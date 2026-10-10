@@ -326,6 +326,21 @@ func loadRedirectTLSConfig(cfg *config.MoomboxConfig) *tls.Config {
 	}
 }
 
+// schemeRedirectServer builds serveSchemeRedirect's server around handler.
+// Its ErrorLog is discarded, as the main server's is, so a panic left to
+// net/http's own recover would be logged nowhere and the client would see
+// its connection dropped: the handler runs inside outermostRecovery, as the
+// main server's does (serverHandler), which logs the panic and answers the
+// 500.
+func (s *Server) schemeRedirectServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           outermostRecovery(s.logger, handler),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       30 * time.Second,
+		ErrorLog:          log.New(io.Discard, "", 0),
+	}
+}
+
 // serveSchemeRedirect runs a minimal HTTP server on ln whose only job is
 // issuing cross-scheme redirects. It exits when the shared underlying
 // listener closes (main-server shutdown).
@@ -335,12 +350,7 @@ func (s *Server) serveSchemeRedirect(ln net.Listener, targetScheme string) {
 			s.logger.Error("scheme-redirect server panic", "panic", r)
 		}
 	}()
-	srv := &http.Server{
-		Handler:           schemeRedirectHandler(targetScheme, listenerPort(ln)),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       30 * time.Second,
-		ErrorLog:          log.New(io.Discard, "", 0),
-	}
+	srv := s.schemeRedirectServer(schemeRedirectHandler(targetScheme, listenerPort(ln)))
 	// Publish for doShutdown so it can drain in-flight redirects gracefully;
 	// the shared-listener close still backstops if shutdown races the Store.
 	s.redirectServer.Store(srv)

@@ -3,11 +3,13 @@ package web
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -159,4 +161,92 @@ func TestOutermostRecovery(t *testing.T) {
 			t.Errorf("a deliberate abort was logged: %s", log.line)
 		}
 	})
+}
+
+// TestTheSchemeRedirectServerRecoversAPanic: the cross-scheme redirect
+// server (serveSchemeRedirect) discards its ErrorLog as the main server does,
+// but had no outermostRecovery around its handler, so a panic in it reached
+// net/http's own recover — logged nowhere, and the client's connection
+// dropped. Its handler is now wrapped the way serverHandler wraps the main
+// server's: the panic is logged and the client gets the 500.
+//
+// Mutants: schemeRedirectServer setting Handler to the bare handler (as
+// serveSchemeRedirect built it) — the request fails with EOF and no line is
+// logged; serveSchemeRedirect building its own server again rather than
+// schemeRedirectServer's — the panic escapes the published server's handler.
+func TestTheSchemeRedirectServerRecoversAPanic(t *testing.T) {
+	log := &errorLineLogger{}
+	s := NewServer(config.NewStore(config.Defaults(), ""), log)
+	ts := httptest.NewUnstartedServer(nil)
+	ts.Config = s.schemeRedirectServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom in the redirect")
+	}))
+	ts.Start()
+	defer ts.Close()
+
+	resp, err := ts.Client().Get(ts.URL + "/jobs?token=QUERY-SECRET")
+	if err != nil {
+		t.Fatalf("the client's request failed (%v) — the panic escaped to net/http, which drops the connection", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError || !strings.Contains(string(body), "Internal server error") {
+		t.Errorf("status %d, body %q; want the 500", resp.StatusCode, body)
+	}
+	lines := log.all()
+	if len(lines) != 1 || !strings.Contains(lines[0], "panic=boom in the redirect") || !strings.Contains(lines[0], "path=/jobs") {
+		t.Fatalf("logged %q, want the one panic line", lines)
+	}
+	if strings.Contains(lines[0], "QUERY-SECRET") {
+		t.Errorf("the panic line carries the query: %s", lines[0])
+	}
+
+	// And serveSchemeRedirect runs the server this builds: a writer whose
+	// first Header() call panics stands in for a panic inside the redirect
+	// handler, served through the server serveSchemeRedirect published.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		s.serveSchemeRedirect(ln, "https")
+	}()
+	defer func() { ln.Close(); <-served }()
+	var srv *http.Server
+	for deadline := time.Now().Add(10 * time.Second); srv == nil; {
+		if srv = s.redirectServer.Load(); srv == nil {
+			if time.Now().After(deadline) {
+				t.Fatal("serveSchemeRedirect never published its server")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	w := &headerPanicsOnce{ResponseWriter: httptest.NewRecorder()}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("the panic escaped serveSchemeRedirect's handler: %v", r)
+			}
+		}()
+		srv.Handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://example.local:774/x", nil))
+	}()
+	if lines := log.all(); len(lines) != 2 || !strings.Contains(lines[1], "panic=a writer that panics") {
+		t.Errorf("logged %q, want a second panic line from serveSchemeRedirect's server", lines)
+	}
+}
+
+// headerPanicsOnce is a ResponseWriter whose first Header() call panics.
+type headerPanicsOnce struct {
+	http.ResponseWriter
+	called bool
+}
+
+func (w *headerPanicsOnce) Header() http.Header {
+	if !w.called {
+		w.called = true
+		panic("a writer that panics")
+	}
+	return w.ResponseWriter.Header()
 }
