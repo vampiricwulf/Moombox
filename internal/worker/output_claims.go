@@ -95,14 +95,31 @@ func outputClaimKeys(stem string) []string {
 }
 
 // outputClaimOwner returns the job whose in-flight finalize claims path, or
-// "" when none does. path is compared as normalizePath spells it.
+// "" when none does. path is compared as normalizePath spells it and, when it
+// differs, with its directory in canonical form — the claim's keys are the
+// stem's own and canonical spellings, and a path can name the real directory
+// in yet another spelling than either: a Windows 8.3 short name (RUNNER~1)
+// that the canonical form spells long. The directory is canonicalised, never
+// the last component, as the sweep and the delete do. The canonical spelling
+// costs a filesystem walk, so it is read only while some claim is held.
 func outputClaimOwner(path string) string {
-	n := normalizePath(path)
+	outputClaims.mu.Lock()
+	none := len(outputClaims.stems) == 0
+	outputClaims.mu.Unlock()
+	if none {
+		return ""
+	}
+	spellings := []string{normalizePath(path)}
+	if c := normalizePath(filepath.Join(canonicalDir(filepath.Dir(path)), filepath.Base(path))); c != spellings[0] {
+		spellings = append(spellings, c)
+	}
 	outputClaims.mu.Lock()
 	defer outputClaims.mu.Unlock()
 	for stem, c := range outputClaims.stems {
-		if strings.HasPrefix(n, stem) {
-			return c.jobID
+		for _, n := range spellings {
+			if strings.HasPrefix(n, stem) {
+				return c.jobID
+			}
 		}
 	}
 	return ""

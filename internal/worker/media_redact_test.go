@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"testing"
@@ -120,8 +121,15 @@ func TestLiveManifestFetchErrorRedactsSignedURL(t *testing.T) {
 			}
 			w.setJobError(job, fmt.Errorf("setup download: %w", dlErr))
 			stored := assertJobErrorClean(t, db, job.ID, rec, logs, mediaClientIP, mediaSig)
-			if !strings.Contains(stored, "/ip/<redacted>/") || !strings.Contains(stored, "connection refused") {
-				t.Errorf("stored error = %q, want the IP's slot shown as <redacted> and the cause kept", stored)
+			// The cause in the platform's own words: "connect: connection
+			// refused" on Linux, "connectex: No connection could be made…"
+			// on Windows.
+			var opErr *net.OpError
+			if !errors.As(dlErr, &opErr) {
+				t.Fatalf("errors.As(*net.OpError) lost on %q", dlErr.Error())
+			}
+			if !strings.Contains(stored, "/ip/<redacted>/") || !strings.Contains(stored, opErr.Err.Error()) {
+				t.Errorf("stored error = %q, want the IP's slot shown as <redacted> and the cause (%q) kept", stored, opErr.Err.Error())
 			}
 		})
 	}

@@ -290,3 +290,34 @@ func TestOutputClaimCoversTheCanonicalSpelling(t *testing.T) {
 		t.Errorf("the real directory's spelling of a claimed output is unowned (owner %q)", owner)
 	}
 }
+
+// A path naming the claimed output's directory in a third spelling — neither
+// the one the claim was made through nor the canonical one — is owned too:
+// on Windows the temp directory reads C:\Users\RUNNER~1\… while its
+// canonical form spells the long name, so the real directory's own path,
+// short-named, matched neither key. A second link to the same directory is
+// that case on every platform.
+//
+// Mutant: outputClaimOwner matching the path's normalizePath spelling alone.
+func TestOutputClaimCoversAnotherSpellingOfItsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	realOut := filepath.Join(dir, "real-output")
+	if err := os.MkdirAll(realOut, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkOut := filepath.Join(dir, "output")
+	otherLink := filepath.Join(dir, "same-output")
+	for _, l := range []string{linkOut, otherLink} {
+		if err := os.Symlink(realOut, l); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+	}
+	release := claimOutputStem("j", filepath.Join(linkOut, "Show [abc]"))
+	defer release()
+	if owner := outputClaimOwner(filepath.Join(otherLink, "Show [abc].mp4")); owner != "j" {
+		t.Errorf("a claimed output named through another link to its directory is unowned (owner %q)", owner)
+	}
+	if owner := outputClaimOwner(filepath.Join(otherLink, "Other [xyz].mp4")); owner != "" {
+		t.Errorf("an unclaimed output is owned by %q", owner)
+	}
+}
