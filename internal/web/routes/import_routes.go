@@ -445,12 +445,15 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		}
 
 		// The client may have gone while the archive was extracting — a tab
-		// closed, an abort after the body was all sent. It was told nothing
-		// was imported, and a job created now would meet its retry with "job
-		// already exists": create none. Nothing is placed yet, so the
-		// deferred cleanup takes back only this request's temporary files.
-		// (499 is nginx's "client closed request"; nobody reads it but the
-		// log.)
+		// closed, a reverse proxy's read timeout. It was told nothing was
+		// imported, and a job created now would meet its retry with "job
+		// already exists": create none. (499 is nginx's "client closed
+		// request"; no client is left to read it.) Nothing is placed yet, so
+		// the deferred cleanup takes back only this request's temporary
+		// files — never a file under the archive's own names: a retry of the
+		// same archive may have written them and been answered 201 by now,
+		// another import of it may hold a row naming them, and a row deleted
+		// with its files kept left them there before this request ran.
 		if req.Context().Err() != nil {
 			jsonError(rw, "import abandoned: the client went away", 499)
 			return
