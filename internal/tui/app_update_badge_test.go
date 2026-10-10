@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 // lightBadge puts a pending release in front of the app the way the periodic
@@ -132,6 +134,19 @@ func TestAnAppliedUpdateClearsTheBadge(t *testing.T) {
 	}
 }
 
+// rvCheck presses R V against a check that answers answer, and returns the
+// result message for the test to deliver when it chooses: whatever reaches
+// the TUI before it arrived during the check's round trip.
+func rvCheck(t *testing.T, app *App, answer *UpdateStatusMsg) tea.Msg {
+	t.Helper()
+	app.OnCheckUpdate = func() (*UpdateStatusMsg, error) { return answer, nil }
+	_, cmd := app.dispatchAction("R V", nil)
+	if cmd == nil {
+		t.Fatal("R V started no check")
+	}
+	return cmd()
+}
+
 // R V answering "Already up to date" means a release this TUI still offers
 // was pulled: its download no longer exists, and R U would fetch a dead
 // asset.
@@ -141,8 +156,39 @@ func TestAnUpToDateCheckClearsTheBadge(t *testing.T) {
 	app := newBadgeApp(t)
 	lightBadge(t, app, "v9.9.9")
 
-	app.Update(updateCheckResultMsg{})
+	app.Update(rvCheck(t, app, nil))
 	if app.updateAvailable != nil || app.details.updateInfo != nil {
 		t.Errorf("an up-to-date check left the pulled release offered: %#v", app.updateAvailable)
+	}
+	if !strings.Contains(app.feedback.msg, "Already up to date") {
+		t.Errorf("feedback = %q", app.feedback.msg)
+	}
+}
+
+// An up-to-date answer drops the badge only while it shows the release it
+// showed when R V was pressed. A release that reached the TUI during the
+// round trip — another check found it after this one's answer was decided —
+// is still pending on the server, and every dashboard offers it; R V used to
+// drop it, after which R U said "No update available".
+//
+// Mutants: R V not capturing the badge (`Seen` left nil) — the release
+// already shown is not cleared; the result clearing whatever is shown — the
+// release found during the round trip goes.
+func TestAnUpToDateCheckKeepsAReleaseFoundDuringIt(t *testing.T) {
+	for _, before := range []string{"", "v9.9.1"} {
+		app := newBadgeApp(t)
+		if before != "" {
+			lightBadge(t, app, before)
+		}
+		result := rvCheck(t, app, nil)
+		app.Update(UpdateStatusMsg{Version: "9.9.2", TagName: "v9.9.2", ReleaseNotes: "n"})
+		app.Update(result)
+		if app.updateAvailable == nil || app.updateAvailable.TagName != "v9.9.2" || app.details.updateInfo == nil {
+			t.Errorf("badge %q before R V: an up-to-date answer dropped v9.9.2, found during it (badge %#v)", before, app.updateAvailable)
+			continue
+		}
+		if !strings.Contains(app.feedback.msg, "v9.9.2") {
+			t.Errorf("badge %q before R V: feedback %q, want it to name the release still pending", before, app.feedback.msg)
+		}
 	}
 }

@@ -346,6 +346,9 @@ export class SettingsController {
       const result = document.getElementById("update-check-result");
       btn.loading = true;
       result.textContent = "";
+      // The badge's release as the check starts; an up-to-date answer drops
+      // only that one (below).
+      const seen = this.app._updateAvailable;
       try {
         const resp = await fetch("/api/update/check", { method: "POST" });
         if (!resp.ok) {
@@ -372,12 +375,19 @@ export class SettingsController {
           this.app._updateAvailable = data;
           this.app.updateVersionIndicator();
         } else {
-          result.textContent = "Up to date";
-          result.style.color = "var(--sl-color-neutral-600)";
-          // Nothing newer than the running version: a pending release this
-          // page still offers was pulled, and its download no longer exists.
-          this.app._updateAvailable = null;
-          this.app.updateVersionIndicator();
+          // Nothing newer than the running version, and the server holds no
+          // release (one it still holds comes back as available, above): a
+          // pending release this page still offers was pulled, and its
+          // download no longer exists. Unless the badge changed during the
+          // round trip — an update_available for a release found after the
+          // answer, which the server holds and every other page still shows.
+          if (this.app._updateAvailable === seen) {
+            this.app._updateAvailable = null;
+            this.app.updateVersionIndicator();
+          }
+          const still = this.app._updateAvailable;
+          result.textContent = still ? `v${still.version} available!` : "Up to date";
+          result.style.color = still ? "var(--text-success)" : "var(--sl-color-neutral-600)";
         }
       } catch {
         result.textContent = "Check failed";

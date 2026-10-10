@@ -1259,7 +1259,9 @@ func readCookieFileCapped(path string) ([]byte, error) {
 // checkUpdateFromTUI is the TUI's R V: a manual check. An up-to-date answer
 // withdraws the release that was pending before the check (seen) — and only
 // that one, so a release another check found during this one's round trip
-// survives it.
+// survives it, and is the answer: the release the server still holds, nil
+// when it holds none. Answered nil instead, R V dropped the TUI's badge for a
+// release the server and every dashboard still offered.
 func (s *runState) checkUpdateFromTUI() (*tui.UpdateStatusMsg, error) {
 	s.log.Info("Update check requested from TUI")
 	seen := routes.SharedUpdateInfo.Load() // what an up-to-date answer may withdraw
@@ -1271,7 +1273,11 @@ func (s *runState) checkUpdateFromTUI() (*tui.UpdateStatusMsg, error) {
 		if tag := routes.ClearPendingUpdate(seen); tag != "" {
 			announceUpdateCleared(s.wsHub, s.tuiUpdateStatusCh, tag)
 		}
-		return nil, nil
+		kept := routes.SharedUpdateInfo.Load()
+		if kept == nil {
+			return nil, nil
+		}
+		return &tui.UpdateStatusMsg{Version: kept.Version, TagName: kept.TagName, ReleaseNotes: kept.ReleaseNotes}, nil
 	}
 	routes.SharedUpdateInfo.Store(release)
 	s.wsHub.Broadcast("update_available", release)

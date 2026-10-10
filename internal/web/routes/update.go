@@ -313,10 +313,19 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			if deps.OnFound != nil {
 				deps.OnFound(release)
 			}
+		} else {
+			if tag := ClearPendingUpdate(seen); tag != "" && deps.OnCleared != nil {
+				deps.OnCleared(tag)
+			}
+			// What the server still holds: a release another check found
+			// during this one's round trip, which ClearPendingUpdate kept.
+			// It is the answer — "up to date" made the asking dashboard drop
+			// the badge for a release every other UI still offered.
+			release = SharedUpdateInfo.Load()
+		}
+		if release != nil {
 			resp["available"] = true
 			maps.Copy(resp, releaseFields(release))
-		} else if tag := ClearPendingUpdate(seen); tag != "" && deps.OnCleared != nil {
-			deps.OnCleared(tag)
 		}
 
 		jsonResponse(w, resp)

@@ -97,6 +97,11 @@ type (
 	updateCheckResultMsg struct {
 		Info *UpdateStatusMsg // nil = up to date
 		Err  string
+		// Seen is the badge's release when R V was pressed. An up-to-date
+		// answer drops the badge only while it still shows that one: a
+		// release that reached the TUI during the check's round trip was
+		// found after the answer, and the server holds it.
+		Seen *UpdateStatusMsg
 	}
 	updateApplyResultMsg struct {
 		Err string // empty on success (process exits before this is seen)
@@ -693,7 +698,7 @@ type App struct {
 	OnDeleteClientToken func(id string) error
 
 	// Update callbacks
-	OnCheckUpdate     func() (*UpdateStatusMsg, error)  // manual check — returns nil if up to date
+	OnCheckUpdate     func() (*UpdateStatusMsg, error)  // manual check — the release pending after it, nil when none (up to date)
 	OnForceCheck      func()                            // force an immediate monitor poll of all sources
 	OnBackfillRescan  func()                            // force a feed-history backfill re-scan of all channels (R B)
 	OnApplyUpdate     func(tag string) string           // installs the release tagged tag, the one shown; returns error string (empty on success, process exits)

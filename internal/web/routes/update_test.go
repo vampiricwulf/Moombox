@@ -747,10 +747,13 @@ func TestUpdateCheckUpToDateWithdrawsThePendingRelease(t *testing.T) {
 // An up-to-date answer withdraws only the release pending when the check
 // started. Another check can find a release during this one's GitHub round
 // trip; withdrawing whatever was pending at the end withdrew that, and every
-// UI's badge with it until the next daily check.
+// UI's badge with it until the next daily check. The kept release is the
+// check's answer: answered "up to date", the dashboard that asked dropped its
+// badge for a release the server and every other UI still offered.
 //
-// Mutant: the route loading SharedUpdateInfo after the check — v9.9.10 is
-// withdrawn.
+// Mutants: the route loading SharedUpdateInfo after the check — v9.9.10 is
+// withdrawn; the up-to-date branch not reporting what the server still holds
+// — the answer is available:false.
 func TestUpdateCheckUpToDateKeepsAReleaseFoundDuringIt(t *testing.T) {
 	newer := &updater.ReleaseInfo{Version: "9.9.10", TagName: "v9.9.10"}
 	orig := checkForUpdate
@@ -779,6 +782,13 @@ func TestUpdateCheckUpToDateKeepsAReleaseFoundDuringIt(t *testing.T) {
 	}
 	if len(cleared) != 0 {
 		t.Errorf("OnCleared = %q, want nothing withdrawn", cleared)
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["available"] != true || resp["tagName"] != "v9.9.10" {
+		t.Errorf("answer = %v, want v9.9.10 available — the release the server still holds", resp)
 	}
 }
 

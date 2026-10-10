@@ -436,12 +436,13 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		if a.OnCheckUpdate != nil {
 			a.setFeedback("Checking for updates...")
 			checkFn := a.OnCheckUpdate
+			seen := a.updateAvailable
 			return a, safeCmd(func() tea.Msg {
 				info, err := checkFn()
 				if err != nil {
 					return updateCheckResultMsg{Err: err.Error()}
 				}
-				return updateCheckResultMsg{Info: info}
+				return updateCheckResultMsg{Info: info, Seen: seen}
 			})
 		}
 	case "R M":

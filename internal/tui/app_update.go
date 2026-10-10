@@ -358,11 +358,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.details.updateInfo = msg.Info
 			a.setFeedback(fmt.Sprintf("Update available: %s — R N for notes, R U to install", msg.Info.TagName))
 		} else {
-			// Nothing newer than the running version: a release this TUI
-			// still offers was pulled, and its download no longer exists.
-			a.updateAvailable = nil
-			a.details.updateInfo = nil
-			a.setFeedback("Already up to date")
+			// Nothing newer than the running version, and the server holds no
+			// release (OnCheckUpdate answers with one it still holds): a
+			// release this TUI still offers was pulled, and its download no
+			// longer exists. Unless the badge changed during the round trip —
+			// a release found after the answer, which the server holds. It
+			// was cleared unconditionally, and R U then said "No update
+			// available" while the server and every dashboard offered it.
+			if a.updateAvailable == msg.Seen {
+				a.updateAvailable = nil
+				a.details.updateInfo = nil
+			}
+			if a.updateAvailable != nil {
+				a.setFeedback(fmt.Sprintf("Update available: %s — R N for notes, R U to install", a.updateAvailable.TagName))
+			} else {
+				a.setFeedback("Already up to date")
+			}
 		}
 		return a, nil
 
