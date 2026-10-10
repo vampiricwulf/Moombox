@@ -101,3 +101,33 @@ func TestSetSidecarDownSeedsTheBarBeforeRun(t *testing.T) {
 		t.Errorf("seeding a healthy sidecar drew the alert anyway: %q", got)
 	}
 }
+
+// TestSetOfflineSeedsTheBarBeforeRun is the connectivity twin of the seed
+// above. Monitor.Start probes synchronously inside initServices, so a boot
+// with no network goes offline before cmd/moombox subscribes; OnStateChange
+// replays nothing, and the monitor fires nothing more until the network
+// returns. Before the seed the bar showed no OFFLINE for the whole outage
+// while the dashboard's initial_state showed its banner.
+//
+// Mutants this kills:
+//   - SetOffline made a no-op (the seed dropped) → the bar stays quiet
+//   - SetOffline writing the negation → the online case draws the alert
+func TestSetOfflineSeedsTheBarBeforeRun(t *testing.T) {
+	a := NewApp()
+
+	a.Send(ConnectivityMsg{Online: false})
+	if a.statusBar.offline {
+		t.Fatal("Send before Run reached the model — if that ever becomes true, this seeding path is unnecessary and the subscription alone would do")
+	}
+
+	a.SetOffline(true)
+	a.statusBar.SetWidth(200)
+	if got := stripANSI(a.statusBar.View()); !strings.Contains(got, "OFFLINE") {
+		t.Errorf("an offline state seeded before Run never reached the bar: %q", got)
+	}
+
+	a.SetOffline(false)
+	if got := stripANSI(a.statusBar.View()); strings.Contains(got, "OFFLINE") {
+		t.Errorf("seeding an online state drew the alert anyway: %q", got)
+	}
+}

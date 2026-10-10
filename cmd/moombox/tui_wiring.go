@@ -1090,6 +1090,14 @@ func (s *runState) runTUI() {
 	unsubConnTUI := s.connMon.OnStateChange(func(online bool) {
 		app.Send(tui.ConnectivityMsg{Online: online})
 	})
+	// Then seed the state that already exists, as the sidecar chip below
+	// does. A boot with no network went offline inside initServices
+	// (connMon.Start probes synchronously), before any subscriber existed;
+	// OnStateChange replays nothing and the monitor fires nothing more until
+	// the network returns, so without the seed the bar showed no OFFLINE for
+	// the whole outage while the dashboard's initial_state showed its banner.
+	// Read after subscribing, so a transition before the read is in the seed.
+	app.SetOffline(!s.connMon.IsOnline())
 
 	// Wire BotGuard sidecar liveness to the TUI (program.Send, like
 	// connectivity above).

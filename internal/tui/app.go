@@ -877,6 +877,19 @@ func (a *App) SetSidecarDown(down bool) {
 	a.statusBar.sidecarDown = down
 }
 
+// SetOffline seeds the status bar's OFFLINE alert before Run.
+//
+// ConnectivityMsg carries every later transition, but the monitor's first one
+// is made in initServices (Monitor.Start probes synchronously, and a device
+// with no network goes offline there), long before cmd/moombox subscribes —
+// and OnStateChange replays nothing, while the monitor stays offline and so
+// fires nothing more until the network returns. The state that already
+// exists at TUI start therefore comes in through the model, as the sidecar
+// chip's does.
+func (a *App) SetOffline(offline bool) {
+	a.statusBar.offline = offline
+}
+
 // SetConfig provides the config reference for the settings panel.
 func (a *App) SetConfig(cfg *config.MoomboxConfig) {
 	a.cfg = cfg
