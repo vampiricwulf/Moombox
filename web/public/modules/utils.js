@@ -1051,15 +1051,24 @@ export function channelTermsForSave(existingTerms, seedShown, typed) {
 }
 
 /**
+ * What looks like a URL rather than a channel ID, matched against the
+ * lower-cased input: a scheme, a host name leading the input, or youtube.com,
+ * youtu.be or twitch.tv anywhere. The Go side's urlShapedRe
+ * (internal/utils/channel.go) is the same pattern.
+ */
+const URL_SHAPED = /^[a-z][a-z0-9+.-]*:\/\/|^[a-z0-9-]+(\.[a-z0-9-]+)+(\/|$)|youtube\.com|youtu\.be|twitch\.tv/;
+
+/**
  * Whether a typed channel ID has to go through /api/resolve-channel before it
- * is a channel ID: a youtube.com / youtu.be / twitch.tv URL, or a bare
- * @handle (a YouTube handle — both channel dialogs advertise the form, and
- * posted verbatim it named no channel the monitors could poll). The Go side's
- * utils.NeedsChannelResolve is the same rule.
+ * is a channel ID: anything URL-shaped, the host compared case-insensitively
+ * ("Twitch.tv/shroud" as bios write it used to be posted as the ID), or a
+ * bare @handle (a YouTube handle — both channel dialogs advertise the form,
+ * and posted verbatim it named no channel the monitors could poll). The Go
+ * side's utils.NeedsChannelResolve is the same rule.
  */
 export function needsChannelResolve(id) {
   const v = String(id ?? "").trim();
-  return v.startsWith("@") || v.includes("youtube.com") || v.includes("youtu.be") || v.includes("twitch.tv");
+  return v.startsWith("@") || URL_SHAPED.test(v.toLowerCase());
 }
 
 /** The resolve step's refusal, worded as the server words it. */

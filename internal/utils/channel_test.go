@@ -8,6 +8,14 @@ import (
 	"testing"
 )
 
+// TestLooksLikeURL: a URL is URL-shaped whatever case its host is written
+// in, and whatever host it names, so that the writers resolve it or refuse
+// it rather than store it as a channel ID; a YouTube channel ID or a Twitch
+// login never is.
+//
+// Mutants killed: matching the input as typed rather than lower-cased
+// (the mixed-case hosts); dropping the scheme or the leading-host arm (the
+// example.com URLs).
 func TestLooksLikeURL(t *testing.T) {
 	tests := []struct {
 		input string
@@ -18,11 +26,21 @@ func TestLooksLikeURL(t *testing.T) {
 		{"https://youtu.be/abc123", true},
 		{"https://twitch.tv/shroud", true},
 		{"twitch.tv/shroud", true},
+		{"Twitch.tv/shroud", true},
+		{"https://www.Twitch.tv/shroud", true},
+		{"https://www.YouTube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx", true},
+		{"YOUTU.BE/abc123", true},
+		{"https://example.com/page", true},
+		{"HTTP://example.com/page", true},
+		{"example.com/page", true},
+		{"www.example.com", true},
 		{"shroud", false},
+		{"Shroud_99", false},
 		{"dQw4w9WgXcQ", false},
+		{"UCxxxxxxxxxxxxxxxxxxxxxx", false},
+		{"UC-x_xxxxxxxxxxxxxxxxxxx", false},
 		{"", false},
 		{"   ", false},
-		{"https://example.com/page", false},
 	}
 
 	for _, tt := range tests {
@@ -168,9 +186,11 @@ func TestResolveChannelInputBareHandle(t *testing.T) {
 }
 
 // TestNeedsChannelResolve is the rule the writers rate limit or go
-// asynchronous on: a channel URL or a bare @handle, nothing else.
+// asynchronous on: a URL, its host in any case, or a bare @handle, nothing
+// else.
 //
-// Mutant killed: dropping the "@" arm (a bare handle is taken as typed).
+// Mutants killed: dropping the "@" arm (a bare handle is taken as typed);
+// LooksLikeURL matching the input as typed (the mixed-case hosts).
 func TestNeedsChannelResolve(t *testing.T) {
 	for in, want := range map[string]bool{
 		"@SomeHandle":                          true,
@@ -178,6 +198,9 @@ func TestNeedsChannelResolve(t *testing.T) {
 		"https://www.youtube.com/@SomeHandle":  true,
 		"youtube.com/channel/UCxxxxxxxxxxxxxx": true,
 		"twitch.tv/shroud":                     true,
+		"Twitch.tv/shroud":                     true,
+		"https://www.YouTube.com/@SomeHandle":  true,
+		"https://example.com/@SomeHandle":      true,
 		"UCxxxxxxxxxxxxxxxxxxxxxx":             false,
 		"shroud":                               false,
 		"":                                     false,
@@ -195,10 +218,17 @@ func TestNeedsChannelResolve(t *testing.T) {
 // channel is ErrNotChannelURL, never the input echoed back as an ID; a
 // lookup that fails is its own error, not ErrNotChannelURL.
 //
+// A channel URL resolves whatever case its host is written in, with a
+// scheme or without one; a URL on any other host is refused.
+//
 // Mutants killed: dropping the TrimSpace (" UC… " kept padded); answering
 // a nil resolution with the input instead of ErrNotChannelURL (the watch
 // URL comes back as an ID); skipping resolution for a bare handle (it comes
-// back verbatim).
+// back verbatim); ExtractTwitchTarget or ParseYouTubeChannelURL comparing a
+// scheme-less host as typed ("Twitch.tv/Shroud", "YouTube.com/channel/…"
+// refused); LooksLikeURL matching as typed ("https://www.Twitch.tv/…"
+// returned verbatim); dropping its leading-host arm ("example.com/shroud"
+// returned verbatim).
 func TestNormalizeChannelID(t *testing.T) {
 	const channelID = "UCabc1234567890_-DEFGHIj"
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
@@ -221,13 +251,27 @@ func TestNormalizeChannelID(t *testing.T) {
 			t.Errorf("NormalizeChannelID(%q) = %+v, %v; want %s on youtube named X", in, got, err, channelID)
 		}
 	}
-	got, err = NormalizeChannelID(t.Context(), "twitch.tv/shroud")
-	if err != nil || got == nil || got.ID != "shroud" || got.Platform != "twitch" {
-		t.Errorf("Twitch URL: got %+v, %v; want shroud on twitch", got, err)
+	// A host written in any case is that host, bare or with a scheme.
+	for _, in := range []string{"twitch.tv/shroud", "Twitch.tv/Shroud", "https://www.Twitch.tv/shroud"} {
+		got, err := NormalizeChannelID(t.Context(), in)
+		if err != nil || got == nil || got.ID != "shroud" || got.Platform != "twitch" {
+			t.Errorf("NormalizeChannelID(%q) = %+v, %v; want shroud on twitch", in, got, err)
+		}
+	}
+	for _, in := range []string{
+		"https://www.YouTube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx",
+		"YouTube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx",
+	} {
+		got, err := NormalizeChannelID(t.Context(), in)
+		if err != nil || got == nil || got.ID != "UCxxxxxxxxxxxxxxxxxxxxxx" || got.Platform != "youtube" {
+			t.Errorf("NormalizeChannelID(%q) = %+v, %v; want UCxxxxxxxxxxxxxxxxxxxxxx on youtube", in, got, err)
+		}
 	}
 	for _, in := range []string{
 		"https://www.youtube.com/watch?v=dQw4w9WgXcQ",
 		"https://www.twitch.tv/videos/123456",
+		"https://example.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx",
+		"example.com/shroud",
 		"@",
 		"@foo bar",
 	} {

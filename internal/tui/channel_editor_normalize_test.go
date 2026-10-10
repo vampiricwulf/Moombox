@@ -270,3 +270,63 @@ func TestChannelResolvedPanicAnswersTheEditor(t *testing.T) {
 		t.Errorf("panic answer %+v, want an error for the input", r)
 	}
 }
+
+// TestChannelEditorsResolveMixedCaseURLs: a channel link written with its
+// host in mixed case, as bios write it ("Twitch.tv/shroud",
+// "https://www.YouTube.com/channel/UC…"), is resolved by both TUI editors,
+// and a URL on any other host is refused. The shared gate looked for
+// "youtube.com/", "youtu.be/" or "twitch.tv/" as typed, so Enter saved such
+// a URL as the channel ID with no resolve step.
+//
+// Mutant killed: utils.LooksLikeURL matching the input as typed (both
+// editors save the URL verbatim).
+func TestChannelEditorsResolveMixedCaseURLs(t *testing.T) {
+	for in, want := range map[string]config.ChannelConfig{
+		"https://www.Twitch.tv/shroud":                  {ID: "shroud", Platform: "twitch"},
+		"Twitch.tv/shroud":                              {ID: "shroud", Platform: "twitch"},
+		"https://www.YouTube.com/channel/" + tuiPlainID: {ID: tuiPlainID, Platform: "youtube"},
+	} {
+		m := settingsAdding(nil, in)
+		if act := m.handleChannelKey(keyEnter); act != "resolve_channel" {
+			t.Errorf("Settings: Enter on %q: action %q, want resolve_channel (channels %+v)", in, act, m.channels)
+			continue
+		}
+		r := resolveFor(t, m.GetChannelResolveInput())
+		m.HandleChannelResolved(r.Input, r.ID, r.Name, r.Platform, r.Err)
+		if len(m.channels) != 1 || m.channels[0].ID != want.ID || m.channels[0].Platform != want.Platform {
+			t.Errorf("Settings: %q saved %+v, want %s on %s", in, m.channels, want.ID, want.Platform)
+		}
+
+		a := NewApp()
+		w := wizardOnChannelEditor(a, nil, in)
+		runResolve(t, a)
+		if len(w.channels) != 1 || w.channels[0].ID != want.ID || w.channels[0].Platform != want.Platform {
+			t.Errorf("wizard: %q stored %+v, want %s on %s", in, w.channels, want.ID, want.Platform)
+		}
+	}
+
+	m := settingsAdding(nil, "https://Example.com/shroud")
+	enterAndResolve(t, m)
+	if len(m.channels) != 0 || m.errorMsg != "Channel ID: not a YouTube or Twitch channel URL" {
+		t.Errorf("a URL on another host: channels %+v, errorMsg %q, want refused", m.channels, m.errorMsg)
+	}
+}
+
+// TestSettingsChannelPlatformAutoDetectReadsMixedCaseHost: typing a link into
+// the Settings editor's ID box switches its platform whatever case the host
+// is written in.
+//
+// Mutant killed: autoDetectPlatform comparing the ID as typed (the platform
+// stays youtube for "Twitch.tv/shroud").
+func TestSettingsChannelPlatformAutoDetectReadsMixedCaseHost(t *testing.T) {
+	m := settingsAdding(nil, "Twitch.tv/shroud")
+	m.autoDetectPlatform()
+	if got := m.channelEditValues["platform"]; got != "twitch" {
+		t.Errorf("platform after Twitch.tv/shroud: %q, want twitch", got)
+	}
+	m.channelEditValues["id"] = "https://www.YouTube.com/@SomeHandle"
+	m.autoDetectPlatform()
+	if got := m.channelEditValues["platform"]; got != "youtube" {
+		t.Errorf("platform after a YouTube.com link: %q, want youtube", got)
+	}
+}

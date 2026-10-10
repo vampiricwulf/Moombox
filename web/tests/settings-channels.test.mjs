@@ -105,6 +105,70 @@ test("the setup wizard's Add Channel resolves a bare @handle and refuses a non-c
   assert.ok(toastTexts(h).includes("Not a YouTube or Twitch channel URL"), `toasts: ${JSON.stringify(toastTexts(h))}`);
 });
 
+// A channel link written with its host in mixed case, as bios write it, is a
+// link all the same. The resolve gate compared "youtube.com" / "youtu.be" /
+// "twitch.tv" as typed, so "Twitch.tv/shroud" went out as the channel ID
+// with no resolve call; a URL on any other host did too.
+//
+// Mutants killed: needsChannelResolve matching the input as typed (the
+// mixed-case links are posted or listed verbatim); dropping its scheme arm
+// (the example.com URL is posted as the ID).
+test("both Add Channel dialogs resolve a link whatever case its host is in", { skip }, async () => {
+  const links = {
+    "Twitch.tv/shroud": { id: "shroud", name: "", platform: "twitch", resolved: true },
+    "https://www.YouTube.com/channel/UCabcdefghijklmnopqrstuv": { id: "UCabcdefghijklmnopqrstuv", name: "", platform: "youtube", resolved: true },
+  };
+  const route = ({ body }) => links[body.input] ?? { id: body.input, name: "", platform: "", resolved: false };
+  const h = await openWith([], { "POST /api/resolve-channel": route });
+  const s = h.app.settings;
+  for (const [input, want] of Object.entries(links)) {
+    s.showAddChannelDialog();
+    h.el("channel-id-input").value = input;
+    await s.saveChannel();
+    await h.flush();
+    assert.equal(h.http.matching("/api/config/channels", "POST").at(-1)?.body?.id, want.id, `Settings posted ${input} resolved`);
+  }
+
+  s.showAddChannelDialog();
+  h.el("channel-id-input").value = "https://Example.com/shroud";
+  await s.saveChannel();
+  await h.flush();
+  assert.equal(h.http.matching("/api/config/channels", "POST").length, 2, "the example.com URL was not posted");
+  assert.ok(toastTexts(h).includes("Not a YouTube or Twitch channel URL"), `toasts: ${JSON.stringify(toastTexts(h))}`);
+
+  const setup = h.app.setup;
+  setup.channels = [];
+  for (const input of Object.keys(links)) {
+    setup.openAddChannelDialog("setup-channel-list");
+    h.el("setup-ch-id").value = input;
+    await setup.saveChannelFromDialog();
+    await h.flush();
+  }
+  assert.deepEqual(setup.channels.map((c) => c.id), Object.values(links).map((l) => l.id), "the wizard listed the resolved IDs");
+});
+
+// The ID box's platform auto-detect reads the host the same way.
+//
+// Mutant killed: either dialog's auto-detect comparing the input as typed
+// (the select stays on YouTube for "Twitch.tv/shroud").
+test("both channel dialogs' platform auto-detect reads a mixed-case host", { skip }, async () => {
+  const h = await openWith([]);
+  const type = (id, value) => {
+    h.el(id).value = value;
+    h.el(id).dispatchEvent(new h.window.CustomEvent("sl-input"));
+  };
+  h.app.settings.showAddChannelDialog();
+  type("channel-id-input", "Twitch.tv/shroud");
+  assert.equal(h.el("channel-platform-select").value, "twitch", "Settings: Twitch.tv switched the select");
+  type("channel-id-input", "YouTube.com/@SomeHandle");
+  assert.equal(h.el("channel-platform-select").value, "youtube", "Settings: YouTube.com switched it back");
+
+  h.app.setup.setupListeners(); // what show() binds on a first run
+  h.app.setup.openAddChannelDialog("setup-channel-list");
+  type("setup-ch-id", "https://www.Twitch.tv/shroud");
+  assert.equal(h.el("setup-ch-platform").value, "twitch", "wizard: Twitch.tv switched the select");
+});
+
 // ── W25-11: Add Channel over a configured channel ──────────────────────────
 //
 // Add Channel had no existence check: an ID already configured — typed, or a

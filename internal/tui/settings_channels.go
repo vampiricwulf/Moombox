@@ -269,7 +269,7 @@ func (m *SettingsModel) handleChannelEditKey(key string) string {
 
 // autoDetectPlatform checks the ID field value and auto-switches the platform if it contains a known domain.
 func (m *SettingsModel) autoDetectPlatform() {
-	id := m.channelEditValues["id"]
+	id := strings.ToLower(m.channelEditValues["id"])
 	if strings.HasPrefix(strings.TrimSpace(id), "@") || strings.Contains(id, "youtube.com/") || strings.Contains(id, "youtu.be/") {
 		m.channelEditValues["platform"] = "youtube"
 	} else if strings.Contains(id, "twitch.tv/") {

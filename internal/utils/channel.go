@@ -3,6 +3,7 @@ package utils
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"unicode"
 )
@@ -75,16 +76,27 @@ func ResolveChannelInput(ctx context.Context, input string) (*ResolvedChannel, e
 	return nil, nil
 }
 
-// LooksLikeURL returns true if the input looks like a URL (contains a domain).
+// urlShapedRe is LooksLikeURL's rule, matched against the lower-cased
+// input: a scheme ("https://"), a host name leading the input
+// ("www.example.com/…", "twitch.tv"), or youtube.com, youtu.be or twitch.tv
+// anywhere in it. A YouTube channel ID or a Twitch login holds neither a
+// "." nor a ":", so no plain ID matches.
+var urlShapedRe = regexp.MustCompile(`^[a-z][a-z0-9+.-]*://|^[a-z0-9-]+(\.[a-z0-9-]+)+(/|$)|youtube\.com|youtu\.be|twitch\.tv`)
+
+// LooksLikeURL reports whether input is URL-shaped rather than a plain
+// channel ID (urlShapedRe). The host is compared case-insensitively, as the
+// parsers behind ResolveChannelInput compare it: the rule used to look for
+// "youtube.com/", "youtu.be/" or "twitch.tv/" as typed, so a link written
+// "Twitch.tv/shroud" or "https://www.YouTube.com/channel/UC…", as bios
+// write them, and any URL off those three hosts, was saved as the channel
+// ID by every writer instead of being resolved or refused.
 func LooksLikeURL(input string) bool {
-	input = strings.TrimSpace(input)
-	return strings.Contains(input, "youtube.com/") || strings.Contains(input, "youtu.be/") ||
-		strings.Contains(input, "twitch.tv/")
+	return urlShapedRe.MatchString(strings.ToLower(strings.TrimSpace(input)))
 }
 
 // NeedsChannelResolve reports whether NormalizeChannelID has to resolve
-// input rather than take it as typed: a youtube.com / youtu.be / twitch.tv
-// URL, or a bare @handle. Resolving a YouTube handle is a page fetch with
+// input rather than take it as typed: anything URL-shaped (LooksLikeURL),
+// or a bare @handle. Resolving a YouTube handle is a page fetch with
 // retries, so the writers decide on this whether to rate limit (POST
 // /api/config/channels, PUT /api/config) or to go asynchronous (the TUI
 // editors). The dashboard's needsChannelResolve

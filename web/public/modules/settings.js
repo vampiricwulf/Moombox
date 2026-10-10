@@ -290,7 +290,7 @@ export class SettingsController {
     if (channelIdInput) {
       channelIdInput.addEventListener("sl-input", () => {
         if (this.editingChannelId) return; // Don't auto-switch when editing
-        const val = (channelIdInput.value || "").trim();
+        const val = (channelIdInput.value || "").trim().toLowerCase();
         const platformSelect = document.getElementById("channel-platform-select");
         if (!platformSelect || platformSelect.disabled) return;
         if (val.startsWith("@") || val.includes("youtube.com") || val.includes("youtu.be")) {

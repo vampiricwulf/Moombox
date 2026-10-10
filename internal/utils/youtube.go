@@ -117,9 +117,10 @@ func ParseYouTubeChannelURL(input string) *YouTubeChannelInput {
 		return nil
 	}
 
-	// Normalize bare URLs without protocol
-	if strings.HasPrefix(input, "youtube.com/") || strings.HasPrefix(input, "www.youtube.com/") ||
-		strings.HasPrefix(input, "m.youtube.com/") {
+	// Normalize bare URLs without protocol. The host is case-insensitive,
+	// here as in the check below: "YouTube.com/@foo".
+	if lower := strings.ToLower(input); strings.HasPrefix(lower, "youtube.com/") || strings.HasPrefix(lower, "www.youtube.com/") ||
+		strings.HasPrefix(lower, "m.youtube.com/") {
 		input = "https://" + input
 	}
 

@@ -249,3 +249,42 @@ func TestChannelIDsCompareCaseInsensitively(t *testing.T) {
 		t.Errorf("stored %+v, want the one entry updated", got)
 	}
 }
+
+// TestChannelWritersResolveMixedCaseURLs: POST /api/config/channels and
+// PUT /api/config resolve a channel link whose host is written in mixed
+// case ("Twitch.tv/shroud", "https://www.YouTube.com/channel/UC…") and
+// refuse a URL on any other host. The shared gate compared the host as
+// typed, so each of these was stored as the channel ID with a 200.
+//
+// Mutant killed: utils.LooksLikeURL matching the input as typed.
+func TestChannelWritersResolveMixedCaseURLs(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://www.YouTube.com/channel/UCabcdefghijklmnopqrstuv": "UCabcdefghijklmnopqrstuv",
+		"https://www.Twitch.tv/shroud":                             "shroud",
+		"Twitch.tv/shroud":                                         "shroud",
+	} {
+		f := newChannelRoutesFixture(t)
+		if rec := postChannel(t, f.router, map[string]any{"id": in, "enabled": true}); rec.Code != http.StatusOK {
+			t.Errorf("POST %q: %d (body %s)", in, rec.Code, rec.Body.String())
+		}
+		if got := storedChannels(f.store); len(got) != 1 || got[0].ID != want {
+			t.Errorf("POST %q stored %+v, want %s", in, got, want)
+		}
+
+		c := newConfigRoutesFixture(t)
+		if rec := putChannels(t, c.router, "/api/config", []map[string]any{{"id": in}}); rec.Code != http.StatusOK {
+			t.Errorf("PUT %q: %d (body %s)", in, rec.Code, rec.Body.String())
+		}
+		if got := storedChannels(c.store); len(got) != 1 || got[0].ID != want {
+			t.Errorf("PUT %q stored %+v, want %s", in, got, want)
+		}
+	}
+
+	f := newChannelRoutesFixture(t)
+	if rec := postChannel(t, f.router, map[string]any{"id": "https://Example.com/shroud"}); rec.Code != http.StatusBadRequest {
+		t.Errorf("POST of a URL on another host: %d (body %s), want 400", rec.Code, rec.Body.String())
+	}
+	if got := storedChannels(f.store); len(got) != 0 {
+		t.Errorf("a URL on another host was stored: %+v", got)
+	}
+}

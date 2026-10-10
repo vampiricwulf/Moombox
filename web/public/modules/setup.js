@@ -232,7 +232,7 @@ export class SetupController {
     const setupChId = document.getElementById("setup-ch-id");
     if (setupChId) {
       setupChId.addEventListener("sl-input", () => {
-        const val = (setupChId.value || "").trim();
+        const val = (setupChId.value || "").trim().toLowerCase();
         const platformSel = document.getElementById("setup-ch-platform");
         if (!platformSel) return;
         if (val.startsWith("@") || val.includes("youtube.com") || val.includes("youtu.be")) {
