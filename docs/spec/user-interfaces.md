@@ -757,7 +757,7 @@ The two cookie blocks come from `routes`' own projections rather than being rebu
 | `GET` | `/api/config` | Get current configuration. |
 | `PUT` | `/api/config` | Update configuration. Triggers config save and may trigger restart. |
 | `POST` | `/api/config/channels` | Add or update (by `id`) a monitored channel. A URL-shaped `id` is resolved to the channel's ID first, under the same rate limiter as `/api/resolve-channel` (a plain ID — every enable/disable toggle — is not limited); one that does not resolve is refused, `400` when it is no channel URL and `422` when the lookup fails. An unknown `platform` or `quality_preference`, or an `archive_window_days` / `archive_slots` outside 1–3650 / 1–100, is a `400` naming the field (`config.ChannelOverrideErrors`, the rules `Validate` applies), as is the same entry in `PUT /api/config`'s `channels[]`. |
-| `DELETE` | `/api/config/channels/{id}` | Remove a monitored channel. |
+| `DELETE` | `/api/config/channels/{id}` | Remove a monitored channel. `{id}` arrives percent-encoded (the dashboard's `encodeURIComponent`) and is matched decoded (`pathParam`, `internal/web/routes/channel_routes.go`): chi routes on the escaped `RawPath` Go keeps for `@` and `:`, so an `@handle` or URL-shaped ID used to match nothing and answer `404`. |
 | `PUT` | `/api/config/channels/reorder` | Reorder the monitored-channel list. Body `{ ids: [...] }` naming every configured channel exactly once; `400` on a count mismatch, a duplicate id, or an id that names no channel. The new order is saved under the config lock and rolled back if the save fails, then the channel-change callback re-seeds the monitors. |
 | `POST` | `/api/resolve-channel` | Resolve a channel URL or name to a canonical channel identifier. |
 

@@ -225,6 +225,50 @@ func TestChannelDeleteUnknownIDReturns404(t *testing.T) {
 	}
 }
 
+// TestChannelDeleteDecodesEscapedID pins W25-13: the dashboard sends the ID
+// through encodeURIComponent, and chi matches on the escaped RawPath Go keeps
+// for '@' and ':' — so a channel stored as "@SomeHandle" or as a URL could
+// not be removed from the dashboard at all (404, channel still configured).
+// The literal-'%' rows pin the other half: an ID chi matched on the decoded
+// Path must not be decoded a second time.
+//
+// Mutants killed: pathParam returning chi.URLParam unchanged (the '@', URL
+// and "@50%" rows 404); pathParam decoding even without a RawPath (the
+// "a%40b" row removes nothing, then 404s).
+func TestChannelDeleteDecodesEscapedID(t *testing.T) {
+	for _, tc := range []struct {
+		id, target string
+	}{
+		{"@SomeHandle", "/api/config/channels/%40SomeHandle"},
+		{"https://www.youtube.com/@foo", "/api/config/channels/https%3A%2F%2Fwww.youtube.com%2F%40foo"},
+		{"@50%", "/api/config/channels/%4050%25"},
+		{"a%40b", "/api/config/channels/a%2540b"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			f := newChannelRoutesFixture(t)
+			if err := f.store.Update(func(c *config.MoomboxConfig) {
+				c.Channels = []config.ChannelConfig{{ID: tc.id, Platform: "youtube"}, {ID: "a@b", Platform: "youtube"}}
+			}); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			rec := httptest.NewRecorder()
+			f.router.ServeHTTP(rec, httptest.NewRequest("DELETE", tc.target, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("DELETE %s: want 200, got %d (body: %s)", tc.target, rec.Code, rec.Body.String())
+			}
+			var left []string
+			f.store.Read(func(c *config.MoomboxConfig) {
+				for _, ch := range c.Channels {
+					left = append(left, ch.ID)
+				}
+			})
+			if !slices.Equal(left, []string{"a@b"}) {
+				t.Errorf("channels left after deleting %q: %q, want only a@b", tc.id, left)
+			}
+		})
+	}
+}
+
 // --- PUT /api/config/channels/reorder ---
 
 func TestChannelReorderSwapsOrder(t *testing.T) {

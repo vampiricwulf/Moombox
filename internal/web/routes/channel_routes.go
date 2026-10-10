@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -128,7 +129,7 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 
 	// DELETE /api/config/channels/:id
 	r.Delete("/api/config/channels/{id}", func(rw http.ResponseWriter, req *http.Request) {
-		channelID := chi.URLParam(req, "id")
+		channelID := pathParam(req, "id")
 
 		// Copy-on-write for the same reason as the upsert above: the old
 		// append-shift compacted elements inside the shared backing array,
@@ -280,4 +281,23 @@ func validChannelPlatform(p string) bool {
 		return true
 	}
 	return false
+}
+
+// pathParam returns the named chi URL parameter DECODED. chi matches routes
+// against r.URL.RawPath whenever Go kept one — which it does whenever the
+// client's escaping differs from Go's own, as encodeURIComponent's does for
+// '@' and ':' — so the parameter arrives still escaped: the dashboard's
+// DELETE of "@SomeHandle" or of a URL-shaped ID matched no channel and
+// answered 404. Only that case is decoded. Without a RawPath chi matched the
+// already-decoded Path, and decoding again would turn a literal '%' in an
+// ID into a wrong byte or an error.
+func pathParam(req *http.Request, key string) string {
+	v := chi.URLParam(req, key)
+	if req.URL.RawPath == "" {
+		return v
+	}
+	if dec, err := url.PathUnescape(v); err == nil {
+		return dec
+	}
+	return v
 }
