@@ -103,3 +103,28 @@ func TestReleaseNotesApplyKeyOnlyBesideAPendingUpdate(t *testing.T) {
 		t.Error("U beside a pending update should hand over to the apply flow and close the notes")
 	}
 }
+
+// U beside a pending update's notes, and R U, name the release the TUI shows
+// by its tag — the name the server checks it against before installing
+// anything (routes.PendingUpdate), as it checks the dashboard's dialog. It used
+// to pass the bare version, which the server ignored, installing whatever was
+// pending.
+//
+// Mutant: applyUpdateAction passing a.updateAvailable.Version — OnApplyUpdate
+// gets "2.0.0".
+func TestApplyNamesTheReleaseShownByItsTag(t *testing.T) {
+	app := NewApp()
+	var got []string
+	app.OnApplyUpdate = func(tag string) string { got = append(got, tag); return "" }
+	app.updateAvailable = &UpdateStatusMsg{Version: "2.0.0", TagName: "v2.0.0", ReleaseNotes: "notes"}
+	app.releaseNotesPopup.open("v2.0.0", "notes", 80, 24)
+	app.releaseNotesPopup.setPending(true)
+	_, cmd := app.handleKey(tea.KeyPressMsg{Code: 'u', Text: "u"})
+	if cmd == nil {
+		t.Fatal("U beside the pending update's notes started no apply")
+	}
+	cmd()
+	if len(got) != 1 || got[0] != "v2.0.0" {
+		t.Errorf("OnApplyUpdate got %q, want the shown release's tag v2.0.0", got)
+	}
+}

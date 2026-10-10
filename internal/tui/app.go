@@ -696,7 +696,7 @@ type App struct {
 	OnCheckUpdate     func() (*UpdateStatusMsg, error)  // manual check — returns nil if up to date
 	OnForceCheck      func()                            // force an immediate monitor poll of all sources
 	OnBackfillRescan  func()                            // force a feed-history backfill re-scan of all channels (R B)
-	OnApplyUpdate     func(version string) string       // returns error string (empty on success, process exits)
+	OnApplyUpdate     func(tag string) string           // installs the release tagged tag, the one shown; returns error string (empty on success, process exits)
 	OnVerifySignature func() (manifest bool, err error) // verify current binary's signature, and its release's manifest when it has one
 	// OnDismissUpdate skips a pending version (the S key in the
 	// release-notes overlay); nil hides the key.
@@ -1271,10 +1271,10 @@ func (a *App) applyUpdateAction() tea.Cmd {
 	}
 	a.updateConfirmAt = time.Time{}
 	a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
-	ver := a.updateAvailable.Version
+	tag := a.updateAvailable.TagName
 	applyFn := a.OnApplyUpdate
 	return safeCmd(func() tea.Msg {
-		return updateApplyResultMsg{Err: applyFn(ver)}
+		return updateApplyResultMsg{Err: applyFn(tag)}
 	})
 }
 

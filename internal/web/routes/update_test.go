@@ -336,8 +336,13 @@ func TestUpdateDismissWithoutPendingIs400(t *testing.T) {
 }
 
 // TestDismissUpdateSkipsExactlyThePendingTag: the helper the route and the
-// TUI share persists the skipped version and clears the shared pointer only
-// when it still holds that tag — a newer release found meanwhile survives.
+// TUI share persists the skipped version and clears the shared pointer — and
+// only for the release still pending. A skip naming an older one (its notes
+// were on screen when a check found v10.0.0) is refused and saves nothing,
+// and the newer release survives; so is a skip with nothing pending.
+//
+// Mutants: DismissUpdate without its PendingUpdate check — the stale skip
+// saves v9.9.8 and answers nil.
 func TestDismissUpdateSkipsExactlyThePendingTag(t *testing.T) {
 	_, store := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test"})
 	SharedUpdateInfo.Store(&updater.ReleaseInfo{TagName: "v9.9.9"})
@@ -352,12 +357,121 @@ func TestDismissUpdateSkipsExactlyThePendingTag(t *testing.T) {
 	if SharedUpdateInfo.Load() != nil {
 		t.Error("pending pointer not cleared")
 	}
-	SharedUpdateInfo.Store(&updater.ReleaseInfo{TagName: "v10.0.0"})
-	if err := DismissUpdate(store, "v9.9.9"); err != nil {
-		t.Fatal(err)
+
+	if err := DismissUpdate(store, "v9.9.9"); !errors.Is(err, ErrNoUpdatePending) {
+		t.Errorf("a skip with nothing pending = %v, want ErrNoUpdatePending", err)
 	}
-	if p := SharedUpdateInfo.Load(); p == nil || p.TagName != "v10.0.0" {
+
+	newer := &updater.ReleaseInfo{TagName: "v10.0.0"}
+	SharedUpdateInfo.Store(newer)
+	err := DismissUpdate(store, "v9.9.8")
+	var stale *StalePendingError
+	if !errors.As(err, &stale) || stale.Tag != "v9.9.8" || stale.Pending != newer {
+		t.Fatalf("a skip of a release no longer pending = %v, want a StalePendingError naming v9.9.8 and v10.0.0", err)
+	}
+	store.Read(func(c *config.MoomboxConfig) { skipped = c.Updates.SkippedVersion })
+	if skipped != "v9.9.9" {
+		t.Errorf("a refused skip saved SkippedVersion = %q", skipped)
+	}
+	if SharedUpdateInfo.Load() != newer {
 		t.Error("a newer pending release must survive a stale dismiss")
+	}
+}
+
+// The dashboard's dialog names the release whose notes it shows. While a
+// check has replaced it with another, both of its buttons are refused with a
+// 409 carrying the release now pending — never applied to it: Skip used to
+// skip v9.9.2, a release the operator never saw, and toast "Skipped v9.9.2";
+// Update Now installed it. The named release still pending is acted on, and
+// so is a request naming none (a script).
+//
+// Mutants: either route resolving the pending release with
+// PendingUpdate("") — the stale request skips or applies v9.9.2;
+// writePendingRefusal answering the stale case 400 without the pending
+// release — the 409 and its pending tag fail.
+func TestUpdateApplyAndDismissActOnlyOnTheReleaseShown(t *testing.T) {
+	origApply := applyUpdate
+	t.Cleanup(func() { applyUpdate = origApply })
+	var applied []string
+	applyUpdate = func(_ *updater.Updater, _ context.Context, rel *updater.ReleaseInfo) error {
+		applied = append(applied, rel.TagName)
+		return errors.New("stop before the restart")
+	}
+	upd, err := updater.New("2.6.0-test", silentLogger{})
+	if err != nil {
+		t.Fatalf("updater.New: %v", err)
+	}
+	post := func(r http.Handler, path, body string) *httptest.ResponseRecorder {
+		var req *http.Request
+		if body == "" {
+			req = httptest.NewRequest("POST", path, nil)
+		} else {
+			req = httptest.NewRequest("POST", path, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.RemoteAddr = "127.0.0.1:50000" // apply is loopback-only
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for _, path := range []string{"/api/update/dismiss", "/api/update/apply"} {
+		t.Run(path+" refuses a release no longer pending", func(t *testing.T) {
+			applied = nil
+			var cleared []string
+			r, store := newUpdateFixture(t, &UpdateRouteDeps{
+				Version: "2.6.0-test", Updater: upd,
+				OnCleared: func(tag string) { cleared = append(cleared, tag) },
+			})
+			newer := &updater.ReleaseInfo{Version: "9.9.2", TagName: "v9.9.2", ReleaseNotes: "notes 9.9.2"}
+			SharedUpdateInfo.Store(newer)
+
+			rec := post(r, path, `{"tagName":"v9.9.1"}`)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("want 409, got %d (body: %s)", rec.Code, rec.Body.String())
+			}
+			var resp struct {
+				Error   string         `json:"error"`
+				Pending map[string]any `json:"pending"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatal(err)
+			}
+			if resp.Pending["tagName"] != "v9.9.2" || resp.Pending["releaseNotes"] != "notes 9.9.2" {
+				t.Errorf("409 pending = %v, want v9.9.2 with its notes", resp.Pending)
+			}
+			if !strings.Contains(resp.Error, "v9.9.1") || !strings.Contains(resp.Error, "v9.9.2") {
+				t.Errorf("409 error = %q, want it to name both releases", resp.Error)
+			}
+			var skipped string
+			store.Read(func(c *config.MoomboxConfig) { skipped = c.Updates.SkippedVersion })
+			if skipped != "" || len(applied) != 0 || len(cleared) != 0 {
+				t.Errorf("refused request acted: skipped %q, applied %v, cleared %v", skipped, applied, cleared)
+			}
+			if SharedUpdateInfo.Load() != newer {
+				t.Error("the pending release must survive a refused request")
+			}
+			if updateInProgress.Load() {
+				t.Error("a refused apply left the in-progress flag set")
+			}
+		})
+		for _, body := range []string{`{"tagName":"v9.9.1"}`, ""} {
+			t.Run(path+" acts on the release named "+body, func(t *testing.T) {
+				applied = nil
+				r, store := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test", Updater: upd})
+				SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.1", TagName: "v9.9.1"})
+				rec := post(r, path, body)
+				var skipped string
+				store.Read(func(c *config.MoomboxConfig) { skipped = c.Updates.SkippedVersion })
+				if path == "/api/update/dismiss" {
+					if rec.Code != http.StatusOK || skipped != "v9.9.1" {
+						t.Errorf("dismiss = %d, skipped %q; want 200 and v9.9.1", rec.Code, skipped)
+					}
+				} else if len(applied) != 1 || applied[0] != "v9.9.1" {
+					t.Errorf("apply installed %v, want v9.9.1", applied)
+				}
+			})
+		}
 	}
 }
 

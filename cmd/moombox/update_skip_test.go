@@ -116,3 +116,68 @@ func TestTheTUISkipClearsEveryDashboardsBadge(t *testing.T) {
 		t.Errorf("dashboard got %s %s, want update_cleared naming v9.9.9", f.Type, f.Payload)
 	}
 }
+
+// The TUI's U and S act on the release whose notes it shows, and only while
+// that is still the pending one — the rule the dashboard's dialog is held to
+// (routes.PendingUpdate). A TUI whose copy is stale (the message naming the
+// newer release was dropped) is refused, nothing is installed, skipped or
+// announced, and the TUI is handed the release now pending, so R N shows the
+// notes to read first; with nothing pending it is told to drop its badge.
+//
+// Mutants: applyUpdateFromTUI or dismissUpdateFromTUI resolving
+// PendingUpdate("") / skipping without DismissUpdate's check — the stale
+// request goes ahead; resyncTUIUpdate sending nothing — the TUI keeps the
+// stale badge.
+func TestTheTUIActsOnlyOnTheReleaseItShows(t *testing.T) {
+	newer := &updater.ReleaseInfo{TagName: "v9.9.2", Version: "9.9.2", ReleaseNotes: "notes 9.9.2"}
+	for _, tc := range []struct {
+		name    string
+		pending *updater.ReleaseInfo
+		want    tui.UpdateStatusMsg // what the TUI is handed
+	}{
+		{"a newer release pending", newer, tui.UpdateStatusMsg{TagName: "v9.9.2", Version: "9.9.2", ReleaseNotes: "notes 9.9.2"}},
+		{"nothing pending", nil, tui.UpdateStatusMsg{TagName: "v9.9.1"}},
+	} {
+		for _, key := range []string{"U", "S"} {
+			t.Run(key+" with "+tc.name, func(t *testing.T) {
+				pendingRelease(t, tc.pending)
+				store := config.NewStore(config.Defaults(), filepath.Join(t.TempDir(), "config.toml"))
+				hub := web.NewWebSocketHub(sweepTestLogger{})
+				next := connectDashboard(t, hub)
+				ch := make(chan tui.UpdateStatusMsg, 2)
+				// No updater: an apply that got past the check would panic.
+				s := &runState{configStore: store, wsHub: hub, tuiUpdateStatusCh: ch}
+
+				var refused bool
+				if key == "U" {
+					refused = s.applyUpdateFromTUI("v9.9.1") != ""
+				} else {
+					refused = s.dismissUpdateFromTUI("v9.9.1") != nil
+				}
+				if !refused {
+					t.Fatal("acting on v9.9.1, which is not pending, was not refused")
+				}
+				var skipped string
+				store.Read(func(c *config.MoomboxConfig) { skipped = c.Updates.SkippedVersion })
+				if skipped != "" {
+					t.Errorf("a refused skip saved %q", skipped)
+				}
+				if routes.SharedUpdateInfo.Load() != tc.pending {
+					t.Error("the pending release changed under a refused request")
+				}
+				select {
+				case got := <-ch:
+					if got != tc.want {
+						t.Errorf("TUI handed %+v, want %+v", got, tc.want)
+					}
+				default:
+					t.Errorf("the TUI was not re-synced; want %+v", tc.want)
+				}
+				hub.Broadcast("sentinel", nil)
+				if f := next(); f.Type != "sentinel" {
+					t.Errorf("a refused request sent the dashboards %s %s", f.Type, f.Payload)
+				}
+			})
+		}
+	}
+}

@@ -2,6 +2,10 @@ package routes
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -121,12 +125,92 @@ func (deps *UpdateRouteDeps) logUpdateFailure(what string, err error) {
 	}
 }
 
+// ErrNoUpdatePending refuses an apply or a skip when no release is pending.
+var ErrNoUpdatePending = errors.New("no update pending")
+
+// StalePendingError refuses an apply or a skip that names a release which is
+// no longer the pending one: Tag is the release whose notes were on screen,
+// Pending the one a check has found since. Acting on the pending release
+// installed, or skipped for good, a release whose notes the operator never
+// saw — a dashboard dialog open on v9.9.1 skipped v9.9.2 when a check found
+// it meanwhile, and toasted "Skipped v9.9.2". The UIs show Pending's notes
+// instead, and the operator decides again.
+type StalePendingError struct {
+	Tag     string
+	Pending *updater.ReleaseInfo
+}
+
+func (e *StalePendingError) Error() string {
+	return e.Tag + " is no longer the pending update — " + e.Pending.TagName + " is; read its notes first"
+}
+
+// PendingUpdate returns the pending release when it is the one tag names,
+// for an apply or a skip of the release whose notes were on screen. It
+// refuses with ErrNoUpdatePending when nothing is pending and with a
+// *StalePendingError when another release is. tag "" names whichever release
+// is pending: a request that names none (a script, or a dashboard page from
+// before the field) acts on it as every request used to.
+func PendingUpdate(tag string) (*updater.ReleaseInfo, error) {
+	pending := SharedUpdateInfo.Load()
+	if pending == nil {
+		return nil, ErrNoUpdatePending
+	}
+	if tag != "" && pending.TagName != tag {
+		return nil, &StalePendingError{Tag: tag, Pending: pending}
+	}
+	return pending, nil
+}
+
+// releaseFields is a release as the update routes and /api/status report it.
+func releaseFields(rel *updater.ReleaseInfo) map[string]any {
+	return map[string]any{
+		"version":          rel.Version,
+		"tagName":          rel.TagName,
+		"releaseNotes":     rel.ReleaseNotes,
+		"releaseNotesHtml": rel.ReleaseNotesHtml,
+		"publishedAt":      rel.PublishedAt,
+	}
+}
+
+// requestedUpdateTag reads the release an apply or a skip names: {"tagName"},
+// the tag of the notes the dialog showed. No body names none (PendingUpdate).
+func requestedUpdateTag(r *http.Request) (string, error) {
+	var body struct {
+		TagName string `json:"tagName"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	return body.TagName, nil
+}
+
+// writePendingRefusal answers an apply or a skip PendingUpdate refused:
+// 409 with the release now pending, whose notes the dialog shows instead,
+// or 400 with noneMsg when nothing is.
+func writePendingRefusal(w http.ResponseWriter, err error, noneMsg string) {
+	var stale *StalePendingError
+	if !errors.As(err, &stale) {
+		jsonError(w, noneMsg, http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": stale.Error(), "pending": releaseFields(stale.Pending)})
+}
+
 // DismissUpdate records tag as the skipped version and clears the shared
 // pending-update pointer if it still names that tag. Shared by the
 // POST /api/update/dismiss route and the TUI's S key in the release-notes
-// overlay. CompareAndSwap, not Store(nil): a newer release found while the
-// dismiss was in flight must survive.
+// overlay. tag must be the pending release (PendingUpdate): a skip of the
+// release whose notes were on screen is refused once a check has found
+// another, and saves nothing. CompareAndSwap, not Store(nil): a newer release
+// found while the dismiss was in flight must survive.
 func DismissUpdate(store *config.Store, tag string) error {
+	pending, err := PendingUpdate(tag)
+	if err != nil {
+		return err
+	}
+	tag = pending.TagName
 	mu := store.RWMutex()
 	cfg := store.Config()
 	mu.Lock()
@@ -138,8 +222,8 @@ func DismissUpdate(store *config.Store, tag string) error {
 		return err
 	}
 	mu.Unlock()
-	if pending := SharedUpdateInfo.Load(); pending != nil && pending.TagName == tag {
-		SharedUpdateInfo.CompareAndSwap(pending, nil)
+	if now := SharedUpdateInfo.Load(); now != nil && now.TagName == tag {
+		SharedUpdateInfo.CompareAndSwap(now, nil)
 	}
 	return nil
 }
@@ -188,11 +272,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 		}
 		if ui := SharedUpdateInfo.Load(); ui != nil {
 			resp["available"] = true
-			resp["version"] = ui.Version
-			resp["tagName"] = ui.TagName
-			resp["releaseNotes"] = ui.ReleaseNotes
-			resp["releaseNotesHtml"] = ui.ReleaseNotesHtml
-			resp["publishedAt"] = ui.PublishedAt
+			maps.Copy(resp, releaseFields(ui))
 		}
 		jsonResponse(w, resp)
 	})
@@ -234,11 +314,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 				deps.OnFound(release)
 			}
 			resp["available"] = true
-			resp["version"] = release.Version
-			resp["tagName"] = release.TagName
-			resp["releaseNotes"] = release.ReleaseNotes
-			resp["releaseNotesHtml"] = release.ReleaseNotesHtml
-			resp["publishedAt"] = release.PublishedAt
+			maps.Copy(resp, releaseFields(release))
 		} else if tag := ClearPendingUpdate(seen); tag != "" && deps.OnCleared != nil {
 			deps.OnCleared(tag)
 		}
@@ -263,15 +339,22 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			return
 		}
 
+		tag, err := requestedUpdateTag(r)
+		if err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
 		if !updateInProgress.CompareAndSwap(false, true) {
 			jsonError(w, "update already in progress", http.StatusConflict)
 			return
 		}
 
-		release := SharedUpdateInfo.Load()
-		if release == nil {
+		// The release whose notes the dialog showed, and no other.
+		release, err := PendingUpdate(tag)
+		if err != nil {
 			updateInProgress.Store(false)
-			jsonError(w, "no update available", http.StatusBadRequest)
+			writePendingRefusal(w, err, "no update available")
 			return
 		}
 
@@ -366,14 +449,26 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 	// action permanently disabled all update awareness on a box whose
 	// YouTube/Twitch extractors rot without updates. Disabling checks
 	// entirely remains available as the Settings > Updates toggle.
-	// The NEXT release (different tag) notifies normally.
+	// The NEXT release (different tag) notifies normally. The body names the
+	// release whose notes the dialog showed; another one pending is a 409.
 	r.Post("/api/update/dismiss", func(w http.ResponseWriter, r *http.Request) {
-		pending := SharedUpdateInfo.Load()
-		if pending == nil {
-			jsonError(w, "no update pending", http.StatusBadRequest)
+		tag, err := requestedUpdateTag(r)
+		if err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		pending, err := PendingUpdate(tag)
+		if err != nil {
+			writePendingRefusal(w, err, "no update pending")
 			return
 		}
 		if err := DismissUpdate(store, pending.TagName); err != nil {
+			var stale *StalePendingError
+			if errors.As(err, &stale) || errors.Is(err, ErrNoUpdatePending) {
+				// A check replaced or withdrew it in between.
+				writePendingRefusal(w, err, "no update pending")
+				return
+			}
 			jsonError(w, "failed to save config", http.StatusInternalServerError)
 			return
 		}

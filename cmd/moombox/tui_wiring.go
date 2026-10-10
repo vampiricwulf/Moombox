@@ -485,19 +485,7 @@ func (s *runState) runTUI() {
 	}
 	if s.upd != nil {
 		app.OnCheckUpdate = s.checkUpdateFromTUI
-		app.OnApplyUpdate = func(ver string) string {
-			release := routes.SharedUpdateInfo.Load()
-			if release == nil {
-				return "no update info available"
-			}
-			s.log.Info("Update requested from TUI", slog.String("version", ver))
-			if err := s.upd.ApplyUpdate(context.Background(), release); err != nil {
-				s.log.Error("[Updater] Update failed", slog.String("error", err.Error()))
-				return err.Error()
-			}
-			s.triggerRestart("TUI update")
-			return ""
-		}
+		app.OnApplyUpdate = s.applyUpdateFromTUI
 		app.OnVerifySignature = func() (bool, error) {
 			return s.upd.VerifyCurrentSignature(context.Background())
 		}
@@ -1294,19 +1282,65 @@ func (s *runState) checkUpdateFromTUI() (*tui.UpdateStatusMsg, error) {
 	}, nil
 }
 
+// applyUpdateFromTUI is the TUI's R U, and the U beside a pending update's
+// notes: it installs the release tagged tag, the one the TUI shows, and only
+// while that is still the pending release (routes.PendingUpdate) — the rule
+// POST /api/update/apply holds the dashboard's dialog to. It used to install
+// whatever was pending, so a TUI whose copy of the pending release was stale
+// applied a release whose notes were never on screen.
+func (s *runState) applyUpdateFromTUI(tag string) string {
+	release, err := routes.PendingUpdate(tag)
+	if err != nil {
+		s.resyncTUIUpdate(tag, err)
+		return err.Error()
+	}
+	s.log.Info("Update requested from TUI", slog.String("version", release.TagName))
+	if err := s.upd.ApplyUpdate(context.Background(), release); err != nil {
+		s.log.Error("[Updater] Update failed", slog.String("error", err.Error()))
+		return err.Error()
+	}
+	s.triggerRestart("TUI update")
+	return ""
+}
+
 // dismissUpdateFromTUI is the TUI's S beside a pending update's notes: it
 // skips tag through routes.DismissUpdate, the helper POST /api/update/dismiss
 // uses, and then announces the withdrawal the way that route does (its
 // OnCleared). Every open dashboard holds its own copy of the pending release,
 // and a skip from here used to reach none of them: the badge stayed up until a
 // reload, and its Update Now and Skip answered "no update available" and "no
-// update pending".
+// update pending". A skip DismissUpdate refuses — tag is no longer the pending
+// release — saves nothing and re-syncs the TUI instead.
 func (s *runState) dismissUpdateFromTUI(tag string) error {
 	if err := routes.DismissUpdate(s.configStore, tag); err != nil {
+		s.resyncTUIUpdate(tag, err)
 		return err
 	}
 	announceUpdateCleared(s.wsHub, s.tuiUpdateStatusCh, tag)
 	return nil
+}
+
+// resyncTUIUpdate hands the TUI the server's pending release after an apply
+// or a skip of tag was refused because the TUI's own copy is stale — a
+// release found or withdrawn while its message to the TUI was dropped (the
+// channel is non-blocking). A newer release lights the badge in its place, so
+// R N shows the notes the operator has to read first; none pending clears it.
+// Any other refusal leaves the badge alone.
+func (s *runState) resyncTUIUpdate(tag string, err error) {
+	var msg tui.UpdateStatusMsg
+	var stale *routes.StalePendingError
+	switch {
+	case errors.As(err, &stale):
+		msg = tui.UpdateStatusMsg{Version: stale.Pending.Version, TagName: stale.Pending.TagName, ReleaseNotes: stale.Pending.ReleaseNotes}
+	case errors.Is(err, routes.ErrNoUpdatePending):
+		msg = tui.UpdateStatusMsg{TagName: tag}
+	default:
+		return
+	}
+	select {
+	case s.tuiUpdateStatusCh <- msg:
+	default:
+	}
 }
 
 // forwardTUILogs copies the logger's lines into the TUI's log channel until

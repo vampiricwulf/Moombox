@@ -90,6 +90,11 @@ export class UpdateController {
     const dlg = document.getElementById("update-dialog");
     const notes = document.getElementById("update-release-notes");
     if (!dlg || !this.available) return;
+    // The release whose notes go on screen. Update Now and Skip name it, and
+    // the server refuses them (409) once a check has replaced it — an
+    // update_available landing while the dialog is open changes
+    // this.available, never the notes the operator is reading.
+    this.shown = this.available;
     dlg.label = `Update to v${this.available.version}`;
     // SECURITY CONTRACT: this is the app's ONLY innerHTML sink for external
     // content (GitHub release markdown), deliberately unescaped because the
@@ -107,6 +112,28 @@ export class UpdateController {
       notes.textContent = this.available.releaseNotes || "No release notes available.";
     }
     dlg.show();
+  }
+
+  // The body of an apply or a skip: the tag of the release whose notes are on
+  // screen. None when the dialog never showed one; the server then acts on
+  // whatever is pending.
+  _shownRequest() {
+    return {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tagName: this.shown?.tagName }),
+    };
+  }
+
+  // A 409 from apply or dismiss: a check found another release while the
+  // dialog was open, and the server refused to act on a release whose notes
+  // were never on screen. Its notes replace the ones the operator read, so
+  // they decide again; nothing was installed or skipped.
+  _showPendingInstead(data, verb) {
+    this.available = data.pending;
+    this.updateVersionIndicator();
+    this.showUpdateDialog();
+    this.app.showToast(`Not ${verb}: ${data.error}`, "warning");
   }
 
   async applyUpdate() {
@@ -128,13 +155,17 @@ export class UpdateController {
     const btn = document.getElementById("update-now-btn");
     if (btn) { btn.loading = true; btn.disabled = true; }
     try {
-      const resp = await fetch("/api/update/apply", { method: "POST" });
+      const resp = await fetch("/api/update/apply", this._shownRequest());
       if (resp.ok) {
         this.app.showToast("Update applied. Restarting...", "success");
         document.getElementById("update-dialog")?.hide();
       } else {
         const data = await resp.json().catch(() => ({ error: resp.statusText }));
-        this.app.showToast("Update failed: " + (data.error || "Unknown error"), "danger");
+        if (resp.status === 409 && data.pending) {
+          this._showPendingInstead(data, "updated");
+        } else {
+          this.app.showToast("Update failed: " + (data.error || "Unknown error"), "danger");
+        }
       }
     } catch (e) {
       // No answer is not a failure: the server keeps downloading after the
@@ -157,14 +188,21 @@ export class UpdateController {
       return;
     }
     try {
-      const resp = await fetch("/api/update/dismiss", { method: "POST" });
+      const resp = await fetch("/api/update/dismiss", this._shownRequest());
       if (!resp.ok) {
         const data = await resp.json().catch(() => ({ error: resp.statusText }));
+        if (resp.status === 409 && data.pending) {
+          this._showPendingInstead(data, "skipped");
+          return;
+        }
         this.app.showToast("Failed to dismiss: " + (data.error || "Unknown error"), "danger");
         return;
       }
-      const skipped = this.available?.tagName || "this version";
-      this.available = null;
+      // The release the server skipped, which is the one on screen; the badge
+      // drops only if it still shows that one, by update_cleared's rule.
+      const data = await resp.json().catch(() => ({}));
+      const skipped = data.skipped || this.shown?.tagName || "this version";
+      if (this.available?.tagName === skipped) this.available = null;
       this.updateVersionIndicator();
       document.getElementById("update-dialog")?.hide();
       // Version-scoped skip (the old behavior disabled ALL update checks —
