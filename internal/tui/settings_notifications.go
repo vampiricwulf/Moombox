@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"maps"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -19,6 +22,9 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 		if key == "d" || key == "D" {
 			if m.notifIndex < len(m.notifications) {
 				m.notifications = append(m.notifications[:m.notifIndex], m.notifications[m.notifIndex+1:]...)
+				if m.notifIndex < len(m.notifFrom) {
+					m.notifFrom = slices.Delete(m.notifFrom, m.notifIndex, m.notifIndex+1)
+				}
 				if m.notifIndex >= len(m.notifications) && m.notifIndex > 0 {
 					m.notifIndex--
 				}
@@ -289,6 +295,9 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 		if m.notifIndex < len(m.notifications) {
 			m.notifications[m.notifIndex] = n
 		} else {
+			// An added target has no Open copy: the save adds it rather than
+			// merging it into a live target.
+			m.notifFrom = append(m.notifFrom[:min(len(m.notifFrom), len(m.notifications))], -1)
 			m.notifications = append(m.notifications, n)
 		}
 		m.dirty = true
@@ -344,4 +353,219 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 		return ""
 	}
 	return ""
+}
+
+// notifFormValues is a target as the notification editor shows it, each
+// field in the form its Enter writes it: the trimmed URL, the mute as
+// IsEnabled reads it, the event filter as the editor would store it (its
+// known events, "*" when that is none or all — both store nil, "every
+// event"), the canonical mention, the mention filter as a set (or
+// "default", absent), and the delivery mode with absent reading separate.
+// Two targets with equal form values differ only in spelling, so a save
+// that compared the stored structs would read an Enter that changed
+// nothing — which spells an absent enabled out as true — as an edit.
+func notifFormValues(n config.NotificationConfig) map[string]string {
+	events := "*"
+	filter := make(map[string]bool, len(n.Events))
+	for _, e := range n.Events {
+		filter[e] = true
+	}
+	var picked []string
+	for _, e := range allNotifEvents {
+		if filter[e] {
+			picked = append(picked, e)
+		}
+	}
+	if len(picked) > 0 && len(picked) < len(allNotifEvents) {
+		events = strings.Join(picked, ",")
+	}
+	mention := strings.TrimSpace(n.Mention)
+	if canonical, _, _, err := config.ParseMention(n.Mention); err == nil {
+		mention = canonical
+	}
+	mentionEvents := "default"
+	if n.MentionEvents != nil {
+		list := slices.Clone(*n.MentionEvents)
+		slices.Sort(list)
+		mentionEvents = "[" + strings.Join(slices.Compact(list), ",") + "]"
+	}
+	mode := "separate"
+	if strings.TrimSpace(n.Mode) == "edit" {
+		mode = "edit"
+	}
+	return map[string]string{
+		"url":            strings.TrimSpace(n.URL),
+		"enabled":        boolToDisplay(n.IsEnabled()),
+		"events":         events,
+		"mention":        mention,
+		"mention_events": mentionEvents,
+		"mode":           mode,
+	}
+}
+
+// writeNotifField writes the form field key — one of notifFormValues'
+// keys — from src onto dst, and reports false for a key it does not know.
+// The slices and pointers are copied, never shared: dst goes into the live
+// config, src stays in the editor.
+func writeNotifField(dst *config.NotificationConfig, src config.NotificationConfig, key string) bool {
+	switch key {
+	case "url":
+		dst.URL = src.URL
+	case "enabled":
+		dst.Enabled = nil
+		if src.Enabled != nil {
+			on := *src.Enabled
+			dst.Enabled = &on
+		}
+	case "events":
+		dst.Events = slices.Clone(src.Events)
+	case "mention":
+		dst.Mention = src.Mention
+	case "mention_events":
+		dst.MentionEvents = nil
+		if src.MentionEvents != nil {
+			list := append([]string{}, *src.MentionEvents...)
+			dst.MentionEvents = &list
+		}
+	case "mode":
+		dst.Mode = src.Mode
+	default:
+		return false
+	}
+	return true
+}
+
+// cloneNotification copies n with nothing shared.
+func cloneNotification(n config.NotificationConfig) config.NotificationConfig {
+	out := n
+	for k := range notifFormValues(n) {
+		writeNotifField(&out, n, k)
+	}
+	return out
+}
+
+// notifIdentities names each target of list by its trimmed URL and how many
+// earlier entries carry the same one: the URL is all a target has to be
+// known by, and a webhook listed twice (which the manager posts to once) is
+// still two entries to the editors.
+func notifIdentities(list []config.NotificationConfig) []string {
+	seen := make(map[string]int, len(list))
+	ids := make([]string, len(list))
+	for i, n := range list {
+		url := strings.TrimSpace(n.URL)
+		ids[i] = url + "#" + strconv.Itoa(seen[url])
+		seen[url]++
+	}
+	return ids
+}
+
+// mergeNotificationEdits applies the Settings editor's own target changes to
+// the target list as it stands at save time — mergeChannelEdits' rule, with
+// a target's identity in place of a channel ID. base is the list Open
+// copied, edited the list the editor holds now, from the base index each
+// edited entry was opened from (-1, or past its end: added in the editor),
+// live the store's list now. The result is a new slice (never live's array,
+// which Snapshot readers and a rollback share), and changed is false — live
+// returned as is — when the editor changed nothing.
+//
+// A target is known by the URL it had at Open (notifIdentities), so one
+// whose URL the editor changed is still the same target. A base target the
+// editor deleted is removed from live. One it changed — compared as the form
+// shows it, notifFormValues — is merged field by field into live's target
+// with that identity: only the fields the editor changed are written, so a
+// dashboard mute or mention on the same target survives a TUI edit of its
+// events, and a field both changed takes the editor's value. An edit of a
+// target the dashboard removed meanwhile is added back, the operator having
+// saved it on purpose. A target the editor added replaces one the dashboard
+// added with the same URL while the overlay was open — one webhook, listed
+// once — and is appended otherwise. Everything else in live — a target the
+// dashboard added, muted or edited, and one it removed that the editor did
+// not touch — stays exactly as live has it.
+func mergeNotificationEdits(base, edited []config.NotificationConfig, from []int, live []config.NotificationConfig) ([]config.NotificationConfig, bool) {
+	baseIDs := notifIdentities(base)
+	type upsert struct {
+		n, was  config.NotificationConfig
+		id      string // the base identity; unused for an added target
+		hasBase bool
+	}
+	kept := make([]bool, len(base))
+	var upserts []upsert
+	for i, n := range edited {
+		f := -1
+		if i < len(from) {
+			f = from[i]
+		}
+		if f < 0 || f >= len(base) || kept[f] {
+			upserts = append(upserts, upsert{n: n})
+			continue
+		}
+		kept[f] = true
+		if maps.Equal(notifFormValues(base[f]), notifFormValues(n)) {
+			continue
+		}
+		upserts = append(upserts, upsert{n: n, was: base[f], id: baseIDs[f], hasBase: true})
+	}
+	removed := make(map[string]bool)
+	inBase := make(map[string]bool, len(base))
+	for i, id := range baseIDs {
+		inBase[id] = true
+		if !kept[i] {
+			removed[id] = true
+		}
+	}
+	if len(removed) == 0 && len(upserts) == 0 {
+		return live, false
+	}
+
+	// outIDs follows out: each kept live target's identity, "" once an added
+	// target has replaced it or for one appended, so two added targets with
+	// one URL do not both land on the same dashboard-added entry.
+	out := make([]config.NotificationConfig, 0, len(live)+len(upserts))
+	outIDs := make([]string, 0, cap(out))
+	for i, id := range notifIdentities(live) {
+		if !removed[id] {
+			out = append(out, live[i])
+			outIDs = append(outIDs, id)
+		}
+	}
+	for _, u := range upserts {
+		i := -1
+		if u.hasBase {
+			i = slices.Index(outIDs, u.id)
+		} else {
+			url := strings.TrimSpace(u.n.URL)
+			for j, id := range outIDs {
+				if id != "" && !inBase[id] && strings.TrimSpace(out[j].URL) == url {
+					i = j
+					break
+				}
+			}
+		}
+		switch {
+		case i >= 0 && u.hasBase:
+			out[i] = mergeNotifFields(out[i], u.was, u.n)
+		case i >= 0:
+			out[i] = cloneNotification(u.n)
+			outIDs[i] = ""
+		default:
+			out = append(out, cloneNotification(u.n))
+			outIDs = append(outIDs, "")
+		}
+	}
+	return out, true
+}
+
+// mergeNotifFields is the three-way merge of one target: live as it stands
+// at save time, with each form field the editor changed — where edited
+// differs from base, the copy Open took, compared as the form shows them —
+// taken from edited. A field the editor left alone keeps live's value,
+// whatever the dashboard set it to meanwhile.
+func mergeNotifFields(live, base, edited config.NotificationConfig) config.NotificationConfig {
+	was, now := notifFormValues(base), notifFormValues(edited)
+	for k := range was {
+		if was[k] != now[k] {
+			writeNotifField(&live, edited, k)
+		}
+	}
+	return live
 }

@@ -580,7 +580,7 @@ type App struct {
 	windowTitle string
 
 	// Config reference for settings panel. cfg is the direct
-	// *MoomboxConfig pointer (used by applyValues big-block writes);
+	// *MoomboxConfig pointer (applyValues writes into it);
 	// configStore exposes the same struct with synchronisation. New code
 	// should prefer configStore.Read / configStore.Update.
 	cfg         *config.MoomboxConfig
@@ -909,8 +909,8 @@ func (a *App) syncHideFinishedAge() {
 
 // SetConfigStore wires the unified config Store into the App and its
 // sub-models (DECISIONS #8). Also sets a.cfg + a.settings.cfg as
-// stable pointers for the applyValues big-block writes that mutate cfg
-// directly under the Store's lock.
+// stable pointers for the applyValues writes that mutate cfg directly
+// under the Store's lock.
 func (a *App) SetConfigStore(s *config.Store) {
 	a.configStore = s
 	a.cfg = s.Config()

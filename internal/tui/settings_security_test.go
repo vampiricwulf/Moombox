@@ -85,6 +85,10 @@ func TestRemovePasswordResetsExternalAndPublic(t *testing.T) {
 // TestApplyValuesRequiresPasswordForExternalAndPublic: the settings-save guard
 // refuses to persist passwordless external access. "public" reaches
 // m.values via loadValues (a hand-edited config file), so the guard sees it.
+// A save writes only the fields the operator edited, but the guard runs on
+// the merged result — the edits over the live config — so a loaded
+// passwordless mode refuses a save of anything else ("loaded"), and a mode
+// the operator typed is refused or written through unmangled ("typed").
 func TestApplyValuesRequiresPasswordForExternalAndPublic(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -99,45 +103,68 @@ func TestApplyValuesRequiresPasswordForExternalAndPublic(t *testing.T) {
 		{"lan without password allowed", "lan", "", false},
 		{"localhost without password allowed", "localhost", "", false},
 	}
+	checkRefusal := func(t *testing.T, m *SettingsModel, access string) {
+		t.Helper()
+		if m.status != saveError {
+			t.Fatalf("status = %v, want saveError for passwordless %q", m.status, access)
+		}
+		if !strings.Contains(m.errorMsg, "Password required") {
+			t.Errorf("errorMsg = %q, want a password-required message", m.errorMsg)
+		}
+	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(tt.name+"/loaded", func(t *testing.T) {
 			m, cfg := newSecuritySettingsModel(t, tt.access, tt.hash)
 			if got := m.values["network_access"]; got != tt.access {
 				t.Fatalf("loadValues dropped the access mode: values[network_access] = %q, want %q", got, tt.access)
 			}
-
-			// Clobber cfg (NOT m.values) with a different mode, so the
-			// post-save assertion below proves applyValues actually wrote the
-			// panel's value through rather than passing because cfg happened
-			// to already hold it.
-			sentinel := "lan"
-			if tt.access == "lan" {
-				sentinel = "localhost"
-			}
-			cfg.Network.NetworkAccess = sentinel
+			m.values["log_level"] = "DEBUG" // a save of something else
 
 			m.applyValues()
 
 			if tt.wantError {
-				if m.status != saveError {
-					t.Fatalf("status = %v, want saveError for passwordless %q", m.status, tt.access)
-				}
-				if !strings.Contains(m.errorMsg, "Password required") {
-					t.Errorf("errorMsg = %q, want a password-required message", m.errorMsg)
+				checkRefusal(t, m, tt.access)
+				if cfg.Logs.LogLevel == "DEBUG" {
+					t.Error("a refused save wrote the log level")
 				}
 				return
 			}
 			if m.status == saveError {
 				t.Fatalf("save refused for %q/%q: %s", tt.access, tt.hash, m.errorMsg)
 			}
-			// The allowed path must write the mode back UNMANGLED. This is the
-			// other half of the guard's reachability argument: loadValues copies
-			// network_access verbatim into m.values and applyValues writes it
-			// straight back to cfg, so a hand-edited "public" round-trips
-			// through the settings panel — which is exactly why the guard above
-			// has to recognise it.
+			// Not edited, so not written: a hand-edited "public" round-trips
+			// through the settings panel untouched — which is exactly why the
+			// guard above has to recognise it.
 			if cfg.Network.NetworkAccess != tt.access {
-				t.Errorf("NetworkAccess = %q after applyValues, want %q preserved", cfg.Network.NetworkAccess, tt.access)
+				t.Errorf("NetworkAccess = %q after applyValues, want %q kept", cfg.Network.NetworkAccess, tt.access)
+			}
+		})
+		t.Run(tt.name+"/typed", func(t *testing.T) {
+			// Open on another mode and type this one, so the post-save
+			// assertion proves applyValues wrote the panel's value through
+			// rather than passing because cfg happened to already hold it.
+			sentinel := "lan"
+			if tt.access == "lan" {
+				sentinel = "localhost"
+			}
+			m, cfg := newSecuritySettingsModel(t, sentinel, tt.hash)
+			m.values["network_access"] = tt.access
+
+			m.applyValues()
+
+			if tt.wantError {
+				checkRefusal(t, m, tt.access)
+				if cfg.Network.NetworkAccess != sentinel {
+					t.Errorf("NetworkAccess = %q after a refused save, want %q", cfg.Network.NetworkAccess, sentinel)
+				}
+				return
+			}
+			if m.status == saveError {
+				t.Fatalf("save refused for %q/%q: %s", tt.access, tt.hash, m.errorMsg)
+			}
+			// The allowed path must write the mode back UNMANGLED.
+			if cfg.Network.NetworkAccess != tt.access {
+				t.Errorf("NetworkAccess = %q after applyValues, want %q written", cfg.Network.NetworkAccess, tt.access)
 			}
 		})
 	}

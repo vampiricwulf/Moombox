@@ -6,6 +6,7 @@ import (
 	"maps"
 	"math"
 	"net"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -361,8 +362,8 @@ type SettingsModel struct {
 	status   saveStatus
 	errorMsg string
 
-	// Config reference. cfg is the direct *MoomboxConfig pointer used by
-	// applyValues' big-block writes; configStore exposes the same struct
+	// Config reference. cfg is the direct *MoomboxConfig pointer applyValues
+	// writes its edited fields into; configStore exposes the same struct
 	// with synchronisation for snapshot reads. Both wired together via
 	// App.SetConfigStore.
 	cfg         *config.MoomboxConfig
@@ -375,11 +376,12 @@ type SettingsModel struct {
 	// written into the live *MoomboxConfig by the time it is called, so a
 	// refused write is the moment the running process and config.toml
 	// diverge — the caller reports it and rolls the live struct back
-	// (CORE-4).
+	// (CORE-4). A Settings save that changed nothing in the live config does
+	// not call it.
 	OnSave    func(cfg *config.MoomboxConfig) error
 	OnRestart func()
-	// OnRestartRequired fires when a settings save commits a value
-	// flagged in restartRequiredKeys, regardless of whether the user
+	// OnRestartRequired fires when a settings save changes the live value
+	// of a setting flagged in restartRequiredKeys, regardless of whether the user
 	// then triggers OnRestart from the modal or dismisses it. The App
 	// flips a persistent banner-visible flag so the dismissal case
 	// doesn't leave a config/runtime mismatch with no visual reminder.
@@ -454,6 +456,16 @@ type SettingsModel struct {
 	notifEditScrollStart int
 	notifDeleteConf      bool
 	notifications        []config.NotificationConfig
+	// notificationsAtOpen is the target list as Open copied it, and
+	// notifFrom names, for each entry of notifications, the index of the
+	// notificationsAtOpen entry it was opened from (-1: the editor added it).
+	// A save applies only what the editor changed relative to its own Open
+	// copy, by that copy's identity (mergeNotificationEdits), so a target the
+	// dashboard added, edited or removed while the overlay was open is not
+	// reverted by a save of something else. Tracked by origin rather than by
+	// URL because the URL is one of the fields the editor edits.
+	notificationsAtOpen []config.NotificationConfig
+	notifFrom           []int
 
 	// Security sub-editor state
 	secMode         securityMode
@@ -531,6 +543,8 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 		m.notifDeleteConf = false
 		m.notifications = make([]config.NotificationConfig, len(c.Notifications))
 		copy(m.notifications, c.Notifications)
+		m.notificationsAtOpen = slices.Clone(c.Notifications)
+		m.notifFrom = openOrigins(len(c.Notifications))
 
 		// Load values
 		m.loadValues(c)
@@ -551,14 +565,29 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.updateTextInputForField()
 }
 
-// resyncChannels makes the channel list just saved — this editor's changes
-// merged into everyone else's — both the list the editor shows and the base
-// the next save diffs against, as a fresh Open would. Copies, under the
-// store's read lock: the live slice is shared with Snapshot readers.
-func (m *SettingsModel) resyncChannels() {
+// openOrigins is notifFrom for a list Open has just copied: every entry is
+// its own Open copy.
+func openOrigins(n int) []int {
+	from := make([]int, n)
+	for i := range from {
+		from[i] = i
+	}
+	return from
+}
+
+// resyncFromLive makes the config just saved — this overlay's changes merged
+// into everyone else's — both what the overlay shows and the base the next
+// save diffs against, as a fresh Open would: the field values, the channel
+// list and the notification targets. Copies, under the store's read lock:
+// the live slices are shared with Snapshot readers.
+func (m *SettingsModel) resyncFromLive() {
 	read := func(c *config.MoomboxConfig) {
+		m.loadValues(c)
 		m.channels = slices.Clone(c.Channels)
 		m.channelsAtOpen = slices.Clone(c.Channels)
+		m.notifications = slices.Clone(c.Notifications)
+		m.notificationsAtOpen = slices.Clone(c.Notifications)
+		m.notifFrom = openOrigins(len(c.Notifications))
 	}
 	switch {
 	case m.configStore != nil:
@@ -568,8 +597,12 @@ func (m *SettingsModel) resyncChannels() {
 	default:
 		return
 	}
+	m.originalValues = maps.Clone(m.values)
 	if m.channelIndex >= len(m.channels) {
 		m.channelIndex = max(0, len(m.channels)-1)
+	}
+	if m.notifIndex >= len(m.notifications) {
+		m.notifIndex = max(0, len(m.notifications)-1)
 	}
 }
 
@@ -591,32 +624,40 @@ func (m *SettingsModel) SetSize(w, h int) {
 }
 
 func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
+	loadSettingsValues(m.values, cfg)
+}
+
+// loadSettingsValues fills v with cfg's value for every field the overlay
+// shows, each in the form the overlay shows and edits it. A save reads the
+// live config through it too, so the values it merges and validates, and
+// the restart check's before and after, are in that same form.
+func loadSettingsValues(v map[string]string, cfg *config.MoomboxConfig) {
 	// Network
-	m.values["port"] = strconv.Itoa(cfg.Network.Port)
-	m.values["network_access"] = cfg.Network.NetworkAccess
-	m.values["https_enabled"] = boolToDisplay(cfg.Network.HTTPSEnabled)
-	m.values["tls_cert_path"] = cfg.Network.TLSCertPath
-	m.values["tls_key_path"] = cfg.Network.TLSKeyPath
-	m.values["trust_forwarded_proto"] = boolToDisplay(cfg.Network.TrustForwardedProto)
-	m.values["trusted_proxies"] = strings.Join(cfg.Network.TrustedProxies, ", ")
-	m.values["public_url"] = cfg.Network.PublicURL
-	m.values["probe_targets"] = strings.Join(cfg.Connectivity.ProbeTargets, ", ")
+	v["port"] = strconv.Itoa(cfg.Network.Port)
+	v["network_access"] = cfg.Network.NetworkAccess
+	v["https_enabled"] = boolToDisplay(cfg.Network.HTTPSEnabled)
+	v["tls_cert_path"] = cfg.Network.TLSCertPath
+	v["tls_key_path"] = cfg.Network.TLSKeyPath
+	v["trust_forwarded_proto"] = boolToDisplay(cfg.Network.TrustForwardedProto)
+	v["trusted_proxies"] = strings.Join(cfg.Network.TrustedProxies, ", ")
+	v["public_url"] = cfg.Network.PublicURL
+	v["probe_targets"] = strings.Join(cfg.Connectivity.ProbeTargets, ", ")
 
 	// Paths
-	m.values["database_path"] = cfg.Paths.DatabasePath
-	m.values["log_file_path"] = cfg.Paths.LogFilePath
-	m.values["output_directory"] = cfg.Paths.OutputDirectory
-	m.values["staging_directory"] = cfg.Paths.StagingDirectory
-	m.values["ffmpeg_path"] = cfg.Paths.FfmpegPath
+	v["database_path"] = cfg.Paths.DatabasePath
+	v["log_file_path"] = cfg.Paths.LogFilePath
+	v["output_directory"] = cfg.Paths.OutputDirectory
+	v["staging_directory"] = cfg.Paths.StagingDirectory
+	v["ffmpeg_path"] = cfg.Paths.FfmpegPath
 
 	// Logs
-	m.values["log_level"] = cfg.Logs.LogLevel
-	m.values["log_max_file_size"] = strconv.Itoa(cfg.Logs.LogMaxFileSize)
-	m.values["log_max_files"] = strconv.Itoa(cfg.Logs.LogMaxFiles)
+	v["log_level"] = cfg.Logs.LogLevel
+	v["log_max_file_size"] = strconv.Itoa(cfg.Logs.LogMaxFileSize)
+	v["log_max_files"] = strconv.Itoa(cfg.Logs.LogMaxFiles)
 
 	// Monitors
-	m.values["archive_window_days"] = strconv.Itoa(cfg.Monitors.ArchiveWindowDays)
-	m.values["archive_slots"] = strconv.Itoa(cfg.Monitors.ArchiveSlots)
+	v["archive_window_days"] = strconv.Itoa(cfg.Monitors.ArchiveWindowDays)
+	v["archive_slots"] = strconv.Itoa(cfg.Monitors.ArchiveSlots)
 	// FormatFloat with -1 precision round-trips fractional values ("0.5"
 	// stays "0.5", "30" stays "30") — %.0f and int() silently rounded them
 	// away on EVERY save, touched field or not (CORE-7). The form carries
@@ -624,86 +665,184 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	// form a config.toml may spell it with: ParseFlexDuration has already
 	// turned "90s" into 1.5 minutes before the overlay sees the struct, and
 	// FlexDuration.MarshalTOML writes it back with this exact spelling.
-	m.values["feed_check_interval"] = strconv.FormatFloat(cfg.Monitors.FeedCheckInterval.Minutes(), 'f', -1, 64)
+	v["feed_check_interval"] = strconv.FormatFloat(cfg.Monitors.FeedCheckInterval.Minutes(), 'f', -1, 64)
 	if cfg.Monitors.DecapiCheckInterval != nil {
-		m.values["decapi_check_interval"] = strconv.Itoa(*cfg.Monitors.DecapiCheckInterval)
+		v["decapi_check_interval"] = strconv.Itoa(*cfg.Monitors.DecapiCheckInterval)
 	} else {
-		m.values["decapi_check_interval"] = ""
+		v["decapi_check_interval"] = ""
 	}
 	if cfg.Monitors.TwitchCheckInterval != nil {
-		m.values["twitch_check_interval"] = strconv.Itoa(*cfg.Monitors.TwitchCheckInterval)
+		v["twitch_check_interval"] = strconv.Itoa(*cfg.Monitors.TwitchCheckInterval)
 	} else {
-		m.values["twitch_check_interval"] = ""
+		v["twitch_check_interval"] = ""
 	}
-	m.values["hide_finished_age_days"] = strconv.FormatFloat(cfg.Monitors.HideFinishedAgeDays.Days(), 'f', -1, 64)
-	m.values["probe_cooldown"] = strconv.FormatFloat(cfg.Monitors.ProbeCooldown.Value, 'f', -1, 64)
+	v["hide_finished_age_days"] = strconv.FormatFloat(cfg.Monitors.HideFinishedAgeDays.Days(), 'f', -1, 64)
+	v["probe_cooldown"] = strconv.FormatFloat(cfg.Monitors.ProbeCooldown.Value, 'f', -1, 64)
 	// nil normalizes to true (default on) — matches config validation.
-	m.values["membership_discovery"] = boolToDisplay(cfg.Monitors.MembershipDiscoveryEnabled())
+	v["membership_discovery"] = boolToDisplay(cfg.Monitors.MembershipDiscoveryEnabled())
 
 	// Downloader
-	m.values["output_template"] = cfg.Downloader.OutputTemplate
-	m.values["max_video_resolution"] = strconv.Itoa(cfg.Downloader.MaxVideoResolution)
-	m.values["num_parallel_downloads"] = strconv.Itoa(cfg.Downloader.NumParallelDownloads)
-	m.values["segment_workers"] = strconv.Itoa(cfg.Downloader.SegmentWorkers)
-	m.values["reorder_buffer_mb"] = strconv.Itoa(cfg.Downloader.ReorderBufferMB)
-	m.values["reorder_budget_mb"] = strconv.Itoa(cfg.Downloader.ReorderBudgetMB)
-	m.values["download_chat"] = boolToDisplay(cfg.Downloader.DownloadChat)
-	m.values["prefer_60fps"] = boolToDisplay(cfg.Downloader.Prefer60fps)
-	m.values["maximum_timeout"] = strconv.Itoa(cfg.Downloader.MaximumTimeout)
-	m.values["interruption_timeout"] = strconv.FormatFloat(cfg.Downloader.InterruptionTimeout.Minutes(), 'f', -1, 64)
-	m.values["incomplete_staging_expiry_days"] = strconv.FormatFloat(cfg.Downloader.IncompleteStagingExpiryDays.Days(), 'f', -1, 64)
+	v["output_template"] = cfg.Downloader.OutputTemplate
+	v["max_video_resolution"] = strconv.Itoa(cfg.Downloader.MaxVideoResolution)
+	v["num_parallel_downloads"] = strconv.Itoa(cfg.Downloader.NumParallelDownloads)
+	v["segment_workers"] = strconv.Itoa(cfg.Downloader.SegmentWorkers)
+	v["reorder_buffer_mb"] = strconv.Itoa(cfg.Downloader.ReorderBufferMB)
+	v["reorder_budget_mb"] = strconv.Itoa(cfg.Downloader.ReorderBudgetMB)
+	v["download_chat"] = boolToDisplay(cfg.Downloader.DownloadChat)
+	v["prefer_60fps"] = boolToDisplay(cfg.Downloader.Prefer60fps)
+	v["maximum_timeout"] = strconv.Itoa(cfg.Downloader.MaximumTimeout)
+	v["interruption_timeout"] = strconv.FormatFloat(cfg.Downloader.InterruptionTimeout.Minutes(), 'f', -1, 64)
+	v["incomplete_staging_expiry_days"] = strconv.FormatFloat(cfg.Downloader.IncompleteStagingExpiryDays.Days(), 'f', -1, 64)
 
 	// Cookies
-	m.values["cookie_file"] = cfg.Cookies.CookieFile
+	v["cookie_file"] = cfg.Cookies.CookieFile
 	ytActive, twActive := config.GetActivePlatforms(cfg)
-	m.values["active_youtube"] = boolToDisplay(ytActive)
-	m.values["active_twitch"] = boolToDisplay(twActive)
-	m.values["auto_enabled"] = boolToDisplay(cfg.Cookies.AutoEnabled)
-	m.values["browser_profile_dir"] = cfg.Cookies.BrowserProfileDir
-	m.values["browser_path"] = cfg.Cookies.BrowserPath
-	m.values["browser_type"] = cfg.Cookies.BrowserType
-	m.values["refresh_interval"] = strconv.FormatFloat(cfg.Cookies.RefreshInterval.Minutes(), 'f', -1, 64)
-	m.values["dpapi_fallback"] = boolToDisplay(cfg.Cookies.DpapiFallback)
-	m.values["acquisition"] = cfg.Cookies.Acquisition
+	v["active_youtube"] = boolToDisplay(ytActive)
+	v["active_twitch"] = boolToDisplay(twActive)
+	v["auto_enabled"] = boolToDisplay(cfg.Cookies.AutoEnabled)
+	v["browser_profile_dir"] = cfg.Cookies.BrowserProfileDir
+	v["browser_path"] = cfg.Cookies.BrowserPath
+	v["browser_type"] = cfg.Cookies.BrowserType
+	v["refresh_interval"] = strconv.FormatFloat(cfg.Cookies.RefreshInterval.Minutes(), 'f', -1, 64)
+	v["dpapi_fallback"] = boolToDisplay(cfg.Cookies.DpapiFallback)
+	v["acquisition"] = cfg.Cookies.Acquisition
 
 	// Disk
-	m.values["disk_warn_percent"] = strconv.Itoa(cfg.Disk.WarnPercent)
-	m.values["disk_critical_percent"] = strconv.Itoa(cfg.Disk.CriticalPercent)
+	v["disk_warn_percent"] = strconv.Itoa(cfg.Disk.WarnPercent)
+	v["disk_critical_percent"] = strconv.Itoa(cfg.Disk.CriticalPercent)
 
 	// Updates
-	m.values["auto_check_updates"] = boolToDisplay(cfg.Updates.AutoCheckUpdates)
+	v["auto_check_updates"] = boolToDisplay(cfg.Updates.AutoCheckUpdates)
 
 	// BotGuard sidecar
-	m.values["use_sidecar"] = boolToDisplay(cfg.Bgutils.UseSidecar)
+	v["use_sidecar"] = boolToDisplay(cfg.Bgutils.UseSidecar)
 
 	// Memory
-	m.values["go_soft_limit_mb"] = strconv.Itoa(cfg.Memory.GoSoftLimitMB)
-	m.values["sidecar_soft_limit_mb"] = strconv.Itoa(cfg.Memory.SidecarSoftLimitMB)
-	m.values["sidecar_hard_limit_mb"] = strconv.Itoa(cfg.Memory.SidecarHardLimitMB)
+	v["go_soft_limit_mb"] = strconv.Itoa(cfg.Memory.GoSoftLimitMB)
+	v["sidecar_soft_limit_mb"] = strconv.Itoa(cfg.Memory.SidecarSoftLimitMB)
+	v["sidecar_hard_limit_mb"] = strconv.Itoa(cfg.Memory.SidecarHardLimitMB)
 }
 
-func (m *SettingsModel) applyValues() {
+// settingsWrite is what one applyValues did to the live config.
+type settingsWrite struct {
+	// before is the live config as the write found it, copied under the
+	// lock the write held: what a refused config.Save rolls back to.
+	before config.MoomboxConfig
+	// changed reports that the write changed the live config at all. A save
+	// that changed nothing has nothing to put on disk.
+	changed bool
+	// restart reports that a restartRequiredKeys setting's value changed,
+	// compared in the live config before and after the write rather than as
+	// typed: a field the dashboard had already moved to the typed value, or
+	// a blank probe_targets that keeps the stored list, changed nothing that
+	// a restart would pick up.
+	restart bool
+}
+
+// settingsParsed carries what validateSettingsValues parsed, so the write
+// uses the values the checks passed rather than parsing them a second way.
+type settingsParsed struct {
+	port      int
+	publicURL string
+	flex      map[string]float64
+}
+
+// applyValues writes the overlay's own edits into the live config. Only a
+// field the operator edited — one whose value now differs from the value
+// Open loaded — is written; every other field keeps its live value, whatever
+// the dashboard set it to while the overlay was open, and so does every
+// channel and notification target the overlay did not touch
+// (mergeChannelEdits, mergeNotificationEdits). Open copied every setting and
+// a save used to write them all back, so a save of the log level reverted
+// a parallel-downloads count, a webhook target or anything else changed on
+// the dashboard meanwhile.
+//
+// All of it runs under the store's write lock, the checks included: the
+// merged result — the edited fields over the live config as it stands now —
+// is what every check validates and what is written, so no write can land
+// between the two. It reports false, with the overlay's error set and
+// nothing written, when a check refuses.
+func (m *SettingsModel) applyValues() (settingsWrite, bool) {
 	if m.cfg == nil {
-		return
+		return settingsWrite{}, false
 	}
+	mu := m.configStore.RWMutex()
+	mu.Lock()
+	defer mu.Unlock()
+
+	live := make(map[string]string, len(m.values))
+	loadSettingsValues(live, m.cfg)
+	edited := m.editedKeys()
+	merged := maps.Clone(live)
+	for _, k := range edited {
+		merged[k] = m.values[k]
+	}
+	p, msg := validateSettingsValues(merged, m.cfg.Network.PasswordHash)
+	if msg != "" {
+		m.errorMsg = msg
+		m.status = saveError
+		return settingsWrite{}, false
+	}
+
+	w := settingsWrite{before: *m.cfg}
+	for _, k := range edited {
+		writeSettingsField(m.cfg, k, merged, p)
+	}
+
+	// Channels: only this editor's own changes, merged by ID into the list
+	// as it stands NOW, under the store lock. Writing m.channels back whole
+	// reverted every channel change the dashboard made while the overlay was
+	// open — a save of the log level dropped a channel added there, and the
+	// next sweep then pruned that channel's jobs and feed history as
+	// departed. Untouched, the live list is left exactly as it is.
+	if chs, changed := mergeChannelEdits(m.channelsAtOpen, m.channels, m.cfg.Channels); changed {
+		m.cfg.Channels = chs
+	}
+	// Notification targets: the same rule, by each target's identity.
+	if ns, changed := mergeNotificationEdits(m.notificationsAtOpen, m.notifications, m.notifFrom, m.cfg.Notifications); changed {
+		m.cfg.Notifications = ns
+	}
+
+	after := make(map[string]string, len(live))
+	loadSettingsValues(after, m.cfg)
+	for k := range restartRequiredKeys {
+		if after[k] != live[k] {
+			w.restart = true
+			break
+		}
+	}
+	w.changed = !reflect.DeepEqual(w.before, *m.cfg)
+	return w, true
+}
+
+// editedKeys returns, sorted, the fields whose value differs from the one
+// Open loaded: the fields the operator edited.
+func (m *SettingsModel) editedKeys() []string {
+	var keys []string
+	for k, v := range m.values {
+		if v != m.originalValues[k] {
+			keys = append(keys, k)
+		}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// validateSettingsValues runs every check a save makes over v, the merged
+// values, and returns the first refusal's message — "" when v passes —
+// with what the checks parsed. passwordHash is the live dashboard password.
+func validateSettingsValues(v map[string]string, passwordHash string) (settingsParsed, string) {
+	var p settingsParsed
 
 	// Validate port
-	port, _ := strconv.Atoi(m.values["port"])
-	if port < 1 || port > 65535 {
-		m.errorMsg = "Port must be 1-65535"
-		m.status = saveError
-		return
+	p.port, _ = strconv.Atoi(v["port"])
+	if p.port < 1 || p.port > 65535 {
+		return p, "Port must be 1-65535"
 	}
 
-	// Validate external access requires password (snapshot under RLock)
-	var passwordHash string
-	m.configStore.Read(func(c *config.MoomboxConfig) {
-		passwordHash = c.Network.PasswordHash
-	})
-	if isExternalAccess(m.values["network_access"]) && passwordHash == "" {
-		m.errorMsg = "Password required for external access. Set password in Network section."
-		m.status = saveError
-		return
+	// Validate external access requires password
+	if isExternalAccess(v["network_access"]) && passwordHash == "" {
+		return p, "Password required for external access. Set password in Network section."
 	}
 
 	// Validate trusted_proxies entries. config.Validate — and therefore the
@@ -711,36 +850,32 @@ func (m *SettingsModel) applyValues() {
 	// entry, so without this gate one typo makes the whole save fail while
 	// saveAndClose still reports "Saved" and every other change in that save
 	// is lost. Mirrors validateConfigUpdates' web-side field error.
-	for p := range strings.SplitSeq(m.values["trusted_proxies"], ",") {
-		p = strings.TrimSpace(p)
-		if p == "" {
+	for e := range strings.SplitSeq(v["trusted_proxies"], ",") {
+		e = strings.TrimSpace(e)
+		if e == "" {
 			continue
 		}
 		ok := false
-		if strings.Contains(p, "/") {
-			_, _, err := net.ParseCIDR(p)
+		if strings.Contains(e, "/") {
+			_, _, err := net.ParseCIDR(e)
 			ok = err == nil
 		} else {
-			ok = net.ParseIP(p) != nil
+			ok = net.ParseIP(e) != nil
 		}
 		if !ok {
-			m.errorMsg = fmt.Sprintf("Trusted proxies: %q is not a valid IP or CIDR", p)
-			m.status = saveError
-			return
+			return p, fmt.Sprintf("Trusted proxies: %q is not a valid IP or CIDR", e)
 		}
 	}
 
 	// Validate probe_targets entries. Same rationale as trusted_proxies above:
 	// config.Validate refuses an unparseable host:port, so gate it here too.
-	for p := range strings.SplitSeq(m.values["probe_targets"], ",") {
-		p = strings.TrimSpace(p)
-		if p == "" {
+	for e := range strings.SplitSeq(v["probe_targets"], ",") {
+		e = strings.TrimSpace(e)
+		if e == "" {
 			continue
 		}
-		if _, _, err := net.SplitHostPort(p); err != nil {
-			m.errorMsg = fmt.Sprintf("Probe targets: %q is not a valid host:port", p)
-			m.status = saveError
-			return
+		if _, _, err := net.SplitHostPort(e); err != nil {
+			return p, fmt.Sprintf("Probe targets: %q is not a valid host:port", e)
 		}
 	}
 
@@ -748,31 +883,26 @@ func (m *SettingsModel) applyValues() {
 	// config.Validate refuses a config carrying an unusable value, so without
 	// this one typo makes the whole save fail while saveAndClose still reports
 	// "Saved". The canonical form (lowercased scheme, trailing slash trimmed)
-	// is what gets written below, so the TUI stores exactly what the web path's
+	// is what gets written, so the TUI stores exactly what the web path's
 	// validateConfigUpdates would.
-	publicURL, err := config.ValidatePublicURL(m.values["public_url"])
+	publicURL, err := config.ValidatePublicURL(v["public_url"])
 	if err != nil {
-		m.errorMsg = fmt.Sprintf("Public dashboard URL: %v", err)
-		m.status = saveError
-		return
+		return p, fmt.Sprintf("Public dashboard URL: %v", err)
 	}
+	p.publicURL = publicURL
 
 	// Validate browser_path if set.
 	// Static checks only — the full ValidateBrowserPath spawns a subprocess
 	// and waits up to 10s for --version, which would freeze the BubbleTea
 	// event loop. The web UI runs the full check via the async HTTP endpoint.
-	browserPath := strings.TrimSpace(m.values["browser_path"])
-	browserType := strings.TrimSpace(m.values["browser_type"])
+	browserPath := strings.TrimSpace(v["browser_path"])
+	browserType := strings.TrimSpace(v["browser_type"])
 	if browserPath != "" {
 		if browserType == "" {
-			m.errorMsg = "browser_type required when browser_path is set"
-			m.status = saveError
-			return
+			return p, "browser_type required when browser_path is set"
 		}
 		if err := cookies.ValidateBrowserPathQuick(browserPath, browserType); err != nil {
-			m.errorMsg = "Invalid browser: " + err.Error()
-			m.status = saveError
-			return
+			return p, "Invalid browser: " + err.Error()
 		}
 	}
 
@@ -805,28 +935,22 @@ func (m *SettingsModel) applyValues() {
 		{"sidecar_soft_limit_mb", "Sidecar soft memory limit must be 0-65536 MB (0 = no limit)", 0, 65536},
 		{"sidecar_hard_limit_mb", "Sidecar hard memory limit must be 0-65536 MB (0 = no limit)", 0, 65536},
 	} {
-		n, err := strconv.Atoi(m.values[c.key])
+		n, err := strconv.Atoi(v[c.key])
 		if err != nil || n < c.min || n > c.max {
-			m.errorMsg = c.msg
-			m.status = saveError
-			return
+			return p, c.msg
 		}
 	}
-	warnPct, _ := strconv.Atoi(m.values["disk_warn_percent"])
-	critPct, _ := strconv.Atoi(m.values["disk_critical_percent"])
+	warnPct, _ := strconv.Atoi(v["disk_warn_percent"])
+	critPct, _ := strconv.Atoi(v["disk_critical_percent"])
 	if critPct <= warnPct {
-		m.errorMsg = "Disk critical threshold must exceed warning threshold"
-		m.status = saveError
-		return
+		return p, "Disk critical threshold must exceed warning threshold"
 	}
 	// The same pair rule config.Validate applies (and Save refuses on), said
 	// as a field message instead of a raw "Save failed: invalid config".
-	sideSoft, _ := strconv.Atoi(m.values["sidecar_soft_limit_mb"])
-	sideHard, _ := strconv.Atoi(m.values["sidecar_hard_limit_mb"])
+	sideSoft, _ := strconv.Atoi(v["sidecar_soft_limit_mb"])
+	sideHard, _ := strconv.Atoi(v["sidecar_hard_limit_mb"])
 	if sideSoft > 0 && sideHard > 0 && sideHard <= sideSoft {
-		m.errorMsg = "Sidecar hard memory limit must exceed the soft limit"
-		m.status = saveError
-		return
+		return p, "Sidecar hard memory limit must exceed the soft limit"
 	}
 	// The FlexDuration-backed fields are FLOATS. Fractional days/minutes are
 	// valid config the Web UI and the config file both accept, and parsing
@@ -835,7 +959,7 @@ func (m *SettingsModel) applyValues() {
 	// "nan" (and TOML 1.0 has nan/inf literals a hand-edited config could
 	// carry), and NaN slips through a min/max range check because both
 	// comparisons are false.
-	flex := make(map[string]float64, 6)
+	p.flex = make(map[string]float64, 6)
 	for _, c := range []struct {
 		key, msg string
 		min, max float64
@@ -847,13 +971,11 @@ func (m *SettingsModel) applyValues() {
 		{"refresh_interval", "Cookie refresh interval must be 10-10080 minutes", 10, 10080},
 		{"hide_finished_age_days", "Hide finished after must be 0-365 days", 0, 365},
 	} {
-		v, err := strconv.ParseFloat(strings.TrimSpace(m.values[c.key]), 64)
-		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < c.min || v > c.max {
-			m.errorMsg = c.msg
-			m.status = saveError
-			return
+		f, err := strconv.ParseFloat(strings.TrimSpace(v[c.key]), 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < c.min || f > c.max {
+			return p, c.msg
 		}
-		flex[c.key] = v
+		p.flex[c.key] = f
 	}
 
 	// The two optional interval overrides: empty means "dynamic". A value
@@ -868,15 +990,13 @@ func (m *SettingsModel) applyValues() {
 		{"decapi_check_interval", "DECAPI check interval must be 15-3600 seconds (or empty for dynamic)", 15, 3600},
 		{"twitch_check_interval", "Twitch check interval must be 5-3600 seconds (or empty for the default 15)", 5, 3600},
 	} {
-		v := strings.TrimSpace(m.values[c.key])
-		if v == "" {
+		s := strings.TrimSpace(v[c.key])
+		if s == "" {
 			continue
 		}
-		n, err := strconv.Atoi(v)
+		n, err := strconv.Atoi(s)
 		if err != nil || n < c.min || n > c.max {
-			m.errorMsg = c.msg
-			m.status = saveError
-			return
+			return p, c.msg
 		}
 	}
 	// Text fields config.Validate refuses to save empty.
@@ -888,16 +1008,12 @@ func (m *SettingsModel) applyValues() {
 		{"cookie_file", "Cookie file must not be empty"},
 		{"output_template", "Output template must not be empty"},
 	} {
-		if strings.TrimSpace(m.values[c.key]) == "" {
-			m.errorMsg = c.msg
-			m.status = saveError
-			return
+		if strings.TrimSpace(v[c.key]) == "" {
+			return p, c.msg
 		}
 	}
-	if len(m.values["output_template"]) > config.OutputTemplateMaxLen {
-		m.errorMsg = fmt.Sprintf("Output template must be at most %d characters", config.OutputTemplateMaxLen)
-		m.status = saveError
-		return
+	if len(v["output_template"]) > config.OutputTemplateMaxLen {
+		return p, fmt.Sprintf("Output template must be at most %d characters", config.OutputTemplateMaxLen)
 	}
 	// Path fields: reject ".." segments. Absolute paths are accepted here and
 	// in the Web UI alike — config.PathHasTraversal is the single rule both
@@ -914,153 +1030,199 @@ func (m *SettingsModel) applyValues() {
 		{"cookie_file", "Cookie file"},
 		{"browser_profile_dir", "Browser profile directory"},
 	} {
-		if config.PathHasTraversal(m.values[c.key]) {
-			m.errorMsg = c.label + " cannot contain a .. segment"
-			m.status = saveError
-			return
+		if config.PathHasTraversal(v[c.key]) {
+			return p, c.label + " cannot contain a .. segment"
 		}
 	}
+	return p, ""
+}
 
-	// Lock for all config writes
-	mu := m.configStore.RWMutex()
-	mu.Lock()
-
+// writeSettingsField writes field key of v — passed and parsed by
+// validateSettingsValues into p — into c, and reports false for a key it
+// does not know. One case per field loadSettingsValues loads; the two are
+// pinned against each other by TestEverySettingsFieldIsWritable.
+func writeSettingsField(c *config.MoomboxConfig, key string, v map[string]string, p settingsParsed) bool {
+	val := v[key]
+	yes := val == "Yes"
+	// Every int field is range-checked by validateSettingsValues, so this
+	// parse cannot fail for one; it is unused for the rest.
+	n, _ := strconv.Atoi(val)
+	switch key {
 	// Network
-	m.cfg.Network.Port = port
-	m.cfg.Network.NetworkAccess = m.values["network_access"]
-	m.cfg.Network.HTTPSEnabled = m.values["https_enabled"] == "Yes"
-	m.cfg.Network.TLSCertPath = m.values["tls_cert_path"]
-	m.cfg.Network.TLSKeyPath = m.values["tls_key_path"]
-	m.cfg.Network.TrustForwardedProto = m.values["trust_forwarded_proto"] == "Yes"
-	proxies := []string(nil)
-	for p := range strings.SplitSeq(m.values["trusted_proxies"], ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			proxies = append(proxies, p)
-		}
-	}
-	m.cfg.Network.TrustedProxies = proxies
-	m.cfg.Network.PublicURL = publicURL
-	targets := []string(nil)
-	for p := range strings.SplitSeq(m.values["probe_targets"], ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			targets = append(targets, p)
-		}
-	}
-	if len(targets) > 0 {
-		m.cfg.Connectivity.ProbeTargets = targets
-	} else {
+	case "port":
+		c.Network.Port = p.port
+	case "network_access":
+		c.Network.NetworkAccess = val
+	case "https_enabled":
+		c.Network.HTTPSEnabled = yes
+	case "tls_cert_path":
+		c.Network.TLSCertPath = val
+	case "tls_key_path":
+		c.Network.TLSKeyPath = val
+	case "trust_forwarded_proto":
+		c.Network.TrustForwardedProto = yes
+	case "trusted_proxies":
+		c.Network.TrustedProxies = splitSettingsList(val)
+	case "public_url":
+		c.Network.PublicURL = p.publicURL
+	case "probe_targets":
 		// Blank keeps the stored targets, as the dashboard's field does (an
 		// empty list is refused there). The TUI used to write the defaults
-		// instead, so the same gesture gave two configs. The field shows
-		// what is kept, so the save is not seen as a restart-worthy change.
-		m.values["probe_targets"] = strings.Join(m.cfg.Connectivity.ProbeTargets, ", ")
-	}
+		// instead, so the same gesture gave two configs.
+		if targets := splitSettingsList(val); len(targets) > 0 {
+			c.Connectivity.ProbeTargets = targets
+		}
 
 	// Paths
-	m.cfg.Paths.DatabasePath = m.values["database_path"]
-	m.cfg.Paths.LogFilePath = m.values["log_file_path"]
-	m.cfg.Paths.OutputDirectory = m.values["output_directory"]
-	m.cfg.Paths.StagingDirectory = m.values["staging_directory"]
-	m.cfg.Paths.FfmpegPath = m.values["ffmpeg_path"]
+	case "database_path":
+		c.Paths.DatabasePath = val
+	case "log_file_path":
+		c.Paths.LogFilePath = val
+	case "output_directory":
+		c.Paths.OutputDirectory = val
+	case "staging_directory":
+		c.Paths.StagingDirectory = val
+	case "ffmpeg_path":
+		c.Paths.FfmpegPath = val
 
 	// Logs
-	m.cfg.Logs.LogLevel = m.values["log_level"]
-	m.cfg.Logs.LogMaxFileSize, _ = strconv.Atoi(m.values["log_max_file_size"])
-	m.cfg.Logs.LogMaxFiles, _ = strconv.Atoi(m.values["log_max_files"])
+	case "log_level":
+		c.Logs.LogLevel = val
+	case "log_max_file_size":
+		c.Logs.LogMaxFileSize = n
+	case "log_max_files":
+		c.Logs.LogMaxFiles = n
 
 	// Monitors
-	m.cfg.Monitors.ArchiveWindowDays, _ = strconv.Atoi(m.values["archive_window_days"])
-	m.cfg.Monitors.ArchiveSlots, _ = strconv.Atoi(m.values["archive_slots"])
-	m.cfg.Monitors.FeedCheckInterval = config.FlexDuration{Value: flex["feed_check_interval"]}
-	if v := strings.TrimSpace(m.values["decapi_check_interval"]); v != "" {
-		d, _ := strconv.Atoi(v) // range-checked above
-		m.cfg.Monitors.DecapiCheckInterval = &d
-	} else {
-		m.cfg.Monitors.DecapiCheckInterval = nil
-	}
-	if v := strings.TrimSpace(m.values["twitch_check_interval"]); v != "" {
-		tv, _ := strconv.Atoi(v) // range-checked above
-		m.cfg.Monitors.TwitchCheckInterval = &tv
-	} else {
-		m.cfg.Monitors.TwitchCheckInterval = nil
-	}
-	m.cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: flex["hide_finished_age_days"]}
-	m.cfg.Monitors.ProbeCooldown = config.FlexDuration{Value: flex["probe_cooldown"]}
-	membershipOn := m.values["membership_discovery"] == "Yes"
-	m.cfg.Monitors.MembershipDiscovery = &membershipOn
+	case "archive_window_days":
+		c.Monitors.ArchiveWindowDays = n
+	case "archive_slots":
+		c.Monitors.ArchiveSlots = n
+	case "feed_check_interval":
+		c.Monitors.FeedCheckInterval = config.FlexDuration{Value: p.flex[key]}
+	case "decapi_check_interval":
+		c.Monitors.DecapiCheckInterval = optionalSettingsInt(val)
+	case "twitch_check_interval":
+		c.Monitors.TwitchCheckInterval = optionalSettingsInt(val)
+	case "hide_finished_age_days":
+		c.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: p.flex[key]}
+	case "probe_cooldown":
+		c.Monitors.ProbeCooldown = config.FlexDuration{Value: p.flex[key]}
+	case "membership_discovery":
+		c.Monitors.MembershipDiscovery = &yes
 
 	// Downloader
-	m.cfg.Downloader.OutputTemplate = m.values["output_template"]
-	m.cfg.Downloader.MaxVideoResolution, _ = strconv.Atoi(m.values["max_video_resolution"])
-	m.cfg.Downloader.NumParallelDownloads, _ = strconv.Atoi(m.values["num_parallel_downloads"])
-	m.cfg.Downloader.SegmentWorkers, _ = strconv.Atoi(m.values["segment_workers"])
-	m.cfg.Downloader.ReorderBufferMB, _ = strconv.Atoi(m.values["reorder_buffer_mb"])
-	m.cfg.Downloader.ReorderBudgetMB, _ = strconv.Atoi(m.values["reorder_budget_mb"])
-	m.cfg.Downloader.DownloadChat = m.values["download_chat"] == "Yes"
-	m.cfg.Downloader.Prefer60fps = m.values["prefer_60fps"] == "Yes"
-	m.cfg.Downloader.MaximumTimeout, _ = strconv.Atoi(m.values["maximum_timeout"])
-	m.cfg.Downloader.InterruptionTimeout = config.FlexDuration{Value: flex["interruption_timeout"]}
-	m.cfg.Downloader.IncompleteStagingExpiryDays = config.FlexDuration{Value: flex["incomplete_staging_expiry_days"]}
+	case "output_template":
+		c.Downloader.OutputTemplate = val
+	case "max_video_resolution":
+		c.Downloader.MaxVideoResolution = n
+	case "num_parallel_downloads":
+		c.Downloader.NumParallelDownloads = n
+	case "segment_workers":
+		c.Downloader.SegmentWorkers = n
+	case "reorder_buffer_mb":
+		c.Downloader.ReorderBufferMB = n
+	case "reorder_budget_mb":
+		c.Downloader.ReorderBudgetMB = n
+	case "download_chat":
+		c.Downloader.DownloadChat = yes
+	case "prefer_60fps":
+		c.Downloader.Prefer60fps = yes
+	case "maximum_timeout":
+		c.Downloader.MaximumTimeout = n
+	case "interruption_timeout":
+		c.Downloader.InterruptionTimeout = config.FlexDuration{Value: p.flex[key]}
+	case "incomplete_staging_expiry_days":
+		c.Downloader.IncompleteStagingExpiryDays = config.FlexDuration{Value: p.flex[key]}
 
 	// Cookies
-	m.cfg.Cookies.CookieFile = m.values["cookie_file"]
-	// The toggles display GetActivePlatforms' answer, which may be inferred.
-	// Only an edited toggle records the explicit override: writing an
-	// unedited inferred answer back would freeze it, so a channel added
-	// later would never light its platform. Non-nil even when empty — []
-	// is the explicit "both off" override.
-	if m.values["active_youtube"] != m.originalValues["active_youtube"] ||
-		m.values["active_twitch"] != m.originalValues["active_twitch"] {
+	case "cookie_file":
+		c.Cookies.CookieFile = val
+	case "active_youtube", "active_twitch":
+		// The toggles display GetActivePlatforms' answer, which may be
+		// inferred. Only an edited toggle records the explicit override, so
+		// this runs only for one: writing an unedited inferred answer back
+		// would freeze it, and a channel added later would never light its
+		// platform. Non-nil even when empty — [] is the explicit "both off"
+		// override. The other toggle is its merged value: its live answer
+		// unless it was edited too.
 		activePlats := []string{}
-		if m.values["active_youtube"] == "Yes" {
+		if v["active_youtube"] == "Yes" {
 			activePlats = append(activePlats, "youtube")
 		}
-		if m.values["active_twitch"] == "Yes" {
+		if v["active_twitch"] == "Yes" {
 			activePlats = append(activePlats, "twitch")
 		}
-		m.cfg.Cookies.ActivePlatforms = activePlats
-	}
-	m.cfg.Cookies.AutoEnabled = m.values["auto_enabled"] == "Yes"
-	m.cfg.Cookies.BrowserProfileDir = m.values["browser_profile_dir"]
-	// TrimSpace matches what validateConfigUpdates does for the web path
-	// (and applyConfigUpdates, in config_routes.go). Without trimming here, a
-	// user pasting
-	// "  /usr/bin/firefox  " would pass the trimmed validation above but
-	// persist whitespace into config — exec.Command would then fail with
-	// "fork/exec  /usr/bin/firefox  : no such file or directory".
-	m.cfg.Cookies.BrowserPath = strings.TrimSpace(m.values["browser_path"])
-	m.cfg.Cookies.BrowserType = strings.TrimSpace(m.values["browser_type"])
-	m.cfg.Cookies.RefreshInterval = config.FlexDuration{Value: flex["refresh_interval"]}
-	m.cfg.Cookies.DpapiFallback = m.values["dpapi_fallback"] == "Yes"
-	m.cfg.Cookies.Acquisition = m.values["acquisition"]
+		c.Cookies.ActivePlatforms = activePlats
+	case "auto_enabled":
+		c.Cookies.AutoEnabled = yes
+	case "browser_profile_dir":
+		c.Cookies.BrowserProfileDir = val
+	case "browser_path":
+		// TrimSpace matches what validateConfigUpdates does for the web path
+		// (and applyConfigUpdates, in config_routes.go). Without trimming
+		// here, a user pasting "  /usr/bin/firefox  " would pass the trimmed
+		// validation but persist whitespace into config — exec.Command would
+		// then fail with "fork/exec  /usr/bin/firefox  : no such file or
+		// directory".
+		c.Cookies.BrowserPath = strings.TrimSpace(val)
+	case "browser_type":
+		c.Cookies.BrowserType = strings.TrimSpace(val)
+	case "refresh_interval":
+		c.Cookies.RefreshInterval = config.FlexDuration{Value: p.flex[key]}
+	case "dpapi_fallback":
+		c.Cookies.DpapiFallback = yes
+	case "acquisition":
+		c.Cookies.Acquisition = val
 
 	// Disk
-	m.cfg.Disk.WarnPercent, _ = strconv.Atoi(m.values["disk_warn_percent"])
-	m.cfg.Disk.CriticalPercent, _ = strconv.Atoi(m.values["disk_critical_percent"])
+	case "disk_warn_percent":
+		c.Disk.WarnPercent = n
+	case "disk_critical_percent":
+		c.Disk.CriticalPercent = n
 
 	// Updates
-	m.cfg.Updates.AutoCheckUpdates = m.values["auto_check_updates"] == "Yes"
+	case "auto_check_updates":
+		c.Updates.AutoCheckUpdates = yes
 
 	// BotGuard sidecar
-	m.cfg.Bgutils.UseSidecar = m.values["use_sidecar"] == "Yes"
+	case "use_sidecar":
+		c.Bgutils.UseSidecar = yes
 
 	// Memory
-	m.cfg.Memory.GoSoftLimitMB, _ = strconv.Atoi(m.values["go_soft_limit_mb"])
-	m.cfg.Memory.SidecarSoftLimitMB, _ = strconv.Atoi(m.values["sidecar_soft_limit_mb"])
-	m.cfg.Memory.SidecarHardLimitMB, _ = strconv.Atoi(m.values["sidecar_hard_limit_mb"])
-
-	// Channels: only this editor's own changes, merged by ID into the list
-	// as it stands NOW, under the store lock. Writing m.channels back whole
-	// reverted every channel change the dashboard made while the overlay was
-	// open — a save of the log level dropped a channel added there, and the
-	// next sweep then pruned that channel's jobs and feed history as
-	// departed. Untouched, the live list is left exactly as it is.
-	if merged, changed := mergeChannelEdits(m.channelsAtOpen, m.channels, m.cfg.Channels); changed {
-		m.cfg.Channels = merged
+	case "go_soft_limit_mb":
+		c.Memory.GoSoftLimitMB = n
+	case "sidecar_soft_limit_mb":
+		c.Memory.SidecarSoftLimitMB = n
+	case "sidecar_hard_limit_mb":
+		c.Memory.SidecarHardLimitMB = n
+	default:
+		return false
 	}
-	m.cfg.Notifications = m.notifications
+	return true
+}
 
-	mu.Unlock()
+// splitSettingsList splits a comma-separated field into its trimmed,
+// non-empty entries; nil when there are none.
+func splitSettingsList(val string) []string {
+	var out []string
+	for e := range strings.SplitSeq(val, ",") {
+		if e = strings.TrimSpace(e); e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// optionalSettingsInt is an optional interval override: nil for an empty
+// field, which means the dynamic default.
+func optionalSettingsInt(val string) *int {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return nil
+	}
+	n, _ := strconv.Atoi(val) // range-checked by validateSettingsValues
+	return &n
 }
 
 // recheckDirty recalculates dirty state by comparing values against originalValues.
@@ -1077,15 +1239,6 @@ func (m *SettingsModel) recheckDirty() {
 		}
 	}
 	m.dirty = false
-}
-
-func (m *SettingsModel) hasRestartChanges() bool {
-	for key := range restartRequiredKeys {
-		if m.values[key] != m.originalValues[key] {
-			return true
-		}
-	}
-	return false
 }
 
 func (m *SettingsModel) isFieldSection() bool {

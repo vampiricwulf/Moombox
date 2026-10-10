@@ -277,7 +277,9 @@ func (m *SettingsModel) handleClose() string {
 }
 
 // snapshotConfig copies the live config under the store's read lock, for the
-// callers that mutate it before a save that can be refused.
+// callers that mutate it before a save that can be refused. (applyValues
+// takes the same copy itself, under the write lock its writes hold:
+// settingsWrite.before.)
 //
 // The copy is SHALLOW — the same shape config.Store.Update's own rollback
 // takes, for the same reason: every writer here REPLACES the slice fields it
@@ -303,29 +305,24 @@ func (m *SettingsModel) snapshotConfig() config.MoomboxConfig {
 // struct.
 //
 // It restores the WHOLE struct rather than the fields the caller happens to
-// have typed, deliberately: applyValues writes every section, and a
-// hand-maintained undo list would drift the first time a field was added to
-// applyValues and not to it.
+// have typed, deliberately: a hand-maintained undo list would drift the
+// first time a field was added to writeSettingsField and not to it.
 //
-// The one shape that would defeat the shallow copy: applyValues ends with
-// `m.cfg.Notifications = m.notifications`, so after a SUCCESSFUL save the
-// live config ALIASES the model's own slice — and the notification editor
-// writes elements in place. That is unreachable today only because a
-// successful save closes the panel and Open re-copies the slice on the way
-// back in. If the panel is ever left open and editable after a save,
-// Notifications must be deep-copied into the snapshot. Channels do not
-// alias: mergeChannelEdits builds a new slice, and a save re-copies the
-// editor's list from the saved one (resyncChannels).
+// Neither list aliases the model's own: mergeChannelEdits and
+// mergeNotificationEdits build new slices (the latter copying each target it
+// writes), and a save re-copies the editors' lists from the saved ones
+// (resyncFromLive), so the notification editor's in-place writes never reach
+// the live config or a snapshot.
 //
 // Known window: a background writer (cookie refresh, a Web PUT) can commit
-// through config.Store.Update between snapshotConfig and this restore; the
-// whole-struct write then reverts that change in memory while it is already
-// on disk. Closing it would mean holding the store's write lock across
-// snapshot → applyValues → OnSave → restore, which deadlocks: applyValues
-// takes that same lock, and so does OnSaveConfig (around config.Save, then
-// Snapshot's RLock). It is the identical caveat Store.Update's own rollback
-// documents, and the window is one refused save concurrent with a background
-// Update.
+// through config.Store.Update between the snapshot — applyValues takes it
+// under the same lock as its writes — and this restore; the whole-struct
+// write then reverts that change in memory while it is already on disk.
+// Closing it would mean holding the store's write lock across applyValues →
+// OnSave → restore, which deadlocks: OnSaveConfig takes that same lock
+// (around config.Save, then Snapshot's RLock). It is the identical caveat
+// Store.Update's own rollback documents, and the window is one refused save
+// concurrent with a background Update.
 func (m *SettingsModel) restoreConfig(snapshot config.MoomboxConfig) {
 	if m.cfg == nil {
 		return
@@ -341,26 +338,26 @@ func (m *SettingsModel) restoreConfig(snapshot config.MoomboxConfig) {
 }
 
 // saveAndClose applies changes, saves config, and closes.
+//
+// Only what the overlay changed is written (applyValues), and a save whose
+// changes leave the live config as it was — a field typed back to what the
+// dashboard already set, an Enter on a target that changed nothing, a
+// removal the dashboard made first — writes nothing: OnSave is not called,
+// so config.toml is not rewritten and nothing is hot-reloaded.
 func (m *SettingsModel) saveAndClose() string {
 	if m.dirty && m.status != saveError {
-		// Snapshot BEFORE applyValues. applyValues writes straight into the
-		// live *MoomboxConfig the store holds (Open stores the store's own
-		// pointer), so without a snapshot a refused save leaves the running
-		// process on values that are not on disk while the overlay says
-		// "Saved" (CORE-4).
-		snapshot := m.snapshotConfig()
-		m.applyValues()
-		if m.status == saveError {
-			// Today every check in applyValues runs before its write block,
-			// so this restore is a no-op on the validation path; it is here
-			// so the two refusal paths cannot drift apart if a check ever
-			// lands after a write.
-			m.restoreConfig(snapshot)
-			return "" // Validation failed, show error
+		// applyValues writes straight into the live *MoomboxConfig the store
+		// holds (Open stores the store's own pointer), and hands back the
+		// config as its write found it: without that a refused save leaves
+		// the running process on values that are not on disk while the
+		// overlay says "Saved" (CORE-4).
+		w, ok := m.applyValues()
+		if !ok {
+			return "" // Validation failed, show error; nothing was written
 		}
-		if m.OnSave != nil {
+		if w.changed && m.OnSave != nil {
 			if err := m.OnSave(m.cfg); err != nil {
-				m.restoreConfig(snapshot)
+				m.restoreConfig(w.before)
 				m.errorMsg = "Save failed: " + err.Error()
 				m.status = saveError
 				// dirty stays set: the typed values are still in m.values,
@@ -372,11 +369,8 @@ func (m *SettingsModel) saveAndClose() string {
 		m.dirty = false
 		m.structDirty = false
 		m.handOverChannelPrunes()
-		needsRestart := m.hasRestartChanges()
-		m.originalValues = make(map[string]string, len(m.values))
-		maps.Copy(m.originalValues, m.values)
-		m.resyncChannels()
-		if needsRestart {
+		m.resyncFromLive()
+		if w.restart {
 			// Surface a persistent banner so dismissing the modal with
 			// Esc still leaves a visual reminder that the on-disk config
 			// no longer matches the running process. Audit reports/tui.md
