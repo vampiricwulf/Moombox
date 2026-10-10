@@ -138,9 +138,14 @@ type (
 		Formats *FormatsData
 		Err     string
 	}
+	// importResultMsg is the A Z upload's answer. Note is the server's own
+	// line for a name it found taken in imports/ (re-adopted or renamed), and
+	// Renamed says the archive took a " (n)" name beside a different file.
 	importResultMsg struct {
-		Title string
-		Err   string
+		Title   string
+		Err     string
+		Note    string
+		Renamed bool
 	}
 	// cookieImportResultMsg is the async result of OnImportCookieFile (E I).
 	// The whole cookies.ImportResult, not a bool: the overlay words each
@@ -778,8 +783,8 @@ type appFeedback struct {
 	// rows above the status bar (wrapFeedback) instead of cutting it to one.
 	// Set only by setWrappedFeedback, for the lines that carry a sentence
 	// written elsewhere whose tail is the part to act on — the held profile's
-	// lock path. False, the zero value, is the one ellipsized row every other
-	// line has always had.
+	// lock path, an import's outcome note. False, the zero value, is the one
+	// ellipsized row every other line has always had.
 	wrap bool
 	// until is when the line stops being shown. The zero value means "nothing
 	// scheduled", which is what an empty struct reads as.

@@ -605,7 +605,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.importDlg.Close()
-		a.setFeedback("Imported: " + msg.Title)
+		if msg.Note != "" {
+			// The server's sentence about a taken name ends in the names
+			// themselves, so it is read whole rather than cut to a row; a
+			// rename is a warning, a re-adoption a success.
+			sev := severitySuccess
+			if msg.Renamed {
+				sev = severityWarning
+			}
+			a.setWrappedFeedback("Imported: "+msg.Title+" — "+msg.Note, sev)
+		} else {
+			a.setFeedback("Imported: " + msg.Title)
+		}
 		// Async close uncovers the task list — resume a paused marquee now.
 		return a, a.ensureMarqueeTicking()
 
@@ -1235,8 +1246,9 @@ func (a *App) setFeedbackWithSeverity(msg string, stated feedbackSeverity) {
 // For a line carrying a sentence written elsewhere whose tail is the part to
 // act on: R C's line, whose LastError names a held profile's lock, R F's
 // held-profile arm, which is that sentence, and R F's error arm, which carries
-// whatever other sentence the pass failed with. Every other line keeps the one
-// ellipsized row — their prose is bounded, and tests pin it cut.
+// whatever other sentence the pass failed with — and A Z's outcome line, the
+// import's note naming the files it re-adopted or renamed. Every other line
+// keeps the one ellipsized row — their prose is bounded, and tests pin it cut.
 //
 // It takes the pair in the order cookieRecheckFeedback returns it, so the call
 // site reads `a.setWrappedFeedback(a.cookieRecheckFeedback(msg))` and the

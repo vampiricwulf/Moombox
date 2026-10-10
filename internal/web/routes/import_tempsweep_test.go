@@ -28,7 +28,7 @@ func TestCleanupOldImportTempRemovesAStaleSpool(t *testing.T) {
 	if err := os.Chtimes(f.Name(), old, old); err != nil {
 		t.Fatal(err)
 	}
-	if removed, err := CleanupOldImportTemp(); err != nil || removed != 1 {
+	if removed, err := CleanupOldImportTemp(t.TempDir()); err != nil || removed != 1 {
 		t.Fatalf("CleanupOldImportTemp = %d, %v; want 1, nil", removed, err)
 	}
 	if _, err := os.Stat(f.Name()); err == nil {

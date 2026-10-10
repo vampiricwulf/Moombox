@@ -231,15 +231,31 @@ export class ImportController {
       this._hideCancelButton();
 
       if (xhr.status === 201) {
-        statusText.textContent = "Import complete!";
         progressBar.value = 100;
-        this.app.showToast("Archive imported successfully", "success");
+        // `import` says what became of a name already taken in imports/
+        // (import_routes.go importOutcome): a byte-identical file re-adopted,
+        // or a different one left alone while this archive took " (2)".
+        let outcome = null;
+        try { outcome = JSON.parse(xhr.responseText).import || null; } catch {}
+        const note = outcome && outcome.note ? outcome.note : "";
+        if (note) {
+          // The note stays where it can be read — under the bar, with the
+          // submit hidden so the same archive is not sent again — until the
+          // next file or Clear, rather than going with the 1.5 s reset.
+          statusText.textContent = `Import complete — ${note}`;
+          submitBtn.style.display = "none";
+          const renamed = Array.isArray(outcome.renamed) && outcome.renamed.length > 0;
+          this.app.showToast(`Archive imported — ${note}`, renamed ? "warning" : "success");
+        } else {
+          statusText.textContent = "Import complete!";
+          this.app.showToast("Archive imported successfully", "success");
 
-        // Reset form after delay
-        this._clearTimeout = setTimeout(() => {
-          this._clearTimeout = null;
-          this.clearImportFile();
-        }, 1500);
+          // Reset form after delay
+          this._clearTimeout = setTimeout(() => {
+            this._clearTimeout = null;
+            this.clearImportFile();
+          }, 1500);
+        }
 
         // Refresh player job list if initialized
         if (this.app.player.playerInitialized) {

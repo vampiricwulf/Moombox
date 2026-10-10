@@ -285,8 +285,16 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 			return importResultMsg{Err: msg}
 		}
 
+		// "import" is what became of a name already taken in imports/
+		// (importOutcome, internal/web/routes/import_routes.go): a
+		// byte-identical file re-adopted, or a different one left alone
+		// while this archive took " (2)".
 		var result struct {
-			Title string `json:"title"`
+			Title  string `json:"title"`
+			Import struct {
+				Renamed []json.RawMessage `json:"renamed"`
+				Note    string            `json:"note"`
+			} `json:"import"`
 		}
 		if decErr := json.NewDecoder(resp.Body).Decode(&result); decErr != nil {
 			// Non-fatal: we got a 2xx, just can't parse the title
@@ -299,7 +307,7 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 		if importedTitle == "" {
 			importedTitle = "archive"
 		}
-		return importResultMsg{Title: importedTitle}
+		return importResultMsg{Title: importedTitle, Note: result.Import.Note, Renamed: len(result.Import.Renamed) > 0}
 	}, func(text string) tea.Msg { return importResultMsg{Err: text} })
 }
 

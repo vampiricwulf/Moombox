@@ -940,7 +940,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// `defer os.RemoveAll(tempDir)` inside the trim path covers the
 	// happy case; a hard process abort (panic in a sibling goroutine,
 	// OS kill, power loss) bypasses the defer and leaks the dir. 24h
-	// age threshold keeps concurrent trims' in-flight tempdirs safe.
+	// age threshold keeps concurrent trims' in-flight tempdirs safe. The
+	// import sweep also takes what an aborted import extracted into
+	// <output>/imports, so the output directory is read here, before the
+	// goroutine.
+	importOutputDir := cfg.Paths.OutputDirectory
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -952,7 +956,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 		} else if removed > 0 {
 			log.Info("trim-tempdir cleanup", slog.Int("removed", removed))
 		}
-		if removed, err := routes.CleanupOldImportTemp(); err != nil {
+		if removed, err := routes.CleanupOldImportTemp(importOutputDir); err != nil {
 			log.Debug("import-temp cleanup", slog.String("error", err.Error()))
 		} else if removed > 0 {
 			log.Info("import-temp cleanup", slog.Int("removed", removed))

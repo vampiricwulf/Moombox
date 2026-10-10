@@ -78,3 +78,66 @@ test("choosing another file mid-upload is refused, not swapped in", { skip }, as
   assert.equal(PendingXHR.last.aborted, false);
   assert.ok(h.toasts().some((t) => /cancel it before choosing another file/.test(t.textContent)));
 });
+
+/** An XHR the server answers as soon as it is sent. */
+function answering(status, body) {
+  return class AnsweringXHR extends PendingXHR {
+    send() {
+      this.status = status;
+      this.responseText = JSON.stringify(body);
+      for (const fn of this.listeners.load || []) fn();
+    }
+  };
+}
+
+async function importAnswered(h, status, body) {
+  globalThis.XMLHttpRequest = answering(status, body);
+  h.app.imports.initImports();
+  h.app.imports.setImportFile(new h.window.File(["zip"], "a.zip"));
+  h.app.imports.uploadImport();
+}
+
+// W25-01: a re-import that re-adopted the identical files a deleted row left
+// in imports/, or took " (2)" beside a different file, says so — in a toast
+// and in the status line, which stays until the next file instead of going
+// with the 1.5 s reset.
+//
+// Mutants: ignoring `import.note` (the plain "Import complete!" and its
+// reset); keeping the 1.5 s reset for a note (the status line is cleared);
+// a success toast for a rename; leaving the submit button shown.
+test("an import's outcome note is shown and kept", { skip }, async () => {
+  const h = await harness.makeApp();
+  const note = 'imports/ already held a different "Stream [dQw4w9WgXcQ].mp4"; imported as "Stream [dQw4w9WgXcQ] (2).mp4"';
+  await importAnswered(h, 201, {
+    id: "dQw4w9WgXcQ",
+    title: "Stream",
+    import: { renamed: [{ from: "Stream [dQw4w9WgXcQ].mp4", to: "Stream [dQw4w9WgXcQ] (2).mp4" }], note },
+  });
+
+  assert.ok(h.toasts().some((t) => t.textContent.includes(note) && t.variant === "warning"), "no warning toast carries the note");
+  h.advance(5000);
+  assert.equal(h.el("import-progress").style.display, "", "the status line was reset away");
+  assert.ok(h.el("import-status-text").textContent.includes(note), h.el("import-status-text").textContent);
+  assert.equal(h.el("import-submit-btn").style.display, "none", "the same archive can be sent again");
+});
+
+// A plain import keeps its old behaviour: a success toast and the reset.
+test("an import with nothing to report resets as before", { skip }, async () => {
+  const h = await harness.makeApp();
+  await importAnswered(h, 201, { id: "dQw4w9WgXcQ", title: "Stream", import: {} });
+
+  assert.ok(h.toasts().some((t) => /Archive imported successfully/.test(t.textContent)));
+  h.advance(1500);
+  assert.equal(h.el("import-progress").style.display, "none", "the form was not reset");
+});
+
+// W25-04: a refusal names its reason — the zip's videos, for one holding
+// more than one recording — in the status line and the toast.
+test("a refused import shows the server's reason", { skip }, async () => {
+  const h = await harness.makeApp();
+  const reason = "the zip holds more than one recording: A.mp4, B.mp4 — import one recording per zip";
+  await importAnswered(h, 400, { error: reason });
+
+  assert.equal(h.el("import-status-text").textContent, reason);
+  assert.ok(h.toasts().some((t) => t.textContent.includes(reason) && t.variant === "danger"));
+});

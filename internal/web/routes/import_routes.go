@@ -3,11 +3,13 @@ package routes
 import (
 	"archive/zip"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -272,9 +274,10 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// beginning "/.." promotes the following ".." elements to real path
 		// segments and walks out of imports/ — and os.Create truncates
 		// whatever it lands on. The file-name path (importNameIDRe) only
-		// takes path-safe id shapes; this is the path that was not. An id that fails the check falls back to the generated one
-		// rather than failing the import: O-AA chose "imports everything"
-		// over "surfaces bad archives".
+		// takes path-safe id shapes; this is the path that was not. An id
+		// that fails the check falls back to the generated one rather than
+		// failing the import: O-AA chose "imports everything" over
+		// "surfaces bad archives".
 		if videoID == "" && utils.IsVideoID(meta.VideoID) {
 			videoID = meta.VideoID
 		}
@@ -315,64 +318,79 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 			outputDir = "./output"
 		}
 		importsDir := filepath.Join(outputDir, "imports")
-		os.MkdirAll(importsDir, 0o755)
+		if err := os.MkdirAll(importsDir, 0o755); err != nil {
+			logger.Error("import: could not create the imports directory", "dir", importsDir, "err", err)
+			jsonError(rw, "failed to create the imports directory", http.StatusInternalServerError)
+			return
+		}
 
-		baseFilename := importStem(title, videoID)
-		videoOutName := filepath.Join("imports", baseFilename+videoExt)
-		videoOutPath := filepath.Join(outputDir, videoOutName)
+		// Every entry is extracted to a temporary name inside imports/ and
+		// moved to its own name only once the row exists. Nothing this
+		// request did not create is ever truncated or removed: a row's Delete
+		// leaves its files in imports/, so a re-import of the same archive
+		// writes exactly the names that are already there, and extracting
+		// straight onto them truncated the only good copy — removed it
+		// outright when the entry turned out damaged or the insert failed,
+		// and replaced it without a word when a different file came in under
+		// the same name (W25-01).
+		files := []*importFile{{entry: videoFile, kind: "video", suffix: videoExt}}
+		if chatFile != nil {
+			// A chat that cannot be written fails the import like the video:
+			// the zip carried it, and a 201 without it said the archive was
+			// imported when its chat was gone (W25-02).
+			files = append(files, &importFile{entry: chatFile, kind: "chat", suffix: ".chat.json"})
+		}
+		// What this request extracted and did not place goes on the way out,
+		// on every failure path and through a panic the recovery middleware
+		// catches. Only those temporary files: never a placed or adopted one.
+		defer func() {
+			for _, f := range files {
+				if f.tmp != "" {
+					os.Remove(f.tmp)
+				}
+			}
+		}()
+		for _, f := range files {
+			if err := f.extract(importsDir); err != nil {
+				logger.Error("import: could not extract the "+f.kind, "entry", zipEntryName(f.entry), "err", err)
+				jsonError(rw, "failed to extract "+f.kind, http.StatusInternalServerError)
+				return
+			}
+		}
 
-		// Belt and braces on top of the id validation above: every WRITE now
-		// goes through the same canonical containment check the read routes
-		// use, so a future change to how baseFilename is built cannot re-open
-		// WEB-1. CanonicalPath resolves the nearest existing ancestor, so this
-		// is valid on a path that does not exist yet.
-		if _, ok := validatePathTraversal(videoOutPath, outputDir); !ok {
+		// The names: "<title> [<id>]", or the first " (n)" of it that is
+		// free or already holds exactly these bytes — a file left by a
+		// deleted row of this very archive is re-adopted, not copied again;
+		// a different one keeps its name and this import takes the next.
+		baseStem := importStem(title, videoID)
+		stem, err := chooseImportNames(importsDir, outputDir, baseStem, files)
+		switch {
+		case errors.Is(err, errImportInvalidPath):
 			jsonError(rw, "invalid output path", http.StatusBadRequest)
 			return
-		}
-
-		// Extract video file
-		if err := extractZipEntry(videoFile, videoOutPath); err != nil {
-			logger.Error("import: could not extract the video", "entry", zipEntryName(videoFile), "err", err)
-			jsonError(rw, "failed to extract video", http.StatusInternalServerError)
+		case errors.Is(err, errImportNameTaken):
+			logger.Warn("import: no free name in imports/", "stem", baseStem, "err", err)
+			jsonError(rw, "no free name in imports/ for "+baseStem, http.StatusConflict)
+			return
+		case err != nil:
+			logger.Error("import: could not check imports/ for the archive's name", "stem", baseStem, "err", err)
+			jsonError(rw, "failed to check imports/ for the archive's name", http.StatusInternalServerError)
 			return
 		}
-
-		// Extract chat file if present. A chat that cannot be written fails
-		// the import: the zip carried it, and a 201 without it said the
-		// archive was imported when its chat was gone — the import used to
-		// skip it without a word (W25-02).
-		chatOutName, chatOutPath := "", ""
+		videoOutName := filepath.Join("imports", stem+videoExt)
+		chatOutName := ""
+		absChat := ""
 		if chatFile != nil {
-			chatOutName = filepath.Join("imports", baseFilename+".chat.json")
-			chatOutPath = filepath.Join(outputDir, chatOutName)
-			if _, ok := validatePathTraversal(chatOutPath, outputDir); !ok {
-				os.Remove(videoOutPath)
-				jsonError(rw, "invalid output path", http.StatusBadRequest)
-				return
-			}
-			if err := extractZipEntry(chatFile, chatOutPath); err != nil {
-				logger.Error("import: could not extract the chat", "entry", zipEntryName(chatFile), "err", err)
-				os.Remove(videoOutPath)
-				jsonError(rw, "failed to extract chat", http.StatusInternalServerError)
-				return
-			}
+			chatOutName = filepath.Join("imports", filepath.Base(files[1].dest))
+			absChat, _ = filepath.Abs(files[1].dest)
 		}
 
 		// The row a recording gets, so an import is not a second-class job:
 		// absolute output/chat paths, the pinned output directory the
 		// relative names resolve against, and the size (Stats' recorded
 		// total and the details dialog's size line both read it).
-		absVideo, _ := filepath.Abs(videoOutPath)
-		absChat := ""
-		if chatOutPath != "" {
-			absChat, _ = filepath.Abs(chatOutPath)
-		}
-		var fileSize *int64
-		if info, err := os.Stat(videoOutPath); err == nil {
-			size := info.Size()
-			fileSize = &size
-		}
+		absVideo, _ := filepath.Abs(files[0].dest)
+		fileSize := &files[0].size
 
 		// Create job
 		job := &database.Job{
@@ -399,21 +417,38 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 
 		added, err := db.AddJob(job)
 		if err != nil {
-			// No row will ever name what was just extracted: take it back
-			// out rather than leave it for the Files tab to find as orphans.
-			os.Remove(videoOutPath)
-			if chatOutPath != "" {
-				os.Remove(chatOutPath)
-			}
+			// No row will ever name what was extracted: the deferred cleanup
+			// takes the temporary files back out, and nothing was placed.
+			logger.Error("import: could not create the job", "id", videoID, "err", err)
 			jsonError(rw, "failed to create job", http.StatusInternalServerError)
 			return
 		}
 		if !added {
 			// Another request inserted this id between JobExists and here.
-			// Its row may well name these very files, so they stay.
+			// Its row may well name files in imports/; this request placed
+			// none, and its temporary files go with the deferred cleanup.
 			jsonError(rw, "job already exists for video ID: "+videoID, http.StatusConflict)
 			return
 		}
+
+		// Into place, now that a row names them.
+		for _, f := range files {
+			if err := f.place(); err != nil {
+				logger.Error("import: could not move the "+f.kind+" into place", "path", f.dest, "err", err)
+				// The row goes, and so does every file this request placed —
+				// each was a name nothing held. An adopted file stays: it was
+				// there before this request.
+				db.DeleteJob(videoID)
+				for _, p := range files {
+					if p.placed {
+						os.Remove(p.dest)
+					}
+				}
+				jsonError(rw, "failed to move the "+f.kind+" into imports/", http.StatusInternalServerError)
+				return
+			}
+		}
+
 		// Answer with the row as stored, not the struct built above: a field
 		// the insert does not write would otherwise be reported as saved.
 		if stored, err := db.GetJob(videoID); err == nil && stored != nil {
@@ -424,42 +459,262 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// set afterwards are silently dropped for non-gzip clients.
 		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(http.StatusCreated)
-		jsonResponse(rw, job)
+		jsonResponse(rw, importResponse{Job: job, Import: newImportOutcome(baseStem, files)})
 	})
 
 	return func() { importRL.Close() }
 }
 
-// extractZipEntry extracts a single zip entry to a destination path. On any
-// failure the partially-written destination is removed — the caller returns
-// an error to the client without creating a job, so a leftover truncated
-// file would be a silent disk leak under output/imports/.
-func extractZipEntry(f *zip.File, destPath string) error {
-	os.MkdirAll(filepath.Dir(destPath), 0o755)
-	rc, err := f.Open()
+// importResponse is an import's 201 body: the row as stored, and under
+// "import" what the import did about names already taken in imports/.
+type importResponse struct {
+	*database.Job
+	Import importOutcome `json:"import"`
+}
+
+// importOutcome tells the dashboard and the TUI what became of the names the
+// import found taken. Every field is empty for an import that took free ones.
+type importOutcome struct {
+	// Readopted names the files that were already in imports/ holding
+	// exactly the imported bytes: the row names them, and they were not
+	// written over.
+	Readopted []string `json:"readopted,omitempty"`
+	// Renamed lists the files whose name held a different file: that file
+	// was left alone, and the import took the first free " (n)" name.
+	Renamed []importRename `json:"renamed,omitempty"`
+	// Note is the outcome in one line, the words both clients show.
+	Note string `json:"note,omitempty"`
+}
+
+// importRename is one file placed under a " (n)" name: From is the name a
+// different file already held, To the name the import took.
+type importRename struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// newImportOutcome reports where each file landed against the name it was
+// meant to have, baseStem plus its suffix.
+func newImportOutcome(baseStem string, files []*importFile) importOutcome {
+	var out importOutcome
+	var notes []string
+	for _, f := range files {
+		name := filepath.Base(f.dest)
+		switch {
+		case f.adopted:
+			out.Readopted = append(out.Readopted, name)
+		case name != baseStem+f.suffix:
+			out.Renamed = append(out.Renamed, importRename{From: baseStem + f.suffix, To: name})
+			notes = append(notes, fmt.Sprintf("imports/ already held a different %q; imported as %q", baseStem+f.suffix, name))
+		}
+	}
+	if len(out.Readopted) > 0 {
+		notes = append(notes, "kept the identical copy already in imports/: "+strings.Join(out.Readopted, ", "))
+	}
+	out.Note = strings.Join(notes, "; ")
+	return out
+}
+
+// importFile is one file an import writes into imports/: a zip entry,
+// extracted to a temporary name and then placed under the chosen stem plus
+// its suffix — or adopted, when that name already holds the same bytes.
+type importFile struct {
+	entry  *zip.File
+	kind   string // "video" or "chat": what a failure names
+	suffix string // what follows the stem: ".mp4", ".chat.json"
+
+	tmp  string // this request's extraction; "" once placed or removed
+	size int64
+	sum  [sha256.Size]byte
+
+	dest    string // the destination, once chooseImportStem picks it
+	adopted bool   // dest already held these bytes; nothing is written there
+	placed  bool   // this request created dest
+}
+
+// importPartialExt ends the temporary name an import extracts an entry to.
+// The orphan sweep does not list it (it is not media, chat, thumbnail or
+// description), and CleanupOldImportTemp removes one a hard abort left.
+const importPartialExt = ".partial"
+
+// extract writes the entry to a new temporary file in dir, hashing it on the
+// way. On any failure the temporary file is removed.
+func (f *importFile) extract(dir string) error {
+	rc, err := f.entry.Open()
 	if err != nil {
 		return err
 	}
 	defer rc.Close()
 
-	out, err := os.Create(destPath)
+	out, err := os.CreateTemp(dir, importTempPrefix+"*"+importPartialExt)
 	if err != nil {
 		return err
 	}
+	// CreateTemp's 0600 would follow the file into place; an archive is
+	// 0644, as every other file the output directory holds.
+	err = out.Chmod(0o644)
 
 	// Limit to declared size + 1 byte to detect zip bombs that lie about UncompressedSize64
-	limit := int64(f.UncompressedSize64) + 1
-	n, err := io.Copy(out, io.LimitReader(rc, limit))
-	if n >= limit {
-		err = fmt.Errorf("zip entry %q exceeds declared size (zip bomb protection)", f.Name)
+	h := sha256.New()
+	limit := int64(f.entry.UncompressedSize64) + 1
+	var n int64
+	if err == nil {
+		n, err = io.Copy(io.MultiWriter(out, h), io.LimitReader(rc, limit))
+		if n >= limit {
+			err = fmt.Errorf("zip entry %q exceeds declared size (zip bomb protection)", f.entry.Name)
+		}
 	}
 	if closeErr := out.Close(); err == nil {
 		err = closeErr
 	}
 	if err != nil {
-		os.Remove(destPath)
+		os.Remove(out.Name())
+		return err
 	}
-	return err
+	f.tmp, f.size = out.Name(), n
+	h.Sum(f.sum[:0])
+	return nil
+}
+
+// errImportNameTaken says a destination holds something other than the
+// imported bytes.
+var errImportNameTaken = errors.New("name taken")
+
+// errImportInvalidPath is a destination outside the output directory.
+var errImportInvalidPath = errors.New("invalid output path")
+
+// claim checks dest for f: free, or already holding exactly f's bytes (same
+// size and SHA-256) — an adopted file. Anything else there takes the name.
+func (f *importFile) claim(dest string) (adopt bool, err error) {
+	info, err := os.Lstat(dest)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() || info.Size() != f.size {
+		return false, errImportNameTaken
+	}
+	existing, err := os.Open(dest)
+	if err != nil {
+		return false, err
+	}
+	defer existing.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, existing); err != nil {
+		return false, err
+	}
+	var sum [sha256.Size]byte
+	if h.Sum(sum[:0]); sum != f.sum {
+		return false, errImportNameTaken
+	}
+	return true, nil
+}
+
+// place moves f's temporary file to its destination. An adopted destination
+// keeps its own file (the temporary one is dropped) — unless it went missing
+// since it was checked, when the temporary file takes its place after all.
+func (f *importFile) place() error {
+	if f.adopted {
+		if _, err := os.Lstat(f.dest); err == nil {
+			os.Remove(f.tmp)
+			f.tmp = ""
+			return nil
+		}
+		f.adopted = false
+	}
+	if err := placeNoReplace(f.tmp, f.dest); err != nil {
+		return err
+	}
+	f.tmp, f.placed = "", true
+	return nil
+}
+
+// placeNoReplace moves tmp to dest unless dest exists. A hard link refuses an
+// existing name where a rename would replace it; on a filesystem without hard
+// links the rename runs after a check for dest instead.
+func placeNoReplace(tmp, dest string) error {
+	err := os.Link(tmp, dest)
+	if err == nil {
+		os.Remove(tmp)
+		return nil
+	}
+	if errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	if _, statErr := os.Lstat(dest); !errors.Is(statErr, fs.ErrNotExist) {
+		return fmt.Errorf("%s: %w", dest, errImportNameTaken)
+	}
+	return os.Rename(tmp, dest)
+}
+
+// importMaxDisambiguation is the last " (n)" chooseImportStem tries.
+const importMaxDisambiguation = 999
+
+// chooseImportNames picks every file's destination and returns the video's
+// stem. The video files choose together — a recording's parts share one stem,
+// as "<stem> - partN" — and each other file (a chat) on its own: a chat is
+// re-adopted beside a re-adopted video, or beside one that took a " (n)"
+// name, whenever its own name holds the same bytes, rather than written
+// again because its sibling's name was taken.
+func chooseImportNames(importsDir, outputDir, base string, files []*importFile) (string, error) {
+	var videos []*importFile
+	for _, f := range files {
+		if f.kind == "video" {
+			videos = append(videos, f)
+		}
+	}
+	stem, err := chooseImportStem(importsDir, outputDir, base, videos)
+	if err != nil {
+		return "", err
+	}
+	for _, f := range files {
+		if f.kind != "video" {
+			if _, err := chooseImportStem(importsDir, outputDir, base, []*importFile{f}); err != nil {
+				return "", err
+			}
+		}
+	}
+	return stem, nil
+}
+
+// chooseImportStem picks the stem a group of files is placed under: base,
+// else "base (2)", "base (3)"… — the way uniqueTrimBasename names a second
+// trim of the same range — the first whose every file is free or already
+// holds the imported bytes. It sets each file's dest and adopted.
+func chooseImportStem(importsDir, outputDir, base string, files []*importFile) (string, error) {
+	for n := 1; n <= importMaxDisambiguation; n++ {
+		stem := base
+		if n > 1 {
+			stem = fmt.Sprintf("%s (%d)", base, n)
+		}
+		usable := true
+		for _, f := range files {
+			dest := filepath.Join(importsDir, stem+f.suffix)
+			// Belt and braces on top of the id validation: every WRITE goes
+			// through the same canonical containment check the read routes
+			// use, so a future change to how the stem is built cannot
+			// re-open WEB-1. CanonicalPath resolves the nearest existing
+			// ancestor, so this is valid on a path that does not exist yet.
+			if _, ok := validatePathTraversal(dest, outputDir); !ok {
+				return "", errImportInvalidPath
+			}
+			adopt, err := f.claim(dest)
+			if errors.Is(err, errImportNameTaken) {
+				usable = false
+				break
+			}
+			if err != nil {
+				return "", err
+			}
+			f.dest, f.adopted = dest, adopt
+		}
+		if usable {
+			return stem, nil
+		}
+	}
+	return "", fmt.Errorf("every name up to %q: %w", fmt.Sprintf("%s (%d)", base, importMaxDisambiguation), errImportNameTaken)
 }
 
 // maxImportUpload caps an import upload (the whole request body).
@@ -557,15 +812,51 @@ func randomHex(n int) string {
 }
 
 // importTempPrefix names the temp file an upload is spooled to before it is
-// opened as a zip (see the import route above).
+// opened as a zip, and the temporary file each entry is extracted to inside
+// imports/ before it is placed (see the import route above).
 const importTempPrefix = "moombox-import-"
 
-// CleanupOldImportTemp removes import spool files older than 24h. The route
-// removes its own with a deferred os.Remove, but a hard abort mid-import (OS
-// kill, power loss) leaves up to 500 MB behind in the temp directory. No
+// importPartialRe is the whole name of an entry's temporary extraction:
+// os.CreateTemp's random part is decimal. No name an import places can take
+// this shape — every one carries " [<id>]" — so the sweep below can never
+// match an archive, whatever its title.
+var importPartialRe = regexp.MustCompile(`^` + regexp.QuoteMeta(importTempPrefix) + `[0-9]+` + regexp.QuoteMeta(importPartialExt) + `$`)
+
+// importTempMaxAge is how old a leftover must be before it is swept. No
 // import runs for a day, so the age floor never touches one in flight.
-func CleanupOldImportTemp() (removed int, err error) {
-	return utils.RemoveStaleTempEntries(24*time.Hour, importTempPrefix)
+const importTempMaxAge = 24 * time.Hour
+
+// CleanupOldImportTemp removes import leftovers older than importTempMaxAge:
+// spool files in the temp directory, and entries extracted into
+// <outputDir>/imports but never placed. The route removes its own with a
+// deferred os.Remove, but a hard abort mid-import (OS kill, power loss)
+// leaves up to 500 MB behind in the one and 2 GB in the other.
+func CleanupOldImportTemp(outputDir string) (removed int, err error) {
+	removed, err = utils.RemoveStaleTempEntries(importTempMaxAge, importTempPrefix)
+	if outputDir == "" {
+		outputDir = "./output"
+	}
+	importsDir := filepath.Join(outputDir, "imports")
+	entries, readErr := os.ReadDir(importsDir)
+	if readErr != nil {
+		if !errors.Is(readErr, fs.ErrNotExist) && err == nil {
+			err = readErr
+		}
+		return removed, err
+	}
+	cutoff := time.Now().Add(-importTempMaxAge)
+	for _, ent := range entries {
+		if !ent.Type().IsRegular() || !importPartialRe.MatchString(ent.Name()) {
+			continue
+		}
+		if info, infoErr := ent.Info(); infoErr != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		if os.Remove(filepath.Join(importsDir, ent.Name())) == nil {
+			removed++
+		}
+	}
+	return removed, err
 }
 
 // importChatMeta is what an import reads out of a chat archive's header.
