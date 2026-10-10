@@ -1,12 +1,24 @@
 // The Tasks list's selection and the actions that read it: what a batch or a
 // single action may touch is what the operator can see and confirm.
+//
+// Same jsdom probe as app.test.mjs: an absent jsdom skips, anything else
+// fails. (The harness was imported statically, so without jsdom this one
+// suite failed to load where every other DOM suite skipped.)
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 
-import * as harness from "./helpers/app-dom.mjs";
-import * as inputs from "./fixtures/app-render-inputs.mjs";
+let jsdomMissing = null;
+try {
+  await import("jsdom");
+} catch (e) {
+  if (e.code !== "ERR_MODULE_NOT_FOUND") throw e;
+  jsdomMissing = `jsdom not installed — run \`npm ci\` in web/tests (${e.code})`;
+}
+const harness = jsdomMissing ? null : await import("./helpers/app-dom.mjs");
+const inputs = jsdomMissing ? null : await import("./fixtures/app-render-inputs.mjs");
+const skip = jsdomMissing || false;
 
-after(() => harness.teardownAll());
+after(() => harness?.teardownAll());
 
 const fin = (over = {}) => ({ ...inputs.JOBS.Finished, id: "fin-1", videoId: "fin1", title: "Old finished",
   watched: false, updatedAt: harness.agoISO(60), ...over });
@@ -25,7 +37,7 @@ async function boot(routes = {}) {
 // that was not on screen. The filter now drops what it hides.
 //
 // Mutant: renderJobs' visibleIds prune removed — DELETE /api/jobs/fin-1 goes out.
-test("a filter drops the selection it hides, so no batch reaches a hidden job", async () => {
+test("a filter drops the selection it hides, so no batch reaches a hidden job", { skip }, async () => {
   const h = await boot({ "DELETE /api/jobs/:id": () => ({ success: true }) });
   h.app.jobs = [fin(), live()];
   h.app.renderJobs();
@@ -45,7 +57,7 @@ test("a filter drops the selection it hides, so no batch reaches a hidden job", 
 // The Archived panel keeps its own selection and prunes it the same way.
 //
 // Mutant: renderArchivedJobs' visibleArchivedIds prune removed.
-test("an Archived filter drops the selection it hides", async () => {
+test("an Archived filter drops the selection it hides", { skip }, async () => {
   const h = await harness.makeApp({});
   h.app._activePanel = "archived";
   h.app.archivedJobs = [fin({ id: "old-a", videoId: "oa", title: "Alpha" }), fin({ id: "old-b", videoId: "ob", title: "Bravo" })];
@@ -62,7 +74,7 @@ test("an Archived filter drops the selection it hides", async () => {
 //
 // Mutants: batchAction's post-confirm re-filter removed; deleteJob's or
 // cancelJob's post-confirm status check removed.
-test("a batch delete skips a job that started downloading while the confirm was open", async () => {
+test("a batch delete skips a job that started downloading while the confirm was open", { skip }, async () => {
   const h = await boot({ "DELETE /api/jobs/:id": () => ({ success: true }) });
   const err = fin({ id: "err-1", videoId: "e1", status: "Error" });
   h.app.jobs = [err, live()];
@@ -77,7 +89,7 @@ test("a batch delete skips a job that started downloading while the confirm was 
   assert.deepEqual(h.fetchLog.filter((c) => c.method === "DELETE").map((c) => c.url), []);
 });
 
-test("a single delete does not reach a job that started downloading while the confirm was open", async () => {
+test("a single delete does not reach a job that started downloading while the confirm was open", { skip }, async () => {
   const h = await boot({ "DELETE /api/jobs/:id": () => ({ success: true }) });
   const err = fin({ id: "err-1", videoId: "e1", status: "Error" });
   h.app.jobs = [err];
@@ -91,7 +103,7 @@ test("a single delete does not reach a job that started downloading while the co
   assert.deepEqual(h.fetchLog.filter((c) => c.method === "DELETE").map((c) => c.url), []);
 });
 
-test("a single cancel does not reach a job that finished while the confirm was open", async () => {
+test("a single cancel does not reach a job that finished while the confirm was open", { skip }, async () => {
   const h = await boot({ "POST /api/jobs/:id/cancel": () => ({ success: true }) });
   const dl = live({ id: "dl-1", videoId: "d1", status: "Downloading" });
   h.app.jobs = [dl];
@@ -110,7 +122,7 @@ test("a single cancel does not reach a job that finished while the confirm was o
 // on Add Video (or a card's Delete icon) ALSO opened that job's details.
 //
 // Mutant: the _enterFromControl check removed — the details dialog opens.
-test("Enter on a focused button does not also open the focused job's details", async () => {
+test("Enter on a focused button does not also open the focused job's details", { skip }, async () => {
   const h = await boot();
   h.app.jobs = [fin(), live()];
   h.app.renderJobs();
@@ -133,7 +145,7 @@ test("Enter on a focused button does not also open the focused job's details", a
 // old position while Arrow navigation and Enter index the re-sorted list.
 //
 // Mutant: the _sortKey branch removed — the DOM stays [a, z].
-test("a renamed job moves to its sorted place, where navigation will look for it", async () => {
+test("a renamed job moves to its sorted place, where navigation will look for it", { skip }, async () => {
   const h = await boot();
   const a = live({ id: "a", videoId: "va", title: "Alpha" });
   const z = live({ id: "z", videoId: "vz", title: "Zulu" });
@@ -149,7 +161,7 @@ test("a renamed job moves to its sorted place, where navigation will look for it
 // A chip typed again beside its existing chip rendered twice.
 //
 // Mutant: syncTokens' serializeToken de-duplication removed — two chips.
-test("typing a filter that is already a chip does not add it twice", async () => {
+test("typing a filter that is already a chip does not add it twice", { skip }, async () => {
   const h = await boot();
   h.app.jobs = [fin(), live()];
   h.app.renderJobs();
