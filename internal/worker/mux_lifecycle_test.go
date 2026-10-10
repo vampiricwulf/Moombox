@@ -151,6 +151,132 @@ func TestVerifyMuxedDurationNamesTheNumbers(t *testing.T) {
 	}
 }
 
+// TestSpanSecTakesTheStartOffAFragmentedMovOnly pins how an input's length is
+// measured for the shortfall check. The mov demuxer reports a fragmented MP4's
+// duration as the end timestamp of its last fragment — start included — so a
+// DASH part that began 208 s into the broadcast probes as (start 208,
+// duration 298) for 90 s of media. The MPEG-TS demuxer estimates duration as
+// last minus first, so its duration already is the span and its start (hours,
+// for a Twitch capture joined mid-broadcast) must stay out of the sum.
+//
+// Mutants, one per row:
+//   - returning DurationSec unconditionally: the first row reads 298.
+//   - subtracting for every container: the mpegts row reads negative, and
+//     the check is silently disabled for every long Twitch recording.
+//   - subtracting a negative start: AAC priming inflates the span.
+func TestSpanSecTakesTheStartOffAFragmentedMovOnly(t *testing.T) {
+	const mov = "mov,mp4,m4a,3gp,3g2,mj2"
+	for _, tc := range []struct {
+		name  string
+		probe *ffprobeData
+		want  float64
+	}{
+		{"fragmented mov part that began at 208 s", &ffprobeData{FormatName: mov, StartSec: 208, DurationSec: 298}, 90},
+		{"mov from the start of the broadcast", &ffprobeData{FormatName: mov, StartSec: 0, DurationSec: 90}, 90},
+		{"mpegts keeps its estimated span", &ffprobeData{FormatName: "mpegts", StartSec: 209.4, DurationSec: 90}, 90},
+		{"negative start (priming) is left alone", &ffprobeData{FormatName: mov, StartSec: -0.046, DurationSec: 90}, 90},
+		{"unknown container", &ffprobeData{FormatName: "", StartSec: 100, DurationSec: 300}, 300},
+		{"nil probe", nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.probe.spanSec(); got != tc.want {
+				t.Errorf("spanSec() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestVerifyMuxedDurationMeasuresAnOffsetInputBySpan is the field failure
+// against a REAL ffprobe: part 2 of a YouTube quality split began 208 s into
+// the broadcast, its 7668 s probed as duration 7876, and a whole copy was
+// rejected as "208s missing" — at finalize, again by segment recovery, and it
+// would have been again by the Mux action the error recommended. A whole copy
+// of such an input must pass, a genuinely short one must still fail naming
+// the span, and an MPEG-TS input with the same offset must keep its full
+// protection (its probed duration is already the span).
+//
+// Mutants:
+//   - comparing probe.DurationSec: the fragmented 90 s input reads 298 and a
+//     whole 90 s copy is rejected.
+//   - subtracting start_time for every container: the mpegts input's span
+//     goes negative, the floor skips it, and a 5 s copy of 90 s passes.
+func TestVerifyMuxedDurationMeasuresAnOffsetInputBySpan(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	dir := t.TempDir()
+	o := NewDownloadOrchestrator(nil, nil, ffmpegPath, discardLogger{}, nil, nil, nil, nil, nil)
+	ctx := context.Background()
+
+	frag := filepath.Join(dir, "video_stream")
+	writeOffsetFragmentFixture(t, ffmpegPath, frag, 90, 208)
+	if p := o.runFFprobe(ctx, frag); p == nil || p.StartSec < 200 || p.DurationSec < 290 {
+		t.Fatalf("fragment fixture probed as %+v — the offset did not take, and the test would pass vacuously", p)
+	}
+
+	if err := o.verifyMuxedDuration(ctx, "j1", 90, frag, ""); err != nil {
+		t.Errorf("a whole 90 s copy of a part that began at 208 s was rejected: %v", err)
+	}
+	err := o.verifyMuxedDuration(ctx, "j1", 5, frag, "")
+	if err == nil {
+		t.Fatal("a 5 s copy of a 90 s part passed — the shortfall check is gone, not corrected")
+	}
+	if !strings.Contains(err.Error(), "90") || strings.Contains(err.Error(), "298") {
+		t.Errorf("shortfall error %q should name the 90 s span, not the 298 s end timestamp", err)
+	}
+
+	ts := filepath.Join(dir, "video.ts")
+	writeOffsetTSFixture(t, ffmpegPath, ts, 90, 208)
+	if p := o.runFFprobe(ctx, ts); p == nil || p.StartSec < 200 {
+		t.Fatalf("mpegts fixture probed as %+v — the offset did not take", p)
+	}
+	if err := o.verifyMuxedDuration(ctx, "j1", 90, ts, ""); err != nil {
+		t.Errorf("a whole 90 s copy of an mpegts input starting at 208 s was rejected: %v", err)
+	}
+	if err := o.verifyMuxedDuration(ctx, "j1", 5, ts, ""); err == nil {
+		t.Error("a 5 s copy of a 90 s mpegts input passed — the start was taken off a span that never included it")
+	}
+}
+
+// TestLaterPartOfASplitMuxes drives the field failure through the part path
+// itself: a seg_1 recording that begins at 208 s of the broadcast must come
+// out of muxSegment as a persisted part of its real length, not as a
+// shortfall error that leaves it in staging.
+//
+// Mutant: measuring the input by its probed duration — muxSegment discards
+// the part and returns "208s missing".
+func TestLaterPartOfASplitMuxes(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+
+	staging, outputDir := muxFixtureJob(t, w, db, "j-offset-part")
+	segDir := filepath.Join(staging, "seg_1")
+	if err := os.MkdirAll(segDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	media := filepath.Join(segDir, "video_stream")
+	writeOffsetFragmentFixture(t, ffmpegPath, media, 90, 208)
+
+	job, _ := db.GetJob("j-offset-part")
+	jobCtx := w.buildJobContext(job)
+	seg, err := w.orchestrator.muxSegment(context.Background(), jobCtx, 1, 0, time.Now().Unix(),
+		QualityInfo{Label: "1080p"}, &DownloadResult{HasVideo: true, VideoPath: media})
+	if err != nil {
+		t.Fatalf("muxSegment on a part that began at 208 s = %v, want a muxed part — the copy carried all of it", err)
+	}
+	if seg == nil {
+		t.Fatal("muxSegment returned no segment for a whole copy")
+	}
+	if d := seg.DurationSeconds - 90; d < -2 || d > 2 {
+		t.Errorf("part duration = %.1fs, want ~90s", seg.DurationSeconds)
+	}
+	if left := mp4sIn(t, outputDir); len(left) != 1 {
+		t.Errorf("output dir holds %v, want the one part file", left)
+	}
+	if rows, _ := db.GetSegments("j-offset-part"); len(rows) != 1 || rows[0].SegmentIndex != 1 {
+		t.Errorf("segment rows = %+v, want one row at index 1", rows)
+	}
+}
+
 // TestRestartMuxFinishesAndClearsStaging pins Task 2's review finding 1: the
 // off-queue restart/Mux path muxed the staged recording into the archive and
 // then left the raw recording in staging forever, silently doubling the disk
@@ -946,6 +1072,44 @@ func writeMuxFixture(t *testing.T, ffmpegPath, path string, seconds int) {
 		"-movflags", "+faststart", path)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("generate fixture %s: %v\n%s", path, err, out)
+	}
+}
+
+// writeOffsetFragmentFixture renders seconds of video as a FRAGMENTED MP4
+// whose first fragment sits at offsetSec on its timeline — the shape of a
+// DASH staging file for a part that began after a split or a restart. The
+// mov demuxer probes it with the offset folded into its duration
+// (start_time=offsetSec, duration=offsetSec+seconds). No extension is
+// needed: the format is forced, as it is for a `video_stream`.
+//
+// frag_discont keeps the first tfdt at the packet's own timestamp instead of
+// rebasing the track to zero, and avoid_negative_ts=disabled stops the CLI
+// from shifting the offset back out on the way in.
+func writeOffsetFragmentFixture(t *testing.T, ffmpegPath, path string, seconds, offsetSec int) {
+	t.Helper()
+	cmd := exec.Command(ffmpegPath, "-nostdin", "-y",
+		"-f", "lavfi", "-i", fmt.Sprintf("testsrc=size=64x64:rate=5:duration=%d", seconds),
+		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+		"-output_ts_offset", fmt.Sprint(offsetSec), "-avoid_negative_ts", "disabled",
+		"-movflags", "+frag_keyframe+empty_moov+default_base_moof+frag_discont",
+		"-f", "mp4", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate offset fragment fixture %s: %v\n%s", path, err, out)
+	}
+}
+
+// writeOffsetTSFixture renders the same seconds of video as MPEG-TS starting
+// at offsetSec — a Twitch or YouTube HLS staging file joined mid-broadcast.
+// The mpegts demuxer probes it as start_time≈offsetSec, duration=seconds.
+func writeOffsetTSFixture(t *testing.T, ffmpegPath, path string, seconds, offsetSec int) {
+	t.Helper()
+	cmd := exec.Command(ffmpegPath, "-nostdin", "-y",
+		"-f", "lavfi", "-i", fmt.Sprintf("testsrc=size=64x64:rate=5:duration=%d", seconds),
+		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+		"-output_ts_offset", fmt.Sprint(offsetSec),
+		"-f", "mpegts", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate offset mpegts fixture %s: %v\n%s", path, err, out)
 	}
 }
 

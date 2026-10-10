@@ -142,14 +142,22 @@ func muxedOutputIsShort(inputSec, outputSec float64) bool {
 // DOWNLOAD is missing segments" and steers Retry into re-downloading, which
 // fixes nothing when the bytes are already on disk and it is the copy that
 // stopped early.
+//
+// An input is measured by its SPAN (ffprobeData.spanSec), not its probed
+// duration: a fragmented MP4 that begins past the start of the broadcast —
+// every later part of a split, a recording resumed or started at sq>0 —
+// probes with its start time folded into its duration, and the copy, which
+// starts at zero, read as exactly that many seconds short. The check rejected
+// such a part at every attempt, finalize and Mux action alike, and left it in
+// staging with nothing wrong with it.
 func (o *DownloadOrchestrator) verifyMuxedDuration(ctx context.Context, jobID string, outputSec float64, inputs ...string) error {
 	var longest float64
 	for _, in := range inputs {
 		if in == "" {
 			continue
 		}
-		if probe := o.runFFprobe(ctx, in); probe != nil && probe.DurationSec > longest {
-			longest = probe.DurationSec
+		if span := o.runFFprobe(ctx, in).spanSec(); span > longest {
+			longest = span
 		}
 	}
 	if !muxedOutputIsShort(longest, outputSec) {

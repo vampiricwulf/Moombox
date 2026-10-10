@@ -55,6 +55,54 @@ type ffprobeData struct {
 	Height      int
 	Fps         int
 	DurationSec float64
+	// StartSec is format.start_time: where on its own timeline the file's
+	// first packet sits. Zero for a recording captured from the start of a
+	// broadcast and for every output FFmpeg writes; the position in the
+	// broadcast for a part that began after a split or a restart.
+	StartSec float64
+	// FormatName is the demuxer ffprobe opened the file with — its
+	// comma-separated name list ("mov,mp4,m4a,3gp,3g2,mj2", "mpegts").
+	FormatName string
+}
+
+// spanSec is the length of media a `-c copy` of this file carries across —
+// what the copy's own duration will read, since FFmpeg rebases the copy's
+// timeline to zero. It is NOT always DurationSec: the mov demuxer reports a
+// fragmented MP4's duration as the END timestamp of its last fragment, start
+// included, so a DASH part whose first fragment sits at 208 s of the broadcast
+// probes as start_time=208, duration=7876 while holding 7668 s of media. The
+// shortfall check (verifyMuxedDuration) read that as a copy 208 s short and
+// rejected every later part of a split, and every recording that began past
+// sequence zero, leaving its staging unmuxed with advice to re-run a mux that
+// failed the same way.
+//
+// Only a mov container is corrected, because the quirk is the mov demuxer's:
+// the MPEG-TS demuxer (Twitch, YouTube HLS) estimates duration from the
+// packets as last minus first, so its duration already IS the span and its
+// start_time — hours into a broadcast for a Twitch capture — must not be
+// taken off it. A negative start (AAC priming, an edit list) is left alone.
+func (p *ffprobeData) spanSec() float64 {
+	if p == nil {
+		return 0
+	}
+	if p.StartSec > 0 && isMovContainer(p.FormatName) {
+		return p.DurationSec - p.StartSec
+	}
+	return p.DurationSec
+}
+
+// isMovContainer reports whether an ffprobe format_name names the mov
+// demuxer — the one whose fragmented-file duration includes the start time.
+// Matched entry by entry rather than on the whole list, so an FFmpeg build
+// that orders or extends the aliases differently still matches.
+func isMovContainer(formatName string) bool {
+	for _, name := range strings.Split(formatName, ",") {
+		switch strings.TrimSpace(name) {
+		case "mov", "mp4", "m4a", "3gp", "3g2", "mj2":
+			return true
+		}
+	}
+	return false
 }
 
 // runFFprobe extracts video metadata using ffprobe (B5).
@@ -87,7 +135,9 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 			RFrameRate string `json:"r_frame_rate"`
 		} `json:"streams"`
 		Format struct {
-			Duration string `json:"duration"`
+			FormatName string `json:"format_name"`
+			StartTime  string `json:"start_time"`
+			Duration   string `json:"duration"`
 		} `json:"format"`
 	}
 
@@ -96,7 +146,7 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 		return nil
 	}
 
-	data := &ffprobeData{}
+	data := &ffprobeData{FormatName: probe.Format.FormatName}
 
 	// Find video stream
 	for _, s := range probe.Streams {
@@ -113,6 +163,9 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 	// Duration
 	if probe.Format.Duration != "" {
 		data.DurationSec, _ = strconv.ParseFloat(probe.Format.Duration, 64)
+	}
+	if probe.Format.StartTime != "" {
+		data.StartSec, _ = strconv.ParseFloat(probe.Format.StartTime, 64)
 	}
 
 	return data
