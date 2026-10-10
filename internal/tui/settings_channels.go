@@ -287,8 +287,8 @@ func (m *SettingsModel) saveCurrentChannel() {
 	// An edit that changed nothing the form shows keeps the entry exactly
 	// as it was. valuesToChannel spells defaults out (platform "youtube",
 	// enabled true), and a spelled-out default reads as an edit to
-	// mergeChannelEdits — which would put this copy over whatever the
-	// dashboard did to the channel since the overlay opened.
+	// mergeChannelEdits — which adds back a channel the dashboard removed
+	// since the overlay opened.
 	if existing != nil && maps.Equal(channelToValues(ch), channelToValues(*existing)) {
 		ch = *existing
 	}
@@ -315,11 +315,15 @@ func (m *SettingsModel) saveCurrentChannel() {
 //
 // Matching is by channel ID, case-insensitively as config.Validate compares
 // them. A base ID the editor no longer has (deleted, or renamed away) is
-// removed from live. An entry the editor added, or changed from its base
-// copy, replaces live's entry with that ID or, when live has none, is
-// appended — so an edit of a channel the dashboard removed meanwhile adds it
-// back, the operator having saved it on purpose. Everything else in live —
-// a channel the dashboard added, disabled or edited, and one it removed that
+// removed from live. An entry the editor changed from its base copy is
+// merged field by field into live's entry with that ID (mergeChannelFields):
+// only the fields the editor changed are written, so a dashboard change to
+// another field of the same channel — a disable, an output directory — made
+// while the overlay was open survives. An entry with no base copy (added,
+// or renamed to a new ID) replaces live's entry with that ID whole, and so
+// does an edit of a channel the dashboard removed meanwhile, which is
+// appended: the operator saved it on purpose. Everything else in live — a
+// channel the dashboard added, disabled or edited, and one it removed that
 // the editor did not touch — stays exactly as live has it.
 func mergeChannelEdits(base, edited, live []config.ChannelConfig) ([]config.ChannelConfig, bool) {
 	key := func(id string) string { return strings.ToLower(strings.TrimSpace(id)) }
@@ -327,14 +331,20 @@ func mergeChannelEdits(base, edited, live []config.ChannelConfig) ([]config.Chan
 	for _, ch := range base {
 		atOpen[key(ch.ID)] = ch
 	}
+	type upsert struct {
+		ch      config.ChannelConfig
+		was     config.ChannelConfig
+		hasBase bool
+	}
 	kept := make(map[string]bool, len(edited))
-	var upserts []config.ChannelConfig
+	var upserts []upsert
 	for _, ch := range edited {
 		kept[key(ch.ID)] = true
-		if was, ok := atOpen[key(ch.ID)]; ok && reflect.DeepEqual(was, ch) {
+		was, ok := atOpen[key(ch.ID)]
+		if ok && reflect.DeepEqual(was, ch) {
 			continue
 		}
-		upserts = append(upserts, ch)
+		upserts = append(upserts, upsert{ch: ch, was: was, hasBase: ok})
 	}
 	removed := make(map[string]bool)
 	for _, ch := range base {
@@ -352,14 +362,67 @@ func mergeChannelEdits(base, edited, live []config.ChannelConfig) ([]config.Chan
 			out = append(out, ch)
 		}
 	}
-	for _, ch := range upserts {
-		if i := slices.IndexFunc(out, func(c config.ChannelConfig) bool { return key(c.ID) == key(ch.ID) }); i >= 0 {
-			out[i] = ch
-		} else {
-			out = append(out, ch)
+	for _, u := range upserts {
+		i := slices.IndexFunc(out, func(c config.ChannelConfig) bool { return key(c.ID) == key(u.ch.ID) })
+		switch {
+		case i >= 0 && u.hasBase:
+			out[i] = mergeChannelFields(out[i], u.was, u.ch)
+		case i >= 0:
+			out[i] = u.ch
+		default:
+			out = append(out, u.ch)
 		}
 	}
 	return out, true
+}
+
+// mergeChannelFields is the three-way merge of one channel: live as it
+// stands at save time, with each form field the editor changed — where
+// edited differs from base, the copy Open took, compared as the form shows
+// them (channelToValues) — taken from edited. A field the editor left alone
+// keeps live's value, whatever the dashboard set it to meanwhile, and so
+// does every field the form does not show. Writing the editor's entry whole
+// put the overlay's Open-time copy of every other field over the
+// dashboard's: a TUI rename re-enabled a channel disabled on the dashboard,
+// or cleared the output directory set there.
+func mergeChannelFields(live, base, edited config.ChannelConfig) config.ChannelConfig {
+	was, now := channelToValues(base), channelToValues(edited)
+	for k := range was {
+		if was[k] != now[k] {
+			writeChannelField(&live, edited, k)
+		}
+	}
+	return live
+}
+
+// writeChannelField writes the form field key — one of channelToValues'
+// keys — from src onto dst, and reports false for a key it does not know.
+func writeChannelField(dst *config.ChannelConfig, src config.ChannelConfig, key string) bool {
+	switch key {
+	case "id":
+		dst.ID = src.ID
+	case "name":
+		dst.Name = src.Name
+	case "platform":
+		dst.Platform = src.Platform
+	case "enabled":
+		dst.Enabled = src.Enabled
+	case "terms":
+		dst.Terms = src.Terms
+	case "include_non_live":
+		dst.IncludeNonLiveContent = src.IncludeNonLiveContent
+	case "quality_preference":
+		dst.QualityPreference = src.QualityPreference
+	case "output_directory":
+		dst.OutputDirectory = src.OutputDirectory
+	case "archive_window_days":
+		dst.ArchiveWindowDays = src.ArchiveWindowDays
+	case "archive_slots":
+		dst.ArchiveSlots = src.ArchiveSlots
+	default:
+		return false
+	}
+	return true
 }
 
 // GetChannelResolveInput returns the current channel ID being resolved.
