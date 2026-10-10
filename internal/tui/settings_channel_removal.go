@@ -176,6 +176,28 @@ func (m *SettingsModel) resetChannelRemoval() {
 	m.channelRemovalState = channelRemovalState{}
 }
 
+// channelRemovalPromptUp says whether the removal prompt is on screen: it
+// owns every key while it is (handleChannelKey).
+func (m *SettingsModel) channelRemovalPromptUp() bool {
+	return m.channelDeleteConf && m.channelMode != "edit" && sections[m.sectionIndex].name == "Channels"
+}
+
+// channelRemovalHint is the overlay footer while the prompt is up: the
+// prompt's own keys. The list's "Enter: Edit  D: Delete" stayed there, and
+// Enter is the prompt's confirm — the key the footer called Edit removed the
+// channel — while the footer's "Esc: Close" cancelled the prompt (View
+// swaps that for "Esc: Cancel").
+func (m *SettingsModel) channelRemovalHint() string {
+	hint := "Enter: Remove, keep jobs"
+	if in := m.removalInfo; in != nil && in.Total == 0 {
+		hint = "Enter: Remove"
+	}
+	if in := m.removalInfo; in != nil && in.Pending > 0 {
+		hint += "  P: Remove, delete pending"
+	}
+	return hint
+}
+
 // channelRemovalPromptLines renders the prompt in place of the key list, one
 // line each, cut to w: the question, what is kept regardless, then the keys.
 // When maxLines is short, the two informational lines go first.

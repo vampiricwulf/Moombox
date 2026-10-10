@@ -148,6 +148,50 @@ func TestChannelRemovalZeroCountClaimsNoAbsence(t *testing.T) {
 	}
 }
 
+// TestChannelRemovalFooterFollowsThePrompt: while the prompt is up the
+// overlay's footer names the prompt's keys. It kept the list's "Enter: Edit
+// D: Delete" beside "Esc: Close", and Enter is the prompt's confirm — the key
+// the footer called Edit removed the channel — while Esc cancelled the
+// prompt rather than closing anything. Cancelled, the list's footer is back.
+//
+// Mutants killed: renderHintText without its prompt branch ("Enter: Edit"
+// stays); View's Esc label not swapped ("Esc: Close" stays); the P entry
+// offered with nothing pending.
+func TestChannelRemovalFooterFollowsThePrompt(t *testing.T) {
+	footer := func(h *removalHarness) string {
+		lines := strings.Split(stripANSI(h.a.settings.View()), "\n")
+		for i := len(lines) - 1; i >= 0; i-- {
+			if strings.Contains(lines[i], "Esc: ") {
+				return lines[i]
+			}
+		}
+		return ""
+	}
+	h := newRemovalHarness(t, removalInfo)
+	h.press(t, "d")
+	got := footer(h)
+	for _, want := range []string{"Esc: Cancel", "Enter: Remove, keep jobs", "P: Remove, delete pending"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("footer with the prompt up lacks %q: %q", want, got)
+		}
+	}
+	for _, stale := range []string{"Esc: Close", "Enter: Edit", "D: Delete"} {
+		if strings.Contains(got, stale) {
+			t.Errorf("footer with the prompt up still offers %q: %q", stale, got)
+		}
+	}
+	h.press(t, "esc")
+	if got := footer(h); !strings.Contains(got, "Esc: Close") || !strings.Contains(got, "Enter: Edit") {
+		t.Errorf("footer after the prompt was cancelled: %q", got)
+	}
+
+	h = newRemovalHarness(t, ChannelRemovalInfo{Total: 3})
+	h.press(t, "d")
+	if got := footer(h); strings.Contains(got, "P: ") {
+		t.Errorf("footer offers a delete with nothing pending: %q", got)
+	}
+}
+
 // TestChannelRemovalDeletePendingWaitsForTheSave: P removes the channel from
 // the list at once but deletes nothing until the overlay is saved; the save
 // hands the channel over and the App runs the delete, then says so.

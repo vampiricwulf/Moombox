@@ -93,9 +93,13 @@ func (m *SettingsModel) View() string {
 
 	// Hints
 	content.WriteString("\n")
-	hintLeft := DimStyle.Render("Esc: Close")
-	hintRight := fitSettingsHint(m.renderHintText(), innerW-ansi.StringWidth("Esc: Close")-1)
-	hintGap := innerW - ansi.StringWidth("Esc: Close") - ansi.StringWidth(hintRight)
+	escHint := "Esc: Close"
+	if m.channelRemovalPromptUp() {
+		escHint = "Esc: Cancel" // the prompt's Esc closes the prompt, not the overlay
+	}
+	hintLeft := DimStyle.Render(escHint)
+	hintRight := fitSettingsHint(m.renderHintText(), innerW-ansi.StringWidth(escHint)-1)
+	hintGap := innerW - ansi.StringWidth(escHint) - ansi.StringWidth(hintRight)
 	hintGap = max(hintGap, 1)
 	content.WriteString(hintLeft)
 	content.WriteString(strings.Repeat(" ", hintGap))
@@ -268,6 +272,9 @@ func (m *SettingsModel) renderHintText() string {
 			hint += "  Ctrl+O: Install FFmpeg"
 		}
 		return hint
+	}
+	if m.channelRemovalPromptUp() {
+		return m.channelRemovalHint()
 	}
 	return "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate  A: Add  Enter: Edit  D: Delete"
 }
