@@ -298,3 +298,80 @@ func TestImportProbeDurationReadsFFprobe(t *testing.T) {
 		t.Errorf("a 2 s clip probed as %v s", d)
 	}
 }
+
+// appleDoubleFile is the head of a macOS AppleDouble file ("._<name>"): the
+// magic 0x00051607, version 2, the "Mac OS X" filler and room for an entry.
+var appleDoubleFile = append([]byte{0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00},
+	append([]byte("Mac OS X        "), make([]byte, 64)...)...)
+
+// A zip made with macOS Finder's Compress carries an AppleDouble
+// "__MACOSX/._<name>" beside every file with extended attributes (every
+// download has com.apple.quarantine), named with that file's own extension.
+// It was counted as a second video, and a zip of one recording was refused
+// as "more than one recording" — naming a file Finder hides — while its
+// chat's twin was listed as a left-out chat. Metadata is skipped: under
+// __MACOSX always, and a "._" name elsewhere (another Mac tool's) when it
+// holds AppleDouble's magic. A video whose own title begins "._" is a video.
+//
+// Mutants: dropping the __MACOSX check (the zip whose __MACOSX entry is not
+// AppleDouble's is refused);
+// dropping the "._" check (the zip with the sibling "._" files is refused);
+// skipping every "._" name without reading its magic (the "._." video is
+// "no video file found").
+func TestImportSkipsMacOSMetadata(t *testing.T) {
+	stubImportDurations(t)
+	chat := chatJSONFor(t, map[string]any{"videoId": "dQw4w9WgXcQ", "videoTitle": "Stream", "channelName": "Chan"})
+	for _, tc := range []struct {
+		name     string
+		entries  []importEntry
+		want     []string // imports/ afterwards
+		segments int
+	}{
+		{"Finder, one recording", []importEntry{
+			{name: "Stream [dQw4w9WgXcQ].mp4", data: []byte("VIDEO")},
+			{name: "__MACOSX/._Stream [dQw4w9WgXcQ].mp4", data: appleDoubleFile},
+			{name: "Stream [dQw4w9WgXcQ].chat.json", data: chat},
+			{name: "__MACOSX/._Stream [dQw4w9WgXcQ].chat.json", data: appleDoubleFile},
+		}, []string{"Stream [dQw4w9WgXcQ].mp4", "Stream [dQw4w9WgXcQ].chat.json"}, 0},
+		{"Finder, a folder of a split recording", []importEntry{
+			{name: "Stream/Stream [dQw4w9WgXcQ] - part1.mp4", data: []byte("ONE")},
+			{name: "__MACOSX/Stream/._Stream [dQw4w9WgXcQ] - part1.mp4", data: appleDoubleFile},
+			{name: "Stream/Stream [dQw4w9WgXcQ] - part2.mp4", data: []byte("TWO")},
+			{name: "__MACOSX/Stream/._Stream [dQw4w9WgXcQ] - part2.mp4", data: appleDoubleFile},
+			{name: "Stream/Stream [dQw4w9WgXcQ].chat.json", data: chat},
+			{name: "__MACOSX/Stream/._Stream [dQw4w9WgXcQ].chat.json", data: appleDoubleFile},
+		}, []string{"Stream [dQw4w9WgXcQ] - part1.mp4", "Stream [dQw4w9WgXcQ] - part2.mp4", "Stream [dQw4w9WgXcQ].chat.json"}, 2},
+		{"under __MACOSX, whatever it holds", []importEntry{
+			{name: "Stream [dQw4w9WgXcQ].mp4", data: []byte("VIDEO")},
+			{name: "__MACOSX/._Stream [dQw4w9WgXcQ].mp4", data: []byte("not AppleDouble's magic")},
+		}, []string{"Stream [dQw4w9WgXcQ].mp4"}, 0},
+		{"AppleDouble beside the files", []importEntry{
+			{name: "Stream [dQw4w9WgXcQ].mp4", data: []byte("VIDEO")},
+			{name: "._Stream [dQw4w9WgXcQ].mp4", data: appleDoubleFile},
+			{name: "Stream [dQw4w9WgXcQ].chat.json", data: chat},
+			{name: "._Stream [dQw4w9WgXcQ].chat.json", data: appleDoubleFile},
+		}, []string{"Stream [dQw4w9WgXcQ].mp4", "Stream [dQw4w9WgXcQ].chat.json"}, 0},
+		{"a video titled ._.", []importEntry{
+			{name: "._. Stream [dQw4w9WgXcQ].mp4", data: []byte("VIDEO")},
+		}, []string{"._. Stream [dQw4w9WgXcQ].mp4"}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newImportFixture(t)
+			rec, job := importZip(t, f, orderedImportZip(t, tc.entries...))
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+			}
+			r := decodeImportResult(t, rec.Body.Bytes())
+			if len(r.Import.UnpairedChats) != 0 || r.Import.Note != "" {
+				t.Errorf("outcome %+v: metadata reported as a left-out chat", r.Import)
+			}
+			if len(tc.want) > 1 && job.ChatFilename == "" {
+				t.Error("the recording's chat was not imported")
+			}
+			if segs, _ := f.db.GetSegments(job.ID); len(segs) != tc.segments {
+				t.Errorf("%d segment rows, want %d", len(segs), tc.segments)
+			}
+			assertNoLeftovers(t, f, tc.want...)
+		})
+	}
+}

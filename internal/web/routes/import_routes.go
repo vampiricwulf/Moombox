@@ -2,6 +2,7 @@ package routes
 
 import (
 	"archive/zip"
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/rand"
@@ -586,6 +587,9 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 			continue
 		}
 		name := zipEntryName(f)
+		if importMacMetadata(f, name) {
+			continue
+		}
 		lower := strings.ToLower(name)
 		// The extension is cut from the name as written: lower-casing can
 		// change a rune's length (KELVIN SIGN is "k"), so an offset taken
@@ -648,6 +652,41 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 		}
 	}
 	return rec, nil
+}
+
+// importAppleDoubleMagic opens every AppleDouble file: the extended
+// attributes and resource fork macOS keeps for a file on a volume that
+// cannot hold them, as "._<name>" beside it.
+var importAppleDoubleMagic = []byte{0x00, 0x05, 0x16, 0x07}
+
+// importMacMetadata reports whether a zip entry is macOS's metadata about a
+// file rather than a file of the archive. Finder's Compress writes each
+// file's extended attributes (every download carries com.apple.quarantine)
+// as "__MACOSX/<dir>/._<name>", and other Mac tools write the "._<name>"
+// beside the file — named with that file's own extension, so it was
+// counted as a second video, and a zip of one recording was refused as two.
+// Everything under __MACOSX is metadata; a "._" name elsewhere is metadata
+// when it holds AppleDouble's magic, so a video whose own title begins "._"
+// still imports.
+func importMacMetadata(f *zip.File, name string) bool {
+	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '/' || r == '\\' })
+	if len(parts) == 0 {
+		return false
+	}
+	if slices.Contains(parts[:len(parts)-1], "__MACOSX") {
+		return true
+	}
+	if !strings.HasPrefix(parts[len(parts)-1], "._") {
+		return false
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return false
+	}
+	defer rc.Close()
+	head := make([]byte, len(importAppleDoubleMagic))
+	_, err = io.ReadFull(rc, head)
+	return err == nil && bytes.Equal(head, importAppleDoubleMagic)
 }
 
 // importMultipleRecordingsError refuses a zip whose videos are not the parts
