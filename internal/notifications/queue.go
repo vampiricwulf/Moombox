@@ -83,7 +83,11 @@ type targetQueue struct {
 	// shuttingDown is the Manager's flag, shared by pointer. When it is set,
 	// deliveries make a single attempt instead of running the retry ladder.
 	shuttingDown *atomic.Bool
-	logger       interface {
+	// conn is the Manager's connectivity monitor, shared by pointer
+	// (Manager.SetConnectivity). nil, or empty, means nothing ever holds.
+	// Set before the goroutine starts and never written after.
+	conn   *connSource
+	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -148,6 +152,18 @@ type targetQueue struct {
 	droppedOldest int
 	droppedNewest int
 	lastDropWarn  time.Time
+
+	// holding is set while the queue holds its messages through a
+	// connectivity outage: pop found the monitor offline with a message at the
+	// head, or a delivery's ladder is holding in awaitOutage. While it is set
+	// every queued message, and every arrival, is marked delayed, and a full
+	// queue drops its OLDEST rather than the arrival. pop clears it on the
+	// first look that finds the monitor online again.
+	holding bool
+	// heldDropped counts the messages the full queue dropped while holding,
+	// reported once — a Warn and a heldDropReport ahead of the backlog — when
+	// pop clears holding.
+	heldDropped int
 
 	// wake carries one buffered token, so a signal sent while the goroutine is
 	// between pop and receive is remembered rather than lost.
@@ -380,10 +396,32 @@ func (q *targetQueue) enqueue(it queued) {
 			"event", it.msg.logEvent(), "title", it.msg.logTitle())
 		return
 	}
+	// A message arriving while the monitor reports offline will wait for the
+	// online edge whatever the goroutine is doing, so the hold starts here if
+	// the goroutine has not started it yet: the cap's drop-oldest policy must
+	// not depend on whether the goroutine has woken up to the outage.
+	started := false
+	if !q.holding && q.conn.offline() {
+		started = q.beginHoldLocked()
+	}
+	if q.holding {
+		// Raised during the outage, or queued behind a delivery it holds:
+		// either way it goes out late, and says so.
+		it.msg.delayed = true
+	}
+	if started {
+		n := len(q.items) - q.steps + 1
+		defer q.logger.Info("connectivity monitor reports offline — holding this target's notifications until it returns",
+			"queued", n)
+	}
 	if len(q.items)-q.steps < notificationQueueCap {
 		q.items = append(q.items, it)
 		q.mu.Unlock()
 		q.signal()
+		return
+	}
+	if q.holding {
+		q.enqueueHeldLocked(it)
 		return
 	}
 	victim := -1
@@ -417,6 +455,49 @@ func (q *targetQueue) enqueue(it queued) {
 			"dropped_newest", nNewest,
 			"event", dropped.msg.logEvent(), "title", dropped.msg.logTitle())
 	}
+	q.signal()
+}
+
+// enqueueHeldLocked is enqueue's overflow policy while the queue holds through
+// an outage: the OLDEST message goes, never the arrival — the oldest low-tier
+// one if there is any, as at any other time, else the oldest of all. Outside
+// an outage the arrival goes (an older alert is the first symptom of an
+// incident, a newer one its echo), but a held queue only fills because
+// nothing can leave it: what an operator reads on the online edge should be
+// the latest of what happened, with the count of what is missing reported
+// once ahead of it (heldDropReport) rather than a Warn per victim.
+//
+// Called with q.mu HELD and a full queue; releases it. A queue full of
+// messages always has a victim: the cap counts messages only.
+func (q *targetQueue) enqueueHeldLocked(it queued) {
+	victim := -1
+	for i := range q.items {
+		if q.items[i].ctl == nil && q.items[i].tier == TierLow {
+			victim = i
+			break
+		}
+	}
+	if victim < 0 {
+		for i := range q.items {
+			if q.items[i].ctl == nil {
+				victim = i
+				break
+			}
+		}
+	}
+	if victim < 0 {
+		// Unreachable (see above), but a full queue with no message in it
+		// must still not keep the arrival past the cap.
+		q.mu.Unlock()
+		it.letGo()
+		return
+	}
+	dropped := q.items[victim]
+	q.items = append(q.items[:victim], q.items[victim+1:]...)
+	q.items = append(q.items, it)
+	q.heldDropped++
+	q.mu.Unlock()
+	dropped.letGo()
 	q.signal()
 }
 
@@ -530,6 +611,42 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 		}
 		return queued{}, false, true
 	}
+	offline := q.conn.offline()
+	if offline && q.closing {
+		return q.closeOfflineLocked()
+	}
+	if !offline && q.holding {
+		// The online edge. The backlog goes out from here, oldest first and
+		// each marked as delayed; what the full queue dropped while it held
+		// is counted once, ahead of it.
+		q.holding = false
+		n := q.heldDropped
+		q.heldDropped = 0
+		q.mu.Unlock()
+		q.logger.Info("connectivity restored — delivering the notifications held through the outage")
+		if n > 0 {
+			q.logger.Warn("notification queue held through an outage dropped its oldest — reporting it to the target",
+				"dropped", n, "cap", notificationQueueCap)
+			return queued{msg: heldDropReport(n), tier: TierNormal}, true, false
+		}
+		// Looked at again from the top: the lock was let go for the log line,
+		// and the queue may have been retired meanwhile.
+		return q.pop()
+	}
+	if len(q.items) > 0 && offline && q.items[0].ctl == nil {
+		// The monitor calls the link down, so nothing is spent on it: the
+		// queue holds, and every transition wakes it to look again
+		// (Manager.SetConnectivity). A step at the head still runs — it
+		// needs no network, and it only ever comes after what is ahead of it.
+		started := q.beginHoldLocked()
+		n := len(q.items) - q.steps
+		q.mu.Unlock()
+		if started {
+			q.logger.Info("connectivity monitor reports offline — holding this target's notifications until it returns",
+				"queued", n)
+		}
+		return queued{}, false, false
+	}
 	if len(q.items) == 0 {
 		// The queue has emptied, so whatever the coalescing window was still
 		// holding has no later drop to ride out on. Reporting it here is what
@@ -555,6 +672,124 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 	}
 	q.mu.Unlock()
 	return it, true, false
+}
+
+// closeOfflineLocked is pop's shutdown arm while the monitor reports offline:
+// nothing queued can be delivered — single attempts on a link that is down
+// would only spend the force-exit's seconds — so the messages are discarded
+// with one Warn naming the count, the steps still run (as a retired target's
+// do), and the goroutine exits. Called with q.mu HELD; releases it.
+func (q *targetQueue) closeOfflineLocked() (it queued, ok, exit bool) {
+	var steps []func()
+	var dropped []queued
+	for _, it := range q.items {
+		if it.ctl != nil {
+			steps = append(steps, it.ctl)
+			continue
+		}
+		dropped = append(dropped, it)
+	}
+	heldDropped := q.heldDropped
+	q.heldDropped = 0
+	q.items = nil
+	q.steps = 0
+	q.exited = true
+	q.mu.Unlock()
+	for _, it := range dropped {
+		it.letGo()
+	}
+	for _, fn := range steps {
+		q.runControl(fn)
+	}
+	if len(dropped) > 0 || heldDropped > 0 {
+		q.logger.Warn("shutting down while the connectivity monitor reports offline — discarding this target's held notifications",
+			"dropped", len(dropped), "dropped_while_held", heldDropped)
+	}
+	return queued{}, false, true
+}
+
+// beginHoldLocked marks the queue holding and every message in it delayed,
+// and reports whether the hold is new (for the caller's one log line). Called
+// with q.mu HELD.
+func (q *targetQueue) beginHoldLocked() bool {
+	if q.holding {
+		return false
+	}
+	q.holding = true
+	for i := range q.items {
+		if q.items[i].ctl == nil {
+			q.items[i].msg.delayed = true
+		}
+	}
+	return true
+}
+
+// retired reports whether the target is going away: removed by a Reload, or
+// closed for shutdown.
+func (q *targetQueue) retired() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.closing || q.discard
+}
+
+// watchingOutages implements outageGate.
+func (q *targetQueue) watchingOutages() bool {
+	return q.conn.watching()
+}
+
+// awaitOutage implements outageGate for the delivery this queue's goroutine is
+// running (DiscordWebhook.deliverWith).
+//
+// First the verdict: up to d for the monitor to report offline, waking on
+// every transition (Manager.SetConnectivity) and every enqueue; d of zero
+// only looks, which is what the ladder asks before each attempt. With no
+// outage in that time it returns outageNone — after all of d, or sooner when
+// the target goes away: a shutdown must not sit out outageVerdictWait on a
+// notification the ladder is about to drop anyway.
+//
+// Then, on an outage, the hold: the queue is marked holding (so what queues
+// behind is marked delayed and the cap drops the oldest), and the goroutine
+// waits for the monitor to report online (outageResumed) or for the target to
+// be retired or closed (outageGaveUp).
+func (q *targetQueue) awaitOutage(d time.Duration) outageResult {
+	if !q.conn.offline() {
+		if d <= 0 {
+			return outageNone
+		}
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+	verdict:
+		for !q.conn.offline() {
+			if q.retired() {
+				return outageNone
+			}
+			select {
+			case <-q.wake:
+			case <-timer.C:
+				if !q.conn.offline() {
+					return outageNone
+				}
+				break verdict
+			}
+		}
+	}
+	q.mu.Lock()
+	started := q.beginHoldLocked()
+	n := len(q.items) - q.steps
+	q.mu.Unlock()
+	if started {
+		q.logger.Info("connectivity monitor reports offline — holding this target's notifications until it returns",
+			"queued", n+1)
+	}
+	for {
+		if q.retired() {
+			return outageGaveUp
+		}
+		if !q.conn.offline() {
+			return outageResumed
+		}
+		<-q.wake
+	}
 }
 
 // stopDiscard retires a target removed by a Reload: it finishes the item it is
@@ -584,6 +819,13 @@ func (q *targetQueue) run() {
 			q.logger.Error("panic in notification sender loop", "panic", fmt.Sprint(r))
 		}
 	}()
+	// This goroutine is the one that runs the sender's retry ladder, so it is
+	// the one an outage holds (outageGate). Installed here rather than at
+	// construction: a re-added target's queue adopts a retired one's sender
+	// and starts only once that goroutine has exited (applyTargets).
+	if gs, ok := q.sender.(gatedSender); ok {
+		gs.setOutageGate(q)
+	}
 	for {
 		it, ok, exit := q.pop()
 		if exit {

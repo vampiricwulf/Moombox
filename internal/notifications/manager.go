@@ -301,6 +301,13 @@ type Manager struct {
 	// shuttingDown flips once, in BeginShutdown; every queue holds a pointer
 	// to it and reads it per delivery.
 	shuttingDown atomic.Bool
+	// conn is the connectivity monitor SetConnectivity wires (outage.go),
+	// shared with every queue by pointer like shuttingDown. Empty — the
+	// zero value a test literal gets — means no queue ever holds.
+	conn connSource
+	// unsubConn ends the monitor subscription SetConnectivity made, so a
+	// second call replaces it rather than adding one. Guarded by targetsMu.
+	unsubConn func()
 	// waitTimeout bounds Wait; zero means defaultWaitTimeout (test literals
 	// omit it). Set once at construction, never written afterwards.
 	waitTimeout time.Duration
@@ -805,6 +812,7 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 			delete(m.retiring, t.key)
 		}
 		q := newTargetQueue(t, m.logger, &m.shuttingDown, m.clock)
+		q.conn = &m.conn
 		bind(q)
 		next = append(next, q)
 		if t.key != "" {

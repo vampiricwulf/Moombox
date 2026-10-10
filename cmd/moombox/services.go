@@ -950,6 +950,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// Edit-mode targets keep one Discord message per job and need its id to
 	// survive a restart; the ids live on the job row (schema 20).
 	notifyMgr.SetMessageStore(db)
+	// A notification raised while the connectivity monitor reports offline is
+	// held in its target's queue and delivered, marked as delayed, on the
+	// online edge — instead of spending its three attempts on a dead link
+	// within seconds and being dropped (W27-10).
+	notifyMgr.SetConnectivity(s.connMon)
 	s.notifyMgr = notifyMgr
 
 	// =========================================================================

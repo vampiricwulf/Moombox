@@ -49,6 +49,15 @@ type Message struct {
 	Embeds         []Embed
 	Mention        string
 	MentionAllowed *AllowedMentions
+	// delayed marks a message its target held through a connectivity outage
+	// (targetQueue.pop, awaitOutage). buildPayload then adds delayedNote to
+	// the content: a line of content rather than a field, because content is
+	// outside the embeds' 6000-character budget, so a batch the splitter
+	// packed to the limit still fits with the note on it.
+	//
+	// Only the queue sets it, on its own item, so nothing a producer builds
+	// can carry one.
+	delayed bool
 }
 
 // One is the single-embed Message every non-batched send is — the shape all

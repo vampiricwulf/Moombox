@@ -100,6 +100,32 @@ type DiscordWebhook struct {
 	// bucketRefillsAt is when this webhook's rate bucket next has room, set
 	// from an X-RateLimit-Remaining: 0 response. Zero means "not known empty".
 	bucketRefillsAt time.Time
+	// gate is the target queue draining this webhook (setOutageGate), which
+	// the retry ladder asks whether a failing link is an outage to hold
+	// through. nil for SendTest's own instance and for a webhook no queue has
+	// started on: those run the ladder as it always ran. Guarded by bucketMu.
+	gate outageGate
+}
+
+// setOutageGate installs the queue whose goroutine drains this webhook. A
+// queue calls it as its goroutine starts, so a re-added target that adopts a
+// retired queue's sender (applyTargets) takes the gate over with it.
+func (d *DiscordWebhook) setOutageGate(g outageGate) {
+	d.bucketMu.Lock()
+	d.gate = g
+	d.bucketMu.Unlock()
+}
+
+// outageGate returns the installed gate when it is watching a connectivity
+// monitor, else nil.
+func (d *DiscordWebhook) outageGate() outageGate {
+	d.bucketMu.Lock()
+	g := d.gate
+	d.bucketMu.Unlock()
+	if g == nil || !g.watchingOutages() {
+		return nil
+	}
+	return g
 }
 
 type discordPayload struct {
@@ -265,6 +291,19 @@ func buildPayload(msg Message) ([]byte, error) {
 		payload.Content = msg.Mention
 		payload.AllowedMentions = msg.MentionAllowed
 	}
+	// A message its target held through an outage says so, on a line of its
+	// own after any mention. With no mention the content still gets an empty
+	// allowed_mentions: the note pings nobody, and the webhook default would
+	// parse user ids out of any content it is handed.
+	if msg.delayed {
+		note := delayedNote(msg.Embeds)
+		if payload.Content != "" {
+			payload.Content += "\n" + note
+		} else {
+			payload.Content = note
+			payload.AllowedMentions = &AllowedMentions{Parse: []string{}}
+		}
+	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -307,13 +346,19 @@ func (d *DiscordWebhook) SendOnce(msg Message) error {
 	}
 }
 
-// Send sends a Discord webhook message.
+// Send sends a Discord webhook message. When an outage holds it part-way
+// through its ladder, what goes out after the outage is the same message
+// marked as delayed (deliverWith).
 func (d *DiscordWebhook) Send(msg Message) error {
 	body, err := buildPayload(msg)
 	if err != nil {
 		return err
 	}
-	_, err = d.deliver(http.MethodPost, d.URL, body, false)
+	_, err = d.deliverWith(http.MethodPost, d.URL, body, false, func() ([]byte, error) {
+		held := msg
+		held.delayed = true
+		return buildPayload(held)
+	})
 	return err
 }
 
@@ -328,7 +373,33 @@ func (d *DiscordWebhook) Send(msg Message) error {
 //
 // Alerts exist precisely for flaky moments; the previous single-shot behavior
 // dropped e.g. a "recording failed" embed on the first connection reset.
-func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody bool) (_ []byte, err error) {
+//
+// The edit path's POST and PATCH come through here with no re-render: a
+// lifecycle rewrite an outage held is resent as it was (deliverWith).
+func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody bool) ([]byte, error) {
+	return d.deliverWith(method, endpoint, body, wantBody, nil)
+}
+
+// deliverWith is deliver's loop, and where an outage holds a delivery.
+//
+// With a gate installed (the target queue, watching the connectivity monitor),
+// nothing is spent on a link the monitor calls down. Before each attempt a
+// monitor reporting offline holds the delivery in place until it reports
+// online again, so an outage that starts under a delivery costs it the one
+// attempt it was making. When the LAST attempt failed at the transport level
+// and the monitor still says online, the delivery waits up to
+// outageVerdictWait for its verdict before giving up: the monitor is slower to
+// call an outage than three refused dials are to fail. Either way a hold ends
+// with a fresh ladder once the link is back — the outage is charged no
+// attempts.
+//
+// The hold blocks this target's queue goroutine only, which is the point —
+// what is queued behind waits in order — and never a producer. A target
+// retired or closed for shutdown while it holds gives the delivery up.
+//
+// delayed renders the body again marked as delayed, for the attempt after a
+// hold; nil resends body as it was.
+func (d *DiscordWebhook) deliverWith(method, endpoint string, body []byte, wantBody bool, delayed func() ([]byte, error)) (_ []byte, err error) {
 	var lastErr error
 	var slept time.Duration
 	var r discordResponse
@@ -337,7 +408,38 @@ func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody 
 			d.noteRateLimitGiveUp(r)
 		}
 	}()
+	gate := d.outageGate()
+	// held handles one wait's outcome: on a resume, the body becomes the
+	// delayed one and the ladder starts over; on a give-up, the delivery ends.
+	held := func(res outageResult) (restart bool, giveUp error) {
+		switch res {
+		case outageResumed:
+			if delayed != nil {
+				if b, rerr := delayed(); rerr == nil {
+					body = b
+				}
+			}
+			return true, nil
+		case outageGaveUp:
+			cause := lastErr
+			if cause == nil {
+				cause = errors.New("discord webhook request held by a connectivity outage")
+			}
+			return false, fmt.Errorf("%w (held through a connectivity outage; the target closed before the link returned)", cause)
+		}
+		return false, nil
+	}
 	for attempt := 1; ; attempt++ {
+		if gate != nil {
+			// Nothing is spent on a link the monitor already calls down.
+			restart, giveUp := held(gate.awaitOutage(0))
+			if giveUp != nil {
+				return nil, giveUp
+			}
+			if restart {
+				attempt, slept = 1, 0
+			}
+		}
 		// Pre-emptive: if the last response said the bucket was empty, wait
 		// out its window instead of spending one of three attempts on the 429
 		// Discord has already promised.
@@ -345,9 +447,11 @@ func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody 
 		r, err = d.do(method, endpoint, body, wantBody)
 		d.noteBucket(r)
 
+		transport := false
 		var delay time.Duration
 		switch {
 		case err != nil:
+			transport = true
 			lastErr = fmt.Errorf("discord webhook request: %w", err)
 			delay = discordRetryBackoff[min(attempt-1, len(discordRetryBackoff)-1)]
 		case r.status < 400:
@@ -373,6 +477,18 @@ func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody 
 		}
 
 		if attempt == discordMaxAttempts {
+			if transport && gate != nil {
+				// The ladder is spent, and the monitor may not have caught up
+				// with a link that went down under it: ask before dropping.
+				restart, giveUp := held(gate.awaitOutage(outageVerdictWait))
+				if giveUp != nil {
+					return nil, giveUp
+				}
+				if restart {
+					attempt, slept = 0, 0
+					continue
+				}
+			}
 			return nil, fmt.Errorf("%w (gave up after %d attempts)", lastErr, discordMaxAttempts)
 		}
 		if slept+delay > discordMaxSleepTotal {
