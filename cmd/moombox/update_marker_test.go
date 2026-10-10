@@ -232,20 +232,28 @@ func TestARollbackIsNotAnnouncedAsAnUpdate(t *testing.T) {
 
 // run() reads the rollback once (rolledBackRelease) and hands that reading to
 // both of its consumers: the "Update Applied" decision and the breadcrumb's
-// resolution, which marks the release skipped. run() itself boots the whole
+// resolution, which marks the release skipped. The resolution also takes the
+// config's own ConfigLoaded, which gates the skip write
+// (TestARolledBackReleaseIsMarkedSkipped). run() itself boots the whole
 // service graph, so its call sites are read from source.
 //
 // Mutants: run() dropping the resolveUpdateBreadcrumb call (the breadcrumb is
 // never resolved and no rollback is skipped); passing "" in place of
-// rolledBackFrom to either call; dropping the rolledBackRelease call.
+// rolledBackFrom to either call; dropping the rolledBackRelease call; passing
+// false for configLoaded
+// (`resolveUpdateBreadcrumb(s.configStore, exeSelf, version, rolledBackFrom, false, log)`)
+// or reading configLoaded from anything but c.ConfigLoaded — no rollback
+// ever writes SkippedVersion, and the daily check offers the failed release
+// again.
 func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "main.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var readAt token.Pos
+	var readAt, loadedAt token.Pos
 	argOf := map[string]ast.Expr{} // callee → the argument that must be rolledBackFrom
+	var loadedArg ast.Expr         // resolveUpdateBreadcrumb's, which must be configLoaded
 	ast.Inspect(f, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
 		if !ok || fn.Name.Name != "run" {
@@ -262,6 +270,13 @@ func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 							}
 						}
 					}
+					if id, ok := n.Lhs[0].(*ast.Ident); ok && id.Name == "configLoaded" {
+						if sel, ok := n.Rhs[0].(*ast.SelectorExpr); ok && sel.Sel.Name == "ConfigLoaded" {
+							loadedAt = n.Pos()
+						} else {
+							t.Errorf("run() sets configLoaded at %s from something other than the config's ConfigLoaded", fset.Position(n.Pos()))
+						}
+					}
 				}
 			case *ast.CallExpr:
 				fun, ok := n.Fun.(*ast.Ident)
@@ -276,6 +291,7 @@ func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 				case "resolveUpdateBreadcrumb":
 					if len(n.Args) == 6 {
 						argOf[fun.Name] = n.Args[3]
+						loadedArg = n.Args[4]
 					}
 				}
 			}
@@ -285,6 +301,16 @@ func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 	})
 	if readAt == token.NoPos {
 		t.Fatal("run() never assigns rolledBackFrom from rolledBackRelease")
+	}
+	if loadedAt == token.NoPos {
+		t.Error("run() never reads configLoaded from the config's ConfigLoaded")
+	}
+	if loadedArg != nil {
+		if id, ok := loadedArg.(*ast.Ident); !ok || id.Name != "configLoaded" {
+			t.Errorf("run() calls resolveUpdateBreadcrumb at %s without configLoaded: the skip write never happens", fset.Position(loadedArg.Pos()))
+		} else if id.Pos() < loadedAt {
+			t.Errorf("run() calls resolveUpdateBreadcrumb at %s before reading configLoaded", fset.Position(id.Pos()))
+		}
 	}
 	for _, callee := range []string{"announcesVersionChange", "resolveUpdateBreadcrumb"} {
 		arg, ok := argOf[callee]

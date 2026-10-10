@@ -27,8 +27,9 @@ import (
 // Mutants: recoverFailedBoot not restoring the breadcrumb (drop its
 // restoreUpdateBreadcrumb call) — the late crash's release is not skipped and
 // the rollback is announced as an update; restarted arming without the tag
-// (`b.armed, b.artifact = true, artifact`) — the same; the launcher loop's
-// read of the tag is pendingUpdateTag, which this calls as the loop does.
+// (`b.armed, b.artifact = true, artifact`) — the same. The launcher loop's
+// read of the tag is pendingUpdateTag, which this calls as the loop does;
+// TestTheLauncherArmsTheBootWithTheBreadcrumbsRelease pins the loop's call.
 func TestALateRollbackSkipsTheReleaseAndIsNoUpdate(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
