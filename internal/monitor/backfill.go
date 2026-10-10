@@ -315,8 +315,8 @@ func (bw *BackfillWorker) Start(ctx context.Context) {
 
 // runScan executes one queued scan. The deferred cleanup runs on EVERY exit
 // path — success, failure, cancellation, panic (§11): reset the cursor if
-// the scan was individually cancelled, remove the in-flight entry, close
-// done for CancelAndPrune's wait.
+// the scan was individually cancelled, release the scan's context, remove
+// the in-flight entry, close done for CancelAndPrune's wait.
 func (bw *BackfillWorker) runScan(item scanItem) {
 	chID := item.ref.ChID
 	defer func() {
@@ -336,6 +336,13 @@ func (bw *BackfillWorker) runScan(item scanItem) {
 				bw.logger.Warn("backfill cursor reset failed", "channel", chID, "err", err)
 			}
 		}
+		// Release the scan's context: it derives from baseCtx, which keeps
+		// a child registered until the child is cancelled, and only a widen,
+		// a pause or a prune cancels one — every scan that completed, failed
+		// or was skipped stayed on baseCtx for the life of the process.
+		// After the check above, which must see only a cancellation that
+		// came from outside: a failed scan resumes from its cursor.
+		item.fl.cancel()
 		bw.mu.Lock()
 		// A widen-restart replaces the map entry with the deeper scan's
 		// while this one is still unwinding — only remove what is OURS.
