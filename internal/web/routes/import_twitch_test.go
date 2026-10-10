@@ -90,6 +90,64 @@ func TestImportRecognisesATwitchArchive(t *testing.T) {
 	}
 }
 
+// Only Moombox's own Twitch ids say an archive is Twitch's: "tw_v<vod id>",
+// "tw_<stream id>" and "tw_manual_<login>_<n>". Any "tw_" id did, and
+// "tw_abcdEFGH" is an ordinary 11-character YouTube id (about one in 262,000
+// start so): its archive imported as a Twitch row with no URL and no
+// thumbnail, its YouTube chat header ignored. A YouTube header — a videoId
+// and no platform — also outweighs a Twitch-shaped id, since "tw_12345678"
+// is 11 characters too.
+//
+// Mutants: detecting Twitch by the "tw_" prefix again (the header-less
+// "tw_abcdEFGH" is twitch); ignoring the YouTube header ("tw_12345678" with
+// one is twitch); dropping the manual add's shape from the pattern (its id
+// is not taken, and stays in the title).
+func TestImportTakesOnlyMoomboxTwitchIDsForTwitch(t *testing.T) {
+	ytChat := func(id string) []byte {
+		return chatJSONFor(t, map[string]any{"videoId": id, "videoTitle": "Song", "channelName": "Chan"})
+	}
+	for _, tc := range []struct {
+		name         string
+		entries      []importEntry
+		wantID       string
+		wantPlatform string
+		wantURL      string
+	}{
+		{"a tw_ YouTube id, no chat", []importEntry{
+			{name: "Song [tw_abcdEFGH].mp4", data: []byte("v")},
+		}, "tw_abcdEFGH", "youtube", "https://www.youtube.com/watch?v=tw_abcdEFGH"},
+		{"a tw_ YouTube id with its chat", []importEntry{
+			{name: "Song [tw_abcdEFGH].mp4", data: []byte("v")},
+			{name: "Song [tw_abcdEFGH].chat.json", data: ytChat("tw_abcdEFGH")},
+		}, "tw_abcdEFGH", "youtube", "https://www.youtube.com/watch?v=tw_abcdEFGH"},
+		{"a Twitch-shaped YouTube id with its chat", []importEntry{
+			{name: "Song [tw_12345678].mp4", data: []byte("v")},
+			{name: "Song [tw_12345678].chat.json", data: ytChat("tw_12345678")},
+		}, "tw_12345678", "youtube", "https://www.youtube.com/watch?v=tw_12345678"},
+		{"a manual add's capture", []importEntry{
+			{name: "Late [tw_manual_some_streamer_1759000000000000000].mp4", data: []byte("v")},
+		}, "tw_manual_some_streamer_1759000000000000000", "twitch", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newImportFixture(t)
+			rec, job := importZip(t, f, orderedImportZip(t, tc.entries...))
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+			}
+			if job.ID != tc.wantID || job.Platform != tc.wantPlatform || job.URL != tc.wantURL {
+				t.Errorf("id %q platform %q url %q, want %q / %q / %q",
+					job.ID, job.Platform, job.URL, tc.wantID, tc.wantPlatform, tc.wantURL)
+			}
+			if strings.Contains(job.Title, "[") {
+				t.Errorf("title %q keeps its id", job.Title)
+			}
+			if tc.wantPlatform == "youtube" && job.ThumbnailURL != "https://i.ytimg.com/vi/"+tc.wantID+"/maxresdefault.jpg" {
+				t.Errorf("thumbnail %q", job.ThumbnailURL)
+			}
+		})
+	}
+}
+
 // A YouTube archive is untouched by the Twitch detection.
 func TestImportKeepsAYouTubeArchiveYouTube(t *testing.T) {
 	f := newImportFixture(t)

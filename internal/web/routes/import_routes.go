@@ -240,8 +240,12 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// (twitch.TwitchChatData, platform "twitch") and the "tw_" job id its
 		// file is named with. It imported as a YouTube row — channel
 		// "Import", a watch URL for a video that does not exist, and the
-		// "[tw_…]" id left in its title (W25-03).
-		twitchArchive := meta.Platform == "twitch" || strings.HasPrefix(videoID, "tw_")
+		// "[tw_…]" id left in its title (W25-03). Only Moombox's own Twitch
+		// id shapes say so, and only when no YouTube chat header (a videoId
+		// and no platform) says otherwise: "tw_abcdEFGH" is an ordinary
+		// YouTube id, and so — 11 characters — is "tw_12345678".
+		youTubeChat := meta.VideoID != "" && meta.Platform == ""
+		twitchArchive := meta.Platform == "twitch" || (importTwitchIDRe.MatchString(videoID) && !youTubeChat)
 		if videoID == "" && !twitchArchive && utils.IsVideoID(meta.VideoID) {
 			videoID = meta.VideoID
 		}
@@ -280,7 +284,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		isVod := false
 		if twitchArchive {
 			platform, videoURL, thumbnailURL = "twitch", "", ""
-			if m := importTwitchVODRe.FindStringSubmatch(videoID); m != nil {
+			if m := importTwitchIDRe.FindStringSubmatch(videoID); m != nil && m[1] != "" {
 				videoURL, isVod = "https://www.twitch.tv/videos/"+m[1], true
 			}
 		}
@@ -1166,19 +1170,27 @@ func importLegacyStem(title, id string) string {
 // importNameMaxBytes is a file name's limit on Linux filesystems (NAME_MAX).
 const importNameMaxBytes = 255
 
-// importNameIDRe is a bracketed id in an archive's file name: a YouTube video
-// id; a Moombox Twitch job's id, which its archives are named with
-// (worker.go names a Twitch recording by job.ID: "tw_v<vod id>",
-// "tw_<stream id>", "tw_manual_<login>_<n>"); or the "imp_" placeholder an
-// earlier import minted (randomHex(4), the shape the dashboard's
-// isImportPlaceholderId and the TUI's isImportPlaceholderID read), so
-// re-importing an imported archive keeps its id. Every shape is path-safe —
-// the id is interpolated into the output name.
-var importNameIDRe = regexp.MustCompile(`\[(tw_[a-zA-Z0-9_]{1,64}|imp_[0-9a-f]{8}|[a-zA-Z0-9_-]{11})\]`)
+// importTwitchIDPattern is a Moombox Twitch job's id, which worker.go names
+// its recordings with: a VOD's "tw_v<vod id>" and a live capture's
+// "tw_<stream id>" (twitch.BuildJobID), and a manual add's
+// "tw_manual_<login>_<n>" (the add route, jobs.go) — those shapes only, not
+// any "tw_" id: "tw_abcdEFGH" is an ordinary YouTube id, and its archive
+// imported as a Twitch row with no URL. Its first group is a VOD's id, the
+// one Twitch id that names a page of its own (twitch.tv/videos/<id>), and its
+// second a manual add's login.
+const importTwitchIDPattern = `tw_(?:v([0-9]{1,20})|[0-9]{1,20}|manual_([a-z0-9_]{1,25})_[0-9]{1,20})`
 
-// importTwitchVODRe is a Twitch VOD job's id, the one Twitch id shape that
-// names a page of its own: twitch.tv/videos/<digits>.
-var importTwitchVODRe = regexp.MustCompile(`^tw_v([0-9]+)$`)
+// importTwitchIDRe is a whole id of importTwitchIDPattern's shape.
+var importTwitchIDRe = regexp.MustCompile(`^` + importTwitchIDPattern + `$`)
+
+// importNameIDRe is a bracketed id in an archive's file name: a YouTube video
+// id; a Moombox Twitch job's id (importTwitchIDPattern); or the "imp_"
+// placeholder an earlier import minted (randomHex(4), the shape the
+// dashboard's isImportPlaceholderId and the TUI's isImportPlaceholderID
+// read), so re-importing an imported archive keeps its id. Every shape is
+// path-safe — the id is interpolated into the output name. The id is its
+// first group.
+var importNameIDRe = regexp.MustCompile(`\[(` + importTwitchIDPattern + `|imp_[0-9a-f]{8}|[a-zA-Z0-9_-]{11})\]`)
 
 // importNameID returns the id a file name's stem carries and the stem without
 // it. The id is the LAST bracketed one: Moombox ("${title} [${id}]") and
