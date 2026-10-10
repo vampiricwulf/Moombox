@@ -1049,3 +1049,18 @@ export function channelTermsForSave(existingTerms, seedShown, typed) {
   }
   return typed;
 }
+
+/**
+ * Whether a typed channel ID has to go through /api/resolve-channel before it
+ * is a channel ID: a youtube.com / youtu.be / twitch.tv URL, or a bare
+ * @handle (a YouTube handle — both channel dialogs advertise the form, and
+ * posted verbatim it named no channel the monitors could poll). The Go side's
+ * utils.NeedsChannelResolve is the same rule.
+ */
+export function channelInputNeedsResolve(id) {
+  const v = String(id ?? "").trim();
+  return v.startsWith("@") || v.includes("youtube.com") || v.includes("youtu.be") || v.includes("twitch.tv");
+}
+
+/** The resolve step's refusal, worded as the server words it. */
+export const NOT_A_CHANNEL_URL = "Not a YouTube or Twitch channel URL";

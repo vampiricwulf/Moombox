@@ -3,10 +3,12 @@
  */
 import { renderTemplatePreview } from "./settings.js";
 import {
+  channelInputNeedsResolve,
   cookieSetupAbortReport,
   cookieSetupAcceptedToast,
   cookieSetupProbe,
   cookieSetupRejectedMessage,
+  NOT_A_CHANNEL_URL,
   serverErrorMessage,
 } from "./utils.js";
 
@@ -233,7 +235,7 @@ export class SetupController {
         const val = (setupChId.value || "").trim();
         const platformSel = document.getElementById("setup-ch-platform");
         if (!platformSel) return;
-        if (val.includes("youtube.com") || val.includes("youtu.be")) {
+        if (val.startsWith("@") || val.includes("youtube.com") || val.includes("youtu.be")) {
           if (platformSel.value !== "youtube") platformSel.value = "youtube";
         } else if (val.includes("twitch.tv")) {
           if (platformSel.value !== "twitch") platformSel.value = "twitch";
@@ -685,8 +687,8 @@ export class SetupController {
     let name = (document.getElementById("setup-ch-name")?.value || "").trim();
     let platform = document.getElementById("setup-ch-platform")?.value || "youtube";
 
-    // Resolve channel URL if it looks like a URL
-    if (id.includes("youtube.com") || id.includes("youtu.be") || id.includes("twitch.tv")) {
+    // Resolve a channel URL or a bare @handle
+    if (channelInputNeedsResolve(id)) {
       const saveBtn = document.getElementById("setup-ch-save");
       if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
       try {
@@ -697,6 +699,12 @@ export class SetupController {
         });
         if (resp.ok) {
           const resolved = await resp.json();
+          // Echoed back unrecognised: no channel, and the wizard's Finish
+          // would be refused over it.
+          if (resolved.resolved === false) {
+            this.app.showToast(NOT_A_CHANNEL_URL, "danger");
+            return;
+          }
           if (resolved.id) id = resolved.id;
           if (resolved.name && !name) name = resolved.name;
           if (resolved.platform) platform = resolved.platform;

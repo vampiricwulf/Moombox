@@ -6,6 +6,7 @@ import {
   browserPathValidationOutcome,
   channelRemovalPrompt,
   channelRemovedToast,
+  channelInputNeedsResolve,
   channelTermsForSave,
   cookieImportRolledBackToast,
   cookieSetupAbortReport,
@@ -13,6 +14,7 @@ import {
   cookieSetupProbe,
   cookieSetupRejectedMessage,
   formatRelativeTime,
+  NOT_A_CHANNEL_URL,
   restartValuesChanged,
   serverErrorMessage,
   snapshotRestartValues,
@@ -291,7 +293,7 @@ export class SettingsController {
         const val = (channelIdInput.value || "").trim();
         const platformSelect = document.getElementById("channel-platform-select");
         if (!platformSelect || platformSelect.disabled) return;
-        if (val.includes("youtube.com") || val.includes("youtu.be")) {
+        if (val.startsWith("@") || val.includes("youtube.com") || val.includes("youtu.be")) {
           if (platformSelect.value !== "youtube") {
             platformSelect.value = "youtube";
             this.updateChannelDialogForPlatform("youtube");
@@ -1669,8 +1671,8 @@ export class SettingsController {
     const enabledSwitch = document.getElementById("channel-enabled-switch");
     const enabled = enabledSwitch ? enabledSwitch.checked : true;
 
-    // Resolve channel URL if it looks like a URL (only for new channels)
-    if (!this.editingChannelId && (id.includes("youtube.com") || id.includes("youtu.be") || id.includes("twitch.tv"))) {
+    // Resolve a channel URL or a bare @handle (only for new channels)
+    if (!this.editingChannelId && channelInputNeedsResolve(id)) {
       const saveBtn = document.getElementById("channel-save-btn");
       if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
       try {
@@ -1681,6 +1683,12 @@ export class SettingsController {
         });
         if (resp.ok) {
           const resolved = await resp.json();
+          // The route echoes input it does not recognise; that is no
+          // channel, and saving it would store a URL (or "@…") as an ID.
+          if (resolved.resolved === false) {
+            this.app.showToast(NOT_A_CHANNEL_URL, "danger");
+            return;
+          }
           if (resolved.id) {
             id = resolved.id;
             document.getElementById("channel-id-input").value = id;
