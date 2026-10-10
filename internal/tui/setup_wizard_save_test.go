@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,6 +120,57 @@ func TestPasswordSpaceWarningOnBothTUISurfaces(t *testing.T) {
 	}
 	if v := securityView("plain secret"); strings.Contains(v, config.PasswordOuterSpaceWarning) {
 		t.Error("Security: warning for a password with no outer space")
+	}
+}
+
+// TestSetupSaveCarriesTheLoginCookiesBeforeSaving pins W26-06 on the TUI
+// wizard's side: its Cookies step names a cookie file and its Cookie Login
+// step then writes the login to the cookie file the running service was
+// built with, so the restart loaded an empty jar from the saved one although
+// the login had been reported Done. The save command hands the cookie file it
+// is about to save to OnCarryCookies first; a carry that fails is reported in
+// the wizard and nothing is saved.
+//
+// Mutants killed: the save command not calling OnCarryCookies; calling it
+// after OnComplete; ignoring its error.
+func TestSetupSaveCarriesTheLoginCookiesBeforeSaving(t *testing.T) {
+	t.Chdir(t.TempDir())
+	run := func(carryErr error) (carried []string, saved bool, res setupSaveResultMsg) {
+		app := NewApp()
+		app.SetSetupCallbacks(
+			func(*config.MoomboxConfig) error { saved = true; return nil },
+			nil, nil, nil, nil, nil,
+		)
+		app.SetupWizCarryCookies(func(cookieFile string) error {
+			if saved {
+				t.Error("OnCarryCookies ran after the config was saved")
+			}
+			carried = append(carried, cookieFile)
+			return carryErr
+		})
+		// Advanced setup on its channel list, past the Cookies step (which
+		// named the cookie file) and the Cookie Login step: Tab finishes.
+		app.setupWiz.Open()
+		app.setupWiz.mode = setupModeAdvanced
+		app.setupWiz.values["cookieFile"] = filepath.Join("data", "my-cookies.txt")
+		app.setupWiz.advancedFormDone, app.setupWiz.advancedCookieDone = true, true
+		app.setupWiz.channelMode = "list"
+		_, cmd := app.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+		if cmd == nil {
+			t.Fatal("Tab on the channel list issued no save command")
+		}
+		res, _ = cmd().(setupSaveResultMsg)
+		return carried, saved, res
+	}
+
+	carried, saved, res := run(nil)
+	if want := filepath.Join("data", "my-cookies.txt"); len(carried) != 1 || carried[0] != want || !saved || res.Err != "" {
+		t.Errorf("carried %q saved %v err %q, want the saved cookie file %q carried, then saved", carried, saved, res.Err, want)
+	}
+
+	_, saved, res = run(errors.New("disk full"))
+	if saved || !strings.Contains(res.Err, "cookies.cookie_file") {
+		t.Errorf("a failed carry: saved %v err %q, want refused naming cookies.cookie_file", saved, res.Err)
 	}
 }
 

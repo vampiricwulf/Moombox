@@ -795,6 +795,10 @@ func (s *runState) runTUI() {
 		return s.authSvc.HashPassword(password)
 	})
 
+	// The cookies a browser login in the wizard wrote, carried into the
+	// cookie file it saves — the Web wizard's CarryCookies, the same call.
+	app.SetupWizCarryCookies(s.carrySetupCookies)
+
 	// Wire setup wizard FFmpeg status check
 	app.SetupWizFFmpegCheck(func() (bool, string) {
 		valid, ver, _ := routes.CheckFFmpegCached(s.ffmpegPathOrDefault())
@@ -1206,6 +1210,17 @@ func (s *runState) httpsEnabled() bool {
 	enabled := false
 	s.configStore.Read(func(c *config.MoomboxConfig) { enabled = c.Network.HTTPSEnabled })
 	return enabled
+}
+
+// carrySetupCookies is both setup wizards' CarryCookies: the cookies the
+// running cookie service wrote — at the cookie file this run booted with, where
+// a browser login in the wizard saved them — carried into cookieFile, the one
+// the wizard is about to save (cookies.AutoCookieService.CarryCookieFileTo).
+func (s *runState) carrySetupCookies(cookieFile string) error {
+	if s.autoCookieSvc == nil {
+		return nil
+	}
+	return s.autoCookieSvc.CarryCookieFileTo(cookieFile)
 }
 
 // ffmpegPathOrDefault returns the configured FFmpeg path, or "ffmpeg" for

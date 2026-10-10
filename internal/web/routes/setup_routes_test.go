@@ -543,6 +543,78 @@ func TestSetupCompleteStoresThePasswordAsTyped(t *testing.T) {
 	}
 }
 
+// TestSetupCompleteCarriesTheLoginCookiesIntoTheSavedCookieFile pins W26-06
+// on the Web wizard's side: its step 6 offers a cookie file beside the
+// browser login, the login wrote to the cookie file the running service was
+// built with, and the restart loaded an empty jar from the one the wizard
+// saved. setup/complete now hands the cookie file it is about to save to
+// CarryCookies — the body's, or the config's when the body names none —
+// before anything is saved, and a carry that fails refuses the setup under
+// cookies.cookie_file with nothing saved.
+//
+// Mutants killed: not calling CarryCookies; calling it with the config's
+// cookie file when the body names another; calling it after the save;
+// ignoring its error.
+func TestSetupCompleteCarriesTheLoginCookiesIntoTheSavedCookieFile(t *testing.T) {
+	newFixture := func(t *testing.T, carry func(f *setupFixture, cookieFile string) error) *setupFixture {
+		t.Helper()
+		f := newSetupFixture(t)
+		r := chi.NewRouter()
+		SetupRoutes(r, &SetupDeps{
+			Auth:         f.auth,
+			CarryCookies: func(cookieFile string) error { return carry(f, cookieFile) },
+		}, f.store)
+		f.router = r
+		return f
+	}
+
+	custom := filepath.Join(t.TempDir(), "data", "my-cookies.txt")
+	var carried []string
+	f := newFixture(t, func(f *setupFixture, cookieFile string) error {
+		var loaded bool
+		f.store.Read(func(c *config.MoomboxConfig) { loaded = c.ConfigLoaded })
+		if loaded {
+			t.Error("CarryCookies ran after the setup was saved")
+		}
+		carried = append(carried, cookieFile)
+		return nil
+	})
+	if rec := postSetupComplete(t, f.router, map[string]any{
+		"cookies": map[string]any{"cookie_file": custom, "auto_enabled": true, "active_platforms": []string{"youtube"}},
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("setup/complete: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	if len(carried) != 1 || carried[0] != custom {
+		t.Errorf("carried into %q, want the saved cookie file %q", carried, custom)
+	}
+
+	carried = nil
+	f = newFixture(t, func(_ *setupFixture, cookieFile string) error { carried = append(carried, cookieFile); return nil })
+	var configured string
+	f.store.Read(func(c *config.MoomboxConfig) { configured = c.Cookies.CookieFile })
+	if rec := postSetupComplete(t, f.router, map[string]any{}); rec.Code != http.StatusOK {
+		t.Fatalf("setup/complete with no cookie file: %d", rec.Code)
+	}
+	if len(carried) != 1 || carried[0] != configured {
+		t.Errorf("carried into %q, want the configured cookie file %q", carried, configured)
+	}
+
+	f = newFixture(t, func(*setupFixture, string) error { return errors.New("disk full") })
+	rec := postSetupComplete(t, f.router, map[string]any{"cookies": map[string]any{"cookie_file": custom}})
+	var resp struct {
+		Details map[string]string `json:"details"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if rec.Code != http.StatusBadRequest || resp.Details["cookies.cookie_file"] == "" {
+		t.Errorf("a failed carry: %d %v, want 400 under cookies.cookie_file", rec.Code, resp.Details)
+	}
+	var loaded bool
+	f.store.Read(func(c *config.MoomboxConfig) { loaded = c.ConfigLoaded })
+	if loaded {
+		t.Error("the setup was saved although its cookies could not be carried")
+	}
+}
+
 // postSetupComplete sends body to /api/setup/complete from loopback, as the
 // wizard does.
 func postSetupComplete(t *testing.T, router http.Handler, body map[string]any) *httptest.ResponseRecorder {

@@ -1,10 +1,13 @@
 package cookies
 
 // cookie_files.go — cookie file hygiene: the atomic write, sweeping orphaned
-// temp files, and tightening a cookie directory's ACL/permissions.
+// temp files, tightening a cookie directory's ACL/permissions, and carrying
+// the cookie file into the one a first-run setup saves.
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -313,4 +316,76 @@ func tightenCookieDirOnce(dir string) {
 		tightenedCookieDirsMu.Unlock()
 		succeeded = true
 	}()
+}
+
+// CarryCookieFileTo carries the cookies this service writes — at the cookie
+// file it was built with, the boot-time cookies.cookie_file — into newPath,
+// the cookie file a first-run setup is about to save. Both wizards call it
+// before they save (the Web one's POST /api/setup/complete, the TUI one's
+// save command): a browser login run in the wizard wrote to the boot-time
+// path, the Advanced step lets the operator name another cookie file beside
+// that login, and the restart then loaded an empty jar from the new path
+// although the wizard had reported the login Done. One rule for both: the
+// cookies the run was using are the cookies the restart loads.
+//
+// The cookies are merged into newPath when a file is already there, the
+// carried ones winning a clash (they are what the wizard just signed in to),
+// the same merge every cookie writer uses; an unreadable newPath is refused
+// rather than overwritten (ErrCookieFileUnreadable). The refresh sidecar goes
+// with them when it is newer than newPath's own. The boot-time file is left
+// where it is. Nothing to carry — no boot-time file, an empty one, or newPath
+// naming the same file — is not an error.
+func (s *AutoCookieService) CarryCookieFileTo(newPath string) error {
+	from := s.cookiePath
+	if from == "" || newPath == "" || sameFilePath(from, newPath) {
+		return nil
+	}
+	data, err := readCookieFile(from)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read the cookies to carry from %s: %w", from, err)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		return fmt.Errorf("create the directory for %s: %w", newPath, err)
+	}
+	merged := string(data)
+	existing, err := readCookieFile(newPath)
+	switch {
+	case err == nil:
+		if strings.TrimSpace(string(existing)) != "" {
+			merged = mergeCookieFiles(string(existing), merged)
+		}
+	case errors.Is(err, fs.ErrNotExist):
+	default:
+		return fmt.Errorf("%w — refusing to overwrite %s (%w)", ErrCookieFileUnreadable, newPath, err)
+	}
+	if err := writeCookieFile(newPath, []byte(merged), 0o600); err != nil {
+		return err
+	}
+	fromMeta, err := LoadMeta(from)
+	if err != nil || fromMeta == nil {
+		return nil // the sidecar is advisory; the next refresh writes one
+	}
+	if toMeta, err := LoadMeta(newPath); err == nil && toMeta != nil && !fromMeta.LastRefresh.After(toMeta.LastRefresh) {
+		return nil
+	}
+	return SaveMeta(newPath, *fromMeta)
+}
+
+// sameFilePath reports whether a and b name the same file: the same absolute
+// path, or — both existing — the same file by os.SameFile.
+func sameFilePath(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA == nil && errB == nil && absA == absB {
+		return true
+	}
+	infoA, errA := os.Stat(a)
+	infoB, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(infoA, infoB)
 }

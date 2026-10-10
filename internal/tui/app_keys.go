@@ -192,6 +192,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			installYtdlp := a.setupWiz.pendingYtdlp
 			onComplete := a.setupWiz.OnComplete
 			onInstall := a.setupWiz.OnInstallYtdlp
+			onCarryCookies := a.setupWiz.OnCarryCookies
 			return a, safeCmd(func() tea.Msg {
 				if cfg == nil {
 					return setupSaveResultMsg{Err: "no config to save"}
@@ -202,6 +203,13 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				// path — the Web wizard's 400 (config.MakeSetupDirs).
 				if err := config.MakeSetupDirs(cfg.Paths.OutputDirectory, cfg.Paths.StagingDirectory); err != nil {
 					return setupSaveResultMsg{Err: err.Error()}
+				}
+				// The cookies a login on the Cookie Login step wrote, into
+				// the cookie file the setup saves — before it is saved.
+				if onCarryCookies != nil {
+					if err := onCarryCookies(cfg.Cookies.CookieFile); err != nil {
+						return setupSaveResultMsg{Err: "cookies.cookie_file: could not carry the signed-in cookies here: " + err.Error()}
+					}
 				}
 				if onComplete != nil {
 					if err := onComplete(cfg); err != nil {

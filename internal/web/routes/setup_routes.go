@@ -19,6 +19,23 @@ type SetupDeps struct {
 	Auth           *web.AuthService
 	OnInstallYtdlp func(port int, httpsEnabled bool)
 	OnRestart      func()
+	// CarryCookies carries the cookies the running cookie service wrote —
+	// a browser login the wizard just ran — into the cookie file the setup
+	// saves, before it is saved (cookies.AutoCookieService.CarryCookieFileTo,
+	// the rule the TUI wizard's save command follows too). Nil carries
+	// nothing.
+	CarryCookies func(cookieFile string) error
+}
+
+// setupFieldError answers a setup refused over one field the way a
+// validation failure is answered, so the wizard names the field.
+func setupFieldError(rw http.ResponseWriter, field, msg string) {
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(http.StatusBadRequest)
+	json.NewEncoder(rw).Encode(map[string]any{
+		"error":   "Validation failed",
+		"details": map[string]string{field: msg},
+	})
 }
 
 // setupCompleteBeforeLock runs as /api/setup/complete reaches the store
@@ -147,9 +164,10 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 		// anything is saved, outside the lock (I/O). One that cannot be
 		// created refuses the setup under its field, as a validation error
 		// is (config.MakeSetupDirs).
-		var outputDir, stagingDir string
+		var outputDir, stagingDir, cookieFile string
 		store.Read(func(c *config.MoomboxConfig) {
 			outputDir, stagingDir = c.Paths.OutputDirectory, c.Paths.StagingDirectory
+			cookieFile = c.Cookies.CookieFile
 		})
 		if paths, ok := updates["paths"].(map[string]any); ok {
 			if v, ok := paths["output_directory"].(string); ok {
@@ -159,21 +177,32 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 				stagingDir = v
 			}
 		}
+		if ck, ok := updates["cookies"].(map[string]any); ok {
+			if v, ok := ck["cookie_file"].(string); ok {
+				cookieFile = v
+			}
+		}
 		if err := config.MakeSetupDirs(outputDir, stagingDir); err != nil {
 			var dirErr *config.SetupDirError
 			if !errors.As(err, &dirErr) {
 				jsonError(rw, "failed to create directories", http.StatusInternalServerError)
 				return
 			}
-			rw.Header().Set("Content-Type", "application/json")
-			rw.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(rw).Encode(map[string]any{
-				"error": "Validation failed",
-				"details": map[string]string{
-					dirErr.Key: fmt.Sprintf("could not create %q: %v", dirErr.Path, dirErr.Err),
-				},
-			})
+			setupFieldError(rw, dirErr.Key, fmt.Sprintf("could not create %q: %v", dirErr.Path, dirErr.Err))
 			return
+		}
+
+		// The cookies a browser login in this wizard wrote went to the
+		// cookie file the running service was built with; carry them into
+		// the one this setup saves, so the restart loads them. The
+		// Advanced step offers another cookie file beside the login, and
+		// the restart used to load an empty jar from it although the
+		// wizard had reported the login Done.
+		if deps.CarryCookies != nil {
+			if err := deps.CarryCookies(cookieFile); err != nil {
+				setupFieldError(rw, "cookies.cookie_file", "could not carry the signed-in cookies here: "+err.Error())
+				return
+			}
 		}
 
 		setupCompleteBeforeLock()

@@ -149,7 +149,8 @@ func (s *runState) wireRoutes() func() {
 				s.log.Info("yt-dlp plugin installed from setup wizard", slog.Int("port", port))
 			}
 		},
-		OnRestart: func() { s.triggerRestart("setup") },
+		OnRestart:    func() { s.triggerRestart("setup") },
+		CarryCookies: s.carrySetupCookies,
 	}, s.configStore)
 	routes.FFmpegRoutes(s.r, &routes.FFmpegDeps{
 		Store:     s.configStore,

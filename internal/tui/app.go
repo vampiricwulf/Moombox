@@ -950,6 +950,11 @@ func (a *App) SetupWizHashPassword(fn func(string) (string, error)) {
 	a.setupWiz.OnHashPassword = fn
 }
 
+// SetupWizCarryCookies sets the setup wizard's OnCarryCookies.
+func (a *App) SetupWizCarryCookies(fn func(cookieFile string) error) {
+	a.setupWiz.OnCarryCookies = fn
+}
+
 // SetUpdateChannels configures the async update channels.
 func (a *App) SetUpdateChannels(
 	jobUpdate <-chan *database.JobChange,
