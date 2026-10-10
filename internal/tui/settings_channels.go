@@ -4,6 +4,9 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"maps"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -281,6 +284,14 @@ func (m *SettingsModel) saveCurrentChannel() {
 		existing = &m.channels[m.channelIndex]
 	}
 	ch := valuesToChannel(m.channelEditValues, existing)
+	// An edit that changed nothing the form shows keeps the entry exactly
+	// as it was. valuesToChannel spells defaults out (platform "youtube",
+	// enabled true), and a spelled-out default reads as an edit to
+	// mergeChannelEdits — which would put this copy over whatever the
+	// dashboard did to the channel since the overlay opened.
+	if existing != nil && maps.Equal(channelToValues(ch), channelToValues(*existing)) {
+		ch = *existing
+	}
 	if m.channelIndex < len(m.channels) {
 		m.channels[m.channelIndex] = ch
 	} else {
@@ -293,6 +304,62 @@ func (m *SettingsModel) saveCurrentChannel() {
 	m.structDirty = true
 	m.status = saveIdle
 	m.channelMode = "list"
+}
+
+// mergeChannelEdits applies the Settings editor's own channel changes to
+// the channel list as it stands at save time. base is the list Open copied,
+// edited the list the editor holds now, live the store's list now; the
+// result is a new slice (never live's array, which Snapshot readers and a
+// rollback share), and changed is false — live returned as is — when the
+// editor changed nothing.
+//
+// Matching is by channel ID, case-insensitively as config.Validate compares
+// them. A base ID the editor no longer has (deleted, or renamed away) is
+// removed from live. An entry the editor added, or changed from its base
+// copy, replaces live's entry with that ID or, when live has none, is
+// appended — so an edit of a channel the dashboard removed meanwhile adds it
+// back, the operator having saved it on purpose. Everything else in live —
+// a channel the dashboard added, disabled or edited, and one it removed that
+// the editor did not touch — stays exactly as live has it.
+func mergeChannelEdits(base, edited, live []config.ChannelConfig) ([]config.ChannelConfig, bool) {
+	key := func(id string) string { return strings.ToLower(strings.TrimSpace(id)) }
+	atOpen := make(map[string]config.ChannelConfig, len(base))
+	for _, ch := range base {
+		atOpen[key(ch.ID)] = ch
+	}
+	kept := make(map[string]bool, len(edited))
+	var upserts []config.ChannelConfig
+	for _, ch := range edited {
+		kept[key(ch.ID)] = true
+		if was, ok := atOpen[key(ch.ID)]; ok && reflect.DeepEqual(was, ch) {
+			continue
+		}
+		upserts = append(upserts, ch)
+	}
+	removed := make(map[string]bool)
+	for _, ch := range base {
+		if !kept[key(ch.ID)] {
+			removed[key(ch.ID)] = true
+		}
+	}
+	if len(removed) == 0 && len(upserts) == 0 {
+		return live, false
+	}
+
+	out := make([]config.ChannelConfig, 0, len(live)+len(upserts))
+	for _, ch := range live {
+		if !removed[key(ch.ID)] {
+			out = append(out, ch)
+		}
+	}
+	for _, ch := range upserts {
+		if i := slices.IndexFunc(out, func(c config.ChannelConfig) bool { return key(c.ID) == key(ch.ID) }); i >= 0 {
+			out[i] = ch
+		} else {
+			out = append(out, ch)
+		}
+	}
+	return out, true
 }
 
 // GetChannelResolveInput returns the current channel ID being resolved.

@@ -308,13 +308,14 @@ func (m *SettingsModel) snapshotConfig() config.MoomboxConfig {
 // applyValues and not to it.
 //
 // The one shape that would defeat the shallow copy: applyValues ends with
-// `m.cfg.Channels = m.channels` (and the same for Notifications), so after a
-// SUCCESSFUL save the live config ALIASES the model's own slice — and the
-// channel/notification editors write elements in place
-// (m.channels[i] = ch). That combination is unreachable today only because a
-// successful save closes the panel and Open re-copies both slices on the way
+// `m.cfg.Notifications = m.notifications`, so after a SUCCESSFUL save the
+// live config ALIASES the model's own slice — and the notification editor
+// writes elements in place. That is unreachable today only because a
+// successful save closes the panel and Open re-copies the slice on the way
 // back in. If the panel is ever left open and editable after a save,
-// Channels and Notifications must be deep-copied into the snapshot.
+// Notifications must be deep-copied into the snapshot. Channels do not
+// alias: mergeChannelEdits builds a new slice, and a save re-copies the
+// editor's list from the saved one (resyncChannels).
 //
 // Known window: a background writer (cookie refresh, a Web PUT) can commit
 // through config.Store.Update between snapshotConfig and this restore; the
@@ -371,6 +372,7 @@ func (m *SettingsModel) saveAndClose() string {
 		m.dirty = false
 		m.structDirty = false
 		m.handOverChannelPrunes()
+		m.resyncChannels()
 		needsRestart := m.hasRestartChanges()
 		m.originalValues = make(map[string]string, len(m.values))
 		maps.Copy(m.originalValues, m.values)

@@ -6,6 +6,7 @@ import (
 	"maps"
 	"math"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -403,6 +404,11 @@ type SettingsModel struct {
 	channelDeleteConf bool
 	channelResolving  bool // true while async URL resolution is in progress
 	channels          []config.ChannelConfig
+	// channelsAtOpen is the channel list as Open copied it. A save writes
+	// back only what the editor changed relative to it (mergeChannelEdits),
+	// so a channel the dashboard added, disabled or removed while the
+	// overlay was open is not reverted by a save of something else.
+	channelsAtOpen []config.ChannelConfig
 
 	// The channel-removal prompt and the choices it took
 	// (settings_channel_removal.go).
@@ -517,6 +523,7 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 		m.channelDeleteConf = false
 		m.channels = make([]config.ChannelConfig, len(c.Channels))
 		copy(m.channels, c.Channels)
+		m.channelsAtOpen = slices.Clone(c.Channels)
 
 		// Notification editor
 		m.notifIndex = 0
@@ -542,6 +549,28 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	maps.Copy(m.originalValues, m.values)
 
 	m.updateTextInputForField()
+}
+
+// resyncChannels makes the channel list just saved — this editor's changes
+// merged into everyone else's — both the list the editor shows and the base
+// the next save diffs against, as a fresh Open would. Copies, under the
+// store's read lock: the live slice is shared with Snapshot readers.
+func (m *SettingsModel) resyncChannels() {
+	read := func(c *config.MoomboxConfig) {
+		m.channels = slices.Clone(c.Channels)
+		m.channelsAtOpen = slices.Clone(c.Channels)
+	}
+	switch {
+	case m.configStore != nil:
+		m.configStore.Read(read)
+	case m.cfg != nil:
+		read(m.cfg)
+	default:
+		return
+	}
+	if m.channelIndex >= len(m.channels) {
+		m.channelIndex = max(0, len(m.channels)-1)
+	}
 }
 
 // Close hides the settings panel.
@@ -1020,8 +1049,15 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Memory.SidecarSoftLimitMB, _ = strconv.Atoi(m.values["sidecar_soft_limit_mb"])
 	m.cfg.Memory.SidecarHardLimitMB, _ = strconv.Atoi(m.values["sidecar_hard_limit_mb"])
 
-	// Apply channels and notifications
-	m.cfg.Channels = m.channels
+	// Channels: only this editor's own changes, merged by ID into the list
+	// as it stands NOW, under the store lock. Writing m.channels back whole
+	// reverted every channel change the dashboard made while the overlay was
+	// open — a save of the log level dropped a channel added there, and the
+	// next sweep then pruned that channel's jobs and feed history as
+	// departed. Untouched, the live list is left exactly as it is.
+	if merged, changed := mergeChannelEdits(m.channelsAtOpen, m.channels, m.cfg.Channels); changed {
+		m.cfg.Channels = merged
+	}
 	m.cfg.Notifications = m.notifications
 
 	mu.Unlock()
