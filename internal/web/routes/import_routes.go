@@ -252,6 +252,11 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		if videoID == "" {
 			videoID = fmt.Sprintf("imp_%s", randomHex(4))
 		}
+		// A Moombox Twitch id's parts: a VOD's id, or a manual add's login.
+		var twitchVOD, twitchLogin string
+		if m := importTwitchIDRe.FindStringSubmatch(videoID); twitchArchive && m != nil {
+			twitchVOD, twitchLogin = m[1], m[2]
+		}
 
 		title := titleHeader
 		if title == "" {
@@ -268,7 +273,9 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 			channel = meta.ChannelName
 		}
 		if channel == "" && twitchArchive {
-			channel = cmp.Or(meta.ChannelDisplayName, meta.ChannelLogin)
+			// A manual add's id carries the channel's login: better than the
+			// placeholder for an archive whose chat did not come with it.
+			channel = cmp.Or(meta.ChannelDisplayName, meta.ChannelLogin, twitchLogin)
 		}
 		if channel == "" {
 			channel = "Import"
@@ -277,15 +284,17 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// Where the row points. A YouTube id is a watch page and a
 		// thumbnail; of Twitch's ids only a VOD's names a page
 		// (twitch.tv/videos/<id>) — a live capture's stream id names none,
-		// so that row carries no URL rather than a wrong one.
+		// so that row carries no URL rather than a wrong one, and neither
+		// client derives one for it (streamURL, the TUI's; streamUrl, the
+		// dashboard's).
 		platform := "youtube"
 		videoURL := "https://www.youtube.com/watch?v=" + videoID
 		thumbnailURL := "https://i.ytimg.com/vi/" + videoID + "/maxresdefault.jpg"
 		isVod := false
 		if twitchArchive {
 			platform, videoURL, thumbnailURL = "twitch", "", ""
-			if m := importTwitchIDRe.FindStringSubmatch(videoID); m != nil && m[1] != "" {
-				videoURL, isVod = "https://www.twitch.tv/videos/"+m[1], true
+			if twitchVOD != "" {
+				videoURL, isVod = "https://www.twitch.tv/videos/"+twitchVOD, true
 			}
 		}
 

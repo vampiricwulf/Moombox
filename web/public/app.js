@@ -12,7 +12,7 @@ import { LogPanelController } from "./modules/log-panel.js";
 import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { JobDetailsController } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -2791,14 +2791,12 @@ export class MoomboxApp {
     const job = this.jobs.find((j) => j.id === this.selectedJobId)
       || this.archivedJobs.find((j) => j.id === this.selectedJobId);
     if (!job) return;
-    let url = job.url;
-    if (!url) {
-      if (job.platform === "twitch") {
-        url = `https://www.twitch.tv/${job.channelName || job.videoId}`;
-      } else {
-        url = `https://www.youtube.com/watch?v=${job.videoId}`;
-      }
-    }
+    // streamUrl, the details' Stream URL row's and the TUI's rule: a Twitch
+    // live row with no url has no page, where this opened
+    // twitch.tv/<channelName> — for an imported capture "Import", someone
+    // else's channel.
+    const url = streamUrl(job);
+    if (!url) return;
     try {
       const parsed = new URL(url);
       if (parsed.protocol === "https:" || parsed.protocol === "http:") {

@@ -688,6 +688,13 @@ func isImportPlaceholderID(id string) bool {
 // streamURL returns the stream page URL for a job, or "" if unavailable —
 // including for an import's placeholder id, whose URL the dashboard hides
 // for the same reason: it opens (or copies) a page for no video at all.
+//
+// A Twitch live row with no URL has no page. Every Twitch row Moombox
+// creates carries its URL; the one that does not is an imported live
+// capture, whose stream id names no page and whose channel name is no login
+// — the import's "Import" placeholder, or the chat's display name — so
+// twitch.tv/<channel name> was somebody else's channel, or no page at all.
+// A VOD's id names its own page.
 func streamURL(j *database.Job) string {
 	if isImportPlaceholderID(j.VideoID) {
 		return ""
@@ -703,10 +710,7 @@ func streamURL(j *database.Job) string {
 			vodID := strings.TrimPrefix(j.VideoID, "tw_v")
 			return "https://www.twitch.tv/videos/" + vodID
 		}
-		if j.ChannelName == "" {
-			return ""
-		}
-		return "https://www.twitch.tv/" + j.ChannelName
+		return ""
 	}
 	return "https://www.youtube.com/watch?v=" + j.VideoID
 }

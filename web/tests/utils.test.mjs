@@ -273,7 +273,8 @@ test("channelTermsForSave: clearing an edited field removes terms", () => {
 
 // streamUrl mirrors internal/tui/app_actions.go streamURL (the TUI's O C
 // chord): an explicit url wins; else YouTube watch URL; Twitch VOD strips the
-// tw_v prefix; Twitch live needs a channel name.
+// tw_v prefix; Twitch live with no url has no page — its channelName is no
+// login (an import's "Import", or a display name).
 test("streamUrl: explicit url wins over derivation", () => {
   assert.equal(streamUrl({ url: "https://example/x", videoId: "abc", platform: "youtube" }), "https://example/x");
 });
@@ -283,8 +284,11 @@ test("streamUrl: youtube derives the watch URL", () => {
 test("streamUrl: twitch VOD strips the tw_v prefix", () => {
   assert.equal(streamUrl({ videoId: "tw_v123456", platform: "twitch", isVod: true }), "https://www.twitch.tv/videos/123456");
 });
-test("streamUrl: twitch live is the channel page, empty without a channel", () => {
-  assert.equal(streamUrl({ videoId: "live1", platform: "twitch", channelName: "somestreamer" }), "https://www.twitch.tv/somestreamer");
+// MUTANT: derive twitch.tv/<channelName> again — an imported capture's
+// "Import" is somebody else's channel.
+test("streamUrl: twitch live is its url, none without one", () => {
+  assert.equal(streamUrl({ videoId: "tw_1", platform: "twitch", url: "https://www.twitch.tv/somestreamer" }), "https://www.twitch.tv/somestreamer");
+  assert.equal(streamUrl({ videoId: "tw_1", platform: "twitch", channelName: "Import" }), "");
   assert.equal(streamUrl({ videoId: "live1", platform: "twitch" }), "");
   assert.equal(streamUrl({ platform: "youtube" }), "");
   assert.equal(streamUrl(null), "");

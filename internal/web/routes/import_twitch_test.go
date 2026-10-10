@@ -148,6 +148,26 @@ func TestImportTakesOnlyMoomboxTwitchIDsForTwitch(t *testing.T) {
 	}
 }
 
+// A manual add's capture is named "tw_manual_<login>_<n>": imported without
+// its chat, the row's channel is that login rather than the "Import"
+// placeholder — and its URL stays empty: a live capture names no page, and
+// neither client derives one.
+//
+// Mutant: dropping the id's login from the channel fallback ("Import").
+func TestImportTakesAManualCaptureChannelFromItsID(t *testing.T) {
+	f := newImportFixture(t)
+	rec, job := importZip(t, f, orderedImportZip(t,
+		importEntry{name: "Late [tw_manual_some_streamer_1759000000000000000].mp4", data: []byte("v")},
+	))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	if job.Platform != "twitch" || job.ChannelName != "some_streamer" || job.URL != "" || job.IsVod {
+		t.Errorf("platform %q channel %q url %q isVod %v, want twitch / some_streamer / no URL",
+			job.Platform, job.ChannelName, job.URL, job.IsVod)
+	}
+}
+
 // A YouTube archive is untouched by the Twitch detection.
 func TestImportKeepsAYouTubeArchiveYouTube(t *testing.T) {
 	f := newImportFixture(t)

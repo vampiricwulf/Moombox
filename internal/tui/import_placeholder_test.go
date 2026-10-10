@@ -46,6 +46,29 @@ func TestImportPlaceholderHasNoStreamURL(t *testing.T) {
 	}
 }
 
+// An imported Twitch live capture has no URL — its stream id names no page —
+// and streamURL built one from the channel name: twitch.tv/Import for an
+// archive imported without its chat, a stranger's channel, and
+// twitch.tv/<display name> with it, a page that does not exist. O S opened
+// it and O C copied it. Such a row has no page; one with its URL keeps it.
+//
+// Mutant: deriving twitch.tv/<channel name> for a Twitch live row with no
+// URL again.
+func TestImportedTwitchLiveCaptureHasNoStreamURL(t *testing.T) {
+	for _, channel := range []string{"Import", "加藤純一"} {
+		j := &database.Job{ID: "tw_316543210987", VideoID: "tw_316543210987", Platform: "twitch",
+			ChannelName: channel, ManuallyAdded: true, Status: database.StatusFinished, Progress: "Imported"}
+		if got := streamURL(j); got != "" || canOpenStream(j) {
+			t.Errorf("channel %q: streamURL = %q (O S / O C offered: %v), want no page", channel, got, canOpenStream(j))
+		}
+	}
+	native := &database.Job{ID: "tw_316543210987", VideoID: "tw_316543210987", Platform: "twitch",
+		ChannelName: "SomeStreamer", URL: "https://twitch.tv/somestreamer"}
+	if got := streamURL(native); got != "https://twitch.tv/somestreamer" {
+		t.Errorf("a native capture's streamURL = %q, want its URL", got)
+	}
+}
+
 // canOpenStream is exactly "streamURL has one": a Twitch channel job with no
 // channel name has no page, and the menu offered O S for it anyway, after
 // which the chord answered "No stream URL available".

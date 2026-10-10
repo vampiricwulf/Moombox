@@ -895,9 +895,13 @@ export function canResumeJob(job, { requireKnownStaging = false } = {}) {
 /**
  * streamUrl is the JS twin of the TUI's streamURL (internal/tui/app_actions.go,
  * the O C chord): the job's own url when it has one, else derived from the
- * platform. Twitch VOD ids carry a "tw_v" prefix on the wire; Twitch live has
- * no id-addressable page, only the channel's. Empty string = nothing to copy.
- * @param {{url?: string, videoId?: string, platform?: string, isVod?: boolean, channelName?: string}|null} job
+ * platform. Twitch VOD ids carry a "tw_v" prefix on the wire. A Twitch live
+ * row with no url has no page: every Twitch row Moombox creates carries its
+ * url, and the one that does not is an imported live capture, whose stream id
+ * names no page and whose channelName is no login — the import's "Import"
+ * placeholder or the chat's display name — so twitch.tv/<channelName> was
+ * somebody else's channel, or none. Empty string = nothing to copy or open.
+ * @param {{url?: string, videoId?: string, platform?: string, isVod?: boolean}|null} job
  * @returns {string}
  */
 export function streamUrl(job) {
@@ -905,8 +909,7 @@ export function streamUrl(job) {
   if (job.url) return job.url;
   if (!job.videoId) return "";
   if (job.platform === "twitch") {
-    if (job.isVod) return "https://www.twitch.tv/videos/" + job.videoId.replace(/^tw_v/, "");
-    return job.channelName ? "https://www.twitch.tv/" + job.channelName : "";
+    return job.isVod ? "https://www.twitch.tv/videos/" + job.videoId.replace(/^tw_v/, "") : "";
   }
   return "https://www.youtube.com/watch?v=" + job.videoId;
 }

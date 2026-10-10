@@ -205,7 +205,8 @@ func TestStreamURL(t *testing.T) {
 		{"direct URL", &database.Job{URL: "https://example.com/stream"}, "https://example.com/stream"},
 		{"youtube videoID", &database.Job{VideoID: "dQw4w9WgXcQ"}, "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
 		{"twitch VOD", &database.Job{VideoID: "tw_v1234567890", Platform: "twitch", IsVod: true}, "https://www.twitch.tv/videos/1234567890"},
-		{"twitch channel", &database.Job{VideoID: "shroud", Platform: "twitch", ChannelName: "shroud"}, "https://www.twitch.tv/shroud"},
+		{"twitch channel with its URL", &database.Job{VideoID: "shroud", Platform: "twitch", ChannelName: "shroud", URL: "https://www.twitch.tv/shroud"}, "https://www.twitch.tv/shroud"},
+		{"twitch live with no URL", &database.Job{VideoID: "tw_316543210987", Platform: "twitch", ChannelName: "shroud"}, ""},
 		{"twitch no channelName", &database.Job{VideoID: "123", Platform: "twitch"}, ""},
 		{"empty", &database.Job{}, ""},
 	}

@@ -525,8 +525,9 @@ export class JobDetailsController {
     setDisplay("details-open-folder-btn", (hasFile || isActive) && isLocalhost);
     setDisplay("details-play-btn", hasFile);
     // The import's placeholder url opens a YouTube page for a video that
-    // does not exist — see isImportPlaceholderId.
-    setDisplay("details-open-url-btn", !isImportPlaceholderId(job.videoId));
+    // does not exist — see isImportPlaceholderId — and a row streamUrl has no
+    // page for (an imported Twitch live capture) has nothing to open.
+    setDisplay("details-open-url-btn", !isImportPlaceholderId(job.videoId) && streamUrl(job) !== "");
   }
 
   renderJobDetails(job) {
@@ -559,9 +560,11 @@ export class JobDetailsController {
     }
 
     const isTwitch = job.platform === "twitch";
-    // Extract Twitch login from URL or channelName for embed
-    const twitchLogin = isTwitch
-      ? (job.url ? job.url.replace(/.*twitch\.tv\//, "").split("/")[0].split("?")[0] : job.channelName || "").toLowerCase()
+    // The Twitch login for the embed, from the url alone: a row with no url
+    // is an imported live capture, whose channelName is no login — "Import",
+    // or a display name — and embedded that stranger's channel.
+    const twitchLogin = isTwitch && job.url
+      ? job.url.replace(/.*twitch\.tv\//, "").split("/")[0].split("?")[0].toLowerCase()
       : "";
     const twitchVodId = isTwitch && job.videoId.startsWith("tw_v") ? job.videoId.slice(4) : "";
     // An imported archive with no real YouTube id carries the import's
@@ -578,6 +581,9 @@ export class JobDetailsController {
       embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?video=${this.app.escapeHtml(twitchVodId)}&parent=${this.app.escapeHtml(window.location.hostname)}&autoplay=false&muted=true" allowfullscreen></iframe>`;
     } else if (isTwitch && twitchLogin) {
       embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?channel=${this.app.escapeHtml(twitchLogin)}&parent=${this.app.escapeHtml(window.location.hostname)}&autoplay=false&muted=true" allowfullscreen></iframe>`;
+    } else if (isTwitch) {
+      // A Twitch row with no page — never the YouTube embed below, whose
+      // id would be the Twitch stream id.
     } else {
       // No `allow` list: YouTube's share snippet requests accelerometer,
       // autoplay, clipboard-write, encrypted-media, gyroscope and

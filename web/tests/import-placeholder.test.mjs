@@ -112,3 +112,77 @@ test("a real id keeps its embed, its Stream URL row and its Open URL button", { 
   h.app.details.updateDetailsButtons(inputs.JOBS.Finished);
   assert.equal(h.el("details-open-url-btn").style.display, "");
 });
+
+/** An imported Twitch live capture: a stream id that names no page, so no url (internal/web/routes/import_routes.go). */
+const importedTwitchCapture = (channelName) => ({
+  ...inputs.JOBS.Finished,
+  id: "tw_316543210987",
+  videoId: "tw_316543210987",
+  platform: "twitch",
+  url: "",
+  thumbnailUrl: "",
+  channelName,
+  filename: "imports/Late Night [tw_316543210987].mp4",
+  manuallyAdded: true,
+  isVod: false,
+  watched: false,
+  incompleteTail: false,
+});
+
+// An imported Twitch live capture has no url, and the dialog built its page
+// from the channel name anyway: "Import" (no chat in the zip) embedded and
+// linked twitch.tv/Import, a stranger's channel, and a display name a page
+// that does not exist — the Stream URL row and its copy button, the embed and
+// Open URL all of them.
+//
+// MUTANT: streamUrl deriving twitch.tv/<channelName> again (the Stream URL row
+// and Open URL come back). MUTANT: the embed taking channelName when the url
+// is empty (player.twitch.tv/?channel=import). MUTANT: openJobUrl building its
+// own twitch.tv/<channelName> (it opens the stranger's channel). MUTANT: Open
+// URL shown on the placeholder check alone. MUTANT: a Twitch row with no page
+// falling through to the YouTube embed (youtube-nocookie.com/embed/tw_…).
+test("an imported Twitch live capture's dialog derives no page from its channel name", { skip }, async () => {
+  for (const channelName of ["Import", "加藤純一"]) {
+    const h = await harness.makeApp();
+    const job = importedTwitchCapture(channelName);
+    h.app.jobs = [job];
+    h.app.selectedJobId = job.id;
+    h.app.details.renderJobDetails(job);
+    h.app.details.updateDetailsButtons(job);
+    const content = h.el("job-details-content");
+
+    assert.equal(content.querySelector("iframe"), null, `${channelName}: no embed for a channel the row does not name`);
+    const labels = [...content.querySelectorAll(".details-label")].map((l) => l.textContent);
+    assert.ok(!labels.includes("Stream URL:"), `${channelName}: no Stream URL row`);
+    assert.ok(!content.innerHTML.includes("twitch.tv/"), `${channelName}: no twitch.tv link anywhere`);
+    assert.equal(h.el("details-open-url-btn").style.display, "none", `${channelName}: Open URL hidden`);
+
+    const opened = [];
+    h.window.open = (...args) => { opened.push(args[0]); };
+    h.app.openJobUrl();
+    assert.deepEqual(opened, [], `${channelName}: Open URL opened ${opened}`);
+  }
+});
+
+// MUTANT: the embed's login read from nothing but the channelName, or Open URL
+// hidden for every Twitch live row — a native capture carries its url, and
+// keeps all three.
+test("a native Twitch capture keeps its embed, its Stream URL row and Open URL", { skip }, async () => {
+  const h = await harness.makeApp();
+  // A display name that is not the login: the embed's login is the url's.
+  const job = { ...importedTwitchCapture("サム Streamer"), url: "https://www.twitch.tv/somestreamer", manuallyAdded: false };
+  h.app.jobs = [job];
+  h.app.selectedJobId = job.id;
+  h.app.details.renderJobDetails(job);
+  h.app.details.updateDetailsButtons(job);
+  const content = h.el("job-details-content");
+
+  assert.match(content.querySelector("iframe.details-embed")?.src ?? "", /player\.twitch\.tv\/\?channel=somestreamer&/);
+  const labels = [...content.querySelectorAll(".details-label")].map((l) => l.textContent);
+  assert.ok(labels.includes("Stream URL:"));
+  assert.equal(h.el("details-open-url-btn").style.display, "");
+  const opened = [];
+  h.window.open = (...args) => { opened.push(args[0]); };
+  h.app.openJobUrl();
+  assert.deepEqual(opened, ["https://www.twitch.tv/somestreamer"]);
+});
