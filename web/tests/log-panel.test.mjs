@@ -179,3 +179,53 @@ test("lines without a number are always shown", { skip }, async () => {
 
   assert.deepEqual(h.app.logPanel.logs, ["INFO old server", "INFO unnumbered frame", "INFO from the page itself"]);
 });
+
+// A resync snapshot — the hub sends one in place of a frame a lagging tab
+// dropped — goes through the client's write queue like any frame, and a log
+// line logged while it was being built can be queued ahead of it: the tab
+// gets that line's frame, numbered above the snapshot's newest line, THEN the
+// snapshot, which does not hold it. Replacing the buffer wiped the line. The
+// frames this connection delivered above the snapshot's number stay, after
+// its lines; one at or below it is in the snapshot and is not kept twice.
+//
+// Mutants: setSnapshot back to `this.logs = lines` (the overtaking line is
+// wiped); addLog not recording its numbered frames (likewise); setSnapshot
+// keeping every recorded frame rather than those above its number ("INFO b"
+// shows twice).
+test("a resync snapshot that arrives after a newer frame keeps that frame's line", { skip }, async () => {
+  const h = await harness.makeApp();
+  const viewer = h.el("logs-viewer");
+
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [], logs: ["INFO a"], logSeq: 1 } });
+  h.app.handleMessage({ type: "log", payload: "INFO b", seq: 2 });
+  h.app.handleMessage({ type: "log", payload: "INFO c overtook the resync", seq: 3 });
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [], logs: ["INFO a", "INFO b"], logSeq: 2 } });
+  h.app.handleMessage({ type: "log", payload: "INFO d", seq: 4 });
+  h.flushRaf();
+  await h.flush();
+  h.flushRaf();
+
+  assert.deepEqual(h.app.logPanel.logs, ["INFO a", "INFO b", "INFO c overtook the resync", "INFO d"],
+    "the line whose frame overtook the snapshot must survive it, once, in order");
+  assert.equal(countIn(viewer, "overtook the resync"), 1, "the overtaking line must be drawn once");
+  assert.equal(countIn(viewer, "INFO b"), 1, "a line the snapshot holds must not be kept twice");
+});
+
+// The kept frames are this connection's own. A reconnect to a restarted
+// server numbers its lines from 1 again, so a frame the old socket delivered
+// is above the new snapshot's number without being newer than anything in it.
+//
+// Mutant: newConnection not clearing the recorded frames — the old process's
+// line is appended after the new snapshot.
+test("a reconnect's snapshot keeps nothing the old socket delivered", { skip }, async () => {
+  const h = await harness.makeApp();
+
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [], logs: ["INFO old"], logSeq: 500 } });
+  h.app.handleMessage({ type: "log", payload: "INFO old frame", seq: 501 });
+  h.app.connectWebSocket();
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [], logs: ["INFO new"], logSeq: 3 } });
+  h.flushRaf();
+
+  assert.deepEqual(h.app.logPanel.logs, ["INFO new"],
+    "after a reconnect the new snapshot is the whole buffer");
+});

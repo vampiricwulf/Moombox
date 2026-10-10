@@ -1012,6 +1012,7 @@ export class MoomboxApp {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}`;
 
+    this.logPanel.newConnection();
     this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
