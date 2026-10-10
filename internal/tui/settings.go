@@ -959,14 +959,15 @@ func validateSettingsValues(v map[string]string, passwordHash string, checkBrows
 	}
 
 	// Validate probe_targets entries. Same rationale as trusted_proxies above:
-	// config.Validate refuses an unparseable host:port, so gate it here too.
+	// config.Validate refuses an entry ValidateProbeTarget does, so gate it
+	// here too, with the same check.
 	for e := range strings.SplitSeq(v["probe_targets"], ",") {
 		e = strings.TrimSpace(e)
 		if e == "" {
 			continue
 		}
-		if _, _, err := net.SplitHostPort(e); err != nil {
-			return p, fmt.Sprintf("Probe targets: %q is not a valid host:port", e)
+		if err := config.ValidateProbeTarget(e); err != nil {
+			return p, fmt.Sprintf("Probe targets: %q %v", e, err)
 		}
 	}
 

@@ -484,8 +484,8 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				if s == "" {
 					continue
 				}
-				if _, _, err := net2.SplitHostPort(s); err != nil {
-					errs["connectivity.probe_targets"] = fmt.Sprintf("%q is not a valid host:port", s)
+				if err := config.ValidateProbeTarget(s); err != nil {
+					errs["connectivity.probe_targets"] = fmt.Sprintf("%q %v", s, err)
 					break
 				}
 				valid++

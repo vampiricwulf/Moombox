@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -933,6 +934,16 @@ func TestConfigUpdatesProbeTargets(t *testing.T) {
 	notStrings := map[string]any{"connectivity": map[string]any{"probe_targets": []any{443}}}
 	if errs := validateConfigUpdates(notStrings); errs["connectivity.probe_targets"] == "" {
 		t.Errorf("non-string entry accepted: %v", errs)
+	}
+	// An entry that splits as host:port but no dial can use, or that dials
+	// this machine, is refused by name — config.ValidateProbeTarget, the
+	// check config.Validate makes. Mutant killed: the loop going back to
+	// net.SplitHostPort alone.
+	for _, target := range []string{"1.1.1.1:", "1.1.1.1:99999", "1.1.1.1:https443", ":443", "127.0.0.1:443"} {
+		unusable := map[string]any{"connectivity": map[string]any{"probe_targets": []any{"8.8.8.8:443", target}}}
+		if msg := validateConfigUpdates(unusable)["connectivity.probe_targets"]; !strings.Contains(msg, strconv.Quote(target)) {
+			t.Errorf("%q: error %q does not refuse the entry by name", target, msg)
+		}
 	}
 	good := map[string]any{"connectivity": map[string]any{"probe_targets": []any{" 1.1.1.1:443 ", "[2606:4700::1111]:443"}}}
 	if errs := validateConfigUpdates(good); len(errs) != 0 {

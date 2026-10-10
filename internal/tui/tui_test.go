@@ -2,6 +2,8 @@ package tui
 
 import (
 	"image/color"
+	"strconv"
+	"strings"
 	"testing"
 
 	lipgloss "charm.land/lipgloss/v2"
@@ -420,6 +422,22 @@ func TestApplyValuesProbeTargets(t *testing.T) {
 	m.applyValues()
 	if m.status != saveError {
 		t.Fatalf("status = %v, want saveError for a host without a port", m.status)
+	}
+
+	// An entry that splits as host:port but no dial can use, or that dials
+	// this machine, blocks the save naming the entry — the check
+	// config.Validate makes (config.ValidateProbeTarget). Mutant killed: the
+	// gate going back to net.SplitHostPort alone.
+	for _, target := range []string{"1.1.1.1:", "1.1.1.1:99999", ":443", "localhost:443"} {
+		m.status, m.errorMsg = saveIdle, ""
+		m.values["probe_targets"] = "1.1.1.1:443, " + target
+		m.applyValues()
+		if m.status != saveError || !strings.Contains(m.errorMsg, strconv.Quote(target)) {
+			t.Errorf("%q: status=%v msg=%q, want a field error naming the entry", target, m.status, m.errorMsg)
+		}
+	}
+	if got := cfg.Connectivity.ProbeTargets; len(got) != 3 || got[0] != "1.1.1.1:443" {
+		t.Fatalf("a refused save changed ProbeTargets to %v", got)
 	}
 
 	m.status, m.errorMsg = saveIdle, ""

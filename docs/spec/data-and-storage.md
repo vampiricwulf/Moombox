@@ -630,7 +630,7 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 
 | Field | Type | Default | TOML Key | Notes |
 |-------|------|---------|----------|-------|
-| ProbeTargets | []string | `1.1.1.1:443, 8.8.8.8:443, 9.9.9.9:443` | `probe_targets` | host:port TCP targets raced to detect internet reachability. Exposed in both settings UIs' Network section; `PUT /api/config` validates each entry with `net.SplitHostPort` and rejects an empty list. **Restart-required** (the monitor takes its targets at construction). |
+| ProbeTargets | []string | `1.1.1.1:443, 8.8.8.8:443, 9.9.9.9:443` | `probe_targets` | host:port TCP targets raced to detect internet reachability. Exposed in both settings UIs' Network section. Every entry must pass `config.ValidateProbeTarget`, the one check `config.Validate`, `PUT /api/config` and the TUI's save share: it must split as host:port, its port must be 1-65535 or a TCP service name the system knows (`1.1.1.1:`, `1.1.1.1:99999` and `1.1.1.1:https443` can never connect, and a list of only those would keep the monitor offline for good), and its host must not be this machine — empty (`:443` dials the local host), `localhost` or a name under `.localhost`, a loopback or an unspecified address — where a local service would answer through any outage. A named host is accepted as written; nothing is resolved. The refusal names the entry. `PUT /api/config` also rejects an empty list; on load an empty list or any refused entry falls back to the defaults. **Restart-required** (the monitor takes its targets at construction). |
 
 #### [[channels]] (array of tables)
 

@@ -876,6 +876,78 @@ func TestValidate_ConnectivityProbeTargets(t *testing.T) {
 	}
 }
 
+// TestValidateProbeTarget pins the probe_targets entry check the three save
+// paths share. Each refused entry passed net.SplitHostPort, the whole check
+// before: a port no dial can use ("1.1.1.1:" dials port 0, "99999" and
+// "https443" fail at once), and a list of only those kept the monitor offline
+// for good; or a host that is this machine (":443", loopback, unspecified,
+// localhost), where a local service answers through any outage.
+//
+// Mutants killed: dropping the empty-host check (":443" accepted), dropping
+// the isLocalProbeHost call (loopback/localhost accepted), weakening the
+// 1-65535 range check to `n < 1 && n > 65535` ("99999", "0" accepted),
+// refusing every non-numeric port ("one.one.one.one:https" refused), dropping
+// the zone strip ("[::1%lo]" accepted), and Validate going back to
+// net.SplitHostPort (the Validate/Normalize case). Dropping the empty-port
+// check is an equivalent mutant: LookupPort answers 0 for an empty port and
+// the range check refuses it, with a less direct message.
+func TestValidateProbeTarget(t *testing.T) {
+	for _, target := range []string{
+		"1.1.1.1:443",
+		"[2606:4700::1111]:443",
+		"one.one.one.one:443",
+		"one.one.one.one:https",
+		"8.8.8.8:1",
+		"8.8.8.8:65535",
+		"192.168.1.1:80",
+		"notlocalhost:443",
+	} {
+		if err := ValidateProbeTarget(target); err != nil {
+			t.Errorf("ValidateProbeTarget(%q) = %v, want accepted", target, err)
+		}
+	}
+	for _, target := range []string{
+		"8.8.8.8",          // no port
+		"1.1.1.1:",         // empty port
+		"1.1.1.1:0",        // port 0
+		"1.1.1.1:99999",    // out of range
+		"1.1.1.1:-1",       // out of range
+		"1.1.1.1:https443", // unknown service
+		":443",             // empty host dials this machine
+		"127.0.0.1:443",
+		"127.8.9.10:443",
+		"[::1]:443",
+		"[::1%lo]:443",
+		"0.0.0.0:443",
+		"[::]:443",
+		"localhost:443",
+		"LocalHost.:443",
+		"router.localhost:443",
+	} {
+		if err := ValidateProbeTarget(target); err == nil {
+			t.Errorf("ValidateProbeTarget(%q) = nil, want refused", target)
+		}
+	}
+
+	// Validate reports an unusable entry by name and Normalize falls back
+	// to the defaults for the list holding it.
+	cfg := Defaults()
+	cfg.Connectivity.ProbeTargets = []string{"1.1.1.1:443", ":443"}
+	reported := false
+	for _, e := range Validate(cfg) {
+		if strings.Contains(e.Error(), "connectivity.probe_targets") && strings.Contains(e.Error(), `":443"`) {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Errorf("Validate did not name the unusable entry \":443\": %v", Validate(cfg))
+	}
+	Normalize(cfg)
+	if !slices.Equal(cfg.Connectivity.ProbeTargets, DefaultProbeTargets) {
+		t.Errorf("Normalize kept %v, want the defaults", cfg.Connectivity.ProbeTargets)
+	}
+}
+
 // TestLoadLeavesDefaultProbeTargetsIntact: Load decodes the file into
 // Defaults(), and toml.Decode writes a slice into the existing backing array
 // when its capacity suffices. While Defaults() handed out DefaultProbeTargets

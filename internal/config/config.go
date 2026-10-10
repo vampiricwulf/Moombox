@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,66 @@ import (
 // DefaultProbeTargets is the user-facing default for connectivity.probe_targets.
 // Kept in sync with connectivity/probe.go's in-package fallback.
 var DefaultProbeTargets = []string{"1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"}
+
+// ValidateProbeTarget reports why one connectivity.probe_targets entry cannot
+// serve the reachability probe, or nil when it can. It is the one check
+// config.Validate, the dashboard's PUT /api/config and the TUI's settings save
+// share. Besides the host:port split it refuses two kinds of entry the split
+// lets through:
+//
+//   - a port no dial can use: empty ("1.1.1.1:"), outside 1-65535, or a name
+//     the system does not know as a TCP service ("1.1.1.1:https443"). A list
+//     of only these fails every probe, so the monitor never comes online —
+//     every monitor skips every poll and the scheduler admits nothing.
+//   - a host that is this machine: empty (":443" dials the local host),
+//     localhost, a loopback or an unspecified address. A local service on
+//     that port answers through any outage, so the active probe never sees one.
+//
+// It does no DNS lookup — a named host is accepted as written — and a service
+// name resolves through net.LookupPort, which reads the local services table.
+func ValidateProbeTarget(target string) error {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return fmt.Errorf("must be host:port: %w", err)
+	}
+	if host == "" {
+		return errors.New("has no host (an empty host dials this machine)")
+	}
+	if isLocalProbeHost(host) {
+		return fmt.Errorf("host %q is this machine, which answers through an outage", host)
+	}
+	if port == "" {
+		return errors.New("has no port")
+	}
+	n, convErr := strconv.Atoi(port)
+	if convErr != nil {
+		// Not a number: a service name ("https") is what net.Dial accepts
+		// too, so take whatever the system resolves it to.
+		if n, err = net.LookupPort("tcp", port); err != nil {
+			return fmt.Errorf("port %q is neither a number nor a known TCP service", port)
+		}
+	}
+	if n < 1 || n > 65535 {
+		return fmt.Errorf("port %q is outside 1-65535", port)
+	}
+	return nil
+}
+
+// isLocalProbeHost reports whether host names this machine: localhost (or a
+// name under .localhost, RFC 6761), a loopback address, or the unspecified
+// address, which a dial treats as the local host.
+func isLocalProbeHost(host string) bool {
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	// An IPv6 zone ("fe80::1%eth0") is not part of the address.
+	if i := strings.IndexByte(h, '%'); i >= 0 {
+		h = h[:i]
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
+}
 
 // SegmentWorkersWarnThreshold is the point past which segment_workers is
 // reported as risky. Not a cap: the value is honoured as written.
@@ -636,9 +697,9 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			cfg.Network.ClientTokenTTLDays = defaults.Network.ClientTokenTTLDays
 		}
 	}
-	// connectivity.probe_targets: each entry must be host:port. Empty list or
-	// any malformed entry falls back to the defaults (Normalize); Validate
-	// reports each malformed entry.
+	// connectivity.probe_targets: each entry must pass ValidateProbeTarget.
+	// Empty list or any unusable entry falls back to the defaults
+	// (Normalize); Validate reports each unusable entry.
 	if len(cfg.Connectivity.ProbeTargets) == 0 {
 		fail("connectivity.probe_targets is empty")
 		if !reportOnly {
@@ -646,8 +707,8 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		}
 	} else {
 		for _, t := range cfg.Connectivity.ProbeTargets {
-			if _, _, err := net.SplitHostPort(t); err != nil {
-				fail("connectivity.probe_targets entry %q must be host:port: %v", t, err)
+			if err := ValidateProbeTarget(t); err != nil {
+				fail("connectivity.probe_targets entry %q %v", t, err)
 				if !reportOnly {
 					cfg.Connectivity.ProbeTargets = defaults.Connectivity.ProbeTargets
 					break
