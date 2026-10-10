@@ -100,7 +100,7 @@ A status transition decided on a status read earlier must not be written uncondi
 
 ### Job status lifecycle
 `Upcoming` → `Live` → `Downloading` → `Muxing` → `Finished`
-Backlog VODs only: enter as `Queued` and are admitted to `Upcoming` by the worker's per-channel archive-slots scheduler, which admits none while offline, or from the moment the output volume reaches `disk_critical_percent` until usage is back 2 points below it (`config.DiskRecoveryMargin`; the hold, or an open `disk_critical` alert, that a previous run left in `open-alerts.json` starts it held) (live/upcoming and newly published content never waits in `Queued`); a backlog VOD parked in `COOKIES?` returns to `Queued` (when its feed row still exists), not `Upcoming`, so a cookie repair re-admits it through the same pacing.
+Backlog VODs only: enter as `Queued` and are admitted to `Upcoming` by the worker's per-channel archive-slots scheduler, which admits none while offline, or from the moment the output volume reaches `disk_critical_percent` until usage is back 2 points below it (`config.DiskRecoveryMargin`; the hold, or an open `disk_critical` alert, that a previous run left in `open-alerts.json` starts it held) (live/upcoming and newly published content never waits in `Queued`); a backlog VOD parked in `COOKIES?` returns to `Queued` (its feed row or not — a removed channel's kept backlog is admitted under the global `archive_slots`), not `Upcoming`, so a cookie repair re-admits it through the same pacing.
 Error paths: any → `Error`, `Cancelled`, or `COOKIES?`. Two automatic ways out of `Error`, both the Twitch monitor's and never both for one row: a Twitch job that failed with `TwitchOfflineErrMsg` before any segment was downloaded is re-initialised to `Upcoming` when the monitor finds the same broadcast live, within `MaxTwitchAutoRetries` (`isRecoverableTwitchError` → `AutoReinitializeJob`); and a live Twitch capture that stopped with its broadcast's end unconfirmed (`park_reason` `twitch_end_unconfirmed`, which `isRecoverableTwitchError` refuses) is muxed once the Twitch monitor confirms the broadcast over, exactly as the Mux action would, once.
 
 `JobStatus` is `type JobStatus string`. Timestamps are ISO 8601 strings. Optional numerics use pointers.
@@ -117,7 +117,7 @@ Prefixes: **A** (Action), **R** (Request), **O** (Open), **E** (Extras), **Q** (
 All REST endpoints use `/api/` (no version). Route registration and frontend fetch calls must stay in sync.
 
 ### Panic recovery
-All goroutines MUST have inline `defer func() { if r := recover(); ... }()`. HTTP: `RecoveryMiddleware`. DB callbacks: `safeCallJobUpdate`/`safeCallJobsChange`.
+All goroutines MUST have inline `defer func() { if r := recover(); ... }()`. HTTP: `RecoveryMiddleware`, plus `outermostRecovery` around the whole server handler for what runs ahead of it. DB callbacks: `safeCallJobUpdate`/`safeCallJobsChange`.
 
 ### Web UI embedding
 Static assets in `web/public/`, embedded via `go:embed` in `web/embed.go`. Changes require `go build`.
