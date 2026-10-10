@@ -565,6 +565,9 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				}
 			}
 		}
+		// Duplicates compare case-insensitively, as config.Validate does: a
+		// pair differing only in case passed here and then failed Save, a
+		// bare 500 with the field's name lost.
 		seen := make(map[string]bool, len(chs))
 		for i, raw := range chs {
 			obj, ok := raw.(map[string]any)
@@ -573,7 +576,7 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				continue
 			}
 			id, _ := obj["id"].(string)
-			id = strings.TrimSpace(id)
+			id = strings.ToLower(strings.TrimSpace(id))
 			if id == "" {
 				errs[fmt.Sprintf("channels[%d].id", i)] = "channel ID required"
 				continue

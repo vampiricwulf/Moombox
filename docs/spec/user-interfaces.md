@@ -219,7 +219,7 @@ All 45 non-test files of `internal/tui/`, grouped by role. Four of them form two
 | `ytdlp_dialog.go` | yt-dlp plugin overlay (`E Y`). Renders `ytdlpplugin.Info` verbatim; `I` installs for the live port. |
 | `release_notes_overlay.go` | Release notes overlay (`R N`). `glamour`-rendered Markdown in a `bubbles/viewport`, wrapped by `wrapReleaseNotes` rather than by glamour (see the `R N` row below); beside a pending update's own notes `U` applies it and `S` skips it. |
 | `ffmpeg_check.go` | FFmpeg validation/installation overlay. Built with `huh`. `Esc` quits Moombox here rather than dismissing, because FFmpeg is required for muxing. |
-| `setup_wizard.go` | First-run setup overlay, and — via `E L` — the standalone cookie-login step on a configured install. Built with `huh`. Config, FFmpeg, yt-dlp plugin, cookies. |
+| `setup_wizard.go` | First-run setup overlay, and — via `E L` — the standalone cookie-login step on a configured install. Built with `huh`. Config, FFmpeg, yt-dlp plugin, cookies, channels — whose editor resolves a URL or bare `@handle` ID and refuses a duplicate exactly as the Settings one does. |
 
 **The Settings overlay** — nine files, none of which uses `huh`: the editor is built from the package's own section and field tables over `text_input.go`. One row is a hybrid: `max_video_resolution` is a `fieldNumber` that also declares `options` (`resolutionPresets`, `internal/tui/settings.go`), so ←/→ step the preset ladder while typing still enters any custom value — a `fieldCycle` row gets no text input at all, which is why it is not one. The stepper is `cycleNumberPreset` (`internal/tui/text_input.go`), the numeric sibling of `cycleFieldOption`: it moves an off-ladder value to the nearest preset above or below rather than to the end of the list. `settings_components.go` suppresses the arrows for such a row so the step is not also a cursor move, and its `previewFn` names the preset (or `Custom: N`) on the dim line below. The dashboard's twin is an `<sl-select>` over the same ladder plus a Custom entry that reveals the numeric input (`RESOLUTION_PRESETS`, `web/public/modules/settings.js`). Both first-run wizards reach the unbounded mode too: the Web one through a blank-by-default select (`web/public/modules/setup.js`), the TUI one because `finishAdvancedSetup` (`internal/tui/setup_wizard.go`) reads the raw field text, not `vNum`, which cannot tell an empty entry from a typed `0`.
 
@@ -228,7 +228,7 @@ All 45 non-test files of `internal/tui/`, grouped by role. Four of them form two
 | `settings.go` | Settings model: the section/field tables, `Open`/`Close`, `loadValues`/`applyValues`, dirty and restart-required tracking. |
 | `settings_view.go` | Settings rendering: header, hint line, action buttons, field rows, and each sub-editor's view. |
 | `settings_keys.go` | Settings key handling: section and field navigation, edit mode, save/close routing. |
-| `settings_channels.go` | Channel sub-editor: add, edit, delete, and the four per-channel overrides. |
+| `settings_channels.go` | Channel sub-editor: add, edit, delete, and the four per-channel overrides. An ID that is a URL or a bare `@handle` is resolved first, off the update loop (`resolveChannelCmd` → `HandleChannelResolved`, through `utils.NormalizeChannelID`); one that names no channel is refused with `Channel ID: not a YouTube or Twitch channel URL`, and an ID another entry already has — compared case-insensitively, typed or resolved — with `Channel "…" already added` (`channelIDTaken`, which the setup wizard's editor shares). |
 | `settings_channel_removal.go` | The channel sub-editor's removal prompt (`D`): counts the channel's jobs off the update loop (`OnChannelRemovalSummary`), offers Enter (keep them) / P (delete the pending ones) / Esc in place of the key list, and hands a saved "delete" choice to the App (`TakeChannelPrunes` → `OnDeletePendingChannelJobs`). |
 | `settings_notifications.go` | Notification sub-editor: webhook list (an edit-mode target's row carries a dim `· one message per job`), per-event toggles, test send, the per-target `enabled` mute, the `mention` text field, the `m` key, which toggles a highlighted event row in the mention (`@`) column, and the Delivery row (Separate messages / One message per job, Space toggles). |
 | `settings_security.go` | Security sub-editor: password set/remove, network access, and the external-access predicate `isExternalAccess`. |
@@ -461,7 +461,7 @@ These are returned by Bubble Tea commands that perform HTTP requests to the back
 | `backfillRescanQueuedMsg` | Feed-history re-scan queued (`R B`) |
 | `cookieRecheckResultMsg` | Cookie recheck |
 | `cookieForceRefreshResultMsg` | Cookie force refresh |
-| `channelResolvedMsg` | Channel URL/name resolution |
+| `channelResolvedMsg` | A channel editor's ID resolved through `utils.NormalizeChannelID` (`resolveChannelCmd`). Both editors — Settings and the setup wizard — receive it; each drops an answer it is not waiting for, or one for text its ID box no longer holds. |
 | `channelRemovalSummaryMsg` | A channel's job counts for the Settings → Channels removal prompt; one for a prompt since closed, or for another channel, is dropped |
 | `channelJobsPrunedMsg` | The pending-jobs delete a Settings save committed for removed channels |
 | `fetchClientTokensResultMsg` | Client token list fetch |

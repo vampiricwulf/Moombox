@@ -16,6 +16,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // cookieSetupCountdownSeconds is how long the wizard waits for the user to
@@ -247,6 +248,10 @@ type SetupWizardModel struct {
 	channelEditValues map[string]string
 	channelEditField  int
 	channelDeleteConf bool
+	// channelResolving is set while the edited ID — a URL or a bare @handle —
+	// is resolved off the update loop (resolveChannelCmd →
+	// HandleChannelResolved), the step the Settings editor has always had.
+	channelResolving bool
 
 	// Esc confirmation state for advanced mode (prevents accidental data loss)
 	escConfirm bool
@@ -321,6 +326,7 @@ func (m *SetupWizardModel) Open() {
 	m.channelEditValues = nil
 	m.channelEditField = 0
 	m.channelDeleteConf = false
+	m.channelResolving = false
 	m.escConfirm = false
 	m.advancedCookieDone = false
 	m.saving = false
@@ -951,37 +957,34 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 		} else if len(m.channels) == 0 {
 			m.channelIndex = 0
 		}
+		m.channelResolving = false
 		m.textInput.Blur()
 		return ""
 	case keyEnter:
+		if m.channelResolving {
+			return ""
+		}
 		id := strings.TrimSpace(m.channelEditValues["id"])
 		if id == "" {
 			m.errorMsg = "Channel ID is required"
 			return ""
 		}
-		// Check for duplicate channel ID
-		for i, existing := range m.channels {
-			if strings.EqualFold(existing.ID, id) && i != m.channelIndex {
-				m.errorMsg = fmt.Sprintf("Channel %q already added", id)
-				return ""
-			}
+		if channelIDTaken(m.channels, m.channelIndex, id) {
+			m.errorMsg = fmt.Sprintf("Channel %q already added", id)
+			return ""
 		}
 		if msg := validateChannelValues(m.channelEditValues); msg != "" {
 			m.errorMsg = msg
 			return ""
 		}
-		var existing *config.ChannelConfig
-		if m.channelIndex < len(m.channels) {
-			existing = &m.channels[m.channelIndex]
+		// A URL or a bare @handle — what the field's help offers — is
+		// resolved first, as the Settings editor does. The wizard had no
+		// resolve step at all, and stored a pasted channel URL as the ID.
+		if utils.NeedsChannelResolve(id) {
+			m.channelResolving = true
+			return "resolve_channel"
 		}
-		ch := valuesToChannel(m.channelEditValues, existing)
-		if m.channelIndex < len(m.channels) {
-			m.channels[m.channelIndex] = ch
-		} else {
-			m.channels = append(m.channels, ch)
-		}
-		m.channelMode = "list"
-		m.textInput.Blur()
+		m.commitChannelEdit()
 		return ""
 	case keyUp:
 		if m.channelEditField > 0 {
@@ -1009,6 +1012,73 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 		return ""
 	}
 	return ""
+}
+
+// commitChannelEdit writes the editor's values into the channel list — over
+// the entry being edited, or as a new one — and returns to the list.
+func (m *SetupWizardModel) commitChannelEdit() {
+	var existing *config.ChannelConfig
+	if m.channelIndex < len(m.channels) {
+		existing = &m.channels[m.channelIndex]
+	}
+	ch := valuesToChannel(m.channelEditValues, existing)
+	if m.channelIndex < len(m.channels) {
+		m.channels[m.channelIndex] = ch
+	} else {
+		m.channels = append(m.channels, ch)
+	}
+	m.channelMode = "list"
+	m.textInput.Blur()
+}
+
+// GetChannelResolveInput returns the channel ID being resolved.
+func (m *SetupWizardModel) GetChannelResolveInput() string {
+	if m.channelEditValues == nil {
+		return ""
+	}
+	return strings.TrimSpace(m.channelEditValues["id"])
+}
+
+// HandleChannelResolved takes resolveChannelCmd's answer for the editor's ID
+// — the Settings editor's rules: an answer nothing is waiting for, or one
+// for text the ID box no longer holds, is dropped; an input that names no
+// channel is refused, never stored as typed; and a resolved ID the list
+// already has is refused as a typed one is.
+func (m *SetupWizardModel) HandleChannelResolved(input, id, name, platform string, err error) {
+	if !m.channelResolving {
+		return
+	}
+	m.channelResolving = false
+	if m.channelMode != "edit" || input != m.GetChannelResolveInput() {
+		return
+	}
+	if err != nil {
+		m.errorMsg = channelResolveError(err)
+		return
+	}
+	m.channelEditValues["id"] = id
+	if name != "" && m.channelEditValues["name"] == "" {
+		m.channelEditValues["name"] = name
+	}
+	if platform != "" {
+		m.channelEditValues["platform"] = platform
+	}
+	if channelIDTaken(m.channels, m.channelIndex, id) {
+		m.errorMsg = fmt.Sprintf("Channel %q already added", id)
+		m.clampChannelEditField()
+		m.updateTextInputForField()
+		return
+	}
+	m.commitChannelEdit()
+}
+
+// channelEditHint is the channel editor's key line: what Enter and Esc do,
+// or that the ID is being resolved.
+func (m *SetupWizardModel) channelEditHint() string {
+	if m.channelResolving {
+		return "Resolving channel...  Esc: Cancel"
+	}
+	return "Esc: Cancel  Enter: Save  ↑/↓: Fields"
 }
 
 // clampChannelEditField adjusts channelEditField when cycling platform may
@@ -1715,7 +1785,7 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 	lines = append(lines, "")
 	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
 	if m.channelMode == "edit" {
-		lines = append(lines, DimStyle.Render("Esc: Cancel  Enter: Save  \u2191/\u2193: Fields"))
+		lines = append(lines, DimStyle.Render(m.channelEditHint()))
 	} else {
 		hintLeft := DimStyle.Render("Esc: Back")
 		navHint := DimStyle.Render("A: Add  Enter: Edit  D: Delete  ")
@@ -1835,7 +1905,7 @@ func (m *SetupWizardModel) viewAdvanced() string {
 		lines = append(lines, "")
 		lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
 		if m.channelMode == "edit" {
-			lines = append(lines, DimStyle.Render("Esc: Cancel  Enter: Save  \u2191/\u2193: Fields"))
+			lines = append(lines, DimStyle.Render(m.channelEditHint()))
 		} else {
 			hintLeft := DimStyle.Render("Esc: Back")
 			navHint := DimStyle.Render("A: Add  Enter: Edit  D: Delete  ")

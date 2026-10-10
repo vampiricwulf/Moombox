@@ -50,13 +50,16 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 		// the lock) share the previous backing array, so writing an element
 		// in place would race their reads; whole-slice replacement is the
 		// documented Store contract. The old header doubles as the rollback
-		// snapshot since its array is never touched.
+		// snapshot since its array is never touched. The ID matches
+		// case-insensitively, the rule config.Validate refuses a duplicate
+		// by: "Shroud" over a stored "shroud" is that channel, not a second
+		// entry Save would then refuse.
 		mu.Lock()
 		oldChannels := cfg.Channels
 		newChannels := slices.Clone(cfg.Channels)
 		found := false
 		for i, ch := range newChannels {
-			if ch.ID == channel.ID {
+			if strings.EqualFold(ch.ID, channel.ID) {
 				newChannels[i] = channel
 				found = true
 				break

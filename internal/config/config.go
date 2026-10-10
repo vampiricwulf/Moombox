@@ -1009,6 +1009,40 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		}
 	}
 
+	// channels[].id: every writer stores a trimmed ID and refuses one a
+	// channel already has (utils.NormalizeChannelID, and the duplicate checks
+	// of PUT /api/config, POST /api/config/channels and both TUI editors),
+	// comparing case-insensitively — a Twitch login is, and two spellings of
+	// one channel are one channel monitored twice, which the dashboard's
+	// Remove then left half-removed. A hand-edited file can still carry
+	// either. Normalize trims the ID and drops the later duplicate, the entry
+	// every lookup by ID already passed over; the slice is rebuilt rather
+	// than compacted in place, so a Store rollback's header and a Snapshot
+	// reader's array are never written through.
+	{
+		seen := make(map[string]int, len(cfg.Channels))
+		kept := make([]ChannelConfig, 0, len(cfg.Channels))
+		changed := false
+		for i, ch := range cfg.Channels {
+			if id := strings.TrimSpace(ch.ID); id != ch.ID {
+				fail("channels[%d].id %q has surrounding whitespace", i, ch.ID)
+				ch.ID = id
+				changed = true
+			}
+			key := strings.ToLower(ch.ID)
+			if first, dup := seen[key]; dup && ch.ID != "" {
+				fail("channels[%d].id %q duplicates channels[%d]", i, ch.ID, first)
+				changed = true
+				continue
+			}
+			seen[key] = i
+			kept = append(kept, ch)
+		}
+		if changed && !reportOnly {
+			cfg.Channels = kept
+		}
+	}
+
 	// Channel-level quality_preference (applies to both YouTube and Twitch)
 	// and archive_window_days/archive_slots overrides.
 	for i := range cfg.Channels {

@@ -219,3 +219,33 @@ func TestSetupCompleteNormalizesChannelIDs(t *testing.T) {
 		t.Errorf("stored %+v, want the trimmed ID and the handle's UC ID", got)
 	}
 }
+
+// TestChannelIDsCompareCaseInsensitively: config.Validate refuses two IDs
+// that differ only in case (Save's last line against W25-15's duplicate),
+// so the writers compare the same way — PUT /api/config refuses the pair
+// with a 400 naming the entry rather than a bare 500 from Save, and POST
+// /api/config/channels matches "Shroud" to the stored "shroud" instead of
+// appending a second entry Save would then refuse.
+//
+// Mutants killed: PUT's duplicate key not lowercased (500); POST's match
+// back to == (500, nothing stored).
+func TestChannelIDsCompareCaseInsensitively(t *testing.T) {
+	f := newConfigRoutesFixture(t)
+	rec := putChannels(t, f.router, "/api/config", []map[string]any{{"id": "shroud"}, {"id": "Shroud"}})
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"channels[1].id":"duplicate channel ID"`) {
+		t.Errorf("PUT of a case pair: %d %s, want 400 naming channels[1].id", rec.Code, rec.Body.String())
+	}
+
+	cf := newChannelRoutesFixture(t)
+	if err := cf.store.Update(func(c *config.MoomboxConfig) {
+		c.Channels = []config.ChannelConfig{{ID: "shroud", Platform: "twitch"}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := postChannel(t, cf.router, map[string]any{"id": "Shroud", "platform": "twitch", "name": "Renamed", "edit": true}); rec.Code != http.StatusOK {
+		t.Fatalf("POST Shroud over shroud: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	if got := storedChannels(cf.store); len(got) != 1 || got[0].Name != "Renamed" {
+		t.Errorf("stored %+v, want the one entry updated", got)
+	}
+}

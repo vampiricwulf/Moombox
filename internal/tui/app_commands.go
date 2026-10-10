@@ -666,23 +666,31 @@ func (a *App) testNotificationCmd(url string) tea.Cmd {
 	})
 }
 
-// resolveChannelCmd resolves a channel URL asynchronously via tea.Cmd.
+// normalizeChannelID is utils.NormalizeChannelID behind a variable, so the
+// TUI tests can answer a handle's lookup without reaching youtube.com.
+var normalizeChannelID = utils.NormalizeChannelID
+
+// resolveChannelCmd runs a channel editor's ID — a URL or a bare @handle —
+// through utils.NormalizeChannelID, the normaliser every channel writer
+// shares, off the update loop: a handle is a page fetch with retries. Both
+// editors (Settings and the setup wizard) receive the answer and the one
+// waiting takes it. An input that names no channel comes back as
+// ErrNotChannelURL; it used to come back as its own ID, and was saved — a
+// watch URL stored as a channel the monitors polled forever. A panic answers
+// the editor too, so it is not left resolving.
 func (a *App) resolveChannelCmd(input string) tea.Cmd {
-	return safeCmd(func() tea.Msg {
-		resolved, err := utils.ResolveChannelInput(context.Background(), input)
+	return safeCmdOr(func() tea.Msg {
+		resolved, err := normalizeChannelID(context.Background(), input)
 		if err != nil {
-			return channelResolvedMsg{Err: err}
-		}
-		if resolved == nil {
-			// Not a recognized URL — return input as-is
-			return channelResolvedMsg{ID: input}
+			return channelResolvedMsg{Input: input, Err: err}
 		}
 		return channelResolvedMsg{
+			Input:    input,
 			ID:       resolved.ID,
 			Name:     resolved.Name,
 			Platform: resolved.Platform,
 		}
-	})
+	}, func(text string) tea.Msg { return channelResolvedMsg{Input: input, Err: errors.New(text)} })
 }
 
 // openBrowser launches the default browser for the given URL using the

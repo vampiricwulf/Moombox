@@ -946,7 +946,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case channelResolvedMsg:
-		a.settings.HandleChannelResolved(msg.ID, msg.Name, msg.Platform, msg.Err)
+		// Both channel editors resolve through resolveChannelCmd; each
+		// discards an answer it is not waiting for.
+		a.settings.HandleChannelResolved(msg.Input, msg.ID, msg.Name, msg.Platform, msg.Err)
+		a.setupWiz.HandleChannelResolved(msg.Input, msg.ID, msg.Name, msg.Platform, msg.Err)
 		return a, nil
 
 	case channelRemovalSummaryMsg:

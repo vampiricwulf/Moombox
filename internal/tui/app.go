@@ -301,8 +301,11 @@ type (
 		Err    error
 	}
 
-	// Async results for channel URL resolution
+	// Async results for a channel editor's ID (resolveChannelCmd). Input is
+	// the text that was resolved, so an editor whose ID box changed while
+	// the lookup ran drops the answer instead of saving it over the new text.
 	channelResolvedMsg struct {
+		Input    string
 		ID       string
 		Name     string
 		Platform string

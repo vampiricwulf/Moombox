@@ -2,11 +2,13 @@ package tui
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // --- Channel sub-editor ---
@@ -222,9 +224,17 @@ func (m *SettingsModel) handleChannelEditKey(key string) string {
 			m.status = saveError
 			return ""
 		}
-		if strings.Contains(id, "youtube.com/") || strings.Contains(id, "youtu.be/") || strings.Contains(id, "twitch.tv/") {
+		// A URL or a bare @handle is resolved first, off the update loop
+		// (resolveChannelCmd → HandleChannelResolved); a bare handle used
+		// to be saved as typed, an ID no monitor could poll.
+		if utils.NeedsChannelResolve(id) {
 			m.channelResolving = true
 			return "resolve_channel"
+		}
+		if channelIDTaken(m.channels, m.channelIndex, id) {
+			m.errorMsg = fmt.Sprintf("Channel %q already added", id)
+			m.status = saveError
+			return ""
 		}
 		m.saveCurrentChannel()
 		return ""
@@ -257,7 +267,7 @@ func (m *SettingsModel) handleChannelEditKey(key string) string {
 // autoDetectPlatform checks the ID field value and auto-switches the platform if it contains a known domain.
 func (m *SettingsModel) autoDetectPlatform() {
 	id := m.channelEditValues["id"]
-	if strings.Contains(id, "youtube.com/") || strings.Contains(id, "youtu.be/") {
+	if strings.HasPrefix(strings.TrimSpace(id), "@") || strings.Contains(id, "youtube.com/") || strings.Contains(id, "youtu.be/") {
 		m.channelEditValues["platform"] = "youtube"
 	} else if strings.Contains(id, "twitch.tv/") {
 		m.channelEditValues["platform"] = "twitch"
@@ -294,27 +304,64 @@ func (m *SettingsModel) GetChannelResolveInput() string {
 }
 
 // HandleChannelResolved processes the result of an async channel resolution.
-// If the user cancelled (Esc) before the result arrived, the result is silently discarded.
-func (m *SettingsModel) HandleChannelResolved(id, name, platform string, err error) {
+// If the user cancelled (Esc) before the result arrived, the result is
+// silently discarded, and so is one for text the ID box no longer holds —
+// typed over while the lookup ran; Enter resolves what is there now. An
+// input that names no channel is refused with ErrNotChannelURL's sentence
+// instead of saved, and a resolved ID another entry already has is refused
+// as the plain-ID path refuses it.
+func (m *SettingsModel) HandleChannelResolved(input, id, name, platform string, err error) {
 	if !m.channelResolving {
 		return // User cancelled or navigated away — discard stale result
 	}
 	m.channelResolving = false
+	if input != m.GetChannelResolveInput() {
+		return
+	}
 	if err != nil {
-		m.errorMsg = "Resolve failed: " + err.Error()
+		m.errorMsg = channelResolveError(err)
 		m.status = saveError
 		return
 	}
-	if id != "" {
-		m.channelEditValues["id"] = id
-	}
+	m.channelEditValues["id"] = id
 	if name != "" && m.channelEditValues["name"] == "" {
 		m.channelEditValues["name"] = name
 	}
 	if platform != "" {
 		m.channelEditValues["platform"] = platform
 	}
+	if channelIDTaken(m.channels, m.channelIndex, id) {
+		m.errorMsg = fmt.Sprintf("Channel %q already added", id)
+		m.status = saveError
+		// The box shows the resolved ID, the one that collides.
+		m.updateTextInputForField()
+		return
+	}
 	m.saveCurrentChannel()
+}
+
+// channelIDTaken reports whether a channel in chs other than the one at
+// index self already has id, compared case-insensitively — the rule
+// config.Validate refuses a duplicate by. Shared by the Settings editor and
+// the setup wizard, which used to be the only one of the two to check.
+func channelIDTaken(chs []config.ChannelConfig, self int, id string) bool {
+	id = strings.TrimSpace(id)
+	for i, ch := range chs {
+		if i != self && strings.EqualFold(strings.TrimSpace(ch.ID), id) {
+			return true
+		}
+	}
+	return false
+}
+
+// channelResolveError words a failed resolve for the channel editors: an
+// input that names no channel gets ErrNotChannelURL's sentence, the one POST
+// /api/config/channels answers; anything else is the lookup's own failure.
+func channelResolveError(err error) string {
+	if errors.Is(err, utils.ErrNotChannelURL) {
+		return "Channel ID: " + err.Error()
+	}
+	return "Resolve failed: " + err.Error()
 }
 
 func (m *SettingsModel) cycleChannelOption(field channelFieldDef, direction int) {

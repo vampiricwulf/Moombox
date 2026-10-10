@@ -217,6 +217,9 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			})
 		}
 		var cmds []tea.Cmd
+		if action == "resolve_channel" {
+			cmds = append(cmds, a.resolveChannelCmd(a.setupWiz.GetChannelResolveInput()))
+		}
 		if action == "finish_cookie" {
 			// Run cookie extraction async so TUI doesn't freeze
 			platform := a.setupWiz.cookiePlatform

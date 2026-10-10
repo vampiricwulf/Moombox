@@ -628,7 +628,7 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 
 | Field | Type | Default | TOML Key |
 |-------|------|---------|----------|
-| ID | string | "" | `id` | YouTube channel ID or Twitch username |
+| ID | string | "" | `id` | YouTube channel ID or Twitch username. Every writer stores it through `utils.NormalizeChannelID` — trimmed, a URL or bare `@handle` resolved — and `Validate` refuses an ID with surrounding whitespace or one another entry has, compared case-insensitively, so `Save` refuses either; `Normalize` (Load) trims it and drops the later duplicate. |
 | Name | string | "" | `name` | Display name |
 | Platform | string | "youtube" | `platform` | "youtube" or "twitch" |
 | Enabled | *bool | nil (true) | `enabled` | nil defaults to true |

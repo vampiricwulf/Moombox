@@ -618,7 +618,7 @@ func (m *SettingsModel) renderChannelEdit(w int) string {
 	}
 	hint := " (Enter: save, Esc: cancel)"
 	if m.channelResolving {
-		hint = " (resolving URL...)"
+		hint = " (resolving channel...)"
 	}
 	lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render(title)+
 		DimStyle.Render(hint))
