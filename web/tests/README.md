@@ -82,6 +82,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `settings-reorder-budget.test.mjs` | the two reorder ceilings: 0 sent, an empty field omitted |
 | `settings-text.test.mjs` | Settings and setup text that pointed the wrong way or dropped the server's reason |
 | `settings-channels.test.mjs` | both Add Channel dialogs: a URL or bare `@handle` resolved first, a configured ID switching to editing it, the edit mark, and a stale list's `409` |
+| `setup-wizard.test.mjs` | the first-run wizard's Finish: the address it redirects the tab to after the restart |
 | `sidecar-warning.test.mjs` | the header warning while the BotGuard sidecar is down |
 | `stats-storage.test.mjs` | the Stats tab's storage breakdown, Cancelled included |
 | `trimmer.test.mjs` | the trim dialog's failure states and keyboard reach |

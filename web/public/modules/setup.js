@@ -882,8 +882,13 @@ export class SetupController {
 
     // Detect if dashboard URL will change (port or HTTPS toggle).
     // After restart the old URL is dead, so we redirect instead of polling.
-    const newPort = port || 774;
+    // A blank port leaves the server's port as it is, so the address to
+    // compare against is the one this page is served from — not 774: when
+    // 774 is taken the server serves from a nearby port, binds the same one
+    // after the restart, and the old default sent this tab to whatever held
+    // 774 (internal/web/server.go).
     const currentPort = parseInt(window.location.port) || (window.location.protocol === "https:" ? 443 : 80);
+    const newPort = port || currentPort;
     const currentHttps = window.location.protocol === "https:";
     if (newPort !== currentPort || httpsEnabled !== currentHttps) {
       const protocol = httpsEnabled ? "https" : "http";
