@@ -31,6 +31,34 @@ func TestFormatFileSize(t *testing.T) {
 	}
 }
 
+// TestFormatFileSizeBelowZeroReadsLikeTheWeb: zero and every negative print
+// "0B", as the Web's formatBytes prints them (its "invalid inputs coerce to
+// 0B" case in web/tests/utils.test.mjs). A negative printed "-2048B" — no
+// tier, a minus sign — where the dashboard read "0B" for the same value; the
+// one figure either UI works out by subtraction, a disk's used space (total
+// minus free), is the way one reaches them.
+//
+// Mutant: FormatFileSize without its floor — every negative row prints its
+// raw byte count.
+func TestFormatFileSizeBelowZeroReadsLikeTheWeb(t *testing.T) {
+	tests := []struct {
+		bytes    int64
+		expected string
+	}{
+		{0, "0B"},
+		{-1, "0B"},
+		{-100, "0B"},
+		{-2048, "0B"},
+		{-1 << 40, "0B"},
+	}
+	for _, tt := range tests {
+		result := FormatFileSize(tt.bytes)
+		if result != tt.expected {
+			t.Errorf("FormatFileSize(%d) = %q, want %q", tt.bytes, result, tt.expected)
+		}
+	}
+}
+
 // TestFormatFileSizeRoundsTiesLikeTheWeb: a size of exactly N.25 of a unit is
 // a tie at one decimal, and the Web's formatBytes (toFixed(1)) rounds it up
 // where %.1f rounded it to even — the TUI read "1.2GB" beside the dashboard's

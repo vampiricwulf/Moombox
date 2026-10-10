@@ -11,6 +11,11 @@ import (
 // The tiers, the rounding and the unit-without-a-space form are the Web's
 // formatBytes (web/public/modules/utils.js), so a figure reads the same in the
 // dashboard, the TUI job details and the TUI statistics overlay.
+//
+// So is the floor: a size below zero — a disk's used figure worked out as
+// total minus free from a reading that does not add up — prints "0B", as
+// formatBytes prints it. It printed "-2048B", a negative in bytes with no
+// tier, where the dashboard read "0B" for the same value.
 func FormatFileSize(bytes int64) string {
 	const (
 		kb = 1024
@@ -18,6 +23,7 @@ func FormatFileSize(bytes int64) string {
 		gb = 1024 * mb
 		tb = 1024 * gb
 	)
+	bytes = max(bytes, 0)
 	switch {
 	case bytes >= tb:
 		return toFixed1(float64(bytes)/float64(tb)) + "TB"

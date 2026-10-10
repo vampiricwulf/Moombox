@@ -50,10 +50,21 @@ test("formatBytes: each unit boundary", () => {
   assert.equal(formatBytes(1024 * 1024 * 1024 * 1024), "1.0TB");
 });
 
+// Zero and every negative read "0B", as the TUI's utils.FormatFileSize reads
+// them (TestFormatFileSizeBelowZeroReadsLikeTheWeb pins the Go half with the
+// same rows): the disk card's used figure is total minus free, and a reading
+// that does not add up must not print a minus sign in one UI and not the other.
+//
+// Mutant: the `bytes < 0` floor dropped — every negative row prints its raw
+// byte count.
 test("formatBytes: invalid inputs coerce to 0B", () => {
   assert.equal(formatBytes(null), "0B");
   assert.equal(formatBytes(NaN), "0B");
+  assert.equal(formatBytes(0), "0B");
+  assert.equal(formatBytes(-1), "0B");
   assert.equal(formatBytes(-100), "0B");
+  assert.equal(formatBytes(-2048), "0B");
+  assert.equal(formatBytes(-(2 ** 40)), "0B");
 });
 
 test("formatDurationSeconds", () => {
