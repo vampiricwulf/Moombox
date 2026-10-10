@@ -225,7 +225,7 @@ The lists below are the `internal/` imports of each package as `go list -f '{{jo
 
 - `cmd/moombox` imports everything (orchestrator): `bgutils`, `bgutils/sidecar`, `cipher`, `config`, `connectivity`, `cookies`, `database`, `engine`, `jobfilter`, `logger`, `monitor`, `notifications`, `stats`, `tui`, `twitch`, `updater`, `utils`, `web`, `internal/web/routes`, `worker`, `youtube`
 - `internal/worker` imports: `bgutils`, `chat`, `cipher`, `config`, `constants`, `database`, `engine`, `httpx`, `notifications`, `redact`, `twitch`, `utils`, `youtube`
-- `internal/web/routes` imports: `bgutils`, `bgutils/sidecar`, `config`, `cookies`, `database`, `disk`, `jobfilter`, `notifications`, `stats`, `updater`, `utils`, `web`, `worker`, `ytdlpplugin`
+- `internal/web/routes` imports: `bgutils`, `bgutils/sidecar`, `config`, `cookies`, `database`, `disk`, `engine` (the import's ffprobe path), `jobfilter`, `notifications`, `stats`, `updater`, `utils`, `web`, `worker`, `ytdlpplugin`
 - `internal/web` imports: `config` only — the hub's `Broadcast*` methods take `any`, so the server, hub, auth and middleware never import the job types; the route handlers live in `internal/web/routes`
 - `internal/tui` imports: `config`, `constants`, `cookies`, `database`, `httpx`, `jobfilter`, `notifications`, `stats`, `utils`, `ytdlpplugin` — NOT `web`: the TUI's HTTP calls use a plain `net/http` client carrying the internal token, and its live updates come straight from the database subscriptions
 - `internal/monitor` imports: `config`, `database`, `httpx`, `twitch`, `worker`
