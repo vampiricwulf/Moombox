@@ -54,7 +54,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | tui/ | ~25,430 | 45 | 126 | Largest — 2-over-1 panel layout, overlays, chord system |
 | worker/ | ~23,110 | 53 | 123 | Download orchestration, strategies, queue, quality monitor, disk-full gate, channel removal |
 | cookies/ | ~16,370 | 37 | 91 | Cookie jar, refresh, auto-cookie (Firefox/Chromium), Job Object |
-| web/routes/ | ~9,470 | 26 | 79 | REST handlers (jobs, config, stats, output, staging, cookies, import) |
+| web/routes/ | ~9,550 | 26 | 80 | REST handlers (jobs, config, stats, output, staging, cookies, import) |
 | engine/ | ~8,670 | 20 | 53 | Segment downloader (DASH/HLS/VOD), manifest, resume, eviction probe, reorder budget |
 | twitch/ | ~7,470 | 13 | 45 | Twitch GQL API, auth, HLS, IRC chat, VOD chat, emotes |
 | youtube/ | ~6,480 | 13 | 19 | YouTube service, player API, format selector, membership tab |
@@ -88,8 +88,8 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 ### Totals
 
 - **cmd/:** ~10,390 lines across 27 source files (26 in `cmd/moombox` — entry/launcher/adapters/wiring — plus the sign tool), plus 85 test files (~12,680 lines)
-- **internal/ packages:** ~140,890 lines across 348 source files in 33 packages
-- **Test code:** ~204,490 lines across 779 test files under `internal/` (`internal/docs`'s two included)
+- **internal/ packages:** ~140,980 lines across 348 source files in 33 packages
+- **Test code:** ~204,670 lines across 780 test files under `internal/` (`internal/docs`'s two included)
 - **Frontend:** ~23,440 lines across 27 files (~980 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 20 ES modules under `web/public/modules/` (`chat-timeline.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
 
 ## Entry Points
