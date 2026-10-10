@@ -151,6 +151,43 @@ func TestVerifyPassword(t *testing.T) {
 	}
 }
 
+// TestVerifyPasswordAcceptsTheTrimmedFormOfAPaddedPassword pins the
+// compatibility half of W26-09's rule. No surface trims a password any more,
+// but both first-run wizards did, so an install they set up holds the hash of
+// the trimmed password while its operator types the spaces. The password as
+// typed is checked first; when it fails and has whitespace at either end, its
+// trimmed form is checked too. Never the other way: a password stored with
+// its spaces is not matched by the bare word.
+//
+// Mutants killed: dropping the trimmed check (the padded password typed
+// against a wizard's hash fails); checking only the trimmed form (a password
+// stored with its spaces fails as typed). Equivalent: dropping the
+// outer-space guard — trimming a password with no outer whitespace changes
+// nothing, so the second check could only repeat the first.
+func TestVerifyPasswordAcceptsTheTrimmedFormOfAPaddedPassword(t *testing.T) {
+	as := NewAuthService()
+	wizardHash, _ := as.HashPassword("correct horse battery") // what the trimming wizards stored
+	paddedHash, _ := as.HashPassword(" padded secret ")       // what is stored now
+
+	for _, tc := range []struct {
+		typed string
+		hash  string
+		want  bool
+	}{
+		{" correct horse battery ", wizardHash, true},
+		{"\tcorrect horse battery\n", wizardHash, true},
+		{"correct horse battery", wizardHash, true},
+		{" correct horse battery x", wizardHash, false},
+		{" padded secret ", paddedHash, true},
+		{"padded secret", paddedHash, false},
+		{"  padded secret  ", paddedHash, false},
+	} {
+		if got := as.VerifyPassword(tc.typed, tc.hash); got != tc.want {
+			t.Errorf("VerifyPassword(%q) = %v, want %v", tc.typed, got, tc.want)
+		}
+	}
+}
+
 func TestCreateSession(t *testing.T) {
 	as := NewAuthService()
 

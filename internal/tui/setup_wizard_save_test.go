@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -57,6 +58,67 @@ func TestPasswordSurfacesRefuseWhatTheLoginRefuses(t *testing.T) {
 			t.Errorf("Security, %d bytes: hash %q message %q, want refused with %q",
 				len(tc.pw), cfg.Network.PasswordHash, s.secMessage, tc.want)
 		}
+	}
+}
+
+// TestSetupWizardHashesThePasswordAsTyped pins W26-09 in the TUI wizard: it
+// read the password through v(), which trims, while the login and every
+// password change check it as typed — so " correct horse battery " set a
+// password the operator could not log in with. No surface trims a password
+// now: what is typed is what is hashed.
+//
+// Mutant killed: finishAdvancedSetup reading the password through v().
+func TestSetupWizardHashesThePasswordAsTyped(t *testing.T) {
+	const typed = " correct horse battery "
+	m := NewSetupWizardModel()
+	var hashed string
+	m.OnHashPassword = func(pw string) (string, error) { hashed = pw; return "scrypt:salt:hash", nil }
+	m.values["networkAccess"] = "External"
+	m.values["password"] = typed
+	if got := m.finishAdvancedSetup(); got != "save" {
+		t.Fatalf("finishAdvancedSetup = %q (%s)", got, m.errorMsg)
+	}
+	if hashed != typed {
+		t.Errorf("hashed %q, want the password as typed %q", hashed, typed)
+	}
+}
+
+// TestPasswordSpaceWarningOnBothTUISurfaces: a password with a space at
+// either end is kept as typed, so the wizard's Network step and Settings →
+// Security's Set Password say so while it is typed — a warning, never a
+// refusal (W26-09).
+//
+// Mutants killed: the wizard's view without the warning; renderSecuritySet
+// without it; either showing it for a password with no outer space.
+func TestPasswordSpaceWarningOnBothTUISurfaces(t *testing.T) {
+	wizardView := func(pw string) string {
+		m := NewSetupWizardModel()
+		m.Open()
+		m.SetSize(120, 50)
+		m.HandleKey(keyDown)
+		m.HandleKey(keyEnter) // Advanced Setup: its form opens on Network
+		m.values["networkAccess"] = "External"
+		m.values["password"] = pw
+		return ansi.Strip(m.View())
+	}
+	if v := wizardView(" padded secret "); !strings.Contains(v, config.PasswordOuterSpaceWarning) {
+		t.Errorf("wizard: no warning for a padded password:\n%s", v)
+	}
+	if v := wizardView("plain secret"); strings.Contains(v, config.PasswordOuterSpaceWarning) {
+		t.Error("wizard: warning for a password with no outer space")
+	}
+
+	securityView := func(pw string) string {
+		s, _ := newSecuritySettingsModel(t, "localhost", "")
+		s.secMode = securitySet
+		s.secNewPw = pw
+		return ansi.Strip(s.renderSecuritySet(120))
+	}
+	if v := securityView("padded secret "); !strings.Contains(v, config.PasswordOuterSpaceWarning) {
+		t.Errorf("Security: no warning for a padded password:\n%s", v)
+	}
+	if v := securityView("plain secret"); strings.Contains(v, config.PasswordOuterSpaceWarning) {
+		t.Error("Security: warning for a password with no outer space")
 	}
 }
 

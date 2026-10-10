@@ -523,6 +523,26 @@ func TestSetupCompleteRefusesAPasswordTheLoginRefuses(t *testing.T) {
 	}
 }
 
+// TestSetupCompleteStoresThePasswordAsTyped: no surface trims a password
+// (W26-09) — setup/complete hashes the one it is sent, spaces and all, so the
+// login matches it as typed and not the bare word.
+//
+// Mutant killed: trimming the password before it is hashed.
+func TestSetupCompleteStoresThePasswordAsTyped(t *testing.T) {
+	f := newSetupFixture(t)
+	const typed = " padded secret "
+	if rec := postSetupComplete(t, f.router, map[string]any{
+		"password": typed, "network": map[string]any{"network_access": "external"},
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("setup/complete: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	var hash string
+	f.store.Read(func(c *config.MoomboxConfig) { hash = c.Network.PasswordHash })
+	if !f.auth.VerifyPassword(typed, hash) || f.auth.VerifyPassword("padded secret", hash) {
+		t.Error("the stored hash is not the password as typed")
+	}
+}
+
 // postSetupComplete sends body to /api/setup/complete from loopback, as the
 // wizard does.
 func postSetupComplete(t *testing.T, router http.Handler, body map[string]any) *httptest.ResponseRecorder {

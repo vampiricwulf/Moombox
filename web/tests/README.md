@@ -71,7 +71,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `keyboard-modifiers.test.mjs` | Ctrl/Cmd/Alt combinations never reach a dashboard or trim-dialog shortcut |
 | `log-panel.test.mjs` | the Logs panel: batched appends, the 500-line window, the snapshot and frame numbers (`logSeq`/`seq`) across connects and resyncs |
 | `open-folder.test.mjs` | Open Folder surfaces a refusal |
-| `password-forms.test.mjs` | the wizard's External Access Password and Settings' Set Password: the bounds the login enforces, checked before posting |
+| `password-forms.test.mjs` | the wizard's External Access Password and Settings' Set Password: the bounds the login enforces, checked before posting; the password sent as typed; the warning while it starts or ends with a space |
 | `player.test.mjs` | `player.js`: selection, the chat sidebar and offset, seeking, search, the overlay; a few pure helper tests |
 | `release-notes-toast.test.mjs` | a failed release-notes fetch toasts rather than blocking the tab |
 | `render-diff.test.mjs` | a repeated `job_update` makes no DOM write in the details dialog or the status bar |

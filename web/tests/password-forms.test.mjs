@@ -22,6 +22,15 @@ const skip = jsdomMissing || false;
 after(() => harness?.teardownAll());
 
 const TOO_LONG = "Password too long (max 128 characters)";
+const SPACE_WARNING = "This password starts or ends with a space. It is kept as typed.";
+
+// Type `value` into the sl-input `id`, as the browser reports typing.
+function type(h, id, value) {
+  const input = h.el(id);
+  input.value = value;
+  input.dispatchEvent(new h.window.Event("sl-input"));
+  return input;
+}
 const toastTexts = (h) => h.toasts().map((t) => t.textContent.trim());
 
 // The first-run wizard, its setup/complete answering a refusal so a test stops
@@ -57,6 +66,44 @@ test("the wizard refuses an external password the login would refuse", { skip },
   await h.app.setup.finishAdvancedSetup();
   assert.equal(h.http.matching("/api/setup/complete", "POST").length, 0, "setup/complete was posted");
   assert.ok(toastTexts(h).includes(TOO_LONG), `toasts ${JSON.stringify(toastTexts(h))}`);
+});
+
+// W26-09: the wizard read the password through its trimming val(), so it
+// posted "correct horse battery" for " correct horse battery " while the login
+// posts the field as typed — the operator could not log in with what they
+// typed. No surface trims a password now.
+//
+// Mutant killed: reading the password through val() (trimmed).
+test("the wizard posts the external password as typed", { skip }, async () => {
+  const h = await wizard();
+  const typed = " correct horse battery ";
+  h.el("setup-network-access").value = "external";
+  h.el("setup-external-password").value = typed;
+  await h.app.setup.finishAdvancedSetup();
+  const call = h.http.matching("/api/setup/complete", "POST")[0];
+  assert.ok(call, "setup/complete was not posted");
+  assert.equal(call.body.password, typed);
+});
+
+// Both forms warn — never refuse — while the password typed starts or ends
+// with a space, and drop the warning once it does not; Settings keeps its own
+// hint beside it.
+//
+// Mutants killed: the wizard's field not bound to the warning; Settings' new
+// password not bound; passwordHasOuterSpace always false; the warning
+// replacing Settings' own hint.
+test("both forms warn while a password starts or ends with a space", { skip }, async () => {
+  const h = await wizard();
+  let input = type(h, "setup-external-password", "padded secret ");
+  assert.equal(input.getAttribute("help-text"), SPACE_WARNING);
+  input = type(h, "setup-external-password", "plain secret");
+  assert.equal(input.getAttribute("help-text"), null);
+
+  const s = await settingsForm();
+  input = type(s, "security-new-password", " padded secret");
+  assert.equal(input.getAttribute("help-text"), `Minimum 8 characters ${SPACE_WARNING}`);
+  input = type(s, "security-new-password", "plain secret");
+  assert.equal(input.getAttribute("help-text"), "Minimum 8 characters");
 });
 
 // Settings → Set Password refuses the same password before it posts; the

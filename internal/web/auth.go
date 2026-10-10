@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/scrypt"
+
+	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
 const (
@@ -125,8 +127,27 @@ func (as *AuthService) HashPassword(password string) (string, error) {
 	return "scrypt:" + hex.EncodeToString(salt) + ":" + hex.EncodeToString(hash), nil
 }
 
-// VerifyPassword checks a plaintext password against a stored scrypt hash.
+// VerifyPassword checks a plaintext password against a stored scrypt hash —
+// the password exactly as typed and, when that fails and the typed one
+// starts or ends with whitespace, its trimmed form too. Every check of the
+// password comes here: the login, set-password's and remove-password's
+// current password, and TUI Settings → Security through OnVerifyPassword.
+//
+// No surface trims a password any more (config.PasswordHasOuterSpace), but
+// both first-run wizards did: an install they set up holds the hash of the
+// trimmed password, and its operator types it as they first typed it. The
+// second check costs one more scrypt, and only for a password with outer
+// whitespace — which the typing operator knows they sent.
 func (as *AuthService) VerifyPassword(password, storedHash string) bool {
+	if as.verifyExact(password, storedHash) {
+		return true
+	}
+	return config.PasswordHasOuterSpace(password) &&
+		as.verifyExact(strings.TrimSpace(password), storedHash)
+}
+
+// verifyExact checks password, byte for byte, against a stored scrypt hash.
+func (as *AuthService) verifyExact(password, storedHash string) bool {
 	// Parse "scrypt:<salt_hex>:<hash_hex>"
 	parts := strings.SplitN(storedHash, ":", 3)
 	if len(parts) != 3 || parts[0] != "scrypt" {

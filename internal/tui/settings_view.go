@@ -1019,6 +1019,13 @@ func (m *SettingsModel) renderSecuritySet(w int) string {
 		lines = append(lines, prefixStyle.Render(prefix)+labelStyle.Render(padRight(f.label, padW))+val)
 	}
 
+	// A new password with a space at either end is kept as typed — no
+	// surface trims a password — so say so: a warning, not a refusal.
+	if config.PasswordHasOuterSpace(m.secNewPw) {
+		lines = append(lines, "")
+		lines = append(lines, "  "+YellowStyle.Render(config.PasswordOuterSpaceWarning))
+	}
+
 	if m.secMessage != "" {
 		lines = append(lines, "")
 		lines = append(lines, "  "+lipgloss.NewStyle().Foreground(m.secMessageColor).Render(m.secMessage))

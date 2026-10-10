@@ -3,6 +3,7 @@
  */
 import { renderTemplatePreview } from "./settings.js";
 import {
+  bindPasswordSpaceWarning,
   cookieSetupAbortReport,
   cookieSetupAcceptedToast,
   cookieSetupProbe,
@@ -221,6 +222,9 @@ export class SetupController {
         if (p) p.style.display = isExternal ? "" : "none";
       });
     }
+    // A password with a space at either end is kept as typed: say so while
+    // it is typed, without refusing it.
+    bindPasswordSpaceWarning(document.getElementById("setup-external-password"));
 
     // Channel dialog
     document.getElementById("setup-ch-cancel")?.addEventListener("click", () => {
@@ -819,7 +823,9 @@ export class SetupController {
 
     const port = num("setup-port");
     const networkAccess = document.getElementById("setup-network-access")?.value || "localhost";
-    const externalPassword = val("setup-external-password");
+    // As typed, not through val(): no surface trims a password, and this one
+    // posted the trimmed form the login then refused as typed.
+    const externalPassword = document.getElementById("setup-external-password")?.value || "";
 
     // Validate password for external access — navigate to Network step where
     // the field lives. The bounds are the ones every password surface shares

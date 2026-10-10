@@ -1091,3 +1091,41 @@ export function passwordLengthError(pw) {
   if (bytes > 128) return PASSWORD_TOO_LONG;
   return "";
 }
+
+/**
+ * The warning a form that sets the password shows while the one typed starts
+ * or ends with a space — shown, never refused. The Go side's
+ * config.PasswordOuterSpaceWarning is the same text.
+ */
+export const PASSWORD_OUTER_SPACE_WARNING = "This password starts or ends with a space. It is kept as typed.";
+
+/**
+ * Whether a password starts or ends with whitespace. No surface trims a
+ * password: what is typed is what is stored and checked. The first-run wizard
+ * used to trim it while the login did not, so a stray space at either end
+ * made a password nobody could log in with (config.PasswordHasOuterSpace).
+ */
+export function passwordHasOuterSpace(pw) {
+  const s = String(pw ?? "");
+  return s !== s.trim();
+}
+
+/**
+ * Keep a password input's help text in step with what is typed: `base` (its
+ * own hint, or "") plus PASSWORD_OUTER_SPACE_WARNING while the value starts
+ * or ends with a space. Returns the update, for a caller that sets the value
+ * itself (no sl-input fires then).
+ */
+export function bindPasswordSpaceWarning(input, base = "") {
+  if (!input) return () => {};
+  const update = () => {
+    const text = passwordHasOuterSpace(input.value)
+      ? [base, PASSWORD_OUTER_SPACE_WARNING].filter(Boolean).join(" ")
+      : base;
+    if (text) input.setAttribute("help-text", text);
+    else input.removeAttribute("help-text");
+  };
+  input.addEventListener("sl-input", update);
+  update();
+  return update;
+}

@@ -3,6 +3,7 @@
  */
 import {
   applyChannelOverrides,
+  bindPasswordSpaceWarning,
   browserPathValidationOutcome,
   channelRemovalPrompt,
   channelRemovedToast,
@@ -198,6 +199,11 @@ export class SettingsController {
     if (setPasswordBtn) {
       setPasswordBtn.addEventListener("click", () => this.setPassword());
     }
+
+    // Security: a new password with a space at either end is kept as typed —
+    // say so while it is typed, without refusing it.
+    this._newPasswordWarning = bindPasswordSpaceWarning(
+      document.getElementById("security-new-password"), "Minimum 8 characters");
 
     // Security: remove password button
     const removePasswordBtn = document.getElementById("security-remove-password-btn");
@@ -2646,6 +2652,7 @@ export class SettingsController {
       if (currentPasswordInput) currentPasswordInput.value = "";
       document.getElementById("security-new-password").value = "";
       document.getElementById("security-confirm-password").value = "";
+      this._newPasswordWarning?.();
     }
 
     // Load connected clients

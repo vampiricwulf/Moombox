@@ -275,6 +275,36 @@ func TestAuthLoginSuccess(t *testing.T) {
 	}
 }
 
+// TestAuthAcceptsAPaddedPasswordAWizardStoredTrimmed pins W26-09 at the
+// routes: both first-run wizards hashed the external-access password trimmed
+// while the login and both password changes checked it as typed, so an
+// operator who typed " correct horse battery " could neither log in nor
+// change or remove the password from either UI. Every check of the password
+// goes through VerifyPassword, which accepts the trimmed form of a password
+// typed with spaces at either end.
+//
+// Mutant killed: VerifyPassword without its trimmed check (401 on all
+// three).
+func TestAuthAcceptsAPaddedPasswordAWizardStoredTrimmed(t *testing.T) {
+	const typed = " correct horse battery "
+	for _, tc := range []struct {
+		path string
+		body map[string]string
+	}{
+		{"/api/auth/login", map[string]string{"password": typed}},
+		{"/api/auth/set-password", map[string]string{"currentPassword": typed, "newPassword": "a new password"}},
+		{"/api/auth/remove-password", map[string]string{"currentPassword": typed}},
+	} {
+		f := newAuthFixture(t)
+		f.setPasswordHash(t, "correct horse battery") // as the wizards stored it
+		rec := httptest.NewRecorder()
+		f.router.ServeHTTP(rec, loopbackRequest("POST", tc.path, tc.body))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s with the padded password: %d (body %s), want 200", tc.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestAuthLoginEmptyPassword(t *testing.T) {
 	f := newAuthFixture(t)
 	f.setPasswordHash(t, "secret")

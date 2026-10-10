@@ -1319,8 +1319,10 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 
 	// External access requires a password, within the bounds every password
 	// surface shares (config.PasswordLengthError): one the login refuses as
-	// too long must not be set here.
-	password := v("password")
+	// too long must not be set here. Read as typed, not through v(): no
+	// surface trims a password (config.PasswordHasOuterSpace), and this one
+	// hashed the trimmed form the login then refused as typed.
+	password := m.values["password"]
 	if networkAccess == "external" {
 		if len(password) < config.PasswordMinLen {
 			m.errorMsg = "A password (min 8 characters) is required for external access"
@@ -1861,6 +1863,12 @@ func (m *SetupWizardModel) viewAdvanced() string {
 				}
 				if preview := templatePreview(val); preview != "" {
 					lines = append(lines, DimStyle.Render(preview))
+				}
+			case "port", "networkAccess", "password", "httpsEnabled":
+				// The Network group: a password with a space at either end
+				// is kept as typed, so say so — a warning, not a refusal.
+				if m.values["networkAccess"] == "External" && config.PasswordHasOuterSpace(m.values["password"]) {
+					lines = append(lines, YellowStyle.Render(config.PasswordOuterSpaceWarning))
 				}
 			}
 		}
