@@ -150,7 +150,10 @@ function makeHttp() {
       const pathname = url.startsWith("http") ? new URL(url).pathname : url.split("?")[0];
       let body;
       if (typeof init.body === "string") { try { body = JSON.parse(init.body); } catch { body = init.body; } }
-      calls.push({ method, url: pathname, body, headers: init.headers });
+      // search keeps the query a call carried ("" for none): url is the
+      // pathname alone, which every route matches on.
+      const search = url.includes("?") ? url.slice(url.indexOf("?")) : "";
+      calls.push({ method, url: pathname, search, body, headers: init.headers });
       const hit = matchRoute(routes, method, pathname);
       if (!hit) return Promise.resolve(toResponse(response({ status: 404 })));
       return Promise.resolve(hit.handler({ params: hit.params, method, url: pathname, body }))

@@ -1294,6 +1294,30 @@ sl-progress-bar {
     opacity: 0.5;
 }
 
+/* The removal prompt's two choices, stacked full width: their labels carry
+   the job counts and run long, so they wrap rather than overflow a phone. */
+.channel-remove-choices {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sl-spacing-small);
+    margin-top: var(--sl-spacing-medium);
+}
+
+.channel-remove-choices sl-button {
+    width: 100%;
+}
+
+.channel-remove-choices sl-button::part(base) {
+    height: auto;
+    min-height: var(--sl-input-height-medium);
+}
+
+.channel-remove-choices sl-button::part(label) {
+    white-space: normal;
+    line-height: var(--sl-line-height-dense);
+    padding-block: var(--sl-spacing-x-small);
+}
+
 /* Notification Card */
 .notification-card {
     background-color: var(--sl-color-neutral-50);

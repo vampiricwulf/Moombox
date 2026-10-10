@@ -2088,6 +2088,16 @@
             <sl-button slot="footer" id="confirm-dialog-ok" variant="primary">OK</sl-button>
         </sl-dialog>
 
+        <!-- Channel removal: keep the channel's jobs (default) or delete its pending ones (SettingsController.chooseChannelRemoval) -->
+        <sl-dialog id="channel-remove-dialog" label="Remove Channel" style="--width: 28rem">
+            <p id="channel-remove-message" style="white-space: pre-line; word-break: break-word;"></p>
+            <div class="channel-remove-choices">
+                <sl-button id="channel-remove-keep" variant="primary" autofocus>Remove channel, keep its jobs</sl-button>
+                <sl-button id="channel-remove-delete" variant="danger" outline>Remove channel and delete its pending jobs</sl-button>
+            </div>
+            <sl-button slot="footer" id="channel-remove-cancel" variant="default">Cancel</sl-button>
+        </sl-dialog>
+
         <sl-dialog id="remove-password-dialog" label="Remove Password" style="--width: 24rem">
             <p>Enter your current password to confirm removal.</p>
             <sl-input id="remove-password-input" type="password" label="Current Password" placeholder="Enter password" toggle-password style="margin-top: var(--sl-spacing-small)"></sl-input>

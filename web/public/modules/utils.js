@@ -869,6 +869,70 @@ export const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKI
 // preserves staging, reinitialize deletes it; keep them separately gated.
 export const RESUMABLE_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
 
+// ── Channel removal ──────────────────────────────────────────────────────────
+// Removing a channel asks what to do with its jobs (W25-09, owner decision).
+// The confirmation counts them — GET /api/config/channels/{id}/removal — and
+// offers "Remove channel, keep its N jobs" (the default), "Remove channel and
+// delete its N pending jobs" (only when there are any) and Cancel; the choice
+// rides the DELETE as ?jobs=keep or ?jobs=delete. "Pending" is the Queued,
+// Upcoming and COOKIES? rows, less any whose staging holds footage, which
+// neither choice deletes and the prompt names; active downloads are never
+// touched. The dialog itself is SettingsController.chooseChannelRemoval; the
+// TUI's Settings → Channels delete asks the same question
+// (internal/tui/settings_channels.go).
+
+const countOf = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The confirmation's text for removing `name`, from the removal summary the
+ * server answered — `{total, pending, footage: [{id, title, status}], active}`
+ * — or null when it could not be read: the prompt then offers keep and
+ * Cancel only, since a delete it cannot count is not one to offer.
+ * @returns {{message: string, keepLabel: string, deleteLabel: string|null}}
+ */
+export function channelRemovalPrompt(name, summary) {
+  const lines = [`Remove "${name}" from the monitored channels?`];
+  if (!summary) {
+    lines.push("Its jobs could not be counted, so all of them will be kept.");
+    return { message: lines.join("\n\n"), keepLabel: "Remove channel, keep its jobs", deleteLabel: null };
+  }
+  const total = summary.total ?? 0;
+  const pending = summary.pending ?? 0;
+  const footage = summary.footage ?? [];
+  const active = summary.active ?? 0;
+  lines.push(total ? `It has ${countOf(total, "job", "jobs")}.` : "It has no jobs.");
+  if (footage.length) {
+    // The first three titles and a count of the rest.
+    const names = footage.slice(0, 3).map((f) => `"${f.title || f.id}"`);
+    if (footage.length > 3) names.push(`and ${footage.length - 3} more`);
+    lines.push(`${countOf(footage.length, "parked recording", "parked recordings")} with footage will be kept either way: ${names.join(", ")}.`);
+  }
+  if (active) {
+    lines.push(`${countOf(active, "download", "downloads")} in progress ${active === 1 ? "is" : "are"} not affected.`);
+  }
+  return {
+    message: lines.join("\n\n"),
+    keepLabel: total ? `Remove channel, keep its ${countOf(total, "job", "jobs")}` : "Remove channel",
+    deleteLabel: pending ? `Remove channel and delete its ${countOf(pending, "pending job", "pending jobs")}` : null,
+  };
+}
+
+/**
+ * The toast once the DELETE succeeded: `choice` is what was asked, `data`
+ * the response body — `{jobsDeleted, footageKept}` for a delete.
+ */
+export function channelRemovedToast(choice, summary, data) {
+  if (choice === "delete") {
+    const kept = data?.footageKept?.length ?? 0;
+    let msg = `Channel removed; ${countOf(data?.jobsDeleted ?? 0, "pending job", "pending jobs")} deleted`;
+    if (kept) msg += `, ${countOf(kept, "parked recording", "parked recordings")} with footage kept`;
+    return msg;
+  }
+  if (!summary) return "Channel removed; its jobs were kept";
+  const total = summary.total ?? 0;
+  return total ? `Channel removed; its ${countOf(total, "job", "jobs")} ${total === 1 ? "was" : "were"} kept` : "Channel removed";
+}
+
 /**
  * Whether a job can be resumed (staging preserved, continue where it stopped).
  * One rule for the details button, the batch bar, and the batch action: the

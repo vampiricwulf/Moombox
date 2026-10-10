@@ -4,6 +4,8 @@
 import {
   applyChannelOverrides,
   browserPathValidationOutcome,
+  channelRemovalPrompt,
+  channelRemovedToast,
   channelTermsForSave,
   cookieImportRolledBackToast,
   cookieSetupAbortReport,
@@ -1777,27 +1779,80 @@ export class SettingsController {
     }
   }
 
+  // Removing a channel asks what to do with its jobs (channelRemovalPrompt,
+  // utils.js): keep them all — the default — or delete the pending ones. The
+  // counts come from the server, which alone can see which parked rows hold
+  // footage.
   async deleteChannel(channelId) {
-    if (!await this.app.showConfirm("Are you sure you want to remove this channel?", { okLabel: "Remove", okVariant: "danger" })) return;
+    const path = `/api/config/channels/${encodeURIComponent(channelId)}`;
+    const channel = this.app.config?.channels?.find((c) => c.id === channelId);
+    let summary = null;
+    try {
+      const res = await fetch(`${path}/removal`);
+      if (res.ok) summary = await res.json();
+    } catch {
+      // Uncounted: the prompt offers keep and Cancel only.
+    }
+    const choice = await this.chooseChannelRemoval(channelRemovalPrompt(channel?.name || channelId, summary));
+    if (!choice) return;
 
     try {
-      const response = await fetch(
-        `/api/config/channels/${encodeURIComponent(channelId)}`,
-        {
-          method: "DELETE",
-        },
-      );
-
+      const response = await fetch(`${path}?jobs=${choice}`, { method: "DELETE" });
       if (response.ok) {
-        this.app.showToast("Channel removed", "success");
-        this.app.loadConfig();
+        const data = await response.json().catch(() => ({}));
+        this.app.showToast(channelRemovedToast(choice, summary, data), "success");
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.app.showToast(data.error || "Failed to remove channel", "danger");
       }
+      // A 500 can come after the channel was removed ("…deleting its pending
+      // jobs failed"), so the list is reloaded either way.
+      this.app.loadConfig();
     } catch (e) {
       this.app.showToast("Failed to remove channel: " + e.message, "danger");
     }
+  }
+
+  /**
+   * Shows #channel-remove-dialog with `prompt` (channelRemovalPrompt) and
+   * resolves with "keep", "delete", or null for Cancel or a dialog closed any
+   * other way. The buttons are replaced by fresh copies first, so the previous
+   * prompt's listeners go with the old nodes (as showConfirm does).
+   */
+  chooseChannelRemoval(prompt) {
+    return new Promise((resolve) => {
+      const dlg = document.getElementById("channel-remove-dialog");
+      document.getElementById("channel-remove-message").textContent = prompt.message;
+      const fresh = (id) => {
+        const el = document.getElementById(id);
+        const copy = el.cloneNode(true);
+        el.replaceWith(copy);
+        return copy;
+      };
+      const keep = fresh("channel-remove-keep");
+      const del = fresh("channel-remove-delete");
+      const cancel = fresh("channel-remove-cancel");
+      keep.textContent = prompt.keepLabel;
+      del.textContent = prompt.deleteLabel ?? "";
+      del.style.display = prompt.deleteLabel ? "" : "none";
+
+      let settled = false;
+      const finish = (choice) => {
+        if (settled) return;
+        settled = true;
+        dlg.removeEventListener("sl-after-hide", onHide);
+        resolve(choice);
+        dlg.hide();
+      };
+      // Only the dialog's own close: a tooltip inside it fires the same
+      // event as it hides, and bubbles it here.
+      const onHide = (e) => { if (e.target === dlg) finish(null); };
+      keep.addEventListener("click", () => finish("keep"));
+      del.addEventListener("click", () => finish("delete"));
+      cancel.addEventListener("click", () => finish(null));
+      dlg.addEventListener("sl-after-hide", onHide);
+      dlg.show();
+    });
   }
 
   async toggleChannel(channelId, enabled) {

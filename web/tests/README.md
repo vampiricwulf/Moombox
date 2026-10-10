@@ -91,6 +91,7 @@ than a silent skip.
 | `a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`, `archive-boundary.test.mjs`, `boot-and-login.test.mjs`, `job-asides.test.mjs`, `job-deeplink.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`, `open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`, `render-diff.test.mjs`, `settings-guard.test.mjs`, `settings-notification-mode.test.mjs`, `settings-notifications.test.mjs`, `settings-reorder-budget.test.mjs`, `sidecar-warning.test.mjs`, `update-check-debounce.test.mjs`, `watched-state.test.mjs` | yes |
 | `resolution-picker.test.mjs` | partly — 2 pure mapping tests, 4 jsdom picker tests |
 | `import-placeholder.test.mjs` | partly — 1 pure helper test, 2 jsdom dialog tests |
+| `channel-removal.test.mjs` | partly — 3 pure prompt/toast tests, 4 jsdom removal-dialog tests |
 
 ## The player harness
 
