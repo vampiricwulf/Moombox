@@ -380,12 +380,13 @@ type SettingsModel struct {
 	// not call it.
 	OnSave    func(cfg *config.MoomboxConfig) error
 	OnRestart func()
-	// OnRestartRequired fires when a settings save changes the live value
-	// of a setting flagged in restartRequiredKeys, regardless of whether the user
-	// then triggers OnRestart from the modal or dismisses it. The App
-	// flips a persistent banner-visible flag so the dismissal case
-	// doesn't leave a config/runtime mismatch with no visual reminder.
-	// Audit reports/tui.md #26.
+	// OnRestartRequired fires when a settings save leaves a setting flagged
+	// in restartRequiredKeys that the operator edited at a value other than
+	// the one Open showed (settingsWrite.restart), regardless of whether the
+	// user then triggers OnRestart from the modal or dismisses it. The App
+	// flips a persistent banner-visible flag so the dismissal case doesn't
+	// leave a config/runtime mismatch with no visual reminder. Audit
+	// reports/tui.md #26.
 	OnRestartRequired func()
 	// OnSecurityChanged fires after the Security sub-editor commits a change
 	// to the dashboard password (set or remove). Both can flip the persistent
@@ -731,11 +732,16 @@ type settingsWrite struct {
 	// changed reports that the write changed the live config at all. A save
 	// that changed nothing has nothing to put on disk.
 	changed bool
-	// restart reports that a restartRequiredKeys setting's value changed,
-	// compared in the live config before and after the write rather than as
-	// typed: a field the dashboard had already moved to the typed value, or
-	// a blank probe_targets that keeps the stored list, changed nothing that
-	// a restart would pick up.
+	// restart reports that a restartRequiredKeys field the operator edited
+	// now holds, in the live config after the write, a value other than the
+	// one Open showed. The running process cannot have restarted since Open
+	// (a restart closes the overlay), so a value that differs from Open's is
+	// one config.toml now carries and the process may not run on — even when
+	// the dashboard had already saved that same value and the write itself
+	// changed nothing. A blank probe_targets keeps the stored list, so it
+	// counts only when that list is not the one Open showed. A field the
+	// operator did not edit never counts: a restart value the dashboard saved
+	// is the dashboard's to prompt for.
 	restart bool
 }
 
@@ -805,8 +811,8 @@ func (m *SettingsModel) applyValues() (settingsWrite, bool) {
 
 	after := make(map[string]string, len(live))
 	loadSettingsValues(after, m.cfg)
-	for k := range restartRequiredKeys {
-		if after[k] != live[k] {
+	for _, k := range edited {
+		if restartRequiredKeys[k] && after[k] != m.originalValues[k] {
 			w.restart = true
 			break
 		}

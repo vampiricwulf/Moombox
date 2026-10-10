@@ -427,51 +427,94 @@ func TestTUISaveValidatesTheMergedResult(t *testing.T) {
 	}
 }
 
-// TestTUISaveRestartReflectsWhatChanged: the restart prompt follows what the
-// save changed in the live config, not what was typed. A port typed to the
-// value the dashboard had already set changes nothing (and writes nothing);
-// a save of the log level while the dashboard changed the port leaves the
-// port alone and so needs no restart from this save; a port that does move
-// prompts.
+// TestTUISaveRestartReflectsWhatChanged: the restart prompt follows the
+// restart-required fields the operator edited, each compared — as the live
+// config holds it after the write — with the value Open showed. The process
+// cannot have restarted since Open (a restart closes the overlay), so a
+// typed port the dashboard had already saved still leaves config.toml on a
+// port the listener is not on: the write changes nothing (and writes
+// nothing), yet it prompts. A save of the log level while the dashboard
+// changed the port prompts nothing — that restart is the dashboard's to ask
+// for — and neither does a field typed away and back. A blank probe_targets
+// keeps the stored list, so it prompts only when that list is not the one
+// Open showed.
 //
-// Mutant killed: the restart decided from the typed values against the Open
-// ones (the old hasRestartChanges) — the first case prompts.
+// Mutants killed: the restart decided from the live config before and after
+// the write (the first case is silent); every restart-required key compared
+// with its Open value, edited or not (the dashboard's port prompts the log
+// level save); the typed value compared with the Open one, the old
+// hasRestartChanges (the blank probe_targets that kept Open's list prompts).
 func TestTUISaveRestartReflectsWhatChanged(t *testing.T) {
-	t.Run("typed to the dashboard's value", func(t *testing.T) {
-		m, store, saves := overlayOverStore(t, func(*config.MoomboxConfig) {})
-		onDashboard(t, store, func(c *config.MoomboxConfig) { c.Network.Port = 9090 })
+	// save opens the overlay, lets dashboard change the live config, types
+	// typed over the overlay's values, saves, and reports whether a restart
+	// was asked for — the question and the banner must agree — and how many
+	// times OnSave ran.
+	save := func(t *testing.T, dashboard func(*config.MoomboxConfig), typed map[string]string) (restart bool, saves int, store *config.Store) {
+		t.Helper()
+		m, store, n := overlayOverStore(t, func(*config.MoomboxConfig) {})
+		if dashboard != nil {
+			onDashboard(t, store, dashboard)
+		}
 		prompted := 0
 		m.OnRestartRequired = func() { prompted++ }
-		m.values["port"] = "9090"
-		saveOverlay(t, m)
-		if m.showRestartOverlay || prompted != 0 {
-			t.Error("a port already at the typed value prompted a restart")
+		for k, v := range typed {
+			m.values[k] = v
 		}
-		if *saves != 0 {
-			t.Errorf("OnSave called %d times for a save that changed nothing", *saves)
+		saveOverlay(t, m)
+		if m.showRestartOverlay != (prompted == 1) {
+			t.Fatalf("restart question shown %v, OnRestartRequired called %d times", m.showRestartOverlay, prompted)
+		}
+		return m.showRestartOverlay, *n, store
+	}
+	t.Run("typed to the dashboard's value", func(t *testing.T) {
+		restart, saves, store := save(t, func(c *config.MoomboxConfig) { c.Network.Port = 9090 },
+			map[string]string{"port": "9090"})
+		if !restart {
+			t.Error("a port typed away from the one Open showed prompted no restart: the listener is still on the boot port")
+		}
+		if saves != 0 {
+			t.Errorf("OnSave called %d times for a save that changed nothing in the live config", saves)
+		}
+		if live, _ := liveAndDisk(t, store); live.Network.Port != 9090 {
+			t.Errorf("port = %d, want 9090", live.Network.Port)
 		}
 	})
 	t.Run("another field saved", func(t *testing.T) {
-		m, store, _ := overlayOverStore(t, func(*config.MoomboxConfig) {})
-		onDashboard(t, store, func(c *config.MoomboxConfig) { c.Network.Port = 9090 })
-		m.values["log_level"] = "DEBUG"
-		saveOverlay(t, m)
-		if m.showRestartOverlay {
-			t.Error("a save of the log level prompted a restart")
+		restart, _, store := save(t, func(c *config.MoomboxConfig) { c.Network.Port = 9090 },
+			map[string]string{"log_level": "DEBUG"})
+		if restart {
+			t.Error("a save of the log level prompted a restart for the dashboard's port")
 		}
 		if live, _ := liveAndDisk(t, store); live.Network.Port != 9090 {
 			t.Errorf("port = %d, want the dashboard's 9090", live.Network.Port)
 		}
 	})
 	t.Run("port moved", func(t *testing.T) {
-		m, store, _ := overlayOverStore(t, func(*config.MoomboxConfig) {})
-		m.values["port"] = "9091"
-		saveOverlay(t, m)
-		if !m.showRestartOverlay {
+		restart, _, store := save(t, nil, map[string]string{"port": "9091"})
+		if !restart {
 			t.Error("a port change did not prompt a restart")
 		}
 		if live, _ := liveAndDisk(t, store); live.Network.Port != 9091 {
 			t.Errorf("port = %d, want 9091", live.Network.Port)
+		}
+	})
+	t.Run("probe targets blanked", func(t *testing.T) {
+		if restart, _, _ := save(t, nil, map[string]string{"probe_targets": "", "log_level": "DEBUG"}); restart {
+			t.Error("a blank probe_targets, which keeps the list Open showed, prompted a restart")
+		}
+	})
+	t.Run("probe targets blanked over the dashboard's list", func(t *testing.T) {
+		restart, _, store := save(t,
+			func(c *config.MoomboxConfig) { c.Connectivity.ProbeTargets = []string{"1.0.0.1:443"} },
+			map[string]string{"probe_targets": ""})
+		if !restart {
+			t.Error("a blank probe_targets kept a list other than the one Open showed and prompted nothing")
+		}
+		// The live list, not config.Load's: Load decodes into Defaults(),
+		// whose probe targets share config.DefaultProbeTargets' array, and a
+		// shorter list read from the file would be written into it.
+		if live := store.Snapshot(); !slices.Equal(live.Connectivity.ProbeTargets, []string{"1.0.0.1:443"}) {
+			t.Errorf("probe_targets = %v, want the stored list kept", live.Connectivity.ProbeTargets)
 		}
 	})
 }

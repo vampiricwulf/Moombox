@@ -340,10 +340,13 @@ func (m *SettingsModel) restoreConfig(snapshot config.MoomboxConfig) {
 // saveAndClose applies changes, saves config, and closes.
 //
 // Only what the overlay changed is written (applyValues), and a save whose
-// changes leave the live config as it was — a field typed back to what the
-// dashboard already set, an Enter on a target that changed nothing, a
+// changes leave the live config as it was — a field typed to what the
+// dashboard already saved, an Enter on a target that changed nothing, a
 // removal the dashboard made first — writes nothing: OnSave is not called,
-// so config.toml is not rewritten and nothing is hot-reloaded.
+// so config.toml is not rewritten and nothing is hot-reloaded. Such a save
+// can still ask for the restart: a restart-required field typed away from
+// its Open value is on disk at a value the process was not started with,
+// whoever wrote it there (settingsWrite.restart).
 func (m *SettingsModel) saveAndClose() string {
 	if m.dirty && m.status != saveError {
 		// applyValues writes straight into the live *MoomboxConfig the store
