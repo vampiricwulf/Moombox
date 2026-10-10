@@ -1300,7 +1300,16 @@ export class SettingsController {
     if (portChanged || httpsChanged) {
       const proto = newHttps ? "https:" : "http:";
       const host = window.location.hostname;
-      const redirectUrl = `${proto}//${host}:${newPort}/`;
+      // A changed port is where the restart binds. An unchanged one is not
+      // necessarily the configured value: when it is taken the server serves
+      // from a nearby port and binds that one again after the restart
+      // (internal/web/server.go), and a published Docker port maps it to
+      // another — so the page's own port, as the setup wizard redirects
+      // (W26-12). The configured port sent an HTTPS toggle to whatever held
+      // 774.
+      const servingPort = parseInt(window.location.port) || (window.location.protocol === "https:" ? 443 : 80);
+      const redirectPort = portChanged ? newPort : servingPort;
+      const redirectUrl = `${proto}//${host}:${redirectPort}/`;
       this.app.showToast(`Redirecting to ${redirectUrl} in a few seconds...`, "primary");
       redirectTimeoutId = setTimeout(() => { window.location.href = redirectUrl; }, 3500);
     }

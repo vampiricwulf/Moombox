@@ -81,6 +81,34 @@ test("the restart prompt names HTTPS/TLS among the settings it covers", { skip }
   assert.match(asked[0], /HTTPS\/TLS/);
 });
 
+// W27 review: Settings' restart redirect followed the configured port even
+// when the port was not changed, so on a page served from a fallback port
+// (774 taken, the server on 775 — and on 775 again after the restart,
+// internal/web/server.go) turning HTTPS on sent the tab to
+// https://localhost:774/, whatever held it. An unchanged port now redirects
+// to the page's own port, the setup wizard's W26-12 rule; a changed port
+// still goes to the new value.
+//
+// Mutants killed: the configured port whatever changed (:774 for the HTTPS
+// toggle); the page's port whatever changed (:775 for the port change).
+test("the restart redirect keeps the serving port unless the port changed", { skip }, async () => {
+  const redirectAfter = async (saved) => {
+    const h = await harness.makeApp({
+      url: "http://localhost:775/",
+      routes: { "POST /api/restart": () => ({ success: true }) },
+    });
+    h.app.showConfirm = async () => true;
+    h.app.settings._originalRestartValues = { "network.port": 774, "network.https_enabled": false };
+    await h.app.settings._checkRestartRequired({ network: saved });
+    await h.flush();
+    const toast = h.toasts().map((t) => t.textContent.trim()).find((t) => t.startsWith("Redirecting to"));
+    assert.ok(toast, "no redirect toast");
+    return toast;
+  };
+  assert.match(await redirectAfter({ port: 774, https_enabled: true }), /Redirecting to https:\/\/localhost:775\/ /);
+  assert.match(await redirectAfter({ port: 8080, https_enabled: false }), /Redirecting to http:\/\/localhost:8080\/ /);
+});
+
 // The channel card's monitoring switch had only a title, which is not an
 // accessible name for the switch's inner input: a screen reader announced an
 // unnamed switch per channel. Its label slot now carries screen-reader-only
