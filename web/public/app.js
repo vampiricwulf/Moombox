@@ -625,11 +625,11 @@ export class MoomboxApp {
         }
         if (status.updateAvailable) {
           this.updates.available = status.updateAvailable;
-        } else if (this.updates.available) {
-          // Server no longer reports a pending update (it was applied or
-          // superseded) — clear the stale badge instead of advertising an
-          // update we're already running.
-          this.updates.available = null;
+        } else {
+          // Server no longer reports a pending update (it was skipped,
+          // applied or withdrawn while this page was not listening) — clear
+          // the stale badge, and close an update dialog still offering it.
+          this.updates.nonePending();
         }
         if (status.uptime != null) {
           this._uptimeSeconds = status.uptime;
@@ -1443,13 +1443,10 @@ export class MoomboxApp {
         break;
 
       case "update_cleared":
-        // The pending release was skipped or pulled. Only the release this
-        // page is showing: a clear racing a newly-found one names the older
-        // tag.
-        if (this.updates.available?.tagName === p?.tagName) {
-          this.updates.available = null;
-          this.updates.updateVersionIndicator();
-        }
+        // The pending release was skipped or pulled: the badge drops, and an
+        // update dialog offering it closes. Only the release this page is
+        // showing: a clear racing a newly-found one names the older tag.
+        this.updates.withdrawn(p?.tagName);
         break;
 
       case "connectivity":

@@ -514,7 +514,7 @@ The WebSocket connects on any path (upgrade handler intercepts before static fil
 - `check_timers` — Monitor schedule update (payload: `{nextFeedCheck, nextDecapiCheck, nextTwitchCheck}`)
 - `initial_state` — Sent on connect (payload: `{jobs, logs, logSeq, nextFeedCheck, nextDecapiCheck, nextTwitchCheck, connectivity, hideFinishedAgeDays, backfill, runningTrims}`; `logSeq` numbers the newest line of `logs`)
 - `update_available` — New version found (payload: release info)
-- `update_cleared` — The pending release was withdrawn: skipped, or a check found nothing newer, so it was pulled (payload: `{tagName}`; a dashboard drops its badge only when the tag names the release it shows)
+- `update_cleared` — The pending release was withdrawn: skipped, or a check found nothing newer, so it was pulled (payload: `{tagName}`; a dashboard drops its badge only when the tag names the release it shows, and closes an update dialog still offering that release)
 - `disk_status` — Disk space update (payload: `{free, total, usedPct, warnLevel}`)
 - `connectivity` — Network reachability changed (payload: `{online}`)
 - `backfill_status` — Per-channel backfill scan progress (payload: `{channel, tab, pages, state}`)

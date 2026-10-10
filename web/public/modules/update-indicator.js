@@ -9,6 +9,11 @@ const GITHUB_REPO_URL = "https://github.com/vampiricwulf/Moombox";
 export class UpdateController {
   constructor(app) {
     this.app = app;
+    // The tag this page's own Update Now or Skip names while its request is
+    // in flight, and whether that release was withdrawn meanwhile (see
+    // withdrawn).
+    this._acting = null;
+    this._actingWithdrawn = false;
   }
 
   /** Wire up the update dialog's buttons. */
@@ -114,6 +119,47 @@ export class UpdateController {
     dlg.show();
   }
 
+  // The release tagged tag is no longer pending: skipped elsewhere (the TUI's
+  // S, another dashboard's Skip) or withdrawn by a check that found it pulled.
+  // The badge drops while it still shows that release — a clear racing a
+  // newly-found one names the older tag — and an update dialog still offering
+  // it closes: its Update Now and Skip would both be refused ("no update
+  // available", "no update pending"). Not under this page's own Update Now or
+  // Skip on it: the dismiss route announces a skip before it answers, so this
+  // page can hear its own skip first, and the answer closes the dialog with
+  // its own toast.
+  withdrawn(tag) {
+    if (!tag) return;
+    if (this.available?.tagName === tag) {
+      this.available = null;
+      this.updateVersionIndicator();
+    }
+    if (this.shown?.tagName !== tag) return;
+    if (this._acting === tag) {
+      this._actingWithdrawn = true;
+      return;
+    }
+    this._closeWithdrawn();
+  }
+
+  // A status load found no release pending: whatever this page offers, on the
+  // badge or in an open dialog, was skipped, applied or withdrawn while it
+  // was not listening (a reconnect).
+  nonePending() {
+    this.withdrawn(this.available?.tagName);
+    this.withdrawn(this.shown?.tagName);
+  }
+
+  // Closes an update dialog offering the release shown, which went elsewhere,
+  // and says so: nothing here failed. The dialog reused as a notes viewer
+  // (Settings > View Release Notes) offers nothing, so it stays.
+  _closeWithdrawn() {
+    const dlg = document.getElementById("update-dialog");
+    if (!dlg?.open || dlg.dataset.viewerMode === "true") return;
+    dlg.hide();
+    this.app.showToast(`${this.shown.tagName} is no longer pending — it was skipped, applied or withdrawn elsewhere.`, "primary");
+  }
+
   // The body of an apply or a skip: the tag of the release whose notes are on
   // screen. None when the dialog never showed one; the server then acts on
   // whatever is pending.
@@ -154,6 +200,7 @@ export class UpdateController {
     }
     const btn = document.getElementById("update-now-btn");
     if (btn) { btn.loading = true; btn.disabled = true; }
+    this._act();
     try {
       const resp = await fetch("/api/update/apply", this._shownRequest());
       if (resp.ok) {
@@ -163,6 +210,10 @@ export class UpdateController {
         const data = await resp.json().catch(() => ({ error: resp.statusText }));
         if (resp.status === 409 && data.pending) {
           this._showPendingInstead(data, "updated");
+        } else if (this._actingWithdrawn) {
+          // Refused because it was skipped or withdrawn elsewhere while the
+          // request was out.
+          this._closeWithdrawn();
         } else {
           this.app.showToast("Update failed: " + (data.error || "Unknown error"), "danger");
         }
@@ -173,8 +224,16 @@ export class UpdateController {
       // and restarts on its own when the update lands.
       this.app.showToast(`Lost contact with the server (${e.message}) — the update may still be downloading; the dashboard reconnects when it restarts.`, "warning");
     } finally {
+      this._acting = null;
       if (btn) { btn.loading = false; btn.disabled = false; }
     }
+  }
+
+  // Marks the release shown as the one this page's own request names, until
+  // the request's finally clears it.
+  _act() {
+    this._acting = this.shown?.tagName ?? null;
+    this._actingWithdrawn = false;
   }
 
   async dismissUpdate() {
@@ -187,12 +246,18 @@ export class UpdateController {
       dlg.hide();
       return;
     }
+    this._act();
     try {
       const resp = await fetch("/api/update/dismiss", this._shownRequest());
       if (!resp.ok) {
         const data = await resp.json().catch(() => ({ error: resp.statusText }));
         if (resp.status === 409 && data.pending) {
           this._showPendingInstead(data, "skipped");
+          return;
+        }
+        if (this._actingWithdrawn) {
+          // Skipped or withdrawn elsewhere while the request was out.
+          this._closeWithdrawn();
           return;
         }
         this.app.showToast("Failed to dismiss: " + (data.error || "Unknown error"), "danger");
@@ -210,6 +275,8 @@ export class UpdateController {
       this.app.showToast(`Skipped ${skipped} — you'll be notified about the next release.`, "primary");
     } catch (e) {
       this.app.showToast("Failed to dismiss: " + e.message, "danger");
+    } finally {
+      this._acting = null;
     }
   }
 }

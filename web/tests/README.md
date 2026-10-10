@@ -86,6 +86,8 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `stats-storage.test.mjs` | the Stats tab's storage breakdown, Cancelled included |
 | `trimmer.test.mjs` | the trim dialog's failure states and keyboard reach |
 | `update-check-debounce.test.mjs` | a debounced update check reports the wait, not "Up to date" |
+| `update-check-keep.test.mjs` | an up-to-date check keeps a release that reached the page during its round trip |
+| `update-dialog.test.mjs` | the update dialog's Update Now and Skip name the release on screen, and the dialog closes, saying why, once that release is skipped or withdrawn elsewhere |
 | `verify-signature.test.mjs` | Verify Signature's wording for a checked manifest and for a signature alone |
 | `watched-state.test.mjs` | Mark Watched / Unwatched from the details dialog and the batch bar |
 

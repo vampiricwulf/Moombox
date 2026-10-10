@@ -131,3 +131,163 @@ test("Skip of the release on screen skips it and drops the badge", { skip }, asy
   const texts = h.toasts().map((t) => t.textContent);
   assert.ok(texts.some((t) => t.includes("Skipped v9.9.1")), `toasts were ${JSON.stringify(texts)}`);
 });
+
+// ── A release withdrawn while its dialog is open ────────────────────────────
+//
+// The dialog left open when its release was skipped elsewhere (the TUI's S,
+// another dashboard's Skip) or pulled kept both buttons, and both failed:
+// update_cleared dropped the badge only, so Skip toasted "Failed to dismiss:
+// no update pending" and Update Now "Update failed: no update available". The
+// dialog now closes and says why.
+
+// The routes' answers once nothing is pending (update.go: PendingUpdate ->
+// writePendingRefusal), before which `before` runs, as a broadcast landing
+// while the request is out would.
+function nothingPending(before = () => {}) {
+  const refuse = (error) => () => {
+    before();
+    return { __response: true, status: 400, body: { error } };
+  };
+  return {
+    "POST /api/update/dismiss": refuse("no update pending"),
+    "POST /api/update/apply": refuse("no update available"),
+  };
+}
+
+// Boots with v9.9.1 pending and its dialog open. The stub dialog records
+// show/hide on _open; the code reads Shoelace's `open`.
+async function dialogOpenOn911(routes, statusRef = { status: { version: "2.8.10", updateAvailable: release("9.9.1") } }) {
+  const h = await harness.makeApp({
+    routes: { ...routes, "GET /api/status": () => statusRef.status },
+  });
+  const dlg = h.el("update-dialog");
+  Object.defineProperty(dlg, "open", { get() { return !!this._open; } });
+  h.el("version-indicator").click();
+  assert.equal(dlg.label, "Update to v9.9.1");
+  assert.equal(dlg.open, true);
+  return h;
+}
+
+const toastsOf = (h) => h.toasts().map((t) => ({ text: t.textContent, variant: t.variant }));
+const said = (h, re) => toastsOf(h).some((t) => re.test(t.text) && t.variant !== "danger");
+const NO_LONGER = /v9\.9\.1 is no longer pending/;
+
+// MUTANTS: the update_cleared case dropping the badge only (the dialog stays
+// up offering v9.9.1); _closeWithdrawn's dlg.hide() deleted.
+test("update_cleared for the release on screen closes its dialog and says why", { skip }, async () => {
+  const h = await dialogOpenOn911(nothingPending());
+
+  h.app.handleMessage({ type: "update_cleared", payload: { tagName: "v9.9.1" } });
+  await h.flush();
+
+  assert.equal(h.app.updates.available, null, "the badge drops");
+  assert.equal(h.el("update-dialog").open, false, "the dialog still offers a release nothing holds");
+  assert.ok(said(h, NO_LONGER), `the close must say why, neutrally; toasts were ${JSON.stringify(toastsOf(h))}`);
+  assert.equal(h.http.matching("/api/update/", "POST").length, 0);
+});
+
+// MUTANT: withdrawn() closing the dialog whatever tag the clear names — a
+// late clear of an older release closes the dialog on the newer one.
+test("update_cleared for another release leaves the dialog open", { skip }, async () => {
+  const h = await dialogOpenOn911(nothingPending());
+
+  h.app.handleMessage({ type: "update_cleared", payload: { tagName: "v9.9.0" } });
+  await h.flush();
+
+  assert.equal(h.el("update-dialog").open, true);
+  assert.equal(h.app.updates.available?.tagName, "v9.9.1");
+  assert.deepEqual(toastsOf(h), []);
+});
+
+// The same dialog reused by Settings > View Release Notes offers nothing, so
+// a clear of the release it last offered leaves the notes open.
+//
+// MUTANT: _closeWithdrawn without the viewerMode check.
+test("update_cleared leaves the release-notes viewer open", { skip }, async () => {
+  const h = await dialogOpenOn911({
+    ...nothingPending(),
+    "GET /api/update/release-notes": () => ({ tagName: "v2.8.10", releaseNotes: "current", releaseNotesHtml: "<p>current</p>" }),
+  });
+  const dlg = h.el("update-dialog");
+  dlg.hide();
+  h.el("btn-view-release-notes").click();
+  await h.flush();
+  await h.flush();
+  assert.equal(dlg.label, "Release Notes — v2.8.10");
+  assert.equal(dlg.open, true);
+
+  h.app.handleMessage({ type: "update_cleared", payload: { tagName: "v9.9.1" } });
+  await h.flush();
+
+  assert.equal(dlg.open, true, "the notes viewer closed under the reader");
+  assert.equal(dlg.dataset.viewerMode, "true");
+  assert.deepEqual(toastsOf(h), []);
+});
+
+// A reconnect's status load is how a page that missed the update_cleared
+// learns of it.
+//
+// MUTANT: loadStatus's no-release branch dropping the badge only.
+test("a status load with nothing pending closes the dialog offering a release", { skip }, async () => {
+  const statusRef = { status: { version: "2.8.10", updateAvailable: release("9.9.1") } };
+  const h = await dialogOpenOn911(nothingPending(), statusRef);
+
+  statusRef.status = { version: "2.8.10" };
+  await h.app.loadStatus();
+  await h.flush();
+
+  assert.equal(h.app.updates.available, null);
+  assert.equal(h.el("update-dialog").open, false);
+  assert.ok(said(h, NO_LONGER), `toasts were ${JSON.stringify(toastsOf(h))}`);
+});
+
+// Withdrawn elsewhere while this page's own request is out: the server refuses
+// it (nothing pending), and that is the withdrawal, not a failure.
+//
+// MUTANT: the failure branches without the _actingWithdrawn arm — a danger
+// toast ("Failed to dismiss: no update pending", "Update failed: no update
+// available") over a dialog left open.
+for (const button of ["update-dismiss-btn", "update-now-btn"]) {
+  test(`${button} refused because the release went elsewhere meanwhile closes the dialog without a failure`, { skip }, async () => {
+    let h;
+    h = await dialogOpenOn911(nothingPending(() => {
+      h.app.handleMessage({ type: "update_cleared", payload: { tagName: "v9.9.1" } });
+    }));
+
+    h.el(button).click();
+    await h.flush();
+    await h.flush();
+
+    assert.equal(h.http.matching("/api/update/", "POST").length, 1);
+    assert.equal(h.el("update-dialog").open, false);
+    const toasts = toastsOf(h);
+    assert.deepEqual(toasts.filter((t) => t.variant === "danger"), [], "a withdrawal is not a failure");
+    assert.ok(said(h, NO_LONGER), `toasts were ${JSON.stringify(toasts)}`);
+  });
+}
+
+// This page's own Skip: the dismiss route announces update_cleared before it
+// answers, so the page can hear its own skip first. The answer reports it,
+// once, as this page's skip.
+//
+// MUTANT: withdrawn() without the _acting guard — the page's own skip also
+// toasts "v9.9.1 is no longer pending — it was skipped … elsewhere".
+test("this page's own Skip heard first as update_cleared is reported once, as its skip", { skip }, async () => {
+  let h;
+  h = await dialogOpenOn911({
+    "POST /api/update/dismiss": () => {
+      h.app.handleMessage({ type: "update_cleared", payload: { tagName: "v9.9.1" } });
+      return { success: true, skipped: "v9.9.1" };
+    },
+  });
+
+  h.el("update-dismiss-btn").click();
+  await h.flush();
+  await h.flush();
+
+  assert.equal(h.el("update-dialog").open, false);
+  assert.equal(h.app.updates.available, null);
+  const texts = toastsOf(h).map((t) => t.text);
+  assert.equal(texts.length, 1, `toasts were ${JSON.stringify(texts)}`);
+  assert.match(texts[0], /Skipped v9\.9\.1/);
+});
