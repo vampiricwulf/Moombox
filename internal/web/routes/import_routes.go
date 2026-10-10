@@ -342,8 +342,10 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// free or already holds exactly these bytes — a file left by a
 		// deleted row of this very archive is re-adopted, not copied again;
 		// a different one keeps its name and this import takes the next.
+		// The name an import gave the archive before titles were cut by
+		// bytes is re-adopted too, when it holds these bytes.
 		baseStem := importStem(title, videoID)
-		stem, err := chooseImportNames(importsDir, outputDir, baseStem, files)
+		stem, err := chooseImportNames(importsDir, outputDir, baseStem, importLegacyStem(title, videoID), files)
 		switch {
 		case errors.Is(err, errImportInvalidPath):
 			jsonError(rw, "invalid output path", http.StatusBadRequest)
@@ -995,25 +997,61 @@ const importMaxDisambiguation = 999
 // re-adopted beside a re-adopted video, or beside one that took a " (n)"
 // name, whenever its own name holds the same bytes, rather than written
 // again because its sibling's name was taken.
-func chooseImportNames(importsDir, outputDir, base string, files []*importFile) (string, error) {
+//
+// legacy is the stem an import gave the same archive before titles were cut
+// by bytes (importLegacyStem). Where it differs from base, a file it names
+// that holds exactly the imported bytes is re-adopted there first: a long
+// CJK title's archive, imported before and its row since deleted, was
+// otherwise never found under its old name, and its re-import wrote a
+// second full copy beside it. A legacy name is only ever adopted, never
+// written.
+func chooseImportNames(importsDir, outputDir, base, legacy string, files []*importFile) (string, error) {
 	var videos []*importFile
 	for _, f := range files {
 		if f.kind == "video" {
 			videos = append(videos, f)
 		}
 	}
-	stem, err := chooseImportStem(importsDir, outputDir, base, videos)
-	if err != nil {
-		return "", err
+	stem := legacy
+	if legacy == base || !adoptImportStem(importsDir, outputDir, legacy, videos) {
+		var err error
+		if stem, err = chooseImportStem(importsDir, outputDir, base, videos); err != nil {
+			return "", err
+		}
 	}
 	for _, f := range files {
-		if f.kind != "video" {
-			if _, err := chooseImportStem(importsDir, outputDir, base, []*importFile{f}); err != nil {
-				return "", err
-			}
+		if f.kind == "video" {
+			continue
+		}
+		if legacy != base && adoptImportStem(importsDir, outputDir, legacy, []*importFile{f}) {
+			continue
+		}
+		if _, err := chooseImportStem(importsDir, outputDir, base, []*importFile{f}); err != nil {
+			return "", err
 		}
 	}
 	return stem, nil
+}
+
+// adoptImportStem re-adopts files under stem when every one of them is
+// already there with exactly its bytes, setting each file's dest; otherwise
+// it changes nothing. A name it cannot check — one past the filesystem's
+// limit among them — is not adopted.
+func adoptImportStem(importsDir, outputDir, stem string, files []*importFile) bool {
+	dests := make([]string, len(files))
+	for i, f := range files {
+		dests[i] = filepath.Join(importsDir, stem+f.suffix)
+		if _, ok := validatePathTraversal(dests[i], outputDir); !ok {
+			return false
+		}
+		if adopt, err := f.claim(dests[i]); err != nil || !adopt {
+			return false
+		}
+	}
+	for i, f := range files {
+		f.dest, f.adopted = dests[i], true
+	}
+	return true
 }
 
 // chooseImportStem picks the stem a group of files is placed under: base,
@@ -1115,6 +1153,14 @@ func importStem(title, id string) string {
 		safe = utils.SanitizeForFilename(truncateUTF8(safe, budget-1))
 	}
 	return fmt.Sprintf("%s [%s]", safe, id)
+}
+
+// importLegacyStem is the stem an import named an archive before titles were
+// cut by bytes: the sanitized title — capped at 200 runes, not bytes — and
+// " [<id>]". It differs from importStem only for a title past the byte
+// budget, which only a multi-byte title reaches.
+func importLegacyStem(title, id string) string {
+	return fmt.Sprintf("%s [%s]", utils.SanitizeForFilename(title), id)
 }
 
 // importNameMaxBytes is a file name's limit on Linux filesystems (NAME_MAX).

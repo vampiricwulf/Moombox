@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // W25-01. A row's Delete leaves its files in imports/, so re-importing the
@@ -298,4 +299,84 @@ func TestCleanupOldImportTempSweepsAnAbortedExtraction(t *testing.T) {
 			t.Errorf("%s was swept: %v", filepath.Base(p), err)
 		}
 	}
+}
+
+// An archive imported before titles were cut by bytes is named
+// SanitizeForFilename(title)+" [<id>]": a 70-character Japanese title — 210
+// bytes — fits a file name whole, where the import now cuts it to 179.
+// Re-importing that archive after its row was deleted never looked under
+// the old name: the cut one was free, a second full copy of the video and
+// chat went there, the old pair was left an orphan, and the answer was a
+// plain 201. The old name is re-adopted when it holds the same bytes; a
+// different file there is left alone, and the import takes the cut name as
+// any import would.
+//
+// Mutants: not trying the legacy stem (a second copy beside the old one);
+// adopting a legacy name without the byte check (the different file is
+// taken for the import's); trying it for the videos only (the chat is
+// copied a second time).
+func TestImportReadoptsAPreUpgradeLongTitle(t *testing.T) {
+	title := strings.Repeat("配", 70)
+	legacyStem := utils.SanitizeForFilename(title) + " [dQw4w9WgXcQ]"
+	cutStem := importStem(title, "dQw4w9WgXcQ")
+	if legacyStem == cutStem {
+		t.Fatalf("the title %d bytes long is not cut: %q", len(title), cutStem)
+	}
+	chat := chatJSONFor(t, map[string]any{"videoId": "dQw4w9WgXcQ", "videoTitle": title, "channelName": "Ch"})
+	entries := []importEntry{
+		{name: "Stream [dQw4w9WgXcQ].mp4", data: []byte("ORIGINAL-RECORDING")},
+		{name: "Stream [dQw4w9WgXcQ].chat.json", data: chat},
+	}
+	seed := func(t *testing.T, f *importFixture, name string, data []byte) string {
+		t.Helper()
+		p := filepath.Join(f.outputDir, "imports", name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-time.Hour)
+		os.Chtimes(p, old, old)
+		return p
+	}
+
+	t.Run("identical", func(t *testing.T) {
+		f := newImportFixture(t)
+		video := seed(t, f, legacyStem+".mp4", []byte("ORIGINAL-RECORDING"))
+		oldChat := seed(t, f, legacyStem+".chat.json", chat)
+		rec, _ := importZip(t, f, orderedImportZip(t, entries...))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("re-import: %d (body %s)", rec.Code, rec.Body.String())
+		}
+		r := decodeImportResult(t, rec.Body.Bytes())
+		if r.OutputFile != video || r.ChatFile != oldChat {
+			t.Errorf("the row names %q / %q, want the pre-upgrade files %q / %q",
+				filepath.Base(r.OutputFile), filepath.Base(r.ChatFile), filepath.Base(video), filepath.Base(oldChat))
+		}
+		assertUntouched(t, video, "ORIGINAL-RECORDING")
+		assertUntouched(t, oldChat, string(chat))
+		assertNoLeftovers(t, f, filepath.Base(video), filepath.Base(oldChat))
+		if want := []string{filepath.Base(video), filepath.Base(oldChat)}; !slices.Equal(r.Import.Readopted, want) {
+			t.Errorf("readopted %q, want %q", r.Import.Readopted, want)
+		}
+	})
+
+	t.Run("different", func(t *testing.T) {
+		f := newImportFixture(t)
+		other := seed(t, f, legacyStem+".mp4", []byte("ANOTHER-RECORDING!"))
+		rec, _ := importZip(t, f, orderedImportZip(t, entries...))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+		}
+		r := decodeImportResult(t, rec.Body.Bytes())
+		if filepath.Base(r.OutputFile) != cutStem+".mp4" {
+			t.Errorf("output %q, want the cut name %q", filepath.Base(r.OutputFile), cutStem+".mp4")
+		}
+		assertUntouched(t, other, "ANOTHER-RECORDING!")
+		assertNoLeftovers(t, f, filepath.Base(other), cutStem+".mp4", cutStem+".chat.json")
+		if len(r.Import.Readopted) != 0 || len(r.Import.Renamed) != 0 {
+			t.Errorf("outcome %+v, want neither re-adopted nor renamed", r.Import)
+		}
+	})
 }
