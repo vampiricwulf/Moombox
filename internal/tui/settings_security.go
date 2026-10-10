@@ -112,6 +112,14 @@ func (m *SettingsModel) handleSetPassword() {
 		m.secMessageColor = ColorRed
 		return
 	}
+	// The bounds every password surface shares, POST
+	// /api/auth/set-password's among them: this editor set any length, so a
+	// password the login refuses as too long.
+	if msg := config.PasswordLengthError(m.secNewPw); msg != "" {
+		m.secMessage = msg
+		m.secMessageColor = ColorRed
+		return
+	}
 	if m.secNewPw != m.secConfirmPw {
 		m.secMessage = "Passwords do not match"
 		m.secMessageColor = ColorRed

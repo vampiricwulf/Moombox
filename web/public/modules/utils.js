@@ -1073,3 +1073,21 @@ export function needsChannelResolve(id) {
 
 /** The resolve step's refusal, worded as the server words it. */
 export const NOT_A_CHANNEL_URL = "Not a YouTube or Twitch channel URL";
+
+/** The dashboard password's two refusals, worded as the server words them. */
+export const PASSWORD_TOO_SHORT = "Password must be at least 8 characters";
+export const PASSWORD_TOO_LONG = "Password too long (max 128 characters)";
+
+/**
+ * The refusal for a password outside the bounds every password surface
+ * shares — at least 8 and at most 128 bytes of UTF-8, as the server counts
+ * them — or "" for one within them. The Go side's config.PasswordLengthError
+ * (internal/config/password.go) is the same rule: setup used to accept a
+ * password the login refuses as too long.
+ */
+export function passwordLengthError(pw) {
+  const bytes = new TextEncoder().encode(String(pw ?? "")).length;
+  if (bytes < 8) return PASSWORD_TOO_SHORT;
+  if (bytes > 128) return PASSWORD_TOO_LONG;
+  return "";
+}

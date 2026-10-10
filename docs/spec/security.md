@@ -313,11 +313,15 @@ The only ways a mutating request reaches a handler without an Origin/Referer hea
 
 **Hash format:** `scrypt:<salt_hex>:<hash_hex>` — stored in the TOML config file under `[network] password_hash`.
 
-**Auto-hashing:** On startup, if the config contains a plaintext password (detected by checking if the value does not match the `scrypt:*:*` format via `IsScryptHash`), the server automatically hashes it with scrypt and writes the hash back to the config. This allows users to set passwords in plaintext for convenience, with automatic conversion to a secure hash.
+**Auto-hashing:** On startup, if the config contains a plaintext password (detected by checking if the value does not match the `scrypt:*:*` format via `IsScryptHash`), the server automatically hashes it with scrypt and writes the hash back to the config (`hashPlaintextPassword`, `cmd/moombox/services.go`). This allows users to set passwords in plaintext for convenience, with automatic conversion to a secure hash. A plaintext password longer than the login accepts (see [Password rules](#password-rules)) is hashed all the same — left as plaintext it could not be verified at all, not even as the current password of a change — and the boot warns that the login will refuse it, in the words every interactive surface refuses it with.
 
 **Verification:** Uses `crypto/subtle.ConstantTimeCompare` to compare the computed hash against the stored hash, preventing timing side-channel attacks.
 
 **Source:** `HashPassword`, `VerifyPassword`, `IsScryptHash` in `internal/web/auth.go`.
+
+### Password rules
+
+**Length: 8 to 128 bytes, everywhere.** Every surface that sets the dashboard password — both first-run wizards (`POST /api/setup/complete`, the TUI's `finishAdvancedSetup`), `POST /api/auth/set-password`, and TUI Settings → Security — refuses one shorter than `PasswordMinLen` or longer than `PasswordMaxLen` with the same two messages, `Password must be at least 8 characters` and `Password too long (max 128 characters)` (`PasswordLengthError`, `internal/config/password.go`; the dashboard's twin is `passwordLengthError` in `web/public/modules/utils.js`, which the wizard and Settings check before posting). `POST /api/auth/login` and `POST /api/auth/remove-password` refuse a password over the maximum with the second message. The length is bytes of UTF-8, as the login has always counted it. Setup used to check only the minimum and TUI Settings → Security nothing, so a long pasted passphrase set a password the remote dashboard could never be logged into.
 
 ### Session Management
 

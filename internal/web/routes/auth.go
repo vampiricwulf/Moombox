@@ -78,8 +78,8 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 			jsonError(rw, "Password is required", http.StatusBadRequest)
 			return
 		}
-		if len(body.Password) > 128 {
-			jsonError(rw, "Password too long (max 128 characters)", http.StatusBadRequest)
+		if len(body.Password) > config.PasswordMaxLen {
+			jsonError(rw, config.PasswordTooLongMsg, http.StatusBadRequest)
 			return
 		}
 
@@ -200,12 +200,8 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 			return
 		}
 
-		if len(body.NewPassword) < 8 {
-			jsonError(rw, "Password must be at least 8 characters", http.StatusBadRequest)
-			return
-		}
-		if len(body.NewPassword) > 128 {
-			jsonError(rw, "Password too long (max 128 characters)", http.StatusBadRequest)
+		if msg := config.PasswordLengthError(body.NewPassword); msg != "" {
+			jsonError(rw, msg, http.StatusBadRequest)
 			return
 		}
 
@@ -292,8 +288,8 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 			jsonError(rw, "Current password is required", http.StatusBadRequest)
 			return
 		}
-		if len(body.CurrentPassword) > 128 {
-			jsonError(rw, "Password too long (max 128 characters)", http.StatusBadRequest)
+		if len(body.CurrentPassword) > config.PasswordMaxLen {
+			jsonError(rw, config.PasswordTooLongMsg, http.StatusBadRequest)
 			return
 		}
 

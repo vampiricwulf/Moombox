@@ -657,9 +657,9 @@ This is **dashboard** authentication — the operator's password and session. It
 | Method | Path | Rate Limit | Notes |
 |--------|------|:----------:|-------|
 | `GET` | `/api/auth/status` | — | Public. Returns `{ authRequired, authenticated, hasPassword, passwordlessExternal }` (`AuthRoutes`, `internal/web/routes/auth.go`). `passwordlessExternal` is `network_access` of `external`/`public` with no password hash — a state only a hand-edited config file can produce, and it drives the Web UI's persistent security banner. |
-| `POST` | `/api/auth/login` | 5 req / 60s | `{ password }` body, max 128 chars. Sets the session cookie and — when a database is wired — issues a persistent `moombox_client` token cookie, revoking any previous one from the same browser. Returns `{ success: true }`; the token itself is never in the body. |
+| `POST` | `/api/auth/login` | 5 req / 60s | `{ password }` body, max 128 bytes ([security.md](security.md) § Password rules). Sets the session cookie and — when a database is wired — issues a persistent `moombox_client` token cookie, revoking any previous one from the same browser. Returns `{ success: true }`; the token itself is never in the body. |
 | `POST` | `/api/auth/logout` | — | Invalidates the session and revokes the presented client token, then clears both cookies. The Web UI's status bar shows a logout icon (`btn-logout`, beside the theme toggle) only while `authRequired && authenticated`; its click is this POST followed by a reload. |
-| `POST` | `/api/auth/set-password` | 3 req / 60s | Sets or changes the password. Requires a valid session **or** a loopback/private-network origin. |
+| `POST` | `/api/auth/set-password` | 3 req / 60s | Sets or changes the password — 8 to 128 bytes, the bounds every password surface shares (`PasswordLengthError`, `internal/config/password.go`). Requires a valid session **or** a loopback/private-network origin. |
 | `POST` | `/api/auth/remove-password` | 3 req / 60s | Removes password (disables auth). Same session-or-local gate. |
 
 The two limiters are per-IP and separate from the shared API limiter: `rateLimitLoginPerMinute = 5` and `rateLimitPasswordPerMinute = 3` in `cmd/moombox/main.go`. A refused request answers `429` with `Retry-After` and `{ error, retryAfter }`.

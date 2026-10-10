@@ -1317,11 +1317,19 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		networkAccess = "localhost"
 	}
 
-	// External access requires a password (min 8 chars)
+	// External access requires a password, within the bounds every password
+	// surface shares (config.PasswordLengthError): one the login refuses as
+	// too long must not be set here.
 	password := v("password")
-	if networkAccess == "external" && len(password) < 8 {
-		m.errorMsg = "A password (min 8 characters) is required for external access"
-		return ""
+	if networkAccess == "external" {
+		if len(password) < config.PasswordMinLen {
+			m.errorMsg = "A password (min 8 characters) is required for external access"
+			return ""
+		}
+		if msg := config.PasswordLengthError(password); msg != "" {
+			m.errorMsg = msg
+			return ""
+		}
 	}
 
 	// Validate numeric ranges before building config (must match API validateConfigUpdates)

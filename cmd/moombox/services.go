@@ -466,6 +466,39 @@ func logConfigSource(log interface {
 		slog.String("path", storePath))
 }
 
+// hashPlaintextPassword replaces a plaintext password_hash — one written into
+// config.toml by hand — with its scrypt hash. One longer than
+// config.PasswordMaxLen is hashed all the same — left as plaintext it could
+// not be verified at all, not even as the current password of a change — but
+// the login refuses it, so the boot says so, with the message every
+// interactive surface refuses it with.
+func hashPlaintextPassword(log interface {
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, store *config.Store) {
+	var plain string
+	store.Read(func(c *config.MoomboxConfig) { plain = c.Network.PasswordHash })
+	if plain == "" || web.IsScryptHash(plain) {
+		return
+	}
+	log.Info("[Config] Plaintext password detected, converting to secure hash")
+	if len(plain) > config.PasswordMaxLen {
+		log.Warn("[Config] The plaintext password in password_hash is too long for the dashboard login: " +
+			config.PasswordTooLongMsg + ". Change it from the dashboard on this machine or the TUI's Settings → Security")
+	}
+	hash, err := web.NewAuthService().HashPassword(plain)
+	if err != nil {
+		log.Error("Failed to hash plaintext password", slog.String("error", err.Error()))
+		return
+	}
+	if saveErr := store.Update(func(c *config.MoomboxConfig) {
+		c.Network.PasswordHash = hash
+	}); saveErr != nil {
+		log.Warn("Failed to save auto-hashed password", slog.String("error", saveErr.Error()))
+	}
+}
+
 // archiveSlotsResolver builds the per-channel archive-slots resolver the
 // backlog scheduler consults on every admission sweep (spec §10): "how many
 // backlog downloads may channel X run". The per-channel archive_slots override
@@ -621,20 +654,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.upd = upd
 
 	// Auto-convert plaintext password to scrypt hash (matches TS ConfigManager.load)
-	if cfg.Network.PasswordHash != "" && !web.IsScryptHash(cfg.Network.PasswordHash) {
-		log.Info("[Config] Plaintext password detected, converting to secure hash")
-		tempAuth := web.NewAuthService()
-		hash, err := tempAuth.HashPassword(cfg.Network.PasswordHash)
-		if err == nil {
-			if saveErr := s.configStore.Update(func(c *config.MoomboxConfig) {
-				c.Network.PasswordHash = hash
-			}); saveErr != nil {
-				log.Warn("Failed to save auto-hashed password", slog.String("error", saveErr.Error()))
-			}
-		} else {
-			log.Error("Failed to hash plaintext password", slog.String("error", err.Error()))
-		}
-	}
+	hashPlaintextPassword(log, s.configStore)
 
 	// =========================================================================
 	// 3. Open database

@@ -11,6 +11,55 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
+// TestPasswordSurfacesRefuseWhatTheLoginRefuses pins W26-10 on the TUI's
+// two password surfaces: the wizard checked only the minimum and Settings →
+// Security nothing at all, so either could set a password over 128 bytes,
+// which /api/auth/login refuses. Both answer with the shared refusals now
+// (config.PasswordLengthError) and accept 128.
+//
+// Mutants killed: the wizard's finishAdvancedSetup checking only the minimum
+// (129 saved); handleSetPassword without the length check (7 and 129 set).
+func TestPasswordSurfacesRefuseWhatTheLoginRefuses(t *testing.T) {
+	wizard := func(pw string) *SetupWizardModel {
+		m := NewSetupWizardModel()
+		m.OnHashPassword = func(string) (string, error) { return "scrypt:salt:hash", nil }
+		m.values["networkAccess"] = "External"
+		m.values["password"] = pw
+		return m
+	}
+	m := wizard(strings.Repeat("a", 129))
+	if got := m.finishAdvancedSetup(); got != "" || m.errorMsg != config.PasswordTooLongMsg {
+		t.Errorf("wizard, 129 bytes: action %q errorMsg %q, want refused with %q", got, m.errorMsg, config.PasswordTooLongMsg)
+	}
+	if m := wizard(strings.Repeat("a", 128)); m.finishAdvancedSetup() != "save" {
+		t.Errorf("wizard, 128 bytes refused: %q", m.errorMsg)
+	}
+
+	for _, tc := range []struct {
+		pw   string
+		want string
+	}{
+		{strings.Repeat("a", 7), config.PasswordTooShortMsg},
+		{strings.Repeat("a", 129), config.PasswordTooLongMsg},
+		{strings.Repeat("a", 128), ""},
+	} {
+		s, cfg := newSecuritySettingsModel(t, "localhost", "")
+		s.OnHashPassword = func(string) string { return "scrypt:salt:hash" }
+		s.secNewPw, s.secConfirmPw = tc.pw, tc.pw
+		s.handleSetPassword()
+		if tc.want == "" {
+			if cfg.Network.PasswordHash == "" {
+				t.Errorf("Security, %d bytes refused: %q", len(tc.pw), s.secMessage)
+			}
+			continue
+		}
+		if cfg.Network.PasswordHash != "" || s.secMessage != tc.want {
+			t.Errorf("Security, %d bytes: hash %q message %q, want refused with %q",
+				len(tc.pw), cfg.Network.PasswordHash, s.secMessage, tc.want)
+		}
+	}
+}
+
 // TestSetupSaveRefusesAnUncreatableDirectory pins W26-13 on the TUI
 // wizard's side: an output directory that cannot be created — here
 // "./output" is a regular file — used to be discarded after the save, the

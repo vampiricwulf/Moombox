@@ -126,8 +126,10 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 		// Hash password if provided (needed before external access check)
 		var passwordHash string
 		if password != "" {
-			if len(password) < 8 {
-				jsonError(rw, "password must be at least 8 characters", http.StatusBadRequest)
+			// The bounds every password surface shares: a password the
+			// login would refuse as too long must not be set here.
+			if msg := config.PasswordLengthError(password); msg != "" {
+				jsonError(rw, msg, http.StatusBadRequest)
 				return
 			}
 			if deps.Auth != nil {

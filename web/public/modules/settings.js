@@ -15,6 +15,7 @@ import {
   formatRelativeTime,
   needsChannelResolve,
   NOT_A_CHANNEL_URL,
+  passwordLengthError,
   restartValuesChanged,
   serverErrorMessage,
   snapshotRestartValues,
@@ -2660,8 +2661,10 @@ export class SettingsController {
     const newPassword = newPasswordInput.value;
     const confirmPassword = confirmPasswordInput.value;
 
-    if (!newPassword || newPassword.length < 8) {
-      this.app.showToast("Password must be at least 8 characters", "warning");
+    // The bounds every password surface shares, the server's own.
+    const lengthRefusal = passwordLengthError(newPassword);
+    if (lengthRefusal) {
+      this.app.showToast(lengthRefusal, "warning");
       return;
     }
 

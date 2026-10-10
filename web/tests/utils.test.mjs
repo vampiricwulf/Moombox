@@ -16,7 +16,25 @@ import {
   snapshotRestartValues,
   restartValuesChanged,
   streamUrl,
+  passwordLengthError,
+  PASSWORD_TOO_SHORT,
+  PASSWORD_TOO_LONG,
 } from "../public/modules/utils.js";
+
+// The bounds every password surface shares, counted in UTF-8 bytes as the
+// server counts them (config.PasswordLengthError): setup used to accept a
+// password the login refuses as too long (W26-10).
+//
+// Mutants killed: `<` as `<=` (8 refused); `>` as `>=` (128 refused);
+// counting UTF-16 code units (43 three-byte characters accepted).
+test("passwordLengthError: 8 to 128 bytes", () => {
+  assert.equal(passwordLengthError(""), PASSWORD_TOO_SHORT);
+  assert.equal(passwordLengthError("a".repeat(7)), PASSWORD_TOO_SHORT);
+  assert.equal(passwordLengthError("a".repeat(8)), "");
+  assert.equal(passwordLengthError("a".repeat(128)), "");
+  assert.equal(passwordLengthError("a".repeat(129)), PASSWORD_TOO_LONG);
+  assert.equal(passwordLengthError("あ".repeat(43)), PASSWORD_TOO_LONG);
+});
 
 test("formatTimestamp: zero and invalid inputs", () => {
   assert.equal(formatTimestamp(0), "0:00");

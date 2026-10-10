@@ -487,6 +487,42 @@ func TestSetupCompleteRefusesAnUncreatableDirectory(t *testing.T) {
 	}
 }
 
+// TestSetupCompleteRefusesAPasswordTheLoginRefuses pins W26-10 on the Web
+// wizard's side: setup checked only the minimum, so a pasted passphrase over
+// 128 bytes was hashed and saved, and every remote login with it answered
+// 400 "Password too long (max 128 characters)". Setup refuses it with that
+// message now, and accepts 128.
+//
+// Mutant killed: setup/complete checking only the minimum (129 saved).
+func TestSetupCompleteRefusesAPasswordTheLoginRefuses(t *testing.T) {
+	external := map[string]any{"network_access": "external"}
+
+	f := newSetupFixture(t)
+	rec := postSetupComplete(t, f.router, map[string]any{"password": strings.Repeat("a", 129), "network": external})
+	var resp struct {
+		Error string `json:"error"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if rec.Code != http.StatusBadRequest || resp.Error != config.PasswordTooLongMsg {
+		t.Errorf("a 129-byte password: %d %q, want 400 %q", rec.Code, resp.Error, config.PasswordTooLongMsg)
+	}
+	var hash string
+	f.store.Read(func(c *config.MoomboxConfig) { hash = c.Network.PasswordHash })
+	if hash != "" {
+		t.Error("the refused password was stored")
+	}
+
+	f = newSetupFixture(t)
+	pw := strings.Repeat("a", 128)
+	if rec := postSetupComplete(t, f.router, map[string]any{"password": pw, "network": external}); rec.Code != http.StatusOK {
+		t.Fatalf("a 128-byte password: %d (body %s), want 200", rec.Code, rec.Body.String())
+	}
+	f.store.Read(func(c *config.MoomboxConfig) { hash = c.Network.PasswordHash })
+	if !f.auth.VerifyPassword(pw, hash) {
+		t.Error("the 128-byte password does not verify against the stored hash")
+	}
+}
+
 // postSetupComplete sends body to /api/setup/complete from loopback, as the
 // wizard does.
 func postSetupComplete(t *testing.T, router http.Handler, body map[string]any) *httptest.ResponseRecorder {
