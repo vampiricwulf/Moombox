@@ -17,10 +17,11 @@ import (
 // and deletes its pending ones once the overlay is saved, Esc cancels.
 
 type removalHarness struct {
-	a       *App
-	cfg     *config.MoomboxConfig
-	deletes []string
-	counted []string
+	a         *App
+	cfg       *config.MoomboxConfig
+	deletes   []string
+	counted   []string
+	platforms []string // the platform each count was asked for
 }
 
 func newRemovalHarness(t *testing.T, info ChannelRemovalInfo) *removalHarness {
@@ -30,8 +31,9 @@ func newRemovalHarness(t *testing.T, info ChannelRemovalInfo) *removalHarness {
 	h := &removalHarness{a: NewApp(), cfg: cfg}
 	h.a.SetConfig(cfg)
 	h.a.SetConfigStore(config.NewStore(cfg, ""))
-	h.a.OnChannelRemovalSummary = func(id string) (ChannelRemovalInfo, error) {
+	h.a.OnChannelRemovalSummary = func(id, platform string) (ChannelRemovalInfo, error) {
 		h.counted = append(h.counted, id)
+		h.platforms = append(h.platforms, platform)
 		return info, nil
 	}
 	h.a.OnDeletePendingChannelJobs = func(id string) (int, int, error) {
@@ -111,6 +113,41 @@ func TestChannelRemovalPromptCountsAndOffersBothChoices(t *testing.T) {
 	}
 }
 
+// TestChannelRemovalCountsByTheChannelsPlatform: D asks for the selected
+// channel's counts with its platform — a Twitch channel's jobs carry no
+// channel ID, and counted as a YouTube channel's they were none.
+//
+// Mutant killed: beginChannelRemoval not recording the platform (the count
+// is asked for "").
+func TestChannelRemovalCountsByTheChannelsPlatform(t *testing.T) {
+	h := newRemovalHarness(t, removalInfo)
+	h.a.settings.channels = append(h.a.settings.channels,
+		config.ChannelConfig{ID: "somestreamer", Name: "Some Streamer", Platform: "twitch"})
+	h.press(t, "d") // Alpha, YouTube by default
+	h.press(t, "esc")
+	h.a.settings.channelIndex = 2
+	h.press(t, "d")
+	if !slices.Equal(h.counted, []string{"UCalpha", "somestreamer"}) || !slices.Equal(h.platforms, []string{"youtube", "twitch"}) {
+		t.Errorf("counted %v on %v, want UCalpha on youtube and somestreamer on twitch", h.counted, h.platforms)
+	}
+}
+
+// TestChannelRemovalZeroCountClaimsNoAbsence: a zero count is no proof the
+// channel has no jobs — a YouTube row from before jobs carried their
+// channel's ID, or one added by hand, is never counted — so the prompt says
+// what it can promise, that none will be deleted, and offers a bare Remove.
+//
+// Mutant killed: the old " It has no jobs." line.
+func TestChannelRemovalZeroCountClaimsNoAbsence(t *testing.T) {
+	h := newRemovalHarness(t, ChannelRemovalInfo{})
+	h.press(t, "d")
+	view := stripANSI(h.a.settings.View())
+	if !strings.Contains(view, `Remove "Alpha"? No job will be deleted.`) || !strings.Contains(view, "Enter: Remove") ||
+		strings.Contains(view, "no jobs") {
+		t.Errorf("zero-count prompt:\n%s", view)
+	}
+}
+
 // TestChannelRemovalDeletePendingWaitsForTheSave: P removes the channel from
 // the list at once but deletes nothing until the overlay is saved; the save
 // hands the channel over and the App runs the delete, then says so.
@@ -180,7 +217,9 @@ func TestChannelRemovalOffersNoDeleteWithNothingPending(t *testing.T) {
 // and Esc, and says why.
 func TestChannelRemovalUncountedOffersKeepOnly(t *testing.T) {
 	h := newRemovalHarness(t, removalInfo)
-	h.a.OnChannelRemovalSummary = func(string) (ChannelRemovalInfo, error) { return ChannelRemovalInfo{}, errors.New("db locked") }
+	h.a.OnChannelRemovalSummary = func(string, string) (ChannelRemovalInfo, error) {
+		return ChannelRemovalInfo{}, errors.New("db locked")
+	}
 	h.press(t, "d")
 	view := stripANSI(h.a.settings.View())
 	if !strings.Contains(view, "could not be counted (db locked); all will be kept") || strings.Contains(view, "P: Remove") {

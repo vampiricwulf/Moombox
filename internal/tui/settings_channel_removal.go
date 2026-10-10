@@ -28,7 +28,7 @@ import (
 // ChannelRemovalInfo is what removing a channel would do to its jobs — the
 // TUI's copy of worker.ChannelRemoval, adapted in cmd/moombox.
 type ChannelRemovalInfo struct {
-	Total   int      // every job carrying the channel's ID
+	Total   int      // every job of the channel (worker.ChannelRemoval.Total)
 	Pending int      // what "delete its pending jobs" deletes
 	Footage []string // titles of the parked recordings with footage, kept either way
 	Active  int      // downloads in progress, which nothing touches
@@ -50,11 +50,12 @@ type channelJobsPrunedMsg struct {
 // channelRemovalState is the prompt's state. channelDeleteConf says whether
 // the prompt is up; this says what it shows.
 type channelRemovalState struct {
-	removalID      string
-	removalName    string
-	removalLoading bool
-	removalInfo    *ChannelRemovalInfo
-	removalErr     string
+	removalID       string
+	removalPlatform string
+	removalName     string
+	removalLoading  bool
+	removalInfo     *ChannelRemovalInfo
+	removalErr      string
 	// channelPrunes holds the IDs removed with "delete its pending jobs",
 	// waiting for the save; readyPrunes the ones a save handed over.
 	channelPrunes map[string]bool
@@ -67,6 +68,7 @@ func (m *SettingsModel) beginChannelRemoval() string {
 	ch := m.channels[m.channelIndex]
 	m.channelDeleteConf = true
 	m.removalID = ch.ID
+	m.removalPlatform = ch.GetPlatform()
 	m.removalName = cmp.Or(ch.Name, ch.ID)
 	m.removalLoading = true
 	m.removalInfo = nil
@@ -74,9 +76,11 @@ func (m *SettingsModel) beginChannelRemoval() string {
 	return "channel_removal_summary"
 }
 
-// ChannelRemovalID is the channel the prompt is counting.
-func (m *SettingsModel) ChannelRemovalID() string {
-	return m.removalID
+// ChannelRemovalID is the channel the prompt is counting, and its platform,
+// which decides what ties a job to it: a Twitch channel's jobs carry no
+// channel ID.
+func (m *SettingsModel) ChannelRemovalID() (id, platform string) {
+	return m.removalID, m.removalPlatform
 }
 
 // HandleChannelRemovalSummary lands the count. A count for a prompt that has
@@ -188,7 +192,10 @@ func (m *SettingsModel) channelRemovalPromptLines(w, maxLines int) []string {
 	default:
 		in := m.removalInfo
 		if in.Total == 0 {
-			head += " It has no jobs."
+			// No proof it has none (a YouTube row older than jobs.channel_id,
+			// or one added by hand, is never counted), only that nothing
+			// will be deleted.
+			head += " No job will be deleted."
 			keep = "Enter: Remove"
 		} else {
 			head += " It has " + countOf(in.Total, "job", "jobs") + "."
@@ -235,14 +242,14 @@ func (m *SettingsModel) channelRemovalPromptLines(w, maxLines int) []string {
 // channelRemovalSummaryCmd counts a channel's jobs off the update loop.
 // Without the callback the prompt is answered at once as uncounted: keep
 // and Esc only.
-func (a *App) channelRemovalSummaryCmd(id string) tea.Cmd {
+func (a *App) channelRemovalSummaryCmd(id, platform string) tea.Cmd {
 	count := a.OnChannelRemovalSummary
 	if count == nil {
 		a.settings.HandleChannelRemovalSummary(id, ChannelRemovalInfo{}, fmt.Errorf("job counts unavailable"))
 		return nil
 	}
 	return safeCmd(func() tea.Msg {
-		info, err := count(id)
+		info, err := count(id, platform)
 		return channelRemovalSummaryMsg{ID: id, Info: info, Err: err}
 	})
 }

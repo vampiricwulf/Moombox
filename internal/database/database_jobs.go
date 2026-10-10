@@ -424,7 +424,8 @@ type ChannelJob struct {
 
 // ListChannelJobs returns every job carrying channelID — whatever its status
 // — oldest first. jobs.channel_id is nullable and `channel_id = ?` never
-// matches NULL, so Twitch and manually added jobs are never listed.
+// matches NULL, so Twitch and manually added jobs are never listed: a Twitch
+// channel's are ListTwitchJobs'.
 func (db *Database) ListChannelJobs(channelID string) ([]ChannelJob, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -443,6 +444,36 @@ func (db *Database) ListChannelJobs(channelID string) ([]ChannelJob, error) {
 			return nil, err
 		}
 		jobs = append(jobs, j)
+	}
+	return jobs, rows.Err()
+}
+
+// ListTwitchJobs returns every Twitch job — whatever its status — oldest
+// first, with the fields that tie one to a channel (ID, VideoID, URL and
+// ChannelName, which worker.TwitchJobLogin reads) and its Title and Status:
+// what a Twitch channel's removal confirmation counts. No Twitch row carries
+// a channel_id — neither the Twitch monitor's (newTwitchStreamJob) nor a
+// manual add sets one — so ListChannelJobs never finds one.
+func (db *Database) ListTwitchJobs() ([]*Job, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT id, video_id, url, channel_name, title, status FROM jobs WHERE platform = 'twitch' ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []*Job
+	for rows.Next() {
+		var id, status string
+		var videoID, url, channelName, title sql.NullString
+		if err := rows.Scan(&id, &videoID, &url, &channelName, &title, &status); err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, &Job{ID: id, VideoID: videoID.String, URL: url.String, ChannelName: channelName.String,
+			Title: title.String, Status: JobStatus(status), Platform: "twitch"})
 	}
 	return jobs, rows.Err()
 }

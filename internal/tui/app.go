@@ -664,7 +664,9 @@ type App struct {
 	// how many it deleted and how many parked recordings with footage it
 	// kept. worker.SummarizeChannelRemoval / DeletePendingChannelJobs,
 	// adapted in cmd/moombox. Without them the prompt offers keep and Esc.
-	OnChannelRemovalSummary    func(channelID string) (ChannelRemovalInfo, error)
+	// The summary takes the channel's platform: a Twitch channel's jobs
+	// carry no channel ID, and are told by the login their URL names.
+	OnChannelRemovalSummary    func(channelID, platform string) (ChannelRemovalInfo, error)
 	OnDeletePendingChannelJobs func(channelID string) (deleted, footageKept int, err error)
 	// OnFfmpegPathChange re-applies paths.ffmpeg_path to the services that
 	// captured it when their muxers were built. Separate from OnSaveConfig

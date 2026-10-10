@@ -51,6 +51,16 @@ test("no delete choice when nothing is pending or the jobs could not be counted"
   assert.equal(channelRemovalPrompt("C", { total: 0, pending: 0, footage: [], active: 0 }).keepLabel, "Remove channel");
 });
 
+// A zero is no proof the channel has none — a YouTube row from before jobs
+// carried their channel's ID, or one added by hand, is never counted — so the
+// prompt promises only what it can: nothing will be deleted.
+// MUTANT: the old "It has no jobs." line.
+test("a zero count claims no absence", () => {
+  const p = channelRemovalPrompt("C", { total: 0, pending: 0, footage: [], active: 0 });
+  assert.equal(p.message, 'Remove "C" from the monitored channels?\n\nNo job will be deleted.');
+  assert.doesNotMatch(p.message, /no jobs/i);
+});
+
 test("the toast says what the removal did", () => {
   assert.equal(channelRemovedToast("keep", SUMMARY, { success: true }), "Channel removed; its 4 jobs were kept");
   assert.equal(channelRemovedToast("delete", SUMMARY, { jobsDeleted: 1, footageKept: SUMMARY.footage }),

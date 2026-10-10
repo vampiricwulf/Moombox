@@ -7,11 +7,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/tui"
+	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
 // TestTUIChannelRemovalAdapters: the TUI's removal prompt gets the counts
@@ -59,7 +61,7 @@ func TestTUIChannelRemovalAdapters(t *testing.T) {
 	app := tui.NewApp()
 	s.wireTUIChannelRemoval(app)
 
-	info, err := app.OnChannelRemovalSummary(ch)
+	info, err := app.OnChannelRemovalSummary(ch, "youtube")
 	if err != nil {
 		t.Fatalf("OnChannelRemovalSummary: %v", err)
 	}
@@ -76,6 +78,43 @@ func TestTUIChannelRemovalAdapters(t *testing.T) {
 	}
 	if j, _ := db.GetJob("queued"); j != nil {
 		t.Error("the pending job survived")
+	}
+}
+
+// TestTUIChannelRemovalCountsATwitchChannelsJobs: the summary adapter hands
+// the platform the TUI names to worker.SummarizeChannelRemoval, so a Twitch
+// channel's jobs — which carry no channel ID — are counted by its login: here
+// the very row the Twitch monitor creates (newTwitchStreamJob), recording.
+// Counted as a YouTube channel's they were none, and the TUI said "It has no
+// jobs." over the capture in progress.
+//
+// Mutant killed: the adapter passing "youtube" whatever the platform.
+func TestTUIChannelRemovalCountsATwitchChannelsJobs(t *testing.T) {
+	dir := t.TempDir()
+	db, err := database.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	cfg := config.Defaults()
+	cfg.Paths.StagingDirectory = filepath.Join(dir, "staging")
+	s := &runState{db: db, configStore: config.NewStore(cfg, "")}
+
+	ch := config.ChannelConfig{ID: "somestreamer", Name: "Some Streamer", Platform: "twitch"}
+	job := newTwitchStreamJob(&twitch.TwitchStreamInfo{StreamID: "424242", ChannelLogin: "somestreamer",
+		ChannelDisplayName: "Some Streamer", Title: "live now", IsLive: true}, &ch, dir, time.Now())
+	if added, err := db.AddJob(job); err != nil || !added {
+		t.Fatalf("AddJob: %v %v", added, err)
+	}
+
+	app := tui.NewApp()
+	s.wireTUIChannelRemoval(app)
+	info, err := app.OnChannelRemovalSummary(ch.ID, ch.GetPlatform())
+	if err != nil {
+		t.Fatalf("OnChannelRemovalSummary: %v", err)
+	}
+	if info.Total != 1 || info.Active != 1 || info.Pending != 0 {
+		t.Errorf("info = %+v, want the live capture counted: 1 job, 1 active", info)
 	}
 }
 

@@ -877,7 +877,8 @@ export const RESUMABLE_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
 // rides the DELETE as ?jobs=keep or ?jobs=delete. "Pending" is the Queued,
 // Upcoming and COOKIES? rows, less any whose staging holds footage, which
 // neither choice deletes and the prompt names; active downloads are never
-// touched. The dialog itself is SettingsController.chooseChannelRemoval; the
+// touched. A Twitch channel's jobs are counted by the login their URL names,
+// and none of them is pending (worker.SummarizeChannelRemoval). The dialog itself is SettingsController.chooseChannelRemoval; the
 // TUI's Settings → Channels delete asks the same question
 // (internal/tui/settings_channels.go).
 
@@ -900,7 +901,10 @@ export function channelRemovalPrompt(name, summary) {
   const pending = summary.pending ?? 0;
   const footage = summary.footage ?? [];
   const active = summary.active ?? 0;
-  lines.push(total ? `It has ${countOf(total, "job", "jobs")}.` : "It has no jobs.");
+  // A zero is no proof the channel has none: a YouTube row from before jobs
+  // carried their channel's ID, or one added by hand, is never counted — and
+  // never deleted either, which is the one thing the zero can promise.
+  lines.push(total ? `It has ${countOf(total, "job", "jobs")}.` : "No job will be deleted.");
   if (footage.length) {
     // The first three titles and a count of the rest.
     const names = footage.slice(0, 3).map((f) => `"${f.title || f.id}"`);

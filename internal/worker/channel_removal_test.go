@@ -73,7 +73,7 @@ func removalFixture(t *testing.T) (db *database.Database, staging, ch string) {
 // as pending); the Active arm dropped (Active 0); Muxing missing from it.
 func TestSummarizeChannelRemoval(t *testing.T) {
 	db, staging, ch := removalFixture(t)
-	sum, err := SummarizeChannelRemoval(db, staging, ch)
+	sum, err := SummarizeChannelRemoval(db, staging, ch, "youtube")
 	if err != nil {
 		t.Fatalf("SummarizeChannelRemoval: %v", err)
 	}
@@ -121,5 +121,79 @@ func TestDeletePendingChannelJobs(t *testing.T) {
 	}
 	if !HasStagingFiles(staging, "parked_capture") {
 		t.Error("the parked capture's staging is gone")
+	}
+}
+
+// TestSummarizeTwitchChannelRemoval: a Twitch channel's jobs carry no
+// channel_id, so the summary ties them by the login TwitchJobLogin reads off
+// them — the monitor's rows (https://twitch.tv/<login>) and a Web add's
+// (https://www.twitch.tv/<login>, a tw_manual_ row among them) — matched
+// without regard to case, the config ID being typed by hand. Counted by
+// channel_id they were none, and both prompts said "It has no jobs." over a
+// capture in progress and one parked with its footage. None is pending: the
+// delete reaches rows by channel_id alone, and DeletePendingChannelJobs
+// deletes nothing of a Twitch channel's.
+//
+// Mutants killed: the twitch branch of SummarizeChannelRemoval dropped (total
+// 0); strings.EqualFold made a lowercased == (the mixed-case config ID
+// matches nothing);
+// summarizeRemoval called with deletable true for Twitch (the manual row
+// reads as pending, a delete the UIs would offer and not perform); the login
+// matched by strings.Contains on the URL (another channel whose login extends
+// this one's is counted).
+func TestSummarizeTwitchChannelRemoval(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "twitch.db"))
+	if err != nil {
+		t.Fatalf("database.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	staging := t.TempDir()
+	for i, row := range []struct {
+		id, url, channelName string
+		status               database.JobStatus
+		staged               bool
+	}{
+		{"tw_1001", "https://twitch.tv/somestreamer", "SomeStreamer", database.StatusFinished, false},
+		{"tw_1002", "https://twitch.tv/somestreamer", "SomeStreamer", database.StatusCookies, true},
+		{"tw_1003", "https://twitch.tv/somestreamer", "SomeStreamer", database.StatusDownloading, true},
+		{"tw_manual_somestreamer_17", "https://www.twitch.tv/somestreamer", "somestreamer", database.StatusUpcoming, false},
+		{"tw_v999", "https://www.twitch.tv/videos/999", "Manual", database.StatusUpcoming, false},
+		{"tw_2001", "https://twitch.tv/somestreamer2", "SomeStreamer2", database.StatusCookies, false},
+	} {
+		created := fmt.Sprintf("2026-07-01T00:00:%02dZ", i)
+		if _, err := db.AddJob(&database.Job{ID: row.id, VideoID: row.id, URL: row.url, Title: "T " + row.id,
+			ChannelName: row.channelName, Platform: "twitch", Status: row.status,
+			CreatedAt: created, UpdatedAt: created}); err != nil {
+			t.Fatal(err)
+		}
+		if row.staged {
+			dir := filepath.Join(staging, row.id)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "video_00001.ts"), []byte("footage"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	sum, err := SummarizeChannelRemoval(db, staging, "SomeStreamer", "twitch")
+	if err != nil {
+		t.Fatalf("SummarizeChannelRemoval: %v", err)
+	}
+	if sum.Total != 4 || sum.Pending != 0 || sum.Active != 1 {
+		t.Errorf("total/pending/active = %d/%d/%d, want 4/0/1", sum.Total, sum.Pending, sum.Active)
+	}
+	want := []ChannelJobRef{{ID: "tw_1002", Title: "T tw_1002", Status: database.StatusCookies}}
+	if !slices.Equal(sum.Footage, want) {
+		t.Errorf("footage = %+v, want %+v", sum.Footage, want)
+	}
+
+	n, kept, err := DeletePendingChannelJobs(db, staging, "SomeStreamer")
+	if err != nil || n != 0 || len(kept) != 0 {
+		t.Errorf("delete = %d deleted, kept %+v, err %v; want nothing", n, kept, err)
+	}
+	if j, _ := db.GetJob("tw_manual_somestreamer_17"); j == nil {
+		t.Error("the delete reached a Twitch row")
 	}
 }

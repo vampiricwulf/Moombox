@@ -42,9 +42,18 @@ func ChannelRemovalRoutes(r chi.Router, deps *ChannelRemovalRoutesDeps) {
 
 	// GET /api/config/channels/{id}/removal — what removing the channel
 	// would do to its jobs: {total, pending, footage: [{id, title, status}],
-	// active}. Answers for any ID, configured or not.
+	// active}. The jobs are counted as the configured channel's platform
+	// ties them to it (a Twitch channel's carry no channel ID); an ID the
+	// config does not hold is counted as a YouTube channel's.
 	r.Get("/api/config/channels/{id}/removal", func(rw http.ResponseWriter, req *http.Request) {
-		sum, err := worker.SummarizeChannelRemoval(deps.DB, stagingDir(), pathParam(req, "id"))
+		channelID := pathParam(req, "id")
+		platform := "youtube"
+		deps.Store.Read(func(c *config.MoomboxConfig) {
+			if i := slices.IndexFunc(c.Channels, func(ch config.ChannelConfig) bool { return ch.ID == channelID }); i >= 0 {
+				platform = c.Channels[i].GetPlatform()
+			}
+		})
+		sum, err := worker.SummarizeChannelRemoval(deps.DB, stagingDir(), channelID, platform)
 		if err != nil {
 			jsonError(rw, "failed to read the channel's jobs", http.StatusInternalServerError)
 			return

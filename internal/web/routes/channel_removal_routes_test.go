@@ -119,6 +119,40 @@ func TestChannelRemovalSummaryRoute(t *testing.T) {
 	}
 }
 
+// TestChannelRemovalSummaryRouteCountsATwitchChannelsJobs: the route counts
+// a configured channel's jobs as its platform ties them to it. A Twitch
+// channel's rows carry no channel ID — the Twitch monitor's row names the
+// channel in its URL — and counted by ID they were none: the dashboard said
+// "It has no jobs." over a capture in progress.
+//
+// Mutant killed: the configured platform not looked up (the route counts
+// every ID as a YouTube channel's: total 0).
+func TestChannelRemovalSummaryRouteCountsATwitchChannelsJobs(t *testing.T) {
+	f := newRemovalRoutesFixture(t)
+	if err := f.store.Update(func(c *config.MoomboxConfig) {
+		c.Channels = append(append([]config.ChannelConfig{}, c.Channels...),
+			config.ChannelConfig{ID: "somestreamer", Platform: "twitch"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AddJob(&database.Job{ID: "tw_424242", VideoID: "424242", URL: "https://twitch.tv/somestreamer",
+		Title: "Some Streamer — live", ChannelName: "Some Streamer", Platform: "twitch",
+		Status: database.StatusDownloading}); err != nil {
+		t.Fatal(err)
+	}
+	rec := f.serve("GET", "/api/config/channels/somestreamer/removal")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET removal: %d %s", rec.Code, rec.Body.String())
+	}
+	var sum worker.ChannelRemoval
+	if err := json.Unmarshal(rec.Body.Bytes(), &sum); err != nil {
+		t.Fatal(err)
+	}
+	if sum.Total != 1 || sum.Active != 1 || sum.Pending != 0 {
+		t.Errorf("summary = %+v, want the capture in progress counted: total 1, active 1", sum)
+	}
+}
+
 // TestChannelRemovalKeepsJobsByDefault: a DELETE that names no choice, and
 // one that says keep, remove the channel and leave every job (W25-09: the
 // sweep used to delete the pending ones on every removal).

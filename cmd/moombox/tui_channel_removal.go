@@ -18,8 +18,8 @@ func (s *runState) wireTUIChannelRemoval(app *tui.App) {
 		s.configStore.Read(func(c *config.MoomboxConfig) { dir = c.Paths.EffectiveStagingDir() })
 		return dir
 	}
-	app.OnChannelRemovalSummary = func(channelID string) (tui.ChannelRemovalInfo, error) {
-		sum, err := worker.SummarizeChannelRemoval(s.db, stagingDir(), channelID)
+	app.OnChannelRemovalSummary = func(channelID, platform string) (tui.ChannelRemovalInfo, error) {
+		sum, err := worker.SummarizeChannelRemoval(s.db, stagingDir(), channelID, platform)
 		if err != nil {
 			return tui.ChannelRemovalInfo{}, err
 		}
