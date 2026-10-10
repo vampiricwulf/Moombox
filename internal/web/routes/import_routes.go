@@ -364,7 +364,8 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// recording is stored as the finalize stores one
 		// (finalizeMultiSegmentJob): filename the parts' shared name with no
 		// extension, output_file the first part, the parts' total size, and
-		// a segment row per part.
+		// a segment row per part — inserted with the row, so the JobAdded
+		// the dashboard and the TUI learn of it by carries its parts.
 		videos := importVideoFiles(files)
 		absVideo, _ := filepath.Abs(videos[0].dest)
 		videoOutName := filepath.Join("imports", filepath.Base(videos[0].dest))
@@ -372,7 +373,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		for _, v := range videos {
 			totalSize += v.size
 		}
-		var segments []*database.Segment
+		var segments []database.Segment
 		if len(videos) > 1 {
 			videoOutName = filepath.Join("imports", stem)
 			var ffmpegPath string
@@ -386,7 +387,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 				if seg.DurationSeconds = importProbeDuration(req.Context(), ffprobePath, v.tmp); seg.DurationSeconds <= 0 {
 					logger.Warn("import: could not read a part's duration", "part", seg.Filename)
 				}
-				segments = append(segments, seg)
+				segments = append(segments, *seg)
 			}
 		}
 		chatOutName, absChat := "", ""
@@ -414,6 +415,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 			ChatFile:        absChat,
 			OutputDirectory: outputDir,
 			FileSize:        &totalSize,
+			Segments:        segments,
 			ManuallyAdded:   true,
 			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 			UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
@@ -429,7 +431,8 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 
 		added, err := db.AddJob(job)
 		if err != nil {
-			// No row will ever name what was extracted: the deferred cleanup
+			// No row will ever name what was extracted — the row and its
+			// parts commit together or not at all: the deferred cleanup
 			// takes the temporary files back out, and nothing was placed.
 			logger.Error("import: could not create the job", "id", videoID, "err", err)
 			jsonError(rw, "failed to create job", http.StatusInternalServerError)
@@ -441,16 +444,6 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 			// none, and its temporary files go with the deferred cleanup.
 			jsonError(rw, "job already exists for video ID: "+videoID, http.StatusConflict)
 			return
-		}
-
-		// A split recording's parts, on rows of their own beside the job's.
-		for _, s := range segments {
-			if err := db.AddSegment(s); err != nil {
-				logger.Error("import: could not record a part", "id", videoID, "part", s.Filename, "err", err)
-				db.DeleteJob(videoID) // its segment rows go with it (ON DELETE CASCADE)
-				jsonError(rw, "failed to create job", http.StatusInternalServerError)
-				return
-			}
 		}
 
 		// Into place, now that a row names them.

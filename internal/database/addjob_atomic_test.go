@@ -95,3 +95,60 @@ func TestWriteVersionsFollowWriteOrder(t *testing.T) {
 		t.Errorf("a plain read carries version %v, want 0", got)
 	}
 }
+
+// TestAddJobInsertsItsSegments: a recording that arrives already split (an
+// archive import's) had its part rows inserted after AddJob, and JobAdded —
+// the only event a new row gets — carried the row without them, so the
+// dashboard's details and trimmer and the TUI's details held the job with no
+// parts until a reload. The parts now go in AddJob's transaction, JobAdded
+// carries them as GetJob reads them, and a refused part takes the row back
+// out with it.
+//
+// Mutants: not inserting job.Segments (no part rows); the read-back loading
+// gaps alone (JobAdded without its parts); inserting the parts after the
+// commit (the row survives its refused part).
+func TestAddJobInsertsItsSegments(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var got *Job
+	defer db.OnJobAdded(func(e *JobAdded) { got = e.Job })()
+
+	job := &Job{ID: "j1", VideoID: "j1", URL: "u", Status: StatusFinished, Segments: []Segment{
+		{SegmentIndex: 0, Filename: "X - part1.mp4", FilePath: "/out/X - part1.mp4", DurationSeconds: 10},
+		{SegmentIndex: 1, Filename: "X - part2.mp4", FilePath: "/out/X - part2.mp4", DurationSeconds: 20},
+	}}
+	if ok, err := db.AddJob(job); !ok || err != nil {
+		t.Fatalf("AddJob = %v, %v", ok, err)
+	}
+	stored, _ := db.GetSegments("j1")
+	if len(stored) != 2 || stored[0].Filename != "X - part1.mp4" || stored[1].DurationSeconds != 20 {
+		t.Fatalf("stored parts %+v, want both", stored)
+	}
+	if got == nil || len(got.Segments) != 2 || got.Segments[0].ID != stored[0].ID || got.Segments[1].ID != stored[1].ID {
+		t.Errorf("JobAdded parts %+v, want the stored %+v", got, stored)
+	}
+	for i, s := range job.Segments {
+		if s.ID != stored[i].ID || s.JobID != "j1" {
+			t.Errorf("caller's part %d = id %d job %q, want the row's id %d and j1", i, s.ID, s.JobID, stored[i].ID)
+		}
+	}
+
+	if _, err := db.db.Exec(`CREATE TRIGGER no_parts BEFORE INSERT ON segments BEGIN SELECT RAISE(ABORT, 'part refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	got = nil
+	ok, err := db.AddJob(&Job{ID: "j2", VideoID: "j2", URL: "u", Status: StatusFinished,
+		Segments: []Segment{{SegmentIndex: 0, Filename: "Y - part1.mp4"}}})
+	if ok || err == nil {
+		t.Fatalf("AddJob = %v, %v; want the part failure reported", ok, err)
+	}
+	if row, _ := db.GetJob("j2"); row != nil {
+		t.Error("the job row survived its refused part")
+	}
+	if got != nil {
+		t.Error("JobAdded fired for a job that was not added")
+	}
+}

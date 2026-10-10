@@ -275,7 +275,9 @@ Index: `idx_trims_job_id(job_id)`.
 **segments** (added v5) — one row per output *part* of a multi-part job.
 Parts are produced by quality splits (resolution changed mid-stream, both
 platforms) and by Twitch live gap splits (segments expired unrecoverably from
-the CDN; each part file is internally gapless):
+the CDN; each part file is internally gapless). An archive import of a split
+recording carries its parts too: `AddJob` inserts them with the row, in its
+transaction, so the `JobAdded` both UIs learn of the row by carries them:
 
 | Column | Type | Notes |
 |--------|------|-------|

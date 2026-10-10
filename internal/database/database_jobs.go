@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -9,16 +10,21 @@ import (
 
 // AddJob inserts a new job into the database.
 //
-// The row and its gap rows go in one transaction: a gap insert that failed
-// used to leave the job row behind while AddJob reported an error and fired no
-// JobAdded — a job every list showed only after a restart, that its creator
-// believed was never made.
+// The row, its gap rows and its segment rows go in one transaction: a gap
+// insert that failed used to leave the job row behind while AddJob reported
+// an error and fired no JobAdded — a job every list showed only after a
+// restart, that its creator believed was never made. Segments are the parts
+// of a recording that arrives already split (an archive import's): inserted
+// after AddJob, they were in no event — JobAdded is the only one a new row
+// gets — so the dashboard and the TUI held the job without its parts.
 //
-// JobAdded carries the row as STORED, read back inside the same lock: the
-// INSERT names a fixed column list, so a field it does not cover (watched,
-// incomplete_tail, park_reason, auto_retry_count — written later through
-// UpdateJobFields) takes the schema default no matter what the caller's struct
-// held, and subscribers must see what a GetJob would return, not the struct.
+// JobAdded carries the row as STORED, read back inside the same lock with its
+// child rows, as GetJob reads it: the INSERT names a fixed column list, so a
+// field it does not cover (watched, incomplete_tail, park_reason,
+// auto_retry_count — written later through UpdateJobFields) takes the schema
+// default no matter what the caller's struct held, and subscribers must see
+// what a GetJob would return, not the struct. Each of job.Segments gets its
+// row's id and the job's id written back.
 func (db *Database) AddJob(job *Job) (bool, error) {
 	db.mu.Lock()
 
@@ -58,6 +64,12 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 			return false, fmt.Errorf("failed to insert gap: %w", err)
 		}
 	}
+	for i := range job.Segments {
+		if err := insertSegmentExec(ctx, tx, job.ID, &job.Segments[i]); err != nil {
+			db.mu.Unlock()
+			return false, fmt.Errorf("failed to insert segment: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		db.mu.Unlock()
 		return false, fmt.Errorf("failed to commit job insert: %w", err)
@@ -65,9 +77,7 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 
 	added := job
 	if stored, err := scanJob(db.stmtGetJob.QueryRowContext(ctx, job.ID)); err == nil {
-		if gaps, gErr := db.getGaps(job.ID); gErr == nil {
-			stored.Gaps = gaps
-		}
+		db.loadChildRows(stored)
 		db.jobWriteVersion++
 		stored.Version = db.jobWriteVersion
 		added = stored
@@ -655,17 +665,23 @@ func (db *Database) getTrimsUnlocked(jobID string) ([]TrimRecord, error) {
 func (db *Database) AddSegment(seg *Segment) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	return insertSegmentExec(db.getCtx(), db.db, seg.JobID, seg)
+}
 
-	result, err := db.db.ExecContext(db.getCtx(), `INSERT INTO segments (job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds, chat_file)
+// insertSegmentExec inserts seg as a part row of jobID — the one column list
+// AddSegment, AddJob and ReplaceJobSegments write — and writes the row's id
+// and jobID back onto seg.
+func insertSegmentExec(ctx context.Context, exec executor, jobID string, seg *Segment) error {
+	result, err := exec.ExecContext(ctx, `INSERT INTO segments (job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds, chat_file)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		seg.JobID, seg.SegmentIndex, seg.UnixStart, seg.UnixEnd, seg.Quality, seg.Filename,
+		jobID, seg.SegmentIndex, seg.UnixStart, seg.UnixEnd, seg.Quality, seg.Filename,
 		seg.FilePath, seg.FileSize, seg.VideoWidth, seg.VideoHeight, seg.VideoFps, seg.DurationSeconds,
 		seg.ChatFile)
 	if err != nil {
 		return err
 	}
 	id, _ := result.LastInsertId()
-	seg.ID = int(id)
+	seg.ID, seg.JobID = int(id), jobID
 	return nil
 }
 
@@ -743,18 +759,9 @@ func (db *Database) ReplaceJobSegments(jobID string, segs []Segment) error {
 	}
 
 	for i := range segs {
-		seg := &segs[i]
-		result, err := tx.ExecContext(ctx, `INSERT INTO segments (job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds, chat_file)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			jobID, seg.SegmentIndex, seg.UnixStart, seg.UnixEnd, seg.Quality, seg.Filename,
-			seg.FilePath, seg.FileSize, seg.VideoWidth, seg.VideoHeight, seg.VideoFps, seg.DurationSeconds,
-			seg.ChatFile)
-		if err != nil {
+		if err := insertSegmentExec(ctx, tx, jobID, &segs[i]); err != nil {
 			return err
 		}
-		id, _ := result.LastInsertId()
-		seg.ID = int(id)
-		seg.JobID = jobID
 	}
 
 	return tx.Commit()

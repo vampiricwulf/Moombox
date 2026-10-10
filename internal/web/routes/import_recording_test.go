@@ -10,7 +10,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 // W25-04. The import took the first video in the zip and, separately, the
@@ -216,11 +219,48 @@ func TestImportPairsAChatByNameOnly(t *testing.T) {
 	}
 }
 
-// A part row the database refuses takes the job back out — its segment rows
-// with it — and nothing is placed.
+// The dashboard and the TUI learn of an imported row only from the events
+// the database fires: the hub sends JobAdded's row as job_update and the TUI
+// appends it. The parts were inserted after AddJob and nothing announced the
+// row again, so both held a split import without its parts until a reload —
+// details with no Parts, and the dashboard's Trim on part 1 alone. The last
+// row they are handed now carries every part.
 //
-// Mutant: dropping the DeleteJob call on the AddSegment error path (a row
-// with no parts names files that were never placed).
+// Mutants: the import not handing its parts to AddJob — inserting them after
+// it, as before, or not at all (JobAdded carries none); AddJob's read-back
+// loading the gaps alone.
+func TestImportSplitRecordingIsAnnouncedWithItsParts(t *testing.T) {
+	stubImportDurations(t)
+	f := newImportFixture(t)
+	var mu sync.Mutex
+	var last *database.Job
+	f.db.OnJobAdded(func(ev *database.JobAdded) { mu.Lock(); last = ev.Job; mu.Unlock() })
+	f.db.OnJobChange(func(ev *database.JobChange) { mu.Lock(); last = ev.Job; mu.Unlock() })
+
+	rec, job := importZip(t, f, orderedImportZip(t,
+		importEntry{name: "Stream [dQw4w9WgXcQ] - part1.mp4", data: []byte("ONE")},
+		importEntry{name: "Stream [dQw4w9WgXcQ] - part2.mp4", data: []byte("TWO!")},
+	))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	stored, err := f.db.GetSegments(job.ID)
+	if err != nil || len(stored) != 2 {
+		t.Fatalf("stored parts %+v (%v), want two", stored, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if last == nil || len(last.Segments) != 2 ||
+		last.Segments[0].Filename != stored[0].Filename || last.Segments[1].Filename != stored[1].Filename {
+		t.Errorf("the last row the clients were handed: %+v, want its parts %+v", last, stored)
+	}
+}
+
+// A part row the database refuses takes the job back out — the row and its
+// parts commit together — and nothing is placed.
+//
+// Mutant: AddJob inserting the parts after its commit (a row with no parts
+// names files that were never placed).
 func TestImportSplitRecordingWithARefusedPartRowLeavesNothing(t *testing.T) {
 	f := newImportFixture(t)
 	raw, err := sql.Open("sqlite", filepath.Join(filepath.Dir(f.outputDir), "test.db"))

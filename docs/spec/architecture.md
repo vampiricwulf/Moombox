@@ -845,7 +845,7 @@ The primary data model. See `internal/database/types.go` for the complete struct
 
 Key methods:
 - `Open(dbPath, logger) -> (*Database, error)`: Opens/creates database, runs migrations, prepares the hot-path statement.
-- `AddJob(job) -> (bool, error)`: INSERT OR IGNORE. Returns false if duplicate.
+- `AddJob(job) -> (bool, error)`: INSERT OR IGNORE. Returns false if duplicate. The row, its `Gaps` and its `Segments` (a split archive import's parts) commit in one transaction, and `OnJobAdded` carries the row read back with its child rows, as `GetJob` reads it — the only event a new row gets, so parts inserted after it reached neither UI.
 - `GetJob(id) -> (*Job, error)`: Single job with gaps, trims, segments loaded.
 - `GetAllJobs() -> ([]*Job, error)`: All jobs ordered by `updated_at DESC`.
 - `UpdateJobFields(jobID, map[string]any)`: Dynamic partial update with auto `updated_at`. Triggers subscribers.
