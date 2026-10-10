@@ -208,8 +208,8 @@ func addJobWithPart(set func(*database.Segment, string)) func(*testing.T, *orpha
 // channel's directory took every archive in it.
 //
 // The directory and the set-aside recording are refused by their real
-// spelling too. Behind a symlinked or junctioned output directory the rows
-// store the link's spelling, and the containment check accepts the real one;
+// spelling too. Behind a symlinked output directory the rows store the
+// link's spelling, and the containment check accepts the real one;
 // only a file's exact name was matched canonically, so a request naming the
 // channel's directory, or a recovered recording, through the real path
 // matched no row, and RemoveAll took the Finished archives.

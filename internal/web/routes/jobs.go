@@ -1357,12 +1357,15 @@ func FormatRoutes(r chi.Router, deps *FormatRoutesDeps) {
 // Helper functions
 
 // validatePathTraversal canonicalises both filePath and outputDir (symlinks,
-// junctions, 8.3 short names; a missing file through its deepest existing
-// ancestor) and checks that filePath is inside outputDir. Returns the
-// canonical file path on success, or an empty string and false if the check
-// fails. Canonicalising one side only turned a legitimate path on a
-// short-named or junctioned drive into a "traversal" (403 for a missing
-// file that should have been a 404).
+// 8.3 short names, case; a missing file through its deepest existing
+// ancestor — utils.CanonicalPath, which keeps a Windows junction as spelled)
+// and checks that filePath is inside outputDir. Returns the canonical file
+// path on success, or an empty string and false if the check fails.
+// Canonicalising one side only turned a legitimate path on a short-named or
+// symlinked drive into a "traversal" (403 for a missing file that should
+// have been a 404). A junction is the same spelling on both sides, so a file
+// is inside when it is named the way the directory is: through the junction,
+// or through its target.
 func validatePathTraversal(filePath, outputDir string) (string, bool) {
 	resolvedOutputDir, err := utils.CanonicalPath(outputDir)
 	if err != nil {

@@ -195,10 +195,11 @@ func DeleteOrphanedFile(path string, db *database.Database, cfg *config.MoomboxC
 	}
 
 	// Verify the path is under the staging or output directory, comparing
-	// canonical spellings on BOTH sides (symlinks, junctions, 8.3 short names;
-	// a missing path through its deepest existing ancestor). Canonicalising
-	// the candidate alone refused every legitimate delete on a short-named or
-	// junctioned drive as a "symlink escape".
+	// canonical spellings on BOTH sides (symlinks, 8.3 short names; a missing
+	// path through its deepest existing ancestor; a Windows junction kept as
+	// spelled — utils.CanonicalPath). Canonicalising the candidate alone
+	// refused every legitimate delete on a short-named or symlinked drive as
+	// a "symlink escape".
 	stagingDir, outputDir := resolveStagingDir(cfg), resolveOutputDir(cfg)
 	realPath, err := utils.CanonicalPath(absPath)
 	if err != nil {
@@ -299,9 +300,11 @@ func orphanOwner(absPath string, db *database.Database, cfg *config.MoomboxConfi
 // then again on its canonical spelling against the canonical directory —
 // the both-sides rule DeleteOrphanedFile's containment check already uses.
 // The first pass alone let a request spell an active job's staging through
-// the real directory behind a symlinked or junctioned staging_directory: it
-// passed containment (canonical on both sides), then filepath.Rel against the
+// the real directory behind a symlinked staging_directory: it passed
+// containment (canonical on both sides), then filepath.Rel against the
 // configured spelling found no job, and the job's staging was RemoveAll'd.
+// (A junctioned one is kept as spelled on both sides — utils.CanonicalPath —
+// so a request through the directory behind it fails containment instead.)
 func findActiveJobForPath(absPath string, db *database.Database, cfg *config.MoomboxConfig) (string, error) {
 	stagingDir := resolveStagingDir(cfg)
 	if id, err := findActiveJobUnder(absPath, stagingDir, db, cfg); err != nil || id != "" {
@@ -788,13 +791,13 @@ type outputOwners struct {
 // rows store whatever spelling the configuration had when they were written —
 // a per-channel output_directory spelled through a link into the global tree,
 // a global directory since respelled from a link to its target, a symlinked
-// or junctioned output directory — while the walk and a delete request can
-// name the same file another way. With the rows in their stored spelling
-// alone, the sweep listed such a file (a Finished job's archive, thumbnail,
-// description) and the delete refused it as "Refresh the list.", so the list
-// could never be cleared; and a request naming a channel's directory, or a
-// recovered set-aside recording, by its real path matched no row and was
-// deleted with the archives in it.
+// output directory — while the walk and a delete request can name the same
+// file another way. With the rows in their stored spelling alone, the sweep
+// listed such a file (a Finished job's archive, thumbnail, description) and
+// the delete refused it as "Refresh the list.", so the list could never be
+// cleared; and a request naming a channel's directory, or a recovered
+// set-aside recording, by its real path matched no row and was deleted with
+// the archives in it.
 func newOutputOwners(jobs []*database.Job, trims []database.TrimRecord, absOutputDir string) *outputOwners {
 	o := &outputOwners{
 		files: map[string]string{}, stems: map[string]string{}, dirs: map[string]string{},
@@ -861,12 +864,13 @@ func newOutputOwners(jobs []*database.Job, trims []database.TrimRecord, absOutpu
 }
 
 // spellings returns p's normalised spelling and, when it differs, the one
-// through its directory's canonical spelling (canonicalDir: symlinks,
-// junctions, 8.3 short names; a missing directory through its deepest
-// existing ancestor). The last element is kept as it is: deleting a link
-// removes the link, never what it points at, so a link is its own entry. The
-// rows' paths and the paths asked about go through the same function, so
-// whichever spelling each side uses, they meet in the canonical one.
+// through its directory's canonical spelling (canonicalDir: symlinks, 8.3
+// short names; a missing directory through its deepest existing ancestor; a
+// Windows junction kept as spelled). The last element is kept as it is:
+// deleting a link removes the link, never what it points at, so a link is its
+// own entry. The rows' paths and the paths asked about go through the same
+// function, so whichever spelling each side uses, they meet in the canonical
+// one.
 func (o *outputOwners) spellings(p string) []string {
 	n := normalizePath(p)
 	dir := filepath.Dir(n)

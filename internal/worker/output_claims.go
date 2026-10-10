@@ -53,8 +53,8 @@ type outputClaim struct {
 // jobID until the returned release is called (once; further calls are
 // no-ops). Claims nest — the same stem claimed twice stays claimed until both
 // are released. The stem is recorded in its configured spelling AND its
-// canonical one, so a delete naming the file through a symlinked or junctioned
-// output directory is refused as well.
+// canonical one, so a delete naming the file through the real directory
+// behind a symlinked output directory is refused as well.
 func claimOutputStem(jobID, stem string) (release func()) {
 	keys := outputClaimKeys(stem)
 	outputClaims.mu.Lock()

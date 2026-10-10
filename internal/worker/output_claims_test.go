@@ -224,9 +224,11 @@ func TestOutputClaimsNestAndReleaseOnce(t *testing.T) {
 
 // DeleteOrphanedFile's containment check compares canonical spellings, but
 // the active-job recheck used to look the path up against the CONFIGURED
-// staging spelling only: through a symlinked (Docker volume, NAS link) or
-// junctioned staging_directory, a request naming the real directory passed
-// containment, found no job, and RemoveAll'd an active job's staging.
+// staging spelling only: through a symlinked (Docker volume, NAS link)
+// staging_directory, a request naming the real directory passed containment,
+// found no job, and RemoveAll'd an active job's staging. (A Windows junction
+// is kept as spelled by utils.CanonicalPath, so through a junctioned one the
+// request fails containment instead.)
 //
 // Mutant: dropping findActiveJobForPath's canonical pass.
 func TestDeleteOrphanedFileRefusesAnActiveJobByItsCanonicalSpelling(t *testing.T) {
@@ -269,8 +271,8 @@ func TestDeleteOrphanedFileRefusesAnActiveJobByItsCanonicalSpelling(t *testing.T
 	}
 }
 
-// A claim made through a symlinked (or junctioned) output directory also
-// covers the file named through the real directory behind it — the spelling
+// A claim made through a symlinked output directory also covers the file
+// named through the real directory behind it — the spelling
 // DeleteOrphanedFile's containment check accepts.
 //
 // Mutant: outputClaimKeys returning the configured spelling alone.
