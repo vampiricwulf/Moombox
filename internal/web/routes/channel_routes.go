@@ -3,6 +3,7 @@ package routes
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/url"
@@ -28,8 +29,9 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 
 	// saveChannel validates and upserts one channel — POST
 	// /api/config/channels once its ID is final. edit is the request's mark
-	// that it means to replace a configured channel.
-	saveChannel := func(rw http.ResponseWriter, channel config.ChannelConfig, edit bool) {
+	// that it means to replace a configured channel; postedID is the ID the
+	// request named it by, before normalisation.
+	saveChannel := func(rw http.ResponseWriter, channel config.ChannelConfig, postedID string, edit bool) {
 		// PUT /api/config's rule for the same field. The monitors treat any
 		// platform that is not "twitch" as YouTube, so an unknown one was
 		// accepted here, polled as a YouTube channel, and then made every
@@ -64,23 +66,44 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 		// "Channel added", and a client whose list is stale still could. A
 		// marked edit of a channel removed meanwhile adds it back: the
 		// operator saved it on purpose.
+		//
+		// An edit names the entry it was made on by the ID it posts, the
+		// stored one (the Edit dialog's ID box is disabled; the toggle posts
+		// the card as loaded), so that entry is matched first and takes the
+		// normalised channel: a legacy ID migrates in place, as the TUI
+		// Settings editor's Enter migrates it. Matched by the resolved ID,
+		// the edit of a card stored as "@SomeHandle" or as a channel URL
+		// (as the writers before the normaliser stored them) went to another
+		// entry: a toggle appended a second channel, or replaced the working
+		// one the operator had added by its UC ID, wiping its terms, output
+		// directory and overrides. When another entry holds the resolved ID,
+		// the edit is a 409: replacing either entry would lose one.
 		mu.Lock()
 		oldChannels := cfg.Channels
 		newChannels := slices.Clone(cfg.Channels)
-		found := false
-		for i, ch := range newChannels {
-			if strings.EqualFold(ch.ID, channel.ID) {
-				if !edit {
-					mu.Unlock()
-					jsonError(rw, "channel "+ch.ID+" is already configured", http.StatusConflict)
-					return
-				}
-				newChannels[i] = channel
-				found = true
-				break
-			}
+		byID := func(id string) int {
+			id = strings.TrimSpace(id)
+			return slices.IndexFunc(newChannels, func(ch config.ChannelConfig) bool { return strings.EqualFold(ch.ID, id) })
 		}
-		if !found {
+		held := byID(channel.ID)
+		target := -1
+		if edit {
+			target = byID(postedID)
+		}
+		switch {
+		case target >= 0 && held >= 0 && held != target:
+			mu.Unlock()
+			jsonError(rw, fmt.Sprintf("channel %s is %s, which another entry already has: remove this one instead", newChannels[target].ID, newChannels[held].ID), http.StatusConflict)
+			return
+		case target >= 0:
+			newChannels[target] = channel
+		case held >= 0 && !edit:
+			mu.Unlock()
+			jsonError(rw, "channel "+newChannels[held].ID+" is already configured", http.StatusConflict)
+			return
+		case held >= 0:
+			newChannels[held] = channel
+		default:
 			newChannels = append(newChannels, channel)
 		}
 		cfg.Channels = newChannels
@@ -136,7 +159,7 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 				return
 			}
 			applyResolvedChannel(&channel, resolved)
-			saveChannel(rw, channel, body.Edit)
+			saveChannel(rw, channel, body.ID, body.Edit)
 		}
 		if utils.NeedsChannelResolve(channel.ID) {
 			limitedBy(rl)(http.HandlerFunc(normalize)).ServeHTTP(rw, req)
