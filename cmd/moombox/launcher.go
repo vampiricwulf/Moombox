@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/updater"
 )
 
 // launchAndSupervise is the launcher/supervisor loop. It spawns moombox
@@ -207,9 +209,10 @@ func launchAndSupervise() {
 			// is free for the next update (returns the update's rollback
 			// artifact, "" when no .old existed, i.e. a config restart).
 			// Linux just reports .old. restarted arms the next boot with
-			// that artifact, or carries a still-unproven boot forward
-			// across a config restart.
-			boot.restarted(handleUpdateRestart(exePath), wasFirstAfterUpdate, ranFor)
+			// that artifact and the release the breadcrumb names, or
+			// carries a still-unproven boot forward across a config
+			// restart.
+			boot.restarted(handleUpdateRestart(exePath), pendingUpdateTag(exePath), wasFirstAfterUpdate, ranFor)
 			continue
 
 		case childPostUpdateFailure:
@@ -321,6 +324,14 @@ type postUpdateBoot struct {
 	// when it exits. On Windows the launcher's own ~ image outlives the sweep
 	// of a second update's .old, and it is two versions back.
 	artifact string
+	// tag is the release that update installed, as the .update-pending
+	// breadcrumb named it at that restart ("" when there was none). The
+	// breadcrumb is how the restored binary learns which release failed —
+	// and the update's own boot removes it at its milestone, which on Windows
+	// is not the end of the rollback window: the launcher's ~ image outlives
+	// the sweep (postUpdatePastRollback), so a release that crashes 30 s in is
+	// still rolled back. recoverFailedBoot writes it back from here.
+	tag string
 }
 
 // judge decides one child exit by the recorded artifact (judgeChildExit) and
@@ -334,16 +345,17 @@ func (b *postUpdateBoot) judge(wasRespawn bool, code int, ranFor time.Duration, 
 }
 
 // restarted records an exit-42 restart. artifact is handleUpdateRestart's
-// answer for it: a binary update arms the next boot with that artifact,
-// replacing whatever an earlier update recorded. A config restart ("") inside
-// a still-unproven update's window carries the one-shot forward with the
-// artifact it was armed with — otherwise it would silently drop rollback
-// preservation for a binary that never proved itself; past the window, or
-// after a boot that was no first boot (judge's wasFirst), the boot is not
-// armed.
-func (b *postUpdateBoot) restarted(artifact string, wasFirst bool, ranFor time.Duration) {
+// answer for it, and tag the release the .update-pending breadcrumb names at
+// that moment (pendingUpdateTag): a binary update arms the next boot with
+// both, replacing whatever an earlier update recorded. A config restart ("")
+// inside a still-unproven update's window carries the one-shot forward with
+// the artifact and tag it was armed with — otherwise it would silently drop
+// rollback preservation for a binary that never proved itself; past the
+// window, or after a boot that was no first boot (judge's wasFirst), the boot
+// is not armed.
+func (b *postUpdateBoot) restarted(artifact, tag string, wasFirst bool, ranFor time.Duration) {
 	if artifact != "" {
-		b.armed, b.artifact = true, artifact
+		b.armed, b.artifact, b.tag = true, artifact, tag
 		return
 	}
 	b.armed = wasFirst && ranFor < postUpdateFailureWindow
@@ -357,6 +369,12 @@ func (b *postUpdateBoot) restarted(artifact string, wasFirst bool, ranFor time.D
 // left with manual instructions (preserveUpdateRollback) and reports false,
 // and the launcher exits.
 //
+// Any other failure is the release's, and the breadcrumb naming it goes back
+// on disk first (restoreUpdateBreadcrumb), whether the rollback then succeeds
+// or leaves manual instructions: the boot that restores the previous binary
+// reads it to mark the release skipped, and to announce the version change as
+// the rollback it is rather than as an update.
+//
 // A deterministic startup error (exitCodeStartupError) skips the rollback
 // entirely: the environment, not the binary, is what failed. The artifact is
 // still PRESERVED with instructions, and because the next boot runs the SAME
@@ -364,11 +382,45 @@ func (b *postUpdateBoot) restarted(artifact string, wasFirst bool, ranFor time.D
 // false and the release is not marked skipped.
 func (b *postUpdateBoot) recoverFailedBoot(exePath string, code int) bool {
 	b.armed = false
-	if classifyPostUpdateExit(code) == postUpdateRollback && attemptAutoRollback(exePath, b.artifact, code) {
-		return true
+	if classifyPostUpdateExit(code) == postUpdateRollback {
+		restoreUpdateBreadcrumb(exePath, b.tag)
+		if attemptAutoRollback(exePath, b.artifact, code) {
+			return true
+		}
 	}
 	preserveUpdateRollback(exePath, b.artifact, code)
 	return false
+}
+
+// pendingUpdateTag reads the release tag the .update-pending breadcrumb
+// names, "" when there is none. The launcher reads it at the restart that
+// applies an update, while it is certainly there: ApplyUpdate writes it just
+// before that restart.
+func pendingUpdateTag(exePath string) string {
+	raw, err := os.ReadFile(exePath + updater.PendingVersionSuffix)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+// restoreUpdateBreadcrumb writes the .update-pending breadcrumb naming tag,
+// the release whose first boot failed, back beside the binary. A boot that
+// failed before its milestone has not removed it, and this rewrites the same
+// tag; one that failed after it — a first Windows update, rolled back from ~
+// anywhere inside postUpdateFailureWindow — has, and without it the restored
+// boot had no record of the release: it was not marked skipped, so the daily
+// check offered it again, and the version stamp the failed release had
+// already written made the rollback read as an update "from v2 to v1 …
+// restarted successfully".
+func restoreUpdateBreadcrumb(exePath, tag string) {
+	if tag == "" {
+		return
+	}
+	path := exePath + updater.PendingVersionSuffix
+	if err := os.WriteFile(path, []byte(tag), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write %s (%v) — the restored binary will not skip %s\n", path, err, tag)
+	}
 }
 
 // judgeChildExit is the launcher loop's decision for one child exit: the facts
@@ -544,7 +596,8 @@ const failedBinarySuffix = ".failed"
 // advice names a file that exists, the preserved rollback artifact is
 // renamed back to the plain name, and a marker documents what happened
 // — the next child boot announces it, and (via the .update-pending
-// breadcrumb ApplyUpdate writes) marks the failed version skipped so
+// breadcrumb ApplyUpdate writes, which recoverFailedBoot puts back when the
+// failed boot had already removed it) marks the failed version skipped so
 // automatic checks stop offering a release that just proved broken.
 //
 // Returns false without touching anything when the rollback artifact is not

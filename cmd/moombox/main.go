@@ -19,7 +19,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
-	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 )
 
@@ -489,7 +488,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// it — the update_available embed otherwise never gets a "landed
 	// successfully" counterpart, and a boot-time check also covers applies
 	// the process didn't survive to report. LastRunVersion == "" means
-	// pre-feature config or first run: persist silently, don't announce.
+	// pre-feature config or first run: persist silently, don't announce. So
+	// does the launcher's rollback from a failed update
+	// (announcesVersionChange).
 	//
 	// Gated on ConfigLoaded (mirrors the NeedsAutoPersist gate in
 	// services.go): on a true first run the config file doesn't exist yet,
@@ -502,8 +503,16 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		lastRunVersion = c.Updates.LastRunVersion
 		configLoaded = c.ConfigLoaded
 	})
+	// A boot the launcher rolled back to after a failed update names the
+	// release it failed (rolledBackRelease); it is announced as the rollback
+	// by the failure marker below, never as an update, and marked skipped.
+	exeSelf, exeErr := os.Executable()
+	var rolledBackFrom string
+	if exeErr == nil {
+		rolledBackFrom = rolledBackRelease(exeSelf, version)
+	}
 	if configLoaded && lastRunVersion != version {
-		if lastRunVersion != "" {
+		if announcesVersionChange(lastRunVersion, version, rolledBackFrom) {
 			// Reflect whether the dashboard actually came back: in TUI mode
 			// a failed web bind logs-and-continues above, and "restarted
 			// successfully" on the operator's phone while the dashboard is
@@ -565,7 +574,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// nothing ever read either. Runs regardless of configLoaded (the
 	// marker's relevance is independent of setup-wizard state); the
 	// dedupe stamp only persists once a config file exists.
-	if exeSelf, exeErr := os.Executable(); exeErr == nil {
+	if exeErr == nil {
 		var markerSeen string
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			markerSeen = c.Updates.LastFailureMarkerSeen
@@ -609,43 +618,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			}
 		}
 
-		// .update-pending breadcrumb: ApplyUpdate wrote the tag it updated
-		// TO right before restarting. Resolve it now, ahead of the auto-check
-		// goroutine below. Our own version means the update landed — just
-		// remove it. A DIFFERENT version alongside a failure marker means the
-		// launcher auto-rolled back to this binary: mark that tag skipped so
-		// automatic checks stop offering a release that just proved broken (a
-		// manual "Check for updates" still retries it deliberately). A
-		// different version with NO marker (manual binary swap, marker
-		// deleted early) is treated conservatively: delete without skipping.
-		pendingPath := exeSelf + updater.PendingVersionSuffix
-		if raw, readErr := os.ReadFile(pendingPath); readErr == nil {
-			pendingTag := strings.TrimSpace(string(raw))
-			if shouldSkipPendingVersion(pendingTag, version, len(stamps) > 0) && configLoaded {
-				if err := s.configStore.Update(func(c *config.MoomboxConfig) {
-					c.Updates.SkippedVersion = pendingTag
-				}); err != nil {
-					log.Warn("failed to persist skipped version after rollback",
-						slog.String("version", pendingTag), slog.String("error", err.Error()))
-				} else {
-					log.Warn("failed update rolled back — version marked skipped for automatic checks",
-						slog.String("version", pendingTag))
-				}
-			}
-			// Before the breadcrumb goes: its age is what proves the update
-			// that landed came AFTER an earlier failure's marker.
-			if cleared, clrErr := clearSupersededFailureMarker(exeSelf, pendingPath, pendingTag, version); clrErr != nil {
-				log.Warn("failed to remove a failed-update marker a later update superseded",
-					slog.String("marker", exeSelf+".update-failed"), slog.String("error", clrErr.Error()))
-			} else if cleared != "" {
-				log.Info("removed a failed-update marker: a later update has applied successfully, so its rollback instructions are stale",
-					slog.String("marker", cleared), slog.String("version", pendingTag))
-			}
-			if rmErr := os.Remove(pendingPath); rmErr != nil {
-				log.Warn("failed to remove pending-version breadcrumb",
-					slog.String("path", pendingPath), slog.String("error", rmErr.Error()))
-			}
-		}
+		// .update-pending breadcrumb: resolved now, ahead of the auto-check
+		// goroutine below, so a release the launcher just rolled back from is
+		// skipped before any check can offer it.
+		resolveUpdateBreadcrumb(s.configStore, exeSelf, version, rolledBackFrom, configLoaded, log)
 	}
 
 	// Auto-update check: initial check + daily ticker, plus a check within a

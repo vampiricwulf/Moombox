@@ -162,7 +162,7 @@ func TestASecondUpdatesSweptOldIsPastRollback(t *testing.T) {
 	// Update 1 (N → N+1): ApplyUpdate left N at .old.
 	write(exePath, "N+1")
 	write(exePath+".old", "N")
-	boot.restarted(handleUpdateRestart(exePath), false, 0)
+	boot.restarted(handleUpdateRestart(exePath), "", false, 0)
 	if want := exePath + "~"; boot.artifact != want {
 		t.Fatalf("first update's artifact = %q, want %q", boot.artifact, want)
 	}
@@ -183,7 +183,7 @@ func TestASecondUpdatesSweptOldIsPastRollback(t *testing.T) {
 	// Update 2 (N+1 → N+2): ApplyUpdate left N+1 at .old.
 	write(exePath+".old", "N+1")
 	write(exePath, "N+2")
-	boot.restarted(handleUpdateRestart(exePath), first, 10*time.Minute)
+	boot.restarted(handleUpdateRestart(exePath), "", first, 10*time.Minute)
 	if boot.artifact != exePath+".old" {
 		t.Fatalf("second update's artifact = %q, want its .old", boot.artifact)
 	}

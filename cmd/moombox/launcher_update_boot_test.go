@@ -42,7 +42,7 @@ func TestASecondUpdateIsJudgedByTheArtifactItsRestartRecorded(t *testing.T) {
 
 	// Update 1 (N → N+1): the restart renamed .old to ~.
 	writeReleases(t, map[string]string{exePath: "N+1", exePath + "~": "N"})
-	boot.restarted(exePath+"~", false, 0)
+	boot.restarted(exePath+"~", "", false, 0)
 	if !boot.armed || boot.artifact != exePath+"~" {
 		t.Fatalf("after the first update's restart the record = %+v, want armed with its ~", boot)
 	}
@@ -55,7 +55,7 @@ func TestASecondUpdateIsJudgedByTheArtifactItsRestartRecorded(t *testing.T) {
 
 	// Update 2 (N+1 → N+2): the rename over ~ failed, so .old is the artifact.
 	writeReleases(t, map[string]string{exePath: "N+2", exePath + ".old": "N+1"})
-	boot.restarted(exePath+".old", first, 10*time.Minute)
+	boot.restarted(exePath+".old", "", first, 10*time.Minute)
 	if !boot.armed || boot.artifact != exePath+".old" {
 		t.Fatalf("after the second update's restart the record = %+v, want armed with its .old", boot)
 	}
@@ -100,7 +100,7 @@ func TestAFirstUpdatesQuickDeathRollsBackToItsArtifact(t *testing.T) {
 			exePath := filepath.Join(t.TempDir(), "moombox")
 			writeReleases(t, map[string]string{exePath: "N+1", exePath + ".old": "N"})
 			var boot postUpdateBoot
-			boot.restarted(exePath+".old", false, 0)
+			boot.restarted(exePath+".old", "", false, 0)
 
 			if tc.judge {
 				action, first := boot.judge(false, tc.code, 10*time.Second, false, 0)
@@ -140,7 +140,7 @@ func TestAConfigRestartKeepsTheArmedArtifact(t *testing.T) {
 	exePath := filepath.Join(t.TempDir(), "moombox.exe")
 	writeReleases(t, map[string]string{exePath: "N+1", exePath + ".old": "N", exePath + "~": "N-1"})
 	var boot postUpdateBoot
-	boot.restarted(exePath+".old", false, 0)
+	boot.restarted(exePath+".old", "", false, 0)
 
 	// The first boot exits 42 for a settings change 20s in; the restart finds
 	// no new update.
@@ -148,7 +148,7 @@ func TestAConfigRestartKeepsTheArmedArtifact(t *testing.T) {
 	if action != childRestart || !first {
 		t.Fatalf("a config restart of the first boot = (%v, first %v), want a restart of the first boot", action, first)
 	}
-	boot.restarted("", first, 20*time.Second)
+	boot.restarted("", "", first, 20*time.Second)
 	if !boot.armed || boot.artifact != exePath+".old" {
 		t.Fatalf("after a config restart inside the window the record = %+v, want still armed with %s", boot, exePath+".old")
 	}
@@ -178,12 +178,20 @@ func TestAConfigRestartKeepsTheArmedArtifact(t *testing.T) {
 // that names an artifact arms the boot with it whatever came before, replacing
 // an earlier update's.
 //
+// The release tag travels with the artifact: a named artifact records the
+// restart's tag, and a config restart keeps the one the boot was armed with —
+// the breadcrumb the restored binary needs names the update, not whatever a
+// config restart finds on disk.
+//
 // Mutants: drop `ranFor < postUpdateFailureWindow` — a boot that proved itself
 // is armed again; drop `wasFirst &&` — every early config restart arms a
 // boot; record a named artifact only over an empty record (`if b.artifact ==
-// "" { b.artifact = artifact }`) — the second update keeps the first's ~.
+// "" { b.artifact = artifact }`) — the second update keeps the first's ~;
+// record the tag on every restart (`b.tag = tag` ahead of the artifact check)
+// — a config restart replaces the update's tag.
 func TestRestartedArmsOnlyAnUpdateOrAnUnprovenFirstBoot(t *testing.T) {
 	const old, tilde = "/x/moombox.exe.old", "/x/moombox.exe~"
+	const armedTag, restartTag = "v2.0.0", "v3.0.0"
 	for _, tc := range []struct {
 		name      string
 		before    postUpdateBoot
@@ -194,20 +202,27 @@ func TestRestartedArmsOnlyAnUpdateOrAnUnprovenFirstBoot(t *testing.T) {
 		wantName  string
 	}{
 		{"update", postUpdateBoot{}, old, false, time.Hour, true, old},
-		{"later update replaces the record", postUpdateBoot{artifact: tilde}, old, true, 10 * time.Minute, true, old},
-		{"update right after an update", postUpdateBoot{artifact: tilde}, old, true, 5 * time.Second, true, old},
-		{"config restart inside the window", postUpdateBoot{artifact: tilde}, "", true, time.Minute, true, tilde},
-		{"config restart past the window", postUpdateBoot{artifact: tilde}, "", true, postUpdateFailureWindow, false, tilde},
-		{"config restart of no first boot", postUpdateBoot{artifact: tilde}, "", false, time.Minute, false, tilde},
+		{"later update replaces the record", postUpdateBoot{artifact: tilde, tag: armedTag}, old, true, 10 * time.Minute, true, old},
+		{"update right after an update", postUpdateBoot{artifact: tilde, tag: armedTag}, old, true, 5 * time.Second, true, old},
+		{"config restart inside the window", postUpdateBoot{artifact: tilde, tag: armedTag}, "", true, time.Minute, true, tilde},
+		{"config restart past the window", postUpdateBoot{artifact: tilde, tag: armedTag}, "", true, postUpdateFailureWindow, false, tilde},
+		{"config restart of no first boot", postUpdateBoot{artifact: tilde, tag: armedTag}, "", false, time.Minute, false, tilde},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			boot := tc.before // judge has already disarmed it
-			boot.restarted(tc.artifact, tc.wasFirst, tc.ranFor)
+			boot.restarted(tc.artifact, restartTag, tc.wasFirst, tc.ranFor)
 			if boot.armed != tc.wantArmed {
 				t.Errorf("armed = %v, want %v", boot.armed, tc.wantArmed)
 			}
 			if tc.wantArmed && boot.artifact != tc.wantName {
 				t.Errorf("artifact = %q, want %q", boot.artifact, tc.wantName)
+			}
+			wantTag := restartTag
+			if tc.artifact == "" {
+				wantTag = armedTag
+			}
+			if tc.wantArmed && boot.tag != wantTag {
+				t.Errorf("tag = %q, want %q", boot.tag, wantTag)
 			}
 		})
 	}

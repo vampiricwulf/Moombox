@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	isatty "github.com/mattn/go-isatty"
@@ -407,6 +408,92 @@ func clearSupersededFailureMarker(exePath, pendingPath, pendingTag, currentVersi
 		return "", err
 	}
 	return marker, nil
+}
+
+// rolledBackRelease returns the release the launcher rolled this install back
+// from, "" on any other boot: the tag the .update-pending breadcrumb names
+// when shouldSkipPendingVersion reads it as a rollback — not this binary's own
+// version, with a failed-update marker beside it.
+func rolledBackRelease(exePath, currentVersion string) string {
+	raw, err := os.ReadFile(exePath + updater.PendingVersionSuffix)
+	if err != nil {
+		return ""
+	}
+	marker := false
+	for _, m := range []string{exePath + ".update-broken", exePath + ".update-failed"} {
+		if _, err := os.Stat(m); err == nil {
+			marker = true
+		}
+	}
+	tag := strings.TrimSpace(string(raw))
+	if !shouldSkipPendingVersion(tag, currentVersion, marker) {
+		return ""
+	}
+	return tag
+}
+
+// announcesVersionChange reports whether a boot announces the version the
+// previous run recorded (lastRunVersion) changing to its own as "Update
+// Applied". Not on the first stamp ("": a fresh install, or a config from
+// before the stamp existed), and not on the launcher's rollback from a failed
+// update (rolledBackFrom, rolledBackRelease): the failure marker announces
+// that one, as the rollback it is. A failed release can stamp its own version
+// before it crashes — on Windows a first update stays rolled back for the
+// whole postUpdateFailureWindow, well past the stamp — and the boot it was
+// rolled back to then sent a green "updated from v2 to v1 … restarted
+// successfully" beside the marker's "Previous Update Failed". A release that
+// fails before the stamp, which is every rollback on Linux, never reaches
+// this: the version recorded is still the restored one.
+func announcesVersionChange(lastRunVersion, currentVersion, rolledBackFrom string) bool {
+	return lastRunVersion != "" && lastRunVersion != currentVersion && rolledBackFrom == ""
+}
+
+// resolveUpdateBreadcrumb consumes the .update-pending breadcrumb beside
+// exePath: the tag ApplyUpdate updated TO, written right before its restart.
+// Our own version means the update landed — just remove it. A rollback
+// (rolledBackFrom, as run() read it with rolledBackRelease) marks that tag
+// skipped, once a config file exists, so automatic checks stop offering a
+// release that just proved broken (a manual "Check for updates" still retries
+// it deliberately). A different version with NO marker (manual binary swap,
+// marker deleted early) is treated conservatively: delete without skipping.
+// The launcher puts the breadcrumb back when it rolls back a boot that had
+// already removed it (restoreUpdateBreadcrumb).
+func resolveUpdateBreadcrumb(store *config.Store, exePath, currentVersion, rolledBackFrom string, configLoaded bool, log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) {
+	pendingPath := exePath + updater.PendingVersionSuffix
+	raw, err := os.ReadFile(pendingPath)
+	if err != nil {
+		return
+	}
+	pendingTag := strings.TrimSpace(string(raw))
+	if rolledBackFrom != "" && configLoaded {
+		if err := store.Update(func(c *config.MoomboxConfig) {
+			c.Updates.SkippedVersion = rolledBackFrom
+		}); err != nil {
+			log.Warn("failed to persist skipped version after rollback",
+				slog.String("version", rolledBackFrom), slog.String("error", err.Error()))
+		} else {
+			log.Warn("failed update rolled back — version marked skipped for automatic checks",
+				slog.String("version", rolledBackFrom))
+		}
+	}
+	// Before the breadcrumb goes: its age is what proves the update that
+	// landed came AFTER an earlier failure's marker.
+	if cleared, clrErr := clearSupersededFailureMarker(exePath, pendingPath, pendingTag, currentVersion); clrErr != nil {
+		log.Warn("failed to remove a failed-update marker a later update superseded",
+			slog.String("marker", exePath+".update-failed"), slog.String("error", clrErr.Error()))
+	} else if cleared != "" {
+		log.Info("removed a failed-update marker: a later update has applied successfully, so its rollback instructions are stale",
+			slog.String("marker", cleared), slog.String("version", pendingTag))
+	}
+	if rmErr := os.Remove(pendingPath); rmErr != nil {
+		log.Warn("failed to remove pending-version breadcrumb",
+			slog.String("path", pendingPath), slog.String("error", rmErr.Error()))
+	}
 }
 
 // cookieFilePath returns the Netscape cookie file the services use — the
