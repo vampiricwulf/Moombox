@@ -904,17 +904,21 @@ export class SetupController {
     const currentPort = parseInt(window.location.port) || (window.location.protocol === "https:" ? 443 : 80);
     const newPort = port || currentPort;
     const currentHttps = window.location.protocol === "https:";
+    let redirectUrl = null;
     if (newPort !== currentPort || httpsEnabled !== currentHttps) {
       const protocol = httpsEnabled ? "https" : "http";
-      this._redirectUrl = `${protocol}://${window.location.hostname}:${newPort}`;
-    } else {
-      this._redirectUrl = null;
+      redirectUrl = `${protocol}://${window.location.hostname}:${newPort}`;
     }
 
-    await this.submitSetup(config, finishBtn);
+    await this.submitSetup(config, finishBtn, redirectUrl);
   }
 
-  async submitSetup(config, finishBtn) {
+  // redirectUrl is the address the restart moves the dashboard to, or null
+  // when it stays. It is kept only once the server has applied the setup: a
+  // Finish the server refused used to leave its redirect behind, and a later
+  // Use Defaults or Quick setup — which keep the port — then sent the tab to
+  // the refused attempt's address.
+  async submitSetup(config, finishBtn, redirectUrl = null) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
 
@@ -927,6 +931,7 @@ export class SetupController {
       });
 
       if (response.ok) {
+        this._redirectUrl = redirectUrl;
         this.hide();
         this.app.showToast("Setup complete! Restarting...", "success");
         // Server triggers restart — poll until it comes back
