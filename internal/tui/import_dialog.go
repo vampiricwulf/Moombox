@@ -238,7 +238,9 @@ func (m *ImportDialogModel) View() string {
 	case 0:
 		content.WriteString(TitleStyle.Render("Import Archive"))
 		content.WriteString("\n")
-		content.WriteString(DimStyle.Render("Select a .zip archive to import"))
+		// The import's rule in one line that fits the 60-column floor: one
+		// recording per zip, its chat paired only by name.
+		content.WriteString(DimStyle.Render("Select a .zip: one recording + its <name>.chat.json"))
 		content.WriteString("\n\n")
 		content.WriteString(m.picker.View())
 		content.WriteString("\n")

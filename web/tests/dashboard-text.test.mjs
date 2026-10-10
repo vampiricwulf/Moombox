@@ -24,6 +24,18 @@ after(() => {
   playerHarness?.teardownAll();
 });
 
+// The Imports tab's help is the only in-app guidance, and it described the
+// old rules: any video, and "optionally a chat JSON file" — a chat.json is
+// now left out unless it is named after the video, and a second video is a
+// 400. Mutant: the old sentence.
+test("the Imports tab's help states the one-recording, name-paired rule", { skip }, async () => {
+  const h = await harness.makeApp();
+  const help = h.window.document.querySelector("#imports-container .settings-help").textContent;
+  assert.match(help, /one recording/);
+  assert.match(help, /<name> - part1/);
+  assert.match(help, /<name>\.chat\.json/);
+});
+
 // Mutant: restore the fixed "messages" suffix.
 test("a progress tooltip counts one chat message in the singular", { skip }, async () => {
   const h = await harness.makeApp();

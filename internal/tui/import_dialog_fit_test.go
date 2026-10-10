@@ -12,8 +12,12 @@ import (
 // empty folder read bubbles' own "Bummer. No Files Found." — a failure, when
 // the folder just holds no .zip.
 //
+// The line above the picker says what a zip must hold — one recording, its
+// chat named after it — which is all the import accepts.
+//
 // Mutant: importPickerHint always answering the full wording, or the picker
-// keeping bubbles' empty-folder text.
+// keeping bubbles' empty-folder text; the old "Select a .zip archive to
+// import", which said nothing of either rule.
 func TestImportPickerFitsTheFloorAndSaysWhatIsMissing(t *testing.T) {
 	m := NewImportDialogModel()
 	m.SetSize(60, 24)
@@ -39,5 +43,8 @@ func TestImportPickerFitsTheFloorAndSaysWhatIsMissing(t *testing.T) {
 	}
 	if !strings.Contains(v, "No .zip archives here") || strings.Contains(v, "Bummer") {
 		t.Errorf("the empty folder is not described:\n%s", v)
+	}
+	if !strings.Contains(v, "one recording + its <name>.chat.json") {
+		t.Errorf("the picker does not say what a zip must hold:\n%s", v)
 	}
 }
