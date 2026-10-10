@@ -761,7 +761,15 @@ func importJSONIsChat(f *zip.File) bool {
 		return false
 	}
 	defer rc.Close()
-	dec := json.NewDecoder(rc)
+	return importJSONHoldsChat(rc)
+}
+
+// importJSONHoldsChat is importJSONIsChat's read: whether r holds an object
+// whose "messages" is an array of at least one message. Every ".json" the
+// zip carries is read so, the ones the import does not keep as much as the
+// ones it does, and no token of it is held past importJSONTokenLimit.
+func importJSONHoldsChat(r io.Reader) bool {
+	dec := newImportJSONStream(r)
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
 		return false
 	}
@@ -1332,11 +1340,11 @@ var importChatHeaders = [][]string{
 // writes them ahead of the messages, so the read normally stops — once
 // either writer's set is complete (importChatHeaders) — before reaching
 // them; any value in between is skipped token by token, never held. A file
-// that is not a JSON object, or ends early, yields whatever was found before
-// that.
+// that is not a JSON object, ends early, or holds a token past
+// importJSONTokenLimit yields whatever was found before that.
 func readImportChatMeta(r io.Reader) importChatMeta {
 	var meta importChatMeta
-	dec := json.NewDecoder(r)
+	dec := newImportJSONStream(r)
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
 		return meta
 	}
@@ -1386,7 +1394,7 @@ func readImportChatMeta(r io.Reader) importChatMeta {
 
 // skipJSONValue consumes the next value, however deeply nested, one token at
 // a time. It reports false when the stream ends or breaks.
-func skipJSONValue(dec *json.Decoder) bool {
+func skipJSONValue(dec *importJSONStream) bool {
 	t, err := dec.Token()
 	if err != nil {
 		return false
@@ -1399,7 +1407,7 @@ func skipJSONValue(dec *json.Decoder) bool {
 
 // skipJSONContainer consumes the rest of the object or array whose opening
 // delimiter open was just read.
-func skipJSONContainer(dec *json.Decoder, open json.Delim) bool {
+func skipJSONContainer(dec *importJSONStream, open json.Delim) bool {
 	if open != '{' && open != '[' {
 		return true
 	}
@@ -1417,4 +1425,77 @@ func skipJSONContainer(dec *json.Decoder, open json.Delim) bool {
 		}
 	}
 	return true
+}
+
+// importJSONTokenLimit is the most an import's read of an entry's JSON —
+// importJSONHoldsChat's and readImportChatMeta's — holds at once: the token
+// it is reading (a key, a string, a number, or the first message
+// importJSONHoldsChat decodes whole), with the whitespace ahead of it, past
+// the end of the one before. json.Decoder holds a token whole before it
+// hands it over, so reading as a stream bounded how far a read went but not
+// what it held: a ".json" the import does not keep, one 96 MB string, cost
+// 350 MB of heap to classify, and a zip may declare 2 GiB. No archive
+// Moombox writes has a token anywhere near the limit — a title, a message,
+// an emote's URL — and a read that meets one ends there.
+const importJSONTokenLimit = 1 << 20
+
+// errImportJSONTokenTooLong ends a read that met a token past
+// importJSONTokenLimit.
+var errImportJSONTokenTooLong = errors.New("a JSON token longer than an import reads")
+
+// importJSONStream is a json.Decoder over an entry that takes in no more than
+// importJSONTokenLimit bytes past the end of the last token it returned:
+// each call lets its source run that far and no further, and a token that
+// would need more fails the call. What the decoder already holds past that
+// token counts against the next one, so neither its buffer nor the token it
+// builds outgrows the limit, however large the entry.
+type importJSONStream struct {
+	dec *json.Decoder
+	src *importJSONSource
+}
+
+// importJSONSource is the entry as an importJSONStream reads it.
+type importJSONSource struct {
+	r     io.Reader
+	read  int64 // bytes handed to the decoder so far
+	limit int64 // how far read may go before the call in progress fails
+}
+
+func (s *importJSONSource) Read(p []byte) (int, error) {
+	room := s.limit - s.read
+	if room <= 0 {
+		return 0, errImportJSONTokenTooLong
+	}
+	if int64(len(p)) > room {
+		p = p[:room]
+	}
+	n, err := s.r.Read(p)
+	s.read += int64(n)
+	return n, err
+}
+
+func newImportJSONStream(r io.Reader) *importJSONStream {
+	src := &importJSONSource{r: r}
+	return &importJSONStream{dec: json.NewDecoder(src), src: src}
+}
+
+// allow lets the source run importJSONTokenLimit bytes past the decoder's
+// offset: the end of the token it last returned.
+func (s *importJSONStream) allow() {
+	s.src.limit = s.dec.InputOffset() + importJSONTokenLimit
+}
+
+func (s *importJSONStream) Token() (json.Token, error) {
+	s.allow()
+	return s.dec.Token()
+}
+
+func (s *importJSONStream) More() bool {
+	s.allow()
+	return s.dec.More()
+}
+
+func (s *importJSONStream) Decode(v any) error {
+	s.allow()
+	return s.dec.Decode(v)
 }
