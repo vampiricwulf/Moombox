@@ -1570,8 +1570,16 @@ export class SettingsController {
     }
   }
 
-  showAddChannelDialog(channel = null) {
+  /**
+   * Open the channel dialog: on `channel` to edit it, or empty to add one.
+   * `alreadyConfigured` is the Add that named a configured channel — the
+   * dialog opens on that channel's stored settings, with a note saying so.
+   */
+  showAddChannelDialog(channel = null, { alreadyConfigured = false } = {}) {
     this.editingChannelId = channel ? channel.id : null;
+
+    const existingNote = document.getElementById("channel-existing-note");
+    if (existingNote) existingNote.style.display = alreadyConfigured && channel ? "" : "none";
 
     document.getElementById("channel-id-input").value = channel?.id || "";
     document.getElementById("channel-name-input").value = channel?.name || "";
@@ -1651,6 +1659,12 @@ export class SettingsController {
     }
   }
 
+  /** The configured channel whose ID is `id`, compared as the server does (case-insensitively). */
+  configuredChannel(id) {
+    const want = String(id ?? "").trim().toLowerCase();
+    return (this.app.config?.channels || []).find((c) => String(c.id ?? "").toLowerCase() === want) || null;
+  }
+
   async saveChannel() {
     let id = document.getElementById("channel-id-input").value.trim();
     let name = document.getElementById("channel-name-input").value.trim();
@@ -1717,6 +1731,19 @@ export class SettingsController {
       }
     }
 
+    // An Add naming a configured channel — by its ID, or by a URL or @handle
+    // that resolved to it — is not an add. It used to post {id, enabled}
+    // over the stored entry, wiping its terms, output directory and
+    // overrides behind a "Channel added" toast. The dialog switches to
+    // editing that channel instead, filled with what it stores.
+    if (!this.editingChannelId) {
+      const configured = this.configuredChannel(id);
+      if (configured) {
+        this.showAddChannelDialog(configured, { alreadyConfigured: true });
+        return;
+      }
+    }
+
     const isTwitch = platform === "twitch";
 
     // When editing, start from the existing channel so keys this dialog
@@ -1759,6 +1786,9 @@ export class SettingsController {
       return;
     }
     const channelPayload = overrides.channel;
+    // The server replaces a configured channel only for a request marked as
+    // an edit, and answers an unmarked one 409.
+    if (this.editingChannelId) channelPayload.edit = true;
 
     const saveBtn = document.getElementById("channel-save-btn");
     if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
@@ -1776,6 +1806,17 @@ export class SettingsController {
           "success",
         );
         this.app.loadConfig();
+      } else if (response.status === 409 && !this.editingChannelId) {
+        // Configured since this page last loaded the list (another tab, the
+        // TUI): reload it and edit that channel, as the check above would have.
+        await this.app.loadConfig();
+        const configured = this.configuredChannel(id);
+        if (configured) {
+          this.showAddChannelDialog(configured, { alreadyConfigured: true });
+        } else {
+          const data = await response.json().catch(() => ({ error: response.statusText }));
+          this.app.showToast(data.error || "Failed to save channel", "danger");
+        }
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.app.showToast(data.error || "Failed to save channel", "danger");
@@ -1871,7 +1912,7 @@ export class SettingsController {
       const response = await fetch("/api/config/channels", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...channel, enabled }),
+        body: JSON.stringify({ ...channel, enabled, edit: true }),
       });
 
       if (response.ok) {

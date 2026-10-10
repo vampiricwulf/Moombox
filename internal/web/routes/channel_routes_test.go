@@ -70,8 +70,9 @@ func TestChannelAddInsertsNewChannel(t *testing.T) {
 }
 
 func TestChannelAddUpdatesExistingByID(t *testing.T) {
-	// Same ID = upsert, not duplicate. The route uses the position-in-slice
-	// for the in-place update so display order is stable across edits.
+	// Same ID with the edit mark = upsert, not duplicate. The route uses the
+	// position-in-slice for the in-place update so display order is stable
+	// across edits.
 	f := newChannelRoutesFixture(t)
 	if err := f.store.Update(func(c *config.MoomboxConfig) {
 		c.Channels = []config.ChannelConfig{{ID: "UCfoo", Name: "OldName", Platform: "youtube"}}
@@ -79,10 +80,11 @@ func TestChannelAddUpdatesExistingByID(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	body, _ := json.Marshal(config.ChannelConfig{
-		ID:       "UCfoo",
-		Name:     "NewName",
-		Platform: "youtube",
+	body, _ := json.Marshal(map[string]any{
+		"id":       "UCfoo",
+		"name":     "NewName",
+		"platform": "youtube",
+		"edit":     true,
 	})
 	req := httptest.NewRequest("POST", "/api/config/channels", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
@@ -147,7 +149,7 @@ func TestChannelAddTrimsTheID(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	body, _ := json.Marshal(config.ChannelConfig{ID: "  UCfoo ", Name: "NewName", Platform: "youtube"})
+	body, _ := json.Marshal(map[string]any{"id": "  UCfoo ", "name": "NewName", "platform": "youtube", "edit": true})
 	req := httptest.NewRequest("POST", "/api/config/channels", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	f.router.ServeHTTP(rec, req)

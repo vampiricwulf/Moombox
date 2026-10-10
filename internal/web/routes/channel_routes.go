@@ -27,8 +27,9 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 	cfg := store.Config()
 
 	// saveChannel validates and upserts one channel — POST
-	// /api/config/channels once its ID is final.
-	saveChannel := func(rw http.ResponseWriter, channel config.ChannelConfig) {
+	// /api/config/channels once its ID is final. edit is the request's mark
+	// that it means to replace a configured channel.
+	saveChannel := func(rw http.ResponseWriter, channel config.ChannelConfig, edit bool) {
 		// PUT /api/config's rule for the same field. The monitors treat any
 		// platform that is not "twitch" as YouTube, so an unknown one was
 		// accepted here, polled as a YouTube channel, and then made every
@@ -54,12 +55,26 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 		// case-insensitively, the rule config.Validate refuses a duplicate
 		// by: "Shroud" over a stored "shroud" is that channel, not a second
 		// entry Save would then refuse.
+		//
+		// Replacing a configured channel takes the request's edit mark — the
+		// dashboard's Edit dialog and its enable toggle send it. Unmarked,
+		// the post is an add, and an add naming a configured channel is a
+		// 409: the dashboard's Add Channel used to post {id, enabled} over
+		// one, wiping its terms, output directory and overrides behind
+		// "Channel added", and a client whose list is stale still could. A
+		// marked edit of a channel removed meanwhile adds it back: the
+		// operator saved it on purpose.
 		mu.Lock()
 		oldChannels := cfg.Channels
 		newChannels := slices.Clone(cfg.Channels)
 		found := false
 		for i, ch := range newChannels {
 			if strings.EqualFold(ch.ID, channel.ID) {
+				if !edit {
+					mu.Unlock()
+					jsonError(rw, "channel "+ch.ID+" is already configured", http.StatusConflict)
+					return
+				}
 				newChannels[i] = channel
 				found = true
 				break
@@ -88,11 +103,17 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 
 	// POST /api/config/channels
 	r.Post("/api/config/channels", func(rw http.ResponseWriter, req *http.Request) {
-		var channel config.ChannelConfig
-		if err := json.NewDecoder(req.Body).Decode(&channel); err != nil {
+		// The channel, plus "edit": true when the request means to replace
+		// a configured one (saveChannel). The mark is never stored.
+		var body struct {
+			config.ChannelConfig
+			Edit bool `json:"edit"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 			jsonError(rw, "invalid channel config", http.StatusBadRequest)
 			return
 		}
+		channel := body.ChannelConfig
 
 		if strings.TrimSpace(channel.ID) == "" {
 			jsonError(rw, "channel ID required", http.StatusBadRequest)
@@ -115,7 +136,7 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 				return
 			}
 			applyResolvedChannel(&channel, resolved)
-			saveChannel(rw, channel)
+			saveChannel(rw, channel, body.Edit)
 		}
 		if utils.NeedsChannelResolve(channel.ID) {
 			limitedBy(rl)(http.HandlerFunc(normalize)).ServeHTTP(rw, req)

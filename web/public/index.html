@@ -1579,6 +1579,10 @@
 
         <!-- Add Channel Dialog -->
         <sl-dialog label="Add Channel" id="add-channel-dialog">
+            <sl-alert id="channel-existing-note" variant="primary" open style="display: none; margin-bottom: 1rem;">
+                <sl-icon slot="icon" name="info-circle"></sl-icon>
+                Already configured — editing it instead
+            </sl-alert>
             <sl-select
                 id="channel-platform-select"
                 label="Platform"

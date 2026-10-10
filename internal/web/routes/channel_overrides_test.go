@@ -112,7 +112,7 @@ func TestChannelAddResolvesURLsUnderTheLimiter(t *testing.T) {
 	})
 
 	for i := range 3 {
-		if rec := postChannel(t, r, map[string]any{"id": "UCplain", "enabled": i%2 == 0}); rec.Code != http.StatusOK {
+		if rec := postChannel(t, r, map[string]any{"id": "UCplain", "enabled": i%2 == 0, "edit": i > 0}); rec.Code != http.StatusOK {
 			t.Fatalf("plain-ID post %d was limited: %d (body %s)", i, rec.Code, rec.Body.String())
 		}
 	}
