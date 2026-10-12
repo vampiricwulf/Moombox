@@ -72,3 +72,23 @@ func TestCancelRouteReportsAJobThatEndedFirst(t *testing.T) {
 		})
 	}
 }
+
+// The route's own write, with no worker, clears an owed "Stream Found" as the
+// worker's CancelJob does (internal/worker, TestCancelClearsTheOwedFound): a
+// Retry of the cancelled row must not announce a discovery long past.
+//
+// Mutant: announce_found dropped from the worker-less write in cancelJob.
+func TestCancelRouteWithoutAWorkerClearsTheOwedFound(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "owed", func(j *database.Job) {
+		j.Status = database.StatusUpcoming
+		j.AnnounceFound = true
+	})
+
+	if rec := doRequest(t, f.router, "POST", "/api/jobs/owed/cancel", nil); rec.Code != http.StatusOK {
+		t.Fatalf("POST cancel = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	if f.db.TakeAnnounceFound("owed") {
+		t.Error("the owed Stream Found survived the route's cancel")
+	}
+}

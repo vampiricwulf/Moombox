@@ -29,44 +29,56 @@ func TestIsPremiereResponse(t *testing.T) {
 }
 
 // A non-web client's response may lack the microformat the premiere signal
-// needs; the watch page's parse supplies it.
+// and the upload date both come from; the watch page's parse supplies them,
+// and never clears what the client already had.
 //
-// Mutant: dropping the IsPremiere merge from mergeWatchPageMetadata.
-func TestWatchPageMergeCarriesIsPremiere(t *testing.T) {
+// Mutants: dropping the IsPremiere or the UploadDate merge from
+// mergeWatchPageMetadata.
+func TestWatchPageMergeCarriesIsPremiereAndUploadDate(t *testing.T) {
 	target := &VideoInfo{}
-	mergeWatchPageMetadata(target, &VideoInfo{IsPremiere: true})
+	mergeWatchPageMetadata(target, &VideoInfo{IsPremiere: true, UploadDate: "2026-10-01"})
 	if !target.IsPremiere {
 		t.Error("the watch page's premiere flag was not merged")
 	}
-	target = &VideoInfo{IsPremiere: true}
+	if target.UploadDate != "2026-10-01" {
+		t.Errorf("UploadDate = %q, want the watch page's", target.UploadDate)
+	}
+	target = &VideoInfo{IsPremiere: true, UploadDate: "2026-09-30"}
 	mergeWatchPageMetadata(target, &VideoInfo{})
 	if !target.IsPremiere {
 		t.Error("a watch page without the signal cleared the client's premiere flag")
+	}
+	if target.UploadDate != "2026-09-30" {
+		t.Errorf("UploadDate = %q, want the client's own kept", target.UploadDate)
 	}
 }
 
 // While a premiere plays its response no longer says upcoming and carries no
 // "premiere" reason; the display flag still recognises it from broadcast
-// details on a video that is explicitly not live content. A live broadcast,
-// which is live content, never reads as a premiere.
+// details on a video that is EXPLICITLY not live content. A live broadcast,
+// which is live content, never reads as a premiere — nor does a response that
+// does not say either way.
 //
-// Mutant: IsPremiere set from isPremiereResponse alone (the playing premiere
-// reads as a plain live stream).
+// Mutants: IsPremiere set from isPremiereResponse alone (the playing premiere
+// reads as a plain live stream); the display arm reading an absent
+// isLiveContent as false (every live broadcast a client sends without it reads
+// as a premiere).
 func TestPlayingPremiereIsRecognised(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
-		isLiveContent bool
+		isLiveContent string // the videoDetails field, or "" for none
 		want          bool
 	}{
-		{"premiere playing", false, true},
-		{"live broadcast", true, false},
+		{"premiere playing", `, "isLiveContent": false`, true},
+		{"live broadcast", `, "isLiveContent": true`, false},
+		{"isLiveContent absent", ``, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := `{
-                "playabilityStatus": {"status": "OK"},
-                "videoDetails": {"videoId": "vid", "isLive": true, "isLiveContent": ` + map[bool]string{true: "true", false: "false"}[tc.isLiveContent] + `},
-                "microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {"isLiveNow": true, "startTimestamp": "2026-10-12T18:00:00+00:00"}}}
-            }`
+				"playabilityStatus": {"status": "OK"},
+				"videoDetails": {"videoId": "vid", "isLive": true` + tc.isLiveContent + `},
+				"microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {"isLiveNow": true, "startTimestamp": "2026-10-12T18:00:00+00:00"}}}
+			}`
 			info, err := NewPlayerAPI(nil, noopLogger{}).parsePlayerResponse(context.Background(), decodePlayerJSON(t, body), "", nil, "vid")
 			if err != nil {
 				t.Fatalf("parsePlayerResponse: %v", err)
