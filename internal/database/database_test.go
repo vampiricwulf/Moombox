@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -854,8 +855,8 @@ func TestSubscriberSliceTrim(t *testing.T) {
 	}
 
 	// Unsubscribe all in reverse order
-	for i := len(unsubs) - 1; i >= 0; i-- {
-		unsubs[i]()
+	for _, unsub := range slices.Backward(unsubs) {
+		unsub()
 	}
 
 	// After unsubscribing all, the internal slice length should be 0.

@@ -1385,7 +1385,7 @@ func TestLastLoadErrorStaysBoundedAndPathOnly(t *testing.T) {
 	// whatever the bound is set to. The path is synthetic rather than under
 	// t.TempDir() for the same determinism — the temp prefix has no fixed
 	// length — and it need not exist: the read seam answers before any open.
-	for pad := 0; pad < 3; pad++ {
+	for pad := range 3 {
 		t.Run(fmt.Sprintf("a pathological path is bounded on a rune boundary (pad %d)", pad), func(t *testing.T) {
 			path := "/mnt/" + strings.Repeat("x", pad) + strings.Repeat("私", 300) + "-cookies.txt"
 			sentinel := loadThroughFailingRead(t, path,

@@ -91,8 +91,7 @@ func TestLiveManifestFetchErrorRedactsPoToken(t *testing.T) {
 			if !strings.Contains(err.Error(), "/pot/<redacted>") {
 				t.Errorf("error = %q, want the token's slot shown as /pot/<redacted>", err.Error())
 			}
-			var ue *url.Error
-			if !errors.As(err, &ue) {
+			if _, ok := errors.AsType[*url.Error](err); !ok {
 				t.Errorf("errors.As(*url.Error) lost on %q — transport classification needs it", err.Error())
 			}
 			if line, ok := loggedSecret(logs, secret); ok {

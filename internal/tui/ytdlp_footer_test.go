@@ -16,7 +16,7 @@ import (
 func TestYtdlpDialogFooterNamesEveryCloseKey(t *testing.T) {
 	app := NewApp()
 	app.OnYtdlpPluginStatus = func() (ytdlpplugin.Info, error) {
-		return ytdlpplugin.Info{Installed: true, PluginDir: "/plug", CurrentPort: 7740, InstalledPort: intPtr(7740)}, nil
+		return ytdlpplugin.Info{Installed: true, PluginDir: "/plug", CurrentPort: 7740, InstalledPort: new(7740)}, nil
 	}
 	_, cmd := app.dispatchAction("E Y", nil)
 	app.Update(runCmd(t, cmd))

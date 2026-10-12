@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"maps"
 	"strings"
 	"testing"
 
@@ -97,9 +98,7 @@ func pluginStatusBody(extra map[string]any) map[string]any {
 		"httpsEnabled": false, "installedPort": nil, "portMismatch": false,
 		"extractedPath": "/plug/moombox", "unparseable": false,
 	}
-	for k, v := range extra {
-		body[k] = v
-	}
+	maps.Copy(body, extra)
 	return body
 }
 

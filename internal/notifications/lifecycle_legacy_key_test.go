@@ -158,8 +158,8 @@ func TestAnOldKeyOfAnotherWebhookIsNotRead(t *testing.T) {
 
 			// The thread first: what it takes from the row, the channel's
 			// event then misses.
-			for i := len(built) - 1; i >= 0; i-- {
-				if err := m.dispatchOne(built[i], One("Downloading", "d", 0, nil, SendOptions{Event: "downloading", JobID: job}), false); err != nil {
+			for _, b := range slices.Backward(built) {
+				if err := m.dispatchOne(b, One("Downloading", "d", 0, nil, SendOptions{Event: "downloading", JobID: job}), false); err != nil {
 					t.Fatal(err)
 				}
 			}

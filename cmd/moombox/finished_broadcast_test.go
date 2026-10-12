@@ -39,7 +39,7 @@ func TestEveryJobChangeIsBroadcast(t *testing.T) {
 		t.Fatal("cannot find the job_update subscriber and its dispatch")
 	}
 	var code strings.Builder
-	for _, line := range strings.Split(text[start:dispatch], "\n") {
+	for line := range strings.SplitSeq(text[start:dispatch], "\n") {
 		if !strings.HasPrefix(strings.TrimSpace(line), "//") {
 			code.WriteString(line + "\n")
 		}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -175,9 +176,7 @@ func (a *openAlerts) snapshot() openAlertsDoc {
 	}
 	if len(a.doc.Auth) > 0 {
 		d.Auth = make(map[string]time.Time, len(a.doc.Auth))
-		for p, at := range a.doc.Auth {
-			d.Auth[p] = at
-		}
+		maps.Copy(d.Auth, a.doc.Auth)
 	}
 	return d
 }

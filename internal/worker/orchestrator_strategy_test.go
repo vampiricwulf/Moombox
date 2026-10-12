@@ -9,13 +9,13 @@ import (
 // adaptiveVideo / adaptiveAudio build the split video-only + audio-only
 // adaptive entries that HasManifestlessDashFormats keys on.
 func adaptiveVideo() youtube.Format {
-	return youtube.Format{Itag: 137, URL: "https://v.example/videoplayback?x=1", MimeType: "video/mp4", Width: ptrInt(1920), Height: ptrInt(1080)}
+	return youtube.Format{Itag: 137, URL: "https://v.example/videoplayback?x=1", MimeType: "video/mp4", Width: new(1920), Height: new(1080)}
 }
 func adaptiveAudio() youtube.Format {
 	return youtube.Format{Itag: 140, URL: "https://a.example/videoplayback?x=2", MimeType: "audio/mp4"}
 }
 func progressive() youtube.Format {
-	return youtube.Format{Itag: 18, URL: "https://p.example/videoplayback?x=3", MimeType: "video/mp4", Width: ptrInt(640), Height: ptrInt(360)}
+	return youtube.Format{Itag: 18, URL: "https://p.example/videoplayback?x=3", MimeType: "video/mp4", Width: new(640), Height: new(360)}
 }
 
 func TestSelectDownloadStrategy(t *testing.T) {
@@ -52,7 +52,7 @@ func TestSelectDownloadStrategy(t *testing.T) {
 				StreamStatus:    youtube.StreamPostLive,
 				DashManifestURL: "",
 				Formats: []youtube.Format{
-					{Itag: 248, URL: "https://v.example/videoplayback?x=1", MimeType: "video/webm", Width: ptrInt(1920), Height: ptrInt(1080), ContentLength: "58382400"},
+					{Itag: 248, URL: "https://v.example/videoplayback?x=1", MimeType: "video/webm", Width: new(1920), Height: new(1080), ContentLength: "58382400"},
 					{Itag: 251, URL: "https://a.example/videoplayback?x=2", MimeType: "audio/webm", ContentLength: "3211436"},
 				},
 			},
@@ -162,7 +162,7 @@ func TestDbResumeSeq(t *testing.T) {
 		lastSeq      *int
 		want         int
 	}{
-		{"live resumes from db seq", youtube.StreamLive, ptrInt(4000), 4000},
+		{"live resumes from db seq", youtube.StreamLive, new(4000), 4000},
 		{"live with no db seq starts at 0", youtube.StreamLive, nil, 0},
 		{
 			// The trap: a re-processed cancelled live job carries a stale
@@ -171,10 +171,10 @@ func TestDbResumeSeq(t *testing.T) {
 			// stale seq would skip the init and reproduce the moov-less file.
 			name:         "post-live ignores stale db seq and starts at 0",
 			streamStatus: youtube.StreamPostLive,
-			lastSeq:      ptrInt(4000),
+			lastSeq:      new(4000),
 			want:         0,
 		},
-		{"genuine VOD ignores stale db seq and starts at 0", youtube.StreamVOD, ptrInt(4000), 0},
+		{"genuine VOD ignores stale db seq and starts at 0", youtube.StreamVOD, new(4000), 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -463,7 +463,7 @@ func TestViewTerminalTooSmallNamesTheSize(t *testing.T) {
 	// It must also FIT: shown only in terminals narrower than minTermWidth,
 	// the message is no use if the required size is past the right edge.
 	app.width = 40
-	for _, line := range strings.Split(app.View().Content, "\n") {
+	for line := range strings.SplitSeq(app.View().Content, "\n") {
 		if w := runewidth.StringWidth(line); w > app.width {
 			t.Errorf("line %q is %d columns, wider than the %d-column terminal it is shown in", line, w, app.width)
 		}
@@ -506,7 +506,7 @@ func TestFeedbackLineIsCutToTheWidth(t *testing.T) {
 	app.width, app.height = 80, 24
 	app.recalcLayout()
 	app.setFeedback("Deleted: " + strings.Repeat("a very long stream title ", 6) + "(3s)")
-	for _, line := range strings.Split(app.View().Content, "\n") {
+	for line := range strings.SplitSeq(app.View().Content, "\n") {
 		if w := ansi.StringWidth(line); w > 80 {
 			t.Fatalf("a %d-cell line on an 80-column terminal: %q", w, stripANSI(line))
 		}

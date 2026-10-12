@@ -11,7 +11,7 @@ const sampleNotes = "## Features\n\n- Something reasonably long that will need t
 
 func widestLine(s string) int {
 	w := 0
-	for _, ln := range strings.Split(s, "\n") {
+	for ln := range strings.SplitSeq(s, "\n") {
 		w = max(w, lipgloss.Width(ln))
 	}
 	return w

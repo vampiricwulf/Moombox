@@ -178,7 +178,7 @@ func TestEmptyStateQuotesLikeTheHeader(t *testing.T) {
 	if !strings.Contains(view, "…].") {
 		t.Errorf("the empty state must be cut to the row with an ellipsis: %q", view)
 	}
-	for _, line := range strings.Split(view, "\n") {
+	for line := range strings.SplitSeq(view, "\n") {
 		if n := len([]rune(line)); n > 40 {
 			t.Errorf("a rendered line exceeds the 40-column panel (%d): %q", n, line)
 		}

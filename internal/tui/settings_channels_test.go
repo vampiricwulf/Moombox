@@ -6,8 +6,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
-func intPtr(v int) *int { return &v }
-
 // fullChannel is a channel carrying every field the TUI editor does NOT
 // show, plus named (map) terms. Any of these vanishing after an edit is
 // the data-loss bug this file exists to pin.
@@ -19,11 +17,11 @@ func fullChannel() config.ChannelConfig {
 		Platform:              "youtube",
 		Enabled:               &enabled,
 		Terms:                 config.ChannelTerms{IsMap: true, Named: map[string]string{"stream": "(?i)karaoke", "vod": "(?i)vod"}},
-		NumDescLookbehind:     intPtr(5),
+		NumDescLookbehind:     new(5),
 		OutputDirectory:       "D:/special",
 		IncludeNonLiveContent: true,
-		ArchiveWindowDays:     intPtr(7),
-		ArchiveSlots:          intPtr(2),
+		ArchiveWindowDays:     new(7),
+		ArchiveSlots:          new(2),
 		QualityPreference:     "720p",
 	}
 }

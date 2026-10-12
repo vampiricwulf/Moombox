@@ -18,7 +18,7 @@ func TestShellExecuteInfoLayout(t *testing.T) {
 	if got := unsafe.Sizeof(shellExecuteInfo{}); got != 112 {
 		t.Fatalf("sizeof(SHELLEXECUTEINFOW) = %d, want 112", got)
 	}
-	typ := reflect.TypeOf(shellExecuteInfo{})
+	typ := reflect.TypeFor[shellExecuteInfo]()
 	for name, offset := range map[string]uintptr{
 		"lpVerb":       16,
 		"lpFile":       24,

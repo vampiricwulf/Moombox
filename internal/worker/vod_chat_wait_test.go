@@ -39,15 +39,15 @@ func TestVodChatWaitTimeout(t *testing.T) {
 	}{
 		{"no length falls back to the floor", &database.Job{}, vodChatWaitFloor},
 		{"nil job falls back to the floor", nil, vodChatWaitFloor},
-		{"zero length falls back to the floor", &database.Job{LengthSeconds: ptrInt(0)}, vodChatWaitFloor},
-		{"negative length falls back to the floor", &database.Job{LengthSeconds: ptrInt(-5)}, vodChatWaitFloor},
-		{"short VOD gets the floor", &database.Job{LengthSeconds: ptrInt(180)}, vodChatWaitFloor},
-		{"exactly the floor", &database.Job{LengthSeconds: ptrInt(30 * 60)}, vodChatWaitFloor},
-		{"one second over the floor", &database.Job{LengthSeconds: ptrInt(30*60 + 1)}, vodChatWaitFloor + time.Second},
-		{"long VOD gets its own duration", &database.Job{LengthSeconds: ptrInt(4 * 3600)}, 4 * time.Hour},
-		{"exactly the ceiling", &database.Job{LengthSeconds: ptrInt(6 * 3600)}, vodChatWaitCeiling},
-		{"one second over the ceiling", &database.Job{LengthSeconds: ptrInt(6*3600 + 1)}, vodChatWaitCeiling},
-		{"absurd length is capped", &database.Job{LengthSeconds: ptrInt(90 * 3600)}, vodChatWaitCeiling},
+		{"zero length falls back to the floor", &database.Job{LengthSeconds: new(0)}, vodChatWaitFloor},
+		{"negative length falls back to the floor", &database.Job{LengthSeconds: new(-5)}, vodChatWaitFloor},
+		{"short VOD gets the floor", &database.Job{LengthSeconds: new(180)}, vodChatWaitFloor},
+		{"exactly the floor", &database.Job{LengthSeconds: new(30 * 60)}, vodChatWaitFloor},
+		{"one second over the floor", &database.Job{LengthSeconds: new(30*60 + 1)}, vodChatWaitFloor + time.Second},
+		{"long VOD gets its own duration", &database.Job{LengthSeconds: new(4 * 3600)}, 4 * time.Hour},
+		{"exactly the ceiling", &database.Job{LengthSeconds: new(6 * 3600)}, vodChatWaitCeiling},
+		{"one second over the ceiling", &database.Job{LengthSeconds: new(6*3600 + 1)}, vodChatWaitCeiling},
+		{"absurd length is capped", &database.Job{LengthSeconds: new(90 * 3600)}, vodChatWaitCeiling},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := vodChatWaitTimeout(tc.job); got != tc.want {
@@ -95,7 +95,7 @@ func TestVodChatWaitSlotIsReleasedBeforeTheWait(t *testing.T) {
 		// 4 h of video ⇒ a 4 h bound: nothing in this test may depend on it
 		// elapsing.
 		result <- o.resolveVodChatOutcome(ctx, dl, &rec, done,
-			&database.Job{ID: "vod1", LengthSeconds: ptrInt(4 * 3600)})
+			&database.Job{ID: "vod1", LengthSeconds: new(4 * 3600)})
 	}()
 
 	acquired := make(chan bool, 1)
@@ -200,7 +200,7 @@ func TestVodChatWaitBoundReadsTheFreshRow(t *testing.T) {
 	_, db := testWorkerSetup(t)
 	if _, err := db.AddJob(&database.Job{
 		ID: "tw_fresh_len", VideoID: "fresh_len", URL: "https://twitch.tv/videos/4",
-		Platform: "twitch", Status: database.StatusMuxing, LengthSeconds: ptrInt(4 * 3600),
+		Platform: "twitch", Status: database.StatusMuxing, LengthSeconds: new(4 * 3600),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +317,7 @@ func TestVodChatWaitDeadCtxKeepsACompletedPagersVerdict(t *testing.T) {
 	cancel()
 
 	finished := 0
-	for i := 0; i < deadCtxVerdictRuns; i++ {
+	for range deadCtxVerdictRuns {
 		var rec chatOutcome // the pager ran out of chat to fetch: nil verdict
 		done := make(chan struct{})
 		close(done) // ...and its goroutine has already signalled completion
@@ -348,7 +348,7 @@ func TestVodChatWaitDeadCtxReportsAStoppedPagerIncomplete(t *testing.T) {
 	cancel()
 
 	incomplete := 0
-	for i := 0; i < deadCtxVerdictRuns; i++ {
+	for range deadCtxVerdictRuns {
 		var rec chatOutcome
 		done := make(chan struct{})
 		dl := &stopUnwoundChatSource{started: make(chan struct{}), release: make(chan struct{})}

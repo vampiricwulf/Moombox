@@ -63,14 +63,8 @@ func TestNoPageCarriesAnInlineEventHandler(t *testing.T) {
 		html := readEmbeddedModule(t, page)
 		for _, m := range inlineHandlerRe.FindAllStringIndex(html, -1) {
 			// Report the attribute with a little context so the site is findable.
-			start := m[0]
-			if start < 0 {
-				start = 0
-			}
-			end := m[1] + 40
-			if end > len(html) {
-				end = len(html)
-			}
+			start := max(m[0], 0)
+			end := min(m[1]+40, len(html))
 			t.Errorf("%s carries an inline event handler: %q — script-src is 'self' only, so the browser "+
 				"refuses to run it", page, strings.TrimSpace(html[start:end]))
 		}

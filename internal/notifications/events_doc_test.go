@@ -26,7 +26,7 @@ func TestTheDocsNameEveryEventAndEveryClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	var line string
-	for _, l := range strings.Split(string(spec), "\n") {
+	for l := range strings.SplitSeq(string(spec), "\n") {
 		if strings.HasPrefix(l, "**Notification events:**") {
 			line = l
 			break

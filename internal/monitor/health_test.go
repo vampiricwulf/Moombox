@@ -104,7 +104,7 @@ func TestRecordSuccessFiresOnHealthyOnlyAfterAStreakWasNotified(t *testing.T) {
 		t.Fatalf("onHealthy fired %d times with no prior streak, want 0", len(healthy))
 	}
 
-	for i := 0; i < unhealthyThreshold; i++ {
+	for range unhealthyThreshold {
 		h.recordError("ch1", errors.New("boom"))
 	}
 	h.recordSuccess("ch1")
@@ -125,7 +125,7 @@ func TestRecordSuccessBelowTheThresholdIsSilent(t *testing.T) {
 	fired := 0
 	h.onHealthy = func(string) { fired++ }
 
-	for i := 0; i < unhealthyThreshold-1; i++ {
+	for range unhealthyThreshold - 1 {
 		h.recordError("ch1", errors.New("blip"))
 	}
 	h.recordSuccess("ch1")
@@ -202,7 +202,7 @@ func TestRestoredUnhealthyChannelClosesOnItsFirstSuccess(t *testing.T) {
 		t.Fatalf("onHealthy = %v, want one close for the restored channel", healthy)
 	}
 
-	for i := 0; i < 2*unhealthyThreshold; i++ {
+	for range 2 * unhealthyThreshold {
 		h.recordError("down", errors.New("still down"))
 	}
 	if len(unhealthy) != 0 {

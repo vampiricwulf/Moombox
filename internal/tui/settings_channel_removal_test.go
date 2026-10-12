@@ -160,9 +160,9 @@ func TestChannelRemovalZeroCountClaimsNoAbsence(t *testing.T) {
 func TestChannelRemovalFooterFollowsThePrompt(t *testing.T) {
 	footer := func(h *removalHarness) string {
 		lines := strings.Split(stripANSI(h.a.settings.View()), "\n")
-		for i := len(lines) - 1; i >= 0; i-- {
-			if strings.Contains(lines[i], "Esc: ") {
-				return lines[i]
+		for _, line := range slices.Backward(lines) {
+			if strings.Contains(line, "Esc: ") {
+				return line
 			}
 		}
 		return ""
@@ -387,8 +387,8 @@ func TestChannelRemovalMouseSaveRunsTheDelete(t *testing.T) {
 	view := stripANSI(h.a.settings.View())
 	x, y := -1, -1
 	for row, line := range strings.Split(view, "\n") {
-		if i := strings.Index(line, "[ Save & Return ]"); i >= 0 {
-			x, y = len([]rune(line[:i]))+2, row
+		if before, _, ok := strings.Cut(line, "[ Save & Return ]"); ok {
+			x, y = len([]rune(before))+2, row
 			break
 		}
 	}

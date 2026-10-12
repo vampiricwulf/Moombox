@@ -684,9 +684,7 @@ func TestSetupCompleteGuardHoldsForOverlappingCompletes(t *testing.T) {
 	codes := make([]int, 2)
 	var done sync.WaitGroup
 	for i := range codes {
-		done.Add(1)
-		go func() {
-			defer done.Done()
+		done.Go(func() {
 			defer func() {
 				if p := recover(); p != nil {
 					t.Errorf("complete %d panicked: %v", i, p)
@@ -695,7 +693,7 @@ func TestSetupCompleteGuardHoldsForOverlappingCompletes(t *testing.T) {
 			codes[i] = postSetupComplete(t, f.router, map[string]any{
 				"network": map[string]any{"port": 7001 + i},
 			}).Code
-		}()
+		})
 	}
 	done.Wait()
 

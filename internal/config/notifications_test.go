@@ -194,11 +194,11 @@ func TestNotificationIsEnabled(t *testing.T) {
 	if !absent.IsEnabled() {
 		t.Error("a target with no enabled key must deliver — otherwise the key's arrival silences every existing install")
 	}
-	off := NotificationConfig{Enabled: boolPtr(false)}
+	off := NotificationConfig{Enabled: new(false)}
 	if off.IsEnabled() {
 		t.Error("enabled = false must not deliver")
 	}
-	on := NotificationConfig{Enabled: boolPtr(true)}
+	on := NotificationConfig{Enabled: new(true)}
 	if !on.IsEnabled() {
 		t.Error("enabled = true must deliver")
 	}
@@ -286,7 +286,7 @@ func TestNotificationKeysRoundTripThroughSave(t *testing.T) {
 	cfg.Notifications = []NotificationConfig{
 		{URL: "discord://1/aaa", Mention: "<@&123456789012345678>"},
 		{URL: "discord://2/bbb", Mention: "@here", MentionEvents: &never},
-		{URL: "discord://3/ccc", Enabled: boolPtr(false), MentionEvents: &some, Mention: "@everyone"},
+		{URL: "discord://3/ccc", Enabled: new(false), MentionEvents: &some, Mention: "@everyone"},
 	}
 	if err := Save(cfg, path); err != nil {
 		t.Fatalf("Save: %v", err)

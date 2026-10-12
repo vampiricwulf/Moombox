@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -400,12 +401,7 @@ func flattenCmd(cmd tea.Cmd) []tea.Msg {
 
 // hasMsg reports whether want is among msgs.
 func hasMsg(msgs []tea.Msg, want tea.Msg) bool {
-	for _, m := range msgs {
-		if m == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(msgs, want)
 }
 
 // findClipboardResult returns the clipboardResultMsg among msgs.

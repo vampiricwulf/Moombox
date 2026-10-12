@@ -29,7 +29,7 @@ func TestTaskRowsWithVS16TitlesFitThePanel(t *testing.T) {
 			jobs = append(jobs, &database.Job{ID: string(rune('a' + i)), Title: title, Status: database.StatusFinished, Platform: "youtube"})
 		}
 		m.SetJobs(jobs)
-		for _, line := range strings.Split(m.View(), "\n") {
+		for line := range strings.SplitSeq(m.View(), "\n") {
 			if got := ansi.StringWidth(line); got > w {
 				t.Errorf("width %d: a row is %d cells: %q", w, got, line)
 			}

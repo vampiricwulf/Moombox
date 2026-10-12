@@ -45,8 +45,7 @@ func TestClipboardHelperCommandShape(t *testing.T) {
 //
 // Mutant: building the command with exec.Command instead — Cancel is nil.
 func TestClipboardHelperCommandIsContextBound(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	if cmd := clipboardHelperCmd(ctx, "x"); cmd.Cancel == nil {
 		t.Error("the helper command is not context-bound: a hung clip.exe would never be reaped")
 	}

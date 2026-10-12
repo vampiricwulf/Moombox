@@ -99,7 +99,7 @@ func readCookieRows(t *testing.T, path string) []netscapeRow {
 		t.Fatalf("read cookie file: %v", err)
 	}
 	var rows []netscapeRow
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		// Trim ONLY the line ending. TrimSpace would eat the trailing tab of a
 		// row whose value is empty and turn a 7-field row into a 6-field one,
 		// which would hide exactly the row this test file is looking for.

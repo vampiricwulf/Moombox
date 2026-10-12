@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -57,8 +58,8 @@ func TestActionMenuPagesWithPgUpPgDnHomeEnd(t *testing.T) {
 	m.HandleKey(keyEnd)
 	items := m.mainList.Items()
 	last := ""
-	for i := len(items) - 1; i >= 0; i-- {
-		if mi, ok := items[i].(menuActionItem); ok && mi.action != nil {
+	for _, item := range slices.Backward(items) {
+		if mi, ok := item.(menuActionItem); ok && mi.action != nil {
 			last = mi.action.Chord
 			break
 		}

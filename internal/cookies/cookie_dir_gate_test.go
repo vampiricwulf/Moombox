@@ -245,10 +245,10 @@ func TestCookieDirGateIsTheSharedPredicate(t *testing.T) {
 // Windows leg fails here as well as in internal/utils.
 func TestTightenCookieDirOnceLeavesTheDataDirectoryAloneOnPOSIX(t *testing.T) {
 	dir := cookieDirFixture(t, "cookies.txt", "output/", "staging/", "moombox.db", "moombox.log")
-	var calls int32
+	var calls atomic.Int32
 	applied := make(chan struct{}, 4)
 	fakeApplyUserOnlyDACL(t, func(d string) error {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		applied <- struct{}{}
 		return nil
 	})
@@ -269,7 +269,7 @@ func TestTightenCookieDirOnceLeavesTheDataDirectoryAloneOnPOSIX(t *testing.T) {
 		t.Fatal("POSIX chmodded the data directory 0700 — that is the container bug O-K forbids")
 	case <-time.After(100 * time.Millisecond):
 	}
-	if got := atomic.LoadInt32(&calls); got != 0 {
+	if got := calls.Load(); got != 0 {
 		t.Errorf("apply calls = %d, want 0", got)
 	}
 }

@@ -392,9 +392,9 @@ func TestPostDownloadTrimSendsOneTrimFailed(t *testing.T) {
 // TrimTask field so it nests.
 func TestTrimEventWireShape(t *testing.T) {
 	ev := TrimEvent{
-		TrimTask: TrimTask{ID: "trim_j_1", JobID: "j", StartTime: 1.5, EndTime: 9, Progress: 42},
-		State:    TrimStateFinished,
-		Trim:     &database.TrimRecord{ID: "trim_j_1", JobID: "j"},
+		ID: "trim_j_1", JobID: "j", StartTime: 1.5, EndTime: 9, Progress: 42,
+		State: TrimStateFinished,
+		Trim:  &database.TrimRecord{ID: "trim_j_1", JobID: "j"},
 	}
 	b, err := json.Marshal(ev)
 	if err != nil {

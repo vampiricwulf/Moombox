@@ -721,7 +721,7 @@ func TestDecapi_AProbeGiveUpLeavesTheVODArchivable(t *testing.T) {
 	found := recordDecapiVideoFound(dm)
 	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1", IncludeNonLiveContent: true}
 
-	for i := 0; i < maxMetadataFailures; i++ {
+	for range maxMetadataFailures {
 		_ = dm.processResponse(context.Background(), decapiBody("vidFresh001", "fresh vod"), ch)
 	}
 	if hp, _ := db.HasProcessed("vidFresh001"); hp {
@@ -756,7 +756,7 @@ func TestDecapi_ASkippedVODIsArchivedOnceVODsAreTurnedOn(t *testing.T) {
 	found := recordDecapiVideoFound(dm)
 	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1"}
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		_ = dm.processResponse(context.Background(), decapiBody("vidNewest01", "newest"), ch)
 	}
 	if probes != 1 {

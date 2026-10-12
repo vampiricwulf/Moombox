@@ -60,10 +60,10 @@ func awaitSettled(t *testing.T, dir string) {
 // ever be made.
 func TestTightenCookieDirOnceRetriesAfterFailure(t *testing.T) {
 	dir := cookieDirFixture(t)
-	var calls int32
+	var calls atomic.Int32
 	done := make(chan struct{}, 8)
 	fakeApplyUserOnlyDACL(t, func(d string) error {
-		n := atomic.AddInt32(&calls, 1)
+		n := calls.Add(1)
 		defer func() { done <- struct{}{} }()
 		if n == 1 {
 			return errors.New("fake transient failure")
@@ -75,7 +75,7 @@ func TestTightenCookieDirOnceRetriesAfterFailure(t *testing.T) {
 	tightenCookieDirOnce(dir)
 	awaitSignal(t, done, "the first DACL apply")
 	awaitSettled(t, dir)
-	if got := atomic.LoadInt32(&calls); got != 1 {
+	if got := calls.Load(); got != 1 {
 		t.Fatalf("after first write: calls = %d, want 1", got)
 	}
 
@@ -84,7 +84,7 @@ func TestTightenCookieDirOnceRetriesAfterFailure(t *testing.T) {
 	tightenCookieDirOnce(dir)
 	awaitSignal(t, done, "the second DACL apply")
 	awaitSettled(t, dir)
-	if got := atomic.LoadInt32(&calls); got != 2 {
+	if got := calls.Load(); got != 2 {
 		t.Fatalf("after second write: calls = %d, want 2 (failure was not retried)", got)
 	}
 
@@ -96,7 +96,7 @@ func TestTightenCookieDirOnceRetriesAfterFailure(t *testing.T) {
 		t.Fatal("third write re-attempted the DACL apply after a prior success")
 	case <-time.After(100 * time.Millisecond):
 	}
-	if got := atomic.LoadInt32(&calls); got != 2 {
+	if got := calls.Load(); got != 2 {
 		t.Errorf("after third write: calls = %d, want 2 (memoised on success)", got)
 	}
 }
@@ -110,12 +110,12 @@ func TestTightenCookieDirOnceRetriesAfterFailure(t *testing.T) {
 // would then read the counter as 2.
 func TestTightenCookieDirOnceConcurrentWritesSpawnOneApply(t *testing.T) {
 	dir := cookieDirFixture(t)
-	var calls int32
+	var calls atomic.Int32
 	started := make(chan struct{}, 4)
 	release := make(chan struct{})
 	done := make(chan struct{}, 4)
 	fakeApplyUserOnlyDACL(t, func(d string) error {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		started <- struct{}{}
 		<-release
 		done <- struct{}{}
@@ -136,7 +136,7 @@ func TestTightenCookieDirOnceConcurrentWritesSpawnOneApply(t *testing.T) {
 	close(release)
 	awaitSignal(t, done, "the released DACL apply")
 
-	if got := atomic.LoadInt32(&calls); got != 1 {
+	if got := calls.Load(); got != 1 {
 		t.Errorf("calls = %d, want 1 (two concurrent writes must spawn one apply)", got)
 	}
 }
@@ -153,10 +153,10 @@ func TestTightenCookieDirOnceConcurrentWritesSpawnOneApply(t *testing.T) {
 // bookkeeping runs.
 func TestTightenCookieDirOncePermanentFailureCostIsOnePerWrite(t *testing.T) {
 	dir := cookieDirFixture(t)
-	var calls int32
+	var calls atomic.Int32
 	done := make(chan struct{}, 8)
 	fakeApplyUserOnlyDACL(t, func(d string) error {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		done <- struct{}{}
 		return errors.New("fake permanent failure")
 	})
@@ -168,7 +168,7 @@ func TestTightenCookieDirOncePermanentFailureCostIsOnePerWrite(t *testing.T) {
 		awaitSettled(t, dir)
 	}
 
-	if got := atomic.LoadInt32(&calls); got != writes {
+	if got := calls.Load(); got != writes {
 		t.Errorf("calls = %d, want %d (exactly one attempt per write on a permanently-failing host)", got, writes)
 	}
 }

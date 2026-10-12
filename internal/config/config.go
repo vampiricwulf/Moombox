@@ -55,11 +55,6 @@ var (
 	dirTighteningAllowed = utils.DirTighteningAllowed
 )
 
-// boolPtr returns a pointer to b. Used for *bool config fields whose default is
-// a concrete value (a feature that is on unless explicitly disabled), where a
-// plain bool couldn't distinguish "absent" from "explicitly false".
-func boolPtr(b bool) *bool { return &b }
-
 // platformDefaults returns the two memory-derived downloader defaults for a
 // GOARCH: the per-job reorder ceiling and the process-wide reorder budget, in
 // megabytes.
@@ -148,7 +143,7 @@ func Defaults() *MoomboxConfig {
 			FeedCheckInterval:   FlexDuration{Value: 10}, // minutes
 			HideFinishedAgeDays: FlexDuration{Value: 30},
 			ProbeCooldown:       FlexDuration{Value: 0}, // seconds; 0 = disabled
-			MembershipDiscovery: boolPtr(true),
+			MembershipDiscovery: new(true),
 		},
 		Downloader: DownloaderConfig{
 			OutputTemplate:              "${channel}/${start_date} ${title} [${id}]",
@@ -695,7 +690,7 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 	// absent from an existing config) normalizes to true so the feature is
 	// enabled unless an operator explicitly sets false.
 	if cfg.Monitors.MembershipDiscovery == nil && !reportOnly {
-		cfg.Monitors.MembershipDiscovery = boolPtr(true)
+		cfg.Monitors.MembershipDiscovery = new(true)
 	}
 	if cfg.Monitors.FeedCheckInterval.Value < 1 || cfg.Monitors.FeedCheckInterval.Value > 1440 {
 		fail("monitors.feed_check_interval %v out of range 1..1440 minutes", cfg.Monitors.FeedCheckInterval.Value)

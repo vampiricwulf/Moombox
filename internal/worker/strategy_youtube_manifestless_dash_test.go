@@ -9,10 +9,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
-// ptrInt is a shared test helper for the *int format/seq fields. Kept as a
-// named helper (not Go 1.26 new(expr)) for readability and gopls support.
-func ptrInt(v int) *int { return &v }
-
 func TestManifestlessSq0URL(t *testing.T) {
 	if got := manifestlessSq0URL("https://x/videoplayback?a=1&b=2"); got != "https://x/videoplayback?a=1&b=2&sq=0" {
 		t.Errorf("query-style url: got %q", got)
@@ -36,15 +32,15 @@ func TestHasManifestlessDashFormats(t *testing.T) {
 		{
 			name: "only HLS muxed video formats — no audio-only entries",
 			formats: []youtube.Format{
-				{Itag: 300, MimeType: `video/mp4; codecs="avc1.4d4020,mp4a.40.2"`, URL: "https://x/", Width: ptrInt(1280), Height: ptrInt(720)},
-				{Itag: 301, MimeType: `video/mp4; codecs="avc1.64002a,mp4a.40.2"`, URL: "https://x/", Width: ptrInt(1920), Height: ptrInt(1080)},
+				{Itag: 300, MimeType: `video/mp4; codecs="avc1.4d4020,mp4a.40.2"`, URL: "https://x/", Width: new(1280), Height: new(720)},
+				{Itag: 301, MimeType: `video/mp4; codecs="avc1.64002a,mp4a.40.2"`, URL: "https://x/", Width: new(1920), Height: new(1080)},
 			},
 			want: false,
 		},
 		{
 			name: "split video + audio adaptive (the manifest-free DASH case)",
 			formats: []youtube.Format{
-				{Itag: 299, MimeType: `video/mp4; codecs="avc1.64002a"`, URL: "https://x/", Width: ptrInt(1920), Height: ptrInt(1080)},
+				{Itag: 299, MimeType: `video/mp4; codecs="avc1.64002a"`, URL: "https://x/", Width: new(1920), Height: new(1080)},
 				{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`, URL: "https://x/"},
 			},
 			want: true,
@@ -56,7 +52,7 @@ func TestHasManifestlessDashFormats(t *testing.T) {
 			// re-downloads the whole file forever.
 			name: "complete-file adaptive formats (contentLength set) are not segment-addressable",
 			formats: []youtube.Format{
-				{Itag: 248, MimeType: `video/webm; codecs="vp9"`, URL: "https://x/", Width: ptrInt(1920), Height: ptrInt(1080), ContentLength: "58382400"},
+				{Itag: 248, MimeType: `video/webm; codecs="vp9"`, URL: "https://x/", Width: new(1920), Height: new(1080), ContentLength: "58382400"},
 				{Itag: 251, MimeType: `audio/webm; codecs="opus"`, URL: "https://x/", ContentLength: "3211436"},
 			},
 			want: false,
@@ -71,14 +67,14 @@ func TestHasManifestlessDashFormats(t *testing.T) {
 		{
 			name: "video-only without audio — incomplete",
 			formats: []youtube.Format{
-				{Itag: 299, MimeType: `video/mp4; codecs="avc1.64002a"`, URL: "https://x/", Width: ptrInt(1920), Height: ptrInt(1080)},
+				{Itag: 299, MimeType: `video/mp4; codecs="avc1.64002a"`, URL: "https://x/", Width: new(1920), Height: new(1080)},
 			},
 			want: false,
 		},
 		{
 			name: "URL absent on a format — that format must not count",
 			formats: []youtube.Format{
-				{Itag: 299, MimeType: `video/mp4`, URL: "", Width: ptrInt(1920), Height: ptrInt(1080)},
+				{Itag: 299, MimeType: `video/mp4`, URL: "", Width: new(1920), Height: new(1080)},
 				{Itag: 140, MimeType: `audio/mp4`, URL: "https://x/"},
 			},
 			want: false,
@@ -105,10 +101,10 @@ func TestPartitionManifestlessFormatsExcludesContentLength(t *testing.T) {
 	// A MIXED pool: OTF video+audio (segment-addressable, no contentLength) plus
 	// a HIGHER-res whole-file video (contentLength set) and a URL-less format.
 	formats := []youtube.Format{
-		{Itag: 299, MimeType: `video/mp4; codecs="avc1.64002a"`, URL: "https://x/", Width: ptrInt(1920), Height: ptrInt(1080)},
+		{Itag: 299, MimeType: `video/mp4; codecs="avc1.64002a"`, URL: "https://x/", Width: new(1920), Height: new(1080)},
 		{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`, URL: "https://x/"},
-		{Itag: 401, MimeType: `video/mp4; codecs="av01.0.12M.08"`, URL: "https://x/", Width: ptrInt(3840), Height: ptrInt(2160), ContentLength: "1073741824"},
-		{Itag: 137, MimeType: `video/mp4; codecs="avc1.640028"`, URL: "", Width: ptrInt(1920), Height: ptrInt(1080)},
+		{Itag: 401, MimeType: `video/mp4; codecs="av01.0.12M.08"`, URL: "https://x/", Width: new(3840), Height: new(2160), ContentLength: "1073741824"},
+		{Itag: 137, MimeType: `video/mp4; codecs="avc1.640028"`, URL: "", Width: new(1920), Height: new(1080)},
 	}
 
 	video, audio := partitionManifestlessFormats(formats)

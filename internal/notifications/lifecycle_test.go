@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -32,9 +33,7 @@ func (s *memStore) NotificationMsgs(jobID string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(src))
-	for k, v := range src {
-		out[k] = v
-	}
+	maps.Copy(out, src)
 	return out
 }
 
@@ -46,9 +45,7 @@ func (s *memStore) UpdateNotificationMsgs(jobID string, msgs map[string]string) 
 		return false
 	}
 	cp := make(map[string]string, len(msgs))
-	for k, v := range msgs {
-		cp[k] = v
-	}
+	maps.Copy(cp, msgs)
 	s.rows[jobID] = cp
 	return true
 }
@@ -685,18 +682,14 @@ func TestTwoTargetsOnOneJobBothPersist(t *testing.T) {
 	tr := newLifecycleTracker(st)
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		tr.remember("yt_1", "abc", "111")
-	}()
+	})
 	<-st.entered // target A is inside its write, holding its snapshot
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		tr.remember("yt_1", "def", "222")
-	}()
+	})
 	// Give B every chance to get its row in FIRST. With the serialisation it
 	// cannot even take a snapshot yet, so this waits out the timeout; without
 	// it, B's write lands immediately and the wait ends on the first branch.

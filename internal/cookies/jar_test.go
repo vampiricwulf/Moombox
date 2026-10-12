@@ -89,7 +89,7 @@ func TestCookieHeader(t *testing.T) {
 	// rows must not appear in it. Before the jar was partitioned they did:
 	// every authenticated youtube.com request carried the Twitch session's
 	// auth-token and login cookies along with it.
-	for _, pair := range strings.Split(header, "; ") {
+	for pair := range strings.SplitSeq(header, "; ") {
 		name, _, _ := strings.Cut(pair, "=")
 		if name == "auth-token" || name == "login" {
 			t.Errorf("YouTube Cookie header carries the Twitch cookie %q: %q", name, header)

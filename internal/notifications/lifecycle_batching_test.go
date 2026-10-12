@@ -168,16 +168,14 @@ func TestSetModeSwapsUnderOneHold(t *testing.T) {
 		}, testLogger{})
 
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() {
 				if r := recover(); r != nil {
 					t.Errorf("panic in the racing Add: %v", r)
 				}
 			}()
 			b.Add(Embed{Opts: SendOptions{Event: "found", JobID: "yt_1"}}, "", nil)
-		}()
+		})
 		b.setMode(ModeEdit)
 		wg.Wait()
 

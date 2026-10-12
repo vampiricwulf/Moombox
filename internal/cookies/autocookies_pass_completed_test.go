@@ -209,8 +209,8 @@ func gatedCallsOf(t *testing.T, callee string) map[string]string {
 // gateOf reads the gate around the call at the top of `stack`, which holds
 // every ancestor node from the enclosing function body down to the call.
 func gateOf(stack []ast.Node) string {
-	for i := len(stack) - 1; i >= 0; i-- {
-		ifStmt, ok := stack[i].(*ast.IfStmt)
+	for i, s := range slices.Backward(stack) {
+		ifStmt, ok := s.(*ast.IfStmt)
 		if !ok {
 			continue
 		}

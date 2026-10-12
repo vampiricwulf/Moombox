@@ -523,9 +523,7 @@ func TestStagingClaimIsRaceFree(t *testing.T) {
 	var mu sync.Mutex
 	accepted := 0
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { _ = recover() }()
 			if release, err := w.claimJobOperation("j-race", opRecoverAsides); err == nil {
 				mu.Lock()
@@ -533,7 +531,7 @@ func TestStagingClaimIsRaceFree(t *testing.T) {
 				mu.Unlock()
 				_ = release
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if accepted != 1 {

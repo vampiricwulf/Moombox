@@ -48,8 +48,8 @@ func TestSelectedVideoTargetDuration(t *testing.T) {
 			name:   "exact itag match wins",
 			jobCtx: &JobContext{Job: &database.Job{SelectedVideoItag: &itag137}},
 			videoInfo: &youtube.VideoInfo{Formats: []youtube.Format{
-				{Itag: itag140, Width: ptrInt(1280), TargetDurationSec: 5},
-				{Itag: itag137, Width: ptrInt(1920), TargetDurationSec: 2},
+				{Itag: itag140, Width: new(1280), TargetDurationSec: 5},
+				{Itag: itag137, Width: new(1920), TargetDurationSec: 2},
 			}},
 			wantSec: 2, wantUnknown: false,
 		},
@@ -58,7 +58,7 @@ func TestSelectedVideoTargetDuration(t *testing.T) {
 			jobCtx: &JobContext{Job: &database.Job{}},
 			videoInfo: &youtube.VideoInfo{Formats: []youtube.Format{
 				{Itag: 140, TargetDurationSec: 5}, // audio (no Width/Height) — skipped
-				{Itag: 137, Width: ptrInt(1920), TargetDurationSec: 5},
+				{Itag: 137, Width: new(1920), TargetDurationSec: 5},
 			}},
 			wantSec: 5, wantUnknown: false,
 		},
@@ -66,7 +66,7 @@ func TestSelectedVideoTargetDuration(t *testing.T) {
 			name:   "no format carries it at all",
 			jobCtx: &JobContext{Job: &database.Job{SelectedVideoItag: &itag137}},
 			videoInfo: &youtube.VideoInfo{Formats: []youtube.Format{
-				{Itag: itag137, Width: ptrInt(1920)},
+				{Itag: itag137, Width: new(1920)},
 			}},
 			wantSec: 1, wantUnknown: true,
 		},
@@ -215,9 +215,9 @@ func TestDiagnoseEvictedStart_ConfirmedEviction(t *testing.T) {
 	logger := &warnCaptureLogger{}
 	o := &DownloadOrchestrator{logger: logger}
 
-	jobCtx := &JobContext{Job: &database.Job{ID: "j1", VideoID: "vid1", Platform: "youtube", SelectedVideoItag: ptrInt(itag)}}
+	jobCtx := &JobContext{Job: &database.Job{ID: "j1", VideoID: "vid1", Platform: "youtube", SelectedVideoItag: new(itag)}}
 	videoInfo := &youtube.VideoInfo{Formats: []youtube.Format{
-		{Itag: itag, Width: ptrInt(1920), Height: ptrInt(1080), TargetDurationSec: targetDuration},
+		{Itag: itag, Width: new(1920), Height: new(1080), TargetDurationSec: targetDuration},
 	}}
 	result := &DownloadResult{VideoDownloader: videoDl}
 

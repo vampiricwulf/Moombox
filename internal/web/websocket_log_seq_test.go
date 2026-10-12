@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -118,12 +119,7 @@ func TestAConnectShowsEachLogLineOnce(t *testing.T) {
 		t.Fatal("initial_state carries no logSeq")
 	}
 	inSnapshot := func(line string) bool {
-		for _, l := range snap.Logs {
-			if l == line {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(snap.Logs, line)
 	}
 	if !strings.Contains(strings.Join(snap.Logs, "\n"), "websocket connected") {
 		t.Fatalf("fixture: the hub's own connect line is not in the snapshot: %q", snap.Logs)

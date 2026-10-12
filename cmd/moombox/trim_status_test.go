@@ -26,9 +26,9 @@ func (r *frameRecorder) Broadcast(msgType string, payload any) {
 func TestTrimEventsGoOutAsTrimStatus(t *testing.T) {
 	rec := &frameRecorder{}
 	ev := worker.TrimEvent{
-		TrimTask: worker.TrimTask{ID: "trim_j_1", JobID: "j", StartTime: 1, EndTime: 2},
-		State:    worker.TrimStateFailed,
-		Error:    "x",
+		ID: "trim_j_1", JobID: "j", StartTime: 1, EndTime: 2,
+		State: worker.TrimStateFailed,
+		Error: "x",
 	}
 	trimStatusFrames(rec)(ev)
 	if len(rec.frames) != 1 || rec.frames[0].msgType != "trim_status" {

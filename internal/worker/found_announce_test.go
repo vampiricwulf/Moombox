@@ -207,7 +207,7 @@ func TestCancelledFetchDoesNotAnnounce(t *testing.T) {
 func TestRefusedFetchKeepsTheNeutralWording(t *testing.T) {
 	sp, rec, job := foundTestJob(t)
 	sp.applyJobMetadata(job, &youtube.VideoInfo{
-		Title: "T", StreamStatus: youtube.StreamNotAStream, LengthSeconds: intPtr(600),
+		Title: "T", StreamStatus: youtube.StreamNotAStream, LengthSeconds: new(600),
 		PlayabilityError: youtube.PlayabilityMembersOnly,
 	}, false, true)
 
@@ -322,8 +322,6 @@ func TestCancelClearsTheOwedFound(t *testing.T) {
 	}
 }
 
-func intPtr(n int) *int { return &n }
-
 // Each kind of find says what it is, and carries only the fields that kind
 // has: a schedule for an upcoming one, a length where a video exists, an end
 // or publish date for a finished one.
@@ -350,23 +348,23 @@ func TestDeferredFoundSaysWhatItFound(t *testing.T) {
 			"Upcoming: ",
 			map[string]string{"Starts At": fmt.Sprintf("<t:%d:f> (<t:%d:R>)", startTS.Unix(), startTS.Unix()), "Length": "", "Ended": "", "Published": ""}},
 		{"upcoming premiere",
-			youtube.VideoInfo{ScheduledStartTime: start, IsUpcoming: true, IsPremiere: true, LengthSeconds: intPtr(600), StreamStatus: youtube.StreamUpcoming},
+			youtube.VideoInfo{ScheduledStartTime: start, IsUpcoming: true, IsPremiere: true, LengthSeconds: new(600), StreamStatus: youtube.StreamUpcoming},
 			"Upcoming premiere: ",
 			map[string]string{"Length": "10m 0s"}},
 		{"live broadcast",
-			youtube.VideoInfo{ScheduledStartTime: start, IsLive: true, LengthSeconds: intPtr(42), StreamStatus: youtube.StreamLive},
+			youtube.VideoInfo{ScheduledStartTime: start, IsLive: true, LengthSeconds: new(42), StreamStatus: youtube.StreamLive},
 			"Live: ",
 			map[string]string{"Starts At": "", "Length": ""}},
 		{"premiering now",
 			youtube.VideoInfo{IsLive: true, IsPremiere: true, StreamStatus: youtube.StreamLive},
 			"Premiering: ", nil},
 		{"ended broadcast",
-			youtube.VideoInfo{StreamStatus: youtube.StreamPostLive, IsPostLiveDVR: true, LengthSeconds: intPtr(3725),
+			youtube.VideoInfo{StreamStatus: youtube.StreamPostLive, IsPostLiveDVR: true, LengthSeconds: new(3725),
 				EndTimestamp: "2026-10-10T20:00:00Z", PublishedAt: "2026-10-10T18:00:00Z", PublishedPrecision: "started"},
 			"Ended stream: ",
 			map[string]string{"Length": "1h 2m", "Ended": "<t:1791662400:f>", "Published": "", "Starts At": ""}},
 		{"upload, day-precision publish date",
-			youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, LengthSeconds: intPtr(90),
+			youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, LengthSeconds: new(90),
 				PublishedAt: "2026-10-09T23:59:59Z", PublishedPrecision: "day", UploadDate: "2026-10-09"},
 			"Video: ",
 			map[string]string{"Published": "Oct 9, 2026", "Ended": ""}},

@@ -51,9 +51,7 @@ func TestCaptureLoggerIsSafeForConcurrentUse(t *testing.T) {
 	const writers, each = 4, 200
 	var wg sync.WaitGroup
 	for i := range writers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() {
 				if r := recover(); r != nil {
 					t.Errorf("writer %d panicked: %v", i, r)
@@ -63,7 +61,7 @@ func TestCaptureLoggerIsSafeForConcurrentUse(t *testing.T) {
 				logs.Info("line", "writer", i, "n", n)
 				_ = logs.lines()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if got := len(logs.lines()); got != writers*each {

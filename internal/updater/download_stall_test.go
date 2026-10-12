@@ -28,7 +28,7 @@ func trickleServer(t *testing.T, chunks int, gap, hold time.Duration) *httptest.
 		f := rw.(http.Flusher)
 		chunk := make([]byte, 4<<10)
 		chunk[0] = 0x7f
-		for i := 0; i < chunks; i++ {
+		for range chunks {
 			if _, err := rw.Write(chunk); err != nil {
 				return
 			}

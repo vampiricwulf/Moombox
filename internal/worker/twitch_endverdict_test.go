@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -461,12 +462,7 @@ func (h *endVerdictHarness) watchStatuses() func() []database.JobStatus {
 }
 
 func sawMuxing(seq []database.JobStatus) bool {
-	for _, s := range seq {
-		if s == database.StatusMuxing {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(seq, database.StatusMuxing)
 }
 
 // errUsher stands in for the master-playlist failures a variant refresh really

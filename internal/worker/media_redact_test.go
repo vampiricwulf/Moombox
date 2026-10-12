@@ -104,8 +104,7 @@ func TestLiveManifestFetchErrorRedactsSignedURL(t *testing.T) {
 					t.Errorf("a job log line carries %s: %q", secret, line)
 				}
 			}
-			var ue *url.Error
-			if !errors.As(dlErr, &ue) {
+			if _, ok := errors.AsType[*url.Error](dlErr); !ok {
 				t.Errorf("errors.As(*url.Error) lost on %q — transport classification needs it", dlErr.Error())
 			}
 

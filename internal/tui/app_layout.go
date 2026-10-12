@@ -331,7 +331,7 @@ func wrapFeedback(msg string, width, maxRows int) []string {
 	}
 	var rows []string
 	line := ""
-	for _, word := range strings.Fields(msg) {
+	for word := range strings.FieldsSeq(msg) {
 		switch {
 		case line == "":
 			line = word

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -49,7 +50,7 @@ func TestSettingsHeaderKeepsActiveSectionVisible(t *testing.T) {
 		for i := range sections {
 			check(i)
 		}
-		for i := len(sections) - 1; i >= 0; i-- {
+		for i := range slices.Backward(sections) {
 			check(i)
 		}
 	}
@@ -170,7 +171,7 @@ func TestSettingsFooterIsOneLineAtEightyColumns(t *testing.T) {
 	m.width, m.height = 80, 30
 	m.switchSection(sectionIndexByName(t, "Channels"))
 	view := stripANSI(m.View())
-	for _, line := range strings.Split(view, "\n") {
+	for line := range strings.SplitSeq(view, "\n") {
 		if strings.Contains(line, "Esc: Close") {
 			if !strings.Contains(line, "D: Delete") {
 				t.Errorf("the footer lost or wrapped \"D: Delete\":\n%s", view)

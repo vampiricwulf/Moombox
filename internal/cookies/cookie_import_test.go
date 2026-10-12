@@ -235,7 +235,7 @@ func TestPrepareCookieImportNeverWritesAnEmptyValuedRow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("prepareCookieImport: %v", err)
 		}
-		for _, line := range strings.Split(out, "\n") {
+		for line := range strings.SplitSeq(out, "\n") {
 			if isNetscapeDataRow(line) && netscapeRowValue(line) == "" {
 				t.Errorf("the output still carries an empty-valued row: %q", line)
 			}

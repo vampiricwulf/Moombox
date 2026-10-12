@@ -87,8 +87,6 @@ func netscapeExpiry(t *testing.T, lines []string, name string) int64 {
 	return 0
 }
 
-func ptrInt64(v int64) *int64 { return &v }
-
 // TestQueryFirefoxCookieDB_ExpiryUnitsBySchemaVersion is the gate test for
 // the Firefox 142 change: schema version 16 (and up) stores moz_cookies.expiry
 // in MILLISECONDS, everything before it stores SECONDS. Both sides of the gate
@@ -120,7 +118,7 @@ func TestQueryFirefoxCookieDB_ExpiryUnitsBySchemaVersion(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dbPath := makeFirefoxCookieDB(t, tt.schemaVersion, tt.setVersion, []firefoxRow{
-				{name: "SID", value: "abc123", host: ".youtube.com", path: "/", expiry: ptrInt64(tt.storedExpiry)},
+				{name: "SID", value: "abc123", host: ".youtube.com", path: "/", expiry: new(tt.storedExpiry)},
 			})
 
 			lines, _, err := queryFirefoxCookieDB(dbPath)
@@ -166,7 +164,7 @@ func TestQueryFirefoxCookieDB_ExpiredCookieStillExpiredAfterConversion(t *testin
 	const pastSeconds int64 = 1000000000
 
 	dbPath := makeFirefoxCookieDB(t, 16, true, []firefoxRow{
-		{name: "SID", value: "stale", host: ".youtube.com", path: "/", expiry: ptrInt64(pastSeconds * 1000)},
+		{name: "SID", value: "stale", host: ".youtube.com", path: "/", expiry: new(pastSeconds * 1000)},
 	})
 
 	lines, _, err := queryFirefoxCookieDB(dbPath)

@@ -447,7 +447,7 @@ func TestB2UnscopedRotationReachesTheJar(t *testing.T) {
 // describe the jar's contents without printing a single cookie value.
 func cookieNamesIn(header string) []string {
 	var names []string
-	for _, pair := range strings.Split(header, ";") {
+	for pair := range strings.SplitSeq(header, ";") {
 		if name, _, ok := strings.Cut(strings.TrimSpace(pair), "="); ok && name != "" {
 			names = append(names, name)
 		}

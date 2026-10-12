@@ -30,8 +30,8 @@ func TestMouseSaveAndReturnRunsTheCloseHook(t *testing.T) {
 	view := stripANSI(a.settings.View())
 	x, y := -1, -1
 	for row, line := range strings.Split(view, "\n") {
-		if i := strings.Index(line, "[ Save & Return ]"); i >= 0 {
-			x, y = len([]rune(line[:i]))+2, row
+		if before, _, ok := strings.Cut(line, "[ Save & Return ]"); ok {
+			x, y = len([]rune(before))+2, row
 			break
 		}
 	}

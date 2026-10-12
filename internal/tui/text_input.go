@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"image/color"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -200,9 +201,9 @@ func cycleNumberPreset(vals map[string]string, key string, options []string, dir
 		vals[key] = options[0]
 		return
 	}
-	for i := len(options) - 1; i >= 0; i-- {
-		if n, err := strconv.Atoi(options[i]); err == nil && n < cur {
-			vals[key] = options[i]
+	for _, option := range slices.Backward(options) {
+		if n, err := strconv.Atoi(option); err == nil && n < cur {
+			vals[key] = option
 			return
 		}
 	}

@@ -33,8 +33,7 @@ func jobIDf(i int) string { return "job-" + strconv.Itoa(i) }
 // and the live job is never started (not dropped, not logged).
 func TestDequeueDoesNotTakeALifecycleSlot(t *testing.T) {
 	q := NewJobQueue(10)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	for i := range 100 {
 		q.Enqueue(jobIDf(i), database.StatusUpcoming)
@@ -77,8 +76,7 @@ func TestDequeueDoesNotTakeALifecycleSlot(t *testing.T) {
 func TestDeclinedJobNeverTouchesTheLifecycleCount(t *testing.T) {
 	q := NewJobQueue(10)
 	q.maxLifecycle = 3
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	q.Enqueue("declined", database.StatusUpcoming)
 	if _, _, ok := q.Dequeue(ctx); !ok {
@@ -170,8 +168,7 @@ func TestAcquireLifecycleSlotGatesDownloads(t *testing.T) {
 func TestCompleteReleasesTheLifecycleSlotWithoutAProcessingRow(t *testing.T) {
 	q := NewJobQueue(10)
 	q.maxLifecycle = 1
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if !q.AcquireLifecycleSlot(ctx, "orphan") {
 		t.Fatal("first AcquireLifecycleSlot = false")
@@ -208,8 +205,7 @@ func TestEnqueueDropLogsOncePerJob(t *testing.T) {
 	q := NewJobQueue(10)
 	counter := &warnCaptureLogger{}
 	q.SetLogger(counter)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	for i := range 100 {
 		q.Enqueue(jobIDf(i), database.StatusUpcoming)

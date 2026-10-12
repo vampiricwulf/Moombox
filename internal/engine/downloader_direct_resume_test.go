@@ -115,7 +115,7 @@ func TestDirectDownload_MidStream200DoesNotSplice(t *testing.T) {
 	tmp := t.TempDir()
 	outFile := filepath.Join(tmp, "video.mp4")
 
-	var nonZeroRangeHits int32
+	var nonZeroRangeHits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rng := r.Header.Get("Range")
 		if rng == "" {
@@ -142,7 +142,7 @@ func TestDirectDownload_MidStream200DoesNotSplice(t *testing.T) {
 			// A non-zero-offset chunk: pretend the server ignores Range and
 			// dumps the whole file from byte 0 with a 200 — the corruption
 			// trigger. (Under the 50 MB read cap, so it's read in full.)
-			atomic.AddInt32(&nonZeroRangeHits, 1)
+			nonZeroRangeHits.Add(1)
 			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 			w.WriteHeader(http.StatusOK)
 			w.Write(body)
@@ -167,7 +167,7 @@ func TestDirectDownload_MidStream200DoesNotSplice(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if atomic.LoadInt32(&nonZeroRangeHits) == 0 {
+	if nonZeroRangeHits.Load() == 0 {
 		t.Fatal("test never exercised the mid-download 200 path (no non-zero-offset chunk requested)")
 	}
 

@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -264,13 +265,7 @@ func TestCitationAllowlistParsing(t *testing.T) {
 func TestRootDocsAreChecked(t *testing.T) {
 	root := repoRoot(t)
 	for _, name := range []string{"SPEC.md", "CLAUDE.md"} {
-		found := false
-		for _, d := range specDocs {
-			if d == name {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(specDocs, name)
 		if !found {
 			t.Errorf("%s is not in specDocs -- O-Z put both root docs under the citation checks", name)
 			continue
@@ -295,12 +290,7 @@ func TestRootDocsAreChecked(t *testing.T) {
 func TestReadmeAndEverySkillAreChecked(t *testing.T) {
 	root := repoRoot(t)
 	inSpecDocs := func(name string) bool {
-		for _, d := range specDocs {
-			if d == name {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(specDocs, name)
 	}
 
 	if !inSpecDocs("README.md") {

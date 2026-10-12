@@ -141,8 +141,6 @@ func assertCookies(t *testing.T, got []seenRequest, want []*string) {
 	}
 }
 
-func ptr(s string) *string { return &s }
-
 // TestFetchChatReReadsCookiePerRequest is the claim for the chat-poll use
 // site. The getter returns a DIFFERENT value on its second call; if the header
 // were captured at construction both polls would carry the first value, which
@@ -157,7 +155,7 @@ func TestFetchChatReReadsCookiePerRequest(t *testing.T) {
 		}
 	}
 
-	assertCookies(t, rec.requests(), []*string{ptr("SID=first-value"), ptr("SID=second-value")})
+	assertCookies(t, rec.requests(), []*string{new("SID=first-value"), new("SID=second-value")})
 }
 
 // TestFetchFreshContinuationReReadsCookiePerRequest is the same claim for the
@@ -178,7 +176,7 @@ func TestFetchFreshContinuationReReadsCookiePerRequest(t *testing.T) {
 		}
 	}
 
-	assertCookies(t, rec.requests(), []*string{ptr("SID=first-value"), ptr("SID=second-value")})
+	assertCookies(t, rec.requests(), []*string{new("SID=first-value"), new("SID=second-value")})
 }
 
 // TestFetchChatNilGetterSendsNoCookie: tests and cookieless installs build a
@@ -287,5 +285,5 @@ func TestCookieGetterFromYouTubeAuthTracksTheLiveJar(t *testing.T) {
 		t.Fatalf("second poll: %v", err)
 	}
 
-	assertCookies(t, rec.requests(), []*string{ptr("SID=before-rotation"), ptr("SID=after-rotation")})
+	assertCookies(t, rec.requests(), []*string{new("SID=before-rotation"), new("SID=after-rotation")})
 }

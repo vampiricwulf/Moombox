@@ -49,7 +49,7 @@ func TestHelpClaimsTaskPanelPaging(t *testing.T) {
 
 	view := stripANSI(h.viewport.View())
 	sawPaging, sawHomeEnd := false, false
-	for _, line := range strings.Split(view, "\n") {
+	for line := range strings.SplitSeq(view, "\n") {
 		if strings.Contains(line, "PgUp") {
 			sawPaging = true
 			if !strings.Contains(line, "(Tasks · Details · Logs · Job Log)") {

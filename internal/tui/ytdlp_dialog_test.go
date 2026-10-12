@@ -61,7 +61,7 @@ func TestYtdlpDialogShowsStatusAndInstalls(t *testing.T) {
 			Installed:     statusCalls > 1,
 			PluginDir:     "/plug",
 			CurrentPort:   7740,
-			InstalledPort: intPtr(7739),
+			InstalledPort: new(7739),
 			PortMismatch:  statusCalls == 1,
 		}, nil
 	}
@@ -152,7 +152,7 @@ func TestYtdlpDialogRefreshReloads(t *testing.T) {
 	calls := 0
 	app.OnYtdlpPluginStatus = func() (ytdlpplugin.Info, error) {
 		calls++
-		return ytdlpplugin.Info{Installed: true, PluginDir: "/plug", CurrentPort: 7740, InstalledPort: intPtr(7740)}, nil
+		return ytdlpplugin.Info{Installed: true, PluginDir: "/plug", CurrentPort: 7740, InstalledPort: new(7740)}, nil
 	}
 	_, cmd := app.dispatchAction("E Y", nil)
 	app.Update(runCmd(t, cmd))

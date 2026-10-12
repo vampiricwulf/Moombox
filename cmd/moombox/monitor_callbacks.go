@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -794,9 +795,7 @@ func withAuthFailureCooldown(send authFailureNotifier) (authFailureNotifier, fun
 func withPersistedAuthFailureCooldown(send authFailureNotifier, st *openAlerts) (authFailureNotifier, func(platform string) bool) {
 	var mu sync.Mutex
 	last := make(map[string]time.Time)
-	for platform, at := range st.snapshot().Auth {
-		last[platform] = at
-	}
+	maps.Copy(last, st.snapshot().Auth)
 	// persist writes one platform's stamp, read inside the store's lock so a
 	// stamp and a close racing for the same platform leave the current one.
 	persist := func(platform string) {

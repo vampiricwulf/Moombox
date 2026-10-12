@@ -6,10 +6,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
-// ptrBool is a local helper: ChannelConfig.Enabled is a *bool whose nil means
-// enabled.
-func ptrBool(b bool) *bool { return &b }
-
 // TestPickTwitchProbeChannelMirrorsTheMonitor pins the one decision the closure
 // makes on its own: WHICH login the tier-2 probe targets. The predicate is
 // copied from TwitchMonitor.getTwitchChannels (internal/monitor/twitch.go) so
@@ -51,7 +47,7 @@ func TestPickTwitchProbeChannelMirrorsTheMonitor(t *testing.T) {
 		{
 			"a disabled twitch channel is skipped",
 			[]config.ChannelConfig{
-				{ID: "disabled_login", Platform: "twitch", Enabled: ptrBool(false)},
+				{ID: "disabled_login", Platform: "twitch", Enabled: new(false)},
 				{ID: "enabled_login", Platform: "twitch"},
 			},
 			"enabled_login",
@@ -59,14 +55,14 @@ func TestPickTwitchProbeChannelMirrorsTheMonitor(t *testing.T) {
 		{
 			"every twitch channel disabled",
 			[]config.ChannelConfig{
-				{ID: "disabled_login", Platform: "twitch", Enabled: ptrBool(false)},
+				{ID: "disabled_login", Platform: "twitch", Enabled: new(false)},
 			},
 			"",
 		},
 		{
 			"an explicit enabled=true is honoured",
 			[]config.ChannelConfig{
-				{ID: "explicit_login", Platform: "twitch", Enabled: ptrBool(true)},
+				{ID: "explicit_login", Platform: "twitch", Enabled: new(true)},
 			},
 			"explicit_login",
 		},

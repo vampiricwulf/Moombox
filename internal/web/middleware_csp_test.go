@@ -17,7 +17,7 @@ func TestSecurityHeadersCSPAdmitsEmoteCDNs(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 
 	imgSrc := ""
-	for _, d := range strings.Split(rec.Header().Get("Content-Security-Policy"), ";") {
+	for d := range strings.SplitSeq(rec.Header().Get("Content-Security-Policy"), ";") {
 		if d = strings.TrimSpace(d); strings.HasPrefix(d, "img-src ") {
 			imgSrc = d
 		}
@@ -50,7 +50,7 @@ func TestSecurityHeadersCSPHasNoInlineScript(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 
 	directives := map[string]string{}
-	for _, d := range strings.Split(rec.Header().Get("Content-Security-Policy"), ";") {
+	for d := range strings.SplitSeq(rec.Header().Get("Content-Security-Policy"), ";") {
 		d = strings.TrimSpace(d)
 		if name, rest, ok := strings.Cut(d, " "); ok {
 			directives[name] = rest

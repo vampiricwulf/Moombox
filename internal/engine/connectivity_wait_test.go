@@ -69,8 +69,7 @@ func TestCallIsOnlineSingleFlight(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 5 {
-		wg.Add(1)
-		go func() { defer wg.Done(); callIsOnline(probe) }()
+		wg.Go(func() { callIsOnline(probe) })
 	}
 	wg.Wait() // every caller gives up at isOnlineProbeTimeout
 	close(block)

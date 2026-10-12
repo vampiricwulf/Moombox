@@ -80,8 +80,7 @@ func TestSchedulerSweepsWhenConnectivityReturns(t *testing.T) {
 	addSchedJob(t, db, &ch, "back_a", database.StatusQueued, 1)
 	addFeedItemRow(t, db, ch, "back_a", "2026-07-10T00:00:00Z")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go s.Run(ctx)
 	waitForCond(t, 2*time.Second, "Run's subscription", func() bool {
 		conn.mu.Lock()

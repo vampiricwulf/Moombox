@@ -161,7 +161,7 @@ func TestQueryFirefoxCookieDB_NullColumnsAreNotSilentlyDropped(t *testing.T) {
 // is the safe direction but was completely unobservable. A database with no
 // readable user_version must say so rather than pass for a genuine schema 0.
 func TestQueryFirefoxCookieDB_ReportsSchemaProbeOutcome(t *testing.T) {
-	rows := []firefoxRow{{name: "SAPISID", value: "v", host: ".youtube.com", path: "/", expiry: ptrInt64(0)}}
+	rows := []firefoxRow{{name: "SAPISID", value: "v", host: ".youtube.com", path: "/", expiry: new(int64(0))}}
 
 	if _, stats, err := queryFirefoxCookieDB(makeFirefoxCookieDB(t, 16, true, rows)); err != nil {
 		t.Fatalf("queryFirefoxCookieDB: %v", err)

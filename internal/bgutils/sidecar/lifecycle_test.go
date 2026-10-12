@@ -144,8 +144,7 @@ func TestSupervisorStopsRetryingAStoppedSidecar(t *testing.T) {
 	})
 	sup.sleep = func(context.Context, time.Duration) {}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	done := make(chan struct{})
 	go func() { defer close(done); sup.Run(ctx) }()
 	sup.Notify("stdout EOF")
@@ -287,8 +286,7 @@ func TestAStopCancelledRestartReportsErrStopped(t *testing.T) {
 	})
 	sup.sleep = func(context.Context, time.Duration) {}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	done := make(chan struct{})
 	go func() { defer close(done); sup.Run(ctx) }()
 	sup.Notify("stdout EOF")

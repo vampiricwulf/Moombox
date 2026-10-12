@@ -357,7 +357,7 @@ func TestSchemeMuxCloseDuringBackoffEndsTheLoop(t *testing.T) {
 
 	// Let the ladder climb a rung or two so the Close lands inside a sleep
 	// rather than between two Accepts.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		select {
 		case <-ln.attempted:
 		case <-time.After(2 * time.Second):

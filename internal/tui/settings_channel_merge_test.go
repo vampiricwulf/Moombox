@@ -85,8 +85,6 @@ func channelIDs(chs []config.ChannelConfig) []string {
 	return ids
 }
 
-func boolPtr(b bool) *bool { return &b }
-
 // TestTUISaveKeepsDashboardChannelChanges pins W25-10: a TUI Settings save
 // whose channel editor was not touched leaves the live channel list exactly
 // as the dashboard left it while the overlay was open. applyValues wrote
@@ -115,7 +113,7 @@ func TestTUISaveKeepsDashboardChannelChanges(t *testing.T) {
 	t.Run("disable", func(t *testing.T) {
 		m, store := settingsOverStore(t)
 		dashboard(t, store, func(chs []config.ChannelConfig) []config.ChannelConfig {
-			chs[0].Enabled = boolPtr(false)
+			chs[0].Enabled = new(false)
 			return chs
 		})
 		// Open A's editor and save it unchanged.
@@ -257,7 +255,7 @@ func TestTUISaveMergesAChannelFieldByField(t *testing.T) {
 	t.Run("a dashboard disable survives a TUI rename", func(t *testing.T) {
 		m, store := settingsOverStore(t)
 		dashboard(t, store, func(chs []config.ChannelConfig) []config.ChannelConfig {
-			chs[0].Enabled = boolPtr(false)
+			chs[0].Enabled = new(false)
 			return chs
 		})
 		openChannelEditor(m)
@@ -321,7 +319,7 @@ func TestMergeChannelFieldsCoversEveryFormField(t *testing.T) {
 	one, three, seven := 1, 3, 7
 	base := config.ChannelConfig{ID: mergeA, Name: "A", Platform: "youtube"}
 	edited := config.ChannelConfig{
-		ID: "UCaaaaaaaaaaaaaaaaaaaaaA", Name: "tui", Platform: "youtube", Enabled: boolPtr(false),
+		ID: "UCaaaaaaaaaaaaaaaaaaaaaA", Name: "tui", Platform: "youtube", Enabled: new(false),
 		Terms: config.ChannelTerms{Simple: "(?i)tui"}, IncludeNonLiveContent: true, QualityPreference: "720p",
 		OutputDirectory: "/tui", ArchiveWindowDays: &seven, ArchiveSlots: &three,
 	}

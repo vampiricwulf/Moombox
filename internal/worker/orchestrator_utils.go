@@ -96,7 +96,7 @@ func (p *ffprobeData) spanSec() float64 {
 // Matched entry by entry rather than on the whole list, so an FFmpeg build
 // that orders or extends the aliases differently still matches.
 func isMovContainer(formatName string) bool {
-	for _, name := range strings.Split(formatName, ",") {
+	for name := range strings.SplitSeq(formatName, ",") {
 		switch strings.TrimSpace(name) {
 		case "mov", "mp4", "m4a", "3gp", "3g2", "mj2":
 			return true

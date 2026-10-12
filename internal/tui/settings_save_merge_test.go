@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -560,9 +561,7 @@ func TestTUISaveRestartReflectsWhatChanged(t *testing.T) {
 		}
 		prompted := 0
 		m.OnRestartRequired = func() { prompted++ }
-		for k, v := range typed {
-			m.values[k] = v
-		}
+		maps.Copy(m.values, typed)
 		saveOverlay(t, m)
 		if m.showRestartOverlay != (prompted == 1) {
 			t.Fatalf("restart question shown %v, OnRestartRequired called %d times", m.showRestartOverlay, prompted)

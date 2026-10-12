@@ -9,15 +9,13 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
-func boolPtr(b bool) *bool { return &b }
-
 // TestBuildTargetsSkipsDisabled pins the mute switch. A disabled target must
 // leave the delivery list entirely — not deliver-and-discard — so HasTargets
 // reports false when everything is muted and the HasTargets guards in the
 // monitor and update-available paths stop building embeds nobody will read.
 func TestBuildTargetsSkipsDisabled(t *testing.T) {
 	cfg := &config.MoomboxConfig{Notifications: []config.NotificationConfig{
-		{URL: "discord://1/aaa", Enabled: boolPtr(false)},
+		{URL: "discord://1/aaa", Enabled: new(false)},
 		{URL: "discord://2/bbb"},
 	}}
 	targets := buildTargets(cfg, testLogger{})
@@ -26,7 +24,7 @@ func TestBuildTargetsSkipsDisabled(t *testing.T) {
 	}
 
 	allOff := &config.MoomboxConfig{Notifications: []config.NotificationConfig{
-		{URL: "discord://1/aaa", Enabled: boolPtr(false)},
+		{URL: "discord://1/aaa", Enabled: new(false)},
 	}}
 	m := NewManager(allOff, testLogger{})
 	if m.HasTargets() {
@@ -46,7 +44,7 @@ func TestBuildTargetsDisabledDoesNotShadowItsTwin(t *testing.T) {
 	// the surviving target's filter is nil either way, and the assertion could
 	// not tell a skip-before-dedupe from a skip-after-dedupe.
 	cfg := &config.MoomboxConfig{Notifications: []config.NotificationConfig{
-		{URL: "discord://1/aaa", Enabled: boolPtr(false), Events: []string{"error"}},
+		{URL: "discord://1/aaa", Enabled: new(false), Events: []string{"error"}},
 		{URL: "https://discord.com/api/webhooks/1/aaa", Events: []string{"finished"}},
 	}}
 	targets := buildTargets(cfg, testLogger{})

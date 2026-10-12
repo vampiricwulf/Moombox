@@ -54,7 +54,7 @@ func TestBuildTargetsLogsNoURLCredential(t *testing.T) {
 		{URL: "tgram://123456789:AAH-SECRETBOTTOKEN/987654321"},
 		{URL: "https://hooks.example.com?token=SECRETQ"},
 		// disabled: logged before it is ever parsed
-		{URL: "https://moombox:hunter3SECRET@discord.com/api/webhooks/1/SECRETTOKEN", Enabled: boolPtr(false)},
+		{URL: "https://moombox:hunter3SECRET@discord.com/api/webhooks/1/SECRETTOKEN", Enabled: new(false)},
 		// accepted, with a filter and a mention list that warn
 		{URL: "https://discord.com/api/webhooks/1/SECRETTOKEN2", Events: []string{"", "no_such_event"}},
 		{URL: "https://discord.com/api/webhooks/2/SECRETTOKEN3", Mention: "@here", MentionEvents: &mentionEvents},

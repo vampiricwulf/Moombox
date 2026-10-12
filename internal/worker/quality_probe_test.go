@@ -287,8 +287,7 @@ func TestProbeVideoInfoFallsBackToTheCascadeOnAProbeError(t *testing.T) {
 			fullErr:  &youtube.VideoIDMismatchError{Requested: "vid", Got: "other"},
 		}
 		_, err := probeVideoInfo(context.Background(), f, "vid", false, nil)
-		var mismatch *youtube.VideoIDMismatchError
-		if !errors.As(err, &mismatch) {
+		if _, ok := errors.AsType[*youtube.VideoIDMismatchError](err); !ok {
 			t.Fatalf("err = %v; want a wrapped *youtube.VideoIDMismatchError", err)
 		}
 	})
@@ -343,8 +342,7 @@ func TestProbeVideoInfoEndsTheTickOnASubstitutedVideo(t *testing.T) {
 			}
 
 			_, err := probeVideoInfo(context.Background(), f, "vid", tc.requiresAuth, nil)
-			var mm *youtube.VideoIDMismatchError
-			if !errors.As(err, &mm) {
+			if _, ok := errors.AsType[*youtube.VideoIDMismatchError](err); !ok {
 				t.Fatalf("err = %v; want the substitution to be reported", err)
 			}
 			if f.full != 0 {

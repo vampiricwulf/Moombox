@@ -719,8 +719,7 @@ func decodeConfigEntries[T any](field string, raw []any) ([]T, map[string]string
 		}
 		var entry T
 		if err := json.Unmarshal(data, &entry); err != nil {
-			var te *json.UnmarshalTypeError
-			if errors.As(err, &te) {
+			if te, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
 				if te.Field != "" {
 					key += "." + te.Field
 				}

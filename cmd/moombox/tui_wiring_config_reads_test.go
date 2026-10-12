@@ -23,9 +23,7 @@ func TestRunStateConfigReadsAreLocked(t *testing.T) {
 
 	const rounds = 300
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer func() {
 			if r := recover(); r != nil {
 				t.Errorf("the config writer panicked: %v", r)
@@ -41,7 +39,7 @@ func TestRunStateConfigReadsAreLocked(t *testing.T) {
 				}
 			})
 		}
-	}()
+	})
 
 	for range rounds {
 		_ = s.httpsEnabled()
@@ -130,9 +128,7 @@ func TestRunStateConfigLoadedReadIsLocked(t *testing.T) {
 
 	const rounds = 60
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer func() {
 			if r := recover(); r != nil {
 				t.Errorf("the config writer panicked: %v", r)
@@ -146,7 +142,7 @@ func TestRunStateConfigLoadedReadIsLocked(t *testing.T) {
 				return
 			}
 		}
-	}()
+	})
 
 	for range rounds {
 		_ = s.configLoaded()

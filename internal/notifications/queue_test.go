@@ -202,7 +202,7 @@ func TestQueueCapCountsMessagesNotEmbeds(t *testing.T) {
 	// window closes one whole coalescing window of `found`s: perWindow sends,
 	// then the timer. Each window leaves the batcher as exactly one message.
 	window := func(n int) {
-		for j := 0; j < perWindow; j++ {
+		for j := range perWindow {
 			m.Send("w"+itoa(n)+"-"+itoa(j), "", TypeInfo, nil,
 				SendOptions{Event: "found", JobID: "w" + itoa(n) + "-" + itoa(j)})
 		}
@@ -560,7 +560,7 @@ func TestBeginShutdownFlushesTheOpenWindowSingleAttempt(t *testing.T) {
 	m := newTestManagerWithClock(t, clk, 5*time.Second, notificationTarget{sender: s, key: "k1"})
 
 	// Batchable sends: they sit in the open window and nothing is queued yet.
-	for i := 0; i < embeds; i++ {
+	for i := range embeds {
 		m.Send("Stream Found", "", TypeInfo, nil, SendOptions{Event: "found", JobID: itoa(i)})
 	}
 	m.BeginShutdown()

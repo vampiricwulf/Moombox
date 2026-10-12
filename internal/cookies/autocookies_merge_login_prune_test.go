@@ -151,7 +151,7 @@ func TestRefreshWarnsWhenTheExpiredTwitchLoginIsPruned(t *testing.T) {
 	// matching the unrelated Warn line above.
 	const successMarker = "cookie refresh succeeded"
 	var successLine string
-	for _, line := range strings.Split(all, "\n") {
+	for line := range strings.SplitSeq(all, "\n") {
 		if strings.HasPrefix(line, successMarker) {
 			successLine = line
 		}

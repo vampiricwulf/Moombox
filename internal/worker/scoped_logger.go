@@ -41,7 +41,7 @@ func isNilLogger(inner logger) bool {
 		return true
 	}
 	switch v := reflect.ValueOf(inner); v.Kind() {
-	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
 		return v.IsNil()
 	default:
 		return false
