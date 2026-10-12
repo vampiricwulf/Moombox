@@ -314,10 +314,7 @@ func extractPublishedAt(status string, microformat map[string]any) (ts, precisio
 // parses as neither is no-date (""): garbage stored at 'day' rank would
 // sort nonsensically forever.
 func microformatDate(microformat map[string]any) string {
-	v := getStr(microformat, "uploadDate")
-	if v == "" {
-		v = getStr(microformat, "publishDate")
-	}
+	v := microformatUploadDate(microformat)
 	if _, err := time.Parse(time.DateOnly, v); err == nil {
 		return v + "T23:59:59Z"
 	}
@@ -824,12 +821,12 @@ func isPremiereResponse(videoDetails, playabilityStatus, microformat map[string]
 // upload has no broadcast details. Display only: classifyStream keeps the
 // narrower signal it has always decided on.
 func isPremiereForDisplay(videoDetails, playabilityStatus, microformat map[string]any) bool {
-	if isPremiereResponse(videoDetails, playabilityStatus, microformat) {
-		return true
-	}
 	isLiveContent, known := videoDetails["isLiveContent"].(bool)
 	lbd, _ := microformat["liveBroadcastDetails"].(map[string]any)
-	return known && !isLiveContent && lbd != nil && getStr(lbd, "startTimestamp") != ""
+	if lbd == nil || getStr(lbd, "startTimestamp") == "" || isLiveContent {
+		return false
+	}
+	return known || isPremiereResponse(videoDetails, playabilityStatus, microformat)
 }
 
 func classifyStream(videoDetails, playabilityStatus, microformat map[string]any, hasFormats bool) (StreamStatus, bool, bool, bool) {

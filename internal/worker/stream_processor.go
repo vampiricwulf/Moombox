@@ -677,7 +677,7 @@ func (sp *StreamProcessor) applyJobMetadata(job *database.Job, info *youtube.Vid
 	if announceFound {
 		sp.sendStreamFound(job, info)
 	} else if notifyStartTimeConfirmed && info.IsUpcoming && !info.IsLive && sp.notifier != nil {
-		sp.notifier.Send(startTimeConfirmed(job, info.ScheduledStartTime))
+		sp.notifier.Send(startTimeConfirmed(job))
 	}
 
 	if notifyScheduleChanged && sp.notifier != nil {

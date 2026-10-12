@@ -41,7 +41,7 @@ func (sp *StreamProcessor) sendStreamFound(job *database.Job, info *youtube.Vide
 		// A target filtered to `scheduled` but not `found` heard about this
 		// schedule before the two embeds merged; it still does, in the
 		// confirmation's own words (Manager.Send routes it).
-		ct, cd, cn, cf, co := startTimeConfirmed(job, job.StreamStartTime)
+		ct, cd, cn, cf, co := startTimeConfirmed(job)
 		opts.Fallback = &notifications.Fallback{Title: ct, Description: cd, Type: cn, Fields: cf, Event: co.Event}
 	}
 	sp.notifier.Send(title, desc, ntype, fields, opts)
@@ -49,7 +49,9 @@ func (sp *StreamProcessor) sendStreamFound(job *database.Job, info *youtube.Vide
 
 // startTimeConfirmed is "YouTube Start Time Confirmed": an upcoming stream's
 // schedule, when it appears after the stream was announced as found — or, as
-// a Fallback, for a target that does not take "Stream Found" at all.
+// a Fallback, for a target that does not take "Stream Found" at all. The
+// schedule is the row's: both callers send it once applyJobMetadata has
+// written the fetch's start time to the row and synced job to it.
 //
 // The one row→facts mapper, exactly as the worker's "Authentication Required"
 // send uses it (worker.go). `scheduled` is one of the lifecycle events, and
@@ -65,8 +67,8 @@ func (sp *StreamProcessor) sendStreamFound(job *database.Job, info *youtube.Vide
 // EscapeMarkdown's doc). It is rendered as "Stream Found" renders the same
 // field, countdown and all; a value that does not parse goes through raw, as
 // it always has.
-func startTimeConfirmed(job *database.Job, scheduledStart string) (string, string, notifications.NotificationType, []notifications.Field, notifications.SendOptions) {
-	startsAt := scheduledStart
+func startTimeConfirmed(job *database.Job) (string, string, notifications.NotificationType, []notifications.Field, notifications.SendOptions) {
+	startsAt := job.StreamStartTime
 	if t := parseRFC3339(startsAt); !t.IsZero() {
 		startsAt = notifications.StartsAtValue(t)
 	}

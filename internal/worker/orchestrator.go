@@ -192,12 +192,10 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			{Name: "Type", Value: dlType, Inline: true},
 		}
 		// Include scheduled start time if available
-		if jobCtx.Job.StreamStartTime != "" {
-			if t, err := time.Parse(time.RFC3339, jobCtx.Job.StreamStartTime); err == nil {
-				startFields = append(startFields, notifications.Field{
-					Name: "Scheduled For", Value: fmt.Sprintf("<t:%d:f>", t.Unix()), Inline: true,
-				})
-			}
+		if t := parseRFC3339(jobCtx.Job.StreamStartTime); !t.IsZero() {
+			startFields = append(startFields, notifications.Field{
+				Name: "Scheduled For", Value: notifications.Timestamp(t), Inline: true,
+			})
 		}
 		// Include format selection details with human-readable labels
 		if jobCtx.Job.SelectedVideoItag != nil {

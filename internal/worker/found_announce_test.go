@@ -484,13 +484,15 @@ func owe(t *testing.T, db *database.Database, job *database.Job) {
 // first fetch (a panic, a park) and is retried or resumed later would
 // otherwise announce a discovery long past.
 //
-// Mutants: announce_found dropped from ReinitializeJob's or ResumeJob's reset.
+// Mutants: announce_found dropped from ReinitializeJob's, AutoReinitializeJob's
+// or ResumeJob's reset.
 func TestRerunsClearTheOwedFound(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		rerun func(w *DownloadWorker, id string)
 	}{
 		{"retry", (*DownloadWorker).ReinitializeJob},
+		{"auto-reinitialize", (*DownloadWorker).AutoReinitializeJob},
 		{"resume", (*DownloadWorker).ResumeJob},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

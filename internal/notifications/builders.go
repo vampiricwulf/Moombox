@@ -264,13 +264,19 @@ var foundLead = map[string]string{
 	FoundVideo:            "Video: ",
 }
 
+// Timestamp renders t as Discord's <t:…:f> markup: an absolute moment, shown
+// in the reader's own timezone. The one renderer for every embed field that
+// carries a time, here and in the producers.
+func Timestamp(t time.Time) string {
+	return fmt.Sprintf("<t:%d:f>", t.Unix())
+}
+
 // StartsAtValue renders a scheduled start for a "Starts At" field: absolute
 // and relative, both of which Discord shows in the reader's own timezone, the
 // countdown kept current. Shared by StreamFound and the worker's "YouTube
 // Start Time Confirmed", which name the same field.
 func StartsAtValue(t time.Time) string {
-	s := t.Unix()
-	return fmt.Sprintf("<t:%d:f> (<t:%d:R>)", s, s)
+	return fmt.Sprintf("%s (<t:%d:R>)", Timestamp(t), t.Unix())
 }
 
 // StreamFound is the discovery embed for both monitors (audit C4). The TITLE
@@ -289,7 +295,7 @@ func StreamFound(f JobFacts) (string, string, NotificationType, []Field, SendOpt
 	lead := "Found matching stream: "
 	if f.Platform == "twitch" {
 		lead = "Live: "
-	} else if l, ok := foundLead[f.Kind]; ok {
+	} else if l := foundLead[f.Kind]; l != "" {
 		lead = l
 	}
 	desc := lead + EscapeMarkdown(displayName(f))
@@ -302,13 +308,13 @@ func StreamFound(f JobFacts) (string, string, NotificationType, []Field, SendOpt
 	fb.AddInlineIf(f.Length > 0, "Length", utils.FormatDurationHuman(f.Length))
 	switch {
 	case !f.EndedAt.IsZero():
-		fb.AddInline("Ended", fmt.Sprintf("<t:%d:f>", f.EndedAt.Unix()))
+		fb.AddInline("Ended", Timestamp(f.EndedAt))
 	case !f.PublishedAt.IsZero() && f.PublishedDayOnly:
 		// A plain date, not <t:…:D>: the day was normalised to its last
 		// second UTC, which a reader east of UTC would see as the day after.
 		fb.AddInline("Published", f.PublishedAt.UTC().Format("Jan 2, 2006"))
 	case !f.PublishedAt.IsZero():
-		fb.AddInline("Published", fmt.Sprintf("<t:%d:f>", f.PublishedAt.Unix()))
+		fb.AddInline("Published", Timestamp(f.PublishedAt))
 	}
 	fb.AddInlineIf(f.Access != "", "Access", f.Access)
 	if f.Description != "" {

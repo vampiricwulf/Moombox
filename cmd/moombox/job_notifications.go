@@ -49,7 +49,9 @@ func cliAddedFacts(platform, jobID, jobURL, channelLogin string) notifications.J
 //
 // channelURL is the channel's page, which the job row cannot derive — a
 // Twitch row's channel_id is always NULL, and its login is only on the
-// monitor's stream info. category is the Twitch game.
+// monitor's stream info — so the monitor always supplies it; only a test
+// leaves it blank, and the facts' own fallback stands then. category is the
+// Twitch game.
 func notifyStreamFound(n notifications.Sender, job *database.Job, channelURL, category string) {
 	f := worker.NotifyFacts(job)
 	if channelURL != "" {

@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -74,8 +73,8 @@ func notifyAuthor(f notifications.JobFacts) *notifications.Author {
 // discordTimestamp renders an RFC 3339 time as Discord's <t:…:f> markup, or
 // returns raw unchanged when it does not parse.
 func discordTimestamp(raw string) string {
-	if t, err := time.Parse(time.RFC3339, raw); err == nil {
-		return fmt.Sprintf("<t:%d:f>", t.Unix())
+	if t := parseRFC3339(raw); !t.IsZero() {
+		return notifications.Timestamp(t)
 	}
 	return raw
 }

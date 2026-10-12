@@ -2180,8 +2180,8 @@ func outageAlert(start, end time.Time) (title, description string, fields []noti
 	return "Outage Alert",
 		"Internet connectivity was lost — channel monitoring paused and downloads waited; monitors are re-checking now",
 		[]notifications.Field{
-			{Name: "Started", Value: fmt.Sprintf("<t:%d:f>", start.Unix()), Inline: true},
-			{Name: "Ended", Value: fmt.Sprintf("<t:%d:f>", end.Unix()), Inline: true},
+			{Name: "Started", Value: notifications.Timestamp(start), Inline: true},
+			{Name: "Ended", Value: notifications.Timestamp(end), Inline: true},
 			{Name: "Duration", Value: end.Sub(start).Round(time.Second).String(), Inline: true},
 		}
 }
