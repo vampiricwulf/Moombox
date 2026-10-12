@@ -173,8 +173,9 @@ type ChatDownloader struct {
 	//
 	// ABSOLUTE, never the epoch-relative OffsetMs. A live record has no
 	// videoOffsetTimeMsec, so its offset is derived from cd.streamStartMs —
-	// which on the early-chat handoff is the SCHEDULED start (tryStartEarlyChat
-	// passes videoInfo.ScheduledStartTime and nothing ever corrects it), while
+	// which on the early-chat handoff is the SCHEDULED start, or for a stream
+	// with no schedule its upload date (tryStartEarlyChat passes
+	// earlyChatEpoch, and nothing ever corrects it), while
 	// the replay archive's own offsets are measured from the ACTUAL start. A
 	// stream that went live five minutes late would leave a mark five minutes
 	// too high and the pass would silently drop the entire post-live tail it

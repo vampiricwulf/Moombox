@@ -134,6 +134,20 @@ type VideoInfo struct {
 	// "day" (microformat uploadDate/publishDate fallback). Empty when
 	// PublishedAt is empty.
 	PublishedPrecision string `json:"publishedPrecision,omitempty"`
+
+	// IsPremiere marks a premiere — an uploaded video played out at a
+	// scheduled time — rather than a live broadcast (isPremiereForDisplay).
+	// Display only: nothing decides on this field.
+	IsPremiere bool `json:"isPremiere,omitempty"`
+
+	// UploadDate is the microformat's uploadDate (or publishDate) as YouTube
+	// gives it: when the video was created. For an upcoming broadcast that is
+	// when it was set up, which is why ScheduledStartTime no longer falls back
+	// to it there. Two uses: the early-chat epoch of a stream with no schedule
+	// (earlyChatEpoch), where any fixed instant serves; and telling a bare-date
+	// publish date from one that carried a time, for "Stream Found"'s Published
+	// field (addFoundFacts, internal/worker/found_announce.go).
+	UploadDate string `json:"uploadDate,omitempty"`
 }
 
 // ChatSource carries the chat-setup facts the WATCH PAGE this VideoInfo was

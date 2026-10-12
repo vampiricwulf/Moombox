@@ -143,15 +143,17 @@ func callsIn(node ast.Node) map[string][]*ast.CallExpr {
 // createYouTubeJob holds back "Stream Found" for a backlog VOD: a deep
 // backfill queues one per catalog VOD, and each announces itself with
 // "Download Starting" when the scheduler admits it. The gate is
-// announceYouTubeJobFound's, and it is only as good as the disposition the
-// closure hands it — 9eaa52d tested the helper, and passing it any other
-// value at the call site survived the suite.
+// announcesJobFound's, applied where the job row is built — AnnounceFound is
+// set in the INSERT itself — and it is only as good as the disposition the
+// closure hands it: 9eaa52d tested the helper, and passing it any other value
+// at the call site survived the suite.
 //
 // Asserted on the source because createYouTubeJob is a closure inside
 // wireMonitorCallbacks, which a test cannot call.
 //
-// Mutant: announceYouTubeJobFound(s.notifyMgr, job, monitor.DispositionBroadcast)
-// — or any argument but the closure's own disposition parameter.
+// Mutants: AnnounceFound: announcesJobFound(monitor.DispositionBroadcast) — or
+// any argument but the closure's own disposition parameter; AnnounceFound left
+// out of the row (no YouTube discovery is ever announced).
 func TestCreateYouTubeJobGatesFoundOnItsOwnDisposition(t *testing.T) {
 	lit, fset := closureAssigned(t, "monitor_callbacks.go", "wireMonitorCallbacks", "createYouTubeJob")
 	disposition := ""
@@ -165,19 +167,23 @@ func TestCreateYouTubeJobGatesFoundOnItsOwnDisposition(t *testing.T) {
 	if disposition == "" {
 		t.Fatal("createYouTubeJob takes no monitor.JobDisposition parameter — re-anchor this test rather than deleting it")
 	}
-	announces := callsIn(lit)["announceYouTubeJobFound"]
-	if len(announces) != 1 {
-		t.Fatalf("createYouTubeJob calls announceYouTubeJobFound %d times, want once", len(announces))
+	var values []ast.Expr
+	ast.Inspect(lit, func(n ast.Node) bool {
+		if kv, ok := n.(*ast.KeyValueExpr); ok {
+			if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "AnnounceFound" {
+				values = append(values, kv.Value)
+			}
+		}
+		return true
+	})
+	if len(values) != 1 {
+		t.Fatalf("createYouTubeJob sets AnnounceFound %d times, want once in the row it inserts", len(values))
 	}
-	args := announces[0].Args
-	if len(args) != 3 {
-		t.Fatalf("announceYouTubeJobFound takes %d arguments here, want 3 — re-anchor this test", len(args))
-	}
-	if id, ok := args[2].(*ast.Ident); !ok || id.Name != disposition {
-		var buf bytes.Buffer
-		_ = printer.Fprint(&buf, fset, args[2])
-		t.Errorf("createYouTubeJob hands announceYouTubeJobFound %q, want its own disposition %q — "+
-			"a backlog VOD then announces itself twice", buf.String(), disposition)
+	var buf bytes.Buffer
+	_ = printer.Fprint(&buf, fset, values[0])
+	if want := "announcesJobFound(" + disposition + ")"; buf.String() != want {
+		t.Errorf("createYouTubeJob sets AnnounceFound: %s, want %s — a backlog VOD then announces itself twice",
+			buf.String(), want)
 	}
 }
 
@@ -185,19 +191,20 @@ func TestCreateYouTubeJobGatesFoundOnItsOwnDisposition(t *testing.T) {
 // delivers in queue order, and the worker's first event can be queued the
 // moment it has the job; an edit-mode target's "Stream Found" or "Video
 // Added" queued behind it edits the message that event created back to
-// "Found" or "Added", possibly for hours. Both monitors' closures and both
-// branches of the Web add route announce first.
+// "Found" or "Added", possibly for hours. The Twitch monitor's closure and
+// both branches of the Web add route announce first. The YouTube closure
+// announces nothing itself: the worker sends its "Stream Found" from the first
+// fetch, ahead of the job's other events, because the row it inserts says the
+// announcement is owed (TestCreateYouTubeJobGatesFoundOnItsOwnDisposition).
 //
 // Asserted on the source, like the gate above: the monitor closures live
 // inside wireMonitorCallbacks, and the add route's worker is a concrete
 // *worker.DownloadWorker with nothing a test can observe at hand-off. The
 // route's half is in internal/web/routes (TestAddedIsQueuedBeforeTheWorkerHasTheJob).
 //
-// Mutants: the YouTube closure's announceYouTubeJobFound after its
-// EnqueueJob; the Twitch closure's notifyStreamFound after its EnqueueJob.
+// Mutant: the Twitch closure's notifyStreamFound after its EnqueueJob.
 func TestNewJobsAreAnnouncedBeforeTheWorkerHasThem(t *testing.T) {
 	for _, tc := range []struct{ closure, announce string }{
-		{"createYouTubeJob", "announceYouTubeJobFound"},
 		{"s.twitchMon.OnStreamFound", "notifyStreamFound"},
 	} {
 		lit, fset := closureAssigned(t, "monitor_callbacks.go", "wireMonitorCallbacks", tc.closure)

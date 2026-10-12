@@ -125,6 +125,11 @@ type StreamProcessor struct {
 
 	twitchHints *twitchHintCache // populated by OnStreamFound; consumed by processTwitchLive
 
+	// getVideoInfoFn replaces yt.GetVideoInfo in Process when set: a test
+	// seam, as DownloadWorker.processStreamFn is, since youtube.Service has
+	// none of its own and a real fetch needs the network.
+	getVideoInfoFn func(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
+
 	mu          sync.Mutex
 	activeChats []*chat.ChatDownloader // Track active chat downloaders for cleanup
 }
@@ -238,8 +243,23 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 	// is reserved for the waitForLive polling loop where speed matters and we already
 	// know the video exists. On initial processing, use the full WEB + TV fetch to
 	// get accurate playability and complete metadata.
-	info, err := sp.yt.GetVideoInfo(ctx, job.VideoID)
+	//
+	// A job the monitor just discovered announces itself after this fetch, so
+	// its "Stream Found" carries what the fetch learned (found_announce.go).
+	// The flag is taken from the row only once the fetch is over, and only by
+	// a run still live: a failed fetch announces from what the row already
+	// held, ahead of the error it ends in, but a cancelled run takes nothing —
+	// a cancel or delete has cleared the flag or the row already, and a run
+	// stopped by shutdown leaves it owed to the next one.
+	getVideoInfo := sp.getVideoInfoFn
+	if getVideoInfo == nil {
+		getVideoInfo = sp.yt.GetVideoInfo
+	}
+	info, err := getVideoInfo(ctx, job.VideoID)
 	if err != nil {
+		if sp.takeAnnounceFound(ctx, job) {
+			sp.sendStreamFound(job, nil)
+		}
 		return nil, fmt.Errorf("full fetch failed: %w", err)
 	}
 
@@ -249,7 +269,7 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 		"sessionAuth", string(info.SessionAuth),
 		"videoID", job.VideoID)
 
-	sp.updateJobMetadata(job, info, false)
+	sp.applyJobMetadata(job, info, false, sp.takeAnnounceFound(ctx, job))
 
 	if errMsg, sentinel := sp.checkPlayability(info); errMsg != "" {
 		// The one log line that answers "were we even signed in?" at the
@@ -456,7 +476,7 @@ func playabilityVerdict(info *youtube.VideoInfo) (string, error) {
 // we don't miss the live transition, looser polling for distant streams to
 // avoid hammering YouTube. Audit reports/worker.md F46.
 const (
-	probeIntervalImminent = 30 * time.Second // < 5 min until scheduled start
+	probeIntervalImminent = 30 * time.Second // < 5 min until scheduled start, or no schedule at all
 	probeIntervalNear     = 5 * time.Minute  // < 1 hour
 	probeIntervalDistant  = 10 * time.Minute // ≥ 1 hour with a schedule
 )
@@ -476,10 +496,13 @@ func (sp *StreamProcessor) calculateProbeInterval(info *youtube.VideoInfo) time.
 		}
 	}
 	// No schedule = the stream can go live at ANY moment (unscheduled or
-	// early start). Poll at the "near" cadence, not the 10-min distant
-	// band — a 10-min blind window meant catching an unscheduled start up
-	// to ~10 min late, losing that much video on DVR-off streams.
-	return probeIntervalNear
+	// early start), so it is polled as one whose start is imminent. Any looser
+	// band is a blind window that long: the 5-min "near" band caught an
+	// unscheduled start up to 5 min late, losing that much video on DVR-off
+	// streams. 30 s is also the cadence these streams effectively had while an
+	// upcoming stream's start time fell back to its upload date, which lies
+	// in the past and so read as imminent (owner decision, 2026-10-11).
+	return probeIntervalImminent
 }
 
 // vodStatusUpdates builds the row update for a stream classified VOD or
@@ -512,6 +535,14 @@ func vodStatusUpdates(job *database.Job, info *youtube.VideoInfo) map[string]any
 // In both modes, guards apply: empty strings and "Unknown Title"/"Unknown Channel"
 // sentinel values are never written.
 func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.VideoInfo, overwrite bool) {
+	sp.applyJobMetadata(job, info, overwrite, false)
+}
+
+// applyJobMetadata is updateJobMetadata with one more decision: announceFound
+// sends the job's deferred "Stream Found" once the row is updated, and that
+// embed carries the schedule in place of a separate "YouTube Start Time
+// Confirmed" (found_announce.go).
+func (sp *StreamProcessor) applyJobMetadata(job *database.Job, info *youtube.VideoInfo, overwrite, announceFound bool) {
 	updates := map[string]any{}
 	notifyStartTimeConfirmed := false
 	notifyScheduleChanged := false
@@ -638,60 +669,29 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 	// Starting", which carries the same time in its own "Scheduled For"
 	// field. Two embeds for one moment, the first of them announcing a
 	// schedule for a stream that had already begun.
-	if notifyStartTimeConfirmed && info.IsUpcoming && !info.IsLive && sp.notifier != nil {
-		startsAt := info.ScheduledStartTime
-		if t, err := time.Parse(time.RFC3339, startsAt); err == nil {
-			startsAt = fmt.Sprintf("<t:%d:f>", t.Unix())
-		}
-		// The one row→facts mapper, exactly as the worker's "Authentication
-		// Required" send uses it (worker.go). `scheduled` is one of the
-		// eleven lifecycle events, and Manager.planLifecycle
-		// (internal/notifications/lifecycle.go) keys on Opts.JobID: without
-		// it an edit-mode target could never fold this embed into the job's
-		// one message, and the dashboard deep link — which needs JobID and
-		// Author both — would never apply. NotifyFacts also supplies the
-		// YouTube watch-URL fallback for a row whose url is still blank,
-		// which a freshly discovered upcoming stream's often is.
-		// Title and channel are job-supplied text, escaped as the builders
-		// escape them; Starts At carries <t:…> markup on purpose and must
-		// NOT be (see EscapeMarkdown's doc).
-		f := NotifyFacts(job)
-		sp.notifier.Send("YouTube Start Time Confirmed",
-			fmt.Sprintf("Scheduled: %s", notifications.EscapeMarkdown(job.Title)),
-			notifications.TypeInfo,
-			[]notifications.Field{
-				{Name: "Channel", Value: notifications.EscapeMarkdown(job.ChannelName), Inline: true},
-				{Name: "Starts At", Value: startsAt, Inline: true},
-			},
-			notifications.SendOptions{
-				URL:       f.URL,
-				Thumbnail: f.ThumbnailURL,
-				Event:     "scheduled",
-				Author:    notifyAuthor(f),
-				Platform:  f.Platform,
-				JobID:     f.ID,
-			},
-		)
+	//
+	// A deferred discovery takes the confirmation's place: "Stream Found"
+	// carries the same start time as its Starts At field, and the two used to
+	// arrive seconds apart. The confirmation stays for a schedule that appears
+	// on a LATER fetch, when the discovery is long announced.
+	if announceFound {
+		sp.sendStreamFound(job, info)
+	} else if notifyStartTimeConfirmed && info.IsUpcoming && !info.IsLive && sp.notifier != nil {
+		sp.notifier.Send(startTimeConfirmed(job, info.ScheduledStartTime))
 	}
 
 	if notifyScheduleChanged && sp.notifier != nil {
-		fmtTime := func(raw string) string {
-			if t, err := time.Parse(time.RFC3339, raw); err == nil {
-				return fmt.Sprintf("<t:%d:f>", t.Unix())
-			}
-			return raw
-		}
 		// Same mapper, same three identity fields, same reason as the
-		// confirmation above: `rescheduled` is a lifecycle event too, and the
-		// two are the same job's story.
+		// confirmation's (startTimeConfirmed, found_announce.go): `rescheduled`
+		// is a lifecycle event too, and the two are the same job's story.
 		f := NotifyFacts(job)
 		sp.notifier.Send("YouTube Schedule Changed",
 			fmt.Sprintf("Rescheduled: %s", notifications.EscapeMarkdown(job.Title)),
 			notifications.TypeInfo,
 			[]notifications.Field{
 				{Name: "Channel", Value: notifications.EscapeMarkdown(job.ChannelName), Inline: true},
-				{Name: "Old Time", Value: fmtTime(oldStartTime), Inline: true},
-				{Name: "New Time", Value: fmtTime(info.ScheduledStartTime), Inline: true},
+				{Name: "Old Time", Value: discordTimestamp(oldStartTime), Inline: true},
+				{Name: "New Time", Value: discordTimestamp(info.ScheduledStartTime), Inline: true},
 			},
 			notifications.SendOptions{
 				URL:       f.URL,

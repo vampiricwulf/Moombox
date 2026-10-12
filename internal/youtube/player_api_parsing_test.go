@@ -819,24 +819,45 @@ func TestExtractScheduledStartTime(t *testing.T) {
 			"startTimestamp": "2025-01-01T00:00:00Z",
 		},
 	}
-	result := extractScheduledStartTime(mf, nil)
-	if result != "2025-01-01T00:00:00Z" {
-		t.Errorf("expected ISO timestamp, got %q", result)
+	for _, begun := range []bool{false, true} {
+		if result := extractScheduledStartTime(mf, nil, begun); result != "2025-01-01T00:00:00Z" {
+			t.Errorf("begun=%v: expected ISO timestamp, got %q", begun, result)
+		}
 	}
 
-	// From uploadDate fallback
+	// From uploadDate fallback, for a stream that has begun
 	mf2 := map[string]any{
 		"uploadDate": "2025-06-15",
 	}
-	result2 := extractScheduledStartTime(mf2, nil)
+	result2 := extractScheduledStartTime(mf2, nil, true)
 	if result2 != "2025-06-15" {
 		t.Errorf("expected uploadDate, got %q", result2)
 	}
 
 	// Nil inputs
-	result3 := extractScheduledStartTime(nil, nil)
+	result3 := extractScheduledStartTime(nil, nil, true)
 	if result3 != "" {
 		t.Errorf("expected empty for nil inputs, got %q", result3)
+	}
+}
+
+// An upcoming stream with no schedule has no start time: its upload and
+// publish dates are when the broadcast was created. The offline slate's epoch
+// is a schedule, and still counts.
+//
+// Mutant: dropping the upcoming guard — the unscheduled stream reads as
+// scheduled at its creation date.
+func TestUpcomingStreamTakesNoUploadDateAsItsStart(t *testing.T) {
+	mf := map[string]any{"uploadDate": "2025-06-15T08:00:00-07:00", "publishDate": "2025-06-15T08:00:00-07:00"}
+	if got := extractScheduledStartTime(mf, nil, false); got != "" {
+		t.Errorf("unscheduled upcoming stream: start = %q, want none", got)
+	}
+
+	slate := map[string]any{"liveStreamability": map[string]any{"liveStreamabilityRenderer": map[string]any{
+		"offlineSlate": map[string]any{"liveStreamOfflineSlateRenderer": map[string]any{"scheduledStartTime": "1760292000"}},
+	}}}
+	if got := extractScheduledStartTime(mf, slate, false); got != "2025-10-12T18:00:00Z" {
+		t.Errorf("upcoming stream with an offline-slate schedule: start = %q, want 2025-10-12T18:00:00Z", got)
 	}
 }
 
@@ -1772,5 +1793,82 @@ func TestMergeFormatPoolAttachesTheCookielessCopyAsTheShadow(t *testing.T) {
 	}
 	if got := MergeFormatPool(context.Background(), nil, nil); len(got) != 0 {
 		t.Errorf("MergeFormatPool(nil, nil) = %+v, want empty", got)
+	}
+}
+
+// Through the whole parse: the upload date stands in for a start only once
+// the response shows the stream has begun. An unscheduled upcoming stream and
+// a refused response — classified not_a_stream whatever it really is — carry
+// none; a finished video keeps it.
+//
+// Mutants: deriving begun from the stream status alone (the refused row
+// takes the upload date); passing isUpcoming un-negated (the rows invert).
+func TestParseTakesTheUploadDateOnlyOnceTheStreamHasBegun(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"unscheduled upcoming", `{
+            "playabilityStatus": {"status": "LIVE_STREAM_OFFLINE", "reason": "This live event will begin in a few moments."},
+            "videoDetails": {"videoId": "vid", "isUpcoming": true, "isLiveContent": true},
+            "microformat": {"playerMicroformatRenderer": {"uploadDate": "2025-06-15T08:00:00-07:00"}}
+        }`, ""},
+		{"refused, members only", `{
+            "playabilityStatus": {"status": "LOGIN_REQUIRED", "reason": "Join this channel to get access to members-only content like this video, and other exclusive perks."},
+            "videoDetails": {"videoId": "vid"},
+            "microformat": {"playerMicroformatRenderer": {"uploadDate": "2025-06-15T08:00:00-07:00"}}
+        }`, ""},
+		{"plain video", `{
+            "playabilityStatus": {"status": "OK"},
+            "videoDetails": {"videoId": "vid"},
+            "microformat": {"playerMicroformatRenderer": {"uploadDate": "2025-06-15T08:00:00-07:00"}}
+        }`, "2025-06-15T08:00:00-07:00"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewPlayerAPI(nil, noopLogger{})
+			info, err := p.parsePlayerResponse(context.Background(), decodePlayerJSON(t, tc.body), "", nil, "vid")
+			if err != nil {
+				t.Fatalf("parsePlayerResponse: %v", err)
+			}
+			if info.ScheduledStartTime != tc.want {
+				t.Errorf("ScheduledStartTime = %q (status %s, playability %s), want %q",
+					info.ScheduledStartTime, info.StreamStatus, info.PlayabilityError, tc.want)
+			}
+		})
+	}
+}
+
+// A refusal whose reason matched nothing is still a refusal: the verdict is
+// "unknown", the worker fails the job on it, and its upload date is no start.
+func TestUnrecognisedRefusalTakesNoUploadDate(t *testing.T) {
+	p := NewPlayerAPI(nil, noopLogger{})
+	info, err := p.parsePlayerResponse(context.Background(), decodePlayerJSON(t, `{
+        "playabilityStatus": {"status": "UNPLAYABLE", "reason": "Something YouTube has never said before."},
+        "videoDetails": {"videoId": "vid"},
+        "microformat": {"playerMicroformatRenderer": {"uploadDate": "2025-06-15T08:00:00-07:00"}}
+    }`), "", nil, "vid")
+	if err != nil {
+		t.Fatalf("parsePlayerResponse: %v", err)
+	}
+	if info.PlayabilityError != PlayabilityUnknown {
+		t.Fatalf("playability = %s, want unknown — this test needs an unrecognised refusal", info.PlayabilityError)
+	}
+	if info.ScheduledStartTime != "" {
+		t.Errorf("ScheduledStartTime = %q, want none for a refusal", info.ScheduledStartTime)
+	}
+}
+
+// The upload date the start time no longer falls back to for an upcoming
+// stream is still carried, as UploadDate, for the early-chat epoch.
+func TestUpcomingStreamStillCarriesItsUploadDate(t *testing.T) {
+	info, err := NewPlayerAPI(nil, noopLogger{}).parsePlayerResponse(context.Background(), decodePlayerJSON(t, `{
+        "playabilityStatus": {"status": "LIVE_STREAM_OFFLINE", "reason": "This live event will begin in a few moments."},
+        "videoDetails": {"videoId": "vid", "isUpcoming": true, "isLiveContent": true},
+        "microformat": {"playerMicroformatRenderer": {"publishDate": "2025-06-15T08:00:00-07:00"}}
+    }`), "", nil, "vid")
+	if err != nil {
+		t.Fatalf("parsePlayerResponse: %v", err)
+	}
+	if info.ScheduledStartTime != "" || info.UploadDate != "2025-06-15T08:00:00-07:00" {
+		t.Errorf("start %q, upload date %q; want no start and the publish date carried", info.ScheduledStartTime, info.UploadDate)
 	}
 }

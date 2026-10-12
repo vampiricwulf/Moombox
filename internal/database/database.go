@@ -76,6 +76,7 @@ var fieldToColumn = map[string]string{
 	"incomplete_tail":     "incomplete_tail",
 	"park_reason":         "park_reason",
 	"park_identity":       "park_identity",
+	"announce_found":      "announce_found",
 }
 
 // dbLogger is the interface for database error logging.
@@ -416,7 +417,7 @@ func (db *Database) prepareStatements() error {
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at, quality_preference, watched, resume_position, chat_offset,
 		auto_retry_count, channel_id, queue_priority, incomplete_tail, park_reason, park_identity,
-		notification_msgs
+		notification_msgs, announce_found
 		FROM jobs WHERE id = ?`)
 	if err != nil {
 		return err
@@ -456,7 +457,7 @@ func intToBool(i int) bool {
 }
 
 // insertJobExec performs an INSERT OR IGNORE INTO jobs using the provided
-// executor (either *sql.DB or *sql.Tx), so the 44-column INSERT exists
+// executor (either *sql.DB or *sql.Tx), so the 45-column INSERT exists
 // once.
 //
 // channel_id and queue_priority are written on EVERY insert (spec §10):
@@ -476,10 +477,10 @@ func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, er
 		thumbnail_file, description_file,
 		twitch_quality, twitch_category, channel_avatar_url,
 		selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at,
-		quality_preference, channel_id, queue_priority, file_size)
+		quality_preference, channel_id, queue_priority, file_size, announce_found)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		?, ?, ?, ?)`,
+		?, ?, ?, ?, ?)`,
 		job.ID, job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform,
 		job.Status, job.Progress, job.Percent, job.ETA, job.Speed, job.Error,
 		job.CreatedAt, job.UpdatedAt,
@@ -492,7 +493,8 @@ func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, er
 		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
 		job.LastRecheckAt,
-		job.QualityPreference, job.ChannelID, job.QueuePriority, job.FileSize)
+		job.QualityPreference, job.ChannelID, job.QueuePriority, job.FileSize,
+		boolToInt(job.AnnounceFound))
 }
 
 // UpdateJobFields performs a partial update of a job using a map of field names to values.
@@ -724,6 +726,28 @@ func (db *Database) UpdateChatOffset(jobID string, offset float64) bool {
 	return db.updateSingleColumnSilent(jobID, "chat_offset", offset, "UpdateChatOffset")
 }
 
+// TakeAnnounceFound clears jobID's announce_found flag and reports whether it
+// was set: true exactly once per flag, for whichever caller clears it, because
+// the check and the clear are one conditional UPDATE. Silent like the writers
+// above — the flag is no UI's concern, so it bumps no updated_at and notifies
+// nobody. False for an unknown jobID, an unset flag, or a failed write; a
+// discovery announced twice is worse than one not announced.
+func (db *Database) TakeAnnounceFound(jobID string) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	res, err := db.db.ExecContext(db.getCtx(),
+		"UPDATE jobs SET announce_found = 0 WHERE id = ? AND announce_found = 1", jobID)
+	if err != nil {
+		if db.logger != nil {
+			db.logger.Error("TakeAnnounceFound failed", "jobID", jobID, "err", err)
+		}
+		return false
+	}
+	n, err := res.RowsAffected()
+	return err == nil && n == 1
+}
+
 // decodeNotificationMsgs turns the stored JSON object into the per-target
 // message-id map. NULL, an empty/blank string, malformed JSON, a non-object
 // and an empty object all read as nil.
@@ -806,6 +830,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 	var j Job
 	var isVod, manuallyAdded, allowNonStream, watched, incompleteTail int
 	var notifMsgs sql.NullString
+	var announceFound int
 	err := r.Scan(
 		&j.ID, &j.VideoID, &j.URL, &j.Title, &j.ChannelName, &j.Platform,
 		&j.Status, &j.Progress, &j.Percent, &j.ETA, &j.Speed, &j.Error,
@@ -821,7 +846,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
 		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition, &j.ChatOffset,
 		&j.AutoRetryCount, &j.ChannelID, &j.QueuePriority, &incompleteTail, &j.ParkReason, &j.ParkIdentity,
-		&notifMsgs,
+		&notifMsgs, &announceFound,
 	)
 	if err != nil {
 		return nil, err
@@ -832,6 +857,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 	j.Watched = intToBool(watched)
 	j.IncompleteTail = intToBool(incompleteTail)
 	j.NotificationMsgs = decodeNotificationMsgs(notifMsgs)
+	j.AnnounceFound = intToBool(announceFound)
 	return &j, nil
 }
 

@@ -6,7 +6,6 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/monitor"
-	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 )
 
 type fakeHealthReporter struct{ health []monitor.ChannelHealth }
@@ -99,7 +98,8 @@ func TestJobCreationForDisposition(t *testing.T) {
 // A deep backfill on an include_non_live_content channel queues a backlog VOD
 // per catalog entry, and each sent "Stream Found" as it was queued — a burst
 // of notifications for content that announces itself again, paced, when the
-// scheduler admits it. Broadcasts and new VODs still announce on creation.
+// scheduler admits it. Broadcasts and new VODs are still owed one (the row's
+// AnnounceFound), which the worker sends after their first metadata fetch.
 //
 // Mutant: announcesJobFound returning true for every disposition.
 func TestAnnouncesJobFound(t *testing.T) {
@@ -113,28 +113,6 @@ func TestAnnouncesJobFound(t *testing.T) {
 	} {
 		if got := announcesJobFound(tc.d); got != tc.want {
 			t.Errorf("announcesJobFound(%s) = %v, want %v", tc.d, got, tc.want)
-		}
-	}
-}
-
-// The gate is applied where createYouTubeJob announces the job it created,
-// not only defined: a backlog VOD's creation sends nothing, the others send
-// one "Stream Found".
-//
-// Mutant: drop announcesJobFound(d) from announceYouTubeJobFound.
-func TestAnnounceYouTubeJobFoundHoldsBackBacklogVODs(t *testing.T) {
-	for _, tc := range []struct {
-		d    monitor.JobDisposition
-		want int
-	}{
-		{monitor.DispositionBroadcast, 1},
-		{monitor.DispositionNewVOD, 1},
-		{monitor.DispositionBacklogVOD, 0},
-	} {
-		rec := notificationtest.New()
-		announceYouTubeJobFound(rec, &database.Job{ID: "vid1", VideoID: "vid1", Platform: "youtube", Title: "A"}, tc.d)
-		if got := len(rec.ByEvent("found")); got != tc.want {
-			t.Errorf("%s: %d Stream Found sends, want %d", tc.d, got, tc.want)
 		}
 	}
 }

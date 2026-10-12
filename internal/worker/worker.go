@@ -593,8 +593,12 @@ func (w *DownloadWorker) TwitchHintStats() TwitchHintStats {
 // gets to WasCancelled before the flag is settled by it, and is the caller's
 // to report.
 func (w *DownloadWorker) CancelJob(jobID string) (cancelled, flagged bool) {
+	// announce_found goes with it: a job cancelled before its first fetch is
+	// owed no "Stream Found", and a later Retry must not announce a discovery
+	// long past.
 	if !w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
-		"status": database.StatusCancelled,
+		"status":         database.StatusCancelled,
+		"announce_found": false,
 	}) {
 		return false, false
 	}
@@ -2212,6 +2216,11 @@ func (w *DownloadWorker) ResumeJob(jobID string) {
 			"park_reason":      database.ParkReasonNone,
 			"park_identity":    "",
 			"auto_retry_count": 0,
+			// A re-run — an operator's, or the monitor's auto-resume or
+			// auto-reinitialize — is of a job already known: a "Stream Found"
+			// still owed from a run that never reached its first fetch (a
+			// panic, a park) would announce a discovery long past.
+			"announce_found": false,
 		})
 		w.EnqueueJob(jobID)
 	})
@@ -2318,6 +2327,7 @@ func (w *DownloadWorker) reinitializeNow(jobID string) {
 		"error":               "",
 		"park_reason":         database.ParkReasonNone,
 		"park_identity":       "",
+		"announce_found":      false, // see ResumeJob
 		"progress":            "",
 		"percent":             0,
 		"speed":               "",
@@ -2400,6 +2410,7 @@ func (w *DownloadWorker) autoReinitializeNow(jobID string) {
 		"error":               "",
 		"park_reason":         database.ParkReasonNone,
 		"park_identity":       "",
+		"announce_found":      false, // see ResumeJob
 		"progress":            "",
 		"percent":             0,
 		"speed":               "",

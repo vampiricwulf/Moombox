@@ -48,6 +48,29 @@ type JobFacts struct {
 
 	// Category is the Twitch game category; always empty for YouTube.
 	Category string
+	// The rest of this group is what a YouTube discovery's first metadata
+	// fetch learned (StreamFound only). All zero when that fetch failed.
+	//
+	// Kind is what was found, one of the Found* constants; "" when unknown.
+	Kind string
+	// StartsAt is an upcoming stream's scheduled start; zero when it has no
+	// schedule, is already live, or is a VOD.
+	StartsAt time.Time
+	// Length is the video's duration — a VOD's, or a premiere's, whose video
+	// already exists. Zero for a live broadcast, which has none yet.
+	Length time.Duration
+	// EndedAt is when a finished broadcast ended; PublishedAt when a video
+	// was published, read only when EndedAt is zero. PublishedDayOnly marks a
+	// PublishedAt YouTube gave as a bare date, which the parse normalises to
+	// that day's last second UTC, so it is rendered as that date and never as
+	// a moment. A publish date that carried a time is not day-only.
+	EndedAt          time.Time
+	PublishedAt      time.Time
+	PublishedDayOnly bool
+	// Access names a restriction on watching the video ("Members only"),
+	// pre-rendered by the producer, which owns the playability vocabulary.
+	// Empty when the video is open to anyone.
+	Access string
 	// VideoFormat, AudioFormat and TimeRange are the advanced options a web
 	// add can carry, pre-rendered by the route that owns their wording.
 	VideoFormat string
@@ -68,7 +91,7 @@ type JobFacts struct {
 	FormatSelection string
 	TrimmedRange    string
 	// Description is the video description, RAW and unbounded; the builder
-	// excerpts it.
+	// excerpts it. Read by StreamFound as well as DownloadFinished.
 	Description string
 
 	// --- Outcome truth (DownloadFinished only; the error send builds its own
@@ -220,19 +243,78 @@ func JobAdded(f JobFacts) (string, string, NotificationType, []Field, SendOption
 		jobOpts(f, "added")
 }
 
+// The kinds of thing a YouTube discovery can turn out to be (JobFacts.Kind).
+const (
+	FoundUpcoming         = "upcoming"
+	FoundUpcomingPremiere = "upcoming_premiere"
+	FoundLive             = "live"
+	FoundLivePremiere     = "live_premiere"
+	FoundEnded            = "ended" // a broadcast that has finished
+	FoundVideo            = "video" // an upload, or a VOD of unknown origin
+)
+
+// foundLead is the description's lead-in for each Kind. An unknown Kind — a
+// fetch that failed — keeps the wording the embed had before it knew.
+var foundLead = map[string]string{
+	FoundUpcoming:         "Upcoming: ",
+	FoundUpcomingPremiere: "Upcoming premiere: ",
+	FoundLive:             "Live: ",
+	FoundLivePremiere:     "Premiering: ",
+	FoundEnded:            "Ended stream: ",
+	FoundVideo:            "Video: ",
+}
+
+// StartsAtValue renders a scheduled start for a "Starts At" field: absolute
+// and relative, both of which Discord shows in the reader's own timezone, the
+// countdown kept current. Shared by StreamFound and the worker's "YouTube
+// Start Time Confirmed", which name the same field.
+func StartsAtValue(t time.Time) string {
+	s := t.Unix()
+	return fmt.Sprintf("<t:%d:f> (<t:%d:R>)", s, s)
+}
+
 // StreamFound is the discovery embed for both monitors (audit C4). The TITLE
-// is shared; the DESCRIPTION stays per platform because the two moments are
-// genuinely different — a YouTube find is usually an upcoming stream, a Twitch
-// find is live right now.
+// is shared; the DESCRIPTION is per platform because the two moments are
+// genuinely different — a Twitch find is live right now, and a YouTube find
+// says what it turned out to be (Kind).
+//
+// A YouTube find is sent by the worker after its first metadata fetch, so it
+// carries what that fetch learned. An upcoming stream's schedule rides here as
+// Starts At rather than in a separate "YouTube Start Time Confirmed" seconds
+// later. That embed remains for a schedule that appears after discovery, for
+// a job owed no deferred discovery (a manual add, a row from before schema
+// v22), and as the Fallback for a target that takes `scheduled` but not
+// `found`.
 func StreamFound(f JobFacts) (string, string, NotificationType, []Field, SendOptions) {
-	desc := "Found matching stream: " + EscapeMarkdown(displayName(f))
+	lead := "Found matching stream: "
 	if f.Platform == "twitch" {
-		desc = "Live: " + EscapeMarkdown(displayName(f))
+		lead = "Live: "
+	} else if l, ok := foundLead[f.Kind]; ok {
+		lead = l
 	}
+	desc := lead + EscapeMarkdown(displayName(f))
+
 	fb := NewFieldBuilder().
 		AddInlineIf(f.Channel != "", "Channel", EscapeMarkdown(f.Channel))
 	addIDField(fb, f).
 		AddInlineIf(f.Category != "", "Category", EscapeMarkdown(f.Category))
+	fb.AddInlineIf(!f.StartsAt.IsZero(), "Starts At", StartsAtValue(f.StartsAt))
+	fb.AddInlineIf(f.Length > 0, "Length", utils.FormatDurationHuman(f.Length))
+	switch {
+	case !f.EndedAt.IsZero():
+		fb.AddInline("Ended", fmt.Sprintf("<t:%d:f>", f.EndedAt.Unix()))
+	case !f.PublishedAt.IsZero() && f.PublishedDayOnly:
+		// A plain date, not <t:…:D>: the day was normalised to its last
+		// second UTC, which a reader east of UTC would see as the day after.
+		fb.AddInline("Published", f.PublishedAt.UTC().Format("Jan 2, 2006"))
+	case !f.PublishedAt.IsZero():
+		fb.AddInline("Published", fmt.Sprintf("<t:%d:f>", f.PublishedAt.Unix()))
+	}
+	fb.AddInlineIf(f.Access != "", "Access", f.Access)
+	if f.Description != "" {
+		// Clamp first, escape second, as DownloadFinished does.
+		fb.Add("Description", EscapeMarkdown(ClampRunes(f.Description, descriptionExcerptLen)))
+	}
 
 	return "Stream Found", desc, TypeInfo, fb.Build(), jobOpts(f, "found")
 }

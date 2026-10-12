@@ -150,8 +150,12 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		}
 	}
 
-	// Scheduled start time
-	scheduledStartTime := extractScheduledStartTime(microformat, playabilityStatus)
+	// Scheduled start time. Refused is any verdict but OK — the same line the
+	// worker's playability check draws, which fails the job on every other
+	// verdict, "unknown" included (an UNPLAYABLE or ERROR status whose reason
+	// matched nothing is still a refusal).
+	refused := playErr != PlayabilityOK
+	scheduledStartTime := extractScheduledStartTime(microformat, playabilityStatus, !isUpcoming && !refused)
 
 	// Published date (spec §12) — status-aware, deliberately independent of
 	// extractScheduledStartTime above (see extractPublishedAt doc comment).
@@ -183,9 +187,11 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		IsLive:             isLive,
 		IsUpcoming:         isUpcoming,
 		IsPostLiveDVR:      isPostLiveDVR,
+		IsPremiere:         isPremiereForDisplay(videoDetails, playabilityStatus, microformat),
 		LengthSeconds:      lengthSeconds,
 		EndTimestamp:       endTimestamp,
 		ScheduledStartTime: scheduledStartTime,
+		UploadDate:         microformatUploadDate(microformat),
 		DashManifestURL:    getStr(streamingData, "dashManifestUrl"),
 		HlsManifestURL:     getStr(streamingData, "hlsManifestUrl"),
 		PlayabilityError:   playErr,
@@ -197,7 +203,26 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 }
 
 // extractScheduledStartTime tries multiple sources for the scheduled start time.
-func extractScheduledStartTime(microformat, playabilityStatus map[string]any) string {
+//
+// The two schedule sources always count. The microformat's uploadDate /
+// publishDate counts only when begun is true — the response shows a stream
+// that is live or finished, or a plain video. For an upcoming stream it is
+// when the broadcast was created, not when it starts, and taking it made an
+// unscheduled stream look scheduled — a "Starts At" in the past on the
+// discovery embed, and a start time in the row the probe cadence and
+// reschedule detection then read. yt-dlp goes further and never takes it as a
+// start at all (release_timestamp is liveBroadcastDetails.startTimestamp
+// alone); it is kept for a stream that has begun only because a plain video
+// has no other date, and changing the live and finished paths is out of this
+// rule's scope. Such a stream's broadcast usually carries its real start in
+// startTimestamp, which wins above; one that does not still takes the upload
+// date, as it always has, and the worker's "now" fallback only fills a row
+// with nothing at all.
+//
+// A REFUSED response (members-only, sign-in, age gate) has not begun either,
+// as far as anyone can tell: it carries too little to classify, and reads as
+// not_a_stream whatever it really is.
+func extractScheduledStartTime(microformat, playabilityStatus map[string]any, begun bool) string {
 	// liveBroadcastDetails.startTimestamp
 	if lbd, ok := getNestedMap(microformat, "liveBroadcastDetails"); ok {
 		if ts := getStr(lbd, "startTimestamp"); ts != "" {
@@ -212,15 +237,22 @@ func extractScheduledStartTime(microformat, playabilityStatus map[string]any) st
 		}
 	}
 
-	// Fallback to uploadDate / publishDate from microformat
+	// Fallback to uploadDate / publishDate from microformat — only once the
+	// stream has begun (see above).
+	if !begun {
+		return ""
+	}
+	return microformatUploadDate(microformat)
+}
+
+// microformatUploadDate is the microformat's uploadDate, or its publishDate,
+// as YouTube gives it: when the video was created. For an upcoming broadcast
+// that is when it was set up, not when it starts.
+func microformatUploadDate(microformat map[string]any) string {
 	if ud := getStr(microformat, "uploadDate"); ud != "" {
 		return ud
 	}
-	if pd := getStr(microformat, "publishDate"); pd != "" {
-		return pd
-	}
-
-	return ""
+	return getStr(microformat, "publishDate")
 }
 
 // extractPublishedAt returns the probe's authoritative publish date for the
@@ -771,6 +803,35 @@ func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 	}
 }
 
+// isPremiereResponse reports whether a player response describes a premiere:
+// it has a scheduled start but is not marked as live content, and either the
+// playability reason says "premiere" or videoDetails says upcoming.
+// classifyStream decides on it; isPremiereForDisplay widens it for display.
+func isPremiereResponse(videoDetails, playabilityStatus, microformat map[string]any) bool {
+	isLiveContent, _ := videoDetails["isLiveContent"].(bool)
+	isUpcomingVD, _ := videoDetails["isUpcoming"].(bool)
+	lbd, _ := microformat["liveBroadcastDetails"].(map[string]any)
+	reason := strings.ToLower(playabilityReason(playabilityStatus))
+	return lbd != nil && getStr(lbd, "startTimestamp") != "" && !isLiveContent &&
+		(strings.Contains(reason, "premiere") || isUpcomingVD)
+}
+
+// isPremiereForDisplay is VideoInfo.IsPremiere: isPremiereResponse, or a video
+// that has broadcast details and is EXPLICITLY not live content. The second
+// arm is what recognises a premiere while it plays — its response no longer
+// says upcoming, and carries no "premiere" reason — and, afterwards, the
+// premiere's video. A live broadcast is always live content; an ordinary
+// upload has no broadcast details. Display only: classifyStream keeps the
+// narrower signal it has always decided on.
+func isPremiereForDisplay(videoDetails, playabilityStatus, microformat map[string]any) bool {
+	if isPremiereResponse(videoDetails, playabilityStatus, microformat) {
+		return true
+	}
+	isLiveContent, known := videoDetails["isLiveContent"].(bool)
+	lbd, _ := microformat["liveBroadcastDetails"].(map[string]any)
+	return known && !isLiveContent && lbd != nil && getStr(lbd, "startTimestamp") != ""
+}
+
 func classifyStream(videoDetails, playabilityStatus, microformat map[string]any, hasFormats bool) (StreamStatus, bool, bool, bool) {
 	isLiveContent, _ := videoDetails["isLiveContent"].(bool)
 	isLiveNow, _ := videoDetails["isLive"].(bool)
@@ -802,10 +863,7 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	// polling cycle. Detect it independently.
 	_, hasLiveStreamability := getNestedMap(playabilityStatus, "liveStreamability", "liveStreamabilityRenderer")
 
-	// Premiere detection: has scheduled start but not marked as live content,
-	// and reason contains "premiere" or videoDetails says upcoming.
-	isPremiere := lbd != nil && getStr(lbd, "startTimestamp") != "" && !isLiveContent &&
-		(strings.Contains(reason, "premiere") || isUpcomingVD)
+	isPremiere := isPremiereResponse(videoDetails, playabilityStatus, microformat)
 	isPremiereNow := isPremiere && isLiveNow
 	isUpcomingPremiere := isPremiere && !isLiveNow && !hasFormats
 

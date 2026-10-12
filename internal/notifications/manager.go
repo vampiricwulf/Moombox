@@ -215,6 +215,22 @@ type AllowedMentions struct {
 	Users []string `json:"users,omitempty"`
 }
 
+// Fallback is the substitute embed SendOptions.Fallback names. It shares the
+// send's options — link, thumbnail, author, footer, job — and differs only in
+// its words and its event.
+//
+// It exists for one merge. A YouTube discovery's "Stream Found" carries the
+// stream's schedule, which used to arrive seconds later as its own "YouTube
+// Start Time Confirmed"; a target filtered to `scheduled` but not `found`
+// would otherwise hear nothing about that schedule at all.
+type Fallback struct {
+	Title       string
+	Description string
+	Type        NotificationType
+	Fields      []Field
+	Event       string
+}
+
 // SendOptions provides optional parameters for a notification.
 type SendOptions struct {
 	URL       string // Link URL for the embed title
@@ -241,6 +257,12 @@ type SendOptions struct {
 	// it sends nothing at all. Suppressing the send outright left the message
 	// reading "Found" or "Downloading" for good.
 	EditOnly bool
+
+	// Fallback is what a target receives instead when its event filter drops
+	// Event but allows Fallback.Event. A target that allows Event receives the
+	// primary, which also pings it when its mention events name either event;
+	// one that allows neither receives nothing. Nil for nearly every send.
+	Fallback *Fallback
 
 	// There is deliberately NO mention here. A ping is per TARGET and per
 	// MESSAGE, never per producer and never per embed: Manager.Send resolves
@@ -941,11 +963,29 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 	// FieldBuilder's buffer it is free to reuse for its next send. One
 	// allocation per send buys the guarantee that what is delivered is what
 	// was asked for.
+	//
+	// The fallback is taken off the options first, so neither embed carries it
+	// into a queue: it is a routing decision made here, once per target.
+	fb := opts.Fallback
+	opts.Fallback = nil
 	msg := One(title, description, ntype.Color(), append([]Field(nil), fields...), opts)
-	msg.Embeds[0].At = time.Now() // when it happened, whenever a target delivers it
+	at := time.Now() // when it happened, whenever a target delivers it
+	msg.Embeds[0].At = at
+	var fallback *Embed // built on the first target that needs it
 	for _, q := range targets {
-		if !q.allows(opts.Event) {
-			continue
+		embed, event := msg.Embeds[0], opts.Event
+		if !q.allows(event) {
+			if fb == nil || fb.Event == "" || !q.allows(fb.Event) {
+				continue
+			}
+			if fallback == nil {
+				fopts := opts
+				fopts.Event = fb.Event
+				fm := One(fb.Title, fb.Description, fb.Type.Color(), append([]Field(nil), fb.Fields...), fopts)
+				fm.Embeds[0].At = at
+				fallback = &fm.Embeds[0]
+			}
+			embed, event = *fallback, fb.Event
 		}
 		// The filter runs BEFORE the coalescing stage, so a target never
 		// accumulates an embed it would not have sent.
@@ -962,8 +1002,15 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 		// fields were already copied once above); the *AllowedMentions is built
 		// once in buildTargets and never written after, so sharing that pointer
 		// across targets and sends is safe too.
-		mention, allowed := q.mentionFor(opts.Event)
-		q.batch.Add(msg.Embeds[0], mention, allowed)
+		mention, allowed := q.mentionFor(event)
+		if mention == "" && fb != nil && event == opts.Event {
+			// The primary carries the fallback's news as well — the merged
+			// "Stream Found" is also the schedule confirmation — so a target
+			// that pings on the fallback's event pings on it too, as it was
+			// pinged by the confirmation before the two merged.
+			mention, allowed = q.mentionFor(fb.Event)
+		}
+		q.batch.Add(embed, mention, allowed)
 	}
 }
 

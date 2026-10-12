@@ -1520,6 +1520,14 @@ func mergeWatchPageMetadata(target *VideoInfo, source *VideoInfo) {
 	if target.EndTimestamp == "" {
 		target.EndTimestamp = source.EndTimestamp
 	}
+	// The premiere signal needs the microformat, which a non-web client's
+	// response may not carry; the watch page's does.
+	if source.IsPremiere {
+		target.IsPremiere = true
+	}
+	if target.UploadDate == "" {
+		target.UploadDate = source.UploadDate
+	}
 }
 
 // stampManifestSources records label — the client's Format.Source label — as

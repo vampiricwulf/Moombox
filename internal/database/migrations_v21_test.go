@@ -50,8 +50,10 @@ func TestMigrationV21UpgradesAV20Database(t *testing.T) {
 	if err != nil {
 		t.Fatalf("v20 -> v21 upgrade failed: %v", err)
 	}
-	if v, _ := db2.readUserVersion(); v != 21 {
-		t.Errorf("user_version = %d, want 21", v)
+	// Open runs every later block too, so the version lands on the current
+	// one, not 21.
+	if v, _ := db2.readUserVersion(); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
 	}
 	j, err := db2.GetJob("tw_1")
 	db2.Close()
@@ -69,8 +71,8 @@ func TestMigrationV21UpgradesAV20Database(t *testing.T) {
 
 // TestMigrationV21DevelopmentDatabaseKeepsWorking: a database a development
 // build migrated to v21 has jobs.twitch_quality_preference, which this binary
-// never reads or names. It must open without a downgrade refusal or a
-// migration, and every read and write must work around the extra column: its
+// never reads or names. It must open without a downgrade refusal, and every
+// read and write must work around the extra column: its
 // NOT NULL empty-string default fills it on an insert that leaves it out.
 //
 // Mutant: schemaVersion put back to 20, as removing v21 would (the database
@@ -102,8 +104,10 @@ func TestMigrationV21DevelopmentDatabaseKeepsWorking(t *testing.T) {
 		t.Fatalf("a development v21 database no longer opens: %v", err)
 	}
 	defer db2.Close()
-	if v, _ := db2.readUserVersion(); v != 21 {
-		t.Errorf("user_version = %d, want 21", v)
+	// The later blocks still run (v22 adds announce_found); none of them
+	// touches the extra column.
+	if v, _ := db2.readUserVersion(); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
 	}
 	if j, err := db2.GetJob("tw_dev"); err != nil || j == nil || j.QualityPreference != "720p" {
 		t.Fatalf("the development-build row reads %+v, %v; want it with quality_preference 720p", j, err)

@@ -31,9 +31,10 @@ func TestBuildTargetsSkipsDisabled(t *testing.T) {
 	m := NewManager(allOff, testLogger{})
 	if m.HasTargets() {
 		t.Error("HasTargets reported true with every target disabled — all THREE producer guards " +
-			"(cmd/moombox/helpers.go update-available, and both cmd/moombox/monitor_callbacks.go " +
-			"Stream Found sites) would keep building embeds that go nowhere. The disk alerts " +
-			"build unconditionally and are not one of them")
+			"(cmd/moombox/helpers.go update-available, the Twitch Stream Found site in " +
+			"cmd/moombox/monitor_callbacks.go, and the TUI cancel in cmd/moombox/job_notifications.go) " +
+			"would keep building embeds that go nowhere. The disk alerts and the worker's YouTube " +
+			"Stream Found build unconditionally and are not among them")
 	}
 }
 

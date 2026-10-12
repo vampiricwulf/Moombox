@@ -80,62 +80,40 @@ func TestCLIAddedFactsProduceAJobAddedEmbed(t *testing.T) {
 	}
 }
 
-// TestNotifyStreamFoundIsOneEmbedForBothMonitors is audit C4. Both discovery
-// sites lived inside closures in wireMonitorCallbacks and had no test at all;
-// this seam is what makes them assertable.
+// TestNotifyStreamFoundTwitch is audit C4's Twitch half. The discovery site
+// lives inside a closure in wireMonitorCallbacks and had no test at all; this
+// seam is what makes it assertable. The YouTube half is sent by the worker
+// after its first fetch, and is tested there (internal/worker/
+// found_announce_test.go) under the same "Stream Found" title.
 //
 // Mutants this kill:
 //   - keeping "Twitch Stream Found" as a second title.
 //   - dropping the Twitch channel page, which is the only channel link a
 //     Twitch row can produce (channel_id is NULL for every Twitch job).
-//   - sending the category for YouTube, where it is always empty.
-func TestNotifyStreamFoundIsOneEmbedForBothMonitors(t *testing.T) {
-	t.Run("youtube", func(t *testing.T) {
-		rec := notificationtest.New()
-		chID := "UC_abc"
-		notifyStreamFound(rec, &database.Job{
-			ID: "vid1", VideoID: "vid1", Platform: "youtube", Title: "A Stream",
-			ChannelName: "A Channel", ChannelID: &chID,
-			URL: "https://www.youtube.com/watch?v=vid1", ThumbnailURL: "https://i.ytimg.example/t.jpg",
-		}, "", "")
+func TestNotifyStreamFoundTwitch(t *testing.T) {
+	rec := notificationtest.New()
+	notifyStreamFound(rec, &database.Job{
+		ID: "tw_9", VideoID: "9", Platform: "twitch", Title: "Streamer — live",
+		ChannelName: "Streamer", ChannelAvatarURL: "https://static.example/p.png",
+		URL: "https://twitch.tv/streamer", ThumbnailURL: "https://static.example/prev.jpg",
+	}, "https://twitch.tv/streamer", "Just Chatting")
 
-		calls := rec.ByEvent("found")
-		if len(calls) != 1 {
-			t.Fatalf("recorded %d found calls, want 1", len(calls))
-		}
-		if calls[0].Title != "Stream Found" {
-			t.Errorf("title = %q", calls[0].Title)
-		}
-		if calls[0].Description != "Found matching stream: A Stream" {
-			t.Errorf("description = %q", calls[0].Description)
-		}
-		if calls[0].Opts.Author == nil || calls[0].Opts.Author.URL != "https://www.youtube.com/channel/UC_abc" {
-			t.Error("the YouTube find lost its channel-page link")
-		}
-	})
-
-	t.Run("twitch", func(t *testing.T) {
-		rec := notificationtest.New()
-		notifyStreamFound(rec, &database.Job{
-			ID: "tw_9", VideoID: "9", Platform: "twitch", Title: "Streamer — live",
-			ChannelName: "Streamer", ChannelAvatarURL: "https://static.example/p.png",
-			URL: "https://twitch.tv/streamer", ThumbnailURL: "https://static.example/prev.jpg",
-		}, "https://twitch.tv/streamer", "Just Chatting")
-
-		calls := rec.ByEvent("found")
-		if len(calls) != 1 {
-			t.Fatalf("recorded %d found calls, want 1", len(calls))
-		}
-		if calls[0].Title != "Stream Found" {
-			t.Errorf("title = %q — the Twitch find still names the platform", calls[0].Title)
-		}
-		if calls[0].Description != "Live: Streamer — live" {
-			t.Errorf("description = %q", calls[0].Description)
-		}
-		if calls[0].Opts.Author == nil || calls[0].Opts.Author.URL != "https://twitch.tv/streamer" {
-			t.Error("the Twitch find has no channel-page link")
-		}
-	})
+	calls := rec.ByEvent("found")
+	if len(calls) != 1 {
+		t.Fatalf("recorded %d found calls, want 1", len(calls))
+	}
+	if calls[0].Title != "Stream Found" {
+		t.Errorf("title = %q — the Twitch find still names the platform", calls[0].Title)
+	}
+	if calls[0].Description != "Live: Streamer — live" {
+		t.Errorf("description = %q", calls[0].Description)
+	}
+	if v, _ := calls[0].Field("Category"); v != "Just Chatting" {
+		t.Errorf("Category = %q, want the game", v)
+	}
+	if calls[0].Opts.Author == nil || calls[0].Opts.Author.URL != "https://twitch.tv/streamer" {
+		t.Error("the Twitch find has no channel-page link")
+	}
 }
 
 // A cancel that flags an actively processing run leaves "Job Cancelled" to

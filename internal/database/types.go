@@ -189,6 +189,16 @@ type Job struct {
 	// json:"-" on purpose. It is credential-derived and of no use to any UI;
 	// the user-facing signal is ParkReason plus the job's error text.
 	ParkIdentity string `json:"-"`
+	// AnnounceFound says this job's "Stream Found" is still owed. The YouTube
+	// monitor's creator sets it in the INSERT that creates the job; the
+	// worker's first metadata fetch takes it (TakeAnnounceFound) and sends the
+	// embed with what that fetch learned; a cancel clears it. Living in the row
+	// is what makes it exact: a second monitor's duplicate insert and a
+	// monitor's per-cycle re-detection of a known job cannot touch it, and a
+	// restart before the fetch keeps it owed.
+	//
+	// json:"-": it is the notifier's bookkeeping, of no use to any UI.
+	AnnounceFound bool `json:"-"`
 	// NotificationMsgs maps a notification target's stable key — the first 16
 	// hex digits of SHA-256 over the RESOLVED webhook URL, the same key
 	// notifications.buildTargets dedupes on — to the id of the one Discord

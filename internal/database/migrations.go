@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 21
+const schemaVersion = 22
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -149,7 +149,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     incomplete_tail INTEGER NOT NULL DEFAULT 0,
     park_reason TEXT NOT NULL DEFAULT '',
     park_identity TEXT NOT NULL DEFAULT '',
-    notification_msgs TEXT
+    notification_msgs TEXT,
+    announce_found INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -733,6 +734,15 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 22 {
+		if err := db.migrateV22(); err != nil {
+			return err
+		}
+		if err := db.writeUserVersion(22); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -872,6 +882,23 @@ func (db *Database) migrateV20() error {
 	// written last), so a duplicate-column error is expected and benign.
 	if _, err := db.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN notification_msgs TEXT`); err != nil && !isDuplicateColumnErr(err) {
 		return fmt.Errorf("v20 alter: %w", err)
+	}
+	return nil
+}
+
+// migrateV22 adds announce_found to jobs: the job's "Stream Found" is still
+// owed. See the Job.AnnounceFound doc comment in types.go.
+//
+// Existing rows take the default 0: every one of them was announced, if at
+// all, by the code that ran when it was created.
+//
+//	announce_found INTEGER NOT NULL DEFAULT 0
+func (db *Database) migrateV22() error {
+	ctx := db.getCtx()
+	// Guarded ALTER: a crash mid-block re-runs the whole block (user_version is
+	// written last), so a duplicate-column error is expected and benign.
+	if _, err := db.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN announce_found INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumnErr(err) {
+		return fmt.Errorf("v22 alter: %w", err)
 	}
 	return nil
 }

@@ -175,7 +175,7 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at, quality_preference, watched, resume_position, chat_offset,
 		auto_retry_count, channel_id, queue_priority, incomplete_tail, park_reason, park_identity,
-		notification_msgs
+		notification_msgs, announce_found
 		FROM jobs ORDER BY updated_at DESC`
 
 	rows, err := db.db.QueryContext(db.getCtx(), query)

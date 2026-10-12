@@ -1,6 +1,9 @@
 package worker
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 )
@@ -66,4 +69,23 @@ func notifyAuthor(f notifications.JobFacts) *notifications.Author {
 		return nil
 	}
 	return &notifications.Author{Name: f.Channel, IconURL: f.ChannelAvatarURL, URL: f.ChannelURL}
+}
+
+// discordTimestamp renders an RFC 3339 time as Discord's <t:…:f> markup, or
+// returns raw unchanged when it does not parse.
+func discordTimestamp(raw string) string {
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return fmt.Sprintf("<t:%d:f>", t.Unix())
+	}
+	return raw
+}
+
+// parseRFC3339 parses an RFC 3339 time, or returns the zero time — which every
+// builder reads as "unknown" — for "" or anything that does not parse.
+func parseRFC3339(s string) time.Time {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }

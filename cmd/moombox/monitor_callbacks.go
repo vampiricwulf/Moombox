@@ -715,22 +715,15 @@ func jobCreationForDisposition(d monitor.JobDisposition) (status database.JobSta
 	}
 }
 
-// announcesJobFound reports whether creating a job for this disposition sends
-// the "Stream Found" notification. A backlog VOD does not: a deep backfill on
+// announcesJobFound reports whether a job created for this disposition is owed
+// the "Stream Found" notification (Job.AnnounceFound, which the worker's first
+// metadata fetch takes and announces). A backlog VOD is not: a deep backfill on
 // an include_non_live_content channel queues one per catalog VOD, and each
 // already announces itself with "YouTube Download Starting" when the
 // archive-slots scheduler admits it (orchestrator.go sends it on every
 // ExecuteWithChat entry) — paced, where the queueing is a burst.
 func announcesJobFound(d monitor.JobDisposition) bool {
 	return d != monitor.DispositionBacklogVOD
-}
-
-// announceYouTubeJobFound is createYouTubeJob's "Stream Found" for the job it
-// just created, held back for a disposition announcesJobFound excludes.
-func announceYouTubeJobFound(n notifications.Notifier, job *database.Job, d monitor.JobDisposition) {
-	if announcesJobFound(d) && n.HasTargets() {
-		notifyStreamFound(n, job, "", "")
-	}
 }
 
 // authFailureNotifier is wireMonitorCallbacks' cooldown-guarded notification
@@ -1602,8 +1595,13 @@ func (s *runState) wireMonitorCallbacks() {
 			QualityPreference: ch.QualityPreference,
 			ChannelID:         channelID,
 			QueuePriority:     priority,
-			CreatedAt:         now,
-			UpdatedAt:         now,
+			// Owed its "Stream Found", which the worker sends after its first
+			// metadata fetch (internal/worker/found_announce.go). In the
+			// INSERT itself, so a duplicate insert or a re-detection of a known
+			// job cannot touch it, and the heartbeat cannot reach the row first.
+			AnnounceFound: announcesJobFound(d),
+			CreatedAt:     now,
+			UpdatedAt:     now,
 		}
 
 		added, err := s.db.AddJob(job)
@@ -1676,11 +1674,6 @@ func (s *runState) wireMonitorCallbacks() {
 		// History fires for EVERY disposition — it is what makes
 		// HasProcessed mean "a job was created" (spec §10/§15).
 		s.db.AddToHistory(videoID)
-		// Announced BEFORE the worker is handed the job: each target delivers
-		// in queue order, and an edit-mode target's "Found" queued behind the
-		// worker's first event would edit the message it created back to
-		// "Found" until the next event, possibly hours later.
-		announceYouTubeJobFound(s.notifyMgr, job, d)
 		if enqueueNow {
 			s.dlWorker.EnqueueJob(videoID)
 		} else {
@@ -1740,7 +1733,10 @@ func (s *runState) wireMonitorCallbacks() {
 		// live, manifesting as a false "twitch channel is offline" error).
 		s.dlWorker.StashTwitchStreamInfo(info)
 		s.db.AddToHistory(jobID)
-		// Announced before the enqueue, as on the YouTube path.
+		// Announced before the enqueue: the worker's first event can be queued
+		// the moment it has the job, and an edit-mode target's "Found" queued
+		// behind it would edit that message back. (A YouTube find is the worker's
+		// own first event instead — internal/worker/found_announce.go.)
 		if s.notifyMgr.HasTargets() {
 			notifyStreamFound(s.notifyMgr, job, "https://twitch.tv/"+info.ChannelLogin, info.GameCategory)
 		}

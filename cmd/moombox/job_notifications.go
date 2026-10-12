@@ -37,18 +37,19 @@ func cliAddedFacts(platform, jobID, jobURL, channelLogin string) notifications.J
 	return f
 }
 
-// notifyStreamFound is the one discovery embed, for both monitors.
+// notifyStreamFound is the Twitch monitor's discovery embed. A YouTube
+// discovery is sent by the worker after its first metadata fetch instead
+// (the job row's AnnounceFound), through the same notifications.StreamFound
+// builder, so both platforms still produce one embed shape.
 //
-// A package-level function rather than two inline sends inside
-// wireMonitorCallbacks' closures: those closures need a runState, three live
-// monitors and a database to reach, which is why neither discovery embed had a
-// test before (audit §4, coverage root cause). Everything the two sites differ
-// by is a parameter.
+// A package-level function rather than an inline send inside
+// wireMonitorCallbacks' closure: that closure needs a runState, three live
+// monitors and a database to reach, which is why the discovery embed had no
+// test before (audit §4, coverage root cause).
 //
-// channelURL is the channel's page when the caller knows one the job row
-// cannot derive — a Twitch row's channel_id is always NULL, and its login is
-// only on the monitor's stream info. category is the Twitch game, empty for
-// YouTube.
+// channelURL is the channel's page, which the job row cannot derive — a
+// Twitch row's channel_id is always NULL, and its login is only on the
+// monitor's stream info. category is the Twitch game.
 func notifyStreamFound(n notifications.Sender, job *database.Job, channelURL, category string) {
 	f := worker.NotifyFacts(job)
 	if channelURL != "" {

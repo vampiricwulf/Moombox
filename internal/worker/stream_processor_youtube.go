@@ -502,6 +502,20 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 	}
 }
 
+// earlyChatEpoch is an early-chat file's epoch: every live message's offset is
+// measured from it, and nothing corrects it later — the player re-aligns the
+// file by the difference between the job's start and this epoch — so any fixed
+// instant serves, and none at all ("") leaves every live message without an
+// offset. The schedule when there is one; otherwise the upload date, which is
+// what an unscheduled stream's epoch was while ScheduledStartTime still fell
+// back to it for upcoming streams.
+func earlyChatEpoch(info *youtube.VideoInfo) string {
+	if info.ScheduledStartTime != "" {
+		return info.ScheduledStartTime
+	}
+	return info.UploadDate
+}
+
 // tryStartEarlyChat attempts to start a chat downloader during the upcoming phase (B2).
 // onProgress is wired before Start so callers don't need a follow-up SetOnProgress
 // (per audit reports/worker.md F16 — keeps initial+retry paths in sync).
@@ -571,9 +585,7 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 		// leaves the field nil, which the API reads as "no Cookie header".
 		opts.CookieHeader = sp.yt.Auth.GetCookieHeader
 	}
-	if info.ScheduledStartTime != "" {
-		opts.StreamStartTime = info.ScheduledStartTime
-	}
+	opts.StreamStartTime = earlyChatEpoch(info)
 
 	dl := chat.NewChatDownloader(opts)
 	// Same as setupChatDownloader: without this the downloader's own

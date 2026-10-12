@@ -1427,7 +1427,10 @@ var cancelJob = func(db *database.Database, w *worker.DownloadWorker, jobID stri
 	if w != nil {
 		return w.CancelJob(jobID)
 	}
-	return db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{"status": database.StatusCancelled}), false
+	return db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
+		"status":         database.StatusCancelled,
+		"announce_found": false, // as CancelJob clears it
+	}), false
 }
 
 // loadJob fetches the job a handler acts on, and answers the request itself

@@ -336,7 +336,7 @@ The `StreamProcessor` is the first stage of job processing. It determines what a
    - More than 1 hour away: 10-minute interval (`probeIntervalDistant`)
    - 5 minutes to 1 hour: 5-minute interval (`probeIntervalNear`)
    - Less than 5 minutes: 30-second interval (`probeIntervalImminent`)
-   - No scheduled start time: the 5-minute "near" interval, since the stream can go live at any moment
+   - No scheduled start time: the 30-second "imminent" interval, since the stream can go live at any moment
    - Plus random jitter up to 30 seconds
 4. Polls via lightweight `ProbeVideoStatus()` (ANDROID_VR client for speed). Persists metadata from each probe (title, thumbnail, description, scheduled start time, etc.) using change detection — only writes to DB when values actually differ, at zero additional network cost since the probe already returns this data
 5. Chat surge detection: if 30+ new messages arrive within a 15-second window, triggers an immediate probe (the stream may have gone live early)
