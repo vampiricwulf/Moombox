@@ -2,7 +2,7 @@ module github.com/vampiricwulf/Moombox
 
 go 1.27
 
-toolchain go1.27.1
+toolchain go1.27.2
 
 require (
 	charm.land/bubbles/v2 v2.2.1
@@ -57,7 +57,7 @@ require (
 	github.com/sahilm/fuzzy v0.1.3 // indirect
 	github.com/xo/terminfo v1.2.0 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
-	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	modernc.org/libc v1.75.7 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
