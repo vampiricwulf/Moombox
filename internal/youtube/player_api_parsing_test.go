@@ -1872,3 +1872,54 @@ func TestUpcomingStreamStillCarriesItsUploadDate(t *testing.T) {
 		t.Errorf("start %q, upload date %q; want no start and the publish date carried", info.ScheduledStartTime, info.UploadDate)
 	}
 }
+
+// An age-gated finished broadcast, as the anonymous monitor probe sees one,
+// carries no formats because this caller may not see them, and its
+// broadcast details say it has ended: it is post_live, not upcoming. The
+// misread kept such a stream in the feed monitor's scope and re-created its
+// job every cycle for as long as the gate stood.
+//
+// age_restricted only. A members-only or sign-in refusal keeps reading
+// upcoming: the monitor's denied predicate (isDenied, spec §9) keys on
+// exactly that pair, and is what keeps a refusal from ever creating a job.
+// A PLAYABLE finished broadcast with no formats is still being processed and
+// stays upcoming, as the worker's waiting loop expects; so does an
+// unavailable one, which can mean "not processed yet" as easily as "gone".
+//
+// Mutants: the arm dropped (the age-gated row reads upcoming); the arm on
+// any non-OK verdict (the members-only row escapes isDenied into a job, the
+// unavailable one sends the worker after a VOD with no media yet); the arm
+// not gated at all (the processing row too).
+func TestRefusedFinishedBroadcastIsPostLiveNotUpcoming(t *testing.T) {
+	for _, tc := range []struct {
+		name, playability string
+		want              StreamStatus
+	}{
+		{"age-gated", `{"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm your age"}`, StreamPostLive},
+		{"age-gated, AGE_CHECK_REQUIRED", `{"status": "AGE_CHECK_REQUIRED", "reason": "This video may be inappropriate for some users."}`, StreamPostLive},
+		{"members-only", `{"status": "LOGIN_REQUIRED", "reason": "Join this channel to get access to members-only content like this video, and other exclusive perks."}`, StreamUpcoming},
+		{"sign-in required", `{"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm you’re not a bot"}`, StreamUpcoming},
+		{"playable, still processing", `{"status": "OK"}`, StreamUpcoming},
+		{"unavailable", `{"status": "UNPLAYABLE", "reason": "This video is unavailable"}`, StreamUpcoming},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info, err := NewPlayerAPI(nil, noopLogger{}).parsePlayerResponse(context.Background(), decodePlayerJSON(t, `{
+				"playabilityStatus": `+tc.playability+`,
+				"videoDetails": {"videoId": "vid", "isLiveContent": true},
+				"microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {
+					"isLiveNow": false,
+					"startTimestamp": "2026-09-11T02:14:17+00:00",
+					"endTimestamp": "2026-09-11T05:09:26+00:00"}}}
+			}`), "", nil, "vid")
+			if err != nil {
+				t.Fatalf("parsePlayerResponse: %v", err)
+			}
+			if info.StreamStatus != tc.want {
+				t.Errorf("StreamStatus = %s (playability %s), want %s", info.StreamStatus, info.PlayabilityError, tc.want)
+			}
+			if tc.want == StreamPostLive && !info.IsPostLiveDVR {
+				t.Error("IsPostLiveDVR = false for a finished broadcast")
+			}
+		})
+	}
+}

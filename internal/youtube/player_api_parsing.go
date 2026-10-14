@@ -880,6 +880,28 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	if isLiveNow || isPremiereNow {
 		return StreamLive, true, false, false
 	}
+	// An age-gated finished broadcast carries no formats because THIS caller
+	// may not see them (an anonymous probe), not because it has not begun;
+	// and its broadcast details say it has ENDED, so it cannot be upcoming
+	// whatever the format list says. Without this arm the no-formats rules
+	// below read it as upcoming, and the feed monitor then kept it in scope
+	// and tried to create its job every cycle for as long as the gate stood
+	// (a stream archived weeks before, every five minutes).
+	//
+	// age_restricted ONLY, on purpose. The monitor's denied predicate (spec
+	// §9, monitor.isDenied) keys on `upcoming` with members_only or
+	// login_required, and excludes age_restricted as an ordinary
+	// classification: a members-only finished stream must keep reading
+	// upcoming so that predicate holds and no refusal creates a job, where a
+	// post_live would escape it into a job parked in COOKIES?. A PLAYABLE
+	// finished broadcast with no formats is still being processed and stays
+	// upcoming for the worker's waiting loop; unavailable, private and
+	// unknown can mean "not processed yet" as easily as "gone" and stay too.
+	if isPostLiveDVR && !hasFormats {
+		if playErr, _ := parsePlayabilityStatus(playabilityStatus); playErr == PlayabilityAgeRestricted {
+			return StreamPostLive, false, false, true
+		}
+	}
 	// liveStreamability with no formats — treat as upcoming. Runs before the
 	// lbd==nil && !isLiveContent shortcut so premieres that only expose the
 	// renderer aren't mis-classified as not_a_stream.
