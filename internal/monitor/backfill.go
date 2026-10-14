@@ -202,6 +202,24 @@ type BackfillWorker struct {
 	// CancelAndPrune's.
 	OnProgress func(chID, tab string, pages int, state string)
 
+	// OnNewRows, when set, is called once after a scan that COMPLETED and
+	// INSERTED at least one feed_items row the store did not have — rows is
+	// that count — on the serial consumer goroutine. Those rows entered the
+	// store after the cycle whose sweep queued the scan had already walked
+	// the channel, so without a nudge they wait a whole poll interval to be
+	// probed and jobbed; the host wires this to the feed monitor's CheckNow.
+	//
+	// Completed only. The cycle the host runs sweeps again, and a sweep
+	// re-queues any channel whose scan ended short (backfilled_at NULL): a
+	// nudge for an incomplete scan's pages would run that retry at once, and
+	// a tab failing every other page would then cost a whole feed cycle —
+	// every channel's RSS fetch and walk — per page of progress. An
+	// incomplete scan's rows wait for the sweep-retry's own cycle, as they
+	// always did. A completed scan that only re-sighted rows already present
+	// (a forced re-scan of a settled channel) does not call it either:
+	// there is nothing new to walk. Nil-safe; set before Start.
+	OnNewRows func(chID string, rows int)
+
 	// mu guards inflight, queue and baseCtx. Sweep holds it across each
 	// channel's check-and-enqueue, so concurrent sweeps (a monitor cycle
 	// racing a kickMonitors re-run) can never double-enqueue one channel.
@@ -230,6 +248,10 @@ type BackfillWorker struct {
 	// lastPageAt is when the last page fetch was released, for waitPage.
 	// Unguarded by design: scans are strictly serial on one goroutine.
 	lastPageAt time.Time
+	// insertedThisScan counts the rows the running scan inserted (not merely
+	// re-sighted), for OnNewRows. Reset by runScan before each scan and
+	// unguarded for the same reason as lastPageAt.
+	insertedThisScan int
 
 	// ChannelEnabled, when set, reports whether chID is still configured
 	// AND enabled in the LIVE config. runScan asks it before starting a
@@ -369,12 +391,16 @@ func (bw *BackfillWorker) runScan(item scanItem) {
 		bw.emitProgress(chID, "", 0, "idle")
 		return
 	}
+	bw.insertedThisScan = 0
 	err := bw.scan(item.ctx, item.ref.Ch, chID, item.ref.WindowDays, item.ref.WithMembership)
 	switch {
 	case err == nil:
 		// Completed — completeScan wrote backfilled_at; the sweep's first
 		// arm goes quiet for this channel.
 		bw.emitProgress(chID, "", 0, "done")
+		if n := bw.insertedThisScan; n > 0 && bw.OnNewRows != nil {
+			bw.OnNewRows(chID, n)
+		}
 	case item.ctx.Err() != nil && bw.isPaused(item.fl):
 		bw.logger.Info("backfill scan paused: channel disabled", "channel", chID)
 		bw.emitProgress(chID, "", 0, "idle")
@@ -931,14 +957,18 @@ func (bw *BackfillWorker) scanTab(ctx context.Context, chID, tab string, cur *ba
 			// the backfill runs once, so a skipped row would be a permanent
 			// gap — the cursor hasn't advanced past this page, so the retry
 			// refetches it and the upserts are idempotent.
-			if _, err := bw.db.UpsertFeedItem(database.FeedItem{
+			inserted, err := bw.db.UpsertFeedItem(database.FeedItem{
 				ChannelID: chID, VideoID: it.VideoID, Title: it.Title,
 				Published: pub.Format(time.RFC3339), DatePrecision: prec,
 				CatalogPos: tc.NextPos, Source: tab, FirstSeen: firstSeen,
-			}); err != nil {
+			})
+			if err != nil {
 				bw.logger.Warn("backfill upsert failed; tab resumes from cursor on next sweep",
 					"channel", chID, "tab", tab, "id", it.VideoID, "err", err)
 				return fmt.Errorf("backfill %s/%s: upsert %s: %w", chID, tab, it.VideoID, err)
+			}
+			if inserted {
+				bw.insertedThisScan++
 			}
 			tc.NextPos++
 		}

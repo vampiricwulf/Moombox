@@ -1119,6 +1119,18 @@ func (s *runState) initServices(logLevelOverride string) error {
 	}
 	feedMon.BackfillSweep = func() { sweepBackfill(false) }
 	s.backfillRescan = func() { sweepBackfill(true) }
+	// The scan runs on the worker's own goroutine, so the rows it lands
+	// arrive AFTER the cycle whose sweep queued it has walked the channel
+	// and would wait a whole feed_check_interval to be probed and jobbed — an
+	// upcoming stream found by the backfill alone (RSS down, DECAPI showing a
+	// newer video) was created minutes after the scan that found it. A kick
+	// re-runs the cycle now; one that lands mid-cycle is latched and re-run
+	// right after (runCycle's pendingKick), so several scans completing in a
+	// row cost one extra cycle, not one each.
+	backfill.OnNewRows = func(chID string, rows int) {
+		log.Debug("backfill wrote new feed rows; re-checking feeds now", slog.String("channel", chID), slog.Int("rows", rows))
+		feedMon.CheckNow()
+	}
 
 	// =========================================================================
 	// 13. DECAPI monitor
