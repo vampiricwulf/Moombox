@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -83,6 +84,54 @@ func TestSpecDocSchemaVersionMatchesTheCode(t *testing.T) {
 		for _, m := range ms {
 			if got, _ := strconv.Atoi(m[1]); got != want {
 				t.Errorf("%s says %q, but schemaVersion is %d", c.doc, m[0], want)
+			}
+		}
+	}
+}
+
+// toolchainClaims are the sentences that name go.mod's toolchain pin. As with
+// schemaVersionClaims, each pattern must still match.
+var toolchainClaims = []struct {
+	doc     string
+	pattern *regexp.Regexp
+}{
+	{"operations.md", regexp.MustCompile("`toolchain (go[0-9][0-9.]*)`")},
+	{"appendix-metrics.md", regexp.MustCompile(`\*\*Go version:\*\* [0-9.]+ \(` + "`toolchain (go[0-9][0-9.]*)`" + `\)`)},
+	{"SPEC.md", regexp.MustCompile("`toolchain (go[0-9][0-9.]*)`")},
+	{"BUILDING.md", regexp.MustCompile("`toolchain (go[0-9][0-9.]*)`")},
+}
+
+// goModToolchain matches go.mod's toolchain directive.
+var goModToolchain = regexp.MustCompile(`(?m)^toolchain (go[0-9][0-9.]*)\s*$`)
+
+// TestSpecDocToolchainMatchesGoMod pins every sentence that names the toolchain
+// pin to go.mod's `toolchain` line. go.mod moved to go1.27.2 as the floor that
+// fixes the net/http, crypto/tls and textproto vulnerabilities, and four docs
+// went on telling a builder the floor was go1.27.1 — the vulnerable patch.
+//
+// MUTANT: put go1.27.1 back into any of the four sentences (operations.md's,
+// appendix-metrics.md's, SPEC.md's, BUILDING.md's) -- that claim fails.
+func TestSpecDocToolchainMatchesGoMod(t *testing.T) {
+	root := repoRoot(t)
+	b, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	m := goModToolchain.FindStringSubmatch(strings.ReplaceAll(string(b), "\r\n", "\n"))
+	if m == nil {
+		t.Fatal("go.mod has no toolchain line -- re-aim this check")
+	}
+	want := m[1]
+	for _, c := range toolchainClaims {
+		text := strings.Join(docLines(t, root, c.doc), "\n")
+		ms := c.pattern.FindAllStringSubmatch(text, -1)
+		if len(ms) == 0 {
+			t.Errorf("%s no longer contains %q -- the sentence moved or was reworded; re-aim this check", c.doc, c.pattern)
+			continue
+		}
+		for _, m := range ms {
+			if m[1] != want {
+				t.Errorf("%s says %q, but go.mod carries toolchain %s", c.doc, m[0], want)
 			}
 		}
 	}

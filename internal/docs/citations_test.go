@@ -148,12 +148,12 @@ func backtickSpans(line string) []span {
 }
 
 // docPath resolves a specDocs entry to its file: the deep-dive docs live in
-// docs/spec/, SPEC.md and CLAUDE.md at the repo root.
+// docs/spec/; SPEC.md, CLAUDE.md, README.md and BUILDING.md at the repo root.
 func docPath(root, name string) string {
 	if strings.Contains(name, "/") {
 		return filepath.Join(root, filepath.FromSlash(name))
 	}
-	if name == "SPEC.md" || name == "CLAUDE.md" || name == "README.md" {
+	if name == "SPEC.md" || name == "CLAUDE.md" || name == "README.md" || name == "BUILDING.md" {
 		return filepath.Join(root, name)
 	}
 	return filepath.Join(root, "docs", "spec", name)

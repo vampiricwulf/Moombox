@@ -19,7 +19,7 @@
 
 ## Runtime
 
-- **Go version:** 1.27 (`toolchain go1.27.1`)
+- **Go version:** 1.27 (`toolchain go1.27.2`)
 - **Module path:** github.com/vampiricwulf/Moombox
 - **Current app version:** 2.9.5
 - **Database schema version:** 23
