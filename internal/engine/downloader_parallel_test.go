@@ -460,18 +460,22 @@ func TestReorderBufferFailureDoesNotReopenUnboundedGrowth(t *testing.T) {
 //	240 segments, 4 workers, so catchUpBatchLimit = 8*4 = 32 -> the batched
 //	structure needs ceil(240/32) = 8 runParallelCatchUp calls, and its
 //	runDashLoop ran an UNCONDITIONAL probeHeadSequence after every one of
-//	them, plus the initial head-discovery probe: 9 serial probes at 500ms
-//	each is >= 4.5s of wall clock before a single segment's 5ms delay is
-//	counted (batched model total: 9*500ms + 240/4*5ms = 4.8s). The rolling
+//	them, plus the initial head-discovery probe: 9 serial probes at 2s
+//	each is >= 18s of wall clock before a single segment's 5ms delay is
+//	counted (batched model total: 9*2s + 240/4*5ms = 18.3s). The rolling
 //	window pays exactly ONE probe (initial head discovery -- segment-header
 //	harvests keep head fresh afterward), so its nominal time is
-//	500ms + 240/4*5ms + overhead, comfortably under 1.5s even with coarse
-//	Windows timers. The structure is asserted directly first — exactly one
-//	probe — because that is what the batched shape cannot satisfy on any
-//	machine. The wall-clock budget backs it up: 4s sits below the batched
-//	floor of 4.5s and well above the rolling nominal (a loaded 2-core
-//	GitHub Windows runner measured 2.65s with the correct single probe, so
-//	the earlier 2.5s budget discriminated on runner speed, not structure).
+//	2s + 240/4*5ms + overhead. The structure is asserted directly first —
+//	exactly one probe — because that is what the batched shape cannot
+//	satisfy on any machine. The wall-clock budget backs it up, and the
+//	probe delay is what gives it room: with a 500ms probe the batched floor
+//	was 4.5s, and a loaded 2-core GitHub Windows runner twice caught up
+//	with the correct single probe in more than the budget that had to sit
+//	under it (2.65s over 2.5s, then 4.16s over 4s) — the budget measured
+//	runner speed, not structure, and could not be raised without crossing
+//	the floor. At 2s a probe, the 10s budget sits 8s under the batched
+//	floor and some 7.5s above the rolling nominal, where that runner's
+//	worst overhead so far (~3.7s) fits twice over.
 func TestCatchUpRollingWindowThroughput(t *testing.T) {
 	t.Parallel()
 	const (
@@ -479,8 +483,8 @@ func TestCatchUpRollingWindowThroughput(t *testing.T) {
 		endSeq     = 239 // 240 segments: 0..239 (EndSeq clamp ends the run)
 		numWorkers = 4
 		segDelay   = 5 * time.Millisecond
-		probeDelay = 500 * time.Millisecond
-		budget     = 4000 * time.Millisecond
+		probeDelay = 2 * time.Second
+		budget     = 10 * time.Second
 	)
 	var probes atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
