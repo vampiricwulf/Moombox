@@ -307,43 +307,6 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		// Persist any metadata changes (change-detected, zero-cost if nothing differs)
 		sp.updateJobMetadata(job, probeInfo, true)
 
-		// Reschedule check. The status probe above carries no schedule, so a
-		// start that moved was seen only by the full fetch below, every 30
-		// min; one cheap WEB call on its own cadence (scheduleProbeInterval,
-		// tighter as the start nears) sees it within minutes. Schedule only,
-		// and only while the answer still says upcoming: the full fetch owns
-		// every other field; a stream that has just begun carries its ACTUAL
-		// start in the same field, which is the go-live path's to write, not
-		// a reschedule to announce; and a probe that reports no schedule —
-		// refused, or none set — changes nothing. The clock advances before
-		// the call, so a failing probe is not retried every 30 s.
-		//
-		// An answer that says the stream has BEGUN is handed to the switch
-		// below in the status probe's place (scheduleProbeOvertakes): the WEB
-		// view can run ahead of ANDROID_VR, whose waiting-room slate can read
-		// as upcoming for a while after go-live, and the live and VOD arms
-		// confirm with a full fetch and keep polling when it disagrees — so a
-		// wrong answer costs one full fetch per probe, which the status probe
-		// itself can already cost every 30 s. Never any other answer: a
-		// refused WEB call reads not_a_stream, and the default arm ends the
-		// job on that.
-		if probeInfo.StreamStatus == youtube.StreamUpcoming {
-			if iv := scheduleProbeInterval(scheduledStartTime, time.Now()); iv > 0 && time.Since(lastScheduleProbe) >= iv {
-				lastScheduleProbe = time.Now()
-				if sched, err := sp.probeVideoSchedule(ctx, job.VideoID); err != nil {
-					reportFetchOutcome(err, "probe/youtube")
-					sp.logger.Debug("schedule probe failed; next full fetch covers it", "videoID", job.VideoID, "err", err)
-				} else if scheduleProbeOvertakes(sched) {
-					sp.logger.Info("schedule probe says the stream has begun ahead of the status probe; confirming",
-						"videoID", job.VideoID, "status", sched.StreamStatus)
-					probeInfo = sched
-				} else if sched.IsUpcoming && !sched.IsLive && sched.ScheduledStartTime != "" {
-					sp.updateJobMetadata(job, &youtube.VideoInfo{ScheduledStartTime: sched.ScheduledStartTime, IsUpcoming: true}, true)
-					scheduledStartTime = sched.ScheduledStartTime
-				}
-			}
-		}
-
 		// Periodic full WEB fetch to catch metadata ANDROID_VR can't see
 		// (e.g., rescheduled start times only available in microformat).
 		if time.Since(lastFullFetch) >= fullFetchInterval && probeInfo.StreamStatus == youtube.StreamUpcoming {
@@ -382,12 +345,66 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 					}, nil
 				}
 				sp.logger.Debug("periodic full fetch completed", "videoID", job.VideoID)
-				lastScheduleProbe = time.Now() // it carries the schedule too
+				// It carries the schedule too, so the schedule probe below is
+				// not due again for a full interval.
+				lastScheduleProbe = time.Now()
+				// On this tick the fetch is the WEB view the schedule probe
+				// would have been, so a stream it sees begun goes to the switch
+				// as the probe's answer would (scheduleProbeOvertakes, below).
+				if scheduleProbeOvertakes(fullInfo) {
+					sp.logger.Info("periodic full fetch says the stream has begun ahead of the status probe; confirming",
+						"videoID", job.VideoID, "status", fullInfo.StreamStatus)
+					probeInfo = fullInfo
+				}
 			} else {
 				reportFetchOutcome(err, "probe/youtube")
 				sp.logger.Debug("periodic full fetch failed, will retry later", "videoID", job.VideoID, "err", err)
 			}
 			lastFullFetch = time.Now()
+		}
+
+		// Reschedule check. The status probe above carries no schedule, so a
+		// start that moved was seen only by the full fetch, every 30 min; one
+		// cheap WEB call on its own cadence (scheduleProbeInterval, tighter as
+		// the start nears) sees it within minutes. Schedule only, and only
+		// while the answer still says upcoming: the full fetch owns every
+		// other field; a stream that has just begun carries its ACTUAL start
+		// in the same field, which is the go-live path's to write, not a
+		// reschedule to announce; and a probe that reports no schedule —
+		// refused, or none set — changes nothing. The clock advances before
+		// the call, so a failing probe is not retried every 30 s.
+		//
+		// It asks AFTER the full fetch, whose success resets its clock: asked
+		// first, on every tick the fetch came due it read the schedule the
+		// fetch then read again — a cookied WEB call every half hour for
+		// nothing once the start was six hours out and the probe's cap met
+		// the fetch's interval. A fetch that fails leaves it due, so it asks
+		// on that tick in the fetch's place.
+		//
+		// An answer that says the stream has BEGUN is handed to the switch
+		// below in the status probe's place (scheduleProbeOvertakes): the WEB
+		// view can run ahead of ANDROID_VR, whose waiting-room slate can read
+		// as upcoming for a while after go-live, and the live and VOD arms
+		// confirm with a full fetch and keep polling when it disagrees — so a
+		// wrong answer costs one full fetch per probe, which the status probe
+		// itself can already cost every 30 s. Never any other answer: a
+		// refused WEB call reads not_a_stream, and the default arm ends the
+		// job on that.
+		if probeInfo.StreamStatus == youtube.StreamUpcoming {
+			if iv := scheduleProbeInterval(scheduledStartTime, time.Now()); iv > 0 && time.Since(lastScheduleProbe) >= iv {
+				lastScheduleProbe = time.Now()
+				if sched, err := sp.probeVideoSchedule(ctx, job.VideoID); err != nil {
+					reportFetchOutcome(err, "probe/youtube")
+					sp.logger.Debug("schedule probe failed; next full fetch covers it", "videoID", job.VideoID, "err", err)
+				} else if scheduleProbeOvertakes(sched) {
+					sp.logger.Info("schedule probe says the stream has begun ahead of the status probe; confirming",
+						"videoID", job.VideoID, "status", sched.StreamStatus)
+					probeInfo = sched
+				} else if sched.IsUpcoming && !sched.IsLive && sched.ScheduledStartTime != "" {
+					sp.updateJobMetadata(job, &youtube.VideoInfo{ScheduledStartTime: sched.ScheduledStartTime, IsUpcoming: true}, true)
+					scheduledStartTime = sched.ScheduledStartTime
+				}
+			}
 		}
 
 		// B2: Try starting chat if not yet available — or RESTART the one whose

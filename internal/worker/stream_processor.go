@@ -535,8 +535,11 @@ func (sp *StreamProcessor) calculateProbeInterval(info *youtube.VideoInfo) time.
 // the time left (owner decision, 2026-10-14): one twelfth of it, so an hour
 // out is every 5 min and three hours out every 15, clamped between
 // scheduleProbeMin and scheduleProbeMax. The cap is the full fetch's own
-// interval, and the full fetch resets the probe's clock, so a start six
-// hours or more away costs no call the full fetch was not already making.
+// interval, and the full fetch resets the probe's clock — the loop asks
+// after it, so on the tick the fetch comes due a fetch that succeeds has
+// reset it already — so a start six hours or more away costs no call the
+// full fetch was not already making. A fetch that fails leaves the probe
+// due, and it asks on that tick instead.
 // The loop asks on its status-probe ticks, so the real cadence is the first
 // tick at or past the interval: three hours out (15 min, on 10-minute ticks)
 // the schedule is read every 20.
@@ -546,8 +549,9 @@ const (
 	scheduleProbeDivisor = 12
 )
 
-// scheduleProbeOvertakes reports whether a schedule probe's answer says the
-// stream has begun — live, or already over — and so may stand in for the
+// scheduleProbeOvertakes reports whether a schedule probe's answer — or the
+// periodic full fetch's, which on its tick takes the probe's place — says
+// the stream has begun, live or already over, and so may stand in for the
 // status probe's in the waiting loop's switch, whose live and VOD arms
 // confirm with a full fetch before acting. An ALLOW-list on purpose: every
 // other answer stays with the status probe. not_a_stream is what a refused

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -281,4 +282,77 @@ func TestWaitingLoopActsOnABegunScheduleAnswer(t *testing.T) {
 			t.Errorf("row status = %q, want %q", run.row.Status, database.StatusUpcoming)
 		}
 	})
+}
+
+// kinds is the order of the calls one tick made, for comparison.
+func kinds(tick []waitCall) string {
+	s := ""
+	for i, c := range tick {
+		if i > 0 {
+			s += ","
+		}
+		s += c.kind
+	}
+	return s
+}
+
+// The schedule probe asks after the periodic full fetch, so on the tick the
+// fetch comes due, a fetch that succeeds — it reads the schedule too — has
+// already reset the probe's clock. Eight hours out the probe's cadence is
+// capped at the fetch's own 30 minutes, and asking first sent one cookied
+// WEB call every half hour just ahead of a fetch that read the same
+// schedule again: a start six hours or more away now costs no call the full
+// fetch was not already making.
+//
+// Mutants: the schedule-probe block back ahead of the full fetch; the full
+// fetch no longer resetting the probe's clock (either way, a probe on every
+// full-fetch tick).
+func TestSuccessfulFullFetchStandsInForTheScheduleProbe(t *testing.T) {
+	run := driveWaitForLive(t, 8*time.Hour, 2*time.Hour, func(time.Time) waitFakes { return waitFakes{} })
+	if got := run.count("full"); got < 3 {
+		t.Fatalf("%d full fetches in 2 hours, want at least 3:%s", got, run)
+	}
+	if got := run.count("schedule"); got != 0 {
+		t.Errorf("%d schedule probe(s) with the start 8 h away, each on a tick whose full fetch read the schedule, want 0:%s", got, run)
+	}
+}
+
+// A full fetch that FAILS leaves the schedule probe due, and the probe asks
+// on that same tick, after it: the fallback that keeps a reschedule seen when
+// the watch page will not load.
+//
+// Mutants: the probe skipped on any tick the full fetch ran (none on the
+// failed tick); the probe back ahead of the full fetch (the order is wrong).
+func TestScheduleProbeCoversAFailedFullFetch(t *testing.T) {
+	run := driveWaitForLive(t, 8*time.Hour, 35*time.Minute, func(time.Time) waitFakes {
+		return waitFakes{full: func(time.Duration) (*youtube.VideoInfo, error) {
+			return nil, errors.New("innertube: 503")
+		}}
+	})
+	ticks := run.ticks()
+	if got := kinds(ticks[len(ticks)-1]); got != "status,full,schedule" {
+		t.Errorf("the full-fetch tick made %s, want status,full,schedule:%s", got, run)
+	}
+}
+
+// The full fetch on its tick is the WEB view the schedule probe would have
+// been, so an answer from it that says the stream has begun goes to the
+// switch the same way: the live arm confirms and the wait ends on that tick,
+// though the status probe still reads the waiting room. With the probe asked
+// after the fetch, a successful fetch takes the probe's place on that tick,
+// and without this the hand-off would wait for the next probe.
+//
+// Mutant: the full fetch's begun answer not handed to the switch (the wait
+// runs to the budget).
+func TestFullFetchThatSeesTheStreamBegunEndsTheWait(t *testing.T) {
+	run := driveWaitForLive(t, 8*time.Hour, 45*time.Minute, func(start time.Time) waitFakes {
+		return waitFakes{full: func(time.Duration) (*youtube.VideoInfo, error) { return liveAnswer(start), nil }}
+	})
+	if run.returned < 0 || run.result == nil || !run.result.ShouldDownload {
+		t.Fatalf("the wait ended with %+v at %v, want a live download on the full-fetch tick:%s", run.result, run.returned, run)
+	}
+	ticks := run.ticks()
+	if got := kinds(ticks[len(ticks)-1]); got != "status,full,full" {
+		t.Errorf("the last tick made %s, want status, the periodic full fetch, then the live arm's confirming one:%s", got, run)
+	}
 }
