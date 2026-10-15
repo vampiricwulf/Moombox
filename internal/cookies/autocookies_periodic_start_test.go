@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -69,6 +70,49 @@ func waitFor(cond func() bool, budget time.Duration) bool {
 	return cond()
 }
 
+// startJoinedPeriodicRefresh is StartPeriodicRefresh for a test: the loop runs
+// under t's context and is JOINED when the test ends — see joinBackground.
+// Every test of the loop starts it this way.
+//
+// Call it after every t.TempDir the service writes into, and after every
+// fixture cleanup the loop reads through (a swapped package var, the profile
+// fixture's database). Cleanups run last in, first out, so the join then runs
+// ahead of them. Returning while a pass was still writing cookies.txt.meta.json
+// into its TempDir is what failed TestPeriodicLoopPicksUpAProfileThatAppears-
+// AtRuntime on the Windows runner: testing's RemoveAll listed the directory,
+// the meta file's temp landed, and the rmdir answered "The directory is not
+// empty".
+//
+// It also stubs the cookie directory's DACL. A pass that writes cookies.txt
+// starts tightenCookieDirOnce's goroutine, which nothing joins — it is
+// process-wide, and harmless where the directory outlives it — and on Windows
+// that goroutine is a real icacls against the TempDir being removed.
+func startJoinedPeriodicRefresh(t *testing.T, s *AutoCookieService, interval time.Duration) {
+	t.Helper()
+	noDirTightening(t)
+	s.StartPeriodicRefresh(t.Context(), interval)
+	t.Cleanup(func() { joinBackground(t, s) })
+}
+
+// noDirTightening replaces the cookie directory's icacls / chmod with a no-op
+// for the test, so no unjoined shell-out runs against a TempDir.
+func noDirTightening(t *testing.T) {
+	t.Helper()
+	fakeApplyUserOnlyDACL(t, func(string) error { return nil })
+}
+
+// joinBackground stops the service — which waits up to AutoCookieStopWait for
+// a pass in flight — and then insists that its goroutines really are gone, so
+// a pass slower than that bound still cannot outlive the test.
+func joinBackground(t *testing.T, s *AutoCookieService) {
+	t.Helper()
+	s.Stop()
+	if !s.waitBackground(10 * time.Second) {
+		t.Error("the service's background goroutines were still running 10 s after Stop — the " +
+			"directories this test made are about to be removed under a pass that is writing into them")
+	}
+}
+
 // TestPeriodicLoopPicksUpAProfileThatAppearsAtRuntime is the two-sided
 // acceptance for moving the profile-directory question out of main.go.
 //
@@ -108,7 +152,7 @@ func TestPeriodicLoopPicksUpAProfileThatAppearsAtRuntime(t *testing.T) {
 	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
 
 	const interval = 25 * time.Millisecond
-	s.StartPeriodicRefresh(t.Context(), interval)
+	startJoinedPeriodicRefresh(t, s, interval)
 
 	// --- Side 1: no profile yet. Many ticks, no work, nothing to show a user.
 	time.Sleep(10 * interval)
@@ -136,6 +180,70 @@ func TestPeriodicLoopPicksUpAProfileThatAppearsAtRuntime(t *testing.T) {
 		t.Fatalf("the profile appeared and the running loop never read it (LastError=%q). Completing "+
 			"setup at runtime must be picked up by the next tick — requiring a restart is the bug the "+
 			"boot-time os.Stat caused", lastErrorSnapshot(s))
+	}
+	// The pass that verified is not over: it still writes the meta file. The
+	// next tick's stand-down says it is — the loop is one goroutine, so a tick
+	// that reached the import guard is one the importing pass has returned
+	// from — and that is when the profile fixture registered above may close
+	// its database: its cleanup runs ahead of the join, which was registered
+	// before it.
+	if !waitFor(func() bool { return log.count(guardSkipped) > 0 }, 10*time.Second) {
+		t.Fatal("the loop imported and then never stood down, so the pass that wrote cookies.txt " +
+			"never returned")
+	}
+}
+
+// TestPeriodicLoopJoinedBeforeItsTempDirsGo is the Windows CI failure of
+// TestPeriodicLoopPicksUpAProfileThatAppearsAtRuntime, made deterministic.
+//
+// That test returned as soon as a verify had run, and the pass was not over:
+// it still had the rollback decision and SaveMeta ahead of it, which writes
+// cookies.txt.meta.json into the test's cookie TempDir. testing removed the
+// directory under it — on Windows a temp file landing between RemoveAll's
+// listing and its rmdir fails the cleanup with "The directory is not empty";
+// elsewhere the late MkdirAll re-created the removed directory and leaked it.
+// Here the verify sleeps through the window, ignoring its context, so the
+// write lands after the subtest body returns every time; the join must hold
+// the TempDir cleanup until it has.
+//
+// Mutant (checked): startJoinedPeriodicRefresh registering no join — the
+// cookie directory is re-created after the subtest's cleanup removed it. That
+// Stop itself waits is TestStopWaitsForThePeriodicPassInFlight's, since the
+// join here would cover a Stop that did not.
+func TestPeriodicLoopJoinedBeforeItsTempDirsGo(t *testing.T) {
+	var cookieDir string
+	var verified atomic.Int64
+	t.Run("a pass still writing when the body returns", func(t *testing.T) {
+		profileDir := writeWALCookieProfile(t, youtubeAuthRows())
+		cookieDir = t.TempDir()
+		s := NewAutoCookieService(profileDir, filepath.Join(cookieDir, "cookies.txt"),
+			NewCookieJar(), &recordingCookieLogger{})
+		s.detectBrowser = func() *DetectedBrowser { return nil }
+		s.VerifyYouTubeAuth = func(context.Context) (bool, error) {
+			verified.Add(1)
+			time.Sleep(300 * time.Millisecond)
+			return true, nil
+		}
+		s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
+
+		startJoinedPeriodicRefresh(t, s, 20*time.Millisecond)
+		if !waitFor(func() bool { return verified.Load() > 0 }, 10*time.Second) {
+			t.Fatal("the loop never imported, so nothing below measures the join")
+		}
+		// Returns here, as the original did, with the pass mid-verify.
+	})
+	// Longer than the verify's sleep, so a write the join did not hold has
+	// landed by the time the directory is looked at.
+	time.Sleep(600 * time.Millisecond)
+	if _, err := os.Stat(cookieDir); err == nil {
+		entries, _ := os.ReadDir(cookieDir)
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		_ = os.RemoveAll(filepath.Dir(cookieDir)) // SaveMeta's MkdirAll re-created the TempDir root too
+		t.Errorf("the periodic pass wrote %v into the cookie directory after the test's cleanup had "+
+			"removed it — the loop was not joined before its TempDirs went", names)
 	}
 }
 
@@ -194,7 +302,7 @@ func TestPeriodicLoopKeepsItsBrowserWhenTheFlagFlipsOff(t *testing.T) {
 		s, log, verified := newService(t)
 
 		const interval = 20 * time.Millisecond
-		s.StartPeriodicRefresh(t.Context(), interval)
+		startJoinedPeriodicRefresh(t, s, interval)
 		// Wait for EITHER branch to show itself, so a loop that took the wrong
 		// one fails on the assertion that names the policy rather than on a
 		// liveness timeout that names nothing.

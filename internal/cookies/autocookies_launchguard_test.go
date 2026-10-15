@@ -283,7 +283,7 @@ func TestPeriodicTickInProfileModeObeysTheImportGuard(t *testing.T) {
 	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { verified.Add(1); return true, nil }
 	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
 
-	s.StartPeriodicRefresh(t.Context(), 20*time.Millisecond)
+	startJoinedPeriodicRefresh(t, s, 20*time.Millisecond)
 
 	if !waitForStandDowns(log, standDownsObserved) {
 		t.Fatalf("the periodic timer never stood a profile-mode tick down on a populated cookies.txt "+

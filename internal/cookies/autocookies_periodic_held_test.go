@@ -74,7 +74,7 @@ func TestPeriodicTickReportsAHeldProfileAsASkip(t *testing.T) {
 		return &DetectedBrowser{Type: "chrome", Path: unlaunchable, Name: "unlaunchable test browser"}
 	}
 
-	s.StartPeriodicRefresh(t.Context(), 20*time.Millisecond)
+	startJoinedPeriodicRefresh(t, s, 20*time.Millisecond)
 
 	const skipped = "periodic auto-cookie refresh skipped — a browser holds the profile"
 	if !waitFor(func() bool { return len(log.lines(skipped)) > 0 }, 10*time.Second) {

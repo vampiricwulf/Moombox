@@ -56,7 +56,7 @@ Called from: `routes.SetupRoutes` (setup wizard completion), `routes.UpdateRoute
 4. Monitors stop (Twitch, DECAPI, Feed), then the trim service (`TrimService.Stop`: cancels every trim it runs — a dashboard's, a TUI's, a finished job's post-download one — and waits up to 2 seconds for each to remove its partial file)
 5. Download worker stops (waits up to 10 seconds for in-flight jobs to save state, then cancels in-flight muxes and gives FFmpeg 2 seconds to die). The force-exit must outlast this whole budget: its clock starts first, and a backstop no longer than the worker's wait would exit before `CancelMuxes` ran
 6. In-flight notifications are flushed
-7. Cookie refresh and auto-cookie services stop
+7. Cookie refresh and auto-cookie services stop (the auto-cookie service cancels its periodic refresh and boot seed and waits up to 2 seconds, `cookies.AutoCookieStopWait`, for a pass in flight to return)
 8. PotProvider is cleaned up and the BotGuard sidecar is stopped (when running)
 9. Web server shuts down
 10. Log forwarder and DB event subscribers are unsubscribed

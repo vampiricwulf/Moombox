@@ -82,9 +82,7 @@ func TestPeriodicBrowserlessTickImportsOnlyWithNothingToLose(t *testing.T) {
 		s.VerifyYouTubeAuth = func(context.Context) (bool, error) { verified.Add(1); return true, nil }
 		s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
 
-		ctx, cancel := context.WithCancel(context.Background())
-		t.Cleanup(cancel)
-		s.StartPeriodicRefresh(ctx, 20*time.Millisecond)
+		startJoinedPeriodicRefresh(t, s, 20*time.Millisecond)
 		// Wait for a decision either way. Each case then waits for the ticks it
 		// needs; see waitForStandDowns.
 		waitFor(func() bool {
@@ -213,7 +211,7 @@ func TestPeriodicTickWithABrowserIgnoresTheImportGuard(t *testing.T) {
 	}
 	t.Cleanup(func() { refreshChromiumCookies = realChromium })
 
-	s.StartPeriodicRefresh(t.Context(), 20*time.Millisecond)
+	startJoinedPeriodicRefresh(t, s, 20*time.Millisecond)
 
 	if !waitFor(func() bool { return launched.Load() > 0 }, 10*time.Second) {
 		t.Fatalf("the periodic timer never ran a browser refresh on a host that HAS a browser and a "+

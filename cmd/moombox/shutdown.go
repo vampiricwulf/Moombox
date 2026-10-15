@@ -118,7 +118,10 @@ func (s *runState) shutdown() bool {
 	// 3. Flush in-flight notifications (may have been fired during worker stop)
 	stopService("Notifications", s.notifyMgr.Wait)
 
-	// 4. Stop cookie refresh and auto-cookie service
+	// 4. Stop cookie refresh and auto-cookie service. The auto-cookie Stop
+	// cancels its periodic refresh and boot seed and waits for a pass in
+	// flight to return (up to cookies.AutoCookieStopWait), so nothing it
+	// started writes cookies.txt after the steps below have begun.
 	stopService("CookieRefresh", s.cookieRefresh.Stop)
 	stopService("AutoCookies", s.autoCookieSvc.Stop)
 

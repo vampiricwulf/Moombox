@@ -784,7 +784,7 @@ When the main context is cancelled (Ctrl+C, SIGTERM, or restart trigger):
 3. Stop TwitchMonitor, DecapiMonitor, FeedMonitor, then the TrimService (cancels the trims it runs — a finished job's post-download trim among them — and waits up to 2 s for each to remove its partial file)
 4. Stop DownloadWorker (waits up to 10 s for active downloads to save resume state, then cancels in-flight muxes)
 5. Flush pending notifications
-6. Stop CookieRefresh and AutoCookieService
+6. Stop CookieRefresh and AutoCookieService (which cancels its periodic refresh and boot seed and waits up to 2 s for a pass in flight to return)
 7. Cleanup PotProvider (evict VMs)
 8. Stop the BotGuard sidecar (when running)
 9. Stop WebServer (graceful HTTP shutdown)

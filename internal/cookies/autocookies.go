@@ -190,6 +190,19 @@ var launchWindowKillBudget = 2 * time.Second
 // applyUserOnlyDACL and loadCookieJar elsewhere in this package.
 var authVerifyWindow = authVerifyTimeout
 
+// AutoCookieStopWait bounds how long Stop waits for the service's own
+// goroutines — StartPeriodicRefresh's timer and StartProfileSeed's boot import —
+// to return. Stop cancels a pass in flight and kills its browser first, so the
+// wait is normally milliseconds: what a cancelled pass still has to do is write
+// cookies.txt and its meta file, both temp+rename. The bound only keeps a step
+// that does not observe the cancel from holding the shutdown.
+//
+// Not budgeted into cmd/moombox's forceExitAfter, and it need not be: the
+// service stops after the worker, and a backstop that fires during this wait
+// exits with the pass wherever it is — which is what every shutdown did before
+// the wait existed.
+const AutoCookieStopWait = 2 * time.Second
+
 // platformRefreshURLs maps platform names to their refresh URLs.
 var platformRefreshURLs = map[string]string{
 	"youtube": refreshURL,
@@ -375,6 +388,22 @@ type AutoCookieService struct {
 	// both refuse while it is set.
 	stopped bool
 
+	// lifetime is the service's own context, and Stop ends it through
+	// endLifetime. The two goroutines this service starts for itself —
+	// StartPeriodicRefresh's timer and StartProfileSeed's boot import — run
+	// under it as well as under their caller's context (startBackground), so
+	// Stop reaches a pass in flight whether or not the caller cancelled first.
+	// nil on a service built as a literal rather than by NewAutoCookieService;
+	// both readers allow for that.
+	lifetime    context.Context
+	endLifetime context.CancelFunc
+
+	// background counts those two goroutines, so Stop can wait for a pass in
+	// flight to return (waitBackground). Added to under mu and only while
+	// stopped is false, and Stop raises stopped under mu before it waits, so no
+	// Add can land after the Wait has begun.
+	background sync.WaitGroup
+
 	// Optional auth verification callbacks (set by caller for real API verification)
 	VerifyYouTubeAuth func(ctx context.Context) (bool, error)
 	VerifyTwitchAuth  func(ctx context.Context) (bool, error)
@@ -421,6 +450,9 @@ type AutoCookieService struct {
 	// its for loop, so an escaping panic ends the 30-minute timer for the life
 	// of the process rather than costing one tick. cmd/moombox wraps the body
 	// it injects here in its own recover for exactly that reason.
+	//
+	// It is NOT called for a pass that outlived its goroutine's context — a
+	// shutdown, or Stop — see notePassCompleted.
 	OnPassCompleted func()
 
 	// DpapiFallback enables the Windows-only DPAPI cookie-extraction
@@ -598,6 +630,7 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 		},
 		logger: logger,
 	}
+	s.lifetime, s.endLifetime = context.WithCancel(context.Background())
 	// Restore LastRefresh from the on-disk sidecar so periodic refresh
 	// doesn't fire immediately on every startup. Audit reports/
 	// cookies.md #48. Missing sidecar (fresh install or pre-#48
@@ -762,6 +795,16 @@ func (s *AutoCookieService) ClearManualRelogin(platform string) bool {
 // lifetime. After it, StartSetup returns ErrServiceStopped and
 // RefreshCookies/RefreshCookiesDetailed decline.
 //
+// It also ends the service's own goroutines — StartPeriodicRefresh's timer
+// and StartProfileSeed's boot import — and waits, up to AutoCookieStopWait,
+// for a pass either has in flight to return. Before that join Stop returned
+// with such a pass still running: shutdown went on to stop the refresh
+// service and close the database while the pass wrote cookies.txt and its
+// meta file and then fired OnPassCompleted, and a test that stopped at the
+// same point had testing remove the cookie directory while the meta file was
+// being written into it, which Windows refuses ("The directory is not
+// empty").
+//
 // The latch is a separate field from `cancelled` because the two answer
 // different questions and have different lifetimes. `cancelled` aborts ONE
 // setup attempt and is consumed by the next claim; `stopped` is a statement
@@ -777,9 +820,17 @@ func (s *AutoCookieService) Stop() {
 	// setupProcess covers it on its own.
 	s.cancelled = true
 	s.mu.Unlock()
+	// Ahead of the kills: a pass waiting on a verify round trip is released
+	// by this, one driving a browser by killRefreshProcess below.
+	if s.endLifetime != nil {
+		s.endLifetime()
+	}
 	s.killSetupProcess()
 	s.killRefreshProcess()
 	s.cleanup()
+	if !s.waitBackground(AutoCookieStopWait) && s.logger != nil {
+		s.logger.Warn("auto-cookie refresh pass still running after stop", "waited", AutoCookieStopWait.String())
+	}
 }
 
 // dpapiFallbackOn reports cookies.dpapi_fallback through the DpapiFallback

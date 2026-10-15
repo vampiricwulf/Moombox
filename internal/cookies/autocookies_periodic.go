@@ -63,14 +63,72 @@ func (s *AutoCookieService) periodicRefreshHasSource() bool {
 	return err == nil
 }
 
-// notePassCompleted fires OnPassCompleted if one is wired.
+// notePassCompleted fires OnPassCompleted if one is wired, unless ctx has
+// ended. ctx is the calling goroutine's own context — the loop's or the
+// seed's, never the pass's budget — so it has ended only when the caller's
+// did (a shutdown) or when Stop ended the service's lifetime.
+//
+// A pass that outlived its goroutine's context fires nothing. The hook runs
+// RefreshService's re-check under context.Background(), up to two validate
+// round trips, so firing it there held Stop's join for its whole bound, and
+// fanned the verdict out into a refresh service, a worker and a notification
+// manager that shutdown had already stopped. Nothing is lost by skipping it:
+// the next boot's first check reads the file this pass wrote.
 //
 // A named method rather than an inline nil check so the decision has a seam a
 // test can drive: the tick that calls it needs a browser profile, a browser
 // and a network, so the branch is otherwise unreachable offline.
-func (s *AutoCookieService) notePassCompleted() {
-	if s.OnPassCompleted != nil {
+func (s *AutoCookieService) notePassCompleted(ctx context.Context) {
+	if s.OnPassCompleted != nil && ctx.Err() == nil {
 		s.OnPassCompleted()
+	}
+}
+
+// startBackground registers one of the service's own goroutines with Stop. It
+// returns ctx narrowed to the service's lifetime, the func that goroutine must
+// defer to deregister, and false when the service is already stopped — in
+// which case nothing may start, because Stop has latched and may already be
+// waiting.
+//
+// Under mu, and only while stopped is false, which is what makes the Add safe
+// against the Wait: Stop raises stopped under the same lock before it waits.
+func (s *AutoCookieService) startBackground(ctx context.Context) (context.Context, func(), bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return ctx, func() {}, false
+	}
+	s.background.Add(1)
+	ctx, cancel := context.WithCancel(ctx)
+	unhook := func() bool { return false }
+	if s.lifetime != nil {
+		unhook = context.AfterFunc(s.lifetime, cancel)
+	}
+	return ctx, func() {
+		unhook()
+		cancel()
+		s.background.Done()
+	}, true
+}
+
+// waitBackground waits up to d for every goroutine startBackground registered
+// to return, and reports whether they all had.
+func (s *AutoCookieService) waitBackground(d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r != nil && s.logger != nil {
+				s.logger.Error("panic waiting for the auto-cookie background passes", "panic", fmt.Sprintf("%v", r))
+			}
+		}()
+		s.background.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
 	}
 }
 
@@ -80,6 +138,12 @@ func (s *AutoCookieService) notePassCompleted() {
 // the network stack, or a VPN sidecar is ready — would report a false
 // "auth verification failed" and flag a re-login the user does not need.
 const profileImportStartupDelay = 15 * time.Second
+
+// profileSeedWait is the value StartProfileSeed actually waits, and it is a var
+// for the reason authVerifyWindow is: a test cannot wait out 15 s to reach the
+// seed's pass, and the join Stop makes with that pass needs one in flight to
+// prove anything. Production never assigns it.
+var profileSeedWait = profileImportStartupDelay
 
 // StartProfileSeed runs AT MOST ONE browser-free import out of the configured
 // browser profile, shortly after start, on an install that has no cookies to
@@ -114,17 +178,26 @@ func (s *AutoCookieService) StartProfileSeed(ctx context.Context) {
 		return
 	}
 
+	// Registered with Stop, which ends ctx and waits for the import below. A
+	// service stopped before this point gets no goroutine at all.
+	ctx, done, ok := s.startBackground(ctx)
+	if !ok {
+		s.logger.Debug("startup browser-profile cookie import not started — the service is stopped")
+		return
+	}
+
 	s.logger.Info("browser-free import path and no cookies to lose — seeding cookies from the configured browser profile",
 		"profile_dir", s.profileDir, "cookie_file", s.cookiePath,
-		"delay", profileImportStartupDelay.String())
+		"delay", profileSeedWait.String())
 
 	go func() {
+		defer done()
 		defer func() {
 			if r := recover(); r != nil {
 				s.logger.Error("panic in startup cookie seed goroutine", "panic", fmt.Sprintf("%v", r))
 			}
 		}()
-		if err := utils.Sleep(ctx, profileImportStartupDelay); err != nil {
+		if err := utils.Sleep(ctx, profileSeedWait); err != nil {
 			return
 		}
 		// Asked again, because the whole gate is "there is nothing here to
@@ -174,7 +247,7 @@ func (s *AutoCookieService) StartProfileSeed(ctx context.Context) {
 		// not read the import's verdict half a minute after the re-check's
 		// output.
 		if result.Ran {
-			s.notePassCompleted()
+			s.notePassCompleted(ctx)
 		}
 	}()
 }
@@ -197,9 +270,18 @@ func (s *AutoCookieService) StartProfileSeed(ctx context.Context) {
 // hand is the manual trigger — R F in the TUI, shift+click on the dashboard —
 // because a refresh is only meaningful when something changed the profile, and
 // the operator is the only thing that can.
+//
+// The goroutine is the service's own: Stop ends it, cancelling a tick in
+// flight, and waits for that tick to return (see Stop). ctx still ends it too.
 func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval time.Duration) {
+	ctx, done, ok := s.startBackground(ctx)
+	if !ok {
+		s.logger.Debug("auto-cookie periodic refresh not started — the service is stopped")
+		return
+	}
 	s.logger.Info("auto-cookie periodic refresh enabled", "interval", interval.String())
 	go func() {
+		defer done()
 		defer func() {
 			if r := recover(); r != nil {
 				s.logger.Error("panic in periodic cookie refresh goroutine", "panic", fmt.Sprintf("%v", r))
@@ -311,6 +393,6 @@ func (s *AutoCookieService) periodicTick(ctx context.Context, interval time.Dura
 	// DECLINED pass (eight refreshDeclined() exits) wrote nothing, so
 	// there is nothing to re-read.
 	if result.Ran {
-		s.notePassCompleted()
+		s.notePassCompleted(ctx)
 	}
 }

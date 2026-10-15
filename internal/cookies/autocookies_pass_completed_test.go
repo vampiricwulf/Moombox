@@ -33,11 +33,33 @@ func TestNotePassCompletedFiresTheHook(t *testing.T) {
 	calls := 0
 	s := &AutoCookieService{OnPassCompleted: func() { calls++ }}
 
-	s.notePassCompleted()
-	s.notePassCompleted()
+	s.notePassCompleted(context.Background())
+	s.notePassCompleted(context.Background())
 
 	if calls != 2 {
 		t.Errorf("the hook fired %d times for two completed passes, want 2", calls)
+	}
+}
+
+// TestNotePassCompletedAfterItsLoopEndedFiresNothing: a pass that finished
+// after its goroutine's context ended — a shutdown, or Stop ending the
+// service's lifetime — fires no re-check. The hook runs RefreshService's
+// re-check under context.Background(), so firing it then held Stop's join
+// for its whole bound and fanned the verdict into services shutdown had
+// already stopped.
+//
+// Mutant (checked): the ctx.Err() test dropped from notePassCompleted — the
+// hook fires for the cancelled pass.
+func TestNotePassCompletedAfterItsLoopEndedFiresNothing(t *testing.T) {
+	calls := 0
+	s := &AutoCookieService{OnPassCompleted: func() { calls++ }}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	s.notePassCompleted(ctx)
+
+	if calls != 0 {
+		t.Errorf("the hook fired %d time(s) for a pass whose loop had already ended, want 0", calls)
 	}
 }
 
@@ -50,7 +72,7 @@ func TestNotePassCompletedFiresTheHook(t *testing.T) {
 // process.
 func TestNotePassCompletedWithNoHookIsSafe(t *testing.T) {
 	s := &AutoCookieService{}
-	s.notePassCompleted() // must not panic
+	s.notePassCompleted(context.Background()) // must not panic
 }
 
 // TestNotePassCompletedHasExactlyItsTwoWritingCallers is the structural half
@@ -145,7 +167,7 @@ const (
 //
 // WHAT IS RECOGNISED as a gate: the call sits inside the BODY of an `if` whose
 // condition is a bare field selector, and the reported name is that field.
-// `if result.Ran { s.notePassCompleted() }` reports "Ran".
+// `if result.Ran { s.notePassCompleted(ctx) }` reports "Ran".
 //
 // WHAT IS NOT, each with its own sentinel: no enclosing `if`; a condition that
 // is not a bare selector, which covers `if true`, `if !result.Ran`, and
