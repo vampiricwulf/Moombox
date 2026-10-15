@@ -55,7 +55,7 @@ func TestApplyProbeToFeedItem(t *testing.T) {
 	defer db.Close()
 	db.UpsertFeedItem(fi("UC1", "v1", "2026-07-16T00:00:00Z", "assumed", "membership", "unknown", 0))
 	// Probe: vod with a started date → status flips, date upgrades, source untouched.
-	if err := db.ApplyProbeToFeedItem("UC1", "v1", "vod", "Real Title", "2026-07-14T20:00:00Z", "started"); err != nil {
+	if err := db.ApplyProbeToFeedItem("UC1", "v1", "vod", "Real Title", "2026-07-14T20:00:00Z", "started", FeedRecheck{}); err != nil {
 		t.Fatal(err)
 	}
 	got := mustGetFeedItem(t, db, "UC1", "v1")
@@ -65,13 +65,13 @@ func TestApplyProbeToFeedItem(t *testing.T) {
 	// A later probe with a WORSE date must not downgrade; a stale-listing-shaped
 	// status write is the caller's responsibility to prevent, but 'Unknown Title'
 	// must never overwrite a real title.
-	db.ApplyProbeToFeedItem("UC1", "v1", "vod", "Unknown Title", "2026-07-13T00:00:00Z", "day")
+	db.ApplyProbeToFeedItem("UC1", "v1", "vod", "Unknown Title", "2026-07-13T00:00:00Z", "day", FeedRecheck{})
 	got = mustGetFeedItem(t, db, "UC1", "v1")
 	if got.DatePrecision != "started" || got.Title != "Real Title" {
 		t.Fatalf("probe downgrade leaked: %+v", got)
 	}
 	// upcoming supplies no date: rank 0 no-op, status still lands.
-	if err := db.ApplyProbeToFeedItem("UC1", "v1", "upcoming", "", "", ""); err != nil {
+	if err := db.ApplyProbeToFeedItem("UC1", "v1", "upcoming", "", "", "", FeedRecheck{}); err != nil {
 		t.Fatal(err)
 	}
 	got = mustGetFeedItem(t, db, "UC1", "v1")
@@ -92,11 +92,11 @@ func TestFeedScope_Q1UnionQ2(t *testing.T) {
 	db.UpsertFeedItem(fi("UC1", "in", recent, "exact", "rss", "unknown", 0))   // Q1
 	db.UpsertFeedItem(fi("UC1", "out", old, "coarse", "videos", "unknown", 1)) // neither
 	db.UpsertFeedItem(fi("UC1", "up", old, "assumed", "rss", "unknown", 2))    // Q2 via status
-	db.ApplyProbeToFeedItem("UC1", "up", "upcoming", "", "", "")
+	db.ApplyProbeToFeedItem("UC1", "up", "upcoming", "", "", "", FeedRecheck{})
 	db.UpsertFeedItem(fi("UC1", "unres", old, "assumed", "membership", "unknown", 3)) // Q2 unresolved arm (§7)
 	db.UpsertFeedItem(fi("UC1", "memb", recent, "coarse", "membership", "unknown", 4))
 
-	got, err := db.FeedScope("UC1", cutoff, true)
+	got, err := db.FeedScope("UC1", cutoff, now.Format(time.RFC3339), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestFeedScope_Q1UnionQ2(t *testing.T) {
 		t.Error("out-of-window coarse row leaked into scope")
 	}
 	// The read arm is the OPERATOR'S toggle: membership rows drop from BOTH arms.
-	got, _ = db.FeedScope("UC1", cutoff, false)
+	got, _ = db.FeedScope("UC1", cutoff, now.Format(time.RFC3339), false)
 	ids = idsOf(got)
 	if ids["memb"] || ids["unres"] {
 		t.Error("membership rows visible with the toggle off")
@@ -150,7 +150,7 @@ func TestFeedScope_UnresolvedRSSRowFirstSeenInsideTheWindow(t *testing.T) {
 	add("stale", "rss", now.AddDate(0, 0, -20).Format(time.RFC3339), 1)
 	add("listed", "videos", seenNow, 2)
 
-	got, err := db.FeedScope("UC1", cutoff, false)
+	got, err := db.FeedScope("UC1", cutoff, now.Format(time.RFC3339), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,10 +167,10 @@ func TestFeedScope_UnresolvedRSSRowFirstSeenInsideTheWindow(t *testing.T) {
 
 	// Once a probe resolves it, the row leaves the arm: an upcoming one is
 	// carried by status, a VOD is judged by its date like any other.
-	if err := db.ApplyProbeToFeedItem("UC1", "scheduled", "vod", "", "", ""); err != nil {
+	if err := db.ApplyProbeToFeedItem("UC1", "scheduled", "vod", "", "", "", FeedRecheck{}); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = db.FeedScope("UC1", cutoff, false)
+	got, _ = db.FeedScope("UC1", cutoff, now.Format(time.RFC3339), false)
 	if idsOf(got)["scheduled"] {
 		t.Error("a resolved VOD older than the window must leave scope")
 	}
@@ -196,7 +196,7 @@ func TestFeedScope_QueryPlan(t *testing.T) {
 	// verified: same query against this exact all-'unknown' population always
 	// plans as SCAN, regardless of SQL phrasing — this is not a planner bug).
 	for i := range 1450 {
-		db.ApplyProbeToFeedItem("UC1", vid(i), "vod", "T", "2026-01-01T00:00:00Z", "exact")
+		db.ApplyProbeToFeedItem("UC1", vid(i), "vod", "T", "2026-01-01T00:00:00Z", "exact", FeedRecheck{})
 	}
 	db.db.Exec(`ANALYZE`)
 	assertPlan := func(q string, args []any, mustContain string) {
@@ -440,7 +440,7 @@ func TestFeedItems_PublishedFirstSeenAlwaysZ(t *testing.T) {
 		"bfCoarse":   {"2026-07-08T20:00:00Z", "day"},
 	}
 	for vid, p := range probes {
-		if err := db.ApplyProbeToFeedItem("UC1", vid, "vod", vid, p[0], p[1]); err != nil {
+		if err := db.ApplyProbeToFeedItem("UC1", vid, "vod", vid, p[0], p[1], FeedRecheck{}); err != nil {
 			t.Fatalf("probe write %s: %v", vid, err)
 		}
 	}
@@ -475,9 +475,9 @@ func TestFeedItems_PublishedFirstSeenAlwaysZ(t *testing.T) {
 func mustGetFeedItem(t *testing.T, db *Database, channelID, videoID string) FeedItem {
 	t.Helper()
 	it := FeedItem{ChannelID: channelID, VideoID: videoID}
-	err := db.db.QueryRow(`SELECT title, published, date_precision, catalog_pos, source, status, first_seen
+	err := db.db.QueryRow(`SELECT title, published, date_precision, catalog_pos, source, status, first_seen, recheck_at, recheck_step
 		FROM feed_items WHERE channel_id = ? AND video_id = ?`, channelID, videoID).Scan(
-		&it.Title, &it.Published, &it.DatePrecision, &it.CatalogPos, &it.Source, &it.Status, &it.FirstSeen)
+		&it.Title, &it.Published, &it.DatePrecision, &it.CatalogPos, &it.Source, &it.Status, &it.FirstSeen, &it.RecheckAt, &it.RecheckStep)
 	if err != nil {
 		t.Fatalf("mustGetFeedItem(%s, %s): %v", channelID, videoID, err)
 	}
@@ -490,4 +490,128 @@ func idsOf(items []FeedItem) map[string]bool {
 		out[it.VideoID] = true
 	}
 	return out
+}
+
+// An unconfirmed broadcast end's re-check (FeedItem.RecheckAt) decides when
+// its row is in scope, and nothing else does: pending, the row is out of
+// every arm — the in-window Q1 row, the unresolved Q2 row — and due, Q3
+// carries it wherever its date is. The membership toggle reaches Q3 like the
+// other arms.
+//
+// Mutants: the pending filter dropped from Q1 (the in-window pending row in
+// scope) or from Q2 (the assumed pending row in scope); Q3 dropped (the due
+// rows outside the window missing); Q3 without its due bound (the pending
+// row outside the window in scope); Q3 ignoring the membership toggle.
+func TestFeedScope_TheEndRecheckDecidesScope(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	defer db.Close()
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	nowStr := now.Format(time.RFC3339)
+	cutoff := now.AddDate(0, 0, -3).Format(time.RFC3339)
+	recent := now.AddDate(0, 0, -1).Format(time.RFC3339)
+	old := now.AddDate(0, 0, -30).Format(time.RFC3339)
+	pending := FeedRecheck{At: now.Add(time.Hour).Format(time.RFC3339), Step: 1}
+	due := FeedRecheck{At: now.Add(-time.Minute).Format(time.RFC3339), Step: 2}
+	add := func(vid, pub, prec, src, status string, rc FeedRecheck) {
+		t.Helper()
+		if _, err := db.UpsertFeedItem(fi("UC1", vid, pub, prec, src, "unknown", 0)); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.ApplyProbeToFeedItem("UC1", vid, status, vid, pub, prec, rc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("inWindowPending", recent, "exact", "rss", "vod", pending)
+	add("assumedPending", old, "assumed", "rss", "unknown", pending)
+	add("oldPending", old, "exact", "rss", "vod", pending)
+	add("oldDue", old, "exact", "rss", "vod", due)
+	add("inWindowDue", recent, "exact", "rss", "vod", due)
+	add("membDue", old, "exact", "membership", "vod", due)
+	add("settled", old, "exact", "rss", "vod", FeedRecheck{})
+
+	got, err := db.FeedScope("UC1", cutoff, nowStr, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := idsOf(got)
+	for _, want := range []string{"oldDue", "inWindowDue", "membDue"} {
+		if !ids[want] {
+			t.Errorf("scope missing the due re-check %q", want)
+		}
+	}
+	for _, not := range []string{"inWindowPending", "assumedPending", "oldPending", "settled"} {
+		if ids[not] {
+			t.Errorf("%q is in scope: a pending re-check and a settled out-of-window vod must not be", not)
+		}
+	}
+	for _, it := range got {
+		if it.VideoID == "oldDue" && (it.RecheckAt != due.At || it.RecheckStep != due.Step) {
+			t.Errorf("scope row carries re-check %q step %d, want %q %d", it.RecheckAt, it.RecheckStep, due.At, due.Step)
+		}
+	}
+	got, _ = db.FeedScope("UC1", cutoff, nowStr, false)
+	if idsOf(got)["membDue"] {
+		t.Error("a membership row's re-check reached scope with the toggle off")
+	}
+}
+
+// The re-check rides the probe write, in the same statement: written with
+// the status that needs it, and cleared by the next write that does not.
+//
+// Mutants: the recheck columns left out of the UPDATE (nothing written);
+// written only when non-zero (a settled write leaves the old one pending).
+func TestApplyProbeToFeedItem_WritesAndClearsTheRecheck(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	defer db.Close()
+	db.UpsertFeedItem(fi("UC1", "v1", "2026-07-10T00:00:00Z", "exact", "rss", "unknown", 0))
+	rc := FeedRecheck{At: "2026-07-16T13:00:00Z", Step: 1}
+	if err := db.ApplyProbeToFeedItem("UC1", "v1", "vod", "", "", "", rc); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustGetFeedItem(t, db, "UC1", "v1"); got.RecheckAt != rc.At || got.RecheckStep != rc.Step {
+		t.Fatalf("re-check %q step %d, want %q %d", got.RecheckAt, got.RecheckStep, rc.At, rc.Step)
+	}
+	if err := db.ApplyProbeToFeedItem("UC1", "v1", "upcoming", "", "", "", FeedRecheck{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustGetFeedItem(t, db, "UC1", "v1"); got.RecheckAt != "" || got.RecheckStep != 0 {
+		t.Fatalf("a settled write left re-check %q step %d", got.RecheckAt, got.RecheckStep)
+	}
+}
+
+// Q3 reads through its own index, in order, whatever the rest of the
+// channel holds.
+//
+// Mutant: the index dropped (or not covering recheck_at) — a SCAN.
+func TestFeedScope_Q3QueryPlan(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	defer db.Close()
+	for i := range 600 {
+		vid := "v" + strings.Repeat("y", 2) + string(rune('a'+i%26)) + string(rune('a'+(i/26)%26))
+		db.UpsertFeedItem(fi("UC1", vid, "2026-01-01T00:00:00Z", "exact", "videos", "unknown", i))
+		rc := FeedRecheck{}
+		if i%50 == 0 {
+			rc = FeedRecheck{At: "2026-07-16T13:00:00Z", Step: 1}
+		}
+		db.ApplyProbeToFeedItem("UC1", vid, "vod", "T", "2026-01-01T00:00:00Z", "exact", rc)
+	}
+	db.db.Exec(`ANALYZE`)
+	rows, err := db.db.Query("EXPLAIN QUERY PLAN "+feedScopeQ3SQL(false), "UC1", "2026-07-16T14:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var all string
+	for rows.Next() {
+		var a, b, c int
+		var d string
+		rows.Scan(&a, &b, &c, &d)
+		all += d + "\n"
+	}
+	if !strings.Contains(all, "idx_feed_items_recheck") || strings.Contains(all, "TEMP B-TREE") {
+		t.Fatalf("plan for Q3:\n%s\nwant idx_feed_items_recheck, no TEMP B-TREE", all)
+	}
 }

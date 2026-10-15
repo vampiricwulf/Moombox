@@ -193,7 +193,13 @@ type FeedMonitor struct {
 	// date the row. The ladder makes the upgrade one-time per video. Nil
 	// disables the second phase (rows with rankable dates still classify;
 	// see applyProbe).
-	ProbeDate       func(ctx context.Context, videoID string) (publishedAt, precision string, err error)
+	ProbeDate func(ctx context.Context, videoID string) (publishedAt, precision string, err error)
+	// ConfirmEnd is the end check (ConfirmEndFunc): the one signed-in WEB
+	// call that settles a broadcast end the status probe read off weak
+	// signals alone. Nil, or no signed-in session, leaves every such end
+	// unconfirmed: stored ended for announcing, with its row re-checked on
+	// endRecheckBackoff (applyProbe).
+	ConfirmEnd      ConfirmEndFunc
 	MetadataTracker *MetadataFailureTracker
 	ProbeCooldown   *ProbeCooldown // per-monitor; window from config, refreshed each cycle
 	IsOnline        func() bool    // nil = always online
@@ -728,24 +734,24 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 	fm.carryNewIDs(chID, newIDs, cycleNow)
 
 	// 3. WALK — the serial probe pass over the store's scope (spec §8).
-	scope, scopeErr := fm.db.FeedScope(chID, cutoff, fm.membershipDiscoveryEnabled())
+	scope, scopeErr := fm.db.FeedScope(chID, cutoff, cycleNow.Format(time.RFC3339), fm.membershipDiscoveryEnabled())
 	if scopeErr != nil {
 		fm.logger.Warn("FeedScope query failed; walk+archive skipped this cycle", "channel", ch.Name, "err", scopeErr)
 		return rssErr
 	}
 	walkCtx, walkCancel := context.WithTimeout(ctx, passBudget(len(scope)))
-	fresh := fm.walk(walkCtx, ch, chID, cutoff, scope)
+	fresh := fm.walk(walkCtx, ch, chID, cutoff, cycleNow, scope)
 	walkCancel()
 
 	// 4. ARCHIVE — re-read scope (the walk corrected dates and statuses, so
 	// rows may have entered or left it) and decide jobs per item (spec §10).
-	scope, scopeErr = fm.db.FeedScope(chID, cutoff, fm.membershipDiscoveryEnabled())
+	scope, scopeErr = fm.db.FeedScope(chID, cutoff, cycleNow.Format(time.RFC3339), fm.membershipDiscoveryEnabled())
 	if scopeErr != nil {
 		fm.logger.Warn("FeedScope re-read failed; archive skipped this cycle", "channel", ch.Name, "err", scopeErr)
 		return rssErr
 	}
 	archiveCtx, archiveCancel := context.WithTimeout(ctx, passBudget(len(scope)))
-	fm.archive(archiveCtx, ch, chID, cutoff, scope, newIDs, fresh)
+	fm.archive(archiveCtx, ch, chID, cutoff, cycleNow, scope, newIDs, fresh)
 	archiveCancel()
 	fm.settleNewIDs(chID, newIDs)
 

@@ -58,7 +58,7 @@ func passBudget(rows int) time.Duration {
 // (new vs backlog — carryNewIDs); fresh carries the walk's
 // successful probe results so nothing is probed twice in one cycle —
 // probe_cooldown defaults to 0, so nothing else would suppress the repeat.
-func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, chID, cutoff string, scope []database.FeedItem, newIDs map[string]bool, fresh map[string]ProbeClassifyResult) {
+func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, chID, cutoff string, now time.Time, scope []database.FeedItem, newIDs map[string]bool, fresh map[string]ProbeClassifyResult) {
 	// The established gate (§11) is per-channel: read once. Fail closed on a
 	// read error — past content skipped this cycle is retried next cycle,
 	// while archiving an unestablished channel repeats the headline bug.
@@ -145,7 +145,7 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 					continue
 				}
 				if res.Outcome == OutcomeProbed {
-					fm.applyProbe(chID, row.VideoID, row.DatePrecision, res)
+					fm.applyProbe(chID, row, res, now)
 				}
 			}
 			switch res.Outcome {
@@ -180,7 +180,19 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 // result — the caller has already routed denied/errored/cooldown away.
 // Live/upcoming job as broadcasts; past content re-checks the window against
 // the probe's date, then dispositions new-vs-backlog from newIDs.
+//
+// An unconfirmed end makes no job at all: it is ended for announcing — no
+// broadcast job, no "Video found" — and a VOD job on an end nobody
+// confirmed would act on the guess the re-check exists to test. FeedScope
+// already keeps such a row out of the archive's re-read once the walk has
+// scheduled its re-check; this covers the refresh probe, which runs on a
+// row the walk did not reach.
 func (fm *FeedMonitor) emitJob(ch *config.ChannelConfig, row database.FeedItem, res ProbeClassifyResult, cutoff string, newIDs map[string]bool) bool {
+	if res.EndUnconfirmed {
+		fm.logger.Debug("archive: broadcast end unconfirmed; no job until a re-check settles it",
+			"videoID", row.VideoID, "channel", ch.Name)
+		return false
+	}
 	d := DispositionBacklogVOD
 	switch res.StreamStatus {
 	case "live", "upcoming":

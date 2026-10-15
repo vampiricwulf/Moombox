@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -36,6 +37,55 @@ type VideoProbeResult struct {
 	PublishedPrecision string // "started" or "day", empty when PublishedAt is empty
 	PlayabilityError   string // playability status from YouTube API (may be empty for OK videos)
 	BroadcastEnded     bool   // the broadcast or premiere is over, whatever StreamStatus says (youtube.VideoInfo.BroadcastEnded)
+	BroadcastEndWeak   bool   // BroadcastEnded rests on weak signals alone: confirmed before it is trusted (ConfirmEndFunc)
+}
+
+// EndCheck is the signed-in WEB call's answer for a broadcast the status
+// probe reads as ended on weak signals alone (ConfirmEndFunc). WEB carries
+// the microformat the status probes never do, and with it
+// liveBroadcastDetails.endTimestamp.
+type EndCheck struct {
+	// Ended: the WEB answer's own end is strong — endTimestamp (or
+	// isPostLiveDvr). The broadcast is over.
+	Ended bool
+	// OnAir: the WEB answer's own flags say live now or upcoming. The
+	// broadcast is not over, whatever the status probe's weak signals said.
+	OnAir bool
+	// PublishedAt and PublishedPrecision are the same call's date — what the
+	// §9 date fetch would have asked the same client for.
+	PublishedAt        string
+	PublishedPrecision string
+}
+
+// ConfirmEndFunc makes the one signed-in WEB-family call that settles a weak
+// end (probeAndClassify). An error means it could not run or could not be
+// read — no signed-in session (ErrEndCheckUnavailable), a transport error —
+// and leaves the end unconfirmed; one under a context that has ended is an
+// errored probe instead (confirmEnd). Wired to
+// youtube.Service.ProbeVideoSchedule behind HasAuthCookies (cmd/moombox,
+// monitorEndCheck).
+type ConfirmEndFunc func(ctx context.Context, videoID string) (EndCheck, error)
+
+// ErrEndCheckUnavailable is ConfirmEndFunc's answer when there is no
+// signed-in session to ask with. An anonymous WEB call is refused for
+// exactly the answers a weak end comes from (the age gate), so it would
+// settle nothing.
+var ErrEndCheckUnavailable = errors.New("no signed-in YouTube session for the end check")
+
+// endRecheckBackoff is how long a broadcast whose end rests on weak signals
+// the end check could not settle waits before it is probed again: an hour,
+// then six, then daily for as long as it stays unsettled. Not every cycle:
+// an unsettled end is what a refused answer for an ended stream looks like
+// for as long as the refusal stands, which can be for good. Not never: the
+// same answer is what an age-gated stream that is live now might look like,
+// and a re-probe that finds it live or upcoming takes it up as a newly found
+// broadcast.
+var endRecheckBackoff = [...]time.Duration{time.Hour, 6 * time.Hour, 24 * time.Hour}
+
+// endRecheckDelay is the wait before re-check number step+1 — step counting
+// the re-checks already scheduled, so 0 for a first unsettled end.
+func endRecheckDelay(step int) time.Duration {
+	return endRecheckBackoff[min(max(step, 0), len(endRecheckBackoff)-1)]
 }
 
 // VideoProbeFunc probes a YouTube video and returns its stream status.
@@ -214,6 +264,7 @@ type ProcessYouTubeVideoParams struct {
 	ProbeVideo VideoProbeFunc
 	Tracker    *MetadataFailureTracker
 	Cooldown   *ProbeCooldown // optional: skips re-probes within the cooldown window
+	ConfirmEnd ConfirmEndFunc // optional: the end check a weak end needs (probeAndClassify); nil leaves every weak end unsettled
 	IsReprobe  bool           // true if re-checking a previously processed video (logs demoted to Debug)
 	// Repeat marks a video the caller classified last time as well: the
 	// classification logs are demoted to Debug, as for IsReprobe, but nothing
@@ -257,6 +308,16 @@ type ProcessYouTubeVideoResult struct {
 	// (bounded by DECAPI's 429 limiter and the poll interval), because that
 	// pushback clears on its own and the latch would not.
 	Denied bool
+	// EndUnconfirmed is ProbeClassifyResult.EndUnconfirmed carried out:
+	// StreamStatus is post_live on a weak end the end check could not
+	// settle. ShouldProcess is false for it whatever the channel archives —
+	// no job of either kind on an end nobody confirmed — and DECAPI's memo
+	// holds it for the re-check backoff (endRecheckDelay) rather than for
+	// good or not at all.
+	EndUnconfirmed bool
+	// endChecked is ProbeClassifyResult.endChecked carried out: the WEB call
+	// the §9 date fetch would make has already been made.
+	endChecked bool
 }
 
 // nonLiveSkipReason decides whether a non-live classification (a VOD, post-live
@@ -334,6 +395,7 @@ type ProbeClassifyParams struct {
 	ProbeVideo VideoProbeFunc // REQUIRED — nil panics; the feed path has no passthrough mode, production always wires it (feed.go, decapi.go)
 	Tracker    *MetadataFailureTracker
 	Cooldown   *ProbeCooldown // optional: skips re-probes within the cooldown window
+	ConfirmEnd ConfirmEndFunc // optional: the end check a weak end needs; nil leaves every weak end unsettled
 	Logger     interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -355,6 +417,21 @@ type ProbeClassifyResult struct {
 	PublishedAt        string
 	PublishedPrecision string
 	PlayabilityError   string
+
+	// EndUnconfirmed: StreamStatus is post_live on weak end signals alone
+	// (VideoProbeResult.BroadcastEndWeak) that the end check could not
+	// settle — it could not run (no signed-in session, a transport error) or
+	// its answer said neither ended nor on air (a refusal). Ended for
+	// announcing, and for nothing else: no job of either kind, and never a
+	// settled vod. The feed stores the row vod with a re-check scheduled on
+	// endRecheckBackoff (applyProbe); DECAPI's memo holds it for the same
+	// backoff.
+	EndUnconfirmed bool
+	// endChecked: the end check ran and answered, and its date is already in
+	// PublishedAt when the status probe had none. The §9 date fetch would be
+	// the same WEB call asking the same question, so probeRowDated and
+	// DECAPI skip it.
+	endChecked bool
 }
 
 // probeAndClassify runs one probe of a YouTube video and classifies it into
@@ -449,10 +526,74 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 	// isDenied, on the status as probed: a members-only or sign-in refusal
 	// stays Denied and upcoming even when the broadcast is over, or it would
 	// escape into a job parked in COOKIES?.
+	//
+	// A strong end stands. A weak one is confirmed first (confirmEnd): its
+	// safety rests on answers nobody has captured, and the one that matters
+	// is a refused answer for an age-gated stream that is live NOW — read
+	// ended unconfirmed, that stream would never be recorded.
 	if meta.BroadcastEnded && result.StreamStatus == "upcoming" {
-		result.StreamStatus = "post_live"
+		if meta.BroadcastEndWeak {
+			confirmEnd(ctx, p, &result)
+		} else {
+			result.StreamStatus = "post_live"
+		}
 	}
 	return result
+}
+
+// confirmEnd settles a weak end with the one signed-in WEB-family call
+// (p.ConfirmEnd), which carries the microformat — and with it
+// liveBroadcastDetails.endTimestamp — the status probes never do:
+//
+//   - the WEB answer's end is strong: ended, post_live, as a strong end on
+//     the status probe would have been;
+//   - it says live now or upcoming: not ended — the result stays upcoming,
+//     which is a broadcast job and the worker's waiting loop, as before
+//     BroadcastEnded existed;
+//   - it could not run, or said neither (a refusal, an end as weak as the
+//     probe's): post_live for ANNOUNCING — the archived stream must not be
+//     announced every cycle again — but EndUnconfirmed, so no job is made
+//     on it and it is probed again on endRecheckBackoff instead of never;
+//   - it failed because the pass itself ended: OutcomeErrored, as if the
+//     probe had.
+//
+// The call runs inside the probe, so it is gated by the same cooldown and
+// the same pass budget as the probe that needed it, and made at most once
+// per probe. Its date rides along: the §9 date fetch is the same call.
+func confirmEnd(ctx context.Context, p ProbeClassifyParams, r *ProbeClassifyResult) {
+	var chk EndCheck
+	err := ErrEndCheckUnavailable
+	if p.ConfirmEnd != nil {
+		chk, err = p.ConfirmEnd(ctx, p.VideoID)
+	}
+	if err != nil && ctx.Err() != nil {
+		// The pass ended under the call — shutdown, or the pass budget.
+		// YouTube said nothing, so this is the errored-probe contract
+		// (nothing written, retried next cycle), not an unconfirmed end that
+		// would wait out an hour's backoff for a question never asked.
+		*r = ProbeClassifyResult{Outcome: OutcomeErrored}
+		return
+	}
+	if err == nil {
+		r.endChecked = true
+		if chk.OnAir && !chk.Ended {
+			return
+		}
+		if r.PublishedAt == "" {
+			r.PublishedAt, r.PublishedPrecision = chk.PublishedAt, chk.PublishedPrecision
+		}
+	}
+	r.StreamStatus = "post_live"
+	if err == nil && chk.Ended {
+		return
+	}
+	r.EndUnconfirmed = true
+	reason := "the WEB answer settles nothing"
+	if err != nil {
+		reason = err.Error()
+	}
+	p.Logger.Debug("[Monitor] Broadcast end rests on weak signals and is unconfirmed; ended for announcing, re-checked later",
+		"videoID", p.VideoID, "channel", p.Channel.Name, "reason", reason)
 }
 
 // ProcessYouTubeVideo probes a YouTube video's metadata to classify its stream
@@ -487,6 +628,7 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		ProbeVideo: p.ProbeVideo,
 		Tracker:    p.Tracker,
 		Cooldown:   p.Cooldown,
+		ConfirmEnd: p.ConfirmEnd,
 		Logger:     p.Logger,
 	})
 
@@ -554,6 +696,13 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		p.Logger.Info(fmt.Sprintf("[Monitor] Found LIVE stream/premiere: %s (%s) - queuing for download", p.Title, p.VideoID))
 
 	case "post_live", "vod":
+		if cr.EndUnconfirmed {
+			// Ended for announcing and nothing else: a VOD job on an end
+			// nobody confirmed acts on the guess the re-check exists to test.
+			logInfo(fmt.Sprintf("[Monitor] Skipping ended stream (end unconfirmed, re-checked later): %s (%s)", p.Title, p.VideoID))
+			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title, StreamStatus: cr.StreamStatus,
+				EndUnconfirmed: true, endChecked: cr.endChecked}
+		}
 		if skip, reason := nonLiveSkipReason(includeNonLive, p.IsReprobe); skip {
 			logInfo(fmt.Sprintf("[Monitor] Skipping ended stream (%s, %s): %s (%s)", cr.StreamStatus, reason, p.Title, p.VideoID))
 			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title, StreamStatus: cr.StreamStatus}
@@ -575,6 +724,7 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		Title:         title,
 		StreamStatus:  cr.StreamStatus,
 		PublishedAt:   cr.PublishedAt,
+		endChecked:    cr.endChecked,
 	}
 }
 

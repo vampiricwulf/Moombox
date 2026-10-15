@@ -173,6 +173,8 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		endTimestamp = getStr(lbd, "endTimestamp")
 	}
 
+	ended, endWeak, onAir := broadcastEnded(videoDetails, playabilityStatus, microformat)
+
 	return &VideoInfo{
 		Title:              title,
 		ChannelName:        channelName,
@@ -185,7 +187,9 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		IsLive:             isLive,
 		IsUpcoming:         isUpcoming,
 		IsPostLiveDVR:      isPostLiveDVR,
-		BroadcastEnded:     broadcastEnded(videoDetails, playabilityStatus, microformat),
+		BroadcastEnded:     ended,
+		BroadcastEndWeak:   endWeak,
+		BroadcastOnAir:     onAir,
 		IsPremiere:         isPremiereForDisplay(videoDetails, playabilityStatus, microformat),
 		LengthSeconds:      lengthSeconds,
 		EndTimestamp:       endTimestamp,
@@ -811,23 +815,34 @@ func broadcastLength(videoDetails map[string]any) int {
 
 // broadcastEnded reports whether a broadcast or premiere is over, read off
 // its own flags and never off whether formats came back (VideoInfo.
-// BroadcastEnded). Once the response says it is neither live nor upcoming,
-// any one of these is enough:
+// BroadcastEnded), and how much that verdict can be trusted. Once the
+// response says it is neither live nor upcoming, any one of these is enough:
 //
 //   - microformat liveBroadcastDetails.endTimestamp, which WEB-family
-//     clients send and ANDROID_VR and TV never do;
+//     clients send and ANDROID_VR and TV never do — STRONG;
 //   - videoDetails.isPostLiveDvr, yt-dlp's first live_status rule — on a
-//     stream whose recording is not available, the only flag besides length;
+//     stream whose recording is not available, the only flag besides
+//     length — STRONG;
 //   - liveStreamability's displayEndscreen, which a playable ended stream and
-//     a finished premiere carry and a live or upcoming one does not;
+//     a finished premiere carry and a live or upcoming one does not — WEAK;
 //   - a positive lengthSeconds on live content. YouTube reports 0 for an
 //     upcoming or live broadcast, and a refused answer (the age gate,
 //     members-only) carries nothing else. Live content only: an ordinary
-//     upload has a length too.
+//     upload has a length too — WEAK.
 //
 // Each was read off ANDROID_VR's live answers for every state on 2026-10-15
-// (TestBroadcastEnded).
-func broadcastEnded(videoDetails, playabilityStatus, microformat map[string]any) bool {
+// (TestBroadcastEnded). The two weak ones are weak because their safety
+// rests on answers nobody has captured: a refused answer for an age-gated
+// stream that is live NOW (does it say isLive, or only state a length?), a
+// scheduled stream with a positive length and no isUpcoming. weak is true
+// when only they say ended (VideoInfo.BroadcastEndWeak), and the monitors
+// then confirm the end before they trust it (monitor.ConfirmEndFunc).
+//
+// onAir is the guard itself — the response's own flags say live now or
+// upcoming (VideoInfo.BroadcastOnAir). It is not "not ended": a refused
+// answer that says neither is neither, and the monitors' end check reads
+// that difference.
+func broadcastEnded(videoDetails, playabilityStatus, microformat map[string]any) (ended, weak, onAir bool) {
 	isLive, _ := videoDetails["isLive"].(bool)
 	isUpcoming, _ := videoDetails["isUpcoming"].(bool)
 	lbd, _ := microformat["liveBroadcastDetails"].(map[string]any)
@@ -837,21 +852,24 @@ func broadcastEnded(videoDetails, playabilityStatus, microformat map[string]any)
 	status := getStr(playabilityStatus, "status")
 	reason := strings.ToLower(playabilityReason(playabilityStatus))
 	if isLive || isUpcoming || isUpcomingFromPlayability(status, reason) {
-		return false
+		return false, false, true
 	}
 	if getStr(lbd, "endTimestamp") != "" {
-		return true
+		return true, false, false
 	}
 	if postLive, _ := videoDetails["isPostLiveDvr"].(bool); postLive {
-		return true
+		return true, false, false
 	}
 	if ls, ok := getNestedMap(playabilityStatus, "liveStreamability", "liveStreamabilityRenderer"); ok {
 		if endscreen, _ := ls["displayEndscreen"].(bool); endscreen {
-			return true
+			return true, true, false
 		}
 	}
 	isLiveContent, _ := videoDetails["isLiveContent"].(bool)
-	return isLiveContent && broadcastLength(videoDetails) > 0
+	if isLiveContent && broadcastLength(videoDetails) > 0 {
+		return true, true, false
+	}
+	return false, false, false
 }
 
 // isPremiereResponse reports whether a player response describes a premiere:

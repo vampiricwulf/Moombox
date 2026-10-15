@@ -3,6 +3,7 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"slices"
 )
 
 type FeedItem struct {
@@ -11,6 +12,23 @@ type FeedItem struct {
 	CatalogPos                int
 	Source, Status            string
 	FirstSeen                 string
+	// RecheckAt is when the row is next probed after a broadcast end that
+	// rests on weak signals the end check could not confirm (RFC3339 UTC; ""
+	// = none pending). The row is stored ended (vod) for announcing, and
+	// FeedScope keeps it out of scope until this instant, then in scope
+	// wherever its date is — the one way back for a vod row (spec §8).
+	// RecheckStep counts the re-checks scheduled so far, which picks the next
+	// backoff. Written by ApplyProbeToFeedItem only.
+	RecheckAt   string
+	RecheckStep int
+}
+
+// FeedRecheck is a probe write's end re-check (ApplyProbeToFeedItem): the
+// zero value — what every settled classification writes — clears any
+// pending one.
+type FeedRecheck struct {
+	At   string // RFC3339 UTC
+	Step int
 }
 
 // UpsertFeedItem is the §6 upsert. status is ALWAYS written 'unknown' on insert
@@ -48,7 +66,12 @@ RETURNING first_seen`, newRank, oldRank)
 // It never touches source or catalog_pos. Dateless probes pass published=""
 // precision="": rank is forced to 0 in Go so it can never win the guard, even
 // against 'assumed' (which ranks 1).
-func (db *Database) ApplyProbeToFeedItem(channelID, videoID, status, title, published, precision string) error {
+//
+// recheck is written unconditionally, in the same statement as the status:
+// an unconfirmed end's vod and the re-check that keeps it from being a
+// settled one land together or not at all, and every other classification
+// passes the zero value and clears whatever was pending.
+func (db *Database) ApplyProbeToFeedItem(channelID, videoID, status, title, published, precision string, recheck FeedRecheck) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	// rank 0 for "no date supplied" so it can never win, even against 'assumed'.
@@ -60,11 +83,14 @@ func (db *Database) ApplyProbeToFeedItem(channelID, videoID, status, title, publ
   status = ?,
   title = CASE WHEN ? <> '' AND ? <> 'Unknown Title' THEN ? ELSE title END,
   published = CASE WHEN ? > %[1]s THEN ? ELSE published END,
-  date_precision = CASE WHEN ? > %[1]s THEN ? ELSE date_precision END
+  date_precision = CASE WHEN ? > %[1]s THEN ? ELSE date_precision END,
+  recheck_at = ?,
+  recheck_step = ?
 WHERE channel_id = ? AND video_id = ?`, precisionRankCaseSQL("date_precision"))
 	_, err := db.db.ExecContext(db.getCtx(), q,
 		status, title, title, title,
 		rank, published, rank, precision,
+		recheck.At, recheck.Step,
 		channelID, videoID)
 	return err
 }
@@ -78,9 +104,11 @@ func (db *Database) GetFeedItem(channelID, videoID string) (*FeedItem, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	it := &FeedItem{ChannelID: channelID, VideoID: videoID}
-	err := db.db.QueryRowContext(db.getCtx(), `SELECT title, published, date_precision, catalog_pos, source, status, first_seen
+	err := db.db.QueryRowContext(db.getCtx(), `SELECT title, published, date_precision, catalog_pos, source, status, first_seen,
+  recheck_at, recheck_step
   FROM feed_items WHERE channel_id = ? AND video_id = ?`, channelID, videoID).Scan(
-		&it.Title, &it.Published, &it.DatePrecision, &it.CatalogPos, &it.Source, &it.Status, &it.FirstSeen)
+		&it.Title, &it.Published, &it.DatePrecision, &it.CatalogPos, &it.Source, &it.Status, &it.FirstSeen,
+		&it.RecheckAt, &it.RecheckStep)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -100,8 +128,10 @@ func (db *Database) SetFeedItemSource(channelID, videoID, source string) error {
 	return err
 }
 
+const feedScopeColumnsSQL = `video_id, title, published, date_precision, catalog_pos, source, status, first_seen, recheck_at, recheck_step`
+
 func feedScopeQ1SQL(includeMembership bool) string {
-	q := `SELECT video_id, title, published, date_precision, catalog_pos, source, status, first_seen
+	q := `SELECT ` + feedScopeColumnsSQL + `
   FROM feed_items WHERE channel_id = ? AND published >= ?`
 	if !includeMembership {
 		q += ` AND source <> 'membership'`
@@ -113,7 +143,7 @@ func feedScopeQ2SQL(includeMembership bool) string {
 	// Fetch three statuses via the index; the unresolved-arm filter is applied
 	// in Go (spec §7: post-filter unknown rows to assumed precision, or to RSS
 	// rows first seen inside the window — see FeedScope).
-	q := `SELECT video_id, title, published, date_precision, catalog_pos, source, status, first_seen
+	q := `SELECT ` + feedScopeColumnsSQL + `
   FROM feed_items WHERE channel_id = ? AND status IN ('upcoming','live','unknown')`
 	if !includeMembership {
 		q += ` AND source <> 'membership'`
@@ -121,10 +151,29 @@ func feedScopeQ2SQL(includeMembership bool) string {
 	return q
 }
 
-// FeedScope returns Q1 ∪ Q2 (spec §7), deduped by video_id, in Q1's order with
-// Q2-only rows appended. includeMembership is MembershipDiscoveryEnabled() —
-// the operator's toggle, NEVER membershipActive() (cookie state must not move scope).
-func (db *Database) FeedScope(channelID, cutoff string, includeMembership bool) ([]FeedItem, error) {
+func feedScopeQ3SQL(includeMembership bool) string {
+	// The rows whose end re-check is due, wherever their date: an
+	// unconfirmed end is usually outside the window by the time it is
+	// re-checked, and Q1 and Q2 never carry a vod row from there.
+	q := `SELECT ` + feedScopeColumnsSQL + `
+  FROM feed_items WHERE channel_id = ? AND recheck_at > '' AND recheck_at <= ?`
+	if !includeMembership {
+		q += ` AND source <> 'membership'`
+	}
+	return q + ` ORDER BY recheck_at ASC, video_id ASC`
+}
+
+// FeedScope returns Q1 ∪ Q2 ∪ Q3 (spec §7), deduped by video_id, in Q1's
+// order with Q2-only and then Q3-only rows appended. includeMembership is
+// MembershipDiscoveryEnabled() — the operator's toggle, NEVER
+// membershipActive() (cookie state must not move scope).
+//
+// now is the cycle's instant, against which the end re-check is judged
+// (FeedItem.RecheckAt). A row whose re-check is still pending is out of
+// scope whichever arm would carry it: it was probed, its end could not be
+// confirmed, and the backoff is the only thing that decides when it is
+// probed again. Q3 brings it back once due, wherever its date is.
+func (db *Database) FeedScope(channelID, cutoff, now string, includeMembership bool) ([]FeedItem, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	scan := func(q string, args ...any) ([]FeedItem, error) {
@@ -137,7 +186,8 @@ func (db *Database) FeedScope(channelID, cutoff string, includeMembership bool) 
 		for rows.Next() {
 			it := FeedItem{ChannelID: channelID}
 			if err := rows.Scan(&it.VideoID, &it.Title, &it.Published, &it.DatePrecision,
-				&it.CatalogPos, &it.Source, &it.Status, &it.FirstSeen); err != nil {
+				&it.CatalogPos, &it.Source, &it.Status, &it.FirstSeen,
+				&it.RecheckAt, &it.RecheckStep); err != nil {
 				return nil, err
 			}
 			out = append(out, it)
@@ -152,11 +202,20 @@ func (db *Database) FeedScope(channelID, cutoff string, includeMembership bool) 
 	if err != nil {
 		return nil, err
 	}
+	q3, err := scan(feedScopeQ3SQL(includeMembership), channelID, now)
+	if err != nil {
+		return nil, err
+	}
+	pending := func(it FeedItem) bool { return it.RecheckAt != "" && it.RecheckAt > now }
 	seen := make(map[string]bool, len(q1))
+	q1 = slices.DeleteFunc(q1, pending)
 	for _, it := range q1 {
 		seen[it.VideoID] = true
 	}
 	for _, it := range q2 {
+		if pending(it) {
+			continue
+		}
 		// unresolved arm (§7): an unknown row qualifies at 'assumed' precision —
 		// its published is a sighting instant, not a date — or when RSS first
 		// listed it inside the window. An RSS <published> is the ANNOUNCEMENT
@@ -170,6 +229,12 @@ func (db *Database) FeedScope(channelID, cutoff string, includeMembership bool) 
 			(it.Source != "rss" || it.FirstSeen < cutoff) {
 			continue
 		}
+		if !seen[it.VideoID] {
+			q1 = append(q1, it)
+			seen[it.VideoID] = true
+		}
+	}
+	for _, it := range q3 {
 		if !seen[it.VideoID] {
 			q1 = append(q1, it)
 			seen[it.VideoID] = true

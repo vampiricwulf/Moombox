@@ -1362,6 +1362,38 @@ func monitorProbeResult(meta *youtube.VideoInfo) *monitor.VideoProbeResult {
 		PublishedPrecision: meta.PublishedPrecision,
 		PlayabilityError:   string(meta.PlayabilityError),
 		BroadcastEnded:     meta.BroadcastEnded,
+		BroadcastEndWeak:   meta.BroadcastEndWeak,
+	}
+}
+
+// monitorEndCheck builds the monitors' end check (monitor.ConfirmEndFunc)
+// from a credentialed WEB-family probe — production passes
+// youtube.Service.ProbeVideoSchedule, the same WEB call the date fetch and
+// the waiting loop's reschedule check make, read here for its microformat's
+// liveBroadcastDetails. Signed-in or not at all: an anonymous WEB call is
+// refused for exactly the answers a weak end comes from (the age gate), so
+// without a session the check reports monitor.ErrEndCheckUnavailable and
+// the monitor re-checks later instead.
+//
+// Ended is the WEB answer's own STRONG end (endTimestamp, or isPostLiveDvr);
+// a WEB answer whose end is as weak as the status probe's settles nothing.
+// OnAir is its explicit live-or-upcoming flags, never IsUpcoming, which the
+// no-formats rule sets on a refused answer for an ended stream too.
+func monitorEndCheck(signedIn func() bool, probe func(ctx context.Context, videoID string) (*youtube.VideoInfo, error)) monitor.ConfirmEndFunc {
+	return func(ctx context.Context, videoID string) (monitor.EndCheck, error) {
+		if !signedIn() {
+			return monitor.EndCheck{}, monitor.ErrEndCheckUnavailable
+		}
+		meta, err := probe(ctx, videoID)
+		if err != nil {
+			return monitor.EndCheck{}, err
+		}
+		return monitor.EndCheck{
+			Ended:              meta.BroadcastEnded && !meta.BroadcastEndWeak,
+			OnAir:              meta.BroadcastOnAir,
+			PublishedAt:        meta.PublishedAt,
+			PublishedPrecision: meta.PublishedPrecision,
+		}, nil
 	}
 }
 
@@ -1446,6 +1478,12 @@ func (s *runState) wireMonitorCallbacks() {
 	}
 	s.feedMon.ProbeDate = probeDateFunc
 	s.decapiMon.ProbeDate = probeDateFunc
+
+	// The end check (monitor.ConfirmEndFunc): one signed-in WEB call that
+	// settles a broadcast end the status probe read off weak signals alone.
+	// HasAuthCookies, not HasAnyAuthCookie: this asks "can we sign in", and
+	// a half-cleared session would only be refused.
+	s.feedMon.ConfirmEnd = monitorEndCheck(s.ytService.HasAuthCookies, s.ytService.ProbeVideoSchedule)
 
 	// Authenticated probe for members-only videos: an anonymous probe can't see
 	// members-only content, gets no formats, and misclassifies it as "upcoming"

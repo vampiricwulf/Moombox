@@ -1877,7 +1877,7 @@ func TestUpcomingStreamStillCarriesItsUploadDate(t *testing.T) {
 
 // BroadcastEnded is read off the broadcast's own flags, never off whether
 // formats came back, so the monitors can tell a broadcast that is over from
-// one still to come whatever this caller may see. Every row is an
+// one still to come whatever this caller may see. Every captured row is an
 // ANDROID_VR answer captured from live YouTube on 2026-10-15 — the monitors'
 // status probe — trimmed to the fields that decide, IDs renamed to the
 // fixture's; the microformat rows are the WEB shape.
@@ -1892,13 +1892,25 @@ func TestUpcomingStreamStillCarriesItsUploadDate(t *testing.T) {
 // ended too, and it is the monitor's denied predicate that keeps that
 // refusal from a job, not this flag.
 //
+// Each verdict carries its strength: endTimestamp and isPostLiveDvr are
+// strong, displayEndscreen and a length on live content weak
+// (BroadcastEndWeak — the monitors confirm such an end before they trust
+// it). And the guard is a fact of its own, BroadcastOnAir: what the
+// monitors' WEB end check reads to tell "live or upcoming" from an answer
+// that says neither.
+//
 // Mutants: the length arm dropped (age-gated ended reads not ended — the
 // loop this replaced); the isLiveContent guard on length dropped (the
 // ordinary upload reads ended); isPostLiveDvr dropped (the row with no
 // length yet reads not ended); displayEndscreen dropped (the
 // format-withheld premiere reads not ended); endTimestamp dropped (the WEB
 // row); any of the three live/upcoming guards dropped (its precedence row
-// reads ended).
+// reads ended); endTimestamp or isPostLiveDvr reported weak (the WEB row, the
+// no-recording rows); displayEndscreen or the length reported strong (the
+// age-gated row, the premiere, the synthetic weak-only shapes — the end the
+// monitors would then trust unconfirmed); the guard reporting onAir false
+// (the live and upcoming rows), or a not-ended answer reporting onAir true
+// (the deleted video, the age-gated row with length 0).
 func TestBroadcastEnded(t *testing.T) {
 	const (
 		ageGate     = `{"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm your age", "desktopLegacyAgeGateReason": 1}`
@@ -1911,38 +1923,60 @@ func TestBroadcastEnded(t *testing.T) {
 		noRecording = `{"status": "UNPLAYABLE", "reason": "This live stream recording is not available."}`
 		formats     = `, "streamingData": {"adaptiveFormats": [{"itag": 140, "url": "https://example.invalid/a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\""}]}`
 	)
+	// What a row must read: not ended and not on air; on air; ended on a
+	// strong signal; ended on weak signals alone.
+	type verdict int
+	const (
+		neither verdict = iota
+		onAir
+		strong
+		weak
+	)
 	for _, tc := range []struct {
 		name, playability, videoDetails, extra string
-		want                                   bool
+		want                                   verdict
 	}{
-		{"age-gated ended", ageGate, `{"videoId": "vid", "lengthSeconds": "10511", "isLiveContent": true}`, "", true},
-		{"ended stream", endedLS, `{"videoId": "vid", "lengthSeconds": "14043", "isLiveContent": true}`, formats, true},
-		{"ended stream, formats withheld", endedLS, `{"videoId": "vid", "lengthSeconds": "14043", "isLiveContent": true}`, "", true},
-		{"ended, recording not available", noRecording, `{"videoId": "vid", "lengthSeconds": "121601512", "isLiveContent": true, "isPostLiveDvr": true}`, "", true},
-		{"finished premiere, formats withheld", premiereLS, `{"videoId": "vid", "lengthSeconds": "178", "isLiveContent": false}`, "", true},
-		{"members-only ended", membersOnly, `{"videoId": "vid", "lengthSeconds": "10378", "isLiveContent": true}`, "", true},
-		{"live", liveLS, `{"videoId": "vid", "lengthSeconds": "0", "isLive": true, "isLiveContent": true, "isLiveDvrEnabled": true}`, formats, false},
-		{"upcoming waiting room", waitingRoom, `{"videoId": "vid", "lengthSeconds": "0", "isUpcoming": true, "isLiveContent": true}`, "", false},
-		{"age-gated, length 0", ageGate, `{"videoId": "vid", "lengthSeconds": "0", "isLiveContent": true}`, "", false},
-		{"scheduled premiere with a length", ok, `{"videoId": "vid", "lengthSeconds": "178", "isUpcoming": true, "isLiveContent": false}`, "", false},
-		{"ordinary upload", ok, `{"videoId": "vid", "lengthSeconds": "213", "isLiveContent": false}`, formats, false},
-		{"deleted video", `{"status": "ERROR", "reason": "This video is unavailable"}`, `{"videoId": "vid"}`, "", false},
+		{"age-gated ended", ageGate, `{"videoId": "vid", "lengthSeconds": "10511", "isLiveContent": true}`, "", weak},
+		{"ended stream", endedLS, `{"videoId": "vid", "lengthSeconds": "14043", "isLiveContent": true}`, formats, weak},
+		{"ended stream, formats withheld", endedLS, `{"videoId": "vid", "lengthSeconds": "14043", "isLiveContent": true}`, "", weak},
+		{"ended, recording not available", noRecording, `{"videoId": "vid", "lengthSeconds": "121601512", "isLiveContent": true, "isPostLiveDvr": true}`, "", strong},
+		{"finished premiere, formats withheld", premiereLS, `{"videoId": "vid", "lengthSeconds": "178", "isLiveContent": false}`, "", weak},
+		{"members-only ended", membersOnly, `{"videoId": "vid", "lengthSeconds": "10378", "isLiveContent": true}`, "", weak},
+		{"live", liveLS, `{"videoId": "vid", "lengthSeconds": "0", "isLive": true, "isLiveContent": true, "isLiveDvrEnabled": true}`, formats, onAir},
+		{"upcoming waiting room", waitingRoom, `{"videoId": "vid", "lengthSeconds": "0", "isUpcoming": true, "isLiveContent": true}`, "", onAir},
+		{"age-gated, length 0", ageGate, `{"videoId": "vid", "lengthSeconds": "0", "isLiveContent": true}`, "", neither},
+		{"scheduled premiere with a length", ok, `{"videoId": "vid", "lengthSeconds": "178", "isUpcoming": true, "isLiveContent": false}`, "", onAir},
+		{"ordinary upload", ok, `{"videoId": "vid", "lengthSeconds": "213", "isLiveContent": false}`, formats, neither},
+		{"deleted video", `{"status": "ERROR", "reason": "This video is unavailable"}`, `{"videoId": "vid"}`, "", neither},
 		{"WEB: ended per microformat", ok, `{"videoId": "vid", "isLiveContent": true}`,
-			`, "microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {"isLiveNow": false, "startTimestamp": "2026-09-11T02:14:17+00:00", "endTimestamp": "2026-09-11T05:09:26+00:00"}}}`, true},
+			`, "microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {"isLiveNow": false, "startTimestamp": "2026-09-11T02:14:17+00:00", "endTimestamp": "2026-09-11T05:09:26+00:00"}}}`, strong},
 		{"WEB: live per microformat", ok, `{"videoId": "vid", "isLiveContent": true}`,
-			`, "microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {"isLiveNow": true, "startTimestamp": "2026-10-15T02:14:17+00:00"}}}`, false},
+			`, "microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {"isLiveNow": true, "startTimestamp": "2026-10-15T02:14:17+00:00"}}}`, onAir},
 
 		// Synthetic, each one signal alone. isPostLiveDvr decides without a
 		// length: the captured no-recording answer with its length removed,
 		// the shape of a stream that has just ended and not yet stated one.
-		{"post-live, no length yet", noRecording, `{"videoId": "vid", "isLiveContent": true, "isPostLiveDvr": true}`, "", true},
+		{"post-live, no length yet", noRecording, `{"videoId": "vid", "isLiveContent": true, "isPostLiveDvr": true}`, "", strong},
 		// And precedence: a response that says live or upcoming, in any of
 		// the three ways classifyStream reads, is not ended whatever end
 		// signal it also carries.
-		{"says upcoming, carries a length", ok, `{"videoId": "vid", "lengthSeconds": "10511", "isUpcoming": true, "isLiveContent": true}`, "", false},
-		{"waiting room without isUpcoming, carries a length", waitingRoom, `{"videoId": "vid", "lengthSeconds": "10511", "isLiveContent": true}`, "", false},
+		{"says upcoming, carries a length", ok, `{"videoId": "vid", "lengthSeconds": "10511", "isUpcoming": true, "isLiveContent": true}`, "", onAir},
+		{"waiting room without isUpcoming, carries a length", waitingRoom, `{"videoId": "vid", "lengthSeconds": "10511", "isLiveContent": true}`, "", onAir},
 		{"WEB: live now, carries an end", ok, `{"videoId": "vid", "isLiveContent": true}`,
-			`, "microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {"isLiveNow": true, "startTimestamp": "2026-10-15T02:14:17+00:00", "endTimestamp": "2026-10-15T05:09:26+00:00"}}}`, false},
+			`, "microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {"isLiveNow": true, "startTimestamp": "2026-10-15T02:14:17+00:00", "endTimestamp": "2026-10-15T05:09:26+00:00"}}}`, onAir},
+		// A strong signal is strong whatever weak one rides with it.
+		{"no recording, with an endscreen", `{"status": "UNPLAYABLE", "reason": "This live stream recording is not available.", "liveStreamability": {"liveStreamabilityRenderer": {"videoId": "vid", "displayEndscreen": true}}}`,
+			`{"videoId": "vid", "lengthSeconds": "14043", "isLiveContent": true, "isPostLiveDvr": true}`, "", strong},
+		{"WEB: ended per microformat, with a length", ok, `{"videoId": "vid", "lengthSeconds": "10511", "isLiveContent": true}`,
+			`, "microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {"isLiveNow": false, "startTimestamp": "2026-09-11T02:14:17+00:00", "endTimestamp": "2026-09-11T05:09:26+00:00"}}}`, strong},
+		// The weak-only shapes nobody has captured, which are why a weak end
+		// is confirmed before it is trusted: an age-gated stream that is live
+		// NOW, refused with a length and no isLive; a scheduled stream that
+		// states a length and no isUpcoming. Both read ended — weak, so the
+		// monitors ask the WEB client before they believe it.
+		{"age-gated and live now, refused without isLive", ageGate, `{"videoId": "vid", "lengthSeconds": "3600", "isLiveContent": true}`, "", weak},
+		{"scheduled, with a length and no isUpcoming", `{"status": "OK", "liveStreamability": {"liveStreamabilityRenderer": {"videoId": "vid", "pollDelayMs": "30000"}}}`,
+			`{"videoId": "vid", "lengthSeconds": "7200", "isLiveContent": true}`, "", weak},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			info, err := NewPlayerAPI(nil, noopLogger{}).parsePlayerResponse(context.Background(), decodePlayerJSON(t, `{
@@ -1952,8 +1986,10 @@ func TestBroadcastEnded(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parsePlayerResponse: %v", err)
 			}
-			if info.BroadcastEnded != tc.want {
-				t.Errorf("BroadcastEnded = %v, want %v (status %s, playability %s)", info.BroadcastEnded, tc.want, info.StreamStatus, info.PlayabilityError)
+			wantEnded := tc.want == strong || tc.want == weak
+			if info.BroadcastEnded != wantEnded || info.BroadcastEndWeak != (tc.want == weak) || info.BroadcastOnAir != (tc.want == onAir) {
+				t.Errorf("BroadcastEnded=%v BroadcastEndWeak=%v BroadcastOnAir=%v, want verdict %d (0 neither, 1 on air, 2 strong, 3 weak) (status %s, playability %s)",
+					info.BroadcastEnded, info.BroadcastEndWeak, info.BroadcastOnAir, tc.want, info.StreamStatus, info.PlayabilityError)
 			}
 		})
 	}

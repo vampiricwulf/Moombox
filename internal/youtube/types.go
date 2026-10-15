@@ -76,7 +76,9 @@ type VideoInfo struct {
 	IsLive             bool             `json:"isLive"`
 	IsUpcoming         bool             `json:"isUpcoming"`
 	IsPostLiveDVR      bool             `json:"isPostLiveDVR"`
-	BroadcastEnded     bool             `json:"broadcastEnded,omitempty"` // over, whatever StreamStatus says; read by the monitors (broadcastEnded)
+	BroadcastEnded     bool             `json:"broadcastEnded,omitempty"`   // over, whatever StreamStatus says; read by the monitors (broadcastEnded)
+	BroadcastEndWeak   bool             `json:"broadcastEndWeak,omitempty"` // BroadcastEnded rests on weak signals alone, which the monitors confirm (broadcastEnded)
+	BroadcastOnAir     bool             `json:"broadcastOnAir,omitempty"`   // the broadcast's own flags say live now or upcoming, whatever the formats (broadcastEnded)
 	LengthSeconds      *int             `json:"lengthSeconds,omitempty"`
 	EndTimestamp       string           `json:"endTimestamp,omitempty"`
 	ScheduledStartTime string           `json:"scheduledStartTime,omitempty"`

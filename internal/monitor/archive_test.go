@@ -534,36 +534,57 @@ func TestArchive_AMissedBroadcastAnnouncedBeforeTheWindowIsArchived(t *testing.T
 // must not announce it again, and must leave the row vod so it leaves the
 // upcoming arm for good. Before BroadcastEnded this logged "archive: creating
 // job" and "Video found" every five minutes for weeks.
+//
+// Both strengths end the loop. The field case is the weak one (the age gate
+// states only a length): with no end check to confirm it, the row is still
+// stored vod, but with its re-check an hour out, so the next cycle leaves it
+// alone too — a strong end (the recording-not-available answer's
+// isPostLiveDvr) leaves no re-check at all.
 func TestArchive_AnEndedBroadcastIsNeverReannounced(t *testing.T) {
-	db := newTestDB(t)
-	now := fixedNow()
-	seedRow(t, db, "UC1", "ended1", now.Add(-35*24*time.Hour), "exact", "rss", "upcoming")
-	addFinishedJob(t, db, "ended1")
-	if err := db.AddToHistory("ended1"); err != nil {
-		t.Fatalf("AddToHistory: %v", err)
-	}
-	probes := 0
-	fm := newTestFeedMonitor(t, db, withRSS(rssWith()), withMembership(membWith()), withWindowDays(3),
-		withProbe(func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
-			probes++
-			return &VideoProbeResult{StreamStatus: "upcoming", Title: videoID,
-				PlayabilityError: "age_restricted", BroadcastEnded: true}, nil
-		}), withNow(now))
-	found := recordVideoFound(fm)
+	for _, tc := range []struct {
+		name        string
+		probe       VideoProbeResult
+		wantRecheck string
+	}{
+		{"weak end, age-gated", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "age_restricted",
+			BroadcastEnded: true, BroadcastEndWeak: true}, fixedNow().Add(time.Hour).Format(time.RFC3339)},
+		{"strong end, no recording", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "unknown",
+			BroadcastEnded: true}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t)
+			now := fixedNow()
+			seedRow(t, db, "UC1", "ended1", now.Add(-35*24*time.Hour), "exact", "rss", "upcoming")
+			addFinishedJob(t, db, "ended1")
+			if err := db.AddToHistory("ended1"); err != nil {
+				t.Fatalf("AddToHistory: %v", err)
+			}
+			probes := 0
+			fm := newTestFeedMonitor(t, db, withRSS(rssWith()), withMembership(membWith()), withWindowDays(3),
+				withProbe(func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+					probes++
+					res := tc.probe
+					res.Title = videoID
+					return &res, nil
+				}), withNow(now))
+			found := recordVideoFound(fm)
 
-	fm.runCycleForTest(t, "UC1")
-	if len(*found) != 0 {
-		t.Fatalf("an ended broadcast was announced again: %v", *found)
-	}
-	if got := mustGetFeedItem(t, db, "UC1", "ended1").Status; got != "vod" {
-		t.Fatalf("row status = %q, want vod", got)
-	}
+			fm.runCycleForTest(t, "UC1")
+			if len(*found) != 0 {
+				t.Fatalf("an ended broadcast was announced again: %v", *found)
+			}
+			row := mustGetFeedItem(t, db, "UC1", "ended1")
+			if row.Status != "vod" || row.RecheckAt != tc.wantRecheck {
+				t.Fatalf("row status %q re-check %q, want vod and %q", row.Status, row.RecheckAt, tc.wantRecheck)
+			}
 
-	// The next cycle leaves it alone: out of the window and no longer
-	// upcoming, it is out of scope, so it is not even probed.
-	probes = 0
-	fm.runCycleForTest(t, "UC1")
-	if len(*found) != 0 || probes != 0 {
-		t.Fatalf("second cycle: found=%v probes=%d, want none", *found, probes)
+			// The next cycle leaves it alone: out of the window and no longer
+			// upcoming, it is out of scope, so it is not even probed.
+			probes = 0
+			fm.runCycleForTest(t, "UC1")
+			if len(*found) != 0 || probes != 0 {
+				t.Fatalf("second cycle: found=%v probes=%d, want none", *found, probes)
+			}
+		})
 	}
 }

@@ -323,14 +323,26 @@ The rules run in this order; the first that matches decides (`classifyStream`, `
 
 `upcoming` here means "no media yet: wait", which is what the worker's waiting loop needs — and it is what the no-formats rows say about an ended broadcast whose formats this caller may not see: an age gate, a recording that is not available, formats withheld. Whether the broadcast has ENDED is a separate fact, `VideoInfo.BroadcastEnded` (`broadcastEnded`), read off the broadcast's own flags and never off the format list. Once the response says it is neither live nor upcoming (`videoDetails.isLive`, `liveBroadcastDetails.isLiveNow`, `videoDetails.isUpcoming`, or an upcoming playability), any one of these makes it true:
 
-| Signal | Carried by |
-|--------|------------|
-| `liveBroadcastDetails.endTimestamp` | WEB-family clients only — ANDROID_VR and TV send no microformat |
-| `videoDetails.isPostLiveDvr` (yt-dlp's first `live_status` rule) | an ended stream, the one whose recording is not available included |
-| `liveStreamability.liveStreamabilityRenderer.displayEndscreen` | a playable ended stream and a finished premiere; never a live or upcoming one, and never a refused answer |
-| `videoDetails.lengthSeconds` > 0 on `isLiveContent` | every ended stream, refused answers included (the age gate, members-only); an upcoming or live broadcast reports 0, and an ordinary upload is not live content |
+| Signal | Strength | Carried by |
+|--------|----------|------------|
+| `liveBroadcastDetails.endTimestamp` | strong | WEB-family clients only — ANDROID_VR and TV send no microformat |
+| `videoDetails.isPostLiveDvr` (yt-dlp's first `live_status` rule) | strong | an ended stream, the one whose recording is not available included |
+| `liveStreamability.liveStreamabilityRenderer.displayEndscreen` | weak | a playable ended stream and a finished premiere; never a live or upcoming one, and never a refused answer |
+| `videoDetails.lengthSeconds` > 0 on `isLiveContent` | weak | every ended stream, refused answers included (the age gate, members-only); an upcoming or live broadcast reports 0, and an ordinary upload is not live content |
 
-Each was read off ANDROID_VR's live answers for every state on 2026-10-15 (`TestBroadcastEnded`). Only the monitors read it (`probeAndClassify`, below); `StreamStatus` keeps its meaning for the worker. An earlier `classifyStream` arm made an age-gated ended broadcast `post_live` on `endTimestamp` alone — a field the monitor's ANDROID_VR probe never carries — so it never fired where it was needed, and an archived stream went on announcing itself every cycle.
+Each was read off ANDROID_VR's live answers for every state on 2026-10-15 (`TestBroadcastEnded`). Only the monitors read it (`probeAndClassify`, `internal/monitor/utils.go`); `StreamStatus` keeps its meaning for the worker. An earlier `classifyStream` arm made an age-gated ended broadcast `post_live` on `endTimestamp` alone — a field the monitor's ANDROID_VR probe never carries — so it never fired where it was needed, and an archived stream went on announcing itself every cycle.
+
+**Strength.** The two weak signals are weak because their safety rests on answers nobody has captured: a refused answer for an age-gated stream that is live NOW (does it say `isLive`, or only state a length?), and a scheduled stream that states a positive length and no `isUpcoming`. Either would read ended, and a stream read ended is never recorded. `VideoInfo.BroadcastEndWeak` is true when only weak signals say ended; `VideoInfo.BroadcastOnAir` is the guard itself — the response's own flags say live now or upcoming — which is not the same as "not ended": a refused answer that says neither is neither.
+
+**Confirmation.** `probeAndClassify` acts on an ended broadcast only where the classifier read it `upcoming` (no formats), and only after the denied predicate, so a members-only or sign-in refusal stays denied. A strong end stands: `post_live`. A weak one is confirmed first, by ONE signed-in WEB-family call (`ConfirmEnd` — `monitorEndCheck` in `cmd/moombox/monitor_callbacks.go` over `youtube.Service.ProbeVideoSchedule`, behind `HasAuthCookies`), which carries the microformat and with it `endTimestamp`. It runs inside the probe that needed it, so the same cooldown and pass budget gate it, and its date rides along — the §9 date fetch is the same call and is not made again:
+
+| End check's answer | Result |
+|--------------------|--------|
+| Its own end is strong (`endTimestamp`, or `isPostLiveDvr`) | ended: `post_live`, settled like a strong end on the probe |
+| Its own flags say live now or upcoming (`BroadcastOnAir`) | not ended: stays `upcoming` — the broadcast job and the worker's waiting loop, as before `BroadcastEnded` |
+| It cannot run (no signed-in session — an anonymous WEB call is refused for exactly the answers a weak end comes from — a transport error), or says neither (a refusal, an end as weak as the probe's) | `post_live` for ANNOUNCING, with `EndUnconfirmed`: no job of either kind, and re-checked later. A call cut short because the monitor's own pass ended (shutdown, the pass budget) is an errored probe instead — nothing written, retried next cycle |
+
+**Re-check.** An unconfirmed end is never a settled `vod`. The feed stores the row `vod`, so the archived stream is not announced again, with `feed_items.recheck_at` set in the same write ([data-and-storage.md](data-and-storage.md)): one hour after the first probe, then six hours, then daily for as long as it stays unconfirmed (`endRecheckBackoff`, `internal/monitor/utils.go`). Until then the row is out of the scope read wherever its date would put it; once due it is in scope wherever its date is (`FeedScope`'s Q3), the walk probes it — the one way back for a `vod` row besides the restart carve-out — and a probe that finds it live or upcoming takes it up as a newly found broadcast, while a confirmed end settles it and clears the re-check. The re-check lives in the database, so a restart keeps it. The archive makes no job on an unconfirmed end, VOD included: a VOD job would act on the guess the re-check exists to test. A backfill row reaches the same walk, and the same rule.
 
 ### Playability Status Parsing
 

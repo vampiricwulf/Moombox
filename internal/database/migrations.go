@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 22
+const schemaVersion = 23
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -187,6 +187,8 @@ CREATE TABLE IF NOT EXISTS feed_items (
     source         TEXT NOT NULL,   -- rss|membership|videos|streams
     status         TEXT NOT NULL,   -- unknown|upcoming|live|vod|not_a_stream
     first_seen     TEXT NOT NULL,
+    recheck_at     TEXT NOT NULL DEFAULT '',  -- v23: next probe of an unconfirmed broadcast end; '' = none
+    recheck_step   INTEGER NOT NULL DEFAULT 0, -- v23: re-checks scheduled so far (picks the backoff)
     PRIMARY KEY (channel_id, video_id)
 );
 
@@ -236,6 +238,7 @@ CREATE INDEX IF NOT EXISTS idx_client_tokens_prefix ON client_tokens(token_prefi
 CREATE INDEX IF NOT EXISTS idx_history_added_at ON history(added_at);
 CREATE INDEX IF NOT EXISTS idx_feed_items_window ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC);
 CREATE INDEX IF NOT EXISTS idx_feed_items_status ON feed_items(channel_id, status);
+CREATE INDEX IF NOT EXISTS idx_feed_items_recheck ON feed_items(channel_id, recheck_at, video_id);
 `
 
 // readUserVersion reads SQLite's PRAGMA user_version. Returns 0 on a fresh DB.
@@ -743,6 +746,15 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 23 {
+		if err := db.migrateV23(); err != nil {
+			return err
+		}
+		if err := db.writeUserVersion(23); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -902,3 +914,39 @@ func (db *Database) migrateV22() error {
 	}
 	return nil
 }
+
+// migrateV23 adds the end re-check to feed_items: when the row is next
+// probed after a broadcast end that rests on weak signals the monitor's end
+// check could not confirm (recheck_at, RFC3339 UTC, empty when none is
+// pending), and how many re-checks have been scheduled so far
+// (recheck_step, which picks the backoff). See FeedItem.RecheckAt.
+//
+// Existing rows take the defaults: nothing pending. No backfill is owed:
+// every release before this one stored a row vod only on what the classifier
+// itself read (formats, or an endTimestamp — a strong signal); the weak
+// signals reached the store only with BroadcastEnded, which no release
+// carried without this re-check.
+//
+//	recheck_at   TEXT NOT NULL DEFAULT ''
+//	recheck_step INTEGER NOT NULL DEFAULT 0
+func (db *Database) migrateV23() error {
+	ctx := db.getCtx()
+	// Guarded ALTERs: a crash mid-block re-runs the whole block (user_version
+	// is written last), so a duplicate-column error is expected and benign.
+	for _, q := range []string{
+		`ALTER TABLE feed_items ADD COLUMN recheck_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE feed_items ADD COLUMN recheck_step INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := db.db.ExecContext(ctx, q); err != nil && !isDuplicateColumnErr(err) {
+			return fmt.Errorf("v23 alter: %w", err)
+		}
+	}
+	if _, err := db.db.ExecContext(ctx, createFeedItemsRecheckIdxSQL); err != nil {
+		return fmt.Errorf("v23 index: %w", err)
+	}
+	return nil
+}
+
+const createFeedItemsRecheckIdxSQL = `
+CREATE INDEX IF NOT EXISTS idx_feed_items_recheck
+    ON feed_items(channel_id, recheck_at, video_id)`

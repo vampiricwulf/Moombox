@@ -28,6 +28,7 @@ func TestMonitorProbeResultCarriesEveryField(t *testing.T) {
 		PublishedPrecision: "started",
 		PlayabilityError:   youtube.PlayabilityAgeRestricted,
 		BroadcastEnded:     true,
+		BroadcastEndWeak:   true,
 	})
 	want := &monitor.VideoProbeResult{
 		StreamStatus:       "upcoming",
@@ -36,6 +37,7 @@ func TestMonitorProbeResultCarriesEveryField(t *testing.T) {
 		PublishedPrecision: "started",
 		PlayabilityError:   "age_restricted",
 		BroadcastEnded:     true,
+		BroadcastEndWeak:   true,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("monitorProbeResult = %+v, want %+v", got, want)
@@ -85,13 +87,69 @@ func TestMonitorProbeIsTheCallThenTheAdapter(t *testing.T) {
 	}
 }
 
+// The end check asks a signed-in WEB call and reads its own flags: a strong
+// end is Ended, a weak one settles nothing, the explicit live-or-upcoming
+// flags are OnAir, and the call's date rides along. Without a session it
+// does not run at all.
+//
+// Mutants: the signed-in gate dropped (the probe runs anonymously, and the
+// no-session case gets an answer instead of ErrEndCheckUnavailable); Ended
+// as BroadcastEnded alone (the weak WEB answer reads ended); OnAir read off
+// IsUpcoming (the refused WEB answer, which the no-formats rule marks
+// upcoming, reads on air — an ended stream announced again); the date not
+// carried; the probe's error swallowed.
+func TestMonitorEndCheckReadsTheWEBAnswersOwnFlags(t *testing.T) {
+	answer := func(info *youtube.VideoInfo, err error) func(context.Context, string) (*youtube.VideoInfo, error) {
+		return func(context.Context, string) (*youtube.VideoInfo, error) { return info, err }
+	}
+	signedIn := func() bool { return true }
+	for _, tc := range []struct {
+		name string
+		info *youtube.VideoInfo
+		want monitor.EndCheck
+	}{
+		{"strong end", &youtube.VideoInfo{StreamStatus: youtube.StreamPostLive, BroadcastEnded: true,
+			EndTimestamp: "2026-09-11T05:09:26+00:00", PublishedAt: "2026-09-11T02:14:17Z", PublishedPrecision: "started"},
+			monitor.EndCheck{Ended: true, PublishedAt: "2026-09-11T02:14:17Z", PublishedPrecision: "started"}},
+		{"weak end", &youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming, IsUpcoming: true, BroadcastEnded: true, BroadcastEndWeak: true},
+			monitor.EndCheck{}},
+		{"refused, says nothing", &youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming, IsUpcoming: true,
+			PlayabilityError: youtube.PlayabilityAgeRestricted}, monitor.EndCheck{}},
+		{"on air", &youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming, IsUpcoming: true, BroadcastOnAir: true},
+			monitor.EndCheck{OnAir: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := monitorEndCheck(signedIn, answer(tc.info, nil))(context.Background(), "vid")
+			if err != nil || got != tc.want {
+				t.Errorf("end check = (%+v, %v), want (%+v, nil)", got, err, tc.want)
+			}
+		})
+	}
+
+	asked := false
+	_, err := monitorEndCheck(func() bool { return false }, func(context.Context, string) (*youtube.VideoInfo, error) {
+		asked = true
+		return &youtube.VideoInfo{BroadcastEnded: true}, nil
+	})(context.Background(), "vid")
+	if !errors.Is(err, monitor.ErrEndCheckUnavailable) || asked {
+		t.Errorf("without a session: err %v, probe asked %v; want ErrEndCheckUnavailable and no call", err, asked)
+	}
+
+	boom := errors.New("player: transport error")
+	if _, err := monitorEndCheck(signedIn, answer(nil, boom))(context.Background(), "vid"); !errors.Is(err, boom) {
+		t.Errorf("a failed call gave %v, want %v", err, boom)
+	}
+}
+
 // Every monitor probe in production is monitorProbe over a youtube.Service
 // probe — the anonymous ProbeVideoStatus for both monitors, the
-// authenticated one for the feed's membership rows — and nothing else in the
-// package assigns one. TestMonitorProbeIsTheCallThenTheAdapter covers what
-// monitorProbe does; what puts it in production is these assignments, which
-// only a fully built runState reaches, so they are read from source in the
-// idiom of TestTheTUIUpdateKeysAreTheTagCheckedHelpers.
+// authenticated one for the feed's membership rows — and the end check is
+// monitorEndCheck over the signed-in WEB call; nothing else in the package
+// assigns one. TestMonitorProbeIsTheCallThenTheAdapter and
+// TestMonitorEndCheckReadsTheWEBAnswersOwnFlags cover what they do; what
+// puts them in production is these assignments, which only a fully built
+// runState reaches, so they are read from source in the idiom of
+// TestTheTUIUpdateKeysAreTheTagCheckedHelpers.
 //
 // Mutants: the ProbeVideoAuth assignment as the pre-flag inline closure
 // returning a five-field VideoProbeResult (membership rows lose
@@ -99,12 +157,14 @@ func TestMonitorProbeIsTheCallThenTheAdapter(t *testing.T) {
 // withheld is announced every cycle again — the closure survived the whole
 // suite before this test); either monitor's ProbeVideo as an inline closure;
 // ProbeVideoAuth built over ProbeVideoStatus (the anonymous client, which
-// sees no members-only formats); any of the three assignments deleted.
+// sees no members-only formats); the feed's ConfirmEnd gated on
+// HasAnyAuthCookie or built over a status probe; any assignment deleted.
 func TestEveryMonitorProbeIsBuiltByMonitorProbe(t *testing.T) {
 	want := map[string]string{
 		"s.feedMon.ProbeVideo":     "monitorProbe(s.ytService.ProbeVideoStatus)",
 		"s.decapiMon.ProbeVideo":   "monitorProbe(s.ytService.ProbeVideoStatus)",
 		"s.feedMon.ProbeVideoAuth": "monitorProbe(s.ytService.ProbeVideoStatusAuthenticated)",
+		"s.feedMon.ConfirmEnd":     "monitorEndCheck(s.ytService.HasAuthCookies, s.ytService.ProbeVideoSchedule)",
 	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -127,7 +187,7 @@ func TestEveryMonitorProbeIsBuiltByMonitorProbe(t *testing.T) {
 			}
 			for i, lhs := range as.Lhs {
 				sel, ok := lhs.(*ast.SelectorExpr)
-				if !ok || (sel.Sel.Name != "ProbeVideo" && sel.Sel.Name != "ProbeVideoAuth") {
+				if !ok || (sel.Sel.Name != "ProbeVideo" && sel.Sel.Name != "ProbeVideoAuth" && sel.Sel.Name != "ConfirmEnd") {
 					continue
 				}
 				name := types.ExprString(lhs)

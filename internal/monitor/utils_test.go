@@ -855,27 +855,34 @@ func TestProcessYouTubeVideo_GiveUpWarningNamesTheRealNextStep(t *testing.T) {
 // escalation reads) even when the broadcast is over: rewriting first would
 // let a members-only stream escape into a job parked in COOKIES?.
 //
+// Each row carries the strength its captured answer has (TestBroadcastEnded):
+// the age gate and the withheld formats end on weak signals, the missing
+// recording on isPostLiveDvr. With no end check wired a weak end is
+// post_live too — for announcing — but unconfirmed; a strong one is not.
+//
 // Mutants: the rewrite dropped (age-gated, no-recording and withheld rows
 // stay upcoming); the rewrite run before isDenied (the members-only and
 // sign-in rows turn Probed post_live); the rewrite not gated on the flag
 // (the genuine upcoming row turns post_live); the rewrite on any status
-// (the not_a_stream row turns post_live).
+// (the not_a_stream row turns post_live); a strong end marked unconfirmed
+// (the no-recording row).
 func TestProbeAndClassify_AnEndedBroadcastIsPostLive(t *testing.T) {
 	ch := &config.ChannelConfig{Name: "c"}
 	for _, tc := range []struct {
-		name        string
-		probe       VideoProbeResult
-		wantOutcome ProbeOutcome
-		wantStatus  string
+		name            string
+		probe           VideoProbeResult
+		wantOutcome     ProbeOutcome
+		wantStatus      string
+		wantUnconfirmed bool
 	}{
-		{"age-gated ended", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "age_restricted", BroadcastEnded: true}, OutcomeProbed, "post_live"},
-		{"recording not available", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "unknown", BroadcastEnded: true}, OutcomeProbed, "post_live"},
-		{"formats withheld", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "ok", BroadcastEnded: true}, OutcomeProbed, "post_live"},
-		{"members-only ended", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "members_only", BroadcastEnded: true}, OutcomeDenied, "upcoming"},
-		{"sign-in ended", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "login_required", BroadcastEnded: true}, OutcomeDenied, "upcoming"},
-		{"genuinely upcoming", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "ok"}, OutcomeProbed, "upcoming"},
-		{"finished premiere", VideoProbeResult{StreamStatus: "not_a_stream", PlayabilityError: "ok", BroadcastEnded: true}, OutcomeProbed, "not_a_stream"},
-		{"ended vod", VideoProbeResult{StreamStatus: "vod", PlayabilityError: "ok", BroadcastEnded: true}, OutcomeProbed, "vod"},
+		{"age-gated ended", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "age_restricted", BroadcastEnded: true, BroadcastEndWeak: true}, OutcomeProbed, "post_live", true},
+		{"recording not available", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "unknown", BroadcastEnded: true}, OutcomeProbed, "post_live", false},
+		{"formats withheld", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "ok", BroadcastEnded: true, BroadcastEndWeak: true}, OutcomeProbed, "post_live", true},
+		{"members-only ended", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "members_only", BroadcastEnded: true, BroadcastEndWeak: true}, OutcomeDenied, "upcoming", false},
+		{"sign-in ended", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "login_required", BroadcastEnded: true, BroadcastEndWeak: true}, OutcomeDenied, "upcoming", false},
+		{"genuinely upcoming", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "ok"}, OutcomeProbed, "upcoming", false},
+		{"finished premiere", VideoProbeResult{StreamStatus: "not_a_stream", PlayabilityError: "ok", BroadcastEnded: true, BroadcastEndWeak: true}, OutcomeProbed, "not_a_stream", false},
+		{"ended vod", VideoProbeResult{StreamStatus: "vod", PlayabilityError: "ok", BroadcastEnded: true, BroadcastEndWeak: true}, OutcomeProbed, "vod", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := probeAndClassify(ProbeClassifyParams{Ctx: context.Background(), VideoID: "v", Channel: ch,
@@ -884,8 +891,9 @@ func TestProbeAndClassify_AnEndedBroadcastIsPostLive(t *testing.T) {
 					return &res, nil
 				},
 				Tracker: NewMetadataFailureTracker(), Logger: silentLogger{}})
-			if r.Outcome != tc.wantOutcome || r.StreamStatus != tc.wantStatus {
-				t.Errorf("outcome %v status %q, want %v %q", r.Outcome, r.StreamStatus, tc.wantOutcome, tc.wantStatus)
+			if r.Outcome != tc.wantOutcome || r.StreamStatus != tc.wantStatus || r.EndUnconfirmed != tc.wantUnconfirmed {
+				t.Errorf("outcome %v status %q unconfirmed %v, want %v %q %v",
+					r.Outcome, r.StreamStatus, r.EndUnconfirmed, tc.wantOutcome, tc.wantStatus, tc.wantUnconfirmed)
 			}
 		})
 	}

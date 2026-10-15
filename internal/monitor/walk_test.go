@@ -26,11 +26,11 @@ func (fm *FeedMonitor) walkForTest(t *testing.T, channelID string) map[string]Pr
 	ch := &config.ChannelConfig{ID: channelID, Name: channelID, IncludeNonLiveContent: true}
 	cycleNow := fm.now().UTC()
 	cutoff := cycleNow.Add(-time.Duration(fm.archiveWindowDays(ch)) * 24 * time.Hour).Format(time.RFC3339)
-	scope, err := fm.db.FeedScope(channelID, cutoff, fm.membershipDiscoveryEnabled())
+	scope, err := fm.db.FeedScope(channelID, cutoff, cycleNow.Format(time.RFC3339), fm.membershipDiscoveryEnabled())
 	if err != nil {
 		t.Fatalf("FeedScope(%s): %v", channelID, err)
 	}
-	return fm.walk(context.Background(), ch, channelID, cutoff, scope)
+	return fm.walk(context.Background(), ch, channelID, cutoff, cycleNow, scope)
 }
 
 // seedRow seeds a single feed_items row directly (bypassing FETCH/STORE),
@@ -49,7 +49,7 @@ func seedRow(t *testing.T, db *database.Database, chID, videoID string, publishe
 		t.Fatalf("seedRow upsert %s: %v", videoID, err)
 	}
 	if status != "unknown" {
-		if err := db.ApplyProbeToFeedItem(chID, videoID, status, videoID, pubStr, precision); err != nil {
+		if err := db.ApplyProbeToFeedItem(chID, videoID, status, videoID, pubStr, precision, database.FeedRecheck{}); err != nil {
 			t.Fatalf("seedRow applyProbe %s: %v", videoID, err)
 		}
 	}
@@ -649,7 +649,7 @@ func TestWalk_CancelledContextStopsPass(t *testing.T) {
 
 	ch := &config.ChannelConfig{ID: chID, Name: chID, IncludeNonLiveContent: true}
 	cutoff := now.Add(-30 * 24 * time.Hour).Format(time.RFC3339)
-	scope, err := db.FeedScope(chID, cutoff, false)
+	scope, err := db.FeedScope(chID, cutoff, now.Format(time.RFC3339), false)
 	if err != nil {
 		t.Fatalf("FeedScope: %v", err)
 	}
@@ -659,7 +659,7 @@ func TestWalk_CancelledContextStopsPass(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	fresh := fm.walk(ctx, ch, chID, cutoff, scope)
+	fresh := fm.walk(ctx, ch, chID, cutoff, now, scope)
 
 	if len(probed) != 0 {
 		t.Errorf("cancelled context probed %v, want no probes — the pass budget is over", probed)
