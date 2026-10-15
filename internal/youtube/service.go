@@ -73,30 +73,30 @@ func NewService(jar *cookies.CookieJar, logger interface {
 	return svc
 }
 
-// Init fetches the YouTube homepage once, at startup, to seed visitor data
-// and the API key. It is not retried, and needs no retry: a failed fetch
-// leaves the built-in API key in place, and visitor data is backfilled by
-// every watch-page fetch through the OnVisitorData callback — the first job
-// or probe after a startup blip recovers it.
+// Init fetches the YouTube homepage once, at startup, to seed visitor data,
+// the API key and the signed-in session. It is not retried, and needs no
+// retry: a failed fetch leaves the built-in API key in place, and visitor data
+// is backfilled by every watch-page fetch through the OnVisitorData callback —
+// the first job or probe after a startup blip recovers it. The session is
+// re-read only for an account the jar comes to hold later
+// (readAccountSession).
 func (s *Service) Init(ctx context.Context) {
 	// Load/sync cookies
 	if err := s.Auth.SyncCookies(); err != nil {
 		s.logger.Warn("[YouTube] SyncCookies failed during init", "error", err)
 	}
 
-	// Fetch YouTube homepage for visitor data and API key
-	headers := map[string]string{
-		"User-Agent": constants.UserAgents.Web,
-	}
-	if ch := s.Auth.GetCookieHeader(); ch != "" {
-		headers["Cookie"] = ch
-	}
-	body, err := utils.FetchBody(ctx, constants.YouTubeURLs.Base, 15*time.Second, headers)
+	// Fetch YouTube homepage for visitor data and API key. The account
+	// before the page, as fetchHomepage wants; and this read is the
+	// account's one homepage session read (claimSessionRead), so the first
+	// probe does not fetch the page again.
+	account := s.Auth.Identity()
+	s.PlayerAPI.claimSessionRead(account)
+	html, err := s.fetchHomepage(ctx)
 	if err != nil {
 		s.logger.Warn("[YouTube] Failed to fetch homepage", "error", err)
 		return
 	}
-	html := string(body)
 
 	// Extract visitor data (only set if currently empty so a fresher value
 	// from OnVisitorData isn't clobbered by an older homepage fetch).
@@ -120,13 +120,54 @@ func (s *Service) Init(ctx context.Context) {
 	// account (DELEGATED_SESSION_ID) a probe without it is judged as the
 	// primary account and refused. A cookieless homepage states none and
 	// sets nothing.
-	s.PlayerAPI.captureVisitorData(homepageSession(html))
+	s.PlayerAPI.captureVisitorData(homepageSession(html), account)
 
 	// Extract API key
 	if m := homepageApiKeyRe.FindStringSubmatch(html); m != nil {
 		s.PlayerAPI.SetAPIKey(m[1])
 		s.logger.Debug("[YouTube] API key extracted", "key", m[1])
 	}
+}
+
+// fetchHomepage fetches the YouTube homepage with the jar's cookies. A caller
+// keeping the session it states reads the jar's account (Auth.Identity)
+// BEFORE calling, for the reason captureVisitorData gives.
+func (s *Service) fetchHomepage(ctx context.Context) (string, error) {
+	headers := map[string]string{
+		"User-Agent": constants.UserAgents.Web,
+	}
+	if ch := s.Auth.GetCookieHeader(); ch != "" {
+		headers["Cookie"] = ch
+	}
+	body, err := utils.FetchBody(ctx, constants.YouTubeURLs.Base, 15*time.Second, headers)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// readAccountSession re-reads the signed-in session off the homepage when the
+// jar has come to hold an account whose session the probes do not have — a
+// cookie import for another account, a cookies.txt replaced by hand, a first
+// login after a cookieless start — as Init reads it at startup. Without it the
+// probes would go unsessioned (probeYtcfg attaches only the account's own
+// session) until a job's full extraction fetched a watch page, and the feed
+// monitor fetches none: on a brand account its membership and date probes
+// would be judged as the primary account and refused. Once per account
+// (claimSessionRead). Called by the probe wrappers after their SyncCookies, so
+// the probe that first sees the new account carries its session.
+func (s *Service) readAccountSession(ctx context.Context) {
+	account := s.Auth.Identity()
+	if !s.PlayerAPI.claimSessionRead(account) {
+		return
+	}
+	html, err := s.fetchHomepage(ctx)
+	if err != nil {
+		s.logger.Warn("[YouTube] Failed to read the new account's session off the homepage", "error", err)
+		return
+	}
+	s.PlayerAPI.captureVisitorData(homepageSession(html), account)
+	s.logger.Debug("[YouTube] Session re-read off the homepage for the jar's new account")
 }
 
 // homepageSession reads the signed-in session's identity — SESSION_INDEX and
@@ -191,6 +232,7 @@ func (s *Service) ProbeVideoDate(ctx context.Context, videoID string) (published
 	if err := s.Auth.SyncCookies(); err != nil {
 		s.logger.Warn("[YouTube] SyncCookies failed before date probe", "error", err)
 	}
+	s.readAccountSession(ctx)
 	s.vdMu.RLock()
 	vd := s.visitorData
 	s.vdMu.RUnlock()
@@ -205,6 +247,7 @@ func (s *Service) ProbeVideoSchedule(ctx context.Context, videoID string) (*Vide
 	if err := s.Auth.SyncCookies(); err != nil {
 		s.logger.Warn("[YouTube] SyncCookies failed before schedule probe", "error", err)
 	}
+	s.readAccountSession(ctx)
 	s.vdMu.RLock()
 	vd := s.visitorData
 	s.vdMu.RUnlock()
@@ -260,6 +303,7 @@ func (s *Service) ProbeVideoStatusAuthenticated(ctx context.Context, videoID str
 	if err := s.Auth.SyncCookies(); err != nil {
 		s.logger.Warn("[YouTube] SyncCookies failed before authenticated probe", "error", err)
 	}
+	s.readAccountSession(ctx)
 	s.vdMu.RLock()
 	vd := s.visitorData
 	s.vdMu.RUnlock()

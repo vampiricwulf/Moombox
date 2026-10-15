@@ -57,9 +57,24 @@ type PlayerAPI struct {
 	// threads the master ytcfg's session into every client call. Captured
 	// alongside visitor data (captureVisitorData), sticky: a watch page that
 	// names no session (fetched without cookies) does not clear it.
+	//
+	// sessionAccount is the jar's account (Auth.Identity) the session was
+	// read under, and probeYtcfg attaches the session only while the jar
+	// still holds that account. A session belongs to the cookies it was read
+	// with: once cookies.txt is removed it rode along on requests carrying no
+	// credentials at all, and once another account's cookies were imported
+	// it named account A's brand page on account B's requests, until a
+	// restart or a watch page that happened to state a session — and the
+	// feed monitor fetches no watch page. yt-dlp never pairs the two, since
+	// it reads the session off the page it fetched with the current cookies.
+	// sessionAsked is the account whose homepage read is already claimed
+	// (claimSessionRead), so an account that changes at runtime has its
+	// session read once, not once per probe.
 	sessionMu          sync.RWMutex
 	sessionIndex       *int
 	delegatedSessionID string
+	sessionAccount     string
+	sessionAsked       string
 	logger             interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)

@@ -51,6 +51,13 @@ func (a *Auth) HasAnyAuthCookie() bool {
 	return a.jar.HasAnyYouTubeAuthCookie()
 }
 
+// Identity is the account the jar's cookies sign in as — an opaque equality
+// token, "" exactly when HasAuthCookies is false. See
+// cookies.CookieJar.YouTubeIdentity.
+func (a *Auth) Identity() string {
+	return a.jar.YouTubeIdentity()
+}
+
 // GetCookieHeader returns the Cookie header string.
 func (a *Auth) GetCookieHeader() string {
 	return a.jar.GetCookieHeader()

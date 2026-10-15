@@ -29,7 +29,7 @@ func TestCaptureVisitorData(t *testing.T) {
 		var got string
 		p := &PlayerAPI{OnVisitorData: func(vd string) { got = vd }}
 
-		p.captureVisitorData(&YtcfgData{VisitorData: "vd-abc"})
+		p.captureVisitorData(&YtcfgData{VisitorData: "vd-abc"}, "")
 
 		if got != "vd-abc" {
 			t.Errorf("OnVisitorData got %q, want %q", got, "vd-abc")
@@ -40,7 +40,7 @@ func TestCaptureVisitorData(t *testing.T) {
 		fired := false
 		p := &PlayerAPI{OnVisitorData: func(string) { fired = true }}
 
-		p.captureVisitorData(&YtcfgData{})
+		p.captureVisitorData(&YtcfgData{}, "")
 
 		if fired {
 			t.Error("OnVisitorData fired for empty visitor data")
@@ -49,10 +49,10 @@ func TestCaptureVisitorData(t *testing.T) {
 
 	t.Run("nil ytcfg and nil callback are safe no-ops", func(t *testing.T) {
 		p := &PlayerAPI{OnVisitorData: func(string) {}}
-		p.captureVisitorData(nil) // must not panic
+		p.captureVisitorData(nil, "") // must not panic
 
-		p = &PlayerAPI{}                                   // nil callback
-		p.captureVisitorData(&YtcfgData{VisitorData: "x"}) // must not panic
+		p = &PlayerAPI{}                                       // nil callback
+		p.captureVisitorData(&YtcfgData{VisitorData: "x"}, "") // must not panic
 	})
 }
 

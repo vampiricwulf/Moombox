@@ -304,16 +304,23 @@ func (p *PlayerAPI) ProbeVideoStatusAuthenticated(ctx context.Context, videoID, 
 }
 
 // probeYtcfg is the ytcfg a probe-only call carries: the visitor data the
-// caller cached, and the signed-in session the last watch page stated (see
-// the session fields on PlayerAPI). Nothing else — a probe fetches no watch
-// page of its own.
+// caller cached, and the signed-in session the last page fetched with the
+// jar's cookies stated (see the session fields on PlayerAPI) — only while the
+// jar still holds the account it was read under. A jar with no account, or
+// with another one, gets no session: judged as the primary account is what a
+// probe without one always was, while another account's page id is an
+// account the credentials do not hold. Nothing else — a probe fetches no
+// watch page of its own.
 func (p *PlayerAPI) probeYtcfg(visitorData string) *YtcfgData {
 	ytcfg := DefaultYtcfg()
 	if visitorData != "" {
 		ytcfg.VisitorData = visitorData
 	}
+	account := p.auth.Identity()
 	p.sessionMu.RLock()
-	ytcfg.SessionIndex, ytcfg.DelegatedSessionID = p.sessionIndex, p.delegatedSessionID
+	if account != "" && account == p.sessionAccount {
+		ytcfg.SessionIndex, ytcfg.DelegatedSessionID = p.sessionIndex, p.delegatedSessionID
+	}
 	p.sessionMu.RUnlock()
 	return ytcfg
 }
@@ -324,21 +331,48 @@ func (p *PlayerAPI) probeYtcfg(visitorData string) *YtcfgData {
 // authenticated AND public extraction paths — the public call is
 // load-bearing for anonymous users: after invalidate403Caches clears the
 // cache, Init() never re-runs (startup-only call site), so this hand-off is
-// the only refill source. The session is kept only from a page that states
-// one: the public path's cookieless page states none, and must not clear
-// what the authenticated path learned.
-func (p *PlayerAPI) captureVisitorData(ytcfg *YtcfgData) {
+// the only refill source.
+//
+// account is the jar's account (Auth.Identity) the page was fetched under,
+// read BEFORE its cookie header: a reload between the two can then only pair
+// a session with an account it does not match, which probeYtcfg never
+// attaches, and never the other way round. The session is kept only from a
+// page that states one and was fetched with an account: the public path's
+// cookieless page (account "") states none, and must not clear what the
+// authenticated path learned.
+func (p *PlayerAPI) captureVisitorData(ytcfg *YtcfgData, account string) {
 	if ytcfg == nil {
 		return
 	}
 	if ytcfg.VisitorData != "" && p.OnVisitorData != nil {
 		p.OnVisitorData(ytcfg.VisitorData)
 	}
-	if ytcfg.SessionIndex != nil || ytcfg.DelegatedSessionID != "" {
+	if account != "" && (ytcfg.SessionIndex != nil || ytcfg.DelegatedSessionID != "") {
 		p.sessionMu.Lock()
 		p.sessionIndex, p.delegatedSessionID = ytcfg.SessionIndex, ytcfg.DelegatedSessionID
+		p.sessionAccount = account
 		p.sessionMu.Unlock()
 	}
+}
+
+// claimSessionRead reports whether the jar's account still wants its session
+// read off the homepage — a jar that holds an account (account != "") whose
+// session is neither kept nor already asked for — and claims the read, so the
+// probes running into a changed account fetch the homepage once between
+// them. One read per account, whatever it found: a homepage that failed or
+// stated no session leaves the probes without one until a watch page states
+// it, as a failed startup read always has. See Service.readAccountSession.
+func (p *PlayerAPI) claimSessionRead(account string) bool {
+	if account == "" {
+		return false
+	}
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	if account == p.sessionAccount || account == p.sessionAsked {
+		return false
+	}
+	p.sessionAsked = account
+	return true
 }
 
 // tvSaysWaitingRoom reports the one verdict owner decision O-I short-circuits
@@ -371,6 +405,9 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	if err := p.auth.SyncCookies(); err != nil {
 		p.logger.Warn("[PlayerApi] SyncCookies failed", slog.String("error", err.Error()))
 	}
+	// The account first, then the cookie header the page is fetched with:
+	// see captureVisitorData for why that order.
+	account := p.auth.Identity()
 	wp, err := fetchWatchPage(ctx, videoID, p.auth.GetCookieHeader())
 	if err != nil {
 		p.logger.Warn("[PlayerApi] Could not fetch watch page", slog.String("error", err.Error()))
@@ -391,8 +428,9 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		p.logger.Debug("[PlayerApi] no attestation challenge from watch page", "videoID", videoID, "reason", wp.AttestationReason)
 	}
 
-	// Capture visitor data for future probe calls
-	p.captureVisitorData(ytcfg)
+	// Capture visitor data, and the session under the account the page was
+	// fetched with, for future probe calls
+	p.captureVisitorData(ytcfg, account)
 
 	formatPool := []Format{}
 	tally := &mismatchTally{}
@@ -722,7 +760,9 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	// Capture visitor data for future probe calls (parity with the
 	// authenticated path). Load-bearing for anonymous users: after a 403
 	// credential refresh clears the service cache, this is the only refill.
-	p.captureVisitorData(wp.Ytcfg)
+	// The page was fetched without cookies (account ""), so it keeps no
+	// session.
+	p.captureVisitorData(wp.Ytcfg, "")
 
 	formatPool := []Format{}
 	tally := &mismatchTally{}
