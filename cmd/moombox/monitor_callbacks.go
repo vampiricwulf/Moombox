@@ -1334,9 +1334,26 @@ func trimStatusFrames(hub interface {
 	}
 }
 
+// monitorProbe builds a monitor status probe from a youtube one: the call,
+// then monitorProbeResult. Every monitor probe is built here — the anonymous
+// one both monitors use and the feed's authenticated one — so a field the
+// monitors depend on cannot reach one probe and not the other. An inline
+// closure in its place would compile, pass every behavioural test and lose
+// the field on that one path (a members-only ended stream announced every
+// cycle again), so TestEveryMonitorProbeIsBuiltByMonitorProbe reads the
+// wiring from source.
+func monitorProbe(probe func(ctx context.Context, videoID string) (*youtube.VideoInfo, error)) monitor.VideoProbeFunc {
+	return func(ctx context.Context, videoID string) (*monitor.VideoProbeResult, error) {
+		meta, err := probe(ctx, videoID)
+		if err != nil {
+			return nil, err
+		}
+		return monitorProbeResult(meta), nil
+	}
+}
+
 // monitorProbeResult adapts a status probe's VideoInfo to what the monitors
-// read. Both probes (anonymous and authenticated) go through it, so a field
-// the monitors depend on cannot reach one and not the other.
+// read; monitorProbe is its only caller.
 func monitorProbeResult(meta *youtube.VideoInfo) *monitor.VideoProbeResult {
 	return &monitor.VideoProbeResult{
 		StreamStatus:       string(meta.StreamStatus),
@@ -1414,16 +1431,10 @@ func (s *runState) wireMonitorCallbacks() {
 
 	// ProbeVideo callback for monitors (metadata check before job creation).
 	// Uses the caller-supplied ctx so monitor shutdown cancels in-flight
-	// probes (per audit reports/cross-cutting.md C4).
-	probeVideoFunc := func(ctx context.Context, videoID string) (*monitor.VideoProbeResult, error) {
-		meta, err := s.ytService.ProbeVideoStatus(ctx, videoID)
-		if err != nil {
-			return nil, err
-		}
-		return monitorProbeResult(meta), nil
-	}
-	s.feedMon.ProbeVideo = probeVideoFunc
-	s.decapiMon.ProbeVideo = probeVideoFunc
+	// probes (per audit reports/cross-cutting.md C4). Every monitor probe is
+	// built by monitorProbe (TestEveryMonitorProbeIsBuiltByMonitorProbe).
+	s.feedMon.ProbeVideo = monitorProbe(s.ytService.ProbeVideoStatus)
+	s.decapiMon.ProbeVideo = monitorProbe(s.ytService.ProbeVideoStatus)
 
 	// Date-completing fetch for the two-phase probe (§9): the ANDROID_VR/TV
 	// status probes carry no microformat, so vod-family results arrive
@@ -1441,18 +1452,12 @@ func (s *runState) wireMonitorCallbacks() {
 	// (which bypasses include_non_live_content). The TV_SAMSUNG+cookies probe
 	// classifies it correctly (vod/live/upcoming). Only the feed monitor's
 	// membership path uses it; RSS/DECAPI stay on the anonymous probe.
-	s.feedMon.ProbeVideoAuth = func(ctx context.Context, videoID string) (*monitor.VideoProbeResult, error) {
-		meta, err := s.ytService.ProbeVideoStatusAuthenticated(ctx, videoID)
-		if err != nil {
-			return nil, err
-		}
-		return monitorProbeResult(meta), nil
-	}
+	s.feedMon.ProbeVideoAuth = monitorProbe(s.ytService.ProbeVideoStatusAuthenticated)
 
 	// Membership discovery: authenticated /membership tab scan for members-only
 	// videos the RSS feed never lists. Wired on the feed monitor only. The
 	// closure adapts youtube.MembershipVideo -> monitor.MembershipVideo (keeping
-	// the monitor package decoupled from youtube, like probeVideoFunc does for
+	// the monitor package decoupled from youtube, like monitorProbe does for
 	// VideoInfo). MembershipEnabled re-reads the config flag AND cookie state
 	// live each cycle, so toggling the setting or acquiring cookies takes effect
 	// on the next cycle with no restart.
