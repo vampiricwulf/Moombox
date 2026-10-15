@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
@@ -195,6 +196,110 @@ func TestCancelledFetchDoesNotAnnounce(t *testing.T) {
 	if !sp.db.TakeAnnounceFound(job.ID) {
 		t.Error("a cancelled run spent the flag; a run stopped by shutdown must leave it owed")
 	}
+}
+
+// cancelOnFound records what it is sent and cancels the run once a "found"
+// is: the run that announced then stops at waitForLive's first select rather
+// than polling a YouTube the test does not have.
+type cancelOnFound struct {
+	notifications.Sender
+	cancel func()
+}
+
+func (c cancelOnFound) Send(title, desc string, nt notifications.NotificationType, f []notifications.Field, o notifications.SendOptions) {
+	c.Sender.Send(title, desc, nt, f, o)
+	if o.Event == "found" {
+		c.cancel()
+	}
+}
+
+// A fetch can SUCCEED on a run already cancelled — GetVideoInfo returns the
+// watch page's parse when the clients after it fail on the cancelled ctx —
+// and that run stops there: it writes nothing and sends nothing, and leaves
+// an owed flag owed. A shutdown landing mid-fetch on a fresh discovery used
+// to send "YouTube Start Time Confirmed" on its own, and the restart's
+// "Stream Found", carrying the same Starts At, came after it: the two embeds
+// the deferral merged, apart and in reverse order. The restart below now
+// sends the discovery as ONE embed. A job owed nothing (a manual add) stops
+// the same way, with no confirmation for a run the operator just cancelled.
+//
+// Mutants: Process going on past a cancelled fetch (run 1 sends the
+// confirmation and writes the start time); the stop applied only to an owed
+// job (the unowed run sends its confirmation); the stop returning anything
+// but cancelledResult (processJob then records an error for a shutdown).
+func TestCancelledSuccessfulFetchSendsNothing(t *testing.T) {
+	info := func() *youtube.VideoInfo {
+		return &youtube.VideoInfo{Title: "Fetched Title", ChannelName: "A Channel",
+			ScheduledStartTime: "2026-10-20T18:00:00Z", IsUpcoming: true,
+			StreamStatus: youtube.StreamUpcoming, PlayabilityError: youtube.PlayabilityOK}
+	}
+	cancelledFetch := func(sp *StreamProcessor, job *database.Job) *StreamProcessResult {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		sp.getVideoInfoFn = func(context.Context, string) (*youtube.VideoInfo, error) {
+			cancel() // the shutdown lands while the fetch runs, which still succeeds
+			return info(), nil
+		}
+		res, err := sp.Process(ctx, job)
+		if err != nil {
+			t.Fatalf("cancelled run: %v", err)
+		}
+		return res
+	}
+
+	t.Run("owed discovery", func(t *testing.T) {
+		sp, rec, job := foundTestJob(t)
+		sp.cfg = &config.MoomboxConfig{}
+		owe(t, sp.db, job)
+
+		res := cancelledFetch(sp, job)
+		if res == nil || !errors.Is(res.ErrSentinel, ErrCancelled) {
+			t.Errorf("cancelled run returned %+v, want cancelledResult", res)
+		}
+		if got := rec.Calls(); len(got) != 0 {
+			t.Fatalf("the cancelled run sent %+v, want nothing", got)
+		}
+		row, err := sp.db.GetJob(job.ID)
+		if err != nil || row == nil {
+			t.Fatalf("GetJob: %v", err)
+		}
+		if row.StreamStartTime != "" || row.Title != "Feed Title" {
+			t.Errorf("the cancelled run wrote start %q, title %q; want the row as it was", row.StreamStartTime, row.Title)
+		}
+		if !row.AnnounceFound {
+			t.Fatal("the cancelled run spent the flag; a shutdown must leave it owed")
+		}
+
+		// The restart: the flag is still owed, and its fetch takes it.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		sp.notifier = cancelOnFound{Sender: rec, cancel: cancel}
+		sp.getVideoInfoFn = func(context.Context, string) (*youtube.VideoInfo, error) { return info(), nil }
+		if _, err := sp.Process(ctx, row); err != nil {
+			t.Fatalf("restart: %v", err)
+		}
+		calls := rec.Calls()
+		if len(calls) != 1 || calls[0].Opts.Event != "found" {
+			t.Fatalf("the discovery arrived as %+v, want one \"found\"", calls)
+		}
+		if _, ok := calls[0].Field("Starts At"); !ok {
+			t.Error("the restart's Stream Found carries no Starts At")
+		}
+	})
+
+	t.Run("job owed nothing", func(t *testing.T) {
+		sp, rec, job := foundTestJob(t)
+		sp.cfg = &config.MoomboxConfig{}
+
+		res := cancelledFetch(sp, job)
+		if res == nil || !errors.Is(res.ErrSentinel, ErrCancelled) {
+			t.Errorf("cancelled run returned %+v, want cancelledResult", res)
+		}
+		if got := rec.Calls(); len(got) != 0 {
+			t.Errorf("the cancelled run sent %+v, want nothing", got)
+		}
+	})
 }
 
 // A refused fetch says little that can be trusted about what the video is —

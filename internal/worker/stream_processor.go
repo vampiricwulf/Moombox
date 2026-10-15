@@ -269,7 +269,23 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 		"sessionAuth", string(info.SessionAuth),
 		"videoID", job.VideoID)
 
-	sp.applyJobMetadata(job, info, false, sp.takeAnnounceFound(ctx, job))
+	// A fetch can succeed on a run already cancelled: GetVideoInfo returns
+	// the watch page's parse when every client after it fails on the
+	// cancelled ctx. Such a run stops here, writing nothing and sending
+	// nothing. It used to go on, write the start time and — the flag refused
+	// it — send "YouTube Start Time Confirmed" on its own, for a discovery
+	// never announced; after a shutdown the owed "Stream Found" followed on
+	// the next run, so the two embeds the deferral merged arrived apart, the
+	// confirmation first. The take comes before the check: a cancel landing
+	// between the two would otherwise refuse the take and still let the run
+	// through to that confirmation. A run that took the flag sends what it
+	// took.
+	announce := sp.takeAnnounceFound(ctx, job)
+	if !announce && ctx.Err() != nil {
+		return cancelledResult(), nil
+	}
+
+	sp.applyJobMetadata(job, info, false, announce)
 
 	if errMsg, sentinel := sp.checkPlayability(info); errMsg != "" {
 		// The one log line that answers "were we even signed in?" at the
