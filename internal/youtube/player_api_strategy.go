@@ -268,6 +268,30 @@ func (p *PlayerAPI) ProbeVideoDate(ctx context.Context, videoID, visitorData str
 	return info.PublishedAt, info.PublishedPrecision, nil
 }
 
+// ProbeVideoSchedule fetches ONLY an upcoming stream's scheduled start via one
+// WEB-family player call — the same call as ProbeVideoDate, read for its other
+// microformat field: liveBroadcastDetails.startTimestamp, which YouTube
+// updates when a stream is rescheduled. The status probes cannot see it:
+// ANDROID_VR and TV carry no microformat (verified against live YouTube,
+// 2026-10-14), so the waiting loop that polls them every 30 s learned of a
+// reschedule only from its 30-minute full fetch, and a start pushed back at
+// the scheduled time — the usual reschedule — stayed stale past the new one.
+//
+// Credentialed like ProbeVideoDate (the jar's cookies ride along), so a
+// members-only waiting room answers too. The whole parse is returned, not
+// the schedule alone: the caller must read it together with IsLive and
+// IsUpcoming, because a stream that has just begun carries its ACTUAL start
+// in the same field, and that is no reschedule. A refused response, or one
+// with no schedule, carries "" with a nil error: "YouTube has no schedule"
+// is a result, not a failure.
+func (p *PlayerAPI) ProbeVideoSchedule(ctx context.Context, videoID, visitorData string) (*VideoInfo, error) {
+	ytcfg := DefaultYtcfg()
+	if visitorData != "" {
+		ytcfg.VisitorData = visitorData
+	}
+	return p.fetchWithClientProbe(ctx, videoID, constants.WebSafariClient, ytcfg, 0)
+}
+
 // ProbeVideoStatusAuthenticated performs a lightweight authenticated status probe
 // using the TV_DOWNGRADED client with cookies (no watch page, no STS, no cipher).
 // Used for polling members-only upcoming streams, and by the worker's one-call

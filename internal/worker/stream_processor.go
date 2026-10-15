@@ -505,6 +505,52 @@ func (sp *StreamProcessor) calculateProbeInterval(info *youtube.VideoInfo) time.
 	return probeIntervalImminent
 }
 
+// The schedule probe: how often the waiting loop asks YouTube whether an
+// upcoming stream's scheduled start moved. The status probes carry no
+// schedule (youtube.ProbeVideoSchedule), and the 30-minute full fetch was
+// the only thing that did — a start pushed back AT the scheduled time, the
+// usual reschedule, stayed stale past the new one. The cadence tapers with
+// the time left (owner decision, 2026-10-14): one twelfth of it, so an hour
+// out is every 5 min and three hours out every 15, clamped between
+// scheduleProbeMin and scheduleProbeMax. The cap is the full fetch's own
+// interval, and the full fetch resets the probe's clock, so a start six
+// hours or more away costs no call the full fetch was not already making.
+// The loop asks on its status-probe ticks, so the real cadence is the first
+// tick at or past the interval: three hours out (15 min, on 10-minute ticks)
+// the schedule is read every 20.
+const (
+	scheduleProbeMin     = 2 * time.Minute
+	scheduleProbeMax     = fullFetchInterval
+	scheduleProbeDivisor = 12
+)
+
+// scheduleProbeOvertakes reports whether a schedule probe's answer says the
+// stream has begun — live, or already over — and so may stand in for the
+// status probe's in the waiting loop's switch, whose live and VOD arms
+// confirm with a full fetch before acting. An ALLOW-list on purpose: every
+// other answer stays with the status probe. not_a_stream is what a refused
+// WEB call reads as, and the switch's default arm ends the job on it;
+// upcoming and unknown have nothing to act on.
+func scheduleProbeOvertakes(sched *youtube.VideoInfo) bool {
+	switch sched.StreamStatus {
+	case youtube.StreamLive, youtube.StreamVOD, youtube.StreamPostLive:
+		return true
+	}
+	return false
+}
+
+// scheduleProbeInterval is how often to re-check the schedule for a stream
+// scheduled to start at scheduledStart (RFC 3339), or 0 for never: no
+// schedule at all (there is nothing to move; the full fetch picks one up), or
+// a value that does not parse. A start already past probes at the minimum.
+func scheduleProbeInterval(scheduledStart string, now time.Time) time.Duration {
+	t := parseRFC3339(scheduledStart)
+	if t.IsZero() {
+		return 0
+	}
+	return min(max(t.Sub(now)/scheduleProbeDivisor, scheduleProbeMin), scheduleProbeMax)
+}
+
 // vodStatusUpdates builds the row update for a stream classified VOD or
 // post-live. A job created Upcoming still carries the SCHEDULED start; for a
 // finished stream YouTube's ScheduledStartTime is the actual start the replay
@@ -592,10 +638,13 @@ func (sp *StreamProcessor) applyJobMetadata(job *database.Job, info *youtube.Vid
 		}
 	}
 
-	// Stream start time
+	// Stream start time. Compared as instants, not strings: the watch page's
+	// microformat spells a start "+00:00" and the offline slate's epoch "Z",
+	// and a row written from one source then read against the other is the
+	// same moment — not a reschedule to announce.
 	if info.ScheduledStartTime != "" {
 		if overwrite {
-			if info.ScheduledStartTime != job.StreamStartTime {
+			if !sameInstant(info.ScheduledStartTime, job.StreamStartTime) {
 				if job.StreamStartTime == "" {
 					notifyStartTimeConfirmed = true
 				} else if !info.IsLive {

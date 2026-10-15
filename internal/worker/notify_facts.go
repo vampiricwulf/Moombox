@@ -79,6 +79,17 @@ func discordTimestamp(raw string) string {
 	return raw
 }
 
+// sameInstant reports whether two RFC 3339 strings name the same moment,
+// whatever their offsets' spelling ("+00:00" against "Z"). Strings that do
+// not both parse compare as text.
+func sameInstant(a, b string) bool {
+	ta, tb := parseRFC3339(a), parseRFC3339(b)
+	if ta.IsZero() || tb.IsZero() {
+		return a == b
+	}
+	return ta.Equal(tb)
+}
+
 // parseRFC3339 parses an RFC 3339 time, or returns the zero time — which every
 // builder reads as "unknown" — for "" or anything that does not parse.
 func parseRFC3339(s string) time.Time {

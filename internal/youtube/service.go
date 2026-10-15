@@ -170,6 +170,20 @@ func (s *Service) ProbeVideoDate(ctx context.Context, videoID string) (published
 	return s.PlayerAPI.ProbeVideoDate(ctx, videoID, vd)
 }
 
+// ProbeVideoSchedule fetches an upcoming stream's scheduled start via one
+// WEB-family player call, carrying whatever credentials the jar holds — see
+// PlayerAPI.ProbeVideoSchedule. The waiting loop's reschedule check
+// (internal/worker, scheduleProbeInterval).
+func (s *Service) ProbeVideoSchedule(ctx context.Context, videoID string) (*VideoInfo, error) {
+	if err := s.Auth.SyncCookies(); err != nil {
+		s.logger.Warn("[YouTube] SyncCookies failed before schedule probe", "error", err)
+	}
+	s.vdMu.RLock()
+	vd := s.visitorData
+	s.vdMu.RUnlock()
+	return s.PlayerAPI.ProbeVideoSchedule(ctx, videoID, vd)
+}
+
 // SetVisitorData stores visitor data extracted from a watch page. Sticky
 // with a TTL: writes when no value is cached OR when the cached value is
 // older than visitorDataTTL. Callers that re-fetch the watch page on the hot
