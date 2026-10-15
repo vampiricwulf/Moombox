@@ -21,7 +21,7 @@
 
 - **Go version:** 1.27 (`toolchain go1.27.1`)
 - **Module path:** github.com/vampiricwulf/Moombox
-- **Current app version:** 2.9.4
+- **Current app version:** 2.9.5
 - **Database schema version:** 22
 - **Default port:** 774
 
