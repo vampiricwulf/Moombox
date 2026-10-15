@@ -35,6 +35,7 @@ type VideoProbeResult struct {
 	PublishedAt        string // probe's authoritative publish date (RFC3339, may be empty)
 	PublishedPrecision string // "started" or "day", empty when PublishedAt is empty
 	PlayabilityError   string // playability status from YouTube API (may be empty for OK videos)
+	BroadcastEnded     bool   // the broadcast or premiere is over, whatever StreamStatus says (youtube.VideoInfo.BroadcastEnded)
 }
 
 // VideoProbeFunc probes a YouTube video and returns its stream status.
@@ -438,6 +439,18 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 	}
 	if isDenied(meta.StreamStatus, meta.PlayabilityError) {
 		result.Outcome = OutcomeDenied
+		return result
+	}
+	// An ended broadcast is never coming. The classifier reads one with no
+	// formats as upcoming, and a refused or format-withheld answer for an
+	// ended stream has none: left alone, the upcoming arm announced an
+	// archived stream again every cycle. post_live sends it down the
+	// past-content path instead (stored as vod, history-gated). AFTER
+	// isDenied, on the status as probed: a members-only or sign-in refusal
+	// stays Denied and upcoming even when the broadcast is over, or it would
+	// escape into a job parked in COOKIES?.
+	if meta.BroadcastEnded && result.StreamStatus == "upcoming" {
+		result.StreamStatus = "post_live"
 	}
 	return result
 }

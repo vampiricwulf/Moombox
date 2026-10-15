@@ -527,3 +527,43 @@ func TestArchive_AMissedBroadcastAnnouncedBeforeTheWindowIsArchived(t *testing.T
 		t.Errorf("found = %v, want the VOD of the broadcast that aired yesterday", *found)
 	}
 }
+
+// The field case end to end: an archived stream (Finished job, history row)
+// whose feed row still reads upcoming, probed as YouTube answers an
+// age-gated ended broadcast — upcoming with no formats, but ended. The cycle
+// must not announce it again, and must leave the row vod so it leaves the
+// upcoming arm for good. Before BroadcastEnded this logged "archive: creating
+// job" and "Video found" every five minutes for weeks.
+func TestArchive_AnEndedBroadcastIsNeverReannounced(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	seedRow(t, db, "UC1", "ended1", now.Add(-35*24*time.Hour), "exact", "rss", "upcoming")
+	addFinishedJob(t, db, "ended1")
+	if err := db.AddToHistory("ended1"); err != nil {
+		t.Fatalf("AddToHistory: %v", err)
+	}
+	probes := 0
+	fm := newTestFeedMonitor(t, db, withRSS(rssWith()), withMembership(membWith()), withWindowDays(3),
+		withProbe(func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+			probes++
+			return &VideoProbeResult{StreamStatus: "upcoming", Title: videoID,
+				PlayabilityError: "age_restricted", BroadcastEnded: true}, nil
+		}), withNow(now))
+	found := recordVideoFound(fm)
+
+	fm.runCycleForTest(t, "UC1")
+	if len(*found) != 0 {
+		t.Fatalf("an ended broadcast was announced again: %v", *found)
+	}
+	if got := mustGetFeedItem(t, db, "UC1", "ended1").Status; got != "vod" {
+		t.Fatalf("row status = %q, want vod", got)
+	}
+
+	// The next cycle leaves it alone: out of the window and no longer
+	// upcoming, it is out of scope, so it is not even probed.
+	probes = 0
+	fm.runCycleForTest(t, "UC1")
+	if len(*found) != 0 || probes != 0 {
+		t.Fatalf("second cycle: found=%v probes=%d, want none", *found, probes)
+	}
+}

@@ -76,6 +76,7 @@ type VideoInfo struct {
 	IsLive             bool             `json:"isLive"`
 	IsUpcoming         bool             `json:"isUpcoming"`
 	IsPostLiveDVR      bool             `json:"isPostLiveDVR"`
+	BroadcastEnded     bool             `json:"broadcastEnded,omitempty"` // over, whatever StreamStatus says; read by the monitors (broadcastEnded)
 	LengthSeconds      *int             `json:"lengthSeconds,omitempty"`
 	EndTimestamp       string           `json:"endTimestamp,omitempty"`
 	ScheduledStartTime string           `json:"scheduledStartTime,omitempty"`

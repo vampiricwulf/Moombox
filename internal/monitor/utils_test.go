@@ -843,3 +843,50 @@ func TestProcessYouTubeVideo_GiveUpWarningNamesTheRealNextStep(t *testing.T) {
 		})
 	}
 }
+
+// A probe whose broadcast has ended is post_live whatever its status said:
+// an ended broadcast is never coming, so the monitors must not run their
+// upcoming arm on it. The classifier reads "no formats" as upcoming, and a
+// refused or format-withheld answer for an ended stream has none — the
+// re-announce loop of an archived stream every cycle.
+//
+// Refusals keep winning. isDenied is decided on the status as probed, so a
+// members-only or sign-in refusal stays Denied (and upcoming, which the
+// escalation reads) even when the broadcast is over: rewriting first would
+// let a members-only stream escape into a job parked in COOKIES?.
+//
+// Mutants: the rewrite dropped (age-gated, no-recording and withheld rows
+// stay upcoming); the rewrite run before isDenied (the members-only and
+// sign-in rows turn Probed post_live); the rewrite not gated on the flag
+// (the genuine upcoming row turns post_live); the rewrite on any status
+// (the not_a_stream row turns post_live).
+func TestProbeAndClassify_AnEndedBroadcastIsPostLive(t *testing.T) {
+	ch := &config.ChannelConfig{Name: "c"}
+	for _, tc := range []struct {
+		name        string
+		probe       VideoProbeResult
+		wantOutcome ProbeOutcome
+		wantStatus  string
+	}{
+		{"age-gated ended", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "age_restricted", BroadcastEnded: true}, OutcomeProbed, "post_live"},
+		{"recording not available", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "unknown", BroadcastEnded: true}, OutcomeProbed, "post_live"},
+		{"formats withheld", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "ok", BroadcastEnded: true}, OutcomeProbed, "post_live"},
+		{"members-only ended", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "members_only", BroadcastEnded: true}, OutcomeDenied, "upcoming"},
+		{"sign-in ended", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "login_required", BroadcastEnded: true}, OutcomeDenied, "upcoming"},
+		{"genuinely upcoming", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "ok"}, OutcomeProbed, "upcoming"},
+		{"finished premiere", VideoProbeResult{StreamStatus: "not_a_stream", PlayabilityError: "ok", BroadcastEnded: true}, OutcomeProbed, "not_a_stream"},
+		{"ended vod", VideoProbeResult{StreamStatus: "vod", PlayabilityError: "ok", BroadcastEnded: true}, OutcomeProbed, "vod"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := probeAndClassify(ProbeClassifyParams{Ctx: context.Background(), VideoID: "v", Channel: ch,
+				ProbeVideo: func(ctx context.Context, id string) (*VideoProbeResult, error) {
+					res := tc.probe
+					return &res, nil
+				},
+				Tracker: NewMetadataFailureTracker(), Logger: silentLogger{}})
+			if r.Outcome != tc.wantOutcome || r.StreamStatus != tc.wantStatus {
+				t.Errorf("outcome %v status %q, want %v %q", r.Outcome, r.StreamStatus, tc.wantOutcome, tc.wantStatus)
+			}
+		})
+	}
+}

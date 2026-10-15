@@ -1334,6 +1334,20 @@ func trimStatusFrames(hub interface {
 	}
 }
 
+// monitorProbeResult adapts a status probe's VideoInfo to what the monitors
+// read. Both probes (anonymous and authenticated) go through it, so a field
+// the monitors depend on cannot reach one and not the other.
+func monitorProbeResult(meta *youtube.VideoInfo) *monitor.VideoProbeResult {
+	return &monitor.VideoProbeResult{
+		StreamStatus:       string(meta.StreamStatus),
+		Title:              meta.Title,
+		PublishedAt:        meta.PublishedAt,
+		PublishedPrecision: meta.PublishedPrecision,
+		PlayabilityError:   string(meta.PlayabilityError),
+		BroadcastEnded:     meta.BroadcastEnded,
+	}
+}
+
 // wireMonitorCallbacks installs every post-service-startup callback that
 // connects the construction graph: cookie recovery / auth-recovered sweep,
 // monitor ProbeVideo + OnVideoFound / OnStreamFound job-creation closures,
@@ -1406,13 +1420,7 @@ func (s *runState) wireMonitorCallbacks() {
 		if err != nil {
 			return nil, err
 		}
-		return &monitor.VideoProbeResult{
-			StreamStatus:       string(meta.StreamStatus),
-			Title:              meta.Title,
-			PublishedAt:        meta.PublishedAt,
-			PublishedPrecision: meta.PublishedPrecision,
-			PlayabilityError:   string(meta.PlayabilityError),
-		}, nil
+		return monitorProbeResult(meta), nil
 	}
 	s.feedMon.ProbeVideo = probeVideoFunc
 	s.decapiMon.ProbeVideo = probeVideoFunc
@@ -1438,13 +1446,7 @@ func (s *runState) wireMonitorCallbacks() {
 		if err != nil {
 			return nil, err
 		}
-		return &monitor.VideoProbeResult{
-			StreamStatus:       string(meta.StreamStatus),
-			Title:              meta.Title,
-			PublishedAt:        meta.PublishedAt,
-			PublishedPrecision: meta.PublishedPrecision,
-			PlayabilityError:   string(meta.PlayabilityError),
-		}, nil
+		return monitorProbeResult(meta), nil
 	}
 
 	// Membership discovery: authenticated /membership tab scan for members-only

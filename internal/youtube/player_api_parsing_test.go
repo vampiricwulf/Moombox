@@ -1875,114 +1875,85 @@ func TestUpcomingStreamStillCarriesItsUploadDate(t *testing.T) {
 	}
 }
 
-// An age-gated finished broadcast, as the anonymous monitor probe sees one,
-// carries no formats because this caller may not see them, and its
-// broadcast details say it has ended: it is post_live, not upcoming. The
-// misread kept such a stream in the feed monitor's scope and re-created its
-// job every cycle for as long as the gate stood.
+// BroadcastEnded is read off the broadcast's own flags, never off whether
+// formats came back, so the monitors can tell a broadcast that is over from
+// one still to come whatever this caller may see. Every row is an
+// ANDROID_VR answer captured from live YouTube on 2026-10-15 — the monitors'
+// status probe — trimmed to the fields that decide, IDs renamed to the
+// fixture's; the microformat rows are the WEB shape.
 //
-// age_restricted only. A members-only or sign-in refusal keeps reading
-// upcoming: the monitor's denied predicate (isDenied, spec §9) keys on
-// exactly that pair, and is what keeps a refusal from ever creating a job.
-// A PLAYABLE finished broadcast with no formats is still being processed and
-// stays upcoming, as the worker's waiting loop expects; so does an
-// unavailable one, which can mean "not processed yet" as easily as "gone".
+// Refused answers (the age gate, members-only, a missing recording) carry no
+// liveStreamability, so a positive lengthSeconds and isPostLiveDvr are all
+// they have; an upcoming or live broadcast reports length 0. A playable
+// ended broadcast also states displayEndscreen, which is the only signal a
+// finished premiere (not live content) carries once its formats are gone.
 //
-// Mutants: the arm dropped (the age-gated row reads upcoming); the arm on
-// any non-OK verdict (the members-only row escapes isDenied into a job, the
-// unavailable one sends the worker after a VOD with no media yet); the arm
-// not gated at all (the processing row too).
-func TestRefusedFinishedBroadcastIsPostLiveNotUpcoming(t *testing.T) {
+// The fact is the broadcast's, not the verdict's: the members-only row is
+// ended too, and it is the monitor's denied predicate that keeps that
+// refusal from a job, not this flag.
+//
+// Mutants: the length arm dropped (age-gated ended reads not ended — the
+// loop this replaced); the isLiveContent guard on length dropped (the
+// ordinary upload reads ended); isPostLiveDvr dropped (the row with no
+// length yet reads not ended); displayEndscreen dropped (the
+// format-withheld premiere reads not ended); endTimestamp dropped (the WEB
+// row); any of the three live/upcoming guards dropped (its precedence row
+// reads ended).
+func TestBroadcastEnded(t *testing.T) {
+	const (
+		ageGate     = `{"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm your age", "desktopLegacyAgeGateReason": 1}`
+		membersOnly = `{"status": "UNPLAYABLE", "reason": "Join this channel from your computer or mobile app to get access to members-only content like this video."}`
+		ok          = `{"status": "OK"}`
+		endedLS     = `{"status": "OK", "liveStreamability": {"liveStreamabilityRenderer": {"videoId": "vid", "broadcastId": "1", "pollDelayMs": "30000", "displayEndscreen": true}}}`
+		premiereLS  = `{"status": "OK", "liveStreamability": {"liveStreamabilityRenderer": {"videoId": "vid", "pollDelayMs": "30000", "displayEndscreen": true}}}`
+		liveLS      = `{"status": "OK", "liveStreamability": {"liveStreamabilityRenderer": {"videoId": "vid", "broadcastId": "23", "pollDelayMs": "30000"}}}`
+		waitingRoom = `{"status": "LIVE_STREAM_OFFLINE", "reason": "This live event will begin in a few moments.", "liveStreamability": {"liveStreamabilityRenderer": {"videoId": "vid", "pollDelayMs": "30000"}}}`
+		noRecording = `{"status": "UNPLAYABLE", "reason": "This live stream recording is not available."}`
+		formats     = `, "streamingData": {"adaptiveFormats": [{"itag": 140, "url": "https://example.invalid/a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\""}]}`
+	)
 	for _, tc := range []struct {
-		name, playability string
-		want              StreamStatus
+		name, playability, videoDetails, extra string
+		want                                   bool
 	}{
-		{"age-gated", `{"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm your age"}`, StreamPostLive},
-		{"age-gated, AGE_CHECK_REQUIRED", `{"status": "AGE_CHECK_REQUIRED", "reason": "This video may be inappropriate for some users."}`, StreamPostLive},
-		{"members-only", `{"status": "LOGIN_REQUIRED", "reason": "Join this channel to get access to members-only content like this video, and other exclusive perks."}`, StreamUpcoming},
-		{"sign-in required", `{"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm you’re not a bot"}`, StreamUpcoming},
-		{"playable, still processing", `{"status": "OK"}`, StreamUpcoming},
-		{"unavailable", `{"status": "UNPLAYABLE", "reason": "This video is unavailable"}`, StreamUpcoming},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			info, err := NewPlayerAPI(nil, noopLogger{}).parsePlayerResponse(context.Background(), decodePlayerJSON(t, `{
-				"playabilityStatus": `+tc.playability+`,
-				"videoDetails": {"videoId": "vid", "isLiveContent": true},
-				"microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {
-					"isLiveNow": false,
-					"startTimestamp": "2026-09-11T02:14:17+00:00",
-					"endTimestamp": "2026-09-11T05:09:26+00:00"}}}
-			}`), "", nil, "vid")
-			if err != nil {
-				t.Fatalf("parsePlayerResponse: %v", err)
-			}
-			if info.StreamStatus != tc.want {
-				t.Errorf("StreamStatus = %s (playability %s), want %s", info.StreamStatus, info.PlayabilityError, tc.want)
-			}
-			if tc.want == StreamPostLive && !info.IsPostLiveDVR {
-				t.Error("IsPostLiveDVR = false for a finished broadcast")
-			}
-		})
-	}
-}
+		{"age-gated ended", ageGate, `{"videoId": "vid", "lengthSeconds": "10511", "isLiveContent": true}`, "", true},
+		{"ended stream", endedLS, `{"videoId": "vid", "lengthSeconds": "14043", "isLiveContent": true}`, formats, true},
+		{"ended stream, formats withheld", endedLS, `{"videoId": "vid", "lengthSeconds": "14043", "isLiveContent": true}`, "", true},
+		{"ended, recording not available", noRecording, `{"videoId": "vid", "lengthSeconds": "121601512", "isLiveContent": true, "isPostLiveDvr": true}`, "", true},
+		{"finished premiere, formats withheld", premiereLS, `{"videoId": "vid", "lengthSeconds": "178", "isLiveContent": false}`, "", true},
+		{"members-only ended", membersOnly, `{"videoId": "vid", "lengthSeconds": "10378", "isLiveContent": true}`, "", true},
+		{"live", liveLS, `{"videoId": "vid", "lengthSeconds": "0", "isLive": true, "isLiveContent": true, "isLiveDvrEnabled": true}`, formats, false},
+		{"upcoming waiting room", waitingRoom, `{"videoId": "vid", "lengthSeconds": "0", "isUpcoming": true, "isLiveContent": true}`, "", false},
+		{"age-gated, length 0", ageGate, `{"videoId": "vid", "lengthSeconds": "0", "isLiveContent": true}`, "", false},
+		{"scheduled premiere with a length", ok, `{"videoId": "vid", "lengthSeconds": "178", "isUpcoming": true, "isLiveContent": false}`, "", false},
+		{"ordinary upload", ok, `{"videoId": "vid", "lengthSeconds": "213", "isLiveContent": false}`, formats, false},
+		{"deleted video", `{"status": "ERROR", "reason": "This video is unavailable"}`, `{"videoId": "vid"}`, "", false},
+		{"WEB: ended per microformat", ok, `{"videoId": "vid", "isLiveContent": true}`,
+			`, "microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {"isLiveNow": false, "startTimestamp": "2026-09-11T02:14:17+00:00", "endTimestamp": "2026-09-11T05:09:26+00:00"}}}`, true},
+		{"WEB: live per microformat", ok, `{"videoId": "vid", "isLiveContent": true}`,
+			`, "microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {"isLiveNow": true, "startTimestamp": "2026-10-15T02:14:17+00:00"}}}`, false},
 
-// The same finished age-gated broadcast as the MONITOR'S probe actually sees
-// it: ANDROID_VR sends no microformat at all, so there is no endTimestamp for
-// the rule above to read, and the stream kept classifying upcoming and
-// re-announcing itself every cycle after that rule shipped. The response
-// below is ANDROID_VR's answer for jqZ9cGeGDBE, captured from live YouTube
-// on 2026-10-15 (trimmed to the fields classifyStream reads, its ID renamed
-// to the fixture's): a positive lengthSeconds is the end signal it does
-// carry, since an upcoming or live broadcast reports 0.
-//
-// Mutants: the arm dropped (the ended row reads upcoming); the length check
-// dropped (the length-0 row, an age-gated stream still to come, reads
-// post_live and the monitor skips it); the isLiveContent check dropped (an
-// age-gated ordinary upload reads post_live, not not_a_stream); the verdict
-// gate dropped (the members-only row escapes isDenied into a job).
-func TestAgeGatedFinishedBroadcastWithoutMicroformatIsPostLive(t *testing.T) {
-	const ageGate = `{"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm your age", "desktopLegacyAgeGateReason": 1}`
-	for _, tc := range []struct {
-		name, playability, videoDetails string
-		want                            StreamStatus
-	}{
-		{"age-gated, ended", ageGate,
-			`{"videoId": "vid", "lengthSeconds": "10511", "isLowLatencyLiveStream": true, "isPrivate": false, "isLiveContent": true}`,
-			StreamPostLive},
-		{"age-gated, length 0", ageGate,
-			`{"videoId": "vid", "lengthSeconds": "0", "isLiveContent": true}`,
-			StreamUpcoming},
-		{"age-gated, no length", ageGate,
-			`{"videoId": "vid", "isLiveContent": true}`,
-			StreamUpcoming},
-		{"age-gated, upcoming flag", ageGate,
-			`{"videoId": "vid", "lengthSeconds": "10511", "isLiveContent": true, "isUpcoming": true}`,
-			StreamUpcoming},
-		{"age-gated upload, not live content", ageGate,
-			`{"videoId": "vid", "lengthSeconds": "600", "isLiveContent": false}`,
-			StreamNotAStream},
-		{"members-only, ended",
-			`{"status": "LOGIN_REQUIRED", "reason": "Join this channel to get access to members-only content like this video, and other exclusive perks."}`,
-			`{"videoId": "vid", "lengthSeconds": "10511", "isLiveContent": true}`,
-			StreamUpcoming},
-		{"sign-in required, ended",
-			`{"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm you’re not a bot"}`,
-			`{"videoId": "vid", "lengthSeconds": "10511", "isLiveContent": true}`,
-			StreamUpcoming},
+		// Synthetic, each one signal alone. isPostLiveDvr decides without a
+		// length: the captured no-recording answer with its length removed,
+		// the shape of a stream that has just ended and not yet stated one.
+		{"post-live, no length yet", noRecording, `{"videoId": "vid", "isLiveContent": true, "isPostLiveDvr": true}`, "", true},
+		// And precedence: a response that says live or upcoming, in any of
+		// the three ways classifyStream reads, is not ended whatever end
+		// signal it also carries.
+		{"says upcoming, carries a length", ok, `{"videoId": "vid", "lengthSeconds": "10511", "isUpcoming": true, "isLiveContent": true}`, "", false},
+		{"waiting room without isUpcoming, carries a length", waitingRoom, `{"videoId": "vid", "lengthSeconds": "10511", "isLiveContent": true}`, "", false},
+		{"WEB: live now, carries an end", ok, `{"videoId": "vid", "isLiveContent": true}`,
+			`, "microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {"isLiveNow": true, "startTimestamp": "2026-10-15T02:14:17+00:00", "endTimestamp": "2026-10-15T05:09:26+00:00"}}}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			info, err := NewPlayerAPI(nil, noopLogger{}).parsePlayerResponse(context.Background(), decodePlayerJSON(t, `{
 				"playabilityStatus": `+tc.playability+`,
-				"videoDetails": `+tc.videoDetails+`
+				"videoDetails": `+tc.videoDetails+tc.extra+`
 			}`), "", nil, "vid")
 			if err != nil {
 				t.Fatalf("parsePlayerResponse: %v", err)
 			}
-			if info.StreamStatus != tc.want {
-				t.Errorf("StreamStatus = %s (playability %s), want %s", info.StreamStatus, info.PlayabilityError, tc.want)
-			}
-			if tc.want == StreamPostLive && !info.IsPostLiveDVR {
-				t.Error("IsPostLiveDVR = false for a finished broadcast")
+			if info.BroadcastEnded != tc.want {
+				t.Errorf("BroadcastEnded = %v, want %v (status %s, playability %s)", info.BroadcastEnded, tc.want, info.StreamStatus, info.PlayabilityError)
 			}
 		})
 	}

@@ -185,6 +185,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		IsLive:             isLive,
 		IsUpcoming:         isUpcoming,
 		IsPostLiveDVR:      isPostLiveDVR,
+		BroadcastEnded:     broadcastEnded(videoDetails, playabilityStatus, microformat),
 		IsPremiere:         isPremiereForDisplay(videoDetails, playabilityStatus, microformat),
 		LengthSeconds:      lengthSeconds,
 		EndTimestamp:       endTimestamp,
@@ -808,6 +809,51 @@ func broadcastLength(videoDetails map[string]any) int {
 	return n
 }
 
+// broadcastEnded reports whether a broadcast or premiere is over, read off
+// its own flags and never off whether formats came back (VideoInfo.
+// BroadcastEnded). Once the response says it is neither live nor upcoming,
+// any one of these is enough:
+//
+//   - microformat liveBroadcastDetails.endTimestamp, which WEB-family
+//     clients send and ANDROID_VR and TV never do;
+//   - videoDetails.isPostLiveDvr, yt-dlp's first live_status rule — on a
+//     stream whose recording is not available, the only flag besides length;
+//   - liveStreamability's displayEndscreen, which a playable ended stream and
+//     a finished premiere carry and a live or upcoming one does not;
+//   - a positive lengthSeconds on live content. YouTube reports 0 for an
+//     upcoming or live broadcast, and a refused answer (the age gate,
+//     members-only) carries nothing else. Live content only: an ordinary
+//     upload has a length too.
+//
+// Each was read off ANDROID_VR's live answers for every state on 2026-10-15
+// (TestBroadcastEnded).
+func broadcastEnded(videoDetails, playabilityStatus, microformat map[string]any) bool {
+	isLive, _ := videoDetails["isLive"].(bool)
+	isUpcoming, _ := videoDetails["isUpcoming"].(bool)
+	lbd, _ := microformat["liveBroadcastDetails"].(map[string]any)
+	if now, _ := lbd["isLiveNow"].(bool); now {
+		isLive = true
+	}
+	status := getStr(playabilityStatus, "status")
+	reason := strings.ToLower(playabilityReason(playabilityStatus))
+	if isLive || isUpcoming || isUpcomingFromPlayability(status, reason) {
+		return false
+	}
+	if getStr(lbd, "endTimestamp") != "" {
+		return true
+	}
+	if postLive, _ := videoDetails["isPostLiveDvr"].(bool); postLive {
+		return true
+	}
+	if ls, ok := getNestedMap(playabilityStatus, "liveStreamability", "liveStreamabilityRenderer"); ok {
+		if endscreen, _ := ls["displayEndscreen"].(bool); endscreen {
+			return true
+		}
+	}
+	isLiveContent, _ := videoDetails["isLiveContent"].(bool)
+	return isLiveContent && broadcastLength(videoDetails) > 0
+}
+
 // isPremiereResponse reports whether a player response describes a premiere:
 // it has a scheduled start but is not marked as live content, and either the
 // playability reason says "premiere" or videoDetails says upcoming.
@@ -888,37 +934,13 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	if isLiveNow || isPremiereNow {
 		return StreamLive, true, false, false
 	}
-	// An age-gated finished broadcast carries no formats because THIS caller
-	// may not see them (an anonymous probe), not because it has not begun;
-	// and it says it has ENDED, so it cannot be upcoming whatever the format
-	// list says. Without this arm the no-formats rules below read it as
-	// upcoming, and the feed monitor then kept it in scope and tried to
-	// create its job every cycle for as long as the gate stood (a stream
-	// archived weeks before, every five minutes).
+	// From here, no formats reads upcoming — "wait" to the worker — even for
+	// a broadcast that has ended and whose formats this caller may not see
+	// (an age gate, a recording not available, formats withheld). Whether it
+	// has ended is broadcastEnded's to say, not this function's: the monitors
+	// read that, and an arm here keyed on one end signal never fired for the
+	// probe that mattered.
 	//
-	// Two end signals, because the probe that matters sends only one. A
-	// client with a microformat states endTimestamp (isPostLiveDVR). ANDROID_VR
-	// — the monitor's status probe — sends no microformat at all, so for it
-	// the signal is a positive lengthSeconds on live content: an upcoming or
-	// live broadcast reports 0, and isLiveNow and isUpcoming have already
-	// returned above. Reading endTimestamp alone left this arm unreachable
-	// from the monitor, and the loop it was written to end went on.
-	//
-	// age_restricted ONLY, on purpose. The monitor's denied predicate (spec
-	// §9, monitor.isDenied) keys on `upcoming` with members_only or
-	// login_required, and excludes age_restricted as an ordinary
-	// classification: a members-only finished stream must keep reading
-	// upcoming so that predicate holds and no refusal creates a job, where a
-	// post_live would escape it into a job parked in COOKIES?. A PLAYABLE
-	// finished broadcast with no formats is still being processed and stays
-	// upcoming for the worker's waiting loop; unavailable, private and
-	// unknown can mean "not processed yet" as easily as "gone" and stay too.
-	hasEnded := isPostLiveDVR || (lbd == nil && isLiveContent && broadcastLength(videoDetails) > 0)
-	if hasEnded && !hasFormats {
-		if playErr, _ := parsePlayabilityStatus(playabilityStatus); playErr == PlayabilityAgeRestricted {
-			return StreamPostLive, false, false, true
-		}
-	}
 	// liveStreamability with no formats — treat as upcoming. Runs before the
 	// lbd==nil && !isLiveContent shortcut so premieres that only expose the
 	// renderer aren't mis-classified as not_a_stream.

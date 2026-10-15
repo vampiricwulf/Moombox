@@ -313,12 +313,22 @@ The rules run in this order; the first that matches decides (`classifyStream`, `
 | Premiere (has a scheduled start, not live content, reason contains "premiere" or `videoDetails.isUpcoming`), not live now, no formats | `upcoming` |
 | `videoDetails.isUpcoming == true` and no formats — overrides `isLive`, which YouTube sets on a waiting room once the scheduled time passes | `upcoming` |
 | `videoDetails.isLive == true` OR `liveBroadcastDetails.isLiveNow == true` (a live premiere included) | `live` |
-| The broadcast has ended — `liveBroadcastDetails.endTimestamp` present and not live now, or, with no microformat at all, `isLiveContent` with a positive `videoDetails.lengthSeconds` (an upcoming or live broadcast reports 0) — no formats, and the playability verdict is `age_restricted` (as the monitor's anonymous probe sees an age-gated stream). The second signal is the one the monitor's probe carries: ANDROID_VR sends no microformat, so an arm reading `endTimestamp` alone never fired for it and the loop below went on (`TestAgeGatedFinishedBroadcastWithoutMicroformatIsPostLive`, built on ANDROID_VR's live answer). The formats are missing because this caller may not see them, not because the broadcast has not begun. and the formats are missing because this caller may not see them, not because it has not begun. Without this arm the no-formats rule below read an age-gated finished stream as `upcoming`, and the feed monitor kept it in scope and tried to create its job every cycle for as long as the gate stood. `age_restricted` only: the monitor's denied predicate (§9, `isDenied`) keys on `upcoming` with `members_only` or `login_required`, so a members-only finished stream must keep reading `upcoming` for that predicate to hold and no refusal to create a job. A PLAYABLE finished broadcast with no formats is still being processed and reads `upcoming` as before, which the worker's waiting loop relies on, and so does one with any other verdict (unavailable, private, unknown), which can mean "not processed yet" as easily as "gone" (`TestRefusedFinishedBroadcastIsPostLiveNotUpcoming`) | `post_live` |
 | `playabilityStatus.liveStreamability` renderer present and no formats — a scheduled stream some clients report without `isUpcoming` | `upcoming` |
 | No `liveBroadcastDetails`, not `isLiveContent`, not a premiere | `not_a_stream` |
 | No formats but has `liveBroadcastDetails` or `isLiveContent` | `upcoming` |
 | `liveBroadcastDetails.endTimestamp` present and not live now | `post_live` (DVR) |
 | Default | `vod` |
+
+`upcoming` here means "no media yet: wait", which is what the worker's waiting loop needs — and it is what the no-formats rows say about an ended broadcast whose formats this caller may not see: an age gate, a recording that is not available, formats withheld. Whether the broadcast has ENDED is a separate fact, `VideoInfo.BroadcastEnded` (`broadcastEnded`), read off the broadcast's own flags and never off the format list. Once the response says it is neither live nor upcoming (`videoDetails.isLive`, `liveBroadcastDetails.isLiveNow`, `videoDetails.isUpcoming`, or an upcoming playability), any one of these makes it true:
+
+| Signal | Carried by |
+|--------|------------|
+| `liveBroadcastDetails.endTimestamp` | WEB-family clients only — ANDROID_VR and TV send no microformat |
+| `videoDetails.isPostLiveDvr` (yt-dlp's first `live_status` rule) | an ended stream, the one whose recording is not available included |
+| `liveStreamability.liveStreamabilityRenderer.displayEndscreen` | a playable ended stream and a finished premiere; never a live or upcoming one, and never a refused answer |
+| `videoDetails.lengthSeconds` > 0 on `isLiveContent` | every ended stream, refused answers included (the age gate, members-only); an upcoming or live broadcast reports 0, and an ordinary upload is not live content |
+
+Each was read off ANDROID_VR's live answers for every state on 2026-10-15 (`TestBroadcastEnded`). Only the monitors read it (`probeAndClassify`, below); `StreamStatus` keeps its meaning for the worker. An earlier `classifyStream` arm made an age-gated ended broadcast `post_live` on `endTimestamp` alone — a field the monitor's ANDROID_VR probe never carries — so it never fired where it was needed, and an archived stream went on announcing itself every cycle.
 
 ### Playability Status Parsing
 
