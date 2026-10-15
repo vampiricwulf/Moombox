@@ -254,14 +254,11 @@ func (p *PlayerAPI) ProbeVideoStatus(ctx context.Context, videoID string, visito
 // errors are errors. Callers gate the retry-vs-proceed decision on that
 // distinction (spec §9's two-phase probe).
 func (p *PlayerAPI) ProbeVideoDate(ctx context.Context, videoID, visitorData string) (publishedAt, precision string, err error) {
-	ytcfg := DefaultYtcfg()
-	if visitorData != "" {
-		ytcfg.VisitorData = visitorData
-	}
 	// No watch page fetched on this probe-only path, so no ytcfg beyond the
-	// visitor data the caller cached. And no PLAYER PO token: owner decision
-	// O-R, see fetchWithClientProbe.
-	info, err := p.fetchWithClientProbe(ctx, videoID, constants.WebSafariClient, ytcfg, 0)
+	// visitor data the caller cached and the session the last watch page
+	// stated (probeYtcfg). And no PLAYER PO token: owner decision O-R, see
+	// fetchWithClientProbe.
+	info, err := p.fetchWithClientProbe(ctx, videoID, constants.WebSafariClient, p.probeYtcfg(visitorData), 0)
 	if err != nil {
 		return "", "", err
 	}
@@ -285,11 +282,7 @@ func (p *PlayerAPI) ProbeVideoDate(ctx context.Context, videoID, visitorData str
 // with no schedule, carries "" with a nil error: "YouTube has no schedule"
 // is a result, not a failure.
 func (p *PlayerAPI) ProbeVideoSchedule(ctx context.Context, videoID, visitorData string) (*VideoInfo, error) {
-	ytcfg := DefaultYtcfg()
-	if visitorData != "" {
-		ytcfg.VisitorData = visitorData
-	}
-	return p.fetchWithClientProbe(ctx, videoID, constants.WebSafariClient, ytcfg, 0)
+	return p.fetchWithClientProbe(ctx, videoID, constants.WebSafariClient, p.probeYtcfg(visitorData), 0)
 }
 
 // ProbeVideoStatusAuthenticated performs a lightweight authenticated status probe
@@ -305,23 +298,46 @@ func (p *PlayerAPI) ProbeVideoSchedule(ctx context.Context, videoID, visitorData
 // waiting room, on precisely the accounts the experiment hits — reports at
 // Debug instead of Warn.
 func (p *PlayerAPI) ProbeVideoStatusAuthenticated(ctx context.Context, videoID, visitorData string) (*VideoInfo, error) {
-	ytcfg := DefaultYtcfg()
-	if visitorData != "" {
-		ytcfg.VisitorData = visitorData
-	}
-	info, err := p.fetchWithClientProbe(ctx, videoID, constants.TVDowngradedClient, ytcfg, 0)
+	info, err := p.fetchWithClientProbe(ctx, videoID, constants.TVDowngradedClient, p.probeYtcfg(visitorData), 0)
 	stampManifestSources(info, "tv_auth")
 	return info, err
 }
 
+// probeYtcfg is the ytcfg a probe-only call carries: the visitor data the
+// caller cached, and the signed-in session the last watch page stated (see
+// the session fields on PlayerAPI). Nothing else — a probe fetches no watch
+// page of its own.
+func (p *PlayerAPI) probeYtcfg(visitorData string) *YtcfgData {
+	ytcfg := DefaultYtcfg()
+	if visitorData != "" {
+		ytcfg.VisitorData = visitorData
+	}
+	p.sessionMu.RLock()
+	ytcfg.SessionIndex, ytcfg.DelegatedSessionID = p.sessionIndex, p.delegatedSessionID
+	p.sessionMu.RUnlock()
+	return ytcfg
+}
+
 // captureVisitorData forwards watch-page visitor data to the service cache
-// (OnVisitorData → Service.SetVisitorData). Shared by the authenticated AND
-// public extraction paths — the public call is load-bearing for anonymous
-// users: after invalidate403Caches clears the cache, Init() never re-runs
-// (startup-only call site), so this hand-off is the only refill source.
+// (OnVisitorData → Service.SetVisitorData), and keeps the page's session
+// identity for the probe-only calls (probeYtcfg). Shared by the
+// authenticated AND public extraction paths — the public call is
+// load-bearing for anonymous users: after invalidate403Caches clears the
+// cache, Init() never re-runs (startup-only call site), so this hand-off is
+// the only refill source. The session is kept only from a page that states
+// one: the public path's cookieless page states none, and must not clear
+// what the authenticated path learned.
 func (p *PlayerAPI) captureVisitorData(ytcfg *YtcfgData) {
-	if ytcfg != nil && ytcfg.VisitorData != "" && p.OnVisitorData != nil {
+	if ytcfg == nil {
+		return
+	}
+	if ytcfg.VisitorData != "" && p.OnVisitorData != nil {
 		p.OnVisitorData(ytcfg.VisitorData)
+	}
+	if ytcfg.SessionIndex != nil || ytcfg.DelegatedSessionID != "" {
+		p.sessionMu.Lock()
+		p.sessionIndex, p.delegatedSessionID = ytcfg.SessionIndex, ytcfg.DelegatedSessionID
+		p.sessionMu.Unlock()
 	}
 }
 

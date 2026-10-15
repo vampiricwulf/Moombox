@@ -47,7 +47,20 @@ type PlayerAPI struct {
 	potProvider  PotTokenProvider
 	// OnVisitorData is called when visitor data is extracted from a watch page.
 	OnVisitorData func(visitorData string)
-	logger        interface {
+	// session is the signed-in session's identity as the last watch page
+	// stated it — SESSION_INDEX and DELEGATED_SESSION_ID, which
+	// GenerateAPIHeaders sends as X-Goog-AuthUser and X-Goog-PageId. A
+	// membership held on a brand account exists only under that delegated
+	// identity: a credentialed call without the headers is judged as the
+	// primary account and refused, so the probe-only calls (no watch page of
+	// their own) must carry what the last full extraction learned, as yt-dlp
+	// threads the master ytcfg's session into every client call. Captured
+	// alongside visitor data (captureVisitorData), sticky: a watch page that
+	// names no session (fetched without cookies) does not clear it.
+	sessionMu          sync.RWMutex
+	sessionIndex       *int
+	delegatedSessionID string
+	logger             interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
