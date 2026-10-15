@@ -125,10 +125,20 @@ type StreamProcessor struct {
 
 	twitchHints *twitchHintCache // populated by OnStreamFound; consumed by processTwitchLive
 
-	// getVideoInfoFn replaces yt.GetVideoInfo in Process when set: a test
-	// seam, as DownloadWorker.processStreamFn is, since youtube.Service has
-	// none of its own and a real fetch needs the network.
+	// getVideoInfoFn replaces yt.GetVideoInfo — in Process and in the waiting
+	// loop's full fetches — when set: a test seam, as
+	// DownloadWorker.processStreamFn is, since youtube.Service has none of its
+	// own and a real fetch needs the network.
 	getVideoInfoFn func(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
+
+	// probeStatusFn and probeScheduleFn replace the waiting loop's status
+	// probe and its schedule probe when set, for the same reason: with
+	// getVideoInfoFn they let a test drive waitForLive with no network
+	// (wait_for_live_test.go). authenticated says which status probe the loop
+	// asked for — ProbeVideoStatusAuthenticated once it has switched to the
+	// cookied one, ProbeVideoStatus before.
+	probeStatusFn   func(ctx context.Context, videoID string, authenticated bool) (*youtube.VideoInfo, error)
+	probeScheduleFn func(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
 
 	mu          sync.Mutex
 	activeChats []*chat.ChatDownloader // Track active chat downloaders for cleanup
@@ -251,11 +261,7 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 	// held, ahead of the error it ends in, but a cancelled run takes nothing —
 	// a cancel or delete has cleared the flag or the row already, and a run
 	// stopped by shutdown leaves it owed to the next one.
-	getVideoInfo := sp.getVideoInfoFn
-	if getVideoInfo == nil {
-		getVideoInfo = sp.yt.GetVideoInfo
-	}
-	info, err := getVideoInfo(ctx, job.VideoID)
+	info, err := sp.fetchVideoInfo(ctx, job.VideoID)
 	if err != nil {
 		if sp.takeAnnounceFound(ctx, job) {
 			sp.sendStreamFound(job, nil)

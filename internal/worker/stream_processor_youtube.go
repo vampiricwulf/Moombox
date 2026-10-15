@@ -101,6 +101,37 @@ func waitingRoomAuthFlip(info *youtube.VideoInfo, hasCookies bool) bool {
 	return info != nil && hasCookies && isAuthWalledPlayability(info.PlayabilityError)
 }
 
+// fetchVideoInfo is the full multi-client fetch, Process's and the waiting
+// loop's: yt.GetVideoInfo, or getVideoInfoFn when a test set one.
+func (sp *StreamProcessor) fetchVideoInfo(ctx context.Context, videoID string) (*youtube.VideoInfo, error) {
+	if sp.getVideoInfoFn != nil {
+		return sp.getVideoInfoFn(ctx, videoID)
+	}
+	return sp.yt.GetVideoInfo(ctx, videoID)
+}
+
+// probeVideoStatus is the waiting loop's status probe: the cookied one once
+// the loop has switched to it (authenticated), the cookieless ANDROID_VR one
+// before — or probeStatusFn when a test set one.
+func (sp *StreamProcessor) probeVideoStatus(ctx context.Context, videoID string, authenticated bool) (*youtube.VideoInfo, error) {
+	if sp.probeStatusFn != nil {
+		return sp.probeStatusFn(ctx, videoID, authenticated)
+	}
+	if authenticated {
+		return sp.yt.ProbeVideoStatusAuthenticated(ctx, videoID)
+	}
+	return sp.yt.ProbeVideoStatus(ctx, videoID)
+}
+
+// probeVideoSchedule is the waiting loop's schedule probe: yt.ProbeVideoSchedule,
+// or probeScheduleFn when a test set one.
+func (sp *StreamProcessor) probeVideoSchedule(ctx context.Context, videoID string) (*youtube.VideoInfo, error) {
+	if sp.probeScheduleFn != nil {
+		return sp.probeScheduleFn(ctx, videoID)
+	}
+	return sp.yt.ProbeVideoSchedule(ctx, videoID)
+}
+
 func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, initialInfo *youtube.VideoInfo) (*StreamProcessResult, error) {
 	sp.logger.Info("waiting for stream to go live", "videoID", job.VideoID)
 
@@ -234,13 +265,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		}
 
 		// Probe — use lightweight authenticated probe if members-only was detected
-		var probeInfo *youtube.VideoInfo
-		var probeErr error
-		if membersOnly {
-			probeInfo, probeErr = sp.yt.ProbeVideoStatusAuthenticated(ctx, job.VideoID)
-		} else {
-			probeInfo, probeErr = sp.yt.ProbeVideoStatus(ctx, job.VideoID)
-		}
+		probeInfo, probeErr := sp.probeVideoStatus(ctx, job.VideoID, membersOnly)
 		if probeErr != nil {
 			newCount, giveUp, report, cancelled := applyProbeError(probeErr, consecutiveErrors)
 			switch report {
@@ -305,7 +330,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		if probeInfo.StreamStatus == youtube.StreamUpcoming {
 			if iv := scheduleProbeInterval(scheduledStartTime, time.Now()); iv > 0 && time.Since(lastScheduleProbe) >= iv {
 				lastScheduleProbe = time.Now()
-				if sched, err := sp.yt.ProbeVideoSchedule(ctx, job.VideoID); err != nil {
+				if sched, err := sp.probeVideoSchedule(ctx, job.VideoID); err != nil {
 					reportFetchOutcome(err, "probe/youtube")
 					sp.logger.Debug("schedule probe failed; next full fetch covers it", "videoID", job.VideoID, "err", err)
 				} else if scheduleProbeOvertakes(sched) {
@@ -322,7 +347,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		// Periodic full WEB fetch to catch metadata ANDROID_VR can't see
 		// (e.g., rescheduled start times only available in microformat).
 		if time.Since(lastFullFetch) >= fullFetchInterval && probeInfo.StreamStatus == youtube.StreamUpcoming {
-			fullInfo, err := sp.yt.GetVideoInfo(ctx, job.VideoID)
+			fullInfo, err := sp.fetchVideoInfo(ctx, job.VideoID)
 			if err == nil {
 				sp.updateJobMetadata(job, fullInfo, true)
 				if fullInfo.ScheduledStartTime != "" {
@@ -396,7 +421,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		switch probeInfo.StreamStatus {
 		case youtube.StreamLive:
 			sp.logger.Info("stream is now live (probe)", "videoID", job.VideoID)
-			fullInfo, err := sp.yt.GetVideoInfo(ctx, job.VideoID)
+			fullInfo, err := sp.fetchVideoInfo(ctx, job.VideoID)
 			if err != nil {
 				// Confirmatory full fetch failed — most likely a transient
 				// connectivity blip in the brief window after a successful probe.
@@ -424,7 +449,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 
 		case youtube.StreamVOD, youtube.StreamPostLive:
 			sp.logger.Info("stream became VOD (probe)", "videoID", job.VideoID)
-			fullInfo, err := sp.yt.GetVideoInfo(ctx, job.VideoID)
+			fullInfo, err := sp.fetchVideoInfo(ctx, job.VideoID)
 			if err != nil {
 				// Same connectivity-resilience as the live case: don't error the
 				// stream on a transient confirmatory-fetch failure; report
@@ -456,7 +481,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			if membersOnly {
 				sp.logger.Info("auth probe unclear, doing full fetch",
 					"status", probeInfo.StreamStatus, "videoID", job.VideoID)
-				fullInfo, err := sp.yt.GetVideoInfo(ctx, job.VideoID)
+				fullInfo, err := sp.fetchVideoInfo(ctx, job.VideoID)
 				if err != nil {
 					reportFetchOutcome(err, "probe/youtube")
 					sp.logger.Warn("full fetch after unclear auth probe failed", "err", err)

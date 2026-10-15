@@ -73,10 +73,12 @@ func TestScheduleProbeOvertakesOnlyABegunStream(t *testing.T) {
 // moment with another offset, as the watch page ("+00:00") and the offline
 // slate ("Z") do for one stream.
 //
-// Mutants: the loop syncing scheduledStartTime but not the row; a
-// schedule-only VideoInfo read as live (no reschedule notice); the start
-// compared as text (the respelt repeat announces a reschedule to the same
-// moment).
+// Called directly, so the loop's own wiring is not under test here:
+// TestWaitingLoopWritesAMovedStartToTheRow drives waitForLive for that.
+//
+// Mutants: a schedule-only VideoInfo read as live (no reschedule notice); the
+// start compared as text (the respelt repeat announces a reschedule to the
+// same moment).
 func TestRescheduleIsWrittenOnEveryMove(t *testing.T) {
 	sp, rec, job := foundTestJob(t)
 	sp.applyJobMetadata(job, &youtube.VideoInfo{Title: "T", ScheduledStartTime: "2026-10-15T03:00:00Z", IsUpcoming: true}, false, false)
