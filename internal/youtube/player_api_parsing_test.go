@@ -1925,3 +1925,65 @@ func TestRefusedFinishedBroadcastIsPostLiveNotUpcoming(t *testing.T) {
 		})
 	}
 }
+
+// The same finished age-gated broadcast as the MONITOR'S probe actually sees
+// it: ANDROID_VR sends no microformat at all, so there is no endTimestamp for
+// the rule above to read, and the stream kept classifying upcoming and
+// re-announcing itself every cycle after that rule shipped. The response
+// below is ANDROID_VR's answer for jqZ9cGeGDBE, captured from live YouTube
+// on 2026-10-15 (trimmed to the fields classifyStream reads, its ID renamed
+// to the fixture's): a positive lengthSeconds is the end signal it does
+// carry, since an upcoming or live broadcast reports 0.
+//
+// Mutants: the arm dropped (the ended row reads upcoming); the length check
+// dropped (the length-0 row, an age-gated stream still to come, reads
+// post_live and the monitor skips it); the isLiveContent check dropped (an
+// age-gated ordinary upload reads post_live, not not_a_stream); the verdict
+// gate dropped (the members-only row escapes isDenied into a job).
+func TestAgeGatedFinishedBroadcastWithoutMicroformatIsPostLive(t *testing.T) {
+	const ageGate = `{"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm your age", "desktopLegacyAgeGateReason": 1}`
+	for _, tc := range []struct {
+		name, playability, videoDetails string
+		want                            StreamStatus
+	}{
+		{"age-gated, ended", ageGate,
+			`{"videoId": "vid", "lengthSeconds": "10511", "isLowLatencyLiveStream": true, "isPrivate": false, "isLiveContent": true}`,
+			StreamPostLive},
+		{"age-gated, length 0", ageGate,
+			`{"videoId": "vid", "lengthSeconds": "0", "isLiveContent": true}`,
+			StreamUpcoming},
+		{"age-gated, no length", ageGate,
+			`{"videoId": "vid", "isLiveContent": true}`,
+			StreamUpcoming},
+		{"age-gated, upcoming flag", ageGate,
+			`{"videoId": "vid", "lengthSeconds": "10511", "isLiveContent": true, "isUpcoming": true}`,
+			StreamUpcoming},
+		{"age-gated upload, not live content", ageGate,
+			`{"videoId": "vid", "lengthSeconds": "600", "isLiveContent": false}`,
+			StreamNotAStream},
+		{"members-only, ended",
+			`{"status": "LOGIN_REQUIRED", "reason": "Join this channel to get access to members-only content like this video, and other exclusive perks."}`,
+			`{"videoId": "vid", "lengthSeconds": "10511", "isLiveContent": true}`,
+			StreamUpcoming},
+		{"sign-in required, ended",
+			`{"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm you’re not a bot"}`,
+			`{"videoId": "vid", "lengthSeconds": "10511", "isLiveContent": true}`,
+			StreamUpcoming},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info, err := NewPlayerAPI(nil, noopLogger{}).parsePlayerResponse(context.Background(), decodePlayerJSON(t, `{
+				"playabilityStatus": `+tc.playability+`,
+				"videoDetails": `+tc.videoDetails+`
+			}`), "", nil, "vid")
+			if err != nil {
+				t.Fatalf("parsePlayerResponse: %v", err)
+			}
+			if info.StreamStatus != tc.want {
+				t.Errorf("StreamStatus = %s (playability %s), want %s", info.StreamStatus, info.PlayabilityError, tc.want)
+			}
+			if tc.want == StreamPostLive && !info.IsPostLiveDVR {
+				t.Error("IsPostLiveDVR = false for a finished broadcast")
+			}
+		})
+	}
+}
