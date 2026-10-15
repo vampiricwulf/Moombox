@@ -89,6 +89,20 @@ const DefaultAPIKey = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 // =============================================================================
 // YOUTUBE CLIENT CONFIGURATIONS
 // =============================================================================
+//
+// Where a client below stands in yt-dlp's default requested-client tuples
+// (yt-dlp master, _video.py, since #17805 "Set tv_samsung as a default
+// client", 2026-10-10):
+//
+//	_DEFAULT_CLIENTS         = (tv_samsung, visionos, web)
+//	_DEFAULT_JSLESS_CLIENTS  = (visionos,)
+//	_DEFAULT_AUTHED_CLIENTS  = (web_embedded, tv_samsung, web)
+//	_DEFAULT_PREMIUM_CLIENTS = (web_creator, tv_samsung, web)
+//
+// yt-dlp asks the premium tuple for a Premium subscriber, else the authed one
+// for a signed-in session, else the jsless one when no JS runtime is
+// available, else the default. How Moombox's format ranking follows them is
+// the AuthLevel block in internal/youtube (types.go).
 
 // YouTubeClientConfig holds configuration for a YouTube API client.
 type YouTubeClientConfig struct {
@@ -100,8 +114,9 @@ type YouTubeClientConfig struct {
 }
 
 // TVSamsungClient is the primary authenticated client: TVHTML5 identifying
-// itself as a 2016 Samsung Tizen set (yt-dlp's tv_samsung, #17723, default
-// authed and premium client since #17805). The bare TVHTML5 identity
+// itself as a 2016 Samsung Tizen set (yt-dlp's tv_samsung, #17723; a default
+// client since #17805, leading _DEFAULT_CLIENTS and second in the authed and
+// premium tuples). The bare TVHTML5 identity
 // (TVDowngradedClient) is answered "The page needs to be reloaded" for a
 // signed-in session — YouTube now forces that identity onto a player JS
 // variant the player call cannot satisfy — with no formats, on every
@@ -199,13 +214,15 @@ var WebEmbeddedClient = YouTubeClientConfig{
 	},
 }
 
-// VisionOSClient is yt-dlp's lead default client since 2026.08.19 (dae52d838
-// removed android_vr from every default list; visionos leads _DEFAULT_CLIENTS
-// and _DEFAULT_JSLESS_CLIENTS). Cookieless, no JS player required, no PO-token
-// policy. Serves direct-URL adaptive formats for VODs and HLS for live —
-// verified 2026-08-24 that it does NOT return dashManifestUrl for live
-// streams, so it cannot replace ANDROID_VR as the live-DASH enrichment
-// source. Caveat per upstream: "Made for kids" videos aren't available.
+// VisionOSClient is in yt-dlp's cookieless defaults since 2026.08.19
+// (dae52d838 removed android_vr from every default list): second in
+// _DEFAULT_CLIENTS, behind tv_samsung, and the whole of
+// _DEFAULT_JSLESS_CLIENTS, the tuple for an install with no JS runtime.
+// Cookieless, no JS player required, no PO-token policy. Serves direct-URL
+// adaptive formats for VODs and HLS for live — verified 2026-08-24 that it
+// does NOT return dashManifestUrl for live streams, so it cannot replace
+// ANDROID_VR as the live-DASH enrichment source. Caveat per upstream: "Made
+// for kids" videos aren't available.
 var VisionOSClient = YouTubeClientConfig{
 	ClientName:    "VISIONOS",
 	ClientVersion: "1.02",
