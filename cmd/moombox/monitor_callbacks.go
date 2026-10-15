@@ -1484,6 +1484,7 @@ func (s *runState) wireMonitorCallbacks() {
 	// HasAuthCookies, not HasAnyAuthCookie: this asks "can we sign in", and
 	// a half-cleared session would only be refused.
 	s.feedMon.ConfirmEnd = monitorEndCheck(s.ytService.HasAuthCookies, s.ytService.ProbeVideoSchedule)
+	s.decapiMon.ConfirmEnd = monitorEndCheck(s.ytService.HasAuthCookies, s.ytService.ProbeVideoSchedule)
 
 	// Authenticated probe for members-only videos: an anonymous probe can't see
 	// members-only content, gets no formats, and misclassifies it as "upcoming"

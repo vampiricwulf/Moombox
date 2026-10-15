@@ -107,15 +107,43 @@ type decapiTerminalMemo struct {
 	// the skip used to write a history row, which kept both monitors from
 	// archiving the video after include_non_live_content was turned on.
 	nonLiveOff bool
+	// recheckAt is set when the sighting ended on a broadcast end that rests
+	// on weak signals the end check could not confirm
+	// (ProcessYouTubeVideoResult.EndUnconfirmed): the memo holds that answer
+	// until then — the feed's re-check backoff, endRecheckDelay — and the
+	// next sighting after it probes again. recheckStep counts the re-checks
+	// scheduled for this videoID, which picks the next wait. Neither every
+	// 15 s (the answer is what a refused answer for an ended stream looks
+	// like for as long as the refusal stands) nor never (it is also what an
+	// age-gated stream that is live now might look like, and a re-check that
+	// finds it live or upcoming announces it).
+	recheckAt   time.Time
+	recheckStep int
 }
 
 // decapiTerminalStatus reports whether a classification can no longer change.
 // Only "vod" and "not_a_stream" qualify: "upcoming" becomes "live" becomes
-// "vod", and "post_live" is the transitional state that becomes "vod". This is
-// the same terminal set the feed walk refuses to re-probe (walk.go, the status
-// switch in walk).
+// "vod". This is the same terminal set the feed walk refuses to re-probe
+// (walk.go, the status switch in walk). A post_live result is recorded as
+// the vod it is (decapiMemoStatus).
 func decapiTerminalStatus(status string) bool {
 	return status == "vod" || status == "not_a_stream"
+}
+
+// decapiMemoStatus is the status the memo keeps for a classification. A
+// post_live result is a broadcast the probe found over, so it is the vod the
+// feed stores it as (applyProbe's normalization), and every reason the memo
+// trusts a vod (history, a dated window verdict, the channel archiving no
+// VODs) holds for it as well. Recorded raw it was never terminal, and DECAPI
+// probed a channel's ended newest video every 15 s for good. An end the end
+// check could not confirm is post_live too; what keeps the memo from
+// settling it is recheckAt, which terminalMemoHit answers before any of
+// those reasons.
+func decapiMemoStatus(status string) string {
+	if status == "post_live" {
+		return "vod"
+	}
+	return status
 }
 
 // DecapiMonitor polls DECAPI for latest videos from YouTube channels.
@@ -160,10 +188,29 @@ type DecapiMonitor struct {
 	// shared with the feed monitor: the ANDROID_VR status probe carries no
 	// microformat, so a vod-family result arrives dateless and the §13
 	// window check below could never pass without this second fetch.
-	ProbeDate       func(ctx context.Context, videoID string) (publishedAt, precision string, err error)
+	ProbeDate func(ctx context.Context, videoID string) (publishedAt, precision string, err error)
+	// ConfirmEnd is the end check the feed monitor shares (ConfirmEndFunc):
+	// the one signed-in WEB call that settles a broadcast end the status
+	// probe read off weak signals alone. Nil, or no signed-in session, leaves
+	// such an end unconfirmed: no job, held by the terminal memo for the
+	// re-check backoff (decapiTerminalMemo.recheckAt).
+	ConfirmEnd      ConfirmEndFunc
 	MetadataTracker *MetadataFailureTracker
 	ProbeCooldown   *ProbeCooldown // per-monitor; window from config, refreshed each cycle
 	IsOnline        func() bool    // nil = always online
+
+	// now is the terminal memo's clock for the re-check backoff; nil is
+	// time.Now (clock). Tests set it.
+	now func() time.Time
+}
+
+// clock reports the memo's current instant (dm.now, or time.Now when unset —
+// tests and literals build monitors without the constructor).
+func (dm *DecapiMonitor) clock() time.Time {
+	if dm.now != nil {
+		return dm.now()
+	}
+	return time.Now()
 }
 
 // Health returns the per-channel health snapshot for /api/status.
@@ -231,6 +278,7 @@ func NewDecapiMonitor(store *config.Store, db *database.Database, logger interfa
 		// refreshProbeCooldown (before any probe runs), so the zero here just
 		// means "disabled until the first cycle reads config".
 		ProbeCooldown: NewProbeCooldown(0),
+		now:           time.Now,
 	}
 }
 
@@ -832,6 +880,7 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		ProbeVideo: dm.ProbeVideo,
 		Tracker:    dm.MetadataTracker,
 		Cooldown:   dm.ProbeCooldown,
+		ConfirmEnd: dm.ConfirmEnd,
 		IsReprobe:  reprobe,
 		Repeat:     repeat,
 		Logger:     dm.logger,
@@ -841,9 +890,10 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	// leaves StreamStatus empty, which is never terminal, and result.Denied
 	// arrives already narrowed to the refusals that are settled for an
 	// anonymous prober (deniedIsSettled) — a login_required refusal creates no
-	// job but is deliberately not remembered.
-	dm.recordTerminalMemo(ch.ID, videoID, result.StreamStatus, result.Denied)
-	if !result.ShouldProcess && !ch.IncludeNonLiveContent && decapiTerminalStatus(result.StreamStatus) {
+	// job but is deliberately not remembered. A settled post_live is recorded
+	// as the vod it is; an unconfirmed end is held until its re-check.
+	dm.recordTerminalMemo(ch.ID, videoID, result)
+	if !result.ShouldProcess && !ch.IncludeNonLiveContent && decapiTerminalStatus(decapiMemoStatus(result.StreamStatus)) {
 		dm.noteTerminalMemoNonLiveOff(ch.ID, videoID)
 	}
 	// Window check (§13): "the newest video on the channel" is not the same
@@ -860,7 +910,9 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	// first sighting's skip logs at Info, and its failed date fetch at Warn,
 	// to keep them visible.
 	if result.ShouldProcess && (result.StreamStatus == "vod" || result.StreamStatus == "post_live" || result.StreamStatus == "not_a_stream") {
-		if result.PublishedAt == "" && dm.ProbeDate != nil {
+		// The end check (ConfirmEnd) is this same WEB call: when it ran, its
+		// date is already in, and asking again would only repeat the answer.
+		if result.PublishedAt == "" && dm.ProbeDate != nil && !result.endChecked {
 			// Two-phase probe (§9): the status probe carries no microformat,
 			// so in production EVERY vod-family result lands here dateless.
 			// One WEB date fetch — authenticated when the jar holds
@@ -955,12 +1007,19 @@ func (dm *DecapiMonitor) archiveWindowDays(ch *config.ChannelConfig) int {
 //     a channel's override) re-probes once and then settles again.
 //   - the memoized include_non_live_content skip, valid only while the
 //     channel still does not archive VODs — turning it on re-probes once.
+//
+// An unconfirmed broadcast end is held by its own rule, ahead of all four:
+// until recheckAt, whatever else holds, and not a moment after.
 func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string, reprobe bool, windowDays int, includeNonLive bool) bool {
+	now := dm.clock()
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 	m, ok := dm.terminalMemo[channelID]
 	if !ok || m.videoID != videoID {
 		return false
+	}
+	if !m.recheckAt.IsZero() {
+		return now.Before(m.recheckAt)
 	}
 	if m.denied {
 		// A settled refusal needs no second reason, and the arms below cannot
@@ -979,14 +1038,34 @@ func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string, reprobe bool
 // recordTerminalMemo stores this cycle's classification for the channel,
 // replacing any previous one. An empty status (probe errored, cooldown
 // suppressed it, or no probe is wired) is recorded as-is and is not terminal,
-// so the next cycle probes again.
-func (dm *DecapiMonitor) recordTerminalMemo(channelID, videoID, status string, denied bool) {
+// so the next cycle probes again. A post_live is recorded as vod
+// (decapiMemoStatus).
+//
+// An unconfirmed end schedules its re-check: endRecheckDelay after now, the
+// step continuing from the last one for this same videoID — an hour, six,
+// then daily. An errored or cooled-down probe of that video keeps the step
+// (it answered nothing, so the backoff resumes where it was, not from an
+// hour); any other answer — on air, settled, a new newest video — ends it.
+func (dm *DecapiMonitor) recordTerminalMemo(channelID, videoID string, r ProcessYouTubeVideoResult) {
+	now := dm.clock()
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 	if dm.terminalMemo == nil {
 		dm.terminalMemo = make(map[string]decapiTerminalMemo)
 	}
-	dm.terminalMemo[channelID] = decapiTerminalMemo{videoID: videoID, status: status, denied: denied}
+	step := 0
+	if prev, ok := dm.terminalMemo[channelID]; ok && prev.videoID == videoID {
+		step = prev.recheckStep
+	}
+	m := decapiTerminalMemo{videoID: videoID, status: decapiMemoStatus(r.StreamStatus), denied: r.Denied}
+	switch {
+	case r.EndUnconfirmed:
+		m.recheckAt = now.Add(endRecheckDelay(step))
+		m.recheckStep = step + 1
+	case r.StreamStatus == "":
+		m.recheckStep = step
+	}
+	dm.terminalMemo[channelID] = m
 }
 
 // noteTerminalMemoOutsideWindow records that the memo recordTerminalMemo just

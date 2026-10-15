@@ -483,7 +483,7 @@ func TestDecapi_TerminalMemoCoversTheOutOfWindowArm(t *testing.T) {
 func TestDecapi_DeniedVerdictIsLatched(t *testing.T) {
 	dm := &DecapiMonitor{logger: silentLogger{}}
 
-	dm.recordTerminalMemo("UC_a", "vid_denied_11", "upcoming", true)
+	dm.recordTerminalMemo("UC_a", "vid_denied_11", ProcessYouTubeVideoResult{StreamStatus: "upcoming", Denied: true})
 	if !dm.terminalMemoHit("UC_a", "vid_denied_11", false, 30, false) {
 		t.Error("a denied verdict did not latch — the same refusal is re-probed every 15 s forever")
 	}
@@ -492,7 +492,7 @@ func TestDecapi_DeniedVerdictIsLatched(t *testing.T) {
 	}
 
 	// A non-denied "upcoming" is still not terminal: it becomes live.
-	dm.recordTerminalMemo("UC_b", "vid_upcoming1", "upcoming", false)
+	dm.recordTerminalMemo("UC_b", "vid_upcoming1", ProcessYouTubeVideoResult{StreamStatus: "upcoming"})
 	if dm.terminalMemoHit("UC_b", "vid_upcoming1", false, 30, false) {
 		t.Error("an ordinary upcoming latched — the premiere would never be picked up when it goes live")
 	}
@@ -818,19 +818,20 @@ func TestDecapi_ARepeatedAnswerLogsAtDebug(t *testing.T) {
 	}
 }
 
-// The §13 window skip is the last line of the two answers the terminal memo
-// never carries — a post_live newest video (not terminal) and a VOD whose
-// date fetch keeps failing (a dateless verdict is not memoized) — so they
-// reach it on every 15 s cycle. It ignored the repeat and logged at Info each
-// time, after the match and classification lines had been demoted. The first
+// The §13 window skip is the last line of the answers the terminal memo
+// never carries — a dateless verdict, whether YouTube has no date for the
+// video or the date fetch keeps failing, is not memoized — so they reach it
+// on every 15 s cycle. It ignored the repeat and logged at Info each time,
+// after the match and classification lines had been demoted. The first
 // sighting still logs it at Info; repeats at Debug. The failing date fetch's
 // own line, just before the skip, did the same at Warn: it now warns on the
 // first sighting and logs repeats at Debug, so no line of a repeat rises
-// above Debug.
+// above Debug. (A post_live newest video was the other such answer; it is
+// memoized now, as the vod it is — TestDecapi_ASettledEndedNewestVideoIsMemoized.)
 //
 // Mutants: the window skip logging at Info whatever repeat says — 4 Info
 // lines over the 4 repeats in both cases; the date-fetch failure logging at
-// Warn whatever repeat says — 4 Warn lines over the dateless case's repeats.
+// Warn whatever repeat says — 4 Warn lines over the failing case's repeats.
 func TestDecapi_ARepeatedWindowSkipLogsAtDebug(t *testing.T) {
 	const (
 		skipMsg  = "decapi: newest video is outside the archive window; skipping"
@@ -842,8 +843,8 @@ func TestDecapi_ARepeatedWindowSkipLogsAtDebug(t *testing.T) {
 		probeDate  func(context.Context, string) (string, string, error)
 		fetchFails bool
 	}{
-		{"post_live dated outside the window", "post_live", func(context.Context, string) (string, string, error) {
-			return time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339), "exact", nil
+		{"vod YouTube has no date for", "vod", func(context.Context, string) (string, string, error) {
+			return "", "", nil
 		}, false},
 		{"vod whose date fetch keeps failing", "vod", func(context.Context, string) (string, string, error) {
 			return "", "", errors.New("date fetch: transport error")

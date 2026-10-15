@@ -157,7 +157,7 @@ func TestMonitorEndCheckReadsTheWEBAnswersOwnFlags(t *testing.T) {
 // withheld is announced every cycle again — the closure survived the whole
 // suite before this test); either monitor's ProbeVideo as an inline closure;
 // ProbeVideoAuth built over ProbeVideoStatus (the anonymous client, which
-// sees no members-only formats); the feed's ConfirmEnd gated on
+// sees no members-only formats); either monitor's ConfirmEnd gated on
 // HasAnyAuthCookie or built over a status probe; any assignment deleted.
 func TestEveryMonitorProbeIsBuiltByMonitorProbe(t *testing.T) {
 	want := map[string]string{
@@ -165,6 +165,7 @@ func TestEveryMonitorProbeIsBuiltByMonitorProbe(t *testing.T) {
 		"s.decapiMon.ProbeVideo":   "monitorProbe(s.ytService.ProbeVideoStatus)",
 		"s.feedMon.ProbeVideoAuth": "monitorProbe(s.ytService.ProbeVideoStatusAuthenticated)",
 		"s.feedMon.ConfirmEnd":     "monitorEndCheck(s.ytService.HasAuthCookies, s.ytService.ProbeVideoSchedule)",
+		"s.decapiMon.ConfirmEnd":   "monitorEndCheck(s.ytService.HasAuthCookies, s.ytService.ProbeVideoSchedule)",
 	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
