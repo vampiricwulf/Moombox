@@ -62,18 +62,18 @@ The probe-only calls fetch no watch page of their own — `ProbeVideoStatusAuthe
 
 #### Auth Levels
 
-Formats collected from different clients are tagged with an auth level. When deduplicating formats by itag, the format with the **lowest** auth level wins. The tier order mirrors yt-dlp's client priority (`build_innertube_clients`: tv > web > mweb > android > ios), NOT "least privileged first". TV leads because upstream ranks tv first (priority 40) and its URLs need no GVS token; WEB-family formats beat the cookieless clients because Moombox mints and attaches the GVS token their URLs require, while android_vr sits under selective enforcement with no token that applies to it — so TV and WEB formats must win same-itag ties against the cookieless clients:
+Formats collected from different clients are tagged with an auth level. When deduplicating formats by itag, the format with the **lowest** auth level wins. The order follows yt-dlp's requested-client tuples where the two can be matched (owner decision, 2026-10-14): yt-dlp keeps the first client's copy of each stream id and later clients fill gaps, and its tuples are `(web_embedded, tv_samsung, web)` authed and `(tv_samsung, visionos, web)` public — so `web_embedded` leads the authed tier, TV second, then the web family (the watch page IS the web client), and TV leads the public tier. yt-dlp's numeric client `priority` (tv 40, web 30) is NOT its format preference — it only sorts the `player_client=all` expansion — and an earlier reading of it put TV first on the authed path; that never decided a download, since the TV client returned no formats for signed-in sessions until `tv_samsung`, and every cookied recording came from the watch page's copy. In practice the order decides VODs: a live broadcast is rarely embeddable, `web_embedded` answers "unavailable" with no formats, and a live recording's winner is the TV copy — for Moombox and yt-dlp alike (verified 2026-10-14 on a cookied live extraction, 13 of 14 winners `tv_auth`; the DASH and HLS manifest sources are chosen by cascade order, not by this ranking, and were unchanged). Where the tuple order is not followed: the cookieless clients stay the last-resort tier on both paths (upstream's public tuple would lead with visionos), because a cookieless client winning a same-itag tie is the 2026-08-15 incident, and android_vr sits under selective enforcement with no token that applies to it. `TestSameItagTieFollowsUpstreamsClientOrder` pins both orders.
 
 | Level | Constant | Client | Description |
 |-------|----------|--------|-------------|
-| 0 | `AuthLevelTVPublic` | TV_SAMSUNG (no cookies) | Public TV client request. |
-| 1 | `AuthLevelTVAuth` | TV_SAMSUNG (with cookies) | Authenticated TV client request. |
-| 2 | `AuthLevelWatchPagePublic` | Watch page (no cookies) | Extracted from ytInitialPlayerResponse in the watch page HTML. |
-| 3 | `AuthLevelWatchPageAuth` | Watch page (with cookies) | Same, from an authenticated page load. |
-| 4 | `AuthLevelWebSafari` | WEB (Safari UA) | Pre-merged HLS formats when YouTube serves them. |
-| 5 | `AuthLevelWeb` | WEB | Standard web client. Provides DASH manifest URLs. |
-| 6 | `AuthLevelWebEmbedded` | WEB_EMBEDDED_PLAYER | Embedded player. Age-gate bypass; leads the authed cascade. |
-| 7 | `AuthLevelWebCreator` | WEB_CREATOR | Creator Studio client. Access to member-only content. |
+| 0 | `AuthLevelTVPublic` | TV_SAMSUNG (no cookies) | Public TV client request. Leads the public cascade; no GVS token. |
+| 1 | `AuthLevelWebEmbedded` | WEB_EMBEDDED_PLAYER | Embedded player. Leads the authed cascade, as upstream's; no GVS token. Age-gate bypass. |
+| 2 | `AuthLevelTVAuth` | TV_SAMSUNG (with cookies) | Authenticated TV client request. Second on the authed cascade; no GVS token, so it is the token-free shadow of a web-family winner. |
+| 3 | `AuthLevelWatchPagePublic` | Watch page (no cookies) | Extracted from ytInitialPlayerResponse in the watch page HTML. |
+| 4 | `AuthLevelWatchPageAuth` | Watch page (with cookies) | Same, from an authenticated page load. |
+| 5 | `AuthLevelWebSafari` | WEB (Safari UA) | Pre-merged HLS formats when YouTube serves them. |
+| 6 | `AuthLevelWeb` | WEB | Standard web client. Provides DASH manifest URLs. |
+| 7 | `AuthLevelWebCreator` | WEB_CREATOR | Creator Studio client. Access to member-only content. The premium tuple's lead upstream, but Moombox has no Premium detection and fetches it only as a members-only fallback. |
 | 8 | `AuthLevelVisionOS` | VISIONOS | Cookieless last resort. Direct URLs without cipher. |
 | 9 | `AuthLevelAndroidVR` | ANDROID_VR | Cookieless last resort, ranked below VISIONOS (see below). |
 

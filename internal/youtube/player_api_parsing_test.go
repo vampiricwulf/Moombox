@@ -1588,6 +1588,7 @@ func TestDeduplicateFormatsKeepsATokenFreeShadowOfAWebFamilyWinner(t *testing.T)
 		"web_embedded": AuthLevelWebEmbedded,
 		"visionos":     AuthLevelVisionOS,
 		"tv_public":    AuthLevelTVPublic,
+		"tv_auth":      AuthLevelTVAuth,
 		"android_vr":   AuthLevelAndroidVR,
 	}
 	mk := func(source string) Format {
@@ -1603,12 +1604,13 @@ func TestDeduplicateFormatsKeepsATokenFreeShadowOfAWebFamilyWinner(t *testing.T)
 		{"web_creator winner, visionos loser", []string{"web_creator", "visionos"}, "web_creator", "visionos"},
 		{"visionos listed first still loses and shadows", []string{"visionos", "web_creator"}, "web_creator", "visionos"},
 		{"tv_public wins outright and carries no shadow", []string{"web_creator", "tv_public", "visionos"}, "tv_public", ""},
-		// web_embedded (6) outranks web_creator (7) outright, so the
-		// shadow-slot ranking between token-free losers is only reachable
-		// under a lower-level WEB-family winner: web (5).
-		{"web_embedded beats visionos for the shadow slot", []string{"web", "visionos", "web_embedded"}, "web", "web_embedded"},
-		{"web_embedded first, then visionos", []string{"web", "web_embedded", "visionos"}, "web", "web_embedded"},
-		{"displaced token-free winner is then outranked", []string{"visionos", "web", "web_embedded"}, "web", "web_embedded"},
+		// web_embedded (1) leads the authed tier outright, so the shadow-slot
+		// ranking between token-free losers is only reachable under a
+		// WEB-family winner with no web_embedded copy: web (6) over tv_auth
+		// (2) is impossible, so the losers here are the cookieless tier.
+		{"web_embedded wins outright over web and carries no shadow", []string{"web", "visionos", "web_embedded"}, "web_embedded", ""},
+		{"web_embedded wins outright whatever its position", []string{"visionos", "web", "web_embedded"}, "web_embedded", ""},
+		{"tv_auth wins outright over web and carries no shadow", []string{"web", "tv_auth", "visionos"}, "tv_auth", ""},
 		{"web_creator loses to web_embedded outright", []string{"web_creator", "visionos", "web_embedded"}, "web_embedded", ""},
 		{"visionos beats android_vr for the shadow slot", []string{"android_vr", "web_creator", "visionos"}, "web_creator", "visionos"},
 		{"a lone web_creator has no shadow", []string{"web_creator"}, "web_creator", ""},

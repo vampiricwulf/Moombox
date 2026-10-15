@@ -410,24 +410,39 @@ type YtcfgData struct {
 // (_DEFAULT_CLIENTS), web_embedded (_DEFAULT_AUTHED_CLIENTS) and web_creator
 // (_DEFAULT_PREMIUM_CLIENTS) — each of which Moombox ranks near the BOTTOM.
 //
-// That inversion is deliberate, and the reason is Moombox's architecture,
-// not upstream's ordering: yt-dlp PICKS one client's response, while Moombox
-// POOLS every client's formats and dedups by itag, so the ranking itself has
-// to say which copy of a stream is best. TV leads because upstream ranks tv
-// first — priority 40, and, by the tuple-order measure the paragraph above
-// endorses, the TV client (tv_samsung since #17805, tv_downgraded before) precedes web in both the authed and the premium
-// default tuples (_video.py _DEFAULT_AUTHED_CLIENTS / _DEFAULT_PREMIUM_CLIENTS)
-// — and its URLs need no GVS token at all (GvsTokenRequired), so a tv copy
-// downloads bare with nothing to mint. A WEB-family copy beats the cookieless
-// clients because Moombox mints the GVS token its URLs require and attaches
-// it — the WEB family is the client upstream built its token policy around.
-// web_embedded needs no token either and sits above the cookieless tier
-// because it is an authenticated client and upstream's authed tuple leads
-// with it; android_vr sits under selective enforcement with no token that
-// applies to it. Ranking by upstream's tuple order instead would hand
-// same-itag ties to visionos (and to web_embedded / web_creator over the tv
-// and web copies) — a cookieless client winning a same-itag tie is the
-// 2026-08-15 incident this comment block opens with.
+// The ranking follows that tuple order where the two paths can be matched
+// (owner decision, 2026-10-14): yt-dlp PICKS one client's response, while
+// Moombox POOLS every client's formats and dedups by itag, so the ranking
+// has to say which copy of a stream is best, and the answer is the copy
+// upstream's first-seen rule would have kept. The authed cascade's tuple is
+// (web_embedded, tv_samsung, web): web_embedded leads, tv second, then the
+// web family — the watch page IS the web client, and web_safari is the
+// variant Moombox asks first. The public cascade's is (tv_samsung, visionos,
+// web): tv leads. The two cascades never share a pool, so the two tv levels
+// only need to sit right within their own. web_creator is the premium
+// tuple's lead, but Moombox has no Premium detection and only fetches it as
+// a members-only fallback, so it stays behind the web family.
+//
+// Until 2026-10-14 tv led the authed tier too, on the reading that upstream
+// "ranks tv first" — the priority-field misreading above — and because its
+// URLs need no GVS token. That never decided a download: the TV client was
+// refused for signed-in sessions (constants.TVSamsungClient) and returned no
+// formats, so every cookied recording came from the watch page's copy with
+// a minted token. With TV answering again, tv-first would have moved every
+// cookied install onto URLs from an identity upstream ranks second and
+// calls a workaround; web_embedded-first is the path upstream's cookied
+// users download from daily, its URLs need no GVS token either, and a
+// web_embedded winner keeps the tv copy as its token-free shadow. In
+// practice that decides VODs: a live broadcast is rarely embeddable, and
+// web_embedded answers "unavailable" with no formats, so a live recording's
+// winner is the tv copy — for Moombox and for yt-dlp alike (verified
+// 2026-10-14 on a cookied live extraction: 13 of 14 winners tv_auth).
+//
+// Where the tuple order is NOT followed: visionos. By first-seen it would
+// lead the public tuple ahead of web; here the cookieless clients stay the
+// last-resort tier, because a cookieless client winning a same-itag tie is
+// the 2026-08-15 incident this comment block opens with, and android_vr sits
+// under selective enforcement with no token that applies to it.
 //
 // Within the last-resort tier, VISIONOS sits above ANDROID_VR. That much IS
 // monotone with upstream, which dropped android_vr from every default client
@@ -450,17 +465,19 @@ type YtcfgData struct {
 // VOD missing_pot degrade swaps to it. The shadow never changes which copy
 // wins.
 const (
-	// TV tier — upstream priority 40. It leads because upstream ranks tv
-	// first; its URLs need no GVS token upstream (GvsTokenRequired is false),
-	// so a tv copy downloads bare.
+	// Public cascade: tv leads (_DEFAULT_CLIENTS = tv_samsung, visionos,
+	// web). Its URLs need no GVS token (GvsTokenRequired is false).
 	AuthLevelTVPublic = 0
-	AuthLevelTVAuth   = 1
-	// WEB tier — upstream priority 30. The watch page IS the web client.
-	AuthLevelWatchPagePublic = 2
-	AuthLevelWatchPageAuth   = 3
-	AuthLevelWebSafari       = 4
-	AuthLevelWeb             = 5
-	AuthLevelWebEmbedded     = 6
+	// Authed cascade: web_embedded leads, tv second (_DEFAULT_AUTHED_CLIENTS
+	// = web_embedded, tv_samsung, web). Neither needs a GVS token.
+	AuthLevelWebEmbedded = 1
+	AuthLevelTVAuth      = 2
+	// The web family. The watch page IS the web client; web_safari is the
+	// variant asked first, web the fallback. Their URLs need the GVS token.
+	AuthLevelWatchPagePublic = 3
+	AuthLevelWatchPageAuth   = 4
+	AuthLevelWebSafari       = 5
+	AuthLevelWeb             = 6
 	AuthLevelWebCreator      = 7
 	// Last-resort tier: cookieless non-WebPO clients. VISIONOS ahead of
 	// ANDROID_VR — see the block comment above.
