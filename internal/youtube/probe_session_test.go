@@ -67,6 +67,29 @@ func TestProbesCarryTheWatchPagesSession(t *testing.T) {
 	}
 }
 
+// Init reads the session off the homepage too, so the probes carry it from
+// the first monitor cycle — before any job's full extraction has fetched a
+// watch page. A cookieless homepage states none and sets nothing.
+//
+// Mutant: Init capturing visitor data and the API key only.
+func TestHomepageStatesTheSession(t *testing.T) {
+	got := homepageSession(`ytcfg.set({"SESSION_INDEX":"1","DELEGATED_SESSION_ID":"brand-123","INNERTUBE_API_KEY":"k"});`)
+	if got.SessionIndex == nil || *got.SessionIndex != 1 || got.DelegatedSessionID != "brand-123" {
+		t.Errorf("homepage session = index %v, delegated %q; want 1 and brand-123", got.SessionIndex, got.DelegatedSessionID)
+	}
+	if anon := homepageSession(`ytcfg.set({"INNERTUBE_API_KEY":"k"});`); anon.SessionIndex != nil || anon.DelegatedSessionID != "" {
+		t.Errorf("cookieless homepage session = %+v, want none", anon)
+	}
+
+	p := newRetryTestAPI()
+	idx := 1
+	p.captureVisitorData(&YtcfgData{SessionIndex: &idx, DelegatedSessionID: "brand-123"})
+	p.captureVisitorData(homepageSession(`ytcfg.set({"INNERTUBE_API_KEY":"k"});`))
+	if got := p.probeYtcfg(""); got.DelegatedSessionID != "brand-123" {
+		t.Error("a cookieless homepage cleared the session a watch page had stated")
+	}
+}
+
 // A page that states a new session replaces the old one whole: an operator
 // who moved from a brand account to the primary must not keep sending the
 // brand's page id.

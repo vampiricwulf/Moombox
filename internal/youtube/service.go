@@ -3,6 +3,7 @@ package youtube
 import (
 	"context"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -112,11 +113,37 @@ func (s *Service) Init(ctx context.Context) {
 		s.vdMu.Unlock()
 	}
 
+	// The signed-in session's identity, which the homepage states as a watch
+	// page does. Captured here so the probe-only calls carry it from the
+	// first cycle: the feed monitor's membership and date probes run before
+	// any job's full extraction has fetched a watch page, and on a brand
+	// account (DELEGATED_SESSION_ID) a probe without it is judged as the
+	// primary account and refused. A cookieless homepage states none and
+	// sets nothing.
+	s.PlayerAPI.captureVisitorData(homepageSession(html))
+
 	// Extract API key
 	if m := homepageApiKeyRe.FindStringSubmatch(html); m != nil {
 		s.PlayerAPI.SetAPIKey(m[1])
 		s.logger.Debug("[YouTube] API key extracted", "key", m[1])
 	}
+}
+
+// homepageSession reads the signed-in session's identity — SESSION_INDEX and
+// DELEGATED_SESSION_ID — off the homepage HTML, as extractYtcfg reads them off
+// a watch page. Visitor data is deliberately not here: Init reads it under
+// its own sticky rule above.
+func homepageSession(html string) *YtcfgData {
+	session := &YtcfgData{}
+	if m := sessionIndexRegex.FindStringSubmatch(html); m != nil {
+		if idx, err := strconv.Atoi(m[1]); err == nil {
+			session.SessionIndex = &idx
+		}
+	}
+	if m := delegatedSessionRegex.FindStringSubmatch(html); m != nil {
+		session.DelegatedSessionID = strings.Clone(m[1])
+	}
+	return session
 }
 
 // GetVideoInfo fetches video info, using authentication if cookies are available.

@@ -644,7 +644,8 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		// covers "Made for kids": upstream marks BOTH clients as unable to
 		// serve those (_base.py repeats the same note above each), so
 		// android_vr adds nothing there. Upstream's made-for-kids fallback is
-		// web_embedded then tv_downgraded, which this chain does not attempt.
+		// web_embedded alone (tv_downgraded was dropped from it in #17805),
+		// which this chain does not attempt.
 		if wcResult.PlayabilityError == PlayabilityLoginRequired ||
 			wcResult.StreamStatus == StreamNotAStream ||
 			len(wcResult.Formats) == 0 ||
