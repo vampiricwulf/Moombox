@@ -286,19 +286,19 @@ func (p *PlayerAPI) ProbeVideoSchedule(ctx context.Context, videoID, visitorData
 }
 
 // ProbeVideoStatusAuthenticated performs a lightweight authenticated status probe
-// using the TV_DOWNGRADED client with cookies (no watch page, no STS, no cipher).
+// using the TV_SAMSUNG client with cookies (no watch page, no STS, no cipher).
 // Used for polling members-only upcoming streams, and by the worker's one-call
 // quality probe. Pass an empty string for visitorData when none has been
 // captured yet.
 //
-// On the probe variant for the DRM report's sake, not for O-R's: TV_DOWNGRADED
+// On the probe variant for the DRM report's sake, not for O-R's: TV_SAMSUNG
 // is not WEB-family, so clientAcceptsPlayerPoToken already returns false and
 // no token was ever minted here either way. What the marking changes is that
 // the tv client's DRM skip — which this exact call meets every 30 s of a
 // waiting room, on precisely the accounts the experiment hits — reports at
 // Debug instead of Warn.
 func (p *PlayerAPI) ProbeVideoStatusAuthenticated(ctx context.Context, videoID, visitorData string) (*VideoInfo, error) {
-	info, err := p.fetchWithClientProbe(ctx, videoID, constants.TVDowngradedClient, p.probeYtcfg(visitorData), 0)
+	info, err := p.fetchWithClientProbe(ctx, videoID, constants.TVSamsungClient, p.probeYtcfg(visitorData), 0)
 	stampManifestSources(info, "tv_auth")
 	return info, err
 }
@@ -418,8 +418,8 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	}
 
 	// Try web_embedded first — yt-dlp's lead authenticated client since
-	// 2026.08.19 (_DEFAULT_AUTHED_CLIENTS = web_embedded, tv_downgraded,
-	// web). It needs no PO token and supports cookies, so it keeps serving
+	// 2026.08.19 (_DEFAULT_AUTHED_CLIENTS = web_embedded, tv_samsung, web —
+	// tv_downgraded held the TV slot before #17805). It needs no PO token and supports cookies, so it keeps serving
 	// formats when POT enforcement or the account experiment bites the
 	// others. Lightweight shape (no embed-page fetch — encryptedHostFlags is
 	// only needed on the age-restricted path below). Purely a format-pool /
@@ -434,7 +434,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	}
 
 	// Try TV client
-	result, err := tally.note(p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, sts))
+	result, err := tally.note(p.fetchWithClient(ctx, videoID, constants.TVSamsungClient, ytcfg, sts))
 	if err != nil {
 		// HTTP error (not a playability error) — log warning and continue to try
 		// WEB_CREATOR / VISIONOS / ANDROID_VR instead of returning immediately.
@@ -448,7 +448,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		// from — name the client AND the verdict together, or a log reader
 		// cannot tell which of five clients produced "members_only".
 		p.logger.Debug("[PlayerApi] TV client result",
-			"client", constants.TVDowngradedClient.ClientName,
+			"client", constants.TVSamsungClient.ClientName,
 			"formats", len(result.Formats),
 			// A client YouTube forced onto SABR reports "formats 0" and so
 			// does an empty streamingData; these two fields are what tells
@@ -745,7 +745,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		}
 	}
 
-	result, err := tally.note(p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, wp.Ytcfg, stsPublic))
+	result, err := tally.note(p.fetchWithClient(ctx, videoID, constants.TVSamsungClient, wp.Ytcfg, stsPublic))
 	if err != nil {
 		// Every TV failure is now a SKIP, not the end of the extraction —
 		// the shape GetVideoInfoAuthenticated's own TV arm has always had:
@@ -768,7 +768,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		collectFormats(&formatPool, result.Formats, "tv_public", AuthLevelTVPublic)
 		stampManifestSources(result, "tv_public")
 		p.logger.Debug("[PlayerApi] TV client result (public)",
-			"client", constants.TVDowngradedClient.ClientName,
+			"client", constants.TVSamsungClient.ClientName,
 			"formats", len(result.Formats),
 			"urllessFormats", result.FormatDiag.URLlessFormats,
 			"sabrForced", result.FormatDiag.SabrForced,

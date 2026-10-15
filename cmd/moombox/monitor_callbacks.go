@@ -1430,7 +1430,7 @@ func (s *runState) wireMonitorCallbacks() {
 
 	// Authenticated probe for members-only videos: an anonymous probe can't see
 	// members-only content, gets no formats, and misclassifies it as "upcoming"
-	// (which bypasses include_non_live_content). The TV_DOWNGRADED+cookies probe
+	// (which bypasses include_non_live_content). The TV_SAMSUNG+cookies probe
 	// classifies it correctly (vod/live/upcoming). Only the feed monitor's
 	// membership path uses it; RSS/DECAPI stay on the anonymous probe.
 	s.feedMon.ProbeVideoAuth = func(ctx context.Context, videoID string) (*monitor.VideoProbeResult, error) {

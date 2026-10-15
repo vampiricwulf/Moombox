@@ -219,7 +219,7 @@ func (s *Service) InvalidateVisitorData() {
 	s.vdMu.Unlock()
 }
 
-// ProbeVideoStatusAuthenticated performs an authenticated probe using TV_DOWNGRADED.
+// ProbeVideoStatusAuthenticated performs an authenticated probe using TV_SAMSUNG.
 // Used for polling members-only upcoming streams, and — since owner decision
 // O-H — by the 30 s quality monitor.
 //

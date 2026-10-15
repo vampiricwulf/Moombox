@@ -162,7 +162,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		// no POT, no watch-page fetch — bypasses the visitor-data rotation
 		// that was causing a sidecar mint every 30s). Streams that
 		// genuinely need authentication (members-only, age-restricted,
-		// login-required) route through the authenticated TV_DOWNGRADED
+		// login-required) route through the authenticated TV_SAMSUNG
 		// probe instead — one cookied player call, not the full cascade
 		// (owner decision O-H) — since ANDROID_VR will 401 on those. Same
 		// predicate observeYouTubeStatusProbe uses to skip arming the
@@ -1053,7 +1053,7 @@ func probeIsSelectable(info *youtube.VideoInfo) bool {
 // that probe AND the whole cascade, every tick.
 //
 // Both kinds now start cheap: ANDROID_VR when nothing is walled (cookieless,
-// no POT, no watch page), TV_DOWNGRADED-with-cookies when something is
+// no POT, no watch page), TV_SAMSUNG-with-cookies when something is
 // (ProbeVideoStatusAuthenticated — one player call, no watch page, no STS, no
 // POT; android_vr would 401 on members-only content).
 //
@@ -1106,7 +1106,7 @@ func probeVideoInfo(ctx context.Context, yt youtubeProbeClient, videoID string, 
 	}
 
 	cookied := yt.HasAuthCookies()
-	tvKind := "tv_downgraded"
+	tvKind := "tv_samsung"
 	if cookied {
 		tvKind += "+cookies"
 	}
@@ -1213,7 +1213,7 @@ func probeFormatCount(info *youtube.VideoInfo) int {
 // the quality that would be selected under current preferences.
 //
 // requiresAuth: when true the probe uses ProbeVideoStatusAuthenticated
-// (TV_DOWNGRADED with cookies) — required for members-only, age-restricted and
+// (TV_SAMSUNG with cookies) — required for members-only, age-restricted and
 // login-required streams, where the cookieless ANDROID_VR probe 401s. When
 // false it uses ProbeVideoStatus (ANDROID_VR, cookieless, no POT), and a
 // cookied install retries once through the TV probe before paying for the

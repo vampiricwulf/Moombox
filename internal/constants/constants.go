@@ -46,6 +46,7 @@ var UserAgents = struct {
 	Android   string
 	AndroidVR string
 	TV        string
+	TVSamsung string
 	VisionOS  string
 }{
 	// Randomized per process start (see randomizedWebUA). This is the single
@@ -59,6 +60,9 @@ var UserAgents = struct {
 	Android:   "com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip",
 	AndroidVR: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
 	TV:        "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+	// A 2016 Samsung Tizen set, per Samsung's own platform-information guide;
+	// see TVSamsungClient.
+	TVSamsung: "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1",
 	VisionOS:  "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
 }
 
@@ -95,7 +99,37 @@ type YouTubeClientConfig struct {
 	Context       map[string]any
 }
 
-// TVDowngradedClient is the primary authenticated client (TVHTML5).
+// TVSamsungClient is the primary authenticated client: TVHTML5 identifying
+// itself as a 2016 Samsung Tizen set (yt-dlp's tv_samsung, #17723, default
+// authed and premium client since #17805). The bare TVHTML5 identity
+// (TVDowngradedClient) is answered "The page needs to be reloaded" for a
+// signed-in session — YouTube now forces that identity onto a player JS
+// variant the player call cannot satisfy — with no formats, on every
+// video: verified 2026-10-14 against a public, a members-only and an
+// age-gated VOD with the operator's cookies (TestLiveTVSamsung, since
+// removed), where this identity answered ok with 30–42 formats to each.
+// Upstream calls it a workaround until the JS variant is handled; the
+// device fields are what YouTube keys on, and they are sent in the
+// Innertube context as well as the User-Agent.
+var TVSamsungClient = YouTubeClientConfig{
+	ClientName:    "TVHTML5",
+	ClientVersion: "5.20260707",
+	ClientID:      "7",
+	UserAgent:     UserAgents.TVSamsung,
+	Context: map[string]any{
+		"clientName":    "TVHTML5",
+		"clientVersion": "5.20260707",
+		"deviceMake":    "Samsung",
+		"deviceModel":   "UKS9800",
+		"osName":        "Tizen",
+		"osVersion":     "2.4.0",
+		"hl":            "en",
+	},
+}
+
+// TVDowngradedClient is TVHTML5 under the bare Cobalt identity — yt-dlp's
+// tv_downgraded, the primary authenticated client until TVSamsungClient
+// replaced it. Kept as the definition upstream keeps; nothing calls it.
 var TVDowngradedClient = YouTubeClientConfig{
 	ClientName:    "TVHTML5",
 	ClientVersion: "5.20260707",

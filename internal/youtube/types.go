@@ -415,7 +415,7 @@ type YtcfgData struct {
 // POOLS every client's formats and dedups by itag, so the ranking itself has
 // to say which copy of a stream is best. TV leads because upstream ranks tv
 // first — priority 40, and, by the tuple-order measure the paragraph above
-// endorses, tv_downgraded precedes web in both the authed and the premium
+// endorses, the TV client (tv_samsung since #17805, tv_downgraded before) precedes web in both the authed and the premium
 // default tuples (_video.py _DEFAULT_AUTHED_CLIENTS / _DEFAULT_PREMIUM_CLIENTS)
 // — and its URLs need no GVS token at all (GvsTokenRequired), so a tv copy
 // downloads bare with nothing to mint. A WEB-family copy beats the cookieless

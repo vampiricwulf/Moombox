@@ -415,8 +415,8 @@ func TestProbeVideoInfoLogsTheBranchItTook(t *testing.T) {
 		hasCookies bool
 		wantProbe  string
 	}{
-		{"cookied install", true, "tv_downgraded+cookies"},
-		{"cookieless install", false, "tv_downgraded"},
+		{"cookied install", true, "tv_samsung+cookies"},
+		{"cookieless install", false, "tv_samsung"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			lg := &recordingProbeLogger{}
@@ -471,7 +471,7 @@ func TestProbeVideoInfoLogsTheBranchItTook(t *testing.T) {
 		if len(lg.lines) != 1 {
 			t.Fatalf("logged %d Debug lines, want exactly 1: %+v", len(lg.lines), lg.lines)
 		}
-		if got := lg.lines[0].value("hop"); got != "tv_downgraded+cookies" {
+		if got := lg.lines[0].value("hop"); got != "tv_samsung+cookies" {
 			t.Errorf("hop = %q, want the cookied hop that produced the reason", got)
 		}
 		if got := lg.lines[0].value("reason"); got != "hop 403" {
