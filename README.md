@@ -394,19 +394,25 @@ authenticating proxy keeps working.
   its own DNAT rules, so a host firewall rule does not cover a published
   port. Restrict the publish itself (`127.0.0.1:774:774`) rather than
   relying on the firewall.
-- **IPv6.** Moombox binds IPv4 only. `docker-compose.yml` declares an
-  IPv6-enabled network so that inbound IPv6 to the published port is
-  handled by ip6tables instead of Docker's userland proxy — which would
-  otherwise re-originate those connections from the bridge gateway's
-  *private IPv4* address, making an internet IPv6 client look like a LAN
-  client to the `lan` filter. The practical effect is that IPv6
-  connections are refused at the container rather than misclassified:
-  **reach the dashboard over the host's IPv4 address.** This relies on Docker Engine 27+, where ip6tables is
-  enabled by default; on older engines the misclassification remains and
-  nothing in Moombox can detect it. Publishing as `0.0.0.0:774:774` stops
-  the port accepting IPv6 in the first place. See the comments in
-  `docker-compose.yml`, including what to do if your host cannot create
-  an IPv6-enabled network at all.
+- **IPv6.** Moombox listens dual-stack on `lan`/`external`/`public`
+  (natively and in the container), so IPv6 clients connect and are
+  judged by `network_access` on their real address: on `lan`, ULA
+  (`fc00::/7`) and link-local (`fe80::/10`) clients are admitted and a
+  global IPv6 address gets **403 Forbidden**. `docker-compose.yml`
+  declares an IPv6-enabled network so that inbound IPv6 to the published
+  port is handled by ip6tables, which keeps the client's address, instead
+  of Docker's userland proxy — which would otherwise re-originate those
+  connections from the bridge gateway's *private IPv4* address, making an
+  internet IPv6 client look like a LAN client to the `lan` filter. The
+  practical effect is that an internet IPv6 client gets the 403 — and so
+  does a LAN client on a global IPv6 address, which browsers do not retry
+  over IPv4: **reach the dashboard over the host's IPv4 address.** This
+  relies on Docker Engine 27+, where ip6tables is enabled by default; on
+  older engines the misclassification remains and nothing in Moombox can
+  detect it. Publishing as `0.0.0.0:774:774` stops the port accepting
+  IPv6 in the first place. See the comments in `docker-compose.yml`,
+  including what to do if your host cannot create an IPv6-enabled
+  network at all.
 
 ## Configuration
 

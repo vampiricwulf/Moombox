@@ -475,7 +475,11 @@ func (s *Server) Start(ctx context.Context) error {
 		port = 774
 	}
 
-	// Bind to localhost unless LAN/external is enabled
+	// Bind to localhost unless LAN/external is enabled. "0.0.0.0" under
+	// network "tcp" is a wildcard Go opens dual-stack ([::], IPV6_V6ONLY off)
+	// wherever the kernel has IPv6, so IPv6 clients connect too and are
+	// judged by network_access on their real address (parseIPLiteral and the
+	// classifiers in middleware.go); "127.0.0.1" is IPv4 loopback alone.
 	host := "127.0.0.1"
 	switch s.cfg.Network.NetworkAccess {
 	case "lan", "external", "public":

@@ -15,11 +15,13 @@ services:
       # that can reach this published port can use the dashboard.
       # Use "127.0.0.1:774:774" to restrict it to the Docker host only.
       #
-      # Moombox binds IPv4 only inside the container, so reach the
-      # dashboard over the host's IPv4 address — an AAAA-only hostname is
-      # refused (see the networks: block at the bottom of this file); a
-      # dual-stack hostname usually still works, because browsers fall
-      # back to IPv4 after the refusal.
+      # Moombox listens dual-stack inside the container, and judges an
+      # IPv6 client by the "lan" filter on its real address: a ULA or
+      # link-local one is admitted, a global IPv6 one gets 403 Forbidden
+      # (see the networks: block at the bottom of this file). Reach the
+      # dashboard over the host's IPv4 address — a hostname whose AAAA
+      # record the browser picks gets the 403, and browsers do not retry
+      # over IPv4 after a 403.
       # Publishing as "0.0.0.0:774:774" instead stops this port
       # from accepting IPv6 at all; the network below keeps its IPv6
       # address and outbound IPv6 either way.
@@ -77,17 +79,20 @@ networks:
   #
   # What actually happens with this block on Docker Engine 27+ (where
   # ip6tables is on by default for IPv6-enabled networks): inbound IPv6 is
-  # DNATed to the container instead of being re-originated by the userland
-  # proxy, and since Moombox binds IPv4 only, those connections are
-  # REFUSED at the container. The hole is closed by refusal — not by the
-  # filter judging the real client address.
+  # DNATed to the container, keeping the client's own address, instead of
+  # being re-originated by the userland proxy. Moombox listens dual-stack,
+  # so it accepts those connections and the "lan" filter judges the REAL
+  # client address: a ULA (fc00::/7) or link-local (fe80::/10) client is
+  # admitted, and a global IPv6 one — any internet client — gets 403
+  # Forbidden. The hole is closed by the filter seeing the real address.
   #
-  # So: IPv6 clients must reach the dashboard over the host's IPv4
-  # address. A connection to an AAAA address gets "connection refused" —
-  # an AAAA-only hostname therefore fails outright, while a dual-stack
-  # hostname usually still works because browsers fall back to IPv4.
-  # Use the IPv4 address, or publish as "0.0.0.0:774:774" (see the ports:
-  # comment above) so the port stops accepting IPv6 in the first place.
+  # So: reach the dashboard over the host's IPv4 address. A LAN client
+  # whose own IPv6 address is a global one (what most home networks hand
+  # out) gets the 403 too, and browsers do not retry over IPv4 after a
+  # 403 — so a hostname with an AAAA record fails for it whether or not
+  # it also has an A record. Use the IPv4 address or an IPv4-only name, or
+  # publish as "0.0.0.0:774:774" (see the ports: comment above) so the
+  # port stops accepting IPv6 in the first place.
   #
   # On Docker Engine < 27, ip6tables is off, the userland proxy still
   # handles IPv6, and the misclassification above — the hole — persists.

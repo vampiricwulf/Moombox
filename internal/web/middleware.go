@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -330,7 +331,7 @@ func externalHostRefused(store *config.Store, r *http.Request) bool {
 		name = h
 	}
 	name = strings.TrimSuffix(strings.Trim(name, "[]"), ".")
-	if strings.EqualFold(name, "localhost") || net.ParseIP(name) != nil {
+	if strings.EqualFold(name, "localhost") || parseIPLiteral(name) != nil {
 		return false
 	}
 	// A wildcard SAN counts, as it does for this mode's Origin check
@@ -777,7 +778,7 @@ func (s *trustedProxySet) contains(ipStr string) bool {
 	if s == nil || len(s.nets) == 0 {
 		return false
 	}
-	ip := net.ParseIP(ipStr)
+	ip := parseIPLiteral(ipStr) // a link-local proxy arrives zoned, as any peer does
 	if ip == nil {
 		return false
 	}
@@ -888,8 +889,27 @@ func namesTrustedClass(s string) bool {
 	return strings.EqualFold(s, "localhost")
 }
 
+// parseIPLiteral parses an address literal for the classifiers here, an IPv6
+// zone included. Go spells an accepted link-local IPv6 peer with the
+// interface it arrived on — RemoteAddr "[fe80::1%eth0]:50000", so ExtractIP
+// gives "fe80::1%eth0" — and net.ParseIP refuses a zone: every classifier
+// read such a peer as no address at all, so lan refused the link-local
+// clients isPrivateIP admits, and the listener, which is dual-stack, does
+// accept them. A zone names an interface of this host, not another address,
+// so it is dropped (the address's bytes carry none); netip accepts one on an
+// IPv6 address only. An IPv4-mapped literal ("::ffff:a.b.c.d") comes back as
+// an address To4 unmaps, so every check below judges it as its IPv4 address.
+// nil when s is no literal.
+func parseIPLiteral(s string) net.IP {
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return nil
+	}
+	return net.IP(addr.AsSlice())
+}
+
 func isLoopback(ipStr string) bool {
-	ip := net.ParseIP(ipStr)
+	ip := parseIPLiteral(ipStr)
 	if ip == nil {
 		return ipStr == "localhost"
 	}
@@ -905,7 +925,7 @@ var privateCIDRs = []*net.IPNet{
 }
 
 func isPrivateIP(ipStr string) bool {
-	ip := net.ParseIP(ipStr)
+	ip := parseIPLiteral(ipStr)
 	if ip == nil {
 		return false
 	}
@@ -961,7 +981,7 @@ func isPrivateIPFor(ipStr, networkAccess string) bool {
 	if networkAccess != "lan" {
 		return false
 	}
-	ip := net.ParseIP(ipStr)
+	ip := parseIPLiteral(ipStr)
 	return ip != nil && sharedAddressSpace.Contains(ip)
 }
 
