@@ -146,7 +146,7 @@ func twitchCancelFixture(t *testing.T, status database.JobStatus) (*StreamProces
 	if err != nil || stored == nil {
 		t.Fatalf("GetJob: %v", err)
 	}
-	sp := &StreamProcessor{db: db, cfg: cfg, twitchHints: newTwitchHintCache(), logger: nopWorkerLogger{}}
+	sp := &StreamProcessor{db: db, cfg: cfg, twitchHints: newTwitchHintCache(), logger: discardLogger{}}
 	return sp, db, stored
 }
 

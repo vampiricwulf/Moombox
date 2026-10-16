@@ -8,6 +8,8 @@ import (
 	"slices"
 	"sync"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/treeguard"
 )
 
 // networkGuardEnv is what the guard sets for the suite: every proxy variable
@@ -33,6 +35,9 @@ var (
 // run, for video IDs that do not exist, so none ever came back and no test
 // saved a thumbnail. The 404 keeps that outcome without the round trips; a
 // test that wants a thumbnail serves its own (TestCopyAssetsTakesTheFirstUsableThumbnailSize).
+//
+// The tests run through treeguard.Run, which fails a run that left a file in
+// the package directory.
 func TestMain(m *testing.M) {
 	var mu sync.Mutex
 	reached := map[string]int{}
@@ -58,7 +63,7 @@ func TestMain(m *testing.M) {
 	thumbs := httptest.NewServer(http.NotFoundHandler())
 	ytThumbnailBase = thumbs.URL
 
-	code := m.Run()
+	code := treeguard.Run(m)
 	thumbs.Close()
 	trip.Close()
 
