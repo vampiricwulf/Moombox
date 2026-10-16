@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -19,11 +20,16 @@ import (
 func printUsage() {
 	out := flag.CommandLine.Output()
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  moombox [flags]                                run the archiver")
-	fmt.Fprintln(out, "  moombox [-config path] add <video_id_or_url>   queue a video and exit")
+	fmt.Fprintln(out, "  moombox [flags]                                     run the archiver")
+	fmt.Fprintln(out, "  moombox [-config path] "+addUsage+"   queue a video and exit")
 	fmt.Fprintln(out, "\nFlags:")
 	flag.PrintDefaults()
 }
+
+// addUsage is the add subcommand's synopsis. The `--` is optional: a video
+// ID that begins with '-' is taken as the target anyway (addTarget), and
+// `--` is the spelling that works for every argument.
+const addUsage = "add [--] <video_id_or_url>"
 
 // runAddCommand parses `add`'s own arguments (a -config may follow the
 // subcommand as well as precede it) and runs addVideo.
@@ -31,12 +37,43 @@ func runAddCommand(configPath string, args []string) {
 	fs := flag.NewFlagSet("add", flag.ExitOnError)
 	fs.Usage = printUsage
 	cfgPath := fs.String("config", configPath, "Path to config file")
-	_ = fs.Parse(args) // ExitOnError: a bad flag exits here
-	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "Usage: moombox [-config path] add <video_id_or_url>")
+	flagArgs, target := addTarget(args)
+	_ = fs.Parse(flagArgs) // ExitOnError: a bad flag exits here
+	if target == "" && fs.NArg() == 1 {
+		target = fs.Arg(0)
+	} else if target == "" || fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "Usage: moombox [-config path] "+addUsage)
 		os.Exit(1)
 	}
-	addVideo(fs.Arg(0), *cfgPath)
+	addVideo(target, *cfgPath)
+}
+
+// addTarget takes a trailing argument that begins with '-' and that
+// utils.ExtractMediaID accepts as `add`'s target, and returns the arguments
+// before it for the flag parser. YouTube video IDs are drawn from
+// [A-Za-z0-9_-], so about one in 64 begins with '-', and the flag parser read
+// `moombox add -XyZ123abcd` as an undefined flag — the daemon's usage and exit
+// status 2 for an ID the command accepts as a URL or after `--`. Only the
+// last argument is taken, and not when it is the value of a -config before
+// it: `add -config -XyZ123abcd` names a config file, as the flag parser reads
+// it. No flag `add` defines can be mistaken for a target — ExtractMediaID
+// takes a '-' only inside an 11-character video ID, and a Twitch login must
+// begin with a letter. Any other argument is left to the flag parser, so a
+// misspelt flag is still reported as one — unless it is eleven characters of
+// a video ID's alphabet, which is a video ID.
+func addTarget(args []string) (flagArgs []string, target string) {
+	n := len(args)
+	if n == 0 {
+		return args, ""
+	}
+	last := args[n-1]
+	if !strings.HasPrefix(last, "-") || utils.ExtractMediaID(last) == nil {
+		return args, ""
+	}
+	if n >= 2 && (args[n-2] == "-config" || args[n-2] == "--config") {
+		return args, ""
+	}
+	return args[:n-1], last
 }
 
 // addVideo adds a video/stream to the queue from the command line.

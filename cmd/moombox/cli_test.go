@@ -6,9 +6,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 // TestCLIAddHonoursConfigOnEitherSide runs main() in a child process (the
@@ -91,14 +94,129 @@ func TestCLIVersionEqualsTrueSkipsTheLauncher(t *testing.T) {
 }
 
 // TestUsageNamesTheAddSubcommand: -h printed the daemon's flags only, and
-// `add` appeared nowhere until it was run without an argument.
+// `add` appeared nowhere until it was run without an argument. It names the
+// `--` that ends add's flags too.
 func TestUsageNamesTheAddSubcommand(t *testing.T) {
 	var b strings.Builder
 	prev := flagOutput(&b)
 	defer flagOutput(prev)
 	printUsage()
-	if !strings.Contains(b.String(), "add <video_id_or_url>") {
-		t.Errorf("usage does not mention add:\n%s", b.String())
+	if !strings.Contains(b.String(), "add [--] <video_id_or_url>") {
+		t.Errorf("usage does not mention add and its --:\n%s", b.String())
+	}
+}
+
+// TestCLIAddTakesADashLeadingVideoID runs main() in a child process against a
+// config whose database exists. YouTube video IDs are drawn from
+// [A-Za-z0-9_-], so about one in 64 begins with '-', and `moombox add
+// -XyZ123abcd` was read as an undefined flag: the daemon's usage and status 2,
+// although the same ID was accepted after `--` or inside its watch URL. Each
+// order of -config and add now queues it; `--` keeps working; and a target
+// with a second positional before it is still refused with add's usage.
+//
+// Mutants: addTarget returns its arguments unchanged (the first two rows exit
+// 2); runAddCommand drops `|| fs.NArg() != 0` (the last row queues
+// -AbCdEfGhIj and exits 0).
+func TestCLIAddTakesADashLeadingVideoID(t *testing.T) {
+	if os.Getenv("MOOMBOX_CLI_HELPER") == "1" {
+		os.Args = append([]string{"moombox"}, strings.Split(os.Getenv("MOOMBOX_CLI_ARGS"), "\x1f")...)
+		main()
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "moombox.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[paths]\ndatabase_path = '"+dbPath+"'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args []string
+		id   string // queued, and so in the database afterwards
+		code int
+		out  string
+	}{
+		{[]string{"-config", cfgPath, "add", "-XyZ123abcd"}, "-XyZ123abcd", 0, "Added -XyZ123abcd to queue."},
+		{[]string{"add", "-config", cfgPath, "-QrS456tuvw"}, "-QrS456tuvw", 0, "Added -QrS456tuvw to queue."},
+		{[]string{"-config", cfgPath, "add", "--", "-MnO789pqrs"}, "-MnO789pqrs", 0, "Added -MnO789pqrs to queue."},
+		{[]string{"-config", cfgPath, "add", "extra", "-AbCdEfGhIj"}, "", 1, "Usage: moombox [-config path] add [--] <video_id_or_url>"},
+	} {
+		t.Run(strings.Join(tc.args[len(tc.args)-2:], " "), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCLIAddTakesADashLeadingVideoID$")
+			cmd.Dir = dir
+			home := t.TempDir() // no daemon lock to find: add takes the no-daemon rule
+			cmd.Env = append(os.Environ(),
+				"MOOMBOX_CLI_HELPER=1",
+				"MOOMBOX_CLI_ARGS="+strings.Join(tc.args, "\x1f"),
+				"_MOOMBOX_CHILD=1", // a wrong dispatch boots run() here, not a launcher
+				"MOOMBOX_NO_TUI=1",
+				"HOME="+home,
+				"LOCALAPPDATA="+home,
+			)
+			out, err := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("the command did not exit:\n%s", out)
+			}
+			code := 0
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				code = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if code != tc.code || !strings.Contains(string(out), tc.out) {
+				t.Fatalf("exit %d, want %d with %q:\n%s", code, tc.code, tc.out, out)
+			}
+		})
+	}
+	db, err = database.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, id := range []string{"-XyZ123abcd", "-QrS456tuvw", "-MnO789pqrs"} {
+		if !db.JobExists(id) {
+			t.Errorf("%s is not in the database", id)
+		}
+	}
+	if db.JobExists("-AbCdEfGhIj") {
+		t.Error("the refused row's ID was queued")
+	}
+}
+
+// TestAddTargetTakesOnlyATrailingMediaID pins what addTarget takes from the
+// flag parser: a trailing argument that begins with '-' and is a video ID, and
+// nothing else — not a misspelt flag, which the parser must still report,
+// and not the value of a -config before it.
+//
+// Mutants: drop the ExtractMediaID test (the -nosuch row is taken as a
+// target); drop the -config value guard (the two -config rows lose their
+// value).
+func TestAddTargetTakesOnlyATrailingMediaID(t *testing.T) {
+	for _, tc := range []struct {
+		args   []string
+		flags  []string
+		target string
+	}{
+		{[]string{"-XyZ123abcd"}, []string{}, "-XyZ123abcd"},
+		{[]string{"-config", "c.toml", "-XyZ123abcd"}, []string{"-config", "c.toml"}, "-XyZ123abcd"},
+		{[]string{"-config=c.toml", "-XyZ123abcd"}, []string{"-config=c.toml"}, "-XyZ123abcd"},
+		{[]string{"--", "-XyZ123abcd"}, []string{"--"}, "-XyZ123abcd"},
+		{[]string{"dQw4w9WgXcQ"}, []string{"dQw4w9WgXcQ"}, ""},
+		{[]string{"-nosuch"}, []string{"-nosuch"}, ""},
+		{[]string{"-config", "-XyZ123abcd"}, []string{"-config", "-XyZ123abcd"}, ""},
+		{[]string{"--config", "-XyZ123abcd"}, []string{"--config", "-XyZ123abcd"}, ""},
+		{nil, nil, ""},
+	} {
+		flags, target := addTarget(tc.args)
+		if target != tc.target || strings.Join(flags, "\x1f") != strings.Join(tc.flags, "\x1f") {
+			t.Errorf("addTarget(%q) = %q, %q; want %q, %q", tc.args, flags, target, tc.flags, tc.target)
+		}
 	}
 }
 
