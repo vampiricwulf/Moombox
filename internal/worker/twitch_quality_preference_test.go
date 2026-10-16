@@ -78,11 +78,13 @@ func TestStartTwitchVariantRecordsThePick(t *testing.T) {
 	sp := &StreamProcessor{cfg: &config.MoomboxConfig{}, db: db}
 
 	vod, _ := db.GetJob("tw_vod")
-	if got := sp.startTwitchVariant(ladder(), vod, nil); got == nil || got.Name != "720p60" {
-		t.Fatalf("VOD start picked %v, want 720p60", got)
+	if got, written := sp.startTwitchVariant(ladder(), vod, nil); got == nil || got.Name != "720p60" || !written {
+		t.Fatalf("VOD start picked %v (written %v), want 720p60 written", got, written)
 	}
 	live, _ := db.GetJob("tw_live")
-	sp.startTwitchVariant(ladder(), live, map[string]any{"status": database.StatusLive})
+	if _, written := sp.startTwitchVariant(ladder(), live, map[string]any{"status": database.StatusLive}); !written {
+		t.Errorf("the live start's write on an Upcoming row was refused")
+	}
 
 	for id, wantStatus := range map[string]database.JobStatus{"tw_vod": database.StatusUpcoming, "tw_live": database.StatusLive} {
 		j, _ := db.GetJob(id)
@@ -98,7 +100,7 @@ func TestStartTwitchVariantRecordsThePick(t *testing.T) {
 	}
 
 	// Nothing fits: nothing is written.
-	if got := sp.startTwitchVariant(nil, vod, nil); got != nil {
+	if got, _ := sp.startTwitchVariant(nil, vod, nil); got != nil {
 		t.Errorf("an empty playlist picked %v", got)
 	}
 	if j, _ := db.GetJob("tw_vod"); j.TwitchQuality != "720p60" {

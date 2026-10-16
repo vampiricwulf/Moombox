@@ -99,15 +99,35 @@ func (sp *StreamProcessor) selectTwitchVariant(variants []twitch.TwitchHLSVarian
 // another variant writes it again (ExecuteTwitch's recordVariant). A VOD start
 // used to write nothing, so its row went on showing the preference it was
 // created with as its "Quality".
-func (sp *StreamProcessor) startTwitchVariant(variants []twitch.TwitchHLSVariant, job *database.Job, extra map[string]any) *twitch.TwitchHLSVariant {
-	variant := sp.selectTwitchVariant(variants, job)
+//
+// A write that sets a status — the live start's Live, decided on the row
+// processJob read — applies only to a row with no outcome
+// (UpdateJobFieldsUnlessTerminal), and written is false when it was refused:
+// an operator's Cancel that landed during the stream lookup or the playlist
+// fetch writes the row before it cancels ctx, and Live used to be written
+// over it. The caller stops on a refusal. The VOD start's write sets no
+// status and is made as before (written is then always true).
+func (sp *StreamProcessor) startTwitchVariant(variants []twitch.TwitchHLSVariant, job *database.Job, extra map[string]any) (variant *twitch.TwitchHLSVariant, written bool) {
+	variant = sp.selectTwitchVariant(variants, job)
 	if variant == nil {
-		return nil
+		return nil, false
 	}
 	fields := map[string]any{"twitch_quality": variant.Name}
 	maps.Copy(fields, extra)
+	if _, setsStatus := fields["status"]; setsStatus {
+		return variant, sp.db.UpdateJobFieldsUnlessTerminal(job.ID, fields)
+	}
 	sp.db.UpdateJobFields(job.ID, fields)
-	return variant
+	return variant, true
+}
+
+// hlsMasterPlaylist is tw.GetHLSMasterPlaylist, or hlsMasterFn when a test
+// set one.
+func (sp *StreamProcessor) hlsMasterPlaylist(ctx context.Context, login string) ([]twitch.TwitchHLSVariant, bool, error) {
+	if sp.hlsMasterFn != nil {
+		return sp.hlsMasterFn(ctx, login)
+	}
+	return sp.tw.GetHLSMasterPlaylist(ctx, login)
 }
 
 // twitchAuthSentinel returns ErrCookiesRequired when err is (or wraps)
@@ -477,7 +497,7 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 		vodStagingDir = c.Paths.StagingDirectory
 	})
 
-	variant := sp.startTwitchVariant(variants, job, nil)
+	variant, _ := sp.startTwitchVariant(variants, job, nil)
 	if variant == nil {
 		return &StreamProcessResult{ShouldDownload: false, IsVod: true, Error: "no suitable HLS quality found for VOD"}, nil
 	}
@@ -658,7 +678,7 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	}
 
 	// Get HLS variants
-	variants, anonymousPlayback, err := sp.tw.GetHLSMasterPlaylist(ctx, login)
+	variants, anonymousPlayback, err := sp.hlsMasterPlaylist(ctx, login)
 	// BEFORE the error check: the playback token already answered the
 	// credential question, and a capture that then fails to start is exactly
 	// when an operator needs to be told which of the two problems they have.
@@ -674,12 +694,17 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		liveStagingBase = c.Paths.StagingDirectory
 	})
 
-	variant := sp.startTwitchVariant(variants, job, map[string]any{
+	variant, written := sp.startTwitchVariant(variants, job, map[string]any{
 		"status": database.StatusLive,
 		"is_vod": false,
 	})
 	if variant == nil {
 		return &StreamProcessResult{ShouldDownload: false, Error: "no suitable HLS quality found"}, nil
+	}
+	if !written {
+		// The row already holds an outcome — a Cancel that landed since
+		// processJob read it — and Live was not written over it.
+		return cancelledResult(), nil
 	}
 
 	sp.logger.Info("twitch live stream ready",
@@ -800,7 +825,12 @@ func syncTwitchJobMetadata(job *database.Job, updates map[string]any) {
 // waitForTwitchLive polls a Twitch channel until it goes live or is cancelled.
 // Returns (streamInfo, nil) when live, (nil, nil) when cancelled, (nil, err) on fatal error.
 func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.Job, login string) (*twitch.TwitchStreamInfo, error) {
-	sp.db.UpdateJobFields(job.ID, map[string]any{
+	// Conditional, as waitForLive's is: an operator's Cancel can land after
+	// processJob read the row, and this write turned that Cancelled row back
+	// into Upcoming, "Waiting for stream..." and all, until
+	// handleCancellation wrote Cancelled again. A write it refuses changes
+	// nothing: the loop's first check reads the Cancelled row and stops.
+	sp.db.UpdateJobFieldsUnlessTerminal(job.ID, map[string]any{
 		"status":          database.StatusUpcoming,
 		"progress":        "Waiting for stream...",
 		"last_recheck_at": time.Now().UTC().Format(time.RFC3339),

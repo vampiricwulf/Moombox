@@ -140,6 +140,11 @@ type StreamProcessor struct {
 	probeStatusFn   func(ctx context.Context, videoID string, authenticated bool) (*youtube.VideoInfo, error)
 	probeScheduleFn func(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
 
+	// hlsMasterFn replaces tw.GetHLSMasterPlaylist in processTwitchLive when
+	// set, for the same reason: twitch.Service has no seam of its own, and
+	// the playback token and the Usher playlist are network calls.
+	hlsMasterFn func(ctx context.Context, login string) ([]twitch.TwitchHLSVariant, bool, error)
+
 	mu          sync.Mutex
 	activeChats []*chat.ChatDownloader // Track active chat downloaders for cleanup
 }
@@ -355,11 +360,21 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 		// live BROADCAST stops holding its channel's archive slot. One-way
 		// write joined onto the existing status update — one call, one row
 		// touch; a no-op for jobs already at priority 0.
-		sp.db.UpdateJobFields(job.ID, map[string]any{
+		//
+		// Conditional, as waitForLive's first write is: Live was decided on
+		// the row processJob read, and an operator's Cancel that landed
+		// since — after the take, or after Process's own read of the row —
+		// writes the row before it cancels ctx. This write used to turn that
+		// Cancelled row into Live and hand the job to a download, until
+		// handleCancellation wrote Cancelled again. A refused write stops
+		// the run as a cancelled one.
+		if !sp.db.UpdateJobFieldsUnlessTerminal(job.ID, map[string]any{
 			"status":         database.StatusLive,
 			"is_vod":         false,
 			"queue_priority": 0,
-		})
+		}) {
+			return cancelledResult(), nil
+		}
 		sp.releaseArchiveSlot(job)
 		return &StreamProcessResult{
 			VideoInfo:      info,

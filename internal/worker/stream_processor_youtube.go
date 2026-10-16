@@ -574,11 +574,20 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 	}
 	sp.updateJobMetadata(job, fullInfo, true)
 
+	// Conditional: the loop's last check read the row before the fetch that
+	// confirmed this, and an operator's Cancel that landed since writes the
+	// row before it cancels ctx. Live used to be written over it, and the run
+	// went on to a download until handleCancellation wrote Cancelled again. A
+	// refused write — Live, or is_vod alone for a stream that is over — stops
+	// the run as a cancelled one, its early chat with it.
 	fields := map[string]any{"is_vod": isVod}
 	if !isVod {
 		fields["status"] = database.StatusLive
 	}
-	sp.db.UpdateJobFields(job.ID, fields)
+	if !sp.db.UpdateJobFieldsUnlessTerminal(job.ID, fields) {
+		sp.stopEarlyChat(chatDl)
+		return cancelledResult()
+	}
 
 	if chatDl != nil {
 		sp.untrackChat(chatDl)
