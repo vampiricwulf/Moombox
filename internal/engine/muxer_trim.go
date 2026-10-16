@@ -74,9 +74,26 @@ func (m *Muxer) buildTrimSegmentArgs(seg TrimSegmentInput, outputPath string, ta
 }
 
 // concatIntermediates concatenates intermediate files into a single output using FFmpeg concat demuxer.
+//
+// Every entry is written to the list as an absolute path. The concat demuxer
+// resolves a relative entry against the LIST FILE's directory — tempDir, a
+// moombox-concat-* or moombox-trim-* directory under the system temp — and not
+// against the working directory the rest of FFmpeg's argv is resolved
+// against. A part row under the default paths.output_directory ("./output")
+// is relative to the working directory, so the Tier 4 part merge handed
+// ConcatCopy names FFmpeg looked for under the temp directory, and every
+// merge on a native install with a relative output directory failed.
 func (m *Muxer) concatIntermediates(ctx context.Context, intermediates []string, outputPath, tempDir string) error {
+	entries := make([]string, len(intermediates))
+	for i, p := range intermediates {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return fmt.Errorf("resolve concat input %q: %w", p, err)
+		}
+		entries[i] = abs
+	}
 	concatListPath := filepath.Join(tempDir, "concat.txt")
-	listContent := buildConcatList(intermediates)
+	listContent := buildConcatList(entries)
 	if err := os.WriteFile(concatListPath, []byte(listContent), 0o644); err != nil {
 		return fmt.Errorf("write concat list: %w", err)
 	}

@@ -1248,3 +1248,69 @@ func TestMergeSameFormatParts_RealFFmpegEndToEnd(t *testing.T) {
 		t.Errorf("db segment FilePath = %q, want %q", dbSegs[0].FilePath, part1)
 	}
 }
+
+// TestMergeSameFormatParts_RelativeOutputDirectory is the W27-02 reproduction
+// at the worker: the part rows as the default paths.output_directory
+// ("./output") has muxSegment write them — relative to the working directory
+// — merge into one row on the first part's name. Every such merge aborted at
+// the concat (the demuxer looked for the parts under its list's temp
+// directory), leaving the recording split with only a Debug line.
+//
+// Mutant it kills: engine.concatIntermediates listing its inputs as given
+// (buildConcatList(intermediates)) rather than resolved absolute.
+func TestMergeSameFormatParts_RelativeOutputDirectory(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+	db, err := database.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	job := &database.Job{ID: "yt_mergeRel", VideoID: "mergeRel", URL: "u", Status: database.StatusMuxing}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	// filepath.Join("./output", "Chan"), as buildJobContext's default output
+	// directory and the template's channel subdirectory give it.
+	outDir := filepath.Join(".", "output", "Chan")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	part1 := filepath.Join(outDir, "Show - part1.mp4")
+	part2 := filepath.Join(outDir, "Show - part2.mp4")
+	for _, p := range []string{part1, part2} {
+		cmd := exec.Command(ffmpegPath, "-y",
+			"-f", "lavfi", "-i", "testsrc=duration=1:size=128x72:rate=30",
+			"-f", "lavfi", "-i", "sine=duration=1",
+			"-c:v", "libx264", "-c:a", "aac", p)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("failed to generate fixture %s: %v\n%s", p, err, out)
+		}
+	}
+	if err := db.AddSegment(&database.Segment{JobID: job.ID, SegmentIndex: 0, UnixStart: 1000, UnixEnd: 1010, Quality: "72p30", Filename: "Show - part1.mp4", FilePath: part1, DurationSeconds: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddSegment(&database.Segment{JobID: job.ID, SegmentIndex: 1, UnixStart: 1010, UnixEnd: 1020, Quality: "72p30", Filename: "Show - part2.mp4", FilePath: part2, DurationSeconds: 1}); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := db.GetSegments(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	o := &DownloadOrchestrator{muxer: engine.NewMuxer(ffmpegPath, &discardLogger{}), db: db, logger: &discardLogger{}}
+	jobCtx := &JobContext{Job: job, StagingDir: filepath.Join(dir, "staging")}
+	got := o.mergeSameFormatParts(context.Background(), jobCtx, segs)
+	if len(got) != 1 {
+		t.Fatalf("segments after merge = %d, want 1 (part rows %q, %q relative to the working directory)", len(got), part1, part2)
+	}
+	if got[0].FilePath != part1 {
+		t.Errorf("merged FilePath = %q, want %q (renamed onto first part)", got[0].FilePath, part1)
+	}
+	if _, err := os.Stat(part2); !os.IsNotExist(err) {
+		t.Errorf("superseded part2 should have been deleted, stat err = %v", err)
+	}
+}
