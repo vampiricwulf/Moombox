@@ -135,6 +135,13 @@ func (o *DownloadOrchestrator) mux() *engine.Muxer {
 	return o.muxer
 }
 
+// errDownloadSetup marks ExecuteWithChat's failure to set the download up —
+// strategy.Download, whose first fetch (the HLS master playlist, the DASH
+// manifest) is made outside the engine's own outage waits. Reads as
+// "setup download: <cause>". processJob waits one that met a connectivity
+// outage out and runs the job again (waitOutSetupOutage).
+var errDownloadSetup = errors.New("setup download")
+
 // ExecuteWithChat runs the full download pipeline for a YouTube job,
 // optionally with a pre-started chat downloader.
 func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo, isVod bool, existingChat *chat.ChatDownloader) error {
@@ -381,7 +388,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	strategyCtx.AudioStartSeq = 0
 
 	if err != nil {
-		return fmt.Errorf("setup download: %w", err)
+		return fmt.Errorf("%w: %w", errDownloadSetup, err)
 	}
 
 	// Check abort immediately after download setup — avoid false progress updates

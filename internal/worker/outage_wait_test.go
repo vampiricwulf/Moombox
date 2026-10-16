@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/chat"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -770,5 +772,121 @@ func TestTransportFailedFetchLeavesTheFoundOwed(t *testing.T) {
 	}
 	if !job.AnnounceFound || !sp.db.TakeAnnounceFound(job.ID) {
 		t.Error("the flag was spent on a fetch that never reached YouTube")
+	}
+}
+
+// closedPortURL is an HLS master URL on a port nothing listens on: its fetch
+// fails with connection refused, a transport failure.
+func closedPortURL(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return "http://" + addr + "/master.m3u8"
+}
+
+// liveHLSResult is a stream-processing result for a live YouTube broadcast
+// whose download is set up from the HLS master playlist at master.
+func liveHLSResult(master string) *StreamProcessResult {
+	return &StreamProcessResult{ShouldDownload: true, VideoInfo: &youtube.VideoInfo{
+		IsLive: true, StreamStatus: youtube.StreamLive, HlsManifestURL: master,
+	}}
+}
+
+// TestDownloadSetupMeetingAnOutageWaitsAndRunsAgain is W27-06's last door: a
+// broadcast whose stream processing succeeded, and whose download setup's
+// first fetch (here the HLS master playlist) met the outage — the outage
+// began between the two, as at go-live or on a network that flaps as it
+// comes back. ExecuteWithChat had written Downloading, the setup failure went
+// to setJobError, and the broadcast ended in Error with the monitor reporting
+// offline: a YouTube Error has no automatic way out. Now it waits for the
+// network holding no slot, keeping its status, and the job runs again from
+// stream processing.
+//
+// Mutants this kills:
+//   - processJob's waitOutSetupOutage branch removed → the row ends in Error
+//   - waitOutSetupOutage not asking outageCalled (always waiting) → see
+//     TestDownloadSetupAnswerIsRecorded
+//   - the ReleaseSlots call dropped → the lifecycle slot is held through the
+//     wait (and the next pass takes a second one)
+//   - the stopEarlyChat call dropped → the waiting room's chat downloader
+//     runs on through the wait, beside the one the next pass starts
+//   - processJob not going round again after the wait (`continue` replaced by
+//     `return`) → stream processing runs once
+func TestDownloadSetupMeetingAnOutageWaitsAndRunsAgain(t *testing.T) {
+	shortOutageConfirmWindow(t, 50*time.Millisecond)
+	master := closedPortURL(t)
+	w, db, conn := outageWorker(t, true)
+	ch := "UC_setup"
+	addSchedJob(t, db, &ch, "setup_live", database.StatusLive, 0)
+	// The waiting room's chat, handed to ExecuteWithChat with the result.
+	early := chat.NewChatDownloader(chat.ChatDownloaderOptions{VideoID: "setup_live",
+		OutputFile: filepath.Join(t.TempDir(), "chat.json")})
+	w.streamProc.trackChat(early)
+	var calls atomic.Int32
+	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+		if calls.Add(1) == 1 {
+			conn.online.Store(false) // the outage begins as the download starts
+			res := liveHLSResult(master)
+			res.ChatDownloader = early
+			return res, nil
+		}
+		return cancelledResult(), nil // the second pass: end the run here
+	}
+	done := runJob(t, w, context.Background(), "setup_live")
+	waitForCond(t, 5*time.Second, "the network wait", func() bool {
+		return jobRow(t, db, "setup_live").Progress == networkWaitProgress
+	})
+	if row := jobRow(t, db, "setup_live"); row.Status != database.StatusDownloading || row.Error != "" {
+		t.Errorf("waiting row reads %s (%q), want the Downloading ExecuteWithChat wrote", row.Status, row.Error)
+	}
+	if n := w.queue.LifecycleCount(); n != 0 {
+		t.Errorf("%d lifecycle slot(s) held through the wait, want 0", n)
+	}
+	w.streamProc.mu.Lock()
+	tracked := len(w.streamProc.activeChats)
+	w.streamProc.mu.Unlock()
+	if tracked != 0 {
+		t.Errorf("the waiting room's chat downloader is still running through the wait (%d tracked)", tracked)
+	}
+	conn.set(true)
+	awaitDone(t, done, "setup_live")
+	if n := calls.Load(); n != 2 {
+		t.Errorf("stream processing ran %d time(s), want twice: once before the setup failed, once after the wait", n)
+	}
+	if row := jobRow(t, db, "setup_live"); row.Status != database.StatusDownloading || row.Error != "" || row.Progress != "" {
+		t.Errorf("row = %s (%q, progress %q), want Downloading with the wait's line cleared", row.Status, row.Error, row.Progress)
+	}
+}
+
+// TestDownloadSetupAnswerIsRecorded: what the setup rule waits on is a
+// transport failure the monitor calls. An answer — the master playlist's
+// server refusing it with a 403 — is recorded as the job's Error at once even
+// with the monitor reporting offline, as stream processing's answers are.
+//
+// Mutant killed: waitOutSetupOutage not asking outageCalled → the 403 is
+// waited on and the run never ends. Its errors.Is(dlErr, errDownloadSetup)
+// check is not killed by any test: no download failure but setup's brings a
+// transport failure back to processJob today (the engine waits its own
+// outages out in place), and the check keeps it that way.
+func TestDownloadSetupAnswerIsRecorded(t *testing.T) {
+	shortOutageConfirmWindow(t, 50*time.Millisecond)
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+	w, db, conn := outageWorker(t, true)
+	ch := "UC_setup"
+	addSchedJob(t, db, &ch, "setup_403", database.StatusLive, 0)
+	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+		conn.online.Store(false)
+		return liveHLSResult(srv.URL + "/master.m3u8"), nil
+	}
+	awaitDone(t, runJob(t, w, context.Background(), "setup_403"), "setup_403")
+	if row := jobRow(t, db, "setup_403"); row.Status != database.StatusError {
+		t.Errorf("status = %s (progress %q), want Error", row.Status, row.Progress)
 	}
 }

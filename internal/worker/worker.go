@@ -890,185 +890,204 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 
 	w.logger.Info("processing job", "jobID", jobID, "videoID", job.VideoID)
 
-	// Process stream (probe, wait for live, etc.) — waiting a connectivity
-	// outage out rather than failing on it (outage_wait.go).
-	result, err := w.processStreamThroughOutages(ctx, job)
-	// When the format URLs were extracted, near enough: for a VOD, Process
-	// returns straight after its fetch. refreshStaleVodInfo measures the slot
-	// waits below from here.
-	extractedAt := time.Now()
-	if err != nil {
+	// One pass per attempt at the job. A pass after the first is a download
+	// whose setup fetch met a connectivity outage, run again from stream
+	// processing once the network is back (waitOutSetupOutage).
+	var setupOutageSince time.Time
+	for {
+		// Process stream (probe, wait for live, etc.) — waiting a connectivity
+		// outage out rather than failing on it (outage_wait.go).
+		result, err := w.processStreamThroughOutages(ctx, job)
+		// When the format URLs were extracted, near enough: for a VOD, Process
+		// returns straight after its fetch. refreshStaleVodInfo measures the slot
+		// waits below from here.
+		extractedAt := time.Now()
+		if err != nil {
+			if ctx.Err() != nil {
+				w.handleCancellation(job)
+				return
+			}
+			requeued, err := w.requeueBacklogAfterTransientFailure(job, err)
+			if !requeued {
+				w.setJobError(job, err)
+			}
+			return
+		}
+
+		if !result.ShouldDownload {
+			if errors.Is(result.ErrSentinel, ErrCancelled) {
+				// A wait cancelled by ctx.Done() or the row's status (see
+				// cancelledResult). Route through handleCancellation so shutdown
+				// preserves state.
+				w.handleCancellation(job)
+				return
+			}
+			if result.Error == "" {
+				// Every producer of ShouldDownload:false names a reason today.
+				// One that did not would leave the row in whatever non-terminal
+				// state it had, with nothing driving it and nothing said; make
+				// that visible instead.
+				result.Error = "stream processing declined the job without a reason"
+			}
+			// AsError preserves any ErrSentinel attached by the producer (e.g.
+			// ErrCookiesRequired from checkPlayability) so setJobError's
+			// errors.Is checks fire correctly. Without this wrap, the prior
+			// code's errors.New stripped the sentinel and forced setJobError
+			// back to string-matching.
+			w.setJobError(job, result.AsError())
+			return
+		}
+
+		// Check cancellation between stream processing and download
 		if ctx.Err() != nil {
 			w.handleCancellation(job)
 			return
 		}
-		requeued, err := w.requeueBacklogAfterTransientFailure(job, err)
-		if !requeued {
-			w.setJobError(job, err)
-		}
-		return
-	}
 
-	if !result.ShouldDownload {
-		if errors.Is(result.ErrSentinel, ErrCancelled) {
-			// A wait cancelled by ctx.Done() or the row's status (see
-			// cancelledResult). Route through handleCancellation so shutdown
-			// preserves state.
+		// Download slot first — for VODs, blocks until one is available;
+		// broadcasts pass through ungated (see acquireDownloadSlot). BEFORE the
+		// lifecycle slot, not after it: a VOD that took its lifecycle slot and
+		// then parked on the download pool held one of the 100 for nothing, so
+		// enough admitted backlog (Σ archive_slots across channels) filled the
+		// lifecycle pool with VODs that were merely queueing, and a live
+		// broadcast — which never waits on the download pool — blocked behind
+		// them and lost footage. A VOD now waits holding nothing that a broadcast
+		// needs.
+		if !w.acquireDownloadSlot(ctx, jobID, result.IsVod) {
+			// Context cancelled while waiting for download slot
 			w.handleCancellation(job)
 			return
 		}
-		if result.Error == "" {
-			// Every producer of ShouldDownload:false names a reason today.
-			// One that did not would leave the row in whatever non-terminal
-			// state it had, with nothing driving it and nothing said; make
-			// that visible instead.
-			result.Error = "stream processing declined the job without a reason"
-		}
-		// AsError preserves any ErrSentinel attached by the producer (e.g.
-		// ErrCookiesRequired from checkPlayability) so setJobError's
-		// errors.Is checks fire correctly. Without this wrap, the prior
-		// code's errors.New stripped the sentinel and forced setJobError
-		// back to string-matching.
-		w.setJobError(job, result.AsError())
-		return
-	}
 
-	// Check cancellation between stream processing and download
-	if ctx.Err() != nil {
-		w.handleCancellation(job)
-		return
-	}
-
-	// Download slot first — for VODs, blocks until one is available;
-	// broadcasts pass through ungated (see acquireDownloadSlot). BEFORE the
-	// lifecycle slot, not after it: a VOD that took its lifecycle slot and
-	// then parked on the download pool held one of the 100 for nothing, so
-	// enough admitted backlog (Σ archive_slots across channels) filled the
-	// lifecycle pool with VODs that were merely queueing, and a live
-	// broadcast — which never waits on the download pool — blocked behind
-	// them and lost footage. A VOD now waits holding nothing that a broadcast
-	// needs.
-	if !w.acquireDownloadSlot(ctx, jobID, result.IsVod) {
-		// Context cancelled while waiting for download slot
-		w.handleCancellation(job)
-		return
-	}
-
-	// Lifecycle slot (owner decision O-F): claimed HERE, once stream
-	// processing has decided this job downloads, and never earlier. Dequeue
-	// used to claim it, which meant every Upcoming job and every
-	// manually-added offline Twitch channel held one of the 100 for its whole
-	// wait — and a job stream processing then refused held one it never used.
-	// It bounds the whole download half; the download slot above bounds the
-	// VOD pool. Every exit path from here on runs through the deferred
-	// queue.Complete above, which releases both.
-	if !w.queue.AcquireLifecycleSlot(ctx, jobID) {
-		// Only ctx cancellation ends that wait.
-		w.handleCancellation(job)
-		return
-	}
-
-	// Both waits are over. A VOD's format URLs were extracted before them,
-	// and a googlevideo URL lives ~6 h: one that queued longer than that
-	// failed its first request with a 403 that nothing retried. Re-extract a
-	// stale one now that the download is really starting.
-	if err := w.refreshStaleVodInfoThroughOutages(ctx, job, result, extractedAt); err != nil {
-		if ctx.Err() != nil || errors.Is(err, ErrCancelled) {
+		// Lifecycle slot (owner decision O-F): claimed HERE, once stream
+		// processing has decided this job downloads, and never earlier. Dequeue
+		// used to claim it, which meant every Upcoming job and every
+		// manually-added offline Twitch channel held one of the 100 for its whole
+		// wait — and a job stream processing then refused held one it never used.
+		// It bounds the whole download half; the download slot above bounds the
+		// VOD pool. Every exit path from here on runs through the deferred
+		// queue.Complete above, which releases both.
+		if !w.queue.AcquireLifecycleSlot(ctx, jobID) {
+			// Only ctx cancellation ends that wait.
 			w.handleCancellation(job)
 			return
 		}
-		requeued, err := w.requeueBacklogAfterTransientFailure(job, err)
-		if !requeued {
-			w.setJobError(job, err)
-		}
-		return
-	}
 
-	// Build job context
-	jobCtx := w.buildJobContext(job)
-
-	// Route to platform-specific orchestrator
-	var dlErr error
-	if job.Platform == "twitch" && result.TwitchVariant != nil {
-		variant := newTwitchVariantInfo(job, result.TwitchVariant, jobCtx.Config)
-		// Stable broadcast identity for engine resume validation: the live
-		// stream ID when known, else the job's video/VOD ID.
-		if result.TwitchStreamInfo != nil && result.TwitchStreamInfo.StreamID != "" {
-			variant.StreamID = result.TwitchStreamInfo.StreamID
-		} else {
-			variant.StreamID = job.VideoID
+		// Both waits are over. A VOD's format URLs were extracted before them,
+		// and a googlevideo URL lives ~6 h: one that queued longer than that
+		// failed its first request with a 403 that nothing retried. Re-extract a
+		// stale one now that the download is really starting.
+		if err := w.refreshStaleVodInfoThroughOutages(ctx, job, result, extractedAt); err != nil {
+			if ctx.Err() != nil || errors.Is(err, ErrCancelled) {
+				w.handleCancellation(job)
+				return
+			}
+			requeued, err := w.requeueBacklogAfterTransientFailure(job, err)
+			if !requeued {
+				w.setJobError(job, err)
+			}
+			return
 		}
-		// For live streams, provide a stream-end check function and quality probe
-		if !result.IsVod && result.TwitchStreamInfo != nil && w.tw != nil {
-			login := result.TwitchStreamInfo.ChannelLogin
-			variant.CheckStreamFn = func(innerCtx context.Context) (bool, error) {
-				info, err := w.confirmTwitchStreamInfo(innerCtx, login)
-				if err != nil {
-					return false, err
+
+		// Build job context
+		jobCtx := w.buildJobContext(job)
+
+		// Route to platform-specific orchestrator
+		var dlErr error
+		if job.Platform == "twitch" && result.TwitchVariant != nil {
+			variant := newTwitchVariantInfo(job, result.TwitchVariant, jobCtx.Config)
+			// Stable broadcast identity for engine resume validation: the live
+			// stream ID when known, else the job's video/VOD ID.
+			if result.TwitchStreamInfo != nil && result.TwitchStreamInfo.StreamID != "" {
+				variant.StreamID = result.TwitchStreamInfo.StreamID
+			} else {
+				variant.StreamID = job.VideoID
+			}
+			// For live streams, provide a stream-end check function and quality probe
+			if !result.IsVod && result.TwitchStreamInfo != nil && w.tw != nil {
+				login := result.TwitchStreamInfo.ChannelLogin
+				variant.CheckStreamFn = func(innerCtx context.Context) (bool, error) {
+					info, err := w.confirmTwitchStreamInfo(innerCtx, login)
+					if err != nil {
+						return false, err
+					}
+					return info != nil && info.IsLive, nil
 				}
-				return info != nil && info.IsLive, nil
+				variant.RecheckStreamFn = func(innerCtx context.Context) (*twitch.TwitchStreamInfo, error) {
+					return w.confirmTwitchStreamInfo(innerCtx, login)
+				}
+				variant.FetchVariantsFn = func(innerCtx context.Context) ([]twitch.TwitchHLSVariant, error) {
+					// The anonymous-playback verdict is discarded HERE and only
+					// here. ONE VERDICT PER CAPTURE is the design (Arc 10 R6):
+					// processTwitchLive takes the mark at capture start and this
+					// closure does not take it again.
+					//
+					// Not because repeats are expensive — they are not. A repeat
+					// NoteTwitchAuthLoss with the same reason computes
+					// changed == false and shouldFireRecovery declines, so it is
+					// an idempotent status write. The reason is that this closure
+					// is not a detector worth building the story on: it backs
+					// refreshBestVariant, so it runs on EVERY (re)start of a
+					// downloader — post-outage resume, gap recovery, quality
+					// change, init change — and the quality probe, which means it
+					// re-mints the playback token many times on one capture and
+					// may also never run at all on a clean stream.
+					//
+					// What that costs, stated plainly because nothing else says
+					// it: a credential that dies MID-CAPTURE on a chat-off job is
+					// not marked until the next capture start.
+					variants, _, err := w.tw.GetHLSMasterPlaylist(innerCtx, login)
+					return variants, err
+				}
 			}
-			variant.RecheckStreamFn = func(innerCtx context.Context) (*twitch.TwitchStreamInfo, error) {
-				return w.confirmTwitchStreamInfo(innerCtx, login)
+			// Determine which Twitch chat downloader to use
+			var twitchChat ChatSource
+			if result.TwitchChatDownloader != nil {
+				twitchChat = result.TwitchChatDownloader
+			} else if result.TwitchVodChatDl != nil {
+				twitchChat = result.TwitchVodChatDl
 			}
-			variant.FetchVariantsFn = func(innerCtx context.Context) ([]twitch.TwitchHLSVariant, error) {
-				// The anonymous-playback verdict is discarded HERE and only
-				// here. ONE VERDICT PER CAPTURE is the design (Arc 10 R6):
-				// processTwitchLive takes the mark at capture start and this
-				// closure does not take it again.
-				//
-				// Not because repeats are expensive — they are not. A repeat
-				// NoteTwitchAuthLoss with the same reason computes
-				// changed == false and shouldFireRecovery declines, so it is
-				// an idempotent status write. The reason is that this closure
-				// is not a detector worth building the story on: it backs
-				// refreshBestVariant, so it runs on EVERY (re)start of a
-				// downloader — post-outage resume, gap recovery, quality
-				// change, init change — and the quality probe, which means it
-				// re-mints the playback token many times on one capture and
-				// may also never run at all on a clean stream.
-				//
-				// What that costs, stated plainly because nothing else says
-				// it: a credential that dies MID-CAPTURE on a chat-off job is
-				// not marked until the next capture start.
-				variants, _, err := w.tw.GetHLSMasterPlaylist(innerCtx, login)
-				return variants, err
-			}
+			dlErr = w.orchestrator.ExecuteTwitch(ctx, jobCtx, variant, result.IsVod, twitchChat)
+		} else {
+			// YouTube path
+			dlErr = w.orchestrator.ExecuteWithChat(ctx, jobCtx, result.VideoInfo, result.IsVod, result.ChatDownloader)
 		}
-		// Determine which Twitch chat downloader to use
-		var twitchChat ChatSource
-		if result.TwitchChatDownloader != nil {
-			twitchChat = result.TwitchChatDownloader
-		} else if result.TwitchVodChatDl != nil {
-			twitchChat = result.TwitchVodChatDl
-		}
-		dlErr = w.orchestrator.ExecuteTwitch(ctx, jobCtx, variant, result.IsVod, twitchChat)
-	} else {
-		// YouTube path
-		dlErr = w.orchestrator.ExecuteWithChat(ctx, jobCtx, result.VideoInfo, result.IsVod, result.ChatDownloader)
-	}
 
-	if dlErr != nil {
-		// ErrCancelled: the row was already Cancelled when ExecuteWithChat
-		// started. That early return used to be nil, which this read as a
-		// finished download — it deleted the staging of a job the operator
-		// had just cancelled and might Mux or Resume, and skipped the
-		// cancellation's own handling.
-		if ctx.Err() != nil || errors.Is(dlErr, ErrCancelled) {
-			w.handleCancellation(job)
+		if dlErr != nil {
+			// ErrCancelled: the row was already Cancelled when ExecuteWithChat
+			// started. That early return used to be nil, which this read as a
+			// finished download — it deleted the staging of a job the operator
+			// had just cancelled and might Mux or Resume, and skipped the
+			// cancellation's own handling.
+			if ctx.Err() != nil || errors.Is(dlErr, ErrCancelled) {
+				w.handleCancellation(job)
+				return
+			}
+			// A download whose setup fetch met a connectivity outage waits for
+			// the network and runs the job again, the row keeping its status
+			// (waitOutSetupOutage), rather than ending in Error over a fetch
+			// the outage failed.
+			if fresh, wait := w.waitOutSetupOutage(ctx, job, result, dlErr, &setupOutageSince); wait {
+				if fresh == nil {
+					w.handleCancellation(job)
+					return
+				}
+				job = fresh
+				continue
+			}
+			// A backlog VOD that ran out of disk waits in Queued for the space
+			// instead of ending in Error (requeueBacklogAfterDiskFull).
+			requeued, err := w.requeueBacklogAfterDiskFull(job, dlErr)
+			if !requeued {
+				w.setJobError(job, err)
+			}
 			return
 		}
-		// A backlog VOD that ran out of disk waits in Queued for the space
-		// instead of ending in Error (requeueBacklogAfterDiskFull).
-		requeued, err := w.requeueBacklogAfterDiskFull(job, dlErr)
-		if !requeued {
-			w.setJobError(job, err)
-		}
+
+		w.forgetBacklogRetries(job.ID)
+		w.cleanupStagingAfterMux(job.ID, jobCtx.StagingDir)
 		return
 	}
-
-	w.forgetBacklogRetries(job.ID)
-	w.cleanupStagingAfterMux(job.ID, jobCtx.StagingDir)
 }
 
 // cleanupStagingAfterMux removes a job's staging directory now that its

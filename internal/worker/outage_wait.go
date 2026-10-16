@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -125,21 +126,69 @@ func (w *DownloadWorker) waitForNetwork(ctx context.Context, jobID string) bool 
 }
 
 // waitOutOutage waits for the network on behalf of job's run, then reports
-// whether the run should go on: false when ctx ended first, or when the row
-// was deleted or left the states the queue processes while it waited — the
-// re-read Process itself makes after its fetch, for a run that waited minutes
-// or hours between the two.
-func (w *DownloadWorker) waitOutOutage(ctx context.Context, job *database.Job) bool {
+// whether the run should go on, with the row as it now reads: false when ctx
+// ended first, or when the row was deleted or left the states the queue
+// processes while it waited — the re-read Process itself makes after its
+// fetch, for a run that waited minutes or hours between the two.
+func (w *DownloadWorker) waitOutOutage(ctx context.Context, job *database.Job) (*database.Job, bool) {
 	if !w.waitForNetwork(ctx, job.ID) {
-		return false
+		return nil, false
 	}
 	cur, err := w.db.GetJob(job.ID)
 	if err != nil {
 		// A database error must not end a job that is waiting for nothing
 		// else: go on, as Process's own re-read does.
-		return true
+		return job, true
 	}
-	return cur != nil && ShouldProcess(cur)
+	if cur == nil || !ShouldProcess(cur) {
+		return nil, false
+	}
+	return cur, true
+}
+
+// waitOutSetupOutage is the outage rule for a YouTube download whose setup
+// failed (errDownloadSetup). ExecuteWithChat has written Downloading by then,
+// and strategy.Download's first fetch — the HLS master playlist, the DASH
+// manifest of a live stream without manifest-free formats or of a VOD that
+// still carries one — is made outside the engine's own outage waits: one that
+// met the outage went to setJobError, and the broadcast ended in Error with
+// the monitor reporting offline, where nothing brought it back. It happens
+// when the outage begins between stream processing and the download: at
+// go-live, on a network that flaps as it comes back, or across a VOD's slot
+// wait.
+//
+// A setup failure the monitor calls an outage (outageCalled) is waited out
+// like stream processing's (waitOutOutage), the row keeping its status, and
+// the job is then run again from stream processing — the manifest URLs, and
+// whether the broadcast is still live, are a fresh fetch's to say. Before the
+// wait the failed attempt gives back what it holds: its slots, which the next
+// pass takes again (ReleaseSlots; the run stays registered), and a
+// waiting-room chat ExecuteWithChat inherited, which would otherwise run on
+// beside the next pass's own downloader on the same chat file.
+//
+// Reports whether dlErr was such a failure; when it was, the row to run again
+// with, or nil when the run is not to go on — ctx ended, or the row is gone or
+// no longer processable — which processJob routes to handleCancellation.
+// since is when the run first waited on a setup outage, for the log.
+func (w *DownloadWorker) waitOutSetupOutage(ctx context.Context, job *database.Job, result *StreamProcessResult, dlErr error, since *time.Time) (*database.Job, bool) {
+	if !errors.Is(dlErr, errDownloadSetup) || !w.outageCalled(ctx, dlErr) {
+		return nil, false
+	}
+	again := !since.IsZero()
+	if !again {
+		*since = time.Now()
+	}
+	w.logOutageWait(again, "download setup failed on a connectivity outage; waiting for the network, then processing the job again",
+		"jobID", job.ID, "err", dlErr)
+	w.queue.ReleaseSlots(job.ID)
+	if result != nil && result.ChatDownloader != nil && w.streamProc != nil {
+		w.streamProc.stopEarlyChat(result.ChatDownloader)
+	}
+	fresh, ok := w.waitOutOutage(ctx, job)
+	if !ok {
+		return nil, true
+	}
+	return fresh, true
 }
 
 // processStreamThroughOutages is stream processing that waits a connectivity
@@ -183,7 +232,7 @@ func (w *DownloadWorker) processStreamThroughOutages(ctx context.Context, job *d
 		}
 		w.logOutageWait(waited, "stream processing failed on a connectivity outage; waiting for the network, then processing the job again",
 			"jobID", job.ID, "status", job.Status, "err", err)
-		if !w.waitOutOutage(ctx, job) {
+		if _, ok := w.waitOutOutage(ctx, job); !ok {
 			return cancelledResult(), nil
 		}
 	}
@@ -234,7 +283,7 @@ func (w *DownloadWorker) refreshStaleVodInfoThroughOutages(ctx context.Context, 
 		}
 		w.logOutageWait(waited, "VOD re-extraction failed on a connectivity outage; waiting for the network, then re-extracting",
 			"jobID", job.ID, "err", err)
-		if !w.waitOutOutage(ctx, job) {
+		if _, ok := w.waitOutOutage(ctx, job); !ok {
 			return ErrCancelled
 		}
 	}
