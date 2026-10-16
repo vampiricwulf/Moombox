@@ -120,9 +120,16 @@ const muxCrashHelperEnv = "MOOMBOX_ENGINE_MUX_CRASH_HELPER"
 //     dead run's token;
 //   - and that file goes in the boot sweep, which leaves the directory empty.
 //
+// Before the kill, the same sweep leaves the file alone: while the process
+// writing it lives, it is another live Moombox's — a second instance sharing
+// the output tree, or a child still shutting down after its launcher was
+// killed (the W30 review's findings) — and its lock says so.
+//
 // Mutants: childproc's prepare not setting Pdeathsig (the stand-in is still
 // running); mux handing FFmpeg the final name (a partial archive sits under
-// it); RemoveStaleMuxTemps skipping a gone run's file (it is still there).
+// it); RemoveStaleMuxTemps skipping a gone run's file (it is still there);
+// removeStaleMuxTemp not trying the writer's lock (the live process's file
+// is removed before the kill).
 func TestACrashMidMuxLeavesNoWriterAndNoFinalFile(t *testing.T) {
 	if os.Getenv(muxCrashHelperEnv) != "" {
 		dir := os.Getenv(muxCrashHelperEnv)
@@ -165,6 +172,14 @@ func TestACrashMidMuxLeavesNoWriterAndNoFinalFile(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 
+	removed, live, err := RemoveStaleMuxTemps([]string{tools}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := dirNames(t, out); len(removed) != 0 || len(live) != 1 || len(names) != 1 || !IsMuxTempPath(names[0]) {
+		t.Errorf("with the writing process alive the sweep removed %v and reported %v live, leaving %v; want its temporary file left and reported live", removed, live, names)
+	}
+
 	_ = helper.Process.Kill()
 	_ = helper.Wait()
 
@@ -186,7 +201,7 @@ func TestACrashMidMuxLeavesNoWriterAndNoFinalFile(t *testing.T) {
 	if len(names) != 1 || !IsMuxTempPath(names[0]) || muxTempRunOf(names[0]) == muxRun {
 		t.Fatalf("the crash left %v, want exactly one temporary file of the dead run's", names)
 	}
-	if _, err := RemoveStaleMuxTemps([]string{tools}, nil); err != nil {
+	if _, _, err := RemoveStaleMuxTemps([]string{tools}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if names := dirNames(t, out); len(names) != 0 {

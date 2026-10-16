@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -233,7 +235,7 @@ func TestRemoveStaleMuxTempsTakesOnlyAGoneRunsTemporaryFiles(t *testing.T) {
 		write(filepath.Join(tree, "Title [f].partial.mp4")),
 	}
 
-	removed, err := RemoveStaleMuxTemps([]string{tree, filepath.Join(tree, "missing")}, []string{other})
+	removed, _, err := RemoveStaleMuxTemps([]string{tree, filepath.Join(tree, "missing")}, []string{other})
 	if err != nil {
 		t.Fatalf("RemoveStaleMuxTemps: %v", err)
 	}
@@ -249,5 +251,234 @@ func TestRemoveStaleMuxTempsTakesOnlyAGoneRunsTemporaryFiles(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("the sweep removed %s, which is not a gone run's temporary file", p)
 		}
+	}
+}
+
+// otherRunToken returns a run token that is not this run's.
+func otherRunToken() string {
+	if muxRun == "0badc0de" {
+		return "0badc0df"
+	}
+	return "0badc0de"
+}
+
+// holdAsAnotherWriter creates a temporary output named with another run's
+// token and takes its lock through its own open, as a writer in another
+// process does: a second open's lock conflicts with it in this process too,
+// on Linux (flock is per open file) and on Windows (LockFileEx is per
+// handle). The caller closes the file to let the writer go.
+func holdAsAnotherWriter(t *testing.T, dir string) (string, *os.File) {
+	t.Helper()
+	p := filepath.Join(dir, "Title [live]"+muxTempMarker+otherRunToken()+"-1.mp4")
+	f, err := createMuxTempFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lockMuxTemp(f); err != nil {
+		f.Close()
+		t.Skipf("this filesystem cannot lock: %v", err)
+	}
+	if _, err := f.WriteString("partial"); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	return p, f
+}
+
+// TestRemoveStaleMuxTempsLeavesAFileItsWriterStillHolds is the sweep's half
+// of the W30 review's two findings: another run's token is not a gone run. A
+// second Moombox writing to the same output tree under its own data
+// directory, and a child still shutting down after its launcher was killed
+// (the launcher's single-instance lock gone with it), both write under a token
+// that is not this run's, and the sweep took their live temporary files —
+// FFmpeg's faststart pass reopened its output by name and the mux failed.
+// The sweep now takes a file only when it can take its writer's lock: while
+// the writer holds it the file stays and is reported live, and once the
+// writer is gone — its handle closed, as its death closes it — the file goes.
+//
+// Mutants: removeStaleMuxTemp not trying the lock (the held file is
+// removed); lockMuxTempFile answering nil, or an error that is not
+// errMuxTempHeld, for a lock someone else holds (the held file is removed, or
+// kept but not reported live); the sweep removing nothing once the lock is
+// free (the gone writer's file stays).
+func TestRemoveStaleMuxTempsLeavesAFileItsWriterStillHolds(t *testing.T) {
+	dir := t.TempDir()
+	p, held := holdAsAnotherWriter(t, dir)
+
+	removed, live, err := RemoveStaleMuxTemps(nil, []string{dir})
+	if err != nil {
+		held.Close()
+		t.Fatalf("RemoveStaleMuxTemps: %v", err)
+	}
+	if len(removed) != 0 || len(live) != 1 || live[0] != p {
+		t.Errorf("with its writer alive the sweep removed %v and reported %v live, want nothing removed and %s live", removed, live, p)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Errorf("the sweep removed a temporary file its writer still holds: %v", err)
+	}
+
+	held.Close()
+	removed, live, err = RemoveStaleMuxTemps(nil, []string{dir})
+	if err != nil {
+		t.Fatalf("RemoveStaleMuxTemps: %v", err)
+	}
+	if len(removed) != 1 || len(live) != 0 {
+		t.Errorf("with its writer gone the sweep removed %v and reported %v live, want the file removed", removed, live)
+	}
+	if names := dirNames(t, dir); len(names) != 0 {
+		t.Errorf("after the writer let go the sweep left %v", names)
+	}
+}
+
+// TestWriteOutputHoldsItsTemporaryFileUntilTheRename: what the sweep tests is
+// a lock writeOutput holds from before FFmpeg opens its temporary file until
+// the file is renamed onto the final name or removed. Inside the write the
+// file exists already, created by writeOutput (FFmpeg writes over it with
+// -y), and another open's lock attempt finds it held; once writeOutput has
+// returned, the archive is free.
+//
+// Mutants: writeOutput closing its handle before write runs, or createMuxTemp
+// returning without the lock (the sweep finds the file free mid-write);
+// writeOutput never closing it (the archive's lock is still held afterwards —
+// a handle leaked per mux).
+func TestWriteOutputHoldsItsTemporaryFileUntilTheRename(t *testing.T) {
+	m := NewMuxer("ffmpeg", &testLogger{})
+	dir := t.TempDir()
+	final := filepath.Join(dir, "Title [abc].mp4")
+	var verdict muxTempVerdict = -1
+	err := m.writeOutput(t.Context(), final, nil, func(tmp string) error {
+		if _, err := os.Stat(tmp); err != nil {
+			t.Errorf("the temporary file does not exist when the writer is handed it: %v", err)
+		}
+		verdict = removeStaleMuxTemp(tmp)
+		return os.WriteFile(tmp, []byte("whole"), 0o644)
+	})
+	if err != nil {
+		t.Fatalf("writeOutput: %v", err)
+	}
+	if verdict != muxTempLive {
+		t.Errorf("mid-write the sweep's verdict on the temporary file was %d, want live (%d): the writer does not hold its lock", verdict, muxTempLive)
+	}
+	f, err := openMuxTempForSweep(final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := lockMuxTemp(f); err != nil {
+		t.Errorf("after writeOutput returned the archive's lock is still held (%v): its handle was never closed", err)
+	}
+}
+
+// TestCreateMuxTempNeverWritesANameItDoesNotHold covers createMuxTemp's two
+// retries. A leftover already under the next name (an earlier run whose
+// token matched this run's) is left as it is and a new name drawn; and a file
+// that a sweep removed between the create and the lock — the moment its
+// writer had not yet taken it — is let go, so FFmpeg is never handed a name
+// the lock is not on.
+//
+// Mutants: createMuxTempFile opening a name that exists (the leftover is
+// handed out and written over); dropping the sameFileAsPath check (the name
+// the sweep removed is handed out).
+func TestCreateMuxTempNeverWritesANameItDoesNotHold(t *testing.T) {
+	m := NewMuxer("ffmpeg", &testLogger{})
+	dir := t.TempDir()
+	final := filepath.Join(dir, "Title [abc].mp4")
+
+	// The next sequence number's name, taken by a leftover.
+	next := filepath.Join(dir, "Title [abc]"+muxTempMarker+muxRun+"-"+strconv.FormatUint(muxTempSeq.Load()+1, 10)+".mp4")
+	if err := os.WriteFile(next, []byte("leftover"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tmp, f, err := m.createMuxTemp(final)
+	if err != nil {
+		t.Fatalf("createMuxTemp beside a leftover: %v", err)
+	}
+	f.Close()
+	if tmp == next {
+		t.Errorf("createMuxTemp handed out %s, which a leftover already holds", next)
+	}
+	if b, _ := os.ReadFile(next); string(b) != "leftover" {
+		t.Errorf("the leftover under %s reads %q, want it untouched", next, b)
+	}
+	if err := os.Remove(tmp); err != nil {
+		t.Fatal(err)
+	}
+
+	// A sweep removes the first file before the writer's lock lands.
+	real := lockMuxTemp
+	t.Cleanup(func() { lockMuxTemp = real })
+	var swept []string
+	lockMuxTemp = func(f *os.File) error {
+		if len(swept) == 0 {
+			swept = append(swept, f.Name())
+			if err := os.Remove(f.Name()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return real(f)
+	}
+	tmp, f, err = m.createMuxTemp(final)
+	if err != nil {
+		t.Fatalf("createMuxTemp after a sweep took its first file: %v", err)
+	}
+	defer f.Close()
+	lockMuxTemp = real
+	if len(swept) != 1 || tmp == swept[0] {
+		t.Fatalf("createMuxTemp handed out %s, the name the sweep removed (%v)", tmp, swept)
+	}
+	if !sameFileAsPath(f, tmp) {
+		t.Errorf("createMuxTemp handed out %s, which does not name the file it holds", tmp)
+	}
+	if v := removeStaleMuxTemp(tmp); v != muxTempLive {
+		t.Errorf("the sweep's verdict on the file createMuxTemp holds is %d, want live", v)
+	}
+}
+
+// TestRemoveStaleMuxTempsWithoutLocksTakesOnlyAFileLongIdle: where the lock
+// cannot be tried at all (a filesystem that answers flock with an error), a
+// live writer cannot be told from a gone one by it. The writer writes
+// unlocked rather than failing the mux, and the sweep takes such a file only
+// once it has sat untouched for muxTempIdleAge — a live FFmpeg rewrites its
+// output as it goes.
+//
+// Mutants: dropping the age check (the fresh file is removed); treating the
+// error as a held lock (the day-old file is never removed); createMuxTemp
+// failing when the lock cannot be taken (writeOutput errors).
+func TestRemoveStaleMuxTempsWithoutLocksTakesOnlyAFileLongIdle(t *testing.T) {
+	real := lockMuxTemp
+	t.Cleanup(func() { lockMuxTemp = real })
+	lockMuxTemp = func(*os.File) error { return errors.New("locks are not supported here") }
+
+	dir := t.TempDir()
+	fresh := filepath.Join(dir, "Title [a]"+muxTempMarker+otherRunToken()+"-1.mp4")
+	idle := filepath.Join(dir, "Title [b]"+muxTempMarker+otherRunToken()+"-2.mp4")
+	for _, p := range []string{fresh, idle} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-muxTempIdleAge - time.Hour)
+	if err := os.Chtimes(idle, old, old); err != nil {
+		t.Fatal(err)
+	}
+	removed, _, err := RemoveStaleMuxTemps(nil, []string{dir})
+	if err != nil {
+		t.Fatalf("RemoveStaleMuxTemps: %v", err)
+	}
+	if len(removed) != 1 || removed[0] != idle {
+		t.Errorf("removed %v, want only the file idle past muxTempIdleAge", removed)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("the sweep removed a fresh temporary file it could not lock: %v", err)
+	}
+
+	final := filepath.Join(dir, "Title [c].mp4")
+	if err := NewMuxer("ffmpeg", &testLogger{}).writeOutput(t.Context(), final, nil, func(tmp string) error {
+		return os.WriteFile(tmp, []byte("whole"), 0o644)
+	}); err != nil {
+		t.Fatalf("writeOutput where the lock cannot be taken: %v", err)
+	}
+	if b, _ := os.ReadFile(final); string(b) != "whole" {
+		t.Errorf("the final name holds %q, want the finished file", b)
 	}
 }

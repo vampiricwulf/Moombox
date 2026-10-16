@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -26,7 +28,7 @@ type OutputCheck func(ctx context.Context, path string) error
 
 // writeOutput is how every FFmpeg write of an output file goes: Mux, MuxCopy,
 // ConcatCopy and the cross-segment trim's concat. FFmpeg writes a temporary
-// file beside final (muxTempPath), and the temporary file is renamed onto
+// file beside final (createMuxTemp), and the temporary file is renamed onto
 // final only once FFmpeg has exited 0 and every check has passed. Anything
 // else — FFmpeg failing, a cancel killing it, a check refusing it, the rename
 // itself — removes the temporary file and leaves final as it was.
@@ -39,13 +41,24 @@ type OutputCheck func(ctx context.Context, path string) error
 // only that temporary file — which the next start's sweep removes
 // (RemoveStaleMuxTemps) — and final is never a half-written file.
 //
+// The temporary file is created here, before FFmpeg opens it by name (every
+// writer passes -y), and this process holds a lock on it until the file is
+// renamed or removed (lockMuxTempFile): the lock, not the name, is what tells
+// a sweep the file's writer is alive.
+//
 // A cancelled run takes its temporary file with it too. It used to be kept,
 // under the final name, "for a salvage": FFmpeg killed before its trailer
 // leaves an MP4 with no moov, which nothing plays, while the staging it was
 // muxed from is kept for the next mux.
 func (m *Muxer) writeOutput(ctx context.Context, final string, checks []OutputCheck, write func(tmp string) error) error {
-	tmp := muxTempPath(final)
-	err := write(tmp)
+	tmp, held, err := m.createMuxTemp(final)
+	if err != nil {
+		return fmt.Errorf("create the temporary output: %w", err)
+	}
+	// Closed last, after the rename or the removal: until then the lock says
+	// the file is being written.
+	defer held.Close()
+	err = write(tmp)
 	for _, check := range checks {
 		if err != nil {
 			break
@@ -53,7 +66,13 @@ func (m *Muxer) writeOutput(ctx context.Context, final string, checks []OutputCh
 		err = check(ctx, tmp)
 	}
 	if err == nil {
-		syncFile(tmp)
+		// Flush the finished output to disk before it takes the archive's
+		// name, so a power loss after the rename cannot leave that name on a
+		// file whose bytes never landed — the staging it was muxed from is
+		// deleted once the row reads Finished. Through the handle the lock is
+		// on, which can write (Windows flushes only such a handle); best
+		// effort, the rename happens all the same.
+		_ = held.Sync()
 		// utils.ReplaceFile, not os.Rename: on Windows an indexer or a scanner
 		// still holding the file FFmpeg just closed refuses the rename for a
 		// moment (sweep-2 TOOL-2), and it replaces a final that exists — a
@@ -71,19 +90,60 @@ func (m *Muxer) writeOutput(ctx context.Context, final string, checks []OutputCh
 	return err
 }
 
-// syncFile flushes a finished output to disk before it is renamed into place,
-// so a power loss after the rename cannot leave the archive's name on a file
-// whose bytes never landed — the staging it was muxed from is deleted once
-// the row reads Finished. Best effort: opened read-write because Windows
-// flushes only a handle that can write, and a file that cannot be opened or
-// flushed (a scanner holding it) is renamed all the same.
-func syncFile(path string) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		return
+// errMuxTempHeld is lockMuxTempFile's answer when another open of the file
+// holds its lock: the writer is alive.
+var errMuxTempHeld = errors.New("the temporary output's lock is held")
+
+// lockMuxTemp is lockMuxTempFile, a variable so a test can stand in for a
+// filesystem that cannot lock.
+var lockMuxTemp = lockMuxTempFile
+
+// muxTempCreateAttempts bounds createMuxTemp's tries; each draws a new name.
+const muxTempCreateAttempts = 4
+
+// createMuxTemp creates the temporary output for final and returns it open,
+// with this process holding its lock. The name is a new one each try
+// (muxTempPath): a leftover under it — an earlier run's whose token matched
+// this run's — is never written over, and a file a sweep took between the
+// create and the lock (another process's, which found it unlocked for that
+// moment and removed it) is let go for a fresh one, so FFmpeg never writes a
+// name the lock is not on. On a filesystem where the lock cannot be taken at
+// all the file is written unlocked; the sweep spares such a file until it has
+// sat untouched for muxTempIdleAge.
+func (m *Muxer) createMuxTemp(final string) (string, *os.File, error) {
+	var lastErr error
+	for range muxTempCreateAttempts {
+		tmp := muxTempPath(final)
+		f, err := createMuxTempFile(tmp)
+		if errors.Is(err, fs.ErrExist) {
+			lastErr = err
+			continue
+		}
+		if err != nil {
+			return "", nil, err
+		}
+		lerr := lockMuxTemp(f)
+		if lerr != nil && !errors.Is(lerr, errMuxTempHeld) {
+			m.logger.Debug("cannot lock the temporary output here; it is written unlocked", "path", tmp, "err", lerr)
+			return tmp, f, nil
+		}
+		if lerr == nil && sameFileAsPath(f, tmp) {
+			return tmp, f, nil
+		}
+		f.Close()
+		lastErr = fmt.Errorf("%s was removed before its lock was taken", tmp)
 	}
-	_ = f.Sync()
-	f.Close()
+	return "", nil, lastErr
+}
+
+// sameFileAsPath reports whether path still names the file f has open.
+func sameFileAsPath(f *os.File, path string) bool {
+	held, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	named, err := os.Stat(path)
+	return err == nil && os.SameFile(held, named)
 }
 
 // muxTempMarker is what names a file as an FFmpeg run's temporary output:
@@ -96,15 +156,16 @@ const muxTempMarker = ".moombox-tmp-"
 // units on NTFS, which a UTF-8 byte count never undercounts).
 const muxTempNameMax = 255
 
-// muxRun is this process's run token, and the only thing that tells the boot
-// sweep which temporary outputs are a live run's: four random bytes, drawn
-// once at start. A file wearing another run's token was written by a process
-// that is gone. Only one Moombox child runs at a time — the launcher holds the
-// single-instance lock and starts the next child only once the last has
-// exited — and the FFmpeg a gone child started went with it
-// (internal/childproc). A collision with an earlier run's token is a 1 in 2^32
-// chance per pair of runs, and costs the sweep that leftover until the next
-// start.
+// muxRun is this process's run token: four random bytes, drawn once at
+// start, in the name of every temporary output it writes. It keeps this
+// run's own temporary files out of the boot sweep without opening them, and
+// two runs' files for one archive apart. It is not what tells the sweep
+// another run's file is a leftover — another token is not a gone process: a
+// second Moombox writing to the same output tree under its own data
+// directory, or a child still shutting down after its launcher was killed,
+// writes under its own — the writer's lock is (lockMuxTempFile). A
+// collision with an earlier run's token is a 1 in 2^32 chance per pair of
+// runs, and costs the sweep that leftover until the next start.
 var muxRun = newMuxRun()
 
 // muxTempSeq numbers this run's temporary outputs, so two writes of one final
@@ -166,22 +227,33 @@ func muxTempRunOf(name string) string {
 // (writeOutput), this run's or another's.
 func IsMuxTempPath(path string) bool { return muxTempRunOf(filepath.Base(path)) != "" }
 
+// muxTempIdleAge is how long a temporary output whose lock cannot be tried
+// must have sat untouched before the sweep takes it: a live FFmpeg rewrites
+// its output as it goes, and the checks and the rename after it take
+// seconds, so a day is no run's. The trim sweep trusts the same age.
+const muxTempIdleAge = 24 * time.Hour
+
 // RemoveStaleMuxTemps is the start-up sweep for the temporary outputs a run
 // that is gone left behind — a crash or a kill mid-mux leaves exactly one,
 // beside the archive it was writing. It walks each of trees and reads each of
-// dirs (one level), and removes every regular file named as a temporary
-// output (muxTempMarker) whose run token is not this run's. This run's are
-// never touched, wherever the sweep runs relative to this run's muxes: the
-// token, not a time, is what tells the two apart (see muxRun for why another
-// token is always a gone run's). A root that does not exist is skipped, an
-// entry that cannot be read or removed is skipped, and the first error that
-// stopped a root being read is returned with what was removed.
-func RemoveStaleMuxTemps(trees, dirs []string) (removed []string, err error) {
+// dirs (one level), and removes a regular file named as a temporary output
+// (muxTempMarker) only when its writer is gone: its token is not this run's,
+// and its writer's lock is free (removeStaleMuxTemp). A file whose lock is
+// held is a live run's — another Moombox writing to the same tree, or a child
+// that outlived its launcher — and is returned in live. A root that does not
+// exist is skipped, an entry that cannot be read or removed is skipped, and
+// the first error that stopped a root being read is returned with what was
+// removed.
+func RemoveStaleMuxTemps(trees, dirs []string) (removed, live []string, err error) {
 	sweep := func(path string) {
-		if run := muxTempRunOf(filepath.Base(path)); run != "" && run != muxRun {
-			if os.Remove(path) == nil {
-				removed = append(removed, path)
-			}
+		if run := muxTempRunOf(filepath.Base(path)); run == "" || run == muxRun {
+			return
+		}
+		switch removeStaleMuxTemp(path) {
+		case muxTempRemoved:
+			removed = append(removed, path)
+		case muxTempLive:
+			live = append(live, path)
 		}
 	}
 	note := func(e error) {
@@ -222,5 +294,43 @@ func RemoveStaleMuxTemps(trees, dirs []string) (removed []string, err error) {
 			}
 		}
 	}
-	return removed, err
+	return removed, live, err
+}
+
+// muxTempVerdict is what removeStaleMuxTemp did with one temporary output.
+type muxTempVerdict int
+
+const (
+	muxTempKept    muxTempVerdict = iota // unreadable, too fresh to judge unlocked, or the remove failed
+	muxTempRemoved                       // its writer was gone, and it is
+	muxTempLive                          // its writer holds its lock
+)
+
+// removeStaleMuxTemp removes one temporary output of another run's if its
+// writer is gone. Taking the writer's lock is the proof: the lock goes with
+// the process that held it, however that process ended, and the file is
+// removed while the sweep holds it, so no writer can be on it in between
+// (createMuxTemp lets go of a name it finds gone after its own lock). Where
+// the lock cannot be tried at all, a file untouched for muxTempIdleAge is
+// taken instead.
+func removeStaleMuxTemp(path string) muxTempVerdict {
+	f, err := openMuxTempForSweep(path)
+	if err != nil {
+		return muxTempKept
+	}
+	defer f.Close()
+	switch lerr := lockMuxTemp(f); {
+	case lerr == nil:
+	case errors.Is(lerr, errMuxTempHeld):
+		return muxTempLive
+	default:
+		st, serr := f.Stat()
+		if serr != nil || time.Since(st.ModTime()) < muxTempIdleAge {
+			return muxTempKept
+		}
+	}
+	if os.Remove(path) != nil {
+		return muxTempKept
+	}
+	return muxTempRemoved
 }
