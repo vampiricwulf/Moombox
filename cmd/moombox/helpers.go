@@ -4,13 +4,13 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	isatty "github.com/mattn/go-isatty"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobfilter"
@@ -56,17 +56,51 @@ func effectiveLogLevel(configured, override string) string {
 
 // waitForKeypress waits for a keypress before exiting (prevents .exe window
 // from vanishing on Windows when the process hit a startup error). Matches
-// the TS waitForKeypress() in index.ts — only blocks on a TTY so scripted
-// runs / CI aren't held up.
-func waitForKeypress() {
-	// The prompt comes after the TTY check: under Docker or systemd it would
-	// be a false line in the very log an operator reads after the crash.
-	if !isatty.IsTerminal(os.Stdin.Fd()) {
+// the TS waitForKeypress() in index.ts. ctx is run()'s signal context and
+// interactive is its useTUI; see awaitKeypress.
+func waitForKeypress(ctx context.Context, interactive bool) {
+	awaitKeypress(ctx, interactive, os.Stdin, os.Stderr)
+}
+
+// awaitKeypress is waitForKeypress on any input and output, so its tests need
+// no terminal.
+//
+// It waits only in an interactive session — useTUI: stdin and stdout are
+// terminals and nothing asked for headless. A headless run (-no-tui,
+// -headless, MOOMBOX_NO_TUI, or no terminal at all) returns at once. Checking
+// only that stdin is a terminal was not enough: the Docker image sets
+// MOOMBOX_NO_TUI, and a container started with a TTY (`docker run -t`,
+// compose `tty: true`, no stdin_open) has a terminal on stdin that nothing
+// ever writes to, so a startup error never reached its exit 3 and a restart
+// policy never fired. The prompt comes after the check: under Docker or
+// systemd it would be a false line in the very log an operator reads after
+// the crash.
+//
+// The wait also ends with ctx, which SIGTERM and SIGINT cancel: the signal
+// context caught them, so a blocked read swallowed `docker stop` (the
+// launcher forwards it) until the grace period ran out into a SIGKILL, and
+// Ctrl+C at the prompt did nothing. A blocking read cannot be interrupted, so
+// it runs on its own goroutine, left behind when ctx wins — the caller exits
+// right after.
+func awaitKeypress(ctx context.Context, interactive bool, in io.Reader, out io.Writer) {
+	if !interactive {
 		return
 	}
-	fmt.Fprintln(os.Stderr, "\nPress Enter to exit...")
-	reader := bufio.NewReader(os.Stdin)
-	reader.ReadByte()
+	fmt.Fprintln(out, "\nPress Enter to exit...")
+	pressed := make(chan struct{})
+	go func() {
+		defer close(pressed)
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(out, "keypress wait panic: %v\n", r)
+			}
+		}()
+		_, _ = bufio.NewReader(in).ReadByte()
+	}()
+	select {
+	case <-pressed:
+	case <-ctx.Done():
+	}
 }
 
 // youtubeThumbnailURL returns the maxres thumbnail URL for a YouTube video.

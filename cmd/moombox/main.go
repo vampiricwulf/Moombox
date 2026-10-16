@@ -35,10 +35,10 @@ const exitCodeRestart = 42
 // "this install's environment is wrong", never as "the update is broken": no
 // automatic rollback, no skipped version, the rollback artifact preserved
 // with instructions — and never crash-respawned. Its timing decides nothing
-// (classifyChildExit): the child waits at waitForKeypress before exiting, so
-// how long it ran measures the operator, which once decided both the
-// rollback (CORE-23) and whether a slow keypress was respawned into the same
-// prompt five times.
+// (classifyChildExit): an interactive child waits at waitForKeypress before
+// exiting, so how long it ran measures the operator, which once decided both
+// the rollback (CORE-23) and whether a slow keypress was respawned into the
+// same prompt five times.
 const exitCodeStartupError = 3
 
 func init() {
@@ -248,7 +248,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				s.closeLog()
 			}
 		}
-		waitForKeypress()
+		waitForKeypress(ctx, useTUI)
 		os.Exit(exitCodeStartupError)
 	}
 
@@ -438,9 +438,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				log.Error("Web server failed to start", slog.String("error", err.Error()))
 				fmt.Fprintf(os.Stderr, "\nError: %s\n", err.Error())
 				fmt.Fprintln(os.Stderr, "Web dashboard is unavailable.")
-				waitForKeypress()
 				// Deterministic: the port is taken or the bind address is
-				// unusable on this host. Never "the update is broken".
+				// unusable on this host. Never "the update is broken". And
+				// no keypress wait: this arm is headless, and a headless run
+				// never holds its exit (awaitKeypress).
 				os.Exit(exitCodeStartupError)
 			}
 			log.Warn("Web server failed, continuing in TUI-only mode", slog.String("error", err.Error()))
