@@ -272,7 +272,8 @@ func TestCookiesStatusError(t *testing.T) {
 // pre-flight check for a row cancelled between queuing and execution
 // returned nil, which processJob read as a finished download — it deleted
 // the staging of a job the operator had just cancelled and skipped
-// handleCancellation. It returns ErrCancelled now.
+// handleCancellation. It returns ErrCancelled now; the check is the
+// conditional Downloading write's refusal (orchestrator_entry_cancel_test.go).
 //
 // Mutant: return nil from that branch again.
 func TestExecuteWithChatReportsAnAlreadyCancelledRow(t *testing.T) {

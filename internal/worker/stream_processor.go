@@ -90,10 +90,10 @@ func cancelledResult() *StreamProcessResult {
 }
 
 // writeUnlessOutcome makes a status write decided on an earlier read of the
-// row — the go-live writes — through UpdateJobFieldsUnlessTerminal, and
-// reports whether the row holds an outcome the caller must stop for: the
-// write was refused and a fresh read finds the row terminal (an operator's
-// Cancel that landed since) or gone.
+// row — the go-live writes, an orchestrator's Downloading — through
+// UpdateJobFieldsUnlessTerminal, and reports whether the row holds an
+// outcome the caller must stop for: the write was refused and a fresh read
+// finds the row terminal (an operator's Cancel that landed since) or gone.
 //
 // The write's false alone is not that. UpdateJobFieldsUnlessTerminal reports
 // false for a statement that failed, too — another process holding the

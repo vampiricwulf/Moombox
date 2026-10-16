@@ -1054,10 +1054,12 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		}
 
 		if dlErr != nil {
-			// ErrCancelled: the row was already Cancelled when ExecuteWithChat
-			// started. That early return used to be nil, which this read as a
-			// finished download — it deleted the staging of a job the operator
-			// had just cancelled and might Mux or Resume, and skipped the
+			// ErrCancelled: the orchestrator's first status write found an
+			// outcome on the row — an operator's Cancel that landed before
+			// it, or the row gone — in ExecuteWithChat or ExecuteTwitch alike.
+			// That early return used to be nil, which this read as a finished
+			// download — it deleted the staging of a job the operator had just
+			// cancelled and might Mux or Resume, and skipped the
 			// cancellation's own handling.
 			if ctx.Err() != nil || errors.Is(dlErr, ErrCancelled) {
 				w.handleCancellation(job)

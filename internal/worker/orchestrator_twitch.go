@@ -158,13 +158,27 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// the pipeline after a daemon restart (mirrors the YouTube path) — the
 	// notification "Download Time" fields would otherwise only cover the
 	// post-restart span.
+	//
+	// Written on a row with no outcome only, after the listener above, as
+	// ExecuteWithChat writes its own. An operator's Cancel writes the row
+	// before it cancels the run, so one that landed after processTwitchLive's
+	// Live write — or the whole Cancel, after processJob's last ctx check —
+	// was written over with Downloading, and "Twitch Download Starting" went
+	// out for the job just cancelled. A refusal for the row's outcome stops
+	// here, staging untouched and the chat never started; a write that
+	// failed on a row with none does not (writeUnlessOutcome).
 	twitchUpdates := map[string]any{
 		"status": database.StatusDownloading,
 	}
 	if jobCtx.Job.DownloadStartedAt == "" {
 		twitchUpdates["download_started_at"] = time.Now().UTC().Format(time.RFC3339)
 	}
-	o.db.UpdateJobFields(jobCtx.Job.ID, twitchUpdates)
+	if writeUnlessOutcome(o.db, jobCtx.Job.ID, twitchUpdates) {
+		if twitchChatDl != nil {
+			twitchChatDl.Stop()
+		}
+		return ErrCancelled
+	}
 
 	// Send "Twitch Download Starting" notification
 	if o.notifier != nil {

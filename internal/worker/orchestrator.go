@@ -149,19 +149,12 @@ var errDownloadSetup = errors.New("setup download")
 func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo, isVod bool, existingChat *chat.ChatDownloader) error {
 	o.logger.Info("starting download", "videoID", jobCtx.Job.VideoID, "isVod", isVod)
 
-	// Pre-execution cancellation check — if job was cancelled between queuing and execution.
-	// GetJob returns (nil, nil) when the row was deleted out from under us.
-	if freshJob, err := o.db.GetJob(jobCtx.Job.ID); err == nil && freshJob != nil && freshJob.Status == database.StatusCancelled {
-		if existingChat != nil {
-			existingChat.Stop()
-		}
-		return ErrCancelled
-	}
-
 	// Subscribe to job status changes for cancellation. Job deletion is
 	// handled upstream in processJob (OnJobDeleted registered there covers the
 	// full job lifecycle including this function); cancel() here propagates
-	// through the parent context automatically.
+	// through the parent context automatically. Subscribed BEFORE the status
+	// write below, so a Cancel lands either before it, where the write finds
+	// it, or after it, where this listener hears it.
 	jobCtx2, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -179,14 +172,27 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	ctx = jobCtx2
 
-	// Update status
+	// Update status — on a row with no outcome only. This was decided on
+	// processJob's read of the row, and an operator's Cancel writes the row
+	// before it cancels the run: one that lands after the stream processor's
+	// go-live write, or after processJob's last ctx check, is in the row and
+	// not yet in ctx. The pre-check that stood here read the row and stopped
+	// on Cancelled, and a Cancel that landed between that read and the write
+	// was still written over. A refusal for the row's outcome (Cancelled,
+	// or the row gone) stops the run before "Download Starting" is sent; a
+	// write that failed on a row with none does not (writeUnlessOutcome).
 	updates := map[string]any{
 		"status": database.StatusDownloading,
 	}
 	if jobCtx.Job.DownloadStartedAt == "" {
 		updates["download_started_at"] = time.Now().UTC().Format(time.RFC3339)
 	}
-	o.db.UpdateJobFields(jobCtx.Job.ID, updates)
+	if writeUnlessOutcome(o.db, jobCtx.Job.ID, updates) {
+		if existingChat != nil {
+			existingChat.Stop()
+		}
+		return ErrCancelled
+	}
 
 	// Send "Download Starting" notification
 	if o.notifier != nil {
