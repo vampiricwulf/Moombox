@@ -220,3 +220,103 @@ func TestACancelBeforeTheOrchestratorWriteStands(t *testing.T) {
 		})
 	}
 }
+
+// The same race, with the chat the stream processor left on the row — a
+// Twitch capture's "pending" (processTwitchLive writes it with Live), a
+// YouTube one's early "downloading". The Cancelled row's chat is settled as a
+// user cancel settles it (cancelledChatStatus) whichever of the run's end and
+// CancelJob's flag comes first: the run used to settle it only when the flag
+// was there, and a run that stopped on the row write alone kept the running
+// chat on a Cancelled row, which both UIs render verbatim.
+//
+// Mutant: handleCancellation settling the chat on the flag alone again (the
+// held-back cases read "pending" / "downloading").
+func TestACancelledRowsChatIsSettledWhicheverComesFirst(t *testing.T) {
+	for _, platform := range []string{"youtube", "twitch"} {
+		for _, held := range []bool{false, true} {
+			name := platform + "/flag first"
+			if held {
+				name = platform + "/row write first"
+			}
+			t.Run(name, func(t *testing.T) {
+				w, db := testWorkerSetup(t)
+				rec := notificationtest.New()
+				w.orchestrator.notifier = rec
+				w.notifier = rec
+				id := "pj_chat_" + platform
+				if _, err := db.AddJob(&database.Job{ID: id, VideoID: id, Platform: platform, URL: "https://twitch.tv/streamer",
+					Status: database.StatusUpcoming, Title: "T", ChannelName: "C"}); err != nil {
+					t.Fatal(err)
+				}
+				w.queue.Enqueue(id, database.StatusUpcoming)
+				got, ctx, ok := w.queue.Dequeue(context.Background())
+				if !ok || got != id {
+					t.Fatalf("Dequeue = %q %v", got, ok)
+				}
+
+				cancelWritten := make(chan struct{})
+				released := make(chan struct{})
+				var once sync.Once
+				unsub := db.OnJobUpdate(func(j *database.Job) {
+					if j.ID != id || j.Status != database.StatusCancelled {
+						return
+					}
+					first := false
+					once.Do(func() { first = true; close(cancelWritten) })
+					if first && held {
+						select {
+						case <-released:
+						case <-time.After(5 * time.Second):
+						}
+					}
+				})
+				defer unsub()
+
+				chat, want := "downloading", chatStatusIncomplete
+				if platform == "twitch" {
+					chat, want = "pending", ""
+				}
+				cancelDone := make(chan struct{})
+				var flagged atomic.Bool
+				w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+					db.UpdateJobFieldsUnlessTerminal(id, map[string]any{"status": database.StatusLive, "chat_status": chat})
+					go func() {
+						defer close(cancelDone)
+						_, f := w.CancelJob(id)
+						flagged.Store(f)
+					}()
+					<-cancelWritten
+					if !held {
+						<-cancelDone // the flag is there before the run goes on
+					}
+					if platform == "twitch" {
+						return &StreamProcessResult{ShouldDownload: true,
+							TwitchVariant: &twitch.TwitchHLSVariant{URL: "http://127.0.0.1:1/x.m3u8", Name: "720p"}}, nil
+					}
+					return &StreamProcessResult{ShouldDownload: true,
+						VideoInfo: &youtube.VideoInfo{StreamStatus: youtube.StreamLive, IsLive: true}}, nil
+				}
+				w.processJob(ctx, id)
+				close(released)
+				<-cancelDone
+
+				row, _ := db.GetJob(id)
+				if row == nil || row.Status != database.StatusCancelled || row.ChatStatus != want {
+					t.Errorf("row = %+v, want Cancelled with chat_status %q", row, want)
+				}
+				// Flagged first, the run reports the Cancel; held back, the run
+				// has settled and CancelJob's caller (the route, the TUI) does.
+				if flagged.Load() == held {
+					t.Errorf("CancelJob flagged = %v, want %v", flagged.Load(), !held)
+				}
+				wantSent := 1
+				if held {
+					wantSent = 0
+				}
+				if n := len(rec.ByEvent("cancelled")); n != wantSent {
+					t.Errorf("the run sent %d Job Cancelled, want %d", n, wantSent)
+				}
+			})
+		}
+	}
+}

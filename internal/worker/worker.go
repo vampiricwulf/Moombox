@@ -1436,22 +1436,36 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 	// (no DB write), so the free-slot-before-DB-writes ordering below holds.
 	userCancelled := w.queue.WasCancelled(job.ID)
 
+	// Written while the run is still registered: a Retry/Resume/Reinitialize
+	// clicked while this run unwound waits for its Done (afterJobExit), which
+	// only processJob's deferred Complete closes, and a Mux is refused until
+	// then (muxJob). And on a row that still reads Cancelled only: CancelJob
+	// wrote that status before it flagged this run, and every write the run
+	// makes after it is conditional, so an unconditional one here re-asserted
+	// nothing and could only land on another actor's write — a Finished
+	// archive a Mux of the Cancelled row made while this run unwound.
+	//
+	// The chat is settled on the row's Cancel whether or not the flag is
+	// here. CancelJob's row write runs its subscribers ahead of queue.Cancel,
+	// and a run can stop on that write alone — its conditional go-live or
+	// Downloading write refused — and reach this point with no flag; the
+	// Cancel's caller reports it then (settle), and the row kept the
+	// "pending" or "downloading" both UIs render verbatim. Without the flag
+	// the write is made only when there is a chat to settle: a shutdown's
+	// row keeps its state, and a deleted row has none.
+	var updates map[string]any
 	if userCancelled {
-		// Written while the run is still registered: a Retry/Resume/
-		// Reinitialize clicked while this run unwound waits for its Done
-		// (afterJobExit), which only processJob's deferred Complete closes,
-		// and a Mux is refused until then (muxJob). And on a row that still
-		// reads Cancelled only: CancelJob wrote that status before it flagged
-		// this run, and every write the run makes after it is conditional, so
-		// an unconditional one here re-asserted nothing and could only land
-		// on another actor's write — a Finished archive a Mux of the
-		// Cancelled row made while this run unwound.
-		updates := map[string]any{"status": database.StatusCancelled}
-		if fresh, err := w.db.GetJob(job.ID); err == nil && fresh != nil {
-			if cs, ok := cancelledChatStatus(fresh.ChatStatus); ok {
-				updates["chat_status"] = cs
+		updates = map[string]any{"status": database.StatusCancelled}
+	}
+	if fresh, err := w.db.GetJob(job.ID); err == nil && fresh != nil && (userCancelled || fresh.Status == database.StatusCancelled) {
+		if cs, ok := cancelledChatStatus(fresh.ChatStatus); ok {
+			if updates == nil {
+				updates = map[string]any{}
 			}
+			updates["chat_status"] = cs
 		}
+	}
+	if updates != nil {
 		w.db.UpdateJobFieldsIf(job.ID, database.StatusCancelled, updates)
 	}
 
@@ -1468,8 +1482,10 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 	} else {
 		// Shutdown: the existing status stays so the job resumes on restart.
 		// Or the row was deleted (processJob's OnJobDeleted listener cancels
-		// the same ctx), and there is nothing left to write.
-		w.logger.Info("job interrupted (shutdown or row deleted), leaving its state as is", "jobID", job.ID)
+		// the same ctx), and there is nothing left to write. Or the row's
+		// Cancel stopped the run ahead of its flag, and only its chat was
+		// settled above.
+		w.logger.Info("job interrupted (shutdown, row deleted, or a Cancel not yet flagged), leaving its state as is", "jobID", job.ID)
 	}
 }
 
