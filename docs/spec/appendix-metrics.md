@@ -1,8 +1,8 @@
 # Appendix: Project Metrics
 
-> **Last verified:** 2026-10-10
+> **Last verified:** 2026-10-16
 >
-> The Package Scale table and the Totals were regenerated on 2026-10-10: the table with the script below, the Totals by the same count (`wc -l` per file) over the tracked files (`git ls-files`; `web/public/` less `vendor/`). Since the 2026-10-04 pass two packages were added — `internal/redact` and `internal/sqliteuri` — and none removed; `internal/worker` grew from 39 to 53 source files (among them the disk-full admission gate, channel removal, backlog retry, the VOD supersede and slot wait, the Twitch end-unconfirmed park and the output claims), `internal/updater` gained the signed release manifest, `internal/logger` (1 to 3), `internal/disk` (3 to 5), `internal/cookies` (35 to 37), `internal/tui` (43 to 45) and `internal/web/routes` (25 to 26) gained files, and `internal/utils` and `internal/twitch` each lost one. The Runtime, Test Baseline (the package count and the two packages without tests) and Key Dependencies sections were checked against the tree the same day.
+> The Package Scale table and the Totals were regenerated on 2026-10-16: the table with the script below, the Totals by the same count (`wc -l` per file) over the tracked files (`git ls-files`; `web/public/` less `vendor/`). Since the 2026-10-10 pass one package was added — `internal/treeguard`, the test-only guard every tested package's `TestMain` runs through — and none removed; with it every tested package gained a test file (its `TestMain`, or the guard folded into the one it had). `internal/worker` (53 to 54) and `internal/config` (7 to 8) gained source files, and every package's test-file count was recounted: `internal/cookies` holds 93, not 91, and `cmd/` 95, not 85. The Runtime, Test Baseline (the package count and the two packages without tests) and Key Dependencies sections were checked against the tree the same day.
 >
 > These metrics are volatile — they drift as development continues. Update this file periodically.
 >
@@ -51,47 +51,48 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 
 | Package | Source Lines | Src Files | Test Files | Description |
 |---------|-------------|-----------|------------|-------------|
-| tui/ | ~25,430 | 45 | 126 | Largest — 2-over-1 panel layout, overlays, chord system |
-| worker/ | ~23,110 | 53 | 123 | Download orchestration, strategies, queue, quality monitor, disk-full gate, channel removal |
-| cookies/ | ~16,370 | 37 | 91 | Cookie jar, refresh, auto-cookie (Firefox/Chromium), Job Object |
-| web/routes/ | ~9,550 | 26 | 80 | REST handlers (jobs, config, stats, output, staging, cookies, import) |
-| engine/ | ~8,670 | 20 | 53 | Segment downloader (DASH/HLS/VOD), manifest, resume, eviction probe, reorder budget |
-| twitch/ | ~7,470 | 13 | 45 | Twitch GQL API, auth, HLS, IRC chat, VOD chat, emotes |
-| youtube/ | ~6,480 | 13 | 19 | YouTube service, player API, format selector, membership tab |
-| monitor/ | ~5,440 | 9 | 15 | Feed (RSS), DECAPI, Twitch monitors, archive scheduling, backfill |
-| notifications/ | ~4,720 | 11 | 27 | Manager + Discord webhook, batching, edit-mode message ids |
-| database/ | ~4,650 | 8 | 20 | SQLite/WAL, migrations, synchronous writes, pub/sub |
-| web/ | ~4,610 | 9 | 24 | chi router, WebSocket, auth, middleware, embed, folder-open composer |
-| chat/ | ~3,290 | 3 | 23 | YouTube live chat downloader (polling + batching) |
-| cipher/ | ~3,190 | 13 | 12 | YouTube signature cipher: sidecar-routed + goja fallback |
-| config/ | ~2,920 | 7 | 15 | TOML config, FlexDuration, channel terms, migrations |
-| utils/ | ~2,910 | 25 | 28 | HTTP helpers, formatters, YouTube URL parsing, JSON, DACL, resolution cap, canonical paths |
+| tui/ | ~26,000 | 45 | 130 | Largest — 2-over-1 panel layout, overlays, chord system |
+| worker/ | ~23,600 | 54 | 128 | Download orchestration, strategies, queue, quality monitor, disk-full gate, channel removal |
+| cookies/ | ~16,670 | 37 | 93 | Cookie jar, refresh, auto-cookie (Firefox/Chromium), Job Object |
+| web/routes/ | ~9,720 | 26 | 81 | REST handlers (jobs, config, stats, output, staging, cookies, import) |
+| engine/ | ~8,670 | 20 | 54 | Segment downloader (DASH/HLS/VOD), manifest, resume, eviction probe, reorder budget |
+| twitch/ | ~7,470 | 13 | 46 | Twitch GQL API, auth, HLS, IRC chat, VOD chat, emotes |
+| youtube/ | ~6,960 | 13 | 24 | YouTube service, player API, format selector, membership tab |
+| monitor/ | ~5,900 | 9 | 19 | Feed (RSS), DECAPI, Twitch monitors, archive scheduling, backfill |
+| notifications/ | ~4,850 | 11 | 29 | Manager + Discord webhook, batching, edit-mode message ids |
+| database/ | ~4,820 | 8 | 23 | SQLite/WAL, migrations, synchronous writes, pub/sub |
+| web/ | ~4,630 | 9 | 25 | chi router, WebSocket, auth, middleware, embed, folder-open composer |
+| chat/ | ~3,290 | 3 | 24 | YouTube live chat downloader (polling + batching) |
+| cipher/ | ~3,190 | 13 | 13 | YouTube signature cipher: sidecar-routed + goja fallback |
+| config/ | ~3,060 | 8 | 18 | TOML config, FlexDuration, channel terms, migrations |
+| utils/ | ~2,910 | 25 | 29 | HTTP helpers, formatters, YouTube URL parsing, JSON, DACL, resolution cap, canonical paths |
 | bgutils/ | ~2,180 | 6 | 11 | PO token: PotProvider, Challenge, BotGuard, WebPoMinter (goja path) |
 | bgutils/sidecar/ | ~2,100 | 7 | 13 | Node subprocess manager: extract, JSON-RPC mux, Job Object pinning |
-| goja/ | ~1,510 | 5 | 12 | JS runtime shims (minimal DOM, timers, encoding) |
-| updater/ | ~1,370 | 4 | 7 | GitHub release checker, self-updater, Ed25519, signed release manifest |
-| cookies/dpapi/ | ~1,110 | 6 | 8 | Windows DPAPI decryption for browser cookie stores |
-| logger/ | ~970 | 3 | 3 | slog wrapper, file rotation, ring buffer, pub/sub |
-| redact/ | ~540 | 4 | 3 | One redaction rule per kind of secret for error text, log lines and notifications — a media URL's credentials (a googlevideo URL's client IP, signatures and GVS PO token in both its URL forms; the playback session a Twitch weaver playlist's or edge segment's path spells), a credential inside a URL |
-| jobfilter/ | ~500 | 2 | 4 | Dashboard filter language (Go twin of `filter-parser.js`/`filter-engine.js`), used by the TUI's `/` filter box |
-| connectivity/ | ~500 | 3 | 3 | Reachability monitor; gates stream-end verdicts during outages |
+| goja/ | ~1,510 | 5 | 13 | JS runtime shims (minimal DOM, timers, encoding) |
+| updater/ | ~1,370 | 4 | 8 | GitHub release checker, self-updater, Ed25519, signed release manifest |
+| cookies/dpapi/ | ~1,110 | 6 | 9 | Windows DPAPI decryption for browser cookie stores |
+| logger/ | ~970 | 3 | 4 | slog wrapper, file rotation, ring buffer, pub/sub |
+| redact/ | ~540 | 4 | 4 | One redaction rule per kind of secret for error text, log lines and notifications — a media URL's credentials (a googlevideo URL's client IP, signatures and GVS PO token in both its URL forms; the playback session a Twitch weaver playlist's or edge segment's path spells), a credential inside a URL |
+| connectivity/ | ~500 | 3 | 4 | Reachability monitor; gates stream-end verdicts during outages |
+| jobfilter/ | ~500 | 2 | 5 | Dashboard filter language (Go twin of `filter-parser.js`/`filter-engine.js`), used by the TUI's `/` filter box |
+| constants/ | ~360 | 1 | 3 | Hardcoded values (client configs, UAs, URLs) |
 | childproc/ | ~360 | 4 | 4 | FFmpeg and ffprobe started tied to the process that runs them (Pdeathsig on a locked thread on Linux, a kill-on-close Job Object of the child's own on Windows) |
-| ytdlpplugin/ | ~350 | 1 | 1 | yt-dlp PO-token plugin status/install — shared by the dashboard's Integrations card and the TUI's E Y overlay |
-| constants/ | ~310 | 1 | 2 | Hardcoded values (client configs, UAs, URLs) |
-| disk/ | ~200 | 5 | 4 | Disk space queries: kernel32 on Windows, statfs on Linux |
-| notifications/notificationtest/ | ~180 | 1 | 1 | Shared fakes for the notification manager's tests |
-| httpx/ | ~110 | 1 | 1 | Shared keep-alive-tuned http.Client/Transport shapes |
-| bgutils/embed/ | ~80 | 4 | 1 | go:embed boundary for the Node binaries + sidecar tarball |
-| stats/ | ~80 | 1 | 1 | Figures shared by the Web Stats tab and the TUI's E T overlay — job aggregates, disk reading |
-| webtest/ | ~70 | 1 | 1 | Shared goja harness for evaluating shipped Web UI JS (`settings.js`) from Go tests |
-| sqliteuri/ | ~30 | 1 | 1 | The `file:` URI every SQLite open goes through — the job database and the browsers' cookie databases |
+| ytdlpplugin/ | ~350 | 1 | 2 | yt-dlp PO-token plugin status/install — shared by the dashboard's Integrations card and the TUI's E Y overlay |
+| treeguard/ | ~200 | 1 | 1 | Test-only: every tested package's `TestMain` runs through `Run`, which fails a run that leaves files in the package directory |
+| disk/ | ~200 | 5 | 5 | Disk space queries: kernel32 on Windows, statfs on Linux |
+| notifications/notificationtest/ | ~180 | 1 | 2 | Shared fakes for the notification manager's tests |
+| httpx/ | ~110 | 1 | 2 | Shared keep-alive-tuned http.Client/Transport shapes |
+| bgutils/embed/ | ~80 | 4 | 2 | go:embed boundary for the Node binaries + sidecar tarball |
+| stats/ | ~80 | 1 | 2 | Figures shared by the Web Stats tab and the TUI's E T overlay — job aggregates, disk reading |
+| webtest/ | ~70 | 1 | 2 | Shared goja harness for evaluating shipped Web UI JS (`settings.js`) from Go tests |
+| sqliteuri/ | ~30 | 1 | 2 | The `file:` URI every SQLite open goes through — the job database and the browsers' cookie databases |
 
 ### Totals
 
-- **cmd/:** ~10,390 lines across 27 source files (26 in `cmd/moombox` — entry/launcher/adapters/wiring — plus the sign tool), plus 85 test files (~12,680 lines)
-- **internal/ packages:** ~140,980 lines across 348 source files in 33 packages
-- **Test code:** ~204,670 lines across 780 test files under `internal/` (`internal/docs`'s two included)
-- **Frontend:** ~23,440 lines across 27 files (~980 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 20 ES modules under `web/public/modules/` (`chat-timeline.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
+- **cmd/:** ~10,670 lines across 27 source files (26 in `cmd/moombox` — entry/launcher/adapters/wiring — plus the sign tool), plus 95 test files (~13,940 lines)
+- **internal/ packages:** ~144,180 lines across 351 source files in 34 packages
+- **Test code:** ~212,630 lines across 833 test files under `internal/` (`internal/docs`'s three included)
+- **Frontend:** ~23,650 lines across 27 files (~990 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 20 ES modules under `web/public/modules/` (`chat-timeline.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
 
 ## Entry Points
 

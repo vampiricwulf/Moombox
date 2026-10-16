@@ -183,43 +183,45 @@ All monitor `OnVideoFound`/`OnStreamFound` callbacks are wrapped with `defer fun
 ## Package Dependency Graph
 
 ```
-cmd/moombox/ (24 files)                -- launcher + orchestrator (~8,550 lines)
-cmd/sign/main.go                       -- CI signing tool (Ed25519)
+cmd/moombox/                 -- launcher + orchestrator
+cmd/sign/main.go             -- CI signing tool (Ed25519)
 
-internal/config     (7 files, ~2,490)  -- TOML config, FlexDuration, channel terms
-internal/updater    (3 files, ~870)    -- GitHub release checker + self-updater + Ed25519
-internal/ytdlpplugin (1 file,  ~330)   -- yt-dlp plugin file: status, install, generator (shared by the web route and the TUI E Y overlay)
-internal/logger     (1 file,  ~760)    -- slog wrapper, file rotation, ring buffer, pub/sub
-internal/database   (8 files, ~4,110)  -- SQLite/WAL, synchronous writes, pub/sub
-internal/stats      (1 file,  ~70)     -- the figures both dashboards show, derived from the job aggregate + disk reading (imports only database)
-internal/jobfilter  (2 files, ~470)    -- the dashboard's filter language (Parse/Match/Serialize), the TUI's / box
-internal/cookies    (35 files, ~15,870) -- jar, refresh, auto-cookie (Firefox/Chromium)
-internal/youtube    (13 files, ~6,710) -- Service, PlayerAPI, Auth, watch page, format selector
-internal/twitch    (14 files, ~6,410)  -- Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes
-internal/bgutils   (6 files, ~2,050)   -- PO token: PotProvider + WebPoClient (sidecar; goja when it is turned off)
-internal/bgutils/sidecar (7 files,~1,880) -- Node subprocess manager: extract, JSON-RPC mux, Job Object
-internal/bgutils/embed   (4 files)      -- go:embed boundary for node-windows-amd64.gz + node-linux-amd64.gz + node-linux-arm64.gz + sidecar.tar.gz + version.txt
-internal/cipher     (13 files, ~3,110) -- YouTube signature cipher: AST + regex, 10-VM LRU
-internal/engine    (20 files, ~8,170)  -- SegmentDownloader (DASH/HLS/VOD), manifest, FFmpeg muxer
-internal/chat       (3 files, ~3,030)  -- YouTube live chat downloader (polling + batching)
-internal/worker    (39 files, ~18,070) -- Worker, Orchestrator, StreamProcessor, Queue, Trim, Quality
-internal/monitor    (9 files, ~5,090)  -- FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
-internal/notif.    (11 files, ~3,790)  -- Manager + Discord webhook, batching, edit-mode message ids
-internal/web       (34 files, ~11,750) -- chi router, WebSocket hub, auth, middleware (9 files) + routes/ (25 files)
-internal/tui       (44 files, ~23,240) -- 2-over-1 panel layout, overlays, chord system
-internal/goja       (5 files, ~1,470)  -- JS runtime shims (minimal DOM, TextEncoder, timers)
-internal/connectivity (3 files, ~480)  -- reachability monitor (plain TCP dial); gates stream-end verdicts during outages
-internal/httpx      (1 file,  ~110)    -- shared keep-alive-tuned http.Client/Transport shapes
-internal/sqliteuri  (1 file,  ~30)     -- the "file:" URI every SQLite open goes through (job database, browser cookie databases)
-internal/redact     (4 files, ~540)    -- one redaction rule per kind of secret, for error text, log lines and notifications (a googlevideo or Twitch media URL's credentials, the GVS PO token, a credential inside a URL)
-internal/childproc  (4 files, ~360)    -- FFmpeg and ffprobe started tied to the process that runs them: Pdeathsig on a locked thread (Linux), a kill-on-close Job Object of the child's own (Windows)
-internal/disk       (3 files, ~130)    -- Disk space queries: kernel32 on Windows, statfs on Linux
-internal/constants  (1 file,  ~320)    -- Hardcoded values (API keys, URLs, timeouts)
-internal/utils     (26 files, ~2,590)  -- HTTP helpers, formatters, YouTube URL parsing
-internal/treeguard                     -- test-only: every tested package's TestMain runs through it, failing a run that leaves files in the package directory
+internal/config              -- TOML config, FlexDuration, channel terms
+internal/updater             -- GitHub release checker + self-updater + Ed25519
+internal/ytdlpplugin         -- yt-dlp plugin file: status, install, generator (shared by the web route and the TUI E Y overlay)
+internal/logger              -- slog wrapper, file rotation, ring buffer, pub/sub
+internal/database            -- SQLite/WAL, synchronous writes, pub/sub
+internal/stats               -- the figures both dashboards show, derived from the job aggregate + disk reading (imports only database)
+internal/jobfilter           -- the dashboard's filter language (Parse/Match/Serialize), the TUI's / box
+internal/cookies             -- jar, refresh, auto-cookie (Firefox/Chromium)
+internal/cookies/dpapi       -- Windows DPAPI decryption for browser cookie stores
+internal/youtube             -- Service, PlayerAPI, Auth, watch page, format selector
+internal/twitch              -- Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes
+internal/bgutils             -- PO token: PotProvider + WebPoClient (sidecar; goja when it is turned off)
+internal/bgutils/sidecar     -- Node subprocess manager: extract, JSON-RPC mux, Job Object
+internal/bgutils/embed       -- go:embed boundary for node-windows-amd64.gz + node-linux-amd64.gz + node-linux-arm64.gz + sidecar.tar.gz + version.txt
+internal/cipher              -- YouTube signature cipher: AST + regex, 10-VM LRU
+internal/engine              -- SegmentDownloader (DASH/HLS/VOD), manifest, FFmpeg muxer
+internal/chat                -- YouTube live chat downloader (polling + batching)
+internal/worker              -- Worker, Orchestrator, StreamProcessor, Queue, Trim, Quality
+internal/monitor             -- FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
+internal/notifications       -- Manager + Discord webhook, batching, edit-mode message ids
+internal/web                 -- chi router, WebSocket hub, auth, middleware
+internal/web/routes          -- REST handlers
+internal/tui                 -- 2-over-1 panel layout, overlays, chord system
+internal/goja                -- JS runtime shims (minimal DOM, TextEncoder, timers)
+internal/connectivity        -- reachability monitor (plain TCP dial); gates stream-end verdicts during outages
+internal/httpx               -- shared keep-alive-tuned http.Client/Transport shapes
+internal/sqliteuri           -- the "file:" URI every SQLite open goes through (job database, browser cookie databases)
+internal/redact              -- one redaction rule per kind of secret, for error text, log lines and notifications (a googlevideo or Twitch media URL's credentials, the GVS PO token, a credential inside a URL)
+internal/childproc           -- FFmpeg and ffprobe started tied to the process that runs them: Pdeathsig on a locked thread (Linux), a kill-on-close Job Object of the child's own (Windows)
+internal/disk                -- Disk space queries: kernel32 on Windows, statfs on Linux
+internal/constants           -- Hardcoded values (API keys, URLs, timeouts)
+internal/utils               -- HTTP helpers, formatters, YouTube URL parsing
+internal/treeguard           -- test-only: every tested package's TestMain runs through it, failing a run that leaves files in the package directory
 ```
 
-Total: approximately 124,400 lines of Go across 325 source files under `internal/` (excluding tests, web assets, and `cmd/`). `appendix-metrics.md` is the maintained copy of these numbers and carries the script that regenerates them.
+The tree carries no file or line counts: [appendix-metrics.md](appendix-metrics.md) § Package Scale is their one copy, with the script that regenerates it, and the Totals beside it give the module's figures.
 
 ### Dependency Direction
 

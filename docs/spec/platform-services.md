@@ -1352,10 +1352,10 @@ Resume state is saved after each disk flush. On restart, the downloader loads th
 - `security.md` -- Auth tokens, CSRF for API calls, cookie security.
 
 ### Source Files
-- `internal/youtube/` -- Service facade, PlayerAPI (strategy + parsing), Auth, WatchPage, Browse, FormatSelector, Types (13 files, ~6,700 lines).
-- `internal/twitch/` -- Service, API, Auth, HLS, Chat (IRC + recording + file), VodChat, Emotes, PlaybackToken, LivenessProbe, Delays, Types (14 files, ~6,400 lines).
-- `internal/bgutils/` -- PotProvider, WebPoClient, Challenge, BotGuard, WebPoMinter, Types (6 files, ~2,050 lines; the sidecar manager is the `sidecar/` subpackage, 7 files, ~1,900 lines).
-- `internal/cipher/` -- Solver, PlayerCache, Extractor, STS, Decrypt, ResolveURL, sidecar routing, Types (13 files, ~3,100 lines).
-- `internal/goja/` -- Runtime, DOMShim, Encoding, Timer (5 files, ~1,500 lines).
-- `internal/chat/` -- Downloader, API, Types (3 files, ~3,000 lines).
+- `internal/youtube/` -- Service facade, PlayerAPI (strategy + parsing), Auth, WatchPage, Browse, FormatSelector, Types (13 files, ~6,960 lines).
+- `internal/twitch/` -- Service, API, Auth, HLS, Chat (IRC + recording), VodChat, Emotes, PlaybackToken, LivenessProbe, Delays, Types (13 files, ~7,470 lines).
+- `internal/bgutils/` -- PotProvider, WebPoClient, Challenge, BotGuard, WebPoMinter, Types (6 files, ~2,180 lines; the sidecar manager is the `sidecar/` subpackage, 7 files, ~2,100 lines).
+- `internal/cipher/` -- Solver, PlayerCache, Extractor, STS, Decrypt, ResolveURL, sidecar routing, Types (13 files, ~3,190 lines).
+- `internal/goja/` -- Runtime, DOMShim, Encoding, Timer (5 files, ~1,510 lines).
+- `internal/chat/` -- Downloader, API, Types (3 files, ~3,290 lines).
 - `internal/constants/constants.go` -- All API keys, URLs, client configs, timeouts, limits.

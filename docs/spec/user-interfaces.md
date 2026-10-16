@@ -1188,6 +1188,6 @@ Some routes apply additional per-route middleware:
 
 - **`internal/web/`** — HTTP server, middleware, WebSocket hub, auth service.
 - **`internal/web/routes/`** — All REST API route handlers, organized by domain (auth, jobs, cookies, update, ffmpeg, stats, files, ytdlp).
-- **`internal/tui/`** — All TUI source files (45 non-test files, ~25,010 lines; see §Source Files).
+- **`internal/tui/`** — All TUI source files (45 non-test files, ~26,000 lines; see §Source Files).
 - **`web/public/`** — All static web assets (HTML, JS, CSS).
 - **`web/embed.go`** — `go:embed` directive for static assets.
