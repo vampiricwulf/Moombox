@@ -4,6 +4,6 @@
   "type": "module",
   "description": "Dev-only harness deps for the Moombox frontend test suites (node --test web/tests/*.test.mjs). jsdom is needed only by the DOM suites (listed in README.md); the pure suites run without it.",
   "devDependencies": {
-    "jsdom": "^30.0.1"
+    "jsdom": "^30.1.2"
   }
 }
