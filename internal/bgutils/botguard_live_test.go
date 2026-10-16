@@ -5,26 +5,36 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
-// TestBotGuardLiveFingerprint runs the full PO-token generation flow against
-// the real Google attestation endpoint. The test SKIPS unless
-// MOOMBOX_LIVE_BG_TEST=1 is set in the environment, so it never runs by
-// default (which would spam Google's WAA endpoint and require network).
+// TestBotGuardLiveFingerprint runs the full goja PO-token generation flow
+// against the real Google attestation endpoint. The test SKIPS unless
+// MOOMBOX_LIVE_GOJA_TEST=1 is set in the environment, so it never runs by
+// default (which would spam Google's WAA endpoint and require network):
 //
-// Owner enabled this knob during the BotGuard fingerprint investigation to
-// validate test.49's prototype-chain fix end-to-end:
-//
-//	$env:MOOMBOX_LIVE_BG_TEST="1"; go test -v -run TestBotGuardLive ./internal/bgutils/...
+//	$env:MOOMBOX_LIVE_GOJA_TEST="1"; go test -v -run TestBotGuardLive ./internal/bgutils/
 //
 // PASS = real integrity token (non-empty IntegrityToken, BotGuard accepted
 // our environment). FAIL = websafe-only fallback (BotGuard declined).
 //
+// It is EXPECTED TO FAIL today: BotGuard's timing check rejects the goja
+// path, which is why the sidecar is the default. It has its own knob, not
+// MOOMBOX_LIVE_BG_TEST, so the sidecar's live checks under that one can be
+// all green and a red line there always means something; run this one when
+// porting BotGuard protocol changes into the goja fallback. TestMain keeps
+// this package off the network unless MOOMBOX_LIVE_BG_TEST is set, so the
+// test installs a live client of its own for its run.
+//
 // Day 6 enhancements: timing per phase + console-message dump.
 func TestBotGuardLiveFingerprint(t *testing.T) {
-	if os.Getenv("MOOMBOX_LIVE_BG_TEST") != "1" {
-		t.Skip("set MOOMBOX_LIVE_BG_TEST=1 to run the live BotGuard fingerprint check")
+	if os.Getenv("MOOMBOX_LIVE_GOJA_TEST") != "1" {
+		t.Skip("set MOOMBOX_LIVE_GOJA_TEST=1 to run the live goja BotGuard check (expected to fail while BotGuard rejects goja)")
 	}
+	prev := bgHTTPClient
+	bgHTTPClient = httpx.Client(30 * time.Second)
+	t.Cleanup(func() { bgHTTPClient = prev })
 
 	logger := &testBGLogger{t: t}
 	cfg := &BgConfig{

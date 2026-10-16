@@ -173,7 +173,11 @@ cd .. && cd bgutil-sidecar && node build.mjs
 
 # 3. Run BotGuard test suite:
 cd D:/Git/Moombox && go test -count=1 ./internal/bgutils/...
-MOOMBOX_LIVE_BG_TEST=1 go test -count=1 -timeout 180s -run "TestBotGuardLive\|TestSidecarLive" ./internal/bgutils/...
+# Live sidecar checks (all should pass; -run is an RE2 regex, so a bare |):
+MOOMBOX_LIVE_BG_TEST=1 go test -count=1 -timeout 180s -run "TestSidecarLive|TestSidecarFallsBackOnDeath" ./internal/bgutils/...
+# Live goja check, its own knob: EXPECTED TO FAIL while BotGuard's timing
+# check rejects goja. Run it when porting protocol changes into step 4.
+MOOMBOX_LIVE_GOJA_TEST=1 go test -count=1 -timeout 180s -run TestBotGuardLive ./internal/bgutils/
 
 # 4. Port equivalent changes to internal/bgutils/{botguard,webpo_client,
 #    webpo_minter}.go if the BotGuard protocol changed. The goja

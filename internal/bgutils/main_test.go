@@ -13,7 +13,8 @@ import (
 // running time to the network. Every BotGuard request goes through
 // bgHTTPClient, which now refuses at once unless MOOMBOX_LIVE_BG_TEST=1 asks
 // for the live checks. A test that needs a particular answer still installs
-// its own client and restores this one.
+// its own client and restores this one, as the goja live check does under its
+// own MOOMBOX_LIVE_GOJA_TEST.
 func TestMain(m *testing.M) {
 	if os.Getenv("MOOMBOX_LIVE_BG_TEST") != "1" {
 		bgHTTPClient = &http.Client{Transport: refusingTransport{}}
