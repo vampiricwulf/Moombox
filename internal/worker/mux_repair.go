@@ -48,9 +48,11 @@ import (
 // stagedRepairSuffix names the repaired copy of a staged recording, written
 // beside it: "<file>.moombox-repair". Not a name discoverStagingMedia knows,
 // nor a set-aside one (engine.IsStagedRestartPath wants digits after the
-// stamp), so no scan mistakes it for a recording; it is removed once the copy
-// that read it is done, and a crash's leftover is truncated by the next
-// repair of the same file or goes with the staging dir.
+// stamp), so no scan mistakes it for a recording. It is removed once the copy
+// that read it is done; one left behind — the process died mid-mux, or the
+// removal failed — is removed by the next repair of the same file before it
+// counts the free space, by the job's staging cleanup, and by the boot sweep
+// (removeStaleRepairedCopies), so it never sits in shielded staging.
 const stagedRepairSuffix = ".moombox-repair"
 
 // muxGapRecordSuffix names the record a mux leaves beside a staged recording
@@ -336,7 +338,21 @@ func (o *DownloadOrchestrator) walkStagedInput(ctx context.Context, jobID, path 
 func (o *DownloadOrchestrator) writeRepairedCopy(ctx context.Context, jobID string, in *stagedInput) error {
 	dst := in.path + stagedRepairSuffix
 	need := in.walk.RepairedSize()
-	if ds, err := repairDiskSpace(filepath.Dir(dst)); err == nil && ds.Free < uint64(need)+repairHeadroom {
+	// A repaired copy of this file an earlier mux left — the process died
+	// before it removed it, or the removal failed — is the file this one
+	// truncates: its bytes are no claim on the volume. Counted as used, it
+	// refused every retry on a volume with room for one copy, pointing at
+	// nothing. Removed first, or credited when it will not go.
+	var leftover uint64
+	if info, err := os.Stat(dst); err == nil && info.Mode().IsRegular() {
+		switch err := os.Remove(dst); {
+		case err == nil:
+			o.logger.Info("removed a repaired copy an earlier mux left beside a staged recording", "path", dst, "jobID", jobID)
+		case !os.IsNotExist(err):
+			leftover = uint64(info.Size())
+		}
+	}
+	if ds, err := repairDiskSpace(filepath.Dir(dst)); err == nil && ds.Free+leftover < uint64(need)+repairHeadroom {
 		return fmt.Errorf("the staged %s has %d damaged stretch(es) to leave out, and the repaired copy it is muxed from needs %s free on the staging volume, which has %s — staging is preserved; free some space and re-run the Mux action",
 			filepath.Base(in.path), len(in.walk.Drops), utils.FormatFileSize(need+repairHeadroom), utils.FormatFileSize(int64(ds.Free)))
 	}
@@ -355,8 +371,8 @@ func (o *DownloadOrchestrator) writeRepairedCopy(ctx context.Context, jobID stri
 }
 
 // removeRepairedCopies removes the repaired copies a copy read. A removal
-// that fails leaves one behind in staging, which the next repair of the same
-// file truncates.
+// that fails leaves one behind in staging, for the job's staging cleanup and
+// the boot sweep to try again (removeStaleRepairedCopies).
 func (o *DownloadOrchestrator) removeRepairedCopies(jobID string, ins *stagedInputs) {
 	for _, in := range ins.list() {
 		if in.read == in.path {
@@ -365,6 +381,44 @@ func (o *DownloadOrchestrator) removeRepairedCopies(jobID string, ins *stagedInp
 		if err := os.Remove(in.read); err != nil && !os.IsNotExist(err) {
 			o.logger.Warn("could not remove the repaired copy of a staged recording; it stays in staging",
 				"path", in.read, "err", err, "jobID", jobID)
+		}
+	}
+}
+
+// removeStaleRepairedCopies removes every repaired copy (stagedRepairSuffix)
+// in a job's staging tree — the root and each seg_N dir, tombstoned ones
+// included. A repaired copy is derived from the staged recording beside it,
+// which a repair never touches, so removing one loses nothing; the caller
+// makes sure no copy is reading it — the boot sweep under the job's staging
+// claim, the staging cleanup once the job's own copies are done. Without
+// this one a mux killed mid-copy (a restart, a self-update) left a copy the
+// size of the recording in staging its mux-gap record keeps for good.
+func (w *DownloadWorker) removeStaleRepairedCopies(jobID, stagingDir string) {
+	if stagingDir == "" {
+		return
+	}
+	dirs := []string{stagingDir}
+	for _, sd := range segDirsOf(stagingDir, true) {
+		dirs = append(dirs, sd.dir)
+	}
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), stagedRepairSuffix) {
+				continue
+			}
+			p := filepath.Join(dir, e.Name())
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				w.logger.Warn("could not remove a leftover repaired copy of a staged recording; it is tried again at the next start",
+					"path", p, "err", err, "jobID", jobID)
+				continue
+			}
+			w.logger.Info("removed a leftover repaired copy of a staged recording",
+				"path", p, "jobID", jobID,
+				"reason", "a mux that read it did not remove it (the process stopped mid-mux, or the removal failed); it is derived from the staged recording beside it, which is kept")
 		}
 	}
 }

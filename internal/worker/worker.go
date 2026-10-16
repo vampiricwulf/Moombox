@@ -1121,6 +1121,10 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 	// row, so a job resurrected while this ran is left tracked.
 	w.db.TrackJobForLogs(jobID)
 	defer w.restoreLogRouting(jobID)
+	// The job's copies are done: a repaired copy one of them could not
+	// remove is tried again here, before staging a mux-gap record keeps is
+	// kept with it.
+	w.removeStaleRepairedCopies(jobID, stagingDir)
 	fresh, _ := w.db.GetJob(jobID)
 	v := decideStagingCleanup(w.db, fresh, jobID, stagingDir)
 	switch v.keep {

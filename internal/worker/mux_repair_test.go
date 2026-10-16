@@ -733,6 +733,71 @@ func TestRepairRefusedWithoutSpace(t *testing.T) {
 	}
 }
 
+// TestLeftoverRepairedCopyDoesNotBlockTheRetry: the staging volume has room
+// for one repaired copy, and a mux killed mid-copy (a restart, an update)
+// left that copy behind. The re-mux's free-space check counted the leftover's
+// own bytes against the copy that truncates it, and refused every retry with
+// "free some space", pointing at nothing. It must finish, the leftover
+// removed first; and a leftover the job's own copy did not remove is gone by
+// the end of its staging cleanup, which keeps the dir for the record.
+//
+// Mutants: writeRepairedCopy without the leftover's removal or credit (the
+// job ends in Error naming the free space); cleanupStagingAfterMux without
+// its removeStaleRepairedCopies call (the second leftover stays).
+func TestLeftoverRepairedCopyDoesNotBlockTheRetry(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	src := fragmentedFixture(t, ffmpegPath, "video", 300)
+	w, db := testWorkerSetup(t)
+	const id = "j-gap-leftover"
+	staging, _ := muxFixtureJob(t, w, db, id)
+	media := filepath.Join(staging, "video_stream")
+	stageFragmented(t, media, src, 50, damageZeroed)
+	walk, err := engine.WalkFMP4(context.Background(), media)
+	if err != nil || !walk.Damaged() {
+		t.Fatalf("walk: %v", err)
+	}
+	// The volume as it stood before the kill: room for the copy and its
+	// headroom, plus 1 MB, less whatever repaired copy sits in staging.
+	base := uint64(walk.RepairedSize()) + repairHeadroom + 1<<20
+	prev := repairDiskSpace
+	repairDiskSpace = func(string) (*disk.DiskSpace, error) {
+		free := base
+		if info, err := os.Stat(media + stagedRepairSuffix); err == nil {
+			free -= uint64(info.Size())
+		}
+		return &disk.DiskSpace{Free: free, Total: 1 << 40}, nil
+	}
+	t.Cleanup(func() { repairDiskSpace = prev })
+	if _, err := engine.WriteFMP4Repair(context.Background(), media, walk, media+stagedRepairSuffix); err != nil {
+		t.Fatal(err)
+	}
+	// And one beside a part's recording no copy of this mux reads.
+	other := filepath.Join(staging, "seg_1", "video_stream"+stagedRepairSuffix)
+	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte("a leftover repaired copy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.MuxJob(id); err != nil {
+		t.Fatalf("MuxJob: %v", err)
+	}
+	w.Stop()
+	row, _ := db.GetJob(id)
+	if row == nil || row.Status != database.StatusFinished {
+		t.Fatalf("job = %v (%q), want Finished — the only thing short of room was the leftover the repair truncates", statusOf(row), errorOf(row))
+	}
+	for _, p := range []string{media + stagedRepairSuffix, other} {
+		if fileExists(p) {
+			t.Errorf("the leftover repaired copy %s is still in staging", p)
+		}
+	}
+	if !hasMuxGapRecord(media) {
+		t.Error("the damaged recording lost its record")
+	}
+}
+
 // TestUnmeasurableFragmentedInputKeepsStaging: a fragmented MP4 whose decode
 // times run backwards — here its first half appended twice — has no timeline
 // to measure a copy by. It is muxed as it stands and checked the way it

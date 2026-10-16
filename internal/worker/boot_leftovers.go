@@ -25,6 +25,9 @@ var bootSweepClaimed func(jobID string)
 //   - a set-aside recording marked recovered (asideRecoveredMarker) whose
 //     muxed sibling is on disk — the copy was verified before the marker was
 //     written, so the aside is footage that already exists beside the archive;
+//   - a repaired copy of a staged recording (stagedRepairSuffix) a mux did
+//     not remove — the process stopped mid-mux, or the removal failed — which
+//     is derived from the recording beside it;
 //   - the staging dir of a Finished job whose archive file(s) exist, when
 //     cleanupStagingAfterMux would have deleted it (decideStagingCleanup says
 //     removeStaging), no aside marked recovered is left in it, and the row
@@ -88,6 +91,10 @@ func (w *DownloadWorker) reclaimJobLeftovers(jobID, stagingDir string) {
 	if err != nil || (job != nil && IsActiveJobStatus(job.Status)) {
 		return
 	}
+	// So is a repaired copy a mux left — it is derived from the recording
+	// beside it — and under the claim, with the row not active, no copy is
+	// reading one.
+	w.removeStaleRepairedCopies(jobID, stagingDir)
 	// A recovered aside is redundant whatever became of its row: the proof is
 	// the sibling on disk, not the job.
 	keptAside := w.removeVerifiedRecoveredAsides(jobID, stagingDir)

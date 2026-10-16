@@ -494,3 +494,59 @@ func TestStartRunsTheBootSweep(t *testing.T) {
 		t.Errorf("staging survived Start (%v); the boot sweep did not run", err)
 	}
 }
+
+// TestBootSweepRemovesLeftoverRepairedCopies: a mux killed mid-copy (a
+// restart, a self-update) leaves the repaired copy it read — the size of the
+// recording — beside a staged recording whose mux-gap record keeps the dir
+// for good. The sweep removes it, in the root and in a part's dir, and logs
+// it with a reason; the damaged original and its record stay. A Muxing row's
+// is left alone: its restart mux may be reading it.
+//
+// Mutant: reclaimJobLeftovers without the removeStaleRepairedCopies call
+// (both copies stay, shielded with the dir).
+func TestBootSweepRemovesLeftoverRepairedCopies(t *testing.T) {
+	w, db, log, stagingBase := bootSweepWorker(t)
+	archive := filepath.Join(t.TempDir(), "a.mp4")
+	writeFixtureFile(t, archive, "the archive")
+	for _, j := range []struct {
+		id     string
+		status database.JobStatus
+	}{{"j-finished", database.StatusFinished}, {"j-muxing", database.StatusMuxing}} {
+		if _, err := db.AddJob(&database.Job{ID: j.id, VideoID: j.id, Status: j.status, OutputFile: archive, DownloadStartedAt: downloadStarted}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var leftovers, kept []string
+	for _, id := range []string{"j-finished", "j-muxing"} {
+		for _, dir := range []string{filepath.Join(stagingBase, id), filepath.Join(stagingBase, id, "seg_1")} {
+			media := filepath.Join(dir, "video_stream")
+			writeFixtureFile(t, media, "damaged capture")
+			if err := writeMuxGapRecord(media, muxGapRecord{Size: int64(len("damaged capture")), Dropped: []string{"bytes 1-2"}}); err != nil {
+				t.Fatal(err)
+			}
+			writeFixtureFile(t, media+stagedRepairSuffix, "repaired copy")
+			if id == "j-finished" {
+				leftovers = append(leftovers, media+stagedRepairSuffix)
+			} else {
+				kept = append(kept, media+stagedRepairSuffix)
+			}
+			kept = append(kept, media, media+muxGapRecordSuffix)
+		}
+	}
+
+	w.reclaimBootLeftovers()
+
+	for _, p := range leftovers {
+		if fileExists(p) {
+			t.Errorf("%s survived the boot sweep", p)
+		}
+		if !log.deletionLogged(p) {
+			t.Errorf("the removal of %s was not logged with a reason", p)
+		}
+	}
+	for _, p := range kept {
+		if !fileExists(p) {
+			t.Errorf("%s was removed", p)
+		}
+	}
+}
