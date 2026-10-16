@@ -105,6 +105,15 @@ type JobFacts struct {
 	// AsideCount is how many set-aside recordings the job's staging still held
 	// at finalize.
 	AsideCount int
+	// MuxGaps, pre-rendered by the orchestrator, says the archive was muxed
+	// from a repaired copy of a damaged staged recording — the unreadable
+	// bytes left out, a short gap where they were — or could not be checked
+	// against the staged fragments, and that staging was kept. "" for an
+	// archive carried across whole. It turns the embed Warning-coloured.
+	MuxGaps string
+	// MuxGapDropped reports that MuxGaps is about bytes left out — the
+	// archive has a gap — rather than only a copy nothing could check.
+	MuxGapDropped bool
 }
 
 // Part is one muxed output of a job: the whole recording for a job that never
@@ -426,6 +435,10 @@ func DownloadFinished(f JobFacts, parts []Part) (string, string, NotificationTyp
 	if f.AsideCount > 0 {
 		fb.Add("Set-aside recordings", fmt.Sprintf("%d — Recover to mux them", f.AsideCount))
 	}
+	if f.MuxGaps != "" {
+		ntype = TypeWarning
+		fb.Add("Gaps", f.MuxGaps)
+	}
 
 	opts := jobOpts(f, "finished")
 	// The finished embed has always used the FULL-WIDTH image rather than the
@@ -443,8 +456,11 @@ func DownloadFinished(f JobFacts, parts []Part) (string, string, NotificationTyp
 	// And the words, with it: the Warning colour over "Successfully
 	// archived" still said the archive was whole.
 	desc := "Successfully archived: "
-	if f.IncompleteTail {
+	switch {
+	case f.IncompleteTail:
 		desc = "Archived with its end missing: "
+	case f.MuxGapDropped:
+		desc = "Archived with a gap: "
 	}
 	return "Download Finished",
 		desc + EscapeMarkdown(displayName(f)),

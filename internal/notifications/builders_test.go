@@ -393,6 +393,42 @@ func TestDescriptionExcerptIsRuneSafeAndBounded(t *testing.T) {
 	}
 }
 
+// An archive muxed from a repaired copy of a damaged staged recording — its
+// unreadable bytes left out, a short gap where they were — is Warning-coloured
+// with a Gaps field saying so, and does not read "Successfully archived"; one
+// that only could not be checked against its staged fragments carries the
+// field and the colour, but has no gap to name in its description (W30-A11).
+//
+// Mutants: the Gaps field dropped; the colour left at Success; the
+// description chosen on MuxGaps rather than MuxGapDropped ("Archived with a
+// gap" for a copy that has none).
+func TestAFinishWithAGapSaysSo(t *testing.T) {
+	f := ytFacts()
+	f.MuxGaps, f.MuxGapDropped = "1 damaged stretch(es) left out (2.0s) — staging kept", true
+	_, desc, ntype, fields, _ := DownloadFinished(f, []Part{{File: "a.mp4"}})
+	if got := mustField(t, fields, "Gaps"); got != f.MuxGaps {
+		t.Errorf("Gaps = %q, want %q", got, f.MuxGaps)
+	}
+	if ntype != TypeWarning {
+		t.Errorf("type = %v, want Warning", ntype)
+	}
+	if !strings.HasPrefix(desc, "Archived with a gap") {
+		t.Errorf("an archive with a gap reads %q", desc)
+	}
+	f.MuxGaps, f.MuxGapDropped = "not checked against the staged fragments — staging kept", false
+	_, desc, ntype, fields, _ = DownloadFinished(f, []Part{{File: "a.mp4"}})
+	if mustField(t, fields, "Gaps") != f.MuxGaps || ntype != TypeWarning {
+		t.Errorf("an unchecked copy: fields %v, type %v; want the Gaps field, Warning", fields, ntype)
+	}
+	if strings.Contains(desc, "gap") {
+		t.Errorf("an unchecked copy with no gap reads %q", desc)
+	}
+	f.MuxGaps = ""
+	if _, _, _, fields, _ = DownloadFinished(f, []Part{{File: "a.mp4"}}); func() bool { _, ok := fieldValue(fields, "Gaps"); return ok }() {
+		t.Error("a whole archive carries a Gaps field")
+	}
+}
+
 // A finish whose recording is knowingly short is Warning-coloured with a Tail
 // field — and its description used to read "Successfully archived" all the
 // same, the wording the colour change was made to retire.
