@@ -1445,7 +1445,7 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		// 16:9 framing, only then fall back to the letterboxed sizes.
 		thumbQualities := []string{"maxresdefault", "mqdefault", "hqdefault", "sddefault", "default"}
 		for _, quality := range thumbQualities {
-			thumbURL := fmt.Sprintf("https://i.ytimg.com/vi/%s/%s.jpg", jobCtx.Job.VideoID, quality)
+			thumbURL := fmt.Sprintf("%s/%s/%s.jpg", ytThumbnailBase, jobCtx.Job.VideoID, quality)
 			thumbDst := filepath.Join(outputDir, filenameBase+".jpg")
 			if DownloadFileMinSize(ctx, thumbURL, thumbDst, 1000, o.logger) == nil {
 				thumbnailSaved = true

@@ -17,6 +17,11 @@ import (
 // here.
 var workerHTTPClient = httpx.Client(10 * time.Minute)
 
+// ytThumbnailBase is where copyAssets reads a YouTube video's thumbnail
+// sizes from ("<base>/<videoID>/<size>.jpg"). A var so the unit suite can
+// serve it from a local stub (network_guard_test.go) instead of i.ytimg.com.
+var ytThumbnailBase = "https://i.ytimg.com/vi"
+
 // DownloadFileMinSize downloads a file but discards it if smaller than minSize bytes.
 // If lg is non-nil and the file is rejected for being too small, the rejection
 // is also logged at Debug level (per audit reports/worker.md Finding 48 — the
