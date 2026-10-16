@@ -7,12 +7,33 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
-// networkWaitProgress is the progress line a job waiting out a connectivity
-// outage shows for the length of the wait (waitForNetwork), as a VOD queueing
-// for its slot shows vodSlotWaitProgress.
+// networkWaitProgress opens the progress line a job waiting out a
+// connectivity outage shows for the length of the wait (waitForNetwork), as a
+// VOD queueing for its slot shows vodSlotWaitProgress; networkWaitLine adds
+// how long it has waited.
 const networkWaitProgress = "Waiting for network connectivity..."
+
+// networkWaitRefresh is how often a waiting job's progress line is rewritten
+// with the time waited so far. Coarser than the engine's wait lines, which
+// ride a download's own progress writes: every job of an offline boot waits
+// at once, and each rewrite is a row write and a broadcast. A var so tests
+// need not wait it out.
+var networkWaitRefresh = 10 * time.Second
+
+// networkWaitLine is the progress line itself, "Waiting for network
+// connectivity... (1m 20s)". The "... (<elapsed>)" tail is the TUI's wait
+// marker (internal/tui isWaitProgress), the one every engine wait line
+// carries (activityMessage); pinned by TestActivityMessagesCarryWaitMarker.
+// Without it a Downloading row waiting here — a VOD or a live capture
+// re-enqueued at an offline boot — showed its frozen percent in the TUI's
+// task list, the "hung" look the marker exists to prevent, while the engine's
+// own wait for the same outage read as a wait.
+func networkWaitLine(waited time.Duration) string {
+	return networkWaitProgress + " (" + utils.FormatDurationHuman(waited) + ")"
+}
 
 // outageConfirmWindow is how long a transport failure met while the
 // connectivity monitor still reports online waits for the monitor to call
@@ -85,9 +106,11 @@ var networkWaitFloor = offlineProbeFloor
 // networkWaitFloor has passed with it still reporting offline, and reports
 // false when ctx ends first. The row keeps its status throughout — an
 // Upcoming broadcast stays Upcoming, an interrupted capture Downloading — and
-// its progress line says what it is waiting for, cleared however the wait
-// ends. Returns at once when the monitor already reports online.
-func (w *DownloadWorker) waitForNetwork(ctx context.Context, jobID string) bool {
+// its progress line says what it is waiting for and for how long (since:
+// when the run's wait began, which a retry after the floor carries on),
+// cleared however the wait ends. Returns at once when the monitor already
+// reports online.
+func (w *DownloadWorker) waitForNetwork(ctx context.Context, jobID string, since time.Time) bool {
 	if w.conn == nil {
 		return true
 	}
@@ -106,21 +129,25 @@ func (w *DownloadWorker) waitForNetwork(ctx context.Context, jobID string) bool 
 	if w.conn.IsOnline() {
 		return true
 	}
-	w.db.UpdateJobFields(jobID, map[string]any{"progress": networkWaitProgress})
+	w.db.UpdateJobFields(jobID, map[string]any{"progress": networkWaitLine(time.Since(since))})
 	defer w.db.UpdateJobFields(jobID, map[string]any{"progress": ""})
 	floor := time.NewTimer(networkWaitFloor)
 	defer floor.Stop()
+	refresh := time.NewTicker(networkWaitRefresh)
+	defer refresh.Stop()
 	for {
 		select {
 		case <-online:
+			// A flap can deliver "online" and take it back before this reads it.
+			if w.conn.IsOnline() {
+				return true
+			}
+		case <-refresh.C:
+			w.db.UpdateJobFields(jobID, map[string]any{"progress": networkWaitLine(time.Since(since))})
 		case <-floor.C:
 			return true
 		case <-ctx.Done():
 			return false
-		}
-		// A flap can deliver "online" and take it back before this reads it.
-		if w.conn.IsOnline() {
-			return true
 		}
 	}
 }
@@ -130,8 +157,8 @@ func (w *DownloadWorker) waitForNetwork(ctx context.Context, jobID string) bool 
 // ended first, or when the row was deleted or left the states the queue
 // processes while it waited — the re-read Process itself makes after its
 // fetch, for a run that waited minutes or hours between the two.
-func (w *DownloadWorker) waitOutOutage(ctx context.Context, job *database.Job) (*database.Job, bool) {
-	if !w.waitForNetwork(ctx, job.ID) {
+func (w *DownloadWorker) waitOutOutage(ctx context.Context, job *database.Job, since time.Time) (*database.Job, bool) {
+	if !w.waitForNetwork(ctx, job.ID, since) {
 		return nil, false
 	}
 	cur, err := w.db.GetJob(job.ID)
@@ -169,7 +196,8 @@ func (w *DownloadWorker) waitOutOutage(ctx context.Context, job *database.Job) (
 // Reports whether dlErr was such a failure; when it was, the row to run again
 // with, or nil when the run is not to go on — ctx ended, or the row is gone or
 // no longer processable — which processJob routes to handleCancellation.
-// since is when the run first waited on a setup outage, for the log.
+// since is when the run first waited on a setup outage (zero: not yet), for
+// the log and the wait's progress line.
 func (w *DownloadWorker) waitOutSetupOutage(ctx context.Context, job *database.Job, result *StreamProcessResult, dlErr error, since *time.Time) (*database.Job, bool) {
 	if !errors.Is(dlErr, errDownloadSetup) || !w.outageCalled(ctx, dlErr) {
 		return nil, false
@@ -184,7 +212,7 @@ func (w *DownloadWorker) waitOutSetupOutage(ctx context.Context, job *database.J
 	if result != nil && result.ChatDownloader != nil && w.streamProc != nil {
 		w.streamProc.stopEarlyChat(result.ChatDownloader)
 	}
-	fresh, ok := w.waitOutOutage(ctx, job)
+	fresh, ok := w.waitOutOutage(ctx, job, *since)
 	if !ok {
 		return nil, true
 	}
@@ -224,15 +252,20 @@ func (w *DownloadWorker) waitOutSetupOutage(ctx context.Context, job *database.J
 // handleCancellation: a shutdown leaves the row as it is, to resume on the
 // next start.
 func (w *DownloadWorker) processStreamThroughOutages(ctx context.Context, job *database.Job) (*StreamProcessResult, error) {
-	for waited := false; ; waited = true {
+	var since time.Time // when the run first waited
+	for {
 		result, err := w.processStream(ctx, job)
 		if err == nil || ctx.Err() != nil || !w.outageCalled(ctx, err) {
 			w.announceFoundOnFailure(ctx, job, err)
 			return result, w.markTwitchUnreachable(job, err)
 		}
-		w.logOutageWait(waited, "stream processing failed on a connectivity outage; waiting for the network, then processing the job again",
+		again := !since.IsZero()
+		if !again {
+			since = time.Now()
+		}
+		w.logOutageWait(again, "stream processing failed on a connectivity outage; waiting for the network, then processing the job again",
 			"jobID", job.ID, "status", job.Status, "err", err)
-		if _, ok := w.waitOutOutage(ctx, job); !ok {
+		if _, ok := w.waitOutOutage(ctx, job, since); !ok {
 			return cancelledResult(), nil
 		}
 	}
@@ -276,14 +309,19 @@ func (w *DownloadWorker) logOutageWait(again bool, msg string, args ...any) {
 // held through the wait: the download they are for comes straight after.
 // Returns an error wrapping ErrCancelled when the wait ended without the run.
 func (w *DownloadWorker) refreshStaleVodInfoThroughOutages(ctx context.Context, job *database.Job, result *StreamProcessResult, extractedAt time.Time) error {
-	for waited := false; ; waited = true {
+	var since time.Time // when the run first waited
+	for {
 		err := w.refreshStaleVodInfo(ctx, job, result, extractedAt)
 		if err == nil || ctx.Err() != nil || !w.outageCalled(ctx, err) {
 			return err
 		}
-		w.logOutageWait(waited, "VOD re-extraction failed on a connectivity outage; waiting for the network, then re-extracting",
+		again := !since.IsZero()
+		if !again {
+			since = time.Now()
+		}
+		w.logOutageWait(again, "VOD re-extraction failed on a connectivity outage; waiting for the network, then re-extracting",
 			"jobID", job.ID, "err", err)
-		if _, ok := w.waitOutOutage(ctx, job); !ok {
+		if _, ok := w.waitOutOutage(ctx, job, since); !ok {
 			return ErrCancelled
 		}
 	}

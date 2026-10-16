@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,6 +38,11 @@ func outageWorker(t *testing.T, online bool) (*DownloadWorker, *database.Databas
 	conn.online.Store(online)
 	w := NewDownloadWorker(db, nil, cfg, &discardLogger{}, &DownloadWorkerDeps{Conn: conn})
 	return w, db, conn
+}
+
+// isNetworkWaitLine reports whether a progress line is waitForNetwork's.
+func isNetworkWaitLine(progress string) bool {
+	return strings.HasPrefix(progress, networkWaitProgress+" (")
 }
 
 // shortOutageConfirmWindow shrinks outageConfirmWindow for one test.
@@ -94,7 +100,7 @@ func jobRow(t *testing.T, db *database.Database, id string) *database.Job {
 //
 // Mutants this kills:
 //   - processJob calling processStream directly again → no wait at all
-//   - waitForNetwork not writing networkWaitProgress, or not clearing it →
+//   - waitForNetwork not writing networkWaitLine, or not clearing it →
 //     the line never shows, or outlives the wait
 //   - waitForNetwork returning before the monitor reports online → stream
 //     processing runs again offline
@@ -129,7 +135,7 @@ func TestOfflineBootWaitsForTheNetworkInPlace(t *testing.T) {
 		conn.set(false)
 		done := runJob(t, w, context.Background(), tc.id)
 		waitForCond(t, 5*time.Second, tc.id+" waiting for the network", func() bool {
-			return jobRow(t, db, tc.id).Progress == networkWaitProgress
+			return isNetworkWaitLine(jobRow(t, db, tc.id).Progress)
 		})
 		if n := calls.Load(); n != 1 {
 			t.Errorf("%s: stream processing ran %d time(s) while offline, want once: the fetch the wait follows", tc.id, n)
@@ -276,7 +282,7 @@ func TestWaitedOutRowThatLeftIsNotProcessed(t *testing.T) {
 	}
 	done := runJob(t, w, context.Background(), "boot_left")
 	waitForCond(t, 5*time.Second, "the network wait", func() bool {
-		return jobRow(t, db, "boot_left").Progress == networkWaitProgress
+		return isNetworkWaitLine(jobRow(t, db, "boot_left").Progress)
 	})
 	db.UpdateJobFields("boot_left", map[string]any{"status": database.StatusFinished})
 	conn.set(true)
@@ -315,7 +321,7 @@ func TestFetchMeetingAnOutageWaitsAndRunsAgain(t *testing.T) {
 	}
 	done := runJob(t, w, context.Background(), "mid_upcoming")
 	waitForCond(t, 5*time.Second, "the network wait", func() bool {
-		return jobRow(t, db, "mid_upcoming").Progress == networkWaitProgress
+		return isNetworkWaitLine(jobRow(t, db, "mid_upcoming").Progress)
 	})
 	if row := jobRow(t, db, "mid_upcoming"); row.Status != database.StatusUpcoming || row.Error != "" {
 		t.Errorf("waiting row reads %s (%q), want Upcoming", row.Status, row.Error)
@@ -511,7 +517,7 @@ func TestStaleReextractionMeetingAnOutageWaits(t *testing.T) {
 	}
 	done := runJob(t, w, ctx, "stale_manual")
 	waitForCond(t, 5*time.Second, "the network wait", func() bool {
-		return jobRow(t, db, "stale_manual").Progress == networkWaitProgress
+		return isNetworkWaitLine(jobRow(t, db, "stale_manual").Progress)
 	})
 	conn.set(true)
 	awaitDone(t, done, "stale_manual")
@@ -545,7 +551,7 @@ func TestStaleReextractionWaitForARowThatLeft(t *testing.T) {
 	}
 	done := runJob(t, w, context.Background(), "stale_left")
 	waitForCond(t, 5*time.Second, "the network wait", func() bool {
-		return jobRow(t, db, "stale_left").Progress == networkWaitProgress
+		return isNetworkWaitLine(jobRow(t, db, "stale_left").Progress)
 	})
 	db.UpdateJobFields("stale_left", map[string]any{"status": database.StatusFinished})
 	conn.set(true)
@@ -694,7 +700,7 @@ func TestOutageWaitedFirstFetchAnnouncesOnce(t *testing.T) {
 	defer cancel()
 	done := runJob(t, w, ctx, "found_out")
 	waitForCond(t, 5*time.Second, "the network wait", func() bool {
-		return jobRow(t, db, "found_out").Progress == networkWaitProgress
+		return isNetworkWaitLine(jobRow(t, db, "found_out").Progress)
 	})
 	if got := rec.Calls(); len(got) != 0 {
 		t.Errorf("sent %+v while the fetch was waited out, want nothing", got)
@@ -838,7 +844,7 @@ func TestDownloadSetupMeetingAnOutageWaitsAndRunsAgain(t *testing.T) {
 	}
 	done := runJob(t, w, context.Background(), "setup_live")
 	waitForCond(t, 5*time.Second, "the network wait", func() bool {
-		return jobRow(t, db, "setup_live").Progress == networkWaitProgress
+		return isNetworkWaitLine(jobRow(t, db, "setup_live").Progress)
 	})
 	if row := jobRow(t, db, "setup_live"); row.Status != database.StatusDownloading || row.Error != "" {
 		t.Errorf("waiting row reads %s (%q), want the Downloading ExecuteWithChat wrote", row.Status, row.Error)
@@ -888,5 +894,48 @@ func TestDownloadSetupAnswerIsRecorded(t *testing.T) {
 	awaitDone(t, runJob(t, w, context.Background(), "setup_403"), "setup_403")
 	if row := jobRow(t, db, "setup_403"); row.Status != database.StatusError {
 		t.Errorf("status = %s (progress %q), want Error", row.Status, row.Progress)
+	}
+}
+
+// TestNetworkWaitLineCountsTheWait: the wait's progress line says how long the
+// job has waited, rewritten every networkWaitRefresh — its "... (<elapsed>)"
+// tail is the TUI's wait marker — and the count runs from the run's first
+// wait, through the retries networkWaitFloor makes while the monitor stays
+// offline.
+//
+// Mutants this kills:
+//   - the refresh arm dropped → within one wait the line keeps the "(0s)" it
+//     opened with (the first subtest, whose floor never comes)
+//   - processStreamThroughOutages starting since afresh on every wait → each
+//     retry's line opens at "(0s)" again and never reaches a second (the
+//     second subtest, a retry every 200 ms)
+func TestNetworkWaitLineCountsTheWait(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		floor time.Duration
+	}{
+		{"within one wait", 10 * time.Second},
+		{"across the floor's retries", 200 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldFloor, oldRefresh := networkWaitFloor, networkWaitRefresh
+			networkWaitFloor, networkWaitRefresh = tc.floor, 20*time.Millisecond
+			t.Cleanup(func() { networkWaitFloor, networkWaitRefresh = oldFloor, oldRefresh })
+			w, db, _ := outageWorker(t, false) // offline throughout
+			ch := "UC_count"
+			addSchedJob(t, db, &ch, "count_upcoming", database.StatusUpcoming, 0)
+			w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+				return nil, fmt.Errorf("full fetch failed: %w", dialRefused)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := runJob(t, w, ctx, "count_upcoming")
+			waitForCond(t, 5*time.Second, "a wait line counting past a second", func() bool {
+				p := jobRow(t, db, "count_upcoming").Progress
+				return isNetworkWaitLine(p) && p != networkWaitLine(0)
+			})
+			cancel()
+			awaitDone(t, done, "count_upcoming")
+		})
 	}
 }

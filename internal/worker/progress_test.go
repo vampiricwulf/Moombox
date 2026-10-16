@@ -79,6 +79,22 @@ func TestActivityMessagesCarryWaitMarker(t *testing.T) {
 	}
 }
 
+// TestNetworkWaitLineCarriesTheWaitMarker pins the same contract for the
+// line processJob's outage wait writes (waitForNetwork): a Downloading row
+// waiting there — re-enqueued at an offline boot, its download's setup met by
+// the outage — must read as a wait in the TUI's task list, as the engine's own
+// wait for the same outage does, not as its frozen percent.
+//
+// Mutant killed: networkWaitLine returning networkWaitProgress alone.
+func TestNetworkWaitLineCarriesTheWaitMarker(t *testing.T) {
+	if got, want := networkWaitLine(80*time.Second), "Waiting for network connectivity... (1m 20s)"; got != want {
+		t.Errorf("networkWaitLine(80s) = %q, want %q", got, want)
+	}
+	if msg := networkWaitLine(0); !strings.Contains(msg, "... (") {
+		t.Errorf("networkWaitLine(0) = %q lacks the %q wait marker", msg, "... (")
+	}
+}
+
 func TestDominantActivity(t *testing.T) {
 	base := time.Now()
 

@@ -699,9 +699,11 @@ func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait
 
 // isWaitProgress reports whether a progress string is a downloader wait
 // message rather than a segment counter. Every activity message the worker
-// renders (worker.activityMessage) carries the "... (<elapsed>)" tail and no
-// counter format does — the contract is pinned on the worker side by
-// TestActivityMessagesCarryWaitMarker.
+// renders (worker.activityMessage), and the line a job waiting out a
+// connectivity outage shows (worker.networkWaitLine), carries the
+// "... (<elapsed>)" tail and no counter format does — the contract is pinned
+// on the worker side by TestActivityMessagesCarryWaitMarker and
+// TestNetworkWaitLineCarriesTheWaitMarker.
 func isWaitProgress(s string) bool {
 	return strings.Contains(s, "... (")
 }
