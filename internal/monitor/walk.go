@@ -203,6 +203,13 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 // or Moombox down through it) probed as a VOD and was windowed out by the
 // date it was announced, though it aired inside the window.
 //
+// A weak end the end check answered (res.endChecked) has made that WEB
+// call already, so the fetch is not made again: the check's date is taken
+// instead, under the same rule — only where the fetch would have run. Taken
+// over an authoritative date, the check's 'started' outranked an RSS row's
+// 'exact' on the ladder, and a settled vod became the restart carve-out's
+// shape (vod, started, no job), probed every cycle for the whole window.
+//
 // ok=false means the date fetch itself FAILED (transport error): callers
 // treat the row like an errored probe — no write, no FRESH, no exhaustion,
 // retried next cycle. A fetch that succeeds but finds no date (YouTube has
@@ -210,11 +217,8 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 // invariant and the archive's row-date fallback handle that honestly.
 func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem, cutoff string) (ProbeClassifyResult, bool) {
 	res := fm.probeRow(ctx, ch, chID, row)
-	if res.Outcome != OutcomeProbed || res.PublishedAt != "" || fm.ProbeDate == nil {
+	if res.Outcome != OutcomeProbed || res.PublishedAt != "" {
 		return res, true
-	}
-	if res.endChecked {
-		return res, true // the end check was this same WEB call, and its date is in already (confirmEnd)
 	}
 	vodFamily := res.StreamStatus == "vod" || res.StreamStatus == "post_live" || res.StreamStatus == "not_a_stream"
 	if !vodFamily {
@@ -223,6 +227,15 @@ func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConf
 	announcedEarly := row.Source == "rss" && row.Published < cutoff
 	if row.DatePrecision != "coarse" && row.DatePrecision != "assumed" && row.DatePrecision != "" && !announcedEarly {
 		return res, true // the row's own date is already authoritative
+	}
+	if res.endChecked {
+		// The end check was this same WEB call (confirmEnd): its date is the
+		// fetch's answer.
+		res.PublishedAt, res.PublishedPrecision = res.endCheckPublishedAt, res.endCheckPrecision
+		return res, true
+	}
+	if fm.ProbeDate == nil {
+		return res, true
 	}
 	pub, prec, err := fm.ProbeDate(ctx, row.VideoID)
 	if err != nil {

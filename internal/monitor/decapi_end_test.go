@@ -24,7 +24,9 @@ import (
 // recordTerminalMemo — 4 probes in every case); the include_non_live_content
 // note keyed on the raw status (the VODs-off cases probe 4 times); the date
 // fetch asked after the end check (the dateless confirmed case's date
-// fetches).
+// fetches); the check's date not taken, by DECAPI or by ProcessYouTubeVideo
+// carrying it out (the confirmed case outside the window is dateless, never
+// memoized, and probed 4 times).
 func TestDecapi_ASettledEndedNewestVideoIsMemoized(t *testing.T) {
 	outside := time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
 	strongEnd := func(verdict string) VideoProbeResult {

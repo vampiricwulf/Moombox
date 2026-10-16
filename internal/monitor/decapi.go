@@ -911,8 +911,12 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	// to keep them visible.
 	if result.ShouldProcess && (result.StreamStatus == "vod" || result.StreamStatus == "post_live" || result.StreamStatus == "not_a_stream") {
 		// The end check (ConfirmEnd) is this same WEB call: when it ran, its
-		// date is already in, and asking again would only repeat the answer.
-		if result.PublishedAt == "" && dm.ProbeDate != nil && !result.endChecked {
+		// date is the answer the fetch would get, and asking again would
+		// only repeat it. DECAPI has no stored date to protect — every
+		// dateless vod-family result fetches here — so it is always taken.
+		if result.PublishedAt == "" && result.endChecked {
+			result.PublishedAt = result.endCheckPublishedAt
+		} else if result.PublishedAt == "" && dm.ProbeDate != nil {
 			// Two-phase probe (§9): the status probe carries no microformat,
 			// so in production EVERY vod-family result lands here dateless.
 			// One WEB date fetch — authenticated when the jar holds

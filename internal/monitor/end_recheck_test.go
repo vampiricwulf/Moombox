@@ -58,14 +58,18 @@ func seedRecheck(t *testing.T, db *database.Database, chID, videoID string, publ
 // is strong (ended — confirmed), it says live or upcoming (not ended — the
 // broadcast job and the waiting loop, as before BroadcastEnded), or it could
 // not run or said neither (ended for announcing, unconfirmed). Its date
-// rides along, and a refusal is decided before any of it.
+// rides along beside the result's own, never in it (the callers take it only
+// where the §9 date fetch would have run), and a refusal is decided before
+// any of it.
 //
 // Mutants: a weak end trusted unconfirmed (the rewrite ignoring
 // BroadcastEndWeak — the unsettled rows read confirmed and the end check is
 // never asked); the OnAir answer ignored (the on-air row reads post_live);
 // the Ended answer ignored (the confirmed row reads unconfirmed); the end
 // check asked for a strong end too (its call count); the check's date not
-// carried (the confirmed row's date); endChecked left unset (the date fetch
+// carried (the confirmed row's endCheckPublishedAt); the check's date
+// written into PublishedAt, as 69342f6b did (the confirmed row's
+// PublishedAt); endChecked left unset (the date fetch
 // asks the same WEB call again); the check consulted ahead of isDenied (the
 // members-only row's call count); a call cut short by the pass's own
 // context treated as an unconfirmed end (the errored case).
@@ -118,8 +122,11 @@ func TestProbeAndClassify_AWeakEndIsConfirmedBeforeItIsTrusted(t *testing.T) {
 			if checks != tc.wantChecks {
 				t.Errorf("end check asked %d times, want %d", checks, tc.wantChecks)
 			}
-			if r.PublishedAt != tc.wantDate || r.endChecked != tc.wantChecked {
-				t.Errorf("date %q endChecked %v, want %q %v", r.PublishedAt, r.endChecked, tc.wantDate, tc.wantChecked)
+			if r.endCheckPublishedAt != tc.wantDate || r.endChecked != tc.wantChecked {
+				t.Errorf("check's date %q endChecked %v, want %q %v", r.endCheckPublishedAt, r.endChecked, tc.wantDate, tc.wantChecked)
+			}
+			if r.PublishedAt != "" {
+				t.Errorf("the result's own date is %q, want the status probe's (none)", r.PublishedAt)
 			}
 		})
 	}
@@ -422,5 +429,94 @@ func TestProcessYouTubeVideo_AnUnconfirmedEndIsNoJob(t *testing.T) {
 	if r := run(endCheckReturning(&checks, EndCheck{OnAir: true}, nil)); !r.ShouldProcess || r.EndUnconfirmed || r.StreamStatus != "upcoming" || checks != 1 {
 		t.Errorf("on air: ShouldProcess %v EndUnconfirmed %v status %q checks %d, want true false upcoming 1",
 			r.ShouldProcess, r.EndUnconfirmed, r.StreamStatus, checks)
+	}
+}
+
+// The end check's date is the §9 date fetch's answer, so it is taken only
+// where that fetch would have run — over a coarse, assumed or missing date,
+// or the date of an rss row announced before the window — and never over a
+// date the row already holds as authoritative. The field case for the
+// second half is an RSS row ('exact') on a channel that archives no VODs: a
+// weak end the check confirms is a settled vod, probed once, as a strong end
+// is. With the check's 'started' written over its 'exact' it became the
+// restart carve-out's shape (vod, started, no job) and was probed — and the
+// signed-in WEB call made again — every cycle for the whole window.
+//
+// Mutants: confirmEnd writing the check's date into PublishedAt, as
+// 69342f6b did (the exact row's date 'started', six probes and six end
+// checks); probeRowDated taking the check's date ahead of its
+// authoritative-date test (the same); probeRowDated not taking it at all
+// (the coarse, assumed and announced-early rows left on their estimates);
+// the date fetch asked after the end check (a date fetch).
+func TestFeed_TheEndChecksDateIsTakenOnlyWhereTheDateFetchWouldRun(t *testing.T) {
+	t0 := fixedNow()
+	started := t0.Add(-5 * time.Hour).Format(time.RFC3339)
+	confirmed := EndCheck{Ended: true, PublishedAt: started, PublishedPrecision: "started"}
+
+	t.Run("an authoritative date stands, and the settled vod is probed once", func(t *testing.T) {
+		db := newTestDB(t)
+		announced := t0.Add(-6 * time.Hour)
+		seedRow(t, db, "UC1", "e1", announced, "exact", "rss", "unknown")
+		probes, checks, dates := 0, 0, 0
+		answer := weakEnd()
+		for i := range 6 {
+			fm := newTestFeedMonitor(t, db, withRSS(rssWith()), withMembership(membWith()), withWindowDays(3),
+				withProbe(countingProbe(&probes, &answer)), withNow(t0.Add(time.Duration(i)*10*time.Minute)),
+				withProbeDate(func(context.Context, string) (string, string, error) {
+					dates++
+					return started, "started", nil
+				}))
+			fm.ConfirmEnd = endCheckReturning(&checks, confirmed, nil)
+			// include_non_live_content off: nothing but the walk looks at the row.
+			if err := fm.checkChannel(context.Background(), &config.ChannelConfig{ID: "UC1", Name: "UC1"}); err != nil {
+				t.Fatalf("checkChannel: %v", err)
+			}
+		}
+		row := mustGetFeedItem(t, db, "UC1", "e1")
+		if row.Status != "vod" || row.DatePrecision != "exact" || row.Published != announced.Format(time.RFC3339) || row.RecheckAt != "" {
+			t.Errorf("row %q %q %s re-check %q, want a settled vod on its own exact date %s",
+				row.Status, row.DatePrecision, row.Published, row.RecheckAt, announced.Format(time.RFC3339))
+		}
+		if probes != 1 || checks != 1 || dates != 0 {
+			t.Errorf("over 6 cycles: probes %d, end checks %d, date fetches %d; want 1, 1, 0", probes, checks, dates)
+		}
+	})
+
+	for _, tc := range []struct {
+		name      string
+		published time.Time
+		precision string
+		source    string
+	}{
+		{"a coarse row", t0.Add(-24 * time.Hour), "coarse", "videos"},
+		{"an assumed row", t0, "assumed", "rss"},
+		{"an rss row announced before the window", t0.Add(-5 * 24 * time.Hour), "exact", "rss"},
+	} {
+		t.Run("the check's date completes "+tc.name, func(t *testing.T) {
+			db := newTestDB(t)
+			// First seen now: an rss row announced before the window is in
+			// scope by Q2's unresolved arm (§7).
+			if _, err := db.UpsertFeedItem(database.FeedItem{ChannelID: "UC1", VideoID: "w1", Title: "w1",
+				Published: tc.published.Format(time.RFC3339), DatePrecision: tc.precision,
+				Source: tc.source, FirstSeen: t0.Format(time.RFC3339)}); err != nil {
+				t.Fatal(err)
+			}
+			probes, checks, dates := 0, 0, 0
+			answer := weakEnd()
+			fm := newTestFeedMonitor(t, db, withWindowDays(3), withProbe(countingProbe(&probes, &answer)), withNow(t0),
+				withProbeDate(func(context.Context, string) (string, string, error) {
+					dates++
+					return "", "", nil
+				}))
+			fm.ConfirmEnd = endCheckReturning(&checks, confirmed, nil)
+			fm.walkForTest(t, "UC1")
+			row := mustGetFeedItem(t, db, "UC1", "w1")
+			if row.Status != "vod" || row.DatePrecision != "started" || row.Published != started {
+				t.Errorf("row %q %q %s, want vod on the check's started date %s", row.Status, row.DatePrecision, row.Published, started)
+			}
+			if probes != 1 || checks != 1 || dates != 0 {
+				t.Errorf("probes %d, end checks %d, date fetches %d; want 1, 1, 0", probes, checks, dates)
+			}
+		})
 	}
 }

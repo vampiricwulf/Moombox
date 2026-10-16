@@ -52,7 +52,8 @@ type EndCheck struct {
 	// broadcast is not over, whatever the status probe's weak signals said.
 	OnAir bool
 	// PublishedAt and PublishedPrecision are the same call's date — what the
-	// §9 date fetch would have asked the same client for.
+	// §9 date fetch would have asked the same client for, and taken only
+	// where that fetch would have been made (probeRowDated, DECAPI).
 	PublishedAt        string
 	PublishedPrecision string
 }
@@ -315,9 +316,11 @@ type ProcessYouTubeVideoResult struct {
 	// holds it for the re-check backoff (endRecheckDelay) rather than for
 	// good or not at all.
 	EndUnconfirmed bool
-	// endChecked is ProbeClassifyResult.endChecked carried out: the WEB call
-	// the §9 date fetch would make has already been made.
-	endChecked bool
+	// endChecked and endCheckPublishedAt are ProbeClassifyResult's carried
+	// out: the WEB call the §9 date fetch would make has already been made,
+	// and this is its date, for DECAPI to take where it would have fetched.
+	endChecked          bool
+	endCheckPublishedAt string
 }
 
 // nonLiveSkipReason decides whether a non-live classification (a VOD, post-live
@@ -427,11 +430,18 @@ type ProbeClassifyResult struct {
 	// endRecheckBackoff (applyProbe); DECAPI's memo holds it for the same
 	// backoff.
 	EndUnconfirmed bool
-	// endChecked: the end check ran and answered, and its date is already in
-	// PublishedAt when the status probe had none. The §9 date fetch would be
-	// the same WEB call asking the same question, so probeRowDated and
-	// DECAPI skip it.
-	endChecked bool
+	// endChecked: the end check ran and answered, and endCheckPublishedAt
+	// and endCheckPrecision are its date. The §9 date fetch would be the same
+	// WEB call asking the same question, so probeRowDated and DECAPI skip it
+	// and take this date instead — but only where they would have made that
+	// fetch, never over a date the row already holds as authoritative.
+	// PublishedAt stays the status probe's own: written there, the check's
+	// 'started' outranked an RSS row's 'exact' on the ladder and turned a
+	// settled vod into the restart carve-out's shape (vod, started, no job),
+	// probed every cycle for as long as it stayed in the window.
+	endChecked          bool
+	endCheckPublishedAt string
+	endCheckPrecision   string
 }
 
 // probeAndClassify runs one probe of a YouTube video and classifies it into
@@ -559,7 +569,8 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 //
 // The call runs inside the probe, so it is gated by the same cooldown and
 // the same pass budget as the probe that needed it, and made at most once
-// per probe. Its date rides along: the §9 date fetch is the same call.
+// per probe. Its date rides along (endCheckPublishedAt), for the callers to
+// take where the §9 date fetch — the same call — would have run.
 func confirmEnd(ctx context.Context, p ProbeClassifyParams, r *ProbeClassifyResult) {
 	var chk EndCheck
 	err := ErrEndCheckUnavailable
@@ -576,11 +587,9 @@ func confirmEnd(ctx context.Context, p ProbeClassifyParams, r *ProbeClassifyResu
 	}
 	if err == nil {
 		r.endChecked = true
+		r.endCheckPublishedAt, r.endCheckPrecision = chk.PublishedAt, chk.PublishedPrecision
 		if chk.OnAir && !chk.Ended {
 			return
-		}
-		if r.PublishedAt == "" {
-			r.PublishedAt, r.PublishedPrecision = chk.PublishedAt, chk.PublishedPrecision
 		}
 	}
 	r.StreamStatus = "post_live"
@@ -701,7 +710,7 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 			// nobody confirmed acts on the guess the re-check exists to test.
 			logInfo(fmt.Sprintf("[Monitor] Skipping ended stream (end unconfirmed, re-checked later): %s (%s)", p.Title, p.VideoID))
 			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title, StreamStatus: cr.StreamStatus,
-				EndUnconfirmed: true, endChecked: cr.endChecked}
+				EndUnconfirmed: true, endChecked: cr.endChecked, endCheckPublishedAt: cr.endCheckPublishedAt}
 		}
 		if skip, reason := nonLiveSkipReason(includeNonLive, p.IsReprobe); skip {
 			logInfo(fmt.Sprintf("[Monitor] Skipping ended stream (%s, %s): %s (%s)", cr.StreamStatus, reason, p.Title, p.VideoID))
@@ -720,11 +729,12 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 	}
 
 	return ProcessYouTubeVideoResult{
-		ShouldProcess: true,
-		Title:         title,
-		StreamStatus:  cr.StreamStatus,
-		PublishedAt:   cr.PublishedAt,
-		endChecked:    cr.endChecked,
+		ShouldProcess:       true,
+		Title:               title,
+		StreamStatus:        cr.StreamStatus,
+		PublishedAt:         cr.PublishedAt,
+		endChecked:          cr.endChecked,
+		endCheckPublishedAt: cr.endCheckPublishedAt,
 	}
 }
 
