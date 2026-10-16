@@ -262,9 +262,19 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 	// a cancel or delete has cleared the flag or the row already (the take
 	// then matches nothing), and a run stopped by shutdown leaves it owed to
 	// the next one.
+	//
+	// Nor does a fetch that never reached YouTube (isTransportFailure) take
+	// it here: processJob waits an outage out and runs this again
+	// (processStreamThroughOutages), and the fetch that then answers
+	// announces with what it learned. Taken here, the flag went on a
+	// feed-title embed sent into the dead link, and the retry's schedule
+	// followed as a "YouTube Start Time Confirmed" of its own — the two
+	// embeds the deferral exists to merge. When processJob records the
+	// failure instead, it announces from the row itself
+	// (announceFoundOnFailure).
 	info, err := sp.fetchVideoInfo(ctx, job.VideoID)
 	if err != nil {
-		if sp.takeAnnounceFound(ctx, job) {
+		if !isTransportFailure(err) && sp.takeAnnounceFound(ctx, job) {
 			sp.sendStreamFound(job, nil)
 		}
 		return nil, fmt.Errorf("full fetch failed: %w", err)

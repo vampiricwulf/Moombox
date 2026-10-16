@@ -639,3 +639,136 @@ func TestTwitchVodShutdownMidFetchLeavesTheRow(t *testing.T) {
 		t.Errorf("status = %s (%q), want the Upcoming row left to resume", row.Status, row.Error)
 	}
 }
+
+// foundOutageJob adds a freshly discovered Upcoming row that owes its "Stream
+// Found" (announce_found), wires a recorder for the processor's sends, and
+// parks the waiting loop's probe until the run ends — what follows the first
+// fetch is not under test.
+func foundOutageJob(t *testing.T, w *DownloadWorker, db *database.Database, id string) *notificationtest.Recorder {
+	t.Helper()
+	chID := "UC_abc"
+	job := &database.Job{ID: id, VideoID: id, Platform: "youtube",
+		Title: "Feed Title", ChannelName: "A Channel", Status: database.StatusUpcoming, ChannelID: &chID}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	owe(t, db, job)
+	rec := notificationtest.New()
+	w.streamProc.notifier = rec
+	w.streamProc.probeStatusFn = func(ctx context.Context, _ string, _ bool) (*youtube.VideoInfo, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return rec
+}
+
+// TestOutageWaitedFirstFetchAnnouncesOnce: a discovery owes one "Stream
+// Found", sent after its first fetch with what the fetch learned
+// (found_announce.go). A first fetch that meets an outage is now waited out
+// and made again, and Process used to spend the flag on the failure anyway —
+// a feed-title embed with no Starts At, sent into the dead link — so the
+// retry's schedule went out on its own as a "YouTube Start Time Confirmed":
+// the two embeds the deferral exists to merge. Now the failed fetch leaves the
+// flag owed, and the fetch that answers announces once, schedule and all.
+//
+// Mutant killed: Process taking the flag on a transport failure again (its
+// `!isTransportFailure(err) &&` dropped) → a "found" during the wait, and a
+// "scheduled" beside it.
+func TestOutageWaitedFirstFetchAnnouncesOnce(t *testing.T) {
+	shortOutageConfirmWindow(t, 50*time.Millisecond)
+	w, db, conn := outageWorker(t, true)
+	rec := foundOutageJob(t, w, db, "found_out")
+	var calls atomic.Int32
+	w.streamProc.getVideoInfoFn = func(context.Context, string) (*youtube.VideoInfo, error) {
+		if calls.Add(1) == 1 {
+			conn.online.Store(false) // the outage, as the monitor reports it
+			return nil, fmt.Errorf("watch page: %w", dialRefused)
+		}
+		return &youtube.VideoInfo{Title: "Fetched Title", ChannelName: "A Channel",
+			ScheduledStartTime: "2026-12-12T18:00:00Z", IsUpcoming: true,
+			StreamStatus: youtube.StreamUpcoming, PlayabilityError: youtube.PlayabilityOK}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runJob(t, w, ctx, "found_out")
+	waitForCond(t, 5*time.Second, "the network wait", func() bool {
+		return jobRow(t, db, "found_out").Progress == networkWaitProgress
+	})
+	if got := rec.Calls(); len(got) != 0 {
+		t.Errorf("sent %+v while the fetch was waited out, want nothing", got)
+	}
+	conn.set(true)
+	waitForCond(t, 5*time.Second, "the retry's announcement", func() bool { return len(rec.ByEvent("found")) > 0 })
+	cancel()
+	awaitDone(t, done, "found_out")
+
+	found := rec.ByEvent("found")
+	if len(found) != 1 {
+		t.Fatalf("recorded %d \"found\" embeds, want 1: %+v", len(found), rec.Calls())
+	}
+	if want := "Upcoming: Fetched Title"; found[0].Description != want {
+		t.Errorf("description = %q, want %q: what the fetch that answered learned", found[0].Description, want)
+	}
+	if _, ok := found[0].Field("Starts At"); !ok {
+		t.Error("\"Stream Found\" carries no Starts At")
+	}
+	if got := rec.ByEvent("scheduled"); len(got) != 0 {
+		t.Errorf("recorded %d \"YouTube Start Time Confirmed\" beside the discovery, want 0: %+v", len(got), got)
+	}
+}
+
+// TestUnwaitedTransportFailureStillAnnounces pins the other half: a first
+// fetch that never reached YouTube and is NOT waited out — the monitor never
+// calls an outage — ends the job in Error, and the discovery is still
+// announced, once, from what the row holds, as any other failed first fetch
+// announces (Process now leaves this one to processJob).
+//
+// Mutant killed: processStreamThroughOutages not calling
+// announceFoundOnFailure → the failed discovery is never announced. Dropping
+// announceFoundOnFailure's isTransportFailure check is an equivalent mutant:
+// every other failure reaches it with the flag already taken by Process.
+func TestUnwaitedTransportFailureStillAnnounces(t *testing.T) {
+	shortOutageConfirmWindow(t, 20*time.Millisecond)
+	w, db, _ := outageWorker(t, true) // online throughout
+	rec := foundOutageJob(t, w, db, "found_err")
+	w.streamProc.getVideoInfoFn = func(context.Context, string) (*youtube.VideoInfo, error) {
+		return nil, fmt.Errorf("watch page: %w", dialRefused)
+	}
+	w.processJob(context.Background(), "found_err")
+	if row := jobRow(t, db, "found_err"); row.Status != database.StatusError {
+		t.Fatalf("status = %s, want Error", row.Status)
+	}
+	found := rec.ByEvent("found")
+	if len(found) != 1 {
+		t.Fatalf("recorded %d \"found\" embeds, want 1: %+v", len(found), rec.Calls())
+	}
+	if want := "Found matching stream: Feed Title"; found[0].Description != want {
+		t.Errorf("description = %q, want %q: the row's own title", found[0].Description, want)
+	}
+	if db.TakeAnnounceFound("found_err") {
+		t.Error("the flag outlived the announcement")
+	}
+}
+
+// TestTransportFailedFetchLeavesTheFoundOwed is the unit-level pin of the
+// rule in Process: a first fetch that never reached YouTube sends nothing and
+// leaves the flag owed, for the fetch processJob makes again or for
+// processJob's own announcement.
+//
+// Mutant killed: the same as TestOutageWaitedFirstFetchAnnouncesOnce's.
+func TestTransportFailedFetchLeavesTheFoundOwed(t *testing.T) {
+	sp, rec, job := foundTestJob(t)
+	sp.getVideoInfoFn = func(context.Context, string) (*youtube.VideoInfo, error) {
+		return nil, dialRefused
+	}
+	owe(t, sp.db, job)
+	if _, err := sp.Process(context.Background(), job); err == nil {
+		t.Fatal("Process succeeded on a failing fetch")
+	}
+	if got := rec.Calls(); len(got) != 0 {
+		t.Errorf("sent %+v on a fetch that never reached YouTube, want nothing", got)
+	}
+	if !job.AnnounceFound || !sp.db.TakeAnnounceFound(job.ID) {
+		t.Error("the flag was spent on a fetch that never reached YouTube")
+	}
+}

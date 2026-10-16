@@ -178,6 +178,7 @@ func (w *DownloadWorker) processStreamThroughOutages(ctx context.Context, job *d
 	for waited := false; ; waited = true {
 		result, err := w.processStream(ctx, job)
 		if err == nil || ctx.Err() != nil || !w.outageCalled(ctx, err) {
+			w.announceFoundOnFailure(ctx, job, err)
 			return result, w.markTwitchUnreachable(job, err)
 		}
 		w.logOutageWait(waited, "stream processing failed on a connectivity outage; waiting for the network, then processing the job again",
@@ -185,6 +186,26 @@ func (w *DownloadWorker) processStreamThroughOutages(ctx context.Context, job *d
 		if !w.waitOutOutage(ctx, job) {
 			return cancelledResult(), nil
 		}
+	}
+}
+
+// announceFoundOnFailure sends the "Stream Found" a discovery still owes when
+// the stream processing processJob is about to record failed on the transport
+// (found_announce.go). Process announces from the row ahead of any other
+// failed first fetch, but leaves the flag owed on one that never reached
+// YouTube, which may be waited out and made again — the fetch that answers
+// then announces once, with what it learned. This is the case where it is
+// not waited out: a transport failure the monitor never called an outage, on
+// its way to the job's Error (or, for backlog, back to Queued), which must
+// not leave the discovery unannounced. A cancelled run sends nothing
+// (takeAnnounceFound), and a flag already taken — every failure after the
+// first fetch — makes it a no-op.
+func (w *DownloadWorker) announceFoundOnFailure(ctx context.Context, job *database.Job, err error) {
+	if !isTransportFailure(err) || w.streamProc == nil {
+		return
+	}
+	if w.streamProc.takeAnnounceFound(ctx, job) {
+		w.streamProc.sendStreamFound(job, nil)
 	}
 }
 

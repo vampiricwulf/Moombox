@@ -21,9 +21,12 @@ import (
 //
 // What is owed is the row's announce_found flag (database.Job.AnnounceFound):
 // set in the INSERT that creates the job, taken by Process once the fetch is
-// over (Database.TakeAnnounceFound, which clears it in the same statement),
-// cleared by a cancel (CancelJob, and the cancel route without a worker) and
-// by every re-run (ResumeJob, ReinitializeJob, AutoReinitializeJob).
+// over (Database.TakeAnnounceFound, which clears it in the same statement) —
+// or, for a first fetch that never reached YouTube, by the fetch processJob
+// makes again once the outage is waited out, and by processJob itself when it
+// records the failure instead (announceFoundOnFailure) — cleared by a cancel
+// (CancelJob, and the cancel route without a worker) and by every re-run
+// (ResumeJob, ReinitializeJob, AutoReinitializeJob).
 
 // sendStreamFound sends the deferred discovery embed for job. info is the
 // first fetch's result, or nil when that fetch failed — the embed then says
