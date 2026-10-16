@@ -418,18 +418,20 @@ type SettingsModel struct {
 	channelRemovalState
 
 	// Notification sub-editor state
-	notifIndex      int
-	notifMode       string // "list" or "edit"
-	notifEditURL    string
+	notifIndex   int
+	notifMode    string // "list" or "edit"
+	notifEditURL string
+	// notifEditEvents is the event rows' ticks, seeded from the target as it
+	// opens (notifEventRows). Enter rebuilds the target's filter from them
+	// only when they differ from those seeded rows, so an Enter on rows left
+	// alone, or toggled away and back, keeps the filter exactly as stored:
+	// the rows show only this build's vocabulary, so a filter naming a
+	// retired key (connectivity_pause, still delivered through its alias)
+	// opens with no row ticked, and one naming every event opens as no filter
+	// does, and rebuilding either from the rows would turn an Enter that
+	// changed nothing into "every event" or a filter that sheds the events a
+	// later build adds into one that takes them.
 	notifEditEvents map[string]bool
-	// notifEditEventsTouched records whether the operator toggled an event row
-	// in this editing session. False keeps the target's filter exactly as
-	// stored on Enter: the rows show only this build's vocabulary, so a
-	// filter naming a retired key (connectivity_pause, still delivered
-	// through its alias) or none at all opens with no row ticked, and
-	// rebuilding it from the rows would turn an Enter that changed nothing
-	// into "every event".
-	notifEditEventsTouched bool
 	// notifEditDelivery is the per-TARGET delivery mode being edited,
 	// "separate" or "edit". Deliberately not named notifEditMode: notifMode
 	// above is the SUB-EDITOR's mode ("list" / "edit"), a different axis that

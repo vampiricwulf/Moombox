@@ -419,15 +419,16 @@ func TestTUISaveWritesTargetEditsTheFormUsedToHide(t *testing.T) {
 // the vocabulary, so a filter naming a retired key opens with no row
 // ticked. Now that the save tells such a filter from "every event", an
 // Enter that rebuilt the filter from those rows would turn a look at the
-// target into an edit to every event. The filter is rebuilt only once an
-// event row was toggled in that editing session — by Space or by a click —
-// and a toggle in an earlier session left with Esc does not count.
+// target into an edit to every event. The filter is rebuilt only when the
+// rows differ from those the target opened with — a toggle by Space or by a
+// click — and a toggle in an earlier session left with Esc does not count.
 //
-// Mutants killed: Enter rebuilding the filter whether or not a row was
-// toggled; opening a target without clearing the earlier session's toggle;
-// a click on an event row not marking the rows touched. Clearing it when
-// "a" opens an added target is not pinned: "a" ticks every row, and the
-// rebuilt filter is then every event, the same as an untouched one.
+// Mutants killed: Enter rebuilding the filter whether or not the rows
+// changed; opening a target without re-seeding its rows from it (the
+// abandoned session's toggle still counts); a click on an event row not
+// toggling it. Seeding the rows "a" opens an added target with is not
+// pinned here: they are every row, and the rebuilt filter is then every
+// event, the same as an untouched one.
 func TestNotifEditorKeepsAFilterItsRowsCannotShow(t *testing.T) {
 	retired := []string{"connectivity_pause"}
 	m, store, saves := overlayOverStore(t, func(c *config.MoomboxConfig) {
@@ -458,6 +459,49 @@ func TestNotifEditorKeepsAFilterItsRowsCannotShow(t *testing.T) {
 	editTarget(t, m, 0, func() { m.clickNotifEvent(2) })
 	if got, want := m.notifications[0].Events, []string{notifEventGroups[0].events[0]}; !slices.Equal(got, want) {
 		t.Errorf("a click that ticked one row left the entry's events at %v, want %v", got, want)
+	}
+}
+
+// TestNotifEditorRowsToggledBackKeepTheStoredFilter: rows toggled away and
+// back are the rows the target opened with, so the Enter keeps its filter as
+// stored and the save writes nothing — a field typed away and back is not an
+// edit. Two filters open with rows that do not say what they are: one naming
+// a retired key opens with no row ticked, and one naming every vocabulary
+// event opens with every row ticked, as no filter does. Rebuilding either
+// from those rows turned the first into "every event" and the second into no
+// filter, which takes the events a later build adds; the merge reads both as
+// edits (notifications.TargetFormValues).
+//
+// Mutants killed: Enter rebuilding the filter from the rows whatever they
+// are — which here, the toggles being the only change, is the rule before the
+// rows were compared, rebuilding once a row was toggled; sameNotifEventRows
+// telling a row toggled off from one never ticked (maps.Equal: the retired
+// filter's rows gain an explicit false).
+func TestNotifEditorRowsToggledBackKeepTheStoredFilter(t *testing.T) {
+	every := slices.Clone(allNotifEvents)
+	for name, stored := range map[string][]string{
+		"retired key": {"connectivity_pause"},
+		"every event": every,
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, store, saves := overlayOverStore(t, func(c *config.MoomboxConfig) {
+				c.Notifications = []config.NotificationConfig{{URL: hookA, Events: slices.Clone(stored)}}
+			})
+			editTarget(t, m, 0, func() {
+				toggleEvent(m, allNotifEvents[0])
+				toggleEvent(m, allNotifEvents[0])
+			})
+			if got := m.notifications[0].Events; !slices.Equal(got, stored) {
+				t.Fatalf("rows toggled away and back left the entry's events at %v, want the stored %v", got, stored)
+			}
+			saveOverlay(t, m)
+			if *saves != 0 {
+				t.Errorf("OnSave called %d times for a save that changed nothing", *saves)
+			}
+			if got := store.Snapshot().Notifications[0].Events; !slices.Equal(got, stored) {
+				t.Errorf("live events = %v, want the stored %v", got, stored)
+			}
+		})
 	}
 }
 

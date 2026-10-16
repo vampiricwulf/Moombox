@@ -262,7 +262,7 @@ test("an added target is sent as from -1", { skip }, async () => {
  * PUT /api/config's notification_edits answered as the server's merge
  * answers it (notifications.MergeTargetEdits): an entry edited from a base
  * index has each field it changed — compared as TargetFormValues compares
- * them, an event filter as a set and one naming every event as none — written
+ * them, an event filter as a set and an absent one as every event — written
  * onto the live target with that identity, a base target no entry names is
  * removed, and an added one appended. The answer is the live list as it then
  * stands, `changed` saying whether the edit moved it. The suites above answer
@@ -271,12 +271,8 @@ test("an added target is sent as from -1", { skip }, async () => {
  */
 function mergingServer(live) {
   const server = { live: structuredClone(live) };
-  const vocabulary = JSON.stringify([...ALL_EVENT_IDS].sort());
-  const events = (list) => {
-    if (!Array.isArray(list) || list.length === 0) return "*";
-    const set = JSON.stringify([...new Set(list)].sort());
-    return set === vocabulary ? "*" : set;
-  };
+  const events = (list) =>
+    Array.isArray(list) && list.length > 0 ? JSON.stringify([...new Set(list)].sort()) : "*";
   const form = (n) => ({
     url: n.url,
     enabled: n.enabled !== false,
@@ -392,6 +388,26 @@ test("an opened row stays with its target across other cards' saves", { skip }, 
   assert.deepEqual(h.app.config.notifications.map((n) => n.url), [HOOK_B, HOOK_C]);
   assert.equal(litEvents(h, 0).length, ALL_EVENT_IDS.length, "B's opened row closed behind A's delete");
   assert.equal(eventChips(h, 1).length, 0, "C's row opened in B's place");
+});
+
+// Clear filter on a stored filter naming every event — what the old
+// Filter... chip stored — saves the target with no filter, which the merge
+// tells from it (TargetFormValues) and stores, so the row closes.
+//
+// MUTANT: the opened-row early return taken for any filter naming every
+// event (nothing is sent, and the filter stays).
+test("Clear filter on a stored every-event filter saves its removal", { skip }, async () => {
+  const { h, server } = await openTargets([{ url: HOOK_A, events: [...ALL_EVENT_IDS] }]);
+  assert.equal(litEvents(h, 0).length, ALL_EVENT_IDS.length);
+  control(h, 0, "clear-filter").click();
+  await h.flush();
+  await h.flush();
+
+  assert.deepEqual(puts(h), [{
+    notification_edits: { base: [{ url: HOOK_A, events: ALL_EVENT_IDS }], edited: [{ url: HOOK_A }], from: [0] },
+  }]);
+  assert.deepEqual(server.live, [{ url: HOOK_A }]);
+  assert.ok(control(h, 0, "enable-filter"), "the row did not close");
 });
 
 // Clear filter on a row Filter... opened, with nothing stored, closes it and

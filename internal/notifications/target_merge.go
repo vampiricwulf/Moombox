@@ -52,35 +52,22 @@ func TargetFormValues(n config.NotificationConfig) map[string]string {
 	}
 }
 
-// vocabularySorted is EventGroups' events, sorted: the vocabulary both
-// editors offer a row or a chip for.
-var vocabularySorted = func() []string {
-	var out []string
-	for _, g := range EventGroups {
-		out = append(out, g.Events...)
-	}
-	slices.Sort(out)
-	return out
-}()
-
 // targetFormEvents is an event filter as TargetFormValues compares it: "*"
-// for every event — no filter, or one naming each vocabulary event and
-// nothing else — and otherwise the names it holds, as a sorted set. A filter
-// naming only events outside the vocabulary is its own value, not "*": the
-// manager reads it as a filter (one naming a retired key matches that key's
-// alias; connectivity_lost matches nothing), so turning it into "every event"
-// is an edit.
+// for no filter, and otherwise the names it holds, as a sorted set. Every
+// filter is its own value, because the manager reads every filter as one: a
+// filter naming each vocabulary event receives no event a later build adds,
+// where no filter receives them all, so clearing it is an edit — it used to
+// read as "*" too, and the dashboard's "Clear filter" on the filter its old
+// Filter... chip stored wrote nothing; and a filter naming only events
+// outside the vocabulary matches through an alias (a retired key) or not at
+// all (connectivity_lost), so turning it into "every event" is an edit.
 func targetFormEvents(events []string) string {
 	if len(events) == 0 {
 		return "*"
 	}
 	set := slices.Clone(events)
 	slices.Sort(set)
-	set = slices.Compact(set)
-	if slices.Equal(set, vocabularySorted) {
-		return "*"
-	}
-	return fmt.Sprintf("%q", set)
+	return fmt.Sprintf("%q", slices.Compact(set))
 }
 
 // WriteTargetField writes the form field key — one of TargetFormValues'

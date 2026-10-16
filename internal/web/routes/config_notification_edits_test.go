@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/notifications"
 )
 
 const (
@@ -284,6 +285,43 @@ func TestNotificationEditsLeaveUntouchedFieldsAsStored(t *testing.T) {
 	}
 	if got := strings.Join(a.Events, ","); got != "finished,not_an_event" {
 		t.Errorf("events = %q, want the stored filter untouched by a mute", got)
+	}
+}
+
+// TestClearFilterOnAnEveryEventFilter: the dashboard's "Clear filter" on a
+// target whose stored filter names every vocabulary event — what its old
+// Filter... chip stored — sends the target with no filter, and the save
+// clears it. The merge used to read the two as one value, answer
+// changed:false and leave the filter, chips and all.
+//
+// Mutant killed: notifications' targetFormEvents reading a filter that names
+// every vocabulary event as no filter.
+func TestClearFilterOnAnEveryEventFilter(t *testing.T) {
+	f := newConfigRoutesFixture(t)
+	var every []string
+	for _, g := range notifications.EventGroups {
+		every = append(every, g.Events...)
+	}
+	if err := f.store.Update(func(c *config.MoomboxConfig) {
+		c.Notifications = []config.NotificationConfig{{URL: editHookA, Events: every}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	page := pageTargets(t, f)
+	rec := putConfigExpect(t, f, editsBody(page, edited(page, func(l []any) []any {
+		delete(l[0].(map[string]any), "events")
+		return l
+	})))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"changed":true`) {
+		t.Fatalf("Clear filter: %d %s, want 200 changed:true", rec.Code, rec.Body.String())
+	}
+	for name, c := range map[string]*config.MoomboxConfig{"live": f.store.Snapshot(), "config.toml": onDiskConfig(t, f)} {
+		if got := c.Notifications[0].Events; len(got) != 0 {
+			t.Errorf("%s: events = %d names after Clear filter, want none", name, len(got))
+		}
+	}
+	if !f.notifs.Load() {
+		t.Error("the cleared filter did not reload the notification manager")
 	}
 }
 

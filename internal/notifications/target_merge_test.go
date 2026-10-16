@@ -83,3 +83,36 @@ func TestEveryTargetFieldIsWritable(t *testing.T) {
 		t.Error("WriteTargetField accepted a field it does not know")
 	}
 }
+
+// TestAnEveryEventFilterIsNotNoFilter: a filter naming each vocabulary
+// event is a filter, which the manager keeps to the events it names — one a
+// later build adds is not among them — where no filter takes every event, so
+// the merge tells the two apart. It used to read them as one value, and the
+// dashboard's "Clear filter" on the every-event filter its old Filter... chip
+// stored wrote nothing: the filter stayed, and the chips with it.
+//
+// Mutant killed: targetFormEvents reading a filter that names every
+// vocabulary event as "*" (no filter) — the clear is no edit.
+func TestAnEveryEventFilterIsNotNoFilter(t *testing.T) {
+	var every []string
+	for _, g := range EventGroups {
+		every = append(every, g.Events...)
+	}
+	filtered := config.NotificationConfig{URL: mergeHookA, Events: every}
+	cleared := config.NotificationConfig{URL: mergeHookA}
+	got, changed := MergeTargetEdits(
+		[]config.NotificationConfig{filtered}, []config.NotificationConfig{cleared}, []int{0},
+		[]config.NotificationConfig{filtered})
+	if !changed || len(got) != 1 || got[0].Events != nil {
+		t.Errorf("clearing an every-event filter merged to events %v (changed %v), want no filter", got[0].Events, changed)
+	}
+	// The order and repeats a filter is written with are still no edit.
+	reordered := slices.Clone(every)
+	slices.Reverse(reordered)
+	reordered = append(reordered, every[0])
+	if _, changed := MergeTargetEdits(
+		[]config.NotificationConfig{filtered}, []config.NotificationConfig{{URL: mergeHookA, Events: reordered}}, []int{0},
+		[]config.NotificationConfig{filtered}); changed {
+		t.Error("the same filter written in another order read as an edit")
+	}
+}

@@ -2434,9 +2434,11 @@ export class SettingsController {
    * unticked — that is the save (toggleNotificationEvent). It used to save a
    * filter naming every event; once the dashboard's saves became merges, the
    * merge read that as no change, the answer came back with the target as
-   * stored, and the row closed again, so no filter could be started. The row
-   * is kept by the target's identity, so a save of another card, whose answer
-   * replaces the page's list, leaves it open.
+   * stored, and the row closed again, so no filter could be started. The
+   * merge now stores such a filter as one (TargetFormValues), which would be
+   * no better: a filter the operator never narrowed that misses every event
+   * a later build adds. The row is kept by the target's identity, so a save
+   * of another card, whose answer replaces the page's list, leaves it open.
    */
   enableNotificationFilter(index) {
     const list = this.app.config.notifications || [];

@@ -51,18 +51,7 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 		if len(m.notifications) > 0 && m.notifIndex < len(m.notifications) {
 			n := m.notifications[m.notifIndex]
 			m.notifEditURL = n.URL
-			m.notifEditEvents = make(map[string]bool)
-			m.notifEditEventsTouched = false
-			if len(n.Events) == 0 {
-				// All events
-				for _, e := range allNotifEvents {
-					m.notifEditEvents[e] = true
-				}
-			} else {
-				for _, e := range n.Events {
-					m.notifEditEvents[e] = true
-				}
-			}
+			m.notifEditEvents = notifEventRows(n.Events)
 			// Absent enabled means delivering, exactly as the card reads it.
 			m.notifEditEnabled = n.IsEnabled()
 			m.notifEditMention = n.Mention
@@ -94,11 +83,7 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 		}
 	case "a", "A":
 		m.notifEditURL = ""
-		m.notifEditEvents = make(map[string]bool)
-		m.notifEditEventsTouched = false
-		for _, e := range allNotifEvents {
-			m.notifEditEvents[e] = true
-		}
+		m.notifEditEvents = notifEventRows(nil)
 		m.notifEditEnabled = true
 		m.notifEditMention = ""
 		m.notifEditMentionTouched = false
@@ -192,6 +177,36 @@ func notifMentionIDsWithNoRow(ids []string) []string {
 	return out
 }
 
+// notifEventRows is the event rows a target's filter opens the editor with:
+// every row ticked for no filter, which is every event, and otherwise each
+// event the filter names — one with no row (a retired key) included, though
+// no row shows it.
+func notifEventRows(events []string) map[string]bool {
+	rows := make(map[string]bool, len(allNotifEvents))
+	if len(events) == 0 {
+		for _, e := range allNotifEvents {
+			rows[e] = true
+		}
+		return rows
+	}
+	for _, e := range events {
+		rows[e] = true
+	}
+	return rows
+}
+
+// sameNotifEventRows reports whether a and b tick the same rows. Only the
+// rows count, and a row toggled off reads as one never ticked, so rows
+// toggled away and back are the rows they started as.
+func sameNotifEventRows(a, b map[string]bool) bool {
+	for _, e := range allNotifEvents {
+		if a[e] != b[e] {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *SettingsModel) handleNotifEditKey(key string) string {
 	totalItems := notifEditEventBase + len(allNotifEvents)
 
@@ -251,10 +266,10 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 		n.Mode = m.notifEditDelivery
 		// An empty selection stores Events = nil, which the manager, the web
 		// card and operations.md all read as "all events". Silence is the
-		// Enabled toggle, not an empty filter. Untouched rows leave the stored
-		// filter as it is (notifEditEventsTouched); an added target has none,
-		// which is every event — the rows "a" ticks.
-		if m.notifEditEventsTouched {
+		// Enabled toggle, not an empty filter. Rows that end as the target
+		// opened them leave the stored filter as it is (notifEditEvents); an
+		// added target has none, which is every event — the rows "a" ticks.
+		if !sameNotifEventRows(m.notifEditEvents, notifEventRows(n.Events)) {
 			n.Events = nil
 			if selected > 0 && selected < len(allNotifEvents) {
 				n.Events = events
@@ -341,7 +356,6 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 		if eventIdx := m.notifEditFocus - notifEditEventBase; eventIdx >= 0 && eventIdx < len(allNotifEvents) {
 			event := allNotifEvents[eventIdx]
 			m.notifEditEvents[event] = !m.notifEditEvents[event]
-			m.notifEditEventsTouched = true
 		}
 		return ""
 	case "m", "M":
