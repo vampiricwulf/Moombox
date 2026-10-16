@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/engine"
 )
 
 // streamParams captures the codec/geometry parameters of a media file's
@@ -84,7 +86,7 @@ func probeStreamParams(ctx context.Context, ffprobePath, filePath string) (*stre
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_streams",
-		filePath,
+		engine.FFmpegPathArg(filePath),
 	)
 
 	output, err := cmd.Output()

@@ -976,7 +976,7 @@ func probeAudioBitrate(ctx context.Context, ffprobePath, filePath string) int {
 		"-print_format", "json",
 		"-show_streams",
 		"-select_streams", "a:0",
-		filePath,
+		engine.FFmpegPathArg(filePath),
 	)
 
 	output, err := cmd.Output()

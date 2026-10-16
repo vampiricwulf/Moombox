@@ -339,6 +339,35 @@ func TestFFmpegPathArg(t *testing.T) {
 	}
 }
 
+// TestFFmpegPathArgIsTheSeamOutsideTheEngine: FFmpegPathArg, which every
+// ffprobe call outside this package wraps its file in (W27-05), gives exactly
+// ffmpegPathArg's answer — the long path prefixed on Windows, everything else
+// as written — so a probe opens the path the mux wrote.
+//
+// Mutants it kills: FFmpegPathArg returning p (the long path reaches ffprobe
+// raw); FFmpegPathArg prefixing whatever the OS (the linux row changes).
+//
+// Do not add t.Parallel(): mutates the package-level ffmpegPathOS seam.
+func TestFFmpegPathArgIsTheSeamOutsideTheEngine(t *testing.T) {
+	long := `C:\out\` + strings.Repeat("a", 300) + ".mp4"
+	short := `C:\out\clip.mp4`
+
+	prev := ffmpegPathOS
+	t.Cleanup(func() { ffmpegPathOS = prev })
+
+	ffmpegPathOS = "windows"
+	if got := FFmpegPathArg(long); !strings.HasPrefix(got, `\\?\`) || got != ffmpegPathArg(long) {
+		t.Errorf("FFmpegPathArg(long) on windows = %q…, want ffmpegPathArg's prefixed answer", got[:min(12, len(got))])
+	}
+	if got := FFmpegPathArg(short); got != short {
+		t.Errorf("FFmpegPathArg(short) on windows = %q, want it unchanged", got)
+	}
+	ffmpegPathOS = "linux"
+	if got := FFmpegPathArg(long); got != long {
+		t.Errorf("FFmpegPathArg(long) on linux = %q…, want it unchanged", got[:min(12, len(got))])
+	}
+}
+
 // utf16Len is what Windows counts against MAX_PATH. Deliberately computed here
 // rather than borrowed from the implementation, so a production switch back to
 // len() (UTF-8 bytes) is measured against an independent yardstick.

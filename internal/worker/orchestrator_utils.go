@@ -115,7 +115,7 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 		"-print_format", "json",
 		"-show_streams",
 		"-show_format",
-		filePath,
+		engine.FFmpegPathArg(filePath),
 	)
 
 	out, err := cmd.Output()

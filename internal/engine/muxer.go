@@ -63,9 +63,10 @@ func (m *Muxer) FFprobePath() string {
 // ffmpegPathArg is exercised on every platform. Production never reassigns it.
 var ffmpegPathOS = runtime.GOOS
 
-// ffmpegPathArg prepares a file path for FFmpeg's or ffprobe's argv. A
-// composed output path — output dir + channel subdir + a 200-rune title +
-// " - partN.chat.json" — can exceed Windows' 260-character MAX_PATH. Go opens
+// ffmpegPathArg prepares a file path for FFmpeg's or ffprobe's argv (ffprobe's
+// through FFmpegPathArg, from outside this package). A composed output path —
+// output dir + channel subdir + a 200-rune title + " - partN.chat.json" — can
+// exceed Windows' 260-character MAX_PATH. Go opens
 // such a path through the \\?\ extended-length prefix automatically; FFmpeg
 // receives the raw string and fails on a host without the LongPathsEnabled
 // policy (sweep-2 ENGINE-12). Only paths that actually need the prefix get it,
@@ -100,6 +101,16 @@ func ffmpegPathArg(p string) string {
 	}
 	return `\\?\` + abs
 }
+
+// FFmpegPathArg is ffmpegPathArg for an argv built outside this package: the
+// ffprobe calls in internal/worker (runFFprobe, probeStreamParams,
+// probeAudioBitrate) and the import's duration probe pass their file through
+// it. ffprobe opens its input through the same libavformat file protocol
+// FFmpeg does, so a build that needs the prefix to open a path needs it for
+// both: an archive path the mux wrote through the prefix was probed raw, the
+// probe failed, and the row finished with no resolution or duration and
+// without the short-output check (ENGINE-9) that runs on the probe's answer.
+func FFmpegPathArg(p string) string { return ffmpegPathArg(p) }
 
 // deriveFFprobePath returns the ffprobe path corresponding to the given ffmpeg path.
 func deriveFFprobePath(ffmpegPath string) string {

@@ -886,7 +886,7 @@ func importSegment(jobID string, video *importFile, files []*importFile) *databa
 var importProbeDuration = func(ctx context.Context, ffprobePath, file string) float64 {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, ffprobePath, "-v", "quiet", "-print_format", "json", "-show_format", file).Output()
+	out, err := exec.CommandContext(ctx, ffprobePath, "-v", "quiet", "-print_format", "json", "-show_format", engine.FFmpegPathArg(file)).Output()
 	if err != nil {
 		return 0
 	}
