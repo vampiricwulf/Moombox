@@ -17,6 +17,7 @@ import {
   needsChannelResolve,
   NOT_A_CHANNEL_URL,
   passwordLengthError,
+  resolveConfigPath,
   restartValuesChanged,
   serverErrorMessage,
   snapshotRestartValues,
@@ -217,6 +218,9 @@ export class SettingsController {
     this._netAccessListenerAdded = false;
     /** Snapshot of restart-required values taken when config is loaded */
     this._originalRestartValues = {};
+    /** The restart-required values this page's saves sent since then, by
+     *  path: what the restart prompt judges (_checkRestartRequired). */
+    this._sentRestartValues = {};
     this._dirty = false;
     this._dirtyListenersAdded = false;
     /** True once populateBrowserSelector has filled the browser <sl-select> —
@@ -906,6 +910,7 @@ export class SettingsController {
     // literal left the paths it omitted comparing against undefined, so every
     // save reported "changed" and prompted for a restart.
     this._originalRestartValues = snapshotRestartValues(config, RESTART_REQUIRED_FIELDS);
+    this._sentRestartValues = {};
 
     // Network is the default visible section, so load security status now.
     // Reset flag so the form fields are cleared on a full config repopulate —
@@ -1225,11 +1230,9 @@ export class SettingsController {
         this.app.showToast("Settings saved successfully", "success");
         // Refresh status bar (platform indicators, cookie status, etc.)
         this.app.loadStatus();
-        // Check if any restart-required settings changed. The cache holds
-        // the loaded value of every field this page did not send, so only a
-        // restart-required field the operator edited can prompt — one the
-        // TUI changed meanwhile is the TUI's restart to ask for.
-        this._checkRestartRequired(config);
+        // Prompt when what the page sent includes a changed restart-required
+        // field.
+        this._checkRestartRequired(payload);
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         let msg = data.error || "Failed to save settings";
@@ -1247,11 +1250,23 @@ export class SettingsController {
   }
 
   /**
-   * After a successful save, check if restart-requiring settings changed.
-   * If so, prompt the user and call POST /api/restart.
+   * After a successful save, prompt for a restart — and call POST
+   * /api/restart — when this page's saves wrote a restart-required field
+   * with a value other than the one the form was filled with: the TUI's rule
+   * (settingsWrite). `sent` is the save's PUT body. Only what the page sent
+   * counts, never the config cache: a channel action reloads that from the
+   * live config while the form is dirty (app.loadConfig), so a
+   * restart-required field the TUI changed meanwhile used to prompt here for
+   * a save that never touched it — that restart is the TUI's to ask for.
+   * Every value sent since the form was filled counts, not only this save's,
+   * so a declined prompt is asked again on the next save.
    */
-  async _checkRestartRequired(config) {
-    const current = snapshotRestartValues(config, RESTART_REQUIRED_FIELDS);
+  async _checkRestartRequired(sent) {
+    for (const { path } of RESTART_REQUIRED_FIELDS) {
+      const value = resolveConfigPath(sent, path);
+      if (value !== undefined) this._sentRestartValues[path] = value;
+    }
+    const current = { ...this._originalRestartValues, ...this._sentRestartValues };
     if (!restartValuesChanged(this._originalRestartValues, current, RESTART_REQUIRED_FIELDS)) {
       return;
     }

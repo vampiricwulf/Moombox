@@ -435,6 +435,109 @@ test("notificationIdentities names targets as the server's merge does", () => {
   );
 });
 
+// ── The restart prompt ──────────────────────────────────────────────────────
+
+/**
+ * A page over a fake server that serves GET /api/config from its live config
+ * and applies a PUT key by key; showConfirm records each prompt and answers
+ * `restart`.
+ */
+async function openWithRestart({ restart = false } = {}) {
+  const server = { config: structuredClone(CONFIG) };
+  const h = await harness.makeApp({
+    initialState: { config: structuredClone(CONFIG) },
+    routes: {
+      "GET /api/config": () => structuredClone(server.config),
+      "PUT /api/config": ({ body }) => {
+        for (const [section, fields] of Object.entries(body)) {
+          Object.assign((server.config[section] ??= {}), fields);
+        }
+        return { success: true, changed: true };
+      },
+      "POST /api/restart": () => ({ success: true }),
+    },
+  });
+  h.app.config = structuredClone(CONFIG);
+  h.app.settings.populateConfigForm();
+  const asked = [];
+  h.app.showConfirm = async (message, opts) => {
+    asked.push(opts?.title || message);
+    return restart;
+  };
+  return { h, server, asked };
+}
+
+// A restart-required field the TUI saved while the page was open is the
+// TUI's restart to ask for, not a dashboard save's that never touched it. A
+// channel action reloads the page's config cache from the live config while
+// the form is dirty (app.loadConfig), and the prompt used to compare that
+// cache with the form's load-time values: the TUI's port read as the page's
+// change, and accepting restarted the server over it.
+//
+// MUTANT: _checkRestartRequired judging the config cache, as it did — the
+// save of the parallel-downloads count alone prompts.
+test("a restart field the TUI changed does not prompt an unrelated save", { skip }, async () => {
+  const { h, server, asked } = await openWithRestart();
+  h.el("cfg-parallel-downloads").value = "5";
+  h.app.settings._markDirty();
+  server.config.network.port = 8080; // the TUI saves a restart-required field
+  await h.app.loadConfig(); // a channel action, while the form is dirty
+  await h.flush();
+  await save(h);
+
+  assert.deepEqual(puts(h), [{ downloader: { num_parallel_downloads: 5 } }]);
+  assert.equal(server.config.network.port, 8080);
+  assert.deepEqual(asked, [], `the save of num_parallel_downloads alone asked: ${JSON.stringify(asked)}`);
+});
+
+// A restart field the page sent still prompts, and a declined prompt is asked
+// again on the next save, which sends something else: the values every save
+// since the form was filled sent count, not only this one's.
+//
+// MUTANTS: only the current save's body judged (the second save does not
+// ask); the load-time snapshot not moved when the restart is accepted (the
+// save after it asks again).
+test("a sent restart field prompts until the restart is accepted", { skip }, async () => {
+  const { h, asked } = await openWithRestart();
+  h.el("cfg-port").value = "775";
+  await save(h);
+  assert.deepEqual(asked, ["Restart Required"], "the port change did not prompt");
+
+  h.el("cfg-log-level").value = "DEBUG";
+  await save(h);
+  assert.deepEqual(asked, ["Restart Required", "Restart Required"], "a declined restart was not asked again");
+
+  h.app.showConfirm = async (message, opts) => { asked.push(opts?.title || message); return true; };
+  h.el("cfg-log-level").value = "WARN";
+  await save(h);
+  await h.flush();
+  assert.equal(asked.length, 3);
+  h.el("cfg-log-level").value = "ERROR";
+  await save(h);
+  assert.equal(asked.length, 3, "the save after an accepted restart asked again");
+});
+
+// The form filled again (a config reload with no unsaved edits) starts over:
+// what is live then is the baseline, and a value the page sent before is not
+// judged against it.
+//
+// MUTANT: populateConfigForm keeping the sent values — the port the page
+// sent and the TUI then changed again prompts an unrelated save.
+test("a refilled form judges only what is sent after it", { skip }, async () => {
+  const { h, server, asked } = await openWithRestart();
+  h.el("cfg-port").value = "775";
+  await save(h);
+  assert.equal(asked.length, 1);
+  server.config.network.port = 776; // the TUI moves it again
+  await h.app.loadConfig(); // a clean form: populateConfigForm runs
+  await h.flush();
+
+  h.el("cfg-log-level").value = "DEBUG";
+  await save(h);
+  assert.deepEqual(puts(h).at(-1), { logs: { log_level: "DEBUG" } });
+  assert.equal(asked.length, 1, `an unrelated save after the refill asked: ${JSON.stringify(asked)}`);
+});
+
 // ── editedSettingsPayload ───────────────────────────────────────────────────
 
 // MUTANTS: comparing by identity rather than by value (an untouched list
