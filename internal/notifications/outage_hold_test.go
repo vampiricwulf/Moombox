@@ -760,9 +760,10 @@ func TestEditModeHoldMarksEveryLaterRequest(t *testing.T) {
 }
 
 // TestRaisedAfterTheRestoreIsNotMarked: the queue holds from the online edge
-// until its goroutine next looks, and the Outage Alert is sent from that same
-// transition — so a notification queued in between was raised after the
-// outage, and goes out unmarked, behind the held one that is.
+// until its goroutine next looks, and what the restore itself sets off — a
+// Twitch capture's resume, a monitor re-check's find — can be queued in
+// between. It was raised after the outage, and goes out unmarked, behind the
+// held one that is.
 //
 // Mutant: enqueue marking an arrival delayed while the queue holds rather
 // than while the monitor reports offline (the post-restore notification
@@ -774,20 +775,20 @@ func TestRaisedAfterTheRestoreIsNotMarked(t *testing.T) {
 
 	m.Send("Job Failed", "d", TypeError, nil, SendOptions{Event: "error", JobID: "yt_1"})
 	time.Sleep(150 * time.Millisecond) // the goroutine finds it offline and parks
-	// The monitor reports online, and the alert is queued before the
-	// transition reaches the queue's own wake.
+	// The monitor reports online, and the capture's resume is queued before
+	// the transition reaches the queue's own wake.
 	conn.mu.Lock()
 	conn.online = true
 	conn.mu.Unlock()
-	m.Send("Outage Alert", "d", TypeWarning, nil, SendOptions{Event: "connectivity_restored"})
+	m.Send("Twitch Download Resumed", "d", TypeDownload, nil, SendOptions{Event: "connectivity_resume", JobID: "tw_2"})
 	waitFor(t, "both notifications", func() bool { return len(f.calls()) == 2 })
 	calls := f.calls()
-	if calls[0].Body.Embeds[0].Title != "Job Failed" || calls[1].Body.Embeds[0].Title != "Outage Alert" {
+	if calls[0].Body.Embeds[0].Title != "Job Failed" || calls[1].Body.Embeds[0].Title != "Twitch Download Resumed" {
 		t.Fatalf("delivered %q then %q, want the held one first", calls[0].Body.Embeds[0].Title, calls[1].Body.Embeds[0].Title)
 	}
 	assertDelayedNote(t, calls[0])
 	if c := calls[1].Body.Content; c != "" {
-		t.Errorf("the alert raised after the restore carries content %q, want none", c)
+		t.Errorf("the resume raised after the restore carries content %q, want none", c)
 	}
 }
 

@@ -414,8 +414,8 @@ func (q *targetQueue) enqueue(it queued) {
 	}
 	// Not on q.holding alone: the queue still holds from the online edge
 	// until its goroutine's next pop clears it, and what arrives in between
-	// was raised after the outage — the Outage Alert among it, sent from the
-	// same transition that wakes the goroutine.
+	// was raised after the outage — what the restore itself sets off, such as
+	// a Twitch capture's resume or a monitor re-check's find.
 	if started {
 		n := len(q.items) - q.steps + 1
 		defer q.logger.Info("connectivity monitor reports offline — holding this target's notifications until it returns",
