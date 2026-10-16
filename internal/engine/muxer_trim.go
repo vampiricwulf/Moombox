@@ -2,9 +2,12 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -12,21 +15,86 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
-// CleanupOldTrimTempDirs removes leftover `moombox-trim-*`,
-// `moombox-2pass-*` and `moombox-concat-*` directories (ConcatCopy's, which
-// the worker's part merge uses) from %TEMP% that are older than 24h.
-// These are normally cleaned up by `defer os.RemoveAll(tempDir)` inside
-// the trim path, but a hard process abort (panic in a sibling
-// goroutine, OS kill, power loss) bypasses the defer and leaves the
-// dirs orphaned. Windows eventually reclaims %TEMP% but on a
-// long-running install they accumulate. Safe to call at startup; uses
-// 24h age threshold so a concurrent trim's in-flight tempdir is never
-// touched.
+// trimTempMaxAge is how old a leftover temp directory must be before a sweep
+// removes it: longer than any encode that can own one, so an in-flight one is
+// never touched.
+const trimTempMaxAge = 24 * time.Hour
+
+// CleanupOldTrimTempDirs removes leftover `moombox-2pass-*` and
+// `moombox-concat-*` directories (ConcatCopy's, which the worker's part merge
+// uses) from %TEMP% that are older than 24h, and the `moombox-trim-*` ones
+// that versions before multi-segment trims wrote their intermediates beside
+// the output (trimTempDirPattern) left there — RemoveStaleTrimTempDirs sweeps
+// where they go now. These are normally cleaned up by `defer
+// os.RemoveAll(tempDir)`, but a hard process abort (panic in a sibling
+// goroutine, OS kill, power loss) bypasses the defer and leaves the dirs
+// orphaned. Windows eventually reclaims %TEMP% but on a long-running install
+// they accumulate. Safe to call at startup; uses 24h age threshold so a
+// concurrent mux's in-flight tempdir is never touched.
 //
 // Errors are logged-and-continue at the caller; this is housekeeping,
 // not a critical path.
 func CleanupOldTrimTempDirs() (removed int, err error) {
-	return utils.RemoveStaleTempEntries(24*time.Hour, "moombox-trim-", "moombox-2pass-", "moombox-concat-")
+	return utils.RemoveStaleTempEntries(trimTempMaxAge, "moombox-trim-", "moombox-2pass-", "moombox-concat-")
+}
+
+// trimTempDirMarker sits between the output's stem and os.MkdirTemp's random
+// part in the name of a multi-segment trim's intermediates directory.
+const trimTempDirMarker = ".moombox-trim-"
+
+// trimTempDirRe is the whole name of such a directory: a stem, the marker,
+// and MkdirTemp's random part, which is decimal. A clip the trim service
+// places is "<id> [<start>s-<end>s].mp4" and never takes this shape, so the
+// sweep below can never match one.
+var trimTempDirRe = regexp.MustCompile(`^.+` + regexp.QuoteMeta(trimTempDirMarker) + `[0-9]+$`)
+
+// trimTempDirPattern is the os.MkdirTemp pattern for the directory a
+// multi-segment trim re-encodes its parts into: BESIDE outputPath and named
+// after its stem — "<stem>.moombox-trim-<n>".
+//
+// Beside the output, because the intermediates together are about the size
+// of the clip, and the clip's volume is the one the disk alerts and the
+// backlog's disk gate watch. Under os.TempDir() they went to the container's
+// /tmp in Docker — the writable layer on the host's /var/lib/docker, which no
+// Moombox check sees — and to RAM on a host whose /tmp is a tmpfs, where a
+// long trim failed with ENOSPC however much room the output disk had.
+//
+// After its stem, because the trim service claims the clip's stem for the
+// length of the encode (claimOutputStem, internal/worker): the orphan sweep
+// never offers an intermediate the encode is still writing, and a directory a
+// crash left says whose it was.
+func trimTempDirPattern(outputPath string) string {
+	base := filepath.Base(outputPath)
+	return strings.TrimSuffix(base, filepath.Ext(base)) + trimTempDirMarker + "*"
+}
+
+// RemoveStaleTrimTempDirs removes the multi-segment trim intermediates
+// directories (trimTempDirPattern) in dir that are older than 24h: what a
+// hard abort mid-trim left in a trim directory before the deferred removal
+// ran. A missing dir has nothing to sweep. Only a directory of exactly that
+// name is touched, so a file in dir — a clip — never is.
+func RemoveStaleTrimTempDirs(dir string) (removed int, err error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	cutoff := time.Now().Add(-trimTempMaxAge)
+	for _, ent := range entries {
+		if !ent.IsDir() || !trimTempDirRe.MatchString(ent.Name()) {
+			continue
+		}
+		info, err := ent.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		if os.RemoveAll(filepath.Join(dir, ent.Name())) == nil {
+			removed++
+		}
+	}
+	return removed, nil
 }
 
 // TrimSegmentInput describes one segment for the TrimAndConcatWithProgress pipeline.
@@ -77,7 +145,8 @@ func (m *Muxer) buildTrimSegmentArgs(seg TrimSegmentInput, outputPath string, ta
 //
 // Every entry is written to the list as an absolute path. The concat demuxer
 // resolves a relative entry against the LIST FILE's directory — tempDir, a
-// moombox-concat-* or moombox-trim-* directory under the system temp — and not
+// moombox-concat-* directory under the system temp or a trim's intermediates
+// directory beside its output (trimTempDirPattern) — and not
 // against the working directory the rest of FFmpeg's argv is resolved
 // against. A part row under the default paths.output_directory ("./output")
 // is relative to the working directory, so the Tier 4 part merge handed
@@ -121,8 +190,10 @@ func (m *Muxer) concatIntermediates(ctx context.Context, intermediates []string,
 // buildArgs and buildTrimSegmentArgs.
 //
 // outputPath goes through ffmpegPathArg (sweep-2 ENGINE-12) — it is the
-// user-composed archive path. concatListPath deliberately does NOT: it is
-// always <os.MkdirTemp dir>/concat.txt, ours and short, and the list's own
+// user-composed archive path — and so does concatListPath: the part merge's
+// is <os.MkdirTemp dir>/concat.txt under the system temp, short, but a
+// trim's sits in its intermediates directory beside the clip
+// (trimTempDirPattern), inside the user's output tree. The list's own
 // ENTRIES must stay unprefixed regardless, because buildConcatList rewrites
 // backslashes to forward slashes for the demuxer and a prefixed entry would
 // come out as //?/C:/… and fail to parse.
@@ -131,7 +202,7 @@ func (m *Muxer) buildConcatArgs(concatListPath, outputPath string) []string {
 		"-y",
 		"-f", "concat",
 		"-safe", "0",
-		"-i", concatListPath,
+		"-i", ffmpegPathArg(concatListPath),
 		"-c", "copy",
 		"-movflags", "faststart",
 		ffmpegPathArg(outputPath),
@@ -219,7 +290,12 @@ func (m *Muxer) TrimAndConcatWithProgress(ctx context.Context, segments []TrimSe
 
 	const encodePortion = 0.95 // 95% of progress for encoding, 5% for concat
 
-	tempDir, err := os.MkdirTemp("", "moombox-trim-*")
+	// The intermediates go beside the output, on its volume
+	// (trimTempDirPattern), whose directory need not exist yet.
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
+	}
+	tempDir, err := os.MkdirTemp(filepath.Dir(outputPath), trimTempDirPattern(outputPath))
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}

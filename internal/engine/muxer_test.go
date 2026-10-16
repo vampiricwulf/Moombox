@@ -443,8 +443,9 @@ func TestFFmpegPathArgMeasuresResolvedUTF16Length(t *testing.T) {
 // length are untouched.
 //
 // Mutants: leaving any ONE builder's path raw (that builder's row reports the
-// unprefixed argument), and applying the seam regardless of ffmpegPathOS (the
-// non-Windows argv changes).
+// unprefixed argument) — buildConcatArgs' list path included, which a
+// multi-segment trim writes beside its clip — and applying the seam
+// regardless of ffmpegPathOS (the non-Windows argv changes).
 //
 // Do not add t.Parallel(): mutates the package-level ffmpegPathOS seam.
 func TestEveryFfmpegArgvBuilderAppliesThePathSeam(t *testing.T) {
@@ -453,10 +454,10 @@ func TestEveryFfmpegArgvBuilderAppliesThePathSeam(t *testing.T) {
 	video := hostAbsPath(t, stem+".video.ts")
 	audio := hostAbsPath(t, stem+".audio.m4a")
 	output := hostAbsPath(t, stem+".mp4")
-	// The concat list lives in an os.MkdirTemp directory, never in the user's
-	// output tree, so it is deliberately NOT a long path here — and it is
-	// deliberately not wrapped in production either (see buildConcatArgs).
-	list := filepath.Join(t.TempDir(), "concat.txt")
+	// A multi-segment trim's concat list lives in its intermediates directory
+	// beside the clip (trimTempDirPattern), inside the user's output tree, so
+	// it can be as long as the output (see buildConcatArgs).
+	list := hostAbsPath(t, stem+".moombox-trim-1"+string(filepath.Separator)+"concat.txt")
 	passLog := filepath.Join(t.TempDir(), "passlog")
 
 	opts := &TrimOptions{
@@ -483,7 +484,7 @@ func TestEveryFfmpegArgvBuilderAppliesThePathSeam(t *testing.T) {
 		{"buildTrimSegmentArgs", func() []string { return m.buildTrimSegmentArgs(seg, output, 1920, 1080, 30, 18, 128) },
 			[]string{video, output}},
 		{"buildConcatArgs", func() []string { return m.buildConcatArgs(list, output) },
-			[]string{output}},
+			[]string{list, output}},
 	}
 
 	prev := ffmpegPathOS

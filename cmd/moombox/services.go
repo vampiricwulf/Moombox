@@ -981,35 +981,38 @@ func (s *runState) initServices(logLevelOverride string) error {
 	trimSvc.SetNotifier(notifyMgr)
 	s.trimSvc = trimSvc
 
-	// Sweep orphaned trim/two-pass tempdirs from %TEMP% on startup.
-	// `defer os.RemoveAll(tempDir)` inside the trim path covers the
-	// happy case; a hard process abort (panic in a sibling goroutine,
-	// OS kill, power loss) bypasses the defer and leaks the dir. 24h
-	// age threshold keeps concurrent trims' in-flight tempdirs safe. The
-	// import sweep also takes what an aborted import extracted into
-	// <output>/imports, so the output directory is read here, before the
-	// goroutine. The mux sweep takes the temporary file a crash or a kill
-	// left beside an archive FFmpeg was writing; it tells a gone run's from
-	// this run's by a token, not an age, so it can run beside the worker's
-	// boot re-mux of the same archive (worker.RemoveStaleMuxTemps).
-	importOutputDir := cfg.Paths.OutputDirectory
+	// Sweep orphaned trim/two-pass/concat tempdirs on startup: the
+	// intermediates a multi-segment trim writes beside its clip, in every
+	// job's trim directory, and what is left in %TEMP%. `defer
+	// os.RemoveAll(tempDir)` inside the trim path covers the happy case;
+	// a hard process abort (panic in a sibling goroutine, OS kill, power
+	// loss) bypasses the defer and leaks the dir. 24h age threshold keeps
+	// concurrent trims' in-flight tempdirs safe. The trim sweep re-roots
+	// moved rows onto the output directory, and the import sweep also
+	// takes what an aborted import extracted into <output>/imports, so the
+	// output directory is read here, before the goroutine. The mux sweep
+	// takes the temporary file a crash or a kill left beside an archive
+	// FFmpeg was writing; it tells a gone run's from this run's by a token,
+	// not an age, so it can run beside the worker's boot re-mux of the same
+	// archive (worker.RemoveStaleMuxTemps).
+	sweepOutputDir := cfg.Paths.OutputDirectory
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("trim-tempdir cleanup panic", slog.Any("panic", r))
 			}
 		}()
-		if removed, err := engine.CleanupOldTrimTempDirs(); err != nil {
-			log.Debug("trim-tempdir cleanup", slog.String("error", err.Error()))
+		if removed, err := worker.CleanupOldTrimTemp(db, sweepOutputDir); err != nil {
+			log.Debug("trim-tempdir cleanup", slog.Int("removed", removed), slog.String("error", err.Error()))
 		} else if removed > 0 {
 			log.Info("trim-tempdir cleanup", slog.Int("removed", removed))
 		}
-		if removed, err := routes.CleanupOldImportTemp(importOutputDir); err != nil {
+		if removed, err := routes.CleanupOldImportTemp(sweepOutputDir); err != nil {
 			log.Debug("import-temp cleanup", slog.String("error", err.Error()))
 		} else if removed > 0 {
 			log.Info("import-temp cleanup", slog.Int("removed", removed))
 		}
-		worker.RemoveStaleMuxTemps(db, importOutputDir, log)
+		worker.RemoveStaleMuxTemps(db, sweepOutputDir, log)
 	}()
 
 	// =========================================================================

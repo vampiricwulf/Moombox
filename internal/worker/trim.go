@@ -465,7 +465,9 @@ func (ts *TrimService) run(ctx context.Context, plan *trimPlan, progressFn func(
 
 	// No trim row names the file until the encode is done, which for a long
 	// range is a long time to be an unreferenced file in trim/. The claim is
-	// on the stem, so it covers the partial file too. Deferred ahead of the
+	// on the stem, so it covers the partial file too, and the intermediates a
+	// multi-segment encode writes into a directory named after the partial
+	// file's stem beside it (engine.TrimAndConcatWithProgress). Deferred ahead of the
 	// outcome below, so it is released after it: once the partial file is gone.
 	defer claimOutputStem(job.ID, strings.TrimSuffix(plan.trimPath, filepath.Ext(plan.trimPath)))()
 
@@ -932,6 +934,51 @@ func sendTrimFailed(n notifications.Sender, job *database.Job, trimErr error) {
 			JobID:     f.ID,
 		},
 	)
+}
+
+// CleanupOldTrimTemp is the startup sweep for a multi-segment trim's
+// intermediates that a hard abort mid-trim (OS kill, power loss, a panic
+// elsewhere) left before the encode's deferred removal ran — each about the
+// size of its share of the clip. They are written beside the clip, so the
+// sweep reads every directory the trim service writes into (trimDirsOf, for
+// every job the database holds: beside its output and each of its parts),
+// and the system temp directory as well, where versions before this one
+// wrote them (engine.CleanupOldTrimTempDirs). Only directories over a day
+// old go (engine.RemoveStaleTrimTempDirs). A trim directory whose job row is
+// gone is not read; its leftovers are files the orphan sweep lists.
+//
+// outputDir is paths.output_directory, the base trimDirsOf re-roots a moved
+// archive tree's rows onto. Errors are reported and the sweep goes on: it is
+// housekeeping, not a critical path.
+func CleanupOldTrimTemp(db *database.Database, outputDir string) (removed int, err error) {
+	removed, err = engine.CleanupOldTrimTempDirs()
+	if outputDir == "" {
+		outputDir = "./output"
+	}
+	absOutputDir, absErr := filepath.Abs(outputDir)
+	if absErr != nil {
+		return removed, errors.Join(err, absErr)
+	}
+	jobs, jobsErr := db.GetAllJobs()
+	if jobsErr != nil {
+		return removed, errors.Join(err, jobsErr)
+	}
+	seen := map[string]bool{}
+	for _, job := range jobs {
+		for _, dir := range trimDirsOf(job, absOutputDir) {
+			key := normalizePath(dir)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			n, dirErr := engine.RemoveStaleTrimTempDirs(dir)
+			removed += n
+			if dirErr != nil {
+				err = errors.Join(err, dirErr)
+			}
+		}
+	}
+	return removed, err
 }
 
 // trimSeconds spells a trim bound for a refusal: to the millisecond, without
