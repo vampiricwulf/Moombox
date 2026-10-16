@@ -172,9 +172,13 @@ func seedLegacyInstall(t *testing.T, configured string) string {
 // naming both paths; FileSchemaVersion, which `moombox add` reads first, must
 // read the same file.
 //
+// File and ResolveFile must name that file too: the daemon records File for
+// `moombox add`, which resolves database_path with ResolveFile, and a record
+// of the literal path names a file that does not exist.
+//
 // MUTANTS: legacyDatabaseFile always returning "" (an empty database at the
 // literal path); FileSchemaVersion reading dbPath instead of the file it
-// resolved (no such file); the Warn dropped.
+// resolved (no such file); the Warn dropped; Open keeping dbPath as its File.
 func TestOpenKeepsTheDatabaseAnEarlierReleaseKept(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -210,7 +214,18 @@ func TestOpenKeepsTheDatabaseAnEarlierReleaseKept(t *testing.T) {
 			}
 			job, _ := db.GetJob("kept")
 			seen, _ := db.HasProcessed("kept")
+			opened := db.File()
 			db.Close()
+			legacyInfo, err := os.Stat(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info, err := os.Stat(opened); err != nil || !os.SameFile(info, legacyInfo) {
+				t.Errorf("File() = %q after Open(%q), want the file it opened, %q", opened, configured, legacy)
+			}
+			if resolved, err := ResolveFile(configured); err != nil || resolved != opened {
+				t.Errorf("ResolveFile(%q) = %q, %v; want %q, the file Open opened", configured, resolved, err, opened)
+			}
 			if job == nil || !seen {
 				t.Errorf("Open(%q) holds job %v, HasProcessed(kept)=%v; the install's jobs and history are in %q", configured, job, seen, legacy)
 			}
@@ -275,7 +290,11 @@ func TestOpenCreatesTheConfiguredPathWhenNoEarlierDatabaseIsThere(t *testing.T) 
 			if err != nil {
 				t.Fatalf("Open(%q) beside %s: %v", configured, name, err)
 			}
+			opened := db.File()
 			db.Close()
+			if opened != configured {
+				t.Errorf("File() = %q, want %q, the path Open opened", opened, configured)
+			}
 			if _, err := os.Stat(configured); err != nil {
 				t.Errorf("Open did not create %q: %v", configured, err)
 			}

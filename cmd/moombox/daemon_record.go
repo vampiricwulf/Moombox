@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -57,7 +59,9 @@ const daemonRecordEnv = "_MOOMBOX_DAEMON_RECORD"
 type daemonRecord struct {
 	// PID is the child that has the database open.
 	PID int `json:"pid"`
-	// DatabasePath is database_path as the daemon resolved it.
+	// DatabasePath is the file the daemon's database.Open opened
+	// (Database.File) — database_path, or the file an earlier release kept
+	// that path's database in — absolute and with its symlinks resolved.
 	DatabasePath string `json:"database_path"`
 	// ConfigPath is the config file the daemon loaded, "" when it runs on
 	// defaults (a first run).
@@ -130,12 +134,14 @@ func heldDaemonRecordPath() string {
 }
 
 // writeDaemonRecord is the child's half: it records, at path, the database
-// it opened from dbPath and the config it loaded from configPath (both as the
-// config spells them, resolved here against this process's working
-// directory). A no-op when path is "" (childDaemonRecordPath found none). A
-// failure is a Warn and nothing more: without the record `add` refuses while
-// this daemon runs, and a database that opened is no reason to stop.
-func writeDaemonRecord(path, dbPath, configPath string, log interface {
+// file it opened, dbFile (Database.File: the file database.Open opened, not
+// database_path, which an earlier release may have read as another file), and
+// the config file it loaded, configPath — each resolved here against this
+// process's working directory as the OS resolved it (resolveUnder). A no-op
+// when path is "" (childDaemonRecordPath found none). A failure is a Warn and
+// nothing more: without the record `add` refuses while this daemon runs, and
+// a database that opened is no reason to stop.
+func writeDaemonRecord(path, dbFile, configPath string, log interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
@@ -144,7 +150,7 @@ func writeDaemonRecord(path, dbPath, configPath string, log interface {
 	if path == "" {
 		return
 	}
-	rec, err := newDaemonRecord(dbPath, configPath)
+	rec, err := newDaemonRecord(dbFile, configPath)
 	if err == nil {
 		var data []byte
 		if data, err = json.MarshalIndent(rec, "", "  "); err == nil {
@@ -157,15 +163,15 @@ func writeDaemonRecord(path, dbPath, configPath string, log interface {
 	}
 }
 
-// newDaemonRecord is this process's record for dbPath and configPath.
-func newDaemonRecord(dbPath, configPath string) (daemonRecord, error) {
+// newDaemonRecord is this process's record for dbFile and configPath.
+func newDaemonRecord(dbFile, configPath string) (daemonRecord, error) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return daemonRecord{}, err
 	}
-	rec := daemonRecord{PID: os.Getpid(), WorkingDir: wd, DatabasePath: absUnder(wd, dbPath)}
+	rec := daemonRecord{PID: os.Getpid(), WorkingDir: wd, DatabasePath: resolveUnder(wd, dbFile)}
 	if configPath != "" {
-		rec.ConfigPath = absUnder(wd, configPath)
+		rec.ConfigPath = resolveUnder(wd, configPath)
 	}
 	return rec, nil
 }
@@ -244,9 +250,17 @@ const noDaemonRecordRefusal = "a Moombox daemon is running but has not recorded 
 //
 // With no daemon running, a relative database_path resolves against cwd, and
 // the caller refuses it when no database is there (addVideo).
+//
+// Either way database_path resolves to the file database.Open would open from
+// that directory (databaseFileUnder), not to its lexical join: a ".." after a
+// symlinked directory climbs out of the symlink's target on Unix, and
+// "//localhost/<abs>" is the file <abs> an earlier release kept, neither of
+// which filepath.Join and Clean spell — so the daemon's own config, from its
+// own directory, resolved to a file the daemon did not have open, and add
+// failed there or wrote the job into a database at the lexical spelling.
 func resolveAddDatabase(dbPath, configFile, cwd string, d daemonState) (string, error) {
 	if !d.running {
-		return absUnder(cwd, dbPath), nil
+		return databaseFileUnder(cwd, dbPath)
 	}
 	rec := d.record
 	if rec == nil {
@@ -256,7 +270,10 @@ func resolveAddDatabase(dbPath, configFile, cwd string, d daemonState) (string, 
 	if configFile != "" && rec.ConfigPath != "" && samePath(configFile, rec.ConfigPath) {
 		base = rec.WorkingDir
 	}
-	want := absUnder(base, dbPath)
+	want, err := databaseFileUnder(base, dbPath)
+	if err != nil {
+		return "", err
+	}
 	if samePath(want, rec.DatabasePath) {
 		return rec.DatabasePath, nil
 	}
@@ -272,22 +289,86 @@ func resolveAddDatabase(dbPath, configFile, cwd string, d daemonState) (string, 
 		rec.PID, rec.DatabasePath, dbPath, which, want, daemonConfig)
 }
 
-// absUnder is path made absolute against base when it is relative.
-func absUnder(base, path string) string {
-	if filepath.IsAbs(path) {
-		return filepath.Clean(path)
+// databaseFileUnder is the file database.Open opens for dbPath from the
+// directory base: dbPath joined to base the way the OS joins it (joinUnder),
+// then read the way Open reads it (database.ResolveFile, which keeps an
+// earlier release's file for a path it read another way), then spelled
+// canonically (canonicalFile).
+func databaseFileUnder(base, dbPath string) (string, error) {
+	file, err := database.ResolveFile(joinUnder(base, dbPath))
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(base, path)
+	return canonicalFile(file), nil
+}
+
+// resolveUnder is path from the directory base as the OS resolves it,
+// spelled canonically: a config file, or the database file Open opened.
+func resolveUnder(base, path string) string {
+	return canonicalFile(joinUnder(base, path))
+}
+
+// joinUnder is path as the OS opens it from the directory base. An absolute
+// path is returned as it is, not cleaned: database.ResolveFile reads a leading
+// "//" as an earlier release did ("//localhost/<abs>" is <abs>), and
+// filepath.Clean turned it into "/localhost/<abs>", a file that does not
+// exist. A relative one is joined to base the way the OS walks it, which is
+// not the same on both systems. Windows resolves "." and ".." lexically,
+// against the directory as it is spelled, so filepath.Join's Clean is its
+// answer. Unix resolves them physically: a ".." after a symlink climbs out of
+// the symlink's target, not back to the symlink's parent, so a database_path
+// of "../db/moombox.db" run from a directory reached through a symlink — the
+// working directory a shell's cd gives, which os.Getwd returns — is beside
+// the target, where SQLite opens it, and filepath.Join put it beside the
+// symlink. So there the path is appended uncleaned, for the OS, or
+// canonicalFile, to walk.
+func joinUnder(base, path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	if runtime.GOOS == "windows" {
+		return filepath.Join(base, path)
+	}
+	return base + string(filepath.Separator) + path
+}
+
+// canonicalFile is path, which is absolute, with its symlinks, "." and ".."
+// resolved the way the OS walks them (filepath.EvalSymlinks, which resolves
+// each symlink before the ".." that follows it): the file's own spelling when
+// it exists, else its directory's plus its name, else path unchanged — so a
+// spelling database.ResolveFile reads another way, or one that names nothing
+// yet, is left for the OS to read as it does.
+func canonicalFile(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	i := len(path) - 1
+	for i >= 0 && !os.IsPathSeparator(path[i]) {
+		i--
+	}
+	if i <= len(filepath.VolumeName(path)) {
+		return path
+	}
+	if dir, err := filepath.EvalSymlinks(path[:i]); err == nil {
+		return filepath.Join(dir, path[i+1:])
+	}
+	return path
 }
 
 // samePath reports whether a and b name one file: the same file when both
-// exist (a symlink, an 8.3 name or another case of one on Windows), otherwise
-// the same canonical spelling.
+// exist (a symlink, an 8.3 name or another case of one on Windows), never
+// when only one of them does, and otherwise the same canonical spelling.
+// The spelling is compared only when neither exists: utils.CanonicalPath
+// cleans ".." lexically before it resolves anything, so a missing path that
+// climbs out of a symlink can be spelt like an existing file it is not.
 func samePath(a, b string) bool {
-	if fa, err := os.Stat(a); err == nil {
-		if fb, err := os.Stat(b); err == nil {
-			return os.SameFile(fa, fb)
-		}
+	fa, errA := os.Stat(a)
+	fb, errB := os.Stat(b)
+	if errA == nil && errB == nil {
+		return os.SameFile(fa, fb)
+	}
+	if (errA == nil && errors.Is(errB, fs.ErrNotExist)) || (errB == nil && errors.Is(errA, fs.ErrNotExist)) {
+		return false
 	}
 	ca, errA := utils.CanonicalPath(a)
 	cb, errB := utils.CanonicalPath(b)

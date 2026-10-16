@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,19 @@ func putDaemonRecord(t *testing.T, path string, rec daemonRecord) {
 	}
 }
 
+// canonicalTempDir is t.TempDir() spelled as canonicalFile spells what is
+// under it — Windows runners' temp directory sits under an 8.3 short name
+// (RUNNER~1) that filepath.EvalSymlinks expands — so a test can compare the
+// paths add resolves with strings.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // touch creates an empty file at path.
 func touch(t *testing.T, path string) {
 	t.Helper()
@@ -78,9 +92,11 @@ func touch(t *testing.T, path string) {
 // database without the comparison (the other-install and absolute-elsewhere
 // rows are accepted); treat a running daemon with no record as no daemon
 // (that row resolves); the no-record refusal advises a restart of the daemon
-// again, which the dashboard's Restart does not give it (the starting row).
+// again, which the dashboard's Restart does not give it (the starting row);
+// canonicalFile returns its path unchanged (the no-daemon relative row is
+// <cwd>/./moombox.db).
 func TestResolveAddDatabase(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	daemonDir := filepath.Join(root, "daemon")
 	elsewhere := filepath.Join(root, "elsewhere")
 	for _, d := range []string{daemonDir, elsewhere} {
@@ -287,12 +303,13 @@ func TestChildDaemonRecordPath(t *testing.T) {
 }
 
 // TestWriteDaemonRecordResolvesAgainstTheWorkingDirectory: the child records
-// database_path and its config as it resolved them — against its own working
-// directory, which it records too — and writes nothing when no launcher named
-// a record.
+// the database file it opened and its config as the OS resolved them —
+// against its own working directory, which it records too — spelled
+// canonically, and writes nothing when no path is named.
 //
-// Mutant: record database_path as given (the relative row is not absolute,
-// and readDaemonRecord refuses it).
+// Mutants: record the file as given (the relative row is not absolute, and
+// readDaemonRecord refuses it); canonicalFile returns its path unchanged (the
+// recorded database keeps its "./").
 func TestWriteDaemonRecordResolvesAgainstTheWorkingDirectory(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -300,25 +317,203 @@ func TestWriteDaemonRecordResolvesAgainstTheWorkingDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir("data", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	touch(t, "config.toml")
+	db, err := database.Open("./data/moombox.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := db.File()
+	db.Close()
 	recPath := filepath.Join(t.TempDir(), daemonRecordName)
-	writeDaemonRecord(recPath, "./data/moombox.db", "config.toml", &nopLogger{})
+	writeDaemonRecord(recPath, file, "config.toml", &nopLogger{})
 	rec := readDaemonRecord(recPath)
 	if rec == nil {
 		t.Fatal("no record was written")
 	}
-	want := daemonRecord{
-		PID:          os.Getpid(),
-		DatabasePath: filepath.Join(wd, "data", "moombox.db"),
-		ConfigPath:   filepath.Join(wd, "config.toml"),
-		WorkingDir:   wd,
+	if rec.PID != os.Getpid() || rec.WorkingDir != wd {
+		t.Errorf("record = %+v, want pid %d in %s", *rec, os.Getpid(), wd)
 	}
-	if *rec != want {
-		t.Errorf("record = %+v, want %+v", *rec, want)
+	for _, f := range []struct{ name, got, want string }{
+		{"database", rec.DatabasePath, filepath.Join(wd, "data", "moombox.db")},
+		{"config", rec.ConfigPath, filepath.Join(wd, "config.toml")},
+	} {
+		if !samePath(f.got, f.want) || f.got != filepath.Clean(f.got) {
+			t.Errorf("the record's %s is %q, want %q spelled canonically", f.name, f.got, f.want)
+		}
 	}
 
-	writeDaemonRecord("", "moombox.db", "", &nopLogger{}) // no launcher named one
-	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
-		t.Errorf("a record was written with no path named: %v", entries)
+	before, _ := os.ReadDir(dir)
+	writeDaemonRecord("", "moombox.db", "", &nopLogger{}) // no path named
+	if after, _ := os.ReadDir(dir); len(after) != len(before) {
+		t.Errorf("a record was written with no path named: %v", after)
+	}
+}
+
+// TestDotDotThroughASymlinkedWorkingDirectory: the daemon runs from a
+// directory reached through a symlink (links/mb -> real/mb, the working
+// directory a shell's cd gives, which os.Getwd returns), and its
+// database_path is "../db/moombox.db". Unix resolves that ".." in the
+// symlink's target, so SQLite opens real/db/moombox.db; the record and `add`
+// resolved it lexically, with filepath.Join, to links/db/moombox.db. So add
+// from the daemon's own directory failed with "unable to open database
+// file", or, with a moombox.db of the current schema at that lexical
+// spelling, wrote the job there and reported it added — and with the daemon
+// stopped it was refused there with "No database at" the lexical spelling.
+// The record, add with the daemon's config from its directory and from
+// another, and add with no daemon now all name the file SQLite opened.
+//
+// Mutant: joinUnder joins with filepath.Join on Unix too (every row names
+// links/db/moombox.db).
+func TestDotDotThroughASymlinkedWorkingDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows resolves .. lexically, as filepath.Join does")
+	}
+	root := t.TempDir()
+	for _, d := range []string{"real/mb", "real/db", "links/db", "elsewhere"} {
+		if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(d)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	daemonDir := filepath.Join(root, "links", "mb")
+	if err := os.Symlink(filepath.Join(root, "real", "mb"), daemonDir); err != nil {
+		t.Skipf("cannot make a symlink here: %v", err)
+	}
+	elsewhere := filepath.Join(root, "elsewhere")
+	daemonDB := filepath.Join(root, "real", "db", "moombox.db")
+	strayDB := filepath.Join(root, "links", "db", "moombox.db")
+	touch(t, filepath.Join(root, "real", "mb", "config.toml"))
+	touch(t, strayDB) // a file at the lexical spelling
+	const dbPath = "../db/moombox.db"
+
+	t.Chdir(daemonDir)
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := db.File()
+	db.Close()
+	if info, err := os.Stat(strayDB); err != nil || info.Size() != 0 {
+		t.Fatalf("SQLite opened the lexical spelling, not the file beside the symlink's target — the test's premise is gone (%v)", err)
+	}
+	recPath := filepath.Join(t.TempDir(), daemonRecordName)
+	writeDaemonRecord(recPath, file, "config.toml", &nopLogger{})
+	rec := readDaemonRecord(recPath)
+	if rec == nil || !samePath(rec.DatabasePath, daemonDB) {
+		t.Fatalf("the record is %+v, want the database SQLite opened, %s", rec, daemonDB)
+	}
+
+	running := daemonState{running: true, record: rec}
+	for _, tc := range []struct {
+		name, cwd, cfg string
+		d              daemonState
+	}{
+		{"the daemon's directory", daemonDir, "config.toml", running},
+		{"another directory, the daemon's -config", elsewhere, filepath.Join(daemonDir, "config.toml"), running},
+		{"no daemon, the daemon's directory", daemonDir, "config.toml", daemonState{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveAddDatabase(dbPath, resolveUnder(tc.cwd, tc.cfg), tc.cwd, tc.d)
+			if err != nil || !samePath(got, daemonDB) {
+				t.Errorf("= %q, %v; want %s, the database SQLite opened (not %s)", got, err, daemonDB, strayDB)
+			}
+		})
+	}
+}
+
+// TestAddFindsTheDatabaseAnEarlierReleaseKept: a database_path of
+// "//localhost/<abs>", which every earlier release opened as <abs> and
+// database.Open still opens as <abs> while nothing is at the literal path.
+// absUnder cleaned it to "/localhost/<abs>", so add with no daemon failed
+// with "unable to open database file" where the previous release's add
+// worked, and the daemon, which had <abs> open, recorded "/localhost/<abs>"
+// and add failed on that. The record names the file Open opened, and add
+// resolves database_path as Open does.
+//
+// Mutants: joinUnder cleans an absolute path (the no-daemon row names
+// /localhost/...); databaseFileUnder skips database.ResolveFile (both rows
+// name the literal path); the record names database_path instead of the
+// file Open opened (TestTheDaemonRecordIsWrittenWhereTheDatabaseOpens).
+func TestAddFindsTheDatabaseAnEarlierReleaseKept(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a leading // is a UNC path on Windows")
+	}
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "legacy", "moombox.db")
+	if err := os.Mkdir(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := database.Open(legacy) // the install's database, with its jobs table
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	configured := "//localhost" + legacy
+
+	t.Chdir(dir)
+	db, err = database.Open(configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := db.File()
+	db.Close()
+	if !samePath(file, legacy) {
+		t.Fatalf("Open(%q) opened %q, not the earlier release's %s — the test's premise is gone", configured, file, legacy)
+	}
+	recPath := filepath.Join(t.TempDir(), daemonRecordName)
+	writeDaemonRecord(recPath, file, "", &nopLogger{})
+	rec := readDaemonRecord(recPath)
+	if rec == nil || !samePath(rec.DatabasePath, legacy) {
+		t.Fatalf("the record is %+v, want the database Open opened, %s", rec, legacy)
+	}
+
+	got, err := resolveAddDatabase(configured, "", dir, daemonState{})
+	if err != nil || !samePath(got, legacy) {
+		t.Errorf("no daemon: = %q, %v; want %s", got, err, legacy)
+	}
+	if v, err := database.FileSchemaVersion(got); err != nil || v != database.CurrentSchemaVersion() {
+		t.Errorf("FileSchemaVersion(%q) = %d, %v", got, v, err)
+	}
+	got, err = resolveAddDatabase(configured, "", dir, daemonState{running: true, record: rec})
+	if err != nil || got != rec.DatabasePath {
+		t.Errorf("the daemon running: = %q, %v; want its record's %s", got, err, rec.DatabasePath)
+	}
+}
+
+// TestSamePathNeverMatchesAMissingFileToAnExistingOne: a path that does not
+// exist is not the file another path names, though utils.CanonicalPath,
+// which cleans ".." lexically before it resolves anything, spells x/sub/..
+// as x when sub is a symlink — and the OS reads x/sub/.. as the parent of
+// sub's target.
+//
+// Mutant: drop the one-exists check (the missing path matches).
+func TestSamePathNeverMatchesAMissingFileToAnExistingOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows resolves .. lexically, so the two spellings name one file there")
+	}
+	root := t.TempDir()
+	for _, d := range []string{"x/nodir", "y/z"} {
+		if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(d)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(root, "y", "z"), filepath.Join(root, "x", "sub")); err != nil {
+		t.Skipf("cannot make a symlink here: %v", err)
+	}
+	existing := filepath.Join(root, "x", "nodir", "moombox.db")
+	touch(t, existing)
+	sep := string(filepath.Separator)
+	missing := filepath.Join(root, "x", "sub") + sep + ".." + sep + "nodir" + sep + "moombox.db" // y/nodir/moombox.db
+	if _, err := os.Stat(missing); err == nil {
+		t.Fatalf("%s exists — the test's premise is gone", missing)
+	}
+	if samePath(missing, existing) || samePath(existing, missing) {
+		t.Errorf("samePath matched the missing %s to the existing %s", missing, existing)
+	}
+	if !samePath(existing, filepath.Join(root, "x", "sub")+sep+".."+sep+".."+sep+"x"+sep+"nodir"+sep+"moombox.db") {
+		t.Error("samePath does not match two spellings of one existing file")
 	}
 }
 
@@ -327,13 +522,15 @@ func TestWriteDaemonRecordResolvesAgainstTheWorkingDirectory(t *testing.T) {
 // in every child's environment, and initServices takes its record's path from
 // childDaemonRecordPath before the database opens — not from the launcher's
 // variable alone, which a launcher from before the record never sets — writes
-// the record after the database opens and removes it when the database
-// closes.
+// the record after the database opens, naming the file Open opened
+// (db.File(), not database_path, which an earlier release may have read as
+// another file), and removes it when the database closes.
 //
 // Mutants: drop the childDaemonRecordEnv append from the launcher loop; take
 // the path from os.Getenv(daemonRecordEnv) again, or call
 // childDaemonRecordPath after database.Open; drop the writeDaemonRecord call,
-// or move it above database.Open; drop the removeDaemonRecord from closeDB.
+// or move it above database.Open; record cfg.Paths.DatabasePath again; drop
+// the removeDaemonRecord from closeDB.
 func TestTheDaemonRecordIsWrittenWhereTheDatabaseOpens(t *testing.T) {
 	_, body := funcBody(t, "launcher.go", "launchAndSupervise")
 	if !callsNamed(body, "childDaemonRecordEnv") {
@@ -342,7 +539,7 @@ func TestTheDaemonRecordIsWrittenWhereTheDatabaseOpens(t *testing.T) {
 
 	fset, body := funcBody(t, "services.go", "initServices")
 	var openAt, pathAt, writeAt int
-	var closeRemoves, readsEnv bool
+	var closeRemoves, readsEnv, recordsOpenedFile bool
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.CallExpr:
@@ -353,6 +550,13 @@ func TestTheDaemonRecordIsWrittenWhereTheDatabaseOpens(t *testing.T) {
 			}
 			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "writeDaemonRecord" {
 				writeAt = fset.Position(n.Pos()).Offset
+				if len(n.Args) > 1 {
+					if c, ok := n.Args[1].(*ast.CallExpr); ok {
+						if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "File" {
+							recordsOpenedFile = true
+						}
+					}
+				}
 			}
 			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "childDaemonRecordPath" {
 				pathAt = fset.Position(n.Pos()).Offset
@@ -374,6 +578,9 @@ func TestTheDaemonRecordIsWrittenWhereTheDatabaseOpens(t *testing.T) {
 	}
 	if pathAt == 0 || pathAt >= openAt {
 		t.Errorf("initServices does not take the record's path from childDaemonRecordPath before database.Open (path at %d, open at %d)", pathAt, openAt)
+	}
+	if !recordsOpenedFile {
+		t.Error("initServices does not record the file database.Open opened (db.File())")
 	}
 	if readsEnv {
 		t.Error("initServices reads the launcher's record variable itself, which a launcher from before the record never sets")
@@ -417,7 +624,8 @@ func callsNamed(node ast.Node, name string) bool {
 // again (row 1 lands in the cwd's); resolveAddDatabase drops the comparison
 // (row 2 lands in the daemon's); the no-config refusal drops the daemon's
 // config (row 3); the no-daemon relative refusal reverts to "Start the
-// Moombox daemon first." (row 5's text).
+// Moombox daemon first." (row 5's text); canonicalFile drops its fallback to
+// the file's directory (row 5 names <cwd>/./moombox.db).
 func TestCLIAddWritesToTheRunningDaemonsDatabase(t *testing.T) {
 	if os.Getenv("MOOMBOX_CLI_HELPER") == "1" {
 		os.Args = append([]string{"moombox"}, strings.Split(os.Getenv("MOOMBOX_CLI_ARGS"), "\x1f")...)

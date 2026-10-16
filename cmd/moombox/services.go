@@ -681,7 +681,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	s.db = db
-	writeDaemonRecord(daemonRecord, cfg.Paths.DatabasePath, cfg.LoadedFrom, log)
+	writeDaemonRecord(daemonRecord, db.File(), cfg.LoadedFrom, log)
 	// Database Close is wrapped in sync.Once so both the orderly shutdown
 	// sequence (stopService "Database") and the run()-side defer are safe.
 	var dbCloseOnce sync.Once

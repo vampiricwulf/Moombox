@@ -127,7 +127,7 @@ func addVideo(input, configPath string) {
 	}
 	configFile := ""
 	if cfg.LoadedFrom != "" {
-		configFile = absUnder(cwd, cfg.LoadedFrom)
+		configFile = resolveUnder(cwd, cfg.LoadedFrom)
 	}
 	dbPath, err := resolveAddDatabase(cfg.Paths.DatabasePath, configFile, cwd, daemon)
 	if err != nil {

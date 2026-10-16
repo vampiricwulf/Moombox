@@ -98,6 +98,9 @@ type Database struct {
 	mu        sync.RWMutex
 	closeOnce sync.Once
 	logger    dbLogger
+	// file is the file Open opened (ResolveFile): dbPath, or the file an
+	// earlier release kept that path's database in.
+	file string
 
 	// fieldToColumn is a per-instance copy of the package-level map. Snapshotting
 	// into the struct at Open() keeps the map read-only at runtime — callers
@@ -184,12 +187,9 @@ const jobStatsCacheTTL = 5 * time.Second
 // legacyDatabaseFile finds one, so a `moombox add` during the update window
 // reads the database the running daemon writes.
 func FileSchemaVersion(dbPath string) (int, error) {
-	file, err := legacyDatabaseFile(dbPath)
+	file, err := ResolveFile(dbPath)
 	if err != nil {
 		return 0, err
-	}
-	if file == "" {
-		file = dbPath
 	}
 	sqlDB, err := sql.Open("sqlite", sqliteuri.FileURI(file)+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
@@ -299,6 +299,24 @@ func legacyDatabaseFile(dbPath string) (string, error) {
 	return legacy, nil
 }
 
+// ResolveFile is the file Open and FileSchemaVersion use for dbPath: the
+// file an earlier release kept that path's database in when
+// legacyDatabaseFile finds one, and dbPath itself — exactly as given, a
+// relative path still relative — otherwise. `moombox add` compares it with
+// the file the running daemon recorded (Database.File), so the two must come
+// from this one resolution: a path an earlier release read another way, such
+// as "//localhost/<abs>", names a file its literal spelling does not.
+func ResolveFile(dbPath string) (string, error) {
+	file, err := legacyDatabaseFile(dbPath)
+	if err != nil {
+		return "", err
+	}
+	if file == "" {
+		return dbPath, nil
+	}
+	return file, nil
+}
+
 // holdsJobsTable reports whether the database at path, opened read-only,
 // has a jobs table.
 func holdsJobsTable(path string) (bool, error) {
@@ -339,13 +357,11 @@ func Open(dbPath string, logger ...dbLogger) (*Database, error) {
 	if len(logger) > 0 && logger[0] != nil {
 		log = logger[0]
 	}
-	file, err := legacyDatabaseFile(dbPath)
+	file, err := ResolveFile(dbPath)
 	if err != nil {
 		return nil, err
 	}
-	if file == "" {
-		file = dbPath
-	} else if log != nil {
+	if file != dbPath && log != nil {
 		log.Warn("database_path holds '#', '?' or '%', and earlier releases kept its database in another file — opening that one, which holds the jobs and history; "+
 			"to use database_path, stop Moombox and move the file, with its -wal and -shm, there",
 			"database_path", dbPath, "opened", file)
@@ -371,6 +387,7 @@ func Open(dbPath string, logger ...dbLogger) (*Database, error) {
 
 	db := &Database{
 		db:            sqlDB,
+		file:          file,
 		fieldToColumn: ftc,
 		jobLogs:       make(map[string][]string),
 		logRouted:     make(map[string]struct{}),
@@ -390,6 +407,13 @@ func Open(dbPath string, logger ...dbLogger) (*Database, error) {
 	}
 
 	return db, nil
+}
+
+// File is the file this database was opened from (ResolveFile): the
+// database_path Open was given, relative if it was, or the file an earlier
+// release kept that path's database in.
+func (db *Database) File() string {
+	return db.file
 }
 
 // prepareStmt prepares a statement and records it in preparedStmts so Close
