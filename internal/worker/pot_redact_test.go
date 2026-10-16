@@ -126,30 +126,7 @@ func TestJobErrorRedactsPoToken(t *testing.T) {
 	ue := &url.Error{Op: "Get", URL: "https://rr1---sn-x.googlevideo.com/videoplayback/pot/" + pathToken + "?itag=1&pot=" + queryToken, Err: fmt.Errorf("connection reset by peer")}
 	w.setJobError(job, fmt.Errorf("setup download: %v", ue))
 
-	row, err := db.GetJob(job.ID)
-	if err != nil || row == nil {
-		t.Fatalf("GetJob: %v", err)
-	}
-	stored := row.Error
-	if stored == "" {
-		t.Fatal("no error was stored")
-	}
-	calls := rec.ByEvent("error")
-	if len(calls) != 1 {
-		t.Fatalf("recorded %d Job Failed sends, want 1", len(calls))
-	}
-	embedErr := notifyField(t, calls[0], "Error")
-	for _, secret := range []string{pathToken, queryToken} {
-		if strings.Contains(stored, secret) {
-			t.Errorf("stored job error carries %s: %q", secret, stored)
-		}
-		if strings.Contains(embedErr, secret) {
-			t.Errorf("Job Failed embed's Error field carries %s: %q", secret, embedErr)
-		}
-		if line, ok := loggedSecret(logs, secret); ok {
-			t.Errorf("a log line carries %s: %q", secret, line)
-		}
-	}
+	stored := assertJobErrorClean(t, db, job.ID, rec, logs, pathToken, queryToken)
 	if !strings.HasPrefix(stored, "setup download: Get ") || !strings.Contains(stored, "connection reset by peer") {
 		t.Errorf("stored error = %q, want the rest of the message kept", stored)
 	}

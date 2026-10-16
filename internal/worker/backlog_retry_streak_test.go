@@ -9,13 +9,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-// backlogRetryCount is jobID's current requeue streak.
-func (w *DownloadWorker) backlogRetryCount(jobID string) int {
-	w.backlogRetryMu.Lock()
-	defer w.backlogRetryMu.Unlock()
-	return w.backlogRetries[jobID]
-}
-
 // TestBacklogRetryStreakEndsWithTheRun: the retry budget counts a job's runs
 // that ended back in Queued, and a run that ends any other way — in Error,
 // cancelled, or finished — starts the next streak from nothing. (A fetch that
@@ -32,7 +25,7 @@ func TestBacklogRetryStreakEndsWithTheRun(t *testing.T) {
 			return nil, dialRefused
 		}
 		w.processJob(context.Background(), id)
-		if n := w.backlogRetryCount(id); n != 1 {
+		if n, _ := backlogStreak(w, id); n != 1 {
 			t.Fatalf("streak = %d after one requeue, want 1", n)
 		}
 		db.UpdateJobFields(id, map[string]any{"status": database.StatusUpcoming})
@@ -46,7 +39,7 @@ func TestBacklogRetryStreakEndsWithTheRun(t *testing.T) {
 			return nil, errors.New("full fetch failed: web API error: HTTP 404")
 		}
 		w.processJob(context.Background(), "streak_err")
-		if n := w.backlogRetryCount("streak_err"); n != 0 {
+		if n, _ := backlogStreak(w, "streak_err"); n != 0 {
 			t.Errorf("streak = %d after a run that ended in Error, want 0", n)
 		}
 	})
@@ -61,7 +54,7 @@ func TestBacklogRetryStreakEndsWithTheRun(t *testing.T) {
 			return nil, context.Canceled
 		}
 		w.processJob(ctx, "streak_cancel")
-		if n := w.backlogRetryCount("streak_cancel"); n != 0 {
+		if n, _ := backlogStreak(w, "streak_cancel"); n != 0 {
 			t.Errorf("streak = %d after a cancelled run, want 0", n)
 		}
 	})
@@ -83,7 +76,7 @@ func TestBacklogRetryStreakEndsWithTheRun(t *testing.T) {
 		if row, _ := db.GetJob("streak_done"); row.Status != database.StatusFinished {
 			t.Fatalf("status = %s (%q), want Finished", row.Status, row.Error)
 		}
-		if n := w.backlogRetryCount("streak_done"); n != 0 {
+		if n, _ := backlogStreak(w, "streak_done"); n != 0 {
 			t.Errorf("streak = %d after a run that finished, want 0", n)
 		}
 	})

@@ -15,17 +15,6 @@ import (
 // video_stream that was already muxed as part 1 — and finalize silently
 // dropped everything captured after the restart.
 func TestDiscoverResumeSegment(t *testing.T) {
-	newOrch := func(t *testing.T) (*DownloadOrchestrator, *database.Database) {
-		t.Helper()
-		db, err := database.Open(filepath.Join(t.TempDir(), "test.db"))
-		if err != nil {
-			t.Fatalf("database.Open: %v", err)
-		}
-		t.Cleanup(func() { db.Close() })
-		o := &DownloadOrchestrator{db: db, logger: discardLogger{}}
-		return o, db
-	}
-
 	addJob := func(t *testing.T, db *database.Database, id string) {
 		t.Helper()
 		if _, err := db.AddJob(&database.Job{ID: id, VideoID: id, URL: "https://twitch.tv/x", Platform: "twitch"}); err != nil {
@@ -49,7 +38,7 @@ func TestDiscoverResumeSegment(t *testing.T) {
 	}
 
 	t.Run("fresh job uses root", func(t *testing.T) {
-		o, db := newOrch(t)
+		o, db := newRenameTestOrch(t)
 		addJob(t, db, "j1")
 		jobCtx := &JobContext{Job: &database.Job{ID: "j1"}, StagingDir: t.TempDir()}
 		idx, dir := o.discoverResumeSegment(jobCtx)
@@ -59,7 +48,7 @@ func TestDiscoverResumeSegment(t *testing.T) {
 	})
 
 	t.Run("unmuxed root data resumes part 1", func(t *testing.T) {
-		o, db := newOrch(t)
+		o, db := newRenameTestOrch(t)
 		addJob(t, db, "j1")
 		staging := t.TempDir()
 		stageMedia(t, staging)
@@ -71,7 +60,7 @@ func TestDiscoverResumeSegment(t *testing.T) {
 	})
 
 	t.Run("unmuxed seg dir resumes that part", func(t *testing.T) {
-		o, db := newOrch(t)
+		o, db := newRenameTestOrch(t)
 		addJob(t, db, "j1")
 		staging := t.TempDir()
 		stageMedia(t, staging)
@@ -85,7 +74,7 @@ func TestDiscoverResumeSegment(t *testing.T) {
 	})
 
 	t.Run("muxed root must not be appended into", func(t *testing.T) {
-		o, db := newOrch(t)
+		o, db := newRenameTestOrch(t)
 		addJob(t, db, "j1")
 		staging := t.TempDir()
 		stageMedia(t, staging)
@@ -98,7 +87,7 @@ func TestDiscoverResumeSegment(t *testing.T) {
 	})
 
 	t.Run("muxed seg dir advances to next index", func(t *testing.T) {
-		o, db := newOrch(t)
+		o, db := newRenameTestOrch(t)
 		addJob(t, db, "j1")
 		staging := t.TempDir()
 		stageMedia(t, staging)
@@ -115,7 +104,7 @@ func TestDiscoverResumeSegment(t *testing.T) {
 	})
 
 	t.Run("short-skipped root with seg_0", func(t *testing.T) {
-		o, db := newOrch(t)
+		o, db := newRenameTestOrch(t)
 		addJob(t, db, "j1")
 		staging := t.TempDir()
 		stageMedia(t, staging)
@@ -131,7 +120,7 @@ func TestDiscoverResumeSegment(t *testing.T) {
 	// appending fresh download data into a dir whose content the merge
 	// already consumed would corrupt or duplicate that content.
 	t.Run("skips tombstoned seg dir", func(t *testing.T) {
-		o, db := newOrch(t)
+		o, db := newRenameTestOrch(t)
 		addJob(t, db, "j1")
 		staging := t.TempDir()
 		stageMedia(t, staging)                         // root, part 0

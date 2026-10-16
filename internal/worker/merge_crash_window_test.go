@@ -11,13 +11,15 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/engine"
 )
 
-// mergeFixture is a two-part run ready to merge: the part files in out and a
-// seg_0/seg_1 staging pair beside them.
+// mergeFixture is a two-part run ready to merge: the part files ("orig1",
+// "orig2") in an output dir, at segments[i].FilePath, and a seg_0/seg_1
+// staging pair beside them. Its concat writes "merged-bytes", and its replace
+// stamps each row's ID and JobID as ReplaceJobSegments does.
 func mergeFixture(t *testing.T) (pm *partMerger, stagingDir string, segments []database.Segment) {
 	t.Helper()
 	outDir, stagingDir := t.TempDir(), t.TempDir()
 	for i, name := range []string{"base - part1.mp4", "base - part2.mp4"} {
-		if err := os.WriteFile(filepath.Join(outDir, name), []byte("orig"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(outDir, name), []byte("orig"+itoa(i+1)), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		seg := filepath.Join(stagingDir, "seg_"+itoa(i))
@@ -31,7 +33,14 @@ func mergeFixture(t *testing.T) (pm *partMerger, stagingDir string, segments []d
 	}
 	pm = newTestPartMerger(t)
 	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged"))
+	pm.concat = writeConcatStub([]byte("merged-bytes"))
+	pm.replace = func(jobID string, segs []database.Segment) error {
+		for i := range segs {
+			segs[i].ID = 500 + i
+			segs[i].JobID = jobID
+		}
+		return nil
+	}
 	pm.updateFile = func(int, string, string, string) error { return nil }
 	return pm, stagingDir, segments
 }
@@ -82,7 +91,6 @@ func TestMergeKeepsASupersededDirHoldingAnAside(t *testing.T) {
 	if err := os.WriteFile(aside, []byte("set aside"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	pm.replace = func(string, []database.Segment) error { return nil }
 	pm.merge(context.Background(), "job", stagingDir, segments)
 
 	if _, err := os.Stat(aside); err != nil {

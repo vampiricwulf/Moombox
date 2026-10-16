@@ -253,21 +253,11 @@ func TestUnconfirmedEndExitReturnsBeforeTheMuxingStatus(t *testing.T) {
 		return true, nil
 	}
 
-	var mu sync.Mutex
-	var statuses []database.JobStatus
-	unsubscribe := h.db.OnJobUpdate(func(j *database.Job) {
-		if j.ID != h.job.ID {
-			return
-		}
-		mu.Lock()
-		statuses = append(statuses, j.Status)
-		mu.Unlock()
-	})
-
+	statuses := h.watchStatuses()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil)
-	unsubscribe()
+	seq := statuses()
 
 	if !errors.Is(err, engine.ErrQualityLost) {
 		t.Fatalf("ExecuteTwitch = %v, want the download error (%v) — the unknown-verdict exit must "+
@@ -279,14 +269,10 @@ func TestUnconfirmedEndExitReturnsBeforeTheMuxingStatus(t *testing.T) {
 	if got := h.checks.Load(); got != 2 {
 		t.Errorf("CheckStreamFn calls = %d, want 2 (the engine's 404 consult and the exit's re-verify)", got)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	for _, s := range statuses {
-		if s == database.StatusMuxing {
-			t.Fatalf("the job was advertised as %q on the unknown-verdict exit (sequence %v) — that "+
-				"exit returns an error, so it must return BEFORE the Muxing write",
-				database.StatusMuxing, statuses)
-		}
+	if sawMuxing(seq) {
+		t.Errorf("the job was advertised as %q on the unknown-verdict exit (sequence %v) — that "+
+			"exit returns an error, so it must return BEFORE the Muxing write",
+			database.StatusMuxing, seq)
 	}
 }
 

@@ -320,18 +320,8 @@ func TestPartMergerMerge_NoMergeableRunIdentity(t *testing.T) {
 // run aborts the WHOLE merge (not just that run), leaving every original
 // part file untouched and never calling db replace.
 func TestPartMergerMerge_ConcatFailureAborts(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
+	pm, _, segments := mergeFixture(t)
+	part1, part2 := segments[0].FilePath, segments[1].FilePath
 	pm.concat = func(context.Context, []string, string) error {
 		return errors.New("ffmpeg: boom")
 	}
@@ -341,10 +331,6 @@ func TestPartMergerMerge_ConcatFailureAborts(t *testing.T) {
 		return nil
 	}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2},
-	}
 	got := pm.merge(context.Background(), "job1", "", segments)
 
 	if !reflect.DeepEqual(got, segments) {
@@ -365,27 +351,12 @@ func TestPartMergerMerge_ConcatFailureAborts(t *testing.T) {
 // failure leaves the original parts on disk untouched (no rename ever
 // happens before a successful replace) and cleans up the temp concat output.
 func TestPartMergerMerge_ReplaceFailureAborts(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
+	pm, _, segments := mergeFixture(t)
+	part1, part2 := segments[0].FilePath, segments[1].FilePath
 	pm.replace = func(string, []database.Segment) error {
 		return errors.New("db: locked")
 	}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2},
-	}
 	got := pm.merge(context.Background(), "job1", "", segments)
 
 	if !reflect.DeepEqual(got, segments) {
@@ -397,7 +368,7 @@ func TestPartMergerMerge_ReplaceFailureAborts(t *testing.T) {
 	if b, err := os.ReadFile(part2); err != nil || string(b) != "orig2" {
 		t.Errorf("part2 mutated after aborted replace: content=%q err=%v", b, err)
 	}
-	tempPath := filepath.Join(dir, "base - merged0.mp4")
+	tempPath := filepath.Join(filepath.Dir(part1), "base - merged0.mp4")
 	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
 		t.Errorf("temp concat output not cleaned up after aborted replace: stat err = %v", err)
 	}
@@ -409,18 +380,12 @@ func TestPartMergerMerge_ReplaceFailureAborts(t *testing.T) {
 // whose FilePath/ChatFile land on the first part's original names, and the
 // superseded second part's video+chat files are deleted.
 func TestPartMergerMerge_HappyPath(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
+	pm, _, segments := mergeFixture(t)
+	part1, part2 := segments[0].FilePath, segments[1].FilePath
+	dir := filepath.Dir(part1)
 	chat1 := filepath.Join(dir, "base - part1.chat.json")
 	chat2 := filepath.Join(dir, "base - part2.chat.json")
 
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	chatJSON := func(id string) []byte {
 		b, _ := json.Marshal(chat.ChatData{VideoID: "v1", MessageCount: 1, Messages: []chat.ChatMessage{{ID: id}}})
 		return b
@@ -432,18 +397,11 @@ func TestPartMergerMerge_HappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
-
 	var replacedWith []database.Segment
+	stamp := pm.replace
 	pm.replace = func(jobID string, segs []database.Segment) error {
-		for i := range segs {
-			segs[i].ID = 500 + i
-			segs[i].JobID = jobID
-		}
 		replacedWith = segs
-		return nil
+		return stamp(jobID, segs)
 	}
 	var updateFileCalls int
 	pm.updateFile = func(id int, filename, filePath, chatFile string) error {
@@ -451,10 +409,8 @@ func TestPartMergerMerge_HappyPath(t *testing.T) {
 		return nil
 	}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, UnixStart: 1000, UnixEnd: 1100, Quality: "1080p60", Filename: "base - part1.mp4", FilePath: part1, DurationSeconds: 100, ChatFile: chat1},
-		{SegmentIndex: 1, UnixStart: 1100, UnixEnd: 1200, Quality: "1080p60", Filename: "base - part2.mp4", FilePath: part2, DurationSeconds: 100, ChatFile: chat2},
-	}
+	segments[0].UnixStart, segments[0].UnixEnd, segments[0].ChatFile = 1000, 1100, chat1
+	segments[1].UnixStart, segments[1].UnixEnd, segments[1].ChatFile = 1100, 1200, chat2
 	got := pm.merge(context.Background(), "job1", "", segments)
 
 	if len(got) != 1 {
@@ -519,18 +475,12 @@ func TestPartMergerMerge_HappyPath(t *testing.T) {
 // chat replay for exactly the one production case (Twitch) that ever
 // carries per-part ChatFile.
 func TestPartMergerMerge_ChatMergeFailureAbortsRun(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
+	pm, _, segments := mergeFixture(t)
+	part1, part2 := segments[0].FilePath, segments[1].FilePath
+	dir := filepath.Dir(part1)
 	chat1 := filepath.Join(dir, "base - part1.chat.json")
 	chat2 := filepath.Join(dir, "base - part2.chat.json")
 
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	validChat, _ := json.Marshal(chat.ChatData{VideoID: "v1", MessageCount: 1, Messages: []chat.ChatMessage{{ID: "m1"}}})
 	if err := os.WriteFile(chat1, validChat, 0o644); err != nil {
 		t.Fatal(err)
@@ -540,9 +490,6 @@ func TestPartMergerMerge_ChatMergeFailureAbortsRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
 	replaceCalled := false
 	pm.replace = func(jobID string, segs []database.Segment) error {
 		replaceCalled = true
@@ -554,10 +501,7 @@ func TestPartMergerMerge_ChatMergeFailureAbortsRun(t *testing.T) {
 		return nil
 	}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1, DurationSeconds: 100, ChatFile: chat1},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2, DurationSeconds: 100, ChatFile: chat2},
-	}
+	segments[0].ChatFile, segments[1].ChatFile = chat1, chat2
 	got := pm.merge(context.Background(), "job1", "", segments)
 
 	// Full identity: the run (here, the entire batch — its only run) is
@@ -694,49 +638,10 @@ func TestPartMergerMerge_ChatMergeFailureRunIsolatesFromOtherRuns(t *testing.T) 
 // own seg_N dir is deliberately left alone (see merge's doc comment) —
 // verified here too, so a future change can't "fix" that into a regression.
 func TestPartMergerMerge_StagingDirSupersededCleanup(t *testing.T) {
-	outDir := t.TempDir()
-	stagingDir := t.TempDir()
-
-	part1 := filepath.Join(outDir, "base - part1.mp4")
-	part2 := filepath.Join(outDir, "base - part2.mp4")
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
+	pm, stagingDir, segments := mergeFixture(t)
 	seg0Dir := filepath.Join(stagingDir, "seg_0")
 	seg1Dir := filepath.Join(stagingDir, "seg_1")
-	if err := os.MkdirAll(seg0Dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(seg1Dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(seg0Dir, "video_stream"), []byte("raw0"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(seg1Dir, "video_stream"), []byte("raw1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
-	pm.replace = func(jobID string, segs []database.Segment) error {
-		for i := range segs {
-			segs[i].ID = 900 + i
-			segs[i].JobID = jobID
-		}
-		return nil
-	}
-	pm.updateFile = func(id int, filename, filePath, chatFile string) error { return nil }
-
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1, DurationSeconds: 100},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2, DurationSeconds: 100},
-	}
 	got := pm.merge(context.Background(), "job1", stagingDir, segments)
 
 	if len(got) != 1 {
@@ -761,26 +666,8 @@ func TestPartMergerMerge_StagingDirSupersededCleanup(t *testing.T) {
 // — since the row still resolves to a real file — superseded-part cleanup
 // still proceeds normally.
 func TestPartMergerMerge_RenameFailureKeepsRowAtTempPath(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
-	pm.replace = func(jobID string, segs []database.Segment) error {
-		for i := range segs {
-			segs[i].ID = 1100 + i
-			segs[i].JobID = jobID
-		}
-		return nil
-	}
+	pm, _, segments := mergeFixture(t)
+	part1, part2 := segments[0].FilePath, segments[1].FilePath
 	updateFileCalled := false
 	pm.updateFile = func(id int, filename, filePath, chatFile string) error {
 		updateFileCalled = true
@@ -790,16 +677,12 @@ func TestPartMergerMerge_RenameFailureKeepsRowAtTempPath(t *testing.T) {
 		return errors.New("rename: access denied")
 	}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1, DurationSeconds: 100},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2, DurationSeconds: 100},
-	}
 	got := pm.merge(context.Background(), "job1", "", segments)
 
 	if len(got) != 1 {
 		t.Fatalf("merged output = %d rows, want 1", len(got))
 	}
-	wantTemp := filepath.Join(dir, "base - merged0.mp4")
+	wantTemp := filepath.Join(filepath.Dir(part1), "base - merged0.mp4")
 	if got[0].FilePath != wantTemp {
 		t.Errorf("FilePath = %q, want committed temp path %q (rename never landed)", got[0].FilePath, wantTemp)
 	}
@@ -827,40 +710,18 @@ func TestPartMergerMerge_RenameFailureKeepsRowAtTempPath(t *testing.T) {
 // undo succeeds, the run is still fully recoverable and superseded cleanup
 // proceeds.
 func TestPartMergerMerge_UpdateFileFailureRestoresRow(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
-	pm.replace = func(jobID string, segs []database.Segment) error {
-		for i := range segs {
-			segs[i].ID = 1300 + i
-			segs[i].JobID = jobID
-		}
-		return nil
-	}
+	pm, _, segments := mergeFixture(t)
+	part1, part2 := segments[0].FilePath, segments[1].FilePath
 	pm.updateFile = func(id int, filename, filePath, chatFile string) error {
 		return errors.New("db: locked")
 	}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1, DurationSeconds: 100},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2, DurationSeconds: 100},
-	}
 	got := pm.merge(context.Background(), "job1", "", segments)
 
 	if len(got) != 1 {
 		t.Fatalf("merged output = %d rows, want 1", len(got))
 	}
-	wantTemp := filepath.Join(dir, "base - merged0.mp4")
+	wantTemp := filepath.Join(filepath.Dir(part1), "base - merged0.mp4")
 	if got[0].FilePath != wantTemp {
 		t.Errorf("FilePath = %q, want restored temp path %q", got[0].FilePath, wantTemp)
 	}
@@ -887,28 +748,10 @@ func TestPartMergerMerge_UpdateFileFailureRestoresRow(t *testing.T) {
 // remaining, independently-resolvable copy of that span, since the
 // committed row can no longer be trusted to point anywhere real).
 func TestPartMergerMerge_UpdateFileDoubleFaultSkipsCleanup(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	pm, _, segments := mergeFixture(t)
+	part1, part2 := segments[0].FilePath, segments[1].FilePath
+	videoTemp := filepath.Join(filepath.Dir(part1), "base - merged0.mp4")
 
-	videoTemp := filepath.Join(dir, "base - merged0.mp4")
-
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
-	pm.replace = func(jobID string, segs []database.Segment) error {
-		for i := range segs {
-			segs[i].ID = 1500 + i
-			segs[i].JobID = jobID
-		}
-		return nil
-	}
 	pm.updateFile = func(id int, filename, filePath, chatFile string) error {
 		return errors.New("db: locked")
 	}
@@ -921,10 +764,6 @@ func TestPartMergerMerge_UpdateFileDoubleFaultSkipsCleanup(t *testing.T) {
 		return os.Rename(oldpath, newpath)
 	}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1, DurationSeconds: 100},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2, DurationSeconds: 100},
-	}
 	got := pm.merge(context.Background(), "job1", "", segments)
 
 	if len(got) != 1 {
