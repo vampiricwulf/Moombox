@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -185,9 +186,11 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// sanitised title and a validated id below) — so the rule is a ".."
 		// path COMPONENT, not the substring: Moombox's own naming writes
 		// "Wait... what_ [id].mp4", which the substring test refused to
-		// re-import.
+		// re-import. The name is read through zipEntryName, so a ".."
+		// written with backslashes is refused on every host, not only on a
+		// Windows one.
 		for _, f := range zipReader.File {
-			name := filepath.ToSlash(filepath.Clean(f.Name))
+			name := path.Clean(zipEntryName(f))
 			if slices.Contains(strings.Split(name, "/"), "..") || filepath.IsAbs(f.Name) || strings.HasPrefix(name, "/") {
 				jsonError(rw, "invalid zip entry path", http.StatusBadRequest)
 				return
@@ -211,7 +214,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// keeping it doubled the id in both the title and the file
 		// ("video [id] [id].mp4"). A split recording's parts share one name,
 		// less their " - partN".
-		videoID, nameTitle := importNameID(filepath.Base(rec.stem))
+		videoID, nameTitle := importNameID(path.Base(rec.stem))
 
 		// Metadata — id, title, channel, platform — comes only from a chat
 		// paired with this recording by name.
@@ -695,7 +698,7 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 	// "chat.json" beside "Stream [id].mp4" was dropped with a plain 201.
 	for _, c := range chatEntries {
 		if !named[c.stem] && (!c.json || importJSONIsChat(c.entry)) {
-			rec.unpairedChats = append(rec.unpairedChats, filepath.Base(c.name))
+			rec.unpairedChats = append(rec.unpairedChats, path.Base(c.name))
 		}
 	}
 	return rec, nil
@@ -741,7 +744,7 @@ func importMacMetadata(f *zip.File, name string) bool {
 func importMultipleRecordingsError(videos []importPart) error {
 	var names []string
 	for _, v := range videos {
-		names = append(names, filepath.Base(v.stem)+v.ext)
+		names = append(names, path.Base(v.stem)+v.ext)
 	}
 	if len(names) > 10 {
 		names = append(names[:10], fmt.Sprintf("and %d more", len(names)-10))
@@ -1167,14 +1170,24 @@ func importUploadTooLarge(err error) bool {
 // UTF-8 is used as-is even with the flag clear, because many tools write UTF-8
 // without setting it. Raw CP437 bytes otherwise became an invalid-UTF-8 title
 // and filename, which JSON then rendered as U+FFFD.
+//
+// A backslash comes back as "/": Windows PowerShell 5.1's Compress-Archive,
+// the zipper Windows ships, writes a folder's entries as `Folder\Stream.mp4`.
+// A Windows host's filepath splits on both separators and a Linux one's on "/"
+// alone, so the same zip was titled "Stream" on Windows and "Folder\Stream"
+// (written as "imports/Folder_Stream [id].mp4") in the Docker image. Every
+// name the import reads goes through here, so every host reads a zip alike \u2014
+// importMacMetadata already split on both.
 func zipEntryName(f *zip.File) string {
-	if utf8.ValidString(f.Name) {
-		return f.Name
+	name := f.Name
+	if !utf8.ValidString(name) {
+		if s, err := charmap.CodePage437.NewDecoder().String(name); err == nil {
+			name = s
+		} else {
+			name = strings.ToValidUTF8(name, "\uFFFD")
+		}
 	}
-	if s, err := charmap.CodePage437.NewDecoder().String(f.Name); err == nil {
-		return s
-	}
-	return strings.ToValidUTF8(f.Name, "\uFFFD")
+	return strings.ReplaceAll(name, `\`, "/")
 }
 
 // importNameReserve is what an import's file name can carry past its
