@@ -126,6 +126,12 @@ type runState struct {
 
 	// --- Lifecycle control ---
 	restartRequested atomic.Bool
+	// stdoutIsTerminal records, at run's start, whether stdout is a terminal
+	// — afterwards a hung-up one no longer reads as a terminal at all.
+	stdoutIsTerminal bool
+	// stdoutHungUp is set by a hangup when stdout is that terminal
+	// (stopOnSignal): from then on nothing writes to it (muteHungUpTerminal).
+	stdoutHungUp atomic.Bool
 	// quitTUI is written by runTUI on the main goroutine and read by
 	// triggerRestart's grace-timer goroutine — atomic (like the callback
 	// slots below) so a restart-triggering request that lands before

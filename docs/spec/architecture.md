@@ -24,7 +24,7 @@ Moombox uses a two-process model controlled by the `_MOOMBOX_CHILD` environment 
 
 **Launcher process** (no `_MOOMBOX_CHILD`):
 - Executes `launchAndSupervise()` in `cmd/moombox/launcher.go`
-- Ignores SIGINT (the child handles Ctrl+C)
+- Catches Ctrl+C (SIGINT), SIGTERM and, on Unix, a hangup (SIGHUP) instead of dying from them, and forwards each to the child (`forwardStop`; on Windows the console event already reached the child, so it only records the stop); a hangup inherited as ignored (`nohup`) stays ignored
 - Spawns itself as a child with `_MOOMBOX_CHILD=1` added to the environment
 - Passes through stdin/stdout/stderr so the child's TUI renders in the launcher's console
 - When the child exits with code 42 (`exitCodeRestart`), the launcher respawns. This picks up any new binary (for self-updates via the swap: current kept at `.old`, `.new` -> current)
@@ -34,7 +34,7 @@ Moombox uses a two-process model controlled by the `_MOOMBOX_CHILD` environment 
 
 **Application process** (with `_MOOMBOX_CHILD=1`):
 - Runs the full service stack via `run()`
-- Handles SIGINT/SIGTERM for graceful shutdown
+- Handles SIGINT, SIGTERM and, on Unix, SIGHUP for graceful shutdown (`catchStopSignals`), catching every later one too, so a repeated signal mid-shutdown is harmless; the TUI quits when the run's context ends, and after a hangup nothing more is written to the gone terminal
 - Returns `true` from `run()` to signal a restart request, causing `main()` to `os.Exit(42)`
 
 **Restart mechanism:**

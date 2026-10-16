@@ -1127,12 +1127,14 @@ func (s *runState) runTUI() {
 	// receives logs via Subscribe() instead.
 	s.log.SuppressStdout()
 
-	// Run TUI (blocks until quit)
-	if err := tui.Run(app); err != nil {
+	// Run TUI (blocks until quit — from the keyboard, or because a stop
+	// signal ended s.ctx: bubbletea has no handler for a hangup, so a closed
+	// terminal used to leave this waiting for a key that could not come).
+	if err := tui.Run(s.ctx, app); err != nil {
 		s.log.Error("TUI error", slog.String("error", err.Error()))
 	}
 
-	s.log.RestoreStdout()
+	s.restoreStdoutAfterTUI()
 
 	// Cleanup TUI channels — cancel first so workers stop sending, then
 	// unsubscribe. Don't close channels: non-blocking sends mean no

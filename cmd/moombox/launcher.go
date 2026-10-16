@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/updater"
@@ -47,18 +46,25 @@ func launchAndSupervise() {
 	// Windows-only; no-op on Linux.
 	cleanupOrphans(exePath)
 
-	// Ignore interrupts in the launcher — the child handles Ctrl+C.
-	signal.Ignore(os.Interrupt)
-
-	// Forward SIGTERM to the child instead of dying with the default
-	// disposition. A plain `kill <launcher-pid>` (the PID a user sees for
-	// the foreground process) is a request to stop Moombox, and the child is
-	// what has to stop. The single-instance lock is held by the launcher and
-	// by its child (shareInstanceLock), so a launcher that dies anyway — a
-	// kill -9 — leaves it held until the child has exited, and no second
-	// instance starts against the same DB meanwhile. On Windows the launcher
-	// does not signal at all: see forwardStop. Outright TerminateProcess on
-	// the launcher remains uninterceptable, and its Job Object ends the child.
+	// Forward the stop signals (stopSignals: Ctrl+C, SIGTERM and, on Unix, a
+	// hangup) to the child instead of dying with the default disposition. A
+	// plain `kill <launcher-pid>` (the PID a user sees for the foreground
+	// process) is a request to stop Moombox, and the child is what has to
+	// stop. The single-instance lock is held by the launcher and by its child
+	// (shareInstanceLock), so a launcher that dies anyway — a kill -9 —
+	// leaves it held until the child has exited, and no second instance
+	// starts against the same DB meanwhile. A hangup killed both at once,
+	// past every step of the child's graceful shutdown. Ctrl+C used to be
+	// ignored here on the grounds that the child gets its own, which holds
+	// only for a signal sent to the whole process group (a terminal's):
+	// `docker run` without -t proxies Ctrl+C to the container's main process
+	// — this one — alone, as do `kill -INT <pid>` and a supervisor that
+	// signals the main PID, and nothing stopped. Each signal is forwarded
+	// whoever else received it: a group-wide one reaches the child twice,
+	// which it shrugs off (catchStopSignals), and the launcher cannot tell
+	// the two kinds apart. On Windows the launcher does not signal at all:
+	// see forwardStop. Outright TerminateProcess on the launcher remains
+	// uninterceptable, and its Job Object ends the child.
 	var child atomic.Pointer[os.Process]
 	// starting is true while the main loop is mid-launch (cmd.Start in flight,
 	// child not yet stored). The forwarder uses it to distinguish "genuinely no
@@ -66,25 +72,26 @@ func launchAndSupervise() {
 	// cmd.Start (e.g. AV scanning a fresh update binary) can't race the spin.
 	var starting atomic.Bool
 	// terminating records that the launcher itself initiated the child's
-	// death (SIGTERM forwarding). Crash supervision must never respawn a
+	// death (stop-signal forwarding). Crash supervision must never respawn a
 	// stop the user/system asked for — and exit-code heuristics can't tell
-	// (Windows p.Kill yields exit 1, the same as many crashes).
+	// (Windows p.Kill yields exit 1, the same as many crashes; a child the
+	// signal killed before it could catch it exits -1).
 	var terminating atomic.Bool
-	forward := func(p *os.Process) {
+	forward := func(p *os.Process, sig os.Signal) {
 		terminating.Store(true)
-		forwardStop(runtime.GOOS, p)
+		forwardStop(runtime.GOOS, p, sig)
 	}
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM)
+	signal.Notify(sigCh, stopSignals()...)
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Fprintf(os.Stderr, "panic in launcher signal forwarder: %v\n", r)
 			}
 		}()
-		for range sigCh {
+		for sig := range sigCh {
 			if p := child.Load(); p != nil {
-				forward(p)
+				forward(p, sig)
 				continue
 			}
 			// No child registered. If the main loop is mid-launch, wait for the
@@ -95,15 +102,15 @@ func launchAndSupervise() {
 				time.Sleep(time.Millisecond)
 			}
 			if p := child.Load(); p != nil {
-				forward(p)
+				forward(p, sig)
 				continue
 			}
 			// Genuinely no child (before the first Start, the respawn window,
 			// or a failed Start). signal.Notify removed the default terminate
-			// disposition, so without this exit the SIGTERM would be swallowed
+			// disposition, so without this exit the signal would be swallowed
 			// and the launcher would respawn as if nothing happened. Process
 			// death releases the instance lock.
-			os.Exit(143) // 128 + SIGTERM
+			os.Exit(signalExitCode(sig))
 		}
 	}()
 
@@ -159,7 +166,7 @@ func launchAndSupervise() {
 		// killed before its child has exited.
 		shareInstanceLock(cmd)
 
-		// Reset the stop-intent latch per spawn: a SIGTERM that raced a
+		// Reset the stop-intent latch per spawn: a stop signal that raced a
 		// previous child's restart (child exited 42 anyway because its
 		// restart was already committed) must not permanently disable
 		// crash supervision and rollback preservation for every future
@@ -259,7 +266,7 @@ func launchAndSupervise() {
 			fmt.Fprintf(os.Stderr,
 				"moombox exited abnormally (code %d) — restarting in %s (attempt %d/%d)\n",
 				code, backoff, consecutiveCrashes, maxConsecutiveCrashes)
-			// A SIGTERM during this sleep finds no child and exits the
+			// A stop signal during this sleep finds no child and exits the
 			// launcher via the forwarder's no-child branch — the sleep
 			// doesn't trap the stop.
 			time.Sleep(backoff)
@@ -286,25 +293,27 @@ type stoppable interface {
 	Kill() error
 }
 
-// forwardStop hands the launcher's SIGTERM on to the child.
+// forwardStop hands a stop signal the launcher caught (stopSignals) on to the
+// child: the same signal, so the child's shutdown knows a hangup from a stop.
 //
 // On Windows it does nothing. Go delivers SIGTERM there only for the console
-// close, logoff and shutdown events, which Windows sends to every process
-// attached to the console — the child shares the launcher's, so it already
-// has the same event and has begun its own graceful shutdown (worker drain,
-// resume sidecars, WAL checkpoint) inside the grace period Windows allows.
-// os.Process.Signal cannot deliver SIGTERM on Windows, and the Kill fallback
-// it used to take was TerminateProcess: the recorder died milliseconds into
-// that shutdown. The launcher only records the stop (terminating) and waits
-// for the child to exit.
+// close, logoff and shutdown events, and os.Interrupt only for Ctrl+C and
+// Ctrl+Break, which Windows sends to every process attached to the console —
+// the child shares the launcher's, so it already has the same event and has
+// begun its own graceful shutdown (worker drain, resume sidecars, WAL
+// checkpoint) inside the grace period Windows allows. os.Process.Signal cannot
+// deliver either on Windows, and the Kill fallback it used to take was
+// TerminateProcess: the recorder died milliseconds into that shutdown. The
+// launcher only records the stop (terminating) and waits for the child to
+// exit.
 //
-// Elsewhere SIGTERM reaches only the PID it was sent to, so the launcher
+// Elsewhere a signal sent to a PID reaches only that PID, so the launcher
 // passes it on, killing the child only when it cannot be signalled.
-func forwardStop(goos string, p stoppable) {
+func forwardStop(goos string, p stoppable, sig os.Signal) {
 	if goos == "windows" {
 		return
 	}
-	if err := p.Signal(syscall.SIGTERM); err != nil {
+	if err := p.Signal(sig); err != nil {
 		_ = p.Kill()
 	}
 }

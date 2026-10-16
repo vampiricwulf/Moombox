@@ -35,6 +35,7 @@ const forceExitAfter = worker.StopBudget + 3*time.Second
 // Returns true when a restart was requested via s.triggerRestart, so the
 // caller (main) can re-invoke run() with the same configPath.
 func (s *runState) shutdown() bool {
+	s.muteHungUpTerminal() // a hangup ended the run: nothing more to its terminal
 	s.log.Info("Shutdown signal received, shutting down gracefully...")
 
 	// Force-exit timer (forceExitAfter). closeLimiters / closeDB / closeLog

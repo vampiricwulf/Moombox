@@ -783,7 +783,7 @@ The respawned child shares the launcher's console; the `CREATE_NO_WINDOW` flag (
 
 ### Shutdown Sequence
 
-When the main context is cancelled (Ctrl+C, SIGTERM, or restart trigger):
+When the main context is cancelled (Ctrl+C, SIGTERM, a hangup — SIGHUP on Unix, when the terminal closes or an SSH session drops — or restart trigger):
 
 1. 15-second force-exit timer starts (it must outlast the worker's 12-second stop budget — see `forceExitAfter` in `cmd/moombox/shutdown.go`)
 2. Notifications switch to single-attempt delivery

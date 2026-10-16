@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
-	"syscall"
 	"time"
 
 	isatty "github.com/mattn/go-isatty"
@@ -215,16 +213,19 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	startPprofIfRequested()
 
 	// Graceful shutdown context (also stored on runState so every extracted
-	// phase sees the same cancellation).
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// phase sees the same cancellation). A stop signal cancels it
+	// (stopOnSignal), and every later one is caught too (catchStopSignals).
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	s := &runState{
-		ctx:        ctx,
-		cancel:     cancel,
-		configPath: configPath,
-		useTUI:     useTUI,
+		ctx:              ctx,
+		cancel:           cancel,
+		configPath:       configPath,
+		useTUI:           useTUI,
+		stdoutIsTerminal: isatty.IsTerminal(os.Stdout.Fd()),
 	}
+	catchStopSignals(stopSignals(), s.stopOnSignal)
 
 	// Initialise all 16 service sections (config, logger, updater, database,
 	// connectivity, cookies, platform services, worker, monitors, cookie

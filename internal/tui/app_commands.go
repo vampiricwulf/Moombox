@@ -761,14 +761,36 @@ func newImportRequest(baseURL string, body io.Reader, title, channel string) (*h
 	return req, nil
 }
 
-// Run starts the TUI program.
+// Run starts the TUI program and blocks until it quits: from the keyboard, or
+// because ctx ended (runUntilDone).
 //
 // tea.WithFPS raises the renderer from bubbletea's default 60 to tuiTargetFPS
 // (120, its maximum). This is the package's ONLY tea.NewProgram site, and
 // TestTheOneProgramIsBuiltWithTheTargetFPS is what keeps it that way.
-func Run(app *App) error {
+func Run(ctx context.Context, app *App) error {
 	p := tea.NewProgram(app, tea.WithFPS(tuiTargetFPS))
 	app.program.Store(p)
+	return runUntilDone(ctx, p)
+}
+
+// runUntilDone runs p, quitting it when ctx ends — the run's context, which
+// a stop signal ends. bubbletea quits on SIGINT and SIGTERM by its own
+// handler but has none for a hangup (SIGHUP): closing the terminal the TUI ran
+// in left Run waiting for a key that could not come, and the shutdown behind
+// it never started. The quit is bubbletea's ordinary one, the same QuitTUI a
+// restart sends, and a ctx that ended before the program started quits it as
+// soon as it runs (App.program is stored before this, so nothing is lost to a
+// QuitTUI that found no program yet).
+func runUntilDone(ctx context.Context, p *tea.Program) error {
+	stop := context.AfterFunc(ctx, func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "panic quitting the TUI: %v\n", r)
+			}
+		}()
+		p.Quit()
+	})
+	defer stop()
 	_, err := p.Run()
 	// A SIGINT delivered from outside (kill -INT) surfaces as ErrInterrupted;
 	// it is a request to quit like any other, not a TUI failure.
