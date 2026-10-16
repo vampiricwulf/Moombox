@@ -64,16 +64,23 @@ func (s *connSource) offline() bool {
 // holds its queue while the monitor reports offline, and a delivery whose link
 // fails under it holds in place once the monitor calls it an outage — see
 // targetQueue.pop and DiscordWebhook.deliverWith. Every transition wakes every
-// target, so a held queue resumes on the online edge itself.
+// target, so a held queue resumes on the online edge itself, and the offline
+// one marks what each target has queued (targetQueue.noteOffline).
 //
-// Never blocks the monitor: the callback only signals each queue, without
-// waiting on anything. A second call replaces the first monitor.
+// Never blocks the monitor: the callback only marks and signals each queue,
+// taking each one's lock for no longer than enqueue does, without waiting on
+// anything. A second call replaces the first monitor.
 func (m *Manager) SetConnectivity(c Connectivity) {
 	if m == nil || c == nil {
 		return
 	}
 	m.conn.c.Store(&connHolder{c: c})
-	unsub := c.OnStateChange(func(bool) { m.wakeQueues() })
+	unsub := c.OnStateChange(func(online bool) {
+		if !online {
+			m.noteOffline()
+		}
+		m.wakeQueues()
+	})
 	m.targetsMu.Lock()
 	prev := m.unsubConn
 	m.unsubConn = unsub
@@ -84,6 +91,16 @@ func (m *Manager) SetConnectivity(c Connectivity) {
 	// The monitor may already be offline — an offline boot seeds it before
 	// anything is wired — and a queue that is waiting needs to look again.
 	m.wakeQueues()
+}
+
+// noteOffline hands the monitor's offline transition to every live target.
+func (m *Manager) noteOffline() {
+	m.targetsMu.RLock()
+	targets := m.targets
+	m.targetsMu.RUnlock()
+	for _, q := range targets {
+		q.noteOffline()
+	}
 }
 
 // wakeQueues nudges every live target's goroutine to re-read the monitor.

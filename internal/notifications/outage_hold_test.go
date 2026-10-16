@@ -133,8 +133,11 @@ func assertDelayedNote(t *testing.T, r recordedReq) {
 // they were raised, each saying it was delayed and when it was raised.
 //
 // Mutants: SetConnectivity's subscription not waking the queues (the held
-// messages are never delivered); enqueue or beginHoldLocked not marking a
-// held message delayed, or buildPayload not rendering the note (no note).
+// messages are never delivered); enqueue not marking an arrival delayed, or
+// buildPayload not rendering the note (no note). Not beginHoldLocked's
+// marking: both messages arrive offline, so enqueue marks each and the queue
+// is empty when the hold starts — TestOutageUnderADeliveryHoldsInPlace and
+// TestSecondOutageMarksWhatQueuedInTheOnlineGap kill that one.
 func TestNotificationRaisedOfflineIsHeldAndDeliveredMarked(t *testing.T) {
 	f := newFakeDiscord(t, okCreated("M1"))
 	conn := newOutageConn(false)
@@ -227,6 +230,138 @@ func TestOutageUnderADeliveryHoldsInPlace(t *testing.T) {
 	}
 	assertDelayedNote(t, calls[1])
 	assertDelayedNote(t, calls[2])
+}
+
+// cutUntil answers request n, for n < len(gates), only once gates[n] is
+// closed, and then cuts the connection without answering — a request the
+// test holds in flight before it fails at the transport level. Every later
+// request gets a 2xx.
+func cutUntil(gates ...chan struct{}) func(int, recordedReq, http.ResponseWriter) {
+	var down atomic.Bool
+	down.Store(true)
+	cut := dropConn(&down)
+	ok := okCreated("M1")
+	return func(n int, r recordedReq, rw http.ResponseWriter) {
+		if n >= len(gates) {
+			ok(n, r, rw)
+			return
+		}
+		<-gates[n]
+		cut(n, r, rw)
+	}
+}
+
+// isHolding reads the queue's hold flag under its lock.
+func isHolding(q *targetQueue) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.holding
+}
+
+// TestSecondOutageMarksWhatQueuedInTheOnlineGap: a delivery held in place
+// resumes on the restore without passing back through pop, so the queue
+// still reads as holding while its fresh ladder retries on a link that is
+// still flapping. A notification raised in that online gap queues unmarked —
+// rightly, it was raised after the first outage — and is then held through
+// a second one, which must mark it: it was queued when the monitor went
+// offline again. It went out unmarked, because the second outage found the
+// hold already set and beginHoldLocked marked only a new one.
+//
+// Every step waits on the state it needs rather than on a sleep: the first
+// failure is held until the monitor reports offline, so the ladder's next
+// look finds the outage, and the resumed attempt is held in flight across
+// the arrival and the second loss.
+//
+// Mutant: beginHoldLocked returning early on a hold already set, before its
+// marking (Job Cancelled goes out with no note).
+func TestSecondOutageMarksWhatQueuedInTheOnlineGap(t *testing.T) {
+	prevBackoff := discordRetryBackoff
+	discordRetryBackoff = [discordMaxAttempts - 1]time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
+	t.Cleanup(func() { discordRetryBackoff = prevBackoff })
+
+	first, resumed := make(chan struct{}), make(chan struct{})
+	f := newFakeDiscord(t, cutUntil(first, resumed))
+	conn := newOutageConn(true)
+	m := heldManager(t, conn, webhookTarget(f))
+	q := m.targets[0]
+
+	m.Send("Job Failed", "d", TypeError, nil, SendOptions{Event: "error", JobID: "yt_1"})
+	waitFor(t, "the first attempt", func() bool { return len(f.calls()) == 1 })
+	conn.set(false) // outage 1, under the delivery
+	close(first)
+	waitFor(t, "the delivery held in place", func() bool { return isHolding(q) })
+
+	conn.set(true) // the restore; the link is still flapping
+	waitFor(t, "the resumed attempt", func() bool { return len(f.calls()) == 2 })
+	m.Send("Job Cancelled", "d", TypeCancelled, nil, SendOptions{Event: "cancelled", JobID: "yt_2"})
+	waitFor(t, "the notification raised in the online gap", func() bool { return q.pending() == 1 })
+	if !isHolding(q) {
+		t.Fatal("the queue no longer reads as holding — the stale hold this test is about did not happen")
+	}
+
+	conn.set(false) // outage 2, with Job Cancelled queued
+	close(resumed)
+	conn.set(true)
+	waitFor(t, "both notifications", func() bool { return len(f.calls()) >= 4 })
+	calls := f.calls()
+	last := calls[len(calls)-1]
+	if last.Body.Embeds[0].Title != "Job Cancelled" {
+		t.Fatalf("last delivered %q, want Job Cancelled", last.Body.Embeds[0].Title)
+	}
+	assertDelayedNote(t, last)
+}
+
+// TestOutageInsideAnInFlightRequestMarksWhatWaited: the monitor calls an
+// outage and clears it while a delivery's request is still in flight, so the
+// queue's goroutine never looks while the monitor reports offline — no pop,
+// no ladder check — and only the transition itself can see what waited
+// behind that request. It was queued when the monitor went offline, and goes
+// out marked. An idle target's outage, with nothing queued, holds nothing and
+// says nothing.
+//
+// Mutants: SetConnectivity's subscription not handing the offline transition
+// to the queues (noteOffline; Job Cancelled goes out with no note);
+// noteOffline starting a hold on a queue with no message in it (the idle
+// target logs that it is holding).
+func TestOutageInsideAnInFlightRequestMarksWhatWaited(t *testing.T) {
+	lg := &countingLogger{}
+	inFlight := make(chan struct{})
+	ok := okCreated("M1")
+	f := newFakeDiscord(t, func(n int, r recordedReq, rw http.ResponseWriter) {
+		if n == 0 {
+			<-inFlight
+		}
+		ok(n, r, rw)
+	})
+	conn := newOutageConn(true)
+	m := newTestManagerWithLogger(t, lg, 2*time.Second, webhookTarget(f))
+	m.SetConnectivity(conn)
+	q := m.targets[0]
+
+	conn.set(false) // an outage on an idle target
+	conn.set(true)
+	lg.mu.Lock()
+	for _, msg := range lg.infos {
+		if strings.Contains(msg, "holding this target's notifications") {
+			t.Errorf("an idle target's outage logged %q — it holds nothing", msg)
+		}
+	}
+	lg.mu.Unlock()
+
+	m.Send("Job Failed", "d", TypeError, nil, SendOptions{Event: "error", JobID: "yt_1"})
+	waitFor(t, "the request in flight", func() bool { return len(f.calls()) == 1 })
+	m.Send("Job Cancelled", "d", TypeCancelled, nil, SendOptions{Event: "cancelled", JobID: "yt_2"})
+	waitFor(t, "the notification queued behind it", func() bool { return q.pending() == 1 })
+	conn.set(false) // called and cleared inside the request
+	conn.set(true)
+	close(inFlight)
+
+	waitFor(t, "both notifications", func() bool { return len(f.calls()) == 2 })
+	calls := f.calls()
+	if calls[1].Body.Embeds[0].Title != "Job Cancelled" {
+		t.Fatalf("second delivered %q, want Job Cancelled", calls[1].Body.Embeds[0].Title)
+	}
+	assertDelayedNote(t, calls[1])
 }
 
 // TestLateVerdictHoldsTheLastAttempt: three refused dials are over before the

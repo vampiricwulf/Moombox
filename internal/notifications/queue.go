@@ -155,11 +155,14 @@ type targetQueue struct {
 
 	// holding is set while the queue holds its messages through a
 	// connectivity outage: pop found the monitor offline with a message at the
-	// head, or a delivery's ladder is holding in awaitOutage. Setting it marks
-	// every queued message delayed, as enqueue marks every arrival while the
+	// head, a delivery's ladder is holding in awaitOutage, or the monitor's
+	// offline transition found messages queued (noteOffline). Every look that
+	// finds the monitor offline marks every queued message delayed, the hold
+	// new or not (beginHoldLocked), as enqueue marks every arrival while the
 	// monitor reports offline; while it is set a full queue drops its OLDEST
 	// rather than the arrival. pop clears it on the first look that finds the
-	// monitor online again.
+	// monitor online again — a delivery held in place resumes without one, so
+	// it can still be set when the link drops again.
 	holding bool
 	// heldDropped counts the messages the full queue dropped while holding,
 	// reported once — a Warn and a heldDropReport ahead of the backlog — when
@@ -714,18 +717,46 @@ func (q *targetQueue) closeOfflineLocked() (it queued, ok, exit bool) {
 
 // beginHoldLocked marks the queue holding and every message in it delayed,
 // and reports whether the hold is new (for the caller's one log line). Called
-// with q.mu HELD.
+// with q.mu HELD, and only while the monitor reports offline.
+//
+// The marking runs on every call, the hold already set or not. holding can
+// outlive the outage that set it: a delivery held in place resumes on the
+// online edge without passing back through pop, which is what clears it, and
+// its fresh ladder can still be retrying when the link drops again. A message
+// queued in that online gap was raised after the first outage and is held
+// through the second, and marking only on a NEW hold sent it out unmarked.
 func (q *targetQueue) beginHoldLocked() bool {
-	if q.holding {
-		return false
-	}
-	q.holding = true
 	for i := range q.items {
 		if q.items[i].ctl == nil {
 			q.items[i].msg.delayed = true
 		}
 	}
+	if q.holding {
+		return false
+	}
+	q.holding = true
 	return true
+}
+
+// noteOffline is the monitor's offline transition reaching this queue
+// (Manager.SetConnectivity): whatever it has queued was queued when the
+// monitor went offline, and is marked delayed and held here, at the
+// transition itself. The goroutine marks it too when it next looks (pop,
+// awaitOutage), but a delivery whose request is still in flight looks at
+// nothing until that request ends — and an outage the monitor called and
+// cleared inside that request was otherwise never seen by this queue at all,
+// so what waited behind it went out unmarked. A queue with no message queued
+// starts no hold: there is nothing to mark, and an idle target's log should
+// not report holding nothing.
+func (q *targetQueue) noteOffline() {
+	q.mu.Lock()
+	n := len(q.items) - q.steps
+	started := n > 0 && q.beginHoldLocked()
+	q.mu.Unlock()
+	if started {
+		q.logger.Info("connectivity monitor reports offline — holding this target's notifications until it returns",
+			"queued", n)
+	}
 }
 
 // retired reports whether the target is going away: removed by a Reload, or

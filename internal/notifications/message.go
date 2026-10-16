@@ -50,7 +50,8 @@ type Message struct {
 	Mention        string
 	MentionAllowed *AllowedMentions
 	// delayed marks a message its target held through a connectivity outage
-	// (targetQueue.pop, awaitOutage). buildPayload then adds delayedNote to
+	// (targetQueue.enqueue, and beginHoldLocked from pop, awaitOutage and
+	// noteOffline). buildPayload then adds delayedNote to
 	// the content: a line of content rather than a field, because content is
 	// outside the embeds' 6000-character budget, so a batch the splitter
 	// packed to the limit still fits with the note on it. An edit-mode
