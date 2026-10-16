@@ -791,7 +791,7 @@ Special states: `Error`, `Cancelled`, `COOKIES?` (credentials needed — cookies
 
 ## Architecture
 
-Moombox is a Go application (~144,000 lines, not counting tests) compiled to a single binary. All code lives under `internal/` with web assets embedded via `go:embed`.
+Moombox is a Go application (~146,000 lines, not counting tests) compiled to a single binary. All code lives under `internal/` with web assets embedded via `go:embed`.
 
 ```
 Monitors (RSS/DECAPI/Twitch) -> Job Database (SQLite) -> Download Worker -> YouTube/Twitch API

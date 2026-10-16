@@ -1357,5 +1357,5 @@ Resume state is saved after each disk flush. On restart, the downloader loads th
 - `internal/bgutils/` -- PotProvider, WebPoClient, Challenge, BotGuard, WebPoMinter, Types (6 files, ~2,180 lines; the sidecar manager is the `sidecar/` subpackage, 7 files, ~2,100 lines).
 - `internal/cipher/` -- Solver, PlayerCache, Extractor, STS, Decrypt, ResolveURL, sidecar routing, Types (13 files, ~3,190 lines).
 - `internal/goja/` -- Runtime, DOMShim, Encoding, Timer (5 files, ~1,510 lines).
-- `internal/chat/` -- Downloader, API, Types (3 files, ~3,290 lines).
+- `internal/chat/` -- Downloader, API, Types (3 files, ~3,410 lines).
 - `internal/constants/constants.go` -- All API keys, URLs, client configs, timeouts, limits.
