@@ -162,8 +162,7 @@ const muxTempNameMax = 255
 // two runs' files for one archive apart. It is not what tells the sweep
 // another run's file is a leftover — another token is not a gone process: a
 // second Moombox writing to the same output tree under its own data
-// directory, or a child still shutting down after its launcher was killed,
-// writes under its own — the writer's lock is (lockMuxTempFile). A
+// directory writes under its own — the writer's lock is (lockMuxTempFile). A
 // collision with an earlier run's token is a 1 in 2^32 chance per pair of
 // runs, and costs the sweep that leftover until the next start.
 var muxRun = newMuxRun()
@@ -239,11 +238,10 @@ const muxTempIdleAge = 24 * time.Hour
 // dirs (one level), and removes a regular file named as a temporary output
 // (muxTempMarker) only when its writer is gone: its token is not this run's,
 // and its writer's lock is free (removeStaleMuxTemp). A file whose lock is
-// held is a live run's — another Moombox writing to the same tree, or a child
-// that outlived its launcher — and is returned in live. A root that does not
-// exist is skipped, an entry that cannot be read or removed is skipped, and
-// the first error that stopped a root being read is returned with what was
-// removed.
+// held is a live run's — another Moombox writing to the same tree — and is
+// returned in live. A root that does not exist is skipped, an entry that
+// cannot be read or removed is skipped, and the first error that stopped a
+// root being read is returned with what was removed.
 func RemoveStaleMuxTemps(trees, dirs []string) (removed, live []string, err error) {
 	sweep := func(path string) {
 		if run := muxTempRunOf(filepath.Base(path)); run == "" || run == muxRun {

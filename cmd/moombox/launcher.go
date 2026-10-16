@@ -50,13 +50,14 @@ func launchAndSupervise() {
 	signal.Ignore(os.Interrupt)
 
 	// Forward SIGTERM to the child instead of dying with the default
-	// disposition. The single-instance lock lives in THIS process: if a
-	// plain `kill <launcher-pid>` (the PID a user sees for the foreground
-	// process) killed only the launcher, the child would keep running —
-	// and writing to the database — while the lock is released, letting a
-	// second instance start against the same DB. On Windows the launcher
+	// disposition. A plain `kill <launcher-pid>` (the PID a user sees for
+	// the foreground process) is a request to stop Moombox, and the child is
+	// what has to stop. The single-instance lock is held by the launcher and
+	// by its child (shareInstanceLock), so a launcher that dies anyway — a
+	// kill -9 — leaves it held until the child has exited, and no second
+	// instance starts against the same DB meanwhile. On Windows the launcher
 	// does not signal at all: see forwardStop. Outright TerminateProcess on
-	// the launcher remains uninterceptable.
+	// the launcher remains uninterceptable, and its Job Object ends the child.
 	var child atomic.Pointer[os.Process]
 	// starting is true while the main loop is mid-launch (cmd.Start in flight,
 	// child not yet stored). The forwarder uses it to distinguish "genuinely no
@@ -153,6 +154,9 @@ func launchAndSupervise() {
 		}
 		cmd.Env = env
 		configureLauncherChild(cmd)
+		// The child holds the instance lock too, so it outlives a launcher
+		// killed before its child has exited.
+		shareInstanceLock(cmd)
 
 		// Reset the stop-intent latch per spawn: a SIGTERM that raced a
 		// previous child's restart (child exited 42 anyway because its

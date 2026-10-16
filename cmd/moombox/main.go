@@ -184,6 +184,9 @@ func main() {
 		launchAndSupervise()
 		return
 	}
+	// The launcher's instance lock, kept for this child's life, before the
+	// child starts anything that could inherit it.
+	holdInheritedInstanceLock()
 
 	// TTY detection: only use TUI if both stdin/stdout are terminals
 	isTTY := isatty.IsTerminal(os.Stdout.Fd()) && isatty.IsTerminal(os.Stdin.Fd())

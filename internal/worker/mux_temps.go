@@ -15,8 +15,7 @@ import (
 // (engine.RemoveStaleMuxTemps). This run's own temporary files — a boot
 // re-mux already under way — carry this run's token and are never touched,
 // and a file another live process is writing (a second Moombox sharing the
-// output tree, a child still shutting down after its launcher was killed)
-// holds its lock and is left to it.
+// output tree) holds its lock and is left to it.
 //
 // The places it looks are every place a job can have written an archive:
 // the output directory as configured now and each job's own

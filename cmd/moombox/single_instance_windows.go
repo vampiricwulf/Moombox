@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"unsafe"
@@ -164,3 +165,12 @@ func releaseSingleInstanceLock() {
 	procCloseHandle.Call(singleInstanceHandle)
 	singleInstanceHandle = 0
 }
+
+// shareInstanceLock is a no-op on Windows. The child never outlives the
+// launcher there: the launcher's kill-on-close Job Object ends it, and
+// everything under it, when the launcher dies however it dies
+// (newLauncherJob), which is the window the Unix version closes.
+func shareInstanceLock(cmd *exec.Cmd) {}
+
+// holdInheritedInstanceLock is a no-op on Windows (see shareInstanceLock).
+func holdInheritedInstanceLock() {}
