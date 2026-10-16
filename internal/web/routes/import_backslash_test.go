@@ -1,11 +1,14 @@
 package routes
 
 import (
+	"archive/zip"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestImportReadsABackslashEntryNameAsAFolder is the W27-04 reproduction:
@@ -86,6 +89,131 @@ func TestImportRefusesABackslashTraversalOnEveryHost(t *testing.T) {
 		rec, _ := importZip(t, newImportFixture(t), makeImportZip(t, map[string][]byte{name: []byte("v")}))
 		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid zip entry path") {
 			t.Errorf("%q: %d %s, want 400 invalid zip entry path", name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// A Linux host imported a backslash-named archive, before a backslash was a
+// separator, as "Folder\Stream" — "imports/Folder_Stream [<id>].mp4" and its
+// chat. Deleting the row (which leaves the files) and re-importing the same
+// zip after the upgrade, the natural way to correct that title, found the new
+// name "Stream [<id>]" free and wrote a second full copy of the recording and
+// its chat beside the old pair, with a plain 201. The old pair is re-adopted
+// when it holds the same bytes; a different file there is left alone, and the
+// import takes the new name as any import would.
+//
+// Mutants: importBackslashTitle always returning this import's title (the
+// second copy); zipEntryWrittenName returning the rewritten name (the same:
+// the written name then never differs); the chat loop not trying the legacy
+// stems (the chat is copied a second time beside the re-adopted video).
+func TestImportReadoptsAPreUpgradeBackslashName(t *testing.T) {
+	const oldStem = "Folder_Stream [abcd1234567]"
+	const newStem = "Stream [abcd1234567]"
+	chat := chatJSONFor(t, map[string]any{})
+	entries := []importEntry{
+		{name: `Folder\Stream [abcd1234567].mp4`, data: []byte("ORIGINAL-RECORDING")},
+		{name: `Folder\Stream [abcd1234567].chat.json`, data: chat},
+	}
+	seed := func(t *testing.T, f *importFixture, name string, data []byte) string {
+		t.Helper()
+		p := filepath.Join(f.outputDir, "imports", name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-time.Hour)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("identical", func(t *testing.T) {
+		f := newImportFixture(t)
+		video := seed(t, f, oldStem+".mp4", []byte("ORIGINAL-RECORDING"))
+		oldChat := seed(t, f, oldStem+".chat.json", chat)
+		rec, job := importZip(t, f, orderedImportZip(t, entries...))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("re-import: %d (body %s)", rec.Code, rec.Body.String())
+		}
+		r := decodeImportResult(t, rec.Body.Bytes())
+		if r.OutputFile != video || r.ChatFile != oldChat {
+			t.Errorf("the row names %q / %q, want the pre-upgrade files %q / %q",
+				filepath.Base(r.OutputFile), filepath.Base(r.ChatFile), filepath.Base(video), filepath.Base(oldChat))
+		}
+		if job.Title != "Stream" {
+			t.Errorf("title %q, want \"Stream\" (only the files keep the old name)", job.Title)
+		}
+		assertUntouched(t, video, "ORIGINAL-RECORDING")
+		assertUntouched(t, oldChat, string(chat))
+		assertNoLeftovers(t, f, filepath.Base(video), filepath.Base(oldChat))
+		if want := []string{filepath.Base(video), filepath.Base(oldChat)}; !slices.Equal(r.Import.Readopted, want) {
+			t.Errorf("readopted %q, want %q", r.Import.Readopted, want)
+		}
+	})
+
+	t.Run("different", func(t *testing.T) {
+		f := newImportFixture(t)
+		other := seed(t, f, oldStem+".mp4", []byte("ANOTHER-RECORDING!"))
+		rec, _ := importZip(t, f, orderedImportZip(t, entries...))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+		}
+		r := decodeImportResult(t, rec.Body.Bytes())
+		if filepath.Base(r.OutputFile) != newStem+".mp4" {
+			t.Errorf("output %q, want the new name %q", filepath.Base(r.OutputFile), newStem+".mp4")
+		}
+		assertUntouched(t, other, "ANOTHER-RECORDING!")
+		assertNoLeftovers(t, f, filepath.Base(other), newStem+".mp4", newStem+".chat.json")
+		if len(r.Import.Readopted) != 0 || len(r.Import.Renamed) != 0 {
+			t.Errorf("outcome %+v, want neither re-adopted nor renamed", r.Import)
+		}
+	})
+}
+
+// importBackslashTitle reads the title a Linux host gave an archive before a
+// backslash was a separator: the name as written, split on "/" alone, less
+// its last bracketed id — and only where that differs from this import's
+// reading and names the same id.
+//
+// Mutants: dropping the id guard (the folder's own id case answers
+// "Other \Stream", a title for another row's name); reading the id and title
+// from the name with its backslashes rewritten (every backslash case answers
+// the import's own title); preferring the name's title over a header's or
+// the chat's.
+func TestImportBackslashTitle(t *testing.T) {
+	rec := func(stem string, names ...string) *importRecording {
+		r := &importRecording{stem: stem}
+		for _, n := range names {
+			r.parts = append(r.parts, importPart{video: &zip.File{FileHeader: zip.FileHeader{Name: n}}})
+		}
+		return r
+	}
+	for _, tc := range []struct {
+		desc            string
+		rec             *importRecording
+		videoID, prefer string
+		title, want     string
+	}{
+		{"a folder written with a backslash",
+			rec("Folder/Stream [abcd1234567]", `Folder\Stream [abcd1234567].mp4`), "abcd1234567", "", "Stream", `Folder\Stream`},
+		{"no backslash: the import's own title",
+			rec("Folder/Stream [abcd1234567]", "Folder/Stream [abcd1234567].mp4"), "abcd1234567", "", "Stream", "Stream"},
+		{"a slash folder outside it: split on \"/\" alone",
+			rec("Outer/Folder/Stream [abcd1234567]", `Outer/Folder\Stream [abcd1234567].mp4`), "abcd1234567", "", "Stream", `Folder\Stream`},
+		{"a split recording's parts",
+			rec("Folder/Stream [abcd1234567]", `Folder\Stream [abcd1234567] - part1.mp4`, `Folder\Stream [abcd1234567] - part2.mp4`), "abcd1234567", "", "Stream", `Folder\Stream`},
+		{"no id in the name: the chat's id names both readings",
+			rec("Folder/Stream", `Folder\Stream.mp4`), "abcd1234567", "", "Stream", `Folder\Stream`},
+		{"the folder's own id: another row's name",
+			rec("Other [efgh1234567]/Stream", `Other [efgh1234567]\Stream.mp4`), "abcd1234567", "", "Stream", "Stream"},
+		{"a header's or chat's title wins",
+			rec("Folder/Stream [abcd1234567]", `Folder\Stream [abcd1234567].mp4`), "abcd1234567", "Chat Title", "Chat Title", "Chat Title"},
+	} {
+		if got := importBackslashTitle(tc.rec, tc.videoID, tc.prefer, tc.title); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.desc, got, tc.want)
 		}
 	}
 }

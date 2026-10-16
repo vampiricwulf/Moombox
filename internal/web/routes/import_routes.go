@@ -362,10 +362,13 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// free or already holds exactly these bytes — a file left by a
 		// deleted row of this very archive is re-adopted, not copied again;
 		// a different one keeps its name and this import takes the next.
-		// The name an import gave the archive before titles were cut by
-		// bytes is re-adopted too, when it holds these bytes.
+		// The names an import gave the archive under an earlier rule are
+		// re-adopted too, when they hold these bytes: before titles were cut
+		// by bytes, and — on a Linux host — before a backslash in an entry
+		// name was a folder separator (importBackslashTitle).
 		baseStem := importStem(title, videoID)
-		stem, err := chooseImportNames(importsDir, outputDir, baseStem, importLegacyStem(title, videoID), files)
+		backslashTitle := importBackslashTitle(rec, videoID, cmp.Or(titleHeader, meta.VideoTitle), title)
+		stem, err := chooseImportNames(importsDir, outputDir, baseStem, importLegacyStems(baseStem, title, backslashTitle, videoID), files)
 		switch {
 		case errors.Is(err, errImportInvalidPath):
 			jsonError(rw, "invalid output path", http.StatusBadRequest)
@@ -1047,22 +1050,22 @@ const importMaxDisambiguation = 999
 // name, whenever its own name holds the same bytes, rather than written
 // again because its sibling's name was taken.
 //
-// legacy is the stem an import gave the same archive before titles were cut
-// by bytes (importLegacyStem). Where it differs from base, a file it names
-// that holds exactly the imported bytes is re-adopted there first: a long
-// CJK title's archive, imported before and its row since deleted, was
-// otherwise never found under its old name, and its re-import wrote a
-// second full copy beside it. A legacy name is only ever adopted, never
-// written.
-func chooseImportNames(importsDir, outputDir, base, legacy string, files []*importFile) (string, error) {
+// legacy are the stems an import gave the same archive under an earlier
+// naming rule (importLegacyStems), none of them base. A file one of them
+// names that holds exactly the imported bytes is re-adopted there first: a
+// long CJK title's archive, or a backslash-named one a Linux host imported,
+// whose row has since been deleted, was otherwise never found under its old
+// name, and its re-import wrote a second full copy beside it. A legacy name
+// is only ever adopted, never written.
+func chooseImportNames(importsDir, outputDir, base string, legacy []string, files []*importFile) (string, error) {
 	var videos []*importFile
 	for _, f := range files {
 		if f.kind == "video" {
 			videos = append(videos, f)
 		}
 	}
-	stem := legacy
-	if legacy == base || !adoptImportStem(importsDir, outputDir, legacy, videos) {
+	stem, adopted := adoptImportLegacyStem(importsDir, outputDir, legacy, videos)
+	if !adopted {
 		var err error
 		if stem, err = chooseImportStem(importsDir, outputDir, base, videos); err != nil {
 			return "", err
@@ -1072,7 +1075,7 @@ func chooseImportNames(importsDir, outputDir, base, legacy string, files []*impo
 		if f.kind == "video" {
 			continue
 		}
-		if legacy != base && adoptImportStem(importsDir, outputDir, legacy, []*importFile{f}) {
+		if _, adopted := adoptImportLegacyStem(importsDir, outputDir, legacy, []*importFile{f}); adopted {
 			continue
 		}
 		if _, err := chooseImportStem(importsDir, outputDir, base, []*importFile{f}); err != nil {
@@ -1080,6 +1083,18 @@ func chooseImportNames(importsDir, outputDir, base, legacy string, files []*impo
 		}
 	}
 	return stem, nil
+}
+
+// adoptImportLegacyStem re-adopts files under the first of the legacy stems
+// that holds every one of them with exactly its bytes (adoptImportStem), and
+// returns that stem; it reports false, changing nothing, when none does.
+func adoptImportLegacyStem(importsDir, outputDir string, legacy []string, files []*importFile) (string, bool) {
+	for _, stem := range legacy {
+		if adoptImportStem(importsDir, outputDir, stem, files) {
+			return stem, true
+		}
+	}
+	return "", false
 }
 
 // adoptImportStem re-adopts files under stem when every one of them is
@@ -1176,18 +1191,24 @@ func importUploadTooLarge(err error) bool {
 // A Windows host's filepath splits on both separators and a Linux one's on "/"
 // alone, so the same zip was titled "Stream" on Windows and "Folder\Stream"
 // (written as "imports/Folder_Stream [id].mp4") in the Docker image. Every
-// name the import reads goes through here, so every host reads a zip alike \u2014
+// name the import reads goes through here, so every host reads a zip alike —
 // importMacMetadata already split on both.
 func zipEntryName(f *zip.File) string {
-	name := f.Name
-	if !utf8.ValidString(name) {
-		if s, err := charmap.CodePage437.NewDecoder().String(name); err == nil {
-			name = s
-		} else {
-			name = strings.ToValidUTF8(name, "\uFFFD")
-		}
+	return strings.ReplaceAll(zipEntryWrittenName(f), `\`, "/")
+}
+
+// zipEntryWrittenName is f's name decoded as zipEntryName decodes it, a
+// backslash left as written: what zipEntryName returned before a backslash
+// was a separator, and so what importBackslashTitle reads an earlier
+// import's name from. The two differ only byte for byte, "\" for "/".
+func zipEntryWrittenName(f *zip.File) string {
+	if utf8.ValidString(f.Name) {
+		return f.Name
 	}
-	return strings.ReplaceAll(name, `\`, "/")
+	if s, err := charmap.CodePage437.NewDecoder().String(f.Name); err == nil {
+		return s
+	}
+	return strings.ToValidUTF8(f.Name, "\uFFFD")
 }
 
 // importNameReserve is what an import's file name can carry past its
@@ -1220,6 +1241,45 @@ func importStem(title, id string) string {
 // budget, which only a multi-byte title reaches.
 func importLegacyStem(title, id string) string {
 	return fmt.Sprintf("%s [%s]", utils.SanitizeForFilename(title), id)
+}
+
+// importLegacyStems are the stems an import gave this archive under a naming
+// rule it has since left, each once and none of them base: the title capped
+// by runes rather than cut by bytes (importLegacyStem), and the title a Linux
+// host read from a backslash-named entry (importBackslashTitle), both cut by
+// bytes and capped by runes. chooseImportNames only ever re-adopts them.
+func importLegacyStems(base, title, backslashTitle, id string) []string {
+	var stems []string
+	for _, s := range []string{importLegacyStem(title, id), importStem(backslashTitle, id), importLegacyStem(backslashTitle, id)} {
+		if s != base && !slices.Contains(stems, s) {
+			stems = append(stems, s)
+		}
+	}
+	return stems
+}
+
+// importBackslashTitle is the title a Linux host gave this archive before a
+// backslash in an entry name was read as a folder separator: the recording's
+// name as the zip spells it, split on "/" alone, less its last bracketed id —
+// "Folder\Stream" for `Folder\Stream [<id>].mp4`, which that host wrote as
+// "imports/Folder_Stream [<id>].mp4" (a Windows host already split it).
+// preferred is the title a header or the chat gave, which no entry name
+// touches. title, this import's own, is the answer whenever that reading
+// named the archive no differently — its name holds no backslash — or under
+// another id: a bracketed id in the folder, which only that reading took,
+// names files that are not this row's.
+func importBackslashTitle(rec *importRecording, videoID, preferred, title string) string {
+	// zipEntryName's rewrite is byte for byte, so the recording's name as
+	// written is the same-length start of its entry's written name.
+	written := zipEntryWrittenName(rec.parts[0].video)
+	if len(written) < len(rec.stem) || written[:len(rec.stem)] == rec.stem {
+		return title
+	}
+	id, rest := importNameID(path.Base(written[:len(rec.stem)]))
+	if id != "" && id != videoID {
+		return title
+	}
+	return cmp.Or(preferred, rest, "Import")
 }
 
 // importNameMaxBytes is a file name's limit on Linux filesystems (NAME_MAX).
