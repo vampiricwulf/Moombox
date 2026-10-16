@@ -133,6 +133,23 @@ func expandHome(p string) string {
 	return filepath.Join(home, p[2:])
 }
 
+// unquotePath takes one matching pair of surrounding quotes off a pasted path.
+// Explorer's "Copy as path" (Ctrl+Shift+C) always wraps the path in double
+// quotes, Windows Terminal quotes a dropped file whose path has a space, and
+// some Linux terminals single-quote a dropped one — so the quotes are the
+// paste's, not the name's, and stat'ing them as part of it answered "does not
+// exist" about a file that does. Neither quote is a legal character in a
+// Windows file name. Only a matching pair at both ends comes off, and only
+// one: a quote inside the path, or at one end alone, is left as typed.
+func unquotePath(p string) string {
+	if len(p) >= 2 {
+		if q := p[0]; (q == '"' || q == '\'') && p[len(p)-1] == q {
+			return p[1 : len(p)-1]
+		}
+	}
+	return p
+}
+
 // HandleKey processes one keypress. It returns ("import", path) when a valid
 // file was confirmed, ("close", "") when the overlay closed, and ("", "")
 // otherwise.
@@ -171,7 +188,7 @@ func (m *CookieImportDialogModel) HandleKey(key string) (string, string) {
 // a Windows profile path is most of a dialog wide on its own, and the phrase
 // the operator has to read must not be what gets word-wrapped away.
 func (m *CookieImportDialogModel) confirmPath() (string, string) {
-	path := expandHome(strings.TrimSpace(m.input.Value()))
+	path := expandHome(unquotePath(strings.TrimSpace(m.input.Value())))
 	if path == "" {
 		m.errorMsg = "Enter a path to a cookies.txt file"
 		return "", ""

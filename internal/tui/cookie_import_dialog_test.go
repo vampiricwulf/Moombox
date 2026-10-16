@@ -61,6 +61,81 @@ func TestCookieImportDialogValidatesThePath(t *testing.T) {
 	}
 }
 
+// TestCookieImportDialogAcceptsAQuotedPath is the W27-03 reproduction: a path
+// pasted in quotes — Explorer's "Copy as path", a Windows Terminal drop of a
+// path with a space, a Linux terminal's single-quoted drop — imports the file
+// it names. It answered "That path does not exist:" above the quoted path.
+//
+// Mutants it kills (each compiles):
+//   - confirmPath without unquotePath: every quoted row is refused;
+//   - unquotePath and strings.TrimSpace swapped: the row with a trailing space
+//     after the closing quote is refused;
+//   - unquotePath and expandHome swapped: the quoted "~/…" row is refused;
+//   - unquotePath taking off double quotes only: the single-quoted row is
+//     refused (and the unit row `'a b'` fails).
+func TestCookieImportDialogAcceptsAQuotedPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dir := filepath.Join(home, "Jane Doe", "Downloads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "cookies.txt")
+	if err := os.WriteFile(file, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tilde := "~" + string(filepath.Separator) + filepath.Join("Jane Doe", "Downloads", "cookies.txt")
+	for _, typed := range []string{
+		`"` + file + `"`,
+		`'` + file + `'`,
+		`"` + file + `" `,
+		`"` + tilde + `"`,
+	} {
+		m := NewCookieImportDialogModel()
+		m.Open()
+		typeInto(m, typed)
+		if action, path := m.HandleKey(keyEnter); action != "import" || path != file {
+			t.Errorf("typed %q: action=%q path=%q, want import of %q; view:\n%s", typed, action, path, file, m.View())
+		}
+	}
+
+	// A lone quote at one end is not a pair: the path is stat'ed as typed.
+	m := NewCookieImportDialogModel()
+	m.Open()
+	typeInto(m, `"`+file)
+	if action, _ := m.HandleKey(keyEnter); action != "" {
+		t.Errorf("an unmatched quote must not import, got action %q", action)
+	}
+}
+
+// TestUnquotePath pins the one-matching-pair rule.
+//
+// Mutants it kills (each compiles):
+//   - the `p[len(p)-1] == q` match dropped (any quote closes): `"a b'` comes
+//     out unquoted;
+//   - a loop taking every pair off: `""a b""` comes out as `a b`;
+//   - `len(p) >= 2` relaxed to `>= 1`: `"` slices p[1:0] and panics;
+//   - single quotes not recognised: `'a b'` comes out quoted.
+func TestUnquotePath(t *testing.T) {
+	for in, want := range map[string]string{
+		`"a b"`:    `a b`,
+		`'a b'`:    `a b`,
+		`""`:       ``,
+		`"`:        `"`,
+		`"a b'`:    `"a b'`,
+		`""a b""`:  `"a b"`,
+		`a "b" c`:  `a "b" c`,
+		`a b`:      `a b`,
+		`'it's'`:   `it's`,
+		`C:\x y\z`: `C:\x y\z`,
+	} {
+		if got := unquotePath(in); got != want {
+			t.Errorf("unquotePath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // TestCookieImportDialogRendersEveryOutcome: the result is worded per platform
 // off ImportOutcome.String() and the verdict — never flattened to pass/fail —
 // and never includes cookie content.
