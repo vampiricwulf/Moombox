@@ -797,6 +797,9 @@ func (m *SettingsModel) applyValues() (settingsWrite, bool) {
 	loadSettingsValues(live, m.cfg)
 	merged := m.mergeEdited(live, edited)
 	p, msg := validateSettingsValues(merged, m.cfg.Network.PasswordHash, browser.check)
+	if msg == "" {
+		msg = quotedSettingsPath(merged, edited)
+	}
 	if msg != "" {
 		m.errorMsg = msg
 		m.status = saveError
@@ -1108,22 +1111,42 @@ func validateSettingsValues(v map[string]string, passwordHash string, checkBrows
 	// in the Web UI alike — config.PathHasTraversal is the single rule both
 	// call, because a value one UI saves and the other refuses is exactly the
 	// defect this replaced (see internal/config/pathcheck.go).
-	for _, c := range []struct{ key, label string }{
-		{"database_path", "Database path"},
-		{"log_file_path", "Log file path"},
-		{"output_directory", "Output directory"},
-		{"staging_directory", "Staging directory"},
-		{"ffmpeg_path", "FFmpeg path"},
-		{"tls_cert_path", "TLS certificate path"},
-		{"tls_key_path", "TLS key path"},
-		{"cookie_file", "Cookie file"},
-		{"browser_profile_dir", "Browser profile directory"},
-	} {
+	for _, c := range settingsPathFields {
 		if config.PathHasTraversal(v[c.key]) {
 			return p, c.label + " cannot contain a .. segment"
 		}
 	}
 	return p, ""
+}
+
+// settingsPathFields are the overlay's path fields, by key and label.
+var settingsPathFields = []struct{ key, label string }{
+	{"database_path", "Database path"},
+	{"log_file_path", "Log file path"},
+	{"output_directory", "Output directory"},
+	{"staging_directory", "Staging directory"},
+	{"ffmpeg_path", "FFmpeg path"},
+	{"tls_cert_path", "TLS certificate path"},
+	{"tls_key_path", "TLS key path"},
+	{"cookie_file", "Cookie file"},
+	{"browser_profile_dir", "Browser profile directory"},
+}
+
+// quotedSettingsPath refuses an edited path field wrapped in quotes — what
+// Explorer's "Copy as path" pastes (config.PathIsQuoted) — returning the
+// refusal's message, or "". Nothing downstream takes the quotes off:
+// `"E:\Archive"` saved as the output directory has no volume on Windows, so
+// it is a relative directory whose name holds `"` and `:`, and every mux
+// then fails to create it. Only the fields the operator EDITED are read, as
+// PUT /api/config refuses only a changed value (newQuotedPathErrors): a path
+// stored quoted before this rule must not make every unrelated save fail.
+func quotedSettingsPath(v map[string]string, edited []string) string {
+	for _, c := range settingsPathFields {
+		if slices.Contains(edited, c.key) && config.PathIsQuoted(v[c.key]) {
+			return c.label + " cannot be wrapped in quotes"
+		}
+	}
+	return ""
 }
 
 // writeSettingsField writes field key of v — passed and parsed by

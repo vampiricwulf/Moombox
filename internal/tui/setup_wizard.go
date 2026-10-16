@@ -1380,9 +1380,9 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		m.errorMsg = "Downloader: YouTube max timeout must be at least 30 seconds"
 		return ""
 	}
-	// Path fields: reject ".." segments, matching validateConfigUpdates on
-	// the web wizard's /api/setup/complete. Absolute paths are accepted on
-	// both — see internal/config/pathcheck.go.
+	// Path fields: reject ".." segments and a value wrapped in quotes,
+	// matching validateConfigUpdates on the web wizard's /api/setup/complete.
+	// Absolute paths are accepted on both — see internal/config/pathcheck.go.
 	for _, c := range []struct{ key, label string }{
 		{"logFilePath", "Paths: Log file path"},
 		{"databasePath", "Paths: Database path"},
@@ -1391,6 +1391,10 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		{"ffmpegPath", "Paths: FFmpeg path"},
 		{"cookieFile", "Cookies: Cookie file"},
 	} {
+		if config.PathIsQuoted(v(c.key)) {
+			m.errorMsg = c.label + " cannot be wrapped in quotes"
+			return ""
+		}
 		if config.PathHasTraversal(v(c.key)) {
 			m.errorMsg = c.label + " cannot contain a .. segment"
 			return ""

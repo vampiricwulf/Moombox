@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
@@ -116,9 +117,9 @@ func (m *CookieImportDialogModel) SetResult(r cookies.ImportResult, err error) {
 // rewritten into a path under the wrong account.
 //
 // Nothing else in the tree expands "~" and bubbles' filepicker does not
-// either, but this is the one prompt where an operator types a path by hand
-// rather than browsing to it, and "~/Downloads/cookies.txt" is exactly what a
-// browser's export leaves behind.
+// either. This prompt does because the file it asks for is one a browser's
+// export leaves in the home directory: "~/Downloads/cookies.txt" is exactly
+// what an operator types here.
 func expandHome(p string) string {
 	if p != "~" && !strings.HasPrefix(p, "~/") && !strings.HasPrefix(p, "~\\") {
 		return p
@@ -131,23 +132,6 @@ func expandHome(p string) string {
 		return home
 	}
 	return filepath.Join(home, p[2:])
-}
-
-// unquotePath takes one matching pair of surrounding quotes off a pasted path.
-// Explorer's "Copy as path" (Ctrl+Shift+C) always wraps the path in double
-// quotes, Windows Terminal quotes a dropped file whose path has a space, and
-// some Linux terminals single-quote a dropped one — so the quotes are the
-// paste's, not the name's, and stat'ing them as part of it answered "does not
-// exist" about a file that does. Neither quote is a legal character in a
-// Windows file name. Only a matching pair at both ends comes off, and only
-// one: a quote inside the path, or at one end alone, is left as typed.
-func unquotePath(p string) string {
-	if len(p) >= 2 {
-		if q := p[0]; (q == '"' || q == '\'') && p[len(p)-1] == q {
-			return p[1 : len(p)-1]
-		}
-	}
-	return p
 }
 
 // HandleKey processes one keypress. It returns ("import", path) when a valid
@@ -188,7 +172,7 @@ func (m *CookieImportDialogModel) HandleKey(key string) (string, string) {
 // a Windows profile path is most of a dialog wide on its own, and the phrase
 // the operator has to read must not be what gets word-wrapped away.
 func (m *CookieImportDialogModel) confirmPath() (string, string) {
-	path := expandHome(unquotePath(strings.TrimSpace(m.input.Value())))
+	path := expandHome(config.UnquotePath(strings.TrimSpace(m.input.Value())))
 	if path == "" {
 		m.errorMsg = "Enter a path to a cookies.txt file"
 		return "", ""

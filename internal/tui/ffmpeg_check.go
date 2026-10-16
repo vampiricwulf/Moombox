@@ -12,6 +12,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
 // ffmpegMode identifies which view the FFmpeg check overlay is in.
@@ -495,14 +497,25 @@ func (m *FFmpegCheckModel) handleCustomKey(key string) string {
 		m.form = nil
 		m.formInit = m.buildMainForm()
 	case keyEnter:
-		if m.customPath == "" || m.checking {
+		path := pastedPath(m.customPath)
+		if path == "" || m.checking {
 			return ""
 		}
 		m.checking = true
 		m.spinner = newSpinner()
-		return "check_custom:" + m.customPath
+		return "check_custom:" + path
 	}
 	return ""
+}
+
+// pastedPath is the path the custom and manual prompts check: what was typed,
+// trimmed and with one pair of surrounding quotes taken off
+// (config.UnquotePath) — Explorer's "Copy as path" is the natural way to get
+// ffmpeg.exe's path into this prompt, as it is into E I's, and the quoted
+// form was run as typed, failed, and was reported as not a valid FFmpeg.
+// The path checked is the one saved.
+func pastedPath(typed string) string {
+	return config.UnquotePath(strings.TrimSpace(typed))
 }
 
 // ShowReview switches to script review mode for elevated installs.
@@ -599,12 +612,13 @@ func (m *FFmpegCheckModel) handleManualKey(key string) string {
 		m.form = nil
 		m.formInit = m.buildMainForm()
 	case keyEnter:
-		if m.manualPath == "" || m.checking {
+		path := pastedPath(m.manualPath)
+		if path == "" || m.checking {
 			return ""
 		}
 		m.checking = true
 		m.spinner = newSpinner()
-		return "check_custom:" + m.manualPath
+		return "check_custom:" + path
 	}
 	return ""
 }

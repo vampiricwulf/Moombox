@@ -142,7 +142,8 @@ func monitorIntervalsOf(cfg *config.MoomboxConfig) monitorIntervals {
 // pathFieldError returns the per-field error for a user-supplied path value,
 // or "" when the value is acceptable.
 //
-// It rejects ".." segments and nothing else. Absolute paths are deliberately
+// It rejects ".." segments and nothing else; a new value wrapped in quotes
+// is newQuotedPathErrors' to refuse. Absolute paths are deliberately
 // allowed: the Docker entrypoint seeds every path field as "/data/...", the
 // TUI has always accepted absolute values, and config.toml has always taken
 // them by hand — so the old "no absolute paths" rule (inherited verbatim from
@@ -176,8 +177,13 @@ func pathFieldError(p string, required bool) string {
 // under the output directory, and Windows runs a PE whatever its extension.
 // An imported file is always named "<title> [<id>].<ext>", so it can never
 // carry this name. Empty means "ffmpeg from PATH" and passes.
+//
+// The name is read with one pair of surrounding quotes off
+// (config.UnquotePath): quotes are pathFieldError's to refuse, and read as
+// part of the name they turned `"C:\ffmpeg\bin\ffmpeg.exe"` into one ending
+// `ffmpeg.exe"`, refused as not named ffmpeg.
 func ffmpegPathError(p string) string {
-	p = strings.TrimSpace(p)
+	p = config.UnquotePath(strings.TrimSpace(p))
 	if p == "" {
 		return ""
 	}
@@ -203,6 +209,59 @@ func newFFmpegPathError(updates map[string]any, stored string) string {
 		return ""
 	}
 	return ffmpegPathError(v)
+}
+
+// quotedPathError refuses a path wrapped in quotes (config.PathIsQuoted),
+// or returns "".
+func quotedPathError(p string) string {
+	if config.PathIsQuoted(p) {
+		return "Path cannot be wrapped in quotes"
+	}
+	return ""
+}
+
+// quotedPathSettings are the path settings newQuotedPathErrors reads: each
+// one's section and key in an update, and its stored value.
+var quotedPathSettings = []struct {
+	section, key string
+	stored       func(*config.MoomboxConfig) string
+}{
+	{"network", "tls_cert_path", func(c *config.MoomboxConfig) string { return c.Network.TLSCertPath }},
+	{"network", "tls_key_path", func(c *config.MoomboxConfig) string { return c.Network.TLSKeyPath }},
+	{"paths", "log_file_path", func(c *config.MoomboxConfig) string { return c.Paths.LogFilePath }},
+	{"paths", "database_path", func(c *config.MoomboxConfig) string { return c.Paths.DatabasePath }},
+	{"paths", "output_directory", func(c *config.MoomboxConfig) string { return c.Paths.OutputDirectory }},
+	{"paths", "staging_directory", func(c *config.MoomboxConfig) string { return c.Paths.StagingDirectory }},
+	{"paths", "ffmpeg_path", func(c *config.MoomboxConfig) string { return c.Paths.FfmpegPath }},
+	{"cookies", "cookie_file", func(c *config.MoomboxConfig) string { return c.Cookies.CookieFile }},
+	{"cookies", "browser_profile_dir", func(c *config.MoomboxConfig) string { return c.Cookies.BrowserProfileDir }},
+}
+
+// newQuotedPathErrors refuses a path setting wrapped in quotes — what
+// Explorer's "Copy as path" pastes (config.PathIsQuoted) — keyed by field.
+// Nothing downstream takes the quotes off: `"E:\Archive"` saved as the output
+// directory has no volume on Windows, so it is a relative directory whose
+// name holds `"` and `:`, and every mux then failed to create it. Refused
+// rather than unquoted, so the value stored is the one the form shows.
+//
+// Only a value that CHANGES the stored one is refused, as newFFmpegPathError
+// refuses a name: the dashboard's full-form save sends every stored path back,
+// and one stored quoted before this rule (or hand-edited into config.toml)
+// must not make every unrelated save fail on a field the operator never
+// touched.
+func newQuotedPathErrors(updates map[string]any, stored *config.MoomboxConfig) map[string]string {
+	errs := map[string]string{}
+	for _, f := range quotedPathSettings {
+		section, _ := updates[f.section].(map[string]any)
+		v, ok := section[f.key].(string)
+		if !ok || strings.TrimSpace(v) == strings.TrimSpace(f.stored(stored)) {
+			continue
+		}
+		if msg := quotedPathError(v); msg != "" {
+			errs[f.section+"."+f.key] = msg
+		}
+	}
+	return errs
 }
 
 // pathField names one path-shaped config field and whether config.Validate
@@ -1172,7 +1231,10 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		validationErrs := validateConfigUpdates(updates)
 		maps.Copy(validationErrs, channelErrs)
 		var storedFFmpeg string
-		store.Read(func(c *config.MoomboxConfig) { storedFFmpeg = c.Paths.FfmpegPath })
+		store.Read(func(c *config.MoomboxConfig) {
+			storedFFmpeg = c.Paths.FfmpegPath
+			maps.Copy(validationErrs, newQuotedPathErrors(updates, c))
+		})
 		if msg := newFFmpegPathError(updates, storedFFmpeg); msg != "" {
 			validationErrs["paths.ffmpeg_path"] = msg
 		}

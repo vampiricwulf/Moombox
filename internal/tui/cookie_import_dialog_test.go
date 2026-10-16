@@ -67,12 +67,13 @@ func TestCookieImportDialogValidatesThePath(t *testing.T) {
 // it names. It answered "That path does not exist:" above the quoted path.
 //
 // Mutants it kills (each compiles):
-//   - confirmPath without unquotePath: every quoted row is refused;
-//   - unquotePath and strings.TrimSpace swapped: the row with a trailing space
-//     after the closing quote is refused;
-//   - unquotePath and expandHome swapped: the quoted "~/…" row is refused;
-//   - unquotePath taking off double quotes only: the single-quoted row is
-//     refused (and the unit row `'a b'` fails).
+//   - confirmPath without config.UnquotePath: every quoted row is refused;
+//   - config.UnquotePath and strings.TrimSpace swapped: the row with a
+//     trailing space after the closing quote is refused;
+//   - config.UnquotePath and expandHome swapped: the quoted "~/…" row is
+//     refused;
+//   - config.UnquotePath taking off double quotes only: the single-quoted row
+//     is refused (and config's TestUnquotePath row `'a b'` fails).
 func TestCookieImportDialogAcceptsAQuotedPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -106,33 +107,6 @@ func TestCookieImportDialogAcceptsAQuotedPath(t *testing.T) {
 	typeInto(m, `"`+file)
 	if action, _ := m.HandleKey(keyEnter); action != "" {
 		t.Errorf("an unmatched quote must not import, got action %q", action)
-	}
-}
-
-// TestUnquotePath pins the one-matching-pair rule.
-//
-// Mutants it kills (each compiles):
-//   - the `p[len(p)-1] == q` match dropped (any quote closes): `"a b'` comes
-//     out unquoted;
-//   - a loop taking every pair off: `""a b""` comes out as `a b`;
-//   - `len(p) >= 2` relaxed to `>= 1`: `"` slices p[1:0] and panics;
-//   - single quotes not recognised: `'a b'` comes out quoted.
-func TestUnquotePath(t *testing.T) {
-	for in, want := range map[string]string{
-		`"a b"`:    `a b`,
-		`'a b'`:    `a b`,
-		`""`:       ``,
-		`"`:        `"`,
-		`"a b'`:    `"a b'`,
-		`""a b""`:  `"a b"`,
-		`a "b" c`:  `a "b" c`,
-		`a b`:      `a b`,
-		`'it's'`:   `it's`,
-		`C:\x y\z`: `C:\x y\z`,
-	} {
-		if got := unquotePath(in); got != want {
-			t.Errorf("unquotePath(%q) = %q, want %q", in, got, want)
-		}
 	}
 }
 

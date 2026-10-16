@@ -119,7 +119,8 @@ type FFmpegDeps struct {
 // PUT's hot-reload block follows, so a callback that reads the config (or
 // takes another lock that a config reader holds) cannot invert the lock order.
 //
-// A value PUT /api/config would refuse is refused here too, before anything is
+// A value PUT /api/config would refuse — a ".." segment, or a new value
+// wrapped in quotes — is refused here too, before anything is
 // written: answering `-version` is not a superset of the PUT's string rule
 // (`<dir>\other\..\bin\ffmpeg.exe` does both), and validateConfigUpdates has
 // no grandfather clause for paths — so one stored here made every later
@@ -128,6 +129,9 @@ type FFmpegDeps struct {
 // this stops a future caller from persisting one by another route.
 func applyValidatedFfmpegPath(store *config.Store, path string, onChange func(string)) error {
 	if msg := pathFieldError(path, false); msg != "" {
+		return errors.New(msg)
+	}
+	if msg := quotedPathError(path); msg != "" {
 		return errors.New(msg)
 	}
 	mu := store.RWMutex()
@@ -196,7 +200,12 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 			jsonError(rw, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		path := strings.TrimSpace(body.Path)
+		// One pair of surrounding quotes comes off (config.UnquotePath), as
+		// the TUI's FFmpeg prompt takes them off: Explorer's "Copy as path"
+		// is the natural way to get ffmpeg.exe's path into this field, and
+		// the quoted form failed the name rule below. The path checked is
+		// the one saved and answered, so the form takes it without them.
+		path := config.UnquotePath(strings.TrimSpace(body.Path))
 		if path == "" {
 			jsonError(rw, "path is required", http.StatusBadRequest)
 			return

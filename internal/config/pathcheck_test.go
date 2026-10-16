@@ -55,3 +55,54 @@ func TestPathHasTraversal(t *testing.T) {
 		}
 	}
 }
+
+// TestUnquotePath pins the one-matching-pair rule.
+//
+// Mutants it kills (each compiles):
+//   - the `p[len(p)-1] == q` match dropped (any quote closes): `"a b'` comes
+//     out unquoted;
+//   - a loop taking every pair off: `""a b""` comes out as `a b`;
+//   - `len(p) >= 2` relaxed to `>= 1`: `"` slices p[1:0] and panics;
+//   - single quotes not recognised: `'a b'` comes out quoted.
+func TestUnquotePath(t *testing.T) {
+	for in, want := range map[string]string{
+		`"a b"`:    `a b`,
+		`'a b'`:    `a b`,
+		`""`:       ``,
+		`"`:        `"`,
+		`"a b'`:    `"a b'`,
+		`""a b""`:  `"a b"`,
+		`a "b" c`:  `a "b" c`,
+		`a b`:      `a b`,
+		`'it's'`:   `it's`,
+		`C:\x y\z`: `C:\x y\z`,
+	} {
+		if got := UnquotePath(in); got != want {
+			t.Errorf("UnquotePath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestPathIsQuoted: a value wrapped in a matching pair of quotes — spaces
+// around the pair aside, as a paste leaves them — is quoted; one quote, a
+// quote inside the path or none is not.
+//
+// Mutants it kills: PathIsQuoted without its TrimSpace (the padded row is
+// not quoted); comparing against the untrimmed value (every padded unquoted
+// row is quoted).
+func TestPathIsQuoted(t *testing.T) {
+	for in, want := range map[string]bool{
+		`"E:\Archive"`:     true,
+		`'/data/output'`:   true,
+		` "E:\Archive" `:   true,
+		`E:\Archive`:       false,
+		` E:\Archive `:     false,
+		`"E:\Archive`:      false,
+		`E:\My "x" Folder`: false,
+		``:                 false,
+	} {
+		if got := PathIsQuoted(in); got != want {
+			t.Errorf("PathIsQuoted(%q) = %v, want %v", in, got, want)
+		}
+	}
+}

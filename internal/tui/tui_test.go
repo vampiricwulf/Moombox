@@ -366,6 +366,67 @@ func TestSetupWizardRejectsPathTraversal(t *testing.T) {
 	}
 }
 
+// TestPathSettingsRefuseQuotes keeps both TUI path forms agreeing with
+// pathFieldError (PUT /api/config, /api/setup/complete): a path pasted from
+// Explorer's "Copy as path" keeps its quotes, nothing downstream takes them
+// off, and `"E:\Archive"` stored as the output directory is a relative
+// directory whose name holds `"` and `:` on Windows. Both forms refuse it
+// naming the quotes; a quote inside a path is a name and is kept.
+//
+// A value stored quoted before the rule is not refused while the operator
+// saves another field, as PUT /api/config refuses only a changed one.
+//
+// Mutants it kills: applyValues not calling quotedSettingsPath (the quoted
+// rows save); quotedSettingsPath reading every field rather than the edited
+// ones (the stored quoted value refuses the log-level save); the wizard
+// check without config.PathIsQuoted (the wizard finishes).
+func TestPathSettingsRefuseQuotes(t *testing.T) {
+	for _, key := range []string{
+		"database_path", "log_file_path", "output_directory",
+		"staging_directory", "ffmpeg_path", "tls_cert_path", "tls_key_path",
+		"cookie_file", "browser_profile_dir",
+	} {
+		for value, refused := range map[string]bool{
+			`"E:\Archive"`:            true,
+			` '/data/moombox-thing' `: true,
+			`/data/the "best" thing`:  false,
+		} {
+			cfg := config.Defaults()
+			m := NewSettingsModel()
+			m.configStore = config.NewStore(cfg, "")
+			m.Open(cfg)
+			m.values[key] = value
+			m.applyValues()
+			if got := m.status == saveError; got != refused {
+				t.Errorf("settings %s=%q: refused = %v (%s), want %v", key, value, got, m.errorMsg, refused)
+			}
+			if refused && !strings.Contains(m.errorMsg, "quotes") {
+				t.Errorf("settings %s=%q: error %q does not name the quotes", key, value, m.errorMsg)
+			}
+		}
+	}
+	cfg := config.Defaults()
+	cfg.Paths.OutputDirectory = `"E:\Archive"`
+	m := NewSettingsModel()
+	m.configStore = config.NewStore(cfg, "")
+	m.Open(cfg)
+	m.values["log_level"] = "DEBUG"
+	if m.applyValues(); m.status == saveError {
+		t.Errorf("a stored quoted output directory refused a log-level save: %s", m.errorMsg)
+	}
+
+	for _, key := range []string{
+		"logFilePath", "databasePath", "outputDir", "stagingDir",
+		"ffmpegPath", "cookieFile",
+	} {
+		m := NewSetupWizardModel()
+		m.values[key] = `"E:\Archive"`
+		if got := m.finishAdvancedSetup(); got != "" || !strings.Contains(m.errorMsg, "quotes") {
+			t.Errorf("wizard %s quoted: finishAdvancedSetup = %q, error %q; want it refused naming the quotes", key, got, m.errorMsg)
+		}
+	}
+}
+
 // --- settings: trusted_proxies ---
 
 // TestApplyValuesRejectsBadTrustedProxy: config.Save runs config.Validate and
