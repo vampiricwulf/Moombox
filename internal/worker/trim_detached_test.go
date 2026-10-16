@@ -14,6 +14,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 )
 
@@ -202,8 +203,11 @@ func TestStartTrimRunsDetached(t *testing.T) {
 	if _, err := os.Stat(finished); err == nil {
 		t.Errorf("the finished trim's name exists while the encode runs: %v", r.files(t))
 	}
-	if got := r.files(t); len(got) != 1 || got[0] != "detached [60s-300s].partial.mp4" {
-		t.Errorf("trim/ holds %v mid-encode, want only the .partial.mp4", got)
+	// FFmpeg writes the engine's temporary file for the .partial.mp4
+	// (engine.Muxer.writeOutput), renamed onto the partial and then onto the
+	// finished name only once each is whole.
+	if got := r.files(t); len(got) != 1 || !strings.HasPrefix(got[0], "detached [60s-300s].partial.") || !engine.IsMuxTempPath(got[0]) {
+		t.Errorf("trim/ holds %v mid-encode, want only the .partial.mp4's temporary file", got)
 	}
 
 	for _, rng := range [][2]float64{{60, 300}, {10, 20}} {
@@ -238,10 +242,10 @@ func TestStartTrimRunsDetached(t *testing.T) {
 }
 
 // TestStoppedTrimLeavesNothing: a trim cut short — Moombox stopping, the
-// service's Stop — removes what it wrote. Mux keeps an archive mux's partial
-// output when its context is cancelled (cleanupFailedMux, for a salvage);
-// a trim's partial file is worth nothing, and under the finished name it
-// read as a finished trim. A stop is not a failure: no trim_error, and the
+// service's Stop — removes what it wrote. Mux once kept a cancelled run's
+// partial output (cleanupFailedMux, for a salvage; the engine now removes its
+// temporary file on any failure); a trim's partial file is worth nothing,
+// and under the finished name it read as a finished trim. A stop is not a failure: no trim_error, and the
 // dashboard is told the trim was interrupted. Nothing starts after Stop.
 //
 // Mutants: drop run's `os.Remove(partial)` — the partial file stays; drop

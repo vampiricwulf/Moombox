@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/vampiricwulf/Moombox/internal/childproc"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
@@ -408,10 +409,10 @@ func ffmpegVersionWarning(versionLine string) string {
 
 // checkFFmpeg runs "ffmpeg -version" with a 10-second timeout and returns
 // whether it succeeded, the version string, and an optional version warning.
-func checkFFmpeg(path string) (valid bool, version string, warning string) {
+func checkFFmpeg(ffmpegPath string) (valid bool, version string, warning string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "-version")
+	cmd := childproc.CommandContext(ctx, ffmpegPath, "-version")
 	out, err := cmd.Output()
 	if err != nil {
 		return false, "", ""

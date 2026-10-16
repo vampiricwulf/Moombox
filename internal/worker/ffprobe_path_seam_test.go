@@ -44,9 +44,9 @@ func TestEveryFFprobeCallAppliesThePathSeam(t *testing.T) {
 }
 
 // ffprobeExecSites maps each function in this package's non-test source that
-// builds an ffprobe command (exec.Command or exec.CommandContext whose program
-// names ffprobe) to whether every such call's last argument is
-// engine.FFmpegPathArg(…).
+// builds an ffprobe command (childproc.CommandContext, or an exec.Command or
+// exec.CommandContext, whose program names ffprobe) to whether every such
+// call's last argument is engine.FFmpegPathArg(…).
 func ffprobeExecSites(t *testing.T) map[string]bool {
 	t.Helper()
 	files, err := filepath.Glob("*.go")
@@ -89,14 +89,14 @@ func ffprobeExecSites(t *testing.T) map[string]bool {
 	return sites
 }
 
-// execProgramArg returns the program argument of an exec.Command or
-// exec.CommandContext call.
+// execProgramArg returns the program argument of a childproc.CommandContext,
+// exec.Command or exec.CommandContext call.
 func execProgramArg(call *ast.CallExpr) (ast.Expr, bool) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return nil, false
 	}
-	if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "exec" {
+	if pkg, ok := sel.X.(*ast.Ident); !ok || (pkg.Name != "exec" && pkg.Name != "childproc") {
 		return nil, false
 	}
 	switch {

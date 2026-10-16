@@ -212,6 +212,7 @@ internal/connectivity (3 files, ~480)  -- reachability monitor (plain TCP dial);
 internal/httpx      (1 file,  ~110)    -- shared keep-alive-tuned http.Client/Transport shapes
 internal/sqliteuri  (1 file,  ~30)     -- the "file:" URI every SQLite open goes through (job database, browser cookie databases)
 internal/redact     (4 files, ~540)    -- one redaction rule per kind of secret, for error text, log lines and notifications (a googlevideo or Twitch media URL's credentials, the GVS PO token, a credential inside a URL)
+internal/childproc  (4 files, ~360)    -- FFmpeg and ffprobe started tied to the process that runs them: Pdeathsig on a locked thread (Linux), a kill-on-close Job Object of the child's own (Windows)
 internal/disk       (3 files, ~130)    -- Disk space queries: kernel32 on Windows, statfs on Linux
 internal/constants  (1 file,  ~320)    -- Hardcoded values (API keys, URLs, timeouts)
 internal/utils     (26 files, ~2,590)  -- HTTP helpers, formatters, YouTube URL parsing
@@ -225,9 +226,9 @@ Dependencies flow strictly downward. Lower-level packages never import higher-le
 
 The lists below are the `internal/` imports of each package as `go list -f '{{join .Imports " "}}' ./internal/<pkg>` prints them (regenerate the same way):
 
-- `cmd/moombox` imports everything (orchestrator): `bgutils`, `bgutils/sidecar`, `cipher`, `config`, `connectivity`, `cookies`, `database`, `engine`, `jobfilter`, `logger`, `monitor`, `notifications`, `stats`, `tui`, `twitch`, `updater`, `utils`, `web`, `internal/web/routes`, `worker`, `youtube`
-- `internal/worker` imports: `bgutils`, `chat`, `cipher`, `config`, `constants`, `database`, `engine`, `httpx`, `notifications`, `redact`, `twitch`, `utils`, `youtube`
-- `internal/web/routes` imports: `bgutils`, `bgutils/sidecar`, `config`, `cookies`, `database`, `disk`, `engine` (the import's ffprobe path), `jobfilter`, `notifications`, `stats`, `updater`, `utils`, `web`, `worker`, `ytdlpplugin`
+- `cmd/moombox` imports everything (orchestrator): `bgutils`, `bgutils/sidecar`, `childproc`, `cipher`, `config`, `connectivity`, `cookies`, `database`, `engine`, `jobfilter`, `logger`, `monitor`, `notifications`, `stats`, `tui`, `twitch`, `updater`, `utils`, `web`, `internal/web/routes`, `worker`, `youtube`
+- `internal/worker` imports: `bgutils`, `chat`, `childproc`, `cipher`, `config`, `constants`, `database`, `engine`, `httpx`, `notifications`, `redact`, `twitch`, `utils`, `youtube`
+- `internal/web/routes` imports: `bgutils`, `bgutils/sidecar`, `childproc` (the FFmpeg check and the import's ffprobe), `config`, `cookies`, `database`, `disk`, `engine` (the import's ffprobe path), `jobfilter`, `notifications`, `stats`, `updater`, `utils`, `web`, `worker`, `ytdlpplugin`
 - `internal/web` imports: `config` only — the hub's `Broadcast*` methods take `any`, so the server, hub, auth and middleware never import the job types; the route handlers live in `internal/web/routes`
 - `internal/tui` imports: `config`, `constants`, `cookies`, `database`, `httpx`, `jobfilter`, `notifications`, `stats`, `utils`, `ytdlpplugin` — NOT `web`: the TUI's HTTP calls use a plain `net/http` client carrying the internal token, and its live updates come straight from the database subscriptions
 - `internal/monitor` imports: `config`, `database`, `httpx`, `twitch`, `worker`
@@ -236,11 +237,11 @@ The lists below are the `internal/` imports of each package as `go list -f '{{jo
 - `internal/cipher` imports: `bgutils/sidecar`, `goja`, `httpx`, `utils`
 - `internal/bgutils` imports: `bgutils/sidecar`, `constants`, `goja`, `httpx`
 - `internal/cookies` imports: `constants`, `cookies/dpapi`, `httpx`, `sqliteuri`, `utils` (`cookies/dpapi` imports only `sqliteuri`)
-- `internal/engine` imports: `constants`, `httpx`, `redact`, `utils` (e.g. `DownloadChunkSize` is `constants.DownloadChunkSize`)
+- `internal/engine` imports: `childproc`, `constants`, `httpx`, `redact`, `utils` (e.g. `DownloadChunkSize` is `constants.DownloadChunkSize`)
 - `internal/chat` / `internal/notifications` import: `constants`/`config`, `httpx`, `utils` (`internal/notifications` also `redact`)
 - `internal/utils` imports: `connectivity`, `constants`, `httpx`
 - `internal/database` imports: `sqliteuri`
-- `internal/constants`, `internal/httpx`, `internal/connectivity`, `internal/sqliteuri`, `internal/redact` import nothing from internal
+- `internal/constants`, `internal/httpx`, `internal/connectivity`, `internal/sqliteuri`, `internal/redact`, `internal/childproc` import nothing from internal
 
 Cross-cutting concerns (logging, notifications, events) flow through callback closures wired in `cmd/moombox` (`services.go`, `monitor_callbacks.go`, `tui_wiring.go`), not through package imports.
 
@@ -689,7 +690,8 @@ go func() {
 **Background mux goroutines:**
 - Quality- and gap-split segment muxing runs under the orchestrator's mux root, not `context.Background()`
 - Each has its own panic recovery
-- The root outlives the JOB's context, so a user cancel never orphans a half-written output; but `Stop` cancels the root itself (`CancelMuxes` in `internal/worker/quality_split_common.go`) once its 10-second wait for in-flight jobs runs out, so a shutdown kills FFmpeg rather than leaving it writing into a staging dir the restarted child re-muxes with `-y`. A mux cancelled that way leaves its row `Muxing` with staging intact, and the next start re-muxes it
+- The root outlives the JOB's context, so a user cancel never orphans a half-written output; but `Stop` cancels the root itself (`CancelMuxes` in `internal/worker/quality_split_common.go`) once its 10-second wait for in-flight jobs runs out, so a shutdown ends FFmpeg in order rather than exiting from under it. A mux cancelled that way leaves its row `Muxing` with staging intact, and the next start re-muxes it
+- What a crash leaves does not depend on that cancel (W28-A01). Every FFmpeg and ffprobe the child starts dies with it (`CommandContext`, `internal/childproc/childproc.go`): before, a child that died mid-mux (an OOM kill, a fatal runtime error, a kill of the child alone) left its FFmpeg running — on Linux nothing tied it to the child, and on Windows the kill-on-close job it lived in was the LAUNCHER's — and the crash-respawned child's boot re-mux (`enqueueExistingJobs` → `muxOnRestart` → `MuxJob`) wrote the same archive beside it with `-y`, which read as `Finished` and played as garbage while the staging cleanup deleted the only good copy. And no FFmpeg writes an archive's name any more: each output is written to a temporary name of its run's own beside it and renamed into place only after FFmpeg exits 0 and the archive's checks pass (`writeOutput`, `internal/engine/muxer_output.go`), and the next start removes what a crash left (`RemoveStaleMuxTemps`, `internal/worker/mux_temps.go`). [operations.md](operations.md) § Runtime Dependency: FFmpeg has both halves
 
 **Download worker:**
 - Each `processJob` goroutine has panic recovery

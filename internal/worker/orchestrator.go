@@ -87,9 +87,11 @@ type DownloadOrchestrator struct {
 	// therefore unreachable from DownloadWorker.Stop. muxRootCancel is what
 	// Stop cuts (owner decision O-E): the 10 s shutdown backstop "fires
 	// routinely" while a part mux drains, and on Windows the orphaned FFmpeg
-	// then lives on in the LAUNCHER's kill-on-close job object while the
-	// respawned child re-muxes the same output with -y. Partial part files are
-	// re-muxed on restart, so cancelling costs nothing.
+	// then lived on in the LAUNCHER's kill-on-close job object while the
+	// respawned child re-muxed the same output with -y. It dies with the
+	// child now (internal/childproc, W28-A01), but cancelled is still the
+	// orderly end. Partial part files are re-muxed on restart, so cancelling
+	// costs nothing.
 	muxRootCtx    context.Context
 	muxRootCancel context.CancelFunc
 }

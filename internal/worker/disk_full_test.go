@@ -90,17 +90,41 @@ func TestIsDiskFullOnFFmpegWritingToAFullDisk(t *testing.T) {
 	src := filepath.Join(dir, "src.mp4")
 	writeMuxFixture(t, ffmpegPath, src, 1)
 	out := filepath.Join(dir, "out.mp4")
-	if err := os.Symlink("/dev/full", out); err != nil {
-		t.Skipf("cannot link to /dev/full: %v", err)
-	}
 
-	err := engine.NewMuxer(ffmpegPath, discardLogger{}).MuxCopy(context.Background(), src, "", out)
+	err := engine.NewMuxer(fullDiskFFmpeg(t, ffmpegPath), discardLogger{}).MuxCopy(context.Background(), src, "", out)
 	if err == nil {
 		t.Fatal("muxing onto /dev/full succeeded")
 	}
 	if !isDiskFull(fmt.Errorf("mux: %w", err)) {
 		t.Errorf("isDiskFull = false for FFmpeg's failure on a full disk: %v", err)
 	}
+}
+
+// fullDiskFFmpeg returns a stand-in for FFmpeg that runs the real one with
+// /dev/full in place of the output it was handed — the whole disk full, as
+// the volume an archive is written to can be. A link from the output's name
+// to /dev/full no longer reaches FFmpeg: it writes a temporary file beside
+// that name (engine.Muxer.writeOutput), on the disk the link sits on. The
+// output's format, which FFmpeg reads from the extension, is named with -f.
+func fullDiskFFmpeg(t *testing.T, ffmpegPath string) string {
+	t.Helper()
+	if _, err := os.Stat("/dev/full"); err != nil {
+		t.Skipf("needs /dev/full: %v", err)
+	}
+	p := filepath.Join(t.TempDir(), "ffmpeg")
+	script := "#!/bin/sh\n" +
+		"n=$#; i=0; out=''\n" +
+		"for a; do\n" +
+		"  i=$((i+1))\n" +
+		"  if [ $i -eq 1 ]; then set --; fi\n" +
+		"  if [ $i -lt $n ]; then set -- \"$@\" \"$a\"; else out=\"$a\"; fi\n" +
+		"done\n" +
+		"case \"$out\" in *.ts) f=mpegts ;; *) f=mp4 ;; esac\n" +
+		"exec '" + ffmpegPath + "' \"$@\" -f \"$f\" /dev/full\n"
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 // diskFullVodJob adds an admitted VOD of channel UC_full with its output

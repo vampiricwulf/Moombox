@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
+	"github.com/vampiricwulf/Moombox/internal/childproc"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -832,7 +833,7 @@ func (s *runState) runTUI() {
 		ffmpegPath := s.ffmpegPathOrDefault()
 		checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer checkCancel()
-		if err := exec.CommandContext(checkCtx, ffmpegPath, "-version").Run(); err != nil {
+		if err := childproc.CommandContext(checkCtx, ffmpegPath, "-version").Run(); err != nil {
 			app.ShowFFmpegCheck()
 		}
 	}

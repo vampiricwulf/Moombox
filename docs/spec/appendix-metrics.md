@@ -27,7 +27,7 @@
 
 ## Test Baseline
 
-- **Packages:** 39 in `go list ./...`. `go test -count=1 ./...` reports **37 ok / 0 fail**; the other two have no test files (`tools/sidecar-sig-probe`, `web`).
+- **Packages:** 40 in `go list ./...` (`internal/childproc` added since the pass above). `go test -count=1 ./...` reports **38 ok / 0 fail**; the other two have no test files (`tools/sidecar-sig-probe`, `web`).
 - **Browser detection table:** `knownBrowsers` (`internal/cookies/autocookies_detect.go`) has **10 entries** — four Gecko, six Chromium. The full table with type keys is in [data-and-storage.md](data-and-storage.md) § Cookies.
 
 ## Key Dependencies
@@ -75,6 +75,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | redact/ | ~540 | 4 | 3 | One redaction rule per kind of secret for error text, log lines and notifications — a media URL's credentials (a googlevideo URL's client IP, signatures and GVS PO token in both its URL forms; the playback session a Twitch weaver playlist's or edge segment's path spells), a credential inside a URL |
 | jobfilter/ | ~500 | 2 | 4 | Dashboard filter language (Go twin of `filter-parser.js`/`filter-engine.js`), used by the TUI's `/` filter box |
 | connectivity/ | ~500 | 3 | 3 | Reachability monitor; gates stream-end verdicts during outages |
+| childproc/ | ~360 | 4 | 4 | FFmpeg and ffprobe started tied to the process that runs them (Pdeathsig on a locked thread on Linux, a kill-on-close Job Object of the child's own on Windows) |
 | ytdlpplugin/ | ~350 | 1 | 1 | yt-dlp PO-token plugin status/install — shared by the dashboard's Integrations card and the TUI's E Y overlay |
 | constants/ | ~310 | 1 | 2 | Hardcoded values (client configs, UAs, URLs) |
 | disk/ | ~200 | 5 | 4 | Disk space queries: kernel32 on Windows, statfs on Linux |

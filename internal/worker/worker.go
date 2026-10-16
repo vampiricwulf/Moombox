@@ -2121,9 +2121,11 @@ const muxCancelGrace = 2 * time.Second
 
 // StopBudget is the longest Stop can take: the in-flight wait plus the grace
 // after mux cancellation. A caller's force-exit backstop must outlast it, or
-// the process exits before Stop reaches CancelMuxes and FFmpeg is left
-// writing into a staging dir the restarted child re-muxes with -y (owner
-// decision O-E).
+// the process exits before Stop reaches CancelMuxes (owner decision O-E).
+// FFmpeg no longer outlives that exit to write into a staging dir the
+// restarted child re-muxes — it dies with the process (internal/childproc)
+// and only ever wrote its own temporary file (engine.Muxer.writeOutput) —
+// but a mux ended that way is killed mid-write instead of cancelled.
 const StopBudget = inFlightWait + muxCancelGrace
 
 // Stop signals the worker to stop processing new jobs and waits for in-flight
@@ -2153,10 +2155,10 @@ func (w *DownloadWorker) Stop() {
 		w.logger.Info("download worker: all in-flight jobs finished")
 	case <-time.After(inFlightWait):
 		// Owner decision O-E: the jobs still running at this point are almost
-		// always draining a mux, and exiting now would leave FFmpeg writing
-		// into a staging dir the restarted child re-muxes with -y. Cancel the
-		// mux root so those processes die with us; their partial part files
-		// are re-muxed on restart.
+		// always draining a mux. Exiting now would end them by killing FFmpeg
+		// with the process (internal/childproc); cancel the mux root so they
+		// end here instead, each removing its temporary file. Their rows stay
+		// Muxing and are re-muxed on restart.
 		w.logger.Warn("download worker: timed out waiting for in-flight jobs; cancelling in-flight muxes")
 		if w.orchestrator != nil {
 			w.orchestrator.CancelMuxes()
@@ -2563,8 +2565,7 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 		}()
 
 		// Owner decision O-E: the orchestrator's mux root, never
-		// context.Background() — a Stop reaches this FFmpeg instead of leaving
-		// it writing into a staging dir the restarted child re-muxes with -y.
+		// context.Background() — a Stop reaches this FFmpeg and cancels it.
 		root := w.orchestrator.muxRoot()
 
 		// The operator's Cancel reaches this FFmpeg too. Both UIs offer Cancel

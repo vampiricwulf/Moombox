@@ -314,8 +314,8 @@ func TestRestartMuxFinishesAndClearsStaging(t *testing.T) {
 // the job used to be written Finished over a third of a recording. It must
 // land in Error with the numbers, and staging must survive for a re-mux.
 //
-// Mutant: dropping the verifyMuxedDuration call from muxAndFinalize — the job
-// reads Finished and the staging dir is deleted under it.
+// Mutant: dropping the verifiedCopy check from muxAndFinalize's MuxCopy —
+// the job reads Finished and the staging dir is deleted under it.
 func TestTruncatedMuxErrorsInsteadOfFinishing(t *testing.T) {
 	ffmpegPath, _ := requireFFmpegTools(t)
 	w, db := testWorkerSetup(t)
@@ -346,8 +346,8 @@ func TestTruncatedMuxErrorsInsteadOfFinishing(t *testing.T) {
 	// it as an unowned file, and a later Mux action wrote its retry beside a
 	// bad file wearing the archive's name.
 	//
-	// Mutant: returning the shortfall error without removing the output — the
-	// .mp4 below is still in the output dir.
+	// Mutant: engine.Muxer.writeOutput keeping the temporary file a check
+	// rejected — it is still in the output dir, beside the archive's name.
 	if left := mp4sIn(t, outputDir); len(left) != 0 {
 		t.Errorf("a short mux left %v in the output dir — the archive name must be free for the re-mux", left)
 	}
@@ -362,7 +362,9 @@ func TestTruncatedMuxErrorsInsteadOfFinishing(t *testing.T) {
 // Driven directly rather than through a split capture: the site's only input
 // is a staged recording and a probe, and both are on disk here.
 //
-// Mutant: returning the shortfall error without removing the part file.
+// Mutants: dropping the verifiedCopy check from muxSegment's MuxCopy (the
+// short part is recorded); writeOutput keeping the temporary file the check
+// rejected (it is still in the output dir).
 func TestTruncatedPartMuxLeavesNoPartFile(t *testing.T) {
 	ffmpegPath, _ := requireFFmpegTools(t)
 	w, db := testWorkerSetup(t)
@@ -454,16 +456,18 @@ func TestRestartMuxOutOfAChatWaitKeepsTheChatCapture(t *testing.T) {
 }
 
 // TestCancelledAsideMuxLeavesNoPartialSibling pins close-review Minor 2. An
-// aside mux cut off by a shutdown leaves FFmpeg's partial output beside the
-// archive: cleanupFailedMux preserves a partial on ctx cancel (the right call
-// for the MAIN mux, where the partial is all the operator has), but an
-// aside's partial has no salvage value — the aside itself is still in
-// staging, waiting for the next run. Worse, the leftover is INVISIBLE: the
-// orphan sweep owns it by stem, so no UI offers it, and asideOutputPath's
-// collision counter writes the retry to "-2" rather than over it.
+// aside mux cut off by a shutdown used to leave FFmpeg's partial output
+// beside the archive — an aside's partial has no salvage value, the aside
+// itself is still in staging, waiting for the next run — and the leftover was
+// INVISIBLE: the orphan sweep owns it by stem, so no UI offers it, and
+// asideOutputPath's collision counter writes the retry to "-2" rather than
+// over it. FFmpeg now writes a temporary file the engine renames into place
+// only on success (engine.Muxer.writeOutput), so the cut is made while that
+// temporary file is being written, and nothing at all may be left beside the
+// archive: neither the sibling nor the temporary file.
 //
-// Mutant: dropping os.Remove(out) from the MuxCopy error arm — the moov-less
-// sibling is still on disk.
+// Mutant: writeOutput not removing its temporary file when the write fails
+// (engine) — the cancelled copy's temporary file is still on disk.
 func TestCancelledAsideMuxLeavesNoPartialSibling(t *testing.T) {
 	ffmpegPath, _ := requireFFmpegTools(t)
 	staging, outputDir := t.TempDir(), t.TempDir()
@@ -483,12 +487,13 @@ func TestCancelledAsideMuxLeavesNoPartialSibling(t *testing.T) {
 		}, outputDir, "Title")
 	}()
 
-	// Cancel the moment FFmpeg has opened its output — that is the whole
-	// window this finding lives in, and the fixture is sized so the copy is
-	// still running hundreds of milliseconds later.
+	// Cancel the moment FFmpeg has opened its output — the temporary file the
+	// engine has it write — which is the whole window this finding lives in,
+	// and the fixture is sized so the copy is still running hundreds of
+	// milliseconds later.
 	deadline := time.Now().Add(60 * time.Second)
 	for {
-		if _, err := os.Stat(sibling); err == nil {
+		if names := mp4sIn(t, outputDir); len(names) > 0 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -508,6 +513,9 @@ func TestCancelledAsideMuxLeavesNoPartialSibling(t *testing.T) {
 	if _, err := os.Stat(sibling); !os.IsNotExist(err) {
 		t.Errorf("a cancelled aside mux left %s behind (stat err = %v) — a moov-less file under the "+
 			"archive's own stem that no UI can offer and the next finalize writes '-2' around", sibling, err)
+	}
+	if names := mp4sIn(t, outputDir); len(names) != 0 {
+		t.Errorf("a cancelled aside mux left %v beside the archive", names)
 	}
 }
 
@@ -1179,7 +1187,7 @@ func errorOf(job *database.Job) string {
 // then deleted the aside, the only copy of that footage, behind a sibling
 // holding a third of it. A short copy is now discarded and the aside kept.
 //
-// Mutant: dropping the verifyMuxedDuration check from muxStagedAsides — the
+// Mutant: dropping the verifiedCopy check from muxStagedAsides' MuxCopy — the
 // aside is gone and a short sibling is reported recovered.
 func TestTruncatedAsideStaysInStaging(t *testing.T) {
 	ffmpegPath, _ := requireFFmpegTools(t)

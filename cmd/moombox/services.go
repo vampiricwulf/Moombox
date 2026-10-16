@@ -968,7 +968,10 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// age threshold keeps concurrent trims' in-flight tempdirs safe. The
 	// import sweep also takes what an aborted import extracted into
 	// <output>/imports, so the output directory is read here, before the
-	// goroutine.
+	// goroutine. The mux sweep takes the temporary file a crash or a kill
+	// left beside an archive FFmpeg was writing; it tells a gone run's from
+	// this run's by a token, not an age, so it can run beside the worker's
+	// boot re-mux of the same archive (worker.RemoveStaleMuxTemps).
 	importOutputDir := cfg.Paths.OutputDirectory
 	go func() {
 		defer func() {
@@ -986,6 +989,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 		} else if removed > 0 {
 			log.Info("import-temp cleanup", slog.Int("removed", removed))
 		}
+		worker.RemoveStaleMuxTemps(db, importOutputDir, log)
 	}()
 
 	// =========================================================================

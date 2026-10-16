@@ -49,7 +49,7 @@ The application listens on port 774 by default. Configuration lives in `config.t
 
 Moombox follows a strict priority hierarchy for all design decisions. When two concerns conflict, the higher-priority one wins:
 
-1. **Correctness** — The archived output must be bit-perfect. A corrupt archive is worse than no archive. Download gaps are detected and logged. Muxing uses FFmpeg's container format handling rather than manual byte manipulation. Resume state is persisted so crashes do not lose hours of segments.
+1. **Correctness** — The archived output must be bit-perfect. A corrupt archive is worse than no archive. Download gaps are detected and logged. Muxing uses FFmpeg's container format handling rather than manual byte manipulation, and an output takes its final name only once FFmpeg has exited 0 and its checks have passed — a crash mid-mux leaves a temporary file the next start removes, and the FFmpeg that was writing it dies with the process. Resume state is persisted so crashes do not lose hours of segments.
 
 2. **Reliability** — The application must not crash, must not silently lose data, and must recover from transient failures automatically. Every goroutine has inline `defer/recover`. Network errors trigger exponential backoff with jitter. Stream-end detection uses a verification loop (up to 6 checks at 5-minute intervals) rather than trusting a single API response. Cookie auth loss triggers automatic refresh attempts.
 
@@ -147,6 +147,8 @@ internal/
     embed/         <- go:embed of node-windows-amd64.gz + node-linux-amd64.gz + node-linux-arm64.gz + sidecar.tar.gz + version.txt
   cipher/          <- Signature + n-param decryption: AST + regex, 10-VM LRU, disk cache
   engine/          <- SegmentDownloader (DASH/HLS/VOD), manifest parser, FFmpeg muxer
+  childproc/       <- FFmpeg/ffprobe started tied to the process that runs them
+                  -- (Pdeathsig on Linux, a kill-on-close Job Object on Windows)
   chat/            <- YouTube live chat downloader (polling + batching + resume)
   worker/          <- DownloadWorker, DownloadOrchestrator, StreamProcessor, JobQueue,
                       TrimService, QualityMonitor, orphaned file scanner

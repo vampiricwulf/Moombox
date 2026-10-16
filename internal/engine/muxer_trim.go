@@ -144,7 +144,9 @@ func (m *Muxer) buildConcatArgs(concatListPath, outputPath string) []string {
 // to have already confirmed the inputs share compatible stream params (see
 // probeStreamParams / streamParams.equal in internal/worker) — concat
 // demuxer copy mode silently produces a broken file if inputs disagree on
-// codec, resolution, framerate, or audio params.
+// codec, resolution, framerate, or audio params. Like every output, it is
+// written under a temporary name and renamed onto outputPath once FFmpeg has
+// exited 0 (writeOutput).
 func (m *Muxer) ConcatCopy(ctx context.Context, inputs []string, outputPath string) error {
 	if len(inputs) == 0 {
 		return fmt.Errorf("no inputs to concat")
@@ -156,7 +158,9 @@ func (m *Muxer) ConcatCopy(ctx context.Context, inputs []string, outputPath stri
 	}
 	defer os.RemoveAll(tempDir)
 
-	return m.concatIntermediates(ctx, inputs, outputPath, tempDir)
+	return m.writeOutput(ctx, outputPath, nil, func(tmp string) error {
+		return m.concatIntermediates(ctx, inputs, tmp, tempDir)
+	})
 }
 
 // buildConcatList generates the FFmpeg concat demuxer file list content.
@@ -249,7 +253,9 @@ func (m *Muxer) TrimAndConcatWithProgress(ctx context.Context, segments []TrimSe
 	// Concat phase (remaining 5%)
 	progressFn(encodePortion * 100)
 
-	if err := m.concatIntermediates(ctx, intermediates, outputPath, tempDir); err != nil {
+	if err := m.writeOutput(ctx, outputPath, nil, func(tmp string) error {
+		return m.concatIntermediates(ctx, intermediates, tmp, tempDir)
+	}); err != nil {
 		return err
 	}
 

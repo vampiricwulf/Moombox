@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,6 +14,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/vampiricwulf/Moombox/internal/childproc"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -110,7 +110,7 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, o.mux().FFprobePath(),
+	cmd := childproc.CommandContext(ctx, o.mux().FFprobePath(),
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_streams",

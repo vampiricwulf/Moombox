@@ -134,9 +134,10 @@ func muxedOutputIsShort(inputSec, outputSec float64) bool {
 // lives in deleted on the way out. An error leaves the job in Error with the
 // numbers in its message and staging untouched (both cleanup paths only run
 // after a mux that returned nil), so the Mux action can re-run the copy once
-// the input is repaired. Both call sites discard the rejected output first
-// (discardRejectedMuxOutput) — the footage is in the INPUT, and leaving a short
-// file under the archive's name is what the re-mux has to write over.
+// the input is repaired. Every call site runs it through verifiedCopy, on the
+// copy still under FFmpeg's temporary name, so a rejected copy is removed
+// without ever taking the archive's name — the footage is in the INPUT, and a
+// short file under that name is what the re-mux used to have to write over.
 //
 // The flag path is deliberately NOT used here: incomplete_tail means "the
 // DOWNLOAD is missing segments" and steers Retry into re-downloading, which
@@ -169,9 +170,33 @@ func (o *DownloadOrchestrator) verifyMuxedDuration(ctx context.Context, jobID st
 		outputSec, longest, longest-outputSec)
 }
 
-// discardRejectedMuxOutput deletes a muxed output the finalize just rejected —
-// one a shortfall verdict found short, or a part whose chat could not be
-// copied beside it.
+// muxVerdict is what verifiedCopy found out about a copy: the probe of the
+// finished file, which the row's resolution and length come from, and the
+// shortfall verdict when it came out short.
+type muxVerdict struct {
+	probe *ffprobeData
+	short error
+}
+
+// verifiedCopy is ENGINE-9's duration check as the copy's engine.OutputCheck.
+// It probes the finished copy while it is still under FFmpeg's temporary name
+// and rejects it when verifyMuxedDuration finds it short of its longest
+// input, so a short copy is removed before it can take the archive's name
+// (engine.Muxer.writeOutput). It records what it found in v; a copy ffprobe
+// cannot read passes, as it did when the check ran after the mux.
+func (o *DownloadOrchestrator) verifiedCopy(jobID string, v *muxVerdict, inputs ...string) engine.OutputCheck {
+	return func(ctx context.Context, path string) error {
+		v.probe = o.runFFprobe(ctx, path)
+		if v.probe != nil {
+			v.short = o.verifyMuxedDuration(ctx, jobID, v.probe.DurationSec, inputs...)
+		}
+		return v.short
+	}
+}
+
+// discardRejectedMuxOutput deletes a muxed output the finalize rejected after
+// it was renamed into place: a part whose chat could not be copied beside it.
+// A copy found short never gets that far (verifiedCopy).
 //
 // The alternative is what shipped with ENGINE-9: the truncated .mp4 stayed in
 // the output directory wearing the archive's own name while the row went to
@@ -588,34 +613,31 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 				"limit", asideOutputCollisionLimit, "jobID", jobCtx.Job.ID)
 			continue
 		}
-		if err := o.mux().MuxCopy(ctx, g.video, g.audio, out); err != nil {
-			// Take the partial with it. engine.cleanupFailedMux deliberately
-			// PRESERVES a partial output when the failure was a ctx cancel —
-			// right for the main mux, where the partial is all the operator
-			// has — but an aside's partial has no salvage value: the aside
-			// itself is still in staging and the next finalize re-muxes it.
-			// Left behind, it is a moov-less file wearing the archive's own
-			// stem, which the output sweep OWNS (engine.RestartSiblingStem)
-			// and so never offers for deletion, while asideOutputPath's
-			// counter writes the successful retry to "-2" beside it.
-			os.Remove(out)
-			o.logger.Error("could not mux a set-aside recording; it stays in staging and the dir is kept for a later Mux action",
-				"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
-			continue
-		}
 		// ENGINE-9, aside edition — and the one copy whose source is deleted
 		// right after it: `-c copy` exits 0 after the first fragment it cannot
 		// demux, and an aside is exactly a recording the engine could not
 		// resume, its tail the likeliest to hold one. The main and part muxes
 		// check the copy's length against their inputs; this one deleted the
 		// only copy of the footage behind a sibling holding a fraction of it.
-		if probe := o.runFFprobe(ctx, out); probe != nil {
-			if err := o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probe.DurationSec, g.video, g.audio); err != nil {
-				os.Remove(out)
+		//
+		// A copy that fails, is cancelled or comes out short leaves nothing
+		// behind: FFmpeg writes a temporary file the engine renames onto out
+		// only once it has exited 0 and this check passed, and removes
+		// otherwise. A partial left under out was a moov-less file wearing the
+		// archive's own stem, which the output sweep OWNS
+		// (engine.RestartSiblingStem) and so never offered for deletion, while
+		// asideOutputPath's counter wrote the successful retry to "-2" beside
+		// it.
+		var verdict muxVerdict
+		if err := o.mux().MuxCopy(ctx, g.video, g.audio, out, o.verifiedCopy(jobCtx.Job.ID, &verdict, g.video, g.audio)); err != nil {
+			if verdict.short != nil {
 				o.logger.Error("a set-aside recording's copy came out short; it stays in staging and the dir is kept",
 					"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
 				continue
 			}
+			o.logger.Error("could not mux a set-aside recording; it stays in staging and the dir is kept for a later Mux action",
+				"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
+			continue
 		}
 		o.logger.Warn("a set-aside recording was muxed to its own file beside the archive; it overlaps the start of the main recording, so it is NOT one of the job's parts",
 			"output", out, "aside", strings.Join(g.files, " | "), "jobID", jobCtx.Job.ID)
@@ -1023,23 +1045,20 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		return fmt.Errorf("no media files to mux")
 	}
 
-	if err := o.mux().MuxCopy(ctx, videoPath, audioPath, outputFile); err != nil {
-		return fmt.Errorf("mux: %w", err)
-	}
-
-	// B5: Run ffprobe to extract actual video metadata
-	probeData := o.runFFprobe(ctx, outputFile)
-
 	// ENGINE-9: before anything writes Finished over this row, check that the
 	// copy actually carried the recording across. A short output errors out
 	// here with staging intact rather than finishing clean over a fraction of
-	// the archive.
-	if probeData != nil {
-		if err := o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probeData.DurationSec, videoPath, audioPath); err != nil {
-			o.discardRejectedMuxOutput(jobCtx.Job.ID, outputFile)
-			return err
+	// the archive — checked under FFmpeg's temporary name (verifiedCopy), so
+	// the archive's own name is only ever a copy that passed. The probe it
+	// takes is B5's: the row's resolution, frame rate and length.
+	var verdict muxVerdict
+	if err := o.mux().MuxCopy(ctx, videoPath, audioPath, outputFile, o.verifiedCopy(jobCtx.Job.ID, &verdict, videoPath, audioPath)); err != nil {
+		if verdict.short != nil {
+			return verdict.short
 		}
+		return fmt.Errorf("mux: %w", err)
 	}
+	probeData := verdict.probe
 
 	// Get file info
 	info, err := os.Stat(outputFile)
@@ -1681,26 +1700,20 @@ func (o *DownloadOrchestrator) muxSegment(
 		}
 	}
 
-	// MuxCopy (no re-encoding)
-	if err := o.mux().MuxCopy(ctx, videoPath, audioPath, outputPath); err != nil {
-		return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
-	}
-
-	// FFprobe for metadata
-	probeData := o.runFFprobe(ctx, outputPath)
-
+	// MuxCopy (no re-encoding), probed for the segment's metadata.
+	//
 	// ENGINE-9, part edition: a part whose copy stopped early must not be
 	// persisted as a finished segment. Returning the error before AddSegment
 	// leaves the index unrecorded, which is what keeps its staging dir alive
-	// (hasUnmuxedPartsForJob) for a re-mux — and the short part file is
-	// removed with it, so the re-mux writes the real part at that name rather
-	// than beside an unreferenced truncated twin of it.
-	if probeData != nil {
-		if err := o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probeData.DurationSec, videoPath, audioPath); err != nil {
-			o.discardRejectedMuxOutput(jobCtx.Job.ID, outputPath)
-			return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
-		}
+	// (hasUnmuxedPartsForJob) for a re-mux — and the short copy never takes
+	// the part's name (verifiedCopy checks it under FFmpeg's temporary one),
+	// so the re-mux writes the real part at that name rather than beside an
+	// unreferenced truncated twin of it.
+	var verdict muxVerdict
+	if err := o.mux().MuxCopy(ctx, videoPath, audioPath, outputPath, o.verifiedCopy(jobCtx.Job.ID, &verdict, videoPath, audioPath)); err != nil {
+		return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
 	}
+	probeData := verdict.probe
 
 	// Resolve the unixStart sentinel (see the doc comment): derive the start
 	// from the probed duration, clamped so it never precedes the job's

@@ -12,6 +12,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/engine"
 )
 
 // writeBlockingFFmpeg writes a stand-in FFmpeg that creates its output (the
@@ -105,20 +106,28 @@ func TestOrphanSweepLeavesAnInProgressMuxAlone(t *testing.T) {
 		return err
 	})
 
+	// What FFmpeg is writing is the archive's temporary file, under the
+	// archive's stem (engine.Muxer.writeOutput); the claim covers it all the
+	// same.
 	outs := mp4sIn(t, outputDir)
-	if len(outs) != 1 {
-		t.Fatalf("the stand-in mux should have written one output, found %v", outs)
+	if len(outs) != 1 || !engine.IsMuxTempPath(outs[0]) {
+		t.Fatalf("the stand-in mux should be writing one temporary output, found %v", outs)
 	}
-	out := filepath.Join(outputDir, outs[0])
+	inflight := filepath.Join(outputDir, outs[0])
 
 	var stagingBase string
 	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
 	cfg := &config.MoomboxConfig{Paths: config.PathsConfig{OutputDirectory: outputDir, StagingDirectory: stagingBase}}
-	assertSweepSpares(t, db, cfg, out)
+	assertSweepSpares(t, db, cfg, inflight)
 
 	if err := release(); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
+	outs = mp4sIn(t, outputDir)
+	if len(outs) != 1 || engine.IsMuxTempPath(outs[0]) {
+		t.Fatalf("the finished mux should leave the archive alone, found %v", outs)
+	}
+	out := filepath.Join(outputDir, outs[0])
 	fresh, _ := db.GetJob("j-inflight")
 	if fresh == nil || fresh.Status != database.StatusFinished || normalizePath(fresh.OutputFile) != normalizePath(out) {
 		t.Fatalf("the mux did not finish onto its output: %+v", fresh)
@@ -156,8 +165,8 @@ func TestOrphanSweepLeavesAnInProgressPartMuxAlone(t *testing.T) {
 	})
 
 	outs := mp4sIn(t, outputDir)
-	if len(outs) != 1 {
-		t.Fatalf("the stand-in part mux should have written one output, found %v", outs)
+	if len(outs) != 1 || !engine.IsMuxTempPath(outs[0]) {
+		t.Fatalf("the stand-in part mux should be writing one temporary output, found %v", outs)
 	}
 	part := filepath.Join(outputDir, outs[0])
 	var stagingBase string

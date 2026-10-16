@@ -5,15 +5,16 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/vampiricwulf/Moombox/internal/childproc"
 )
 
 // runFFmpegWithProgress runs FFmpeg, parsing stderr for time= progress lines.
 // progressFn is called with 0-100 based on currentTime/totalDuration.
 func (m *Muxer) runFFmpegWithProgress(ctx context.Context, args []string, totalDuration float64, progressFn func(float64)) error {
-	cmd := exec.CommandContext(ctx, m.ffmpegPath, args...)
+	cmd := childproc.CommandContext(ctx, m.ffmpegPath, args...)
 	cmd.Stdout = nil
 
 	stderr, err := cmd.StderrPipe()
@@ -21,6 +22,9 @@ func (m *Muxer) runFFmpegWithProgress(ctx context.Context, args []string, totalD
 		return fmt.Errorf("stderr pipe: %w", err)
 	}
 
+	// Start, the stderr read and Wait stay on this goroutine: on Linux
+	// childproc holds its OS thread from Start to Wait, the thread FFmpeg's
+	// parent-death signal belongs to.
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("ffmpeg start: %w", err)
 	}

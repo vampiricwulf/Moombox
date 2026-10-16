@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -31,12 +30,9 @@ func TestTrimFailureKeepsFFmpegsReason(t *testing.T) {
 	src := filepath.Join(dir, "src.mp4")
 	writeMuxFixture(t, ffmpegPath, src, 3)
 	out := filepath.Join(dir, "out.ts")
-	if err := os.Symlink("/dev/full", out); err != nil {
-		t.Skipf("cannot link to /dev/full: %v", err)
-	}
 
 	progressed := false
-	err := engine.NewMuxer(ffmpegPath, discardLogger{}).Mux(context.Background(), src, "", out, &engine.TrimOptions{
+	err := engine.NewMuxer(fullDiskFFmpeg(t, ffmpegPath), discardLogger{}).Mux(context.Background(), src, "", out, &engine.TrimOptions{
 		TrimStartOffset: 0.5, TrimDuration: 2, ProgressFn: func(float64) { progressed = true },
 	})
 	if err == nil {

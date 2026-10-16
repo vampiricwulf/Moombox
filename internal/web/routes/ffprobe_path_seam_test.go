@@ -46,7 +46,9 @@ func TestEveryFFprobeCallAppliesThePathSeam(t *testing.T) {
 			if !ok {
 				return true
 			}
-			if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "exec" {
+			// childproc.CommandContext is how the probe runs (tied to this
+			// process); an exec call naming ffprobe is held to the seam too.
+			if pkg, ok := sel.X.(*ast.Ident); !ok || (pkg.Name != "exec" && pkg.Name != "childproc") {
 				return true
 			}
 			var program ast.Expr

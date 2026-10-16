@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"unicode/utf16"
+
+	"github.com/vampiricwulf/Moombox/internal/childproc"
 )
 
 // TrimOptions configures trimming and encoding during muxing.
@@ -131,12 +132,21 @@ func deriveFFprobePath(ffmpegPath string) string {
 }
 
 // MuxCopy muxes video and audio streams using codec copy (fast, no re-encoding).
-func (m *Muxer) MuxCopy(ctx context.Context, videoPath, audioPath, outputPath string) error {
-	return m.Mux(ctx, videoPath, audioPath, outputPath, nil)
+// FFmpeg writes a temporary file beside outputPath, and checks run on it
+// before it is renamed into place (writeOutput): an archive mux passes its
+// duration check here, so a short copy never takes the archive's name.
+func (m *Muxer) MuxCopy(ctx context.Context, videoPath, audioPath, outputPath string, checks ...OutputCheck) error {
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, checks)
 }
 
-// Mux performs FFmpeg muxing with optional trimming/encoding.
+// Mux performs FFmpeg muxing with optional trimming/encoding, into a
+// temporary file renamed onto outputPath once FFmpeg has exited 0
+// (writeOutput).
 func (m *Muxer) Mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions) error {
+	return m.mux(ctx, videoPath, audioPath, outputPath, opts, nil)
+}
+
+func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions, checks []OutputCheck) error {
 	// Validate inputs
 	if videoPath != "" {
 		if _, err := os.Stat(videoPath); err != nil {
@@ -160,40 +170,17 @@ func (m *Muxer) Mux(ctx context.Context, videoPath, audioPath, outputPath string
 	needsEncode := opts != nil && opts.UsePreciseTrim && hasTrim(opts) && (opts.CRF > 0 || opts.VideoBitrate > 0)
 	needsTwoPass := needsEncode && opts.TwoPass && opts.VideoBitrate > 0
 
-	if needsTwoPass {
-		err := m.runTwoPassEncode(ctx, videoPath, audioPath, outputPath, opts)
-		cleanupFailedMux(ctx, err, outputPath)
-		return err
-	}
-
-	args := m.buildArgs(videoPath, audioPath, outputPath, opts, needsEncode)
-
-	m.logger.Debug("ffmpeg", "args", strings.Join(args, " "))
-	var err error
-	if opts != nil && opts.ProgressFn != nil && hasTrim(opts) && opts.TrimDuration > 0 {
-		err = m.runFFmpegWithProgress(ctx, args, opts.TrimDuration, opts.ProgressFn)
-	} else {
-		err = m.runFFmpeg(ctx, args)
-	}
-	cleanupFailedMux(ctx, err, outputPath)
-	return err
-}
-
-// cleanupFailedMux removes the output file on mux failure, but preserves
-// partial output when the failure is due to caller-initiated cancellation.
-// Context cancel during mux is almost always a user shutdown — keeping the
-// partial file lets the user decide whether to restart the mux or salvage
-// what's there. True ffmpeg errors (invalid args, corrupt input, etc.)
-// still get cleaned up so we don't leave broken MP4s on disk.
-func cleanupFailedMux(ctx context.Context, err error, outputPath string) {
-	if err == nil {
-		return
-	}
-	if ctx.Err() != nil {
-		// Parent context cancelled — preserve partial output.
-		return
-	}
-	os.Remove(outputPath)
+	return m.writeOutput(ctx, outputPath, checks, func(tmp string) error {
+		if needsTwoPass {
+			return m.runTwoPassEncode(ctx, videoPath, audioPath, tmp, opts)
+		}
+		args := m.buildArgs(videoPath, audioPath, tmp, opts, needsEncode)
+		m.logger.Debug("ffmpeg", "args", strings.Join(args, " "))
+		if opts != nil && opts.ProgressFn != nil && hasTrim(opts) && opts.TrimDuration > 0 {
+			return m.runFFmpegWithProgress(ctx, args, opts.TrimDuration, opts.ProgressFn)
+		}
+		return m.runFFmpeg(ctx, args)
+	})
 }
 
 func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOptions, needsEncode bool) []string {
@@ -264,7 +251,7 @@ func (m *Muxer) appendEncodeArgs(args []string, audioPath string, opts *TrimOpti
 }
 
 func (m *Muxer) runFFmpeg(ctx context.Context, args []string) error {
-	cmd := exec.CommandContext(ctx, m.ffmpegPath, args...)
+	cmd := childproc.CommandContext(ctx, m.ffmpegPath, args...)
 	cmd.Stdout = nil
 
 	// Capture stderr for error reporting with a 1MB cap.

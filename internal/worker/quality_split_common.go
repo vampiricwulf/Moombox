@@ -91,11 +91,11 @@ func (o *DownloadOrchestrator) CancelMuxes() {
 // Context rationale: the mux hangs off the ORCHESTRATOR's mux root, not the
 // job's context — user-cancel must not orphan a partial output mid-FFmpeg —
 // but no longer off context.Background(): Stop cuts the root once its
-// in-flight wait runs out (owner decision O-E), so a shutdown kills this
-// FFmpeg instead of leaving it writing into a staging dir the respawned child
-// re-muxes with -y. The 2-hour ceiling is generous (codec-copy of a multi-GB
-// segment on slow disk/USB/NAS with antivirus scanning can legitimately
-// exceed tens of minutes) but bounded so a truly stuck FFmpeg can't pin
+// in-flight wait runs out (owner decision O-E), so a shutdown cancels this
+// FFmpeg rather than exiting from under it. The 2-hour ceiling is generous
+// (codec-copy of a multi-GB segment on slow disk/USB/NAS with antivirus
+// scanning can legitimately exceed tens of minutes) but bounded so a truly
+// stuck FFmpeg can't pin
 // shutdown indefinitely (defer wg.Wait() in the caller means worker.Stop()'s
 // 10s grace otherwise can't override the wait).
 //

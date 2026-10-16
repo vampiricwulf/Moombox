@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -29,6 +28,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/text/encoding/charmap"
 
+	"github.com/vampiricwulf/Moombox/internal/childproc"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
@@ -889,7 +889,7 @@ func importSegment(jobID string, video *importFile, files []*importFile) *databa
 var importProbeDuration = func(ctx context.Context, ffprobePath, file string) float64 {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, ffprobePath, "-v", "quiet", "-print_format", "json", "-show_format", engine.FFmpegPathArg(file)).Output()
+	out, err := childproc.CommandContext(ctx, ffprobePath, "-v", "quiet", "-print_format", "json", "-show_format", engine.FFmpegPathArg(file)).Output()
 	if err != nil {
 		return 0
 	}
