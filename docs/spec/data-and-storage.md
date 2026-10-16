@@ -1348,7 +1348,7 @@ All log lines use `2006-01-02 15:04:05` format (Go reference time). This applies
 
 ### Crash Output File
 
-Beside the log sits `<log name>-crash.log` (`moombox-crash.log` for the default `./moombox.log`; `crashOutputPath`, `cmd/moombox/crash_output.go`), the runtime's second destination for a fatal error's output — an unrecovered panic, a fatal runtime error, a fatal signal's trace — which otherwise reaches stderr only and never the logger. Each child creates it empty as soon as the logger is open; the next start logs the beginning of whatever a crash left there and moves it to `<crash file>.1` (the previous crash's, at most 1 MiB). See operations.md §Launcher/Supervisor Pattern.
+Beside the log sits `<log name>-crash.log` (`moombox-crash.log` for the default `./moombox.log`; `crashOutputPath`, `cmd/moombox/crash_output.go`), the runtime's second destination for a fatal error's output — an unrecovered panic, a fatal runtime error, a fatal signal's trace — which otherwise reaches stderr only and never the logger. Each child creates it empty as soon as the logger is open; the next start logs the beginning of whatever a crash left there and moves it to `<crash file>.1` (the previous crash's, at most 1 MiB) — or copies it there when it cannot be moved. See operations.md §Launcher/Supervisor Pattern.
 
 ---
 

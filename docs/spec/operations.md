@@ -411,10 +411,14 @@ before it counts itself as crashing and so to stderr only, the first frame it st
 `crashCause`) and its first 8 KiB (`crashExcerptBytes`, cut at a line, saying how
 much it left out) as `output`, with every URL cut to its origin and any PO token removed
 (`redactCrashText`), then keeps the whole output as `<crash file>.1`, replacing the crash before it
-and cut to 1 MiB (`crashKeepBytes`) — at most two crashes' output on disk. A crash respawn's
-`crash_recovered` notification names that cause and the kept file (`crashRecoveredNotice`), or says
-the process left no crash output (a SIGKILL or the OOM killer reports none) instead of sending the
-operator to logs that hold nothing more.
+and cut to 1 MiB (`crashKeepBytes`) — at most two crashes' output on disk. When the crash file cannot be
+moved there (on Windows, a viewer, a scanner or the indexer holding either file without delete sharing;
+anywhere, a `.1` that rename cannot replace) it is copied there instead (`copyCrashOutput`), since the
+start's own capture empties the crash file; when the copy fails too, the output is not kept beyond the
+logged excerpt, and the log line (`crashOutput="not kept"`) and the notice say so rather than naming a
+file that no longer holds it. A crash respawn's `crash_recovered` notification names that cause and the
+kept file (`crashRecoveredNotice`), or says the process left no crash output (a SIGKILL or the OOM killer
+reports none) instead of sending the operator to logs that hold nothing more.
 
 **Windows-specific details:**
 - The parent catches `os.Interrupt` (Ctrl+C, Ctrl+Break) and SIGTERM (console close, logoff, shutdown) and sends nothing on: each event reached every process on the console, the child included. It records the stop, so the child's exit propagates.

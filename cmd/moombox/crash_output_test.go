@@ -310,6 +310,109 @@ func TestCaptureCrashOutputLogsThePreviousCrashAndArms(t *testing.T) {
 	}
 }
 
+// TestCrashOutputThatCannotBeMovedAside pins what a start does when the crash
+// output cannot be moved to its kept name — on Windows, a viewer, a scanner or
+// the indexer holding either file without delete sharing (simulated); anywhere,
+// a kept name rename cannot replace (a directory, here). It used to report the
+// output kept in place, as the crash file itself, and then arm this start's
+// capture on that same file, which truncated it: the log and the Recovered
+// From Crash notice named an empty file as holding the whole output.
+//
+//   - The move fails and a copy can be made: the kept name holds the output,
+//     cut to crashKeepBytes, and the crash file is armed empty for this start.
+//   - The copy fails too: nothing is named as holding the whole output, the
+//     notice says the rest could not be kept, and the log has the excerpt.
+//
+// Mutants: no copy fallback (the first row's kept file is missing); kept left
+// as the crash file on failure (the second row's notice names an empty file);
+// the copy unbounded (the first row's kept file is the whole output).
+func TestCrashOutputThatCannotBeMovedAside(t *testing.T) {
+	var big strings.Builder
+	big.WriteString("panic: probe crash\n\ngoroutine 9 [running]:\n")
+	for big.Len() < crashKeepBytes+crashKeepBytes/4 {
+		big.WriteString("main.f()\n\t/src/main.go:1 +0x1\n")
+	}
+	body := big.String()
+
+	for _, tc := range []struct {
+		name       string
+		renameFail bool // simulated: a sharing violation
+		keptIsDir  bool // real: rename and copy both refuse a directory
+		wantKept   bool
+	}{
+		{"the move is refused, the copy is not", true, false, true},
+		{"the move and the copy are refused", false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			logPath := filepath.Join(dir, "moombox.log")
+			crashPath, err := filepath.Abs(crashOutputPath(logPath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			keptPath := keptCrashPath(crashPath)
+			if err := os.WriteFile(crashPath, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.renameFail {
+				prevRename := renameCrashOutput
+				renameCrashOutput = func(string, string) error {
+					return errors.New("the process cannot access the file because it is being used by another process")
+				}
+				t.Cleanup(func() { renameCrashOutput = prevRename })
+			}
+			if tc.keptIsDir {
+				if err := os.MkdirAll(filepath.Join(keptPath, "x"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			log, err := logger.New(logPath, "INFO", 1<<20, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = debug.SetCrashOutput(nil, debug.CrashOptions{}) })
+
+			s := &runState{log: log}
+			prev := s.captureCrashOutput(logPath)
+			log.Close()
+			if !prev.captured() || prev.cause != "panic: probe crash" {
+				t.Fatalf("captureCrashOutput = cause %q, captured %v; want the probe crash", prev.cause, prev.captured())
+			}
+			desc, _ := crashRecoveredNotice("2", prev, "moombox.log")
+			if info, err := os.Stat(crashPath); err != nil || info.Size() != 0 {
+				t.Errorf("the crash file is not armed empty for this start (%v)", err)
+			}
+			logged, _ := os.ReadFile(logPath)
+			if !strings.Contains(string(logged), "goroutine 9") {
+				t.Errorf("moombox.log has no excerpt of the crash:\n%s", logged)
+			}
+
+			if !tc.wantKept {
+				if prev.kept != "" {
+					t.Errorf("kept = %q, want none: nothing holds the whole output", prev.kept)
+				}
+				if strings.Contains(desc, "the whole of it") || !strings.Contains(desc, "could not be kept") {
+					t.Errorf("notice = %q, want it to say the rest could not be kept", desc)
+				}
+				return
+			}
+			if prev.kept != keptPath {
+				t.Fatalf("kept = %q, want %q", prev.kept, keptPath)
+			}
+			data, err := os.ReadFile(keptPath)
+			if err != nil {
+				t.Fatalf("the output was not kept: %v", err)
+			}
+			if len(data) != crashKeepBytes || !strings.HasPrefix(body, string(data)) {
+				t.Errorf("the kept output is %d bytes, want the first %d of the crash's", len(data), crashKeepBytes)
+			}
+			if !strings.Contains(desc, "the whole of it in "+keptPath) {
+				t.Errorf("notice = %q, want it to name %s", desc, keptPath)
+			}
+		})
+	}
+}
+
 // TestCrashOutputIsWired pins the two call sites: initServices captures the
 // crash output as soon as the logger is open, and run()'s crash-respawn notice
 // is crashRecoveredNotice's.

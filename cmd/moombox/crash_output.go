@@ -33,7 +33,9 @@ import (
 // logs its beginning — the cause, and the trace of the goroutine that died —
 // through the redaction every log line about a failure gets, and keeps the
 // whole output one more crash cycle as <crash file>.1, cut to crashKeepBytes:
-// at most two crashes' output on disk, however many crashes there were. One
+// at most two crashes' output on disk, however many crashes there were — or,
+// when it cannot be moved aside, copies it there before this start's capture
+// empties the crash file, and says so when it could not keep it at all. One
 // line never reaches the file: a fatal error's own "fatal error: …", which
 // the runtime prints before it counts itself as crashing; crashCause names
 // such a crash by the frame it struck in instead.
@@ -74,16 +76,30 @@ type previousCrash struct {
 	cause   string // the output's first line, redacted and bounded
 	excerpt string // its beginning, redacted, bounded by crashExcerptBytes
 	size    int64  // the whole output's size
-	kept    string // where the output is kept now; the crash file itself when moving it aside failed
+	kept    string // where the whole output is kept now; "" when it could not be kept
 }
 
 func (c previousCrash) captured() bool { return c.size > 0 }
+
+// renameCrashOutput is os.Rename, a variable so a test can make the move
+// aside fail the way Windows does when another process holds the crash file
+// or the kept one open without delete sharing.
+var renameCrashOutput = os.Rename
 
 // takePreviousCrash reads what a crash left at crashPath, then moves it to
 // keptCrashPath (replacing the crash before it) and cuts that to
 // crashKeepBytes. A crash file that is absent or empty yields the zero
 // value. The error reports what could not be read or moved; whatever was
 // read is returned with it.
+//
+// When the move fails — on Windows, a log viewer, a scanner or the indexer
+// holding either file without delete sharing; anywhere, a kept name rename
+// cannot replace — the output is copied there instead (copyCrashOutput). It
+// used to be reported kept in place, as the crash file itself, which this
+// start's capture then emptied (armCrashOutput truncates it): the log and the
+// Recovered From Crash notice pointed at an empty file for the whole output.
+// When the copy fails too, kept is "" and the notice says the rest could not
+// be kept; the log has the excerpt.
 func takePreviousCrash(crashPath string) (previousCrash, error) {
 	f, err := os.Open(crashPath)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -103,12 +119,16 @@ func takePreviousCrash(crashPath string) (previousCrash, error) {
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return previousCrash{}, err
 	}
-	c := previousCrash{size: info.Size(), kept: crashPath}
+	c := previousCrash{size: info.Size()}
 	c.excerpt, c.cause = crashExcerpt(head[:n], info.Size())
 
 	kept := keptCrashPath(crashPath)
-	if err := os.Rename(crashPath, kept); err != nil {
-		return c, fmt.Errorf("keep the crash output: %w", err)
+	if err := renameCrashOutput(crashPath, kept); err != nil {
+		if cerr := copyCrashOutput(crashPath, kept); cerr != nil {
+			return c, fmt.Errorf("keep the crash output: %w; copy it instead: %w", err, cerr)
+		}
+		c.kept = kept // cut to crashKeepBytes by the copy
+		return c, nil
 	}
 	c.kept = kept
 	if c.size > crashKeepBytes {
@@ -117,6 +137,30 @@ func takePreviousCrash(crashPath string) (previousCrash, error) {
 		}
 	}
 	return c, nil
+}
+
+// copyCrashOutput copies the first crashKeepBytes of the crash output at
+// crashPath to kept, replacing what was there, for a crash file that could not
+// be moved aside. A copy that fails part-way is removed rather than left as a
+// kept output that is not the whole of it.
+func copyCrashOutput(crashPath, kept string) error {
+	src, err := os.Open(crashPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(kept, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(dst, io.LimitReader(src, crashKeepBytes))
+	if cerr := dst.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(kept)
+	}
+	return err
 }
 
 // crashExcerpt turns the first bytes of a crash's output (of total bytes in
@@ -229,9 +273,13 @@ func (s *runState) captureCrashOutput(logPath string) previousCrash {
 		s.log.Warn("could not take the previous run's crash output", slog.String("file", crashPath), slog.String("error", err.Error()))
 	}
 	if prev.captured() {
+		kept := prev.kept
+		if kept == "" {
+			kept = "not kept" // the warning above says why
+		}
 		s.log.Error("the previous run crashed — the beginning of its crash output",
 			slog.String("cause", prev.cause),
-			slog.String("crashOutput", prev.kept),
+			slog.String("crashOutput", kept),
 			slog.String("output", prev.excerpt))
 	}
 	if err := armCrashOutput(crashPath); err != nil {
@@ -245,14 +293,18 @@ func (s *runState) captureCrashOutput(logPath string) previousCrash {
 // respawn: the previous exit code, and what its crash output says — the cause
 // and where the output is — or, when it left none, that the log has nothing
 // more on it, rather than sending the operator to look. logName is the log
-// file's name.
+// file's name. A file is named as holding the whole output only when it does.
 func crashRecoveredNotice(code string, prev previousCrash, logName string) (desc string, fields []notifications.Field) {
 	if !prev.captured() {
 		return fmt.Sprintf("Moombox exited abnormally (code %s) and was automatically restarted. It left no crash output: "+
 			"a process killed outright (SIGKILL, the OOM killer) or one that exited with that code itself reports none, "+
 			"so %s holds nothing more on the cause", code, logName), nil
 	}
+	fields = []notifications.Field{{Name: "Cause", Value: prev.cause}}
+	if prev.kept == "" {
+		return fmt.Sprintf("Moombox exited abnormally (code %s) and was automatically restarted — the beginning of its crash output "+
+			"is in %s; the rest could not be kept", code, logName), fields
+	}
 	return fmt.Sprintf("Moombox exited abnormally (code %s) and was automatically restarted — the beginning of its crash output "+
-			"is in %s, and the whole of it in %s", code, logName, prev.kept),
-		[]notifications.Field{{Name: "Cause", Value: prev.cause}}
+		"is in %s, and the whole of it in %s", code, logName, prev.kept), fields
 }
