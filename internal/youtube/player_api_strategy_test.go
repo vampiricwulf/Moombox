@@ -1622,6 +1622,10 @@ func TestProbeVideoDateSendsTheJarsCredentials(t *testing.T) {
 
 	t.Run("a jar holding YouTube auth sends Cookie and SAPISIDHASH", func(t *testing.T) {
 		tr := swap(t)
+		// The probe reads a new account's session off the homepage first
+		// (readAccountSession), and this Service never ran Init: answer that
+		// read here, or it is a live fetch of www.youtube.com.
+		stubHomepage(t, nil)
 		svc := jarServiceFromCookieFile(t, youtubeAuthCookieFile)
 
 		pub, _, err := svc.ProbeVideoDate(context.Background(), videoID)
