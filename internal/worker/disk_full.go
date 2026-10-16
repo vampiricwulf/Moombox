@@ -23,11 +23,17 @@ var diskFullTexts = []string{
 // space: the platform's own error (diskFullErrnos — ENOSPC on unix,
 // ERROR_DISK_FULL and ERROR_HANDLE_DISK_FULL on Windows) anywhere in the
 // chain, which is how the engine's writes reach the worker (engine.ErrLocalWrite
-// wraps the *os.PathError with %w), or one of diskFullTexts in the message,
+// wraps the *os.PathError with %w), the mux's own refusal to write a repaired
+// copy the staging volume has no room for (repairNoSpaceError, which
+// muxAndFinalize wraps with %w), or one of diskFullTexts in the message,
 // which is how FFmpeg's do.
 func isDiskFull(err error) bool {
 	if err == nil {
 		return false
+	}
+	var noRoom *repairNoSpaceError
+	if errors.As(err, &noRoom) {
+		return true
 	}
 	for _, errno := range diskFullErrnos {
 		if errors.Is(err, errno) {

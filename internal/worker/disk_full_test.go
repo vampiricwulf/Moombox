@@ -33,7 +33,8 @@ func (e terseErr) Unwrap() error { return e.err }
 // and FFmpeg's stderr tail. A failure that is not about space is not one.
 //
 // Mutants: drop the diskFullErrnos loop — the terse wrap is missed; drop the
-// diskFullTexts loop — the flattened and FFmpeg forms are missed.
+// diskFullTexts loop — the flattened and FFmpeg forms are missed; drop the
+// repairNoSpaceError check — the repair's refusal is missed.
 func TestIsDiskFullRecognisesTheWriteForms(t *testing.T) {
 	for _, errno := range diskFullErrnos {
 		pathErr := &os.PathError{Op: "write", Path: filepath.Join("staging", "j", "video.mp4"), Err: errno}
@@ -49,6 +50,10 @@ func TestIsDiskFullRecognisesTheWriteForms(t *testing.T) {
 				t.Errorf("%s (%v): isDiskFull = false, want true for %q", tc.name, errno, tc.err)
 			}
 		}
+	}
+
+	if err := fmt.Errorf("mux: %w", &repairNoSpaceError{msg: "the repaired copy needs 65.4MB free on the staging volume, which has 1.0MB"}); !isDiskFull(err) {
+		t.Errorf("the repair's refusal: isDiskFull = false, want true for %q", err)
 	}
 
 	ffmpeg := fmt.Errorf("mux: %w", fmt.Errorf("ffmpeg: %w (stderr: %s)", errors.New("exit status 1"),

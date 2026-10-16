@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/disk"
@@ -900,5 +901,48 @@ func TestMergeKeepsASupersededDirHoldingAMuxGap(t *testing.T) {
 	}
 	if n := len(stagedMuxGaps(stagingDir)); n != 1 {
 		t.Errorf("stagedMuxGaps = %d after the merge, want 1 — the shield must see the tombstoned dir", n)
+	}
+}
+
+// TestBacklogRepairWithoutSpaceGoesBackToQueued: a backlog VOD whose staged
+// whole-file fMP4 has a damaged fragment, on a staging volume without room
+// for the repaired copy. Every other out-of-disk failure of a backlog VOD's
+// run — the engine's writes, FFmpeg's mux writes — sends it back to Queued to
+// wait for the space; the repair's own refusal used to end it in Error, for
+// an operator to re-run the Mux action by hand.
+//
+// Mutant: writeRepairedCopy refusing with a plain error rather than a
+// repairNoSpaceError (the job ends in Error).
+func TestBacklogRepairWithoutSpaceGoesBackToQueued(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	prev := repairDiskSpace
+	repairDiskSpace = func(string) (*disk.DiskSpace, error) { return &disk.DiskSpace{Free: 1 << 20, Total: 1 << 30}, nil }
+	t.Cleanup(func() { repairDiskSpace = prev })
+
+	src := fragmentedFixture(t, ffmpegPath, "video", 300)
+	var buf bytes.Buffer
+	buf.Write(src.init)
+	for i, f := range src.frags {
+		if i == 50 {
+			f = make([]byte, len(f))
+		}
+		buf.Write(f)
+	}
+	srv := serveWholeFile(t, buf.Bytes())
+
+	w, db := testWorkerSetup(t)
+	w.orchestrator.routedCipher = stubCipherSolver{}
+	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+		return &StreamProcessResult{ShouldDownload: true, IsVod: true,
+			VideoInfo: vodInfoAt(srv.URL, time.Now().Add(6*time.Hour).Unix(), buf.Len())}, nil
+	}
+	diskFullVodJob(t, db, "gap_vod", 1)
+	w.processJob(context.Background(), "gap_vod")
+	row, _ := db.GetJob("gap_vod")
+	if row.Status != database.StatusQueued {
+		t.Fatalf("status = %s (%q), want Queued — out of room for the repaired copy, as for any out-of-disk mux", row.Status, row.Error)
+	}
+	if !w.scheduler.held("gap_vod", time.Now()) {
+		t.Error("the requeued job is not held from re-admission")
 	}
 }

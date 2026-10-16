@@ -69,6 +69,16 @@ const repairHeadroom = 64 << 20
 // full staging volume.
 var repairDiskSpace = disk.GetDiskSpace
 
+// repairNoSpaceError is writeRepairedCopy's refusal for want of room on the
+// staging volume. It is an out-of-space failure like the engine's ENOSPC
+// writes and FFmpeg's "No space left on device", and isDiskFull counts it as
+// one: a backlog VOD it stops waits in Queued for the space
+// (requeueBacklogAfterDiskFull) instead of ending in Error, where an operator
+// had to re-run the Mux action by hand.
+type repairNoSpaceError struct{ msg string }
+
+func (e *repairNoSpaceError) Error() string { return e.msg }
+
 // stagedInput is one staged recording as a copy reads it.
 type stagedInput struct {
 	path string // the recording as the engine staged it
@@ -353,8 +363,8 @@ func (o *DownloadOrchestrator) writeRepairedCopy(ctx context.Context, jobID stri
 		}
 	}
 	if ds, err := repairDiskSpace(filepath.Dir(dst)); err == nil && ds.Free+leftover < uint64(need)+repairHeadroom {
-		return fmt.Errorf("the staged %s has %d damaged stretch(es) to leave out, and the repaired copy it is muxed from needs %s free on the staging volume, which has %s — staging is preserved; free some space and re-run the Mux action",
-			filepath.Base(in.path), len(in.walk.Drops), utils.FormatFileSize(need+repairHeadroom), utils.FormatFileSize(int64(ds.Free)))
+		return &repairNoSpaceError{msg: fmt.Sprintf("the staged %s has %d damaged stretch(es) to leave out, and the repaired copy it is muxed from needs %s free on the staging volume, which has %s — staging is preserved; free some space and re-run the Mux action",
+			filepath.Base(in.path), len(in.walk.Drops), utils.FormatFileSize(need+repairHeadroom), utils.FormatFileSize(int64(ds.Free)))}
 	}
 	for _, d := range in.walk.Drops {
 		o.logger.Warn("a staged recording has a damaged stretch FFmpeg cannot read past; the archive is muxed from a repaired copy without it, and keeps a gap there",
