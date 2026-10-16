@@ -808,14 +808,6 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 	tr := m.tracker()
 	e := msg.Embeds[0]
 	e.Fields = tr.rewriteFields(e.Opts.JobID, t.msgKey, e.Opts.Event, e.Fields, e.eventTime())
-	if msg.delayed {
-		// Held through an outage (targetQueue.holding): the rewrite says so
-		// in a field, not the content note buildPayload gives every other
-		// message — Discord keeps the content of a message an edit sends
-		// none for, so a note there would outlive the state it described,
-		// where the next rewrite replaces the embed and the field with it.
-		e.Fields = withDelayedField(e.Fields, e.eventTime())
-	}
 	// The ping is per MESSAGE (content + allowed_mentions), so it is carried
 	// over from the queued Message, not rebuilt from the embed. An EditOnly
 	// close carries none: its report is suppressed, and the role text would
@@ -824,7 +816,7 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 	if opts.EditOnly {
 		mention, allowed = "", nil
 	}
-	body, err := buildPayload(Message{Embeds: []Embed{e}, Mention: mention, MentionAllowed: allowed})
+	body, err := newManagedBody(e, mention, allowed, msg.delayed)
 	if err != nil {
 		return err
 	}
@@ -834,8 +826,12 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 
 	if plan.AlsoSeparate && !opts.EditOnly {
 		// The separate embed carries the mention and must go out even if the
-		// closing edit failed (owner ruling: two messages on failure).
-		if sepErr := sendPlain(t.sender, msg, once); sepErr != nil {
+		// closing edit failed (owner ruling: two messages on failure). An
+		// outage that held one of this event's requests in place held the
+		// post with it: it goes out after the outage too, and says so.
+		sep := msg
+		sep.delayed = sep.delayed || body.held
+		if sepErr := sendPlain(t.sender, sep, once); sepErr != nil {
 			return errors.Join(lifecycleErr, extraErr, sepErr)
 		}
 	}
@@ -849,18 +845,74 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 	return errors.Join(lifecycleErr, extraErr)
 }
 
+// managedBody is the one body an edit-mode event's requests share — the
+// create or rewrite of the job's message, and the rewrite of its other
+// messages (patchExtra) — with its twin marked as delayed, for what the event
+// sends after an outage has held one of those requests in place.
+//
+// The mark is a Delayed field (withDelayedField), not the content note
+// buildPayload gives every other message: Discord keeps the content of a
+// message an edit sends none for, so a note there would outlive the state it
+// described, where the next rewrite replaces the embed and the field with it.
+type managedBody struct {
+	plain, marked []byte
+	// held is set once an outage has held one of the event's requests and
+	// let it go. Everything the event sends from then on goes out after the
+	// outage, and says so: the held request's own resend (resume), the
+	// requests after it (current), and the terminal event's separate post,
+	// which carries the content note (dispatchOne).
+	held bool
+}
+
+// newManagedBody renders e as the managed body. delayed is the queued
+// message's own mark (targetQueue.holding): a message held before its
+// delivery began carries the field on every request.
+func newManagedBody(e Embed, mention string, allowed *AllowedMentions, delayed bool) (*managedBody, error) {
+	fields := e.Fields
+	render := func(fs []Field) ([]byte, error) {
+		e.Fields = fs
+		return buildPayload(Message{Embeds: []Embed{e}, Mention: mention, MentionAllowed: allowed})
+	}
+	marked, err := render(withDelayedField(fields, e.eventTime()))
+	if err != nil {
+		return nil, err
+	}
+	b := &managedBody{plain: marked, marked: marked}
+	if !delayed {
+		if b.plain, err = render(fields); err != nil {
+			return nil, err
+		}
+	}
+	return b, nil
+}
+
+// current is the body the event's next request sends.
+func (b *managedBody) current() []byte {
+	if b.held {
+		return b.marked
+	}
+	return b.plain
+}
+
+// resume is deliver's re-render for a request an outage held: from here on,
+// the event's requests go out after the outage.
+func (b *managedBody) resume() ([]byte, error) {
+	b.held = true
+	return b.marked, nil
+}
+
 // patchExtra rewrites the job's other messages on this target (lifecyclePlan.
 // Extra) with the body its own message got, and returns the keys of those it
 // delivered. One that Discord answers "Unknown Message" is forgotten — there
 // is nothing left of it to close — and nothing is posted in its place: the
 // job's own message carries the story.
-func (m *Manager) patchExtra(edit editableSender, tr *lifecycleTracker, jobID string, extra []extraMsg, body []byte, once bool) (delivered []string, err error) {
+func (m *Manager) patchExtra(edit editableSender, tr *lifecycleTracker, jobID string, extra []extraMsg, body *managedBody, once bool) (delivered []string, err error) {
 	for _, x := range extra {
 		var perr error
 		if once {
-			perr = edit.patchMessageOnce(x.id, body)
+			perr = edit.patchMessageOnce(x.id, body.current())
 		} else {
-			perr = edit.patchMessage(x.id, body)
+			perr = edit.patchMessage(x.id, body.current(), body.resume)
 		}
 		switch {
 		case perr == nil:
@@ -887,13 +939,13 @@ func sendPlain(s sender, msg Message, once bool) error {
 // postOrPatch performs the wire half of dispatchOne, including the one
 // recovery this path has: a PATCH that Discord answers "Unknown Message"
 // becomes a fresh POST whose id overwrites the stored one.
-func (m *Manager) postOrPatch(edit editableSender, tr *lifecycleTracker, jobID, msgKey, event string, plan lifecyclePlan, body []byte, once bool) error {
+func (m *Manager) postOrPatch(edit editableSender, tr *lifecycleTracker, jobID, msgKey, event string, plan lifecyclePlan, body *managedBody, once bool) error {
 	if plan.MessageID != "" {
 		var err error
 		if once {
-			err = edit.patchMessageOnce(plan.MessageID, body)
+			err = edit.patchMessageOnce(plan.MessageID, body.current())
 		} else {
-			err = edit.patchMessage(plan.MessageID, body)
+			err = edit.patchMessage(plan.MessageID, body.current(), body.resume)
 		}
 		if err == nil {
 			return nil
@@ -921,9 +973,9 @@ func (m *Manager) postOrPatch(edit editableSender, tr *lifecycleTracker, jobID, 
 		err error
 	)
 	if once {
-		id, err = edit.postWaitOnce(body)
+		id, err = edit.postWaitOnce(body.current())
 	} else {
-		id, err = edit.postWait(body)
+		id, err = edit.postWait(body.current(), body.resume)
 	}
 	if err != nil {
 		// A re-POST that itself fails leaves the id already forgotten, so the
@@ -936,10 +988,12 @@ func (m *Manager) postOrPatch(edit editableSender, tr *lifecycleTracker, jobID, 
 
 // editableSender is the optional capability a transport advertises when it can
 // create a message it is able to rewrite later. Only *DiscordWebhook
-// implements it; anything else falls back to separate posts.
+// implements it; anything else falls back to separate posts. The retrying
+// pair takes what renders the body to send instead once an outage has held
+// the request (DiscordWebhook.deliver's delayed).
 type editableSender interface {
-	postWait(body []byte) (string, error)
-	patchMessage(messageID string, body []byte) error
+	postWait(body []byte, delayed func() ([]byte, error)) (string, error)
+	patchMessage(messageID string, body []byte, delayed func() ([]byte, error)) error
 	postWaitOnce(body []byte) (string, error)
 	patchMessageOnce(messageID string, body []byte) error
 }

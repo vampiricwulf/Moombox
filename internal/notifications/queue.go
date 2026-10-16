@@ -773,7 +773,7 @@ func (q *targetQueue) watchingOutages() bool {
 }
 
 // awaitOutage implements outageGate for the delivery this queue's goroutine is
-// running (DiscordWebhook.deliverWith).
+// running (DiscordWebhook.deliver).
 //
 // First the verdict: up to d for the monitor to report offline, waking on
 // every transition (Manager.SetConnectivity) and every enqueue; d of zero

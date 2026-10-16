@@ -63,7 +63,7 @@ func (s *connSource) offline() bool {
 // wires the live one at boot, beside SetMessageStore). From then on a target
 // holds its queue while the monitor reports offline, and a delivery whose link
 // fails under it holds in place once the monitor calls it an outage — see
-// targetQueue.pop and DiscordWebhook.deliverWith. Every transition wakes every
+// targetQueue.pop and DiscordWebhook.deliver. Every transition wakes every
 // target, so a held queue resumes on the online edge itself, and the offline
 // one marks what each target has queued (targetQueue.noteOffline).
 //

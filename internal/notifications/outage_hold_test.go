@@ -2,7 +2,9 @@ package notifications
 
 import (
 	"fmt"
+	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -197,7 +199,7 @@ func TestQueueHoldsWhateverTheTransport(t *testing.T) {
 // the link's return delivers the same notification, marked delayed, and then
 // the one queued behind it while the monitor still said online, marked too.
 //
-// Mutants: deliverWith not asking the gate before each attempt (attempts two
+// Mutants: deliver not asking the gate before each attempt (attempts two
 // and three go out on the dead link); Send's re-render not marking the held
 // delivery; beginHoldLocked not marking what was already queued (the second
 // notification arrives unmarked).
@@ -453,11 +455,11 @@ func TestHeldQueueDropsOldestAndReportsOnce(t *testing.T) {
 // message for good. The rewrite after the outage replaces the embed, and the
 // mark goes with it.
 //
-// Mutants: dispatchOne carrying the delayed mark into the managed body's
-// content (the requests carry the note); dispatchOne not adding the Delayed
-// field (the held rewrites carry none); adding it whatever the mark (the
-// post-outage rewrite still says Delayed); withDelayedField inserting it
-// anywhere but third.
+// Mutants: newManagedBody carrying the delayed mark into the managed body's
+// content (the requests carry the note); newManagedBody not adding the
+// Delayed field to a held message's body (the held rewrites carry none);
+// adding it whatever the mark (the post-outage rewrite still says Delayed);
+// withDelayedField inserting it anywhere but third.
 func TestEditModeKeepsOneMessageThroughAHold(t *testing.T) {
 	f := newFakeDiscord(t, okCreated("M1"))
 	conn := newOutageConn(false)
@@ -502,6 +504,213 @@ func TestEditModeKeepsOneMessageThroughAHold(t *testing.T) {
 		if fl.Name == delayedFieldName {
 			t.Errorf("the rewrite raised after the outage still carries %q", fl.Value)
 		}
+	}
+}
+
+// outageMark names the outage mark a delivered request carries: "field" for
+// the Delayed field a lifecycle create or rewrite takes, "note" for the
+// content line every other post takes, "" for neither, and "both" for a
+// request that wrongly carries the two.
+func outageMark(r recordedReq) string {
+	field := false
+	for _, e := range r.Body.Embeds {
+		for _, fl := range e.Fields {
+			field = field || fl.Name == delayedFieldName
+		}
+	}
+	note := strings.Contains(r.Body.Content, "Delayed by a connectivity outage")
+	switch {
+	case field && note:
+		return "both"
+	case field:
+		return "field"
+	case note:
+		return "note"
+	}
+	return ""
+}
+
+// outageMarks is outageMark for each of calls.
+func outageMarks(calls []recordedReq) []string {
+	out := make([]string, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, outageMark(c))
+	}
+	return out
+}
+
+// TestEditModeCloseHeldInPlaceMarksTheRestOfTheEvent is W27-10's motivating
+// case on an edit-mode target: the job's lifecycle message is open when the
+// link dies, and the job fails because of it. Its Job Failed was queued while
+// the monitor still said online, so nothing marks it when its delivery
+// starts; the closing PATCH fails on the dead link and is held in place once
+// the monitor calls the outage. Everything the event sends after the outage
+// says it was delayed — the PATCH's resend in its Delayed field, and the
+// separate post that carries the ping in its content note, as a
+// separate-mode target marks the same held Job Failed. The post went out
+// unmarked: only Send's own re-render marked a resumed body, and the outage
+// held the PATCH, not the post.
+//
+// Every step waits on the state it needs: the PATCH's first attempt is held
+// in flight until the monitor reports offline, so the ladder's next look
+// finds the outage.
+//
+// Mutants: dispatchOne not carrying the hold to the separate post (it goes
+// out with no note); postOrPatch handing patchMessage no re-render, or
+// patchMessage handing deliver none (the resent PATCH has no Delayed field);
+// newManagedBody marking the body from the start (the PATCH's first attempt,
+// made before the outage, carries the field).
+func TestEditModeCloseHeldInPlaceMarksTheRestOfTheEvent(t *testing.T) {
+	prevBackoff := discordRetryBackoff
+	discordRetryBackoff = [discordMaxAttempts - 1]time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
+	t.Cleanup(func() { discordRetryBackoff = prevBackoff })
+
+	patched := make(chan struct{})
+	var down atomic.Bool
+	down.Store(true)
+	cut := dropConn(&down)
+	ok := okCreated("M1")
+	f := newFakeDiscord(t, func(n int, r recordedReq, rw http.ResponseWriter) {
+		if n == 1 { // the closing PATCH's first attempt
+			<-patched
+			cut(n, r, rw)
+			return
+		}
+		ok(n, r, rw)
+	})
+	conn := newOutageConn(true)
+	m := heldManager(t, conn, editTarget(f, nil, ModeEdit))
+	q := m.targets[0]
+
+	m.Send("Download Starting", "d", TypeDownload, nil, SendOptions{Event: "downloading", JobID: "yt_9"})
+	waitFor(t, "the creating POST", func() bool { return len(f.calls()) == 1 })
+	m.Send("Job Failed", "d", TypeError, nil, SendOptions{Event: "error", JobID: "yt_9"})
+	waitFor(t, "the closing PATCH in flight", func() bool { return len(f.calls()) == 2 })
+	conn.set(false) // the outage the job failed of, called under the PATCH
+	close(patched)
+	waitFor(t, "the PATCH held in place", func() bool { return isHolding(q) })
+	conn.set(true)
+
+	waitFor(t, "the PATCH's resend and the separate post", func() bool { return len(f.calls()) == 4 })
+	calls := f.calls()
+	if got, want := requestLines(calls), []string{"POST /", "PATCH /messages/M1", "PATCH /messages/M1", "POST /"}; !slices.Equal(got, want) {
+		t.Fatalf("requests = %v, want %v", got, want)
+	}
+	if got, want := outageMarks(calls), []string{"", "", "field", "note"}; !slices.Equal(got, want) {
+		t.Errorf("marks = %q, want %q — the create and the PATCH's first attempt went before the outage, its resend and the separate post after it", got, want)
+	}
+	if sep := calls[3]; sep.Body.Embeds[0].Title == "Job Failed" {
+		assertDelayedNote(t, sep)
+	} else {
+		t.Errorf("the last request carries %q, want the separate Job Failed", sep.Body.Embeds[0].Title)
+	}
+}
+
+// resumeGate is an outageGate whose next look after arm finds a hold the
+// monitor has already let go — an outage called and cleared between two
+// attempts — and whose every other look finds no outage.
+type resumeGate struct{ armed atomic.Bool }
+
+func (g *resumeGate) watchingOutages() bool { return true }
+
+func (g *resumeGate) awaitOutage(time.Duration) outageResult {
+	if g.armed.CompareAndSwap(true, false) {
+		return outageResumed
+	}
+	return outageNone
+}
+
+// TestEditModeHoldMarksEveryLaterRequest: an edit-mode event can make several
+// requests — the create or rewrite of the job's message, the rewrite of a
+// message an older spelling of the webhook opened (patchExtra), the separate
+// post of a terminal event — and an outage that holds any one of them in
+// place holds every one after it. Each request made after the hold carries
+// the mark, the held one's own resend included; each made before it, none.
+//
+// Mutants: postWait handing deliver no re-render (the held create is resent
+// unmarked); patchExtra rewriting with the unmarked body after a hold (the
+// second spelling's message, rewritten after the outage, is unmarked);
+// patchExtra handing patchMessage no re-render (its held rewrite is resent
+// unmarked, and the separate post after it too); postOrPatch re-creating a
+// gone message with the unmarked body.
+func TestEditModeHoldMarksEveryLaterRequest(t *testing.T) {
+	prevBackoff := discordRetryBackoff
+	discordRetryBackoff = [discordMaxAttempts - 1]time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
+	t.Cleanup(func() { discordRetryBackoff = prevBackoff })
+
+	const id, tok = "123456789012345678", "abcdefTOKEN"
+	plain := "https://discord.com/api/webhooks/" + id + "/" + tok
+	const job = "dQw4w9WgXcQ"
+	for _, tc := range []struct {
+		name  string
+		event string
+		// stored is the job's message on this target; spelled adds one an
+		// older spelling of the webhook opened, M_SLASH.
+		stored  string
+		spelled bool
+		// cut is the request whose attempt the outage takes; gone, one
+		// Discord answers Unknown Message (-1: none).
+		cut, gone int
+		want      []string
+		marks     []string
+	}{
+		{"a create held in place", "downloading", "", false, 0, -1,
+			[]string{"POST /", "POST /"}, []string{"", "field"}},
+		{"a close held in place", "error", "M_PLAIN", true, 0, -1,
+			[]string{"PATCH /messages/M_PLAIN", "PATCH /messages/M_PLAIN", "PATCH /messages/M_SLASH", "POST /"},
+			[]string{"", "field", "field", "note"}},
+		{"the second spelling's rewrite held in place", "error", "M_PLAIN", true, 1, -1,
+			[]string{"PATCH /messages/M_PLAIN", "PATCH /messages/M_SLASH", "PATCH /messages/M_SLASH", "POST /"},
+			[]string{"", "", "field", "note"}},
+		{"a message gone when the held rewrite is resent", "muxing", "M_PLAIN", false, 0, 1,
+			[]string{"PATCH /messages/M_PLAIN", "PATCH /messages/M_PLAIN", "POST /"},
+			[]string{"", "field", "field"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &resumeGate{}
+			var down atomic.Bool
+			down.Store(true)
+			cut := dropConn(&down)
+			ok := okCreated("NEW")
+			f := newFakeDiscord(t, func(n int, r recordedReq, rw http.ResponseWriter) {
+				switch n {
+				case tc.cut:
+					g.armed.Store(true) // the ladder's next look finds the hold
+					cut(n, r, rw)
+				case tc.gone:
+					rw.WriteHeader(http.StatusNotFound)
+					io.WriteString(rw, `{"message":"Unknown Message","code":10008}`)
+				default:
+					ok(n, r, rw)
+				}
+			})
+			urls := []string{plain}
+			if tc.spelled {
+				urls = append(urls, plain+"/")
+			}
+			tgt := legacyKeyTarget(t, f, urls...)
+			tgt.sender.(*DiscordWebhook).setOutageGate(g)
+			st := newMemStore()
+			if tc.stored != "" {
+				st.rows[job] = map[string]string{targetMsgKey(plain): tc.stored}
+				if tc.spelled {
+					st.rows[job][targetMsgKey(plain+"/")] = "M_SLASH"
+				}
+			}
+			m := &Manager{logger: testLogger{}}
+			m.SetMessageStore(st)
+
+			if err := m.dispatchOne(tgt, One(tc.event, "d", 0, nil, SendOptions{Event: tc.event, JobID: job}), false); err != nil {
+				t.Fatal(err)
+			}
+			calls := f.calls()
+			if got := requestLines(calls); !slices.Equal(got, tc.want) {
+				t.Fatalf("requests = %v, want %v", got, tc.want)
+			}
+			if got := outageMarks(calls); !slices.Equal(got, tc.marks) {
+				t.Errorf("marks = %q, want %q", got, tc.marks)
+			}
+		})
 	}
 }
 

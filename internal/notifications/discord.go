@@ -348,13 +348,13 @@ func (d *DiscordWebhook) SendOnce(msg Message) error {
 
 // Send sends a Discord webhook message. When an outage holds it part-way
 // through its ladder, what goes out after the outage is the same message
-// marked as delayed (deliverWith).
+// marked as delayed (deliver).
 func (d *DiscordWebhook) Send(msg Message) error {
 	body, err := buildPayload(msg)
 	if err != nil {
 		return err
 	}
-	_, err = d.deliverWith(http.MethodPost, d.URL, body, false, func() ([]byte, error) {
+	_, err = d.deliver(http.MethodPost, d.URL, body, false, func() ([]byte, error) {
 		held := msg
 		held.delayed = true
 		return buildPayload(held)
@@ -374,32 +374,25 @@ func (d *DiscordWebhook) Send(msg Message) error {
 // Alerts exist precisely for flaky moments; the previous single-shot behavior
 // dropped e.g. a "recording failed" embed on the first connection reset.
 //
-// The edit path's POST and PATCH come through here with no re-render: a
-// lifecycle rewrite an outage held is resent as it was (deliverWith).
-func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody bool) ([]byte, error) {
-	return d.deliverWith(method, endpoint, body, wantBody, nil)
-}
-
-// deliverWith is deliver's loop, and where an outage holds a delivery.
-//
-// With a gate installed (the target queue, watching the connectivity monitor),
-// nothing is spent on a link the monitor calls down. Before each attempt a
-// monitor reporting offline holds the delivery in place until it reports
-// online again, so an outage that starts under a delivery costs it the one
-// attempt it was making. When the LAST attempt failed at the transport level
-// and the monitor still says online, the delivery waits up to
-// outageVerdictWait for its verdict before giving up: the monitor is slower to
-// call an outage than three refused dials are to fail. Either way a hold ends
-// with a fresh ladder once the link is back — the outage is charged no
-// attempts.
+// It is also where an outage holds a delivery. With a gate installed (the
+// target queue, watching the connectivity monitor), nothing is spent on a link
+// the monitor calls down. Before each attempt a monitor reporting offline
+// holds the delivery in place until it reports online again, so an outage
+// that starts under a delivery costs it the one attempt it was making. When
+// the LAST attempt failed at the transport level and the monitor still says
+// online, the delivery waits up to outageVerdictWait for its verdict before
+// giving up: the monitor is slower to call an outage than three refused dials
+// are to fail. Either way a hold ends with a fresh ladder once the link is
+// back — the outage is charged no attempts.
 //
 // The hold blocks this target's queue goroutine only, which is the point —
 // what is queued behind waits in order — and never a producer. A target
 // retired or closed for shutdown while it holds gives the delivery up.
 //
 // delayed renders the body again marked as delayed, for the attempt after a
-// hold; nil resends body as it was.
-func (d *DiscordWebhook) deliverWith(method, endpoint string, body []byte, wantBody bool, delayed func() ([]byte, error)) (_ []byte, err error) {
+// hold — Send's adds the content note, the edit path's the Delayed field
+// (managedBody) — and nil resends body as it was.
+func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody bool, delayed func() ([]byte, error)) (_ []byte, err error) {
 	var lastErr error
 	var slept time.Duration
 	var r discordResponse

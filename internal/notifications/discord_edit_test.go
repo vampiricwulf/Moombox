@@ -87,7 +87,7 @@ func TestPostWaitAsksForTheMessageAndReturnsItsID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := d.postWait(body)
+	id, err := d.postWait(body, nil)
 	if err != nil {
 		t.Fatalf("postWait: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestPostWaitRejectsAResponseWithNoID(t *testing.T) {
 	})
 	d := &DiscordWebhook{URL: f.URL()}
 	body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
-	if _, err := d.postWait(body); err == nil {
+	if _, err := d.postWait(body, nil); err == nil {
 		t.Fatal("postWait accepted a response with no id")
 	}
 }
@@ -130,7 +130,7 @@ func TestPatchMessageTargetsTheMessageRoute(t *testing.T) {
 	d := &DiscordWebhook{URL: f.URL() + "/api/webhooks/123/tok"}
 
 	body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
-	if err := d.patchMessage("999", body); err != nil {
+	if err := d.patchMessage("999", body, nil); err != nil {
 		t.Fatalf("patchMessage: %v", err)
 	}
 	calls := f.calls()
@@ -182,7 +182,7 @@ func TestPatchMessageUnknownMessageIsRecoverable(t *testing.T) {
 			})
 			d := &DiscordWebhook{URL: f.URL()}
 			body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
-			err := d.patchMessage("999", body)
+			err := d.patchMessage("999", body, nil)
 			if err == nil {
 				t.Fatal("patchMessage accepted a refusal")
 			}
@@ -213,7 +213,7 @@ func TestEditPathSharesTheRetrySchedule(t *testing.T) {
 	})
 	d := &DiscordWebhook{URL: f.URL()}
 	body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
-	if err := d.patchMessage("999", body); err != nil {
+	if err := d.patchMessage("999", body, nil); err != nil {
 		t.Fatalf("patchMessage did not retry a 502: %v", err)
 	}
 	if n := len(f.calls()); n != 2 {
@@ -280,7 +280,7 @@ func TestUnknownMessageStillCarriesTheHTTPError(t *testing.T) {
 	})
 	d := &DiscordWebhook{URL: f.URL()}
 	body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
-	err := d.patchMessage("999", body)
+	err := d.patchMessage("999", body, nil)
 	if !errors.Is(err, ErrUnknownMessage) {
 		t.Fatalf("err = %v, want ErrUnknownMessage", err)
 	}
@@ -310,10 +310,10 @@ func TestEditURLsSurviveAThreadIDQuery(t *testing.T) {
 	d := &DiscordWebhook{URL: f.URL() + "/api/webhooks/123/TOK?thread_id=456"}
 
 	body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
-	if _, err := d.postWait(body); err != nil {
+	if _, err := d.postWait(body, nil); err != nil {
 		t.Fatalf("postWait: %v", err)
 	}
-	if err := d.patchMessage("999", body); err != nil {
+	if err := d.patchMessage("999", body, nil); err != nil {
 		t.Fatalf("patchMessage: %v", err)
 	}
 	calls := f.calls()

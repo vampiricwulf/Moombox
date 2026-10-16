@@ -145,9 +145,10 @@ func (d *DiscordWebhook) messageURL(messageID string) string {
 // postWait creates a message and returns its id, for a target that will later
 // rewrite it in place. Same loop, same retry schedule and same rate-limit
 // bucket as an ordinary Send — the only differences are wait=true and that the
-// response body is read.
-func (d *DiscordWebhook) postWait(body []byte) (string, error) {
-	respBody, err := d.deliver(http.MethodPost, d.execWaitURL(), body, true)
+// response body is read. delayed is deliver's: it renders the body to send
+// instead once an outage has held the request (nil resends body).
+func (d *DiscordWebhook) postWait(body []byte, delayed func() ([]byte, error)) (string, error) {
+	respBody, err := d.deliver(http.MethodPost, d.execWaitURL(), body, true, delayed)
 	if err != nil {
 		return "", err
 	}
@@ -156,9 +157,9 @@ func (d *DiscordWebhook) postWait(body []byte) (string, error) {
 
 // patchMessage rewrites a message this webhook created. A 404/10008 comes back
 // as ErrUnknownMessage so the caller can re-post; every other refusal is
-// permanent and reaches the caller unchanged.
-func (d *DiscordWebhook) patchMessage(messageID string, body []byte) error {
-	_, err := d.deliver(http.MethodPatch, d.messageURL(messageID), body, false)
+// permanent and reaches the caller unchanged. delayed is as for postWait.
+func (d *DiscordWebhook) patchMessage(messageID string, body []byte, delayed func() ([]byte, error)) error {
+	_, err := d.deliver(http.MethodPatch, d.messageURL(messageID), body, false, delayed)
 	return asEditRefusal(messageID, err)
 }
 
