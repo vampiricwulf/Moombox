@@ -47,7 +47,8 @@ export class MoomboxApp {
     this.autoCookieReloginRequired = null;
     // Tri-state; see loadStatus. null = the server has no opinion.
     this.sidecarHealthy = null;
-    // The server's UTC offset in minutes, from /api/status; null until read.
+    // The server's UTC offset in minutes, from /api/setup/status at boot and
+    // /api/status after; null until read.
     this.serverUtcOffsetMinutes = null;
     this.nextFeedCheck = 0;
     this.nextDecapiCheck = 0;
@@ -109,6 +110,13 @@ export class MoomboxApp {
   async init() {
     // Check if this is a first-run (no config)
     const status = await this.checkSetupStatus();
+    // The server's zone, for the template examples (renderTemplatePreview).
+    // A first run shows the wizard and never reaches loadStatus, which keeps
+    // it for Settings, so the wizard's example would only ever have the
+    // browser's date: take it from here, before the wizard draws.
+    if (Number.isFinite(status.utcOffsetMinutes)) {
+      this.serverUtcOffsetMinutes = status.utcOffsetMinutes;
+    }
 
     if (status.isFirstRun) {
       this.setup.show();

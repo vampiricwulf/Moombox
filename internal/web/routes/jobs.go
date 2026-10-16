@@ -1617,23 +1617,29 @@ type StatusRouteDeps struct {
 	GetChannelHealth func() map[string]any
 }
 
+// hostUTCOffsetMinutes is the host's zone offset from UTC right now, in
+// minutes east: the zone config.ResolveTemplate writes
+// ${start_date}/${start_time} in (time.Local — TZ in Docker), which need not
+// be the browser's. The dashboard's template examples read it — Settings'
+// from /api/status, the first-run wizard's from /api/setup/status, which is
+// all a first run fetches — so the date they show is the one a recording
+// made today would get.
+func hostUTCOffsetMinutes() int {
+	_, offset := time.Now().Zone()
+	return offset / 60
+}
+
 // StatusRoute returns the server status.
 func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 	r.Get("/api/status", func(rw http.ResponseWriter, req *http.Request) {
 		var mem runtime.MemStats
 		runtime.ReadMemStats(&mem)
 
-		// The host's zone offset from UTC right now, east positive: the zone
-		// config.ResolveTemplate writes ${start_date}/${start_time} in
-		// (time.Local — TZ in Docker), which need not be the browser's. The
-		// dashboard's template example reads it so the date it shows is
-		// the one a recording made today would get.
-		_, utcOffset := time.Now().Zone()
 		resp := map[string]any{
 			"status":           "running",
 			"uptime":           time.Since(deps.StartTime).Seconds(),
 			"timestamp":        time.Now().UTC().Format(time.RFC3339),
-			"utcOffsetMinutes": utcOffset / 60,
+			"utcOffsetMinutes": hostUTCOffsetMinutes(),
 			"memory": map[string]any{
 				"rss":        mem.Sys / 1048576,
 				"heapUsed":   mem.HeapAlloc / 1048576,

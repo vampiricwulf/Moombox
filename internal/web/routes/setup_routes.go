@@ -65,6 +65,10 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 
 		resp := map[string]any{
 			"isFirstRun": !configLoaded,
+			// The wizard's template example renders its date in the
+			// server's zone. A first run never reaches /api/status, which
+			// carries it for Settings, so it comes from here as well.
+			"utcOffsetMinutes": hostUTCOffsetMinutes(),
 		}
 		// Always include FFmpeg status (helps user during setup and post-setup)
 		path := ffmpegPath

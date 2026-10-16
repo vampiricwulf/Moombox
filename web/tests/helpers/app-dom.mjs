@@ -224,6 +224,10 @@ function defineShoelaceStubs(window) {
   class SlValue extends HTMLElement {
     get value() { return this._value ?? this.getAttribute("value") ?? ""; }
     set value(v) { this._value = v == null ? "" : String(v); }
+    // Reflects its attribute, as Shoelace's does: the template examples fall
+    // back to it while the input is empty, as they draw.
+    get placeholder() { return this.getAttribute("placeholder") ?? ""; }
+    set placeholder(v) { this.setAttribute("placeholder", v == null ? "" : String(v)); }
   }
   class SlChecked extends SlValue {
     get checked() { return this._checked ?? this.hasAttribute("checked"); }

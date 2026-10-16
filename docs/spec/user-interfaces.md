@@ -1021,7 +1021,7 @@ The same two lists carry every other restart-required key — `port`, `network_a
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/setup/status` | Check if first-run setup has been completed. |
+| `GET` | `/api/setup/status` | Check if first-run setup has been completed (`isFirstRun`), with FFmpeg's state (`ffmpegValid`, `ffmpegVersion`) and the host zone's UTC offset (`utcOffsetMinutes`, for the wizard's template example — a first run never reads `/api/status`). |
 | `POST` | `/api/setup/complete` | Save the wizard's settings and restart — loopback only, and once: the "setup already completed" check (400) is made again under the store lock, in the save both wizards end in (`config.Store.CompleteFirstRun`), so of two completes that overlap (the tab Moombox opens on boot and a second one, or the TUI wizard's) one is applied and the other refused, instead of both saving over each other and both restarting. See [First-Run Setup Wizard](#first-run-setup-wizard). |
 
 ### Logs

@@ -71,3 +71,33 @@ test("the Settings example shows the server's date once /api/status gives its zo
   });
   assert.equal(h.el("cfg-template-preview").textContent, "Example: 20260904 Singing Stream.mp4");
 });
+
+// The first-run wizard's example, too. A first run shows the wizard and never
+// calls initializeApp, the only caller of loadStatus, so /api/status's offset
+// never arrived and the wizard always drew the browser's date. Its offset
+// comes from /api/setup/status, which init() reads before the wizard draws.
+// The wizard completes only from loopback, so on a headless host it is a
+// browser on another machine through an SSH tunnel to localhost: another
+// zone. The frozen clock is 2026-09-05T12:00Z, Sep 4 at UTC-13 and Sep 5 in
+// every zone a browser can be in but UTC-12.
+//
+// Mutants: init() not keeping the setup status's utcOffsetMinutes (both
+// draws have the browser's Sep 5); keeping it after setup.show() (the first
+// draw, of the placeholder, has it); updateSetupPreview not passing the
+// offset (both); /api/setup/status not carrying it (TestSetupStatusCarries-
+// TheHostsUTCOffset).
+test("the setup wizard's example shows the server's date on a first run", { skip }, async () => {
+  let statusReads = 0;
+  const h = await harness.makeApp({
+    url: "http://localhost:774/",
+    initialState: { setup: { isFirstRun: true, ffmpegValid: true, utcOffsetMinutes: -780 } },
+    routes: { "GET /api/status": () => { statusReads++; return {}; } },
+  });
+  assert.equal(statusReads, 0, "a first run reads /api/status after all; this test no longer pins the setup status's offset");
+  const preview = h.el("setup-template-preview");
+  assert.equal(preview.textContent, "Example: Miko Ch/20260904 Singing Stream [dQw4w9WgXcQ].mp4", "the first draw, of the placeholder");
+  const input = h.el("setup-output-template");
+  input.value = "${start_date} ${title}";
+  input.dispatchEvent(new h.window.Event("sl-input"));
+  assert.equal(preview.textContent, "Example: 20260904 Singing Stream.mp4");
+});

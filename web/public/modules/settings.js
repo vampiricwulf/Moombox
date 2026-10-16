@@ -139,11 +139,11 @@ const RESTART_REQUIRED_FIELDS = [
  *
  * The sample is today at 20:00 in the SERVER's zone, which is the one the
  * resolver writes in (time.Local: TZ in Docker, the system zone elsewhere):
- * utcOffsetMinutes is /api/status's utcOffsetMinutes. The browser's own zone
- * is not the server's for a remote viewer, or for a container whose TZ
- * differs from the viewer's, and its date showed a day the recording would
- * not get. Without the offset (status not loaded yet) the browser's date is
- * the best guess.
+ * utcOffsetMinutes is the utcOffsetMinutes /api/setup/status and /api/status
+ * carry. The browser's own zone is not the server's for a remote viewer, or
+ * for a container whose TZ differs from the viewer's, and its date showed a
+ * day the recording would not get. Without the offset (neither status read)
+ * the browser's date is the best guess.
  */
 export function renderTemplatePreview(template, utcOffsetMinutes) {
   const pad = (n) => String(n).padStart(2, "0");
