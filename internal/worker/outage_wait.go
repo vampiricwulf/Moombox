@@ -30,12 +30,6 @@ func isTransportFailure(err error) bool {
 	return err != nil && probeVote(err) == reportFailure
 }
 
-// offline reports whether the connectivity monitor says the device has no
-// network. No monitor wired: never.
-func (w *DownloadWorker) offline() bool {
-	return w.conn != nil && !w.conn.IsOnline()
-}
-
 // outageCalled reports whether a stream-processing failure was the device
 // being offline, and so must be waited out rather than recorded: a transport
 // failure (isTransportFailure) met while the monitor reports offline, or one
@@ -75,10 +69,22 @@ func (w *DownloadWorker) outageCalled(ctx context.Context, err error) bool {
 	}
 }
 
-// waitForNetwork blocks until the connectivity monitor reports online, and
-// reports false when ctx ends first. The row keeps its status throughout —
-// an Upcoming broadcast stays Upcoming, an interrupted capture Downloading —
-// and its progress line says what it is waiting for, cleared however the wait
+// networkWaitFloor is the longest waitForNetwork waits on the connectivity
+// monitor before it lets the caller try its fetch anyway — the waiting
+// loops' offlineProbeFloor, for the same reason: the monitor can report
+// offline while the platforms answer (its probe dials only probe_targets,
+// which a firewall can block, and a successful platform request does not
+// bring it back online), and a wait that ended only on its word stranded the
+// job for as long as it was wrong. During a real outage the fetch fails as
+// fast as it did, and the wait starts again. A var so tests need not wait it
+// out.
+var networkWaitFloor = offlineProbeFloor
+
+// waitForNetwork blocks until the connectivity monitor reports online, or
+// networkWaitFloor has passed with it still reporting offline, and reports
+// false when ctx ends first. The row keeps its status throughout — an
+// Upcoming broadcast stays Upcoming, an interrupted capture Downloading — and
+// its progress line says what it is waiting for, cleared however the wait
 // ends. Returns at once when the monitor already reports online.
 func (w *DownloadWorker) waitForNetwork(ctx context.Context, jobID string) bool {
 	if w.conn == nil {
@@ -101,9 +107,13 @@ func (w *DownloadWorker) waitForNetwork(ctx context.Context, jobID string) bool 
 	}
 	w.db.UpdateJobFields(jobID, map[string]any{"progress": networkWaitProgress})
 	defer w.db.UpdateJobFields(jobID, map[string]any{"progress": ""})
+	floor := time.NewTimer(networkWaitFloor)
+	defer floor.Stop()
 	for {
 		select {
 		case <-online:
+		case <-floor.C:
+			return true
 		case <-ctx.Done():
 			return false
 		}
@@ -143,34 +153,50 @@ func (w *DownloadWorker) waitOutOutage(ctx context.Context, job *database.Job) b
 // went unrecorded and the rest of an interrupted Twitch capture (no DVR) was
 // lost.
 //
-// So, as the scheduler holds admission and the downloaders wait in place:
-// while the monitor reports offline, stream processing does not start; and a
-// fetch that fails on the outage (outageCalled) waits for the network and
-// runs stream processing again from the top, the row keeping its status
-// throughout. Anything else — an answer from the service, a transport failure
-// the monitor does not call an outage — is returned as before.
+// So, as the downloaders wait in place: a fetch that fails on the outage
+// (outageCalled) waits for the network and runs stream processing again from
+// the top, the row keeping its status throughout. Anything else — an answer
+// from the service, a transport failure the monitor does not call an outage —
+// is returned as before.
+//
+// The wait follows a failed fetch; the monitor's word alone never starts one.
+// Stream processing used to be held before its first fetch while the monitor
+// reported offline, and the monitor can say that with the network up (its
+// probe dials only probe_targets, which a firewall can block, and nothing the
+// platforms answer brings it back): every job processJob ran — a manual add,
+// every row re-enqueued at boot, an interrupted live capture among them —
+// waited under the wait's progress line for as long as the monitor was
+// wrong, and nothing was ever fetched. A fetch made during a real outage
+// fails at once, so only one the network can answer goes ahead; and the wait
+// itself gives the fetch another try every networkWaitFloor.
 //
 // A wait that ctx ends, or after which the row is gone or no longer
 // processable, returns cancelledResult(), which processJob routes to
 // handleCancellation: a shutdown leaves the row as it is, to resume on the
 // next start.
 func (w *DownloadWorker) processStreamThroughOutages(ctx context.Context, job *database.Job) (*StreamProcessResult, error) {
-	for {
-		if w.offline() {
-			w.logger.Info("offline; stream processing waits for connectivity",
-				"jobID", job.ID, "status", job.Status)
-			if !w.waitOutOutage(ctx, job) {
-				return cancelledResult(), nil
-			}
-			w.logger.Info("connectivity restored; processing the job", "jobID", job.ID)
-		}
+	for waited := false; ; waited = true {
 		result, err := w.processStream(ctx, job)
 		if err == nil || ctx.Err() != nil || !w.outageCalled(ctx, err) {
 			return result, w.markTwitchUnreachable(job, err)
 		}
-		w.logger.Warn("stream processing failed on a connectivity outage; waiting for the network, then processing the job again",
+		w.logOutageWait(waited, "stream processing failed on a connectivity outage; waiting for the network, then processing the job again",
 			"jobID", job.ID, "status", job.Status, "err", err)
+		if !w.waitOutOutage(ctx, job) {
+			return cancelledResult(), nil
+		}
 	}
+}
+
+// logOutageWait logs a wait an outage forced on a job: at Warn the first time
+// in a run, at Debug every time after — once a minute through a long outage
+// (networkWaitFloor), which at Warn would bury the job's log.
+func (w *DownloadWorker) logOutageWait(again bool, msg string, args ...any) {
+	if again {
+		w.logger.Debug(msg, args...)
+		return
+	}
+	w.logger.Warn(msg, args...)
 }
 
 // refreshStaleVodInfoThroughOutages is refreshStaleVodInfo with the same
@@ -180,12 +206,12 @@ func (w *DownloadWorker) processStreamThroughOutages(ctx context.Context, job *d
 // held through the wait: the download they are for comes straight after.
 // Returns an error wrapping ErrCancelled when the wait ended without the run.
 func (w *DownloadWorker) refreshStaleVodInfoThroughOutages(ctx context.Context, job *database.Job, result *StreamProcessResult, extractedAt time.Time) error {
-	for {
+	for waited := false; ; waited = true {
 		err := w.refreshStaleVodInfo(ctx, job, result, extractedAt)
 		if err == nil || ctx.Err() != nil || !w.outageCalled(ctx, err) {
 			return err
 		}
-		w.logger.Warn("VOD re-extraction failed on a connectivity outage; waiting for the network, then re-extracting",
+		w.logOutageWait(waited, "VOD re-extraction failed on a connectivity outage; waiting for the network, then re-extracting",
 			"jobID", job.ID, "err", err)
 		if !w.waitOutOutage(ctx, job) {
 			return ErrCancelled

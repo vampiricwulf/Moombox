@@ -86,19 +86,16 @@ func jobRow(t *testing.T, db *database.Database, id string) *database.Job {
 // Upcoming, Live and Downloading row. processJob ran stream processing on
 // each at once, its first fetch failed with the outage's dial error, and the
 // row ended in Error for good — a scheduled stream never recorded, the rest
-// of an interrupted Twitch capture lost. Now stream processing waits for the
-// network, the row keeping its status under the wait's progress line, and
-// runs once it is back.
+// of an interrupted Twitch capture lost. Now the fetch that fails on the
+// outage waits for the network, the row keeping its status under the wait's
+// progress line, and stream processing runs again once it is back.
 //
 // Mutants this kills:
 //   - processJob calling processStream directly again → no wait at all
-//   - processStreamThroughOutages' offline gate dropped (`if w.offline()`
-//     never taken) → stream processing runs offline (no wait line, a call
-//     before the network is back)
 //   - waitForNetwork not writing networkWaitProgress, or not clearing it →
 //     the line never shows, or outlives the wait
 //   - waitForNetwork returning before the monitor reports online → stream
-//     processing runs offline
+//     processing runs again offline
 func TestOfflineBootWaitsForTheNetworkInPlace(t *testing.T) {
 	w, db, conn := outageWorker(t, false)
 	ch := "UC_boot"
@@ -132,16 +129,16 @@ func TestOfflineBootWaitsForTheNetworkInPlace(t *testing.T) {
 		waitForCond(t, 5*time.Second, tc.id+" waiting for the network", func() bool {
 			return jobRow(t, db, tc.id).Progress == networkWaitProgress
 		})
-		if n := calls.Load(); n != 0 {
-			t.Errorf("%s: stream processing ran %d time(s) while offline", tc.id, n)
+		if n := calls.Load(); n != 1 {
+			t.Errorf("%s: stream processing ran %d time(s) while offline, want once: the fetch the wait follows", tc.id, n)
 		}
 		if row := jobRow(t, db, tc.id); row.Status != tc.status || row.Error != "" {
 			t.Errorf("%s: waiting row reads %s (%q), want the %s it came in with", tc.id, row.Status, row.Error, tc.status)
 		}
 		conn.set(true)
 		awaitDone(t, done, tc.id)
-		if n := calls.Load(); n != 1 {
-			t.Errorf("%s: stream processing ran %d time(s), want once, after the network returned", tc.id, n)
+		if n := calls.Load(); n != 2 {
+			t.Errorf("%s: stream processing ran %d time(s), want twice: the failed fetch, then once the network returned", tc.id, n)
 		}
 		row := jobRow(t, db, tc.id)
 		if row.Status != tc.status || row.Error != "" {
@@ -160,9 +157,9 @@ func TestOfflineBootWaitsForTheNetworkInPlace(t *testing.T) {
 // Error.
 //
 // Mutant killed: waitForNetwork's false ignored in waitOutOutage (the run
-// going on to stream processing on a dead ctx — processJob's own ctx read
-// still routes that to handleCancellation, so the count of stream-processing
-// runs is what tells them apart).
+// going on to stream processing again on a dead ctx — processJob's own ctx
+// read still routes that to handleCancellation, so the count of
+// stream-processing runs is what tells them apart).
 func TestOfflineBootShutdownLeavesTheRowToResume(t *testing.T) {
 	w, db, _ := outageWorker(t, false)
 	ch := "UC_boot"
@@ -178,8 +175,82 @@ func TestOfflineBootShutdownLeavesTheRowToResume(t *testing.T) {
 	if row := jobRow(t, db, "boot_shutdown"); row.Status != database.StatusUpcoming || row.Error != "" {
 		t.Errorf("status = %s (%q), want the Upcoming row left to resume", row.Status, row.Error)
 	}
-	if n := calls.Load(); n != 0 {
-		t.Errorf("stream processing ran %d time(s) after the shutdown ended the wait", n)
+	if n := calls.Load(); n != 1 {
+		t.Errorf("stream processing ran %d time(s), want once: the fetch the wait follows, and none after the shutdown ended it", n)
+	}
+}
+
+// TestWronglyOfflineMonitorDoesNotHoldTheFirstFetch: the connectivity monitor
+// can report offline with the network up — its probe dials only
+// probe_targets, which a firewall can block, and nothing the platforms answer
+// brings it back. Stream processing used to wait on its word before the first
+// fetch, so every job processJob ran (here an interrupted capture re-enqueued
+// at boot) sat under the wait's progress line for as long as the monitor was
+// wrong, with nothing ever fetched. A wait now follows a failed fetch only:
+// this one, which the network answers, goes ahead at once.
+//
+// Mutant killed: an up-front `if !w.conn.IsOnline()` wait restored ahead of
+// processStream → no call before networkWaitFloor (a minute here).
+func TestWronglyOfflineMonitorDoesNotHoldTheFirstFetch(t *testing.T) {
+	w, db, _ := outageWorker(t, false) // the monitor says offline throughout
+	ch := "UC_wrong"
+	addSchedJob(t, db, &ch, "wrong_oracle", database.StatusDownloading, 0)
+	var calls atomic.Int32
+	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+		calls.Add(1) // the platform answers: the network is up
+		return cancelledResult(), nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runJob(t, w, ctx, "wrong_oracle")
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		row := jobRow(t, db, "wrong_oracle")
+		cancel()
+		<-done
+		t.Fatalf("processJob still waiting after 5s with the network up (row %s, progress %q, %d stream-processing run(s))",
+			row.Status, row.Progress, calls.Load())
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("stream processing ran %d time(s), want once", n)
+	}
+}
+
+// TestNetworkWaitTriesAgainWhileTheMonitorStaysOffline: a fetch that failed
+// while the monitor reports offline waits for the network — and when the
+// monitor is wrong it never reports it back. The wait gives the fetch another
+// try every networkWaitFloor, as the waiting loops probe at least every
+// offlineProbeFloor, so a job the network can serve is not stranded on the
+// monitor's word.
+//
+// Mutant killed: waitForNetwork's floor arm dropped → the wait ends only on
+// the monitor, which never comes back; the second fetch never happens.
+func TestNetworkWaitTriesAgainWhileTheMonitorStaysOffline(t *testing.T) {
+	old := networkWaitFloor
+	networkWaitFloor = 50 * time.Millisecond
+	t.Cleanup(func() { networkWaitFloor = old })
+	w, db, _ := outageWorker(t, false) // offline throughout
+	ch := "UC_floor"
+	addSchedJob(t, db, &ch, "floor_upcoming", database.StatusUpcoming, 0)
+	var calls atomic.Int32
+	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+		if calls.Add(1) == 1 {
+			return nil, fmt.Errorf("full fetch failed: %w", dialRefused)
+		}
+		return cancelledResult(), nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	w.processJob(ctx, "floor_upcoming")
+	if ctx.Err() != nil {
+		t.Fatal("processJob ran until the test's deadline: the wait never let the fetch try again")
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("stream processing ran %d time(s), want twice", n)
+	}
+	if row := jobRow(t, db, "floor_upcoming"); row.Status != database.StatusUpcoming || row.Error != "" || row.Progress != "" {
+		t.Errorf("row = %s (%q, progress %q), want Upcoming with the wait's line cleared", row.Status, row.Error, row.Progress)
 	}
 }
 
@@ -196,7 +267,9 @@ func TestWaitedOutRowThatLeftIsNotProcessed(t *testing.T) {
 	addSchedJob(t, db, &ch, "boot_left", database.StatusUpcoming, 0)
 	var calls atomic.Int32
 	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
-		calls.Add(1)
+		if calls.Add(1) == 1 {
+			return nil, fmt.Errorf("full fetch failed: %w", dialRefused)
+		}
 		return cancelledResult(), nil
 	}
 	done := runJob(t, w, context.Background(), "boot_left")
@@ -206,8 +279,8 @@ func TestWaitedOutRowThatLeftIsNotProcessed(t *testing.T) {
 	db.UpdateJobFields("boot_left", map[string]any{"status": database.StatusFinished})
 	conn.set(true)
 	awaitDone(t, done, "boot_left")
-	if n := calls.Load(); n != 0 {
-		t.Errorf("stream processing ran %d time(s) for a row that left the queue's states during the wait", n)
+	if n := calls.Load(); n != 1 {
+		t.Errorf("stream processing ran %d time(s), want once: not again for a row that left the queue's states during the wait", n)
 	}
 	if row := jobRow(t, db, "boot_left"); row.Status != database.StatusFinished {
 		t.Errorf("status = %s, want the Finished the row was given", row.Status)
