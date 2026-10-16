@@ -140,13 +140,26 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// finalizing switches the offline cancel off once the session loop is
 	// over: muxing and the chat drain need no network, and a blip there used
 	// to cancel the final mux — a complete recording landing in Error, a
-	// split job finishing without its last part.
-	var finalizing atomic.Bool
+	// split job finishing without its last part. Set and read under
+	// cancelMu, with the session to cancel taken under the same lock: a
+	// report that found it unset cancels a session installed before it was
+	// set, never the finalize's own.
+	var finalizing bool
 	if o.conn != nil && !isVod {
 		unregisterConn := o.conn.OnStateChange(func(online bool) {
-			if !online && !finalizing.Load() {
+			if online {
+				return
+			}
+			cancelMu.Lock()
+			c := cancelCurrent
+			if finalizing {
+				c = nil
+			} else {
 				offlineCancelled.Store(true)
-				callCancel()
+			}
+			cancelMu.Unlock()
+			if c != nil {
+				c()
 			}
 		})
 		defer unregisterConn()
@@ -601,6 +614,16 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// consumes it on entry.
 	outageFinalize := false
 
+	// sessionErr is the last session's own state, read once, where the loop
+	// decides between an outage and an end. The post-loop dispatch decides
+	// on it rather than on the session context, which an offline report
+	// landing after that moment still cancels: read again later, a clean
+	// end the report caught on its way to the finalize took the
+	// shutdown/user-cancel exit and returned "context canceled" with the
+	// job's own context alive, so processJob wrote Error over a complete
+	// capture.
+	var sessionErr error
+
 	// unconfirmedEndErr latches the HLS loop's unknown-verdict exit: the
 	// download failed while nothing said the broadcast was over. Finalizing
 	// there marked the job Finished and processJob then deleted the staging
@@ -948,7 +971,11 @@ sessionLoop:
 		// Inner loop exited. Anything other than a live-stream connectivity
 		// outage — natural end of stream, shutdown, user cancel, job
 		// deletion — ends the session loop and proceeds to finalization.
-		isOutage := ctx.Err() != nil && parentCtx.Err() == nil &&
+		// An offline report landing before this read is the outage it
+		// reports (the flag is set before the cancel); one landing after it
+		// is not, and the dispatch below never sees it.
+		sessionErr = ctx.Err()
+		isOutage := sessionErr != nil && parentCtx.Err() == nil &&
 			!userCancelled.Load() && offlineCancelled.Load()
 		if !isOutage {
 			break sessionLoop
@@ -1081,13 +1108,15 @@ sessionLoop:
 		// callCancel against the already-spent wait session — the flag is
 		// the only trace of it. Once cancelCurrent points at the new
 		// session, any later cancel reaches the download directly. Cancel
-		// the fresh session before breaking so the post-loop dispatch sees
-		// a cancelled ctx and takes the terminal path (preserve staging),
-		// not the finalize path. A connectivity re-drop in the same window
-		// needs no special handling: the engine's IsOnline wiring makes the
-		// resumed downloader wait out the blip itself.
+		// the fresh session before breaking, as the session's state the
+		// post-loop dispatch decides by, so it takes the terminal path
+		// (preserve staging), not the finalize path. A connectivity re-drop
+		// in the same window needs no special handling: the engine's
+		// IsOnline wiring makes the resumed downloader wait out the blip
+		// itself.
 		if parentCtx.Err() != nil || userCancelled.Load() {
 			callCancel()
+			sessionErr = ctx.Err()
 			break sessionLoop
 		}
 
@@ -1169,16 +1198,26 @@ sessionLoop:
 	// "Downloading" through ~the entire post-stream phase. Audit
 	// reports/worker.md F23 / Q4.
 	//
-	// Only on the way to a finalize — the exact complement of the
-	// shutdown/user-cancel exit below. This write used to come first for
-	// every exit: an operator's Cancel of a live capture was written over
-	// with Muxing every time, and a shutdown left the row Muxing, so the
-	// restart muxed the partial capture (muxOnRestart) instead of resuming
-	// the broadcast; the row stays Downloading for that now. And only on a
-	// row with no outcome: a Cancel whose row write landed before this
-	// run's listener heard it (a slower subscriber ahead of it holds the
-	// notification chain) is refused here, and taken as the user's cancel.
-	if ctx.Err() == nil || (outageFinalize && parentCtx.Err() == nil && !userCancelled.Load()) {
+	// Only on the way to a finalize: the session ended cleanly, or the
+	// broadcast ended during an outage with neither the job's context nor
+	// the user's cancel behind it. Decided once, here, on what the session
+	// loop ended with (sessionErr), and the exit below is the complement of
+	// this decision, with the two terminal signals read again after the
+	// wait — never the loop's session, which an offline report still
+	// cancels until finalizing is set. The part-mux wait below is the
+	// likeliest place for one to land, and the exit used to read the
+	// session again after it: a clean end took the shutdown exit there.
+	//
+	// This write used to come first for every exit: an operator's Cancel of
+	// a live capture was written over with Muxing every time, and a
+	// shutdown left the row Muxing, so the restart muxed the partial
+	// capture (muxOnRestart) instead of resuming the broadcast; the row
+	// stays Downloading for that now. And only on a row with no outcome: a
+	// Cancel whose row write landed before this run's listener heard it (a
+	// slower subscriber ahead of it holds the notification chain) is
+	// refused here, and taken as the user's cancel.
+	finalize := sessionErr == nil || (outageFinalize && parentCtx.Err() == nil && !userCancelled.Load())
+	if finalize {
 		if writeUnlessOutcome(o.db, jobCtx.Job.ID, map[string]any{
 			"status": database.StatusMuxing,
 		}) {
@@ -1190,37 +1229,44 @@ sessionLoop:
 	// Wait for any background segment muxes to finish
 	segmentMuxWg.Wait()
 
-	if ctx.Err() != nil {
-		if !outageFinalize || parentCtx.Err() != nil || userCancelled.Load() {
-			// Shutdown/user cancel (including either arriving during an
-			// outage wait): preserve staging dir for resume
-			if twitchChatDl != nil {
-				twitchChatDl.Stop()
-				// This exit never reaches resolveChatOutcome, the only other
-				// place that waits on chatDone — and the chat goroutine's
-				// deferred teardown (flush, then the resume-sidecar write) is
-				// still running. Returning here left ResumeStore.Save mid-
-				// rename inside the staging directory the caller is about to
-				// hand to a resume, a /retry (which DELETES staging) or a
-				// t.TempDir cleanup. Bounded, like every other wait on this
-				// channel: a wedged downloader must not hold a shutdown open.
-				if !waitForChatShutdown(chatDone, chatShutdownGrace) {
-					o.logger.Warn("Twitch chat downloader still running after the shutdown grace; "+
-						"its resume sidecar may be incomplete", "jobID", jobCtx.Job.ID)
-				}
+	if !finalize || parentCtx.Err() != nil || userCancelled.Load() {
+		// Shutdown/user cancel (including either arriving during an outage
+		// wait or the part-mux wait above): preserve staging dir for resume
+		if twitchChatDl != nil {
+			twitchChatDl.Stop()
+			// This exit never reaches resolveChatOutcome, the only other
+			// place that waits on chatDone — and the chat goroutine's
+			// deferred teardown (flush, then the resume-sidecar write) is
+			// still running. Returning here left ResumeStore.Save mid-
+			// rename inside the staging directory the caller is about to
+			// hand to a resume, a /retry (which DELETES staging) or a
+			// t.TempDir cleanup. Bounded, like every other wait on this
+			// channel: a wedged downloader must not hold a shutdown open.
+			if !waitForChatShutdown(chatDone, chatShutdownGrace) {
+				o.logger.Warn("Twitch chat downloader still running after the shutdown grace; "+
+					"its resume sidecar may be incomplete", "jobID", jobCtx.Job.ID)
 			}
-			if userCancelled.Load() {
-				// ErrCancelled as well as the context's error, so processJob
-				// takes the cancellation path even while its own ctx is still
-				// live: the run's ctx cancel comes after the Cancel's row write,
-				// and a row that holds another outcome (the Muxing write's
-				// refusal above) has no ctx cancel coming at all. Read as a
-				// failure, setJobError's write applies to any row but a
-				// Cancelled one.
-				return fmt.Errorf("%w: %w", ErrCancelled, ctx.Err())
-			}
-			return ctx.Err()
 		}
+		// The loop's session is cancelled on every way here but one: a
+		// user's cancel on the finalize path whose listener has set the flag
+		// and not yet cancelled the session.
+		stopErr := ctx.Err()
+		if stopErr == nil {
+			stopErr = context.Canceled
+		}
+		if userCancelled.Load() {
+			// ErrCancelled as well as the context's error, so processJob
+			// takes the cancellation path even while its own ctx is still
+			// live: the run's ctx cancel comes after the Cancel's row write,
+			// and a row that holds another outcome (the Muxing write's
+			// refusal above) has no ctx cancel coming at all. Read as a
+			// failure, setJobError's write applies to any row but a
+			// Cancelled one.
+			return fmt.Errorf("%w: %w", ErrCancelled, stopErr)
+		}
+		return stopErr
+	}
+	if outageFinalize {
 		// The broadcast ended or changed while connectivity was down: finalize
 		// everything captured up to the outage. Live only — outageFinalize is
 		// set by the session loop's outage branch, which a VOD never reaches
@@ -1252,10 +1298,12 @@ sessionLoop:
 	// The finalize runs on a session of its own: only a user cancel or the
 	// job's own context (shutdown, deletion) can end it, never an offline
 	// transition (finalizing, above) — it needs no network. The fresh
-	// session is what covers the moment between the session loop's exit and
-	// the flag: an offline cancel landing there cancelled the loop's session,
-	// which nothing below uses.
-	finalizing.Store(true)
+	// session is what covers the moment between the session loop's end and
+	// the flag: an offline cancel landing there cancelled the loop's
+	// session, which nothing from the dispatch on decides by (sessionErr).
+	cancelMu.Lock()
+	finalizing = true
+	cancelMu.Unlock()
 	finalCtx, _ := newSession()
 	muxCtx := finalCtx
 	if outageFinalize {

@@ -223,3 +223,72 @@ func TestTwitchCancelBeforeTheMuxingWriteStands(t *testing.T) {
 		t.Errorf("%q was sent for a capture the operator had cancelled", got[0].Title)
 	}
 }
+
+// A live capture whose broadcast ends cleanly finalizes even when the
+// connection drops after the session loop has ended: here as the Muxing write
+// is published, which is where the part-mux wait begins. The exit used to read
+// the loop's session again after that wait, and the offline report had
+// cancelled it, so a complete capture took the shutdown/user-cancel exit and
+// returned "context canceled" with the job's own context alive; processJob
+// wrote Error over the row, and neither the automatic mux nor the Twitch
+// recovery picks that row up.
+//
+// Mutant: the exit gated on the loop's session again (`ctx.Err() != nil &&
+// (!outageFinalize || parentCtx.Err() != nil || userCancelled.Load())`):
+// ExecuteTwitch returns context.Canceled and no mux is announced. The
+// decision itself reading ctx.Err() at the dispatch rather than sessionErr
+// survives here: the only report it would mistake lands between the loop's
+// last read and the dispatch, where nothing a test can hold runs.
+func TestTwitchCleanEndFinalizesThroughAnOfflineReport(t *testing.T) {
+	h := newEndVerdictHarness(t, "tw_clean_end_offline")
+	rec := notificationtest.New()
+	h.o.notifier = rec
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".m3u8") {
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			_, _ = w.Write([]byte("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n" +
+				"#EXTINF:1.0,\nseg0.ts\n#EXTINF:1.0,\nseg1.ts\n#EXT-X-ENDLIST\n"))
+			return
+		}
+		_, _ = w.Write(bytes.Repeat([]byte{0x47}, 188*20))
+	}))
+	defer srv.Close()
+	h.variant.URL = srv.URL + "/live.m3u8"
+	h.variant.CheckStreamFn = func(context.Context) (bool, error) { return false, nil }
+	h.variant.RecheckStreamFn = func(context.Context) (*twitch.TwitchStreamInfo, error) {
+		return &twitch.TwitchStreamInfo{IsLive: false}, nil
+	}
+
+	var once sync.Once
+	var dropped atomic.Bool
+	unsub := h.db.OnJobUpdate(func(j *database.Job) {
+		if j.ID != h.job.ID || j.Status != database.StatusMuxing {
+			return
+		}
+		once.Do(func() {
+			dropped.Store(true)
+			h.conn.set(false)
+		})
+	})
+	defer unsub()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil)
+	h.conn.set(true)
+
+	if !dropped.Load() {
+		t.Fatal("the capture never reached the Muxing write")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("the job's own context ended; the test is invalid")
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, ErrCancelled) {
+		t.Errorf("a broadcast that ended cleanly returned %v after an offline report, want the finalize "+
+			"(a mux result, not a stop)", err)
+	}
+	if got := rec.ByEvent("muxing"); len(got) != 1 {
+		t.Errorf("mux announcements = %d, want 1: the clean end must finalize", len(got))
+	}
+}
