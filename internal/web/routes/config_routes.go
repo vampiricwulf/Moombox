@@ -19,7 +19,6 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
-	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
@@ -195,10 +194,11 @@ func ffmpegPathError(p string) string {
 }
 
 // newFFmpegPathError applies ffmpegPathError to a paths.ffmpeg_path update
-// only when it CHANGES the stored value: the dashboard's full-form save
-// sends the stored path back on every save, and a path stored before this
-// rule (or hand-edited into config.toml) must not make every unrelated save
-// fail on a field the operator never touched.
+// only when it CHANGES the stored value: an API client's full-body save
+// sends the stored path back (the dashboard's did, before it sent only what
+// it edited), and a path stored before this rule (or hand-edited into
+// config.toml) must not make every unrelated save fail on a field the
+// operator never touched.
 func newFFmpegPathError(updates map[string]any, stored string) string {
 	paths, ok := updates["paths"].(map[string]any)
 	if !ok {
@@ -651,43 +651,53 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		}
 	}
 
-	// Notifications — mention must be a well-formed Discord mention token
-	// (config.ParseMention's four accepted forms); a token Discord cannot
-	// resolve renders as literal text and pings nobody, which looks like a
-	// delivery failure. mode must be one of the two the file loader accepts.
-	// Unknown event names are NOT errors here: they are
-	// stripped in applyConfigUpdates, where an all-unknown Events filter is
-	// deliberately left as written rather than rejected or emptied.
+	// Notifications: a whole list, which /api/setup/complete still takes (PUT
+	// /api/config refuses one, and takes notification_edits instead).
 	if notifs, ok := updates["notifications"].([]any); ok {
-		// Same decode gate as the channels arm above, and the same reason:
-		// `"enabled": "false"` on one target used to drop the whole
-		// notifications update behind a 200.
-		if _, decErrs := decodeConfigEntries[config.NotificationConfig]("notifications", notifs); decErrs != nil {
-			maps.Copy(errs, decErrs)
+		maps.Copy(errs, notificationEntryErrors("notifications", notifs))
+	}
+
+	return errs
+}
+
+// notificationEntryErrors checks a JSON array of notification targets —
+// /api/setup/complete's notifications, PUT /api/config's
+// notification_edits.edited — keyed field[i].<key>. Each entry must decode:
+// the same gate as the channels arm, and the same reason, since
+// `"enabled": "false"` on one target used to drop the whole update behind a
+// 200. mention must be a well-formed Discord mention token
+// (config.ParseMention's four accepted forms); a token Discord cannot
+// resolve renders as literal text and pings nobody, which looks like a
+// delivery failure. mode must be one of the two the file loader accepts.
+// Unknown event names are NOT errors here: they are stripped
+// (normalizeNotificationEntries), where an all-unknown Events filter is
+// deliberately left as written rather than rejected or emptied.
+func notificationEntryErrors(field string, raw []any) map[string]string {
+	errs := map[string]string{}
+	if _, decErrs := decodeConfigEntries[config.NotificationConfig](field, raw); decErrs != nil {
+		maps.Copy(errs, decErrs)
+	}
+	for i, item := range raw {
+		nm, ok := item.(map[string]any)
+		if !ok {
+			continue
 		}
-		for i, raw := range notifs {
-			nm, ok := raw.(map[string]any)
-			if !ok {
-				continue
+		if v, ok := nm["mention"].(string); ok && v != "" {
+			if _, _, _, err := config.ParseMention(v); err != nil {
+				errs[fmt.Sprintf("%s[%d].mention", field, i)] = err.Error()
 			}
-			if v, ok := nm["mention"].(string); ok && v != "" {
-				if _, _, _, err := config.ParseMention(v); err != nil {
-					errs[fmt.Sprintf("notifications[%d].mention", i)] = err.Error()
-				}
-			}
-			// The per-target delivery mode. Matches the config-side constraint
-			// in validateOrNormalize — a value the file loader would refuse
-			// must not be reachable through a PUT either.
-			if v, ok := nm["mode"].(string); ok {
-				switch v {
-				case "", "separate", "edit":
-				default:
-					errs[fmt.Sprintf("notifications[%d].mode", i)] = `mode must be "separate" or "edit"`
-				}
+		}
+		// The per-target delivery mode. Matches the config-side constraint
+		// in validateOrNormalize — a value the file loader would refuse
+		// must not be reachable through a PUT either.
+		if v, ok := nm["mode"].(string); ok {
+			switch v {
+			case "", "separate", "edit":
+			default:
+				errs[fmt.Sprintf("%s[%d].mode", field, i)] = `mode must be "separate" or "edit"`
 			}
 		}
 	}
-
 	return errs
 }
 
@@ -1105,60 +1115,18 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 	}
 
 	// Notifications
-	// Decoded through decodeConfigEntries, the shared helper the channels arm
+	// A whole list: /api/setup/complete's (PUT /api/config refuses one and
+	// merges notification_edits instead). Decoded through
+	// decodeConfigEntries, the shared helper the channels arm
 	// below also uses, rather than rebuilt field by field: every tagged field
 	// carries through unconditionally, so a field a later arc adds (N3's
 	// `mode`) needs no route edit here and survives a save written before it
-	// existed — the SPA round-trips the whole stored array on every settings
-	// save, so a field this route didn't know about would otherwise be
-	// silently dropped. A decode error is already a 400 by the time control
-	// reaches here (validateConfigUpdates runs the same helper), so the
+	// existed. A decode error is already a 400 by the time control reaches
+	// here (validateConfigUpdates runs the same helper), so the
 	// nothing-decoded arm is the unreachable one.
 	if notifs, ok := updates["notifications"].([]any); ok {
 		if ncs, decErrs := decodeConfigEntries[config.NotificationConfig]("notifications", notifs); decErrs == nil {
-			for i := range ncs {
-				n := &ncs[i]
-				if n.Mention != "" {
-					// Unreachable on error — validateConfigUpdates already
-					// rejected an unusable mention — so an error here leaves
-					// the decoded (operator-typed) value untouched.
-					if canonical, _, _, err := config.ParseMention(n.Mention); err == nil {
-						n.Mention = canonical
-					}
-				}
-				// Unknown event names are stripped UNLESS doing so would
-				// empty an otherwise non-empty filter: buildTargets treats an
-				// absent/nil Events filter as "every event", so reducing an
-				// all-garbage filter to empty would turn "matches nothing"
-				// into "matches everything". The manager's startup Warn is
-				// what tells the operator about the garbage that survives,
-				// and the web UI's own chip editor can't produce this state.
-				if len(n.Events) > 0 {
-					kept := make([]string, 0, len(n.Events))
-					for _, e := range n.Events {
-						if notifications.KnownEvents[e] {
-							kept = append(kept, e)
-						}
-					}
-					if len(kept) > 0 {
-						n.Events = kept
-					}
-				}
-				// mention_events has no such trap — stripping only ever
-				// narrows who gets pinged, and an emptied list is the
-				// meaningful "never" — so unknown entries are dropped
-				// unconditionally, all the way down to an explicit empty
-				// list.
-				if n.MentionEvents != nil {
-					kept := make([]string, 0, len(*n.MentionEvents))
-					for _, e := range *n.MentionEvents {
-						if notifications.KnownEvents[e] {
-							kept = append(kept, e)
-						}
-					}
-					n.MentionEvents = &kept
-				}
-			}
+			normalizeNotificationEntries(ncs)
 			cfg.Notifications = ncs
 		}
 	}
@@ -1227,55 +1195,25 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		// that will be stored.
 		channelErrs := normalizeChannelUpdates(req.Context(), updates)
 
-		// Validate the field constraints before anything is applied.
-		validationErrs := validateConfigUpdates(updates)
+		// Validate the field constraints before anything is applied, each
+		// cross-field rule against the live value of the half the body does
+		// not carry (mergedValidationView): a save carries only what its
+		// editor changed.
+		live := store.Snapshot()
+		validationErrs := validateConfigUpdates(mergedValidationView(updates, live))
 		maps.Copy(validationErrs, channelErrs)
-		var storedFFmpeg string
-		store.Read(func(c *config.MoomboxConfig) {
-			storedFFmpeg = c.Paths.FfmpegPath
-			maps.Copy(validationErrs, newQuotedPathErrors(updates, c))
-		})
-		if msg := newFFmpegPathError(updates, storedFFmpeg); msg != "" {
+		maps.Copy(validationErrs, newQuotedPathErrors(updates, live))
+		if msg := newFFmpegPathError(updates, live.Paths.FfmpegPath); msg != "" {
 			validationErrs["paths.ffmpeg_path"] = msg
 		}
-
-		// Notification webhook URLs must parse at save time — previously a
-		// bad paste was accepted with a success toast, then silently
-		// warn-skipped at the next startup ("notifications just don't
-		// work"). Only NEW/EDITED URLs are validated: a pre-existing
-		// hand-edited entry (e.g. a legacy non-Discord URL, tolerated as a
-		// boot-time warn-skip) is grandfathered, because the web UI's
-		// full-form save always includes the stored notifications array —
-		// hard-failing it would block every unrelated settings save. The
-		// TUI editor validates on edit the same way.
-		if notifs, ok := updates["notifications"].([]any); ok {
-			existing := make(map[string]struct{})
-			store.Read(func(c *config.MoomboxConfig) {
-				for _, nc := range c.Notifications {
-					existing[nc.URL] = struct{}{}
-				}
-			})
-			for i, n := range notifs {
-				if nm, ok := n.(map[string]any); ok {
-					if v, ok := nm["url"].(string); ok && v != "" {
-						if _, known := existing[v]; known {
-							continue
-						}
-						if err := notifications.ValidateURL(v); err != nil {
-							validationErrs[fmt.Sprintf("notifications[%d].url", i)] = err.Error()
-						}
-					}
-				}
-			}
+		if _, whole := updates["notifications"]; whole {
+			validationErrs["notifications"] = notificationsReplacedWhole
 		}
+		edits, editErrs := decodeNotificationEdits(updates)
+		maps.Copy(validationErrs, editErrs)
 
 		if len(validationErrs) > 0 {
-			rw.Header().Set("Content-Type", "application/json")
-			rw.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(rw).Encode(map[string]any{
-				"error":   "Validation failed",
-				"details": validationErrs,
-			})
+			writeValidationFailed(rw, validationErrs)
 			return
 		}
 
@@ -1313,6 +1251,42 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		// copy directly via config.Save, then assign back only on success.
 		cfgCopy := *cfg
 		applyConfigUpdates(&cfgCopy, updates)
+		// The editor's own target changes, merged into the live list as it
+		// stands now, under this lock.
+		if edits != nil {
+			merged, changed, errs := mergeNotificationEdits(edits, cfg.Notifications)
+			if len(errs) > 0 {
+				mu.Unlock()
+				writeValidationFailed(rw, errs)
+				return
+			}
+			if changed {
+				cfgCopy.Notifications = merged
+			}
+		}
+
+		// Every check again, on the merged config this save would store: a
+		// rule pairing a field the body carries with one it does not was
+		// judged above against the value read before this lock, and the TUI
+		// can have saved since. config.Save would refuse what fails here as
+		// a 500 naming no field.
+		if issues := config.Validate(&cfgCopy); len(issues) > 0 {
+			mu.Unlock()
+			writeValidationFailed(rw, map[string]string{"config": errors.Join(issues...).Error()})
+			return
+		}
+
+		// A save that leaves the live config as it is writes nothing:
+		// config.toml is not rewritten and nothing is hot-reloaded — the TUI
+		// save's rule. The dashboard sends only what changed, but a field
+		// typed to the value the TUI saved first, or a target change the TUI
+		// made first, is such a save.
+		if reflect.DeepEqual(cfgCopy, *cfg) {
+			unchanged := savedResponse(edits, cfg.Notifications, false)
+			mu.Unlock()
+			jsonResponse(rw, unchanged)
+			return
+		}
 
 		if err := config.Save(&cfgCopy, store.SavePath()); err != nil {
 			mu.Unlock()
@@ -1321,6 +1295,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		}
 
 		// Save succeeded — apply to live config
+		notifsChanged := !reflect.DeepEqual(cfgCopy.Notifications, cfg.Notifications)
 		*cfg = cfgCopy
 
 		// Read new values while still holding the lock
@@ -1341,6 +1316,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		// types, so the callback below can read it after mu.Unlock without
 		// racing the next PUT.
 		newDownloader := cfg.Downloader
+		saved := savedResponse(edits, cfg.Notifications, true)
 
 		mu.Unlock()
 
@@ -1371,16 +1347,16 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			if newSegWorkers != oldSegWorkers && callbacks.OnSegmentWorkersChange != nil {
 				callbacks.OnSegmentWorkersChange(newSegWorkers)
 			}
-			// public_url lives in [network], not [notifications], but the
-			// notification manager is its only consumer — it reads the base
-			// URL at send time from the config Reload hands it. The web
-			// form's Save sends `network` WITHOUT `notifications` when no
-			// webhook is configured, so without this second trigger a
-			// public_url change would sit unread until the next restart.
-			// (The TUI has no such gap: its save path calls Reload
-			// unconditionally — cmd/moombox/tui_wiring.go.)
-			_, hasNotifs := updates["notifications"]
-			if (hasNotifs || newPublicURL != oldPublicURL) && callbacks.OnNotificationsChange != nil {
+			// The targets, when this save changed them — not on the mere
+			// presence of notification_edits: the reload flushes every
+			// target's open batch window, and an edit the TUI had already
+			// made changes nothing. public_url lives in [network], not
+			// [notifications], but the notification manager is its only
+			// consumer — it reads the base URL at send time from the config
+			// Reload hands it — so a public_url change reloads it too. (The
+			// TUI has no such gap: its save path calls Reload unconditionally
+			// — cmd/moombox/tui_wiring.go.)
+			if (notifsChanged || newPublicURL != oldPublicURL) && callbacks.OnNotificationsChange != nil {
 				callbacks.OnNotificationsChange()
 			}
 			if newGoSoft != oldGoSoft && callbacks.OnGoSoftLimitChange != nil {
@@ -1398,7 +1374,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			}
 		}
 
-		jsonResponse(rw, map[string]any{"success": true})
+		jsonResponse(rw, saved)
 	}
 
 	var resolveRL *web.RateLimiter
@@ -1415,7 +1391,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		// A channel ID that has to be resolved is a youtube.com fetch with
 		// retries, so such a save rides the limiter POST
 		// /api/config/channels resolves under; every other save — the
-		// dashboard's full-form save sends no channels at all — does not.
+		// dashboard's Settings save sends no channels at all — does not.
 		if channelUpdatesNeedResolve(updates) {
 			limitedBy(resolveRL)(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 				handlePut(rw, req, updates)

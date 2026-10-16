@@ -99,6 +99,12 @@ globalThis.__runPopulateConfigForm = function (config) {
       el.value = value ?? "";
     },
     getInputValue(id) { return document.getElementById(id).value; },
+    // populateConfigForm ends by reading the form back, as a save would, for
+    // the baseline a save compares each field with (_gatherFormFields).
+    getInputNumber(id) {
+      const s = String(document.getElementById(id).value ?? "").trim();
+      return s ? Number(s) : undefined;
+    },
   };
   // Narrowed exactly like settingsPanelVMWithUtils's importPanelProbe narrows
   // populateBrowserSelector: these are other fields' business.

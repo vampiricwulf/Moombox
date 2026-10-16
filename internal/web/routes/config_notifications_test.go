@@ -82,16 +82,28 @@ func TestConfigPutPublicURLUnchangedDoesNotFire(t *testing.T) {
 	}
 }
 
+// addedTargets is a notification_edits body adding targets to an editor's
+// empty list: base [], each entry from -1.
+func addedTargets(targets ...any) map[string]any {
+	from := make([]any, len(targets))
+	for i := range from {
+		from[i] = -1
+	}
+	return map[string]any{"notification_edits": map[string]any{
+		"base": []any{}, "edited": targets, "from": from,
+	}}
+}
+
 // TestConfigPutNotificationKeysPersist covers enabled, mention and the
 // three-way mention_events through the real merge path.
 func TestConfigPutNotificationKeysPersist(t *testing.T) {
 	f := newConfigRoutesFixture(t)
-	putConfig(t, f, map[string]any{"notifications": []any{
+	putConfig(t, f, addedTargets(
 		map[string]any{"url": "discord://1/aaa", "enabled": false},
 		map[string]any{"url": "discord://2/bbb", "mention": "<@&123456789012345678>"},
 		map[string]any{"url": "discord://3/ccc", "mention": "@here", "mention_events": []any{}},
 		map[string]any{"url": "discord://4/ddd", "mention": "@here", "mention_events": []any{"finished"}},
-	}})
+	))
 	var n []config.NotificationConfig
 	f.store.Read(func(c *config.MoomboxConfig) { n = append(n, c.Notifications...) })
 	if len(n) != 4 {
@@ -118,9 +130,9 @@ func TestConfigPutNotificationKeysPersist(t *testing.T) {
 // literal text and pings nobody, which looks like a delivery failure.
 func TestConfigPutRejectsBadMention(t *testing.T) {
 	f := newConfigRoutesFixture(t)
-	rec := putConfigExpect(t, f, map[string]any{"notifications": []any{
+	rec := putConfigExpect(t, f, addedTargets(
 		map[string]any{"url": "discord://1/aaa", "mention": "@ops-team"},
-	}})
+	))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d, want 400 (body: %s)", rec.Code, rec.Body.String())
 	}
@@ -136,11 +148,11 @@ func TestConfigPutRejectsBadMention(t *testing.T) {
 // empty would turn "matches nothing" into "matches EVERYTHING".
 func TestConfigPutStripsUnknownEvents(t *testing.T) {
 	f := newConfigRoutesFixture(t)
-	putConfig(t, f, map[string]any{"notifications": []any{
+	putConfig(t, f, addedTargets(
 		map[string]any{"url": "discord://1/aaa", "events": []any{"finished", "bogus_event", "error"}},
 		map[string]any{"url": "discord://2/bbb", "events": []any{"bogus_only"}},
 		map[string]any{"url": "discord://3/ccc", "mention": "@here", "mention_events": []any{"error", "nope"}},
-	}})
+	))
 	var n []config.NotificationConfig
 	f.store.Read(func(c *config.MoomboxConfig) { n = append(n, c.Notifications...) })
 
@@ -205,20 +217,30 @@ func TestConfigPutRejectsATypeMismatchedEntry(t *testing.T) {
 	}{
 		{
 			name: "notifications enabled as a string",
-			updates: map[string]any{"notifications": []any{
+			updates: addedTargets(
 				map[string]any{"url": "discord://1/aaa", "enabled": "false"},
-			}},
+			),
 			wantKey: "notifications[0].enabled",
 			wantMsg: "expected bool, got string",
 		},
 		{
 			name: "notifications mention_events as a number",
-			updates: map[string]any{"notifications": []any{
+			updates: addedTargets(
 				map[string]any{"url": "discord://1/aaa"},
 				map[string]any{"url": "discord://2/bbb", "mention_events": 5},
-			}},
+			),
 			wantKey: "notifications[1].mention_events",
 			wantMsg: "expected array, got number",
+		},
+		{
+			name: "a base entry mistyped",
+			updates: map[string]any{"notification_edits": map[string]any{
+				"base":   []any{map[string]any{"url": "discord://9/zzz", "enabled": "no"}},
+				"edited": []any{map[string]any{"url": "discord://9/zzz"}},
+				"from":   []any{0},
+			}},
+			wantKey: "notification_edits.base[0].enabled",
+			wantMsg: "expected bool, got string",
 		},
 		{
 			name: "channels enabled as a string",
@@ -232,9 +254,7 @@ func TestConfigPutRejectsATypeMismatchedEntry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newConfigRoutesFixture(t)
 			// Something stored, so "the array survived" is a real assertion.
-			putConfig(t, f, map[string]any{"notifications": []any{
-				map[string]any{"url": "discord://9/zzz"},
-			}})
+			putConfig(t, f, addedTargets(map[string]any{"url": "discord://9/zzz"}))
 
 			rec := putConfigExpect(t, f, tc.updates)
 			if rec.Code != http.StatusBadRequest {

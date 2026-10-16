@@ -81,6 +81,8 @@ test("the save payload carries both keys, zero included", { skip }, async () => 
 test("an empty reorder field is omitted so the server keeps its value", { skip }, async () => {
   const h = await openSettings();
   h.el("cfg-reorder-buffer-mb").value = "";
+  // Another edit, so the save has something to send.
+  h.el("cfg-reorder-budget-mb").value = "2048";
 
   await h.app.settings.saveConfig();
   await h.flush();

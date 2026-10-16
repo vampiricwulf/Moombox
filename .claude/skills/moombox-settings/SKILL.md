@@ -40,7 +40,7 @@ SomeSetting string `toml:"some_setting" json:"some_setting"`
 `web/public/modules/settings.js`:
 - Add Shoelace input element with `cfg-` prefixed ID (e.g., `cfg-log-max-files`)
 - Populate in `populateConfigForm()`
-- Gather in `saveConfig()` and include in nested snake_case payload
+- Read it in `_gatherFormFields()` as a `"section.key"` entry (`undefined` when there is nothing to send). A save sends only the fields whose value differs from the one the form was filled with (`editedSettingsPayload` against `_formBaseline`), nested by section — so a field missing from the map is silently never saved, and a dashboard save leaves every field it did not edit to the server's live value
 - Listen for `sl-change`/`sl-input` events for dirty tracking
 - If restart required: add `{ path, id }` entry to `RESTART_REQUIRED_FIELDS` array
 

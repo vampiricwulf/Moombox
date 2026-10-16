@@ -1,7 +1,7 @@
 // The notification card's three per-target controls (mute, mention, mention
 // chips) and the Network section's Public Dashboard URL row.
 //
-// All three card controls AUTO-SAVE through _saveNotificationsOnly, which is
+// All three card controls AUTO-SAVE through _saveNotificationEdits, which is
 // what makes them different from every other field on the Settings page: they
 // must not raise the "unsaved changes" banner (the edit is already stored),
 // they must not double-PUT (a <sl-switch> and an <sl-input> bubble `click` as
@@ -122,7 +122,7 @@ test("toggling the enabled switch PUTs enabled:false and reverts on failure", { 
   await h.flush();
 
   assert.equal(puts(h).length, 1, "one toggle must issue exactly one PUT");
-  assert.equal(puts(h).at(-1).notifications[0].enabled, false);
+  assert.equal(puts(h).at(-1).notification_edits.edited[0].enabled, false);
   assert.equal(h.app.config.notifications[0].enabled, false);
   assert.equal(control(h, 0, "toggle-enabled").checked, false);
 
@@ -166,10 +166,10 @@ test("typing a mention preselects the ruling's defaults without writing them", {
 
   const body = puts(h).at(-1);
   assert.ok(body, "the mention commit issued no PUT /api/config");
-  assert.equal(body.notifications[0].mention, "<@&123>");
+  assert.equal(body.notification_edits.edited[0].mention, "<@&123>");
   assert.ok(
-    !("mention_events" in body.notifications[0]),
-    `the default list must stay implicit until the operator disagrees with it — writing it out would freeze today's defaults into their config; got ${JSON.stringify(body.notifications[0])}`,
+    !("mention_events" in body.notification_edits.edited[0]),
+    `the default list must stay implicit until the operator disagrees with it — writing it out would freeze today's defaults into their config; got ${JSON.stringify(body.notification_edits.edited[0])}`,
   );
   assert.deepEqual(litChips(h, 0).sort(), [...DEFAULTS].sort());
 });
@@ -186,7 +186,7 @@ test("unticking one default chip writes the remaining five explicitly", { skip }
 
   const body = puts(h).at(-1);
   assert.ok(body, "the chip click issued no PUT /api/config");
-  assert.deepEqual(body.notifications[0].mention_events, DEFAULTS.filter((e) => e !== "error"));
+  assert.deepEqual(body.notification_edits.edited[0].mention_events, DEFAULTS.filter((e) => e !== "error"));
 });
 
 // MUTANT: delete the key when the last chip goes out (the `events` filter's
@@ -202,7 +202,7 @@ test("unticking every mention chip writes an explicit empty list", { skip }, asy
   await h.flush();
   await h.flush();
 
-  const sent = puts(h).at(-1).notifications[0];
+  const sent = puts(h).at(-1).notification_edits.edited[0];
   assert.ok(
     Array.isArray(sent.mention_events) && sent.mention_events.length === 0,
     `an emptied mention filter must be sent as [], not omitted; got ${JSON.stringify(sent)}`,
@@ -245,7 +245,7 @@ test("toggling the enabled switch does not raise the unsaved-settings banner", {
 // The mention field is the first auto-saving control on this page the server
 // can REJECT: PUT /api/config 400s a token config.ParseMention cannot resolve
 // and answers `details` keyed by field. saveConfig unpacks that map into the
-// toast; _saveNotificationsOnly used to drop it, so a malformed mention read
+// toast; the card save (_saveNotificationEdits) used to drop it, so a malformed mention read
 // as a bare "Validation failed" with no hint of which target or why.
 //
 // MUTANT: toast only `data.error`. The first assertion below passes and the

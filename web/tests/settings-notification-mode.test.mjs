@@ -72,8 +72,8 @@ test("clicking Edit sets mode on that target only", { skip }, async () => {
 
   const put = h.http.matching("/api/config", "PUT").at(-1);
   assert.ok(put, "the mode switch issued no PUT /api/config");
-  assert.equal(put.body.notifications[0].mode, "edit");
-  assert.equal(put.body.notifications[1].mode, "separate");
+  assert.equal(put.body.notification_edits.edited[0].mode, "edit");
+  assert.equal(put.body.notification_edits.edited[1].mode, "separate");
 });
 
 // MUTANT: store "" for separate — the key vanishes from the payload and the
@@ -85,18 +85,20 @@ test("switching back to Separate is sent explicitly", { skip }, async () => {
   await h.flush();
 
   const put = h.http.matching("/api/config", "PUT").at(-1);
-  assert.equal(put.body.notifications[2].mode, "separate");
+  assert.equal(put.body.notification_edits.edited[2].mode, "separate");
 });
 
-// MUTANT: drop the `previous === next` guard. A click on the chip that is
-// already active then PUTs, toasts "Notifications updated" and — because the
-// route fires OnNotificationsChange on the mere presence of a `notifications`
-// key — reloads the manager, which flushes every target's open batch window.
+// MUTANTS: drop the already-active guard — a click on the lit chip PUTs and
+// toasts "Notifications updated" over nothing; compare the raw `mode` there
+// (the old guard) — the first target, whose absent mode the card lights as
+// Separate, PUTs a Separate click that changes nothing.
 test("clicking the already-active chip issues no PUT", { skip }, async () => {
   const h = await openSettings();
-  // The third target is stored as edit; the second is explicitly separate.
+  // The third target is stored as edit; the second is explicitly separate;
+  // the first has no mode at all, which reads as separate.
   cards(h)[2].querySelector('[data-notif-action="set-mode"][data-mode="edit"]').click();
   cards(h)[1].querySelector('[data-notif-action="set-mode"][data-mode="separate"]').click();
+  cards(h)[0].querySelector('[data-notif-action="set-mode"][data-mode="separate"]').click();
   await h.flush();
 
   assert.equal(
@@ -140,8 +142,8 @@ test("a mode switch preserves the target's other keys", { skip }, async () => {
   await h.flush();
 
   const put = h.http.matching("/api/config", "PUT").at(-1);
-  assert.deepEqual(put.body.notifications[0].events, ["finished", "error"]);
-  assert.equal(put.body.notifications[0].url, "https://discord.com/api/webhooks/1/aaa");
+  assert.deepEqual(put.body.notification_edits.edited[0].events, ["finished", "error"]);
+  assert.equal(put.body.notification_edits.edited[0].url, "https://discord.com/api/webhooks/1/aaa");
 });
 
 // The chips are <sl-tag>s, whose base is a plain span: they were click-only,

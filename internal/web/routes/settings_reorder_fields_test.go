@@ -48,7 +48,9 @@ func TestReorderSettingsControlsExist(t *testing.T) {
 		if !strings.Contains(js, tc.id) {
 			t.Errorf("settings.js never mentions %s — the field is never populated or read", tc.id)
 		}
-		if !strings.Contains(js, tc.key+":") {
+		// The form's field map (_gatherFormFields), which the save's payload
+		// is built from.
+		if !strings.Contains(js, `"downloader.`+tc.key+`":`) {
 			t.Errorf("settings.js never puts %s in the save payload — an edit to that field is discarded", tc.key)
 		}
 	}

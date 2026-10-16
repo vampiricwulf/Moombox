@@ -173,6 +173,27 @@ export function resolutionPresetFor(value) {
   return RESOLUTION_PRESETS.includes(String(n)) ? String(n) : "custom";
 }
 
+/**
+ * The PUT /api/config body of a Settings save: each field of `current` — a
+ * flat "section.key" map, as SettingsController._gatherFormFields reads the
+ * form — whose value differs from `baseline`'s, the value the form held when
+ * it was filled or last saved, nested by section. A field the operator did
+ * not change is left out, so the server keeps its live value: whatever the
+ * TUI saved while the page was open (owner decision, the TUI save's rule). A
+ * field typed back to its loaded value is not an edit, and undefined —
+ * nothing to send, such as a cleared number — is never sent.
+ */
+export function editedSettingsPayload(baseline, current) {
+  const payload = {};
+  for (const [path, value] of Object.entries(current)) {
+    if (value === undefined) continue;
+    if (JSON.stringify(value) === JSON.stringify(baseline?.[path])) continue;
+    const dot = path.indexOf(".");
+    (payload[path.slice(0, dot)] ??= {})[path.slice(dot + 1)] = value;
+  }
+  return payload;
+}
+
 export class SettingsController {
   constructor(app) {
     this.app = app;
@@ -185,6 +206,13 @@ export class SettingsController {
     /** True once populateBrowserSelector has filled the browser <sl-select> —
      *  saves must not touch browser_path/browser_type before then. */
     this._browserSelectLoaded = false;
+    /** The form's values as populateConfigForm filled them, or as the last
+     *  save sent them (_gatherFormFields' map): a save sends only the fields
+     *  that differ from it. */
+    this._formBaseline = {};
+    /** The browser choice as populateBrowserSelector filled it, or as the
+     *  last save sent it (_browserChoice), for the same rule. */
+    this._browserBaseline = null;
     /** True when the yt-dlp plugin button reads "Reinstall" (installed,
      *  matching port) — the install call must then force a rewrite. */
     this._ytdlpReinstall = false;
@@ -771,17 +799,12 @@ export class SettingsController {
         activeTwSwitch.checked = this.app.activePlatforms?.twitch === true;
       }
     }
-    // What the toggles showed at load. Without an explicit override they
-    // show the server's INFERRED answer, and saving that back unedited would
-    // freeze it (a channel added later would never light its platform), so
-    // a save sends active_platforms only once there is an override already
-    // or a toggle has been changed. An empty list is that override too —
+    // Without an explicit override the toggles show the server's INFERRED
+    // answer, and saving that back unedited would freeze it (a channel added
+    // later would never light its platform). A save sends active_platforms
+    // only once a toggle has been changed — the rule every field now saves
+    // under (editedSettingsPayload) — and an empty list is an override too:
     // both platforms off.
-    this._activePlatformsShown = {
-      explicit: Array.isArray(activePlats),
-      youtube: !!activeYtSwitch?.checked,
-      twitch: !!activeTwSwitch?.checked,
-    };
 
     const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
     if (autoCookiesSwitch) {
@@ -828,6 +851,10 @@ export class SettingsController {
     // blank select would save as "", which config.Normalize then turns back
     // into "auto" behind the operator.
     this.app.setInputValue("cfg-cookies-acquisition", config.cookies?.acquisition || "auto");
+
+    // The form as just filled: what a save compares each field with, so it
+    // sends only what the operator then changes (editedSettingsPayload).
+    this._formBaseline = this._gatherFormFields();
 
     // Track dirty state
     this._dirty = false;
@@ -916,130 +943,30 @@ export class SettingsController {
     apply();
   }
 
-  async saveConfig() {
-    const saveBtn = document.getElementById("save-config-btn");
-    if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
-
-    if (!this.app.config) {
-      this.app.config = {};
-    }
-    const config = this.app.config;
-
-    // Gather values from form
-    const port = this.app.getInputNumber("cfg-port");
-    const netAccessSelect = document.getElementById("cfg-network-access");
-    const networkAccess = netAccessSelect ? netAccessSelect.value : "localhost";
-    const httpsSwitch = document.getElementById("cfg-https-enabled");
-    const httpsEnabled = httpsSwitch ? httpsSwitch.checked : false;
-    const tlsCertPath = this.app.getInputValue("cfg-tls-cert-path");
-    const tlsKeyPath = this.app.getInputValue("cfg-tls-key-path");
-
-    const database = this.app.getInputValue("cfg-database");
-    const logFile = this.app.getInputValue("cfg-log-file");
-    const outputDir = this.app.getInputValue("cfg-output-dir");
-    const stagingDir = this.app.getInputValue("cfg-staging-dir");
-    const ffmpegPath = this.app.getInputValue("cfg-ffmpeg-path");
-
-    const logLevelSelect = document.getElementById("cfg-log-level");
-    const logLevel = logLevelSelect ? logLevelSelect.value : "";
-    const logMaxSize = this.app.getInputNumber("cfg-log-max-size");
-    const logMaxFiles = this.app.getInputNumber("cfg-log-max-files");
-
-    const archiveWindowDays = this.app.getInputNumber("cfg-archive-window-days");
-    const archiveSlots = this.app.getInputNumber("cfg-archive-slots");
-    const feedCheckInterval = this.app.getInputNumber("cfg-feed-check-interval");
-    const decapiCheckInterval = this.app.getInputNumber("cfg-decapi-check-interval");
-    const twitchCheckInterval = this.app.getInputNumber("cfg-twitch-check-interval");
-    const hideFinishedDays = this.app.getInputNumber("cfg-hide-finished-days");
-    const probeCooldown = this.app.getInputNumber("cfg-probe-cooldown");
-    const membershipSwitch = document.getElementById("cfg-membership-discovery");
-    const membershipDiscovery = membershipSwitch ? membershipSwitch.checked : true;
-
-    const outputTemplate = this.app.getInputValue("cfg-output-template");
-    const maxResolution = this.app.getInputNumber("cfg-max-resolution");
-    const parallelDownloads = this.app.getInputNumber("cfg-parallel-downloads");
-    const segmentWorkers = this.app.getInputNumber("cfg-segment-workers");
-    const reorderBufferMB = this.app.getInputNumber("cfg-reorder-buffer-mb");
-    const reorderBudgetMB = this.app.getInputNumber("cfg-reorder-budget-mb");
-    const maximumTimeout = this.app.getInputNumber("cfg-maximum-timeout");
-    const interruptionTimeout = this.app.getInputNumber("cfg-interruption-timeout");
-    const incompleteStagingExpiry = this.app.getInputNumber("cfg-incomplete-staging-expiry");
-    const downloadChatSwitch = document.getElementById("cfg-download-chat");
-    const downloadChat = downloadChatSwitch ? downloadChatSwitch.checked : true;
-    const prefer60fpsSwitch = document.getElementById("cfg-prefer-60fps");
-    const prefer60fps = prefer60fpsSwitch ? prefer60fpsSwitch.checked : true;
-
-    const cookieFile = this.app.getInputValue("cfg-cookie-file");
-    const activeYtSwitch = document.getElementById("cfg-active-youtube");
-    const activeTwSwitch = document.getElementById("cfg-active-twitch");
-    const activePlatforms = [];
-    if (activeYtSwitch?.checked) activePlatforms.push("youtube");
-    if (activeTwSwitch?.checked) activePlatforms.push("twitch");
-    const shown = this._activePlatformsShown;
-    const sendActivePlatforms = !shown || shown.explicit ||
-      shown.youtube !== !!activeYtSwitch?.checked ||
-      shown.twitch !== !!activeTwSwitch?.checked;
-    const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
-    const autoEnabled = autoCookiesSwitch ? autoCookiesSwitch.checked : false;
-    const autoCookiesProfileDir = this.app.getInputValue("cfg-auto-cookies-profile-dir");
-    const cookieRefreshInterval = this.app.getInputNumber("cfg-cookie-refresh-interval");
-
-    // Browser selection — resolved later after payload is built so we can
-    // validate and potentially throw before the fetch
-    const browserSelectEl = document.getElementById("cfg-cookies-browser-select");
-    const browserSelectVal = browserSelectEl?.value || "";
-
-    const diskWarnPercent = this.app.getInputNumber("cfg-disk-warn-percent");
-    const diskCriticalPercent = this.app.getInputNumber("cfg-disk-critical-percent");
-
-    const autoCheckUpdatesSwitch = document.getElementById("cfg-auto-check-updates");
-    const autoCheckUpdates = autoCheckUpdatesSwitch ? autoCheckUpdatesSwitch.checked : true;
-
-    const memoryGoSoftMB = this.app.getInputNumber("cfg-memory-go-soft-limit-mb");
-    const memorySidecarSoftMB = this.app.getInputNumber("cfg-memory-sidecar-soft-limit-mb");
-    const memorySidecarHardMB = this.app.getInputNumber("cfg-memory-sidecar-hard-limit-mb");
-
-    const useSidecarSwitch = document.getElementById("cfg-bgutils-use-sidecar");
-    const useSidecar = useSidecarSwitch ? useSidecarSwitch.checked : true;
-
-    const trustForwardedProtoSwitch = document.getElementById("cfg-trust-forwarded-proto");
-    const trustForwardedProto = trustForwardedProtoSwitch ? trustForwardedProtoSwitch.checked : false;
-
-    const trustedProxiesEl = document.getElementById("cfg-trusted-proxies");
-    const trustedProxies = (trustedProxiesEl?.value || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    // Always sent, empty included: "" is the meaningful "no public address,
-    // link embeds at YouTube/Twitch instead", so a cleared field has to reach
-    // the server rather than leave the stored URL standing.
-    const publicUrl = this.app.getInputValue("cfg-public-url");
-
-    const probeTargetsEl = document.getElementById("cfg-probe-targets");
-    const probeTargets = (probeTargetsEl?.value || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    const dpapiFallbackSwitch = document.getElementById("cfg-cookies-dpapi-fallback");
-    const dpapiFallback = dpapiFallbackSwitch ? dpapiFallbackSwitch.checked : false;
-
-    const acquisitionEl = document.getElementById("cfg-cookies-acquisition");
-    const acquisition = acquisitionEl?.value || "auto";
-
-    // Build payload with only form-managed sections (don't include channels
-    // to avoid overwriting concurrent changes from TUI).
-    const network = {
-      port,
-      https_enabled: httpsEnabled,
-      tls_cert_path: tlsCertPath,
-      tls_key_path: tlsKeyPath,
-      trust_forwarded_proto: trustForwardedProto,
-      trusted_proxies: trustedProxies,
-      public_url: publicUrl,
+  /**
+   * Every value the full-form Save manages, read off the form into the flat
+   * "section.key" → wire value map editedSettingsPayload compares with the
+   * one populateConfigForm took (_formBaseline). undefined means the form
+   * holds nothing to send for that key — a cleared number, a network_access
+   * the select has no option for, an empty probe-target list — and a save
+   * leaves the server's value alone.
+   *
+   * The browser choice is not here: its select fills later
+   * (populateBrowserSelector) and has a baseline of its own (_browserChoice).
+   */
+  _gatherFormFields() {
+    const checked = (id, absent) => {
+      const el = document.getElementById(id);
+      return el ? el.checked : absent;
     };
-    // network_access is sent only when the select actually holds a value.
+    const list = (id) => (document.getElementById(id)?.value || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const num = (id) => this.app.getInputNumber(id);
+    const text = (id) => this.app.getInputValue(id);
+
+    // network_access only when the select actually holds a value.
     //
     // It can be empty for exactly one reason: the select is populated from the
     // loaded config (populateConfigForm), and when that config carries a value
@@ -1053,97 +980,141 @@ export class SettingsController {
     // Omitting the key instead preserves the stored value: both
     // validateConfigUpdates and applyConfigUpdates skip absent network keys
     // (type-assertion guarded), so "public" survives the save untouched.
-    if (networkAccess !== "") {
-      network.network_access = networkAccess;
-    }
+    const networkAccess = document.getElementById("cfg-network-access")?.value || undefined;
 
-    const payload = {
-      network,
-      paths: {
-        database_path: database,
-        log_file_path: logFile,
-        output_directory: outputDir,
-        staging_directory: stagingDir,
-        ffmpeg_path: ffmpegPath,
-      },
-      logs: {
-        log_level: logLevel,
-        log_max_file_size: logMaxSize,
-        log_max_files: logMaxFiles,
-      },
-      monitors: {
-        archive_window_days: archiveWindowDays,
-        archive_slots: archiveSlots,
-        feed_check_interval: feedCheckInterval,
-        hide_finished_age_days: hideFinishedDays,
-        probe_cooldown: probeCooldown,
-        decapi_check_interval: decapiCheckInterval ?? null,
-        twitch_check_interval: twitchCheckInterval ?? null,
-        membership_discovery: membershipDiscovery,
-      },
-      downloader: {
-        output_template: outputTemplate,
-        max_video_resolution: maxResolution,
-        num_parallel_downloads: parallelDownloads,
-        segment_workers: segmentWorkers,
-        reorder_buffer_mb: reorderBufferMB,
-        reorder_budget_mb: reorderBudgetMB,
-        download_chat: downloadChat,
-        prefer_60fps: prefer60fps,
-        maximum_timeout: maximumTimeout,
-        interruption_timeout: interruptionTimeout,
-        incomplete_staging_expiry_days: incompleteStagingExpiry,
-      },
-      cookies: {
-        cookie_file: cookieFile,
-        active_platforms: sendActivePlatforms ? activePlatforms : undefined,
-        auto_enabled: autoEnabled,
-        acquisition,
-        browser_profile_dir: autoCookiesProfileDir,
-        dpapi_fallback: dpapiFallback,
-        // refresh_interval / browser_path / browser_type resolved below
-      },
-      disk: {
-        disk_warn_percent: diskWarnPercent,
-        disk_critical_percent: diskCriticalPercent,
-      },
-      updates: {
-        auto_check_updates: autoCheckUpdates,
-      },
-      memory: {
-        go_soft_limit_mb: memoryGoSoftMB,
-        sidecar_soft_limit_mb: memorySidecarSoftMB,
-        sidecar_hard_limit_mb: memorySidecarHardMB,
-      },
-      bgutils: {
-        use_sidecar: useSidecar,
-      },
-      ...(probeTargets.length ? { connectivity: { probe_targets: probeTargets } } : {}),
+    const activePlatforms = [];
+    if (document.getElementById("cfg-active-youtube")?.checked) activePlatforms.push("youtube");
+    if (document.getElementById("cfg-active-twitch")?.checked) activePlatforms.push("twitch");
+
+    const probeTargets = list("cfg-probe-targets");
+
+    return {
+      "network.port": num("cfg-port"),
+      "network.network_access": networkAccess,
+      "network.https_enabled": checked("cfg-https-enabled", false),
+      "network.tls_cert_path": text("cfg-tls-cert-path"),
+      "network.tls_key_path": text("cfg-tls-key-path"),
+      "network.trust_forwarded_proto": checked("cfg-trust-forwarded-proto", false),
+      "network.trusted_proxies": list("cfg-trusted-proxies"),
+      // "" is the meaningful "no public address, link embeds at
+      // YouTube/Twitch instead", so a cleared field is a value to send.
+      "network.public_url": text("cfg-public-url"),
+
+      "paths.database_path": text("cfg-database"),
+      "paths.log_file_path": text("cfg-log-file"),
+      "paths.output_directory": text("cfg-output-dir"),
+      "paths.staging_directory": text("cfg-staging-dir"),
+      "paths.ffmpeg_path": text("cfg-ffmpeg-path"),
+
+      "logs.log_level": document.getElementById("cfg-log-level")?.value ?? "",
+      "logs.log_max_file_size": num("cfg-log-max-size"),
+      "logs.log_max_files": num("cfg-log-max-files"),
+
+      "monitors.archive_window_days": num("cfg-archive-window-days"),
+      "monitors.archive_slots": num("cfg-archive-slots"),
+      "monitors.feed_check_interval": num("cfg-feed-check-interval"),
+      "monitors.hide_finished_age_days": num("cfg-hide-finished-days"),
+      "monitors.probe_cooldown": num("cfg-probe-cooldown"),
+      // null clears the override: the global interval applies.
+      "monitors.decapi_check_interval": num("cfg-decapi-check-interval") ?? null,
+      "monitors.twitch_check_interval": num("cfg-twitch-check-interval") ?? null,
+      "monitors.membership_discovery": checked("cfg-membership-discovery", true),
+
+      "downloader.output_template": text("cfg-output-template"),
+      "downloader.max_video_resolution": num("cfg-max-resolution"),
+      "downloader.num_parallel_downloads": num("cfg-parallel-downloads"),
+      "downloader.segment_workers": num("cfg-segment-workers"),
+      "downloader.reorder_buffer_mb": num("cfg-reorder-buffer-mb"),
+      "downloader.reorder_budget_mb": num("cfg-reorder-budget-mb"),
+      "downloader.download_chat": checked("cfg-download-chat", true),
+      "downloader.prefer_60fps": checked("cfg-prefer-60fps", true),
+      "downloader.maximum_timeout": num("cfg-maximum-timeout"),
+      "downloader.interruption_timeout": num("cfg-interruption-timeout"),
+      "downloader.incomplete_staging_expiry_days": num("cfg-incomplete-staging-expiry"),
+
+      "cookies.cookie_file": text("cfg-cookie-file"),
+      "cookies.active_platforms": activePlatforms,
+      "cookies.auto_enabled": checked("cfg-auto-cookies-enabled", false),
+      "cookies.acquisition": document.getElementById("cfg-cookies-acquisition")?.value || "auto",
+      "cookies.browser_profile_dir": text("cfg-auto-cookies-profile-dir"),
+      "cookies.dpapi_fallback": checked("cfg-cookies-dpapi-fallback", false),
+      // Never null: the server would turn it into 0, which fails the
+      // 10..10080 range and rejects the save; an empty field keeps the
+      // stored value.
+      "cookies.refresh_interval": num("cfg-cookie-refresh-interval"),
+
+      "disk.disk_warn_percent": num("cfg-disk-warn-percent"),
+      "disk.disk_critical_percent": num("cfg-disk-critical-percent"),
+
+      "updates.auto_check_updates": checked("cfg-auto-check-updates", true),
+
+      "memory.go_soft_limit_mb": num("cfg-memory-go-soft-limit-mb"),
+      "memory.sidecar_soft_limit_mb": num("cfg-memory-sidecar-soft-limit-mb"),
+      "memory.sidecar_hard_limit_mb": num("cfg-memory-sidecar-hard-limit-mb"),
+
+      "bgutils.use_sidecar": checked("cfg-bgutils-use-sidecar", true),
+
+      // An empty list would fail the "at least one" check; the stored
+      // targets are kept instead.
+      "connectivity.probe_targets": probeTargets.length ? probeTargets : undefined,
     };
+  }
 
-    // Only send refresh_interval when the field has a value — the server
-    // turns null into 0, which fails the 10..10080 range validation and
-    // rejects the entire save. Omitting the key keeps the stored value.
-    if (cookieRefreshInterval !== undefined) {
-      payload.cookies.refresh_interval = cookieRefreshInterval;
+  /**
+   * The browser selection as the browser_path / browser_type pair a save
+   * stores: "" and "" for auto-detect, a detected browser's path and family
+   * (the option value is an index — Shoelace mangles spaces in values — and
+   * the real ones live in data attributes), or the custom fields. null until
+   * populateBrowserSelector has filled the select (loadAutoCookieStatus runs
+   * async): read before then it says "", and a save would silently erase a
+   * configured browser.
+   */
+  _browserChoice() {
+    if (!this._browserSelectLoaded) return null;
+    const select = document.getElementById("cfg-cookies-browser-select");
+    const value = select?.value || "";
+    if (value === "__custom__") {
+      return {
+        custom: true,
+        path: document.getElementById("cfg-cookies-browser-path")?.value || "",
+        type: document.getElementById("cfg-cookies-browser-type")?.value || "firefox",
+      };
     }
+    if (value === "") return { custom: false, path: "", type: "" };
+    const opt = select?.querySelector(`sl-option[value="${CSS.escape(value)}"]`);
+    return { custom: false, path: opt?.dataset.path || "", type: opt?.dataset.type || "" };
+  }
 
-    // Include notifications — managed entirely via the web UI, so no
-    // concurrent modification risk (unlike channels which the TUI can edit).
-    if (config.notifications) {
-      payload.notifications = config.notifications;
+  /**
+   * The full-form Save. It sends only what the operator changed since the
+   * form was filled or last saved (owner decision, the TUI save's rule):
+   * each field is compared with its value then (editedSettingsPayload), and
+   * PUT /api/config applies each key it is sent on its own, so every field
+   * the page did not touch keeps its live value — whatever the TUI saved
+   * while the page was open. It used to send every field, and the whole
+   * notification list, and put the page's load-time copy of each back. The
+   * notification cards save their own changes as they are made
+   * (_saveNotificationEdits), so the targets are not part of this save.
+   */
+  async saveConfig() {
+    const saveBtn = document.getElementById("save-config-btn");
+    if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
+
+    if (!this.app.config) {
+      this.app.config = {};
     }
+    const config = this.app.config;
 
-    // Resolve browser selection into payload.cookies.browser_path / browser_type.
-    // Must happen before the fetch so validation errors can abort early.
-    // Only when the selector has actually been populated (loadAutoCookieStatus
-    // runs async) — otherwise the select reads "" and the save would silently
-    // erase a configured browser. Omitting both keys keeps the server's stored
-    // values.
-    if (this._browserSelectLoaded) {
-      if (browserSelectVal === "__custom__") {
-        const path = document.getElementById("cfg-cookies-browser-path")?.value || "";
-        const type = document.getElementById("cfg-cookies-browser-type")?.value || "firefox";
+    const current = this._gatherFormFields();
+    const payload = editedSettingsPayload(this._formBaseline, current);
+
+    // The browser choice, the same way: sent, both halves together, only
+    // when it changed. It must be resolved before the fetch so a refused
+    // custom path can abort the save.
+    const browser = this._browserChoice();
+    const browserEdited = browser !== null && JSON.stringify(browser) !== JSON.stringify(this._browserBaseline);
+    if (browserEdited) {
+      if (browser.custom) {
         const msgEl = document.getElementById("custom-browser-validation-msg");
         // Clear any previous validation message
         if (msgEl) { msgEl.textContent = ""; msgEl.style.color = ""; }
@@ -1159,7 +1130,7 @@ export class SettingsController {
           const validateResp = await fetch("/api/auto-cookies/validate-browser-path", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ path, type }),
+            body: JSON.stringify({ path: browser.path, type: browser.type }),
           });
           outcome = validateResp.ok
             ? browserPathValidationOutcome({ reached: true, body: await validateResp.json() })
@@ -1183,20 +1154,26 @@ export class SettingsController {
           // past; the save is proceeding, so say so where it will be seen.
           this.app.showToast(outcome.message, "warning");
         }
-        payload.cookies.browser_path = path;
-        payload.cookies.browser_type = type;
-      } else if (browserSelectVal === "") {
-        // Auto-detect — clear any explicit browser selection
-        payload.cookies.browser_path = "";
-        payload.cookies.browser_type = "";
-      } else {
-        // A detected browser was chosen — the option value is an index
-        // (Shoelace mangles spaces in values); the real path and family
-        // live in data attributes.
-        const opt = browserSelectEl?.querySelector(`sl-option[value="${CSS.escape(browserSelectVal)}"]`);
-        payload.cookies.browser_path = opt?.dataset.path || "";
-        payload.cookies.browser_type = opt?.dataset.type || "";
       }
+      payload.cookies ??= {};
+      payload.cookies.browser_path = browser.path;
+      payload.cookies.browser_type = browser.type;
+    }
+
+    const settled = () => {
+      this._dirty = false;
+      this._updateUnsavedIndicator();
+      document.getElementById("settings-unsaved-banner").style.display = "none";
+    };
+
+    if (Object.keys(payload).length === 0) {
+      // Nothing differs from what the form was filled with — a field typed
+      // away and back included — so there is nothing to write, and nothing
+      // the server holds is touched.
+      settled();
+      this.app.showToast("No changes to save", "primary");
+      if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
+      return;
     }
 
     try {
@@ -1209,34 +1186,28 @@ export class SettingsController {
       if (response.ok) {
         // Deep-merge payload into local config cache to preserve server-only
         // nested fields (Object.assign would replace entire sub-objects).
-        // Drop undefined-valued keys (cleared numeric fields) first —
-        // JSON.stringify omitted them from the request, so the server kept
-        // its stored values; copying undefined would desync the local cache
-        // and trigger spurious "Restart Required" prompts.
         for (const [key, val] of Object.entries(payload)) {
-          if (val && typeof val === "object" && !Array.isArray(val) && config[key] && typeof config[key] === "object") {
-            const defined = Object.fromEntries(
-              Object.entries(val).filter(([, v]) => v !== undefined),
-            );
-            Object.assign(config[key], defined);
+          if (config[key] && typeof config[key] === "object") {
+            Object.assign(config[key], val);
           } else {
-            config[key] = val;
+            config[key] = { ...val };
           }
         }
-        if (sendActivePlatforms) {
-          this._activePlatformsShown = {
-            explicit: true,
-            youtube: activePlatforms.includes("youtube"),
-            twitch: activePlatforms.includes("twitch"),
-          };
+        // What was just written is the form's new baseline; every other
+        // field keeps the one it had, so an edit saved once is not sent
+        // again and an untouched field still never is.
+        for (const [section, fields] of Object.entries(payload)) {
+          for (const [key, val] of Object.entries(fields)) this._formBaseline[`${section}.${key}`] = val;
         }
-        this._dirty = false;
-        this._updateUnsavedIndicator();
-        document.getElementById("settings-unsaved-banner").style.display = "none";
+        if (browserEdited) this._browserBaseline = browser;
+        settled();
         this.app.showToast("Settings saved successfully", "success");
         // Refresh status bar (platform indicators, cookie status, etc.)
         this.app.loadStatus();
-        // Check if any restart-required settings changed
+        // Check if any restart-required settings changed. The cache holds
+        // the loaded value of every field this page did not send, so only a
+        // restart-required field the operator edited can prompt — one the
+        // TUI changed meanwhile is the TUI's restart to ask for.
         this._checkRestartRequired(config);
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
@@ -2214,9 +2185,10 @@ export class SettingsController {
         this.app.config.notifications = [];
       }
 
+      const base = this._notificationsCopy();
       this.app.config.notifications.push({ url });
       try {
-        await this._saveNotificationsOnly();
+        await this._saveNotificationEdits(base);
         dialog.hide();
         this.renderNotificationsList();
       } catch {
@@ -2236,9 +2208,12 @@ export class SettingsController {
     if (!await this.app.showConfirm("Remove this notification webhook?", { okLabel: "Remove", okVariant: "danger" })) return;
 
     if (this.app.config.notifications) {
+      const base = this._notificationsCopy();
       const [removed] = this.app.config.notifications.splice(index, 1);
       try {
-        await this._saveNotificationsOnly();
+        // Every entry but the deleted one was edited from its own base
+        // index; the deleted one is the base index no entry names.
+        await this._saveNotificationEdits(base, base.map((_, i) => i).filter((i) => i !== index));
       } catch {
         // Revert on failure
         this.app.config.notifications.splice(index, 0, removed);
@@ -2257,12 +2232,13 @@ export class SettingsController {
     const notif = this.app.config.notifications?.[index];
     if (!notif) return;
 
+    const base = this._notificationsCopy();
     const previousEnabled = notif.enabled;
     // Absent counts as enabled, the same reading the card renders with.
     notif.enabled = notif.enabled === false;
 
     try {
-      await this._saveNotificationsOnly();
+      await this._saveNotificationEdits(base);
     } catch {
       // Revert on failure — including back to ABSENT, which is what a config
       // written before this key looks like.
@@ -2293,13 +2269,14 @@ export class SettingsController {
     const next = (value || "").trim();
     if (next === (notif.mention || "")) return;
 
+    const base = this._notificationsCopy();
     const previousMention = notif.mention;
     if (next) notif.mention = next;
     else delete notif.mention;
 
     let rejected = null;
     try {
-      await this._saveNotificationsOnly();
+      await this._saveNotificationEdits(base);
     } catch {
       if (previousMention === undefined) delete notif.mention;
       else notif.mention = previousMention;
@@ -2331,6 +2308,7 @@ export class SettingsController {
     const notif = this.app.config.notifications?.[index];
     if (!notif || !notif.mention) return;
 
+    const base = this._notificationsCopy();
     const previousEvents = notif.mention_events;
     const resolved = this._resolveMentionEvents(notif);
     notif.mention_events = resolved.includes(eventId)
@@ -2338,7 +2316,7 @@ export class SettingsController {
       : [...resolved, eventId];
 
     try {
-      await this._saveNotificationsOnly();
+      await this._saveNotificationEdits(base);
     } catch {
       if (previousEvents === undefined) delete notif.mention_events;
       else notif.mention_events = previousEvents;
@@ -2347,29 +2325,24 @@ export class SettingsController {
   }
 
   /**
-   * Set a target's delivery mode. "separate" is stored EXPLICITLY rather than
-   * deleted. PUT /api/config merges per SECTION, not per key: applyConfigUpdates
-   * rebuilds each notification entry from the payload, so a key this card omits
-   * is simply lost. Writing the value out keeps the web card and the TUI editor
-   * round-tripping the same states, and keeps the payload readable.
+   * Set a target's delivery mode, written out explicitly ("separate"
+   * included) the way the TUI editor writes it.
    *
    * Clicking the chip that is already active returns early, the same guard
-   * setNotificationMention has: the PUT would store what is already stored,
-   * but PUT /api/config fires OnNotificationsChange on the mere presence of a
-   * `notifications` key, and that reload FLUSHES every target's open batch
-   * window. A no-op click must not shorten another job's coalescing window.
+   * setNotificationMention has. An absent mode reads as separate — the chip
+   * the card lights for it, and how the server's merge compares it — so its
+   * Separate chip is the active one too: the save would change nothing.
    */
   async setNotificationMode(index, mode) {
     const notif = this.app.config.notifications?.[index];
     if (!notif) return;
     const previous = notif.mode;
     const next = mode === "edit" ? "edit" : "separate";
-    // undefined !== "separate", so an absent key is still written out
-    // explicitly the first time the Separate chip is clicked.
-    if (previous === next) return;
+    if ((previous === "edit" ? "edit" : "separate") === next) return;
+    const base = this._notificationsCopy();
     notif.mode = next;
     try {
-      await this._saveNotificationsOnly();
+      await this._saveNotificationEdits(base);
     } catch {
       // Revert on failure — including back to ABSENT, which is what a config
       // written before this key looks like, and what both siblings do.
@@ -2384,6 +2357,7 @@ export class SettingsController {
     if (!notif || !Array.isArray(notif.events)) return;
 
     // Save a copy in case the save fails
+    const base = this._notificationsCopy();
     const previousEvents = [...notif.events];
 
     const idx = notif.events.indexOf(eventId);
@@ -2400,7 +2374,7 @@ export class SettingsController {
     }
 
     try {
-      await this._saveNotificationsOnly();
+      await this._saveNotificationEdits(base);
     } catch {
       // Revert on failure
       notif.events = previousEvents;
@@ -2412,10 +2386,11 @@ export class SettingsController {
     const notif = this.app.config.notifications?.[index];
     if (!notif) return;
 
+    const base = this._notificationsCopy();
     const previousEvents = notif.events;
     notif.events = [...ALL_EVENT_IDS];
     try {
-      await this._saveNotificationsOnly();
+      await this._saveNotificationEdits(base);
     } catch {
       notif.events = previousEvents;
     }
@@ -2426,19 +2401,37 @@ export class SettingsController {
     const notif = this.app.config.notifications?.[index];
     if (!notif) return;
 
+    const base = this._notificationsCopy();
     const previousEvents = notif.events;
     delete notif.events;
     try {
-      await this._saveNotificationsOnly();
+      await this._saveNotificationEdits(base);
     } catch {
       notif.events = previousEvents;
     }
     this.renderNotificationsList();
   }
 
+  /** The target list as it stands now, copied: the base of the next edit. */
+  _notificationsCopy() {
+    return JSON.parse(JSON.stringify(this.app.config.notifications || []));
+  }
+
   /**
-   * Save only the notifications section to avoid side-effects on other unsaved
-   * settings. The server-side PUT /api/config merges — omitted sections are untouched.
+   * Save one card change: the target list as it was before it (`base`, as
+   * this page last read it or a save answered it) and as it is now, with
+   * `from` naming the base index each entry came from (-1 for an added one;
+   * the default reads each entry as its own index's, an entry past base's
+   * end as added). PUT /api/config merges the change into the live list by
+   * each target's identity — the TUI save's merge — so a target the TUI
+   * added, edited or removed while this page was open is not reverted, and
+   * a field both changed takes this save's value. The list used to be sent
+   * whole, putting this page's copy of every target back. Only the targets
+   * travel, so no other unsaved setting is touched.
+   *
+   * The answer carries the live list after the write, which replaces the
+   * page's copy: the next change starts from it, and the cards show what
+   * the TUI changed meanwhile.
    *
    * A 400 carries `details` keyed by field ("notifications[0].mention"), and
    * this unpacks it the way saveConfig does. The mention input is the first
@@ -2446,19 +2439,27 @@ export class SettingsController {
    * a malformed token toasts a bare "Validation failed" and the operator is
    * left guessing which of their targets it meant.
    */
-  async _saveNotificationsOnly() {
+  async _saveNotificationEdits(base, from) {
+    const edited = this.app.config.notifications || [];
+    const edits = {
+      base,
+      edited,
+      from: from ?? edited.map((_, i) => (i < base.length ? i : -1)),
+    };
     let response;
     try {
       response = await fetch("/api/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ notifications: this.app.config.notifications || [] }),
+        body: JSON.stringify({ notification_edits: edits }),
       });
     } catch (e) {
       this.app.showToast("Failed to save notifications: " + e.message, "danger");
       throw e;
     }
     if (response.ok) {
+      const data = await response.json().catch(() => ({}));
+      if (Array.isArray(data?.notifications)) this.app.config.notifications = data.notifications;
       this.app.showToast("Notifications updated", "success");
     } else {
       const data = await response.json().catch(() => ({ error: response.statusText }));
@@ -2964,6 +2965,9 @@ export class SettingsController {
     }
 
     this._browserSelectLoaded = true;
+    // The choice as just filled from the stored pair: a save sends the pair
+    // only once the operator changes it (saveConfig).
+    this._browserBaseline = this._browserChoice();
 
     // Wire change listener once (idempotent)
     if (!select._customListenerAttached) {

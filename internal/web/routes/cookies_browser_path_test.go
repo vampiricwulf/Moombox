@@ -172,7 +172,7 @@ func TestSaveConfigHasOneExitFromBrowserValidation(t *testing.T) {
 
 	const (
 		startMark = "/api/auto-cookies/validate-browser-path"
-		endMark   = "payload.cookies.browser_path = path;"
+		endMark   = "payload.cookies.browser_path = browser.path;"
 	)
 	start := strings.Index(body, startMark)
 	if start < 0 {
