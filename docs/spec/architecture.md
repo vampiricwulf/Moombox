@@ -28,7 +28,7 @@ Moombox uses a two-process model controlled by the `_MOOMBOX_CHILD` environment 
 - Spawns itself as a child with `_MOOMBOX_CHILD=1` added to the environment
 - Passes through stdin/stdout/stderr so the child's TUI renders in the launcher's console
 - When the child exits with code 42 (`exitCodeRestart`), the launcher respawns. This picks up any new binary (for self-updates via the swap: current kept at `.old`, `.new` -> current)
-- When the child exits with code 0 or any other code, the launcher exits with the same code
+- Any other exit is decided by `classifyChildExit` (operations.md §Launcher/Supervisor Pattern has the rules in order): code 0, a stop the launcher forwarded, 130/143 and 3 (`exitCodeStartupError`) end the launcher with the same code, and so does any other non-zero exit within 60 s of a fresh launch; a failed first boot after an update is rolled back to the previous binary; any other non-zero exit is a crash, respawned after 1/2/4/8/16 s until the launcher gives up after 5 in a row
 - On respawn, cleans up `.old` binary by renaming to `.exe~` (freeing the `.old` name for future updates)
 - On final exit, spawns a detached `cmd /C ping ... & del` process to delete the `.exe~` file after the launcher releases its lock
 

@@ -17,8 +17,9 @@ import (
 // launchAndSupervise is the launcher/supervisor loop. It spawns moombox
 // as a child process in the same console and waits. If the child exits
 // with exitCodeRestart (config change or update applied), it respawns —
-// picking up any new binary on disk. For any other exit code it
-// propagates and exits.
+// picking up any new binary on disk. Every other exit is classifyChildExit's
+// to decide: it propagates and exits, rolls a failed update back, or
+// respawns a crash with backoff.
 //
 // This keeps one stable parent holding the console connection so the
 // child's BubbleTea properly restores terminal state, and avoids
