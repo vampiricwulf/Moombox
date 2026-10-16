@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -79,6 +80,16 @@ var (
 // asks the probe whether the network is back — the Twitch VOD chat's
 // vodChatOnlinePoll. A var so tests need not wait it out.
 var chatOnlinePoll = 5 * time.Second
+
+// chatOfflineRetryFloor is the longest a fetch loop parked on a connectivity
+// outage waits for the probe before it asks for the same continuation again
+// anyway — the worker's offlineProbeFloor. The probe can report offline with
+// the network up (the connectivity monitor dials only probe_targets, which a
+// firewall can block, and nothing the platforms answer brings it back), and a
+// wait that ended only on its word stopped the capture for as long as it was
+// wrong. During a real outage the fetch fails as it did and the wait starts
+// again, the budget untouched. A var so tests need not wait it out.
+var chatOfflineRetryFloor = 60 * time.Second
 
 // errStaleRecoveryExhausted is the terminal error Start reports when
 // runChatLoop gave up after maxStaleContinuationAttempts consecutive
@@ -199,9 +210,14 @@ type ChatDownloader struct {
 	replay atomic.Bool
 
 	// isOnline is the device-connectivity probe SetIsOnline installs (nil =
-	// none): a fetch that fails while it reports offline waits for the
-	// network instead of spending the consecutive-error budget.
+	// none): a fetch that fails without reaching the chat API while it
+	// reports offline waits for the network instead of spending the
+	// consecutive-error budget.
 	isOnline atomic.Pointer[func() bool]
+	// offlineWaiting is set while the fetch loop is parked on an outage, so
+	// the wait's Info lines come once each way per outage rather than once
+	// per chatOfflineRetryFloor retry. The fetch loop's alone.
+	offlineWaiting bool
 
 	// testRecoveryOverride allows tests to inject a recovery function instead of
 	// calling recoverStaleContinuation. Only set in tests; nil in production.
@@ -273,19 +289,39 @@ func (cd *ChatDownloader) offline() bool {
 }
 
 // waitOnline blocks until the probe reports the network back, polling every
-// chatOnlinePoll, and reports false when ctx ends first — which Stop and
+// chatOnlinePoll, or until chatOfflineRetryFloor has passed with it still
+// reporting offline, and reports false when ctx ends first — which Stop and
 // MarkStreamEnded both bring about, through cancelCtx.
 func (cd *ChatDownloader) waitOnline(ctx context.Context) bool {
 	t := time.NewTicker(chatOnlinePoll)
 	defer t.Stop()
+	floor := time.NewTimer(chatOfflineRetryFloor)
+	defer floor.Stop()
 	for cd.offline() {
 		select {
 		case <-ctx.Done():
 			return false
+		case <-floor.C:
+			return true
 		case <-t.C:
 		}
 	}
 	return true
+}
+
+// isTransportFailure reports whether a chat fetch failed without reaching the
+// chat API at all — a dial, DNS or TLS failure, a deadline with no answer, a
+// connection cut mid-response — as opposed to an answer from it: a status, a
+// body that does not parse. Only the first can be the network being down; an
+// answer proves it up, whatever the connectivity probe says. The worker's
+// probeVote draws the same line for the connectivity oracle.
+func isTransportFailure(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
+	}
+	// *url.Error, what http.Client.Do fails with, is itself a net.Error.
+	_, ok := errors.AsType[net.Error](err)
+	return ok
 }
 
 // callOnProgress snapshots the current progress callback under the lock and
@@ -1223,17 +1259,33 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 	// No network is not a fault of the page: wait for it, then ask for the
 	// same continuation again with the budget untouched — and cleared, since
 	// the failures just before the probe noticed the outage were the outage
-	// too. One Info line each way per outage, not one per poll, and no
-	// OnError: nothing failed that the network coming back will not fix. A
-	// wait that ctx ends (Stop, MarkStreamEnded, shutdown) leaves the loop as
-	// a cancel does.
-	if cd.offline() {
-		cd.logInfo("chat fetch failed while offline; waiting for connectivity",
-			"videoID", cd.opts.VideoID, "err", err)
+	// too. One Info line each way per outage, not one per poll or per retry,
+	// and no OnError: nothing failed that the network coming back will not
+	// fix. A wait that ctx ends (Stop, MarkStreamEnded, shutdown) leaves the
+	// loop as a cancel does.
+	//
+	// Only a fetch that never reached the chat API waits (isTransportFailure).
+	// An answer — a 500, a body that does not parse — proves the network up
+	// whatever the probe says, and spends the budget as it always did: it used
+	// to wait for a probe that may be wrong, and for as long as it was, the
+	// capture fetched nothing. The wait itself lets the fetch try again every
+	// chatOfflineRetryFloor for the same reason.
+	if cd.offline() && isTransportFailure(err) {
+		if !cd.offlineWaiting {
+			cd.offlineWaiting = true
+			cd.logInfo("chat fetch failed while offline; waiting for connectivity",
+				"videoID", cd.opts.VideoID, "err", err)
+		}
 		if !cd.waitOnline(ctx) {
 			return true
 		}
-		cd.logInfo("connectivity restored; resuming chat download", "videoID", cd.opts.VideoID)
+		if cd.offline() {
+			cd.logDebug("chat still offline; asking for the same continuation again",
+				"videoID", cd.opts.VideoID)
+		} else {
+			cd.offlineWaiting = false
+			cd.logInfo("connectivity restored; resuming chat download", "videoID", cd.opts.VideoID)
+		}
 		*consecutiveErrors = 0
 		return false
 	}

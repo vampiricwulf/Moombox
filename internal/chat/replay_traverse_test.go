@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -665,6 +667,117 @@ func TestStopEndsAnOfflineWait(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Stop did not end the offline wait")
+	}
+}
+
+// TestAnAnswerMetOfflineSpendsTheBudget: only a fetch that never reached the
+// chat API waits on the connectivity probe. The probe can say offline with the
+// network up (the monitor dials only probe_targets, which a firewall can
+// block), and the chat waited on ANY failure while it did — a 500 included —
+// so for as long as the probe was wrong the capture asked for nothing. An
+// answer proves the network up: it spends the budget as it always did.
+//
+// Mutant killed: handleFetchError's isTransportFailure check dropped → the
+// 500 waits on the probe, which never comes back, and Start runs to the
+// test's deadline.
+func TestAnAnswerMetOfflineSpendsTheBudget(t *testing.T) {
+	fastChatOnlinePoll(t)
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidWrongProbe",
+		OutputFile:          filepath.Join(t.TempDir(), "chat.json"),
+		IsReplay:            true,
+		InitialContinuation: "replay-0",
+	})
+	cd.testBackoffOverride = time.Millisecond
+	cd.SetIsOnline(func() bool { return false }) // wrong throughout
+	var fetches atomic.Int32
+	cd.testFetchOverride = func(context.Context) (*ChatApiResponse, error) {
+		fetches.Add(1)
+		return nil, errors.New("chat API returned status 500")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := cd.Start(ctx)
+	if ctx.Err() != nil {
+		t.Fatalf("Start ran to the test's deadline after %d fetch(es): the answer waited on the probe", fetches.Load())
+	}
+	if !errors.Is(err, errChatFetchExhausted) {
+		t.Fatalf("Start = %v after %d fetch(es), want errChatFetchExhausted: the answers spend the budget", err, fetches.Load())
+	}
+	if n, want := fetches.Load(), int32(maxConsecErrorsVod+1); n != want {
+		t.Errorf("fetches = %d, want %d: the whole budget, online or not", n, want)
+	}
+}
+
+// TestOfflineWaitAsksAgainAfterTheFloor: a fetch that failed on the transport
+// while the probe says offline waits for the network, and when the probe is
+// wrong it never says the network is back. The wait asks for the same
+// continuation again every chatOfflineRetryFloor, the budget untouched, so
+// the replay still comes out whole.
+//
+// Mutant killed: waitOnline's floor arm dropped → the wait ends only on the
+// probe, and Start runs to the test's deadline with one page fetched.
+func TestOfflineWaitAsksAgainAfterTheFloor(t *testing.T) {
+	fastChatOnlinePoll(t)
+	old := chatOfflineRetryFloor
+	chatOfflineRetryFloor = 20 * time.Millisecond
+	t.Cleanup(func() { chatOfflineRetryFloor = old })
+	const total = 600
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidFloor",
+		OutputFile:          filepath.Join(t.TempDir(), "chat.json"),
+		IsReplay:            true,
+		InitialContinuation: "replay-0",
+	})
+	cd.testBackoffOverride = time.Millisecond
+	cd.SetIsOnline(func() bool { return false }) // wrong throughout
+	var failed atomic.Int32
+	cd.testFetchOverride = func(context.Context) (*ChatApiResponse, error) {
+		var from int
+		fmt.Sscanf(cd.continuation, "replay-%d", &from)
+		// Page two meets the transport failure the first ten times it is
+		// asked for — twice the replay budget.
+		if from == archivePageSize && failed.Add(1) <= 2*maxConsecErrorsVod {
+			return nil, errOutageDial
+		}
+		return archivePage(from, total), nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := cd.Start(ctx)
+	if ctx.Err() != nil {
+		t.Fatalf("Start ran to the test's deadline after %d failed fetch(es): the wait never asked again", failed.Load())
+	}
+	if err != nil {
+		t.Fatalf("Start = %v after %d failed fetch(es)", err, failed.Load())
+	}
+	if got := cd.MessageCount(); got != total {
+		t.Errorf("MessageCount = %d, want the whole archive (%d)", got, total)
+	}
+}
+
+// TestIsTransportFailure pins which chat fetch failures can be the network
+// being down: no answer at all, never an answer.
+//
+// Mutants this kills: the net.Error arm dropped (the dial and the url.Error
+// read as answers); the EOF arms dropped (a cut body reads as an answer); any
+// arm answering true for a status or a parse failure.
+func TestIsTransportFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"a dial", errOutageDial, true},
+		{"what http.Client.Do returns", &url.Error{Op: "Post", URL: "https://www.youtube.com/youtubei/v1/live_chat/get_live_chat", Err: errOutageDial}, true},
+		{"a deadline", fmt.Errorf("fetch: %w", context.DeadlineExceeded), true},
+		{"a body cut short", io.ErrUnexpectedEOF, true},
+		{"a status", errors.New("chat API returned status 500"), false},
+		{"a body that does not parse", fmt.Errorf("parse chat response: %w", errors.New("invalid character")), false},
+	} {
+		if got := isTransportFailure(tc.err); got != tc.want {
+			t.Errorf("%s: isTransportFailure(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+		}
 	}
 }
 
