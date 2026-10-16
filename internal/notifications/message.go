@@ -53,7 +53,9 @@ type Message struct {
 	// (targetQueue.pop, awaitOutage). buildPayload then adds delayedNote to
 	// the content: a line of content rather than a field, because content is
 	// outside the embeds' 6000-character budget, so a batch the splitter
-	// packed to the limit still fits with the note on it.
+	// packed to the limit still fits with the note on it. An edit-mode
+	// lifecycle rewrite builds its own body, and takes a Delayed field
+	// instead (dispatchOne, withDelayedField).
 	//
 	// Only the queue sets it, on its own item, so nothing a producer builds
 	// can carry one.

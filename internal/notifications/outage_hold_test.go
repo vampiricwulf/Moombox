@@ -312,18 +312,24 @@ func TestHeldQueueDropsOldestAndReportsOnce(t *testing.T) {
 
 // TestEditModeKeepsOneMessageThroughAHold: an edit-mode target's held
 // lifecycle events still build ONE message per job — the first creates it,
-// the next rewrites it — and neither body carries the content note, which an
-// edit that sends no content would leave on the message for good.
+// the next rewrites it — and each says it was delayed in a Delayed field
+// after Status and History, dated by when it was raised, rather than in the
+// content note, which an edit that sends no content would leave on the
+// message for good. The rewrite after the outage replaces the embed, and the
+// mark goes with it.
 //
-// Mutant: dispatchOne carrying the delayed mark into the managed body (both
-// requests carry the note in their content).
+// Mutants: dispatchOne carrying the delayed mark into the managed body's
+// content (the requests carry the note); dispatchOne not adding the Delayed
+// field (the held rewrites carry none); adding it whatever the mark (the
+// post-outage rewrite still says Delayed); withDelayedField inserting it
+// anywhere but third.
 func TestEditModeKeepsOneMessageThroughAHold(t *testing.T) {
 	f := newFakeDiscord(t, okCreated("M1"))
 	conn := newOutageConn(false)
 	m := heldManager(t, conn, editTarget(f, nil, ModeEdit))
 
 	m.Send("Download Starting", "d", TypeDownload, nil, SendOptions{Event: "downloading", JobID: "yt_7"})
-	m.Send("Download Finished", "d", TypeSuccess, nil, SendOptions{Event: "finished", JobID: "yt_7"})
+	m.Send("Muxing", "d", TypeDownload, []Field{{Name: "Parts", Value: "1"}}, SendOptions{Event: "muxing", JobID: "yt_7"})
 	time.Sleep(150 * time.Millisecond)
 	if n := len(f.calls()); n != 0 {
 		t.Fatalf("%d requests while offline", n)
@@ -341,6 +347,58 @@ func TestEditModeKeepsOneMessageThroughAHold(t *testing.T) {
 		if c.Body.Content != "" {
 			t.Errorf("%s carried content %q — a lifecycle rewrite must not take the note", c.Method, c.Body.Content)
 		}
+		fields := c.Body.Embeds[0].Fields
+		if len(fields) < 3 || fields[2].Name != delayedFieldName {
+			t.Errorf("%s fields %+v — want Status, History, then the Delayed mark", c.Method, fields)
+			continue
+		}
+		at, err := time.Parse(time.RFC3339, c.Body.Embeds[0].Timestamp)
+		if err != nil {
+			t.Fatalf("embed timestamp %q: %v", c.Body.Embeds[0].Timestamp, err)
+		}
+		if want := fmt.Sprintf("<t:%d:f>", at.Unix()); !strings.Contains(fields[2].Value, want) {
+			t.Errorf("Delayed = %q, want it to name when the event was raised (%s)", fields[2].Value, want)
+		}
+	}
+
+	m.Send("Download Finished", "d", TypeSuccess, nil, SendOptions{Event: "finished", JobID: "yt_7"})
+	waitFor(t, "the post-outage rewrite", func() bool { return len(f.calls()) == 3 })
+	for _, fl := range f.calls()[2].Body.Embeds[0].Fields {
+		if fl.Name == delayedFieldName {
+			t.Errorf("the rewrite raised after the outage still carries %q", fl.Value)
+		}
+	}
+}
+
+// TestRaisedAfterTheRestoreIsNotMarked: the queue holds from the online edge
+// until its goroutine next looks, and the Outage Alert is sent from that same
+// transition — so a notification queued in between was raised after the
+// outage, and goes out unmarked, behind the held one that is.
+//
+// Mutant: enqueue marking an arrival delayed while the queue holds rather
+// than while the monitor reports offline (the post-restore notification
+// carries the note).
+func TestRaisedAfterTheRestoreIsNotMarked(t *testing.T) {
+	f := newFakeDiscord(t, okCreated("M1"))
+	conn := newOutageConn(false)
+	m := heldManager(t, conn, webhookTarget(f))
+
+	m.Send("Job Failed", "d", TypeError, nil, SendOptions{Event: "error", JobID: "yt_1"})
+	time.Sleep(150 * time.Millisecond) // the goroutine finds it offline and parks
+	// The monitor reports online, and the alert is queued before the
+	// transition reaches the queue's own wake.
+	conn.mu.Lock()
+	conn.online = true
+	conn.mu.Unlock()
+	m.Send("Outage Alert", "d", TypeWarning, nil, SendOptions{Event: "connectivity_restored"})
+	waitFor(t, "both notifications", func() bool { return len(f.calls()) == 2 })
+	calls := f.calls()
+	if calls[0].Body.Embeds[0].Title != "Job Failed" || calls[1].Body.Embeds[0].Title != "Outage Alert" {
+		t.Fatalf("delivered %q then %q, want the held one first", calls[0].Body.Embeds[0].Title, calls[1].Body.Embeds[0].Title)
+	}
+	assertDelayedNote(t, calls[0])
+	if c := calls[1].Body.Content; c != "" {
+		t.Errorf("the alert raised after the restore carries content %q, want none", c)
 	}
 }
 

@@ -155,10 +155,11 @@ type targetQueue struct {
 
 	// holding is set while the queue holds its messages through a
 	// connectivity outage: pop found the monitor offline with a message at the
-	// head, or a delivery's ladder is holding in awaitOutage. While it is set
-	// every queued message, and every arrival, is marked delayed, and a full
-	// queue drops its OLDEST rather than the arrival. pop clears it on the
-	// first look that finds the monitor online again.
+	// head, or a delivery's ladder is holding in awaitOutage. Setting it marks
+	// every queued message delayed, as enqueue marks every arrival while the
+	// monitor reports offline; while it is set a full queue drops its OLDEST
+	// rather than the arrival. pop clears it on the first look that finds the
+	// monitor online again.
 	holding bool
 	// heldDropped counts the messages the full queue dropped while holding,
 	// reported once — a Warn and a heldDropReport ahead of the backlog — when
@@ -401,14 +402,17 @@ func (q *targetQueue) enqueue(it queued) {
 	// the goroutine has not started it yet: the cap's drop-oldest policy must
 	// not depend on whether the goroutine has woken up to the outage.
 	started := false
-	if !q.holding && q.conn.offline() {
+	if q.conn.offline() {
 		started = q.beginHoldLocked()
-	}
-	if q.holding {
-		// Raised during the outage, or queued behind a delivery it holds:
+		// Raised during the outage, or queued behind a delivery it holds
+		// (the monitor reports offline for as long as that hold lasts):
 		// either way it goes out late, and says so.
 		it.msg.delayed = true
 	}
+	// Not on q.holding alone: the queue still holds from the online edge
+	// until its goroutine's next pop clears it, and what arrives in between
+	// was raised after the outage — the Outage Alert among it, sent from the
+	// same transition that wakes the goroutine.
 	if started {
 		n := len(q.items) - q.steps + 1
 		defer q.logger.Info("connectivity monitor reports offline — holding this target's notifications until it returns",

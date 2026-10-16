@@ -150,6 +150,23 @@ func delayedNote(embeds []Embed) string {
 	return fmt.Sprintf("Delayed by a connectivity outage — raised <t:%d:f>", first.Unix())
 }
 
+// delayedFieldName names the field an edit-mode lifecycle rewrite carries
+// instead of delayedNote (dispatchOne).
+const delayedFieldName = "Delayed"
+
+// withDelayedField returns fields with the outage mark inserted after the
+// rewrite's Status and History (rewriteFields puts them first), so the clamp,
+// which drops trailing fields, keeps it ahead of the event's own. at is when
+// the event was raised. The caller's slice is not modified.
+func withDelayedField(fields []Field, at time.Time) []Field {
+	mark := Field{Name: delayedFieldName, Value: fmt.Sprintf("By a connectivity outage — raised <t:%d:f>", at.Unix())}
+	pos := min(2, len(fields))
+	out := make([]Field, 0, len(fields)+1)
+	out = append(out, fields[:pos]...)
+	out = append(out, mark)
+	return append(out, fields[pos:]...)
+}
+
 // heldDropReport is the one message a target gets on the online edge when its
 // queue overflowed while it held: how many of the oldest it dropped. It goes
 // out AHEAD of the held backlog, so the gap is explained before the

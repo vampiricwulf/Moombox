@@ -808,6 +808,14 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 	tr := m.tracker()
 	e := msg.Embeds[0]
 	e.Fields = tr.rewriteFields(e.Opts.JobID, t.msgKey, e.Opts.Event, e.Fields, e.eventTime())
+	if msg.delayed {
+		// Held through an outage (targetQueue.holding): the rewrite says so
+		// in a field, not the content note buildPayload gives every other
+		// message — Discord keeps the content of a message an edit sends
+		// none for, so a note there would outlive the state it described,
+		// where the next rewrite replaces the embed and the field with it.
+		e.Fields = withDelayedField(e.Fields, e.eventTime())
+	}
 	// The ping is per MESSAGE (content + allowed_mentions), so it is carried
 	// over from the queued Message, not rebuilt from the embed. An EditOnly
 	// close carries none: its report is suppressed, and the role text would
