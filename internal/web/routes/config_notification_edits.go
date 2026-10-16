@@ -36,10 +36,39 @@ type notificationEdits struct {
 }
 
 // notificationsReplacedWhole refuses PUT /api/config's whole-list
-// notifications: undocumented as an API, sent by nothing since the dashboard
-// moved to notification_edits, and what reverted every target change made
-// elsewhere while a page was open.
-const notificationsReplacedWhole = "the target list is not replaced whole: send notification_edits ({base, edited, from}) with your own changes"
+// notifications when the list would change the targets: undocumented as an
+// API, and what reverted every target change made elsewhere while a page was
+// open. Its one sender is the dashboard build before notification_edits — a
+// tab open across a self-update still runs it, and is asked to save before it
+// reloads — so the message says to reload.
+const notificationsReplacedWhole = "the target list is not replaced whole: send notification_edits ({base, edited, from}) with your own changes (a dashboard tab opened before an update: reload it)"
+
+// notificationListUnchanged reports whether raw, PUT /api/config's
+// whole-list notifications, holds live's targets as they stand: one entry
+// per target, in order, each with the form values the editors compare
+// (notifications.TargetFormValues — the URL as stored, so each identity
+// matches too). The dashboard build before notification_edits sent its list
+// as last read with every Settings save; a tab still running it after a
+// self-update is told to save before it reloads, and refusing that save over
+// a list that changes nothing left its edits nowhere to go. A list that does
+// change the targets is refused: written whole it would put the tab's copy of
+// every target back.
+func notificationListUnchanged(raw any, live []config.NotificationConfig) bool {
+	entries, ok := raw.([]any)
+	if !ok || len(entries) != len(live) {
+		return false
+	}
+	list, errs := decodeConfigEntries[config.NotificationConfig]("notifications", entries)
+	if errs != nil {
+		return false
+	}
+	for i := range list {
+		if !maps.Equal(notifications.TargetFormValues(list[i]), notifications.TargetFormValues(live[i])) {
+			return false
+		}
+	}
+	return true
+}
 
 // decodeNotificationEdits reads updates' notification_edits, normalised as
 // a stored list is (normalizeNotificationEntries) — base and edited alike,

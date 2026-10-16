@@ -652,7 +652,7 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 	}
 
 	// Notifications: a whole list, which /api/setup/complete still takes (PUT
-	// /api/config refuses one, and takes notification_edits instead).
+	// /api/config never applies one, and takes notification_edits instead).
 	if notifs, ok := updates["notifications"].([]any); ok {
 		maps.Copy(errs, notificationEntryErrors("notifications", notifs))
 	}
@@ -1115,8 +1115,8 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 	}
 
 	// Notifications
-	// A whole list: /api/setup/complete's (PUT /api/config refuses one and
-	// merges notification_edits instead). Decoded through
+	// A whole list: /api/setup/complete's (PUT /api/config never applies one
+	// and merges notification_edits instead). Decoded through
 	// decodeConfigEntries, the shared helper the channels arm
 	// below also uses, rather than rebuilt field by field: every tagged field
 	// carries through unconditionally, so a field a later arc adds (N3's
@@ -1200,14 +1200,25 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		// not carry (mergedValidationView): a save carries only what its
 		// editor changed.
 		live := store.Snapshot()
+		// A whole target list is never applied: one holding the live targets
+		// as they stand is dropped and the rest of the body saved — what a
+		// dashboard tab still running the build before notification_edits
+		// sends with every Settings save — and any other is refused.
+		var wholeListErr string
+		if raw, whole := updates["notifications"]; whole {
+			if !notificationListUnchanged(raw, live.Notifications) {
+				wholeListErr = notificationsReplacedWhole
+			}
+			delete(updates, "notifications")
+		}
 		validationErrs := validateConfigUpdates(mergedValidationView(updates, live))
 		maps.Copy(validationErrs, channelErrs)
 		maps.Copy(validationErrs, newQuotedPathErrors(updates, live))
 		if msg := newFFmpegPathError(updates, live.Paths.FfmpegPath); msg != "" {
 			validationErrs["paths.ffmpeg_path"] = msg
 		}
-		if _, whole := updates["notifications"]; whole {
-			validationErrs["notifications"] = notificationsReplacedWhole
+		if wholeListErr != "" {
+			validationErrs["notifications"] = wholeListErr
 		}
 		edits, editErrs := decodeNotificationEdits(updates)
 		maps.Copy(validationErrs, editErrs)

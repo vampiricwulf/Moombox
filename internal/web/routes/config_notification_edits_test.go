@@ -325,11 +325,10 @@ func TestClearFilterOnAnEveryEventFilter(t *testing.T) {
 	}
 }
 
-// TestPutRefusesAWholeNotificationList: the whole-list notifications key is
-// gone from PUT /api/config — undocumented, sent by nothing since the
-// dashboard moved to notification_edits, and the very shape that reverted a
-// target change made elsewhere. A body carrying it is a 400 naming it, and
-// nothing is written.
+// TestPutRefusesAWholeNotificationList: PUT /api/config never applies a
+// whole-list notifications — undocumented, and the very shape that reverted a
+// target change made elsewhere. A body whose list would change the targets is
+// a 400 naming it, and nothing is written.
 //
 // Mutant killed: dropping the refusal (the list replaces A, B, C).
 func TestPutRefusesAWholeNotificationList(t *testing.T) {
@@ -344,6 +343,71 @@ func TestPutRefusesAWholeNotificationList(t *testing.T) {
 	live := f.store.Snapshot()
 	if got := urlsOf(live.Notifications); !slices.Equal(got, []string{editHookA, editHookB, editHookC}) || live.Logs.LogLevel == "DEBUG" {
 		t.Errorf("a refused save wrote: targets %q, log level %q", got, live.Logs.LogLevel)
+	}
+}
+
+// TestPutTakesAnOlderDashboardsSave: a dashboard tab still running the build
+// before notification_edits — app.js defers the reload after a self-update
+// while the form is dirty, and asks the operator to save first — sends every
+// field and, beside them, its target list as last read, enabled and mode
+// spelled out the way its cards wrote them. Such a list holds the live
+// targets as they stand, so it is dropped and the rest of the save applied:
+// refusing the key whole left the operator's edits nowhere to go, the reload
+// they were told to make discarding them. A list the TUI has changed since
+// the tab read it would put the tab's copy back, so that save is refused,
+// and writes nothing.
+//
+// Mutants killed: refusing every whole list (the first save is a 400);
+// dropping every whole list, or comparing a list by its length alone (the
+// stale one saves); the matching list left in the body (applyConfigUpdates
+// writes it whole: the spelled-out defaults reload the notification manager
+// over no change).
+func TestPutTakesAnOlderDashboardsSave(t *testing.T) {
+	f, page := pageOver(t)
+	spelled := edited(page, func(l []any) []any {
+		for _, n := range l {
+			n.(map[string]any)["enabled"] = true
+			n.(map[string]any)["mode"] = "separate"
+		}
+		return l
+	})
+	rec := putConfigExpect(t, f, map[string]any{
+		"logs":          map[string]any{"log_level": "DEBUG"},
+		"downloader":    map[string]any{"num_parallel_downloads": float64(3)},
+		"notifications": spelled,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("the older dashboard's save: %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	live := f.store.Snapshot()
+	if live.Logs.LogLevel != "DEBUG" {
+		t.Errorf("log level = %q, want the save's DEBUG", live.Logs.LogLevel)
+	}
+	if got := urlsOf(live.Notifications); !slices.Equal(got, []string{editHookA, editHookB, editHookC}) ||
+		live.Notifications[0].Enabled != nil || live.Notifications[0].Mode != "" {
+		t.Errorf("targets = %q (A enabled %v, mode %q), want A, B, C as stored", got, live.Notifications[0].Enabled, live.Notifications[0].Mode)
+	}
+	if f.notifs.Load() {
+		t.Error("a list that changed nothing reloaded the notification manager")
+	}
+
+	// The TUI mutes B; the tab's list still has it delivering.
+	if err := f.store.Update(func(c *config.MoomboxConfig) {
+		muted := false
+		c.Notifications[1].Enabled = &muted
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec = putConfigExpect(t, f, map[string]any{
+		"logs":          map[string]any{"log_level": "WARN"},
+		"notifications": page,
+	})
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "notification_edits") {
+		t.Fatalf("a stale list: %d %s, want a 400 pointing at notification_edits", rec.Code, rec.Body.String())
+	}
+	live = f.store.Snapshot()
+	if live.Logs.LogLevel != "DEBUG" || live.Notifications[1].IsEnabled() {
+		t.Errorf("a refused save wrote: log level %q, B delivering %v", live.Logs.LogLevel, live.Notifications[1].IsEnabled())
 	}
 }
 
