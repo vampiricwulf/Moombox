@@ -119,6 +119,16 @@ The dashboard is available at `http://<host>:774`. Everything (config,
 database, logs, staging, finished downloads) lives under `./data`; edit
 `./data/config.toml` or use the dashboard's Settings page to configure.
 
+`./data/README-docker.txt` is the reference for the settings the image
+seeds and for the container-specific advice below. `config.toml` itself
+keeps no comments: Moombox saves it by writing out every setting, so any
+save rewrites it without them — and the first start saves it (to record
+the version that ran), as does every update and every change from the
+dashboard or the TUI. Keep notes in `README-docker.txt` instead: a newer
+image refreshes that file only while you have not edited it, and
+otherwise leaves your copy alone and writes its own text to
+`README-docker.txt.new` beside it.
+
 Docker-specific behavior:
 - **Network access defaults to `"lan"`** (instead of `"localhost"`) — the
   container is only reachable through the published port, and requests
