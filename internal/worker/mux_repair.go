@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,6 +78,42 @@ type stagedInput struct {
 	// of this file — a fragmented MP4 the walk could not read, or whose
 	// timeline is no measure of it — and is "" when something can.
 	unmeasured string
+	// lead is, for an input whose first fragment(s) the repair leaves out
+	// (lostStart) and that a copy places against the other half of its
+	// capture (alignStagedInputs), how far into the capture its repaired
+	// copy begins: the gap the archive keeps at its start. 0 otherwise.
+	lead float64
+}
+
+// lostStart reports whether a drop came before the input's first readable
+// fragment in any of its video or audio tracks: its repaired copy begins
+// later on the capture's timeline than the recording did.
+func (in *stagedInput) lostStart() bool {
+	if in.walk == nil {
+		return false
+	}
+	for _, d := range in.walk.Drops {
+		for _, g := range d.Gaps {
+			if !g.HasFrom && g.HasTo && codecTypeOf(g.Handler) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// carriesOnly reports whether every track the walk found in the input is of
+// one codec type: a video_stream or an audio_stream of a DASH capture.
+func (in *stagedInput) carriesOnly(codecType string) bool {
+	if in.walk == nil || len(in.walk.Tracks) == 0 {
+		return false
+	}
+	for _, t := range in.walk.Tracks {
+		if codecTypeOf(t.Handler) != codecType {
+			return false
+		}
+	}
+	return true
 }
 
 // measured reports whether the input's own fragments measure a copy of it.
@@ -92,6 +129,11 @@ func (in *stagedInput) keepsStaging() bool {
 // of which may be nil.
 type stagedInputs struct {
 	video, audio *stagedInput
+	// offsets delay each input on the copy's timeline (alignStagedInputs);
+	// aligned is set when they were worked out, which only a copy of two
+	// inputs one of which lost its start needs.
+	offsets engine.InputOffsets
+	aligned bool
 }
 
 func (s *stagedInputs) list() []*stagedInput {
@@ -144,17 +186,19 @@ func (o *DownloadOrchestrator) copyStaged(ctx context.Context, jobID, videoPath,
 	defer o.removeRepairedCopies(jobID, ins)
 	v.inputs = ins
 	video, audio := ins.readPaths()
-	if err := o.mux().MuxCopy(ctx, video, audio, outputPath, o.verifiedCopy(jobID, &v, ins)); err != nil {
+	if err := o.mux().MuxCopyAt(ctx, video, audio, outputPath, ins.offsets, o.verifiedCopy(jobID, &v, ins)); err != nil {
 		return v, err
 	}
 	o.reportStagingRepairs(jobID, ins, outputPath)
 	return v, nil
 }
 
-// prepareStagedInputs walks each staged input, records beside it whether its
-// copy will leave staging kept (writeMuxGapRecord — before anything is muxed,
-// so a record that cannot be written stops the copy rather than leave its
-// staging unshielded), and writes a repaired copy of each damaged one.
+// prepareStagedInputs walks each staged input, places the two against each
+// other when a repair cuts the start of either (alignStagedInputs), records
+// beside each whether its copy will leave staging kept (writeMuxGapRecord —
+// before anything is muxed, so a record that cannot be written stops the
+// copy rather than leave its staging unshielded), and writes a repaired copy
+// of each damaged one.
 func (o *DownloadOrchestrator) prepareStagedInputs(ctx context.Context, jobID, outputPath, videoPath, audioPath string) (*stagedInputs, error) {
 	ins := &stagedInputs{}
 	slots := []struct {
@@ -167,10 +211,14 @@ func (o *DownloadOrchestrator) prepareStagedInputs(ctx context.Context, jobID, o
 		}
 		in, err := o.walkStagedInput(ctx, jobID, s.path)
 		if err != nil {
-			o.removeRepairedCopies(jobID, ins)
 			return nil, err
 		}
 		*s.slot = in
+	}
+	if err := o.alignStagedInputs(ctx, jobID, ins); err != nil {
+		return nil, err
+	}
+	for _, in := range ins.list() {
 		if err := o.recordStagedInput(in, outputPath); err != nil {
 			o.removeRepairedCopies(jobID, ins)
 			return nil, err
@@ -183,6 +231,77 @@ func (o *DownloadOrchestrator) prepareStagedInputs(ctx context.Context, jobID, o
 		}
 	}
 	return ins, nil
+}
+
+// muxStartTolerance is how far a track of a copy that alignStagedInputs
+// placed may start from where its staged fragments put it: an edit list's
+// AAC priming, a video's composition offset — a few tens of milliseconds —
+// and well short of the one-second fragment a desync would be.
+const muxStartTolerance = 0.5
+
+// alignStagedInputs places the two inputs of a copy on the timeline they
+// share when a repair cuts the start of either. FFmpeg starts every input
+// file at its own first timestamp, so a repaired audio_stream whose first
+// fragment was the damaged one — beginning at the second fragment's decode
+// time — came out level with a video_stream that still begins at the first:
+// the archive played that audio from 0 s against the picture from 0 s, ahead
+// of it by the dropped stretch for the whole archive, and the per-track
+// check, measuring each track from its own first readable fragment, passed
+// it. The two halves of a DASH capture (a live or manifestless video_stream
+// and audio_stream, a restart's pair of asides, a whole-file VOD download's
+// pair) are cut from one broadcast's media timeline, so where each one's
+// first readable fragment sits on it places them against each other: each
+// input is delayed (engine.InputOffsets, FFmpeg's -itsoffset) by how far
+// after the earlier one it begins, and the archive keeps a gap at the start
+// of the cut track instead. An input the walk cannot read is placed by
+// ffprobe's start time of it; one nothing can place refuses the copy, with
+// staging kept, rather than write an archive out of step.
+//
+// A copy whose inputs kept their starts is left as FFmpeg has always muxed
+// it, and so is a copy of one input, whose tracks keep their places in it.
+func (o *DownloadOrchestrator) alignStagedInputs(ctx context.Context, jobID string, ins *stagedInputs) error {
+	if ins.video == nil || ins.audio == nil || (!ins.video.lostStart() && !ins.audio.lostStart()) {
+		return nil
+	}
+	halves := []*stagedInput{ins.video, ins.audio}
+	var starts [2]float64
+	for i, in := range halves {
+		s, ok := o.stagedStart(ctx, in)
+		if !ok {
+			cut := halves[1-i]
+			return fmt.Errorf("the staged %s lost its first fragment(s) to damage, and where the staged %s begins cannot be read to place it against, so the two would play out of step — staging is preserved; mux them by hand",
+				filepath.Base(cut.path), filepath.Base(in.path))
+		}
+		starts[i] = s
+	}
+	origin := min(starts[0], starts[1])
+	ins.offsets = engine.InputOffsets{Video: starts[0] - origin, Audio: starts[1] - origin}
+	ins.aligned = true
+	for i, in := range halves {
+		off := starts[i] - origin
+		if !in.lostStart() || off <= 0 {
+			continue
+		}
+		in.lead = off
+		o.logger.Warn("a staged recording lost its first fragment(s) to damage; its repaired copy is placed where its first readable fragment sits on the capture's timeline, so the archive keeps a gap at its start rather than play out of step",
+			"staged", in.path, "startGap", fmt.Sprintf("0:00:00.0 to %s (%.1fs)", engine.FormatTimelineSeconds(off), off), "jobID", jobID)
+	}
+	return nil
+}
+
+// stagedStart is where a staged input begins on its capture's timeline: its
+// first readable fragment's decode time, or for a file the walk cannot read,
+// ffprobe's start time of it. ok is false when neither can be had.
+func (o *DownloadOrchestrator) stagedStart(ctx context.Context, in *stagedInput) (float64, bool) {
+	if in.walk != nil {
+		if s, ok := in.walk.StartSeconds(); ok {
+			return s, true
+		}
+	}
+	if p := o.runFFprobe(ctx, in.read); p != nil {
+		return p.StartSec, true
+	}
+	return 0, false
 }
 
 // walkStagedInput walks one staged recording.
@@ -261,9 +380,13 @@ func (o *DownloadOrchestrator) reportStagingRepairs(jobID string, ins *stagedInp
 			for _, d := range in.walk.Drops {
 				gaps = append(gaps, engine.FormatFMP4Drop(d))
 			}
+			args := []any{"output", outputPath, "staged", in.path, "gaps", strings.Join(gaps, " | "),
+				"droppedBytes", in.walk.DroppedBytes()}
+			if in.lead > 0 {
+				args = append(args, "startGap", fmt.Sprintf("%s 0:00:00.0 to %s (%.1fs) of the output", engine.HandlerName(in.walk.Tracks[0].Handler), engine.FormatTimelineSeconds(in.lead), in.lead))
+			}
 			o.logger.Warn("muxed with a gap: damaged bytes of a staged recording were left out of the output, and every intact fragment after them was kept; staging is kept with the original bytes",
-				"output", outputPath, "staged", in.path, "gaps", strings.Join(gaps, " | "),
-				"droppedBytes", in.walk.DroppedBytes(), "jobID", jobID)
+				append(args, "jobID", jobID)...)
 		case in.unmeasured != "":
 			o.logger.Warn("muxed without a check against the staged fragments; staging is kept",
 				"output", outputPath, "staged", in.path, "why", in.unmeasured, "jobID", jobID)
@@ -354,8 +477,40 @@ func (o *DownloadOrchestrator) verifyAgainstStaging(ctx context.Context, jobID s
 		return fmt.Errorf("mux produced %.0fs of %s from %.0fs of staged fragments (%.0fs missing) — the copy stopped at a bad fragment; the short output was removed and staging is preserved, re-run the Mux action",
 			got, typ, want, want-got)
 	}
+	if err := o.verifyAlignedStarts(jobID, out, ins); err != nil {
+		return err
+	}
 	if len(fallback) > 0 {
 		return o.verifyMuxedDuration(ctx, jobID, out.DurationSec, fallback...)
+	}
+	return nil
+}
+
+// verifyAlignedStarts checks a copy alignStagedInputs placed: each half's
+// track must start in the copy where the offset put it, within
+// muxStartTolerance. A copy whose tracks came out level anyway is the desync
+// the offsets exist to prevent. A half the walk did not read, or that holds
+// more than its one kind of track, is not judged.
+func (o *DownloadOrchestrator) verifyAlignedStarts(jobID string, out *ffprobeData, ins *stagedInputs) error {
+	if !ins.aligned {
+		return nil
+	}
+	for _, h := range []struct {
+		in   *stagedInput
+		typ  string
+		want float64
+	}{{ins.video, "video", ins.offsets.Video}, {ins.audio, "audio", ins.offsets.Audio}} {
+		if !h.in.carriesOnly(h.typ) {
+			continue
+		}
+		got, ok := out.streamStart(h.typ)
+		if !ok || math.Abs(got-h.want) <= muxStartTolerance {
+			continue
+		}
+		o.logger.Error("muxed output's "+h.typ+" does not start where its staged fragments put it — the copy is out of step",
+			"jobID", jobID, "wantStartSeconds", h.want, "outputStartSeconds", got)
+		return fmt.Errorf("mux started the %s at %.1fs where its staged fragments put it at %.1fs — the copy is out of step; the output was removed and staging is preserved, re-run the Mux action",
+			h.typ, got, h.want)
 	}
 	return nil
 }
@@ -419,8 +574,13 @@ func (o *DownloadOrchestrator) recordStagedInput(in *stagedInput, outputPath str
 			rec.Dropped = append(rec.Dropped, engine.FormatFMP4Drop(d))
 			var widest float64
 			for _, g := range d.Gaps {
-				if g.HasFrom && g.HasTo {
+				switch {
+				case g.HasFrom && g.HasTo:
 					widest = max(widest, g.To-g.From)
+				case g.HasTo:
+					// Before the first readable fragment: as long as the
+					// lead the copy restores, when it restores one.
+					widest = max(widest, in.lead)
 				}
 			}
 			rec.GapSeconds += widest

@@ -71,10 +71,13 @@ type ffprobeData struct {
 	Streams []probedStream
 }
 
-// probedStream is one stream of a probed file.
+// probedStream is one stream of a probed file. StartSec is its start_time:
+// where its first packet sits on the file's timeline — 0 for a stream that
+// starts with the file, later for one a copy delayed (alignStagedInputs).
 type probedStream struct {
 	CodecType   string
 	DurationSec float64
+	StartSec    float64
 }
 
 // streamSeconds is the longest duration among the file's streams of one
@@ -90,6 +93,20 @@ func (p *ffprobeData) streamSeconds(codecType string) (seconds float64, present 
 		}
 	}
 	return seconds, present
+}
+
+// streamStart is the start of the file's first stream of one codec_type;
+// ok is false when it has none.
+func (p *ffprobeData) streamStart(codecType string) (seconds float64, ok bool) {
+	if p == nil {
+		return 0, false
+	}
+	for _, s := range p.Streams {
+		if s.CodecType == codecType {
+			return s.StartSec, true
+		}
+	}
+	return 0, false
 }
 
 // spanSec is the length of media a `-c copy` of this file carries across —
@@ -161,6 +178,7 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 			Height     int    `json:"height"`
 			RFrameRate string `json:"r_frame_rate"`
 			Duration   string `json:"duration"`
+			StartTime  string `json:"start_time"`
 		} `json:"streams"`
 		Format struct {
 			FormatName string `json:"format_name"`
@@ -178,6 +196,7 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 	for _, s := range probe.Streams {
 		st := probedStream{CodecType: s.CodecType}
 		st.DurationSec, _ = strconv.ParseFloat(s.Duration, 64)
+		st.StartSec, _ = strconv.ParseFloat(s.StartTime, 64)
 		data.Streams = append(data.Streams, st)
 	}
 

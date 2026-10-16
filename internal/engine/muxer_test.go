@@ -174,7 +174,7 @@ func TestBuildArgs_CopyMode(t *testing.T) {
 	logger := &testLogger{}
 	m := NewMuxer("ffmpeg", logger)
 
-	args := m.buildArgs("video.mp4", "audio.mp4", "output.mp4", nil, false)
+	args := m.buildArgs("video.mp4", "audio.mp4", "output.mp4", nil, false, InputOffsets{})
 
 	// Should contain -c copy
 	found := false
@@ -195,6 +195,30 @@ func TestBuildArgs_CopyMode(t *testing.T) {
 	checkContains(t, args, "output.mp4")
 }
 
+// TestBuildArgs_InputOffsets: an input's delay is its own -itsoffset, right
+// ahead of its -i (after its -ss), and an input with none gets no option at
+// all — MuxCopy's argv is what it always was.
+//
+// Mutants: appendInputOffset placed after the -i (FFmpeg applies it to the
+// next input, or rejects a trailing one); the audio input given the video's
+// offset; an offset of 0 still written.
+func TestBuildArgs_InputOffsets(t *testing.T) {
+	m := NewMuxer("ffmpeg", &testLogger{})
+	args := m.buildArgs("video.mp4", "audio.mp4", "output.mp4", nil, false, InputOffsets{Audio: 2.020136})
+	want := []string{"-y", "-i", "video.mp4", "-itsoffset", "2.020136", "-i", "audio.mp4"}
+	if !slices.Equal(args[:len(want)], want) {
+		t.Errorf("args = %v, want them to begin %v", args, want)
+	}
+	args = m.buildArgs("video.mp4", "audio.mp4", "output.mp4", &TrimOptions{TrimStartOffset: 5}, false, InputOffsets{Video: 1.5})
+	want = []string{"-y", "-ss", "5.000", "-itsoffset", "1.500000", "-i", "video.mp4", "-ss", "5.000", "-i", "audio.mp4"}
+	if !slices.Equal(args[:len(want)], want) {
+		t.Errorf("args = %v, want them to begin %v", args, want)
+	}
+	if args := m.buildArgs("video.mp4", "audio.mp4", "output.mp4", nil, false, InputOffsets{}); slices.Contains(args, "-itsoffset") {
+		t.Errorf("args = %v, want no -itsoffset without an offset", args)
+	}
+}
+
 func TestBuildArgs_EncodeMode(t *testing.T) {
 	logger := &testLogger{}
 	m := NewMuxer("ffmpeg", logger)
@@ -205,7 +229,7 @@ func TestBuildArgs_EncodeMode(t *testing.T) {
 		CRF:             18,
 		UsePreciseTrim:  true,
 	}
-	args := m.buildArgs("video.mp4", "", "output.mp4", opts, true)
+	args := m.buildArgs("video.mp4", "", "output.mp4", opts, true, InputOffsets{})
 
 	checkContains(t, args, "-ss")
 	checkContains(t, args, "10.500")
@@ -228,7 +252,7 @@ func TestBuildArgs_ABRMode(t *testing.T) {
 		AudioBitrate:    128,
 		UsePreciseTrim:  true,
 	}
-	args := m.buildArgs("video.mp4", "audio.mp4", "output.mp4", opts, true)
+	args := m.buildArgs("video.mp4", "audio.mp4", "output.mp4", opts, true, InputOffsets{})
 
 	checkContains(t, args, "-b:v")
 	checkContains(t, args, "5000k")
@@ -475,7 +499,7 @@ func TestEveryFfmpegArgvBuilderAppliesThePathSeam(t *testing.T) {
 		build func() []string
 		paths []string
 	}{
-		{"buildArgs", func() []string { return m.buildArgs(video, audio, output, opts, true) },
+		{"buildArgs", func() []string { return m.buildArgs(video, audio, output, opts, true, InputOffsets{}) },
 			[]string{video, audio, output}},
 		{"buildTwoPassArgs/pass1", func() []string { a1, _ := m.buildTwoPassArgs(video, audio, output, passLog, opts); return a1 },
 			[]string{video}},

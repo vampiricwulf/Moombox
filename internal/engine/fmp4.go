@@ -78,6 +78,32 @@ func (t *FMP4Track) SpanSeconds() float64 {
 	return float64(t.End-t.First) / float64(t.Timescale)
 }
 
+// StartSeconds is where the track's first readable fragment sits on its
+// media timeline, in seconds from that timeline's zero. The two halves of a
+// DASH capture share one timeline, so this is what places a video_stream
+// and an audio_stream against each other. 0 for a track no readable
+// fragment carried.
+func (t *FMP4Track) StartSeconds() float64 {
+	if !t.seen || t.Timescale == 0 {
+		return 0
+	}
+	return float64(t.First) / float64(t.Timescale)
+}
+
+// StartSeconds is the earliest StartSeconds of the walk's tracks that a
+// readable fragment carried; ok is false when none did.
+func (w *FMP4Walk) StartSeconds() (sec float64, ok bool) {
+	for _, t := range w.Tracks {
+		if !t.seen || t.Timescale == 0 {
+			continue
+		}
+		if s := t.StartSeconds(); !ok || s < sec {
+			sec, ok = s, true
+		}
+	}
+	return sec, ok
+}
+
 // seconds places a decode time on the track's timeline, in seconds from its
 // first readable fragment.
 func (t *FMP4Track) seconds(dt uint64) float64 {
@@ -1191,22 +1217,29 @@ func copyKeptRanges(ctx context.Context, in io.ReaderAt, out io.Writer, walk *FM
 }
 
 // FormatFMP4Drop renders one drop for a log line: its byte range and, per
-// track, the stretch of the track's timeline it leaves empty.
+// track, the stretch of the track's timeline it leaves empty. A track's
+// timeline counts from its first readable fragment, so a drop ahead of that
+// has no time of its own on it: it is named as before the track's first
+// readable fragment, and how long it lasts is the lead a copy beside the
+// other half of the capture restores (the worker's alignStagedInputs).
 func FormatFMP4Drop(d FMP4Drop) string {
 	var parts []string
 	for _, g := range d.Gaps {
-		from, to := "the start", "the end"
-		if g.HasFrom {
-			from = FormatTimelineSeconds(g.From)
+		name := HandlerName(g.Handler)
+		switch {
+		case !g.HasFrom && g.HasTo:
+			parts = append(parts, name+" before its first readable fragment")
+			continue
+		case !g.HasFrom:
+			parts = append(parts, name+" (no readable fragment)")
+			continue
 		}
+		to, gap := "the end", ""
 		if g.HasTo {
 			to = FormatTimelineSeconds(g.To)
-		}
-		gap := ""
-		if g.HasFrom && g.HasTo {
 			gap = fmt.Sprintf(" (%.1fs)", g.To-g.From)
 		}
-		parts = append(parts, fmt.Sprintf("%s %s to %s%s", HandlerName(g.Handler), from, to, gap))
+		parts = append(parts, fmt.Sprintf("%s %s to %s%s", name, FormatTimelineSeconds(g.From), to, gap))
 	}
 	return fmt.Sprintf("bytes %d-%d (%d bytes): %s", d.Start, d.End, d.End-d.Start, strings.Join(parts, ", "))
 }

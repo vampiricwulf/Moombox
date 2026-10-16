@@ -136,17 +136,30 @@ func deriveFFprobePath(ffmpegPath string) string {
 // before it is renamed into place (writeOutput): an archive mux passes its
 // duration check here, so a short copy never takes the archive's name.
 func (m *Muxer) MuxCopy(ctx context.Context, videoPath, audioPath, outputPath string, checks ...OutputCheck) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, nil, checks)
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, InputOffsets{}, checks)
+}
+
+// InputOffsets delays the inputs of a MuxCopyAt, in seconds, each passed to
+// FFmpeg as that input's -itsoffset. FFmpeg starts every input file at its
+// own first timestamp, so two inputs that begin at different points of one
+// timeline come out level unless told how far apart they begin. 0 (or less)
+// is no delay.
+type InputOffsets struct{ Video, Audio float64 }
+
+// MuxCopyAt is MuxCopy with each input delayed by its offset: the input's
+// first sample lands that far into the output.
+func (m *Muxer) MuxCopyAt(ctx context.Context, videoPath, audioPath, outputPath string, off InputOffsets, checks ...OutputCheck) error {
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, checks)
 }
 
 // Mux performs FFmpeg muxing with optional trimming/encoding, into a
 // temporary file renamed onto outputPath once FFmpeg has exited 0
 // (writeOutput).
 func (m *Muxer) Mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, opts, nil)
+	return m.mux(ctx, videoPath, audioPath, outputPath, opts, InputOffsets{}, nil)
 }
 
-func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions, checks []OutputCheck) error {
+func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions, off InputOffsets, checks []OutputCheck) error {
 	// Validate inputs
 	if videoPath != "" {
 		if _, err := os.Stat(videoPath); err != nil {
@@ -174,7 +187,7 @@ func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string
 		if needsTwoPass {
 			return m.runTwoPassEncode(ctx, videoPath, audioPath, tmp, opts)
 		}
-		args := m.buildArgs(videoPath, audioPath, tmp, opts, needsEncode)
+		args := m.buildArgs(videoPath, audioPath, tmp, opts, needsEncode, off)
 		m.logger.Debug("ffmpeg", "args", strings.Join(args, " "))
 		if opts != nil && opts.ProgressFn != nil && hasTrim(opts) && opts.TrimDuration > 0 {
 			return m.runFFmpegWithProgress(ctx, args, opts.TrimDuration, opts.ProgressFn)
@@ -183,7 +196,7 @@ func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string
 	})
 }
 
-func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOptions, needsEncode bool) []string {
+func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOptions, needsEncode bool, off InputOffsets) []string {
 	args := []string{"-y"} // Overwrite
 
 	// Input args with optional trim
@@ -194,6 +207,7 @@ func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOpt
 	// before it ever touches the output, so a long input path fails first
 	// (sweep-2 ENGINE-12). Short paths come back byte-identical.
 	if videoPath != "" {
+		args = appendInputOffset(args, off.Video)
 		args = append(args, "-i", ffmpegPathArg(videoPath))
 	}
 
@@ -201,6 +215,7 @@ func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOpt
 		if opts != nil && opts.TrimStartOffset > 0 {
 			args = append(args, "-ss", fmt.Sprintf("%.3f", opts.TrimStartOffset))
 		}
+		args = appendInputOffset(args, off.Audio)
 		args = append(args, "-i", ffmpegPathArg(audioPath))
 	}
 
@@ -221,6 +236,16 @@ func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOpt
 	args = append(args, ffmpegPathArg(outputPath))
 
 	return args
+}
+
+// appendInputOffset adds the -itsoffset that delays the next input by sec
+// seconds, when it is a delay at all. It is an input option: it goes
+// between that input's -ss and its -i.
+func appendInputOffset(args []string, sec float64) []string {
+	if sec <= 0 {
+		return args
+	}
+	return append(args, "-itsoffset", strconv.FormatFloat(sec, 'f', 6, 64))
 }
 
 func (m *Muxer) appendEncodeArgs(args []string, audioPath string, opts *TrimOptions) []string {

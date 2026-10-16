@@ -209,13 +209,29 @@ func TestWalkFMP4ForeignBoxMustFit(t *testing.T) {
 }
 
 // TestWalkFMP4SpanStartsAtTheFirstFragment: a part that began 208 s into the
-// broadcast carries 20 s of fragments, not 228.
+// broadcast carries 20 s of fragments, not 228, and starts at 208 s of the
+// broadcast's timeline — at 210 s once its first fragment is the damaged one,
+// which is what places its repaired copy against the other half of the
+// capture.
 //
-// Mutant: SpanSeconds measuring End from zero.
+// Mutants: SpanSeconds measuring End from zero; StartSeconds read from the
+// first fragment's position rather than the first readable one's (the
+// damaged row reads 208).
 func TestWalkFMP4SpanStartsAtTheFirstFragment(t *testing.T) {
-	data, _ := synthStream(10, 208)
-	if got := mustWalk(t, data).Tracks[0].SpanSeconds(); !near(got, 20) {
+	data, offs := synthStream(10, 208)
+	w := mustWalk(t, data)
+	if got := w.Tracks[0].SpanSeconds(); !near(got, 20) {
 		t.Errorf("span = %.3fs, want 20s", got)
+	}
+	if got, ok := w.StartSeconds(); !ok || !near(got, 208) {
+		t.Errorf("start = %.3fs (%v), want 208s", got, ok)
+	}
+	w = mustWalk(t, splice(data, offs[0], offs[1], make([]byte, offs[1]-offs[0])))
+	if got, ok := w.StartSeconds(); !ok || !near(got, 210) {
+		t.Errorf("start with the first fragment damaged = %.3fs (%v), want 210s", got, ok)
+	}
+	if _, ok := mustWalk(t, data[:offs[0]]).StartSeconds(); ok {
+		t.Error("an init with no fragment has a start")
 	}
 }
 
@@ -324,8 +340,10 @@ func TestWalkFMP4ResyncWantsADeclaredTrack(t *testing.T) {
 // Nothing precedes the gap, and the timeline starts at the first readable
 // fragment.
 //
-// Mutant: recordDrop setting HasFrom unconditionally — the gap claims to
-// start at 0 s of a track that had no fragment yet.
+// Mutants: recordDrop setting HasFrom unconditionally — the gap claims to
+// start at 0 s of a track that had no fragment yet; FormatFMP4Drop rendering
+// it as a stretch of the timeline ("the start to 0:00:00.0", which names no
+// length).
 func TestWalkFMP4DamageRightAfterTheInit(t *testing.T) {
 	data, offs := synthStream(10, 0)
 	w := mustWalk(t, splice(data, offs[0], offs[1], make([]byte, offs[1]-offs[0])))
@@ -334,6 +352,9 @@ func TestWalkFMP4DamageRightAfterTheInit(t *testing.T) {
 	}
 	if g := w.Drops[0].Gaps[0]; g.HasFrom || !g.HasTo || !near(g.To, 0) {
 		t.Errorf("gap = %+v, want no start and the timeline's own 0 s as its end", g)
+	}
+	if got := FormatFMP4Drop(w.Drops[0]); !strings.HasSuffix(got, ": video before its first readable fragment") {
+		t.Errorf("FormatFMP4Drop = %q, want the drop named as before the first readable fragment", got)
 	}
 	if got := w.Tracks[0].SpanSeconds(); !near(got, 18) || w.Fragments != 9 {
 		t.Errorf("span = %.3fs over %d fragments, want 18s over 9", got, w.Fragments)

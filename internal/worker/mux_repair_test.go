@@ -345,6 +345,126 @@ func TestDamagedDashTwoFilesChecksEachTrack(t *testing.T) {
 	}
 }
 
+// probeStarts reads each output stream's start_time.
+func probeStarts(t *testing.T, ffprobePath, path string) map[string]float64 {
+	t.Helper()
+	out, err := exec.Command(ffprobePath, "-v", "quiet", "-print_format", "json", "-show_streams", path).Output()
+	if err != nil {
+		t.Fatalf("ffprobe %s: %v", path, err)
+	}
+	var p struct {
+		Streams []struct {
+			CodecType string `json:"codec_type"`
+			StartTime string `json:"start_time"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out, &p); err != nil {
+		t.Fatal(err)
+	}
+	starts := map[string]float64{}
+	for _, s := range p.Streams {
+		starts[s.CodecType], _ = strconv.ParseFloat(s.StartTime, 64)
+	}
+	return starts
+}
+
+// TestDamagedDashStartKeepsItsLead is the two-file capture with the damage
+// in the very first fragment after the init — of the video, then of the
+// audio. The repaired copy of the damaged half begins at its second
+// fragment's decode time, and FFmpeg starts each input file at its own first
+// timestamp: muxed as it was, that half's content from 2 s played at 0 s
+// against the other's from 0 s, out of step for the whole archive, and the
+// per-track check passed it. The damaged track must start about the dropped
+// fragment's length into the archive, the whole one at 0, and the gap at the
+// start must be named in the job's log and counted in the record.
+//
+// Mutants:
+//   - alignStagedInputs returning before it works anything out (the damaged
+//     track starts at 0: out of step).
+//   - copyStaged muxing with no offsets (MuxCopy): verifyAlignedStarts
+//     rejects the copy and the job ends in Error; with that check gone too,
+//     the damaged track starts at 0.
+//   - lostStart ignoring a drop ahead of the first readable fragment (as
+//     the first mutant).
+//   - recordStagedInput not counting the lead (gapSeconds 0).
+func TestDamagedDashStartKeepsItsLead(t *testing.T) {
+	ffmpegPath, ffprobePath := requireFFmpegTools(t)
+	video := fragmentedFixture(t, ffmpegPath, "video", 300)
+	audio := fragmentedFixture(t, ffmpegPath, "audio", 300)
+	for _, tc := range []struct {
+		name               string
+		videoBad, audioBad int
+		damaged, whole     string
+	}{
+		{"first video fragment", 0, -1, "video", "audio"},
+		{"first audio fragment", -1, 0, "audio", "video"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			const id = "j-gap-start"
+			staging, _ := routedRepairJob(t, w, db, id)
+			stageFragmented(t, filepath.Join(staging, "video_stream"), video, tc.videoBad, damageZeroed)
+			stageFragmented(t, filepath.Join(staging, "audio_stream"), audio, tc.audioBad, damageZeroed)
+
+			if err := w.MuxJob(id); err != nil {
+				t.Fatalf("MuxJob: %v", err)
+			}
+			w.Stop()
+
+			row, _ := db.GetJob(id)
+			if row == nil || row.Status != database.StatusFinished {
+				t.Fatalf("job = %v (error %q), want Finished", statusOf(row), errorOf(row))
+			}
+			starts := probeStarts(t, ffprobePath, row.OutputFile)
+			if got := starts[tc.damaged]; got < 1.9 || got > 2.1 {
+				t.Errorf("archive %s starts at %.3fs, want ~2 s — where its first readable fragment sits beside the %s; at 0 it plays out of step", tc.damaged, got, tc.whole)
+			}
+			if got := starts[tc.whole]; got < -0.1 || got > 0.1 {
+				t.Errorf("archive %s starts at %.3fs, want 0", tc.whole, got)
+			}
+			if s := probeStreams(t, ffprobePath, row.OutputFile)[tc.damaged]; s.seconds < 297 {
+				t.Errorf("archive %s = %.1fs, want ~298 s — every fragment after the damaged first one", tc.damaged, s.seconds)
+			}
+			log := strings.Join(db.GetJobLogs(id), "\n")
+			if !strings.Contains(log, "0:00:00.0 to 0:00:02.0") {
+				t.Errorf("the job's log does not name the gap at the start:\n%s", log)
+			}
+			rec, ok := readMuxGapRecord(filepath.Join(staging, tc.damaged+"_stream"))
+			if !ok || rec.GapSeconds < 1.9 || rec.GapSeconds > 2.1 {
+				t.Errorf("record = %+v (holds %v), want gapSeconds ~2", rec, ok)
+			}
+		})
+	}
+}
+
+// TestDamagedStartRefusedWhenItCannotBePlaced: a half whose first fragment
+// was damaged, beside a half whose start nothing can read — not a fragmented
+// MP4 the walk reads, and nothing ffprobe opens — cannot be placed against
+// it, so the copy is refused, with nothing recorded or repaired, rather than
+// written out of step.
+//
+// Mutant: stagedStart answering 0 for a file it cannot read (the copy goes
+// ahead with a made-up start).
+func TestDamagedStartRefusedWhenItCannotBePlaced(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	dir := t.TempDir()
+	videoPath, audioPath := filepath.Join(dir, "video_stream"), filepath.Join(dir, "audio_stream")
+	stageFragmented(t, videoPath, fragmentedFixture(t, ffmpegPath, "video", 300), 0, damageZeroed)
+	if err := os.WriteFile(audioPath, bytes.Repeat([]byte("not media "), 1000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := NewDownloadOrchestrator(nil, nil, ffmpegPath, discardLogger{}, nil, nil, nil, nil, nil)
+	ins, err := o.prepareStagedInputs(context.Background(), "j1", filepath.Join(dir, "out.mp4"), videoPath, audioPath)
+	if err == nil || !strings.Contains(err.Error(), "out of step") {
+		t.Fatalf("prepareStagedInputs = %+v, %v; want a refusal naming the desync", ins, err)
+	}
+	for _, p := range []string{videoPath + muxGapRecordSuffix, videoPath + stagedRepairSuffix} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s was written by a refused copy (stat err %v)", filepath.Base(p), err)
+		}
+	}
+}
+
 // TestDamagedTwitchFMP4FinishesWithAGap is the Twitch fMP4 capture: one
 // video_stream holding a muxed variant — the EXT-X-MAP init, then fragments
 // whose every moof carries a video traf and an audio traf — on a Twitch row.
