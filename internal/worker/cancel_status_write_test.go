@@ -128,11 +128,19 @@ func TestCompleteStreamTransitionStopsOnACancelledRow(t *testing.T) {
 // its own, at status, and a processor over it with chat capture off.
 func twitchCancelFixture(t *testing.T, status database.JobStatus) (*StreamProcessor, *database.Database, *database.Job) {
 	t.Helper()
+	sp, db, job, _ := twitchCancelFixtureAt(t, status)
+	return sp, db, job
+}
+
+// twitchCancelFixtureAt is twitchCancelFixture, with the database file's path.
+func twitchCancelFixtureAt(t *testing.T, status database.JobStatus) (*StreamProcessor, *database.Database, *database.Job, string) {
+	t.Helper()
 	cfg := config.Defaults()
 	cfg.Paths.StagingDirectory = t.TempDir()
 	cfg.Paths.OutputDirectory = t.TempDir()
 	cfg.Downloader.DownloadChat = false
-	db, err := database.Open(filepath.Join(t.TempDir(), "twitch-cancel.db"))
+	path := filepath.Join(t.TempDir(), "twitch-cancel.db")
+	db, err := database.Open(path)
 	if err != nil {
 		t.Fatalf("database.Open: %v", err)
 	}
@@ -147,7 +155,7 @@ func twitchCancelFixture(t *testing.T, status database.JobStatus) (*StreamProces
 		t.Fatalf("GetJob: %v", err)
 	}
 	sp := &StreamProcessor{db: db, cfg: cfg, twitchHints: newTwitchHintCache(), logger: discardLogger{}}
-	return sp, db, stored
+	return sp, db, stored, path
 }
 
 // A Twitch wait that begins on a row a Cancel has already written leaves it

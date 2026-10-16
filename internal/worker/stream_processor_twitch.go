@@ -101,13 +101,15 @@ func (sp *StreamProcessor) selectTwitchVariant(variants []twitch.TwitchHLSVarian
 // created with as its "Quality".
 //
 // A write that sets a status — the live start's Live, decided on the row
-// processJob read — applies only to a row with no outcome
-// (UpdateJobFieldsUnlessTerminal), and written is false when it was refused:
-// an operator's Cancel that landed during the stream lookup or the playlist
-// fetch writes the row before it cancels ctx, and Live used to be written
-// over it. The caller stops on a refusal. The VOD start's write sets no
-// status and is made as before (written is then always true).
-func (sp *StreamProcessor) startTwitchVariant(variants []twitch.TwitchHLSVariant, job *database.Job, extra map[string]any) (variant *twitch.TwitchHLSVariant, written bool) {
+// processJob read — applies only to a row with no outcome, and outcome is
+// true when it was refused for one (writeUnlessOutcome): an operator's Cancel
+// that landed during the stream lookup or the playlist fetch writes the row
+// before it cancels ctx, and Live used to be written over it. The caller
+// stops on an outcome. A write that failed on a row with none reports none,
+// and the capture starts as it did while the write was unconditional. The
+// VOD start's write sets no status and is made as before (outcome is then
+// always false).
+func (sp *StreamProcessor) startTwitchVariant(variants []twitch.TwitchHLSVariant, job *database.Job, extra map[string]any) (variant *twitch.TwitchHLSVariant, outcome bool) {
 	variant = sp.selectTwitchVariant(variants, job)
 	if variant == nil {
 		return nil, false
@@ -115,10 +117,10 @@ func (sp *StreamProcessor) startTwitchVariant(variants []twitch.TwitchHLSVariant
 	fields := map[string]any{"twitch_quality": variant.Name}
 	maps.Copy(fields, extra)
 	if _, setsStatus := fields["status"]; setsStatus {
-		return variant, sp.db.UpdateJobFieldsUnlessTerminal(job.ID, fields)
+		return variant, writeUnlessOutcome(sp.db, job.ID, fields)
 	}
 	sp.db.UpdateJobFields(job.ID, fields)
-	return variant, true
+	return variant, false
 }
 
 // hlsMasterPlaylist is tw.GetHLSMasterPlaylist, or hlsMasterFn when a test
@@ -694,14 +696,14 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		liveStagingBase = c.Paths.StagingDirectory
 	})
 
-	variant, written := sp.startTwitchVariant(variants, job, map[string]any{
+	variant, outcome := sp.startTwitchVariant(variants, job, map[string]any{
 		"status": database.StatusLive,
 		"is_vod": false,
 	})
 	if variant == nil {
 		return &StreamProcessResult{ShouldDownload: false, Error: "no suitable HLS quality found"}, nil
 	}
-	if !written {
+	if outcome {
 		// The row already holds an outcome — a Cancel that landed since
 		// processJob read it — and Live was not written over it.
 		return cancelledResult(), nil

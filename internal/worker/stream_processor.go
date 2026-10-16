@@ -89,6 +89,29 @@ func cancelledResult() *StreamProcessResult {
 	return &StreamProcessResult{ShouldDownload: false, Error: "cancelled", ErrSentinel: ErrCancelled}
 }
 
+// writeUnlessOutcome makes a status write decided on an earlier read of the
+// row — the go-live writes — through UpdateJobFieldsUnlessTerminal, and
+// reports whether the row holds an outcome the caller must stop for: the
+// write was refused and a fresh read finds the row terminal (an operator's
+// Cancel that landed since) or gone.
+//
+// The write's false alone is not that. UpdateJobFieldsUnlessTerminal reports
+// false for a statement that failed, too — another process holding the
+// database's write lock past busy_timeout, an I/O error — and reading every
+// false as a Cancel ended a live job on a database error, unrecorded, with
+// nothing set to say why; for Twitch, which has no live-from-start, the
+// broadcast's opening went with it. A write that failed on a row with no
+// outcome is logged by the database and the run goes on, as it did while
+// the write was unconditional; so does one whose read fails, as Process's
+// own check of the row stops nothing on a failed read.
+func writeUnlessOutcome(db *database.Database, id string, fields map[string]any) (outcome bool) {
+	if db.UpdateJobFieldsUnlessTerminal(id, fields) {
+		return false
+	}
+	cur, err := db.GetJob(id)
+	return err == nil && (cur == nil || cur.IsTerminal())
+}
+
 // StreamProcessor handles stream status probing and waiting.
 type StreamProcessor struct {
 	yt          *youtube.Service
@@ -366,9 +389,10 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 		// since — after the take, or after Process's own read of the row —
 		// writes the row before it cancels ctx. This write used to turn that
 		// Cancelled row into Live and hand the job to a download, until
-		// handleCancellation wrote Cancelled again. A refused write stops
-		// the run as a cancelled one.
-		if !sp.db.UpdateJobFieldsUnlessTerminal(job.ID, map[string]any{
+		// handleCancellation wrote Cancelled again. A write refused for the
+		// row's outcome stops the run as a cancelled one; one that failed on
+		// a row with none does not (writeUnlessOutcome).
+		if writeUnlessOutcome(sp.db, job.ID, map[string]any{
 			"status":         database.StatusLive,
 			"is_vod":         false,
 			"queue_priority": 0,

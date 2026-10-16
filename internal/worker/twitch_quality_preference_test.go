@@ -78,12 +78,12 @@ func TestStartTwitchVariantRecordsThePick(t *testing.T) {
 	sp := &StreamProcessor{cfg: &config.MoomboxConfig{}, db: db}
 
 	vod, _ := db.GetJob("tw_vod")
-	if got, written := sp.startTwitchVariant(ladder(), vod, nil); got == nil || got.Name != "720p60" || !written {
-		t.Fatalf("VOD start picked %v (written %v), want 720p60 written", got, written)
+	if got, outcome := sp.startTwitchVariant(ladder(), vod, nil); got == nil || got.Name != "720p60" || outcome {
+		t.Fatalf("VOD start picked %v (outcome %v), want 720p60 and no outcome", got, outcome)
 	}
 	live, _ := db.GetJob("tw_live")
-	if _, written := sp.startTwitchVariant(ladder(), live, map[string]any{"status": database.StatusLive}); !written {
-		t.Errorf("the live start's write on an Upcoming row was refused")
+	if _, outcome := sp.startTwitchVariant(ladder(), live, map[string]any{"status": database.StatusLive}); outcome {
+		t.Errorf("the live start's write on an Upcoming row reported an outcome")
 	}
 
 	for id, wantStatus := range map[string]database.JobStatus{"tw_vod": database.StatusUpcoming, "tw_live": database.StatusLive} {

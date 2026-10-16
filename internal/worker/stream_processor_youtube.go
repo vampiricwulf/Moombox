@@ -578,13 +578,14 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 	// confirmed this, and an operator's Cancel that landed since writes the
 	// row before it cancels ctx. Live used to be written over it, and the run
 	// went on to a download until handleCancellation wrote Cancelled again. A
-	// refused write — Live, or is_vod alone for a stream that is over — stops
-	// the run as a cancelled one, its early chat with it.
+	// write — Live, or is_vod alone for a stream that is over — refused for
+	// the row's outcome stops the run as a cancelled one, its early chat with
+	// it; one that failed on a row with none does not (writeUnlessOutcome).
 	fields := map[string]any{"is_vod": isVod}
 	if !isVod {
 		fields["status"] = database.StatusLive
 	}
-	if !sp.db.UpdateJobFieldsUnlessTerminal(job.ID, fields) {
+	if writeUnlessOutcome(sp.db, job.ID, fields) {
 		sp.stopEarlyChat(chatDl)
 		return cancelledResult()
 	}
