@@ -159,13 +159,13 @@ func TestCheckNowFnRunsTheServicesCheck(t *testing.T) {
 func TestPostRefreshRecheckHookSurvivesAPanic(t *testing.T) {
 	log := &recheckLogger{}
 	ran := 0
-	hook := postRefreshRecheckHook(func() {
+	hook := postRefreshRecheckHook(func(context.Context) {
 		ran++
 		panic("the credential fan-out blew up")
 	}, log)
 
-	hook() // must not panic
-	hook() // and the caller is still able to call it again
+	hook(context.Background()) // must not panic
+	hook(context.Background()) // and the caller is still able to call it again
 
 	if ran != 2 {
 		t.Errorf("the hook body ran %d times, want 2 — a recovered panic must not latch the hook off", ran)
@@ -179,9 +179,35 @@ func TestPostRefreshRecheckHookSurvivesAPanic(t *testing.T) {
 func TestPostRefreshRecheckHookRunsItsBody(t *testing.T) {
 	log := &recheckLogger{}
 	ran := 0
-	postRefreshRecheckHook(func() { ran++ }, log)()
+	postRefreshRecheckHook(func(context.Context) { ran++ }, log)(context.Background())
 
 	if ran != 1 {
 		t.Errorf("the hook body ran %d times, want 1", ran)
+	}
+}
+
+// TestPostRefreshRecheckHookForwardsItsContext. The context the hook is called
+// with is the auto-cookie goroutine's own, and it is the only thing that lets
+// the shutdown's cancel reach the re-check's round trips — AutoCookieService
+// .Stop's join can only cover a re-check that cancel ends. A wrapper that ran
+// its body under a context of its own would put the re-check back out of the
+// join's reach while every test of the body still passed.
+//
+// The mutation: the wrapper calling recheck(context.Background()). The wiring's
+// half — the body handing that ctx on to recheckAfterCookieWrite — is pinned
+// by TestEveryCookieWriteRecheckIsDeferred.
+func TestPostRefreshRecheckHookForwardsItsContext(t *testing.T) {
+	type key struct{}
+	log := &recheckLogger{}
+	var got context.Context
+	hook := postRefreshRecheckHook(func(ctx context.Context) { got = ctx }, log)
+
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), key{}, "the loop's"))
+	cancel()
+	hook(ctx)
+
+	if got == nil || got.Value(key{}) != "the loop's" || got.Err() == nil {
+		t.Errorf("the hook body ran under %v, want the context the hook was called with — the re-check "+
+			"is then out of reach of the cancel that ends the auto-cookie loop", got)
 	}
 }

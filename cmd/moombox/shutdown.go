@@ -120,8 +120,12 @@ func (s *runState) shutdown() bool {
 
 	// 4. Stop cookie refresh and auto-cookie service. The auto-cookie Stop
 	// cancels its periodic refresh and boot seed and waits for a pass in
-	// flight to return (up to cookies.AutoCookieStopWait), so nothing it
-	// started writes cookies.txt after the steps below have begun.
+	// flight to return (up to cookies.AutoCookieStopWait) — the auth
+	// re-check after it included, which runs under the same context, so the
+	// run ctx's cancel has already cut its round trips short. A pass that
+	// observes the cancel has written cookies.txt for the last time before
+	// the steps below begin; one with a step that ignores it past the bound
+	// is logged and left running, and can still write after them.
 	stopService("CookieRefresh", s.cookieRefresh.Stop)
 	stopService("AutoCookies", s.autoCookieSvc.Stop)
 

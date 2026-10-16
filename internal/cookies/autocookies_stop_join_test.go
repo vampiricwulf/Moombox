@@ -2,8 +2,12 @@ package cookies
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -54,7 +58,7 @@ func newPassInFlight(t *testing.T) *passInFlight {
 		return true, nil
 	}
 	p.s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
-	p.s.OnPassCompleted = func() { p.hooked.Add(1) }
+	p.s.OnPassCompleted = func(context.Context) { p.hooked.Add(1) }
 	return p
 }
 
@@ -98,17 +102,17 @@ func (p *passInFlight) assertJoined(t *testing.T) {
 		t.Errorf("Stop gave up waiting %d time(s) on a pass that was cancelled and finishing", n)
 	}
 	if n := p.hooked.Load(); n != 0 {
-		t.Errorf("OnPassCompleted fired %d time(s) for a pass that outlived its loop — the re-check "+
-			"runs under context.Background() into services a shutdown has already stopped", n)
+		t.Errorf("OnPassCompleted fired %d time(s) for a pass that outlived its loop — a re-check under "+
+			"a context that has already ended can only fail its round trips and publish that as the status", n)
 	}
 }
 
 // TestStopWaitsForThePeriodicPassInFlight: Stop cancels the timer's pass in
 // flight and waits for it to return, so nothing it starts writes after the
-// caller has gone on. Shutdown stops this service and then the refresh
-// service, the web server and the database; before the join the pass could go
-// on writing cookies.txt and its meta file after all of that, and fire
-// OnPassCompleted into the stopped services.
+// caller has gone on. Shutdown stops the refresh service and then this one,
+// and goes on to the PO token provider, the web server and the database;
+// before the join the pass could go on writing cookies.txt and its meta file
+// after all of that, and fire OnPassCompleted into the stopped services.
 //
 // Mutants (checked): Stop without its waitBackground — the meta file is not
 // there yet; Stop without endLifetime, and startBackground without the
@@ -173,6 +177,120 @@ func TestStopWaitsForTheStartupSeed(t *testing.T) {
 		default:
 		}
 	})
+}
+
+// TestStopJoinsThePostPassReCheck: the re-check a completed pass fires is part
+// of that pass, so Stop's join covers it. cmd/moombox wires OnPassCompleted to
+// RefreshService.CheckNow under the ctx the hook is handed; this drives a real
+// one over the service's own jar, behind a guide that answers only after a
+// slow network's delay — longer than AutoCookieStopWait — and rotates
+// __Secure-1PSIDTS when it does. The re-check is on the wire when the stop
+// begins, in both of the ways it can begin: the shutdown's order (the run's
+// context cancelled, then RefreshService.Stop, which does not reach a CheckNow
+// in flight, then this service's Stop), and Stop on its own.
+//
+// Before, the wiring re-checked under context.Background(): neither cancel
+// reached the guide request, Stop gave up after its 2 s, and the re-check
+// landed afterwards — rewriting cookies.txt and firing its callbacks after the
+// shutdown had moved on to the web server and the database.
+//
+// Mutant (checked): notePassCompleted handing the hook context.Background() —
+// in both subtests Stop gives up, the hook returns after Stop did, and the
+// rotation reaches cookies.txt.
+func TestStopJoinsThePostPassReCheck(t *testing.T) {
+	const rotated = "rotated-after-stop"
+	for _, tc := range []struct {
+		name     string
+		shutdown bool
+	}{
+		{"the shutdown's order", true},
+		{"Stop alone", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withLaunchWindowKillBudget(t, testLaunchWindowKillBudget)
+			noDirTightening(t)
+			log := &recordingCookieLogger{}
+			cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+			jar := NewCookieJar()
+			s := NewAutoCookieService(writeWALCookieProfile(t, youtubeAuthRows()), cookiePath, jar, log)
+			s.detectBrowser = func() *DetectedBrowser { return nil }
+			s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return true, nil }
+			s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
+			rs := NewRefreshService(jar, 0, nopLogger{})
+
+			// Only the re-check reaches the guide: the pass's own verify is
+			// stubbed above.
+			onTheWire, answered := make(chan struct{}), make(chan struct{})
+			var wireOnce, answerOnce sync.Once
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer answerOnce.Do(func() { close(answered) })
+				// Read first: the server watches for the client going away
+				// only once the request body is consumed.
+				_, _ = io.Copy(io.Discard, r.Body)
+				wireOnce.Do(func() { close(onTheWire) })
+				select {
+				case <-r.Context().Done():
+				case <-time.After(AutoCookieStopWait + 2*time.Second):
+				}
+				w.Header().Add("Set-Cookie", "__Secure-1PSIDTS="+rotated+"; Domain=.youtube.com; Path=/; Max-Age=31536000")
+				_, _ = w.Write([]byte(loggedInGuideBody))
+			}))
+			t.Cleanup(srv.Close)
+			pointYouTubeGuideAt(t, srv)
+			pointTwitchValidateAt(t, statusServer(t, http.StatusOK))
+
+			var hookReturned atomic.Int64
+			s.OnPassCompleted = func(ctx context.Context) {
+				rs.CheckNow(ctx)
+				hookReturned.Store(time.Now().UnixNano())
+			}
+
+			// Registered last, so it runs ahead of the server's Close, the
+			// guide URL's restore and the TempDir's removal.
+			runCtx, cancelRun := context.WithCancel(context.Background())
+			t.Cleanup(func() {
+				cancelRun()
+				if !s.waitBackground(30 * time.Second) {
+					t.Error("the loop was still running 30 s after its context ended")
+				}
+			})
+			s.StartPeriodicRefresh(runCtx, 20*time.Millisecond)
+			select {
+			case <-onTheWire:
+			case <-time.After(20 * time.Second):
+				t.Fatalf("the post-pass re-check never reached the guide (LastError=%q)", lastErrorSnapshot(s))
+			}
+
+			if tc.shutdown {
+				cancelRun()
+				rs.Stop()
+			}
+			s.Stop()
+			stoppedAt := time.Now()
+
+			if n := log.count(stopStillRunning); n != 0 {
+				t.Errorf("Stop gave up %d time(s) on a pass whose re-check was on the wire — the cancel "+
+					"did not reach the re-check's round trip", n)
+			}
+			if at := hookReturned.Load(); at == 0 || at > stoppedAt.UnixNano() {
+				t.Error("Stop returned with the post-pass re-check still running — the shutdown goes on to " +
+					"the web server and the database while it writes cookies.txt and fires its callbacks")
+			}
+			select {
+			case <-answered:
+			case <-time.After(AutoCookieStopWait + 12*time.Second):
+				t.Fatal("the guide never finished answering")
+			}
+			if !s.waitBackground(10 * time.Second) {
+				t.Fatal("the loop was still running 10 s after the guide had answered")
+			}
+			if b, err := os.ReadFile(cookiePath); err != nil {
+				t.Fatalf("read cookies.txt: %v", err)
+			} else if strings.Contains(string(b), rotated) {
+				t.Error("the re-check's guide reply was written into cookies.txt after Stop returned")
+			}
+		})
+	}
 }
 
 // TestStopIsBoundedByAutoCookieStopWait: a pass that does not observe the

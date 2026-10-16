@@ -64,23 +64,31 @@ func (s *AutoCookieService) periodicRefreshHasSource() bool {
 }
 
 // notePassCompleted fires OnPassCompleted if one is wired, unless ctx has
-// ended. ctx is the calling goroutine's own context — the loop's or the
-// seed's, never the pass's budget — so it has ended only when the caller's
-// did (a shutdown) or when Stop ended the service's lifetime.
+// ended, and hands the hook that same ctx. ctx is the calling goroutine's own
+// context — the loop's or the seed's, never the pass's budget — so it has
+// ended only when the caller's did (a shutdown) or when Stop ended the
+// service's lifetime.
 //
-// A pass that outlived its goroutine's context fires nothing. The hook runs
-// RefreshService's re-check under context.Background(), up to two validate
-// round trips, so firing it there held Stop's join for its whole bound, and
-// fanned the verdict out into a refresh service, a worker and a notification
-// manager that shutdown had already stopped. Nothing is lost by skipping it:
-// the next boot's first check reads the file this pass wrote.
+// The hook runs under ctx so that Stop's join reaches it. It runs
+// RefreshService's re-check — up to two validate round trips — on this
+// goroutine, and under context.Background() a re-check already in flight
+// when the shutdown began held the join for its whole bound and then went on
+// writing cookies.txt and fanning its verdict out into a worker, a web
+// server and a database that shutdown had moved on to. Under ctx the same
+// cancel that ends the loop ends its round trips: an auth check that cannot
+// finish is inconclusive, so it flags no auth loss and moves no baseline.
+//
+// A pass that outlived its goroutine's context fires nothing at all: a
+// re-check under an ended ctx could only fail both round trips at once and
+// publish that as the status. Nothing is lost by skipping it: the next boot's
+// first check reads the file this pass wrote.
 //
 // A named method rather than an inline nil check so the decision has a seam a
 // test can drive: the tick that calls it needs a browser profile, a browser
 // and a network, so the branch is otherwise unreachable offline.
 func (s *AutoCookieService) notePassCompleted(ctx context.Context) {
 	if s.OnPassCompleted != nil && ctx.Err() == nil {
-		s.OnPassCompleted()
+		s.OnPassCompleted(ctx)
 	}
 }
 

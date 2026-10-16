@@ -293,19 +293,24 @@ func twitchAuthLossHook(mark func(reason string), log interface {
 // recheck is the caller's whole body rather than a CheckNow func, so the guard
 // covers everything the hook does — the accessor lookup and the logging
 // included, not just the pass.
-func postRefreshRecheckHook(recheck func(), log interface {
+//
+// ctx is passed through untouched. It is the auto-cookie goroutine's own
+// context (see AutoCookieService.OnPassCompleted), and the body has to run its
+// re-check under it: that is what lets the shutdown's cancel end the re-check's
+// round trips, and AutoCookieService.Stop's join cover them.
+func postRefreshRecheckHook(recheck func(ctx context.Context), log interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
-}) func() {
-	return func() {
+}) func(ctx context.Context) {
+	return func(ctx context.Context) {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("panic in the post-refresh cookie re-check", "panic", fmt.Sprint(r))
 			}
 		}()
-		recheck()
+		recheck(ctx)
 	}
 }
 
@@ -1387,8 +1392,18 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// autoCookieSvc is built — but see postRefreshRecheckHook for what a panic
 	// on this goroutine actually costs, which is why the wrapper is not
 	// optional.
-	autoCookieSvc.OnPassCompleted = postRefreshRecheckHook(func() {
-		recheckAfterCookieWrite(context.Background(), s.checkNowFn(), log, "an automatic cookie refresh")
+	//
+	// ctx, and not context.Background() as at the other five sites: it is not
+	// a gesture's budget but the timer's or the seed's own context — the run's
+	// ctx narrowed to the auto-cookie service's lifetime — and it ends only
+	// when the shutdown does. The re-check runs on that goroutine, so
+	// AutoCookieService.Stop's join waits for it, and the join can only hold
+	// for round trips this cancel ends; under Background one in flight at the
+	// signal outlived the 2-second wait and rewrote cookies.txt after the
+	// shutdown had moved on. A re-check cut short is inconclusive, so a
+	// shutdown flags no auth loss.
+	autoCookieSvc.OnPassCompleted = postRefreshRecheckHook(func(ctx context.Context) {
+		recheckAfterCookieWrite(ctx, s.checkNowFn(), log, "an automatic cookie refresh")
 	}, log)
 
 	// cookies.dpapi_fallback, read LIVE like AcquisitionMode and
@@ -1484,13 +1499,14 @@ func (s *runState) initServices(logLevelOverride string) error {
 		// what the operator is told.
 		//
 		// context.Background rather than refreshCtx, which is still alive here:
-		// uniformity with the other five sites. One of them — the
-		// OnPassCompleted hook above — has no caller context to reach for at
-		// all; every one that does (runCookieRecovery's ctx, R F's refreshCtx,
-		// the TUI wizard finish's and the TUI cookie-file import's) holds a
-		// budget that belongs to its own gesture, not to a fingerprint
-		// comparison that must not be cancelled by its caller's teardown. The
-		// re-check has to outlive nothing.
+		// uniformity with the four other gesture sites. Every one of them
+		// (runCookieRecovery's ctx, R F's refreshCtx, the TUI wizard finish's
+		// and the TUI cookie-file import's) holds a budget that belongs to its
+		// own gesture, not to a fingerprint comparison that must not be
+		// cancelled by its caller's teardown. The re-check has to outlive
+		// nothing. The OnPassCompleted hook above is the one site that takes
+		// its caller's ctx, because that ctx is no gesture's budget: it is the
+		// auto-cookie goroutine's lifetime, which ends only with the process's.
 		defer func() {
 			if result.Ran {
 				recheckAfterCookieWrite(context.Background(), s.checkNowFn(), log, "the job-triggered cookie refresh", "platform", platform)

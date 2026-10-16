@@ -31,7 +31,7 @@ import (
 // TestNotePassCompletedHasExactlyItsTwoWritingCallers below.
 func TestNotePassCompletedFiresTheHook(t *testing.T) {
 	calls := 0
-	s := &AutoCookieService{OnPassCompleted: func() { calls++ }}
+	s := &AutoCookieService{OnPassCompleted: func(context.Context) { calls++ }}
 
 	s.notePassCompleted(context.Background())
 	s.notePassCompleted(context.Background())
@@ -43,16 +43,15 @@ func TestNotePassCompletedFiresTheHook(t *testing.T) {
 
 // TestNotePassCompletedAfterItsLoopEndedFiresNothing: a pass that finished
 // after its goroutine's context ended — a shutdown, or Stop ending the
-// service's lifetime — fires no re-check. The hook runs RefreshService's
-// re-check under context.Background(), so firing it then held Stop's join
-// for its whole bound and fanned the verdict into services shutdown had
-// already stopped.
+// service's lifetime — fires no re-check. The hook re-checks under that same
+// context, so all it could do then is fail both round trips at once and
+// publish that as the status, into services shutdown has already stopped.
 //
 // Mutant (checked): the ctx.Err() test dropped from notePassCompleted — the
 // hook fires for the cancelled pass.
 func TestNotePassCompletedAfterItsLoopEndedFiresNothing(t *testing.T) {
 	calls := 0
-	s := &AutoCookieService{OnPassCompleted: func() { calls++ }}
+	s := &AutoCookieService{OnPassCompleted: func(context.Context) { calls++ }}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -60,6 +59,29 @@ func TestNotePassCompletedAfterItsLoopEndedFiresNothing(t *testing.T) {
 
 	if calls != 0 {
 		t.Errorf("the hook fired %d time(s) for a pass whose loop had already ended, want 0", calls)
+	}
+}
+
+// TestNotePassCompletedHandsTheHookItsContext: the hook is called with the
+// goroutine's own context, the one Stop's join can end. cmd/moombox runs the
+// re-check under whatever the hook is handed, and a re-check under a context
+// of its own making — context.Background() was the wiring's — is out of reach
+// of both the shutdown's cancel and Stop's: one in flight when the shutdown
+// began outlived the join and went on writing cookies.txt afterwards.
+// TestStopJoinsThePostPassReCheck drives that end to end.
+//
+// Mutant (checked): notePassCompleted calling s.OnPassCompleted(
+// context.Background()).
+func TestNotePassCompletedHandsTheHookItsContext(t *testing.T) {
+	type key struct{}
+	var got context.Context
+	s := &AutoCookieService{OnPassCompleted: func(ctx context.Context) { got = ctx }}
+	ctx := context.WithValue(context.Background(), key{}, "the loop's")
+
+	s.notePassCompleted(ctx)
+
+	if got == nil || got.Value(key{}) != "the loop's" {
+		t.Errorf("the hook was handed %v, want the calling goroutine's context", got)
 	}
 }
 

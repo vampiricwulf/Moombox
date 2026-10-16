@@ -16,6 +16,10 @@ type recheckSite struct {
 	gesture             string
 	deferred            bool
 	inPassCompletedHook bool
+	// ctxFromEnclosingFunc: the call's ctx argument is the context.Context
+	// parameter of the func literal it sits in, rather than a context made
+	// on the spot.
+	ctxFromEnclosingFunc bool
 }
 
 // TestEveryCookieWriteRecheckIsDeferred pins the SHAPE of the six re-check
@@ -47,6 +51,14 @@ type recheckSite struct {
 // through postRefreshRecheckHook's recover guard. It is pinned by its own
 // shape. Its mutant: assign the bare closure, losing the recover, and a panic
 // on the auto-cookie goroutine takes the process down.
+//
+// That site is also the one that must re-check under the ctx the hook is
+// handed, the auto-cookie goroutine's own, where the other five use
+// context.Background(): AutoCookieService.Stop's join covers the re-check only
+// if the shutdown's cancel can end its round trips, and one under Background
+// outlived the join and rewrote cookies.txt after the shutdown had moved on.
+// Its mutant: recheckAfterCookieWrite(context.Background(), ...) inside the
+// hook's literal.
 func TestEveryCookieWriteRecheckIsDeferred(t *testing.T) {
 	var sites []recheckSite
 	for _, name := range []string{"monitor_callbacks.go", "services.go", "tui_wiring.go"} {
@@ -87,6 +99,13 @@ func TestEveryCookieWriteRecheckIsDeferred(t *testing.T) {
 			hooks++
 			if s.deferred {
 				t.Errorf("%s:%d (%q) is BOTH the OnPassCompleted hook and deferred — one reading is wrong", s.file, s.line, s.gesture)
+			}
+			if !s.ctxFromEnclosingFunc {
+				t.Errorf("%s:%d (%q) does not re-check under the ctx its hook is handed. That ctx is the "+
+					"auto-cookie goroutine's own, which the shutdown cancels and AutoCookieService.Stop "+
+					"waits out; a re-check under any other context keeps writing cookies.txt and firing "+
+					"its callbacks after Stop has given up on it and the shutdown has moved on",
+					s.file, s.line, s.gesture)
 			}
 		case !s.deferred:
 			t.Errorf("%s:%d (%q) calls recheckAfterCookieWrite outside a defer. Three of the eight "+
@@ -141,7 +160,12 @@ func recheckSitesIn(t *testing.T, filename string) []recheckSite {
 
 		site := recheckSite{file: filename, line: fset.Position(call.Pos()).Line, gesture: gestureArg(call)}
 		// stack[len(stack)-1] is the call itself; walk outward.
+		innermost := true
 		for i := len(stack) - 2; i >= 0; i-- {
+			if lit, isLit := stack[i].(*ast.FuncLit); isLit && innermost {
+				innermost = false
+				site.ctxFromEnclosingFunc = ctxArgIsParamOf(call, lit)
+			}
 			if _, isDefer := stack[i].(*ast.DeferStmt); isDefer {
 				site.deferred = true
 			}
@@ -168,6 +192,27 @@ func gestureArg(call *ast.CallExpr) string {
 		return ""
 	}
 	return lit.Value[1 : len(lit.Value)-1]
+}
+
+// ctxArgIsParamOf reports whether the call's first argument is the identifier
+// lit declares as its first parameter, typed context.Context.
+func ctxArgIsParamOf(call *ast.CallExpr, lit *ast.FuncLit) bool {
+	if len(call.Args) == 0 || lit.Type.Params == nil || len(lit.Type.Params.List) == 0 {
+		return false
+	}
+	arg, ok := call.Args[0].(*ast.Ident)
+	if !ok {
+		return false
+	}
+	first := lit.Type.Params.List[0]
+	sel, ok := first.Type.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Context" {
+		return false
+	}
+	if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "context" {
+		return false
+	}
+	return len(first.Names) > 0 && first.Names[0].Name == arg.Name
 }
 
 // isPassCompletedHook reports whether `outer` is the postRefreshRecheckHook

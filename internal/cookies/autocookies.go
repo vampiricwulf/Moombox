@@ -194,8 +194,10 @@ var authVerifyWindow = authVerifyTimeout
 // goroutines — StartPeriodicRefresh's timer and StartProfileSeed's boot import —
 // to return. Stop cancels a pass in flight and kills its browser first, so the
 // wait is normally milliseconds: what a cancelled pass still has to do is write
-// cookies.txt and its meta file, both temp+rename. The bound only keeps a step
-// that does not observe the cancel from holding the shutdown.
+// cookies.txt and its meta file, both temp+rename, and the OnPassCompleted
+// re-check after it runs under the same context, so its round trips end with
+// the cancel. The bound only keeps a step that does not observe the cancel
+// from holding the shutdown.
 //
 // Not budgeted into cmd/moombox's forceExitAfter, and it need not be: the
 // service stops after the worker, and a backstop that fires during this wait
@@ -451,9 +453,18 @@ type AutoCookieService struct {
 	// of the process rather than costing one tick. cmd/moombox wraps the body
 	// it injects here in its own recover for exactly that reason.
 	//
+	// ctx is that goroutine's own context — its caller's narrowed to the
+	// service's lifetime (startBackground) — and the hook must run its
+	// re-check under it rather than under context.Background(). The pass is
+	// not over until the hook returns, so Stop's join covers the re-check as
+	// well, and it can only do that for round trips the shutdown's cancel,
+	// or Stop's own, can end. A re-check under Background outlived the join's
+	// bound and went on rewriting cookies.txt and firing its callbacks after
+	// shutdown had moved on to the web server and the database.
+	//
 	// It is NOT called for a pass that outlived its goroutine's context — a
 	// shutdown, or Stop — see notePassCompleted.
-	OnPassCompleted func()
+	OnPassCompleted func(ctx context.Context)
 
 	// DpapiFallback enables the Windows-only DPAPI cookie-extraction
 	// path as a fallback when the CDP refresh launch fails. Off by
@@ -797,13 +808,17 @@ func (s *AutoCookieService) ClearManualRelogin(platform string) bool {
 //
 // It also ends the service's own goroutines — StartPeriodicRefresh's timer
 // and StartProfileSeed's boot import — and waits, up to AutoCookieStopWait,
-// for a pass either has in flight to return. Before that join Stop returned
-// with such a pass still running: shutdown went on to stop the refresh
-// service and close the database while the pass wrote cookies.txt and its
-// meta file and then fired OnPassCompleted, and a test that stopped at the
-// same point had testing remove the cookie directory while the meta file was
-// being written into it, which Windows refuses ("The directory is not
-// empty").
+// for a pass either has in flight to return, the OnPassCompleted re-check
+// after it included: that runs under the same context, which ending the
+// lifetime cancels. Before that join Stop returned with such a pass still
+// running: shutdown, which stops the refresh service just ahead of this one,
+// went on to the PO token provider, the web server and the database while
+// the pass wrote cookies.txt and its meta file and then fired
+// OnPassCompleted, and a test that stopped at the same point had testing
+// remove the cookie directory while the meta file was being written into it,
+// which Windows refuses ("The directory is not empty"). A step that ignores
+// the cancel can still outlast the bound; Stop logs that it gave up and
+// returns.
 //
 // The latch is a separate field from `cancelled` because the two answer
 // different questions and have different lifetimes. `cancelled` aborts ONE
