@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/treeguard"
 )
 
 // The test binary is its own stand-in for FFmpeg. With childprocRoleEnv set it
@@ -43,7 +45,8 @@ func TestMain(m *testing.M) {
 	// and TestTheParentThreadOutlivesTheProgram would pass with no lock at all
 	// whenever its goroutine happened to start the program from it.
 	runtime.LockOSThread()
-	os.Exit(m.Run())
+	// treeguard.Run fails a run that leaves files in the package directory.
+	os.Exit(treeguard.Run(m))
 }
 
 // runStarter is the "starter" role.

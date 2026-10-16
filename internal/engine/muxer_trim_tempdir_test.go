@@ -70,8 +70,15 @@ func TestMultiSegmentTrimIntermediatesStayBesideTheOutput(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("FFmpeg ran %d times, want two segment encodes and a concat: %q", len(lines), lines)
 	}
-	if lines[2] != out {
-		t.Errorf("the concat wrote %q, want the output %q", lines[2], out)
+	// The concat writes the clip under its temporary name beside it, which
+	// writeOutput renames into place (TestEveryFFmpegWriteIsHandedATemporaryName).
+	if filepath.Dir(lines[2]) != trimDir ||
+		!strings.HasPrefix(filepath.Base(lines[2]), "vid [10s-7200s].partial"+muxTempMarker) ||
+		!muxTempRe.MatchString(lines[2]) {
+		t.Errorf("the concat wrote %q, want the output's temporary name beside it (%s)", lines[2], out)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Errorf("the clip is not at its own name after the trim: %v", err)
 	}
 	for _, seg := range lines[:2] {
 		if strings.HasPrefix(seg, tmpRoot) {

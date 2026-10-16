@@ -110,7 +110,8 @@ func TestAnInteractiveStartupErrorWaitsForEnter(t *testing.T) {
 //
 // Mutants: `waitForKeypress(context.Background(), useTUI)` — SIGTERM no
 // longer ends the wait; `waitForKeypress(ctx, true)` — a headless container
-// with a TTY waits again; restoring a wait to the web-bind arm — two calls.
+// with a TTY waits again; restoring a wait to the web-bind arm — two calls;
+// run's ctx from context.Background() — not the one a stop signal ends.
 func TestRunWaitsForAKeypressOnlyWithItsSignalContextAndUseTUI(t *testing.T) {
 	const want = "waitForKeypress(ctx, useTUI)"
 	fset, body := funcBody(t, "main.go", "run")
@@ -132,22 +133,39 @@ func TestRunWaitsForAKeypressOnlyWithItsSignalContextAndUseTUI(t *testing.T) {
 	if len(found) != 1 {
 		t.Fatalf("run() calls waitForKeypress %d times (%v), want once — the initServices failure", len(found), found)
 	}
-	// And ctx is the signal context: the one SIGTERM and SIGINT cancel.
-	var signalCtx bool
+	// And ctx is the one a stop signal ends: run's ctx comes from
+	// context.WithCancel, its cancel is the runState's, and run arms
+	// catchStopSignals with s.stopOnSignal, which calls that cancel
+	// (TestRunWiresTheStopSignals pins the arming, the stop_signals tests
+	// what stopOnSignal does).
+	var withCancel, cancelHanded, armed bool
 	ast.Inspect(body, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
-		if !ok || len(as.Lhs) == 0 || len(as.Rhs) != 1 {
-			return true
-		}
-		if id, ok := as.Lhs[0].(*ast.Ident); !ok || id.Name != "ctx" {
-			return true
-		}
-		if strings.HasPrefix(types.ExprString(as.Rhs[0]), "signal.NotifyContext(") {
-			signalCtx = true
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			if len(x.Lhs) == 2 && len(x.Rhs) == 1 {
+				if id, ok := x.Lhs[0].(*ast.Ident); ok && id.Name == "ctx" &&
+					strings.HasPrefix(types.ExprString(x.Rhs[0]), "context.WithCancel(") {
+					withCancel = true
+				}
+			}
+		case *ast.CompositeLit:
+			if types.ExprString(x.Type) != "runState" {
+				return true
+			}
+			for _, el := range x.Elts {
+				if kv, ok := el.(*ast.KeyValueExpr); ok && types.ExprString(kv.Key) == "cancel" && types.ExprString(kv.Value) == "cancel" {
+					cancelHanded = true
+				}
+			}
+		case *ast.CallExpr:
+			if types.ExprString(x) == "catchStopSignals(stopSignals(), s.stopOnSignal)" {
+				armed = true
+			}
 		}
 		return true
 	})
-	if !signalCtx {
-		t.Error("run()'s ctx is not assigned from signal.NotifyContext; the keypress wait would not end on SIGTERM")
+	if !withCancel || !cancelHanded || !armed {
+		t.Errorf("run()'s ctx is not the one a stop signal ends (ctx from context.WithCancel: %v, its cancel on runState: %v, catchStopSignals armed with s.stopOnSignal: %v); the keypress wait would not end on SIGTERM",
+			withCancel, cancelHanded, armed)
 	}
 }
