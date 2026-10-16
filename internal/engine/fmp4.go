@@ -712,6 +712,16 @@ func (wk *fmp4Walker) walkFragments(pos int64) error {
 			return nil
 		}
 		if err == nil && !fmp4Leading[b.typ] && !fmp4TopLevel[b.typ] {
+			known, kerr := wk.foreignBoxFits(b)
+			if kerr != nil {
+				return kerr
+			}
+			if known {
+				// A box of a type this walk does not know that a writer put
+				// between fragments, as FFmpeg reads past one: read past.
+				pos = b.end()
+				continue
+			}
 			err = badBox("box %q at byte %d cannot be there", b.typ, pos)
 		}
 		if err != nil {
@@ -772,6 +782,34 @@ func (wk *fmp4Walker) walkFragments(pos int64) error {
 		}
 	}
 	return nil
+}
+
+// foreignBoxFits reports whether b, a box of a type the walk does not know,
+// is one a writer put there rather than damage: four printable characters for
+// a type, a size inside the file, and right after it the end of the file or a
+// box the walk does know. Bytes of damage read as a header fail it — an HTML
+// body's "<htm" is a size of a gigabyte, and wherever such a size lands is
+// not a box boundary.
+func (wk *fmp4Walker) foreignBoxFits(b fmp4Box) (bool, error) {
+	for i := 0; i < len(b.typ); i++ {
+		if c := b.typ[i]; c < 0x20 || c > 0x7e {
+			return false, nil
+		}
+	}
+	if b.pastEOF {
+		return false, nil
+	}
+	if b.end() == wk.size {
+		return true, nil
+	}
+	next, err := wk.readBox(b.end())
+	switch {
+	case errors.Is(err, errBoxShort) || isBadBox(err):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return fmp4Leading[next.typ] || fmp4TopLevel[next.typ], nil
 }
 
 // readFragment reads the fragment whose moof is b: the moof, then the mdat

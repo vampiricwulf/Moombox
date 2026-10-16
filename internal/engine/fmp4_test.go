@@ -144,6 +144,51 @@ func TestWalkFMP4ReadsAHealthyStream(t *testing.T) {
 	}
 }
 
+// TestWalkFMP4ReadsPastAForeignBox: a box of a type the walk does not know,
+// which a writer put between fragments — whole, printable, followed by a box
+// the walk does know — is read past as FFmpeg reads past it. Treated as
+// damage, every capture whose server adds one would be "repaired" and keep
+// its staging.
+//
+// Mutant: foreignBoxFits answering false (ten drops, one per foreign box).
+func TestWalkFMP4ReadsPastAForeignBox(t *testing.T) {
+	data := synthInit(synthTrack{1, "vide", 90000})
+	for i := range 10 {
+		data = append(data, synthBox("ytmd", []byte("Sequence-Number: "+strings.Repeat("7", i+1)))...)
+		data = append(data, synthFragment(uint32(i+1), synthTraf{1, uint64(2*i) * 90000, 50, 3600, 100})...)
+	}
+	data = append(data, synthBox("ytmd", []byte("trailing"))...)
+	w := mustWalk(t, data)
+	if w.Damaged() || w.Fragments != 10 || !near(w.Tracks[0].SpanSeconds(), 20) {
+		t.Errorf("drops=%v fragments=%d span=%.3f, want a clean 20 s walk of 10 fragments", w.Drops, w.Fragments, w.Tracks[0].SpanSeconds())
+	}
+}
+
+// TestWalkFMP4ForeignBoxMustFit: damage whose first bytes read as a header of
+// an unknown type is not a foreign box. Here the header claims 16 KB — past
+// the start of the intact fragment right after the damage — and where that
+// lands is no box; taken as a foreign box, the walk jumped over that fragment
+// and the drop took it. A type that is not four printable characters is
+// damage even when a box follows it.
+//
+// Mutants: foreignBoxFits not looking at what follows the box (the first row
+// drops fragment 5); foreignBoxFits taking any type (the second row has no
+// drop).
+func TestWalkFMP4ForeignBoxMustFit(t *testing.T) {
+	data, offs := synthStream(10, 0)
+	garbage := append(append(u32(16<<10), []byte("<htm")...), bytes.Repeat([]byte("l><head>"), 12)...)
+	w := mustWalk(t, splice(data, offs[4], offs[5], garbage))
+	if len(w.Drops) != 1 || w.Drops[0].End != int64(offs[4]+len(garbage)) || w.Fragments != 9 {
+		t.Errorf("drops=%+v fragments=%d, want only the %d damaged bytes dropped and 9 fragments", w.Drops, w.Fragments, len(garbage))
+	}
+	frag4 := data[offs[4]:offs[5]]
+	typeless := append(append(u32(uint32(len(frag4))), 0x01, 0x02, 0x03, 0x04), make([]byte, len(frag4)-8)...)
+	w = mustWalk(t, splice(data, offs[4], offs[5], typeless))
+	if len(w.Drops) != 1 || w.Drops[0].Start != int64(offs[4]) || w.Drops[0].End != int64(offs[5]) {
+		t.Errorf("drops=%+v, want the box of a non-printable type dropped", w.Drops)
+	}
+}
+
 // TestWalkFMP4SpanStartsAtTheFirstFragment: a part that began 208 s into the
 // broadcast carries 20 s of fragments, not 228.
 //
