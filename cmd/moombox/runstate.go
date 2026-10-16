@@ -53,6 +53,10 @@ type runState struct {
 
 	// --- Connectivity ---
 	connMon *connectivity.Monitor
+	// outageAlerts is the Outage Alert's debounce (outage_alerts.go), wired
+	// to connMon in wireMonitorCallbacks and stopped — reporting an episode
+	// still waiting out its window — before the notification drain.
+	outageAlerts *outageAlerts
 
 	// --- Platform services ---
 	jar         *cookies.CookieJar

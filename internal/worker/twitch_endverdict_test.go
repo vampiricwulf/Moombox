@@ -201,6 +201,14 @@ type endVerdictHarness struct {
 
 func newEndVerdictHarness(t *testing.T, jobID string) *endVerdictHarness {
 	t.Helper()
+	// The suites built on this harness drive an outage as an instant flip,
+	// offline then online, and are about what the recovery does once the
+	// session is cancelled — so the session is cancelled on the offline
+	// transition itself, as it was before the outage minimum. The minimum
+	// has suites of its own (twitch_outage_minimum_test.go).
+	prevCancelAfter := twitchOutageCancelAfter
+	twitchOutageCancelAfter = 0
+	t.Cleanup(func() { twitchOutageCancelAfter = prevCancelAfter })
 	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "gone", http.StatusNotFound)
 	}))

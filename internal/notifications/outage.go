@@ -145,9 +145,9 @@ func delayedNote(embeds []Embed) string {
 		first = time.Now()
 	}
 	if len(embeds) > 1 {
-		return fmt.Sprintf("Delayed by a connectivity outage — raised from <t:%d:f>", first.Unix())
+		return "Delayed by a connectivity outage — raised from " + Timestamp(first)
 	}
-	return fmt.Sprintf("Delayed by a connectivity outage — raised <t:%d:f>", first.Unix())
+	return "Delayed by a connectivity outage — raised " + Timestamp(first)
 }
 
 // delayedFieldName names the field an edit-mode lifecycle rewrite carries
@@ -159,7 +159,7 @@ const delayedFieldName = "Delayed"
 // which drops trailing fields, keeps it ahead of the event's own. at is when
 // the event was raised. The caller's slice is not modified.
 func withDelayedField(fields []Field, at time.Time) []Field {
-	mark := Field{Name: delayedFieldName, Value: fmt.Sprintf("By a connectivity outage — raised <t:%d:f>", at.Unix())}
+	mark := Field{Name: delayedFieldName, Value: "By a connectivity outage — raised " + Timestamp(at)}
 	pos := min(2, len(fields))
 	out := make([]Field, 0, len(fields)+1)
 	out = append(out, fields[:pos]...)

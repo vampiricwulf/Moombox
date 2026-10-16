@@ -94,6 +94,14 @@ func (s *runState) shutdown() bool {
 	// prevent — cheap here, since the call is one atomic store.
 	stopService("Notifications (single-attempt mode)", s.notifyMgr.BeginShutdown)
 
+	// The Outage Alert waits out its coalescing window after a restore
+	// (outage_alerts.go); an outage that ended just before the shutdown is
+	// reported now, ahead of the drain below, rather than never. Stopped
+	// here too, so a transition during the teardown sends nothing.
+	if s.outageAlerts != nil {
+		stopService("Outage alert", s.outageAlerts.stop)
+	}
+
 	// 1. Stop monitors
 	stopService("TwitchMonitor", s.twitchMon.Stop)
 	stopService("DecapiMonitor", s.decapiMon.Stop)

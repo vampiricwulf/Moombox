@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/connectivity"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
@@ -126,10 +127,21 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	})
 	defer unsubscribe()
 
-	// Register connectivity callback: offline cancels the current session so
-	// the downloader stops fetching against a dead network. The session loop
-	// below then waits for restoration and resumes the SAME job instead of
-	// finalizing it (one job per broadcast).
+	// Register connectivity callback: an outage cancels the current session
+	// so the downloader stops fetching against a dead network. The session
+	// loop below then waits for restoration and resumes the SAME job instead
+	// of finalizing it (one job per broadcast).
+	//
+	// Not on the offline transition itself: only once the link has stayed
+	// down for twitchOutageCancelAfter (connectivity.MinOutage). The monitor
+	// comes back online on its first good poll, so a flapping link cycled
+	// through it every ~15 s, and every cycle cancelled the session, re-ran
+	// the broadcast recheck and the variant refresh, and sent a "Twitch
+	// Download Resumed" (W27-11). A shorter outage is ridden out in place:
+	// the engine's IsOnline wiring waits for the link and its own resume and
+	// StopOnGap decide between a seamless continuation and a gap split, as
+	// after any restore — and the chat, which an outage can leave waiting
+	// out a stretched reconnect backoff, is asked to reconnect now.
 	//
 	// Live only. A VOD has no live edge to lose and no broadcast to
 	// re-verify, so the engine's IsOnline wiring waits an outage out in place
@@ -145,24 +157,84 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// report that found it unset cancels a session installed before it was
 	// set, never the finalize's own.
 	var finalizing bool
+	// outageSince is when the outage that cancelled the session began (unix
+	// nanoseconds): the offline transition, not the cancel twitchOutageCancelAfter
+	// later. The session loop reads it where it consumes the cancel, so the
+	// resume embed's pause instant and "resumed after" span the whole outage.
+	var outageSince atomic.Int64
 	if o.conn != nil && !isVod {
-		unregisterConn := o.conn.OnStateChange(func(online bool) {
-			if online {
-				return
-			}
+		cancelForOutage := func(since time.Time) {
 			cancelMu.Lock()
 			c := cancelCurrent
 			if finalizing {
 				c = nil
 			} else {
+				outageSince.Store(since.UnixNano())
 				offlineCancelled.Store(true)
 			}
 			cancelMu.Unlock()
 			if c != nil {
 				c()
 			}
+		}
+		// outageMu guards the armed cancel and its epoch: a restore stops
+		// the timer, and the epoch is what tells a callback that escaped
+		// Stop that its outage is over. Lock order: outageMu, then cancelMu
+		// (cancelForOutage), never the other way.
+		var outageMu sync.Mutex
+		var outageTimer *time.Timer
+		var outageEpoch uint64
+		disarm := func() {
+			if outageTimer != nil {
+				outageTimer.Stop()
+				outageTimer = nil
+			}
+			outageEpoch++
+		}
+		unregisterConn := o.conn.OnStateChange(func(online bool) {
+			outageMu.Lock()
+			defer outageMu.Unlock()
+			disarm()
+			if online {
+				if r, ok := twitchChatDl.(interface{ RetryNow() }); ok {
+					r.RetryNow()
+				}
+				return
+			}
+			cancelMu.Lock()
+			done := finalizing
+			cancelMu.Unlock()
+			if done {
+				return
+			}
+			since := time.Now()
+			if twitchOutageCancelAfter <= 0 {
+				cancelForOutage(since)
+				return
+			}
+			ep := outageEpoch
+			outageTimer = time.AfterFunc(twitchOutageCancelAfter, func() {
+				defer func() {
+					if r := recover(); r != nil {
+						o.logger.Error("panic in the Twitch outage cancel", "panic", fmt.Sprint(r), "jobID", jobID)
+					}
+				}()
+				outageMu.Lock()
+				current := ep == outageEpoch
+				outageMu.Unlock()
+				if current && !o.conn.IsOnline() {
+					o.logger.Info("Twitch capture offline past the outage minimum — pausing the session",
+						"after", twitchOutageCancelAfter, "jobID", jobID)
+					cancelForOutage(since)
+				}
+			})
 		})
-		defer unregisterConn()
+		defer func() {
+			unregisterConn()
+			outageMu.Lock()
+			disarm()
+			outageMu.Unlock()
+		}()
 	}
 
 	ctx, _ = newSession()
@@ -999,14 +1071,20 @@ sessionLoop:
 		// that never muxed its last part. Only a latch the recovery itself
 		// takes, or the resumed session's own, reaches the exit below.
 		unconfirmedEndErr = nil
-		// The pause instant, stamped where the flag is consumed. NOT sent:
-		// a "download paused, connectivity lost" embed has no connectivity to
-		// travel over, so its three attempts and ~7 s of backoff delivered it
-		// only when the outage was shorter than the send itself (audit C8 —
-		// the same fallacy the connectivity_lost removal fixed). The resume
-		// embed below carries it, and an outage that never resumes is covered
-		// by connectivity_split.
+		// The pause instant: when the outage began, the offline transition
+		// the cancel stamped (outageSince) — twitchOutageCancelAfter before
+		// the cancel itself, a stretch the engine waited through in place.
+		// Now, where the flag is consumed, only when no stamp is there. NOT
+		// sent: a "download paused, connectivity lost" embed has no
+		// connectivity to travel over, so its three attempts and ~7 s of
+		// backoff delivered it only when the outage was shorter than the
+		// send itself (audit C8 — the same fallacy the connectivity_lost
+		// removal fixed). The resume embed below carries it, and an outage
+		// that never resumes is covered by connectivity_split.
 		pausedAt := time.Now()
+		if since := outageSince.Swap(0); since != 0 {
+			pausedAt = time.Unix(0, since)
+		}
 
 		o.logger.Warn("Twitch download paused — connectivity lost; waiting to resume same broadcast",
 			"part", segmentIndex+1, "jobID", jobCtx.Job.ID)
@@ -1670,6 +1748,13 @@ const postOutageRefreshAttempts = 3
 // postOutageRetryDelay is the backoff step of both post-outage retry loops:
 // the n-th retry waits n steps. A variable so tests need not sleep it out.
 var postOutageRetryDelay = 3 * time.Second
+
+// twitchOutageCancelAfter is how long the link must stay down before a live
+// Twitch capture's session is cancelled into the outage recovery:
+// connectivity.MinOutage, the minimum the Outage Alert keeps too, so a blip
+// that sends no alert restarts no capture either. A variable so tests need
+// not wait it out; zero cancels on the offline transition itself.
+var twitchOutageCancelAfter = connectivity.MinOutage
 
 // sameTwitchBroadcast reports whether info refers to the broadcast this job
 // has been recording, by the shared sameBroadcastStart identity rule against

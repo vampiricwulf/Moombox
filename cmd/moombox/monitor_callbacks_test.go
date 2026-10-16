@@ -117,16 +117,18 @@ func TestAnnouncesJobFound(t *testing.T) {
 	}
 }
 
-// TestOutageAlert pins the "Outage Alert" notification sent on connectivity
-// restore (the only connectivity webhook that can actually deliver — a
-// "lost" notification has, by definition, no connectivity to ride). Start
-// and end render as Discord dynamic timestamps (<t:unix:f> — each viewer's
-// local timezone); duration is a plain second-rounded string.
+// TestOutageAlert pins the "Outage Alert" notification sent after a
+// connectivity restore (the only connectivity webhook that can actually
+// deliver — a "lost" notification has, by definition, no connectivity to
+// ride). Start and end render as Discord dynamic timestamps (<t:unix:f> —
+// each viewer's local timezone); duration is a plain second-rounded string,
+// and a single outage carries no flap count (outage_alerts_test.go has the
+// flapping shape).
 func TestOutageAlert(t *testing.T) {
 	start := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
 	end := start.Add(4*time.Minute + 32*time.Second + 600*time.Millisecond)
 
-	title, _, fields := outageAlert(start, end)
+	title, _, fields := outageAlert(start, end, end.Sub(start), 1)
 
 	if title != "Outage Alert" {
 		t.Errorf("title = %q, want \"Outage Alert\"", title)
