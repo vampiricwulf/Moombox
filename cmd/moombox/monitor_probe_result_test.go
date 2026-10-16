@@ -54,28 +54,48 @@ func TestMonitorProbeResultCarriesEveryField(t *testing.T) {
 
 // monitorProbe is the call, then the adapter: what the youtube probe
 // answered reaches the monitor whole, and a failed probe reaches it as the
-// failure, never as a result.
+// failure, never as a result. The answer sets every field the adapter reads,
+// and the sweep below holds monitorProbe's own output to the same rule as
+// TestMonitorProbeResultCarriesEveryField holds the adapter's: a field
+// monitorProbe does not carry reads zero, whichever field it is.
 //
 // Mutants: monitorProbe returning a struct literal of the five pre-flag
-// fields in place of monitorProbeResult(meta) (BroadcastEnded lost); the
-// error swallowed (`return monitorProbeResult(meta), nil` ahead of the
-// check — the nil meta panics, or a result arrives for a failed probe).
+// fields in place of monitorProbeResult(meta) (BroadcastEnded lost), or of
+// bcab5da9's six (BroadcastEndWeak lost — every weak end would reach the
+// monitors as a strong one, never confirmed and never re-checked; it passed
+// the whole suite while the answer here left that field false), or without
+// the date; the error swallowed (`return monitorProbeResult(meta), nil`
+// ahead of the check — the nil meta panics, or a result arrives for a
+// failed probe).
 func TestMonitorProbeIsTheCallThenTheAdapter(t *testing.T) {
-	info := &youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming, Title: "t",
-		PlayabilityError: youtube.PlayabilityAgeRestricted, BroadcastEnded: true}
+	info := &youtube.VideoInfo{
+		StreamStatus:       youtube.StreamUpcoming,
+		Title:              "t",
+		PublishedAt:        "2026-09-11T02:14:17Z",
+		PublishedPrecision: "started",
+		PlayabilityError:   youtube.PlayabilityAgeRestricted,
+		BroadcastEnded:     true,
+		BroadcastEndWeak:   true,
+	}
 	var asked string
 	got, err := monitorProbe(func(ctx context.Context, videoID string) (*youtube.VideoInfo, error) {
 		asked = videoID
 		return info, nil
 	})(context.Background(), "vid")
-	if err != nil {
-		t.Fatalf("probe: %v", err)
+	if err != nil || got == nil {
+		t.Fatalf("probe: (%+v, %v), want a result", got, err)
 	}
 	if asked != "vid" {
 		t.Errorf("the youtube probe was asked about %q, want vid", asked)
 	}
 	if want := monitorProbeResult(info); !reflect.DeepEqual(got, want) {
 		t.Errorf("monitorProbe = %+v, want monitorProbeResult's %+v", got, want)
+	}
+	v := reflect.ValueOf(*got)
+	for i := range v.NumField() {
+		if v.Field(i).IsZero() {
+			t.Errorf("VideoProbeResult.%s is not carried by monitorProbe", v.Type().Field(i).Name)
+		}
 	}
 
 	boom := errors.New("player: transport error")
