@@ -8,6 +8,8 @@ import (
 	"slices"
 	"sync"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/treeguard"
 )
 
 // networkGuardEnv is what the guard sets for the suite: every proxy variable
@@ -29,10 +31,12 @@ var (
 // makes, say — fails the run. Otherwise it downloads the live page on every
 // CI run, carrying the test's fake credentials, and a runner whose egress is
 // blackholed waits out the fetch's timeout. The live tests
-// (MOOMBOX_LIVE_YT_TEST, MOOMBOX_LIVE_YT_COOKIES) run without it.
+// (MOOMBOX_LIVE_YT_TEST, MOOMBOX_LIVE_YT_COOKIES) run without it. Either way
+// the tests run through treeguard.Run, which fails a run that left a file in
+// the package directory.
 func TestMain(m *testing.M) {
 	if os.Getenv("MOOMBOX_LIVE_YT_TEST") == "1" || os.Getenv("MOOMBOX_LIVE_YT_COOKIES") != "" {
-		os.Exit(m.Run())
+		os.Exit(treeguard.Run(m))
 	}
 
 	var mu sync.Mutex
@@ -56,7 +60,7 @@ func TestMain(m *testing.M) {
 		}
 	}
 
-	code := m.Run()
+	code := treeguard.Run(m)
 	trip.Close()
 
 	if len(reached) > 0 {

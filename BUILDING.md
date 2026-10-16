@@ -104,6 +104,8 @@ go test -v -run TestParseDash ./internal/engine/... # one test
 go vet ./...                                        # static analysis
 ```
 
+go test runs each package's tests in the package's own directory, so a test that writes to a relative path (a config built from `config.Defaults()`, whose `./output` and `./staging` a handler then creates; a file named without a directory; `C:\Moombox\staging`, which is only a relative name on Linux) writes beside the source. Every tested package's `TestMain` runs its tests through `treeguard.Run` (`internal/treeguard/treeguard.go`), which fails the run and names what it left when anything new is in the package directory afterwards; write such files under `t.TempDir()`. The leftovers are kept for inspection, so it is the first run after a leak appears that fails. `TestEveryTestedPackageRunsTheGuard` fails a tested package that has no such `TestMain`, so a new package needs one too: `func TestMain(m *testing.M) { os.Exit(treeguard.Run(m)) }`.
+
 ## CI Workflows
 
 - **`.github/workflows/release.yml`** — runs on tag push (`v*`). Runs the test suite on the tagged commit first, then builds and signs all three platforms, creates a GitHub release with the matching assets and a body listing all download links, and publishes the Docker image. Run it by hand ("Run workflow") for a dry run: every step runs and nothing is published (the image is not pushed; the release upload goes to a draft the job deletes). A tag must equal the version in `cmd/moombox/main.go` or the release fails.

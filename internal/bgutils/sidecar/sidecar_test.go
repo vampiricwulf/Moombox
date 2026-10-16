@@ -9,6 +9,7 @@ import (
 	"time"
 
 	bgembed "github.com/vampiricwulf/Moombox/internal/bgutils/embed"
+	"github.com/vampiricwulf/Moombox/internal/treeguard"
 )
 
 // testLogger routes Sidecar logger calls through testing.T.Logf so test
@@ -42,8 +43,10 @@ var sharedSidecarCache = sync.OnceValues(func() (string, error) {
 	return os.MkdirTemp("", "moombox-sidecar-test-")
 })
 
+// TestMain removes the shared extraction once the run is over, and fails a
+// run that left a file in the package directory (treeguard.Run).
 func TestMain(m *testing.M) {
-	code := m.Run()
+	code := treeguard.Run(m)
 	if dir, err := sharedSidecarCache(); err == nil {
 		os.RemoveAll(dir)
 	}

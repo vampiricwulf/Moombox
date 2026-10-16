@@ -9,6 +9,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/treeguard"
 )
 
 // --- a browser the tests can drive -----------------------------------------
@@ -93,7 +95,9 @@ func TestMain(m *testing.M) {
 	if isFakeSetupLaunch(os.Args) {
 		os.Exit(runFakeSetupBrowser(os.Getenv(fakeBrowserModeEnv)))
 	}
-	os.Exit(m.Run())
+	// The tests themselves run through treeguard.Run, which fails a run that
+	// left a file in the package directory.
+	os.Exit(treeguard.Run(m))
 }
 
 // isFakeSetupChild recognises the process fakeBrowserHandoff spawns. Checked

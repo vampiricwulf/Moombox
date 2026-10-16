@@ -216,6 +216,7 @@ internal/childproc  (4 files, ~360)    -- FFmpeg and ffprobe started tied to the
 internal/disk       (3 files, ~130)    -- Disk space queries: kernel32 on Windows, statfs on Linux
 internal/constants  (1 file,  ~320)    -- Hardcoded values (API keys, URLs, timeouts)
 internal/utils     (26 files, ~2,590)  -- HTTP helpers, formatters, YouTube URL parsing
+internal/treeguard                     -- test-only: every tested package's TestMain runs through it, failing a run that leaves files in the package directory
 ```
 
 Total: approximately 124,400 lines of Go across 325 source files under `internal/` (excluding tests, web assets, and `cmd/`). `appendix-metrics.md` is the maintained copy of these numbers and carries the script that regenerates them.
