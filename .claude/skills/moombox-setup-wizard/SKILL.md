@@ -49,6 +49,7 @@ Completion saves config and triggers restart (exit code 42).
 - Validation: reuses `validateConfigUpdates()`
 - Application: reuses `applyConfigUpdates()`
 - Special handling for password hashing, directory creation, yt-dlp plugin install
+- Cookie carry: the cookies this wizard run's own browser login or import wrote went to the boot-time `cookies.cookie_file` the running cookie service was built with, so before saving, both wizards carry them into the `cookie_file` the setup saves (`SetupDeps.CarryCookies` here, `SetupWizardModel.OnCarryCookies` in the TUI's save command, both wired to `AutoCookieService.CarryCookieFileTo` in `internal/cookies/cookie_files.go`). Only the platforms supplied in this run are carried, merged into a file already there; a run that signed in to nothing leaves the saved file alone, and a carry that fails refuses the setup under `cookies.cookie_file` with nothing saved
 - Triggers restart via `OnRestart()` callback (500ms delay goroutine)
 
 ### 5. Feature Parity
