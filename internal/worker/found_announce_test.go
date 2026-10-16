@@ -223,10 +223,24 @@ func (c cancelOnFound) Send(title, desc string, nt notifications.NotificationTyp
 // sends the discovery as ONE embed. A job owed nothing (a manual add) stops
 // the same way, with no confirmation for a run the operator just cancelled.
 //
+// Cancelled is what the row says too, not only ctx. The operator's Cancel
+// (the real CancelJob below) writes the row before it cancels the run's ctx,
+// and a fetch that returns in between — the window held open, as a slow
+// subscriber to that write would hold it, until the run sends something —
+// found ctx live and sent the confirmation for a job just cancelled. A
+// channel removal's "delete its pending jobs" deletes the row and cancels no
+// run at all, and the run sent the confirmation for a job no longer there.
+//
 // Mutants: Process going on past a cancelled fetch (run 1 sends the
 // confirmation and writes the start time); the stop applied only to an owed
 // job (the unowed run sends its confirmation); the stop returning anything
-// but cancelledResult (processJob then records an error for a shutdown).
+// but cancelledResult (processJob then records an error for a shutdown), or
+// the row's stop doing so (every row-side run fails); the row not re-read,
+// only ctx consulted (both Cancel runs and the channel removal send the
+// confirmation); the re-read applied only to an owed job (the unowed Cancel
+// run sends it); the re-read stopping on a Cancelled row but not a missing
+// one (the channel removal sends it), or on a missing row but not a
+// Cancelled one (both Cancel runs send it).
 func TestCancelledSuccessfulFetchSendsNothing(t *testing.T) {
 	info := func() *youtube.VideoInfo {
 		return &youtube.VideoInfo{Title: "Fetched Title", ChannelName: "A Channel",
@@ -300,6 +314,191 @@ func TestCancelledSuccessfulFetchSendsNothing(t *testing.T) {
 			t.Errorf("the cancelled run sent %+v, want nothing", got)
 		}
 	})
+
+	for _, owed := range []bool{true, false} {
+		name := "operator's Cancel, write before ctx, owed discovery"
+		if !owed {
+			name = "operator's Cancel, write before ctx, job owed nothing"
+		}
+		t.Run(name, func(t *testing.T) {
+			q := queuedFoundJob(t, owed)
+			// The window every Cancel has between its write and its ctx
+			// cancel, held open by a subscriber to that write until the
+			// run sends something or returns.
+			written, sent, returned := make(chan struct{}), make(chan struct{}, 8), make(chan struct{})
+			unsub := q.db.OnJobUpdate(func(j *database.Job) {
+				if j.ID != q.job.ID || j.Status != database.StatusCancelled {
+					return
+				}
+				select {
+				case <-written:
+				default:
+					close(written)
+					select {
+					case <-sent:
+					case <-returned:
+					case <-time.After(5 * time.Second):
+					}
+				}
+			})
+			defer unsub()
+			q.sp.notifier = sendSignal{q.rec, sent}
+
+			cancelDone := make(chan struct{})
+			q.sp.getVideoInfoFn = func(context.Context, string) (*youtube.VideoInfo, error) {
+				go func() {
+					defer close(cancelDone)
+					defer func() {
+						if r := recover(); r != nil {
+							t.Errorf("CancelJob panicked: %v", r)
+						}
+					}()
+					q.w.CancelJob(q.job.ID) // the operator clicks Cancel as the fetch completes
+				}()
+				select {
+				case <-written:
+				case <-time.After(5 * time.Second):
+					t.Error("CancelJob's write never reached its subscribers")
+				}
+				return info(), nil
+			}
+			res, err := q.sp.Process(q.ctx, q.job)
+			close(returned)
+			<-cancelDone
+			if err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if res == nil || !errors.Is(res.ErrSentinel, ErrCancelled) {
+				t.Errorf("the cancelled run returned %+v, want cancelledResult", res)
+			}
+			if got := q.rec.Calls(); len(got) != 0 {
+				t.Errorf("a run the operator cancelled during its fetch sent %+v, want nothing", got)
+			}
+			row, err := q.db.GetJob(q.job.ID)
+			if err != nil || row == nil {
+				t.Fatalf("GetJob: %v", err)
+			}
+			if row.Status != database.StatusCancelled || row.StreamStartTime != "" {
+				t.Errorf("row status %q, start %q; want the Cancelled row as the Cancel left it", row.Status, row.StreamStartTime)
+			}
+		})
+	}
+
+	t.Run("channel removal deletes the row", func(t *testing.T) {
+		sp, rec, job := foundTestJob(t)
+		sp.cfg = &config.MoomboxConfig{}
+		owe(t, sp.db, job)
+		stagingBase := t.TempDir()
+		sp.getVideoInfoFn = func(context.Context, string) (*youtube.VideoInfo, error) {
+			// The operator removes the channel, deleting its pending jobs,
+			// while the watch page loads.
+			if n, _, err := DeletePendingChannelJobs(sp.db, stagingBase, "UC_abc"); err != nil || n != 1 {
+				t.Fatalf("DeletePendingChannelJobs = %d, %v; want 1 deleted", n, err)
+			}
+			return info(), nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		res, err := sp.Process(ctx, job)
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		if res == nil || !errors.Is(res.ErrSentinel, ErrCancelled) {
+			t.Errorf("the run returned %+v, want cancelledResult", res)
+		}
+		if got := rec.Calls(); len(got) != 0 {
+			t.Errorf("a job deleted with its channel during its fetch was sent %+v, want nothing", got)
+		}
+	})
+}
+
+// queuedFound is an Upcoming discovery held by a worker's queue, as
+// processJob holds it: dequeued, so the worker's CancelJob cancels the ctx
+// the run's Process is given.
+type queuedFound struct {
+	w   *DownloadWorker
+	db  *database.Database
+	sp  *StreamProcessor
+	rec *notificationtest.Recorder
+	job *database.Job
+	ctx context.Context
+}
+
+// queuedFoundJob is foundTestJob's row in a worker's database, owed its
+// "Stream Found" when owed is set.
+func queuedFoundJob(t *testing.T, owed bool) queuedFound {
+	t.Helper()
+	w, db := testWorkerSetup(t)
+	chID := "UC_abc"
+	job := &database.Job{ID: "found1", VideoID: "found1", Platform: "youtube",
+		Title: "Feed Title", ChannelName: "A Channel", Status: database.StatusUpcoming,
+		ChannelID: &chID, AnnounceFound: owed}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	stored, err := db.GetJob(job.ID)
+	if err != nil || stored == nil || stored.AnnounceFound != owed {
+		t.Fatalf("GetJob: %v %+v", err, stored)
+	}
+	w.queue.Enqueue(job.ID, database.StatusUpcoming)
+	id, ctx, ok := w.queue.Dequeue(context.Background())
+	if !ok || id != job.ID {
+		t.Fatalf("Dequeue = %q, %v", id, ok)
+	}
+	rec := notificationtest.New()
+	sp := &StreamProcessor{db: db, notifier: rec, logger: discardLogger{}, cfg: &config.MoomboxConfig{}}
+	return queuedFound{w: w, db: db, sp: sp, rec: rec, job: stored, ctx: ctx}
+}
+
+// sendSignal records what it is sent and signals each send on sent.
+type sendSignal struct {
+	*notificationtest.Recorder
+	sent chan struct{}
+}
+
+func (s sendSignal) Send(title, desc string, nt notifications.NotificationType, f []notifications.Field, o notifications.SendOptions) {
+	s.Recorder.Send(title, desc, nt, f, o)
+	select {
+	case s.sent <- struct{}{}:
+	default:
+	}
+}
+
+// A Cancel that lands after the take leaves the row Cancelled. The run took
+// its owed "Stream Found" first and sends it, as designed; the Cancel, made
+// as CancelJob makes it (the row written, then the run's ctx cancelled),
+// lands as it does. waitForLive's first write, which sets Upcoming, then
+// applies only to a row with no outcome, and the loop stops. It used to be
+// unconditional and turned the operator's Cancelled back into Upcoming, for
+// as long as it took handleCancellation to write it again.
+//
+// Mutant: waitForLive's first write unconditional again (the row reads
+// Upcoming).
+func TestCancelAfterTheTakeLeavesTheRowCancelled(t *testing.T) {
+	q := queuedFoundJob(t, true)
+	q.sp.notifier = cancelOnFound{Sender: q.rec, cancel: func() { q.w.CancelJob(q.job.ID) }}
+	q.sp.getVideoInfoFn = func(context.Context, string) (*youtube.VideoInfo, error) {
+		return &youtube.VideoInfo{Title: "Fetched Title", ChannelName: "A Channel",
+			ScheduledStartTime: "2026-10-20T18:00:00Z", IsUpcoming: true,
+			StreamStatus: youtube.StreamUpcoming, PlayabilityError: youtube.PlayabilityOK}, nil
+	}
+	res, err := q.sp.Process(q.ctx, q.job)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if res == nil || !errors.Is(res.ErrSentinel, ErrCancelled) {
+		t.Errorf("the cancelled run returned %+v, want cancelledResult", res)
+	}
+	if calls := q.rec.Calls(); len(calls) != 1 || calls[0].Opts.Event != "found" {
+		t.Errorf("recorded %+v, want the one \"found\" the run took", calls)
+	}
+	row, err := q.db.GetJob(q.job.ID)
+	if err != nil || row == nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if row.Status != database.StatusCancelled {
+		t.Errorf("row status = %q after the Cancel, want %q", row.Status, database.StatusCancelled)
+	}
 }
 
 // A refused fetch says little that can be trusted about what the video is —

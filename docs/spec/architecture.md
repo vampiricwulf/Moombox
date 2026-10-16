@@ -321,7 +321,7 @@ The `StreamProcessor` is the first stage of job processing. It determines what a
 
 **YouTube path:**
 1. Performs a full multi-client fetch via `yt.GetVideoInfo()` (WEB + TV clients for accurate playability and complete metadata)
-2. Updates job metadata in the database (title, channel, thumbnail, description, scheduled start time, length)
+2. Updates job metadata in the database (title, channel, thumbnail, description, scheduled start time, length) — unless the run was cancelled during the fetch, which can still succeed on a cancelled context: a run that did not take an owed "Stream Found" (`found` in operations.md) stops there, writing and sending nothing, when its context is cancelled or its row reads `Cancelled` or is gone (an operator's Cancel writes the row and a delete removes it before either cancels the run, and a channel removal's bulk delete of its pending jobs cancels none)
 3. Checks playability (members-only, login required, age restricted, etc.)
 4. Routes based on `StreamStatus`:
    - `StreamLive` -> Updates status to Live, sends notification, returns `ShouldDownload=true, IsVod=false`
@@ -330,7 +330,7 @@ The `StreamProcessor` is the first stage of job processing. It determines what a
    - `StreamUpcoming` -> Enters `waitForLive()` polling loop
 
 **waitForLive() loop:**
-1. Updates job status to `Upcoming`
+1. Updates job status to `Upcoming`, unless the row already holds an outcome (`UpdateJobFieldsUnlessTerminal`): an operator's Cancel that landed after `Process` read the row stays `Cancelled`, and the loop's first check (a cancelled context, or a row that reads `Cancelled` or is gone) stops the run
 2. If chat download is enabled, attempts to start an early chat downloader (`tryStartEarlyChat()`) to capture pre-stream chat messages. Each probe re-evaluates the decision through `earlyChatNeedsRestart(chatDl, finished, lastRestart, now)` (`internal/worker/stream_processor_youtube.go`), which restarts when there is no downloader OR when the current one's run has ENDED and the previous start is at least `earlyChatMinRestartInterval` (5 min) behind — a run that dies immediately on dead cookies would otherwise cost one full watch-page fetch per probe for the rest of the wait, while the ~50-minute stale-exhaustion case the restart exists for is never delayed — YouTube resets a waiting-room chat after a period of inactivity, and the resulting downloader stays non-nil, so the old `chatDl == nil` gate left the waiting room uncaptured for the rest of the wait. `finished` is recorded by the run goroutine's own `defer` (`runEarlyChat`, called as the `go` statement in `tryStartEarlyChat`) once `Start` has returned by any route, never from `ChatDownloader.OnFinish` — `Start`'s recovery defer returns before `OnFinish` is reached, so a run that PANICKED would never be restarted — and never from `IsRunning()`, which is also false between `NewChatDownloader` and the goroutine reaching `Start`. The replaced downloader is untracked before the new one starts, and the new run picks up the chat file through the chat downloader's completion + adoption rules (platform-services.md) rather than overwriting it
 3. Calculates probe interval based on time until scheduled start:
    - More than 1 hour away: 10-minute interval (`probeIntervalDistant`)

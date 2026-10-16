@@ -259,8 +259,9 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 	// The flag is taken from the row only once the fetch is over, and only by
 	// a run still live: a failed fetch announces from what the row already
 	// held, ahead of the error it ends in, but a cancelled run takes nothing —
-	// a cancel or delete has cleared the flag or the row already, and a run
-	// stopped by shutdown leaves it owed to the next one.
+	// a cancel or delete has cleared the flag or the row already (the take
+	// then matches nothing), and a run stopped by shutdown leaves it owed to
+	// the next one.
 	info, err := sp.fetchVideoInfo(ctx, job.VideoID)
 	if err != nil {
 		if sp.takeAnnounceFound(ctx, job) {
@@ -282,13 +283,28 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 	// it — send "YouTube Start Time Confirmed" on its own, for a discovery
 	// never announced; after a shutdown the owed "Stream Found" followed on
 	// the next run, so the two embeds the deferral merged arrived apart, the
-	// confirmation first. The take comes before the check: a cancel landing
-	// between the two would otherwise refuse the take and still let the run
-	// through to that confirmation. A run that took the flag sends what it
-	// took.
+	// confirmation first.
+	//
+	// Cancelled is what the ROW says as well as what ctx says, read as the
+	// waiting loop reads it on every tick. The operator's Cancel writes the
+	// row (Cancelled, the flag cleared) before it cancels ctx, with the
+	// write's subscribers run in between; DeleteJob removes the row before
+	// its OnJobDeleted cancels ctx; and a channel removal's "delete its
+	// pending jobs" deletes the row in bulk and cancels no run at all. A
+	// fetch that returned in any of those windows found ctx live and went on
+	// to the same orphan confirmation, for a job just cancelled or no longer
+	// there. The take comes first, so a run whose take came after the write
+	// sees it in the row; a run whose take came before took the flag, and
+	// sends what it took. A read that fails stops nothing, as it stops
+	// nothing in the waiting loop: a database error must not end a live job.
 	announce := sp.takeAnnounceFound(ctx, job)
-	if !announce && ctx.Err() != nil {
-		return cancelledResult(), nil
+	if !announce {
+		if ctx.Err() != nil {
+			return cancelledResult(), nil
+		}
+		if cur, err := sp.db.GetJob(job.ID); err == nil && (cur == nil || cur.Status == database.StatusCancelled) {
+			return cancelledResult(), nil
+		}
 	}
 
 	sp.applyJobMetadata(job, info, false, announce)

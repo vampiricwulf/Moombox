@@ -135,7 +135,13 @@ func (sp *StreamProcessor) probeVideoSchedule(ctx context.Context, videoID strin
 func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, initialInfo *youtube.VideoInfo) (*StreamProcessResult, error) {
 	sp.logger.Info("waiting for stream to go live", "videoID", job.VideoID)
 
-	sp.db.UpdateJobFields(job.ID, map[string]any{
+	// Conditional: an operator's Cancel can land after Process read the row
+	// — after a run that took its "Stream Found" sent it — and this write
+	// used to turn that Cancelled row back into Upcoming, until
+	// handleCancellation wrote Cancelled again. A write it refuses changes
+	// nothing: the loop stops on the cancelled ctx, or, while the Cancel has
+	// yet to cancel it, on the Cancelled row its first check reads.
+	sp.db.UpdateJobFieldsUnlessTerminal(job.ID, map[string]any{
 		"status":          database.StatusUpcoming,
 		"last_recheck_at": time.Now().UTC().Format(time.RFC3339),
 	})
