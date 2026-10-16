@@ -105,14 +105,17 @@ type JobFacts struct {
 	// AsideCount is how many set-aside recordings the job's staging still held
 	// at finalize.
 	AsideCount int
-	// MuxGaps, pre-rendered by the orchestrator, says the archive was muxed
-	// from a repaired copy of a damaged staged recording — the unreadable
-	// bytes left out, a short gap where they were — or could not be checked
-	// against the staged fragments, and that staging was kept. "" for an
-	// archive carried across whole. It turns the embed Warning-coloured.
+	// MuxGaps, pre-rendered by the orchestrator, says a staged recording was
+	// muxed from a repaired copy of it — the unreadable bytes left out, a
+	// short gap where they were — into the archive or into a file beside it
+	// (a set-aside recording's sibling, a superseded part), or could not be
+	// checked against the staged fragments, and that staging was kept. ""
+	// when every staged recording was carried across whole. It turns the
+	// embed Warning-coloured.
 	MuxGaps string
-	// MuxGapDropped reports that MuxGaps is about bytes left out — the
-	// archive has a gap — rather than only a copy nothing could check.
+	// MuxGapDropped reports that MuxGaps is about bytes left out of the
+	// archive itself — the archive has a gap — rather than out of a file
+	// beside it, or only a copy nothing could check.
 	MuxGapDropped bool
 }
 

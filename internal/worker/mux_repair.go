@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/disk"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -728,26 +729,80 @@ func stagedMuxGaps(stagingDir string) []muxGapNote {
 	return out
 }
 
+// archiveOutputs is what a finished job's archive is made of, as
+// muxGapSummary tells a record about the archive from one about a file beside
+// it: the row's output file and its parts' files, and whether it finalized as
+// parts at all.
+type archiveOutputs struct {
+	files map[string]bool
+	parts bool
+}
+
+// jobArchiveOutputs reads a finished job's archive files off its row and its
+// part rows.
+func jobArchiveOutputs(db *database.Database, j *database.Job) archiveOutputs {
+	a := archiveOutputs{files: map[string]bool{}}
+	if j.OutputFile != "" {
+		a.files[filepath.Clean(j.OutputFile)] = true
+	}
+	if db != nil {
+		if segs, err := db.GetSegments(j.ID); err == nil {
+			for _, s := range segs {
+				if s.FilePath != "" {
+					a.files[filepath.Clean(s.FilePath)] = true
+				}
+			}
+			a.parts = len(segs) > 0
+		}
+	}
+	return a
+}
+
+// holds reports whether a record's copy went into the archive. A set-aside
+// recording's went into a sibling beside it (muxStagedAsides), never into
+// the archive. Any other went into the archive when it wrote one of the
+// archive's files, or when the job finalized as parts: a part the part merge
+// folded into the one before it has no file of its own any more, and its
+// media is in that one. A part's recording on a job that finalized as one
+// file is a part a complete VOD download superseded, whose file now sits
+// beside the archive (supersedePartsWithVod).
+func (a archiveOutputs) holds(n muxGapNote) bool {
+	if engine.IsStagedRestartPath(n.path) {
+		return false
+	}
+	return a.files[filepath.Clean(n.rec.Output)] || a.parts
+}
+
 // muxGapSummary is the Download Finished embed's line for a job whose staging
-// holds mux-gap records, "" for one whose does not; dropped reports that the
-// records describe bytes left out of an output rather than only a copy
-// nothing could check.
-func muxGapSummary(stagingDir string) (summary string, dropped bool) {
+// holds mux-gap records, "" for one whose does not. dropped reports that a
+// record describes bytes left out of the archive itself (archiveOutputs.holds);
+// stretches left out of a file beside it — a set-aside recording's sibling, a
+// superseded part — are named as that, and leave the archive whole, as is a
+// copy nothing could check.
+func muxGapSummary(stagingDir string, archive archiveOutputs) (summary string, dropped bool) {
 	notes := stagedMuxGaps(stagingDir)
 	if len(notes) == 0 {
 		return "", false
 	}
-	var stretches int
-	var seconds float64
+	var stretches, besideStretches int
+	var seconds, besideSeconds float64
 	unmeasured := false
 	for _, n := range notes {
-		stretches += len(n.rec.Dropped)
-		seconds += n.rec.GapSeconds
+		if archive.holds(n) {
+			stretches += len(n.rec.Dropped)
+			seconds += n.rec.GapSeconds
+		} else {
+			besideStretches += len(n.rec.Dropped)
+			besideSeconds += n.rec.GapSeconds
+		}
 		unmeasured = unmeasured || n.rec.Unmeasured != ""
 	}
 	var parts []string
 	if stretches > 0 {
 		parts = append(parts, fmt.Sprintf("%d damaged stretch(es) left out (%.1fs)", stretches, seconds))
+	}
+	if besideStretches > 0 {
+		parts = append(parts, fmt.Sprintf("%d damaged stretch(es) left out of a file beside the archive, not the archive (%.1fs)", besideStretches, besideSeconds))
 	}
 	if unmeasured {
 		parts = append(parts, "not checked against the staged fragments")

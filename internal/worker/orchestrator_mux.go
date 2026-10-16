@@ -1583,7 +1583,7 @@ func (o *DownloadOrchestrator) finishedFacts(jobCtx *JobContext, j *database.Job
 	f.ChatIncomplete = j.ChatStatus == chatStatusIncomplete
 	if jobCtx != nil && jobCtx.StagingDir != "" {
 		f.AsideCount = len(asideReport(jobCtx.StagingDir).Groups)
-		f.MuxGaps, f.MuxGapDropped = muxGapSummary(jobCtx.StagingDir)
+		f.MuxGaps, f.MuxGapDropped = muxGapSummary(jobCtx.StagingDir, jobArchiveOutputs(o.db, j))
 	}
 	return f
 }

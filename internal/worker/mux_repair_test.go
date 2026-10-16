@@ -18,6 +18,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/disk"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 )
 
 // W30-A11: a live DASH capture is staged as one fMP4 stream — the init, then
@@ -227,6 +228,9 @@ func routedRepairJob(t *testing.T, w *DownloadWorker, db *database.Database, job
 //   - the walk resyncing from a torn moof's claimed end rather than from
 //     inside it (the torn-moof row loses intact fragment 51 too: 1480
 //     frames).
+//   - jobArchiveOutputs not reading the row's output file (the Download
+//     Finished embed calls the gap one beside the archive and reads
+//     "Successfully archived").
 func TestDamagedDashFragmentFinishesWithAGap(t *testing.T) {
 	ffmpegPath, ffprobePath := requireFFmpegTools(t)
 	src := fragmentedFixture(t, ffmpegPath, "video", 300)
@@ -241,6 +245,8 @@ func TestDamagedDashFragmentFinishesWithAGap(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, db := testWorkerSetup(t)
+			rec := notificationtest.New()
+			w.orchestrator.notifier = rec
 			const id = "j-gap"
 			staging, _ := routedRepairJob(t, w, db, id)
 			media := filepath.Join(staging, "video_stream")
@@ -264,7 +270,7 @@ func TestDamagedDashFragmentFinishesWithAGap(t *testing.T) {
 			}
 			log := strings.Join(db.GetJobLogs(id), "\n")
 			for _, want := range []string{"muxed with a gap", "video 0:01:40.0 to 0:01:42.0", "bytes ",
-				"preserving staging dir: the archive was muxed without all of a staged recording"} {
+				"preserving staging dir: a mux could not carry a staged recording whole"} {
 				if !strings.Contains(log, want) {
 					t.Errorf("the job's log does not say %q:\n%s", want, log)
 				}
@@ -280,6 +286,9 @@ func TestDamagedDashFragmentFinishesWithAGap(t *testing.T) {
 			}
 			if v := decideStagingCleanup(db, row, id, staging); v.keep != keepStagingForMuxGaps {
 				t.Errorf("decideStagingCleanup = %v, want keepStagingForMuxGaps", v.keep)
+			}
+			if calls := rec.ByEvent("finished"); len(calls) != 1 || !strings.HasPrefix(calls[0].Description, "Archived with a gap") {
+				t.Errorf("finished notifications = %+v, want one reading \"Archived with a gap\"", calls)
 			}
 		})
 	}
@@ -944,5 +953,101 @@ func TestBacklogRepairWithoutSpaceGoesBackToQueued(t *testing.T) {
 	}
 	if !w.scheduler.held("gap_vod", time.Now()) {
 		t.Error("the requeued job is not held from re-admission")
+	}
+}
+
+// TestWholeArchiveBesideARepairedAsideIsNotAGap: the staged root recording
+// is whole; only a set-aside recording, muxed into its own sibling beside the
+// archive, had a damaged fragment repaired around. The archive is not missing
+// anything, so the Download Finished embed must not read "Archived with a
+// gap" — it says the stretch was left out of a file beside the archive — and
+// the staging cleanup's Warn must not say the archive was muxed without part
+// of a recording.
+//
+// Mutants: muxGapSummary counting every record as the archive's, as it did
+// (the embed reads "Archived with a gap"); the old Warn wording.
+func TestWholeArchiveBesideARepairedAsideIsNotAGap(t *testing.T) {
+	ffmpegPath, ffprobePath := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	rec := notificationtest.New()
+	w.orchestrator.notifier = rec
+	const id = "j-gap-beside"
+	staging, _ := routedRepairJob(t, w, db, id)
+	src := fragmentedFixture(t, ffmpegPath, "video", 300)
+	stageFragmented(t, filepath.Join(staging, "video_stream"), src, -1, damageNone)
+	stageFragmented(t, filepath.Join(staging, "video_stream"+engine.StagedRestartSuffix+"1700000000"), src, 50, damageZeroed)
+
+	if err := w.MuxJob(id); err != nil {
+		t.Fatalf("MuxJob: %v", err)
+	}
+	w.Stop()
+	row, _ := db.GetJob(id)
+	if row == nil || row.Status != database.StatusFinished {
+		t.Fatalf("job = %v (%q), want Finished", statusOf(row), errorOf(row))
+	}
+	if v := probeStreams(t, ffprobePath, row.OutputFile)["video"]; v.frames != 1500 {
+		t.Fatalf("archive video = %d frames, want 1500 (whole)", v.frames)
+	}
+	calls := rec.ByEvent("finished")
+	if len(calls) != 1 {
+		t.Fatalf("finished notifications = %d, want 1", len(calls))
+	}
+	if strings.HasPrefix(calls[0].Description, "Archived with a gap") {
+		t.Errorf("the embed of a whole archive reads %q", calls[0].Description)
+	}
+	if gaps, _ := calls[0].Field("Gaps"); !strings.Contains(gaps, "beside the archive") {
+		t.Errorf("Gaps = %q, want the stretch named as left out of a file beside the archive", gaps)
+	}
+	log := strings.Join(db.GetJobLogs(id), "\n")
+	if strings.Contains(log, "the archive was muxed without") || !strings.Contains(log, "a mux could not carry a staged recording whole") {
+		t.Errorf("the staging cleanup's Warn misstates what was muxed with a gap:\n%s", log)
+	}
+}
+
+// TestMuxGapSummaryTellsTheArchiveFromWhatIsBesideIt pins archiveOutputs:
+// a record of the archive's own file is the archive's gap, as is one of a
+// part the part merge folded into the one before it (its own file gone, the
+// job finalized as parts); a set-aside recording's, and a part's on a job that
+// finalized as one file (a part a complete VOD download superseded), are of
+// files beside it.
+//
+// Mutants: holds answering by Output alone (the merged-part row reads whole);
+// holds ignoring parts entirely (the same); holds without its set-aside check
+// (the aside row reads as a gap in the archive).
+func TestMuxGapSummaryTellsTheArchiveFromWhatIsBesideIt(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "a.mp4")
+	part2 := filepath.Join(filepath.Dir(archive), "a - part2.mp4")
+	for _, tc := range []struct {
+		name      string
+		recording string // relative to staging
+		output    string
+		outputs   archiveOutputs
+		dropped   bool
+	}{
+		{"the archive's own recording", "video_stream", archive, archiveOutputs{files: map[string]bool{archive: true}}, true},
+		{"a part merged into the one before it", filepath.Join("seg_1", "video_stream"), part2, archiveOutputs{files: map[string]bool{archive: true}, parts: true}, true},
+		{"a set-aside recording's sibling", "video_stream" + engine.StagedRestartSuffix + "1700000000", archive + ".restart-1700000000.mp4", archiveOutputs{files: map[string]bool{archive: true}, parts: true}, false},
+		{"a part a complete VOD superseded", filepath.Join("seg_0", "video_stream"), part2, archiveOutputs{files: map[string]bool{archive: true}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			staging := t.TempDir()
+			media := filepath.Join(staging, tc.recording)
+			if err := os.MkdirAll(filepath.Dir(media), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(media, []byte("staged"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeMuxGapRecord(media, muxGapRecord{Size: int64(len("staged")), Output: tc.output, Dropped: []string{"bytes 1-2"}, GapSeconds: 2}); err != nil {
+				t.Fatal(err)
+			}
+			summary, dropped := muxGapSummary(staging, tc.outputs)
+			if dropped != tc.dropped {
+				t.Errorf("dropped = %v (%q), want %v", dropped, summary, tc.dropped)
+			}
+			if beside := strings.Contains(summary, "beside the archive"); beside == tc.dropped {
+				t.Errorf("summary = %q, want it to say beside the archive only when the archive is whole", summary)
+			}
+		})
 	}
 }

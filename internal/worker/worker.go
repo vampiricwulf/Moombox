@@ -1145,10 +1145,12 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 		// A staged recording was muxed from a repaired copy that left its
 		// damaged bytes out, or could not be checked against its own
 		// fragments (copyStaged, mux_repair.go): what this dir holds beyond
-		// the archive is in no archive at all. One line per recording, each
-		// with what its record says.
+		// the file it was muxed into is in no output at all. That file is
+		// the archive, a part, or a sibling beside them — a set-aside
+		// recording's, a superseded part's — and the record's reason names
+		// it. One line per recording.
 		for _, g := range v.gaps {
-			w.logger.Warn("preserving staging dir: the archive was muxed without all of a staged recording, which staging keeps",
+			w.logger.Warn("preserving staging dir: a mux could not carry a staged recording whole, and staging keeps it",
 				"recording", g.path, "why", g.rec.reason(), "path", stagingDir, "jobID", jobID)
 		}
 	case keepStagingForUnusedRoot:
