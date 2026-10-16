@@ -73,6 +73,7 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 	// walk's: the pass's individual decisions are mostly silent by design,
 	// and the summary is the heartbeat that proves the pass ran.
 	var jobs, gated, history, retries, unknown int
+	nowStr := now.UTC().Format(time.RFC3339)
 
 	for _, row := range scope {
 		select {
@@ -137,9 +138,18 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 			// stale (§10). probeRow, never a bare probeAndClassify, so the
 			// members_only escalation (§9) applies here too.
 			res, isFresh := fresh[row.VideoID]
+			if !isFresh && recheckPending(row, nowStr) {
+				// An unconfirmed end waiting out its backoff: no job until a
+				// re-check settles it, and no refresh probe either — one every
+				// cycle for as long as it waits is the cost the backoff
+				// bounds. The walk's own probe of it (the restart carve-out)
+				// is the one that reaches here FRESH.
+				gated++
+				continue
+			}
 			if !isFresh {
 				var ok bool
-				res, ok = fm.probeRowDated(ctx, ch, chID, row, cutoff)
+				res, ok = fm.probeRowDated(ctx, ch, chID, row, cutoff, now)
 				if !ok {
 					retries++ // date fetch failed — the errored-probe contract
 					continue
@@ -183,10 +193,9 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 //
 // An unconfirmed end makes no job at all: it is ended for announcing — no
 // broadcast job, no "Video found" — and a VOD job on an end nobody
-// confirmed would act on the guess the re-check exists to test. FeedScope
-// already keeps such a row out of the archive's re-read once the walk has
-// scheduled its re-check; this covers the refresh probe, which runs on a
-// row the walk did not reach.
+// confirmed would act on the guess the re-check exists to test. That covers
+// the walk's FRESH result and the refresh probe alike; a row whose re-check
+// is pending is not refresh-probed at all (archive).
 func (fm *FeedMonitor) emitJob(ch *config.ChannelConfig, row database.FeedItem, res ProbeClassifyResult, cutoff string, newIDs map[string]bool) bool {
 	if res.EndUnconfirmed {
 		fm.logger.Debug("archive: broadcast end unconfirmed; no job until a re-check settles it",

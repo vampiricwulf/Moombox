@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,9 +170,9 @@ func TestProbeAndClassify_AWeakEndIsConfirmedBeforeItIsTrusted(t *testing.T) {
 // Mutants: the re-check not written (applyProbe passing the zero
 // FeedRecheck — the row is a settled vod and never probed again); the
 // backoff flat at an hour (the second delay); the step not advanced (every
-// delay an hour); FeedScope's pending filter dropped (probed at +30 min,
-// while the row is still in the window); Q3 dropped (never probed once out
-// of the window).
+// delay an hour); the walk reading a pending re-check as due, or the
+// archive refresh-probing one (probed at +30 min, while the row is still in
+// the window); Q3 dropped (never probed once out of the window).
 func TestFeed_AnUnconfirmedEndIsRecheckedOnTheBackoff(t *testing.T) {
 	db := newTestDB(t)
 	t0 := fixedNow()
@@ -519,4 +520,201 @@ func TestFeed_TheEndChecksDateIsTakenOnlyWhereTheDateFetchWouldRun(t *testing.T)
 			}
 		})
 	}
+}
+
+// A pending re-check takes nothing away from the restart carve-out (§8): a
+// vod row with a started date and no job is probed every cycle whether or
+// not its end is waiting on the backoff, so a stream that resumes on the
+// same video ID is found on the next cycle, not an hour (six hours, a day)
+// later. Those probes are not the re-check: they make no end check and move
+// no schedule, and the re-check, when due, still asks and still advances.
+// The row is the field shape: a /streams-tab row (coarse), last probed
+// upcoming, on a channel that archives no VODs; its ended stream answers on
+// weak signals alone, nobody can confirm them, and the date fetch dates it
+// 'started'.
+//
+// Mutants: a pending row kept out of FeedScope's Q1 again, as 69342f6b did
+// (the carve-out never probes it: one probe at +10 min short, and the
+// resumed stream unfound); the walk's carve-out skipping a pending row (the
+// same); endCheckFor giving a pending row the end check (an end check every
+// cycle); applyProbe advancing the backoff on a pending row's probe (the
+// schedule moves at +10 min); confirmEnd logging a withheld check's answer
+// as an unconfirmed end re-checked later (that Debug line on the carve-out's
+// cycles).
+func TestWalk_APendingReCheckKeepsTheRestartCarveOut(t *testing.T) {
+	db := newTestDB(t)
+	t0 := fixedNow()
+	seedRow(t, db, "UC1", "s1", t0.Add(-24*time.Hour), "coarse", "streams", "upcoming")
+	started := t0.Add(-20 * time.Hour).Format(time.RFC3339)
+	probes, checks := 0, 0
+	answer := weakEnd()
+	var rec *warnRecordingLogger
+	cycle := func(at time.Time) []foundCall {
+		t.Helper()
+		fm := newTestFeedMonitor(t, db, withRSS(rssWith()), withMembership(membWith()), withWindowDays(3),
+			withProbe(countingProbe(&probes, &answer)), withNow(at),
+			withProbeDate(func(context.Context, string) (string, string, error) { return started, "started", nil }))
+		rec = &warnRecordingLogger{}
+		fm.logger = rec
+		fm.ConfirmEnd = endCheckReturning(&checks, EndCheck{}, ErrEndCheckUnavailable)
+		found := recordVideoFound(fm)
+		// include_non_live_content off: the carve-out is the walk's one rule for this vod row.
+		if err := fm.checkChannel(context.Background(), &config.ChannelConfig{ID: "UC1", Name: "UC1"}); err != nil {
+			t.Fatalf("checkChannel: %v", err)
+		}
+		return *found
+	}
+	// scheduled: the cycle logged an unconfirmed end as re-checked later.
+	scheduled := func() bool {
+		for _, d := range rec.debugs {
+			if strings.Contains(d, "re-checked later") {
+				return true
+			}
+		}
+		return false
+	}
+	expect := func(label string, found []foundCall, wantProbes, wantChecks int, wantAt string, wantStep int, wantScheduled bool) {
+		t.Helper()
+		row := mustGetFeedItem(t, db, "UC1", "s1")
+		if probes != wantProbes || checks != wantChecks || len(found) != 0 ||
+			row.Status != "vod" || row.RecheckAt != wantAt || row.RecheckStep != wantStep {
+			t.Fatalf("%s: probes %d, end checks %d, found %v, row %q %q re-check %q step %d; want %d, %d, nothing, vod started, %q step %d",
+				label, probes, checks, found, row.Status, row.DatePrecision, row.RecheckAt, row.RecheckStep,
+				wantProbes, wantChecks, wantAt, wantStep)
+		}
+		if scheduled() != wantScheduled {
+			t.Fatalf("%s: logged an end re-checked later %v, want %v (debugs %q)", label, scheduled(), wantScheduled, rec.debugs)
+		}
+	}
+	at := func(d time.Duration) string { return t0.Add(d).Format(time.RFC3339) }
+
+	expect("first probe", cycle(t0), 1, 1, at(time.Hour), 1, true)
+	if row := mustGetFeedItem(t, db, "UC1", "s1"); row.DatePrecision != "started" {
+		t.Fatalf("fixture: the row is %q, want the carve-out's started date", row.DatePrecision)
+	}
+	expect("the carve-out, re-check pending", cycle(t0.Add(10*time.Minute)), 2, 1, at(time.Hour), 1, false)
+	expect("the re-check, due", cycle(t0.Add(time.Hour)), 3, 2, at(7*time.Hour), 2, true)
+	expect("the carve-out again", cycle(t0.Add(70*time.Minute)), 4, 2, at(7*time.Hour), 2, false)
+
+	// The stream resumes on the same ID: the next cycle's carve-out finds it.
+	answer = VideoProbeResult{StreamStatus: "live", PlayabilityError: "ok"}
+	found := cycle(t0.Add(80 * time.Minute))
+	if probes != 5 || len(found) != 1 || found[0].d != DispositionBroadcast {
+		t.Fatalf("the stream live again: probes %d, found %v; want 5 and one broadcast job", probes, found)
+	}
+	if row := mustGetFeedItem(t, db, "UC1", "s1"); row.Status != "live" || row.RecheckAt != "" || row.RecheckStep != 0 {
+		t.Fatalf("row %q re-check %q step %d, want live and nothing pending", row.Status, row.RecheckAt, row.RecheckStep)
+	}
+}
+
+// The archive's refresh probe follows the walk's rule: a row whose re-check
+// is pending is not refresh-probed at all — no job until a re-check settles
+// it, and a probe every cycle while it waits is the cost the backoff bounds.
+//
+// Mutant: the archive's pending gate dropped (a refresh probe of the pending
+// row).
+func TestArchive_TheRefreshProbeAndTheEndReCheck(t *testing.T) {
+	t.Run("a pending re-check is not refreshed", func(t *testing.T) {
+		db := newTestDB(t)
+		now := fixedNow()
+		seedRecheck(t, db, "UC1", "v1", now.Add(-24*time.Hour), "exact", "rss", now.Add(time.Hour), 1)
+		probes := 0
+		answer := weakEnd()
+		fm := newTestFeedMonitor(t, db, withRSS(rssWith()), withMembership(membWith()), withWindowDays(3),
+			withProbe(countingProbe(&probes, &answer)), withNow(now))
+		found := recordVideoFound(fm)
+		fm.runCycleForTest(t, "UC1")
+		row := mustGetFeedItem(t, db, "UC1", "v1")
+		if probes != 0 || len(*found) != 0 || row.RecheckAt != now.Add(time.Hour).Format(time.RFC3339) || row.RecheckStep != 1 {
+			t.Fatalf("probes %d, found %v, re-check %q step %d; want no probe, no job, the schedule as it was",
+				probes, *found, row.RecheckAt, row.RecheckStep)
+		}
+	})
+}
+
+// endCheckFor, row by row: a row whose re-check is pending is probed without
+// the end check, and every other row with it — a due re-check included.
+//
+// Mutants: the withheld arm dropped (the pending rows get the end check);
+// the pending test reading a due re-check as pending (the due rows get
+// none).
+func TestEndCheckFor(t *testing.T) {
+	now := fixedNow()
+	pending := now.Add(time.Minute).Format(time.RFC3339)
+	due := now.Format(time.RFC3339)
+	checks := 0
+	fm := &FeedMonitor{ConfirmEnd: endCheckReturning(&checks, EndCheck{Ended: true}, nil)}
+	for _, tc := range []struct {
+		name  string
+		row   database.FeedItem
+		wants bool
+	}{
+		{"upcoming", database.FeedItem{Status: "upcoming"}, true},
+		{"unknown", database.FeedItem{Status: "unknown"}, true},
+		{"live", database.FeedItem{Status: "live"}, true},
+		{"vod, re-check due", database.FeedItem{Status: "vod", RecheckAt: due}, true},
+		{"unknown, re-check due", database.FeedItem{Status: "unknown", RecheckAt: due}, true},
+		{"vod, re-check pending", database.FeedItem{Status: "vod", RecheckAt: pending}, false},
+		{"unknown, re-check pending", database.FeedItem{Status: "unknown", RecheckAt: pending}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := checks
+			_, err := fm.endCheckFor(tc.row, now)(context.Background(), "v")
+			asked := checks > before
+			if asked != tc.wants || (!asked && !errors.Is(err, errEndCheckWithheld)) {
+				t.Errorf("end check asked %v (err %v), want asked %v", asked, err, tc.wants)
+			}
+		})
+	}
+}
+
+// A row whose re-check is still pending is where its arm put it, like any
+// row — unlike a due one, which Q3 carries wherever its date is: its source
+// exhausting skips it, as it skips the carve-out row it is, and its date is
+// read for the source's order.
+//
+// Mutants: the exhaustion skip exempting every re-check row, pending
+// included (the pending row behind the exhausted source is probed); the
+// ordering check skipping a pending row's date (no "listing order violated"
+// warning when the next row probes newer).
+func TestWalk_APendingReCheckIsAListingPosition(t *testing.T) {
+	now := fixedNow()
+	date := func(d time.Duration) string { return now.Add(-d).Format(time.RFC3339) }
+	t.Run("skipped behind an exhausted source", func(t *testing.T) {
+		db := newTestDB(t)
+		seedCoarseLump(t, db, "UC1", now, "videos", "c1")
+		seedRecheck(t, db, "UC1", "p1", now.Add(-8*24*time.Hour), "started", "videos", now.Add(time.Hour), 1)
+		var probed []string
+		fm := newTestFeedMonitor(t, db, withProbe(func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+			probed = append(probed, videoID)
+			if videoID == "c1" {
+				return &VideoProbeResult{StreamStatus: "vod", PublishedAt: date(20 * 24 * time.Hour), PublishedPrecision: "day"}, nil
+			}
+			res := weakEnd()
+			return &res, nil
+		}), withWindowDays(10), withNow(now))
+		fm.walkForTest(t, "UC1")
+		if !slices.Equal(probed, []string{"c1"}) {
+			t.Fatalf("probed %v, want [c1] — the pending row behind the exhausted source skipped", probed)
+		}
+	})
+	t.Run("read for the source's order", func(t *testing.T) {
+		db := newTestDB(t)
+		seedRecheck(t, db, "UC1", "p1", now.Add(-24*time.Hour), "started", "videos", now.Add(time.Hour), 1)
+		seedCoarseLump(t, db, "UC1", now, "videos", "c1")
+		fm := newTestFeedMonitor(t, db, withProbe(func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+			if videoID == "c1" {
+				return &VideoProbeResult{StreamStatus: "vod", PublishedAt: date(12 * time.Hour), PublishedPrecision: "day"}, nil
+			}
+			res := weakEnd()
+			res.PublishedAt, res.PublishedPrecision = date(24*time.Hour), "started"
+			return &res, nil
+		}), withWindowDays(10), withNow(now))
+		rec := &warnRecordingLogger{}
+		fm.logger = rec
+		fm.walkForTest(t, "UC1")
+		if !slices.Contains(rec.warnings, "listing order violated; early exit disabled") {
+			t.Fatalf("warnings %v: the coarse row probed newer than the pending one before it, want the ordering warning", rec.warnings)
+		}
+	})
 }

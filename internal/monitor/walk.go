@@ -28,19 +28,49 @@ type walkState struct {
 // is no coarse bucket to bound.
 func dateOrdered(source string) bool { return source != "rss" }
 
-// walk is the WALK step (spec §8): a SERIAL probe pass over scope (Q1 ∪ Q2,
-// in Q1's order — concurrent probes would already be in flight past a
+// recheckDue reports whether row's end re-check has come due by now, the
+// cycle's instant as RFC3339 UTC (the form RecheckAt is written in, so the
+// strings order as the instants do). A due row is probed with the end check
+// wherever its date is (FeedScope's Q3).
+func recheckDue(row database.FeedItem, now string) bool {
+	return row.RecheckAt != "" && row.RecheckAt <= now
+}
+
+// recheckPending reports whether row's end re-check is scheduled and not yet
+// due. A pending row is in scope wherever its arm puts it, like any row —
+// the restart carve-out probes a vod one every cycle — but no probe before
+// the re-check makes the end check, and none moves its schedule.
+func recheckPending(row database.FeedItem, now string) bool {
+	return row.RecheckAt > now
+}
+
+// endCheckFor is the end check a probe of row may make (ProbeClassifyParams.
+// ConfirmEnd), judged against now, the cycle's instant. A row whose re-check
+// is pending gets none: the backoff decides when it is asked again, and a
+// probe on any other rule before then (the restart carve-out, the
+// unresolved arm) asking it every cycle was the cost the backoff exists to
+// bound. Every other row gets fm.ConfirmEnd, a due re-check included.
+func (fm *FeedMonitor) endCheckFor(row database.FeedItem, now time.Time) ConfirmEndFunc {
+	if recheckPending(row, now.UTC().Format(time.RFC3339)) {
+		return withheldEndCheck
+	}
+	return fm.ConfirmEnd
+}
+
+// walk is the WALK step (spec §8): a SERIAL probe pass over scope (Q1 ∪ Q2
+// ∪ Q3, in Q1's order — concurrent probes would already be in flight past a
 // window boundary before it's known). For each row it applies the probe
 // gates in order — HasActiveJob, term-match, the membership cookie gate,
 // then the status rule (probe unknown/upcoming/live; vod only via the
-// restart carve-out; not_a_stream never) — and, for date-ordered sources,
-// infers when the rest of that source must be older than the window and
-// stops probing it early.
+// restart carve-out or a due end re-check; not_a_stream never) — and, for
+// date-ordered sources, infers when the rest of that source must be older
+// than the window and stops probing it early.
 //
 // Returns the FRESH set — rows a probe actually ran against this pass —
 // keyed by video ID, for the ARCHIVE step to disposition without
 // re-probing. now is the cycle's one instant (§7), which an unconfirmed
-// end's re-check is scheduled from (applyProbe).
+// end's re-check is judged against and scheduled from (recheckDue,
+// applyProbe).
 func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID, cutoff string, now time.Time, scope []database.FeedItem) map[string]ProbeClassifyResult {
 	fresh := map[string]ProbeClassifyResult{}
 	st := walkState{exhausted: map[string]bool{}, lastDate: map[string]time.Time{}, noExit: map[string]bool{}}
@@ -49,6 +79,7 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 	// production failure invisible for hours. The summary is the walk's
 	// heartbeat: it must appear once per channel per cycle, whatever happened.
 	var skipped, probed, applied, denied, errored, cooldown, dateFetchFailed int
+	nowStr := now.UTC().Format(time.RFC3339)
 
 	for _, row := range scope {
 		if ctx.Err() != nil {
@@ -66,14 +97,16 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 		// takes effect next cycle — otherwise a row could exhaust a source it
 		// was not in when the list was built.
 		src := row.Source
+		due := recheckDue(row, nowStr)
 
-		if st.exhausted[src] && row.Status != "upcoming" && row.Status != "live" && row.DatePrecision != "assumed" && row.RecheckAt == "" {
+		if st.exhausted[src] && row.Status != "upcoming" && row.Status != "live" && row.DatePrecision != "assumed" && !due {
 			// The exemptions are not optional: Q2 carries upcoming/live and
 			// assumed rows unconditionally, and their published is an insert
 			// or sighting instant, not a listing position — "everything
 			// behind the boundary is older" says nothing about them. Nor
 			// about a row whose end re-check is due: Q3 carries it because
-			// the backoff ran out, wherever its date is.
+			// the backoff ran out, wherever its date is. One still pending
+			// is where its arm put it, like any other row.
 			skipped++
 			continue
 		}
@@ -99,15 +132,22 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 		case "unknown", "upcoming", "live":
 			// probe below
 		case "vod":
-			if row.RecheckAt != "" {
-				// An unconfirmed end whose re-check is due — FeedScope keeps
-				// one still pending out of scope. The one other way back for
-				// a vod row: it was stored ended on weak signals nobody
-				// confirmed, so it is probed again (probeAndClassify's
-				// confirmEnd), and a probe that finds it live or upcoming
+			if due {
+				// An unconfirmed end whose re-check is due. The other way
+				// back for a vod row: it was stored ended on weak signals
+				// nobody confirmed, so it is probed again, with the end check
+				// (endCheckFor), and a probe that finds it live or upcoming
 				// takes it up as a newly found broadcast.
 				break
 			}
+			// The restart carve-out, whether or not a re-check is pending:
+			// the backoff only ever adds probes. A pending re-check that
+			// took the row out of scope left a stream that resumed on the
+			// same ID unfound for an hour, then six, then a day, when the
+			// carve-out would have found it on the next cycle. A pending
+			// row's probe is made without the end check (endCheckFor): it
+			// looks for a restart, which the status probe reads live or
+			// upcoming, and the backoff decides when the end is asked again.
 			hasJob, err := fm.db.HasAnyJob(row.VideoID)
 			if err != nil || hasJob || row.DatePrecision != "started" {
 				skipped++
@@ -119,7 +159,7 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 		}
 
 		probed++
-		res, ok := fm.probeRowDated(ctx, ch, chID, row, cutoff)
+		res, ok := fm.probeRowDated(ctx, ch, chID, row, cutoff, now)
 		if !ok {
 			// The date fetch failed (transport error): a transient fault, not
 			// a classification. Nothing written, not FRESH, never exhausts —
@@ -139,7 +179,7 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 			applied++
 			fm.applyProbe(chID, row, res, now) // normalization + terminal invariant + re-check, below
 			fresh[row.VideoID] = res
-			if res.PublishedAt != "" && row.RecheckAt == "" {
+			if res.PublishedAt != "" && !due {
 				// A due re-check is not at a listing position either (the
 				// skip above): its date says nothing about the order of the
 				// rows around it, so it neither trips the ordering check nor
@@ -210,13 +250,18 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 // 'exact' on the ladder, and a settled vod became the restart carve-out's
 // shape (vod, started, no job), probed every cycle for the whole window.
 //
+// The probe is given the end check the row's state calls for (endCheckFor,
+// against now, the cycle's instant): none for a row whose re-check is still
+// pending, whose weak end stays unconfirmed for applyProbe to leave the
+// schedule as it stands.
+//
 // ok=false means the date fetch itself FAILED (transport error): callers
 // treat the row like an errored probe — no write, no FRESH, no exhaustion,
 // retried next cycle. A fetch that succeeds but finds no date (YouTube has
 // none) returns ok=true with the result still dateless: applyProbe's
 // invariant and the archive's row-date fallback handle that honestly.
-func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem, cutoff string) (ProbeClassifyResult, bool) {
-	res := fm.probeRow(ctx, ch, chID, row)
+func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem, cutoff string, now time.Time) (ProbeClassifyResult, bool) {
+	res := fm.probeRow(ctx, ch, chID, row, fm.endCheckFor(row, now))
 	if res.Outcome != OutcomeProbed || res.PublishedAt != "" {
 		return res, true
 	}
@@ -260,7 +305,10 @@ func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConf
 // discovered via RSS must not wait a poll interval to be admitted.
 // login_required does neither: on public videos it is anti-bot pushback,
 // not a membership signal (§9).
-func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem) ProbeClassifyResult {
+//
+// confirm is the end check this probe may make (endCheckFor), passed on to
+// both probes when the refusal escalates.
+func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem, confirm ConfirmEndFunc) ProbeClassifyResult {
 	probe := fm.ProbeVideo
 	if row.Source == "membership" && fm.ProbeVideoAuth != nil {
 		probe = fm.ProbeVideoAuth
@@ -272,7 +320,7 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 		ProbeVideo: probe,
 		Tracker:    fm.MetadataTracker,
 		Cooldown:   fm.ProbeCooldown,
-		ConfirmEnd: fm.ConfirmEnd,
+		ConfirmEnd: confirm,
 		Logger:     fm.logger,
 	})
 	if res.PlayabilityError != "members_only" {
@@ -296,7 +344,7 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 			ProbeVideo: fm.ProbeVideoAuth,
 			Tracker:    fm.MetadataTracker,
 			Cooldown:   nil,
-			ConfirmEnd: fm.ConfirmEnd,
+			ConfirmEnd: confirm,
 			Logger:     fm.logger,
 		})
 	}
@@ -320,6 +368,10 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 // keeps an archived stream from being announced again — with its re-check
 // scheduled in the same write, endRecheckDelay after now: an hour after the
 // first, then six, then daily (row.RecheckStep counts the ones before).
+// On a row whose re-check is still pending the schedule stands instead:
+// that probe was not the re-check (the restart carve-out, or the unresolved
+// arm, probing it on their own rules, without the end check — endCheckFor),
+// so it neither advances the backoff nor restarts it.
 // Every other classification clears a pending one, so the re-check ends the
 // moment a probe settles the row: a confirmed end is a vod like any other,
 // and a broadcast found live or upcoming is carried by its status.
@@ -333,7 +385,10 @@ func (fm *FeedMonitor) applyProbe(chID string, row database.FeedItem, r ProbeCla
 		status = "unknown"
 	}
 	var recheck database.FeedRecheck
-	if r.EndUnconfirmed {
+	switch {
+	case r.EndUnconfirmed && recheckPending(row, now.UTC().Format(time.RFC3339)):
+		recheck = database.FeedRecheck{At: row.RecheckAt, Step: row.RecheckStep}
+	case r.EndUnconfirmed:
 		recheck = database.FeedRecheck{
 			At:   now.Add(endRecheckDelay(row.RecheckStep)).UTC().Format(time.RFC3339),
 			Step: row.RecheckStep + 1,

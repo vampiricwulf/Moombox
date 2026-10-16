@@ -73,6 +73,17 @@ type ConfirmEndFunc func(ctx context.Context, videoID string) (EndCheck, error)
 // settle nothing.
 var ErrEndCheckUnavailable = errors.New("no signed-in YouTube session for the end check")
 
+// errEndCheckWithheld is withheldEndCheck's answer: the probe was not given
+// the end check (the feed's endCheckFor), so a weak end it reads stays
+// unconfirmed, and the re-check already pending on its row stands.
+var errEndCheckWithheld = errors.New("the end check is not this probe's to make")
+
+// withheldEndCheck is the ConfirmEndFunc of a probe that may not make the
+// end check (endCheckFor).
+func withheldEndCheck(context.Context, string) (EndCheck, error) {
+	return EndCheck{}, errEndCheckWithheld
+}
+
 // endRecheckBackoff is how long a broadcast whose end rests on weak signals
 // the end check could not settle waits before it is probed again: an hour,
 // then six, then daily for as long as it stays unsettled. Not every cycle:
@@ -597,6 +608,9 @@ func confirmEnd(ctx context.Context, p ProbeClassifyParams, r *ProbeClassifyResu
 		return
 	}
 	r.EndUnconfirmed = true
+	if errors.Is(err, errEndCheckWithheld) {
+		return // the row's pending re-check stands (endCheckFor); nothing is re-checked on this probe's account
+	}
 	reason := "the WEB answer settles nothing"
 	if err != nil {
 		reason = err.Error()

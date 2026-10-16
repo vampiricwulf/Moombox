@@ -492,16 +492,18 @@ func idsOf(items []FeedItem) map[string]bool {
 	return out
 }
 
-// An unconfirmed broadcast end's re-check (FeedItem.RecheckAt) decides when
-// its row is in scope, and nothing else does: pending, the row is out of
-// every arm — the in-window Q1 row, the unresolved Q2 row — and due, Q3
-// carries it wherever its date is. The membership toggle reaches Q3 like the
-// other arms.
+// An unconfirmed broadcast end's re-check (FeedItem.RecheckAt) only ever
+// adds a row to scope: due, Q3 carries it wherever its date is; pending, it
+// is in Q1 or Q2 exactly where any row would be — the in-window row, the
+// unresolved assumed row — and out of scope where any row would be (the
+// vod outside the window). The membership toggle reaches Q3 like the other
+// arms.
 //
-// Mutants: the pending filter dropped from Q1 (the in-window pending row in
-// scope) or from Q2 (the assumed pending row in scope); Q3 dropped (the due
-// rows outside the window missing); Q3 without its due bound (the pending
-// row outside the window in scope); Q3 ignoring the membership toggle.
+// Mutants: a pending row kept out of Q1, as 69342f6b did (the in-window
+// pending row missing — the restart carve-out never sees it), or out of Q2
+// (the assumed pending row missing); Q3 dropped (the due rows outside the
+// window missing); Q3 without its due bound (the pending row outside the
+// window in scope); Q3 ignoring the membership toggle.
 func TestFeedScope_TheEndRecheckDecidesScope(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
@@ -522,7 +524,7 @@ func TestFeedScope_TheEndRecheckDecidesScope(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	add("inWindowPending", recent, "exact", "rss", "vod", pending)
+	add("inWindowPending", recent, "started", "rss", "vod", pending)
 	add("assumedPending", old, "assumed", "rss", "unknown", pending)
 	add("oldPending", old, "exact", "rss", "vod", pending)
 	add("oldDue", old, "exact", "rss", "vod", due)
@@ -540,9 +542,14 @@ func TestFeedScope_TheEndRecheckDecidesScope(t *testing.T) {
 			t.Errorf("scope missing the due re-check %q", want)
 		}
 	}
-	for _, not := range []string{"inWindowPending", "assumedPending", "oldPending", "settled"} {
+	for _, want := range []string{"inWindowPending", "assumedPending"} {
+		if !ids[want] {
+			t.Errorf("scope missing %q: a pending re-check must not take a row out of the arm that carries it", want)
+		}
+	}
+	for _, not := range []string{"oldPending", "settled"} {
 		if ids[not] {
-			t.Errorf("%q is in scope: a pending re-check and a settled out-of-window vod must not be", not)
+			t.Errorf("%q is in scope: an out-of-window vod is in no arm until its re-check is due", not)
 		}
 	}
 	for _, it := range got {

@@ -3,7 +3,6 @@ package database
 import (
 	"database/sql"
 	"fmt"
-	"slices"
 )
 
 type FeedItem struct {
@@ -12,13 +11,14 @@ type FeedItem struct {
 	CatalogPos                int
 	Source, Status            string
 	FirstSeen                 string
-	// RecheckAt is when the row is next probed after a broadcast end that
-	// rests on weak signals the end check could not confirm (RFC3339 UTC; ""
-	// = none pending). The row is stored ended (vod) for announcing, and
-	// FeedScope keeps it out of scope until this instant, then in scope
-	// wherever its date is — the one way back for a vod row (spec §8).
-	// RecheckStep counts the re-checks scheduled so far, which picks the next
-	// backoff. Written by ApplyProbeToFeedItem only.
+	// RecheckAt is when the row is next probed with the end check after a
+	// broadcast end that rests on weak signals the end check could not
+	// confirm (RFC3339 UTC; "" = none pending). The row is stored ended (vod)
+	// for announcing; until this instant it is in scope only where its arm
+	// puts it, like any row, and from it FeedScope's Q3 carries it wherever
+	// its date is — the way back for a vod row besides the restart carve-out
+	// (spec §8). RecheckStep counts the re-checks scheduled so far, which
+	// picks the next backoff. Written by ApplyProbeToFeedItem only.
 	RecheckAt   string
 	RecheckStep int
 }
@@ -169,10 +169,15 @@ func feedScopeQ3SQL(includeMembership bool) string {
 // membershipActive() (cookie state must not move scope).
 //
 // now is the cycle's instant, against which the end re-check is judged
-// (FeedItem.RecheckAt). A row whose re-check is still pending is out of
-// scope whichever arm would carry it: it was probed, its end could not be
-// confirmed, and the backoff is the only thing that decides when it is
-// probed again. Q3 brings it back once due, wherever its date is.
+// (FeedItem.RecheckAt): Q3 carries a row once its re-check is due, wherever
+// its date is. A row whose re-check is still pending is in Q1 or Q2 exactly
+// as any other row would be. The backoff only ever adds a row to scope,
+// never takes one out: keeping a pending row out of every arm suspended the
+// restart carve-out (§8), which probes an in-window vod+started row with no
+// job every cycle, so a stream that resumed on the same video ID went
+// unfound for an hour, then six, then a day. What the walk and the archive
+// do with a pending row — no end check, no refresh probe, no job — is
+// theirs to decide (monitor's endCheckFor and archive).
 func (db *Database) FeedScope(channelID, cutoff, now string, includeMembership bool) ([]FeedItem, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -206,16 +211,11 @@ func (db *Database) FeedScope(channelID, cutoff, now string, includeMembership b
 	if err != nil {
 		return nil, err
 	}
-	pending := func(it FeedItem) bool { return it.RecheckAt != "" && it.RecheckAt > now }
 	seen := make(map[string]bool, len(q1))
-	q1 = slices.DeleteFunc(q1, pending)
 	for _, it := range q1 {
 		seen[it.VideoID] = true
 	}
 	for _, it := range q2 {
-		if pending(it) {
-			continue
-		}
 		// unresolved arm (§7): an unknown row qualifies at 'assumed' precision —
 		// its published is a sighting instant, not a date — or when RSS first
 		// listed it inside the window. An RSS <published> is the ANNOUNCEMENT
