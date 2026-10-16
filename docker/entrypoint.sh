@@ -22,10 +22,13 @@
 # is a file no save touches. It is written when missing and refreshed when
 # this image's text differs from it, because the text describes the image:
 # a copy frozen at the first install's text would keep an older image's
-# advice forever. But only while it is still the text an entrypoint wrote,
-# which the checksum in .README-docker.txt.sha256 beside it records: a copy
-# the operator edited is never overwritten — this image's text goes to
-# README-docker.txt.new beside it instead, and the log says so.
+# advice forever. But only while it still holds, word for word, a text an
+# entrypoint wrote — to it or beside it as README-docker.txt.new — which
+# the checksums in .README-docker.txt.sha256 beside it record, one for
+# every such text: a copy the operator edited is never overwritten. A text
+# not given before goes to README-docker.txt.new beside it instead, and the
+# log says so; a .new the operator moved over the copy is an entrypoint's
+# text, so the next image refreshes it.
 #
 # An existing config.toml is never modified — change settings there or via
 # the dashboard's Settings page as usual.
@@ -51,9 +54,11 @@ every setting with its value, which drops anything else in the file,
 and it saves it often: on its first start, when it records the version
 that ran; after each update; and whenever a setting or a channel is
 changed from the dashboard or the TUI. This file is never saved over. A
-newer image refreshes it only while it is still the text an image
-wrote; once you edit it, your copy is kept and the image puts its own
-text in README-docker.txt.new beside it.
+newer image refreshes it only while it still holds an image's text word
+for word. Once you edit it, your copy is kept, and an image whose text
+is new puts it in README-docker.txt.new beside it instead, once: move
+that over your copy to take it (later images then refresh the file
+again), or delete it to keep your own.
 
 Every setting, with its default and an explanation:
 https://github.com/vampiricwulf/Moombox/blob/main/config.example.toml
@@ -167,6 +172,17 @@ sha256_of() {
     sha256sum | cut -d ' ' -f 1
 }
 
+# known_guidance reports whether the text with checksum $1 is one an
+# entrypoint wrote, to README-docker.txt or beside it as .new.
+known_guidance() {
+    grep -qxF "$1" "$GUIDE_STAMP" 2>/dev/null
+}
+
+# remember_guidance records the checksum $1 among those texts, once.
+remember_guidance() {
+    known_guidance "$1" || printf '%s\n' "$1" >> "$GUIDE_STAMP"
+}
+
 # write_guidance keeps README-docker.txt current without overwriting an
 # operator's edits. Every step checks for itself: it runs on the left of
 # an || below, where set -e does not apply, and a failure must only be
@@ -179,26 +195,24 @@ write_guidance() {
     fi
     if [ -f "$GUIDE_PATH" ]; then
         have=$(sha256_of < "$GUIDE_PATH") || return 1
-        wrote=$(cat "$GUIDE_STAMP" 2>/dev/null || true)
         if [ "$have" = "$want" ]; then
             # Current already. Record it as this image's text, which it is
-            # (a README-docker.txt.new moved over it, say), so the next
-            # image may refresh it.
-            if [ "$wrote" != "$want" ]; then
-                printf '%s\n' "$want" > "$GUIDE_STAMP" || return 1
-            fi
+            # whoever put it there, so the next image may refresh it.
+            remember_guidance "$want" || return 1
             rm -f "$GUIDE_PATH.new"
             return 0
         fi
-        if [ "$have" != "$wrote" ]; then
-            # Not the text an entrypoint last wrote: the operator's. Keep it,
-            # and say where this image's text is — once per text, not on
-            # every start.
-            if [ -f "$GUIDE_PATH.new" ] &&
-                [ "$(sha256_of < "$GUIDE_PATH.new")" = "$want" ]; then
+        if ! known_guidance "$have"; then
+            # Not a text an entrypoint wrote: the operator's. Keep it, and
+            # say where this image's text is — once per text. A text
+            # already given is not given again: a .new the operator
+            # deleted stays deleted, and an edit of this image's own text
+            # has nothing new to put beside it.
+            if known_guidance "$want"; then
                 return 0
             fi
             docker_guidance > "$GUIDE_PATH.new" || return 1
+            remember_guidance "$want" || return 1
             echo "[moombox-entrypoint] $GUIDE_PATH has local edits, so it was kept; this image's guidance is in $GUIDE_PATH.new"
             return 0
         fi
@@ -210,7 +224,7 @@ write_guidance() {
     # none, never half of one.
     docker_guidance > "$GUIDE_PATH.tmp" || return 1
     mv -f "$GUIDE_PATH.tmp" "$GUIDE_PATH" || return 1
-    printf '%s\n' "$want" > "$GUIDE_STAMP" || return 1
+    remember_guidance "$want" || return 1
     rm -f "$GUIDE_PATH.new"
 }
 

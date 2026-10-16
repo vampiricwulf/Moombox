@@ -126,8 +126,9 @@ save rewrites it without them — and the first start saves it (to record
 the version that ran), as does every update and every change from the
 dashboard or the TUI. Keep notes in `README-docker.txt` instead: a newer
 image refreshes that file only while you have not edited it, and
-otherwise leaves your copy alone and writes its own text to
-`README-docker.txt.new` beside it.
+otherwise leaves your copy alone and writes its own text, once, to
+`README-docker.txt.new` beside it — move that over your copy to take it
+(later images then refresh the file again), or delete it to keep yours.
 
 Docker-specific behavior:
 - **Network access defaults to `"lan"`** (instead of `"localhost"`) — the
