@@ -266,9 +266,10 @@ func registryLen(r *twitchChatRegistry) int {
 // every other test in this file and to the whole package — the registry would
 // stay empty (or leak) forever while every unit test stayed green.
 //
-// The probe is a synchronous OnJobUpdate subscriber on the Muxing flip, which
-// ExecuteTwitch performs after registration and before any defer runs — no
-// polling, no timing. A pre-cancelled ctx walks the function end to end without
+// The probe is a synchronous OnJobUpdate subscriber on startChat's
+// chat_status "downloading" write, which ExecuteTwitch performs after
+// registration and before any defer runs — no polling, no timing. (It was the
+// Muxing flip, until a shutdown stopped writing Muxing: the run below is one.) A pre-cancelled ctx walks the function end to end without
 // touching the network: the notifier is nil, the thumbnail URL is empty, a nil
 // FetchVariantsFn skips the quality monitor, the download loop never runs, and
 // startChat's goroutine dials an already-dead context.
@@ -306,7 +307,7 @@ func TestExecuteTwitchRegistersTheLiveChatDownloaderForItsWholeRun(t *testing.T)
 	var duringRun atomic.Int64
 	duringRun.Store(-1)
 	unsub := db.OnJobUpdate(func(j *database.Job) {
-		if j.ID == job.ID && j.Status == database.StatusMuxing {
+		if j.ID == job.ID && j.ChatStatus == "downloading" {
 			duringRun.Store(int64(registryLen(o.twitchChats)))
 		}
 	})

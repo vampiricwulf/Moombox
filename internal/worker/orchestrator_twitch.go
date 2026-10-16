@@ -1168,9 +1168,24 @@ sessionLoop:
 	// muxAndFinalize fired AFTER all real mux work, leaving the UI on
 	// "Downloading" through ~the entire post-stream phase. Audit
 	// reports/worker.md F23 / Q4.
-	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-		"status": database.StatusMuxing,
-	})
+	//
+	// Only on the way to a finalize — the exact complement of the
+	// shutdown/user-cancel exit below. This write used to come first for
+	// every exit: an operator's Cancel of a live capture was written over
+	// with Muxing every time, and a shutdown left the row Muxing, so the
+	// restart muxed the partial capture (muxOnRestart) instead of resuming
+	// the broadcast; the row stays Downloading for that now. And only on a
+	// row with no outcome: a Cancel whose row write landed before this
+	// run's listener heard it (a slower subscriber ahead of it holds the
+	// notification chain) is refused here, and taken as the user's cancel.
+	if ctx.Err() == nil || (outageFinalize && parentCtx.Err() == nil && !userCancelled.Load()) {
+		if writeUnlessOutcome(o.db, jobCtx.Job.ID, map[string]any{
+			"status": database.StatusMuxing,
+		}) {
+			userCancelled.Store(true)
+			callCancel()
+		}
+	}
 
 	// Wait for any background segment muxes to finish
 	segmentMuxWg.Wait()
@@ -1193,6 +1208,16 @@ sessionLoop:
 					o.logger.Warn("Twitch chat downloader still running after the shutdown grace; "+
 						"its resume sidecar may be incomplete", "jobID", jobCtx.Job.ID)
 				}
+			}
+			if userCancelled.Load() {
+				// ErrCancelled as well as the context's error, so processJob
+				// takes the cancellation path even while its own ctx is still
+				// live: the run's ctx cancel comes after the Cancel's row write,
+				// and a row that holds another outcome (the Muxing write's
+				// refusal above) has no ctx cancel coming at all. Read as a
+				// failure, setJobError's write applies to any row but a
+				// Cancelled one.
+				return fmt.Errorf("%w: %w", ErrCancelled, ctx.Err())
 			}
 			return ctx.Err()
 		}
