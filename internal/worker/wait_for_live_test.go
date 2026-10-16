@@ -356,3 +356,56 @@ func TestFullFetchThatSeesTheStreamBegunEndsTheWait(t *testing.T) {
 		t.Errorf("the last tick made %s, want status, the periodic full fetch, then the live arm's confirming one:%s", got, run)
 	}
 }
+
+// endedAnswer is a broadcast that is over, as the WEB-family calls see it:
+// post_live, its schedule field carrying the ACTUAL start.
+func endedAnswer(actualStart time.Time) *youtube.VideoInfo {
+	return &youtube.VideoInfo{StreamStatus: youtube.StreamPostLive, PlayabilityError: youtube.PlayabilityOK,
+		ScheduledStartTime: actualStart.UTC().Format(time.RFC3339)}
+}
+
+// A stream the waiting loop finds already over is not announced as
+// rescheduled. Its answer carries the broadcast's actual start in the
+// schedule field, and the row takes it; but a start that differed from the
+// schedule — a stream begun five minutes late — sent "YouTube Schedule
+// Changed", Old Time the schedule and New Time the start, because !IsLive
+// was all the notice asked and a post_live or VOD answer is not live. The
+// periodic full fetch that saw the stream ended sent it, and so did the
+// go-live transition's write when the status probe saw it first. The notice
+// is for a stream still upcoming.
+//
+// Mutant: the notice gated on !IsLive alone again (both runs send one).
+func TestAnEndedStreamIsNotAnnouncedAsRescheduled(t *testing.T) {
+	const late = 5 * time.Minute
+	for _, tc := range []struct {
+		name            string
+		startIn, budget time.Duration
+		fakes           func(start time.Time) waitFakes
+	}{
+		{"the periodic full fetch sees it ended", 10 * time.Minute, 45 * time.Minute, func(start time.Time) waitFakes {
+			return waitFakes{full: func(time.Duration) (*youtube.VideoInfo, error) { return endedAnswer(start.Add(late)), nil }}
+		}},
+		{"the status probe sees it ended", 10 * time.Minute, 10 * time.Minute, func(start time.Time) waitFakes {
+			return waitFakes{
+				status: func(time.Duration) (*youtube.VideoInfo, error) {
+					return &youtube.VideoInfo{StreamStatus: youtube.StreamPostLive, PlayabilityError: youtube.PlayabilityOK}, nil
+				},
+				full: func(time.Duration) (*youtube.VideoInfo, error) { return endedAnswer(start.Add(late)), nil },
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := driveWaitForLive(t, tc.startIn, tc.budget, tc.fakes)
+			if run.returned < 0 || run.result == nil || !run.result.ShouldDownload || !run.result.IsVod {
+				t.Fatalf("the wait ended with %+v at %v, want the ended stream downloaded:%s", run.result, run.returned, run)
+			}
+			actual := run.start.Add(late).Format(time.RFC3339)
+			if !sameInstant(run.row.StreamStartTime, actual) {
+				t.Errorf("row start = %q, want the broadcast's actual start %q", run.row.StreamStartTime, actual)
+			}
+			if got := run.rec.ByEvent("rescheduled"); len(got) != 0 {
+				t.Errorf("an ended stream was announced as rescheduled: %+v", got)
+			}
+		})
+	}
+}

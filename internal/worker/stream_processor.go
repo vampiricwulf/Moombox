@@ -699,10 +699,15 @@ func (sp *StreamProcessor) applyJobMetadata(job *database.Job, info *youtube.Vid
 			if !sameInstant(info.ScheduledStartTime, job.StreamStartTime) {
 				if job.StreamStartTime == "" {
 					notifyStartTimeConfirmed = true
-				} else if !info.IsLive {
-					// Only notify schedule change for genuine reschedules (upcoming).
-					// When a stream goes live, YouTube updates the scheduled time to the
-					// actual start — that's not a reschedule, and Download Starting covers it.
+				} else if info.IsUpcoming && !info.IsLive {
+					// Only notify schedule change for genuine reschedules: a
+					// stream still upcoming, as the confirmation below asks.
+					// Once a stream has begun YouTube puts its ACTUAL start in
+					// the same field — that's not a reschedule, and Download
+					// Starting covers it. !IsLive alone let through a stream
+					// already over (post_live, VOD): the waiting loop's
+					// periodic full fetch, or the go-live transition, that
+					// found it ended announced its actual start as a new time.
 					notifyScheduleChanged = true
 					oldStartTime = job.StreamStartTime
 				}
