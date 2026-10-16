@@ -21,7 +21,14 @@ import (
 // whole-file adaptive URL, and returns the server.
 func serveWholeFile(t *testing.T, body []byte) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(wholeFileHandler(body))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// wholeFileHandler is serveWholeFile's handler, for a test that wraps it.
+func wholeFileHandler(body []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		var s, e int64
 		fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &s, &e)
 		if e <= 0 || e >= int64(len(body)) {
@@ -31,9 +38,7 @@ func serveWholeFile(t *testing.T, body []byte) *httptest.Server {
 		w.Header().Set("Content-Length", strconv.FormatInt(e-s+1, 10))
 		w.WriteHeader(http.StatusPartialContent)
 		w.Write(body[s : e+1])
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+	}
 }
 
 // serveMuxFixture renders seconds of video with writeMuxFixture and serves it

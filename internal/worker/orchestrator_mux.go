@@ -884,9 +884,9 @@ func (o *DownloadOrchestrator) recoverAsides(ctx context.Context, jobCtx *JobCon
 // before the branch now; owner ruling keeps `muxing` as its own event rather
 // than folding it into `finished`.
 //
-// The job is re-read rather than taken from the status write that follows,
-// because the two finalize shapes write that status in different places and
-// none of the fields below depends on it.
+// The job is re-read rather than taken from the status write that comes
+// before it, because that write is a conditional one that returns no row,
+// and none of the fields below depends on it.
 func (o *DownloadOrchestrator) sendMuxingStarting(jobCtx *JobContext) {
 	if o.notifier == nil {
 		return
@@ -972,6 +972,19 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// No-op when the job has no seg_N staging dirs.
 	o.muxUnrecordedSegments(ctx, jobCtx)
 
+	// The finalize's Muxing write, for both shapes, ahead of the
+	// announcement. Every caller — the orchestrators, MuxJob — wrote Muxing
+	// already, decided on a status read earlier, so this applies only to a
+	// row with no outcome: an operator's Cancel that landed since, before
+	// the caller's listener heard it, was written over and the mux ran on,
+	// announced. A refusal stops the finalize with nothing muxed and
+	// staging kept.
+	if writeUnlessOutcome(o.db, jobCtx.Job.ID, map[string]any{
+		"status": database.StatusMuxing,
+	}) {
+		return ErrCancelled
+	}
+
 	// A7: announce the mux BEFORE the shape is chosen. The branch below
 	// returns into finalizeMultiSegmentJob, which never reached the inline
 	// send this replaces.
@@ -997,10 +1010,6 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	} else if len(segments) > 0 {
 		return o.finalizeMultiSegmentJob(ctx, jobCtx, segments)
 	}
-
-	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-		"status": database.StatusMuxing,
-	})
 
 	// Resolve output path — template may contain subdirectory (e.g. "${channel}/...")
 	filenameBase := jobCtx.Filename
@@ -1171,15 +1180,12 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 		}
 	}()
 
-	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-		"status": database.StatusMuxing,
-	})
-
 	// Tier 4: opportunistically collapse contiguous same-format parts into
 	// one file BEFORE anything below decides the finalize shape, so a
 	// fully-merged job takes the plain output name (the len==1 check just
 	// below) exactly like a never-split job. Runs under the Muxing status
-	// set just above rather than the stale pre-finalize status, since a
+	// both callers (muxAndFinalize, muxFromStaging) write before they
+	// announce the mux, rather than the stale pre-finalize status, since a
 	// multi-run concat can take a while.
 	//
 	// YouTube-only gate. Twitch gap-split parts are NOT eligible, for three
@@ -1811,7 +1817,14 @@ func (o *DownloadOrchestrator) muxFromStaging(ctx context.Context, jobCtx *JobCo
 		if segments, err := o.db.GetSegments(jobCtx.Job.ID); err == nil && len(segments) > 0 {
 			// The off-queue mux verb on a post-split job: it reaches
 			// finalizeMultiSegmentJob without passing through muxAndFinalize,
-			// so it needs its own announcement. A manual mux is a mux.
+			// so it needs its own Muxing write and announcement — the write
+			// on a row with no outcome only, as muxAndFinalize's. A manual
+			// mux is a mux.
+			if writeUnlessOutcome(o.db, jobCtx.Job.ID, map[string]any{
+				"status": database.StatusMuxing,
+			}) {
+				return ErrCancelled
+			}
 			o.sendMuxingStarting(jobCtx)
 			return o.finalizeMultiSegmentJob(ctx, jobCtx, segments)
 		}

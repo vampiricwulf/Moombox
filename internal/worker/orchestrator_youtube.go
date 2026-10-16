@@ -795,9 +795,17 @@ streamEnded:
 	// muxAndFinalize fired AFTER all real mux work, leaving the UI on
 	// "Downloading" through ~the entire post-stream phase. Audit
 	// reports/worker.md F23 / Q4.
-	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+	//
+	// On a row with no outcome only: an operator's Cancel whose row write
+	// landed before this run's listener heard it (a slower subscriber ahead
+	// of it holds the notification chain) was written over, and the final
+	// part muxed. A refusal stops here, the final part left in staging; the
+	// deferred Wait still lets the background part muxes land.
+	if writeUnlessOutcome(o.db, jobCtx.Job.ID, map[string]any{
 		"status": database.StatusMuxing,
-	})
+	}) {
+		return result, waitedForResume.value(), ErrCancelled
+	}
 
 	// Wait for background segment muxes to finish before final mux —
 	// their DB records must exist before muxAndFinalize calls GetSegments.

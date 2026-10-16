@@ -2631,6 +2631,15 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 		defer w.queue.ReleaseDownloadSlot(jobID)
 
 		if err := w.orchestrator.muxFromStaging(ctx, jobCtx); err != nil {
+			if errors.Is(err, ErrCancelled) {
+				// The finalize's Muxing write found an outcome on the row —
+				// an operator's Cancel this listener has yet to hear, or
+				// another outcome no cancel follows — and nothing was muxed.
+				// It stands: read as a failure, the Error write below landed
+				// on it, whatever this mux's ctx said.
+				w.logger.Info("MuxJob: the row already holds an outcome; nothing muxed, staging is kept", "jobID", jobID)
+				return
+			}
 			if ctx.Err() != nil && root.Err() == nil {
 				// Cancelled (or deleted) by the operator; staging stays for a
 				// later Mux or Resume. The row says Cancelled unless the mux's

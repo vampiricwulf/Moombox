@@ -534,11 +534,19 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			// the complete one aside). As Muxing, enqueueExistingJobs re-muxes
 			// it from staging (muxOnRestart) — or, for an incomplete tail,
 			// still sends it back through the refresh loop.
-			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+			//
+			// On a row with no outcome only: an operator's Cancel whose row
+			// write landed before this run's listener heard it (a slower
+			// subscriber ahead of it holds the notification chain) was
+			// written over, and the finalize ran on. A refusal stops the run
+			// as a cancelled one, the complete download kept in staging.
+			if writeUnlessOutcome(o.db, jobCtx.Job.ID, map[string]any{
 				"status":   database.StatusMuxing,
 				"progress": progressStr,
 				"percent":  percent,
-			})
+			}) {
+				err = ErrCancelled
+			}
 		}
 	} else {
 		// Live: run with stream-end verification (A2). runLiveStreamDownload
@@ -580,13 +588,26 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			// downloaded it again from the start. As Muxing,
 			// enqueueExistingJobs re-muxes it from staging (muxOnRestart) — or,
 			// for an incomplete tail, sends it back through the refresh loop.
-			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+			// On a row with no outcome only, as the VOD branch's.
+			if writeUnlessOutcome(o.db, jobCtx.Job.ID, map[string]any{
 				"status": database.StatusMuxing,
-			})
+			}) {
+				err = ErrCancelled
+			}
 		}
 	}
 
 	if err != nil {
+		if errors.Is(err, ErrCancelled) {
+			// A Muxing write — above, or at the live loop's stream end —
+			// found an outcome on the row. ErrCancelled whatever ctx says by
+			// now: the write after the Cancel's (a progress tick) carries the
+			// Cancelled row to the listener, which cancels ctx, and processJob
+			// read the context's error as a failure. Nothing is muxed;
+			// staging stays for a later Mux or Resume, as on a cancel.
+			o.cleanup(chatDl, chatDone)
+			return ErrCancelled
+		}
 		if ctx.Err() != nil {
 			// Shutdown: stop chat but preserve staging dir for resume.
 			// cleanup IS this arm's old inline body — Stop, then the bounded
