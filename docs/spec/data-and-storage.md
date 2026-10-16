@@ -211,9 +211,9 @@ Every registration method returns an unsubscribe function. Each subscriber slice
 | download_started_at | TEXT | NULL | RFC3339 |
 | thumbnail_url | TEXT | NULL | |
 | description | TEXT | NULL | |
-| output_file | TEXT | NULL | Absolute path to final output file |
+| output_file | TEXT | NULL | Path to the final output file, as written: under the job's directory, so relative to the working directory under a relative one (see `output_directory` below) |
 | filename | TEXT | NULL | The archive's path relative to the job's output directory (`output_directory` when set, else the global one), the template's subdirectories included; for a job that finalized as parts, the base the parts share, without an extension. The player, the chat route and Open Folder join it to that directory, and so does the orphan sweep — to the current global directory as well (`rowRelativeLocations`, `internal/worker/orphans.go`), which still finds a single-file archive after the archive tree is moved and `paths.output_directory` repointed. A split job's base names no file: its parts are found through their segment rows, re-rooted the same way (`output_directory` below) |
-| output_directory | TEXT | NULL | The job's own output directory: a per-channel or per-job override, or the global one as it stood at creation, which the monitor and an import store when the channel has none of its own. `filename` and `chat_filename` are relative to it. The absolute columns that lie under it — `output_file`, `chat_file`, `thumbnail_file`, `description_file`, and each part's `file_path` and `chat_file` — name it in their own spelling, so after the archive tree is moved and `paths.output_directory` repointed the orphan sweep finds each of them under the current global directory as well (`rowAbsoluteLocations`, `internal/worker/orphans.go`); a column outside it is found only as stored |
+| output_directory | TEXT | NULL | The job's own output directory: a per-channel or per-job override, or the global one as it stood at creation, which the monitor and an import store when the channel has none of its own. `filename` and `chat_filename` are relative to it. The path columns that lie under it — `output_file`, `chat_file`, `thumbnail_file`, `description_file`, and each part's `file_path` and `chat_file` — are the path as written, this directory joined with the file's name in its own spelling: relative to the working directory when the directory is relative (`paths.output_directory`'s default `./output`, which a job with no directory of its own gets, `internal/worker/worker.go`), absolute when it is absolute; an import's are absolute (`filepath.Abs`, `internal/web/routes/import_routes.go`). A path handed to a program that resolves names against another directory is made absolute first — the part merge's concat list, which FFmpeg reads against its own temp directory (`concatIntermediates`, `internal/engine/muxer_trim.go`). Because each names the directory in its own spelling, the orphan sweep finds it under the current global directory as well after the archive tree is moved and `paths.output_directory` repointed (`rowAbsoluteLocations`, `internal/worker/orphans.go`); a column outside it is found only as stored |
 | video_width | INTEGER | NULL | Pixels |
 | video_height | INTEGER | NULL | Pixels |
 | video_fps | INTEGER | NULL | |
@@ -221,9 +221,9 @@ Every registration method returns an unsubscribe function. Each subscriber slice
 | chat_status | TEXT | NULL | `pending` / `downloading` / `finished` / `unavailable` / `incomplete`; the terminal value comes from the downloader's OUTCOME (`chatStatusForOutcome`, `internal/worker/orchestrator_chat.go`), not its message count — `incomplete` means the capture stopped short, or that finalize could not copy it beside the archive (`copyAssets`, `internal/worker/orchestrator_mux.go`): either way the archive lacks a whole chat, and the value is what makes the staging cleanup keep the capture rather than delete it. A part whose chat cannot be copied is not recorded at all, so its `seg_N` stays unmuxed and shielded until a retry. `pending` until the capture actually starts (both platforms; a Twitch VOD's download-slot wait included), then `downloading`. A user cancel settles a still-running value (`cancelledChatStatus`, `internal/worker/worker.go`): `downloading` becomes `incomplete` and `pending` is cleared; a shutdown leaves it for the capture to resume |
 | total_chat_messages | INTEGER | NULL | |
 | chat_filename | TEXT | NULL | The chat archive's path relative to the job's output directory, resolved as `filename` is |
-| chat_file | TEXT | NULL | Absolute path (added v2) |
-| thumbnail_file | TEXT | NULL | Absolute path (added v3) |
-| description_file | TEXT | NULL | Absolute path (added v3) |
+| chat_file | TEXT | NULL | Path as written (added v2; see `output_directory`) |
+| thumbnail_file | TEXT | NULL | Path as written (added v3; see `output_directory`) |
+| description_file | TEXT | NULL | Path as written (added v3; see `output_directory`) |
 | twitch_quality | TEXT | NULL | The variant the capture is recording, by its playlist name ("chunked", "720p60"): written at the capture start, live and VOD (`StreamProcessor.startTwitchVariant`), and again whenever a split moves the capture to another variant (`recordVariant` in `ExecuteTwitch`). Empty until a capture starts. Both UIs show it as "Quality". Nothing selects from it — until D-T9 it was ALSO the preference: set to it at creation, overwritten at the stream start, and read back as the preference by the next selection. The preference is `quality_preference` |
 | twitch_category | TEXT | NULL | |
 | channel_avatar_url | TEXT | NULL | |
@@ -290,13 +290,13 @@ transaction, so the `JobAdded` both UIs learn of the row by carries them:
 | unix_end | INTEGER | Unix timestamp |
 | quality | TEXT | e.g. "1080p60" |
 | filename | TEXT | Part filename: `{resolved template} - partN.mp4` (a job finalizing with exactly one part is renamed back to the plain `{resolved template}.mp4`) |
-| file_path | TEXT | Absolute path, nullable |
+| file_path | TEXT | The part's path as written, nullable: the job's directory joined with `filename`, so relative to the working directory under the default `./output` and absolute under an absolute directory or an import (see `jobs.output_directory`) |
 | file_size | INTEGER | Bytes, nullable |
 | video_width | INTEGER | Nullable |
 | video_height | INTEGER | Nullable |
 | video_fps | INTEGER | Nullable |
 | duration_seconds | REAL | Nullable |
-| chat_file | TEXT | (v15) Absolute path of this part's chat JSON, `''` when the part has no chat (pre-v15 rows, chat disabled, YouTube — only Twitch live IRC chat rolls per part) |
+| chat_file | TEXT | (v15) Path of this part's chat JSON as written, as `file_path` is, `''` when the part has no chat (pre-v15 rows, chat disabled, YouTube — only Twitch live IRC chat rolls per part) |
 
 Index: `idx_segments_job_id(job_id)`.
 
