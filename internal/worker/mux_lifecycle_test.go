@@ -877,6 +877,9 @@ func TestFinalizeMuxesEachAsideToItsOwnFile(t *testing.T) {
 	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 30)
 	aside := filepath.Join(staging, "video.mp4"+engine.StagedRestartSuffix+"1700000000")
 	writeAsideFixture(t, ffmpegPath, aside, 10)
+	// The aside's resume twin is no aside, so it must not hold staging (the
+	// last check below). Its own removal is pinned where it can be seen:
+	// TestMuxStagedAsidesRemovesTheRecordingAndItsTwin.
 	twin := aside + ".resume.json"
 	if err := os.WriteFile(twin, []byte(`{"stale":true}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -899,15 +902,7 @@ func TestFinalizeMuxesEachAsideToItsOwnFile(t *testing.T) {
 		t.Errorf("no %s beside the archive (stat err = %v) — the set-aside recording was never muxed, "+
 			"so staging cleanup takes it with the dir", sibling, err)
 	}
-	// The twin goes with the recording it describes (fix round 1, Minor 3: the
-	// removal shipped unpinned and the reviewer's mutant survived the package).
-	// Mutant: dropping the engine.StagedRestartSidecar removal — a sidecar
-	// outlives its media and a later Start could match its offsets.
-	if _, err := os.Stat(twin); !os.IsNotExist(err) {
-		t.Errorf("the aside's resume sidecar %s survived its recovery (stat err = %v) — a sidecar "+
-			"beside nothing is a stale offset map", twin, err)
-	}
-	// And the sweep must not offer the sibling: it is the job's own footage,
+	// The sweep must not offer the sibling: it is the job's own footage,
 	// unreferenced by construction (fix round 1, Important 1).
 	outCfg := &config.MoomboxConfig{}
 	outCfg.Paths.OutputDirectory = filepath.Dir(fresh.OutputFile)

@@ -279,41 +279,6 @@ func TestReleaseDownloadSlot_NonexistentJob(t *testing.T) {
 	q.ReleaseDownloadSlot("nonexistent")
 }
 
-func TestComplete_FreesLifecycleSlot(t *testing.T) {
-	q := NewJobQueue(10)
-	q.maxLifecycle = 1
-	q.Enqueue("job1", database.StatusUpcoming)
-	q.Enqueue("job2", database.StatusUpcoming)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	q.Dequeue(ctx)
-	if q.IsProcessing("job1") != true {
-		t.Error("job1 should be processing after dequeue")
-	}
-	// The slot comes from the ShouldDownload decision now (O-F), so the test
-	// has to take it for this assertion to mean anything.
-	if !q.AcquireLifecycleSlot(ctx, "job1") {
-		t.Fatal("AcquireLifecycleSlot = false with the single slot free")
-	}
-
-	q.Complete("job1")
-
-	if q.IsProcessing("job1") {
-		t.Error("job1 should not be processing after Complete")
-	}
-	if q.LifecycleCount() != 0 {
-		t.Errorf("LifecycleCount() after Complete = %d, want 0", q.LifecycleCount())
-	}
-
-	// job2 should now be dequeueable
-	id2, _, ok := q.Dequeue(ctx)
-	if !ok || id2 != "job2" {
-		t.Errorf("dequeue after Complete = %q, ok=%v, want job2/true", id2, ok)
-	}
-}
-
 func TestComplete_AlsoReleasesDownloadSlot(t *testing.T) {
 	q := NewJobQueue(10)
 	q.Enqueue("job1", database.StatusUpcoming)

@@ -328,18 +328,19 @@ func TestCalculateETAEarlyReturnUnderFiveSeconds(t *testing.T) {
 }
 
 // TestCalculateETASegmentBased exercises the segments-based ETA
-// branch. With 30s elapsed and 50/100 segments, segsPerSec=50/30=1.67,
-// remaining=50/1.67=~30s.
+// branch. With 30s elapsed (on a fake clock, so the figure is exact) and
+// 50/100 segments, segsPerSec=50/30=1.67, remaining=50/1.67=30s — the
+// sub-minute "Ns" bucket, where TestCalculateETAReadsTheTrackerClock lands in
+// the minutes one.
 func TestCalculateETASegmentBased(t *testing.T) {
 	pt := newTestProgressTracker()
-	pt.startTime = time.Now().Add(-30 * time.Second)
+	clk := &fakeClock{t: pt.startTime.Add(30 * time.Second)}
+	pt.now = clk.now
 	pt.videoSeq = 50
 	pt.videoTotal = 100
 
-	got := pt.calculateETA()
-	// Format depends on duration buckets: <60s = "Ns".
-	if !strings.HasSuffix(got, "s") {
-		t.Errorf("ETA: want sub-minute format like 'Ns', got %q", got)
+	if got := pt.calculateETA(); got != "30s" {
+		t.Errorf("calculateETA() = %q, want %q", got, "30s")
 	}
 }
 

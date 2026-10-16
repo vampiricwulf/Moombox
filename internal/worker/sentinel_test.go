@@ -204,6 +204,12 @@ func TestTwitchAuthSentinel(t *testing.T) {
 	})
 
 	t.Run("wrapped twitch.ErrTwitchAuthExpired → ErrCookiesRequired", func(t *testing.T) {
+		// The end-to-end flow: a twitch GQL 401/403 wraps ErrTwitchAuthExpired,
+		// the VOD-error producer attaches this result as ErrSentinel, and
+		// AsError ("wraps ErrCookiesRequired" in TestStreamProcessResultAsError)
+		// surfaces it so setJobError's errors.Is(err, ErrCookiesRequired)
+		// routes the job to StatusCookies. The twitch sentinel itself does not
+		// survive the %v display string; callers rely on this classification.
 		err := fmt.Errorf("gql auth failure: %w", twitch.ErrTwitchAuthExpired)
 		got := twitchAuthSentinel(err)
 		if got != ErrCookiesRequired {
@@ -259,33 +265,6 @@ func TestCookiesStatusError(t *testing.T) {
 				t.Errorf("cookiesStatusError = %v, want %v", got, tc.want)
 			}
 		})
-	}
-}
-
-// TestStreamProcessResultPropagatesTwitchAuth documents the end-to-end
-// flow: a twitch GQL 401/403 produces ErrTwitchAuthExpired-wrapped
-// errors which the VOD-error producer attaches via ErrSentinel and the
-// AsError consumer surfaces such that worker.setJobError's
-// errors.Is(err, ErrCookiesRequired) routes the job to StatusCookies.
-func TestStreamProcessResultPropagatesTwitchAuth(t *testing.T) {
-	authErr := fmt.Errorf("gql auth failure (401): %w", twitch.ErrTwitchAuthExpired)
-	r := &StreamProcessResult{
-		Error:       fmt.Sprintf("twitch VOD error: %v", authErr),
-		ErrSentinel: twitchAuthSentinel(authErr),
-	}
-	err := r.AsError()
-	if !errors.Is(err, ErrCookiesRequired) {
-		t.Error("twitch auth error should reach setJobError as ErrCookiesRequired via AsError")
-	}
-	// And the underlying twitch sentinel is still present in the chain
-	// for any caller that wants the platform-specific signal.
-	if !errors.Is(err, twitch.ErrTwitchAuthExpired) {
-		// AsError combines the display string with the sentinel via the
-		// new fmt.Errorf("%w (%w)", inner, sentinel) form. The inner
-		// error here is errors.New(r.Error) — a plain error without the
-		// twitch sentinel — so this branch validates that we *don't*
-		// require both. Document the limitation.
-		t.Log("twitch.ErrTwitchAuthExpired does not survive the percent-v formatting in r.Error; rely on ErrCookiesRequired classification")
 	}
 }
 

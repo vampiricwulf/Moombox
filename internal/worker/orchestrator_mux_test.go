@@ -262,49 +262,23 @@ func muxTestOrchestrator(t *testing.T, rec *notificationtest.Recorder, segments 
 	return o, &JobContext{Job: stored}
 }
 
-// TestMuxingStartingFiresForAMultiPartJob is A7. muxAndFinalize returns into
-// finalizeMultiSegmentJob 28 lines before the "Muxing Starting" send, so every
-// quality-split and gap-split job skipped the event operations.md documents as
-// "FFmpeg mux step begins". A subscriber received it for single-file jobs and
-// not for split ones, with no pattern visible from the outside.
-//
-// THE MUTANT: moving the send back below the `len(segments) > 0` branch. The
-// multi-part subtest then records zero muxing notifications.
-func TestMuxingStartingFiresForAMultiPartJob(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		segments int
-	}{
-		{"single-file finalize", 0},
-		{"multi-part finalize", 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := notificationtest.New()
-			o, jobCtx := muxTestOrchestrator(t, rec, tc.segments)
-
-			o.sendMuxingStarting(jobCtx)
-
-			got := rec.ByEvent("muxing")
-			if len(got) != 1 {
-				t.Fatalf("recorded %d muxing notifications, want 1: %+v", len(got), rec.Calls())
-			}
-			if got[0].Title != "Muxing Starting" {
-				t.Errorf("title = %q, want %q", got[0].Title, "Muxing Starting")
-			}
-		})
-	}
-}
-
-// TestMuxAndFinalizeAnnouncesTheMuxBeforeChoosingAShape is the placement
-// assertion the helper test above cannot make: sendMuxingStarting must be
-// reached on the path that RETURNS into finalizeMultiSegmentJob, not only on
-// the one that falls through to the single-file mux.
+// TestMuxAndFinalizeAnnouncesTheMuxBeforeChoosingAShape is A7. muxAndFinalize
+// returned into finalizeMultiSegmentJob 28 lines before the "Muxing Starting"
+// send, so every quality-split and gap-split job skipped the event
+// operations.md documents as "FFmpeg mux step begins". A subscriber received
+// it for single-file jobs and not for split ones, with no pattern visible from
+// the outside. sendMuxingStarting must be reached on the path that RETURNS
+// into finalizeMultiSegmentJob, not only on the one that falls through to the
+// single-file mux.
 //
 // Driving the whole of muxAndFinalize needs FFmpeg and staged media, so this
 // asserts on the source instead: the send call must appear BEFORE the
 // `finalizeMultiSegmentJob` return in the file. A source assertion is weak on
-// its own — paired with the behavioural test above, it is what pins the one
-// thing that broke.
+// its own — paired with the behavioural tests of the send itself
+// (TestMuxFromStagingAnnouncesTheMux below, TestMuxingStartingSaysWhatTheMuxHas
+// in mux_wording_test.go), it is what pins the one thing that broke.
+//
+// THE MUTANT: moving the send back below the `len(segments) > 0` branch.
 func TestMuxAndFinalizeAnnouncesTheMuxBeforeChoosingAShape(t *testing.T) {
 	src, err := os.ReadFile("orchestrator_mux.go")
 	if err != nil {
