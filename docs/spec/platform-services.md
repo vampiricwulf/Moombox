@@ -1291,6 +1291,8 @@ The run gives up when the consecutive-error count EXCEEDS the limit (`>`, matchi
 | Live | 20 | Linear, 5s × consecutive errors, cap 60s |
 | VOD/Replay | 5 | Linear, 5s × consecutive errors, cap 30s |
 
+**A failed fetch spends the budget only while the device is online** — the Twitch VOD chat's rule (§ VOD Chat above). The budget runs out in 75 s of backoff for a replay and about 14.5 minutes for a live chat, and a connectivity outage outlasts either while the video beside it waits in place; the chat used to give up (`errChatFetchExhausted`, `chat_status` `incomplete`) and was never started again, so the rest of the replay, or every live message after the outage, was missing from the archive. `ExecuteWithChat` (`internal/worker/orchestrator.go`) and the waiting-room chat (`tryStartEarlyChat`, `internal/worker/stream_processor_youtube.go`) install the connectivity probe (`ChatDownloader.SetIsOnline`), and a fetch that fails while it reports offline waits for the network (`waitOnline`, polling every `chatOnlinePoll`, 5 s) and then asks for the same continuation again: that failure does not count, and the streak before it is cleared, those failures having been the outage before the probe noticed it. The wait logs once at Info and calls no `OnError`; `Stop`, `MarkStreamEnded` and shutdown end it as they end a backoff sleep.
+
 ### Resume State
 
 Sidecar `.resume.json` file:

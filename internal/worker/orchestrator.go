@@ -417,6 +417,11 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		chatDl.SetOnProgress(func(p chat.ChatProgress) {
 			tracker.SetChatCount(p.MessageCount)
 		})
+		// The chat waits an outage out as the video does, rather than spending
+		// its consecutive-error budget on it and giving the capture up for
+		// good — this goroutine starts it once and never again. Set on the
+		// inherited early chat as well as a new one.
+		chatDl.SetIsOnline(connIsOnline(o.conn))
 		go func() {
 			defer close(chatDone)
 			defer func() {

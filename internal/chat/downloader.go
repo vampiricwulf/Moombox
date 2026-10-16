@@ -75,6 +75,11 @@ var (
 	staleFirstRetryDelayForTesting  = staleFirstRetryDelay
 )
 
+// chatOnlinePoll is how often a fetch loop parked on a connectivity outage
+// asks the probe whether the network is back — the Twitch VOD chat's
+// vodChatOnlinePoll. A var so tests need not wait it out.
+var chatOnlinePoll = 5 * time.Second
+
 // errStaleRecoveryExhausted is the terminal error Start reports when
 // runChatLoop gave up after maxStaleContinuationAttempts consecutive
 // stale-continuation recoveries. The broadcast was still live when this run
@@ -193,6 +198,11 @@ type ChatDownloader struct {
 	// loop. opts.IsReplay is never read again after construction.
 	replay atomic.Bool
 
+	// isOnline is the device-connectivity probe SetIsOnline installs (nil =
+	// none): a fetch that fails while it reports offline waits for the
+	// network instead of spending the consecutive-error budget.
+	isOnline atomic.Pointer[func() bool]
+
 	// testRecoveryOverride allows tests to inject a recovery function instead of
 	// calling recoverStaleContinuation. Only set in tests; nil in production.
 	testRecoveryOverride func(ctx context.Context) bool
@@ -241,6 +251,43 @@ func (cd *ChatDownloader) SetOnProgress(fn func(p ChatProgress)) {
 	cd.onProgressMu.Unlock()
 }
 
+// SetIsOnline installs the device-connectivity probe. Without it a fetch
+// failing through an outage spent the consecutive-error budget — six failures,
+// 75 s of backoff, for a replay; twenty-one and about 14.5 minutes for a live
+// chat — and the capture gave up for good while the video beside it waited the
+// outage out: the rest of the replay, or every message after the outage, was
+// never fetched. The Twitch VOD chat's SetIsOnline is the twin. Safe to call
+// before or after Start; nil removes the probe.
+func (cd *ChatDownloader) SetIsOnline(fn func() bool) {
+	if fn == nil {
+		cd.isOnline.Store(nil)
+		return
+	}
+	cd.isOnline.Store(&fn)
+}
+
+// offline reports whether the installed probe says the device has no network.
+func (cd *ChatDownloader) offline() bool {
+	fn := cd.isOnline.Load()
+	return fn != nil && !(*fn)()
+}
+
+// waitOnline blocks until the probe reports the network back, polling every
+// chatOnlinePoll, and reports false when ctx ends first — which Stop and
+// MarkStreamEnded both bring about, through cancelCtx.
+func (cd *ChatDownloader) waitOnline(ctx context.Context) bool {
+	t := time.NewTicker(chatOnlinePoll)
+	defer t.Stop()
+	for cd.offline() {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+		}
+	}
+	return true
+}
+
 // callOnProgress snapshots the current progress callback under the lock and
 // invokes it outside the lock so a slow caller (e.g. a database update)
 // does not block a concurrent SetOnProgress.
@@ -266,8 +313,9 @@ func (cd *ChatDownloader) logDebug(msg string, args ...any) {
 // reconstruct from the archive afterwards: the ones that DISCARD something on
 // disk (the mode rule refusing a live run's sidecar), that change which
 // endpoint the run is talking to (adoptFreshContinuation's flip), or that stop
-// the capture short (the stale-recovery cap) — so a job's log shows them
-// without switching to debug. Everything else stays on logDebug.
+// the capture short (the stale-recovery cap) or pause it for an outage — so
+// a job's log shows them without switching to debug. Everything else stays
+// on logDebug.
 func (cd *ChatDownloader) logInfo(msg string, args ...any) {
 	if cd.Logger != nil {
 		cd.Logger.Info(msg, args...)
@@ -1170,6 +1218,24 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 			cd.OnError(err)
 		}
 		return true
+	}
+
+	// No network is not a fault of the page: wait for it, then ask for the
+	// same continuation again with the budget untouched — and cleared, since
+	// the failures just before the probe noticed the outage were the outage
+	// too. One Info line each way per outage, not one per poll, and no
+	// OnError: nothing failed that the network coming back will not fix. A
+	// wait that ctx ends (Stop, MarkStreamEnded, shutdown) leaves the loop as
+	// a cancel does.
+	if cd.offline() {
+		cd.logInfo("chat fetch failed while offline; waiting for connectivity",
+			"videoID", cd.opts.VideoID, "err", err)
+		if !cd.waitOnline(ctx) {
+			return true
+		}
+		cd.logInfo("connectivity restored; resuming chat download", "videoID", cd.opts.VideoID)
+		*consecutiveErrors = 0
+		return false
 	}
 
 	*consecutiveErrors++

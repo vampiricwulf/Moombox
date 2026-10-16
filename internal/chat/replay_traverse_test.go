@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -485,6 +487,184 @@ func TestFetchErrorExhaustionRecordsAnIncompleteOutcome(t *testing.T) {
 		t.Errorf("Start = %v, want errChatFetchExhausted — a live capture that exhausted its "+
 			"consecutive-error budget stopped short, and the worker writes \"finished\" for a nil "+
 			"outcome", err)
+	}
+}
+
+// fastChatOnlinePoll shortens the offline wait's poll for one test.
+func fastChatOnlinePoll(t *testing.T) {
+	t.Helper()
+	old := chatOnlinePoll
+	chatOnlinePoll = time.Millisecond
+	t.Cleanup(func() { chatOnlinePoll = old })
+}
+
+// errOutageDial is what a fetch meets while the device has no network.
+var errOutageDial = &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: network is unreachable")}
+
+// TestReplayChatWaitsOutAnOutage pins the YouTube chat downloader's offline
+// wait, the Twitch VOD chat's twin. A replay pages while the video downloads,
+// and the video waits an outage out in place; the chat spent its
+// consecutive-error budget on the outage instead — six failures, 75 s of
+// backoff — gave up with errChatFetchExhausted, and the job finished with
+// chat_status "incomplete" and the rest of the replay never fetched. Here the
+// device is offline for far longer than the budget's backoff (1 ms per
+// failure in this test), and the archive must still come out whole.
+//
+// Mutants this kills:
+//   - the offline branch in handleFetchError removed, or offline() ignoring
+//     the probe → the budget runs out inside the outage
+//     (errChatFetchExhausted, the archive cut at page one)
+//   - waitOnline returning at once instead of waiting → no fetch is counted,
+//     but the loop polls the dead network once a millisecond for the whole
+//     outage — pinned by maxOutageFetches
+func TestReplayChatWaitsOutAnOutage(t *testing.T) {
+	fastChatOnlinePoll(t)
+	const total = 1000
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidOutage",
+		OutputFile:          filepath.Join(t.TempDir(), "chat.json"),
+		IsReplay:            true,
+		InitialContinuation: "replay-0",
+	})
+	cd.testBackoffOverride = time.Millisecond
+
+	var down, began atomic.Bool
+	var outageFetches atomic.Int32
+	cd.SetIsOnline(func() bool { return !down.Load() })
+	cd.testFetchOverride = func(context.Context) (*ChatApiResponse, error) {
+		var from int
+		fmt.Sscanf(cd.continuation, "replay-%d", &from)
+		if from == archivePageSize && !began.Swap(true) {
+			// The outage starts as page two is asked for, and lasts 100 ms —
+			// a hundred times the budget's whole backoff here.
+			down.Store(true)
+			time.AfterFunc(100*time.Millisecond, func() { down.Store(false) })
+		}
+		if down.Load() {
+			outageFetches.Add(1)
+			return nil, errOutageDial
+		}
+		return archivePage(from, total), nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := cd.Start(ctx); err != nil {
+		t.Fatalf("Start = %v after %d fetches during the outage — the chat gave up on an outage the video waits out", err, outageFetches.Load())
+	}
+	if got := cd.MessageCount(); got != total {
+		t.Errorf("MessageCount = %d, want the whole archive (%d)", got, total)
+	}
+	const maxOutageFetches = 3
+	if n := outageFetches.Load(); n > maxOutageFetches {
+		t.Errorf("%d fetches went out during the outage, want at most %d — the loop polled the dead network instead of waiting for it", n, maxOutageFetches)
+	}
+}
+
+// TestLiveChatOutageLeavesTheBudgetWhole pins the budget accounting around a
+// wait: the failure that meets the outage does not count, and the streak
+// before it is cleared once the network returns — those failures came as the
+// outage began, before the probe noticed it. So a live chat's full budget
+// (maxConsecErrorsLive) is there again after the outage.
+//
+// Fifteen online failures, then one offline, then failures until the budget
+// runs out: 15 + 1 + (maxConsecErrorsLive+1) fetches in all.
+//
+// Mutants this kills:
+//   - the offline branch removed → the offline failure counts and the streak
+//     runs on: exhausted at the 21st fetch
+//   - `*consecutiveErrors = 0` removed → the streak resumes at 15: exhausted
+//     six fetches after the outage
+func TestLiveChatOutageLeavesTheBudgetWhole(t *testing.T) {
+	fastChatOnlinePoll(t)
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidLiveOutage",
+		OutputFile:          filepath.Join(t.TempDir(), "chat.json"),
+		IsLiveOrUpcoming:    true,
+		InitialContinuation: "tok",
+	})
+	cd.testBackoffOverride = time.Millisecond
+
+	var mu sync.Mutex
+	isOffline, fetches := false, 0
+	cd.SetIsOnline(func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		was := isOffline
+		isOffline = false // the network is back by the next look
+		return !was
+	})
+	cd.testFetchOverride = func(context.Context) (*ChatApiResponse, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		fetches++
+		if fetches == 16 {
+			isOffline = true
+			return nil, errOutageDial
+		}
+		return nil, errors.New("chat API returned status 500")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := cd.Start(ctx)
+	if !errors.Is(err, errChatFetchExhausted) {
+		t.Fatalf("Start = %v, want errChatFetchExhausted once the budget is spent online", err)
+	}
+	mu.Lock()
+	got := fetches
+	mu.Unlock()
+	if want := 16 + maxConsecErrorsLive + 1; got != want {
+		t.Errorf("fetches = %d, want %d: 15 online failures, one offline that counts nothing and clears the streak, then the whole budget", got, want)
+	}
+}
+
+// TestStopEndsAnOfflineWait pins that the wait is not a trap: Stop (and
+// MarkStreamEnded, through the same cancelCtx) ends it, and the run exits as a
+// stopped one rather than with a give-up verdict.
+//
+// Mutant killed: waitOnline ignoring ctx → Start never returns.
+func TestStopEndsAnOfflineWait(t *testing.T) {
+	fastChatOnlinePoll(t)
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidStopOffline",
+		OutputFile:          filepath.Join(t.TempDir(), "chat.json"),
+		IsLiveOrUpcoming:    true,
+		InitialContinuation: "tok",
+	})
+	cd.testBackoffOverride = time.Millisecond
+	cd.SetIsOnline(func() bool { return false })
+	fetched := make(chan struct{}, 1)
+	cd.testFetchOverride = func(context.Context) (*ChatApiResponse, error) {
+		select {
+		case fetched <- struct{}{}:
+		default:
+		}
+		return nil, errOutageDial
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("panic: %v", r)
+			}
+		}()
+		done <- cd.Start(context.Background())
+	}()
+	select {
+	case <-fetched:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the chat never fetched")
+	}
+	cd.Stop()
+	select {
+	case err := <-done:
+		if errors.Is(err, errChatFetchExhausted) {
+			t.Errorf("Start = %v: a stopped wait reported a give-up", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stop did not end the offline wait")
 	}
 }
 

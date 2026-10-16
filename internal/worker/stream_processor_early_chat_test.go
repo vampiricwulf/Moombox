@@ -208,6 +208,64 @@ func TestTryStartEarlyChatRunsThroughRunEarlyChat(t *testing.T) {
 	}
 }
 
+// TestYouTubeChatIsGivenTheConnectivityProbe pins the two sites that hand the
+// YouTube chat downloader its connectivity probe (chat.ChatDownloader's
+// SetIsOnline; the behaviour itself is pinned in internal/chat by
+// TestReplayChatWaitsOutAnOutage). Without it the chat spent its
+// consecutive-error budget on an outage the video waited out, and gave the
+// capture up for good — ExecuteWithChat starts it once and never again. Both
+// sites run network I/O first (the watch page, the whole download), so only
+// the shape is assertable, as for the early-chat wiring above.
+//
+// Mutants this kills:
+//   - either SetIsOnline call deleted → its site finds none
+//   - ExecuteWithChat's call moved below chatDl.Start → the order assertion
+//   - the early chat's call placed after `go runEarlyChat` → the order
+//     assertion
+func TestYouTubeChatIsGivenTheConnectivityProbe(t *testing.T) {
+	_, file := parseYouTubeProcessor(t)
+	early := funcDeclNamed(t, file, "tryStartEarlyChat")
+	set := selectorCallPos(early.Body, "dl", "SetIsOnline")
+	var launch token.Pos
+	ast.Inspect(early.Body, func(node ast.Node) bool {
+		if g, ok := node.(*ast.GoStmt); ok && launch == token.NoPos {
+			launch = g.Pos()
+		}
+		return true
+	})
+	if set == token.NoPos {
+		t.Error("tryStartEarlyChat gives the early chat no connectivity probe (dl.SetIsOnline)")
+	} else if launch == token.NoPos || set > launch {
+		t.Error("tryStartEarlyChat must call dl.SetIsOnline before it launches the run")
+	}
+
+	fset := token.NewFileSet()
+	orch, err := parser.ParseFile(fset, "orchestrator.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse orchestrator.go: %v", err)
+	}
+	var exec *ast.FuncDecl
+	for _, decl := range orch.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "ExecuteWithChat" {
+			exec = fn
+		}
+	}
+	if exec == nil {
+		t.Fatal("no ExecuteWithChat in orchestrator.go")
+	}
+	set = selectorCallPos(exec.Body, "chatDl", "SetIsOnline")
+	start := selectorCallPos(exec.Body, "chatDl", "Start")
+	if start == token.NoPos {
+		t.Fatal("ExecuteWithChat no longer calls chatDl.Start — this test no longer describes it")
+	}
+	if set == token.NoPos {
+		t.Fatal("ExecuteWithChat gives the chat downloader no connectivity probe (chatDl.SetIsOnline)")
+	}
+	if set > start {
+		t.Errorf("ExecuteWithChat calls chatDl.SetIsOnline (%v) after chatDl.Start (%v)", fset.Position(set), fset.Position(start))
+	}
+}
+
 // TestWaitForLiveRestartsEarlyChatInOrder pins the consumer side: the retry
 // block is gated on earlyChatNeedsRestart (not the old `chatDl == nil`), the
 // downloader being replaced is untracked BEFORE the new one is started, and

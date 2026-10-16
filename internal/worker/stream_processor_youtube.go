@@ -681,6 +681,10 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	// diagnostics (the mode rule's refusal, the file-epoch adoption, API
 	// drift) never reach the log (Arc J D6).
 	dl.Logger = sp.logger
+	// A waiting room can sit through an outage too: its chat waits for the
+	// network rather than spending its error budget on it. The orchestrator
+	// installs its own probe again on the handoff.
+	dl.SetIsOnline(sp.isOnline)
 	if onProgress != nil {
 		// Wire OnProgress before Start so the surge-detection callback fires
 		// from the very first batch (F16).
