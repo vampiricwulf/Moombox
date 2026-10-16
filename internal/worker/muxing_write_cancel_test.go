@@ -40,7 +40,7 @@ var orchestratorMuxingWrites = map[string]int{
 	"orchestrator.go":         2, // ExecuteWithChat: the VOD branch, the live branch
 	"orchestrator_youtube.go": 1, // runLiveStreamDownload's stream end
 	"orchestrator_twitch.go":  1, // ExecuteTwitch, on the way to a finalize
-	"orchestrator_mux.go":     2, // muxAndFinalize; muxFromStaging's direct multi-part arm
+	"orchestrator_mux.go":     2, // muxAndFinalize; muxFromStaging, ahead of its part recovery
 }
 
 // Every Muxing write in the orchestrators is the fields of a
@@ -233,8 +233,11 @@ func statusNames(seq []database.JobStatus) []string {
 //
 // Mutants: muxAndFinalize's write unconditional (UpdateJobFields: the row
 // reads Muxing and the mux is announced); its refusal ignored (the same);
-// muxFromStaging's direct-arm write unconditional or its refusal ignored (the
+// muxFromStaging's write unconditional or its refusal ignored (the
 // direct-arm rows); the write moved back below sendMuxingStarting (announced).
+// Split staging with an unrecorded part, which needs FFmpeg to tell a
+// refusal that came first from one that came after the part recovery, is
+// TestARefusedFinalizeMuxesNoUnrecordedPart's.
 func TestFinalizeOnARowWithAnOutcomeMuxesNothing(t *testing.T) {
 	type shape struct {
 		name     string
@@ -298,38 +301,147 @@ func TestFinalizeOnARowWithAnOutcomeMuxesNothing(t *testing.T) {
 // whose finalize refused its Muxing write returned an error MuxJob read as a
 // failure, and its Error write landed on whatever the row held — here a
 // Finished archive another mux wrote while this one waited for its slot.
-// Staging is kept.
+// Staging is kept, and nothing is muxed from it: with split staging (a root
+// part and an unrecorded seg_1), muxFromStaging's part recovery used to run
+// ahead of the refusal and record two part rows on the Finished row.
 //
-// Mutant: MuxJob's ErrCancelled arm dropped (the row reads Error).
+// Mutants: MuxJob's ErrCancelled arm dropped (the row reads Error);
+// muxFromStaging's Muxing write dropped or moved below its recovery (the
+// split case's parts are muxed and recorded).
 func TestMuxJobLeavesAnOutcomeItsFinalizeFound(t *testing.T) {
-	w, db := testWorkerSetup(t)
-	t.Cleanup(w.Stop)
-	var stagingBase string
-	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
-	job := &database.Job{ID: "tw_muxjob_outcome", VideoID: "v1", URL: "https://twitch.tv/videos/1", Platform: "twitch",
-		Status: database.StatusError, OutputDirectory: t.TempDir()}
-	if _, err := db.AddJob(job); err != nil {
+	for _, split := range []bool{false, true} {
+		name := "one staged file"
+		if split {
+			name = "split staging"
+		}
+		t.Run(name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			t.Cleanup(w.Stop)
+			var stagingBase string
+			w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+			job := &database.Job{ID: "tw_muxjob_outcome", VideoID: "v1", URL: "https://twitch.tv/videos/1", Platform: "twitch",
+				Title: "T", Status: database.StatusError, OutputDirectory: t.TempDir()}
+			if _, err := db.AddJob(job); err != nil {
+				t.Fatal(err)
+			}
+			if split {
+				stageSplitParts(t, filepath.Join(stagingBase, job.ID), "video.ts")
+			} else {
+				stageMediaFor(t, stagingBase, job.ID)
+			}
+
+			// Hold the one download slot, so the mux waits for it with the row read.
+			w.queue.SetMaxDownloads(1)
+			if !w.queue.TryAcquireDownloadSlot("holder") {
+				t.Fatal("could not take the download slot")
+			}
+			if err := w.MuxJob(job.ID); err != nil {
+				t.Fatalf("MuxJob: %v", err)
+			}
+			db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusFinished})
+			w.queue.ReleaseDownloadSlot("holder")
+			w.wg.Wait()
+
+			row, _ := db.GetJob(job.ID)
+			if row == nil || row.Status != database.StatusFinished {
+				t.Errorf("row = %+v, want the Finished outcome left standing", row)
+			}
+			if !HasSegmentFiles(stagingBase, job.ID) {
+				t.Error("staging was not kept")
+			}
+			assertNothingMuxed(t, db, job.ID, job.OutputDirectory)
+		})
+	}
+}
+
+// stageSplitParts stages a split capture's two parts with real media: the
+// root (part 0) and an unrecorded seg_1, each named name. Skips without
+// FFmpeg — the part recovery a refused finalize must not reach muxes them.
+func stageSplitParts(t *testing.T, dir, name string) {
+	t.Helper()
+	ffmpegPath, _ := requireFFmpegTools(t)
+	fixture := filepath.Join(t.TempDir(), "part.mp4")
+	writeMuxFixture(t, ffmpegPath, fixture, 2)
+	data, err := os.ReadFile(fixture)
+	if err != nil {
 		t.Fatal(err)
 	}
-	stageMediaFor(t, stagingBase, job.ID)
+	for _, d := range []string{dir, filepath.Join(dir, "seg_1")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
-	// Hold the one download slot, so the mux waits for it with the row read.
-	w.queue.SetMaxDownloads(1)
-	if !w.queue.TryAcquireDownloadSlot("holder") {
-		t.Fatal("could not take the download slot")
+// assertNothingMuxed fails when the output directory holds anything or the
+// job has part rows.
+func assertNothingMuxed(t *testing.T, db *database.Database, jobID, outputDir string) {
+	t.Helper()
+	var names []string
+	if entries, _ := os.ReadDir(outputDir); len(entries) != 0 {
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
 	}
-	if err := w.MuxJob(job.ID); err != nil {
-		t.Fatalf("MuxJob: %v", err)
+	segs, _ := db.GetSegments(jobID)
+	if len(names) != 0 || len(segs) != 0 {
+		t.Errorf("muxed %v into the output directory and recorded %d part rows, want nothing muxed", names, len(segs))
 	}
-	db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusFinished})
-	w.queue.ReleaseDownloadSlot("holder")
-	w.wg.Wait()
+}
 
-	row, _ := db.GetJob(job.ID)
-	if row == nil || row.Status != database.StatusFinished {
-		t.Errorf("row = %+v, want the Finished outcome left standing", row)
-	}
-	if !HasSegmentFiles(stagingBase, job.ID) {
-		t.Error("staging was not kept")
+// A finalize refused for an outcome muxes nothing from split staging either:
+// both entries recover the parts a mid-capture mux never recorded, and both
+// did so ahead of the refusal — FFmpeg run over the recording after its
+// Cancel, the parts stream-copied into the output directory and recorded on
+// a Cancelled or Finished row. The refusal now comes first, and seg_1 stays
+// staged.
+//
+// Mutants: muxAndFinalize's Muxing write moved back below its
+// muxUnrecordedSegments (its case muxes and records two parts);
+// muxFromStaging's dropped or moved below its own (its case does).
+func TestARefusedFinalizeMuxesNoUnrecordedPart(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		outcome database.JobStatus
+		direct  bool // through muxFromStaging rather than muxAndFinalize
+	}{
+		{"muxAndFinalize, Cancelled", database.StatusCancelled, false},
+		{"muxFromStaging, Finished", database.StatusFinished, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			job := &database.Job{ID: "yt_refused", VideoID: "refused", Title: "A Job", Platform: "youtube",
+				Status: database.StatusDownloading, OutputDirectory: t.TempDir()}
+			if _, err := db.AddJob(job); err != nil {
+				t.Fatal(err)
+			}
+			stored, _ := db.GetJob(job.ID)
+			jobCtx := w.buildJobContext(stored)
+			jobCtx.StagingDir = t.TempDir()
+			jobCtx.OutputDir = t.TempDir()
+			jobCtx.Filename = "a-job"
+			stageSplitParts(t, jobCtx.StagingDir, "video_stream")
+			if !db.UpdateJobFieldsUnlessTerminal(job.ID, map[string]any{"status": tc.outcome}) {
+				t.Fatal("could not write the outcome")
+			}
+
+			var err error
+			if tc.direct {
+				err = w.orchestrator.muxFromStaging(context.Background(), jobCtx)
+			} else {
+				err = w.orchestrator.muxAndFinalize(context.Background(), jobCtx,
+					&DownloadResult{HasVideo: true, VideoPath: filepath.Join(jobCtx.StagingDir, "video_stream")})
+			}
+			if !errors.Is(err, ErrCancelled) {
+				t.Errorf("returned %v, want ErrCancelled", err)
+			}
+			assertNothingMuxed(t, db, job.ID, jobCtx.OutputDir)
+			if _, statErr := os.Stat(filepath.Join(jobCtx.StagingDir, "seg_1", "video_stream")); statErr != nil {
+				t.Errorf("seg_1's media is gone from staging: %v", statErr)
+			}
+		})
 	}
 }

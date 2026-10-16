@@ -958,6 +958,23 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		// Update local job reference for notifications below
 		jobCtx.Job = freshJob
 	}
+	// The finalize's Muxing write, for both shapes, ahead of everything it
+	// muxes and of the announcement. Every caller — the orchestrators,
+	// MuxJob — wrote Muxing already, decided on a status read earlier, so
+	// this applies only to a row with no outcome: an operator's Cancel that
+	// landed since, before the caller's listener heard it, was written over
+	// and the mux ran on, announced. A refusal stops the finalize with
+	// nothing muxed and staging kept. Ahead of the unrecorded-part recovery
+	// too: below it, a refused finalize of split staging still stream-copied
+	// every unrecorded part into the output directory and recorded its row
+	// — FFmpeg run over a recording after its Cancel, and part rows added
+	// to a Cancelled or Finished row.
+	if writeUnlessOutcome(o.db, jobCtx.Job.ID, map[string]any{
+		"status": database.StatusMuxing,
+	}) {
+		return ErrCancelled
+	}
+
 	// Until the Finished write below names them, the files this writes are
 	// on no row: keep the orphan sweep and its deletes off them.
 	defer claimOutputStem(jobCtx.Job.ID, filepath.Join(jobCtx.OutputDir, jobCtx.Filename))()
@@ -971,19 +988,6 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// processJob's staging cleanup then deletes the unmuxed media for good.
 	// No-op when the job has no seg_N staging dirs.
 	o.muxUnrecordedSegments(ctx, jobCtx)
-
-	// The finalize's Muxing write, for both shapes, ahead of the
-	// announcement. Every caller — the orchestrators, MuxJob — wrote Muxing
-	// already, decided on a status read earlier, so this applies only to a
-	// row with no outcome: an operator's Cancel that landed since, before
-	// the caller's listener heard it, was written over and the mux ran on,
-	// announced. A refusal stops the finalize with nothing muxed and
-	// staging kept.
-	if writeUnlessOutcome(o.db, jobCtx.Job.ID, map[string]any{
-		"status": database.StatusMuxing,
-	}) {
-		return ErrCancelled
-	}
 
 	// A7: announce the mux BEFORE the shape is chosen. The branch below
 	// returns into finalizeMultiSegmentJob, which never reached the inline
@@ -1802,6 +1806,19 @@ func (o *DownloadOrchestrator) muxSegment(
 func (o *DownloadOrchestrator) muxFromStaging(ctx context.Context, jobCtx *JobContext) error {
 	stagingDir := jobCtx.StagingDir
 
+	// The Muxing write muxAndFinalize makes, made here first for the
+	// recovery below, which muxes before either arm is reached: on a row
+	// with no outcome only, as muxAndFinalize's, and a refusal muxes
+	// nothing. Below the recovery, a refused finalize of split staging still
+	// muxed and recorded every unrecorded part. It also covers the direct
+	// arm for a post-split job with no root media, which reaches
+	// finalizeMultiSegmentJob without passing through muxAndFinalize.
+	if writeUnlessOutcome(o.db, jobCtx.Job.ID, map[string]any{
+		"status": database.StatusMuxing,
+	}) {
+		return ErrCancelled
+	}
+
 	// Recover quality-split segment dirs (seg_N) that were never muxed —
 	// e.g. the job errored or was cancelled after a split. Without this,
 	// muxAndFinalize would see the existing DB segments and finalize while
@@ -1817,14 +1834,8 @@ func (o *DownloadOrchestrator) muxFromStaging(ctx context.Context, jobCtx *JobCo
 		if segments, err := o.db.GetSegments(jobCtx.Job.ID); err == nil && len(segments) > 0 {
 			// The off-queue mux verb on a post-split job: it reaches
 			// finalizeMultiSegmentJob without passing through muxAndFinalize,
-			// so it needs its own Muxing write and announcement — the write
-			// on a row with no outcome only, as muxAndFinalize's. A manual
-			// mux is a mux.
-			if writeUnlessOutcome(o.db, jobCtx.Job.ID, map[string]any{
-				"status": database.StatusMuxing,
-			}) {
-				return ErrCancelled
-			}
+			// so it needs its own announcement, after the Muxing write
+			// above. A manual mux is a mux.
 			o.sendMuxingStarting(jobCtx)
 			return o.finalizeMultiSegmentJob(ctx, jobCtx, segments)
 		}
