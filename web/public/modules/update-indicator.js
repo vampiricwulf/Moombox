@@ -1,10 +1,16 @@
 /**
  * Update Controller — the version indicator (header) and the update-available dialog
  */
+import { viewerIsAtTheHost } from "./utils.js";
 
 // Moombox GitHub repository page — opened by double-clicking the version
 // indicator. Mirrors constants.ProjectRepoURL on the Go side (keep in sync).
 const GITHUB_REPO_URL = "https://github.com/vampiricwulf/Moombox";
+
+// Where an update can be installed from, for a viewer the server will not
+// install for: the same remedy the dialog's #update-remote-note gives.
+const REMOTE_UPDATE_REMEDY =
+  "Updates install only from a browser on the Moombox host itself or from its terminal UI; in Docker, pull the new image and recreate the container.";
 
 export class UpdateController {
   constructor(app) {
@@ -119,6 +125,20 @@ export class UpdateController {
     } else {
       notes.textContent = this.available.releaseNotes || "No release notes available.";
     }
+    // The server installs an update only for a loopback peer
+    // (updateApplyOriginAllowed, internal/web/routes/update.go), and a viewer
+    // whose page is not on a loopback name is not one — a LAN viewer, and
+    // every client of a Docker container. Update Now was offered to them
+    // anyway and always answered "update apply restricted to local origins";
+    // it is now disabled up front, with a line naming where an update does
+    // install from. The notes and Skip stay: a skip is anyone's to make.
+    // viewerIsAtTheHost is the cookie setup's test, the shape of the server's
+    // IsLoopbackRequest.
+    const remote = !viewerIsAtTheHost(window.location.hostname);
+    const updateBtn = document.getElementById("update-now-btn");
+    if (updateBtn) updateBtn.disabled = remote;
+    const remoteNote = document.getElementById("update-remote-note");
+    if (remoteNote) remoteNote.style.display = remote ? "" : "none";
     dlg.show();
   }
 
@@ -186,6 +206,12 @@ export class UpdateController {
   }
 
   async applyUpdate() {
+    // Disabled for this viewer (showUpdateDialog); one that gets here anyway
+    // asks for nothing the server would grant.
+    if (!viewerIsAtTheHost(window.location.hostname)) {
+      this.app.showToast(REMOTE_UPDATE_REMEDY, "warning");
+      return;
+    }
     if (this._refuseWhileInFlight()) return;
     // Updating restarts the whole process: active recordings are
     // interrupted and resume on the new binary, but live segments broadcast
@@ -219,6 +245,11 @@ export class UpdateController {
           // Refused because it was skipped or withdrawn elsewhere while the
           // request was out.
           this._closeWithdrawn();
+        } else if (resp.status === 403) {
+          // Not a loopback peer after all, though the page is on a loopback
+          // name: a browser on a Docker host at http://localhost reaches the
+          // container from the bridge gateway. Same remedy as the note.
+          this.app.showToast(`Update failed: ${data.error || "Forbidden"}. ${REMOTE_UPDATE_REMEDY}`, "danger");
         } else {
           this.app.showToast("Update failed: " + (data.error || "Unknown error"), "danger");
         }

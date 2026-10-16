@@ -58,8 +58,11 @@ var releaseVersionRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$
 // which CSRF also accepts on lan) and pass an Origin-only gate — the very
 // case S-8 meant to close. The direct peer, not the forwarded one: a proxy
 // in front means the caller is not on this machine. (Docker's bridge peer is
-// never loopback either, and in-app update is not offered there — a pulled
-// image replaces the binary.)
+// never loopback either — a pulled image replaces the binary there. The
+// dashboard disables Update Now for a viewer whose page is not on a loopback
+// name and says where updates install from; a refusal it could not foresee,
+// a browser on the Docker host at localhost, toasts the same remedy:
+// UpdateController in web/public/modules/update-indicator.js.)
 func updateApplyOriginAllowed(r *http.Request) bool {
 	if !web.IsLoopbackRequest(r) {
 		return false

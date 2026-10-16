@@ -2081,6 +2081,11 @@
         </sl-dialog>
 
         <sl-dialog id="update-dialog" label="Update Available">
+            <!-- Shown, with Update Now disabled, to a viewer not at the host: the server installs only for a loopback peer (UpdateController.showUpdateDialog) -->
+            <sl-alert id="update-remote-note" variant="primary" open style="display: none; margin-bottom: 1rem;">
+                <sl-icon slot="icon" name="info-circle"></sl-icon>
+                Updates install only from a browser on the Moombox host itself or from its terminal UI. In Docker, pull the new image and recreate the container instead.
+            </sl-alert>
             <div id="update-release-notes"></div>
             <sl-button slot="footer" id="update-now-btn" variant="primary">Update Now</sl-button>
             <sl-button slot="footer" id="update-dismiss-btn" variant="default">Skip this version</sl-button>

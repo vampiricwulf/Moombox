@@ -179,7 +179,9 @@ Docker-specific behavior:
   up -d`) — an in-app update would be lost when the container is
   recreated, so the seeded config disables automatic update checks
   (`auto_check_updates = false`; the manual "Check for updates" button
-  still works).
+  still works; its dialog shows the release notes and Skip, and Update
+  Now is disabled with a pointer to pulling the image, or, from a
+  browser on the Docker host itself, refused with the same pointer).
 
 To build the image from source instead of pulling:
 `docker build -t moombox .` from a checkout of this repository.

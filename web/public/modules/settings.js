@@ -513,6 +513,10 @@ export class SettingsController {
             const dismissBtn = document.getElementById("update-dismiss-btn");
             if (updateBtn) updateBtn.style.display = "none";
             if (dismissBtn) dismissBtn.textContent = "Close";
+            // Nothing installs from here, so where updates install from is
+            // not this dialog's to say (showUpdateDialog sets it afresh).
+            const remoteNote = document.getElementById("update-remote-note");
+            if (remoteNote) remoteNote.style.display = "none";
             dlg.dataset.viewerMode = "true";
             dlg.show();
             // Restore the update-prompt state when the dialog closes. Text must
