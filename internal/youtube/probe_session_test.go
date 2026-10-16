@@ -514,18 +514,21 @@ func TestAHomepageReadThatDidNotComeBackIsNotTheAccountsOne(t *testing.T) {
 	}
 
 	t.Run("abandoned by its caller", func(t *testing.T) {
+		// The first probe to see account B is given up on by its caller
+		// while B's homepage read is in flight: the stub cancels the probe's
+		// context when the read arrives, not on a timer, so a slow runner
+		// cannot end it before the read is sent.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 		svc, path, home, tr, _ := setup(t, func(n int) homepageFault {
 			if n == 2 {
+				cancel()
 				return homepageStalls
 			}
 			return homepageAnswers
 		})
 		switchToB(t, path)
-		// The first probe to see account B runs out of time while B's
-		// homepage read is in flight.
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		_, _ = svc.ProbeVideoStatusAuthenticated(ctx, "test1234567")
-		cancel()
 		if f := home.fetches(); len(f) != 2 {
 			t.Fatalf("setup: homepage fetched %d times; want Init's and the abandoned one", len(f))
 		}
