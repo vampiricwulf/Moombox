@@ -40,12 +40,33 @@ func catchStopSignals(signals []os.Signal, onStop func(os.Signal)) {
 // which starts the graceful shutdown — in TUI mode tui.Run quits on it first,
 // because bubbletea handles SIGINT and SIGTERM itself but not a hangup. A
 // hangup when stdout is a terminal also marks that terminal gone, so the
-// shutdown writes nothing more to it (muteHungUpTerminal).
+// shutdown writes nothing more to it (muteHungUpTerminal). The stop also
+// overrides a restart, requested before it or after (restartPending).
 func (s *runState) stopOnSignal(sig os.Signal) {
 	if isHangup(sig) && s.stdoutIsTerminal {
 		s.stdoutHungUp.Store(true) // before the cancel: whoever sees ctx end sees this
 	}
+	s.stopSignalled.Store(true)
 	s.cancel()
+}
+
+// restartPending reports whether this run ends in a restart — exit
+// exitCodeRestart, which the launcher answers with a respawn: one was
+// requested (triggerRestart) and no stop signal arrived, whichever came
+// first. A restart's drain gives a stop 5 s and the shutdown after it to
+// land, and the child used to exit 42 regardless: the terminal it ran in had
+// just closed, or the operator had pressed Ctrl+C or sent SIGTERM, and the
+// launcher respawned it — on a closed terminal, as a headless child on the
+// deleted pty, recording and holding the instance lock where nobody could see
+// or stop it.
+func (s *runState) restartPending() bool {
+	return s.restartRequested.Load() && !s.stopSignalled.Load()
+}
+
+// stopOverrodeRestart reports a restart that was requested and that a stop
+// signal overrode (restartPending), for the shutdown to say so.
+func (s *runState) stopOverrodeRestart() bool {
+	return s.restartRequested.Load() && s.stopSignalled.Load()
 }
 
 // muteHungUpTerminal stops the logger writing to stdout once stdout's terminal

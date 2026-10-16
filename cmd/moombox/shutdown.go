@@ -28,20 +28,24 @@ const forceExitAfter = worker.StopBudget + 3*time.Second
 // PO-token provider → web server → log/DB unsubscribe → database. A
 // force-exit timer (forceExitAfter) closes rate limiters, the database and
 // the logger and exits as a backstop — with exitCodeRestart when a restart is
-// pending, else 0 (see the timer for why never 1). Every individual stop is
+// pending (restartPending), else 0 (see the timer for why never 1). Every individual stop is
 // isolated with panic recovery so one failing service does not block the
 // others.
 //
-// Returns true when a restart was requested via s.triggerRestart, so the
-// caller (main) can re-invoke run() with the same configPath.
+// Returns true when a restart was requested via s.triggerRestart and no stop
+// signal overrode it (restartPending), so the caller (main) exits with
+// exitCodeRestart and the launcher respawns.
 func (s *runState) shutdown() bool {
 	s.muteHungUpTerminal() // a hangup ended the run: nothing more to its terminal
 	s.log.Info("Shutdown signal received, shutting down gracefully...")
+	if s.stopOverrodeRestart() {
+		s.log.Info("A stop signal arrived while a restart was pending: stopping instead of restarting")
+	}
 
 	// Force-exit timer (forceExitAfter). closeLimiters / closeDB / closeLog
 	// must run here too because os.Exit skips remaining defers; all are
 	// sync.Once-guarded so the concurrently-running deferred cleanup doesn't
-	// double-close. The exit CODE must honor restartRequested: this backstop
+	// double-close. The exit CODE must honor restartPending: this backstop
 	// fires routinely (worker stop alone can legitimately take its whole
 	// budget while a background segment mux drains), and exiting 1 during an
 	// update/config restart makes the launcher terminate instead of
@@ -57,7 +61,7 @@ func (s *runState) shutdown() bool {
 		s.closeLimiters()
 		s.closeDB()  // final WAL checkpoint — committed data survives either way
 		s.closeLog() // flush buffered logs before force exit
-		if s.restartRequested.Load() {
+		if s.restartPending() {
 			os.Exit(exitCodeRestart)
 		}
 		// Exit 0, not 1: this backstop fires routinely on slow-but-USER-
@@ -185,11 +189,12 @@ func (s *runState) shutdown() bool {
 	// 8. Flush database (sync.Once-guarded — also fires from defer s.closeDB)
 	stopService("Database", s.closeDB)
 
-	if s.restartRequested.Load() {
+	restart := s.restartPending()
+	if restart {
 		s.log.Info("Shutdown complete, restarting...")
 	} else {
 		s.log.Info("Shutdown complete")
 	}
 
-	return s.restartRequested.Load()
+	return restart
 }

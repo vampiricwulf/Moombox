@@ -16,9 +16,9 @@ import (
 // launchAndSupervise is the launcher/supervisor loop. It spawns moombox
 // as a child process in the same console and waits. If the child exits
 // with exitCodeRestart (config change or update applied), it respawns —
-// picking up any new binary on disk. Every other exit is classifyChildExit's
-// to decide: it propagates and exits, rolls a failed update back, or
-// respawns a crash with backoff.
+// picking up any new binary on disk — unless the launcher forwarded a stop
+// to that child. Every exit is classifyChildExit's to decide: it propagates
+// and exits, rolls a failed update back, or respawns a crash with backoff.
 //
 // This keeps one stable parent holding the console connection so the
 // child's BubbleTea properly restores terminal state, and avoids
@@ -72,10 +72,11 @@ func launchAndSupervise() {
 	// cmd.Start (e.g. AV scanning a fresh update binary) can't race the spin.
 	var starting atomic.Bool
 	// terminating records that the launcher itself initiated the child's
-	// death (stop-signal forwarding). Crash supervision must never respawn a
-	// stop the user/system asked for — and exit-code heuristics can't tell
-	// (Windows p.Kill yields exit 1, the same as many crashes; a child the
-	// signal killed before it could catch it exits -1).
+	// death (stop-signal forwarding). Neither crash supervision nor a
+	// restart the child had pending may respawn a stop the user/system asked
+	// for — and exit-code heuristics can't tell (Windows p.Kill yields exit
+	// 1, the same as many crashes; a child the signal killed before it could
+	// catch it exits -1; a child stopped in a restart's drain exits 42).
 	var terminating atomic.Bool
 	forward := func(p *os.Process, sig os.Signal) {
 		terminating.Store(true)
@@ -166,11 +167,13 @@ func launchAndSupervise() {
 		// killed before its child has exited.
 		shareInstanceLock(cmd)
 
-		// Reset the stop-intent latch per spawn: a stop signal that raced a
-		// previous child's restart (child exited 42 anyway because its
-		// restart was already committed) must not permanently disable
-		// crash supervision and rollback preservation for every future
-		// child. A genuine stop re-sets it via the forwarder.
+		// Reset the stop-intent latch per spawn. A stop forwarded to a child
+		// ends supervision whatever that child's exit — a restart it had
+		// pending included (classifyChildExit) — so no child is spawned
+		// after one; but a stop that reached the forwarder just as the
+		// previous child exited lands on a child already judged, and must
+		// not disable crash supervision and rollback preservation for the
+		// next. A genuine stop re-sets it via the forwarder.
 		terminating.Store(false)
 
 		starting.Store(true)
@@ -251,7 +254,7 @@ func launchAndSupervise() {
 
 		case childPropagate:
 			deferDeleteOldLauncher(exePath)
-			os.Exit(code)
+			os.Exit(propagatedExitCode(code))
 
 		default: // childCrash
 			consecutiveCrashes++
@@ -462,19 +465,28 @@ func judgeChildExit(artifact string, firstAfterUpdate, wasRespawn bool, code int
 // that got past its startup and its rollback artifact (postUpdatePastRollback).
 func classifyChildExit(code int, ranFor time.Duration, wasFirstAfterUpdate, terminating, supervised bool, consecutiveCrashes int) childExitAction {
 	switch {
-	case code == exitCodeRestart:
-		return childRestart
-
-	case code == 0:
-		// Deliberate quit — clean up as always.
-		return childPropagate
-
 	case terminating:
 		// The launcher forwarded a stop signal — the user/system asked for
 		// this exit. Never respawn it AND never treat it as a failed update
 		// (checked before the post-update rule: stopping the service right
 		// after updating must not leave a scary "update failed" marker),
-		// whatever the code.
+		// whatever the code. A restart the child exits for (42) included,
+		// so this comes first: a stop that lands in a restart's drain — 5 s,
+		// then the shutdown — used to be answered with a respawn. On a
+		// terminal that had just closed, the respawned child found no
+		// terminal, ran headless on the deleted pty, recording and holding
+		// the instance lock where nobody could see or stop it. The child
+		// lets a stop override its pending restart too (restartPending);
+		// this covers a stop that reaches it only after it settled on 42,
+		// and a child binary that predates that. propagatedExitCode turns
+		// the 42 into a clean 0.
+		return childPropagate
+
+	case code == exitCodeRestart:
+		return childRestart
+
+	case code == 0:
+		// Deliberate quit — clean up as always.
 		return childPropagate
 
 	case wasFirstAfterUpdate && code != 0 &&
@@ -523,6 +535,18 @@ func classifyChildExit(code int, ranFor time.Duration, wasFirstAfterUpdate, term
 		// crash-loop cutoff.
 		return childCrash
 	}
+}
+
+// propagatedExitCode is the code the launcher exits with when it propagates
+// a child's exit (childPropagate): the child's own, except a restart
+// (exitCodeRestart) that a forwarded stop overrode, which is a clean stop.
+// Nothing that reads the launcher's status — a shell, a service manager, a
+// container runtime — knows 42 for anything else.
+func propagatedExitCode(code int) int {
+	if code == exitCodeRestart {
+		return 0
+	}
+	return code
 }
 
 // launcherHealthyWindow is how long a child must run before crash

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -122,11 +123,15 @@ func TestHungUpTerminalGetsNoMoreLines(t *testing.T) {
 //     TUI on a hangup, and gives stdout back through restoreStdoutAfterTUI,
 //     never straight to a terminal that may have hung up.
 //   - shutdown() mutes a hung-up terminal before its first log line.
+//   - shutdown() decides the restart — its return and the force-exit's code —
+//     by restartPending, which a stop signal overrides, never by
+//     restartRequested alone.
 //
 // Mutants: signal.NotifyContext back in run() (or catchStopSignals given
 // anything but stopSignals() and s.stopOnSignal); tui.Run given
 // context.Background(); s.log.RestoreStdout() back in runTUI in place of the
-// helper; the muteHungUpTerminal call deleted.
+// helper; the muteHungUpTerminal call deleted; s.restartRequested.Load() back
+// in shutdown() for its return or the force-exit's code.
 func TestRunWiresTheStopSignals(t *testing.T) {
 	calls := func(file, fn string) []string {
 		t.Helper()
@@ -177,8 +182,57 @@ func TestRunWiresTheStopSignals(t *testing.T) {
 	if !has(tuiCalls, "s.restoreStdoutAfterTUI()") || has(tuiCalls, "s.log.RestoreStdout()") {
 		t.Errorf("runTUI gives stdout back other than through restoreStdoutAfterTUI: a hung-up terminal would get the shutdown's lines; calls: %v", tuiCalls)
 	}
-	if sd := calls("shutdown.go", "shutdown"); !has(sd, "s.muteHungUpTerminal()") {
+	sd := calls("shutdown.go", "shutdown")
+	if !has(sd, "s.muteHungUpTerminal()") {
 		t.Errorf("shutdown() does not mute a hung-up terminal; calls: %v", sd)
+	}
+	if !has(sd, "s.restartPending()") || has(sd, "s.restartRequested.Load()") {
+		t.Errorf("shutdown() decides the restart other than by restartPending: a stop in a restart's drain would exit 42; calls: %v", sd)
+	}
+}
+
+// TestAStopOverridesAPendingRestart pins that a stop signal ends the run
+// without the restart it overrides, whichever came first. A restart's drain
+// (5 s, then the shutdown) gave a hangup or a Ctrl+C time to land, and the
+// child exited 42 regardless: the launcher respawned it into the terminal that
+// had just closed — headless on the deleted pty, recording and holding the
+// instance lock where nobody could see or stop it.
+//
+// Mutants: stopOnSignal not recording the stop (both stop rows restart);
+// restartPending reading restartRequested alone (likewise);
+// stopOverrodeRestart ignoring either flag.
+func TestAStopOverridesAPendingRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		restartFirst, stop     bool
+		restartAfter           bool
+		wantPending, wantNoted bool
+	}{
+		{"a restart alone", true, false, false, true, false},
+		{"a stop in a restart's drain", true, true, false, false, true},
+		{"a restart requested during a stop", false, true, true, false, true},
+		{"a stop alone", false, true, false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			s := &runState{ctx: ctx, cancel: cancel}
+			if tc.restartFirst {
+				s.restartRequested.Store(true) // triggerRestart's store
+			}
+			if tc.stop {
+				s.stopOnSignal(os.Interrupt)
+			}
+			if tc.restartAfter {
+				s.restartRequested.Store(true)
+			}
+			if got := s.restartPending(); got != tc.wantPending {
+				t.Errorf("restartPending() = %v, want %v", got, tc.wantPending)
+			}
+			if got := s.stopOverrodeRestart(); got != tc.wantNoted {
+				t.Errorf("stopOverrodeRestart() = %v, want %v", got, tc.wantNoted)
+			}
+		})
 	}
 }
 

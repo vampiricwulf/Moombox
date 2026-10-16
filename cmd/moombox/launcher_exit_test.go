@@ -15,10 +15,15 @@ import (
 // into the same prompt five times (and, after an update, lost the rollback
 // artifact to the healthy-window rule).
 //
+// A stop the launcher forwarded beats a restart: a hangup in a restart's
+// drain (the terminal closed, an SSH session dropped) was answered with a
+// respawn, into the terminal that was gone.
+//
 // Mutants: drop the `code == exitCodeStartupError` rule (the slow-keypress
 // row becomes a crash); drop the `|| code == exitCodeStartupError` clause of
 // the post-update rule (the slow post-update row propagates and deletes the
-// artifact instead of preserving it).
+// artifact instead of preserving it); the restart rule back ahead of the
+// terminating rule (the stopped-restart row respawns).
 func TestClassifyChildExit(t *testing.T) {
 	const quick, slow = 2 * time.Second, 5 * time.Minute
 	for _, tc := range []struct {
@@ -32,6 +37,8 @@ func TestClassifyChildExit(t *testing.T) {
 		want               childExitAction
 	}{
 		{"restart", exitCodeRestart, slow, false, false, false, 0, childRestart},
+		{"a restart a forwarded stop overrode", exitCodeRestart, quick, false, true, false, 0, childPropagate},
+		{"a restart a forwarded stop overrode, after an update", exitCodeRestart, quick, true, true, false, 0, childPropagate},
 		{"clean quit", 0, slow, false, false, false, 0, childPropagate},
 		{"forwarded stop beats a failed update", 1, quick, true, true, false, 0, childPropagate},
 		{"fresh update dies quickly", 1, quick, true, false, false, 0, childPostUpdateFailure},
@@ -53,6 +60,19 @@ func TestClassifyChildExit(t *testing.T) {
 		got := classifyChildExit(tc.code, tc.ranFor, tc.firstAfterUpdate, tc.terminating, tc.supervised, tc.consecutiveCrashes)
 		if got != tc.want {
 			t.Errorf("%s: classifyChildExit = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestPropagatedExitCode pins the code the launcher exits with when it stops
+// supervising: the child's, except the restart a forwarded stop overrode,
+// which is a clean stop — no shell or service manager reads 42 as anything.
+//
+// Mutant: return code as is (the 42 row).
+func TestPropagatedExitCode(t *testing.T) {
+	for code, want := range map[int]int{exitCodeRestart: 0, 0: 0, 1: 1, 130: 130, exitCodeStartupError: exitCodeStartupError, -1: -1} {
+		if got := propagatedExitCode(code); got != want {
+			t.Errorf("propagatedExitCode(%d) = %d, want %d", code, got, want)
 		}
 	}
 }

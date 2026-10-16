@@ -20,9 +20,13 @@ import (
 // The re-executed test binary acts out a launcher (signalHelperEnv set, no
 // _MOOMBOX_CHILD) running the real launchAndSupervise, and the child that
 // launcher spawns (the same binary, with _MOOMBOX_CHILD=1 added by the
-// launcher). The child records every stop signal it catches into
-// signalDirEnv/signals, one per line, and holds its "shutdown" open until the
-// test creates signalDirEnv/release.
+// launcher). The child records each start into signalDirEnv/starts and every
+// stop signal it catches into signalDirEnv/signals, one per line, holds its
+// "shutdown" open until the test creates signalDirEnv/release, and then exits
+// with exitCodeRestart: the exit of a child whose restart was settled before
+// the stop reached it, which the launcher respawns unless it forwarded that
+// stop — so a launcher that did not mark a stop as its own (terminating)
+// respawns, and a launcher that judged the restart ahead of the stop does too.
 const (
 	signalHelperEnv = "MOOMBOX_SIGNAL_HELPER"
 	signalDirEnv    = "MOOMBOX_SIGNAL_DIR"
@@ -35,6 +39,10 @@ func launcherSignalHelper() {
 		os.Exit(99)
 	}
 	dir := os.Getenv(signalDirEnv)
+	if f, err := os.OpenFile(filepath.Join(dir, "starts"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		fmt.Fprintln(f, os.Getpid())
+		f.Close()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &runState{ctx: ctx, cancel: cancel}
 	// run()'s own wiring (TestRunWiresTheStopSignals), plus the record.
@@ -51,7 +59,7 @@ func launcherSignalHelper() {
 	<-ctx.Done()
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "release")); err == nil {
-			os.Exit(0) // a shutdown that finished
+			os.Exit(exitCodeRestart) // a shutdown that finished, a restart settled before the stop
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -145,16 +153,34 @@ func (l *launcherRun) signals() []string {
 	return strings.Fields(strings.ReplaceAll(string(raw), " ", "_"))
 }
 
-// release lets the child's shutdown finish, then waits for the launcher.
+// starts is how many children the launcher has started so far.
+func (l *launcherRun) starts() int {
+	raw, _ := os.ReadFile(filepath.Join(l.dir, "starts"))
+	return len(strings.Fields(string(raw)))
+}
+
+// release lets the child's shutdown finish, then waits for the launcher —
+// which must exit, not start the child it stopped again.
 func (l *launcherRun) release(t *testing.T) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(l.dir, "release"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-l.done:
-	case <-time.After(20 * time.Second):
-		t.Fatalf("the launcher did not exit after its child's shutdown finished; output:\n%s", l.out.String())
+	deadline := time.After(20 * time.Second)
+	for {
+		select {
+		case <-l.done:
+			if n := l.starts(); n != 1 {
+				t.Fatalf("the launcher started %d children, want 1", n)
+			}
+			return
+		case <-deadline:
+			t.Fatalf("the launcher did not exit after its child's shutdown finished; output:\n%s", l.out.String())
+		case <-time.After(10 * time.Millisecond):
+			if l.starts() > 1 {
+				t.Fatalf("the launcher respawned the child it had forwarded a stop to: its exit %d was judged a restart", exitCodeRestart)
+			}
+		}
 	}
 }
 
@@ -165,9 +191,12 @@ func (l *launcherRun) release(t *testing.T) {
 //   - A signal to the launcher's PID alone — `kill`, `docker run` without -t
 //     proxying Ctrl+C to the container's main process, a supervisor
 //     signalling the main PID — is handed to the child, and the launcher
-//     waits for the child's shutdown and exits with its code. Ctrl+C was
-//     ignored here (W28-A05): nothing stopped. A hangup killed the launcher
-//     (W28-A02) and the child got only Pdeathsig's SIGTERM.
+//     waits for the child's shutdown and exits clean, never respawning the
+//     child it stopped, even one that exits for a restart (the helper child
+//     exits 42 every time). Ctrl+C was ignored here (W28-A05): nothing
+//     stopped. A hangup killed the launcher (W28-A02) and the child got only
+//     Pdeathsig's SIGTERM. A hangup in a restart's drain was answered with a
+//     respawn, into the terminal that had just closed.
 //   - A signal to the whole process group — a terminal's hangup when the
 //     window closes or an SSH session drops, Ctrl+C at a --headless run —
 //     reaches both, then again (the shell's forward of the hangup to its
@@ -180,7 +209,11 @@ func (l *launcherRun) release(t *testing.T) {
 // dies of it); signal.Ignore(os.Interrupt) back in the launcher in place of
 // catching it (the PID-alone Ctrl+C row times out); catchStopSignals
 // unregistering after the first signal (the twice rows: the repeat kills the
-// child); stopSignals ignoring the inherited disposition (the nohup row).
+// child); stopSignals ignoring the inherited disposition (the nohup row); the
+// forwarder marking only a SIGTERM as terminating (the Ctrl+C and hangup rows
+// respawn); classifyChildExit judging exitCodeRestart ahead of terminating
+// (every row respawns); propagatedExitCode passing 42 through (every row
+// exits 42).
 func TestLauncherHandsStopSignalsToTheChild(t *testing.T) {
 	if os.Getenv(signalHelperEnv) == "1" {
 		launcherSignalHelper()
@@ -232,7 +265,7 @@ func TestLauncherHandsStopSignalsToTheChild(t *testing.T) {
 						t.Fatalf("the launcher died of %v instead of waiting for its child; output:\n%s", ws.Signal(), l.out.String())
 					}
 				}
-				t.Fatalf("the launcher exited with %v, want the child's clean 0 — the repeated signal killed the child mid-shutdown?; output:\n%s", l.err, l.out.String())
+				t.Fatalf("the launcher exited with %v, want a clean 0 — the repeated signal killed the child mid-shutdown, or the restart the stop overrode came through as 42?; output:\n%s", l.err, l.out.String())
 			}
 		})
 	}

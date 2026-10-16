@@ -126,6 +126,9 @@ type runState struct {
 
 	// --- Lifecycle control ---
 	restartRequested atomic.Bool
+	// stopSignalled is set by every stop signal (stopOnSignal); it overrides
+	// restartRequested (restartPending).
+	stopSignalled atomic.Bool
 	// prevCrash is what the previous process's crash left in the crash file
 	// beside the log (captureCrashOutput, in initServices); the Recovered
 	// From Crash notice reports it.

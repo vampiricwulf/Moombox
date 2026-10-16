@@ -27,7 +27,7 @@ Moombox uses a two-process model controlled by the `_MOOMBOX_CHILD` environment 
 - Catches Ctrl+C (SIGINT), SIGTERM and, on Unix, a hangup (SIGHUP) instead of dying from them, and forwards each to the child (`forwardStop`; on Windows the console event already reached the child, so it only records the stop); a hangup inherited as ignored (`nohup`) stays ignored
 - Spawns itself as a child with `_MOOMBOX_CHILD=1` added to the environment
 - Passes through stdin/stdout/stderr so the child's TUI renders in the launcher's console
-- When the child exits with code 42 (`exitCodeRestart`), the launcher respawns. This picks up any new binary (for self-updates via the swap: current kept at `.old`, `.new` -> current)
+- When the child exits with code 42 (`exitCodeRestart`), the launcher respawns — unless it forwarded a stop to that child, which ends supervision with exit 0. This picks up any new binary (for self-updates via the swap: current kept at `.old`, `.new` -> current)
 - Any other exit is decided by `classifyChildExit` (operations.md §Launcher/Supervisor Pattern has the rules in order): code 0, a stop the launcher forwarded, 130/143 and 3 (`exitCodeStartupError`) end the launcher with the same code, and so does any other non-zero exit within 60 s of a fresh launch; a failed first boot after an update is rolled back to the previous binary; any other non-zero exit is a crash, respawned after 1/2/4/8/16 s until the launcher gives up after 5 in a row
 - On respawn, cleans up `.old` binary by renaming to `.exe~` (freeing the `.old` name for future updates)
 - On final exit, spawns a detached `cmd /C ping ... & del` process to delete the `.exe~` file after the launcher releases its lock
@@ -35,7 +35,7 @@ Moombox uses a two-process model controlled by the `_MOOMBOX_CHILD` environment 
 **Application process** (with `_MOOMBOX_CHILD=1`):
 - Runs the full service stack via `run()`
 - Handles SIGINT, SIGTERM and, on Unix, SIGHUP for graceful shutdown (`catchStopSignals`), catching every later one too, so a repeated signal mid-shutdown is harmless; the TUI quits when the run's context ends, and after a hangup nothing more is written to the gone terminal
-- Returns `true` from `run()` to signal a restart request, causing `main()` to `os.Exit(42)`
+- Returns `true` from `run()` to signal a restart request, causing `main()` to `os.Exit(42)` — unless a stop signal arrived, which overrides a restart requested before it or after (`restartPending`)
 
 **Restart mechanism:**
 ```

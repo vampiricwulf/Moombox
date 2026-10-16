@@ -10,7 +10,7 @@ This document covers building, testing, releasing, updating, and running Moombox
 - **FFmpeg is required at runtime** — must be on PATH or configured via `cfg.Paths.FFmpegPath`. The first-run setup wizard validates FFmpeg availability and can install it via chocolatey or winget.
 - **CI publishes on tag push only** (tags matching `v*`), and only after the test suite has passed on the tagged commit. The workflow reads `RELEASE_NOTES.md` from the repository root for the GitHub release body.
 - **Ed25519 signature verification is mandatory** before any binary swap during self-update. Updates without a valid `.sig` file are rejected, and so are releases without a valid signed manifest (`moombox-manifest.json`) naming that release, a newer version and the binary's SHA-256. Only a release before `FirstManifestVersion` (2.9.0), which never had a manifest, is one to install by hand; from it on, a release without its signed manifest is refused as a failure, and a binary installed by hand would fail Verify Signature for the same missing assets.
-- **Exit code 42** is the restart signal. The launcher process respawns the child when it exits with this code. Code 0 and a user-intent code (130/143, or a launcher-forwarded stop) propagate and terminate. Any other non-zero code is either an automatic rollback (first boot after an update), a fail-fast propagation (a fresh launch that died inside the 60 s healthy window), or a supervised crash respawn with backoff — see §Launcher/Supervisor Pattern.
+- **Exit code 42** is the restart signal. The launcher process respawns the child when it exits with this code, unless the launcher forwarded a stop to it (then it exits 0). Code 0 and a user-intent code (130/143, or a launcher-forwarded stop) propagate and terminate. Any other non-zero code is either an automatic rollback (first boot after an update), a fail-fast propagation (a fresh launch that died inside the 60 s healthy window), or a supervised crash respawn with backoff — see §Launcher/Supervisor Pattern.
 - **Exit code 3** (`exitCodeStartupError`) is a DETERMINISTIC startup failure — an unreadable config, a logger that cannot open its file, a refused database migration, or (headless only) a web bind the host will not give. It always propagates, never crash-respawns, and the post-update rule never rolls back on it — the environment failed, not the new binary. Its timing decides nothing: the child waits for a keypress before exiting 3, so how long it "ran" measures the operator, not the binary (`classifyChildExit`, `cmd/moombox/launcher.go`).
 - **Version is set in `cmd/moombox/main.go`** as `var version = "x.y.z"`. CI overrides this via `-ldflags -X main.version=...` at build time.
 - **Windows resource embedding** uses `go-winres` to generate `.syso` files at build time. These files are not committed to the repository.
@@ -366,6 +366,13 @@ The launcher enables graceful restarts without process chain buildup. When Moomb
 - **The child's stop signals** (`catchStopSignals`, `stopOnSignal`, `cmd/moombox/stop_signals.go`): the same set ends the run's context and starts the graceful shutdown, and every later one is caught too, so a repeated signal mid-shutdown — a hangup comes from the terminal, the shell and the launcher — cannot kill the child with its default action (`signal.NotifyContext`, used before, unregistered the signals when the TUI exited). The TUI quits when the context ends (`tui.Run`), since bubbletea handles SIGINT and SIGTERM but not SIGHUP; and after a hangup with stdout on that terminal the logger stops writing to stdout (`muteHungUpTerminal`) — moombox.log and the dashboard still get every line — so the shutdown makes no attempt on a terminal that is gone.
 
 **Parent behavior on child exit** (the `switch` in `launchAndSupervise`, `cmd/moombox/launcher.go`, in this order):
+- A launcher-forwarded stop (Ctrl+C, SIGTERM or a hangup): propagate the child's code without respawning, whatever
+  the code — a restart the child exits 42 for included, which the launcher exits 0 for (`propagatedExitCode`) — and
+  without writing an update-failed marker: stopping the service right after an update must not leave a scary
+  "update failed" marker behind. A stop that landed in a restart's drain used to be answered with a respawn: on a
+  terminal that had just closed, the new child ran headless on the deleted pty, recording and holding the instance
+  lock where nobody could see or stop it. The child lets a stop override its pending restart too (`restartPending`,
+  §Restart Triggers); this rule covers a stop that reaches it only after it settled on 42.
 - Exit code 42 (`exitCodeRestart`): Respawn the child (loop continues). If `<exe>.old` exists (from an
   update), rename it to `<exe>~` to free the `.old` name for future updates. A rename that fails — the
   `~` name is still held by this launcher's own mapped image, which happens on the second update of one
@@ -375,9 +382,6 @@ The launcher enables graceful restarts without process chain buildup. When Moomb
   rolls it back); a config restart inside a still-unproven first boot's `postUpdateFailureWindow`
   carries both forward, and any other exit of that boot ends the one-shot.
 - Normal exit (code 0): Terminate.
-- A launcher-forwarded stop (Ctrl+C, SIGTERM or a hangup): propagate the child's code without respawning, and without
-  writing an update-failed marker — stopping the service right after an update must not leave a scary
-  "update failed" marker behind.
 - A non-zero exit from the FIRST boot after an update, inside `postUpdateFailureWindow` (2 minutes)
   and with its rollback artifact still on disk: automatic rollback (above), unless the code is
   `exitCodeStartupError`, which is preserved-with-instructions instead — whenever it arrives, since
@@ -435,6 +439,8 @@ All restart triggers call `triggerRestart(source)` (`cmd/moombox/services.go`), 
 3. Starts the web server's drain (`StartDrain`), so no new request is taken
 4. After a 5-second grace — time for the response that asked for the restart to reach its client — calls `cancel()` to cancel the root context (propagates to all services) and `quitTUI()` if the TUI is running
 
+A stop signal (Ctrl+C, SIGTERM, a hangup) overrides a requested restart, whether it arrives in the drain, during the shutdown or before the request (`restartPending`, `cmd/moombox/stop_signals.go`): the run ends with exit 0 and the log says `"A stop signal arrived while a restart was pending: stopping instead of restarting"`. An update the restart was to start is already on disk and runs at the next start, as an ordinary launch.
+
 | Source | Trigger |
 |--------|---------|
 | `"API"` | `POST /api/restart` (gated by `network_access` + CSRF + auth) |
@@ -471,9 +477,9 @@ Each service stop is wrapped in `stopService(name, fn)` which provides:
 A `time.AfterFunc` timer (`forceExitAfter`, 15 seconds) starts at shutdown entry. It is the download worker's whole stop budget (`worker.StopBudget`: a 10-second wait for in-flight jobs, then mux cancellation and a 2-second grace) plus a 3-second margin — it must outlast that budget and the trim service's stop ahead of it (up to 2 seconds, `worker.TrimStopWait`) together, because its clock starts first and a shorter backstop would exit before the worker cancelled its muxes. (What that cancel was first for — FFmpeg left writing an archive the restarted child re-muxes with `-y` — no longer rests on it: FFmpeg dies with the process and writes only a temporary file of its own, § Runtime Dependency: FFmpeg. A mux the exit kills instead of cancels leaves that temporary file for the next start's sweep.) What the trim stop and the worker leave of the margin is the notification flush's; the timer is not widened for the trim stop, since the owner's ruling caps a graceful shutdown at 15 s. If graceful shutdown has not completed in time, the timer fires:
 1. Logs `"Graceful shutdown timed out, forcing exit"`
 2. Closes the rate limiters, the database (final WAL checkpoint) and the log (flushing buffered lines)
-3. Exits with code 42 when a restart was requested, else 0 — never 1, which the launcher would treat as a crash and respawn a daemon the user just quit
+3. Exits with code 42 when a restart is pending (`restartPending`: requested, and no stop signal overrode it), else 0 — never 1, which the launcher would treat as a crash and respawn a daemon the user just quit
 
-After graceful shutdown completes, if `restartRequested` is true, the child process exits with code 42 (triggering launcher respawn). Otherwise, it exits with code 0.
+After graceful shutdown completes, if a restart is pending (`restartPending`), the child process exits with code 42 (triggering launcher respawn). Otherwise, it exits with code 0.
 
 ---
 

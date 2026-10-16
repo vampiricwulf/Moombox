@@ -772,8 +772,9 @@ GitHub Actions (`.github/workflows/release.yml`) triggers on tag push, and runs 
 ### Launcher/Supervisor
 
 The launcher (parent process, without `_MOOMBOX_CHILD`) spawns the application as a child with `_MOOMBOX_CHILD=1`. It decides each child exit by `classifyChildExit` (`cmd/moombox/launcher.go`), whose rules apply in this order — docs/spec/operations.md §Launcher/Supervisor Pattern has the full detail:
+- Any exit after the launcher forwarded a stop to the child — Launcher exits with the child's code, or 0 for a restart's 42: a stop in a restart's drain stops Moombox (the child itself lets a stop override a pending restart).
 - Exit code 42 — Restart requested. Launcher respawns immediately, picking up any new binary.
-- Exit code 0, or any exit after the launcher forwarded a stop to the child — Launcher exits with the same code.
+- Exit code 0 — Launcher exits with the same code.
 - A non-zero exit from the first boot after an update, inside 2 minutes and with its rollback artifact still on disk (exit 3 whenever it arrives) — automatic rollback to the previous binary, which is respawned; exit 3 keeps the artifact with instructions instead.
 - Exit code 130 or 143 (128+SIGINT / 128+SIGTERM), or 3 (`exitCodeStartupError`) — Launcher exits with the same code.
 - Any other non-zero exit within 60 s of a fresh launch — Launcher exits with the same code: a startup failure fails fast instead of crash-looping.
