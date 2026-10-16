@@ -344,10 +344,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.updateAvailable = nil
 				a.details.updateInfo = nil
 			}
+			a.followPendingRelease(pendingGoneElsewhere)
 			return a, a.listenForUpdates()
 		}
 		a.updateAvailable = &msg
 		a.details.updateInfo = &msg
+		a.followPendingRelease(pendingGoneElsewhere)
 		return a, a.listenForUpdates()
 
 	case updateCheckResultMsg:
@@ -375,6 +377,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.setFeedback("Already up to date")
 			}
 		}
+		// After the check's own line: notes on screen for the release it
+		// replaced or found pulled are the more specific news.
+		a.followPendingRelease(pendingGonePulled)
 		return a, nil
 
 	case updateApplyResultMsg:
@@ -387,11 +392,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// while the restart is pending — so R U and the badge go with it.
 		a.updateAvailable = nil
 		a.details.updateInfo = nil
+		// U closed the notes before the apply, but R N can have opened them
+		// again on the same release while it ran. Ahead of this arm's own
+		// line, which is the one to leave on the main screen.
+		a.followPendingRelease(pendingGoneApplied)
 		a.setFeedback("Update applied — restarting")
 		return a, nil
 
 	case dismissUpdateResultMsg:
+		a.releaseNotesPopup.skipping = ""
 		if msg.Err != nil {
+			// A skip refused because the release went elsewhere re-synced the
+			// pending release (resyncTUIUpdate) while the notes ignored it.
+			a.followPendingRelease(pendingGoneElsewhere)
 			// Stated: nothing in this wording reaches the scan's red
 			// substrings, and a refused skip rendered in the success green.
 			a.setFeedbackWithSeverity("Could not skip "+msg.Tag+": "+msg.Err.Error(), severityError)
@@ -428,7 +441,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// R N re-opened it on a pending update meanwhile, the late answer
 		// put the running version's notes and tag under a footer still
 		// offering U and S — both of which then refused on the tag guard.
-		if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() && !a.releaseNotesPopup.pending {
+		// Notes withdrawn from beside a pending update are not pending
+		// either, and are not that viewer.
+		if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() && !a.releaseNotesPopup.pending &&
+			a.releaseNotesPopup.notice == "" {
 			// A failed fetch carries no tag (OnFetchReleaseNotes returns
 			// "", "", err), and reopening with it blanked the title to
 			// "Release Notes — ". Keep the tag R N opened the overlay with.
@@ -1245,6 +1261,43 @@ func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) (string, feedbac
 
 func (a *App) setFeedback(msg string) {
 	a.setFeedbackWithSeverity(msg, severityUnstated)
+}
+
+// Why the release R N's notes are open on stopped being pending, for
+// followPendingRelease: what each arm that clears or replaces
+// a.updateAvailable knows of it.
+const (
+	pendingGoneElsewhere = "skipped, applied or withdrawn elsewhere"
+	pendingGonePulled    = "a check found it withdrawn"
+	pendingGoneApplied   = "applied, restarting"
+)
+
+// followPendingRelease runs wherever a.updateAvailable is cleared or
+// replaced. Notes open beside a pending update (R N) whose release is no
+// longer the pending one kept their footer offering U and S, and both did
+// nothing: the keys' tag gate (handleKey) refuses them for a release other
+// than the one pending. The footer now drops them and the overlay says why
+// (withdraw) — gone is the reason when nothing is pending; a newer release
+// pending in its place is named — and so does the feedback line, for the
+// main screen once the notes close. Not while the overlay's own S on that
+// release is out: the skip announces the clear before it answers, and its
+// answer closes the notes with its own line.
+func (a *App) followPendingRelease(gone string) {
+	o := a.releaseNotesPopup
+	if o == nil || !o.isOpen() || !o.pending || o.skipping == o.tag {
+		return
+	}
+	if a.updateAvailable != nil && a.updateAvailable.TagName == o.tag {
+		return
+	}
+	notice, line := "No longer pending — "+gone, o.tag+" is no longer pending — "+gone
+	if a.updateAvailable != nil {
+		next := a.updateAvailable.TagName
+		notice = "No longer pending — " + next + " is; close and R N for its notes"
+		line = o.tag + " is no longer pending — " + next + " is; R N for its notes"
+	}
+	o.withdraw(notice)
+	a.setFeedback(line)
 }
 
 // feedbackRowHold is how long one row of the feedback line stays up: the 3 s

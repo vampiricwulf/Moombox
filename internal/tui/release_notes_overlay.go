@@ -28,6 +28,15 @@ type releaseNotesOverlay struct {
 	// is non-nil), so the footer offers the S key. Reset on close so a
 	// later open() for an arbitrary version's notes defaults to false.
 	pending bool
+	// notice is the line shown above the footer once the release these notes
+	// belong to stopped being pending while they were open (withdraw): the
+	// main screen's feedback line is hidden behind the overlay. Reset on
+	// close.
+	notice string
+	// skipping is the tag the overlay's own S is skipping while its request
+	// is out, so the clear that skip announces is not read as one from
+	// elsewhere (followPendingRelease). Reset by the answer and by close.
+	skipping string
 	// isDark mirrors App.isDark (terminal background detection) so the
 	// markdown renderer matches the terminal, exactly as the huh themes
 	// already do. Defaults true: dark is Moombox's historical assumption
@@ -62,6 +71,16 @@ func (o *releaseNotesOverlay) open(tag, rawNotes string, width, height int) {
 	o.vp.GotoTop()
 }
 
+// withdraw is for notes open beside a pending update whose release is no
+// longer pending — skipped or applied elsewhere, pulled, or replaced by a
+// newer one a check found. U and S would both be refused (their tag gate in
+// handleKey), so the footer stops offering them, and notice says why above
+// it. The notes stay open where the reader was.
+func (o *releaseNotesOverlay) withdraw(notice string) {
+	o.pending = false
+	o.notice = notice
+}
+
 // applySize sizes the viewport for the given terminal dimensions and
 // re-renders the body at that width (renderBody bakes its word wrap into the
 // rendered text, so the content must be regenerated whenever the width
@@ -76,7 +95,8 @@ func (o *releaseNotesOverlay) applySize(width, height int) {
 	o.width = width
 	o.height = height
 
-	// -4 borders + padding, -6 borders + title + footer.
+	// -4 borders + padding; -6 rows, of which the borders, title and footer
+	// take four and the notice, when there is one, a fifth.
 	vpWidth := max(min(max(width*8/10, 40), width)-4, 1)
 	vpHeight := max(min(max(height*8/10, 8), height)-6, 1)
 
@@ -105,6 +125,8 @@ func (o *releaseNotesOverlay) close() {
 	o.tag = ""
 	o.rawNotes = ""
 	o.pending = false
+	o.notice = ""
+	o.skipping = ""
 }
 
 // Update routes a tea.Msg to the embedded viewport for scroll handling.
@@ -166,8 +188,15 @@ func (o *releaseNotesOverlay) View() string {
 	title := titleStyle.Render(truncateString("Release Notes — "+o.tag, max(inner-2, 1)))
 	footer := footerStyle.Render(footerText)
 
-	body := o.vp.View()
-	joined := lipgloss.JoinVertical(lipgloss.Left, title, body, footer)
+	rows := []string{title, o.vp.View()}
+	if o.notice != "" {
+		// Truncated like the title: every notice leads with "No longer
+		// pending", the part a narrow box keeps.
+		noticeStyle := lipgloss.NewStyle().Foreground(ColorWarning).Padding(0, 1)
+		rows = append(rows, noticeStyle.Render(truncateString(o.notice, max(inner-2, 1))))
+	}
+	rows = append(rows, footer)
+	joined := lipgloss.JoinVertical(lipgloss.Left, rows...)
 	box := borderStyle.Render(joined)
 
 	// Backstop: centerBox pads but never clips, so anything still too wide

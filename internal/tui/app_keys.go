@@ -134,11 +134,14 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if !a.releaseNotesPopup.pending || a.updateAvailable == nil || a.OnDismissUpdate == nil {
 				return a, nil
 			}
-			if a.updateAvailable.TagName != a.releaseNotesPopup.tag {
+			// And once: a second S while the first is out would only be
+			// refused, the release being skipped already.
+			if a.updateAvailable.TagName != a.releaseNotesPopup.tag || a.releaseNotesPopup.skipping != "" {
 				return a, nil
 			}
 			tag := a.updateAvailable.TagName
 			fn := a.OnDismissUpdate
+			a.releaseNotesPopup.skipping = tag
 			a.setFeedback("Skipping " + tag + "...")
 			return a, safeCmd(func() tea.Msg { return dismissUpdateResultMsg{Tag: tag, Err: fn(tag)} })
 		}
