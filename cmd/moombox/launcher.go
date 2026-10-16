@@ -150,6 +150,9 @@ func launchAndSupervise() {
 		// launcherStalenessNote). Absent for pre-handshake launchers, which
 		// the child treats as "an earlier version".
 		env = append(env, "_MOOMBOX_LAUNCHER_VERSION="+version)
+		// Where this child records its database for `moombox add`, the
+		// record a previous child left removed first (daemon_record.go).
+		env = append(env, childDaemonRecordEnv()...)
 		// wasRespawn: this spawn exists because the previous child crashed.
 		// A quick death of a respawned child must route into the crash
 		// COUNTER (backoff + cutoff), not the fail-fast branch — otherwise

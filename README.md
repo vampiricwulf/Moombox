@@ -177,6 +177,14 @@ To add a video manually:
 ```bash
 Moombox.exe add <video_url_or_id>
 ```
+While Moombox is running (as the same user), `add` writes to the
+database the running instance has open, whichever directory you run it
+from — pass the
+`--config` it runs with if that config is not found from here. With
+Moombox stopped, a relative `database_path` (the default
+`./moombox.db`) is looked up in the current directory, so run `add` from
+Moombox's own directory then. A video ID that begins with `-` works as
+it is, or after `--`.
 
 To run without the TUI (web dashboard only):
 ```bash

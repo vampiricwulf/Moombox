@@ -95,7 +95,14 @@ func acquireSingleInstanceLock() error {
 
 var (
 	procLockFileEx         = kernel32.NewProc("LockFileEx")
+	procUnlockFileEx       = kernel32.NewProc("UnlockFileEx")
 	crossSessionLockHandle syscall.Handle
+	// heldLockDir is the directory of the cross-session lock this process
+	// holds, "" when it holds none: where the daemon record goes
+	// (daemon_record.go). The record is a file of its own beside the lock,
+	// not the lock file's content: the byte LockFileEx locks cannot be read
+	// through another handle.
+	heldLockDir string
 )
 
 const (
@@ -109,16 +116,15 @@ const (
 // process (any session, same user) already holds it; every other failure
 // is fail-open (nil).
 func acquireCrossSessionLock() error {
-	base := os.Getenv("LOCALAPPDATA")
-	if base == "" {
+	lockDir := daemonLockDir()
+	if lockDir == "" {
 		return nil
 	}
-	lockDir := filepath.Join(base, "moombox")
 	if err := os.MkdirAll(lockDir, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: cross-session lock dir unavailable (%v) — continuing with session mutex only\n", err)
 		return nil
 	}
-	pathPtr, err := syscall.UTF16PtrFromString(filepath.Join(lockDir, "moombox.lock"))
+	pathPtr, err := syscall.UTF16PtrFromString(filepath.Join(lockDir, singleInstanceLockName))
 	if err != nil {
 		return nil
 	}
@@ -149,13 +155,75 @@ func acquireCrossSessionLock() error {
 		return nil
 	}
 	crossSessionLockHandle = h
+	heldLockDir = lockDir
+	// A record beside a lock nobody held was left by a daemon that died
+	// with it; it must not stand for this one while its child boots.
+	removeDaemonRecord(heldDaemonRecordPath())
 	return nil
 }
 
+// daemonLockDir is the directory the cross-session lock lives in,
+// %LOCALAPPDATA%\moombox; "" when LOCALAPPDATA is unset, where no lock is
+// taken.
+func daemonLockDir() string {
+	base := os.Getenv("LOCALAPPDATA")
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "moombox")
+}
+
+// daemonLockHeld reports whether a process holds the cross-session lock in
+// dir — `moombox add` asking whether a daemon runs. A shared fail-immediately
+// LockFileEx on the launcher's byte is tried through a handle of its own
+// (Windows file locks belong to the handle, so this works within the
+// holder's own process too) and released at once; ERROR_LOCK_VIOLATION means
+// the lock is held. A missing lock file means no daemon ever ran as this
+// user. The probe holds its shared lock for microseconds, and a launcher
+// starting inside them refuses as if another instance ran, with its "try
+// again" advice.
+func daemonLockHeld(dir string) (bool, error) {
+	pathPtr, err := syscall.UTF16PtrFromString(filepath.Join(dir, singleInstanceLockName))
+	if err != nil {
+		return false, err
+	}
+	h, err := syscall.CreateFile(pathPtr,
+		syscall.GENERIC_READ,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
+		nil, syscall.OPEN_EXISTING, syscall.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		if err == syscall.ERROR_FILE_NOT_FOUND || err == syscall.ERROR_PATH_NOT_FOUND {
+			return false, nil
+		}
+		return false, err
+	}
+	defer syscall.CloseHandle(h)
+	var ovl syscall.Overlapped
+	r, _, callErr := procLockFileEx.Call(
+		uintptr(h),
+		lockfileFailImmediately, // shared: no lockfileExclusiveLock
+		0,                       // reserved
+		1,                       // the byte the launcher locks
+		0,
+		uintptr(unsafe.Pointer(&ovl)),
+	)
+	if r == 0 {
+		if errno, ok := callErr.(syscall.Errno); ok && errno == errLockViolation {
+			return true, nil
+		}
+		return false, callErr
+	}
+	procUnlockFileEx.Call(uintptr(h), 0, 1, 0, uintptr(unsafe.Pointer(&ovl)))
+	return false, nil
+}
+
 // releaseSingleInstanceLock closes the mutex handle and the cross-session
-// lock file. Safe to call on a process that never acquired (no-op).
+// lock file, removing the daemon record beside the lock first. Safe to call
+// on a process that never acquired (no-op).
 func releaseSingleInstanceLock() {
 	if crossSessionLockHandle != 0 {
+		removeDaemonRecord(heldDaemonRecordPath())
+		heldLockDir = ""
 		syscall.CloseHandle(crossSessionLockHandle) // releases the LockFileEx region
 		crossSessionLockHandle = 0
 	}

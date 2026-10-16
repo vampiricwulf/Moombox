@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -100,8 +101,37 @@ func addVideo(input, configPath string) {
 		if configPath != "" {
 			fmt.Fprintf(os.Stderr, "No config file at %s — pass the -config the daemon runs with so the job lands in the daemon's database.\n", configPath)
 		} else {
-			fmt.Fprintln(os.Stderr, "No config.toml found — run `moombox add` from the Moombox daemon's directory, or pass its -config, so the job lands in the daemon's database.")
+			// Passing the daemon's -config is not the whole answer on its
+			// own: with the daemon stopped, a relative database_path in it
+			// still resolves against this directory (resolveAddDatabase).
+			fmt.Fprintln(os.Stderr, "No config.toml found here, in ./config/ or in ~/.config/moombox/ — pass the -config the Moombox daemon runs with. While the daemon is stopped, a relative database_path in it resolves against this directory, so run `moombox add` from the daemon's directory then.")
 		}
+		if d := findRunningDaemon(); d.record != nil && d.record.ConfigPath != "" {
+			fmt.Fprintf(os.Stderr, "The running Moombox daemon (pid %d) loaded %s.\n", d.record.PID, d.record.ConfigPath)
+		}
+		os.Exit(1)
+	}
+
+	// Which database: the one the running daemon recorded beside its
+	// single-instance lock, or, with none running, database_path resolved
+	// against this directory (daemon_record.go). database_path used to be
+	// opened as given, so a relative one run from another directory than the
+	// daemon's found no database there ("Start the Moombox daemon first."
+	// while it ran) or wrote the job into a stray moombox.db, reported it
+	// added and sent Job Added for a video the daemon never saw.
+	daemon := findRunningDaemon()
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read the working directory: %v\n", err)
+		os.Exit(1)
+	}
+	configFile := ""
+	if cfg.LoadedFrom != "" {
+		configFile = absUnder(cwd, cfg.LoadedFrom)
+	}
+	dbPath, err := resolveAddDatabase(cfg.Paths.DatabasePath, configFile, cwd, daemon)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Not added: %v.\n", err)
 		os.Exit(1)
 	}
 
@@ -111,15 +141,22 @@ func addVideo(input, configPath string) {
 	// running daemon during an update window) would leave the daemon's old
 	// code writing against a new schema. Also catches a missing DB file —
 	// the daemon, not `add`, should create it.
-	if v, verr := database.FileSchemaVersion(cfg.Paths.DatabasePath); verr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to inspect database %s: %v\nStart the Moombox daemon first.\n", cfg.Paths.DatabasePath, verr)
+	if v, verr := database.FileSchemaVersion(dbPath); verr != nil {
+		switch {
+		case !daemon.running && !filepath.IsAbs(cfg.Paths.DatabasePath):
+			fmt.Fprintf(os.Stderr, "No database at %s: %v\nThe database_path \"%s\" is relative, and with no Moombox daemon running as this user it resolves against this directory. Run `moombox add` from the directory the daemon runs in, set an absolute database_path, or start the daemon first.\n", dbPath, verr, cfg.Paths.DatabasePath)
+		case daemon.running:
+			fmt.Fprintf(os.Stderr, "Failed to inspect database %s: %v\n", dbPath, verr)
+		default:
+			fmt.Fprintf(os.Stderr, "Failed to inspect database %s: %v\nStart the Moombox daemon first.\n", dbPath, verr)
+		}
 		os.Exit(1)
 	} else if v != database.CurrentSchemaVersion() {
 		fmt.Fprintf(os.Stderr, "Database schema v%d does not match this binary (v%d) — start the Moombox daemon to migrate, then retry.\n", v, database.CurrentSchemaVersion())
 		os.Exit(1)
 	}
 
-	db, err := database.Open(cfg.Paths.DatabasePath)
+	db, err := database.Open(dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
 		os.Exit(1)

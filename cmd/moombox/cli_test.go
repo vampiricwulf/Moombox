@@ -38,11 +38,14 @@ func TestCLIAddHonoursConfigOnEitherSide(t *testing.T) {
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCLIAddHonoursConfigOnEitherSide$")
 			cmd.Dir = t.TempDir() // a wrong dispatch writes a daemon's files here, not into the package
+			home := t.TempDir()   // the refusal looks for a running daemon: not this machine's
 			cmd.Env = append(os.Environ(),
 				"MOOMBOX_CLI_HELPER=1",
 				"MOOMBOX_CLI_ARGS="+args,
 				"_MOOMBOX_CHILD=1", // a wrong dispatch boots run() here, not a launcher
 				"MOOMBOX_NO_TUI=1",
+				"HOME="+home,
+				"LOCALAPPDATA="+home,
 			)
 			out, err := cmd.CombinedOutput()
 			if ctx.Err() != nil {

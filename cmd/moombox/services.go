@@ -675,10 +675,19 @@ func (s *runState) initServices(logLevelOverride string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	s.db = db
+	// The record `moombox add` finds this database by, at the path the
+	// launcher named (daemon_record.go); it goes when the database closes.
+	daemonRecord := os.Getenv(daemonRecordEnv)
+	writeDaemonRecord(daemonRecord, cfg.Paths.DatabasePath, cfg.LoadedFrom, log)
 	// Database Close is wrapped in sync.Once so both the orderly shutdown
 	// sequence (stopService "Database") and the run()-side defer are safe.
 	var dbCloseOnce sync.Once
-	s.closeDB = func() { dbCloseOnce.Do(func() { db.Close() }) }
+	s.closeDB = func() {
+		dbCloseOnce.Do(func() {
+			removeDaemonRecord(daemonRecord)
+			db.Close()
+		})
+	}
 
 	// =========================================================================
 	// 3b. Connectivity monitor

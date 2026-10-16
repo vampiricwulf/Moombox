@@ -3,7 +3,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +23,10 @@ import (
 // caller. Adding additional callers requires either a mutex here or a
 // guarantee of caller serialization.
 var lockFile *os.File
+
+// heldLockDir is the directory of the lock this process holds, "" when it
+// holds none: where the daemon record goes (daemon_record.go).
+var heldLockDir string
 
 // lockDirFor returns the directory in which the lock file should live.
 // Prefers $HOME/.local/share/moombox; falls back to /tmp if HOME is
@@ -49,7 +55,7 @@ func acquireSingleInstanceLock() error {
 		return fmt.Errorf("create lock dir %q: %w", lockDir, err)
 	}
 
-	lockPath := filepath.Join(lockDir, "moombox.lock")
+	lockPath := filepath.Join(lockDir, singleInstanceLockName)
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("open lock file %q: %w", lockPath, err)
@@ -71,11 +77,47 @@ func acquireSingleInstanceLock() error {
 	_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
 
 	lockFile = f
+	heldLockDir = lockDir
+	// A record beside a lock nobody held was left by a daemon that died
+	// with it; it must not stand for this one while its child boots.
+	removeDaemonRecord(heldDaemonRecordPath())
 	return nil
 }
 
-// releaseSingleInstanceLock closes this process's descriptor on the lock
-// file. Safe to call on a process that never acquired (no-op).
+// daemonLockDir is the directory the lock lives in, for `moombox add`.
+func daemonLockDir() string { return lockDirFor() }
+
+// daemonLockHeld reports whether a process holds the lock in dir — `moombox
+// add` asking whether a daemon runs. A shared non-blocking flock is tried on
+// a descriptor of its own (flock locks belong to the open file description,
+// so this works within the holder's own process too) and dropped at once;
+// one that would block means the lock is held. A missing lock file means no
+// daemon ever ran as this user. The probe holds its shared lock for
+// microseconds, and a launcher starting inside them refuses as if another
+// instance ran, with its "try again" advice.
+func daemonLockHeld(dir string) (bool, error) {
+	f, err := os.Open(filepath.Join(dir, singleInstanceLockName))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer f.Close()
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+	if err == nil {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		return false, nil
+	}
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		return true, nil
+	}
+	return false, err
+}
+
+// releaseSingleInstanceLock removes the daemon record beside the lock, then
+// closes this process's descriptor on the lock file. Safe to call on a
+// process that never acquired (no-op).
 //
 // It closes, and never asks for LOCK_UN: the child holds a descriptor on the
 // same open file (shareInstanceLock), and an unlock through either one
@@ -85,6 +127,8 @@ func releaseSingleInstanceLock() {
 	if lockFile == nil {
 		return
 	}
+	removeDaemonRecord(heldDaemonRecordPath())
+	heldLockDir = ""
 	lockFile.Close()
 	lockFile = nil
 }
