@@ -35,13 +35,14 @@ func TestDiscoverResumeSegment(t *testing.T) {
 		// A tombstoned seg_N dir must never be handed back as a resume target
 		// -- appending fresh download data into a dir whose content the merge
 		// already consumed would corrupt or duplicate that content. seg_1 (the
-		// highest staged part, tombstoned/superseded) must be invisible
-		// entirely -- with it hidden, the only recorded part is 0, so the next
-		// fresh index is 1, in a BRAND NEW seg_1 dir the caller will MkdirAll
-		// -- NOT the tombstoned one (which happens to share the same path
-		// here, but discoverResumeSegment must treat it as absent, not as an
-		// existing dir to append into).
-		{name: "skips tombstoned seg dir", stagedDirs: []string{"", "seg_1"}, segRows: []int{0}, tombstone: "seg_1", wantIdx: 1, wantDir: "seg_1"},
+		// highest staged part, tombstoned) must be invisible entirely, which
+		// leaves the root's unmuxed data as the part to resume. With part 0
+		// recorded this case could not fail: the next fresh index is 1 either
+		// way, and seg_1 is the tombstoned dir's own path.
+		//
+		// Mutant: stagedSegDirs listing tombstoned dirs (segDirsOf(dir, true))
+		// -- the tombstoned seg_1 comes back as (1, seg_1).
+		{name: "skips tombstoned seg dir", stagedDirs: []string{"", "seg_1"}, tombstone: "seg_1", wantIdx: 0, wantDir: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
