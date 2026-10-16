@@ -99,6 +99,14 @@ func setAsideStagedMedia(dir string, names []string) ([]string, error) {
 				return asides, fmt.Errorf("set aside %s but its resume state could not be moved or removed: %w", filepath.Base(p), rmErr)
 			}
 		}
+		// So does the record of a mux that could not carry it whole, which
+		// keepRepairedAside and the aside removals read beside the aside. One
+		// that cannot follow is no trap: beside the fresh file it describes
+		// a size that file will not have, and the aside's own mux walks it
+		// and records it again.
+		if err := utils.ReplaceFile(p+muxGapRecordSuffix, aside+muxGapRecordSuffix); err != nil && !os.IsNotExist(err) {
+			os.Remove(p + muxGapRecordSuffix)
+		}
 	}
 	return asides, nil
 }

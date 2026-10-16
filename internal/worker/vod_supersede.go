@@ -111,7 +111,20 @@ func (o *DownloadOrchestrator) claimStagingRootForVod(jobCtx *JobContext) error 
 			return fmt.Errorf("create part 0 staging dir: %w", err)
 		}
 		for _, name := range liveShapeStagingNames {
-			for _, p := range []string{filepath.Join(root, name), engine.StagedRestartSidecar(filepath.Join(root, name))} {
+			src := filepath.Join(root, name)
+			// The recording travels with its resume state and with the record
+			// a mux leaves beside a recording it could not carry whole —
+			// part 0's, when the root was muxed as part 0 at the split with a
+			// damaged fragment left out. Left in the root, that record names
+			// a file that is not there and shields nothing; seg_0's copy of
+			// the damaged original, a recorded part nothing muxes again to
+			// write a new one, would then go with the staging once the
+			// from-the-start download supersedes the parts. The record moves
+			// first: a crash after it and before the recording leaves the
+			// recording in the root, where the next claim sets it aside (an
+			// aside shields itself, and its own mux records it again), never
+			// a moved recording without its record.
+			for _, p := range []string{src + muxGapRecordSuffix, src, engine.StagedRestartSidecar(src)} {
 				if !fileExists(p) {
 					continue
 				}

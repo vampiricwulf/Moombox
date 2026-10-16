@@ -475,3 +475,62 @@ func TestCleanupKeepsRootRecordingTheFinalizeDidNotUse(t *testing.T) {
 		})
 	}
 }
+
+// TestVodClaimCarriesPartZeroMuxGapRecord: a split job's part 0 is muxed from
+// the staging root at its split (rootIsPartZero) with a damaged fragment left
+// out of a repaired copy, so the record shielding the original sits beside
+// root/video_stream. The from-the-start run's claim moves that recording into
+// seg_0, and nothing muxes a recorded part again to write a new record: the
+// record must move with it, or the complete VOD's finalize supersedes the
+// parts and its staging cleanup deletes the only copy of what part 0's
+// repair left out.
+//
+// Mutant: claimStagingRootForVod moving only the recording and its resume
+// state (stagedMuxGaps finds nothing after the claim, and the staged
+// original is deleted with staging).
+func TestVodClaimCarriesPartZeroMuxGapRecord(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	const id = "j-vodclaim-gap"
+	staging, _ := muxFixtureJob(t, w, db, id)
+	root := filepath.Join(staging, "video_stream")
+	src := fragmentedFixture(t, ffmpegPath, "video", 300)
+	stageFragmented(t, root, src, 50, damageZeroed)
+
+	job, _ := db.GetJob(id)
+	jobCtx := w.buildJobContext(job)
+	seg, err := w.orchestrator.muxSegment(context.Background(), jobCtx, 0, 0, 1700000000,
+		QualityInfo{Label: "720p"}, &DownloadResult{HasVideo: true, VideoPath: root})
+	if err != nil || seg == nil {
+		t.Fatalf("muxSegment part 0: %v", err)
+	}
+	if !hasMuxGapRecord(root) {
+		t.Fatal("part 0's damaged root recording has no mux-gap record")
+	}
+
+	if err := w.orchestrator.claimStagingRootForVod(jobCtx); err != nil {
+		t.Fatalf("claimStagingRootForVod: %v", err)
+	}
+	moved := filepath.Join(staging, "seg_0", "video_stream")
+	if !hasMuxGapRecord(moved) {
+		t.Fatal("part 0's recording moved to seg_0 without its mux-gap record")
+	}
+
+	// The from-the-start download completes in the root, and the Mux action
+	// finalizes it: the parts are superseded, the root muxed whole.
+	stageFragmented(t, root, src, -1, damageNone)
+	if err := writeVodRootState(staging, vodRootComplete); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.MuxJob(id); err != nil {
+		t.Fatalf("MuxJob: %v", err)
+	}
+	w.Stop()
+	row, _ := db.GetJob(id)
+	if row == nil || row.Status != database.StatusFinished {
+		t.Fatalf("job = %v (%q), want Finished", statusOf(row), errorOf(row))
+	}
+	if !hasMuxGapRecord(moved) {
+		t.Errorf("part 0's staged original, muxed with a gap, is gone or unshielded after the VOD finalize (exists %v)", fileExists(moved))
+	}
+}

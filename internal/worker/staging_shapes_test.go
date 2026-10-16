@@ -243,3 +243,31 @@ func TestSetAsideStagedMediaRemovesEmptyFiles(t *testing.T) {
 		t.Errorf("the empty capture is still in staging")
 	}
 }
+
+// TestSetAsideStagedMediaCarriesItsMuxGapRecord: a recording a mux could not
+// carry whole keeps its record when it is set aside — beside the aside, where
+// keepRepairedAside and the aside removals read it, and not beside the fresh
+// file that takes its name.
+//
+// Mutant: setAsideStagedMedia without the record move (the aside has no
+// record; the stale one stays in the recording's old place).
+func TestSetAsideStagedMediaCarriesItsMuxGapRecord(t *testing.T) {
+	dir := t.TempDir()
+	media := filepath.Join(dir, "video_stream")
+	if err := os.WriteFile(media, []byte("damaged capture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMuxGapRecord(media, muxGapRecord{Size: int64(len("damaged capture")), Dropped: []string{"bytes 1-2"}}); err != nil {
+		t.Fatal(err)
+	}
+	asides, err := setAsideStagedMedia(dir, liveShapeStagingNames)
+	if err != nil || len(asides) != 1 {
+		t.Fatalf("setAsideStagedMedia = %v, %v", asides, err)
+	}
+	if !hasMuxGapRecord(asides[0]) {
+		t.Error("the aside has no mux-gap record")
+	}
+	if fileExists(media + muxGapRecordSuffix) {
+		t.Error("the record stayed where the recording was")
+	}
+}
