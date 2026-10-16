@@ -451,31 +451,25 @@ func TestReorderBufferFailureDoesNotReopenUnboundedGrowth(t *testing.T) {
 // test for the rolling-window catch-up: a far-behind download must drain its
 // whole span in ONE continuously-fed pool rather than batch-quantised waves
 // with a dedicated head probe between each. It drives the real runDashLoop
-// (d.Start) against a fake GVS where every segment costs a small fixed delay
-// and every dedicated head probe costs a large fixed delay, then asserts
-// total wall clock well under what the batched structure must pay.
-//
-// The numbers, and why the margin cannot flake on a busy machine:
+// (d.Start) against a fake GVS that counts the dedicated head probes.
 //
 //	240 segments, 4 workers, so catchUpBatchLimit = 8*4 = 32 -> the batched
 //	structure needs ceil(240/32) = 8 runParallelCatchUp calls, and its
 //	runDashLoop ran an UNCONDITIONAL probeHeadSequence after every one of
-//	them, plus the initial head-discovery probe: 9 serial probes at 2s
-//	each is >= 18s of wall clock before a single segment's 5ms delay is
-//	counted (batched model total: 9*2s + 240/4*5ms = 18.3s). The rolling
-//	window pays exactly ONE probe (initial head discovery -- segment-header
-//	harvests keep head fresh afterward), so its nominal time is
-//	2s + 240/4*5ms + overhead. The structure is asserted directly first —
-//	exactly one probe — because that is what the batched shape cannot
-//	satisfy on any machine. The wall-clock budget backs it up, and the
-//	probe delay is what gives it room: with a 500ms probe the batched floor
-//	was 4.5s, and a loaded 2-core GitHub Windows runner twice caught up
-//	with the correct single probe in more than the budget that had to sit
-//	under it (2.65s over 2.5s, then 4.16s over 4s) — the budget measured
-//	runner speed, not structure, and could not be raised without crossing
-//	the floor. At 2s a probe, the 10s budget sits 8s under the batched
-//	floor and some 7.5s above the rolling nominal, where that runner's
-//	worst overhead so far (~3.7s) fits twice over.
+//	them, plus the initial head-discovery probe: 9 probes. The rolling window
+//	pays exactly ONE (initial head discovery -- segment-header harvests keep
+//	head fresh afterward).
+//
+// The probe count is the whole assertion, because it is what the batched
+// shape cannot satisfy on any machine at any speed. This test used to back it
+// with a wall-clock budget under the batched shape's probe floor, and that
+// budget measured the runner instead: a loaded 2-core GitHub Windows runner
+// caught up with the correct single probe in 2.65s over 2.5s, 4.16s over 4s,
+// and then 17.9s over 10s, where Linux takes 2.4s. The catch-up saves its
+// resume checkpoint every ResumeCatchupInterval segments, and each save
+// fsyncs the media and the sidecar and renames it (owner decision O-G), so the
+// wall clock carries the runner's disk as well as the loop's shape. The
+// elapsed time is still logged, for a run that wants to compare.
 func TestCatchUpRollingWindowThroughput(t *testing.T) {
 	t.Parallel()
 	const (
@@ -483,8 +477,6 @@ func TestCatchUpRollingWindowThroughput(t *testing.T) {
 		endSeq     = 239 // 240 segments: 0..239 (EndSeq clamp ends the run)
 		numWorkers = 4
 		segDelay   = 5 * time.Millisecond
-		probeDelay = 2 * time.Second
-		budget     = 10 * time.Second
 	)
 	var probes atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -495,11 +487,10 @@ func TestCatchUpRollingWindowThroughput(t *testing.T) {
 			return
 		}
 		if seq > head {
-			// Dedicated head-discovery probe (sq=999999999): models the real
-			// round trip each probe costs. The batched structure paid this
-			// between every batch; the rolling window only at entry.
+			// Dedicated head-discovery probe (sq=999999999). The batched
+			// structure paid one between every batch; the rolling window only
+			// at entry.
 			probes.Add(1)
-			time.Sleep(probeDelay)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -524,22 +515,16 @@ func TestCatchUpRollingWindowThroughput(t *testing.T) {
 	if err := d.Start(t.Context()); err != nil {
 		t.Fatalf("Start = %v, want nil", err)
 	}
-	elapsed := time.Since(start)
+	t.Logf("caught up %d segments in %v", endSeq+1, time.Since(start).Round(time.Millisecond))
 
 	// Correctness first: the speed is worthless if the recording has a hole.
 	wantSegments(t, out, 0, endSeq)
 
 	// Structure: one head-discovery probe for the whole span. The batched
-	// shape pays one per batch (9 here), on any machine at any speed.
+	// shape pays one per batch (9 here).
 	if got := probes.Load(); got != 1 {
 		t.Errorf("head probes = %d, want exactly 1 -- the pool is draining at batch boundaries "+
 			"and paying a head probe per batch instead of rolling continuously", got)
-	}
-
-	if elapsed > budget {
-		t.Errorf("caught up %d segments in %v, want < %v -- the pool is draining at batch boundaries "+
-			"and paying a head probe per batch (%d probes observed) instead of rolling continuously",
-			endSeq+1, elapsed.Round(time.Millisecond), budget, probes.Load())
 	}
 }
 
