@@ -1137,6 +1137,16 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 	case keepStagingForUnmuxedPart:
 		w.logger.Warn("preserving staging dir: a captured part is still unmuxed after finalize; recover via the Mux action",
 			"path", stagingDir, "jobID", jobID)
+	case keepStagingForMuxGaps:
+		// A staged recording was muxed from a repaired copy that left its
+		// damaged bytes out, or could not be checked against its own
+		// fragments (copyStaged, mux_repair.go): what this dir holds beyond
+		// the archive is in no archive at all. One line per recording, each
+		// with what its record says.
+		for _, g := range v.gaps {
+			w.logger.Warn("preserving staging dir: the archive was muxed without all of a staged recording, which staging keeps",
+				"recording", g.path, "why", g.rec.reason(), "path", stagingDir, "jobID", jobID)
+		}
 	case keepStagingForUnusedRoot:
 		// The staging root holds a recording the finalize did not use: the
 		// from-the-start download beside a job that finalized as parts (one
@@ -1171,7 +1181,7 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 }
 
 // stagingKeep is what decideStagingCleanup concluded about a finalized job's
-// staging directory: delete it (removeStaging), keep all of it for one of four
+// staging directory: delete it (removeStaging), keep all of it for one of five
 // reasons, or prune it down to the chat capture.
 type stagingKeep int
 
@@ -1180,17 +1190,19 @@ const (
 	keepStagingForAsides
 	keepStagingForUnmuxedPart
 	keepStagingForUnusedRoot
+	keepStagingForMuxGaps
 	keepStagingForTail
 	keepStagingChatOnly
 )
 
 // stagingVerdict is decideStagingCleanup's answer, with what the Warn that
-// keeps the directory names: the set-aside recordings, or the root recording
-// the finalize did not use.
+// keeps the directory names: the set-aside recordings, the root recording the
+// finalize did not use, or the recordings a mux could not carry whole.
 type stagingVerdict struct {
 	keep       stagingKeep
 	asides     []string
 	unusedRoot string
+	gaps       []muxGapNote
 }
 
 // decideStagingCleanup is cleanupStagingAfterMux's decision, without the
@@ -1209,6 +1221,15 @@ func decideStagingCleanup(db *database.Database, fresh *database.Job, jobID, sta
 	}
 	if unused := unusedRootRecording(db, jobID, stagingDir); unused != "" {
 		return stagingVerdict{keep: keepStagingForUnusedRoot, unusedRoot: unused}
+	}
+	// A recording a mux could not carry whole (stagedMuxGaps): its damaged
+	// bytes were left out of a repaired copy, or nothing could check the copy
+	// against its fragments. Ahead of the tail and chat keeps, whose prune
+	// would take it, and on no row field at all — the record beside the
+	// recording is the whole of it, so the boot sweep and the orphan sweep
+	// read the same answer (W30-A11).
+	if gaps := stagedMuxGaps(stagingDir); len(gaps) > 0 {
+		return stagingVerdict{keep: keepStagingForMuxGaps, gaps: gaps}
 	}
 	if fresh != nil && fresh.IncompleteTail {
 		return stagingVerdict{keep: keepStagingForTail}

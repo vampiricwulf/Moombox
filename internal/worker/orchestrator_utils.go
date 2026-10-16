@@ -63,6 +63,33 @@ type ffprobeData struct {
 	// FormatName is the demuxer ffprobe opened the file with — its
 	// comma-separated name list ("mov,mp4,m4a,3gp,3g2,mj2", "mpegts").
 	FormatName string
+	// Streams is every stream's codec_type and duration in seconds (0 when
+	// ffprobe gave none). ENGINE-9 judges a copy of fragmented staged media
+	// track by track against them (verifyAgainstStaging): the format duration
+	// is the longest stream's, so a video track cut at a third passed beside a
+	// whole audio track.
+	Streams []probedStream
+}
+
+// probedStream is one stream of a probed file.
+type probedStream struct {
+	CodecType   string
+	DurationSec float64
+}
+
+// streamSeconds is the longest duration among the file's streams of one
+// codec_type ("video", "audio"); present is false when it has none.
+func (p *ffprobeData) streamSeconds(codecType string) (seconds float64, present bool) {
+	if p == nil {
+		return 0, false
+	}
+	for _, s := range p.Streams {
+		if s.CodecType == codecType {
+			present = true
+			seconds = max(seconds, s.DurationSec)
+		}
+	}
+	return seconds, present
 }
 
 // spanSec is the length of media a `-c copy` of this file carries across —
@@ -133,6 +160,7 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 			Width      int    `json:"width"`
 			Height     int    `json:"height"`
 			RFrameRate string `json:"r_frame_rate"`
+			Duration   string `json:"duration"`
 		} `json:"streams"`
 		Format struct {
 			FormatName string `json:"format_name"`
@@ -147,6 +175,11 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 	}
 
 	data := &ffprobeData{FormatName: probe.Format.FormatName}
+	for _, s := range probe.Streams {
+		st := probedStream{CodecType: s.CodecType}
+		st.DurationSec, _ = strconv.ParseFloat(s.Duration, 64)
+		data.Streams = append(data.Streams, st)
+	}
 
 	// Find video stream
 	for _, s := range probe.Streams {

@@ -388,6 +388,15 @@ func (pm *partMerger) merge(ctx context.Context, jobID, stagingDir string, segme
 							"jobID", jobID, "dir", segDir, "asides", strings.Join(asides, " | "))
 						continue
 					}
+					// Nor is the recording of a part its mux could not carry
+					// whole — a repaired copy left its damaged bytes out — so
+					// the merged file lacks them too, and the staging
+					// cleanup's mux-gap shield keeps the dir (W30-A11).
+					if gaps := stagedMuxGaps(segDir); len(gaps) > 0 {
+						pm.logger.Warn("part merge: keeping a superseded part's staging dir — its mux left part of the recording out",
+							"jobID", jobID, "dir", segDir, "recording", gaps[0].path)
+						continue
+					}
 					if err := os.RemoveAll(segDir); err != nil {
 						pm.logger.Warn("part merge: failed to delete superseded part's staging dir", "err", err, "jobID", jobID, "dir", segDir)
 					}

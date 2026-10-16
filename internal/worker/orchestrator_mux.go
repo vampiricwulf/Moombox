@@ -128,6 +128,12 @@ func muxedOutputIsShort(inputSec, outputSec float64) bool {
 
 // verifyMuxedDuration probes the longest input beside the already-probed
 // output and returns an error naming both durations when the output is short.
+// It is the check for inputs whose own fragments cannot measure a copy —
+// MPEG-TS and WebM captures, progressive MP4s, and a fragmented MP4 the walk
+// could not read — and verifyAgainstStaging hands it those; a fragmented MP4
+// the walk reads is measured track by track by its fragments instead, since
+// ffprobe's mov demuxer stops at a damaged fragment exactly where the copy
+// did (W30-A11).
 //
 // Failing the mux is the point: the alternative this replaces was a Finished
 // row over a third of a recording, with the staging the missing part still
@@ -171,24 +177,27 @@ func (o *DownloadOrchestrator) verifyMuxedDuration(ctx context.Context, jobID st
 }
 
 // muxVerdict is what verifiedCopy found out about a copy: the probe of the
-// finished file, which the row's resolution and length come from, and the
-// shortfall verdict when it came out short.
+// finished file, which the row's resolution and length come from, the
+// shortfall verdict when it came out short, and the inputs as copyStaged
+// walked them — whether one was repaired, or could not be vouched for, is
+// what keeps a caller's staging (stagedInputs.keepsStaging).
 type muxVerdict struct {
-	probe *ffprobeData
-	short error
+	probe  *ffprobeData
+	short  error
+	inputs *stagedInputs
 }
 
 // verifiedCopy is ENGINE-9's duration check as the copy's engine.OutputCheck.
 // It probes the finished copy while it is still under FFmpeg's temporary name
-// and rejects it when verifyMuxedDuration finds it short of its longest
-// input, so a short copy is removed before it can take the archive's name
+// and rejects it when verifyAgainstStaging finds it short of its inputs, so a
+// short copy is removed before it can take the archive's name
 // (engine.Muxer.writeOutput). It records what it found in v; a copy ffprobe
 // cannot read passes, as it did when the check ran after the mux.
-func (o *DownloadOrchestrator) verifiedCopy(jobID string, v *muxVerdict, inputs ...string) engine.OutputCheck {
+func (o *DownloadOrchestrator) verifiedCopy(jobID string, v *muxVerdict, ins *stagedInputs) engine.OutputCheck {
 	return func(ctx context.Context, path string) error {
 		v.probe = o.runFFprobe(ctx, path)
 		if v.probe != nil {
-			v.short = o.verifyMuxedDuration(ctx, jobID, v.probe.DurationSec, inputs...)
+			v.short = o.verifyAgainstStaging(ctx, jobID, v.probe, ins)
 		}
 		return v.short
 	}
@@ -628,8 +637,8 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 		// (engine.RestartSiblingStem) and so never offered for deletion, while
 		// asideOutputPath's counter wrote the successful retry to "-2" beside
 		// it.
-		var verdict muxVerdict
-		if err := o.mux().MuxCopy(ctx, g.video, g.audio, out, o.verifiedCopy(jobCtx.Job.ID, &verdict, g.video, g.audio)); err != nil {
+		verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, g.video, g.audio, out)
+		if err != nil {
 			if verdict.short != nil {
 				o.logger.Error("a set-aside recording's copy came out short; it stays in staging and the dir is kept",
 					"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
@@ -642,6 +651,17 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 		o.logger.Warn("a set-aside recording was muxed to its own file beside the archive; it overlaps the start of the main recording, so it is NOT one of the job's parts",
 			"output", out, "aside", strings.Join(g.files, " | "), "jobID", jobCtx.Job.ID)
 		recovered = append(recovered, out)
+		if verdict.inputs.keepsStaging() {
+			// Muxed from a repaired copy, or with nothing to vouch for the
+			// copy: the aside holds bytes its sibling does not, so it is
+			// marked recovered — no later pass muxes it again to "-2" — and
+			// NOT removed. Its mux-gap record is what keeps it, and the
+			// staging dir, from every removal (removeRecoveredAsides, the
+			// boot sweep, the staging cleanup); a half of the same restart
+			// that was whole is held with it, so the pair stays a pair.
+			o.keepRepairedAside(jobCtx.Job.ID, g, out)
+			continue
+		}
 		for _, p := range g.files {
 			// Marked BEFORE the removal: an aside left as it was — its
 			// removal failed (a Windows handle), or the process died between
@@ -698,6 +718,9 @@ func (o *DownloadOrchestrator) removeRecoveredAsides(jobCtx *JobContext) {
 				continue
 			}
 			p := filepath.Join(dir, name)
+			if hasMuxGapRecord(p) {
+				continue // recovered from a repaired copy: kept on purpose (keepRepairedAside)
+			}
 			if err := removeAsideFile(p); err != nil && !os.IsNotExist(err) {
 				continue // still held; the marker keeps it out of the scans
 			}
@@ -1064,8 +1087,13 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// the archive — checked under FFmpeg's temporary name (verifiedCopy), so
 	// the archive's own name is only ever a copy that passed. The probe it
 	// takes is B5's: the row's resolution, frame rate and length.
-	var verdict muxVerdict
-	if err := o.mux().MuxCopy(ctx, videoPath, audioPath, outputFile, o.verifiedCopy(jobCtx.Job.ID, &verdict, videoPath, audioPath)); err != nil {
+	//
+	// A staged fMP4 with a damaged fragment is muxed from a repaired copy
+	// that leaves out only the unreadable bytes, checked track by track
+	// against its fragments' own timeline, and finishes with a gap there; the
+	// record copyStaged leaves beside it keeps staging (W30-A11).
+	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputFile)
+	if err != nil {
 		if verdict.short != nil {
 			return verdict.short
 		}
@@ -1555,6 +1583,7 @@ func (o *DownloadOrchestrator) finishedFacts(jobCtx *JobContext, j *database.Job
 	f.ChatIncomplete = j.ChatStatus == chatStatusIncomplete
 	if jobCtx != nil && jobCtx.StagingDir != "" {
 		f.AsideCount = len(asideReport(jobCtx.StagingDir).Groups)
+		f.MuxGaps, f.MuxGapDropped = muxGapSummary(jobCtx.StagingDir)
 	}
 	return f
 }
@@ -1719,8 +1748,12 @@ func (o *DownloadOrchestrator) muxSegment(
 	// the part's name (verifiedCopy checks it under FFmpeg's temporary one),
 	// so the re-mux writes the real part at that name rather than beside an
 	// unreferenced truncated twin of it.
-	var verdict muxVerdict
-	if err := o.mux().MuxCopy(ctx, videoPath, audioPath, outputPath, o.verifiedCopy(jobCtx.Job.ID, &verdict, videoPath, audioPath)); err != nil {
+	//
+	// A damaged part is repaired and recorded like the archive (copyStaged);
+	// its seg_N dir keeps the record that shields it, which the part merge
+	// and the staging cleanup both read.
+	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputPath)
+	if err != nil {
 		return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
 	}
 	probeData := verdict.probe

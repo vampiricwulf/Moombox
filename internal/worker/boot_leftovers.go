@@ -132,7 +132,7 @@ func (w *DownloadWorker) reclaimJobLeftovers(jobID, stagingDir string) {
 	}
 	w.logger.Info("boot cleanup: removed a finished job's staging directory",
 		"path", stagingDir, "jobID", jobID,
-		"reason", "the job is Finished with its archive on disk, and its post-mux cleanup would have removed this directory (chat and tail complete, nothing set aside, no unmuxed part, no unused root recording)")
+		"reason", "the job is Finished with its archive on disk, and its post-mux cleanup would have removed this directory (chat and tail complete, nothing set aside, no unmuxed part, no unused root recording, nothing a mux left out)")
 }
 
 // missingArchiveFile returns the first archive file a Finished row names that
@@ -213,6 +213,13 @@ func (w *DownloadWorker) removeVerifiedRecoveredAsides(jobID, stagingDir string)
 // removeVerifiedRecoveredAside is removeVerifiedRecoveredAsides for one aside
 // whose recovered marker sits beside it.
 func (w *DownloadWorker) removeVerifiedRecoveredAside(jobID, aside string) {
+	// Recovered from a repaired copy, or held with a half that was: the
+	// sibling lacks what the repair left out, so it is no proof (W30-A11).
+	if hasMuxGapRecord(aside) {
+		w.logger.Debug("boot cleanup: keeping a recovered set-aside recording; its sibling was muxed from a repaired copy",
+			"aside", aside, "jobID", jobID)
+		return
+	}
 	marker := aside + asideRecoveredMarker
 	raw, err := os.ReadFile(marker)
 	if err != nil {

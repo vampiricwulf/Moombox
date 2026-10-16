@@ -87,7 +87,7 @@ func IsActiveJobStatus(s database.JobStatus) bool { return activeJobStatuses[s] 
 // deliberately preserved rather than cleaned up, and so must NOT be offered
 // (or allowed) as a deletable orphan. Mirrors the exact carve-out applied at
 // job-finish time (see (*DownloadWorker).cleanupStagingAfterMux in
-// worker.go): a Finished job's staging only survives cleanup for five
+// worker.go): a Finished job's staging only survives cleanup for six
 // reasons — it's flagged IncompleteTail (tail is Resume-able), its chat
 // capture ended incomplete (no verb re-pages from the capture kept in
 // staging — Retry refuses a Finished job and Reinitialize starts over — but
@@ -98,12 +98,14 @@ func IsActiveJobStatus(s database.JobStatus) bool { return activeJobStatuses[s] 
 // an unmuxed captured part (recoverable via the Mux action), or its root
 // holds a recording the finalize did not use (unusedRootRecording — the
 // from-the-start download beside a job that finalized as parts, or a second
-// recording beside the one a single-file finalize muxed). The tail and
+// recording beside the one a single-file finalize muxed), or a staged
+// recording a mux could not carry whole (stagedMuxGaps — its damaged bytes
+// left out of a repaired copy, or a copy nothing could check). The tail and
 // chat shields expire on one age rule — which is ON by default: the option
 // behind it, downloader.incomplete_staging_expiry_days, ships at 7 days ("0 =
 // preserve forever" describes the VALUE 0, not the default). The set-aside,
-// unmuxed-part and unused-root shields have no age rule at all: each holds
-// captured media that can exist nowhere else.
+// unmuxed-part, unused-root and mux-gap shields have no age rule at all: each
+// holds captured media that can exist nowhere else.
 //
 // This predicate must stay precise: any OTHER Finished job's staging is a
 // genuine orphan (e.g. a stale dir left by an old/removed job) and must
@@ -131,11 +133,16 @@ func jobNeedsStaging(db *database.Database, cfg *config.MoomboxConfig, job *data
 	// parts did not take), and the cleanup kept the dir precisely so it would
 	// not be lost. Without it the sweep offered that dir as an ordinary
 	// orphan — one click from deleting what the cleanup had preserved.
+	// The mux-gap shield is cleanupStagingAfterMux's too, and off the age
+	// rule for the same reason: what it keeps is the bytes of a staged
+	// recording a repair left out of the archive (or a copy nothing could
+	// check), which are in no archive at all (stagedMuxGaps).
 	return (job.IncompleteTail && notExpired) ||
 		(job.ChatStatus == chatStatusIncomplete && notExpired) ||
 		asideShield ||
 		hasUnmuxedSegmentParts(db, job.ID, jobStagingDir) ||
-		unusedRootRecording(db, job.ID, jobStagingDir) != ""
+		unusedRootRecording(db, job.ID, jobStagingDir) != "" ||
+		len(stagedMuxGaps(jobStagingDir)) > 0
 }
 
 // incompleteStagingExpired reports whether an incomplete_tail job's staging
