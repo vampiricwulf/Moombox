@@ -4,9 +4,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -30,29 +33,71 @@ func TestStopSignalSet(t *testing.T) {
 	}
 }
 
+// hupHelperEnv makes the re-executed test binary print the stop signals
+// stopSignals() reports, one per line, and exit; with hupHelperIgnore also
+// set, after ignoring hangups itself.
+const (
+	hupHelperEnv    = "MOOMBOX_HUP_HELPER"
+	hupHelperIgnore = "MOOMBOX_HUP_HELPER_IGNORE"
+)
+
 // TestStopSignalsLeaveAnIgnoredHangupIgnored pins that stopSignals asks the
-// process's real disposition: with SIGHUP ignored, as nohup leaves it, the set
-// has no SIGHUP in it. (TestLauncherHandsStopSignalsToTheChild runs the same
-// case end to end under nohup.)
+// process's real disposition: with SIGHUP ignored — as nohup leaves it for the
+// process it starts, or as the process set it itself — the set has no SIGHUP
+// in it; at its default the set has one. (TestLauncherHandsStopSignalsToTheChild
+// runs the nohup case end to end.)
 //
-// Mutant: stopSignals calling stopSignalSet(false).
+// Each case runs in a helper process. Ignoring the hangup in the test binary
+// itself could not be undone: Notify then Stop puts back the disposition that
+// was in force before Notify — the ignore — while clearing signal.Ignored, so
+// every process the test binary started afterwards inherited SIGHUP ignored,
+// unseen by TestLauncherHandsStopSignalsToTheChild's guard, whose hangup rows
+// then timed out under -count=2 or -shuffle.
+//
+// Mutant: stopSignals calling stopSignalSet(false) (the two ignored rows).
 func TestStopSignalsLeaveAnIgnoredHangupIgnored(t *testing.T) {
+	if os.Getenv(hupHelperEnv) == "1" {
+		if os.Getenv(hupHelperIgnore) == "1" {
+			signal.Ignore(syscall.SIGHUP)
+		}
+		for _, sig := range stopSignals() {
+			fmt.Println(sig)
+		}
+		os.Exit(0)
+	}
 	if signal.Ignored(syscall.SIGHUP) {
-		t.Skip("hangups are already ignored in this process (nohup); the other row is what this test is for")
+		t.Skip("hangups are ignored in this process (nohup), and so in every helper it starts")
 	}
-	if !slices.Contains(stopSignals(), os.Signal(syscall.SIGHUP)) {
-		t.Fatalf("stopSignals() = %v with hangups at their default, want SIGHUP in it", stopSignals())
-	}
-	signal.Ignore(syscall.SIGHUP)
-	t.Cleanup(func() {
-		// Notify clears the runtime's ignored mark, which Reset alone leaves
-		// set; Stop then puts the default disposition back.
-		ch := make(chan os.Signal, 1)
-		signal.Notify(ch, syscall.SIGHUP)
-		signal.Stop(ch)
-	})
-	if got := stopSignals(); slices.Contains(got, os.Signal(syscall.SIGHUP)) {
-		t.Errorf("stopSignals() = %v with hangups ignored, want no SIGHUP: a nohup'd Moombox would stop when its shell exits", got)
+	nohup, nohupErr := exec.LookPath("nohup")
+	for _, tc := range []struct {
+		name    string
+		wrapper []string
+		ignore  bool
+		wantHUP bool
+	}{
+		{"a hangup at its default", nil, false, true},
+		{"a hangup the process ignored", nil, true, false},
+		{"a hangup inherited as ignored (nohup)", []string{nohup}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.wrapper != nil && nohupErr != nil {
+				t.Skip("no nohup on PATH")
+			}
+			argv := append(append([]string{}, tc.wrapper...), os.Args[0], "-test.run=^TestStopSignalsLeaveAnIgnoredHangupIgnored$")
+			cmd := exec.Command(argv[0], argv[1:]...)
+			cmd.Env = append(os.Environ(), hupHelperEnv+"=1")
+			if tc.ignore {
+				cmd.Env = append(cmd.Env, hupHelperIgnore+"=1")
+			}
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("helper: %v", err)
+			}
+			got := strings.Split(strings.TrimSpace(string(out)), "\n")
+			if has := slices.Contains(got, syscall.SIGHUP.String()); has != tc.wantHUP {
+				t.Errorf("stopSignals() = %q, want SIGHUP in it: %v — a nohup'd Moombox must not stop when its shell exits, and one at the default must stop on a hangup", got, tc.wantHUP)
+			}
+		})
 	}
 }
 
