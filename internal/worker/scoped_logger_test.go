@@ -29,6 +29,23 @@ func (c *captureLogger) lines() [][]any {
 	return append([][]any(nil), c.msgs...)
 }
 
+// field returns the value logged under key on the first line whose message is
+// msg, and whether that line was logged at all.
+func (c *captureLogger) field(msg, key string) (any, bool) {
+	for _, line := range c.lines() {
+		if len(line) == 0 || line[0] != msg {
+			continue
+		}
+		for i := 1; i+1 < len(line); i += 2 {
+			if line[i] == key {
+				return line[i+1], true
+			}
+		}
+		return nil, true
+	}
+	return nil, false
+}
+
 // reset forgets every line logged so far.
 func (c *captureLogger) reset() {
 	c.mu.Lock()

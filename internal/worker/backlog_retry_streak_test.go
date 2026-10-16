@@ -3,8 +3,6 @@ package worker
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -76,16 +74,10 @@ func TestBacklogRetryStreakEndsWithTheRun(t *testing.T) {
 		diskFullVodJob(t, db, "streak_done", 1)
 		startStreak(t, w, db, "streak_done")
 
-		full := filepath.Join(t.TempDir(), "full.mp4")
-		writeMuxFixture(t, ffmpegPath, full, 2)
-		body, err := os.ReadFile(full)
-		if err != nil {
-			t.Fatal(err)
-		}
-		srv := serveWholeFile(t, body)
+		srv, size := serveMuxFixture(t, ffmpegPath, 2)
 		w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
 			return &StreamProcessResult{ShouldDownload: true, IsVod: true,
-				VideoInfo: vodInfoAt(srv.URL, time.Now().Add(6*time.Hour).Unix(), len(body))}, nil
+				VideoInfo: vodInfoAt(srv.URL, time.Now().Add(6*time.Hour).Unix(), size)}, nil
 		}
 		w.processJob(context.Background(), "streak_done")
 		if row, _ := db.GetJob("streak_done"); row.Status != database.StatusFinished {

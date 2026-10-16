@@ -757,43 +757,6 @@ func TestAdvanceToNewPartCallSitesAllLatch(t *testing.T) {
 	}
 }
 
-// fieldCaptureLogger records every log call's message and key/value args. The
-// orchestrator logs from background mux goroutines too, so it locks.
-type fieldCaptureLogger struct {
-	mu    sync.Mutex
-	lines [][]any
-}
-
-func (l *fieldCaptureLogger) log(msg string, args []any) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.lines = append(l.lines, append([]any{msg}, args...))
-}
-
-func (l *fieldCaptureLogger) Debug(msg string, args ...any) { l.log(msg, args) }
-func (l *fieldCaptureLogger) Info(msg string, args ...any)  { l.log(msg, args) }
-func (l *fieldCaptureLogger) Warn(msg string, args ...any)  { l.log(msg, args) }
-func (l *fieldCaptureLogger) Error(msg string, args ...any) { l.log(msg, args) }
-
-// field returns the value logged under key on the first line whose message is
-// msg, and whether that line was logged at all.
-func (l *fieldCaptureLogger) field(msg, key string) (any, bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for _, line := range l.lines {
-		if len(line) == 0 || line[0] != msg {
-			continue
-		}
-		for i := 1; i+1 < len(line); i += 2 {
-			if line[i] == key {
-				return line[i+1], true
-			}
-		}
-		return nil, true
-	}
-	return nil, false
-}
-
 // TestVariantRefreshFailureLogsTheInnerLoopError is sweep-2 residual R7: the
 // refresh-failure line logged only fetchErr, so an operator reading a job that
 // stopped there saw the master-playlist failure and nothing about what ended
@@ -806,7 +769,7 @@ func (l *fieldCaptureLogger) field(msg, key string) (any, bool) {
 func TestVariantRefreshFailureLogsTheInnerLoopError(t *testing.T) {
 	h := newEndVerdictHarness(t, "tw_refresh_log")
 	fastRefreshRetries(t)
-	log := &fieldCaptureLogger{}
+	log := &captureLogger{}
 	h.o.logger = log
 	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
 		h.checks.Add(1)

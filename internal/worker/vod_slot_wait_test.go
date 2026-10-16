@@ -5,8 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -44,25 +42,19 @@ func TestStaleVodExtractionIsRefreshedAfterSlotWait(t *testing.T) {
 	_, outputDir := muxFixtureJob(t, w, db, "j-stale")
 	db.UpdateJobFields("j-stale", map[string]any{"status": database.StatusUpcoming})
 
-	full := filepath.Join(t.TempDir(), "full.mp4")
-	writeMuxFixture(t, ffmpegPath, full, 3)
-	body, err := os.ReadFile(full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fresh := serveWholeFile(t, body)
+	fresh, size := serveMuxFixture(t, ffmpegPath, 3)
 	expired := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		rw.WriteHeader(http.StatusForbidden) // expire= has passed
 	}))
 	t.Cleanup(expired.Close)
 
 	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
-		return &StreamProcessResult{ShouldDownload: true, IsVod: true, VideoInfo: vodInfoAt(expired.URL, 1, len(body))}, nil
+		return &StreamProcessResult{ShouldDownload: true, IsVod: true, VideoInfo: vodInfoAt(expired.URL, 1, size)}, nil
 	}
 	var refreshed atomic.Int32
 	w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
 		refreshed.Add(1)
-		return vodInfoAt(fresh.URL, time.Now().Add(6*time.Hour).Unix(), len(body)), nil
+		return vodInfoAt(fresh.URL, time.Now().Add(6*time.Hour).Unix(), size), nil
 	}
 
 	w.processJob(context.Background(), "j-stale")
@@ -95,16 +87,10 @@ func TestStaleVodRefreshFailureKeepsUnexpiredURLs(t *testing.T) {
 	_, outputDir := muxFixtureJob(t, w, db, "j-valid")
 	db.UpdateJobFields("j-valid", map[string]any{"status": database.StatusUpcoming})
 
-	full := filepath.Join(t.TempDir(), "full.mp4")
-	writeMuxFixture(t, ffmpegPath, full, 3)
-	body, err := os.ReadFile(full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := serveWholeFile(t, body)
+	srv, size := serveMuxFixture(t, ffmpegPath, 3)
 	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
 		// Good for 55 more minutes: inside vodInfoMaxAge, so stale.
-		return &StreamProcessResult{ShouldDownload: true, IsVod: true, VideoInfo: vodInfoAt(srv.URL, time.Now().Add(55*time.Minute).Unix(), len(body))}, nil
+		return &StreamProcessResult{ShouldDownload: true, IsVod: true, VideoInfo: vodInfoAt(srv.URL, time.Now().Add(55*time.Minute).Unix(), size)}, nil
 	}
 	var refreshed atomic.Int32
 	w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {

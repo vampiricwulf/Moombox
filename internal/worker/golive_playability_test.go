@@ -24,7 +24,7 @@ func TestGoLiveStopsOnDeadCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	sp := &StreamProcessor{db: db, logger: nopWorkerLogger{}}
+	sp := &StreamProcessor{db: db, logger: discardLogger{}}
 
 	walled := func(formats int) *youtube.VideoInfo {
 		info := &youtube.VideoInfo{

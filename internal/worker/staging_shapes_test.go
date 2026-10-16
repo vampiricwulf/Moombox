@@ -36,6 +36,20 @@ func serveWholeFile(t *testing.T, body []byte) *httptest.Server {
 	return srv
 }
 
+// serveMuxFixture renders seconds of video with writeMuxFixture and serves it
+// through serveWholeFile: the whole-file VOD a test downloads. It returns the
+// server and the body's length, which the VideoInfo builders take.
+func serveMuxFixture(t *testing.T, ffmpegPath string, seconds int) (*httptest.Server, int) {
+	t.Helper()
+	full := filepath.Join(t.TempDir(), "full.mp4")
+	writeMuxFixture(t, ffmpegPath, full, seconds)
+	body, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return serveWholeFile(t, body), len(body)
+}
+
 // wholeFileVodInfo is a finished VOD whose one video-only format is served by
 // srv: plain URL, no cipher, a client that needs no GVS token.
 func wholeFileVodInfo(srv *httptest.Server, size int) *youtube.VideoInfo {
@@ -127,17 +141,11 @@ func TestRestartMuxAfterWholeFileVodArchivesTheVod(t *testing.T) {
 	staging, outputDir := muxFixtureJob(t, w, db, "j-vodshape")
 
 	writeAsideFixture(t, ffmpegPath, filepath.Join(staging, "video_stream"), 2)
-	full := filepath.Join(t.TempDir(), "full.mp4")
-	writeMuxFixture(t, ffmpegPath, full, 10)
-	body, err := os.ReadFile(full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := serveWholeFile(t, body)
+	srv, size := serveMuxFixture(t, ffmpegPath, 10)
 
 	job, _ := db.GetJob("j-vodshape")
 	jobCtx := w.buildJobContext(job)
-	res, err := DownloadVod(context.Background(), jobCtx, wholeFileVodInfo(srv, len(body)), stubCipherSolver{}, nil, nil, nil)
+	res, err := DownloadVod(context.Background(), jobCtx, wholeFileVodInfo(srv, size), stubCipherSolver{}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("DownloadVod: %v", err)
 	}
@@ -187,17 +195,11 @@ func TestRestartMuxAfterWholeFileVodKeepsEveryEarlierCapture(t *testing.T) {
 
 	writeAsideFixture(t, ffmpegPath, filepath.Join(staging, "video_stream"), 2)
 	writeAsideFixture(t, ffmpegPath, filepath.Join(staging, "video.ts"), 4)
-	full := filepath.Join(t.TempDir(), "full.mp4")
-	writeMuxFixture(t, ffmpegPath, full, 10)
-	body, err := os.ReadFile(full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := serveWholeFile(t, body)
+	srv, size := serveMuxFixture(t, ffmpegPath, 10)
 
 	job, _ := db.GetJob("j-twoshapes")
 	jobCtx := w.buildJobContext(job)
-	res, err := DownloadVod(context.Background(), jobCtx, wholeFileVodInfo(srv, len(body)), stubCipherSolver{}, nil, nil, nil)
+	res, err := DownloadVod(context.Background(), jobCtx, wholeFileVodInfo(srv, size), stubCipherSolver{}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("DownloadVod: %v", err)
 	}

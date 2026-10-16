@@ -45,6 +45,9 @@ func testWorkerSetup(t *testing.T) (*DownloadWorker, *database.Database) {
 	return w, db
 }
 
+// discardLogger is the package's one no-op logger. It satisfies the anonymous
+// logger interface every constructor here takes, and twitch.NewAuth's and
+// cookies.NewRefreshService's too.
 type discardLogger struct{}
 
 func (discardLogger) Debug(msg string, args ...any) {}

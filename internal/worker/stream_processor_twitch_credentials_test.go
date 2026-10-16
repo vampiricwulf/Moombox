@@ -48,7 +48,7 @@ func TestTwitchChatCredentialsReturnsBothHalves(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	credentials := twitchChatCredentials(twitch.NewAuth(jar, nopWorkerLogger{}))
+	credentials := twitchChatCredentials(twitch.NewAuth(jar, discardLogger{}))
 	if credentials == nil {
 		t.Fatal("credential getter is nil for a configured Auth")
 	}
@@ -75,7 +75,7 @@ func TestTwitchChatCredentialsTrackTheJar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	credentials := twitchChatCredentials(twitch.NewAuth(jar, nopWorkerLogger{}))
+	credentials := twitchChatCredentials(twitch.NewAuth(jar, discardLogger{}))
 	if token, login := credentials(); token != "token-before" || login != "accountbefore" {
 		t.Fatalf("credentials = (%q, %q), want (%q, %q)",
 			token, login, "token-before", "accountbefore")
@@ -433,14 +433,6 @@ func TestTwitchChatDowngradeCallbackResolvesTheSenderPerFire(t *testing.T) {
 			"with instead of resolving the current one", len(rec.sent))
 	}
 }
-
-// nopWorkerLogger satisfies twitch.NewAuth's anonymous logger interface.
-type nopWorkerLogger struct{}
-
-func (nopWorkerLogger) Debug(string, ...any) {}
-func (nopWorkerLogger) Info(string, ...any)  {}
-func (nopWorkerLogger) Warn(string, ...any)  {}
-func (nopWorkerLogger) Error(string, ...any) {}
 
 // TestTwitchChatDowngradeCallbackMarksThePlatformAndNotifiesTheJob is Arc 10
 // R1's wiring claim: ONE report, TWO consumers.

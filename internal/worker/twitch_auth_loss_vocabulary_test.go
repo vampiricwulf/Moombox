@@ -56,12 +56,11 @@ func TestTwitchAuthLossVocabularyCoversEveryDowngradeReason(t *testing.T) {
 // shouldFireRecovery declines, so no callback fires and nothing here can reach
 // a network or a notifier.
 //
-// nopWorkerLogger is the package's existing discard logger
-// (stream_processor_twitch_credentials_test.go:403) and already satisfies the
-// anonymous logger interface cookies.NewRefreshService takes.
+// discardLogger (worker_test.go) already satisfies the anonymous logger
+// interface cookies.NewRefreshService takes.
 func twitchAuthLossSentence(t *testing.T, reason string) string {
 	t.Helper()
-	rs := cookies.NewRefreshService(cookies.NewCookieJar(), 0, nopWorkerLogger{})
+	rs := cookies.NewRefreshService(cookies.NewCookieJar(), 0, discardLogger{})
 	rs.NoteTwitchAuthLoss(reason)
 	got := rs.GetStatus().TwitchError
 	if got == "" {

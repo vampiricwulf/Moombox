@@ -3,7 +3,7 @@ package worker
 import "testing"
 
 func TestTrimServiceSetFfmpegPathRebuildsMuxer(t *testing.T) {
-	ts := NewTrimService(nil, "", nopWorkerLogger{})
+	ts := NewTrimService(nil, "", discardLogger{})
 	if got := ts.mux().FFprobePath(); got != "ffprobe" {
 		t.Fatalf("default ffprobe = %q", got)
 	}
@@ -22,7 +22,7 @@ func TestTrimServiceSetFfmpegPathRebuildsMuxer(t *testing.T) {
 // mux/probe/concat for every download and must follow a save. (A post-download
 // trim runs through the shared trim service, which the same save re-points.)
 func TestOrchestratorSetFfmpegPathRebuildsMuxer(t *testing.T) {
-	o := NewDownloadOrchestrator(nil, nil, "", nopWorkerLogger{}, nil, nil, nil, nil, nil)
+	o := NewDownloadOrchestrator(nil, nil, "", discardLogger{}, nil, nil, nil, nil, nil)
 	if got := o.mux().FFprobePath(); got != "ffprobe" {
 		t.Fatalf("default ffprobe = %q", got)
 	}
@@ -43,7 +43,7 @@ func TestOrchestratorSetFfmpegPathRebuildsMuxer(t *testing.T) {
 func TestWorkerSetFfmpegPathForwards(t *testing.T) {
 	(&DownloadWorker{}).SetFfmpegPath("C:/tools/ffmpeg.exe") // must not panic
 
-	w := &DownloadWorker{orchestrator: NewDownloadOrchestrator(nil, nil, "", nopWorkerLogger{}, nil, nil, nil, nil, nil)}
+	w := &DownloadWorker{orchestrator: NewDownloadOrchestrator(nil, nil, "", discardLogger{}, nil, nil, nil, nil, nil)}
 	w.SetFfmpegPath("C:/tools/ffmpeg.exe")
 	if got := w.orchestrator.mux().FFprobePath(); got != "C:/tools/ffprobe.exe" && got != `C:\tools\ffprobe.exe` {
 		t.Errorf("orchestrator ffprobe = %q after the worker forwarded", got)

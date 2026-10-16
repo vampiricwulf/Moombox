@@ -9,22 +9,13 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/engine"
 )
 
-// nopProgressLogger satisfies the worker package's anonymous logger
-// interface for tests.
-type nopProgressLogger struct{}
-
-func (nopProgressLogger) Debug(msg string, args ...any) {}
-func (nopProgressLogger) Info(msg string, args ...any)  {}
-func (nopProgressLogger) Warn(msg string, args ...any)  {}
-func (nopProgressLogger) Error(msg string, args ...any) {}
-
 // newTestProgressTracker constructs a ProgressTracker with no DB hooked
 // up — the tests below exercise the pure-logic format helpers without
 // triggering the persistence path.
 func newTestProgressTracker() *ProgressTracker {
 	return &ProgressTracker{
 		jobID:     "test-job",
-		logger:    nopProgressLogger{},
+		logger:    discardLogger{},
 		now:       time.Now,
 		startTime: time.Now().Add(-30 * time.Second),
 	}
@@ -366,7 +357,7 @@ func TestCalculateETASegmentBased(t *testing.T) {
 // noteVodBytesLocked — video alone, "1m 30s". Mutant: measuring from
 // pt.startTime instead of vodSessionStart — 40 s of clock, "3m 30s".
 func TestCalculateETAVODCountsOnlyThisSessionsBytes(t *testing.T) {
-	pt := NewProgressTracker(nil, "eta-vod", nopProgressLogger{}, 24*time.Hour) // gate every DB write
+	pt := NewProgressTracker(nil, "eta-vod", discardLogger{}, 24*time.Hour) // gate every DB write
 	t.Cleanup(pt.Close)
 	clk := &fakeClock{t: pt.startTime}
 	pt.mu.Lock()
@@ -416,7 +407,7 @@ func TestCalculateETAVODCountsOnlyThisSessionsBytes(t *testing.T) {
 // at all; counting a restart's drop as movement (`p.Bytes > s.latest` →
 // `true`) — the rate goes negative and the ETA after the restart is wrong.
 func TestVODProgressFollowsTheStreamingHandoff(t *testing.T) {
-	pt := NewProgressTracker(nil, "eta-handoff", nopProgressLogger{}, 24*time.Hour) // gate every DB write
+	pt := NewProgressTracker(nil, "eta-handoff", discardLogger{}, 24*time.Hour) // gate every DB write
 	t.Cleanup(pt.Close)
 	clk := &fakeClock{t: pt.startTime}
 	pt.mu.Lock()
