@@ -114,9 +114,29 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 			return
 		}
 
-		// Read the uploaded file to a temp location
-		tmpFile, err := os.CreateTemp("", importTempPrefix+"*.zip")
+		// The upload is spooled into <output>/imports, where its entries are
+		// extracted: on the volume the disk alerts watch. Under the system
+		// temp directory it was the container's /tmp in Docker — the
+		// writable layer on the host's /var/lib/docker, which nothing
+		// watches — and RAM on a tmpfs /tmp, where an upload of up to 500 MB
+		// failed with ENOSPC however much room the output disk had.
+		// CleanupOldImportTemp takes what a hard abort leaves (importSpoolRe).
+		var outputDir string
+		store.Read(func(c *config.MoomboxConfig) {
+			outputDir = c.Paths.OutputDirectory
+		})
+		if outputDir == "" {
+			outputDir = "./output"
+		}
+		importsDir := filepath.Join(outputDir, "imports")
+		if err := os.MkdirAll(importsDir, 0o755); err != nil {
+			logger.Error("import: could not create the imports directory", "dir", importsDir, "err", err)
+			jsonError(rw, "failed to create the imports directory", http.StatusInternalServerError)
+			return
+		}
+		tmpFile, err := os.CreateTemp(importsDir, importTempPrefix+"*"+importSpoolExt)
 		if err != nil {
+			logger.Error("import: could not create the upload's spool file", "dir", importsDir, "err", err)
 			jsonError(rw, "failed to create temp file", http.StatusInternalServerError)
 			return
 		}
@@ -308,21 +328,6 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// Check for duplicate (use JobExists to match TS - checks ALL jobs, not just active)
 		if db.JobExists(videoID) {
 			jsonError(rw, "job already exists for video ID: "+videoID, http.StatusConflict)
-			return
-		}
-
-		// Output paths
-		var outputDir string
-		store.Read(func(c *config.MoomboxConfig) {
-			outputDir = c.Paths.OutputDirectory
-		})
-		if outputDir == "" {
-			outputDir = "./output"
-		}
-		importsDir := filepath.Join(outputDir, "imports")
-		if err := os.MkdirAll(importsDir, 0o755); err != nil {
-			logger.Error("import: could not create the imports directory", "dir", importsDir, "err", err)
-			jsonError(rw, "failed to create the imports directory", http.StatusInternalServerError)
 			return
 		}
 
@@ -1337,10 +1342,13 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// importTempPrefix names the temp file an upload is spooled to before it is
-// opened as a zip, and the temporary file each entry is extracted to inside
-// imports/ before it is placed (see the import route above).
+// importTempPrefix names the file an upload is spooled to inside imports/
+// before it is opened as a zip, and the temporary file each entry is
+// extracted to there before it is placed (see the import route above).
 const importTempPrefix = "moombox-import-"
+
+// importSpoolExt ends the name of the file an upload is spooled to.
+const importSpoolExt = ".zip"
 
 // importPartialRe is the whole name of an entry's temporary extraction:
 // os.CreateTemp's random part is decimal. No name an import places can take
@@ -1348,15 +1356,20 @@ const importTempPrefix = "moombox-import-"
 // match an archive, whatever its title.
 var importPartialRe = regexp.MustCompile(`^` + regexp.QuoteMeta(importTempPrefix) + `[0-9]+` + regexp.QuoteMeta(importPartialExt) + `$`)
 
+// importSpoolRe is the whole name of an upload's spool, by the same rule: no
+// name an import places ends "<prefix><digits>.zip".
+var importSpoolRe = regexp.MustCompile(`^` + regexp.QuoteMeta(importTempPrefix) + `[0-9]+` + regexp.QuoteMeta(importSpoolExt) + `$`)
+
 // importTempMaxAge is how old a leftover must be before it is swept. No
 // import runs for a day, so the age floor never touches one in flight.
 const importTempMaxAge = 24 * time.Hour
 
-// CleanupOldImportTemp removes import leftovers older than importTempMaxAge:
-// spool files in the temp directory, and entries extracted into
-// <outputDir>/imports but never placed. The route removes its own with a
-// deferred os.Remove, but a hard abort mid-import (OS kill, power loss)
-// leaves up to 500 MB behind in the one and 2 GB in the other.
+// CleanupOldImportTemp removes import leftovers older than importTempMaxAge
+// from <outputDir>/imports — upload spools, and entries extracted there but
+// never placed — and the spools older versions wrote to the temp directory.
+// The route removes its own with a deferred os.Remove, but a hard abort
+// mid-import (OS kill, power loss) leaves up to 500 MB of spool and 2 GB of
+// extraction behind.
 func CleanupOldImportTemp(outputDir string) (removed int, err error) {
 	removed, err = utils.RemoveStaleTempEntries(importTempMaxAge, importTempPrefix)
 	if outputDir == "" {
@@ -1372,7 +1385,7 @@ func CleanupOldImportTemp(outputDir string) (removed int, err error) {
 	}
 	cutoff := time.Now().Add(-importTempMaxAge)
 	for _, ent := range entries {
-		if !ent.Type().IsRegular() || !importPartialRe.MatchString(ent.Name()) {
+		if !ent.Type().IsRegular() || !(importPartialRe.MatchString(ent.Name()) || importSpoolRe.MatchString(ent.Name())) {
 			continue
 		}
 		if info, infoErr := ent.Info(); infoErr != nil || info.ModTime().After(cutoff) {

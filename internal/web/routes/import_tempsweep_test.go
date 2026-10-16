@@ -8,9 +8,12 @@ import (
 
 // TestCleanupOldImportTempRemovesAStaleSpool: a hard abort mid-import left
 // the upload's spool file (up to 500 MB) in the temp directory, and nothing
-// swept it.
+// swept it. The route spools into imports/ now
+// (TestImportSpoolsTheUploadOnTheOutputVolume); what older versions left in
+// the temp directory is still swept.
 //
-// Mutant: sweep a prefix the route does not use.
+// Mutant: sweep a prefix the route does not use; drop the temp directory's
+// sweep.
 func TestCleanupOldImportTempRemovesAStaleSpool(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TMPDIR", dir)
@@ -19,7 +22,7 @@ func TestCleanupOldImportTempRemovesAStaleSpool(t *testing.T) {
 	if os.TempDir() != dir {
 		t.Skipf("os.TempDir() = %q, not the test's %q", os.TempDir(), dir)
 	}
-	f, err := os.CreateTemp("", importTempPrefix+"*.zip") // the route's own pattern
+	f, err := os.CreateTemp("", importTempPrefix+"*.zip") // the pattern older versions used
 	if err != nil {
 		t.Fatal(err)
 	}
