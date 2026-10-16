@@ -729,8 +729,10 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			"playability", string(wcResult.PlayabilityError))
 
 		// Try the cookieless fallback clients if WEB_CREATOR also fails or has
-		// inadequate formats. VISIONOS first (yt-dlp's lead default since
-		// 2026.08.19), then ANDROID_VR — retained behind it because upstream's
+		// inadequate formats. VISIONOS first (in yt-dlp's cookieless defaults
+		// since 2026.08.19: second in _DEFAULT_CLIENTS behind tv_samsung, and
+		// the whole of _DEFAULT_JSLESS_CLIENTS; see the AuthLevel block in
+		// types.go), then ANDROID_VR — retained behind it because upstream's
 		// all-formats-403 enforcement on android_vr is selective (verified
 		// still fully working from here 2026-08-24), and because it is the
 		// only cookieless source of a live dashManifestUrl. NOT because it
