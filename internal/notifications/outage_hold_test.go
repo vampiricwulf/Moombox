@@ -135,11 +135,13 @@ func assertDelayedNote(t *testing.T, r recordedReq) {
 // they were raised, each saying it was delayed and when it was raised.
 //
 // Mutants: SetConnectivity's subscription not waking the queues (the held
-// messages are never delivered); enqueue not marking an arrival delayed, or
-// buildPayload not rendering the note (no note). Not beginHoldLocked's
-// marking: both messages arrive offline, so enqueue marks each and the queue
-// is empty when the hold starts — TestOutageUnderADeliveryHoldsInPlace and
-// TestSecondOutageMarksWhatQueuedInTheOnlineGap kill that one.
+// messages are never delivered); buildPayload not rendering the note (no
+// note). Not the marking itself: both messages arrive offline, so enqueue
+// marks each, and the goroutine's look that each arrival wakes marks the
+// queue again (pop's beginHoldLocked), so the test cannot tell either one
+// missing. TestArrivalBehindAnInPlaceHoldIsMarked kills enqueue's mark, and
+// TestOutageUnderADeliveryHoldsInPlace and
+// TestSecondOutageMarksWhatQueuedInTheOnlineGap kill beginHoldLocked's.
 func TestNotificationRaisedOfflineIsHeldAndDeliveredMarked(t *testing.T) {
 	f := newFakeDiscord(t, okCreated("M1"))
 	conn := newOutageConn(false)
@@ -364,6 +366,49 @@ func TestOutageInsideAnInFlightRequestMarksWhatWaited(t *testing.T) {
 		t.Fatalf("second delivered %q, want Job Cancelled", calls[1].Body.Embeds[0].Title)
 	}
 	assertDelayedNote(t, calls[1])
+}
+
+// TestArrivalBehindAnInPlaceHoldIsMarked: a notification raised while the
+// monitor reports offline, behind a delivery the outage holds in place. The
+// goroutine waits in awaitOutage's hold, which looks at nothing queued behind
+// it, and the offline transition came before the notification did, so
+// noteOffline never saw it either: enqueue's own mark is the only one it
+// gets. Everywhere else a look of the goroutine's marks an offline arrival
+// again, which is why no other test here can tell that mark missing.
+//
+// Every step waits on the state it needs: the first attempt is held in flight
+// until the monitor reports offline, and the arrival comes once the delivery
+// is held.
+//
+// Mutant: enqueue not marking an arrival delayed while the monitor reports
+// offline (Job Cancelled goes out with no note).
+func TestArrivalBehindAnInPlaceHoldIsMarked(t *testing.T) {
+	prevBackoff := discordRetryBackoff
+	discordRetryBackoff = [discordMaxAttempts - 1]time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
+	t.Cleanup(func() { discordRetryBackoff = prevBackoff })
+
+	first := make(chan struct{})
+	f := newFakeDiscord(t, cutUntil(first))
+	conn := newOutageConn(true)
+	m := heldManager(t, conn, webhookTarget(f))
+	q := m.targets[0]
+
+	m.Send("Job Failed", "d", TypeError, nil, SendOptions{Event: "error", JobID: "yt_1"})
+	waitFor(t, "the first attempt", func() bool { return len(f.calls()) == 1 })
+	conn.set(false) // the outage, under the delivery, with nothing queued
+	close(first)
+	waitFor(t, "the delivery held in place", func() bool { return isHolding(q) })
+	m.Send("Job Cancelled", "d", TypeCancelled, nil, SendOptions{Event: "cancelled", JobID: "yt_2"})
+	waitFor(t, "the notification raised during the hold", func() bool { return q.pending() == 1 })
+
+	conn.set(true)
+	waitFor(t, "both notifications", func() bool { return len(f.calls()) == 3 })
+	calls := f.calls()
+	if calls[1].Body.Embeds[0].Title != "Job Failed" || calls[2].Body.Embeds[0].Title != "Job Cancelled" {
+		t.Fatalf("delivered %q then %q, want the held delivery first", calls[1].Body.Embeds[0].Title, calls[2].Body.Embeds[0].Title)
+	}
+	assertDelayedNote(t, calls[1])
+	assertDelayedNote(t, calls[2])
 }
 
 // TestLateVerdictHoldsTheLastAttempt: three refused dials are over before the
