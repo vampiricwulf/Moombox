@@ -44,14 +44,31 @@ func recheckPending(row database.FeedItem, now string) bool {
 	return row.RecheckAt > now
 }
 
+// settledTerminal reports whether row already holds a settled terminal
+// classification: stored vod or not_a_stream with no re-check pending, so
+// whatever stored it — a strong end, a confirmed weak one, formats, the
+// recording itself — was not a guess the backoff is testing.
+func settledTerminal(row database.FeedItem) bool {
+	return (row.Status == "vod" || row.Status == "not_a_stream") && row.RecheckAt == ""
+}
+
 // endCheckFor is the end check a probe of row may make (ProbeClassifyParams.
-// ConfirmEnd), judged against now, the cycle's instant. A row whose re-check
-// is pending gets none: the backoff decides when it is asked again, and a
-// probe on any other rule before then (the restart carve-out, the
-// unresolved arm) asking it every cycle was the cost the backoff exists to
-// bound. Every other row gets fm.ConfirmEnd, a due re-check included.
+// ConfirmEnd), judged against now, the cycle's instant. The signed-in WEB
+// call settles an end nobody has settled, and only that:
+//
+//   - a row whose re-check is pending gets none: the backoff decides when
+//     it is asked again, and a probe on any other rule before then (the
+//     restart carve-out, the unresolved arm) asking it every cycle was the
+//     cost the backoff exists to bound;
+//   - a row holding a settled terminal classification (settledTerminal)
+//     gets none: its probe — the restart carve-out's, or the archive's
+//     refresh — looks for a stream that resumed, which the status probe
+//     reads live or upcoming, and a weak end from it agrees with what the
+//     row holds (probeRowDated);
+//   - every other row — stored unknown, upcoming or live — gets
+//     fm.ConfirmEnd, and so does a due re-check.
 func (fm *FeedMonitor) endCheckFor(row database.FeedItem, now time.Time) ConfirmEndFunc {
-	if recheckPending(row, now.UTC().Format(time.RFC3339)) {
+	if recheckPending(row, now.UTC().Format(time.RFC3339)) || settledTerminal(row) {
 		return withheldEndCheck
 	}
 	return fm.ConfirmEnd
@@ -144,10 +161,11 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 			// the backoff only ever adds probes. A pending re-check that
 			// took the row out of scope left a stream that resumed on the
 			// same ID unfound for an hour, then six, then a day, when the
-			// carve-out would have found it on the next cycle. A pending
-			// row's probe is made without the end check (endCheckFor): it
-			// looks for a restart, which the status probe reads live or
-			// upcoming, and the backoff decides when the end is asked again.
+			// carve-out would have found it on the next cycle. Its probe is
+			// made without the end check (endCheckFor), pending or settled:
+			// it looks for a restart, which the status probe reads live or
+			// upcoming, and the backoff — or the end the row already holds
+			// — answers the rest.
 			hasJob, err := fm.db.HasAnyJob(row.VideoID)
 			if err != nil || hasJob || row.DatePrecision != "started" {
 				skipped++
@@ -251,9 +269,13 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 // shape (vod, started, no job), probed every cycle for the whole window.
 //
 // The probe is given the end check the row's state calls for (endCheckFor,
-// against now, the cycle's instant): none for a row whose re-check is still
-// pending, whose weak end stays unconfirmed for applyProbe to leave the
-// schedule as it stands.
+// against now, the cycle's instant). None for a row whose re-check is still
+// pending: its weak end stays unconfirmed, for applyProbe to leave the
+// schedule as it stands. None either for a row already holding a settled
+// terminal classification — stored vod or not_a_stream, no re-check pending
+// (settledTerminal) — and a weak end from that probe agrees with what it
+// holds: settled it stays, never turned back into an unconfirmed end by an
+// answer weaker than the one that settled it.
 //
 // ok=false means the date fetch itself FAILED (transport error): callers
 // treat the row like an errored probe — no write, no FRESH, no exhaustion,
@@ -262,6 +284,9 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 // invariant and the archive's row-date fallback handle that honestly.
 func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem, cutoff string, now time.Time) (ProbeClassifyResult, bool) {
 	res := fm.probeRow(ctx, ch, chID, row, fm.endCheckFor(row, now))
+	if res.EndUnconfirmed && settledTerminal(row) {
+		res.EndUnconfirmed = false
+	}
 	if res.Outcome != OutcomeProbed || res.PublishedAt != "" {
 		return res, true
 	}

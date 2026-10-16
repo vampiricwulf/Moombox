@@ -607,13 +607,120 @@ func TestWalk_APendingReCheckKeepsTheRestartCarveOut(t *testing.T) {
 	}
 }
 
-// The archive's refresh probe follows the walk's rule: a row whose re-check
+// The restart carve-out's probe of a row holding a settled end makes no
+// end check: it looks for a stream that resumed, which the status probe
+// reads live or upcoming, and a weak end from it agrees with the end the row
+// already holds — settled it stays. Asked every cycle, the signed-in WEB call
+// cost one more request per cycle for the whole window on every such row
+// (about 430 at the default poll and window), and an unconfirmed answer
+// would have turned a settled end back into a pending one. Two rows have the
+// carve-out's shape (vod, started, no job): one a strong end settled, and a
+// coarse /streams-tab row whose weak end the end check confirmed, taking the
+// check's 'started' date because the date fetch would have run — asked once,
+// on the probe that settled it, and never again.
+//
+// Nor does it log the answer as an unconfirmed end to be re-checked: no
+// re-check is scheduled on its account.
+//
+// Mutants: endCheckFor giving a settled row the end check (an end check per
+// cycle); probeRowDated not settling a settled row's weak answer (the
+// strong-settled row goes pending on the first cycle); confirmEnd logging a
+// withheld check's answer as unconfirmed and re-checked later (that Debug
+// line every cycle).
+func TestWalk_TheCarveOutProbeOfASettledEndMakesNoEndCheck(t *testing.T) {
+	t0 := fixedNow()
+	started := t0.Add(-20 * time.Hour).Format(time.RFC3339)
+	for _, tc := range []struct {
+		name       string
+		seed       func(t *testing.T, db *database.Database)
+		check      EndCheck
+		checkErr   error
+		wantChecks int
+	}{
+		{"a strong end settled it", func(t *testing.T, db *database.Database) {
+			seedRow(t, db, "UC1", "r1", t0.AddDate(0, 0, -1), "started", "rss", "vod")
+		}, EndCheck{}, ErrEndCheckUnavailable, 0},
+		{"the end check settled it", func(t *testing.T, db *database.Database) {
+			seedRow(t, db, "UC1", "r1", t0.Add(-24*time.Hour), "coarse", "streams", "upcoming")
+		}, EndCheck{Ended: true, PublishedAt: started, PublishedPrecision: "started"}, nil, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t)
+			tc.seed(t, db)
+			probes, checks, dates := 0, 0, 0
+			answer := weakEnd()
+			for i := range 6 {
+				rec := &warnRecordingLogger{}
+				fm := newTestFeedMonitor(t, db, withRSS(rssWith()), withMembership(membWith()), withWindowDays(3),
+					withProbe(countingProbe(&probes, &answer)), withNow(t0.Add(time.Duration(i)*10*time.Minute)),
+					withProbeDate(func(context.Context, string) (string, string, error) {
+						dates++
+						return started, "started", nil
+					}))
+				fm.logger = rec
+				fm.ConfirmEnd = endCheckReturning(&checks, tc.check, tc.checkErr)
+				found := recordVideoFound(fm)
+				// include_non_live_content off: the carve-out is the walk's one rule for this vod row.
+				if err := fm.checkChannel(context.Background(), &config.ChannelConfig{ID: "UC1", Name: "UC1"}); err != nil {
+					t.Fatalf("checkChannel: %v", err)
+				}
+				if len(*found) != 0 {
+					t.Fatalf("cycle %d: an ended broadcast was jobbed: %v", i, *found)
+				}
+				for _, d := range rec.debugs {
+					if strings.Contains(d, "re-checked later") {
+						t.Fatalf("cycle %d: a settled end's carve-out probe logged %q", i, d)
+					}
+				}
+			}
+			row := mustGetFeedItem(t, db, "UC1", "r1")
+			if probes != 6 || checks != tc.wantChecks || dates != 0 ||
+				row.Status != "vod" || row.DatePrecision != "started" || row.RecheckAt != "" {
+				t.Fatalf("over 6 cycles: probes %d, end checks %d, date fetches %d, row %q %q re-check %q; want 6 (the carve-out's), %d, 0, a settled vod on its started date",
+					probes, checks, dates, row.Status, row.DatePrecision, row.RecheckAt, tc.wantChecks)
+			}
+		})
+	}
+}
+
+// The archive's refresh probe follows the same two rules. A row holding a
+// settled terminal classification — a vod, or a not_a_stream (a finished
+// premiere whose formats are withheld now reads the same weak end) — is
+// refreshed without the end check, and a weak answer agrees with it: the
+// VOD job it was always going to get, as at bcab5da9. A row whose re-check
 // is pending is not refresh-probed at all — no job until a re-check settles
 // it, and a probe every cycle while it waits is the cost the backoff bounds.
+// The settled rows are what include_non_live_content turned on after they
+// settled leaves behind, or the channel established after, or an orphaned
+// history row cleared.
 //
-// Mutant: the archive's pending gate dropped (a refresh probe of the pending
-// row).
+// Mutants: endCheckFor giving a settled vod the end check, or a settled
+// not_a_stream (an end check, and the unconfirmed answer makes no job);
+// probeRowDated not settling a settled row's weak answer (no job, and the
+// row goes pending); the archive's pending gate dropped (a refresh probe of
+// the pending row).
 func TestArchive_TheRefreshProbeAndTheEndReCheck(t *testing.T) {
+	for _, status := range []string{"vod", "not_a_stream"} {
+		t.Run("a settled "+status+" is refreshed without the end check", func(t *testing.T) {
+			db := newTestDB(t)
+			now := fixedNow()
+			seedRow(t, db, "UC1", "v1", now.Add(-24*time.Hour), "exact", "rss", status)
+			probes, checks := 0, 0
+			answer := weakEnd()
+			fm := newTestFeedMonitor(t, db, withRSS(rssWith()), withMembership(membWith()), withWindowDays(3),
+				withProbe(countingProbe(&probes, &answer)), withNow(now))
+			fm.ConfirmEnd = endCheckReturning(&checks, EndCheck{}, ErrEndCheckUnavailable)
+			found := recordVideoFound(fm)
+			fm.runCycleForTest(t, "UC1") // archives VODs
+			if probes != 1 || checks != 0 || len(*found) != 1 || (*found)[0].d != DispositionBacklogVOD {
+				t.Fatalf("probes %d, end checks %d, found %v; want the refresh probe, no end check, one backlog VOD job",
+					probes, checks, *found)
+			}
+			if row := mustGetFeedItem(t, db, "UC1", "v1"); row.RecheckAt != "" {
+				t.Fatalf("the settled row went pending: re-check %q", row.RecheckAt)
+			}
+		})
+	}
 	t.Run("a pending re-check is not refreshed", func(t *testing.T) {
 		db := newTestDB(t)
 		now := fixedNow()
@@ -632,12 +739,14 @@ func TestArchive_TheRefreshProbeAndTheEndReCheck(t *testing.T) {
 	})
 }
 
-// endCheckFor, row by row: a row whose re-check is pending is probed without
-// the end check, and every other row with it — a due re-check included.
+// endCheckFor, row by row: the end check is for an end nobody has settled —
+// a first probe of a row stored unknown, upcoming or live, or a due re-check
+// — and for nothing else.
 //
-// Mutants: the withheld arm dropped (the pending rows get the end check);
-// the pending test reading a due re-check as pending (the due rows get
-// none).
+// Mutants: either withheld arm dropped (the pending or the settled rows get
+// the end check); settledTerminal without not_a_stream (the settled
+// not_a_stream gets it); the pending test reading a due re-check as pending
+// (the due rows get none).
 func TestEndCheckFor(t *testing.T) {
 	now := fixedNow()
 	pending := now.Add(time.Minute).Format(time.RFC3339)
@@ -654,6 +763,8 @@ func TestEndCheckFor(t *testing.T) {
 		{"live", database.FeedItem{Status: "live"}, true},
 		{"vod, re-check due", database.FeedItem{Status: "vod", RecheckAt: due}, true},
 		{"unknown, re-check due", database.FeedItem{Status: "unknown", RecheckAt: due}, true},
+		{"vod, settled", database.FeedItem{Status: "vod"}, false},
+		{"not_a_stream, settled", database.FeedItem{Status: "not_a_stream"}, false},
 		{"vod, re-check pending", database.FeedItem{Status: "vod", RecheckAt: pending}, false},
 		{"unknown, re-check pending", database.FeedItem{Status: "unknown", RecheckAt: pending}, false},
 	} {

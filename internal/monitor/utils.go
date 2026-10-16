@@ -75,7 +75,9 @@ var ErrEndCheckUnavailable = errors.New("no signed-in YouTube session for the en
 
 // errEndCheckWithheld is withheldEndCheck's answer: the probe was not given
 // the end check (the feed's endCheckFor), so a weak end it reads stays
-// unconfirmed, and the re-check already pending on its row stands.
+// unconfirmed for its caller to settle against what the row already holds:
+// the re-check pending on it stands (applyProbe), or the settled end it
+// holds agrees (probeRowDated).
 var errEndCheckWithheld = errors.New("the end check is not this probe's to make")
 
 // withheldEndCheck is the ConfirmEndFunc of a probe that may not make the
@@ -609,7 +611,7 @@ func confirmEnd(ctx context.Context, p ProbeClassifyParams, r *ProbeClassifyResu
 	}
 	r.EndUnconfirmed = true
 	if errors.Is(err, errEndCheckWithheld) {
-		return // the row's pending re-check stands (endCheckFor); nothing is re-checked on this probe's account
+		return // the caller settles it against the row (endCheckFor); nothing is re-checked on this probe's account
 	}
 	reason := "the WEB answer settles nothing"
 	if err != nil {
