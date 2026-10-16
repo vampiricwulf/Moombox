@@ -394,6 +394,24 @@ The launcher enables graceful restarts without process chain buildup. When Moomb
   minute), giving up after `maxConsecutiveCrashes` (5) consecutive quick deaths. For a 24/7 unattended
   archiver a dead-until-noticed daemon is the worst outcome.
 
+**Crash output** (`cmd/moombox/crash_output.go`): what crash supervision respawns is almost always a
+crash the logger never saw — a fatal runtime error, a panic in a goroutine without a recover, a fatal
+signal — and the Go runtime writes those to stderr only, which in TUI mode is the alternate screen the
+respawned TUI clears. So each child gives the runtime a second place to write it
+(`armCrashOutput`, `debug.SetCrashOutput`): `<log name>-crash.log` beside the log
+(`crashOutputPath`, `moombox-crash.log` for the default), created empty as soon as the logger is open.
+The next start that finds output there (`takePreviousCrash`, any start, not only a crash respawn —
+the launcher's give-up and fail-fast exits tell the operator to check the logs) logs an ERROR with the
+output's first line as `cause` (for a fatal error, whose own `fatal error: …` line the runtime prints
+before it counts itself as crashing and so to stderr only, the first frame it struck in —
+`crashCause`) and its first 8 KiB (`crashExcerptBytes`, cut at a line, saying how
+much it left out) as `output`, with every URL cut to its origin and any PO token removed
+(`redactCrashText`), then keeps the whole output as `<crash file>.1`, replacing the crash before it
+and cut to 1 MiB (`crashKeepBytes`) — at most two crashes' output on disk. A crash respawn's
+`crash_recovered` notification names that cause and the kept file (`crashRecoveredNotice`), or says
+the process left no crash output (a SIGKILL or the OOM killer reports none) instead of sending the
+operator to logs that hold nothing more.
+
 **Windows-specific details:**
 - The parent catches `os.Interrupt` (Ctrl+C, Ctrl+Break) and SIGTERM (console close, logoff, shutdown) and sends nothing on: each event reached every process on the console, the child included. It records the stop, so the child's exit propagates.
 - The `createNoWindow` flag (`0x08000000`) is used when spawning cleanup processes, not the child itself. The child inherits the parent's console (stdin/stdout/stderr are piped through).
@@ -551,7 +569,7 @@ These are the event strings used for filtering. A target with no event filter re
 | `update_available` | New version detected |
 | `update_applied` | Moombox restarted on a different version than the previous run (embed reports whether the web dashboard came back) — never on the launcher's rollback from a failed update, which `update_failed` announces |
 | `update_failed` | A failed-update marker (`.update-broken` / `.update-failed`) was found at boot — manual attention needed |
-| `crash_recovered` | The launcher respawned Moombox after an abnormal exit |
+| `crash_recovered` | The launcher respawned Moombox after an abnormal exit; names the crash's cause from its crash output, or says it left none (§Launcher/Supervisor Pattern) |
 | `channel_unhealthy` | A monitored channel failed a sustained streak of checks on EVERY monitor covering it (renamed/banned/misconfigured) — its streams are being missed. Cross-monitor confirmed: a YouTube channel still reachable via DECAPI while its RSS feed 404s during peak hours does NOT fire (avoids the false positive). |
 | `channel_healthy` | A channel that fired `channel_unhealthy` answered a check again. Fires only when the alert was actually SENT — a streak suppressed by the cross-monitor confirmation has no alert to close. The two YouTube monitors share one incident per channel (`channelIncidents`, `cmd/moombox/monitor_callbacks.go`): an outage both observe sends one alert, and the first monitor to reach the channel again closes it — a set per monitor sent two identical alerts and left one open when only DECAPI recovered. Aliased to `channel_unhealthy` |
 | `sidecar_down` | The BotGuard sidecar has been unhealthy for a continuous 60 seconds. Error-coloured and mention-eligible. The supervisor's restart ladder handles everything shorter, so this is the failure it could not fix: no PO token is minted and signature-ciphered formats are unavailable until it returns. Carries the reason the child died and how many successful restarts this process has made |

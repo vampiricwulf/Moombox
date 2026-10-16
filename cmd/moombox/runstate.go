@@ -126,6 +126,10 @@ type runState struct {
 
 	// --- Lifecycle control ---
 	restartRequested atomic.Bool
+	// prevCrash is what the previous process's crash left in the crash file
+	// beside the log (captureCrashOutput, in initServices); the Recovered
+	// From Crash notice reports it.
+	prevCrash previousCrash
 	// stdoutIsTerminal records, at run's start, whether stdout is a terminal
 	// — afterwards a hung-up one no longer reads as a terminal at all.
 	stdoutIsTerminal bool

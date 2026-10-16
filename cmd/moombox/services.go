@@ -614,6 +614,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.closeLog = func() { logCloseOnce.Do(func() { log.Close() }) }
 
 	log.Info("Starting Moombox", slog.String("version", version), slog.String("commit", commit))
+	// What a crash of the previous process left beside the log goes into it,
+	// and this process's own crash output is captured from here on.
+	s.prevCrash = s.captureCrashOutput(cfg.Paths.LogFilePath)
 	logConfigSource(log, cfg, s.configPath)
 	for _, issue := range cfg.NormalizedOnLoad {
 		log.Warn("Config value replaced by its default — the next save writes the default to the file", slog.String("issue", issue))

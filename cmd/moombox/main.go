@@ -561,13 +561,18 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// Crash-recovery notice: the launcher sets _MOOMBOX_CRASH_RESPAWN when
 	// this boot exists because the previous process died abnormally and
 	// supervision respawned it. Tell the operator — an unattended recorder
-	// that silently crash-cycles hides a problem that needs a look.
+	// that silently crash-cycles hides a problem that needs a look — and
+	// what its crash output says, which initServices has already logged
+	// (captureCrashOutput).
 	if respawnCode := os.Getenv("_MOOMBOX_CRASH_RESPAWN"); respawnCode != "" {
+		crashOutput := "none captured"
+		if s.prevCrash.captured() {
+			crashOutput = s.prevCrash.kept
+		}
 		log.Error("moombox was restarted by the launcher after an abnormal exit",
-			slog.String("previousExitCode", respawnCode))
-		notifyMgr.Send("Recovered From Crash",
-			fmt.Sprintf("Moombox exited abnormally (code %s) and was automatically restarted — check the logs for the cause", respawnCode),
-			notifications.TypeWarning, nil,
+			slog.String("previousExitCode", respawnCode), slog.String("crashOutput", crashOutput))
+		desc, fields := crashRecoveredNotice(respawnCode, s.prevCrash, filepath.Base(cfg.Paths.LogFilePath))
+		notifyMgr.Send("Recovered From Crash", desc, notifications.TypeWarning, fields,
 			notifications.SendOptions{Event: "crash_recovered"},
 		)
 	}

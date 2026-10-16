@@ -777,7 +777,7 @@ The launcher (parent process, without `_MOOMBOX_CHILD`) spawns the application a
 - A non-zero exit from the first boot after an update, inside 2 minutes and with its rollback artifact still on disk (exit 3 whenever it arrives) — automatic rollback to the previous binary, which is respawned; exit 3 keeps the artifact with instructions instead.
 - Exit code 130 or 143 (128+SIGINT / 128+SIGTERM), or 3 (`exitCodeStartupError`) — Launcher exits with the same code.
 - Any other non-zero exit within 60 s of a fresh launch — Launcher exits with the same code: a startup failure fails fast instead of crash-looping.
-- Any other non-zero exit — crash supervision: the launcher respawns the child after 1/2/4/8/16 s, telling it (`_MOOMBOX_CRASH_RESPAWN`) so it sends `crash_recovered`, and gives up with the last code after 5 consecutive crashes without a healthy 60 s run in between.
+- Any other non-zero exit — crash supervision: the launcher respawns the child after 1/2/4/8/16 s, telling it (`_MOOMBOX_CRASH_RESPAWN`) so it sends `crash_recovered` with the cause from the crash output it finds beside the log, and gives up with the last code after 5 consecutive crashes without a healthy 60 s run in between.
 
 The respawned child shares the launcher's console; the `CREATE_NO_WINDOW` flag (0x08000000) is used only for the detached cleanup spawn that deletes the superseded launcher binary. Restart triggers: config change requiring restart, update applied, setup wizard completion, `POST /api/restart`.
 
