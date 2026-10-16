@@ -458,6 +458,8 @@ quality_preference = "best"            # Optional, any channel: "best", "1080p60
 
 Template variables for `output_template`: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start_time}`
 
+`${start_date}` (`YYYYMMDD`) and `${start_time}` (`HHMM`) are the stream's start in the host's local time zone: the system zone on Windows and Linux, `TZ` in Docker (see `docker-compose.yml`). Earlier versions wrote them in UTC whatever the zone; archives already on disk keep the names they were given, since nothing renames them, so a channel folder can hold both until then and from then on.
+
 ## Building from Source
 
 See [BUILDING.md](BUILDING.md) for prerequisites and build commands for Windows, Linux x64, and Linux arm64.

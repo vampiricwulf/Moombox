@@ -52,7 +52,9 @@ services:
       # reason that looks nothing like a mount problem. Adding ":ro" breaks
       # it the same way.
     # environment:
-    #   # Timezone for timestamps in filenames and logs:
+    #   # Time zone for ${start_date}/${start_time} in new filenames and for
+    #   # log timestamps (the image ships tzdata; unset means UTC). Archives
+    #   # already written keep their names; nothing renames them:
     #   - TZ=America/Los_Angeles
     # Run as a specific user instead of root (make sure ./data is
     # writable by that uid first):

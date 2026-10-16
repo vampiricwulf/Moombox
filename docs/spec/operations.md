@@ -930,7 +930,7 @@ A backlog VOD admitted below the threshold can still fill what is left. One whos
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/api/status` | GET | Server status: version, disk space, cookie state, monitor state |
+| `/api/status` | GET | Server status: version, disk space, cookie state, monitor state, and the host zone's UTC offset (`utcOffsetMinutes`, for the template example) |
 | `/api/stats` | GET | Statistics dashboard data: job counts, download totals, etc. |
 | `/api/logs` | GET | Recent log lines from the in-memory ring buffer |
 

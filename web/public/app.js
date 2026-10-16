@@ -47,6 +47,8 @@ export class MoomboxApp {
     this.autoCookieReloginRequired = null;
     // Tri-state; see loadStatus. null = the server has no opinion.
     this.sidecarHealthy = null;
+    // The server's UTC offset in minutes, from /api/status; null until read.
+    this.serverUtcOffsetMinutes = null;
     this.nextFeedCheck = 0;
     this.nextDecapiCheck = 0;
     this.nextTwitchCheck = 0;
@@ -606,6 +608,13 @@ export class MoomboxApp {
         // `[bgutils] use_sidecar = false` — and must read as "no opinion", not
         // as a fault; only an explicit `healthy: false` raises the warning.
         this.sidecarHealthy = status.botguardSidecar ? status.botguardSidecar.healthy === true : null;
+        // The server's zone, which recordings are named in: the Settings
+        // template example renders its date there (renderTemplatePreview).
+        // The config may have drawn it already, with the browser's.
+        if (Number.isFinite(status.utcOffsetMinutes) && status.utcOffsetMinutes !== this.serverUtcOffsetMinutes) {
+          this.serverUtcOffsetMinutes = status.utcOffsetMinutes;
+          this.settings?._wireTemplatePreview?.();
+        }
         if (status.version) {
           if (this._version && status.version !== this._version) {
             // The server restarted on a DIFFERENT version — an update

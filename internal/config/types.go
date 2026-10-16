@@ -563,5 +563,5 @@ type TemplateVariables struct {
 	Title   string
 	ID      string
 	Channel string
-	Date    *string // ISO date, optional
+	Date    *string // RFC 3339 time, optional (now when absent); rendered in time.Local
 }

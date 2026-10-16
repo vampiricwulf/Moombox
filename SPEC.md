@@ -639,7 +639,7 @@ Netscape-format cookie file (`cookies.txt`). The `CookieJar` parses it into TWO 
 
 **Staging directory:** Active downloads write segments to `staging/{jobID}/`. Contains video segments, audio segments, chat JSON, and resume state files. At each start the worker deletes only the leftovers that are provably redundant — a recovered set-aside recording whose sibling is on disk, and a `Finished` job's staging when its row records a download of its own (never an import's), its archive is on disk, no recovered set-aside recording it could not verify is left in it, and the post-mux cleanup's own rules would have deleted it — logging each with its path and reason; everything else waits for the orphan sweep's confirm-before-delete (`reclaimBootLeftovers`, `internal/worker/boot_leftovers.go`).
 
-**Output template:** Default `${channel}/${start_date} ${title} [${id}]`. Variables are expanded at mux time. Creates per-channel subdirectories.
+**Output template:** Default `${channel}/${start_date} ${title} [${id}]`. Variables are expanded at mux time; `${start_date}`/`${start_time}` in the host's local time zone (`TZ` in Docker). Creates per-channel subdirectories.
 
 **Chat JSON format:** Header with metadata (video ID, title, channel, start time, message count), followed by an array of chat messages. The message count in the header uses fixed-width padding (20 chars) so it can be updated in-place without rewriting the file. Messages are appended incrementally.
 

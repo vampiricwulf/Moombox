@@ -754,8 +754,10 @@ File permissions: `0o600` (owner read/write only).
 | `${title}` | Video/stream title | Filesystem-unsafe characters removed; Unicode preserved; cut to 180 bytes on a rune boundary (`templateTitleMaxBytes`) |
 | `${id}` | Video/stream ID | No sanitization (IDs are alphanumeric) |
 | `${channel}` | Channel name | Filesystem-unsafe characters removed; Unicode preserved; cut to 200 bytes (`templateChannelMaxBytes`) |
-| `${start_date}` | Stream start time (or now) | Formatted as `YYYYMMDD` |
-| `${start_time}` | Stream start time (or now) | Formatted as `HHMM` |
+| `${start_date}` | Stream start time (or now) | Formatted as `YYYYMMDD` in the host's local zone (`time.Local`: `TZ` in Docker, the system zone on Windows and Linux) |
+| `${start_time}` | Stream start time (or now) | Formatted as `HHMM` in the host's local zone, as `${start_date}` |
+
+Every stored time is UTC — `created_at`, YouTube's `startTimestamp` (`+00:00`), Twitch's `createdAt` (`Z`), the workers' "now" fallbacks — so the resolver converts the parsed time to `time.Local` before formatting it. It used to format it in the string's own offset, which named every install's files in UTC: `TZ` in `docker-compose.yml` had no effect, and an evening stream in the Americas or a morning one in Japan was filed under the wrong day. Files written before that change keep their names; nothing renames them. The two previews show the same zone: the TUI's calls the resolver, and the dashboard's renders its sample date at `/api/status`'s `utcOffsetMinutes`, the server's offset, rather than in the browser's zone (`renderTemplatePreview`, `web/public/modules/settings.js`).
 
 Sanitization preserves CJK, Japanese kana, and full-width characters via a regex allowlist. Those keep
 three bytes a character, and Linux caps a name at 255 BYTES, so the byte caps are what keep a long

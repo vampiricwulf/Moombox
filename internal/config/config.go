@@ -1494,6 +1494,16 @@ func guardReservedComponents(p string) string {
 const OutputTemplateMaxLen = 500
 
 // ResolveTemplate resolves an output template with the given variables.
+//
+// ${start_date} and ${start_time} are written in the host's local zone
+// (time.Local: TZ in Docker, the system zone on Windows and Linux), whatever
+// offset vars.Date carries. Every stored time is UTC — a job's created_at,
+// YouTube's startTimestamp ("+00:00"), Twitch's createdAt ("Z"), the
+// workers' "now" fallbacks — and the parsed time was formatted in its own
+// offset, so every install named its files in UTC: TZ in docker-compose had
+// no effect, and an evening stream in the Americas or a morning one in Japan
+// was filed under the wrong day. Files written before that changed keep the
+// names they got; nothing renames them.
 func ResolveTemplate(template string, vars TemplateVariables) string {
 	safeTitle := truncateUTF8(sanitizeTemplateStr(vars.Title), templateTitleMaxBytes)
 	safeChannel := truncateUTF8(sanitizeTemplateStr(vars.Channel), templateChannelMaxBytes)
@@ -1504,6 +1514,7 @@ func ResolveTemplate(template string, vars TemplateVariables) string {
 			now = t
 		}
 	}
+	now = now.In(time.Local)
 
 	resolve := func(title, channel string) string {
 		return strings.NewReplacer(

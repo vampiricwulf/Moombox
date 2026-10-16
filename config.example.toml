@@ -150,6 +150,8 @@
 [downloader]
 
 # Filename template. Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}
+# ${start_date} (YYYYMMDD) and ${start_time} (HHMM) are in the host's local
+# time zone (TZ in Docker).
 # output_template = "${channel}/${start_date} ${title} [${id}]"
 
 # Maximum video resolution, compared against the SHORTER frame dimension — so

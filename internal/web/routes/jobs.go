@@ -1623,10 +1623,17 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 		var mem runtime.MemStats
 		runtime.ReadMemStats(&mem)
 
+		// The host's zone offset from UTC right now, east positive: the zone
+		// config.ResolveTemplate writes ${start_date}/${start_time} in
+		// (time.Local — TZ in Docker), which need not be the browser's. The
+		// dashboard's template example reads it so the date it shows is
+		// the one a recording made today would get.
+		_, utcOffset := time.Now().Zone()
 		resp := map[string]any{
-			"status":    "running",
-			"uptime":    time.Since(deps.StartTime).Seconds(),
-			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"status":           "running",
+			"uptime":           time.Since(deps.StartTime).Seconds(),
+			"timestamp":        time.Now().UTC().Format(time.RFC3339),
+			"utcOffsetMinutes": utcOffset / 60,
 			"memory": map[string]any{
 				"rss":        mem.Sys / 1048576,
 				"heapUsed":   mem.HeapAlloc / 1048576,

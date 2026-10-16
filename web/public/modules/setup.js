@@ -262,7 +262,7 @@ export class SetupController {
     if (setupTemplateInput && setupTemplatePreview) {
       const updateSetupPreview = () => {
         const val = setupTemplateInput.value || setupTemplateInput.placeholder;
-        setupTemplatePreview.textContent = renderTemplatePreview(val);
+        setupTemplatePreview.textContent = renderTemplatePreview(val, this.app.serverUtcOffsetMinutes);
         setupTemplatePreview.style.display = val ? "" : "none";
       };
       setupTemplateInput.addEventListener("sl-input", updateSetupPreview);

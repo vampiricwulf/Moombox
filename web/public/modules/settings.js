@@ -133,18 +133,33 @@ const RESTART_REQUIRED_FIELDS = [
 
 /**
  * Render a template preview string using sample data, in the formats
- * config.ResolveTemplate writes (${start_date} YYYYMMDD, ${start_time} HHMM,
- * local time) and with the muxer's .mp4 — the TUI's preview calls the
- * resolver itself, so this is the copy that has to keep pace with it.
+ * config.ResolveTemplate writes (${start_date} YYYYMMDD, ${start_time} HHMM)
+ * and with the muxer's .mp4 — the TUI's preview calls the resolver itself,
+ * so this is the copy that has to keep pace with it.
+ *
+ * The sample is today at 20:00 in the SERVER's zone, which is the one the
+ * resolver writes in (time.Local: TZ in Docker, the system zone elsewhere):
+ * utcOffsetMinutes is /api/status's utcOffsetMinutes. The browser's own zone
+ * is not the server's for a remote viewer, or for a container whose TZ
+ * differs from the viewer's, and its date showed a day the recording would
+ * not get. Without the offset (status not loaded yet) the browser's date is
+ * the best guess.
  */
-export function renderTemplatePreview(template) {
-  const now = new Date();
+export function renderTemplatePreview(template, utcOffsetMinutes) {
   const pad = (n) => String(n).padStart(2, "0");
+  let startDate;
+  if (Number.isFinite(utcOffsetMinutes)) {
+    const there = new Date(Date.now() + utcOffsetMinutes * 60000);
+    startDate = `${there.getUTCFullYear()}${pad(there.getUTCMonth() + 1)}${pad(there.getUTCDate())}`;
+  } else {
+    const now = new Date();
+    startDate = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+  }
   const vars = {
     channel: "Miko Ch",
     title: "Singing Stream",
     id: "dQw4w9WgXcQ",
-    start_date: `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`,
+    start_date: startDate,
     start_time: "2000",
   };
   let result = template || "";
@@ -926,14 +941,18 @@ export class SettingsController {
     this.loadSecurityStatus();
   }
 
-  /** Wire up the live template preview below the output template input. */
+  /**
+   * Wire up the live template preview below the output template input. Also
+   * what re-renders it once /api/status says the server's zone (loadStatus),
+   * which can land after the config has drawn it.
+   */
   _wireTemplatePreview() {
     const templateInput = document.getElementById("cfg-output-template");
     const templatePreview = document.getElementById("cfg-template-preview");
     if (templateInput && templatePreview) {
       const updatePreview = () => {
         const val = templateInput.value || templateInput.placeholder;
-        templatePreview.textContent = renderTemplatePreview(val);
+        templatePreview.textContent = renderTemplatePreview(val, this.app.serverUtcOffsetMinutes);
         templatePreview.style.display = val ? "" : "none";
       };
       if (!this._templatePreviewWired) {
