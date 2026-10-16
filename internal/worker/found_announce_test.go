@@ -501,38 +501,6 @@ func TestCancelAfterTheTakeLeavesTheRowCancelled(t *testing.T) {
 	}
 }
 
-// A refused fetch says little that can be trusted about what the video is —
-// a members-only response classifies as not_a_stream — so the embed keeps its
-// neutral wording, carries no Length, and names the refusal. The shape is
-// the one the parse produces for a refusal: not_a_stream, not upcoming, no
-// start time (its upload date is no start), and a length it cannot vouch for.
-//
-// Mutant: foundKind classifying a refused fetch ("Video: T", Length present).
-func TestRefusedFetchKeepsTheNeutralWording(t *testing.T) {
-	sp, rec, job := foundTestJob(t)
-	sp.applyJobMetadata(job, &youtube.VideoInfo{
-		Title: "T", StreamStatus: youtube.StreamNotAStream, LengthSeconds: new(600),
-		PlayabilityError: youtube.PlayabilityMembersOnly,
-	}, false, true)
-
-	found := rec.ByEvent("found")
-	if len(found) != 1 {
-		t.Fatalf("recorded %+v, want one \"found\"", rec.Calls())
-	}
-	if want := "Found matching stream: T"; found[0].Description != want {
-		t.Errorf("description = %q, want %q", found[0].Description, want)
-	}
-	if v, ok := found[0].Field("Length"); ok {
-		t.Errorf("Length = %q on a refused fetch, want no field", v)
-	}
-	if v, _ := found[0].Field("Access"); v != "Members only" {
-		t.Errorf("Access = %q, want \"Members only\"", v)
-	}
-	if v, ok := found[0].Field("Starts At"); ok {
-		t.Errorf("Starts At = %q on a refused fetch, want no field", v)
-	}
-}
-
 // The later confirmation renders Starts At as "Stream Found" does, countdown
 // included.
 func TestLaterConfirmationRendersStartsAtLikeFound(t *testing.T) {
@@ -612,7 +580,9 @@ func TestCancelClearsTheOwedFound(t *testing.T) {
 
 // Each kind of find says what it is, and carries only the fields that kind
 // has: a schedule for an upcoming one, a length where a video exists, an end
-// or publish date for a finished one.
+// or publish date for a finished one. The last three rows are what any find
+// may carry besides: a refused fetch's neutral wording, the restriction it
+// names, and the description.
 //
 // Mutants: foundKind ignoring IsPremiere (the premiere rows read "Upcoming:" /
 // "Live:"); Length set for a live broadcast; Ended or Published set for an
@@ -668,6 +638,31 @@ func TestDeferredFoundSaysWhatItFound(t *testing.T) {
 			youtube.VideoInfo{StreamStatus: youtube.StreamVOD, PublishedAt: "2026-10-09T12:00:00Z", PublishedPrecision: "started"},
 			"Video: ",
 			map[string]string{"Published": "<t:1791547200:f>"}},
+		// A refused fetch says little that can be trusted about what the video
+		// is — a members-only response classifies as not_a_stream — so the
+		// embed keeps its neutral wording, carries no Length, and names the
+		// refusal. The shape is the one the parse produces for a refusal:
+		// not_a_stream, not upcoming, no start time (its upload date is no
+		// start), and a length it cannot vouch for.
+		//
+		// Mutant: foundKind classifying a refused fetch ("Video: T", Length
+		// present).
+		{"refused fetch keeps the neutral wording",
+			youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, LengthSeconds: new(600),
+				PlayabilityError: youtube.PlayabilityMembersOnly},
+			"Found matching stream: ",
+			map[string]string{"Length": "", "Access": "Members only", "Starts At": ""}},
+		// A restriction on watching is named. The description is excerpted
+		// into its own field.
+		{"restricted, with a description",
+			youtube.VideoInfo{IsUpcoming: true, Description: "Join us *live*", PlayabilityError: youtube.PlayabilityMembersOnly},
+			"Found matching stream: ",
+			map[string]string{"Access": "Members only", "Description": `Join us \*live\*`}},
+		// An open video carries no Access field.
+		{"open video",
+			youtube.VideoInfo{IsUpcoming: true, PlayabilityError: youtube.PlayabilityOK},
+			"Upcoming: ",
+			map[string]string{"Access": ""}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sp, rec, job := foundTestJob(t)
@@ -690,32 +685,6 @@ func TestDeferredFoundSaysWhatItFound(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// A restriction on watching is named; an open video carries no Access field.
-// The description is excerpted into its own field.
-func TestDeferredFoundCarriesAccessAndDescription(t *testing.T) {
-	sp, rec, job := foundTestJob(t)
-	sp.applyJobMetadata(job, &youtube.VideoInfo{
-		Title: "T", IsUpcoming: true, Description: "Join us *live*",
-		PlayabilityError: youtube.PlayabilityMembersOnly,
-	}, false, true)
-	found := rec.ByEvent("found")
-	if len(found) != 1 {
-		t.Fatalf("recorded %+v, want one \"found\"", rec.Calls())
-	}
-	if v, _ := found[0].Field("Access"); v != "Members only" {
-		t.Errorf("Access = %q, want \"Members only\"", v)
-	}
-	if v, _ := found[0].Field("Description"); v != `Join us \*live\*` {
-		t.Errorf("Description = %q, want the escaped description", v)
-	}
-
-	sp2, rec2, job2 := foundTestJob(t)
-	sp2.applyJobMetadata(job2, &youtube.VideoInfo{Title: "T", IsUpcoming: true, PlayabilityError: youtube.PlayabilityOK}, false, true)
-	if v, ok := rec2.ByEvent("found")[0].Field("Access"); ok {
-		t.Errorf("Access = %q on an open video, want no field", v)
 	}
 }
 

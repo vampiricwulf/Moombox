@@ -347,15 +347,10 @@ func newInterruptedTestDownloader(t *testing.T) *engine.SegmentDownloader {
 	return d
 }
 
-// TestFinalizeIncompleteTailInterruption pins the third computeIncompleteTail
-// input: a DownloadResult whose downloader latched a Tier-2 interruption
-// finalize (FinalizedDuringInterruption()==true) must persist
-// incomplete_tail=true even though NEITHER downloader finalized behind
-// head. Would catch: computeIncompleteTail or finalizeIncompleteTail never
-// consulting FinalizedDuringInterruption at all (the flag would stay
-// false, silently discarding staging on cleanup even though the resume
-// sidecar was deliberately preserved for exactly this case).
-func TestFinalizeIncompleteTailInterruption(t *testing.T) {
+// TestFinalizeIncompleteTail pins the computeIncompleteTail inputs besides
+// behind-head: each row leaves NEITHER downloader finalized behind head, and
+// finalizeIncompleteTail must still report incomplete_tail=true and persist it.
+func TestFinalizeIncompleteTail(t *testing.T) {
 	dir := t.TempDir()
 	db, err := database.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -363,32 +358,69 @@ func TestFinalizeIncompleteTailInterruption(t *testing.T) {
 	}
 	defer db.Close()
 
-	jobID := "yt_finalizeIncompleteTailInterruption"
-	job := &database.Job{
-		ID:      jobID,
-		VideoID: jobID,
-		URL:     "https://youtube.com/watch?v=" + jobID,
-		Status:  database.StatusDownloading,
-	}
-	if _, err := db.AddJob(job); err != nil {
-		t.Fatal(err)
-	}
-
 	o := &DownloadOrchestrator{db: db, logger: &discardLogger{}}
 
-	dl := newInterruptedTestDownloader(t)
+	for _, tc := range []struct {
+		name   string
+		result func(t *testing.T) *DownloadResult
+		waited bool   // workerWaitedForResume
+		why    string // what flags the row, for the failure messages
+	}{
+		{
+			// The third computeIncompleteTail input: a DownloadResult whose
+			// downloader latched a Tier-2 interruption finalize
+			// (FinalizedDuringInterruption()==true). Would catch:
+			// computeIncompleteTail or finalizeIncompleteTail never consulting
+			// FinalizedDuringInterruption at all (the flag would stay false,
+			// silently discarding staging on cleanup even though the resume
+			// sidecar was deliberately preserved for exactly this case).
+			name: "Interruption",
+			result: func(t *testing.T) *DownloadResult {
+				return &DownloadResult{VideoDownloader: newInterruptedTestDownloader(t)}
+			},
+			why: "a downloader that latched a Tier-2 interruption finalize",
+		},
+		{
+			// (residual Tier-2 fix) workerWaitedForResume -- true when the live
+			// loop's shouldWaitForResume branch fired at least once, even if it
+			// eventually exhausted maxConsecutiveLiveChecks and gave up -- flags
+			// incomplete_tail even when NEITHER downloader ever latched
+			// FinalizedDuringInterruption itself (the whole point: that
+			// engine-side latch is never reached when the loop dies from
+			// repeated refresh failures rather than an engine-side budget
+			// expiry). Both downloaders nil (no FinalizedDuringInterruption
+			// evidence at all) -- only workerWaitedForResume=true should flag
+			// this.
+			name:   "WorkerWaitedForResume",
+			result: func(*testing.T) *DownloadResult { return &DownloadResult{} },
+			waited: true,
+			why:    "workerWaitedForResume=true with no downloader evidence at all",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jobID := "yt_finalizeIncompleteTail" + tc.name
+			if _, err := db.AddJob(&database.Job{
+				ID:      jobID,
+				VideoID: jobID,
+				URL:     "https://youtube.com/watch?v=" + jobID,
+				Status:  database.StatusDownloading,
+			}); err != nil {
+				t.Fatal(err)
+			}
 
-	incomplete, _, _, _, _ := o.finalizeIncompleteTail(jobID, &DownloadResult{VideoDownloader: dl}, false)
-	if !incomplete {
-		t.Fatal("a downloader that latched a Tier-2 interruption finalize must flag incomplete_tail even with both behind-head false")
-	}
+			incomplete, _, _, _, _ := o.finalizeIncompleteTail(jobID, tc.result(t), tc.waited)
+			if !incomplete {
+				t.Fatalf("%s must flag incomplete_tail even with both behind-head false", tc.why)
+			}
 
-	got, err := db.GetJob(jobID)
-	if err != nil || got == nil {
-		t.Fatalf("GetJob: %v", err)
-	}
-	if !got.IncompleteTail {
-		t.Error("finalizeIncompleteTail did not persist incomplete_tail=true for an interrupted finalize")
+			got, err := db.GetJob(jobID)
+			if err != nil || got == nil {
+				t.Fatalf("GetJob: %v", err)
+			}
+			if !got.IncompleteTail {
+				t.Errorf("finalizeIncompleteTail did not persist incomplete_tail=true for %s", tc.why)
+			}
+		})
 	}
 }
 
@@ -1011,51 +1043,6 @@ func TestObserveYouTubeStatusProbe(t *testing.T) {
 	})
 }
 
-// TestFinalizeIncompleteTailWorkerWaitedForResume (residual Tier-2 fix)
-// pins that workerWaitedForResume -- true when the live loop's
-// shouldWaitForResume branch fired at least once, even if it eventually
-// exhausted maxConsecutiveLiveChecks and gave up -- flags incomplete_tail
-// even when NEITHER downloader ever latched FinalizedDuringInterruption
-// itself (the whole point: that engine-side latch is never reached when
-// the loop dies from repeated refresh failures rather than an engine-side
-// budget expiry).
-func TestFinalizeIncompleteTailWorkerWaitedForResume(t *testing.T) {
-	dir := t.TempDir()
-	db, err := database.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	jobID := "yt_finalizeIncompleteTailWorkerWaited"
-	job := &database.Job{
-		ID:      jobID,
-		VideoID: jobID,
-		URL:     "https://youtube.com/watch?v=" + jobID,
-		Status:  database.StatusDownloading,
-	}
-	if _, err := db.AddJob(job); err != nil {
-		t.Fatal(err)
-	}
-
-	o := &DownloadOrchestrator{db: db, logger: &discardLogger{}}
-
-	// Both downloaders nil (no FinalizedDuringInterruption evidence at all)
-	// -- only workerWaitedForResume=true should flag this.
-	incomplete, _, _, _, _ := o.finalizeIncompleteTail(jobID, &DownloadResult{}, true)
-	if !incomplete {
-		t.Fatal("workerWaitedForResume=true must flag incomplete_tail even with no downloader evidence at all")
-	}
-
-	got, err := db.GetJob(jobID)
-	if err != nil || got == nil {
-		t.Fatalf("GetJob: %v", err)
-	}
-	if !got.IncompleteTail {
-		t.Error("finalizeIncompleteTail did not persist incomplete_tail=true for workerWaitedForResume=true")
-	}
-}
-
 // TestResumeWaitLatch exercises resumeWaitLatch -- the ACTUAL type
 // runLiveStreamDownload uses (wait()/resolved()/value(), not a
 // reimplementation of its transitions) -- through the two exact sequences
@@ -1072,7 +1059,7 @@ func TestFinalizeIncompleteTailWorkerWaitedForResume(t *testing.T) {
 //
 // value() is finalizeIncompleteTail's workerWaitedForResume argument; what
 // each value writes at the DB is TestFinalizeIncompleteTailWritesAndSelfClears
-// (false clears the flag) and TestFinalizeIncompleteTailWorkerWaitedForResume
+// (false clears the flag) and TestFinalizeIncompleteTail/WorkerWaitedForResume
 // (true sets it).
 func TestResumeWaitLatch(t *testing.T) {
 	t.Run("zero value starts not-waiting", func(t *testing.T) {

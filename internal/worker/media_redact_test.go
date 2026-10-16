@@ -63,7 +63,7 @@ func assertJobErrorClean(t *testing.T, db *database.Database, jobID string, rec 
 // Mutant (run): redact.MediaError's walker given redact.PoTokenURL instead of
 // redact.MediaURL (the rule before this fix) — the strategy error of both rows
 // keeps the IP and the signature. (setJobError's backstop still cleans the
-// stored error then; TestJobErrorRedactsSignedURL pins that one.)
+// stored error then; TestJobErrorRedactsMediaURL pins that one.)
 func TestLiveManifestFetchErrorRedactsSignedURL(t *testing.T) {
 	signedPath := "/expire/1900000000/ei/x/ip/" + mediaClientIP + "/id/abc.1/source/yt_live_broadcast/sparams/expire,ei,ip,id,source/sig/" + mediaSig
 	rows := []struct {
@@ -134,36 +134,71 @@ func TestLiveManifestFetchErrorRedactsSignedURL(t *testing.T) {
 	}
 }
 
-// TestJobErrorRedactsSignedURL pins setJobError's backstop for the signed
-// URL: a whole-file VOD whose host refuses ends with
-// `download: Get "https://rr3---sn-….googlevideo.com/videoplayback?…&ip=…&sig=…"`,
-// and an error flattened with %v on the way leaves no *url.Error for the
-// producers' redact.MediaError to find. The one message setJobError hands the
-// "job error" line, the stored error and the Job Failed embed is cut there.
-//
-// Mutant (run): setJobError's errMsg through redact.PoTokenText (the rule
-// before this fix) instead of redact.MediaText — the stored error, the log
-// line and the embed's Error field all keep the IP and the signature.
-func TestJobErrorRedactsSignedURL(t *testing.T) {
-	w, db := testWorkerSetup(t)
-	t.Cleanup(w.Stop)
-	logs := &captureLogger{}
-	w.logger = logs
-	rec := notificationtest.New()
-	w.notifier = rec
-	job := &database.Job{ID: "yt_signedfunnel", VideoID: "signedfunnel", Platform: "youtube", Status: database.StatusDownloading}
-	if _, err := db.AddJob(job); err != nil {
-		t.Fatal(err)
-	}
-	ue := &url.Error{
-		Op:  "Get",
-		URL: "https://rr3---sn-abc.googlevideo.com/videoplayback?expire=1&ei=x&ip=" + mediaClientIP + "&id=o-abc&itag=140&source=youtube&sig=" + mediaSig + "&pot=<redacted>",
-		Err: errors.New("dial tcp: connect: connection refused"),
-	}
-	w.setJobError(job, fmt.Errorf("download: %v", ue))
-	stored := assertJobErrorClean(t, db, job.ID, rec, logs, mediaClientIP, mediaSig)
-	if !strings.Contains(stored, "ip=<redacted>") || !strings.Contains(stored, "itag=140") || !strings.Contains(stored, "connection refused") {
-		t.Errorf("stored error = %q, want the IP's slot shown as <redacted>, the itag and the cause kept", stored)
+// TestJobErrorRedactsMediaURL pins the job-error funnel: setJobError's one
+// message feeds the "job error" log line, the stored error the dashboard and
+// the TUI show, and the Job Failed embed. A secret that reached it by a route
+// no producer redacted — a *url.Error flattened with %v on the way, which
+// leaves no *url.Error in the chain for the producers' redact.MediaError to
+// find — is cut out there, before any of the three sees it, and the rest of
+// the message is kept.
+func TestJobErrorRedactsMediaURL(t *testing.T) {
+	const pathToken, queryToken = "SECRETPATHTOKEN", "SECRETQUERYTOKEN"
+	for _, tc := range []struct {
+		name        string
+		stage       string // setJobError is handed "<stage>: Get \"<url>\": <cause>"
+		url, cause  string
+		secrets     []string
+		mustSurvive []string
+	}{
+		// setJobError's backstop for the signed URL: a whole-file VOD whose
+		// host refuses ends with
+		// `download: Get "https://rr3---sn-….googlevideo.com/videoplayback?…&ip=…&sig=…"`.
+		//
+		// Mutant (run): setJobError's errMsg through redact.PoTokenText (the
+		// rule before this fix) instead of redact.MediaText — the stored
+		// error, the log line and the embed's Error field all keep the IP and
+		// the signature.
+		{"signed URL", "download",
+			"https://rr3---sn-abc.googlevideo.com/videoplayback?expire=1&ei=x&ip=" + mediaClientIP + "&id=o-abc&itag=140&source=youtube&sig=" + mediaSig + "&pot=<redacted>",
+			"dial tcp: connect: connection refused",
+			[]string{mediaClientIP, mediaSig},
+			[]string{"ip=<redacted>", "itag=140", "connection refused"}},
+		// A PO token, in both of its forms: the /pot/ path segment and the
+		// pot= query value.
+		//
+		// Mutant (run): errMsg := err.Error() without redact.MediaText — the
+		// stored error, the log line and the embed's Error field all carry
+		// both tokens.
+		{"PO token", "setup download",
+			"https://rr1---sn-x.googlevideo.com/videoplayback/pot/" + pathToken + "?itag=1&pot=" + queryToken,
+			"connection reset by peer",
+			[]string{pathToken, queryToken},
+			[]string{"connection reset by peer"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			t.Cleanup(w.Stop)
+			logs := &captureLogger{}
+			w.logger = logs
+			rec := notificationtest.New()
+			w.notifier = rec
+			job := &database.Job{ID: "yt_funnel", VideoID: "funnel", Platform: "youtube", Status: database.StatusDownloading}
+			if _, err := db.AddJob(job); err != nil {
+				t.Fatal(err)
+			}
+			ue := &url.Error{Op: "Get", URL: tc.url, Err: errors.New(tc.cause)}
+			w.setJobError(job, fmt.Errorf("%s: %v", tc.stage, ue))
+
+			stored := assertJobErrorClean(t, db, job.ID, rec, logs, tc.secrets...)
+			if !strings.HasPrefix(stored, tc.stage+": Get ") {
+				t.Errorf("stored error = %q, want the message's start (%q) kept", stored, tc.stage+": Get ")
+			}
+			for _, want := range tc.mustSurvive {
+				if !strings.Contains(stored, want) {
+					t.Errorf("stored error = %q, want %q kept", stored, want)
+				}
+			}
+		})
 	}
 }
 

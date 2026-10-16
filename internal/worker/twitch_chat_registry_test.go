@@ -272,6 +272,25 @@ func registryLen(r *twitchChatRegistry) int {
 // touching the network: the notifier is nil, the thumbnail URL is empty, a nil
 // FetchVariantsFn skips the quality monitor, the download loop never runs, and
 // startChat's goroutine dials an already-dead context.
+//
+// The same run pins the shutdown ordering. ExecuteTwitch's shutdown/user-cancel
+// arm used to Stop() the chat downloader and return immediately, without ever
+// reaching resolveChatOutcome — the only place that waits on chatDone. The
+// chat goroutine's deferred teardown (flush -> saveResumeState ->
+// ResumeStore.Save) was therefore still writing chat.json.resume.json.tmp into
+// staging AFTER the orchestrator had returned and declared the job finished.
+// In production that is a write into a directory a /retry may already be
+// deleting; in tests it is the observed t.TempDir "The directory is not empty"
+// flake.
+//
+// That assertion is deliberately "removable IMMEDIATELY", with no retry: the
+// whole claim is that nothing of ours is still writing by the time
+// ExecuteTwitch returns. So it runs first, ahead of the registry checks.
+//
+// MUTANT: delete the waitForChatShutdown call from the cancel arm in
+// orchestrator_twitch.go — RemoveAll fails (Windows) or the leftover check
+// finds chat.json.resume.json.tmp, and this test fails on the run, not one
+// run in fifty.
 func TestExecuteTwitchRegistersTheLiveChatDownloaderForItsWholeRun(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	o := w.orchestrator
@@ -293,58 +312,6 @@ func TestExecuteTwitchRegistersTheLiveChatDownloaderForItsWholeRun(t *testing.T)
 	})
 	defer unsub()
 
-	// The real concrete type ExecuteTwitch asserts on. The dead ctx means Start
-	// never dials. No credential: the options carry no Credentials getter, so
-	// the downloader is anonymous by construction.
-	cd := twitch.NewChatDownloader(twitch.ChatDownloaderOptions{
-		ChannelLogin: "somechannel",
-		OutputPath:   filepath.Join(t.TempDir(), "chat.json"),
-	}, &discardLogger{})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	jobCtx := &JobContext{Job: job, DB: db, Config: &JobConfig{}, StagingDir: t.TempDir(), Logger: &discardLogger{}}
-	_ = o.ExecuteTwitch(ctx, jobCtx, &TwitchVariantInfo{URL: "http://127.0.0.1:1/x.m3u8", Name: "720p"}, false, cd)
-
-	if got := duringRun.Load(); got != 1 {
-		t.Errorf("the live chat downloader was registered on %d entries while ExecuteTwitch ran, want 1", got)
-	}
-	if got := registryLen(o.twitchChats); got != 0 {
-		t.Errorf("the registry still holds %d entries after ExecuteTwitch returned, want 0", got)
-	}
-}
-
-// TestExecuteTwitchDoesNotOutliveItsChatGoroutineOnCancel pins the shutdown
-// ordering. ExecuteTwitch's shutdown/user-cancel arm used to Stop() the chat
-// downloader and return immediately, without ever reaching resolveChatOutcome
-// — the only place that waits on chatDone. The chat goroutine's deferred
-// teardown (flush -> saveResumeState -> ResumeStore.Save) was therefore still
-// writing chat.json.resume.json.tmp into staging AFTER the orchestrator had
-// returned and declared the job finished. In production that is a write into
-// a directory a /retry may already be deleting; in tests it is the observed
-// t.TempDir "The directory is not empty" flake.
-//
-// The assertion is deliberately "removable IMMEDIATELY", with no retry: the
-// whole claim is that nothing of ours is still writing by the time
-// ExecuteTwitch returns.
-//
-// MUTANT: delete the waitForChatShutdown call from the cancel arm in
-// orchestrator_twitch.go — RemoveAll fails (Windows) or the leftover check
-// finds chat.json.resume.json.tmp, and this test fails on the run, not one
-// run in fifty.
-func TestExecuteTwitchDoesNotOutliveItsChatGoroutineOnCancel(t *testing.T) {
-	w, db := testWorkerSetup(t)
-	o := w.orchestrator
-
-	job := &database.Job{
-		ID: "tw_cancel_wait", VideoID: "reg", URL: "https://twitch.tv/x",
-		Platform: "twitch", Status: database.StatusDownloading,
-	}
-	if _, err := db.AddJob(job); err != nil {
-		t.Fatal(err)
-	}
-
 	// Not t.TempDir: this test REMOVES the directory itself, as its assertion.
 	chatDir, err := os.MkdirTemp("", "moombox-chat-cancel-")
 	if err != nil {
@@ -352,6 +319,9 @@ func TestExecuteTwitchDoesNotOutliveItsChatGoroutineOnCancel(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(chatDir) })
 
+	// The real concrete type ExecuteTwitch asserts on. The dead ctx means Start
+	// never dials. No credential: the options carry no Credentials getter, so
+	// the downloader is anonymous by construction.
 	cd := twitch.NewChatDownloader(twitch.ChatDownloaderOptions{
 		ChannelLogin: "somechannel",
 		OutputPath:   filepath.Join(chatDir, "chat.json"),
@@ -380,6 +350,13 @@ func TestExecuteTwitchDoesNotOutliveItsChatGoroutineOnCancel(t *testing.T) {
 	if err := os.RemoveAll(chatDir); err != nil {
 		t.Errorf("the chat directory is still held the instant ExecuteTwitch returned: %v (entries: %v)",
 			err, entries)
+	}
+
+	if got := duringRun.Load(); got != 1 {
+		t.Errorf("the live chat downloader was registered on %d entries while ExecuteTwitch ran, want 1", got)
+	}
+	if got := registryLen(o.twitchChats); got != 0 {
+		t.Errorf("the registry still holds %d entries after ExecuteTwitch returned, want 0", got)
 	}
 }
 

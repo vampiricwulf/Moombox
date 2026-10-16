@@ -1,40 +1,44 @@
 package worker
 
-import "testing"
+import (
+	"testing"
 
-func TestTrimServiceSetFfmpegPathRebuildsMuxer(t *testing.T) {
-	ts := NewTrimService(nil, "", discardLogger{})
-	if got := ts.mux().FFprobePath(); got != "ffprobe" {
-		t.Fatalf("default ffprobe = %q", got)
-	}
-	ts.SetFfmpegPath("C:/tools/ffmpeg.exe")
-	if got := ts.mux().FFprobePath(); got != "C:/tools/ffprobe.exe" && got != `C:\tools\ffprobe.exe` {
-		t.Errorf("after SetFfmpegPath, ffprobe = %q", got)
-	}
-	ts.SetFfmpegPath("")
-	if got := ts.mux().FFprobePath(); got != "ffprobe" {
-		t.Errorf("blank path must restore PATH lookup, got %q", got)
-	}
-}
+	"github.com/vampiricwulf/Moombox/internal/engine"
+)
 
-// TestOrchestratorSetFfmpegPathRebuildsMuxer: paths.ffmpeg_path is hot-reloaded
-// into the DOWNLOAD path too, not only trims. The orchestrator's muxer handles
-// mux/probe/concat for every download and must follow a save. (A post-download
-// trim runs through the shared trim service, which the same save re-points.)
-func TestOrchestratorSetFfmpegPathRebuildsMuxer(t *testing.T) {
-	o := NewDownloadOrchestrator(nil, nil, "", discardLogger{}, nil, nil, nil, nil, nil)
-	if got := o.mux().FFprobePath(); got != "ffprobe" {
-		t.Fatalf("default ffprobe = %q", got)
-	}
+// TestSetFfmpegPathRebuildsMuxer: SetFfmpegPath rebuilds the muxer of each
+// owner, so its ffprobe follows the new path, and a blank path goes back to
+// the PATH lookup.
+func TestSetFfmpegPathRebuildsMuxer(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		owner interface {
+			SetFfmpegPath(string)
+			mux() *engine.Muxer
+		}
+	}{
+		{"TrimService", NewTrimService(nil, "", discardLogger{})},
+		// paths.ffmpeg_path is hot-reloaded into the DOWNLOAD path too, not
+		// only trims. The orchestrator's muxer handles mux/probe/concat for
+		// every download and must follow a save. (A post-download trim runs
+		// through the shared trim service, which the same save re-points.)
+		{"Orchestrator", NewDownloadOrchestrator(nil, nil, "", discardLogger{}, nil, nil, nil, nil, nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.owner.mux().FFprobePath(); got != "ffprobe" {
+				t.Fatalf("default ffprobe = %q", got)
+			}
 
-	o.SetFfmpegPath("C:/tools/ffmpeg.exe")
-	if got := o.mux().FFprobePath(); got != "C:/tools/ffprobe.exe" && got != `C:\tools\ffprobe.exe` {
-		t.Errorf("after SetFfmpegPath, ffprobe = %q", got)
-	}
+			tc.owner.SetFfmpegPath("C:/tools/ffmpeg.exe")
+			if got := tc.owner.mux().FFprobePath(); got != "C:/tools/ffprobe.exe" && got != `C:\tools\ffprobe.exe` {
+				t.Errorf("after SetFfmpegPath, ffprobe = %q", got)
+			}
 
-	o.SetFfmpegPath("")
-	if got := o.mux().FFprobePath(); got != "ffprobe" {
-		t.Errorf("blank path must restore PATH lookup, got %q", got)
+			tc.owner.SetFfmpegPath("")
+			if got := tc.owner.mux().FFprobePath(); got != "ffprobe" {
+				t.Errorf("blank path must restore PATH lookup, got %q", got)
+			}
+		})
 	}
 }
 

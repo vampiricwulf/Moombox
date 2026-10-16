@@ -65,42 +65,96 @@ func selectable(title string) *youtube.VideoInfo {
 	return &youtube.VideoInfo{Title: title, Formats: splitAdaptive()}
 }
 
-// TestProbeVideoInfoUsesTheCheapAuthenticatedProbe is owner decision O-H. The
-// 30 s monitor used to run the FULL authenticated cascade — a 1-5 MB cookied
-// watch page plus 3-7 player calls — for every auth-walled stream, which at
-// this cadence is ~120 watch pages and >=360 player calls per hour per job.
-// ProbeVideoStatusAuthenticated is one TV-with-cookies call and already
-// returns the pool the probe selects from.
-//
-// Every entry point here returns a selectable answer, so a mis-route is caught
-// by the CALL COUNTS rather than by an incidental nil dereference downstream
-// (fix round 1, m4).
-//
-// Mutants this kills:
-//   - requiresAuth still routed to GetVideoInfo  → full == 1, probeAuth == 0
-//   - requiresAuth routed to the COOKIELESS probe → probe == 1 (android_vr 401s
-//     on members-only content, so this must not happen)
-func TestProbeVideoInfoUsesTheCheapAuthenticatedProbe(t *testing.T) {
-	f := &fakeProbeClient{
-		hasCookies:    true,
-		probeInfo:     selectable("cookieless probe"),
-		probeAuthInfo: selectable("cookied probe"),
-		fullInfo:      selectable("cascade"),
-	}
+// TestProbeVideoInfoTakesTheCheapestHopThatAnswers pins the quality probe's
+// routing (owner decision O-H): each row counts which of the three entry
+// points a tick called — the cheap probe for its kind, the cookied recovery
+// hop, the one-shot cascade — and checks whose answer came back. The cascade
+// answers selectably in every row, so a needless cascade is caught by the
+// call counts, not by a missing answer.
+func TestProbeVideoInfoTakesTheCheapestHopThatAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		hasCookies    bool
+		requiresAuth  bool
+		probeInfo     *youtube.VideoInfo
+		probeAuthInfo *youtube.VideoInfo
+		wantProbe     int
+		wantProbeAuth int
+		wantFull      int
+		wantTitle     string
+	}{
+		// The first half of O-H. The 30 s monitor used to run the FULL
+		// authenticated cascade — a 1-5 MB cookied watch page plus 3-7 player
+		// calls — for every auth-walled stream, which at this cadence is ~120
+		// watch pages and >=360 player calls per hour per job.
+		// ProbeVideoStatusAuthenticated is one TV-with-cookies call and
+		// already returns the pool the probe selects from.
+		//
+		// Every entry point in this row returns a selectable answer, so a
+		// mis-route is caught by the CALL COUNTS rather than by an incidental
+		// nil dereference downstream (fix round 1, m4).
+		//
+		// Mutants this kills:
+		//   - requiresAuth still routed to GetVideoInfo  → full == 1, probeAuth == 0
+		//   - requiresAuth routed to the COOKIELESS probe → probe == 1 (android_vr 401s
+		//     on members-only content, so this must not happen)
+		{"uses the cheap authenticated probe", true, true, selectable("cookieless probe"), selectable("cookied probe"), 0, 1, 0, "cookied probe"},
 
-	info, err := probeVideoInfo(context.Background(), f, "vid", true, nil)
-	if err != nil {
-		t.Fatalf("probeVideoInfo: %v", err)
-	}
-	if info == nil || len(info.Formats) != 2 {
-		t.Fatalf("info = %+v, want the probe's two formats", info)
-	}
-	if f.probeAuth != 1 || f.full != 0 || f.probe != 0 {
-		t.Errorf("calls: probeAuth=%d probe=%d full=%d; want exactly one authenticated probe",
-			f.probeAuth, f.probe, f.full)
-	}
-	if info.Title != "cookied probe" {
-		t.Errorf("info came from %q, want the cookied probe's answer", info.Title)
+		// O-H's second clause — "auth-walled/RECOVERY streams" — and the
+		// branch the verifier called dominant. A public stream whose cookieless
+		// android_vr probe comes back with nothing selectable used to pay the
+		// whole cascade (a 1-5 MB cookied watch page plus three to seven player
+		// calls) on EVERY 30 s tick. When the install has cookies, one
+		// TV-with-cookies call is tried first, and a stream that answers there
+		// costs two player calls instead of the cascade.
+		//
+		// Mutants this kills:
+		//   - the recovery branch goes straight to the cascade → probeAuth == 0, full == 1
+		//   - the hop's answer discarded and the cascade run anyway → full == 1
+		{"takes the cookied hop before the cascade", true, false, &youtube.VideoInfo{}, selectable("cookied hop"), 1, 1, 0, "cookied hop"},
+
+		// Keeps the hop from becoming a wasted call per tick on a cookieless
+		// install: Step 0's live evidence is that TV_DOWNGRADED without cookies
+		// answers login_required ("Sign in to confirm you're not a bot") and
+		// carries no formats at all. This is also the public probe's one
+		// fallback (see TestProbeVideoInfoFallsBackOnceForBothProbeKinds).
+		//
+		// Mutants this kills:
+		//   - the hop taken unconditionally → probeAuth == 1
+		{"skips the cookied hop without cookies", false, false, &youtube.VideoInfo{}, selectable("cookied hop"), 1, 0, 1, "cascade"},
+
+		// The ceiling on the hop: it buys at most one extra player call, never
+		// a second cascade, and the tick still resolves exactly as it did
+		// before O-H.
+		//
+		// Mutants this kills:
+		//   - the cascade dropped once the hop has run → full == 0
+		//   - the hop retried/looped                   → probeAuth > 1
+		{"cascades once when the cookied hop also fails", true, false, &youtube.VideoInfo{}, &youtube.VideoInfo{}, 1, 1, 1, "cascade"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeProbeClient{
+				hasCookies:    tc.hasCookies,
+				probeInfo:     tc.probeInfo,
+				probeAuthInfo: tc.probeAuthInfo,
+				fullInfo:      selectable("cascade"),
+			}
+
+			info, err := probeVideoInfo(context.Background(), f, "vid", tc.requiresAuth, nil)
+			if err != nil {
+				t.Fatalf("probeVideoInfo: %v", err)
+			}
+			if info == nil || len(info.Formats) != 2 {
+				t.Fatalf("info = %+v, want the answer's two formats", info)
+			}
+			if f.probe != tc.wantProbe || f.probeAuth != tc.wantProbeAuth || f.full != tc.wantFull {
+				t.Errorf("calls: probe=%d probeAuth=%d full=%d; want probe=%d probeAuth=%d full=%d",
+					f.probe, f.probeAuth, f.full, tc.wantProbe, tc.wantProbeAuth, tc.wantFull)
+			}
+			if info.Title != tc.wantTitle {
+				t.Errorf("info came from %q, want the %s answer", info.Title, tc.wantTitle)
+			}
+		})
 	}
 }
 
@@ -112,15 +166,16 @@ func TestProbeVideoInfoUsesTheCheapAuthenticatedProbe(t *testing.T) {
 // no adaptiveFormats — but it fires ONCE per tick, for either probe kind.
 //
 // No cookies are configured on this fixture, so the cookied recovery hop
-// (below) is not in play here: this is the cookieless install's shape. This
+// (above) is not in play here: this is the cookieless install's shape. This
 // test holds the authenticated probe; the public probe's one fallback on the
-// same shape is TestProbeVideoInfoSkipsTheCookiedHopWithoutCookies (full == 1).
+// same shape is the "skips the cookied hop without cookies" row above
+// (full == 1).
 //
 // Mutants this kills:
 //   - the fallback gated on !requiresAuth again  → full == 0
 //   - the fallback looping or retrying           → full > 1
 //   - the fallback firing when the probe already
-//     had split-adaptive formats                 → covered by the test above
+//     had split-adaptive formats                 → covered by the first row above
 func TestProbeVideoInfoFallsBackOnceForBothProbeKinds(t *testing.T) {
 	empty := &youtube.VideoInfo{} // no DASH URL, no formats
 	f := &fakeProbeClient{
@@ -138,94 +193,6 @@ func TestProbeVideoInfoFallsBackOnceForBothProbeKinds(t *testing.T) {
 	}
 	if f.full != 1 {
 		t.Errorf("GetVideoInfo called %d times, want exactly 1", f.full)
-	}
-}
-
-// TestProbeVideoInfoTakesTheCookiedHopBeforeTheCascade is O-H's second clause —
-// "auth-walled/RECOVERY streams" — and the branch the verifier called dominant.
-// A public stream whose cookieless android_vr probe comes back with nothing
-// selectable used to pay the whole cascade (a 1-5 MB cookied watch page plus
-// three to seven player calls) on EVERY 30 s tick. When the install has
-// cookies, one TV-with-cookies call is tried first, and a stream that answers
-// there costs two player calls instead of the cascade.
-//
-// Mutants this kills:
-//   - the recovery branch goes straight to the cascade → probeAuth == 0, full == 1
-//   - the hop's answer discarded and the cascade run anyway → full == 1
-func TestProbeVideoInfoTakesTheCookiedHopBeforeTheCascade(t *testing.T) {
-	f := &fakeProbeClient{
-		hasCookies:    true,
-		probeInfo:     &youtube.VideoInfo{}, // android_vr: nothing selectable
-		probeAuthInfo: selectable("cookied hop"),
-		fullInfo:      selectable("cascade"),
-	}
-
-	info, err := probeVideoInfo(context.Background(), f, "vid", false, nil)
-	if err != nil {
-		t.Fatalf("probeVideoInfo: %v", err)
-	}
-	if f.probe != 1 || f.probeAuth != 1 || f.full != 0 {
-		t.Errorf("calls: probe=%d probeAuth=%d full=%d; want the cookieless probe then the cookied hop, no cascade",
-			f.probe, f.probeAuth, f.full)
-	}
-	if info.Title != "cookied hop" {
-		t.Errorf("info came from %q, want the cookied hop's answer", info.Title)
-	}
-}
-
-// TestProbeVideoInfoSkipsTheCookiedHopWithoutCookies keeps the hop from
-// becoming a wasted call per tick on a cookieless install: Step 0's live
-// evidence is that TV_DOWNGRADED without cookies answers login_required
-// ("Sign in to confirm you're not a bot") and carries no formats at all.
-//
-// Mutants this kills:
-//   - the hop taken unconditionally → probeAuth == 1
-func TestProbeVideoInfoSkipsTheCookiedHopWithoutCookies(t *testing.T) {
-	f := &fakeProbeClient{
-		hasCookies:    false,
-		probeInfo:     &youtube.VideoInfo{},
-		probeAuthInfo: selectable("cookied hop"),
-		fullInfo:      selectable("cascade"),
-	}
-
-	info, err := probeVideoInfo(context.Background(), f, "vid", false, nil)
-	if err != nil {
-		t.Fatalf("probeVideoInfo: %v", err)
-	}
-	if f.probe != 1 || f.probeAuth != 0 || f.full != 1 {
-		t.Errorf("calls: probe=%d probeAuth=%d full=%d; want the cookieless probe then the cascade",
-			f.probe, f.probeAuth, f.full)
-	}
-	if info.Title != "cascade" {
-		t.Errorf("info came from %q, want the cascade's answer", info.Title)
-	}
-}
-
-// TestProbeVideoInfoCascadesOnceWhenTheCookiedHopAlsoFails is the ceiling on
-// the hop: it buys at most one extra player call, never a second cascade, and
-// the tick still resolves exactly as it did before O-H.
-//
-// Mutants this kills:
-//   - the cascade dropped once the hop has run → full == 0
-//   - the hop retried/looped                   → probeAuth > 1
-func TestProbeVideoInfoCascadesOnceWhenTheCookiedHopAlsoFails(t *testing.T) {
-	f := &fakeProbeClient{
-		hasCookies:    true,
-		probeInfo:     &youtube.VideoInfo{},
-		probeAuthInfo: &youtube.VideoInfo{},
-		fullInfo:      selectable("cascade"),
-	}
-
-	info, err := probeVideoInfo(context.Background(), f, "vid", false, nil)
-	if err != nil {
-		t.Fatalf("probeVideoInfo: %v", err)
-	}
-	if f.probe != 1 || f.probeAuth != 1 || f.full != 1 {
-		t.Errorf("calls: probe=%d probeAuth=%d full=%d; want one of each, cascade last",
-			f.probe, f.probeAuth, f.full)
-	}
-	if info.Title != "cascade" {
-		t.Errorf("info came from %q, want the cascade's answer", info.Title)
 	}
 }
 

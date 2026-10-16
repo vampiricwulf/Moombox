@@ -18,32 +18,8 @@ func TestParseTimeToSeconds(t *testing.T) {
 		{"2:00:30", 7230, false},
 		{"", 0, true},
 		{"abc", 0, true},
-	}
 
-	for _, tt := range tests {
-		result, err := ParseTimeToSeconds(tt.input)
-		if tt.err {
-			if err == nil {
-				t.Errorf("ParseTimeToSeconds(%q): expected error", tt.input)
-			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("ParseTimeToSeconds(%q): %v", tt.input, err)
-			continue
-		}
-		if result != tt.expected {
-			t.Errorf("ParseTimeToSeconds(%q) = %f, want %f", tt.input, result, tt.expected)
-		}
-	}
-}
-
-func TestParseTimeToSeconds_EdgeCases(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected float64
-		err      bool
-	}{
+		// Edge cases.
 		{"1:2:3:4", 0, true},        // Too many colons
 		{"  120  ", 120, false},     // Whitespace trimming
 		{"-5", -5, false},           // Negative (accepted — caller validates)

@@ -61,8 +61,9 @@ func TestSchedulerAdmissionLeavesACancelStanding(t *testing.T) {
 //
 // Mutant: return without handleCancellation when the failure is not
 // recorded — the Job Cancelled the route left to this run is never sent.
-// (The write's own guard is TestFailureOverTheRoutesCancelLeavesItToTheRoute's:
-// here the flag settles it first.)
+// (The write's own guard is the "failure over the route's cancel" row of
+// TestRunEndingOverTheRoutesCancelLeavesItToTheRoute: here the flag settles it
+// first.)
 func TestSetJobErrorLeavesACancelStanding(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	t.Cleanup(w.Stop)
@@ -177,60 +178,68 @@ func TestFailureBetweenCancelsTwoHalvesEndsTheRunCancelled(t *testing.T) {
 	}
 }
 
-// TestFailureOverTheRoutesCancelLeavesItToTheRoute: CancelJob writes
+// TestRunEndingOverTheRoutesCancelLeavesItToTheRoute: CancelJob writes
 // Cancelled, then flags the run (the Web's order, and now the TUI's), and the
-// write alone cancels the download. A failure that reached setJobError in
-// between found no flag, left the row alone and sent nothing; the flag then
-// landed on the still-registered run, so the route left Job Cancelled to a
-// run already past sending it, and nobody sent it. The failure settles the
-// run: CancelJob answers false and the route sends it.
-//
-// Mutants: write the failure with UpdateJobFields — Error over the Cancel,
-// and Job Failed; let Cancel flag a settled run — CancelJob answers true and
-// nobody sends Job Cancelled.
-func TestFailureOverTheRoutesCancelLeavesItToTheRoute(t *testing.T) {
-	w, db := testWorkerSetup(t)
-	t.Cleanup(w.Stop)
-	rec := notificationtest.New()
-	w.notifier = rec
-	job := runningJob(t, w, db, "route_cancel")
+// write alone cancels the download. A run that ends in between finds no flag,
+// and every way it can end settles the run, so the flag that lands next is
+// refused: CancelJob answers false and the route sends Job Cancelled. The run
+// leaves the Cancel standing and sends nothing.
+func TestRunEndingOverTheRoutesCancelLeavesItToTheRoute(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  func(w *DownloadWorker, job *database.Job) // how the run ends between the write and the flag
+	}{
+		// A failure that reached setJobError in between found no flag, left
+		// the row alone and sent nothing; the flag then landed on the
+		// still-registered run, so the route left Job Cancelled to a run
+		// already past sending it, and nobody sent it. The failure settles the
+		// run.
+		//
+		// Mutants: write the failure with UpdateJobFields — Error over the
+		// Cancel, and Job Failed; let Cancel flag a settled run — CancelJob
+		// answers true and nobody sends Job Cancelled.
+		{"failure over the route's cancel", func(w *DownloadWorker, job *database.Job) {
+			w.setJobError(job, errors.New("download: connection reset by peer"))
+		}},
+		// The same order reaching handleCancellation instead: CancelJob's
+		// Cancelled write stops the download, the run ends with no flag to
+		// read — an interruption, which sends nothing — and CancelJob then
+		// flagged it. Reading the flag settles the run.
+		//
+		// Mutant: WasCancelled without the settle — CancelJob answers true,
+		// and nobody sends it.
+		{"run ended by the route's write", (*DownloadWorker).handleCancellation},
+		// The order TestAPanicAfterAFlaggedCancelEndsTheRunCancelled reverses:
+		// a panic recorded in between finds no flag. The record settles the
+		// run, where a run left unsettled was flagged, its caller left the
+		// notification to it, and the run, past its record, never sent it.
+		//
+		// Mutant: read the flag without settling the run in recordRunPanic —
+		// Cancel flags it, and nobody sends Job Cancelled.
+		{"panic over the route's cancel", func(w *DownloadWorker, job *database.Job) {
+			w.recordRunPanic(job.ID, job, "boom")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			t.Cleanup(w.Stop)
+			rec := notificationtest.New()
+			w.notifier = rec
+			job := runningJob(t, w, db, "route_cancel")
 
-	db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusCancelled}) // CancelJob's write
-	w.setJobError(job, errors.New("download: connection reset by peer"))
-	if w.queue.Cancel(job.ID) { // and its flag
-		t.Error("CancelJob flagged a run that had settled its outcome: the route leaves Job Cancelled to a run that will not send it")
-	}
+			db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusCancelled}) // CancelJob's write
+			tc.end(w, job)
+			if w.queue.Cancel(job.ID) { // and its flag
+				t.Error("CancelJob flagged a run that had settled its outcome: the route leaves Job Cancelled to a run that will not send it")
+			}
 
-	if row, _ := db.GetJob(job.ID); row.Status != database.StatusCancelled || row.Error != "" {
-		t.Errorf("row = %s %q, want the Cancel standing", row.Status, row.Error)
-	}
-	if n := len(rec.Calls()); n != 0 {
-		t.Errorf("the run sent %d notifications, want none (the route sends Job Cancelled)", n)
-	}
-}
-
-// TestRunEndedByTheRoutesWriteLeavesTheCancelToTheRoute is the same order
-// reaching handleCancellation instead: CancelJob's Cancelled write stops the
-// download, the run ends with no flag to read — an interruption, which
-// sends nothing — and CancelJob then flagged it. Reading the flag settles the
-// run, so CancelJob answers false and the route sends Job Cancelled.
-//
-// Mutant: WasCancelled without the settle — CancelJob answers true, and
-// nobody sends it.
-func TestRunEndedByTheRoutesWriteLeavesTheCancelToTheRoute(t *testing.T) {
-	w, db := testWorkerSetup(t)
-	t.Cleanup(w.Stop)
-	rec := notificationtest.New()
-	w.notifier = rec
-	job := runningJob(t, w, db, "route_interrupt")
-
-	db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusCancelled}) // CancelJob's write
-	w.handleCancellation(job)
-	if w.queue.Cancel(job.ID) { // and its flag
-		t.Error("CancelJob flagged a run that had already ended: nobody sends Job Cancelled")
-	}
-	if n := len(rec.Calls()); n != 0 {
-		t.Errorf("the run sent %d notifications, want none", n)
+			if row, _ := db.GetJob(job.ID); statusOf(row) != database.StatusCancelled || errorOf(row) != "" {
+				t.Errorf("row = %s %q, want the Cancel standing", statusOf(row), errorOf(row))
+			}
+			if n := len(rec.Calls()); n != 0 {
+				t.Errorf("the run sent %d notifications, want none (the route sends Job Cancelled)", n)
+			}
+		})
 	}
 }
 

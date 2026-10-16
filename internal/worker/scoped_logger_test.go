@@ -102,17 +102,6 @@ func TestScopedLoggerAppendsFixedArgs(t *testing.T) {
 	}
 }
 
-func TestScopedLoggerNilInnerDoesNotPanic(t *testing.T) {
-	// Regression test: an untyped nil inner logger must not panic on log
-	// calls; newScopedLogger substitutes a no-op logger for it.
-	sl := newScopedLogger(nil, "jobID", "x")
-	// These must not panic.
-	sl.Debug("test message")
-	sl.Info("test message")
-	sl.Warn("test message")
-	sl.Error("test message")
-}
-
 // panicLogger's methods dereference the receiver, so calling any of them on
 // a nil *panicLogger panics — it exists to prove newScopedLogger's typed-nil
 // guard actually intercepts before inner is ever touched, not just that the
@@ -127,18 +116,29 @@ func (p *panicLogger) Info(msg string, args ...any)  { p.log(msg) }
 func (p *panicLogger) Warn(msg string, args ...any)  { p.log(msg) }
 func (p *panicLogger) Error(msg string, args ...any) { p.log(msg) }
 
-func TestScopedLoggerTypedNilInnerDoesNotPanic(t *testing.T) {
-	// Regression test: a non-nil interface wrapping a nil concrete value
-	// (e.g. `var l *someLogger; jobCtx.Logger = l`) must also be treated as
-	// nil. A plain `inner == nil` check does not catch this — the interface
-	// value itself is non-nil, only its dynamic value is — so without
-	// isNilLogger's reflection-based detection this would nil-deref inside
-	// panicLogger.log instead of no-op'ing.
-	var p *panicLogger
-	sl := newScopedLogger(p, "jobID", "y")
-	// These must not panic.
-	sl.Debug("test message")
-	sl.Info("test message")
-	sl.Warn("test message")
-	sl.Error("test message")
+func TestScopedLoggerNilInnerDoesNotPanic(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		inner logger
+	}{
+		// Regression test: an untyped nil inner logger must not panic on log
+		// calls; newScopedLogger substitutes a no-op logger for it.
+		{"untyped nil", nil},
+		// Regression test: a non-nil interface wrapping a nil concrete value
+		// (e.g. `var l *someLogger; jobCtx.Logger = l`) must also be treated
+		// as nil. A plain `inner == nil` check does not catch this — the
+		// interface value itself is non-nil, only its dynamic value is — so
+		// without isNilLogger's reflection-based detection this would
+		// nil-deref inside panicLogger.log instead of no-op'ing.
+		{"typed nil", (*panicLogger)(nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sl := newScopedLogger(tc.inner, "jobID", "x")
+			// These must not panic.
+			sl.Debug("test message")
+			sl.Info("test message")
+			sl.Warn("test message")
+			sl.Error("test message")
+		})
+	}
 }
