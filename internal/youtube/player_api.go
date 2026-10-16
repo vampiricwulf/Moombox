@@ -70,11 +70,12 @@ type PlayerAPI struct {
 	// sessionAsked is the account whose homepage read is already claimed
 	// (claimSessionRead), so an account that changes at runtime has its
 	// session read once, not once per probe. The claim stands for a read in
-	// flight or one that came back with a page, whatever the page stated. A
-	// read that did not come back is handed back (releaseSessionRead): at
-	// once when its caller abandoned it, and at sessionRetryAt when it
-	// failed. sessionClock is the clock sessionRetryAt is read on (nil:
-	// time.Now), a test seam.
+	// flight or one that came back with a page, whatever the page stated, and
+	// only until another account's session takes the slot (captureVisitorData
+	// hands it back then). A read that did not come back is handed back
+	// (releaseSessionRead): at once when its caller abandoned it, and at
+	// sessionRetryAt when it failed. sessionClock is the clock sessionRetryAt
+	// is read on (nil: time.Now), a test seam.
 	sessionMu          sync.RWMutex
 	sessionIndex       *int
 	delegatedSessionID string

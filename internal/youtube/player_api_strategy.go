@@ -340,6 +340,15 @@ func (p *PlayerAPI) probeYtcfg(visitorData string) *YtcfgData {
 // page that states one and was fetched with an account: the public path's
 // cookieless page (account "") states none, and must not clear what the
 // authenticated path learned.
+//
+// There is one slot, so keeping account B's session evicts whatever the
+// slot held. A homepage read claimed for another account then stands for a
+// session no longer kept, and is handed back: otherwise an operator who
+// boots on account A, has a job fetch a watch page under account B, and
+// imports A again (Moombox's own not-a-member remedy) would find A's read
+// still counted as done, and A's probes would go without its session until a
+// watch page under A happened to state it — on a feed-monitor-only install,
+// never.
 func (p *PlayerAPI) captureVisitorData(ytcfg *YtcfgData, account string) {
 	if ytcfg == nil {
 		return
@@ -351,6 +360,9 @@ func (p *PlayerAPI) captureVisitorData(ytcfg *YtcfgData, account string) {
 		p.sessionMu.Lock()
 		p.sessionIndex, p.delegatedSessionID = ytcfg.SessionIndex, ytcfg.DelegatedSessionID
 		p.sessionAccount = account
+		if p.sessionAsked != account {
+			p.sessionAsked, p.sessionRetryAt = "", time.Time{}
+		}
 		p.sessionMu.Unlock()
 	}
 }

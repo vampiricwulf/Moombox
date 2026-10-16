@@ -608,3 +608,69 @@ func TestAReleaseLeavesAClaimThatMovedOn(t *testing.T) {
 		t.Error("account B's abandoned read handed back account C's")
 	}
 }
+
+// An account whose kept session a page under another account evicted is read
+// again when the jar holds it once more. The operator boots on account A
+// (Init reads A's brand session), imports account B and adds a B-member video,
+// whose full extraction fetches a watch page under B before any probe has run
+// (so B's session takes the one slot and no probe ever claimed B), then
+// imports A again — Moombox's own not-a-member remedy. A's probes must carry
+// A's session again, read off the homepage once, not go without it because
+// A's startup read still counted as done.
+//
+// Mutant: captureVisitorData not handing back the claim of an account whose
+// session it evicted (every probe sends no session, and the homepage is
+// fetched once).
+func TestAnAccountWhoseSessionWasEvictedIsReadAgain(t *testing.T) {
+	home := stubHomepage(t, map[string]string{"a": sessionBrandA, "other-account": sessionBrandB})
+	tr := recordPlayerCalls(t)
+	jar, path := loadAccountJar(t, accountCookies("a"))
+	svc := NewService(jar, noopLogger{})
+	svc.Init(context.Background())
+	if got := svc.PlayerAPI.probeYtcfg(""); got.DelegatedSessionID != "brand-a" {
+		t.Fatalf("setup: after Init the probes carry %q, want brand-a", got.DelegatedSessionID)
+	}
+
+	idxB := 2
+	orig := fetchWatchPage
+	fetchWatchPage = func(_ context.Context, _ string, cookie string) (*WatchPageResult, error) {
+		ytcfg := DefaultYtcfg()
+		if strings.Contains(cookie, "logininfo-other-account") {
+			ytcfg.SessionIndex, ytcfg.DelegatedSessionID = &idxB, "brand-b"
+		}
+		return &WatchPageResult{Ytcfg: ytcfg}, nil
+	}
+	t.Cleanup(func() { fetchWatchPage = orig })
+
+	if err := os.WriteFile(path, []byte(accountCookies("other-account")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GetVideoInfo(context.Background(), "test1234567"); err != nil {
+		t.Fatalf("GetVideoInfo under account B: %v", err)
+	}
+	if got := svc.PlayerAPI.probeYtcfg(""); got.DelegatedSessionID != "brand-b" {
+		t.Fatalf("setup: after B's watch page the probes carry %q, want brand-b", got.DelegatedSessionID)
+	}
+
+	if err := os.WriteFile(path, []byte(accountCookies("a")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tr.headers = nil
+	runProbes(t, svc)
+	for i, h := range tr.headers {
+		if !strings.Contains(h.Get("Cookie"), "logininfo-a") {
+			t.Fatalf("setup: probe %d sent Cookie %q, want account A's", i, h.Get("Cookie"))
+		}
+		if h.Get("X-Goog-AuthUser") != "1" || h.Get("X-Goog-PageId") != "brand-a" {
+			t.Errorf("probe %d back on account A: X-Goog-AuthUser = %q, X-Goog-PageId = %q; want A's 1 and brand-a",
+				i, h.Get("X-Goog-AuthUser"), h.Get("X-Goog-PageId"))
+		}
+	}
+	f := home.fetches()
+	if len(f) != 2 {
+		t.Fatalf("homepage fetched %d times; want Init's and one read for account A again", len(f))
+	}
+	if !strings.Contains(f[1], "logininfo-a") {
+		t.Errorf("the second homepage read sent Cookie %q, want account A's", f[1])
+	}
+}
