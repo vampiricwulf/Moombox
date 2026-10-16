@@ -6,11 +6,14 @@ import (
 )
 
 // isRecoverableTwitchError reports whether an errored Twitch job is in the
-// narrow shape that auto-recovery is designed for: a transient flap during
-// the initial probe (no segments downloaded yet), captured in the database
-// with the exact worker.TwitchOfflineErrMsg message, and still within the
-// retry budget. Any deviation — different error string, partial download
-// already on disk, exhausted budget — defers to user action.
+// narrow shape that auto-recovery is designed for: a transient failure during
+// the initial probe (no segments downloaded yet), still within the retry
+// budget, and one of two kinds — a flap, captured in the database with the
+// exact worker.TwitchOfflineErrMsg message, or a probe that never reached
+// Twitch at all, which setJobError marks ParkReasonTwitchUnreachable (an
+// outage the connectivity monitor calls is waited out in place instead).
+// Any deviation — another error, partial download already on disk,
+// exhausted budget — defers to user action.
 //
 // Imports worker.TwitchOfflineErrMsg so producer (stream_processor_twitch.go)
 // and consumer (this predicate) can never drift on the literal.
@@ -26,7 +29,7 @@ func isRecoverableTwitchError(job *database.Job, maxRetries int) bool {
 	if job.Status != database.StatusError {
 		return false
 	}
-	if job.Error != worker.TwitchOfflineErrMsg {
+	if job.Error != worker.TwitchOfflineErrMsg && job.ParkReason != database.ParkReasonTwitchUnreachable {
 		return false
 	}
 	// A row the unconfirmed-end latch marked is the automatic mux's

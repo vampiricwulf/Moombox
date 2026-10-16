@@ -80,6 +80,42 @@ func TestIsRecoverableTwitchError(t *testing.T) {
 			job:  nil,
 			want: false,
 		},
+		// W27-06: a Twitch live job whose stream processing never reached
+		// Twitch, on a network the connectivity monitor said was up, carries
+		// the transport failure's own text — which the exact-string match
+		// never took, so the rest of a still-live broadcast was lost. It is
+		// marked ParkReasonTwitchUnreachable instead, and recovered on the
+		// marker whatever its text. Mutant killed: the predicate keyed on
+		// TwitchOfflineErrMsg alone.
+		{
+			name: "unreachable marker is recoverable whatever the error text",
+			job: &database.Job{
+				Status:     database.StatusError,
+				Error:      `twitch stream info: Post "https://gql.twitch.tv/gql": dial tcp: lookup gql.twitch.tv: no such host`,
+				ParkReason: database.ParkReasonTwitchUnreachable,
+			},
+			want: true,
+		},
+		{
+			name: "unreachable marker with segments downloaded is not recoverable",
+			job: &database.Job{
+				Status:       database.StatusError,
+				Error:        "twitch HLS: dial tcp: connection refused",
+				ParkReason:   database.ParkReasonTwitchUnreachable,
+				LastVideoSeq: intPtr(7),
+			},
+			want: false,
+		},
+		{
+			name: "unreachable marker with the budget spent is not recoverable",
+			job: &database.Job{
+				Status:         database.StatusError,
+				Error:          "twitch HLS: dial tcp: connection refused",
+				ParkReason:     database.ParkReasonTwitchUnreachable,
+				AutoRetryCount: 2,
+			},
+			want: false,
+		},
 	}
 
 	maxRetries := worker.MaxTwitchAutoRetries

@@ -407,11 +407,30 @@ func (sp *StreamProcessor) processTwitch(ctx context.Context, job *database.Job)
 	return sp.processTwitchLive(ctx, job, login)
 }
 
+// twitchVodFetchError is the error a Twitch VOD fetch that got no answer
+// makes stream processing return, rather than a result: one that never
+// reached Twitch (isTransportFailure), or a cancelled run. The result form is
+// a verdict on the VOD, which processJob records as the job's failure at
+// once; as an error, processJob waits an outage out and fetches again
+// (processStreamThroughOutages), and routes a cancelled run to
+// handleCancellation — a shutdown in the middle of the fetch used to end the
+// VOD in Error with "context canceled". The message is the one the result
+// form carries. nil for an answer from Twitch, which stays a result.
+func twitchVodFetchError(ctx context.Context, what string, err error) error {
+	if ctx.Err() == nil && !isTransportFailure(err) {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", what, err)
+}
+
 func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.Job) (*StreamProcessResult, error) {
 	vodID := strings.TrimPrefix(job.VideoID, "tw_v")
 
 	vodInfo, err := sp.tw.GetVodInfo(ctx, vodID)
 	if err != nil {
+		if err := twitchVodFetchError(ctx, "twitch VOD error", err); err != nil {
+			return nil, err
+		}
 		return &StreamProcessResult{
 			ShouldDownload: false,
 			IsVod:          true,
@@ -440,6 +459,9 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 
 	variants, err := sp.tw.GetVodHLSPlaylist(ctx, vodID)
 	if err != nil {
+		if err := twitchVodFetchError(ctx, "twitch VOD HLS error", err); err != nil {
+			return nil, err
+		}
 		return &StreamProcessResult{
 			ShouldDownload: false,
 			IsVod:          true,

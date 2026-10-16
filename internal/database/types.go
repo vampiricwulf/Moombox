@@ -21,9 +21,10 @@ const (
 	StatusCookies     JobStatus = "COOKIES?"
 )
 
-// ParkReason records WHY a job was parked at StatusCookies — and, for one
-// Twitch case, why it stopped in StatusError (ParkReasonTwitchEndUnconfirmed,
-// the only value an Error row carries). The status alone
+// ParkReason records WHY a job was parked at StatusCookies — and, for two
+// Twitch cases, why it stopped in StatusError (ParkReasonTwitchEndUnconfirmed
+// and ParkReasonTwitchUnreachable, the only values an Error row carries). The
+// status alone
 // says "credentials are the fix", which is true for every value here — but it
 // does not say WHICH credentials, and the automatic recovery sweeps need that
 // distinction to avoid retrying a job that cannot possibly succeed against the
@@ -69,6 +70,18 @@ const (
 	// No COOKIES? sweep reads an Error row, so the credential sweeps never see
 	// it.
 	ParkReasonTwitchEndUnconfirmed ParkReason = "twitch_end_unconfirmed"
+
+	// ParkReasonTwitchUnreachable is the other reason an ERROR row carries: a
+	// Twitch live job's stream processing never reached Twitch — a transport
+	// failure, on a network the connectivity monitor says is up (one it calls
+	// an outage is waited out instead, and the job never stops). Like the
+	// offline flap's TwitchOfflineErrMsg, it is what lets the Twitch monitor
+	// re-initialise the job when it finds the same broadcast live again
+	// (isRecoverableTwitchError → AutoReinitializeJob), within the same retry
+	// budget and only while no segment was downloaded. Written by setJobError
+	// from the error's type, never inferred from its text; the
+	// re-initialisation clears it.
+	ParkReasonTwitchUnreachable ParkReason = "twitch_unreachable"
 )
 
 // Job is the primary data model for a download job.

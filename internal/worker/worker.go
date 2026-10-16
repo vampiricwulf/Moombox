@@ -226,8 +226,12 @@ type DownloadWorker struct {
 	streamProc  *StreamProcessor
 	notifier    notifications.Sender
 	logger      logger
-	wg          sync.WaitGroup // tracks in-flight processJob goroutines
-	notifyJob   chan struct{}  // signal to re-check for new jobs (non-blocking send)
+	// conn is the connectivity monitor (nil: always online), the one the
+	// scheduler and the orchestrator hold. processJob waits an outage out
+	// on it rather than failing a job whose fetch met one (outage_wait.go).
+	conn      Connectivity
+	wg        sync.WaitGroup // tracks in-flight processJob goroutines
+	notifyJob chan struct{}  // signal to re-check for new jobs (non-blocking send)
 
 	// stagingClaimMu guards stagingClaims, the per-job claim BOTH off-queue
 	// verbs take before they start: MuxJob and RecoverAsides. Each writes into
@@ -407,6 +411,7 @@ func NewDownloadWorker(
 		streamProc:   sp,
 		notifier:     nm,
 		logger:       logger,
+		conn:         conn,
 		notifyJob:    make(chan struct{}, 1),
 	}
 	// The scheduler reads the disk through the worker, which holds the
@@ -885,8 +890,9 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 
 	w.logger.Info("processing job", "jobID", jobID, "videoID", job.VideoID)
 
-	// Process stream (probe, wait for live, etc.)
-	result, err := w.processStream(ctx, job)
+	// Process stream (probe, wait for live, etc.) — waiting a connectivity
+	// outage out rather than failing on it (outage_wait.go).
+	result, err := w.processStreamThroughOutages(ctx, job)
 	// When the format URLs were extracted, near enough: for a VOD, Process
 	// returns straight after its fetch. refreshStaleVodInfo measures the slot
 	// waits below from here.
@@ -966,8 +972,8 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	// and a googlevideo URL lives ~6 h: one that queued longer than that
 	// failed its first request with a 403 that nothing retried. Re-extract a
 	// stale one now that the download is really starting.
-	if err := w.refreshStaleVodInfo(ctx, job, result, extractedAt); err != nil {
-		if ctx.Err() != nil {
+	if err := w.refreshStaleVodInfoThroughOutages(ctx, job, result, extractedAt); err != nil {
+		if ctx.Err() != nil || errors.Is(err, ErrCancelled) {
 			w.handleCancellation(job)
 			return
 		}
@@ -1591,14 +1597,20 @@ func cookieRefreshWorthAttempting(err error) bool {
 // Returns ParkReasonNone for anything that does not park at StatusCookies, so
 // callers can write the field unconditionally and never leave a stale
 // classification behind on a job that failed for an unrelated reason — with
-// one Error-row exception: a live Twitch capture that stopped on its
+// two Error-row exceptions: a live Twitch capture that stopped on its
 // unconfirmed-end latch (ErrTwitchEndUnconfirmed) is recorded as
 // ParkReasonTwitchEndUnconfirmed, the marker the automatic mux keys on
-// (AutoMuxEndedBroadcast, D-T4).
+// (AutoMuxEndedBroadcast, D-T4); and a Twitch live job whose stream
+// processing never reached Twitch (twitchUnreachableError) as
+// ParkReasonTwitchUnreachable, a marker the Twitch monitor's recovery keys on
+// (isRecoverableTwitchError).
 func parkReasonForError(err error) database.ParkReason {
 	if !cookiesStatusError(err) {
 		if errors.Is(err, ErrTwitchEndUnconfirmed) {
 			return database.ParkReasonTwitchEndUnconfirmed
+		}
+		if _, ok := errors.AsType[*twitchUnreachableError](err); ok {
+			return database.ParkReasonTwitchUnreachable
 		}
 		return database.ParkReasonNone
 	}
@@ -1719,9 +1731,10 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// "still retrying" from "gave up for good" — the exact moment that needs
 	// attention. retryLikely mirrors monitor.isRecoverableTwitchError
 	// (KEEP IN SYNC — the import would be cyclic): Error status, the exact
-	// offline-flap message, no delivered segments, budget remaining.
+	// offline-flap message or the unreachable marker, no delivered segments,
+	// budget remaining.
 	retryLikely := status == database.StatusError &&
-		errMsg == TwitchOfflineErrMsg &&
+		(errMsg == TwitchOfflineErrMsg || reason == database.ParkReasonTwitchUnreachable) &&
 		job.LastVideoSeq == nil &&
 		job.AutoRetryCount < MaxTwitchAutoRetries
 	nonActionable := errors.Is(err, ErrNonActionable)
