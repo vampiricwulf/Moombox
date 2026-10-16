@@ -243,163 +243,124 @@ func TestPartMergerMerge_TrivialInputsPassThrough(t *testing.T) {
 	}
 }
 
-// TestPartMergerMerge_ProbeFailureIdentity pins the interface contract: a
-// probe error on ANY part aborts the WHOLE merge, returning the input slice
-// completely untouched (no rows touched, concat/replace never invoked).
-func TestPartMergerMerge_ProbeFailureIdentity(t *testing.T) {
-	pm := newTestPartMerger(t)
-	pm.probe = func(_ context.Context, _, filePath string) (*streamParams, error) {
-		if filePath == "b.mp4" {
-			return nil, errors.New("ffprobe: boom")
-		}
-		return matchingParams(context.Background(), "", filePath)
+// TestPartMergerMerge_Identity pins the merges that return the input slice
+// completely untouched without ever calling concat/replace.
+func TestPartMergerMerge_Identity(t *testing.T) {
+	cases := []struct {
+		name     string
+		probe    func(ctx context.Context, ffprobePath, filePath string) (*streamParams, error)
+		segments []database.Segment
+	}{
+		// ProbeFailure pins the interface contract: a probe error on ANY part
+		// aborts the WHOLE merge, returning the input slice completely
+		// untouched (no rows touched, concat/replace never invoked).
+		{
+			name: "ProbeFailure",
+			probe: func(_ context.Context, _, filePath string) (*streamParams, error) {
+				if filePath == "b.mp4" {
+					return nil, errors.New("ffprobe: boom")
+				}
+				return matchingParams(context.Background(), "", filePath)
+			},
+			segments: []database.Segment{
+				{SegmentIndex: 0, FilePath: "a.mp4", Filename: "a.mp4"},
+				{SegmentIndex: 1, FilePath: "b.mp4", Filename: "b.mp4"},
+			},
+		},
+		// NoMergeableRun confirms distinct stream params (no contiguous run of
+		// len>1) leaves the input untouched without ever calling
+		// concat/replace.
+		{
+			name: "NoMergeableRun",
+			probe: func(_ context.Context, _, filePath string) (*streamParams, error) {
+				return &streamParams{VCodec: filePath}, nil // every file gets a distinct codec
+			},
+			segments: []database.Segment{
+				{SegmentIndex: 0, FilePath: "a.mp4"},
+				{SegmentIndex: 1, FilePath: "b.mp4"},
+				{SegmentIndex: 2, FilePath: "c.mp4"},
+			},
+		},
 	}
-	concatCalled := false
-	pm.concat = func(context.Context, []string, string) error {
-		concatCalled = true
-		return nil
-	}
-	replaceCalled := false
-	pm.replace = func(string, []database.Segment) error {
-		replaceCalled = true
-		return nil
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pm := newTestPartMerger(t)
+			pm.probe = tc.probe
+			concatCalled := false
+			pm.concat = func(context.Context, []string, string) error {
+				concatCalled = true
+				return nil
+			}
+			replaceCalled := false
+			pm.replace = func(string, []database.Segment) error {
+				replaceCalled = true
+				return nil
+			}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, FilePath: "a.mp4", Filename: "a.mp4"},
-		{SegmentIndex: 1, FilePath: "b.mp4", Filename: "b.mp4"},
-	}
-	got := pm.merge(context.Background(), "job1", "", segments)
+			got := pm.merge(context.Background(), "job1", "", tc.segments)
 
-	if !reflect.DeepEqual(got, segments) {
-		t.Errorf("merge with a probe failure = %+v, want input unchanged %+v", got, segments)
-	}
-	if concatCalled {
-		t.Error("concat must not be called when a probe fails")
-	}
-	if replaceCalled {
-		t.Error("db replace must not be called when a probe fails")
+			if !reflect.DeepEqual(got, tc.segments) {
+				t.Errorf("merge = %+v, want input unchanged %+v", got, tc.segments)
+			}
+			if concatCalled {
+				t.Error("concat must not be called")
+			}
+			if replaceCalled {
+				t.Error("db replace must not be called")
+			}
+		})
 	}
 }
 
-// TestPartMergerMerge_NoMergeableRunIdentity confirms distinct stream params
-// (no contiguous run of len>1) leaves the input untouched without ever
-// calling concat/replace.
-func TestPartMergerMerge_NoMergeableRunIdentity(t *testing.T) {
-	pm := newTestPartMerger(t)
-	pm.probe = func(_ context.Context, _, filePath string) (*streamParams, error) {
-		return &streamParams{VCodec: filePath}, nil // every file gets a distinct codec
+// TestPartMergerMerge_FailureAborts pins the failures that abort the WHOLE
+// merge before any rename: the input comes back unchanged, both original part
+// files are untouched, and no temp concat output is left behind.
+func TestPartMergerMerge_FailureAborts(t *testing.T) {
+	cases := []struct {
+		name                  string
+		concatErr, replaceErr error
+	}{
+		// ConcatFailure confirms a concat failure on any run aborts the WHOLE
+		// merge (not just that run), leaving every original part file
+		// untouched and never calling db replace.
+		{name: "ConcatFailure", concatErr: errors.New("ffmpeg: boom")},
+		// ReplaceFailure confirms a db.ReplaceJobSegments failure leaves the
+		// original parts on disk untouched (no rename ever happens before a
+		// successful replace) and cleans up the temp concat output.
+		{name: "ReplaceFailure", replaceErr: errors.New("db: locked")},
 	}
-	concatCalled := false
-	pm.concat = func(context.Context, []string, string) error {
-		concatCalled = true
-		return nil
-	}
-	replaceCalled := false
-	pm.replace = func(string, []database.Segment) error {
-		replaceCalled = true
-		return nil
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pm, _, segments := mergeFixture(t)
+			part1, part2 := segments[0].FilePath, segments[1].FilePath
+			if tc.concatErr != nil {
+				pm.concat = func(context.Context, []string, string) error { return tc.concatErr }
+			}
+			replaceCalled := false
+			pm.replace = func(string, []database.Segment) error {
+				replaceCalled = true
+				return tc.replaceErr
+			}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, FilePath: "a.mp4"},
-		{SegmentIndex: 1, FilePath: "b.mp4"},
-		{SegmentIndex: 2, FilePath: "c.mp4"},
-	}
-	got := pm.merge(context.Background(), "job1", "", segments)
+			got := pm.merge(context.Background(), "job1", "", segments)
 
-	if !reflect.DeepEqual(got, segments) {
-		t.Errorf("merge with no mergeable run = %+v, want input unchanged %+v", got, segments)
-	}
-	if concatCalled || replaceCalled {
-		t.Error("concat/replace must not be called when no run has len>1")
-	}
-}
-
-// TestPartMergerMerge_ConcatFailureAborts confirms a concat failure on any
-// run aborts the WHOLE merge (not just that run), leaving every original
-// part file untouched and never calling db replace.
-func TestPartMergerMerge_ConcatFailureAborts(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = func(context.Context, []string, string) error {
-		return errors.New("ffmpeg: boom")
-	}
-	replaceCalled := false
-	pm.replace = func(string, []database.Segment) error {
-		replaceCalled = true
-		return nil
-	}
-
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2},
-	}
-	got := pm.merge(context.Background(), "job1", "", segments)
-
-	if !reflect.DeepEqual(got, segments) {
-		t.Errorf("merge after concat failure = %+v, want input unchanged", got)
-	}
-	if replaceCalled {
-		t.Error("db replace must not be called after a concat failure")
-	}
-	if b, err := os.ReadFile(part1); err != nil || string(b) != "orig1" {
-		t.Errorf("part1 mutated by aborted merge: content=%q err=%v", b, err)
-	}
-	if b, err := os.ReadFile(part2); err != nil || string(b) != "orig2" {
-		t.Errorf("part2 mutated by aborted merge: content=%q err=%v", b, err)
-	}
-}
-
-// TestPartMergerMerge_ReplaceFailureAborts confirms a db.ReplaceJobSegments
-// failure leaves the original parts on disk untouched (no rename ever
-// happens before a successful replace) and cleans up the temp concat output.
-func TestPartMergerMerge_ReplaceFailureAborts(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
-	pm.replace = func(string, []database.Segment) error {
-		return errors.New("db: locked")
-	}
-
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2},
-	}
-	got := pm.merge(context.Background(), "job1", "", segments)
-
-	if !reflect.DeepEqual(got, segments) {
-		t.Errorf("merge after replace failure = %+v, want input unchanged", got)
-	}
-	if b, err := os.ReadFile(part1); err != nil || string(b) != "orig1" {
-		t.Errorf("part1 mutated after aborted replace: content=%q err=%v", b, err)
-	}
-	if b, err := os.ReadFile(part2); err != nil || string(b) != "orig2" {
-		t.Errorf("part2 mutated after aborted replace: content=%q err=%v", b, err)
-	}
-	tempPath := filepath.Join(dir, "base - merged0.mp4")
-	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
-		t.Errorf("temp concat output not cleaned up after aborted replace: stat err = %v", err)
+			if !reflect.DeepEqual(got, segments) {
+				t.Errorf("merge = %+v, want input unchanged", got)
+			}
+			if tc.concatErr != nil && replaceCalled {
+				t.Error("db replace must not be called after a concat failure")
+			}
+			if b, err := os.ReadFile(part1); err != nil || string(b) != "orig1" {
+				t.Errorf("part1 mutated by aborted merge: content=%q err=%v", b, err)
+			}
+			if b, err := os.ReadFile(part2); err != nil || string(b) != "orig2" {
+				t.Errorf("part2 mutated by aborted merge: content=%q err=%v", b, err)
+			}
+			tempPath := filepath.Join(filepath.Dir(part1), "base - merged0.mp4")
+			if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
+				t.Errorf("temp concat output not cleaned up after aborted merge: stat err = %v", err)
+			}
+		})
 	}
 }
 
@@ -409,18 +370,12 @@ func TestPartMergerMerge_ReplaceFailureAborts(t *testing.T) {
 // whose FilePath/ChatFile land on the first part's original names, and the
 // superseded second part's video+chat files are deleted.
 func TestPartMergerMerge_HappyPath(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
+	pm, _, segments := mergeFixture(t)
+	part1, part2 := segments[0].FilePath, segments[1].FilePath
+	dir := filepath.Dir(part1)
 	chat1 := filepath.Join(dir, "base - part1.chat.json")
 	chat2 := filepath.Join(dir, "base - part2.chat.json")
 
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	chatJSON := func(id string) []byte {
 		b, _ := json.Marshal(chat.ChatData{VideoID: "v1", MessageCount: 1, Messages: []chat.ChatMessage{{ID: id}}})
 		return b
@@ -432,18 +387,11 @@ func TestPartMergerMerge_HappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
-
 	var replacedWith []database.Segment
+	stamp := pm.replace
 	pm.replace = func(jobID string, segs []database.Segment) error {
-		for i := range segs {
-			segs[i].ID = 500 + i
-			segs[i].JobID = jobID
-		}
 		replacedWith = segs
-		return nil
+		return stamp(jobID, segs)
 	}
 	var updateFileCalls int
 	pm.updateFile = func(id int, filename, filePath, chatFile string) error {
@@ -451,10 +399,8 @@ func TestPartMergerMerge_HappyPath(t *testing.T) {
 		return nil
 	}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, UnixStart: 1000, UnixEnd: 1100, Quality: "1080p60", Filename: "base - part1.mp4", FilePath: part1, DurationSeconds: 100, ChatFile: chat1},
-		{SegmentIndex: 1, UnixStart: 1100, UnixEnd: 1200, Quality: "1080p60", Filename: "base - part2.mp4", FilePath: part2, DurationSeconds: 100, ChatFile: chat2},
-	}
+	segments[0].UnixStart, segments[0].UnixEnd, segments[0].ChatFile = 1000, 1100, chat1
+	segments[1].UnixStart, segments[1].UnixEnd, segments[1].ChatFile = 1100, 1200, chat2
 	got := pm.merge(context.Background(), "job1", "", segments)
 
 	if len(got) != 1 {
@@ -519,18 +465,12 @@ func TestPartMergerMerge_HappyPath(t *testing.T) {
 // chat replay for exactly the one production case (Twitch) that ever
 // carries per-part ChatFile.
 func TestPartMergerMerge_ChatMergeFailureAbortsRun(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
+	pm, _, segments := mergeFixture(t)
+	part1, part2 := segments[0].FilePath, segments[1].FilePath
+	dir := filepath.Dir(part1)
 	chat1 := filepath.Join(dir, "base - part1.chat.json")
 	chat2 := filepath.Join(dir, "base - part2.chat.json")
 
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	validChat, _ := json.Marshal(chat.ChatData{VideoID: "v1", MessageCount: 1, Messages: []chat.ChatMessage{{ID: "m1"}}})
 	if err := os.WriteFile(chat1, validChat, 0o644); err != nil {
 		t.Fatal(err)
@@ -540,9 +480,6 @@ func TestPartMergerMerge_ChatMergeFailureAbortsRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
 	replaceCalled := false
 	pm.replace = func(jobID string, segs []database.Segment) error {
 		replaceCalled = true
@@ -554,10 +491,7 @@ func TestPartMergerMerge_ChatMergeFailureAbortsRun(t *testing.T) {
 		return nil
 	}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1, DurationSeconds: 100, ChatFile: chat1},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2, DurationSeconds: 100, ChatFile: chat2},
-	}
+	segments[0].ChatFile, segments[1].ChatFile = chat1, chat2
 	got := pm.merge(context.Background(), "job1", "", segments)
 
 	// Full identity: the run (here, the entire batch — its only run) is
@@ -694,49 +628,10 @@ func TestPartMergerMerge_ChatMergeFailureRunIsolatesFromOtherRuns(t *testing.T) 
 // own seg_N dir is deliberately left alone (see merge's doc comment) —
 // verified here too, so a future change can't "fix" that into a regression.
 func TestPartMergerMerge_StagingDirSupersededCleanup(t *testing.T) {
-	outDir := t.TempDir()
-	stagingDir := t.TempDir()
-
-	part1 := filepath.Join(outDir, "base - part1.mp4")
-	part2 := filepath.Join(outDir, "base - part2.mp4")
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
+	pm, stagingDir, segments := mergeFixture(t)
 	seg0Dir := filepath.Join(stagingDir, "seg_0")
 	seg1Dir := filepath.Join(stagingDir, "seg_1")
-	if err := os.MkdirAll(seg0Dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(seg1Dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(seg0Dir, "video_stream"), []byte("raw0"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(seg1Dir, "video_stream"), []byte("raw1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
-	pm.replace = func(jobID string, segs []database.Segment) error {
-		for i := range segs {
-			segs[i].ID = 900 + i
-			segs[i].JobID = jobID
-		}
-		return nil
-	}
-	pm.updateFile = func(id int, filename, filePath, chatFile string) error { return nil }
-
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1, DurationSeconds: 100},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2, DurationSeconds: 100},
-	}
 	got := pm.merge(context.Background(), "job1", stagingDir, segments)
 
 	if len(got) != 1 {
@@ -761,26 +656,8 @@ func TestPartMergerMerge_StagingDirSupersededCleanup(t *testing.T) {
 // — since the row still resolves to a real file — superseded-part cleanup
 // still proceeds normally.
 func TestPartMergerMerge_RenameFailureKeepsRowAtTempPath(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
-	pm.replace = func(jobID string, segs []database.Segment) error {
-		for i := range segs {
-			segs[i].ID = 1100 + i
-			segs[i].JobID = jobID
-		}
-		return nil
-	}
+	pm, _, segments := mergeFixture(t)
+	part1, part2 := segments[0].FilePath, segments[1].FilePath
 	updateFileCalled := false
 	pm.updateFile = func(id int, filename, filePath, chatFile string) error {
 		updateFileCalled = true
@@ -790,16 +667,12 @@ func TestPartMergerMerge_RenameFailureKeepsRowAtTempPath(t *testing.T) {
 		return errors.New("rename: access denied")
 	}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1, DurationSeconds: 100},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2, DurationSeconds: 100},
-	}
 	got := pm.merge(context.Background(), "job1", "", segments)
 
 	if len(got) != 1 {
 		t.Fatalf("merged output = %d rows, want 1", len(got))
 	}
-	wantTemp := filepath.Join(dir, "base - merged0.mp4")
+	wantTemp := filepath.Join(filepath.Dir(part1), "base - merged0.mp4")
 	if got[0].FilePath != wantTemp {
 		t.Errorf("FilePath = %q, want committed temp path %q (rename never landed)", got[0].FilePath, wantTemp)
 	}
@@ -827,40 +700,18 @@ func TestPartMergerMerge_RenameFailureKeepsRowAtTempPath(t *testing.T) {
 // undo succeeds, the run is still fully recoverable and superseded cleanup
 // proceeds.
 func TestPartMergerMerge_UpdateFileFailureRestoresRow(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
-	pm.replace = func(jobID string, segs []database.Segment) error {
-		for i := range segs {
-			segs[i].ID = 1300 + i
-			segs[i].JobID = jobID
-		}
-		return nil
-	}
+	pm, _, segments := mergeFixture(t)
+	part1, part2 := segments[0].FilePath, segments[1].FilePath
 	pm.updateFile = func(id int, filename, filePath, chatFile string) error {
 		return errors.New("db: locked")
 	}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1, DurationSeconds: 100},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2, DurationSeconds: 100},
-	}
 	got := pm.merge(context.Background(), "job1", "", segments)
 
 	if len(got) != 1 {
 		t.Fatalf("merged output = %d rows, want 1", len(got))
 	}
-	wantTemp := filepath.Join(dir, "base - merged0.mp4")
+	wantTemp := filepath.Join(filepath.Dir(part1), "base - merged0.mp4")
 	if got[0].FilePath != wantTemp {
 		t.Errorf("FilePath = %q, want restored temp path %q", got[0].FilePath, wantTemp)
 	}
@@ -887,28 +738,10 @@ func TestPartMergerMerge_UpdateFileFailureRestoresRow(t *testing.T) {
 // remaining, independently-resolvable copy of that span, since the
 // committed row can no longer be trusted to point anywhere real).
 func TestPartMergerMerge_UpdateFileDoubleFaultSkipsCleanup(t *testing.T) {
-	dir := t.TempDir()
-	part1 := filepath.Join(dir, "base - part1.mp4")
-	part2 := filepath.Join(dir, "base - part2.mp4")
-	if err := os.WriteFile(part1, []byte("orig1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	pm, _, segments := mergeFixture(t)
+	part1, part2 := segments[0].FilePath, segments[1].FilePath
+	videoTemp := filepath.Join(filepath.Dir(part1), "base - merged0.mp4")
 
-	videoTemp := filepath.Join(dir, "base - merged0.mp4")
-
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	pm.concat = writeConcatStub([]byte("merged-bytes"))
-	pm.replace = func(jobID string, segs []database.Segment) error {
-		for i := range segs {
-			segs[i].ID = 1500 + i
-			segs[i].JobID = jobID
-		}
-		return nil
-	}
 	pm.updateFile = func(id int, filename, filePath, chatFile string) error {
 		return errors.New("db: locked")
 	}
@@ -921,10 +754,6 @@ func TestPartMergerMerge_UpdateFileDoubleFaultSkipsCleanup(t *testing.T) {
 		return os.Rename(oldpath, newpath)
 	}
 
-	segments := []database.Segment{
-		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1, DurationSeconds: 100},
-		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: part2, DurationSeconds: 100},
-	}
 	got := pm.merge(context.Background(), "job1", "", segments)
 
 	if len(got) != 1 {
@@ -1057,83 +886,66 @@ func TestPartMergerMerge_MultiRunBatch(t *testing.T) {
 // names the (now-vanished) temp path while the real file sits unreferenced
 // under its run-head name.
 
-// TestAdoptMergedFinal_PatternMismatchNotAdopted confirms a normal
-// (non-merge-temp) filename is never touched — no stat, no probe, no
-// updateFile call.
-func TestAdoptMergedFinal_PatternMismatchNotAdopted(t *testing.T) {
-	pm := newTestPartMerger(t)
-	probeCalled := false
-	pm.probe = func(context.Context, string, string) (*streamParams, error) {
-		probeCalled = true
-		return matchingParams(context.Background(), "", "")
+// TestAdoptMergedFinal_NotAdopted pins the refusals: none adopts, calls
+// updateFile, or touches seg, and none probes without a candidate file.
+func TestAdoptMergedFinal_NotAdopted(t *testing.T) {
+	cases := []struct {
+		name       string
+		filename   string
+		writeFinal bool // the run-head final name, "base - part1.mp4", exists on disk
+		probeErr   error
+	}{
+		// PatternMismatch confirms a normal (non-merge-temp) filename is never
+		// touched — no stat, no probe, no updateFile call.
+		{name: "PatternMismatch", filename: "base - part1.mp4"},
+		// FinalNameAbsent confirms a merge-temp filename whose reconstructed
+		// run-head final name does NOT exist on disk is left alone — this is
+		// the ordinary "file is just gone" case, not the crash-repair
+		// signature.
+		{name: "FinalNameAbsent", filename: "base - merged0.mp4"},
+		// CandidateProbeFails confirms a candidate that exists but doesn't
+		// probe cleanly is refused — an adopt-and-repair must never point the
+		// row at something unverified.
+		{name: "CandidateProbeFails", filename: "base - merged0.mp4", writeFinal: true, probeErr: errors.New("ffprobe: boom")},
 	}
-	updateCalled := false
-	pm.updateFile = func(int, string, string, string) error {
-		updateCalled = true
-		return nil
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.writeFinal {
+				if err := os.WriteFile(filepath.Join(dir, "base - part1.mp4"), []byte("not really playable"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pm := newTestPartMerger(t)
+			probeCalled := false
+			pm.probe = func(ctx context.Context, ffprobePath, filePath string) (*streamParams, error) {
+				probeCalled = true
+				if tc.probeErr != nil {
+					return nil, tc.probeErr
+				}
+				return matchingParams(ctx, ffprobePath, filePath)
+			}
+			updateCalled := false
+			pm.updateFile = func(int, string, string, string) error {
+				updateCalled = true
+				return nil
+			}
 
-	seg := database.Segment{ID: 1, JobID: "job1", SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: "/x/base - part1.mp4"}
-	if pm.adoptMergedFinal(context.Background(), &seg) {
-		t.Error("a normal part filename must never be adopted")
-	}
-	if probeCalled || updateCalled {
-		t.Error("no probe or updateFile call should happen for a filename that doesn't match the merge-temp pattern")
-	}
-}
-
-// TestAdoptMergedFinal_FinalNameAbsentNotAdopted confirms a merge-temp
-// filename whose reconstructed run-head final name does NOT exist on disk
-// is left alone — this is the ordinary "file is just gone" case, not the
-// crash-repair signature.
-func TestAdoptMergedFinal_FinalNameAbsentNotAdopted(t *testing.T) {
-	dir := t.TempDir()
-	pm := newTestPartMerger(t)
-	pm.probe = matchingParams
-	updateCalled := false
-	pm.updateFile = func(int, string, string, string) error {
-		updateCalled = true
-		return nil
-	}
-
-	seg := database.Segment{ID: 1, JobID: "job1", SegmentIndex: 0, Filename: "base - merged0.mp4", FilePath: filepath.Join(dir, "base - merged0.mp4")}
-	if pm.adoptMergedFinal(context.Background(), &seg) {
-		t.Error("must not adopt when the run-head final name does not exist on disk either")
-	}
-	if updateCalled {
-		t.Error("updateFile must not be called when there is no candidate file to adopt")
-	}
-	if seg.FilePath != filepath.Join(dir, "base - merged0.mp4") {
-		t.Errorf("seg must be left untouched: FilePath = %q", seg.FilePath)
-	}
-}
-
-// TestAdoptMergedFinal_CandidateProbeFailsNotAdopted confirms a candidate
-// that exists but doesn't probe cleanly is refused — an adopt-and-repair
-// must never point the row at something unverified.
-func TestAdoptMergedFinal_CandidateProbeFailsNotAdopted(t *testing.T) {
-	dir := t.TempDir()
-	finalVideo := filepath.Join(dir, "base - part1.mp4")
-	if err := os.WriteFile(finalVideo, []byte("not really playable"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	pm := newTestPartMerger(t)
-	pm.probe = func(context.Context, string, string) (*streamParams, error) {
-		return nil, errors.New("ffprobe: boom")
-	}
-	updateCalled := false
-	pm.updateFile = func(int, string, string, string) error {
-		updateCalled = true
-		return nil
-	}
-
-	seg := database.Segment{ID: 1, JobID: "job1", SegmentIndex: 0, Filename: "base - merged0.mp4", FilePath: filepath.Join(dir, "base - merged0.mp4")}
-	if pm.adoptMergedFinal(context.Background(), &seg) {
-		t.Error("must not adopt a candidate that fails to probe cleanly")
-	}
-	if updateCalled {
-		t.Error("updateFile must not be called when the candidate fails to probe")
+			seg := database.Segment{ID: 1, JobID: "job1", SegmentIndex: 0, Filename: tc.filename, FilePath: filepath.Join(dir, tc.filename)}
+			want := seg
+			if pm.adoptMergedFinal(context.Background(), &seg) {
+				t.Error("adopted, want refused")
+			}
+			if updateCalled {
+				t.Error("updateFile must not be called when nothing is adopted")
+			}
+			if probeCalled && !tc.writeFinal {
+				t.Error("no probe should happen without a candidate file to verify")
+			}
+			if !reflect.DeepEqual(seg, want) {
+				t.Errorf("seg must be left untouched: %+v, want %+v", seg, want)
+			}
+		})
 	}
 }
 

@@ -62,34 +62,58 @@ func TestNewJobQueue(t *testing.T) {
 	}
 }
 
-func TestEnqueueDequeue_FIFO(t *testing.T) {
-	q := NewJobQueue(10)
-	q.Enqueue("job1", database.StatusUpcoming)
-	q.Enqueue("job2", database.StatusUpcoming)
-	q.Enqueue("job3", database.StatusUpcoming)
-
-	if q.PendingCount() != 3 {
-		t.Errorf("PendingCount() = %d, want 3", q.PendingCount())
+func TestDequeue_Order(t *testing.T) {
+	type enqueued struct {
+		id     string
+		status database.JobStatus
+	}
+	tests := []struct {
+		name      string
+		enqueue   []enqueued
+		wantOrder []string
+	}{
+		{
+			name: "FIFO",
+			enqueue: []enqueued{
+				{"job1", database.StatusUpcoming}, {"job2", database.StatusUpcoming}, {"job3", database.StatusUpcoming},
+			},
+			wantOrder: []string{"job1", "job2", "job3"},
+		},
+		{
+			// Live (priority 1) jumps the queue; everything else is FIFO at 0.
+			name: "PriorityOrdering",
+			enqueue: []enqueued{
+				{"upcoming_job", database.StatusUpcoming}, {"downloading_job", database.StatusDownloading}, {"live_job", database.StatusLive},
+			},
+			wantOrder: []string{"live_job", "upcoming_job", "downloading_job"},
+		},
+		{
+			// Two live jobs — should be FIFO among same priority.
+			name:      "PriorityFIFOWithinTies",
+			enqueue:   []enqueued{{"live1", database.StatusLive}, {"live2", database.StatusLive}},
+			wantOrder: []string{"live1", "live2"},
+		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q := NewJobQueue(10)
+			for _, e := range tt.enqueue {
+				q.Enqueue(e.id, e.status)
+			}
+			if q.PendingCount() != len(tt.enqueue) {
+				t.Errorf("PendingCount() = %d, want %d", q.PendingCount(), len(tt.enqueue))
+			}
 
-	id1, _, ok1 := q.Dequeue(ctx)
-	id2, _, ok2 := q.Dequeue(ctx)
-	id3, _, ok3 := q.Dequeue(ctx)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
 
-	if !ok1 || !ok2 || !ok3 {
-		t.Fatal("Dequeue returned false unexpectedly")
-	}
-	if id1 != "job1" {
-		t.Errorf("first dequeue = %q, want %q", id1, "job1")
-	}
-	if id2 != "job2" {
-		t.Errorf("second dequeue = %q, want %q", id2, "job2")
-	}
-	if id3 != "job3" {
-		t.Errorf("third dequeue = %q, want %q", id3, "job3")
+			for i, want := range tt.wantOrder {
+				if id, _, ok := q.Dequeue(ctx); !ok || id != want {
+					t.Errorf("dequeue %d = %q, ok=%v, want %s/true", i+1, id, ok, want)
+				}
+			}
+		})
 	}
 }
 
@@ -135,141 +159,140 @@ func TestDequeue_ContextCancellation(t *testing.T) {
 	}
 }
 
-func TestDequeue_PriorityOrdering(t *testing.T) {
-	q := NewJobQueue(10)
-
-	// Live (priority 1) jumps the queue; everything else is FIFO at 0.
-	q.Enqueue("upcoming_job", database.StatusUpcoming)
-	q.Enqueue("downloading_job", database.StatusDownloading)
-	q.Enqueue("live_job", database.StatusLive)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	for i, want := range []string{"live_job", "upcoming_job", "downloading_job"} {
-		if id, _, ok := q.Dequeue(ctx); !ok || id != want {
-			t.Errorf("dequeue %d = %q, ok=%v, want %s/true", i+1, id, ok, want)
-		}
-	}
-}
-
-func TestDequeue_PriorityFIFOWithinTies(t *testing.T) {
-	q := NewJobQueue(10)
-
-	// Enqueue two live jobs — should be FIFO among same priority
-	q.Enqueue("live1", database.StatusLive)
-	q.Enqueue("live2", database.StatusLive)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	id1, _, _ := q.Dequeue(ctx)
-	id2, _, _ := q.Dequeue(ctx)
-
-	if id1 != "live1" {
-		t.Errorf("first dequeue = %q, want live1 (FIFO among ties)", id1)
-	}
-	if id2 != "live2" {
-		t.Errorf("second dequeue = %q, want live2 (FIFO among ties)", id2)
-	}
-}
-
 // TestDequeue_LifecycleGating is gone: owner decision O-F moved the lifecycle
 // slot off Dequeue and onto the ShouldDownload decision, so the behaviour it
 // pinned (a second Dequeue blocking at maxLifecycle) is the bug, not the
 // contract. Its replacement is TestDequeueDoesNotTakeALifecycleSlot in
 // queue_lifecycle_test.go, which asserts the opposite invariant.
 
-func TestAcquireDownloadSlot_BlocksWhenFull(t *testing.T) {
-	q := NewJobQueue(1) // Only 1 download slot
-	q.Enqueue("job1", database.StatusUpcoming)
-	q.Enqueue("job2", database.StatusUpcoming)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	// Dequeue both (lifecycle allows it)
-	q.Dequeue(ctx)
-	q.Dequeue(ctx)
-
-	// Acquire download slot for job1
-	if !q.AcquireDownloadSlot(ctx, "job1") {
-		t.Fatal("AcquireDownloadSlot should succeed for first job")
+// TestAcquireDownloadSlot_FullPool: job1 holds the only download slot, and
+// job2's acquire waits for whatever the row does to free or add one.
+func TestAcquireDownloadSlot_FullPool(t *testing.T) {
+	tests := []struct {
+		name    string
+		unblock func(t *testing.T, q *JobQueue) // nil: nothing frees a slot
+		want    bool
+	}{
+		// Acquire download slot for job2 should block because maxDownloads=1.
+		{"BlocksWhenFull", nil, false},
+		// Release job1's download slot in a goroutine; job2 should then be
+		// able to acquire.
+		{"UnblocksOnRelease", func(t *testing.T, q *JobQueue) {
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Errorf("release goroutine panicked: %v", r)
+					}
+				}()
+				time.Sleep(20 * time.Millisecond)
+				q.ReleaseDownloadSlot("job1")
+			}()
+		}, true},
+		// Increase max downloads; job2 should then be able to acquire.
+		{"SetMaxDownloads", func(_ *testing.T, q *JobQueue) { q.SetMaxDownloads(2) }, true},
 	}
 
-	if q.ActiveCount() != 1 {
-		t.Errorf("ActiveCount() = %d, want 1", q.ActiveCount())
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q := NewJobQueue(1) // Only 1 download slot
+			q.Enqueue("job1", database.StatusUpcoming)
+			q.Enqueue("job2", database.StatusUpcoming)
 
-	// Acquire download slot for job2 should block because maxDownloads=1
-	shortCtx, shortCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer shortCancel()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
 
-	if q.AcquireDownloadSlot(shortCtx, "job2") {
-		t.Error("AcquireDownloadSlot should have blocked when all download slots are full")
-	}
-}
+			// Dequeue both (lifecycle allows it)
+			q.Dequeue(ctx)
+			q.Dequeue(ctx)
 
-func TestAcquireDownloadSlot_UnblocksOnRelease(t *testing.T) {
-	q := NewJobQueue(1)
-	q.Enqueue("job1", database.StatusUpcoming)
-	q.Enqueue("job2", database.StatusUpcoming)
+			// Acquire download slot for job1
+			if !q.AcquireDownloadSlot(ctx, "job1") {
+				t.Fatal("AcquireDownloadSlot should succeed for first job")
+			}
+			if q.ActiveCount() != 1 {
+				t.Errorf("ActiveCount() = %d, want 1", q.ActiveCount())
+			}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	q.Dequeue(ctx)
-	q.Dequeue(ctx)
-
-	q.AcquireDownloadSlot(ctx, "job1")
-
-	// Release job1's download slot in a goroutine
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		q.ReleaseDownloadSlot("job1")
-	}()
-
-	// job2 should now be able to acquire
-	if !q.AcquireDownloadSlot(ctx, "job2") {
-		t.Error("AcquireDownloadSlot should succeed after release")
-	}
-}
-
-func TestReleaseDownloadSlot_FreesSlot(t *testing.T) {
-	q := NewJobQueue(10)
-	q.Enqueue("job1", database.StatusUpcoming)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	q.Dequeue(ctx)
-	q.AcquireDownloadSlot(ctx, "job1")
-
-	if q.ActiveCount() != 1 {
-		t.Errorf("ActiveCount() = %d, want 1", q.ActiveCount())
-	}
-
-	q.ReleaseDownloadSlot("job1")
-
-	if q.ActiveCount() != 0 {
-		t.Errorf("ActiveCount() after ReleaseDownloadSlot = %d, want 0", q.ActiveCount())
+			if tt.unblock != nil {
+				tt.unblock(t, q)
+			}
+			// A row that expects job2 to stay blocked waits only long enough
+			// to show it.
+			wait := time.Second
+			if !tt.want {
+				wait = 50 * time.Millisecond
+			}
+			acquireCtx, acquireCancel := context.WithTimeout(context.Background(), wait)
+			defer acquireCancel()
+			if got := q.AcquireDownloadSlot(acquireCtx, "job2"); got != tt.want {
+				t.Errorf("AcquireDownloadSlot(job2) = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestReleaseDownloadSlot_DoubleRelease(t *testing.T) {
-	q := NewJobQueue(10)
-	q.Enqueue("job1", database.StatusUpcoming)
+// TestReleaseAndComplete takes job1 through enqueue and dequeue, then through
+// each row's sequence of download-slot acquire, ReleaseDownloadSlot and
+// Complete. No sequence may double-decrement: every one ends with both
+// counters at zero.
+func TestReleaseAndComplete(t *testing.T) {
+	tests := []struct {
+		name           string
+		ops            []string // "acquire", "release" (ReleaseDownloadSlot), "complete"
+		wantProcessing bool
+	}{
+		{"ReleaseDownloadSlot_FreesSlot", []string{"acquire", "release"}, true},
+		// The second release should be a no-op.
+		{"ReleaseDownloadSlot_DoubleRelease", []string{"acquire", "release", "release"}, true},
+		// Complete without prior ReleaseDownloadSlot — should release both.
+		{"Complete_AlsoReleasesDownloadSlot", []string{"acquire", "complete"}, false},
+		// Should not double-decrement.
+		{"Complete_AfterReleaseDownloadSlot", []string{"acquire", "release", "complete"}, false},
+		{"IsProcessing", []string{"complete"}, false},
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q := NewJobQueue(10)
+			q.Enqueue("job1", database.StatusUpcoming)
+			if q.IsProcessing("job1") {
+				t.Error("job1 should not be processing before dequeue")
+			}
 
-	q.Dequeue(ctx)
-	q.AcquireDownloadSlot(ctx, "job1")
-	q.ReleaseDownloadSlot("job1")
-	q.ReleaseDownloadSlot("job1") // should be a no-op
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
 
-	if q.ActiveCount() != 0 {
-		t.Errorf("ActiveCount() after double ReleaseDownloadSlot = %d, want 0", q.ActiveCount())
+			q.Dequeue(ctx)
+			if !q.IsProcessing("job1") {
+				t.Error("job1 should be processing after dequeue")
+			}
+
+			for _, op := range tt.ops {
+				switch op {
+				case "acquire":
+					q.AcquireDownloadSlot(ctx, "job1")
+					if q.ActiveCount() != 1 {
+						t.Errorf("ActiveCount() = %d, want 1", q.ActiveCount())
+					}
+				case "release":
+					q.ReleaseDownloadSlot("job1")
+				case "complete":
+					q.Complete("job1")
+				default:
+					t.Fatalf("unknown op %q", op)
+				}
+			}
+
+			if q.ActiveCount() != 0 {
+				t.Errorf("ActiveCount() after %v = %d, want 0", tt.ops, q.ActiveCount())
+			}
+			if q.LifecycleCount() != 0 {
+				t.Errorf("LifecycleCount() after %v = %d, want 0", tt.ops, q.LifecycleCount())
+			}
+			if got := q.IsProcessing("job1"); got != tt.wantProcessing {
+				t.Errorf("IsProcessing(job1) after %v = %v, want %v", tt.ops, got, tt.wantProcessing)
+			}
+		})
 	}
 }
 
@@ -277,90 +300,6 @@ func TestReleaseDownloadSlot_NonexistentJob(t *testing.T) {
 	q := NewJobQueue(10)
 	// Should not panic
 	q.ReleaseDownloadSlot("nonexistent")
-}
-
-func TestComplete_FreesLifecycleSlot(t *testing.T) {
-	q := NewJobQueue(10)
-	q.maxLifecycle = 1
-	q.Enqueue("job1", database.StatusUpcoming)
-	q.Enqueue("job2", database.StatusUpcoming)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	q.Dequeue(ctx)
-	if q.IsProcessing("job1") != true {
-		t.Error("job1 should be processing after dequeue")
-	}
-	// The slot comes from the ShouldDownload decision now (O-F), so the test
-	// has to take it for this assertion to mean anything.
-	if !q.AcquireLifecycleSlot(ctx, "job1") {
-		t.Fatal("AcquireLifecycleSlot = false with the single slot free")
-	}
-
-	q.Complete("job1")
-
-	if q.IsProcessing("job1") {
-		t.Error("job1 should not be processing after Complete")
-	}
-	if q.LifecycleCount() != 0 {
-		t.Errorf("LifecycleCount() after Complete = %d, want 0", q.LifecycleCount())
-	}
-
-	// job2 should now be dequeueable
-	id2, _, ok := q.Dequeue(ctx)
-	if !ok || id2 != "job2" {
-		t.Errorf("dequeue after Complete = %q, ok=%v, want job2/true", id2, ok)
-	}
-}
-
-func TestComplete_AlsoReleasesDownloadSlot(t *testing.T) {
-	q := NewJobQueue(10)
-	q.Enqueue("job1", database.StatusUpcoming)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	q.Dequeue(ctx)
-	q.AcquireDownloadSlot(ctx, "job1")
-
-	if q.ActiveCount() != 1 {
-		t.Errorf("ActiveCount() = %d, want 1", q.ActiveCount())
-	}
-
-	// Complete without prior ReleaseDownloadSlot — should release both
-	q.Complete("job1")
-
-	if q.ActiveCount() != 0 {
-		t.Errorf("ActiveCount() after Complete = %d, want 0", q.ActiveCount())
-	}
-	if q.LifecycleCount() != 0 {
-		t.Errorf("LifecycleCount() after Complete = %d, want 0", q.LifecycleCount())
-	}
-}
-
-func TestComplete_AfterReleaseDownloadSlot(t *testing.T) {
-	q := NewJobQueue(10)
-	q.Enqueue("job1", database.StatusUpcoming)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	q.Dequeue(ctx)
-	q.AcquireDownloadSlot(ctx, "job1")
-	q.ReleaseDownloadSlot("job1")
-	q.Complete("job1")
-
-	// Should not double-decrement
-	if q.ActiveCount() != 0 {
-		t.Errorf("ActiveCount() = %d, want 0", q.ActiveCount())
-	}
-	if q.LifecycleCount() != 0 {
-		t.Errorf("LifecycleCount() = %d, want 0", q.LifecycleCount())
-	}
-	if q.IsProcessing("job1") {
-		t.Error("job1 should not be processing after Complete")
-	}
 }
 
 func TestCancel_RemovesFromPending(t *testing.T) {
@@ -415,53 +354,6 @@ func TestCancel_NonexistentJob(t *testing.T) {
 	q.Cancel("nonexistent")
 }
 
-func TestIsProcessing(t *testing.T) {
-	q := NewJobQueue(10)
-	q.Enqueue("job1", database.StatusUpcoming)
-
-	if q.IsProcessing("job1") {
-		t.Error("job1 should not be processing before dequeue")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	q.Dequeue(ctx)
-
-	if !q.IsProcessing("job1") {
-		t.Error("job1 should be processing after dequeue")
-	}
-
-	q.Complete("job1")
-
-	if q.IsProcessing("job1") {
-		t.Error("job1 should not be processing after Complete")
-	}
-}
-
-func TestSetMaxDownloads(t *testing.T) {
-	q := NewJobQueue(1)
-	q.Enqueue("job1", database.StatusUpcoming)
-	q.Enqueue("job2", database.StatusUpcoming)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	q.Dequeue(ctx)
-	q.Dequeue(ctx)
-
-	// Acquire slot for job1
-	q.AcquireDownloadSlot(ctx, "job1")
-
-	// Increase max downloads
-	q.SetMaxDownloads(2)
-
-	// Now job2 should be able to acquire a download slot
-	if !q.AcquireDownloadSlot(ctx, "job2") {
-		t.Error("AcquireDownloadSlot should succeed after SetMaxDownloads(2)")
-	}
-}
-
 func TestSetMaxParallel_Alias(t *testing.T) {
 	q := NewJobQueue(1)
 	q.SetMaxParallel(5)
@@ -487,6 +379,12 @@ func TestShouldProcess(t *testing.T) {
 		{"error", database.StatusError, false},
 		{"cancelled", database.StatusCancelled, false},
 		{"cookies", database.StatusCookies, false},
+		// The Queued resting-state guarantee: ShouldProcess is an enqueuer
+		// predicate — both callers (worker.go enqueueExistingJobs and the
+		// pollForJobs heartbeat) feed its true straight into queue.Enqueue,
+		// which silently drops beyond 100 pending items — so Queued must stay
+		// false here. (That it is not a terminal state either is pinned by
+		// internal/database's TestUpdateJobFieldsUnlessTerminalSparesEveryOutcome.)
 		{"queued", database.StatusQueued, false},
 	}
 
@@ -675,21 +573,6 @@ func TestAcquireDownloadSlot_GatesVodsOnly(t *testing.T) {
 	q.mu.Unlock()
 	if !vodHolds {
 		t.Error("vod1 no longer holds its slot — completing the broadcast corrupted holdingDlSlot")
-	}
-}
-
-// TestQueuedIsRestingState pins the Queued resting-state guarantees:
-// ShouldProcess is an enqueuer predicate — both callers (worker.go
-// enqueueExistingJobs and the pollForJobs heartbeat) feed its true straight
-// into queue.Enqueue, which silently drops beyond 100 pending items — so
-// Queued must stay false there. It is also not a terminal state.
-func TestQueuedIsRestingState(t *testing.T) {
-	j := &database.Job{ID: "q1", Status: database.StatusQueued}
-	if ShouldProcess(j) {
-		t.Fatal("ShouldProcess(Queued) must be false — both callers Enqueue on true (worker.go startup + heartbeat)")
-	}
-	if j.IsTerminal() {
-		t.Fatal("Queued is waiting, not finished")
 	}
 }
 

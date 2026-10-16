@@ -69,7 +69,7 @@ func TestRefreshWhileLive(t *testing.T) {
 						return nil, errManifest
 					}
 					return &DownloadResult{}, nil
-				}, nopWorkerLogger{}, "j")
+				}, discardLogger{}, "j")
 			if ok := err == nil && r != nil; ok != tc.wantOK {
 				t.Errorf("result %v, err %v — want success %v", r, err, tc.wantOK)
 			}

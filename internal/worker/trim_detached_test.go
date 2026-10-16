@@ -157,18 +157,6 @@ func (r *trimRig) files(t *testing.T) []string {
 	return names
 }
 
-// waitFor polls cond for up to 10 s.
-func waitFor(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 // TestStartTrimRunsDetached: the dashboard's trim route answers at once and
 // the encode runs as the service's own task. It used to run the whole encode
 // under the request, so a page closed or reloaded mid-trim killed FFmpeg —
@@ -210,7 +198,7 @@ func TestStartTrimRunsDetached(t *testing.T) {
 	}
 
 	finished := filepath.Join(r.trims, "detached [60s-300s].mp4")
-	waitFor(t, "the encode to open its output", func() bool { return len(r.files(t)) > 0 })
+	waitForCond(t, 10*time.Second, "the encode to open its output", func() bool { return len(r.files(t)) > 0 })
 	if _, err := os.Stat(finished); err == nil {
 		t.Errorf("the finished trim's name exists while the encode runs: %v", r.files(t))
 	}
@@ -268,7 +256,7 @@ func TestStoppedTrimLeavesNothing(t *testing.T) {
 		t.Fatalf("StartTrim: %v", err)
 	}
 	r.events.wait(t, TrimStateRunning)
-	waitFor(t, "the encode to open its output", func() bool { return len(r.files(t)) > 0 })
+	waitForCond(t, 10*time.Second, "the encode to open its output", func() bool { return len(r.files(t)) > 0 })
 
 	r.ts.Stop()
 	ev := r.events.wait(t, TrimStateFailed)
@@ -325,7 +313,7 @@ func TestBrokenTrimSendsTrimError(t *testing.T) {
 	if _, err := r.ts.StartTrim(r.job, 60, 300); err != nil {
 		t.Fatalf("StartTrim: %v", err)
 	}
-	waitFor(t, "the detached trim to fail", func() bool { return r.events.count(TrimStateFailed) == 2 })
+	waitForCond(t, 10*time.Second, "the detached trim to fail", func() bool { return r.events.count(TrimStateFailed) == 2 })
 	if n := len(r.rec.ByEvent("trim_error")); n != 2 {
 		t.Errorf("a failed detached trim: trim_error sent %d times in all, want 2", n)
 	}
@@ -438,11 +426,11 @@ func TestRunningTrimsReportProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartTrim: %v", err)
 	}
-	waitFor(t, "the running trim's progress", func() bool {
+	waitForCond(t, 10*time.Second, "the running trim's progress", func() bool {
 		rs := r.ts.RunningTrims()
 		return len(rs) == 1 && rs[0].ID == task.ID && rs[0].Progress == 10
 	})
-	waitFor(t, "a running event carrying the progress", func() bool {
+	waitForCond(t, 10*time.Second, "a running event carrying the progress", func() bool {
 		r.events.mu.Lock()
 		defer r.events.mu.Unlock()
 		for _, ev := range r.events.evs {
@@ -465,7 +453,7 @@ func TestRunningTrimsReportProgress(t *testing.T) {
 	if _, err := r2.ts.StartTrim(r2.job, 60, 300); err != nil {
 		t.Fatalf("StartTrim: %v", err)
 	}
-	waitFor(t, "the second trim's progress", func() bool {
+	waitForCond(t, 10*time.Second, "the second trim's progress", func() bool {
 		rs := r2.ts.RunningTrims()
 		return len(rs) == 1 && rs[0].Progress == 10
 	})
@@ -509,7 +497,7 @@ func TestPostDownloadTrimHoldsTheJobsTrimSlot(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(gate, "gate"), nil, 0o644)
 		<-done
 	})
-	waitFor(t, "the post-download encode to open its output", func() bool { return len(r.files(t)) > 0 })
+	waitForCond(t, 10*time.Second, "the post-download encode to open its output", func() bool { return len(r.files(t)) > 0 })
 
 	if rs := r.ts.RunningTrims(); len(rs) != 1 || rs[0].JobID != r.job.ID || rs[0].StartTime != start || rs[0].EndTime != end {
 		t.Errorf("RunningTrims = %+v while the post-download trim encodes, want it listed", rs)
@@ -524,7 +512,7 @@ func TestPostDownloadTrimHoldsTheJobsTrimSlot(t *testing.T) {
 
 	touch(t, gate, "gate")
 	<-done
-	waitFor(t, "every trim to end", func() bool { return len(r.ts.RunningTrims()) == 0 })
+	waitForCond(t, 10*time.Second, "every trim to end", func() bool { return len(r.ts.RunningTrims()) == 0 })
 	if n := r.events.count(TrimStateRunning); n == 0 {
 		t.Error("no running event for the post-download trim: the dashboard never sees it")
 	}
@@ -568,7 +556,7 @@ func TestStoppedPostDownloadTrimSendsTrimFailed(t *testing.T) {
 		defer close(done)
 		o.postDownloadTrim(t.Context(), &job)
 	}()
-	waitFor(t, "the post-download encode to open its output", func() bool { return len(r.files(t)) > 0 })
+	waitForCond(t, 10*time.Second, "the post-download encode to open its output", func() bool { return len(r.files(t)) > 0 })
 
 	r.ts.Stop()
 	select {
@@ -716,7 +704,7 @@ func TestPostDownloadTrimThatCannotRunSaysSo(t *testing.T) {
 			defer close(done)
 			o.postDownloadTrim(ctx, &job)
 		}()
-		waitFor(t, "the post-download encode to open its output", func() bool { return len(r.files(t)) > 0 })
+		waitForCond(t, 10*time.Second, "the post-download encode to open its output", func() bool { return len(r.files(t)) > 0 })
 		if err := r.db.DeleteJob(r.job.ID); err != nil {
 			t.Fatal(err)
 		}

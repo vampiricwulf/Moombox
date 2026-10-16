@@ -11,15 +11,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
-func hasLogPrefix(logs *captureLogger, prefix string) bool {
-	for _, m := range logs.lines() {
-		if msg, _ := m[0].(string); strings.HasPrefix(msg, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 // A probe and a download that disagree for good — an HLS download beside the
 // probe's DASH ladder, a top rung only the probe's client sees — made every
 // 30 s tick signal a change, cancel the downloaders and rebuild them at the
@@ -123,7 +114,7 @@ func TestUnhonouredPinsAreWarned(t *testing.T) {
 	if _, err := DownloadManifestlessDash(context.Background(), job, manifestlessPotInfo("visionos", "visionos"), stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil); err != nil {
 		t.Fatalf("DownloadManifestlessDash: %v", err)
 	}
-	if !hasLogPrefix(logs, "[FormatSelector] Manual video itag 303 not offered") {
+	if logLine(logs, "[FormatSelector] Manual video itag 303 not offered") == nil {
 		t.Error("an unhonoured video pin was not warned")
 	}
 
@@ -133,7 +124,7 @@ func TestUnhonouredPinsAreWarned(t *testing.T) {
 	if _, err := DownloadManifestlessDash(context.Background(), job, manifestlessPotInfo("visionos", "visionos"), stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil); err != nil {
 		t.Fatalf("DownloadManifestlessDash: %v", err)
 	}
-	if !hasLogPrefix(logs, "[FormatSelector] Manual audio itag 251 not offered") {
+	if logLine(logs, "[FormatSelector] Manual audio itag 251 not offered") == nil {
 		t.Error("an unhonoured audio pin was not warned")
 	}
 
@@ -143,7 +134,7 @@ func TestUnhonouredPinsAreWarned(t *testing.T) {
 	if _, err := DownloadManifestlessDash(context.Background(), job, manifestlessPotInfo("visionos", "visionos"), stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil); err != nil {
 		t.Fatalf("DownloadManifestlessDash: %v", err)
 	}
-	if hasLogPrefix(logs, "[FormatSelector] Manual") {
+	if logLine(logs, "[FormatSelector] Manual") != nil {
 		t.Error("an honoured pin was warned")
 	}
 
@@ -155,7 +146,7 @@ func TestUnhonouredPinsAreWarned(t *testing.T) {
 	}, nil, nil, &bgutils.PotProvider{}, nil); err != nil {
 		t.Fatalf("DownloadHls: %v", err)
 	}
-	if !hasLogPrefix(logs, "[FormatSelector] Manual video itag 299 cannot be honoured on an HLS stream") {
+	if logLine(logs, "[FormatSelector] Manual video itag 299 cannot be honoured on an HLS stream") == nil {
 		t.Error("a pin on an HLS stream was ignored silently")
 	}
 }

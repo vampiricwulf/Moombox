@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
@@ -170,66 +171,57 @@ func TestRefreshGvsCredentialsBindingStableAcrossRefreshes(t *testing.T) {
 	}
 }
 
-// TestRefreshGvsCredentialsDegradesOnMintFailure pins the "never returns an
-// error" contract: a failing mint must not propagate an error or panic —
-// it degrades to an empty token so the engine keeps its existing
-// credentials and the download fails the same way it would have without
-// this callback.
-func TestRefreshGvsCredentialsDegradesOnMintFailure(t *testing.T) {
-	fake := &fakePotProvider{
-		generate: func(ctx context.Context, binding string, bypassCache bool) (string, error) {
-			return "", errors.New("mint failed")
-		},
-	}
+// TestRefreshGvsCredentialsDegradesWithoutAToken pins the "never returns an
+// error" contract for every provider that yields no token: nothing may
+// propagate an error or panic — the refresh degrades to an empty token so the
+// engine keeps its existing credentials and the download fails the same way
+// it would have without this callback.
+func TestRefreshGvsCredentialsDegradesWithoutAToken(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider gvsTokenMinter
+	}{
+		// A failing mint degrades rather than propagating.
+		{"mint failure", &fakePotProvider{
+			generate: func(ctx context.Context, binding string, bypassCache bool) (string, error) {
+				return "", errors.New("mint failed")
+			},
+		}},
+		// A nil interface value: minterUsable's `m == nil` arm.
+		{"untyped nil provider skips the mint", nil},
+		// The typed-nil interface case: a genuinely nil *bgutils.PotProvider
+		// passed as the gvsTokenMinter parameter must not panic when
+		// refreshGvsCredentials calls minterUsable/asPotProvider on it —
+		// boxing a nil concrete pointer into an interface produces a non-nil
+		// interface value, which is exactly the footgun
+		// asPotProvider/minterUsable exist to guard against.
+		{"typed-nil *bgutils.PotProvider skips the mint", (*bgutils.PotProvider)(nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ytSvc := youtube.NewService(nil, &discardLogger{})
+			ytSvc.SetVisitorData("vd-123")
+			job := &JobContext{
+				Job:    &database.Job{ID: "test-job"},
+				YT:     ytSvc,
+				Logger: &discardLogger{},
+			}
+			videoInfo := &youtube.VideoInfo{
+				Formats: []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "web_creator"}},
+			}
 
-	ytSvc := youtube.NewService(nil, &discardLogger{})
-	ytSvc.SetVisitorData("vd-123")
-	job := &JobContext{
-		Job:    &database.Job{ID: "test-job"},
-		YT:     ytSvc,
-		Logger: &discardLogger{},
-	}
-	videoInfo := &youtube.VideoInfo{
-		Formats: []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "web_creator"}},
-	}
-
-	baseURL, token := refreshGvsCredentials(context.Background(), job, videoInfo, 140, nil, nil, fake, "vd-123", "test")
-	if token != "" {
-		t.Errorf("token = %q, want empty on mint failure", token)
-	}
-	// No cipher solver is wired (routedSolver and cipherSolver both nil), so
-	// the URL half is also expected to come back empty here — this asserts
-	// the degrade path never panics and never fabricates a value, not that
-	// URL resolution specifically failed for this reason.
-	if baseURL != "" {
-		t.Errorf("baseURL = %q, want empty (no cipher solver wired)", baseURL)
-	}
-}
-
-// TestRefreshGvsCredentialsNilProviderSkipsMint exercises the typed-nil
-// interface case directly: a genuinely nil *bgutils.PotProvider passed as
-// the gvsTokenMinter parameter must not panic when refreshGvsCredentials
-// calls minterUsable/asPotProvider on it — boxing a nil concrete pointer
-// into an interface produces a non-nil interface value, which is exactly
-// the footgun asPotProvider/minterUsable exist to guard against.
-func TestRefreshGvsCredentialsNilProviderSkipsMint(t *testing.T) {
-	ytSvc := youtube.NewService(nil, &discardLogger{})
-	ytSvc.SetVisitorData("vd-123")
-	job := &JobContext{
-		Job:    &database.Job{ID: "test-job"},
-		YT:     ytSvc,
-		Logger: &discardLogger{},
-	}
-	videoInfo := &youtube.VideoInfo{
-		Formats: []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "web_creator"}},
-	}
-
-	baseURL, token := refreshGvsCredentials(context.Background(), job, videoInfo, 140, nil, nil, nil, "vd-123", "test")
-	if token != "" {
-		t.Errorf("token = %q, want empty with a nil provider", token)
-	}
-	if baseURL != "" {
-		t.Errorf("baseURL = %q, want empty (no cipher solver wired)", baseURL)
+			baseURL, token := refreshGvsCredentials(context.Background(), job, videoInfo, 140, nil, nil, tc.provider, "vd-123", "test")
+			if token != "" {
+				t.Errorf("token = %q, want empty", token)
+			}
+			// No cipher solver is wired (routedSolver and cipherSolver both
+			// nil), so the URL half is also expected to come back empty here —
+			// this asserts the degrade path never panics and never fabricates
+			// a value, not that URL resolution specifically failed for this
+			// reason.
+			if baseURL != "" {
+				t.Errorf("baseURL = %q, want empty (no cipher solver wired)", baseURL)
+			}
+		})
 	}
 }
 

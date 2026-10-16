@@ -32,7 +32,7 @@ func TestTwitchGuardRefusesANewBroadcastForAnUpcomingJobWithACapture(t *testing.
 		t.Fatalf("database.Open: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	sp := &StreamProcessor{db: db, cfg: cfg, twitchHints: newTwitchHintCache(), logger: nopWorkerLogger{}}
+	sp := &StreamProcessor{db: db, cfg: cfg, twitchHints: newTwitchHintCache(), logger: discardLogger{}}
 
 	job := &database.Job{ID: "tw_guard", VideoID: "tw_guard", URL: "https://twitch.tv/streamer",
 		Platform: "twitch", Status: database.StatusUpcoming, ManuallyAdded: true,

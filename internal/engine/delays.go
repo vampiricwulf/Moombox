@@ -36,7 +36,7 @@ type delays struct {
 
 // SetFastDelaysForTests divides every retry and backoff wait by scale. It
 // exists for tests in OTHER packages: internal/worker's
-// TestFinalizeIncompleteTailInterruption drives a real SegmentDownloader
+// TestFinalizeIncompleteTail/Interruption drives a real SegmentDownloader
 // through a Tier-2 finalize and paid the production retry ladder — 10.1 s,
 // a quarter of the whole suite's wall time — because this struct is
 // unexported and its in-package fastDelays() helper unreachable from there

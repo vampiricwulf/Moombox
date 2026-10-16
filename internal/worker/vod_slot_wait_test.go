@@ -5,8 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -29,100 +27,86 @@ func vodInfoAt(base string, expire int64, size int) *youtube.VideoInfo {
 	}
 }
 
-// TestStaleVodExtractionIsRefreshedAfterSlotWait is V3 through processJob: a
-// VOD's format URLs were extracted before the slot waits and had expired by
-// the time the download started (googlevideo answers 403). The download must
-// re-extract and use the fresh URLs, and the job must finish.
-//
-// Mutant: drop the refreshStaleVodInfo call from processJob — the download
-// runs on the expired URL, gets 403, and the job ends in Error.
-func TestStaleVodExtractionIsRefreshedAfterSlotWait(t *testing.T) {
+// TestStaleVodExtractionAfterSlotWait drives a VOD whose extraction went
+// stale while its slots were awaited through processJob: each row is re-
+// extracted exactly once and must finish with one output.
+func TestStaleVodExtractionAfterSlotWait(t *testing.T) {
 	ffmpegPath, _ := requireFFmpegTools(t)
-	w, db := testWorkerSetup(t)
-	w.orchestrator.SetFfmpegPath(ffmpegPath)
-	w.orchestrator.routedCipher = stubCipherSolver{}
-	_, outputDir := muxFixtureJob(t, w, db, "j-stale")
-	db.UpdateJobFields("j-stale", map[string]any{"status": database.StatusUpcoming})
+	srv, size := serveMuxFixture(t, ffmpegPath, 3)
 
-	full := filepath.Join(t.TempDir(), "full.mp4")
-	writeMuxFixture(t, ffmpegPath, full, 3)
-	body, err := os.ReadFile(full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fresh := serveWholeFile(t, body)
-	expired := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		rw.WriteHeader(http.StatusForbidden) // expire= has passed
-	}))
-	t.Cleanup(expired.Close)
-
-	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
-		return &StreamProcessResult{ShouldDownload: true, IsVod: true, VideoInfo: vodInfoAt(expired.URL, 1, len(body))}, nil
-	}
-	var refreshed atomic.Int32
-	w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
-		refreshed.Add(1)
-		return vodInfoAt(fresh.URL, time.Now().Add(6*time.Hour).Unix(), len(body)), nil
-	}
-
-	w.processJob(context.Background(), "j-stale")
-
-	row, _ := db.GetJob("j-stale")
-	if row.Status != database.StatusFinished {
-		t.Fatalf("status = %s (%q), want Finished on the re-extracted URLs", row.Status, row.Error)
-	}
-	if refreshed.Load() != 1 {
-		t.Errorf("re-extractions = %d, want 1", refreshed.Load())
-	}
-	if len(mp4sIn(t, outputDir)) != 1 {
-		t.Errorf("outputs = %v", mp4sIn(t, outputDir))
-	}
-}
-
-// TestStaleVodRefreshFailureKeepsUnexpiredURLs is W20-23 through processJob: a
-// VOD whose URLs lapse within the hour is re-extracted once its slots are
-// held, and that re-extraction fails on a blip. The URLs it already holds
-// still serve the file, so the download goes ahead on them and the job
-// finishes — it used to end in Error over a fetch it did not need.
-//
-// Mutant: return the re-extraction's error unconditionally from
-// refreshStaleVodInfo — the job ends in Error.
-func TestStaleVodRefreshFailureKeepsUnexpiredURLs(t *testing.T) {
-	ffmpegPath, _ := requireFFmpegTools(t)
-	w, db := testWorkerSetup(t)
-	w.orchestrator.SetFfmpegPath(ffmpegPath)
-	w.orchestrator.routedCipher = stubCipherSolver{}
-	_, outputDir := muxFixtureJob(t, w, db, "j-valid")
-	db.UpdateJobFields("j-valid", map[string]any{"status": database.StatusUpcoming})
-
-	full := filepath.Join(t.TempDir(), "full.mp4")
-	writeMuxFixture(t, ffmpegPath, full, 3)
-	body, err := os.ReadFile(full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := serveWholeFile(t, body)
-	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+	for _, tc := range []struct {
+		name string
+		// staleOnExpired serves the stale extraction from a server that 403s
+		// every request instead of from the file's own server.
+		staleOnExpired bool
+		staleExpire    int64
+		// refreshErr fails the re-extraction; nil answers with the file's
+		// server under URLs good for six hours.
+		refreshErr error
+		wantOn     string
+	}{
+		// V3: a VOD's format URLs were extracted before the slot waits and had
+		// expired by the time the download started (googlevideo answers 403).
+		// The download must re-extract and use the fresh URLs, and the job
+		// must finish.
+		//
+		// Mutant: drop the refreshStaleVodInfo call from processJob — the
+		// download runs on the expired URL, gets 403, and the job ends in
+		// Error.
+		{"refreshed after the slot wait", true, 1, nil, "the re-extracted URLs"},
+		// W20-23: a VOD whose URLs lapse within the hour is re-extracted once
+		// its slots are held, and that re-extraction fails on a blip. The URLs
+		// it already holds still serve the file, so the download goes ahead on
+		// them and the job finishes — it used to end in Error over a fetch it
+		// did not need.
+		//
+		// Mutant: return the re-extraction's error unconditionally from
+		// refreshStaleVodInfo — the job ends in Error.
+		//
 		// Good for 55 more minutes: inside vodInfoMaxAge, so stale.
-		return &StreamProcessResult{ShouldDownload: true, IsVod: true, VideoInfo: vodInfoAt(srv.URL, time.Now().Add(55*time.Minute).Unix(), len(body))}, nil
-	}
-	var refreshed atomic.Int32
-	w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
-		refreshed.Add(1)
-		return nil, dialRefused
-	}
+		{"refresh failure keeps unexpired URLs", false, time.Now().Add(55 * time.Minute).Unix(), dialRefused, "the extraction's own URLs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			w.orchestrator.SetFfmpegPath(ffmpegPath)
+			w.orchestrator.routedCipher = stubCipherSolver{}
+			_, outputDir := muxFixtureJob(t, w, db, "j-stale")
+			db.UpdateJobFields("j-stale", map[string]any{"status": database.StatusUpcoming})
 
-	w.processJob(context.Background(), "j-valid")
+			staleBase := srv.URL
+			if tc.staleOnExpired {
+				expired := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+					rw.WriteHeader(http.StatusForbidden) // expire= has passed
+				}))
+				t.Cleanup(expired.Close)
+				staleBase = expired.URL
+			}
 
-	row, _ := db.GetJob("j-valid")
-	if row.Status != database.StatusFinished {
-		t.Fatalf("status = %s (%q), want Finished on the extraction's own URLs", row.Status, row.Error)
-	}
-	if refreshed.Load() != 1 {
-		t.Errorf("re-extractions = %d, want 1", refreshed.Load())
-	}
-	if len(mp4sIn(t, outputDir)) != 1 {
-		t.Errorf("outputs = %v", mp4sIn(t, outputDir))
+			w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+				return &StreamProcessResult{ShouldDownload: true, IsVod: true, VideoInfo: vodInfoAt(staleBase, tc.staleExpire, size)}, nil
+			}
+			var refreshed atomic.Int32
+			w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
+				refreshed.Add(1)
+				if tc.refreshErr != nil {
+					return nil, tc.refreshErr
+				}
+				return vodInfoAt(srv.URL, time.Now().Add(6*time.Hour).Unix(), size), nil
+			}
+
+			w.processJob(context.Background(), "j-stale")
+
+			row, _ := db.GetJob("j-stale")
+			if row.Status != database.StatusFinished {
+				t.Fatalf("status = %s (%q), want Finished on %s", row.Status, row.Error, tc.wantOn)
+			}
+			if refreshed.Load() != 1 {
+				t.Errorf("re-extractions = %d, want 1", refreshed.Load())
+			}
+			if len(mp4sIn(t, outputDir)) != 1 {
+				t.Errorf("outputs = %v", mp4sIn(t, outputDir))
+			}
+		})
 	}
 }
 

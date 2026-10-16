@@ -61,23 +61,6 @@ func vodPotInfo(videoSource, audioSource string) *youtube.VideoInfo {
 	}
 }
 
-// potMintLine returns the args of the "[POT] GVS mint" Info line, or nil.
-func potMintLine(logs *captureLogger) map[string]any {
-	for _, m := range logs.lines() {
-		if m[0] != "[POT] GVS mint" {
-			continue
-		}
-		kv := map[string]any{}
-		for i := 1; i+1 < len(m); i += 2 {
-			if k, ok := m[i].(string); ok {
-				kv[k] = m[i+1]
-			}
-		}
-		return kv
-	}
-	return nil
-}
-
 func runVodPot(t *testing.T, job *JobContext, info *youtube.VideoInfo, pot *bgutils.PotProvider) *DownloadResult {
 	t.Helper()
 	res, err := DownloadVod(context.Background(), job, info, stubCipherSolver{}, nil, pot, nil)
@@ -115,7 +98,7 @@ func TestDownloadVodAttachesGvsTokenToWebFamily(t *testing.T) {
 		if n := calls.Load(); n != 1 {
 			t.Errorf("mint ran %d times, want exactly 1", n)
 		}
-		line := potMintLine(logs)
+		line := logLine(logs, "[POT] GVS mint")
 		if line == nil {
 			t.Fatalf("no [POT] GVS mint line logged: %v", logs.lines())
 		}
@@ -140,7 +123,7 @@ func TestDownloadVodAttachesGvsTokenToWebFamily(t *testing.T) {
 		if n := calls.Load(); n != 0 {
 			t.Errorf("mint ran %d times, want 0 — no chosen format requires a token", n)
 		}
-		if line := potMintLine(logs); line != nil {
+		if line := logLine(logs, "[POT] GVS mint"); line != nil {
 			t.Errorf("unexpected [POT] GVS mint line: %v", line)
 		}
 	})
@@ -158,7 +141,7 @@ func TestDownloadVodAttachesGvsTokenToWebFamily(t *testing.T) {
 		if n := calls.Load(); n != 1 {
 			t.Errorf("mint ran %d times, want exactly 1", n)
 		}
-		line := potMintLine(logs)
+		line := logLine(logs, "[POT] GVS mint")
 		if line == nil || line["videoSource"] != "web_creator" || line["audioSource"] != "tv_auth" {
 			t.Errorf("[POT] GVS mint line = %v, want videoSource=web_creator audioSource=tv_auth", line)
 		}
@@ -214,18 +197,8 @@ func (failingSigSolver) Batch(_ context.Context, _ string, _, _ []string) (map[s
 // logLine returns the args of the first log line whose message starts with
 // prefix, as a key/value map (with the message under ""), or nil.
 func logLine(logs *captureLogger, prefix string) map[string]any {
-	for _, m := range logs.lines() {
-		msg, _ := m[0].(string)
-		if !strings.HasPrefix(msg, prefix) {
-			continue
-		}
-		kv := map[string]any{"": msg}
-		for i := 1; i+1 < len(m); i += 2 {
-			if k, ok := m[i].(string); ok {
-				kv[k] = m[i+1]
-			}
-		}
-		return kv
+	if lines := logLines(logs, func(m string) bool { return strings.HasPrefix(m, prefix) }); len(lines) > 0 {
+		return lines[0]
 	}
 	return nil
 }
@@ -293,7 +266,7 @@ func TestDownloadVodMissingPotDegrades(t *testing.T) {
 			if _, ok := line["err"]; !ok {
 				t.Errorf("[POT] missing_pot line carries no err: %v", line)
 			}
-			if l := potMintLine(logs); l != nil {
+			if l := logLine(logs, "[POT] GVS mint"); l != nil {
 				t.Errorf("unexpected [POT] GVS mint line: %v", l)
 			}
 		})

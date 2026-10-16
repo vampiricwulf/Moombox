@@ -1,11 +1,16 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -257,49 +262,23 @@ func muxTestOrchestrator(t *testing.T, rec *notificationtest.Recorder, segments 
 	return o, &JobContext{Job: stored}
 }
 
-// TestMuxingStartingFiresForAMultiPartJob is A7. muxAndFinalize returns into
-// finalizeMultiSegmentJob 28 lines before the "Muxing Starting" send, so every
-// quality-split and gap-split job skipped the event operations.md documents as
-// "FFmpeg mux step begins". A subscriber received it for single-file jobs and
-// not for split ones, with no pattern visible from the outside.
-//
-// THE MUTANT: moving the send back below the `len(segments) > 0` branch. The
-// multi-part subtest then records zero muxing notifications.
-func TestMuxingStartingFiresForAMultiPartJob(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		segments int
-	}{
-		{"single-file finalize", 0},
-		{"multi-part finalize", 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := notificationtest.New()
-			o, jobCtx := muxTestOrchestrator(t, rec, tc.segments)
-
-			o.sendMuxingStarting(jobCtx)
-
-			got := rec.ByEvent("muxing")
-			if len(got) != 1 {
-				t.Fatalf("recorded %d muxing notifications, want 1: %+v", len(got), rec.Calls())
-			}
-			if got[0].Title != "Muxing Starting" {
-				t.Errorf("title = %q, want %q", got[0].Title, "Muxing Starting")
-			}
-		})
-	}
-}
-
-// TestMuxAndFinalizeAnnouncesTheMuxBeforeChoosingAShape is the placement
-// assertion the helper test above cannot make: sendMuxingStarting must be
-// reached on the path that RETURNS into finalizeMultiSegmentJob, not only on
-// the one that falls through to the single-file mux.
+// TestMuxAndFinalizeAnnouncesTheMuxBeforeChoosingAShape is A7. muxAndFinalize
+// returned into finalizeMultiSegmentJob 28 lines before the "Muxing Starting"
+// send, so every quality-split and gap-split job skipped the event
+// operations.md documents as "FFmpeg mux step begins". A subscriber received
+// it for single-file jobs and not for split ones, with no pattern visible from
+// the outside. sendMuxingStarting must be reached on the path that RETURNS
+// into finalizeMultiSegmentJob, not only on the one that falls through to the
+// single-file mux.
 //
 // Driving the whole of muxAndFinalize needs FFmpeg and staged media, so this
 // asserts on the source instead: the send call must appear BEFORE the
 // `finalizeMultiSegmentJob` return in the file. A source assertion is weak on
-// its own — paired with the behavioural test above, it is what pins the one
-// thing that broke.
+// its own — paired with the behavioural tests of the send itself
+// (TestMuxFromStagingAnnouncesTheMux below, TestMuxingStartingSaysWhatTheMuxHas
+// in mux_wording_test.go), it is what pins the one thing that broke.
+//
+// THE MUTANT: moving the send back below the `len(segments) > 0` branch.
 func TestMuxAndFinalizeAnnouncesTheMuxBeforeChoosingAShape(t *testing.T) {
 	src, err := os.ReadFile("orchestrator_mux.go")
 	if err != nil {
@@ -355,5 +334,63 @@ func TestMuxFromStagingAnnouncesTheMux(t *testing.T) {
 	}
 	if got[0].Title != "Muxing Starting" {
 		t.Errorf("title = %q, want \"Muxing Starting\" — the event key alone does not prove which embed went out", got[0].Title)
+	}
+}
+
+// TestCopyAssetsTakesTheFirstUsableThumbnailSize pins copyAssets' YouTube
+// thumbnail order, read through ytThumbnailBase. maxresdefault is missing (a
+// video with no HD thumbnail), so the 16:9 mqdefault must be the one saved —
+// not one of the letterboxed 4:3 sizes after it — and nothing past it is
+// asked for.
+//
+// Mutants this kills: the URL hard-coded to i.ytimg.com again (the stub sees
+// no request, and the network guard trips), a 4:3 size moved ahead of
+// mqdefault, and a loop that keeps going after a size was saved.
+func TestCopyAssetsTakesTheFirstUsableThumbnailSize(t *testing.T) {
+	mq := bytes.Repeat([]byte("m"), 2000)
+	var mu sync.Mutex
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.URL.Path)
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/vid/maxresdefault.jpg":
+			http.NotFound(w, r)
+		case "/vid/mqdefault.jpg":
+			w.Write(mq)
+		default:
+			// Every later size would be accepted too, so taking one of them
+			// instead of mqdefault shows up as the wrong bytes.
+			w.Write(bytes.Repeat([]byte("x"), 2000))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	orig := ytThumbnailBase
+	ytThumbnailBase = srv.URL
+	t.Cleanup(func() { ytThumbnailBase = orig })
+
+	o := &DownloadOrchestrator{logger: discardLogger{}}
+	jobCtx := &JobContext{Job: &database.Job{ID: "yt_thumb", VideoID: "vid"}, StagingDir: t.TempDir()}
+	outDir := t.TempDir()
+	updates := map[string]any{}
+	o.copyAssets(context.Background(), jobCtx, outDir, "A Job", "A Job", updates, false)
+
+	mu.Lock()
+	got := slices.Clone(asked)
+	mu.Unlock()
+	if want := []string{"/vid/maxresdefault.jpg", "/vid/mqdefault.jpg"}; !slices.Equal(got, want) {
+		t.Errorf("sizes asked = %v, want %v", got, want)
+	}
+	wantPath := filepath.Join(outDir, "A Job.jpg")
+	if updates["thumbnail_file"] != wantPath {
+		t.Errorf("thumbnail_file = %v, want %s", updates["thumbnail_file"], wantPath)
+	}
+	body, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("read the saved thumbnail: %v", err)
+	}
+	if !bytes.Equal(body, mq) {
+		t.Error("the saved thumbnail is not mqdefault's bytes")
 	}
 }

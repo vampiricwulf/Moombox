@@ -55,7 +55,7 @@ func reportsInOneBurst(t *testing.T, interval time.Duration) int {
 	reports := 0
 	t.Cleanup(db.OnJobUpdate(func(*database.Job) { reports++ }))
 
-	pt := NewProgressTracker(db, "burst", nopProgressLogger{}, interval)
+	pt := NewProgressTracker(db, "burst", discardLogger{}, interval)
 	t.Cleanup(pt.Close)
 
 	clk := &fakeClock{t: time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)}
@@ -120,7 +120,7 @@ func TestTrackerDefaultMatchesTheConfigDefault(t *testing.T) {
 			progressUpdateInterval, want)
 	}
 	for _, in := range []time.Duration{0, -5 * time.Millisecond} {
-		pt := NewProgressTracker(nil, "fallback", nopProgressLogger{}, in)
+		pt := NewProgressTracker(nil, "fallback", discardLogger{}, in)
 		if pt.updateInterval != progressUpdateInterval {
 			t.Errorf("NewProgressTracker(..., %v).updateInterval = %v, want the %v fallback",
 				in, pt.updateInterval, progressUpdateInterval)
@@ -173,7 +173,7 @@ func TestTheNextJobsTrackerTakesANewProgressInterval(t *testing.T) {
 		t.Fatalf("ProgressInterval after the save = %v, want 8ms", jobCtx.Config.ProgressInterval)
 	}
 
-	pt := NewProgressTracker(db, job.ID, nopProgressLogger{}, jobCtx.Config.ProgressInterval)
+	pt := NewProgressTracker(db, job.ID, discardLogger{}, jobCtx.Config.ProgressInterval)
 	t.Cleanup(pt.Close)
 	if pt.updateInterval != 8*time.Millisecond {
 		t.Errorf("the tracker built after the save gates at %v, want 8ms", pt.updateInterval)
@@ -191,7 +191,7 @@ func TestTheNextJobsTrackerTakesANewProgressInterval(t *testing.T) {
 // "too early for meaningful estimate" guard fires and the result is "" where
 // this test wants "15m 0s".
 func TestCalculateETAReadsTheTrackerClock(t *testing.T) {
-	pt := NewProgressTracker(nil, "eta", nopProgressLogger{}, 0)
+	pt := NewProgressTracker(nil, "eta", discardLogger{}, 0)
 	t.Cleanup(pt.Close)
 
 	clk := &fakeClock{t: pt.startTime.Add(100 * time.Second)}

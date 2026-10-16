@@ -94,7 +94,7 @@ func TestRefreshWhileLiveStopsAtACredentialWall(t *testing.T) {
 				time.Millisecond, func(*youtube.VideoInfo) (*DownloadResult, error) {
 					refreshes++
 					return &DownloadResult{}, nil
-				}, nopWorkerLogger{}, "j")
+				}, discardLogger{}, "j")
 			if parked := errors.Is(err, ErrCookiesRequired); parked != tc.wantPark {
 				t.Errorf("err %v, result %v — want park %v", err, r, tc.wantPark)
 			}

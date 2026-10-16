@@ -32,40 +32,16 @@ func writeTwitchSessionCookies(t *testing.T, path, token, login string) {
 	}
 }
 
-// TestTwitchChatCredentialsReturnsBothHalves is the claim: a configured Auth
-// yields ONE getter that produces BOTH halves, each read from its own cookie.
+// TestTwitchChatCredentialsTrackTheJar: a configured Auth yields ONE getter
+// that produces BOTH halves, each read from its own cookie, and the getter is a
+// METHOD VALUE, so a cookie re-import underneath a running job moves both
+// halves together. A snapshot would leave the next reconnect presenting one
+// session's credential under another session's identity.
 //
 // Asserting only that the getter is non-nil is the failure mode. A wiring that
 // supplied a token and no login produces `PASS oauth:<token>` beside the
 // anonymous `justinfan<random>` nickname, which Twitch refuses or silently
 // downgrades — so both values are pulled and both are checked.
-func TestTwitchChatCredentialsReturnsBothHalves(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cookies.txt")
-	writeTwitchSessionCookies(t, path, "synthetic-token", "syntheticaccount")
-
-	jar := cookies.NewCookieJar()
-	if err := jar.Load(path); err != nil {
-		t.Fatal(err)
-	}
-
-	credentials := twitchChatCredentials(twitch.NewAuth(jar, nopWorkerLogger{}))
-	if credentials == nil {
-		t.Fatal("credential getter is nil for a configured Auth")
-	}
-	token, login := credentials()
-	if token != "synthetic-token" {
-		t.Errorf("token = %q, want %q", token, "synthetic-token")
-	}
-	if login != "syntheticaccount" {
-		t.Errorf("login = %q, want %q — the IRC handshake would send the anonymous justinfan "+
-			"nickname alongside a real OAuth token", login, "syntheticaccount")
-	}
-}
-
-// TestTwitchChatCredentialsTrackTheJar: the getter is a METHOD VALUE, so a
-// cookie re-import underneath a running job moves both halves together. A
-// snapshot would leave the next reconnect presenting one session's credential
-// under another session's identity.
 func TestTwitchChatCredentialsTrackTheJar(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cookies.txt")
 	writeTwitchSessionCookies(t, path, "token-before", "accountbefore")
@@ -75,7 +51,10 @@ func TestTwitchChatCredentialsTrackTheJar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	credentials := twitchChatCredentials(twitch.NewAuth(jar, nopWorkerLogger{}))
+	credentials := twitchChatCredentials(twitch.NewAuth(jar, discardLogger{}))
+	if credentials == nil {
+		t.Fatal("credential getter is nil for a configured Auth")
+	}
 	if token, login := credentials(); token != "token-before" || login != "accountbefore" {
 		t.Fatalf("credentials = (%q, %q), want (%q, %q)",
 			token, login, "token-before", "accountbefore")
@@ -375,6 +354,10 @@ func TestTwitchChatDowngradeWithoutANotifierIsSilent(t *testing.T) {
 // the one place on this path where a reason can be swallowed, rewritten, or
 // replaced by a constant, and a test that called sendTwitchChatDowngrade
 // directly would step over exactly that code and survive all three.
+//
+// No mark is wired here. An install with no refresh service wired is not an
+// error, and the per-job notice is exactly the signal it still needs. The
+// mutation: `if mark == nil { return }` placed before the send.
 func TestTwitchChatDowngradeCallbackDeliversWhatTheDownloaderReports(t *testing.T) {
 	for _, reason := range []string{
 		twitch.AuthDowngradeLoginRefused,
@@ -433,14 +416,6 @@ func TestTwitchChatDowngradeCallbackResolvesTheSenderPerFire(t *testing.T) {
 			"with instead of resolving the current one", len(rec.sent))
 	}
 }
-
-// nopWorkerLogger satisfies twitch.NewAuth's anonymous logger interface.
-type nopWorkerLogger struct{}
-
-func (nopWorkerLogger) Debug(string, ...any) {}
-func (nopWorkerLogger) Info(string, ...any)  {}
-func (nopWorkerLogger) Warn(string, ...any)  {}
-func (nopWorkerLogger) Error(string, ...any) {}
 
 // TestTwitchChatDowngradeCallbackMarksThePlatformAndNotifiesTheJob is Arc 10
 // R1's wiring claim: ONE report, TWO consumers.
@@ -507,25 +482,6 @@ func TestTwitchChatDowngradeCallbackResolvesTheMarkPerFire(t *testing.T) {
 
 	if len(marked) != 1 {
 		t.Errorf("marks = %v, want one after the seam was wired — the resolver was captured, not called per fire", marked)
-	}
-}
-
-// TestTwitchChatDowngradeCallbackWithNoMarkStillNotifies. An install with no
-// refresh service wired is not an error, and the per-job notice is exactly the
-// signal it still needs.
-//
-// The mutation: `if mark == nil { return }` placed before the send.
-func TestTwitchChatDowngradeCallbackWithNoMarkStillNotifies(t *testing.T) {
-	rec := &recordingNotifier{}
-
-	cb := twitchChatDowngradeCallback(
-		func() notifySend { return rec.send },
-		func() func(string) { return nil },
-		downgradeJob(), "TestChan")
-	cb(twitch.AuthDowngradeUnusableLoginCookie)
-
-	if len(rec.sent) != 1 {
-		t.Errorf("the notifier received %d notices with no mark wired, want 1", len(rec.sent))
 	}
 }
 

@@ -93,7 +93,7 @@ func TestPlaybackTokenMarkWithNoSeamWiredIsInert(t *testing.T) {
 // No network: NoteTwitchAuthLoss makes no request, and on an EMPTY jar
 // shouldFireRecovery declines, so no callback fires either.
 func TestPlaybackTokenMarkReachesTheOperatorSentence(t *testing.T) {
-	rs := cookies.NewRefreshService(cookies.NewCookieJar(), 0, nopWorkerLogger{})
+	rs := cookies.NewRefreshService(cookies.NewCookieJar(), 0, discardLogger{})
 	sp := &StreamProcessor{}
 	sp.SetOnTwitchAuthLoss(rs.NoteTwitchAuthLoss)
 

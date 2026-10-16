@@ -36,6 +36,20 @@ func serveWholeFile(t *testing.T, body []byte) *httptest.Server {
 	return srv
 }
 
+// serveMuxFixture renders seconds of video with writeMuxFixture and serves it
+// through serveWholeFile: the whole-file VOD a test downloads. It returns the
+// server and the body's length, which the VideoInfo builders take.
+func serveMuxFixture(t *testing.T, ffmpegPath string, seconds int) (*httptest.Server, int) {
+	t.Helper()
+	full := filepath.Join(t.TempDir(), "full.mp4")
+	writeMuxFixture(t, ffmpegPath, full, seconds)
+	body, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return serveWholeFile(t, body), len(body)
+}
+
 // wholeFileVodInfo is a finished VOD whose one video-only format is served by
 // srv: plain URL, no cipher, a client that needs no GVS token.
 func wholeFileVodInfo(srv *httptest.Server, size int) *youtube.VideoInfo {
@@ -112,74 +126,24 @@ func groups0Video(t *testing.T, asides []string) string {
 	return ""
 }
 
-// TestRestartMuxAfterWholeFileVodArchivesTheVod is V4 end to end: a VOD job
-// whose earlier post-live attempt left a 2 s capture in staging downloads the
-// complete 10 s recording as a whole file, and the process restarts in Muxing
-// (the restart mux, muxOnRestart → muxFromStaging). The archive must be the
-// complete download, and the earlier capture must survive as its own sibling
-// rather than be deleted with staging.
+// TestRestartMuxAfterWholeFileVodKeepsEveryEarlierCapture is V4 and W20-18
+// end to end. V4: a VOD job whose earlier post-live attempt left a 2 s
+// capture in staging downloads the complete 10 s recording as a whole file,
+// and the process restarts in Muxing (the restart mux, muxOnRestart →
+// muxFromStaging). The archive must be the complete download, and the
+// earlier capture must survive as its own sibling rather than be deleted
+// with staging. W20-18: the staging root holds TWO earlier captures of
+// different shapes — a 2 s DASH video_stream and a 4 s HLS video.ts from an
+// interlude in another session — when the job comes back as a whole-file
+// VOD. Both are set aside under one stamp; each must come out as its own
+// sibling beside the complete download, and neither may be deleted unmuxed.
 //
-// Mutant: drop the setAsideLiveShapesForVod call from DownloadVod — the
+// Mutant (V4): drop the setAsideLiveShapesForVod call from DownloadVod — the
 // archive is the 2 s capture and the 10 s download is deleted.
-func TestRestartMuxAfterWholeFileVodArchivesTheVod(t *testing.T) {
-	ffmpegPath, _ := requireFFmpegTools(t)
-	w, db := testWorkerSetup(t)
-	staging, outputDir := muxFixtureJob(t, w, db, "j-vodshape")
-
-	writeAsideFixture(t, ffmpegPath, filepath.Join(staging, "video_stream"), 2)
-	full := filepath.Join(t.TempDir(), "full.mp4")
-	writeMuxFixture(t, ffmpegPath, full, 10)
-	body, err := os.ReadFile(full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := serveWholeFile(t, body)
-
-	job, _ := db.GetJob("j-vodshape")
-	jobCtx := w.buildJobContext(job)
-	res, err := DownloadVod(context.Background(), jobCtx, wholeFileVodInfo(srv, len(body)), stubCipherSolver{}, nil, nil, nil)
-	if err != nil {
-		t.Fatalf("DownloadVod: %v", err)
-	}
-	if err := w.orchestrator.runDownloaders(context.Background(), res); err != nil {
-		t.Fatalf("download: %v", err)
-	}
-
-	w.enqueueExistingJobs() // the restart: a Muxing row re-muxes from staging
-	w.Stop()
-
-	fresh, _ := db.GetJob("j-vodshape")
-	if fresh.Status != database.StatusFinished {
-		t.Fatalf("status = %s (%q), want Finished", fresh.Status, fresh.Error)
-	}
-	archive := w.orchestrator.runFFprobe(context.Background(), fresh.OutputFile)
-	if archive == nil || archive.DurationSec < 9 {
-		t.Fatalf("archive %s probes %+v, want the complete 10 s download", fresh.OutputFile, archive)
-	}
-	var sibling string
-	for _, n := range mp4sIn(t, outputDir) {
-		if _, ok := engine.RestartSiblingStem(n); ok {
-			sibling = filepath.Join(outputDir, n)
-		}
-	}
-	if sibling == "" {
-		t.Fatalf("outputs = %v, want the earlier capture kept as a .restart- sibling", mp4sIn(t, outputDir))
-	}
-	if p := w.orchestrator.runFFprobe(context.Background(), sibling); p == nil || p.DurationSec > 3 {
-		t.Errorf("sibling %s probes %+v, want the 2 s earlier capture", sibling, p)
-	}
-}
-
-// TestRestartMuxAfterWholeFileVodKeepsEveryEarlierCapture is W20-18 end to
-// end: the staging root holds TWO earlier captures of different shapes — a
-// 2 s DASH video_stream and a 4 s HLS video.ts from an interlude in another
-// session — when the job comes back as a whole-file VOD. Both are set aside
-// under one stamp; each must come out as its own sibling beside the complete
-// download, and neither may be deleted unmuxed.
 //
-// Mutant: drop asideRecordingOf from groupStagedAsides' key — the two asides
-// are one group, only the video_stream is muxed, and the video.ts is removed
-// with the group.
+// Mutant (W20-18): drop asideRecordingOf from groupStagedAsides' key — the
+// two asides are one group, only the video_stream is muxed, and the video.ts
+// is removed with the group.
 func TestRestartMuxAfterWholeFileVodKeepsEveryEarlierCapture(t *testing.T) {
 	ffmpegPath, _ := requireFFmpegTools(t)
 	w, db := testWorkerSetup(t)
@@ -187,17 +151,11 @@ func TestRestartMuxAfterWholeFileVodKeepsEveryEarlierCapture(t *testing.T) {
 
 	writeAsideFixture(t, ffmpegPath, filepath.Join(staging, "video_stream"), 2)
 	writeAsideFixture(t, ffmpegPath, filepath.Join(staging, "video.ts"), 4)
-	full := filepath.Join(t.TempDir(), "full.mp4")
-	writeMuxFixture(t, ffmpegPath, full, 10)
-	body, err := os.ReadFile(full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := serveWholeFile(t, body)
+	srv, size := serveMuxFixture(t, ffmpegPath, 10)
 
 	job, _ := db.GetJob("j-twoshapes")
 	jobCtx := w.buildJobContext(job)
-	res, err := DownloadVod(context.Background(), jobCtx, wholeFileVodInfo(srv, len(body)), stubCipherSolver{}, nil, nil, nil)
+	res, err := DownloadVod(context.Background(), jobCtx, wholeFileVodInfo(srv, size), stubCipherSolver{}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("DownloadVod: %v", err)
 	}

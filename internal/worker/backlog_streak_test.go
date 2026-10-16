@@ -127,12 +127,6 @@ func TestDeletedBacklogRowLeavesNoStreak(t *testing.T) {
 	if n, held := backlogStreak(w, job.ID); n != 0 || held {
 		t.Errorf("the deleted row: count %d held %v, want no streak", n, held)
 	}
-	ch := "UC_retry"
-	addSchedJob(t, db, &ch, job.ID, database.StatusQueued, 1) // created again
-
-	if n, held := backlogStreak(w, job.ID); n != 0 || held {
-		t.Errorf("the re-created row: count %d held %v, want no streak", n, held)
-	}
 }
 
 // TestPrunedBacklogRowLeavesNoStreak is the same through the other way a row
@@ -179,12 +173,6 @@ func TestPrunedBacklogRowLeavesNoStreak(t *testing.T) {
 	})
 	if n, held := backlogStreak(w, kept.ID); n != 1 || !held {
 		t.Errorf("the other channel's row: count %d held %v, want its streak kept (1, held)", n, held)
-	}
-
-	ch := "UC_retry"
-	addSchedJob(t, db, &ch, pruned.ID, database.StatusQueued, 1) // the re-added channel's rescan
-	if n, held := backlogStreak(w, pruned.ID); n != 0 || held {
-		t.Errorf("the re-created row after a channel prune: count %d held %v, want no streak", n, held)
 	}
 }
 

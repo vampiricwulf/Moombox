@@ -73,16 +73,10 @@ func TestSplitJobVodDownloadSupersedesParts(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	jobCtx, part0 := splitJobFixture(t, w, db, ffmpegPath, "j-splitvod")
 
-	full := filepath.Join(t.TempDir(), "full.mp4")
-	writeMuxFixture(t, ffmpegPath, full, 12)
-	body, err := os.ReadFile(full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := serveWholeFile(t, body)
+	srv, size := serveMuxFixture(t, ffmpegPath, 12)
 
 	o := NewDownloadOrchestrator(db, nil, ffmpegPath, discardLogger{}, nil, stubCipherSolver{}, nil, nil, nil)
-	if err := o.ExecuteWithChat(context.Background(), jobCtx, wholeFileVodInfo(srv, len(body)), true, nil); err != nil {
+	if err := o.ExecuteWithChat(context.Background(), jobCtx, wholeFileVodInfo(srv, size), true, nil); err != nil {
 		t.Fatalf("ExecuteWithChat: %v", err)
 	}
 	w.cleanupStagingAfterMux("j-splitvod", jobCtx.StagingDir)
@@ -274,16 +268,10 @@ func TestSupersededRootIsNeverReadAsPartZero(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			full := filepath.Join(t.TempDir(), "full.mp4")
-			writeMuxFixture(t, ffmpegPath, full, 12)
-			body, err := os.ReadFile(full)
-			if err != nil {
-				t.Fatal(err)
-			}
-			srv := serveWholeFile(t, body)
+			srv, size := serveMuxFixture(t, ffmpegPath, 12)
 
 			o := NewDownloadOrchestrator(db, nil, ffmpegPath, discardLogger{}, nil, stubCipherSolver{}, nil, nil, nil)
-			if err := o.ExecuteWithChat(context.Background(), jobCtx, wholeFileVodInfo(srv, len(body)), true, nil); err != nil {
+			if err := o.ExecuteWithChat(context.Background(), jobCtx, wholeFileVodInfo(srv, size), true, nil); err != nil {
 				t.Fatalf("ExecuteWithChat: %v", err)
 			}
 			w.cleanupStagingAfterMux("j-tomb", root)

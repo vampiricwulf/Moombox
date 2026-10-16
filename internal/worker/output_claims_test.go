@@ -2,9 +2,11 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,6 +45,41 @@ func waitForFile(t *testing.T, path string) {
 	}
 }
 
+// runBlocked hands install a writeBlockingFFmpeg stand-in, runs start on its
+// own goroutine, and returns once the stand-in is holding its "mux" open.
+// release lets it finish and returns start's error; a test that stops before
+// calling it releases on cleanup, so start never outlives the test.
+func runBlocked(t *testing.T, install func(ffmpegPath string), start func() error) (release func() error) {
+	t.Helper()
+	gates := t.TempDir()
+	started, gate := filepath.Join(gates, "started"), filepath.Join(gates, "release")
+	install(writeBlockingFFmpeg(t, started, gate))
+
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("panic: %v", r)
+			}
+		}()
+		done <- start()
+	}()
+	var once sync.Once
+	var err error
+	release = func() error {
+		once.Do(func() {
+			if werr := os.WriteFile(gate, nil, 0o644); werr != nil {
+				t.Fatal(werr)
+			}
+			err = <-done
+		})
+		return err
+	}
+	t.Cleanup(func() { release() })
+	waitForFile(t, started)
+	return release
+}
+
 // A finalize names its output on the row only in the write that marks the job
 // Finished, so for the whole length of a mux the file FFmpeg was writing was,
 // to the orphan sweep, an unowned "output" entry — and DeleteOrphanedFile's
@@ -62,24 +99,11 @@ func TestOrphanSweepLeavesAnInProgressMuxAlone(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(staging, "video.mp4"), []byte("staged"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gates := t.TempDir()
-	started, release := filepath.Join(gates, "started"), filepath.Join(gates, "release")
-	w.orchestrator.SetFfmpegPath(writeBlockingFFmpeg(t, started, release))
-
-	done := make(chan error, 1)
-	go func() {
+	release := runBlocked(t, w.orchestrator.SetFfmpegPath, func() error {
 		err := w.MuxJob("j-inflight")
 		w.Stop()
-		done <- err
-	}()
-	released := false
-	defer func() {
-		if !released {
-			os.WriteFile(release, nil, 0o644)
-			<-done
-		}
-	}()
-	waitForFile(t, started)
+		return err
+	})
 
 	outs := mp4sIn(t, outputDir)
 	if len(outs) != 1 {
@@ -90,28 +114,9 @@ func TestOrphanSweepLeavesAnInProgressMuxAlone(t *testing.T) {
 	var stagingBase string
 	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
 	cfg := &config.MoomboxConfig{Paths: config.PathsConfig{OutputDirectory: outputDir, StagingDirectory: stagingBase}}
+	assertSweepSpares(t, db, cfg, out)
 
-	entries, err := ScanOrphanedFiles(db, cfg)
-	if err != nil {
-		t.Fatalf("ScanOrphanedFiles: %v", err)
-	}
-	for _, e := range entries {
-		if normalizePath(e.Path) == normalizePath(out) {
-			t.Errorf("the output of a mux still in progress was offered as an orphan: %+v", e)
-		}
-	}
-	if err := DeleteOrphanedFile(out, db, cfg); err == nil {
-		t.Error("DeleteOrphanedFile removed the output of a mux still in progress")
-	}
-	if _, err := os.Stat(out); err != nil {
-		t.Fatalf("the in-progress output is gone: %v", err)
-	}
-
-	if err := os.WriteFile(release, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	released = true
-	if err := <-done; err != nil {
+	if err := release(); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	fresh, _ := db.GetJob("j-inflight")
@@ -142,26 +147,13 @@ func TestOrphanSweepLeavesAnInProgressPartMuxAlone(t *testing.T) {
 	if err := os.WriteFile(media, []byte("staged"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gates := t.TempDir()
-	started, release := filepath.Join(gates, "started"), filepath.Join(gates, "release")
-	w.orchestrator.SetFfmpegPath(writeBlockingFFmpeg(t, started, release))
-
 	job, _ := db.GetJob("j-inflight-part")
 	jobCtx := w.buildJobContext(job)
-	done := make(chan error, 1)
-	go func() {
+	release := runBlocked(t, w.orchestrator.SetFfmpegPath, func() error {
 		_, err := w.orchestrator.muxSegment(context.Background(), jobCtx, 0, 0, time.Now().Unix(),
 			QualityInfo{Label: "720p"}, &DownloadResult{HasVideo: true, VideoPath: media})
-		done <- err
-	}()
-	released := false
-	defer func() {
-		if !released {
-			os.WriteFile(release, nil, 0o644)
-			<-done
-		}
-	}()
-	waitForFile(t, started)
+		return err
+	})
 
 	outs := mp4sIn(t, outputDir)
 	if len(outs) != 1 {
@@ -171,25 +163,9 @@ func TestOrphanSweepLeavesAnInProgressPartMuxAlone(t *testing.T) {
 	var stagingBase string
 	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
 	cfg := &config.MoomboxConfig{Paths: config.PathsConfig{OutputDirectory: outputDir, StagingDirectory: stagingBase}}
+	assertSweepSpares(t, db, cfg, part)
 
-	entries, err := ScanOrphanedFiles(db, cfg)
-	if err != nil {
-		t.Fatalf("ScanOrphanedFiles: %v", err)
-	}
-	for _, e := range entries {
-		if normalizePath(e.Path) == normalizePath(part) {
-			t.Errorf("a part still muxing was offered as an orphan: %+v", e)
-		}
-	}
-	if err := DeleteOrphanedFile(part, db, cfg); err == nil {
-		t.Error("DeleteOrphanedFile removed a part still muxing")
-	}
-
-	if err := os.WriteFile(release, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	released = true
-	if err := <-done; err != nil {
+	if err := release(); err != nil {
 		t.Fatalf("muxSegment: %v", err)
 	}
 	if owner := outputClaimOwner(part); owner != "" {
@@ -271,37 +247,9 @@ func TestDeleteOrphanedFileRefusesAnActiveJobByItsCanonicalSpelling(t *testing.T
 	}
 }
 
-// A claim made through a symlinked output directory also covers the file
-// named through the real directory behind it — the spelling
-// DeleteOrphanedFile's containment check accepts.
-//
-// Mutant: outputClaimKeys returning the configured spelling alone.
-func TestOutputClaimCoversTheCanonicalSpelling(t *testing.T) {
-	dir := t.TempDir()
-	realOut := filepath.Join(dir, "real-output")
-	if err := os.MkdirAll(realOut, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	linkOut := filepath.Join(dir, "output")
-	if err := os.Symlink(realOut, linkOut); err != nil {
-		t.Skipf("symlink: %v", err)
-	}
-	release := claimOutputStem("j", filepath.Join(linkOut, "Show [abc]"))
-	defer release()
-	if owner := outputClaimOwner(filepath.Join(realOut, "Show [abc].mp4")); owner != "j" {
-		t.Errorf("the real directory's spelling of a claimed output is unowned (owner %q)", owner)
-	}
-}
-
-// A path naming the claimed output's directory in a third spelling — neither
-// the one the claim was made through nor the canonical one — is owned too:
-// on Windows the temp directory reads C:\Users\RUNNER~1\… while its
-// canonical form spells the long name, so the real directory's own path,
-// short-named, matched neither key. A second link to the same directory is
-// that case on every platform.
-//
-// Mutant: outputClaimOwner matching the path's normalizePath spelling alone.
-func TestOutputClaimCoversAnotherSpellingOfItsDirectory(t *testing.T) {
+// A claim made through a symlinked output directory covers the claimed
+// output however a path spells that directory, and nothing beside it.
+func TestOutputClaimCoversEverySpellingOfItsDirectory(t *testing.T) {
 	dir := t.TempDir()
 	realOut := filepath.Join(dir, "real-output")
 	if err := os.MkdirAll(realOut, 0o755); err != nil {
@@ -316,10 +264,33 @@ func TestOutputClaimCoversAnotherSpellingOfItsDirectory(t *testing.T) {
 	}
 	release := claimOutputStem("j", filepath.Join(linkOut, "Show [abc]"))
 	defer release()
-	if owner := outputClaimOwner(filepath.Join(otherLink, "Show [abc].mp4")); owner != "j" {
-		t.Errorf("a claimed output named through another link to its directory is unowned (owner %q)", owner)
+
+	cases := []struct {
+		name, path, wantOwner string
+	}{
+		// The claim also covers the file named through the real directory
+		// behind the link — the spelling DeleteOrphanedFile's containment
+		// check accepts.
+		//
+		// Mutant: outputClaimKeys returning the configured spelling alone.
+		{"TheCanonicalSpelling", filepath.Join(realOut, "Show [abc].mp4"), "j"},
+		// A path naming the claimed output's directory in a third spelling —
+		// neither the one the claim was made through nor the canonical one —
+		// is owned too: on Windows the temp directory reads
+		// C:\Users\RUNNER~1\… while its canonical form spells the long name,
+		// so the real directory's own path, short-named, matched neither key.
+		// A second link to the same directory is that case on every platform.
+		//
+		// Mutant: outputClaimOwner matching the path's normalizePath spelling
+		// alone.
+		{"AnotherSpellingOfItsDirectory", filepath.Join(otherLink, "Show [abc].mp4"), "j"},
+		{"AnUnclaimedOutput", filepath.Join(otherLink, "Other [xyz].mp4"), ""},
 	}
-	if owner := outputClaimOwner(filepath.Join(otherLink, "Other [xyz].mp4")); owner != "" {
-		t.Errorf("an unclaimed output is owned by %q", owner)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if owner := outputClaimOwner(tc.path); owner != tc.wantOwner {
+				t.Errorf("outputClaimOwner(%s) = %q, want %q", tc.path, owner, tc.wantOwner)
+			}
+		})
 	}
 }

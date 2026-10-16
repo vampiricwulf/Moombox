@@ -105,46 +105,80 @@ func outageThenRecover(t *testing.T, h *endVerdictHarness, srv *httptest.Server,
 	}
 }
 
-// Back online after an outage, with the SAME broadcast confirmed live, a
-// failed master-playlist refresh used to finalize the job as Finished on the
-// spot — mid-broadcast — and the monitor, seeing a finished job for that
-// stream, never re-archived the rest. It is retried, then re-verified like the
-// in-loop refresh: a broadcast still live leaves the job in Error with its
-// staging, never Finished.
+// TestPostOutageUnknownVerdictLandsInMarkedError: back online after an
+// outage, the two exits that leave a live capture without a verdict on its
+// broadcast — a recheck that never answers, a refresh that keeps failing while
+// the broadcast still reads live — land the job in Error, never Finished. They
+// are the same unconfirmed end as the in-loop latch, and carry its marker.
 //
-// Mutant: the recovery finalizing on the first failed refresh again, or not
-// retrying it.
-func TestPostOutageRefreshFailureDoesNotFinishALiveBroadcast(t *testing.T) {
-	srv, first := liveTwitchWindow(t)
-	h := newEndVerdictHarness(t, "tw_outage_refresh")
-	var refreshes atomic.Int32
-	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
-		refreshes.Add(1)
-		return nil, errors.New("usher 503")
-	}
-	fresh, err := outageThenRecover(t, h, srv, first)
-	if err == nil || fresh.Status == database.StatusFinished {
-		t.Errorf("a still-live broadcast ended as err=%v status=%s, want an error and no Finished", err, fresh.Status)
-	}
-	if n := refreshes.Load(); n < postOutageRefreshAttempts {
-		t.Errorf("the post-outage refresh was tried %d times, want %d", n, postOutageRefreshAttempts)
-	}
-}
-
-// A post-outage recheck that never gets an answer is an UNKNOWN verdict; it
-// used to read as "not live" and finalize the job Finished.
+// Both used to finalize the job Finished. Later they returned "context
+// canceled" instead: the unknown-verdict exit was gated on the SESSION
+// context, which the outage had cancelled, so both fell through to the
+// shutdown path — the row's error read "context canceled" and carried no
+// mark.
 //
-// Mutant: recheckTwitchBroadcast returning no error when every attempt failed,
-// or the caller ignoring it.
-func TestPostOutageRecheckFailureDoesNotFinishTheJob(t *testing.T) {
-	srv, first := liveTwitchWindow(t)
-	h := newEndVerdictHarness(t, "tw_outage_recheck")
-	h.variant.RecheckStreamFn = func(context.Context) (*twitch.TwitchStreamInfo, error) {
-		return nil, errors.New("gql unreachable")
-	}
-	fresh, err := outageThenRecover(t, h, srv, first)
-	if err == nil || fresh.Status == database.StatusFinished {
-		t.Errorf("an unanswered recheck ended as err=%v status=%s, want an error and no Finished", err, fresh.Status)
+// Mutant: the unknown-verdict exit gated on ctx.Err() again (both rows return
+// context.Canceled).
+func TestPostOutageUnknownVerdictLandsInMarkedError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// arm installs the recovery's failing step on the harness; refreshes
+		// counts the variant refreshes it serves.
+		arm          func(h *endVerdictHarness, refreshes *atomic.Int32)
+		minRefreshes int32
+	}{
+		{
+			// A post-outage recheck that never gets an answer is an UNKNOWN
+			// verdict; it used to read as "not live" and finalize the job
+			// Finished.
+			//
+			// Mutants: recheckTwitchBroadcast returning no error when every
+			// attempt failed, or the caller ignoring it; the post-outage
+			// recheck failure assigned unmarked.
+			name: "recheck never answers",
+			arm: func(h *endVerdictHarness, _ *atomic.Int32) {
+				h.variant.RecheckStreamFn = func(context.Context) (*twitch.TwitchStreamInfo, error) {
+					return nil, errors.New("gql unreachable")
+				}
+			},
+		},
+		{
+			// With the SAME broadcast confirmed live, a failed master-playlist
+			// refresh used to finalize the job as Finished on the spot —
+			// mid-broadcast — and the monitor, seeing a finished job for that
+			// stream, never re-archived the rest. It is retried, then
+			// re-verified like the in-loop refresh: a broadcast still live
+			// leaves the job in Error with its staging, never Finished.
+			//
+			// Mutants: the recovery finalizing on the first failed refresh
+			// again, or not retrying it; latchIfUnconfirmed's live arm
+			// unmarked.
+			name: "refresh keeps failing on a live broadcast",
+			arm: func(h *endVerdictHarness, refreshes *atomic.Int32) {
+				h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
+					refreshes.Add(1)
+					return nil, errors.New("usher 503")
+				}
+			},
+			minRefreshes: postOutageRefreshAttempts,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, first := liveTwitchWindow(t)
+			h := newEndVerdictHarness(t, "tw_outage_unknown")
+			var refreshes atomic.Int32
+			tc.arm(h, &refreshes)
+			fresh, err := outageThenRecover(t, h, srv, first)
+			if err == nil || fresh.Status == database.StatusFinished {
+				t.Errorf("a still-live broadcast ended as err=%v status=%s, want an error and no Finished", err, fresh.Status)
+			}
+			if !errors.Is(err, ErrTwitchEndUnconfirmed) {
+				t.Errorf("the post-outage exit returned %v, want it marked ErrTwitchEndUnconfirmed", err)
+			}
+			if n := refreshes.Load(); n < tc.minRefreshes {
+				t.Errorf("the post-outage refresh was tried %d times, want %d", n, tc.minRefreshes)
+			}
+		})
 	}
 }
 

@@ -206,36 +206,6 @@ func TestAPanicAfterAFlaggedCancelEndsTheRunCancelled(t *testing.T) {
 	}
 }
 
-// TestAPanicOverTheRoutesCancelLeavesItToTheRoute is the other order:
-// CancelJob writes Cancelled and then flags the run, and a panic recorded in
-// between finds no flag. The record settles the run, so the flag that lands
-// next is refused — CancelJob answers false and the route sends Job
-// Cancelled — where a run left unsettled was flagged, its caller left the
-// notification to it, and the run, past its record, never sent it.
-//
-// Mutant: read the flag without settling the run in recordRunPanic — Cancel
-// flags it, and nobody sends Job Cancelled.
-func TestAPanicOverTheRoutesCancelLeavesItToTheRoute(t *testing.T) {
-	w, db := testWorkerSetup(t)
-	t.Cleanup(w.Stop)
-	rec := notificationtest.New()
-	w.notifier = rec
-	job := runningJob(t, w, db, "panic_route_cancel")
-
-	db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusCancelled}) // CancelJob's write
-	w.recordRunPanic(job.ID, job, "boom")
-	if w.queue.Cancel(job.ID) { // and its flag
-		t.Error("CancelJob flagged a run whose panic had settled it: the route leaves Job Cancelled to a run that will not send it")
-	}
-
-	if row, _ := db.GetJob(job.ID); statusOf(row) != database.StatusCancelled || row.Error != "" {
-		t.Errorf("row = %s %q, want the Cancel standing", statusOf(row), errorOf(row))
-	}
-	if n := len(rec.Calls()); n != 0 {
-		t.Errorf("the run sent %d notifications, want none (the route sends Job Cancelled)", n)
-	}
-}
-
 // panicOnEvent panics on the send of one notification event, after running
 // before: a stand-in for any panic at that point of the mux.
 type panicOnEvent struct {

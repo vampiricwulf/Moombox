@@ -9,22 +9,13 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/engine"
 )
 
-// nopProgressLogger satisfies the worker package's anonymous logger
-// interface for tests.
-type nopProgressLogger struct{}
-
-func (nopProgressLogger) Debug(msg string, args ...any) {}
-func (nopProgressLogger) Info(msg string, args ...any)  {}
-func (nopProgressLogger) Warn(msg string, args ...any)  {}
-func (nopProgressLogger) Error(msg string, args ...any) {}
-
 // newTestProgressTracker constructs a ProgressTracker with no DB hooked
 // up — the tests below exercise the pure-logic format helpers without
 // triggering the persistence path.
 func newTestProgressTracker() *ProgressTracker {
 	return &ProgressTracker{
 		jobID:     "test-job",
-		logger:    nopProgressLogger{},
+		logger:    discardLogger{},
 		now:       time.Now,
 		startTime: time.Now().Add(-30 * time.Second),
 	}
@@ -243,81 +234,56 @@ func TestSampleSpeedWindow(t *testing.T) {
 	})
 }
 
-// TestBuildProgressStringVODChunked covers the "vodTotalBytes > 0"
-// branch — the function must return a percentage rather than segment
-// counts. Audit reports/worker.md F69.
-func TestBuildProgressStringVODChunked(t *testing.T) {
-	pt := newTestProgressTracker()
-	pt.vodTotalBytes = 1 << 30 // 1 GB
-	pt.vodPercent = 25.5
-
-	got := pt.buildProgressString()
-	want := "V:25.5%"
-	if got != want {
-		t.Errorf("VOD chunked: want %q, got %q", want, got)
-	}
-
-	pt.chatCount = 42
-	got = pt.buildProgressString()
-	if !strings.Contains(got, "C: 42") {
-		t.Errorf("VOD chunked with chat: should append C: 42, got %q", got)
-	}
-}
-
-// TestBuildProgressStringSegmentedAV covers the "audio + video segments"
-// branch — both totals known.
-func TestBuildProgressStringSegmentedAV(t *testing.T) {
-	pt := newTestProgressTracker()
-	pt.audioSeq = 100
-	pt.audioTotal = 200
-	pt.videoSeq = 50
-	pt.videoTotal = 200
-
-	got := pt.buildProgressString()
-	want := "(V: 50/200 A: 100/200)"
-	if got != want {
-		t.Errorf("segmented A+V: want %q, got %q", want, got)
-	}
-}
-
-// TestBuildProgressStringSegmentedAVUnknownTotal covers the
-// audioTotal=0 / videoTotal=0 branch — segment count without total.
-func TestBuildProgressStringSegmentedAVUnknownTotal(t *testing.T) {
-	pt := newTestProgressTracker()
-	pt.audioSeq = 100 // > 0 to trigger A+V branch
-	pt.videoSeq = 50
-
-	got := pt.buildProgressString()
-	want := "(V: 50 A: 100)"
-	if got != want {
-		t.Errorf("segmented A+V no totals: want %q, got %q", want, got)
-	}
-}
-
-// TestBuildProgressStringChatOnlyFallback covers the "chatCount > 0
-// but no video/audio progress yet" branch.
-func TestBuildProgressStringChatOnlyFallback(t *testing.T) {
-	pt := newTestProgressTracker()
-	pt.chatCount = 17
-	pt.videoSeq = 5
-
-	got := pt.buildProgressString()
-	want := "Seq: 5 C: 17"
-	if got != want {
-		t.Errorf("chat-only fallback: want %q, got %q", want, got)
-	}
-}
-
-// TestBuildProgressStringVideoSeqOnly covers the catch-all bottom
-// branch — just videoSeq, no audio/chat.
-func TestBuildProgressStringVideoSeqOnly(t *testing.T) {
-	pt := newTestProgressTracker()
-	pt.videoSeq = 1234
-
-	got := pt.buildProgressString()
-	want := "Seq: 1234"
-	if got != want {
-		t.Errorf("seq only: want %q, got %q", want, got)
+// TestBuildProgressString covers each branch of the progress line, one row
+// per branch.
+func TestBuildProgressString(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(pt *ProgressTracker)
+		want string
+	}{
+		// The "vodTotalBytes > 0" branch — the function must return a
+		// percentage rather than segment counts. Audit reports/worker.md F69.
+		{"VODChunked", func(pt *ProgressTracker) {
+			pt.vodTotalBytes = 1 << 30 // 1 GB
+			pt.vodPercent = 25.5
+		}, "V:25.5%"},
+		// The same branch with chat: it appends C: 42.
+		{"VODChunkedWithChat", func(pt *ProgressTracker) {
+			pt.vodTotalBytes = 1 << 30
+			pt.vodPercent = 25.5
+			pt.chatCount = 42
+		}, "V:25.5% C: 42"},
+		// The "audio + video segments" branch — both totals known.
+		{"SegmentedAV", func(pt *ProgressTracker) {
+			pt.audioSeq = 100
+			pt.audioTotal = 200
+			pt.videoSeq = 50
+			pt.videoTotal = 200
+		}, "(V: 50/200 A: 100/200)"},
+		// The audioTotal=0 / videoTotal=0 branch — segment count without
+		// total.
+		{"SegmentedAVUnknownTotal", func(pt *ProgressTracker) {
+			pt.audioSeq = 100 // > 0 to trigger A+V branch
+			pt.videoSeq = 50
+		}, "(V: 50 A: 100)"},
+		// The "chatCount > 0 but no video/audio progress yet" branch.
+		{"ChatOnlyFallback", func(pt *ProgressTracker) {
+			pt.chatCount = 17
+			pt.videoSeq = 5
+		}, "Seq: 5 C: 17"},
+		// The catch-all bottom branch — just videoSeq, no audio/chat.
+		{"VideoSeqOnly", func(pt *ProgressTracker) {
+			pt.videoSeq = 1234
+		}, "Seq: 1234"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pt := newTestProgressTracker()
+			tc.set(pt)
+			if got := pt.buildProgressString(); got != tc.want {
+				t.Errorf("buildProgressString() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -337,18 +303,19 @@ func TestCalculateETAEarlyReturnUnderFiveSeconds(t *testing.T) {
 }
 
 // TestCalculateETASegmentBased exercises the segments-based ETA
-// branch. With 30s elapsed and 50/100 segments, segsPerSec=50/30=1.67,
-// remaining=50/1.67=~30s.
+// branch. With 30s elapsed (on a fake clock, so the figure is exact) and
+// 50/100 segments, segsPerSec=50/30=1.67, remaining=50/1.67=30s — the
+// sub-minute "Ns" bucket, where TestCalculateETAReadsTheTrackerClock lands in
+// the minutes one.
 func TestCalculateETASegmentBased(t *testing.T) {
 	pt := newTestProgressTracker()
-	pt.startTime = time.Now().Add(-30 * time.Second)
+	clk := &fakeClock{t: pt.startTime.Add(30 * time.Second)}
+	pt.now = clk.now
 	pt.videoSeq = 50
 	pt.videoTotal = 100
 
-	got := pt.calculateETA()
-	// Format depends on duration buckets: <60s = "Ns".
-	if !strings.HasSuffix(got, "s") {
-		t.Errorf("ETA: want sub-minute format like 'Ns', got %q", got)
+	if got := pt.calculateETA(); got != "30s" {
+		t.Errorf("calculateETA() = %q, want %q", got, "30s")
 	}
 }
 
@@ -366,7 +333,7 @@ func TestCalculateETASegmentBased(t *testing.T) {
 // noteVodBytesLocked — video alone, "1m 30s". Mutant: measuring from
 // pt.startTime instead of vodSessionStart — 40 s of clock, "3m 30s".
 func TestCalculateETAVODCountsOnlyThisSessionsBytes(t *testing.T) {
-	pt := NewProgressTracker(nil, "eta-vod", nopProgressLogger{}, 24*time.Hour) // gate every DB write
+	pt := NewProgressTracker(nil, "eta-vod", discardLogger{}, 24*time.Hour) // gate every DB write
 	t.Cleanup(pt.Close)
 	clk := &fakeClock{t: pt.startTime}
 	pt.mu.Lock()
@@ -416,7 +383,7 @@ func TestCalculateETAVODCountsOnlyThisSessionsBytes(t *testing.T) {
 // at all; counting a restart's drop as movement (`p.Bytes > s.latest` →
 // `true`) — the rate goes negative and the ETA after the restart is wrong.
 func TestVODProgressFollowsTheStreamingHandoff(t *testing.T) {
-	pt := NewProgressTracker(nil, "eta-handoff", nopProgressLogger{}, 24*time.Hour) // gate every DB write
+	pt := NewProgressTracker(nil, "eta-handoff", discardLogger{}, 24*time.Hour) // gate every DB write
 	t.Cleanup(pt.Close)
 	clk := &fakeClock{t: pt.startTime}
 	pt.mu.Lock()

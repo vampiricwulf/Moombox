@@ -43,44 +43,6 @@ func TestEndUnconfirmedMarkKeepsTheMessage(t *testing.T) {
 	}
 }
 
-// TestOnlyTheLiveLatchIsMarked drives the real ExecuteTwitch onto its three
-// Error exits. The LIVE unconfirmed-end latch marks its error; a VOD's latch
-// (no live end to confirm) and a failed part advance (a local I/O failure,
-// which says nothing about the broadcast) do not — the automatic mux is for a
-// broadcast whose end was merely unknown.
-//
-// Mutants: latchIfUnconfirmed's live arm leaving the cause unmarked (the live
-// row is never auto-muxed); its VOD arm marking (a truncated VOD would be
-// muxed as soon as its channel went offline); latchPartFailure marking.
-func TestOnlyTheLiveLatchIsMarked(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-
-	live := newEndVerdictHarness(t, "tw_mark_live")
-	live.variant.CheckStreamFn = func(context.Context) (bool, error) { return true, nil }
-	if err := live.o.ExecuteTwitch(ctx, live.jobCtx, live.variant, false, nil); !errors.Is(err, ErrTwitchEndUnconfirmed) {
-		t.Errorf("live latch returned %v, want it marked ErrTwitchEndUnconfirmed", err)
-	}
-
-	vod := newEndVerdictHarness(t, "tw_mark_vod")
-	if err := vod.o.ExecuteTwitch(ctx, vod.jobCtx, vod.variant, true, nil); err == nil || errors.Is(err, ErrTwitchEndUnconfirmed) {
-		t.Errorf("VOD latch returned %v, want an unmarked error", err)
-	}
-
-	part := newEndVerdictHarness(t, "tw_mark_part")
-	part.variant.CheckStreamFn = func(context.Context) (bool, error) { return true, nil }
-	part.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
-		return []twitch.TwitchHLSVariant{{URL: "http://127.0.0.1:1/x.m3u8", Name: "480p", Width: 854, Height: 480, FPS: 30}}, nil
-	}
-	if err := os.WriteFile(filepath.Join(part.jobCtx.StagingDir, "seg_0"), []byte("not a directory"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	err := part.o.ExecuteTwitch(ctx, part.jobCtx, part.variant, false, nil)
-	if err == nil || !strings.Contains(err.Error(), "advance to new part") || errors.Is(err, ErrTwitchEndUnconfirmed) {
-		t.Errorf("part-advance failure returned %v, want an unmarked advance error", err)
-	}
-}
-
 // TestTwitchBroadcastOver: over means offline, or live as ANOTHER broadcast —
 // by stream ID when the job's ID carries one, else by stream_start_time; a job
 // that knows neither is never judged over against a live channel.
@@ -304,51 +266,14 @@ func TestOperatorMuxClearsTheMarker(t *testing.T) {
 	}
 }
 
-// TestPostOutageUnconfirmedEndIsMarked: the two post-outage exits that leave a
-// live capture in Error without a verdict on its broadcast — a recheck that
-// never answers, a refresh that keeps failing while the broadcast still reads
-// live — are the same unconfirmed end as the in-loop latch, and carry its
-// marker.
-//
-// They used to return "context canceled" instead: the unknown-verdict exit
-// was gated on the SESSION context, which the outage had cancelled, so both
-// fell through to the shutdown path — the row's error read "context
-// canceled" and carried no mark.
-//
-// Mutants: the unknown-verdict exit gated on ctx.Err() again (both cases
-// return context.Canceled); the post-outage recheck failure assigned
-// unmarked (the first case); latchIfUnconfirmed's live arm unmarked (the
-// second).
-func TestPostOutageUnconfirmedEndIsMarked(t *testing.T) {
-	t.Run("recheck never answers", func(t *testing.T) {
-		srv, first := liveTwitchWindow(t)
-		h := newEndVerdictHarness(t, "tw_outage_mark_recheck")
-		h.variant.RecheckStreamFn = func(context.Context) (*twitch.TwitchStreamInfo, error) {
-			return nil, errors.New("gql unreachable")
-		}
-		if _, err := outageThenRecover(t, h, srv, first); !errors.Is(err, ErrTwitchEndUnconfirmed) {
-			t.Errorf("unanswered post-outage recheck returned %v, want it marked", err)
-		}
-	})
-	t.Run("refresh keeps failing on a live broadcast", func(t *testing.T) {
-		srv, first := liveTwitchWindow(t)
-		h := newEndVerdictHarness(t, "tw_outage_mark_refresh")
-		h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
-			return nil, errors.New("usher 503")
-		}
-		if _, err := outageThenRecover(t, h, srv, first); !errors.Is(err, ErrTwitchEndUnconfirmed) {
-			t.Errorf("failed post-outage refresh on a live broadcast returned %v, want it marked", err)
-		}
-	})
-}
-
 // TestUserCancelDuringTheReverifyStaysACancel: the unknown-verdict exit no
-// longer keys on the session context (see TestPostOutageUnconfirmedEndIsMarked),
-// so it has to rule out the operator's cancel itself. A cancel that lands
-// while the exit's re-verify is in flight cancels the session but leaves the
-// job's context alone; it must still end as a cancel — the context error
-// processJob turns into Cancelled — and not as the latched download error,
-// which would write Error over the operator's Cancelled.
+// longer keys on the session context (see
+// TestPostOutageUnknownVerdictLandsInMarkedError), so it has to rule out the
+// operator's cancel itself. A cancel that lands while the exit's re-verify is
+// in flight cancels the session but leaves the job's context alone; it must
+// still end as a cancel — the context error processJob turns into Cancelled —
+// and not as the latched download error, which would write Error over the
+// operator's Cancelled.
 //
 // Mutant: the exit's !userCancelled.Load() guard dropped (ErrQualityLost,
 // marked, comes back).

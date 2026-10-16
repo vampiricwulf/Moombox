@@ -45,14 +45,17 @@ func (ms *manifestServer) onlyPath(t *testing.T) string {
 	return ms.paths[0]
 }
 
-// potLines returns the args of every line logged with msg, as key → value.
-func potLines(logs *captureLogger, msg string) []map[string]any {
+// logLines returns the args of every line logged whose message satisfies
+// match, as key → value with the message itself under "". The package's one
+// log-line parser: potLines and logLine are views over it.
+func logLines(logs *captureLogger, match func(msg string) bool) []map[string]any {
 	var out []map[string]any
 	for _, m := range logs.lines() {
-		if m[0] != msg {
+		msg, _ := m[0].(string)
+		if !match(msg) {
 			continue
 		}
-		kv := map[string]any{}
+		kv := map[string]any{"": msg}
 		for i := 1; i+1 < len(m); i += 2 {
 			if k, ok := m[i].(string); ok {
 				kv[k] = m[i+1]
@@ -61,6 +64,11 @@ func potLines(logs *captureLogger, msg string) []map[string]any {
 		out = append(out, kv)
 	}
 	return out
+}
+
+// potLines returns the args of every line logged with exactly msg.
+func potLines(logs *captureLogger, msg string) []map[string]any {
+	return logLines(logs, func(m string) bool { return m == msg })
 }
 
 // assertSkipLines checks that exactly the wanted "[POT] GVS token skipped"

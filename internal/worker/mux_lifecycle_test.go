@@ -511,19 +511,26 @@ func TestCancelledAsideMuxLeavesNoPartialSibling(t *testing.T) {
 	}
 }
 
-// TestStagedRestartAsidesSkipsTheLiveRecording pins the aside-only scan the
-// orphan sweep runs (close review Minor 10 / Task 8 B6): jobNeedsStaging and
-// scanStagingOrphans ask for asides on every pass and nothing else, so the
-// scan must not pay for discoverStagingMedia's Stat of every candidate media
-// name — and must not REPORT the live recording, which is ordinary staging
-// content, not captured-and-never-muxed footage.
+// TestStagedRestartAsidesSkipsTheLiveRecording pins extra item (d): the
+// engine leaves a recording it could not resume beside the fresh one as
+// <file>.restart-<ts>, and the asides a staging dir yields come in recording
+// order — without the live recording, and with the sidecar twin excluded,
+// since muxing a JSON file is not a recovery.
 //
-// Mutant: dropping this scan's own engine.IsStagedRestartPath filter (the
-// shape it would take if it simply reported what ReadDir returned) — the live
-// video.mp4 comes back as an aside, and through stagedAsideRecordings that
-// shields every finished job's staging dir from the sweep forever. The
-// end-to-end twin of that mutant is the control row in
-// TestStagedAsideKeepsStagingFromCleanup.
+// It is also the aside-only scan the orphan sweep runs (close review Minor 10
+// / Task 8 B6): jobNeedsStaging and scanStagingOrphans ask for asides on every
+// pass and nothing else, so the scan must not pay for discoverStagingMedia's
+// Stat of every candidate media name — and must not REPORT the live
+// recording, which is ordinary staging content, not captured-and-never-muxed
+// footage.
+//
+// Mutants: ignoring the asides (the set-aside footage is invisible to every
+// consumer), or treating the .resume.json twin as one; dropping this scan's
+// own engine.IsStagedRestartPath filter (the shape it would take if it simply
+// reported what ReadDir returned) — the live video.mp4 comes back as an aside,
+// and through stagedAsideRecordings that shields every finished job's staging
+// dir from the sweep forever. The end-to-end twin of that last mutant is the
+// control row in TestStagedAsideKeepsStagingFromCleanup.
 func TestStagedRestartAsidesSkipsTheLiveRecording(t *testing.T) {
 	dir := t.TempDir()
 	live := filepath.Join(dir, "video.mp4")
@@ -782,37 +789,6 @@ func TestRestartSiblingStem(t *testing.T) {
 	}
 }
 
-// TestStagedRestartAsidesInRecordingOrder pins extra item (d): the engine
-// leaves a recording it could not resume beside the fresh one as
-// <file>.restart-<ts>, and the asides a staging dir yields come in recording
-// order — without the live recording, and with the sidecar twin excluded,
-// since muxing a JSON file is not a recovery.
-//
-// Mutants: ignoring the asides (the set-aside footage is invisible to every
-// consumer), or treating the .resume.json twin as one.
-func TestStagedRestartAsidesInRecordingOrder(t *testing.T) {
-	dir := t.TempDir()
-	live := filepath.Join(dir, "video.mp4")
-	aside := filepath.Join(dir, "video.mp4"+engine.StagedRestartSuffix+"1700000000")
-	older := filepath.Join(dir, "video.mp4"+engine.StagedRestartSuffix+"1600000000")
-	for _, p := range []string{live, aside, older, aside + ".resume.json"} {
-		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
-			t.Fatalf("write %s: %v", p, err)
-		}
-	}
-
-	got := stagedRestartAsides(dir)
-	want := []string{older, aside}
-	if len(got) != len(want) {
-		t.Fatalf("stagedRestartAsides = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("stagedRestartAsides = %v, want %v (recording order: oldest first)", got, want)
-		}
-	}
-}
-
 // TestStagedAsideKeepsStagingFromCleanup is the other half of extra item (d):
 // finalize must never delete an aside that has not been merged into the
 // archive. The aside is captured footage no mux has consumed, so the staging
@@ -877,6 +853,9 @@ func TestFinalizeMuxesEachAsideToItsOwnFile(t *testing.T) {
 	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 30)
 	aside := filepath.Join(staging, "video.mp4"+engine.StagedRestartSuffix+"1700000000")
 	writeAsideFixture(t, ffmpegPath, aside, 10)
+	// The aside's resume twin is no aside, so it must not hold staging (the
+	// last check below). Its own removal is pinned where it can be seen:
+	// TestMuxStagedAsidesRemovesTheRecordingAndItsTwin.
 	twin := aside + ".resume.json"
 	if err := os.WriteFile(twin, []byte(`{"stale":true}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -899,15 +878,7 @@ func TestFinalizeMuxesEachAsideToItsOwnFile(t *testing.T) {
 		t.Errorf("no %s beside the archive (stat err = %v) — the set-aside recording was never muxed, "+
 			"so staging cleanup takes it with the dir", sibling, err)
 	}
-	// The twin goes with the recording it describes (fix round 1, Minor 3: the
-	// removal shipped unpinned and the reviewer's mutant survived the package).
-	// Mutant: dropping the engine.StagedRestartSidecar removal — a sidecar
-	// outlives its media and a later Start could match its offsets.
-	if _, err := os.Stat(twin); !os.IsNotExist(err) {
-		t.Errorf("the aside's resume sidecar %s survived its recovery (stat err = %v) — a sidecar "+
-			"beside nothing is a stale offset map", twin, err)
-	}
-	// And the sweep must not offer the sibling: it is the job's own footage,
+	// The sweep must not offer the sibling: it is the job's own footage,
 	// unreferenced by construction (fix round 1, Important 1).
 	outCfg := &config.MoomboxConfig{}
 	outCfg.Paths.OutputDirectory = filepath.Dir(fresh.OutputFile)

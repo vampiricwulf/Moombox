@@ -70,7 +70,7 @@ func TestTwitchReselectionCarriesPrefer60fps(t *testing.T) {
 	if got := variant.selectFrom(sixtyBesideThirty()); got == nil || got.Name != "1080p30" {
 		t.Errorf("selectFrom with prefer_60fps off selected %v, want 1080p30", got)
 	}
-	o := &DownloadOrchestrator{logger: nopWorkerLogger{}}
+	o := &DownloadOrchestrator{logger: discardLogger{}}
 	qi, err := o.buildTwitchProbeFn(variant)(context.Background())
 	if err != nil {
 		t.Fatalf("probe: %v", err)

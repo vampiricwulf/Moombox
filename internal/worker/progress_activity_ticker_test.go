@@ -23,7 +23,7 @@ func newDBProgressTracker(t *testing.T) (*ProgressTracker, *database.Database) {
 	if _, err := db.AddJob(&database.Job{ID: "act-test", Status: database.StatusDownloading}); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	return NewProgressTracker(db, "act-test", nopProgressLogger{}, 0), db
+	return NewProgressTracker(db, "act-test", discardLogger{}, 0), db
 }
 
 func jobProgress(t *testing.T, db *database.Database) (progress, speed, eta string) {

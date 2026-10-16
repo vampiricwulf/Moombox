@@ -76,107 +76,85 @@ func TestIsUnderDirectory(t *testing.T) {
 	}
 }
 
-// TestDeleteOrphanedFileRefusesActiveJob verifies that DeleteOrphanedFile refuses to
-// remove a staging directory whose owning job has become active between scan and
-// delete. This is the race that reports/worker.md Finding 18 flagged.
-func TestDeleteOrphanedFileRefusesActiveJob(t *testing.T) {
-	dir := t.TempDir()
-	stagingDir := filepath.Join(dir, "staging")
-	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
-		t.Fatal(err)
+// TestDeleteOrphanedFileRefusesProtectedJob verifies that DeleteOrphanedFile
+// refuses to remove the staging directory of a job its pre-delete recheck
+// still protects.
+func TestDeleteOrphanedFileRefusesProtectedJob(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     database.JobStatus
+		fields     map[string]any // applied with UpdateJobFields after AddJob
+		thenCancel bool           // once the job is Cancelled, the delete succeeds
+	}{
+		// ActiveJob: the owning job has become active between scan and delete.
+		// This is the race that reports/worker.md Finding 18 flagged.
+		{name: "ActiveJob", status: database.StatusDownloading, thenCancel: true},
+		// FinishedIncompleteTail: a Finished job flagged IncompleteTail is
+		// protected the same way an active job is: its staging directory +
+		// resume sidecar are deliberately preserved (see Job.IncompleteTail)
+		// so Resume can append the missing tail, and the orphan scanner's
+		// pre-delete recheck must not let that preserved state be deleted.
+		// This pins the fix for the data-loss path where findActiveJobForPath's
+		// activeJobStatuses set omitted StatusFinished entirely.
+		// insertJobExec doesn't carry incomplete_tail — only UpdateJobFields
+		// flips it (see database.TestMigrateV17IncompleteTail).
+		{name: "FinishedIncompleteTail", status: database.StatusFinished, fields: map[string]any{"incomplete_tail": true}},
 	}
-	cfg := &config.MoomboxConfig{Paths: config.PathsConfig{StagingDirectory: stagingDir}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stagingDir := filepath.Join(dir, "staging")
+			if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.MoomboxConfig{Paths: config.PathsConfig{StagingDirectory: stagingDir}}
 
-	dbPath := filepath.Join(dir, "test.db")
-	db, err := database.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+			db, err := database.Open(filepath.Join(dir, "test.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
 
-	jobID := "yt_activeOrphanRaceTest"
-	job := &database.Job{
-		ID:      jobID,
-		VideoID: "activeOrphanRaceTest",
-		URL:     "https://youtube.com/watch?v=activeOrphanRaceTest",
-		Status:  database.StatusDownloading, // active — must not be deletable
-	}
-	if _, err := db.AddJob(job); err != nil {
-		t.Fatal(err)
-	}
+			jobID := "yt_protectedOrphanTest"
+			job := &database.Job{
+				ID:      jobID,
+				VideoID: "protectedOrphanTest",
+				URL:     "https://youtube.com/watch?v=protectedOrphanTest",
+				Status:  tc.status,
+			}
+			if _, err := db.AddJob(job); err != nil {
+				t.Fatal(err)
+			}
+			if tc.fields != nil {
+				if updated := db.UpdateJobFields(jobID, tc.fields); updated == nil {
+					t.Fatalf("UpdateJobFields(%v) returned nil", tc.fields)
+				}
+			}
 
-	jobStagingPath := filepath.Join(stagingDir, jobID)
-	if err := os.MkdirAll(jobStagingPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
+			jobStagingPath := filepath.Join(stagingDir, jobID)
+			if err := os.MkdirAll(jobStagingPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
 
-	if err := DeleteOrphanedFile(jobStagingPath, db, cfg); err == nil {
-		t.Fatal("expected DeleteOrphanedFile to refuse active job's staging dir, got nil error")
-	}
+			if err := DeleteOrphanedFile(jobStagingPath, db, cfg); err == nil {
+				t.Fatal("expected DeleteOrphanedFile to refuse the job's staging dir, got nil error")
+			}
+			if _, err := os.Stat(jobStagingPath); err != nil {
+				t.Errorf("staging dir should still exist after refused delete: %v", err)
+			}
+			if !tc.thenCancel {
+				return
+			}
 
-	if _, err := os.Stat(jobStagingPath); err != nil {
-		t.Errorf("staging dir should still exist after refused delete: %v", err)
-	}
-
-	// Now transition to a terminal state — delete should succeed.
-	db.UpdateJobFields(jobID, map[string]any{"status": database.StatusCancelled})
-	if err := DeleteOrphanedFile(jobStagingPath, db, cfg); err != nil {
-		t.Errorf("expected delete to succeed after job transitioned to Cancelled, got %v", err)
-	}
-	if _, err := os.Stat(jobStagingPath); !os.IsNotExist(err) {
-		t.Errorf("staging dir should be gone after successful delete, got err=%v", err)
-	}
-}
-
-// TestDeleteOrphanedFileRefusesFinishedIncompleteTail verifies that a Finished
-// job flagged IncompleteTail is protected the same way an active job is: its
-// staging directory + resume sidecar are deliberately preserved (see
-// Job.IncompleteTail) so Resume can append the missing tail, and the orphan
-// scanner's pre-delete recheck must not let that preserved state be deleted.
-// This pins the fix for the data-loss path where findActiveJobForPath's
-// activeJobStatuses set omitted StatusFinished entirely.
-func TestDeleteOrphanedFileRefusesFinishedIncompleteTail(t *testing.T) {
-	dir := t.TempDir()
-	stagingDir := filepath.Join(dir, "staging")
-	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.MoomboxConfig{Paths: config.PathsConfig{StagingDirectory: stagingDir}}
-
-	dbPath := filepath.Join(dir, "test.db")
-	db, err := database.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	jobID := "yt_incompleteTailOrphanTest"
-	job := &database.Job{
-		ID:      jobID,
-		VideoID: "incompleteTailOrphanTest",
-		URL:     "https://youtube.com/watch?v=incompleteTailOrphanTest",
-		Status:  database.StatusFinished,
-	}
-	if _, err := db.AddJob(job); err != nil {
-		t.Fatal(err)
-	}
-	// insertJobExec doesn't carry incomplete_tail — only UpdateJobFields
-	// flips it (see database.TestMigrateV17IncompleteTail).
-	if updated := db.UpdateJobFields(jobID, map[string]any{"incomplete_tail": true}); updated == nil {
-		t.Fatal("UpdateJobFields(incomplete_tail) returned nil")
-	}
-
-	jobStagingPath := filepath.Join(stagingDir, jobID)
-	if err := os.MkdirAll(jobStagingPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := DeleteOrphanedFile(jobStagingPath, db, cfg); err == nil {
-		t.Fatal("expected DeleteOrphanedFile to refuse Finished+IncompleteTail job's staging dir, got nil error")
-	}
-
-	if _, err := os.Stat(jobStagingPath); err != nil {
-		t.Errorf("staging dir should still exist after refused delete: %v", err)
+			// Now transition to a terminal state — delete should succeed.
+			db.UpdateJobFields(jobID, map[string]any{"status": database.StatusCancelled})
+			if err := DeleteOrphanedFile(jobStagingPath, db, cfg); err != nil {
+				t.Errorf("expected delete to succeed after job transitioned to Cancelled, got %v", err)
+			}
+			if _, err := os.Stat(jobStagingPath); !os.IsNotExist(err) {
+				t.Errorf("staging dir should be gone after successful delete, got err=%v", err)
+			}
+		})
 	}
 }
 

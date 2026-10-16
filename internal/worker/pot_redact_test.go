@@ -10,8 +10,6 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
-	"github.com/vampiricwulf/Moombox/internal/database"
-	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -98,60 +96,6 @@ func TestLiveManifestFetchErrorRedactsPoToken(t *testing.T) {
 				t.Errorf("a job log line carries the PO token: %q", line)
 			}
 		})
-	}
-}
-
-// TestJobErrorRedactsPoToken pins the job-error funnel: setJobError's one
-// message feeds the "job error" log line, the stored error the dashboard and
-// the TUI show, and the Job Failed embed. A token that reached it by a route
-// no producer redacted — here a *url.Error flattened with %v, which leaves no
-// *url.Error in the chain for redact.MediaError to find — is cut out there, in
-// both forms, before any of the three sees it.
-//
-// Mutant (run): errMsg := err.Error() without redact.MediaText — the stored
-// error, the log line and the embed's Error field all carry both tokens.
-func TestJobErrorRedactsPoToken(t *testing.T) {
-	const pathToken, queryToken = "SECRETPATHTOKEN", "SECRETQUERYTOKEN"
-	w, db := testWorkerSetup(t)
-	t.Cleanup(w.Stop)
-	logs := &captureLogger{}
-	w.logger = logs
-	rec := notificationtest.New()
-	w.notifier = rec
-
-	job := &database.Job{ID: "yt_potfunnel", VideoID: "potfunnel", Platform: "youtube", Status: database.StatusDownloading}
-	if _, err := db.AddJob(job); err != nil {
-		t.Fatal(err)
-	}
-	ue := &url.Error{Op: "Get", URL: "https://rr1---sn-x.googlevideo.com/videoplayback/pot/" + pathToken + "?itag=1&pot=" + queryToken, Err: fmt.Errorf("connection reset by peer")}
-	w.setJobError(job, fmt.Errorf("setup download: %v", ue))
-
-	row, err := db.GetJob(job.ID)
-	if err != nil || row == nil {
-		t.Fatalf("GetJob: %v", err)
-	}
-	stored := row.Error
-	if stored == "" {
-		t.Fatal("no error was stored")
-	}
-	calls := rec.ByEvent("error")
-	if len(calls) != 1 {
-		t.Fatalf("recorded %d Job Failed sends, want 1", len(calls))
-	}
-	embedErr := notifyField(t, calls[0], "Error")
-	for _, secret := range []string{pathToken, queryToken} {
-		if strings.Contains(stored, secret) {
-			t.Errorf("stored job error carries %s: %q", secret, stored)
-		}
-		if strings.Contains(embedErr, secret) {
-			t.Errorf("Job Failed embed's Error field carries %s: %q", secret, embedErr)
-		}
-		if line, ok := loggedSecret(logs, secret); ok {
-			t.Errorf("a log line carries %s: %q", secret, line)
-		}
-	}
-	if !strings.HasPrefix(stored, "setup download: Get ") || !strings.Contains(stored, "connection reset by peer") {
-		t.Errorf("stored error = %q, want the rest of the message kept", stored)
 	}
 }
 

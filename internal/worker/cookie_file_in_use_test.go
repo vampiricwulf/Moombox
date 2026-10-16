@@ -20,7 +20,7 @@ import (
 // Mutant: the advice reading the setting first again.
 func TestFailedRefreshAdviceNamesTheCookieFileInUse(t *testing.T) {
 	w, _ := testWorkerSetup(t)
-	log := &fieldCaptureLogger{}
+	log := &captureLogger{}
 	w.logger = log
 	cfg := config.Defaults()
 	cfg.Cookies.CookieFile = "/new/cookies.txt" // saved, restart declined
@@ -50,7 +50,7 @@ func TestFailedRefreshAdviceNamesTheCookieFileInUse(t *testing.T) {
 func TestHeldProfileSkipIsNotCalledAFailedRefresh(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	t.Cleanup(w.Stop)
-	log := &fieldCaptureLogger{}
+	log := &captureLogger{}
 	w.logger = log
 	w.CookieFileInUse = func() string { return "/boot/cookies.txt" }
 	job := parkedRun(t, w, db, "held_profile", false)
@@ -70,13 +70,11 @@ func TestHeldProfileSkipIsNotCalledAFailedRefresh(t *testing.T) {
 	if got, logged := log.field("the job stays parked — the automatic cookie refresh was skipped, not failed", "jobID"); !logged || got != job.ID {
 		t.Errorf("parked line: jobID %v (logged %v), want %s", got, logged, job.ID)
 	}
-	log.mu.Lock()
-	for _, line := range log.lines {
+	for _, line := range log.lines() {
 		if msg, _ := line[0].(string); strings.HasPrefix(msg, "auto cookie refresh failed") {
 			t.Errorf("a skipped refresh logged %q %v", msg, line[1:])
 		}
 	}
-	log.mu.Unlock()
 	if row, _ := db.GetJob(job.ID); row == nil || row.Status != database.StatusCookies {
 		t.Errorf("row = %+v, want it still parked in COOKIES?", row)
 	}

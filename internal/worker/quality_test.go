@@ -70,6 +70,8 @@ func TestQualityInfoChanged(t *testing.T) {
 			changed: false, // FPS-only changes are ignored
 		},
 		{
+			// A real resolution change after ErrQualityLost: the split
+			// should occur.
 			name:    "different height",
 			a:       QualityInfo{Width: 1920, Height: 1080, FPS: 60},
 			b:       QualityInfo{Width: 1280, Height: 720, FPS: 60},
@@ -82,6 +84,8 @@ func TestQualityInfoChanged(t *testing.T) {
 			changed: true,
 		},
 		{
+			// ErrQualityLost fired but the re-fetched quality is identical:
+			// the orchestrator must NOT split — a spurious split would occur.
 			name:    "identical",
 			a:       QualityInfo{Width: 1920, Height: 1080, FPS: 60},
 			b:       QualityInfo{Width: 1920, Height: 1080, FPS: 60},
@@ -102,23 +106,5 @@ func TestQualityInfoChanged(t *testing.T) {
 				t.Errorf("QualityInfo.Changed() = %v, want %v", got, tt.changed)
 			}
 		})
-	}
-}
-
-func TestQualityInfo_SameQualityAfterTransientError(t *testing.T) {
-	// Simulates the scenario where ErrQualityLost fires but re-fetched quality is identical.
-	// The orchestrator should NOT split when Changed() returns false.
-	current := QualityInfo{Width: 1920, Height: 1080, FPS: 60, Label: "1080p60"}
-	refetched := QualityInfo{Width: 1920, Height: 1080, FPS: 60, Label: "1080p60"}
-	if current.Changed(refetched) {
-		t.Error("Changed() should return false for identical quality — spurious split would occur")
-	}
-}
-
-func TestQualityInfo_DifferentQualityAfterRealChange(t *testing.T) {
-	current := QualityInfo{Width: 1920, Height: 1080, FPS: 60, Label: "1080p60"}
-	refetched := QualityInfo{Width: 1280, Height: 720, FPS: 60, Label: "720p60"}
-	if !current.Changed(refetched) {
-		t.Error("Changed() should return true for different resolution — split should occur")
 	}
 }

@@ -57,23 +57,11 @@ func TestOrphanSweepLeavesAnInProgressTrimAlone(t *testing.T) {
 	if _, err := db.AddJob(job); err != nil {
 		t.Fatal(err)
 	}
-	gates := t.TempDir()
-	started, release := filepath.Join(gates, "started"), filepath.Join(gates, "release")
-	ts := NewTrimService(db, writeBlockingFFmpeg(t, started, release), &discardLogger{})
-
-	done := make(chan error, 1)
-	go func() {
+	ts := NewTrimService(db, "", &discardLogger{})
+	release := runBlocked(t, ts.SetFfmpegPath, func() error {
 		_, err := ts.CreateTrim(context.Background(), job, 0, 10, nil)
-		done <- err
-	}()
-	released := false
-	defer func() {
-		if !released {
-			os.WriteFile(release, nil, 0o644)
-			<-done
-		}
-	}()
-	waitForFile(t, started)
+		return err
+	})
 
 	trims := mp4sIn(t, filepath.Join(outputDir, "trim"))
 	if len(trims) != 1 {
@@ -83,11 +71,7 @@ func TestOrphanSweepLeavesAnInProgressTrimAlone(t *testing.T) {
 	cfg := &config.MoomboxConfig{Paths: config.PathsConfig{OutputDirectory: outputDir, StagingDirectory: t.TempDir()}}
 	assertSweepSpares(t, db, cfg, trim)
 
-	if err := os.WriteFile(release, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	released = true
-	<-done
+	release()
 	if owner := outputClaimOwner(trim); owner != "" {
 		t.Errorf("the trim's claim outlived its encode (owner %q)", owner)
 	}
@@ -112,24 +96,11 @@ func TestOrphanSweepLeavesAnInProgressAsideRecoveryAlone(t *testing.T) {
 	if err := os.WriteFile(aside, []byte("set aside"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gates := t.TempDir()
-	started, release := filepath.Join(gates, "started"), filepath.Join(gates, "release")
-	w.orchestrator.SetFfmpegPath(writeBlockingFFmpeg(t, started, release))
-
-	done := make(chan error, 1)
-	go func() {
+	release := runBlocked(t, w.orchestrator.SetFfmpegPath, func() error {
 		err := w.RecoverAsides("j-recover-claim")
 		w.Stop()
-		done <- err
-	}()
-	released := false
-	defer func() {
-		if !released {
-			os.WriteFile(release, nil, 0o644)
-			<-done
-		}
-	}()
-	waitForFile(t, started)
+		return err
+	})
 
 	outs := mp4sIn(t, outputDir)
 	if len(outs) != 1 {
@@ -140,11 +111,7 @@ func TestOrphanSweepLeavesAnInProgressAsideRecoveryAlone(t *testing.T) {
 	cfg := &config.MoomboxConfig{Paths: config.PathsConfig{OutputDirectory: outputDir, StagingDirectory: stagingBase}}
 	assertSweepSpares(t, db, cfg, filepath.Join(outputDir, outs[0]), staging)
 
-	if err := os.WriteFile(release, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	released = true
-	<-done
+	release()
 	if owner := outputClaimOwner(staging); owner != "" {
 		t.Errorf("the staging claim outlived the recovery (owner %q)", owner)
 	}

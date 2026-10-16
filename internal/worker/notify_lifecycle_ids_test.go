@@ -1,24 +1,21 @@
 package worker
 
 import (
-	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
-	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
-	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
-// assertCarriesItsJob is the one assertion every row below makes: the embed
-// this producer sent names its job.
+// assertCarriesItsJob is the assertion every row of
+// TestHandBuiltSendsEscapeAndCarryTheirJob (notify_escape_test.go) makes
+// beside its escaping: the embed this producer sent names its job.
 //
 // Three fields, not one, because they arrive together and are useless apart.
 // JobID is what Manager.planLifecycle (internal/notifications/lifecycle.go)
@@ -44,204 +41,32 @@ func assertCarriesItsJob(t *testing.T, rec *notificationtest.Recorder, event str
 	}
 }
 
-// TestLifecycleScheduleSendsCarryTheirJob covers the `scheduled` and
-// `rescheduled` halves of updateJobMetadata, driven exactly as
-// TestStreamProcessorNotifiesThroughTheSenderSeam drives the first of them.
-//
-// One processor and one row for both: the reschedule only fires on a refresh
-// whose ScheduledStartTime differs from the one already stored, so the second
-// call needs the first one's write.
-func TestLifecycleScheduleSendsCarryTheirJob(t *testing.T) {
-	db, err := database.Open(filepath.Join(t.TempDir(), "sched.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	rec := notificationtest.New()
-	sp := &StreamProcessor{db: db, notifier: rec}
-
-	if _, err := db.AddJob(&database.Job{
-		ID: "yt_sched", VideoID: "sched", Platform: "youtube",
-		Status: database.StatusUpcoming,
-	}); err != nil {
-		t.Fatalf("AddJob: %v", err)
-	}
-	stored, err := db.GetJob("yt_sched")
-	if err != nil {
-		t.Fatalf("GetJob: %v", err)
-	}
-
-	// First sight: no stored start time, so the confirmation fires.
-	sp.updateJobMetadata(stored, &youtube.VideoInfo{
-		Title:              "A Scheduled Stream",
-		ChannelName:        "A Channel",
-		ScheduledStartTime: "2026-10-01T12:00:00Z",
-		IsUpcoming:         true,
-	}, false)
-	// A refresh that moves the time, with the stream still upcoming: the
-	// reschedule fires and the confirmation does not fire twice.
-	sp.updateJobMetadata(stored, &youtube.VideoInfo{
-		Title:              "A Scheduled Stream",
-		ChannelName:        "A Channel",
-		ScheduledStartTime: "2026-10-01T14:00:00Z",
-		IsUpcoming:         true,
-	}, true)
-
-	assertCarriesItsJob(t, rec, "scheduled", stored)
-	assertCarriesItsJob(t, rec, "rescheduled", stored)
-}
-
-// TestLifecycleSplitSendsCarryTheirJob covers `gap_split` and `quality_split`,
-// the two mid-download part boundaries.
-func TestLifecycleSplitSendsCarryTheirJob(t *testing.T) {
+// TestChannelLessRowCarriesNoAuthorButNamesItsJob is the unknown-channel arm
+// of the shape assertCarriesItsJob checks: a row with no channel name (a
+// manual `moombox add` of a bare URL) must carry NO author object — Discord
+// answers an author with an empty name with a 400, and DiscordWebhook.Send
+// treats a non-429 4xx as permanent, so the embed would be lost rather than
+// degraded. JobID and Platform still travel.
+func TestChannelLessRowCarriesNoAuthorButNamesItsJob(t *testing.T) {
 	rec := notificationtest.New()
 	o := &DownloadOrchestrator{notifier: rec, logger: discardLogger{}}
-	job := &database.Job{
-		ID: "tw_split", VideoID: "split", Platform: "twitch",
-		Title: "A Stream", ChannelName: "A Channel",
-		URL: "https://twitch.tv/videos/split",
+	anon := &database.Job{
+		ID: "tw_anon", VideoID: "anon", Platform: "twitch",
+		Title: "A Stream", URL: "https://twitch.tv/videos/anon",
 	}
-	jobCtx := &JobContext{Job: job}
+	o.sendGapSplitNotification(&JobContext{Job: anon}, 0, QualityInfo{Label: "1080p60"})
 
-	o.sendGapSplitNotification(jobCtx, 0, QualityInfo{Label: "1080p60"})
-	o.sendQualitySplitNotification(jobCtx, "Twitch",
-		QualityInfo{Label: "1080p60"}, QualityInfo{Label: "720p60"}, 1, true)
-
-	assertCarriesItsJob(t, rec, "gap_split", job)
-	assertCarriesItsJob(t, rec, "quality_split", job)
-
-	// The unknown-channel arm of the same shape: a row with no channel name
-	// (a manual `moombox add` of a bare URL) must carry NO author object —
-	// Discord answers an author with an empty name with a 400, and
-	// DiscordWebhook.Send treats a non-429 4xx as permanent, so the embed
-	// would be lost rather than degraded. JobID and Platform still travel.
-	t.Run("a channel-less row carries no author but still names its job", func(t *testing.T) {
-		rec := notificationtest.New()
-		o := &DownloadOrchestrator{notifier: rec, logger: discardLogger{}}
-		anon := &database.Job{
-			ID: "tw_anon", VideoID: "anon", Platform: "twitch",
-			Title: "A Stream", URL: "https://twitch.tv/videos/anon",
-		}
-		o.sendGapSplitNotification(&JobContext{Job: anon}, 0, QualityInfo{Label: "1080p60"})
-
-		got := rec.ByEvent("gap_split")
-		if len(got) != 1 {
-			t.Fatalf("gap_split sends = %d, want 1", len(got))
-		}
-		if got[0].Opts.Author != nil {
-			t.Errorf("Author = %+v, want nil for a row with no channel name", got[0].Opts.Author)
-		}
-		if got[0].Opts.JobID != anon.ID || got[0].Opts.Platform != anon.Platform {
-			t.Errorf("JobID/Platform = %q/%q, want %q/%q — the author is the only field the unknown channel costs",
-				got[0].Opts.JobID, got[0].Opts.Platform, anon.ID, anon.Platform)
-		}
-	})
-}
-
-// TestTrimSendsCarryTheirJob covers the last two producers that built their
-// SendOptions by hand: `trim_error` (sendTrimFailed, orchestrator.go) and
-// `trim_deleted` (TrimService.DeleteTrim, trim.go).
-//
-// Neither is a lifecycle event — both stay separate posts, which is what lets
-// them ping an edit-mode target — but the footer's platform, the author line
-// and the dashboard deep link are the job's either way, and Manager.Send
-// applies the deep link only when publicURL, JobID and Author are all there.
-// This closes the last of the "bare SendOptions" sites (N2b review L2).
-func TestTrimSendsCarryTheirJob(t *testing.T) {
-	db, err := database.Open(filepath.Join(t.TempDir(), "trim.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
+	got := rec.ByEvent("gap_split")
+	if len(got) != 1 {
+		t.Fatalf("gap_split sends = %d, want 1", len(got))
 	}
-	t.Cleanup(func() { db.Close() })
-
-	job := &database.Job{
-		ID: "yt_trim", VideoID: "trim", Platform: "youtube",
-		Title: "A Job", ChannelName: "A Channel",
-		Status: database.StatusFinished,
+	if got[0].Opts.Author != nil {
+		t.Errorf("Author = %+v, want nil for a row with no channel name", got[0].Opts.Author)
 	}
-	if _, err := db.AddJob(job); err != nil {
-		t.Fatalf("AddJob: %v", err)
+	if got[0].Opts.JobID != anon.ID || got[0].Opts.Platform != anon.Platform {
+		t.Errorf("JobID/Platform = %q/%q, want %q/%q — the author is the only field the unknown channel costs",
+			got[0].Opts.JobID, got[0].Opts.Platform, anon.ID, anon.Platform)
 	}
-
-	t.Run("trim_error", func(t *testing.T) {
-		rec := notificationtest.New()
-		o := &DownloadOrchestrator{db: db, notifier: rec, logger: discardLogger{}}
-		o.sendTrimFailed(job, errors.New("ffmpeg: exit status 1"))
-		assertCarriesItsJob(t, rec, "trim_error", job)
-	})
-
-	t.Run("trim_deleted", func(t *testing.T) {
-		rec := notificationtest.New()
-		if err := db.AddTrim(&database.TrimRecord{
-			ID: "trim1", JobID: job.ID, StartTime: 10, EndTime: 40,
-			Filename: "clip.mp4", CreatedAt: "2026-09-27T00:00:00Z", Duration: 30,
-		}); err != nil {
-			t.Fatalf("AddTrim: %v", err)
-		}
-		ts := NewTrimService(db, "ffmpeg", discardLogger{})
-		ts.SetNotifier(rec)
-		if err := ts.DeleteTrim(job.ID, "trim1"); err != nil {
-			t.Fatalf("DeleteTrim: %v", err)
-		}
-		assertCarriesItsJob(t, rec, "trim_deleted", job)
-	})
-}
-
-// TestLifecycleMuxingSendCarriesItsJob covers `muxing`. sendMuxingStarting
-// re-reads the row before building its embed, so the fixture writes the
-// channel the author line needs to the DATABASE, not just to the JobContext.
-func TestLifecycleMuxingSendCarriesItsJob(t *testing.T) {
-	db, err := database.Open(filepath.Join(t.TempDir(), "mux.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	job := &database.Job{
-		ID: "yt_muxid", VideoID: "muxid", Platform: "youtube",
-		Title: "A Job", ChannelName: "A Channel",
-		Status: database.StatusDownloading,
-	}
-	if _, err := db.AddJob(job); err != nil {
-		t.Fatalf("AddJob: %v", err)
-	}
-	stored, err := db.GetJob(job.ID)
-	if err != nil {
-		t.Fatalf("GetJob: %v", err)
-	}
-
-	rec := notificationtest.New()
-	o := &DownloadOrchestrator{db: db, notifier: rec, logger: discardLogger{}}
-	o.sendMuxingStarting(&JobContext{Job: stored})
-
-	assertCarriesItsJob(t, rec, "muxing", stored)
-}
-
-// TestLifecycleTwitchSessionSendsCarryTheirJob covers both keys
-// sendTwitchSessionNotification delivers. The event stays a PARAMETER of that
-// helper — only the three identity fields are added — so both of its callers
-// have to be exercised to prove the change is in the helper and not in one
-// call site.
-func TestLifecycleTwitchSessionSendsCarryTheirJob(t *testing.T) {
-	rec := notificationtest.New()
-	o := &DownloadOrchestrator{notifier: rec, logger: discardLogger{}}
-	job := &database.Job{
-		ID: "tw_sess", VideoID: "sess", Platform: "twitch",
-		Title: "A Stream", ChannelName: "A Channel",
-		URL: "https://twitch.tv/videos/sess",
-	}
-	jobCtx := &JobContext{Job: job}
-
-	o.sendTwitchSessionNotification(jobCtx, "Twitch Download Resumed",
-		"Connectivity restored, resuming download: "+job.Title,
-		notifications.TypeDownload, "connectivity_resume", QualityInfo{Label: "1080p60"}, 2)
-	o.sendTwitchSessionNotification(jobCtx, "Twitch Download Finalizing — Connectivity Lost",
-		"Connectivity lost during download: "+job.Title,
-		notifications.TypeDownload, "connectivity_split", QualityInfo{Label: "1080p60"}, 3)
-
-	assertCarriesItsJob(t, rec, "connectivity_resume", job)
-	assertCarriesItsJob(t, rec, "connectivity_split", job)
 }
 
 // TestEveryLifecycleSendCarriesItsJob parses internal/worker and fails any

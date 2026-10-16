@@ -18,7 +18,7 @@ import (
 // stagedSegDirs must never surface a tombstoned dir to ANY of its three
 // consumers, or that content gets resurrected: re-persisted (duplication)
 // by muxUnrecordedSegments/hasUnmuxedPartsForJob, or captured as a live
-// resume target by discoverResumeSegment.
+// resume target by discoverResumeSegment (a TestDiscoverResumeSegment case).
 
 func stageRawMedia(t *testing.T, dir string) {
 	t.Helper()
@@ -89,46 +89,6 @@ func TestHasUnmuxedPartsForJobSkipsTombstoned(t *testing.T) {
 			t.Error("hasUnmuxedPartsForJob = false without a tombstone, want true -- proves the tombstone (not something else) is what suppressed it above")
 		}
 	})
-}
-
-// TestDiscoverResumeSegmentSkipsTombstoned: a tombstoned seg_N dir must
-// never be handed back as a resume target -- appending fresh download data
-// into a dir whose content the merge already consumed would corrupt or
-// duplicate that content.
-func TestDiscoverResumeSegmentSkipsTombstoned(t *testing.T) {
-	dir := t.TempDir()
-	db, err := database.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	jobID := "j_tombstoneResume"
-	if _, err := db.AddJob(&database.Job{ID: jobID, VideoID: jobID, URL: "u"}); err != nil {
-		t.Fatal(err)
-	}
-
-	staging := filepath.Join(dir, "staging")
-	stageRawMedia(t, staging)                         // root, part 0
-	stageRawMedia(t, filepath.Join(staging, "seg_1")) // highest staged part, tombstoned/superseded
-	writeTombstone(t, filepath.Join(staging, "seg_1"))
-	if err := db.AddSegment(&database.Segment{JobID: jobID, SegmentIndex: 0, Quality: "1080p60", Filename: "x.mp4"}); err != nil {
-		t.Fatal(err)
-	}
-
-	o := &DownloadOrchestrator{db: db, logger: &discardLogger{}}
-	jobCtx := &JobContext{Job: &database.Job{ID: jobID}, StagingDir: staging}
-
-	idx, resumeDir := o.discoverResumeSegment(jobCtx)
-
-	// seg_1 must be invisible entirely -- with it hidden, the only
-	// recorded part is 0, so the next fresh index is 1, in a BRAND NEW
-	// seg_1 dir the caller will MkdirAll -- NOT the tombstoned one (which
-	// happens to share the same path here, but discoverResumeSegment must
-	// treat it as absent, not as an existing dir to append into).
-	if idx != 1 || resumeDir != filepath.Join(staging, "seg_1") {
-		t.Errorf("discoverResumeSegment = (%d, %q), want (1, fresh seg_1) -- the tombstoned dir must not be reused as a live append target", idx, resumeDir)
-	}
 }
 
 // TestMuxUnrecordedSegmentsSkipsTombstoned: a tombstoned dir must never be
