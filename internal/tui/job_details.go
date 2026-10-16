@@ -327,21 +327,40 @@ type AsideEntry struct {
 	HasResumeSidecar bool
 }
 
+// MuxGapEntry is one staged recording a mux could not carry whole, as the
+// TUI shows it: internal/worker's MuxGap re-declared, as AsideEntry is.
+type MuxGapEntry struct {
+	// Path is the staged recording.
+	Path string
+	// Reason is its record's account: the stretches left out of which file,
+	// or why nothing could check the copy.
+	Reason string
+}
+
 // AsideSummary is one job's staging directory as the details panel reads it.
 type AsideSummary struct {
 	Asides          []AsideEntry
 	KeptChatSidecar bool
+	// MuxGaps is what keeps a Finished job's staging for a mux gap
+	// (worker.ScanMuxGaps) — the only account of it once the job's in-memory
+	// log is gone.
+	MuxGaps []MuxGapEntry
 }
 
 // sameAs reports whether two summaries would render identically, so SetAsides
 // can skip a rebuild. The App calls SetAsides from updateSelectedJob, which
 // also runs on every JobsUpdateMsg.
 func (s AsideSummary) sameAs(other AsideSummary) bool {
-	if s.KeptChatSidecar != other.KeptChatSidecar || len(s.Asides) != len(other.Asides) {
+	if s.KeptChatSidecar != other.KeptChatSidecar || len(s.Asides) != len(other.Asides) || len(s.MuxGaps) != len(other.MuxGaps) {
 		return false
 	}
 	for i := range s.Asides {
 		if s.Asides[i] != other.Asides[i] {
+			return false
+		}
+	}
+	for i := range s.MuxGaps {
+		if s.MuxGaps[i] != other.MuxGaps[i] {
 			return false
 		}
 	}
@@ -723,6 +742,25 @@ func (m *JobDetailsModel) buildRows() {
 			chat = "kept in staging"
 		}
 		m.addField("Chat Capture", chat)
+	}
+
+	// === Kept for a Mux Gap ===
+	// A staged recording a mux could not carry whole — a damaged fragment's
+	// unreadable bytes left out of a repaired copy, or a copy nothing could
+	// check against the recording's own fragments — keeps the staging dir,
+	// with no age rule (worker.ScanMuxGaps). The job's log said why, and is
+	// gone after a restart; this is what says so then. The reason is long —
+	// byte and time ranges, the file it was muxed into — so it is wrapped
+	// under its recording's name rather than truncated beside it.
+	if n := len(m.asides.MuxGaps); n > 0 {
+		m.rows = append(m.rows, detailRow{kind: rowSeparator})
+		m.rows = append(m.rows, detailRow{kind: rowHeader, label: fmt.Sprintf("Kept for a Mux Gap (%d)", n)})
+		for i, g := range m.asides.MuxGaps {
+			m.addField(fmt.Sprintf("Recording %d", i+1), filepath.Base(g.Path))
+			for _, line := range wrapText(g.Reason, m.blockWrapWidth()) {
+				m.rows = append(m.rows, detailRow{kind: rowField, value: line})
+			}
+		}
 	}
 
 	// === Description ===

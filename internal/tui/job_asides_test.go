@@ -363,3 +363,77 @@ func TestDetailsLabelsMatchTheDashboard(t *testing.T) {
 		}
 	}
 }
+
+// muxGapRows returns the details panel's Kept for a Mux Gap block, header
+// first, up to the next separator.
+func muxGapRows(m *JobDetailsModel) []detailRow {
+	var out []detailRow
+	in := false
+	for _, r := range m.rows {
+		if r.kind == rowHeader && strings.HasPrefix(r.label, "Kept for a Mux Gap") {
+			in = true
+			out = append(out, r)
+			continue
+		}
+		if !in {
+			continue
+		}
+		if r.kind == rowSeparator || r.kind == rowHeader {
+			break
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// TestDetailsPanelSaysWhyStagingIsKeptForAMuxGap: a Finished job whose
+// staging is kept because a mux could not carry a staged recording whole
+// says which recording and why, as the dashboard does — the job's log said so
+// first, but that log is in memory and gone after a restart, and the shield
+// has no age rule. The reason is wrapped, not truncated: its time range and
+// the file it names sit past any one row's width.
+//
+// Mutants this kills:
+//   - no section: muxGapRows is empty.
+//   - the reason truncated into the field beside the name: its tail (the
+//     time range) is not on any row.
+//   - sameAs ignoring MuxGaps: a changed reason is never rebuilt.
+//   - the header emitted unconditionally: the job with none grows a section.
+func TestDetailsPanelSaysWhyStagingIsKeptForAMuxGap(t *testing.T) {
+	m := NewJobDetailsModel()
+	m.SetSize(60, 40)
+	m.SetJob(&database.Job{ID: "j1", Title: "t", VideoID: "v", Status: database.StatusFinished, Platform: "youtube"})
+	if rows := muxGapRows(m); len(rows) != 0 {
+		t.Fatalf("a job with no mux gap grew a %d-row section", len(rows))
+	}
+	reason := "1 damaged stretch(es) (9775 bytes, 2.0s) were left out of /out/Chan/a.mp4: bytes 10-20 (10 bytes): video 0:01:40.0 to 0:01:42.0 (2.0s)"
+	m.SetAsides(AsideSummary{MuxGaps: []MuxGapEntry{{Path: "/staging/j1/video_stream", Reason: reason}}})
+
+	rows := muxGapRows(m)
+	if len(rows) == 0 {
+		t.Fatal("the details panel shows no Kept for a Mux Gap section for a job that has one")
+	}
+	if rows[0].label != "Kept for a Mux Gap (1)" {
+		t.Errorf("header = %q, want %q", rows[0].label, "Kept for a Mux Gap (1)")
+	}
+	// The wrapped lines, joined back with the spaces the wrap broke at.
+	var parts []string
+	for _, r := range rows[1:] {
+		parts = append(parts, strings.TrimSpace(r.label+" "+r.value))
+	}
+	body := strings.Join(parts, " ")
+	for _, want := range []string{"Recording 1 video_stream", "1 damaged stretch(es)", "/out/Chan/a.mp4", "0:01:40.0 to 0:01:42.0 (2.0s)"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the section does not say %q; rows were:\n%s", want, strings.Join(parts, "\n"))
+		}
+	}
+
+	m.SetAsides(AsideSummary{MuxGaps: []MuxGapEntry{{Path: "/staging/j1/video_stream", Reason: "the copy into /out/a.mp4 could not be checked against its fragments: unreadable"}}})
+	body = ""
+	for _, r := range muxGapRows(m) {
+		body += r.value + "\n"
+	}
+	if !strings.Contains(body, "could not be checked") {
+		t.Errorf("a changed reason was not rebuilt; rows were:\n%s", body)
+	}
+}

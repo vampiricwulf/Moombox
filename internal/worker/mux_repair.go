@@ -729,6 +729,32 @@ func stagedMuxGaps(stagingDir string) []muxGapNote {
 	return out
 }
 
+// MuxGap is one staged recording a mux could not carry whole, as both UIs'
+// job details show it. It is the only account of why a Finished job's
+// staging is kept for a mux gap — with no age rule — once the job log that
+// said so is gone: that log lives in memory, so a restart takes it, and on a
+// long capture its cap pushes a part mux's line out.
+type MuxGap struct {
+	// Path is the staged recording.
+	Path string `json:"path"`
+	// Reason is its record's account (muxGapRecord.reason): the stretches
+	// left out of which file, or why nothing could check the copy.
+	Reason string `json:"reason"`
+}
+
+// ScanMuxGaps reports the staged recordings in one job's staging tree that a
+// mux could not carry whole: the staging-cleanup shield (stagedMuxGaps), as
+// GET /api/jobs/{id} and the TUI's details panel show it. Takes (stagingBase,
+// jobID) as ScanAsides does. Never nil: the dashboard reads .length off it.
+func ScanMuxGaps(stagingBase, jobID string) []MuxGap {
+	notes := stagedMuxGaps(filepath.Join(stagingBase, jobID))
+	out := make([]MuxGap, 0, len(notes))
+	for _, n := range notes {
+		out = append(out, MuxGap{Path: n.path, Reason: n.rec.reason()})
+	}
+	return out
+}
+
 // archiveOutputs is what a finished job's archive is made of, as
 // muxGapSummary tells a record about the archive from one about a file beside
 // it: the row's output file and its parts' files, and whether it finalized as

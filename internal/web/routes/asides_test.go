@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -147,5 +148,56 @@ func TestRecoverAsidesRouteAcceptsARecoverableJob(t *testing.T) {
 	}
 	if got["success"] != true {
 		t.Errorf("body = %v, want {\"success\": true} — the same shape /mux answers with", got)
+	}
+}
+
+// TestJobPayloadCarriesTheMuxGaps: a Finished job whose staging is kept
+// because a mux could not carry a staged recording whole says so in GET
+// /api/jobs/{id}, from the record beside the recording — the job's own log,
+// which said so first, is in memory and gone after a restart, and the shield
+// has no age rule. A job with no record answers [].
+//
+// Mutants this kills:
+//   - dropping MuxGaps from enrichJob: `muxGaps` is absent from the body.
+//   - ScanMuxGaps returning a nil slice: `muxGaps` is null for j2.
+func TestJobPayloadCarriesTheMuxGaps(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "j1", func(j *database.Job) { j.Status = database.StatusFinished })
+	f.addJob(t, "j2", func(j *database.Job) { j.Status = database.StatusFinished })
+	dir := filepath.Join(f.stagingDir, "j1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	media := filepath.Join(dir, "video_stream")
+	if err := os.WriteFile(media, make([]byte, 64), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The record a repaired mux leaves (data-and-storage.md, "Damaged
+	// fragments"): it holds while the recording is there at its size.
+	rec := `{"size":64,"output":"a.mp4","dropped":["bytes 10-20 (10 bytes): video 0:01:40.0 to 0:01:42.0 (2.0s)"],"droppedBytes":10,"gapSeconds":2,"at":"2026-10-16T00:00:00Z"}`
+	if err := os.WriteFile(media+".mux-gaps.json", []byte(rec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var got struct {
+		MuxGaps []struct {
+			Path   string `json:"path"`
+			Reason string `json:"reason"`
+		} `json:"muxGaps"`
+	}
+	body := f.getJSON(t, "/api/jobs/j1", &got)
+	if len(got.MuxGaps) != 1 || got.MuxGaps[0].Path != media {
+		t.Fatalf("muxGaps = %+v, want the one recording; body = %s", got.MuxGaps, body)
+	}
+	if r := got.MuxGaps[0].Reason; !strings.Contains(r, "damaged stretch") || !strings.Contains(r, "0:01:40.0 to 0:01:42.0") || !strings.Contains(r, "a.mp4") {
+		t.Errorf("reason = %q, want the record's stretches and the file they were left out of", r)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(f.getJSON(t, "/api/jobs/j2", nil)), &raw); err != nil {
+		t.Fatalf("unmarshal j2: %v", err)
+	}
+	if string(raw["muxGaps"]) != "[]" {
+		t.Errorf("a job with no mux gap reports muxGaps = %s, want []", raw["muxGaps"])
 	}
 }

@@ -47,6 +47,13 @@ type jobWithStaging struct {
 	// recover it. Always false for any other status, whose Mux gate is
 	// HasSegments.
 	UnmuxedParts bool `json:"unmuxedParts"`
+	// MuxGaps names each staged recording a mux could not carry whole — its
+	// damaged bytes left out of a repaired copy, or a copy nothing could
+	// check against its fragments — with its record's reason
+	// (worker.ScanMuxGaps). It is what keeps a Finished job's staging, with
+	// no age rule, and the only place that says so once the job's in-memory
+	// log is gone. Never null.
+	MuxGaps []worker.MuxGap `json:"muxGaps"`
 }
 
 // enrichJob adds computed staging fields to a job response.
@@ -59,6 +66,7 @@ func enrichJob(db *database.Database, job *database.Job, stagingBase string) job
 		Asides:          report.Groups,
 		KeptChatSidecar: report.KeptChatSidecar,
 		UnmuxedParts:    job.Status == database.StatusFinished && worker.HasUnmuxedParts(db, stagingBase, job.ID),
+		MuxGaps:         worker.ScanMuxGaps(stagingBase, job.ID),
 	}
 }
 

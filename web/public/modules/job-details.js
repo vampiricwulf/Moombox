@@ -182,12 +182,14 @@ export class JobDetailsController {
       job.asides = Array.isArray(enriched.asides) ? enriched.asides : [];
       job.keptChatSidecar = !!enriched.keptChatSidecar;
       job.unmuxedParts = !!enriched.unmuxedParts;
+      job.muxGaps = Array.isArray(enriched.muxGaps) ? enriched.muxGaps : [];
       // Re-evaluate button visibility if the dialog is still on this job
       if (this.app.selectedJobId === jobId && document.getElementById("details-dialog").open) {
-        if (job.asides.length > 0) {
-          // The section is part of the rendered body, not a static element, so
-          // it can only appear on a rebuild. Rare by construction: only a job
-          // that restarted mid-stream has asides at all.
+        if (job.asides.length > 0 || job.muxGaps.length > 0) {
+          // The sections are part of the rendered body, not static elements,
+          // so they can only appear on a rebuild. Rare by construction: only a
+          // job that restarted mid-stream has asides at all, and only one
+          // whose staged recording had a damaged fragment has a mux gap.
           this.renderJobDetails(job);
           this.loadJobLogs(jobId);
         } else {
@@ -814,6 +816,28 @@ export class JobDetailsController {
           <div class="details-row"><span class="details-label"></span><span class="details-value" style="color: var(--sl-color-neutral-600); font-size: 0.9em;">Footage the engine preserved when it could not resume a recording mid-stream. Recover muxes each one into its own file beside the archive; they overlap the archive's opening, so they are never merged into it.</span></div>
           ${rows}
         </div>`;
+      })()}${(() => {
+        // The staging-cleanup shield a mux gap leaves (worker.ScanMuxGaps,
+        // GET /api/jobs/{id}'s muxGaps): the only account of why a Finished
+        // job's staging is kept for one once the job's in-memory log is gone.
+        // Rendered with no whitespace of its own, so a job without one draws
+        // exactly the body app.test.mjs's snapshot pins.
+        const gaps = Array.isArray(job.muxGaps) ? job.muxGaps : [];
+        if (gaps.length === 0) return "";
+        let rows = "";
+        gaps.forEach((gap, i) => {
+          const path = gap.path || "";
+          const name = path.split(/[\\/]/).pop();
+          rows += `<div class="details-row">
+            <span class="details-label">Recording ${i + 1}:</span>
+            <span class="details-value" title="${this.app.escapeHtml(path)}">${this.app.escapeHtml(name)} — ${this.app.escapeHtml(gap.reason || "")}</span>
+          </div>`;
+        });
+        return `<div class="details-section" id="details-mux-gaps-section">
+          <strong>Kept for a Mux Gap (${gaps.length}):</strong>
+          <div class="details-row"><span class="details-label"></span><span class="details-value" style="color: var(--sl-color-neutral-600); font-size: 0.9em;">A mux could not carry these staged recordings whole — it left a damaged fragment's unreadable bytes out of a repaired copy, or could not check the copy against the recording's own fragments — so staging keeps the originals, with no age limit, until the job is deleted.</span></div>
+          ${rows}
+        </div>`;
       })()}
 
       ${
@@ -982,7 +1006,7 @@ export class JobDetailsController {
   }
 
   /**
-   * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar/unmuxedParts
+   * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar/unmuxedParts/muxGaps
    * fields from oldJobs onto newJobs.
    * WebSocket bulk updates deliver raw DB objects without these enriched fields;
    * carrying them forward avoids Resume/Mux buttons flickering out in the details dialog.
@@ -1007,6 +1031,9 @@ export class JobDetailsController {
       }
       if (job.unmuxedParts === undefined && old.unmuxedParts !== undefined) {
         job.unmuxedParts = old.unmuxedParts;
+      }
+      if (job.muxGaps === undefined && old.muxGaps !== undefined) {
+        job.muxGaps = old.muxGaps;
       }
     }
   }

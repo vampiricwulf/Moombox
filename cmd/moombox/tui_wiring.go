@@ -269,6 +269,13 @@ func (s *runState) runTUI() {
 				HasResumeSidecar: a.HasResumeSidecar,
 			})
 		}
+		var base string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			base = c.Paths.EffectiveStagingDir()
+		})
+		for _, g := range worker.ScanMuxGaps(base, jobID) {
+			out.MuxGaps = append(out.MuxGaps, tui.MuxGapEntry{Path: g.Path, Reason: g.Reason})
+		}
 		return out
 	}
 	app.OnRecoverAsides = func(jobID string) error {
