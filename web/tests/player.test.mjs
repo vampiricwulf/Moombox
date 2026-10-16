@@ -55,9 +55,14 @@ test("an older selection whose body resolves late never overwrites the newer one
 // ── 2. Offset restore + persistence (Task 19) ───────────────────────────────
 
 test("a saved chat offset is restored, edited, persisted and cleared", { skip }, async () => {
+  // The offset box lives in the chat sidebar, which is display:none unless the
+  // recording has chat and the sidebar is toggled on, and a hidden box cannot
+  // take focus to be blurred.
   const h = harness.makePlayer({
-    jobs: [finished("j1"), finished("j2")],
+    jobs: [finished("j1", { chatFilename: "chat.json" }), finished("j2")],
     watchStateById: { j1: { chatOffset: 1.5 }, j2: {} },
+    chatById: { j1: { platform: "twitch", messages: [{ offsetMs: 0, authorName: "u", message: [{ text: "hi" }] }] } },
+    storage: { "player-sidebar-toggle": "true" },
   });
   const input = h.el("player-chat-offset");
   const reset = h.el("player-chat-offset-reset");
@@ -544,16 +549,20 @@ test("a superseded job-list rebuild does not restore its stale selection", { ski
 });
 
 test("a job selection that throws is logged and hands focus back to the player", { skip }, async () => {
-  const h = harness.makePlayer({ jobs: [finished("j1")], watchState: {} });
+  const h = harness.makePlayer({ jobs: [finished("j1"), finished("j2")], watchState: {} });
   const select = h.select();
   await h.player.loadPlayerJobList();
+  // A recording is already open, so #player-viewport (and the wrapper inside
+  // it) is shown: a hidden wrapper cannot take focus, in a browser or in jsdom.
+  await h.selectJob("j1");
+  assert.notEqual(h.el("player-viewport").style.display, "none");
   h.player.onPlayerJobSelect = () => Promise.reject(new Error("boom"));
 
   const errors = [];
   const realError = console.error;
   console.error = (...a) => errors.push(a.map(String).join(" "));
   try {
-    select.value = "j1";
+    select.value = "j2";
     select.dispatchEvent(new h.window.Event("sl-change"));
     await h.flush();
   } finally {
