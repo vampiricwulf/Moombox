@@ -3,7 +3,10 @@
 package childproc
 
 import (
+	"context"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -131,4 +134,104 @@ func TestTheParentThreadOutlivesTheProgram(t *testing.T) {
 		t.Fatal("the stand-in was killed while the goroutine that started it was still waiting on it: " +
 			"its parent thread was retired under it")
 	}
+}
+
+// hangupStarterEnv makes the re-executed test binary act out Moombox for
+// TestTheProgramIsOutOfTheTerminalsProcessGroup: it catches SIGHUP, as the
+// child does, starts the sleep stand-in through CommandContext, writes the
+// stand-in's PID to the file the variable names, and waits to be killed.
+const hangupStarterEnv = "MOOMBOX_CHILDPROC_TEST_HANGUP_STARTER"
+
+// TestTheProgramIsOutOfTheTerminalsProcessGroup does to a stand-in for
+// Moombox what a closing terminal does: SIGHUP to every process in its
+// foreground process group. Moombox catches it and shuts down in order,
+// cancelling its muxes itself; FFmpeg, in the same group with the default
+// disposition, died of it at once while the mux was still live, and MuxJob
+// wrote the row Error ("mux: ffmpeg: signal: hangup"), which the next start's
+// boot re-mux skips, stranding the recording. The program must survive the
+// group's hangup, sit in a group of its own, and still die when the process
+// that started it dies — out of that group, nothing else would end it.
+//
+// Mutants: prepare not setting Setpgid (the stand-in dies of the hangup and
+// shares the starter's group); prepare not setting Pdeathsig (the stand-in
+// outlives the killed starter).
+func TestTheProgramIsOutOfTheTerminalsProcessGroup(t *testing.T) {
+	if pidFile := os.Getenv(hangupStarterEnv); pidFile != "" {
+		hup := make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		c := standIn(context.Background(), "sleep")
+		if err := c.Start(); err != nil {
+			os.Exit(97)
+		}
+		if err := os.WriteFile(pidFile, []byte(strconv.Itoa(c.Process.Pid)), 0o644); err != nil {
+			os.Exit(98)
+		}
+		for range hup {
+		}
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		exe = os.Args[0]
+	}
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	// The starter gets a group of its own, as a terminal's foreground job
+	// does; it is started with os/exec, untied, since its own tie is not what
+	// is under test.
+	starter := exec.Command(exe, "-test.run=^TestTheProgramIsOutOfTheTerminalsProcessGroup$")
+	starter.Env = append(os.Environ(), hangupStarterEnv+"="+pidFile)
+	starter.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := starter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	starterDone := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("waiting for the starter panicked: %v", r)
+			}
+		}()
+		_ = starter.Wait()
+		close(starterDone)
+	}()
+	pid := 0
+	t.Cleanup(func() {
+		if pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		_ = syscall.Kill(-starter.Process.Pid, syscall.SIGKILL) // only the group this test made
+		<-starterDone
+	})
+
+	for end := time.Now().Add(15 * time.Second); time.Now().Before(end) && pid == 0; {
+		if raw, err := os.ReadFile(pidFile); err == nil {
+			pid, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+		}
+		if pid == 0 {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if pid == 0 {
+		t.Fatal("the starter never started its stand-in")
+	}
+	if pgid, err := syscall.Getpgid(pid); err != nil || pgid != pid {
+		t.Errorf("the stand-in's process group is %d (%v), want its own (%d)", pgid, err, pid)
+	}
+
+	if err := syscall.Kill(-starter.Process.Pid, syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if !alive(pid) {
+		t.Fatal("the stand-in died of the hangup sent to its starter's group: a closing terminal kills FFmpeg mid-mux")
+	}
+
+	if err := starter.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	<-starterDone
+	if !waitGone(pid, 5*time.Second) {
+		t.Fatal("the stand-in outlived the process that started it: a crashed Moombox leaves its FFmpeg running")
+	}
+	pid = 0
 }
