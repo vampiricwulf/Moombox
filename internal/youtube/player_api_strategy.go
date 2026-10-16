@@ -355,24 +355,67 @@ func (p *PlayerAPI) captureVisitorData(ytcfg *YtcfgData, account string) {
 	}
 }
 
+// sessionReadRetryAfter is how long a homepage session read that failed — a
+// transport error, the fetch's own timeout, a 5xx — holds its account before
+// a probe may read it again. A failure says nothing about the account, so it
+// must not stand as the account's one read: a startup read that met a network
+// not yet up, or one 503, would otherwise leave that account's probes without
+// its session for the rest of the run. But not once per probe either: a
+// members-only waiting room polls every 30 s, offline as much as online.
+const sessionReadRetryAfter = 5 * time.Minute
+
 // claimSessionRead reports whether the jar's account still wants its session
 // read off the homepage — a jar that holds an account (account != "") whose
 // session is neither kept nor already asked for — and claims the read, so the
 // probes running into a changed account fetch the homepage once between
-// them. One read per account, whatever it found: a homepage that failed or
-// stated no session leaves the probes without one until a watch page states
-// it, as a failed startup read always has. See Service.readAccountSession.
+// them. One read per account that came back with a page, whatever the page
+// stated: a homepage stating no session (cookies YouTube no longer signs in)
+// leaves the probes without one until a watch page states it. A read that did
+// not come back is not the account's one (releaseSessionRead), and once the
+// retry deadline of a failed one has passed the account is claimed again. See
+// Service.readAccountSession.
 func (p *PlayerAPI) claimSessionRead(account string) bool {
 	if account == "" {
 		return false
 	}
 	p.sessionMu.Lock()
 	defer p.sessionMu.Unlock()
-	if account == p.sessionAccount || account == p.sessionAsked {
+	if account == p.sessionAccount {
 		return false
 	}
-	p.sessionAsked = account
+	if account == p.sessionAsked && (p.sessionRetryAt.IsZero() || p.sessionNow().Before(p.sessionRetryAt)) {
+		return false
+	}
+	p.sessionAsked, p.sessionRetryAt = account, time.Time{}
 	return true
+}
+
+// releaseSessionRead hands back the claim on account's homepage read when the
+// read did not come back with a page. abandoned is a read its caller gave up
+// on — the probe's context ended: a cancelled job, the feed walk's pass
+// budget or the DECAPI probe budget running out — which says nothing about
+// the homepage, so the next probe reads it at once. Any other failure holds
+// the account for sessionReadRetryAfter. A claim that has moved on since (to
+// another account) is left alone.
+func (p *PlayerAPI) releaseSessionRead(account string, abandoned bool) {
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	if account != p.sessionAsked {
+		return
+	}
+	if abandoned {
+		p.sessionAsked, p.sessionRetryAt = "", time.Time{}
+		return
+	}
+	p.sessionRetryAt = p.sessionNow().Add(sessionReadRetryAfter)
+}
+
+// sessionNow is the clock the session-read retry deadline is read on.
+func (p *PlayerAPI) sessionNow() time.Time {
+	if p.sessionClock != nil {
+		return p.sessionClock()
+	}
+	return time.Now()
 }
 
 // tvSaysWaitingRoom reports the one verdict owner decision O-I short-circuits

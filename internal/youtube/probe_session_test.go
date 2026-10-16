@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
@@ -82,14 +83,44 @@ func (h *homepageStub) fetches() []string {
 	return append([]string(nil), h.cookies...)
 }
 
+// homepageFault is how a homepage stub answers one fetch.
+type homepageFault int
+
+const (
+	homepageAnswers homepageFault = iota // the page, stating the account's session
+	homepageFails                        // a 503
+	homepageStalls                       // nothing, until the client gives up
+)
+
 func stubHomepage(t *testing.T, sessions map[string]string) *homepageStub {
+	t.Helper()
+	return stubFaultyHomepage(t, sessions, nil)
+}
+
+// stubFaultyHomepage is stubHomepage whose fetch number n (1-based, in arrival
+// order) is answered as fault(n) says; a nil fault answers every fetch.
+func stubFaultyHomepage(t *testing.T, sessions map[string]string, fault func(n int) homepageFault) *homepageStub {
 	t.Helper()
 	h := &homepageStub{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cookie := r.Header.Get("Cookie")
 		h.mu.Lock()
 		h.cookies = append(h.cookies, cookie)
+		n := len(h.cookies)
 		h.mu.Unlock()
+		if fault != nil {
+			switch fault(n) {
+			case homepageFails:
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			case homepageStalls:
+				select {
+				case <-r.Context().Done():
+				case <-time.After(10 * time.Second):
+				}
+				return
+			}
+		}
 		session := ""
 		for name, s := range sessions {
 			if strings.Contains(cookie, "logininfo-"+name+";") || strings.HasSuffix(cookie, "logininfo-"+name) {
@@ -426,5 +457,154 @@ func TestTheProbeSessionStaysWithItsAccount(t *testing.T) {
 				t.Errorf("the new account's homepage read sent Cookie %q, want account B's", f[1])
 			}
 		})
+	}
+}
+
+// A homepage session read that did not come back with a page is not the
+// account's one read. Only a page decides it — one stating no session is
+// final for the account (TestTheProbeSessionStaysWithItsAccount). A read
+// the probe's caller abandoned (its context ended: a cancelled job, the feed
+// walk's pass budget running out) is handed back at once, so the next probe
+// reads it. A read that failed (a transport error, a 5xx) is handed back
+// after sessionReadRetryAfter, so one network blip at an account switch, or
+// a network not yet up at boot, does not leave that account's probes without
+// its session for the rest of the run, and a waiting room offline does not
+// fetch the homepage on every 30 s poll either.
+//
+// Mutants: readAccountSession not releasing a failed read ("abandoned" and
+// "fails" fail); releaseSessionRead holding an abandoned read for the
+// cooldown like a failed one ("abandoned" fails); releaseSessionRead
+// releasing a failed read at once ("fails" and "the startup read fails": the
+// probe inside the cooldown fetches the homepage again); claimSessionRead
+// never claiming an asked-for account again, whatever its deadline (the probe
+// after the cooldown does not read); Init not releasing its failed read ("the
+// startup read fails").
+func TestAHomepageReadThatDidNotComeBackIsNotTheAccountsOne(t *testing.T) {
+	both := map[string]string{"a": sessionBrandA, "other-account": sessionBrandB}
+	// setup boots a Service on account A (Init is homepage fetch 1) whose
+	// session-read clock the test moves by hand.
+	setup := func(t *testing.T, fault func(n int) homepageFault) (*Service, string, *homepageStub, *headerTransport, *time.Time) {
+		t.Helper()
+		home := stubFaultyHomepage(t, both, fault)
+		tr := recordPlayerCalls(t)
+		jar, path := loadAccountJar(t, accountCookies("a"))
+		svc := NewService(jar, noopLogger{})
+		now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+		svc.PlayerAPI.sessionClock = func() time.Time { return now }
+		svc.Init(context.Background())
+		return svc, path, home, tr, &now
+	}
+	wantSession := func(t *testing.T, tr *headerTransport, when, authUser, pageID string) {
+		t.Helper()
+		if len(tr.headers) == 0 {
+			t.Fatalf("%s: no probe call recorded", when)
+		}
+		for i, h := range tr.headers {
+			if h.Get("X-Goog-AuthUser") != authUser || h.Get("X-Goog-PageId") != pageID {
+				t.Errorf("%s, probe %d: X-Goog-AuthUser = %q, X-Goog-PageId = %q; want %q and %q",
+					when, i, h.Get("X-Goog-AuthUser"), h.Get("X-Goog-PageId"), authUser, pageID)
+			}
+		}
+	}
+	switchToB := func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(accountCookies("other-account")), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("abandoned by its caller", func(t *testing.T) {
+		svc, path, home, tr, _ := setup(t, func(n int) homepageFault {
+			if n == 2 {
+				return homepageStalls
+			}
+			return homepageAnswers
+		})
+		switchToB(t, path)
+		// The first probe to see account B runs out of time while B's
+		// homepage read is in flight.
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		_, _ = svc.ProbeVideoStatusAuthenticated(ctx, "test1234567")
+		cancel()
+		if f := home.fetches(); len(f) != 2 {
+			t.Fatalf("setup: homepage fetched %d times; want Init's and the abandoned one", len(f))
+		}
+
+		tr.headers = nil
+		runProbes(t, svc)
+		wantSession(t, tr, "after the abandoned read", "2", "brand-b")
+		if f := home.fetches(); len(f) != 3 {
+			t.Errorf("homepage fetched %d times; want Init's, the abandoned one and one read for account B", len(f))
+		}
+	})
+
+	t.Run("fails", func(t *testing.T) {
+		svc, path, home, tr, now := setup(t, func(n int) homepageFault {
+			if n == 2 {
+				return homepageFails
+			}
+			return homepageAnswers
+		})
+		switchToB(t, path)
+		runProbes(t, svc)
+		wantSession(t, tr, "inside the cooldown", "", "")
+		if f := home.fetches(); len(f) != 2 {
+			t.Errorf("homepage fetched %d times inside the cooldown; want Init's and the failed one", len(f))
+		}
+
+		*now = now.Add(sessionReadRetryAfter + time.Second)
+		tr.headers = nil
+		runProbes(t, svc)
+		wantSession(t, tr, "after the cooldown", "2", "brand-b")
+		if f := home.fetches(); len(f) != 3 {
+			t.Errorf("homepage fetched %d times; want Init's, the failed one and one read after the cooldown", len(f))
+		}
+	})
+
+	t.Run("the startup read fails", func(t *testing.T) {
+		svc, _, home, tr, now := setup(t, func(n int) homepageFault {
+			if n == 1 {
+				return homepageFails
+			}
+			return homepageAnswers
+		})
+		runProbes(t, svc)
+		wantSession(t, tr, "inside the cooldown", "", "")
+		if f := home.fetches(); len(f) != 1 {
+			t.Errorf("homepage fetched %d times inside the cooldown; want Init's failed one", len(f))
+		}
+
+		*now = now.Add(sessionReadRetryAfter + time.Second)
+		tr.headers = nil
+		runProbes(t, svc)
+		wantSession(t, tr, "after the cooldown", "1", "brand-a")
+		if f := home.fetches(); len(f) != 2 {
+			t.Errorf("homepage fetched %d times; want Init's failed one and one read after the cooldown", len(f))
+		}
+	})
+}
+
+// A release hands back only the claim it was made for. Once the claim has
+// moved on to another account — the jar switched again while the first
+// account's read was in flight, and a probe claimed the new one — the first
+// read's failure must not put the other account's read on a retry deadline,
+// nor its abandonment hand that read back.
+//
+// Mutant: releaseSessionRead not checking that the claim is still the
+// account's (both checks fail).
+func TestAReleaseLeavesAClaimThatMovedOn(t *testing.T) {
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	p := &PlayerAPI{sessionClock: func() time.Time { return now }}
+	if !p.claimSessionRead("account-b") || !p.claimSessionRead("account-c") {
+		t.Fatal("setup: the two accounts' reads were not claimed")
+	}
+	p.releaseSessionRead("account-b", false)
+	now = now.Add(sessionReadRetryAfter + time.Second)
+	if p.claimSessionRead("account-c") {
+		t.Error("account B's failed read put account C's read on B's retry deadline")
+	}
+	p.releaseSessionRead("account-b", true)
+	if p.claimSessionRead("account-c") {
+		t.Error("account B's abandoned read handed back account C's")
 	}
 }
