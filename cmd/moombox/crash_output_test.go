@@ -52,15 +52,50 @@ func crashHelper(path string) {
 		os.Exit(97)
 	}
 	go func() {
-		if os.Getenv(crashKindEnv) == "fatal" {
+		switch os.Getenv(crashKindEnv) {
+		case "fatal":
 			var mu sync.Mutex
 			mu.Unlock() // fatal error: sync: unlock of unlocked mutex — no recover can catch it
+		case "stack overflow":
+			debug.SetMaxStack(1 << 20)
+			crashRecurse(0) // fatal error: stack overflow, raised on the system stack
+		case "out of memory":
+			crashHeld = crashAllocHuge() // fatal error: runtime: out of memory, likewise
 		}
 		panic("probe crash: POST https://user:" + crashSecret + "@hooks.example.com/x?token=" + crashSecret +
 			" failed, pot=" + crashSecret)
 	}()
 	time.Sleep(time.Minute)
 	os.Exit(96)
+}
+
+// crashRecurse recurses until the goroutine's stack is past its limit (n
+// counts up from 0, so the stop is never reached).
+//
+//go:noinline
+func crashRecurse(n int) int {
+	if n < 0 {
+		return 0
+	}
+	var pad [256]byte
+	pad[n%len(pad)] = byte(n)
+	return crashRecurse(n+1) + int(pad[0])
+}
+
+// crashHeld keeps crashAllocHuge's result reachable.
+var crashHeld [][]byte
+
+// crashAllocHuge asks for more address space than any machine has (32 TiB at
+// a time): the runtime's mapping fails, which it reports as out of memory
+// without touching a byte of real memory.
+//
+//go:noinline
+func crashAllocHuge() [][]byte {
+	var held [][]byte
+	for range 64 {
+		held = append(held, make([]byte, 1<<45))
+	}
+	return held
 }
 
 // TestARealCrashReachesTheNextStartsLog runs a process that arms the crash
@@ -72,23 +107,31 @@ func crashHelper(path string) {
 // From Crash notice sent the operator to logs that did not hold the cause
 // (W28-A04). A fatal error's own "fatal error: …" line never reaches the
 // crash file (the runtime prints it before it counts itself as crashing), so
-// its cause is named by the frame it struck in.
+// its cause is named by the frame it struck in: for a stack overflow and for
+// running out of memory, whose output starts at the system stack's
+// "runtime stack:", the dying goroutine's first frame outside the runtime —
+// both used to be named "runtime stack:".
 //
 // Mutants: armCrashOutput not calling debug.SetCrashOutput (the file stays
 // empty); redactCrashText returning its input (the secret reaches the
 // excerpt); takePreviousCrash not moving the output aside (no .1, and the
 // next crash's capture would truncate it); crashCause taking the first line
-// whatever it is (the fatal row's cause is a bare "goroutine 9 [running]:").
+// whatever it is (the fatal row's cause is a bare "goroutine 9 [running]:",
+// the system-stack rows' "runtime stack:"); crashCause not passing over the
+// runtime's own frames (the out-of-memory row names
+// runtime.systemstack_switch).
 func TestARealCrashReachesTheNextStartsLog(t *testing.T) {
 	if path := os.Getenv(crashHelperEnv); path != "" {
 		crashHelper(path)
 	}
 
 	for _, tc := range []struct {
-		kind, wantCause string
+		kind, wantCause, wantIn string
 	}{
-		{"panic", "panic: probe crash"},
-		{"fatal", "fatal error in internal/sync.(*Mutex).unlockSlow"},
+		{"panic", "panic: probe crash", ""},
+		{"fatal", "fatal error in internal/sync.(*Mutex).unlockSlow", ""},
+		{"stack overflow", "fatal error in ", ".crashRecurse"},
+		{"out of memory", "fatal error in ", ".crashAllocHuge"},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			crashPath := filepath.Join(t.TempDir(), "moombox-crash.log")
@@ -109,8 +152,8 @@ func TestARealCrashReachesTheNextStartsLog(t *testing.T) {
 			if !prev.captured() {
 				t.Fatalf("the crash left nothing in %s: its output went to stderr only", crashPath)
 			}
-			if !strings.HasPrefix(prev.cause, tc.wantCause) {
-				t.Errorf("cause = %q, want it to start %q", prev.cause, tc.wantCause)
+			if !strings.HasPrefix(prev.cause, tc.wantCause) || !strings.Contains(prev.cause, tc.wantIn) {
+				t.Errorf("cause = %q, want it to start %q and name %q", prev.cause, tc.wantCause, tc.wantIn)
 			}
 			if !strings.Contains(prev.excerpt, "goroutine ") {
 				t.Errorf("excerpt has no goroutine trace:\n%s", prev.excerpt)
@@ -133,10 +176,17 @@ func TestARealCrashReachesTheNextStartsLog(t *testing.T) {
 
 // TestCrashCause pins how a crash is named from its output: the runtime's
 // first line, or — for a fatal error, whose own line reached stderr only — the
-// first frame of the dying goroutine below the runtime's throw and fatal.
+// frame it struck in: the dying goroutine's first outside the runtime, which
+// for an error raised on the system stack is the goroutine after the
+// "runtime stack:" block; failing that, the first frame below the runtime's
+// throw and fatal.
 //
 // Mutants: take the first line whatever it is (the trace rows); stop skipping
-// the throw/fatal frames (the cause names runtime.throw).
+// the throw/fatal frames (the cause names runtime.throw); search the
+// "runtime stack:" block ahead of the goroutine (the stack-overflow row names
+// runtime.newstack); stop passing over the runtime's frames (the
+// out-of-memory row names runtime.systemstack_switch); count crashExcerpt's
+// cut marker as a frame (the cut row).
 func TestCrashCause(t *testing.T) {
 	for _, tc := range []struct {
 		name, out, want string
@@ -148,6 +198,30 @@ func TestCrashCause(t *testing.T) {
 				"runtime.throw({0x1?, 0x2?})\n\t/go/src/runtime/panic.go:1100 +0x18\n" +
 				"runtime.mapassign_faststr(0xc0000a4000, {0x4b1c2a, 0x3})\n\t/go/src/internal/runtime/maps/x.go:12 +0x9\n",
 			"fatal error in runtime.mapassign_faststr"},
+		{"a stack overflow",
+			"\nruntime stack:\nruntime.throw({0x14cd4cb?, 0x200000008?})\n\t/go/src/runtime/panic.go:1243 +0x48 fp=0x7ffd sp=0x7ffd pc=0x492c88\n" +
+				"runtime.newstack()\n\t/go/src/runtime/stack.go:1207 +0x5dd fp=0x7ffd sp=0x7ffd pc=0x471cfd\n" +
+				"runtime.morestack()\n\t/go/src/runtime/asm_amd64.s:650 +0x7b fp=0x7ffd sp=0x7ffd pc=0x49895b\n\n" +
+				"goroutine 36 gp=0x3f53 m=0 mp=0x5ad9 [running]:\n" +
+				"github.com/vampiricwulf/Moombox/internal/chat.(*Parser).walk(0xe9d?)\n\t/src/internal/chat/parse.go:11 +0x9b\n" +
+				"github.com/vampiricwulf/Moombox/internal/chat.(*Parser).walk(0x0?)\n\t/src/internal/chat/parse.go:14 +0x75\n",
+			"fatal error in github.com/vampiricwulf/Moombox/internal/chat.(*Parser).walk"},
+		{"out of memory",
+			"\nruntime stack:\nruntime.throw({0x14e2324?, 0x297a?})\n\t/go/src/runtime/panic.go:1243 +0x48\n" +
+				"runtime.sysMapOS(0x25ea, 0x2000, {0x14b5, 0x4})\n\t/go/src/runtime/mem_linux.go:175 +0x13b\n" +
+				"runtime.systemstack(0x47e7ff)\n\t/go/src/runtime/asm_amd64.s:531 +0x4a\n\n" +
+				"goroutine 7 gp=0x23a0 m=0 mp=0x545e [running]:\n" +
+				"runtime.systemstack_switch()\n\t/go/src/runtime/asm_amd64.s:481 +0x8\n" +
+				"runtime.(*mheap).alloc(0x0?, 0x0?, 0x0?)\n\t/go/src/runtime/mheap.go:1002 +0x57\n" +
+				"runtime.mallocgc(0x200000000000, 0x52f990, 0x1)\n\t/go/src/runtime/malloc.go:1137 +0x11a\n" +
+				"runtime.makeslice(0x0?, 0x0?, 0x0?)\n\t/go/src/runtime/slice.go:117 +0x49\n" +
+				"github.com/vampiricwulf/Moombox/internal/engine.(*Downloader).grow(...)\n\t/src/internal/engine/x.go:21 +0x7b\n" +
+				"created by github.com/vampiricwulf/Moombox/internal/engine.(*Downloader).Run in goroutine 1\n\t/src/internal/engine/x.go:9 +0x1\n",
+			"fatal error in github.com/vampiricwulf/Moombox/internal/engine.(*Downloader).grow"},
+		{"the runtime's frames alone, cut",
+			"\nruntime stack:\nruntime.throw({0x1?, 0x2?})\n\t/go/src/runtime/panic.go:1243 +0x48\n" +
+				"runtime.newstack()\n\t/go/src/runtime/stack.go:1207 +0x5dd\n… 81234 more bytes",
+			"fatal error in runtime.newstack"},
 	} {
 		got := crashCause(strings.Split(tc.out, "\n"))
 		if !strings.HasPrefix(got, tc.want) {

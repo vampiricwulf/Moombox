@@ -407,8 +407,10 @@ respawned TUI clears. So each child gives the runtime a second place to write it
 The next start that finds output there (`takePreviousCrash`, any start, not only a crash respawn —
 the launcher's give-up and fail-fast exits tell the operator to check the logs) logs an ERROR with the
 output's first line as `cause` (for a fatal error, whose own `fatal error: …` line the runtime prints
-before it counts itself as crashing and so to stderr only, the first frame it struck in —
-`crashCause`) and its first 8 KiB (`crashExcerptBytes`, cut at a line, saying how
+before it counts itself as crashing and so to stderr only, the first frame it struck in outside the
+runtime — for one raised on the system stack, a stack overflow or running out of memory, whose output
+starts at a `runtime stack:` block, the first such frame of the goroutine after it: the recursing
+function, the allocation site — `crashCause`) and its first 8 KiB (`crashExcerptBytes`, cut at a line, saying how
 much it left out) as `output`, with every URL cut to its origin and any PO token removed
 (`redactCrashText`), then keeps the whole output as `<crash file>.1`, replacing the crash before it
 and cut to 1 MiB (`crashKeepBytes`) — at most two crashes' output on disk. When the crash file cannot be

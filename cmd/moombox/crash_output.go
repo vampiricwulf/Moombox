@@ -189,12 +189,18 @@ func crashExcerpt(head []byte, total int64) (excerpt, cause string) {
 
 // crashCause names a crash from the lines of its output: the first line — the
 // runtime's "panic: …", "SIGABRT: abort", "fatal error: …" — unless the
-// output starts at a goroutine's trace. That is a fatal error's (throw,
-// fatal: concurrent map writes, out of memory, a misused sync.Mutex), whose
+// output starts at a trace. That is a fatal error's (throw, fatal: concurrent
+// map writes, out of memory, a stack overflow, a misused sync.Mutex), whose
 // own line the runtime prints before it counts itself as crashing, so that
-// line reaches stderr only and the crash file starts after it. Its cause is
-// then the first frame of the trace below the runtime's fatal and throw
-// functions, which says where it struck.
+// line reaches stderr only and the crash file starts after it: at the dying
+// goroutine's trace, or — for an error raised on the system stack, as a stack
+// overflow and running out of memory are — at a "runtime stack:" block of the
+// runtime's own frames, with the goroutine that was running after it. Its
+// cause is then where it struck: the first frame of that goroutine outside
+// the runtime (the recursing function, the allocation site), else of the
+// system stack, else the first that is not the runtime's throw or fatal.
+// Taking the first line named every stack overflow and out-of-memory crash
+// "runtime stack:".
 func crashCause(lines []string) string {
 	first := -1
 	for i, line := range lines {
@@ -207,24 +213,73 @@ func crashCause(lines []string) string {
 		return ""
 	}
 	head := strings.TrimSpace(lines[first])
-	if !strings.HasPrefix(head, "goroutine ") {
+	if !isTraceHeader(head) {
 		return head
 	}
-	for _, line := range lines[first+1:] {
-		if line == "" || strings.HasPrefix(line, "\t") {
-			continue // a frame's file:line, or the gap before the next goroutine
+	// The sections of the trace, in order: each header's frames.
+	var sections [][]string
+	for _, line := range lines[first:] {
+		switch {
+		case isTraceHeader(strings.TrimSpace(line)):
+			sections = append(sections, nil)
+		case line == "" || strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "created by ") ||
+			strings.HasPrefix(line, "...") || strings.HasPrefix(line, "…"):
+			// a frame's file:line, the gap before the next section, a
+			// goroutine's creator, the runtime's note of frames it left out,
+			// crashExcerpt's of the bytes it did
+		default:
+			fn := line
+			if i := strings.LastIndexByte(fn, '('); i > 0 {
+				fn = fn[:i]
+			}
+			sections[len(sections)-1] = append(sections[len(sections)-1], fn)
 		}
-		fn := line
-		if i := strings.LastIndexByte(fn, '('); i > 0 {
-			fn = fn[:i]
+	}
+	// The dying goroutine is the first one listed; a "runtime stack:" block
+	// comes ahead of it.
+	var search [][]string
+	if head == "runtime stack:" && len(sections) > 1 {
+		search = append(search, sections[1])
+	}
+	search = append(search, sections[0])
+	for _, outside := range []bool{true, false} {
+		for _, frames := range search {
+			for _, fn := range frames {
+				if isThrowFrame(fn) || (outside && isRuntimeFrame(fn)) {
+					continue
+				}
+				return "fatal error in " + fn + " (the runtime printed its message to stderr only)"
+			}
 		}
-		switch fn[strings.LastIndexByte(fn, '.')+1:] {
-		case "throw", "fatal", "fatalthrow", "fatalpanic":
-			continue
-		}
-		return "fatal error in " + fn + " (the runtime printed its message to stderr only)"
 	}
 	return head
+}
+
+// isTraceHeader reports whether a crash output's line (trimmed) starts a
+// section of a trace: a goroutine's, or the system stack's.
+func isTraceHeader(line string) bool {
+	return strings.HasPrefix(line, "goroutine ") || line == "runtime stack:"
+}
+
+// isThrowFrame reports whether a trace's function is one the runtime raises a
+// fatal error or a panic through, which says nothing about where it struck.
+func isThrowFrame(fn string) bool {
+	switch fn[strings.LastIndexByte(fn, '.')+1:] {
+	case "throw", "fatal", "fatalthrow", "fatalpanic", "panic", "gopanic":
+		return true
+	}
+	return false
+}
+
+// isRuntimeFrame reports whether a trace's function belongs to the Go runtime
+// itself: the runtime package or one of its internal packages.
+func isRuntimeFrame(fn string) bool {
+	pkg := fn
+	slash := strings.LastIndexByte(fn, '/')
+	if dot := strings.IndexByte(fn[slash+1:], '.'); dot >= 0 {
+		pkg = fn[:slash+1+dot]
+	}
+	return pkg == "runtime" || strings.HasPrefix(pkg, "runtime/") || strings.HasPrefix(pkg, "internal/runtime/")
 }
 
 // crashURLRe finds a URL in crash output, the same shape internal/redact
