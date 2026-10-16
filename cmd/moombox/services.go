@@ -989,12 +989,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// loss) bypasses the defer and leaks the dir. 24h age threshold keeps
 	// concurrent trims' in-flight tempdirs safe. The trim sweep re-roots
 	// moved rows onto the output directory, and the import sweep also
-	// takes what an aborted import extracted into <output>/imports, so the
-	// output directory is read here, before the goroutine. The mux sweep
-	// takes the temporary file a crash or a kill left beside an archive
-	// FFmpeg was writing; it tells a gone run's from this run's by a token,
-	// not an age, so it can run beside the worker's boot re-mux of the same
-	// archive (worker.RemoveStaleMuxTemps).
+	// takes what an aborted import spooled or extracted into
+	// <output>/imports, so the output directory is read here, before the
+	// goroutine. The mux sweep takes the temporary file a crash or a kill
+	// left beside an archive FFmpeg was writing; it tells a gone run's from
+	// this run's by a token, not an age, so it can run beside the worker's
+	// boot re-mux of the same archive (worker.RemoveStaleMuxTemps).
 	sweepOutputDir := cfg.Paths.OutputDirectory
 	go func() {
 		defer func() {
