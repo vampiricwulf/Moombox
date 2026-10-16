@@ -45,8 +45,8 @@ func assertCarriesItsJob(t *testing.T, rec *notificationtest.Recorder, event str
 }
 
 // TestLifecycleScheduleSendsCarryTheirJob covers the `scheduled` and
-// `rescheduled` halves of updateJobMetadata, driven exactly as
-// TestStreamProcessorNotifiesThroughTheSenderSeam drives the first of them.
+// `rescheduled` halves of updateJobMetadata, driven as the "upcoming" row of
+// TestScheduledDoesNotFireForAStreamAlreadyLive drives the first of them.
 //
 // One processor and one row for both: the reschedule only fires on a refresh
 // whose ScheduledStartTime differs from the one already stored, so the second

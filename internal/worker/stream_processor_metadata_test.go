@@ -58,26 +58,33 @@ func TestUpdateJobMetadata_FillBlanks(t *testing.T) {
 	sp.updateJobMetadata(job, info, false)
 
 	got, _ := db.GetJob("yt_test1")
-	if got.Title != "My Stream" {
-		t.Errorf("title = %q, want %q", got.Title, "My Stream")
-	}
-	if got.ChannelName != "My Channel" {
-		t.Errorf("channel_name = %q, want %q", got.ChannelName, "My Channel")
-	}
-	if got.ThumbnailURL != "https://example.com/thumb.jpg" {
-		t.Errorf("thumbnail_url = %q, want %q", got.ThumbnailURL, "https://example.com/thumb.jpg")
-	}
-	if got.Description != "A description" {
-		t.Errorf("description = %q, want %q", got.Description, "A description")
-	}
-	if got.StreamStartTime != "2026-04-10T12:00:00Z" {
-		t.Errorf("stream_start_time = %q, want %q", got.StreamStartTime, "2026-04-10T12:00:00Z")
-	}
-	if got.StreamEndTime != "2026-04-10T14:00:00Z" {
-		t.Errorf("stream_end_time = %q, want %q", got.StreamEndTime, "2026-04-10T14:00:00Z")
-	}
-	if got.LengthSeconds == nil || *got.LengthSeconds != 7200 {
-		t.Errorf("length_seconds = %v, want 7200", got.LengthSeconds)
+	// Both the row and the caller's local job object must carry the fill
+	// (not just the DB).
+	for _, c := range []struct {
+		src string
+		j   *database.Job
+	}{{"db", got}, {"local job", job}} {
+		if c.j.Title != "My Stream" {
+			t.Errorf("%s: title = %q, want %q", c.src, c.j.Title, "My Stream")
+		}
+		if c.j.ChannelName != "My Channel" {
+			t.Errorf("%s: channel_name = %q, want %q", c.src, c.j.ChannelName, "My Channel")
+		}
+		if c.j.ThumbnailURL != "https://example.com/thumb.jpg" {
+			t.Errorf("%s: thumbnail_url = %q, want %q", c.src, c.j.ThumbnailURL, "https://example.com/thumb.jpg")
+		}
+		if c.j.Description != "A description" {
+			t.Errorf("%s: description = %q, want %q", c.src, c.j.Description, "A description")
+		}
+		if c.j.StreamStartTime != "2026-04-10T12:00:00Z" {
+			t.Errorf("%s: stream_start_time = %q, want %q", c.src, c.j.StreamStartTime, "2026-04-10T12:00:00Z")
+		}
+		if c.j.StreamEndTime != "2026-04-10T14:00:00Z" {
+			t.Errorf("%s: stream_end_time = %q, want %q", c.src, c.j.StreamEndTime, "2026-04-10T14:00:00Z")
+		}
+		if c.j.LengthSeconds == nil || *c.j.LengthSeconds != 7200 {
+			t.Errorf("%s: length_seconds = %v, want 7200", c.src, c.j.LengthSeconds)
+		}
 	}
 }
 
@@ -224,42 +231,5 @@ func TestUpdateJobMetadata_IgnoresUnknownTitle(t *testing.T) {
 	}
 	if got.ChannelName != "" {
 		t.Errorf("channel_name = %q, want empty (should ignore 'Unknown Channel')", got.ChannelName)
-	}
-}
-
-func TestUpdateJobMetadata_SyncsLocalJobObject(t *testing.T) {
-	sp, db := newTestSP(t)
-
-	job := addTestJob(t, db, &database.Job{
-		ID:      "yt_test6",
-		VideoID: "test6",
-		Status:  database.StatusUpcoming,
-	})
-
-	info := &youtube.VideoInfo{
-		Title:              "Updated Title",
-		ChannelName:        "Updated Channel",
-		ThumbnailURL:       "https://example.com/updated.jpg",
-		ScheduledStartTime: "2026-04-10T12:00:00Z",
-		EndTimestamp:       "2026-04-10T14:00:00Z",
-	}
-
-	sp.updateJobMetadata(job, info, false)
-
-	// Verify local job object was updated (not just DB)
-	if job.Title != "Updated Title" {
-		t.Errorf("local job.Title = %q, want %q", job.Title, "Updated Title")
-	}
-	if job.ChannelName != "Updated Channel" {
-		t.Errorf("local job.ChannelName = %q, want %q", job.ChannelName, "Updated Channel")
-	}
-	if job.ThumbnailURL != "https://example.com/updated.jpg" {
-		t.Errorf("local job.ThumbnailURL = %q, want %q", job.ThumbnailURL, "https://example.com/updated.jpg")
-	}
-	if job.StreamStartTime != "2026-04-10T12:00:00Z" {
-		t.Errorf("local job.StreamStartTime = %q, want %q", job.StreamStartTime, "2026-04-10T12:00:00Z")
-	}
-	if job.StreamEndTime != "2026-04-10T14:00:00Z" {
-		t.Errorf("local job.StreamEndTime = %q, want %q", job.StreamEndTime, "2026-04-10T14:00:00Z")
 	}
 }

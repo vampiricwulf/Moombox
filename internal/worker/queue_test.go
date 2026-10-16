@@ -452,6 +452,12 @@ func TestShouldProcess(t *testing.T) {
 		{"error", database.StatusError, false},
 		{"cancelled", database.StatusCancelled, false},
 		{"cookies", database.StatusCookies, false},
+		// The Queued resting-state guarantee: ShouldProcess is an enqueuer
+		// predicate — both callers (worker.go enqueueExistingJobs and the
+		// pollForJobs heartbeat) feed its true straight into queue.Enqueue,
+		// which silently drops beyond 100 pending items — so Queued must stay
+		// false here. (That it is not a terminal state either is pinned by
+		// internal/database's TestUpdateJobFieldsUnlessTerminalSparesEveryOutcome.)
 		{"queued", database.StatusQueued, false},
 	}
 
@@ -640,21 +646,6 @@ func TestAcquireDownloadSlot_GatesVodsOnly(t *testing.T) {
 	q.mu.Unlock()
 	if !vodHolds {
 		t.Error("vod1 no longer holds its slot — completing the broadcast corrupted holdingDlSlot")
-	}
-}
-
-// TestQueuedIsRestingState pins the Queued resting-state guarantees:
-// ShouldProcess is an enqueuer predicate — both callers (worker.go
-// enqueueExistingJobs and the pollForJobs heartbeat) feed its true straight
-// into queue.Enqueue, which silently drops beyond 100 pending items — so
-// Queued must stay false there. It is also not a terminal state.
-func TestQueuedIsRestingState(t *testing.T) {
-	j := &database.Job{ID: "q1", Status: database.StatusQueued}
-	if ShouldProcess(j) {
-		t.Fatal("ShouldProcess(Queued) must be false — both callers Enqueue on true (worker.go startup + heartbeat)")
-	}
-	if j.IsTerminal() {
-		t.Fatal("Queued is waiting, not finished")
 	}
 }
 

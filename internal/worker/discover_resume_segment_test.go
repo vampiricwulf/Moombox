@@ -126,4 +126,27 @@ func TestDiscoverResumeSegment(t *testing.T) {
 			t.Errorf("got (%d, %q), want (0, seg_0)", idx, dir)
 		}
 	})
+
+	// A tombstoned seg_N dir must never be handed back as a resume target --
+	// appending fresh download data into a dir whose content the merge
+	// already consumed would corrupt or duplicate that content.
+	t.Run("skips tombstoned seg dir", func(t *testing.T) {
+		o, db := newOrch(t)
+		addJob(t, db, "j1")
+		staging := t.TempDir()
+		stageMedia(t, staging)                         // root, part 0
+		stageMedia(t, filepath.Join(staging, "seg_1")) // highest staged part, tombstoned/superseded
+		writeTombstone(t, filepath.Join(staging, "seg_1"))
+		addSegRow(t, db, "j1", 0)
+		jobCtx := &JobContext{Job: &database.Job{ID: "j1"}, StagingDir: staging}
+		idx, dir := o.discoverResumeSegment(jobCtx)
+		// seg_1 must be invisible entirely -- with it hidden, the only
+		// recorded part is 0, so the next fresh index is 1, in a BRAND NEW
+		// seg_1 dir the caller will MkdirAll -- NOT the tombstoned one (which
+		// happens to share the same path here, but discoverResumeSegment must
+		// treat it as absent, not as an existing dir to append into).
+		if idx != 1 || dir != filepath.Join(staging, "seg_1") {
+			t.Errorf("got (%d, %q), want (1, fresh seg_1) -- the tombstoned dir must not be reused as a live append target", idx, dir)
+		}
+	})
 }

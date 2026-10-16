@@ -232,7 +232,8 @@ func newEndVerdictHarness(t *testing.T, jobID string) *endVerdictHarness {
 // re-verify still says the broadcast is live — and pins BOTH halves of that
 // exit: it returns the download error (so processJob's setJobError keeps the
 // staging dir and its resume sidecar) and it returns before the row is
-// advertised as Muxing.
+// advertised as Muxing. Being the LIVE latch, its error also carries the D-T4
+// marker: the automatic mux is for a broadcast whose end was merely unknown.
 //
 // Mutants:
 //   - leaving the exit below the `status: Muxing` write (the shipped order
@@ -241,6 +242,8 @@ func newEndVerdictHarness(t *testing.T, jobID string) *endVerdictHarness {
 //   - dropping the latch (never assigning unconfirmedEndErr): ExecuteTwitch
 //     falls through to finalize and returns a mux error instead of dlErr, so
 //     the ErrQualityLost assertion fails.
+//   - latchIfUnconfirmed's live arm leaving the cause unmarked: the live row
+//     is never auto-muxed.
 func TestUnconfirmedEndExitReturnsBeforeTheMuxingStatus(t *testing.T) {
 	h := newEndVerdictHarness(t, "tw_unconfirmed")
 	// Both consults — the engine's 404 consult and the exit's re-verify —
@@ -269,6 +272,9 @@ func TestUnconfirmedEndExitReturnsBeforeTheMuxingStatus(t *testing.T) {
 	if !errors.Is(err, engine.ErrQualityLost) {
 		t.Fatalf("ExecuteTwitch = %v, want the download error (%v) — the unknown-verdict exit must "+
 			"return it so the job lands in Error with its staging intact", err, engine.ErrQualityLost)
+	}
+	if !errors.Is(err, ErrTwitchEndUnconfirmed) {
+		t.Errorf("live latch returned %v, want it marked ErrTwitchEndUnconfirmed", err)
 	}
 	if got := h.checks.Load(); got != 2 {
 		t.Errorf("CheckStreamFn calls = %d, want 2 (the engine's 404 consult and the exit's re-verify)", got)
@@ -481,9 +487,21 @@ var errUsher = errors.New("usher 503")
 // the job goes down the finalize path instead, so Muxing appears, the
 // returned error is the mux failure rather than the refresh failure, and
 // CheckStreamFn is called once instead of twice.
+//
+// The same run pins sweep-2 residual R7: the refresh-failure line logged only
+// fetchErr, so an operator reading a job that stopped there saw the
+// master-playlist failure and nothing about what ended the inner loop — and
+// nothing else on that path logs dlErr either (the engine returns
+// ErrQualityLost without logging it).
+//
+// Mutant (R7): dropping the "downloadErr" field from that line — the value
+// lookup reports the field missing while the line itself is still present,
+// which is what separates this from a wording change.
 func TestVariantRefreshFailureOnALiveBroadcastLandsInError(t *testing.T) {
 	h := newEndVerdictHarness(t, "tw_refresh_live")
 	fastRefreshRetries(t)
+	log := &captureLogger{}
+	h.o.logger = log
 	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
 		h.checks.Add(1)
 		return true, nil // live at the engine's consult AND at the re-verify
@@ -520,6 +538,17 @@ func TestVariantRefreshFailureOnALiveBroadcastLandsInError(t *testing.T) {
 	if _, statErr := os.Stat(h.jobCtx.StagingDir); statErr != nil {
 		t.Errorf("staging dir: %v — it must survive; the non-nil return is what makes processJob "+
 			"take setJobError and skip os.RemoveAll", statErr)
+	}
+
+	downloadErr, logged := log.field("failed to refresh Twitch variants", "downloadErr")
+	if !logged {
+		t.Fatal("the refresh failure was never logged — the R7 check is watching the wrong line")
+	}
+	inner, ok := downloadErr.(error)
+	if !ok || !errors.Is(inner, engine.ErrQualityLost) {
+		t.Errorf("downloadErr = %v, want the error that ended the inner loop (%v) — the operator "+
+			"needs both halves, and neither is logged anywhere else on this path",
+			downloadErr, engine.ErrQualityLost)
 	}
 }
 
@@ -574,14 +603,16 @@ func TestVariantRefreshFailureOnAnEndedBroadcastFinalizes(t *testing.T) {
 // part dir failed. Staging is unusable, so the job must land in Error with
 // what it has — never Finished. No re-verify is involved: the failure is
 // local, not a statement about the broadcast, which is why CheckStreamFn is
-// called once (the engine's consult) and not twice.
+// called once (the engine's consult) and not twice — and why its error does
+// not carry the D-T4 marker, which is for a broadcast whose end was merely
+// unknown.
 //
 // The quality-split break is the one reachable from a harness; the other
 // three are pinned by TestAdvanceToNewPartCallSitesAllLatch.
 //
-// Mutant: the bare `break` these sites used to take — no latch, so the job
+// Mutants: the bare `break` these sites used to take — no latch, so the job
 // takes the finalize path (Muxing appears) and the MkdirAll cause never
-// reaches the row.
+// reaches the row; latchPartFailure marking its error.
 func TestAdvanceToNewPartFailureLandsInError(t *testing.T) {
 	h := newEndVerdictHarness(t, "tw_advance_fail")
 	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
@@ -616,6 +647,9 @@ func TestAdvanceToNewPartFailureLandsInError(t *testing.T) {
 	if !strings.Contains(err.Error(), "seg_0") {
 		t.Errorf("ExecuteTwitch = %v — the latched error must carry the MkdirAll cause so the row "+
 			"says which path failed", err)
+	}
+	if errors.Is(err, ErrTwitchEndUnconfirmed) {
+		t.Errorf("part-advance failure returned %v, want an unmarked advance error", err)
 	}
 	if got := h.checks.Load(); got != 1 {
 		t.Errorf("CheckStreamFn calls = %d, want 1 — a local I/O failure is not a stream verdict, "+
@@ -757,52 +791,17 @@ func TestAdvanceToNewPartCallSitesAllLatch(t *testing.T) {
 	}
 }
 
-// TestVariantRefreshFailureLogsTheInnerLoopError is sweep-2 residual R7: the
-// refresh-failure line logged only fetchErr, so an operator reading a job that
-// stopped there saw the master-playlist failure and nothing about what ended
-// the inner loop — and nothing else on that path logs dlErr either (the engine
-// returns ErrQualityLost without logging it).
-//
-// Mutant: dropping the "downloadErr" field from that line — the value lookup
-// reports the field missing while the line itself is still present, which is
-// what separates this from a wording change.
-func TestVariantRefreshFailureLogsTheInnerLoopError(t *testing.T) {
-	h := newEndVerdictHarness(t, "tw_refresh_log")
-	fastRefreshRetries(t)
-	log := &captureLogger{}
-	h.o.logger = log
-	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
-		h.checks.Add(1)
-		return true, nil
-	}
-	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
-		return nil, errUsher
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	_ = h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil)
-
-	got, logged := log.field("failed to refresh Twitch variants", "downloadErr")
-	if !logged {
-		t.Fatal("the refresh failure was never logged — this test is watching the wrong line")
-	}
-	inner, ok := got.(error)
-	if !ok || !errors.Is(inner, engine.ErrQualityLost) {
-		t.Errorf("downloadErr = %v, want the error that ended the inner loop (%v) — the operator "+
-			"needs both halves, and neither is logged anywhere else on this path",
-			got, engine.ErrQualityLost)
-	}
-}
-
 // TestTwitchVodDownloadFailureLandsInError: a VOD has no live end to confirm,
 // so latchIfUnconfirmed used to decline every VOD outright — a failed VOD
 // download fell through to finalize, muxed the truncated capture, wrote
 // Finished and let processJob delete the staging with its resume sidecar.
 // It now returns the download error before the Muxing write, so the job
-// lands in Error with staging intact.
+// lands in Error with staging intact — unmarked, since there is no live end
+// the automatic mux could wait to see confirmed.
 //
-// Mutant: restore the `isVod ||` short-circuit in latchIfUnconfirmed.
+// Mutants: restore the `isVod ||` short-circuit in latchIfUnconfirmed; its VOD
+// arm marking the cause (a truncated VOD would be muxed as soon as its channel
+// went offline).
 func TestTwitchVodDownloadFailureLandsInError(t *testing.T) {
 	h := newEndVerdictHarness(t, "tw_vod_fail")
 	statuses := h.watchStatuses()
@@ -813,6 +812,9 @@ func TestTwitchVodDownloadFailureLandsInError(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("ExecuteTwitch = nil for a VOD whose download failed — it was finalized as Finished")
+	}
+	if errors.Is(err, ErrTwitchEndUnconfirmed) {
+		t.Errorf("VOD latch returned %v, want an unmarked error", err)
 	}
 	if seq := statuses(); sawMuxing(seq) {
 		t.Errorf("the failed VOD was advertised Muxing (sequence %v) on its way to Error", seq)

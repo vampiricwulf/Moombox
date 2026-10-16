@@ -1069,6 +1069,11 @@ func TestFinalizeIncompleteTailWorkerWaitedForResume(t *testing.T) {
 // This is finalize-scoped, not history-scoped: a latch that never clears
 // on success would report waited=true in scenario 1 too (a regression the
 // mutation check below confirms this test catches).
+//
+// value() is finalizeIncompleteTail's workerWaitedForResume argument; what
+// each value writes at the DB is TestFinalizeIncompleteTailWritesAndSelfClears
+// (false clears the flag) and TestFinalizeIncompleteTailWorkerWaitedForResume
+// (true sets it).
 func TestResumeWaitLatch(t *testing.T) {
 	t.Run("zero value starts not-waiting", func(t *testing.T) {
 		var l resumeWaitLatch
@@ -1094,73 +1099,6 @@ func TestResumeWaitLatch(t *testing.T) {
 		// loop exhausts (maxConsecutiveLiveChecks) with no further resolved()
 		if !l.value() {
 			t.Error("value() = false after an unresolved second wait, want true -- the loop genuinely gave up mid-wait")
-		}
-	})
-}
-
-// TestFinalizeIncompleteTailResumeWaitLatchSequence drives the same two
-// sequences through the real resumeWaitLatch AND finalizeIncompleteTail
-// together (the actual DB write path), so the finalize-scoped fix is
-// proven end to end, not just at the latch in isolation.
-func TestFinalizeIncompleteTailResumeWaitLatchSequence(t *testing.T) {
-	dir := t.TempDir()
-	db, err := database.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	newJob := func(t *testing.T, id string) {
-		t.Helper()
-		if _, err := db.AddJob(&database.Job{
-			ID: id, VideoID: id, URL: "https://youtube.com/watch?v=" + id,
-			Status: database.StatusDownloading,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	o := &DownloadOrchestrator{db: db, logger: &discardLogger{}}
-
-	t.Run("resumed broadcast: not flagged incomplete", func(t *testing.T) {
-		jobID := "yt_resumeLatchSeq_resumed"
-		newJob(t, jobID)
-
-		var l resumeWaitLatch
-		l.wait()
-		l.resolved() // the broadcast resumed; the recording then finishes cleanly
-
-		incomplete, _, _, _, _ := o.finalizeIncompleteTail(jobID, &DownloadResult{}, l.value())
-		if incomplete {
-			t.Error("a wait that was later resolved by a successful refresh must not flag incomplete_tail")
-		}
-		got, err := db.GetJob(jobID)
-		if err != nil || got == nil {
-			t.Fatalf("GetJob: %v", err)
-		}
-		if got.IncompleteTail {
-			t.Error("incomplete_tail persisted true for a resumed-then-clean finish")
-		}
-	})
-
-	t.Run("second wait never resolved: flagged incomplete", func(t *testing.T) {
-		jobID := "yt_resumeLatchSeq_exhausted"
-		newJob(t, jobID)
-
-		var l resumeWaitLatch
-		l.wait()
-		l.resolved()
-		l.wait() // a second, later wait that the loop never resolves
-
-		incomplete, _, _, _, _ := o.finalizeIncompleteTail(jobID, &DownloadResult{}, l.value())
-		if !incomplete {
-			t.Error("an unresolved second wait must flag incomplete_tail even though an earlier wait was resolved")
-		}
-		got, err := db.GetJob(jobID)
-		if err != nil || got == nil {
-			t.Fatalf("GetJob: %v", err)
-		}
-		if !got.IncompleteTail {
-			t.Error("incomplete_tail did not persist true for an unresolved second wait")
 		}
 	})
 }

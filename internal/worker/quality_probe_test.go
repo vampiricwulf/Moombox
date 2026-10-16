@@ -112,40 +112,32 @@ func TestProbeVideoInfoUsesTheCheapAuthenticatedProbe(t *testing.T) {
 // no adaptiveFormats — but it fires ONCE per tick, for either probe kind.
 //
 // No cookies are configured on this fixture, so the cookied recovery hop
-// (below) is not in play here: this is the cookieless install's shape.
+// (below) is not in play here: this is the cookieless install's shape. This
+// test holds the authenticated probe; the public probe's one fallback on the
+// same shape is TestProbeVideoInfoSkipsTheCookiedHopWithoutCookies (full == 1).
 //
 // Mutants this kills:
-//   - the fallback gated on !requiresAuth again  → the auth subtest sees full == 0
+//   - the fallback gated on !requiresAuth again  → full == 0
 //   - the fallback looping or retrying           → full > 1
 //   - the fallback firing when the probe already
 //     had split-adaptive formats                 → covered by the test above
 func TestProbeVideoInfoFallsBackOnceForBothProbeKinds(t *testing.T) {
-	for _, tc := range []struct {
-		name         string
-		requiresAuth bool
-	}{
-		{"public recovery path", false},
-		{"authenticated probe with no adaptive formats", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			empty := &youtube.VideoInfo{} // no DASH URL, no formats
-			f := &fakeProbeClient{
-				probeInfo:     empty,
-				probeAuthInfo: empty,
-				fullInfo:      &youtube.VideoInfo{Formats: splitAdaptive()},
-			}
+	empty := &youtube.VideoInfo{} // no DASH URL, no formats
+	f := &fakeProbeClient{
+		probeInfo:     empty,
+		probeAuthInfo: empty,
+		fullInfo:      &youtube.VideoInfo{Formats: splitAdaptive()},
+	}
 
-			info, err := probeVideoInfo(context.Background(), f, "vid", tc.requiresAuth, nil)
-			if err != nil {
-				t.Fatalf("probeVideoInfo: %v", err)
-			}
-			if len(info.Formats) != 2 {
-				t.Fatalf("info = %+v, want the fallback's formats", info)
-			}
-			if f.full != 1 {
-				t.Errorf("GetVideoInfo called %d times, want exactly 1", f.full)
-			}
-		})
+	info, err := probeVideoInfo(context.Background(), f, "vid", true, nil)
+	if err != nil {
+		t.Fatalf("probeVideoInfo: %v", err)
+	}
+	if len(info.Formats) != 2 {
+		t.Fatalf("info = %+v, want the fallback's formats", info)
+	}
+	if f.full != 1 {
+		t.Errorf("GetVideoInfo called %d times, want exactly 1", f.full)
 	}
 }
 

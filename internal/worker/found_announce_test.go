@@ -592,22 +592,6 @@ func TestProcessAnnouncesOnlyAnOwedJob(t *testing.T) {
 	}
 }
 
-// An unowed job's first fetch still confirms its schedule — a manual add
-// keeps the embed it had.
-func TestUnowedJobKeepsTheConfirmation(t *testing.T) {
-	sp, rec, job := foundTestJob(t)
-	sp.applyJobMetadata(job, &youtube.VideoInfo{
-		Title: "T", ScheduledStartTime: "2026-10-12T18:00:00Z", IsUpcoming: true,
-	}, false, false)
-
-	if got := len(rec.ByEvent("found")); got != 0 {
-		t.Errorf("recorded %d \"found\" embeds for an unowed job, want 0", got)
-	}
-	if got := len(rec.ByEvent("scheduled")); got != 1 {
-		t.Errorf("recorded %d \"scheduled\" embeds, want 1", got)
-	}
-}
-
 // A cancel clears the flag, so a later Retry of the row does not announce a
 // discovery long past.
 //

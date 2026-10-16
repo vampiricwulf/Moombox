@@ -67,6 +67,12 @@ func TestRegistryBroadcastsToEveryLiveDownloader(t *testing.T) {
 // cached emote data — for the life of the process, and this daemon runs 24/7.
 // Not a latch problem: stream_processor_twitch.go builds a FRESH downloader per
 // job execution, so no later job can inherit a stale one's state.
+//
+// The remove runs twice. ExecuteTwitch defers it; a future edit that also
+// removes on an explicit path must not corrupt the registry or panic. The
+// mutation: a slice-based registry whose second removal panics on, or
+// re-slices around, an index it no longer holds — taking the surviving entry
+// with it.
 func TestRemovedDownloaderIsNotReauthenticated(t *testing.T) {
 	reg := newTwitchChatRegistry()
 	stays, goes := &fakeChat{}, &fakeChat{}
@@ -74,35 +80,16 @@ func TestRemovedDownloaderIsNotReauthenticated(t *testing.T) {
 	removeGoes := reg.add(goes)
 
 	removeGoes()
+	removeGoes()
 
 	if got := reg.reauthenticateAll(); got != 1 {
-		t.Errorf("reauthenticateAll() = %d after one removal, want 1", got)
+		t.Errorf("reauthenticateAll() = %d after a double removal, want 1", got)
 	}
 	if n := goes.calls.Load(); n != 0 {
 		t.Errorf("the removed downloader was told %d times, want 0", n)
 	}
 	if n := stays.calls.Load(); n != 1 {
 		t.Errorf("the remaining downloader was told %d times, want 1", n)
-	}
-}
-
-// TestRemoveIsIdempotent. ExecuteTwitch defers the remove; a future edit that
-// also removes on an explicit path must not corrupt the registry or panic.
-//
-// The mutation: a slice-based registry whose second removal panics on, or
-// re-slices around, an index it no longer holds — taking the surviving entry
-// with it.
-func TestRemoveIsIdempotent(t *testing.T) {
-	reg := newTwitchChatRegistry()
-	stays := &fakeChat{}
-	reg.add(stays)
-	remove := reg.add(&fakeChat{})
-
-	remove()
-	remove()
-
-	if got := reg.reauthenticateAll(); got != 1 {
-		t.Errorf("reauthenticateAll() = %d after a double removal, want 1", got)
 	}
 }
 
