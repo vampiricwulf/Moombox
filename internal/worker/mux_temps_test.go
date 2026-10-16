@@ -93,11 +93,16 @@ func TestTheBootReMuxAfterACrashLeavesOneGoodArchive(t *testing.T) {
 // the output directory and every job's own output_directory, once each, and
 // reads the directory of every recorded archive and part file that lies
 // outside those — a part stays beside the first part of its job wherever that
-// was written, which a changed output_directory leaves behind.
+// was written, which a changed output_directory leaves behind — and the
+// "trim" directory beside each, where a trim of that archive or part writes
+// its encode. A directory is read one level, so a listed one does not stand
+// for the trim directory inside it.
 //
 // Mutants: dropping the job output_directory trees (the override is not
 // walked); dropping the recorded files' directories (the moved-away part
-// directory is not read).
+// directory is not read); dropping trimDirsOf (neither trim directory is
+// read); deduplicating dirs by containment instead of equality (the trim
+// directory inside a listed part directory is dropped).
 func TestMuxTempRootsCoverEveryDirectoryAnArchiveIsWrittenTo(t *testing.T) {
 	_, db := testWorkerSetup(t)
 	base := t.TempDir()
@@ -105,12 +110,15 @@ func TestMuxTempRootsCoverEveryDirectoryAnArchiveIsWrittenTo(t *testing.T) {
 	override := filepath.Join(base, "elsewhere")
 	nested := filepath.Join(global, "channel")
 	oldParts := filepath.Join(base, "old-output", "channel")
+	oldArchive := filepath.Join(base, "older-output", "channel")
 	for _, j := range []*database.Job{
 		{ID: "a", VideoID: "a", URL: "u", Status: database.StatusFinished, OutputDirectory: override,
 			OutputFile: filepath.Join(override, "A.mp4")},
 		{ID: "b", VideoID: "b", URL: "u", Status: database.StatusFinished, OutputDirectory: nested,
 			OutputFile: filepath.Join(nested, "B.mp4")},
 		{ID: "c", VideoID: "c", URL: "u", Status: database.StatusMuxing, OutputDirectory: global},
+		{ID: "d", VideoID: "d", URL: "u", Status: database.StatusFinished,
+			OutputFile: filepath.Join(oldArchive, "D.mp4")},
 	} {
 		if _, err := db.AddJob(j); err != nil {
 			t.Fatal(err)
@@ -126,8 +134,50 @@ func TestMuxTempRootsCoverEveryDirectoryAnArchiveIsWrittenTo(t *testing.T) {
 	if want := []string{override, global}; !slices.Equal(trees, sorted(want)) {
 		t.Errorf("trees = %v, want %v (the global directory and the override, the nested one inside the global)", trees, sorted(want))
 	}
-	if !slices.Equal(dirs, []string{oldParts}) {
-		t.Errorf("dirs = %v, want only the part directory outside every tree, %v", dirs, oldParts)
+	want := sorted([]string{oldParts, filepath.Join(oldParts, "trim"), oldArchive, filepath.Join(oldArchive, "trim")})
+	if got := sorted(dirs); !slices.Equal(got, want) {
+		t.Errorf("dirs = %v, want the part and archive directories outside every tree and the trim directory in each, %v", got, want)
+	}
+}
+
+// TestRemoveStaleMuxTempsSweepsACrashedTrimBesideAMovedArchive is the W30
+// review's trim finding: paths.output_directory moved to a new disk, a
+// Finished archive left where the old one put it, and a trim of it — whose
+// encode writes "<trim>.partial.moombox-tmp-<run>-<n>.mp4" in the trim
+// directory beside the archive — killed mid-encode. The sweep walked the
+// current output tree and read the archive's own directory one level, never
+// its trim directory, so the partial re-encode (gigabytes for a long range)
+// stayed on disk for good.
+//
+// Mutant: muxTempRoots dropping trimDirsOf (the leftover survives).
+func TestRemoveStaleMuxTempsSweepsACrashedTrimBesideAMovedArchive(t *testing.T) {
+	_, db := testWorkerSetup(t)
+	base := t.TempDir()
+	oldChan := filepath.Join(base, "old-output", "Chan")
+	trimDir := filepath.Join(oldChan, "trim")
+	if err := os.MkdirAll(trimDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(oldChan, "Title [vid].mp4")
+	if err := os.WriteFile(archive, []byte("archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddJob(&database.Job{ID: "vid", VideoID: "vid", URL: "u", Status: database.StatusFinished,
+		OutputFile: archive, Filename: filepath.Join("Chan", "Title [vid].mp4")}); err != nil {
+		t.Fatal(err)
+	}
+	leftover := goneRunTemp(filepath.Join(trimDir, "vid_00-00-10_00-00-20.partial.mp4"))
+	if err := os.WriteFile(leftover, []byte("half a trim"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n := RemoveStaleMuxTemps(db, filepath.Join(base, "new-output"), discardLogger{}); n != 1 {
+		t.Errorf("RemoveStaleMuxTemps removed %d files, want the crashed trim's temporary file", n)
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Errorf("the crashed trim's temporary file %s survived the boot sweep", leftover)
+	}
+	if _, err := os.Stat(archive); err != nil {
+		t.Errorf("the archive the trim was cut from is gone: %v", err)
 	}
 }
 

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"path/filepath"
+	"slices"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
@@ -22,8 +23,9 @@ import (
 // output_directory, walked whole (the template puts archives in a
 // subdirectory), and — one level each — the directories every recorded file
 // is in, which outlive a change of output_directory: a split job's later
-// parts are written beside its first, wherever that went. A row that cannot
-// be read costs only its own directories.
+// parts are written beside its first, wherever that went, and a trim's encode
+// in the "trim" directory beside the archive or part it cuts. A row that
+// cannot be read costs only its own directories.
 //
 // Every removal is logged with its path.
 func RemoveStaleMuxTemps(db *database.Database, outputDir string, log logger) int {
@@ -44,14 +46,21 @@ func RemoveStaleMuxTemps(db *database.Database, outputDir string, log logger) in
 
 // muxTempRoots returns the trees and the single directories RemoveStaleMuxTemps
 // reads: outputDir ("./output" when unset, as buildJobContext defaults it) and
-// every job's output_directory, and the directory of every output_file and
-// part file_path not already inside one of those trees.
+// every job's output_directory, and — where not already inside one of those
+// trees — the directory of every output_file and part file_path, and the
+// "trim" directory beside each (trimDirsOf), where a trim's encode writes its
+// temporary file: a trim of an archive an earlier output_directory left
+// behind is written beside that archive, outside every tree.
 func muxTempRoots(db *database.Database, outputDir string) (trees, dirs []string) {
 	if outputDir == "" {
 		outputDir = "./output"
 	}
 	trees = []string{filepath.Clean(outputDir)}
-	var files []string
+	absOutputDir, err := filepath.Abs(outputDir)
+	if err != nil {
+		absOutputDir = filepath.Clean(outputDir)
+	}
+	var candidates []string
 	if db != nil {
 		if jobs, err := db.GetAllJobs(); err == nil {
 			for _, j := range jobs {
@@ -59,19 +68,22 @@ func muxTempRoots(db *database.Database, outputDir string) (trees, dirs []string
 					trees = append(trees, filepath.Clean(j.OutputDirectory))
 				}
 				if j.OutputFile != "" {
-					files = append(files, j.OutputFile)
+					candidates = append(candidates, filepath.Dir(j.OutputFile))
 				}
 				for _, s := range j.Segments {
 					if s.FilePath != "" {
-						files = append(files, s.FilePath)
+						candidates = append(candidates, filepath.Dir(s.FilePath))
 					}
 				}
+				candidates = append(candidates, trimDirsOf(j, absOutputDir)...)
 			}
 		}
 	}
 	trees = outermostDirs(trees)
-	for _, f := range files {
-		if d := filepath.Dir(f); !withinAny(d, trees) && !withinAny(d, dirs) {
+	// A directory is read one level, so only a tree covers what lies below
+	// it: a part directory listed does not cover the trim directory in it.
+	for _, d := range candidates {
+		if !withinAny(d, trees) && !slices.ContainsFunc(dirs, func(o string) bool { return normalizePath(o) == normalizePath(d) }) {
 			dirs = append(dirs, d)
 		}
 	}
