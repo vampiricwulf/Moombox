@@ -76,7 +76,7 @@ const NOTIFICATION_EVENT_GROUPS = [
   },
 ];
 const ALL_NOTIFICATION_EVENTS = NOTIFICATION_EVENT_GROUPS.flatMap((g) => g.events);
-const ALL_EVENT_IDS = ALL_NOTIFICATION_EVENTS.map((e) => e.id);
+export const ALL_EVENT_IDS = ALL_NOTIFICATION_EVENTS.map((e) => e.id);
 
 // Which events a target's mention rides along with when it sets `mention` but
 // has never written `mention_events` — the owner's 2026-09-27 ruling Q5. This
@@ -194,6 +194,22 @@ export function editedSettingsPayload(baseline, current) {
   return payload;
 }
 
+/**
+ * Each target of a notification list named as the server's merge names it
+ * (notifications.TargetIdentities): its trimmed URL and how many earlier
+ * entries carry the same one. It is what the page knows a target by across
+ * the live lists a save answers with, which replace its copy.
+ */
+export function notificationIdentities(list) {
+  const seen = new Map();
+  return (list || []).map((n) => {
+    const url = (n?.url || "").trim();
+    const count = seen.get(url) || 0;
+    seen.set(url, count + 1);
+    return `${url}#${count}`;
+  });
+}
+
 export class SettingsController {
   constructor(app) {
     this.app = app;
@@ -213,6 +229,11 @@ export class SettingsController {
     /** The browser choice as populateBrowserSelector filled it, or as the
      *  last save sent it (_browserChoice), for the same rule. */
     this._browserBaseline = null;
+    /** The targets whose event chips Filter... opened while no filter is
+     *  stored, by identity (notificationIdentities). Page state, not a
+     *  save: every chip is lit, which is the "All events" the target
+     *  already has, so there is nothing to write until one is unticked. */
+    this._openEventFilters = new Set();
     /** True when the yt-dlp plugin button reads "Reinstall" (installed,
      *  matching port) — the install call must then force a rewrite. */
     this._ytdlpReinstall = false;
@@ -1951,6 +1972,11 @@ export class SettingsController {
     if (!container || !this.app.config) return;
 
     const notifications = this.app.config.notifications || [];
+    // An opened chip row is forgotten once its target is gone.
+    const ids = notificationIdentities(notifications);
+    for (const id of this._openEventFilters) {
+      if (!ids.includes(id)) this._openEventFilters.delete(id);
+    }
 
     if (notifications.length === 0) {
       container.innerHTML =
@@ -1967,14 +1993,18 @@ export class SettingsController {
 
     container.innerHTML = notifications
       .map((notif, idx) => {
-        const hasFilter = Array.isArray(notif.events) && notif.events.length > 0;
+        // The chips show the stored filter, or — on a row Filter... opened
+        // with none stored — every event lit.
+        const shownEvents = Array.isArray(notif.events) && notif.events.length > 0
+          ? notif.events
+          : this._openEventFilters.has(ids[idx]) ? ALL_EVENT_IDS : null;
         let eventsHtml;
 
-        if (hasFilter) {
+        if (shownEvents) {
           const grouped = NOTIFICATION_EVENT_GROUPS.map((group) => {
             const chips = group.events
               .map((evt) => {
-                const active = notif.events.includes(evt.id);
+                const active = shownEvents.includes(evt.id);
                 const variant = active ? 'variant="primary"' : "";
                 return `<sl-tag size="small" ${variant} ${chip(active)} data-notif-action="toggle-event" data-notif-index="${idx}" data-event-id="${evt.id}">${evt.label}</sl-tag>`;
               })
@@ -2352,54 +2382,80 @@ export class SettingsController {
     this.renderNotificationsList();
   }
 
+  /**
+   * Tick or untick one event chip. On a row Filter... opened with no filter
+   * stored, the chips start all lit, so the first untick writes every event
+   * but that one — the first save this row makes.
+   */
   async toggleNotificationEvent(index, eventId) {
-    const notif = this.app.config.notifications?.[index];
-    if (!notif || !Array.isArray(notif.events)) return;
+    const list = this.app.config.notifications || [];
+    const notif = list[index];
+    if (!notif) return;
+    const id = notificationIdentities(list)[index];
+    const stored = Array.isArray(notif.events) && notif.events.length > 0;
+    if (!stored && !this._openEventFilters.has(id)) return;
 
     // Save a copy in case the save fails
     const base = this._notificationsCopy();
-    const previousEvents = [...notif.events];
+    const previousEvents = notif.events;
 
-    const idx = notif.events.indexOf(eventId);
+    const events = stored ? [...notif.events] : [...ALL_EVENT_IDS];
+    const idx = events.indexOf(eventId);
     if (idx >= 0) {
-      notif.events.splice(idx, 1);
+      events.splice(idx, 1);
     } else {
-      notif.events.push(eventId);
+      events.push(eventId);
     }
 
     // If all events are selected or none remain, clear the filter
     // (empty array is ambiguous — treat as "all events" by removing the filter)
-    if (notif.events.length === 0 || ALL_EVENT_IDS.every((id) => notif.events.includes(id))) {
+    if (events.length === 0 || ALL_EVENT_IDS.every((e) => events.includes(e))) {
       delete notif.events;
+    } else {
+      notif.events = events;
     }
 
     try {
       await this._saveNotificationEdits(base);
+      // The row is the stored filter's now, or closed with it.
+      this._openEventFilters.delete(id);
     } catch {
       // Revert on failure
-      notif.events = previousEvents;
+      if (previousEvents === undefined) delete notif.events;
+      else notif.events = previousEvents;
     }
     this.renderNotificationsList();
   }
 
-  async enableNotificationFilter(index) {
-    const notif = this.app.config.notifications?.[index];
-    if (!notif) return;
-
-    const base = this._notificationsCopy();
-    const previousEvents = notif.events;
-    notif.events = [...ALL_EVENT_IDS];
-    try {
-      await this._saveNotificationEdits(base);
-    } catch {
-      notif.events = previousEvents;
-    }
+  /**
+   * Open the event chips on a target with no filter, every one lit. Page
+   * state, not a save: with every chip lit the target receives what it
+   * receives with no filter, so there is nothing to write until a chip is
+   * unticked — that is the save (toggleNotificationEvent). It used to save a
+   * filter naming every event; once the dashboard's saves became merges, the
+   * merge read that as no change, the answer came back with the target as
+   * stored, and the row closed again, so no filter could be started. The row
+   * is kept by the target's identity, so a save of another card, whose answer
+   * replaces the page's list, leaves it open.
+   */
+  enableNotificationFilter(index) {
+    const list = this.app.config.notifications || [];
+    if (!list[index]) return;
+    this._openEventFilters.add(notificationIdentities(list)[index]);
     this.renderNotificationsList();
   }
 
   async clearNotificationFilter(index) {
-    const notif = this.app.config.notifications?.[index];
+    const list = this.app.config.notifications || [];
+    const notif = list[index];
     if (!notif) return;
+    this._openEventFilters.delete(notificationIdentities(list)[index]);
+    if (!Array.isArray(notif.events) || notif.events.length === 0) {
+      // Opened with Filter... and never narrowed: no filter is stored, so
+      // closing the row is all there is to do.
+      this.renderNotificationsList();
+      return;
+    }
 
     const base = this._notificationsCopy();
     const previousEvents = notif.events;

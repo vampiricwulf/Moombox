@@ -81,7 +81,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `settings-notification-mode.test.mjs` | each notification target's delivery mode |
 | `settings-notifications.test.mjs` | the notification card's auto-saving controls and the Public Dashboard URL row |
 | `settings-reorder-budget.test.mjs` | the two reorder ceilings: 0 sent, an empty field omitted |
-| `settings-save-merge.test.mjs` | a Settings save sends only the fields edited since load or the last save, so a TUI change survives it; the browser pair only once changed; a notification card's change sent as `notification_edits`, and the live list it answers with taken; `editedSettingsPayload` itself is pure |
+| `settings-save-merge.test.mjs` | a Settings save sends only the fields edited since load or the last save, so a TUI change survives it; the browser pair only once changed; a notification card's change sent as `notification_edits`, and the live list it answers with taken; Filter... opening the event chips without a save, against a fake PUT that answers as the server's merge does; `editedSettingsPayload` and `notificationIdentities` themselves are pure |
 | `settings-text.test.mjs` | Settings and setup text that pointed the wrong way or dropped the server's reason |
 | `settings-channels.test.mjs` | both Add Channel dialogs: a URL or bare `@handle` resolved first, a configured ID switching to editing it, the edit mark, and a stale list's `409` |
 | `setup-wizard.test.mjs` | the first-run wizard's Finish: the address it redirects the tab to after the restart |

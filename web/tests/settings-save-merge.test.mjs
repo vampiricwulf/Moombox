@@ -17,7 +17,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 
-import { editedSettingsPayload } from "../public/modules/settings.js";
+import { ALL_EVENT_IDS, editedSettingsPayload, notificationIdentities } from "../public/modules/settings.js";
 
 let jsdomMissing = null;
 try {
@@ -254,6 +254,169 @@ test("an added target is sent as from -1", { skip }, async () => {
 
   assert.deepEqual(puts(h).at(-1).notification_edits.from, [0, 1, -1]);
   assert.deepEqual(puts(h).at(-1).notification_edits.edited.at(-1), { url: HOOK_D });
+});
+
+// ── The event filter ────────────────────────────────────────────────────────
+
+/**
+ * PUT /api/config's notification_edits answered as the server's merge
+ * answers it (notifications.MergeTargetEdits): an entry edited from a base
+ * index has each field it changed — compared as TargetFormValues compares
+ * them, an event filter as a set and one naming every event as none — written
+ * onto the live target with that identity, a base target no entry names is
+ * removed, and an added one appended. The answer is the live list as it then
+ * stands, `changed` saying whether the edit moved it. The suites above answer
+ * {success} alone, which hid that a "change" the merge reads as none comes
+ * back as the target as stored.
+ */
+function mergingServer(live) {
+  const server = { live: structuredClone(live) };
+  const vocabulary = JSON.stringify([...ALL_EVENT_IDS].sort());
+  const events = (list) => {
+    if (!Array.isArray(list) || list.length === 0) return "*";
+    const set = JSON.stringify([...new Set(list)].sort());
+    return set === vocabulary ? "*" : set;
+  };
+  const form = (n) => ({
+    url: n.url,
+    enabled: n.enabled !== false,
+    events: events(n.events),
+    mention: n.mention || "",
+    mention_events: JSON.stringify(n.mention_events ?? null),
+    mode: n.mode === "edit" ? "edit" : "separate",
+  });
+  server.put = ({ body }) => {
+    const { base, edited, from } = body.notification_edits;
+    const before = JSON.stringify(server.live);
+    const baseIds = notificationIdentities(base);
+    const gone = baseIds.filter((_, i) => !from.includes(i));
+    let list = server.live.filter((_, i) => !gone.includes(notificationIdentities(server.live)[i]));
+    edited.forEach((n, i) => {
+      if (from[i] < 0) { list.push(structuredClone(n)); return; }
+      const target = list[notificationIdentities(list).indexOf(baseIds[from[i]])];
+      if (!target) { list.push(structuredClone(n)); return; }
+      const was = form(base[from[i]]), now = form(n);
+      for (const key of Object.keys(now)) {
+        if (was[key] === now[key]) continue;
+        if (n[key] === undefined) delete target[key];
+        else target[key] = structuredClone(n[key]);
+      }
+    });
+    server.live = list;
+    return { success: true, changed: JSON.stringify(list) !== before, notifications: structuredClone(list) };
+  };
+  return server;
+}
+
+async function openTargets(live) {
+  const server = mergingServer(live);
+  const config = { ...structuredClone(CONFIG), notifications: structuredClone(live) };
+  const h = await harness.makeApp({
+    initialState: { config: structuredClone(config) },
+    routes: { "PUT /api/config": server.put },
+  });
+  h.app.config = config;
+  h.app.settings.populateConfigForm();
+  h.app.settings.renderNotificationsList();
+  return { h, server };
+}
+
+const eventChips = (h, idx) => [...card(h, idx).querySelectorAll('[data-notif-action="toggle-event"]')];
+const litEvents = (h, idx) =>
+  eventChips(h, idx).filter((c) => c.getAttribute("variant") === "primary").map((c) => c.dataset.eventId);
+
+// Filter... on a target with no filter opens its chips, every one lit, and
+// saves nothing: every event is what the target already receives. It used to
+// save a filter naming every event, which the server's merge reads as no
+// change, so the answer — the target as stored, no filter — closed the row
+// again and no filter could ever be started from the dashboard.
+//
+// MUTANTS: enableNotificationFilter saving the every-event filter (a PUT goes
+// out, and its answer closes the row); the render ignoring the opened rows
+// (no chips).
+test("Filter... opens the event chips, every one lit, without a save", { skip }, async () => {
+  const { h } = await openTargets([{ url: HOOK_A }]);
+  control(h, 0, "enable-filter").click();
+  await h.flush();
+  await h.flush();
+
+  assert.deepEqual(puts(h), [], "Filter... saved");
+  assert.deepEqual(litEvents(h, 0), ALL_EVENT_IDS, "the chips are not drawn, every one lit");
+  assert.ok(control(h, 0, "clear-filter"), "no Clear filter chip");
+  assert.equal(control(h, 0, "enable-filter"), null, "the card still offers Filter...");
+});
+
+// The first chip unticked on an opened row is the save: every event but that
+// one, against a base with no filter, which the merge stores.
+//
+// MUTANTS: toggleNotificationEvent returning early on a target with no stored
+// filter (nothing is sent); the opened row's chips starting from none lit
+// (the save names the one event instead of every other).
+test("the first chip unticked on an opened row saves every event but that one", { skip }, async () => {
+  const { h, server } = await openTargets([{ url: HOOK_A }]);
+  control(h, 0, "enable-filter").click();
+  await h.flush();
+  eventChips(h, 0).find((c) => c.dataset.eventId === "found").click();
+  await h.flush();
+  await h.flush();
+
+  const want = ALL_EVENT_IDS.filter((e) => e !== "found");
+  assert.deepEqual(puts(h), [{
+    notification_edits: { base: [{ url: HOOK_A }], edited: [{ url: HOOK_A, events: want }], from: [0] },
+  }]);
+  assert.deepEqual(server.live, [{ url: HOOK_A, events: want }]);
+  assert.deepEqual(litEvents(h, 0), want);
+});
+
+// The opened row is page state kept by the target's identity, so another
+// card's save — whose answer replaces the page's list — leaves it open, and a
+// delete above it moves it with its target.
+//
+// MUTANTS: the opened row kept as an every-event list on the page's copy of
+// the target (the answer's list drops it); kept by card index (after the
+// delete it is C's row that is open).
+test("an opened row stays with its target across other cards' saves", { skip }, async () => {
+  const { h } = await openTargets([{ url: HOOK_A }, { url: HOOK_B }, { url: HOOK_C }]);
+  h.app.showConfirm = async () => true;
+  control(h, 1, "enable-filter").click();
+  await h.flush();
+
+  fire(h, control(h, 2, "toggle-enabled"), "sl-change");
+  await h.flush();
+  await h.flush();
+  assert.equal(h.app.config.notifications[2].enabled, false, "the mute was not saved");
+  assert.equal(litEvents(h, 1).length, ALL_EVENT_IDS.length, "B's opened row closed behind C's mute");
+
+  await h.app.settings.deleteNotification(0);
+  await h.flush();
+  assert.deepEqual(h.app.config.notifications.map((n) => n.url), [HOOK_B, HOOK_C]);
+  assert.equal(litEvents(h, 0).length, ALL_EVENT_IDS.length, "B's opened row closed behind A's delete");
+  assert.equal(eventChips(h, 1).length, 0, "C's row opened in B's place");
+});
+
+// Clear filter on a row Filter... opened, with nothing stored, closes it and
+// saves nothing.
+//
+// MUTANT: the early return dropped (a PUT of an edit that changes nothing).
+test("Clear filter on a row nothing was saved from closes it without a save", { skip }, async () => {
+  const { h } = await openTargets([{ url: HOOK_A }]);
+  control(h, 0, "enable-filter").click();
+  await h.flush();
+  control(h, 0, "clear-filter").click();
+  await h.flush();
+  await h.flush();
+
+  assert.deepEqual(puts(h), []);
+  assert.ok(control(h, 0, "enable-filter"), "the row did not close");
+});
+
+// MUTANTS: the URL not trimmed (a padded URL is another target); the count
+// dropped (a webhook listed twice is one entry).
+test("notificationIdentities names targets as the server's merge does", () => {
+  assert.deepEqual(
+    notificationIdentities([{ url: ` ${HOOK_A}` }, { url: HOOK_A }, { url: HOOK_B }, {}]),
+    [`${HOOK_A}#0`, `${HOOK_A}#1`, `${HOOK_B}#0`, "#0"],
+  );
 });
 
 // ── editedSettingsPayload ───────────────────────────────────────────────────
