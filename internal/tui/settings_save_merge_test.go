@@ -176,8 +176,9 @@ func TestTUISaveKeepsDashboardScalarChanges(t *testing.T) {
 // write.
 //
 // Mutants killed: writing an edited field only while live still holds its
-// Open value (first writer wins) — the scalar keeps 7; mergeNotifFields
-// keeping live's value for a field both changed — the mention stays @here.
+// Open value (first writer wins) — the scalar keeps 7; notifications'
+// mergeTargetFields keeping live's value for a field both changed — the
+// mention stays @here.
 func TestTUISaveLastWriterWinsOnTheSameField(t *testing.T) {
 	m, store, _ := overlayOverStore(t, threeTargets)
 	onDashboard(t, store, func(c *config.MoomboxConfig) {
@@ -210,10 +211,11 @@ func TestTUISaveLastWriterWinsOnTheSameField(t *testing.T) {
 // D.
 //
 // Mutants killed: `m.cfg.Notifications = m.notifications` (D dropped, C
-// back, B's and A's dashboard edits undone); mergeNotifFields writing the
-// editor's target whole (A un-muted); mergeNotificationEdits treating every
-// target it kept as edited (C, which the dashboard removed and the TUI did
-// not touch, is added back as an edit of a removed target).
+// back, B's and A's dashboard edits undone); notifications' mergeTargetFields
+// writing the editor's target whole (A un-muted);
+// notifications.MergeTargetEdits treating every target it kept as edited (C,
+// which the dashboard removed and the TUI did not touch, is added back as an
+// edit of a removed target).
 func TestTUISaveKeepsDashboardNotificationChanges(t *testing.T) {
 	m, store, _ := overlayOverStore(t, threeTargets)
 	off := false
@@ -298,51 +300,6 @@ func TestTUISaveAppliesItsOwnTargetChangesByIdentity(t *testing.T) {
 	}
 }
 
-// TestMergeNotificationEditsIdentityEdges pins the corners of a target's
-// identity the overlay can reach.
-//
-// Mutants killed: an identity without its occurrence count (deleting one of
-// two entries with one URL removes both); an added target always appended
-// (a webhook the TUI and the dashboard both added is listed twice); an edit
-// of a target the dashboard removed dropped instead of added back.
-func TestMergeNotificationEditsIdentityEdges(t *testing.T) {
-	x := config.NotificationConfig{URL: hookA}
-	t.Run("one of two entries with one URL deleted", func(t *testing.T) {
-		got, changed := mergeNotificationEdits(
-			[]config.NotificationConfig{x, x}, []config.NotificationConfig{x}, []int{0},
-			[]config.NotificationConfig{x, x})
-		if !changed || len(got) != 1 {
-			t.Errorf("merged %q (changed %v), want one entry left", targetURLs(got), changed)
-		}
-	})
-	t.Run("added on both sides", func(t *testing.T) {
-		mine := config.NotificationConfig{URL: hookB, Mention: "@here"}
-		got, _ := mergeNotificationEdits(
-			[]config.NotificationConfig{x}, []config.NotificationConfig{x, mine}, []int{0, -1},
-			[]config.NotificationConfig{x, {URL: hookB}})
-		if !slices.Equal(targetURLs(got), []string{hookA, hookB}) || got[1].Mention != "@here" {
-			t.Errorf("merged %q, want B once, as the TUI saved it", targetURLs(got))
-		}
-	})
-	t.Run("edited here, removed there", func(t *testing.T) {
-		muted := false
-		edited := config.NotificationConfig{URL: hookA, Enabled: &muted}
-		got, _ := mergeNotificationEdits(
-			[]config.NotificationConfig{x}, []config.NotificationConfig{edited}, []int{0}, nil)
-		if len(got) != 1 || got[0].IsEnabled() {
-			t.Errorf("merged %q, want the TUI's muted A added back", targetURLs(got))
-		}
-	})
-	t.Run("nothing changed", func(t *testing.T) {
-		live := []config.NotificationConfig{{URL: hookD}}
-		got, changed := mergeNotificationEdits(
-			[]config.NotificationConfig{x}, []config.NotificationConfig{x}, []int{0}, live)
-		if changed || &got[0] != &live[0] {
-			t.Errorf("an untouched list was rewritten (changed %v)", changed)
-		}
-	})
-}
-
 // TestTUINoOpSaveWritesNothing: a save whose changes leave the live config
 // as it is writes nothing at all — no OnSave, so config.toml keeps exactly
 // what the dashboard wrote, and the dashboard's changes stand. Opening a
@@ -352,9 +309,9 @@ func TestMergeNotificationEditsIdentityEdges(t *testing.T) {
 // would add that target back.
 //
 // Mutants killed: saveAndClose calling OnSave whatever the write changed
-// (the file is rewritten, saves = 1); mergeNotificationEdits comparing the
-// stored structs instead of notifFormValues (the Enter on C reads as an
-// edit of a removed target, and C is added back).
+// (the file is rewritten, saves = 1); notifications.MergeTargetEdits
+// comparing the stored structs instead of notifications.TargetFormValues
+// (the Enter on C reads as an edit of a removed target, and C is added back).
 func TestTUINoOpSaveWritesNothing(t *testing.T) {
 	m, store, saves := overlayOverStore(t, threeTargets)
 	onDashboard(t, store, func(c *config.MoomboxConfig) {
@@ -401,7 +358,8 @@ func TestTUINoOpSaveWritesNothing(t *testing.T) {
 }
 
 // TestTUISaveWritesTargetEditsTheFormUsedToHide: whether a target was
-// edited is decided by notifFormValues, which hid two differences the
+// edited is decided by notifications.TargetFormValues (the TUI's
+// notifFormValues before the dashboard shared it), which hid two differences the
 // manager acts on. A filter naming only events outside the vocabulary — a
 // retired connectivity_pause, still delivered through its alias, or
 // connectivity_lost, which matches nothing — read as "*", every event, so
@@ -410,8 +368,8 @@ func TestTUINoOpSaveWritesNothing(t *testing.T) {
 // both kept the old filter. And the URL was compared trimmed, so deleting
 // the stray space the manager refuses a padded URL for was no edit either.
 //
-// Mutants killed: notifFormEvents reading a filter with no vocabulary event
-// as "*" (the old known-events-only form) — the retired filters stay;
+// Mutants killed: notifications' targetFormEvents reading a filter with no
+// vocabulary event as "*" (the old known-events-only form) — the retired filters stay;
 // "url" compared trimmed — the padded URL stays; Space on an event row not
 // marking the rows touched — Enter keeps the stored filter.
 func TestTUISaveWritesTargetEditsTheFormUsedToHide(t *testing.T) {
@@ -625,8 +583,9 @@ func TestTUISaveRestartReflectsWhatChanged(t *testing.T) {
 // overlay shows: a field loadSettingsValues loads but the write does not
 // know would be edited, saved as "Saved", and silently never written.
 //
-// Mutant killed: deleting any one case from writeSettingsField (or from
-// writeNotifField, for the editor's target fields).
+// Mutant killed: deleting any one case from writeSettingsField. The target
+// fields' twin, notifications.WriteTargetField, is pinned in its own package
+// (TestEveryTargetFieldIsWritable).
 func TestEverySettingsFieldIsWritable(t *testing.T) {
 	v := map[string]string{}
 	loadSettingsValues(v, config.Defaults())
@@ -638,10 +597,5 @@ func TestEverySettingsFieldIsWritable(t *testing.T) {
 	}
 	if writeSettingsField(config.Defaults(), "no_such_field", v, settingsParsed{}) {
 		t.Error("writeSettingsField accepted a field it does not know")
-	}
-	for key := range notifFormValues(config.NotificationConfig{}) {
-		if !writeNotifField(&config.NotificationConfig{}, config.NotificationConfig{}, key) {
-			t.Errorf("the notification editor shows %q but a save cannot write it", key)
-		}
 	}
 }

@@ -309,7 +309,7 @@ func (m *SettingsModel) snapshotConfig() config.MoomboxConfig {
 // first time a field was added to writeSettingsField and not to it.
 //
 // Neither list aliases the model's own: mergeChannelEdits and
-// mergeNotificationEdits build new slices (the latter copying each target it
+// notifications.MergeTargetEdits build new slices (the latter copying each target it
 // writes), and a save re-copies the editors' lists from the saved ones
 // (resyncFromLive), so the notification editor's in-place writes never reach
 // the live config or a snapshot.

@@ -469,10 +469,11 @@ type SettingsModel struct {
 	// notifFrom names, for each entry of notifications, the index of the
 	// notificationsAtOpen entry it was opened from (-1: the editor added it).
 	// A save applies only what the editor changed relative to its own Open
-	// copy, by that copy's identity (mergeNotificationEdits), so a target the
-	// dashboard added, edited or removed while the overlay was open is not
-	// reverted by a save of something else. Tracked by origin rather than by
-	// URL because the URL is one of the fields the editor edits.
+	// copy, by that copy's identity (notifications.MergeTargetEdits), so a
+	// target the dashboard added, edited or removed while the overlay was
+	// open is not reverted by a save of something else. Tracked by origin
+	// rather than by URL because the URL is one of the fields the editor
+	// edits.
 	notificationsAtOpen []config.NotificationConfig
 	notifFrom           []int
 
@@ -766,10 +767,10 @@ type settingsParsed struct {
 // Open loaded — is written; every other field keeps its live value, whatever
 // the dashboard set it to while the overlay was open, and so does every
 // channel and notification target the overlay did not touch
-// (mergeChannelEdits, mergeNotificationEdits). Open copied every setting and
-// a save used to write them all back, so a save of the log level reverted
-// a parallel-downloads count, a webhook target or anything else changed on
-// the dashboard meanwhile.
+// (mergeChannelEdits, notifications.MergeTargetEdits). Open copied every
+// setting and a save used to write them all back, so a save of the log level
+// reverted a parallel-downloads count, a webhook target or anything else
+// changed on the dashboard meanwhile.
 //
 // It runs under the store's write lock, the checks included: the merged
 // result — the edited fields over the live config as it stands now — is
@@ -821,7 +822,7 @@ func (m *SettingsModel) applyValues() (settingsWrite, bool) {
 		m.cfg.Channels = chs
 	}
 	// Notification targets: the same rule, by each target's identity.
-	if ns, changed := mergeNotificationEdits(m.notificationsAtOpen, m.notifications, m.notifFrom, m.cfg.Notifications); changed {
+	if ns, changed := notifications.MergeTargetEdits(m.notificationsAtOpen, m.notifications, m.notifFrom, m.cfg.Notifications); changed {
 		m.cfg.Notifications = ns
 	}
 
