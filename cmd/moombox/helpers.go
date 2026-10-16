@@ -340,7 +340,10 @@ func filterJobsByAgeThreshold(jobs []*database.Job, hideAgeDays float64) []*data
 // launcher keeps executing the binary it was originally started from across
 // every in-place update, so launcher-side improvements (crash supervision,
 // auto-rollback, …) only take effect after a full stop/start. Deliberately a
-// light suggestion, never a warning: nothing is broken in the meantime.
+// light suggestion, never a warning: nothing is broken in the meantime — the
+// one exception being `moombox add` under a supervisor from before this
+// handshake, whose child cannot find the daemon record's place and records
+// nothing, so `add` refuses until that full stop/start (childDaemonRecordPath).
 // Returns "" when the versions match (nothing to log). An empty
 // launcherVersion means the launcher predates the version handshake itself.
 func launcherStalenessNote(launcherVersion, currentVersion string) string {

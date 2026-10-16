@@ -29,9 +29,12 @@ import (
 // and the child writes the record once its database is open
 // (writeDaemonRecord, initServices) and removes it when it closes the
 // database; the launcher removes it too when it takes the lock and when it
-// releases it. A record is trusted only while the lock is held
-// (findRunningDaemon): a daemon that died without removing its record left
-// the lock with it, kernel-released, so its record is never read as a
+// releases it. A launcher from before the record names nothing — the
+// supervisor keeps running the binary it started from across every in-place
+// update — so a child it spawns finds the record's place beside the lock
+// itself (childDaemonRecordPath). A record is trusted only while the lock is
+// held (findRunningDaemon): a daemon that died without removing its record
+// left the lock with it, kernel-released, so its record is never read as a
 // running daemon's. The lock is per user — %LOCALAPPDATA% on Windows,
 // ~/.local/share on Linux — so a daemon another account runs is invisible
 // here, and `add` takes the no-daemon rule for it.
@@ -44,8 +47,10 @@ const (
 )
 
 // daemonRecordEnv names, in a child's environment, the file it records its
-// database in. Only a launcher that holds the lock sets it, so a child run by
-// hand (or a test's) writes no record another process would read.
+// database in: every launcher since the record sets it, empty when it holds
+// no lock to put the record beside. A child run by hand (or a test's) has
+// none, and writes no record another process would read
+// (childDaemonRecordPath).
 const daemonRecordEnv = "_MOOMBOX_DAEMON_RECORD"
 
 // daemonRecord is the record's content. Every path in it is absolute.
@@ -66,16 +71,53 @@ type daemonRecord struct {
 // this process holds the lock it removes the record an earlier child left —
 // one that crashed removes nothing, and its record must not stand for the
 // child about to boot — and returns the environment entry that names the
-// record's path to the next one. Nil when this process holds no lock with a
-// directory (the Windows session mutex alone, when the cross-session lock
-// failed open).
+// record's path to the next one. The entry names no path when this process
+// holds no lock with a directory (the Windows session mutex alone, when the
+// cross-session lock failed open): it is still set, so the child does not
+// take its launcher for one from before the record and write beside a lock
+// another process holds (childDaemonRecordPath).
 func childDaemonRecordEnv() []string {
 	path := heldDaemonRecordPath()
-	if path == "" {
-		return nil
-	}
 	removeDaemonRecord(path)
 	return []string{daemonRecordEnv + "=" + path}
+}
+
+// childDaemonRecordPath is the child's record path: the one its launcher
+// named (daemonRecordEnv, "" for none), or — when the launcher named nothing
+// at all, being a release from before the record — the record's place beside
+// the lock, while a lock is held there and a launcher spawned this child
+// (_MOOMBOX_LAUNCHER_VERSION, which every launcher since the version
+// handshake sets and a child run by hand does not). The supervisor keeps
+// running the binary it started from across every in-place update until a
+// full stop/start (launcherStalenessNote), so after an in-app update into
+// this release the launcher that respawns the child is the old one, and
+// without this the child recorded nothing and `add` refused every add until
+// the whole process was stopped — the dashboard's and the TUI's Restart
+// respawn the child under that same launcher. Such a launcher removes no
+// record either, so the one a crashed predecessor left is removed here, as
+// the launcher would have before the spawn; initServices calls this before
+// the database opens. Until then — the crash backoff — that record stands
+// for the child the same launcher is about to start, from the same directory
+// and config file. A launcher from before the handshake as well is not
+// told from a child run by hand: its child records nothing, and `add` refuses
+// until a full stop/start.
+func childDaemonRecordPath() string {
+	if path, named := os.LookupEnv(daemonRecordEnv); named {
+		return path
+	}
+	if os.Getenv("_MOOMBOX_LAUNCHER_VERSION") == "" {
+		return ""
+	}
+	dir := daemonLockDir()
+	if dir == "" {
+		return ""
+	}
+	if held, err := daemonLockHeld(dir); err != nil || !held {
+		return ""
+	}
+	path := filepath.Join(dir, daemonRecordName)
+	removeDaemonRecord(path)
+	return path
 }
 
 // heldDaemonRecordPath is the record's path beside the lock this process
@@ -90,9 +132,9 @@ func heldDaemonRecordPath() string {
 // writeDaemonRecord is the child's half: it records, at path, the database
 // it opened from dbPath and the config it loaded from configPath (both as the
 // config spells them, resolved here against this process's working
-// directory). A no-op when path is "" (no launcher named one). A failure is a
-// Warn and nothing more: without the record `add` refuses while this daemon
-// runs, and a database that opened is no reason to stop.
+// directory). A no-op when path is "" (childDaemonRecordPath found none). A
+// failure is a Warn and nothing more: without the record `add` refuses while
+// this daemon runs, and a database that opened is no reason to stop.
 func writeDaemonRecord(path, dbPath, configPath string, log interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
@@ -175,6 +217,17 @@ func readDaemonRecord(path string) *daemonRecord {
 	return &rec
 }
 
+// noDaemonRecordRefusal is why `add` refuses while a daemon holds the lock
+// with no record beside it. Mostly the daemon is still starting, and a moment
+// later it has one. One that stays without a record is a supervisor from
+// before the version handshake, a child from before the record, or a record
+// the child could not write (its Warn says why) — and a Restart from the
+// dashboard or the TUI respawns the child under the same supervisor, so the
+// remedy it names is a full stop and start.
+const noDaemonRecordRefusal = "a Moombox daemon is running but has not recorded its database — retry in a moment if it is still starting; " +
+	"if it stays unrecorded, stop Moombox and start it again (a Restart from the dashboard or the TUI keeps the supervisor process, which can be a release that records none), " +
+	"and see the daemon's log for a record it could not write"
+
 // resolveAddDatabase is the database file `add` writes to, for a config whose
 // database_path is dbPath, loaded from configFile ("" for none), run from cwd.
 //
@@ -185,8 +238,9 @@ func readDaemonRecord(path string) *daemonRecord {
 // which is what makes `moombox -config <the daemon's config> add` work from
 // any directory — and against cwd otherwise, so a second install's config
 // with the same "./moombox.db" is refused rather than read as the running
-// one's. A daemon that holds the lock but has recorded nothing is refused too:
-// a database guessed while it starts is the one this record exists to stop.
+// one's. A daemon that holds the lock but has recorded nothing is refused too
+// (noDaemonRecordRefusal): a database guessed while it starts is the one this
+// record exists to stop.
 //
 // With no daemon running, a relative database_path resolves against cwd, and
 // the caller refuses it when no database is there (addVideo).
@@ -196,7 +250,7 @@ func resolveAddDatabase(dbPath, configFile, cwd string, d daemonState) (string, 
 	}
 	rec := d.record
 	if rec == nil {
-		return "", errors.New("a Moombox daemon is running but has not recorded its database yet — it is still starting, or it is an older version that records none; retry in a moment, or restart the daemon")
+		return "", errors.New(noDaemonRecordRefusal)
 	}
 	base := cwd
 	if configFile != "" && rec.ConfigPath != "" && samePath(configFile, rec.ConfigPath) {

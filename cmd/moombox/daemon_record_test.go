@@ -77,7 +77,8 @@ func touch(t *testing.T, path string) {
 // the files (the spelt-another-way row is refused); return the record's
 // database without the comparison (the other-install and absolute-elsewhere
 // rows are accepted); treat a running daemon with no record as no daemon
-// (that row resolves).
+// (that row resolves); the no-record refusal advises a restart of the daemon
+// again, which the dashboard's Restart does not give it (the starting row).
 func TestResolveAddDatabase(t *testing.T) {
 	root := t.TempDir()
 	daemonDir := filepath.Join(root, "daemon")
@@ -109,7 +110,7 @@ func TestResolveAddDatabase(t *testing.T) {
 	}{
 		{"no daemon, relative", "./moombox.db", otherCfg, elsewhere, daemonState{}, filepath.Join(elsewhere, "moombox.db"), nil},
 		{"no daemon, absolute", daemonDB, otherCfg, elsewhere, daemonState{}, daemonDB, nil},
-		{"daemon starting", "./moombox.db", daemonCfg, daemonDir, daemonState{running: true}, "", []string{"has not recorded"}},
+		{"daemon starting", "./moombox.db", daemonCfg, daemonDir, daemonState{running: true}, "", []string{"has not recorded", "stop Moombox and start it again", "keeps the supervisor"}},
 		{"the daemon's config from elsewhere", "./moombox.db", daemonCfg, elsewhere, running, daemonDB, nil},
 		{"the daemon's config spelt another way", "./moombox.db", unclean, elsewhere, running, daemonDB, nil},
 		{"another install's config, here", "./moombox.db", otherCfg, elsewhere, running, "", []string{daemonDB, filepath.Join(elsewhere, "moombox.db"), daemonCfg, "4242"}},
@@ -193,8 +194,95 @@ func TestADaemonRecordIsTrustedOnlyWhileTheLockIsHeld(t *testing.T) {
 	if d := findRunningDaemon(); d.running {
 		t.Errorf("released, but a daemon reads as running: %+v", d)
 	}
-	if env := childDaemonRecordEnv(); env != nil {
-		t.Errorf("no lock held, but childDaemonRecordEnv() = %q", env)
+	if env := childDaemonRecordEnv(); len(env) != 1 || env[0] != daemonRecordEnv+"=" {
+		t.Errorf("no lock held: childDaemonRecordEnv() = %q, want the variable set to no path", env)
+	}
+}
+
+// TestChildDaemonRecordPath pins where a child records its database. A
+// launcher from before the record names no path — the supervisor keeps
+// running the binary it started from across every in-place update — so after
+// an in-app update into this release the child recorded nothing, and `add`
+// refused every add, from the daemon's own directory too, until the whole
+// process was stopped and started; the in-app Restart kept the same launcher.
+// The child now finds the record's place beside the lock itself when a
+// launcher spawned it naming nothing and the lock is held, removing the
+// record a crashed predecessor left there, and `add` then finds its record.
+// A launcher of this release that holds no lock names no path, and a child
+// run by hand (no _MOOMBOX_LAUNCHER_VERSION) records nothing beside a lock
+// another process holds.
+//
+// Mutants: read daemonRecordEnv with os.Getenv (an empty name takes the
+// fallback); drop the _MOOMBOX_LAUNCHER_VERSION gate (the hand-run child
+// removes and replaces the daemon's record); drop the daemonLockHeld check
+// (the fallback answers with no lock held); drop the removeDaemonRecord in
+// the fallback (the crashed predecessor's record stands while the database
+// opens); initServices reads os.Getenv(daemonRecordEnv) again
+// (TestTheDaemonRecordIsWrittenWhereTheDatabaseOpens).
+func TestChildDaemonRecordPath(t *testing.T) {
+	recPath := isolateDaemonLock(t)
+	dir := t.TempDir()
+	stale := daemonRecord{PID: 1, DatabasePath: filepath.Join(dir, "dead.db"), WorkingDir: dir}
+	named := filepath.Join(dir, "named.json")
+	// unset leaves name unset for the rest of the test, restored at cleanup.
+	unset := func(name string) {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unset(daemonRecordEnv)
+	unset("_MOOMBOX_LAUNCHER_VERSION")
+
+	// No lock held: nothing, whoever spawned this child.
+	t.Setenv("_MOOMBOX_LAUNCHER_VERSION", "2.7.2")
+	unset(daemonRecordEnv)
+	if got := childDaemonRecordPath(); got != "" {
+		t.Errorf("no lock held: %q, want none", got)
+	}
+
+	holdDaemonLock(t)
+	putDaemonRecord(t, recPath, stale)
+
+	// A child run by hand records nothing, and leaves the daemon's record.
+	unset("_MOOMBOX_LAUNCHER_VERSION")
+	if got := childDaemonRecordPath(); got != "" {
+		t.Errorf("a child run by hand: %q, want none", got)
+	}
+	if _, err := os.Stat(recPath); err != nil {
+		t.Errorf("a child run by hand removed the daemon's record: %v", err)
+	}
+
+	// A launcher of this release names the path, or names none.
+	t.Setenv("_MOOMBOX_LAUNCHER_VERSION", version)
+	t.Setenv(daemonRecordEnv, named)
+	if got := childDaemonRecordPath(); got != named {
+		t.Errorf("a named path: %q, want %q", got, named)
+	}
+	t.Setenv(daemonRecordEnv, "")
+	if got := childDaemonRecordPath(); got != "" {
+		t.Errorf("a launcher that named no path: %q, want none", got)
+	}
+
+	// A launcher from before the record: the place beside the lock, the
+	// crashed predecessor's record gone before the database opens.
+	t.Setenv("_MOOMBOX_LAUNCHER_VERSION", "2.9.5")
+	unset(daemonRecordEnv)
+	got := childDaemonRecordPath()
+	if got != recPath {
+		t.Fatalf("under a launcher from before the record: %q, want %q", got, recPath)
+	}
+	if _, err := os.Stat(recPath); err == nil {
+		t.Error("the crashed predecessor's record stands while the database opens")
+	}
+	if d := findRunningDaemon(); !d.running || d.record != nil {
+		t.Fatalf("while the database opens: %+v, want running with no record", d)
+	}
+	t.Chdir(dir)
+	writeDaemonRecord(got, "moombox.db", "", &nopLogger{})
+	d := findRunningDaemon()
+	if !d.running || d.record == nil || d.record.PID != os.Getpid() || !samePath(d.record.DatabasePath, filepath.Join(dir, "moombox.db")) {
+		t.Fatalf("add does not find the child's record: %+v", d)
 	}
 }
 
@@ -236,12 +324,16 @@ func TestWriteDaemonRecordResolvesAgainstTheWorkingDirectory(t *testing.T) {
 
 // TestTheDaemonRecordIsWrittenWhereTheDatabaseOpens pins the two call sites
 // only a real launcher and child reach: the launcher names the record's path
-// in every child's environment, and initServices writes the record after the
-// database opens and removes it when the database closes.
+// in every child's environment, and initServices takes its record's path from
+// childDaemonRecordPath before the database opens — not from the launcher's
+// variable alone, which a launcher from before the record never sets — writes
+// the record after the database opens and removes it when the database
+// closes.
 //
-// Mutants: drop the childDaemonRecordEnv append from the launcher loop; drop
-// the writeDaemonRecord call, or move it above database.Open; drop the
-// removeDaemonRecord from closeDB.
+// Mutants: drop the childDaemonRecordEnv append from the launcher loop; take
+// the path from os.Getenv(daemonRecordEnv) again, or call
+// childDaemonRecordPath after database.Open; drop the writeDaemonRecord call,
+// or move it above database.Open; drop the removeDaemonRecord from closeDB.
 func TestTheDaemonRecordIsWrittenWhereTheDatabaseOpens(t *testing.T) {
 	_, body := funcBody(t, "launcher.go", "launchAndSupervise")
 	if !callsNamed(body, "childDaemonRecordEnv") {
@@ -249,8 +341,8 @@ func TestTheDaemonRecordIsWrittenWhereTheDatabaseOpens(t *testing.T) {
 	}
 
 	fset, body := funcBody(t, "services.go", "initServices")
-	var openAt, writeAt int
-	var closeRemoves bool
+	var openAt, pathAt, writeAt int
+	var closeRemoves, readsEnv bool
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.CallExpr:
@@ -262,6 +354,14 @@ func TestTheDaemonRecordIsWrittenWhereTheDatabaseOpens(t *testing.T) {
 			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "writeDaemonRecord" {
 				writeAt = fset.Position(n.Pos()).Offset
 			}
+			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "childDaemonRecordPath" {
+				pathAt = fset.Position(n.Pos()).Offset
+			}
+			for _, arg := range n.Args {
+				if id, ok := arg.(*ast.Ident); ok && id.Name == "daemonRecordEnv" {
+					readsEnv = true
+				}
+			}
 		case *ast.AssignStmt:
 			if sel, ok := n.Lhs[0].(*ast.SelectorExpr); ok && sel.Sel.Name == "closeDB" {
 				closeRemoves = callsNamed(n.Rhs[0], "removeDaemonRecord")
@@ -271,6 +371,12 @@ func TestTheDaemonRecordIsWrittenWhereTheDatabaseOpens(t *testing.T) {
 	})
 	if openAt == 0 || writeAt <= openAt {
 		t.Errorf("initServices does not write the record after database.Open (open at %d, write at %d)", openAt, writeAt)
+	}
+	if pathAt == 0 || pathAt >= openAt {
+		t.Errorf("initServices does not take the record's path from childDaemonRecordPath before database.Open (path at %d, open at %d)", pathAt, openAt)
+	}
+	if readsEnv {
+		t.Error("initServices reads the launcher's record variable itself, which a launcher from before the record never sets")
 	}
 	if !closeRemoves {
 		t.Error("closeDB does not remove the record")

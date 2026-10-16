@@ -670,14 +670,17 @@ func (s *runState) initServices(logLevelOverride string) error {
 	if !s.useTUI {
 		fmt.Println("Initializing database...")
 	}
+	// The record `moombox add` finds this database by (daemon_record.go): at
+	// the path the launcher named, or beside the lock a launcher from before
+	// the record holds, a crashed predecessor's record removed before the
+	// database opens. It is written once the database is open and goes when
+	// the database closes.
+	daemonRecord := childDaemonRecordPath()
 	db, err := database.Open(cfg.Paths.DatabasePath, log)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
 	s.db = db
-	// The record `moombox add` finds this database by, at the path the
-	// launcher named (daemon_record.go); it goes when the database closes.
-	daemonRecord := os.Getenv(daemonRecordEnv)
 	writeDaemonRecord(daemonRecord, cfg.Paths.DatabasePath, cfg.LoadedFrom, log)
 	// Database Close is wrapped in sync.Once so both the orderly shutdown
 	// sequence (stopService "Database") and the run()-side defer are safe.
