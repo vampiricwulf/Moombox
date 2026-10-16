@@ -24,14 +24,23 @@ const outageCoalesceWindow = 2 * time.Minute
 // outageReportMaxWait bounds how long a link that never settles keeps its
 // episode open. outageCoalesceWindow starts again at every restore, so a link
 // flapping for an afternoon would otherwise never be reported at all: an
-// episode this old at a restore is reported then, flaps and all, and the next
-// loss opens a new one — one alert per half hour for a link that cannot hold.
+// episode whose FIRST restore is this old at a restore is reported then, flaps
+// and all, and the next loss opens a new one — one alert per half hour for a
+// link that cannot hold.
+//
+// Counted from the first restore, not the first loss, because flapping is what
+// it bounds, and flapping starts at a restore. Counted from the loss, a single
+// outage of half an hour or more tripped it at its own restore: the alert went
+// out on the spot with no window armed, so the bounce that so often follows a
+// long outage (a modem resyncing) opened an episode of its own and sent a
+// second alert minutes later.
 const outageReportMaxWait = 30 * time.Minute
 
 // outageEpisode is a run of outages, each restore followed by the next loss
 // inside outageCoalesceWindow.
 type outageEpisode struct {
 	start   time.Time     // the first loss
+	firstUp time.Time     // the first restore; outageReportMaxWait runs from it
 	end     time.Time     // the last restore
 	offline time.Duration // summed over its outages
 	outages int
@@ -84,8 +93,9 @@ func newOutageAlerts(notify notifications.Sender, log interface {
 
 // onState is the connectivity subscriber. It runs on the monitor's goroutine,
 // serialised with every other subscriber, and must not block: it arms or
-// disarms a timer and, for an episode past outageReportMaxWait, hands one send
-// to the notification manager, whose Send queues and returns.
+// disarms a timer and, for an episode flapping for outageReportMaxWait since
+// its first restore, hands one send to the notification manager, whose Send
+// queues and returns.
 func (a *outageAlerts) onState(online bool) {
 	a.mu.Lock()
 	if a.stopped {
@@ -114,9 +124,12 @@ func (a *outageAlerts) onState(online bool) {
 	ep.offline += now.Sub(a.downAt)
 	ep.outages++
 	ep.end = now
+	if ep.firstUp.IsZero() {
+		ep.firstUp = now
+	}
 	a.downAt = time.Time{}
 	a.disarmLocked()
-	if now.Sub(ep.start) >= outageReportMaxWait {
+	if now.Sub(ep.firstUp) >= outageReportMaxWait {
 		a.episode = nil
 		report := *ep
 		a.mu.Unlock()

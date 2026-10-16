@@ -161,10 +161,11 @@ func TestFlappingUnderTheMinimumSendsNoAlert(t *testing.T) {
 
 // TestLinkThatNeverSettlesIsStillReported: the window starts again at every
 // restore, so without a bound a link flapping all afternoon would never be
-// reported; an episode open for outageReportMaxWait is reported at its next
-// restore, and the next loss starts a new one.
+// reported; an episode whose first restore is outageReportMaxWait old is
+// reported at its next restore, and the next loss starts a new one.
 //
-// Mutant: the outageReportMaxWait arm removed (nothing is ever sent).
+// Mutants: the outageReportMaxWait arm removed, or the episode's first
+// restore taken again at every restore (either way nothing is ever sent).
 func TestLinkThatNeverSettlesIsStillReported(t *testing.T) {
 	h := newOutageHarness(t)
 	h.down(0)
@@ -186,6 +187,56 @@ func TestLinkThatNeverSettlesIsStillReported(t *testing.T) {
 	h.clk.last(t).fire()
 	if n := h.alerts(); n != 2 {
 		t.Errorf("%d Outage Alerts after a fresh two-minute outage, want 2", n)
+	}
+}
+
+// TestLongOutageWaitsOutTheWindowAndTakesItsBounce: outageReportMaxWait
+// bounds a link that never settles, so it runs from the episode's first
+// restore. Run from its first loss, it caught every single outage of half an
+// hour or more at its own restore: the alert went out on the spot with no
+// window armed, and the bounce that so often follows a long outage opened an
+// episode of its own and sent a second alert minutes later. A 45-minute
+// outage waits out the window like any other, and the bounce inside it is
+// the same episode: one alert, its time offline summed, its flaps counted.
+//
+// Mutants: the bound measured from the episode's first loss (an alert at the
+// 45-minute restore, then a second for the bounce); the bound taken only once
+// the episode has flapped, still from its first loss (the alert goes at the
+// bounce's restore, with no window for the next one).
+func TestLongOutageWaitsOutTheWindowAndTakesItsBounce(t *testing.T) {
+	h := newOutageHarness(t)
+	h.down(0)
+	start := h.now
+	h.up(45 * time.Minute)
+	if n := h.alerts(); n != 0 {
+		t.Fatalf("%d Outage Alerts at the 45-minute outage's restore, want none until the link has stayed up for %v", n, outageCoalesceWindow)
+	}
+	if w := h.clk.last(t); w.stopped || w.d != outageCoalesceWindow {
+		t.Fatalf("the restore armed window (%v, stopped %v), want an armed %v", w.d, w.stopped, outageCoalesceWindow)
+	}
+	h.down(20 * time.Second) // the link bounces inside the window
+	h.up(90 * time.Second)
+	end := h.now
+	if n := h.alerts(); n != 0 {
+		t.Fatalf("%d Outage Alerts at the bounce's restore, want none until the link has stayed up for %v", n, outageCoalesceWindow)
+	}
+	for _, tm := range h.clk.timers {
+		tm.fire()
+	}
+	calls := h.rec.ByEvent("connectivity_restored")
+	if len(calls) != 1 {
+		t.Fatalf("%d Outage Alerts for a long outage and the bounce inside its window, want 1", len(calls))
+	}
+	c := calls[0]
+	for name, want := range map[string]string{
+		"Started":  "<t:" + strconv.FormatInt(start.Unix(), 10) + ":f>",
+		"Ended":    "<t:" + strconv.FormatInt(end.Unix(), 10) + ":f>",
+		"Duration": "46m30s",
+		"Flaps":    "2",
+	} {
+		if got, _ := c.Field(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
 	}
 }
 
@@ -231,8 +282,8 @@ func TestStartupOnlineReportsNothing(t *testing.T) {
 // the alerter been running, its restore would have reported on the spot.
 //
 // Mutants: stop dropping the pending episode instead of reporting it; onState
-// not refusing a transition after stop (the post-stop outage, past
-// outageReportMaxWait at its restore, is reported).
+// not refusing a transition after stop (the post-stop episode, whose last
+// restore comes outageReportMaxWait after its first, is reported at it).
 func TestStopReportsAnOutageWaitingOutItsWindow(t *testing.T) {
 	h := newOutageHarness(t)
 	h.down(0)
@@ -243,8 +294,12 @@ func TestStopReportsAnOutageWaitingOutItsWindow(t *testing.T) {
 		t.Fatalf("%d Outage Alerts at shutdown with an ended outage pending, want 1", n)
 	}
 	window.fire()
+	// Two outages, the second ending outageReportMaxWait after the episode's
+	// first restore: had the alerter been running, it would report at it.
 	h.down(time.Minute)
-	h.up(outageReportMaxWait + time.Minute)
+	h.up(time.Minute)
+	h.down(10 * time.Second)
+	h.up(outageReportMaxWait)
 	for _, tm := range h.clk.timers {
 		tm.fire()
 	}
