@@ -1094,8 +1094,9 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		if w != nil {
 			if err := w.MuxJob(jobID); err != nil {
 				// ErrStagingBusy is a conflict, not a fault: a set-aside
-				// recovery holds this job's staging, and the operator can
-				// simply try again in a moment. Error→status mapping only —
+				// recovery holds this job's staging, or the job's last run
+				// is still stopping, and the operator can simply try again
+				// in a moment. Error→status mapping only —
 				// the status and HasSegmentFiles gates above decide what is
 				// muxable.
 				status := http.StatusInternalServerError

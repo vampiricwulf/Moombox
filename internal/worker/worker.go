@@ -92,7 +92,8 @@ var (
 	ErrRecoveryJobActive = errors.New("job is active; set-aside recovery would race the download")
 	// ErrStagingBusy: another off-queue operation already holds this job's
 	// staging directory. Shared by MuxJob and RecoverAsides, because the
-	// collision is symmetric.
+	// collision is symmetric. MuxJob also answers it while the job's last
+	// run is still registered (muxJob).
 	ErrStagingBusy = errors.New("another operation is already working this job's staging directory")
 	// ErrNoAsides: nothing in staging was ever set aside. Recovery is not a
 	// second Mux button, so this is a refusal rather than a no-op success.
@@ -1438,16 +1439,20 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 	if userCancelled {
 		// Written while the run is still registered: a Retry/Resume/
 		// Reinitialize clicked while this run unwound waits for its Done
-		// (afterJobExit), which only processJob's deferred Complete closes —
-		// so this Cancelled (CancelJob already wrote one) cannot land on top
-		// of the retry's fresh status.
+		// (afterJobExit), which only processJob's deferred Complete closes,
+		// and a Mux is refused until then (muxJob). And on a row that still
+		// reads Cancelled only: CancelJob wrote that status before it flagged
+		// this run, and every write the run makes after it is conditional, so
+		// an unconditional one here re-asserted nothing and could only land
+		// on another actor's write — a Finished archive a Mux of the
+		// Cancelled row made while this run unwound.
 		updates := map[string]any{"status": database.StatusCancelled}
 		if fresh, err := w.db.GetJob(job.ID); err == nil && fresh != nil {
 			if cs, ok := cancelledChatStatus(fresh.ChatStatus); ok {
 				updates["chat_status"] = cs
 			}
 		}
-		w.db.UpdateJobFields(job.ID, updates)
+		w.db.UpdateJobFieldsIf(job.ID, database.StatusCancelled, updates)
 	}
 
 	// Free the slots — before the notification, symmetric with setJobError.
@@ -2519,6 +2524,23 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 
 	if !HasSegmentFiles(stagingBase, jobID) {
 		return fmt.Errorf("no segment files found in staging")
+	}
+
+	// Nor while the job's last run is still registered. The cancel route
+	// writes Cancelled before the run has stopped, and both UIs offer Mux on
+	// a Cancelled row with staged media at once — while a cancelled Twitch
+	// capture still waits out its part muxes and its chat's shutdown grace.
+	// A Mux clicked there wrote Muxing and Finished, reclaimed staging, and
+	// then the run's own end wrote Cancelled over the Finished archive (or,
+	// landing during the mux, cancelled it through the listener below).
+	// Retry, Resume and Reinitialize wait for that exit (afterJobExit); a
+	// Mux is refused instead, as a conflict the operator can try again in a
+	// moment, so the route still answers what became of the click. Ahead of
+	// the claim and the status write, so a refusal leaves the row exactly as
+	// it found it. The automatic mux (autoMuxNow) runs after the exit and
+	// treats the refusal as the deferral ErrStagingBusy is.
+	if w.queue.IsProcessing(jobID) {
+		return fmt.Errorf("%w (the job's last run is still stopping)", ErrStagingBusy)
 	}
 
 	// The same per-job staging claim RecoverAsides takes. Both verbs mux out

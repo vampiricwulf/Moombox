@@ -154,7 +154,8 @@ func endUnconfirmedRow(job *database.Job) bool {
 //
 // The one refusal that is not a failure is ErrStagingBusy: another operation —
 // a set-aside recovery (A S, recover-asides), which leaves the row in Error
-// while it runs — holds the job's staging, and no mux was attempted. The row
+// while it runs, or a run of the job still registered — holds the job's
+// staging, and no mux was attempted. The row
 // keeps its marker and its own error, and the next poll that finds the
 // broadcast over tries again. Clearing the marker first, as this used to,
 // spent the job's one automatic mux on that refusal and wrote "automatic mux
