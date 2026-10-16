@@ -11,9 +11,12 @@ export class UpdateController {
     this.app = app;
     // The tag this page's own Update Now or Skip names while its request is
     // in flight, and whether that release was withdrawn meanwhile (see
-    // withdrawn).
+    // withdrawn). One slot for both buttons, so one request at a time:
+    // _inFlight names the one out ("update" or "skip"), and _act refuses the
+    // other until it is answered.
     this._acting = null;
     this._actingWithdrawn = false;
+    this._inFlight = null;
   }
 
   /** Wire up the update dialog's buttons. */
@@ -183,6 +186,7 @@ export class UpdateController {
   }
 
   async applyUpdate() {
+    if (this._refuseWhileInFlight()) return;
     // Updating restarts the whole process: active recordings are
     // interrupted and resume on the new binary, but live segments broadcast
     // during the ~30s gap can be lost (Twitch expires them fastest). Make
@@ -198,9 +202,10 @@ export class UpdateController {
       );
       if (!ok) return;
     }
+    // Again after the confirm: a Skip clicked while it was up is out now.
+    if (!this._act("update")) return;
     const btn = document.getElementById("update-now-btn");
     if (btn) { btn.loading = true; btn.disabled = true; }
-    this._act();
     try {
       const resp = await fetch("/api/update/apply", this._shownRequest());
       if (resp.ok) {
@@ -224,16 +229,39 @@ export class UpdateController {
       // and restarts on its own when the update lands.
       this.app.showToast(`Lost contact with the server (${e.message}) — the update may still be downloading; the dashboard reconnects when it restarts.`, "warning");
     } finally {
-      this._acting = null;
+      this._settle();
       if (btn) { btn.loading = false; btn.disabled = false; }
     }
   }
 
-  // Marks the release shown as the one this page's own request names, until
-  // the request's finally clears it.
-  _act() {
+  // Takes the request slot for kind ("update" or "skip") and marks the
+  // release shown as the one this page's own request names, until the
+  // request's finally frees both (_settle). Refused, saying so, while the
+  // other button's request is out: the two share _acting, and the first to be
+  // answered cleared it under the other, whose refusal then toasted the wrong
+  // outcome — an Update Now refused because this page's own Skip had landed
+  // read as a release skipped elsewhere.
+  _act(kind) {
+    if (this._refuseWhileInFlight()) return false;
+    this._inFlight = kind;
     this._acting = this.shown?.tagName ?? null;
     this._actingWithdrawn = false;
+    return true;
+  }
+
+  // Frees the slot _act took.
+  _settle() {
+    this._inFlight = null;
+    this._acting = null;
+  }
+
+  // True, with a toast naming the request still out, while this page's own
+  // Update Now or Skip has not been answered.
+  _refuseWhileInFlight() {
+    if (!this._inFlight) return false;
+    const running = this._inFlight === "update" ? "Update Now" : "Skip";
+    this.app.showToast(`${running} is still waiting for the server — try again once it answers.`, "warning");
+    return true;
   }
 
   async dismissUpdate() {
@@ -246,7 +274,7 @@ export class UpdateController {
       dlg.hide();
       return;
     }
-    this._act();
+    if (!this._act("skip")) return;
     try {
       const resp = await fetch("/api/update/dismiss", this._shownRequest());
       if (!resp.ok) {
@@ -276,7 +304,7 @@ export class UpdateController {
     } catch (e) {
       this.app.showToast("Failed to dismiss: " + e.message, "danger");
     } finally {
-      this._acting = null;
+      this._settle();
     }
   }
 }

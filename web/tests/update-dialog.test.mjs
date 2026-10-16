@@ -291,3 +291,95 @@ test("this page's own Skip heard first as update_cleared is reported once, as it
   assert.equal(texts.length, 1, `toasts were ${JSON.stringify(texts)}`);
   assert.match(texts[0], /Skipped v9\.9\.1/);
 });
+
+// ── Update Now and Skip, one at a time ──────────────────────────────────────
+//
+// Both buttons kept the release they act on in one _acting slot, so with both
+// requests out the first answer cleared it under the other. Here a Skip
+// clicked while Update Now was out landed first, announcing update_cleared
+// before it answered as the dismiss route does: the Update Now's own failure
+// then read as a release withdrawn elsewhere, and its "Update failed" toast
+// never showed. A second request is now refused while the first is out.
+
+/** A route whose answer waits until the test calls release(answer). */
+function heldRoute() {
+  let release;
+  const answered = new Promise((resolve) => { release = resolve; });
+  return { handler: () => answered, release: (answer) => release(answer) };
+}
+
+// MUTANT: _act without its _refuseWhileInFlight() check — the Skip is posted
+// beside the Update Now, its update_cleared marks the shared slot withdrawn,
+// and the Update Now's failure is swallowed as a withdrawal.
+test("Skip while Update Now is out is refused, and the update's answer decides the toast", { skip }, async () => {
+  const apply = heldRoute();
+  let h;
+  h = await dialogOpenOn911({
+    "POST /api/update/apply": apply.handler,
+    "POST /api/update/dismiss": () => {
+      h.app.handleMessage({ type: "update_cleared", payload: { tagName: "v9.9.1" } });
+      return { success: true, skipped: "v9.9.1" };
+    },
+  });
+
+  h.el("update-now-btn").click();
+  await h.flush();
+  h.el("update-dismiss-btn").click();
+  await h.flush();
+
+  assert.equal(h.http.matching("/api/update/dismiss", "POST").length, 0, "a Skip was posted while Update Now was out");
+  assert.ok(
+    toastsOf(h).some((t) => t.text.includes("Update Now is still waiting") && t.variant === "warning"),
+    `the refused Skip must say what it waits for; toasts were ${JSON.stringify(toastsOf(h))}`,
+  );
+
+  apply.release({ __response: true, status: 500, body: { error: "disk full" } });
+  await h.flush();
+  await h.flush();
+
+  const texts = toastsOf(h).map((t) => t.text);
+  assert.ok(texts.some((t) => t.includes("Update failed: disk full")), `toasts were ${JSON.stringify(texts)}`);
+  assert.ok(!texts.some((t) => NO_LONGER.test(t)), `a failure here read as a withdrawal; toasts were ${JSON.stringify(texts)}`);
+});
+
+// With a download active, Update Now asks first; refused, it does not ask.
+//
+// MUTANTS: _settle not freeing _inFlight — after the first answer every later
+// Update Now or Skip on the page is refused as still waiting; applyUpdate
+// without its opening _refuseWhileInFlight() — the active-download confirm is
+// put up for an update that is then refused anyway.
+test("Update Now while Skip is out is refused, and the slot is free once Skip is answered", { skip }, async () => {
+  const dismiss = heldRoute();
+  const h = await dialogOpenOn911({
+    "POST /api/update/dismiss": dismiss.handler,
+    "POST /api/update/apply": () => ({ success: true }),
+  });
+  h.app.jobs = [{ id: "a", status: "Downloading" }];
+  let confirms = 0;
+  h.app.showConfirm = async () => { confirms++; return true; };
+
+  h.el("update-dismiss-btn").click();
+  await h.flush();
+  h.el("update-now-btn").click();
+  await h.flush();
+
+  assert.equal(h.http.matching("/api/update/apply", "POST").length, 0, "an Update Now was posted while Skip was out");
+  assert.equal(confirms, 0, "the refused Update Now asked about the active download first");
+  assert.ok(
+    toastsOf(h).some((t) => t.text.includes("Skip is still waiting") && t.variant === "warning"),
+    `toasts were ${JSON.stringify(toastsOf(h))}`,
+  );
+  assert.notEqual(h.el("update-now-btn").loading, true, "the refused Update Now must not spin");
+
+  dismiss.release({ __response: true, status: 429, body: { error: "rate limited" } });
+  await h.flush();
+  await h.flush();
+  assert.ok(toastsOf(h).some((t) => t.text.includes("Failed to dismiss: rate limited")),
+    `toasts were ${JSON.stringify(toastsOf(h))}`);
+
+  h.el("update-now-btn").click();
+  await h.flush();
+  await h.flush();
+  assert.equal(confirms, 1);
+  assert.equal(h.http.matching("/api/update/apply", "POST").length, 1, "the slot stayed taken after Skip was answered");
+});
