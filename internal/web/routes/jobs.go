@@ -1375,10 +1375,26 @@ func validatePathTraversal(filePath, outputDir string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if !strings.HasPrefix(resolvedFile, resolvedOutputDir+string(filepath.Separator)) {
+	if !pathStrictlyInside(resolvedFile, resolvedOutputDir) {
 		return "", false
 	}
 	return resolvedFile, true
+}
+
+// pathStrictlyInside reports whether file names something below dir, both
+// already canonical: dir itself is not inside, and neither is a path that
+// leaves it or lies on another volume. It asks filepath.Rel, as the orphan
+// sweep's isUnderDirectory does, rather than testing for dir plus a
+// separator: a volume root is the one directory whose clean spelling already
+// ends in one (`E:\`, `\\nas\share\`, "/"), so the prefix it built (`E:\\`)
+// matched no file at all, and an archive given its own drive answered 403 on
+// every player, chat and Open Folder request and refused every import.
+func pathStrictlyInside(file, dir string) bool {
+	rel, err := filepath.Rel(dir, file)
+	if err != nil || rel == "." {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // openFolderFailure maps a failed open-folder spawn to the message and status
