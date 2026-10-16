@@ -234,13 +234,27 @@ type fmp4Walker struct {
 	// it shows it was whole: a torn fragment's mdat claims the bytes after
 	// it, and only the damage it lands in gives that away.
 	last *fmp4Accepted
+	// passed is the box the walk went past most recently on the strength of
+	// its declared size alone — a fragment's mdat, a moof, a leading box, a
+	// foreign one, the init's moov. That size is a claim until the box at
+	// its end reads: a box torn short claims the bytes appended after it, so
+	// its end lands inside them, past the start of whatever came next.
+	// Damage found right at its end is searched for from inside it (damage).
+	passed fmp4Passed
 }
+
+// fmp4Passed is a box the walk went past by its declared size: where its
+// payload begins and where it claims to end.
+type fmp4Passed struct{ payload, end int64 }
+
+// pass records b as the box the walk last went past by its declared size.
+func (wk *fmp4Walker) pass(b fmp4Box) { wk.passed = fmp4Passed{payload: b.start + b.hdr, end: b.end()} }
 
 // fmp4Accepted is what accepting one fragment changed, so it can be undone.
 type fmp4Accepted struct {
-	start, mdatPayload, end int64
-	before                  []FMP4Track
-	filled                  [][2]int // (drop, track) pairs whose To it set
+	start, end int64
+	before     []FMP4Track
+	filled     [][2]int // (drop, track) pairs whose To it set
 }
 
 // WalkFMP4 walks the top-level boxes of a staged fragmented MP4. See the
@@ -367,6 +381,7 @@ func (wk *fmp4Walker) readInit() (int64, error) {
 			if len(wk.walk.Tracks) == 0 {
 				return 0, fmt.Errorf("%w: the init segment declares no track", ErrUnreadableFMP4)
 			}
+			wk.pass(b)
 			return b.end(), nil
 		case "moof", "styp", "sidx", "prft", "emsg":
 			return 0, fmt.Errorf("%w: fragments with no init segment ahead of them", ErrUnreadableFMP4)
@@ -719,6 +734,7 @@ func (wk *fmp4Walker) walkFragments(pos int64) error {
 			if known {
 				// A box of a type this walk does not know that a writer put
 				// between fragments, as FFmpeg reads past one: read past.
+				wk.pass(b)
 				pos = b.end()
 				continue
 			}
@@ -767,17 +783,20 @@ func (wk *fmp4Walker) walkFragments(pos int64) error {
 				fragStart = pos
 				continue
 			}
+			wk.pass(b)
 			pos = b.end()
 			fragStart, wk.last = pos, nil
 		case "mdat":
 			// An mdat no moof describes: no sample of it is read, by FFmpeg
 			// or here.
+			wk.pass(b)
 			pos = b.end()
 			fragStart, wk.last = pos, nil
 		default:
 			if b.typ == "sidx" || b.typ == "mfra" {
 				wk.walk.indexBoxes = append(wk.walk.indexBoxes, pos)
 			}
+			wk.pass(b)
 			pos = b.end()
 		}
 	}
@@ -823,6 +842,11 @@ func (wk *fmp4Walker) readFragment(b fmp4Box, fragStart int64) (int64, error) {
 		}
 		return wk.damage(b.start, fragStart, fmt.Sprintf("the moof at byte %d does not parse: %v", b.start, err))
 	}
+	// A moof that parses can still be torn: cut inside its trun's sample
+	// table — most of a moof — every size it declares stays consistent and
+	// the table reads on into the next fragment's bytes. Only what sits at
+	// its end shows it, and the next fragment begins inside it.
+	wk.pass(b)
 	m, err := wk.readBox(b.end())
 	if errors.Is(err, errBoxShort) {
 		wk.walk.TornTail = fragStart
@@ -840,7 +864,8 @@ func (wk *fmp4Walker) readFragment(b fmp4Box, fragStart int64) (int64, error) {
 	if m.pastEOF {
 		return wk.tornBox(m.start+m.hdr, fragStart, fmt.Sprintf("the mdat at byte %d claims %d bytes, past the next fragment", m.start, m.size))
 	}
-	wk.accept(fragStart, m.start+m.hdr, m.end(), trafs)
+	wk.accept(fragStart, m.end(), trafs)
+	wk.pass(m)
 	return m.end(), nil
 }
 
@@ -867,22 +892,24 @@ func (wk *fmp4Walker) tornBox(payload, fragStart int64, reason string) (int64, e
 // damage handles the unreadable box at p, in the fragment that began at
 // fragStart: it finds the next fragment that parses, records the bytes before
 // it as a drop and returns where the walk goes on. When the damage sits right
-// where the last accepted fragment ended, that fragment may itself be torn —
-// its mdat claiming bytes it never had, which carried the walk over the start
-// of the next fragment into the middle of a later one — so the search starts
-// inside its mdat, and a fragment found there takes the torn one into the
-// drop with it.
+// where a box the walk went past by its declared size claims to end, that box
+// may itself be torn — claiming bytes it never had, which carried the walk
+// over the start of the next fragment into the middle of a later one — so
+// the search starts inside it. That box is the last accepted fragment's mdat,
+// and a fragment found inside it takes the torn one into the drop with it;
+// or a moof, or a box leading one, of the fragment being read, which the drop
+// takes in any case.
 func (wk *fmp4Walker) damage(p, fragStart int64, reason string) (int64, error) {
 	scanFrom := p
-	if wk.last != nil && wk.last.end == p {
-		scanFrom = wk.last.mdatPayload
+	if wk.passed.end == p {
+		scanFrom = wk.passed.payload
 	}
 	q, ok, err := wk.resync(scanFrom)
 	if err != nil {
 		return 0, err
 	}
 	dropStart := fragStart
-	if ok && wk.last != nil && q < p {
+	if ok && wk.last != nil && q < wk.last.end {
 		dropStart = wk.last.start
 		wk.rollback()
 	}
@@ -980,8 +1007,8 @@ func (wk *fmp4Walker) fragmentAt(off int64) (bool, error) {
 }
 
 // accept adds one readable fragment to the tracks' timelines.
-func (wk *fmp4Walker) accept(start, mdatPayload, end int64, trafs []fmp4Traf) {
-	a := &fmp4Accepted{start: start, mdatPayload: mdatPayload, end: end}
+func (wk *fmp4Walker) accept(start, end int64, trafs []fmp4Traf) {
+	a := &fmp4Accepted{start: start, end: end}
 	a.before = make([]FMP4Track, len(wk.walk.Tracks))
 	for i, t := range wk.walk.Tracks {
 		a.before[i] = *t

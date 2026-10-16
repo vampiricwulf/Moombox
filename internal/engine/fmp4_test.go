@@ -99,6 +99,25 @@ func synthStream(n int, startSec uint64) ([]byte, []int) {
 	return data, append(offs, len(data))
 }
 
+// synthBareStream is synthStream with every fragment bare — a moof and its
+// mdat, nothing leading them — the shape of a YouTube live segment.
+func synthBareStream(n int) ([]byte, []int) {
+	data := synthInit(synthTrack{1, "vide", 90000})
+	offs := []int{}
+	for i := range n {
+		offs = append(offs, len(data))
+		f := synthFragment(uint32(i+1), synthTraf{1, uint64(2*i) * 90000, 50, 3600, 200})
+		data = append(data, f[bytes.Index(f, []byte("moof"))-4:]...)
+	}
+	return data, append(offs, len(data))
+}
+
+// moofEnd is where the moof of the fragment at data[off:] ends.
+func moofEnd(data []byte, off int) int {
+	m := off + bytes.Index(data[off:], []byte("moof")) - 4
+	return m + int(binary.BigEndian.Uint32(data[m:]))
+}
+
 func walkBytes(t *testing.T, data []byte) (*FMP4Walk, error) {
 	t.Helper()
 	return WalkFMP4At(context.Background(), bytes.NewReader(data), int64(len(data)))
@@ -200,31 +219,56 @@ func TestWalkFMP4SpanStartsAtTheFirstFragment(t *testing.T) {
 	}
 }
 
-// TestWalkFMP4DropsADamagedFragment is W30-A11's three shapes of one bad
-// fragment mid-stream — zeroed, an HTML error body served in its place, and
-// torn (half its bytes, then the next fragment appended). Each must be
-// dropped as exactly the bad fragment's bytes, with every fragment after it
-// kept, and the gap it leaves at 8-10 s on the track's timeline.
+// TestWalkFMP4DropsADamagedFragment is W30-A11's shapes of one bad fragment
+// mid-stream — zeroed, an HTML error body served in its place, torn (half its
+// bytes, then the next fragment appended), and torn inside its moof (cut in
+// its trun's sample table, which is most of a moof: every size the moof
+// declares still holds, and the table reads on into the next fragment) —
+// each in a DASH segment's shape (styp, sidx, moof, mdat) and a bare one's
+// (moof, mdat). Each must be dropped as exactly the bad fragment's bytes,
+// with every fragment after it kept, and the gap it leaves at 8-10 s on the
+// track's timeline.
 //
 // Mutants:
-//   - damage() resyncing from the damage instead of from inside the last
-//     accepted fragment's mdat: the torn row drops fragment 5 too (its mdat
-//     claims fragment 5's bytes) and keeps the torn fragment 4.
-//   - no rollback of that fragment: the torn row counts 10 fragments.
+//   - damage() resyncing from the damage instead of from inside the box
+//     whose claimed end it is at: the torn rows drop fragment 5 too (a torn
+//     mdat, or a torn moof, claims fragment 5's first bytes) and the mdat
+//     row keeps the torn fragment 4.
+//   - readFragment not recording the moof as passed by its size (the
+//     torn-moof rows drop fragment 5).
+//   - no rollback of the torn fragment: the torn row counts 10 fragments.
+//   - the rollback taken for any fragment found before the damage, rather
+//     than one inside the last accepted fragment (the torn-moof rows roll
+//     back the whole fragment 3, and count 8).
 func TestWalkFMP4DropsADamagedFragment(t *testing.T) {
-	data, offs := synthStream(10, 0)
-	frag4 := data[offs[4]:offs[5]]
 	html := []byte("<html><head><title>502 Bad Gateway</title></head><body>Bad Gateway</body></html>\n")
-	for _, tc := range []struct {
+	type row struct {
 		name     string
 		stream   []byte
 		dropFrom int
 		dropTo   int
+	}
+	var rows []row
+	for _, shape := range []struct {
+		name   string
+		stream func(int) ([]byte, []int)
 	}{
-		{"zeroed", splice(data, offs[4], offs[5], make([]byte, len(frag4))), offs[4], offs[5]},
-		{"html body", splice(data, offs[4], offs[5], html), offs[4], offs[4] + len(html)},
-		{"torn", splice(data, offs[4], offs[5], frag4[:len(frag4)/2]), offs[4], offs[4] + len(frag4)/2},
+		{"dash", func(n int) ([]byte, []int) { return synthStream(n, 0) }},
+		{"bare", synthBareStream},
 	} {
+		data, offs := shape.stream(10)
+		frag4 := data[offs[4]:offs[5]]
+		// 120 bytes short of the moof's end: inside the 400-byte sample
+		// table of its trun, the last box of its last traf.
+		moofCut := moofEnd(data, offs[4]) - 120 - offs[4]
+		rows = append(rows,
+			row{shape.name + "/zeroed", splice(data, offs[4], offs[5], make([]byte, len(frag4))), offs[4], offs[5]},
+			row{shape.name + "/html body", splice(data, offs[4], offs[5], html), offs[4], offs[4] + len(html)},
+			row{shape.name + "/torn", splice(data, offs[4], offs[5], frag4[:len(frag4)/2]), offs[4], offs[4] + len(frag4)/2},
+			row{shape.name + "/torn inside its moof", splice(data, offs[4], offs[5], frag4[:moofCut]), offs[4], offs[4] + moofCut},
+		)
+	}
+	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
 			w := mustWalk(t, tc.stream)
 			if len(w.Drops) != 1 {

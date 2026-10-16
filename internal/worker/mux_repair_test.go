@@ -120,6 +120,11 @@ const (
 	damageZeroed
 	damageTorn // half its bytes, then the next fragment appended
 	damageHTML // an error page served with 200 in its place
+	// damageTornMoof cuts the fragment 4 bytes short of its moof's end —
+	// inside the trun's sample table, the moof's last box — and appends the
+	// next fragment: the moof still parses, its table reading on into the
+	// next fragment's bytes.
+	damageTornMoof
 )
 
 // stageFragmented writes src to path as the engine stages it — the init, then
@@ -137,6 +142,8 @@ func stageFragmented(t *testing.T, path string, src fragmentedSource, bad int, h
 				f = f[:len(f)/2]
 			case damageHTML:
 				f = []byte("<html><head><title>Error</title></head><body>Service unavailable</body></html>\n")
+			case damageTornMoof:
+				f = f[:binary.BigEndian.Uint32(f)-4]
 			}
 		}
 		buf.Write(f)
@@ -197,8 +204,8 @@ func routedRepairJob(t *testing.T, w *DownloadWorker, db *database.Database, job
 
 // TestDamagedDashFragmentFinishesWithAGap is W30-A11 end to end through the
 // Mux action (MuxJob → muxAndFinalize, the path the boot re-mux takes too):
-// a 300 s video_stream with fragment 50 (100-102 s) zeroed, torn or replaced
-// by an HTML body. The job must finish at the full length with every intact
+// a 300 s video_stream with fragment 50 (100-102 s) zeroed, torn (in its mdat
+// or inside its moof) or replaced by an HTML body. The job must finish at the full length with every intact
 // fragment after the damage in the archive — 1490 of 1500 frames, the ten
 // lost being the damaged fragment's own — the gap noted in the job's log
 // with its time and byte range, and staging kept with its record, without
@@ -216,6 +223,9 @@ func routedRepairJob(t *testing.T, w *DownloadWorker, db *database.Database, job
 //   - cleanupStagingAfterMux keeping the dir without saying why (the job's
 //     log does not end with the reason).
 //   - removeRepairedCopies not called (the repaired copy is left in staging).
+//   - the walk resyncing from a torn moof's claimed end rather than from
+//     inside it (the torn-moof row loses intact fragment 51 too: 1480
+//     frames).
 func TestDamagedDashFragmentFinishesWithAGap(t *testing.T) {
 	ffmpegPath, ffprobePath := requireFFmpegTools(t)
 	src := fragmentedFixture(t, ffmpegPath, "video", 300)
@@ -225,6 +235,7 @@ func TestDamagedDashFragmentFinishesWithAGap(t *testing.T) {
 	}{
 		{"zeroed", damageZeroed},
 		{"torn", damageTorn},
+		{"torn inside its moof", damageTornMoof},
 		{"html body", damageHTML},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
