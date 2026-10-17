@@ -44,10 +44,20 @@ func TestScan_NewRowsNudgeOnceAndOnlyForInserts(t *testing.T) {
 	ch := backfillTestCh()
 
 	bw.Sweep([]ChannelRef{refFor(ch, 3, false)}, false)
+	// The scan's in-flight entry, taken while Sweep's enqueue still holds
+	// it (nil only if the scan already ran and unwound). "done" and the
+	// nudge fire from inside the scan, ahead of the cleanup that drops the
+	// entry, and a forced Sweep skips a channel that still has one — so
+	// the re-scan below waits for the entry's done, not for the progress
+	// event alone.
+	first := func() *inFlight { inflight, _ := inflightState(bw); return inflight[backfillTestChannel] }()
 	if got := recvWithin(t, calls, "the first scan's OnNewRows"); got != (newRowsCall{backfillTestChannel, 2}) {
 		t.Fatalf("OnNewRows = %+v, want {%s 2}", got, backfillTestChannel)
 	}
 	recvWithin(t, done, "the first scan's completion")
+	if first != nil {
+		recvWithin(t, first.done, "the first scan's cleanup")
+	}
 
 	// Forced: the channel is complete, so only force re-scans it. Every row
 	// is already present — no nudge. A later `now`, as any real re-scan
