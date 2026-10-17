@@ -7,10 +7,11 @@ name: Build and Publish Docker Image
 #
 # Two ways in, and no tag trigger of its own:
 #
-#   workflow_call      release.yml runs this as a job after its test gate,
-#                      so a release tag publishes the image only once the
-#                      suite has passed on the tagged commit. A release dry
-#                      run calls it with push: false.
+#   workflow_call      release.yml runs this as a job after its release
+#                      job, so a release tag publishes the image only once
+#                      the binaries are built, signed and published. The
+#                      test suite runs beside both and gates neither. A
+#                      release dry run calls it with push: false.
 #   workflow_dispatch  builds and pushes an `edge` tag from main — useful
 #                      for testing image changes without cutting a release.
 #                      Untick "push" to only build both architectures.

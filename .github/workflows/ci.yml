@@ -2,8 +2,9 @@ name: CI
 
 # Build, lint, and test on every push to main and every pull request, on
 # both desktop platforms Moombox ships for. Also callable: release.yml runs
-# this workflow as its required first job, so a tag publishes nothing until
-# the suite has passed on the tagged commit.
+# this workflow as its `test` job on the tagged commit, beside the release
+# rather than ahead of it — the result is reported in the release's run, and
+# a red suite does not hold the release back.
 #
 # Shape:
 #   - matrix over ubuntu-latest + windows-latest (the Windows-only code —

@@ -195,9 +195,9 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 
 #### Jobs
 
-- **`test`** — calls `.github/workflows/ci.yml` (the full suite on ubuntu and windows) for the tagged commit. The other two jobs `needs` it, so nothing is published until it passes. v2.8.9 was published while CI on the same commit was red: the workflows used to run side by side. A flaky failure is cleared with "Re-run failed jobs" on the same tag.
+- **`test`** — calls `.github/workflows/ci.yml` (the full suite on ubuntu and windows) for the tagged commit, beside the other two jobs. Nothing `needs` it: its result is reported in the release's own run, and a red suite marks the run failed while the release still publishes. "Re-run failed jobs" on the same tag re-runs it alone. It gated both jobs from v2.8.9 (published while CI on the same commit was red) until v2.9.6, whose first two tag runs were held by failures that were not the code's — a test race exposed by the race detector's slower scheduling, then a Windows runner out of memory before `go vet` could start.
 - **`release`** — the binaries; steps below.
-- **`docker`** — calls `.github/workflows/docker-publish.yml` with `push` true only for a tag push. It `needs` both `test` and `release`, so a failed build or signature check cannot leave a pushed `latest` image for a version that has no release.
+- **`docker`** — calls `.github/workflows/docker-publish.yml` with `push` true only for a tag push. It `needs` `release`, so a failed build or signature check cannot leave a pushed `latest` image for a version that has no release.
 
 **Dry run.** "Run workflow" on any ref runs all three jobs exactly as a tag would. What publishes is the tag *push* — every gate tests `github.event_name == 'push'` — so a manual run started on a tag ref is still a dry run and cannot overwrite that release's assets. In a dry run the image is built for both architectures but not pushed, and the release step uploads the eight assets to a *draft* release named `dryrun-<run id>-<attempt>` — never public, and it creates no git tag — which the following step checks (a draft with eight assets) and deletes. The upload therefore runs with the same action, token and file list a tag uses. Signing runs, self-check included, so a wrong `SIGNING_KEY` is caught before a tag exists — and so does the manifest step, which writes and signs a manifest for the dry run's `-dryrun` version and draft tag, so the manifest pipeline is exercised too. The dry run's version is the one `cmd/moombox/main.go` declares plus `-dryrun`. It exists because this workflow otherwise runs on tags alone and a tag is never replaced: a break in it was found by the release it broke.
 
@@ -229,7 +229,7 @@ The three builds (steps 8, 9 and 11) are sequential (not parallel). On a 4-vCPU 
 ### Test Workflow
 
 **File:** `.github/workflows/ci.yml`
-**Trigger:** push to `main`, every pull request, and `workflow_call` — release.yml runs it as its required `test` job
+**Trigger:** push to `main`, every pull request, and `workflow_call` — release.yml runs it as its `test` job, beside the release rather than ahead of it
 **Runners:** `ubuntu-latest` and `windows-latest` (matrix, `fail-fast: false`) — the Windows-only code paths (DPAPI cookie reading, Job Objects, cookie profile paths) have tests that skip everywhere else
 **Permissions:** `contents: read`; one run per calling workflow and ref (`concurrency` with cancel-in-progress — the group carries `github.workflow`, the caller's name under `workflow_call`, so a release dry run from `main` and a push to `main` do not cancel each other); 45-minute job timeout
 
@@ -254,7 +254,7 @@ When `RELEASE_NOTES.md` is present, the release body is assembled as:
 ### Docker Publish Workflow
 
 **File:** `.github/workflows/docker-publish.yml`
-**Trigger:** `workflow_call` from release.yml's `docker` job (after the test gate and the release job, so it has no tag trigger of its own), plus `workflow_dispatch` for testing image changes without cutting a release. Both take a boolean `push` input, default true: release.yml passes true only for a tag push, and a manual run with it unticked builds both architectures without pushing.
+**Trigger:** `workflow_call` from release.yml's `docker` job (after the release job, so it has no tag trigger of its own), plus `workflow_dispatch` for testing image changes without cutting a release. Both take a boolean `push` input, default true: release.yml passes true only for a tag push, and a manual run with it unticked builds both architectures without pushing.
 **Permissions:** `contents: read`, `packages: write`
 
 Builds the multi-arch (linux/amd64 + linux/arm64) image via buildx and pushes to `ghcr.io/vampiricwulf/moombox`. Release tags produce `X.Y.Z`, `X.Y`, and `latest` (pre-release tags containing `-` skip `latest`, matching release.yml's pre-release handling); manual dispatch on `main` produces `edge`. `VERSION`/`COMMIT` build args mirror release.yml's ldflags. QEMU is only used for the small Debian runtime stage of the arm64 image — the Go compile cross-compiles natively.
@@ -279,7 +279,7 @@ This is the manual process performed by the developer before CI takes over:
 4. **Tag** — `git tag vx.y.z`
 5. **Push** — `git push && git push origin vx.y.z`
 
-The tag push triggers release.yml, which runs the test suite on the tagged commit and then builds, signs, and publishes the binaries and the image. To exercise that pipeline before step 4, run release.yml by hand from the Actions tab ("Run workflow") — the dry run described under Release Workflow.
+The tag push triggers release.yml, which builds, signs, and publishes the binaries and the image, and runs the test suite on the tagged commit beside them; a red suite shows in that run without holding the release. To exercise that pipeline before step 4, run release.yml by hand from the Actions tab ("Run workflow") — the dry run described under Release Workflow.
 
 ### Version Format
 
