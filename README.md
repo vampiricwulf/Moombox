@@ -1,5 +1,42 @@
 # Moombox
 
+## Thanks
+
+Moombox would not exist without the people below. Most of what it knows about YouTube, Twitch and BotGuard it learned by reading their code, and some of their code ships inside it. I'm grateful to every one of them. Thank you.
+
+### Built on and learned from
+
+- **[moombox](https://github.com/nosoop/moombox)** by nosoop — the original Moombox, which this project grew from and is named after.
+- **[moonarchive](https://github.com/nosoop/moonarchive)** by nosoop — how to archive a live stream segment by segment: the DASH/HLS download strategies, the throttle after failed catch-up requests, and the attestation handling Moombox matches.
+- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** by the yt-dlp team, and **[youtube-dl](https://github.com/ytdl-org/youtube-dl)** before it — the reference for YouTube's clients and format selection, the player cipher, PO tokens, the Twitch extractor and browser cookie extraction.
+- **[ejs](https://github.com/yt-dlp/ejs)** by the yt-dlp team — the signature and n-parameter solver, vendored into Moombox (it is public domain) and run in its sidecar.
+- **[BgUtils](https://github.com/LuanRT/BgUtils)** by LuanRT — BotGuard and PO token minting. Its `bgutils-js` package runs inside Moombox's sidecar, and the in-process fallback follows the same protocol.
+- **[bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)** by Brainicism — the reference for the PO token flow, the sidecar's session setup, and the yt-dlp plugin and endpoint Moombox provides.
+- **[chatterino7](https://github.com/SevenTV/chatterino7)** by SevenTV, built on **[Chatterino](https://github.com/Chatterino/chatterino2)** — how to talk to Twitch IRC: the connection, keepalives, message tags, emotes and badges.
+- **[ytarchive](https://github.com/Kethsar/ytarchive)** by Kethsar, **[Streamlink](https://github.com/streamlink/streamlink)** and **[NewPipe](https://github.com/TeamNewPipe/NewPipe)** — smaller lessons: YouTube's multi-manifest stream naming, the markers of Twitch's stitched ads, and the substitute video YouTube serves a blocked IP.
+- **[Niconico](https://www.nicovideo.jp)** — the flying comments the player's chat overlay is modelled on.
+
+### What it runs on
+
+- **[Node.js](https://nodejs.org)** — the V8 runtime embedded for the sidecar, so BotGuard and the cipher run in a real JavaScript engine.
+- **[jsdom](https://github.com/jsdom/jsdom)** — the DOM that BotGuard runs against.
+- **[meriyah](https://github.com/meriyah/meriyah)** and **[astring](https://github.com/davidbonnet/astring)** — the JavaScript parser and code generator ejs's solver is built from.
+- **[FFmpeg](https://ffmpeg.org)** — every archive is muxed, probed and trimmed with it. It is the one thing Moombox asks you to install.
+
+### Libraries and tools
+
+- **[Charm](https://charm.land)** — Bubble Tea, Bubbles, Huh, Lip Gloss and Glamour, which the whole terminal UI is made of.
+- **[goja](https://github.com/dop251/goja)** by dop251 — the pure-Go JavaScript engine behind the in-process fallback.
+- **[modernc.org/sqlite](https://gitlab.com/cznic/sqlite)** by Jan Mercl — SQLite in pure Go, so the single binary needs no C toolchain.
+- **[Shoelace](https://shoelace.style)** — the web dashboard's components.
+- **[chi](https://github.com/go-chi/chi)**, **[coder/websocket](https://github.com/coder/websocket)**, **[toml](https://github.com/BurntSushi/toml)**, **[goldmark](https://github.com/yuin/goldmark)**, **[bluemonday](https://github.com/microcosm-cc/bluemonday)**, **[go-isatty](https://github.com/mattn/go-isatty)**, **[go-runewidth](https://github.com/mattn/go-runewidth)** and the Go team's **[x/crypto, x/sync and x/text](https://pkg.go.dev/golang.org/x)** — the web server, the WebSockets behind the dashboard's live updates and Twitch chat, config, release notes and terminal handling.
+- **[esbuild](https://esbuild.github.io)**, **[go-winres](https://github.com/tc-hib/go-winres)** and **[xz](https://github.com/ulikunitz/xz)** — at build time: the sidecar's ejs bundle, the Windows icon and version info, and unpacking the Node.js releases.
+
+### Services
+
+- **[DecAPI](https://decapi.me)** by Decicus — the latest-video lookups one of the YouTube monitors relies on.
+- **[7TV](https://7tv.app)**, **[BetterTTV](https://betterttv.com)** and **[FrankerFaceZ](https://www.frankerfacez.com)** — the third-party Twitch emotes in archived chat.
+
 > **Note:** This project was 99% written by [Claude](https://claude.ai) (Anthropic's AI model) using [Claude Code](https://claude.ai/code). From architecture decisions to implementation details, the vast majority of the codebase — including the YouTube engine, download pipeline, TUI, web dashboard, BotGuard solver, and this README — was generated through AI-assisted development.
 
 YouTube and Twitch live stream archiver with a terminal UI and web dashboard. Monitors channels, detects live streams, and downloads video + live chat automatically.
@@ -844,5 +881,3 @@ See [CLAUDE.md](CLAUDE.md) for comprehensive architecture documentation includin
 ## License
 
 [MIT](LICENSE)
-
-Based on [nosoop/moombox](https://github.com/nosoop/moombox).
