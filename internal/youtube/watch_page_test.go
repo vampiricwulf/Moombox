@@ -620,6 +620,12 @@ func TestExtractChatContinuationShapes(t *testing.T) {
 			wantToken: "TTOK",
 		},
 		{
+			// yt-dlp 12ac9aca7: the staged-rollout page's dedicated element.
+			name:      "script element form",
+			page:      `<script id="yt-initial-data" type="application/json" nonce="n">` + body(`{"continuations":[{"reloadContinuationData":{"continuation":"ETOK"}}]}`) + `</script>`,
+			wantToken: "ETOK",
+		},
+		{
 			name:    "no ytInitialData at all",
 			page:    `<html><body>nothing here</body></html>`,
 			wantErr: "ytInitialData not found",

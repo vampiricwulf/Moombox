@@ -1,0 +1,68 @@
+# Upstream Ports — Ledger
+
+Where the last upstream review left off, so the next one (a local session, a scheduled run, or a cloud session with no `references/` checkout) starts from a known point instead of from "whatever the local clone last pulled". The workflow that reads and updates this file is the `moombox-upstream-porting` skill (`.claude/skills/moombox-upstream-porting/SKILL.md`).
+
+**Update this file at the end of every upstream review, including one that ports nothing.** Moving a repo's *Last reviewed* SHA forward is the record that the commits up to it were triaged; an item not ported goes under *Open upstream items*, so moving the SHA past it does not lose it.
+
+## Last review
+
+- **Date:** 2026-10-22
+- **Last port:** `15fe37f4` — fix(youtube,chat): read ytInitialData from the dedicated script element ← yt-dlp `12ac9aca7` (#17703)
+- **Ported into:** `internal/youtube/channel_membership.go` (`ytInitialDataAnchors`, which `internal/youtube/watch_page.go` shares) and `internal/chat/api.go` (its twin anchor set)
+
+## Upstream repos — last reviewed commit
+
+A cloud session has no `references/` (it is gitignored). Clone what the review needs and list what is new since the SHA below:
+
+```bash
+git clone --filter=blob:none https://github.com/yt-dlp/yt-dlp.git /tmp/yt-dlp
+git -C /tmp/yt-dlp log --oneline 43a45ae37419b2a90db710c9fd06cd250ef524d3..HEAD -- yt_dlp/extractor/youtube yt_dlp/extractor/twitch.py yt_dlp/downloader yt_dlp/networking yt_dlp/cookies.py
+```
+
+Locally, `bash references/update-all.sh` pulls all seven, but its "new commits" are only those since the local clone's previous pull. The SHAs below are the durable record: compare against them, not against the script's summary.
+
+| Repo | Clone URL | Last reviewed | Commit date | Notes |
+|---|---|---|---|---|
+| yt-dlp | https://github.com/yt-dlp/yt-dlp.git | `43a45ae37419b2a90db710c9fd06cd250ef524d3` | 2026-10-21 | release 2026.10.21 + the Py3.10 drop |
+| ejs | https://github.com/yt-dlp/ejs.git | `6f8587bb7009a1fc81038538071d2cb66b8b8ed0` | 2026-06-20 | equals the vendored pin |
+| BgUtils | https://github.com/LuanRT/BgUtils.git | `0594e3da2eb4ff18a6d72f7d3c4049674bb25bc9` | 2026-09-20 | |
+| bgutil-ytdlp-pot-provider | https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git | `26475e9d3665b972c4aeb83b4dbaafcf64b88438` | 2026-10-07 | |
+| moonarchive | https://github.com/nosoop/moonarchive.git | `0da99f26c3da3cf1c22e230be1eafc08a0369927` | 2026-08-08 | |
+| chatterino7 | https://github.com/SevenTV/chatterino7.git | `cacc38823254b93ba335e7b10739679471ffeb2b` | 2026-10-14 | |
+| moombox (Python original) | https://github.com/nosoop/moombox.git | `968d42c10a6750b8b6037070ec09f83d7e15556e` | 2026-06-08 | |
+
+## Vendored pins (sidecar)
+
+These are what actually ships. A repo's *Last reviewed* SHA can be ahead of its pin when the newer commits held nothing worth re-vendoring.
+
+| Source | Pin | Where |
+|---|---|---|
+| ejs | `6f8587bb7009a1fc81038538071d2cb66b8b8ed0` | the VERSION file in `bgutil-sidecar/vendor/ejs/` |
+| bgutils-js | `^4.0.3` | `bgutil-sidecar/package.json` |
+| meriyah / astring | `6.1.4` / `1.9.0` (lockstep with ejs's own `package.json`) | `bgutil-sidecar/package.json` |
+
+## Open upstream items
+
+Reviewed and not ported. Newest first. Remove an entry when it is ported (and add it to the port log) or definitively rejected.
+
+| Upstream | What | Moombox exposure | Status |
+|---|---|---|---|
+| yt-dlp `a51ef56c0` (#17884) | Playability reason falls back to `errorScreen.playerInterstitialRenderer.content.interstitialViewModel` (`title.content` as the reason, `description.content` as the subreason) | `playabilityReason` in `internal/youtube/player_api_parsing.go` reads only `reason` and `messages[0]`. A refusal that arrives interstitial-only gets an empty reason, so `parsePlayabilityStatus`'s keyword match (member / private / country) falls through to the unknown verdict. | Low priority. Wants a real response capture for the fixture before porting. |
+| yt-dlp `c7fb478d2` (issue #17666) | web_embedded can go SABR-only (itag 18 only); upstream gets HLS 91–96 back with a Safari UA | Swapping the UA on its own does nothing here: the port has three parts. | Owner deferred 2026-10-02. |
+
+## Port log
+
+Newest first. One row per Moombox commit that ports upstream work.
+
+| Date | Moombox commit | Upstream | Summary |
+|---|---|---|---|
+| 2026-10-22 | `15fe37f4` | yt-dlp `12ac9aca7` (#17703) | ytInitialData read from `<script id="yt-initial-data" type="application/json">` (staged rollout, cookie-authed pages): third anchor in both locator sets |
+
+## Reviewed, no action (most recent review)
+
+Replace this section on each review. It is the reason the SHAs above moved past these commits.
+
+- yt-dlp `fe84bef39`: Kick extractor rework. Moombox has no Kick support.
+- yt-dlp `3d28cf478`, `36b92b4f1`: Python 3.10 dropped; `dt.timezone.utc` → `dt.UTC`; `concurrent.futures.TimeoutError` → `TimeoutError`. Python-only cleanups.
+- yt-dlp `downloader/external.py`: curl stdin-cookies check `>` → `>=`. Applies to the external curl downloader, which Moombox does not use.
+- yt-dlp build, dependency and docs commits (`70279f2f0`, `f59cd0ba0`, `f82b26812`, `8cdf4fea4`, `6ccd97730`, `43a45ae37`).
