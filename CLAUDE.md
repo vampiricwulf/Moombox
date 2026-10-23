@@ -133,7 +133,7 @@ The local `references/` folder (gitignored) contains upstream repos:
 - `moonarchive` — Python stream archiver (segment strategies)
 - `moombox` — original Python moombox
 
-Run `bash references/update-all.sh` to pull upstream and see relevant changes. Use `--diff` for verbose diffs.
+Run `bash references/update-all.sh` to pull upstream and see relevant changes. Use `--diff` for verbose diffs. `docs/spec/upstream-ports.md` records where the last upstream review left off: the last-reviewed SHA in each repo, the last porting commit, and the open items. It is read first and updated last by the `moombox-upstream-porting` skill, and it carries clone URLs for sessions that have no `references/`.
 
 ## Release Process
 

@@ -1,11 +1,13 @@
 ---
 name: moombox-upstream-porting
-description: Use when analyzing upstream changes from yt-dlp, ejs, or BgUtils references, or when YouTube or Twitch extraction breaks — covers change analysis, correlation, and Go adaptation
+description: Use when analyzing upstream changes from yt-dlp, ejs, or BgUtils references, or when YouTube or Twitch extraction breaks — covers change analysis, correlation, Go adaptation, and the docs/spec/upstream-ports.md ledger of where the last review left off (read first, update last)
 ---
 
 # Upstream Porting
 
 Moombox tracks upstream repos in `references/` (gitignored) for YouTube/Twitch extraction logic. When extraction breaks or upstream updates, follow this workflow.
+
+**Start and finish with the ledger: `docs/spec/upstream-ports.md`.** It records the last upstream commit reviewed in each repo, the last Moombox commit that ported upstream work, the vendored pins, and the upstream items that were reviewed but left open. Read it before Step 1 so the review starts where the last one stopped, not where the local clone last pulled. Update it in Step 7 at the end of every review, including one that ports nothing. A cloud session has no `references/`: the ledger's clone URLs and SHAs are how it finds what is new.
 
 ## Upstream Sources
 
@@ -68,11 +70,22 @@ The sidecar uses `bgutils-js` (the consumable npm package from LuanRT/BgUtils) r
 
 ## Analysis Workflow
 
+### Step 0: Read the Ledger
+Open `docs/spec/upstream-ports.md`. Take each repo's *Last reviewed* SHA as the start of the range, and re-check *Open upstream items*: upstream may have changed one since, or a later commit may make it urgent.
+
 ### Step 1: Pull Upstream
 ```bash
 bash references/update-all.sh        # Summary of new commits per repo
 bash references/update-all.sh --diff  # File-level diffs (limited to 500 lines per repo)
 ```
+
+The script's "new commits" are only those since the local clone's last pull. If a run pulled without reviewing, they will not match the ledger's range, so always list from the ledger SHA:
+
+```bash
+git -C references/yt-dlp log --oneline <last-reviewed-sha>..HEAD
+```
+
+**No `references/` (cloud session, fresh machine):** clone the repos you need with `git clone --filter=blob:none <url>` from the ledger's table into a scratch directory (never into the repo), then run the same `log <sha>..HEAD`.
 
 ### Step 2: Triage yt-dlp Changes
 Focus on: `yt_dlp/extractor/youtube.py`, `yt_dlp/extractor/twitch.py`, `yt_dlp/networking/`, `yt_dlp/utils/`, `yt_dlp/downloader/`
@@ -99,6 +112,18 @@ Changes often cascade:
 3. **Format/quality** — new resolutions, codecs (port when convenient)
 4. **Optimization** — download strategies, retry logic (port if beneficial)
 
+### Step 7: Update the Ledger
+Before finishing, every time (a review that ports nothing still moves the SHAs), edit `docs/spec/upstream-ports.md`:
+
+1. **Last review:** today's date. If anything was ported, the porting commit's hash, the upstream commit it ports, and the files it touched.
+2. **Upstream repos:** set each repo's *Last reviewed* SHA and commit date to the HEAD you triaged (`git rev-parse HEAD`, `git log -1 --format=%cs`). Move a SHA only past commits you actually looked at.
+3. **Vendored pins:** refresh them if ejs or bgutils-js was re-vendored.
+4. **Open upstream items:** add every relevant commit you did not port, with its Moombox exposure and why it is waiting. Remove the ones now ported or rejected.
+5. **Port log:** add one row per porting commit, newest first.
+6. **Reviewed, no action:** replace the section with this review's skipped commits and a one-line reason for each.
+
+Commit the ledger in the same commit as the port when there is one, or in a `docs(spec): upstream review <date>` commit when there is not. The porting commit's hash is not known until it is committed, so write the port first, then the ledger in a follow-up commit (or amend the ledger in, while that commit is still HEAD and unpushed). Run `go test ./internal/docs/` afterwards: the ledger is in the citation check, so a path or symbol it names must exist.
+
 ## Porting Considerations
 
 - **Python → Go**: Translate dict comprehensions, regex groups, dynamic typing to idiomatic Go with proper error handling
@@ -108,6 +133,9 @@ Changes often cascade:
 - **No CGo**: All solutions must be pure Go
 
 ## Common Mistakes
+
+- Trusting `update-all.sh`'s "new commits" as the review range instead of the ledger's *Last reviewed* SHA
+- Finishing a review without updating `docs/spec/upstream-ports.md`, or moving a SHA past a relevant commit without listing it under *Open upstream items*
 
 - Porting yt-dlp cipher changes without checking ejs — ejs is often more current for cipher/n-challenge
 - Ignoring BgUtils when yt-dlp auth changes — PO token flow may have changed too
@@ -166,7 +194,7 @@ bash references/update-all.sh   # references/BgUtils gets pulled
 # 2. Bump the npm pin:
 # Edit bgutil-sidecar/package.json — change the bgutils-js version.
 # Match upstream as closely as possible; pin exactly if upstream is
-# pre-1.0 (current pin: bgutils-js: ^3.2.0).
+# pre-1.0 (current pin: see the ledger, docs/spec/upstream-ports.md).
 
 cd bgutil-sidecar && npm install
 cd .. && cd bgutil-sidecar && node build.mjs

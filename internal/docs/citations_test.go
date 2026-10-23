@@ -15,7 +15,9 @@ import (
 )
 
 // specDocs are the docs whose code citations are checked: the six deep-dive
-// docs under docs/spec/, the two hand-edited root docs added by owner decision
+// docs under docs/spec/ and the upstream-ports.md ledger beside them (added
+// 2026-10-22: a review that trusts it reads its paths as where to look), the
+// two hand-edited root docs added by owner decision
 // O-Z (2026-09-17) after a sweep found four passages in SPEC.md naming symbols
 // and wire values that do not exist and a path in CLAUDE.md that does not,
 // and — added by the 2026-09-25 audit — README.md and the seven skills.
@@ -37,6 +39,7 @@ var specDocs = []string{
 	"platform-services.md",
 	"security.md",
 	"user-interfaces.md",
+	"upstream-ports.md",
 	"SPEC.md",
 	"CLAUDE.md",
 	"README.md",
