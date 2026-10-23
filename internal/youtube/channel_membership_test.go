@@ -243,6 +243,64 @@ func TestExtractYtInitialDataInto_WindowBracketForm(t *testing.T) {
 	}
 }
 
+// TestExtractYtInitialDataInto_ScriptElementForm pins the dedicated-element
+// anchor (yt-dlp 12ac9aca7): YouTube's staged-rollout page carries the blob as
+// raw JSON in `<script id="yt-initial-data" type="application/json">`, and the
+// bootstrap that copies it onto window (`window['ytInitialData'] =
+// JSON.parse(…)`) matches neither assignment anchor. The rows cover id first,
+// id after other attributes, single quotes, and the two near-misses
+// upstream's lookarounds reject — which must not match here either.
+//
+// Mutant this kills: dropping the script-element anchor (every accept row then
+// reads "not found"), or loosening `\sid=` to `\bid=` (the data-id row then
+// matches).
+func TestExtractYtInitialDataInto_ScriptElementForm(t *testing.T) {
+	const blob = `{"contents":{"x":1}}`
+	const bootstrap = `<script nonce="b">var ytDataEl = document.getElementById('yt-initial-data');` +
+		`if (ytDataEl) { window['ytInitialData'] = JSON.parse(ytDataEl.textContent); ytDataEl.remove(); }</script>`
+	for _, tc := range []struct {
+		name string
+		page string
+		want bool
+	}{
+		{"rollout shape", `<script id="yt-initial-data" type="application/json" nonce="SeKD">` + blob + `</script>` + bootstrap, true},
+		{"id after other attributes", `<script type="application/json" nonce="n" id="yt-initial-data">` + "\n" + blob + `</script>`, true},
+		{"single-quoted id", `<script id='yt-initial-data'>` + blob + `</script>`, true},
+		{"data-id is not id", `<script data-id="yt-initial-data">` + blob + `</script>`, false},
+		{"script-x is not script", `<script-x id="yt-initial-data">` + blob + `</script-x>`, false},
+		{"bootstrap alone", bootstrap, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := takeFirstYtInitialData([]byte(tc.page))
+			if ok != tc.want {
+				t.Fatalf("ok = %v, want %v (got %s)", ok, tc.want, got)
+			}
+			if ok && string(got) != blob {
+				t.Errorf("got %s, want %s", got, blob)
+			}
+		})
+	}
+}
+
+// TestParseMembershipTab_ScriptElementForm is the consumer-level row for the
+// rollout shape: a member served the dedicated script element is still shown
+// their tab. The membership scan is always cookie-authed, which is the
+// condition the rollout was seen under.
+func TestParseMembershipTab_ScriptElementForm(t *testing.T) {
+	page := []byte(`<!DOCTYPE html><html><head>` +
+		`<script id="yt-initial-data" type="application/json" nonce="x">` + lockupMembershipJSON + `</script>` +
+		`<script nonce="y">window['ytInitialData'] = JSON.parse(document.getElementById('yt-initial-data').textContent);</script>` +
+		`</head><body></body></html>`)
+
+	videos, ok := parseMembershipTab(page)
+	if !ok {
+		t.Fatal("hasAccess=false — the script-element ytInitialData was not found")
+	}
+	if len(videos) != 2 {
+		t.Errorf("videos = %d, want 2", len(videos))
+	}
+}
+
 func TestExtractYtInitialDataInto_Absent(t *testing.T) {
 	if _, ok := takeFirstYtInitialData([]byte("<html></html>")); ok {
 		t.Error("expected extraction to fail when marker absent")

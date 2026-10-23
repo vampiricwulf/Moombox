@@ -62,9 +62,16 @@ const (
 // the ones internal/youtube's locator has always accepted; a BARE
 // `ytInitialData = {` is deliberately NOT one, because the watch page embeds
 // attacker-authored video metadata and a shortDescription can spell it.
+//
+// The third is not an assignment: it is the `<script id="yt-initial-data"
+// type="application/json">{…}</script>` element YouTube has begun serving in
+// a staged rollout (yt-dlp 12ac9aca7). It is the same pattern as
+// internal/youtube's ytInitialDataAnchors, whose comment carries the RE2 and
+// forgery reasoning; keep the two in step.
 var ytInitialDataAnchors = []*regexp.Regexp{
 	regexp.MustCompile(`var ytInitialData\s*=\s*\{`),
 	regexp.MustCompile(`window\["ytInitialData"\]\s*=\s*\{`),
+	regexp.MustCompile(`<script(?:\s[^>]*?)?\sid=["']yt-initial-data["'][^>]*>\s*\{`),
 }
 
 // ChatApiResponse contains the parsed response from a chat API call.

@@ -91,6 +91,30 @@ func TestExtractChatContinuationReadsTheWindowAssignmentForm(t *testing.T) {
 	}
 }
 
+// TestExtractChatContinuationReadsTheScriptElementForm pins the third anchor:
+// the `<script id="yt-initial-data" type="application/json">` element YouTube
+// serves in a staged rollout (yt-dlp 12ac9aca7), whose window bootstrap
+// (`window['ytInitialData'] = JSON.parse(…)`) neither assignment anchor sees.
+//
+// Mutant this kills: dropping the script-element anchor from
+// ytInitialDataAnchors — chat capture then reads "ytInitialData not found" on
+// every rollout page.
+func TestExtractChatContinuationReadsTheScriptElementForm(t *testing.T) {
+	page := `<html><body><script id="yt-initial-data" type="application/json" nonce="n">` +
+		`{"contents":{"twoColumnWatchNextResults":{"conversationBar":{"liveChatRenderer":` +
+		`{"isReplay":false,"continuations":[{"reloadContinuationData":{"continuation":"ETOK"}}]}}}}}` +
+		`</script><script>window['ytInitialData'] = JSON.parse(document.getElementById('yt-initial-data').textContent);</script>` +
+		`</body></html>`
+
+	tok, _, err := ExtractChatContinuation([]byte(page))
+	if err != nil {
+		t.Fatalf("ExtractChatContinuation: %v", err)
+	}
+	if tok != "ETOK" {
+		t.Errorf("token = %q, want %q", tok, "ETOK")
+	}
+}
+
 // TestExtractChatContinuationReportsAMissingBlob keeps the not-found error
 // text, which is the only signal a caller gets when a page carries no
 // ytInitialData at all (a consent wall body, an error page).

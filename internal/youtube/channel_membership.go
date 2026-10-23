@@ -53,8 +53,21 @@ const membershipTabIdentifier = "TAB_ID_SPONSORSHIPS"
 // forged assignment that scans but is empty or is not JSON no longer denies
 // the real document — it is skipped. The narrower anchor set stays regardless,
 // for the reason above.
+//
+// The second anchor is the dedicated script element YouTube has begun serving
+// in a staged rollout (seen on cookie-authed pages, 2026-10): the blob is raw
+// JSON in `<script id="yt-initial-data" type="application/json" nonce="…">`,
+// and a separate bootstrap does `window['ytInitialData'] =
+// JSON.parse(el.textContent)` — single quotes and no `{`, so neither
+// assignment form above sees it. Ported from yt-dlp 12ac9aca7
+// (_YT_INITIAL_DATA_ALT_RE). RE2 has no lookaround for upstream's `(?!-)` and
+// `(?<!-)`, so whitespace stands on both sides instead: `<script-x` and
+// `data-id=` cannot match. Page-authored text cannot spell this anchor at all
+// — YouTube escapes `<` as < inside JSON strings and as &lt; in
+// attributes — so it is, if anything, the harder of the two to forge.
 var ytInitialDataAnchors = []*regexp.Regexp{
 	regexp.MustCompile(`(?:var ytInitialData|window\["ytInitialData"\])\s*=\s*\{`),
+	regexp.MustCompile(`<script(?:\s[^>]*?)?\sid=["']yt-initial-data["'][^>]*>\s*\{`),
 }
 
 // MembershipVideo is a members-only video discovered from a channel's
