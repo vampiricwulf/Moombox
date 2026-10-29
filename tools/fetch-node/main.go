@@ -43,9 +43,11 @@ import (
 
 // Pinned Node.js v24 LTS release. Bump quarterly or on critical CVE.
 //
-// Last bumped: 2026-09-04 — v24.20.0 was the latest v24 LTS (Krypton);
-// moved off the v22 (Jod) line, which is in maintenance until 2027-04.
-const nodeVersion = "v24.20.0"
+// Last bumped: 2026-10-29 — v24.22.2, the latest v24 LTS (Krypton), on top
+// of the v24.22.1 security release: its bundled undici 7.30.1 closes the
+// advisories the sidecar's fetch() layer was in range for under v24.20.0's
+// 7.29.0 (npm audit cannot see that copy), and it carries OpenSSL 3.5.9.
+const nodeVersion = "v24.22.2"
 
 // nodeTarget describes one platform's Node release artifact.
 type nodeTarget struct {
@@ -66,19 +68,19 @@ func nodeTargets() []nodeTarget {
 			goos: "windows", goarch: "amd64",
 			archiveType: "zip", binaryName: "node.exe",
 			embedName: "node-windows-amd64.gz", urlInfix: "win-x64",
-			expectedSHA: "6cac9ffbca8f6a47091e4b5c772e0606049c3871cb67d900c0cedde630e545ba",
+			expectedSHA: "ca1bff5d8ead13c9f2ea404a176db46bd430704d5b5113734049fa365e7799e2",
 		},
 		{
 			goos: "linux", goarch: "amd64",
 			archiveType: "tar.xz", binaryName: "node",
 			embedName: "node-linux-amd64.gz", urlInfix: "linux-x64",
-			expectedSHA: "2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2",
+			expectedSHA: "48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75",
 		},
 		{
 			goos: "linux", goarch: "arm64",
 			archiveType: "tar.xz", binaryName: "node",
 			embedName: "node-linux-arm64.gz", urlInfix: "linux-arm64",
-			expectedSHA: "5f4ddab610c1ab2016b3c227cebdbf6d9495161487e4739c7b90090595f465f7",
+			expectedSHA: "eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8",
 		},
 	}
 }
@@ -291,7 +293,7 @@ func extractFromTarXz(xzBytes []byte, binaryName string) ([]byte, error) {
 			return nil, fmt.Errorf("tar header: %w", err)
 		}
 		// Linux Node tarballs put node at bin/node under a versioned dir,
-		// e.g. node-v24.20.0-linux-x64/bin/node
+		// e.g. node-v24.22.2-linux-x64/bin/node
 		if filepath.Base(hdr.Name) == binaryName && strings.Contains(hdr.Name, "/bin/") {
 			data, err := io.ReadAll(tr)
 			if err != nil {
