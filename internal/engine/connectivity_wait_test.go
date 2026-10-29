@@ -9,14 +9,22 @@ import (
 	"time"
 )
 
+// TestWaitForConnectivity_AlreadyOnline pins that an online probe is asked
+// before anything waits. The poll is an hour and the context ends long before
+// it, so a wait ahead of the first ask returns the context's error instead of
+// nil — no wall-clock bound, which a descheduled runner could exceed.
+//
+// Mutant: waiting one tick before the first callIsOnline — DeadlineExceeded.
 func TestWaitForConnectivity_AlreadyOnline(t *testing.T) {
-	start := time.Now()
-	err := waitForConnectivity(t.Context(), func() bool { return true }, connectivityPollInterval)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	var asked atomic.Int32
+	err := waitForConnectivity(ctx, func() bool { asked.Add(1); return true }, time.Hour)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("waitForConnectivity = %v, want nil at once when the probe reads online", err)
 	}
-	if time.Since(start) > 100*time.Millisecond {
-		t.Fatal("should return immediately when online")
+	if n := asked.Load(); n != 1 {
+		t.Fatalf("probe asked %d times, want once", n)
 	}
 }
 
@@ -32,13 +40,13 @@ func TestWaitForConnectivity_WaitsAndReturns(t *testing.T) {
 		online.Store(true)
 	}()
 
-	start := time.Now()
-	err := waitForConnectivity(t.Context(), func() bool { return online.Load() }, poll)
+	// The deadline only turns a ticker that never re-asks into a failure; a
+	// wall-clock bound over the wait would also fail a descheduled runner.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	err := waitForConnectivity(ctx, func() bool { return online.Load() }, poll)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second { // safety net, ~20x one poll
-		t.Fatalf("waitForConnectivity took %v after the probe flipped online, want one poll interval", elapsed)
+		t.Fatalf("waitForConnectivity = %v, want nil once the probe flipped online", err)
 	}
 }
 

@@ -603,15 +603,13 @@ func TestRenameStagedFileStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	started := time.Now()
 	if err := renameStagedFile(ctx, "from", "to"); !errors.Is(err, errSharingViolation) {
 		t.Fatalf("renameStagedFile = %v, want the last refusal surfaced", err)
 	}
-	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
-		t.Fatalf("took %v, want under 100ms (a dead context must end the ladder, not wait it out)", elapsed)
-	}
+	// The count is the proof, not the clock: a ladder that waited out its
+	// pauses on a dead context climbs past one attempt.
 	if attempts != 1 {
-		t.Fatalf("attempts = %d, want 1", attempts)
+		t.Fatalf("attempts = %d, want 1 (a dead context must end the ladder, not wait it out)", attempts)
 	}
 }
 
