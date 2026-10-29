@@ -6,7 +6,7 @@ Where the last upstream review left off, so the next one (a local session, a sch
 
 ## Last review
 
-- **Date:** 2026-10-22
+- **Date:** 2026-10-29
 - **Last port:** `15fe37f4` — fix(youtube,chat): read ytInitialData from the dedicated script element ← yt-dlp `12ac9aca7` (#17703)
 - **Ported into:** `internal/youtube/channel_membership.go` (`ytInitialDataAnchors`, which `internal/youtube/watch_page.go` shares) and `internal/chat/api.go` (its twin anchor set)
 
@@ -16,19 +16,19 @@ A cloud session has no `references/` (it is gitignored). Clone what the review n
 
 ```bash
 git clone --filter=blob:none https://github.com/yt-dlp/yt-dlp.git /tmp/yt-dlp
-git -C /tmp/yt-dlp log --oneline 43a45ae37419b2a90db710c9fd06cd250ef524d3..HEAD -- yt_dlp/extractor/youtube yt_dlp/extractor/twitch.py yt_dlp/downloader yt_dlp/networking yt_dlp/cookies.py
+git -C /tmp/yt-dlp log --oneline 34ea29166e37d6f16849217982d0429aafc463e8..HEAD -- yt_dlp/extractor/youtube yt_dlp/extractor/twitch.py yt_dlp/downloader yt_dlp/networking yt_dlp/cookies.py
 ```
 
 Locally, `bash references/update-all.sh` pulls all seven, but its "new commits" are only those since the local clone's previous pull. The SHAs below are the durable record: compare against them, not against the script's summary.
 
 | Repo | Clone URL | Last reviewed | Commit date | Notes |
 |---|---|---|---|---|
-| yt-dlp | https://github.com/yt-dlp/yt-dlp.git | `43a45ae37419b2a90db710c9fd06cd250ef524d3` | 2026-10-21 | release 2026.10.21 + the Py3.10 drop |
-| ejs | https://github.com/yt-dlp/ejs.git | `6f8587bb7009a1fc81038538071d2cb66b8b8ed0` | 2026-06-20 | equals the vendored pin |
-| BgUtils | https://github.com/LuanRT/BgUtils.git | `0594e3da2eb4ff18a6d72f7d3c4049674bb25bc9` | 2026-09-20 | |
+| yt-dlp | https://github.com/yt-dlp/yt-dlp.git | `34ea29166e37d6f16849217982d0429aafc463e8` | 2026-10-29 | release 2026.10.26 |
+| ejs | https://github.com/yt-dlp/ejs.git | `d48c6303a5a6455a42ef9e0b445149cadea51279` | 2026-10-26 | CI-only commits past the vendored pin |
+| BgUtils | https://github.com/LuanRT/BgUtils.git | `f842f8a14435a35800ff469d315bb1a7e6d7a64a` | 2026-10-23 | dev-dependency bump only |
 | bgutil-ytdlp-pot-provider | https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git | `26475e9d3665b972c4aeb83b4dbaafcf64b88438` | 2026-10-07 | |
 | moonarchive | https://github.com/nosoop/moonarchive.git | `0da99f26c3da3cf1c22e230be1eafc08a0369927` | 2026-08-08 | |
-| chatterino7 | https://github.com/SevenTV/chatterino7.git | `cacc38823254b93ba335e7b10739679471ffeb2b` | 2026-10-14 | |
+| chatterino7 | https://github.com/SevenTV/chatterino7.git | `49f9b31cff599e88c6a64efea808ae1521186413` | 2026-10-26 | |
 | moombox (Python original) | https://github.com/nosoop/moombox.git | `968d42c10a6750b8b6037070ec09f83d7e15556e` | 2026-06-08 | |
 
 ## Vendored pins (sidecar)
@@ -62,7 +62,9 @@ Newest first. One row per Moombox commit that ports upstream work.
 
 Replace this section on each review. It is the reason the SHAs above moved past these commits.
 
-- yt-dlp `fe84bef39`: Kick extractor rework. Moombox has no Kick support.
-- yt-dlp `3d28cf478`, `36b92b4f1`: Python 3.10 dropped; `dt.timezone.utc` → `dt.UTC`; `concurrent.futures.TimeoutError` → `TimeoutError`. Python-only cleanups.
-- yt-dlp `downloader/external.py`: curl stdin-cookies check `>` → `>=`. Applies to the external curl downloader, which Moombox does not use.
-- yt-dlp build, dependency and docs commits (`70279f2f0`, `f59cd0ba0`, `f82b26812`, `8cdf4fea4`, `6ccd97730`, `43a45ae37`).
+- yt-dlp `7f7106cd3`: curl_cffi 0.17.x support. Moombox has no curl_cffi request handler.
+- yt-dlp `7e3644cfa`, `f264a6cbd`: misc cleanup / release 2026.10.26; the only youtube-path change is the vendored-ejs `_info.py` metadata.
+- yt-dlp `fa9886678`: Odnoklassniki extractor. Not supported by Moombox.
+- yt-dlp build, CI and test commits (`34ea29166`, `c91f8de0b`, `755a01732`, `fd26888eb`, `7747073a2`, `15262b0b9`, `9b58cb33d`).
+- ejs `d48c630`: GitHub Actions bump only. BgUtils `f842f8a`: brace-expansion dev-dep bump only.
+- chatterino7: Qt/UI, CI and Helix refactors, no IRC/emote protocol change Moombox consumes. bgutil-ytdlp-pot-provider, moonarchive, moombox (Python): nothing new.
