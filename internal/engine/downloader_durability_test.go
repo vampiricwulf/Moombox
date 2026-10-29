@@ -210,7 +210,7 @@ func TestDirectDownloadCheckpointsFreshRunAndResumes(t *testing.T) {
 		OutputFile:  out,
 		IsDirectURL: true,
 	})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 	d.directResumeIntervalOverride = DownloadChunkSize
 	d.onResumeSaved = func(int) {
 		mu.Lock()
@@ -256,7 +256,7 @@ func TestDirectDownloadCheckpointsFreshRunAndResumes(t *testing.T) {
 		OutputFile:  out,
 		IsDirectURL: true,
 	})
-	d2.delays = fastDelays()
+	d2.delays = directDelays()
 	if err := d2.Start(resumeCtx); err != nil {
 		t.Fatalf("resumed Start: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestDirectFallbackCheckpointsMidStream(t *testing.T) {
 		OutputFile:  out,
 		IsDirectURL: true,
 	})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 	d.directResumeIntervalOverride = interval
 	d.onResumeSaved = func(int) {
 		mu.Lock()
@@ -466,7 +466,7 @@ func TestDirectCheckpointSpansTheFallbacksRequests(t *testing.T) {
 				seedWholeFileResume(t, out, headedBody(tc.seed, 'A'), int64(len(tc.body))*2)
 			}
 			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
-			d.delays = fastDelays()
+			d.delays = directDelays()
 			d.directResumeIntervalOverride = tc.interval
 			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()

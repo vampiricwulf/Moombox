@@ -5,13 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -58,7 +58,7 @@ func TestDirectChunkRefusedRefreshesTheURL(t *testing.T) {
 					return srv.URL + "/fresh.mp4", "fresh-token"
 				},
 			})
-			d.delays = fastDelays()
+			d.delays = directDelays()
 			if err := d.Start(t.Context()); err != nil {
 				t.Fatalf("Start = %v, want the refreshed URL to finish the file", err)
 			}
@@ -106,7 +106,7 @@ func TestDirectRefreshRefusesAnotherFile(t *testing.T) {
 			return srv.URL + "/videoplayback?expire=2&id=o-BBBB&itag=136&clen=" + clen, ""
 		},
 	})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 	d.directResumeIntervalOverride = DownloadChunkSize
 	err := d.Start(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "different stream") {
@@ -165,7 +165,7 @@ func TestDirectRefreshIsBounded(t *testing.T) {
 					return srv.URL + tc.fresh, ""
 				},
 			})
-			d.delays = fastDelays()
+			d.delays = directDelays()
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			err := d.Start(ctx)
@@ -181,30 +181,26 @@ func TestDirectRefreshIsBounded(t *testing.T) {
 
 // outageServer serves body by Range, except that from the first request past
 // the first chunk it drops every connection mid-body (206 headers, a few
-// bytes, then EOF) for down. online answers like a connectivity monitor that
-// calls the outage offline only over [offlineFrom, offlineUntil) of it.
+// bytes, then EOF) until the download has waited the outage out. out is that
+// outage (see outage): its isOnline answers like a connectivity monitor that
+// lets lateAsks checks after the first drop pass before it calls the link
+// offline.
 type outageServer struct {
 	*httptest.Server
-	mu    sync.Mutex
-	began time.Time
+	out   outage
 	drops atomic.Int32
 }
 
-func newOutageServer(t *testing.T, body []byte, down time.Duration) *outageServer {
+func newOutageServer(t *testing.T, body []byte, lateAsks int32) *outageServer {
 	t.Helper()
-	s := &outageServer{}
+	s := &outageServer{out: outage{lateAsks: lateAsks}}
 	full := serveRangeFile(body)
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var start, end int64
 		fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end)
 		if start >= DownloadChunkSize {
-			s.mu.Lock()
-			if s.began.IsZero() {
-				s.began = time.Now()
-			}
-			dropped := time.Since(s.began) < down
-			s.mu.Unlock()
-			if dropped {
+			s.out.open()
+			if s.out.down() {
 				s.drops.Add(1)
 				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(body)))
 				w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
@@ -217,18 +213,6 @@ func newOutageServer(t *testing.T, body []byte, down time.Duration) *outageServe
 	}))
 	t.Cleanup(s.Close)
 	return s
-}
-
-func (s *outageServer) online(offlineFrom, offlineUntil time.Duration) func() bool {
-	return func() bool {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.began.IsZero() {
-			return true
-		}
-		el := time.Since(s.began)
-		return el < offlineFrom || el >= offlineUntil
-	}
 }
 
 // TestDirectChunkWaitsOutAnOutage pins the whole-file path's connectivity
@@ -254,29 +238,31 @@ func (s *outageServer) online(offlineFrom, offlineUntil time.Duration) func() bo
 func TestDirectChunkWaitsOutAnOutage(t *testing.T) {
 	body := headedBody(2*DownloadChunkSize+100, 'V')
 	for _, tc := range []struct {
-		name                      string
-		down                      time.Duration
-		offlineFrom, offlineUntil time.Duration
-		wantErr                   string
-		maxDrops                  int32
+		name     string
+		lateAsks int32 // checks the monitor still answers "up" (outage)
+		wantErr  string
+		maxDrops int32
 	}{
-		{"the monitor already calls it offline", 600 * time.Millisecond, 0, 600 * time.Millisecond, "", 1},
-		{"the monitor notices after the ladder ran out", 900 * time.Millisecond, 300 * time.Millisecond, 900 * time.Millisecond, "", MaxChunkRetries},
-		{"a link the monitor calls up gives up", time.Hour, time.Hour, time.Hour, fmt.Sprintf("after %d attempts", MaxChunkRetries), MaxChunkRetries},
+		{"the monitor already calls it offline", 0, "", 1},
+		// Each of the ladder's three attempts asks once and hears "up"; the
+		// verdict wait's first poll hears the call.
+		{"the monitor notices after the ladder ran out", MaxChunkRetries, "", MaxChunkRetries},
+		{"a link the monitor calls up gives up", math.MaxInt32, fmt.Sprintf("after %d attempts", MaxChunkRetries), MaxChunkRetries},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := newOutageServer(t, body, tc.down)
+			srv := newOutageServer(t, body, tc.lateAsks)
 			out := filepath.Join(t.TempDir(), "video.mp4")
 			d := NewSegmentDownloader(DownloaderOptions{
 				BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true,
-				IsOnline: srv.online(tc.offlineFrom, tc.offlineUntil),
+				IsOnline: srv.out.isOnline,
 			})
-			d.delays = fastDelays()
+			d.delays = directDelays()
 			var reconnecting atomic.Bool
 			d.OnActivity = func(a DownloadActivity) {
 				if a == ActivityReconnecting {
 					reconnecting.Store(true)
 				}
+				srv.out.onActivity(a)
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
@@ -307,31 +293,29 @@ func TestDirectChunkWaitsOutAnOutage(t *testing.T) {
 // network error instead would read as a failed download — an Error row for a
 // job the operator stopped.
 //
+// The cancel lands from inside the verdict wait, as in
+// TestDirectFallbackOutageVerdictHonoursCancel: after the third dropped
+// attempt its own IsOnline check is the first ask and the verdict wait's
+// first poll the second.
+//
 // Mutant: dropping the cancelErr check after fetchChunkWithRetry's loop —
 // Start returns "chunk download failed after 3 attempts: unexpected EOF".
 func TestDirectOutageVerdictHonoursCancel(t *testing.T) {
 	body := headedBody(2*DownloadChunkSize+100, 'V')
-	srv := newOutageServer(t, body, time.Hour)
-	d := NewSegmentDownloader(DownloaderOptions{
-		BaseURL: srv.URL + "/video.mp4", OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true,
-		IsOnline: func() bool { return true },
-	})
-	d.delays = fastDelays()
+	srv := newOutageServer(t, body, math.MaxInt32)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("cancel goroutine panicked: %v", r)
+	var asked atomic.Int32
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL: srv.URL + "/video.mp4", OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true,
+		IsOnline: func() bool {
+			if srv.drops.Load() >= MaxChunkRetries && asked.Add(1) == 2 {
+				cancel() // the verdict wait's first poll
 			}
-		}()
-		// Past the three attempts (~150 ms here), inside the verdict window.
-		for srv.drops.Load() < MaxChunkRetries {
-			time.Sleep(5 * time.Millisecond)
-		}
-		time.Sleep(100 * time.Millisecond)
-		cancel()
-	}()
+			return true
+		},
+	})
+	d.delays = directDelays()
 	if err := d.Start(ctx); !errors.Is(err, context.Canceled) {
 		t.Errorf("Start = %v, want context.Canceled", err)
 	}

@@ -93,7 +93,7 @@ func runDirectWithToken(t *testing.T, baseURL, token string) []byte {
 		t.Fatalf("open output: %v", err)
 	}
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: baseURL, OutputFile: path, IsDirectURL: true, PoToken: token})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 	d.outputFile = f
 	t.Cleanup(func() { d.outputFile.Close() })
 
@@ -219,7 +219,7 @@ func TestDirectPathPoTokenJoinsExistingQuery(t *testing.T) {
 func fallbackTransportError(t *testing.T, parent context.Context, rawURL, token string) error {
 	t.Helper()
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: rawURL, OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true, PoToken: token})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 	err := d.runDirectDownloadFallback(parent)
 	if err == nil {
 		t.Fatalf("runDirectDownloadFallback(%q) = nil, want a transport error", rawURL)

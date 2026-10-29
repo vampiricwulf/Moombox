@@ -73,7 +73,7 @@ func TestDirectSizeProbeRefusedRefreshesTheURL(t *testing.T) {
 					return srv.URL + "/fresh.mp4", ""
 				},
 			})
-			d.delays = fastDelays()
+			d.delays = directDelays()
 			if err := d.Start(t.Context()); err != nil {
 				t.Fatalf("Start = %v, want the refreshed URL to finish the file", err)
 			}
@@ -130,7 +130,7 @@ func TestDirectSizeProbeRefreshIsBounded(t *testing.T) {
 					return srv.URL + tc.fresh, ""
 				},
 			})
-			d.delays = fastDelays()
+			d.delays = directDelays()
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			err := d.Start(ctx)
@@ -163,32 +163,25 @@ func TestDirectSizeProbeRefreshIsBounded(t *testing.T) {
 func TestDirectSizeProbeWaitsOutAnOutage(t *testing.T) {
 	body := headedBody(2*DownloadChunkSize+100, 'V')
 	for _, tc := range []struct {
-		name                      string
-		gateway                   bool // the outage answers 503, not nothing
-		down                      time.Duration
-		offlineFrom, offlineUntil time.Duration
+		name     string
+		gateway  bool  // the outage answers 503, not nothing
+		lateAsks int32 // checks the monitor still answers "up" (outage)
 	}{
-		{"the monitor already calls it offline", false, time.Second, 0, time.Second},
-		{"the monitor notices on the last attempt", false, 1200 * time.Millisecond, 500 * time.Millisecond, 1200 * time.Millisecond},
-		{"a gateway's 503s while the monitor calls it offline", true, time.Second, 0, time.Second},
+		{"the monitor already calls it offline", false, 0},
+		// Each of the three probes asks once and hears "up"; the verdict
+		// wait's first poll after the last hears the call.
+		{"the monitor notices on the last attempt", false, 3},
+		{"a gateway's 503s while the monitor calls it offline", true, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			full := serveRangeFile(body)
-			var (
-				mu        sync.Mutex
-				began     time.Time
-				unranged  atomic.Int32
-				elapsedAt = func() time.Duration {
-					mu.Lock()
-					defer mu.Unlock()
-					if began.IsZero() {
-						began = time.Now()
-					}
-					return time.Since(began)
-				}
-			)
+			// The link fails from the first probe until the download has
+			// waited the outage out (outage).
+			o := &outage{lateAsks: tc.lateAsks}
+			var unranged atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if elapsedAt() < tc.down {
+				o.open()
+				if o.down() {
 					if tc.gateway {
 						w.WriteHeader(http.StatusServiceUnavailable)
 					} else {
@@ -206,17 +199,15 @@ func TestDirectSizeProbeWaitsOutAnOutage(t *testing.T) {
 			out := filepath.Join(t.TempDir(), "video.mp4")
 			d := NewSegmentDownloader(DownloaderOptions{
 				BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true,
-				IsOnline: func() bool {
-					el := elapsedAt()
-					return el < tc.offlineFrom || el >= tc.offlineUntil
-				},
+				IsOnline: o.isOnline,
 			})
-			d.delays = fastDelays()
+			d.delays = directDelays()
 			var reconnecting atomic.Bool
 			d.OnActivity = func(a DownloadActivity) {
 				if a == ActivityReconnecting {
 					reconnecting.Store(true)
 				}
+				o.onActivity(a)
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
@@ -243,7 +234,6 @@ type fallbackOrigin struct {
 	*httptest.Server
 	mu       sync.Mutex
 	requests int
-	broke    time.Time // when the first answer that failed the link was given
 }
 
 func newFallbackOrigin(t *testing.T, body []byte, next func(n int, path string, w http.ResponseWriter, r *http.Request) bool) *fallbackOrigin {
@@ -266,29 +256,6 @@ func newFallbackOrigin(t *testing.T, body []byte, next func(n int, path string, 
 	}))
 	t.Cleanup(o.Close)
 	return o
-}
-
-// markBroken records that the link failed now, for online's window.
-func (o *fallbackOrigin) markBroken() {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.broke.IsZero() {
-		o.broke = time.Now()
-	}
-}
-
-// online answers like a connectivity monitor that calls the outage offline
-// only over [from, until) of it, measured from the first broken answer.
-func (o *fallbackOrigin) online(from, until time.Duration) func() bool {
-	return func() bool {
-		o.mu.Lock()
-		defer o.mu.Unlock()
-		if o.broke.IsZero() {
-			return true
-		}
-		el := time.Since(o.broke)
-		return el < from || el >= until
-	}
 }
 
 // brokenBody answers 200 with the whole file's length and sends only its
@@ -328,7 +295,7 @@ func TestDirectFallbackRefusedRefreshesTheURL(t *testing.T) {
 					return o.URL + "/fresh.mp4", ""
 				},
 			})
-			d.delays = fastDelays()
+			d.delays = directDelays()
 			if err := d.Start(t.Context()); err != nil {
 				t.Fatalf("Start = %v, want the refreshed URL streamed", err)
 			}
@@ -371,7 +338,7 @@ func TestDirectFallbackRefreshIsBounded(t *testing.T) {
 				return o.URL + "/still-expired.mp4", ""
 			},
 		})
-		d.delays = fastDelays()
+		d.delays = directDelays()
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
 		if err := d.Start(ctx); err == nil || !strings.Contains(err.Error(), "HTTP 403") {
@@ -384,12 +351,13 @@ func TestDirectFallbackRefreshIsBounded(t *testing.T) {
 
 	t.Run("a refusal after progress counts again", func(t *testing.T) {
 		// /u0 is refused; /u1 breaks off after 1000 bytes (an outage the
-		// monitor calls), then is refused; /u2 is refused; /u3 serves.
-		var o *fallbackOrigin
-		o = newFallbackOrigin(t, body, func(n int, path string, w http.ResponseWriter, _ *http.Request) bool {
+		// monitor calls, until the download has waited it out), then is
+		// refused; /u2 is refused; /u3 serves.
+		var link outage
+		o := newFallbackOrigin(t, body, func(n int, path string, w http.ResponseWriter, _ *http.Request) bool {
 			switch {
 			case path == "/u1" && n == 2:
-				o.markBroken()
+				link.open()
 				brokenBody(w, body, 1000)
 				return true
 			case path == "/u3":
@@ -402,12 +370,13 @@ func TestDirectFallbackRefreshIsBounded(t *testing.T) {
 		out := filepath.Join(t.TempDir(), "video.mp4")
 		d := NewSegmentDownloader(DownloaderOptions{
 			BaseURL: o.URL + "/u0", OutputFile: out, IsDirectURL: true,
-			IsOnline: o.online(0, 300*time.Millisecond),
+			IsOnline: link.isOnline,
 			OnCredentialRefresh: func() (string, string) {
 				return o.URL + "/u" + strconv.Itoa(int(calls.Add(1))), ""
 			},
 		})
-		d.delays = fastDelays()
+		d.delays = directDelays()
+		d.OnActivity = link.onActivity
 		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		defer cancel()
 		if err := d.Start(ctx); err != nil {
@@ -493,7 +462,7 @@ func TestDirectFallbackRefreshIsBounded(t *testing.T) {
 					return o.URL + "/u" + strconv.Itoa(int(calls.Add(1))), ""
 				},
 			})
-			d.delays = fastDelays()
+			d.delays = directDelays()
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			if err := d.Start(ctx); err != nil {
@@ -536,7 +505,7 @@ func TestDirectFallbackShortHeadFromByteZeroEnds(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL: o.URL + "/video.mp4", OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true,
 	})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	err := d.Start(ctx)
@@ -570,7 +539,7 @@ func brokenRest(w http.ResponseWriter, r *http.Request, body []byte) {
 // given the time to say so, now waits the outage out and asks again from
 // where the file stands. The first request breaks off after 1000 bytes (or,
 // in the no-answer row, gets none); every request after it fails with
-// nothing for as long as each row's link is down.
+// nothing until the download has waited the outage out (outage).
 //
 // Mutant: dropping the fallback's offline wait — the rows the monitor calls
 // offline spend their attempts inside the outage and fail. Mutant: returning
@@ -583,32 +552,31 @@ func brokenRest(w http.ResponseWriter, r *http.Request, body []byte) {
 func TestDirectFallbackWaitsOutAnOutage(t *testing.T) {
 	body := headedBody(DownloadChunkSize+100, 'V')
 	for _, tc := range []struct {
-		name        string
-		noAnswer    bool
-		down        time.Duration // how long every request fails, from the first
-		from, until time.Duration // when the monitor calls it offline
+		name     string
+		noAnswer bool
+		lateAsks int32 // checks the monitor still answers "up" (outage)
 	}{
-		{"no answer, the monitor already calls it offline", true, 300 * time.Millisecond, 0, 300 * time.Millisecond},
-		{"a body that breaks off, the monitor already calls it offline", false, 300 * time.Millisecond, 0, 300 * time.Millisecond},
-		// Three failures by ~150 ms; the verdict window after the third
-		// covers the monitor's call at 400 ms.
-		{"a body that breaks off, the monitor notices late", false, 700 * time.Millisecond, 400 * time.Millisecond, 700 * time.Millisecond},
+		{"no answer, the monitor already calls it offline", true, 0},
+		{"a body that breaks off, the monitor already calls it offline", false, 0},
+		// Each of the three failures asks once and hears "up"; the verdict
+		// wait's first poll after the third hears the call.
+		{"a body that breaks off, the monitor notices late", false, MaxChunkRetries},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var o *fallbackOrigin
+			link := &outage{lateAsks: tc.lateAsks}
 			var resumedAt atomic.Value
-			o = newFallbackOrigin(t, body, func(n int, _ string, w http.ResponseWriter, r *http.Request) bool {
+			o := newFallbackOrigin(t, body, func(n int, _ string, w http.ResponseWriter, r *http.Request) bool {
 				switch {
-				case n > 1 && o.online(0, tc.down)():
+				case n > 1 && !link.down():
 					resumedAt.Store(r.Header.Get("Range"))
 					return false
 				case tc.noAnswer:
 					// Every request for the length of the outage: the
 					// transport retries one dropped on a reused connection.
-					o.markBroken()
+					link.open()
 					dropConnection(t, w)
 				case n == 1:
-					o.markBroken()
+					link.open()
 					brokenBody(w, body, 1000)
 				default:
 					brokenRest(w, r, body)
@@ -618,14 +586,15 @@ func TestDirectFallbackWaitsOutAnOutage(t *testing.T) {
 			out := filepath.Join(t.TempDir(), "video.mp4")
 			d := NewSegmentDownloader(DownloaderOptions{
 				BaseURL: o.URL + "/video.mp4", OutputFile: out, IsDirectURL: true,
-				IsOnline: o.online(tc.from, tc.until),
+				IsOnline: link.isOnline,
 			})
-			d.delays = fastDelays()
+			d.delays = directDelays()
 			var reconnecting atomic.Bool
 			d.OnActivity = func(a DownloadActivity) {
 				if a == ActivityReconnecting {
 					reconnecting.Store(true)
 				}
+				link.onActivity(a)
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
@@ -670,6 +639,9 @@ func TestDirectFallbackWaitsOutAnOutage(t *testing.T) {
 func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 	body := headedBody(DownloadChunkSize+100, 'V')
 	up := func() bool { return true }
+	// The gateway row's link: 503s from its first request until the download
+	// has waited the outage out (outage). The other rows never open it.
+	var gateway outage
 	for _, tc := range []struct {
 		name     string
 		isOnline func(o *fallbackOrigin) func() bool
@@ -714,12 +686,12 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 		},
 		{
 			"503s while the monitor calls it offline",
-			func(o *fallbackOrigin) func() bool { return o.online(0, 300*time.Millisecond) },
-			func(o *fallbackOrigin, n int, w http.ResponseWriter, _ *http.Request) bool {
+			func(*fallbackOrigin) func() bool { return gateway.isOnline },
+			func(_ *fallbackOrigin, n int, w http.ResponseWriter, _ *http.Request) bool {
 				if n == 1 {
-					o.markBroken()
+					gateway.open()
 				}
-				if o.online(0, 300*time.Millisecond)() {
+				if !gateway.down() {
 					return false
 				}
 				w.WriteHeader(http.StatusServiceUnavailable) // the gateway, its upstream unreachable
@@ -789,7 +761,8 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 				BaseURL: o.URL + "/video.mp4", OutputFile: out, IsDirectURL: true,
 				IsOnline: tc.isOnline(o),
 			})
-			d.delays = fastDelays()
+			d.delays = directDelays()
+			d.OnActivity = gateway.onActivity
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			err := d.Start(ctx)
@@ -821,39 +794,42 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 // the operator stopped. Every request breaks off with nothing after the
 // first, so the third is the last attempt and asks for the verdict.
 //
+// The cancel lands from inside that wait, not after a sleep: once the last
+// request has been answered, the failure's own IsOnline check is the first
+// ask and the verdict wait's first poll the second, which cancels. A sleep
+// timed to land inside the window instead could overshoot it on a stalled
+// runner, and the run then ended on the broken read — the failure this test
+// exists to rule out.
+//
 // Mutant: dropping the cancelErr check before a failure is counted — Start
 // returns the broken read's error.
 func TestDirectFallbackOutageVerdictHonoursCancel(t *testing.T) {
 	body := headedBody(DownloadChunkSize+100, 'V')
-	broke := make(chan struct{})
+	var lastFailed atomic.Bool
 	o := newFallbackOrigin(t, body, func(n int, _ string, w http.ResponseWriter, r *http.Request) bool {
+		if n == MaxChunkRetries {
+			lastFailed.Store(true)
+		}
 		if n == 1 {
 			brokenBody(w, body, 1000)
 		} else {
 			brokenRest(w, r, body)
 		}
-		if n == MaxChunkRetries {
-			close(broke)
-		}
 		return true
 	})
-	d := NewSegmentDownloader(DownloaderOptions{
-		BaseURL: o.URL + "/video.mp4", OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true,
-		IsOnline: func() bool { return true },
-	})
-	d.delays = fastDelays()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("cancel goroutine panicked: %v", r)
+	var asked atomic.Int32
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL: o.URL + "/video.mp4", OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true,
+		IsOnline: func() bool {
+			if lastFailed.Load() && asked.Add(1) == 2 {
+				cancel() // the verdict wait's first poll
 			}
-		}()
-		<-broke
-		time.Sleep(200 * time.Millisecond) // inside the ~750 ms verdict window
-		cancel()
-	}()
+			return true
+		},
+	})
+	d.delays = directDelays()
 	if err := d.Start(ctx); !errors.Is(err, context.Canceled) {
 		t.Errorf("Start = %v, want context.Canceled", err)
 	}
@@ -876,20 +852,24 @@ func TestDirectSizeProbeChargesNeitherARefreshNorAnOutage(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		first func(t *testing.T, w http.ResponseWriter)
-		down  time.Duration // how long the monitor calls it offline after the first probe
+		// outage: the monitor calls the link offline from the first probe
+		// until the download has waited it out (outage).
+		outage bool
 	}{
-		{"a refusal the refresh answers", func(_ *testing.T, w http.ResponseWriter) { w.WriteHeader(http.StatusForbidden) }, 0},
-		{"an outage waited out", dropConnection, 300 * time.Millisecond},
+		{"a refusal the refresh answers", func(_ *testing.T, w http.ResponseWriter) { w.WriteHeader(http.StatusForbidden) }, false},
+		{"an outage waited out", dropConnection, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			full := serveRangeFile(body)
 			var probes, unranged atomic.Int32
-			var firstAt atomic.Int64
+			var o outage
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("Range") == "bytes=0-0" {
 					switch n := probes.Add(1); {
 					case n == 1:
-						firstAt.Store(time.Now().UnixNano())
+						if tc.outage {
+							o.open()
+						}
 						tc.first(t, w)
 						return
 					case n <= 3:
@@ -907,13 +887,11 @@ func TestDirectSizeProbeChargesNeitherARefreshNorAnOutage(t *testing.T) {
 			out := filepath.Join(t.TempDir(), "video.mp4")
 			d := NewSegmentDownloader(DownloaderOptions{
 				BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true,
-				IsOnline: func() bool {
-					at := firstAt.Load()
-					return at == 0 || time.Since(time.Unix(0, at)) >= tc.down
-				},
+				IsOnline:            o.isOnline,
 				OnCredentialRefresh: func() (string, string) { return srv.URL + "/fresh.mp4", "" },
 			})
-			d.delays = fastDelays()
+			d.delays = directDelays()
+			d.OnActivity = o.onActivity
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			if err := d.Start(ctx); err != nil {
@@ -934,6 +912,11 @@ func TestDirectSizeProbeChargesNeitherARefreshNorAnOutage(t *testing.T) {
 // as the cancel, not as "no size" — which would send a stopped download on to
 // the fallback.
 //
+// The cancel lands from inside the verdict wait, as in
+// TestDirectFallbackOutageVerdictHonoursCancel: after the third probe its own
+// IsOnline check is the first ask and the verdict wait's first poll the
+// second.
+//
 // Mutant: `return 0, d.cancelErr(ctx)` after the loop → `return 0, nil`.
 func TestDirectSizeProbeOutageVerdictHonoursCancel(t *testing.T) {
 	var probes atomic.Int32
@@ -942,27 +925,19 @@ func TestDirectSizeProbeOutageVerdictHonoursCancel(t *testing.T) {
 		dropConnection(t, w)
 	}))
 	defer srv.Close()
-	d := NewSegmentDownloader(DownloaderOptions{
-		BaseURL: srv.URL + "/video.mp4", OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true,
-		IsOnline: func() bool { return true },
-	})
-	d.delays = fastDelays()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("cancel goroutine panicked: %v", r)
+	var asked atomic.Int32
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL: srv.URL + "/video.mp4", OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true,
+		IsOnline: func() bool {
+			if probes.Load() >= 3 && asked.Add(1) == 2 {
+				cancel() // the verdict wait's first poll
 			}
-		}()
-		// Past the three probes (~300 ms here), inside the ~750 ms verdict
-		// window that follows the last.
-		for probes.Load() < 3 {
-			time.Sleep(5 * time.Millisecond)
-		}
-		time.Sleep(200 * time.Millisecond)
-		cancel()
-	}()
+			return true
+		},
+	})
+	d.delays = directDelays()
 	if size, err := d.probeFileSizeWithRetry(ctx); size != 0 || !errors.Is(err, context.Canceled) {
 		t.Errorf("probeFileSizeWithRetry = %d, %v; want 0 and context.Canceled", size, err)
 	}

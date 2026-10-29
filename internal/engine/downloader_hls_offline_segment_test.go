@@ -17,37 +17,6 @@ import (
 const vodPlaylist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-PLAYLIST-TYPE:VOD\n" +
 	"#EXTINF:1.0,\nseg0.ts\n#EXTINF:1.0,\nseg1.ts\n#EXTINF:1.0,\nseg2.ts\n#EXTINF:1.0,\nseg3.ts\n#EXT-X-ENDLIST\n"
 
-// outage is connectivity as explicit state, opened by a test handler and
-// closed by the loop's own response to it — never by a wall clock. Once the
-// loop reports ActivityReconnecting, the next connectivity check (the wait's
-// entry check) still reads offline and ends the outage, so the wait's first
-// tick reads online: the loop provably waited, for one poll. A loop that
-// never notices the outage never ends it, so a mutant that charges the
-// failure instead of waiting spends its whole budget inside it however
-// slowly the runner goes; a wall-clock outage had to outlast that budget
-// (two seconds here) on every run.
-type outage struct {
-	offline, noticed atomic.Bool
-}
-
-func (o *outage) open() { o.offline.Store(true) }
-
-func (o *outage) isOnline() bool {
-	if !o.offline.Load() {
-		return true
-	}
-	if o.noticed.Load() {
-		o.offline.Store(false) // read offline once more, by the wait itself
-	}
-	return false
-}
-
-func (o *outage) onActivity(a DownloadActivity) {
-	if a == ActivityReconnecting && o.offline.Load() {
-		o.noticed.Store(true)
-	}
-}
-
 // runOutageVod downloads vodPlaylist from srv. sequential takes the loop's
 // one-segment-at-a-time path (StopOnGap, as a Twitch live capture runs);
 // otherwise the ENDLIST playlist goes to runHlsVodParallel, with maxRetries
@@ -118,7 +87,7 @@ func seg1FailsOffline(t *testing.T, o *outage) *httptest.Server {
 		if tripped.CompareAndSwap(false, true) {
 			o.open()
 		}
-		if o.offline.Load() {
+		if o.down() {
 			http.Error(w, "unreachable", http.StatusServiceUnavailable)
 			return
 		}

@@ -3,6 +3,7 @@ package engine
 import (
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -117,6 +118,28 @@ func fastDelays() delays {
 // the loop.
 func fast(d time.Duration) time.Duration { return d / fastScale }
 
+// directScale is how much faster than fastDelays the whole-file direct path's
+// tests run. That path sleeps on three of the waits alone — the size probe's
+// backoff (genericRetry), the chunk and streaming-fallback ladders and the
+// outage verdict (atEdgeBackoffUnit), and its outage waits (connectivityPoll)
+// — and at fast scale those still cost every download that reaches the
+// streaming fallback 300 ms of probe backoff and every outage verdict 750 ms.
+// The three move together, so the path's escalation counts and orderings stay
+// production's, and a test's own windows (an outage's length, when the
+// monitor calls it) are written at this scale too.
+const directScale = 5
+
+// directDelays is fastDelays() with the direct path's three waits divided by
+// directScale: genericRetry 20 ms, atEdgeBackoffUnit 10 ms, connectivityPoll
+// 50 ms (production ÷ 100), so the verdict window is 150 ms.
+func directDelays() delays {
+	d := fastDelays()
+	d.genericRetry /= directScale
+	d.atEdgeBackoffUnit /= directScale
+	d.connectivityPoll /= directScale
+	return d
+}
+
 // activityRecorder wires OnActivity to a buffered channel so a test can wait
 // for the loop to REACH a state instead of sleeping a wall-clock margin and
 // hoping. Non-blocking send: a test that stops reading never stalls the loop.
@@ -144,6 +167,63 @@ func awaitActivity(t *testing.T, ch <-chan DownloadActivity, want DownloadActivi
 		case <-deadline:
 			t.Fatalf("downloader never reported %v within %v", want, within)
 		}
+	}
+}
+
+// outage is connectivity as explicit state, opened by a test handler and
+// closed by the loop's own response to it — never by a wall clock. Once the
+// loop reports ActivityReconnecting, the next connectivity check (the wait's
+// entry check) still reads offline and ends the outage, so the wait's first
+// tick reads online: the loop provably waited, for one poll. A loop that
+// never notices the outage never ends it, so a mutant that charges the
+// failure instead of waiting spends its whole budget inside it however
+// slowly the runner goes; a wall-clock outage had to outlast that budget on
+// every run, and a [from, until) window narrower than a runner's stall could
+// come and go without the loop ever reading it offline.
+//
+// lateAsks models a monitor that calls the outage late: the first lateAsks
+// connectivity checks after open() still read the link up (the downloader's
+// own failures are then charged), and every one after reads offline until
+// the loop has waited the outage out. A count, not a delay: the direct path
+// asks once per failure and then polls inside awaitOutageVerdict, so
+// lateAsks = MaxChunkRetries lets each attempt's own check pass and hands the
+// call to the verdict wait's first poll, however fast or slow the runner.
+// Checks before open() are not counted.
+type outage struct {
+	lateAsks         int32
+	asks             atomic.Int32 // checks made while offline
+	opened           atomic.Bool
+	offline, noticed atomic.Bool
+}
+
+// open starts the outage. Only the first call does anything: a link that
+// came back stays back.
+func (o *outage) open() {
+	if o.opened.CompareAndSwap(false, true) {
+		o.offline.Store(true)
+	}
+}
+
+// down reports whether the link is still failing: from open() until the loop
+// has waited the outage out.
+func (o *outage) down() bool { return o.offline.Load() }
+
+func (o *outage) isOnline() bool {
+	if !o.offline.Load() {
+		return true
+	}
+	if o.asks.Add(1) <= o.lateAsks {
+		return true // the monitor has not called it yet
+	}
+	if o.noticed.Load() {
+		o.offline.Store(false) // read offline once more, by the wait itself
+	}
+	return false
+}
+
+func (o *outage) onActivity(a DownloadActivity) {
+	if a == ActivityReconnecting && o.offline.Load() {
+		o.noticed.Store(true)
 	}
 }
 

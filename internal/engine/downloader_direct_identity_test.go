@@ -91,7 +91,7 @@ func TestDirectResumeRefusesADifferentTotal(t *testing.T) {
 	}))
 	defer srvA.Close()
 	d1 := NewSegmentDownloader(DownloaderOptions{BaseURL: srvA.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
-	d1.delays = fastDelays()
+	d1.delays = directDelays()
 	d1.directResumeIntervalOverride = DownloadChunkSize
 	if err := d1.Start(t.Context()); err == nil {
 		t.Fatal("run 1 Start = nil, want the 404 that cuts it")
@@ -110,7 +110,7 @@ func TestDirectResumeRefusesADifferentTotal(t *testing.T) {
 	srvB := httptest.NewServer(serveRangeFile(bodyB))
 	defer srvB.Close()
 	d2 := NewSegmentDownloader(DownloaderOptions{BaseURL: srvB.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
-	d2.delays = fastDelays()
+	d2.delays = directDelays()
 	if err := d2.Start(t.Context()); err != nil {
 		t.Fatalf("run 2 Start: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestDirectResumeRefusesAPartialLongerThanTheFile(t *testing.T) {
 	defer srv.Close()
 
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 	if err := d.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestDirectFallbackResumeRefusesADifferentTotal(t *testing.T) {
 	defer srv.Close()
 	run := func() error {
 		d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
-		d.delays = fastDelays()
+		d.delays = directDelays()
 		d.directResumeIntervalOverride = 64 << 10
 		return d.Start(t.Context())
 	}
@@ -321,7 +321,7 @@ func TestDirectFallbackResume416HoldsThePartialToItsFile(t *testing.T) {
 			defer srv.Close()
 
 			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
-			d.delays = fastDelays()
+			d.delays = directDelays()
 			err := d.Start(t.Context())
 			if tc.wantErr != (err != nil) {
 				t.Fatalf("Start = %v, want error %v", err, tc.wantErr)

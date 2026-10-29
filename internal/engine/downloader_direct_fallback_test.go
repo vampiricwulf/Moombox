@@ -39,7 +39,7 @@ func TestProbeFileSizeRetriesBeforeFallback(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, IsDirectURL: true})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 
 	if got, _ := d.probeFileSizeWithRetry(context.Background()); got != 4096 {
 		t.Fatalf("probeFileSizeWithRetry = %d, want 4096 after one transient failure (calls=%d)", got, calls.Load())
@@ -180,7 +180,7 @@ func TestStreamingFallbackFailsOnIdleStall(t *testing.T) {
 
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, OutputFile: path, IsDirectURL: true})
 	d.outputFile = f
-	d.delays = fastDelays()
+	d.delays = directDelays()
 
 	done := make(chan error, 1)
 	go func() { done <- d.runDirectDownloadFallback(context.Background()) }()
@@ -344,7 +344,7 @@ func TestDirectURLStagedBytesStillRestartFresh(t *testing.T) {
 	}
 
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, OutputFile: path, IsDirectURL: true})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -576,7 +576,7 @@ func TestStreamingFallbackClearsResumeSidecarOnSuccess(t *testing.T) {
 	resumeFile := seedDirectResume(t, path, head)
 
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, OutputFile: path, IsDirectURL: true})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
@@ -620,7 +620,7 @@ func TestStreamingFallbackCompletesWhenOffsetIsAtEOF(t *testing.T) {
 	resumeFile := seedDirectResume(t, path, whole)
 
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, OutputFile: path, IsDirectURL: true})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
@@ -670,7 +670,7 @@ func TestFetchChunkWithRetryReportsTheLastCause(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, IsDirectURL: true})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 	data, status, err := d.fetchChunkWithRetry(context.Background(), 0, 7)
 	if err == nil {
 		t.Fatalf("fetchChunkWithRetry = (%q, %d, nil), want an error after %d failed attempts", data, status, MaxChunkRetries)
