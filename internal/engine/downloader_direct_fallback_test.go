@@ -195,43 +195,6 @@ func TestStreamingFallbackFailsOnIdleStall(t *testing.T) {
 	}
 }
 
-// TestStreamingFallbackSurvivesSlowButProgressingTransfer pins the other half
-// of that bound: it is an IDLE deadline, not a total one, so a multi-hour VOD
-// streaming at a steady trickle must still finish. Ten 20 ms gaps against a
-// 60 ms bound is more than three times the deadline in wall clock with no
-// single gap reaching it.
-//
-// Mutant: giving the fallback a total context.WithTimeout(parent,
-// SegmentTimeout) instead — the transfer dies at 60 ms, mid-file.
-func TestStreamingFallbackSurvivesSlowButProgressingTransfer(t *testing.T) {
-	prev := SegmentTimeout
-	t.Cleanup(func() { SegmentTimeout = prev })
-	SegmentTimeout = 60 * time.Millisecond
-
-	srv := trickleServer(t, 10, 20*time.Millisecond, 1024)
-
-	path := filepath.Join(t.TempDir(), "video.mp4")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		t.Fatalf("open output: %v", err)
-	}
-	t.Cleanup(func() { f.Close() })
-
-	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, OutputFile: path, IsDirectURL: true})
-	d.outputFile = f
-
-	start := time.Now()
-	if err := d.runDirectDownloadFallback(context.Background()); err != nil {
-		t.Fatalf("runDirectDownloadFallback = %v, want nil for a continuously progressing transfer", err)
-	}
-	if got := d.bytesWritten.Load(); got != 10*1024 {
-		t.Fatalf("bytesWritten = %d, want %d", got, 10*1024)
-	}
-	if elapsed := time.Since(start); elapsed < SegmentTimeout {
-		t.Fatalf("transfer took %s — shorter than the idle bound, so it never exercised the deadline", elapsed)
-	}
-}
-
 // TestProbeFileSizeDrainIsBounded pins ENGINE-14 (report #50): the 1-byte
 // 206 drain is capped like every other drain in the file, so a server that
 // answers a 1-byte range with megabytes cannot be pulled in full.

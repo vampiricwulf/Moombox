@@ -3,9 +3,12 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -33,45 +36,76 @@ func trickleServer(t *testing.T, chunks int, gap time.Duration, chunkSize int) *
 	return srv
 }
 
-// TestFetchSegmentSurvivesSlowButProgressingTransfer pins ENGINE-4's fix and
-// the ceiling's other half: a transfer that keeps delivering bytes must
-// complete however long it takes in total, and the hard ceiling layered under
-// the idle bound must not clip it. Thirty 40 ms gaps against a 1 s idle bound
-// is more than 1.16 s of wall clock — longer than the bound itself — with no
-// gap ever coming near it, under a 10 s ceiling (far out, because it too must
-// not fire, and it counts every stall the runner adds to the transfer).
+// TestSlowButProgressingTransfersSurvive pins ENGINE-4's fix on both paths
+// that read a body under the idle bound alone, and the ceiling's other half:
+// a transfer that keeps delivering bytes must complete however long it takes
+// in total. fetchSegment (segments, playlists, and the hard ceiling layered
+// under the idle bound, which must not clip it either) and the whole-file
+// streaming fallback (runDirectDownloadFallback, whose one GET for a
+// multi-hour VOD has no other bound) read the same trickle side by side, so
+// the pair pays its wall clock once. Thirty 40 ms gaps against a 1 s idle
+// bound is more than 1.16 s — longer than the bound itself — with no gap
+// ever coming near it, under a 10 s ceiling (far out, because it too must not
+// fire, and it counts every stall the runner adds to the transfer).
 //
 // The margins are wide on purpose: the idle timer must NOT fire, and it and
 // the trickling server share this process, so a runner that deschedules the
 // process for longer than (idle − gap) fails the transfer however correct the
-// code is. 960 ms of margin (a 25x ratio) rides that out; the 40 ms of a 60 ms
-// bound against 20 ms gaps did not, and a 60 ms SIGSTOP failed it 18 times in
-// 20.
+// code is. 960 ms of margin (a 25x ratio) rides that out; the 40 ms of a
+// 60 ms bound against 20 ms gaps, which both paths had, did not.
 //
 // Mutant: restoring `ctx, cancel := context.WithTimeout(parent, SegmentTimeout)`
 // in fetchSegment — the fetch dies at 1 s with context.DeadlineExceeded.
 // Mutant: a ceiling shorter than the transfer (fetchSegment passing the idle
 // bound as its ceiling) — the payload comes back short with errFetchCeiling.
-func TestFetchSegmentSurvivesSlowButProgressingTransfer(t *testing.T) {
+// Mutant: giving streamDirectOnce a total context.WithTimeout(parent,
+// SegmentTimeout) instead of the idle deadline — every request of the
+// fallback dies at 1 s, mid-file, and its ladder runs out.
+func TestSlowButProgressingTransfersSurvive(t *testing.T) {
 	prev := SegmentTimeout
 	t.Cleanup(func() { SegmentTimeout = prev })
 	SegmentTimeout = time.Second
 
 	const chunks = 30
 	srv := trickleServer(t, chunks, 40*time.Millisecond, 1024)
-	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL})
-	d.delays.fetchHardCeiling = 10 * time.Second
+
+	seg := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL})
+	seg.delays.fetchHardCeiling = 10 * time.Second
+
+	path := filepath.Join(t.TempDir(), "video.mp4")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open output: %v", err)
+	}
+	t.Cleanup(func() { f.Close() })
+	direct := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, OutputFile: path, IsDirectURL: true})
+	direct.outputFile = f
+	direct.delays = directDelays()
 
 	start := time.Now()
-	data, status, err := d.fetchSegment(context.Background(), srv.URL+"/seg")
+	fallbackDone := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fallbackDone <- fmt.Errorf("runDirectDownloadFallback panicked: %v", r)
+			}
+		}()
+		fallbackDone <- direct.runDirectDownloadFallback(context.Background())
+	}()
+
+	data, status, err := seg.fetchSegment(context.Background(), srv.URL+"/seg")
 	if err != nil {
-		t.Fatalf("fetchSegment = %v, want nil for a continuously progressing transfer inside the ceiling", err)
+		t.Errorf("fetchSegment = %v, want nil for a continuously progressing transfer inside the ceiling", err)
+	} else if status != http.StatusOK || len(data) != chunks*1024 {
+		t.Errorf("fetchSegment = %d bytes/status %d, want %d/200", len(data), status, chunks*1024)
 	}
-	if status != http.StatusOK || len(data) != chunks*1024 {
-		t.Fatalf("fetchSegment = %d bytes/status %d, want %d/200", len(data), status, chunks*1024)
+	if err := <-fallbackDone; err != nil {
+		t.Errorf("runDirectDownloadFallback = %v, want nil for a continuously progressing transfer", err)
+	} else if got := direct.bytesWritten.Load(); got != chunks*1024 {
+		t.Errorf("runDirectDownloadFallback wrote %d bytes, want %d", got, chunks*1024)
 	}
 	if elapsed := time.Since(start); elapsed < SegmentTimeout {
-		t.Fatalf("transfer took %s — shorter than the idle bound, so it never exercised the deadline", elapsed)
+		t.Fatalf("transfers took %s — shorter than the idle bound, so they never exercised the deadline", elapsed)
 	}
 }
 
