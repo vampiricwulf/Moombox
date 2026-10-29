@@ -4,15 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -233,52 +236,75 @@ func TestStreamingFallbackSurvivesSlowButProgressingTransfer(t *testing.T) {
 // 206 drain is capped like every other drain in the file, so a server that
 // answers a 1-byte range with megabytes cannot be pulled in full.
 //
-// Mutant: restoring the bare io.Copy(io.Discard, resp.Body) — served counts
-// far past maxDrainBytes.
+// It counts what the CLIENT read off the socket, through a counting conn
+// under engineHTTPClient, not what the server managed to write. A loopback
+// write succeeds once the kernel takes the bytes, so a server-side count
+// measured socket buffering: 0.4 MB on Windows, 1-4.5 MB on Linux with
+// autotuning, depending on the sysctls and on how soon the client closed —
+// which needed a 64 MiB cap and a sleep to let the server notice. The client's
+// count is exact on every OS: the drain's maxDrainBytes plus the response
+// head and at most one 4 KiB transport buffer.
+//
+// Serial on purpose: it swaps the package-level engineHTTPClient (the
+// package's t.Parallel tests only resume once the serial ones are done).
+//
+// Mutant: restoring the bare io.Copy(io.Discard, resp.Body) — the client reads
+// the whole 16 MiB body.
 func TestProbeFileSizeDrainIsBounded(t *testing.T) {
-	var served atomic.Int64
+	const chunks = 256 // 16 MiB, 256x maxDrainBytes
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Range", "bytes 0-0/4096")
+		// A stated length, as an origin answering with a whole file sends:
+		// net/http's own Close then ends the connection at once, where an
+		// unsized (chunked) body is first drained up to 256 KiB for reuse.
+		w.Header().Set("Content-Length", strconv.Itoa(chunks*64<<10))
 		w.WriteHeader(http.StatusPartialContent)
 		buf := make([]byte, 64<<10)
-		for range 4096 { // 256 MiB, 4096x maxDrainBytes
-			n, err := w.Write(buf)
-			served.Add(int64(n))
-			if err != nil {
+		for range chunks {
+			if _, err := w.Write(buf); err != nil {
 				return
 			}
 		}
 	}))
 	t.Cleanup(srv.Close)
 
+	var read atomic.Int64
+	tr := httpx.NewTransport(httpx.TransportOptions{})
+	var dialer net.Dialer
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &readCountingConn{Conn: c, n: &read}, nil
+	}
+	prev := engineHTTPClient
+	t.Cleanup(func() { engineHTTPClient = prev; tr.CloseIdleConnections() })
+	engineHTTPClient = httpx.ClientWithTransport(0, tr)
+
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, IsDirectURL: true})
 	if got, _ := d.probeFileSize(context.Background()); got != 4096 {
 		t.Fatalf("probeFileSize = %d, want 4096", got)
 	}
-	// Give the server goroutine a moment to notice the closed body.
-	//
-	// The margin below is MEASURED, not chosen: what the origin gets to push
-	// past the LimitReader is socket buffering, not the drain. Observed with
-	// the fix in place:
-	//   - Windows, two machines (five runs each, two distinct values):
-	//     397,303–462,839 bytes served.
-	//   - ubuntu-latest (2026-09-29, CI run 36605795801): 2,166,775 bytes —
-	//     Linux loopback buffers ~2.07 MiB before the server's writes fail,
-	//     which broke the previous 32*maxDrainBytes (2 MiB) cap.
-	// The cap is therefore 1024*maxDrainBytes (64 MiB): ~31x the observed Linux
-	// slop and ~6x the most the default Linux sysctls can buffer at all
-	// (tcp_wmem[2] 4 MiB send + tcp_rmem[2] 6 MiB receive). The body is
-	// 256 MiB so the mutant — a bare io.Copy(io.Discard, resp.Body) — drains
-	// all of it, 4x above the cap (the cap is 1/4 of what the mutant drains);
-	// under the fix the server loop stops at its first failed write after the
-	// client closes, so the larger body costs the fixed path nothing. The
-	// brief's original 4*maxDrainBytes (256 KiB) sat BELOW the Windows range
-	// and 32*maxDrainBytes sat below the Linux one — both failed with the fix
-	// in place: do not tighten this back.
-	time.Sleep(50 * time.Millisecond)
-	if n := served.Load(); n > 1024*maxDrainBytes {
-		t.Fatalf("drained %d bytes, want at most %d — the 206 drain is unbounded", n, 1024*maxDrainBytes)
+	// Every body read ran on this goroutine inside probeFileSize, and an
+	// early Close ends the connection without another read, so the count is
+	// final here.
+	const slack = 16 << 10
+	if n := read.Load(); n > maxDrainBytes+slack {
+		t.Fatalf("read %d bytes off the socket, want at most %d — the 206 drain is unbounded", n, maxDrainBytes+slack)
 	}
+}
+
+// readCountingConn counts every byte read off the connection into n.
+type readCountingConn struct {
+	net.Conn
+	n *atomic.Int64
+}
+
+func (c *readCountingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.n.Add(int64(n))
+	return n, err
 }
 
 // TestDirectURLStagedBytesStillRestartFresh re-pins the shared no-truncate
