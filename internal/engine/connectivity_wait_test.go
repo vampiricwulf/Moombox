@@ -66,7 +66,16 @@ func TestWaitForConnectivity_ContextCancelled(t *testing.T) {
 // one in-flight probe.
 //
 // Mutant: restoring the per-call `go func()` — starts counts 5 instead of 1.
+//
+// The callers' give-up timeout is cut from 2 s to 20 ms: how long they wait
+// does not matter, only that the probe stays in flight (it blocks until the
+// test releases it) while every one of them asks. Serial on purpose: it
+// writes the package-level isOnlineProbeTimeout.
 func TestCallIsOnlineSingleFlight(t *testing.T) {
+	prevTimeout := isOnlineProbeTimeout
+	t.Cleanup(func() { isOnlineProbeTimeout = prevTimeout })
+	isOnlineProbeTimeout = 20 * time.Millisecond
+
 	var starts atomic.Int32
 	block := make(chan struct{})
 	probe := func() bool {
