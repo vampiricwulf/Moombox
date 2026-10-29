@@ -34,14 +34,14 @@
 
 | Library | Version | Purpose |
 |---------|---------|---------|
-| go-chi/chi/v5 | v5.3.2 | HTTP router |
+| go-chi/chi/v5 | v5.5.0 | HTTP router |
 | charm.land/bubbletea/v2 | v2.1.0 | TUI framework |
 | charm.land/bubbles/v2 | v2.2.1 | TUI components |
 | charm.land/huh/v2 | v2.0.3 | TUI forms |
 | charm.land/lipgloss/v2 | v2.0.6 | TUI styling |
 | charm.land/glamour/v2 | v2.0.1 | Markdown rendering (release notes) |
 | dop251/goja | v0.0.0-20260915 | JS engine |
-| modernc.org/sqlite | v1.60.1 | SQLite driver |
+| modernc.org/sqlite | v1.61.0 | SQLite driver |
 | coder/websocket | v1.8.15 | WebSocket (was nhooyr.io/websocket — upstream moved) |
 | BurntSushi/toml | v1.6.0 | Config parsing |
 
