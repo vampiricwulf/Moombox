@@ -30,7 +30,8 @@ name: CI
 #          .github/scripts/test-shard.sh says which packages each shard
 #          runs. Every flavour has a catch-all shard, rest, so a new package
 #          always runs somewhere, and lint proves the shards cover
-#          `go list ./...` exactly once. Every shard installs FFmpeg, so
+#          `go list ./...` exactly once. Every shard installs FFmpeg (in the
+#          background while the rest of its setup runs), so
 #          muxer_concatcopy_test.go and probe_params_test.go run instead of
 #          skipping, and builds the sidecar payload from the commit under
 #          test.
@@ -334,6 +335,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Start installing FFmpeg
+        # apt on ubuntu, choco on windows: 20-40 s that needs nothing the
+        # setup steps below make, so it runs in the background while they
+        # do, and "Finish installing FFmpeg" waits for it before go test.
+        # Every network command in it is bounded and retried (see the
+        # script: apt's own timeout fires only on total silence).
+        timeout-minutes: 10
+        run: bash .github/scripts/install-ffmpeg.sh --start
+
       - name: Restore embedded Node binary cache
         # The Node binaries ONLY — sidecar.tar.gz must never be added to this
         # path list (see the header). Their whole input is the pin: version.txt
@@ -414,25 +424,12 @@ jobs:
         timeout-minutes: 10
         run: bash .github/scripts/retry.sh 3 300 go run ./tools/fetch-node
 
-      - name: Install FFmpeg (ubuntu)
-        # Every network command is bounded and retried, since apt's own
-        # timeout fires only on total silence. The packages are downloaded
-        # first and then installed with --no-download, so the part that
-        # cannot be cut off half-way never waits on a mirror.
-        if: runner.os == 'Linux'
+      - name: Finish installing FFmpeg
+        # Prints the background install's log and fails the job if it
+        # failed, so muxer_concatcopy_test.go and probe_params_test.go run
+        # instead of skipping.
         timeout-minutes: 10
-        run: |
-          bash .github/scripts/retry.sh 3 90 sudo apt-get update -q
-          bash .github/scripts/retry.sh 3 90 sudo apt-get install -y -q --download-only ffmpeg
-          sudo apt-get install -y -q --no-download ffmpeg
-          ffmpeg -version | head -1
-
-      - name: Install FFmpeg (windows)
-        if: runner.os == 'Windows'
-        timeout-minutes: 10
-        run: |
-          bash .github/scripts/retry.sh 3 0 choco install ffmpeg -y --no-progress
-          ffmpeg -version | head -1
+        run: bash .github/scripts/install-ffmpeg.sh --wait
 
       - name: go test
         # -timeout is go test's limit for one test binary: past it, the
