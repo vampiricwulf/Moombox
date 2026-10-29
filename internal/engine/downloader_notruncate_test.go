@@ -73,13 +73,10 @@ func TestStartDiscardStagedMediaOptIn(t *testing.T) {
 		DiscardStaged: true,
 		MaxRetries:    1,
 	})
-	d.delays = fastDelays()
 
 	// The open mode is decided before the first fetch, so the download's own
 	// failure against a dead address is irrelevant — only the file is.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := d.Start(ctx); errors.Is(err, ErrStagedMediaPresent) {
+	if err := startAgainstDeadAddress(t, d); errors.Is(err, ErrStagedMediaPresent) {
 		t.Fatalf("Start = %v, want the guard to stand down for an explicit discard", err)
 	}
 	if got := sizeOf(t, path); got != 0 {
@@ -370,15 +367,19 @@ func asideFiles(t *testing.T, path string) (media, sidecar string) {
 	return media, sidecar
 }
 
-// startAgainstDeadAddress runs Start against an address nothing answers, with
-// a short deadline. Every row below cares only about what Start decided about
-// the files BEFORE the first fetch, so the download's own failure is expected
-// and the deadline only has to outlast the open sequence.
+// startAgainstDeadAddress runs Start against an address nothing answers and
+// ends it at the first failed fetch. Every caller cares only about what Start
+// decided about the files BEFORE that fetch, so the download's own failure is
+// expected: the loop reports ActivityRetrying for that first refusal, after
+// every file decision, and the run is cancelled there instead of retrying the
+// dead address until a deadline (750 ms a row). The deadline is only a
+// safety net for a run that never fetches.
 func startAgainstDeadAddress(t *testing.T, d *SegmentDownloader) error {
 	t.Helper()
 	d.delays = fastDelays()
-	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), safetyNet)
 	defer cancel()
+	d.OnActivity = func(DownloadActivity) { cancel() }
 	return d.Start(ctx)
 }
 
