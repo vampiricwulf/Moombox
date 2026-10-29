@@ -4,7 +4,7 @@ This document covers prerequisites and build commands for Moombox on Windows and
 
 ## Prerequisites
 
-- **Go 1.27+** — https://go.dev/dl/ (go.mod carries `toolchain go1.27.2`; any Go ≥ 1.21 auto-downloads it)
+- **Go 1.27+** — https://go.dev/dl/ (go.mod carries `toolchain go1.27.3`; any Go ≥ 1.21 auto-downloads it)
 - **Node.js 24 LTS** — https://nodejs.org/ (only required for building the BotGuard sidecar tarball; not a runtime dep)
 - **FFmpeg** — only required at runtime, not at build time
 
