@@ -17,11 +17,42 @@ import (
 const vodPlaylist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-PLAYLIST-TYPE:VOD\n" +
 	"#EXTINF:1.0,\nseg0.ts\n#EXTINF:1.0,\nseg1.ts\n#EXTINF:1.0,\nseg2.ts\n#EXTINF:1.0,\nseg3.ts\n#EXT-X-ENDLIST\n"
 
+// outage is connectivity as explicit state, opened by a test handler and
+// closed by the loop's own response to it — never by a wall clock. Once the
+// loop reports ActivityReconnecting, the next connectivity check (the wait's
+// entry check) still reads offline and ends the outage, so the wait's first
+// tick reads online: the loop provably waited, for one poll. A loop that
+// never notices the outage never ends it, so a mutant that charges the
+// failure instead of waiting spends its whole budget inside it however
+// slowly the runner goes; a wall-clock outage had to outlast that budget
+// (two seconds here) on every run.
+type outage struct {
+	offline, noticed atomic.Bool
+}
+
+func (o *outage) open() { o.offline.Store(true) }
+
+func (o *outage) isOnline() bool {
+	if !o.offline.Load() {
+		return true
+	}
+	if o.noticed.Load() {
+		o.offline.Store(false) // read offline once more, by the wait itself
+	}
+	return false
+}
+
+func (o *outage) onActivity(a DownloadActivity) {
+	if a == ActivityReconnecting && o.offline.Load() {
+		o.noticed.Store(true)
+	}
+}
+
 // runOutageVod downloads vodPlaylist from srv. sequential takes the loop's
 // one-segment-at-a-time path (StopOnGap, as a Twitch live capture runs);
 // otherwise the ENDLIST playlist goes to runHlsVodParallel, with maxRetries
 // fetch attempts per segment.
-func runOutageVod(t *testing.T, srv *httptest.Server, offline *atomic.Bool, sequential bool, maxRetries int) (string, []DownloadGap, error) {
+func runOutageVod(t *testing.T, srv *httptest.Server, o *outage, sequential bool, maxRetries int) (string, []DownloadGap, error) {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "video.ts")
 	d := NewSegmentDownloader(DownloaderOptions{
@@ -31,9 +62,15 @@ func runOutageVod(t *testing.T, srv *httptest.Server, offline *atomic.Bool, sequ
 		IsHls:      true,
 		StopOnGap:  sequential,
 		MaxRetries: maxRetries,
-		IsOnline:   func() bool { return !offline.Load() },
+		IsOnline:   o.isOnline,
 	})
 	d.delays = fastDelays()
+	// Neither the connectivity poll nor the stuck-segment pause is what
+	// these tests measure — the outage ends on the loop's own notice and the
+	// stuck budget is a count — so both shrink to 10 ms.
+	d.delays.connectivityPoll = 10 * time.Millisecond
+	d.delays.hlsStuckRetry = 10 * time.Millisecond
+	d.OnActivity = o.onActivity
 	var mu sync.Mutex
 	var gaps []DownloadGap
 	d.OnGap = func(g DownloadGap) {
@@ -68,10 +105,10 @@ func echoSegment(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "[%s]", strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), ".ts"))
 }
 
-// seg1FailsOffline serves vodPlaylist with seg1's first request opening a
-// two-second outage, during which seg1 fails. The playlist stays reachable,
-// so only a segment-failure branch can notice the outage.
-func seg1FailsOffline(t *testing.T, offline *atomic.Bool) *httptest.Server {
+// seg1FailsOffline serves vodPlaylist with seg1's first request opening an
+// outage, during which seg1 fails. The playlist stays reachable, so only a
+// segment-failure branch can notice the outage — and only that notice ends it.
+func seg1FailsOffline(t *testing.T, o *outage) *httptest.Server {
 	var tripped atomic.Bool
 	mux := http.NewServeMux()
 	mux.HandleFunc("/vod.m3u8", func(w http.ResponseWriter, _ *http.Request) {
@@ -79,12 +116,9 @@ func seg1FailsOffline(t *testing.T, offline *atomic.Bool) *httptest.Server {
 	})
 	mux.HandleFunc("/seg1.ts", func(w http.ResponseWriter, r *http.Request) {
 		if tripped.CompareAndSwap(false, true) {
-			offline.Store(true)
-			// Long enough for the old code to spend the whole stuck budget
-			// (MaxSegmentRetries rounds of about a tenth of a second each).
-			time.AfterFunc(2*time.Second, func() { offline.Store(false) })
+			o.open()
 		}
-		if offline.Load() {
+		if o.offline.Load() {
 			http.Error(w, "unreachable", http.StatusServiceUnavailable)
 			return
 		}
@@ -104,9 +138,9 @@ func seg1FailsOffline(t *testing.T, offline *atomic.Bool) *httptest.Server {
 // Mutant: the IsOnline check in the segment-failure branch removed — the
 // part ends with ErrGapDetected at seg1.
 func TestAnOfflineSegmentFailureWaitsForConnectivity(t *testing.T) {
-	var offline atomic.Bool
-	srv := seg1FailsOffline(t, &offline)
-	data, gaps, err := runOutageVod(t, srv, &offline, true, 0)
+	var o outage
+	srv := seg1FailsOffline(t, &o)
+	data, gaps, err := runOutageVod(t, srv, &o, true, 0)
 	checkWholeVod(t, data, gaps, err)
 }
 
@@ -118,9 +152,9 @@ func TestAnOfflineSegmentFailureWaitsForConnectivity(t *testing.T) {
 //
 // Mutant: the IsOnline wait in fetchSegmentWithRetry removed — seg1 is a gap.
 func TestAVodSegmentFailingOfflineIsNotAGap(t *testing.T) {
-	var offline atomic.Bool
-	srv := seg1FailsOffline(t, &offline)
-	data, gaps, err := runOutageVod(t, srv, &offline, false, 1)
+	var o outage
+	srv := seg1FailsOffline(t, &o)
+	data, gaps, err := runOutageVod(t, srv, &o, false, 1)
 	checkWholeVod(t, data, gaps, err)
 }
 
@@ -132,14 +166,13 @@ func TestAVodSegmentFailingOfflineIsNotAGap(t *testing.T) {
 //
 // Mutant: the stuck count kept across hlsOutages — ErrGapDetected at seg1.
 func TestTheStuckSegmentCountRestartsAfterAnOutage(t *testing.T) {
-	var offline atomic.Bool
+	var o outage
 	var seg1Requests atomic.Int32
 	var outageDone atomic.Bool
 	mux := http.NewServeMux()
 	mux.HandleFunc("/vod.m3u8", func(w http.ResponseWriter, _ *http.Request) {
 		if seg1Requests.Load() == MaxSegmentRetries-1 && outageDone.CompareAndSwap(false, true) {
-			offline.Store(true)
-			time.AfterFunc(300*time.Millisecond, func() { offline.Store(false) })
+			o.open()
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -158,7 +191,7 @@ func TestTheStuckSegmentCountRestartsAfterAnOutage(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	data, gaps, err := runOutageVod(t, srv, &offline, true, 0)
+	data, gaps, err := runOutageVod(t, srv, &o, true, 0)
 	if !outageDone.Load() {
 		t.Fatal("the outage never happened — the test did not exercise the restart")
 	}
