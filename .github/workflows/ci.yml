@@ -24,6 +24,12 @@ name: CI
 #     (bgutil-sidecar's `npm test` and `node --test` in web/tests after its
 #     own `npm ci`, so jsdom is present)
 #
+# Network steps are bounded: every installer and download runs through
+# .github/scripts/retry.sh (a time limit per attempt, three attempts) inside
+# a step timeout. apt gives up only on total silence, so a mirror that
+# trickled bytes once hung the ubuntu leg for 22 minutes; a proxy that reset
+# one HTTP/2 stream once failed `go mod tidy` on the windows leg.
+#
 # staticcheck is a hard gate, pinned to a release rather than @latest:
 # staticcheck lags Go releases, and an unpinned install can refuse to build
 # against a new toolchain the morning go.mod moves to it.
@@ -47,6 +53,11 @@ concurrency:
 defaults:
   run:
     shell: bash
+
+env:
+  # A cache download that stalls is abandoned after this many minutes and
+  # the job carries on as on a miss (actions/cache's own default is 10).
+  SEGMENT_DOWNLOAD_TIMEOUT_MINS: '3'
 
 jobs:
   test:
@@ -96,25 +107,49 @@ jobs:
         # Unconditional: every Go step below embeds this tarball, so it is
         # built from the commit under test, never restored.
         working-directory: bgutil-sidecar
+        timeout-minutes: 10
         run: |
-          npm ci --no-audit --no-fund --ignore-scripts
+          bash ../.github/scripts/retry.sh 3 300 npm ci --no-audit --no-fund --ignore-scripts
           node build.mjs
 
       - name: Fetch embedded Node binaries (all platforms)
         if: steps.cache-node.outputs.cache-hit != 'true'
-        run: go run ./tools/fetch-node
+        timeout-minutes: 10
+        run: bash .github/scripts/retry.sh 3 300 go run ./tools/fetch-node
+
+      - name: Download Go modules and staticcheck
+        # Everything the later steps fetch, fetched here where a failure is
+        # retried. Beyond the build list, `go mod tidy` reads the modules the
+        # tests of dependencies import; tidying a scratch copy of go.mod and
+        # go.sum (-modfile) downloads exactly those and leaves the real files
+        # alone, so the tidy check needs no network and a genuine tidy diff
+        # is never retried.
+        timeout-minutes: 10
+        run: |
+          bash .github/scripts/retry.sh 3 300 go mod download
+          mkdir -p "$RUNNER_TEMP/tidy"
+          cp go.mod go.sum "$RUNNER_TEMP/tidy/"
+          bash .github/scripts/retry.sh 3 300 go mod tidy -modfile="$RUNNER_TEMP/tidy/go.mod"
+          bash .github/scripts/retry.sh 3 300 go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
 
       - name: Install FFmpeg (ubuntu)
+        # Every network command is bounded and retried, since apt's own
+        # timeout fires only on total silence. The packages are downloaded
+        # first and then installed with --no-download, so the part that
+        # cannot be cut off half-way never waits on a mirror.
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
+          bash .github/scripts/retry.sh 3 90 sudo apt-get update -q
+          bash .github/scripts/retry.sh 3 90 sudo apt-get install -y -q --download-only ffmpeg
+          sudo apt-get install -y -q --no-download ffmpeg
           ffmpeg -version | head -1
 
       - name: Install FFmpeg (windows)
         if: runner.os == 'Windows'
+        timeout-minutes: 10
         run: |
-          choco install ffmpeg -y --no-progress
+          bash .github/scripts/retry.sh 3 0 choco install ffmpeg -y --no-progress
           ffmpeg -version | head -1
 
       - name: gofmt
@@ -166,9 +201,7 @@ jobs:
           echo "Dockerfile Go version OK: $got"
 
       - name: staticcheck
-        run: |
-          go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
-          staticcheck ./...
+        run: staticcheck ./...
 
       - name: go build
         run: go build ./...
@@ -223,6 +256,7 @@ jobs:
       - name: Frontend test suite
         if: runner.os == 'Linux'
         working-directory: web/tests
+        timeout-minutes: 10
         run: |
-          npm ci --no-audit --no-fund --ignore-scripts
+          bash ../../.github/scripts/retry.sh 3 300 npm ci --no-audit --no-fund --ignore-scripts
           node --test ./*.test.mjs
