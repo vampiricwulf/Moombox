@@ -44,7 +44,10 @@ import (
 // here may key off a wall-clock duration: the "still stalling" checks wait
 // for the loop to REACH ActivityWaitingResume (awaitActivity) and the
 // bounded time.After arms are safety nets a working loop never reaches, not
-// measurements.
+// measurements. They sit at 30 s, not a few seconds: each window also holds
+// runDashLoop's deferred resume save (two fsyncs and a rename), which costs
+// milliseconds here and seconds on a loaded Windows runner, and a green run
+// never waits on them.
 
 // TestBackstopStallsWhileMayResume drives handleHTTPError's MaxTimeout
 // backstop (segments beyond head permanently 500) with MayResume() latched
@@ -100,8 +103,8 @@ func TestBackstopStallsWhileMayResume(t *testing.T) {
 	// after the loop slept a full interruptionStallRetry and asked MayResume
 	// again, so this proves the stall HELD a cycle — not merely that the arm
 	// was reached an instant before a finalize.
-	awaitActivity(t, act, ActivityWaitingResume, 5*time.Second)
-	awaitActivity(t, act, ActivityWaitingResume, 5*time.Second)
+	awaitActivity(t, act, ActivityWaitingResume, safetyNet)
+	awaitActivity(t, act, ActivityWaitingResume, safetyNet)
 	select {
 	case err := <-done:
 		t.Fatalf("Start returned (err=%v) while MayResume was still true -- the stall did not hold", err)
@@ -118,7 +121,7 @@ func TestBackstopStallsWhileMayResume(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start = %v, want nil after MayResume flipped false", err)
 		}
-	case <-time.After(5 * time.Second): // safety net, orders of magnitude past one cycle
+	case <-time.After(safetyNet): // safety net, orders of magnitude past one cycle
 		t.Fatal("Start did not return promptly after MayResume flipped false")
 	}
 
@@ -194,7 +197,7 @@ func TestBackstopCeilingExpires(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start = %v, want nil (ceiling-forced finalize)", err)
 		}
-	case <-time.After(5 * time.Second): // safety net, far past the scaled ceiling
+	case <-time.After(safetyNet): // safety net, far past the scaled ceiling
 		t.Fatal("Start did not return once the InterruptionTimeout ceiling expired -- stall is unbounded")
 	}
 	elapsed := time.Since(start)
@@ -255,7 +258,7 @@ func TestNilMayResumeByteCompat(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start = %v, want nil", err)
 		}
-	case <-time.After(5 * time.Second): // safety net, far past the scaled MaxTimeout
+	case <-time.After(safetyNet): // safety net, far past the scaled MaxTimeout
 		t.Fatal("Start did not return -- nil MayResume must behave exactly like pre-feature code (bounded finalize at MaxTimeout), not stall indefinitely")
 	}
 	elapsed := time.Since(start)
@@ -279,7 +282,8 @@ func TestNilMayResumeByteCompat(t *testing.T) {
 // InterruptionTimeout is unset/0, i.e. no ceiling) Start would never
 // return, caught by the bounded safety-net wait; the explicit mayResumeCalls
 // assertion catches the same regression even if some other unbounded
-// ceiling accidentally masked the hang.
+// ceiling accidentally masked the hang. No wall-clock bound: the counters
+// are the proof, and a bound over Start also timed its deferred resume save.
 func TestConfirmedEndedIgnoresMayResume(t *testing.T) {
 	t.Parallel()
 	const head = 2
@@ -305,8 +309,8 @@ func TestConfirmedEndedIgnoresMayResume(t *testing.T) {
 		mayResumeCalls.Add(1)
 		return true // must be ignored once the end is confirmed
 	}
+	act := activityRecorder(d)
 
-	start := time.Now()
 	done := make(chan error, 1)
 	go func() { done <- d.Start(t.Context()) }()
 
@@ -315,12 +319,12 @@ func TestConfirmedEndedIgnoresMayResume(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start = %v, want nil", err)
 		}
-	case <-time.After(5 * time.Second): // safety net
+	case <-time.After(safetyNet): // safety net
 		t.Fatal("Start did not return -- a confirmed-ended verdict must bypass MayResume/the stall entirely, not wait on it")
 	}
 
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("finalized after %v -- slower than the goneRetryDuringDownload escalation (10 x singleGoneRetry) should allow", elapsed)
+	if n := countActivity(act, ActivityWaitingResume); n != 0 {
+		t.Errorf("ActivityWaitingResume emitted %d times, want 0 -- a confirmed end must not stall", n)
 	}
 	if mayResumeCalls.Load() != 0 {
 		t.Errorf("MayResume consulted %d times, want 0 -- confirmed end must bypass stallForPossibleResume entirely", mayResumeCalls.Load())
@@ -397,8 +401,8 @@ func TestGoneErrorStallReachedViaStatusCheckError(t *testing.T) {
 	// after the loop slept a full interruptionStallRetry and asked MayResume
 	// again, so this proves the stall HELD a cycle — not merely that the arm
 	// was reached an instant before a finalize.
-	awaitActivity(t, act, ActivityWaitingResume, 5*time.Second)
-	awaitActivity(t, act, ActivityWaitingResume, 5*time.Second)
+	awaitActivity(t, act, ActivityWaitingResume, safetyNet)
+	awaitActivity(t, act, ActivityWaitingResume, safetyNet)
 	select {
 	case err := <-done:
 		t.Fatalf("Start returned (err=%v) while MayResume was still true -- the stall did not hold", err)
@@ -414,7 +418,7 @@ func TestGoneErrorStallReachedViaStatusCheckError(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start = %v, want nil after MayResume flipped false", err)
 		}
-	case <-time.After(5 * time.Second): // safety net, orders of magnitude past one cycle
+	case <-time.After(safetyNet): // safety net, orders of magnitude past one cycle
 		t.Fatal("Start did not return promptly after MayResume flipped false")
 	}
 
@@ -530,8 +534,12 @@ func TestStallForPossibleResumeNoStallSentinel(t *testing.T) {
 // first reaches stallForPossibleResume -- no interruptionStallRetry sleep,
 // no ceiling. A regression back to treating InterruptionNoStall as an
 // ordinary ceiling (or as 0/unbounded) would either add a further
-// interruptionStallRetry cycle or hang outright, either of which this
-// test's tight elapsed bound catches.
+// interruptionStallRetry cycle or hang outright. Both are counted, not
+// timed: one stall cycle emits ActivityWaitingResume and asks MayResume a
+// second time, and a hang is caught by the safety net. An elapsed bound used
+// to stand in for the first, but one cycle costs 250 ms against it, and the
+// window it timed also held the deferred resume save's fsyncs and rename,
+// which a loaded Windows runner stretched past it.
 func TestInterruptionNoStallPromptFinalize(t *testing.T) {
 	t.Parallel()
 	const head = 2
@@ -561,8 +569,8 @@ func TestInterruptionNoStallPromptFinalize(t *testing.T) {
 		mayResumeCalls.Add(1)
 		return true // evidence holds throughout -- must still never stall
 	}
+	act := activityRecorder(d)
 
-	start := time.Now()
 	done := make(chan error, 1)
 	go func() { done <- d.Start(t.Context()) }()
 
@@ -571,21 +579,14 @@ func TestInterruptionNoStallPromptFinalize(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start = %v, want nil", err)
 		}
-	case <-time.After(5 * time.Second): // safety net
+	case <-time.After(safetyNet): // safety net
 		t.Fatal("Start did not return -- InterruptionNoStall must never stall, even with MayResume permanently true")
 	}
-	elapsed := time.Since(start)
 
-	// The goneRetryDuringDownload escalation to reach the budget-expired
-	// block is an unavoidable floor shared with every sibling test in this
-	// file; this bound catches the ABSENCE of any further delay on top of
-	// it -- a real stall would add at least one interruptionStallRetry
-	// cycle (which roughly doubles the elapsed time at either scale) and,
-	// since MayResume never flips, would then repeat forever. The exact
-	// "not even one cycle" proof is the mayResumeCalls == 1 assertion
-	// below, which needs no clock at all.
-	if elapsed > 2*time.Second {
-		t.Errorf("finalized after %v -- InterruptionNoStall must skip the stall entirely (no interruptionStallRetry cycle on top of the goneRetryDuringDownload escalation floor)", elapsed)
+	// "Not even one cycle": a stall would emit ActivityWaitingResume and,
+	// after its interruptionStallRetry sleep, ask MayResume again.
+	if n := countActivity(act, ActivityWaitingResume); n != 0 {
+		t.Errorf("ActivityWaitingResume emitted %d times, want 0 -- InterruptionNoStall must skip the stall entirely", n)
 	}
 	if !d.FinalizedDuringInterruption() {
 		t.Error("FinalizedDuringInterruption() = false, want true (evidence held on the one consult)")
@@ -610,7 +611,8 @@ func TestInterruptionNoStallPromptFinalize(t *testing.T) {
 // false (config-0 job whose downloader nonetheless qualifies for
 // attachMayResume, but the resume signal never fires). Must finalize just
 // as promptly, WITHOUT latching finalizedDuringInterruption -- a clean
-// finish, not a preserved one.
+// finish, not a preserved one. "Promptly" is counted, not timed, as in the
+// sibling: no ActivityWaitingResume, and MayResume asked exactly once.
 func TestInterruptionNoStallNoEvidenceFinalizesNormally(t *testing.T) {
 	t.Parallel()
 	const head = 2
@@ -635,9 +637,13 @@ func TestInterruptionNoStallNoEvidenceFinalizesNormally(t *testing.T) {
 		},
 	})
 	d.delays = fastDelays()
-	d.MayResume = func() bool { return false }
+	var mayResumeCalls atomic.Int64
+	d.MayResume = func() bool {
+		mayResumeCalls.Add(1)
+		return false
+	}
+	act := activityRecorder(d)
 
-	start := time.Now()
 	done := make(chan error, 1)
 	go func() { done <- d.Start(t.Context()) }()
 
@@ -646,11 +652,14 @@ func TestInterruptionNoStallNoEvidenceFinalizesNormally(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start = %v, want nil", err)
 		}
-	case <-time.After(5 * time.Second): // safety net
+	case <-time.After(safetyNet): // safety net
 		t.Fatal("Start did not return")
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("finalized after %v, want promptly (same bound as the evidence-true sibling test)", elapsed)
+	if n := countActivity(act, ActivityWaitingResume); n != 0 {
+		t.Errorf("ActivityWaitingResume emitted %d times, want 0 -- InterruptionNoStall must not stall", n)
+	}
+	if n := mayResumeCalls.Load(); n != 1 {
+		t.Errorf("MayResume consulted %d times, want exactly 1", n)
 	}
 	if d.FinalizedDuringInterruption() {
 		t.Error("FinalizedDuringInterruption() = true, want false -- no evidence must not latch")

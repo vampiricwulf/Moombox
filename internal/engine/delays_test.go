@@ -147,6 +147,30 @@ func awaitActivity(t *testing.T, ch <-chan DownloadActivity, want DownloadActivi
 	}
 }
 
+// countActivity drains ch without blocking and reports how many times want
+// was seen. Valid only once the loop has returned: emitActivity sends
+// synchronously into activityRecorder's buffer, so everything the loop
+// emitted is already there and nothing more can arrive.
+func countActivity(ch <-chan DownloadActivity, want DownloadActivity) int {
+	n := 0
+	for {
+		select {
+		case a := <-ch:
+			if a == want {
+				n++
+			}
+		default:
+			return n
+		}
+	}
+}
+
+// safetyNet bounds a wait a working loop never reaches: it only turns a hang
+// into a failure. It is generous because the windows it covers hold durable
+// I/O (resume saves: fsyncs and a rename) that a loaded Windows runner can
+// stretch to seconds, and a green run never pays for it.
+const safetyNet = 30 * time.Second
+
 func TestFastDelaysKeepRatios(t *testing.T) {
 	f, p := fastDelays(), defaultDelays()
 	if f.interruptionStallRetry/f.singleGoneRetry != p.interruptionStallRetry/p.singleGoneRetry {
