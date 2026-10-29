@@ -28,16 +28,18 @@ permissions:
 
 # Three jobs:
 #
-#   test     ci.yml: the full suite on ubuntu and windows for the tagged
-#            commit, run beside the other two and reported in this run.
-#            Nothing waits for it, so a red test job marks the run failed
-#            and the release still publishes. It used to gate both (added
+#   test     ci.yml for the tagged commit — lint, the node suites, and the
+#            Go suite's linux, race and windows shards, all in parallel —
+#            run beside the other two and reported in this run. Nothing
+#            waits for it, so a red test job marks the run failed and the
+#            release still publishes. It used to gate both (added
 #            after v2.8.9 was published while CI on the same commit was red),
 #            until v2.9.6's first two tag runs were held by failures that
 #            were not the code's: a test race the race detector's slower
 #            scheduling exposed, then a Windows runner out of memory before
 #            `go vet` could start. Its result is still here for every
-#            release; "Re-run failed jobs" on the same tag re-runs it alone.
+#            release; "Re-run failed jobs" on the same tag re-runs only the
+#            jobs of it that failed.
 #   release  the binaries (below).
 #   docker   docker-publish.yml, called after release: the multi-arch
 #            image, pushed only for a tag push. It waits for release so a

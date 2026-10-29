@@ -6,29 +6,55 @@ name: CI
 # rather than ahead of it — the result is reported in the release's run, and
 # a red suite does not hold the release back.
 #
-# Shape:
-#   - matrix over ubuntu-latest + windows-latest (the Windows-only code —
-#     DPAPI cookie reading, Job Objects, cookie profile paths — has tests
-#     that skip everywhere else)
-#   - a cache for the three pinned Node binaries only (~1 min of nodejs.org
-#     downloads on a miss). The sidecar tarball is rebuilt on every run and
-#     never cached: it is seconds of work, and a cached one made the Go
-#     tests embed the PREVIOUS sidecar JS whenever a commit touched only
-#     bgutil-sidecar/src or vendor/ejs, which the old key did not hash
-#   - FFmpeg installed so muxer_concatcopy_test.go and probe_params_test.go
-#     stop skipping
-#   - gofmt / `go mod tidy -diff` / vet / the modernc.org/libc pin check /
-#     the Dockerfile Go-version check / staticcheck / build / full
-#     `go test`; ubuntu also runs `go test -race` over the whole module,
-#     cross-builds linux/arm64, and runs both node suites
-#     (bgutil-sidecar's `npm test` and `node --test` in web/tests after its
-#     own `npm ci`, so jsdom is present)
+# Shape: independent jobs that all start at once, so a run takes as long as
+# its slowest job rather than the sum of every step (it used to be one
+# serial job per OS: ~13 minutes on ubuntu, ~8 on windows).
 #
-# Network steps are bounded: every installer and download runs through
+#   lint   every gate that only compiles: gofmt / `go mod tidy -diff` /
+#          go vet for linux/amd64, windows/amd64 and linux/arm64 / the
+#          modernc.org/libc pin check / the Dockerfile Go-version check /
+#          staticcheck for linux and windows / go build and the
+#          windows/amd64 and linux/arm64 cross-builds / the test-shard
+#          check. Compiling needs no real embed blobs, so empty files stand
+#          in for them (as in vuln-scan.yml): no Node download, no sidecar
+#          build, no FFmpeg.
+#   js     bgutil-sidecar's `npm test` and the frontend suite (`node --test`
+#          in web/tests after its own `npm ci`, so jsdom is present). No Go.
+#   test   the Go suite, `go test -count=1`, in three flavours, each split
+#          by package into shards that run side by side:
+#            linux    go test on ubuntu
+#            race     go test -race on ubuntu, over the whole module
+#            windows  go test on windows (the Windows-only code — DPAPI
+#                     cookie reading, Job Objects, cookie profile paths —
+#                     has tests that skip everywhere else)
+#          .github/scripts/test-shard.sh says which packages each shard
+#          runs. Every flavour has a catch-all shard, rest, so a new package
+#          always runs somewhere, and lint proves the shards cover
+#          `go list ./...` exactly once. Every shard installs FFmpeg, so
+#          muxer_concatcopy_test.go and probe_params_test.go run instead of
+#          skipping, and builds the sidecar payload from the commit under
+#          test.
+#
+# Caches. Each flavour (lint, linux, race, windows) keeps its own Go cache —
+# GOCACHE plus the module zips — keyed by flavour, Go version and go.sum.
+# setup-go's own cache (off here) has one key per runner OS: whichever job
+# saved first would decide what every job on that OS restores (lint's build
+# holds no race-instrumented package, a race shard's no plain one), and the
+# others would race to save the same entry. One job per flavour
+# saves it (lint itself, and each flavour's rest shard), only on a push to
+# main — the one branch whose caches every later run can read — and only
+# when its key missed. The three pinned Node binaries are cached per OS
+# (~1 min of nodejs.org downloads on a miss). The sidecar tarball is rebuilt
+# on every run and never cached: it is seconds of work, and a cached one made
+# the Go tests embed the PREVIOUS sidecar JS whenever a commit touched only
+# bgutil-sidecar/src or vendor/ejs, which the old key did not hash.
+#
+# Network steps are bounded. Every installer and download runs through
 # .github/scripts/retry.sh (a time limit per attempt, three attempts) inside
-# a step timeout. apt gives up only on total silence, so a mirror that
-# trickled bytes once hung the ubuntu leg for 22 minutes; a proxy that reset
-# one HTTP/2 stream once failed `go mod tidy` on the windows leg.
+# a step timeout, and every job has a timeout of its own: apt gives up only
+# on total silence, so a mirror that trickled bytes once hung a run for 22
+# minutes, and a proxy that reset one HTTP/2 stream once failed
+# `go mod tidy`.
 #
 # staticcheck is a hard gate, pinned to a release rather than @latest:
 # staticcheck lags Go releases, and an unpinned install can refuse to build
@@ -39,6 +65,7 @@ on:
     branches: [main]
   pull_request:
   workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -60,62 +87,58 @@ env:
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: '3'
 
 jobs:
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
-      - name: Restore embedded Node binary cache
-        # The Node binaries ONLY — sidecar.tar.gz must never be added to this
-        # path list (see the header). Their whole input is the pin: version.txt
-        # plus the fetch tool that carries the SHA-256s and the download logic.
-        # runner.os is in the key because an archive saved on one runner OS is
-        # not restored on the other.
-        id: cache-node
-        uses: actions/cache@v6
-        with:
-          path: |
-            internal/bgutils/embed/node-windows-amd64.gz
-            internal/bgutils/embed/node-linux-amd64.gz
-            internal/bgutils/embed/node-linux-arm64.gz
-          key: embed-node-${{ runner.os }}-${{ hashFiles('internal/bgutils/embed/version.txt', 'tools/fetch-node/main.go') }}
+      - name: Stand in for the embed blobs
+        # vet, staticcheck and the builds load every package, and a package
+        # does not load without the files its go:embed directives name. They
+        # read code, never the embedded bytes, so an empty file replaces each
+        # named file the checkout lacks: the sidecar tarball and the three
+        # Node binaries, found from the directives rather than listed here,
+        # so a blob added for another platform is covered too.
+        run: |
+          git grep -l -e '^//go:embed ' -- '*.go' | while read -r file; do
+            dir=$(dirname "$file")
+            sed -n 's|^//go:embed ||p' "$file" | tr ' ' '\n' | while read -r name; do
+              case $name in '' | *[*?[]*) continue ;; esac
+              if [ ! -e "$dir/$name" ]; then
+                : > "$dir/$name"
+                echo "empty stand-in: $dir/$name"
+              fi
+            done
+          done
 
       - uses: actions/setup-go@v7
+        id: setup-go
         with:
           go-version-file: go.mod
+          cache: false
 
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          # Both npm projects in the repo: the sidecar payload, whose `npm ci`
-          # runs on every run, and web/tests' node suite, whose `npm ci` runs
-          # on every Linux run.
-          cache: npm
-          cache-dependency-path: |
-            bgutil-sidecar/package-lock.json
-            web/tests/package-lock.json
-
-      - name: Build BotGuard sidecar payload
-        # --ignore-scripts: a compromised dep's postinstall could exfiltrate
-        # GITHUB_TOKEN; jsdom + bgutils-js have no install scripts we need.
-        # Unconditional: every Go step below embeds this tarball, so it is
-        # built from the commit under test, never restored.
-        working-directory: bgutil-sidecar
-        timeout-minutes: 10
+      - name: Locate the Go caches
+        id: cache-dirs
         run: |
-          bash ../.github/scripts/retry.sh 3 300 npm ci --no-audit --no-fund --ignore-scripts
-          node build.mjs
+          {
+            echo "gocache=$(go env GOCACHE)"
+            echo "gomodcache=$(go env GOMODCACHE)"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Fetch embedded Node binaries (all platforms)
-        if: steps.cache-node.outputs.cache-hit != 'true'
-        timeout-minutes: 10
-        run: bash .github/scripts/retry.sh 3 300 go run ./tools/fetch-node
+      - name: Restore the Go caches (lint)
+        id: go-cache
+        uses: actions/cache/restore@v6
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: |
+            ${{ steps.cache-dirs.outputs.gocache }}
+            ${{ steps.cache-dirs.outputs.gomodcache }}/cache/download
+            ~/.cache/staticcheck
+          key: go-lint-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-lint-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-
 
       - name: Download Go modules and staticcheck
         # Everything the later steps fetch, fetched here where a failure is
@@ -132,26 +155,6 @@ jobs:
           bash .github/scripts/retry.sh 3 300 go mod tidy -modfile="$RUNNER_TEMP/tidy/go.mod"
           bash .github/scripts/retry.sh 3 300 go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
 
-      - name: Install FFmpeg (ubuntu)
-        # Every network command is bounded and retried, since apt's own
-        # timeout fires only on total silence. The packages are downloaded
-        # first and then installed with --no-download, so the part that
-        # cannot be cut off half-way never waits on a mirror.
-        if: runner.os == 'Linux'
-        timeout-minutes: 10
-        run: |
-          bash .github/scripts/retry.sh 3 90 sudo apt-get update -q
-          bash .github/scripts/retry.sh 3 90 sudo apt-get install -y -q --download-only ffmpeg
-          sudo apt-get install -y -q --no-download ffmpeg
-          ffmpeg -version | head -1
-
-      - name: Install FFmpeg (windows)
-        if: runner.os == 'Windows'
-        timeout-minutes: 10
-        run: |
-          bash .github/scripts/retry.sh 3 0 choco install ffmpeg -y --no-progress
-          ffmpeg -version | head -1
-
       - name: gofmt
         run: |
           out="$(gofmt -l ./cmd ./internal ./tools ./web)"
@@ -165,7 +168,19 @@ jobs:
         # file with no content change.
         run: go mod tidy -diff
 
-      - name: go vet
+      - name: go vet (linux/amd64)
+        run: go vet ./...
+
+      - name: go vet (windows/amd64)
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: go vet ./...
+
+      - name: go vet (linux/arm64)
+        env:
+          GOOS: linux
+          GOARCH: arm64
         run: go vet ./...
 
       - name: modernc.org/libc pin matches the sqlite driver
@@ -200,63 +215,285 @@ jobs:
           fi
           echo "Dockerfile Go version OK: $got"
 
-      - name: staticcheck
+      - name: staticcheck (linux/amd64)
+        run: staticcheck ./...
+
+      - name: staticcheck (windows/amd64)
+        env:
+          GOOS: windows
+          GOARCH: amd64
         run: staticcheck ./...
 
       - name: go build
         run: go build ./...
 
-      - name: go test
-        run: go test -count=1 ./...
-
-      - name: go test -race
-        # The whole module, Linux only — the Windows leg is unchanged. Owner
-        # ruling O-P started this step on three cheap packages (logger,
-        # database, web) because internal/logger's lock-hierarchy comment, and
-        # the "run under -race" instructions in nine other test files, had
-        # never been checked by anything. Three packages left the goroutine-
-        # heavy ones — the engine, the worker, the cookie service, the
-        # sidecar supervisor, the TUI — checked only when someone remembered
-        # to; the module was race-clean when the step widened (2026-10-09), so
-        # the gate starts green. A test that budgets allocations or fits its
-        # probe inside one wall-clock second either widens its gate or skips
-        # under the race build (each such package's raceEnabled constant):
-        # the detector's instrumentation is not the code it budgets, and the
-        # plain `go test` step above still runs it on both legs.
-        #
-        # Its own timeout, under the job's 45: the whole-module race run is
-        # the step most likely to hang if a test deadlocks only under the
-        # detector's scheduling, and go test's per-package 10-minute default
-        # then dumps every goroutine before this limit cuts the log off.
-        if: runner.os == 'Linux'
-        timeout-minutes: 20
-        run: go test -count=1 -race ./...
+      # go build of several packages links each main package (cmd/moombox
+      # among them) and discards the result, so one command covers both
+      # the libraries and the binary.
+      - name: Cross-build windows/amd64
+        env:
+          CGO_ENABLED: '0'
+          GOOS: windows
+          GOARCH: amd64
+        run: go build ./...
 
       - name: Cross-build linux/arm64
-        if: runner.os == 'Linux'
         env:
           CGO_ENABLED: '0'
           GOOS: linux
           GOARCH: arm64
-        run: go build -o /dev/null ./cmd/moombox
+        run: go build ./...
+
+      - name: Test shards cover every package exactly once
+        # The test job's matrix and test-shard.sh's layout must agree, and
+        # each flavour's shards must be `go list ./...` for that flavour's
+        # GOOS, with no package missing and none twice.
+        run: bash .github/scripts/test-shard.sh --check
+
+      - name: Save the Go caches (lint)
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: |
+            ${{ steps.cache-dirs.outputs.gocache }}
+            ${{ steps.cache-dirs.outputs.gomodcache }}/cache/download
+            ~/.cache/staticcheck
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
+  js:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            bgutil-sidecar/package-lock.json
+            web/tests/package-lock.json
+
+      - name: Build the sidecar for its tests
+        # The sidecar suite needs node_modules (devDependencies included) and
+        # vendor/ejs.bundle.js (esbuild's output, imported by src/cipher.js,
+        # which the tests import transitively via src/server.js). build.mjs
+        # writes the bundle and restores the devDependencies it pruned for
+        # the tarball. --ignore-scripts: a compromised dep's postinstall
+        # could exfiltrate GITHUB_TOKEN; jsdom + bgutils-js have no install
+        # scripts we need.
+        working-directory: bgutil-sidecar
+        timeout-minutes: 10
+        run: |
+          bash ../.github/scripts/retry.sh 3 300 npm ci --no-audit --no-fund --ignore-scripts
+          node build.mjs
 
       - name: Sidecar test suite
         # bgutil-sidecar's wired `npm test` covers the homepage-ytcfg
         # extraction and minter keying — the logic behind the open
-        # premiere-attestation field gate — and until now no workflow ran it.
-        # It needs node_modules (devDependencies included) and
-        # vendor/ejs.bundle.js (esbuild's output, imported by src/cipher.js,
-        # which the tests import transitively via src/server.js). The sidecar
-        # build step above leaves both in place on every run: build.mjs writes
-        # the bundle and restores the devDependencies it pruned for the tarball.
-        if: runner.os == 'Linux'
+        # premiere-attestation field gate.
         working-directory: bgutil-sidecar
+        timeout-minutes: 5
         run: npm test
 
       - name: Frontend test suite
-        if: runner.os == 'Linux'
         working-directory: web/tests
         timeout-minutes: 10
         run: |
           bash ../../.github/scripts/retry.sh 3 300 npm ci --no-audit --no-fund --ignore-scripts
           node --test ./*.test.mjs
+
+  test:
+    name: ${{ matrix.flavour }} (${{ matrix.shard }})
+    runs-on: ${{ matrix.flavour == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # One row per flavour/shard, written exactly as `- { flavour: F,
+        # shard: S }`: test-shard.sh --check (in lint) reads these rows and
+        # fails unless they are the shards the script defines. The longest
+        # shards come first, so they are the first to get a runner.
+        include:
+          - { flavour: windows, shard: worker }
+          - { flavour: race, shard: worker }
+          - { flavour: linux, shard: worker }
+          - { flavour: windows, shard: cookies }
+          - { flavour: windows, shard: engine }
+          - { flavour: windows, shard: web }
+          - { flavour: race, shard: web }
+          - { flavour: race, shard: engine }
+          - { flavour: windows, shard: rest }
+          - { flavour: race, shard: rest }
+          - { flavour: linux, shard: rest }
+    env:
+      FLAVOUR: ${{ matrix.flavour }}
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore embedded Node binary cache
+        # The Node binaries ONLY — sidecar.tar.gz must never be added to this
+        # path list (see the header). Their whole input is the pin: version.txt
+        # plus the fetch tool that carries the SHA-256s and the download logic.
+        # runner.os is in the key because an archive saved on one runner OS is
+        # not restored on the other.
+        id: cache-node
+        uses: actions/cache/restore@v6
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: |
+            internal/bgutils/embed/node-windows-amd64.gz
+            internal/bgutils/embed/node-linux-amd64.gz
+            internal/bgutils/embed/node-linux-arm64.gz
+          key: embed-node-${{ runner.os }}-${{ hashFiles('internal/bgutils/embed/version.txt', 'tools/fetch-node/main.go') }}
+
+      - uses: actions/setup-go@v7
+        id: setup-go
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Locate the caches
+        id: cache-dirs
+        run: |
+          {
+            echo "gocache=$(go env GOCACHE)"
+            echo "gomodcache=$(go env GOMODCACHE)"
+            echo "npm=$(npm config get cache)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Go caches (${{ matrix.flavour }})
+        id: go-cache
+        uses: actions/cache/restore@v6
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: |
+            ${{ steps.cache-dirs.outputs.gocache }}
+            ${{ steps.cache-dirs.outputs.gomodcache }}/cache/download
+          key: go-${{ matrix.flavour }}-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-${{ matrix.flavour }}-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore the npm cache
+        id: npm-cache
+        uses: actions/cache/restore@v6
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: ${{ steps.cache-dirs.outputs.npm }}
+          key: npm-sidecar-${{ runner.os }}-${{ hashFiles('bgutil-sidecar/package-lock.json') }}
+
+      - name: Download Go modules
+        timeout-minutes: 10
+        run: bash .github/scripts/retry.sh 3 300 go mod download
+
+      - name: Build BotGuard sidecar payload
+        # --ignore-scripts: a compromised dep's postinstall could exfiltrate
+        # GITHUB_TOKEN; jsdom + bgutils-js have no install scripts we need.
+        # Unconditional: every Go test embeds this tarball, so it is built
+        # from the commit under test, never restored.
+        working-directory: bgutil-sidecar
+        timeout-minutes: 10
+        run: |
+          bash ../.github/scripts/retry.sh 3 300 npm ci --no-audit --no-fund --ignore-scripts
+          node build.mjs
+
+      - name: Fetch embedded Node binaries (all platforms)
+        id: fetch-node
+        if: steps.cache-node.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        run: bash .github/scripts/retry.sh 3 300 go run ./tools/fetch-node
+
+      - name: Install FFmpeg (ubuntu)
+        # Every network command is bounded and retried, since apt's own
+        # timeout fires only on total silence. The packages are downloaded
+        # first and then installed with --no-download, so the part that
+        # cannot be cut off half-way never waits on a mirror.
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          bash .github/scripts/retry.sh 3 90 sudo apt-get update -q
+          bash .github/scripts/retry.sh 3 90 sudo apt-get install -y -q --download-only ffmpeg
+          sudo apt-get install -y -q --no-download ffmpeg
+          ffmpeg -version | head -1
+
+      - name: Install FFmpeg (windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        run: |
+          bash .github/scripts/retry.sh 3 0 choco install ffmpeg -y --no-progress
+          ffmpeg -version | head -1
+
+      - name: go test
+        # -timeout is go test's limit for one test binary: past it, the
+        # binary dumps every goroutine and fails, which is what names a
+        # deadlocked test (one that hangs only under the race detector's
+        # scheduling, say). It is under this step's timeout by more than a
+        # cold compile takes, so the dump always lands before the step is
+        # cut off, and still more than twice the slowest binary's run on
+        # any runner (internal/worker on windows, 205 s at worst). Under
+        # -race, a test that budgets allocations or fits its probe inside
+        # one wall-clock second either widens its gate or skips (each such
+        # package's raceEnabled constant): the detector's instrumentation is
+        # not the code it budgets, and the linux flavour still runs it.
+        timeout-minutes: 11
+        run: |
+          pkgs=$(bash .github/scripts/test-shard.sh "$FLAVOUR/$SHARD")
+          echo "::group::$FLAVOUR/$SHARD: $(grep -c . <<<"$pkgs") package(s)"
+          echo "$pkgs"
+          echo "::endgroup::"
+          flags=(-count=1 -timeout=8m)
+          if [ "$FLAVOUR" = race ]; then flags+=(-race); fi
+          # shellcheck disable=SC2086 # one import path per line, no spaces
+          go test "${flags[@]}" $pkgs
+
+      # Each flavour's rest shard saves the Go cache all of its shards
+      # restore. Its own tests compile every third-party package the
+      # flavour's other shards need but a handful of small ones, and the
+      # module's own packages in the cache go stale with the next commit
+      # anyway (the key moves with go.sum, not with the code), so nothing
+      # compiles extra for the cache.
+      - name: Save the Go caches (${{ matrix.flavour }})
+        if: ${{ !cancelled() && matrix.shard == 'rest' && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: |
+            ${{ steps.cache-dirs.outputs.gocache }}
+            ${{ steps.cache-dirs.outputs.gomodcache }}/cache/download
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
+      # The Node binaries and the npm cache are per runner OS, shared by the
+      # flavours there: linux's rest saves them on ubuntu (race only
+      # restores), windows's rest on windows.
+      - name: Save the embedded Node binary cache
+        if: ${{ !cancelled() && matrix.shard == 'rest' && matrix.flavour != 'race' && steps.fetch-node.outcome == 'success' }}
+        uses: actions/cache/save@v6
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: |
+            internal/bgutils/embed/node-windows-amd64.gz
+            internal/bgutils/embed/node-linux-amd64.gz
+            internal/bgutils/embed/node-linux-arm64.gz
+          key: ${{ steps.cache-node.outputs.cache-primary-key }}
+
+      - name: Save the npm cache
+        if: ${{ !cancelled() && matrix.shard == 'rest' && matrix.flavour != 'race' && steps.npm-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: ${{ steps.cache-dirs.outputs.npm }}
+          key: ${{ steps.npm-cache.outputs.cache-primary-key }}
