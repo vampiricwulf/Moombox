@@ -154,6 +154,9 @@ func TestDirectSizeProbeRefreshIsBounded(t *testing.T) {
 //
 // Mutant: dropping `offline = d.awaitOutageVerdict(ctx)` from
 // probeFileSizeWithRetry — the late-monitor row goes to the fallback.
+// Mutant: awaitOutageVerdict asking once instead of polling (`return
+// !d.opts.IsOnline()` ahead of its loop) — the late-monitor row, whose
+// monitor calls it on the verdict wait's second poll, goes there too.
 // Mutant: dropping `d.emitActivity(ActivityReconnecting)` — no Reconnecting
 // activity. Mutant: `status == 0 || status >= 500` → `status == 0` — the
 // gateway row spends its three probes on the 503s and goes to the fallback.
@@ -168,9 +171,10 @@ func TestDirectSizeProbeWaitsOutAnOutage(t *testing.T) {
 		lateAsks int32 // checks the monitor still answers "up" (outage)
 	}{
 		{"the monitor already calls it offline", false, 0},
-		// Each of the three probes asks once and hears "up"; the verdict
-		// wait's first poll after the last hears the call.
-		{"the monitor notices on the last attempt", false, 3},
+		// Each of the three probes asks once and hears "up", and so does
+		// the verdict wait's first poll after the last; its second hears the
+		// call. A verdict that asked once would charge the last probe.
+		{"the monitor notices on the last attempt", false, 4},
 		{"a gateway's 503s while the monitor calls it offline", true, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -547,8 +551,10 @@ func brokenRest(w http.ResponseWriter, r *http.Request, body []byte) {
 // rows fail on their first break. Mutant: returning false for it from the
 // failed request — the no-answer row fails at once. Mutant: dropping the
 // awaitOutageVerdict — the late-monitor row's third failure, inside the
-// outage, ends it. Mutant: dropping the emitActivity(ActivityReconnecting) —
-// no Reconnecting activity.
+// outage, ends it. Mutant: awaitOutageVerdict asking once instead of polling
+// (`return !d.opts.IsOnline()` ahead of its loop) — the same, since that
+// row's monitor calls it on the verdict wait's second poll. Mutant: dropping
+// the emitActivity(ActivityReconnecting) — no Reconnecting activity.
 func TestDirectFallbackWaitsOutAnOutage(t *testing.T) {
 	body := headedBody(DownloadChunkSize+100, 'V')
 	for _, tc := range []struct {
@@ -558,9 +564,10 @@ func TestDirectFallbackWaitsOutAnOutage(t *testing.T) {
 	}{
 		{"no answer, the monitor already calls it offline", true, 0},
 		{"a body that breaks off, the monitor already calls it offline", false, 0},
-		// Each of the three failures asks once and hears "up"; the verdict
-		// wait's first poll after the third hears the call.
-		{"a body that breaks off, the monitor notices late", false, MaxChunkRetries},
+		// Each of the three failures asks once and hears "up", and so does
+		// the verdict wait's first poll after the third; its second hears the
+		// call. A verdict that asked once would count the third failure.
+		{"a body that breaks off, the monitor notices late", false, MaxChunkRetries + 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			link := &outage{lateAsks: tc.lateAsks}
@@ -796,13 +803,14 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 //
 // The cancel lands from inside that wait, not after a sleep: once the last
 // request has been answered, the failure's own IsOnline check is the first
-// ask and the verdict wait's first poll the second, which cancels. A sleep
-// timed to land inside the window instead could overshoot it on a stalled
-// runner, and the run then ended on the broken read — the failure this test
-// exists to rule out.
+// ask, the verdict wait's first poll the second and its second poll the
+// third, which cancels. A sleep timed to land inside the window instead
+// could overshoot it on a stalled runner, and the run then ended on the
+// broken read — the failure this test exists to rule out.
 //
 // Mutant: dropping the cancelErr check before a failure is counted — Start
-// returns the broken read's error.
+// returns the broken read's error. Mutant: awaitOutageVerdict asking once
+// instead of polling — the cancel never lands, and Start returns the same.
 func TestDirectFallbackOutageVerdictHonoursCancel(t *testing.T) {
 	body := headedBody(DownloadChunkSize+100, 'V')
 	var lastFailed atomic.Bool
@@ -823,8 +831,8 @@ func TestDirectFallbackOutageVerdictHonoursCancel(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL: o.URL + "/video.mp4", OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true,
 		IsOnline: func() bool {
-			if lastFailed.Load() && asked.Add(1) == 2 {
-				cancel() // the verdict wait's first poll
+			if lastFailed.Load() && asked.Add(1) == 3 {
+				cancel() // the verdict wait's second poll
 			}
 			return true
 		},
@@ -914,10 +922,12 @@ func TestDirectSizeProbeChargesNeitherARefreshNorAnOutage(t *testing.T) {
 //
 // The cancel lands from inside the verdict wait, as in
 // TestDirectFallbackOutageVerdictHonoursCancel: after the third probe its own
-// IsOnline check is the first ask and the verdict wait's first poll the
-// second.
+// IsOnline check is the first ask, the verdict wait's first poll the second
+// and its second poll the third.
 //
 // Mutant: `return 0, d.cancelErr(ctx)` after the loop → `return 0, nil`.
+// Mutant: awaitOutageVerdict asking once instead of polling — the cancel
+// never lands, and the probe returns 0, nil.
 func TestDirectSizeProbeOutageVerdictHonoursCancel(t *testing.T) {
 	var probes atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -931,8 +941,8 @@ func TestDirectSizeProbeOutageVerdictHonoursCancel(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL: srv.URL + "/video.mp4", OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true,
 		IsOnline: func() bool {
-			if probes.Load() >= 3 && asked.Add(1) == 2 {
-				cancel() // the verdict wait's first poll
+			if probes.Load() >= 3 && asked.Add(1) == 3 {
+				cancel() // the verdict wait's second poll
 			}
 			return true
 		},

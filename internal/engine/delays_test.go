@@ -186,9 +186,12 @@ func awaitActivity(t *testing.T, ch <-chan DownloadActivity, want DownloadActivi
 // own failures are then charged), and every one after reads offline until
 // the loop has waited the outage out. A count, not a delay: the direct path
 // asks once per failure and then polls inside awaitOutageVerdict, so
-// lateAsks = MaxChunkRetries lets each attempt's own check pass and hands the
-// call to the verdict wait's first poll, however fast or slow the runner.
-// Checks before open() are not counted.
+// lateAsks = MaxChunkRetries + 1 lets each attempt's own check and the
+// verdict wait's first poll pass and hands the call to its second poll —
+// a verdict that asked once and gave up charges the last attempt. The one
+// clock left is the verdict's own deadline, which its first poll must find
+// unexpired: microseconds of work against 3 x connectivityPoll. Checks before
+// open() are not counted.
 type outage struct {
 	lateAsks         int32
 	asks             atomic.Int32 // checks made while offline

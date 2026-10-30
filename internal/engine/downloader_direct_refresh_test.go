@@ -230,6 +230,9 @@ func newOutageServer(t *testing.T, body []byte, lateAsks int32) *outageServer {
 // Mutant: `offline := !d.opts.IsOnline()` → `offline := false` — the
 // already-offline row drops three attempts. Mutant: dropping
 // `offline = d.awaitOutageVerdict(ctx)` — the late-monitor row fails after
+// three attempts. Mutant: awaitOutageVerdict asking once instead of
+// polling (`return !d.opts.IsOnline()` ahead of its loop) — the late-monitor
+// row, whose monitor calls it on the verdict wait's second poll, fails after
 // three attempts. Mutant: awaitOutageVerdict's deadline `return false` →
 // `return true` — the online row never gives up. Mutant: `incomplete :=
 // status < 300` → `status == 0` — the mid-body drop fails at once. Mutant:
@@ -244,9 +247,10 @@ func TestDirectChunkWaitsOutAnOutage(t *testing.T) {
 		maxDrops int32
 	}{
 		{"the monitor already calls it offline", 0, "", 1},
-		// Each of the ladder's three attempts asks once and hears "up"; the
-		// verdict wait's first poll hears the call.
-		{"the monitor notices after the ladder ran out", MaxChunkRetries, "", MaxChunkRetries},
+		// Each of the ladder's three attempts asks once and hears "up", and
+		// so does the verdict wait's first poll; its second hears the call.
+		// A verdict that asked once would charge the last attempt.
+		{"the monitor notices after the ladder ran out", MaxChunkRetries + 1, "", MaxChunkRetries},
 		{"a link the monitor calls up gives up", math.MaxInt32, fmt.Sprintf("after %d attempts", MaxChunkRetries), MaxChunkRetries},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -295,11 +299,13 @@ func TestDirectChunkWaitsOutAnOutage(t *testing.T) {
 //
 // The cancel lands from inside the verdict wait, as in
 // TestDirectFallbackOutageVerdictHonoursCancel: after the third dropped
-// attempt its own IsOnline check is the first ask and the verdict wait's
-// first poll the second.
+// attempt its own IsOnline check is the first ask, the verdict wait's first
+// poll the second and its second poll the third, which cancels.
 //
 // Mutant: dropping the cancelErr check after fetchChunkWithRetry's loop —
 // Start returns "chunk download failed after 3 attempts: unexpected EOF".
+// Mutant: awaitOutageVerdict asking once instead of polling — the cancel
+// never lands and Start returns the same error.
 func TestDirectOutageVerdictHonoursCancel(t *testing.T) {
 	body := headedBody(2*DownloadChunkSize+100, 'V')
 	srv := newOutageServer(t, body, math.MaxInt32)
@@ -309,8 +315,8 @@ func TestDirectOutageVerdictHonoursCancel(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL: srv.URL + "/video.mp4", OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true,
 		IsOnline: func() bool {
-			if srv.drops.Load() >= MaxChunkRetries && asked.Add(1) == 2 {
-				cancel() // the verdict wait's first poll
+			if srv.drops.Load() >= MaxChunkRetries && asked.Add(1) == 3 {
+				cancel() // the verdict wait's second poll
 			}
 			return true
 		},
