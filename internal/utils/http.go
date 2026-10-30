@@ -17,6 +17,11 @@ import (
 // packages can validate against the same ceiling instead of guessing.
 const MaxFetchBodySize = 50 << 20
 
+// fetchBodyLimit is the cap FetchBody enforces: MaxFetchBodySize, a variable
+// so the test of the cap need not push 50 MB through loopback (7 s under
+// -race).
+var fetchBodyLimit int64 = MaxFetchBodySize
+
 // utilsHTTPClient backs FetchBody / FetchWithTimeout via the shared
 // httpx transport. The 5-minute client-level timeout is a safety net;
 // per-call timeouts come from FetchWithTimeout's ctx.WithTimeout.
@@ -139,12 +144,12 @@ func FetchBody(ctx context.Context, url string, timeout time.Duration, headers m
 	// service.go and watch_page.go) would parse half a page as a complete
 	// one — a watch page missing its tail parses as "no formats", which is
 	// indistinguishable from a real extraction failure.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxFetchBodySize+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, fetchBodyLimit+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(body) > MaxFetchBodySize {
-		return nil, fmt.Errorf("%s: response exceeds MaxFetchBodySize (%d bytes)", url, MaxFetchBodySize)
+	if int64(len(body)) > fetchBodyLimit {
+		return nil, fmt.Errorf("%s: response exceeds MaxFetchBodySize (%d bytes)", url, fetchBodyLimit)
 	}
 	return body, nil
 }

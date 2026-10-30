@@ -198,25 +198,37 @@ func TestFetchBodyCapsAtMaxFetchBodySize(t *testing.T) {
 // truncated read and a reported one. Before this, FetchBody handed back
 // exactly MaxFetchBodySize bytes and a nil error for an over-long response,
 // and internal/youtube/service.go and watch_page.go would parse that half a
-// page as a legitimate result.
+// page as a legitimate result. A body of exactly the cap is still a whole
+// page. The cap is shrunk to 1 MiB here: at the real 50 MB the test pushed
+// 51 MB through loopback, 7 s of every -race run.
 //
-// Mutant this kills: dropping the length check (or restoring the plain
+// Mutants this kills: dropping the length check (or restoring the plain
 // io.LimitReader(resp.Body, MaxFetchBodySize)) makes err nil and len(body)
-// exactly MaxFetchBodySize, and the first assertion fails.
+// exactly the cap, and the first assertion fails; a `>=` check refuses the
+// exact-size body.
 func TestFetchBodyErrorsPastMaxFetchBodySize(t *testing.T) {
-	chunk := make([]byte, 1<<20)
-	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		// One MiB past the ceiling. Writes may fail once the client gives
-		// up reading; that is expected and not the test's business.
-		for written := 0; written <= MaxFetchBodySize; written += len(chunk) {
-			if _, err := rw.Write(chunk); err != nil {
-				return
+	orig := fetchBodyLimit
+	fetchBodyLimit = 1 << 20
+	t.Cleanup(func() { fetchBodyLimit = orig })
+	serve := func(size int64) *httptest.Server {
+		chunk := make([]byte, 64<<10)
+		srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+			// Writes may fail once the client gives up reading; that is
+			// expected and not the test's business.
+			for left := size; left > 0; {
+				n := min(left, int64(len(chunk)))
+				if _, err := rw.Write(chunk[:n]); err != nil {
+					return
+				}
+				left -= n
 			}
-		}
-	}))
-	t.Cleanup(srv.Close)
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
 
-	body, err := FetchBody(t.Context(), srv.URL, 60*time.Second, nil)
+	over := serve(fetchBodyLimit + 1)
+	body, err := FetchBody(t.Context(), over.URL, 60*time.Second, nil)
 	if err == nil {
 		t.Fatalf("FetchBody over the ceiling: want an error, got nil with %d bytes", len(body))
 	}
@@ -225,6 +237,12 @@ func TestFetchBodyErrorsPastMaxFetchBodySize(t *testing.T) {
 	}
 	if body != nil {
 		t.Errorf("body on the over-long path: want nil, got %d bytes", len(body))
+	}
+
+	exact := serve(fetchBodyLimit)
+	body, err = FetchBody(t.Context(), exact.URL, 60*time.Second, nil)
+	if err != nil || int64(len(body)) != fetchBodyLimit {
+		t.Errorf("FetchBody of exactly the ceiling: %d bytes, %v; want the whole body", len(body), err)
 	}
 }
 
