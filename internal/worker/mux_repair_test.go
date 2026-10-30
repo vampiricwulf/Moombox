@@ -51,6 +51,11 @@ var (
 // and its moof+mdat fragments. FFmpeg's closing mfra index is left off: the
 // engine never stages one. Cached per test binary: every test here wants the
 // same few recordings.
+//
+// The audio is silence, generated 4096 samples at a time: what these tests
+// read is the track's frames, fragments and timestamps, never its sound, and
+// the AAC encoder takes three times as long over a tone — 300 s of it cost
+// about six seconds of every run, twice over with the muxed recording.
 func fragmentedFixture(t *testing.T, ffmpegPath, kind string, seconds int) fragmentedSource {
 	t.Helper()
 	key := fmt.Sprint(kind, seconds)
@@ -62,7 +67,7 @@ func fragmentedFixture(t *testing.T, ffmpegPath, kind string, seconds int) fragm
 	path := filepath.Join(t.TempDir(), "source.mp4")
 	args := []string{"-nostdin", "-y"}
 	video := []string{"-f", "lavfi", "-i", fmt.Sprintf("testsrc=size=64x64:rate=5:duration=%d", seconds)}
-	audio := []string{"-f", "lavfi", "-i", fmt.Sprintf("sine=frequency=440:duration=%d", seconds)}
+	audio := []string{"-f", "lavfi", "-t", fmt.Sprint(seconds), "-i", "anullsrc=r=44100:cl=mono:nb_samples=4096"}
 	h264 := []string{"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "10", "-keyint_min", "10", "-sc_threshold", "0"}
 	switch kind {
 	case "audio":
