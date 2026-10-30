@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -127,76 +128,77 @@ func TestHlsLoop_NoEnforceRespectsStatusCheck(t *testing.T) {
 // (the backstop would otherwise return before any further fetch).
 //
 // Connectivity here is EXPLICIT STATE, never a probe counter: the outage is
-// opened by the handler that serves the 404 and closed a fixed moment later,
-// so WHICH of the loop's IsOnline() sites asks, and in what order, cannot
-// change the answer. A counter ("offline for the first two calls") made this
-// test race the loop instead: a stall longer than MaxTimeout right after the
-// segment landed — which a loaded runner produces — let the backstop at the
-// top of the loop ask first. Its own check took the first "offline" answer
-// and its waitOnline took the second plus the first "online" one, so the 404
-// branch, the round this test is about, read "online" on the fourth call. It
-// then went to consultStreamEnd, which answers "still live" here, and Start()
-// returned ErrQualityLost ("stream quality became unavailable") — not the
-// backstop this test guards.
+// opened by the handler that serves the 404, so WHICH of the loop's
+// IsOnline() sites asks, and in what order, cannot change the answer. A
+// counter ("offline for the first two calls") made this test race the loop
+// instead: the backstop at the top of the loop could take an answer meant for
+// the 404 branch, which then read "online", went to consultStreamEnd ("still
+// live" here) and returned ErrQualityLost — not the backstop this test
+// guards.
 //
-// The timing has one relationship and it is the whole point: the outage lasts
-// one connectivityPoll (waitForConnectivity's entry check reads offline, the
-// flip lands before its first tick), and MaxTimeout is half a poll — so the
-// outage is twice the budget it must not spend, while still being an outage
-// LONGER than MaxTimeout, which is the condition under test. The 500 ms
-// budget also leaves ~450 ms of slack over the ~50 ms reload cadence before
-// the 404 round, where the old 200 ms left ~150 ms.
+// No disk or network work sits inside a window MaxTimeout times. The outage
+// opens on the FIRST playlist fetch, before any segment lands, so the clock
+// MaxTimeout reads is seeded at loop entry and reset by waitOnline, and each
+// is checked microseconds later at the top of the loop. An earlier version
+// landed a segment first: its first resume save (a media fsync, a sidecar
+// fsync and a rename — hundreds of milliseconds on a loaded Windows runner)
+// ran between the segment and the next backstop check, and a slow one fired
+// the backstop before the outage ever opened, which the assertion below then
+// blamed on the reset.
 //
-// MUTANT: drop the d.lastSegTime.StoreNow() from waitOnline — the one-second
-// outage ages the clock past the 500 ms budget, the backstop fires at the top
-// of the next iteration and the post-reconnect playlist is never fetched:
-// "recording force-finalized on reconnect".
+// The timing has one relationship and it is the whole point: the outage
+// lasts one connectivityPoll (waitForConnectivity's entry check reads
+// offline, the flip lands before its first tick), and MaxTimeout is half a
+// poll — so the outage is twice the budget it must not spend. The flip is
+// timed from the first IsOnline() that reads offline, not from the 404
+// handler, so a slow 404 round trip cannot let the branch read "online".
+//
+// MUTANT: drop the d.lastSegTime.StoreNow() from waitOnline — the outage ages
+// the entry-seeded clock past the budget, the backstop fires at the top of
+// the next iteration and the post-reconnect playlist is never fetched:
+// "recording force-finalized on reconnect". MUTANT: drop the loop-entry
+// d.lastSegTime.StoreNow() — the zero clock fires the backstop before the
+// first fetch.
 func TestHlsLoop_EnforceMaxTimeoutPausesForOfflineOutage(t *testing.T) {
 	const (
-		// outagePoll is this test's connectivityPoll, 4x fastDelays' 250 ms.
+		// outagePoll is this test's connectivityPoll, 2x fastDelays' 250 ms.
 		// It is what makes the outage's LENGTH deterministic: whenever the
 		// flip lands inside the first poll, waitForConnectivity returns on
 		// that first tick and the stretch is exactly one poll.
-		outagePoll = time.Second
+		outagePoll = 500 * time.Millisecond
 		// flipOnlineAfter is when the device comes back, measured from the
-		// 404. Three quarters of a poll: late enough that the entry check
-		// and the whole 404 branch around it still read offline, early
-		// enough to be seen by the first tick. Landing LATE is harmless
-		// (the next tick returns and the outage is simply longer); landing
-		// before the entry check is what would shorten it, which is why it
-		// is not a few milliseconds.
-		flipOnlineAfter = 750 * time.Millisecond
+		// first IsOnline() that reads offline. Half a poll: late enough that
+		// waitForConnectivity's entry check, microseconds after the branch's
+		// own check, still reads offline, early enough to be seen by the
+		// first tick. Landing LATE is harmless (the next tick returns and the
+		// outage is simply longer).
+		flipOnlineAfter = 250 * time.Millisecond
 		// maxTimeout is half the outage, so the reset under test is what
 		// separates a pass from a fail, with no arithmetic near the edge.
-		maxTimeout = 500 * time.Millisecond
+		maxTimeout = 250 * time.Millisecond
 	)
 
 	var playlistFetches atomic.Int32
 	var postReconnectServed atomic.Bool
 	var offline atomic.Bool
+	var flip sync.Once
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/playlist.m3u8", func(w http.ResponseWriter, r *http.Request) {
-		switch playlistFetches.Add(1) {
-		case 1:
-			// Live window with one segment (no ENDLIST) — seeds lastSegTime.
-			fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n"+
-				"#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:1.0,\nseg100.ts\n")
-		case 2:
+		if playlistFetches.Add(1) == 1 {
 			// 404 while the device is offline → offline-recovery branch, the
 			// exact path whose missing lastSegTime reset caused the bug. The
 			// outage opens HERE, before the 404 reaches the loop, so every
 			// IsOnline() the round makes reads offline.
 			offline.Store(true)
-			time.AfterFunc(flipOnlineAfter, func() { offline.Store(false) })
 			w.WriteHeader(http.StatusNotFound)
-		default:
-			// Post-reconnect fetch: reached only if the recording survived the
-			// outage. End cleanly so the test terminates.
-			postReconnectServed.Store(true)
-			fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n"+
-				"#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:1.0,\nseg100.ts\n#EXT-X-ENDLIST\n")
+			return
 		}
+		// Post-reconnect fetch: reached only if the recording survived the
+		// outage. End cleanly so the test terminates.
+		postReconnectServed.Store(true)
+		fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n"+
+			"#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:1.0,\nseg100.ts\n#EXT-X-ENDLIST\n")
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "[%s]", strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), ".ts"))
@@ -204,11 +206,12 @@ func TestHlsLoop_EnforceMaxTimeoutPausesForOfflineOutage(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	// The device is offline for exactly the stretch the 404 handler opened —
-	// no call count anywhere. waitForConnectivity's entry check reads it
-	// offline and its first tick, one outagePoll later, reads it online, so
-	// lastSegTime ages a full second: twice the MaxTimeout budget, and only
-	// the waitOnline reset keeps the backstop from finalizing on reconnect.
+	// The device is offline from the 404 until flipOnlineAfter past the first
+	// read that saw it — no call count anywhere. waitForConnectivity's entry
+	// check reads it offline and its first tick, one outagePoll later, reads
+	// it online, so lastSegTime ages a full poll: twice the MaxTimeout
+	// budget, and only the waitOnline reset keeps the backstop from
+	// finalizing on reconnect.
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL:           srv.URL + "/playlist.m3u8",
 		OutputFile:        filepath.Join(t.TempDir(), "video_stream"),
@@ -216,7 +219,13 @@ func TestHlsLoop_EnforceMaxTimeoutPausesForOfflineOutage(t *testing.T) {
 		IsHls:             true,
 		MaxTimeout:        maxTimeout,
 		EnforceMaxTimeout: true,
-		IsOnline:          func() bool { return !offline.Load() },
+		IsOnline: func() bool {
+			if !offline.Load() {
+				return true
+			}
+			flip.Do(func() { time.AfterFunc(flipOnlineAfter, func() { offline.Store(false) }) })
+			return false
+		},
 		CheckStreamStatus: func(ctx context.Context) (bool, error) { return false, nil },
 	})
 	// fastDelays keeps the ~50 ms reload cadence; only the connectivity poll

@@ -124,7 +124,8 @@ func (c *oneShotCancelledContext) Err() error {
 // drops those workers and truncates cleanly instead.
 //
 // Mutant: delete `rb.markFailed(item.idx)` from the drain branch — five
-// workers stay parked on segments 13-17 and this row fails on its 5 s bound.
+// workers stay parked on segments 13-17 and this row fails on its safetyNet
+// bound.
 // deadlineTestContext keeps that mutant failing FAST: cleanups run LIFO, so
 // its cancel fires before the server's Close and a wedged run reports instead
 // of hanging the package run.
@@ -194,10 +195,14 @@ func TestHlsVodParallelDrainedIndexReleasesParkedWorkers(t *testing.T) {
 	ctx.armed.Store(true)
 	releaseOnce()
 
+	// A safety net, not a budget: Start's return writes the remaining
+	// segments and saves the resume state (fsyncs and a rename), which a
+	// loaded Windows runner stretches to seconds. Only the deadlock the
+	// message names ever reaches it.
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("Start did not return within 5s — the drained index %d left the consumer waiting for a buffer entry that never arrives, with workers parked above it", held+1)
+	case <-time.After(safetyNet):
+		t.Fatalf("Start did not return within %s — the drained index %d left the consumer waiting for a buffer entry that never arrives, with workers parked above it", safetyNet, held+1)
 	}
 
 	// Back-pressure never drops a fetched segment: the head plus everything

@@ -73,13 +73,10 @@ func TestStartDiscardStagedMediaOptIn(t *testing.T) {
 		DiscardStaged: true,
 		MaxRetries:    1,
 	})
-	d.delays = fastDelays()
 
 	// The open mode is decided before the first fetch, so the download's own
 	// failure against a dead address is irrelevant — only the file is.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := d.Start(ctx); errors.Is(err, ErrStagedMediaPresent) {
+	if err := startAgainstDeadAddress(t, d); errors.Is(err, ErrStagedMediaPresent) {
 		t.Fatalf("Start = %v, want the guard to stand down for an explicit discard", err)
 	}
 	if got := sizeOf(t, path); got != 0 {
@@ -104,7 +101,8 @@ func TestStartDirectURLKeepsLegacyTruncate(t *testing.T) {
 		IsDirectURL: true,
 		MaxRetries:  1,
 	})
-	d.delays = fastDelays()
+	d.delays = directDelays()
+	refuseDialsTo(t, deadAddress)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -370,15 +368,26 @@ func asideFiles(t *testing.T, path string) (media, sidecar string) {
 	return media, sidecar
 }
 
-// startAgainstDeadAddress runs Start against an address nothing answers, with
-// a short deadline. Every row below cares only about what Start decided about
-// the files BEFORE the first fetch, so the download's own failure is expected
-// and the deadline only has to outlast the open sequence.
+// deadAddress is the host:port of the dead-address tests' stream URLs,
+// refused at once (refuseDialsTo) so a run fails its fetches as fast on
+// Windows as on Linux.
+const deadAddress = "127.0.0.1:1"
+
+// startAgainstDeadAddress runs Start against an address nothing answers
+// (deadAddress) and ends it at the loop's first activity. Every caller cares
+// only about what Start decided about the files BEFORE the first fetch, so
+// the download's own failure is expected: the head-sequence probe and the
+// first segment fetch are both refused, and the loop reports ActivityRetrying
+// for the second, after every file decision. The run is cancelled there
+// instead of retrying the dead address until a deadline (750 ms a row). The
+// deadline is only a safety net for a run that never fetches.
 func startAgainstDeadAddress(t *testing.T, d *SegmentDownloader) error {
 	t.Helper()
+	refuseDialsTo(t, deadAddress)
 	d.delays = fastDelays()
-	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), safetyNet)
 	defer cancel()
+	d.OnActivity = func(DownloadActivity) { cancel() }
 	return d.Start(ctx)
 }
 
@@ -603,15 +612,13 @@ func TestRenameStagedFileStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	started := time.Now()
 	if err := renameStagedFile(ctx, "from", "to"); !errors.Is(err, errSharingViolation) {
 		t.Fatalf("renameStagedFile = %v, want the last refusal surfaced", err)
 	}
-	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
-		t.Fatalf("took %v, want under 100ms (a dead context must end the ladder, not wait it out)", elapsed)
-	}
+	// The count is the proof, not the clock: a ladder that waited out its
+	// pauses on a dead context climbs past one attempt.
 	if attempts != 1 {
-		t.Fatalf("attempts = %d, want 1", attempts)
+		t.Fatalf("attempts = %d, want 1 (a dead context must end the ladder, not wait it out)", attempts)
 	}
 }
 

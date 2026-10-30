@@ -3,10 +3,15 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -33,32 +38,76 @@ func trickleServer(t *testing.T, chunks int, gap time.Duration, chunkSize int) *
 	return srv
 }
 
-// TestFetchSegmentSurvivesSlowButProgressingTransfer pins ENGINE-4's fix: a
-// transfer that keeps delivering bytes must complete however long it takes in
-// total. Ten 20 ms gaps against a 60 ms idle bound is 200+ ms of wall clock —
-// more than three times the deadline — with no gap ever reaching it.
+// TestSlowButProgressingTransfersSurvive pins ENGINE-4's fix on both paths
+// that read a body under the idle bound alone, and the ceiling's other half:
+// a transfer that keeps delivering bytes must complete however long it takes
+// in total. fetchSegment (segments, playlists, and the hard ceiling layered
+// under the idle bound, which must not clip it either) and the whole-file
+// streaming fallback (runDirectDownloadFallback, whose one GET for a
+// multi-hour VOD has no other bound) read the same trickle side by side, so
+// the pair pays its wall clock once. Thirty 40 ms gaps against a 1 s idle
+// bound is more than 1.16 s — longer than the bound itself — with no gap
+// ever coming near it, under a 10 s ceiling (far out, because it too must not
+// fire, and it counts every stall the runner adds to the transfer).
+//
+// The margins are wide on purpose: the idle timer must NOT fire, and it and
+// the trickling server share this process, so a runner that deschedules the
+// process for longer than (idle − gap) fails the transfer however correct the
+// code is. 960 ms of margin (a 25x ratio) rides that out; the 40 ms of a
+// 60 ms bound against 20 ms gaps, which both paths had, did not.
 //
 // Mutant: restoring `ctx, cancel := context.WithTimeout(parent, SegmentTimeout)`
-// in fetchSegment — the fetch dies at 60 ms with 0 bytes and
-// context.DeadlineExceeded.
-func TestFetchSegmentSurvivesSlowButProgressingTransfer(t *testing.T) {
+// in fetchSegment — the fetch dies at 1 s with context.DeadlineExceeded.
+// Mutant: a ceiling shorter than the transfer (fetchSegment passing the idle
+// bound as its ceiling) — the payload comes back short with errFetchCeiling.
+// Mutant: giving streamDirectOnce a total context.WithTimeout(parent,
+// SegmentTimeout) instead of the idle deadline — every request of the
+// fallback dies at 1 s, mid-file, and its ladder runs out.
+func TestSlowButProgressingTransfersSurvive(t *testing.T) {
 	prev := SegmentTimeout
 	t.Cleanup(func() { SegmentTimeout = prev })
-	SegmentTimeout = 60 * time.Millisecond
+	SegmentTimeout = time.Second
 
-	srv := trickleServer(t, 10, 20*time.Millisecond, 1024)
-	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL})
+	const chunks = 30
+	srv := trickleServer(t, chunks, 40*time.Millisecond, 1024)
+
+	seg := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL})
+	seg.delays.fetchHardCeiling = 10 * time.Second
+
+	path := filepath.Join(t.TempDir(), "video.mp4")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open output: %v", err)
+	}
+	t.Cleanup(func() { f.Close() })
+	direct := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, OutputFile: path, IsDirectURL: true})
+	direct.outputFile = f
+	direct.delays = directDelays()
 
 	start := time.Now()
-	data, status, err := d.fetchSegment(context.Background(), srv.URL+"/seg")
+	fallbackDone := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fallbackDone <- fmt.Errorf("runDirectDownloadFallback panicked: %v", r)
+			}
+		}()
+		fallbackDone <- direct.runDirectDownloadFallback(context.Background())
+	}()
+
+	data, status, err := seg.fetchSegment(context.Background(), srv.URL+"/seg")
 	if err != nil {
-		t.Fatalf("fetchSegment = %v, want nil for a continuously progressing transfer", err)
+		t.Errorf("fetchSegment = %v, want nil for a continuously progressing transfer inside the ceiling", err)
+	} else if status != http.StatusOK || len(data) != chunks*1024 {
+		t.Errorf("fetchSegment = %d bytes/status %d, want %d/200", len(data), status, chunks*1024)
 	}
-	if status != http.StatusOK || len(data) != 10*1024 {
-		t.Fatalf("fetchSegment = %d bytes/status %d, want 10240/200", len(data), status)
+	if err := <-fallbackDone; err != nil {
+		t.Errorf("runDirectDownloadFallback = %v, want nil for a continuously progressing transfer", err)
+	} else if got := direct.bytesWritten.Load(); got != chunks*1024 {
+		t.Errorf("runDirectDownloadFallback wrote %d bytes, want %d", got, chunks*1024)
 	}
 	if elapsed := time.Since(start); elapsed < SegmentTimeout {
-		t.Fatalf("transfer took %s — shorter than the idle bound, so it never exercised the deadline", elapsed)
+		t.Fatalf("transfers took %s — shorter than the idle bound, so they never exercised the deadline", elapsed)
 	}
 }
 
@@ -68,7 +117,7 @@ func TestFetchSegmentSurvivesSlowButProgressingTransfer(t *testing.T) {
 // caller cancellation.
 //
 // Mutant: dropping the timer entirely (a plain context.WithCancel) — the
-// fetch hangs until the test's own 2 s guard fires.
+// fetch hangs until the test's own guard (safetyNet) fires.
 func TestFetchSegmentFailsOnIdleStall(t *testing.T) {
 	prev := SegmentTimeout
 	t.Cleanup(func() { SegmentTimeout = prev })
@@ -96,7 +145,7 @@ func TestFetchSegmentFailsOnIdleStall(t *testing.T) {
 		if !errors.Is(err, errFetchIdle) {
 			t.Fatalf("fetchSegment = %v, want errFetchIdle", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(safetyNet):
 		t.Fatal("fetchSegment never returned — the idle deadline did not fire")
 	}
 }
@@ -178,7 +227,7 @@ func (zeroByteReader) Close() error               { return nil }
 // end, so it must still end.
 //
 // Mutant: resetting on every Read instead of only when n > 0 — the deadline
-// is pushed out forever and this test fails on its 2 s guard.
+// is pushed out forever and this test fails on its guard (safetyNet).
 func TestIdleBodyDoesNotExtendOnAZeroByteRead(t *testing.T) {
 	const idle = 60 * time.Millisecond
 	ctx, timer, cancel := withReadProgressDeadline(context.Background(), idle)
@@ -197,7 +246,7 @@ func TestIdleBodyDoesNotExtendOnAZeroByteRead(t *testing.T) {
 		if !errors.Is(context.Cause(ctx), errFetchIdle) {
 			t.Fatalf("cause = %v, want errFetchIdle", context.Cause(ctx))
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(safetyNet):
 		t.Fatal("the idle bound never fired — a byte-less Read counted as progress")
 	}
 }
@@ -302,22 +351,53 @@ func deadlineTestContext(t *testing.T) (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
-// TestFetchSegmentHardCeilingCapsATrickle pins the ceiling layered UNDER the
-// idle deadline (Task 3 fix round 1): a body that delivers a byte just often
-// enough to keep resetting the idle timer would otherwise run forever, and on
-// a 24/7 downloader that wedges one segment worker for the whole stream
-// without ever producing the error fetchSegmentWithRetry's ladder needs.
+// ceilingReceivedRe reads the byte count out of fetchDeadlineError's ceiling
+// error ("... having received 23 bytes").
+var ceilingReceivedRe = regexp.MustCompile(`having received (\d+) bytes`)
+
+// TestFetchHardCeilingCapsATrickle pins the ceiling layered UNDER the idle
+// deadline (Task 3 fix round 1): a body that delivers a byte just often enough
+// to keep resetting the idle timer would otherwise run forever, and on a 24/7
+// downloader that wedges one segment worker for the whole stream without ever
+// producing the error fetchSegmentWithRetry's ladder needs. It drives both
+// fetch paths — fetchSegment, and the VOD chunk path fetchChunk, which shares
+// neither the request construction nor the status handling with it — side by
+// side against one endless trickle, so the pair pays the ceiling's wait once.
 //
-// Mutant: drop the context.WithTimeout layer (round 1's behaviour) — the
-// fetch never returns and this row fails on its 2 s guard.
-func TestFetchSegmentHardCeilingCapsATrickle(t *testing.T) {
+// The idle bound must NOT fire here, so it sits 950 ms clear of the 50 ms
+// trickle: a process the runner deschedules for longer than (idle − gap)
+// sees the idle timer fire first on resume. The 100 ms that a 200 ms bound
+// against a 100 ms trickle left failed both paths under 120 ms SIGSTOPs.
+//
+// How late the ceiling fired is read off the trickle, not the wall clock: the
+// trickle delivers one byte per gap, so the bytes a fetch had received when
+// its ceiling ended it count the gaps it lived through. A runner that
+// deschedules the process stretches the elapsed time but delivers no more
+// bytes — each one waits out a fresh gap — where an elapsed bound of twice
+// the ceiling failed any run stalled for longer than the ceiling itself. So
+// the count can be held close: at most one and a half ceilings' worth of
+// gaps (36), against the 23 or 24 a green run reads.
+//
+// Mutant: drop the context.WithTimeout layer (round 1's behaviour) — neither
+// fetch returns and both fail on the guard. Mutant: apply the ceiling to
+// fetchSegment only — the fetchChunk path fails on the guard while the
+// fetchSegment path stays green. Mutant: the idle bound as the ceiling — both
+// return before their ceiling. Mutant: the ceiling wired at twice its value
+// — both receive more than one and a half times the bytes it allows.
+func TestFetchHardCeilingCapsATrickle(t *testing.T) {
 	prev := SegmentTimeout
 	t.Cleanup(func() { SegmentTimeout = prev })
-	SegmentTimeout = 200 * time.Millisecond
+	SegmentTimeout = time.Second
 
-	srv := endlessTrickleServer(t, 100*time.Millisecond, nil)
+	const gap = 50 * time.Millisecond
+	srv := endlessTrickleServer(t, gap, func(w http.ResponseWriter) {
+		// 206 so fetchChunk takes its ordinary partial-content path;
+		// fetchSegment reads any 2xx as its body.
+		w.Header().Set("Content-Range", "bytes 0-1048575/8388608")
+		w.WriteHeader(http.StatusPartialContent)
+	})
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL})
-	d.delays.fetchHardCeiling = 600 * time.Millisecond
+	d.delays.fetchHardCeiling = 1200 * time.Millisecond
 
 	// Cleanups run LIFO, so this cancel fires BEFORE the server's Close: if
 	// the guard below trips (the mutant), the still-running fetch would
@@ -325,34 +405,55 @@ func TestFetchSegmentHardCeilingCapsATrickle(t *testing.T) {
 	ctx, cancel := deadlineTestContext(t)
 	defer cancel()
 
+	type result struct {
+		path    string
+		err     error
+		elapsed time.Duration
+	}
 	start := time.Now()
-	done := make(chan error, 1)
-	go func() {
-		_, _, err := d.fetchSegment(ctx, srv.URL+"/seg")
-		done <- err
-	}()
+	results := make(chan result, 2)
+	fetches := map[string]func() error{
+		"fetchSegment": func() error { _, _, err := d.fetchSegment(ctx, srv.URL+"/seg"); return err },
+		"fetchChunk":   func() error { _, _, err := d.fetchChunk(ctx, 0, 1<<20-1); return err },
+	}
+	for path, fetch := range fetches {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s panicked: %v", path, r)
+				}
+			}()
+			err := fetch()
+			results <- result{path, err, time.Since(start)}
+		}()
+	}
 
-	select {
-	case err := <-done:
-		elapsed := time.Since(start)
-		if !errors.Is(err, errFetchCeiling) {
-			t.Fatalf("fetchSegment = %v, want errFetchCeiling", err)
+	guard := time.After(safetyNet)
+	for range fetches {
+		select {
+		case r := <-results:
+			if !errors.Is(r.err, errFetchCeiling) {
+				t.Errorf("%s = %v, want errFetchCeiling", r.path, r.err)
+			}
+			if errors.Is(r.err, errFetchIdle) {
+				t.Errorf("%s = %v — a transfer that kept delivering is not an idle stall", r.path, r.err)
+			}
+			if r.elapsed < d.delays.fetchHardCeiling {
+				t.Errorf("%s returned after %s, before its %s ceiling", r.path, r.elapsed, d.delays.fetchHardCeiling)
+			}
+			// The upper bound, counted in trickled bytes: it catches a
+			// ceiling wired at twice its value (about 47 bytes) with 12
+			// bytes to spare over a green run.
+			maxBytes := 3 * int(d.delays.fetchHardCeiling/gap) / 2
+			if m := ceilingReceivedRe.FindStringSubmatch(fmt.Sprint(r.err)); m == nil {
+				t.Errorf("%s = %v, want the ceiling's error to say how much it received", r.path, r.err)
+			} else if n, _ := strconv.Atoi(m[1]); n > maxBytes {
+				t.Errorf("%s received %d trickled bytes before its %s ceiling fired, want at most %d — the ceiling fired far past its value", r.path, n, d.delays.fetchHardCeiling, maxBytes)
+			}
+			t.Logf("%s: ceiling fired after %s (ceiling %s, idle %s): %v", r.path, r.elapsed, d.delays.fetchHardCeiling, SegmentTimeout, r.err)
+		case <-guard:
+			t.Fatal("a fetch never returned — the hard ceiling did not fire on every path")
 		}
-		if errors.Is(err, errFetchIdle) {
-			t.Fatalf("fetchSegment = %v — a transfer that kept delivering is not an idle stall", err)
-		}
-		if elapsed < d.delays.fetchHardCeiling {
-			t.Fatalf("fetchSegment returned after %s, before its %s ceiling", elapsed, d.delays.fetchHardCeiling)
-		}
-		// Generous upper margin (the brief's figure is +200 ms): the load-
-		// bearing assertion is the 2 s guard below, which is what the mutant
-		// trips; this one only catches a ceiling wired an order out.
-		if elapsed > d.delays.fetchHardCeiling+500*time.Millisecond {
-			t.Fatalf("fetchSegment returned after %s, far past its %s ceiling", elapsed, d.delays.fetchHardCeiling)
-		}
-		t.Logf("ceiling fired after %s (ceiling %s, idle %s): %v", elapsed, d.delays.fetchHardCeiling, SegmentTimeout, err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("fetchSegment never returned — the hard ceiling did not fire")
 	}
 }
 
@@ -360,7 +461,14 @@ func TestFetchSegmentHardCeilingCapsATrickle(t *testing.T) {
 // the outer, generous bound, and a genuine stall must still end at the idle
 // deadline rather than sitting on a dead socket until the ceiling.
 //
-// Mutant: swap the two bounds (idle 5 s, ceiling 200 ms) — the error becomes
+// Which bound fired is read off the error's cause, not a clock. The ceiling
+// sits past the test's guard, so a fetch that waited for the ceiling's clock
+// fails on the guard however its error reads; a 2 s guard and a "returned
+// after ceiling/2" bound used to stand in for that, and a runner that
+// deschedules the process for longer than either failed the test with the
+// idle bound firing first.
+//
+// Mutant: swap the two bounds (idle 60 s, ceiling 200 ms) — the error becomes
 // errFetchCeiling and this row fails.
 func TestFetchSegmentIdleStillFiresFirst(t *testing.T) {
 	prev := SegmentTimeout
@@ -369,7 +477,7 @@ func TestFetchSegmentIdleStillFiresFirst(t *testing.T) {
 
 	srv := headersThenSilenceServer(t)
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL})
-	d.delays.fetchHardCeiling = 5 * time.Second
+	d.delays.fetchHardCeiling = 2 * safetyNet
 
 	ctx, cancel := deadlineTestContext(t)
 	defer cancel()
@@ -383,91 +491,15 @@ func TestFetchSegmentIdleStillFiresFirst(t *testing.T) {
 
 	select {
 	case err := <-done:
-		elapsed := time.Since(start)
 		if !errors.Is(err, errFetchIdle) {
 			t.Fatalf("fetchSegment = %v, want errFetchIdle", err)
 		}
 		if errors.Is(err, errFetchCeiling) {
 			t.Fatalf("fetchSegment = %v, want the idle bound to fire first", err)
 		}
-		if elapsed > d.delays.fetchHardCeiling/2 {
-			t.Fatalf("fetchSegment returned after %s — that is the ceiling's clock, not the %s idle bound", elapsed, SegmentTimeout)
-		}
-		t.Logf("idle bound fired after %s (idle %s, ceiling %s): %v", elapsed, SegmentTimeout, d.delays.fetchHardCeiling, err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("fetchSegment never returned — neither deadline fired")
-	}
-}
-
-// TestFetchChunkHardCeilingCapsATrickle is the same shape on the VOD chunk
-// path, which shares neither the request construction nor the status
-// handling with fetchSegment.
-//
-// Mutant: apply the ceiling to fetchSegment only — this row fails on its 2 s
-// guard while the fetchSegment rows stay green.
-func TestFetchChunkHardCeilingCapsATrickle(t *testing.T) {
-	prev := SegmentTimeout
-	t.Cleanup(func() { SegmentTimeout = prev })
-	SegmentTimeout = 200 * time.Millisecond
-
-	srv := endlessTrickleServer(t, 100*time.Millisecond, func(w http.ResponseWriter) {
-		// 206 so fetchChunk takes its ordinary partial-content path.
-		w.Header().Set("Content-Range", "bytes 0-1048575/8388608")
-		w.WriteHeader(http.StatusPartialContent)
-	})
-	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL})
-	d.delays.fetchHardCeiling = 600 * time.Millisecond
-
-	ctx, cancel := deadlineTestContext(t)
-	defer cancel()
-
-	start := time.Now()
-	done := make(chan error, 1)
-	go func() {
-		_, _, err := d.fetchChunk(ctx, 0, 1<<20-1)
-		done <- err
-	}()
-
-	select {
-	case err := <-done:
-		elapsed := time.Since(start)
-		if !errors.Is(err, errFetchCeiling) {
-			t.Fatalf("fetchChunk = %v, want errFetchCeiling", err)
-		}
-		if elapsed < d.delays.fetchHardCeiling {
-			t.Fatalf("fetchChunk returned after %s, before its %s ceiling", elapsed, d.delays.fetchHardCeiling)
-		}
-		t.Logf("ceiling fired after %s (ceiling %s, idle %s): %v", elapsed, d.delays.fetchHardCeiling, SegmentTimeout, err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("fetchChunk never returned — the hard ceiling did not fire")
-	}
-}
-
-// TestFetchSegmentUnderCeilingCompletes is the ceiling's other half: it must
-// not clip the slow-but-moving transfer ENGINE-4 exists to keep alive. The
-// body takes 200+ ms — three times the idle bound — under a 3 s ceiling.
-//
-// Mutant: a ceiling shorter than the transfer (60 ms) — the payload comes
-// back short with errFetchCeiling.
-func TestFetchSegmentUnderCeilingCompletes(t *testing.T) {
-	prev := SegmentTimeout
-	t.Cleanup(func() { SegmentTimeout = prev })
-	SegmentTimeout = 60 * time.Millisecond
-
-	srv := trickleServer(t, 10, 20*time.Millisecond, 1024)
-	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL})
-	d.delays.fetchHardCeiling = 3 * time.Second
-
-	start := time.Now()
-	data, status, err := d.fetchSegment(context.Background(), srv.URL+"/seg")
-	if err != nil {
-		t.Fatalf("fetchSegment = %v, want nil — the transfer finished inside the ceiling", err)
-	}
-	if status != http.StatusOK || len(data) != 10*1024 {
-		t.Fatalf("fetchSegment = %d bytes/status %d, want 10240/200", len(data), status)
-	}
-	if elapsed := time.Since(start); elapsed < SegmentTimeout {
-		t.Fatalf("transfer took %s — shorter than the idle bound, so it never exercised either deadline", elapsed)
+		t.Logf("idle bound fired after %s (idle %s, ceiling %s): %v", time.Since(start), SegmentTimeout, d.delays.fetchHardCeiling, err)
+	case <-time.After(safetyNet):
+		t.Fatal("fetchSegment never returned before the guard — neither deadline fired, or only the ceiling's clock was running")
 	}
 }
 
@@ -483,27 +515,35 @@ func TestFetchSegmentUnderCeilingCompletes(t *testing.T) {
 func TestFetchSegmentWithRetryTreatsBothDeadlinesAsTransient(t *testing.T) {
 	prev := SegmentTimeout
 	t.Cleanup(func() { SegmentTimeout = prev })
-	SegmentTimeout = 200 * time.Millisecond
 
 	for _, tc := range []struct {
 		name    string
 		server  func(t *testing.T) *httptest.Server
+		idle    time.Duration
 		ceiling time.Duration
 	}{
 		{
 			name:    "idle stall",
 			server:  headersThenSilenceServer,
+			idle:    200 * time.Millisecond,
 			ceiling: 5 * time.Second,
 		},
 		{
+			// The idle bound sits well past the ceiling, so it is the
+			// ceiling that ends the attempt even if the runner deschedules
+			// the trickle: with 200 ms against a 50 ms trickle a stall of
+			// 150 ms let the idle bound end it instead, and this row then
+			// proved nothing about the ceiling.
 			name: "hard ceiling",
 			server: func(t *testing.T) *httptest.Server {
 				return endlessTrickleServer(t, 50*time.Millisecond, nil)
 			},
+			idle:    time.Second,
 			ceiling: 400 * time.Millisecond,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			SegmentTimeout = tc.idle
 			srv := tc.server(t)
 			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, MaxRetries: 1})
 			d.delays.fetchHardCeiling = tc.ceiling
@@ -521,7 +561,7 @@ func TestFetchSegmentWithRetryTreatsBothDeadlinesAsTransient(t *testing.T) {
 			var err error
 			select {
 			case err = <-done:
-			case <-time.After(3 * time.Second):
+			case <-time.After(safetyNet):
 				t.Fatal("fetchSegmentWithRetry never returned — neither deadline ended the attempt")
 			}
 

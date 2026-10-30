@@ -82,8 +82,8 @@ func TestDirectResume_FallbackResetsAvoidsDoubledFile(t *testing.T) {
 	})
 	// This server never honours Range, so the probe exhausts its full retry
 	// ladder (sweep-2 ENGINE-6) before the fallback runs. Scale the backoff
-	// so the test pays 0.3 s for that instead of production's 6 s.
-	d.delays = fastDelays()
+	// so the test pays 60 ms for that (directDelays) instead of production's 6 s.
+	d.delays = directDelays()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
@@ -270,7 +270,7 @@ func TestDirectChunkedLoopShortOriginIsAnError(t *testing.T) {
 
 			out := filepath.Join(t.TempDir(), "video.mp4")
 			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
-			d.delays = fastDelays()
+			d.delays = directDelays()
 			d.directResumeIntervalOverride = DownloadChunkSize // a checkpoint exists before the cut
 			err := d.Start(t.Context())
 			if err == nil || !strings.Contains(err.Error(), "short of its probed size") {
@@ -357,9 +357,13 @@ func TestDirectHandoffHoldsTheFallbackToTheProbedTotal(t *testing.T) {
 
 			out := filepath.Join(t.TempDir(), "video.mp4")
 			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
-			d.delays = fastDelays()
+			d.delays = directDelays()
 			d.directResumeIntervalOverride = DownloadChunkSize // a checkpoint exists before the cut
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			// A safety net, not a budget: the run writes 20 MB with a
+			// checkpoint (two fsyncs and a rename) per chunk, which a loaded
+			// Windows runner stretches to seconds; only the empty row's
+			// endless-re-ask mutant ever reaches it.
+			ctx, cancel := context.WithTimeout(t.Context(), safetyNet)
 			defer cancel()
 			err := d.Start(ctx)
 			got, _ := os.ReadFile(out)

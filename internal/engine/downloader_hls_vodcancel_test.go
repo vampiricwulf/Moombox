@@ -72,8 +72,11 @@ func TestHlsVodParallelCancelIsNotAGap(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
 
-	// Segment 0 written, and every worker inside a hung fetch of 1..3.
-	deadline := time.Now().Add(5 * time.Second)
+	// Segment 0 written, and every worker inside a hung fetch of 1..3. The
+	// deadlines here are safety nets, not budgets: segment 0's write and the
+	// cancel's resume save (fsyncs and a rename) are what they wait on, and a
+	// loaded Windows runner stretches those to seconds.
+	deadline := time.Now().Add(safetyNet)
 	for d.CurrentSeq() < 1 || hung.Load() < workers {
 		if time.Now().After(deadline) {
 			t.Fatalf("fixture never reached its fixed point: currentSeq %d, %d fetches hung", d.CurrentSeq(), hung.Load())
@@ -85,8 +88,8 @@ func TestHlsVodParallelCancelIsNotAGap(t *testing.T) {
 	var err error
 	select {
 	case err = <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Start did not return within 5s of the cancel")
+	case <-time.After(safetyNet):
+		t.Fatalf("Start did not return within %s of the cancel", safetyNet)
 	}
 
 	if !errors.Is(err, context.Canceled) {

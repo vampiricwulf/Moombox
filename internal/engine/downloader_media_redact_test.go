@@ -38,7 +38,7 @@ func TestDirectDownloadErrorRedactsSignedURL(t *testing.T) {
 		PoToken:     potToken,
 		Logger:      lg,
 	})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	err := d.Start(ctx)
@@ -84,7 +84,7 @@ func TestURLPrefixLogLineRedactsSignedURL(t *testing.T) {
 		IsDirectURL: true,
 		Logger:      lg,
 	})
-	d.delays = fastDelays()
+	d.delays = directDelays()
 	status, _, err := d.streamDirectOnce(t.Context())
 	if status != http.StatusForbidden || err == nil {
 		t.Fatalf("streamDirectOnce = %d, %v; want the 403", status, err)

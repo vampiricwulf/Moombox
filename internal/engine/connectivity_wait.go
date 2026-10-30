@@ -6,17 +6,19 @@ import (
 	"time"
 )
 
-const (
-	connectivityPollInterval = 5 * time.Second
-	// isOnlineProbeTimeout caps how long we wait for a single isOnline()
-	// callback to return. Per audit reports/engine.md #18, the engine has
-	// no way to enforce that callers' isOnline implementation is fast or
-	// non-blocking; without a timeout, a misbehaving callback could block
-	// cancellation indefinitely. Two seconds is plenty for any reasonable
-	// in-process check (ICMP ping, cached state, etc.) without making
-	// recovery from a real outage perceptibly slower.
-	isOnlineProbeTimeout = 2 * time.Second
-)
+const connectivityPollInterval = 5 * time.Second
+
+// isOnlineProbeTimeout caps how long we wait for a single isOnline()
+// callback to return. Per audit reports/engine.md #18, the engine has
+// no way to enforce that callers' isOnline implementation is fast or
+// non-blocking; without a timeout, a misbehaving callback could block
+// cancellation indefinitely. Two seconds is plenty for any reasonable
+// in-process check (ICMP ping, cached state, etc.) without making
+// recovery from a real outage perceptibly slower.
+//
+// A var only so TestCallIsOnlineSingleFlight can shorten the wait its
+// callers give up after; production never writes it.
+var isOnlineProbeTimeout = 2 * time.Second
 
 // onlineProbe is one in-flight IsOnline call. ok is written by the probe
 // goroutine strictly before done closes, so every waiter that receives from
