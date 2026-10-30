@@ -40,6 +40,9 @@ type fragmentedSource struct {
 var (
 	fragmentedSourcesMu sync.Mutex
 	fragmentedSources   = map[string]fragmentedSource{}
+	// fragmentedRenders holds each rendered file whole, so "muxed" can be
+	// copied together from the single-track ones rather than encoded again.
+	fragmentedRenders = map[string][]byte{}
 )
 
 // fragmentedFixture renders seconds of "video" (5 fps, a keyframe and so a
@@ -64,29 +67,7 @@ func fragmentedFixture(t *testing.T, ffmpegPath, kind string, seconds int) fragm
 	if src, ok := fragmentedSources[key]; ok {
 		return src
 	}
-	path := filepath.Join(t.TempDir(), "source.mp4")
-	args := []string{"-nostdin", "-y"}
-	video := []string{"-f", "lavfi", "-i", fmt.Sprintf("testsrc=size=64x64:rate=5:duration=%d", seconds)}
-	audio := []string{"-f", "lavfi", "-t", fmt.Sprint(seconds), "-i", "anullsrc=r=44100:cl=mono:nb_samples=4096"}
-	h264 := []string{"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "10", "-keyint_min", "10", "-sc_threshold", "0"}
-	switch kind {
-	case "audio":
-		args = append(append(args, audio...), "-c:a", "aac", "-frag_duration", "2000000",
-			"-movflags", "+empty_moov+default_base_moof")
-	case "muxed":
-		args = append(append(append(append(args, video...), audio...), h264...), "-c:a", "aac",
-			"-movflags", "+frag_keyframe+empty_moov+default_base_moof")
-	default:
-		args = append(append(append(args, video...), h264...), "-movflags", "+frag_keyframe+empty_moov+default_base_moof")
-	}
-	args = append(args, "-f", "mp4", path)
-	if out, err := exec.Command(ffmpegPath, args...).CombinedOutput(); err != nil {
-		t.Fatalf("generate the fragmented fixture: %v\n%s", err, out)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := renderFragmentedLocked(t, ffmpegPath, kind, seconds)
 	var src fragmentedSource
 	var starts []int
 	end := len(data)
@@ -117,6 +98,49 @@ func fragmentedFixture(t *testing.T, ffmpegPath, kind string, seconds int) fragm
 	}
 	fragmentedSources[key] = src
 	return src
+}
+
+// renderFragmentedLocked renders fragmentedFixture's file, once per kind and
+// length; the caller holds fragmentedSourcesMu. "muxed" is the video and
+// audio renders copied into one file, fragmented at the video's keyframes —
+// the shape an encode of both writes, for a tenth of the cost.
+func renderFragmentedLocked(t *testing.T, ffmpegPath, kind string, seconds int) []byte {
+	t.Helper()
+	key := fmt.Sprint(kind, seconds)
+	if data, ok := fragmentedRenders[key]; ok {
+		return data
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "source.mp4")
+	args := []string{"-nostdin", "-y"}
+	switch kind {
+	case "audio":
+		args = append(args, "-f", "lavfi", "-t", fmt.Sprint(seconds), "-i", "anullsrc=r=44100:cl=mono:nb_samples=4096",
+			"-c:a", "aac", "-frag_duration", "2000000", "-movflags", "+empty_moov+default_base_moof")
+	case "muxed":
+		video, audio := filepath.Join(dir, "video.mp4"), filepath.Join(dir, "audio.mp4")
+		for p, k := range map[string]string{video: "video", audio: "audio"} {
+			if err := os.WriteFile(p, renderFragmentedLocked(t, ffmpegPath, k, seconds), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		args = append(args, "-i", video, "-i", audio, "-map", "0:v", "-map", "1:a", "-c", "copy",
+			"-movflags", "+frag_keyframe+empty_moov+default_base_moof")
+	default:
+		args = append(args, "-f", "lavfi", "-i", fmt.Sprintf("testsrc=size=64x64:rate=5:duration=%d", seconds),
+			"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "10", "-keyint_min", "10", "-sc_threshold", "0",
+			"-movflags", "+frag_keyframe+empty_moov+default_base_moof")
+	}
+	args = append(args, "-f", "mp4", path)
+	if out, err := exec.Command(ffmpegPath, args...).CombinedOutput(); err != nil {
+		t.Fatalf("generate the fragmented %s fixture: %v\n%s", kind, err, out)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragmentedRenders[key] = data
+	return data
 }
 
 // damage is how stageFragmented spoils one fragment.
