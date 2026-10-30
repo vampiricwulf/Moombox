@@ -103,34 +103,43 @@ func TestTheBucketWaitOutlastsTheRoundingSkew(t *testing.T) {
 }
 
 // TestDoesNotSleepWhenTheBucketHasRoom is the premise: a sleep on every send
-// would throttle a healthy webhook to one embed per window for nothing.
+// would throttle a healthy webhook to one embed per window for nothing. It
+// counts the waits the sends took rather than timing the gap between them,
+// which also holds the first request's whole round trip.
+//
+// THE MUTANT: noteBucket arming the deadline whatever Remaining says. The
+// second send then waits out the 5 s window, and this sees that wait.
 func TestDoesNotSleepWhenTheBucketHasRoom(t *testing.T) {
-	rec := &arrivalRecorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		rec.mark()
 		rw.Header().Set("X-RateLimit-Remaining", "4")
 		rw.Header().Set("X-RateLimit-Reset-After", "5")
 		rw.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(srv.Close)
 
+	sleeps := recordDiscordSleeps(t)
 	d := &DiscordWebhook{URL: srv.URL}
 	for range 2 {
 		if err := d.Send(One("t", "", 0, nil, SendOptions{})); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
 	}
-	if got := rec.gap(); got > 500*time.Millisecond {
-		t.Errorf("the second request waited %v although the bucket reported 4 remaining", got)
+	if got := sleeps(); len(got) != 0 {
+		t.Errorf("the sends waited %v although the bucket reported 4 remaining", got)
 	}
 }
 
 // TestBucketClearsWhenTheWindowRefills: a stale "Remaining: 0" must not keep
-// sleeping forever once Discord reports room again.
+// sleeping forever once Discord reports room again. The recorder returns at
+// once, so the empty-bucket deadline the first response armed is still in the
+// future when the third send looks at it — only the clear in between lets that
+// send go without a wait.
+//
+// THE MUTANT: noteBucket leaving the deadline in place on Remaining > 0. The
+// third send then waits for the window a second time.
 func TestBucketClearsWhenTheWindowRefills(t *testing.T) {
 	var n int
 	var mu sync.Mutex
-	rec := &arrivalRecorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
 		n++
@@ -140,7 +149,6 @@ func TestBucketClearsWhenTheWindowRefills(t *testing.T) {
 			rw.Header().Set("X-RateLimit-Remaining", "0")
 			rw.Header().Set("X-RateLimit-Reset-After", "0.05")
 		} else {
-			rec.mark()
 			rw.Header().Set("X-RateLimit-Remaining", "9")
 			rw.Header().Set("X-RateLimit-Reset-After", "5")
 		}
@@ -148,14 +156,19 @@ func TestBucketClearsWhenTheWindowRefills(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
+	sleeps := recordDiscordSleeps(t)
 	d := &DiscordWebhook{URL: srv.URL}
 	for range 3 {
 		if err := d.Send(One("t", "", 0, nil, SendOptions{})); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
 	}
-	if got := rec.gap(); got > 500*time.Millisecond {
-		t.Errorf("the third request waited %v — the bucket was not cleared by a Remaining > 0 response", got)
+	got := sleeps()
+	if len(got) != 1 {
+		t.Fatalf("the sends waited %v, want one wait (before the second) — the bucket was not cleared by a Remaining > 0 response", got)
+	}
+	if window := 50*time.Millisecond + bucketSkewPad; got[0] <= 0 || got[0] > window {
+		t.Errorf("the second send waited %v, want the rest of the %v window the first response armed", got[0], window)
 	}
 }
 
