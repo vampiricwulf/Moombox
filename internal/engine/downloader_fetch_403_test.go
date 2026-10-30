@@ -45,6 +45,9 @@ func TestForbiddenBehindHeadRefreshesAndRetries(t *testing.T) {
 	// idiom every other direct test of this gate uses (see
 	// downloader_dash_headseq_test.go's d.lastSegTime.StoreNow() calls).
 	d.lastSegTime.StoreNow()
+	// The retry after the refresh backs off singleGoneRetry first;
+	// fastDelays keeps the attempt count and only shrinks that 500 ms.
+	d.delays = fastDelays()
 
 	body, err := d.fetchSegmentWithRetry(t.Context(), d.buildSegmentURL(10), nil)
 	if err != nil {
@@ -208,6 +211,7 @@ func TestForbiddenBehindHeadURLRefreshRebuildsSegURL(t *testing.T) {
 	d.noteHeadSeq(5000)
 	d.currentSeq.Store(10)
 	d.lastSegTime.StoreNow() // see comment in the token-refresh test above
+	d.delays = fastDelays()  // as in the token-refresh test above
 
 	seq := 10
 	segURL := d.buildSegmentURL(seq)

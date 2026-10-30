@@ -330,6 +330,9 @@ func TestHlsLive_FMP4StuckSegmentSkipsNotSplitCycle(t *testing.T) {
 		StopOnGap:  true,
 	})
 	d.delays = fastDelays()
+	// The stuck budget is a count (MaxSegmentRetries rounds); the pause
+	// between rounds decides nothing here, so it shrinks to 10 ms.
+	d.delays.hlsStuckRetry = 10 * time.Millisecond
 	var gaps []DownloadGap
 	d.OnGap = func(g DownloadGap) { gaps = append(gaps, g) }
 
