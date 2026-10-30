@@ -156,7 +156,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		hlsForceSeq = true
 	}
 
-	result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
+	result.VideoDownloader = newSegmentDownloader(engine.DownloaderOptions{
 		BaseURL:             variantURL,
 		OutputFile:          result.VideoPath,
 		StartSeq:            hlsStartSeq,

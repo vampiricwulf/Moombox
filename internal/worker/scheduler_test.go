@@ -33,7 +33,7 @@ func TestSchedulerWakeIsSafeNoOp(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(mustHappenWithin):
 		t.Fatal("Wake() blocked with no scheduler loop running")
 	}
 }
@@ -202,6 +202,18 @@ func addFeedItemRow(t *testing.T, db *database.Database, chID, videoID, publishe
 	}
 }
 
+// mustHappenWithin bounds a wait for something a correct run reaches in
+// milliseconds: a goroutine's first step, a startup sweep, a wakeup. It is
+// ten seconds so that a correct run descheduled for a second or two, on a
+// loaded runner or under -race, still passes; a two-second bound failed such
+// a run as though the step had never come. A broken run still fails, only
+// later: every mutant these waits catch leaves the step to the 60 s
+// heartbeat, the Twitch wait's 15 s poll, or never.
+const mustHappenWithin = 10 * time.Second
+
+// waitForCond polls cond until it holds, failing at timeout. It looks once
+// more after the deadline, so a poller descheduled past it still sees a
+// condition that came true meanwhile.
 func waitForCond(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -210,6 +222,9 @@ func waitForCond(t *testing.T, timeout time.Duration, desc string, cond func() b
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
+	}
+	if cond() {
+		return
 	}
 	t.Fatalf("timed out waiting for %s", desc)
 }
@@ -616,7 +631,8 @@ func TestBroadcastFlips_WakeScheduler(t *testing.T) {
 // predates it.
 //
 // Mutant: delete the s.sweep() above the inner loop -> nothing is admitted
-// inside the 2 s window (the next chance is heartbeatInterval away).
+// inside the wait's mustHappenWithin (the next chance is heartbeatInterval
+// away).
 func TestScheduler_RunSweepsBeforeWaiting(t *testing.T) {
 	s, db, log := testSchedulerSetup(t, 2)
 	chID := "UC_startup"
@@ -627,7 +643,7 @@ func TestScheduler_RunSweepsBeforeWaiting(t *testing.T) {
 	t.Cleanup(cancel)
 	go s.Run(ctx)
 
-	waitForCond(t, 2*time.Second, "the startup sweep to admit the leftover backlog", func() bool {
+	waitForCond(t, mustHappenWithin, "the startup sweep to admit the leftover backlog", func() bool {
 		return log.enqueueCount() >= 1
 	})
 	if got := log.admitted(); len(got) != 1 || got[0] != "v_leftover" {
@@ -646,10 +662,14 @@ func TestScheduler_RunSweepsBeforeWaiting(t *testing.T) {
 // The seam is resolveSlots: sweep() calls it once per channel with Queued
 // rows, so a panicking resolver is a sweep that always panics, counted.
 //
+// The restart pause is 20 ms here rather than production's second, so the
+// window below spans a dozen restarts in a quarter of a second.
+//
 // Mutant: drop the `first` gate (sweep unconditionally at the top of every
-// restart) -> a second sweep lands ~1 s in, inside this test's window.
+// restart) -> a second sweep lands ~20 ms in, inside this test's window.
 func TestScheduler_StartupSweepRunsOnlyOnce(t *testing.T) {
 	s, db, _ := testSchedulerSetup(t, 2)
+	s.restartPause = 20 * time.Millisecond
 	chID := "UC_wedged"
 	addSchedJob(t, db, &chID, "v_wedged", database.StatusQueued, 1)
 	addFeedItemRow(t, db, chID, "v_wedged", "2026-07-01T00:00:00Z")
@@ -672,15 +692,15 @@ func TestScheduler_StartupSweepRunsOnlyOnce(t *testing.T) {
 	t.Cleanup(cancel)
 	go s.Run(ctx)
 
-	waitForCond(t, 2*time.Second, "the startup sweep to run at all", func() bool {
+	waitForCond(t, mustHappenWithin, "the startup sweep to run at all", func() bool {
 		return count() >= 1
 	})
 
-	// The restart sleep is 1 s and heartbeatInterval is 60 s, so an ungated
-	// startup sweep panics again at ~1 s and ~2 s while a gated one cannot
-	// sweep again until the heartbeat. Watch a window that spans two restarts,
+	// The restart pause is 20 ms and heartbeatInterval is 60 s, so an ungated
+	// startup sweep panics again every 20 ms while a gated one cannot sweep
+	// again until the heartbeat. Watch a window that spans a dozen restarts,
 	// failing the moment a second sweep lands.
-	deadline := time.Now().Add(1800 * time.Millisecond)
+	deadline := time.Now().Add(250 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if n := count(); n > 1 {
 			t.Fatalf("sweep ran %d times while panicking — the startup sweep must run once per Run, "+

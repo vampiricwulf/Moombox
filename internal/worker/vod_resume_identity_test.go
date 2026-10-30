@@ -20,8 +20,8 @@ import (
 var vodRenditionFill = map[string]byte{"399": 'A', "136": 'B', "251": 'C', "140": 'D'}
 
 // vodRenditionServer serves whole-file renditions of one VOD by itag, each
-// size bytes of its vodRenditionFill behind an ftyp header, generated per
-// request rather than held. While cut is set every rendition answers 404 from
+// size bytes of its vodRenditionFill behind an ftyp header, written per
+// request from one megabyte of each fill rather than held. While cut is set every rendition answers 404 from
 // the 50 MB checkpoint on, so a run dies just past its first sidecar save.
 // starts records each itag's chunk Range starts (the 1-byte probe excluded).
 type vodRenditionServer struct {
@@ -34,6 +34,14 @@ type vodRenditionServer struct {
 func newVodRenditionServer(t *testing.T, size int64) *vodRenditionServer {
 	t.Helper()
 	s := &vodRenditionServer{cut: true, starts: map[string][]int64{}}
+	fills := map[string][]byte{}
+	for itag, b := range vodRenditionFill {
+		fills[itag] = bytes.Repeat([]byte{b}, 1<<20)
+	}
+	// An itag vodRenditionFill does not name is served zeros, as its zero
+	// fill byte always was; without a fill of its own the write loop below
+	// would never move.
+	zeros := make([]byte, 1<<20)
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		itag := r.URL.Query().Get("itag")
 		var start, end int64
@@ -51,14 +59,26 @@ func newVodRenditionServer(t *testing.T, size int64) *vodRenditionServer {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		body := bytes.Repeat([]byte{vodRenditionFill[itag]}, int(end-start+1))
-		if start == 0 {
-			copy(body, "\x00\x00\x00\x18ftypdash")
-		}
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 		w.WriteHeader(http.StatusPartialContent)
-		w.Write(body)
+		left := end - start + 1
+		if start == 0 {
+			header := []byte("\x00\x00\x00\x18ftypdash")[:min(12, left)]
+			w.Write(header)
+			left -= int64(len(header))
+		}
+		fill := fills[itag]
+		if fill == nil {
+			fill = zeros
+		}
+		for left > 0 {
+			n := min(left, int64(len(fill)))
+			if _, err := w.Write(fill[:n]); err != nil {
+				return
+			}
+			left -= n
+		}
 	}))
 	t.Cleanup(s.Close)
 	return s

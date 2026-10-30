@@ -27,11 +27,7 @@ func TestTwitchGuardRefusesANewBroadcastForAnUpcomingJobWithACapture(t *testing.
 	staging := t.TempDir()
 	cfg := config.Defaults()
 	cfg.Paths.StagingDirectory = staging
-	db, err := database.Open(filepath.Join(t.TempDir(), "guard.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTestDB(t)
 	sp := &StreamProcessor{db: db, cfg: cfg, twitchHints: newTwitchHintCache(), logger: discardLogger{}}
 
 	job := &database.Job{ID: "tw_guard", VideoID: "tw_guard", URL: "https://twitch.tv/streamer",

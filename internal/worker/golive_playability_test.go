@@ -2,7 +2,6 @@ package worker
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -19,11 +18,7 @@ import (
 // Mutant: completeStreamTransition without the check — the dead-cookie row
 // downloads.
 func TestGoLiveStopsOnDeadCredentials(t *testing.T) {
-	db, err := database.Open(filepath.Join(t.TempDir(), "golive.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTestDB(t)
 	sp := &StreamProcessor{db: db, logger: discardLogger{}}
 
 	walled := func(formats int) *youtube.VideoInfo {

@@ -174,7 +174,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// the post-cipher-resolution URLs; these (not the raw Format.URL) are
 	// what the engine fetches.
 	if result.HasVideo && result.VideoPath != "" && videoResolved != "" {
-		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
+		result.VideoDownloader = newSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:             videoResolved,
 			OutputFile:          result.VideoPath,
 			StartSeq:            0,
@@ -190,7 +190,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	}
 
 	if result.HasAudio && result.AudioPath != "" && audioResolved != "" {
-		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
+		result.AudioDownloader = newSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:             audioResolved,
 			OutputFile:          result.AudioPath,
 			StartSeq:            0,

@@ -317,7 +317,7 @@ func DownloadManifestlessDash(
 		// OnCipherFailure site. Both closures share this one local so
 		// neither can observe a later mutation of the videoStream pointer.
 		videoItagChosen := videoStream.Itag
-		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
+		result.VideoDownloader = newSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:             videoStream.BaseURL,
 			OutputFile:          result.VideoPath,
 			StartSeq:            videoStartSeq,
@@ -378,7 +378,7 @@ func DownloadManifestlessDash(
 		// DownloaderOptions literal) so OnCredentialRefresh and the later
 		// OnCipherFailure share one immutable snapshot of the chosen itag.
 		audioItagChosen := audioStream.Itag
-		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
+		result.AudioDownloader = newSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:             audioStream.BaseURL,
 			OutputFile:          result.AudioPath,
 			StartSeq:            audioStartSeq,

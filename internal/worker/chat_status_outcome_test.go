@@ -163,11 +163,7 @@ func TestChatFileStatusReadsTheKeptResumeSidecarAsTheVerdict(t *testing.T) {
 // Mutant: writing the DB row without setting jobCtx.ChatStatus — the row is
 // right until copyAssets runs, and then the job finishes reporting "finished".
 func TestRecordChatOutcomeWritesTheRowAndRemembersItOnTheContext(t *testing.T) {
-	db, err := database.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTestDB(t)
 	if _, err := db.AddJob(&database.Job{ID: "j1", VideoID: "v1", URL: "https://twitch.tv/videos/1", Platform: "twitch"}); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
@@ -239,6 +235,10 @@ func (b *blockingChatSource) IsRunning() bool   { return b.running.Load() }
 // after the test releases it, well after resolveChatOutcome has started
 // waiting; a premature read observes the recorder's zero value (nil) instead
 // of the real error and this test fails.
+//
+// The first wait is a minute, so nothing but the release can end it: at one
+// second, with its 200 ms grace after it, a test descheduled for longer than
+// both before the release read the wait as timed out.
 func TestResolveChatOutcomeWaitsForTheGoroutinesRecordBeforeReadingIt(t *testing.T) {
 	o := &DownloadOrchestrator{logger: discardLogger{}}
 	var rec chatOutcome
@@ -255,7 +255,7 @@ func TestResolveChatOutcomeWaitsForTheGoroutinesRecordBeforeReadingIt(t *testing
 
 	resultCh := make(chan error, 1)
 	go func() {
-		resultCh <- o.resolveChatOutcome(dl, &rec, done, time.Second, 200*time.Millisecond)
+		resultCh <- o.resolveChatOutcome(dl, &rec, done, time.Minute, 200*time.Millisecond)
 	}()
 	// Give resolveChatOutcome a head start before letting the goroutine
 	// finish — a correct implementation blocks on <-done for this whole
@@ -270,7 +270,7 @@ func TestResolveChatOutcomeWaitsForTheGoroutinesRecordBeforeReadingIt(t *testing
 			t.Errorf("resolveChatOutcome = %v, want %v — it must wait for the goroutine's "+
 				"close(done) signal before reading the recorder, not race it", got, stall)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("resolveChatOutcome did not return")
 	}
 }
@@ -345,6 +345,11 @@ func (s *stopUnwoundChatSource) IsRunning() bool   { return s.running.Load() }
 // nil flows straight through and chatStatusForOutcome(5000, nil) derives
 // "finished" for a short archive, silently, with no Warn (recordChatOutcome
 // logs only for a non-nil outcome).
+//
+// The grace is an hour, so a call back within ten seconds took the grace
+// select's <-done arm (Stop() unwound promptly), not its timer arm. It was
+// two seconds, and the check that the call came back sooner failed a correct
+// run descheduled for that long.
 func TestResolveChatOutcomeNeverReturnsNilOnceTheWaitTimedOut(t *testing.T) {
 	o := &DownloadOrchestrator{logger: discardLogger{}}
 	var rec chatOutcome
@@ -357,10 +362,23 @@ func TestResolveChatOutcomeNeverReturnsNilOnceTheWaitTimedOut(t *testing.T) {
 	}()
 	<-dl.started
 
-	const grace = 2 * time.Second
-	start := time.Now()
-	got := o.resolveChatOutcome(dl, &rec, done, 20*time.Millisecond, grace)
-	elapsed := time.Since(start)
+	const grace = time.Hour
+	result := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("panic in resolveChatOutcome: %v", r)
+			}
+		}()
+		result <- o.resolveChatOutcome(dl, &rec, done, 20*time.Millisecond, grace)
+	}()
+	var got error
+	select {
+	case got = <-result:
+	case <-time.After(10 * time.Second):
+		t.Fatal("resolveChatOutcome was still in its grace wait after 10s — this test is meant to " +
+			"exercise the grace select's <-done arm (Stop() unwound promptly), not its timer arm")
+	}
 
 	if got == nil {
 		t.Fatal("resolveChatOutcome returned nil after its first wait timed out and Stop() unwound " +
@@ -373,11 +391,6 @@ func TestResolveChatOutcomeNeverReturnsNilOnceTheWaitTimedOut(t *testing.T) {
 	}
 	if status := chatStatusForOutcome(dl.MessageCount(), got); status != chatStatusIncomplete {
 		t.Errorf("chatStatusForOutcome(%d, %v) = %q, want %q", dl.MessageCount(), got, status, chatStatusIncomplete)
-	}
-	if elapsed >= grace {
-		t.Errorf("resolveChatOutcome took %v, i.e. the whole grace window — this test is meant to "+
-			"exercise the grace select's <-done arm (Stop() unwound promptly), not its timer arm",
-			elapsed)
 	}
 }
 

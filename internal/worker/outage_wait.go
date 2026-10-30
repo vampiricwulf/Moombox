@@ -32,8 +32,14 @@ var networkWaitRefresh = 10 * time.Second
 // task list, the "hung" look the marker exists to prevent, while the engine's
 // own wait for the same outage read as a wait.
 func networkWaitLine(waited time.Duration) string {
-	return networkWaitProgress + " (" + utils.FormatDurationHuman(waited) + ")"
+	return networkWaitProgress + " (" + networkWaitElapsed(waited) + ")"
 }
+
+// networkWaitElapsed renders the line's elapsed: utils.FormatDurationHuman,
+// whole seconds. A var so a test can read the count at a finer grain than
+// the second it would otherwise wait for it to move. Production never writes
+// it.
+var networkWaitElapsed = utils.FormatDurationHuman
 
 // outageConfirmWindow is how long a transport failure met while the
 // connectivity monitor still reports online waits for the monitor to call

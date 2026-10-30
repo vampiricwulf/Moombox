@@ -67,6 +67,11 @@ type ProgressTracker struct {
 	// JobConfig.ProgressInterval. Fixed for the tracker's life: a config save
 	// reaches the NEXT job's tracker, never a running one.
 	updateInterval time.Duration
+	// activityInterval is the activity line's refresh cadence and write
+	// throttle (activityUpdateInterval). A field so a test can watch the
+	// refresh loop tick without waiting seconds; production assigns the
+	// constant in the constructor and never reassigns it.
+	activityInterval time.Duration
 	// now is the clock every gate in this file is measured against. A field
 	// so a test can drive a synthetic burst without sleeping; production
 	// assigns time.Now in the constructor and never reassigns it. Every
@@ -211,14 +216,15 @@ func NewProgressTracker(db *database.Database, jobID string, logger logger, upda
 	}
 	now := time.Now()
 	return &ProgressTracker{
-		db:             db,
-		logger:         logger,
-		jobID:          jobID,
-		updateInterval: updateInterval,
-		now:            time.Now,
-		lastUpdate:     now,
-		lastPersist:    now,
-		startTime:      now,
+		db:               db,
+		logger:           logger,
+		jobID:            jobID,
+		updateInterval:   updateInterval,
+		activityInterval: activityUpdateInterval,
+		now:              time.Now,
+		lastUpdate:       now,
+		lastPersist:      now,
+		startTime:        now,
 	}
 }
 
@@ -413,7 +419,7 @@ func (pt *ProgressTracker) setActivity(stream streamKind, a engine.DownloadActiv
 		pt.mu.Unlock()
 		return // a stream delivered recently — the normal counter is current
 	}
-	if now.Sub(pt.lastActivityWrite) < activityUpdateInterval {
+	if now.Sub(pt.lastActivityWrite) < pt.activityEvery() {
 		pt.mu.Unlock()
 		return
 	}
@@ -499,6 +505,15 @@ func (pt *ProgressTracker) pendingActivityLocked() bool {
 		pt.orchActivity != engine.ActivityNone
 }
 
+// activityEvery is the tracker's activity cadence: activityInterval, or the
+// constant for a tracker built without the constructor.
+func (pt *ProgressTracker) activityEvery() time.Duration {
+	if pt.activityInterval > 0 {
+		return pt.activityInterval
+	}
+	return activityUpdateInterval
+}
+
 // ensureActivityTickerLocked starts the refresh goroutine when none is
 // running. Caller holds mu.
 func (pt *ProgressTracker) ensureActivityTickerLocked() {
@@ -526,7 +541,7 @@ func (pt *ProgressTracker) activityRefreshLoop() {
 			pt.mu.Unlock()
 		}
 	}()
-	ticker := time.NewTicker(activityUpdateInterval)
+	ticker := time.NewTicker(pt.activityEvery())
 	defer ticker.Stop()
 	idleTicks := 0
 	for range ticker.C {
@@ -559,7 +574,7 @@ func (pt *ProgressTracker) activityRefreshLoop() {
 		// Throttle against engine-emission writes; the 9/10 slack keeps the
 		// ~1s ticker from beating against its own last write and skipping
 		// alternate ticks.
-		if now.Sub(pt.lastActivityWrite) < activityUpdateInterval*9/10 {
+		if now.Sub(pt.lastActivityWrite) < pt.activityEvery()*9/10 {
 			pt.mu.Unlock()
 			continue
 		}

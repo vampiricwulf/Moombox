@@ -284,7 +284,7 @@ func TestWaitForTwitchLiveConsumesTheMonitorsHintForItsChannel(t *testing.T) {
 		if got.info == nil || got.info.StreamID != "s9" {
 			t.Fatalf("waitForTwitchLive = %+v, want the monitor's stashed info", got.info)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(mustHappenWithin):
 		cancel()
 		<-done // let the wait unwind on ctx rather than panic on the nil service
 		t.Fatal("the wait did not consume the monitor's hint for its channel: it is sleeping out a poll interval and will then pay the GQL round trip the row exists to remove")
@@ -354,7 +354,7 @@ func TestWaitForTwitchLiveReturnsWhenTheRowIsGone(t *testing.T) {
 		if got.info != nil || got.err != nil {
 			t.Errorf("waitForTwitchLive = (%v, %v), want (nil, nil) — a cancel", got.info, got.err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(mustHappenWithin):
 		t.Fatal("waitForTwitchLive kept waiting on a row that no longer exists")
 	}
 }
@@ -381,7 +381,7 @@ func TestWaitForTwitchLiveClearsItsProgressOnCancel(t *testing.T) {
 		defer close(done)
 		sp.waitForTwitchLive(ctx, job, login)
 	}()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(mustHappenWithin)
 	for {
 		if j, _ := db.GetJob(job.ID); j != nil && j.Progress == "Waiting for stream..." {
 			break
@@ -394,7 +394,7 @@ func TestWaitForTwitchLiveClearsItsProgressOnCancel(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(mustHappenWithin):
 		t.Fatal("the wait did not return on cancel")
 	}
 	j, err := db.GetJob(job.ID)

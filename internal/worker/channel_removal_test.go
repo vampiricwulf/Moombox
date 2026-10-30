@@ -15,11 +15,7 @@ import (
 // channel. Each row has its history row, as the host creates every job.
 func removalFixture(t *testing.T) (db *database.Database, staging, ch string) {
 	t.Helper()
-	db, err := database.Open(filepath.Join(t.TempDir(), "removal.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db = openTestDB(t)
 	staging = t.TempDir()
 	ch, other := "UC_removing", "UC_other"
 	for i, row := range []struct {
@@ -142,11 +138,7 @@ func TestDeletePendingChannelJobs(t *testing.T) {
 // matched by strings.Contains on the URL (another channel whose login extends
 // this one's is counted).
 func TestSummarizeTwitchChannelRemoval(t *testing.T) {
-	db, err := database.Open(filepath.Join(t.TempDir(), "twitch.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTestDB(t)
 	staging := t.TempDir()
 	for i, row := range []struct {
 		id, url, channelName string

@@ -45,6 +45,18 @@ func testWorkerSetup(t *testing.T) (*DownloadWorker, *database.Database) {
 	return w, db
 }
 
+// openTestDB opens a fresh database in a temp dir of its own, closed when
+// the test ends.
+func openTestDB(t *testing.T) *database.Database {
+	t.Helper()
+	db, err := database.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("database.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
 // discardLogger is the package's one no-op logger. It satisfies the anonymous
 // logger interface every constructor here takes, and twitch.NewAuth's and
 // cookies.NewRefreshService's too.

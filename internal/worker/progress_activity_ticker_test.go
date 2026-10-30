@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,11 +14,7 @@ import (
 // exercised end to end.
 func newDBProgressTracker(t *testing.T) (*ProgressTracker, *database.Database) {
 	t.Helper()
-	db, err := database.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTestDB(t)
 	if _, err := db.AddJob(&database.Job{ID: "act-test", Status: database.StatusDownloading}); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
@@ -68,9 +63,18 @@ func TestSpeedUsesArrivalCounter(t *testing.T) {
 // line immediately, and its elapsed counter keeps advancing WITHOUT any
 // further SetWaitActivity/emit calls — the exact window (blocking waits,
 // 5-minute verify sleeps) where the line used to freeze.
+//
+// The tracker's clock is the test's, moved five seconds on after the first
+// write, and the loop ticks every 20 ms: the line can change at the next
+// tick, where the real clock and the one-second cadence took a second.
 func TestSetWaitActivityWritesAndTickerRefreshes(t *testing.T) {
 	pt, db := newDBProgressTracker(t)
 	defer pt.Close()
+	clk := &fakeClock{t: time.Now()}
+	pt.mu.Lock()
+	pt.now = clk.now
+	pt.activityInterval = 20 * time.Millisecond
+	pt.mu.Unlock()
 
 	pt.SetWaitActivity(engine.ActivityVerifyingEnd)
 
@@ -83,7 +87,11 @@ func TestSetWaitActivityWritesAndTickerRefreshes(t *testing.T) {
 	}
 
 	// No further calls — the refresh loop alone must advance the elapsed.
-	deadline := time.Now().Add(4 * time.Second)
+	// The clock is read under pt.mu, so it moves under it.
+	pt.mu.Lock()
+	clk.t = clk.t.Add(5 * time.Second)
+	pt.mu.Unlock()
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		cur, _, _ := jobProgress(t, db)
 		if strings.HasPrefix(cur, "Verifying stream ended...") && cur != first {
@@ -92,7 +100,7 @@ func TestSetWaitActivityWritesAndTickerRefreshes(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("progress never refreshed past %q without new emissions", first)
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -143,12 +151,15 @@ func TestSegmentClearsWaitActivity(t *testing.T) {
 // percent lines).
 func TestFinalizeStopsActivityWrites(t *testing.T) {
 	pt, db := newDBProgressTracker(t)
+	pt.mu.Lock()
+	pt.activityInterval = 20 * time.Millisecond
+	pt.mu.Unlock()
 
 	pt.Finalize()
 	pt.SetWaitActivity(engine.ActivityVerifyingEnd)
 
-	// Give a (wrongly-started) refresh loop time to tick once.
-	time.Sleep(1200 * time.Millisecond)
+	// Give a (wrongly-started) refresh loop time to tick ten times over.
+	time.Sleep(200 * time.Millisecond)
 
 	progress, _, _ := jobProgress(t, db)
 	if progress != "" {

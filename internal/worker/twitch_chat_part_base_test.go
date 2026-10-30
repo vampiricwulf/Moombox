@@ -25,14 +25,23 @@ import (
 // the local clock at its start cannot pass for one based on its first segment.
 var pdtEpoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// pdtStream is twoVariantStream with #EXT-X-PROGRAM-DATE-TIME on every
-// segment and a shorter window, recording the first segment each variant's
-// downloader fetched — the first one it WROTE, on the sequential live path.
+// pdtStream is a live broadcast offered at 720p30 and then at 1080p60 only:
+// the 720p playlist 404s from the switch on, as a rendition Twitch withdrew
+// does. Both variants serve one sliding window of one-second segments, each
+// with its #EXT-X-PROGRAM-DATE-TIME, and the playlist ends ENDLIST once the
+// broadcast is over. It records the first segment each variant's downloader
+// fetched — the first one it WROTE, on the sequential live path.
+//
+// The switch comes no sooner than switchAt and once switchReady says so, and
+// the end once endReady says so: the test's own events, not set times a slow
+// machine could overrun. giveUp ends a broadcast whose events never come, so
+// a broken run fails on its assertions rather than at the context's deadline.
 type pdtStream struct {
-	start           time.Time
-	switchAt, endAt time.Duration
-	mu              sync.Mutex
-	first           map[string]int
+	start                 time.Time
+	switchAt, giveUp      time.Duration
+	mu                    sync.Mutex
+	first                 map[string]int
+	switchReady, endReady func() bool
 }
 
 func (s *pdtStream) firstSeq(name string) (int, bool) {
@@ -42,10 +51,35 @@ func (s *pdtStream) firstSeq(name string) (int, bool) {
 	return seq, ok
 }
 
+// when installs the switch and end conditions, before the run starts.
+func (s *pdtStream) when(switchReady, endReady func() bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.switchReady, s.endReady = switchReady, endReady
+}
+
+func (s *pdtStream) conditions() (switchReady, endReady func() bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.switchReady, s.endReady
+}
+
+// switched reports whether the 720p rendition is gone.
+func (s *pdtStream) switched() bool {
+	ready, _ := s.conditions()
+	return time.Since(s.start) > s.switchAt && (ready == nil || ready())
+}
+
+// ended reports whether the broadcast is over.
+func (s *pdtStream) ended() bool {
+	_, ready := s.conditions()
+	return (ready != nil && ready()) || time.Since(s.start) > s.giveUp
+}
+
 func newPDTStream(t *testing.T) (*pdtStream, twitch.TwitchHLSVariant, twitch.TwitchHLSVariant) {
 	t.Helper()
 	ts := oneSecondTS(t)
-	st := &pdtStream{start: time.Now(), switchAt: 3 * time.Second, endAt: 7 * time.Second, first: map[string]int{}}
+	st := &pdtStream{start: time.Now(), switchAt: time.Second, giveUp: 20 * time.Second, first: map[string]int{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
 		if !strings.HasSuffix(r.URL.Path, ".m3u8") {
@@ -61,12 +95,11 @@ func newPDTStream(t *testing.T) (*pdtStream, twitch.TwitchHLSVariant, twitch.Twi
 			return
 		}
 		name = strings.TrimSuffix(name, ".m3u8")
-		el := time.Since(st.start)
-		if name == "720" && el > st.switchAt {
+		if name == "720" && st.switched() {
 			http.NotFound(w, r)
 			return
 		}
-		head := int(el.Seconds())
+		head := int(time.Since(st.start).Seconds())
 		lo := max(0, head-2)
 		var b strings.Builder
 		fmt.Fprintf(&b, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:%d\n", lo)
@@ -74,7 +107,7 @@ func newPDTStream(t *testing.T) (*pdtStream, twitch.TwitchHLSVariant, twitch.Twi
 			fmt.Fprintf(&b, "#EXT-X-PROGRAM-DATE-TIME:%s\n#EXTINF:1.000,\n/%s/%d.ts\n",
 				pdtEpoch.Add(time.Duration(seq)*time.Second).Format("2006-01-02T15:04:05.000Z07:00"), name, seq)
 		}
-		if el > st.endAt {
+		if st.ended() {
 			b.WriteString("#EXT-X-ENDLIST\n")
 		}
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
@@ -140,18 +173,29 @@ func privmsg(id string, at time.Time) string {
 // RollFileAwaitingBase (the same for the second part); createDownloader not
 // wiring OnFirstSegment (both parts keep the local clock, after the wait or at
 // the final flush).
+//
+// Each step waits for the one before it rather than for a set time: the
+// 720p rendition goes once its downloader has fetched and the chat holds the
+// first message, the second message is said once the 1080p downloader has
+// fetched — it is built after the roll, so the message lands in the new part
+// — and the broadcast ends once the chat holds that one too.
 func TestTwitchPartChatIsBasedOnItsFirstSegment(t *testing.T) {
 	st, low, high := newPDTStream(t)
 	msg1At, msg2At := pdtEpoch.Add(100*time.Second), pdtEpoch.Add(200*time.Second)
+	fetched := func(name string) func() bool {
+		return func() bool { _, ok := st.firstSeq(name); return ok }
+	}
 	fakeIRC(t, privmsg("before-split", msg1At), privmsg("after-split", msg2At), func() {
-		time.Sleep(time.Until(st.start.Add(st.switchAt + 1500*time.Millisecond)))
+		for !fetched("1080")() && !st.ended() {
+			time.Sleep(10 * time.Millisecond)
+		}
 	})
 
 	h := newEndVerdictHarness(t, "tw_chat_pdt")
 	h.variant.URL, h.variant.Name, h.variant.Width, h.variant.Height, h.variant.FPS = low.URL, low.Name, low.Width, low.Height, low.FPS
-	h.variant.CheckStreamFn = func(context.Context) (bool, error) { return time.Since(st.start) <= st.endAt, nil }
+	h.variant.CheckStreamFn = func(context.Context) (bool, error) { return !st.ended(), nil }
 	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
-		if time.Since(st.start) > st.switchAt {
+		if st.switched() {
 			return []twitch.TwitchHLSVariant{high}, nil
 		}
 		return []twitch.TwitchHLSVariant{low}, nil
@@ -163,6 +207,10 @@ func TestTwitchPartChatIsBasedOnItsFirstSegment(t *testing.T) {
 		ChannelLogin: "testchan", StreamID: "s1",
 		OutputPath: filepath.Join(h.jobCtx.StagingDir, "chat.json"),
 	}, &discardLogger{})
+	st.when(
+		func() bool { return fetched("720")() && chat.MessageCount() >= 1 },
+		func() bool { return fetched("1080")() && chat.MessageCount() >= 2 },
+	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

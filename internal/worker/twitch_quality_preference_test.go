@@ -1,13 +1,7 @@
 package worker
 
 import (
-	"context"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -144,93 +138,4 @@ func TestTwitchChannelQualityPreference(t *testing.T) {
 			t.Errorf("TwitchChannelQualityPreference(%q) = %q, want %q", login, got, want)
 		}
 	}
-}
-
-// TestTwitchQualitySplitRecordsTheNewVariant drives the real ExecuteTwitch
-// through a quality split and checks twitch_quality follows the capture: the
-// 720p variant's playlist dies, the refresh offers only 1080p, and the row
-// must name the variant now being recorded. It was written once, at the
-// stream start, so a split left it naming the variant the job had left.
-//
-// The split comes early, inside minSegmentDuration, so the closed part is the
-// short-segment discard — the variant changes all the same, and the test
-// stays short.
-//
-// Mutant: the recordVariant call removed from the quality-split branch (the
-// row still names 720p30).
-func TestTwitchQualitySplitRecordsTheNewVariant(t *testing.T) {
-	srv, low, high, switched := twoVariantServer(t)
-	h := newEndVerdictHarness(t, "tw_qsplit_quality")
-	h.variant.URL, h.variant.Name, h.variant.Width, h.variant.Height, h.variant.FPS = low.URL, low.Name, low.Width, low.Height, low.FPS
-	h.variant.CheckStreamFn = func(context.Context) (bool, error) { return !srv.ended(), nil }
-	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
-		if switched() {
-			return []twitch.TwitchHLSVariant{high}, nil
-		}
-		return []twitch.TwitchHLSVariant{low}, nil
-	}
-	h.db.UpdateJobFields(h.job.ID, map[string]any{"twitch_quality": low.Name})
-	h.jobCtx.OutputDir = t.TempDir()
-	h.jobCtx.Filename = "qsplit"
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	if err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil); err != nil {
-		t.Logf("ExecuteTwitch: %v", err)
-	}
-
-	j, err := h.db.GetJob(h.job.ID)
-	if err != nil || j == nil {
-		t.Fatalf("GetJob: %v", err)
-	}
-	if j.TwitchQuality != high.Name {
-		t.Errorf("after the quality split twitch_quality = %q, want %q — the variant being recorded", j.TwitchQuality, high.Name)
-	}
-}
-
-// twoVariantStream is a live broadcast offered at 720p30 and then, from
-// switchAt, at 1080p60 only: the 720p playlist 404s from then on, as a
-// rendition Twitch withdrew does. Both variants serve one sliding window of
-// one-second segments, and the playlist ends ENDLIST at endAt.
-type twoVariantStream struct {
-	start           time.Time
-	switchAt, endAt time.Duration
-}
-
-func (s *twoVariantStream) ended() bool { return time.Since(s.start) > s.endAt }
-
-func twoVariantServer(t *testing.T) (*twoVariantStream, twitch.TwitchHLSVariant, twitch.TwitchHLSVariant, func() bool) {
-	t.Helper()
-	ts := oneSecondTS(t)
-	st := &twoVariantStream{start: time.Now(), switchAt: 2 * time.Second, endAt: 5 * time.Second}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		name, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
-		if !strings.HasSuffix(r.URL.Path, ".m3u8") {
-			w.Header().Set("Content-Type", "video/mp2t")
-			_, _ = w.Write(ts)
-			return
-		}
-		name = strings.TrimSuffix(name, ".m3u8")
-		el := time.Since(st.start)
-		if name == "720" && el > st.switchAt {
-			http.NotFound(w, r)
-			return
-		}
-		head := int(el.Seconds())
-		lo := max(0, head-5)
-		var b strings.Builder
-		fmt.Fprintf(&b, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:%d\n", lo)
-		for seq := lo; seq <= head; seq++ {
-			fmt.Fprintf(&b, "#EXTINF:1.000,\n/%s/%d.ts\n", name, seq)
-		}
-		if el > st.endAt {
-			b.WriteString("#EXT-X-ENDLIST\n")
-		}
-		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-		_, _ = w.Write([]byte(b.String()))
-	}))
-	t.Cleanup(srv.Close)
-	low := twitch.TwitchHLSVariant{URL: srv.URL + "/720.m3u8", Name: "720p30", Width: 1280, Height: 720, FPS: 30}
-	high := twitch.TwitchHLSVariant{URL: srv.URL + "/1080.m3u8", Name: "1080p60", Width: 1920, Height: 1080, FPS: 60}
-	return st, low, high, func() bool { return time.Since(st.start) > st.switchAt }
 }

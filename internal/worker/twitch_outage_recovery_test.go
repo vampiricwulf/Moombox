@@ -71,7 +71,13 @@ func oneSecondTS(t *testing.T) []byte {
 // outageThenRecover runs ExecuteTwitch on a broadcast that stays live, cuts
 // connectivity once segments are landing, restores it, and returns how the
 // run ended.
-func outageThenRecover(t *testing.T, h *endVerdictHarness, srv *httptest.Server, first <-chan struct{}) (*database.Job, error) {
+//
+// "Landing" is a staged video file with bytes in it, and whatever else the
+// test's ready conditions wait for (a chat that holds its messages), rather
+// than a set time after the first segment request: a slow disk or a slow IRC
+// handshake outlasted that, and the outage then cut a capture that had
+// nothing staged yet.
+func outageThenRecover(t *testing.T, h *endVerdictHarness, srv *httptest.Server, first <-chan struct{}, ready ...func() bool) (*database.Job, error) {
 	t.Helper()
 	old := postOutageRetryDelay
 	postOutageRetryDelay = 10 * time.Millisecond
@@ -91,9 +97,24 @@ func outageThenRecover(t *testing.T, h *endVerdictHarness, srv *httptest.Server,
 	case <-time.After(20 * time.Second):
 		t.Fatal("no segment fetched")
 	}
-	time.Sleep(1500 * time.Millisecond)
+	landed := func() bool {
+		if !stagedVideoHasBytes(h.jobCtx.StagingDir) {
+			return false
+		}
+		for _, r := range ready {
+			if !r() {
+				return false
+			}
+		}
+		return true
+	}
+	for deadline := time.Now().Add(20 * time.Second); !landed(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the capture never landed anything to cut")
+		}
+	}
 	h.conn.set(false)
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	h.conn.set(true)
 	select {
 	case err := <-done:
@@ -103,6 +124,21 @@ func outageThenRecover(t *testing.T, h *endVerdictHarness, srv *httptest.Server,
 		t.Fatal("ExecuteTwitch did not return")
 		return nil, nil
 	}
+}
+
+// stagedVideoHasBytes reports whether a video_stream anywhere under staging —
+// the root part's, or a later part's seg_N — holds a written segment.
+func stagedVideoHasBytes(staging string) bool {
+	found := false
+	_ = filepath.WalkDir(staging, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && d.Name() == "video_stream" {
+			if fi, err := d.Info(); err == nil && fi.Size() > 0 {
+				found = true
+			}
+		}
+		return nil
+	})
+	return found
 }
 
 // TestPostOutageUnknownVerdictLandsInMarkedError: back online after an
@@ -293,7 +329,9 @@ func TestOutageFinalizeSpillsAFailedFinalFlush(t *testing.T) {
 	h.chat = twitch.NewChatDownloader(twitch.ChatDownloaderOptions{ChannelLogin: "testchan", StreamID: "s1",
 		OutputPath: filepath.Join(staging, "chat.json")}, &discardLogger{})
 
-	fresh, err := outageThenRecover(t, h, srv, first)
+	// The outage comes once the chat holds both messages, so the final flush
+	// is the one with something to write.
+	fresh, err := outageThenRecover(t, h, srv, first, func() bool { return h.chat.MessageCount() >= 2 })
 	if err != nil || fresh.Status != database.StatusFinished {
 		t.Fatalf("the outage finalize ended as err=%v status=%s, want it Finished — this test is about its chat verdict",
 			err, fresh.Status)

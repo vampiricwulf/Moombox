@@ -82,7 +82,7 @@ func TestSchedulerSweepsWhenConnectivityReturns(t *testing.T) {
 
 	ctx := t.Context()
 	go s.Run(ctx)
-	waitForCond(t, 2*time.Second, "Run's subscription", func() bool {
+	waitForCond(t, mustHappenWithin, "Run's subscription", func() bool {
 		conn.mu.Lock()
 		defer conn.mu.Unlock()
 		return len(conn.cbs) == 1
@@ -92,7 +92,7 @@ func TestSchedulerSweepsWhenConnectivityReturns(t *testing.T) {
 		t.Fatalf("admitted %d while offline", n)
 	}
 	conn.set(true)
-	waitForCond(t, 2*time.Second, "an admission once connectivity returned", func() bool {
+	waitForCond(t, mustHappenWithin, "an admission once connectivity returned", func() bool {
 		return log.enqueueCount() == 1
 	})
 }

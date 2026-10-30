@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -43,11 +42,7 @@ const (
 // tracker owns no goroutine: the fake clock has exactly one reader.
 func reportsInOneBurst(t *testing.T, interval time.Duration) int {
 	t.Helper()
-	db, err := database.Open(filepath.Join(t.TempDir(), "burst.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTestDB(t)
 	if _, err := db.AddJob(&database.Job{ID: "burst", Status: database.StatusDownloading}); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}

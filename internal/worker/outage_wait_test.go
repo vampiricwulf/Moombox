@@ -903,23 +903,38 @@ func TestDownloadSetupAnswerIsRecorded(t *testing.T) {
 // wait, through the retries networkWaitFloor makes while the monitor stays
 // offline.
 //
+// The line renders its elapsed to the millisecond here (networkWaitElapsed),
+// so the count can be read moving within milliseconds rather than at its
+// first whole second, which cost each subtest a second.
+//
 // Mutants this kills:
 //   - the refresh arm dropped → within one wait the line keeps the "(0s)" it
 //     opened with (the first subtest, whose floor never comes)
 //   - processStreamThroughOutages starting since afresh on every wait → each
-//     retry's line opens at "(0s)" again and never reaches a second (the
-//     second subtest, a retry every 200 ms)
+//     retry's line opens at "(0s)" again and never counts past its own
+//     50 ms floor (the second subtest, which waits for four floors' worth)
 func TestNetworkWaitLineCountsTheWait(t *testing.T) {
+	prevElapsed := networkWaitElapsed
+	networkWaitElapsed = func(d time.Duration) string { return d.Round(time.Millisecond).String() }
+	t.Cleanup(func() { networkWaitElapsed = prevElapsed })
+	// counted reads the elapsed off a wait line.
+	counted := func(p string) time.Duration {
+		d, _ := time.ParseDuration(strings.TrimSuffix(strings.TrimPrefix(p, networkWaitProgress+" ("), ")"))
+		return d
+	}
 	for _, tc := range []struct {
 		name  string
 		floor time.Duration
+		// past is how far the count must get: anything at all within one
+		// wait, and beyond what any single retry can count across them.
+		past time.Duration
 	}{
-		{"within one wait", 10 * time.Second},
-		{"across the floor's retries", 200 * time.Millisecond},
+		{"within one wait", 10 * time.Second, 0},
+		{"across the floor's retries", 50 * time.Millisecond, 200 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			oldFloor, oldRefresh := networkWaitFloor, networkWaitRefresh
-			networkWaitFloor, networkWaitRefresh = tc.floor, 20*time.Millisecond
+			networkWaitFloor, networkWaitRefresh = tc.floor, 10*time.Millisecond
 			t.Cleanup(func() { networkWaitFloor, networkWaitRefresh = oldFloor, oldRefresh })
 			w, db, _ := outageWorker(t, false) // offline throughout
 			ch := "UC_count"
@@ -930,9 +945,19 @@ func TestNetworkWaitLineCountsTheWait(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := runJob(t, w, ctx, "count_upcoming")
-			waitForCond(t, 5*time.Second, "a wait line counting past a second", func() bool {
+			// The first wait line seen is the one to move on from: a count
+			// that is already a millisecond or two in when it is first
+			// written must not pass for one that moved.
+			var first string
+			waitForCond(t, 5*time.Second, fmt.Sprintf("a wait line counting past %v", tc.past), func() bool {
 				p := jobRow(t, db, "count_upcoming").Progress
-				return isNetworkWaitLine(p) && p != networkWaitLine(0)
+				if !isNetworkWaitLine(p) {
+					return false
+				}
+				if first == "" {
+					first = p
+				}
+				return p != first && counted(p) > tc.past
 			})
 			cancel()
 			awaitDone(t, done, "count_upcoming")

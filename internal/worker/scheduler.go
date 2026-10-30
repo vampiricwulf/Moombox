@@ -37,6 +37,10 @@ type Scheduler struct {
 	// drains at most one signal per admission sweep.
 	wake chan struct{}
 	log  logger
+	// restartPause is how long Run waits after a panicking sweep before it
+	// goes round again (production: a second). A field so the panic-restart
+	// test can watch several restarts without sleeping seconds out.
+	restartPause time.Duration
 
 	// conn is the connectivity monitor (nil: always online). An admission
 	// made during an outage is a backlog VOD sent to fail its first fetch, so
@@ -82,8 +86,9 @@ func newScheduler(db *database.Database, queue jobEnqueuer, log logger) *Schedul
 		updateJob: func(jobID string, fields map[string]any) bool {
 			return db.UpdateJobFieldsIf(jobID, database.StatusQueued, fields)
 		},
-		wake: make(chan struct{}, 1),
-		log:  log,
+		wake:         make(chan struct{}, 1),
+		log:          log,
+		restartPause: time.Second,
 	}
 }
 
@@ -286,7 +291,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 		// Check if context is done before restarting.
 		// ctx-aware sleep so shutdown during the pause returns promptly.
-		if err := utils.Sleep(ctx, time.Second); err != nil {
+		if err := utils.Sleep(ctx, s.restartPause); err != nil {
 			return
 		}
 	}

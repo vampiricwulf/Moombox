@@ -64,8 +64,8 @@ func TestVodChatWaitTimeout(t *testing.T) {
 //
 // Mutants:
 //   - releasing after resolveChatOutcome returns (or not at all): the second
-//     acquire below blocks for its whole 2 s window and this test fails on the
-//     "still holding" arm.
+//     acquire below blocks for its whole mustHappenWithin and this test fails
+//     on the "still holding" arm.
 //   - a raw activeDownloads decrement in place of ReleaseDownloadSlot: the
 //     orchestrators release again below the mux, so the pool would leak a slot
 //     per VOD; the ActiveCount check at the end fails.
@@ -100,7 +100,7 @@ func TestVodChatWaitSlotIsReleasedBeforeTheWait(t *testing.T) {
 
 	acquired := make(chan bool, 1)
 	go func() {
-		actx, acancel := context.WithTimeout(context.Background(), 2*time.Second)
+		actx, acancel := context.WithTimeout(context.Background(), mustHappenWithin)
 		defer acancel()
 		acquired <- q.AcquireDownloadSlot(actx, "next")
 	}()
@@ -111,7 +111,7 @@ func TestVodChatWaitSlotIsReleasedBeforeTheWait(t *testing.T) {
 			t.Fatal("the next VOD could not acquire a download slot while the chat wait was " +
 				"running — the slot must be released BEFORE the wait, not after it")
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(2 * mustHappenWithin):
 		t.Fatal("the second AcquireDownloadSlot never returned")
 	}
 
@@ -253,7 +253,9 @@ func loggedDuration(cl *captureLogger, msg, key string) (time.Duration, bool) {
 // Mutant: the `ctx.Err() == nil` guard the first round used around the whole
 // pre-wait — a dead context then skipped the collapse entirely and handed
 // resolveChatOutcome the full 30-minute floor, and this test hits its
-// deadline.
+// deadline. That deadline is the only bound: a one-second bound on the call
+// as well failed a correct run descheduled for a second, and a wait that
+// does not collapse is the floor's thirty minutes, not one.
 func TestVodChatWaitStopsPromptlyWhenAlreadyCancelled(t *testing.T) {
 	o := &DownloadOrchestrator{logger: discardLogger{}}
 	var rec chatOutcome
@@ -270,17 +272,12 @@ func TestVodChatWaitStopsPromptlyWhenAlreadyCancelled(t *testing.T) {
 	cancel() // dead on entry
 
 	result := make(chan error, 1)
-	start := time.Now()
 	go func() {
 		result <- o.resolveVodChatOutcome(ctx, dl, &rec, done, &database.Job{ID: "vod3"})
 	}()
 
 	select {
 	case got := <-result:
-		if elapsed := time.Since(start); elapsed > time.Second {
-			t.Errorf("resolveVodChatOutcome took %s on a context that was dead on entry — the "+
-				"bound must collapse, not run", elapsed)
-		}
 		if got == nil {
 			t.Fatal("resolveVodChatOutcome returned nil for a chat that was still paging when " +
 				"the job was stopped")
@@ -384,10 +381,13 @@ type slotWatchingChatSource struct {
 func (s *slotWatchingChatSource) Start(context.Context) error {
 	s.running.Store(true)
 	defer s.running.Store(false)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	deadline := time.Now().Add(mustHappenWithin)
+	for {
 		if s.q.ActiveCount() == 0 {
 			s.sawFree.Store(true)
+			break
+		}
+		if time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
