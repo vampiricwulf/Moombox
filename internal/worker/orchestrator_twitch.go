@@ -397,7 +397,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			partChat := chatPathFor(stagingDir)
 			onFirstSegment = func(pdt time.Time) { irc.SettlePartBase(partChat, pdt) }
 		}
-		dl := engine.NewSegmentDownloader(engine.DownloaderOptions{
+		dl := newSegmentDownloader(engine.DownloaderOptions{
 			OnFirstSegment: onFirstSegment,
 			BaseURL:        variantURL,
 			OutputFile:     videoPath,

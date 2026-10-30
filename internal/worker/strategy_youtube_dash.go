@@ -291,7 +291,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	if videoStream != nil {
 		result.HasVideo = true
 		result.VideoPath = filepath.Join(job.StagingDir, "video_stream")
-		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
+		result.VideoDownloader = newSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:             videoStream.BaseURL,
 			OutputFile:          result.VideoPath,
 			StartSeq:            videoStartSeq,
@@ -322,7 +322,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		result.HasAudio = true
 		result.AudioItag = audioStream.Itag
 		result.AudioPath = filepath.Join(job.StagingDir, "audio_stream")
-		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
+		result.AudioDownloader = newSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:             audioStream.BaseURL,
 			OutputFile:          result.AudioPath,
 			StartSeq:            audioStartSeq,

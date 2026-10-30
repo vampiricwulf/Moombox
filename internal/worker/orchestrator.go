@@ -35,6 +35,13 @@ const (
 	maxVodRefreshAttempts = 4
 )
 
+// newSegmentDownloader is engine.NewSegmentDownloader behind a package var, so
+// the package's tests can run the real engine loops the orchestrator builds at
+// millisecond scale (SegmentDownloader.SetFastDelaysForTests) — their fake
+// servers answer at once, and the production retry, reload and connectivity
+// waits are all that is left of their run time. Production never writes it.
+var newSegmentDownloader = engine.NewSegmentDownloader
+
 // Connectivity is the subset of *connectivity.Monitor the orchestrator uses.
 // Defined as an interface so tests can pass a fake and so callers don't have
 // to unbundle the monitor's methods into separate func-pointer parameters

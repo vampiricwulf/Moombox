@@ -209,6 +209,7 @@ func newEndVerdictHarness(t *testing.T, jobID string) *endVerdictHarness {
 	prevCancelAfter := twitchOutageCancelAfter
 	twitchOutageCancelAfter = 0
 	t.Cleanup(func() { twitchOutageCancelAfter = prevCancelAfter })
+	fastEngine(t)
 	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "gone", http.StatusNotFound)
 	}))
@@ -860,7 +861,7 @@ func TestTwitchVodRidesOutAnOutage(t *testing.T) {
 			offline.Store(true)
 			h.conn.set(false)
 			go func() {
-				time.Sleep(time.Second)
+				time.Sleep(200 * time.Millisecond)
 				offline.Store(false)
 				h.conn.set(true)
 			}()
