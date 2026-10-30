@@ -363,10 +363,17 @@ func TestFetch_Singleflight_CoalescesByCacheKey(t *testing.T) {
 	fs := newFakePlayerServer(body, "Wed, 01 Jan 2025 00:00:00 GMT", "")
 	defer fs.Close()
 
-	// Add latency so concurrent calls overlap inside fetchInternal.
+	// The round trip is held until every caller has reached Fetch, so all
+	// of them overlap inside fetchInternal however late one was scheduled.
+	// It slept 50 ms instead, and a caller first run after the leader's
+	// fetch had finished made a round trip of its own (hits 2).
+	const concurrency = 5
+	var arrived sync.WaitGroup
+	arrived.Add(concurrency * 3)
 	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fs.hits.Add(1)
-		time.Sleep(50 * time.Millisecond)
+		arrived.Wait()
+		time.Sleep(20 * time.Millisecond) // for the last arrival's few steps into Fetch
 		w.Header().Set("Last-Modified", "Wed, 01 Jan 2025 00:00:00 GMT")
 		w.Header().Set("Content-Length", itoa(len(body)))
 		w.WriteHeader(http.StatusOK)
@@ -390,13 +397,13 @@ func TestFetch_Singleflight_CoalescesByCacheKey(t *testing.T) {
 
 	startHits := fs.Hits()
 
-	const concurrency = 5
 	var wg sync.WaitGroup
 	wg.Add(concurrency * len(urls))
 	for range concurrency {
 		for _, u := range urls {
 			go func(u string) {
 				defer wg.Done()
+				arrived.Done()
 				_, _, err := pc.Fetch(context.Background(), u)
 				if err != nil {
 					t.Errorf("concurrent Fetch %s: %v", u, err)
