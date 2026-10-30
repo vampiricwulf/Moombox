@@ -55,10 +55,11 @@ var (
 // engine never stages one. Cached per test binary: every test here wants the
 // same few recordings.
 //
-// The audio is silence, generated 4096 samples at a time: what these tests
-// read is the track's frames, fragments and timestamps, never its sound, and
-// the AAC encoder takes three times as long over a tone — 300 s of it cost
-// about six seconds of every run, twice over with the muxed recording.
+// The audio is silence at 8 kHz, generated 4096 samples at a time: what
+// these tests read is the track's frames, fragments and timestamps, never its
+// sound, and the AAC encoder's cost is its samples — 300 s of a 44.1 kHz tone
+// cost about six seconds of every run, twice over with the muxed recording.
+// At 8 kHz an AAC frame is 128 ms, so a fragment is sixteen of them, 2.048 s.
 func fragmentedFixture(t *testing.T, ffmpegPath, kind string, seconds int) fragmentedSource {
 	t.Helper()
 	key := fmt.Sprint(kind, seconds)
@@ -115,7 +116,7 @@ func renderFragmentedLocked(t *testing.T, ffmpegPath, kind string, seconds int) 
 	args := []string{"-nostdin", "-y"}
 	switch kind {
 	case "audio":
-		args = append(args, "-f", "lavfi", "-t", fmt.Sprint(seconds), "-i", "anullsrc=r=44100:cl=mono:nb_samples=4096",
+		args = append(args, "-f", "lavfi", "-t", fmt.Sprint(seconds), "-i", "anullsrc=r=8000:cl=mono:nb_samples=4096",
 			"-c:a", "aac", "-frag_duration", "2000000", "-movflags", "+empty_moov+default_base_moof")
 	case "muxed":
 		video, audio := filepath.Join(dir, "video.mp4"), filepath.Join(dir, "audio.mp4")
