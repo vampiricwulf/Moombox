@@ -160,7 +160,7 @@ func TestVodSidecarStaysAtTheLastGoodFlush(t *testing.T) {
 	add(1, 150)
 	add(2, 200)
 	// chat.json briefly cannot be written (a stand-in for a Windows lock).
-	if err := os.Rename(out, out+".bak"); err != nil {
+	if err := utils.ReplaceFile(out, out+".bak"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(out, 0o755); err != nil {
@@ -170,7 +170,7 @@ func TestVodSidecarStaysAtTheLastGoodFlush(t *testing.T) {
 	if err := os.Remove(out); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(out+".bak", out); err != nil {
+	if err := utils.ReplaceFile(out+".bak", out); err != nil {
 		t.Fatal(err)
 	}
 

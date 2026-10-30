@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -400,10 +401,15 @@ func TestKillSetupProcessCannotBlockOnALauncherThatNeverPublishes(t *testing.T) 
 
 	t.Run("nothing claimed returns at once", func(t *testing.T) {
 		s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
-		start := time.Now()
+		// The pauses are recorded, not timed: one poll is a 50 ms pause, and a
+		// 50 ms bound on the call was a descheduling away from failing.
+		var polls atomic.Int64
+		prevSleep := launchWindowPollSleep
+		launchWindowPollSleep = func(time.Duration) { polls.Add(1) }
+		t.Cleanup(func() { launchWindowPollSleep = prevSleep })
 		s.killSetupProcess()
-		if elapsed := time.Since(start); elapsed > killProcessTreePollDelay {
-			t.Fatalf("an empty slot must not be polled at all, took %s", elapsed)
+		if n := polls.Load(); n != 0 {
+			t.Fatalf("an empty slot must not be polled at all, paused %d times", n)
 		}
 	})
 

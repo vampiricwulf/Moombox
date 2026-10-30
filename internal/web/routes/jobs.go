@@ -1740,6 +1740,12 @@ func LogRoutes(r chi.Router, getRecentLogs func() []string) {
 	})
 }
 
+// restartDelay is how long the restart endpoint waits after answering before
+// it calls onRestart, so the response reaches the browser ahead of the
+// shutdown. A var for the test that drives the route, which has no browser to
+// wait for; production never assigns it.
+var restartDelay = 500 * time.Millisecond
+
 // RestartRoute registers the restart endpoint. The onRestart callback is
 // invoked after the HTTP response is sent; it triggers graceful shutdown and
 // a launcher respawn.
@@ -1753,6 +1759,7 @@ func LogRoutes(r chi.Router, getRecentLogs func() []string) {
 // already chosen to allow — local, LAN, or authenticated external — i.e.
 // "based on whatever we allow access to."
 func RestartRoute(r chi.Router, onRestart func()) {
+	delay := restartDelay
 	r.Post("/api/restart", func(rw http.ResponseWriter, req *http.Request) {
 		jsonResponse(rw, map[string]any{"success": true, "message": "Restarting..."})
 
@@ -1762,7 +1769,7 @@ func RestartRoute(r chi.Router, onRestart func()) {
 					reportPanic("restart handler", r)
 				}
 			}()
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(delay)
 			if onRestart != nil {
 				onRestart()
 			}

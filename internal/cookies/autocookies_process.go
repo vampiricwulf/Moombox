@@ -149,7 +149,7 @@ func (s *AutoCookieService) killSetupProcess() {
 				return // the job will do it; this PID belongs to whoever Windows gave it to next
 			}
 			killProcessTree(proc)
-			time.Sleep(taskkillDrainDelay)
+			time.Sleep(taskkillDrainPause)
 			return
 		}
 		if !claimed {
@@ -158,9 +158,15 @@ func (s *AutoCookieService) killSetupProcess() {
 		if !time.Now().Before(deadline) {
 			return // still unpublished — give up rather than block the caller
 		}
-		time.Sleep(killProcessTreePollDelay)
+		launchWindowPollSleep(killProcessTreePollDelay)
 	}
 }
+
+// launchWindowPollSleep is the pause between two looks at a launch slot in
+// killSetupProcess and killRefreshProcess. A var for the test that proves an
+// empty slot is not polled at all — it records the pause instead of timing
+// the call around it. Production never assigns it.
+var launchWindowPollSleep = time.Sleep
 
 func (s *AutoCookieService) killRefreshProcess() {
 	// RefreshCookies claims the slot with `s.refreshCmd = &exec.Cmd{}`
@@ -186,7 +192,7 @@ func (s *AutoCookieService) killRefreshProcess() {
 		if !time.Now().Before(deadline) {
 			return // sentinel still in place — give up rather than block Stop()
 		}
-		time.Sleep(killProcessTreePollDelay)
+		launchWindowPollSleep(killProcessTreePollDelay)
 	}
 }
 

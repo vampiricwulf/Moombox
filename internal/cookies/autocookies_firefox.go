@@ -146,7 +146,7 @@ func (s *AutoCookieService) closeFirefoxGracefully() {
 	s.mu.Unlock()
 
 	if proc == nil || exited {
-		time.Sleep(taskkillDrainDelay)
+		time.Sleep(taskkillDrainPause)
 		return
 	}
 
@@ -167,7 +167,7 @@ func (s *AutoCookieService) closeFirefoxGracefully() {
 		s.mu.Unlock()
 		if exited {
 			s.logger.Debug("Firefox exited cleanly")
-			time.Sleep(taskkillDrainDelay)
+			time.Sleep(taskkillDrainPause)
 			return
 		}
 		time.Sleep(firefoxExitPollInterval)

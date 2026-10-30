@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1143,6 +1144,9 @@ func TestJobCreateRejectsDuplicate(t *testing.T) {
 // governs access — "whatever we allow access to".) It also confirms the
 // onRestart callback fires after the response is sent.
 func TestRestartRoute_NotLoopbackGated(t *testing.T) {
+	prevDelay := restartDelay
+	restartDelay = 0 // no browser here to let the answer reach first
+	t.Cleanup(func() { restartDelay = prevDelay })
 	restarted := make(chan struct{}, 1)
 	r := chi.NewRouter()
 	RestartRoute(r, func() { restarted <- struct{}{} })
@@ -1163,10 +1167,11 @@ func TestRestartRoute_NotLoopbackGated(t *testing.T) {
 		t.Errorf("want success:true, got %v", body)
 	}
 
-	// The handler sleeps 500ms before invoking onRestart.
+	// The handler waits restartDelay (500 ms in production) before invoking
+	// onRestart.
 	select {
 	case <-restarted:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("onRestart callback never fired")
 	}
 }
@@ -1590,16 +1595,24 @@ func TestJobChatIsNotReadIntoMemory(t *testing.T) {
 		t.Fatalf("write chat: %v", err)
 	}
 
-	res := testing.Benchmark(func(b *testing.B) {
-		b.ReportAllocs()
-		for b.Loop() {
-			req := httptest.NewRequest("GET", "/api/jobs/yt_bigchat/chat", nil)
-			// Discard the body: httptest.ResponseRecorder would buffer the
-			// whole response and swamp the measurement.
-			serveChatJSON(&discardResponseWriter{h: http.Header{}}, req, path)
-		}
-	})
-	if got := res.AllocedBytesPerOp(); got > fileSize/4 {
+	// A fixed run of requests measured with MemStats, not testing.Benchmark,
+	// which spends its whole one-second benchtime here: the bytes a request
+	// allocates do not depend on how long it is measured for.
+	serve := func() {
+		req := httptest.NewRequest("GET", "/api/jobs/yt_bigchat/chat", nil)
+		// Discard the body: httptest.ResponseRecorder would buffer the
+		// whole response and swamp the measurement.
+		serveChatJSON(&discardResponseWriter{h: http.Header{}}, req, path)
+	}
+	serve()
+	const requests = 20
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range requests {
+		serve()
+	}
+	runtime.ReadMemStats(&after)
+	if got := int64(after.TotalAlloc-before.TotalAlloc) / requests; got > fileSize/4 {
 		t.Errorf("serving a %d-byte chat file allocates %d B/op; want well under a quarter of the "+
 			"file — the handler must stream it, not copy it", fileSize, got)
 	}

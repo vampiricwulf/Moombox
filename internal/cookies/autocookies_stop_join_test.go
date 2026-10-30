@@ -41,7 +41,6 @@ func newPassInFlight(t *testing.T) *passInFlight {
 	// would hide a Stop that does not wait. Registered first, so it is
 	// restored after every join below.
 	withLaunchWindowKillBudget(t, testLaunchWindowKillBudget)
-	noDirTightening(t)
 	p := &passInFlight{
 		log:        &recordingCookieLogger{},
 		cookiePath: filepath.Join(t.TempDir(), "cookies.txt"),
@@ -208,7 +207,6 @@ func TestStopJoinsThePostPassReCheck(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withLaunchWindowKillBudget(t, testLaunchWindowKillBudget)
-			noDirTightening(t)
 			log := &recordingCookieLogger{}
 			cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
 			jar := NewCookieJar()
@@ -301,7 +299,11 @@ func TestStopJoinsThePostPassReCheck(t *testing.T) {
 // return until the pass does; the Warn dropped — no line says so.
 func TestStopIsBoundedByAutoCookieStopWait(t *testing.T) {
 	withLaunchWindowKillBudget(t, testLaunchWindowKillBudget)
-	noDirTightening(t)
+	// The bound, not its length, is what is under test: shortened so the
+	// test does not wait the production 2 s out.
+	prevWait := autoCookieStopWait
+	autoCookieStopWait = 100 * time.Millisecond
+	t.Cleanup(func() { autoCookieStopWait = prevWait })
 	log := &recordingCookieLogger{}
 	s := NewAutoCookieService(writeWALCookieProfile(t, youtubeAuthRows()),
 		filepath.Join(t.TempDir(), "cookies.txt"), NewCookieJar(), log)

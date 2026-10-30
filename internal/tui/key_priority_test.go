@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -421,37 +420,38 @@ func findClipboardResult(msgs []tea.Msg) (clipboardResultMsg, bool) {
 // where the freeze is longest and least explicable. The work belongs in the
 // returned tea.Cmd, which bubbletea runs off the update goroutine.
 //
-// The fake helper sleeps 500 ms: far longer than any dispatch may take, far
-// shorter than the real bound.
+// The fake helper counts its calls instead of sleeping, and the test reads the
+// count rather than a clock: none may have happened when dispatchAction
+// returns, and exactly one once the Cmd has run. A bound on how long the
+// dispatch took was a descheduling of the test goroutine away from failing.
 //
-// Mutant: calling osClipboard inline in dispatchAction again — the dispatch
-// itself takes >= 500 ms and this fails.
+// Mutant: calling osClipboard inline in dispatchAction again — the helper has
+// run once before the Cmd does, and this fails.
 func TestCopyChordDoesNotBlockTheUpdateGoroutine(t *testing.T) {
 	a, job, url := copyApp(t)
 
 	orig := osClipboard
 	t.Cleanup(func() { osClipboard = orig })
+	var calls int
 	var handed string
 	osClipboard = func(text string) bool {
-		time.Sleep(500 * time.Millisecond)
+		calls++
 		handed = text
 		return true
 	}
 
-	start := time.Now()
 	_, cmd := a.dispatchAction("O C", job)
-	if blocked := time.Since(start); blocked >= 50*time.Millisecond {
-		t.Errorf("dispatchAction blocked the update goroutine for %v — the spawn must run inside the returned Cmd", blocked)
+	if calls != 0 {
+		t.Errorf("dispatchAction ran the OS helper %d time(s) on the update goroutine — the spawn must run inside the returned Cmd", calls)
 	}
 	if cmd == nil {
 		t.Fatal("O C returned no command, so the helper runs nowhere at all")
 	}
 
 	// Not vacuous: the helper really does run, inside the Cmd.
-	start = time.Now()
 	msgs := flattenCmd(cmd)
-	if ran := time.Since(start); ran < 400*time.Millisecond {
-		t.Errorf("the Cmd completed in %v — the 500 ms helper did not run inside it", ran)
+	if calls != 1 {
+		t.Errorf("running the Cmd called the OS helper %d time(s), want 1", calls)
 	}
 	if handed != url {
 		t.Errorf("the OS helper was handed %q, want %q", handed, url)

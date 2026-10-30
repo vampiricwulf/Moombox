@@ -174,6 +174,22 @@ var gqlBaseRetryDelay = 1 * time.Second
 // or repeated 429s can't pin a monitor cycle for minutes.
 const gqlMaxRetryDelay = 30 * time.Second
 
+// gqlWait is every wait gqlRequest makes between attempts — the backoff and
+// a 429's Retry-After alike: d, or until ctx ends, whose error it returns. A
+// var for the tests, which record the waits instead of serving them: a
+// Retry-After is whole seconds, and gqlBaseRetryDelay cannot shrink it.
+// Production never assigns it.
+var gqlWait = func(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
 // gqlBodySize renders a GQL response body as its SIZE, never its bytes.
 //
 // Every gqlRequest error used to interpolate string(respData). An
@@ -225,10 +241,8 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 			if a.logger != nil {
 				a.logger.Debug("twitch gql retry", "op", opLabel(opName), "attempt", attempt, "delay", delay.String(), "prev_status", lastStatus)
 			}
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(delay):
+			if err := gqlWait(ctx, delay); err != nil {
+				return nil, err
 			}
 		}
 		skipBackoff = false
@@ -268,10 +282,8 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 				if a.logger != nil {
 					a.logger.Debug("twitch gql 429 honoring Retry-After", "op", opLabel(opName), "wait", ra.String())
 				}
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(ra):
+				if err := gqlWait(ctx, ra); err != nil {
+					return nil, err
 				}
 				// Retry-After already served as this retry's delay — don't
 				// stack the exponential backoff on top of it.

@@ -190,6 +190,14 @@ var launchWindowKillBudget = 2 * time.Second
 // applyUserOnlyDACL and loadCookieJar elsewhere in this package.
 var authVerifyWindow = authVerifyTimeout
 
+// taskkillDrainPause is the pause the three post-kill / post-exit sites
+// actually spend, and it is a var for one reason: every test that reaches one
+// does so with a fixture process (Pid -1, or a made-up PID nothing runs as),
+// where there is no handle to release, and nineteen of them would otherwise
+// sleep 0.3 s each. Production never assigns it — taskkillDrainDelay is the
+// number. Same shape as authVerifyWindow.
+var taskkillDrainPause = taskkillDrainDelay
+
 // AutoCookieStopWait bounds how long Stop waits for the service's own
 // goroutines — StartPeriodicRefresh's timer and StartProfileSeed's boot import —
 // to return. Stop cancels a pass in flight and kills its browser first, so the
@@ -204,6 +212,12 @@ var authVerifyWindow = authVerifyTimeout
 // exits with the pass wherever it is — which is what every shutdown did before
 // the wait existed.
 const AutoCookieStopWait = 2 * time.Second
+
+// autoCookieStopWait is the bound Stop actually spends, and it is a var for one
+// reason: a test proving the bound holds would otherwise wait the whole 2 s
+// out. Production never assigns it — the constant above is the number, this is
+// only the seam a test shortens. Same shape as authVerifyWindow.
+var autoCookieStopWait = AutoCookieStopWait
 
 // platformRefreshURLs maps platform names to their refresh URLs.
 var platformRefreshURLs = map[string]string{
@@ -843,8 +857,8 @@ func (s *AutoCookieService) Stop() {
 	s.killSetupProcess()
 	s.killRefreshProcess()
 	s.cleanup()
-	if !s.waitBackground(AutoCookieStopWait) && s.logger != nil {
-		s.logger.Warn("auto-cookie refresh pass still running after stop", "waited", AutoCookieStopWait.String())
+	if wait := autoCookieStopWait; !s.waitBackground(wait) && s.logger != nil {
+		s.logger.Warn("auto-cookie refresh pass still running after stop", "waited", wait.String())
 	}
 }
 

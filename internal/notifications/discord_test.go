@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -108,6 +110,29 @@ func TestDiscordWebhookRateLimitRetriesOnce(t *testing.T) {
 	}
 	if got := hits.Load(); got != 2 {
 		t.Errorf("expected exactly 2 hits (initial + retry), got %d", got)
+	}
+}
+
+// recordDiscordSleeps replaces discordSleep with a recorder that returns at
+// once, and returns what each wait asked for — so a test can prove which waits
+// a send took, or that it took none, without timing the send around them.
+func recordDiscordSleeps(t *testing.T) func() []time.Duration {
+	t.Helper()
+	var (
+		mu     sync.Mutex
+		sleeps []time.Duration
+	)
+	orig := discordSleep
+	discordSleep = func(d time.Duration) {
+		mu.Lock()
+		sleeps = append(sleeps, d)
+		mu.Unlock()
+	}
+	t.Cleanup(func() { discordSleep = orig })
+	return func() []time.Duration {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(sleeps)
 	}
 }
 
@@ -225,18 +250,17 @@ func TestDiscordWebhookRateLimitRefusesUnreasonableRetryAfter(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 
+			sleeps := recordDiscordSleeps(t)
 			d := &DiscordWebhook{URL: srv.URL}
-			start := time.Now()
 			err := d.Send(One("t", "d", 0, nil, SendOptions{}))
-			elapsed := time.Since(start)
 			if err == nil {
 				t.Fatal("bogus Retry-After: want error, got nil")
 			}
 			if got := hits.Load(); got != 1 {
 				t.Errorf("server should NOT be retried with bogus Retry-After: hits=%d", got)
 			}
-			if elapsed > 500*time.Millisecond {
-				t.Errorf("Send slept for %v despite refusing the Retry-After value", elapsed)
+			if got := sleeps(); len(got) != 0 {
+				t.Errorf("Send slept %v despite refusing the Retry-After value", got)
 			}
 		})
 	}

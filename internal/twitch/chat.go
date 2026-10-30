@@ -1093,7 +1093,9 @@ func (cd *ChatDownloader) adoptPartFile(retry bool) (adopted int, unread bool) {
 		corruptPath := path + chatCorruptSuffix
 		cd.logger.Error("twitch chat: existing part file unreadable; preserving it instead of overwriting",
 			"channel", cd.channelLogin, "path", path, "preservedAs", corruptPath, "err", err)
-		if renameErr := os.Rename(path, corruptPath); renameErr != nil {
+		// ReplaceFile, not os.Rename: on Windows a scanner briefly holding the
+		// file refuses a bare rename, and the next flush then overwrites it.
+		if renameErr := utils.ReplaceFile(path, corruptPath); renameErr != nil {
 			cd.logger.Error("twitch chat: could not preserve the unreadable part file; the next flush will overwrite it",
 				"channel", cd.channelLogin, "path", path, "err", renameErr)
 		}

@@ -77,6 +77,13 @@ const (
 // Package var so tests can shrink it.
 var discordRetryBackoff = [discordMaxAttempts - 1]time.Duration{2 * time.Second, 5 * time.Second}
 
+// discordSleep is every wait a webhook send makes — the retry ladder's delay
+// (a 429's Retry-After or the backoff above) and an empty bucket's refill. A
+// var for the tests that prove a wait was NOT taken, or which one was: they
+// record the request instead of timing the send around it. Production never
+// assigns it.
+var discordSleep = time.Sleep
+
 // discordHTTPClient sends Discord webhook requests via the shared
 // httpx transport. Per-request timeout is enforced by the context; the
 // client-level Timeout (2 * discordTimeout = 30s) is a belt-and-
@@ -491,7 +498,7 @@ func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody 
 			return nil, fmt.Errorf("%w (retry budget exhausted after %d attempts)", lastErr, attempt)
 		}
 		slept += delay
-		time.Sleep(delay)
+		discordSleep(delay)
 	}
 }
 
@@ -546,7 +553,7 @@ func (d *DiscordWebhook) waitForBucket() {
 	if wait > discordRetryAfterCap {
 		wait = discordRetryAfterCap
 	}
-	time.Sleep(wait)
+	discordSleep(wait)
 }
 
 // waitForBucketWithin honours the empty-bucket window only when it closes
@@ -559,7 +566,7 @@ func (d *DiscordWebhook) waitForBucketWithin(max time.Duration) {
 	if wait <= 0 || wait > max {
 		return
 	}
-	time.Sleep(wait)
+	discordSleep(wait)
 }
 
 // bucketWait reports how long until this webhook's bucket refills, or 0 when

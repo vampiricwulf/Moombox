@@ -32,6 +32,24 @@ const (
 	saltLen               = 16
 )
 
+// scryptCost is the N every hash and verify below spends: scryptN, always, in a
+// running instance. A hash does not record its N, so one made at a cost only
+// verifies at the same cost — which is why it is a single process-wide value
+// and not a parameter. Tests, which make and verify their own hashes inside
+// one process, lower it through SetPasswordHashCostForTesting: under the race
+// detector one scrypt at N=16384 costs about half a second.
+var scryptCost = scryptN
+
+// SetPasswordHashCostForTesting sets the scrypt N that HashPassword,
+// VerifyPassword, HashToken and VerifyToken spend, and returns the one it
+// replaced. For a test binary's TestMain, before any test runs: nothing else
+// may call it, and nothing in a running instance does.
+func SetPasswordHashCostForTesting(n int) int {
+	prev := scryptCost
+	scryptCost = n
+	return prev
+}
+
 // authLogger captures the minimal logging surface used for the session-
 // cleanup goroutine's panic-recovery diagnostics. nil-safe.
 type authLogger interface {
@@ -119,7 +137,7 @@ func (as *AuthService) HashPassword(password string) (string, error) {
 		return "", err
 	}
 
-	hash, err := scrypt.Key([]byte(password), salt, scryptN, scryptR, scryptP, scryptKeyLen)
+	hash, err := scrypt.Key([]byte(password), salt, scryptCost, scryptR, scryptP, scryptKeyLen)
 	if err != nil {
 		return "", err
 	}
@@ -170,7 +188,7 @@ func (as *AuthService) verifyExact(password, storedHash string) bool {
 		return false
 	}
 
-	hash, err := scrypt.Key([]byte(password), salt, scryptN, scryptR, scryptP, scryptKeyLen)
+	hash, err := scrypt.Key([]byte(password), salt, scryptCost, scryptR, scryptP, scryptKeyLen)
 	if err != nil {
 		return false
 	}
@@ -314,7 +332,7 @@ func HashToken(token string) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
-	hash, err := scrypt.Key([]byte(token), salt, scryptN, scryptR, scryptP, scryptKeyLen)
+	hash, err := scrypt.Key([]byte(token), salt, scryptCost, scryptR, scryptP, scryptKeyLen)
 	if err != nil {
 		return "", err
 	}
@@ -335,7 +353,7 @@ func VerifyToken(token, storedHash string) bool {
 	if err != nil || len(expectedHash) != scryptKeyLen {
 		return false
 	}
-	hash, err := scrypt.Key([]byte(token), salt, scryptN, scryptR, scryptP, scryptKeyLen)
+	hash, err := scrypt.Key([]byte(token), salt, scryptCost, scryptR, scryptP, scryptKeyLen)
 	if err != nil {
 		return false
 	}

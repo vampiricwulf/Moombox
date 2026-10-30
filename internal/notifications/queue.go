@@ -110,6 +110,11 @@ type targetQueue struct {
 	// exited is set by the pop that tells the goroutine to return: nothing
 	// appended after it would ever run, so enqueueControl refuses from then on.
 	exited bool
+	// delivering is set by the pop that hands run an item and cleared once
+	// run's deliver of it has returned. pop takes the head off items BEFORE
+	// the delivery runs, so items alone cannot tell "nothing left to do" from
+	// "the last item is still on its way out"; idle reads both in one look.
+	delivering bool
 
 	// The ping, as buildTargets resolved it. Guarded by mu like events,
 	// because a Reload swaps them on a surviving queue while Send reads them.
@@ -384,6 +389,15 @@ func (q *targetQueue) pending() int {
 	return len(q.items)
 }
 
+// idle reports that nothing is queued and no delivery is in flight: every
+// item this queue was handed has been delivered (or dropped), and its
+// requests and store writes are done. Test-facing, like pending.
+func (q *targetQueue) idle() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.items) == 0 && !q.delivering
+}
+
 // enqueue appends it, or applies the overflow policy.
 //
 // OVERFLOW: the OLDEST TierLow entry goes, not the arrival. The old semaphore
@@ -629,6 +643,9 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 		q.holding = false
 		n := q.heldDropped
 		q.heldDropped = 0
+		if n > 0 {
+			q.delivering = true // the report below is handed to run
+		}
 		q.mu.Unlock()
 		q.logger.Info("connectivity restored — delivering the notifications held through the outage")
 		if n > 0 {
@@ -677,6 +694,7 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 	if it.ctl != nil {
 		q.steps--
 	}
+	q.delivering = true
 	q.mu.Unlock()
 	return it, true, false
 }
@@ -871,6 +889,9 @@ func (q *targetQueue) run() {
 			continue
 		}
 		q.deliver(it)
+		q.mu.Lock()
+		q.delivering = false
+		q.mu.Unlock()
 	}
 }
 

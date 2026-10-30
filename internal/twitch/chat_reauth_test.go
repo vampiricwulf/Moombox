@@ -532,6 +532,10 @@ func TestReauthenticateSkipsTheBackoffAfterAGenuineError(t *testing.T) {
 	logger := &acceptedLoginRecorder{}
 	cd := newAuthTestChatDownloaderWithLogger(t,
 		staticCredentials("test-token-aaaa", "archiveraccount"), logger)
+	// The backoff's length is not what is measured — only whether it was
+	// taken, through its log line — so its production 2 s step is shrunk.
+	cd.delays.reconnectBase = time.Millisecond
+	cd.delays.reconnectCap = 5 * time.Millisecond
 
 	done := make(chan error, 1)
 	go func() {

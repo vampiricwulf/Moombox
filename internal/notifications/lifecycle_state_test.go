@@ -87,25 +87,30 @@ func run(t *testing.T, m *Manager, jobID string, events ...string) {
 	drain(t, m)
 }
 
-// drain waits until every target's FIFO is empty and its goroutine is idle.
+// drain waits until every target's FIFO is empty and its goroutine is idle:
+// the item popped last has been delivered too, so its requests are in the
+// fake's recording. An empty FIFO alone does not say that — pop takes the head
+// off before the delivery runs — and a fixed "one more scheduler turn" after
+// it lost the last request whenever its dial and write outlasted the turn.
 func drain(t *testing.T, m *Manager) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		pending := 0
+		pending, busy := 0, 0
 		m.targetsMu.RLock()
 		for _, q := range m.targets {
 			q.batch.Flush()
 			pending += q.pending()
+			if !q.idle() {
+				busy++
+			}
 		}
 		m.targetsMu.RUnlock()
-		if pending == 0 {
-			// One more scheduler turn so the item popped last finishes.
-			time.Sleep(5 * time.Millisecond)
+		if busy == 0 {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("queue did not drain: %d items pending", pending)
+			t.Fatalf("queue did not drain: %d items pending, %d targets still busy", pending, busy)
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -133,11 +138,13 @@ func waitCalls(t *testing.T, f *fakeDiscord, n int, within time.Duration) bool {
 	}
 }
 
-// The STORE assertions in this file poll with queue_test.go's waitFor rather
-// than reading straight after drain. drain cannot cover them: pop() removes
-// the head from q.items BEFORE deliver runs, so pending() reads 0 while the
-// POST, its response parse and the store write are all still in flight — with
-// a 50 ms handler the naked read fails 5/5.
+// The STORE assertions in this file poll with queue_test.go's waitFor. Since
+// drain waits for the last delivery to return (targetQueue.idle), a read
+// straight after it would hold too: the store write is part of that delivery.
+// Before that, drain returned once pop had emptied q.items — pop removes the
+// head BEFORE deliver runs, so the POST, its response parse and the store
+// write were all still in flight, and with a 50 ms handler a naked read
+// failed 5/5.
 
 // titleFor names the embed for a test send. lifecycleLabels is the same map
 // the Status field reads, so "quality_split" reads "Quality split" rather
@@ -233,8 +240,9 @@ func TestStateMachineFirstPostsThenEdits(t *testing.T) {
 		}
 	}
 	// The store write trails the wire: pending() is already 0 while the POST's
-	// response is being parsed and remembered, so these two read through
-	// waitFor rather than through drain's 5 ms settle.
+	// response is being parsed and remembered. drain waits for that delivery
+	// to return (targetQueue.idle), so these polls find the write already
+	// made; they stay as waitFor so the read does not lean on drain alone.
 	waitFor(t, "the created id to be stored", func() bool {
 		return st.NotificationMsgs("yt_1")[targetMsgKey(f.URL())] == "M1"
 	})

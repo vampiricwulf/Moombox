@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,6 +46,26 @@ func install429Stub(t *testing.T, retryAfter string) *atomic.Int64 {
 	return &calls
 }
 
+// recordGQLWaits replaces gqlRequest's waits with a recorder that returns at
+// once (or with ctx's error, as the real wait would), and returns what each
+// wait was asked for.
+func recordGQLWaits(t *testing.T) *[]time.Duration {
+	t.Helper()
+	var (
+		mu    sync.Mutex
+		waits []time.Duration
+	)
+	prev := gqlWait
+	t.Cleanup(func() { gqlWait = prev })
+	gqlWait = func(ctx context.Context, d time.Duration) error {
+		mu.Lock()
+		waits = append(waits, d)
+		mu.Unlock()
+		return ctx.Err()
+	}
+	return &waits
+}
+
 // TestGQL429WithALongRetryAfterReturnsWithoutRetrying is TWITCH-9 (report row
 // #62). A 429 whose Retry-After exceeds gqlMaxRetryDelay was retried on the
 // 1s/2s/4s schedule instead — three quick requests into a throttle Twitch had
@@ -58,17 +80,12 @@ func install429Stub(t *testing.T, retryAfter string) *atomic.Int64 {
 // wrapper instead of the 429 error (the message assertion fails, and
 // worker.classifyProbeErr reads the status positionally out of that string).
 func TestGQL429WithALongRetryAfterReturnsWithoutRetrying(t *testing.T) {
-	prevDelay := gqlBaseRetryDelay
-	gqlBaseRetryDelay = time.Millisecond
-	t.Cleanup(func() { gqlBaseRetryDelay = prevDelay })
-
+	waits := recordGQLWaits(t)
 	calls := install429Stub(t, "120") // 2 minutes: four times the 30 s cap
 	log := &renderingLogger{}
 	a := NewAPI(log)
 
-	start := time.Now()
 	_, err := a.gqlRequest(context.Background(), "TestOp", map[string]any{"q": 1}, "")
-	elapsed := time.Since(start)
 
 	if err == nil {
 		t.Fatal("a 429 must not succeed")
@@ -77,8 +94,8 @@ func TestGQL429WithALongRetryAfterReturnsWithoutRetrying(t *testing.T) {
 		t.Errorf("the stub answered %d times, want exactly 1 — a Retry-After past the cap must "+
 			"end the attempt, not start a 1s/2s/4s schedule", n)
 	}
-	if elapsed > 5*time.Second {
-		t.Errorf("gqlRequest took %v — it must return rather than sleep out the window", elapsed)
+	if len(*waits) != 0 {
+		t.Errorf("gqlRequest waited %v — it must return rather than sleep out the window", *waits)
 	}
 	if !strings.Contains(err.Error(), "gql rate limited (429) (TestOp): ") {
 		t.Errorf("err = %q, want the ordinary 429 error — worker.classifyProbeErr reads the "+
@@ -106,10 +123,7 @@ func TestGQL429WithALongRetryAfterReturnsWithoutRetrying(t *testing.T) {
 // Mutant: a fix that returns on EVERY 429 carrying a Retry-After — the call
 // then makes 1 request instead of gqlMaxRetries+1.
 func TestGQL429WithAShortRetryAfterStillRetries(t *testing.T) {
-	prevDelay := gqlBaseRetryDelay
-	gqlBaseRetryDelay = time.Millisecond
-	t.Cleanup(func() { gqlBaseRetryDelay = prevDelay })
-
+	waits := recordGQLWaits(t)
 	calls := install429Stub(t, "1") // 1 s: inside gqlMaxRetryDelay
 	log := &renderingLogger{}
 	a := NewAPI(log)
@@ -120,6 +134,12 @@ func TestGQL429WithAShortRetryAfterStillRetries(t *testing.T) {
 	if n := calls.Load(); n != gqlMaxRetries+1 {
 		t.Errorf("the stub answered %d times, want %d — a Retry-After inside the cap is a "+
 			"retry hint, not a stop", n, gqlMaxRetries+1)
+	}
+	// Each retry waits the Retry-After itself, and only that: the 1s/2s/4s
+	// backoff must not be stacked on it. Mutant: never set skipBackoff — the
+	// waits read 1s 1s 1s 2s 1s 4s.
+	if want := []time.Duration{time.Second, time.Second, time.Second}; !slices.Equal(*waits, want) {
+		t.Errorf("waits = %v, want %v — one Retry-After per retry and no backoff on top", *waits, want)
 	}
 	// One wait per retry, none after the final attempt: the window that
 	// attempt's 429 names has no request left to precede, and sleeping it out

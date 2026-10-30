@@ -43,11 +43,14 @@ func shortAuthVerifyWindow(t *testing.T, d time.Duration) {
 // that ignored the deadline would pass under both the old and the new code and
 // would pin nothing.
 //
-// The wall-time bound is the second half of the proof. "Give both platforms
-// more room" has a wrong answer that satisfies the state assertion alone —
-// doubling the SHARED window — and under it the YouTube verifier would burn
-// 2 × window before Twitch was asked at all. Two windows, one per platform,
-// with only YouTube spending its own, costs ≈ one window in total.
+// The deadlines each verifier is handed are the second half of the proof.
+// "Give both platforms more room" has a wrong answer that satisfies the state
+// assertion alone — doubling the SHARED window — and under it each verifier
+// sees a deadline two windows away. Two windows, one per platform, each a
+// single window long. (This was a bound on the call's wall time, < 2 ×
+// window against a green path of ≈ 1 window: a scheduling stall of one
+// window on a loaded runner failed it, as review F7 found for the test
+// below.)
 func TestEachPlatformGetsItsOwnAuthVerifyWindow(t *testing.T) {
 	const window = 300 * time.Millisecond
 	shortAuthVerifyWindow(t, window)
@@ -66,7 +69,11 @@ func TestEachPlatformGetsItsOwnAuthVerifyWindow(t *testing.T) {
 
 	// YouTube spends its entire window and then reports what a timed-out round
 	// trip reports.
+	var youtubeRemaining time.Duration
 	s.VerifyYouTubeAuth = func(ctx context.Context) (bool, error) {
+		if deadline, ok := ctx.Deadline(); ok {
+			youtubeRemaining = time.Until(deadline)
+		}
 		<-ctx.Done()
 		return false, ctx.Err()
 	}
@@ -84,9 +91,7 @@ func TestEachPlatformGetsItsOwnAuthVerifyWindow(t *testing.T) {
 		return true, nil
 	}
 
-	start := time.Now()
 	yt, tw := s.checkPlatformAuth(context.Background())
-	elapsed := time.Since(start)
 
 	if tw.state != verifyOK {
 		t.Errorf("Twitch state = %v, want verifyOK — a slow YouTube check must not spend Twitch's window", tw.state)
@@ -94,8 +99,12 @@ func TestEachPlatformGetsItsOwnAuthVerifyWindow(t *testing.T) {
 	if twitchRemaining < window/2 {
 		t.Errorf("Twitch was given %v of its %v window; it must get a fresh one, not YouTube's remainder", twitchRemaining, window)
 	}
-	if elapsed >= 2*window {
-		t.Errorf("checkPlatformAuth took %v (≥ 2×%v): the windows must be two separate budgets, not one doubled one", elapsed, window)
+	// Neither verifier may be handed more than one window. A deadline only
+	// gets closer as the run is delayed, so this reads no stopwatch: a
+	// doubled window shows up as a deadline further away than one window.
+	if youtubeRemaining > window || twitchRemaining > window {
+		t.Errorf("the verifiers were handed %v (YouTube) and %v (Twitch) of a %v window: the windows must be two separate budgets, not one doubled one",
+			youtubeRemaining, twitchRemaining, window)
 	}
 
 	// YouTube's own verdict is unchanged by the split — it still spent its

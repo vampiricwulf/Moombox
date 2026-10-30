@@ -611,25 +611,27 @@ func TestSweepStaleCookieSnapshots(t *testing.T) {
 // TestCorruptDBFailsFastWithoutRetrying pins the retry gate: a corrupt
 // database is permanent, and retrying it five times at 500ms only delays the
 // error the operator needs.
+//
+// The attempt count is read off the error, which names it whenever there was
+// more than one ("after N attempts"), rather than off the clock: the window
+// copies the profile into a snapshot and opens it with SQLite, real disk work
+// a 1 s bound on a loaded runner did not own.
+//
+// Mutants: isRetryableDBError answering true for the corrupt file (five
+// attempts, "after 5 attempts"); the constant cookieDBReadRetries restored in
+// the wrap (one attempt reported as five).
 func TestCorruptDBFailsFastWithoutRetrying(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "cookies.sqlite"), []byte("this is not a database"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now()
 	_, _, err := readFirefoxCookies(dir)
-	elapsed := time.Since(start)
 
 	if !errors.Is(err, ErrCookieDBUnreadable) {
 		t.Fatalf("want ErrCookieDBUnreadable, got %v", err)
 	}
-	if elapsed > time.Second {
-		t.Errorf("corrupt DB took %v — the retry loop should not retry a permanent error", elapsed)
-	}
-	// One attempt was made, so the message must not claim five.
-	// Mutant: restore the constant cookieDBReadRetries in the wrap.
 	if strings.Contains(err.Error(), "attempts") {
-		t.Errorf("a single attempt reported as several: %v", err)
+		t.Errorf("a permanent error was retried, or one attempt reported as several: %v", err)
 	}
 }
 

@@ -83,22 +83,13 @@ func waitFor(cond func() bool, budget time.Duration) bool {
 // the meta file's temp landed, and the rmdir answered "The directory is not
 // empty".
 //
-// It also stubs the cookie directory's DACL. A pass that writes cookies.txt
-// starts tightenCookieDirOnce's goroutine, which nothing joins — it is
-// process-wide, and harmless where the directory outlives it — and on Windows
-// that goroutine is a real icacls against the TempDir being removed.
+// A pass that writes cookies.txt also starts tightenCookieDirOnce's goroutine,
+// which nothing joins; TestMain replaces the icacls / chmod it runs with a
+// no-op for the whole package, so that one does not touch the TempDir.
 func startJoinedPeriodicRefresh(t *testing.T, s *AutoCookieService, interval time.Duration) {
 	t.Helper()
-	noDirTightening(t)
 	s.StartPeriodicRefresh(t.Context(), interval)
 	t.Cleanup(func() { joinBackground(t, s) })
-}
-
-// noDirTightening replaces the cookie directory's icacls / chmod with a no-op
-// for the test, so no unjoined shell-out runs against a TempDir.
-func noDirTightening(t *testing.T) {
-	t.Helper()
-	fakeApplyUserOnlyDACL(t, func(string) error { return nil })
 }
 
 // joinBackground stops the service — which waits up to AutoCookieStopWait for
@@ -213,15 +204,16 @@ func TestPeriodicLoopPicksUpAProfileThatAppearsAtRuntime(t *testing.T) {
 func TestPeriodicLoopJoinedBeforeItsTempDirsGo(t *testing.T) {
 	var cookieDir string
 	var verified atomic.Int64
+	var s *AutoCookieService
 	t.Run("a pass still writing when the body returns", func(t *testing.T) {
 		profileDir := writeWALCookieProfile(t, youtubeAuthRows())
 		cookieDir = t.TempDir()
-		s := NewAutoCookieService(profileDir, filepath.Join(cookieDir, "cookies.txt"),
+		s = NewAutoCookieService(profileDir, filepath.Join(cookieDir, "cookies.txt"),
 			NewCookieJar(), &recordingCookieLogger{})
 		s.detectBrowser = func() *DetectedBrowser { return nil }
 		s.VerifyYouTubeAuth = func(context.Context) (bool, error) {
 			verified.Add(1)
-			time.Sleep(300 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			return true, nil
 		}
 		s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
@@ -232,9 +224,14 @@ func TestPeriodicLoopJoinedBeforeItsTempDirsGo(t *testing.T) {
 		}
 		// Returns here, as the original did, with the pass mid-verify.
 	})
-	// Longer than the verify's sleep, so a write the join did not hold has
-	// landed by the time the directory is looked at.
-	time.Sleep(600 * time.Millisecond)
+	if s == nil {
+		return // the subtest failed before it built the service, and said why
+	}
+	// Until the pass is over, so a write the join did not hold has landed by
+	// the time the directory is looked at. With the join this returns at once.
+	if !s.waitBackground(10 * time.Second) {
+		t.Fatal("the pass never returned")
+	}
 	if _, err := os.Stat(cookieDir); err == nil {
 		entries, _ := os.ReadDir(cookieDir)
 		var names []string

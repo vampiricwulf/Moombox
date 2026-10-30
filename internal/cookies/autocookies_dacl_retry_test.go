@@ -8,10 +8,10 @@ import (
 )
 
 // fakeApplyUserOnlyDACL swaps the applyUserOnlyDACL seam for the duration of
-// a test. Restored via t.Cleanup so a later test in the same binary hits the
-// real utils.ApplyUserOnlyDACL again (no real icacls/chmod is ever exercised
-// here — the codebase's own note in the brief: never spawn a real icacls in
-// a test if a seam exists).
+// a test. Restored via t.Cleanup to what it replaced — the package-wide no-op
+// TestMain installs, since no test in this binary runs the real
+// utils.ApplyUserOnlyDACL (never spawn a real icacls in a test if a seam
+// exists).
 func fakeApplyUserOnlyDACL(t *testing.T, fn func(dir string) error) {
 	t.Helper()
 	real := applyUserOnlyDACL
