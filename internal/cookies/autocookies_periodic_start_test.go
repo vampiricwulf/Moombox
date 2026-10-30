@@ -204,15 +204,16 @@ func TestPeriodicLoopPicksUpAProfileThatAppearsAtRuntime(t *testing.T) {
 func TestPeriodicLoopJoinedBeforeItsTempDirsGo(t *testing.T) {
 	var cookieDir string
 	var verified atomic.Int64
+	var s *AutoCookieService
 	t.Run("a pass still writing when the body returns", func(t *testing.T) {
 		profileDir := writeWALCookieProfile(t, youtubeAuthRows())
 		cookieDir = t.TempDir()
-		s := NewAutoCookieService(profileDir, filepath.Join(cookieDir, "cookies.txt"),
+		s = NewAutoCookieService(profileDir, filepath.Join(cookieDir, "cookies.txt"),
 			NewCookieJar(), &recordingCookieLogger{})
 		s.detectBrowser = func() *DetectedBrowser { return nil }
 		s.VerifyYouTubeAuth = func(context.Context) (bool, error) {
 			verified.Add(1)
-			time.Sleep(300 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			return true, nil
 		}
 		s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
@@ -223,9 +224,11 @@ func TestPeriodicLoopJoinedBeforeItsTempDirsGo(t *testing.T) {
 		}
 		// Returns here, as the original did, with the pass mid-verify.
 	})
-	// Longer than the verify's sleep, so a write the join did not hold has
-	// landed by the time the directory is looked at.
-	time.Sleep(600 * time.Millisecond)
+	// Until the pass is over, so a write the join did not hold has landed by
+	// the time the directory is looked at. With the join this returns at once.
+	if !s.waitBackground(10 * time.Second) {
+		t.Fatal("the pass never returned")
+	}
 	if _, err := os.Stat(cookieDir); err == nil {
 		entries, _ := os.ReadDir(cookieDir)
 		var names []string
