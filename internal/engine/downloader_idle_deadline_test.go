@@ -373,15 +373,17 @@ var ceilingReceivedRe = regexp.MustCompile(`having received (\d+) bytes`)
 // trickle delivers one byte per gap, so the bytes a fetch had received when
 // its ceiling ended it count the gaps it lived through. A runner that
 // deschedules the process stretches the elapsed time but delivers no more
-// bytes, where an elapsed bound of twice the ceiling failed any run stalled
-// for longer than the ceiling itself.
+// bytes — each one waits out a fresh gap — where an elapsed bound of twice
+// the ceiling failed any run stalled for longer than the ceiling itself. So
+// the count can be held close: at most one and a half ceilings' worth of
+// gaps (36), against the 23 or 24 a green run reads.
 //
 // Mutant: drop the context.WithTimeout layer (round 1's behaviour) — neither
 // fetch returns and both fail on the guard. Mutant: apply the ceiling to
 // fetchSegment only — the fetchChunk path fails on the guard while the
 // fetchSegment path stays green. Mutant: the idle bound as the ceiling — both
-// return before their ceiling. Mutant: the ceiling wired at three times its
-// value — both receive more than twice the bytes it allows.
+// return before their ceiling. Mutant: the ceiling wired at twice its value
+// — both receive more than one and a half times the bytes it allows.
 func TestFetchHardCeilingCapsATrickle(t *testing.T) {
 	prev := SegmentTimeout
 	t.Cleanup(func() { SegmentTimeout = prev })
@@ -439,10 +441,10 @@ func TestFetchHardCeilingCapsATrickle(t *testing.T) {
 			if r.elapsed < d.delays.fetchHardCeiling {
 				t.Errorf("%s returned after %s, before its %s ceiling", r.path, r.elapsed, d.delays.fetchHardCeiling)
 			}
-			// Generous upper margin: the load-bearing assertion is the
-			// guard, which is what the mutants trip; this one only catches
-			// a ceiling wired far out, counted in trickled bytes.
-			maxBytes := 2 * int(d.delays.fetchHardCeiling/gap)
+			// The upper bound, counted in trickled bytes: it catches a
+			// ceiling wired at twice its value (about 47 bytes) with 12
+			// bytes to spare over a green run.
+			maxBytes := 3 * int(d.delays.fetchHardCeiling/gap) / 2
 			if m := ceilingReceivedRe.FindStringSubmatch(fmt.Sprint(r.err)); m == nil {
 				t.Errorf("%s = %v, want the ceiling's error to say how much it received", r.path, r.err)
 			} else if n, _ := strconv.Atoi(m[1]); n > maxBytes {
