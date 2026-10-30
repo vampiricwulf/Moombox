@@ -299,6 +299,11 @@ func TestStopJoinsThePostPassReCheck(t *testing.T) {
 // return until the pass does; the Warn dropped — no line says so.
 func TestStopIsBoundedByAutoCookieStopWait(t *testing.T) {
 	withLaunchWindowKillBudget(t, testLaunchWindowKillBudget)
+	// The bound, not its length, is what is under test: shortened so the
+	// test does not wait the production 2 s out.
+	prevWait := autoCookieStopWait
+	autoCookieStopWait = 100 * time.Millisecond
+	t.Cleanup(func() { autoCookieStopWait = prevWait })
 	log := &recordingCookieLogger{}
 	s := NewAutoCookieService(writeWALCookieProfile(t, youtubeAuthRows()),
 		filepath.Join(t.TempDir(), "cookies.txt"), NewCookieJar(), log)

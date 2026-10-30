@@ -205,6 +205,12 @@ var authVerifyWindow = authVerifyTimeout
 // the wait existed.
 const AutoCookieStopWait = 2 * time.Second
 
+// autoCookieStopWait is the bound Stop actually spends, and it is a var for one
+// reason: a test proving the bound holds would otherwise wait the whole 2 s
+// out. Production never assigns it — the constant above is the number, this is
+// only the seam a test shortens. Same shape as authVerifyWindow.
+var autoCookieStopWait = AutoCookieStopWait
+
 // platformRefreshURLs maps platform names to their refresh URLs.
 var platformRefreshURLs = map[string]string{
 	"youtube": refreshURL,
@@ -843,8 +849,8 @@ func (s *AutoCookieService) Stop() {
 	s.killSetupProcess()
 	s.killRefreshProcess()
 	s.cleanup()
-	if !s.waitBackground(AutoCookieStopWait) && s.logger != nil {
-		s.logger.Warn("auto-cookie refresh pass still running after stop", "waited", AutoCookieStopWait.String())
+	if wait := autoCookieStopWait; !s.waitBackground(wait) && s.logger != nil {
+		s.logger.Warn("auto-cookie refresh pass still running after stop", "waited", wait.String())
 	}
 }
 
