@@ -39,7 +39,7 @@ func newTestUpdater(t *testing.T, current string, srv *httptest.Server, verifier
 }
 
 // newTestUpdaterAt is newTestUpdater for an origin that is not an httptest
-// server: the download stall tests serve theirs in memory (inMemoryClient).
+// server: the download stall tests serve theirs in memory (httpxtest).
 func newTestUpdaterAt(t *testing.T, current, apiBaseURL string, verifier func(string, string) error) (*Updater, string) {
 	t.Helper()
 	dir := t.TempDir()

@@ -2,7 +2,7 @@
 
 > **Last verified:** 2026-10-16
 >
-> The Package Scale table and the Totals were regenerated on 2026-10-16, after Wave 30 was integrated: the table with the script below, the Totals by the same count (`wc -l` per file) over the tracked files (`git ls-files`; `web/public/` less `vendor/`). Since the 2026-10-10 pass two packages were added — `internal/treeguard`, the test-only guard every tested package's `TestMain` runs through, and `internal/childproc`, which starts every FFmpeg and ffprobe tied to the process that runs it — and none removed. `internal/engine` (20 to 23), `internal/worker` (to 56), `internal/notifications` (to 13) and `internal/connectivity` (3 to 4) gained source files this round, and `cmd/moombox` 6 (26 to 32: the stop signals, the crash output capture, the daemon record, the outage alerts). The Runtime, Test Baseline (the package count and the two packages without tests) and Key Dependencies sections were checked against the tree the same day.
+> The Package Scale table and the Totals were regenerated on 2026-10-16, after Wave 30 was integrated: the table with the script below, the Totals by the same count (`wc -l` per file) over the tracked files (`git ls-files`; `web/public/` less `vendor/`). Since the 2026-10-10 pass two packages were added — `internal/treeguard`, the test-only guard every tested package's `TestMain` runs through, and `internal/childproc`, which starts every FFmpeg and ffprobe tied to the process that runs it — and none removed. `internal/engine` (20 to 23), `internal/worker` (to 56), `internal/notifications` (to 13) and `internal/connectivity` (3 to 4) gained source files this round, and `cmd/moombox` 6 (26 to 32: the stop signals, the crash output capture, the daemon record, the outage alerts). The Runtime, Test Baseline (the package count and the two packages without tests) and Key Dependencies sections were checked against the tree the same day. On 2026-10-30 `internal/httpx/httpxtest` was added, with its row and its share of the Totals; the other rows are as of 2026-10-16.
 >
 > These metrics are volatile — they drift as development continues. Update this file periodically.
 >
@@ -27,7 +27,7 @@
 
 ## Test Baseline
 
-- **Packages:** 41 in `go list ./...`. `go test -count=1 ./...` reports **39 ok / 0 fail**; the other two have no test files (`tools/sidecar-sig-probe`, `web`).
+- **Packages:** 42 in `go list ./...`. `go test -count=1 ./...` reports **40 ok / 0 fail**; the other two have no test files (`tools/sidecar-sig-probe`, `web`).
 - **Browser detection table:** `knownBrowsers` (`internal/cookies/autocookies_detect.go`) has **10 entries** — four Gecko, six Chromium. The full table with type keys is in [data-and-storage.md](data-and-storage.md) § Cookies.
 
 ## Key Dependencies
@@ -81,6 +81,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | treeguard/ | ~200 | 1 | 1 | Test-only: every tested package's `TestMain` runs through `Run`, which fails a run that leaves files in the package directory |
 | disk/ | ~200 | 5 | 5 | Disk space queries: kernel32 on Windows, statfs on Linux |
 | notifications/notificationtest/ | ~180 | 1 | 2 | Shared fakes for the notification manager's tests |
+| httpx/httpxtest/ | ~130 | 1 | 2 | Test-only: an http.Client that serves a handler in the test's own process, so a request can run inside a `testing/synctest` bubble (the updater's stall tests, the engine's idle-deadline and ceiling tests) |
 | httpx/ | ~110 | 1 | 2 | Shared keep-alive-tuned http.Client/Transport shapes |
 | bgutils/embed/ | ~80 | 4 | 2 | go:embed boundary for the Node binaries + sidecar tarball |
 | stats/ | ~80 | 1 | 2 | Figures shared by the Web Stats tab and the TUI's E T overlay — job aggregates, disk reading |
@@ -90,8 +91,8 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 ### Totals
 
 - **cmd/:** ~12,210 lines across 33 source files (32 in `cmd/moombox` — entry/launcher/adapters/wiring — plus the sign tool), plus 105 test files (~16,980 lines)
-- **internal/ packages:** ~147,830 lines across 364 source files in 35 packages
-- **Test code:** ~220,770 lines across 868 test files under `internal/` (`internal/docs`'s three included)
+- **internal/ packages:** ~147,960 lines across 365 source files in 36 packages
+- **Test code:** ~220,900 lines across 870 test files under `internal/` (`internal/docs`'s three included)
 - **Frontend:** ~23,840 lines across 27 files (~1,000 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 20 ES modules under `web/public/modules/` (`chat-timeline.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
 
 ## Entry Points

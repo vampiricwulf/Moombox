@@ -212,6 +212,7 @@ internal/tui                 -- 2-over-1 panel layout, overlays, chord system
 internal/goja                -- JS runtime shims (minimal DOM, TextEncoder, timers)
 internal/connectivity        -- reachability monitor (plain TCP dial); gates stream-end verdicts during outages
 internal/httpx               -- shared keep-alive-tuned http.Client/Transport shapes
+internal/httpx/httpxtest      -- test-only: an http.Client that serves a handler in the test's own process, so a request can run inside a testing/synctest bubble
 internal/sqliteuri           -- the "file:" URI every SQLite open goes through (job database, browser cookie databases)
 internal/redact              -- one redaction rule per kind of secret, for error text, log lines and notifications (a googlevideo or Twitch media URL's credentials, the GVS PO token, a credential inside a URL)
 internal/childproc           -- FFmpeg and ffprobe started tied to the process that runs them: Pdeathsig on a locked thread (Linux), a kill-on-close Job Object of the child's own (Windows)

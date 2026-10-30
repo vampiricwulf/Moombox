@@ -3,23 +3,24 @@ package updater
 import (
 	"context"
 	"crypto/ed25519"
-	"io"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/httpx/httpxtest"
 )
 
 // The stall tests run inside a synctest bubble, where time.AfterFunc (the
 // stall timer) and the trickle handler's time.After share a fake clock that
 // moves only once every goroutine in the bubble is blocked. Both ends of the
-// download are in the bubble too: the requests go through inMemoryClient,
-// which serves the handler over an io.Pipe instead of a socket, since a
-// goroutine waiting on the network would keep the clock from moving. No
-// pause of the process — a loaded runner, a scanner, the race detector —
-// can then come between a chunk and the timer.
+// download are in the bubble too: the requests go through
+// httpxtest.NewClient, which serves the handler over an io.Pipe instead of a
+// socket, since a goroutine waiting on the network would keep the clock from
+// moving. No pause of the process — a loaded runner, a scanner, the race
+// detector — can then come between a chunk and the timer.
 //
 // They used to run against an httptest server on the wall clock. Data every
 // 50 ms against a 200 ms stall timer was cut by a 160 ms pause of the
@@ -34,7 +35,7 @@ func shortenStall(t *testing.T, d time.Duration) {
 }
 
 // trickleOrigin is the origin trickleMux is served under. Nothing resolves
-// it: inMemoryClient answers every request itself.
+// it: httpxtest.NewClient answers every request itself.
 const trickleOrigin = "http://updates.test"
 
 // trickleMux serves /exe as chunks every gap — chunks of them, then holds
@@ -87,99 +88,9 @@ func trickleRelease() *ReleaseInfo {
 func serveInMemory(t *testing.T, h http.Handler) {
 	t.Helper()
 	orig := downloadClient
-	downloadClient = inMemoryClient(h)
+	downloadClient = httpxtest.NewClient(h)
 	t.Cleanup(func() { downloadClient = orig })
 }
-
-// inMemoryClient is an http.Client whose every request is answered by h in
-// the caller's process, the response body streamed through an io.Pipe: each
-// Write the handler makes is read by the client as it is made, as over a
-// socket, and the request's cancellation reaches both ends. A pipe blocks on
-// channels alone, which a synctest bubble can wait out; a socket it cannot.
-func inMemoryClient(h http.Handler) *http.Client {
-	return &http.Client{Transport: handlerTransport{h}}
-}
-
-type handlerTransport struct{ h http.Handler }
-
-func (ht handlerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	pr, pw := io.Pipe()
-	w := &pipeResponseWriter{header: http.Header{}, pw: pw, ready: make(chan struct{})}
-	served := make(chan struct{})
-	go func() {
-		defer close(served)
-		defer func() {
-			w.WriteHeader(http.StatusOK) // a handler that wrote nothing answers 200, as net/http does
-			// A handler that returned because the request was cancelled must
-			// not end the body cleanly: over a socket the client's read fails
-			// once its request is cancelled, whatever the server does next.
-			// A plain Close here could beat the watcher below and hand the
-			// client an EOF instead.
-			if err := req.Context().Err(); err != nil {
-				pw.CloseWithError(err)
-			} else {
-				pw.Close()
-			}
-		}()
-		ht.h.ServeHTTP(w, req)
-	}()
-	go func() {
-		select {
-		case <-req.Context().Done():
-			pw.CloseWithError(req.Context().Err())
-		case <-served:
-		}
-	}()
-	select {
-	case <-w.ready:
-	case <-req.Context().Done():
-		pr.Close()
-		return nil, req.Context().Err()
-	}
-	return &http.Response{
-		Status:        http.StatusText(w.status),
-		StatusCode:    w.status,
-		Proto:         "HTTP/1.1",
-		ProtoMajor:    1,
-		ProtoMinor:    1,
-		Header:        w.sent,
-		Body:          pr,
-		ContentLength: -1,
-		Request:       req,
-	}, nil
-}
-
-// pipeResponseWriter is the handler's side of handlerTransport. Only the
-// handler's goroutine touches it until ready is closed; RoundTrip reads
-// status and sent after that.
-type pipeResponseWriter struct {
-	header      http.Header
-	sent        http.Header
-	pw          *io.PipeWriter
-	status      int
-	wroteHeader bool
-	ready       chan struct{}
-}
-
-func (w *pipeResponseWriter) Header() http.Header { return w.header }
-
-func (w *pipeResponseWriter) WriteHeader(code int) {
-	if w.wroteHeader {
-		return
-	}
-	w.wroteHeader = true
-	w.status = code
-	w.sent = w.header.Clone()
-	close(w.ready)
-}
-
-func (w *pipeResponseWriter) Write(b []byte) (int, error) {
-	w.WriteHeader(http.StatusOK)
-	return w.pw.Write(b)
-}
-
-// Flush is a no-op: every Write already waits for the client to read it.
-func (w *pipeResponseWriter) Flush() {}
 
 // A release binary is 78-87 MB, and the download used to carry a 5-minute
 // TOTAL deadline: anything slower than about 2.3 Mbit/s was killed however
