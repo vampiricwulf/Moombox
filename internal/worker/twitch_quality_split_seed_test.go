@@ -25,8 +25,8 @@ import (
 // closed part is kept, not discarded as short) while the broadcast is still
 // live; the engine reports the quality lost and the refresh moves to 1080p.
 // Both variants serve the same sliding window of sequence numbers. The
-// minimum is a second here rather than production's ten: the rule is the
-// same, and the wall clock this run waits on is the minimum's. The broadcast
+// minimum is half a second here rather than production's ten: the rule is
+// the same, and the wall clock this run waits on is the minimum's. The broadcast
 // ends once the successor has fetched a segment — the first moment there is
 // something to check — rather than at a set time, which a split that came
 // late on a slow machine could miss.
@@ -40,11 +40,11 @@ import (
 // names 720p30).
 func TestTwitchQualitySplitSuccessorStartsWhereThePartEnded(t *testing.T) {
 	prevMin := minSegmentDuration
-	minSegmentDuration = time.Second
+	minSegmentDuration = 500 * time.Millisecond
 	t.Cleanup(func() { minSegmentDuration = prevMin })
 	ts := oneSecondTS(t)
 	start := time.Now()
-	switchAt := minSegmentDuration + time.Second
+	switchAt := minSegmentDuration + 100*time.Millisecond
 	// giveUp ends a broadcast whose successor never fetches, so a broken
 	// split fails here rather than at the context's deadline.
 	const giveUp = 20 * time.Second
