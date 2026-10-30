@@ -538,7 +538,12 @@ func TestProbeCooldownAllowsFreshAndBlocksRecent(t *testing.T) {
 	// ShouldProbe returns true for unseen IDs and false within the cooldown
 	// window after Record — protects feed/DECAPI cycles from re-probing
 	// every ~10 minutes (audit reports/monitor.md #5).
-	cd := NewProbeCooldown(50 * time.Millisecond)
+	//
+	// An hour's window, and the elapsed case made by moving the recorded
+	// probe back past it: a 50 ms window, slept out, failed "immediately
+	// after Record" whenever the test was descheduled for 50 ms between the
+	// two calls.
+	cd := NewProbeCooldown(time.Hour)
 
 	if !cd.ShouldProbe("vid-1") {
 		t.Fatal("ShouldProbe on unseen videoID: want true, got false")
@@ -554,9 +559,10 @@ func TestProbeCooldownAllowsFreshAndBlocksRecent(t *testing.T) {
 		t.Errorf("ShouldProbe on different unseen videoID: want true, got false")
 	}
 
-	// After the cooldown elapses the slot is reusable. 80ms gives the test
-	// a generous margin without slowing the suite noticeably.
-	time.Sleep(80 * time.Millisecond)
+	// After the cooldown elapses the slot is reusable.
+	cd.mu.Lock()
+	cd.lastProbe["vid-1"] = time.Now().Add(-time.Hour)
+	cd.mu.Unlock()
 	if !cd.ShouldProbe("vid-1") {
 		t.Errorf("ShouldProbe after cooldown elapses: want true, got false")
 	}
