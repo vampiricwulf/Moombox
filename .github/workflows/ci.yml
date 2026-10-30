@@ -46,8 +46,12 @@ name: CI
 # main — the one branch whose caches every later run can read — only when
 # its key missed, and only once the job's compiling steps have run: a job
 # that failed in setup would save a near-empty cache, which, as an exact hit
-# from then on, would never be replaced until go.sum or Go moved. The three
-# pinned Node binaries are cached per OS
+# from then on, would never be replaced until go.sum or Go moved. A restored
+# cache keeps the mtimes and trim.txt it was saved with, so Go (and
+# staticcheck) would trim all of a week-old one at the job's first build;
+# .github/scripts/go-cache-trim.sh holds the trim off for the job and trims
+# once, after the last use, in a job that saves. The three pinned Node
+# binaries are cached per OS
 # (~1 min of nodejs.org downloads on a miss). The sidecar tarball is rebuilt
 # on every run and never cached: it is seconds of work, and a cached one made
 # the Go tests embed the PREVIOUS sidecar JS whenever a commit touched only
@@ -124,10 +128,15 @@ jobs:
 
       - name: Locate the Go caches
         id: cache-dirs
+        # staticcheck keeps its cache where Go keeps GOCACHE's default: in
+        # the user cache directory.
         run: |
+          staticcheck_cache=${XDG_CACHE_HOME:-$HOME/.cache}/staticcheck
+          echo "STATICCHECK_CACHE=$staticcheck_cache" >> "$GITHUB_ENV"
           {
             echo "gocache=$(go env GOCACHE)"
             echo "gomodcache=$(go env GOMODCACHE)"
+            echo "staticcheck=$staticcheck_cache"
           } >> "$GITHUB_OUTPUT"
 
       - name: Restore the Go caches (lint)
@@ -139,10 +148,15 @@ jobs:
           path: |
             ${{ steps.cache-dirs.outputs.gocache }}
             ${{ steps.cache-dirs.outputs.gomodcache }}/cache/download
-            ~/.cache/staticcheck
+            ${{ steps.cache-dirs.outputs.staticcheck }}
           key: go-lint-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}
           restore-keys: |
             go-lint-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Hold off the caches' trim
+        # Before the first build: in a cache saved days ago every entry looks
+        # unused, and `go install` below would trim it all (see the script).
+        run: bash .github/scripts/go-cache-trim.sh hold "$(go env GOCACHE)" "$STATICCHECK_CACHE"
 
       - name: Download Go modules and staticcheck
         # Everything the later steps fetch, fetched here where a failure is
@@ -223,10 +237,14 @@ jobs:
         run: staticcheck ./...
 
       - name: staticcheck (windows/amd64)
+        # The last staticcheck run trims its cache as it exits: what neither
+        # run used and nothing used for five days before.
         env:
           GOOS: windows
           GOARCH: amd64
-        run: staticcheck ./...
+        run: |
+          bash .github/scripts/go-cache-trim.sh due "$STATICCHECK_CACHE"
+          staticcheck ./...
 
       - name: go build
         run: go build ./...
@@ -258,6 +276,12 @@ jobs:
       # Saved only once the last compiling step has run, pass or fail: a
       # job that stopped earlier holds a part of the build, and that would
       # be the exact hit of every later run until go.sum or Go moves.
+      - name: Trim the Go cache before saving it (lint)
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true' && (steps.cross-arm64.outcome == 'success' || steps.cross-arm64.outcome == 'failure') }}
+        timeout-minutes: 5
+        continue-on-error: true
+        run: bash .github/scripts/go-cache-trim.sh now
+
       - name: Save the Go caches (lint)
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true' && (steps.cross-arm64.outcome == 'success' || steps.cross-arm64.outcome == 'failure') }}
         uses: actions/cache/save@v6
@@ -267,7 +291,7 @@ jobs:
           path: |
             ${{ steps.cache-dirs.outputs.gocache }}
             ${{ steps.cache-dirs.outputs.gomodcache }}/cache/download
-            ~/.cache/staticcheck
+            ${{ steps.cache-dirs.outputs.staticcheck }}
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
   js:
@@ -401,6 +425,12 @@ jobs:
           restore-keys: |
             go-${{ matrix.flavour }}-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-
 
+      - name: Hold off the Go cache's trim
+        # Before the first build: in a cache saved days ago every entry looks
+        # unused, and fetch-node's `go run` below would trim it all (see the
+        # script).
+        run: bash .github/scripts/go-cache-trim.sh hold "$(go env GOCACHE)"
+
       - name: Restore the npm cache
         id: npm-cache
         uses: actions/cache/restore@v6
@@ -472,6 +502,12 @@ jobs:
       # or fail: a job that failed in setup compiled next to nothing, and
       # that cache would be the exact hit of every later run until go.sum
       # or Go moves.
+      - name: Trim the Go cache before saving it (${{ matrix.flavour }})
+        if: ${{ !cancelled() && matrix.shard == 'rest' && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true' && (steps.gotest.outcome == 'success' || steps.gotest.outcome == 'failure') }}
+        timeout-minutes: 5
+        continue-on-error: true
+        run: bash .github/scripts/go-cache-trim.sh now
+
       - name: Save the Go caches (${{ matrix.flavour }})
         if: ${{ !cancelled() && matrix.shard == 'rest' && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true' && (steps.gotest.outcome == 'success' || steps.gotest.outcome == 'failure') }}
         uses: actions/cache/save@v6
