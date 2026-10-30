@@ -14,11 +14,14 @@ import (
 
 // outageConn is a Connectivity the test flips by hand. set calls every
 // subscriber outside its own lock, the way the monitor's transition does.
+// offlineReads counts the IsOnline calls that answered offline, so a test can
+// wait for the code to have looked rather than for time to pass.
 type outageConn struct {
-	mu     sync.Mutex
-	online bool
-	subs   map[int]func(bool)
-	next   int
+	mu           sync.Mutex
+	online       bool
+	subs         map[int]func(bool)
+	next         int
+	offlineReads atomic.Int32
 }
 
 func newOutageConn(online bool) *outageConn {
@@ -28,6 +31,9 @@ func newOutageConn(online bool) *outageConn {
 func (c *outageConn) IsOnline() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !c.online {
+		c.offlineReads.Add(1)
+	}
 	return c.online
 }
 
@@ -201,13 +207,22 @@ func TestQueueHoldsWhateverTheTransport(t *testing.T) {
 // the link's return delivers the same notification, marked delayed, and then
 // the one queued behind it while the monitor still said online, marked too.
 //
+// Every step waits on the state it needs. The ladder's first backoff is held
+// (holdFirstBackoff) until the monitor reports offline, so the monitor
+// catches up inside it however the runner schedules the process, and the
+// link comes back only once the ladder has read the monitor offline. With a
+// 300 ms backoff and a 900 ms offline window on the wall clock, a pause of
+// the process that outlasted the backoff sent attempt two before the monitor
+// went offline, and one that swallowed the window let the ladder wake to a
+// restored link and send the held notification unmarked.
+//
 // Mutants: deliver not asking the gate before each attempt (attempts two
 // and three go out on the dead link); Send's re-render not marking the held
 // delivery; beginHoldLocked not marking what was already queued (the second
 // notification arrives unmarked).
 func TestOutageUnderADeliveryHoldsInPlace(t *testing.T) {
 	prevBackoff := discordRetryBackoff
-	discordRetryBackoff = [discordMaxAttempts - 1]time.Duration{300 * time.Millisecond, 300 * time.Millisecond}
+	discordRetryBackoff = [discordMaxAttempts - 1]time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
 	t.Cleanup(func() { discordRetryBackoff = prevBackoff })
 
 	var down atomic.Bool
@@ -215,12 +230,23 @@ func TestOutageUnderADeliveryHoldsInPlace(t *testing.T) {
 	f := newFakeDiscord(t, dropConn(&down))
 	conn := newOutageConn(true)
 	m := heldManager(t, conn, webhookTarget(f))
+	q := m.targets[0]
+	inBackoff, release := holdFirstBackoff(t)
 
 	m.Send("Job Failed", "d", TypeError, nil, SendOptions{Event: "error", JobID: "yt_1"})
-	waitFor(t, "the first attempt", func() bool { return len(f.calls()) == 1 })
+	waitFor(t, "the first attempt's backoff", func() bool {
+		select {
+		case <-inBackoff:
+			return true
+		default:
+			return false
+		}
+	})
 	m.Send("Job Cancelled", "d", TypeCancelled, nil, SendOptions{Event: "cancelled", JobID: "yt_2"})
+	waitFor(t, "the second notification queued", func() bool { return q.pending() == 1 })
 	conn.set(false) // the monitor catches up inside the backoff
-	time.Sleep(900 * time.Millisecond)
+	release()
+	waitFor(t, "the ladder reading the monitor offline", func() bool { return conn.offlineReads.Load() > 0 })
 	if n := len(f.calls()); n != 1 {
 		t.Fatalf("%d requests — the ladder kept spending attempts after the monitor reported offline", n)
 	}
@@ -234,6 +260,33 @@ func TestOutageUnderADeliveryHoldsInPlace(t *testing.T) {
 	}
 	assertDelayedNote(t, calls[1])
 	assertDelayedNote(t, calls[2])
+}
+
+// holdFirstBackoff makes the first wait the Discord retry ladder takes block
+// until release is called; inBackoff is closed as that wait begins, which is
+// after the attempt before it has failed. Later waits sleep as usual. Call it
+// after the Manager is built: release is also a cleanup, and cleanups run
+// last-in first-out, so a test that fails while the wait is held still lets
+// the target's goroutine go before the Manager's own cleanup waits for it.
+func holdFirstBackoff(t *testing.T) (inBackoff <-chan struct{}, release func()) {
+	t.Helper()
+	entered, out := make(chan struct{}), make(chan struct{})
+	var first, released sync.Once
+	release = func() { released.Do(func() { close(out) }) }
+	orig := discordSleep
+	discordSleep = func(d time.Duration) {
+		held := false
+		first.Do(func() { held = true })
+		if held {
+			close(entered)
+			<-out
+			return
+		}
+		orig(d)
+	}
+	t.Cleanup(func() { discordSleep = orig })
+	t.Cleanup(release)
+	return entered, release
 }
 
 // cutUntil answers request n, for n < len(gates), only once gates[n] is
