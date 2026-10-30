@@ -155,7 +155,7 @@ func TestStreamingFallbackDiscardsWhenRangeIgnored(t *testing.T) {
 //
 // Mutant: dropping the withReadProgressDeadline/idleBody pair from
 // runDirectDownloadFallback — the call never returns and this test fails on
-// its own 2 s guard.
+// its own guard (safetyNet).
 func TestStreamingFallbackFailsOnIdleStall(t *testing.T) {
 	prev := SegmentTimeout
 	t.Cleanup(func() { SegmentTimeout = prev })
@@ -190,7 +190,7 @@ func TestStreamingFallbackFailsOnIdleStall(t *testing.T) {
 		if !errors.Is(err, errFetchIdle) {
 			t.Fatalf("runDirectDownloadFallback = %v, want errFetchIdle", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(safetyNet):
 		t.Fatal("runDirectDownloadFallback never returned — the streaming fallback has no deadline")
 	}
 }

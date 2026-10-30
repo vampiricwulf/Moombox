@@ -115,7 +115,7 @@ func TestSlowButProgressingTransfersSurvive(t *testing.T) {
 // caller cancellation.
 //
 // Mutant: dropping the timer entirely (a plain context.WithCancel) — the
-// fetch hangs until the test's own 2 s guard fires.
+// fetch hangs until the test's own guard (safetyNet) fires.
 func TestFetchSegmentFailsOnIdleStall(t *testing.T) {
 	prev := SegmentTimeout
 	t.Cleanup(func() { SegmentTimeout = prev })
@@ -143,7 +143,7 @@ func TestFetchSegmentFailsOnIdleStall(t *testing.T) {
 		if !errors.Is(err, errFetchIdle) {
 			t.Fatalf("fetchSegment = %v, want errFetchIdle", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(safetyNet):
 		t.Fatal("fetchSegment never returned — the idle deadline did not fire")
 	}
 }
@@ -225,7 +225,7 @@ func (zeroByteReader) Close() error               { return nil }
 // end, so it must still end.
 //
 // Mutant: resetting on every Read instead of only when n > 0 — the deadline
-// is pushed out forever and this test fails on its 2 s guard.
+// is pushed out forever and this test fails on its guard (safetyNet).
 func TestIdleBodyDoesNotExtendOnAZeroByteRead(t *testing.T) {
 	const idle = 60 * time.Millisecond
 	ctx, timer, cancel := withReadProgressDeadline(context.Background(), idle)
@@ -244,7 +244,7 @@ func TestIdleBodyDoesNotExtendOnAZeroByteRead(t *testing.T) {
 		if !errors.Is(context.Cause(ctx), errFetchIdle) {
 			t.Fatalf("cause = %v, want errFetchIdle", context.Cause(ctx))
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(safetyNet):
 		t.Fatal("the idle bound never fired — a byte-less Read counted as progress")
 	}
 }
@@ -441,7 +441,14 @@ func TestFetchHardCeilingCapsATrickle(t *testing.T) {
 // the outer, generous bound, and a genuine stall must still end at the idle
 // deadline rather than sitting on a dead socket until the ceiling.
 //
-// Mutant: swap the two bounds (idle 5 s, ceiling 200 ms) — the error becomes
+// Which bound fired is read off the error's cause, not a clock. The ceiling
+// sits past the test's guard, so a fetch that waited for the ceiling's clock
+// fails on the guard however its error reads; a 2 s guard and a "returned
+// after ceiling/2" bound used to stand in for that, and a runner that
+// deschedules the process for longer than either failed the test with the
+// idle bound firing first.
+//
+// Mutant: swap the two bounds (idle 60 s, ceiling 200 ms) — the error becomes
 // errFetchCeiling and this row fails.
 func TestFetchSegmentIdleStillFiresFirst(t *testing.T) {
 	prev := SegmentTimeout
@@ -450,7 +457,7 @@ func TestFetchSegmentIdleStillFiresFirst(t *testing.T) {
 
 	srv := headersThenSilenceServer(t)
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL})
-	d.delays.fetchHardCeiling = 5 * time.Second
+	d.delays.fetchHardCeiling = 2 * safetyNet
 
 	ctx, cancel := deadlineTestContext(t)
 	defer cancel()
@@ -464,19 +471,15 @@ func TestFetchSegmentIdleStillFiresFirst(t *testing.T) {
 
 	select {
 	case err := <-done:
-		elapsed := time.Since(start)
 		if !errors.Is(err, errFetchIdle) {
 			t.Fatalf("fetchSegment = %v, want errFetchIdle", err)
 		}
 		if errors.Is(err, errFetchCeiling) {
 			t.Fatalf("fetchSegment = %v, want the idle bound to fire first", err)
 		}
-		if elapsed > d.delays.fetchHardCeiling/2 {
-			t.Fatalf("fetchSegment returned after %s — that is the ceiling's clock, not the %s idle bound", elapsed, SegmentTimeout)
-		}
-		t.Logf("idle bound fired after %s (idle %s, ceiling %s): %v", elapsed, SegmentTimeout, d.delays.fetchHardCeiling, err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("fetchSegment never returned — neither deadline fired")
+		t.Logf("idle bound fired after %s (idle %s, ceiling %s): %v", time.Since(start), SegmentTimeout, d.delays.fetchHardCeiling, err)
+	case <-time.After(safetyNet):
+		t.Fatal("fetchSegment never returned before the guard — neither deadline fired, or only the ceiling's clock was running")
 	}
 }
 
@@ -538,7 +541,7 @@ func TestFetchSegmentWithRetryTreatsBothDeadlinesAsTransient(t *testing.T) {
 			var err error
 			select {
 			case err = <-done:
-			case <-time.After(3 * time.Second):
+			case <-time.After(safetyNet):
 				t.Fatal("fetchSegmentWithRetry never returned — neither deadline ended the attempt")
 			}
 
