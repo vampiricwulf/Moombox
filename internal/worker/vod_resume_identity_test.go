@@ -38,6 +38,10 @@ func newVodRenditionServer(t *testing.T, size int64) *vodRenditionServer {
 	for itag, b := range vodRenditionFill {
 		fills[itag] = bytes.Repeat([]byte{b}, 1<<20)
 	}
+	// An itag vodRenditionFill does not name is served zeros, as its zero
+	// fill byte always was; without a fill of its own the write loop below
+	// would never move.
+	zeros := make([]byte, 1<<20)
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		itag := r.URL.Query().Get("itag")
 		var start, end int64
@@ -64,7 +68,11 @@ func newVodRenditionServer(t *testing.T, size int64) *vodRenditionServer {
 			w.Write(header)
 			left -= int64(len(header))
 		}
-		for fill := fills[itag]; left > 0; {
+		fill := fills[itag]
+		if fill == nil {
+			fill = zeros
+		}
+		for left > 0 {
 			n := min(left, int64(len(fill)))
 			if _, err := w.Write(fill[:n]); err != nil {
 				return
