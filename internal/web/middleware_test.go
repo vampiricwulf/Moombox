@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -1517,7 +1518,7 @@ func TestIPGateHonorsTrustedProxy(t *testing.T) {
 // polling /api/jobs that is ~1 MB of garbage per response (sweep T4-35).
 //
 // THE MUTANT: replace the pool Get/Reset in startGzip with gzip.NewWriter —
-// AllocedBytesPerOp jumps past 200 KB and this fails.
+// the bytes allocated per request jump past 200 KB and this fails.
 func TestCompressionReusesGzipWriters(t *testing.T) {
 	body := strings.Repeat("compressible-json-byte-", 200) // ~4.6 KB, over gzipMinSize
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1527,14 +1528,24 @@ func TestCompressionReusesGzipWriters(t *testing.T) {
 	})
 	wrapped := CompressionMiddleware(handler)
 
-	res := testing.Benchmark(func(b *testing.B) {
-		b.ReportAllocs()
-		for b.Loop() {
-			req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
-			req.Header.Set("Accept-Encoding", "gzip")
-			wrapped.ServeHTTP(httptest.NewRecorder(), req)
-		}
-	})
+	// A fixed run of requests measured with MemStats, not testing.Benchmark,
+	// which spends its whole one-second benchtime here: the bytes a request
+	// allocates do not depend on how long it is measured for. The request
+	// ahead of the count fills the pool.
+	serve := func() {
+		req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		wrapped.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	serve()
+	const requests = 200
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range requests {
+		serve()
+	}
+	runtime.ReadMemStats(&after)
+	allocedPerOp := int64(after.TotalAlloc-before.TotalAlloc) / requests
 	// The race detector charges its shadow memory to the allocating goroutine,
 	// which lifts the SAME pooled workload from ~4 KB/op to ~291 KB/op. Raise
 	// the ceiling rather than skip the test: the unpooled baseline is ~1.09 MB,
@@ -1543,7 +1554,7 @@ func TestCompressionReusesGzipWriters(t *testing.T) {
 	if raceEnabled {
 		ceiling = 500 * 1024
 	}
-	if got := res.AllocedBytesPerOp(); got > int64(ceiling) {
+	if got := allocedPerOp; got > int64(ceiling) {
 		t.Errorf("a gzipped response allocates %d B/op against a %d ceiling; a fresh gzip.Writer alone "+
 			"is ~1.08 MB and a pooled one ~4 KB, so anything over that means the writer is not being "+
 			"reused", got, ceiling)
