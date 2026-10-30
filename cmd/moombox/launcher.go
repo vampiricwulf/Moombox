@@ -693,7 +693,7 @@ func attemptAutoRollback(exePath, backup string, exitCode int) bool {
 		if mvErr = rollbackRename(exePath, failedPath); mvErr == nil {
 			break
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(rollbackMoveRetryDelay)
 	}
 	// The rename needs DELETE access to the destination as well as the
 	// source, so a stale .failed from an EARLIER failed update — the
@@ -722,6 +722,12 @@ func attemptAutoRollback(exePath, backup string, exitCode int) bool {
 
 // rollbackRename is os.Rename, a seam for the test that watches the restore.
 var rollbackRename = os.Rename
+
+// rollbackMoveRetryDelay is the pause after each failed attempt to move the
+// broken binary aside — what an AV scanner's hold on a freshly downloaded
+// file is given to clear. A variable so the test whose destination never
+// clears does not sit through it.
+var rollbackMoveRetryDelay = 500 * time.Millisecond
 
 // writeAutoRollbackMarker records a completed automatic rollback in the
 // same .update-failed marker file the manual-recovery path uses — existing

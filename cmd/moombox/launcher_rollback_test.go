@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAttemptAutoRollbackRestoresPreviousBinary pins the happy path: with a
@@ -160,9 +161,15 @@ func TestAutoRollbackReplacesAnOlderFailedArtifact(t *testing.T) {
 // undeletable destination: os.Rename refuses it on both platforms, and
 // removing exePath (an ordinary file) still succeeds.
 //
+// The pause between the three attempts is shrunk: this destination never
+// clears, and the test used to wait out 3 × 500 ms for it.
+//
 // Mutant: drop the os.Remove fallback — attemptAutoRollback returns false and
 // the install stays on the broken binary.
 func TestAutoRollbackFallsBackToRemovingTheFailedBinary(t *testing.T) {
+	orig := rollbackMoveRetryDelay
+	rollbackMoveRetryDelay = time.Millisecond
+	t.Cleanup(func() { rollbackMoveRetryDelay = orig })
 	dir := t.TempDir()
 	exePath := filepath.Join(dir, "moombox-test.exe")
 	if err := os.WriteFile(exePath, []byte("BROKEN"), 0o755); err != nil {
