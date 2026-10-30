@@ -752,6 +752,8 @@ Go 1.27 required (go.mod carries `toolchain go1.27.3` as the floor: an older loc
 
 GitHub Actions (`.github/workflows/release.yml`) triggers on tag push, and runs the test workflow on the tagged commit beside the build, reporting its result in the same run without holding the release back (a manual run is a dry run that publishes nothing). Builds Windows exe, generates `.syso` for icon/version, signs with Ed25519 (private key in GitHub secret), writes and signs the release manifest, uploads binaries + signatures + manifest to GitHub Release. Release body is read from `RELEASE_NOTES.md` in the repo.
 
+The test workflow (`.github/workflows/ci.yml`) runs on every push to `main` and every pull request as parallel jobs: `lint` (every compile-only gate, for linux, windows and linux/arm64), `js` (the node suites), and `go test -count=1` in linux, race and windows flavours, each split by package into shards (`.github/scripts/test-shard.sh`, whose catch-all shard runs any package no other shard names). See [operations.md](docs/spec/operations.md) § Test Workflow.
+
 ### Release Process
 
 1. Generate `RELEASE_NOTES.md` — `git log --oneline <prev-tag>..HEAD`, group by Features/Improvements/Bug Fixes/Internal (skip empty sections). No heading.
