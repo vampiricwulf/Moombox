@@ -985,9 +985,11 @@ func TestPotProvider_ContextCancelDuringInflight(t *testing.T) {
 
 	// First request starts generation. Waited for: had the request below
 	// got there first, it would have been the leader, blocked in MintFunc
-	// for good, and hung the test.
+	// for good, and hung the test. It is joined at the end, so a panic in
+	// it fails the test rather than vanishing.
+	leader := make(chan any, 1)
 	go func() {
-		defer func() { _ = recover() }()
+		defer func() { leader <- recover() }()
 		pp.GeneratePoToken(context.Background(), binding, false)
 	}()
 	waitInflight(t, pp, binding)
@@ -1005,6 +1007,14 @@ func TestPotProvider_ContextCancelDuringInflight(t *testing.T) {
 	}
 
 	close(blockCh)
+	select {
+	case r := <-leader:
+		if r != nil {
+			t.Errorf("the leading GeneratePoToken panicked: %v", r)
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("the leading GeneratePoToken never returned once its mint was released")
+	}
 }
 
 // ---------------------------------------------------------------------------

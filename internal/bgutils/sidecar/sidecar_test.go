@@ -2,6 +2,7 @@ package sidecar
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -183,6 +184,11 @@ func TestSidecarOnTheEmbeddedPayload(t *testing.T) {
 		for range N {
 			go func() {
 				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						errCh <- fmt.Errorf("ping panicked: %v", r)
+					}
+				}()
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				if err := s.ping(ctx); err != nil {

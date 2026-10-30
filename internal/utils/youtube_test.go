@@ -292,7 +292,14 @@ func TestResolveRetryWaitSleepsOrEndsWithItsContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	done := make(chan error, 1)
-	go func() { done <- resolveRetryWait(ctx, time.Hour) }()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("resolveRetryWait panicked: %v", r)
+			}
+		}()
+		done <- resolveRetryWait(ctx, time.Hour)
+	}()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
