@@ -505,8 +505,6 @@ func (pt *ProgressTracker) pendingActivityLocked() bool {
 		pt.orchActivity != engine.ActivityNone
 }
 
-// ensureActivityTickerLocked starts the refresh goroutine when none is
-// running. Caller holds mu.
 // activityEvery is the tracker's activity cadence: activityInterval, or the
 // constant for a tracker built without the constructor.
 func (pt *ProgressTracker) activityEvery() time.Duration {
@@ -516,6 +514,8 @@ func (pt *ProgressTracker) activityEvery() time.Duration {
 	return activityUpdateInterval
 }
 
+// ensureActivityTickerLocked starts the refresh goroutine when none is
+// running. Caller holds mu.
 func (pt *ProgressTracker) ensureActivityTickerLocked() {
 	if pt.activityTickerOn || pt.closed {
 		return
