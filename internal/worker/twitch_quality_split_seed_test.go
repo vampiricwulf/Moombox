@@ -21,15 +21,20 @@ import (
 // part's last seconds. The successor now starts at the first sequence the
 // closed part does not hold, like the gap and init-change splits.
 //
-// The 720p variant's playlist starts 404ing after minSegmentDuration (so the
-// closed part is kept, not discarded as short) while the broadcast is still
+// The 720p variant's playlist starts 404ing while the broadcast is still
 // live; the engine reports the quality lost and the refresh moves to 1080p.
 // Both variants serve the same sliding window of sequence numbers. The
 // minimum is half a second here rather than production's ten: the rule is
-// the same, and the wall clock this run waits on is the minimum's. The broadcast
-// ends once the successor has fetched a segment — the first moment there is
-// something to check — rather than at a set time, which a split that came
-// late on a slow machine could miss.
+// the same, and the wall clock this run waits on is the minimum's. The switch
+// is timed from the part's first segment fetch, not from the test's start:
+// ExecuteTwitch starts the part's clock before its downloader fetches
+// anything, so a switch past the minimum from that fetch finds the part older
+// than the minimum, and it is kept, not discarded as short. Timed from the
+// test's start, the setup ahead of ExecuteTwitch (the harness's database,
+// over 100 ms under -race) ate into the margin and the part read as short.
+// The broadcast ends once the successor has fetched a segment — the first
+// moment there is something to check — rather than at a set time, which a
+// split that came late on a slow machine could miss.
 //
 // The same split records the variant it moved to on the row, as the job's
 // twitch_quality, which the Twitch preference reads back when the job is
@@ -44,6 +49,7 @@ func TestTwitchQualitySplitSuccessorStartsWhereThePartEnded(t *testing.T) {
 	t.Cleanup(func() { minSegmentDuration = prevMin })
 	ts := oneSecondTS(t)
 	start := time.Now()
+	// switchAt counts from first720, the 720p part's first segment fetch.
 	switchAt := minSegmentDuration + 100*time.Millisecond
 	// giveUp ends a broadcast whose successor never fetches, so a broken
 	// split fails here rather than at the context's deadline.
@@ -51,6 +57,12 @@ func TestTwitchQualitySplitSuccessorStartsWhereThePartEnded(t *testing.T) {
 
 	var mu sync.Mutex
 	got := map[string][]int{}
+	var first720 time.Time
+	switched := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return !first720.IsZero() && time.Since(first720) > switchAt
+	}
 	ended := func() bool {
 		mu.Lock()
 		defer mu.Unlock()
@@ -60,11 +72,11 @@ func TestTwitchQualitySplitSuccessorStartsWhereThePartEnded(t *testing.T) {
 		name, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
 		if strings.HasSuffix(r.URL.Path, ".m3u8") {
 			name = strings.TrimSuffix(name, ".m3u8")
-			el := time.Since(start)
-			if name == "720" && el > switchAt {
+			if name == "720" && switched() {
 				http.NotFound(w, r)
 				return
 			}
+			el := time.Since(start)
 			head := int(el.Seconds())
 			lo := max(0, head-5)
 			var b strings.Builder
@@ -85,6 +97,9 @@ func TestTwitchQualitySplitSuccessorStartsWhereThePartEnded(t *testing.T) {
 			return
 		}
 		mu.Lock()
+		if name == "720" && first720.IsZero() {
+			first720 = time.Now()
+		}
 		got[name] = append(got[name], n)
 		mu.Unlock()
 		w.Header().Set("Content-Type", "video/mp2t")
@@ -98,7 +113,7 @@ func TestTwitchQualitySplitSuccessorStartsWhereThePartEnded(t *testing.T) {
 	h.variant.URL, h.variant.Name, h.variant.Width, h.variant.Height, h.variant.FPS = low.URL, low.Name, low.Width, low.Height, low.FPS
 	h.variant.CheckStreamFn = func(context.Context) (bool, error) { return !ended(), nil }
 	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
-		if time.Since(start) > switchAt {
+		if switched() {
 			return []twitch.TwitchHLSVariant{high}, nil
 		}
 		return []twitch.TwitchHLSVariant{low}, nil
