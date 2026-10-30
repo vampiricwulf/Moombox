@@ -60,7 +60,7 @@ func crashHelper(path string) {
 			debug.SetMaxStack(1 << 20)
 			crashRecurse(0) // fatal error: stack overflow, raised on the system stack
 		case "out of memory":
-			crashHeld = crashAllocHuge() // fatal error: runtime: out of memory, likewise
+			crashHeld = crashAllocHuge() // fatal error: out of memory, thrown on the goroutine's own stack
 		}
 		panic("probe crash: POST https://user:" + crashSecret + "@hooks.example.com/x?token=" + crashSecret +
 			" failed, pot=" + crashSecret)
@@ -85,17 +85,20 @@ func crashRecurse(n int) int {
 // crashHeld keeps crashAllocHuge's result reachable.
 var crashHeld [][]byte
 
-// crashAllocHuge asks for more address space than any machine has (32 TiB at
-// a time): the runtime's mapping fails, which it reports as out of memory
-// without touching a byte of real memory.
+// crashAllocHuge asks for one block just under the runtime's largest
+// allocation (256 TiB less 64 MiB), more than the user address space of any
+// platform Moombox ships for: reserving it fails before the runtime creates
+// any arena metadata, so it throws out of memory having committed nothing.
+// It must stay a block no machine can reserve. One that can be reserved (32
+// TiB, as this once asked for) is not free: the runtime commits about 68 KiB
+// of arena metadata per 64 MiB of it before it fails, ~34 GiB for 32 TiB,
+// which Windows charges against the whole machine's commit limit — the
+// processes go test runs beside this one then failed with "The paging file
+// is too small".
 //
 //go:noinline
 func crashAllocHuge() [][]byte {
-	var held [][]byte
-	for range 64 {
-		held = append(held, make([]byte, 1<<45))
-	}
-	return held
+	return [][]byte{make([]byte, 1<<48-1<<26)}
 }
 
 // TestARealCrashReachesTheNextStartsLog runs a process that arms the crash
@@ -107,19 +110,20 @@ func crashAllocHuge() [][]byte {
 // From Crash notice sent the operator to logs that did not hold the cause
 // (W28-A04). A fatal error's own "fatal error: …" line never reaches the
 // crash file (the runtime prints it before it counts itself as crashing), so
-// its cause is named by the frame it struck in: for a stack overflow and for
-// running out of memory, whose output starts at the system stack's
-// "runtime stack:", the dying goroutine's first frame outside the runtime —
-// both used to be named "runtime stack:".
+// its cause is named by the frame it struck in: the dying goroutine's first
+// frame outside the runtime — for a stack overflow, whose output starts at
+// the system stack's "runtime stack:", the goroutine listed after that block
+// (once named "runtime stack:" itself); for running out of memory, the
+// goroutine that asked for the block.
 //
 // Mutants: armCrashOutput not calling debug.SetCrashOutput (the file stays
 // empty); redactCrashText returning its input (the secret reaches the
 // excerpt); takePreviousCrash not moving the output aside (no .1, and the
 // next crash's capture would truncate it); crashCause taking the first line
-// whatever it is (the fatal row's cause is a bare "goroutine 9 [running]:",
-// the system-stack rows' "runtime stack:"); crashCause not passing over the
-// runtime's own frames (the out-of-memory row names
-// runtime.systemstack_switch).
+// whatever it is (the fatal and out-of-memory rows' cause is a bare
+// "goroutine 9 [running]:", the stack-overflow row's "runtime stack:");
+// crashCause not passing over the runtime's own frames (the out-of-memory
+// row names runtime.(*mcache).allocLarge).
 func TestARealCrashReachesTheNextStartsLog(t *testing.T) {
 	if path := os.Getenv(crashHelperEnv); path != "" {
 		crashHelper(path)
