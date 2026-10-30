@@ -15,6 +15,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 )
 
 // TestCancelMuxesCutsTheMuxRoot pins owner decision O-E: every background and
@@ -283,16 +284,24 @@ func TestLaterPartOfASplitMuxes(t *testing.T) {
 // cost of every archive recovered that way.
 //
 // It doubles as ENGINE-9's false-positive control end to end: a healthy 90 s
-// recording muxes to a 90 s output and must finish clean.
+// recording muxes to a 90 s output and must finish clean. And it is the boot
+// re-mux of a download that completed — the row was already Muxing — so its
+// "Muxing Starting" says the download is complete; the operator's Mux of a
+// failed job is TestMuxingStartingSaysWhatTheMuxHas.
 //
-// Mutant: skipping cleanupStagingAfterMux in MuxJob — the staging dir (and
-// its raw recording) survives a Finished row.
+// Mutants: skipping cleanupStagingAfterMux in MuxJob — the staging dir (and
+// its raw recording) survives a Finished row; MuxJob not reading an already
+// Muxing row as a completed download (capturedMux left true) — the embed
+// says it muxes the captured media.
 func TestRestartMuxFinishesAndClearsStaging(t *testing.T) {
 	ffmpegPath, _ := requireFFmpegTools(t)
 	w, db := testWorkerSetup(t)
+	rec := notificationtest.New()
+	w.orchestrator.notifier = rec
 
 	staging, _ := muxFixtureJob(t, w, db, "j-clean")
 	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 90)
+	db.UpdateJobFields("j-clean", map[string]any{"title": "A Stream"})
 
 	if err := w.MuxJob("j-clean"); err != nil {
 		t.Fatalf("MuxJob: %v", err)
@@ -305,6 +314,9 @@ func TestRestartMuxFinishesAndClearsStaging(t *testing.T) {
 	}
 	if _, err := os.Stat(staging); !os.IsNotExist(err) {
 		t.Errorf("staging dir %s survived a successful restart mux (stat err = %v)", staging, err)
+	}
+	if got := rec.ByEvent("muxing"); len(got) != 1 || got[0].Description != "Download complete, muxing: A Stream" {
+		t.Errorf("muxing sends = %+v, want one reading %q", got, "Download complete, muxing: A Stream")
 	}
 }
 
