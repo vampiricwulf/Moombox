@@ -1040,18 +1040,44 @@ func muxFixtureJob(t *testing.T, w *DownloadWorker, db *database.Database, jobID
 	return stagingDir, outputDir
 }
 
-// writeMuxFixture renders a real seconds-long MP4 with its moov up front, so a
+// writeMuxFixture writes a real seconds-long MP4 with its moov up front, so a
 // byte-truncated copy still probes at its full declared length (which is what
 // makes the ENGINE-9 scenario reproducible).
 func writeMuxFixture(t *testing.T, ffmpegPath, path string, seconds int) {
 	t.Helper()
+	if err := os.WriteFile(path, renderedMuxFixture(t, ffmpegPath, seconds), 0o644); err != nil {
+		t.Fatalf("write fixture %s: %v", path, err)
+	}
+}
+
+var (
+	muxFixturesMu sync.Mutex
+	muxFixtures   = map[int][]byte{}
+)
+
+// renderedMuxFixture renders writeMuxFixture's MP4 once per length per test
+// binary: about forty tests stage one, and the bytes are all they read of it.
+func renderedMuxFixture(t *testing.T, ffmpegPath string, seconds int) []byte {
+	t.Helper()
+	muxFixturesMu.Lock()
+	defer muxFixturesMu.Unlock()
+	if data, ok := muxFixtures[seconds]; ok {
+		return data
+	}
+	path := filepath.Join(t.TempDir(), "fixture.mp4")
 	cmd := exec.Command(ffmpegPath, "-nostdin", "-y",
 		"-f", "lavfi", "-i", fmt.Sprintf("testsrc=size=64x64:rate=5:duration=%d", seconds),
 		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
 		"-movflags", "+faststart", path)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("generate fixture %s: %v\n%s", path, err, out)
+		t.Fatalf("generate the %d s fixture: %v\n%s", seconds, err, out)
 	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	muxFixtures[seconds] = data
+	return data
 }
 
 // writeOffsetFragmentFixture renders seconds of video as a FRAGMENTED MP4
@@ -1092,35 +1118,36 @@ func writeOffsetTSFixture(t *testing.T, ffmpegPath, path string, seconds, offset
 	}
 }
 
-// writeAsideFixture renders the same fixture under a name with no media
-// extension — an aside is <file>.restart-<unix ts>, which FFmpeg cannot pick
-// an output format for, so it is written as .mp4 and moved into place the way
-// the engine's no-truncate guard renames it.
+// writeAsideFixture writes the same fixture under a name with no media
+// extension — an aside is <file>.restart-<unix ts>, the name the engine's
+// no-truncate guard renames a recording to.
+//
+// It writes the name directly. It used to render to a .mp4 and rename that
+// into place, and on Windows a rename of a file FFmpeg has just closed can be
+// refused while a scanner still holds it.
 func writeAsideFixture(t *testing.T, ffmpegPath, path string, seconds int) {
 	t.Helper()
-	tmp := filepath.Join(t.TempDir(), "aside.mp4")
-	writeMuxFixture(t, ffmpegPath, tmp, seconds)
-	if err := os.Rename(tmp, path); err != nil {
-		t.Fatalf("move the aside fixture into place: %v", err)
-	}
+	writeMuxFixture(t, ffmpegPath, path, seconds)
 }
 
 // writeSlowAsideFixture renders an aside big enough that `-c copy` is still
 // writing it hundreds of milliseconds after FFmpeg opens its output, which is
 // what makes a mid-copy cancellation reachable from a test. PCM audio rather
-// than video: 25 minutes of it is ~129 MB written in a fraction of a second,
-// where the same size of encoded video would cost minutes to generate.
+// than video: 25 minutes of it is ~129 MB, where the same size of encoded
+// video would cost minutes to generate. It is silence in one-second frames:
+// the copy's cost is its bytes, and a tone in the source's default 1024-sample
+// frames took six seconds to render.
+//
+// The format is forced (-f mp4), so FFmpeg writes the aside's own
+// extensionless name and nothing has to rename it into place after FFmpeg
+// closes it — a rename Windows can refuse while a scanner holds the file.
 func writeSlowAsideFixture(t *testing.T, ffmpegPath, path string) {
 	t.Helper()
-	tmp := filepath.Join(t.TempDir(), "aside.mp4")
 	cmd := exec.Command(ffmpegPath, "-nostdin", "-y",
-		"-f", "lavfi", "-i", "sine=frequency=1000:duration=1500",
-		"-c:a", "pcm_s16le", tmp)
+		"-f", "lavfi", "-t", "1500", "-i", "anullsrc=r=44100:cl=mono:nb_samples=44100",
+		"-c:a", "pcm_s16le", "-f", "mp4", path)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("generate the slow aside fixture: %v\n%s", err, out)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		t.Fatalf("move the slow aside fixture into place: %v", err)
 	}
 }
 
@@ -1195,13 +1222,9 @@ func TestTruncatedAsideStaysInStaging(t *testing.T) {
 	t.Cleanup(w.Stop)
 
 	staging, outputDir := muxFixtureJob(t, w, db, "j-aside-trunc")
-	full := filepath.Join(staging, "video.mp4")
-	writeMuxFixture(t, ffmpegPath, full, 90)
-	truncateFixture(t, full, 120000)
-	aside := full + engine.StagedRestartSuffix + "1700000000"
-	if err := os.Rename(full, aside); err != nil {
-		t.Fatal(err)
-	}
+	aside := filepath.Join(staging, "video.mp4") + engine.StagedRestartSuffix + "1700000000"
+	writeAsideFixture(t, ffmpegPath, aside, 90)
+	truncateFixture(t, aside, 120000)
 
 	job, _ := db.GetJob("j-aside-trunc")
 	recovered := w.orchestrator.muxStagedAsides(context.Background(), w.buildJobContext(job), outputDir, "base")
