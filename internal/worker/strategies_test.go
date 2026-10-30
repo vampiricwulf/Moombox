@@ -374,13 +374,14 @@ func TestRefreshGvsCredentialsSkipsWholeFileFormat(t *testing.T) {
 // job.YT is deliberately left nil so the (un-fakeable, concrete-typed)
 // player-response re-fetch is skipped, isolating the URL half to its one
 // controllable piece: cipher resolution via a cipher.Solver double
-// (orderedSolver) whose N() is made deliberately slow and ctx-oblivious —
-// the worst case for a URL half that would run after the mint. The outer
-// ctx is given a short deadline to stand in for a tight clamped budget,
-// without re-testing credentialRefreshTimeoutFor's own arithmetic (that's
-// TestCredentialRefreshTimeoutFor's job) — context.WithTimeout composes,
-// so a short outer deadline is exactly as binding on refreshCtx as a low
-// clamp would be.
+// (orderedSolver) whose N() spends the whole budget: it cancels the outer
+// ctx, the end of a tight clamped window, before it returns — the worst case
+// for a URL half that would run before the mint, without re-testing
+// credentialRefreshTimeoutFor's own arithmetic (that's
+// TestCredentialRefreshTimeoutFor's job). refreshCtx derives from the outer
+// ctx, so its end binds refreshCtx exactly as a low clamp would. The budget
+// used to be a 50 ms outer deadline against a 300 ms N(), and a run
+// descheduled for 50 ms before the mint read as a starved mint.
 func TestRefreshGvsCredentialsMintsBeforeSlowURLFetch(t *testing.T) {
 	var trace []string
 	var mintCtxErr error
@@ -392,15 +393,16 @@ func TestRefreshGvsCredentialsMintsBeforeSlowURLFetch(t *testing.T) {
 			return "fresh-token", nil
 		},
 	}
+	outer, spend := context.WithCancel(context.Background())
+	defer spend()
 	slowSolver := &orderedSolver{
 		onN: func(ctx context.Context, playerID, encryptedN string) (string, error) {
 			trace = append(trace, "urlresolve")
-			// Ignores ctx entirely and blocks well past the short outer
-			// deadline below — the worst-case "honestly slow, doesn't even
-			// respect cancellation" URL fetch the ordering fix protects
-			// against. If mint ran first, it already returned before this
-			// call even started, so this can't have starved it.
-			time.Sleep(300 * time.Millisecond)
+			// The worst-case URL fetch the ordering fix protects against: it
+			// runs the shared window out, and ignores that it has. If mint
+			// ran first, it already returned before this call even started,
+			// so this can't have starved it.
+			spend()
 			return "decrypted-n", nil
 		},
 	}
@@ -415,10 +417,7 @@ func TestRefreshGvsCredentialsMintsBeforeSlowURLFetch(t *testing.T) {
 		Formats:   []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1&n=abc123", Source: "web_creator"}},
 	}
 
-	shortCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	_, token := refreshGvsCredentials(shortCtx, job, videoInfo, 140, slowSolver, nil, fake, "vd-123", "test")
+	_, token := refreshGvsCredentials(outer, job, videoInfo, 140, slowSolver, nil, fake, "vd-123", "test")
 
 	if token != "fresh-token" {
 		t.Fatalf("token = %q, want fresh-token — the mint must succeed despite the slow URL half that runs after it", token)
