@@ -103,7 +103,7 @@ func TestAnOrdinaryMintJoinsABypassOneInFlight(t *testing.T) {
 		s, _ := pp.GeneratePoToken(context.Background(), "VIDEOID", false)
 		got <- s
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitInflightWaits(t, pp, 1) // it has joined the bypass mint
 	entry.session = &SessionData{PoToken: "fresh"}
 	close(entry.done)
 	select {
