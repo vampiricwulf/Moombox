@@ -147,7 +147,7 @@ func TestBroadcastDoesNotHoldTheRegistryLock(t *testing.T) {
 		}()
 		select {
 		case <-registered:
-		case <-time.After(2 * time.Second):
+		case <-time.After(mustHappenWithin):
 			t.Error("a job registering while a broadcast was in flight blocked — reauthenticateAll is holding the registry lock across Reauthenticate")
 		}
 	}})

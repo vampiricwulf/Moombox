@@ -59,7 +59,7 @@ func TestDequeueDoesNotTakeALifecycleSlot(t *testing.T) {
 		if !ok {
 			t.Fatal("Dequeue = false for the 101st waiting job")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(mustHappenWithin):
 		t.Fatal("Dequeue blocked on the 101st waiting job — the wait phase is still holding lifecycle slots")
 	}
 }
@@ -351,7 +351,7 @@ func TestAcquireLifecycleSlotCascadingWakeup(t *testing.T) {
 	for i := range 2 {
 		select {
 		case <-acquired:
-		case <-time.After(2 * time.Second):
+		case <-time.After(mustHappenWithin):
 			t.Fatalf("waiter %d never acquired a free slot (lost wakeup)", i+1)
 		}
 	}

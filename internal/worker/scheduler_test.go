@@ -33,7 +33,7 @@ func TestSchedulerWakeIsSafeNoOp(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(mustHappenWithin):
 		t.Fatal("Wake() blocked with no scheduler loop running")
 	}
 }
@@ -202,6 +202,18 @@ func addFeedItemRow(t *testing.T, db *database.Database, chID, videoID, publishe
 	}
 }
 
+// mustHappenWithin bounds a wait for something a correct run reaches in
+// milliseconds: a goroutine's first step, a startup sweep, a wakeup. It is
+// ten seconds so that a correct run descheduled for a second or two, on a
+// loaded runner or under -race, still passes; a two-second bound failed such
+// a run as though the step had never come. A broken run still fails, only
+// later: every mutant these waits catch leaves the step to the 60 s
+// heartbeat, the Twitch wait's 15 s poll, or never.
+const mustHappenWithin = 10 * time.Second
+
+// waitForCond polls cond until it holds, failing at timeout. It looks once
+// more after the deadline, so a poller descheduled past it still sees a
+// condition that came true meanwhile.
 func waitForCond(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -210,6 +222,9 @@ func waitForCond(t *testing.T, timeout time.Duration, desc string, cond func() b
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
+	}
+	if cond() {
+		return
 	}
 	t.Fatalf("timed out waiting for %s", desc)
 }
@@ -616,7 +631,8 @@ func TestBroadcastFlips_WakeScheduler(t *testing.T) {
 // predates it.
 //
 // Mutant: delete the s.sweep() above the inner loop -> nothing is admitted
-// inside the 2 s window (the next chance is heartbeatInterval away).
+// inside the wait's mustHappenWithin (the next chance is heartbeatInterval
+// away).
 func TestScheduler_RunSweepsBeforeWaiting(t *testing.T) {
 	s, db, log := testSchedulerSetup(t, 2)
 	chID := "UC_startup"
@@ -627,7 +643,7 @@ func TestScheduler_RunSweepsBeforeWaiting(t *testing.T) {
 	t.Cleanup(cancel)
 	go s.Run(ctx)
 
-	waitForCond(t, 2*time.Second, "the startup sweep to admit the leftover backlog", func() bool {
+	waitForCond(t, mustHappenWithin, "the startup sweep to admit the leftover backlog", func() bool {
 		return log.enqueueCount() >= 1
 	})
 	if got := log.admitted(); len(got) != 1 || got[0] != "v_leftover" {
@@ -676,7 +692,7 @@ func TestScheduler_StartupSweepRunsOnlyOnce(t *testing.T) {
 	t.Cleanup(cancel)
 	go s.Run(ctx)
 
-	waitForCond(t, 2*time.Second, "the startup sweep to run at all", func() bool {
+	waitForCond(t, mustHappenWithin, "the startup sweep to run at all", func() bool {
 		return count() >= 1
 	})
 

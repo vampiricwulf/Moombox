@@ -498,7 +498,7 @@ func TestAcquireDownloadSlotCascadingWakeup(t *testing.T) {
 	for i := range 2 {
 		select {
 		case <-acquired:
-		case <-time.After(2 * time.Second):
+		case <-time.After(mustHappenWithin):
 			t.Fatalf("waiter %d never acquired a free slot (lost wakeup)", i+1)
 		}
 	}

@@ -64,8 +64,8 @@ func TestVodChatWaitTimeout(t *testing.T) {
 //
 // Mutants:
 //   - releasing after resolveChatOutcome returns (or not at all): the second
-//     acquire below blocks for its whole 2 s window and this test fails on the
-//     "still holding" arm.
+//     acquire below blocks for its whole mustHappenWithin and this test fails
+//     on the "still holding" arm.
 //   - a raw activeDownloads decrement in place of ReleaseDownloadSlot: the
 //     orchestrators release again below the mux, so the pool would leak a slot
 //     per VOD; the ActiveCount check at the end fails.
@@ -100,7 +100,7 @@ func TestVodChatWaitSlotIsReleasedBeforeTheWait(t *testing.T) {
 
 	acquired := make(chan bool, 1)
 	go func() {
-		actx, acancel := context.WithTimeout(context.Background(), 2*time.Second)
+		actx, acancel := context.WithTimeout(context.Background(), mustHappenWithin)
 		defer acancel()
 		acquired <- q.AcquireDownloadSlot(actx, "next")
 	}()
@@ -111,7 +111,7 @@ func TestVodChatWaitSlotIsReleasedBeforeTheWait(t *testing.T) {
 			t.Fatal("the next VOD could not acquire a download slot while the chat wait was " +
 				"running — the slot must be released BEFORE the wait, not after it")
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(2 * mustHappenWithin):
 		t.Fatal("the second AcquireDownloadSlot never returned")
 	}
 
@@ -381,10 +381,13 @@ type slotWatchingChatSource struct {
 func (s *slotWatchingChatSource) Start(context.Context) error {
 	s.running.Store(true)
 	defer s.running.Store(false)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	deadline := time.Now().Add(mustHappenWithin)
+	for {
 		if s.q.ActiveCount() == 0 {
 			s.sawFree.Store(true)
+			break
+		}
+		if time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
