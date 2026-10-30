@@ -65,7 +65,13 @@ func TestScan_NewRowsNudgeOnceAndOnlyForInserts(t *testing.T) {
 	// which is the scan's own clock.
 	bw.now = func() time.Time { return now.Add(time.Hour) }
 	bw.Sweep([]ChannelRef{refFor(ch, 3, false)}, true)
+	second := func() *inFlight { inflight, _ := inflightState(bw); return inflight[backfillTestChannel] }()
 	recvWithin(t, done, "the re-scan's completion")
+	// The nudge would fire after "done": only the entry's done, closed by
+	// the cleanup after both, says no call is still to come.
+	if second != nil {
+		recvWithin(t, second.done, "the re-scan's cleanup")
+	}
 	select {
 	case got := <-calls:
 		t.Fatalf("OnNewRows = %+v after a re-scan that inserted nothing, want no call", got)
