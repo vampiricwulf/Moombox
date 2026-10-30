@@ -13,11 +13,14 @@
 # A background process outlives the step that started it; the runner reaps
 # what is left when the job ends.
 #
-# Every network command is bounded and retried (retry.sh), since apt gives up
-# only on total silence: a mirror that trickled bytes once hung a run for 22
-# minutes. apt downloads first and then installs with --no-download, so the
-# part that cannot be cut off half-way never waits on a mirror. The waiting
-# step's timeout-minutes bounds the whole.
+# Every network command is retried (retry.sh), and apt's get a time limit per
+# attempt too, since apt gives up only on total silence: a mirror that
+# trickled bytes once hung a run for 22 minutes. apt downloads first and then
+# installs with --no-download, so the part that cannot be cut off half-way
+# never waits on a mirror; that offline install runs once, unretried. choco
+# gets no per-attempt limit (cutting an install off half-way is worse than
+# waiting), so a hung attempt is never retried: the waiting step's
+# timeout-minutes is its bound, and the bound of the whole.
 set -euo pipefail
 
 here=$(dirname "$0")

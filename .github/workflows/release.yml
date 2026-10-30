@@ -104,6 +104,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # setup-go's cache (on by default) restores the key setup-go saves on
+      # main. ci.yml keeps its own per-flavour caches with setup-go's cache
+      # off, so only vuln-scan.yml's weekly run writes that key now: a
+      # release soon after a go.sum change fetches its modules in the
+      # build steps below, which nothing retries.
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
