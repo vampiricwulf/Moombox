@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,11 +14,7 @@ import (
 // exercised end to end.
 func newDBProgressTracker(t *testing.T) (*ProgressTracker, *database.Database) {
 	t.Helper()
-	db, err := database.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTestDB(t)
 	if _, err := db.AddJob(&database.Job{ID: "act-test", Status: database.StatusDownloading}); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}

@@ -226,11 +226,7 @@ func TestWriteDescriptionAtomicReplacesTheTargetRatherThanRewritingIt(t *testing
 // type would be four lines of duplication for nothing.
 func muxTestOrchestrator(t *testing.T, rec *notificationtest.Recorder, segments int) (*DownloadOrchestrator, *JobContext) {
 	t.Helper()
-	db, err := database.Open(filepath.Join(t.TempDir(), "mux.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTestDB(t)
 
 	job := &database.Job{
 		ID:       "yt_mux",

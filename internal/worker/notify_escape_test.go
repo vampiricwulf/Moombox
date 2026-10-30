@@ -2,7 +2,6 @@ package worker
 
 import (
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -191,11 +190,7 @@ func TestHandBuiltSendsEscapeAndCarryTheirJob(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.event, func(t *testing.T) {
-			db, err := database.Open(filepath.Join(t.TempDir(), "esc.db"))
-			if err != nil {
-				t.Fatalf("database.Open: %v", err)
-			}
-			t.Cleanup(func() { db.Close() })
+			db := openTestDB(t)
 			rec := notificationtest.New()
 
 			job := tc.drive(t, db, rec)

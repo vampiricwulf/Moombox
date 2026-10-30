@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -20,11 +19,7 @@ import (
 // processor that records its notifications.
 func foundTestJob(t *testing.T) (*StreamProcessor, *notificationtest.Recorder, *database.Job) {
 	t.Helper()
-	db, err := database.Open(filepath.Join(t.TempDir(), "found.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTestDB(t)
 	chID := "UC_abc"
 	job := &database.Job{
 		ID: "found1", VideoID: "found1", Platform: "youtube",

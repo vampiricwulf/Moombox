@@ -2,7 +2,6 @@ package worker
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -50,11 +49,7 @@ func TestScheduledDoesNotFireForAStreamAlreadyLive(t *testing.T) {
 		{"neither (a VOD)", false, false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db, err := database.Open(filepath.Join(t.TempDir(), "c6.db"))
-			if err != nil {
-				t.Fatalf("database.Open: %v", err)
-			}
-			t.Cleanup(func() { db.Close() })
+			db := openTestDB(t)
 
 			rec := notificationtest.New()
 			sp := &StreamProcessor{db: db, notifier: rec}

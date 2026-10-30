@@ -163,11 +163,7 @@ func TestChatFileStatusReadsTheKeptResumeSidecarAsTheVerdict(t *testing.T) {
 // Mutant: writing the DB row without setting jobCtx.ChatStatus — the row is
 // right until copyAssets runs, and then the job finishes reporting "finished".
 func TestRecordChatOutcomeWritesTheRowAndRemembersItOnTheContext(t *testing.T) {
-	db, err := database.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTestDB(t)
 	if _, err := db.AddJob(&database.Job{ID: "j1", VideoID: "v1", URL: "https://twitch.tv/videos/1", Platform: "twitch"}); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}

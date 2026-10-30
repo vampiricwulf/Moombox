@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -33,11 +32,7 @@ func fakeVodMint(t *testing.T, token string, err error) *atomic.Int32 {
 // capturing logger.
 func vodPotJob(t *testing.T) (*JobContext, *captureLogger) {
 	t.Helper()
-	db, err := database.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTestDB(t)
 	job := &database.Job{ID: "yt_vodpot", VideoID: "vodpot", URL: "https://www.youtube.com/watch?v=vodpot", Platform: "youtube", Status: database.StatusDownloading}
 	if _, err := db.AddJob(job); err != nil {
 		t.Fatalf("AddJob: %v", err)

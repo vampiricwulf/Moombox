@@ -10,11 +10,7 @@ import (
 
 func newRenameTestOrch(t *testing.T) (*DownloadOrchestrator, *database.Database) {
 	t.Helper()
-	db, err := database.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openTestDB(t)
 	return &DownloadOrchestrator{db: db, logger: discardLogger{}}, db
 }
 
