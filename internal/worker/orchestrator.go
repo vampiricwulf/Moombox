@@ -27,13 +27,17 @@ const (
 	maxConsecutiveLiveChecks = 6
 	chatWaitTimeout          = 2 * time.Minute
 	qualityMonitorInterval   = 30 * time.Second
-	minSegmentDuration       = 10 * time.Second // Don't split segments shorter than this
 	// maxVodRefreshAttempts bounds the post-live URL-refresh loop. Googlevideo
 	// URLs live ~6h; a marathon post-live backfill can need several refreshes
 	// to finish. 4 attempts ≈ 24h of wall clock, past which the incomplete_tail
 	// flag + manual retry take over.
 	maxVodRefreshAttempts = 4
 )
+
+// minSegmentDuration is the shortest part a quality split keeps: a change
+// that comes sooner is ignored, and a part that ends sooner is discarded
+// rather than muxed. A variable so tests need not wait it out.
+var minSegmentDuration = 10 * time.Second
 
 // newSegmentDownloader is engine.NewSegmentDownloader behind a package var, so
 // the package's tests can run the real engine loops the orchestrator builds at

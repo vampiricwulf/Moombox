@@ -25,9 +25,12 @@ import (
 // the local clock at its start cannot pass for one based on its first segment.
 var pdtEpoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// pdtStream is twoVariantStream with #EXT-X-PROGRAM-DATE-TIME on every
-// segment and a shorter window, recording the first segment each variant's
-// downloader fetched — the first one it WROTE, on the sequential live path.
+// pdtStream is a live broadcast offered at 720p30 and then, from switchAt, at
+// 1080p60 only: the 720p playlist 404s from then on, as a rendition Twitch
+// withdrew does. Both variants serve one sliding window of one-second
+// segments, each with its #EXT-X-PROGRAM-DATE-TIME, and the playlist ends
+// ENDLIST at endAt. It records the first segment each variant's downloader
+// fetched — the first one it WROTE, on the sequential live path.
 type pdtStream struct {
 	start           time.Time
 	switchAt, endAt time.Duration
