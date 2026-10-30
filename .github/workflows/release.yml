@@ -107,11 +107,19 @@ jobs:
       # setup-go's cache (on by default) restores the key setup-go saves on
       # main. ci.yml keeps its own per-flavour caches with setup-go's cache
       # off, so only vuln-scan.yml's weekly run writes that key now: a
-      # release soon after a go.sum change fetches its modules in the
-      # build steps below, which nothing retries.
+      # release soon after a go.sum change misses it and fetches every
+      # module, which the next step does where a failure is retried.
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+
+      - name: Download Go modules
+        # Every network step in this job goes through retry.sh, as in
+        # ci.yml: three attempts, each cut off after five minutes, inside the
+        # step's timeout. A proxy that reset one HTTP/2 stream once failed a
+        # CI run's module fetch, and nothing else here would try again.
+        timeout-minutes: 10
+        run: bash .github/scripts/retry.sh 3 300 go mod download
 
       - name: Compute version + ldflags
         # Computed once and exported via $GITHUB_ENV so the Windows resource
@@ -172,9 +180,10 @@ jobs:
         # --ignore-scripts: a compromised dep's postinstall could
         # exfiltrate GITHUB_TOKEN; jsdom + bgutils-js have no install
         # scripts we depend on, so ignoring is safe.
+        timeout-minutes: 10
         run: |
           cd bgutil-sidecar
-          npm ci --no-audit --no-fund --ignore-scripts
+          bash ../.github/scripts/retry.sh 3 300 npm ci --no-audit --no-fund --ignore-scripts
           node build.mjs
           cd ..
 
@@ -183,7 +192,8 @@ jobs:
         # and Linux arm64; verifies SHA-256; gzips to per-platform embed
         # files. Idempotent: skips re-download when the stamp fetch-node writes
         # beside the blobs (node-blobs.stamp) matches and every blob is present.
-        run: go run ./tools/fetch-node
+        timeout-minutes: 10
+        run: bash .github/scripts/retry.sh 3 300 go run ./tools/fetch-node
 
       - name: Generate Windows resources
         # go-winres works on any host OS — it produces a Windows .syso
@@ -206,7 +216,7 @@ jobs:
           # inside the job that produces the .syso linked into the Windows
           # binary the same job then signs, so an unpinned third-party
           # `go install` here is a supply-chain hole in a signed artifact.
-          go install github.com/tc-hib/go-winres@v0.3.3
+          bash .github/scripts/retry.sh 3 300 go install github.com/tc-hib/go-winres@v0.3.3
 
           jq --arg ver "$NUMERIC_VERSION" --arg vs "$VERSION_STRING" '
             .RT_MANIFEST."#1"."0409".identity.version = $ver

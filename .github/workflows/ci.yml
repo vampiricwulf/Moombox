@@ -53,8 +53,8 @@ name: CI
 # once, after the last use, in a job that saves. With setup-go's cache off,
 # main no longer writes the setup-go cache release.yml's release job (and
 # vuln-scan.yml) restores; only the weekly vulnerability scan writes it now,
-# so a release soon after a go.sum change fetches its modules in its own
-# build steps. The three pinned Node binaries are cached per OS
+# so a release soon after a go.sum change fetches every module in its own
+# retried download step. The three pinned Node binaries are cached per OS
 # (~1 min of nodejs.org downloads on a miss). The sidecar tarball is rebuilt
 # on every run and never cached: it is seconds of work, and a cached one made
 # the Go tests embed the PREVIOUS sidecar JS whenever a commit touched only
