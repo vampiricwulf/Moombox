@@ -174,7 +174,10 @@ func awaitActivity(t *testing.T, ch <-chan DownloadActivity, want DownloadActivi
 // closed by the loop's own response to it — never by a wall clock. Once the
 // loop reports ActivityReconnecting, the next connectivity check (the wait's
 // entry check) still reads offline and ends the outage, so the wait's first
-// tick reads online: the loop provably waited, for one poll. A loop that
+// tick reads online, and checkWaited asserts that read: a loop that reported
+// ActivityReconnecting and asked the origin again at once still ends the
+// outage (its next failure's own check does) but never reads the link back
+// up. A loop that
 // never notices the outage never ends it, so a mutant that charges the
 // failure instead of waiting spends its whole budget inside it however
 // slowly the runner goes; a wall-clock outage had to outlast that budget on
@@ -195,6 +198,7 @@ func awaitActivity(t *testing.T, ch <-chan DownloadActivity, want DownloadActivi
 type outage struct {
 	lateAsks         int32
 	asks             atomic.Int32 // checks made while offline
+	upAfter          atomic.Int32 // checks that read the link back up once the outage ended
 	opened           atomic.Bool
 	offline, noticed atomic.Bool
 }
@@ -213,6 +217,9 @@ func (o *outage) down() bool { return o.offline.Load() }
 
 func (o *outage) isOnline() bool {
 	if !o.offline.Load() {
+		if o.opened.Load() {
+			o.upAfter.Add(1)
+		}
 		return true
 	}
 	if o.asks.Add(1) <= o.lateAsks {
@@ -227,6 +234,20 @@ func (o *outage) isOnline() bool {
 func (o *outage) onActivity(a DownloadActivity) {
 	if a == ActivityReconnecting && o.offline.Load() {
 		o.noticed.Store(true)
+	}
+}
+
+// checkWaited fails t unless the loop read the link back up after the
+// outage ended — the tick of the connectivity wait whose entry check ended
+// it. Call it once the loop has returned from a run that opened the outage
+// and waited it out. Mutant (every path's): dropping the waitForConnectivity
+// after ActivityReconnecting and asking the origin again at once.
+func (o *outage) checkWaited(t *testing.T) {
+	t.Helper()
+	if !o.opened.Load() {
+		t.Error("the outage never opened — the run did not exercise the wait")
+	} else if o.upAfter.Load() == 0 {
+		t.Error("nothing read the link back up after the outage — the loop asked again without waiting it out")
 	}
 }
 

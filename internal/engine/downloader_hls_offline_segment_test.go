@@ -111,6 +111,7 @@ func TestAnOfflineSegmentFailureWaitsForConnectivity(t *testing.T) {
 	srv := seg1FailsOffline(t, &o)
 	data, gaps, err := runOutageVod(t, srv, &o, true, 0)
 	checkWholeVod(t, data, gaps, err)
+	o.checkWaited(t)
 }
 
 // The VOD path proper — runHlsVodParallel through fetchSegmentWithRetry —
@@ -125,6 +126,7 @@ func TestAVodSegmentFailingOfflineIsNotAGap(t *testing.T) {
 	srv := seg1FailsOffline(t, &o)
 	data, gaps, err := runOutageVod(t, srv, &o, false, 1)
 	checkWholeVod(t, data, gaps, err)
+	o.checkWaited(t)
 }
 
 // Failures before an outage do not carry over past it (sequential path). The
@@ -165,4 +167,5 @@ func TestTheStuckSegmentCountRestartsAfterAnOutage(t *testing.T) {
 		t.Fatal("the outage never happened — the test did not exercise the restart")
 	}
 	checkWholeVod(t, data, gaps, err)
+	o.checkWaited(t)
 }

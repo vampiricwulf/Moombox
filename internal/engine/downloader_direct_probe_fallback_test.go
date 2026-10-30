@@ -227,6 +227,7 @@ func TestDirectSizeProbeWaitsOutAnOutage(t *testing.T) {
 			if !reconnecting.Load() {
 				t.Error("no ActivityReconnecting while the outage was waited out")
 			}
+			o.checkWaited(t)
 		})
 	}
 }
@@ -392,6 +393,7 @@ func TestDirectFallbackRefreshIsBounded(t *testing.T) {
 		if n := calls.Load(); n != 3 {
 			t.Errorf("OnCredentialRefresh calls = %d, want 3", n)
 		}
+		link.checkWaited(t)
 	})
 
 	// shortRound answers a Range with a 206 of the next 1000 bytes that
@@ -614,6 +616,7 @@ func TestDirectFallbackWaitsOutAnOutage(t *testing.T) {
 			if !reconnecting.Load() {
 				t.Error("no ActivityReconnecting while the outage was waited out")
 			}
+			link.checkWaited(t)
 			if !tc.noAnswer {
 				if got, _ := resumedAt.Load().(string); got != fmt.Sprintf("bytes=%d-", 1000) {
 					t.Errorf("the request after the outage sent Range %q, want it to resume at byte 1000", got)
@@ -657,6 +660,9 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 		fail      func(o *fallbackOrigin, n int, w http.ResponseWriter, r *http.Request) bool
 		wantErr   string // "" — the download finishes
 		wantAsked int    // requests made, 0 — not checked
+		// link is the outage the row's monitor reports, which the download
+		// must have waited out (checkWaited); nil — none.
+		link *outage
 	}{
 		{
 			"one reset, the monitor calls the link up",
@@ -667,7 +673,7 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 				}
 				return n == 1
 			},
-			"", 2,
+			"", 2, nil,
 		},
 		{
 			"one reset, no monitor",
@@ -678,7 +684,7 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 				}
 				return n == 1
 			},
-			"", 2,
+			"", 2, nil,
 		},
 		{
 			"two 503s, the monitor calls the link up",
@@ -689,7 +695,7 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 				}
 				return n <= 2
 			},
-			"", 3,
+			"", 3, nil,
 		},
 		{
 			"503s while the monitor calls it offline",
@@ -704,7 +710,7 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 				w.WriteHeader(http.StatusServiceUnavailable) // the gateway, its upstream unreachable
 				return true
 			},
-			"", 0,
+			"", 0, &gateway,
 		},
 		{
 			"a break after each 1000 bytes, five times",
@@ -721,7 +727,7 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 				w.Write(body[start : start+1000])
 				return true
 			},
-			"", 6,
+			"", 6, nil,
 		},
 		{
 			"503 throughout",
@@ -730,7 +736,7 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return true
 			},
-			"HTTP 503", MaxChunkRetries,
+			"HTTP 503", MaxChunkRetries, nil,
 		},
 		{
 			"a body that breaks off with nothing, the monitor calls the link up",
@@ -743,7 +749,7 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 				}
 				return true
 			},
-			"unexpected EOF", MaxChunkRetries,
+			"unexpected EOF", MaxChunkRetries, nil,
 		},
 		{
 			// A 200 to every Range: each answer discards the partial and
@@ -755,7 +761,7 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 				brokenBody(w, body, 2000+1000*(n%2))
 				return true
 			},
-			"unexpected EOF", MaxChunkRetries,
+			"unexpected EOF", MaxChunkRetries, nil,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -786,6 +792,9 @@ func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
 				}
 				if got, _ := os.ReadFile(out); !bytes.Equal(got, body) {
 					t.Errorf("output is %d bytes, want the whole %d-byte file", len(got), len(body))
+				}
+				if tc.link != nil {
+					tc.link.checkWaited(t)
 				}
 			}
 			if tc.wantAsked != 0 && asked != tc.wantAsked {

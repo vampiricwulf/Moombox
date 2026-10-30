@@ -281,6 +281,7 @@ func TestDirectChunkWaitsOutAnOutage(t *testing.T) {
 				if !reconnecting.Load() {
 					t.Error("no ActivityReconnecting while the outage was waited out")
 				}
+				srv.out.checkWaited(t)
 			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("Start = %v, want an error naming %q", err, tc.wantErr)
 			}
