@@ -239,6 +239,10 @@ func (b *blockingChatSource) IsRunning() bool   { return b.running.Load() }
 // after the test releases it, well after resolveChatOutcome has started
 // waiting; a premature read observes the recorder's zero value (nil) instead
 // of the real error and this test fails.
+//
+// The first wait is a minute, so nothing but the release can end it: at one
+// second, with its 200 ms grace after it, a test descheduled for longer than
+// both before the release read the wait as timed out.
 func TestResolveChatOutcomeWaitsForTheGoroutinesRecordBeforeReadingIt(t *testing.T) {
 	o := &DownloadOrchestrator{logger: discardLogger{}}
 	var rec chatOutcome
@@ -255,7 +259,7 @@ func TestResolveChatOutcomeWaitsForTheGoroutinesRecordBeforeReadingIt(t *testing
 
 	resultCh := make(chan error, 1)
 	go func() {
-		resultCh <- o.resolveChatOutcome(dl, &rec, done, time.Second, 200*time.Millisecond)
+		resultCh <- o.resolveChatOutcome(dl, &rec, done, time.Minute, 200*time.Millisecond)
 	}()
 	// Give resolveChatOutcome a head start before letting the goroutine
 	// finish — a correct implementation blocks on <-done for this whole
@@ -270,7 +274,7 @@ func TestResolveChatOutcomeWaitsForTheGoroutinesRecordBeforeReadingIt(t *testing
 			t.Errorf("resolveChatOutcome = %v, want %v — it must wait for the goroutine's "+
 				"close(done) signal before reading the recorder, not race it", got, stall)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("resolveChatOutcome did not return")
 	}
 }
