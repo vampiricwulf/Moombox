@@ -35,6 +35,13 @@ func (silentTestLogger) Error(msg string, args ...any) {}
 // exePath points at a tempdir file that ApplyUpdate can rename.
 func newTestUpdater(t *testing.T, current string, srv *httptest.Server, verifier func(string, string) error) (*Updater, string) {
 	t.Helper()
+	return newTestUpdaterAt(t, current, srv.URL, verifier)
+}
+
+// newTestUpdaterAt is newTestUpdater for an origin that is not an httptest
+// server: the download stall tests serve theirs in memory (inMemoryClient).
+func newTestUpdaterAt(t *testing.T, current, apiBaseURL string, verifier func(string, string) error) (*Updater, string) {
+	t.Helper()
 	dir := t.TempDir()
 	exePath := filepath.Join(dir, "moombox.exe")
 	if err := os.WriteFile(exePath, []byte("current binary"), 0o755); err != nil {
@@ -50,7 +57,7 @@ func newTestUpdater(t *testing.T, current string, srv *httptest.Server, verifier
 		repoOwner:       "test",
 		repoName:        "Moombox",
 		client:          &http.Client{Timeout: 5 * time.Second},
-		apiBaseURL:      srv.URL,
+		apiBaseURL:      apiBaseURL,
 		verifySignature: verifier,
 	}, exePath
 }
