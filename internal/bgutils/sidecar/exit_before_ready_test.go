@@ -18,14 +18,24 @@ import (
 // and the first such failure drops the stamp so the next start re-extracts —
 // which here repairs it.
 //
+// It breaks and repairs the package's shared extraction rather than
+// extracting one of its own — which cost one more cold extraction of the
+// ~36 MB payload, the slowest step in this package. Should the repair not
+// happen, the cleanup drops the stamp, so the next test's Start re-extracts
+// instead of running the broken tree.
+//
 // Mutants: stderrTailSuffix left off the error; the stamp not removed (the
 // second start fails the same way).
 func TestAChildThatDiesBeforeReadySaysWhyAndIsReextracted(t *testing.T) {
-	requireBlobs(t)
-	dir := t.TempDir()
+	dir := sharedCacheDir(t)
 	if err := extractIfNeeded(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if t.Failed() {
+			os.Remove(filepath.Join(dir, "version.txt"))
+		}
+	})
 	serverJS := filepath.Join(dir, "src", "server.js")
 	if err := os.WriteFile(serverJS, []byte(`import "moombox-missing-module";`+"\n"), 0o644); err != nil {
 		t.Fatal(err)

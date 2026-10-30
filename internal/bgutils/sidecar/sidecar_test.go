@@ -37,8 +37,7 @@ func requireBlobs(t *testing.T) {
 // the Windows CI runner (Defender scans each file as it lands), which made
 // six otherwise-quick tests a 75-second package. Tests run one after another
 // and each stops its own sidecar before the next starts, so the extracted
-// tree is shared safely; only TestSidecarExtractIdempotent needs a cold
-// directory of its own. Created on first use, removed by TestMain.
+// tree is shared safely. Created on first use, removed by TestMain.
 var sharedSidecarCache = sync.OnceValues(func() (string, error) {
 	return os.MkdirTemp("", "moombox-sidecar-test-")
 })
@@ -53,16 +52,24 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// startSidecar spins up a Sidecar on the package's shared extraction.
-// Returns the started sidecar; t.Cleanup handles shutdown so even a
-// panicking test won't leak the child process.
-func startSidecar(t *testing.T) *Sidecar {
+// sharedCacheDir is the package's shared extraction directory, skipping when
+// the embed blobs are missing.
+func sharedCacheDir(t *testing.T) string {
 	t.Helper()
 	requireBlobs(t)
 	cacheDir, err := sharedSidecarCache()
 	if err != nil {
 		t.Fatalf("shared sidecar cache dir: %v", err)
 	}
+	return cacheDir
+}
+
+// startSidecar spins up a Sidecar on the package's shared extraction.
+// Returns the started sidecar; t.Cleanup handles shutdown so even a
+// panicking test won't leak the child process.
+func startSidecar(t *testing.T) *Sidecar {
+	t.Helper()
+	cacheDir := sharedCacheDir(t)
 
 	s := New(Config{
 		CacheDir:       cacheDir,
@@ -80,92 +87,184 @@ func startSidecar(t *testing.T) *Sidecar {
 	return s
 }
 
-// TestSidecarPingPong verifies the basic JSON-RPC round-trip: extract,
-// launch, ready handshake, then a one-shot ping/pong. Start gates the
-// handshake on the sidecar's `ready` notification, so by the time we get
-// here the JSON-RPC layer is already known to work; the explicit ping
-// here is a regression check on the round-trip plumbing itself, not the
-// startup handshake. Does not hit network.
-func TestSidecarPingPong(t *testing.T) {
-	s := startSidecar(t)
+// reuseMarker is a file the payload does not ship, put inside a directory it
+// does: a re-extraction clears that directory first, taking the marker with
+// it.
+const reuseMarker = "src/.moombox-test-reuse-marker"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := s.ping(ctx); err != nil {
-		t.Fatalf("ping: %v", err)
+// TestSidecarOnTheEmbeddedPayload starts ONE real Node child on the shared
+// extraction and runs, as subtests, every check that needs no more than a
+// running sidecar — each of them used to start a child of its own, about a
+// second apiece here and several on the Windows runner — then stops it,
+// which is the graceful-shutdown check. None of them mints, so the stats
+// still read as a fresh child's.
+func TestSidecarOnTheEmbeddedPayload(t *testing.T) {
+	cacheDir := sharedCacheDir(t)
+	// The extraction the Start below must reuse — an earlier test's, or this
+	// one's on a cold directory, the way a first launch extracts.
+	if err := extractIfNeeded(cacheDir); err != nil {
+		t.Fatalf("extractIfNeeded: %v", err)
 	}
-	if !s.IsHealthy() {
-		t.Fatalf("expected sidecar to be healthy after ping")
-	}
-}
-
-// TestSidecarGetStats exercises the JSON-RPC decode path with a non-trivial
-// response object (numbers nested under named fields).
-func TestSidecarGetStats(t *testing.T) {
-	s := startSidecar(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	stats, err := s.GetStats(ctx)
+	nodePath := filepath.Join(cacheDir, nodeBinaryName())
+	nodeBefore, err := os.Stat(nodePath)
 	if err != nil {
-		t.Fatalf("GetStats: %v", err)
+		t.Fatal(err)
 	}
-	// Fresh sidecar: no mints yet.
-	if stats.MintsTotal != 0 {
-		t.Errorf("expected MintsTotal=0, got %d", stats.MintsTotal)
+	marker := filepath.Join(cacheDir, filepath.FromSlash(reuseMarker))
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if stats.CachedMinters != 0 {
-		t.Errorf("expected CachedMinters=0, got %d", stats.CachedMinters)
-	}
-}
+	t.Cleanup(func() { os.Remove(marker) })
 
-// TestSidecarConcurrentRequests fires multiple pings in parallel; the
-// reqID multiplexer must route each response to its caller without
-// stalling. Failure mode: a writeMu deadlock or a pending-map race would
-// hang the test.
-func TestSidecarConcurrentRequests(t *testing.T) {
 	s := startSidecar(t)
 
-	const N = 10
-	var wg sync.WaitGroup
-	errCh := make(chan error, N)
-	wg.Add(N)
-	for range N {
-		go func() {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := s.ping(ctx); err != nil {
-				errCh <- err
-			}
-		}()
-	}
-	wg.Wait()
-	close(errCh)
-	for err := range errCh {
-		t.Errorf("concurrent ping: %v", err)
-	}
-}
+	// A Start against a cache dir that already holds this payload reuses it:
+	// it rewrites neither the tree nor the Node binary. This was a timing
+	// comparison of a cold start with a warm one, which passed against a
+	// Start that re-extracted every time whenever the two took about as long.
+	//
+	// Mutant: cacheLooksGood always false — the marker is cleared with src/
+	// and the binary is rewritten.
+	t.Run("a start reuses the extraction", func(t *testing.T) {
+		if _, err := os.Stat(marker); err != nil {
+			t.Errorf("Start re-extracted the tree it was given (the marker in src/ is gone: %v)", err)
+		}
+		nodeAfter, err := os.Stat(nodePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !nodeAfter.ModTime().Equal(nodeBefore.ModTime()) || nodeAfter.Size() != nodeBefore.Size() {
+			t.Errorf("Start rewrote the Node binary: %v/%d before, %v/%d after",
+				nodeBefore.ModTime(), nodeBefore.Size(), nodeAfter.ModTime(), nodeAfter.Size())
+		}
+	})
 
-// TestSidecarGracefulShutdown verifies Stop returns promptly when the
-// sidecar has nothing inflight. Stop's worst-case is now ~3s (1s
-// shutdown-RPC + 2s wait + Kill on timeout); 5s ceiling here accounts
-// for Windows process-reap latency without crossing into "we're
-// silently leaking the shutdown budget" territory.
-func TestSidecarGracefulShutdown(t *testing.T) {
-	s := startSidecar(t)
+	// The basic JSON-RPC round-trip. Start gates the handshake on the
+	// sidecar's `ready` notification, so by now the JSON-RPC layer is known
+	// to work; the explicit ping is a regression check on the round-trip
+	// plumbing itself, not the startup handshake. Does not hit network.
+	t.Run("ping pong", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.ping(ctx); err != nil {
+			t.Fatalf("ping: %v", err)
+		}
+		if !s.IsHealthy() {
+			t.Fatalf("expected sidecar to be healthy after ping")
+		}
+	})
 
-	start := time.Now()
-	if err := s.Stop(); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	elapsed := time.Since(start)
-	if elapsed > 5*time.Second {
-		t.Errorf("Stop took too long (must stay well under shutdown.go force-exit budget): %v", elapsed)
-	}
-	if s.IsHealthy() {
-		t.Errorf("expected unhealthy after Stop")
-	}
+	// The JSON-RPC decode path with a non-trivial response object (numbers
+	// nested under named fields).
+	t.Run("get stats", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		stats, err := s.GetStats(ctx)
+		if err != nil {
+			t.Fatalf("GetStats: %v", err)
+		}
+		// Fresh sidecar: no mints yet.
+		if stats.MintsTotal != 0 {
+			t.Errorf("expected MintsTotal=0, got %d", stats.MintsTotal)
+		}
+		if stats.CachedMinters != 0 {
+			t.Errorf("expected CachedMinters=0, got %d", stats.CachedMinters)
+		}
+	})
+
+	// Multiple pings in parallel: the reqID multiplexer must route each
+	// response to its caller without stalling. Failure mode: a writeMu
+	// deadlock or a pending-map race would hang the test.
+	t.Run("concurrent requests", func(t *testing.T) {
+		const N = 10
+		var wg sync.WaitGroup
+		errCh := make(chan error, N)
+		wg.Add(N)
+		for range N {
+			go func() {
+				defer wg.Done()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := s.ping(ctx); err != nil {
+					errCh <- err
+				}
+			}()
+		}
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			t.Errorf("concurrent ping: %v", err)
+		}
+	})
+
+	// The JSON-RPC round-trip for sig+n cipher solving. Uses the cb017549
+	// player fixture which is structurally representative of YouTube's
+	// current obfuscation pattern (no static helper-object sig algorithm;
+	// URL passthrough required).
+	t.Run("solve cipher", func(t *testing.T) {
+		playerJS, err := os.ReadFile(filepath.Join("..", "..", "cipher", "testdata", "player_cb017549.js"))
+		if err != nil {
+			t.Skipf("cipher fixture missing: %v (run task 6.1 to download)", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// Distinguishable challenges so we can assert on transformation.
+		sigA := "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_"
+		nA := "abcdefghij_12345"
+
+		res, err := s.SolveCipher(ctx, SolveCipherRequest{
+			PlayerID:      "cb017549",
+			PlayerJS:      string(playerJS),
+			SigChallenges: []string{sigA},
+			NChallenges:   []string{nA},
+		})
+		if err != nil {
+			t.Fatalf("SolveCipher: %v", err)
+		}
+		gotSig := res.SigResults[sigA]
+		gotN := res.NResults[nA]
+
+		if gotSig == "" || gotSig == sigA {
+			t.Errorf("sig: expected non-empty transformation; got %q", gotSig)
+		}
+		if gotN == "" || gotN == nA {
+			t.Errorf("n: expected non-empty transformation; got %q", gotN)
+		}
+		t.Logf("sig: %q -> %q", sigA, gotSig)
+		t.Logf("n:   %q -> %q", nA, gotN)
+
+		// Second call without playerJS should hit the player cache.
+		res2, err := s.SolveCipher(ctx, SolveCipherRequest{
+			PlayerID:      "cb017549",
+			SigChallenges: []string{sigA},
+		})
+		if err != nil {
+			t.Fatalf("SolveCipher (cache hit): %v", err)
+		}
+		if res2.SigResults[sigA] != gotSig {
+			t.Errorf("cache-hit sig differs: %q vs %q", res2.SigResults[sigA], gotSig)
+		}
+	})
+
+	// Last: Stop returns promptly when the sidecar has nothing inflight.
+	// Stop's worst-case is ~3s (1s shutdown-RPC + 2s wait + Kill on
+	// timeout); 5s ceiling here accounts for Windows process-reap latency
+	// without crossing into "we're silently leaking the shutdown budget"
+	// territory.
+	t.Run("graceful shutdown", func(t *testing.T) {
+		start := time.Now()
+		if err := s.Stop(); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		elapsed := time.Since(start)
+		if elapsed > 5*time.Second {
+			t.Errorf("Stop took too long (must stay well under shutdown.go force-exit budget): %v", elapsed)
+		}
+		if s.IsHealthy() {
+			t.Errorf("expected unhealthy after Stop")
+		}
+	})
 }
 
 // TestSidecarHardKill simulates a crashed child: hard-kill the process,
@@ -200,105 +299,5 @@ func TestSidecarHardKill(t *testing.T) {
 	err := s.ping(ctx)
 	if err == nil {
 		t.Errorf("expected ping after kill to error, got nil")
-	}
-}
-
-// TestSidecarSolveCipher exercises the JSON-RPC round-trip for sig+n
-// cipher solving. Uses the cb017549 player fixture which is structurally
-// representative of YouTube's current obfuscation pattern (no static
-// helper-object sig algorithm; URL passthrough required).
-func TestSidecarSolveCipher(t *testing.T) {
-	requireBlobs(t)
-	playerJS, err := os.ReadFile(filepath.Join("..", "..", "cipher", "testdata", "player_cb017549.js"))
-	if err != nil {
-		t.Skipf("cipher fixture missing: %v (run task 6.1 to download)", err)
-	}
-
-	s := startSidecar(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Distinguishable challenges so we can assert on transformation.
-	sigA := "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_"
-	nA := "abcdefghij_12345"
-
-	res, err := s.SolveCipher(ctx, SolveCipherRequest{
-		PlayerID:      "cb017549",
-		PlayerJS:      string(playerJS),
-		SigChallenges: []string{sigA},
-		NChallenges:   []string{nA},
-	})
-	if err != nil {
-		t.Fatalf("SolveCipher: %v", err)
-	}
-	gotSig := res.SigResults[sigA]
-	gotN := res.NResults[nA]
-
-	if gotSig == "" || gotSig == sigA {
-		t.Errorf("sig: expected non-empty transformation; got %q", gotSig)
-	}
-	if gotN == "" || gotN == nA {
-		t.Errorf("n: expected non-empty transformation; got %q", gotN)
-	}
-	t.Logf("sig: %q -> %q", sigA, gotSig)
-	t.Logf("n:   %q -> %q", nA, gotN)
-
-	// Second call without playerJS should hit the player cache.
-	res2, err := s.SolveCipher(ctx, SolveCipherRequest{
-		PlayerID:      "cb017549",
-		SigChallenges: []string{sigA},
-	})
-	if err != nil {
-		t.Fatalf("SolveCipher (cache hit): %v", err)
-	}
-	if res2.SigResults[sigA] != gotSig {
-		t.Errorf("cache-hit sig differs: %q vs %q", res2.SigResults[sigA], gotSig)
-	}
-}
-
-// TestSidecarExtractIdempotent ensures a second Start against the same
-// cache dir reuses the prior extraction. The old sidecar is stopped first
-// (a single Sidecar instance can't be started twice).
-func TestSidecarExtractIdempotent(t *testing.T) {
-	requireBlobs(t)
-
-	cacheDir := t.TempDir()
-	cfg := Config{
-		CacheDir:       cacheDir,
-		StartupTimeout: 30 * time.Second,
-		RequestTimeout: 30 * time.Second,
-		Logger:         &testLogger{t: t},
-	}
-
-	// First launch: extracts the payload.
-	s1 := New(cfg)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	t1Start := time.Now()
-	if err := s1.Start(ctx); err != nil {
-		t.Fatalf("first Start: %v", err)
-	}
-	first := time.Since(t1Start)
-	if err := s1.Stop(); err != nil {
-		t.Fatalf("first Stop: %v", err)
-	}
-
-	// Second launch: should skip extraction (cache hit).
-	s2 := New(cfg)
-	t2Start := time.Now()
-	if err := s2.Start(ctx); err != nil {
-		t.Fatalf("second Start: %v", err)
-	}
-	second := time.Since(t2Start)
-	if err := s2.Stop(); err != nil {
-		t.Fatalf("second Stop: %v", err)
-	}
-
-	t.Logf("first start: %v   second start: %v", first, second)
-	// Hard to assert "second was faster" reliably across machines, but the
-	// extraction takes 1-3s and ping/pong is sub-100ms, so the second
-	// should be at least notably shorter. Use a generous 50% threshold.
-	if second > first+time.Second && second > first*9/10 {
-		t.Errorf("expected second Start to be faster (cache reuse); first=%v second=%v", first, second)
 	}
 }
