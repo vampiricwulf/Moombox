@@ -224,6 +224,9 @@ func TestPeriodicLoopJoinedBeforeItsTempDirsGo(t *testing.T) {
 		}
 		// Returns here, as the original did, with the pass mid-verify.
 	})
+	if s == nil {
+		return // the subtest failed before it built the service, and said why
+	}
 	// Until the pass is over, so a write the join did not hold has landed by
 	// the time the directory is looked at. With the join this returns at once.
 	if !s.waitBackground(10 * time.Second) {
