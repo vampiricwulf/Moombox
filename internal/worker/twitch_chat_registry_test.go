@@ -377,44 +377,59 @@ func TestExecuteTwitchRegistersTheLiveChatDownloaderForItsWholeRun(t *testing.T)
 // Three mutations, one per block. Dropping the nil guard: a select on a nil
 // channel simply never fires that arm, so every Stop() with no chat goroutine
 // behind it would burn the full grace — the "no new wait" claim, broken
-// silently. Replacing the select with a bare `<-done`: block 3 hangs until the
-// test binary's timeout instead of returning false, which is the wedged-
-// downloader-holds-shutdown-open failure the comment forbids. Returning true
-// on expiry: block 3's verdict flips and the caller's Warn never fires.
+// silently. Replacing the select with a bare `<-done`: block 3 hangs instead
+// of returning false, which is the wedged-downloader-holds-shutdown-open
+// failure the comment forbids. Returning true on expiry: block 3's verdict
+// flips and the caller's Warn never fires.
+//
+// Each wait runs against waitReturnsWithin, ten seconds, and the cases that
+// must not wait out their grace are given an hour of it: the bounds these
+// cases had (a second or two) failed a correct run descheduled for that long,
+// and a wait that does run its grace out is an hour, not ten seconds.
 func TestWaitForChatShutdownIsBoundedAndFreeWhenThereIsNothingToWaitFor(t *testing.T) {
-	// No goroutine was started. Trivially finished, and instantly.
-	start := time.Now()
-	if !waitForChatShutdown(nil, 5*time.Second) {
-		t.Error("a nil done channel reported an unfinished chat goroutine")
+	// waitReturnsWithin runs waitForChatShutdown and fails the test if it is
+	// still waiting after ten seconds.
+	waitReturnsWithin := func(what string, done chan struct{}, grace time.Duration) bool {
+		t.Helper()
+		got := make(chan bool, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("panic in waitForChatShutdown: %v", r)
+				}
+			}()
+			got <- waitForChatShutdown(done, grace)
+		}()
+		select {
+		case ok := <-got:
+			return ok
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: waitForChatShutdown was still waiting after 10s on a %v grace", what, grace)
+			return false
+		}
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("a nil done channel cost %s — a Stop() with no chat behind it must not wait", elapsed)
+
+	// No goroutine was started. Trivially finished, and instantly.
+	if !waitReturnsWithin("a nil done channel", nil, time.Hour) {
+		t.Error("a nil done channel reported an unfinished chat goroutine")
 	}
 
 	// Already finished. Same.
 	closed := make(chan struct{})
 	close(closed)
-	start = time.Now()
-	if !waitForChatShutdown(closed, 5*time.Second) {
+	if !waitReturnsWithin("an already-closed done channel", closed, time.Hour) {
 		t.Error("an already-closed done channel reported an unfinished chat goroutine")
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("an already-closed done channel cost %s, want ~0", elapsed)
 	}
 
 	// Wedged. BOUNDED: it gives up and says so, rather than holding the
 	// shutdown open for as long as the downloader stays stuck.
 	stuck := make(chan struct{})
-	start = time.Now()
-	if waitForChatShutdown(stuck, 50*time.Millisecond) {
+	start := time.Now()
+	if waitReturnsWithin("a chat goroutine that never signals", stuck, 50*time.Millisecond) {
 		t.Error("a chat goroutine that never signalled was reported as finished")
 	}
-	elapsed := time.Since(start)
-	if elapsed < 50*time.Millisecond {
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
 		t.Errorf("the wait returned after %s, short of its own 50ms grace", elapsed)
-	}
-	if elapsed > 2*time.Second {
-		t.Errorf("the wait ran %s on a 50ms grace — it is not bounded by the grace", elapsed)
 	}
 
 	// Signalled mid-wait: the ordinary shutdown, where the teardown finishes
@@ -429,12 +444,8 @@ func TestWaitForChatShutdownIsBoundedAndFreeWhenThereIsNothingToWaitFor(t *testi
 		time.Sleep(30 * time.Millisecond)
 		close(late)
 	}()
-	start = time.Now()
-	if !waitForChatShutdown(late, 5*time.Second) {
+	if !waitReturnsWithin("a chat goroutine that signals at 30ms", late, time.Hour) {
 		t.Error("a chat goroutine that finished inside the grace was reported as still running")
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("a signal at 30ms was noticed only after %s", elapsed)
 	}
 }
 

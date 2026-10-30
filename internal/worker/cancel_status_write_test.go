@@ -166,6 +166,12 @@ func twitchCancelFixtureAt(t *testing.T, status database.JobStatus) (*StreamProc
 //
 // Mutant: waitForTwitchLive's first write unconditional again (the row reads
 // Upcoming, and the wait runs on to the ctx deadline).
+//
+// The deadline is ten seconds, beyond any stall a correct run's first check
+// could meet and short of the wait's first poll (twitchPollInterval): what
+// it tells apart is a wait that stopped at that check from one that ran on
+// to the deadline, and at three seconds a run descheduled for that long read
+// as the second.
 func TestTwitchWaitLeavesACancelledRowCancelled(t *testing.T) {
 	sp, db, job := twitchCancelFixture(t, database.StatusUpcoming)
 	// The operator's Cancel lands after processJob read the row; its ctx
@@ -173,7 +179,7 @@ func TestTwitchWaitLeavesACancelledRowCancelled(t *testing.T) {
 	if !db.UpdateJobFieldsUnlessTerminal(job.ID, map[string]any{"status": database.StatusCancelled}) {
 		t.Fatal("could not cancel the row")
 	}
-	const deadline = 3 * time.Second
+	const deadline = 10 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	began := time.Now()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -259,10 +260,13 @@ func TestCredentialRefreshTimeoutFor(t *testing.T) {
 // refreshGvsCredentials must skip the whole URL half — including the
 // player-response re-fetch that exists solely to feed it — rather than
 // attempting and warning about work that cannot succeed on every single
-// refresh. This is asserted indirectly but concretely: job.YT.GetVideoInfo
-// against a fabricated PlayerURL would otherwise attempt a real network
-// request with no test server behind it; if the gate were missing this
-// test would hang or fail slowly instead of returning immediately.
+// refresh. The re-fetch is counted (refreshVideoInfo): with the gate gone it
+// runs once. This used to be a two-second bound on the call, from when the
+// re-fetch would have gone to the network; it no longer reaches one, so the
+// bound passed with the gate removed, and failed a correct run that was
+// descheduled for two seconds.
+//
+// Mutant: the URL half's solver gate dropped (the re-fetch runs).
 func TestRefreshGvsCredentialsSkipsURLHalfWithoutSolver(t *testing.T) {
 	fake := &fakePotProvider{
 		generate: func(ctx context.Context, binding string, bypassCache bool) (string, error) {
@@ -282,12 +286,18 @@ func TestRefreshGvsCredentialsSkipsURLHalfWithoutSolver(t *testing.T) {
 		Formats:   []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "web_creator"}},
 	}
 
-	start := time.Now()
-	baseURL, token := refreshGvsCredentials(context.Background(), job, videoInfo, 140, nil, nil, fake, "vd-123", "test")
-	elapsed := time.Since(start)
+	var refetches atomic.Int32
+	orig := refreshVideoInfo
+	refreshVideoInfo = func(*youtube.Service, context.Context, string) (*youtube.VideoInfo, error) {
+		refetches.Add(1)
+		return nil, errors.New("the re-fetch ran")
+	}
+	t.Cleanup(func() { refreshVideoInfo = orig })
 
-	if elapsed > 2*time.Second {
-		t.Errorf("took %v — the URL half (player-response re-fetch) must be skipped without a solver, not attempted over the network", elapsed)
+	baseURL, token := refreshGvsCredentials(context.Background(), job, videoInfo, 140, nil, nil, fake, "vd-123", "test")
+
+	if n := refetches.Load(); n != 0 {
+		t.Errorf("the player response was re-fetched %d times — the URL half must be skipped without a solver, not attempted", n)
 	}
 	if baseURL != "" {
 		t.Errorf("baseURL = %q, want empty — no solver was wired to resolve it", baseURL)

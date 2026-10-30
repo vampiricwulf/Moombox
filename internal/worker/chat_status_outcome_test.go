@@ -345,6 +345,11 @@ func (s *stopUnwoundChatSource) IsRunning() bool   { return s.running.Load() }
 // nil flows straight through and chatStatusForOutcome(5000, nil) derives
 // "finished" for a short archive, silently, with no Warn (recordChatOutcome
 // logs only for a non-nil outcome).
+//
+// The grace is an hour, so a call back within ten seconds took the grace
+// select's <-done arm (Stop() unwound promptly), not its timer arm. It was
+// two seconds, and the check that the call came back sooner failed a correct
+// run descheduled for that long.
 func TestResolveChatOutcomeNeverReturnsNilOnceTheWaitTimedOut(t *testing.T) {
 	o := &DownloadOrchestrator{logger: discardLogger{}}
 	var rec chatOutcome
@@ -357,10 +362,23 @@ func TestResolveChatOutcomeNeverReturnsNilOnceTheWaitTimedOut(t *testing.T) {
 	}()
 	<-dl.started
 
-	const grace = 2 * time.Second
-	start := time.Now()
-	got := o.resolveChatOutcome(dl, &rec, done, 20*time.Millisecond, grace)
-	elapsed := time.Since(start)
+	const grace = time.Hour
+	result := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("panic in resolveChatOutcome: %v", r)
+			}
+		}()
+		result <- o.resolveChatOutcome(dl, &rec, done, 20*time.Millisecond, grace)
+	}()
+	var got error
+	select {
+	case got = <-result:
+	case <-time.After(10 * time.Second):
+		t.Fatal("resolveChatOutcome was still in its grace wait after 10s — this test is meant to " +
+			"exercise the grace select's <-done arm (Stop() unwound promptly), not its timer arm")
+	}
 
 	if got == nil {
 		t.Fatal("resolveChatOutcome returned nil after its first wait timed out and Stop() unwound " +
@@ -373,11 +391,6 @@ func TestResolveChatOutcomeNeverReturnsNilOnceTheWaitTimedOut(t *testing.T) {
 	}
 	if status := chatStatusForOutcome(dl.MessageCount(), got); status != chatStatusIncomplete {
 		t.Errorf("chatStatusForOutcome(%d, %v) = %q, want %q", dl.MessageCount(), got, status, chatStatusIncomplete)
-	}
-	if elapsed >= grace {
-		t.Errorf("resolveChatOutcome took %v, i.e. the whole grace window — this test is meant to "+
-			"exercise the grace select's <-done arm (Stop() unwound promptly), not its timer arm",
-			elapsed)
 	}
 }
 

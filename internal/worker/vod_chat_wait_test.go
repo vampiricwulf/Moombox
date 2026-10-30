@@ -253,7 +253,9 @@ func loggedDuration(cl *captureLogger, msg, key string) (time.Duration, bool) {
 // Mutant: the `ctx.Err() == nil` guard the first round used around the whole
 // pre-wait — a dead context then skipped the collapse entirely and handed
 // resolveChatOutcome the full 30-minute floor, and this test hits its
-// deadline.
+// deadline. That deadline is the only bound: a one-second bound on the call
+// as well failed a correct run descheduled for a second, and a wait that
+// does not collapse is the floor's thirty minutes, not one.
 func TestVodChatWaitStopsPromptlyWhenAlreadyCancelled(t *testing.T) {
 	o := &DownloadOrchestrator{logger: discardLogger{}}
 	var rec chatOutcome
@@ -270,17 +272,12 @@ func TestVodChatWaitStopsPromptlyWhenAlreadyCancelled(t *testing.T) {
 	cancel() // dead on entry
 
 	result := make(chan error, 1)
-	start := time.Now()
 	go func() {
 		result <- o.resolveVodChatOutcome(ctx, dl, &rec, done, &database.Job{ID: "vod3"})
 	}()
 
 	select {
 	case got := <-result:
-		if elapsed := time.Since(start); elapsed > time.Second {
-			t.Errorf("resolveVodChatOutcome took %s on a context that was dead on entry — the "+
-				"bound must collapse, not run", elapsed)
-		}
 		if got == nil {
 			t.Fatal("resolveVodChatOutcome returned nil for a chat that was still paging when " +
 				"the job was stopped")
