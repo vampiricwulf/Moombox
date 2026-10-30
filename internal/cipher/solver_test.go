@@ -267,6 +267,12 @@ _result.n = function(input) {
 		t.Errorf("hang call took %v, expected close to its %v bound", elapsed, callTimeout)
 	}
 
+	// The follow-up calls get the production bound back: under 100 ms a
+	// runner that stalled one of them would fail it with a timeout of its
+	// own, reported as the leak below. A leaked interrupt still fails them
+	// at once whatever their bound, since it aborts the next call on entry.
+	callTimeout = orig
+
 	// Subsequent call on the SAME VM must succeed — if ClearInterrupt ordering
 	// is wrong, this second call would fail with InterruptedError leaking from
 	// the prior timeout.
