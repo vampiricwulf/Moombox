@@ -86,9 +86,12 @@ func crashRecurse(n int) int {
 var crashHeld [][]byte
 
 // crashAllocHuge asks for one block just under the runtime's largest
-// allocation (256 TiB less 64 MiB), more than the user address space of any
-// platform Moombox ships for: reserving it fails before the runtime creates
-// any arena metadata, so it throws out of memory having committed nothing.
+// allocation (256 TiB less 64 MiB). The runtime reserves it with 64 MiB of
+// alignment slack, exactly 1<<48 bytes, which no process on a platform
+// Moombox ships for can map: Windows and linux/amd64 give a process 128 TiB
+// of user address space, linux/arm64 at most 256 TiB with the binary and its
+// stacks already in it. The reservation fails before the runtime creates any
+// arena metadata, so it throws out of memory having committed nothing.
 // It must stay a block no machine can reserve. One that can be reserved (32
 // TiB, as this once asked for) is not free: the runtime commits about 68 KiB
 // of arena metadata per 64 MiB of it before it fails, ~34 GiB for 32 TiB,

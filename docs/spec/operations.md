@@ -410,7 +410,8 @@ The next start that finds output there (`takePreviousCrash`, any start, not only
 the launcher's give-up and fail-fast exits tell the operator to check the logs) logs an ERROR with the
 output's first line as `cause` (for a fatal error, whose own `fatal error: …` line the runtime prints
 before it counts itself as crashing and so to stderr only, the first frame it struck in outside the
-runtime — for one raised on the system stack, a stack overflow or running out of memory, whose output
+runtime — for one raised on the system stack, a stack overflow or running out of memory when mapping heap
+memory fails (an allocation too big to reserve throws on the goroutine's own stack), whose output
 starts at a `runtime stack:` block, the first such frame of the goroutine after it: the recursing
 function, the allocation site — `crashCause`) and its first 8 KiB (`crashExcerptBytes`, cut at a line, saying how
 much it left out) as `output`, with every URL cut to its origin and any PO token removed
