@@ -62,24 +62,62 @@ func TestFetchBodyHTTPErrorReturnsErr(t *testing.T) {
 	}
 }
 
-// TestFetchBodyRespectsTimeout verifies the timeout argument actually
-// fires when the server is slow — without it, FetchBody could hang on a
-// lazy peer indefinitely.
-func TestFetchBodyRespectsTimeout(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		time.Sleep(500 * time.Millisecond)
-		rw.WriteHeader(http.StatusOK)
+// stalledServer answers nothing: its handler holds each request until the
+// client abandons it (the server sees the connection close) or the test
+// ends. A fetch against it can only end on its own timeout or context, and
+// the server never makes the test wait out a sleep of its own.
+func stalledServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
 	}))
 	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) }) // runs first: Close waits for the handler
+	return srv
+}
 
-	start := time.Now()
-	_, err := FetchBody(t.Context(), srv.URL, 50*time.Millisecond, nil)
-	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("FetchBody with 50ms timeout vs 500ms server: want error, got nil")
+// TestFetchBodyRespectsTimeout verifies the timeout argument actually
+// fires when the server is slow — without it, FetchBody could hang on a
+// lazy peer indefinitely. The server never answers, so only the timeout can
+// end the fetch: it must, with the deadline as its error, and no sooner
+// than the timeout (timers never fire early). It was timed against 250 ms
+// for a 50 ms timeout, which a 300 ms pause of the test process failed.
+//
+// Mutant: the timeout not applied to the request — FetchBody never returns
+// (cut at 10 s).
+func TestFetchBodyRespectsTimeout(t *testing.T) {
+	srv := stalledServer(t)
+	const timeout = 50 * time.Millisecond
+
+	type result struct {
+		err  error
+		took time.Duration
 	}
-	if elapsed > 250*time.Millisecond {
-		t.Errorf("FetchBody returned after %v — timeout did not fire promptly", elapsed)
+	done := make(chan result, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- result{err: fmt.Errorf("FetchBody panicked: %v", r)}
+			}
+		}()
+		start := time.Now()
+		_, err := FetchBody(t.Context(), srv.URL, timeout, nil)
+		done <- result{err, time.Since(start)}
+	}()
+	select {
+	case r := <-done:
+		if !errors.Is(r.err, context.DeadlineExceeded) {
+			t.Fatalf("FetchBody with a %v timeout vs a server that never answers = %v, want context.DeadlineExceeded", timeout, r.err)
+		}
+		if r.took < timeout {
+			t.Errorf("FetchBody gave up after %v, before its %v timeout", r.took, timeout)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("FetchBody with a %v timeout had not returned after 10 s — the timeout did not fire", timeout)
 	}
 }
 
@@ -118,12 +156,11 @@ func goCancelAfter(t *testing.T, d time.Duration, cancel context.CancelFunc) fun
 // TestFetchBodyHonoursCtxCancel covers the upstream-ctx-cancellation
 // path: a parent ctx cancelled before the response body is read should
 // surface as ctx.Canceled.
+//
+// Mutant: the parent ctx not passed to the request — FetchBody runs into its
+// own 5 s timeout instead, and DeadlineExceeded is not Canceled.
 func TestFetchBodyHonoursCtxCancel(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		time.Sleep(500 * time.Millisecond)
-		rw.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
+	srv := stalledServer(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	joinCancel := goCancelAfter(t, 50*time.Millisecond, cancel)
