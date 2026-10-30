@@ -83,22 +83,13 @@ func waitFor(cond func() bool, budget time.Duration) bool {
 // the meta file's temp landed, and the rmdir answered "The directory is not
 // empty".
 //
-// It also stubs the cookie directory's DACL. A pass that writes cookies.txt
-// starts tightenCookieDirOnce's goroutine, which nothing joins — it is
-// process-wide, and harmless where the directory outlives it — and on Windows
-// that goroutine is a real icacls against the TempDir being removed.
+// A pass that writes cookies.txt also starts tightenCookieDirOnce's goroutine,
+// which nothing joins; TestMain replaces the icacls / chmod it runs with a
+// no-op for the whole package, so that one does not touch the TempDir.
 func startJoinedPeriodicRefresh(t *testing.T, s *AutoCookieService, interval time.Duration) {
 	t.Helper()
-	noDirTightening(t)
 	s.StartPeriodicRefresh(t.Context(), interval)
 	t.Cleanup(func() { joinBackground(t, s) })
-}
-
-// noDirTightening replaces the cookie directory's icacls / chmod with a no-op
-// for the test, so no unjoined shell-out runs against a TempDir.
-func noDirTightening(t *testing.T) {
-	t.Helper()
-	fakeApplyUserOnlyDACL(t, func(string) error { return nil })
 }
 
 // joinBackground stops the service — which waits up to AutoCookieStopWait for

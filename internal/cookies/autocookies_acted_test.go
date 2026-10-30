@@ -95,6 +95,15 @@ func TestMain(m *testing.M) {
 	if isFakeSetupLaunch(os.Args) {
 		os.Exit(runFakeSetupBrowser(os.Getenv(fakeBrowserModeEnv)))
 	}
+	// No test in this package runs the real directory hardening. Every cookie
+	// write (writeFileAtomic, so SaveMeta, RefreshCookies, ImportCookies,
+	// FinishSetup and CarryCookieFileTo too) starts tightenCookieDirOnce's
+	// goroutine, which nothing joins, against the directory the test just
+	// wrote into — on Windows a real icacls that walks the TempDir while
+	// testing removes it, on Linux a chmod after it is gone. A test that is
+	// ABOUT the hardening installs its own fake (fakeApplyUserOnlyDACL), which
+	// restores this no-op when it ends.
+	applyUserOnlyDACL = func(string) error { return nil }
 	// The tests themselves run through treeguard.Run, which fails a run that
 	// left a file in the package directory.
 	os.Exit(treeguard.Run(m))
