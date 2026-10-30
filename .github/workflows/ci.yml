@@ -16,8 +16,8 @@ name: CI
 #          staticcheck for linux and windows / go build and the
 #          windows/amd64 and linux/arm64 cross-builds / the test-shard
 #          check. Compiling needs no real embed blobs, so empty files stand
-#          in for them (as in vuln-scan.yml): no Node download, no sidecar
-#          build, no FFmpeg.
+#          in for the gitignored ones (as in vuln-scan.yml): no Node
+#          download, no sidecar build, no FFmpeg.
 #   js     bgutil-sidecar's `npm test` and the frontend suite (`node --test`
 #          in web/tests after its own `npm ci`, so jsdom is present). No Go.
 #   test   the Go suite, `go test -count=1`, in three flavours, each split
@@ -105,15 +105,17 @@ jobs:
         # vet, staticcheck and the builds load every package, and a package
         # does not load without the files its go:embed directives name. They
         # read code, never the embedded bytes, so an empty file replaces each
-        # named file the checkout lacks: the sidecar tarball and the three
-        # Node binaries, found from the directives rather than listed here,
-        # so a blob added for another platform is covered too.
+        # named file the checkout lacks that git ignores (a build output): the
+        # sidecar tarball and the three Node binaries, found from the
+        # directives rather than listed here, so a blob added for another
+        # platform is covered too. A tracked file missing from a commit gets
+        # no stand-in, so vet and the builds still fail on it.
         run: |
           git grep -l -e '^//go:embed ' -- '*.go' | while read -r file; do
             dir=$(dirname "$file")
             sed -n 's|^//go:embed ||p' "$file" | tr ' ' '\n' | while read -r name; do
               case $name in '' | *[*?[]*) continue ;; esac
-              if [ ! -e "$dir/$name" ]; then
+              if [ ! -e "$dir/$name" ] && git check-ignore -q "$dir/$name"; then
                 : > "$dir/$name"
                 echo "empty stand-in: $dir/$name"
               fi
