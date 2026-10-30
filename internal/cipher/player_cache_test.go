@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -356,6 +358,17 @@ func TestFetch_NetworkFailure_ServesCached(t *testing.T) {
 
 // TestFetch_Singleflight_CoalescesByCacheKey — concurrent Fetches for the
 // same player (even via locale-variant URLs) share a single round-trip.
+//
+// The round trip is held until every caller is inside fetchSF.Do — the
+// leader making it and the 14 waiting on it — so they all overlap there
+// however late one was scheduled. The handler used to sleep 50 ms, and
+// later to wait for every caller to reach the line before Fetch and then
+// 20 ms more; a caller first run, or descheduled on that line, after the
+// leader's fetch had finished made a round trip of its own (hits 2).
+//
+// Mutants: no coalescing (every caller fetches; the hold gives up after 5 s
+// as nobody is in Do, and hits is 15); keying by URL instead of CacheKey
+// (hits 3).
 func TestFetch_Singleflight_CoalescesByCacheKey(t *testing.T) {
 	defer usePlayerHTTPClient(t)()
 
@@ -363,17 +376,12 @@ func TestFetch_Singleflight_CoalescesByCacheKey(t *testing.T) {
 	fs := newFakePlayerServer(body, "Wed, 01 Jan 2025 00:00:00 GMT", "")
 	defer fs.Close()
 
-	// The round trip is held until every caller has reached Fetch, so all
-	// of them overlap inside fetchInternal however late one was scheduled.
-	// It slept 50 ms instead, and a caller first run after the leader's
-	// fetch had finished made a round trip of its own (hits 2).
 	const concurrency = 5
-	var arrived sync.WaitGroup
-	arrived.Add(concurrency * 3)
 	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fs.hits.Add(1)
-		arrived.Wait()
-		time.Sleep(20 * time.Millisecond) // for the last arrival's few steps into Fetch
+		if n := waitForFetchesInSingleflight(concurrency*3, 5*time.Second); n != concurrency*3 {
+			t.Logf("answering with %d of %d Fetches inside fetchSF.Do", n, concurrency*3)
+		}
 		w.Header().Set("Last-Modified", "Wed, 01 Jan 2025 00:00:00 GMT")
 		w.Header().Set("Content-Length", itoa(len(body)))
 		w.WriteHeader(http.StatusOK)
@@ -403,7 +411,11 @@ func TestFetch_Singleflight_CoalescesByCacheKey(t *testing.T) {
 		for _, u := range urls {
 			go func(u string) {
 				defer wg.Done()
-				arrived.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						t.Errorf("concurrent Fetch %s panicked: %v", u, r)
+					}
+				}()
 				_, _, err := pc.Fetch(context.Background(), u)
 				if err != nil {
 					t.Errorf("concurrent Fetch %s: %v", u, err)
@@ -418,5 +430,31 @@ func TestFetch_Singleflight_CoalescesByCacheKey(t *testing.T) {
 	hits := fs.Hits() - startHits
 	if hits != 1 {
 		t.Errorf("singleflight coalescing: want 1 round-trip across 15 concurrent Fetches, got %d", hits)
+	}
+}
+
+// waitForFetchesInSingleflight polls every goroutine's stack until want of
+// them are in PlayerCache.Fetch's fetchSF.Do — the leader inside the call,
+// the rest waiting on it — or within has passed, and returns how many were.
+func waitForFetchesInSingleflight(want int, within time.Duration) int {
+	deadline := time.Now().Add(within)
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		for n == len(buf) {
+			buf = make([]byte, 2*len(buf))
+			n = runtime.Stack(buf, true)
+		}
+		in := 0
+		for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+			if strings.Contains(g, "golang.org/x/sync/singleflight.(*Group).Do(") &&
+				strings.Contains(g, "cipher.(*PlayerCache).Fetch(") {
+				in++
+			}
+		}
+		if in >= want || time.Now().After(deadline) {
+			return in
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
