@@ -217,8 +217,16 @@ func TestInvalidateSolver(t *testing.T) {
 // rather than hanging the decrypt path. Also verifies that after an
 // interrupt, a SUBSEQUENT call on the same VM is not poisoned by a
 // still-pending interrupt flag — the race that the time.AfterFunc-based
-// first draft could leave behind.
+// first draft could leave behind. The bound is shrunk from CipherTimeout's
+// 3 s, which every run used to wait out in full.
+//
+// Mutants: an interrupt left pending once the timed-out call has returned
+// (the next call fails with it); the interrupt never fired (the hang call
+// never returns, until go test's own timeout).
 func TestSolverTimeoutInterruptsInfiniteLoop(t *testing.T) {
+	orig := callTimeout
+	callTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { callTimeout = orig })
 	code := `
 _result.sig = function(input) {
     if (input === "hang") {
@@ -235,7 +243,7 @@ _result.n = function(input) {
 		t.Fatalf("getFromPrepared: %v", err)
 	}
 
-	// Hang call — should return an error within roughly CipherTimeout, not
+	// Hang call — should return an error once its bound is up, not
 	// indefinitely.
 	start := time.Now()
 	_, sigErr := solvers.Sig("hang")
@@ -246,8 +254,13 @@ _result.n = function(input) {
 	if !strings.Contains(sigErr.Error(), "timeout") && !strings.Contains(sigErr.Error(), "Interrupt") {
 		t.Logf("hang error: %v", sigErr)
 	}
-	if elapsed > CipherTimeout*2 {
-		t.Errorf("hang call took %v, expected close to CipherTimeout (%v)", elapsed, CipherTimeout)
+	// Timers never fire early, so the floor is exact; the ceiling leaves a
+	// loaded runner room for the interrupt to land.
+	if elapsed < callTimeout {
+		t.Errorf("hang call returned after %v, before its %v bound: something other than the timeout ended it", elapsed, callTimeout)
+	}
+	if elapsed > callTimeout+5*time.Second {
+		t.Errorf("hang call took %v, expected close to its %v bound", elapsed, callTimeout)
 	}
 
 	// Subsequent call on the SAME VM must succeed — if ClearInterrupt ordering

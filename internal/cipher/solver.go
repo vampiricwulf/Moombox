@@ -509,13 +509,17 @@ var _ Solver = (*GojaResolver)(nil)
 // Compile-time check: GojaResolver satisfies cipher.PlayerSource.
 var _ PlayerSource = (*GojaResolver)(nil)
 
+// callTimeout is the bound callWithTimeout puts on a call: CipherTimeout, a
+// variable so a test can interrupt a hung call without waiting it out.
+var callTimeout = CipherTimeout
+
 // callWithTimeout invokes a goja callable under CipherTimeout via the shared
 // mbgoja.CallWithTimeout helper, which owns the Interrupt/ClearInterrupt
 // ordering contract (fire, block until the goroutine exits, only then
 // clear). The caller still owns the VM mutex (Solvers.mu) for the duration
 // of this function, so there is no concurrent VM access from elsewhere.
 func callWithTimeout(vm *gojavm.Runtime, label string, fn func() (gojavm.Value, error)) (string, error) {
-	v, err := mbgoja.CallWithTimeout(vm, CipherTimeout, "cipher "+label, fn)
+	v, err := mbgoja.CallWithTimeout(vm, callTimeout, "cipher "+label, fn)
 	if err != nil {
 		return "", fmt.Errorf("%s decrypt: %w", label, err)
 	}
