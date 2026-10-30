@@ -359,7 +359,11 @@ func TestDirectHandoffHoldsTheFallbackToTheProbedTotal(t *testing.T) {
 			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
 			d.delays = directDelays()
 			d.directResumeIntervalOverride = DownloadChunkSize // a checkpoint exists before the cut
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			// A safety net, not a budget: the run writes 20 MB with a
+			// checkpoint (two fsyncs and a rename) per chunk, which a loaded
+			// Windows runner stretches to seconds; only the empty row's
+			// endless-re-ask mutant ever reaches it.
+			ctx, cancel := context.WithTimeout(t.Context(), safetyNet)
 			defer cancel()
 			err := d.Start(ctx)
 			got, _ := os.ReadFile(out)
