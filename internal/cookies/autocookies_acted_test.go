@@ -103,7 +103,7 @@ func TestMain(m *testing.M) {
 	// testing removes it, on Linux a chmod after it is gone. A test that is
 	// ABOUT the hardening installs its own fake (fakeApplyUserOnlyDACL), which
 	// restores this no-op when it ends.
-	applyUserOnlyDACL = func(string) error { return nil }
+	DisableDirTighteningForTesting()
 	// Nor does any test pay the post-kill drain: every one that reaches it
 	// kills or finds exited a fixture process (Pid -1, or a made-up PID
 	// nothing runs as), so there is no handle for Windows to release, and

@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/treeguard"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
@@ -26,9 +27,17 @@ var realImportProbeDuration = importProbeDuration
 // answers 0 for — after starting an ffprobe process per import, 67 of them a
 // run, which is most of what an import test cost. The tests that are about the
 // probe put the real one back (useRealImportProbe).
+//
+// And it switches off the cookie directory hardening. The cookie routes'
+// tests write cookies.txt through a real cookies.AutoCookieService over a
+// t.TempDir, and every such write starts a goroutine nothing joins that runs
+// utils.ApplyUserOnlyDACL against that directory — on Windows a real icacls
+// still walking the TempDir while the test's cleanup removes it. The
+// hardening is internal/cookies' to test, and it does, against fakes.
 func TestMain(m *testing.M) {
 	web.SetPasswordHashCostForTesting(16)
 	importProbeDuration = func(context.Context, string, string) float64 { return 0 }
+	cookies.DisableDirTighteningForTesting()
 	os.Exit(treeguard.Run(m))
 }
 

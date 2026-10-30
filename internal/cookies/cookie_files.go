@@ -202,6 +202,19 @@ func sweepStaleCookieTempFiles(dir, base string, maxAge time.Duration) {
 // CI. Mirrors writeCookieFile/readCookieFile/statProfileDir above.
 var applyUserOnlyDACL = utils.ApplyUserOnlyDACL
 
+// DisableDirTighteningForTesting replaces the cookie directory hardening with
+// a no-op for the rest of the process. For a test binary's TestMain, before
+// any test runs: nothing else may call it, and nothing in a running instance
+// does. Every cookie write starts tightenCookieDirOnce's goroutine, which
+// nothing joins, against the directory just written into — in a test that is
+// a t.TempDir, and on Windows the goroutine is a real icacls still walking it
+// while the test's cleanup removes it. A package whose tests write cookie
+// files through the real AutoCookieService calls this; the hardening itself
+// is tested in this package, against fakes.
+func DisableDirTighteningForTesting() {
+	applyUserOnlyDACL = func(string) error { return nil }
+}
+
 // dirTighteningAllowed is utils.DirTighteningAllowed behind a seam, for the
 // same reason as applyUserOnlyDACL above: the real predicate answers true for
 // EVERY directory on Windows — owner decision O-K leaves icacls unchanged — so
