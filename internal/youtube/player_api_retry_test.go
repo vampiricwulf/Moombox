@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,21 +36,24 @@ func newRetryTestAPI() *PlayerAPI {
 // T3-27. The recovery budget is min(45 s, MaxTimeout/3) — 10 s at the floor —
 // and the retry ladder alone is 7 s.
 //
-// Arithmetic (scaled base B = 40 ms, deadline D = 120 ms), after fix round 1
-// added a one-base reservation for the request that follows each sleep: the
-// first retry's delay is B, and its guard threshold is delay+B = 80 ms — the
-// ~120 ms remaining clears it with a 40 ms margin, so the sleep happens. That
-// leaves ~80 ms for the second retry, whose delay is 2B = 80 ms and whose
-// threshold is delay+B = 120 ms; ~80 ms remaining is 40 ms under that
-// threshold, so the third attempt is skipped and the second 503 comes back
-// immediately. Both checks carry a 40 ms margin — wide enough that a loaded
-// CI runner cannot misfire the guard by one iteration.
+// Arithmetic (scaled base B = 250 ms, deadline D = 3B = 750 ms), after fix
+// round 1 added a one-base reservation for the request that follows each
+// sleep: the first retry's delay is B, and its guard threshold is delay+B =
+// 2B — the D minus the first round trip remaining clears it as long as that
+// round trip took under B, so the sleep happens. That leaves at most 2B for
+// the second retry, whose delay is 2B and whose threshold is delay+B = 3B:
+// it can never fit, whatever the round trips cost, so the third attempt is
+// skipped and the second 503 comes back immediately. The first round trip's
+// B of headroom is the only timing in it: 40 ms, the base this used before,
+// was what a loaded runner's first loopback request could take.
 //
 // Mutant named: an unconditional utils.Sleep. It burns the rest of the budget
-// inside the sleep and returns context.DeadlineExceeded, discarding the 503
-// that is the actual reason the caller is being told no.
+// inside the sleep before giving up. Since retryExitErr prefers the last HTTP
+// error to the deadline, that run also returns the 503 after two requests,
+// so the guard's own record — its "retry budget exhausted" line — is what
+// tells the two apart.
 func TestDoRetryRequestStopsWhenTheBackoffWouldOutlastTheDeadline(t *testing.T) {
-	scaleRetryBackoff(t, 40*time.Millisecond)
+	scaleRetryBackoff(t, 250*time.Millisecond)
 
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -57,10 +62,12 @@ func TestDoRetryRequestStopsWhenTheBackoffWouldOutlastTheDeadline(t *testing.T) 
 	}))
 	defer srv.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
 	defer cancel()
 
-	_, err := newRetryTestAPI().doRetryRequest(ctx, srv.URL, []byte(`{}`), nil, nil, "Innertube", "abc12345678")
+	log := &debugRecorder{}
+	api := NewPlayerAPI(NewAuth(cookies.NewCookieJar(), noopLogger{}), log)
+	_, err := api.doRetryRequest(ctx, srv.URL, []byte(`{}`), nil, nil, "Innertube", "abc12345678")
 	if err == nil {
 		t.Fatal("a 503-forever server must produce an error")
 	}
@@ -70,6 +77,32 @@ func TestDoRetryRequestStopsWhenTheBackoffWouldOutlastTheDeadline(t *testing.T) 
 	if n := hits.Load(); n != 2 {
 		t.Errorf("server saw %d requests, want 2 (the immediate attempt plus one that fit its backoff)", n)
 	}
+	if !log.saw("retry budget exhausted") {
+		t.Errorf("the deadline guard never fired; debug lines: %q", log.lines())
+	}
+}
+
+// debugRecorder keeps the Debug lines a PlayerAPI logs.
+type debugRecorder struct {
+	noopLogger
+	mu    sync.Mutex
+	debug []string
+}
+
+func (r *debugRecorder) Debug(msg string, _ ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.debug = append(r.debug, msg)
+}
+
+func (r *debugRecorder) lines() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.debug)
+}
+
+func (r *debugRecorder) saw(sub string) bool {
+	return slices.ContainsFunc(r.lines(), func(l string) bool { return strings.Contains(l, sub) })
 }
 
 // TestDoRetryRequestReservesOneBackoffBaseForTheRequest is fix round 1 on
