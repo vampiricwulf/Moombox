@@ -240,8 +240,9 @@ func TestStateMachineFirstPostsThenEdits(t *testing.T) {
 		}
 	}
 	// The store write trails the wire: pending() is already 0 while the POST's
-	// response is being parsed and remembered, so these two read through
-	// waitFor rather than through drain's 5 ms settle.
+	// response is being parsed and remembered. drain waits for that delivery
+	// to return (targetQueue.idle), so these polls find the write already
+	// made; they stay as waitFor so the read does not lean on drain alone.
 	waitFor(t, "the created id to be stored", func() bool {
 		return st.NotificationMsgs("yt_1")[targetMsgKey(f.URL())] == "M1"
 	})
