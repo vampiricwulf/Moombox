@@ -1,9 +1,12 @@
 package utils
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -149,6 +152,20 @@ func stubYouTubeBaseURL(t *testing.T, srv *httptest.Server) {
 	t.Cleanup(func() { youtubeBaseURL = prev })
 }
 
+// recordResolveWaits replaces ResolveYouTubeChannel's backoff with one that
+// records each delay it was asked for and returns at once.
+func recordResolveWaits(t *testing.T) *[]time.Duration {
+	t.Helper()
+	var waits []time.Duration
+	prev := resolveRetryWait
+	resolveRetryWait = func(_ context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return nil
+	}
+	t.Cleanup(func() { resolveRetryWait = prev })
+	return &waits
+}
+
 // TestResolveYouTubeChannelExtractsCanonical exercises the success path:
 // a 200 OK page with a canonical channel link and an og:title meta.
 func TestResolveYouTubeChannelExtractsCanonical(t *testing.T) {
@@ -220,12 +237,14 @@ func TestResolveYouTubeChannelMissingChannelIDIsError(t *testing.T) {
 }
 
 // TestResolveYouTubeChannelRetriesOn5xx exercises the retry loop:
-// transient 5xx errors should be retried up to twice before surfacing.
-// (Note: the loop sleeps 1s + 2s, so this test takes ~3s.)
+// transient 5xx errors should be retried up to twice before surfacing,
+// after 1 s and then 2 s. The backoff is recorded rather than slept: the
+// test used to sleep both, 3 s a run, to hold the loop to a 2.9 s floor.
+//
+// Mutants: no retry (one hit, an error); no backoff, or the same delay
+// twice (the recorded delays).
 func TestResolveYouTubeChannelRetriesOn5xx(t *testing.T) {
-	if testing.Short() {
-		t.Skip("retry loop sleeps 1s+2s — skipping in -short mode")
-	}
+	waits := recordResolveWaits(t)
 	const channelID = "UCabc1234567890_-DEFGHIj"
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
@@ -239,9 +258,7 @@ func TestResolveYouTubeChannelRetriesOn5xx(t *testing.T) {
 	t.Cleanup(srv.Close)
 	stubYouTubeBaseURL(t, srv)
 
-	start := time.Now()
 	info, err := ResolveYouTubeChannel(t.Context(), "/@SomeChannel")
-	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("ResolveYouTubeChannel after retries: %v", err)
 	}
@@ -251,15 +268,56 @@ func TestResolveYouTubeChannelRetriesOn5xx(t *testing.T) {
 	if got := hits.Load(); got != 3 {
 		t.Errorf("server hits: want 3, got %d", got)
 	}
-	// 1s + 2s minimum backoff
-	if elapsed < 2900*time.Millisecond {
-		t.Errorf("retry elapsed: want ≥2.9s, got %v", elapsed)
+	if want := []time.Duration{time.Second, 2 * time.Second}; !slices.Equal(*waits, want) {
+		t.Errorf("backoff before the retries: %v, want %v", *waits, want)
+	}
+}
+
+// TestResolveRetryWaitSleepsOrEndsWithItsContext covers the real backoff
+// the two tests around it record instead of sleeping: it waits out its
+// delay, and gives up the moment ctx ends.
+//
+// Mutants: no sleep (it returns before its delay); ctx ignored (the
+// cancelled wait sleeps out its hour, cut at 5 s).
+func TestResolveRetryWaitSleepsOrEndsWithItsContext(t *testing.T) {
+	const d = 20 * time.Millisecond
+	start := time.Now()
+	if err := resolveRetryWait(t.Context(), d); err != nil {
+		t.Fatalf("resolveRetryWait(%v) = %v, want nil", d, err)
+	}
+	if took := time.Since(start); took < d {
+		t.Errorf("resolveRetryWait(%v) returned after %v", d, took)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("resolveRetryWait panicked: %v", r)
+			}
+		}()
+		done <- resolveRetryWait(ctx, time.Hour)
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("resolveRetryWait with an ended context = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolveRetryWait kept waiting after its context ended")
 	}
 }
 
 // TestResolveYouTubeChannelFastFails4xx covers the deterministic
-// fast-fail branch: a 404 should NOT trigger the retry loop.
+// fast-fail branch: a 404 should NOT trigger the retry loop — one request,
+// and no backoff waited (it used to be timed against 500 ms instead, around
+// a real loopback round trip).
+//
+// Mutant: 4xx retried like 5xx (hits 3, two waits).
 func TestResolveYouTubeChannelFastFails4xx(t *testing.T) {
+	waits := recordResolveWaits(t)
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
@@ -268,16 +326,14 @@ func TestResolveYouTubeChannelFastFails4xx(t *testing.T) {
 	t.Cleanup(srv.Close)
 	stubYouTubeBaseURL(t, srv)
 
-	start := time.Now()
 	_, err := ResolveYouTubeChannel(t.Context(), "/@Missing")
-	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("ResolveYouTubeChannel on 404: want error, got nil")
 	}
 	if got := hits.Load(); got != 1 {
 		t.Errorf("4xx should fast-fail without retries: hits=%d, want 1", got)
 	}
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("4xx fast-fail elapsed: want <500ms, got %v (retry loop fired?)", elapsed)
+	if len(*waits) != 0 {
+		t.Errorf("4xx fast-fail waited out a backoff: %v (retry loop fired?)", *waits)
 	}
 }

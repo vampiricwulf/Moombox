@@ -160,6 +160,10 @@ const downloadMaxDuration = 2 * time.Hour
 // can shorten it.
 var downloadStallTimeout = 60 * time.Second
 
+// maxDownloadSize caps what downloadFile writes: 200 MB, more than twice a
+// release binary. A variable so the test of the cap need not write 200 MB.
+var maxDownloadSize int64 = 200 << 20
+
 // errDownloadStalled is the cause downloadFile cancels a stalled request with.
 var errDownloadStalled = errors.New("download stalled")
 
@@ -801,14 +805,13 @@ func (u *Updater) downloadFile(parent context.Context, url, dest string) (err er
 		return err
 	}
 
-	// Cap download at 200 MB to prevent disk exhaustion from a compromised
-	// source. Read one extra byte so a payload of *exactly* maxDownloadSize
-	// is accepted while anything larger is rejected — without the +1 the
-	// previous `n >= maxDownloadSize` check rejected the boundary case.
-	// Audit reports/small-packages.md. The sniffed prefix already written
-	// above counts toward the cap, so the limit reader only needs to cover
-	// what is left of it.
-	const maxDownloadSize = 200 << 20
+	// Cap download at maxDownloadSize to prevent disk exhaustion from a
+	// compromised source. Read one extra byte so a payload of *exactly*
+	// maxDownloadSize is accepted while anything larger is rejected — without
+	// the +1 the previous `n >= maxDownloadSize` check rejected the boundary
+	// case. Audit reports/small-packages.md. The sniffed prefix already
+	// written above counts toward the cap, so the limit reader only needs to
+	// cover what is left of it.
 	n, err := io.Copy(f, io.LimitReader(body, maxDownloadSize+1-int64(sn)))
 	if err != nil {
 		f.Close()

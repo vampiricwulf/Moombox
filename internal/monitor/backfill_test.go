@@ -677,8 +677,18 @@ func TestSweep_FreshChannelScansOnce_CompletedNeverRescanned(t *testing.T) {
 	refs := []ChannelRef{refFor(ch, 3, false)}
 
 	bw.Sweep(refs, false)
+	// The scan's in-flight entry, taken while Sweep's enqueue still holds
+	// it (nil only if the scan already ran and unwound). The stub reports
+	// from inside the scan, ahead of the cleanup that drops the entry, and
+	// a sweep skips a channel that still has one — so the sweeps below wait
+	// for the entry's done, not for the stub's call alone, or they would
+	// see the entry and skip the needsBackfill arm they exist to check.
+	first := func() *inFlight { inflight, _ := inflightState(bw); return inflight[backfillTestChannel] }()
 	if got := recvWithin(t, calls, "fresh channel's scan"); got != (scanCall{backfillTestChannel, 3, false}) {
 		t.Fatalf("scan invoked with %+v, want {%s 3 false}", got, backfillTestChannel)
+	}
+	if first != nil {
+		recvWithin(t, first.done, "the first scan's cleanup")
 	}
 
 	// Completed — as Task 3's completeScan records it.

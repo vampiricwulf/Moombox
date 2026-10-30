@@ -132,24 +132,43 @@ func (l *launcherRun) output() string {
 // before the launcher exited or 10 s passed.
 func (l *launcherRun) waitFor(t *testing.T, name string) bool {
 	t.Helper()
+	return l.waitUntil(func() bool {
+		_, err := os.Stat(filepath.Join(l.dir, name))
+		return err == nil
+	})
+}
+
+// waitForSignal reports whether the child recorded a stop signal before the
+// launcher exited or 10 s passed. Not the signals file's existence: the child
+// creates it to append before it writes the line, and a test that read it in
+// between found it empty ("the child caught [] first").
+func (l *launcherRun) waitForSignal(t *testing.T) bool {
+	t.Helper()
+	return l.waitUntil(func() bool { return len(l.signals()) > 0 })
+}
+
+// waitUntil polls cond until it holds, the launcher exits (cond is asked once
+// more) or 10 s pass.
+func (l *launcherRun) waitUntil(cond func() bool) bool {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(filepath.Join(l.dir, name)); err == nil {
+		if cond() {
 			return true
 		}
 		select {
 		case <-l.done:
-			_, err := os.Stat(filepath.Join(l.dir, name))
-			return err == nil
+			return cond()
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
 	return false
 }
 
-// signals is what the child has recorded so far.
+// signals is what the child has recorded so far: whole lines only, since the
+// file can hold the start of a line the child is still writing.
 func (l *launcherRun) signals() []string {
 	raw, _ := os.ReadFile(filepath.Join(l.dir, "signals"))
+	raw = raw[:bytes.LastIndexByte(raw, '\n')+1]
 	return strings.Fields(strings.ReplaceAll(string(raw), " ", "_"))
 }
 
@@ -243,7 +262,7 @@ func TestLauncherHandsStopSignalsToTheChild(t *testing.T) {
 			if err := syscall.Kill(target, tc.sig); err != nil {
 				t.Fatal(err)
 			}
-			if !l.waitFor(t, "signals") {
+			if !l.waitForSignal(t) {
 				t.Fatalf("the child never caught the %v; launcher exit %v; output:\n%s", tc.sig, l.err, l.output())
 			}
 			want := strings.ReplaceAll(tc.sig.String(), " ", "_")
@@ -291,7 +310,7 @@ func TestLauncherHandsStopSignalsToTheChild(t *testing.T) {
 		if err := syscall.Kill(l.cmd.Process.Pid, syscall.SIGTERM); err != nil {
 			t.Fatal(err)
 		}
-		if !l.waitFor(t, "signals") {
+		if !l.waitForSignal(t) {
 			t.Fatalf("the child never caught the SIGTERM that followed; output:\n%s", l.output())
 		}
 		l.release(t)

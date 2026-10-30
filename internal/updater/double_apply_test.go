@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // Once an update is placed the process is restart-pending and .old holds the
@@ -67,7 +69,10 @@ func TestAFailedApplyCanBeRetried(t *testing.T) {
 func TestAnApplyOverABrokenSwapIsRefused(t *testing.T) {
 	srv := swapTestServer(t)
 	u, exePath := newTestUpdater(t, "1.0.0", srv, nil)
-	if err := os.Rename(exePath, exePath+".old"); err != nil {
+	// ReplaceFile, not os.Rename: the exe was written a moment ago, and on
+	// Windows a scanner opening a fresh .exe can refuse its rename for a
+	// moment, which ReplaceFile waits out.
+	if err := utils.ReplaceFile(exePath, exePath+".old"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(exePath+".new", []byte("staged binary"), 0o755); err != nil {

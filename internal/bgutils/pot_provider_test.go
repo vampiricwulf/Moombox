@@ -880,6 +880,35 @@ func TestPotProvider_MinterError(t *testing.T) {
 // PotProvider.GeneratePoToken — inflight dedup
 // ---------------------------------------------------------------------------
 
+// waitInflight waits until a mint for key is in flight, failing after 5 s.
+// The tests below used to sleep a fixed time for their leader to get there;
+// one scheduled later than that ran a different test, or none.
+func waitInflight(t *testing.T, pp *PotProvider, key string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		pp.mu.Lock()
+		_, ok := pp.inflight[key]
+		pp.mu.Unlock()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no mint for %q was in flight after 5 s", key)
+		}
+	}
+}
+
+// waitInflightWaits waits until n callers have joined a mint in flight,
+// failing after 5 s.
+func waitInflightWaits(t *testing.T, pp *PotProvider, n uint64) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); pp.inflightWaits.Load() < n; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d callers joined the mint in flight after 5 s, want %d", pp.inflightWaits.Load(), n)
+		}
+	}
+}
+
 func TestPotProvider_InflightDedup(t *testing.T) {
 	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
 
@@ -909,8 +938,9 @@ func TestPotProvider_InflightDedup(t *testing.T) {
 		}(i)
 	}
 
-	// Give goroutines time to start and hit inflight dedup
-	time.Sleep(50 * time.Millisecond)
+	// One leads the mint; the other two join it — waited for, not slept
+	// for, so the dedup is what the count below measures.
+	waitInflightWaits(t, pp, 2)
 
 	// Unblock the mint
 	close(mintCh)
@@ -953,11 +983,16 @@ func TestPotProvider_ContextCancelDuringInflight(t *testing.T) {
 		},
 	}
 
-	// First request starts generation
+	// First request starts generation. Waited for: had the request below
+	// got there first, it would have been the leader, blocked in MintFunc
+	// for good, and hung the test. It is joined at the end, so a panic in
+	// it fails the test rather than vanishing.
+	leader := make(chan any, 1)
 	go func() {
+		defer func() { leader <- recover() }()
 		pp.GeneratePoToken(context.Background(), binding, false)
 	}()
-	time.Sleep(20 * time.Millisecond)
+	waitInflight(t, pp, binding)
 
 	// Second request hits inflight wait, but we cancel its context
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -972,6 +1007,14 @@ func TestPotProvider_ContextCancelDuringInflight(t *testing.T) {
 	}
 
 	close(blockCh)
+	select {
+	case r := <-leader:
+		if r != nil {
+			t.Errorf("the leading GeneratePoToken panicked: %v", r)
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("the leading GeneratePoToken never returned once its mint was released")
+	}
 }
 
 // ---------------------------------------------------------------------------

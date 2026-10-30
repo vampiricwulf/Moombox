@@ -45,6 +45,13 @@ func TestMain(m *testing.M) {
 	// and TestTheParentThreadOutlivesTheProgram would pass with no lock at all
 	// whenever its goroutine happened to start the program from it.
 	runtime.LockOSThread()
+	// The helper processes these tests re-run this binary as skip the race
+	// runtime's sleep at exit (atexit_sleep_ms, 1000 by default), which cost
+	// each of them over a second under -race. A race a helper hits is still
+	// reported as it happens and still fails it.
+	if g := os.Getenv("GORACE"); !strings.Contains(g, "atexit_sleep_ms") {
+		os.Setenv("GORACE", strings.TrimSpace(g+" atexit_sleep_ms=0"))
+	}
 	// treeguard.Run fails a run that leaves files in the package directory.
 	os.Exit(treeguard.Run(m))
 }

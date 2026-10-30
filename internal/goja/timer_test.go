@@ -8,6 +8,27 @@ import (
 	gojalib "github.com/dop251/goja"
 )
 
+// queued is how many callbacks are waiting for DrainCallbacks.
+func queued(tm *TimerManager) int {
+	tm.callbackMu.Lock()
+	defer tm.callbackMu.Unlock()
+	return len(tm.callbacks)
+}
+
+// waitQueued waits until at least n callbacks are queued, failing after 5 s.
+// A timer on a loaded runner fires when it is scheduled, not when it is due:
+// these tests used to sleep a fixed time and then require the callbacks, and
+// a pause of the process across that sleep (a ticker drops the ticks it
+// misses) failed them with the timers working.
+func waitQueued(t *testing.T, tm *TimerManager, n int) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); queued(tm) < n; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d callbacks queued after 5 s, want %d", queued(tm), n)
+		}
+	}
+}
+
 // --- NewTimerManager tests ---
 
 func TestNewTimerManager(t *testing.T) {
@@ -44,7 +65,7 @@ func TestSetTimeoutEnqueuesCallback(t *testing.T) {
 	}
 
 	// Wait for the timer to fire and enqueue the callback
-	time.Sleep(100 * time.Millisecond)
+	waitQueued(t, tm, 1)
 
 	// Callback should NOT have been called yet (queued, not executed)
 	if fired.Load() != 0 {
@@ -95,7 +116,7 @@ func TestSetTimeoutNegativeDelay(t *testing.T) {
 
 	// Negative delay should be treated as 0 (fire immediately)
 	tm.SetTimeout(callable, -100)
-	time.Sleep(50 * time.Millisecond)
+	waitQueued(t, tm, 1)
 
 	// Drain and verify
 	tm.DrainCallbacks()
@@ -118,10 +139,14 @@ func TestClearTimerPreventsCallback(t *testing.T) {
 	}
 	callable, _ := gojalib.AssertFunction(vm.ToValue(fn))
 
-	id := tm.SetTimeout(callable, 200)
+	id := tm.SetTimeout(callable, 20)
 	tm.ClearTimer(id)
 
-	time.Sleep(300 * time.Millisecond)
+	// A sentinel due well after the cleared timer: once it is queued, the
+	// cleared one would have been too. It used to sleep 300 ms instead.
+	sentinel, _ := gojalib.AssertFunction(vm.ToValue(func(gojalib.FunctionCall) gojalib.Value { return gojalib.Undefined() }))
+	tm.SetTimeout(sentinel, 60)
+	waitQueued(t, tm, 1)
 	tm.DrainCallbacks()
 	if fired.Load() != 0 {
 		t.Error("expected cleared timer to not fire")
@@ -171,9 +196,9 @@ func TestCancelAllStopsAllTimers(t *testing.T) {
 	}
 	callable, _ := gojalib.AssertFunction(vm.ToValue(fn))
 
-	tm.SetTimeout(callable, 200)
-	tm.SetTimeout(callable, 200)
-	tm.SetTimeout(callable, 200)
+	tm.SetTimeout(callable, 20)
+	tm.SetTimeout(callable, 20)
+	tm.SetTimeout(callable, 20)
 
 	if tm.ActiveCount() != 3 {
 		t.Errorf("expected 3 active timers, got %d", tm.ActiveCount())
@@ -185,7 +210,10 @@ func TestCancelAllStopsAllTimers(t *testing.T) {
 		t.Errorf("expected 0 active timers after CancelAll, got %d", tm.ActiveCount())
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	// A stopped manager takes no sentinel timer, so this waits out the
+	// cancelled timers' 20 ms and then some — it used to wait 300 ms for
+	// timers due at 200.
+	time.Sleep(70 * time.Millisecond)
 	tm.DrainCallbacks()
 	if count.Load() != 0 {
 		t.Errorf("expected no callbacks after CancelAll, got %d", count.Load())
@@ -230,8 +258,9 @@ func TestCancelAllClearsPendingCallbacks(t *testing.T) {
 	tm.SetTimeout(callable, 5)
 	tm.SetTimeout(callable, 5)
 
-	// Wait for them to enqueue
-	time.Sleep(50 * time.Millisecond)
+	// Wait for them to enqueue — both, or CancelAll would merely stop
+	// timers that had not fired, and the test prove nothing about the queue.
+	waitQueued(t, tm, 2)
 
 	// CancelAll should clear any pending callbacks
 	tm.CancelAll()
@@ -262,7 +291,7 @@ func TestSetIntervalEnqueuesCallbacks(t *testing.T) {
 	tm.SetInterval(callable, 20)
 
 	// Wait for several ticks to enqueue
-	time.Sleep(150 * time.Millisecond)
+	waitQueued(t, tm, 2)
 
 	// Drain all queued callbacks
 	n, err := tm.DrainCallbacks()
@@ -290,7 +319,7 @@ func TestSetIntervalClearedByID(t *testing.T) {
 	callable, _ := gojalib.AssertFunction(vm.ToValue(fn))
 
 	id := tm.SetInterval(callable, 20)
-	time.Sleep(100 * time.Millisecond)
+	waitQueued(t, tm, 1)
 	// Clear before draining so we flush any in-flight callback that raced
 	// with the clear — the contract is "no callbacks after clear+drain",
 	// not "no callbacks after clear alone" (which is impossible to
@@ -299,7 +328,11 @@ func TestSetIntervalClearedByID(t *testing.T) {
 	tm.DrainCallbacks()
 
 	countAtClear := count.Load()
-	time.Sleep(100 * time.Millisecond)
+	// A sentinel due after several more of the interval's 20 ms ticks:
+	// once it is queued, a tick the clear missed would be too.
+	sentinel, _ := gojalib.AssertFunction(vm.ToValue(func(gojalib.FunctionCall) gojalib.Value { return gojalib.Undefined() }))
+	tm.SetTimeout(sentinel, 100)
+	waitQueued(t, tm, 1)
 	tm.DrainCallbacks()
 	countAfter := count.Load()
 
@@ -321,20 +354,21 @@ func TestSetIntervalZeroDelay(t *testing.T) {
 	}
 	callable, _ := gojalib.AssertFunction(vm.ToValue(fn))
 
+	start := time.Now()
 	tm.SetInterval(callable, 0)
 
-	// With 1ms clamping, should get many ticks but not an unbounded tight loop.
-	// A tight loop would yield millions; 1ms clamping yields ~50 in 50ms.
-	time.Sleep(50 * time.Millisecond)
-	tm.DrainCallbacks()
-
-	c := count.Load()
-	if c < 5 {
-		t.Errorf("expected at least 5 ticks with 0ms (clamped to 1ms) interval in 50ms, got %d", c)
+	// With 1ms clamping it ticks, but no faster than once a millisecond: a
+	// ticker never fires early, so in el it can have queued at most el/1ms.
+	// A tight loop would queue thousands in the same time.
+	waitQueued(t, tm, 5)
+	c := queued(tm)
+	el := time.Since(start)
+	if limit := int(el / time.Millisecond); c > limit {
+		t.Errorf("%d ticks queued in %v with 0ms (clamped to 1ms) interval, want at most %d (tight loop protection)", c, el, limit)
 	}
-	// Sanity upper bound — if it were a true tight loop this would be millions
-	if c > 1000 {
-		t.Errorf("expected fewer than 1000 ticks (tight loop protection), got %d", c)
+	tm.DrainCallbacks()
+	if got := count.Load(); got < 5 {
+		t.Errorf("expected at least 5 ticks with 0ms (clamped to 1ms) interval, got %d", got)
 	}
 }
 
@@ -393,7 +427,7 @@ func TestDrainCallbacksReportsErrors(t *testing.T) {
 	}
 
 	tm.SetTimeout(callable, 5)
-	time.Sleep(50 * time.Millisecond)
+	waitQueued(t, tm, 1)
 
 	_, err = tm.DrainCallbacks()
 	if err == nil {

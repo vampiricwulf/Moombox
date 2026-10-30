@@ -194,13 +194,14 @@ func crashExcerpt(head []byte, total int64) (excerpt, cause string) {
 // own line the runtime prints before it counts itself as crashing, so that
 // line reaches stderr only and the crash file starts after it: at the dying
 // goroutine's trace, or — for an error raised on the system stack, as a stack
-// overflow and running out of memory are — at a "runtime stack:" block of the
-// runtime's own frames, with the goroutine that was running after it. Its
-// cause is then where it struck: the first frame of that goroutine outside
-// the runtime (the recursing function, the allocation site), else of the
-// system stack, else the first that is not the runtime's throw or fatal.
-// Taking the first line named every stack overflow and out-of-memory crash
-// "runtime stack:".
+// overflow is, and running out of memory is when mapping heap memory fails
+// (an allocation too big to reserve throws on the goroutine's own stack) —
+// at a "runtime stack:" block of the runtime's own frames, with the goroutine
+// that was running after it. Its cause is then where it struck: the first
+// frame of that goroutine outside the runtime (the recursing function, the
+// allocation site), else of the system stack, else the first that is not the
+// runtime's throw or fatal. Taking the first line named every stack overflow,
+// and every out-of-memory crash raised on the system stack, "runtime stack:".
 func crashCause(lines []string) string {
 	first := -1
 	for i, line := range lines {

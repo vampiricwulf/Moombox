@@ -70,13 +70,17 @@ func trickleRelease(srv *httptest.Server) *ReleaseInfo {
 // A release binary is 78-87 MB, and the download used to carry a 5-minute
 // TOTAL deadline: anything slower than about 2.3 Mbit/s was killed however
 // steadily it arrived. Only a stall ends a download now. Scaled: data every
-// 50 ms against a 200 ms stall timeout, for well past the timeout overall.
+// 50 ms against a 1 s stall timeout, for 1.5 s overall. The 950 ms between
+// the cadence and the timeout is what a loaded runner may take from the test
+// at any one moment (a 200 ms timeout left 150 ms, and a single 160 ms
+// pause of the process cut the download); the 30 chunks keep the whole
+// transfer past the timeout, which no runner can shorten.
 //
 // Mutant: the stall timer not reset on progress — the download is cut at
-// 200 ms.
+// 1 s.
 func TestASteadyDownloadOutlastsTheStallTimeout(t *testing.T) {
-	shortenStall(t, 200*time.Millisecond)
-	srv := trickleServer(t, 16, 50*time.Millisecond, 0)
+	shortenStall(t, time.Second)
+	srv := trickleServer(t, 30, 50*time.Millisecond, 0)
 	u, exePath := newTestUpdater(t, "1.0.0", srv, nil)
 
 	if err := u.ApplyUpdate(context.Background(), trickleRelease(srv)); err != nil {

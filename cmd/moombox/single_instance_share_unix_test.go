@@ -32,8 +32,16 @@ const (
 // to is closed by its finalizer), ignores SIGTERM — the shutdown the
 // parent-death signal starts in a real child takes up to forceExitAfter — and
 // waits to be killed.
+//
+// Each file it writes appears whole, by a rename: the test reads a file the
+// moment it exists, and a plain WriteFile creates it empty before writing.
 func lockShareHelper(role, dir string) {
-	write := func(name, v string) { _ = os.WriteFile(filepath.Join(dir, name), []byte(v), 0o644) }
+	write := func(name, v string) {
+		tmp := filepath.Join(dir, "."+name+".tmp")
+		if os.WriteFile(tmp, []byte(v), 0o644) == nil {
+			_ = os.Rename(tmp, filepath.Join(dir, name))
+		}
+	}
 	switch role {
 	case "launcher", "launcher-release":
 		if err := acquireSingleInstanceLock(); err != nil {
@@ -137,7 +145,13 @@ func TestTheInstanceLockOutlivesTheLauncherWhileItsChildRuns(t *testing.T) {
 				releaseSingleInstanceLock()
 			})
 
-			childPID, _ := strconv.Atoi(waitForFile(t, dir, "child-pid"))
+			// Never 0 or negative: those are process groups to kill(2), and
+			// the SIGKILL below would take this test's own group — go test
+			// and every package it is running — with it.
+			childPID, err := strconv.Atoi(waitForFile(t, dir, "child-pid"))
+			if err != nil || childPID <= 0 {
+				t.Fatalf("the launcher wrote child-pid %d (%v), want its child's PID", childPID, err)
+			}
 			waitForFile(t, dir, "ready")
 			if role == "launcher" {
 				_ = launcher.Process.Signal(syscall.SIGKILL)
@@ -156,7 +170,6 @@ func TestTheInstanceLockOutlivesTheLauncherWhileItsChildRuns(t *testing.T) {
 			}
 
 			_ = syscall.Kill(childPID, syscall.SIGKILL)
-			var err error
 			for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
 				if err = acquireSingleInstanceLock(); err == nil {
 					break

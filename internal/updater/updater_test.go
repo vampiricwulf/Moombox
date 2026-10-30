@@ -179,35 +179,56 @@ func TestCheckForUpdatePrereleaseOrdering(t *testing.T) {
 
 // --- downloadFile: oversize + HTTP error ---
 
-// TestDownloadFileRejectsOversize covers the maxDownloadSize cap. We
-// serve a 201 MB body (1 MB over the 200 MB cap) and assert the helper
-// errors with a clear message rather than writing the full payload.
+// TestDownloadFileRejectsOversize covers the maxDownloadSize cap: a body one
+// byte over it errors with a clear message rather than writing the full
+// payload, and a body of exactly the cap is accepted. The cap is shrunk to
+// 1 MiB here: at the real 200 MB the test streamed 201 MB through loopback
+// and onto the runner's disk on every run.
+//
+// Mutants: no cap (the oversize body is accepted); the old `>=` check (the
+// exact-size body is refused); a production cap other than 200 MB (the pin
+// ahead of the shrink fails).
 func TestDownloadFileRejectsOversize(t *testing.T) {
-	if testing.Short() {
-		t.Skip("oversize test allocates 201 MB; skipping in -short mode")
+	orig := maxDownloadSize
+	if orig != 200<<20 {
+		t.Fatalf("maxDownloadSize = %d, want 200 MB (%d): production downloads get that cap", orig, 200<<20)
 	}
-	const overSize = 201 << 20
-	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		rw.WriteHeader(http.StatusOK)
-		// Stream zero-bytes; cheaper than allocating a 201MB buffer.
-		buf := make([]byte, 1<<20)
-		for i := 0; i <= 200; i++ {
-			rw.Write(buf)
-		}
-		rw.Write(buf[:1])
-	}))
-	t.Cleanup(srv.Close)
+	maxDownloadSize = 1 << 20
+	t.Cleanup(func() { maxDownloadSize = orig })
+	serve := func(size int64) *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+			rw.WriteHeader(http.StatusOK)
+			buf := make([]byte, 64<<10)
+			for left := size; left > 0; {
+				n := min(left, int64(len(buf)))
+				if _, err := rw.Write(buf[:n]); err != nil {
+					return
+				}
+				left -= n
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
 
-	u, _ := newTestUpdater(t, "1.0.0", srv, nil)
-	dest := filepath.Join(t.TempDir(), "big.bin")
-	err := u.downloadFile(context.Background(), srv.URL, dest)
+	over := serve(maxDownloadSize + 1)
+	u, _ := newTestUpdater(t, "1.0.0", over, nil)
+	err := u.downloadFile(context.Background(), over.URL, filepath.Join(t.TempDir(), "big.bin"))
 	if err == nil {
-		t.Fatal("downloadFile on 201MB body: want size-limit error, got nil")
+		t.Fatal("downloadFile on a body one byte over the cap: want size-limit error, got nil")
 	}
 	if !strings.Contains(err.Error(), "size limit") {
 		t.Errorf("error should mention size limit, got %v", err)
 	}
-	_ = overSize // intentionally unused — kept as a documentation constant
+
+	exact := serve(maxDownloadSize)
+	dest := filepath.Join(t.TempDir(), "exact.bin")
+	if err := u.downloadFile(context.Background(), exact.URL, dest); err != nil {
+		t.Fatalf("downloadFile on a body of exactly the cap: %v, want it accepted", err)
+	}
+	if info, err := os.Stat(dest); err != nil || info.Size() != maxDownloadSize {
+		t.Errorf("the exact-size download left %v (%v), want %d bytes", info, err, maxDownloadSize)
+	}
 }
 
 // TestDownloadFileHTTPError covers the non-200 branch.

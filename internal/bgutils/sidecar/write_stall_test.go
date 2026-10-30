@@ -140,10 +140,16 @@ func TestAStalledWriteMarksTheSidecarUnhealthy(t *testing.T) {
 //
 // A real child process (this test binary, running TestStuckChildProcess) is
 // needed so teardownLocked takes its full path — the fast path for a nil
-// Process skips the RPC that used to hang.
+// Process skips the RPC that used to hang. The budget's two waits are shrunk
+// from 1 s and 2 s for this instance, so the test spends 0.3 s in them
+// rather than 3 s; they still run in full, as Stop runs them in production.
+// The production values are pinned first, before the test shrinks them.
 //
 // Mutants this kills:
-//   - the shutdown RPC's lock wait ignoring its 1 s context → Stop never returns
+//   - the shutdown RPC's lock wait ignoring its context → Stop never returns
+//   - the kill not waiting out the exit grace           → Stop returns under
+//     its budget
+//   - New setting any other budget than 1 s + 2 s       → the pin fails
 func TestStopCompletesBehindAStuckWriter(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestStuckChildProcess$")
 	cmd.Env = append(os.Environ(), "MOOMBOX_SIDECAR_STUCK_CHILD=1")
@@ -153,6 +159,12 @@ func TestStopCompletesBehindAStuckWriter(t *testing.T) {
 	t.Cleanup(func() { _ = cmd.Process.Kill() })
 
 	s := New(Config{Logger: silentLogger{}})
+	if s.shutdownRPCTimeout != time.Second || s.exitGrace != 2*time.Second {
+		t.Fatalf("New set Stop's budget to %s + %s, want the documented 1s + 2s", s.shutdownRPCTimeout, s.exitGrace)
+	}
+	s.shutdownRPCTimeout = 100 * time.Millisecond
+	s.exitGrace = 200 * time.Millisecond
+	budget := s.shutdownRPCTimeout + s.exitGrace
 	w := newStuckStdin()
 	s.cmd = cmd
 	s.stdin = w
@@ -175,10 +187,16 @@ func TestStopCompletesBehindAStuckWriter(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Stop hung behind a stranded stdin write")
 	}
-	// 1 s for the shutdown RPC to give up its lock wait, 2 s for the child
-	// to exit on its own before it is killed; the rest is slack.
-	if took := time.Since(started); took > 6*time.Second {
-		t.Errorf("Stop took %s, want within its ~3 s budget", took)
+	// The shutdown RPC giving up its lock wait, then the child's grace to
+	// exit on its own before it is killed: this child does neither, so Stop
+	// waits out both — a floor no timer can undercut — and no more, bar
+	// slack for the kill and the reap.
+	took := time.Since(started)
+	if took < budget {
+		t.Errorf("Stop took %s, less than its %s budget: a wait was skipped", took, budget)
+	}
+	if took > budget+5*time.Second {
+		t.Errorf("Stop took %s, want within its %s budget", took, budget)
 	}
 	select {
 	case err := <-writer:

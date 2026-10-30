@@ -26,18 +26,29 @@ func TestASaveKeepsTheLogLevelOverrideUnlessTheLevelChanged(t *testing.T) {
 	lines := lg.Subscribe()
 	s := &runState{log: lg, configuredLogLevel: "INFO"}
 
+	// debugReaches logs marker at DEBUG, then a sentinel at ERROR, which
+	// every level lets through, and reports whether the marker reached the
+	// subscriber ahead of the sentinel. A subscriber gets lines in the order
+	// they were logged, so the sentinel's arrival settles it: the check no
+	// longer waits out a whole second for a line that must not come.
 	debugReaches := func(marker string) bool {
 		t.Helper()
+		sentinel := "sentinel-after-" + marker
 		lg.Debug(marker)
-		deadline := time.After(time.Second)
+		lg.Error(sentinel)
+		deadline := time.After(5 * time.Second)
+		seen := false
 		for {
 			select {
 			case l := <-lines:
-				if strings.Contains(l, marker) {
-					return true
+				switch {
+				case strings.Contains(l, sentinel):
+					return seen
+				case strings.Contains(l, marker):
+					seen = true
 				}
 			case <-deadline:
-				return false
+				t.Fatalf("the ERROR line logged after %q never reached the subscriber", marker)
 			}
 		}
 	}

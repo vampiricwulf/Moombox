@@ -188,6 +188,18 @@ var (
 	youtubeBaseURL = "https://www.youtube.com"
 )
 
+// resolveRetryWait waits out one of ResolveYouTubeChannel's backoffs, or
+// returns ctx's error the moment ctx ends. A variable so a test can record
+// the delays instead of sleeping through them.
+var resolveRetryWait = func(ctx context.Context, d time.Duration) error {
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // YouTubeChannelInfo holds resolved YouTube channel information.
 type YouTubeChannelInfo struct {
 	ChannelID string
@@ -211,11 +223,8 @@ func ResolveYouTubeChannel(ctx context.Context, urlPath string) (*YouTubeChannel
 	var err error
 	for attempt := range 3 {
 		if attempt > 0 {
-			delay := time.Duration(1<<(attempt-1)) * time.Second
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-				return nil, ctx.Err()
+			if err := resolveRetryWait(ctx, time.Duration(1<<(attempt-1))*time.Second); err != nil {
+				return nil, err
 			}
 		}
 		body, err = FetchBody(ctx, pageURL, 15*time.Second, headers)

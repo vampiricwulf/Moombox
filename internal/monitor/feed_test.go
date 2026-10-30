@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -20,16 +21,51 @@ import (
 )
 
 // newTestDB opens a fresh temp-file database for a test, closed on cleanup.
-// Every Plan 3 test starts from an empty store built by this helper.
+// Every Plan 3 test starts from an empty store built by this helper: a copy
+// of migratedTestDB's file, which Open finds already at the current schema.
+// Migrating each test's database from scratch cost 5 ms a test, 60 ms under
+// -race (the SQLite driver is Go, and instrumented), across over a hundred
+// tests; the copy costs a fifth of that.
 func newTestDB(t *testing.T) *database.Database {
 	t.Helper()
-	db, err := database.Open(filepath.Join(t.TempDir(), "test.db"))
+	tmpl, err := migratedTestDB()
+	if err != nil {
+		t.Fatalf("the migrated template database: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "test.db")
+	if err := os.WriteFile(path, tmpl, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := database.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
 }
+
+// migratedTestDB is the file of an empty database migrated once for the
+// whole run. Close checkpoints the WAL into it, so the file alone is the
+// database; a WAL left behind would mean it is not, and is an error.
+var migratedTestDB = sync.OnceValues(func() ([]byte, error) {
+	dir, err := os.MkdirTemp("", "moombox-monitor-testdb-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	path := filepath.Join(dir, "template.db")
+	db, err := database.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Close(); err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(path + "-wal"); err == nil {
+		return nil, fmt.Errorf("closing %s left its WAL behind", path)
+	}
+	return os.ReadFile(path)
+})
 
 // feedMonitorOpt configures a FeedMonitor built by newTestFeedMonitor. Each
 // withXxx helper below sets one field. Later Plan 3 tasks add withProbe,

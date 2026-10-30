@@ -55,7 +55,7 @@ func TestALeadersCancellationIsNotTheWaitersAnswer(t *testing.T) {
 		_, err := pp.GeneratePoToken(context.Background(), "SAMEVIDEO", false)
 		followerDone <- err
 	}()
-	time.Sleep(100 * time.Millisecond) // the follower joins the leader's entry
+	waitInflightWaits(t, pp, 1) // the follower joins the leader's entry
 	cancelLeader()
 	if err := <-leaderDone; !errors.Is(err, context.Canceled) {
 		t.Fatalf("leader: %v, want its own cancellation", err)

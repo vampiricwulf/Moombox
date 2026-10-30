@@ -30,6 +30,17 @@ type PassiveTracker struct {
 	window    time.Duration
 	minFails  int
 	minTags   int
+	// now is the tracker's clock: time.Now, unless a test sets its own to
+	// age failures without sleeping.
+	now func() time.Time
+}
+
+// clock reads pt.now, or the wall clock when none is set.
+func (pt *PassiveTracker) clock() time.Time {
+	if pt.now != nil {
+		return pt.now()
+	}
+	return time.Now()
 }
 
 func NewPassiveTracker() *PassiveTracker {
@@ -43,7 +54,7 @@ func NewPassiveTracker() *PassiveTracker {
 func (pt *PassiveTracker) ReportFailure(tag string) {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
-	pt.failures = append(pt.failures, failureEntry{tag: tag, at: time.Now()})
+	pt.failures = append(pt.failures, failureEntry{tag: tag, at: pt.clock()})
 	pt.pruneOld()
 	// Hard cap: if a subsystem spams failures faster than pruneOld can
 	// drop them, trim the oldest entries to keep memory bounded.
@@ -156,7 +167,7 @@ func (pt *PassiveTracker) IsTriggeredPruned() bool {
 }
 
 func (pt *PassiveTracker) pruneOld() {
-	cutoff := time.Now().Add(-pt.window)
+	cutoff := pt.clock().Add(-pt.window)
 	i := 0
 	for i < len(pt.failures) && pt.failures[i].at.Before(cutoff) {
 		i++
