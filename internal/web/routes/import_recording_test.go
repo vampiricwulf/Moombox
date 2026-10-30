@@ -327,13 +327,12 @@ func TestImportProbeDurationReadsFFprobe(t *testing.T) {
 	if _, err := exec.LookPath("ffprobe"); err != nil {
 		t.Skip("ffprobe not installed")
 	}
-	media := filepath.Join(dir, "clip.mp4")
-	if out, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=16x16:d=2", "-c:v", "mpeg4", media).CombinedOutput(); err != nil {
-		t.Skipf("ffmpeg could not make a clip: %v %s", err, out)
-	}
+	// FFmpeg writes the clip under the temporary name itself (-f mp4, since
+	// the extension names no container): renaming a file FFmpeg has just
+	// closed is refused on Windows while a scanner holds it.
 	partial := filepath.Join(dir, importTempPrefix+"1"+importPartialExt)
-	if err := os.Rename(media, partial); err != nil {
-		t.Fatal(err)
+	if out, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=16x16:d=2", "-c:v", "mpeg4", "-f", "mp4", partial).CombinedOutput(); err != nil {
+		t.Skipf("ffmpeg could not make a clip: %v %s", err, out)
 	}
 	if d := importProbeDuration(context.Background(), "ffprobe", partial); d < 1.9 || d > 2.1 {
 		t.Errorf("a 2 s clip probed as %v s", d)
