@@ -13,7 +13,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
 // potRequest is one request the direct-path test server saw: the query the
@@ -228,7 +231,7 @@ func fallbackTransportError(t *testing.T, parent context.Context, rawURL, token 
 }
 
 // refusedURL returns a URL on a loopback port nothing listens on, so the
-// fallback's Do fails at dial.
+// fallback's Do fails at dial — refused at once (refuseDialsTo).
 func refusedURL(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -237,7 +240,55 @@ func refusedURL(t *testing.T) string {
 	}
 	addr := ln.Addr().String()
 	ln.Close()
+	refuseDialsTo(t, addr)
 	return "http://" + addr + "/videoplayback?itag=302&expire=1"
+}
+
+// refusingTransport refuses at once every dial to an address in refused and
+// dials anything else as usual (refuseDialsTo).
+type refusingTransport struct {
+	*http.Transport
+	mu      sync.Mutex
+	refused map[string]bool
+}
+
+// refuseDialsTo makes engineHTTPClient, for the rest of the test, refuse
+// every dial to addr at once, the way Linux refuses a loopback port nothing
+// listens on. A real dial there takes up to a few seconds on Windows (Go's
+// own net/dial_test.go, dialClosedPort), and a test that fails its fetches at
+// a dead address pays that on every attempt: with each refusal delayed by
+// 1.5 s, the dead-address and redaction tests cost the package about 40 s
+// more. Dials to anything else go out as usual, so a test can pair a dead
+// edge with a live server. The refusal is the error a real one is — a
+// *net.OpError for the dial — so http.Client still wraps it in the
+// *url.Error the redaction tests read. Serial tests only: engineHTTPClient is
+// package state, which the package's parallel tests read only once every
+// serial test has finished.
+func refuseDialsTo(t *testing.T, addr string) {
+	t.Helper()
+	if rt, ok := engineHTTPClient.Transport.(*refusingTransport); ok {
+		rt.mu.Lock()
+		rt.refused[addr] = true
+		rt.mu.Unlock()
+		return
+	}
+	rt := &refusingTransport{
+		Transport: httpx.NewTransport(httpx.TransportOptions{}),
+		refused:   map[string]bool{addr: true},
+	}
+	var dialer net.Dialer
+	rt.DialContext = func(ctx context.Context, network, a string) (net.Conn, error) {
+		rt.mu.Lock()
+		refused := rt.refused[a]
+		rt.mu.Unlock()
+		if refused {
+			return nil, &net.OpError{Op: "dial", Net: network, Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+		}
+		return dialer.DialContext(ctx, network, a)
+	}
+	prev := engineHTTPClient
+	t.Cleanup(func() { engineHTTPClient = prev; rt.CloseIdleConnections() })
+	engineHTTPClient = httpx.ClientWithTransport(0, rt)
 }
 
 // TestFallbackTransportErrorRedactsPoToken pins the close-wave fix: the

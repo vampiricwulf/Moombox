@@ -4,15 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
-	"github.com/vampiricwulf/Moombox/internal/httpx"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -105,7 +102,7 @@ func TestStartDirectURLKeepsLegacyTruncate(t *testing.T) {
 		MaxRetries:  1,
 	})
 	d.delays = directDelays()
-	refuseDials(t)
+	refuseDialsTo(t, deadAddress)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -371,27 +368,13 @@ func asideFiles(t *testing.T, path string) (media, sidecar string) {
 	return media, sidecar
 }
 
-// refuseDials points engineHTTPClient, for the rest of the test, at a
-// transport that refuses every dial at once: the dead address these tests
-// stand for, as fast on every OS. A real dial to a closed loopback port
-// (127.0.0.1:1) is refused in microseconds on Linux, but Go's own
-// net/dial_test.go (dialClosedPort) records it taking up to a few seconds on
-// Windows, and a run dials more than once before it reports anything.
-// Serial tests only: engineHTTPClient is package state, which the package's
-// parallel tests read only once every serial test has finished.
-func refuseDials(t *testing.T) {
-	t.Helper()
-	tr := httpx.NewTransport(httpx.TransportOptions{})
-	tr.DialContext = func(_ context.Context, network, _ string) (net.Conn, error) {
-		return nil, &net.OpError{Op: "dial", Net: network, Err: syscall.ECONNREFUSED}
-	}
-	prev := engineHTTPClient
-	t.Cleanup(func() { engineHTTPClient = prev })
-	engineHTTPClient = httpx.ClientWithTransport(0, tr)
-}
+// deadAddress is the host:port of the dead-address tests' stream URLs,
+// refused at once (refuseDialsTo) so a run fails its fetches as fast on
+// Windows as on Linux.
+const deadAddress = "127.0.0.1:1"
 
 // startAgainstDeadAddress runs Start against an address nothing answers
-// (refuseDials) and ends it at the loop's first activity. Every caller cares
+// (deadAddress) and ends it at the loop's first activity. Every caller cares
 // only about what Start decided about the files BEFORE the first fetch, so
 // the download's own failure is expected: the head-sequence probe and the
 // first segment fetch are both refused, and the loop reports ActivityRetrying
@@ -400,7 +383,7 @@ func refuseDials(t *testing.T) {
 // deadline is only a safety net for a run that never fetches.
 func startAgainstDeadAddress(t *testing.T, d *SegmentDownloader) error {
 	t.Helper()
-	refuseDials(t)
+	refuseDialsTo(t, deadAddress)
 	d.delays = fastDelays()
 	ctx, cancel := context.WithTimeout(context.Background(), safetyNet)
 	defer cancel()
