@@ -152,6 +152,7 @@ func TestMediaFsyncMatchesResumeSaveCount(t *testing.T) {
 	})
 	d.delays = fastDelays()
 	d.delays.hlsResumeSave = time.Hour
+	d.delays.hlsReloadUnit = time.Millisecond // counts, not cadence (see TestHlsResumeSaveIsRateLimited)
 	d.onResumeSaved = func(int) {
 		mu.Lock()
 		saves++

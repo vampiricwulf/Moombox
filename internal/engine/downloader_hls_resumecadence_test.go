@@ -73,6 +73,10 @@ func TestHlsResumeSaveIsRateLimited(t *testing.T) {
 	// falls inside one interval, so only the first save and the deferred
 	// final save may write.
 	d.delays.hlsResumeSave = time.Hour
+	// The counts are the proof, not the reload cadence: every reload carries
+	// a new segment, so a millisecond unit only stops the twelve reloads
+	// paying 50 ms each.
+	d.delays.hlsReloadUnit = time.Millisecond
 	d.onResumeSaved = func(lastSeq int) {
 		mu.Lock()
 		saved = append(saved, lastSeq)
