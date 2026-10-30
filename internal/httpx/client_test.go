@@ -1,7 +1,9 @@
 package httpx
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,24 +20,56 @@ func TestClientUsesSharedTransport(t *testing.T) {
 	}
 }
 
-// TestClientHonoursTimeout exercises the round-trip with a sleeping
-// server and asserts the per-client timeout fires.
+// TestClientHonoursTimeout exercises the round-trip against a server that
+// never answers and asserts the per-client timeout fires: only the timeout
+// can end the request, so it must, as a timeout, and no sooner than the
+// timeout (timers never fire early). It was timed against 250 ms for a
+// 50 ms timeout, which a 300 ms pause of the test process failed.
+//
+// Mutant: Client dropping its timeout argument — the request never returns
+// (cut at 10 s).
 func TestClientHonoursTimeout(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		time.Sleep(500 * time.Millisecond)
-		rw.WriteHeader(http.StatusOK)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select { // until the client gives up, or the test ends
+		case <-r.Context().Done():
+		case <-release:
+		}
 	}))
 	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) }) // runs first: Close waits for the handler
 
-	c := Client(50 * time.Millisecond)
-	start := time.Now()
-	_, err := c.Get(srv.URL)
-	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("Client with 50ms timeout: want error, got nil")
+	const timeout = 50 * time.Millisecond
+	c := Client(timeout)
+	type result struct {
+		err  error
+		took time.Duration
 	}
-	if elapsed > 250*time.Millisecond {
-		t.Errorf("Client returned after %v — timeout did not fire promptly", elapsed)
+	done := make(chan result, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- result{err: fmt.Errorf("Get panicked: %v", r)}
+			}
+		}()
+		start := time.Now()
+		resp, err := c.Get(srv.URL)
+		if err == nil {
+			resp.Body.Close()
+		}
+		done <- result{err, time.Since(start)}
+	}()
+	select {
+	case r := <-done:
+		var ne net.Error
+		if !errors.As(r.err, &ne) || !ne.Timeout() {
+			t.Fatalf("Client with a %v timeout vs a server that never answers: err = %v, want a timeout", timeout, r.err)
+		}
+		if r.took < timeout {
+			t.Errorf("Client gave up after %v, before its %v timeout", r.took, timeout)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("Client with a %v timeout had not returned after 10 s — the timeout did not fire", timeout)
 	}
 }
 
