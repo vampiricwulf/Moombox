@@ -182,7 +182,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		// Stop that its outage is over. Lock order: outageMu, then cancelMu
 		// (cancelForOutage), never the other way.
 		var outageMu sync.Mutex
-		var outageTimer *time.Timer
+		var outageTimer interface{ Stop() bool }
 		var outageEpoch uint64
 		disarm := func() {
 			if outageTimer != nil {
@@ -213,7 +213,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 				return
 			}
 			ep := outageEpoch
-			outageTimer = time.AfterFunc(twitchOutageCancelAfter, func() {
+			outageTimer = outageAfterFunc(twitchOutageCancelAfter, func() {
 				defer func() {
 					if r := recover(); r != nil {
 						o.logger.Error("panic in the Twitch outage cancel", "panic", fmt.Sprint(r), "jobID", jobID)
@@ -1755,6 +1755,14 @@ var postOutageRetryDelay = 3 * time.Second
 // that sends no alert restarts no capture either. A variable so tests need
 // not wait it out; zero cancels on the offline transition itself.
 var twitchOutageCancelAfter = connectivity.MinOutage
+
+// outageAfterFunc arms the outage minimum's cancel: time.AfterFunc, behind a
+// package var so the minimum's tests can fire it on a clock of their own
+// rather than sleep it out against a timer they race. Production never
+// writes it.
+var outageAfterFunc = func(d time.Duration, f func()) interface{ Stop() bool } {
+	return time.AfterFunc(d, f)
+}
 
 // sameTwitchBroadcast reports whether info refers to the broadcast this job
 // has been recording, by the shared sameBroadcastStart identity rule against

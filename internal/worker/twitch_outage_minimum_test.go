@@ -13,10 +13,94 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
-// minimumRun is an endVerdictHarness whose orchestrator sends to rec.
+// minimumRun is an endVerdictHarness whose orchestrator sends to rec, and
+// whose outage minimum runs on clock.
 type minimumRun struct {
 	*endVerdictHarness
-	rec *notificationtest.Recorder
+	rec   *notificationtest.Recorder
+	clock *outageClock
+}
+
+// outageClock stands in for time.AfterFunc as the outage minimum's timer
+// (outageAfterFunc): a timer comes due only when the test advances the clock
+// past it. The tests used to sleep the minimum out against a real timer, and
+// a test goroutine descheduled for longer than its margin restored the link
+// after the timer had fired, failing a correct run.
+type outageClock struct {
+	mu     sync.Mutex
+	now    time.Duration
+	timers []*outageClockTimer
+}
+
+type outageClockTimer struct {
+	c              *outageClock
+	at             time.Duration
+	f              func()
+	stopped, fired bool
+}
+
+func (tm *outageClockTimer) Stop() bool {
+	tm.c.mu.Lock()
+	defer tm.c.mu.Unlock()
+	pending := !tm.stopped && !tm.fired
+	tm.stopped = true
+	return pending
+}
+
+func installOutageClock(t *testing.T) *outageClock {
+	t.Helper()
+	c := &outageClock{}
+	prev := outageAfterFunc
+	outageAfterFunc = func(d time.Duration, f func()) interface{ Stop() bool } {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		tm := &outageClockTimer{c: c, at: c.now + d, f: f}
+		c.timers = append(c.timers, tm)
+		return tm
+	}
+	t.Cleanup(func() { outageAfterFunc = prev })
+	return c
+}
+
+// advance moves the clock on by d and runs every timer that came due and was
+// not stopped, on the caller's goroutine — so a cancel one of them makes has
+// been made when advance returns.
+func (c *outageClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.now += d
+	var due []*outageClockTimer
+	for _, tm := range c.timers {
+		if !tm.stopped && !tm.fired && tm.at <= c.now {
+			tm.fired = true
+			due = append(due, tm)
+		}
+	}
+	c.mu.Unlock()
+	for _, tm := range due {
+		tm.f()
+	}
+}
+
+// armed is how many timers the capture has armed so far.
+func (c *outageClock) armed() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.timers)
+}
+
+// noRecheckWithin is the settle a "ridden out" verdict waits before it
+// reads the recheck count. A cancel the capture should not have made reaches
+// the recheck in milliseconds — the link is already back — so this only has
+// to outlast that; nothing in a correct run is racing it.
+const noRecheckWithin = 300 * time.Millisecond
+
+// ridOut waits noRecheckWithin and reports the rechecks the recovery made.
+func ridOut(rechecks *atomic.Int32) int32 {
+	deadline := time.Now().Add(noRecheckWithin)
+	for rechecks.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	return rechecks.Load()
 }
 
 // retryNowChat is a live chat source that counts RetryNow, the call that cuts
@@ -53,7 +137,7 @@ func (c *retryNowChat) RetryNow()         { c.retries.Add(1) }
 func minimumHarness(t *testing.T, jobID string, cancelAfter time.Duration) (h *minimumRun, chat *retryNowChat, rechecks *atomic.Int32, stop func()) {
 	t.Helper()
 	srv, first := liveTwitchWindow(t)
-	h = &minimumRun{endVerdictHarness: newEndVerdictHarness(t, jobID), rec: notificationtest.New()}
+	h = &minimumRun{endVerdictHarness: newEndVerdictHarness(t, jobID), rec: notificationtest.New(), clock: installOutageClock(t)}
 	h.o.notifier = h.rec
 	twitchOutageCancelAfter = cancelAfter // the harness restores the production value
 	old := postOutageRetryDelay
@@ -108,12 +192,15 @@ func TestTwitchBlipDoesNotRestartTheSession(t *testing.T) {
 	defer stop()
 
 	h.conn.set(false)
-	time.Sleep(300 * time.Millisecond)
+	h.clock.advance(300 * time.Millisecond)
 	h.conn.set(true)
 	// Past the minimum: a cancel the blip armed and the restore left armed
-	// would have fired by now.
-	time.Sleep(2500 * time.Millisecond)
-	if n := rechecks.Load(); n != 0 {
+	// fires here.
+	h.clock.advance(time.Hour)
+	if n := h.clock.armed(); n != 1 {
+		t.Errorf("the blip armed %d outage timers, want 1 — the minimum's own path", n)
+	}
+	if n := ridOut(rechecks); n != 0 {
 		t.Errorf("a 300 ms blip sent the capture through the outage recovery (%d rechecks), want it ridden out", n)
 	}
 	if chat.retries.Load() == 0 {
@@ -137,7 +224,10 @@ func TestTwitchOutagePastTheMinimumRestartsTheSession(t *testing.T) {
 	before := time.Now()
 	h.conn.set(false)
 	after := time.Now()
-	time.Sleep(2500 * time.Millisecond)
+	// The minimum runs out in a later second than the loss, so a pause dated
+	// where the session loop consumes the cancel cannot pass for the loss.
+	time.Sleep(time.Until(after.Truncate(time.Second).Add(time.Second + 50*time.Millisecond)))
+	h.clock.advance(2500 * time.Millisecond)
 	h.conn.set(true)
 	deadline := time.Now().Add(10 * time.Second)
 	for len(h.rec.ByEvent("connectivity_resume")) == 0 && time.Now().Before(deadline) {
@@ -180,14 +270,14 @@ func TestTwitchRestoreDisarmsTheOutageCancel(t *testing.T) {
 	defer stop()
 
 	h.conn.set(false)
-	time.Sleep(200 * time.Millisecond)
+	h.clock.advance(200 * time.Millisecond)
 	h.conn.set(true)
-	time.Sleep(1000 * time.Millisecond)
+	h.clock.advance(1000 * time.Millisecond)
 	h.conn.set(false) // 1.2 s after the first loss
-	time.Sleep(800 * time.Millisecond)
-	h.conn.set(true) // the second outage lasted 0.8 s
-	time.Sleep(1200 * time.Millisecond)
-	if n := rechecks.Load(); n != 0 {
+	h.clock.advance(800 * time.Millisecond)
+	h.conn.set(true) // the second outage lasted 0.8 s, past the first one's minimum
+	h.clock.advance(time.Hour)
+	if n := ridOut(rechecks); n != 0 {
 		t.Errorf("two outages under the minimum sent the capture through the recovery (%d rechecks) — the first one's cancel outlived its restore", n)
 	}
 }
