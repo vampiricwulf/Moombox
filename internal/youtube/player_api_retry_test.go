@@ -112,19 +112,23 @@ func (r *debugRecorder) saw(sub string) bool {
 // race the deadline — the very bug this task exists to fix, just moved one
 // step later, and non-deterministically at that.
 //
-// Arithmetic (scaled base B = 40 ms): the first retry's delay is B. A
-// deadline of delay + half a base = 60 ms leaves only 20 ms beyond the sleep
-// — short of the one full base (40 ms) the fixed guard reserves for the
-// request — so the sleep must never happen: the real 503 from the first
-// attempt comes back immediately, deterministically, with no second request
-// ever sent.
+// Arithmetic (scaled base B = 1 s, deadline D = 1.5 s): the first retry's
+// delay is B, and the fixed guard's threshold is delay+B = 2B. Whatever the
+// first round trip cost, at most D = 1.5B is left, short of 2B, so the sleep
+// must never happen: the real 503 from the first attempt comes back as soon
+// as that round trip ends, with no second request ever sent. Correct code
+// never sleeps here, so the large base costs nothing; the first round trip
+// has the whole 1.5 s. It had 60 ms (B = 40 ms), and a first loopback answer
+// later than that turned the 503 into the deadline.
 //
 // Mutant named: the un-reserved guard `time.Until(deadline) <= delay` (this
-// task's own fix, before this round). 60 ms > 40 ms (delay alone) is true, so
-// it would sleep the full 40 ms and then send a second request into a
-// ~20 ms remaining budget — one extra hit the reserved guard never makes.
+// task's own fix, before this round). Its threshold is B alone, which the
+// remaining D minus the first round trip clears whenever that round trip
+// took under 0.5B = 500 ms, so it sleeps the full second and then sends a
+// second request into the half second left — one extra hit the reserved
+// guard never makes.
 func TestDoRetryRequestReservesOneBackoffBaseForTheRequest(t *testing.T) {
-	scaleRetryBackoff(t, 40*time.Millisecond)
+	scaleRetryBackoff(t, time.Second)
 
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -133,7 +137,7 @@ func TestDoRetryRequestReservesOneBackoffBaseForTheRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 
 	_, err := newRetryTestAPI().doRetryRequest(ctx, srv.URL, []byte(`{}`), nil, nil, "Innertube", "abc12345678")
