@@ -149,7 +149,7 @@ func (s *AutoCookieService) killSetupProcess() {
 				return // the job will do it; this PID belongs to whoever Windows gave it to next
 			}
 			killProcessTree(proc)
-			time.Sleep(taskkillDrainDelay)
+			time.Sleep(taskkillDrainPause)
 			return
 		}
 		if !claimed {

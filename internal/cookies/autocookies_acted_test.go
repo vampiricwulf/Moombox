@@ -104,6 +104,11 @@ func TestMain(m *testing.M) {
 	// ABOUT the hardening installs its own fake (fakeApplyUserOnlyDACL), which
 	// restores this no-op when it ends.
 	applyUserOnlyDACL = func(string) error { return nil }
+	// Nor does any test pay the post-kill drain: every one that reaches it
+	// kills or finds exited a fixture process (Pid -1, or a made-up PID
+	// nothing runs as), so there is no handle for Windows to release, and
+	// the 0.3 s pause was most of nineteen tests' run time.
+	taskkillDrainPause = 0
 	// The tests themselves run through treeguard.Run, which fails a run that
 	// left a file in the package directory.
 	os.Exit(treeguard.Run(m))

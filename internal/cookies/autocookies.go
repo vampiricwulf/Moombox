@@ -190,6 +190,14 @@ var launchWindowKillBudget = 2 * time.Second
 // applyUserOnlyDACL and loadCookieJar elsewhere in this package.
 var authVerifyWindow = authVerifyTimeout
 
+// taskkillDrainPause is the pause the three post-kill / post-exit sites
+// actually spend, and it is a var for one reason: every test that reaches one
+// does so with a fixture process (Pid -1, or a made-up PID nothing runs as),
+// where there is no handle to release, and nineteen of them would otherwise
+// sleep 0.3 s each. Production never assigns it — taskkillDrainDelay is the
+// number. Same shape as authVerifyWindow.
+var taskkillDrainPause = taskkillDrainDelay
+
 // AutoCookieStopWait bounds how long Stop waits for the service's own
 // goroutines — StartPeriodicRefresh's timer and StartProfileSeed's boot import —
 // to return. Stop cancels a pass in flight and kills its browser first, so the
