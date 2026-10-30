@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -11,21 +12,47 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
-// writeTrimSource renders a real seconds-long MP4 with video and audio, the
+// writeTrimSource writes a real seconds-long MP4 with video and audio, the
 // shape CreateTrim's precise re-encode expects of an archive.
 func writeTrimSource(t *testing.T, ffmpegPath, path string, seconds string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(path, renderedTrimSource(t, ffmpegPath, seconds), 0o644); err != nil {
+		t.Fatalf("write trim source %s: %v", path, err)
+	}
+}
+
+var (
+	trimSourcesMu sync.Mutex
+	trimSources   = map[string][]byte{}
+)
+
+// renderedTrimSource renders writeTrimSource's MP4 once per length per test
+// binary; the tests read only its bytes.
+func renderedTrimSource(t *testing.T, ffmpegPath, seconds string) []byte {
+	t.Helper()
+	trimSourcesMu.Lock()
+	defer trimSourcesMu.Unlock()
+	if data, ok := trimSources[seconds]; ok {
+		return data
+	}
+	path := filepath.Join(t.TempDir(), "source.mp4")
 	cmd := exec.Command(ffmpegPath, "-nostdin", "-y",
 		"-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration="+seconds,
 		"-f", "lavfi", "-i", "sine=duration="+seconds,
 		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
 		"-c:a", "aac", "-shortest", "-movflags", "+faststart", path)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("generate trim source %s: %v\n%s", path, err, out)
+		t.Fatalf("generate the %s s trim source: %v\n%s", seconds, err, out)
 	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trimSources[seconds] = data
+	return data
 }
 
 // orphanTypeOf returns the type the sweep offers path as, or "" when it is
