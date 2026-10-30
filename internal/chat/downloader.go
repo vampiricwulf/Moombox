@@ -1870,7 +1870,10 @@ func (cd *ChatDownloader) adoptExistingChatFile() int {
 		}
 		corruptPath := outputFile + corruptChatSuffix
 		cd.reportIOError(fmt.Errorf("existing chat file unreadable, preserving it as %s: %w", corruptPath, err))
-		if renameErr := os.Rename(outputFile, corruptPath); renameErr != nil {
+		// ReplaceFile, not os.Rename: on Windows a scanner briefly holding the
+		// file refuses a bare rename, and the first full write then
+		// overwrites it.
+		if renameErr := utils.ReplaceFile(outputFile, corruptPath); renameErr != nil {
 			cd.reportIOError(fmt.Errorf("preserve unreadable chat file: %w", renameErr))
 		}
 		return 0

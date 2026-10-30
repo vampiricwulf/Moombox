@@ -22,13 +22,17 @@ import (
 // twice, and the second write used to overwrite the first's messages. A file
 // at that name this cannot read as a spill is kept aside under its own
 // timestamped name instead. The result is written beside it and renamed into
-// place, so a failure part-way never costs the spill already on disk.
+// place, so a failure part-way never costs the spill already on disk. Both
+// renames go through utils.ReplaceFile: on Windows a scanner briefly holding
+// the spill this just wrote, or the file it just read, refuses a bare
+// os.Rename outright, and the second spill of a part lands moments after the
+// first.
 func dumpLostChatBatch[T any](path string, batch []T) error {
 	spill := path + ".lostbatch.json"
 	var all []T
 	if data, err := os.ReadFile(spill); err == nil {
 		if jsonErr := json.Unmarshal(data, &all); jsonErr != nil {
-			if err := os.Rename(spill, fmt.Sprintf("%s.%d", spill, time.Now().UnixNano())); err != nil {
+			if err := utils.ReplaceFile(spill, fmt.Sprintf("%s.%d", spill, time.Now().UnixNano())); err != nil {
 				return err
 			}
 			all = nil
@@ -46,7 +50,7 @@ func dumpLostChatBatch[T any](path string, batch []T) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, spill); err != nil {
+	if err := utils.ReplaceFile(tmp, spill); err != nil {
 		os.Remove(tmp)
 		return err
 	}
