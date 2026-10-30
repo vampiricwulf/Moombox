@@ -8,6 +8,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // writeTrimSource renders a real seconds-long MP4 with video and audio, the
@@ -218,7 +219,11 @@ func TestOrphanSweepKeepsTrimsOwnedAfterTheOutputTreeMoves(t *testing.T) {
 				t.Fatalf("CreateTrim: %v", err)
 			}
 
-			if err := os.Rename(oldDir, newDir); err != nil {
+			// The tree moves with the product's retrying rename: CreateTrim's
+			// FFmpeg has just written a file inside it, and on Windows a
+			// directory rename is refused while a scanner still holds any
+			// file in it.
+			if err := utils.ReplaceFile(oldDir, newDir); err != nil {
 				t.Fatal(err)
 			}
 			if tc.link {
