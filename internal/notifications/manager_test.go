@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -72,13 +73,41 @@ func newTestManagerWithClockAndLogger(t *testing.T, clk batchClock, lg interface
 	t.Helper()
 	m := &Manager{logger: lg, waitTimeout: waitTimeout, clock: clk}
 	m.applyTargets(targets)
-	t.Cleanup(func() {
-		for _, q := range m.targets {
-			q.stopDiscard()
-		}
-	})
+	t.Cleanup(func() { retireQueues(t, m) })
 	return m
 }
+
+// retireQueues stops every target queue m has running — its live targets and
+// any a Reload retired that are still finishing a delivery — and waits for
+// each queue's goroutine to exit. Signalling alone is not enough: a goroutine
+// still in its retry ladder after the test returned went on reading the
+// package's test seams (discordSleep, discordRetryBackoff) while the next test
+// swapped them, which the race detector reports against that next test.
+// Every manager a test builds is retired through here, as a cleanup.
+func retireQueues(t *testing.T, m *Manager) {
+	t.Helper()
+	m.targetsMu.RLock()
+	queues := slices.Clone(m.targets)
+	for _, q := range m.retiring {
+		queues = append(queues, q)
+	}
+	m.targetsMu.RUnlock()
+	for _, q := range queues {
+		q.stopDiscard()
+	}
+	deadline := time.After(retireQueuesWait)
+	for _, q := range queues {
+		select {
+		case <-q.done:
+		case <-deadline:
+			t.Errorf("a notification target's goroutine was still running %s after the test ended", retireQueuesWait)
+			return
+		}
+	}
+}
+
+// retireQueuesWait bounds retireQueues' wait for one test's queues.
+const retireQueuesWait = 15 * time.Second
 
 // newTestManagerWithClockFromConfig builds the targets from cfg — so a Reload's
 // diff has the same RESOLVED keys to match survivors on that production would —

@@ -53,11 +53,7 @@ func editTarget(f *fakeDiscord, events []string, mode string) notificationTarget
 func installTargets(t *testing.T, m *Manager, targets ...notificationTarget) {
 	t.Helper()
 	m.applyTargets(targets)
-	t.Cleanup(func() {
-		for _, q := range m.targets {
-			q.stopDiscard()
-		}
-	})
+	t.Cleanup(func() { retireQueues(t, m) })
 }
 
 func eventSet(events []string) map[string]bool {

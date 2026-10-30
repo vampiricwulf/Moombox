@@ -121,13 +121,9 @@ func TestAReAddedWebhookWaitsForItsRetiredDelivery(t *testing.T) {
 	m := &Manager{logger: testLogger{}}
 	m.SetMessageStore(st)
 	m.applyTargets([]notificationTarget{editTarget(f, nil, ModeEdit)})
-	t.Cleanup(func() {
-		m.targetsMu.RLock()
-		defer m.targetsMu.RUnlock()
-		for _, q := range m.targets {
-			q.stopDiscard()
-		}
-	})
+	// release first: a failure before the test body releases the gate would
+	// otherwise leave the first POST holding a goroutine retireQueues waits on.
+	t.Cleanup(func() { release(); retireQueues(t, m) })
 
 	const job = "tw_123456789"
 	m.Send("Stream Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: job})

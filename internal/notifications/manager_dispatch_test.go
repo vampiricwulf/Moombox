@@ -16,11 +16,6 @@ import (
 // Audit reports/small-packages.md notifications Wait timeout.
 func TestManagerWaitTimesOut(t *testing.T) {
 	hangForever := make(chan struct{}) // closed only in Cleanup, after Wait timed out
-	t.Cleanup(func() {
-		// Release the wedged sender so its goroutine exits and the
-		// WaitGroup drains instead of leaking past the test.
-		close(hangForever)
-	})
 
 	hanging := senderFunc(func(Message) error {
 		<-hangForever
@@ -29,6 +24,10 @@ func TestManagerWaitTimesOut(t *testing.T) {
 
 	const injected = 50 * time.Millisecond
 	m := newTestManager(t, injected, notificationTarget{sender: hanging, key: "hang"})
+	// Registered after the manager, so it runs before the manager's own
+	// cleanup (cleanups run last-in first-out): the wedged sender is released
+	// and its queue's goroutine can exit for retireQueues to see.
+	t.Cleanup(func() { close(hangForever) })
 	m.Send("t", "d", TypeInfo, nil, SendOptions{})
 
 	start := time.Now()
