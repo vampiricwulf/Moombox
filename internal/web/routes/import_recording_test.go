@@ -310,6 +310,7 @@ func TestImportCutsTheExtensionFromTheNameAsWritten(t *testing.T) {
 // Mutants: answering anything but 0 for a probe that failed; reading a field
 // other than format.duration.
 func TestImportProbeDurationReadsFFprobe(t *testing.T) {
+	useRealImportProbe(t)
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "not-media")
 	os.WriteFile(bad, []byte("not media"), 0o644)
@@ -381,6 +382,7 @@ func TestImportProbesASingleRecordingsLength(t *testing.T) {
 //
 // Mutant: no probe for a single file — no lengthSeconds.
 func TestImportASingleClipRecordsItsLength(t *testing.T) {
+	useRealImportProbe(t)
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		t.Skip("ffmpeg not installed")
