@@ -646,10 +646,14 @@ func TestScheduler_RunSweepsBeforeWaiting(t *testing.T) {
 // The seam is resolveSlots: sweep() calls it once per channel with Queued
 // rows, so a panicking resolver is a sweep that always panics, counted.
 //
+// The restart pause is 20 ms here rather than production's second, so the
+// window below spans a dozen restarts in a quarter of a second.
+//
 // Mutant: drop the `first` gate (sweep unconditionally at the top of every
-// restart) -> a second sweep lands ~1 s in, inside this test's window.
+// restart) -> a second sweep lands ~20 ms in, inside this test's window.
 func TestScheduler_StartupSweepRunsOnlyOnce(t *testing.T) {
 	s, db, _ := testSchedulerSetup(t, 2)
+	s.restartPause = 20 * time.Millisecond
 	chID := "UC_wedged"
 	addSchedJob(t, db, &chID, "v_wedged", database.StatusQueued, 1)
 	addFeedItemRow(t, db, chID, "v_wedged", "2026-07-01T00:00:00Z")
@@ -676,11 +680,11 @@ func TestScheduler_StartupSweepRunsOnlyOnce(t *testing.T) {
 		return count() >= 1
 	})
 
-	// The restart sleep is 1 s and heartbeatInterval is 60 s, so an ungated
-	// startup sweep panics again at ~1 s and ~2 s while a gated one cannot
-	// sweep again until the heartbeat. Watch a window that spans two restarts,
+	// The restart pause is 20 ms and heartbeatInterval is 60 s, so an ungated
+	// startup sweep panics again every 20 ms while a gated one cannot sweep
+	// again until the heartbeat. Watch a window that spans a dozen restarts,
 	// failing the moment a second sweep lands.
-	deadline := time.Now().Add(1800 * time.Millisecond)
+	deadline := time.Now().Add(250 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if n := count(); n > 1 {
 			t.Fatalf("sweep ran %d times while panicking — the startup sweep must run once per Run, "+
