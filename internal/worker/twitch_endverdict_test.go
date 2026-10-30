@@ -471,6 +471,30 @@ func sawMuxing(seq []database.JobStatus) bool {
 // anything about whether the broadcast is over.
 var errUsher = errors.New("usher 503")
 
+// refreshFailureRun is the run the two variant-refresh-failure tests below
+// share: the 404 harness's media playlist makes the engine report the
+// quality lost, every master-playlist refresh fails with errUsher, and
+// liveAt says how the n-th stream check (1-based) answers. It returns the
+// row's status sequence, the refreshes made and how ExecuteTwitch ended.
+func refreshFailureRun(t *testing.T, h *endVerdictHarness, liveAt func(n int32) bool) ([]database.JobStatus, int32, error) {
+	t.Helper()
+	fastRefreshRetries(t)
+	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
+		return liveAt(h.checks.Add(1)), nil
+	}
+	var refreshes atomic.Int32
+	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
+		refreshes.Add(1)
+		return nil, errUsher
+	}
+
+	statuses := h.watchStatuses()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil)
+	return statuses(), refreshes.Load(), err
+}
+
 // TestVariantRefreshFailureOnALiveBroadcastLandsInError is sweep-2 residual R2
 // (graded Important by the fix-round-1 re-review, reproduced there as
 // "CheckStreamFn calls = 1; status sequence = [Downloading Muxing Muxing
@@ -494,24 +518,10 @@ var errUsher = errors.New("usher 503")
 // which is what separates this from a wording change.
 func TestVariantRefreshFailureOnALiveBroadcastLandsInError(t *testing.T) {
 	h := newEndVerdictHarness(t, "tw_refresh_live")
-	fastRefreshRetries(t)
 	log := &captureLogger{}
 	h.o.logger = log
-	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
-		h.checks.Add(1)
-		return true, nil // live at the engine's consult AND at the re-verify
-	}
-	var refreshes atomic.Int32
-	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
-		refreshes.Add(1)
-		return nil, errUsher
-	}
-
-	statuses := h.watchStatuses()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil)
-	seq := statuses()
+	// Live at the engine's consult AND at the re-verify.
+	seq, refreshes, err := refreshFailureRun(t, h, func(int32) bool { return true })
 
 	if !errors.Is(err, errUsher) {
 		t.Fatalf("ExecuteTwitch = %v, want the refresh failure (%v) — a variant refresh that fails "+
@@ -523,8 +533,8 @@ func TestVariantRefreshFailureOnALiveBroadcastLandsInError(t *testing.T) {
 	if got, want := h.checks.Load(), int32(2+liveRefreshAttempts-1); got != want {
 		t.Errorf("CheckStreamFn calls = %d, want %d", got, want)
 	}
-	if got := refreshes.Load(); got != liveRefreshAttempts {
-		t.Errorf("the refresh was tried %d times before the job gave up, want %d", got, liveRefreshAttempts)
+	if refreshes != liveRefreshAttempts {
+		t.Errorf("the refresh was tried %d times before the job gave up, want %d", refreshes, liveRefreshAttempts)
 	}
 	if sawMuxing(seq) {
 		t.Errorf("status sequence = %v — the refresh-failure exit returns an error, so it must not "+
@@ -550,46 +560,47 @@ func TestVariantRefreshFailureOnALiveBroadcastLandsInError(t *testing.T) {
 // TestVariantRefreshFailureOnAnEndedBroadcastFinalizes is the other half of
 // the same rule: the re-verify is what decides, so a refresh failure on a
 // broadcast that HAS ended still finalizes exactly as before. (The broadcast
-// ends between the engine's consult — which had to answer live to produce
-// ErrQualityLost at all — and the re-verify.)
+// ends after the engine's consult, which had to answer live to produce
+// ErrQualityLost at all.) It can be seen over at either of two looks: the
+// end check retryVariantRefresh makes before each pause, or — the retries
+// spent with it still live — the refresh site's own re-verify.
 //
-// Mutant: latching regardless of the re-verify's answer — the job would then
-// land in Error on every refresh failure, so the finalize path is never taken
-// and Muxing never appears.
+// Mutants: retryVariantRefresh without its end check — the whole schedule
+// of refreshes runs for a broadcast already over (the first row); latching
+// regardless of the re-verify's answer — the job lands in Error on every
+// refresh failure, so the finalize path is never taken and Muxing never
+// appears (the second row; the first never reaches the re-verify, the retry's
+// end check confirms the end before it).
 func TestVariantRefreshFailureOnAnEndedBroadcastFinalizes(t *testing.T) {
-	h := newEndVerdictHarness(t, "tw_refresh_ended")
-	fastRefreshRetries(t)
-	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
-		return h.checks.Add(1) == 1, nil // live at the consult, over at the next look
-	}
-	var refreshes atomic.Int32
-	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
-		refreshes.Add(1)
-		return nil, errUsher
-	}
+	for _, tc := range []struct {
+		name string
+		// overAt is the first stream check (1-based) that reads the
+		// broadcast over.
+		overAt                int32
+		wantChecks, refreshes int32
+	}{
+		{"over at the first retry's end check", 2, 2, 1},
+		{"over only at the refresh site's re-verify", liveRefreshAttempts + 1, liveRefreshAttempts + 1, liveRefreshAttempts},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newEndVerdictHarness(t, "tw_refresh_ended")
+			seq, refreshes, err := refreshFailureRun(t, h, func(n int32) bool { return n < tc.overAt })
 
-	statuses := h.watchStatuses()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil)
-	seq := statuses()
-
-	if errors.Is(err, errUsher) {
-		t.Errorf("ExecuteTwitch = %v — a CONFIRMED end must still finalize what was captured, not "+
-			"latch the refresh failure", err)
-	}
-	if got := h.checks.Load(); got != 2 {
-		t.Errorf("CheckStreamFn calls = %d, want 2", got)
-	}
-	if !sawMuxing(seq) {
-		t.Errorf("status sequence = %v — a confirmed end takes the finalize path, which flips the "+
-			"row to Muxing", seq)
-	}
-	// The retry checks the stream before each pause, so an ended broadcast
-	// is not refreshed again. Mutant: retryVariantRefresh without its end
-	// check — the whole schedule of refreshes runs first.
-	if got := refreshes.Load(); got != 1 {
-		t.Errorf("the variant refresh ran %d times for a broadcast already over, want 1", got)
+			if errors.Is(err, errUsher) {
+				t.Errorf("ExecuteTwitch = %v — a CONFIRMED end must still finalize what was captured, not "+
+					"latch the refresh failure", err)
+			}
+			if got := h.checks.Load(); got != tc.wantChecks {
+				t.Errorf("CheckStreamFn calls = %d, want %d", got, tc.wantChecks)
+			}
+			if !sawMuxing(seq) {
+				t.Errorf("status sequence = %v — a confirmed end takes the finalize path, which flips the "+
+					"row to Muxing", seq)
+			}
+			if refreshes != tc.refreshes {
+				t.Errorf("the variant refresh ran %d times, want %d", refreshes, tc.refreshes)
+			}
+		})
 	}
 }
 
