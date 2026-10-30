@@ -115,6 +115,25 @@ type fakeClock struct{ t time.Time }
 func (c *fakeClock) now() time.Time          { return c.t }
 func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
+// TestPassiveTrackerReadsTheWallClockByDefault pins what the window tests
+// replace with fakeClock: a tracker from NewPassiveTracker has no clock of
+// its own and ages failures by the wall clock.
+//
+// Mutant: clock() answering anything but time.Now() when now is nil (a
+// fixed time would keep every failure inside its window for good).
+func TestPassiveTrackerReadsTheWallClockByDefault(t *testing.T) {
+	pt := NewPassiveTracker()
+	if pt.now != nil {
+		t.Fatal("NewPassiveTracker set a clock; production trackers read the wall clock")
+	}
+	before := time.Now()
+	got := pt.clock()
+	after := time.Now()
+	if got.Before(before) || got.After(after) {
+		t.Errorf("clock() = %v, want the wall clock (between %v and %v)", got, before, after)
+	}
+}
+
 func TestPassiveTracker_WindowExpiry(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1_800_000_000, 0)}
 	pt := &PassiveTracker{

@@ -186,9 +186,13 @@ func TestCheckForUpdatePrereleaseOrdering(t *testing.T) {
 // and onto the runner's disk on every run.
 //
 // Mutants: no cap (the oversize body is accepted); the old `>=` check (the
-// exact-size body is refused).
+// exact-size body is refused); a production cap other than 200 MB (the pin
+// ahead of the shrink fails).
 func TestDownloadFileRejectsOversize(t *testing.T) {
 	orig := maxDownloadSize
+	if orig != 200<<20 {
+		t.Fatalf("maxDownloadSize = %d, want 200 MB (%d): production downloads get that cap", orig, 200<<20)
+	}
 	maxDownloadSize = 1 << 20
 	t.Cleanup(func() { maxDownloadSize = orig })
 	serve := func(size int64) *httptest.Server {

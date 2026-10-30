@@ -222,9 +222,13 @@ func TestInvalidateSolver(t *testing.T) {
 //
 // Mutants: an interrupt left pending once the timed-out call has returned
 // (the next call fails with it); the interrupt never fired (the hang call
-// never returns, until go test's own timeout).
+// never returns, until go test's own timeout); a production bound other
+// than CipherTimeout (the pin fails).
 func TestSolverTimeoutInterruptsInfiniteLoop(t *testing.T) {
 	orig := callTimeout
+	if orig != CipherTimeout {
+		t.Fatalf("callTimeout = %v, want CipherTimeout (%v): production calls get that bound", orig, CipherTimeout)
+	}
 	callTimeout = 100 * time.Millisecond
 	t.Cleanup(func() { callTimeout = orig })
 	code := `

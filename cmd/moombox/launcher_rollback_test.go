@@ -162,12 +162,17 @@ func TestAutoRollbackReplacesAnOlderFailedArtifact(t *testing.T) {
 // removing exePath (an ordinary file) still succeeds.
 //
 // The pause between the three attempts is shrunk: this destination never
-// clears, and the test used to wait out 3 × 500 ms for it.
+// clears, and the test used to wait out 3 × 500 ms for it. Its production
+// value is pinned first.
 //
-// Mutant: drop the os.Remove fallback — attemptAutoRollback returns false and
-// the install stays on the broken binary.
+// Mutants: drop the os.Remove fallback — attemptAutoRollback returns false
+// and the install stays on the broken binary; a production pause other than
+// 500 ms fails the pin.
 func TestAutoRollbackFallsBackToRemovingTheFailedBinary(t *testing.T) {
 	orig := rollbackMoveRetryDelay
+	if orig != 500*time.Millisecond {
+		t.Fatalf("rollbackMoveRetryDelay = %v, want 500ms: what a scanner's hold is given to clear", orig)
+	}
 	rollbackMoveRetryDelay = time.Millisecond
 	t.Cleanup(func() { rollbackMoveRetryDelay = orig })
 	dir := t.TempDir()

@@ -205,9 +205,13 @@ func TestFetchBodyCapsAtMaxFetchBodySize(t *testing.T) {
 // Mutants this kills: dropping the length check (or restoring the plain
 // io.LimitReader(resp.Body, MaxFetchBodySize)) makes err nil and len(body)
 // exactly the cap, and the first assertion fails; a `>=` check refuses the
-// exact-size body.
+// exact-size body; a production cap other than MaxFetchBodySize fails the
+// pin ahead of the shrink.
 func TestFetchBodyErrorsPastMaxFetchBodySize(t *testing.T) {
 	orig := fetchBodyLimit
+	if orig != MaxFetchBodySize {
+		t.Fatalf("fetchBodyLimit = %d, want MaxFetchBodySize (%d): production reads get that cap", orig, MaxFetchBodySize)
+	}
 	fetchBodyLimit = 1 << 20
 	t.Cleanup(func() { fetchBodyLimit = orig })
 	serve := func(size int64) *httptest.Server {
