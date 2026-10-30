@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -349,6 +351,10 @@ func deadlineTestContext(t *testing.T) (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
+// ceilingReceivedRe reads the byte count out of fetchDeadlineError's ceiling
+// error ("... having received 23 bytes").
+var ceilingReceivedRe = regexp.MustCompile(`having received (\d+) bytes`)
+
 // TestFetchHardCeilingCapsATrickle pins the ceiling layered UNDER the idle
 // deadline (Task 3 fix round 1): a body that delivers a byte just often enough
 // to keep resetting the idle timer would otherwise run forever, and on a 24/7
@@ -363,17 +369,26 @@ func deadlineTestContext(t *testing.T) (context.Context, context.CancelFunc) {
 // sees the idle timer fire first on resume. The 100 ms that a 200 ms bound
 // against a 100 ms trickle left failed both paths under 120 ms SIGSTOPs.
 //
+// How late the ceiling fired is read off the trickle, not the wall clock: the
+// trickle delivers one byte per gap, so the bytes a fetch had received when
+// its ceiling ended it count the gaps it lived through. A runner that
+// deschedules the process stretches the elapsed time but delivers no more
+// bytes, where an elapsed bound of twice the ceiling failed any run stalled
+// for longer than the ceiling itself.
+//
 // Mutant: drop the context.WithTimeout layer (round 1's behaviour) — neither
 // fetch returns and both fail on the guard. Mutant: apply the ceiling to
 // fetchSegment only — the fetchChunk path fails on the guard while the
 // fetchSegment path stays green. Mutant: the idle bound as the ceiling — both
-// return before their ceiling.
+// return before their ceiling. Mutant: the ceiling wired at three times its
+// value — both receive more than twice the bytes it allows.
 func TestFetchHardCeilingCapsATrickle(t *testing.T) {
 	prev := SegmentTimeout
 	t.Cleanup(func() { SegmentTimeout = prev })
 	SegmentTimeout = time.Second
 
-	srv := endlessTrickleServer(t, 50*time.Millisecond, func(w http.ResponseWriter) {
+	const gap = 50 * time.Millisecond
+	srv := endlessTrickleServer(t, gap, func(w http.ResponseWriter) {
 		// 206 so fetchChunk takes its ordinary partial-content path;
 		// fetchSegment reads any 2xx as its body.
 		w.Header().Set("Content-Range", "bytes 0-1048575/8388608")
@@ -411,7 +426,7 @@ func TestFetchHardCeilingCapsATrickle(t *testing.T) {
 		}()
 	}
 
-	guard := time.After(10 * time.Second)
+	guard := time.After(safetyNet)
 	for range fetches {
 		select {
 		case r := <-results:
@@ -426,9 +441,12 @@ func TestFetchHardCeilingCapsATrickle(t *testing.T) {
 			}
 			// Generous upper margin: the load-bearing assertion is the
 			// guard, which is what the mutants trip; this one only catches
-			// a ceiling wired far out.
-			if r.elapsed > 2*d.delays.fetchHardCeiling {
-				t.Errorf("%s returned after %s, far past its %s ceiling", r.path, r.elapsed, d.delays.fetchHardCeiling)
+			// a ceiling wired far out, counted in trickled bytes.
+			maxBytes := 2 * int(d.delays.fetchHardCeiling/gap)
+			if m := ceilingReceivedRe.FindStringSubmatch(fmt.Sprint(r.err)); m == nil {
+				t.Errorf("%s = %v, want the ceiling's error to say how much it received", r.path, r.err)
+			} else if n, _ := strconv.Atoi(m[1]); n > maxBytes {
+				t.Errorf("%s received %d trickled bytes before its %s ceiling fired, want at most %d — the ceiling fired far past its value", r.path, n, d.delays.fetchHardCeiling, maxBytes)
 			}
 			t.Logf("%s: ceiling fired after %s (ceiling %s, idle %s): %v", r.path, r.elapsed, d.delays.fetchHardCeiling, SegmentTimeout, r.err)
 		case <-guard:
