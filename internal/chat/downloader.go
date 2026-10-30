@@ -232,6 +232,11 @@ type ChatDownloader struct {
 	// (5s-60s) intervals. Only set in tests; zero (disabled) in production.
 	testBackoffOverride time.Duration
 
+	// testSleepObserver, when set, is told every wait sleep() is asked for,
+	// before the wait is served as usual. Tests only, like the overrides
+	// above; production leaves it nil.
+	testSleepObserver func(d time.Duration)
+
 	OnStart  func(messageCount int, resuming bool)
 	OnFinish func()
 	OnError  func(err error)
@@ -2090,6 +2095,9 @@ func (cd *ChatDownloader) clearResume() {
 // sleep waits for the given duration, but returns early if the context is cancelled
 // (which happens on Stop() or MarkStreamEnded()).
 func (cd *ChatDownloader) sleep(ctx context.Context, d time.Duration) {
+	if cd.testSleepObserver != nil {
+		cd.testSleepObserver(d)
+	}
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {

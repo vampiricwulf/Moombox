@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -248,7 +249,7 @@ func TestInnerStaleRecoveryCapRecordsAnIncompleteOutcome(t *testing.T) {
 // fixture's 100 ms gaps to 3 s.
 //
 // Mutants this kills:
-//   - the floor's sleep hoisted out of the end-of-stream branch → the gaps blow past the bound
+//   - the floor's sleep hoisted out of the end-of-stream branch → the loop waits 3 s, not 100 ms
 //   - computePollDelay's fallback wired to the ladder seam       → the 5 s assertion fails
 //   - the fallback changed away from liveChatPollDefault          → same
 func TestHealthyLiveCadenceUnchangedByTheFloor(t *testing.T) {
@@ -294,6 +295,19 @@ func TestHealthyLiveCadenceUnchangedByTheFloor(t *testing.T) {
 	targetURL, _ := url.Parse(server.URL)
 	cd.api.client = &http.Client{Transport: rewriteTransport{target: targetURL}}
 	cd.testRecoveryOverride = func(context.Context) bool { return false }
+	// The waits the loop chose, recorded as it asks for them: the gaps
+	// between polls also hold the chat file's write (an fsync and a rename,
+	// which a scanner can hold for a second on Windows), so a bound on the
+	// gaps measured the disk as much as the cadence.
+	var (
+		sleepsMu sync.Mutex
+		sleeps   []time.Duration
+	)
+	cd.testSleepObserver = func(d time.Duration) {
+		sleepsMu.Lock()
+		sleeps = append(sleeps, d)
+		sleepsMu.Unlock()
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -304,14 +318,14 @@ func TestHealthyLiveCadenceUnchangedByTheFloor(t *testing.T) {
 		t.Fatalf("the loop made %d polls, want 4 — the fixture no longer drives the healthy path", len(at))
 	}
 	for i := 1; i < len(at); i++ {
-		gap := at[i].Sub(at[i-1])
-		if gap < 95*time.Millisecond {
+		if gap := at[i].Sub(at[i-1]); gap < 95*time.Millisecond {
 			t.Errorf("poll %d landed %v after poll %d — faster than YouTube's own timeoutMs", i+1, gap, i)
 		}
-		if gap > time.Second {
-			t.Errorf("poll %d landed %v after poll %d — the recovery floor leaked into the healthy path",
-				i+1, gap, i)
-		}
+	}
+	sleepsMu.Lock()
+	defer sleepsMu.Unlock()
+	if want := []time.Duration{100 * time.Millisecond, 100 * time.Millisecond, 100 * time.Millisecond}; !slices.Equal(sleeps, want) {
+		t.Errorf("the loop waited %v between polls, want %v — the recovery floor leaked into the healthy path", sleeps, want)
 	}
 }
 
