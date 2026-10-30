@@ -476,10 +476,13 @@ jobs:
         # -timeout is go test's limit for one test binary: past it, the
         # binary dumps every goroutine and fails, which is what names a
         # deadlocked test (one that hangs only under the race detector's
-        # scheduling, say). It is under this step's timeout by more than a
-        # cold compile takes, so the dump always lands before the step is
-        # cut off, and still more than twice the slowest binary's run on
-        # any runner (internal/worker on windows, 205 s at worst). Under
+        # scheduling, say). It counts from that binary's start, not the
+        # step's, and leaves four minutes under this step's timeout for the
+        # compiling and queueing ahead of a binary's start: room to spare on
+        # a warm cache, so the dump lands before the step is cut off unless
+        # a cold one holds a binary back longer than that. It is still more
+        # than twice the slowest binary's run on any runner
+        # (internal/worker on windows, 205 s at worst). Under
         # -race, a test that budgets allocations or fits its probe inside
         # one wall-clock second either widens its gate or skips (each such
         # package's raceEnabled constant): the detector's instrumentation is
@@ -490,7 +493,7 @@ jobs:
           echo "::group::$FLAVOUR/$SHARD: $(grep -c . <<<"$pkgs") package(s)"
           echo "$pkgs"
           echo "::endgroup::"
-          flags=(-count=1 -timeout=8m)
+          flags=(-count=1 -timeout=7m)
           if [ "$FLAVOUR" = race ]; then flags+=(-race); fi
           # shellcheck disable=SC2086 # one import path per line, no spaces
           go test "${flags[@]}" $pkgs
