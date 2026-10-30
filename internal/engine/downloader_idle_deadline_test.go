@@ -14,28 +14,53 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/httpx/httpxtest"
 )
 
-// trickleServer writes total bytes in `chunks` writes spaced `gap` apart,
+// trickleHandler writes total bytes in `chunks` writes spaced `gap` apart,
 // flushing each one, so the transfer is continuously progressing but takes
-// far longer overall than the idle bound.
-func trickleServer(t *testing.T, chunks int, gap time.Duration, chunkSize int) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// far longer overall than the idle bound. It stops once its client has gone,
+// so a fetch that failed (a mutant) leaves nothing running in the bubble.
+func trickleHandler(chunks int, gap time.Duration, chunkSize int) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fl, _ := w.(http.Flusher)
 		buf := make([]byte, chunkSize)
 		for range chunks {
-			w.Write(buf)
+			if _, err := w.Write(buf); err != nil {
+				return
+			}
 			if fl != nil {
 				fl.Flush()
 			}
-			time.Sleep(gap)
+			select {
+			case <-time.After(gap):
+			case <-r.Context().Done():
+				return
+			}
 		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+	})
+}
+
+// inMemoryOrigin is the base URL the bubble tests below serve their handler
+// under. Nothing resolves it: serveEngineInMemory's client answers every
+// request itself.
+const inMemoryOrigin = "http://media.test"
+
+// serveEngineInMemory points engineHTTPClient at h for the rest of the test,
+// through httpxtest.NewClient: the handler runs in the test's process with
+// no socket, so a test can run inside a synctest bubble, where the idle and
+// ceiling timers and the handler's waits share the bubble's fake clock and no
+// pause of the process can come between them. Call it outside the bubble;
+// the restore runs once the test is over.
+func serveEngineInMemory(t *testing.T, h http.Handler) {
+	t.Helper()
+	prev := engineHTTPClient
+	engineHTTPClient = httpxtest.NewClient(h)
+	t.Cleanup(func() { engineHTTPClient = prev })
 }
 
 // TestSlowButProgressingTransfersSurvive pins ENGINE-4's fix on both paths
@@ -44,17 +69,16 @@ func trickleServer(t *testing.T, chunks int, gap time.Duration, chunkSize int) *
 // in total. fetchSegment (segments, playlists, and the hard ceiling layered
 // under the idle bound, which must not clip it either) and the whole-file
 // streaming fallback (runDirectDownloadFallback, whose one GET for a
-// multi-hour VOD has no other bound) read the same trickle side by side, so
-// the pair pays its wall clock once. Thirty 40 ms gaps against a 1 s idle
-// bound is more than 1.16 s — longer than the bound itself — with no gap
-// ever coming near it, under a 10 s ceiling (far out, because it too must not
-// fire, and it counts every stall the runner adds to the transfer).
+// multi-hour VOD has no other bound) read the same trickle side by side.
+// Thirty 40 ms gaps against a 1 s idle bound is 1.2 s — longer than the
+// bound itself — with no gap ever coming near it, under a 10 s ceiling.
 //
-// The margins are wide on purpose: the idle timer must NOT fire, and it and
-// the trickling server share this process, so a runner that deschedules the
-// process for longer than (idle − gap) fails the transfer however correct the
-// code is. 960 ms of margin (a 25x ratio) rides that out; the 40 ms of a
-// 60 ms bound against 20 ms gaps, which both paths had, did not.
+// It runs in a synctest bubble over serveEngineInMemory, so those are
+// durations on the bubble's clock, which the idle timer and the trickle
+// share. On the wall clock the idle timer, which must NOT fire, raced the
+// trickle in the same process: a runner that paused the process for longer
+// than (idle − gap) failed the transfer however correct the code was, and
+// pauses of 1.2 s failed it even with 960 ms of margin.
 //
 // Mutant: restoring `ctx, cancel := context.WithTimeout(parent, SegmentTimeout)`
 // in fetchSegment — the fetch dies at 1 s with context.DeadlineExceeded.
@@ -69,46 +93,48 @@ func TestSlowButProgressingTransfersSurvive(t *testing.T) {
 	SegmentTimeout = time.Second
 
 	const chunks = 30
-	srv := trickleServer(t, chunks, 40*time.Millisecond, 1024)
+	serveEngineInMemory(t, trickleHandler(chunks, 40*time.Millisecond, 1024))
 
-	seg := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL})
-	seg.delays.fetchHardCeiling = 10 * time.Second
+	synctest.Test(t, func(t *testing.T) {
+		seg := NewSegmentDownloader(DownloaderOptions{BaseURL: inMemoryOrigin})
+		seg.delays.fetchHardCeiling = 10 * time.Second
 
-	path := filepath.Join(t.TempDir(), "video.mp4")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		t.Fatalf("open output: %v", err)
-	}
-	t.Cleanup(func() { f.Close() })
-	direct := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, OutputFile: path, IsDirectURL: true})
-	direct.outputFile = f
-	direct.delays = directDelays()
+		path := filepath.Join(t.TempDir(), "video.mp4")
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatalf("open output: %v", err)
+		}
+		t.Cleanup(func() { f.Close() })
+		direct := NewSegmentDownloader(DownloaderOptions{BaseURL: inMemoryOrigin, OutputFile: path, IsDirectURL: true})
+		direct.outputFile = f
+		direct.delays = directDelays()
 
-	start := time.Now()
-	fallbackDone := make(chan error, 1)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				fallbackDone <- fmt.Errorf("runDirectDownloadFallback panicked: %v", r)
-			}
+		start := time.Now()
+		fallbackDone := make(chan error, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fallbackDone <- fmt.Errorf("runDirectDownloadFallback panicked: %v", r)
+				}
+			}()
+			fallbackDone <- direct.runDirectDownloadFallback(context.Background())
 		}()
-		fallbackDone <- direct.runDirectDownloadFallback(context.Background())
-	}()
 
-	data, status, err := seg.fetchSegment(context.Background(), srv.URL+"/seg")
-	if err != nil {
-		t.Errorf("fetchSegment = %v, want nil for a continuously progressing transfer inside the ceiling", err)
-	} else if status != http.StatusOK || len(data) != chunks*1024 {
-		t.Errorf("fetchSegment = %d bytes/status %d, want %d/200", len(data), status, chunks*1024)
-	}
-	if err := <-fallbackDone; err != nil {
-		t.Errorf("runDirectDownloadFallback = %v, want nil for a continuously progressing transfer", err)
-	} else if got := direct.bytesWritten.Load(); got != chunks*1024 {
-		t.Errorf("runDirectDownloadFallback wrote %d bytes, want %d", got, chunks*1024)
-	}
-	if elapsed := time.Since(start); elapsed < SegmentTimeout {
-		t.Fatalf("transfers took %s — shorter than the idle bound, so they never exercised the deadline", elapsed)
-	}
+		data, status, err := seg.fetchSegment(context.Background(), inMemoryOrigin+"/seg")
+		if err != nil {
+			t.Errorf("fetchSegment = %v, want nil for a continuously progressing transfer inside the ceiling", err)
+		} else if status != http.StatusOK || len(data) != chunks*1024 {
+			t.Errorf("fetchSegment = %d bytes/status %d, want %d/200", len(data), status, chunks*1024)
+		}
+		if err := <-fallbackDone; err != nil {
+			t.Errorf("runDirectDownloadFallback = %v, want nil for a continuously progressing transfer", err)
+		} else if got := direct.bytesWritten.Load(); got != chunks*1024 {
+			t.Errorf("runDirectDownloadFallback wrote %d bytes, want %d", got, chunks*1024)
+		}
+		if elapsed := time.Since(start); elapsed < SegmentTimeout {
+			t.Fatalf("transfers took %s on the bubble's clock — shorter than the idle bound, so they never exercised the deadline", elapsed)
+		}
+	})
 }
 
 // TestFetchSegmentFailsOnIdleStall pins the other half: the 30 s value is
@@ -295,7 +321,15 @@ func TestFetchSegmentLeavesNoGoroutinesBehind(t *testing.T) {
 // prepare writes the status line and any headers; nil means a plain 200.
 func endlessTrickleServer(t *testing.T, gap time.Duration, prepare func(w http.ResponseWriter)) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(endlessTrickleHandler(gap, prepare))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// endlessTrickleHandler is endlessTrickleServer's handler, for a test that
+// serves it in memory (serveEngineInMemory).
+func endlessTrickleHandler(gap time.Duration, prepare func(w http.ResponseWriter)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if prepare != nil {
 			prepare(w)
 		} else {
@@ -316,9 +350,7 @@ func endlessTrickleServer(t *testing.T, gap time.Duration, prepare func(w http.R
 				fl.Flush()
 			}
 		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+	})
 }
 
 // headersThenSilenceServer answers 200, delivers one byte, and then holds the
@@ -364,19 +396,16 @@ var ceilingReceivedRe = regexp.MustCompile(`having received (\d+) bytes`)
 // neither the request construction nor the status handling with it — side by
 // side against one endless trickle, so the pair pays the ceiling's wait once.
 //
-// The idle bound must NOT fire here, so it sits 950 ms clear of the 50 ms
-// trickle: a process the runner deschedules for longer than (idle − gap)
-// sees the idle timer fire first on resume. The 100 ms that a 200 ms bound
-// against a 100 ms trickle left failed both paths under 120 ms SIGSTOPs.
+// It runs in a synctest bubble over serveEngineInMemory, so the ceiling, the
+// idle bound (which must NOT fire here) and the 50 ms trickle share the
+// bubble's clock. On the wall clock a process the runner paused for longer
+// than (idle − gap) saw the idle timer fire first on resume, and pauses of
+// 1.2 s did that even with the idle bound 950 ms clear of the trickle.
 //
-// How late the ceiling fired is read off the trickle, not the wall clock: the
-// trickle delivers one byte per gap, so the bytes a fetch had received when
-// its ceiling ended it count the gaps it lived through. A runner that
-// deschedules the process stretches the elapsed time but delivers no more
-// bytes — each one waits out a fresh gap — where an elapsed bound of twice
-// the ceiling failed any run stalled for longer than the ceiling itself. So
-// the count can be held close: at most one and a half ceilings' worth of
-// gaps (36), against the 23 or 24 a green run reads.
+// How late the ceiling fired is read off the trickle: it delivers one byte
+// per gap, so the bytes a fetch had received when its ceiling ended it count
+// the gaps it lived through — at most one and a half ceilings' worth of gaps
+// (36), against the 23 or 24 a green run reads.
 //
 // Mutant: drop the context.WithTimeout layer (round 1's behaviour) — neither
 // fetch returns and both fail on the guard. Mutant: apply the ceiling to
@@ -390,18 +419,24 @@ func TestFetchHardCeilingCapsATrickle(t *testing.T) {
 	SegmentTimeout = time.Second
 
 	const gap = 50 * time.Millisecond
-	srv := endlessTrickleServer(t, gap, func(w http.ResponseWriter) {
+	serveEngineInMemory(t, endlessTrickleHandler(gap, func(w http.ResponseWriter) {
 		// 206 so fetchChunk takes its ordinary partial-content path;
 		// fetchSegment reads any 2xx as its body.
 		w.Header().Set("Content-Range", "bytes 0-1048575/8388608")
 		w.WriteHeader(http.StatusPartialContent)
-	})
-	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL})
+	}))
+	synctest.Test(t, func(t *testing.T) { fetchHardCeilingCapsATrickle(t, gap) })
+}
+
+// fetchHardCeilingCapsATrickle is TestFetchHardCeilingCapsATrickle's body,
+// run inside its bubble.
+func fetchHardCeilingCapsATrickle(t *testing.T, gap time.Duration) {
+	d := NewSegmentDownloader(DownloaderOptions{BaseURL: inMemoryOrigin})
 	d.delays.fetchHardCeiling = 1200 * time.Millisecond
 
-	// Cleanups run LIFO, so this cancel fires BEFORE the server's Close: if
-	// the guard below trips (the mutant), the still-running fetch would
-	// otherwise hold the connection open and wedge httptest's Close.
+	// If the guard below trips (the mutants), this cancel, run as the
+	// bubble's cleanup, ends the fetches still reading the endless trickle,
+	// and with them the handler, so the bubble can finish.
 	ctx, cancel := deadlineTestContext(t)
 	defer cancel()
 
@@ -413,7 +448,7 @@ func TestFetchHardCeilingCapsATrickle(t *testing.T) {
 	start := time.Now()
 	results := make(chan result, 2)
 	fetches := map[string]func() error{
-		"fetchSegment": func() error { _, _, err := d.fetchSegment(ctx, srv.URL+"/seg"); return err },
+		"fetchSegment": func() error { _, _, err := d.fetchSegment(ctx, inMemoryOrigin+"/seg"); return err },
 		"fetchChunk":   func() error { _, _, err := d.fetchChunk(ctx, 0, 1<<20-1); return err },
 	}
 	for path, fetch := range fetches {
@@ -450,7 +485,7 @@ func TestFetchHardCeilingCapsATrickle(t *testing.T) {
 			} else if n, _ := strconv.Atoi(m[1]); n > maxBytes {
 				t.Errorf("%s received %d trickled bytes before its %s ceiling fired, want at most %d — the ceiling fired far past its value", r.path, n, d.delays.fetchHardCeiling, maxBytes)
 			}
-			t.Logf("%s: ceiling fired after %s (ceiling %s, idle %s): %v", r.path, r.elapsed, d.delays.fetchHardCeiling, SegmentTimeout, r.err)
+			t.Logf("%s: ceiling fired after %s on the bubble's clock (ceiling %s, idle %s): %v", r.path, r.elapsed, d.delays.fetchHardCeiling, SegmentTimeout, r.err)
 		case <-guard:
 			t.Fatal("a fetch never returned — the hard ceiling did not fire on every path")
 		}
