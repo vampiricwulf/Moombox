@@ -106,11 +106,22 @@ func TestPassiveTracker_FailureSliceCapped(t *testing.T) {
 	}
 }
 
+// fakeClock is a PassiveTracker clock the test moves by hand, so failures
+// age exactly as far as it says. The window tests below used to sleep past
+// windows of 100-120 ms, and the one that needed a failure still INSIDE its
+// window after a sleep failed when the test was descheduled for 40 ms.
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
 func TestPassiveTracker_WindowExpiry(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1_800_000_000, 0)}
 	pt := &PassiveTracker{
 		window:   100 * time.Millisecond,
 		minFails: 5,
 		minTags:  2,
+		now:      clk.now,
 	}
 	pt.ReportFailure("a")
 	pt.ReportFailure("a")
@@ -118,7 +129,7 @@ func TestPassiveTracker_WindowExpiry(t *testing.T) {
 	pt.ReportFailure("b")
 	pt.ReportFailure("b")
 
-	time.Sleep(150 * time.Millisecond)
+	clk.advance(150 * time.Millisecond)
 
 	if pt.ShouldTriggerOffline() {
 		t.Fatal("should not trigger after window expiry")
@@ -132,10 +143,12 @@ func TestPassiveTracker_WindowExpiry(t *testing.T) {
 // the slice but never cleared `triggered`, so isTriggered() reported
 // true forever until the next HTTP success fired ReportSuccess.
 func TestPassiveTracker_LatchClearsOnIdlePrune(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1_800_000_000, 0)}
 	pt := &PassiveTracker{
 		window:   100 * time.Millisecond,
 		minFails: 3,
 		minTags:  2,
+		now:      clk.now,
 	}
 	pt.ReportFailure("a")
 	pt.ReportFailure("a")
@@ -148,9 +161,9 @@ func TestPassiveTracker_LatchClearsOnIdlePrune(t *testing.T) {
 		t.Fatal("expected latch to be set after ShouldTriggerOffline returned true")
 	}
 
-	// Sleep past the failure window — failures age out, no new
-	// failures arrive, no ReportSuccess fires.
-	time.Sleep(150 * time.Millisecond)
+	// Past the failure window — failures age out, no new failures
+	// arrive, no ReportSuccess fires.
+	clk.advance(150 * time.Millisecond)
 
 	// IsTriggered alone doesn't prune (it just reads the flag).
 	// ShouldTriggerOffline does prune AND now also clears the latch
@@ -170,12 +183,13 @@ func TestPassiveTracker_LatchClearsOnIdlePrune(t *testing.T) {
 // >= minFails) kept isTriggered()=true even though ShouldTriggerOffline would
 // no longer trigger.
 func TestPassiveTracker_LatchClearsViaPruneOnMinTagsDrop(t *testing.T) {
-	pt := &PassiveTracker{window: 120 * time.Millisecond, minFails: 3, minTags: 2}
+	clk := &fakeClock{t: time.Unix(1_800_000_000, 0)}
+	pt := &PassiveTracker{window: 120 * time.Millisecond, minFails: 3, minTags: 2, now: clk.now}
 
 	// Tag "a" fails first; later, tag "b" fails enough to keep len >= minFails
 	// after "a" ages out — but leaving only a single distinct tag.
 	pt.ReportFailure("a")
-	time.Sleep(80 * time.Millisecond)
+	clk.advance(80 * time.Millisecond)
 	pt.ReportFailure("b")
 	pt.ReportFailure("b")
 	pt.ReportFailure("b")
@@ -184,7 +198,7 @@ func TestPassiveTracker_LatchClearsViaPruneOnMinTagsDrop(t *testing.T) {
 	}
 
 	// Let "a" age past the 120ms window while the "b" burst stays inside it.
-	time.Sleep(80 * time.Millisecond)
+	clk.advance(80 * time.Millisecond)
 
 	// A pruning read now drops "a", leaving 3 "b" failures: still >= minFails
 	// but only one tag (< minTags), so the latch must clear.
