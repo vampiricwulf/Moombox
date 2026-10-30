@@ -43,8 +43,11 @@ name: CI
 # holds no race-instrumented package, a race shard's no plain one), and the
 # others would race to save the same entry. One job per flavour
 # saves it (lint itself, and each flavour's rest shard), only on a push to
-# main — the one branch whose caches every later run can read — and only
-# when its key missed. The three pinned Node binaries are cached per OS
+# main — the one branch whose caches every later run can read — only when
+# its key missed, and only once the job's compiling steps have run: a job
+# that failed in setup would save a near-empty cache, which, as an exact hit
+# from then on, would never be replaced until go.sum or Go moved. The three
+# pinned Node binaries are cached per OS
 # (~1 min of nodejs.org downloads on a miss). The sidecar tarball is rebuilt
 # on every run and never cached: it is seconds of work, and a cached one made
 # the Go tests embed the PREVIOUS sidecar JS whenever a commit touched only
@@ -239,6 +242,7 @@ jobs:
         run: go build ./...
 
       - name: Cross-build linux/arm64
+        id: cross-arm64
         env:
           CGO_ENABLED: '0'
           GOOS: linux
@@ -251,8 +255,11 @@ jobs:
         # GOOS, with no package missing and none twice.
         run: bash .github/scripts/test-shard.sh --check
 
+      # Saved only once the last compiling step has run, pass or fail: a
+      # job that stopped earlier holds a part of the build, and that would
+      # be the exact hit of every later run until go.sum or Go moves.
       - name: Save the Go caches (lint)
-        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true' && (steps.cross-arm64.outcome == 'success' || steps.cross-arm64.outcome == 'failure') }}
         uses: actions/cache/save@v6
         timeout-minutes: 5
         continue-on-error: true
@@ -408,6 +415,7 @@ jobs:
         run: bash .github/scripts/retry.sh 3 300 go mod download
 
       - name: Build BotGuard sidecar payload
+        id: sidecar
         # --ignore-scripts: a compromised dep's postinstall could exfiltrate
         # GITHUB_TOKEN; jsdom + bgutils-js have no install scripts we need.
         # Unconditional: every Go test embeds this tarball, so it is built
@@ -432,6 +440,7 @@ jobs:
         run: bash .github/scripts/install-ffmpeg.sh --wait
 
       - name: go test
+        id: gotest
         # -timeout is go test's limit for one test binary: past it, the
         # binary dumps every goroutine and fails, which is what names a
         # deadlocked test (one that hangs only under the race detector's
@@ -459,9 +468,12 @@ jobs:
       # flavour's other shards need but a handful of small ones, and the
       # module's own packages in the cache go stale with the next commit
       # anyway (the key moves with go.sum, not with the code), so nothing
-      # compiles extra for the cache.
+      # compiles extra for the cache. It saves only when go test ran, pass
+      # or fail: a job that failed in setup compiled next to nothing, and
+      # that cache would be the exact hit of every later run until go.sum
+      # or Go moves.
       - name: Save the Go caches (${{ matrix.flavour }})
-        if: ${{ !cancelled() && matrix.shard == 'rest' && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && matrix.shard == 'rest' && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true' && (steps.gotest.outcome == 'success' || steps.gotest.outcome == 'failure') }}
         uses: actions/cache/save@v6
         timeout-minutes: 5
         continue-on-error: true
@@ -473,7 +485,8 @@ jobs:
 
       # The Node binaries and the npm cache are per runner OS, shared by the
       # flavours there: linux's rest saves them on ubuntu (race only
-      # restores), windows's rest on windows.
+      # restores), windows's rest on windows — each only after the step
+      # that fills it succeeded, so a failed download is never saved.
       - name: Save the embedded Node binary cache
         if: ${{ !cancelled() && matrix.shard == 'rest' && matrix.flavour != 'race' && steps.fetch-node.outcome == 'success' }}
         uses: actions/cache/save@v6
@@ -487,7 +500,7 @@ jobs:
           key: ${{ steps.cache-node.outputs.cache-primary-key }}
 
       - name: Save the npm cache
-        if: ${{ !cancelled() && matrix.shard == 'rest' && matrix.flavour != 'race' && steps.npm-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && matrix.shard == 'rest' && matrix.flavour != 'race' && steps.npm-cache.outputs.cache-hit != 'true' && steps.sidecar.outcome == 'success' }}
         uses: actions/cache/save@v6
         timeout-minutes: 5
         continue-on-error: true
