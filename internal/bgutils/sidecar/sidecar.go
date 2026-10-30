@@ -170,6 +170,14 @@ type Sidecar struct {
 	// start is a test seam for the one transition a unit test cannot run (it
 	// spawns Node). Production leaves it as startLocked.
 	start func(ctx context.Context) error
+
+	// Stop's budget for a child that no longer answers: how long the
+	// graceful shutdown RPC may take (its write-slot wait included), then
+	// how long the child gets to exit on its own before it is killed — 1 s
+	// and 2 s, set by New. Fields so a test can shrink them for its own
+	// instance; nothing else changes them.
+	shutdownRPCTimeout time.Duration
+	exitGrace          time.Duration
 }
 
 type rpcRequest struct {
@@ -204,9 +212,11 @@ func New(cfg Config) *Sidecar {
 		cfg.RequestTimeout = 90 * time.Second
 	}
 	s := &Sidecar{
-		cfg:      cfg,
-		pending:  make(map[uint64]chan rpcResponse),
-		writeSem: make(chan struct{}, 1),
+		cfg:                cfg,
+		pending:            make(map[uint64]chan rpcResponse),
+		writeSem:           make(chan struct{}, 1),
+		shutdownRPCTimeout: 1 * time.Second,
+		exitGrace:          2 * time.Second,
 	}
 	s.start = s.startLocked
 	return s
@@ -435,7 +445,7 @@ func (s *Sidecar) teardownLocked() error {
 	// writes its "bye" response and then process.exit(0)s on the
 	// next tick. 1s is generous for that round-trip; longer just
 	// extends shutdown latency for no benefit.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdownRPCTimeout)
 	_ = s.callRaw(shutdownCtx, "shutdown", nil)
 	cancel()
 
@@ -463,7 +473,7 @@ func (s *Sidecar) teardownLocked() error {
 		if err != nil {
 			s.cfg.Logger.Debug("sidecar exited", "err", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(s.exitGrace):
 		s.cfg.Logger.Warn("sidecar shutdown timed out, killing process", "pid", s.cmd.Process.Pid)
 		if killErr := s.cmd.Process.Kill(); killErr != nil {
 			firstErr = killErr
