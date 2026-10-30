@@ -113,8 +113,6 @@ func TestDiscordWebhookRateLimitRetriesOnce(t *testing.T) {
 	}
 }
 
-// shrinkBackoff makes the retry backoff schedule test-fast, restoring it
-// on cleanup.
 // recordDiscordSleeps replaces discordSleep with a recorder that returns at
 // once, and returns what each wait asked for — so a test can prove which waits
 // a send took, or that it took none, without timing the send around them.
@@ -138,6 +136,8 @@ func recordDiscordSleeps(t *testing.T) func() []time.Duration {
 	}
 }
 
+// shrinkBackoff makes the retry backoff schedule test-fast, restoring it
+// on cleanup.
 func shrinkBackoff(t *testing.T) {
 	t.Helper()
 	orig := discordRetryBackoff
