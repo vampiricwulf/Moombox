@@ -324,8 +324,12 @@ func TestMonitor_RecoversAfterPassiveLatchWhenSubsystemsGoQuiet(t *testing.T) {
 	var checkOnline atomic.Bool
 	checkOnline.Store(true)
 	m := newTestMonitor(func() bool { return checkOnline.Load() })
-	// Tight passive window so failures age out within the test rather than 30s.
-	m.passive = &PassiveTracker{window: 40 * time.Millisecond, minFails: 5, minTags: 2}
+	// A 40 ms passive window on a clock the test moves, so failures age out
+	// exactly when it says rather than after 30 s — or, on the wall clock,
+	// before the six below were all reported, if the test was descheduled
+	// for 40 ms between them.
+	clk := &fakeClock{t: time.Unix(1_800_000_000, 0)}
+	m.passive = &PassiveTracker{window: 40 * time.Millisecond, minFails: 5, minTags: 2, now: clk.now}
 
 	// Outage begins: the active probe drops AND subsystems pile up cross-tag
 	// failures, latching the passive tracker offline. ReportFailure trips the
@@ -345,8 +349,8 @@ func TestMonitor_RecoversAfterPassiveLatchWhenSubsystemsGoQuiet(t *testing.T) {
 	}
 
 	// Subsystems gate off — NO further ReportSuccess / ReportFailure fires.
-	// Wait for the failure window to age out so a pruning poll can clear it.
-	time.Sleep(70 * time.Millisecond)
+	// The failure window ages out so a pruning poll can clear it.
+	clk.advance(70 * time.Millisecond)
 
 	// Internet returns; the active probe recovers. The next poll must restore
 	// online purely via the pruning read of the passive latch — there is no
