@@ -115,3 +115,30 @@ test("a signature answer is not held to the n rule", () => {
     const { sigResults } = solveCipher({ playerID: "p3", playerJS: "js", sigChallenges: [CHALLENGE] });
     assert.deepEqual(sigResults, { [CHALLENGE]: `x${CHALLENGE}` });
 });
+
+// An answer of either type must be a string, as upstream's validators both
+// require (jsc/_director.py:265-287). A null used to be cached and replayed,
+// and the Go side read it as "" — for a signature, appended as the answer.
+// Now it throws, unlabelled as a stale player (upstream refetches nothing),
+// and nothing is cached: the next solve asks ejs again.
+//
+// Mutants: the string check dropped (the n row throws a bare TypeError from
+// endsWith instead, the sig row caches and returns the null); the throw
+// labelled "no solutions" (the message match fails, and the Go side would
+// refetch the player for it).
+test("a non-string answer throws and caches nothing", () => {
+    for (const type of ["n", "sig"]) {
+        _resetCacheForTest();
+        const ejs = stubEjs(() => null);
+        const req = type === "n" ? { nChallenges: [CHALLENGE] } : { sigChallenges: [CHALLENGE] };
+        assert.throws(
+            () => solveCipher({ playerID: "p4", playerJS: "js", ...req }),
+            { message: `ejs solve ${type}: non-string result for challenge` },
+            `a null ${type} answer must throw`,
+        );
+        ejs.answer = () => "SOLVED";
+        const res = solveCipher({ playerID: "p4", ...req });
+        assert.deepEqual(type === "n" ? res.nResults : res.sigResults, { [CHALLENGE]: "SOLVED" });
+        assert.equal(ejs.solves, 2, `the second ${type} solve must reach ejs, not a cached null`);
+    }
+});

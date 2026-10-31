@@ -113,7 +113,9 @@ func (s *sidecarSolver) playerSent(playerID string) bool {
 //     restart, etc.): drop the sent-record and retry once with JS
 //     attached. Permanent failure if it persists.
 //
-//   - stale-JS errors ("ejs solve sig: no solutions" / "ejs preprocess"):
+//   - stale-JS errors ("ejs solve sig: no solutions", "ejs solve n: no
+//     solutions" — ejs's own, or the sidecar's refusal of an n answer that
+//     is the player's exception sentinel — and "ejs preprocess"):
 //     YouTube has rotated the player and our cache is serving the old
 //     algorithm to ejs. Evict every layer (disk + preprocessed + meta +
 //     in-memory solver via PlayerSource.RemovePlayerJS, plus the
@@ -189,6 +191,13 @@ func (s *sidecarSolver) solve(ctx context.Context, playerID string, sigs, ns []s
 // is fragile by nature; the substrings are stable across the ejs
 // versions Moombox has tracked but bear watching during ejs upgrades
 // (references/update-all.sh surfaces upstream changes).
+//
+// "ejs solve n: no solutions" also matches the sidecar's own refusal of an
+// n answer that ends with its challenge, the player's exception sentinel
+// ("ejs solve n: no solutions (exception sentinel)", bgutil-sidecar's
+// solveMany). The fresh-JS retry it buys is Moombox's own: yt-dlp only asks
+// its next provider after an invalid response (jsc/_director.py:117-124);
+// the sidecar's comment there says what the retry costs.
 func isStaleJSError(err error) bool {
 	if err == nil {
 		return false
