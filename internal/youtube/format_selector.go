@@ -164,7 +164,10 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 	// than ranking it, leaves the winner among the intact formats exactly as
 	// before. Without it a Finished archive's video track stopped partway,
 	// and the post-mux check, which compares the output against the staged
-	// inputs (verifyAgainstStaging), had nothing longer to hold it to.
+	// inputs (verifyAgainstStaging), had nothing longer to hold it to. The
+	// dedup's per-itag collapse ahead of this (collapseToPreferredRendition)
+	// ranks an intact track first for the same reason, so the intact dub of a
+	// video whose every original-language copy is short is still here to win.
 	intactVideo, intactAudio := intactRenditions(formats)
 
 	// Log available video formats (matching TS FormatSelector debug output)

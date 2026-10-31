@@ -337,3 +337,128 @@ func TestDamagedRenditionsAreReportedOncePerExtraction(t *testing.T) {
 		t.Errorf("a probe's report = %q, want one Debug line naming android_vr and itag 399", got[debugsBefore:])
 	}
 }
+
+// damageTrack is damageFormat for an audio rendition of one track: its
+// audioTrack id, displayName and audioIsDefault, as a dubbed video lists them.
+func damageTrack(itag int, mime, approx, id, name string, isDefault bool) string {
+	s := fmt.Sprintf(`{"itag": %d, "url": "https://x/%d-%s", "mimeType": %q, "bitrate": %d, "audioTrack": {"id": %q, "displayName": %q, "audioIsDefault": %v}`,
+		itag, itag, id, mime, 1000+itag, id, name, isDefault)
+	if approx != "" {
+		s += `, "approxDurationMs": ` + approx
+	}
+	return s + "}"
+}
+
+// TestTheCollapseKeepsAnIntactTrackOverADamagedOne pins the damage rung where
+// the selector cannot reach it: collapseToPreferredRendition, which keeps one
+// rendition per itag before the selector ever sees the pool. yt-dlp keeps
+// every track as a format of its own and ranks ie_pref (the -10 a damaged one
+// carries, _video.py:3474) ahead of lang (utils/_utils.py:5363), so where
+// every original-language copy is encoded short and the dub's is intact it
+// archives the dub. The case runs from the wire, through two clients'
+// responses, the dedup and the selector, so it also pins that the stamp
+// survives the cross-client dedup and rides into the shadow: the short AV1
+// would otherwise win the video.
+//
+// Mutants this kills:
+//   - the collapse's damage rung dropped, or ranked after the track →
+//     "every original copy is short": itag 251 and 140 keep the short
+//     original, and the selector, with no intact audio left, archives it
+//   - the collapse's damage rung inverted (a damaged copy preferred) → the
+//     same row
+//   - the stamp lost in the dedup → the short AV1 399 wins the video
+//
+// "an intact original elsewhere still beats the dub" is the guard the other
+// way: the rung decides only between a damaged and an intact copy, so an
+// intact original under another itag keeps the original language.
+func TestTheCollapseKeepsAnIntactTrackOverADamagedOne(t *testing.T) {
+	const (
+		short = `"200000"`
+		whole = `"600061"`
+	)
+	original := func(itag int, mime, approx string) string {
+		return damageTrack(itag, mime, approx, "en.4", "English original", true)
+	}
+	dub := func(itag int, mime, approx string) string {
+		return damageTrack(itag, mime, approx, "es.3", "Spanish", false)
+	}
+	for _, tc := range []struct {
+		name      string
+		audio     []string
+		wantItag  int
+		wantTrack string
+		// per itag, the track the collapse must keep: the first entry of an
+		// itag is what resolveFormatURLByItag returns at setup and on a 403
+		// refresh, so the kept one is the one every itag lookup archives.
+		wantKept map[int]string
+	}{
+		{
+			name: "every original copy is short: the intact dub is archived",
+			audio: []string{
+				original(251, damageOpus, short), dub(251, damageOpus, whole),
+				original(140, damageAAC, short), dub(140, damageAAC, whole),
+			},
+			wantItag: 251, wantTrack: "es.3",
+			wantKept: map[int]string{251: "es.3", 140: "es.3"},
+		},
+		{
+			name: "an intact original elsewhere still beats the dub",
+			audio: []string{
+				original(251, damageOpus, short), dub(251, damageOpus, whole),
+				original(140, damageAAC, whole), dub(140, damageAAC, whole),
+			},
+			wantItag: 140, wantTrack: "en.4",
+			wantKept: map[int]string{251: "es.3", 140: "en.4"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewPlayerAPI(nil, noopLogger{})
+			ctx := withExtractionState(context.Background())
+			formats := append([]string{
+				damageFormat(399, damageAV1, short), damageFormat(248, damageVP9, `"600046"`),
+			}, tc.audio...)
+			var pool []Format
+			for _, c := range []struct {
+				client string
+				level  int
+			}{{"tv", AuthLevelTVAuth}, {"web", AuthLevelWeb}} {
+				info, err := p.parsePlayerResponse(withPlayerClient(ctx, c.client), damageResponse(t, "600", "", formats...), "", nil, damageVideoID)
+				if err != nil {
+					t.Fatalf("parsePlayerResponse (%s): %v", c.client, err)
+				}
+				collectFormats(&pool, info.Formats, c.client, c.level)
+			}
+
+			deduped := deduplicateFormats(ctx, pool)
+			kept := map[int]*Format{}
+			for i := range deduped {
+				if _, seen := kept[deduped[i].Itag]; !seen {
+					kept[deduped[i].Itag] = &deduped[i]
+				}
+			}
+			for itag, want := range tc.wantKept {
+				if f := kept[itag]; f == nil || f.AudioTrackID != want {
+					t.Errorf("itag %d resolves to track %v, want %q", itag, trackOf(f), want)
+				}
+			}
+			if av1 := kept[399]; av1 == nil || !av1.Damaged || av1.TokenAlternate == nil || !av1.TokenAlternate.Damaged {
+				t.Errorf("the short AV1 after the dedup = %+v, want it and its web shadow still Damaged", av1)
+			}
+
+			got := SelectBestFormats(deduped, 1080, true)
+			if got.Video == nil || got.Video.Itag != 248 {
+				t.Errorf("video = %v, want the intact VP9 248", itagOf(got.Video))
+			}
+			if got.Audio == nil || got.Audio.Itag != tc.wantItag || got.Audio.AudioTrackID != tc.wantTrack || got.Audio.Damaged {
+				t.Errorf("audio = itag %v track %v, want the intact itag %d %s", itagOf(got.Audio), trackOf(got.Audio), tc.wantItag, tc.wantTrack)
+			}
+		})
+	}
+}
+
+func trackOf(f *Format) any {
+	if f == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%q (damaged=%v)", f.AudioTrackID, f.Damaged)
+}

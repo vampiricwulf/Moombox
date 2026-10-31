@@ -1186,12 +1186,24 @@ func MergeFormatPool(ctx context.Context, pool, extra []Format) []Format {
 	return deduplicateFormats(ctx, union)
 }
 
-// collapseToPreferredRendition keeps one rendition per itag: the highest
-// audioTrackScore (which already ranks a clean rendition above its DRC twin),
-// then the existing lowest-auth-level tie-break. streams arrives sorted by the
-// whole 3-part key, so the winners come out in ascending itag order — the same
-// order, row for row, that the pre-collapse dedup produced for every response
-// without an audioTrack or an isDrc flag.
+// collapseToPreferredRendition keeps one rendition per itag: an intact one
+// ahead of a Damaged one, then the highest audioTrackScore (which already
+// ranks a clean rendition above its DRC twin), then the existing
+// lowest-auth-level tie-break. streams arrives sorted by the whole 3-part
+// key, so the winners come out in ascending itag order — the same order, row
+// for row, that the pre-collapse dedup produced for every response without an
+// audioTrack or an isDrc flag.
+//
+// The damage rung leads because the selector's does (selectBestFormatsImpl):
+// yt-dlp keeps every track as a format of its own and ranks ie_pref — the
+// -10 a damaged one carries (_video.py:3474) — ahead of lang in its default
+// sort ('hidden', 'aud_or_vid', 'hasvid', 'ie_pref', 'lang', …,
+// utils/_utils.py:5363). So where every original-language copy of an itag is
+// encoded short and a dub's is intact, upstream archives the dub. Ranked by
+// track alone, the collapse kept the short original under each itag, the
+// selector found no intact audio left to put ahead of it, and the archive's
+// audio stopped partway. With the same order on both sides, the rendition the
+// collapse keeps per itag is the one the selector would take from it.
 //
 // Video itags are untouched: they carry no track fields, so one itag can only
 // hold one stream and the loop hands it straight back.
@@ -1207,6 +1219,12 @@ func collapseToPreferredRendition(streams []Format) []Format {
 		if !seen {
 			preferred[f.Itag] = f
 			order = append(order, f.Itag)
+			continue
+		}
+		if f.Damaged != best.Damaged {
+			if !f.Damaged {
+				preferred[f.Itag] = f
+			}
 			continue
 		}
 		if fScore, bestScore := audioTrackScore(&f), audioTrackScore(&best); fScore != bestScore {
