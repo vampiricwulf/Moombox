@@ -56,6 +56,8 @@ Newest first. One row per Moombox commit that ports upstream work.
 
 | Date | Moombox commit | Upstream | Summary |
 |---|---|---|---|
+| 2026-10-31 | `33185cd7` | yt-dlp `715af0c63` (#14646) | The downloader half of `available_at`: every YouTube strategy waits for its URLs' player response before its first media request (`waitForPlayback`), a credential refresh for its fresh response (`waitForFreshPlayback`); live and post-live never wait |
+| 2026-10-31 | `1126da36` | yt-dlp `715af0c63` (#14646), `3c279b33c` (#17062) | `available_at` read off each player response's pre-roll ads (adPlacements START, adSlots BEFORE_CONTENT) and stamped on its formats and manifests (`playbackAvailableAt`) |
 | 2026-10-22 | `15fe37f4` | yt-dlp `12ac9aca7` (#17703) | ytInitialData read from `<script id="yt-initial-data" type="application/json">` (staged rollout, cookie-authed pages): third anchor in both locator sets |
 
 ## Reviewed, no action (most recent review)
