@@ -199,8 +199,9 @@ func (m *AddVideoModel) SetFormats(f *FormatsData) {
 
 // noteColumnWidth fits the longest Note formatNote writes, "Best WEBM,
 // damaged, segmented" (the Best fallback when every rendition of a kind is
-// both): the video table is then 63 columns wide, inside the 78 the dialog's
-// 80-column box leaves.
+// both): the video table is then 63 columns wide, which the dialog's content
+// (boxW-2, 78 at most) holds from a 69-column terminal up. Narrower, down to
+// the TUI's minTermWidth, fitFormatTable gives the Note column what is left.
 const noteColumnWidth = 29
 
 // buildFormatTables constructs bubbles/table models for video and audio format selection.
@@ -782,7 +783,7 @@ func (m *AddVideoModel) renderURLStep(w, _ int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *AddVideoModel) renderFormatStep(_, h int, isVideo bool) string {
+func (m *AddVideoModel) renderFormatStep(w, h int, isVideo bool) string {
 	var lines []string
 
 	stepNum := "1/4"
@@ -816,10 +817,10 @@ func (m *AddVideoModel) renderFormatStep(_, h int, isVideo bool) string {
 		// Adjust table height to fit available space
 		tableH := max(h-10, 3)
 		if isVideo {
-			m.videoTable.SetHeight(min(tableH, len(m.formats.VideoFormats)))
+			fitFormatTable(&m.videoTable, w, min(tableH, len(m.formats.VideoFormats)))
 			lines = append(lines, m.videoTable.View())
 		} else {
-			m.audioTable.SetHeight(min(tableH, len(m.formats.AudioFormats)))
+			fitFormatTable(&m.audioTable, w, min(tableH, len(m.formats.AudioFormats)))
 			lines = append(lines, m.audioTable.View())
 		}
 	}
@@ -828,6 +829,34 @@ func (m *AddVideoModel) renderFormatStep(_, h int, isVideo bool) string {
 	lines = append(lines, DimStyle.Render("A: Auto | N: None | Enter/1-9: Select | Esc: Back"))
 
 	return strings.Join(lines, "\n")
+}
+
+// fitFormatTable sizes a format table to the dialog each time it is drawn,
+// as its height always was. A table's rows are its viewport's, and a bubbles
+// v2 viewport with no width draws nothing (viewport.View answers "" at width
+// 0): built without one, both tables showed their header and its rule alone
+// — no row at all — from the Charm v2 migration on. The width is the
+// columns' own sum, the Note column (the last, the only one whose content
+// varies in width) narrowed to what contentW leaves beside the others and
+// never past noteColumnWidth, so on a narrow terminal the table truncates a
+// long note with "…" instead of the box wrapping every line of the table in
+// two. The height is rows plus the header's lines, which SetHeight takes out
+// of what it is given: rows alone showed two fewer — and nothing, for a
+// table of two or fewer.
+func fitFormatTable(t *table.Model, contentW, rows int) {
+	cols := t.Columns()
+	if len(cols) == 0 {
+		return
+	}
+	note := &cols[len(cols)-1]
+	others := 0
+	for _, c := range cols[:len(cols)-1] {
+		others += c.Width
+	}
+	note.Width = max(min(noteColumnWidth, contentW-others), len("Note"))
+	t.SetColumns(cols)
+	t.SetWidth(others + note.Width)
+	t.SetHeight(rows + lipgloss.Height(formatTableStyles().Header.Render("Note")))
 }
 
 func (m *AddVideoModel) renderTimestamps(w, _ int) string {

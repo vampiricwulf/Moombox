@@ -1,13 +1,18 @@
 package tui
 
 import (
+	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/table"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // pickerAnswer is GET /api/formats' shape as cmd/moombox's formatsPayload
@@ -95,5 +100,68 @@ func TestAddVideoPickerNotesTheBestAndTheMarks(t *testing.T) {
 	// never loses a mark to the table's truncation.
 	if n := len(formatNote("Best WEBM", true, true)); n > noteColumnWidth {
 		t.Errorf("the longest note is %d wide, its column %d", n, noteColumnWidth)
+	}
+}
+
+// TestAddVideoPickerDrawsEveryRow: the format tables drew their header and
+// its rule and not one row — a bubbles v2 table draws its rows through a
+// viewport, which draws nothing at width 0, and neither table was given a
+// width — so the Notes above, and every format, never reached the screen.
+// Each row is drawn now, right under the rule, at a wide terminal and at
+// the TUI's narrowest (minTermWidth), where the Note column narrows to what
+// the dialog leaves instead of the box wrapping the table's every line.
+//
+// Mutants (each run): fitFormatTable without SetWidth (no row drawn); its
+// height without the header's lines (the three-row audio table draws one);
+// the Note column left at noteColumnWidth (at minTermWidth the rule wraps
+// onto the line the first row belongs on).
+func TestAddVideoPickerDrawsEveryRow(t *testing.T) {
+	var formats FormatsData
+	if err := json.Unmarshal([]byte(pickerAnswer), &formats); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, width := range []int{minTermWidth, 100} {
+		for _, tc := range []struct {
+			name string
+			step AddVideoStep
+			rows [][]string // what each row, in order, shows
+		}{
+			{"video", AddStepVideoFormat, [][]string{
+				{"3840x2160", "damaged"},
+				{"2560x1440", "segmented"},
+				{"1920x1080", "Best WEBM"},
+				{"1920x1080", "damaged, segmented"},
+				{"1280x720", "Best MP4"},
+			}},
+			{"audio", AddStepAudioFormat, [][]string{
+				{"160kbps", "48kHz", "Best OPUS"},
+				{"128kbps", "44kHz", "Best AAC, damaged"},
+				{"48kbps", "22kHz", "damaged, segmented"},
+			}},
+		} {
+			t.Run(fmt.Sprintf("%s at width %d", tc.name, width), func(t *testing.T) {
+				m := NewAddVideoModel()
+				m.Open()
+				m.SetSize(width, 40)
+				m.step = tc.step
+				m.SetFormats(&formats)
+				lines := strings.Split(ansi.Strip(m.View()), "\n")
+				header := slices.IndexFunc(lines, func(l string) bool { return strings.Contains(l, "Note") })
+				if header < 0 || header+1+len(tc.rows) >= len(lines) {
+					t.Fatalf("no table header in the dialog:\n%s", strings.Join(lines, "\n"))
+				}
+				if rule := strings.Trim(lines[header+1], " │"); rule == "" || strings.Trim(rule, "─") != "" {
+					t.Fatalf("line under the header = %q, want its rule:\n%s", lines[header+1], strings.Join(lines, "\n"))
+				}
+				for i, want := range tc.rows {
+					got := lines[header+2+i]
+					for _, cell := range want {
+						if !strings.Contains(got, cell) {
+							t.Errorf("row %d = %q, want it to show %q:\n%s", i+1, got, cell, strings.Join(lines, "\n"))
+						}
+					}
+				}
+			})
+		}
 	}
 }
