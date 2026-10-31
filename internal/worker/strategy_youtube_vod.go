@@ -36,15 +36,20 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		return res, err
 	}
 	// D12's last resort. The binding is a guess, so the first run counted the
-	// token as missing and degraded — and the degrade left nothing token-free
-	// to download (only its "nothing usable" and "segments alone" failures
-	// wrap the guessed-binding cause, before anything is built or written).
-	// The run is made once more with the guess trusted: its selection is the
-	// first one again, and the token minted under the guess rides it.
-	job.Logger.Warn("[POT] missing_pot: nothing token-free to download — minting under the guessed binding for the web-family formats",
+	// token as missing and degraded — and the degrade left a chosen stream
+	// with no token-free copy: nothing selectable at all, a stream whose only
+	// copies left are segments, a video or audio stream gone from the
+	// selection, or a pinned rendition gone from the pool (only those
+	// failures wrap the guessed-binding cause, each before anything is built
+	// or written). The run is made once more with the guess trusted: its
+	// selection is the first one again, and the token minted under the guess
+	// rides it.
+	job.Logger.Warn("[POT] missing_pot: a chosen stream has no token-free copy — minting under the guessed binding for the web-family formats",
 		"jobID", job.Job.ID, "binding", videoInfo.GvsBindingKind, "err", err)
-	// A mint that fails there too degrades again, to the same nothing, and
-	// that run's error — naming the mint's own failure — is the job's.
+	// A mint that fails there too degrades again, on the mint's own failure,
+	// as any failed mint's does — a lost pin falls to the automatic pick, a
+	// lost stream is left out, nothing selectable is that run's error — and
+	// that run's outcome is the job's.
 	trusted := *videoInfo
 	trusted.GvsBindingGuessed = false
 	return downloadVod(ctx, job, &trusted, routedSolver, cipherSolver, potProvider, isOnline)
@@ -155,6 +160,21 @@ func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 						"jobID", job.Job.ID, "added", len(extra), "dropped", len(dropped), "swapped", swapped)
 				}
 			}
+			// D12 prefers a token-free copy of what the job would record and
+			// lets the guessed token ride only where there is none. A pinned
+			// rendition is what the job would record: one the degrade dropped
+			// with no token-free copy of its own (no shadow, nothing from the
+			// cookieless chain) is not stood in for by another itag, as it is
+			// when no token can be had at all — under the guess one can. So
+			// the selection is not re-run (its pin arms would say the pin
+			// needs a token none could be minted, where none was asked for):
+			// the failure wraps the guessed-binding cause, and DownloadVod's
+			// trusted run honours the pin with the guessed token.
+			guessed := errors.Is(mintErr, errGuessedGvsBinding)
+			if lost := vodPinsLost(job, result, pool); guessed && len(lost) > 0 {
+				return nil, fmt.Errorf("VOD: the %s has no token-free copy: %w", strings.Join(lost, " and "), mintErr)
+			}
+			first := result
 			selected, result = selectVodFormats(job, pool, dropped, segmented)
 			if !result.HasVideo && !result.HasAudio {
 				return nil, fmt.Errorf("VOD: no formats usable without a GVS PO token (mint failed: %w)", mintErr)
@@ -169,6 +189,14 @@ func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			// and failed as a fragment.
 			if err := segmentedStreamLost(job, selected, segmented); err != nil {
 				return nil, fmt.Errorf("%w; its whole-file copies need a GVS PO token, and none could be minted (mint failed: %w)", err, mintErr)
+			}
+			// The same rule for a whole stream: a degrade that kept the audio
+			// and lost the video (or the reverse) would archive the one stream
+			// alone — an audio-only file for a video job — where a token
+			// minted under the guess fetches both. A lesser rendition of the
+			// same kind is a token-free copy of the stream, and is kept.
+			if lost := vodStreamsLost(first, result); guessed && len(lost) > 0 {
+				return nil, fmt.Errorf("VOD: the %s stream has no token-free copy: %w", strings.Join(lost, " and "), mintErr)
 			}
 			videoResolved, audioResolved, err = resolveVodURLs(ctx, job, result, pool, dropped, segmented, routedSolver, cipherSolver, videoInfo.PlayerURL)
 			if err != nil {
@@ -636,4 +664,62 @@ func poolHasStream(pool []youtube.Format, f *youtube.Format) bool {
 		}
 	}
 	return false
+}
+
+// vodPinsLost names each manual itag the job pinned that first, a
+// selection's result, records and pool no longer holds a copy of
+// (poolHasStream) — "pinned video itag N", or audio — for a guessed
+// binding's degrade, where such a pin has no token-free copy of its own and
+// the guessed token is the way to record it (D12). A pin first did not
+// record (not found, or an audio pin beside a muxed video) is not lost here:
+// the degrade cannot lose what the selection never took.
+func vodPinsLost(job *JobContext, first *DownloadResult, pool []youtube.Format) []string {
+	var lost []string
+	for _, pin := range []struct {
+		kind string
+		itag *int
+	}{{"video", job.Job.SelectedVideoItag}, {"audio", job.Job.SelectedAudioItag}} {
+		if pin.itag == nil || *pin.itag <= 0 {
+			continue
+		}
+		for _, f := range []*youtube.Format{first.VideoFormat, first.AudioFormat} {
+			if f != nil && f.Itag == *pin.itag && strings.Contains(f.MimeType, pin.kind) {
+				if !poolHasStream(pool, f) {
+					lost = append(lost, fmt.Sprintf("pinned %s itag %d", pin.kind, *pin.itag))
+				}
+				break
+			}
+		}
+	}
+	return lost
+}
+
+// vodStreamsLost names the streams — "video", "audio" — that first, a
+// selection's result, records and degraded, the selection a missing_pot
+// degrade re-ran, does not. A result records video when its video input is a
+// video format, and audio when it is an audio-only primary (selectVodFormats
+// files a lone audio stream as the video input), a progressive format's own
+// track, or a separate audio format.
+func vodStreamsLost(first, degraded *DownloadResult) []string {
+	fv, fa := vodStreamKinds(first)
+	dv, da := vodStreamKinds(degraded)
+	var lost []string
+	if fv && !dv {
+		lost = append(lost, "video")
+	}
+	if fa && !da {
+		lost = append(lost, "audio")
+	}
+	return lost
+}
+
+func vodStreamKinds(r *DownloadResult) (video, audio bool) {
+	if f := r.VideoFormat; f != nil {
+		if strings.Contains(f.MimeType, "video") {
+			video, audio = true, IsProgressiveFormat(f)
+		} else {
+			audio = f.IsAudio()
+		}
+	}
+	return video, audio || r.AudioFormat != nil
 }

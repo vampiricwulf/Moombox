@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -138,10 +139,11 @@ func TestDownloadVodPremiumWaivesTheToken(t *testing.T) {
 // VOD path: signed in without a datasync ID, the binding is a guess, and
 // yt-dlp mints nothing (fetch_po_token, _video.py:2815-2819). So the
 // selection degrades to the token-free copies without a mint at all; only
-// when nothing token-free is left is the token minted under the guess, and it
-// rides the first selection (DownloadVod runs the selection once more with
-// the guess trusted); a mint that fails there too fails the job with the
-// degrade's own error.
+// when a chosen stream has no token-free copy left — nothing at all, one
+// stream of the two, or a pinned rendition — is the token minted under the
+// guess, and it rides the first selection (DownloadVod runs the selection
+// once more with the guess trusted); a mint that fails there too fails the
+// job with the degrade's own error.
 //
 // Mutants (each run): minting under the guess at once (strategyGvsToken
 // ignoring GvsBindingGuessed) fails the degrade row (web_creator chosen, one
@@ -192,10 +194,111 @@ func TestDownloadVodGuessedBindingCountsAsMissing(t *testing.T) {
 		if calls.Load() != 1 || bindings[0] != "vd-guess" {
 			t.Errorf("mints = %d under %v, want one under the guessed binding", calls.Load(), bindings)
 		}
-		if line := logLine(logs, "[POT] missing_pot: nothing token-free to download"); line == nil || !errors.Is(line["err"].(error), errGuessedGvsBinding) {
+		if line := logLine(logs, "[POT] missing_pot: a chosen stream has no token-free copy"); line == nil || !errors.Is(line["err"].(error), errGuessedGvsBinding) {
 			t.Errorf("last-resort line = %v, want one carrying the first run's guessed-binding failure", line)
 		}
 	})
+
+	// A degrade that keeps one stream and loses the other, or loses a pinned
+	// rendition, has left a chosen stream with no token-free copy as surely as
+	// one that leaves nothing: the guessed token rides the first selection, so
+	// the job does not archive the survivor alone, or another itag in the
+	// pin's place. A lesser rendition of the same kind is a token-free copy
+	// (the first row above), and so is a pin's own shadow. A token none could
+	// be minted for at all is not a guess, and its degrade is left as it was.
+	//
+	// Mutants (each run): dropping the lost-stream test fails the web-video
+	// and web-audio rows (the survivor alone, no mint); dropping the lost-pin
+	// test fails the pin row (tv_public 247 recorded, no mint); testing a pin
+	// by the selection's itag, not the pool's copy, fails the shadow row (a
+	// mint); applying either test to a failed mint fails the last row (the
+	// job errors); computing the mandatory test from the video alone fails
+	// the web-audio and failed-mint rows (web_creator audio rides bare);
+	// reading an audio-only primary as no stream fails the web-video row's
+	// cause (video and audio); reading itag 18 as video alone fails the 18
+	// row (a mint, the 1080p pair).
+	shadowed303 := func() *youtube.VideoInfo {
+		info := vodMixedInfo()
+		info.Formats[0] = withTokenFreeShadow(info.Formats[0], "tv_public")
+		return info
+	}
+	pin := func(itag int) *int { return &itag }
+	for _, tc := range []struct {
+		name      string
+		info      *youtube.VideoInfo
+		pin       *int
+		mintErr   error
+		wantMints int
+		wantVideo string // "itag/source/token"
+		wantAudio string // "" for no separate audio downloader
+		wantRerun bool
+		wantCause string // in the last resort's err
+	}{
+		{name: "the video has no token-free copy", info: guessed(vodPotInfo("web_creator", "tv_public")), wantMints: 1,
+			wantVideo: "302/web_creator/tok-guess", wantAudio: "251/tv_public/", wantRerun: true, wantCause: "the video stream has no token-free copy"},
+		{name: "the audio has no token-free copy", info: guessed(vodPotInfo("tv_public", "web_creator")), wantMints: 1,
+			wantVideo: "302/tv_public/", wantAudio: "251/web_creator/tok-guess", wantRerun: true, wantCause: "the audio stream has no token-free copy"},
+		{name: "a pinned rendition has no token-free copy", info: guessed(vodMixedInfo()), pin: pin(303), wantMints: 1,
+			wantVideo: "303/web_creator/tok-guess", wantAudio: "251/web_creator/tok-guess", wantRerun: true, wantCause: "the pinned video itag 303 has no token-free copy"},
+		// The muxed itag 18 is token-optional (G31) and carries both streams,
+		// so nothing is lost and nothing is minted: the 360p is recorded where
+		// the guessed token would have fetched the 1080p pair — upstream's
+		// outcome too, since it mints nothing under the guess and keeps 18.
+		{name: "the token-free itag 18 carries both streams", info: guessed(vod18Info()), wantVideo: "18/web_creator/"},
+		{name: "a pinned rendition's own shadow is its token-free copy", info: guessed(shadowed303()), pin: pin(303),
+			wantVideo: "303/tv_public/", wantAudio: "250/tv_public/"},
+		{name: "a failed mint is no guess", info: vodPotInfo("tv_public", "web_creator"), mintErr: errors.New("sidecar down"), wantMints: 1,
+			wantVideo: "302/tv_public/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token := "tok-guess"
+			if tc.mintErr != nil {
+				token = ""
+			}
+			calls := fakeVodMint(t, token, tc.mintErr)
+			job, logs := vodPotJob(t)
+			job.Job.SelectedVideoItag = tc.pin
+			res, err := DownloadVod(context.Background(), job, tc.info, stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
+			if err != nil {
+				t.Fatalf("DownloadVod: %v", err)
+			}
+			if n := int(calls.Load()); n != tc.wantMints {
+				t.Errorf("mint ran %d times, want %d", n, tc.wantMints)
+			}
+			describe := func(f *youtube.Format, dl interface{ PoToken() string }) string {
+				if f == nil || dl == nil {
+					return ""
+				}
+				return fmt.Sprintf("%d/%s/%s", f.Itag, f.Source, dl.PoToken())
+			}
+			var videoDL, audioDL interface{ PoToken() string }
+			if res.VideoDownloader != nil {
+				videoDL = res.VideoDownloader
+			}
+			if res.AudioDownloader != nil {
+				audioDL = res.AudioDownloader
+			}
+			if got := describe(res.VideoFormat, videoDL); got != tc.wantVideo {
+				t.Errorf("video = %q, want %q", got, tc.wantVideo)
+			}
+			if got := describe(res.AudioFormat, audioDL); got != tc.wantAudio {
+				t.Errorf("audio = %q, want %q", got, tc.wantAudio)
+			}
+			last := logLine(logs, "[POT] missing_pot: a chosen stream has no token-free copy")
+			if rerun := last != nil; rerun != tc.wantRerun {
+				t.Errorf("last resort taken %v, want %v: %v", rerun, tc.wantRerun, logs.lines())
+			}
+			if last != nil && !strings.Contains(fmt.Sprint(last["err"]), tc.wantCause) {
+				t.Errorf("last resort's err = %v, want one saying %q", last["err"], tc.wantCause)
+			}
+			if logLine(logs, "[POT] missing_pot: no GVS token") == nil {
+				t.Errorf("no missing_pot line: %v", logs.lines())
+			}
+			if tc.wantRerun && logLine(logs, "[FormatSelector] Manual video itag 303 requires a GVS token") != nil {
+				t.Errorf("the pin was said to need a token none could be minted, where none was asked for: %v", logs.lines())
+			}
+		})
+	}
 
 	t.Run("a failed mint under the guess fails the job", func(t *testing.T) {
 		mintErr := errors.New("sidecar down")
@@ -227,16 +330,26 @@ func withTokenFreeShadow(f youtube.Format, source string) youtube.Format {
 // selection re-runs over the pool without the formats that need the token,
 // their token-free shadows swapped in; the degraded copy is what every later
 // lookup by itag reads — the 403 cipher re-resolve too. With nothing left the
-// setup fails with errMissingPot (missingPotFallback's input); a Premium
+// setup fails with errMissingPot (missingPotFallback's input), and a stream
+// of the two lost is as much nothing left as both are; a pin the degrade
+// dropped is recorded as the token-free pick, and says why; a Premium
 // session's streams ride bare; a guessed binding degrades without a mint and
-// rides its token only where nothing token-free is left (D12).
+// rides its token only where a chosen stream — or a pinned rendition — has
+// no token-free copy (D12), and a mint that fails under the guess too
+// degrades on that failure, falling to HLS with nothing left.
 //
 // Mutants (each run): skipping the degrade fails the shadow and lesser rows
 // (web_creator URLs chosen); not rebinding videoInfo to the degraded copy
 // fails the shadow row's cipher re-resolve (it hands back the winner's URL);
 // not wrapping errMissingPot fails the web-only row; ignoring IsPremium fails
 // the Premium row; minting under a guess at once fails the guessed-degrade
-// row; dropping the guessed last resort fails the guessed web-only row.
+// row; dropping the guessed last resort fails the guessed web-only row;
+// computing the mandatory test from the video alone, or ignoring a lost
+// audio stream, fails the web-audio row (a bare web_creator audio, or none);
+// dropping the dropped-pin Warn fails the pin row; dropping the guessed pin
+// test fails the guessed-pin row (itag 298 recorded, no mint); degrading
+// again under the guess, or not degrading again at all, fails the guessed
+// pin's failed-mint row and the guessed failed-mint row.
 func TestDownloadManifestlessDashMissingPot(t *testing.T) {
 	w720, h720, fps := 1280, 720, 30
 	lesser := func(info *youtube.VideoInfo) *youtube.VideoInfo {
@@ -258,14 +371,17 @@ func TestDownloadManifestlessDashMissingPot(t *testing.T) {
 	}
 	sidecarDown := errors.New("sidecar down")
 
+	pin299 := 299
 	for _, tc := range []struct {
 		name                 string
 		info                 *youtube.VideoInfo
+		pin                  *int
 		mintErr              error
 		wantErr              bool
 		wantMints            int
 		wantVideo, wantAudio string // a substring of each downloader's BaseURL
 		wantToken            string
+		wantLog, forbidLog   string // a log line's prefix
 	}{
 		{name: "shadows swapped in", info: shadowed(manifestlessPotInfo("web_creator", "web_creator")), mintErr: sidecarDown, wantMints: 1,
 			wantVideo: "itag=299&c=tv_auth", wantAudio: "itag=140&c=tv_auth"},
@@ -277,7 +393,20 @@ func TestDownloadManifestlessDashMissingPot(t *testing.T) {
 		{name: "a guessed binding degrades without a mint", info: guess(lesser(manifestlessPotInfo("web_creator", "web_creator"))), wantMints: 0,
 			wantVideo: "itag=298&c=tv", wantAudio: "itag=139&c=tv"},
 		{name: "a guessed binding with nothing token-free", info: guess(manifestlessPotInfo("web_creator", "web_creator")), wantMints: 1,
-			wantVideo: "itag=299", wantAudio: "itag=140", wantToken: "tok123"},
+			wantVideo: "itag=299", wantAudio: "itag=140", wantToken: "tok123",
+			wantLog: "[POT] missing_pot: a chosen stream has no token-free copy — the token minted under the guessed binding rides"},
+		{name: "a web-family audio beside a tv video", info: manifestlessPotInfo("tv_auth", "web_creator"), mintErr: sidecarDown, wantMints: 1, wantErr: true},
+		{name: "a pin the degrade dropped", info: lesser(manifestlessPotInfo("web_creator", "web_creator")), pin: &pin299, mintErr: sidecarDown, wantMints: 1,
+			wantVideo: "itag=298&c=tv", wantAudio: "itag=139&c=tv",
+			wantLog:   "[FormatSelector] Manual video itag 299 requires a GVS token none could be minted; recording itag 298 instead",
+			forbidLog: "[FormatSelector] Manual video itag 299 not offered"},
+		{name: "a guessed binding with a pin that has no token-free copy", info: guess(lesser(manifestlessPotInfo("web_creator", "web_creator"))), pin: &pin299, wantMints: 1,
+			wantVideo: "itag=299", wantAudio: "itag=140", wantToken: "tok123",
+			forbidLog: "[FormatSelector] Manual video itag 299 requires a GVS token"},
+		{name: "a guessed binding's pin when the mint fails too", info: guess(lesser(manifestlessPotInfo("web_creator", "web_creator"))), pin: &pin299, mintErr: sidecarDown, wantMints: 1,
+			wantVideo: "itag=298&c=tv", wantAudio: "itag=139&c=tv",
+			wantLog: "[FormatSelector] Manual video itag 299 requires a GVS token none could be minted; recording itag 298 instead"},
+		{name: "a guessed binding with nothing token-free when the mint fails too", info: guess(manifestlessPotInfo("web_creator", "web_creator")), mintErr: sidecarDown, wantMints: 1, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			token := "tok123"
@@ -287,6 +416,7 @@ func TestDownloadManifestlessDashMissingPot(t *testing.T) {
 			calls := fakeVodMint(t, token, tc.mintErr)
 			built := recordDownloaders(t)
 			job, logs := vodPotJob(t)
+			job.Job.SelectedVideoItag = tc.pin
 			res, err := DownloadManifestlessDash(context.Background(), job, tc.info, stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
 			if n := int(calls.Load()); n != tc.wantMints {
 				t.Errorf("mint ran %d times, want %d", n, tc.wantMints)
@@ -294,6 +424,12 @@ func TestDownloadManifestlessDashMissingPot(t *testing.T) {
 			if tc.wantErr {
 				if !errors.Is(err, errMissingPot) || !errors.Is(err, tc.mintErr) {
 					t.Fatalf("err = %v (result %+v), want errMissingPot wrapping the mint's failure", err, res)
+				}
+				// The failure a live capture with an HLS manifest falls to it on.
+				withHls := *tc.info
+				withHls.HlsManifestURL = "https://m.example/x.m3u8"
+				if got := missingPotFallback(ManifestlessDashStrategy, &withHls, err); got != HlsStrategy {
+					t.Errorf("missingPotFallback = %v, want HlsStrategy", got)
 				}
 				return
 			}
@@ -319,6 +455,12 @@ func TestDownloadManifestlessDashMissingPot(t *testing.T) {
 			}
 			if tc.info.IsPremium && logLine(logs, "[POT] no GVS token — the web-family streams ride bare") == nil {
 				t.Errorf("no ride-bare line for a Premium session: %v", logs.lines())
+			}
+			if tc.wantLog != "" && logLine(logs, tc.wantLog) == nil {
+				t.Errorf("no %q line: %v", tc.wantLog, logs.lines())
+			}
+			if tc.forbidLog != "" && logLine(logs, tc.forbidLog) != nil {
+				t.Errorf("a %q line: %v", tc.forbidLog, logs.lines())
 			}
 			if strings.HasSuffix(tc.wantVideo, "c=tv_auth") {
 				// The degraded copy is the one the 403 hooks resolve again.
