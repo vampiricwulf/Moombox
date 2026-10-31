@@ -159,6 +159,9 @@
 # portrait stream counts as 720. Moombox takes the largest rendition at or below
 # this; when a stream offers nothing that small it takes the closest one above,
 # so the cap never leaves a recording empty. 0 = unbounded (always the largest).
+# On a YouTube VOD a rendition YouTube encoded short (under half the video's
+# length) is set aside first whenever an intact one exists, so the cap is
+# resolved over the intact renditions.
 # max_video_resolution = 2160
 
 # Peak concurrent VOD downloads across all channels. Live streams always

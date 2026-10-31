@@ -24,11 +24,15 @@ func videoDurationSeconds(videoDetails, microformat map[string]any) int {
 // `format_duration < duration // 2`, a format's approxDurationMs in seconds
 // against the video's length halved in WHOLE seconds — so a 601 s video's
 // line is 300 s, not 300.5 s.
-// The rule is upstream's second: 0ad92dfb1 (#2823) held each format against
-// the longest one less 10 s, and a25a42432 moved it to half the duration,
-// because small differences between renditions are ordinary (upstream names
-// __2ABJjxzNo and ySuUZEjARPY) and the case it exists for, 2-nOtRESiUc, is a
-// rendition encoded far short.
+// The rule is upstream's third form. 0ad92dfb1 (#2823) held each format
+// against the longest one less 10 s; a1b2d8436 (#3083, "Avoid false positives
+// when detecting damaged formats") moved it to half the duration
+// (`approxDurationMs / duration < 500`), because small differences between
+// renditions are ordinary (upstream names __2ABJjxzNo and ySuUZEjARPY) and
+// the case it exists for, 2-nOtRESiUc, is a rendition encoded far short; and
+// a25a42432, computing filesize from each format's own duration, rewrote it
+// as `format_duration < duration // 2`, which is where the whole-second floor
+// comes from.
 //
 // A format that states no approxDurationMs is never damaged (upstream's
 // try_call turns the None comparison into None), and neither is anything when
