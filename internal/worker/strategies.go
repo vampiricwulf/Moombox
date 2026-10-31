@@ -85,6 +85,37 @@ func selectDownloadStrategy(isVod bool, info *youtube.VideoInfo) (DownloadStrate
 	case isVod && info.StreamStatus == youtube.StreamPostLive &&
 		HasManifestlessDashFormats(info.Formats):
 		return ManifestlessDashStrategy, nil
+	// The same path for a finished stream whatever its status, when its split
+	// pool carries yt-dlp's own per-format mark of a live adaptive format,
+	// targetDurationSec (_video.py:3492-3501 — upstream fetches exactly those
+	// as fragments for a post_live stream, 3595-3599). The extraction calls
+	// such a stream post-live itself now (finishExtraction reads upstream's
+	// isPostLiveDvr), so this is the belt to that brace: a StreamVOD that
+	// reaches here with live adaptive URLs and no contentLength, and no
+	// video-only + audio-only pair a whole-file GET can fetch beside them
+	// (hasWholeFileSplit), has nothing that GET can fetch but a fragment —
+	// and on a Resume of an incomplete_tail job VodStrategy would set the
+	// live capture aside before failing. A pool that does hold such a pair
+	// is a stream nobody calls post-live whose processing has reached some
+	// renditions, upstream's was_live: yt-dlp skips every live adaptive
+	// format of it (3492-3501, the skip off without live processing) and
+	// downloads the files, and so does the whole-file path (wholeFileVodPool)
+	// — the 1080p file, where this arm took a 720p live adaptive split.
+	// Ahead of a manifest for the post-live arm's reason.
+	case isVod && hasLiveAdaptiveSplit(info.Formats) && !hasWholeFileSplit(info.Formats):
+		return ManifestlessDashStrategy, nil
+	// An OTF VOD with a manifest: the whole-file path cannot fetch an OTF
+	// format (youtube.Format.Segmented), and yt-dlp takes those streams from
+	// the DASH manifest (_video.py:3503-3507, 3726-3764). Only not_a_stream
+	// reaches the whole-file path with a manifest at all — every other VOD
+	// with one goes to DashStrategy below — so this is the manually added or
+	// include_non_live_content upload YouTube serves on the fly. Not the
+	// manifest-free path: its end detection reads X-Head-Seqnum, a live
+	// header. Without a manifest the whole-file path takes what it can fetch
+	// whole, and says so when that leaves a stream the job wants
+	// (DownloadVod, wholeFileVodPool).
+	case useDirectVod && info.DashManifestURL != "" && hasSegmentedFormats(info.Formats):
+		return DashStrategy, nil
 	case useDirectVod && len(info.Formats) > 0:
 		return VodStrategy, nil
 	case !isVod && HasManifestlessDashFormats(info.Formats):
@@ -112,6 +143,56 @@ func selectDownloadStrategy(isVod bool, info *youtube.VideoInfo) (DownloadStrate
 	default:
 		return nil, fmt.Errorf("no download strategy available")
 	}
+}
+
+// hasLiveAdaptiveSplit is HasManifestlessDashFormats over the formats that
+// carry targetDurationSec alone: a split video-only + audio-only pair of
+// live adaptive formats, both open-ended (no contentLength), both with a URL.
+func hasLiveAdaptiveSplit(formats []youtube.Format) bool {
+	live := make([]youtube.Format, 0, len(formats))
+	for _, f := range formats {
+		if f.TargetDurationSec > 0 {
+			live = append(live, f)
+		}
+	}
+	return HasManifestlessDashFormats(live)
+}
+
+// hasWholeFileSplit reports whether formats holds a video-only and an
+// audio-only format a whole-file GET can fetch (not youtube.Format.Segmented,
+// the whole-file pool's own test), both with a URL: the split pair the
+// whole-file path downloads. A muxed itag 18 is no video half
+// (youtube.Format.IsVideoOnly), so a pool whose only video file is the
+// progressive one counts as having none, and its live adaptive split goes
+// to the manifest-free path. That much goes beyond upstream on purpose:
+// yt-dlp's was_live would merge the 360p 18 with an audio file there, but a
+// stream whose every video-only rendition is live adaptive is one in its
+// post-live window that no response happened to call post-live.
+func hasWholeFileSplit(formats []youtube.Format) bool {
+	var video, audio bool
+	for i := range formats {
+		f := &formats[i]
+		if f.URL == "" || f.Segmented() {
+			continue
+		}
+		if f.IsAudio() {
+			audio = true
+		} else if f.IsVideoOnly() {
+			video = true
+		}
+	}
+	return video && audio
+}
+
+// hasSegmentedFormats reports whether formats holds a fetchable format a
+// whole-file GET cannot serve (youtube.Format.Segmented).
+func hasSegmentedFormats(formats []youtube.Format) bool {
+	for i := range formats {
+		if formats[i].URL != "" && formats[i].Segmented() {
+			return true
+		}
+	}
+	return false
 }
 
 // vodStrategyT / dashStrategyT / hlsStrategyT — stateless adapters

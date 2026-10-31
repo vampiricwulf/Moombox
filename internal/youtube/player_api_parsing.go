@@ -628,6 +628,9 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 			if td := getInt(f, "targetDurationSec"); td > 0 {
 				format.TargetDurationSec = td
 			}
+			// upstream's `fmt_stream.get('type') == 'FORMAT_STREAM_TYPE_OTF'`
+			// (_video.py:3506), the one value of the field it reads.
+			format.IsOTF = getStr(f, "type") == "FORMAT_STREAM_TYPE_OTF"
 
 			if at, ok := f["audioTrack"].(map[string]any); ok {
 				format.AudioTrackID = getStr(at, "id")
@@ -1084,8 +1087,9 @@ type formatKey struct {
 // recorded here is taken after the cross-client merge. finishExtraction stamps
 // it onto FormatDiag.CollapsedRenditions.
 //
-// The winner is the lowest AuthLevel, exactly as before the shadows existed,
-// and it carries the lowest-AuthLevel copy of the same stream from a client
+// The winner is the lowest AuthLevel, exactly as before the shadows existed
+// (save the one rule below), and it carries the lowest-AuthLevel copy (save
+// the same rule) of the same stream from a client
 // of the OTHER GVS token class (GvsTokenRequired), when one returned it.
 // Behind a winner whose client requires the token, that is its
 // TokenFreeAlternate: yt-dlp decides the token before it dedups, so a
@@ -1095,9 +1099,39 @@ type formatKey struct {
 // TokenAlternate, the copy the VOD URL refresh's token fallback moves a
 // refused token-free stream onto. A winner of either class carries the one
 // shadow only, and a shadow carries none.
+//
+// One rule outranks the AuthLevel, for the winner and each class's shadow
+// alike: a copy a whole-file GET cannot fetch loses its stream to a copy of
+// it that can (the one with a contentLength). Those are yt-dlp's two https
+// skips (_video.py:3492-3507), and they run before its first-seen dedup, so
+// the next client's whole file is the copy upstream keeps. Before this a
+// stream one client listed segmented and another as a file — a broadcast
+// whose processing reached some clients first — went to whichever ranked
+// higher, the tv copy over the watch page's, and the whole-file path fetched
+// one fragment of it. An OTF copy (Format.IsOTF) is skipped always. A live
+// adaptive one (TargetDurationSec) is skipped only when the stream needs no
+// live processing: upstream keeps those for post_live and fetches them as
+// fragments, first-seen as ever, and so does this — the extraction's own
+// live_status verdict says which (playbackLiveFlags.exempt: post_live or
+// is_live; upstream counts is_live only under --live-from-start, a
+// difference that could show only where a live broadcast lists a stream as
+// a file, and a broadcast still on air has no length to state). Outside a
+// cascade — MergeFormatPool, the VOD missing_pot merge — no response has
+// stated a verdict, and the file wins.
 func deduplicateFormats(ctx context.Context, pool []Format) []Format {
+	live, _ := extractionStateFrom(ctx).playbackLive()
+	keepLiveAdaptive := live.exempt()
+	unfetchableWhole := func(f *Format) bool {
+		return f.Segmented() && (f.IsOTF || !keepLiveAdaptive)
+	}
+	outranks := func(f, best *Format) bool {
+		if fu, bu := unfetchableWhole(f), unfetchableWhole(best); fu != bu {
+			return bu
+		}
+		return authLevelOf(f) < authLevelOf(best)
+	}
 	byStream := make(map[formatKey]Format)
-	// tokenFree and tokenRequiring hold, per stream, the lowest-AuthLevel copy
+	// tokenFree and tokenRequiring hold, per stream, the best copy (outranks)
 	// from a client of each GVS token class — the shadow a winner of the
 	// other class carries (Format.TokenFreeAlternate, Format.TokenAlternate).
 	// Tracked beside the winner, never in place of it: a shadow must not
@@ -1114,7 +1148,7 @@ func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 		if GvsTokenRequired(f.Source) {
 			class = tokenRequiring
 		}
-		if best, ok := class[key]; !ok || authLevelOf(&f) < authLevelOf(&best) {
+		if best, ok := class[key]; !ok || outranks(&f, &best) {
 			class[key] = f
 		}
 		existing, exists := byStream[key]
@@ -1122,9 +1156,7 @@ func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 			byStream[key] = f
 			continue
 		}
-		fAuth := authLevelOf(&f)
-		eAuth := authLevelOf(&existing)
-		if fAuth < eAuth {
+		if outranks(&f, &existing) {
 			byStream[key] = f
 		}
 	}

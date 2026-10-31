@@ -411,7 +411,10 @@ func liveStatusResponse(t *testing.T, details, lbd map[string]any) map[string]an
 // is post_live to classifyStream (the microformat's endTimestamp) and
 // was_live upstream, so it waits; a TV answer in the post-live DVR window
 // carries no microformat, is a VOD to classifyStream and post_live upstream,
-// so it does not.
+// so it does not. That row is ONE response's parse, and stays a VOD on
+// purpose: the extraction's exit is what reads post-live off the flag
+// (finishExtraction, pinned by TestTVPostLiveAnswerIsPostLive), so a
+// monitor's or probe's single parse reads as it always has.
 //
 // Mutants (each run): the verdict read off StreamStatus (the first two rows);
 // isPostLiveDvr ignored (the DVR row); isLiveNow ignored (the isLiveNow-only

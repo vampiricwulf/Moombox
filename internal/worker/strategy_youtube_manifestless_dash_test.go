@@ -58,6 +58,17 @@ func TestHasManifestlessDashFormats(t *testing.T) {
 			want: false,
 		},
 		{
+			// A muxed format is the progressive file, not a video half: the
+			// gate takes only audio-less video (youtube.Format.IsVideoOnly),
+			// so itag 18 listed without a contentLength never makes a pair.
+			name: "muxed itag 18 without contentLength is no video half",
+			formats: []youtube.Format{
+				{Itag: 18, MimeType: `video/mp4; codecs="avc1.42001E, mp4a.40.2"`, URL: "https://x/", Width: new(640), Height: new(360)},
+				{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`, URL: "https://x/"},
+			},
+			want: false,
+		},
+		{
 			name: "audio-only without any video — incomplete (no DASH possible)",
 			formats: []youtube.Format{
 				{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`, URL: "https://x/"},

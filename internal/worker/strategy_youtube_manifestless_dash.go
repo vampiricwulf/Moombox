@@ -78,6 +78,9 @@ func formatToDashStreamInfo(f *youtube.Format) DashStreamInfo {
 // SelectBestDashStream is contentLength-blind and would otherwise pick a
 // higher-res whole-file itag as "best" from a MIXED pool (OTF video+audio that
 // passes the gate PLUS a contentLength video) and feed its URL to the runaway.
+// The video pool mirrors the gate's video test too (youtube.Format.IsVideoOnly):
+// a muxed format (itag 18) listed without a contentLength is the progressive
+// file, not a video half, and under a 360p cap it out-bandwidths itag 134.
 func partitionManifestlessFormats(formats []youtube.Format) (video, audio []DashStreamInfo) {
 	for i := range formats {
 		f := &formats[i]
@@ -87,7 +90,7 @@ func partitionManifestlessFormats(formats []youtube.Format) (video, audio []Dash
 		info := formatToDashStreamInfo(f)
 		if f.IsAudio() {
 			audio = append(audio, info)
-		} else if info.Width > 0 {
+		} else if f.IsVideoOnly() {
 			video = append(video, info)
 		}
 	}

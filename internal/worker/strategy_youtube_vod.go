@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
@@ -30,10 +32,17 @@ var errEmptyGvsToken = errors.New("PO token generator returned an empty token")
 // as on the live strategies; nil disables the wait.
 func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
 	// pool is the format list selection, cipher re-selection and the
-	// alternate picker all draw from. It is the caller's slice until a
-	// missing_pot degrade swaps in a filtered COPY — never filtered in place.
-	pool := videoInfo.Formats
+	// alternate picker all draw from: the extraction's, without the formats
+	// a whole-file GET cannot fetch (wholeFileVodPool) — a filtered COPY, as
+	// a missing_pot degrade's is, never the caller's slice filtered in place.
+	pool, segmented := wholeFileVodPool(videoInfo.Formats)
 	selected, result := selectVodFormats(job, pool, nil)
+	if err := segmentedStreamLost(job, selected, segmented); err != nil {
+		// selectDownloadStrategy sends a pool that holds a segmented format
+		// to DASH whenever a manifest came with it (its OTF arm), so this
+		// one had none.
+		return nil, fmt.Errorf("%w, and no DASH manifest came with them", err)
+	}
 	if !result.HasVideo && !result.HasAudio {
 		return nil, fmt.Errorf("no suitable formats found for VOD download")
 	}
@@ -75,9 +84,16 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			mintErr = errEmptyGvsToken
 		}
 		if mintErr != nil {
-			var dropped []youtube.Format
+			var dropped, removed []youtube.Format
 			var swapped int
 			pool, dropped, swapped = withoutGvsRequiredFormats(pool)
+			// A shadow swapped in is another response's copy, which can be one
+			// a whole-file GET cannot fetch: it leaves the pool as the
+			// extraction's own did, and its stream counts as lost below. What
+			// leaves joins segmented, the list the degraded selection is held
+			// to once it has run.
+			pool, removed = wholeFileVodPool(pool)
+			segmented = append(segmented, removed...)
 			job.Logger.Warn("[POT] missing_pot: no GVS token — dropping web-family formats",
 				"jobID", job.Job.ID, "binding", bindingKind, "err", mintErr, "dropped", len(dropped), "swapped", swapped)
 			// A chosen stream no shadow covered is gone from the degraded pool.
@@ -101,6 +117,8 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 				} else {
 					merged := youtube.MergeFormatPool(ctx, videoInfo.Formats, extra)
 					pool, dropped, swapped = withoutGvsRequiredFormats(merged)
+					pool, removed = wholeFileVodPool(pool)
+					segmented = append(segmented, removed...)
 					job.Logger.Info("[POT] missing_pot: cookieless re-extract merged",
 						"jobID", job.Job.ID, "added", len(extra), "dropped", len(dropped), "swapped", swapped)
 				}
@@ -108,6 +126,17 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			selected, result = selectVodFormats(job, pool, dropped)
 			if !result.HasVideo && !result.HasAudio {
 				return nil, fmt.Errorf("VOD: no formats usable without a GVS PO token (mint failed: %w)", mintErr)
+			}
+			// The degraded selection is held to the first one's rule. The
+			// dedup lets a stream's segmented tv copy lose to a web-family
+			// file and rides it as that file's TokenFreeAlternate, so the swap
+			// can land on the one copy the re-filter leaves out: a video whose
+			// whole file needs the token no mint produced has nothing left but
+			// segments. Without this the job archived its audio alone, with no
+			// error — where, before the whole-file pool, it fetched the shadow
+			// and failed as a fragment.
+			if err := segmentedStreamLost(job, selected, segmented); err != nil {
+				return nil, fmt.Errorf("%w; its whole-file copies need a GVS PO token, and none could be minted (mint failed: %w)", err, mintErr)
 			}
 			videoResolved, audioResolved, err = resolveVodURLs(ctx, job, result, pool, routedSolver, cipherSolver, videoInfo.PlayerURL)
 			if err != nil {
@@ -426,6 +455,72 @@ func reselectVodWithout(job *JobContext, pool []youtube.Format, failedItag int) 
 	}
 	_, alt := selectVodFormats(job, rest, nil)
 	return alt
+}
+
+// wholeFileVodPool splits formats into the ones a whole-file GET can fetch
+// and the ones it cannot (youtube.Format.Segmented: an OTF or live adaptive
+// format with no contentLength), whose URL answers with one fragment — the
+// "bare media fragment" the whole-file path rejects, or, when that fragment
+// is an sq=0-like init that starts with ftyp, a job that finishes over a
+// nearly empty archive. yt-dlp's https pass skips both kinds
+// (_video.py:3492-3507), and so does this pool. Where another client listed
+// the same stream as a file, the extraction's dedup has already kept that
+// copy instead (youtube's deduplicateFormats, the same skip); what is left
+// here is a stream YouTube served segmented alone. Both slices are fresh.
+func wholeFileVodPool(formats []youtube.Format) (pool, segmented []youtube.Format) {
+	pool = make([]youtube.Format, 0, len(formats))
+	for _, f := range formats {
+		if f.URL != "" && f.Segmented() {
+			segmented = append(segmented, f)
+			continue
+		}
+		pool = append(pool, f)
+	}
+	return pool, segmented
+}
+
+// segmentedStreamLost is the clear failure for a VOD whose wanted video or
+// audio YouTube served only segmented: the whole-file pool (wholeFileVodPool)
+// has none of it, and selected — the job's own selection over that pool —
+// came back without it. Leaving the formats out without this check would let
+// a video job archive its audio alone, silently, where its OTF video used to
+// fail as a fragment. DownloadVod holds its first selection to this, and a
+// missing_pot degrade's too (segmented then also holds what the degrade's
+// re-filters left out), and each call adds its own why: no DASH manifest came
+// with the formats, or their whole-file copies need a token. A stream the
+// job does not want — an audio_only job's video, a -1 manual itag — is never
+// lost, and neither is audio a muxed (progressive) pick already carries. A
+// loss-free pool that still left formats out says which, at Info. Each itag
+// is named once: a degrade's re-filter can leave one out again.
+func segmentedStreamLost(job *JobContext, selected youtube.SelectedFormats, segmented []youtube.Format) error {
+	if len(segmented) == 0 {
+		return nil
+	}
+	wantsVideo := job.Job.QualityPreference != "audio_only"
+	if v := job.Job.SelectedVideoItag; v != nil {
+		wantsVideo = *v != -1
+	}
+	wantsAudio := job.Job.SelectedAudioItag == nil || *job.Job.SelectedAudioItag != -1
+	var lost []string
+	if selected.Video == nil && wantsVideo && slices.ContainsFunc(segmented, func(f youtube.Format) bool { return strings.Contains(f.MimeType, "video") }) {
+		lost = append(lost, "video")
+	}
+	if selected.Audio == nil && !IsProgressiveFormat(selected.Video) && wantsAudio && slices.ContainsFunc(segmented, func(f youtube.Format) bool { return f.IsAudio() }) {
+		lost = append(lost, "audio")
+	}
+	itags := make([]string, 0, len(segmented))
+	for _, f := range segmented {
+		if s := strconv.Itoa(f.Itag); !slices.Contains(itags, s) {
+			itags = append(itags, s)
+		}
+	}
+	if len(lost) > 0 {
+		return fmt.Errorf("VOD: YouTube serves this video's %s only as segments (itags %s: OTF or live adaptive, no contentLength), which a whole-file download cannot fetch",
+			strings.Join(lost, " and "), strings.Join(itags, ", "))
+	}
+	job.Logger.Info("VOD: left out formats YouTube serves only as segments, which a whole-file download cannot fetch",
+		"jobID", job.Job.ID, "itags", strings.Join(itags, ","))
+	return nil
 }
 
 // withoutGvsRequiredFormats splits formats into the ones usable without a GVS
