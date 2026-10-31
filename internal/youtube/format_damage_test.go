@@ -3,6 +3,7 @@ package youtube
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -12,6 +13,13 @@ import (
 // states microLength (likewise), and whose adaptiveFormats are the given
 // JSON objects.
 func damageResponse(t *testing.T, lengthSeconds, microLength string, formats ...string) map[string]any {
+	t.Helper()
+	return damageResponseIn(t, "adaptiveFormats", lengthSeconds, microLength, formats...)
+}
+
+// damageResponseIn is damageResponse with the formats under streamingData's
+// array named key: "adaptiveFormats", or "formats" for the muxed ones.
+func damageResponseIn(t *testing.T, key, lengthSeconds, microLength string, formats ...string) map[string]any {
 	t.Helper()
 	vd := fmt.Sprintf(`"videoId": %q, "title": "t", "author": "a"`, damageVideoID)
 	if lengthSeconds != "" {
@@ -25,8 +33,8 @@ func damageResponse(t *testing.T, lengthSeconds, microLength string, formats ...
 		"playabilityStatus": {"status": "OK"},
 		"videoDetails": {%s},
 		"microformat": {"playerMicroformatRenderer": %s},
-		"streamingData": {"adaptiveFormats": [%s]}
-	}`, vd, mf, strings.Join(formats, ",")))
+		"streamingData": {%q: [%s]}
+	}`, vd, mf, key, strings.Join(formats, ",")))
 }
 
 const damageVideoID = "damageVid01"
@@ -45,10 +53,11 @@ func damageFormat(itag int, mime, approx string) string {
 }
 
 const (
-	damageAV1  = `video/mp4; codecs="av01.0.08M.08"`
-	damageVP9  = `video/webm; codecs="vp9"`
-	damageOpus = `audio/webm; codecs="opus"`
-	damageAAC  = `audio/mp4; codecs="mp4a.40.2"`
+	damageAV1   = `video/mp4; codecs="av01.0.08M.08"`
+	damageVP9   = `video/webm; codecs="vp9"`
+	damageOpus  = `audio/webm; codecs="opus"`
+	damageAAC   = `audio/mp4; codecs="mp4a.40.2"`
+	damageMuxed = `video/mp4; codecs="avc1.42001E, mp4a.40.2"`
 )
 
 // TestParsePlayerResponseMarksDamagedRenditions pins yt-dlp's is_damaged
@@ -67,13 +76,34 @@ const (
 //   - a stated 0 read as unstated                        → "a stated 0"
 //   - an unparsable value read as 0                      → "unparsable"
 //   - the microformat fallback dropped                   → "microformat"
+//   - approxDurationMs read from adaptiveFormats alone   → "a muxed format"
+//   - the stamp limited to video                         → "an audio format"
 func TestParsePlayerResponseMarksDamagedRenditions(t *testing.T) {
-	for _, tc := range []struct {
+	type row struct {
 		name          string
 		length, micro string
 		approx        string
 		want          bool
-	}{
+	}
+	// check parses one format, of the given itag and mimeType under the
+	// given streamingData array, and checks its stamp.
+	check := func(t *testing.T, tc row, key string, itag int, mime string) {
+		t.Helper()
+		p := NewPlayerAPI(nil, noopLogger{})
+		data := damageResponseIn(t, key, tc.length, tc.micro, damageFormat(itag, mime, tc.approx))
+		info, err := p.parsePlayerResponse(context.Background(), data, "", nil, damageVideoID)
+		if err != nil {
+			t.Fatalf("parsePlayerResponse: %v", err)
+		}
+		if len(info.Formats) != 1 {
+			t.Fatalf("parsed %d formats, want 1", len(info.Formats))
+		}
+		if got := info.Formats[0].Damaged; got != tc.want {
+			t.Errorf("Damaged = %v, want %v (lengthSeconds %q, microformat %q, approxDurationMs %s)",
+				got, tc.want, tc.length, tc.micro, tc.approx)
+		}
+	}
+	for _, tc := range []row{
 		{"well under half is damaged", "600", "", `"120000"`, true},
 		{"one millisecond under half is damaged", "600", "", `"299999"`, true},
 		{"exactly half is intact", "600", "", `"300000"`, false},
@@ -87,21 +117,20 @@ func TestParsePlayerResponseMarksDamagedRenditions(t *testing.T) {
 		{"no length anywhere: nothing is damaged", "", "", `"1000"`, false},
 		{"a one-second video's half is zero", "1", "", `"0"`, false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := NewPlayerAPI(nil, noopLogger{})
-			data := damageResponse(t, tc.length, tc.micro, damageFormat(399, damageAV1, tc.approx))
-			info, err := p.parsePlayerResponse(context.Background(), data, "", nil, damageVideoID)
-			if err != nil {
-				t.Fatalf("parsePlayerResponse: %v", err)
-			}
-			if len(info.Formats) != 1 {
-				t.Fatalf("parsed %d formats, want 1", len(info.Formats))
-			}
-			if got := info.Formats[0].Damaged; got != tc.want {
-				t.Errorf("Damaged = %v, want %v (lengthSeconds %q, microformat %q, approxDurationMs %s)",
-					got, tc.want, tc.length, tc.micro, tc.approx)
-			}
-		})
+		t.Run(tc.name, func(t *testing.T) { check(t, tc, "adaptiveFormats", 399, damageAV1) })
+	}
+	// Every kind of format is held to the length, from either array.
+	for _, tc := range []struct {
+		row
+		key  string
+		itag int
+		mime string
+	}{
+		{row{"an audio format", "600", "", `"120000"`, true}, "adaptiveFormats", 251, damageOpus},
+		{row{"a muxed format, from streamingData.formats", "600", "", `"120000"`, true}, "formats", 18, damageMuxed},
+		{row{"an intact muxed format", "600", "", `"600046"`, false}, "formats", 18, damageMuxed},
+	} {
+		t.Run(tc.name, func(t *testing.T) { check(t, tc.row, tc.key, tc.itag, tc.mime) })
 	}
 }
 
@@ -201,18 +230,57 @@ func TestDamagedRenditionsRankBelowEveryIntactOne(t *testing.T) {
 // TestSelectorNamesThePassedOverRenditions pins the selector's Debug line:
 // the damaged renditions it passed over, and only those — an intact one, or a
 // damaged one taken because nothing intact of its kind exists, is not passed
-// over.
+// over. Each kind is held to its own intact renditions.
+//
+// Mutants this kills:
+//   - every damaged rendition listed                → "a damaged Opus with
+//     nothing intact beside it" names 251
+//   - the audio half of the condition dropped       → "a damaged Opus beside
+//     an intact AAC" leaves 251 off
+//   - the line dropped                              → both rows
 func TestSelectorNamesThePassedOverRenditions(t *testing.T) {
-	formats := []Format{
+	video := []Format{
 		{Itag: 399, MimeType: damageAV1, Width: new(1920), Height: new(1080), URL: "https://x/399", Damaged: true},
 		{Itag: 248, MimeType: damageVP9, Width: new(1920), Height: new(1080), URL: "https://x/248"},
-		{Itag: 251, MimeType: damageOpus, URL: "https://x/251", Damaged: true},
 	}
-	lg := &damageLogger{}
-	SelectBestFormatsWithLogger(formats, 1080, true, lg)
-	got := lg.damaged(lg.debugs)
-	if len(got) != 1 || !strings.Contains(got[0], "itag 399") || strings.Contains(got[0], "itag 248") || strings.Contains(got[0], "itag 251") {
-		t.Errorf("passed-over lines = %q, want one naming itag 399 alone", got)
+	for _, tc := range []struct {
+		name       string
+		audio      []Format
+		want, not  []string
+		wantFormat string
+	}{
+		{
+			name:  "a damaged Opus with nothing intact beside it is taken, not passed over",
+			audio: []Format{{Itag: 251, MimeType: damageOpus, URL: "https://x/251", Damaged: true}},
+			want:  []string{"itag 399"}, not: []string{"itag 248", "itag 251"},
+		},
+		{
+			name: "a damaged Opus beside an intact AAC is passed over",
+			audio: []Format{
+				{Itag: 251, MimeType: damageOpus, URL: "https://x/251", Damaged: true},
+				{Itag: 140, MimeType: damageAAC, URL: "https://x/140"},
+			},
+			want: []string{"itag 399", "itag 251"}, not: []string{"itag 248", "itag 140"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lg := &damageLogger{}
+			SelectBestFormatsWithLogger(append(slices.Clone(video), tc.audio...), 1080, true, lg)
+			got := lg.damaged(lg.debugs)
+			if len(got) != 1 {
+				t.Fatalf("passed-over lines = %q, want one naming %v", got, tc.want)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(got[0], w) {
+					t.Errorf("passed-over line %q does not name %s", got[0], w)
+				}
+			}
+			for _, n := range tc.not {
+				if strings.Contains(got[0], n) {
+					t.Errorf("passed-over line %q names %s, which was not passed over", got[0], n)
+				}
+			}
+		})
 	}
 }
 
@@ -225,16 +293,18 @@ func itagOf(f *Format) any {
 
 // TestAShortRenditionIsNotArchived is the case end to end, from the wire: the
 // response's top rendition — an AV1, which outranks VP9 — states a third of
-// the video's length (yt-dlp's 2-nOtRESiUc, #2823), and the parsed pool's
-// selection takes the intact VP9 and the intact Opus. Every link of the chain
-// is load-bearing: the approxDurationMs parse, the stamp against
-// lengthSeconds, and the selector's rung.
+// the video's length (yt-dlp's 2-nOtRESiUc, #2823), and so does its Opus,
+// which outranks AAC; the parsed pool's selection takes the intact VP9 and
+// the intact AAC. Every link of the chain is load-bearing, for each kind: the
+// approxDurationMs parse, the stamp against lengthSeconds, and the selector's
+// rung.
 func TestAShortRenditionIsNotArchived(t *testing.T) {
 	p := NewPlayerAPI(nil, noopLogger{})
 	data := damageResponse(t, "600", "",
 		damageFormat(399, damageAV1, `"200000"`),
 		damageFormat(248, damageVP9, `"600046"`),
-		damageFormat(251, damageOpus, `"600061"`),
+		damageFormat(251, damageOpus, `"200000"`),
+		damageFormat(140, damageAAC, `"600061"`),
 	)
 	info, err := p.parsePlayerResponse(context.Background(), data, "", nil, damageVideoID)
 	if err != nil {
@@ -244,8 +314,8 @@ func TestAShortRenditionIsNotArchived(t *testing.T) {
 	if got.Video == nil || got.Video.Itag != 248 {
 		t.Errorf("video = %v, want the intact VP9 248 — the short AV1 would stop at 200 s of 600", itagOf(got.Video))
 	}
-	if got.Audio == nil || got.Audio.Itag != 251 {
-		t.Errorf("audio = %v, want 251", itagOf(got.Audio))
+	if got.Audio == nil || got.Audio.Itag != 140 {
+		t.Errorf("audio = %v, want the intact AAC 140 — the short Opus would stop at 200 s of 600", itagOf(got.Audio))
 	}
 }
 
@@ -288,6 +358,9 @@ func (l *damageLogger) damaged(lines []string) []string {
 //   - the client or the itags left off the line      → the content checks
 //   - reported when nothing is damaged               → the intact response
 //     Warns
+//   - one once-flag shared with the DRM report (drmWarned for
+//     damagedWarned)                                 → the response that
+//     carries both loses its damage Warn to the DRM one
 func TestDamagedRenditionsAreReportedOncePerExtraction(t *testing.T) {
 	short := damageResponse(t, "600", "",
 		damageFormat(399, damageAV1, `"200000"`), damageFormat(248, damageVP9, `"600046"`))
@@ -335,6 +408,27 @@ func TestDamagedRenditionsAreReportedOncePerExtraction(t *testing.T) {
 	}
 	if got := lg.damaged(lg.debugs); len(got) != debugsBefore+1 || !strings.Contains(got[len(got)-1], "client android_vr") || !strings.Contains(got[len(got)-1], "itags [399]") {
 		t.Errorf("a probe's report = %q, want one Debug line naming android_vr and itag 399", got[debugsBefore:])
+	}
+
+	// A response that carries a DRM-protected format and a damaged one: the
+	// DRM report, logged first (parseFormats), must not spend the damage
+	// report's once — each has its own.
+	both := &damageLogger{}
+	bp := NewPlayerAPI(nil, both)
+	drmAndShort := damageResponse(t, "600", "",
+		`{"itag": 137, "url": "https://x/137", "mimeType": "video/mp4; codecs=\"avc1.640028\"", "width": 1920, "height": 1080, "drmFamilies": ["WIDEVINE"]}`,
+		damageFormat(399, damageAV1, `"200000"`), damageFormat(248, damageVP9, `"600046"`))
+	if _, err := bp.parsePlayerResponse(withPlayerClient(withExtractionState(context.Background()), "tv"), drmAndShort, "", nil, damageVideoID); err != nil {
+		t.Fatalf("parsePlayerResponse: %v", err)
+	}
+	var drm int
+	for _, w := range both.warns {
+		if strings.Contains(w, "DRM-protected") {
+			drm++
+		}
+	}
+	if got := both.damaged(both.warns); drm != 1 || len(got) != 1 {
+		t.Errorf("a response carrying both logged %d DRM Warns and %d damage Warns, want 1 and 1: %q", drm, len(got), both.warns)
 	}
 }
 
