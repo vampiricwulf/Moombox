@@ -20,6 +20,18 @@ const tvPostLiveBody = `{
 	]}
 }`
 
+// tvLiveBody is a TV answer for a broadcast still on air that states
+// isPostLiveDvr as well. No capture shows YouTube sending the pair; the row
+// that reads it pins only that the promotion moves a VOD alone.
+const tvLiveBody = `{
+	"playabilityStatus": {"status": "OK"},
+	"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a", "isLiveContent": true, "isLive": true, "isPostLiveDvr": true},
+	"streamingData": {"adaptiveFormats": [
+		{"itag": 137, "url": "https://tv/v", "mimeType": "video/mp4; codecs=\"avc1.640028\"", "width": 1920, "height": 1080, "targetDurationSec": 2},
+		{"itag": 140, "url": "https://tv/a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "targetDurationSec": 2}
+	]}
+}`
+
 // tvFinishedBody is the same broadcast once nobody states isPostLiveDvr: the
 // VOD the extraction has always called it.
 const tvFinishedBody = `{
@@ -46,7 +58,10 @@ const tvFinishedBody = `{
 // both cascades reads vod); a later statement of the flag overriding an
 // earlier one (the watch page's false row reads post_live); classifyStream
 // reading isPostLiveDvr itself (the single-parse check, and the false row,
-// whose TV winner then calls itself post-live).
+// whose TV winner then calls itself post-live); the promotion applied to
+// any status (the live row reads post_live, which the worker would fold into
+// a VOD); the promotion keyed on the exemption verdict rather than post-live
+// (the watch page's stale isLive row reads post_live).
 func TestTVPostLiveAnswerIsPostLive(t *testing.T) {
 	cascades := map[string]func(*PlayerAPI) (*VideoInfo, error){
 		"public": func(p *PlayerAPI) (*VideoInfo, error) {
@@ -67,6 +82,17 @@ func TestTVPostLiveAnswerIsPostLive(t *testing.T) {
 		{"a finished broadcast nobody calls post-live", tvFinishedBody, "", StreamVOD, false},
 		{"the watch page's earlier false stands", tvPostLiveBody,
 			`{"playabilityStatus": {"status": "OK"}, "videoDetails": {"videoId": "test1234567", "title": "t", "author": "a", "isLiveContent": true, "isPostLiveDvr": false}}`,
+			StreamVOD, false},
+		// Only a VOD moves. A broadcast on air already takes the live path,
+		// whatever else its answer states; upstream's live_status would read
+		// post_live here (its first rule), which Moombox leaves to the live
+		// capture.
+		{"a live answer stays live", tvLiveBody, "", StreamLive, false},
+		// The rule is post_live alone, not the exemption verdict the
+		// pre-roll wait reads: a watch page that still says isLive moves no
+		// finished broadcast.
+		{"a stale isLive moves no VOD", tvFinishedBody,
+			`{"playabilityStatus": {"status": "OK"}, "videoDetails": {"videoId": "test1234567", "title": "t", "author": "a", "isLiveContent": true, "isLive": true}}`,
 			StreamVOD, false},
 	} {
 		for cascade, run := range cascades {
@@ -199,7 +225,8 @@ func TestHasSplitAdaptiveFormatsTakesOnlyAudioLessVideo(t *testing.T) {
 // no-cascade rows keep the tv copy); the rule applied to live adaptive
 // copies whatever the verdict (the post-live row loses tv's); OTF kept under
 // live processing like a live adaptive copy (the post-live OTF row); the
-// class shadows ranked by AuthLevel alone (the shadow row's shadow is tv's).
+// class shadows ranked by AuthLevel alone (the shadow row's shadow is tv's);
+// live adaptive copies kept for post_live alone (the live row loses tv's).
 func TestDedupKeepsTheWholeFileCopyOfASegmentedStream(t *testing.T) {
 	w, h := 1920, 1080
 	video := func(source string, level int, mod func(*Format)) Format {
@@ -218,6 +245,12 @@ func TestDedupKeepsTheWholeFileCopyOfASegmentedStream(t *testing.T) {
 		extractionStateFrom(ctx).notePlaybackLive(playbackLiveFlags{postLiveDvr: &yes})
 		return ctx
 	}
+	isLive := func() context.Context {
+		ctx := withExtractionState(context.Background())
+		yes := true
+		extractionStateFrom(ctx).notePlaybackLive(playbackLiveFlags{isLive: &yes})
+		return ctx
+	}
 	vod := func() context.Context { return withExtractionState(context.Background()) }
 
 	for _, tc := range []struct {
@@ -231,6 +264,13 @@ func TestDedupKeepsTheWholeFileCopyOfASegmentedStream(t *testing.T) {
 			[]Format{video("tv_public", AuthLevelTVPublic, liveAdaptive), video("watch_page", AuthLevelWatchPagePublic, file)},
 			"watch_page", ""},
 		{"post-live keeps the live adaptive copy first-seen", postLive(),
+			[]Format{video("tv_public", AuthLevelTVPublic, liveAdaptive), video("watch_page", AuthLevelWatchPagePublic, file)},
+			"tv_public", ""},
+		// is_live counts as post_live does. Upstream keeps live adaptive
+		// formats for is_live only under --live-from-start, a difference no
+		// real pool shows (a broadcast on air states no length), so this row
+		// pins the rule as written rather than a seen shape.
+		{"a live verdict keeps the live adaptive copy first-seen", isLive(),
 			[]Format{video("tv_public", AuthLevelTVPublic, liveAdaptive), video("watch_page", AuthLevelWatchPagePublic, file)},
 			"tv_public", ""},
 		{"an OTF copy loses to a file even post-live", postLive(),
