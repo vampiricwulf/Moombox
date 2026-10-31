@@ -75,13 +75,15 @@ func serveFakeYouTube(t *testing.T, bodies map[string]string) *fakeYouTube {
 //
 //   - when that refuses the same way, the monitors see a failed probe — no
 //     classification, nothing stored, the failure counted by the failure
-//     tracker, and the video probed again next cycle;
+//     tracker — marked monitor.ErrProbeInconclusive, so DECAPI probes the
+//     video again next cycle and the feed walk holds the row on its ladder;
 //   - when it answers, its answer is the classification, so an upcoming
 //     stream the wall hid becomes a job.
 //
 // Mutants: youtube.Service.ProbeVideoStatus returning ANDROID_VR's answer as
 // it stands (the first row classifies not_a_stream); the escalation left out
-// (the second row's stream is never found).
+// (the second row's stream is never found); monitorProbe not marking the
+// refusal inconclusive.
 func TestABotWalledStatusProbeReachesTheMonitorsAsAnErroredProbe(t *testing.T) {
 	const botWall = `{"playabilityStatus":{"status":"LOGIN_REQUIRED","reason":"Sign in to confirm you’re not a bot"}}`
 	const upcoming = `{"playabilityStatus":{"status":"LIVE_STREAM_OFFLINE","reason":"This live event will begin in a few moments."},` +
