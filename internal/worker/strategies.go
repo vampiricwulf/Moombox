@@ -468,6 +468,10 @@ func minterUsable(m gvsTokenMinter) bool {
 // a URL that needs none (cipher's needsNoPlayer) and fails, as before, for
 // one that does.
 //
+// Nor is a fresh URL installed on a stream that carries a token when the
+// re-extraction ran under another visitor session than the one the token is
+// bound to (the binding guard below, audit G51): the token alone is.
+//
 // A URL from a fresh player response is not installed before that
 // response's pre-roll ad is over (waitForFreshPlayback, yt-dlp's
 // available_at), and the wait runs within refreshCtx — see
@@ -529,6 +533,9 @@ func refreshGvsCredentials(
 		formats := videoInfo.Formats
 		playerURL := videoInfo.PlayerURL
 		waitInfo := videoInfo
+		// freshVisitorBinding is the re-extraction's own GVS binding when it is
+		// a visitor-data one, "" otherwise — see the binding guard below.
+		freshVisitorBinding := ""
 		if job.YT != nil {
 			fresh, err := refreshVideoInfo(job.YT, refreshCtx, job.Job.VideoID)
 			if err != nil {
@@ -539,6 +546,9 @@ func refreshGvsCredentials(
 				waitInfo = fresh
 				if fresh.PlayerURL != "" {
 					playerURL = fresh.PlayerURL
+				}
+				if fresh.GvsBindingKind == youtube.BindingVisitorData {
+					freshVisitorBinding = fresh.GvsBinding
 				}
 			}
 			// Interruption spec Tier 1 evidence: this re-fetch runs on every
@@ -583,6 +593,23 @@ func refreshGvsCredentials(
 			}
 			job.Logger.Warn("[POT] credential refresh: itag now served by a client of a different token class — keeping the current URL",
 				"jobID", job.Job.ID, "tag", tag, "itag", itag, "setupSource", streamSource, "freshSource", freshSource, "reason", reason)
+		} else if youtube.GvsTokenRequired(streamSource) && freshVisitorBinding != "" && freshVisitorBinding != binding {
+			// The binding guard (audit G51). A token rides this stream, and it
+			// is minted under the setup binding; the re-extraction ran under a
+			// visitor session of its own — invalidate403Caches dropped the
+			// cached visitor data above, and a watch page hands out a fresh one
+			// — so its URL and the token would disagree on the session.
+			// yt-dlp never pairs them: each extraction, a live-from-start
+			// refetch included, mints its tokens under its own visitor_data
+			// (_video.py:3084-3096, 1953-1960). Keep the current URL, whose
+			// session the token matches, and install the token alone, as the
+			// token-class guard above does. Only a fresh visitor-data binding
+			// is read: the video-ID experiment's and a datasync ID are the
+			// same on every extraction of the job. A stall refresh rebuilds the
+			// downloaders under the fresh extraction's own binding
+			// (refreshDownload → gvsBinding), so the URL is renewed there.
+			job.Logger.Warn("[POT] credential refresh: the re-extraction's visitor session is not the one the token is bound to — keeping the current URL",
+				"jobID", job.Job.ID, "tag", tag, "itag", itag)
 		} else if waitForFreshPlayback(refreshCtx, job, waitInfo, formatByItag(formats, itag), tag) {
 			// The fresh response's pre-roll ad is waited out first, within
 			// refreshCtx (see the doc above); one that outlasts it leaves the
