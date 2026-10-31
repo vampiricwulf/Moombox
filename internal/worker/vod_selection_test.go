@@ -94,7 +94,7 @@ func TestVodReselectionKeepsTheJobsSelection(t *testing.T) {
 		if res.VideoFormat == nil || res.VideoFormat.Itag != 247 {
 			t.Fatalf("fixture: primary %+v, want 247", res.VideoFormat)
 		}
-		if _, _, err := resolveVodURLs(ctx, job, res, pool, failingSigSolver{}, nil, vodTestPlayerURL); err != nil {
+		if _, _, err := resolveVodURLs(ctx, job, res, pool, nil, nil, failingSigSolver{}, nil, vodTestPlayerURL); err != nil {
 			t.Fatalf("resolveVodURLs: %v", err)
 		}
 		if res.VideoFormat.Itag != 136 {
@@ -112,7 +112,7 @@ func TestVodReselectionKeepsTheJobsSelection(t *testing.T) {
 		}
 		job := vodJob(t, 360, true, "")
 		res := &DownloadResult{HasVideo: true, VideoFormat: &pool[0], VideoPath: "video.mp4", HasAudio: true}
-		_, audioURL, err := resolveVodURLs(ctx, job, res, pool, failingSigSolver{}, nil, vodTestPlayerURL)
+		_, audioURL, err := resolveVodURLs(ctx, job, res, pool, nil, nil, failingSigSolver{}, nil, vodTestPlayerURL)
 		if err != nil {
 			t.Fatalf("resolveVodURLs: %v", err)
 		}
@@ -133,7 +133,7 @@ func TestVodReselectionKeepsTheJobsSelection(t *testing.T) {
 		if res.VideoFormat == nil || res.VideoFormat.Itag != 251 {
 			t.Fatalf("fixture: primary %+v, want the opus audio", res.VideoFormat)
 		}
-		if _, _, err := resolveVodURLs(ctx, job, res, pool, failingSigSolver{}, nil, vodTestPlayerURL); err != nil {
+		if _, _, err := resolveVodURLs(ctx, job, res, pool, nil, nil, failingSigSolver{}, nil, vodTestPlayerURL); err != nil {
 			t.Fatalf("resolveVodURLs: %v", err)
 		}
 		if res.VideoFormat.Itag != 140 {

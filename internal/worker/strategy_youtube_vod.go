@@ -46,7 +46,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	if !result.HasVideo && !result.HasAudio {
 		return nil, fmt.Errorf("no suitable formats found for VOD download")
 	}
-	videoResolved, audioResolved, err := resolveVodURLs(ctx, job, result, pool, routedSolver, cipherSolver, videoInfo.PlayerURL)
+	videoResolved, audioResolved, err := resolveVodURLs(ctx, job, result, pool, nil, segmented, routedSolver, cipherSolver, videoInfo.PlayerURL)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +138,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			if err := segmentedStreamLost(job, selected, segmented); err != nil {
 				return nil, fmt.Errorf("%w; its whole-file copies need a GVS PO token, and none could be minted (mint failed: %w)", err, mintErr)
 			}
-			videoResolved, audioResolved, err = resolveVodURLs(ctx, job, result, pool, routedSolver, cipherSolver, videoInfo.PlayerURL)
+			videoResolved, audioResolved, err = resolveVodURLs(ctx, job, result, pool, dropped, segmented, routedSolver, cipherSolver, videoInfo.PlayerURL)
 			if err != nil {
 				return nil, err
 			}
@@ -404,16 +404,17 @@ func selectVodFormats(job *JobContext, formats, dropped, segmented []youtube.For
 // engine is handed fetchable URLs. Stage 3 of the cipher pipeline rework:
 // parseFormats leaves URLs raw (with sigCipher entries carrying EncryptedSig
 // + the bare `url=` value). Bound to two attempts via re-selection — the
-// alternate is drawn from pool, the same list the selection ran over — so a
-// fully broken cipher state surfaces cleanly. A re-selection rewrites
-// result.VideoFormat / result.AudioFormat.
-func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult, pool []youtube.Format, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, playerURL string) (videoResolved, audioResolved string, err error) {
+// alternate is drawn from pool, the same list the selection ran over, and
+// dropped and segmented are what that selection was handed beside it
+// (selectVodFormats) — so a fully broken cipher state surfaces cleanly. A
+// re-selection rewrites result.VideoFormat / result.AudioFormat.
+func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult, pool, dropped, segmented []youtube.Format, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, playerURL string) (videoResolved, audioResolved string, err error) {
 	if result.HasVideo && result.VideoFormat != nil {
 		resolvedURL, err := resolveFormatURL(ctx, result.VideoFormat, routedSolver, cipherSolver, playerURL, job.Logger)
 		if err != nil {
 			job.Logger.Warn("[Cipher] VOD video resolve failed; trying re-selection",
 				"itag", result.VideoFormat.Itag, "err", err)
-			alt := reselectVodWithout(job, pool, result.VideoFormat.Itag)
+			alt := reselectVodWithout(job, pool, dropped, segmented, result.VideoFormat.Itag)
 			if !alt.HasVideo || alt.VideoFormat == nil {
 				return "", "", fmt.Errorf("VOD: video URL resolve failed and no alternate format: %w", err)
 			}
@@ -438,7 +439,7 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 		if err != nil {
 			job.Logger.Warn("[Cipher] VOD audio resolve failed; trying re-selection",
 				"itag", result.AudioFormat.Itag, "err", err)
-			retry := reselectVodWithout(job, pool, result.AudioFormat.Itag).AudioFormat
+			retry := reselectVodWithout(job, pool, dropped, segmented, result.AudioFormat.Itag).AudioFormat
 			if retry == nil {
 				return "", "", fmt.Errorf("VOD: audio URL resolve failed and no alternate format: %w", err)
 			}
@@ -459,15 +460,19 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 // simply the highest-bitrate format of the same kind, which ignored the
 // resolution cap, the quality preference, prefer_60fps and audio_only alike:
 // a 720p-capped job whose 720p format failed its signature downloaded the
-// 2160p one, and an audio-only job whose audio failed downloaded video.
-func reselectVodWithout(job *JobContext, pool []youtube.Format, failedItag int) *DownloadResult {
+// 2160p one, and an audio-only job whose audio failed downloaded video. It is
+// handed the dropped and segmented lists the selection it replaces was
+// handed, so a pin that selection gave up on is reported for the same reason
+// again; without them the pin loop warned "not found" of an itag the line
+// before had just called segmented, or token-bound.
+func reselectVodWithout(job *JobContext, pool, dropped, segmented []youtube.Format, failedItag int) *DownloadResult {
 	rest := make([]youtube.Format, 0, len(pool))
 	for _, f := range pool {
 		if f.Itag != failedItag {
 			rest = append(rest, f)
 		}
 	}
-	_, alt := selectVodFormats(job, rest, nil, nil)
+	_, alt := selectVodFormats(job, rest, dropped, segmented)
 	return alt
 }
 
