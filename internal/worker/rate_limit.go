@@ -583,14 +583,11 @@ func (w *DownloadWorker) outlastRateLimit(ctx context.Context, job *database.Job
 }
 
 // noteAnswered is what a pass whose fetch YouTube answered ends (processJob):
-// the job's spell of refusals, and the session's captcha spell when the
-// answer carries no rate-limit verdict at all (answeredFetch). A Twitch
-// answer says nothing of YouTube's.
-func (w *DownloadWorker) noteAnswered(job *database.Job, info *youtube.VideoInfo) {
+// the job's spell of refusals. The session's captcha spell ends at the fetch
+// itself (Process), which sees every answer, not only those that go on to
+// download.
+func (w *DownloadWorker) noteAnswered(job *database.Job) {
 	w.rateLimitSpells.end(job.ID)
-	if job.Platform != "twitch" && answeredFetch(info) {
-		w.captcha.clear()
-	}
 }
 
 // waitOutRateLimit holds jobID's run for wait under the wait's progress

@@ -328,6 +328,18 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 		}
 		return nil, fmt.Errorf("full fetch failed: %w", err)
 	}
+	// A fetch YouTube answered with no rate-limit verdict ends the session's
+	// captcha spell (captchaAlert), whatever the job then does with it — goes
+	// on to download, ends on a verdict on the video (private, removed,
+	// members-only), or waits for a broadcast to begin, which it does inside
+	// this call, for as long as the wait lasts. Read here, at the fetch, as
+	// the waiting loop's fetches (noteFetch) and a stale VOD's re-extraction
+	// (refreshStaleVodInfo) are. Read only where a pass went on to download
+	// (processJob), the spell outlived every other answer, and a captcha that
+	// came back after one told no one.
+	if answeredFetch(info) {
+		sp.captcha.clear()
+	}
 
 	sp.logger.Debug("fetch result",
 		"status", info.StreamStatus,

@@ -982,7 +982,7 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		// stale re-extraction's — is a fresh limit (outlastRateLimit), whose
 		// day is counted from it (noteAnswered).
 		rateLimitSince = time.Time{}
-		w.noteAnswered(job, result.VideoInfo)
+		w.noteAnswered(job)
 
 		// Check cancellation between stream processing and download
 		if ctx.Err() != nil {

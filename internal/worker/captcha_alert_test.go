@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
@@ -59,15 +60,19 @@ func TestCaptchaVerdictIsARateLimitThatSaysSo(t *testing.T) {
 // TestCaptchaTellsTheOperatorOncePerSpell: two jobs a captcha refuses in one
 // spell send one "captcha_required" between them, and each waits under the
 // captcha's own line, "YouTube asks for a captcha... (… left)", not the rate
-// limit's. A fetch that answers — the first job's, half an hour on — ends the
+// limit's. A fetch that answers — the first job's, half an hour on, a verdict
+// on the video that ends it in Error, with nothing downloaded — ends the
 // spell, and the second job's next refusal opens a new one, which tells the
-// operator again. A notification per job was one per refused video every
-// half hour, and the rate limit's line told the operator to wait for
-// something only they could fix.
+// operator again. Both run the real stream processing, whose fetch is where
+// an answer is read (Process). A notification per job was one per refused
+// video every half hour, and the rate limit's line told the operator to wait
+// for something only they could fix; and only a pass that went on to
+// download ended the spell, so a captcha back after any other answer told
+// no one.
 //
 // Mutants: raise with no open gate — two notifications in the first spell;
-// drop the clear from noteAnswered — no second; show the rate limit's line
-// for a captcha (waitLineFor) — the rows' lines; return ErrRateLimited for a
+// drop the clear from Process — no second; show the rate limit's line for a
+// captcha (waitLineFor) — the rows' lines; return ErrRateLimited for a
 // captcha — no notification at all.
 func TestCaptchaTellsTheOperatorOncePerSpell(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -76,22 +81,13 @@ func TestCaptchaTellsTheOperatorOncePerSpell(t *testing.T) {
 		w.captcha.notify = rec
 		backlogRetryJob(t, db, "captcha_a", 0, false)
 		backlogRetryJob(t, db, "captcha_b", 0, false)
-		refused := captchaResult(t)
 		t0 := time.Now()
-		w.processStreamFn = func(ctx context.Context, job *database.Job) (*StreamProcessResult, error) {
-			if ctx.Err() != nil {
-				return cancelledResult(), nil
+		w.streamProc.getVideoInfoFn = func(_ context.Context, id string) (*youtube.VideoInfo, error) {
+			if id == "captcha_a" && time.Since(t0) >= rateLimitRetryInterval {
+				return &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream,
+					PlayabilityError: youtube.PlayabilityPrivate, PlayabilityReason: "This video is private"}, nil
 			}
-			if job.ID == "captcha_a" && time.Since(t0) >= rateLimitRetryInterval {
-				// An answer: a VOD whose extraction is stale once its slots
-				// are held, and whose re-extraction then ends the job.
-				return &StreamProcessResult{ShouldDownload: true, IsVod: true, VideoInfo: vodInfoAt("http://127.0.0.1:1", 1, 1)}, nil
-			}
-			return refused, nil
-		}
-		w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
-			return judgeRefreshedVodInfo(&youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream,
-				PlayabilityError: youtube.PlayabilityPrivate, PlayabilityReason: "This video is private"})
+			return captchaInfo(), nil
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		var done []chan struct{}
@@ -127,7 +123,7 @@ func TestCaptchaTellsTheOperatorOncePerSpell(t *testing.T) {
 		time.Sleep(rateLimitRetryInterval + time.Minute)
 		synctest.Wait()
 		if row, _ := db.GetJob("captcha_a"); row.Status != database.StatusError {
-			t.Errorf("captcha_a: status %s, want the Error its re-extraction ended it in", row.Status)
+			t.Errorf("captcha_a: status %s, want the Error its answer ended it in", row.Status)
 		}
 		if n := len(rec.ByEvent("captcha_required")); n != 2 {
 			t.Errorf("%d captcha notifications once a fetch answered and the captcha came back, want 2", n)
@@ -139,6 +135,78 @@ func TestCaptchaTellsTheOperatorOncePerSpell(t *testing.T) {
 	})
 }
 
+// TestCaptchaSpellEndsOnEveryAnswer: whatever stream processing does with a
+// fetch YouTube answered with no rate-limit verdict — downloads it, ends on a
+// verdict on the video, or waits in its loop for a broadcast to begin, inside
+// Process for as long as that lasts — the answer ends the session's captcha
+// spell, at the fetch. A refusal ends nothing, and neither does an
+// extraction that came back with formats under a rate-limit verdict: it is
+// downloaded, but the verdict says the session is still walled.
+//
+// Mutants: drop the clear from Process — the answered rows' spell stays
+// open; read any fetch that is not refused outright as an answer
+// (answeredFetch returning info != nil) — the formats row's spell ends.
+func TestCaptchaSpellEndsOnEveryAnswer(t *testing.T) {
+	withFormats := vodInfoAt("https://r1.googlevideo.com", 4_000_000_000, 1)
+	withFormats.PlayabilityError, withFormats.PlayabilityReason = youtube.PlayabilityRateLimited, rateLimitReason
+	for _, tc := range []struct {
+		name   string
+		answer *youtube.VideoInfo
+		ended  bool
+	}{
+		{"a VOD it downloads", vodInfoAt("https://r1.googlevideo.com", 4_000_000_000, 1), true},
+		{"a private video", &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream,
+			PlayabilityError: youtube.PlayabilityPrivate, PlayabilityReason: "This video is private"}, true},
+		{"a members-only one", &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream,
+			PlayabilityError: youtube.PlayabilityMembersOnly, PlayabilityReason: "Join this channel",
+			SessionAuth: youtube.SessionAuthLoggedOut}, true},
+		{"a broadcast it waits for", upcomingAnswer(time.Now().Add(72 * time.Hour)), true},
+		{"formats under the verdict", withFormats, false},
+		{"the captcha again", captchaInfo(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				db := openTestDB(t)
+				chID := "UC_answer"
+				job := &database.Job{ID: "answer1", VideoID: "answer1", Platform: "youtube", Title: "T",
+					Status: database.StatusUpcoming, ChannelID: &chID}
+				if _, err := db.AddJob(job); err != nil {
+					t.Fatalf("AddJob: %v", err)
+				}
+				stored, _ := db.GetJob(job.ID)
+				sp := NewStreamProcessor(youtube.NewService(cookies.NewCookieJar(), discardLogger{}), nil,
+					&config.MoomboxConfig{}, db, discardLogger{})
+				sp.captcha = newCaptchaAlert(nil, discardLogger{})
+				sp.captcha.raise(stored)
+				sp.getVideoInfoFn = func(context.Context, string) (*youtube.VideoInfo, error) { return tc.answer, nil }
+				sp.probeStatusFn = func(context.Context, string, bool) (*youtube.VideoInfo, error) {
+					return upcomingAnswer(time.Time{}), nil
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					defer func() {
+						if r := recover(); r != nil {
+							t.Errorf("Process panicked: %v", r)
+						}
+					}()
+					_, _ = sp.Process(ctx, stored)
+				}()
+				synctest.Wait() // returned, or waiting in its loop
+				sp.captcha.mu.Lock()
+				open := sp.captcha.open
+				sp.captcha.mu.Unlock()
+				cancel()
+				<-done
+				if open == tc.ended {
+					t.Errorf("captcha spell open = %v after the fetch, want %v", open, !tc.ended)
+				}
+			})
+		})
+	}
+}
+
 // TestWaitingLoopCaptchaLineAndAlert: a go-live confirmation refused with a
 // captcha holds the next one off under the captcha's line, rewritten with
 // the time left, and tells the operator once however many of the loop's
@@ -147,7 +215,8 @@ func TestCaptchaTellsTheOperatorOncePerSpell(t *testing.T) {
 //
 // Mutants: rewrite the held line with the rate limit's (tickRateLimit) — the
 // tick's line; drop the raise from noteFetch — no notification; drop the
-// clear — no second.
+// clear — no second; clear on any fetch that is not refused — the formats
+// under the verdict end the spell, and the captcha after them tells again.
 func TestWaitingLoopCaptchaLineAndAlert(t *testing.T) {
 	sp, rec, job := foundTestJob(t)
 	sp.captcha = newCaptchaAlert(rec, discardLogger{})
@@ -177,6 +246,17 @@ func TestWaitingLoopCaptchaLineAndAlert(t *testing.T) {
 	if n := len(rec.ByEvent("captcha_required")); n != 1 {
 		t.Errorf("%d captcha notifications for two refusals of one spell, want 1", n)
 	}
+	// An extraction with formats under the verdict is no refusal, but no
+	// answer either: the spell stands, and the next captcha is still its.
+	withFormats := vodInfoAt("https://r1.googlevideo.com", 4_000_000_000, 1)
+	withFormats.PlayabilityError, withFormats.PlayabilityReason = youtube.PlayabilityRateLimited, rateLimitReason
+	if sp.noteFetch(job, &l, withFormats, false) {
+		t.Error("an extraction with formats under the verdict was read as a refusal")
+	}
+	sp.noteFetch(job, &l, captchaInfo(), false)
+	if n := len(rec.ByEvent("captcha_required")); n != 1 {
+		t.Errorf("%d captcha notifications once formats came back under the verdict, want the spell's 1", n)
+	}
 	sp.noteFetch(job, &l, upcomingAnswer(time.Time{}), false)
 	sp.noteFetch(job, &l, captchaInfo(), false)
 	if n := len(rec.ByEvent("captcha_required")); n != 2 {
@@ -186,11 +266,15 @@ func TestWaitingLoopCaptchaLineAndAlert(t *testing.T) {
 
 // TestCaptchaOnAReextractTellsTheOperator: a stale VOD's re-extraction a
 // captcha refuses, whose URLs are still good, downloads on them — and the
-// captcha, which the next job will meet, still tells the operator; a
-// re-extraction that answers ends the spell.
+// captcha, which the next job will meet, still tells the operator. A
+// re-extraction that came back with formats under a rate-limit verdict
+// downloads too, and ends nothing; one YouTube answered — with fresh URLs, or
+// with a verdict on the video that ends the job — ends the spell.
 //
 // Mutants: drop the raise from refreshStaleVodInfo — no notification; drop
-// the clear on its answer — the spell stays open.
+// the clear on its answer, or on its verdict — the spell stays open; clear on
+// any re-extraction — the formats under the verdict end it; clear on any
+// verdict, a rate limit's too — the captcha on expired URLs ends it.
 func TestCaptchaOnAReextractTellsTheOperator(t *testing.T) {
 	w, _ := testWorkerSetup(t)
 	rec := notificationtest.New()
@@ -200,26 +284,59 @@ func TestCaptchaOnAReextractTellsTheOperator(t *testing.T) {
 		return &StreamProcessResult{IsVod: true, VideoInfo: vodInfoAt("https://r1.googlevideo.com", now.Add(4*time.Hour).Unix(), 1)}
 	}
 	job := &database.Job{ID: "captcha_vod", VideoID: "captcha_vod", Platform: "youtube"}
-	w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
-		return judgeRefreshedVodInfo(captchaInfo())
+	open := func() bool {
+		w.captcha.mu.Lock()
+		defer w.captcha.mu.Unlock()
+		return w.captcha.open
 	}
-	if err := w.refreshStaleVodInfo(context.Background(), job, stale(), now.Add(-2*time.Hour)); err != nil {
+	reextract := func(info *youtube.VideoInfo) error {
+		w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
+			return judgeRefreshedVodInfo(info)
+		}
+		return w.refreshStaleVodInfo(context.Background(), job, stale(), now.Add(-2*time.Hour))
+	}
+	if err := reextract(captchaInfo()); err != nil {
 		t.Fatalf("refreshStaleVodInfo = %v, want the download on the stale extraction", err)
 	}
 	if n := len(rec.ByEvent("captcha_required")); n != 1 {
 		t.Errorf("%d captcha notifications, want 1", n)
 	}
-	w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
-		return vodInfoAt("https://r2.googlevideo.com", now.Add(6*time.Hour).Unix(), 1), nil
+	withFormats := vodInfoAt("https://r2.googlevideo.com", now.Add(6*time.Hour).Unix(), 1)
+	withFormats.PlayabilityError, withFormats.PlayabilityReason = youtube.PlayabilityRateLimited, rateLimitReason
+	if err := reextract(withFormats); err != nil {
+		t.Fatalf("refreshStaleVodInfo = %v, want the download on the formats it came back with", err)
 	}
-	if err := w.refreshStaleVodInfo(context.Background(), job, stale(), now.Add(-2*time.Hour)); err != nil {
+	if !open() {
+		t.Error("an extraction that came back with formats under a rate-limit verdict ended the captcha spell")
+	}
+	if err := reextract(vodInfoAt("https://r2.googlevideo.com", now.Add(6*time.Hour).Unix(), 1)); err != nil {
 		t.Fatalf("refreshStaleVodInfo = %v", err)
 	}
-	w.captcha.mu.Lock()
-	open := w.captcha.open
-	w.captcha.mu.Unlock()
-	if open {
+	if open() {
 		t.Error("the captcha spell is still open after a re-extraction answered")
+	}
+	if err := reextract(captchaInfo()); err != nil {
+		t.Fatalf("refreshStaleVodInfo = %v, want the download on the stale extraction", err)
+	}
+	// A captcha on one whose URLs have expired goes back to processJob, which
+	// waits it out: no answer, so the spell stands.
+	w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
+		return judgeRefreshedVodInfo(captchaInfo())
+	}
+	expired := &StreamProcessResult{IsVod: true, VideoInfo: vodInfoAt("https://r1.googlevideo.com", now.Add(-time.Hour).Unix(), 1)}
+	if err := w.refreshStaleVodInfo(context.Background(), job, expired, now.Add(-7*time.Hour)); !isCaptcha(err) {
+		t.Fatalf("refreshStaleVodInfo = %v, want the captcha back for processJob", err)
+	}
+	if !open() {
+		t.Error("a captcha on a re-extraction whose URLs had expired ended the captcha spell")
+	}
+	private := &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream,
+		PlayabilityError: youtube.PlayabilityPrivate, PlayabilityReason: "This video is private"}
+	if err := reextract(private); !isVodRefreshVerdict(err) {
+		t.Fatalf("refreshStaleVodInfo = %v, want the private verdict", err)
+	}
+	if open() {
+		t.Error("the captcha spell is still open after a re-extraction YouTube answered with a verdict on the video")
 	}
 }
 

@@ -162,6 +162,13 @@ func (w *DownloadWorker) refreshStaleVodInfo(ctx context.Context, job *database.
 			}
 			return nil
 		}
+		// A verdict on the video — private, members-only, a stream no longer
+		// finished — is YouTube answering too, and ends the session's captcha
+		// spell as an answered re-extraction does below, and as any answer to
+		// Process's fetch does.
+		if isVodRefreshVerdict(err) && !rateLimited {
+			w.captcha.clear()
+		}
 		return err
 	}
 	result.VideoInfo = info
