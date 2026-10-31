@@ -1042,6 +1042,19 @@ func isSubstitution(err error) bool {
 	return errors.As(err, &mismatch)
 }
 
+// tvEscalationAsked reports whether a cookieless status probe already made
+// the call hop 2 would: its signed-in escalation, the authenticated TV probe
+// (youtube.StatusProbeEscalationTVAuth), asked once inside ProbeVideoStatus —
+// whether that answered (the answer is tagged with it) or settled nothing
+// (the probe's *youtube.StatusProbeInconclusiveError names it).
+func tvEscalationAsked(info *youtube.VideoInfo, err error) bool {
+	if info != nil && info.StatusProbeEscalation == youtube.StatusProbeEscalationTVAuth {
+		return true
+	}
+	inconclusive, ok := errors.AsType[*youtube.StatusProbeInconclusiveError](err)
+	return ok && inconclusive.Escalation == youtube.StatusProbeEscalationTVAuth
+}
+
 // probeIsSelectable reports whether a probe answer carries something the
 // quality monitor can actually select from: a DASH manifest to parse, or a
 // split-adaptive pool to pick in memory. Anything else — nil, an error shell,
@@ -1095,7 +1108,12 @@ func probeIsSelectable(info *youtube.VideoInfo) bool {
 // At most ONE cascade per tick, always — never a loop, never a retry ladder.
 // The worst case a tick can cost is therefore probe + hop + cascade, i.e. two
 // player calls on top of what it cost before O-H, and only for a cookied
-// install whose stream answers nothing at every hop.
+// install whose stream answers nothing at every hop. The probe in that sum
+// counts its own escalation (G8): a cookieless refusal that says nothing
+// about the broadcast is asked once more inside ProbeVideoStatus — signed
+// out, a web_embedded call plus its embed page, so android_vr + embed page +
+// web_embedded + cascade; signed in, the TV call that is hop 2, which is then
+// not asked again (tvEscalationAsked), so android_vr + TV + cascade.
 //
 // The monitor only needs the format pool in memory; nothing on this path
 // consumes the watch-page metadata the cascade used to refresh (O-H's
@@ -1132,7 +1150,7 @@ func probeVideoInfo(ctx context.Context, yt youtubeProbeClient, videoID string, 
 	}
 	if err == nil && probeIsSelectable(info) {
 		debug("quality probe answered on one player call",
-			"videoID", videoID, "probe", probeKind,
+			"videoID", videoID, "probe", probeKind, "escalation", info.StatusProbeEscalation,
 			"splitAdaptive", HasManifestlessDashFormats(info.Formats),
 			"dashManifest", info.DashManifestURL != "")
 		return info, nil
@@ -1150,14 +1168,15 @@ func probeVideoInfo(ctx context.Context, yt youtubeProbeClient, videoID string, 
 	// the cookieless branch: the auth-walled branch already made this exact
 	// call above.
 	//
-	// Hop 1 may have made it too: a cookieless refusal that says nothing
+	// Hop 1 may have made it already: a cookieless refusal that says nothing
 	// about the broadcast is escalated inside ProbeVideoStatus, to this very
-	// call when the jar is signed in (G8, internal/youtube/status_probe.go),
-	// and an escalated answer that is not selectable comes back here as
-	// hop 1's. Asked again, it costs one TV call per tick while the wall
-	// stands; the probe does not say which client answered, and a TV call is
-	// the cheapest thing ahead of the cascade.
-	if !requiresAuth && cookied && ctx.Err() == nil {
+	// call when the jar is signed in (G8, internal/youtube/status_probe.go).
+	// Its answer, when it gave one, came back as hop 1's and was not
+	// selectable, or it settled nothing; asked again here it would say the
+	// same, one TV call per tick for as long as the wall stood, so the tick
+	// goes on to the cascade, as it would after a hop 2 that found nothing
+	// (tvEscalationAsked).
+	if !requiresAuth && cookied && ctx.Err() == nil && !tvEscalationAsked(info, err) {
 		hopInfo, hopErr := yt.ProbeVideoStatusAuthenticated(ctx, videoID)
 		if hopErr == nil && probeIsSelectable(hopInfo) {
 			debug("quality probe answered on the cookied recovery hop",

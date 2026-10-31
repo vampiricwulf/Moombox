@@ -543,7 +543,16 @@ func observeYouTubeStatusProbe(job *JobContext, info *youtube.VideoInfo, err err
 	if info.StreamStatus == youtube.StreamNotAStream && info.PlayabilityError == youtube.PlayabilityMembersOnly {
 		return false, errMembersOnlyStatusProbe
 	}
-	job.Interruption.observe(info)
+	// An answer the probe's escalation gave in ANDROID_VR's place is read for
+	// the broadcast's state alone. Its formats are another client's, fetched
+	// under that client's rules — a probe-only web_embedded call with no PO
+	// token, whose web-family formats YouTube may strip to SABR, or TV — so
+	// "live with zero formats" on it is not the interruption signature, which
+	// is ANDROID_VR's shape, and observing it would arm resume evidence for a
+	// healthy stream behind a bot wall.
+	if info.StatusProbeEscalation == "" {
+		job.Interruption.observe(info)
+	}
 	return info.StreamStatus != youtube.StreamLive, nil
 }
 

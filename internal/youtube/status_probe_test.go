@@ -174,6 +174,9 @@ func TestStatusProbeAnswersThatSaySomethingAreNotEscalated(t *testing.T) {
 			if n := len(tr.of(clientWebEmbedded)) + int(embeds.Load()); n != 0 {
 				t.Errorf("escalated (%d web_embedded calls and embed fetches) on an answer that said something", n)
 			}
+			if info.StatusProbeEscalation != "" {
+				t.Errorf("StatusProbeEscalation = %q on android_vr's own answer, want none", info.StatusProbeEscalation)
+			}
 		})
 	}
 }
@@ -185,13 +188,21 @@ func TestStatusProbeAnswersThatSaySomethingAreNotEscalated(t *testing.T) {
 // (f2bd3202c), and as a probe: no PLAYER PO token although a minter and
 // visitor data are there (owner decision O-R), and no player adopted for an
 // STS. Signed in it is the authenticated TV probe, and web_embedded is not
-// asked.
+// asked. Either way the answer is tagged with the escalation that gave it
+// (VideoInfo.StatusProbeEscalation), which the waiting room's B1 switch, the
+// stall check and the quality probe's cookied hop read.
+//
+// The no-PO-token check holds only while a mint could have happened, so the
+// signed-out row also checks the probes' visitor data reached the call:
+// fetchWithEmbedded mints only with visitor data in hand.
 //
 // Mutants: the escalation always web_embedded (the signed-in row asks it and
 // not TV) or always TV (the signed-out row asks TV); fetchWithEmbedded's PO
 // token mint not skipped for a probe (a token minted and sent); its player
 // adoption not skipped (the answer carries the embed page's player); the
-// embed page not fetched (no encryptedHostFlags).
+// embed page not fetched (no encryptedHostFlags); probeVideoStatusEmbedded
+// handed "" for the visitor data (no visitorData on the call); the answer
+// not tagged (StatusProbeEscalation empty in both rows).
 func TestStatusProbeEscalationAnswersInTheProbesPlace(t *testing.T) {
 	t.Run("signed out: web_embedded with encryptedHostFlags, as a probe", func(t *testing.T) {
 		embeds := stubEmbedPage(t)
@@ -215,6 +226,12 @@ func TestStatusProbeEscalationAnswersInTheProbesPlace(t *testing.T) {
 		}
 		if !strings.Contains(emb[0], `"encryptedHostFlags":"ehf"`) {
 			t.Errorf("web_embedded body %s, want the embed page's encryptedHostFlags", emb[0])
+		}
+		if !strings.Contains(emb[0], `"visitorData":"vd"`) {
+			t.Errorf("web_embedded body %s, want the probes' visitor data, without which no mint could happen and the next check proves nothing", emb[0])
+		}
+		if info.StatusProbeEscalation != StatusProbeEscalationWebEmbedded {
+			t.Errorf("StatusProbeEscalation = %q, want web_embedded's tag", info.StatusProbeEscalation)
 		}
 		if pot.calls != 0 || strings.Contains(emb[0], "serviceIntegrityDimensions") {
 			t.Errorf("a PLAYER PO token was minted (%d) or sent (%s) on a probe", pot.calls, emb[0])
@@ -244,6 +261,9 @@ func TestStatusProbeEscalationAnswersInTheProbesPlace(t *testing.T) {
 		}
 		if info.HlsManifestSource != "tv_auth" {
 			t.Errorf("HlsManifestSource = %q, want the authenticated TV probe's tv_auth", info.HlsManifestSource)
+		}
+		if info.StatusProbeEscalation != StatusProbeEscalationTVAuth {
+			t.Errorf("StatusProbeEscalation = %q, want tv_auth's tag", info.StatusProbeEscalation)
 		}
 		if n, m := len(tr.of(clientAndroidVR)), len(tr.of(clientTV)); n != 1 || m != 1 {
 			t.Errorf("android_vr asked %d times, TV %d, want once each", n, m)
@@ -413,6 +433,41 @@ func TestAnExtractionKeepsTheRefusalsPlayabilityStatus(t *testing.T) {
 			if info.PlayabilityStatus != "ERROR" || info.PlayabilityError != PlayabilityUnknown || info.StreamStatus != StreamNotAStream {
 				t.Errorf("answer = status %q, verdict %q, stream %q; want ERROR, unknown and not_a_stream",
 					info.PlayabilityStatus, info.PlayabilityError, info.StreamStatus)
+			}
+		})
+	}
+}
+
+// TestEscalationSettledNothing: what the probe makes of its escalation's
+// call. An answer that says something stands in the probe's place; a failure,
+// a refusal as blind as ANDROID_VR's, or the (nil, nil) no live call returns
+// today but a shutdown race could, leave the probe inconclusive — the last
+// with errNilEscalationAnswer rather than an answer that is not there, which
+// the probe would hand on as (nil, nil) to every consumer.
+//
+// Mutants: the nil-answer arm dropped (the (nil, nil) row settles: no error);
+// the refusal arm dropped (the blind refusal settles); the error arm dropped
+// (a failed call with a stale answer beside it settles).
+func TestEscalationSettledNothing(t *testing.T) {
+	failure := errors.New("WEB_EMBEDDED API error: HTTP 400")
+	answer := &VideoInfo{StreamStatus: StreamUpcoming, IsUpcoming: true, PlayabilityError: PlayabilityOK, liveFlagsStated: true}
+	blind := &VideoInfo{StreamStatus: StreamNotAStream, PlayabilityError: PlayabilityLoginRequired, PlayabilityReason: "Sign in"}
+	for _, tc := range []struct {
+		name    string
+		info    *VideoInfo
+		err     error
+		wantErr func(error) bool
+	}{
+		{"an answer", answer, nil, func(err error) bool { return err == nil }},
+		{"a failed call", answer, failure, func(err error) bool { return errors.Is(err, failure) }},
+		{"no answer and no error", nil, nil, func(err error) bool { return errors.Is(err, errNilEscalationAnswer) }},
+		{"a refusal as blind as android_vr's", blind, nil, func(err error) bool {
+			return err != nil && strings.Contains(err.Error(), "too")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := escalationSettledNothing(tc.info, tc.err); !tc.wantErr(got) {
+				t.Errorf("escalationSettledNothing = %v", got)
 			}
 		})
 	}

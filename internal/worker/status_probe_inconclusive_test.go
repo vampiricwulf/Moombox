@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -250,4 +251,92 @@ func TestWaitingLoopGivesUpOnARemovalTheRulesCannotPlace(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAnEscalatedStatusProbeAnswerIsReadForTheBroadcastAlone: an answer the
+// status probe's escalation gave in ANDROID_VR's place
+// (VideoInfo.StatusProbeEscalation) says what the broadcast is doing and
+// nothing about ANDROID_VR, so the three consumers that read ANDROID_VR's
+// shape ask which it was:
+//
+//   - the waiting room's B1 switch: a signed-in escalation's answer means
+//     the cookieless probe is blind and TV is not, which is the switch to the
+//     cookied probe that ANDROID_VR's own login_required refusal made before
+//     G8 put TV's answer in its place — after which every poll paid both;
+//   - the stall check: "live with zero formats" from another client is not
+//     the interruption signature, and arming it would hand a healthy walled
+//     stream resume evidence;
+//   - the quality probe: the cookied hop is the call the signed-in
+//     escalation already made, answered or not, so it is not made twice.
+//
+// Mutants: waitingRoomAuthFlip without the tv_auth arm (the escalated rows
+// do not switch); observe() called on an escalated answer (the signal is
+// armed); the cookied hop not skipped after a TV escalation (probeAuth == 1
+// in the first two quality rows); tvEscalationAsked without its
+// inconclusive-error arm (the second quality row asks TV again).
+func TestAnEscalatedStatusProbeAnswerIsReadForTheBroadcastAlone(t *testing.T) {
+	tvAnswer := func() *youtube.VideoInfo {
+		return &youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming, IsUpcoming: true, PlayabilityError: youtube.PlayabilityOK,
+			StatusProbeEscalation: youtube.StatusProbeEscalationTVAuth}
+	}
+
+	t.Run("the waiting room switches to the cookied probe on a signed-in escalation", func(t *testing.T) {
+		if !waitingRoomAuthFlip(tvAnswer(), true) {
+			t.Error("a TV escalation's answer did not switch the poll to the cookied probe")
+		}
+		if waitingRoomAuthFlip(tvAnswer(), false) {
+			t.Error("switched with no cookies to switch to")
+		}
+		embedded := tvAnswer()
+		embedded.StatusProbeEscalation = youtube.StatusProbeEscalationWebEmbedded
+		if waitingRoomAuthFlip(embedded, true) {
+			t.Error("a web_embedded escalation's answer switched the poll: it is the signed-out escalation, and says nothing about the cookied probe")
+		}
+	})
+
+	t.Run("the stall check reads no interruption signature off an escalated answer", func(t *testing.T) {
+		for _, escalation := range []string{youtube.StatusProbeEscalationTVAuth, youtube.StatusProbeEscalationWebEmbedded} {
+			job := &JobContext{Job: &database.Job{ID: "j1"}, Interruption: &interruptionSignal{}}
+			info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, IsLive: true, PlayabilityError: youtube.PlayabilityOK,
+				StatusProbeEscalation: escalation}
+
+			ended, err := observeYouTubeStatusProbe(job, info, nil)
+
+			if err != nil || ended {
+				t.Errorf("%s: (ended %v, err %v), want the escalation's live answer: not ended", escalation, ended, err)
+			}
+			if job.Interruption.fresh() {
+				t.Errorf("%s: an escalated live answer with zero formats armed the interruption signal", escalation)
+			}
+		}
+	})
+
+	t.Run("the quality probe does not ask TV twice", func(t *testing.T) {
+		for _, tc := range []struct {
+			name          string
+			probeInfo     *youtube.VideoInfo
+			probeErr      error
+			wantProbeAuth int
+		}{
+			{"TV answered for android_vr", tvAnswer(), nil, 0},
+			{"TV settled nothing for android_vr", nil, &youtube.StatusProbeInconclusiveError{Playability: youtube.PlayabilityLoginRequired,
+				Escalation: youtube.StatusProbeEscalationTVAuth, EscalationErr: errors.New("refused too")}, 0},
+			{"web_embedded settled nothing for android_vr", nil, botWalledProbe(errEscalation400), 1},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := &fakeProbeClient{hasCookies: true, probeInfo: tc.probeInfo, probeErr: tc.probeErr,
+					probeAuthInfo: &youtube.VideoInfo{}, fullInfo: selectable("cascade")}
+
+				info, err := probeVideoInfo(context.Background(), f, "vid", false, nil)
+
+				if err != nil || info == nil || info.Title != "cascade" {
+					t.Fatalf("probeVideoInfo = (%+v, %v), want the cascade's answer", info, err)
+				}
+				if f.probe != 1 || f.probeAuth != tc.wantProbeAuth || f.full != 1 {
+					t.Errorf("calls: probe=%d probeAuth=%d full=%d; want probe=1 probeAuth=%d full=1",
+						f.probe, f.probeAuth, f.full, tc.wantProbeAuth)
+				}
+			})
+		}
+	})
 }

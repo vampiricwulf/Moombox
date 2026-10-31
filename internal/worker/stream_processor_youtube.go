@@ -124,10 +124,20 @@ func fullFetchSaysRemoved(info *youtube.VideoInfo) bool {
 // that are the documented remedy (close-review Finding 18). One predicate is
 // what stops that happening again.
 //
+// An answer the cookieless probe's signed-in escalation gave in its place
+// (youtube.StatusProbeEscalationTVAuth) switches too, whatever its verdict:
+// ANDROID_VR refused with nothing to say about the broadcast — the bot wall,
+// above all — and the TV call that saw past it is the cookied probe this
+// switch moves to. Before G8 that refusal reached here as ANDROID_VR's own
+// login_required and flipped; with the escalation's answer in its place it
+// did not, and every poll for the rest of the wait paid ANDROID_VR and TV
+// both.
+//
 // hasCookies is passed in rather than read here so the decision is testable
 // without a network-capable *youtube.Service.
 func waitingRoomAuthFlip(info *youtube.VideoInfo, hasCookies bool) bool {
-	return info != nil && hasCookies && isAuthWalledPlayability(info.PlayabilityError)
+	return info != nil && hasCookies &&
+		(isAuthWalledPlayability(info.PlayabilityError) || info.StatusProbeEscalation == youtube.StatusProbeEscalationTVAuth)
 }
 
 // fetchVideoInfo is the full multi-client fetch, Process's and the waiting

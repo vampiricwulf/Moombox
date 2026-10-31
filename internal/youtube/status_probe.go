@@ -48,7 +48,8 @@ import (
 // gives up: to the authenticated TV probe when the jar is signed in,
 // otherwise to a public web_embedded call carrying the embed page's
 // encryptedHostFlags. An escalation that answers with broadcast details is
-// returned in the probe's place; one that fails, or refuses the same way,
+// returned in the probe's place, tagged with the escalation that gave it
+// (VideoInfo.StatusProbeEscalation); one that fails, or refuses the same way,
 // leaves the probe inconclusive (*StatusProbeInconclusiveError), which the
 // monitors count as an errored probe — nothing stored, probed again next
 // cycle for as long as the refusal stands, since the failure tracker's
@@ -62,6 +63,17 @@ import (
 // player and no solved format, so it escalates on the shape of the refusal
 // itself, whatever the refusal says.
 
+// The status probe's two escalations, as StatusProbeInconclusiveError.Escalation
+// and VideoInfo.StatusProbeEscalation name them.
+const (
+	// StatusProbeEscalationTVAuth is the signed-in escalation: the
+	// authenticated TV probe, ProbeVideoStatusAuthenticated.
+	StatusProbeEscalationTVAuth = "tv_auth"
+	// StatusProbeEscalationWebEmbedded is the signed-out one: a probe-only
+	// web_embedded call (probeVideoStatusEmbedded).
+	StatusProbeEscalationWebEmbedded = "web_embedded"
+)
+
 // StatusProbeInconclusiveError is what Service.ProbeVideoStatus returns when
 // ANDROID_VR refused with no broadcast details (statusAnswerInconclusive) and
 // the one escalation behind it settled nothing either. It is not a statement
@@ -74,8 +86,9 @@ type StatusProbeInconclusiveError struct {
 	// Playability and Reason are ANDROID_VR's refusal.
 	Playability PlayabilityError
 	Reason      string
-	// Escalation names the one client asked next: "tv_auth" when the jar is
-	// signed in, "web_embedded" when it is not. "" when none was asked,
+	// Escalation names the one client asked next:
+	// StatusProbeEscalationTVAuth when the jar is signed in,
+	// StatusProbeEscalationWebEmbedded when it is not. "" when none was asked,
 	// because the caller's context had ended first.
 	Escalation string
 	// EscalationErr is why the escalation settled nothing: the call's own
@@ -191,27 +204,37 @@ func (s *Service) escalateStatusProbe(ctx context.Context, videoID, visitorData 
 	var info *VideoInfo
 	var err error
 	if s.Auth.HasAuthCookies() {
-		inconclusive.Escalation = "tv_auth"
+		inconclusive.Escalation = StatusProbeEscalationTVAuth
 		info, err = s.ProbeVideoStatusAuthenticated(ctx, videoID)
 	} else {
-		inconclusive.Escalation = "web_embedded"
+		inconclusive.Escalation = StatusProbeEscalationWebEmbedded
 		info, err = s.PlayerAPI.probeVideoStatusEmbedded(ctx, videoID, visitorData)
 	}
+	if inconclusive.EscalationErr = escalationSettledNothing(info, err); inconclusive.EscalationErr != nil {
+		s.logger.Debug("[YouTube] Status probe inconclusive", slog.String("videoID", videoID), slog.String("error", inconclusive.Error()))
+		return nil, inconclusive
+	}
+	s.logger.Debug("[YouTube] Status probe refused with no broadcast details; the escalation answered",
+		slog.String("videoID", videoID), slog.String("escalation", inconclusive.Escalation),
+		slog.String("refusal", string(refused.PlayabilityError)), slog.String("status", string(info.StreamStatus)))
+	info.StatusProbeEscalation = inconclusive.Escalation
+	return info, nil
+}
+
+// escalationSettledNothing is why the escalation's call settled nothing —
+// its own failure, no answer at all, or a refusal as blind as ANDROID_VR's —
+// or nil when its answer says something about the broadcast and stands in
+// the probe's place.
+func escalationSettledNothing(info *VideoInfo, err error) error {
 	switch {
 	case err != nil:
-		inconclusive.EscalationErr = err
+		return err
 	case info == nil:
-		inconclusive.EscalationErr = errNilEscalationAnswer
+		return errNilEscalationAnswer
 	case statusAnswerInconclusive(info):
-		inconclusive.EscalationErr = errRefusedWithoutDetails(info)
-	default:
-		s.logger.Debug("[YouTube] Status probe refused with no broadcast details; the escalation answered",
-			slog.String("videoID", videoID), slog.String("escalation", inconclusive.Escalation),
-			slog.String("refusal", string(refused.PlayabilityError)), slog.String("status", string(info.StreamStatus)))
-		return info, nil
+		return errRefusedWithoutDetails(info)
 	}
-	s.logger.Debug("[YouTube] Status probe inconclusive", slog.String("videoID", videoID), slog.String("error", inconclusive.Error()))
-	return nil, inconclusive
+	return nil
 }
 
 // errNilEscalationAnswer is the escalation's answer when its call returned
@@ -223,8 +246,14 @@ var errNilEscalationAnswer = errors.New("no answer and no error")
 // encryptedHostFlags as upstream sends them on every web_embedded call
 // (f2bd3202c), marked probe-only — so, as on every probe, no PLAYER PO token
 // is minted (owner decision O-R), and no player is adopted for a signature
-// timestamp: the answer is read for its videoDetails, and no format of it is
-// ever fetched. The visitor data and session are the probes' own
+// timestamp, which would cost a player fetch on every escalation. The answer
+// is asked for the broadcast's state, read off videoDetails; its formats are
+// still parsed — ciphered ones kept for a later solve, as on every call — and
+// they are another client's, under that client's rules (no PO token, and
+// whatever SABR does to web clients), which is why the answer comes back
+// tagged (VideoInfo.StatusProbeEscalation): the stall check does not read
+// the interruption signature off it, though the quality probe's first hop
+// may still select from it. The visitor data and session are the probes' own
 // (probeYtcfg).
 func (p *PlayerAPI) probeVideoStatusEmbedded(ctx context.Context, videoID, visitorData string) (*VideoInfo, error) {
 	return p.fetchWithEmbedded(withProbeOnlyCall(ctx), videoID, p.probeYtcfg(visitorData), 0, true)
