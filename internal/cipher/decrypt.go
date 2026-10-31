@@ -55,6 +55,12 @@ func (s *GojaResolver) DecryptSignature(ctx context.Context, req SignatureReques
 // Pass a nil routedSolver to skip the routed path and use gojaResolver directly
 // (matches prior behaviour on startup before the sidecar is healthy).
 func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *GojaResolver, req ResolveURLRequest) (*ResolveURLResponse, error) {
+	// A URL that asks nothing of a player resolves to itself, ahead of the
+	// solver and player checks below — neither is needed for it, and the
+	// fall-through used to fail it on an empty PlayerURL (needsNoPlayer).
+	if req.StreamURL != "" && needsNoPlayer(req) {
+		return &ResolveURLResponse{URL: req.StreamURL}, nil
+	}
 	if routedSolver == nil || req.PlayerURL == "" {
 		if gojaResolver == nil {
 			return nil, fmt.Errorf("cipher: no solver available")
