@@ -50,12 +50,15 @@ import (
 const rateLimitBackoff = time.Hour
 
 // rateLimitRetryInterval is how long a job that is not backlog waits in
-// place before its stream processing fetches again: the waiting loop's own
-// full-fetch cadence (fullFetchInterval), the rate at which a waiting
-// broadcast already makes the full extraction a refusal comes back on. A
-// fetch in the meantime would only be the same request sent into the same
-// limit, and a broadcast that went live while it waited is captured from its
-// start, as any live-from-start capture is.
+// place before its stream processing fetches again, and how long the
+// waiting loop holds off a go-live confirmation YouTube refused
+// (loopRateLimit): the waiting loop's own full-fetch cadence
+// (fullFetchInterval), the rate at which a waiting broadcast already makes
+// the full extraction a refusal comes back on. A fetch in the meantime would
+// only be the same request sent into the same limit, and a broadcast that
+// went live while it waited is captured from its start, as any
+// live-from-start capture is. A 429's Retry-After can lengthen the wait in
+// place (rateLimitWait).
 const rateLimitRetryInterval = fullFetchInterval
 
 // rateLimitWaitRefresh is how often the waiting job's progress line is
@@ -63,8 +66,8 @@ const rateLimitRetryInterval = fullFetchInterval
 const rateLimitWaitRefresh = time.Minute
 
 // rateLimitWaitProgress opens the progress line a job waiting out a rate
-// limit shows (outlastRateLimit), as one waiting out an outage shows
-// networkWaitProgress; rateLimitWaitLine adds the time left.
+// limit shows (outlastRateLimit, loopRateLimit), as one waiting out an
+// outage shows networkWaitProgress; rateLimitWaitLine adds the time left.
 const rateLimitWaitProgress = "Rate-limited by YouTube; fetching again"
 
 // rateLimitWaitLine is the progress line itself, "Rate-limited by YouTube;
@@ -166,9 +169,8 @@ func (sp *StreamProcessor) noteFetch(job *database.Job, l *loopRateLimit, info *
 }
 
 // tickRateLimit runs once per answered probe, ahead of the loop's reading
-// of it:
-// while confirmations are held it rewrites the progress line with the time
-// left, and once the hold has run out it lifts it, the line with it.
+// of it: while confirmations are held it rewrites the progress line with the
+// time left, and once the hold has run out it lifts it, the line with it.
 func (sp *StreamProcessor) tickRateLimit(job *database.Job, l *loopRateLimit, now time.Time) {
 	if !l.confirmationHeld() {
 		return
