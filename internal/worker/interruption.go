@@ -525,12 +525,23 @@ func isAuthWalledPlayability(err youtube.PlayabilityError) bool {
 // (*youtube.StatusProbeInconclusiveError) when the escalation settled nothing
 // — an inconclusive check, through the err branch below — or as the
 // escalation's own answer when it did.
+//
+// All but one refusal of that shape, that is. A members-only refusal with no
+// broadcast details is handed on as the answer it is (statusAnswerInconclusive
+// excludes it): it is the access verdict the feed walk and the waiting room
+// act on. To this site it still says nothing about whether the broadcast is
+// on air, so it is deferred here, as errAuthWalledStatusProbe deferred it
+// before the rule moved — read as not_a_stream it would latch the stream
+// ended and finalize a still-live members-only recording.
 func observeYouTubeStatusProbe(job *JobContext, info *youtube.VideoInfo, err error) (bool, error) {
 	if err != nil {
 		return false, err
 	}
 	if info == nil {
 		return false, errNilStatusProbe
+	}
+	if info.StreamStatus == youtube.StreamNotAStream && info.PlayabilityError == youtube.PlayabilityMembersOnly {
+		return false, errMembersOnlyStatusProbe
 	}
 	job.Interruption.observe(info)
 	return info.StreamStatus != youtube.StreamLive, nil
@@ -539,3 +550,8 @@ func observeYouTubeStatusProbe(job *JobContext, info *youtube.VideoInfo, err err
 // errNilStatusProbe is returned by observeYouTubeStatusProbe when
 // ProbeVideoStatus returns (nil, nil) — see its doc comment.
 var errNilStatusProbe = errors.New("status probe returned nil info without error")
+
+// errMembersOnlyStatusProbe is returned by observeYouTubeStatusProbe when the
+// probe answers a members-only refusal with no broadcast details — see its doc
+// comment.
+var errMembersOnlyStatusProbe = errors.New("status probe refused members-only with no broadcast details; verdict deferred")

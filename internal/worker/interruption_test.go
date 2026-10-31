@@ -1045,6 +1045,32 @@ func TestObserveYouTubeStatusProbe(t *testing.T) {
 		})
 	}
 
+	// The one refusal of the blind shape the probe hands on as an answer: a
+	// members-only refusal with no broadcast details, the access verdict the
+	// feed walk relabels a row on (statusAnswerInconclusive excludes it). It
+	// still says nothing about whether the broadcast is on air, so the stall
+	// check defers on it, as it did before the rule moved into the probe.
+	//
+	// Mutant: the members-only guard dropped (the row reads ended, and a
+	// still-live members-only recording is finalized on it).
+	t.Run("a members-only refusal with no broadcast details defers the verdict, not ended", func(t *testing.T) {
+		job := &JobContext{Job: &database.Job{ID: "j1"}, Interruption: &interruptionSignal{}}
+		info := &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityError: youtube.PlayabilityMembersOnly,
+			PlayabilityReason: "Join this channel to get access to members-only content like this video, and other exclusive perks."}
+
+		ended, err := observeYouTubeStatusProbe(job, info, nil)
+
+		if !errors.Is(err, errMembersOnlyStatusProbe) {
+			t.Fatalf("err = %v, want errMembersOnlyStatusProbe: an inconclusive check, never a stream-end verdict", err)
+		}
+		if ended {
+			t.Error("ended = true; a members-only refusal says nothing about whether the broadcast is still on air")
+		}
+		if job.Interruption.fresh() {
+			t.Error("a members-only refusal must not arm the interruption signal")
+		}
+	})
+
 	t.Run("nil info without error is a safe no-op, not a panic", func(t *testing.T) {
 		job := &JobContext{Job: &database.Job{ID: "j1"}, Interruption: &interruptionSignal{}}
 

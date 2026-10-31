@@ -32,22 +32,28 @@ import (
 // classify the video. A response that states none of the flags is
 // live_status None, "unknown" — not "not live". And for the made-for-kids
 // case it appends web_embedded behind a refused android_vr answer
-// (bb1c05752, #15785; visionos joined in 1328586f7, #17184, and ERROR beside
-// UNPLAYABLE in 69ea20006, #17261; _video.py:3145-3153), with the embed
-// page's encryptedHostFlags on the call (f2bd3202c, #16177;
-// _video.py:2948-2954).
+// (_video.py:3145-3153), with the embed page's encryptedHostFlags on the call
+// (f2bd3202c, #16177; _video.py:2948-2954). That fallback's b77c9304e state
+// took five commits: web_embedded behind android_vr in bb1c05752 (#15785),
+// visionos beside android_vr in 1328586f7 (#17184), ERROR beside UNPLAYABLE in
+// 69ea20006 (#17261) — which also swapped web_embedded for tv_downgraded —
+// web_embedded back ahead of tv_downgraded in 5d5b634d8 (#17462), and
+// tv_downgraded dropped in 897341241 (#17805), leaving web_embedded alone.
 //
 // Moombox's probe is one client, so the port is the two halves of that
 // (owner decision D6, 2026-10-31): such an answer is INCONCLUSIVE, never a
-// classification, and it is escalated ONCE before the probe gives up — to the
-// authenticated TV probe when the jar is signed in, otherwise to a public
-// web_embedded call carrying the embed page's encryptedHostFlags. An
-// escalation that answers with broadcast details is returned in the probe's
-// place; one that fails, or refuses the same way, leaves the probe
-// inconclusive (*StatusProbeInconclusiveError), which the monitors count as an
-// errored probe (nothing stored, retried next cycle, bounded by the failure
-// tracker) and the waiting loop as a network-class error (keep waiting, never
-// counted toward its give-up).
+// classification — a members-only refusal aside, a verdict about who may
+// watch the video that the monitors and the waiting room act on
+// (statusAnswerInconclusive) — and it is escalated ONCE before the probe
+// gives up: to the authenticated TV probe when the jar is signed in,
+// otherwise to a public web_embedded call carrying the embed page's
+// encryptedHostFlags. An escalation that answers with broadcast details is
+// returned in the probe's place; one that fails, or refuses the same way,
+// leaves the probe inconclusive (*StatusProbeInconclusiveError), which the
+// monitors count as an errored probe — nothing stored, probed again next
+// cycle for as long as the refusal stands, since the failure tracker's
+// give-up only logs unless probe_cooldown is set — and the waiting loop as a
+// network-class error (keep waiting, never counted toward its give-up).
 //
 // Deliberately beyond upstream in one respect: upstream asks web_embedded
 // only when the watch page says "made for kids" and a JS runtime is there to
@@ -138,9 +144,27 @@ func statusLiveFlagsStated(videoDetails, microformat map[string]any) bool {
 // renderer, broadcast details) — so a refused answer read upcoming off the
 // renderer, or not_a_stream off an explicit isLiveContent false, stays the
 // answer it is.
+//
+// A members-only refusal is never inconclusive, details or none. It says
+// nothing about the broadcast, but it is a verdict about the video — who may
+// watch it — and every consumer acts on it as one: the feed walk relabels the
+// row 'membership' on it and retries with the authenticated probe in the same
+// cycle (the refusal IS the sighting, spec §9; walk.go's probeRow), which is
+// what routes the row to that probe on every later cycle and lets the
+// membership cookie gate park it when cookies lapse; the waiting room
+// switches to the cookied probe on it (B1, waitingRoomAuthFlip). Escalated, a
+// member's TV answer would replace it and none of that would happen;
+// inconclusive, the walk would see an errored probe and nothing to relabel,
+// and a signed-out waiting room would wait for good on a stream it can never
+// record. The one consumer it says nothing to — the live stall check, which
+// asks whether the broadcast is still on air — defers on it itself
+// (internal/worker's observeYouTubeStatusProbe), as it did before G8. Not a
+// shape yt-dlp's made-for-kids fallback reads either: that keys on
+// UNPLAYABLE or ERROR on a page saying "made for kids" (_video.py:3145-3153).
 func statusAnswerInconclusive(info *VideoInfo) bool {
 	return info != nil && info.StreamStatus == StreamNotAStream &&
-		info.PlayabilityError != PlayabilityOK && !info.liveFlagsStated
+		info.PlayabilityError != PlayabilityOK && info.PlayabilityError != PlayabilityMembersOnly &&
+		!info.liveFlagsStated
 }
 
 // escalateStatusProbe is the one escalation behind a status probe whose

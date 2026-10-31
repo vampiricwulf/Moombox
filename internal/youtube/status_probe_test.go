@@ -122,15 +122,18 @@ func TestStatusProbeRefusalWithNoBroadcastDetailsIsInconclusive(t *testing.T) {
 // not_a_stream that states none of live_status's flags is inconclusive.
 // Everything else ANDROID_VR answers is returned as it was, on one call: a
 // refusal that says the video is not live content (upstream's not_live), an
-// OK answer, and the refusals classifyStream reads upcoming or live off
-// something the response did say.
+// OK answer, the refusals classifyStream reads upcoming or live off
+// something the response did say, and a members-only refusal, which is the
+// access verdict the feed walk relabels a row 'membership' on and the
+// waiting room switches to the cookied probe on, details or none.
 //
 // Mutants: statusAnswerInconclusive without its liveFlagsStated conjunct
 // (the stated-false rows escalate), without its refusal conjunct (the OK
-// answer with no videoDetails escalates), or without its not_a_stream
+// answer with no videoDetails escalates), without its not_a_stream
 // conjunct (the liveStreamability row, a refusal stating no flag,
-// escalates); parsePlayerResponse not stamping liveFlagsStated (the
-// stated-false rows escalate).
+// escalates), or without its members-only exclusion (the detail-less
+// members-only rows escalate); parsePlayerResponse not stamping
+// liveFlagsStated (the stated-false rows escalate).
 func TestStatusProbeAnswersThatSaySomethingAreNotEscalated(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
@@ -147,6 +150,13 @@ func TestStatusProbeAnswersThatSaySomethingAreNotEscalated(t *testing.T) {
 			`"liveStreamability":{"liveStreamabilityRenderer":{"videoId":"test1234567"}}}}`, StreamUpcoming},
 		{"a members-only live stream", `{"playabilityStatus":{"status":"LOGIN_REQUIRED","reason":"Join this channel to get access to members-only content"},` +
 			`"videoDetails":{"videoId":"test1234567","isLive":true,"isLiveContent":true}}`, StreamLive},
+		// TV's members-only refusals arrive with no videoDetails at all
+		// (TestParsePlayerResponseKeepsAResponseWithNoVideoID); ANDROID_VR's
+		// have not been captured, so both of the statuses the reason rides.
+		{"a members-only refusal with no videoDetails", `{"playabilityStatus":{"status":"LOGIN_REQUIRED",` +
+			`"reason":"Join this channel to get access to members-only content like this video, and other exclusive perks."}}`, StreamNotAStream},
+		{"an UNPLAYABLE members-only refusal with no videoDetails", `{"playabilityStatus":{"status":"UNPLAYABLE",` +
+			`"reason":"This video is available to this channel's members on level: Member (or any higher level)."}}`, StreamNotAStream},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			embeds := stubEmbedPage(t)

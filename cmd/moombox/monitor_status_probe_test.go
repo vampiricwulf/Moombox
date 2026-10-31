@@ -121,3 +121,50 @@ func TestABotWalledStatusProbeReachesTheMonitorsAsAnErroredProbe(t *testing.T) {
 		})
 	}
 }
+
+// TestAMembersOnlyStatusProbeRefusalReachesTheMonitorsAsTheVerdict: the one
+// refusal with no broadcast details the status probe does not call
+// inconclusive. A members-only refusal is the access verdict the feed walk
+// acts on — probeRow relabels the row 'membership' on its members_only and
+// retries with the authenticated probe the same cycle (spec §9) — so it
+// reaches the monitors as a probe result carrying that verdict, on the one
+// ANDROID_VR call, signed in or out: never an errored probe with nothing to
+// relabel, and never replaced by a member's TV answer, which would leave the
+// row unlabelled and out of the membership cookie gate's reach.
+//
+// Mutant: statusAnswerInconclusive without its members-only exclusion (an
+// errored probe signed out; TV's answer, with no members_only, signed in).
+func TestAMembersOnlyStatusProbeRefusalReachesTheMonitorsAsTheVerdict(t *testing.T) {
+	const membersOnly = `{"playabilityStatus":{"status":"LOGIN_REQUIRED",` +
+		`"reason":"Join this channel to get access to members-only content like this video, and other exclusive perks."}}`
+	const memberTV = `{"playabilityStatus":{"status":"LIVE_STREAM_OFFLINE","reason":"This live event will begin in a few moments."},` +
+		`"videoDetails":{"videoId":"test1234567","title":"Stream","author":"a","isLiveContent":true,"isUpcoming":true}}`
+	for _, tc := range []struct {
+		name string
+		jar  func(t *testing.T) *cookies.CookieJar
+	}{
+		{"signed out", func(*testing.T) *cookies.CookieJar { return cookies.NewCookieJar() }},
+		{"signed in", func(t *testing.T) *cookies.CookieJar {
+			return mustLoadJarFixture(t, "# Netscape HTTP Cookie File\n"+
+				".youtube.com\tTRUE\t/\tTRUE\t2000000000\tSAPISID\tsapisid-a\n"+
+				".youtube.com\tTRUE\t/\tTRUE\t2000000000\tLOGIN_INFO\tlogininfo-a\n")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			yt := serveFakeYouTube(t, map[string]string{"28": membersOnly, "7": memberTV, "56": memberTV})
+			svc := youtube.NewService(tc.jar(t), &nopLogger{})
+
+			res, err := monitorProbe(svc.ProbeVideoStatus)(context.Background(), "test1234567")
+
+			if err != nil {
+				t.Fatalf("probe: %v, want android_vr's members-only verdict", err)
+			}
+			if res.PlayabilityError != "members_only" {
+				t.Errorf("PlayabilityError = %q, want members_only: the verdict the walk relabels the row on", res.PlayabilityError)
+			}
+			if got := yt.asked(); got != "28" {
+				t.Errorf("clients asked %q, want android_vr alone: the walk owns a members-only row's authenticated probe", got)
+			}
+		})
+	}
+}
