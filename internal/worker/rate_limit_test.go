@@ -156,7 +156,8 @@ func TestBacklogRateLimitRequeuesOutsideTheRetryBudget(t *testing.T) {
 //
 // Mutants: route the verdict to setJobError — the row reads Error and there
 // is no second fetch; drop the wait — the second fetch comes at once; drop
-// holdForRateLimit from the non-backlog path — the scheduler admits.
+// holdForRateLimit from the non-backlog path — the scheduler admits; never
+// rewrite the line — a minute in it still says the whole half hour is left.
 func TestRateLimitedBroadcastWaitsInPlace(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		w, db := testWorkerSetup(t)
@@ -195,6 +196,11 @@ func TestRateLimitedBroadcastWaitsInPlace(t *testing.T) {
 		}
 		if !w.scheduler.rateLimitGateClosed(time.Now()) {
 			t.Error("backlog admission is open while a broadcast's rate-limit verdict stands")
+		}
+		time.Sleep(rateLimitWaitRefresh)
+		synctest.Wait()
+		if row, _ := db.GetJob("rl_live"); row.Progress != rateLimitWaitLine(rateLimitRetryInterval-rateLimitWaitRefresh) {
+			t.Errorf("a minute in, progress = %q; want the time left rewritten", row.Progress)
 		}
 		<-done
 
@@ -248,6 +254,56 @@ func TestRateLimitedBroadcastWaitEndsOnCancel(t *testing.T) {
 		}
 		if row, _ := db.GetJob("rl_cancel"); row.Status != database.StatusUpcoming || row.Progress != "" {
 			t.Errorf("row = %s %q, want Upcoming (a shutdown keeps the row) with the line cleared", row.Status, row.Progress)
+		}
+	})
+}
+
+// TestRateLimitedWaitStopsOnARowThatLeftTheQueue: the row is read again
+// once the wait is over, and a job whose row left the states the queue
+// processes meanwhile — written Cancelled by something that did not cancel
+// the run, a channel removal's bulk write, say — is not fetched again, and
+// ends as a cancelled run.
+//
+// Mutant: go on unless the row is gone — the Cancelled row is fetched again.
+func TestRateLimitedWaitStopsOnARowThatLeftTheQueue(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		w, db := testWorkerSetup(t)
+		backlogRetryJob(t, db, "rl_left", 0, false)
+		var mu sync.Mutex
+		fetches := 0
+		refused := rateLimitedResult(t)
+		w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+			mu.Lock()
+			fetches++
+			n := fetches
+			mu.Unlock()
+			if n == 1 {
+				return refused, nil
+			}
+			// A fetch there should not have been; it ends the run, so the
+			// test fails rather than waiting forever.
+			return &StreamProcessResult{ShouldDownload: false, Error: "fetched again"}, nil
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("processJob panicked: %v", r)
+				}
+			}()
+			w.processJob(context.Background(), "rl_left")
+		}()
+		synctest.Wait()
+		db.UpdateJobFields("rl_left", map[string]any{"status": database.StatusCancelled})
+		<-done
+		mu.Lock()
+		defer mu.Unlock()
+		if fetches != 1 {
+			t.Errorf("fetched %d times, want 1 — the row had left the queue", fetches)
+		}
+		if row, _ := db.GetJob("rl_left"); row.Status != database.StatusCancelled {
+			t.Errorf("status = %s, want the Cancelled it was left in", row.Status)
 		}
 	})
 }
