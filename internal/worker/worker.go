@@ -398,6 +398,9 @@ func NewDownloadWorker(
 	// M. The wake lets the scheduler admit the channel's next backlog VOD
 	// promptly instead of on the heartbeat.
 	sp.SetWakeScheduler(sched.Wake)
+	// The waiting loop waits a rate limit out in place, so its refusals hold
+	// the backlog from there (loopRateLimit).
+	sp.SetOnRateLimited(func() { sched.holdForRateLimit(time.Now(), rateLimitBackoff) })
 
 	// ONE registry, two holders. ExecuteTwitch registers into the
 	// orchestrator's; cmd/moombox broadcasts through the worker's. Two

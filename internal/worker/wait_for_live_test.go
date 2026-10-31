@@ -123,6 +123,9 @@ func driveWaitForLive(t *testing.T, startIn, budget time.Duration, fakes func(st
 		sp.getVideoInfoFn = func(context.Context, string) (*youtube.VideoInfo, error) {
 			return answer("full", f.full, upcomingAnswer(run.start))
 		}
+		// The backlog hold the loop places for a rate limit its full fetch
+		// met (loopRateLimit), recorded among the calls as "hold".
+		sp.onRateLimited = func() { answer("hold", nil, nil) }
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

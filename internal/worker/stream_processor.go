@@ -131,6 +131,13 @@ type StreamProcessor struct {
 	// at call sites.
 	wakeScheduler func()
 
+	// onRateLimited places the backlog scheduler's rate-limit hold
+	// (Scheduler.holdForRateLimit) for a refusal the waiting loop's full
+	// fetch met (loopRateLimit, rate_limit.go): the loop waits a rate limit
+	// out itself, where every other refusal reaches processJob, which places
+	// it. Wired by NewDownloadWorker via SetOnRateLimited; nil-guarded.
+	onRateLimited func()
+
 	// onTwitchAuthLoss reports a Twitch auth downgrade to whatever owns the
 	// PLATFORM's credential status — cookies.RefreshService.NoteTwitchAuthLoss
 	// in production, wired by cmd/moombox. nil is a valid install and the
@@ -215,6 +222,12 @@ func (sp *StreamProcessor) SetIsOnline(fn func() bool) {
 // processor. Called by NewDownloadWorker during construction.
 func (sp *StreamProcessor) SetWakeScheduler(fn func()) {
 	sp.wakeScheduler = fn
+}
+
+// SetOnRateLimited wires the backlog scheduler's rate-limit hold onto the
+// stream processor. Called by NewDownloadWorker during construction.
+func (sp *StreamProcessor) SetOnRateLimited(fn func()) {
+	sp.onRateLimited = fn
 }
 
 // SetOnTwitchAuthLoss wires the platform-mark seam. Called during startup,

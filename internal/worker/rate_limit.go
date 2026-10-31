@@ -39,7 +39,10 @@ import (
 //     the fetch that answers (Process). A broadcast whose first fetch was
 //     refused used to end in Error before it aired, and nothing created its
 //     job again, since the feed monitor never re-creates a video it has a job
-//     for.
+//     for;
+//   - and a broadcast already in its waiting loop stays there, its chat and
+//     its probe running, and confirms its go-live again on the same cadence
+//     (loopRateLimit).
 
 // rateLimitBackoff is how long a backlog VOD a rate-limit verdict sent back
 // to Queued is held from re-admission, and how long the verdict holds every
@@ -92,13 +95,98 @@ func rateLimitVerdictMessage(reason string, auth youtube.SessionAuthState) strin
 }
 
 // rateLimitedFetch reports whether a full fetch came back refused for a rate
-// limit with nothing to download. The waiting loop's go-live confirmation
-// reads it as no answer at all: neither a stream still upcoming, to be
-// confirmed again on the next probe — the whole cascade into the limit every
-// 30 s — nor a go-live, which wrote Live and went on to a download with no
-// formats. completeStreamTransition hands it back as the refusal it is.
+// limit with nothing to download. The waiting loop reads it as no answer at
+// all (loopRateLimit): neither a stream still upcoming, to be confirmed again
+// on the next probe — the whole cascade into the limit every 30 s — nor a
+// go-live, which wrote Live and went on to a download with no formats.
 func rateLimitedFetch(info *youtube.VideoInfo) bool {
 	return info != nil && info.PlayabilityError == youtube.PlayabilityRateLimited && probeFormatCount(info) == 0
+}
+
+// loopRateLimit is the waiting loop's memory of the rate limit its full
+// fetches met (waitForLive). A broadcast that is waiting stays in its loop
+// through one — its early chat running, its status probe polling — rather
+// than going back to processJob to wait the limit out: it used to be handed
+// back as the refusal, which stopped the waiting-room chat and left the job
+// with no probe at all for the half hour processJob waits, so a stream that
+// had just gone live lost its chat, and on a stream without DVR its video,
+// for as long as the wait lasted, however soon the limit cleared.
+//
+// What the loop holds off is the go-live confirmation, the full cascade the
+// live and VOD arms make when the status probe says the stream has begun:
+// once YouTube has refused one, the next is made rateLimitRetryInterval
+// after it, as processJob's wait in place would make it, under the same
+// progress line, and the arms read the probe's "live" as nothing until then.
+// The periodic full fetch keeps its own half-hourly cadence.
+type loopRateLimit struct {
+	// refusing: the last full fetch was refused. The first refusal of a spell
+	// places the backlog hold, as outlastRateLimit's does.
+	refusing bool
+	// until: zero, or when a go-live confirmation may be made again.
+	until time.Time
+}
+
+// confirmationHeld reports whether a go-live confirmation must wait.
+func (l *loopRateLimit) confirmationHeld() bool { return !l.until.IsZero() }
+
+// noteFetch reads a full fetch the waiting loop made, and reports whether
+// YouTube refused it for a rate limit (rateLimitedFetch). A refusal's spell
+// holds backlog admission on its first (onRateLimited); a refused go-live
+// confirmation also holds the next one off for rateLimitRetryInterval under
+// the wait's progress line. A fetch that answered ends the spell, and lifts
+// a hold on confirmations the periodic fetch finds the limit gone under.
+func (sp *StreamProcessor) noteFetch(job *database.Job, l *loopRateLimit, info *youtube.VideoInfo, confirmation bool) bool {
+	if !rateLimitedFetch(info) {
+		l.refusing = false
+		if l.confirmationHeld() {
+			l.until = time.Time{}
+			sp.db.UpdateJobFields(job.ID, map[string]any{"progress": ""})
+		}
+		return false
+	}
+	first := !l.refusing
+	l.refusing = true
+	if first && sp.onRateLimited != nil {
+		sp.onRateLimited()
+	}
+	logRefusal := sp.logger.Debug
+	if first {
+		logRefusal = sp.logger.Warn
+	}
+	if !confirmation {
+		logRefusal("YouTube rate-limited the waiting loop's periodic full fetch",
+			"videoID", job.VideoID, "reason", info.PlayabilityReason)
+		return true
+	}
+	l.until = time.Now().Add(rateLimitRetryInterval)
+	sp.db.UpdateJobFields(job.ID, map[string]any{"progress": rateLimitWaitLine(rateLimitRetryInterval)})
+	logRefusal("YouTube rate-limited the go-live confirmation; the job keeps waiting, its chat with it, and confirms again",
+		"videoID", job.VideoID, "retryIn", rateLimitRetryInterval, "reason", info.PlayabilityReason)
+	return true
+}
+
+// tickRateLimit runs once per answered probe, ahead of the loop's reading
+// of it:
+// while confirmations are held it rewrites the progress line with the time
+// left, and once the hold has run out it lifts it, the line with it.
+func (sp *StreamProcessor) tickRateLimit(job *database.Job, l *loopRateLimit, now time.Time) {
+	if !l.confirmationHeld() {
+		return
+	}
+	if !now.Before(l.until) {
+		l.until = time.Time{}
+		sp.db.UpdateJobFields(job.ID, map[string]any{"progress": ""})
+		return
+	}
+	sp.db.UpdateJobFields(job.ID, map[string]any{"progress": rateLimitWaitLine(l.until.Sub(now))})
+}
+
+// endRateLimit clears the wait's progress line from a loop that returns
+// while confirmations are held: a cancel, a shutdown, a give-up.
+func (sp *StreamProcessor) endRateLimit(job *database.Job, l *loopRateLimit) {
+	if l.confirmationHeld() {
+		sp.db.UpdateJobFields(job.ID, map[string]any{"progress": ""})
+	}
 }
 
 // isRateLimited reports whether err is YouTube rate-limiting the session: a

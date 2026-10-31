@@ -396,41 +396,181 @@ func TestRateLimited429WaitsInPlaceAtLeastItsRetryAfter(t *testing.T) {
 	}
 }
 
-// TestRateLimitedGoLiveIsHandedBack: the waiting loop's go-live confirmation
-// that YouTube rate-limits is handed back to processJob as the refusal it
-// is, with the row still Upcoming. Read as an answer, it either wrote Live
-// and went on to a download with nothing to download — Error — or, read
-// "still upcoming", sent the whole cascade into the limit again on every
-// 30 s probe.
+// vodAnswer is a stream that is over, as the WEB-family calls see it.
+func vodAnswer(start time.Time) *youtube.VideoInfo {
+	return &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, PlayabilityError: youtube.PlayabilityOK,
+		ScheduledStartTime: start.UTC().Format(time.RFC3339)}
+}
+
+// fullCalls is when the driven wait made its full fetches.
+func fullCalls(run waitRun) []time.Duration {
+	var at []time.Duration
+	for _, c := range run.calls {
+		if c.kind == "full" {
+			at = append(at, c.at)
+		}
+	}
+	return at
+}
+
+// TestRateLimitedGoLiveKeepsWaiting: a go-live confirmation YouTube refuses
+// for a rate limit leaves the broadcast in its waiting loop — early chat
+// running, status probe polling — and the confirmation is made again once
+// the limit has been waited out, rateLimitRetryInterval later, on the first
+// probe past it; that one goes live. The refusal holds the backlog. Before,
+// a refusal read as an answer either wrote Live and went on to a download
+// with nothing to download (Error), or, read "still upcoming", sent the whole
+// cascade into the limit on every 30 s probe; and then it was handed back to
+// processJob, which stopped the waiting-room chat and waited half an hour
+// with no probe at all.
 //
-// Mutants: drop rateLimitedFetch from completeStreamTransition — the
-// not_a_stream row writes Live and downloads; drop it from the live arm's
-// upcoming cross-check — the upcoming row is confirmed on every probe until
-// the budget ends.
-func TestRateLimitedGoLiveIsHandedBack(t *testing.T) {
-	for _, status := range []youtube.StreamStatus{youtube.StreamNotAStream, youtube.StreamUpcoming} {
-		t.Run(string(status), func(t *testing.T) {
-			run := driveWaitForLive(t, 2*time.Minute, time.Hour, func(start time.Time) waitFakes {
+// Mutants: drop noteFetch from the live arm — the not_a_stream row goes
+// live on the refusal, the upcoming one confirms on every probe; from the
+// VOD arm — the VOD row does; drop the arms' confirmationHeld — every probe
+// confirms; never lift the hold — there is no second confirmation; drop the
+// hook — no backlog hold.
+func TestRateLimitedGoLiveKeepsWaiting(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		answer    func(start time.Time) *youtube.VideoInfo
+		refusedAs youtube.StreamStatus
+	}{
+		{"live, refusal reads not_a_stream", liveAnswer, youtube.StreamNotAStream},
+		{"live, refusal reads upcoming", liveAnswer, youtube.StreamUpcoming},
+		{"VOD, refusal reads upcoming", vodAnswer, youtube.StreamUpcoming},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := driveWaitForLive(t, 2*time.Minute, 2*time.Hour, func(start time.Time) waitFakes {
 				return waitFakes{
-					status: func(time.Duration) (*youtube.VideoInfo, error) { return liveAnswer(start), nil },
-					full: func(time.Duration) (*youtube.VideoInfo, error) {
-						return rateLimitedInfo(status, youtube.SessionAuthLoggedOut), nil
+					status: func(at time.Duration) (*youtube.VideoInfo, error) {
+						if at < 3*time.Minute {
+							return upcomingAnswer(time.Time{}), nil
+						}
+						return tc.answer(start), nil
+					},
+					full: func(at time.Duration) (*youtube.VideoInfo, error) {
+						if at < 10*time.Minute {
+							return rateLimitedInfo(tc.refusedAs, youtube.SessionAuthLoggedOut), nil
+						}
+						return tc.answer(start), nil
 					},
 				}
 			})
-			if run.returned < 0 || run.result == nil {
-				t.Fatalf("the wait never returned; calls:%s", run)
+			fulls := fullCalls(run)
+			if run.result == nil || !run.result.ShouldDownload {
+				t.Fatalf("result = %+v, want the download once the limit was waited out; calls:%s", run.result, run)
 			}
-			if run.result.ShouldDownload || !errors.Is(run.result.ErrSentinel, ErrRateLimited) {
-				t.Errorf("result = %+v, want the rate-limit refusal", run.result)
+			if len(fulls) != 2 {
+				t.Fatalf("full fetches at %v, want the refused confirmation and the one after the wait; calls:%s", fulls, run)
 			}
-			if n := run.count("full"); n != 1 {
-				t.Errorf("%d full fetches, want the one confirmation; calls:%s", n, run)
+			if gap := fulls[1] - fulls[0]; gap < rateLimitRetryInterval || gap > rateLimitRetryInterval+time.Minute {
+				t.Errorf("confirmations %s apart, want the first probe past %s", gap, rateLimitRetryInterval)
 			}
-			if run.row.Status != database.StatusUpcoming {
-				t.Errorf("row status = %s, want Upcoming", run.row.Status)
+			if run.returned != fulls[1] {
+				t.Errorf("the wait returned at %s; it was to wait in its loop until the confirmation at %s", run.returned, fulls[1])
+			}
+			if n := run.count("hold"); n != 1 {
+				t.Errorf("%d backlog holds, want the refusal's one; calls:%s", n, run)
+			}
+			if wantVod := tc.answer(run.start).StreamStatus == youtube.StreamVOD; run.result.IsVod != wantVod {
+				t.Errorf("IsVod = %v, want %v", run.result.IsVod, wantVod)
+			}
+			if run.row.Progress != "" {
+				t.Errorf("row progress = %q once the confirmation answered, want the wait's line cleared", run.row.Progress)
 			}
 		})
+	}
+}
+
+// TestRateLimitedPeriodicFetchHoldsTheBacklog: the waiting loop's periodic
+// full fetch that YouTube refuses for a rate limit holds the backlog, on the
+// first refusal of a spell: two in a row are one spell, and one after an
+// answer is a new one. The loop's fetches held nothing; a broadcast waiting
+// days was the one job that saw the limit, and the backlog went on being
+// admitted into it.
+//
+// Mutants: drop noteFetch from the periodic fetch — no hold; hold on every
+// refusal — three.
+func TestRateLimitedPeriodicFetchHoldsTheBacklog(t *testing.T) {
+	// Six hours out the status probe asks every ten minutes, so the full
+	// fetch is due on the first of those ticks past each half hour.
+	run := driveWaitForLive(t, 6*time.Hour, 2*time.Hour+20*time.Minute, func(start time.Time) waitFakes {
+		n := 0
+		return waitFakes{
+			full: func(time.Duration) (*youtube.VideoInfo, error) {
+				n++
+				if n == 3 {
+					return upcomingAnswer(start), nil
+				}
+				return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedOut), nil
+			},
+		}
+	})
+	if n := run.count("full"); n != 4 {
+		t.Fatalf("%d periodic full fetches, want 4; calls:%s", n, run)
+	}
+	if n := run.count("hold"); n != 2 {
+		t.Errorf("%d backlog holds for refusals at the 1st, 2nd and 4th fetch, want 2 — one a spell; calls:%s", n, run)
+	}
+}
+
+// TestWaitingLoopRateLimitLine: the progress line a held confirmation shows
+// is the wait's own, with the time left, rewritten on each probe and cleared
+// when the hold runs out, when a fetch answers, and when the loop returns.
+//
+// Mutants: leave the line on a hold that ran out; leave it on an answer;
+// leave it on the loop's return; never rewrite the time left.
+func TestWaitingLoopRateLimitLine(t *testing.T) {
+	sp, _, job := foundTestJob(t)
+	progress := func() string {
+		t.Helper()
+		row, _ := sp.db.GetJob(job.ID)
+		return row.Progress
+	}
+	refused := rateLimitedInfo(youtube.StreamNotAStream, youtube.SessionAuthLoggedOut)
+	var l loopRateLimit
+
+	if !sp.noteFetch(job, &l, refused, true) || !l.confirmationHeld() {
+		t.Fatal("a refused confirmation did not hold the next one")
+	}
+	if got := progress(); got != rateLimitWaitLine(rateLimitRetryInterval) {
+		t.Errorf("line on the refusal = %q", got)
+	}
+	sp.tickRateLimit(job, &l, l.until.Add(-20*time.Minute))
+	if got, want := progress(), rateLimitWaitLine(20*time.Minute); got != want {
+		t.Errorf("line ten minutes in = %q, want %q", got, want)
+	}
+	sp.tickRateLimit(job, &l, l.until)
+	if l.confirmationHeld() || progress() != "" {
+		t.Errorf("at the hold's end: held %v, line %q; want lifted and cleared", l.confirmationHeld(), progress())
+	}
+
+	sp.noteFetch(job, &l, refused, true)
+	if sp.noteFetch(job, &l, upcomingAnswer(time.Time{}), false) || l.confirmationHeld() || progress() != "" {
+		t.Errorf("after an answer: held %v, line %q; want lifted and cleared", l.confirmationHeld(), progress())
+	}
+
+	sp.noteFetch(job, &l, refused, true)
+	sp.endRateLimit(job, &l)
+	if got := progress(); got != "" {
+		t.Errorf("line after the loop returned = %q, want cleared", got)
+	}
+}
+
+// TestWaitingLoopRateLimitHoldIsTheSchedulers pins the seam: in production
+// the waiting loop's rate-limit hook is the backlog scheduler's hold, for
+// the hour.
+//
+// Mutant: NewDownloadWorker does not wire it — the hook is nil.
+func TestWaitingLoopRateLimitHoldIsTheSchedulers(t *testing.T) {
+	w, _ := testWorkerSetup(t)
+	if w.streamProc.onRateLimited == nil {
+		t.Fatal("the waiting loop's rate-limit hook is not wired")
+	}
+	now := time.Now()
+	w.streamProc.onRateLimited()
+	if !w.scheduler.rateLimitGateClosed(now.Add(rateLimitBackoff - time.Minute)) {
+		t.Error("the hook placed no hour-long backlog hold")
 	}
 }
 

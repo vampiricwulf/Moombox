@@ -153,6 +153,8 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 	membersOnly := false
 	lastFullFetch := time.Now() // Initial full fetch just happened in Process()
 	lastScheduleProbe := lastFullFetch
+	var rateLimit loopRateLimit // a rate limit the full fetches met (rate_limit.go)
+	defer sp.endRateLimit(job, &rateLimit)
 
 	// B2: Start early chat downloader (only if chat download is enabled)
 	var downloadChat bool
@@ -370,6 +372,9 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				sp.logger.Debug("periodic full fetch failed, will retry later", "videoID", job.VideoID, "err", err)
 			}
 			lastFullFetch = time.Now()
+			if err == nil {
+				sp.noteFetch(job, &rateLimit, fullInfo, false)
+			}
 		}
 
 		// Reschedule check. The status probe above carries no schedule, so a
@@ -444,8 +449,13 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			membersOnly = true
 		}
 
+		sp.tickRateLimit(job, &rateLimit, time.Now())
 		switch probeInfo.StreamStatus {
 		case youtube.StreamLive:
+			if rateLimit.confirmationHeld() {
+				sp.logger.Debug("stream is live (probe); its confirmation waits out a rate limit", "videoID", job.VideoID)
+				continue
+			}
 			sp.logger.Info("stream is now live (probe)", "videoID", job.VideoID)
 			fullInfo, err := sp.fetchVideoInfo(ctx, job.VideoID)
 			if err != nil {
@@ -459,11 +469,14 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				sp.logger.Debug("full fetch on live failed; will retry next poll", "videoID", job.VideoID, "err", err)
 				continue
 			}
+			// A rate limit says nothing about the stream: keep waiting, and
+			// confirm again once it has been waited out (loopRateLimit).
+			if sp.noteFetch(job, &rateLimit, fullInfo, true) {
+				continue
+			}
 			// Cross-check: if full WEB fetch says still upcoming, the probe was
-			// fooled by YouTube's waiting room / offline slate. Keep polling —
-			// unless the fetch was refused for a rate limit, which says nothing
-			// about the stream (rateLimitedFetch).
-			if fullInfo.StreamStatus == youtube.StreamUpcoming && !rateLimitedFetch(fullInfo) {
+			// fooled by YouTube's waiting room / offline slate. Keep polling.
+			if fullInfo.StreamStatus == youtube.StreamUpcoming {
 				sp.updateJobMetadata(job, fullInfo, true)
 				if fullInfo.ScheduledStartTime != "" {
 					scheduledStartTime = fullInfo.ScheduledStartTime
@@ -476,6 +489,10 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			return sp.completeStreamTransition(job, fullInfo, chatDl), nil
 
 		case youtube.StreamVOD, youtube.StreamPostLive:
+			if rateLimit.confirmationHeld() {
+				sp.logger.Debug("stream became VOD (probe); its confirmation waits out a rate limit", "videoID", job.VideoID)
+				continue
+			}
 			sp.logger.Info("stream became VOD (probe)", "videoID", job.VideoID)
 			fullInfo, err := sp.fetchVideoInfo(ctx, job.VideoID)
 			if err != nil {
@@ -486,9 +503,12 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				sp.logger.Debug("full fetch on VOD failed; will retry next poll", "videoID", job.VideoID, "err", err)
 				continue
 			}
-			// Cross-check: if full WEB fetch says still upcoming, keep polling
-			// (a rate limit aside, as above).
-			if fullInfo.StreamStatus == youtube.StreamUpcoming && !rateLimitedFetch(fullInfo) {
+			// A rate limit, as above.
+			if sp.noteFetch(job, &rateLimit, fullInfo, true) {
+				continue
+			}
+			// Cross-check: if full WEB fetch says still upcoming, keep polling.
+			if fullInfo.StreamStatus == youtube.StreamUpcoming {
 				sp.updateJobMetadata(job, fullInfo, true)
 				if fullInfo.ScheduledStartTime != "" {
 					scheduledStartTime = fullInfo.ScheduledStartTime
@@ -548,11 +568,7 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 	// from here to "no download strategy available": a plain Error with no
 	// "Authentication Required" alert, which the credential-recovery sweep —
 	// it resumes COOKIES? rows only — never looked at again.
-	//
-	// A rate limit on the same fetch is handed back the same way, for
-	// processJob to wait out (outlastRateLimit): it wrote Live and went on
-	// to a download with nothing to download, which ended in Error.
-	if errMsg, sentinel := sp.checkPlayability(fullInfo); errMsg != "" && (credentialVerdict(fullInfo, sentinel) || rateLimitedFetch(fullInfo)) {
+	if errMsg, sentinel := sp.checkPlayability(fullInfo); errMsg != "" && credentialVerdict(fullInfo, sentinel) {
 		sp.logger.Warn("playability check failed at go-live",
 			"videoID", job.VideoID,
 			"playability", string(fullInfo.PlayabilityError),
