@@ -397,15 +397,21 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	}
 
 	result, err = strategy.Download(ctx, strategyCtx, videoInfo, deps)
-	if fallback := missingPotFallback(strategy, videoInfo, err); fallback != nil {
+	if fallback := missingPotFallback(strategy, videoInfo, err); fallback != nil && ctx.Err() == nil {
 		// A live stream whose web-family streams need a GVS token none could
 		// be minted for: its HLS manifest is recorded instead, from the live
 		// edge (missingPotFallback). The failed setup built no downloader, so
-		// the restart seeds are still unused.
+		// the restart seeds are still unused. A job cancelled meanwhile —
+		// whose mint the cancel may be the failure of — sets up nothing more.
 		jobCtx.Logger.Warn("[POT] missing_pot: no GVS token for the "+strategy.Kind()+" streams — recording the HLS stream from the live edge instead",
 			"jobID", jobCtx.Job.ID, "err", err)
+		setupErr := err
 		strategy = fallback
 		result, err = strategy.Download(ctx, strategyCtx, videoInfo, deps)
+		if err != nil {
+			// Both causes: why HLS ran, and why it could not either.
+			err = fmt.Errorf("%w; the live HLS fallback failed too: %w", setupErr, err)
+		}
 	}
 
 	// The restart seeds are single-use — the initial downloaders above

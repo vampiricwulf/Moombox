@@ -649,36 +649,59 @@ func (f *fakeStrategy) Download(context.Context, *JobContext, *youtube.VideoInfo
 // TestExecuteWithChatFallsToHlsOnMissingPot pins the orchestrator's half of
 // the live missing_pot fallback: ExecuteWithChat's first setup, failing with
 // errMissingPot on a live stream that carries an HLS manifest, runs the HLS
-// strategy next — and the job log says why from-start was given up.
+// strategy next — and the job log says why from-start was given up. An HLS
+// setup that fails too reports both causes; a job cancelled before the
+// fallback (its mint may have failed on the cancel) sets up nothing more.
 //
-// Mutant: dropping the fallback from ExecuteWithChat fails it (HLS never
-// runs, and the error is the manifest-free setup's).
+// Mutants (each run): dropping the fallback from ExecuteWithChat fails the
+// live row (HLS never runs, and the error is the manifest-free setup's);
+// keeping only the HLS setup's error fails its errMissingPot test; dropping
+// the cancel test fails the cancelled row (HLS runs, and says it will).
 func TestExecuteWithChatFallsToHlsOnMissingPot(t *testing.T) {
-	hlsErr := errors.New("hls ran")
-	mf := &fakeStrategy{kind: "manifestless_dash", err: errors.Join(errMissingPot, errors.New("sidecar down"))}
-	hls := &fakeStrategy{kind: "hls", err: hlsErr}
-	origMF, origHLS := ManifestlessDashStrategy, HlsStrategy
-	ManifestlessDashStrategy, HlsStrategy = mf, hls
-	t.Cleanup(func() { ManifestlessDashStrategy, HlsStrategy = origMF, origHLS })
+	for _, tc := range []struct {
+		name      string
+		cancelled bool
+		wantHls   int32
+	}{
+		{name: "a live stream falls to HLS", wantHls: 1},
+		{name: "a cancelled job does not", cancelled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hlsErr := errors.New("hls ran")
+			mf := &fakeStrategy{kind: "manifestless_dash", err: errors.Join(errMissingPot, errors.New("sidecar down"))}
+			hls := &fakeStrategy{kind: "hls", err: hlsErr}
+			origMF, origHLS := ManifestlessDashStrategy, HlsStrategy
+			ManifestlessDashStrategy, HlsStrategy = mf, hls
+			t.Cleanup(func() { ManifestlessDashStrategy, HlsStrategy = origMF, origHLS })
 
-	w, db := testWorkerSetup(t)
-	job := &database.Job{ID: "yt_mpfb", VideoID: "mpfb", URL: "https://www.youtube.com/watch?v=mpfb", Platform: "youtube", Status: database.StatusLive}
-	if _, err := db.AddJob(job); err != nil {
-		t.Fatal(err)
-	}
-	logs := &captureLogger{}
-	jobCtx := &JobContext{Job: job, DB: db, Config: &JobConfig{}, StagingDir: filepath.Join(t.TempDir(), "staging"), Logger: logs}
-	info := manifestlessPotInfo("web_creator", "web_creator")
-	info.HlsManifestURL, info.HlsManifestSource = "https://m.example/x.m3u8", "web_safari"
+			w, db := testWorkerSetup(t)
+			job := &database.Job{ID: "yt_mpfb", VideoID: "mpfb", URL: "https://www.youtube.com/watch?v=mpfb", Platform: "youtube", Status: database.StatusLive}
+			if _, err := db.AddJob(job); err != nil {
+				t.Fatal(err)
+			}
+			logs := &captureLogger{}
+			jobCtx := &JobContext{Job: job, DB: db, Config: &JobConfig{}, StagingDir: filepath.Join(t.TempDir(), "staging"), Logger: logs}
+			info := manifestlessPotInfo("web_creator", "web_creator")
+			info.HlsManifestURL, info.HlsManifestSource = "https://m.example/x.m3u8", "web_safari"
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelled {
+				cancel()
+			}
 
-	err := w.orchestrator.ExecuteWithChat(context.Background(), jobCtx, info, false, nil)
-	if mf.calls.Load() != 1 || hls.calls.Load() != 1 {
-		t.Fatalf("manifest-free ran %d, HLS %d times; want one each", mf.calls.Load(), hls.calls.Load())
-	}
-	if !errors.Is(err, hlsErr) {
-		t.Errorf("err = %v, want the HLS setup's", err)
-	}
-	if logLine(logs, "[POT] missing_pot: no GVS token for the manifestless_dash streams") == nil {
-		t.Errorf("no fallback line in the job log: %v", logs.lines())
+			err := w.orchestrator.ExecuteWithChat(ctx, jobCtx, info, false, nil)
+			if mf.calls.Load() != 1 || hls.calls.Load() != tc.wantHls {
+				t.Fatalf("manifest-free ran %d, HLS %d times; want 1 and %d", mf.calls.Load(), hls.calls.Load(), tc.wantHls)
+			}
+			if !errors.Is(err, errMissingPot) {
+				t.Errorf("err = %v, want one naming the manifest-free setup's missing_pot", err)
+			}
+			if fell := logLine(logs, "[POT] missing_pot: no GVS token for the manifestless_dash streams") != nil; fell != (tc.wantHls == 1) {
+				t.Errorf("fallback line logged %v, want %v: %v", fell, tc.wantHls == 1, logs.lines())
+			}
+			if tc.wantHls == 1 && !errors.Is(err, hlsErr) {
+				t.Errorf("err = %v, want the HLS setup's beside it", err)
+			}
+		})
 	}
 }
