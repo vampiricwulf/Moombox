@@ -309,10 +309,21 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 				return observeYouTubeStatusProbe(job, info, err)
 			},
 		})
-		if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
+		// Installed whenever a solver is, as refreshGvsCredentials' URL half
+		// is gated — not on the extraction's PlayerURL (audit G2). Without
+		// one there is no player to re-solve with and no fresh response here
+		// to take one from, so the hook does the player-free half alone: the
+		// POT and visitor data are dropped, and its "" sends the engine down
+		// its refresh path, whose re-extraction resolves a player afresh
+		// (resolvePlayerURL). Until then such a job's first 403 invalidated
+		// nothing at all.
+		if routedSolver != nil || cipherSolver != nil {
 			origURL := originalBaseURLs[videoStream.Itag]
 			result.VideoDownloader.OnCipherFailure = func() string {
 				invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, potProvider, "DASH video")
+				if videoInfo.PlayerURL == "" {
+					return ""
+				}
 				return resolveFreshDashURL(ctx, job.Job.ID, routedSolver, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
 			}
 		}
@@ -340,10 +351,14 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 				return observeYouTubeStatusProbe(job, info, err)
 			},
 		})
-		if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
+		// Gated as the video hook is; see there.
+		if routedSolver != nil || cipherSolver != nil {
 			origURL := originalBaseURLs[audioStream.Itag]
 			result.AudioDownloader.OnCipherFailure = func() string {
 				invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, potProvider, "DASH audio")
+				if videoInfo.PlayerURL == "" {
+					return ""
+				}
 				return resolveFreshDashURL(ctx, job.Job.ID, routedSolver, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
 			}
 		}

@@ -178,8 +178,10 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// Wire OnCipherFailure for HLS so a 403 burst invalidates POT / visitor
 	// data / cipher caches. The variant URL has POT in its path so we can't
 	// hot-swap it mid-loop; return "" and let the next orchestrator-driven
-	// refresh rebuild the strategy with fresh values.
-	if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
+	// refresh rebuild the strategy with fresh values. Installed whenever a
+	// solver is, whatever the extraction's PlayerURL, as the DASH hooks are:
+	// the POT and visitor-data halves need no player (audit G2).
+	if routedSolver != nil || cipherSolver != nil {
 		result.VideoDownloader.OnCipherFailure = func() string {
 			invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, potProvider, "HLS")
 			return ""
