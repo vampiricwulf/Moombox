@@ -113,16 +113,19 @@ func TestNUnsolvedFailsTheURL(t *testing.T) {
 	}
 }
 
-// TestNUnsolvedWithNothingToSolveWith: an n with no player URL, or no solver
-// at all, has no answer either. RoutedDecryptNInURL asks no solver without a
-// player (there is no player id to ask under), and RoutedResolveURL and
-// ResolveURL mark their pre-solve failures ErrNUnsolved when an n is all the
-// URL needed a player for — a URL that also carries an encrypted signature
-// fails over that, and says so alone.
+// TestNUnsolvedWithNothingToSolveWith: an n with no player URL, no solver at
+// all, or a player that cannot be had has no answer either.
+// RoutedDecryptNInURL asks no solver without a player (there is no player id
+// to ask under), and RoutedResolveURL and ResolveURL mark their pre-solve
+// failures ErrNUnsolved when an n is all the URL needed a player for — a URL
+// that also carries an encrypted signature fails over that, and says so
+// alone.
 //
 // Mutants: RoutedDecryptNInURL's no-player guard dropped (the solver is asked
 // under player ""); unsolvedIfNOnly always wrapping (the signature rows
-// match ErrNUnsolved) or never (the n-only rows do not).
+// match ErrNUnsolved) or never (the n-only rows do not); ResolveURL's failed
+// GetSolvers returned unmarked (the "player that cannot be fetched, an n"
+// row does not match).
 func TestNUnsolvedWithNothingToSolveWith(t *testing.T) {
 	asked := 0
 	routed := &fakeRoutedSolver{NFn: func(string) (string, error) { asked++; return nAnswer, nil }}
@@ -156,6 +159,16 @@ func TestNUnsolvedWithNothingToSolveWith(t *testing.T) {
 		}, true},
 		{"no player URL, an n and a signature", func() error {
 			_, err := goja.ResolveURL(context.Background(), ResolveURLRequest{StreamURL: withN, EncryptedSignature: "ENC"})
+			return err
+		}, false},
+		// No routed solver, so RoutedResolveURL hands the request to
+		// ResolveURL, whose GetSolvers fails at the player fetch.
+		{"a player that cannot be fetched, an n", func() error {
+			_, err := ResolveFormatURL(context.Background(), nil, newFailingGojaResolver(t), unreachablePlayerURL, ResolveFormatRequest{URL: withN})
+			return err
+		}, true},
+		{"a player that cannot be fetched, an n and a signature", func() error {
+			_, err := ResolveFormatURL(context.Background(), nil, newFailingGojaResolver(t), unreachablePlayerURL, ResolveFormatRequest{URL: withN, EncryptedSig: "ENC"})
 			return err
 		}, false},
 	} {
