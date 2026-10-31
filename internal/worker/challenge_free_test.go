@@ -74,8 +74,9 @@ func visionosCopies(info *youtube.VideoInfo) []youtube.Format {
 // TestDownloadVodFallsBackToChallengeFreeFormats is audit G10's VOD half.
 // When the chosen format's URL fails to resolve for a reason every format
 // needing the player JS shares — the sidecar down (cipher.ErrSidecarUnavailable),
-// a player ejs cannot solve (cipher.ErrPlayerJSStale), an n no solver
-// answered (cipher.ErrNUnsolved), no player URL — the job used to re-select
+// a player ejs cannot solve (cipher.ErrPlayerJSStale) or nothing could fetch
+// (cipher.ErrPlayerJSFetch), an n no solver answered (cipher.ErrNUnsolved),
+// no player URL — the job used to re-select
 // once with that one itag excluded, fail again on the next tv format, and end
 // in Error ("video URL resolve failed for primary and alternate"), where
 // yt-dlp downloads visionos's copy: it skips each format whose challenge
@@ -113,6 +114,7 @@ func TestDownloadVodFallsBackToChallengeFreeFormats(t *testing.T) {
 	}{
 		{"sidecar down", true, false, &challengeSolver{sigErr: fmt.Errorf("%w: the sidecar is not running", cipher.ErrSidecarUnavailable)}, 1, cipher.ErrSidecarUnavailable},
 		{"player JS stale", true, false, &challengeSolver{sigErr: fmt.Errorf("%w: ejs solve sig: no solutions", cipher.ErrPlayerJSStale)}, 1, cipher.ErrPlayerJSStale},
+		{"player JS unfetchable", true, false, &challengeSolver{sigErr: fmt.Errorf("player JS for cafef00d: %w: status 503", cipher.ErrPlayerJSFetch)}, 1, cipher.ErrPlayerJSFetch},
 		{"n unsolved", false, false, &challengeSolver{n: sentinelOf}, 1, cipher.ErrNUnsolved},
 		{"no player URL", true, true, &challengeSolver{}, 0, errChallengesUnsolvable},
 	} {
@@ -230,7 +232,7 @@ func TestDownloadVodFallsBackToChallengeFreeFormats(t *testing.T) {
 }
 
 // TestSystemicResolveFailure pins which resolve failures are systemic: the
-// cipher's three sentinels and a missing player URL, for a format that needs
+// cipher's four sentinels and a missing player URL, for a format that needs
 // the player JS, and nothing for one that does not — its URL needs nothing
 // any of them is about.
 //
@@ -249,6 +251,7 @@ func TestSystemicResolveFailure(t *testing.T) {
 	}{
 		{"sidecar unavailable", fmt.Errorf("x: %w", cipher.ErrSidecarUnavailable), challenged, nPlayer, true},
 		{"player JS stale", fmt.Errorf("x: %w", cipher.ErrPlayerJSStale), challenged, nPlayer, true},
+		{"player JS unfetchable", fmt.Errorf("player JS for cafef00d: %w: status 503", cipher.ErrPlayerJSFetch), challenged, nPlayer, true},
 		{"n unsolved", fmt.Errorf("x: %w", cipher.ErrNUnsolved), challenged, nPlayer, true},
 		{"no player URL", plain, challenged, "", true},
 		{"a request's own failure", plain, challenged, nPlayer, false},

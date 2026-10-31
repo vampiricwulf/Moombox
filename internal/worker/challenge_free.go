@@ -27,6 +27,15 @@ var errChallengesUnsolvable = errors.New("the player's JS challenges cannot be s
 //   - cipher.ErrPlayerJSStale: ejs could not solve the player even after a
 //     fresh fetch of it — the case of a player rotation ejs does not handle
 //     yet.
+//   - cipher.ErrPlayerJSFetch: the player could not be fetched, with no
+//     cached copy to serve instead (PlayerCache.Fetch). Nothing solves a
+//     challenge against a player it does not have; yt-dlp's challenge
+//     director catches a provider that fails on a player it cannot load and
+//     leaves its challenges unanswered (jsc/_director.py:95-140), so every
+//     format needing one is skipped behind "Some formats may be missing"
+//     (_video.py:3303-3359, 3557-3580) and visionos's copy is the one it
+//     keeps. An n surfaces this as cipher.ErrNUnsolved already; a signature
+//     surfaces it as itself (the sidecar's "player JS for <id>").
 //   - cipher.ErrNUnsolved: no solver answered the n challenge. Every format
 //     of a player shares its n function.
 //   - no player URL: there is nothing to solve any challenge with.
@@ -45,6 +54,7 @@ func systemicResolveFailure(err error, f *youtube.Format, playerURL string) bool
 	return playerURL == "" ||
 		errors.Is(err, cipher.ErrSidecarUnavailable) ||
 		errors.Is(err, cipher.ErrPlayerJSStale) ||
+		errors.Is(err, cipher.ErrPlayerJSFetch) ||
 		errors.Is(err, cipher.ErrNUnsolved)
 }
 
@@ -69,7 +79,8 @@ func setupFailedOnChallenges(err error) bool {
 	return errors.Is(err, errChallengesUnsolvable) ||
 		errors.Is(err, cipher.ErrNUnsolved) ||
 		errors.Is(err, cipher.ErrSidecarUnavailable) ||
-		errors.Is(err, cipher.ErrPlayerJSStale)
+		errors.Is(err, cipher.ErrPlayerJSStale) ||
+		errors.Is(err, cipher.ErrPlayerJSFetch)
 }
 
 // withoutChallengeFormats returns the copies in formats whose URL needs no

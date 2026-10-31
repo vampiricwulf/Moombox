@@ -234,6 +234,7 @@ func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 		{"live manifest-free, systemic", "manifestless_dash", false, systemic, false, true},
 		{"live DASH manifest, its n unsolved", "dash", false, fmt.Errorf("DASH: segment URL: %w", cipher.ErrNUnsolved), false, true},
 		{"live, the sidecar down", "manifestless_dash", false, fmt.Errorf("x: %w", cipher.ErrSidecarUnavailable), false, true},
+		{"live, the player unfetchable", "manifestless_dash", false, fmt.Errorf("resolve video URL: player JS for cafef00d: %w: status 503", cipher.ErrPlayerJSFetch), false, true},
 		{"live, an unrelated failure", "manifestless_dash", false, errors.New("manifestless DASH: no suitable video adaptive format"), false, false},
 		{"live, cancelled", "manifestless_dash", false, systemic, true, false},
 		{"a VOD's own failure", "vod", true, systemic, false, false},
