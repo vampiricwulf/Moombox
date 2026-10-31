@@ -987,7 +987,7 @@ func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 	// error never named the country restriction a proxy elsewhere would get
 	// past (G47).
 	//
-	// Then the two refusals that pass, which the worker waits out instead of
+	// Then the session's two refusals, which the worker waits out instead of
 	// ending the job on (PlayabilityRateLimited). Never for a reason that
 	// asks to sign in, which upstream's first arm claims for its login hint
 	// — the bot check ("Sign in to confirm you're not a bot") is a cookie

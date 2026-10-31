@@ -82,12 +82,14 @@ var ErrNonActionable = errors.New("non-actionable error")
 // handleCancellation instead of comparing error strings.
 var ErrCancelled = errors.New("cancelled")
 
-// ErrRateLimited marks a playability refusal YouTube says will pass
-// (youtube.PlayabilityRateLimited: "try again later", or a captcha
-// challenge), from Process or from a stale VOD's re-extraction. processJob
-// routes it to outlastRateLimit (rate_limit.go) — a backlog VOD back to
-// Queued for an hour, any other job waiting in place — instead of to
-// setJobError, which would end in Error a job that only had to wait.
+// ErrRateLimited marks a playability refusal of the session rather than of
+// the video (youtube.PlayabilityRateLimited: "try again later", or a captcha
+// challenge, on an extraction with no formats), from Process or from a stale
+// VOD's re-extraction. processJob routes it — and an Innertube 429 on the
+// whole cascade, the same limit's HTTP form (isRateLimited) — to
+// outlastRateLimit (rate_limit.go): a backlog VOD back to Queued for an
+// hour, any other job waiting in place, instead of setJobError, which would
+// end in Error a job that only had to wait.
 var ErrRateLimited = errors.New("rate-limited by YouTube")
 
 // The three ways the off-queue staging verbs refuse. All three are the
@@ -944,7 +946,8 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 				return
 			}
 			if errors.Is(result.ErrSentinel, ErrRateLimited) {
-				// A refusal that passes: wait it out rather than record it.
+				// The session's refusal, not the video's: wait it out rather
+				// than record it.
 				if job = w.outlastRateLimit(ctx, job, result.AsError(), &rateLimitSince); job == nil {
 					return
 				}
