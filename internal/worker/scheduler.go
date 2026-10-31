@@ -325,14 +325,6 @@ func (s *Scheduler) sweep() {
 		s.log.Debug("scheduler: offline; backlog admission waits for connectivity")
 		return
 	}
-	// Nor while YouTube rate-limits the session: every admission would be
-	// refused the same way, and free its slot for the next one
-	// (holdForRateLimit). The heartbeat's sweep is what finds the hold run
-	// out.
-	if s.rateLimitGateClosed(time.Now()) {
-		s.log.Debug("scheduler: YouTube rate-limited this session; backlog admission waits for the hold to run out")
-		return
-	}
 
 	channels, err := s.db.QueuedChannels()
 	if err != nil {
@@ -350,7 +342,16 @@ func (s *Scheduler) sweep() {
 	if (len(channels) > 0 || s.diskHeld) && s.diskGateClosed() {
 		return
 	}
+	// Nor while YouTube rate-limits the session: every admission would be
+	// refused the same way, and free its slot for the next one
+	// (holdForRateLimit). After the disk gate, so the disk is read, and its
+	// gate closes and reopens, on the sweeps it always was. The heartbeat's
+	// sweep is what finds the hold run out.
 	now := time.Now()
+	if s.rateLimitGateClosed(now) {
+		s.log.Debug("scheduler: YouTube rate-limited this session; backlog admission waits for the hold to run out")
+		return
+	}
 	for _, ch := range channels {
 		inFlight, err := s.db.CountBacklogInFlight(ch)
 		if err != nil {

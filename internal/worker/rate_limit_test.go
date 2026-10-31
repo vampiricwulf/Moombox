@@ -456,3 +456,27 @@ func TestRateLimitIntervalsAreUpstreamsHourAndTheFullFetchCadence(t *testing.T) 
 		t.Errorf("rateLimitRetryInterval = %s (fullFetchInterval %s), want the 30m full-fetch cadence", rateLimitRetryInterval, fullFetchInterval)
 	}
 }
+
+// TestRateLimitHoldLeavesTheDiskGateItsReadings: the disk gate reads the
+// volume, and closes, on the same sweeps whether or not a rate-limit hold
+// stands, so a disk that filled during the hour is held — and recorded for
+// the next process (RecordDiskHold) — the moment it does, not once the hold
+// has run out.
+//
+// Mutant: read the rate-limit gate ahead of the disk gate — the disk is
+// never read under the hold, and the gate stays open.
+func TestRateLimitHoldLeavesTheDiskGateItsReadings(t *testing.T) {
+	s, db, _ := testSchedulerSetup(t, 1)
+	ch := "UC_rl_disk"
+	addSchedJob(t, db, &ch, "rl_disk", database.StatusQueued, 1)
+	addFeedItemRow(t, db, ch, "rl_disk", "2026-07-10T00:00:00Z")
+	var recorded []bool
+	s.RecordDiskHold(func(held bool) { recorded = append(recorded, held) })
+	s.readDisk = func() (diskReading, error) { return diskReading{critical: true}, nil }
+
+	s.holdForRateLimit(time.Now(), time.Hour)
+	s.sweep()
+	if !s.diskHeld || len(recorded) != 1 || !recorded[0] {
+		t.Errorf("disk gate held %v (recorded %v) after a critical reading under the rate-limit hold, want closed and recorded", s.diskHeld, recorded)
+	}
+}
