@@ -625,8 +625,10 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 //
 //   - Only below a KNOWN head (currentSeq < headSeq). yt-dlp's live generator
 //     never requests a sequence before X-Head-Seqnum says it exists
-//     (extractor/youtube/_video.py, _live_adaptive_fragments, from adbc4ec4b
-//     #888): with the head unknown, or the refused sequence already at or
+//     (extractor/youtube/_video.py, _live_adaptive_fragments, from 8c1f07d81
+//     #16771 — the manifest-free generator, which keeps the X-Head-Seqnum
+//     bound adbc4ec4b #888 gave the manifest one, _live_dash_fragments):
+//     with the head unknown, or the refused sequence already at or
 //     past it, the segment is most likely not published yet — the go-live
 //     pre-roll goneRetryBeforeFirstSegment's own comment names — and stepping
 //     past it only asks for a later sequence that exists even less. The hunt
@@ -635,7 +637,8 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 //     with it.
 //   - Never off sq=0 of an InitInlineAtStart downloader, even below a known
 //     head — yt-dlp's own shape: fragment 0 is fatal, retried, never skipped
-//     (downloader/dash.py, fragment.py). That sq=0 holds the stream's only
+//     (downloader/dash.py, `is_fatal=lambda idx: idx == 0` from 814bba393
+//     #5274; fragment.py). That sq=0 holds the stream's only
 //     ftyp+moov, and its media is the first seconds of the recording.
 //     Stepping past it — even after OnCipherFailure had just repaired the
 //     URL that was refused, which is what that first pre-bytes 403 usually

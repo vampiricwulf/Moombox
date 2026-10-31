@@ -183,11 +183,13 @@ var syncMediaFile = (*os.File).Sync
 // renames it over the resume file to avoid corruption from crashes.
 func (d *SegmentDownloader) saveResume() {
 	// ENGINE-13: the first-segment hunt advances currentSeq up to 20 with
-	// nothing written, and loadResume accepts a LastSeq>0/BytesWritten=0
-	// sidecar — so every Resume hunted 20 further and, from the second
-	// attempt, CurrentSeq exceeded maxEvictionHuntAdvance and silenced
-	// diagnoseEvictedStart. A position that describes no bytes is not a
-	// position. It is also the whole-file path's only guard (below).
+	// nothing written (below a known head, and never off a manifest-free
+	// start's sq=0 — see huntMayAdvance), and loadResume accepts a
+	// LastSeq>0/BytesWritten=0 sidecar — so every Resume hunted 20 further
+	// and, from the second attempt, CurrentSeq exceeded
+	// maxEvictionHuntAdvance and silenced diagnoseEvictedStart. A position
+	// that describes no bytes is not a position. It is also the whole-file
+	// path's only guard (below).
 	written := d.bytesWritten.Load()
 	if written == 0 {
 		return

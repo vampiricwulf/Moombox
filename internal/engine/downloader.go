@@ -243,7 +243,7 @@ type DownloaderOptions struct {
 	// there rather than force-starting a later part (those set InitURL and
 	// InitFromSegment instead). While its file is still empty two rules
 	// follow, both ports of yt-dlp's fatal fragment 0 (downloader/dash.py,
-	// `is_fatal=lambda idx: idx == 0`, from adbc4ec4b #888): the first-segment
+	// `is_fatal=lambda idx: idx == 0`, from 814bba393 #5274): the first-segment
 	// hunt never steps past sq=0 (huntMayAdvance), and media for a later
 	// sequence is never written before the init extracted from sq=0
 	// (ensureInlineInit) — the start fails instead. A file without it is a
