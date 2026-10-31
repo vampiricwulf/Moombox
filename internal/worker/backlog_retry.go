@@ -43,7 +43,9 @@ const (
 // that answer is recognised first (vodRefreshVerdict): a backlog VOD that
 // went private or members-only while it queued ends where the verdict sends
 // it, as one refused up front does. Which jobs qualify is requeueBacklog's
-// rule.
+// rule. An Innertube 429 that reaches processJob typed
+// (youtube.HTTPRateLimitError) never comes here: it is YouTube rate-limiting
+// the session, which outlastRateLimit waits out (rate_limit.go).
 func (w *DownloadWorker) requeueBacklogAfterTransientFailure(job *database.Job, err error) (bool, error) {
 	if isVodRefreshVerdict(err) || classifyProbeErr(err) != classNetwork {
 		return false, err
@@ -83,11 +85,9 @@ func (w *DownloadWorker) requeueBacklogAfterDiskFull(job *database.Job, err erro
 // kind, and only a run that ends some other way resets it
 // (forgetBacklogRetries) — not a fetch that succeeds, since a download that
 // then runs out of disk follows one every time — or an operator's verb that
-// takes the job out of the loop (endBacklogStreak).
-//
-// The hold is placed BEFORE the status write, so no sweep can see the row
-// Queued and unheld; the slots are released before it, so the next download
-// does not wait for this run's exit.
+// takes the job out of the loop (endBacklogStreak). A run a rate-limit
+// verdict sent back to Queued (requeueBacklogAfterRateLimit) is neither
+// counted nor resets it.
 func (w *DownloadWorker) requeueBacklog(job *database.Job, err error, what string) (bool, error) {
 	if w.scheduler == nil {
 		return false, err
@@ -101,6 +101,41 @@ func (w *DownloadWorker) requeueBacklog(job *database.Job, err error, what strin
 		return false, fmt.Errorf("%w (gave up after %d retries)", err, backlogRetryLimit)
 	}
 	delay := backlogRetryBackoff << (attempt - 1)
+	if !w.backToQueued(job, delay) {
+		return false, err
+	}
+	w.logger.Warn(what,
+		"jobID", job.ID, "attempt", attempt, "of", backlogRetryLimit, "retryIn", delay, "err", err)
+	return true, nil
+}
+
+// requeueBacklogAfterRateLimit sends a backlog VOD that YouTube refused with
+// a rate-limit verdict (ErrRateLimited) back to Queued, held for
+// rateLimitBackoff (rate_limit.go). Outside backlogRetryLimit: the limit is
+// the session's, so the job's streak neither counts it nor ends with it, and
+// a rate limit that outlasts three hourly retries still never ends a backlog
+// VOD in Error. Which jobs qualify is requeueBacklog's rule; a job that does
+// not is outlastRateLimit's to wait for in place.
+func (w *DownloadWorker) requeueBacklogAfterRateLimit(job *database.Job, err error) (bool, error) {
+	if w.scheduler == nil || CookieResumeStatus(job) != database.StatusQueued {
+		return false, err
+	}
+	if !w.backToQueued(job, rateLimitBackoff) {
+		return false, err
+	}
+	w.logger.Warn("YouTube rate-limited the backlog VOD's fetch; back to Queued, retried in about an hour (not counted against its retries)",
+		"jobID", job.ID, "retryIn", rateLimitBackoff, "err", err)
+	return true, nil
+}
+
+// backToQueued is the requeue itself, once a caller has decided on it: the
+// job's slots released and its row back in Queued, held from re-admission
+// for delay. Reports whether it happened.
+//
+// The hold is placed BEFORE the status write, so no sweep can see the row
+// Queued and unheld; the slots are released before it, so the next download
+// does not wait for this run's exit.
+func (w *DownloadWorker) backToQueued(job *database.Job, delay time.Duration) bool {
 	w.queue.ReleaseSlots(job.ID)
 	w.scheduler.holdUntil(job.ID, time.Now().Add(delay))
 	// Never over an operator's Cancel, which the scheduler would then have
@@ -114,11 +149,9 @@ func (w *DownloadWorker) requeueBacklog(job *database.Job, err error, what strin
 		"error":  "",
 	}) {
 		w.scheduler.unhold(job.ID)
-		return false, err
+		return false
 	}
-	w.logger.Warn(what,
-		"jobID", job.ID, "attempt", attempt, "of", backlogRetryLimit, "retryIn", delay, "err", err)
-	return true, nil
+	return true
 }
 
 // noteBacklogRetry counts one more consecutive requeue for jobID and returns

@@ -82,6 +82,16 @@ var ErrNonActionable = errors.New("non-actionable error")
 // handleCancellation instead of comparing error strings.
 var ErrCancelled = errors.New("cancelled")
 
+// ErrRateLimited marks a playability refusal of the session rather than of
+// the video (youtube.PlayabilityRateLimited: "try again later", or a captcha
+// challenge, on an extraction with no formats), from Process or from a stale
+// VOD's re-extraction. processJob routes it — and an Innertube 429 on the
+// whole cascade, the same limit's HTTP form (isRateLimited) — to
+// outlastRateLimit (rate_limit.go): a backlog VOD back to Queued for an
+// hour, any other job waiting in place, instead of setJobError, which would
+// end in Error a job that only had to wait.
+var ErrRateLimited = errors.New("rate-limited by YouTube")
+
 // The three ways the off-queue staging verbs refuse. All three are the
 // caller's problem to report, never a job failure: the job's own status is
 // untouched by a refusal, and the REST layer maps each of them to 409.
@@ -390,6 +400,9 @@ func NewDownloadWorker(
 	// M. The wake lets the scheduler admit the channel's next backlog VOD
 	// promptly instead of on the heartbeat.
 	sp.SetWakeScheduler(sched.Wake)
+	// The waiting loop waits a rate limit out in place, so its refusals hold
+	// the backlog from there (loopRateLimit).
+	sp.SetOnRateLimited(func() { sched.holdForRateLimit(time.Now(), rateLimitBackoff) })
 
 	// ONE registry, two holders. ExecuteTwitch registers into the
 	// orchestrator's; cmd/moombox broadcasts through the worker's. Two
@@ -893,8 +906,9 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 
 	// One pass per attempt at the job. A pass after the first is a download
 	// whose setup fetch met a connectivity outage, run again from stream
-	// processing once the network is back (waitOutSetupOutage).
-	var setupOutageSince time.Time
+	// processing once the network is back (waitOutSetupOutage), or a job
+	// YouTube rate-limited, run again once it has waited (outlastRateLimit).
+	var setupOutageSince, rateLimitSince time.Time
 	for {
 		// Process stream (probe, wait for live, etc.) — waiting a connectivity
 		// outage out rather than failing on it (outage_wait.go).
@@ -907,6 +921,14 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			if ctx.Err() != nil {
 				w.handleCancellation(job)
 				return
+			}
+			if isRateLimited(err) {
+				// An Innertube 429 on the whole cascade: the HTTP form of the
+				// same limit, waited out as its verdict is (below).
+				if job = w.outlastRateLimit(ctx, job, err, &rateLimitSince); job == nil {
+					return
+				}
+				continue
 			}
 			requeued, err := w.requeueBacklogAfterTransientFailure(job, err)
 			if !requeued {
@@ -923,6 +945,14 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 				w.handleCancellation(job)
 				return
 			}
+			if errors.Is(result.ErrSentinel, ErrRateLimited) {
+				// The session's refusal, not the video's: wait it out rather
+				// than record it.
+				if job = w.outlastRateLimit(ctx, job, result.AsError(), &rateLimitSince); job == nil {
+					return
+				}
+				continue
+			}
 			if result.Error == "" {
 				// Every producer of ShouldDownload:false names a reason today.
 				// One that did not would leave the row in whatever non-terminal
@@ -938,6 +968,9 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			w.setJobError(job, result.AsError())
 			return
 		}
+		// An answer ends the spell of rate-limit refusals: one after it — the
+		// stale re-extraction's — is a fresh limit (outlastRateLimit).
+		rateLimitSince = time.Time{}
 
 		// Check cancellation between stream processing and download
 		if ctx.Err() != nil {
@@ -982,6 +1015,15 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			if ctx.Err() != nil || errors.Is(err, ErrCancelled) {
 				w.handleCancellation(job)
 				return
+			}
+			if isRateLimited(err) {
+				// The re-extraction was rate-limited — its verdict, or a 429 —
+				// and the URLs it would have replaced have expired: as from
+				// Process.
+				if job = w.outlastRateLimit(ctx, job, err, &rateLimitSince); job == nil {
+					return
+				}
+				continue
 			}
 			requeued, err := w.requeueBacklogAfterTransientFailure(job, err)
 			if !requeued {

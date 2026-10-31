@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/treeguard"
 )
@@ -26,6 +27,10 @@ var (
 // productionIframePlayerURL is fetchIframePlayerURL as the package
 // initialised it, before TestMain stubbed it.
 var productionIframePlayerURL func(context.Context, string) (string, error)
+
+// productionPlayerRetryBackoffBase is playerRetryBackoffBase as the package
+// initialised it, before TestMain scaled it down.
+var productionPlayerRetryBackoffBase time.Duration
 
 // TestMain keeps the unit suite off the network. Every fetch in this package
 // goes out through the shared httpx transport (apiClient, utils.FetchBody) or
@@ -47,7 +52,21 @@ var productionIframePlayerURL func(context.Context, string) (string, error)
 // tests that are about that fallback set it themselves, and
 // productionIframePlayerURL keeps what production runs for the test that
 // pins it.
+//
+// The player calls' retry ladder (playerRetryBackoffBase, 1 s, 2 s, 4 s) runs
+// at a millisecond base. A 404 is retried since G46, as upstream retries it,
+// and the stubbed transports answer 404 for every client a test does not
+// script: at the production base each such client cost the suite 7 s, some
+// seventy-five times over. The tests about the ladder's timing set their own
+// base (scaleRetryBackoff), and TestPlayerRetryBackoffBaseIsOneSecond pins
+// the production one. The live suite runs the stubbed tests too, so it is
+// scaled there as well — ahead of its early return, which left the pin
+// reading zero and the suite near go test's ten-minute limit; a live call
+// a server fails is retried within milliseconds, which is no worse for a
+// test.
 func TestMain(m *testing.M) {
+	productionPlayerRetryBackoffBase = playerRetryBackoffBase
+	playerRetryBackoffBase = time.Millisecond
 	if os.Getenv("MOOMBOX_LIVE_YT_TEST") == "1" || os.Getenv("MOOMBOX_LIVE_YT_COOKIES") != "" {
 		os.Exit(treeguard.Run(m))
 	}

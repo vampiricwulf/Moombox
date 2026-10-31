@@ -131,6 +131,13 @@ type StreamProcessor struct {
 	// at call sites.
 	wakeScheduler func()
 
+	// onRateLimited places the backlog scheduler's rate-limit hold
+	// (Scheduler.holdForRateLimit) for a refusal the waiting loop's full
+	// fetch met (loopRateLimit, rate_limit.go): the loop waits a rate limit
+	// out itself, where every other refusal reaches processJob, which places
+	// it. Wired by NewDownloadWorker via SetOnRateLimited; nil-guarded.
+	onRateLimited func()
+
 	// onTwitchAuthLoss reports a Twitch auth downgrade to whatever owns the
 	// PLATFORM's credential status — cookies.RefreshService.NoteTwitchAuthLoss
 	// in production, wired by cmd/moombox. nil is a valid install and the
@@ -217,6 +224,12 @@ func (sp *StreamProcessor) SetWakeScheduler(fn func()) {
 	sp.wakeScheduler = fn
 }
 
+// SetOnRateLimited wires the backlog scheduler's rate-limit hold onto the
+// stream processor. Called by NewDownloadWorker during construction.
+func (sp *StreamProcessor) SetOnRateLimited(fn func()) {
+	sp.onRateLimited = fn
+}
+
 // SetOnTwitchAuthLoss wires the platform-mark seam. Called during startup,
 // long before any job goroutine exists.
 func (sp *StreamProcessor) SetOnTwitchAuthLoss(fn func(reason string)) {
@@ -300,10 +313,12 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 	// followed as a "YouTube Start Time Confirmed" of its own — the two
 	// embeds the deferral exists to merge. When processJob records the
 	// failure instead, it announces from the row itself
-	// (announceFoundOnFailure).
+	// (announceFoundOnFailure). An Innertube 429 on the whole cascade
+	// (isRateLimited) leaves it owed as a rate-limit verdict does, below:
+	// processJob waits that out too.
 	info, err := sp.fetchVideoInfo(ctx, job.VideoID)
 	if err != nil {
-		if !isTransportFailure(err) && sp.takeAnnounceFound(ctx, job) {
+		if !isTransportFailure(err) && !isRateLimited(err) && sp.takeAnnounceFound(ctx, job) {
 			sp.sendStreamFound(job, nil)
 		}
 		return nil, fmt.Errorf("full fetch failed: %w", err)
@@ -336,7 +351,14 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 	// sees it in the row; a run whose take came before took the flag, and
 	// sends what it took. A read that fails stops nothing, as it stops
 	// nothing in the waiting loop: a database error must not end a live job.
-	announce := sp.takeAnnounceFound(ctx, job)
+	//
+	// A fetch YouTube refused for a rate limit does not take it either:
+	// processJob waits the limit out and runs this again (outlastRateLimit),
+	// and the fetch that answers announces with what it learned, where this
+	// one would have sent the feed's title alone, and the answer's schedule
+	// would have followed as a confirmation of its own. A backlog VOD, which
+	// goes back to Queued instead, is never owed one.
+	announce := !rateLimitedFetch(info) && sp.takeAnnounceFound(ctx, job)
 	if !announce {
 		if ctx.Err() != nil {
 			return cancelledResult(), nil
@@ -505,9 +527,10 @@ func judgeRefreshedVodInfo(info *youtube.VideoInfo) (*youtube.VideoInfo, error) 
 // classification when the video is not playable. The display string is
 // the user-facing error; the sentinel (ErrCookiesRequired for member /
 // login, ErrNotAMember for a members-only wall hit by a live session,
-// ErrNonActionable for age-restricted) lets the downstream worker route
-// the job to StatusCookies or suppress notifications via errors.Is rather
-// than substring matching. Both empty/nil → playable.
+// ErrNonActionable for age-restricted, ErrRateLimited for a rate limit or a
+// captcha) lets the downstream worker route the job to StatusCookies, wait
+// it out or suppress notifications via errors.Is rather than substring
+// matching. Both empty/nil → playable.
 //
 // The members-only branch consults info.SessionAuth — YouTube's own verdict
 // on whether the failing request was signed in — because the two causes need
@@ -555,6 +578,23 @@ func playabilityVerdict(info *youtube.VideoInfo) (string, error) {
 		// string is the user's only breadcrumb — say that cookies are the
 		// fix or a cookie-less user gets a dead-end Error.
 		return fmt.Sprintf("Age restricted: %s (cookies from an age-verified account would allow this)", reason), ErrNonActionable
+	case youtube.PlayabilityRateLimited:
+		// Upstream words a rate limit, as every refusal, only for an
+		// extraction that came back with no formats (`if not formats:`,
+		// _video.py:4045 at b77c9304e); one that came back with some is
+		// downloaded. Moombox takes its other verdicts at their word with
+		// formats or without, but this one is the session's and says nothing
+		// of the video: an extraction that pooled formats from a client the
+		// limit spared — the watch page's verdict returned over them, say —
+		// went to the wait (or the backlog to Queued) with what it needed
+		// already in hand. rateLimitedFetch is the same reading.
+		if probeFormatCount(info) > 0 {
+			return "", nil
+		}
+		// Transient: processJob waits it out (outlastRateLimit) rather than
+		// recording it, so this text reaches the job's log, and its error
+		// only once the requeue cannot be made.
+		return rateLimitVerdictMessage(reason, info.SessionAuth), ErrRateLimited
 	default:
 		return reason, nil
 	}
