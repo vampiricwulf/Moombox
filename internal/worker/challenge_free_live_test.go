@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
@@ -40,13 +41,22 @@ func fakeCookielessHls(t *testing.T, manifestURL, source string, err error) *ato
 // n_challenge`, _video.py:3692-3713) and records the next client's —
 // visionos's, which carries no n — so DownloadHls now asks the cookieless
 // chain for that master and records it, bare (visionos needs no GVS token),
-// and fails as before only when there is none, naming both reasons. This is
-// what keeps the challenge-free live fallback recording, at setup and on
-// every refresh, while the player cannot be solved (audit G10).
+// and fails as before only when there is none, naming both reasons. An
+// extraction with no master at all asks the same chain: the challenge-free
+// live fallback records that chain's master when the extraction it fell back
+// from had none, and every refresh of the capture reaches DownloadHls with a
+// fresh extraction that has none either (refreshDownload), which used to fail
+// "no HLS manifest URL available" though the setup had not. This is what
+// keeps the challenge-free live fallback recording, at setup and on every
+// refresh, while the player cannot be solved (audit G10).
 //
 // Mutants: the rescue dropped (the first row fails to set up); the rescue
 // keeping the extraction's master (the first row fetches the n path); the
-// rescue's reason dropped from the error (the second row).
+// rescue swapping the URL but keeping the extraction's VideoInfo (the
+// token-source row mints for the watch page's master and puts the token on
+// visionos's); the rescue's reason dropped from the error (the second row);
+// the empty-master arm dropped, or its reason dropped from the error (the
+// refresh rows).
 func TestDownloadHlsTakesTheChallengeFreeMaster(t *testing.T) {
 	t.Run("the cookieless master is recorded", func(t *testing.T) {
 		srv := newManifestServer(t, potTestMaster)
@@ -89,6 +99,69 @@ func TestDownloadHlsTakesTheChallengeFreeMaster(t *testing.T) {
 			t.Errorf("DownloadHls = %v, want the unsolved n and the cookieless reason", err)
 		}
 	})
+
+	t.Run("the rescued master is recorded as its own client's: no GVS token", func(t *testing.T) {
+		// A web-family master needs a GVS token (youtube.GvsTokenRequired);
+		// visionos's does not. The source, and the binding, that decide the
+		// mint are the rescued master's, not the extraction's.
+		srv := newManifestServer(t, potTestMaster)
+		fakeCookielessHls(t, srv.URL+"/api/manifest/hls_variant/id/abc/source/visionos/file/index.m3u8", "visionos", nil)
+		mints := fakeVodMint(t, "minted-for-the-watch-page", nil)
+		built := recordDownloaders(t)
+		routed, _ := nSolver(sentinelOf, nil)
+		job, _ := reextractJob(t)
+		info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer,
+			HlsManifestURL: srv.URL + "/api/manifest/hls_variant/id/abc/n/" + nChal + "/file/index.m3u8", HlsManifestSource: "watch_page"}
+		if _, err := DownloadHls(context.Background(), job, info, routed, nil, &bgutils.PotProvider{}, nil); err != nil {
+			t.Fatalf("DownloadHls = %v, want the visionos master recorded", err)
+		}
+		if n := mints.Load(); n != 0 {
+			t.Errorf("GVS mint ran %d time(s), want none for visionos's master", n)
+		}
+		if path := srv.onlyPath(t); strings.Contains(path, "/pot/") {
+			t.Errorf("HLS master fetched at %q, want it bare", path)
+		}
+		if len(*built) != 1 || (*built)[0].PoToken != "" {
+			t.Errorf("downloaders %+v, want one bare HLS downloader", *built)
+		}
+	})
+
+	t.Run("a refresh whose extraction has no master records the cookieless master", func(t *testing.T) {
+		srv := newManifestServer(t, potTestMaster)
+		calls := fakeCookielessHls(t, srv.URL+"/api/manifest/hls_variant/id/abc/source/visionos/file/index.m3u8", "visionos", nil)
+		built := recordDownloaders(t)
+		routed, _ := nSolver(sentinelOf, nil)
+		job, _ := reextractJob(t)
+		info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer}
+		res, err := DownloadHls(context.Background(), job, info, routed, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("DownloadHls = %v, want the visionos master recorded", err)
+		}
+		if n := calls.Load(); n != 1 {
+			t.Errorf("cookieless HLS fetch ran %d times, want 1", n)
+		}
+		if path := srv.onlyPath(t); !strings.Contains(path, "/source/visionos/") {
+			t.Errorf("HLS master fetched at %q, want the visionos master", path)
+		}
+		if !res.IsHls || len(*built) != 1 {
+			t.Errorf("result IsHls=%v, downloaders %+v; want one HLS downloader", res.IsHls, *built)
+		}
+		if info.HlsManifestURL != "" {
+			t.Errorf("the caller's VideoInfo was rewritten (master %q)", info.HlsManifestURL)
+		}
+	})
+
+	t.Run("a refresh with no master anywhere fails naming both", func(t *testing.T) {
+		calls := fakeCookielessHls(t, "", "", errors.New("visionos: no HLS manifest"))
+		job, _ := reextractJob(t)
+		_, err := DownloadHls(context.Background(), job, &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer}, nil, nil, nil, nil)
+		if msg := fmt.Sprint(err); !strings.Contains(msg, "no HLS manifest URL available") || !strings.Contains(msg, "visionos: no HLS manifest") {
+			t.Errorf("DownloadHls = %v, want no master and the cookieless reason", err)
+		}
+		if n := calls.Load(); n != 1 {
+			t.Errorf("cookieless HLS fetch ran %d times, want 1", n)
+		}
+	})
 }
 
 // fakeStrategy is a DownloadStrategy of the given kind that answers each
@@ -129,7 +202,7 @@ func swapHls(t *testing.T, hls DownloadStrategy) {
 // job in Error; it now records the live HLS playlist instead, from the live
 // edge, with a Warn saying why from-start was dropped, as yt-dlp records a
 // live stream by default (HLS, the live adaptive formats skipped). With no
-// master in the extraction it asks the cookieless chain for one first. A
+// master in the extraction the HLS setup asks the cookieless chain for one. A
 // post-live manifest-free capture, which has no live edge, runs again on
 // the formats that need no player JS (the drop, one cookieless re-extract,
 // the merge), from the start still. Any other failure, a VOD's own (which
@@ -140,8 +213,8 @@ func swapHls(t *testing.T, hls DownloadStrategy) {
 // fails); the DASH-manifest kind left out (its row); HLS tried for a VOD
 // (the VOD row calls it); setupFailedOnChallenges matching any error (the
 // unrelated row falls back); the cancelled check dropped (the cancelled row
-// falls back); the missing-master lookup dropped (the no-master row hands
-// HLS no master); the post-live re-run on the original formats (its row sees
+// falls back); the empty-master arm dropped from DownloadHls (the no-master
+// row fails to set up); the post-live re-run on the original formats (its row sees
 // the tv copies); the Warn dropped (the live rows).
 func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 	systemic := fmt.Errorf("manifestless DASH: resolve video URL: itag 299: %w: %w", errChallengesUnsolvable, cipher.ErrNUnsolved)
@@ -200,18 +273,24 @@ func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 		})
 	}
 
-	t.Run("live with no master asks the cookieless chain for one", func(t *testing.T) {
-		hls := &fakeStrategy{kind: "hls"}
-		swapHls(t, hls)
-		calls := fakeCookielessHls(t, "https://manifest.googlevideo.com/api/manifest/hls_variant/id/abc/file/index.m3u8", "visionos", nil)
+	t.Run("live with no master records the cookieless chain's", func(t *testing.T) {
+		// The real HLS strategy: DownloadHls asks the cookieless chain for
+		// the master the extraction lacks.
+		srv := newManifestServer(t, potTestMaster)
+		calls := fakeCookielessHls(t, srv.URL+"/api/manifest/hls_variant/id/abc/source/visionos/file/index.m3u8", "visionos", nil)
+		recordDownloaders(t)
 		job, _ := reextractJob(t)
 		info := live()
 		info.HlsManifestURL, info.HlsManifestSource = "", ""
-		if _, err := setupWithChallengeFallback(context.Background(), job, &fakeStrategy{kind: "manifestless_dash", answers: []error{systemic}}, false, info, &StrategyDeps{}); err != nil {
-			t.Fatalf("setup = %v, want the HLS fallback's result", err)
+		res, err := setupWithChallengeFallback(context.Background(), job, &fakeStrategy{kind: "manifestless_dash", answers: []error{systemic}}, false, info, &StrategyDeps{})
+		if err != nil || res == nil || !res.IsHls {
+			t.Fatalf("setup = %+v, %v; want the HLS fallback's result", res, err)
 		}
-		if n := calls.Load(); n != 1 || len(hls.seen) != 1 || hls.seen[0].HlsManifestSource != "visionos" || hls.seen[0].HlsManifestURL == "" {
-			t.Errorf("cookieless fetch ran %d time(s), HLS handed %+v; want once, and the visionos master", n, hls.seen)
+		if n := calls.Load(); n != 1 {
+			t.Errorf("cookieless fetch ran %d time(s), want once", n)
+		}
+		if path := srv.onlyPath(t); !strings.Contains(path, "/source/visionos/") {
+			t.Errorf("HLS master fetched at %q, want the visionos master", path)
 		}
 	})
 

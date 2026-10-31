@@ -206,7 +206,7 @@ func challengeFreeHlsInfo(ctx context.Context, job *JobContext, info *youtube.Vi
 //     formats unless --live-from-start asks for them (_video.py:3492-3501,
 //     3616-3619) and records HLS, and a master whose n has no answer it
 //     passes over for the next client's (3692-3713) — DownloadHls does the
-//     same through challengeFreeHlsInfo, and so does this when the
+//     same through challengeFreeHlsInfo, and asks it too when the
 //     extraction carried no master at all. The from-start paths have no copy
 //     to fall to: visionos serves a live stream no DASH manifest, and a
 //     challenge-free adaptive copy is not looked for here (the plan's call),
@@ -250,17 +250,9 @@ func setupOrChallengeFree(ctx context.Context, job *JobContext, strategy Downloa
 	kind := strategy.Kind()
 	switch {
 	case !isVod && (kind == ManifestlessDashStrategy.Kind() || kind == DashStrategy.Kind()):
-		hlsInfo := info
-		if info.HlsManifestURL == "" {
-			cf, cfErr := challengeFreeHlsInfo(ctx, job, info)
-			if cfErr != nil {
-				return nil, fmt.Errorf("%w; no live HLS playlist to fall back to either: %w", err, cfErr)
-			}
-			hlsInfo = cf
-		}
 		job.Logger.Warn("[Cipher] live: recording from the start cannot run — the player's JS challenges cannot be solved; recording the live HLS playlist from the live edge instead",
 			"jobID", job.Job.ID, "strategy", kind, "err", err)
-		hlsResult, hlsErr := HlsStrategy.Download(ctx, job, hlsInfo, deps)
+		hlsResult, hlsErr := HlsStrategy.Download(ctx, job, info, deps)
 		if hlsErr != nil {
 			return nil, fmt.Errorf("%w; the live HLS fallback failed too: %w", err, hlsErr)
 		}
