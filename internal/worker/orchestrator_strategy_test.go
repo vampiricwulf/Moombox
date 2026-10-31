@@ -23,7 +23,11 @@ func progressive() youtube.Format {
 // Mutants (G6, G24; each run): the live adaptive arm dropped (both "live
 // adaptive split" rows go to vod); the OTF-with-a-manifest arm dropped (the
 // not-a-stream OTF row goes to vod); that arm taken without
-// hasSegmentedFormats (the not-a-stream whole-file row goes to dash).
+// hasSegmentedFormats (the not-a-stream whole-file row goes to dash); the
+// live adaptive arm taken beside a whole-file split (the was_live row goes to
+// manifestless_dash); that split read as a video file alone (the video-file
+// row goes to vod), or with a muxed 18 as its video half (the muxed row goes
+// to vod).
 func TestSelectDownloadStrategy(t *testing.T) {
 	manifestlessFormats := []youtube.Format{adaptiveVideo(), adaptiveAudio()}
 	wholeFileFormats := []youtube.Format{adaptiveVideo(), adaptiveAudio()}
@@ -32,6 +36,15 @@ func TestSelectDownloadStrategy(t *testing.T) {
 	liveAdaptiveFormats[0].TargetDurationSec, liveAdaptiveFormats[1].TargetDurationSec = 2, 2
 	otfFormats := []youtube.Format{adaptiveVideo(), adaptiveAudio()}
 	otfFormats[0].IsOTF, otfFormats[1].IsOTF = true, true
+	// liveAdaptiveBeside is a live adaptive split (a 720p 136, a 139) next to
+	// the given files: a stream whose processing has reached some renditions.
+	liveAdaptiveBeside := func(files ...youtube.Format) []youtube.Format {
+		v := youtube.Format{Itag: 136, URL: "https://v.example/videoplayback?x=136", MimeType: "video/mp4", Width: new(1280), Height: new(720), TargetDurationSec: 2}
+		a := youtube.Format{Itag: 139, URL: "https://a.example/videoplayback?x=139", MimeType: "audio/mp4", TargetDurationSec: 2}
+		return append(files, v, a)
+	}
+	videoFile, audioFile := wholeFileFormats[0], wholeFileFormats[1]
+	muxedFile := youtube.Format{Itag: 18, URL: "https://p.example/videoplayback?x=18", MimeType: `video/mp4; codecs="avc1.42001E, mp4a.40.2"`, Width: new(640), Height: new(360), ContentLength: "30000000"}
 
 	tests := []struct {
 		name  string
@@ -116,6 +129,41 @@ func TestSelectDownloadStrategy(t *testing.T) {
 				StreamStatus:    youtube.StreamVOD,
 				DashManifestURL: "https://manifest.example/dash.mpd",
 				Formats:         liveAdaptiveFormats,
+			},
+			want: "manifestless_dash",
+		},
+		{
+			// upstream's was_live: no response calls it post-live, and its
+			// 1080p 137 and its 140 are files. yt-dlp skips the live adaptive
+			// formats and downloads those; the manifest-free path took the
+			// 720p split.
+			name:  "VOD with a live adaptive split beside a whole-file split stays on VodStrategy",
+			isVod: true,
+			info: &youtube.VideoInfo{
+				StreamStatus: youtube.StreamVOD,
+				Formats:      liveAdaptiveBeside(videoFile, audioFile),
+			},
+			want: "vod",
+		},
+		{
+			// A video file with no audio file beside it is no split the
+			// whole-file path can download: the live adaptive pair is.
+			name:  "VOD with a live adaptive split beside a video file alone routes to manifestless DASH",
+			isVod: true,
+			info: &youtube.VideoInfo{
+				StreamStatus: youtube.StreamVOD,
+				Formats:      liveAdaptiveBeside(videoFile),
+			},
+			want: "manifestless_dash",
+		},
+		{
+			// The muxed 18 is no video half, so its file and the audio file
+			// are no split either.
+			name:  "VOD with a live adaptive split beside a muxed 18 and an audio file routes to manifestless DASH",
+			isVod: true,
+			info: &youtube.VideoInfo{
+				StreamStatus: youtube.StreamVOD,
+				Formats:      liveAdaptiveBeside(muxedFile, audioFile),
 			},
 			want: "manifestless_dash",
 		},

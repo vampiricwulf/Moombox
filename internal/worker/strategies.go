@@ -91,11 +91,18 @@ func selectDownloadStrategy(isVod bool, info *youtube.VideoInfo) (DownloadStrate
 	// as fragments for a post_live stream, 3595-3599). The extraction calls
 	// such a stream post-live itself now (finishExtraction reads upstream's
 	// isPostLiveDvr), so this is the belt to that brace: a StreamVOD that
-	// reaches here with live adaptive URLs and no contentLength has nothing a
-	// whole-file GET can fetch but a fragment, and on a Resume of an
-	// incomplete_tail job VodStrategy would set the live capture aside before
-	// failing. Ahead of a manifest for the post-live arm's reason.
-	case isVod && hasLiveAdaptiveSplit(info.Formats):
+	// reaches here with live adaptive URLs and no contentLength, and no
+	// video-only + audio-only pair a whole-file GET can fetch beside them
+	// (hasWholeFileSplit), has nothing that GET can fetch but a fragment —
+	// and on a Resume of an incomplete_tail job VodStrategy would set the
+	// live capture aside before failing. A pool that does hold such a pair
+	// is a stream nobody calls post-live whose processing has reached some
+	// renditions, upstream's was_live: yt-dlp skips every live adaptive
+	// format of it (3492-3501, the skip off without live processing) and
+	// downloads the files, and so does the whole-file path (wholeFileVodPool)
+	// — the 1080p file, where this arm took a 720p live adaptive split.
+	// Ahead of a manifest for the post-live arm's reason.
+	case isVod && hasLiveAdaptiveSplit(info.Formats) && !hasWholeFileSplit(info.Formats):
 		return ManifestlessDashStrategy, nil
 	// An OTF VOD with a manifest: the whole-file path cannot fetch an OTF
 	// format (youtube.Format.Segmented), and yt-dlp takes those streams from
@@ -149,6 +156,32 @@ func hasLiveAdaptiveSplit(formats []youtube.Format) bool {
 		}
 	}
 	return HasManifestlessDashFormats(live)
+}
+
+// hasWholeFileSplit reports whether formats holds a video-only and an
+// audio-only format a whole-file GET can fetch (not youtube.Format.Segmented,
+// the whole-file pool's own test), both with a URL: the split pair the
+// whole-file path downloads. A muxed itag 18 is no video half
+// (youtube.Format.IsVideoOnly), so a pool whose only video file is the
+// progressive one counts as having none, and its live adaptive split goes
+// to the manifest-free path. That much goes beyond upstream on purpose:
+// yt-dlp's was_live would merge the 360p 18 with an audio file there, but a
+// stream whose every video-only rendition is live adaptive is one in its
+// post-live window that no response happened to call post-live.
+func hasWholeFileSplit(formats []youtube.Format) bool {
+	var video, audio bool
+	for i := range formats {
+		f := &formats[i]
+		if f.URL == "" || f.Segmented() {
+			continue
+		}
+		if f.IsAudio() {
+			audio = true
+		} else if f.IsVideoOnly() {
+			video = true
+		}
+	}
+	return video && audio
 }
 
 // hasSegmentedFormats reports whether formats holds a fetchable format a

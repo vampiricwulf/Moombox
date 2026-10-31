@@ -383,8 +383,8 @@ The `DownloadOrchestrator` manages the complete download lifecycle for a single 
 ```
 if isVod AND post_live AND split:
     DownloadManifestlessDash()  -- &sq=N from sq=0, even beside a manifest (a post-live one covers ~2 h)
-elif isVod AND split among the formats carrying targetDurationSec:
-    DownloadManifestlessDash()  -- live adaptive formats, whatever the status says
+elif isVod AND split among the formats carrying targetDurationSec AND no whole-file video-only + audio-only pair:
+    DownloadManifestlessDash()  -- live adaptive formats, whatever the status says (a pool with a whole-file pair too is yt-dlp's was_live, and falls through)
 elif isVod AND not_a_stream AND DASH manifest AND a segmented (OTF / live adaptive) format:
     DownloadDash()     -- yt-dlp's route for OTF: the manifest
 elif isVod AND (not_a_stream OR no DASH manifest) AND formats exist:
