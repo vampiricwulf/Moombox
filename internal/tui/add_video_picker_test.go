@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/table"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -166,6 +167,164 @@ func TestAddVideoPickerDrawsEveryRow(t *testing.T) {
 	}
 }
 
+// TestAddVideoPickerOpensOnTheBestRow is the owner's first picker follow-up:
+// both Add Video tables opened with the cursor on row 0, the top rendition
+// whatever the Best picks said — a damaged 2160p one in the answer above —
+// so Enter on a freshly opened table took what the dashboard's Add dialog
+// never preselects. Each table now opens on the row the dashboard
+// preselects (populateFormatSelects): the WEBM pick ahead of the MP4 one and
+// the Opus ahead of the AAC, the first that is intact, else the first that
+// exists; row 0 when there is no Best row. Enter takes it.
+//
+// Mutants (each run): no SetCursor on the video table, or on the audio one
+// (that table's rows open on 0); preselectedRow ignoring intact (the
+// damaged WEBM fallback is opened on over the intact MP4, the segmented
+// Opus over the intact AAC); preselectedRow skipping a marked pick even
+// when no pick is intact (the live rows open on 0, no Best row there).
+func TestAddVideoPickerOpensOnTheBestRow(t *testing.T) {
+	v := func(itag int, mime string, height int, damaged, segmented bool) VideoFormat {
+		return VideoFormat{Itag: itag, MimeType: mime, Width: height * 16 / 9, Height: height, Damaged: damaged, Segmented: segmented}
+	}
+	a := func(itag int, mime string, damaged, segmented bool) AudioFormat {
+		return AudioFormat{Itag: itag, MimeType: mime, Damaged: damaged, Segmented: segmented}
+	}
+	const webm, mp4, opus, aac = `video/webm; codecs="vp9"`, `video/mp4; codecs="avc1"`, `audio/webm; codecs="opus"`, `audio/mp4; codecs="mp4a.40.2"`
+	for _, tc := range []struct {
+		name                   string
+		formats                FormatsData
+		wantVideo              int // the row each table's cursor opens on
+		wantAudio              int
+		wantVideoI, wantAudioI int // the itag Enter then takes
+	}{
+		{name: "an intact WEBM and Opus badge below marked rows",
+			formats: FormatsData{
+				VideoFormats: []VideoFormat{v(313, webm, 2160, true, false), v(271, webm, 1440, false, true), v(248, webm, 1080, false, false), v(136, mp4, 720, false, false)},
+				AudioFormats: []AudioFormat{a(251, opus, true, false), a(250, opus, false, false), a(140, aac, false, false)},
+				BestItags:    BestItags{BestWebmVideo: 248, BestMp4Video: 136, BestOpusAudio: 250, BestAacAudio: 140},
+			},
+			wantVideo: 2, wantAudio: 1, wantVideoI: 248, wantAudioI: 250},
+		{name: "a marked WEBM and Opus badge yield to an intact MP4 and AAC one",
+			formats: FormatsData{
+				VideoFormats: []VideoFormat{v(313, webm, 2160, true, false), v(137, mp4, 1080, false, false)},
+				AudioFormats: []AudioFormat{a(251, opus, false, true), a(140, aac, false, false)},
+				BestItags:    BestItags{BestWebmVideo: 313, BestMp4Video: 137, BestOpusAudio: 251, BestAacAudio: 140},
+			},
+			wantVideo: 1, wantAudio: 1, wantVideoI: 137, wantAudioI: 140},
+		{name: "every badge marked, as on a live stream: the WEBM and Opus one",
+			formats: FormatsData{
+				StreamStatus: "live",
+				VideoFormats: []VideoFormat{v(18, `video/mp4; codecs="avc1, mp4a"`, 360, false, false), v(303, webm, 1080, false, true), v(299, mp4, 1080, false, true)},
+				AudioFormats: []AudioFormat{a(140, aac, false, true), a(251, opus, false, true)},
+				BestItags:    BestItags{BestWebmVideo: 303, BestMp4Video: 299, BestOpusAudio: 251, BestAacAudio: 140},
+			},
+			wantVideo: 1, wantAudio: 1, wantVideoI: 303, wantAudioI: 251},
+		{name: "no Best row: row 0",
+			formats: FormatsData{
+				VideoFormats: []VideoFormat{v(248, webm, 1080, false, false), v(136, mp4, 720, false, false)},
+				AudioFormats: []AudioFormat{a(251, opus, false, false), a(140, aac, false, false)},
+			},
+			wantVideo: 0, wantAudio: 0, wantVideoI: 248, wantAudioI: 251},
+		{name: "picks that match no row: row 0",
+			formats: FormatsData{
+				VideoFormats: []VideoFormat{v(248, webm, 1080, false, false), v(136, mp4, 720, false, false)},
+				AudioFormats: []AudioFormat{a(251, opus, false, false), a(140, aac, false, false)},
+				BestItags:    BestItags{BestWebmVideo: 999, BestOpusAudio: 998},
+			},
+			wantVideo: 0, wantAudio: 0, wantVideoI: 248, wantAudioI: 251},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewAddVideoModel()
+			m.Open()
+			m.SetSize(100, 40)
+			m.step = AddStepVideoFormat
+			m.SetFormats(&tc.formats)
+			if got := m.videoTable.Cursor(); got != tc.wantVideo {
+				t.Errorf("video table opens on row %d, want %d", got, tc.wantVideo)
+			}
+			if got := m.audioTable.Cursor(); got != tc.wantAudio {
+				t.Errorf("audio table opens on row %d, want %d", got, tc.wantAudio)
+			}
+			m.View()
+			m.HandleKey(keyEnter)
+			m.View()
+			m.HandleKey(keyEnter)
+			if m.selectedVideoItag == nil || *m.selectedVideoItag != tc.wantVideoI {
+				t.Errorf("Enter took video %v, want itag %d", m.selectedVideoItag, tc.wantVideoI)
+			}
+			if m.selectedAudioItag == nil || *m.selectedAudioItag != tc.wantAudioI {
+				t.Errorf("Enter took audio %v, want itag %d", m.selectedAudioItag, tc.wantAudioI)
+			}
+		})
+	}
+}
+
+// TestAddVideoPickerDrawsTheBestRowHighlighted: the cursor placed on a Best
+// row at or past the table's drawn height sat one row below the last row
+// drawn — the table draws from the cursor less its height on, and SetCursor
+// leaves the viewport's offset at 0 — so the row Enter would take was not
+// on screen, and nothing was highlighted. On a short terminal, with the Best
+// row eleventh, the table now draws that row, highlighted, on its last line,
+// and the operator's Down and Up from there move the highlight a drawn row
+// at a time, as the table's own scrolling always did.
+//
+// Mutant: fitFormatTable without its MoveDown(0) (no row is drawn
+// highlighted, and the Best row is not drawn).
+func TestAddVideoPickerDrawsTheBestRowHighlighted(t *testing.T) {
+	var formats FormatsData
+	for i := range 12 {
+		f := VideoFormat{Itag: 400 + i, MimeType: `video/webm; codecs="vp9"`, Width: 3840 - 160*i, Height: 2160 - 90*i, Damaged: i < 10}
+		formats.VideoFormats = append(formats.VideoFormats, f)
+	}
+	formats.BestItags.BestWebmVideo = 410 // the first intact WEBM, the eleventh row
+	formats.AudioFormats = []AudioFormat{{Itag: 251, MimeType: `audio/webm; codecs="opus"`}}
+
+	m := NewAddVideoModel()
+	m.Open()
+	m.SetSize(100, 24) // the dialog's box is 20 high, the table's rows 10
+	m.step = AddStepVideoFormat
+	m.SetFormats(&formats)
+	if got := m.videoTable.Cursor(); got != 10 {
+		t.Fatalf("cursor on row %d, want 10", got)
+	}
+
+	sel := formatTableStyles().Selected.Render("\x00")
+	selPrefix, _, _ := strings.Cut(sel, "\x00")
+	if selPrefix == "" {
+		t.Fatal("the Selected style renders no escape to find the cursor by")
+	}
+	// highlighted draws the dialog and answers the # cell of the one row
+	// drawn highlighted, "" for none.
+	highlighted := func() string {
+		raw := strings.Split(m.View(), "\n")
+		var rows []string
+		for _, l := range raw {
+			if strings.Contains(l, selPrefix) {
+				rows = append(rows, strings.Fields(strings.Trim(ansi.Strip(l), " │"))[0])
+			}
+		}
+		if len(rows) != 1 {
+			t.Fatalf("%d rows drawn highlighted, want one:\n%s", len(rows), ansi.Strip(strings.Join(raw, "\n")))
+		}
+		return rows[0]
+	}
+	if got := highlighted(); got != "11" {
+		t.Errorf("row %s drawn highlighted, want the Best row, 11", got)
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "Best WEBM") {
+		t.Errorf("the Best row is not drawn:\n%s", ansi.Strip(m.View()))
+	}
+	// The operator's own moves from there are the table's, each drawn.
+	for _, step := range []struct {
+		key  rune
+		want string
+	}{{tea.KeyDown, "12"}, {tea.KeyUp, "11"}, {tea.KeyUp, "10"}, {tea.KeyUp, "9"}} {
+		m.UpdateComponents(tea.KeyPressMsg{Code: step.key})
+		if got := highlighted(); got != step.want {
+			t.Errorf("after %v, row %s drawn highlighted, want %s", step.key, got, step.want)
+		}
+	}
+}
+
 // TestAddVideoPickerHidesTheSegmentedNoteWhileOnAir is the owner's third
 // picker follow-up, on the TUI: while a stream is live or upcoming every
 // adaptive rendition it lists is segmented — the live path fetches exactly
@@ -231,6 +390,11 @@ func TestAddVideoPickerHidesTheSegmentedNoteWhileOnAir(t *testing.T) {
 				if !slices.Equal(got, tbl.want) {
 					t.Errorf("%s notes = %q, want %q", tbl.name, got, tbl.want)
 				}
+			}
+			// The hiding is the note's alone: the cursor still opens on the
+			// intact Best WEBM (row 2), past the segmented 271.
+			if got := m.videoTable.Cursor(); got != 2 {
+				t.Errorf("video cursor on row %d, want 2", got)
 			}
 		})
 	}
