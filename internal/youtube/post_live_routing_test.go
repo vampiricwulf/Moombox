@@ -165,7 +165,8 @@ func TestParseFormatsReadsTheOTFType(t *testing.T) {
 
 // TestFormatSegmented pins the whole-file path's test for a format it cannot
 // fetch: no contentLength, and OTF or live adaptive (targetDurationSec) —
-// yt-dlp's two https skips (_video.py:3492-3507). A stated length is a file.
+// yt-dlp's two https skips (_video.py:3492-3507). A stated length is a file:
+// Moombox's narrowing of them, since upstream's skips read no length.
 //
 // Mutants: the contentLength condition dropped (the two "with a length"
 // rows); either kind dropped (its row).

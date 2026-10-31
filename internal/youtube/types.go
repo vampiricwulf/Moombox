@@ -534,9 +534,17 @@ type YtcfgData struct {
 // lowest-level token-free copy of that stream as the winner's shadow, and the
 // VOD missing_pot degrade swaps to it. A token-free winner — tv or
 // web_embedded — carries no token-free shadow (it carries the token-carrying
-// one, below), and since either outranks the whole web family wherever it
-// returned the stream, a web-family winner's shadow is always a cookieless
-// (visionos, android_vr) copy. The shadow never changes which copy wins.
+// one, below), and either outranks the whole web family wherever it
+// returned the stream, save one case: deduplicateFormats lets a copy a
+// whole-file GET cannot fetch (Format.Segmented; a live adaptive one only
+// outside live processing) lose to one that can, whatever their levels, and
+// ranks each class's shadow the same way. So a web-family winner's shadow is
+// a cookieless (visionos, android_vr) copy, or — where tv or web_embedded
+// listed the stream segmented, the web family as a file, and no token-free
+// client as one — that segmented copy, which the VOD path's whole-file
+// re-filter leaves out again, failing the job clearly when no other file of
+// the stream is left (DownloadVod). The shadow never changes which copy
+// wins.
 //
 // The token-carrying shadow (Format.TokenAlternate) is its mirror. When a
 // stream's winner comes from a client that needs no token — tv or
@@ -683,6 +691,9 @@ func (f *Format) IsVideoOnly() bool {
 // live processing (post_live, or a live capture from its start). Either way
 // only one without a contentLength: a format that states its length is a
 // file, whatever else it says, and the whole-file path fetches it whole.
+// That condition is Moombox's own narrowing — upstream's two skips read no
+// length and drop both kinds whatever they state — kept because a stated
+// contentLength is exactly what the whole-file path's Range requests need.
 func (f *Format) Segmented() bool {
 	return f.ContentLength == "" && (f.IsOTF || f.TargetDurationSec > 0)
 }
