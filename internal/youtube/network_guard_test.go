@@ -18,14 +18,14 @@ import (
 // pointed at the tripwire, and every variable that would exempt a host from
 // it (or make net/http ignore HTTP_PROXY, as REQUEST_METHOD does under CGI)
 // cleared.
-// productionIframePlayerURL is fetchIframePlayerURL as the package
-// initialised it, before TestMain stubbed it.
-var productionIframePlayerURL func(context.Context) (string, error)
-
 var (
 	networkGuardProxyVars = []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}
 	networkGuardClearVars = []string{"NO_PROXY", "no_proxy", "REQUEST_METHOD"}
 )
+
+// productionIframePlayerURL is fetchIframePlayerURL as the package
+// initialised it, before TestMain stubbed it.
+var productionIframePlayerURL func(context.Context) (string, error)
 
 // TestMain keeps the unit suite off the network. Every fetch in this package
 // goes out through the shared httpx transport (apiClient, utils.FetchBody) or

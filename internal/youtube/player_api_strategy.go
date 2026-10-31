@@ -814,13 +814,16 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 //
 // The visitor data is the Service's cached one (cachedVisitorData), and the
 // session the one the probe-only calls carry (probeYtcfg): what the last page
-// fetched under the jar's current account stated. Only on the
+// fetched under the jar's current account stated. The session only on the
 // authenticated path, since the public path's own page is fetched without
-// cookies and never states one. The session half goes BEYOND upstream:
-// yt-dlp loses SESSION_INDEX and DELEGATED_SESSION_ID as well when the page
-// finally fails — webpage_ytcfg is then the client's default and there is no
-// initial player response to read them from (_video.py:3913-3915,
-// 2914-2927).
+// cookies and never states one. Both halves go BEYOND upstream, whose
+// identity never outlives the extraction. yt-dlp loses SESSION_INDEX and
+// DELEGATED_SESSION_ID when the page finally fails — webpage_ytcfg is then
+// the client's default and there is no initial player response to read them
+// from (_video.py:3913-3915, 2914-2927) — and reads visitor data only off
+// this extraction's own ytcfgs and responses (_extract_visitor_data,
+// _base.py:941-950), the per-client config pages it fetches standing in for
+// the page; Moombox fetches none, so the cache stands in for them.
 //
 // The cascades do not capture it back (captureVisitorData): it holds what
 // the caches already do, and storing the visitor data again would only

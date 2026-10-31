@@ -709,11 +709,13 @@ func extractChatContinuation(page []byte) (string, bool, error) {
 // literal backslashes that can trip some parsers downstream.
 //
 // The variant rewrite is yt-dlp's _construct_player_url, which every page's
-// player URL goes through (_extract_player_url, _video.py:2149-2155; default
-// variant 'main' since b7b7910d9 / #14430). The page's own variant — es6,
-// tce, a locale other than en_US — used to be what STS and the goja
-// fallback fetched while the sidecar fetched main, under one disk entry
-// keyed by player id, so each overwrote the other's in turn (audit G50).
+// player URL goes through (_extract_player_url, _video.py:2149-2155; the
+// rewrite from b7b7910d9 / #14430, the default variant 'main' as of
+// 04d6974f5 / #16269). The page's own variant — es6, tce — used to be what
+// STS and the goja fallback fetched while the sidecar fetched main, under one
+// disk entry keyed by player id, so each overwrote the other's in turn
+// (audit G50). A locale other than en_US is rewritten as well, which goes
+// beyond upstream (it keeps the page's locale): see CanonicalPlayerURL.
 //
 // The final Clone matters: raw is a regexp submatch of the full ~5 MB watch
 // page, and when the URL needs no un-escaping, no base prefix and no rewrite,

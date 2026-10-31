@@ -4,10 +4,12 @@ import "regexp"
 
 // mainVariantPath is the player JS path below /s/player/<id>/ that yt-dlp
 // fetches by default: its 'main' variant, _PLAYER_JS_VARIANT_MAP['main'] in
-// extractor/youtube/_video.py, chosen by _DEFAULT_PLAYER_JS_VARIANT (b7b7910d9,
-// #14430). It is the one shape every Moombox player fetch takes — the
-// sidecar's (playerURLForID), and since the watch page's URL is rewritten to
-// it (CanonicalPlayerURL), STS's and the goja fallback's too.
+// extractor/youtube/_video.py, chosen by _DEFAULT_PLAYER_JS_VARIANT. That
+// default came in with _construct_player_url (b7b7910d9, #14430), was 'tv'
+// from 1a895c18a (#15818) and is 'main' again since 04d6974f5 (#16269), which
+// is what b77c9304e runs. It is the one shape every Moombox player fetch
+// takes — the sidecar's (playerURLForID), and since the watch page's URL is
+// rewritten to it (CanonicalPlayerURL), STS's and the goja fallback's too.
 const mainVariantPath = "player_ias.vflset/en_US/base.js"
 
 // playerPathIDRe is yt-dlp's _extract_player_info, `/s/player/(?P<id>[a-fA-F0-9]{8,})/`:
@@ -41,17 +43,24 @@ func PlayerURLForID(playerID string) string {
 // .../s/player/<id>/player_ias.vflset/en_US/base.js. A URL with no
 // /s/player/<id>/ segment comes back unchanged.
 //
-// yt-dlp does the same to every player URL it reads off a page
-// (_construct_player_url, b7b7910d9 / #14430: the variant is 'main' unless
-// the player_js_variant extractor-arg asks otherwise). Moombox did not: the
-// page's variant (es6, tce, tv, a locale other than en_US) was fetched as
-// given by STS and the goja fallback, while the sidecar fetched the main one —
-// and the disk cache keys both by player id alone (CacheKey). The two
-// therefore overwrote each other's ~3 MB file in turn, each body-length
-// change read as a rotation that dropped the preprocessed copy and the
-// compiled solver, and a main fetch replayed the other variant's
-// If-Modified-Since / ETag, so a 304 handed the sidecar the other variant's
-// body (audit G50). One variant means one body under the one key.
+// yt-dlp rewrites every player URL it reads off a page to its default
+// variant the same way (_construct_player_url, b7b7910d9 / #14430; 'main'
+// since 04d6974f5 / #16269, unless the player_js_variant extractor-arg asks
+// otherwise): es6, tce, tv and the rest become player_ias. Moombox did not:
+// the page's variant was fetched as given by STS and the goja fallback, while
+// the sidecar fetched the main one — and the disk cache keys both by player
+// id alone (CacheKey). The two therefore overwrote each other's ~3 MB file in
+// turn, each body-length change read as a rotation that dropped the
+// preprocessed copy and the compiled solver, and a main fetch replayed the
+// other variant's If-Modified-Since / ETag, so a 304 handed the sidecar the
+// other variant's body (audit G50). One variant means one body under the one
+// key.
+//
+// The locale goes BEYOND upstream: yt-dlp reads player_ias.vflset/de_DE as
+// the main variant already (its variant match takes any locale in place of
+// en_US, _get_player_id_variant_and_path) and fetches it as the page gave
+// it. Here it becomes en_US too, because the id-keyed entry must hold the
+// body the sidecar fetches, and playerURLForID asks for en_US.
 //
 // The host is kept, not forced to www.youtube.com as upstream's urljoin
 // does, because every real player URL is already on it and the test servers

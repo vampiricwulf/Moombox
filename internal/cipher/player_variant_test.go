@@ -11,9 +11,10 @@ import (
 )
 
 // TestCanonicalPlayerURL pins the rewrite every player URL takes: any variant
-// or locale of a player becomes that player's main variant
-// (yt-dlp's _construct_player_url, default variant 'main'), the host is kept,
-// and a URL with no /s/player/<id>/ segment is left as it is.
+// of a player becomes that player's main variant (yt-dlp's
+// _construct_player_url, default variant 'main'), and any locale its en_US
+// (beyond upstream, which keeps the page's: the de_DE row), the host is
+// kept, and a URL with no /s/player/<id>/ segment is left as it is.
 //
 // Mutants: CanonicalPlayerURL returning its input (every rewriting row
 // fails); PlayerIDOf answering for a URL with no /s/player/<hex>/ segment.
