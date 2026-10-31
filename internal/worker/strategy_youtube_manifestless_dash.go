@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -117,7 +118,10 @@ func partitionManifestlessFormats(formats []youtube.Format) (video, audio []Dash
 //     (gvsBinding, resolved at extraction and carried on videoInfo), via
 //     the cached /att/get minter — only for a stream whose format came
 //     from a client that requires the GVS token (youtube.GvsTokenRequired);
-//     a tv, web_embedded, visionos or android_vr stream rides bare.
+//     a tv, web_embedded, visionos or android_vr stream rides bare. A stream
+//     whose token is mandatory and cannot be minted is never fetched bare:
+//     the selection re-runs over the token-free pool, or the setup fails
+//     with errMissingPot (manifestlessMissingPot; the mint block says how).
 //  5. Build engine.SegmentDownloader instances. The downloader's
 //     buildSegmentURL auto-detects query-style adaptive URLs and appends
 //     `&sq=N`, while applyPoTokenQuery appends `&pot=POT` per fetch. No
@@ -245,18 +249,71 @@ func DownloadManifestlessDash(
 			logGvsTokenSkipped(job, audioSource, "stream", "audio")
 		}
 	}
+	//
+	// missing_pot, as DownloadVod runs it (audit G16). A chosen stream whose
+	// token is mandatory (youtube.FormatGvsTokenMandatory) and could not be
+	// minted — the mint failed, came back empty, or the binding is a guess
+	// (D12) — would 403 every segment bare, and spend the refresh budget
+	// re-minting against the same failure. yt-dlp never records such a
+	// format: it skips it before its stream id is recorded (_video.py:
+	// 3440-3442, 3514-3555), so the next client's copy is the one it keeps.
+	// Here the selection re-runs over the extraction's pool without the
+	// formats that need the token, each replaced by its token-free shadow
+	// where the dedup kept one (withoutGvsRequiredFormats) — tv's or a
+	// cookieless copy of the same itag, or a lesser rendition of a token-free
+	// client — and the capture records that (manifestlessMissingPot). With
+	// nothing left to record the setup fails with errMissingPot, and a live
+	// capture falls to its HLS manifest, whose token is only recommended
+	// (missingPotFallback); a guessed binding instead rides its token on the
+	// first selection, the one exit D12 leaves. A stream whose token is only
+	// recommended — a Premium session's web family — rides bare, as upstream
+	// fetches it.
 	if potProvider != nil && (videoNeedsPot || audioNeedsPot) {
-		poToken, err := mintGvsPoToken(ctx, potProvider, bindingValue)
-		if err != nil {
-			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
-				"binding", bindingKind, "err", err)
-		} else if poToken != "" {
+		poToken, err := strategyGvsToken(ctx, potProvider, videoInfo, bindingValue, false)
+		mandatory := (videoStream != nil && youtube.FormatGvsTokenMandatory(formatByItag(videoInfo.Formats, videoStream.Itag), videoInfo.IsPremium)) ||
+			(audioStream != nil && youtube.FormatGvsTokenMandatory(formatByItag(videoInfo.Formats, audioStream.Itag), videoInfo.IsPremium))
+		switch {
+		case err == nil:
 			pot = poToken
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
 				"binding", bindingKind, "tokenLength", len(poToken),
 				"videoSource", videoSource, "audioSource", audioSource)
-		} else {
-			job.Logger.Warn("[POT] generator returned empty token", "jobID", job.Job.ID)
+		case !mandatory:
+			job.Logger.Warn("[POT] no GVS token — the web-family streams ride bare: Premium makes their token recommended, not required",
+				"jobID", job.Job.ID, "binding", bindingKind, "err", err,
+				"videoSource", videoSource, "audioSource", audioSource)
+		default:
+			deg, degErr := manifestlessMissingPot(ctx, job, videoInfo, videoItag, audioItag, routedSolver, cipherSolver, bindingKind, err)
+			if degErr == nil {
+				videoInfo, videoStream, audioStream = deg.info, deg.video, deg.audio
+				videoSource, audioSource = "", ""
+				if videoStream != nil {
+					videoSource = formatSourceByItag(videoInfo.Formats, videoStream.Itag)
+				}
+				if audioStream != nil {
+					audioSource = formatSourceByItag(videoInfo.Formats, audioStream.Itag)
+				}
+				// The degraded pool holds no format a token is mandatory for,
+				// and none was minted: nothing rides one.
+				videoNeedsPot, audioNeedsPot = false, false
+				job.Logger.Info("[POT] missing_pot: serving token-free formats",
+					"jobID", job.Job.ID, "videoItag", itagOf(videoStream), "audioItag", itagOf(audioStream),
+					"videoSource", videoSource, "audioSource", audioSource)
+				break
+			}
+			if !errors.Is(err, errGuessedGvsBinding) {
+				return nil, degErr
+			}
+			// D12's last resort: nothing token-free to record, so the first
+			// selection rides the token minted under the guessed binding.
+			guessed, gErr := strategyGvsToken(ctx, potProvider, videoInfo, bindingValue, true)
+			if gErr != nil {
+				return nil, fmt.Errorf("%w; no token could be minted under the guessed binding either: %w", degErr, gErr)
+			}
+			pot = guessed
+			job.Logger.Warn("[POT] missing_pot: nothing token-free to record — the token minted under the guessed binding rides the web-family streams",
+				"jobID", job.Job.ID, "binding", bindingKind, "tokenLength", len(guessed),
+				"videoSource", videoSource, "audioSource", audioSource)
 		}
 	}
 	videoPot, audioPot := "", ""
@@ -445,6 +502,82 @@ func DownloadManifestlessDash(
 	}
 
 	return result, nil
+}
+
+// manifestlessDegrade is a manifest-free selection the missing_pot degrade
+// re-ran: the streams it chose, with their URLs resolved, and info — a copy
+// of the extraction's VideoInfo whose Formats is the degraded pool, so every
+// later lookup by itag (the stream's source, its 403 refresh and cipher
+// re-resolve, its pre-roll wait) reads the copy the stream records — a
+// token-free shadow where one was swapped in — and never the winner it
+// replaced.
+type manifestlessDegrade struct {
+	info         *youtube.VideoInfo
+	video, audio *DashStreamInfo
+}
+
+// manifestlessMissingPot is DownloadManifestlessDash's missing_pot degrade:
+// the selection over videoInfo's pool without the formats whose GVS token is
+// mandatory (withoutGvsRequiredFormats, shadows swapped in), its URLs
+// resolved as the first selection's were. A stream the job wants that the
+// degraded pool cannot supply is an error wrapping errMissingPot and
+// mintErr — the setup has nothing token-free to record. A pinned itag the
+// degrade dropped says so, as the whole-file path's pins do.
+func manifestlessMissingPot(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, videoItag, audioItag int, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, bindingKind string, mintErr error) (*manifestlessDegrade, error) {
+	pool, dropped, swapped := withoutGvsRequiredFormats(videoInfo.Formats, videoInfo.IsPremium)
+	job.Logger.Warn("[POT] missing_pot: no GVS token — dropping web-family formats",
+		"jobID", job.Job.ID, "binding", bindingKind, "err", mintErr, "dropped", len(dropped), "swapped", swapped)
+	videoStreams, audioStreams := partitionManifestlessFormats(pool)
+	var video, audio *DashStreamInfo
+	if videoItag != -1 {
+		video = SelectBestDashStream(videoStreams, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps)
+	}
+	if audioItag != -1 {
+		audio = SelectBestDashStream(audioStreams, audioItag, 0, false, "", false)
+	}
+	var lost []string
+	if video == nil && videoItag != -1 {
+		lost = append(lost, "video")
+	}
+	if audio == nil && audioItag != -1 {
+		lost = append(lost, "audio")
+	}
+	if len(lost) > 0 {
+		return nil, fmt.Errorf("manifestless DASH: %w: no %s adaptive format usable without a GVS PO token, and none could be minted: %w", errMissingPot, strings.Join(lost, " or "), mintErr)
+	}
+	if videoItag > 0 && video.Itag != videoItag && droppedHasItag(dropped, videoItag, "video") {
+		job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual video itag %d requires a GVS token none could be minted; recording itag %d instead", videoItag, video.Itag))
+	} else {
+		warnUnhonouredPins(job, videoItag, video, -1, nil)
+	}
+	if audioItag > 0 && audio.Itag != audioItag && droppedHasItag(dropped, audioItag, "audio") {
+		job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual audio itag %d requires a GVS token none could be minted; recording itag %d instead", audioItag, audio.Itag))
+	} else {
+		warnUnhonouredPins(job, -1, nil, audioItag, audio)
+	}
+	if video != nil {
+		resolved, retry, err := resolveManifestlessStream(ctx, pool, videoStreams, video, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps, routedSolver, cipherSolver, videoInfo.PlayerURL, map[int]bool{}, job.Logger)
+		if err != nil {
+			return nil, fmt.Errorf("manifestless DASH: resolve video URL: %w", err)
+		}
+		if retry != nil {
+			video = retry
+		}
+		video.BaseURL = resolved
+	}
+	if audio != nil {
+		resolved, retry, err := resolveManifestlessStream(ctx, pool, audioStreams, audio, audioItag, 0, false, "", false, routedSolver, cipherSolver, videoInfo.PlayerURL, map[int]bool{}, job.Logger)
+		if err != nil {
+			return nil, fmt.Errorf("manifestless DASH: resolve audio URL: %w", err)
+		}
+		if retry != nil {
+			audio = retry
+		}
+		audio.BaseURL = resolved
+	}
+	info := *videoInfo
+	info.Formats = pool
+	return &manifestlessDegrade{info: &info, video: video, audio: audio}, nil
 }
 
 // dbResumeSeq returns the DB-persisted last sequence to resume a crashed LIVE

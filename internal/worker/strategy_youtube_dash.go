@@ -73,7 +73,10 @@ func resolveFreshDashURL(ctx context.Context, jobID string, routedSolver cipher.
 // (cipher.ErrNUnsolved): its segment URLs would be refused, every one. yt-dlp
 // uses a DASH manifest only `if solved_n or not n_challenge`
 // (_video.py:3730-3751). It used to download them anyway, behind a Warn that
-// downloads "may be throttled" (audit G9).
+// downloads "may be throttled" (audit G9). So does a web-family manifest whose
+// GVS token is mandatory and could not be minted (errMissingPot, the mint
+// block below), which a live capture answers from its HLS manifest
+// (missingPotFallback).
 func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
 	if videoInfo.DashManifestURL == "" {
 		return nil, fmt.Errorf("no DASH manifest URL available")
@@ -137,23 +140,44 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// upstream does — a token on an android_vr URL is the 2026-08-15 403
 	// cause the AuthLevel block in internal/youtube/types.go names. Both
 	// downloaders below follow.
+	//
+	// missing_pot: a web-family manifest whose token none could be minted
+	// for is skipped, not fetched bare — upstream's `if require_po_token and
+	// not po_token` skip (_video.py:3746-3749), which a bare fetch earns as a
+	// 403 on every segment and a refresh budget spent re-minting against the
+	// same failure (audit G16). The setup fails with errMissingPot, and a live
+	// capture falls to its HLS manifest (missingPotFallback). A Premium
+	// session's manifest is only recommended a token (GvsTokenMandatory): it
+	// is fetched bare when none can be had, as upstream fetches it. A guessed
+	// binding counts as no token (D12), and a manifest has no token-free copy
+	// of its own to prefer, so a mandatory one takes the token minted under
+	// the guess — the last resort D12 leaves it; a recommended one goes bare.
 	var dashPoToken string
 	dashSource := videoInfo.DashManifestSource
 	if potProvider != nil && !youtube.GvsTokenRequired(dashSource) {
 		logGvsTokenSkipped(job, dashSource)
 	} else if potProvider != nil {
 		bindingValue, bindingKind := gvsBinding(job, videoInfo)
-		poToken, err := mintGvsPoToken(ctx, potProvider, bindingValue)
-		if err != nil {
-			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
-				"binding", bindingKind, "err", err)
-		} else if poToken != "" {
+		mandatory := youtube.GvsTokenMandatory(dashSource, videoInfo.IsPremium)
+		poToken, err := strategyGvsToken(ctx, potProvider, videoInfo, bindingValue, false)
+		if mandatory && errors.Is(err, errGuessedGvsBinding) {
+			job.Logger.Warn("[POT] missing_pot: the GVS content binding is a guess, and a DASH manifest has no token-free copy — minting under it",
+				"jobID", job.Job.ID, "binding", bindingKind, "source", dashSource)
+			poToken, err = strategyGvsToken(ctx, potProvider, videoInfo, bindingValue, true)
+		}
+		switch {
+		case err == nil:
 			dashPoToken = poToken
 			dashURL = strings.TrimRight(dashURL, "/") + "/pot/" + poToken
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
 				"binding", bindingKind, "tokenLength", len(poToken), "source", dashSource)
-		} else {
-			job.Logger.Warn("[POT] generator returned empty token", "jobID", job.Job.ID)
+		case mandatory:
+			job.Logger.Warn("[POT] missing_pot: no GVS token — skipping the web-family DASH manifest",
+				"jobID", job.Job.ID, "binding", bindingKind, "source", dashSource, "err", err)
+			return nil, fmt.Errorf("DASH: %w: the %s manifest needs a GVS PO token, and none could be minted: %w", errMissingPot, dashSource, err)
+		default:
+			job.Logger.Warn("[POT] no GVS token — fetching the manifest bare: Premium makes it recommended, not required",
+				"jobID", job.Job.ID, "binding", bindingKind, "source", dashSource, "err", err)
 		}
 	}
 

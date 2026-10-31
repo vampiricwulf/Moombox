@@ -663,6 +663,13 @@ var mintGvsPoToken = func(ctx context.Context, p *bgutils.PotProvider, binding s
 // mandatory and that has no token-free copy to take instead.
 var errGuessedGvsBinding = errors.New("the GVS content binding is a guess — signed in, but the page stated no datasync ID")
 
+// errMissingPot marks a strategy setup that failed because a stream it would
+// record needs a GVS PO token (youtube.GvsTokenMandatory) that could not be
+// minted, and no token-free copy of it was left to record instead —
+// upstream's missing_pot skip, which it reports and passes over
+// (_video.py:3440-3442, 3746-3749). missingPotFallback reads it.
+var errMissingPot = errors.New("missing_pot")
+
 // strategyGvsToken is a strategy's first GVS mint (mintGvsPoToken) under
 // binding, and the cause of a missing token: the mint's error, an empty
 // token (errEmptyGvsToken), or — unless guessOK — a guessed binding
@@ -681,6 +688,27 @@ func strategyGvsToken(ctx context.Context, p *bgutils.PotProvider, videoInfo *yo
 		return "", err
 	}
 	return tok, nil
+}
+
+// missingPotFallback returns the strategy a failed setup falls to, or nil:
+// HlsStrategy for a live capture whose manifest-free or DASH-manifest setup
+// failed for want of a GVS token (errMissingPot) when the extraction carries
+// an HLS manifest. The web family's HLS policy is recommended, not required
+// (_base.py:85-88): upstream records that HLS bare when no token can be had,
+// and so does DownloadHls — the visionos and tv masters need none at all. So
+// a capture that yt-dlp would record from HLS is recorded from HLS, from the
+// live edge, instead of failing; a VOD or post-live setup has no live HLS to
+// fall to, and fails with the missing_pot cause. Only the first setup falls
+// back: a mid-stream refresh (refreshDownload) keeps the strategy the
+// capture runs on, and a refresh that cannot set it up fails as a refresh.
+func missingPotFallback(strategy DownloadStrategy, info *youtube.VideoInfo, err error) DownloadStrategy {
+	if !errors.Is(err, errMissingPot) || info == nil || info.StreamStatus != youtube.StreamLive || info.HlsManifestURL == "" {
+		return nil
+	}
+	if strategy != ManifestlessDashStrategy && strategy != DashStrategy {
+		return nil
+	}
+	return HlsStrategy
 }
 
 // tokenClassChanged reports whether a 403 refresh must NOT install the fresh
