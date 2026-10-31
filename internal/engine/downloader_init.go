@@ -58,6 +58,15 @@ func (d *SegmentDownloader) fetchInitSegment(ctx context.Context, segURL string,
 		if serr := utils.Sleep(ctx, d.initRefreshWait()); serr != nil {
 			return nil, serr
 		}
+		// Cancel() sets a flag the sleep does not see; a downloader that is
+		// stopping must not spend a player-response round trip and a mint —
+		// and wipe the cipher solver its sibling shares — on a retry that
+		// will never be sent (fetchSegmentWithRetry's loop top would refuse
+		// it). fetchSegmentWithRetry refreshes before its sleep and checks at
+		// its loop top; this refreshes after the sleep, so it checks here.
+		if cerr := d.cancelErr(ctx); cerr != nil {
+			return nil, cerr
+		}
 		d.refreshCredentials()
 		if rebuildURL != nil {
 			segURL = rebuildURL()

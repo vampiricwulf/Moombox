@@ -640,6 +640,67 @@ func TestDashInitFailureEndsTheStartBeforeAnyMedia(t *testing.T) {
 	}
 }
 
+// TestDashInitCancelledDuringItsRetryIsTheCancel pins the cancel path of the
+// fatal init: a Cancel() while a refused init waits for its retry stops the
+// part as the cancel it is — not ErrInitSegmentUnavailable, which would log
+// an Error and read as a stream that could not be had — and spends no
+// credential refresh on a retry that will never be sent (a player-response
+// round trip, a mint, and a wipe of the cipher solver the sibling downloader
+// shares).
+//
+// Mutants:
+//   - Start without its cancel check ahead of the wrap: Start returns
+//     ErrInitSegmentUnavailable.
+//   - fetchInitSegment without its cancel check after the wait: the refresh
+//     runs once.
+func TestDashInitCancelledDuringItsRetryIsTheCancel(t *testing.T) {
+	const startSeq, head = 3, 6
+	var cancelPart atomic.Pointer[func()]
+	g := serveGVS(t, constHead(head), func(r *http.Request, seq, attempt int) gvsAnswer {
+		if seq <= 0 {
+			return gvsForbidden
+		}
+		return gvsServe
+	})
+	g.onRequest = func(seq int) {
+		if seq == 0 {
+			(*cancelPart.Load())() // the operator cancels while the init is refused
+		}
+	}
+
+	synctest.Test(t, func(t *testing.T) {
+		out := filepath.Join(t.TempDir(), "video_stream")
+		base := gvsBase("cancel")
+		var refreshes atomic.Int32
+		d := NewSegmentDownloader(DownloaderOptions{
+			BaseURL:         base,
+			OutputFile:      out,
+			StartSeq:        startSeq,
+			ForceStartSeq:   true,
+			InitURL:         base + "&sq=0",
+			InitFromSegment: true,
+			OnCredentialRefresh: func() (string, string) {
+				refreshes.Add(1)
+				return "", "fresh-token"
+			},
+		})
+		cancelFn := d.Cancel
+		cancelPart.Store(&cancelFn)
+
+		err := d.Start(t.Context())
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrInitSegmentUnavailable) {
+			t.Fatalf("Start = %v, want the bare cancellation", err)
+		}
+		if got := refreshes.Load(); got != 0 {
+			t.Errorf("credential refreshes = %d, want 0 after the cancel", got)
+		}
+		if got := g.attemptsFor(0); got != 1 {
+			t.Errorf("init fetched %d times, want 1", got)
+		}
+		wantFile(t, out, nil)
+	})
+}
+
 // TestDashEmptyBodiesPastTheHeadEndTheStream pins G5 at the edge: an empty
 // 2xx is a failed fetch of that sequence, never a segment. Past the end of a
 // stream whose edge answers with empty 200s (moonarchive's _dash.py meets them
