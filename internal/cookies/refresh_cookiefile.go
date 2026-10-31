@@ -80,9 +80,19 @@ func hasRowBreakingChar(s string) bool { return strings.ContainsAny(s, rowBreaki
 // to open speculatively. Adding essentialTwitchCookies here is a one-line change
 // the day a Twitch caller arrives, and it needs that caller's tests, not a
 // guess.
+//
+// A youtube-only name (youtubeOnlyEssentialCookies: SOCS) is tracked only from
+// an origin www.youtube.com is sent the cookie of. An unscoped header is
+// host-scoped to its origin and the insertion loop writes it on that origin's
+// own site, so an unscoped SOCS from google.com would be google.com's consent,
+// written where Load — like yt-dlp's www.youtube.com read — never takes it
+// for YouTube's (admitsEssentialYouTubeName).
 func trackedCookieName(name string, origin cookieOrigin) bool {
 	if origin.platform() != originYouTube.platform() {
 		return false
+	}
+	if youtubeOnlyEssentialCookies[name] {
+		return sentToWWWYouTube(string(origin))
 	}
 	return essentialYouTubeCookies[name] || isGoogleOnlyAuthName(name)
 }
@@ -537,8 +547,7 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 					// Computed inside this branch: nearly every row in a real
 					// cookies.txt matches no pending update, and neither reader
 					// below is reachable for those.
-					rowHasEssential := essentialYouTubeCookies[cookieName] &&
-						(isYouTubeDomain(rowDomain) || isGoogleDomain(rowDomain))
+					rowHasEssential := admitsEssentialYouTubeName(cookieName, rowDomain)
 					if cu.Delete {
 						// Drop the row. Writing it back with an empty value
 						// left a credential-shaped hole nothing could prune.
@@ -885,10 +894,20 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 	// 3. Otherwise only a value refresh may cross domains — within one platform,
 	//    and only when a single non-deleting update is in play so the choice is
 	//    unambiguous.
+	//
+	//    A youtube-only essential name (youtubeOnlyEssentialCookies: SOCS) does
+	//    not cross between the two sides of www.youtube.com's read: it is a
+	//    consent each site keeps for itself, not a session value the platform
+	//    shares, so google.com's SOCS never refreshes YouTube's row — which
+	//    Load would then admit as YouTube's consent, the leak
+	//    admitsEssentialYouTubeName closes — nor YouTube's google.com's. An
+	//    unscoped update stands on its declared origin's side. Unreachable while
+	//    originYouTube is the only caller and YouTube sets no google.com SOCS;
+	//    kept for the day an originGoogle caller arrives.
 	var only cookieUpdateKey
 	refreshes := 0
 	for _, k := range candidates {
-		if !updates[k].Delete && sameCookiePlatform(k.Domain, rowDomain, origin) {
+		if !updates[k].Delete && sameCookiePlatform(k.Domain, rowDomain, origin) && !crossesConsentSides(k, rowDomain, origin) {
 			only, refreshes = k, refreshes+1
 		}
 	}
@@ -896,6 +915,21 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 		return only, updates[only], true
 	}
 	return cookieUpdateKey{}, cookieUpdate{}, false
+}
+
+// crossesConsentSides reports whether update k, a youtube-only essential name,
+// would refresh a row on the other side of www.youtube.com's read
+// (sentToWWWYouTube) from its own — an unscoped update's side being its
+// declared origin's. Always false for every other name.
+func crossesConsentSides(k cookieUpdateKey, rowDomain string, origin cookieOrigin) bool {
+	if !youtubeOnlyEssentialCookies[k.Name] {
+		return false
+	}
+	updateDomain := k.Domain
+	if updateDomain == "" {
+		updateDomain = string(origin)
+	}
+	return sentToWWWYouTube(updateDomain) != sentToWWWYouTube(rowDomain)
 }
 
 // sameCookiePlatform reports whether an update's domain and a file row's domain

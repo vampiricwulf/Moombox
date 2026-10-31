@@ -66,7 +66,10 @@ func isEssentialCookie(name, domain string) bool {
 	// essentialYouTubeCookies today. It becomes reachable the day one does, or
 	// the day a third party sets one of these generically-named cookies on a
 	// domain this extractor visits.
-	if (isYouTubeDomain(domain) || isGoogleDomain(domain)) && essentialYouTubeCookies[name] {
+	//
+	// Load's own rule (admitsEssentialYouTubeName), so a SOCS google.com set
+	// is not written into cookies.txt as YouTube's consent either.
+	if admitsEssentialYouTubeName(name, domain) {
 		return true
 	}
 	// Google domain auth cookies

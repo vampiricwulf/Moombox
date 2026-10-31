@@ -1342,9 +1342,18 @@ func trimStatusFrames(hub interface {
 // the field on that one path (a members-only ended stream announced every
 // cycle again), so TestEveryMonitorProbeIsBuiltByMonitorProbe reads the
 // wiring from source.
+//
+// A probe that could not tell (*youtube.StatusProbeInconclusiveError) is
+// marked monitor.ErrProbeInconclusive, its text and chain kept, so the feed
+// walk holds the row on its backoff ladder rather than re-probing it every
+// cycle, and tells it from a transient failure, which it retries next cycle
+// (TestABotWalledStatusProbeReachesTheMonitorsAsAnErroredProbe).
 func monitorProbe(probe func(ctx context.Context, videoID string) (*youtube.VideoInfo, error)) monitor.VideoProbeFunc {
 	return func(ctx context.Context, videoID string) (*monitor.VideoProbeResult, error) {
 		meta, err := probe(ctx, videoID)
+		if _, inconclusive := errors.AsType[*youtube.StatusProbeInconclusiveError](err); inconclusive {
+			return nil, monitor.InconclusiveProbe(err)
+		}
 		if err != nil {
 			return nil, err
 		}

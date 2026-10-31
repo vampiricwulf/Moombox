@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 23
+const schemaVersion = 24
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -239,6 +239,10 @@ CREATE INDEX IF NOT EXISTS idx_history_added_at ON history(added_at);
 CREATE INDEX IF NOT EXISTS idx_feed_items_window ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC);
 CREATE INDEX IF NOT EXISTS idx_feed_items_status ON feed_items(channel_id, status);
 CREATE INDEX IF NOT EXISTS idx_feed_items_recheck ON feed_items(channel_id, recheck_at, video_id);
+
+CREATE TABLE IF NOT EXISTS feed_reprobe_owed (
+    channel_id TEXT PRIMARY KEY  -- v24: owed one reset of its in-scope not_a_stream rows (ResetMisfiledFeedItems)
+);
 `
 
 // readUserVersion reads SQLite's PRAGMA user_version. Returns 0 on a fresh DB.
@@ -755,6 +759,15 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 24 {
+		if err := db.migrateV24(); err != nil {
+			return err
+		}
+		if err := db.writeUserVersion(24); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -950,3 +963,63 @@ func (db *Database) migrateV23() error {
 const createFeedItemsRecheckIdxSQL = `
 CREATE INDEX IF NOT EXISTS idx_feed_items_recheck
     ON feed_items(channel_id, recheck_at, video_id)`
+
+// migrateV24 owes one reset of the feed rows the status probe misfiled: every
+// channel holding a not_a_stream row is recorded in feed_reprobe_owed, and
+// the feed monitor's next cycle for that channel resets the ones inside its
+// walk's scope to unknown, the state a never-probed row has
+// (ResetMisfiledFeedItems), so each is probed once under the inconclusive
+// rule (owner decision, 2026-10-31: reset once on upgrade).
+//
+// Why rows are owed it. Before that rule (G8, youtube.StatusProbeInconclusiveError)
+// the status probe filed a refusal that said nothing about the broadcast —
+// YouTube's bot wall on the probe's IP, a made-for-kids video — not_a_stream,
+// and the walk stored that as a settled classification it never probes again
+// (not_a_stream is out of every probe arm, spec §8). On a channel that
+// archives live content only, which is where the reset matters, a stream so
+// misfiled was never recorded. (A channel that archives VODs as well —
+// include_non_live_content — had ARCHIVE's refresh probe re-ask each such
+// row every cycle while it was in the window and no history row stood
+// against it, so a stream found upcoming there was stored and jobbed; the
+// reset reaches the rows its history and established gates held back.)
+// Nothing on the row tells a misfiled one from a genuine upload, so every
+// not_a_stream row is owed the one re-probe; a genuine non-stream answers
+// not_a_stream again and settles where it was.
+//
+// Why the migration owes the reset rather than making it. The scope is the
+// walk's, and the walk's scope is a cutoff — the cycle's instant less the
+// channel's archive window, monitors.archive_window_days or the channel's
+// own override — and the membership-discovery toggle, all configuration,
+// which this package does not read (Open is handed a path, never a config).
+// A reset by any other rule would touch rows the walk never reads, which the
+// decision rules out: rows outside the scope stay as they are. So the
+// migration records the debt, in the same version bump, and the monitor
+// settles it per channel with the cutoff its own walk uses, once: the owed
+// record goes in the same transaction as the reset. A channel disabled at the
+// upgrade keeps its debt until it is walked again; a removed one's debt goes
+// with its feed history (DeleteChannelFeedData).
+//
+// A fresh install never runs this: createSchema makes the table empty, and
+// every not_a_stream row such a binary stores was filed under the new rule.
+//
+// Idempotent: CREATE TABLE IF NOT EXISTS, and INSERT OR IGNORE on the
+// table's key, so a re-run of the block (user_version is written last) owes
+// the same channels once.
+//
+//	CREATE TABLE feed_reprobe_owed (channel_id TEXT PRIMARY KEY)
+func (db *Database) migrateV24() error {
+	ctx := db.getCtx()
+	if _, err := db.db.ExecContext(ctx, createFeedReprobeOwedSQL); err != nil {
+		return fmt.Errorf("v24 table: %w", err)
+	}
+	if _, err := db.db.ExecContext(ctx, `INSERT OR IGNORE INTO feed_reprobe_owed (channel_id)
+    SELECT DISTINCT channel_id FROM feed_items WHERE status = 'not_a_stream'`); err != nil {
+		return fmt.Errorf("v24 owe: %w", err)
+	}
+	return nil
+}
+
+const createFeedReprobeOwedSQL = `
+CREATE TABLE IF NOT EXISTS feed_reprobe_owed (
+    channel_id TEXT PRIMARY KEY
+)`

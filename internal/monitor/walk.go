@@ -79,15 +79,16 @@ func (fm *FeedMonitor) endCheckFor(row database.FeedItem, now time.Time) Confirm
 // window boundary before it's known). For each row it applies the probe
 // gates in order — HasActiveJob, term-match, the membership cookie gate,
 // then the status rule (probe unknown/upcoming/live; vod only via the
-// restart carve-out or a due end re-check; not_a_stream never) — and, for
-// date-ordered sources, infers when the rest of that source must be older
-// than the window and stops probing it early.
+// restart carve-out or a due end re-check; not_a_stream never), then the
+// inconclusive hold (probeHeld) — and, for date-ordered sources, infers when
+// the rest of that source must be older than the window and stops probing
+// it early.
 //
 // Returns the FRESH set — rows a probe actually ran against this pass —
 // keyed by video ID, for the ARCHIVE step to disposition without
 // re-probing. now is the cycle's one instant (§7), which an unconfirmed
-// end's re-check is judged against and scheduled from (recheckDue,
-// applyProbe).
+// end's re-check and an inconclusive hold are judged against and scheduled
+// from (recheckDue, applyProbe, noteProbeOutcome).
 func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID, cutoff string, now time.Time, scope []database.FeedItem) map[string]ProbeClassifyResult {
 	fresh := map[string]ProbeClassifyResult{}
 	st := walkState{exhausted: map[string]bool{}, lastDate: map[string]time.Time{}, noExit: map[string]bool{}}
@@ -95,7 +96,7 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 	// are individually silent (success writes no log), which made the first
 	// production failure invisible for hours. The summary is the walk's
 	// heartbeat: it must appear once per channel per cycle, whatever happened.
-	var skipped, probed, applied, denied, errored, cooldown, dateFetchFailed int
+	var skipped, held, probed, applied, denied, errored, cooldown, dateFetchFailed int
 	nowStr := now.UTC().Format(time.RFC3339)
 
 	for _, row := range scope {
@@ -176,6 +177,17 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 			continue // not_a_stream
 		}
 
+		if fm.probeHeld(chID, row.VideoID, now) {
+			// The row's last probe was inconclusive, and its hold has not
+			// ended (noteProbeOutcome): the ladder, not the cycle, says when
+			// it is asked again. Whatever the rule above that would probe it
+			// — upcoming, the restart carve-out, a due end re-check — it is
+			// asked when the hold ends, as an errored probe leaves it: no
+			// write, not FRESH, never exhausts.
+			held++
+			continue
+		}
+
 		probed++
 		res, ok := fm.probeRowDated(ctx, ch, chID, row, cutoff, now)
 		if !ok {
@@ -239,9 +251,10 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 	}
 
 	fm.logger.Debug("walk done", "channel", chID, "scope", len(scope),
-		"skipped", skipped, "probed", probed, "applied", applied,
+		"skipped", skipped, "held", held, "probed", probed, "applied", applied,
 		"denied", denied, "errored", errored, "cooldown", cooldown,
 		"dateFetchFailed", dateFetchFailed, "exhausted", len(st.exhausted))
+	fm.pruneFailureSpells(chID, scope)
 	return fresh
 }
 
@@ -283,7 +296,7 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 // none) returns ok=true with the result still dateless: applyProbe's
 // invariant and the archive's row-date fallback handle that honestly.
 func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem, cutoff string, now time.Time) (ProbeClassifyResult, bool) {
-	res := fm.probeRow(ctx, ch, chID, row, fm.endCheckFor(row, now))
+	res := fm.probeRow(ctx, ch, chID, row, fm.endCheckFor(row, now), now)
 	if res.EndUnconfirmed && settledTerminal(row) {
 		res.EndUnconfirmed = false
 	}
@@ -333,7 +346,13 @@ func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConf
 //
 // confirm is the end check this probe may make (endCheckFor), passed on to
 // both probes when the refusal escalates.
-func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem, confirm ConfirmEndFunc) ProbeClassifyResult {
+//
+// Each probe's failure log follows the row's failure spell (inFailureSpell):
+// Warn for the first failed probe since the row last answered, Debug for
+// every one after it. Each probe's outcome is recorded against the spell
+// and the row's hold (noteProbeOutcome) as of now, the cycle's instant; the
+// caller has already checked that the row is not held (probeHeld).
+func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem, confirm ConfirmEndFunc, now time.Time) ProbeClassifyResult {
 	probe := fm.ProbeVideo
 	if row.Source == "membership" && fm.ProbeVideoAuth != nil {
 		probe = fm.ProbeVideoAuth
@@ -346,8 +365,10 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 		Tracker:    fm.MetadataTracker,
 		Cooldown:   fm.ProbeCooldown,
 		ConfirmEnd: confirm,
+		Repeat:     fm.inFailureSpell(chID, row.VideoID),
 		Logger:     fm.logger,
 	})
+	fm.noteProbeOutcome(ctx, chID, row.VideoID, res, now)
 	if res.PlayabilityError != "members_only" {
 		// Covers OutcomeErrored/OutcomeCooldown too: both carry a
 		// zero-valued PlayabilityError, so neither can trigger a flip.
@@ -362,6 +383,14 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 		// refusal was a successful probe, so probeAndClassify just recorded
 		// fm.ProbeCooldown for this video — gating the retry on it would
 		// suppress escalation entirely for any probe_cooldown > 0 (§9).
+		//
+		// Repeat false, not the spell: the escalation runs only on the
+		// answer a members_only refusal is, and noteProbeOutcome has just
+		// ended the row's spell for that answer, so a failure here is a new
+		// spell's first and warns. Its outcome is noted like any probe's: a
+		// failure starts that spell — next cycle's authenticated probe of
+		// the relabelled row is its repeat — and an inconclusive one holds
+		// the row.
 		res = probeAndClassify(ProbeClassifyParams{
 			Ctx:        ctx,
 			VideoID:    row.VideoID,
@@ -370,10 +399,144 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 			Tracker:    fm.MetadataTracker,
 			Cooldown:   nil,
 			ConfirmEnd: confirm,
+			Repeat:     false,
 			Logger:     fm.logger,
 		})
+		fm.noteProbeOutcome(ctx, chID, row.VideoID, res, now)
 	}
 	return res
+}
+
+// probeSpell is one feed row's failure spell (failingProbes): the run of
+// failed probes since the row last answered, and the hold its inconclusive
+// probes put it on.
+type probeSpell struct {
+	// holds counts the inconclusive probes in the spell, the ladder's step:
+	// the next one holds the row for endRecheckDelay(holds), an hour after
+	// the first, then six, then daily.
+	holds int
+	// until is when the hold ends (probeHeld): before it neither the walk
+	// nor the archive's refresh probes the row. Zero while no probe in the
+	// spell has been inconclusive — a transient failure is retried next
+	// cycle — and left as it stands by one that fails transiently once the
+	// hold is due, so that row is retried next cycle too, on the same step.
+	until time.Time
+}
+
+// inFailureSpell reports whether chID's row videoID is in a failure spell:
+// its last probe failed, and none has answered since (failingProbes).
+//
+// The first failed probe in a spell logs at Warn, every failed probe after
+// it at Debug (probeRow passes this as ProbeClassifyParams.Repeat), and an
+// answered probe ends the spell, so the next failure warns again
+// (noteProbeOutcome). A spell is a row's run of failed probes, any failure:
+// an inconclusive status probe under a lasting bot wall (G8,
+// ErrProbeInconclusive) is the case it exists for, which stores nothing and
+// was warned on every probe of the row. Owner decision (2026-10-31, W6
+// follow-up 2): warn once in the walk, Warn on the first in a spell, Debug
+// after. DECAPI's rule is close but not the same
+// (ProcessYouTubeVideoParams.Repeat, sameAsLastAnswer): it demotes every
+// repeat probe of the same newest video, answered in between or not, so it
+// warns once per newest video and never re-arms; the walk re-arms on an
+// answer, since a feed row is probed for as long as it is in scope, and a
+// failure after an answer is a new fault worth one Warn.
+func (fm *FeedMonitor) inFailureSpell(chID, videoID string) bool {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	_, ok := fm.failingProbes[chID][videoID]
+	return ok
+}
+
+// probeHeld reports whether chID's row videoID is on an inconclusive hold
+// that has not ended by now, the cycle's instant (probeSpell.until): the
+// walk skips its probe, and the archive its refresh probe, until it ends.
+func (fm *FeedMonitor) probeHeld(chID, videoID string, now time.Time) bool {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	spell, ok := fm.failingProbes[chID][videoID]
+	return ok && now.Before(spell.until)
+}
+
+// noteProbeOutcome records one probe of chID's row videoID, made at now, the
+// cycle's instant, against its failure spell (inFailureSpell) and its hold
+// (probeHeld):
+//
+//   - a failed probe starts or continues the spell; an inconclusive one
+//     (ProbeClassifyResult.Inconclusive) also holds the row, on
+//     endRecheckBackoff: an hour after the spell's first, six after its
+//     second, then daily, for as long as no probe answers. Owner decision
+//     (2026-10-31, W6 follow-up 1, revised): a feed row whose probe stays
+//     inconclusive backs off. The refusal can stand for good — a
+//     made-for-kids video, a stream removed after its job ended, which
+//     FeedScope's Q2 keeps in scope as upcoming for good — and each probe of
+//     it is three requests signed out (the escalation). DECAPI's newest video
+//     is not held: it is asked about every cycle (ErrProbeInconclusive). A
+//     transient failure holds nothing — a freshly live video must not be
+//     blinded for an hour by one flaky probe (probeAndClassify);
+//   - an answered probe (OutcomeProbed, OutcomeDenied — a refusal is an
+//     answer) ends the spell and resets the ladder, so the row is probed on
+//     its own rule again from the next cycle, and its next inconclusive
+//     probe holds it for an hour, not a day;
+//   - a cooldown-suppressed one changes nothing;
+//   - and so does a failed probe made as ctx ended — the pass budget spent,
+//     or shutdown: the probe was never really asked (confirmEnd's rule for
+//     the end check), and a spell it started would have demoted the first
+//     real failure's line, the one that names the cause, to Debug.
+//
+// A newly seen video has no spell, so its first probe runs at once whatever
+// the rows around it are held for: the hold is a row's, never the
+// channel's.
+func (fm *FeedMonitor) noteProbeOutcome(ctx context.Context, chID, videoID string, res ProbeClassifyResult, now time.Time) {
+	if res.Outcome == OutcomeErrored && ctx.Err() != nil {
+		return
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	switch res.Outcome {
+	case OutcomeErrored:
+		if fm.failingProbes == nil {
+			fm.failingProbes = make(map[string]map[string]probeSpell)
+		}
+		if fm.failingProbes[chID] == nil {
+			fm.failingProbes[chID] = make(map[string]probeSpell)
+		}
+		spell := fm.failingProbes[chID][videoID]
+		if res.Inconclusive {
+			spell.until = now.Add(endRecheckDelay(spell.holds))
+			spell.holds++
+			fm.logger.Debug("status probe inconclusive; row held",
+				"id", videoID, "channel", chID, "until", spell.until.UTC().Format(time.RFC3339), "hold", spell.holds)
+		}
+		fm.failingProbes[chID][videoID] = spell
+	case OutcomeProbed, OutcomeDenied:
+		delete(fm.failingProbes[chID], videoID)
+	}
+}
+
+// pruneFailureSpells drops chID's failure spells for rows outside scope, the
+// walk's: a row that left scope while failing is not probed again, so its
+// spell would otherwise stay for the life of the process. A row that comes
+// back starts a new spell, and its first failure warns; its hold goes with
+// the old one, so it is probed at once, as a newly seen row is.
+func (fm *FeedMonitor) pruneFailureSpells(chID string, scope []database.FeedItem) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	spells := fm.failingProbes[chID]
+	if len(spells) == 0 {
+		return
+	}
+	inScope := make(map[string]struct{}, len(scope))
+	for _, row := range scope {
+		inScope[row.VideoID] = struct{}{}
+	}
+	for id := range spells {
+		if _, ok := inScope[id]; !ok {
+			delete(spells, id)
+		}
+	}
+	if len(spells) == 0 {
+		delete(fm.failingProbes, chID)
+	}
 }
 
 // applyProbe writes a successful probe's classification to the store.

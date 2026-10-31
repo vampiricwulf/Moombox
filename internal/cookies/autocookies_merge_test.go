@@ -85,6 +85,15 @@ func TestIsEssentialCookie(t *testing.T) {
 		// domain guard as CONSENT.
 		{"SOCS", ".youtube.com", true},
 		{"SOCS", ".twitch.tv", false},
+		// ...and on a domain www.youtube.com is sent alone
+		// (admitsEssentialYouTubeName): google.com's own consent is not
+		// YouTube's, which CONSENT's google.com row above, a name every Google
+		// domain shares, is the control for. A YouTube host www is not under
+		// is refused too; www itself is not.
+		{"SOCS", ".google.com", false},
+		{"SOCS", "accounts.google.com", false},
+		{"SOCS", "music.youtube.com", false},
+		{"SOCS", "www.youtube.com", true},
 	}
 	for _, tc := range cases {
 		if got := isEssentialCookie(tc.name, tc.domain); got != tc.want {

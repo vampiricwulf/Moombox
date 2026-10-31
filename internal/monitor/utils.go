@@ -113,10 +113,40 @@ func endRecheckDelay(step int) time.Duration {
 // escalation has settled nothing either (G8). probeAndClassify takes it down
 // its errored path — OutcomeErrored, so the feed walk and DECAPI store no
 // classification, the cooldown records nothing until the failure tracker
-// gives up, and the video is probed again next cycle — where its
+// gives up, and the video is probed again: by DECAPI next cycle, by the feed
+// walk once its hold on the row ends (ErrProbeInconclusive) — where its
 // not_a_stream used to be stored as settled, memoised as terminal, or
 // skipped as non-stream content on a live-only channel.
 type VideoProbeFunc func(ctx context.Context, videoID string) (*VideoProbeResult, error)
+
+// ErrProbeInconclusive marks a VideoProbeFunc error as a probe that reached
+// YouTube and could not tell (InconclusiveProbe): a refusal that said
+// nothing about the broadcast, which its one escalation did not settle
+// either, or a rate limit, which refuses the session, not the video
+// (youtube.StatusProbeInconclusiveError, which cmd/moombox's monitorProbe
+// marks with it, keeping the monitor package decoupled from youtube's
+// types). Every other probe error — a transport failure, a timeout, a 5xx —
+// is transient, and the next cycle asks again.
+//
+// The feed walk holds a row whose probe is inconclusive on endRecheckBackoff
+// (FeedMonitor.noteProbeOutcome): an hour, then six, then daily, until a
+// probe answers. Owner decision (2026-10-31, W6 follow-up 1, revised): the
+// refusal can stand for good — a made-for-kids video, one removed after its
+// job ended — and each probe of it is three requests signed out, so the walk
+// backs off; DECAPI never does, and asks about its newest video every cycle
+// whatever the probe answers, so a new stream or VOD is caught the moment
+// the wall lifts.
+var ErrProbeInconclusive = errors.New("status probe inconclusive")
+
+// InconclusiveProbe marks err as ErrProbeInconclusive: its text stays err's,
+// and its chain keeps err (errors.Is and errors.As still find what err
+// wraps — a cancelled context, the youtube error itself).
+func InconclusiveProbe(err error) error { return inconclusiveProbeError{err} }
+
+type inconclusiveProbeError struct{ err error }
+
+func (e inconclusiveProbeError) Error() string   { return e.err.Error() }
+func (e inconclusiveProbeError) Unwrap() []error { return []error{ErrProbeInconclusive, e.err} }
 
 // MetadataFailureTracker tracks per-video probe failure counts.
 // It is safe for concurrent use.
@@ -429,8 +459,12 @@ type ProbeClassifyParams struct {
 	// about a channel's newest video every 15 s, and a probe that keeps
 	// failing on it — an inconclusive status probe under a lasting bot wall
 	// above all (G8), which is never memoised — logged a Warn every cycle;
-	// the first sighting keeps it. The feed walk leaves it false: its rows
-	// are probed once a feed cycle, and a failure there is each cycle's own.
+	// the first sighting keeps it. The feed walk sets it for a row in a
+	// failure spell — its last probe failed and none has answered since
+	// (FeedMonitor.inFailureSpell) — for the same reason: a row whose probe
+	// keeps failing is probed again, every cycle while it fails transiently
+	// and on its hold's ladder while it is inconclusive, and every one of
+	// those probes warned.
 	Repeat bool
 	Logger interface {
 		Debug(msg string, args ...any)
@@ -453,6 +487,11 @@ type ProbeClassifyResult struct {
 	PublishedAt        string
 	PublishedPrecision string
 	PlayabilityError   string
+
+	// Inconclusive: an OutcomeErrored probe that reached YouTube and could
+	// not tell (ErrProbeInconclusive), not a transient failure. The feed
+	// walk holds the row on endRecheckBackoff for it (noteProbeOutcome).
+	Inconclusive bool
 
 	// EndUnconfirmed: StreamStatus is post_live on weak end signals alone
 	// (VideoProbeResult.BroadcastEndWeak) that the end check could not
@@ -545,7 +584,7 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 			failLog(fmt.Sprintf("[Monitor] Failed to check metadata for %s (attempt %d/%d): %v",
 				p.VideoID, count, maxMetadataFailures, err))
 		}
-		return ProbeClassifyResult{Outcome: OutcomeErrored}
+		return ProbeClassifyResult{Outcome: OutcomeErrored, Inconclusive: errors.Is(err, ErrProbeInconclusive)}
 	}
 
 	// Successful probe: record the (configured) cooldown to limit total

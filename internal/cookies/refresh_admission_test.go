@@ -389,6 +389,15 @@ func TestAdmitSetCookieOriginDecidesAdmission(t *testing.T) {
 		{"scoped google from a google caller", "SAPISID=v; Domain=.google.com", originGoogle, true},
 		{"scoped google from a twitch caller", "SAPISID=v; Domain=.google.com", originTwitch, false},
 		{"scoped google from no declared origin", "SAPISID=v; Domain=.google.com", cookieOrigin(""), false},
+
+		// SOCS is the one tracked name the sibling site does not share
+		// (trackedCookieName, youtubeOnlyEssentialCookies): an unscoped SOCS
+		// from google.com is google.com's consent, written on .google.com,
+		// where Load never reads it as YouTube's. PREF from the same caller is
+		// the control: still one platform for every other name.
+		{"unscoped SOCS from youtube.com", "SOCS=CAESxyz; Path=/; Secure", originYouTube, true},
+		{"unscoped SOCS from google.com", "SOCS=CAESxyz; Path=/; Secure", originGoogle, false},
+		{"unscoped PREF from google.com", "PREF=f6=40000000; Path=/", originGoogle, true},
 	}
 
 	for _, tc := range cases {

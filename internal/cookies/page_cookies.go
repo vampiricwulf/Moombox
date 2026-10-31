@@ -119,23 +119,27 @@ var pageCookieNames = map[string]bool{"SOCS": true, "PREF": true}
 //   - one scoped to google.com (or to a YouTube host www is not under, such
 //     as music.youtube.com). Load admits the essential names on a YouTube or
 //     a Google domain into one map, so with no .youtube.com copy beside it,
-//     google.com's own consent (an EU browser that accepted Google's but
-//     never YouTube's) or PREF stands in the slot. Upstream never sees
-//     either, and sets CAI and a fresh PREF.
+//     google.com's own PREF stands in the slot. Upstream never sees it, and
+//     sets a fresh PREF. SOCS no longer reaches the slot that way — Load
+//     admits it from a domain www.youtube.com is sent alone
+//     (admitsEssentialYouTubeName), so a google.com consent (an EU browser
+//     that accepted Google's but never YouTube's) is not the jar's at all —
+//     and this read keeps the same rule for it, belt to that admission.
 //   - one whose expiry has passed (rowExpired's rule: expiry > 0 and before
 //     now). Load keeps expired rows on purpose (see Load), so a cookies.txt
 //     exported a year ago still holds the consent it had then; no browser,
-//     and no request of upstream's, would send it.
+//     and no request of upstream's, would send it — nor, for SOCS, does
+//     GetCookieHeader any longer (GetCookieHeaderFor).
 //
 // Only the two cookies the page decides on are read this way. Every other
 // cookie goes out as GetCookieHeader sends it, google.com's auth names
 // included, which is the jar's contract with every YouTube request.
 //
 // The domain read is RFC 6265's domain-match from the host's side: the row's
-// domain, leading dot dropped, is www.youtube.com or a domain it is under.
+// domain, leading dot dropped, is www.youtube.com or a domain it is under
+// (sentToWWWYouTube, the rule SOCS is admitted on).
 func youtubeSees(e cookieEntry, now int64) bool {
-	domain := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(e.domain)), ".")
-	return domainMatches("www.youtube.com", domain) && !(e.expiry > 0 && e.expiry < now)
+	return sentToWWWYouTube(e.domain) && !e.expiredAt(now)
 }
 
 // applyPageCookies applies the consent (unless signedIn) and the language to
