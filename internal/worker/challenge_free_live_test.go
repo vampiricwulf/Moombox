@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -277,5 +278,60 @@ func TestExecuteWithChatRecordsLiveHlsWhenChallengesCannotBeSolved(t *testing.T)
 	}
 	if len(ms.seen) != 1 || len(hls.seen) != 1 {
 		t.Errorf("manifest-free tried %d time(s), HLS %d; want 1 and 1", len(ms.seen), len(hls.seen))
+	}
+}
+
+// TestExecuteWithChatWarnsOfAJSLessExtraction: an extraction that ranked for
+// a download without player JS (youtube.VideoInfo.JSLess — the cipher
+// sidecar disabled or down) puts yt-dlp's warning in the job's log at Warn,
+// once, that some formats may be missing (owner decision 4); any other
+// extraction puts none there.
+//
+// Mutants: the warning dropped, or logged below Warn (the JS-less row);
+// logged whatever the extraction (the other row).
+func TestExecuteWithChatWarnsOfAJSLessExtraction(t *testing.T) {
+	for _, jsless := range []bool{true, false} {
+		t.Run(fmt.Sprintf("JSLess=%v", jsless), func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			job := &database.Job{ID: "j-warn", VideoID: "j-warn", URL: "u", Platform: "youtube", Status: database.StatusQueued}
+			if _, err := db.AddJob(job); err != nil {
+				t.Fatal(err)
+			}
+			stop := errors.New("fake VOD: stop here")
+			origVod := VodStrategy
+			VodStrategy = &fakeStrategy{kind: "vod", answers: []error{stop}}
+			t.Cleanup(func() { VodStrategy = origVod })
+			jobCtx := w.buildJobContext(job)
+			rec := &warnRecorder{captureLogger: &captureLogger{}}
+			jobCtx.Logger = rec
+			info := &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, JSLess: jsless,
+				Formats: []youtube.Format{adaptiveVideo(), adaptiveAudio()}}
+			if err := w.orchestrator.ExecuteWithChat(context.Background(), jobCtx, info, true, nil); !errors.Is(err, stop) {
+				t.Fatalf("ExecuteWithChat = %v, want the fake's stop", err)
+			}
+			n := 0
+			for _, m := range rec.warns {
+				if strings.Contains(m, "some formats may be missing") {
+					n++
+				}
+			}
+			if want := map[bool]int{true: 1, false: 0}[jsless]; n != want {
+				t.Errorf("%d Warn line(s) that formats may be missing, want %d", n, want)
+			}
+		})
+	}
+}
+
+// TestChallengeFreeSeamsAreTheServiceMethods pins the two package seams'
+// production values: the cookieless chain's formats and its HLS master, the
+// youtube.Service methods themselves.
+//
+// Mutant: either seam pointing at another method (its check).
+func TestChallengeFreeSeamsAreTheServiceMethods(t *testing.T) {
+	if reflect.ValueOf(fetchCookielessHls).Pointer() != reflect.ValueOf((*youtube.Service).CookielessHlsManifest).Pointer() {
+		t.Error("fetchCookielessHls is not (*youtube.Service).CookielessHlsManifest")
+	}
+	if reflect.ValueOf(fetchCookielessFormats).Pointer() != reflect.ValueOf((*youtube.Service).CookielessFormats).Pointer() {
+		t.Error("fetchCookielessFormats is not (*youtube.Service).CookielessFormats")
 	}
 }

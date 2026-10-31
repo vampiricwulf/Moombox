@@ -154,6 +154,13 @@ type VideoInfo struct {
 	// cookied hop) ask which it was. Never serialised.
 	StatusProbeEscalation string `json:"-"`
 
+	// JSLess is true when this info came from an extraction that ranked the
+	// JS-less client first because no player JS challenge could be solved —
+	// the cipher sidecar disabled or down (PlayerAPI.SetJSChallengeSolvable)
+	// — as yt-dlp asks _DEFAULT_JSLESS_CLIENTS then. The worker warns, as
+	// upstream does, that formats may be missing. Never serialised.
+	JSLess bool `json:"-"`
+
 	// liveFlagsStated is whether the response this info was parsed from
 	// stated any flag yt-dlp's live_status is decided on
 	// (statusLiveFlagsStated). False is the refused answer that says nothing

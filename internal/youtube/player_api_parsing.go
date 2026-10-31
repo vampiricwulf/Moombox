@@ -395,6 +395,8 @@ type extractionState struct {
 	// rather than an atomic.
 	liveMu sync.Mutex
 	live   playbackLiveFlags
+	// jsl is the extraction's JS-less ranking state (challenge_free.go).
+	jsl jslessState
 }
 
 // withExtractionState opens one extraction's scratch. Called once at the head
