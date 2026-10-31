@@ -18,8 +18,16 @@ func progressive() youtube.Format {
 	return youtube.Format{Itag: 18, URL: "https://p.example/videoplayback?x=3", MimeType: "video/mp4", Width: new(640), Height: new(360)}
 }
 
+// TestSelectDownloadStrategy pins the routing table.
+//
+// Mutant (G6): the live adaptive arm dropped (both "live adaptive split"
+// rows go to vod).
 func TestSelectDownloadStrategy(t *testing.T) {
 	manifestlessFormats := []youtube.Format{adaptiveVideo(), adaptiveAudio()}
+	wholeFileFormats := []youtube.Format{adaptiveVideo(), adaptiveAudio()}
+	wholeFileFormats[0].ContentLength, wholeFileFormats[1].ContentLength = "1048576000", "117000000"
+	liveAdaptiveFormats := []youtube.Format{adaptiveVideo(), adaptiveAudio()}
+	liveAdaptiveFormats[0].TargetDurationSec, liveAdaptiveFormats[1].TargetDurationSec = 2, 2
 
 	tests := []struct {
 		name  string
@@ -59,10 +67,23 @@ func TestSelectDownloadStrategy(t *testing.T) {
 			want: "vod",
 		},
 		{
-			// Non-regression: a genuine finished VOD (StreamVOD) with the same
-			// adaptive-format shape must KEEP using VodStrategy — its URLs serve
-			// whole files, so the &sq path would be wrong.
-			name:  "genuine VOD with adaptive formats stays on VodStrategy",
+			// Non-regression: a genuine finished VOD (StreamVOD) whose
+			// adaptive formats are whole files keeps using VodStrategy.
+			name:  "genuine VOD with whole-file formats stays on VodStrategy",
+			isVod: true,
+			info: &youtube.VideoInfo{
+				StreamStatus: youtube.StreamVOD,
+				Formats:      wholeFileFormats,
+			},
+			want: "vod",
+		},
+		{
+			// Updated deliberately with G6: the shape alone — open-ended,
+			// no contentLength — is still no reason to leave the whole-file
+			// path for a VOD. yt-dlp downloads such a format over https too;
+			// only its marks of a segmented format (targetDurationSec, below)
+			// are.
+			name:  "VOD with open-ended formats that carry neither mark stays on VodStrategy",
 			isVod: true,
 			info: &youtube.VideoInfo{
 				StreamStatus:    youtube.StreamVOD,
@@ -70,6 +91,29 @@ func TestSelectDownloadStrategy(t *testing.T) {
 				Formats:         manifestlessFormats,
 			},
 			want: "vod",
+		},
+		{
+			// G6's belt and braces: TV's post-live DVR answer as it read
+			// before the extraction promoted it — StreamVOD, live adaptive
+			// formats, no manifest. The whole-file GET of these fetched one
+			// fragment.
+			name:  "VOD with a live adaptive split routes to manifestless DASH",
+			isVod: true,
+			info: &youtube.VideoInfo{
+				StreamStatus: youtube.StreamVOD,
+				Formats:      liveAdaptiveFormats,
+			},
+			want: "manifestless_dash",
+		},
+		{
+			name:  "VOD with a live adaptive split prefers manifestless DASH over a manifest",
+			isVod: true,
+			info: &youtube.VideoInfo{
+				StreamStatus:    youtube.StreamVOD,
+				DashManifestURL: "https://manifest.example/dash.mpd",
+				Formats:         liveAdaptiveFormats,
+			},
+			want: "manifestless_dash",
 		},
 		{
 			name:  "not-a-stream uses VodStrategy",

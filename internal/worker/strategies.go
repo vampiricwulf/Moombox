@@ -85,6 +85,18 @@ func selectDownloadStrategy(isVod bool, info *youtube.VideoInfo) (DownloadStrate
 	case isVod && info.StreamStatus == youtube.StreamPostLive &&
 		HasManifestlessDashFormats(info.Formats):
 		return ManifestlessDashStrategy, nil
+	// The same path for a finished stream whatever its status, when its split
+	// pool carries yt-dlp's own per-format mark of a live adaptive format,
+	// targetDurationSec (_video.py:3492-3501 — upstream fetches exactly those
+	// as fragments for a post_live stream, 3595-3599). The extraction calls
+	// such a stream post-live itself now (finishExtraction reads upstream's
+	// isPostLiveDvr), so this is the belt to that brace: a StreamVOD that
+	// reaches here with live adaptive URLs and no contentLength has nothing a
+	// whole-file GET can fetch but a fragment, and on a Resume of an
+	// incomplete_tail job VodStrategy would set the live capture aside before
+	// failing. Ahead of a manifest for the post-live arm's reason.
+	case isVod && hasLiveAdaptiveSplit(info.Formats):
+		return ManifestlessDashStrategy, nil
 	case useDirectVod && len(info.Formats) > 0:
 		return VodStrategy, nil
 	case !isVod && HasManifestlessDashFormats(info.Formats):
@@ -112,6 +124,19 @@ func selectDownloadStrategy(isVod bool, info *youtube.VideoInfo) (DownloadStrate
 	default:
 		return nil, fmt.Errorf("no download strategy available")
 	}
+}
+
+// hasLiveAdaptiveSplit is HasManifestlessDashFormats over the formats that
+// carry targetDurationSec alone: a split video-only + audio-only pair of
+// live adaptive formats, both open-ended (no contentLength), both with a URL.
+func hasLiveAdaptiveSplit(formats []youtube.Format) bool {
+	live := make([]youtube.Format, 0, len(formats))
+	for _, f := range formats {
+		if f.TargetDurationSec > 0 {
+			live = append(live, f)
+		}
+	}
+	return HasManifestlessDashFormats(live)
 }
 
 // vodStrategyT / dashStrategyT / hlsStrategyT — stateless adapters
