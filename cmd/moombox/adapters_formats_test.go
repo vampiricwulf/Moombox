@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -160,6 +161,46 @@ func TestFormatsPayloadKeepsABadgeWhenEveryRenditionIsMarked(t *testing.T) {
 	for _, key := range []string{"bestWebmVideo", "bestOpusAudio"} {
 		if v, ok := best[key]; !ok || v != nil {
 			t.Errorf("bestItags.%s = %v (present %v), want null: no rendition of that kind", key, v, ok)
+		}
+	}
+}
+
+// TestFormatsPayloadDecodesIntoTheTUIPicker holds the TUI's decode to the
+// route's shape. The TUI read the four Best picks as flat fields of
+// FormatsData, where the answer nests them in bestItags, so the decode
+// filled none and the TUI picker never showed a Best note; it reads the
+// nested object now, and the two marks beside each row.
+//
+// Mutants: FormatsData's picks flat again (BestItags zero); the TUI's
+// VideoFormat or AudioFormat without Damaged/Segmented (the marks lost).
+func TestFormatsPayloadDecodesIntoTheTUIPicker(t *testing.T) {
+	info := &youtube.VideoInfo{Formats: []youtube.Format{
+		pickerFixture(313, 3840, 20_000_000, pickerWebm, damagedFormat),
+		pickerFixture(248, 1920, 4_000_000, pickerWebm),
+		pickerFixture(137, 1920, 6_000_000, pickerMp4, otfFormat),
+		pickerFixture(136, 1280, 2_000_000, pickerMp4),
+		pickerFixture(251, 0, 160_000, pickerOpus, otfFormat),
+		pickerFixture(250, 0, 70_000, pickerOpus),
+		pickerFixture(140, 0, 128_000, pickerAac, damagedFormat),
+	}}
+	raw, _ := pickerJSON(t, info)
+	var data tui.FormatsData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("decode into tui.FormatsData: %v", err)
+	}
+	if want := (tui.BestItags{BestWebmVideo: 248, BestMp4Video: 136, BestOpusAudio: 250, BestAacAudio: 140}); data.BestItags != want {
+		t.Errorf("BestItags = %+v, want %+v", data.BestItags, want)
+	}
+	marks := map[int][2]bool{}
+	for _, f := range data.VideoFormats {
+		marks[f.Itag] = [2]bool{f.Damaged, f.Segmented}
+	}
+	for _, f := range data.AudioFormats {
+		marks[f.Itag] = [2]bool{f.Damaged, f.Segmented}
+	}
+	for itag, want := range map[int][2]bool{313: {true, false}, 248: {}, 137: {false, true}, 136: {}, 251: {false, true}, 250: {}, 140: {true, false}} {
+		if marks[itag] != want {
+			t.Errorf("itag %d: [damaged segmented] = %v, want %v", itag, marks[itag], want)
 		}
 	}
 }
