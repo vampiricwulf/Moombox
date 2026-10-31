@@ -128,7 +128,8 @@ var pageCookieNames = map[string]bool{"SOCS": true, "PREF": true}
 //   - one whose expiry has passed (rowExpired's rule: expiry > 0 and before
 //     now). Load keeps expired rows on purpose (see Load), so a cookies.txt
 //     exported a year ago still holds the consent it had then; no browser,
-//     and no request of upstream's, would send it.
+//     and no request of upstream's, would send it — nor, for SOCS, does
+//     GetCookieHeader any longer (GetCookieHeaderFor).
 //
 // Only the two cookies the page decides on are read this way. Every other
 // cookie goes out as GetCookieHeader sends it, google.com's auth names
@@ -138,7 +139,7 @@ var pageCookieNames = map[string]bool{"SOCS": true, "PREF": true}
 // domain, leading dot dropped, is www.youtube.com or a domain it is under
 // (sentToWWWYouTube, the rule SOCS is admitted on).
 func youtubeSees(e cookieEntry, now int64) bool {
-	return sentToWWWYouTube(e.domain) && !(e.expiry > 0 && e.expiry < now)
+	return sentToWWWYouTube(e.domain) && !e.expiredAt(now)
 }
 
 // applyPageCookies applies the consent (unless signedIn) and the language to

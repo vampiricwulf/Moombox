@@ -76,6 +76,10 @@ type cookieEntry struct {
 	expiry int64
 }
 
+// expiredAt reports whether e's expiry has passed by now, a unix timestamp:
+// rowExpired's rule, expiry > 0 and before now.
+func (e cookieEntry) expiredAt(now int64) bool { return e.expiry > 0 && e.expiry < now }
+
 // CookieJar parses and manages cookies from a Netscape-format cookie file.
 //
 // One FILE, two in-memory jars. cookies.txt stays a single store holding every
@@ -167,10 +171,15 @@ var essentialYouTubeCookies = map[string]bool{
 // property since 8cb08028f, #13014), http.cookiejar's domain-matched read
 // for that host (YoutubeDLCookieJar.get_cookie_header, yt_dlp/cookies.py:
 // 1405-1409), which a google.com cookie does not domain-match. The page
-// header helpers already read SOCS that way (youtubeSees); admission now
-// agrees with them, so the Innertube header and the page header hold the
-// same consent. A host www is not under (music.youtube.com) is refused for
-// the same reason: upstream's www.youtube.com read does not see it either.
+// header helpers already read SOCS's domain that way (youtubeSees);
+// admission now applies the same domain rule, so neither header carries a
+// consent scoped where www.youtube.com is not sent. (The expiry half of that
+// read is the send side's: GetCookieHeaderFor leaves an expired SOCS out.
+// The headers still differ by design where the jar holds no SOCS upstream
+// would read: the page header puts CAI in its place, applyPageCookies, and
+// the Innertube header sends none.) A host www is not under
+// (music.youtube.com) is refused for the same reason: upstream's
+// www.youtube.com read does not see it either.
 var youtubeOnlyEssentialCookies = map[string]bool{"SOCS": true}
 
 // admitsEssentialYouTubeName reports whether a row named name, scoped to
@@ -865,13 +874,34 @@ func sanitizeCookieValue(v string) string {
 // SAPISIDHASH flows where an attacker-controlled reshuffle makes HTTP-level
 // debugging painful and occasionally trips YouTube endpoints that inspect
 // __Secure-* ordering. Alphabetical is simple and deterministic.
+//
+// The YouTube header leaves out a youtube-only essential cookie
+// (youtubeOnlyEssentialCookies: SOCS) whose expiry has passed. yt-dlp never
+// sends an expired cookie: YoutubeDLCookieJar.get_cookie_header
+// (yt_dlp/cookies.py:1405-1409 at b77c9304e) goes through http.cookiejar's
+// add_cookie_header, whose policy refuses one (return_ok_expires), though
+// the jar loads it (load's ignore_expires=True, cookies.py:1354). So an
+// Innertube call carried a consent upstream's would not — a cookies.txt
+// exported a year ago still holds the SOCS it had then — and the page
+// header, which reads SOCS as upstream does (youtubeSees), did not carry it;
+// now neither does. Only SOCS: Load keeps expired rows and this header
+// sends them for every other name by contract (see Load — expiry is a
+// diagnostic there, ExpiredAuthCookiesFor, not a gate), and an expired
+// credential is the credential-loss signal that contract exists for, not a
+// consent upstream's read would leave out. The domain half of upstream's
+// read is admission's (admitsEssentialYouTubeName), so every SOCS the jar
+// holds is one www.youtube.com is sent.
 func (j *CookieJar) GetCookieHeaderFor(p Platform) string {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 
 	entries := j.jarFor(p)
+	now := time.Now().Unix()
 	names := make([]string, 0, len(entries))
-	for name := range entries {
+	for name, e := range entries {
+		if p == PlatformYouTube && youtubeOnlyEssentialCookies[name] && e.expiredAt(now) {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)

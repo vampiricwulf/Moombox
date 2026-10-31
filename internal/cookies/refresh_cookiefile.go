@@ -894,10 +894,20 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 	// 3. Otherwise only a value refresh may cross domains — within one platform,
 	//    and only when a single non-deleting update is in play so the choice is
 	//    unambiguous.
+	//
+	//    A youtube-only essential name (youtubeOnlyEssentialCookies: SOCS) does
+	//    not cross between the two sides of www.youtube.com's read: it is a
+	//    consent each site keeps for itself, not a session value the platform
+	//    shares, so google.com's SOCS never refreshes YouTube's row — which
+	//    Load would then admit as YouTube's consent, the leak
+	//    admitsEssentialYouTubeName closes — nor YouTube's google.com's. An
+	//    unscoped update stands on its declared origin's side. Unreachable while
+	//    originYouTube is the only caller and YouTube sets no google.com SOCS;
+	//    kept for the day an originGoogle caller arrives.
 	var only cookieUpdateKey
 	refreshes := 0
 	for _, k := range candidates {
-		if !updates[k].Delete && sameCookiePlatform(k.Domain, rowDomain, origin) {
+		if !updates[k].Delete && sameCookiePlatform(k.Domain, rowDomain, origin) && !crossesConsentSides(k, rowDomain, origin) {
 			only, refreshes = k, refreshes+1
 		}
 	}
@@ -905,6 +915,21 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 		return only, updates[only], true
 	}
 	return cookieUpdateKey{}, cookieUpdate{}, false
+}
+
+// crossesConsentSides reports whether update k, a youtube-only essential name,
+// would refresh a row on the other side of www.youtube.com's read
+// (sentToWWWYouTube) from its own — an unscoped update's side being its
+// declared origin's. Always false for every other name.
+func crossesConsentSides(k cookieUpdateKey, rowDomain string, origin cookieOrigin) bool {
+	if !youtubeOnlyEssentialCookies[k.Name] {
+		return false
+	}
+	updateDomain := k.Domain
+	if updateDomain == "" {
+		updateDomain = string(origin)
+	}
+	return sentToWWWYouTube(updateDomain) != sentToWWWYouTube(rowDomain)
 }
 
 // sameCookiePlatform reports whether an update's domain and a file row's domain
