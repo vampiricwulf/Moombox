@@ -453,6 +453,22 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		}
 		pl := result.Playlist
 
+		// An encrypted playlist is refused before anything is written: the
+		// segments under its key are ciphertext, written as fetched, and the
+		// archive would fail only at mux time, if at all (ErrDRMProtected).
+		// Here, ahead of the VOD hand-off below, so runHlsVodParallel never
+		// sees one either; on any round, so a playlist that turns encrypted
+		// mid-stream stops there with the resume sidecar this loop's exit
+		// saves. yt-dlp decrypts AES-128 natively and hands other methods to
+		// ffmpeg (downloader/hls.py, can_download); no platform Moombox
+		// records encrypts HLS today, so a refusal with a clear error is the
+		// whole port.
+		if pl.Encryption != nil {
+			err := hlsEncryptionError(pl.Encryption)
+			d.logger.Error("[Downloader] Refusing an encrypted HLS playlist", "error", err)
+			return err
+		}
+
 		// consecutiveErrors counts playlist fetch/parse failures, so it resets
 		// HERE — the playlist round-trip just succeeded — not at the bottom of
 		// the iteration. The old end-of-iteration reset was skipped by the
