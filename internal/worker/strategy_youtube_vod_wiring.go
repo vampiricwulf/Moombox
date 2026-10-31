@@ -61,16 +61,32 @@ var vodRefreshMinter = func(p *bgutils.PotProvider) gvsTokenMinter { return p }
 var errNoGvsMinter = errors.New("no PO token provider")
 
 // takesNoWebPo reports whether a URL from source must never carry a WebPO
-// GVS token, whatever a refusal suggests: android_vr's and its DASH
-// fallback's, whose policy upstream is required-unless-player-token and to
-// which upstream never sends a WebPO — one on an android_vr URL is the
-// 2026-08-15 403 cause the AuthLevel block names. Such a stream reaches the
-// whole-file path only as a missing_pot copy. The token fallback skips its
-// first step for it, and a token minted for it is for the token-carrying
-// copy alone: the engine cannot clear a token once it holds one, so one left
-// on the stream's own URL would ride every request after.
+// GVS token, whatever a refusal suggests: every URL does but one from a
+// client upstream binds a WebPO to. Those are pot/utils.py's WEBPO_CLIENTS —
+// here TVHTML5 (tv_public, tv_auth), WEB_EMBEDDED_PLAYER (web_embedded) and
+// the web family (watch_page, web, web_safari, web_creator) — and for any
+// other client get_webpo_content_binding answers (None, None), so upstream
+// sends it no WebPO, fetch_pot=always included: visionos, and android_vr and
+// its DASH fallback, a WebPO on whose URLs is the 2026-08-15 403 cause the
+// AuthLevel block names. An empty or unrecognised label takes none either,
+// as GvsTokenRequired reads one: a URL nobody can attribute to a WebPO
+// client gets no WebPO.
+//
+// Such a URL reaches the whole-file path as a missing_pot copy, or as the
+// token-free copy a refresh finds of a tv or web_embedded stream whose own
+// client no longer returns the file (sameVodFile reads a web-family winner's
+// TokenFreeAlternate, and the cookieless chain answers nothing else). The
+// token fallback never puts a token on one: it skips its first step for a
+// refused URL of such a client, and a token minted for a stream whose fresh
+// copy is one is for the token-carrying copy alone (refreshVodURL). The
+// engine cannot clear a token once it holds one (SetPoToken ignores ""), so
+// one left on such a URL would ride every request after.
 func takesNoWebPo(source string) bool {
-	return source == "android_vr" || source == "android_vr_dash_fallback"
+	switch source {
+	case "tv_public", "tv_auth", "web_embedded", "watch_page", "web", "web_safari", "web_creator":
+		return false
+	}
+	return true
 }
 
 // vodRefreshState is what one whole-file stream's refresh remembers between
@@ -95,6 +111,13 @@ type vodRefreshState struct {
 	// resolved for served — and issued when it was handed out.
 	url    string
 	issued time.Time
+	// urlSource is the client url came from (Format.Source): served's at
+	// first, and each hand-out's own after. A refresh may hand out another
+	// client's copy of the same class — a tv_auth stream's fresh token-free
+	// copy can be android_vr's — without the stream changing class, and
+	// whether a token may ride the current URL is that client's question
+	// (takesNoWebPo), not served's.
+	urlSource string
 	// adEnd is when that URL's own pre-roll ad is over — its format's
 	// AvailableAt, as the response it came from stamped it — or zero when that
 	// response's verdict says nothing waits (adWindowEnd).
@@ -112,7 +135,7 @@ type vodRefreshState struct {
 // info is the extraction served came from, whose verdict says whether its ad
 // is waited for — as DownloadVod waited on it.
 func newVodRefreshState(info *youtube.VideoInfo, served youtube.Format, url string) *vodRefreshState {
-	return &vodRefreshState{served: served, url: url, issued: vodRefreshNow(), adEnd: adWindowEnd(info, &served)}
+	return &vodRefreshState{served: served, url: url, issued: vodRefreshNow(), urlSource: served.Source, adEnd: adWindowEnd(info, &served)}
 }
 
 // adWindowEnd is when f's pre-roll ad is over, as a download from info waits
@@ -145,11 +168,13 @@ func adWindowEnd(info *youtube.VideoInfo, f *youtube.Format) time.Time {
 //
 // Anything else is early: the next step, 1 and then 2, and 2 again for a
 // stream that found no token-carrying copy to move to the last time. A
-// stream whose URLs take no WebPO (takesNoWebPo) goes to 2 at once.
+// refused URL from a client that takes no WebPO (takesNoWebPo of
+// st.urlSource) goes to 2 at once: step 1 would put the token on another
+// URL of that client.
 func (st *vodRefreshState) fallbackStep(job *JobContext, tag string, now time.Time) int {
 	if now.Before(st.adEnd) {
 		job.Logger.Info("[POT] VOD URL refresh: refused inside its own pre-roll ad — a fresh URL, not the token fallback",
-			"jobID", job.Job.ID, "tag", tag, "source", st.served.Source, "adLeft", st.adEnd.Sub(now).Round(time.Second).String())
+			"jobID", job.Job.ID, "tag", tag, "source", st.urlSource, "adLeft", st.adEnd.Sub(now).Round(time.Second).String())
 		return 0
 	}
 	evidence := []any{"age", now.Sub(st.issued).Round(time.Second).String()}
@@ -162,11 +187,11 @@ func (st *vodRefreshState) fallbackStep(job *JobContext, tag string, now time.Ti
 		return 0
 	}
 	step := min(st.step+1, 2)
-	if takesNoWebPo(st.served.Source) {
+	if takesNoWebPo(st.urlSource) {
 		step = 2
 	}
 	job.Logger.Info("[POT] VOD URL refresh: a token-free URL was refused long before its expiry — falling back to a GVS token",
-		append([]any{"jobID", job.Job.ID, "tag", tag, "step", step, "source", st.served.Source}, evidence...)...)
+		append([]any{"jobID", job.Job.ID, "tag", tag, "step", step, "source", st.urlSource}, evidence...)...)
 	return step
 }
 
@@ -192,7 +217,7 @@ func (st *vodRefreshState) handOut(info *youtube.VideoInfo, f *youtube.Format, u
 		st.served.TokenFreeAlternate, st.served.TokenAlternate = nil, nil
 	}
 	st.noteToken(token, step)
-	st.url, st.issued, st.adEnd = url, vodRefreshNow(), adWindowEnd(info, f)
+	st.url, st.issued, st.urlSource, st.adEnd = url, vodRefreshNow(), f.Source, adWindowEnd(info, f)
 }
 
 // vodURLRefresh builds a whole-file downloader's OnCredentialRefresh for the
@@ -238,9 +263,15 @@ func vodURLRefresh(ctx context.Context, job *JobContext, videoInfo *youtube.Vide
 //     token-requiring one. With no such copy it is step 1's shape again, and
 //     an Info line says there is none.
 //
-// A stream whose own URLs take no WebPO — an android_vr missing_pot copy
-// (takesNoWebPo) — skips step 1, and with no copy to move to it is refreshed
-// bare: the token was for the copy alone.
+// No token ever rides a URL from a client that takes no WebPO (takesNoWebPo:
+// visionos, android_vr). A refused URL of one skips step 1, and a fresh
+// token-free copy of one — a missing_pot copy's, or the one a tv stream's
+// refresh finds behind a web-family winner once tv no longer returns the
+// file — is passed over for the token-carrying copy whenever a token would
+// ride it: a fresh one, or the one a tokenised stream already holds, which
+// the engine would send on it unasked. With no copy to move to, a stream not
+// yet tokenised is refreshed bare — the token was for the copy alone — and a
+// tokenised one keeps its current URL, the one URL it can still send.
 //
 // The engine asks at most directRefreshAttempts (2) refreshes per refused
 // request, so a size probe refused at once runs exactly those two steps.
@@ -284,10 +315,14 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, st *v
 	}
 	// keep is every exit that hands out no fresh URL: the current URL stays,
 	// and the token rides it — step 1's shape, for a token-free stream — save
-	// on a stream whose URLs take no WebPO, for which a token was minted for
-	// the copy alone.
+	// on a URL from a client that takes no WebPO (st.urlSource), for which a
+	// token was minted for the copy alone. A fresh response's ad wait cut
+	// short by the job's cancel ends here too and still hands the token back,
+	// as a token-requiring stream's refresh always has: a "refreshed" line in
+	// a cancelled job's log, and nothing more — the download ends on the
+	// cancel either way.
 	keep := func() (string, string) {
-		if bare && takesNoWebPo(served.Source) {
+		if bare && takesNoWebPo(st.urlSource) {
 			return "", ""
 		}
 		st.noteToken(poToken, step)
@@ -326,14 +361,7 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, st *v
 	}
 	var f *youtube.Format
 	if step == 2 {
-		if f = vodFileCopy(fresh.Formats, &served, true); f == nil && takesNoWebPo(served.Source) {
-			job.Logger.Info("[POT] VOD URL refresh: no token-carrying copy of the same file — its own URLs take no WebPO, so they are refreshed bare",
-				"jobID", job.Job.ID, "tag", tag, "itag", served.Itag, "clen", served.ContentLength, "source", served.Source)
-			poToken, step = "", 0
-		} else if f == nil {
-			job.Logger.Info("[POT] VOD URL refresh: no token-carrying copy of the same file — the token rides a token-free URL again",
-				"jobID", job.Job.ID, "tag", tag, "itag", served.Itag, "clen", served.ContentLength, "source", served.Source)
-		}
+		f = vodFileCopy(fresh.Formats, &served, true)
 	}
 	if f == nil {
 		f = sameVodFile(fresh.Formats, &served)
@@ -360,6 +388,32 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, st *v
 		job.Logger.Warn("[POT] VOD URL refresh: the re-extraction serves no format for the same file — keeping the current URL",
 			"jobID", job.Job.ID, "tag", tag, "itag", served.Itag, "clen", served.ContentLength, "source", served.Source)
 		return keep()
+	}
+	// The token-free copy found may be from a client that takes no WebPO —
+	// a missing_pot copy's own, or android_vr's behind a web-family winner
+	// for a tv stream whose client no longer returns the file — whatever
+	// client the stream was built from. A token that would ride it, minted
+	// for a step or already held by a tokenised stream (the engine sends
+	// that one unasked), goes on the token-carrying copy instead; with none,
+	// a fresh token is dropped and the copy goes out bare, as it always did,
+	// while a tokenised stream keeps the URL it has.
+	if bare && takesNoWebPo(f.Source) && (poToken != "" || st.tokenised) {
+		if c := vodFileCopy(fresh.Formats, &served, true); c != nil {
+			job.Logger.Info("[POT] VOD URL refresh: the same file's token-free copy is from a client that takes no WebPO — moving onto its token-carrying copy",
+				"jobID", job.Job.ID, "tag", tag, "itag", served.Itag, "clen", served.ContentLength, "source", f.Source)
+			f, step = c, 2
+		} else if st.tokenised {
+			job.Logger.Warn("[POT] VOD URL refresh: the same file's only fresh copy is from a client that takes no WebPO, and a token rides this stream — keeping the current URL",
+				"jobID", job.Job.ID, "tag", tag, "itag", served.Itag, "clen", served.ContentLength, "source", f.Source)
+			return keep()
+		} else {
+			job.Logger.Info("[POT] VOD URL refresh: no token-carrying copy of the same file — its token-free copy is from a client that takes no WebPO, so it is refreshed bare",
+				"jobID", job.Job.ID, "tag", tag, "itag", served.Itag, "clen", served.ContentLength, "source", f.Source)
+			poToken, step = "", 0
+		}
+	} else if step == 2 && !youtube.GvsTokenRequired(f.Source) {
+		job.Logger.Info("[POT] VOD URL refresh: no token-carrying copy of the same file — the token rides a token-free URL again",
+			"jobID", job.Job.ID, "tag", tag, "itag", served.Itag, "clen", served.ContentLength, "source", served.Source)
 	}
 	if fresh.PlayerURL != "" {
 		playerURL = fresh.PlayerURL

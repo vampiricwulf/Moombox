@@ -377,53 +377,59 @@ func TestVodTokenFallbackSparesATokenRequiringStream(t *testing.T) {
 	}
 }
 
-// TestVodTokenFallbackPutsNoWebPoOnAndroidVR: an android_vr URL takes no
-// WebPO — one is the 2026-08-15 403 cause — and the engine could never take
-// one off again, so a missing_pot android_vr stream refused early skips step
-// 1: it moves straight onto the token-carrying copy of its file or, with
-// none, is refreshed bare. A refresh whose re-fetch fails leaves no token on
-// its current URL, where a tv_auth stream's leaves step 1's token on the URL
-// it already has.
+// TestVodTokenFallbackPutsNoWebPoOnANonWebPoClient: a URL from a client
+// upstream binds no WebPO to — visionos and android_vr, outside pot/utils.py's
+// WEBPO_CLIENTS — never carries one, and the engine could never take one off
+// again (an android_vr URL with one is the 2026-08-15 403 cause). So a
+// missing_pot stream of either client refused early skips step 1: it moves
+// straight onto the token-carrying copy of its file or, with none, is
+// refreshed bare. A refresh whose re-fetch fails leaves no token on its
+// current URL, where a tv_auth stream's leaves step 1's token on the URL it
+// already has.
 //
-// Mutant: dropping the takesNoWebPo jump in fallbackStep — the copy row runs
-// step 1 and hands out an android_vr URL with a token. Mutant: dropping the
-// no-copy branch's token drop — the no-copy row hands out the token. Mutant:
-// keep() handing out the token whatever the client — the failed re-fetch
-// row's android_vr stream gets one.
-func TestVodTokenFallbackPutsNoWebPoOnAndroidVR(t *testing.T) {
-	avr := func(gen int, exp time.Time) youtube.Format {
-		return withLevel(youtube.Format{Itag: 137, URL: fallbackURL("avr", gen, exp), ContentLength: "1000", Source: "android_vr"}, youtube.AuthLevelAndroidVR)
+// Mutant: dropping the takesNoWebPo jump in fallbackStep — the copy rows'
+// fallback line says step 1 (the hand-out check still moves them onto the
+// copy, TestVodTokenFallbackJudgesTheURLItHandsOut). Mutant: takesNoWebPo
+// back to android_vr alone — every visionos row puts a token on a visionos
+// URL. Mutant: keep() handing out the token whatever the client — the failed
+// re-fetch rows' visionos and android_vr streams get one.
+func TestVodTokenFallbackPutsNoWebPoOnANonWebPoClient(t *testing.T) {
+	for _, c := range []struct{ source, dir string }{{"android_vr", "avr"}, {"visionos", "vos"}} {
+		own := func(gen int, exp time.Time) youtube.Format {
+			level := youtube.AuthLevelAndroidVR
+			if c.source == "visionos" {
+				level = youtube.AuthLevelVisionOS
+			}
+			return withLevel(youtube.Format{Itag: 137, URL: fallbackURL(c.dir, gen, exp), ContentLength: "1000", Source: c.source}, level)
+		}
+		t.Run(c.source+", onto the token-carrying copy at once", func(t *testing.T) {
+			r := newFallbackRig(t)
+			r.source = c.source
+			r.pool = func(gen int, exp time.Time) []youtube.Format {
+				return youtube.MergeFormatPool(context.Background(), nil, []youtube.Format{webCreatorCopy(gen, exp), own(gen, exp)})
+			}
+			r.start(fallbackURL(c.dir, 0, r.now.Add(5*time.Hour)), time.Time{}, false)
+			r.expect(fallbackURL("wc", 1, r.now.Add(6*time.Hour)), "tok1", 2, "web_creator")
+			if l := r.fallbackLines(); len(l) != 1 || l[0]["step"] != 2 || l[0]["source"] != c.source {
+				t.Errorf("fallback lines = %v, want one, step 2, for the %s stream", l, c.source)
+			}
+		})
+		t.Run(c.source+", no copy: refreshed bare", func(t *testing.T) {
+			r := newFallbackRig(t)
+			r.source = c.source
+			r.pool = func(gen int, exp time.Time) []youtube.Format { return []youtube.Format{own(gen, exp)} }
+			r.start(fallbackURL(c.dir, 0, r.now.Add(5*time.Hour)), time.Time{}, false)
+			r.expect(fallbackURL(c.dir, 1, r.now.Add(6*time.Hour)), "", 0, c.source)
+			r.expect(fallbackURL(c.dir, 2, r.now.Add(6*time.Hour)), "", 0, c.source)
+			if l := logLine(r.logs, noCopyNoWebPoMsg); l == nil || l["source"] != c.source {
+				t.Errorf("no-copy line = %v, want one for the %s copy", l, c.source)
+			}
+		})
 	}
-	wc := func(gen int, exp time.Time) youtube.Format {
-		return withLevel(youtube.Format{Itag: 137, URL: fallbackURL("wc", gen, exp), ContentLength: "1000", Source: "web_creator"}, youtube.AuthLevelWebCreator)
-	}
-	t.Run("onto the token-carrying copy at once", func(t *testing.T) {
-		r := newFallbackRig(t)
-		r.source = "android_vr"
-		r.pool = func(gen int, exp time.Time) []youtube.Format {
-			return youtube.MergeFormatPool(context.Background(), nil, []youtube.Format{wc(gen, exp), avr(gen, exp)})
-		}
-		r.start(fallbackURL("avr", 0, r.now.Add(5*time.Hour)), time.Time{}, false)
-		r.expect(fallbackURL("wc", 1, r.now.Add(6*time.Hour)), "tok1", 2, "web_creator")
-		if l := r.fallbackLines(); len(l) != 1 || l[0]["step"] != 2 || l[0]["source"] != "android_vr" {
-			t.Errorf("fallback lines = %v, want one, step 2, for the android_vr stream", l)
-		}
-	})
-	t.Run("no copy: refreshed bare", func(t *testing.T) {
-		r := newFallbackRig(t)
-		r.source = "android_vr"
-		r.pool = func(gen int, exp time.Time) []youtube.Format { return []youtube.Format{avr(gen, exp)} }
-		r.start(fallbackURL("avr", 0, r.now.Add(5*time.Hour)), time.Time{}, false)
-		r.expect(fallbackURL("avr", 1, r.now.Add(6*time.Hour)), "", 0, "android_vr")
-		r.expect(fallbackURL("avr", 2, r.now.Add(6*time.Hour)), "", 0, "android_vr")
-		if l := logLine(r.logs, "[POT] VOD URL refresh: no token-carrying copy of the same file — its own URLs take no WebPO"); l == nil || l["source"] != "android_vr" {
-			t.Errorf("no-copy line = %v, want one for the android_vr stream", l)
-		}
-	})
 	for _, tc := range []struct {
 		source, dir string
 		wantToken   string
-	}{{"android_vr", "avr", ""}, {"tv_auth", "tv", "tok1"}} {
+	}{{"android_vr", "avr", ""}, {"visionos", "vos", ""}, {"tv_auth", "tv", "tok1"}} {
 		t.Run("the re-fetch fails, "+tc.source, func(t *testing.T) {
 			r := newFallbackRig(t)
 			r.source = tc.source
@@ -431,6 +437,109 @@ func TestVodTokenFallbackPutsNoWebPoOnAndroidVR(t *testing.T) {
 			r.start(fallbackURL(tc.dir, 0, r.now.Add(5*time.Hour)), time.Time{}, false)
 			if u, tok := r.refresh(); u != "" || tok != tc.wantToken {
 				t.Errorf("refresh = (%q, %q), want (\"\", %q) — the current URL kept", u, tok, tc.wantToken)
+			}
+		})
+	}
+}
+
+// webCreatorCopy is web_creator's copy of the itag-137 file: a members-only
+// fallback's, which outranks the cookieless tier and carries its copy as a
+// token-free shadow.
+func webCreatorCopy(gen int, exp time.Time) youtube.Format {
+	return withLevel(youtube.Format{Itag: 137, URL: fallbackURL("wc", gen, exp), ContentLength: "1000", Source: "web_creator"}, youtube.AuthLevelWebCreator)
+}
+
+// androidVRCopy is android_vr's copy of the itag-137 file.
+func androidVRCopy(gen int, exp time.Time) youtube.Format {
+	return withLevel(youtube.Format{Itag: 137, URL: fallbackURL("avr", gen, exp), ContentLength: "1000", Source: "android_vr"}, youtube.AuthLevelAndroidVR)
+}
+
+const noCopyNoWebPoMsg = "[POT] VOD URL refresh: no token-carrying copy of the same file — its token-free copy is from a client that takes no WebPO, so it is refreshed bare"
+
+// TestVodTokenFallbackJudgesTheURLItHandsOut: whether a token may ride a URL
+// is the question of the client that URL comes from, not of the client the
+// stream was built from. A tv_auth stream's fresh token-free copy can be
+// android_vr's — behind a web_creator winner once tv no longer returns the
+// file, or from the cookieless chain — and the stream stays token-free
+// across that hand-out, so the fallback's token must not ride it: step 1
+// becomes the move onto the token-carrying copy, or, with none, the
+// android_vr copy goes out bare as it always did. A refused android_vr URL
+// then skips step 1 whatever client the stream was built from, and a failed
+// re-fetch leaves no token on it. A tokenised stream — one whose tv_auth URLs
+// took step 1's token — holds a token the engine sends on every URL, so it
+// is never handed an android_vr URL at all: it moves onto the token-carrying
+// copy, or keeps the URL it has, even when the fresh mint fails.
+//
+// Mutant: dropping the hand-out check from refreshVodURL — the web_creator
+// row hands out the android_vr URL with tok1, the cookieless row hands out
+// tokens on android_vr URLs, and the tokenised rows hand out the android_vr
+// URL. Mutant: the check without its tokenised clause (only a fresh token
+// counts) — the failed-mint row hands out the android_vr URL. Mutant: the
+// tokenised branch dropped (no copy always means bare) — the no-copy
+// tokenised row hands out the android_vr URL. Mutant: keep() and
+// fallbackStep reading st.served.Source instead of st.urlSource — the
+// cookieless row's refusals run step 1 and its failed re-fetch hands out a
+// token. Mutant: handOut not recording st.urlSource — the same.
+func TestVodTokenFallbackJudgesTheURLItHandsOut(t *testing.T) {
+	t.Run("android_vr behind web_creator: onto the token-carrying copy", func(t *testing.T) {
+		r := newFallbackRig(t)
+		r.pool = func(gen int, exp time.Time) []youtube.Format {
+			return youtube.MergeFormatPool(context.Background(), nil, []youtube.Format{webCreatorCopy(gen, exp), androidVRCopy(gen, exp)})
+		}
+		r.start(fallbackURL("tv", 0, r.now.Add(5*time.Hour)), time.Time{}, false)
+		r.expect(fallbackURL("wc", 1, r.now.Add(6*time.Hour)), "tok1", 2, "web_creator")
+		if l := logLine(r.logs, "[POT] VOD URL refresh: the same file's token-free copy is from a client that takes no WebPO"); l == nil || l["source"] != "android_vr" {
+			t.Errorf("move line = %v, want one naming the android_vr copy", l)
+		}
+	})
+	t.Run("android_vr from the cookieless chain: bare", func(t *testing.T) {
+		r := newFallbackRig(t)
+		avr := fallbackURL("avr", 9, r.now.Add(6*time.Hour))
+		fakeCookielessCtx(t, []youtube.Format{{Itag: 137, URL: avr, ContentLength: "1000", Source: "android_vr"}}, nil)
+		r.pool = func(int, time.Time) []youtube.Format { return nil }
+		r.start(fallbackURL("tv", 0, r.now.Add(5*time.Hour)), time.Time{}, false)
+		r.expect(avr, "", 0, "android_vr")
+		r.now = r.now.Add(time.Minute)
+		r.expect(avr, "", 0, "android_vr")
+		r.failFetch = true
+		if u, tok := r.refresh(); u != "" || tok != "" {
+			t.Errorf("refresh with the re-fetch failing = (%q, %q), want nothing — the current URL is android_vr's", u, tok)
+		}
+		if l := potLines(r.logs, noCopyNoWebPoMsg); len(l) != 2 || l[0]["source"] != "android_vr" {
+			t.Errorf("no-copy lines = %v, want two naming the android_vr copy", l)
+		}
+		lines := r.fallbackLines()
+		if len(lines) != 3 || lines[0]["step"] != 1 || lines[0]["source"] != "tv_auth" || lines[1]["step"] != 2 || lines[1]["source"] != "android_vr" || lines[2]["step"] != 2 {
+			t.Errorf("fallback lines = %v, want step 1 for the tv_auth URL, then step 2 for each android_vr one", lines)
+		}
+	})
+	for _, tc := range []struct {
+		name      string
+		pool      func(gen int, exp time.Time) []youtube.Format
+		mintErr   error
+		wantURL   func(r *fallbackRig) string
+		wantToken string
+	}{
+		{"tokenised, android_vr behind web_creator: onto the token-carrying copy",
+			func(gen int, exp time.Time) []youtube.Format {
+				return youtube.MergeFormatPool(context.Background(), nil, []youtube.Format{webCreatorCopy(gen, exp), androidVRCopy(gen, exp)})
+			}, nil, func(r *fallbackRig) string { return fallbackURL("wc", 2, r.now.Add(6*time.Hour)) }, "tok2"},
+		{"tokenised, only android_vr: the current URL kept",
+			func(gen int, exp time.Time) []youtube.Format { return []youtube.Format{androidVRCopy(gen, exp)} },
+			nil, func(*fallbackRig) string { return "" }, "tok2"},
+		{"tokenised, only android_vr, the mint failing: the current URL kept",
+			func(gen int, exp time.Time) []youtube.Format { return []youtube.Format{androidVRCopy(gen, exp)} },
+			errors.New("sidecar down"), func(*fallbackRig) string { return "" }, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newFallbackRig(t)
+			r.start(fallbackURL("tv", 0, r.now.Add(5*time.Hour)), time.Time{}, false)
+			r.expect(fallbackURL("tv", 1, r.now.Add(6*time.Hour)), "tok1", 1, "tv_auth")
+			// tv1's expiry, with tv gone from the fresh pool.
+			r.now = r.now.Add(6*time.Hour - 15*time.Minute)
+			r.pool, r.mintErr = tc.pool, tc.mintErr
+			if u, tok := r.refresh(); u != tc.wantURL(r) || tok != tc.wantToken {
+				t.Errorf("refresh = (%q, %q), want (%q, %q)", u, tok, tc.wantURL(r), tc.wantToken)
 			}
 		})
 	}

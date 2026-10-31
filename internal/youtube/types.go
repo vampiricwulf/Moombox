@@ -535,15 +535,17 @@ type YtcfgData struct {
 // with a URL) as the winner's TokenAlternate. It is for the VOD URL
 // refresh's token fallback: a token-free stream whose URLs are refused long
 // before their expiry is, after a fresh token-free URL with a minted token
-// has been refused too, moved onto this copy of the same file with that
-// token (the worker's refreshVodURL). That is the field report's shape: a
-// signed-in account without Premium, web_embedded holding no copy of the
-// VOD, and every tv_auth URL refused at its first request, while a Premium
-// account downloaded the same video. yt-dlp has no such copy — it
-// downloads its first-seen one — but its web family's GVS policy is
-// not_required_for_premium, so a Premium subscriber, who never sees the
-// refusal, is exactly the account upstream exempts. A winner carries one
-// shadow or the other, never both, and the copy never changes which wins.
+// has been refused too — or at once, when its fresh token-free copy is
+// visionos's or android_vr's, URLs that take no WebPO — moved onto this
+// copy of the same file with that token (the worker's refreshVodURL). That
+// is the field report's shape: a signed-in account without Premium,
+// web_embedded holding no copy of the VOD, and every tv_auth URL refused at
+// its first request, while a Premium account downloaded the same video.
+// yt-dlp has no such copy — it downloads its first-seen one — but its web
+// family's GVS policy is not_required_for_premium, so a Premium subscriber,
+// who never sees the refusal, is exactly the account upstream exempts. A
+// winner carries one shadow or the other, never both, and the copy never
+// changes which wins.
 const (
 	// Public cascade: tv leads, as in _DEFAULT_CLIENTS. Its URLs need no GVS
 	// token (GvsTokenRequired is false).
@@ -574,10 +576,11 @@ const (
 // VOD direct path, the live DASH/HLS/manifest-free strategies and the 403
 // re-mint all attach a token iff it answers true — save one deliberate
 // exception, the whole-file VOD refresh's token fallback, which tokenises a
-// token-free stream (never an android_vr one) once its URLs are refused long
-// before their expiry, and may move it onto its TokenAlternate (the worker's
-// refreshVodURL). It mirrors the answer
-// yt-dlp's per-client GVS_PO_TOKEN_POLICY gives
+// token-free stream once its URLs are refused long before their expiry, and
+// may move it onto its TokenAlternate (the worker's refreshVodURL) — never
+// putting a token on a visionos or android_vr URL, clients upstream binds no
+// WebPO to (pot/utils.py's WEBPO_CLIENTS; the worker's takesNoWebPo). It
+// mirrors the answer yt-dlp's per-client GVS_PO_TOKEN_POLICY gives
 // (references/yt-dlp/yt_dlp/extractor/youtube/_base.py, WEB_PO_TOKEN_POLICIES
 // and the per-client entries), label by label:
 //
@@ -590,7 +593,8 @@ const (
 //   - tv_auth, tv_public, web_embedded: false. tv and web_embedded have no
 //     GVS_PO_TOKEN_POLICY entry upstream, so the default applies
 //     (required=False) and yt-dlp fetches no GVS token for them.
-//   - visionos: false, for the same reason — no policy entry.
+//   - visionos: false, for the same reason — no policy entry — and it is
+//     not a WEBPO client either, so upstream never sends it a WebPO.
 //   - android_vr, android_vr_dash_fallback: false. android_vr's policy is
 //     required-unless-player-token and upstream attaches no WebPO to it (it
 //     is not a WEBPO client); a WebPO on an android_vr URL is the 2026-08-15
