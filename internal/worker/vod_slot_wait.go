@@ -130,9 +130,13 @@ func (w *DownloadWorker) refreshVodInfo(ctx context.Context, job *database.Job) 
 // an expiry the download then runs into is the whole-file and post-live
 // downloaders' to refresh (OnCredentialRefresh), as one partway through any
 // long transfer is. So does a re-extraction YouTube rate-limited
-// (ErrRateLimited), the one verdict that passes. Any other verdict on the
-// video (vodRefreshVerdict), a definitive refusal, a cancel, or URLs that
-// have expired or carry no expiry to read still return the error.
+// (ErrRateLimited), the one verdict that passes — and that one holds backlog
+// admission all the same, as every rate limit a job meets does
+// (Scheduler.holdForRateLimit): the download goes ahead on URLs it already
+// had, but the next VOD admitted would fetch into the same limit. Any other
+// verdict on the video (vodRefreshVerdict), a definitive refusal, a cancel,
+// or URLs that have expired or carry no expiry to read still return the
+// error.
 func (w *DownloadWorker) refreshStaleVodInfo(ctx context.Context, job *database.Job, result *StreamProcessResult, extractedAt time.Time) error {
 	if !result.IsVod || job.Platform == "twitch" || !vodInfoStale(result.VideoInfo, extractedAt, time.Now()) {
 		return nil
@@ -143,10 +147,14 @@ func (w *DownloadWorker) refreshStaleVodInfo(ctx context.Context, job *database.
 	if err != nil {
 		// A rate-limit verdict is the one verdict that is transient too
 		// (ErrRateLimited): YouTube refused the player call, not the URLs.
-		if ctx.Err() == nil && (errors.Is(err, ErrRateLimited) || !isVodRefreshVerdict(err) && classifyProbeErr(err) == classNetwork) &&
+		rateLimited := isRateLimited(err)
+		if ctx.Err() == nil && (rateLimited || !isVodRefreshVerdict(err) && classifyProbeErr(err) == classNetwork) &&
 			vodURLsUnexpired(result.VideoInfo, time.Now()) {
 			w.logger.Warn("VOD re-extraction failed; downloading on the stale extraction, whose URLs have not expired",
 				"jobID", job.ID, "err", err)
+			if rateLimited && w.scheduler != nil {
+				w.scheduler.holdForRateLimit(time.Now(), rateLimitBackoff)
+			}
 			return nil
 		}
 		return err

@@ -297,20 +297,38 @@ func TestBacklogRateLimitedReextractRequeues(t *testing.T) {
 // TestRateLimitedReextractKeepsUnexpiredURLs: a stale VOD's re-extraction is
 // a precaution, and a rate limit on it is the one verdict that passes — the
 // player call was refused, not the URLs — so a VOD whose URLs are still good
-// for hours downloads on them, as after a blip.
+// for hours downloads on them, as after a blip. The limit still holds the
+// backlog: the next VOD admitted would fetch into it. It held nothing, the
+// one rate limit a job met that did not.
 //
-// Mutant: drop the ErrRateLimited term from refreshStaleVodInfo — the
-// re-extraction's verdict is returned.
+// Mutants: drop the rate-limit term from refreshStaleVodInfo — the
+// re-extraction's verdict is returned; drop the hold — admission stays
+// open; hold on the verdict alone — the 429 row's stays open.
 func TestRateLimitedReextractKeepsUnexpiredURLs(t *testing.T) {
-	w, _ := testWorkerSetup(t)
-	w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
-		return judgeRefreshedVodInfo(rateLimitedInfo(youtube.StreamNotAStream, youtube.SessionAuthLoggedOut))
-	}
-	now := time.Now()
-	info := vodInfoAt("https://r1.googlevideo.com", now.Add(4*time.Hour).Unix(), 1)
-	result := &StreamProcessResult{IsVod: true, VideoInfo: info}
-	if err := w.refreshStaleVodInfo(context.Background(), &database.Job{ID: "j", Platform: "youtube"}, result, now.Add(-2*time.Hour)); err != nil || result.VideoInfo != info {
-		t.Errorf("refreshStaleVodInfo = %v; want nil with the stale extraction kept", err)
+	for _, tc := range []struct {
+		name    string
+		refresh func() (*youtube.VideoInfo, error)
+	}{
+		{"verdict", func() (*youtube.VideoInfo, error) {
+			return judgeRefreshedVodInfo(rateLimitedInfo(youtube.StreamNotAStream, youtube.SessionAuthLoggedOut))
+		}},
+		{"429", func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, _ := testWorkerSetup(t)
+			w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
+				return tc.refresh()
+			}
+			now := time.Now()
+			info := vodInfoAt("https://r1.googlevideo.com", now.Add(4*time.Hour).Unix(), 1)
+			result := &StreamProcessResult{IsVod: true, VideoInfo: info}
+			if err := w.refreshStaleVodInfo(context.Background(), &database.Job{ID: "j", Platform: "youtube"}, result, now.Add(-2*time.Hour)); err != nil || result.VideoInfo != info {
+				t.Errorf("refreshStaleVodInfo = %v; want nil with the stale extraction kept", err)
+			}
+			if !w.scheduler.rateLimitGateClosed(now.Add(rateLimitBackoff - time.Minute)) {
+				t.Error("the rate limit placed no backlog hold")
+			}
+		})
 	}
 }
 
