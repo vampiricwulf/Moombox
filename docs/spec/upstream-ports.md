@@ -47,7 +47,6 @@ Reviewed and not ported. Newest first. Remove an entry when it is ported (and ad
 
 | Upstream | What | Moombox exposure | Status |
 |---|---|---|---|
-| yt-dlp `a51ef56c0` (#17884) | Playability reason falls back to `errorScreen.playerInterstitialRenderer.content.interstitialViewModel` (`title.content` as the reason, `description.content` as the subreason) | `playabilityReason` in `internal/youtube/player_api_parsing.go` reads only `reason` and `messages[0]`. A refusal that arrives interstitial-only gets an empty reason, so `parsePlayabilityStatus`'s keyword match (member / private / country) falls through to the unknown verdict. | Low priority. Wants a real response capture for the fixture before porting. |
 | yt-dlp `c7fb478d2` (issue #17666) | web_embedded can go SABR-only (itag 18 only); upstream gets HLS 91–96 back with a Safari UA | Swapping the UA on its own does nothing here: the port has three parts. | Owner deferred 2026-10-02. |
 
 ## Port log
@@ -56,6 +55,9 @@ Newest first. One row per Moombox commit that ports upstream work.
 
 | Date | Moombox commit | Upstream | Summary |
 |---|---|---|---|
+| 2026-10-31 | `c1df7d3f` | yt-dlp `26feac3dd` (#12958), `f484c5159` (#12939) | A rate-limit or captcha verdict (`rate_limited`) is worded as upstream words it ("Your account" / "The current session has been rate-limited by YouTube for up to an hour") and, beyond upstream, which only words it, waited out: backlog admission held for the hour, a backlog VOD back to `Queued` for it outside the retry budget, any other job fetching again every 30 minutes in place (`outlastRateLimit`) |
+| 2026-10-31 | `1c4eff0f` | yt-dlp `_extract_response` at `b77c9304e` (`_base.py:1322-1356`; ytdl-org #28289, yt-dlp #839) | A player call's 429 is returned at once with its `Retry-After` (`HTTPRateLimitError`), where it was retried four times on every client; a 404 and a 200 whose last `ERROR` alert says "unknown error" are retried within the ladder |
+| 2026-10-31 | `a1a86f61` | yt-dlp `a51ef56c0` (#17884), `f484c5159` (#12939), `26feac3dd` (#12958); `_video.py:4048-4081` at `b77c9304e` | The playability reason is read as upstream reads it (`readPlayabilityText`): the error screen's reason ahead of the status's, its subreason appended, the interstitial's title and description; a geo subreason is `region_blocked` whatever the status; a captcha challenge or a "try again later" is `rate_limited`. The fixtures are built from upstream's traversal paths: no capture yet shows the interstitial, the captcha or the rate limit's status code |
 | 2026-10-31 | `28745ce5` | yt-dlp `8c1f07d81` (#16771) | The live adaptive arm leaves a VOD whose pool also holds a whole-file video-only + audio-only pair (`hasWholeFileSplit`) to the whole-file path: upstream's `was_live`, which skips the live adaptive formats and downloads the files |
 | 2026-10-31 | `61720562` | yt-dlp `cc2db8780`, `8c1f07d81` (#16771) | A missing_pot degrade's selection is held to `segmentedStreamLost` too, over what both of its whole-file re-filters left out: a wanted stream whose only token-free copy is segmented fails the job, where it archived the rest silently |
 | 2026-10-31 | `6ad3085e` | yt-dlp `cc2db8780`, `8c1f07d81` (#16771) | The whole-file VOD pool leaves segmented formats out (`wholeFileVodPool`) and fails clearly on a wanted stream served segmented alone (`segmentedStreamLost`); a `not_a_stream` VOD with a segmented pool and a manifest goes to DASH |
