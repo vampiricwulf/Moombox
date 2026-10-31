@@ -35,6 +35,14 @@ package youtube
 // D12, 2026-10-31): a stream whose token is mandatory takes a token-free copy
 // where one exists, as upstream's missing_pot skip would, and the guessed
 // token rides only a stream that has none.
+//
+// Upstream's other GVS refusal is not marked a guess: a signed-out session
+// with no visitor data, the experiment off ("Missing required Visitor Data",
+// fetch_po_token, _video.py:2784-2792). D12 rules on a signed-in session's
+// account binding, which the fallback certainly is not; a signed-out
+// session's visitor data is simply gone, with no better identity left to
+// bind to, and Moombox mints under the video ID — the last-resort fallback
+// below, the binding YouTube's own experiment uses — rather than not at all.
 
 // Binding kinds, used as the `binding` value in the "[POT] GVS mint" log line
 // so a months-later 403 investigation can see which rule produced the token.
