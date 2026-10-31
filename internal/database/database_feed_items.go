@@ -243,6 +243,63 @@ func (db *Database) FeedScope(channelID, cutoff, now string, includeMembership b
 	return q1, nil
 }
 
+// ResetMisfiledFeedItems settles channelID's v24 debt (migrateV24), once:
+// when the channel is owed it, every row it stores not_a_stream inside the
+// walk's scope — FeedScope's, for the same cutoff and includeMembership — is
+// reset to unknown, the state a never-probed row has (no end re-check
+// pending either), and the debt is cleared in the same transaction. It
+// returns how many rows were reset: 0, with nothing written, for a channel
+// owed nothing, which after the first cycle is every channel.
+//
+// A not_a_stream row is in scope through Q1 alone — published at or after
+// the cutoff, membership rows only while membership discovery is on: Q2
+// carries upcoming, live and unknown rows, and Q3 rows with an end re-check,
+// which a not_a_stream row never has (applyProbe schedules one on a vod). So
+// the predicate below is Q1's (feedScopeQ1SQL), and every row it resets is
+// one the same cycle's walk then probes as the unknown row it now is.
+// Rows outside the scope — dated before the cutoff, or membership rows with
+// discovery off — keep not_a_stream, and since the debt is cleared they keep
+// it: the reset is once, on the upgrade, as the owner decided, not a rule a
+// row meets whenever it comes into scope.
+func (db *Database) ResetMisfiledFeedItems(channelID, cutoff string, includeMembership bool) (int64, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	ctx := db.getCtx()
+	var one int
+	err := db.db.QueryRowContext(ctx, `SELECT 1 FROM feed_reprobe_owed WHERE channel_id = ?`, channelID).Scan(&one)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	q := `UPDATE feed_items SET status = 'unknown', recheck_at = '', recheck_step = 0
+  WHERE channel_id = ? AND status = 'not_a_stream' AND published >= ?`
+	if !includeMembership {
+		q += ` AND source <> 'membership'`
+	}
+	res, err := tx.ExecContext(ctx, q, channelID, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM feed_reprobe_owed WHERE channel_id = ?`, channelID); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // HasAnyJob reports whether a jobs row exists for videoID, in ANY status (§8 restart).
 // Relies on jobs.id == jobs.video_id — true at every production creation site today,
 // but not schema-enforced; the restart carve-out depends on it.
@@ -476,7 +533,9 @@ func (db *Database) ListFeedChannelIDs() ([]string, error) {
 // Both DELETEs run in one transaction: a crash between independent commits
 // would leave an orphaned channel_state row (stale backfilled_at) for a
 // channel with no feed_items — a re-added channel would then be treated as
-// already-backfilled and skip its rescan.
+// already-backfilled and skip its rescan. The channel's v24 debt
+// (feed_reprobe_owed) goes with them: it is owed to rows that no longer
+// exist, and a re-added channel's rows are scanned afresh.
 func (db *Database) DeleteChannelFeedData(channelID string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -490,6 +549,9 @@ func (db *Database) DeleteChannelFeedData(channelID string) error {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_state WHERE channel_id = ?`, channelID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM feed_reprobe_owed WHERE channel_id = ?`, channelID); err != nil {
 		return err
 	}
 	return tx.Commit()
