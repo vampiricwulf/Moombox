@@ -259,8 +259,11 @@ func TestCascadesCarryTheResolvedPlayerURL(t *testing.T) {
 //
 // Mutants: either homepage read not remembering its player; the embed
 // page's player not extracted, not remembered, or not adopted for its own
-// call (the age-gated winner carries no PlayerURL); pagePlayerURL accepting
-// a URL that names no player (the homepage's leading scriptSrc wins).
+// call (the age-gated winner carries no PlayerURL); the adopted player's STS
+// not re-derived (the age-gate call carries none); the embed page's player
+// adopted over the page's own (the second embed row's winner carries it);
+// pagePlayerURL accepting a URL that names no player (the homepage's leading
+// scriptSrc wins).
 func TestPagesNamingAPlayerFeedTheFallback(t *testing.T) {
 	// The homepage leads with a script that is not a player, as a page may.
 	const homepage = `<script>ytcfg.set({"scriptSrc":"https:\/\/www.youtube.com\/s\/desktop\/abc\/jsbin\/desktop_polymer.vflset\/desktop_polymer.js",` +
@@ -314,38 +317,63 @@ func TestPagesNamingAPlayerFeedTheFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("the age-gate bypass's embed page", func(t *testing.T) {
-		embed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = io.WriteString(w, `<script>ytcfg.set({"WEB_PLAYER_CONTEXT_CONFIGS":{"WEB_PLAYER_CONTEXT_CONFIG_ID_EMBEDDED_PLAYER":`+
-				`{"jsUrl":"\/s\/player\/e0e0e0e0\/player_ias.vflset\/en_US\/base.js","encryptedHostFlags":"ehf"}}});</script>`)
-		}))
-		t.Cleanup(embed.Close)
-		orig := constants.YouTubeURLs.Embed
-		constants.YouTubeURLs.Embed = embed.URL
-		t.Cleanup(func() { constants.YouTubeURLs.Embed = orig })
-		stubWatchPage(t)
-		reads := stubIframeAPI(t, "", errors.New("iframe API down"))
-		tr := serveBodies(t, map[string]string{
-			"7": `{"playabilityStatus":{"status":"AGE_VERIFICATION_REQUIRED","reason":"Sign in to confirm your age"},"videoDetails":{"videoId":"test1234567"}}`,
+	// The embed page the age-gate bypass fetches. Nothing earlier in the
+	// first row's extraction names a player — the watch page states an STS
+	// but no player, the iframe API is down and nothing is remembered — so
+	// TV goes out without one, and the web_embedded call adopts the embed
+	// page's, with the page's STS that a player URL now lets it send. In the
+	// second the watch page names its own: the age-gate call keeps it, and
+	// the embed page's is only remembered.
+	for _, tc := range []struct {
+		name       string
+		page       YtcfgData
+		wantReads  int32
+		wantPlayer string
+	}{
+		{name: "the age-gate bypass's embed page", page: YtcfgData{STS: 20381}, wantReads: 1, wantPlayer: embedPlayer},
+		{name: "the embed page behind a page that named its own", page: YtcfgData{STS: 20381, PlayerURL: pagePlayer}, wantPlayer: pagePlayer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			embed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, `<script>ytcfg.set({"WEB_PLAYER_CONTEXT_CONFIGS":{"WEB_PLAYER_CONTEXT_CONFIG_ID_EMBEDDED_PLAYER":`+
+					`{"jsUrl":"\/s\/player\/e0e0e0e0\/player_ias.vflset\/en_US\/base.js","encryptedHostFlags":"ehf"}}});</script>`)
+			}))
+			t.Cleanup(embed.Close)
+			orig := constants.YouTubeURLs.Embed
+			constants.YouTubeURLs.Embed = embed.URL
+			t.Cleanup(func() { constants.YouTubeURLs.Embed = orig })
+			stubWatchPageYtcfg(t, tc.page)
+			reads := stubIframeAPI(t, "", errors.New("iframe API down"))
+			tr := serveBodies(t, map[string]string{
+				"7": `{"playabilityStatus":{"status":"AGE_VERIFICATION_REQUIRED","reason":"Sign in to confirm your age"},"videoDetails":{"videoId":"test1234567"}}`,
+			})
+			p := newRetryTestAPI()
+			info, err := p.GetVideoInfoPublic(context.Background(), "test1234567")
+			if err != nil {
+				t.Fatalf("GetVideoInfoPublic: %v", err)
+			}
+			if reads.Load() != tc.wantReads {
+				t.Fatalf("iframe API read %d times, want %d", reads.Load(), tc.wantReads)
+			}
+			if info.PlayerURL != tc.wantPlayer {
+				t.Errorf("PlayerURL = %q, want %q", info.PlayerURL, tc.wantPlayer)
+			}
+			tvSTS := tc.page.PlayerURL != ""
+			if tv := tr.of("7"); len(tv) == 0 || strings.Contains(tv[0], `"signatureTimestamp"`) != tvSTS {
+				t.Errorf("TV bodies %q, want a signatureTimestamp only when the page named a player", tv)
+			}
+			emb := tr.of("56")
+			if len(emb) != 1 || !strings.Contains(emb[0], `"encryptedHostFlags":"ehf"`) {
+				t.Fatalf("web_embedded bodies %q, want the one age-gate call", emb)
+			}
+			if !strings.Contains(emb[0], `"signatureTimestamp":20381`) {
+				t.Errorf("web_embedded body %q, want the page's STS for the player it runs on", emb[0])
+			}
+			if p.playerURL != embedPlayer || p.playerURLSource != "embed page" {
+				t.Errorf("remembered %q from %q, want the embed page's", p.playerURL, p.playerURLSource)
+			}
 		})
-		p := newRetryTestAPI()
-		info, err := p.GetVideoInfoPublic(context.Background(), "test1234567")
-		if err != nil {
-			t.Fatalf("GetVideoInfoPublic: %v", err)
-		}
-		if reads.Load() != 1 {
-			t.Fatalf("iframe API read %d times, want the one failed read before STS", reads.Load())
-		}
-		if info.PlayerURL != embedPlayer {
-			t.Errorf("PlayerURL = %q, want the embed page's %q", info.PlayerURL, embedPlayer)
-		}
-		if emb := tr.of("56"); len(emb) != 1 || !strings.Contains(emb[0], `"encryptedHostFlags":"ehf"`) {
-			t.Errorf("web_embedded bodies %q, want the one age-gate call", emb)
-		}
-		if p.playerURL != embedPlayer || p.playerURLSource != "embed page" {
-			t.Errorf("remembered %q from %q, want the embed page's", p.playerURL, p.playerURLSource)
-		}
-	})
+	}
 }
 
 // TestWatchPageYtcfgNamesTheMainVariantAndSTS: the watch page's player URL

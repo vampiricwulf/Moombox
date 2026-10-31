@@ -3,6 +3,7 @@ package youtube
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"testing/synctest"
 	"time"
 
@@ -81,21 +83,31 @@ func servePagesInBubble(t *testing.T, h http.Handler, dialFails int) {
 	t.Cleanup(func() { pageGet = orig })
 }
 
+// cutOffBody is a response body the connection dropped mid-read: a few bytes,
+// then io.ErrUnexpectedEOF, as a reset or a short Content-Length gives.
+type cutOffBody struct {
+	io.Reader
+	io.Closer
+}
+
 // TestWatchPageFetchRetriesTransientFailures is G13's port of yt-dlp's
 // _download_webpage_with_retries (_base.py:1001-1011) for the watch page: a
-// transport error, a 5xx or any status but 403/429 gets another attempt, up
-// to three retries, 1 s, 2 s, 4 s apart. The page that finally answers is
-// parsed as any other.
+// transport error, a body cut off mid-read, a 5xx or any status but 403/429
+// gets another attempt, up to three retries, 1 s, 2 s, 4 s apart. The page
+// that finally answers is parsed as any other.
 //
 // Mutants: fetchYouTubePage making one attempt (every row but "answers at
 // once" fails); pageRetryable refusing every error (same); the backoff
-// dropped or reordered (the arrival times differ); a status error treated as
-// a transport one or the reverse (unchanged here — see the refusal test).
+// dropped or reordered (the arrival times differ); a body read error
+// returned as a refusal rather than retried (the cut-off row fails); a
+// status error treated as a transport one or the reverse (unchanged here —
+// see the refusal test).
 func TestWatchPageFetchRetriesTransientFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		statuses  []int // answered in turn, then 200
 		dialFails int
+		cutBodies int // the first n bodies served are cut off mid-read
 		wantAt    []time.Duration
 	}{
 		{name: "answers at once", wantAt: []time.Duration{0}},
@@ -104,6 +116,7 @@ func TestWatchPageFetchRetriesTransientFailures(t *testing.T) {
 		// The refused dials never reach the handler; only the attempt that
 		// does is recorded, after both waits.
 		{name: "two refused dials, then 200", dialFails: 2, wantAt: []time.Duration{3 * time.Second}},
+		{name: "a body cut off mid-read, then whole", cutBodies: 1, wantAt: []time.Duration{0, time.Second}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -116,6 +129,18 @@ func TestWatchPageFetchRetriesTransientFailures(t *testing.T) {
 					}
 					_, _ = w.Write([]byte(watchPageFixture))
 				}), tc.dialFails)
+				if tc.cutBodies > 0 {
+					served, cut := pageGet, 0
+					pageGet = func(ctx context.Context, url string, timeout time.Duration, headers map[string]string) (*http.Response, context.CancelFunc, error) {
+						resp, cancel, err := served(ctx, url, timeout, headers)
+						if err == nil && cut < tc.cutBodies {
+							cut++
+							resp.Body = cutOffBody{io.MultiReader(io.LimitReader(resp.Body, 8), iotest.ErrReader(io.ErrUnexpectedEOF)), resp.Body}
+						}
+						return resp, cancel, err
+					}
+					t.Cleanup(func() { pageGet = served })
+				}
 
 				wp, err := FetchWatchPage(context.Background(), "test1234567", "")
 				if err != nil {
