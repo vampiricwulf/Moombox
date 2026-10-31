@@ -155,11 +155,26 @@ func (w *DownloadWorker) refreshStaleVodInfo(ctx context.Context, job *database.
 			if rateLimited && w.scheduler != nil {
 				w.scheduler.holdForRateLimit(time.Now(), rateLimitBackoff)
 			}
+			// A captcha the next job would meet too: the operator is told,
+			// once a spell (captchaAlert).
+			if isCaptcha(err) {
+				w.captcha.raise(job)
+			}
 			return nil
+		}
+		// A verdict on the video — private, members-only, a stream no longer
+		// finished — is YouTube answering too, and ends the session's captcha
+		// spell as an answered re-extraction does below, and as any answer to
+		// Process's fetch does.
+		if isVodRefreshVerdict(err) && !rateLimited {
+			w.captcha.clear()
 		}
 		return err
 	}
 	result.VideoInfo = info
+	if answeredFetch(info) {
+		w.captcha.clear()
+	}
 	return nil
 }
 

@@ -321,8 +321,14 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		jitterMax = max(jitterMax, time.Second)
 		jitter := time.Duration(rand.Int63n(int64(jitterMax)))
 
-		// B2: Race sleep against chat surge
-		probeTimer := time.NewTimer(interval + jitter)
+		// B2: Race sleep against chat surge. A go-live confirmation held off
+		// for a rate limit is made when its hold ends, not on the first probe
+		// past it (loopRateLimit.heldFor).
+		wait := interval + jitter
+		if held := rateLimit.heldFor(time.Now()); held > 0 {
+			wait = min(wait, held)
+		}
+		probeTimer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			probeTimer.Stop()
@@ -456,8 +462,13 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				sp.logger.Debug("periodic full fetch failed, will retry later", "videoID", job.VideoID, "err", err)
 			}
 			lastFullFetch = time.Now()
-			if err == nil {
-				sp.noteFetch(job, &rateLimit, fullInfo, false)
+			// A refusal — the verdict, or a 429 on the whole cascade, its HTTP
+			// form — that ends a day of them ends the job (rateLimitCap).
+			if err == nil && sp.noteFetch(job, &rateLimit, fullInfo, false) && rateLimit.outlasted(time.Now()) {
+				return sp.giveUpRateLimited(job, &rateLimit, fullInfo, nil, chatDl), nil
+			}
+			if err != nil && sp.noteFetchErr(job, &rateLimit, err, false) && rateLimit.outlasted(time.Now()) {
+				return sp.giveUpRateLimited(job, &rateLimit, nil, err, chatDl), nil
 			}
 		}
 
@@ -548,14 +559,26 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				// Do NOT error the stream (that would lose a live recording over a
 				// blip); report reachability to the oracle and keep polling — the
 				// lightweight probe loop owns the give-up budget, and the next poll
-				// re-attempts the fetch once connectivity returns.
+				// re-attempts the fetch once connectivity returns. A 429 on the
+				// whole cascade is no blip but the rate limit's HTTP form, held
+				// off as its verdict is, below (noteFetchErr).
 				reportFetchOutcome(err, "probe/youtube")
+				if sp.noteFetchErr(job, &rateLimit, err, true) {
+					if rateLimit.outlasted(time.Now()) {
+						return sp.giveUpRateLimited(job, &rateLimit, nil, err, chatDl), nil
+					}
+					continue
+				}
 				sp.logger.Debug("full fetch on live failed; will retry next poll", "videoID", job.VideoID, "err", err)
 				continue
 			}
 			// A rate limit says nothing about the stream: keep waiting, and
-			// confirm again once it has been waited out (loopRateLimit).
+			// confirm again once it has been waited out (loopRateLimit) — or,
+			// a day of them, give up (rateLimitCap).
 			if sp.noteFetch(job, &rateLimit, fullInfo, true) {
+				if rateLimit.outlasted(time.Now()) {
+					return sp.giveUpRateLimited(job, &rateLimit, fullInfo, nil, chatDl), nil
+				}
 				continue
 			}
 			// Cross-check: if full WEB fetch says still upcoming, the probe was
@@ -582,13 +605,23 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			if err != nil {
 				// Same connectivity-resilience as the live case: don't error the
 				// stream on a transient confirmatory-fetch failure; report
-				// reachability and keep polling (re-attempt on the next poll).
+				// reachability and keep polling (re-attempt on the next poll) —
+				// unless it was a 429 on the whole cascade, as above.
 				reportFetchOutcome(err, "probe/youtube")
+				if sp.noteFetchErr(job, &rateLimit, err, true) {
+					if rateLimit.outlasted(time.Now()) {
+						return sp.giveUpRateLimited(job, &rateLimit, nil, err, chatDl), nil
+					}
+					continue
+				}
 				sp.logger.Debug("full fetch on VOD failed; will retry next poll", "videoID", job.VideoID, "err", err)
 				continue
 			}
 			// A rate limit, as above.
 			if sp.noteFetch(job, &rateLimit, fullInfo, true) {
+				if rateLimit.outlasted(time.Now()) {
+					return sp.giveUpRateLimited(job, &rateLimit, fullInfo, nil, chatDl), nil
+				}
 				continue
 			}
 			// Cross-check: if full WEB fetch says still upcoming, keep polling.
@@ -612,11 +645,29 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			// Auth probe may return unclear status for members-only content.
 			// Do full fetch to determine actual state (matching TS auth probe unclear handling).
 			if membersOnly {
+				// This full fetch confirms a stream the cookied probe cannot
+				// read, on every probe, and a rate limit holds it off as it
+				// holds the live and VOD arms' (loopRateLimit): the arm was left
+				// out, so a refusal that read upcoming sent the whole cascade
+				// into the limit every 30 s for good, with no backlog hold, no
+				// line, no cap and — a captcha — no word to the operator, and
+				// one that read live wrote Live and went on to a download with
+				// nothing to download.
+				if rateLimit.confirmationHeld() {
+					sp.logger.Debug("auth probe unclear; its full fetch waits out a rate limit", "videoID", job.VideoID)
+					continue
+				}
 				sp.logger.Info("auth probe unclear, doing full fetch",
 					"status", probeInfo.StreamStatus, "videoID", job.VideoID)
 				fullInfo, err := sp.fetchVideoInfo(ctx, job.VideoID)
 				if err != nil {
 					reportFetchOutcome(err, "probe/youtube")
+					if sp.noteFetchErr(job, &rateLimit, err, true) {
+						if rateLimit.outlasted(time.Now()) {
+							return sp.giveUpRateLimited(job, &rateLimit, nil, err, chatDl), nil
+						}
+						continue
+					}
 					sp.logger.Warn("full fetch after unclear auth probe failed", "err", err)
 					continue // Retry on next iteration
 				}
@@ -628,6 +679,12 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				// full fetch every 30 s.
 				if fullFetchSaysGone(fullInfo) {
 					return sp.giveUpUnavailable(job, fullInfo, chatDl), nil
+				}
+				if sp.noteFetch(job, &rateLimit, fullInfo, true) {
+					if rateLimit.outlasted(time.Now()) {
+						return sp.giveUpRateLimited(job, &rateLimit, fullInfo, nil, chatDl), nil
+					}
+					continue
 				}
 				switch fullInfo.StreamStatus {
 				case youtube.StreamLive, youtube.StreamVOD, youtube.StreamPostLive:

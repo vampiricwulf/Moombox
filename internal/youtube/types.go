@@ -35,12 +35,13 @@ const (
 	// isn't available, try again later", which it explains as the account
 	// or session being rate-limited for up to an hour (26feac3dd, #12958) —
 	// or a captcha challenge (errorScreen.playerCaptchaViewModel,
-	// f484c5159, #12939), which upstream only warns of, and says nothing
-	// about passing. Upstream words either and ends the extraction; an
-	// archiver waits the rate limit out, and the plan waits a captcha out
-	// with it, so the worker treats this verdict as transient and never as
-	// the job's end (parsePlayabilityStatus; the worker's
-	// playabilityVerdict).
+	// f484c5159, #12939), which upstream words in the same refusal, and
+	// says nothing about passing. Upstream words either and ends the
+	// extraction, unless --wait-for-video has it warn and extract again on a
+	// flat interval (raise_no_formats, common.py:1264-1271); an archiver
+	// waits the rate limit out, and the plan waits a captcha out with it,
+	// so the worker treats this verdict as transient and never as the job's
+	// end (parsePlayabilityStatus; the worker's playabilityVerdict).
 	PlayabilityRateLimited PlayabilityError = "rate_limited"
 	PlayabilityUnknown     PlayabilityError = "unknown"
 )

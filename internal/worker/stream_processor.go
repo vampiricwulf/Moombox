@@ -138,6 +138,11 @@ type StreamProcessor struct {
 	// it. Wired by NewDownloadWorker via SetOnRateLimited; nil-guarded.
 	onRateLimited func()
 
+	// captcha is the session's captcha spell (captchaAlert, rate_limit.go),
+	// which a captcha the waiting loop's full fetch meets opens and a fetch
+	// it answers ends. The worker's own; set by NewDownloadWorker. nil-safe.
+	captcha *captchaAlert
+
 	// onTwitchAuthLoss reports a Twitch auth downgrade to whatever owns the
 	// PLATFORM's credential status — cookies.RefreshService.NoteTwitchAuthLoss
 	// in production, wired by cmd/moombox. nil is a valid install and the
@@ -322,6 +327,18 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 			sp.sendStreamFound(job, nil)
 		}
 		return nil, fmt.Errorf("full fetch failed: %w", err)
+	}
+	// A fetch YouTube answered with no rate-limit verdict ends the session's
+	// captcha spell (captchaAlert), whatever the job then does with it — goes
+	// on to download, ends on a verdict on the video (private, removed,
+	// members-only), or waits for a broadcast to begin, which it does inside
+	// this call, for as long as the wait lasts. Read here, at the fetch, as
+	// the waiting loop's fetches (noteFetch) and a stale VOD's re-extraction
+	// (refreshStaleVodInfo) are. Read only where a pass went on to download
+	// (processJob), the spell outlived every other answer, and a captcha that
+	// came back after one told no one.
+	if answeredFetch(info) {
+		sp.captcha.clear()
 	}
 
 	sp.logger.Debug("fetch result",
@@ -527,10 +544,11 @@ func judgeRefreshedVodInfo(info *youtube.VideoInfo) (*youtube.VideoInfo, error) 
 // classification when the video is not playable. The display string is
 // the user-facing error; the sentinel (ErrCookiesRequired for member /
 // login, ErrNotAMember for a members-only wall hit by a live session,
-// ErrNonActionable for age-restricted, ErrRateLimited for a rate limit or a
-// captcha) lets the downstream worker route the job to StatusCookies, wait
-// it out or suppress notifications via errors.Is rather than substring
-// matching. Both empty/nil → playable.
+// ErrNonActionable for age-restricted, ErrRateLimited for a rate limit,
+// errCaptchaRequired — an ErrRateLimited too — for a captcha) lets the
+// downstream worker route the job to StatusCookies, wait it out or suppress
+// notifications via errors.Is rather than substring matching. Both
+// empty/nil → playable.
 //
 // The members-only branch consults info.SessionAuth — YouTube's own verdict
 // on whether the failing request was signed in — because the two causes need
@@ -593,7 +611,12 @@ func playabilityVerdict(info *youtube.VideoInfo) (string, error) {
 		}
 		// Transient: processJob waits it out (outlastRateLimit) rather than
 		// recording it, so this text reaches the job's log, and its error
-		// only once the requeue cannot be made.
+		// only once the requeue cannot be made or the wait has lasted a day.
+		// A captcha is one too (errCaptchaRequired), which someone has to
+		// solve: the operator is told, once a spell (captchaAlert).
+		if isCaptchaReason(reason) {
+			return rateLimitVerdictMessage(reason, info.SessionAuth), errCaptchaRequired
+		}
 		return rateLimitVerdictMessage(reason, info.SessionAuth), ErrRateLimited
 	default:
 		return reason, nil
