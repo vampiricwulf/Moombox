@@ -75,53 +75,75 @@ func TestPlayabilityVerdictWordsARateLimit(t *testing.T) {
 	}
 }
 
+// rateLimited429 is GetVideoInfo's error when the cascade's last client was
+// answered 429 and nothing else answered (finishExtraction wraps the last
+// client's error), as Process returns it.
+func rateLimited429(retryAfter time.Duration) error {
+	return fmt.Errorf("full fetch failed: %w", fmt.Errorf("failed to extract any player response: %w",
+		&youtube.HTTPRateLimitError{Err: errors.New("ANDROID_VR API error: HTTP 429"), RetryAfter: retryAfter}))
+}
+
 // TestBacklogRateLimitRequeuesOutsideTheRetryBudget is G7's backlog half: a
-// backlog VOD YouTube rate-limits goes back to Queued, held for the hour the
-// limit lasts, however many times in a row — the streak it already had is
-// neither counted on nor reset — and the verdict holds every backlog
+// backlog VOD YouTube rate-limits — with its verdict, or with a 429 on every
+// client, the HTTP form of the same limit — goes back to Queued, held for the
+// hour the limit lasts, however many times in a row — the streak it already
+// had is neither counted on nor reset — and the limit holds every backlog
 // admission for as long. It ended in Error, and the slot it freed admitted
-// the channel's next VOD into the same wall.
+// the channel's next VOD into the same wall; the 429 spent the three
+// retries a blip gets, in 35 minutes, and ended in Error with no hold.
 //
 // Mutants: route the verdict to setJobError — the first run ends in Error;
 // requeue it through requeueBacklog — the fourth run ends in Error, "gave up
 // after 3 retries", and the streak grows; hold it for backlogRetryBackoff —
 // it is admissible again within the hour; drop holdForRateLimit — the
-// scheduler admits backlog while the verdict stands.
+// scheduler admits backlog while the verdict stands; drop the 429 from
+// isRateLimited, or its routing from processJob's failed stream processing —
+// the 429 row is held five minutes, and its fourth run ends in Error.
 func TestBacklogRateLimitRequeuesOutsideTheRetryBudget(t *testing.T) {
-	w, db := testWorkerSetup(t)
-	backlogRetryJob(t, db, "rl_vod", 1, true)
-	refused := rateLimitedResult(t)
-	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
-		return refused, nil
-	}
-	// A streak from two earlier transient failures.
-	w.noteBacklogRetry("rl_vod")
-	w.noteBacklogRetry("rl_vod")
+	for _, tc := range []struct {
+		name    string
+		process func(t *testing.T) (*StreamProcessResult, error)
+	}{
+		{"verdict", func(t *testing.T) (*StreamProcessResult, error) { return rateLimitedResult(t), nil }},
+		{"429", func(*testing.T) (*StreamProcessResult, error) { return nil, rateLimited429(0) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			backlogRetryJob(t, db, "rl_vod", 1, true)
+			result, err := tc.process(t)
+			w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+				return result, err
+			}
+			// A streak from two earlier transient failures.
+			w.noteBacklogRetry("rl_vod")
+			w.noteBacklogRetry("rl_vod")
 
-	for run := 1; run <= backlogRetryLimit+2; run++ {
-		w.processJob(context.Background(), "rl_vod")
-		now := time.Now()
-		row, _ := db.GetJob("rl_vod")
-		if row.Status != database.StatusQueued || row.Error != "" {
-			t.Fatalf("run %d: status = %s (%q), want Queued with no error", run, row.Status, row.Error)
-		}
-		if !w.scheduler.held("rl_vod", now.Add(rateLimitBackoff-time.Minute)) {
-			t.Fatalf("run %d: the job is admissible again within the hour", run)
-		}
-		if w.scheduler.held("rl_vod", now.Add(rateLimitBackoff+time.Minute)) {
-			t.Fatalf("run %d: the job is held past the hour", run)
-		}
-		if !w.scheduler.rateLimitGateClosed(now.Add(rateLimitBackoff - time.Minute)) {
-			t.Fatalf("run %d: backlog admission is open while the verdict stands", run)
-		}
-		// The scheduler's re-admission, once the hold is over.
-		db.UpdateJobFields("rl_vod", map[string]any{"status": database.StatusUpcoming})
-	}
-	w.backlogRetryMu.Lock()
-	streak := w.backlogRetries["rl_vod"]
-	w.backlogRetryMu.Unlock()
-	if streak != 2 {
-		t.Errorf("retry streak = %d after the rate-limit requeues, want the 2 it had", streak)
+			for run := 1; run <= backlogRetryLimit+2; run++ {
+				w.processJob(context.Background(), "rl_vod")
+				now := time.Now()
+				row, _ := db.GetJob("rl_vod")
+				if row.Status != database.StatusQueued || row.Error != "" {
+					t.Fatalf("run %d: status = %s (%q), want Queued with no error", run, row.Status, row.Error)
+				}
+				if !w.scheduler.held("rl_vod", now.Add(rateLimitBackoff-time.Minute)) {
+					t.Fatalf("run %d: the job is admissible again within the hour", run)
+				}
+				if w.scheduler.held("rl_vod", now.Add(rateLimitBackoff+time.Minute)) {
+					t.Fatalf("run %d: the job is held past the hour", run)
+				}
+				if !w.scheduler.rateLimitGateClosed(now.Add(rateLimitBackoff - time.Minute)) {
+					t.Fatalf("run %d: backlog admission is open while the limit stands", run)
+				}
+				// The scheduler's re-admission, once the hold is over.
+				db.UpdateJobFields("rl_vod", map[string]any{"status": database.StatusUpcoming})
+			}
+			w.backlogRetryMu.Lock()
+			streak := w.backlogRetries["rl_vod"]
+			w.backlogRetryMu.Unlock()
+			if streak != 2 {
+				t.Errorf("retry streak = %d after the rate-limit requeues, want the 2 it had", streak)
+			}
+		})
 	}
 }
 
@@ -231,28 +253,44 @@ func TestRateLimitedBroadcastWaitEndsOnCancel(t *testing.T) {
 }
 
 // TestBacklogRateLimitedReextractRequeues: a stale VOD's re-extraction that
-// YouTube rate-limits, with URLs that have expired, sends a backlog VOD back
-// to Queued too. Its verdict reaches processJob as a vodRefreshVerdict,
-// which ended it in Error.
+// YouTube rate-limits — its verdict, or a 429 on the whole cascade — with
+// URLs that have expired, sends a backlog VOD back to Queued for the hour
+// too. Its verdict reaches processJob as a vodRefreshVerdict, which ended it
+// in Error; the 429 was a blip's five-minute retry, one of three.
 //
-// Mutant: drop the ErrRateLimited arm after refreshStaleVodInfo — the job
-// ends in Error.
+// Mutants: drop the rate-limit arm after refreshStaleVodInfo — the verdict
+// ends in Error, and the 429 is held five minutes.
 func TestBacklogRateLimitedReextractRequeues(t *testing.T) {
-	w, db := testWorkerSetup(t)
-	backlogRetryJob(t, db, "rl_stale", 1, true)
-	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
-		// expire=1: stale once the slots are held, and no URL left to use.
-		return &StreamProcessResult{ShouldDownload: true, IsVod: true, VideoInfo: vodInfoAt("http://127.0.0.1:1", 1, 1)}, nil
-	}
-	w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
-		return judgeRefreshedVodInfo(rateLimitedInfo(youtube.StreamNotAStream, youtube.SessionAuthLoggedOut))
-	}
-	w.processJob(context.Background(), "rl_stale")
-	if row, _ := db.GetJob("rl_stale"); row.Status != database.StatusQueued {
-		t.Errorf("status = %s (%q), want Queued for the hour", row.Status, row.Error)
-	}
-	if n := w.queue.ActiveCount(); n != 0 {
-		t.Errorf("download slots still held after the requeue: %d", n)
+	for _, tc := range []struct {
+		name    string
+		refresh func() (*youtube.VideoInfo, error)
+	}{
+		{"verdict", func() (*youtube.VideoInfo, error) {
+			return judgeRefreshedVodInfo(rateLimitedInfo(youtube.StreamNotAStream, youtube.SessionAuthLoggedOut))
+		}},
+		{"429", func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			backlogRetryJob(t, db, "rl_stale", 1, true)
+			w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+				// expire=1: stale once the slots are held, and no URL left to use.
+				return &StreamProcessResult{ShouldDownload: true, IsVod: true, VideoInfo: vodInfoAt("http://127.0.0.1:1", 1, 1)}, nil
+			}
+			w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
+				return tc.refresh()
+			}
+			w.processJob(context.Background(), "rl_stale")
+			if row, _ := db.GetJob("rl_stale"); row.Status != database.StatusQueued {
+				t.Errorf("status = %s (%q), want Queued for the hour", row.Status, row.Error)
+			}
+			if !w.scheduler.held("rl_stale", time.Now().Add(rateLimitBackoff-time.Minute)) {
+				t.Error("the job is admissible again within the hour")
+			}
+			if n := w.queue.ActiveCount(); n != 0 {
+				t.Errorf("download slots still held after the requeue: %d", n)
+			}
+		})
 	}
 }
 
@@ -313,40 +351,47 @@ func TestRateLimitHoldsBacklogAdmission(t *testing.T) {
 	}
 }
 
-// TestRequeueBacklogWaitsAtLeastTheRetryAfter: a 429 that named its wait
-// holds the requeued backlog VOD at least that long, up to the hour a rate
-// limit is held; the backoff stands where it is longer.
+// TestRateLimited429WaitsInPlaceAtLeastItsRetryAfter: a job that is not
+// backlog, whose whole cascade was answered 429, waits in place as a
+// rate-limit verdict does — it ended in Error, a broadcast lost before it
+// aired — and for at least the Retry-After YouTube named, up to the hour a
+// limit lasts; the full-fetch cadence stands where it is longer.
 //
-// Mutants: drop the floor — the 40-minute Retry-After is held for the five
-// minute backoff; drop the cap — the five-hour one holds past the hour.
-func TestRequeueBacklogWaitsAtLeastTheRetryAfter(t *testing.T) {
+// Mutants: drop the 429 from isRateLimited — the row ends in Error and there
+// is no second fetch; drop the Retry-After floor — the 45-minute one fetches
+// again at 30; drop the cap — the five-hour one waits five hours.
+func TestRateLimited429WaitsInPlaceAtLeastItsRetryAfter(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		retryAfter time.Duration
 		want       time.Duration
 	}{
-		{"shorter than the backoff", 30 * time.Second, backlogRetryBackoff},
-		{"longer than the backoff", 40 * time.Minute, 40 * time.Minute},
+		{"no Retry-After", 0, rateLimitRetryInterval},
+		{"shorter than the cadence", 2 * time.Minute, rateLimitRetryInterval},
+		{"longer than the cadence", 45 * time.Minute, 45 * time.Minute},
 		{"past the hour", 5 * time.Hour, rateLimitBackoff},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w, db := testWorkerSetup(t)
-			backlogRetryJob(t, db, "ra_vod", 1, true)
-			// As GetVideoInfo wraps the last client's error (finishExtraction).
-			err := fmt.Errorf("failed to extract any player response: %w",
-				&youtube.HTTPRateLimitError{Err: errors.New("TVHTML5 API error: HTTP 429"), RetryAfter: tc.retryAfter})
-			job, _ := db.GetJob("ra_vod")
-			now := time.Now()
-			requeued, _ := w.requeueBacklogAfterTransientFailure(job, err)
-			if !requeued {
-				t.Fatal("not requeued")
-			}
-			if !w.scheduler.held("ra_vod", now.Add(tc.want-time.Second)) {
-				t.Errorf("not held up to %s", tc.want)
-			}
-			if w.scheduler.held("ra_vod", now.Add(tc.want+time.Minute)) {
-				t.Errorf("held past %s", tc.want)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				w, db := testWorkerSetup(t)
+				backlogRetryJob(t, db, "rl_429", 0, false)
+				t0 := time.Now()
+				var fetches []time.Duration
+				w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+					fetches = append(fetches, time.Since(t0))
+					if len(fetches) == 1 {
+						return nil, rateLimited429(tc.retryAfter)
+					}
+					return &StreamProcessResult{ShouldDownload: false, Error: "not a stream"}, nil
+				}
+				w.processJob(context.Background(), "rl_429")
+				if len(fetches) != 2 || fetches[1]-fetches[0] != tc.want {
+					t.Fatalf("fetches at %v, want two, %s apart", fetches, tc.want)
+				}
+				if row, _ := db.GetJob("rl_429"); row.Error != "not a stream" {
+					t.Errorf("row error = %q; want the second fetch's answer, not the 429", row.Error)
+				}
+			})
 		})
 	}
 }
@@ -390,42 +435,56 @@ func TestRateLimitedGoLiveIsHandedBack(t *testing.T) {
 }
 
 // TestRateLimitedFetchDefersTheFoundAnnouncement: a discovery whose first
-// fetch YouTube rate-limits keeps its "Stream Found" owed, and the fetch that
-// answers sends it, with what it learned. Taken on the refusal, the embed
-// went out with the feed's title and nothing else.
+// fetch YouTube rate-limits — with its verdict, or with a 429 on the whole
+// cascade — keeps its "Stream Found" owed, and the fetch that answers sends
+// it, with what it learned. Taken on the refusal, the embed went out with
+// the feed's title and nothing else.
 //
-// Mutant: take the flag on a rate-limited fetch — the refusal announces and
-// the answer has nothing left to announce.
+// Mutants: take the flag on a rate-limited fetch, or on a 429 — that row's
+// refusal announces and the answer has nothing left to announce.
 func TestRateLimitedFetchDefersTheFoundAnnouncement(t *testing.T) {
-	sp, rec, job := foundTestJob(t)
-	owe(t, sp.db, job)
-	answers := []*youtube.VideoInfo{
-		rateLimitedInfo(youtube.StreamNotAStream, youtube.SessionAuthLoggedOut),
-		{Title: "Fetched Title", ChannelName: "A Channel", StreamStatus: youtube.StreamVOD, PlayabilityError: youtube.PlayabilityOK},
-	}
-	sp.getVideoInfoFn = func(context.Context, string) (*youtube.VideoInfo, error) {
-		info := answers[0]
-		answers = answers[1:]
-		return info, nil
-	}
+	for _, tc := range []struct {
+		name    string
+		refusal func() (*youtube.VideoInfo, error)
+	}{
+		{"verdict", func() (*youtube.VideoInfo, error) {
+			return rateLimitedInfo(youtube.StreamNotAStream, youtube.SessionAuthLoggedOut), nil
+		}},
+		{"429", func() (*youtube.VideoInfo, error) {
+			return nil, errors.Unwrap(rateLimited429(0)) // Process adds its own "full fetch failed"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp, rec, job := foundTestJob(t)
+			owe(t, sp.db, job)
+			calls := 0
+			sp.getVideoInfoFn = func(context.Context, string) (*youtube.VideoInfo, error) {
+				calls++
+				if calls == 1 {
+					return tc.refusal()
+				}
+				return &youtube.VideoInfo{Title: "Fetched Title", ChannelName: "A Channel", StreamStatus: youtube.StreamVOD, PlayabilityError: youtube.PlayabilityOK}, nil
+			}
 
-	res, err := sp.Process(context.Background(), job)
-	if err != nil || res.ShouldDownload || !errors.Is(res.ErrSentinel, ErrRateLimited) {
-		t.Fatalf("first Process = %+v, %v; want the rate-limit refusal", res, err)
-	}
-	if n := len(rec.ByEvent("found")); n != 0 {
-		t.Fatalf("the refusal announced the discovery (%d embeds)", n)
-	}
-	if row, _ := sp.db.GetJob(job.ID); !row.AnnounceFound {
-		t.Fatal("the refusal took the owed flag")
-	}
+			res, err := sp.Process(context.Background(), job)
+			if refused := err != nil && isRateLimited(err) || err == nil && !res.ShouldDownload && errors.Is(res.ErrSentinel, ErrRateLimited); !refused {
+				t.Fatalf("first Process = %+v, %v; want the rate limit", res, err)
+			}
+			if n := len(rec.ByEvent("found")); n != 0 {
+				t.Fatalf("the refusal announced the discovery (%d embeds)", n)
+			}
+			if row, _ := sp.db.GetJob(job.ID); !row.AnnounceFound {
+				t.Fatal("the refusal took the owed flag")
+			}
 
-	if res, err := sp.Process(context.Background(), job); err != nil || !res.ShouldDownload {
-		t.Fatalf("second Process = %+v, %v; want the VOD download", res, err)
-	}
-	found := rec.ByEvent("found")
-	if len(found) != 1 || found[0].Description != "Video: Fetched Title" {
-		t.Errorf("found embeds = %+v, want one saying what the answer learned", found)
+			if res, err := sp.Process(context.Background(), job); err != nil || !res.ShouldDownload {
+				t.Fatalf("second Process = %+v, %v; want the VOD download", res, err)
+			}
+			found := rec.ByEvent("found")
+			if len(found) != 1 || found[0].Description != "Video: Fetched Title" {
+				t.Errorf("found embeds = %+v, want one saying what the answer learned", found)
+			}
+		})
 	}
 }
 

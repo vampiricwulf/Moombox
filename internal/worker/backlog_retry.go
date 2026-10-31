@@ -1,12 +1,10 @@
 package worker
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
-	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 const (
@@ -45,7 +43,9 @@ const (
 // that answer is recognised first (vodRefreshVerdict): a backlog VOD that
 // went private or members-only while it queued ends where the verdict sends
 // it, as one refused up front does. Which jobs qualify is requeueBacklog's
-// rule.
+// rule. An Innertube 429 that reaches processJob typed
+// (youtube.HTTPRateLimitError) never comes here: it is YouTube rate-limiting
+// the session, which outlastRateLimit waits out (rate_limit.go).
 func (w *DownloadWorker) requeueBacklogAfterTransientFailure(job *database.Job, err error) (bool, error) {
 	if isVodRefreshVerdict(err) || classifyProbeErr(err) != classNetwork {
 		return false, err
@@ -88,11 +88,6 @@ func (w *DownloadWorker) requeueBacklogAfterDiskFull(job *database.Job, err erro
 // takes the job out of the loop (endBacklogStreak). A run a rate-limit
 // verdict sent back to Queued (requeueBacklogAfterRateLimit) is neither
 // counted nor resets it.
-//
-// A 429 that named its wait (youtube.HTTPRateLimitError's RetryAfter) is
-// held at least that long, where the backoff is shorter — up to the hour a
-// rate-limit verdict holds a backlog VOD (rateLimitBackoff), so a Retry-After
-// no one could mean does not strand the job.
 func (w *DownloadWorker) requeueBacklog(job *database.Job, err error, what string) (bool, error) {
 	if w.scheduler == nil {
 		return false, err
@@ -106,9 +101,6 @@ func (w *DownloadWorker) requeueBacklog(job *database.Job, err error, what strin
 		return false, fmt.Errorf("%w (gave up after %d retries)", err, backlogRetryLimit)
 	}
 	delay := backlogRetryBackoff << (attempt - 1)
-	if rl, ok := errors.AsType[*youtube.HTTPRateLimitError](err); ok {
-		delay = max(delay, min(rl.RetryAfter, rateLimitBackoff))
-	}
 	if !w.backToQueued(job, delay) {
 		return false, err
 	}

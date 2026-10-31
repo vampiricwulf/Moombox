@@ -300,10 +300,12 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 	// followed as a "YouTube Start Time Confirmed" of its own — the two
 	// embeds the deferral exists to merge. When processJob records the
 	// failure instead, it announces from the row itself
-	// (announceFoundOnFailure).
+	// (announceFoundOnFailure). An Innertube 429 on the whole cascade
+	// (isRateLimited) leaves it owed as a rate-limit verdict does, below:
+	// processJob waits that out too.
 	info, err := sp.fetchVideoInfo(ctx, job.VideoID)
 	if err != nil {
-		if !isTransportFailure(err) && sp.takeAnnounceFound(ctx, job) {
+		if !isTransportFailure(err) && !isRateLimited(err) && sp.takeAnnounceFound(ctx, job) {
 			sp.sendStreamFound(job, nil)
 		}
 		return nil, fmt.Errorf("full fetch failed: %w", err)

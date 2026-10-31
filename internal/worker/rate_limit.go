@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -97,21 +98,54 @@ func rateLimitedFetch(info *youtube.VideoInfo) bool {
 	return info != nil && info.PlayabilityError == youtube.PlayabilityRateLimited && probeFormatCount(info) == 0
 }
 
-// outlastRateLimit is processJob's handling of a run YouTube refused with a
-// rate-limit verdict (ErrRateLimited), from stream processing or from a stale
-// VOD's re-extraction. The verdict holds backlog admission first, whatever
-// the job is. A backlog VOD then goes back to Queued for its backoff
+// isRateLimited reports whether err is YouTube rate-limiting the session: a
+// rate-limit verdict (ErrRateLimited), or an Innertube 429 on the chain
+// (youtube.HTTPRateLimitError) — the HTTP form of the same limit, which
+// GetVideoInfo wraps when the cascade's last client was told too many
+// requests and nothing else answered (finishExtraction). The 429 went to
+// requeueBacklogAfterTransientFailure as any transient failure goes: a
+// broadcast or a manual add ended in Error on it, and a backlog VOD spent its
+// three retries in the 35 minutes they span — well inside the hour a limit
+// lasts — and ended in Error too, with no backlog hold placed. A 429 whose
+// typed error a wrap flattened to text is not recognised here, and is still
+// the transient failure classifyProbeErr reads in "HTTP 429".
+func isRateLimited(err error) bool {
+	if errors.Is(err, ErrRateLimited) {
+		return true
+	}
+	_, ok := errors.AsType[*youtube.HTTPRateLimitError](err)
+	return ok
+}
+
+// rateLimitWait is how long a job that is not backlog waits in place on err:
+// rateLimitRetryInterval, or the Retry-After a 429 named
+// (youtube.HTTPRateLimitError) where that is longer — the least YouTube asked
+// for — up to rateLimitBackoff, so a Retry-After no one could mean does not
+// strand the job. A backlog VOD's hour is already past any of them.
+func rateLimitWait(err error) time.Duration {
+	d := rateLimitRetryInterval
+	if rl, ok := errors.AsType[*youtube.HTTPRateLimitError](err); ok {
+		d = max(d, min(rl.RetryAfter, rateLimitBackoff))
+	}
+	return d
+}
+
+// outlastRateLimit is processJob's handling of a run YouTube rate-limited
+// (isRateLimited) — its verdict or a 429 — from stream processing or from a
+// stale VOD's re-extraction. The limit holds backlog admission first,
+// whatever the job is. A backlog VOD then goes back to Queued for its backoff
 // (requeueBacklogAfterRateLimit), or, when it cannot, ends as setJobError
 // ends it — a Cancel that landed meanwhile is reported as one. Any other job
-// gives back its slots, waits rateLimitRetryInterval in place under the
-// wait's progress line, and is run again from stream processing.
+// gives back its slots, waits in place under the wait's progress line
+// (rateLimitWait), and is run again from stream processing.
 //
-// Reports whether the run goes on: when it does, the row as it now reads, or
-// nil when the run is not to go on — ctx ended, or the row was deleted or
-// left the states the queue processes while it waited (waitOutOutage's
-// re-read) — which processJob routes to handleCancellation. since is when
-// the run first waited on a rate limit (zero: not yet), for the log.
-func (w *DownloadWorker) outlastRateLimit(ctx context.Context, job *database.Job, err error, since *time.Time) (*database.Job, bool) {
+// Returns the row as it now reads when the run goes on, or nil when it is
+// over: the backlog VOD's requeue or its Error, or a run whose ctx ended, or
+// whose row was deleted or left the states the queue processes while it
+// waited (waitOutOutage's re-read) — which this hands to handleCancellation.
+// since is when the run first waited on a rate limit (zero: not yet), which
+// decides whether the wait is logged at Warn or at Debug.
+func (w *DownloadWorker) outlastRateLimit(ctx context.Context, job *database.Job, err error, since *time.Time) *database.Job {
 	if w.scheduler != nil {
 		w.scheduler.holdForRateLimit(time.Now(), rateLimitBackoff)
 	}
@@ -119,7 +153,7 @@ func (w *DownloadWorker) outlastRateLimit(ctx context.Context, job *database.Job
 		if requeued, err := w.requeueBacklogAfterRateLimit(job, err); !requeued {
 			w.setJobError(job, err)
 		}
-		return nil, false
+		return nil
 	}
 	logWait := w.logger.Warn
 	if !since.IsZero() {
@@ -127,32 +161,35 @@ func (w *DownloadWorker) outlastRateLimit(ctx context.Context, job *database.Job
 	} else {
 		*since = time.Now()
 	}
+	wait := rateLimitWait(err)
 	logWait("YouTube rate-limited this job's fetch; the job keeps its status and fetches again",
-		"jobID", job.ID, "status", job.Status, "retryIn", rateLimitRetryInterval, "err", err)
+		"jobID", job.ID, "status", job.Status, "retryIn", wait, "err", err)
 	w.queue.ReleaseSlots(job.ID)
-	if !w.waitOutRateLimit(ctx, job.ID) {
-		return nil, true
+	if !w.waitOutRateLimit(ctx, job.ID, wait) {
+		w.handleCancellation(job)
+		return nil
 	}
 	cur, gerr := w.db.GetJob(job.ID)
 	if gerr != nil {
 		// A database error must not end a job that is waiting for nothing
 		// else: go on, as waitOutOutage does.
-		return job, true
+		return job
 	}
 	if cur == nil || !ShouldProcess(cur) {
-		return nil, true
+		w.handleCancellation(job)
+		return nil
 	}
-	return cur, true
+	return cur
 }
 
-// waitOutRateLimit holds jobID's run for rateLimitRetryInterval under the
-// wait's progress line, rewritten with the time left and cleared however the
-// wait ends, and reports false when ctx ends first.
-func (w *DownloadWorker) waitOutRateLimit(ctx context.Context, jobID string) bool {
-	until := time.Now().Add(rateLimitRetryInterval)
-	w.db.UpdateJobFields(jobID, map[string]any{"progress": rateLimitWaitLine(rateLimitRetryInterval)})
+// waitOutRateLimit holds jobID's run for wait under the wait's progress
+// line, rewritten with the time left and cleared however the wait ends, and
+// reports false when ctx ends first.
+func (w *DownloadWorker) waitOutRateLimit(ctx context.Context, jobID string, wait time.Duration) bool {
+	until := time.Now().Add(wait)
+	w.db.UpdateJobFields(jobID, map[string]any{"progress": rateLimitWaitLine(wait)})
 	defer w.db.UpdateJobFields(jobID, map[string]any{"progress": ""})
-	done := time.NewTimer(rateLimitRetryInterval)
+	done := time.NewTimer(wait)
 	defer done.Stop()
 	refresh := time.NewTicker(rateLimitWaitRefresh)
 	defer refresh.Stop()

@@ -917,6 +917,14 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 				w.handleCancellation(job)
 				return
 			}
+			if isRateLimited(err) {
+				// An Innertube 429 on the whole cascade: the HTTP form of the
+				// same limit, waited out as its verdict is (below).
+				if job = w.outlastRateLimit(ctx, job, err, &rateLimitSince); job == nil {
+					return
+				}
+				continue
+			}
 			requeued, err := w.requeueBacklogAfterTransientFailure(job, err)
 			if !requeued {
 				w.setJobError(job, err)
@@ -934,15 +942,9 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			}
 			if errors.Is(result.ErrSentinel, ErrRateLimited) {
 				// A refusal that passes: wait it out rather than record it.
-				fresh, again := w.outlastRateLimit(ctx, job, result.AsError(), &rateLimitSince)
-				if !again {
+				if job = w.outlastRateLimit(ctx, job, result.AsError(), &rateLimitSince); job == nil {
 					return
 				}
-				if fresh == nil {
-					w.handleCancellation(job)
-					return
-				}
-				job = fresh
 				continue
 			}
 			if result.Error == "" {
@@ -1005,18 +1007,13 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 				w.handleCancellation(job)
 				return
 			}
-			if errors.Is(err, ErrRateLimited) {
-				// The re-extraction's verdict was a rate limit, and the URLs
-				// it would have replaced have expired: as from Process.
-				fresh, again := w.outlastRateLimit(ctx, job, err, &rateLimitSince)
-				if !again {
+			if isRateLimited(err) {
+				// The re-extraction was rate-limited — its verdict, or a 429 —
+				// and the URLs it would have replaced have expired: as from
+				// Process.
+				if job = w.outlastRateLimit(ctx, job, err, &rateLimitSince); job == nil {
 					return
 				}
-				if fresh == nil {
-					w.handleCancellation(job)
-					return
-				}
-				job = fresh
 				continue
 			}
 			requeued, err := w.requeueBacklogAfterTransientFailure(job, err)
