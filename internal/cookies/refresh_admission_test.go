@@ -113,6 +113,14 @@ func TestAdmitSetCookieTable(t *testing.T) {
 			wantKey: cookieUpdateKey{Name: "__Secure-3PSIDCC-extra"}, wantValue: "fixture-3psidcc",
 		},
 		{
+			// SOCS is tracked (essentialYouTubeCookies), so YouTube's own
+			// consent rotation reaches cookies.txt the way CONSENT's does.
+			// Discriminates against the allowlist without SOCS.
+			name:  "unscoped SOCS is admitted",
+			admit: true, header: "SOCS=CAESxyz; Max-Age=600; Path=/; Secure",
+			wantKey: cookieUpdateKey{Name: "SOCS"}, wantValue: "CAESxyz", wantExpiryOffset: 600,
+		},
+		{
 			// The narrowing that keeps the new surface narrow. Delete the
 			// trackedCookieName check and this row starts passing.
 			name:  "unscoped untracked name is refused",

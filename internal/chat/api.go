@@ -93,8 +93,17 @@ type ChatAPI struct {
 	// construction goes stale mid-job, 401s, and ends chat capture for good.
 	// nil-safe — see generateAuth below, whose shape this mirrors.
 	cookieHeader func() string
-	generateAuth func() string // Returns Authorization header (SAPISIDHASH) for authenticated requests
-	client       *http.Client
+	// pageCookieHeader is the Cookie header for the watch page
+	// FetchFreshContinuation reads, re-read per fetch like cookieHeader: the
+	// jar's cookies with the consent and language a YouTube HTML page is
+	// fetched with (youtube.Auth.PageCookieHeader) — SOCS=CAI when not signed
+	// in, which is what lets an EU address reach the page's ytInitialData at
+	// all, and an English PREF. nil falls back to cookieHeader. The chat API
+	// calls keep cookieHeader: they are Innertube, whose context states the
+	// language itself.
+	pageCookieHeader func() string
+	generateAuth     func() string // Returns Authorization header (SAPISIDHASH) for authenticated requests
+	client           *http.Client
 	// clientContext is the constant Innertube "context" object (client info +
 	// visitorData), built once and reused for every poll. Live chat polls the
 	// same endpoint every ~5s for hours; rebuilding + re-marshaling this nested
@@ -154,6 +163,12 @@ func NewChatAPI(apiKey, visitorData string, cookieHeader func() string) *ChatAPI
 		"clientVersion": constants.WebClient.ClientVersion,
 		"hl":            "en",
 		"gl":            "US",
+
+		// The two yt-dlp's _extract_context forces beside hl on every
+		// Innertube context (_base.py:753-759), as every player client's
+		// Context states them (constants.go).
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	}
 	if visitorData != "" {
 		client["visitorData"] = visitorData
@@ -189,14 +204,18 @@ func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) 
 		return "", false, err
 	}
 	req.Header.Set("User-Agent", constants.UserAgents.Web)
-	// Force English-language watch pages so the EU consent gate hits a
-	// known-shape variant (we detect it via redirect URL below) and so
-	// ytInitialData field names stay stable. DNT is best-effort hygiene
-	// (audit chat.md C14).
+	// Ask for English-language watch pages so ytInitialData field names stay
+	// stable; the page cookie's PREF says so too, and outranks this header
+	// for a signed-in session. DNT is best-effort hygiene (audit chat.md
+	// C14).
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	req.Header.Set("DNT", "1")
-	if api.cookieHeader != nil {
-		if ch := api.cookieHeader(); ch != "" {
+	cookieHeader := api.pageCookieHeader
+	if cookieHeader == nil {
+		cookieHeader = api.cookieHeader
+	}
+	if cookieHeader != nil {
+		if ch := cookieHeader(); ch != "" {
 			req.Header.Set("Cookie", ch)
 		}
 	}
@@ -211,13 +230,15 @@ func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) 
 	// consent.youtube.com / consent.google.com when YouTube wants the
 	// viewer to accept tracking before serving the watch page. The
 	// returned HTML has no ytInitialData so extraction silently fails;
-	// surface the cause distinctly so operators know to ship CONSENT
-	// cookies (audit chat.md C14).
+	// surface the cause distinctly (audit chat.md C14). The page cookie
+	// already carries SOCS=CAI for a session that is not signed in, so a
+	// wall that stands is one only a browser's own consent passes — SOCS,
+	// which replaced CONSENT (yt-dlp 378ae9f9f).
 	if resp.Request != nil && resp.Request.URL != nil {
 		host := resp.Request.URL.Host
 		if strings.HasPrefix(host, "consent.") {
 			io.Copy(io.Discard, resp.Body)
-			return "", false, fmt.Errorf("watch page redirected to consent wall (%s); supply CONSENT cookies", host)
+			return "", false, fmt.Errorf("watch page redirected to consent wall (%s); accept YouTube's cookie consent in a browser and supply its cookies, SOCS included", host)
 		}
 	}
 

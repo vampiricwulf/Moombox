@@ -877,14 +877,21 @@ type EmbedPageResult struct {
 }
 
 // FetchEmbedPage fetches a YouTube embed page and extracts encryptedHostFlags
-// and the player URL.
-func FetchEmbedPage(ctx context.Context, videoID string) (*EmbedPageResult, error) {
+// and the player URL. cookieHeader is the consent and language pair
+// (Auth.ConsentCookieHeader): the page is fetched without the jar's session,
+// as it always was — neither value it is read for depends on one — but the
+// consent wall stands in front of it as in front of the watch page, and
+// yt-dlp fetches it behind the same SOCS (_initialize_consent).
+func FetchEmbedPage(ctx context.Context, videoID, cookieHeader string) (*EmbedPageResult, error) {
 	url := fmt.Sprintf("%s/%s?html5=1", constants.YouTubeURLs.Embed, videoID)
 
 	headers := map[string]string{
 		"User-Agent":      constants.UserAgents.Web,
 		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 		"Accept-Language": "en-US,en;q=0.5",
+	}
+	if cookieHeader != "" {
+		headers["Cookie"] = cookieHeader
 	}
 
 	body, err := utils.FetchBody(ctx, url, 30*time.Second, headers)

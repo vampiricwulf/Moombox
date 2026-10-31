@@ -56,7 +56,7 @@ type PlayerAPI struct {
 	// their own) must carry what the last full extraction learned, as yt-dlp
 	// threads the master ytcfg's session into every client call. Captured
 	// alongside visitor data (captureVisitorData), sticky: a watch page that
-	// names no session (fetched without cookies) does not clear it.
+	// names no session (fetched without the jar's session) does not clear it.
 	//
 	// sessionAccount is the jar's account (Auth.Identity) the session was
 	// read under, and probeYtcfg attaches the session only while the jar

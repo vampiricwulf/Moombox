@@ -213,10 +213,22 @@ type YouTubeChannelInfo struct {
 // transient failures (network errors, HTTP 5xx surfaces as "HTTP 5xx" in
 // the FetchBody error string). HTTP 4xx errors and ctx cancellation
 // fast-fail. Audit reports/small-packages.md.
+//
+// The page goes out with the consent and language cookies every YouTube page
+// carries (constants.SignedOutYouTubePageCookie: SOCS=CAI and an English
+// PREF), as yt-dlp's tab extractor reads the same page (_extract_webpage →
+// _download_webpage, yt_dlp/extractor/youtube/_tab.py:955-959) through a jar
+// _real_initialize gave both (_base.py:675-704). Without SOCS an EU, EEA or
+// UK address is redirected to consent.youtube.com, whose page names no
+// channel, so adding a channel by @handle or custom URL failed "could not
+// find channel ID on page". The read is anonymous by design and sits below
+// internal/cookies in the import graph, so it carries the signed-out pair,
+// not the jar's.
 func ResolveYouTubeChannel(ctx context.Context, urlPath string) (*YouTubeChannelInfo, error) {
 	pageURL := youtubeBaseURL + urlPath
 	headers := map[string]string{
 		"User-Agent": constants.UserAgents.Web,
+		"Cookie":     constants.SignedOutYouTubePageCookie,
 	}
 
 	var body []byte

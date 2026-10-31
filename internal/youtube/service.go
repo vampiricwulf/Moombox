@@ -142,15 +142,16 @@ func (s *Service) Init(ctx context.Context) {
 	}
 }
 
-// fetchHomepage fetches the YouTube homepage with the jar's cookies. A caller
-// keeping the session it states reads the jar's account (Auth.Identity)
-// BEFORE calling, for the reason captureVisitorData gives.
+// fetchHomepage fetches the YouTube homepage with the jar's cookies, as a
+// page carries them (Auth.PageCookieHeader): SOCS=CAI when the jar is not
+// signed in, so an EU address gets the homepage — its visitor data, API key
+// and player URL — rather than the consent interstitial, and an English PREF.
+// A caller keeping the session it states reads the jar's account
+// (Auth.Identity) BEFORE calling, for the reason captureVisitorData gives.
 func (s *Service) fetchHomepage(ctx context.Context) (string, error) {
 	headers := map[string]string{
 		"User-Agent": constants.UserAgents.Web,
-	}
-	if ch := s.Auth.GetCookieHeader(); ch != "" {
-		headers["Cookie"] = ch
+		"Cookie":     s.Auth.PageCookieHeader(),
 	}
 	body, err := utils.FetchBody(ctx, constants.YouTubeURLs.Base, 15*time.Second, headers)
 	if err != nil {

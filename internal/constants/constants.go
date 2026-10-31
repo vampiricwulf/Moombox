@@ -86,6 +86,19 @@ var YouTubeURLs = struct {
 // DefaultAPIKey is the default YouTube API key.
 const DefaultAPIKey = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 
+// SignedOutYouTubePageCookie is the Cookie header of a YouTube page fetched
+// with no cookie jar at all: the consent and language pair yt-dlp's jar
+// carries for a session with no cookies of its own (_initialize_consent and
+// _initialize_pref, yt_dlp/extractor/youtube/_base.py:675-692; SOCS=CAI
+// since 378ae9f9f, #7774, hl since f3aa3c3f9, #1018, tz since 396a76f7b,
+// #2402). It is what cookies.CookieJar.YouTubeConsentCookieHeader yields on
+// an empty jar, and what the BotGuard sidecar's homepage fetch sends
+// (HOMEPAGE_COOKIE, bgutil-sidecar/src/server.js), both pinned by
+// TestSignedOutPageCookieIsTheEmptyJarsPair. It is for the pages that cannot
+// reach the jar: internal/utils' channel-page read, which sits below
+// internal/cookies in the import graph.
+const SignedOutYouTubePageCookie = "PREF=hl=en&tz=UTC; SOCS=CAI"
+
 // =============================================================================
 // YOUTUBE CLIENT CONFIGURATIONS
 // =============================================================================
@@ -103,6 +116,14 @@ const DefaultAPIKey = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 // for a signed-in session, else the jsless one when no JS runtime is
 // available, else the default. How Moombox's format ranking follows them is
 // the AuthLevel block in internal/youtube (types.go).
+//
+// Every Context states hl=en, timeZone=UTC and utcOffsetMinutes=0, the three
+// fields yt-dlp's _extract_context forces into every Innertube context
+// (_base.py:753-759; the zone since 396a76f7b, #2402, "Enforce UTC"):
+// English reasons for the keyword classification, and
+// times stated in UTC, the zone every stored time is in. The YouTube pages
+// get the same language and zone from their PREF cookie
+// (internal/cookies/page_cookies.go).
 
 // YouTubeClientConfig holds configuration for a YouTube API client.
 type YouTubeClientConfig struct {
@@ -139,6 +160,9 @@ var TVSamsungClient = YouTubeClientConfig{
 		"osName":        "Tizen",
 		"osVersion":     "2.4.0",
 		"hl":            "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -154,6 +178,9 @@ var TVDowngradedClient = YouTubeClientConfig{
 		"clientName":    "TVHTML5",
 		"clientVersion": "5.20260707",
 		"hl":            "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -167,6 +194,9 @@ var WebCreatorClient = YouTubeClientConfig{
 		"clientName":    "WEB_CREATOR",
 		"clientVersion": "1.20260708.06.00",
 		"hl":            "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -180,6 +210,9 @@ var WebClient = YouTubeClientConfig{
 		"clientName":    "WEB",
 		"clientVersion": "2.20260708.00.00",
 		"hl":            "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -197,6 +230,9 @@ var WebSafariClient = YouTubeClientConfig{
 		"clientName":    "WEB",
 		"clientVersion": "2.20260708.00.00",
 		"hl":            "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -211,6 +247,9 @@ var WebEmbeddedClient = YouTubeClientConfig{
 		"clientName":    "WEB_EMBEDDED_PLAYER",
 		"clientVersion": "2.20260708.00.00",
 		"hl":            "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -241,6 +280,9 @@ var VisionOSClient = YouTubeClientConfig{
 		// reasons ("member", "age", "private", "live event will begin", …), so
 		// a localized response misclassifies the stream.
 		"hl": "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -276,6 +318,9 @@ var AndroidVRClient = YouTubeClientConfig{
 		// whose playability reason is what classifyStream reads, so without
 		// it a non-English locale misclassifies every probed stream.
 		"hl": "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 

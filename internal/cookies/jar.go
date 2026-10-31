@@ -138,6 +138,13 @@ var essentialYouTubeCookies = map[string]bool{
 	"__Secure-1PSIDCC": true, "__Secure-3PSIDCC": true,
 	"LOGIN_INFO": true, "VISITOR_INFO1_LIVE": true, "VISITOR_PRIVACY_METADATA": true,
 	"YSC": true, "__Secure-ROLLOUT_TOKEN": true, "CONSENT": true, "PREF": true,
+	// SOCS is the consent cookie YouTube has set in CONSENT's place since
+	// 2023 (yt-dlp 378ae9f9f, #7774, moved its own from CONSENT=YES+ to
+	// SOCS=CAI). Kept so a user's own consent survives Load, browser
+	// extraction (isEssentialCookie) and Set-Cookie admission
+	// (trackedCookieName) alike, and YouTubePageCookieHeader forwards it
+	// rather than putting CAI in its place.
+	"SOCS": true,
 }
 
 // Essential Twitch cookies.
@@ -837,7 +844,20 @@ func (j *CookieJar) GetCookieHeader() string {
 func (j *CookieJar) HasYouTubeAuthCookies() bool {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
+	return j.hasYouTubeAuthLocked()
+}
 
+// hasYouTubeAuthLocked is HasYouTubeAuthCookies for a caller already holding
+// j.mu, so a header built under one read lock (YouTubePageCookieHeader) asks
+// the same question of the same jar contents it emits.
+//
+// It is the question yt-dlp's _has_auth_cookies asks (_base.py:828-833), not
+// the same answer at every edge: upstream also counts __Secure-1PAPISID
+// alone, and takes LOGIN_INFO's presence, empty or not, where this needs
+// SAPISID or __Secure-3PAPISID and a non-empty LOGIN_INFO. A real export
+// carries SAPISID beside the 1P copy and a LOGIN_INFO with a value, so the
+// two agree on what browsers write.
+func (j *CookieJar) hasYouTubeAuthLocked() bool {
 	hasSapisid := j.youtube["SAPISID"].value != "" || j.youtube["__Secure-3PAPISID"].value != ""
 	hasLoginInfo := j.youtube["LOGIN_INFO"].value != ""
 	return hasSapisid && hasLoginInfo

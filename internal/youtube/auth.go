@@ -63,6 +63,26 @@ func (a *Auth) GetCookieHeader() string {
 	return a.jar.GetCookieHeader()
 }
 
+// PageCookieHeader is the Cookie header for a YouTube HTML page fetched with
+// the jar's session: the authenticated watch page, the homepage, the liveness
+// and membership pages, chat's continuation page. It is GetCookieHeader with
+// yt-dlp's consent and language applied — SOCS=CAI when the jar is not signed
+// in, PREF with hl=en and tz=UTC — in the header only (see
+// cookies.CookieJar.YouTubePageCookieHeader). The Innertube calls keep
+// GetCookieHeader (GenerateAPIHeaders): their contexts state the language and
+// time zone themselves.
+func (a *Auth) PageCookieHeader() string {
+	return a.jar.YouTubePageCookieHeader()
+}
+
+// ConsentCookieHeader is the consent and language cookies alone, for a
+// YouTube read made without the jar's session: the public cascade's watch
+// page, the embed page and the iframe API script. See
+// cookies.CookieJar.YouTubeConsentCookieHeader.
+func (a *Auth) ConsentCookieHeader() string {
+	return a.jar.YouTubeConsentCookieHeader()
+}
+
 // SyncCookies reloads cookies from the file.
 func (a *Auth) SyncCookies() error {
 	return a.jar.Reload()

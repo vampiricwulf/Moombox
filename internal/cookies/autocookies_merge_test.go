@@ -79,6 +79,12 @@ func TestIsEssentialCookie(t *testing.T) {
 		// narrowed to isYouTubeDomain only would wrongly reject this.
 		{"PREF", "accounts.google.com", true},
 		{"CONSENT", ".google.com", true},
+		// SOCS, the consent YouTube sets in CONSENT's place (yt-dlp
+		// 378ae9f9f): a browser's own consent is extracted so the page
+		// header forwards it (YouTubePageCookieHeader), under the same
+		// domain guard as CONSENT.
+		{"SOCS", ".youtube.com", true},
+		{"SOCS", ".twitch.tv", false},
 	}
 	for _, tc := range cases {
 		if got := isEssentialCookie(tc.name, tc.domain); got != tc.want {

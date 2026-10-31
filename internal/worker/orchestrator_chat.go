@@ -71,10 +71,12 @@ func chatSourceFor(ctx context.Context, info *youtube.VideoInfo, videoID, cookie
 func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo) *chat.ChatDownloader {
 	// The cookie header is only needed for the FALLBACK fetch. That is a
 	// ONE-SHOT call, so a snapshot of the header is the right thing here — the
-	// long-lived chat downloader below gets a live getter instead.
+	// long-lived chat downloader below gets a live getter instead. The page
+	// header (Auth.PageCookieHeader): a watch page, so it carries the
+	// consent and language cookies every YouTube page is fetched with.
 	cookieHeader := ""
 	if jobCtx.YT != nil && jobCtx.YT.Auth != nil {
-		cookieHeader = jobCtx.YT.Auth.GetCookieHeader()
+		cookieHeader = jobCtx.YT.Auth.PageCookieHeader()
 	}
 
 	// Chat continuation, replay flag and visitor data are extracted at
@@ -122,6 +124,9 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 		// A nil Auth leaves the field nil, which the API treats as "no
 		// Cookie header" — no poll-time panic.
 		opts.CookieHeader = jobCtx.YT.Auth.GetCookieHeader
+		// The watch page a stale continuation is re-read off is a page, and
+		// gets the page header, as the fallback fetch above does.
+		opts.PageCookieHeader = jobCtx.YT.Auth.PageCookieHeader
 	}
 
 	if videoInfo.ScheduledStartTime != "" {

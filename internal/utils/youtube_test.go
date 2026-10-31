@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -233,6 +234,50 @@ func TestResolveYouTubeChannelMissingChannelIDIsError(t *testing.T) {
 	_, err := ResolveYouTubeChannel(t.Context(), "/@SomeChannel")
 	if err == nil {
 		t.Fatal("ResolveYouTubeChannel with no channel ID: want error, got nil")
+	}
+}
+
+// TestResolveYouTubeChannelPassesTheConsentWall: the channel page goes out
+// with SOCS=CAI and an English PREF (constants.SignedOutYouTubePageCookie),
+// as yt-dlp's tab extractor reads it through its consented jar. The stub is
+// the EU interstitial: a request without a consented SOCS is redirected to a
+// consent page that names no channel, which is how an @handle add used to
+// fail "could not find channel ID on page".
+//
+// Mutant: the Cookie header dropped from ResolveYouTubeChannel (the walled
+// page, an error, and no SOCS or PREF seen).
+func TestResolveYouTubeChannelPassesTheConsentWall(t *testing.T) {
+	const channelID = "UCabc1234567890_-DEFGHIj"
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/consent" {
+			fmt.Fprint(rw, `<!doctype html><html><body>Before you continue to YouTube</body></html>`)
+			return
+		}
+		mu.Lock()
+		seen = append(seen, r.Header.Get("Cookie"))
+		mu.Unlock()
+		if c, err := r.Cookie("SOCS"); err != nil || c.Value != "CAI" {
+			http.Redirect(rw, r, "/consent", http.StatusFound)
+			return
+		}
+		fmt.Fprintf(rw, `<link rel="canonical" href="https://www.youtube.com/channel/%s">`, channelID)
+	}))
+	t.Cleanup(srv.Close)
+	stubYouTubeBaseURL(t, srv)
+
+	info, err := ResolveYouTubeChannel(t.Context(), "/@SomeChannel")
+	if err != nil {
+		t.Fatalf("ResolveYouTubeChannel behind the consent wall: %v (cookies sent %q)", err, seen)
+	}
+	if info.ChannelID != channelID {
+		t.Errorf("ChannelID: want %q, got %q", channelID, info.ChannelID)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"PREF=hl=en&tz=UTC; SOCS=CAI"}; !slices.Equal(seen, want) {
+		t.Errorf("Cookie headers sent: %q, want %q", seen, want)
 	}
 }
 
