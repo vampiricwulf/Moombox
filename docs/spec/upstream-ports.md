@@ -60,6 +60,10 @@ Newest first. One row per Moombox commit that ports upstream work.
 | 2026-10-31 | `33185cd7` | yt-dlp `715af0c63` (#14646) | The downloader half of `available_at`: every YouTube strategy waits for its URLs' player response before its first media request (`waitForPlayback`), a credential refresh for its fresh response (`waitForFreshPlayback`); live and post-live never wait |
 | 2026-10-31 | `1126da36` | yt-dlp `715af0c63` (#14646), `3c279b33c` (#17062) | `available_at` read off each player response's pre-roll ads (adPlacements START, adSlots BEFORE_CONTENT) and stamped on its formats and manifests (`playbackAvailableAt`) |
 | 2026-10-22 | `15fe37f4` | yt-dlp `12ac9aca7` (#17703) | ytInitialData read from `<script id="yt-initial-data" type="application/json">` (staged rollout, cookie-authed pages): third anchor in both locator sets |
+| 2026-10-31 | `ac9cc2ca` | yt-dlp `4d37720a0` (#5091) | `post_live` read off `videoDetails.isPostLiveDvr`, upstream's first `live_status` rule, at the extraction's exit (`finishExtraction`, the `get_first` verdict over its responses): TV's answer in the post-live DVR window, with no microformat, was a VOD and went to the whole-file path |
+| 2026-10-31 | `5d91dfab` | yt-dlp `545cc85d1`, `8c1f07d81` (#16771) | The format `type` read (`Format.IsOTF`); in the dedup a copy a whole-file GET cannot fetch (`Format.Segmented`: OTF always, live adaptive outside live processing) loses to another client's whole file of the same stream; the split gate takes only audio-less video (`Format.IsVideoOnly`) |
+| 2026-10-31 | `b889d63b` | yt-dlp `8c1f07d81` (#16771) | A VOD whose split pool carries `targetDurationSec` takes the manifest-free path whatever its status (`hasLiveAdaptiveSplit`), so a Resume in the post-live window continues its capture |
+| 2026-10-31 | `6ad3085e` | yt-dlp `545cc85d1`, `8c1f07d81` (#16771) | The whole-file VOD pool leaves segmented formats out (`wholeFileVodPool`) and fails clearly on a wanted stream served segmented alone (`segmentedStreamLost`); a `not_a_stream` VOD with a segmented pool and a manifest goes to DASH |
 
 ## Reviewed, no action (most recent review)
 

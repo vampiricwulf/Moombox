@@ -379,10 +379,18 @@ The `DownloadOrchestrator` manages the complete download lifecycle for a single 
 13. Post-download trim if job has `StartTime`/`EndTime` set
 14. Clean up staging directory (`cleanupStagingAfterMux`, on `decideStagingCleanup`'s shields, which the boot sweep applies too: a set-aside recording, an unmuxed part, an unused root recording, a recording a mux could not carry whole — a mux-gap record that holds, `stagedMuxGaps` — then an incomplete tail and an incomplete chat capture; each kept dir's Warn, which the job's own log carries, names the shield)
 
-**Strategy selection logic:**
+**Strategy selection logic** (`selectDownloadStrategy`, `internal/worker/strategies.go`; "split" is `HasManifestlessDashFormats`: a video-only and an audio-only format, both with a URL and no contentLength):
 ```
-if isVod AND (not_a_stream OR no DASH manifest) AND formats exist:
-    DownloadVod()      -- direct format URL download, 5MB chunked Range requests
+if isVod AND post_live AND split:
+    DownloadManifestlessDash()  -- &sq=N from sq=0, even beside a manifest (a post-live one covers ~2 h)
+elif isVod AND split among the formats carrying targetDurationSec:
+    DownloadManifestlessDash()  -- live adaptive formats, whatever the status says
+elif isVod AND not_a_stream AND DASH manifest AND a segmented (OTF / live adaptive) format:
+    DownloadDash()     -- yt-dlp's route for OTF: the manifest
+elif isVod AND (not_a_stream OR no DASH manifest) AND formats exist:
+    DownloadVod()      -- direct whole-file download, 5MB chunked Range requests, segmented formats left out
+elif not isVod AND split:
+    DownloadManifestlessDash()  -- the primary live path
 elif DASH manifest exists:
     DownloadDash()     -- sequential DASH segment download
 elif HLS manifest exists:
@@ -392,6 +400,8 @@ elif formats exist:
 else:
     error: no download strategy available
 ```
+
+The status this reads is the extraction's: a TV answer in the post-live DVR window (no microformat, `videoDetails.isPostLiveDvr`, live adaptive formats, no manifest) is `post_live` (see platform-services.md, Stream Status Classification), so a Resume of an `incomplete_tail` job in that window continues its capture on the manifest-free path instead of handing it to `DownloadVod`, which set the capture aside and fetched one fragment. Pinned by `TestSelectDownloadStrategy` (`internal/worker/orchestrator_strategy_test.go`) and `TestResumeInThePostLiveWindowContinuesTheLiveCapture` (`internal/worker/post_live_routing_test.go`).
 
 **Live stream download loop (`runLiveStreamDownload`):**
 1. Starts quality monitor (30-second probe interval) if user hasn't manually selected itags. Every tick starts with one cheap player call (`probeVideoInfo`, `internal/worker/orchestrator_youtube.go`): `ProbeVideoStatus` (ANDROID_VR, cookieless, no POT, no watch page) for public streams, and `ProbeVideoStatusAuthenticated` (TV_SAMSUNG with cookies, no watch page, no STS, no POT) for members-only / age-restricted / login-required ones, where the cookieless probe would 401. When the cookieless probe comes back with nothing selectable and the install has cookies, one TV-with-cookies call is tried next — O-H's "recovery streams" half, gated on `HasAuthCookies` because a cookieless TV call is bot-walled. Only if nothing cheaper produced a `DashManifestURL` or a split-adaptive format pool does the tick fall back, ONCE, to the full `GetVideoInfo` cascade — including when a probe errored, so one 403 never ends a tick that the cascade's three-to-seven clients could still answer. TWO errors buy nothing there and end the tick where they were seen: a cancelled context, and a substituted video (`*youtube.VideoIDMismatchError`) — a substitution is IP-level, so every client is substituted alike and the cascade would only re-ask a blocking server seven more times, nine player calls per 30 s tick for as long as the block lasts. Before owner decision O-H that cascade was the FIRST call on the auth-walled branch and ran on EVERY tick: a 1-5 MB cookied watch page plus three to seven player calls, ~120 pages/hour/job.
