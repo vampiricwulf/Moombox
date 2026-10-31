@@ -83,6 +83,14 @@ type PlayerAPI struct {
 	sessionAsked       string
 	sessionRetryAt     time.Time
 	sessionClock       func() time.Time
+	// playerURL is the player JS URL the latest source named — a watch page,
+	// the homepage, an embed page, the iframe API — when (playerURLAt) and
+	// which (playerURLSource): the memory resolvePlayerURL falls back on for
+	// an extraction whose watch page names no player (player_url.go).
+	playerURLMu     sync.Mutex
+	playerURL       string
+	playerURLAt     time.Time
+	playerURLSource string
 	// cachedVisitorData reads the Service's cached visitor data
 	// (Service.GetVisitorData, wired by NewService) for an extraction whose
 	// watch page could not be had (fallbackYtcfg). nil: there is none.

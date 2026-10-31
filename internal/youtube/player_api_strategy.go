@@ -500,8 +500,11 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	formatPool := []Format{}
 	tally := &mismatchTally{}
 
-	// Extract STS (signatureTimestamp) from player JS for format decryption
-	sts := p.extractSTS(ctx, ytcfg.PlayerURL)
+	// The player URL, the page's or a fallback source's (resolvePlayerURL),
+	// then STS (signatureTimestamp) for format decryption — so the page's
+	// own parse and every client below carry both.
+	ytcfg.PlayerURL = p.resolvePlayerURL(ctx, videoID, ytcfg.PlayerURL)
+	sts := p.extractSTS(ctx, ytcfg)
 
 	// Parse watch page player response
 	var wpParsed *VideoInfo
@@ -821,7 +824,8 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 //
 // The cascades do not capture it back (captureVisitorData): it holds what
 // the caches already do, and storing the visitor data again would only
-// restart its TTL.
+// restart its TTL. No player URL either — resolvePlayerURL supplies that for
+// a page that failed and a page that named none alike.
 func (p *PlayerAPI) fallbackYtcfg(withSession bool) *YtcfgData {
 	vd := ""
 	if p.cachedVisitorData != nil {
@@ -871,8 +875,10 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	formatPool := []Format{}
 	tally := &mismatchTally{}
 
-	// Extract STS for public path too
-	stsPublic := p.extractSTS(ctx, wp.Ytcfg.PlayerURL)
+	// The player URL and STS for the public path too (see the
+	// authenticated path).
+	wp.Ytcfg.PlayerURL = p.resolvePlayerURL(ctx, videoID, wp.Ytcfg.PlayerURL)
+	stsPublic := p.extractSTS(ctx, wp.Ytcfg)
 
 	var wpParsed *VideoInfo
 	if wp.PlayerResponse != nil {
@@ -1029,10 +1035,26 @@ func finalizeVideoInfo(ctx context.Context, result, wpParsed *VideoInfo, formatP
 	return result
 }
 
-// extractSTS extracts the signatureTimestamp from a player URL.
-// Returns 0 if unavailable (missing player URL, no cipher solver, or extraction error).
-func (p *PlayerAPI) extractSTS(ctx context.Context, playerURL string) int {
-	if playerURL == "" || p.cipherSolver == nil {
+// extractSTS is the signatureTimestamp an extraction's player calls carry:
+// the one ytcfg states, else the one read out of the player JS. 0 when there
+// is no player URL, or neither source has it (no cipher solver, an
+// extraction error).
+//
+// yt-dlp's order (_extract_signature_timestamp, _video.py:2239-2241): ytcfg's
+// "STS" first, the player only when ytcfg has none — which spares the
+// extraction a ~3 MB player fetch the page already answered. And like
+// upstream (`if player_url else None`, _video.py:2942) no player URL means no
+// STS at all: one would only ask for signatures nothing here can solve.
+func (p *PlayerAPI) extractSTS(ctx context.Context, ytcfg *YtcfgData) int {
+	if ytcfg == nil || ytcfg.PlayerURL == "" {
+		return 0
+	}
+	if ytcfg.STS > 0 {
+		p.logger.Debug("[PlayerApi] Got signature timestamp from ytcfg", "sts", ytcfg.STS)
+		return ytcfg.STS
+	}
+	playerURL := ytcfg.PlayerURL
+	if p.cipherSolver == nil {
 		return 0
 	}
 	stsStr, err := p.cipherSolver.GetSts(ctx, playerURL)
@@ -1376,6 +1398,26 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 		if err != nil {
 			p.logger.Warn("[PlayerApi] Failed to fetch embed page", slog.String("error", err.Error()))
 			// Continue without encryptedHostFlags — it may still work
+		}
+	}
+	// The embed page names a player as well, as yt-dlp reads one off this
+	// page's ytcfg for web_embedded (_video.py:3066-3068). It is remembered
+	// for later extractions (resolvePlayerURL), and adopted for this call
+	// when the extraction got none from anywhere earlier — its STS with it,
+	// and the result carries it as its PlayerURL. Fetched only on the
+	// age-restricted path, after STS was needed, so it cannot stand ahead of
+	// the other sources there.
+	if embedResult != nil && embedResult.PlayerURL != "" {
+		p.rememberPlayerURL(embedResult.PlayerURL, "embed page")
+		if ytcfg == nil || ytcfg.PlayerURL == "" {
+			adopted := YtcfgData{}
+			if ytcfg != nil {
+				adopted = *ytcfg
+			}
+			adopted.PlayerURL = embedResult.PlayerURL
+			ytcfg = &adopted
+			sts = p.extractSTS(ctx, ytcfg)
+			p.logger.Info("[PlayerApi] web_embedded: using the embed page's player", "videoID", videoID, "playerURL", ytcfg.PlayerURL)
 		}
 	}
 

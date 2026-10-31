@@ -402,6 +402,9 @@ type YtcfgData struct {
 	SessionIndex       *int
 	DelegatedSessionID string
 	DataSyncID         string
+	// STS is the signature timestamp the page's ytcfg states, or 0; the one
+	// extractSTS prefers to reading the player JS for it.
+	STS int
 	// GvsBindToVideoID mirrors yt-dlp's gvs_bind_to_video_id: true when the
 	// page's player configs carry html5_generate_content_po_token=true, the
 	// experiment under which GVS PO tokens bind to the video ID instead of

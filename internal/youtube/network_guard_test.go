@@ -1,6 +1,8 @@
 package youtube
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +18,10 @@ import (
 // pointed at the tripwire, and every variable that would exempt a host from
 // it (or make net/http ignore HTTP_PROXY, as REQUEST_METHOD does under CGI)
 // cleared.
+// productionIframePlayerURL is fetchIframePlayerURL as the package
+// initialised it, before TestMain stubbed it.
+var productionIframePlayerURL func(context.Context) (string, error)
+
 var (
 	networkGuardProxyVars = []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}
 	networkGuardClearVars = []string{"NO_PROXY", "no_proxy", "REQUEST_METHOD"}
@@ -34,9 +40,20 @@ var (
 // (MOOMBOX_LIVE_YT_TEST, MOOMBOX_LIVE_YT_COOKIES) run without it. Either way
 // the tests run through treeguard.Run, which fails a run that left a file in
 // the package directory.
+//
+// The player-URL fallback (fetchIframePlayerURL) answers nothing in the unit
+// suite, as a blackholed iframe API would: every cascade test whose stubbed
+// watch page names no player would otherwise reach for /iframe_api. The
+// tests that are about that fallback set it themselves, and
+// productionIframePlayerURL keeps what production runs for the test that
+// pins it.
 func TestMain(m *testing.M) {
 	if os.Getenv("MOOMBOX_LIVE_YT_TEST") == "1" || os.Getenv("MOOMBOX_LIVE_YT_COOKIES") != "" {
 		os.Exit(treeguard.Run(m))
+	}
+	productionIframePlayerURL = fetchIframePlayerURL
+	fetchIframePlayerURL = func(context.Context) (string, error) {
+		return "", errors.New("the unit suite's iframe API answers nothing")
 	}
 
 	var mu sync.Mutex
