@@ -526,7 +526,7 @@ Warn per key, and the next save leaves them out of the file.
 | StagingDirectory | string | "./staging" | `staging_directory` |
 | FfmpegPath | string | "" | `ffmpeg_path` |
 
-`database_path` also places `open-alerts.json`, the notifications sent and not yet closed and the backlog disk gate's hold, in the same directory (`openAlertsPath`, `cmd/moombox/open_alerts.go`; see operations.md, Event Types), so a volume or a moved install carries both.
+`database_path` also places `open-alerts.json`, the notifications sent and not yet closed and the backlog scheduler's two holds — the disk gate's and the YouTube rate limit's — in the same directory (`openAlertsPath`, `cmd/moombox/open_alerts.go`; see operations.md, Event Types), so a volume or a moved install carries both.
 
 A relative `database_path` resolves against the working directory of the process that opens it, as the OS resolves it — on Unix a `..` after a symlinked working directory climbs out of the symlink's target. The daemon records the file it opened (`Database.File`, an earlier release's file when `database.ResolveFile` keeps one), absolute, beside its single-instance lock, and `moombox add` writes to that file while the daemon runs, refusing a config whose `database_path` resolves elsewhere; with no daemon running it resolves a relative one against its own working directory and refuses when no database is there (`resolveAddDatabase`, `cmd/moombox/daemon_record.go`; [architecture.md](architecture.md) § Subcommands and Flags).
 
