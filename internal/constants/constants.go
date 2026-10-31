@@ -106,7 +106,8 @@ const DefaultAPIKey = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 //
 // Every Context states hl=en, timeZone=UTC and utcOffsetMinutes=0, the three
 // fields yt-dlp's _extract_context forces into every Innertube context
-// (_base.py:753-759): English reasons for the keyword classification, and
+// (_base.py:753-759; the zone since 396a76f7b, #2402, "Enforce UTC"):
+// English reasons for the keyword classification, and
 // times stated in UTC, the zone every stored time is in. The YouTube pages
 // get the same language and zone from their PREF cookie
 // (internal/cookies/page_cookies.go).

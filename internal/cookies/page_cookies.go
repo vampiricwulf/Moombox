@@ -20,17 +20,18 @@ import (
 //     consent.youtube.com, whose 200 carries no ytcfg: no player URL, STS or
 //     visitor data, and no chat continuation.
 //   - PREF with hl=en and tz=UTC merged in, every other key the jar's PREF
-//     holds kept (_initialize_pref, _base.py:683-692, since f3aa3c3f9). A
-//     PREF hl picked in the browser outranks Accept-Language, and the
-//     watch page's player response is read by English keyword (the
-//     members-only verdict, the age gate, "original" audio tracks): a
-//     Japanese PREF read "not a member" as "Login required".
+//     holds kept (_initialize_pref, _base.py:683-692: hl since f3aa3c3f9,
+//     #1018; tz since 396a76f7b, #2402). A PREF hl picked in the browser
+//     outranks Accept-Language, and the watch page's player response is
+//     read by English keyword (the members-only verdict, the age gate,
+//     "original" audio tracks): a Japanese PREF read "not a member" as
+//     "Login required".
 //
-// Header only (owner ruling D1, 2026-10-31): nothing is written back
-// to the jar or to cookies.txt, so a refresh or an export carries the user's
-// cookies exactly as they were. yt-dlp sets both on its in-memory jar, which
-// every request then carries, the Innertube calls too; Moombox keeps them off
-// the Innertube calls, whose contexts state hl, timeZone and utcOffsetMinutes
+// Header only (owner ruling D1, 2026-10-31): nothing is written back to the
+// jar or to cookies.txt, so a refresh or an export carries the user's cookies
+// exactly as they were. yt-dlp sets both on its in-memory jar, which every
+// request then carries, the Innertube calls too; Moombox keeps them off the
+// Innertube calls, whose contexts state hl, timeZone and utcOffsetMinutes
 // themselves (constants.go) — the same three _extract_context forces
 // (_base.py:753-759).
 
