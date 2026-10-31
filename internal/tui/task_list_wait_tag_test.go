@@ -13,11 +13,15 @@ import (
 // does, not as the percent it froze at. The line used to carry no
 // "... (<elapsed>)" tail, so the row showed "45% " for the length of the
 // outage, the hung look isWaitProgress exists to prevent. The line is the
-// worker's (worker.networkWaitLine), quoted here as it renders.
+// worker's (worker.networkWaitLine), quoted here as it renders. So is the
+// line a YouTube download shows while it waits out its player response's
+// pre-roll ad before the first request (worker.playbackWaitLine), whose tail
+// counts down — "(15s left)" — rather than up.
 //
-// Mutant killed: isWaitProgress answering false (`return false`) → both
-// waits render as the frozen percent. (The worker-side mutant — the line
-// without its tail — is TestNetworkWaitLineCarriesTheWaitMarker's.)
+// Mutant killed: isWaitProgress answering false (`return false`) → every
+// wait renders as the frozen percent. (The worker-side mutants — a line
+// without its tail — are TestNetworkWaitLineCarriesTheWaitMarker's and
+// TestPlaybackWaitLineCarriesTheWaitMarker's.)
 func TestNetworkWaitRendersAsWait(t *testing.T) {
 	m := NewTaskListModel()
 	for _, tc := range []struct {
@@ -27,6 +31,7 @@ func TestNetworkWaitRendersAsWait(t *testing.T) {
 	}{
 		{"the engine's outage wait", "Connection lost - reconnecting... (5s)", "⋯ wait ", true},
 		{"processJob's network wait", "Waiting for network connectivity... (1m 20s)", "⋯ wait ", true},
+		{"the pre-roll ad wait", "Waiting out YouTube's pre-roll ad... (15s left)", "⋯ wait ", true},
 		{"a segment counter", "(V: 1234/1300 A: 1234/1300)", "45% ", false},
 	} {
 		job := &database.Job{ID: tc.name, Status: database.StatusDownloading, Percent: 45, Progress: tc.progress}
