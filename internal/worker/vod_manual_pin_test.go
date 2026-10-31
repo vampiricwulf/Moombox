@@ -175,7 +175,12 @@ func TestDownloadVodNamesTheTokenBeforeTheSegments(t *testing.T) {
 // no video is recorded in the video's place, and says so; a damaged pin
 // whose own signature failed, which the re-selection replaced, an audio pin
 // beside a muxed video, whose audio rides inside it, a video pin of an itag
-// only an audio format has, and an intact pin say nothing.
+// only an audio format has, and an intact pin say nothing. The verdict is
+// the recorded copy's own: a degrade that swaps a pinned web_creator file
+// for its token-free shadow (withoutGvsRequiredFormats) records the shadow,
+// which the extraction stamped from its own response, so a damaged file
+// with an intact shadow says nothing and an intact file with a damaged
+// shadow says so.
 //
 // Mutants (each run): warnDamagedPins not called (no row finds its line);
 // the line logged at Info (no row finds it at Warn); the line logged from
@@ -187,10 +192,22 @@ func TestDownloadVodNamesTheTokenBeforeTheSegments(t *testing.T) {
 // formats); the kind test dropped (the
 // audio-itag row warns of a video pin); the audio pin unread (the audio
 // rows find no line); the recorded video format unread (the video rows and
-// the no-video row find none).
+// the no-video row find none); warnDamagedPins called ahead of the GVS
+// block, so it reads the pre-degrade pick (the two shadow rows: the damaged
+// file's shadow warns, the damaged shadow's file does not).
 func TestDownloadVodHonoursADamagedPin(t *testing.T) {
 	damaged := func(f *youtube.Format) { f.Damaged = true }
 	sig := func(f *youtube.Format) { f.EncryptedSig = "SIG" }
+	// shadowed makes f a web_creator file — one a GVS token is required for
+	// — whose token-free tv_public shadow is damaged or not, the shape the
+	// dedup leaves when two clients list the same itag.
+	shadowed := func(damagedShadow bool) func(*youtube.Format) {
+		return func(f *youtube.Format) {
+			shadow := vodFormat(f.Itag, 1920, 1080, h264, withLength)
+			shadow.Damaged = damagedShadow
+			f.Source, f.TokenFreeAlternate = "web_creator", &shadow
+		}
+	}
 	const (
 		videoLine = "[FormatSelector] Manual video itag 137 is possibly damaged (shorter than the video); recording it as pinned"
 		audioLine = "[FormatSelector] Manual audio itag 140 is possibly damaged (shorter than the video); recording it as pinned"
@@ -206,6 +223,7 @@ func TestDownloadVodHonoursADamagedPin(t *testing.T) {
 		wantLine     string
 		wantNoLine   bool
 		wantReselect string // a re-selection the row sets off, by its success line
+		wantSource   string // the recorded video copy's client, when the row holds one
 	}{
 		{name: "a video pin", video: 137,
 			formats:   []youtube.Format{vodFormat(137, 1920, 1080, h264, withLength, damaged), vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength)},
@@ -236,6 +254,12 @@ func TestDownloadVodHonoursADamagedPin(t *testing.T) {
 				vodFormat(139, 0, 0, aac, withLength),
 			},
 			wantVideo: 137, wantAudio: 139, wantLine: videoLine},
+		{name: "a video pin whose degrade swaps a damaged file for an intact shadow", video: 137, mintFails: true,
+			formats:   []youtube.Format{vodFormat(137, 1920, 1080, h264, withLength, damaged, shadowed(false)), vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength)},
+			wantVideo: 137, wantAudio: 140, wantSource: "tv_public", wantNoLine: true},
+		{name: "a video pin whose degrade swaps an intact file for a damaged shadow", video: 137, mintFails: true,
+			formats:   []youtube.Format{vodFormat(137, 1920, 1080, h264, withLength, shadowed(true)), vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength)},
+			wantVideo: 137, wantAudio: 140, wantSource: "tv_public", wantLine: videoLine},
 		{name: "a damaged pin whose own signature fails", video: 137, solver: failingSigSolver{},
 			formats:   []youtube.Format{vodFormat(137, 1920, 1080, h264, withLength, damaged, sig), vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength)},
 			wantVideo: 136, wantAudio: 140, wantNoLine: true, wantReselect: "[Cipher] VOD video re-selection succeeded"},
@@ -285,6 +309,9 @@ func TestDownloadVodHonoursADamagedPin(t *testing.T) {
 			}
 			if res.VideoFormat == nil || res.VideoFormat.Itag != tc.wantVideo || gotAudio != tc.wantAudio {
 				t.Fatalf("video %+v audio %+v, want %d + %d", res.VideoFormat, res.AudioFormat, tc.wantVideo, tc.wantAudio)
+			}
+			if tc.wantSource != "" && res.VideoFormat.Source != tc.wantSource {
+				t.Fatalf("recorded the %s copy of video %d, want the %s shadow", res.VideoFormat.Source, res.VideoFormat.Itag, tc.wantSource)
 			}
 			damagedLines := logLines(logs.captureLogger, func(m string) bool { return strings.Contains(m, "is possibly damaged (shorter than the video)") })
 			if tc.wantNoLine {
