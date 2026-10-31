@@ -405,6 +405,13 @@ func (d *SegmentDownloader) fetchSegment(parent context.Context, segURL string) 
 	return data, resp.StatusCode, nil
 }
 
+// headlessRefusalAttempts is how many times fetchSegmentWithRetry asks for a
+// segment refused with 403 or 410 while no head is known (headSeq < 0): the
+// first try and two more, singleGoneRetry and twice it apart (500 ms, 1 s).
+// See the call site for why a headless refusal is retried at all, and why
+// not yt-dlp's ten times.
+const headlessRefusalAttempts = 3
+
 // errSegmentGone is the ErrSegmentPermanent fetchSegmentWithRetry returns for
 // a 410: the same message, and errors.Is(err, ErrSegmentPermanent) for every
 // caller that only needs "permanent", but distinct from a 403's for the one
@@ -419,6 +426,9 @@ var errSegmentGone = fmt.Errorf("%w", ErrSegmentPermanent)
 // other transient failure waits a LINEAR 5s x (attempt+1) — 5s, 10s, 15s, 20s
 // over the default MaxSegmentRetries=5, with the final attempt's sleep
 // skipped because no fetch follows it.
+// A 403 or 410 while no head is known is asked again headlessRefusalAttempts
+// times in all before it is permanent; with a head known it is permanent at
+// once, unless a 403 below the head gets the refresh path above.
 // Returns:
 //   - (data, nil): success.
 //   - (nil, ErrSegmentPermanent): segment is gone for good (403/410). Don't retry.
@@ -477,6 +487,35 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 			// directly — so the arrival signal fires here unconditionally.
 			d.noteFetch(len(body))
 			return body, nil
+		}
+		if (status == 403 || status == 410) && d.headSeq.Load() < 0 {
+			// No head is known — no response has carried X-Head-Seqnum, so
+			// nothing says whether the segment exists: every HLS fetch
+			// (Twitch VOD segments, a #EXT-X-MAP init through
+			// ensureHlsInit) and a DASH init a non-GVS origin refused. A
+			// refusal was permanent at once here, which made one transient
+			// edge 403 a permanent gap in a Twitch VOD and, on the fMP4
+			// init, ended the whole VOD (runHlsVodParallel). yt-dlp retries
+			// every fragment HTTPError, 403/404/410 included,
+			// fragment_retries (10) times before it skips the fragment
+			// (downloader/fragment.py, download_fragment). Moombox asks
+			// headlessRefusalAttempts times in all, on the 403-refresh
+			// path's doubling backoff and without a refresh, since nothing
+			// here derives the URL from a base: a 403 on Twitch's VOD CDN
+			// is usually permanent (a muted part), and neither tool can
+			// fetch those, so ten attempts would only hold a worker longer.
+			// With a head known the old rules below stand unchanged — past
+			// it a 403 is how a finished stream says "no such segment",
+			// and a 410 is an eviction.
+			if attempt >= min(headlessRefusalAttempts, d.opts.MaxRetries)-1 {
+				if status == 410 {
+					return nil, errSegmentGone
+				}
+				return nil, ErrSegmentPermanent
+			}
+			d.emitActivity(ActivityRetrying)
+			utils.Sleep(ctx, d.delays.singleGoneRetry<<attempt)
+			continue
 		}
 		if status == 410 {
 			// Genuinely evicted. Never retried, never refreshed.
