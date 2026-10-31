@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -79,23 +80,31 @@ const nMPD = `<?xml version="1.0"?>
 // solver the n was not even asked about. yt-dlp uses a manifest only `if
 // solved_n or not n_challenge` (_video.py:3692-3713, 3730-3751), so the
 // setup now fails, naming the n, before a downloader is built (and, for HLS,
-// before the master is fetched). The solved row pins the other side: each
-// path-form n is replaced by its answer.
+// before the master is fetched, and for a DASH manifest URL's own query n,
+// before the manifest is). The solved row pins the other side: each
+// path-form n is replaced by its answer. A DASH manifest URL's path n is
+// left for the segments' echo of it (DownloadDash's Step 1 says why): the
+// manifest is fetched with it as sent, and an unsolved one fails the setup
+// at the segments.
 //
 // Mutants: DownloadDash's segment loop keeping a URL it could not solve (the
 // DASH failure rows set up), its manifest-URL step back to a Warn (the
-// manifest-query row sets up); DownloadHls keeping an unsolved master URL
-// (the HLS failure rows set up); either strategy's old PlayerURL gate
-// restored (the no-player rows set up, the n sent as it came); the path form
-// left unreplaced (the solved rows carry the challenge).
+// manifest-query rows fetch the manifest, the one with a player asks twice);
+// DownloadHls keeping an unsolved master URL (the HLS failure rows set up);
+// either strategy's old PlayerURL gate restored, in DownloadDash at either
+// step (the no-player rows set up, the n sent as it came, or fetch the
+// manifest); the path form left unreplaced (the solved rows carry the
+// challenge); the manifest URL's path n solved at Step 1 (the solved
+// path-n row fetches the answer).
 func TestDashAndHlsSetupFailOnAnUnsolvedN(t *testing.T) {
 	type row struct {
 		name     string
 		player   string
 		answer   func(string) string
 		err      error
-		manifest string // DASH only: a manifest URL suffix carrying its own query n
+		manifest string // DASH only: a manifest URL suffix carrying its own n
 		wantErr  bool
+		noFetch  bool  // DASH only: the setup fails before the manifest is fetched
 		maxAsked int32 // the solver is asked at most this often
 	}
 	rows := []row{
@@ -107,8 +116,17 @@ func TestDashAndHlsSetupFailOnAnUnsolvedN(t *testing.T) {
 	for _, kind := range []string{"DASH", "HLS"} {
 		cases := rows
 		if kind == "DASH" {
-			cases = append(cases, row{name: "the manifest URL's own query n is unsolved", player: nPlayer, answer: sentinelOf,
-				manifest: "?n=" + nChal, wantErr: true, maxAsked: 1})
+			const pathN = "/n/" + nChal + "/source/yt_live_broadcast"
+			cases = append(cases,
+				row{name: "the manifest URL's own query n is unsolved", player: nPlayer, answer: sentinelOf,
+					manifest: "?n=" + nChal, wantErr: true, noFetch: true, maxAsked: 1},
+				row{name: "the manifest URL's own query n, no player URL", answer: solvedAs,
+					manifest: "?n=" + nChal, wantErr: true, noFetch: true},
+				row{name: "the manifest URL's path n, unsolved", player: nPlayer, answer: sentinelOf,
+					manifest: pathN, wantErr: true, maxAsked: 1},
+				row{name: "the manifest URL's path n, solved", player: nPlayer, answer: solvedAs,
+					manifest: pathN, maxAsked: 2},
+			)
 		}
 		for _, tc := range cases {
 			t.Run(kind+"/"+tc.name, func(t *testing.T) {
@@ -140,8 +158,8 @@ func TestDashAndHlsSetupFailOnAnUnsolvedN(t *testing.T) {
 					srv.mu.Lock()
 					fetched := len(srv.paths)
 					srv.mu.Unlock()
-					if kind == "HLS" && fetched != 0 {
-						t.Errorf("the HLS master was fetched %d times with its n unsolved; want never", fetched)
+					if (kind == "HLS" || tc.noFetch) && fetched != 0 {
+						t.Errorf("the %s manifest was fetched %d times with its n unsolved; want never", kind, fetched)
 					}
 					return
 				}
@@ -153,6 +171,11 @@ func TestDashAndHlsSetupFailOnAnUnsolvedN(t *testing.T) {
 						t.Errorf("HLS master fetched at %q, want its n replaced by the answer", path)
 					}
 					return
+				}
+				if tc.manifest != "" {
+					if path := srv.onlyPath(t); !strings.Contains(path, "/n/"+nChal+"/") {
+						t.Errorf("DASH manifest fetched at %q, want its path n as sent, for the segments to echo", path)
+					}
 				}
 				if len(*built) != 2 {
 					t.Fatalf("built %d downloaders, want video and audio", len(*built))
@@ -220,9 +243,14 @@ func TestResolveFreshDashURLHandsBackOnlyASolvedURL(t *testing.T) {
 // systemic-failure fallback, audit W8, classifies on it). They used to be
 // handed the URL with its n as YouTube sent it, and no error.
 //
+// resolveManifestlessStream gives up two ways once the broken itag is
+// excluded — no candidate left at all, or candidates left of which the
+// re-selection picks none (here an audio rendition, for a video stream) — and
+// each keeps the resolve error.
+//
 // Mutants: cipher's routed n failure back to a Warn and the URL as it came
-// (both rows resolve); resolveManifestlessStream's give-up dropping the
-// resolve error (the manifest-free row's errors.Is fails).
+// (every row resolves); either of resolveManifestlessStream's give-ups
+// dropping the resolve error (that give-up's row's errors.Is fails).
 func TestVodAndManifestFreeTreatAnUnsolvedNAsAResolveFailure(t *testing.T) {
 	routed, _ := nSolver(sentinelOf, nil)
 	w, h, fps := 1280, 720, 30
@@ -236,9 +264,20 @@ func TestVodAndManifestFreeTreatAnUnsolvedNAsAResolveFailure(t *testing.T) {
 	}
 
 	cand := DashStreamInfo{Itag: 302, MimeType: video.MimeType, Width: w, Height: h, FPS: fps, Bandwidth: video.Bitrate}
-	if u, _, err := resolveManifestlessStream(context.Background(), []youtube.Format{video}, []DashStreamInfo{cand}, &cand,
-		0, 0, true, "", false, routed, nil, nPlayer, map[int]bool{}, &discardLogger{}); !errors.Is(err, cipher.ErrNUnsolved) {
-		t.Errorf("resolveManifestlessStream = %q, %v; want a resolve failure carrying cipher.ErrNUnsolved", u, err)
+	audio := DashStreamInfo{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`, Bandwidth: 128_000}
+	for _, tc := range []struct {
+		name       string
+		candidates []DashStreamInfo
+		giveUp     string // the give-up the row must reach
+	}{
+		{"no candidate left", []DashStreamInfo{cand}, "no remaining candidates"},
+		{"none the re-selection takes", []DashStreamInfo{cand, audio}, "re-selection produced no candidate"},
+	} {
+		u, _, err := resolveManifestlessStream(context.Background(), []youtube.Format{video}, tc.candidates, &cand,
+			0, 0, true, "", false, routed, nil, nPlayer, map[int]bool{}, &discardLogger{})
+		if !errors.Is(err, cipher.ErrNUnsolved) || !strings.Contains(fmt.Sprint(err), tc.giveUp) {
+			t.Errorf("resolveManifestlessStream, %s = %q, %v; want the %q give-up carrying cipher.ErrNUnsolved", tc.name, u, err, tc.giveUp)
+		}
 	}
 }
 

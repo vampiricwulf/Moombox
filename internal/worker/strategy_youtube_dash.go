@@ -88,6 +88,16 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// and solvers: a URL that needs neither comes back as it is, and one whose
 	// query n has no player or solver to answer it is as unsolved as one the
 	// solvers failed (cipher.ErrNUnsolved).
+	//
+	// The path n (/n/<challenge>/, the form a live manifest URL carries, and
+	// the one yt-dlp solves at this point: _video.py:3730-3741) is left as
+	// YouTube sent it, on purpose. The manifest is fetched with it, its
+	// representations echo it, and Step 4 solves each echo from the original
+	// BaseURL it snapshots (DECISIONS #7). Solved here, the representations
+	// would echo the answer, and Step 4 would run the n function over that
+	// answer into a value no CDN accepts. So a path n no solver answers fails
+	// the setup at Step 4, after the token mint and the manifest fetch, where
+	// yt-dlp skips the manifest before either; the job ends the same way.
 	resolved, err := cipher.RoutedResolveURL(ctx, routedSolver, cipherSolver, cipher.ResolveURLRequest{
 		StreamURL: dashURL,
 		PlayerURL: videoInfo.PlayerURL,
