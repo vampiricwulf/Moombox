@@ -539,3 +539,154 @@ func TestRateLimitHoldLeavesTheDiskGateItsReadings(t *testing.T) {
 		t.Errorf("disk gate held %v (recorded %v) after a critical reading under the rate-limit hold, want closed and recorded", s.diskHeld, recorded)
 	}
 }
+
+// TestRateLimitedWaitHoldsTheBacklogOnce: a job that waits in place holds
+// backlog admission on its first refusal, not on each it meets as it fetches
+// again. Every half-hourly refusal used to push the hour on before it ran
+// out, so one video YouTube kept refusing held every channel's backlog for
+// as long as its job waited — which nothing bounds.
+//
+// Mutant: place the hold on every refusal — the hold the 60-minute refusal
+// pushed on still stands at 61.
+func TestRateLimitedWaitHoldsTheBacklogOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		w, db := testWorkerSetup(t)
+		backlogRetryJob(t, db, "rl_once", 0, false)
+		var mu sync.Mutex
+		fetches := 0
+		refused := rateLimitedResult(t)
+		w.processStreamFn = func(ctx context.Context, _ *database.Job) (*StreamProcessResult, error) {
+			mu.Lock()
+			fetches++
+			mu.Unlock()
+			if ctx.Err() != nil {
+				return cancelledResult(), nil
+			}
+			return refused, nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("processJob panicked: %v", r)
+				}
+			}()
+			w.processJob(ctx, "rl_once")
+		}()
+		t0 := time.Now()
+		synctest.Wait()
+		if !w.scheduler.rateLimitGateClosed(time.Now()) {
+			t.Fatal("the first refusal placed no backlog hold")
+		}
+		time.Sleep(rateLimitBackoff + time.Minute)
+		synctest.Wait()
+		mu.Lock()
+		n := fetches
+		mu.Unlock()
+		if n != 3 {
+			t.Fatalf("%d fetches by %s, want the refusals at 0, 30 and 60 minutes", n, time.Since(t0))
+		}
+		if w.scheduler.rateLimitGateClosed(time.Now()) {
+			t.Error("backlog admission is still held an hour after the job's first refusal; its later refusals pushed it on")
+		}
+		cancel()
+		<-done
+	})
+}
+
+// TestRateLimitedReextractGivesBackItsSlots: a VOD that is not backlog,
+// whose stale re-extraction YouTube rate-limits once both its slots are
+// held, gives them back for the wait, and takes them again — once — when it
+// runs again: kept, a download slot and a lifecycle slot sat idle through
+// the half hour, and the next pass counted each of them a second time,
+// leaking one of each for good. And a refusal after a pass that answered is
+// a fresh spell: it holds the backlog again.
+//
+// Mutants: drop the ReleaseSlots before the wait — the wait holds a slot of
+// each pool, and the next pass two; don't reset the spell once a pass
+// answers — the re-extraction's refusal places no hold, and admission
+// reopens at the hour.
+func TestRateLimitedReextractGivesBackItsSlots(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		w, db := testWorkerSetup(t)
+		backlogRetryJob(t, db, "rl_slots", 0, false)
+		processed := 0
+		refused := rateLimitedResult(t)
+		w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+			processed++
+			if processed == 1 {
+				return refused, nil
+			}
+			// expire=1: stale once the slots are held, and no URL left to use.
+			return &StreamProcessResult{ShouldDownload: true, IsVod: true, VideoInfo: vodInfoAt("http://127.0.0.1:1", 1, 1)}, nil
+		}
+		var mu sync.Mutex
+		var atSecond []int
+		refreshes := 0
+		w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
+			mu.Lock()
+			refreshes++
+			n := refreshes
+			if n == 2 {
+				atSecond = []int{w.queue.ActiveCount(), w.queue.LifecycleCount()}
+			}
+			mu.Unlock()
+			if n == 1 {
+				return judgeRefreshedVodInfo(rateLimitedInfo(youtube.StreamNotAStream, youtube.SessionAuthLoggedOut))
+			}
+			return judgeRefreshedVodInfo(&youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream,
+				PlayabilityError: youtube.PlayabilityPrivate, PlayabilityReason: "This video is private"})
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("processJob panicked: %v", r)
+				}
+			}()
+			w.processJob(context.Background(), "rl_slots")
+		}()
+
+		// The re-extraction is refused on the second pass, at 30 minutes.
+		time.Sleep(rateLimitRetryInterval + time.Minute)
+		synctest.Wait()
+		if dl, lc := w.queue.ActiveCount(), w.queue.LifecycleCount(); dl != 0 || lc != 0 {
+			t.Errorf("mid-wait: %d download and %d lifecycle slots held, want 0 and 0", dl, lc)
+		}
+		<-done
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(atSecond) != 2 || atSecond[0] != 1 || atSecond[1] != 1 {
+			t.Errorf("slots at the next pass's re-extraction (download, lifecycle) = %v, want [1 1]", atSecond)
+		}
+		if dl, lc := w.queue.ActiveCount(), w.queue.LifecycleCount(); dl != 0 || lc != 0 {
+			t.Errorf("after the run: %d download and %d lifecycle slots held, want 0 and 0", dl, lc)
+		}
+		// The first refusal's hour has run out at 61 minutes; the
+		// re-extraction's, from 30, has not.
+		if !w.scheduler.rateLimitGateClosed(time.Now().Add(rateLimitBackoff - rateLimitRetryInterval - time.Minute)) {
+			t.Error("the re-extraction's refusal, after a pass that answered, placed no backlog hold")
+		}
+	})
+}
+
+// TestRateLimitHoldOpensAfreshOnceRunOut: a hold that ran out with no sweep
+// to see it — sweep returns ahead of the gate while offline or while the disk
+// gate is closed — opens afresh on the next limit, at Warn, rather than
+// extending a hold that no longer stands at Debug.
+//
+// Mutant: open only when no hold is marked — the second limit logs at Debug.
+func TestRateLimitHoldOpensAfreshOnceRunOut(t *testing.T) {
+	log := &levelLogger{}
+	s := &Scheduler{log: log}
+	t0 := time.Now()
+	s.holdForRateLimit(t0, time.Hour)
+	s.holdForRateLimit(t0.Add(3*time.Hour), time.Hour)
+	if n := log.count("WARN", "rate-limited this session"); n != 2 {
+		t.Errorf("%d opening Warns for two holds three hours apart, want 2; log: %q", n, log.lines)
+	}
+}

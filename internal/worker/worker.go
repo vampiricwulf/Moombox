@@ -962,6 +962,9 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			w.setJobError(job, result.AsError())
 			return
 		}
+		// An answer ends the spell of rate-limit refusals: one after it — the
+		// stale re-extraction's — is a fresh limit (outlastRateLimit).
+		rateLimitSince = time.Time{}
 
 		// Check cancellation between stream processing and download
 		if ctx.Err() != nil {

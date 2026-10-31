@@ -16,11 +16,12 @@ import (
 // the video with "This content isn't available, try again later", which
 // yt-dlp explains as the account or session being rate-limited by YouTube
 // for up to an hour (26feac3dd, #12958), or with a captcha challenge
-// (f484c5159, #12939). Upstream words the refusal and ends the extraction —
-// one command, one video, and the operator runs it again later. An archiver
-// is the one that runs it again, so here the verdict is transient
-// (ErrRateLimited) and a job waits it out rather than ending in Error, which
-// is going beyond upstream:
+// (f484c5159, #12939) — or, in its HTTP form, with a 429 on every client of
+// the cascade (youtube.HTTPRateLimitError; isRateLimited). Upstream words
+// the refusal and ends the extraction — one command, one video, and the
+// operator runs it again later. An archiver is the one that runs it again,
+// so here the verdict is transient (ErrRateLimited) and a job waits it out
+// rather than ending in Error, which is going beyond upstream:
 //
 //   - a backlog VOD goes back to Queued, held for rateLimitBackoff, outside
 //     backlogRetryLimit — a wall the whole session hits says nothing about
@@ -29,7 +30,9 @@ import (
 //   - and the verdict holds every backlog admission for as long, so the
 //     archive slot it frees does not feed the channel's next VOD into the
 //     same wall (Scheduler.holdForRateLimit) — before, the backlog drained
-//     into Error one admission after another while the limit lasted;
+//     into Error one admission after another while the limit lasted. A job
+//     that waits in place holds it on its first refusal only, never on the
+//     ones it meets as it fetches again (outlastRateLimit);
 //   - a job that is not backlog — a broadcast, a newly published video, a
 //     manual add — keeps its row's status and fetches again every
 //     rateLimitRetryInterval (outlastRateLimit). Its "Stream Found" waits for
@@ -143,11 +146,24 @@ func rateLimitWait(err error) time.Duration {
 // over: the backlog VOD's requeue or its Error, or a run whose ctx ended, or
 // whose row was deleted or left the states the queue processes while it
 // waited (waitOutOutage's re-read) — which this hands to handleCancellation.
-// since is when the run first waited on a rate limit (zero: not yet), which
-// decides whether the wait is logged at Warn or at Debug.
+//
+// since is when the run's current spell of refusals began (zero: none yet,
+// or the last pass answered — processJob resets it). Only the spell's first
+// refusal places the backlog hold and is logged at Warn: the ones a job
+// waiting in place meets every half hour after it are the same limit, seen
+// again by the same job, and placed each time they pushed the hour on
+// before it ran out — so one video YouTube kept refusing, a captcha or a
+// "try again later" that was never going to pass, held every channel's
+// backlog for as long as the job waited, which nothing bounds. A spell's
+// first refusal is still fresh evidence, and any other job's — a backlog
+// VOD's above all, one refusal per run — still extends the hold.
 func (w *DownloadWorker) outlastRateLimit(ctx context.Context, job *database.Job, err error, since *time.Time) *database.Job {
-	if w.scheduler != nil {
-		w.scheduler.holdForRateLimit(time.Now(), rateLimitBackoff)
+	first := since.IsZero()
+	if first {
+		*since = time.Now()
+		if w.scheduler != nil {
+			w.scheduler.holdForRateLimit(*since, rateLimitBackoff)
+		}
 	}
 	if CookieResumeStatus(job) == database.StatusQueued {
 		if requeued, err := w.requeueBacklogAfterRateLimit(job, err); !requeued {
@@ -155,11 +171,9 @@ func (w *DownloadWorker) outlastRateLimit(ctx context.Context, job *database.Job
 		}
 		return nil
 	}
-	logWait := w.logger.Warn
-	if !since.IsZero() {
-		logWait = w.logger.Debug
-	} else {
-		*since = time.Now()
+	logWait := w.logger.Debug
+	if first {
+		logWait = w.logger.Warn
 	}
 	wait := rateLimitWait(err)
 	logWait("YouTube rate-limited this job's fetch; the job keeps its status and fetches again",
@@ -224,7 +238,13 @@ func (s *Scheduler) holdForRateLimit(now time.Time, d time.Duration) {
 	if !until.After(s.rateLimitedUntil) {
 		return
 	}
-	opening := !s.rateHeld
+	// A hold that has run out opens afresh, whether or not a sweep has
+	// looked at it since: sweep returns ahead of the gate while offline,
+	// while the disk gate is closed or when its read fails, and a hold that
+	// ran out under one of those was still "held" here, so the next limit,
+	// hours later, was logged at Debug as an extension and the Warn that
+	// tells the operator the backlog is held never fired for it.
+	opening := !s.rateHeld || !now.Before(s.rateLimitedUntil)
 	s.rateLimitedUntil, s.rateHeld = until, true
 	if opening {
 		s.log.Warn("scheduler: YouTube rate-limited this session; backlog VODs wait in Queued until the hold runs out (live and manually added jobs are not held)",
