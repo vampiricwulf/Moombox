@@ -343,7 +343,7 @@ func ParseDash(xmlContent string, manifestURL string) ([]DashStream, error) {
 // isDRMProtected reports whether a Representation is DRM-protected: it, or
 // the AdaptationSet it sits in, carries a ContentProtection element —
 // yt-dlp's is_drm_protected, which sets has_drm on the format either way
-// (extractor/common.py, _parse_mpd_formats_and_subtitles), after which
+// (extractor/common.py, _parse_mpd_periods), after which
 // YoutubeDL drops it (YoutubeDL.py, process_video_result). ParseDash skips
 // such a Representation, as the youtube package drops a drmFamilies format
 // (player_api_parsing.go): its segments are ciphertext, and recorded they mux
