@@ -975,10 +975,16 @@ CREATE INDEX IF NOT EXISTS idx_feed_items_recheck
 // the status probe filed a refusal that said nothing about the broadcast —
 // YouTube's bot wall on the probe's IP, a made-for-kids video — not_a_stream,
 // and the walk stored that as a settled classification it never probes again
-// (not_a_stream is out of every probe arm, spec §8). A stream so misfiled was
-// never recorded. Nothing on the row tells a misfiled one from a genuine
-// upload, so every not_a_stream row is owed the one re-probe; a genuine
-// non-stream answers not_a_stream again and settles where it was.
+// (not_a_stream is out of every probe arm, spec §8). On a channel that
+// archives live content only, which is where the reset matters, a stream so
+// misfiled was never recorded. (A channel that archives VODs as well —
+// include_non_live_content — had ARCHIVE's refresh probe re-ask each such
+// row every cycle while it was in the window and no history row stood
+// against it, so a stream found upcoming there was stored and jobbed; the
+// reset reaches the rows its history and established gates held back.)
+// Nothing on the row tells a misfiled one from a genuine upload, so every
+// not_a_stream row is owed the one re-probe; a genuine non-stream answers
+// not_a_stream again and settles where it was.
 //
 // Why the migration owes the reset rather than making it. The scope is the
 // walk's, and the walk's scope is a cutoff — the cycle's instant less the

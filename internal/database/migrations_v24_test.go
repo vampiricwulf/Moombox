@@ -32,11 +32,17 @@ var v24Rows = []v24Row{
 	{"UC2", "otherChannel", "2026-07-10T00:00:00Z", "rss", "not_a_stream"},
 }
 
-// seedV24Rows stores rows at their statuses through the store's own writes.
+// seedV24Rows stores rows at their statuses through the store's own writes,
+// each first seen when it was published — an upload RSS listed as it went
+// up — so a row dated before the cutoff is outside every arm of the scope,
+// Q2's unresolved one included (TestResetMisfiledFeedItemsTakesTheUnresolvedArm
+// has the rows first seen later).
 func seedV24Rows(t *testing.T, db *Database, rows []v24Row) {
 	t.Helper()
 	for _, r := range rows {
-		if _, err := db.UpsertFeedItem(fi(r.ch, r.id, r.published, "exact", r.source, "unknown", 0)); err != nil {
+		it := fi(r.ch, r.id, r.published, "exact", r.source, "unknown", 0)
+		it.FirstSeen = r.published
+		if _, err := db.UpsertFeedItem(it); err != nil {
 			t.Fatal(err)
 		}
 		if r.status != "unknown" {
@@ -242,6 +248,70 @@ func TestResetMisfiledFeedItemsResetsTheWalksScopeOnce(t *testing.T) {
 	// UC2's own cycle, membership discovery on, settles UC2's debt alone.
 	if n, err := db2.ResetMisfiledFeedItems("UC2", v24Cutoff, true); err != nil || n != 1 {
 		t.Errorf("UC2's reset = %d, %v; want 1, nil", n, err)
+	}
+}
+
+// TestResetMisfiledFeedItemsTakesTheUnresolvedArm: the scope the reset
+// reads is the one a row has once reset — an unknown row's, the scope the
+// walk was probing it in when the old rule misfiled it — so it takes Q2's
+// unresolved arm as well as Q1. An RSS row first seen inside the window is
+// in it whatever its published: a waiting room announced before the window
+// (an RSS <published> is the announcement), first seen when the channel was
+// added or Moombox came back, which the bot wall reached through that arm
+// alone. So is an 'assumed'-dated row, its published only a sighting
+// instant. An RSS row first seen before the window, and a membership row
+// dated before it (the arm reads first_seen on RSS rows only), keep
+// not_a_stream; and every row reset is in the walk's scope, as the unknown
+// row it now is.
+//
+// Mutants: the predicate Q1's alone (waitingRoom and assumedRow keep
+// not_a_stream); without its first_seen clause (waitingRoom does), or its
+// assumed clause (assumedRow does); the first_seen clause not limited to
+// RSS rows (oldMembers is reset).
+func TestResetMisfiledFeedItemsTakesTheUnresolvedArm(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	defer db.Close()
+	const before, inside = "2026-06-20T00:00:00Z", "2026-07-10T00:00:00Z"
+	for _, it := range []FeedItem{
+		{VideoID: "waitingRoom", Published: before, DatePrecision: "exact", Source: "rss", FirstSeen: inside},
+		{VideoID: "assumedRow", Published: before, DatePrecision: "assumed", Source: "membership", FirstSeen: before},
+		{VideoID: "oldListing", Published: before, DatePrecision: "exact", Source: "rss", FirstSeen: before},
+		{VideoID: "oldMembers", Published: before, DatePrecision: "coarse", Source: "membership", FirstSeen: inside},
+	} {
+		it.ChannelID = "UC1"
+		if _, err := db.UpsertFeedItem(it); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.ApplyProbeToFeedItem("UC1", it.VideoID, "not_a_stream", "", "", "", FeedRecheck{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.db.Exec(`INSERT INTO feed_reprobe_owed (channel_id) VALUES ('UC1')`); err != nil {
+		t.Fatal(err)
+	}
+
+	if n, err := db.ResetMisfiledFeedItems("UC1", v24Cutoff, true); err != nil || n != 2 {
+		t.Fatalf("reset = %d, %v; want 2 rows (waitingRoom, assumedRow), nil", n, err)
+	}
+	for id, want := range map[string]string{
+		"waitingRoom": "unknown", "assumedRow": "unknown",
+		"oldListing": "not_a_stream", "oldMembers": "not_a_stream",
+	} {
+		if it, _ := db.GetFeedItem("UC1", id); it == nil || it.Status != want {
+			t.Errorf("%s = %+v after the reset, want status %q", id, it, want)
+		}
+	}
+	scope, err := db.FeedScope("UC1", v24Cutoff, "2026-07-15T12:00:00Z", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := map[string]bool{}
+	for _, it := range scope {
+		in[it.VideoID] = true
+	}
+	if !in["waitingRoom"] || !in["assumedRow"] {
+		t.Errorf("scope after the reset = %v: a reset row is outside the walk's scope, never probed", in)
 	}
 }
 

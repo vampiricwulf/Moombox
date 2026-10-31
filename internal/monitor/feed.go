@@ -774,7 +774,7 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 	if n, err := fm.db.ResetMisfiledFeedItems(chID, cutoff, includeMembership); err != nil {
 		fm.logger.Warn("the upgrade's not_a_stream reset failed; retried next cycle", "channel", ch.Name, "err", err)
 	} else if n > 0 {
-		fm.logger.Info("[Monitor] Feed rows stored not_a_stream before refusals that say nothing were inconclusive are probed again",
+		fm.logger.Info("[Monitor] Re-probing feed rows an older version filed as non-streams (one-time, after upgrade)",
 			"channel", ch.Name, "rows", n)
 	}
 

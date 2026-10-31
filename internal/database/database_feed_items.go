@@ -251,16 +251,22 @@ func (db *Database) FeedScope(channelID, cutoff, now string, includeMembership b
 // returns how many rows were reset: 0, with nothing written, for a channel
 // owed nothing, which after the first cycle is every channel.
 //
-// A not_a_stream row is in scope through Q1 alone — published at or after
-// the cutoff, membership rows only while membership discovery is on: Q2
-// carries upcoming, live and unknown rows, and Q3 rows with an end re-check,
-// which a not_a_stream row never has (applyProbe schedules one on a vod). So
-// the predicate below is Q1's (feedScopeQ1SQL), and every row it resets is
-// one the same cycle's walk then probes as the unknown row it now is.
-// Rows outside the scope — dated before the cutoff, or membership rows with
-// discovery off — keep not_a_stream, and since the debt is cleared they keep
-// it: the reset is once, on the upgrade, as the owner decided, not a rule a
-// row meets whenever it comes into scope.
+// The scope is the one the row will have once reset: an unknown row's, the
+// scope the walk was probing it in when the old rule misfiled it. That is
+// Q1 — published at or after the cutoff — and Q2's unresolved arm, which
+// FeedScope applies to unknown rows: an 'assumed'-dated row, and an RSS row
+// first seen inside the window whatever its published (an RSS <published>
+// is the announcement, so a waiting room announced before the window and
+// first seen inside it — the channel just added, Moombox down — is in scope
+// through that arm alone, and the wall reached it there). Membership rows
+// count only while membership discovery is on, as in every arm. Q1 alone
+// left that waiting room not_a_stream while its unknown twin was walked.
+// Every row the predicate resets is one the same cycle's walk then probes as
+// the unknown row it now is (or holds, behind a wall that still stands).
+// Rows outside the scope — dated before the cutoff and not unresolved, or
+// membership rows with discovery off — keep not_a_stream, and since the
+// debt is cleared they keep it: the reset is once, on the upgrade, as the
+// owner decided, not a rule a row meets whenever it comes into scope.
 func (db *Database) ResetMisfiledFeedItems(channelID, cutoff string, includeMembership bool) (int64, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -279,11 +285,12 @@ func (db *Database) ResetMisfiledFeedItems(channelID, cutoff string, includeMemb
 	}
 	defer tx.Rollback()
 	q := `UPDATE feed_items SET status = 'unknown', recheck_at = '', recheck_step = 0
-  WHERE channel_id = ? AND status = 'not_a_stream' AND published >= ?`
+  WHERE channel_id = ? AND status = 'not_a_stream'
+    AND (published >= ? OR date_precision = 'assumed' OR (source = 'rss' AND first_seen >= ?))`
 	if !includeMembership {
 		q += ` AND source <> 'membership'`
 	}
-	res, err := tx.ExecContext(ctx, q, channelID, cutoff)
+	res, err := tx.ExecContext(ctx, q, channelID, cutoff, cutoff)
 	if err != nil {
 		return 0, err
 	}
