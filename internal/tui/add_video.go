@@ -37,7 +37,8 @@ type VideoFormat struct {
 	// Damaged and Segmented are the server's marks (GET /api/formats, the
 	// adapter's pickerFormat): a rendition serving under half the video's
 	// length, and one served only as fragments, which a whole-file VOD
-	// cannot fetch. Each is a note in the picker's Note column.
+	// cannot fetch. Each is a note in the picker's Note column — Segmented
+	// only on a stream that is not live or upcoming (notesSegmented).
 	Damaged   bool
 	Segmented bool
 }
@@ -76,6 +77,55 @@ type FormatsData struct {
 	// were flat fields here, which the decode never filled — the API nests
 	// them — so the TUI showed no Best note at all.
 	BestItags BestItags
+	// StreamStatus is the answer's streamStatus, youtube.StreamStatus as
+	// the extraction called the video: "live", "upcoming", "vod",
+	// "post_live" or "not_a_stream". The Note column reads it to leave the
+	// segmented mark off a live or upcoming stream's rows (notesSegmented).
+	StreamStatus string
+}
+
+// notesSegmented reports whether the picker marks a segmented rendition on a
+// stream of status, the answer's streamStatus — the owner's decision on the
+// picker's third follow-up. While a stream is live or upcoming every
+// adaptive rendition it lists is segmented (live adaptive, served as &sq=N
+// fragments), and the live path fetches exactly those, so the mark on every
+// row said nothing a row could be told apart by. A VOD's and a finished
+// stream's (post_live) segmented rows are the ones a whole-file download
+// cannot fetch, and keep it, as does a status the answer did not state.
+// Only the note is left off: the Best picks still pass a segmented
+// rendition over, as the server's bestItags and the cursor's preselectedRow
+// do. The dashboard reads the same status the same way
+// (populateFormatSelects, web/public/app.js).
+func notesSegmented(status string) bool {
+	return status != "live" && status != "upcoming"
+}
+
+// preselectedRow is the row a format table's cursor opens on: the one the
+// dashboard's Add dialog preselects (populateFormatSelects,
+// web/public/app.js), so Enter on a freshly opened table takes the same
+// rendition there as a submit with the dashboard's defaults — the owner's
+// decision on the picker's first follow-up. picks are the server's Best
+// itags in the dashboard's order, WEBM ahead of MP4 and Opus ahead of AAC
+// (0 for a pick the answer had none of): the first whose row is intact,
+// neither damaged nor segmented, else the first with a row at all, as the
+// dashboard falls back to a marked badge only when no badge is intact. With
+// no Best row — no pick at all, or none matching a row — row 0, where the
+// cursor always opened. row answers each row's itag and whether it is
+// intact; n is the number of rows.
+func preselectedRow(n int, row func(i int) (itag int, intact bool), picks ...int) int {
+	for _, wantIntact := range []bool{true, false} {
+		for _, pick := range picks {
+			if pick == 0 {
+				continue
+			}
+			for i := range n {
+				if itag, intact := row(i); itag == pick && (intact || !wantIntact) {
+					return i
+				}
+			}
+		}
+	}
+	return 0
 }
 
 // formatNote is a picker row's Note: its Best label, if any, then the marks,
@@ -211,6 +261,7 @@ func (m *AddVideoModel) buildFormatTables() {
 	}
 
 	ts := formatTableStyles()
+	noteSegmented := notesSegmented(m.formats.StreamStatus)
 
 	// Video table
 	videoCols := []table.Column{
@@ -247,7 +298,7 @@ func (m *AddVideoModel) buildFormatTables() {
 		videoRows = append(videoRows, table.Row{
 			fmt.Sprintf("%d", i+1),
 			fmt.Sprintf("%dx%d", f.Width, f.Height),
-			fps, codec, bitrate, formatNote(best, f.Damaged, f.Segmented),
+			fps, codec, bitrate, formatNote(best, f.Damaged, f.Segmented && noteSegmented),
 		})
 	}
 	m.videoTable = table.New(
@@ -257,6 +308,10 @@ func (m *AddVideoModel) buildFormatTables() {
 		table.WithFocused(true),
 		table.WithStyles(ts),
 	)
+	vf := m.formats.VideoFormats
+	m.videoTable.SetCursor(preselectedRow(len(vf), func(i int) (int, bool) {
+		return vf[i].Itag, !vf[i].Damaged && !vf[i].Segmented
+	}, m.formats.BestItags.BestWebmVideo, m.formats.BestItags.BestMp4Video))
 
 	// Audio table
 	audioCols := []table.Column{
@@ -293,7 +348,7 @@ func (m *AddVideoModel) buildFormatTables() {
 		}
 		audioRows = append(audioRows, table.Row{
 			fmt.Sprintf("%d", i+1),
-			bitrate, sampleRate, codec, formatNote(best, f.Damaged, f.Segmented),
+			bitrate, sampleRate, codec, formatNote(best, f.Damaged, f.Segmented && noteSegmented),
 		})
 	}
 	m.audioTable = table.New(
@@ -303,6 +358,10 @@ func (m *AddVideoModel) buildFormatTables() {
 		table.WithFocused(true),
 		table.WithStyles(ts),
 	)
+	af := m.formats.AudioFormats
+	m.audioTable.SetCursor(preselectedRow(len(af), func(i int) (int, bool) {
+		return af[i].Itag, !af[i].Damaged && !af[i].Segmented
+	}, m.formats.BestItags.BestOpusAudio, m.formats.BestItags.BestAacAudio))
 }
 
 // SetError is called when a format fetch fails.
@@ -843,6 +902,15 @@ func (m *AddVideoModel) renderFormatStep(w, h int, isVideo bool) string {
 // two. The height is rows plus the header's lines, which SetHeight takes out
 // of what it is given: rows alone showed two fewer — and nothing, for a
 // table of two or fewer.
+//
+// Last, the cursor is brought into view. The table opens with it on its
+// Best row (preselectedRow), placed by SetCursor, which leaves the
+// viewport's offset where it was: the table draws from the cursor less the
+// height on, so a cursor at or past the drawn height sat one row below the
+// last row drawn, highlighted nowhere, until a key moved it. MoveDown(0)
+// moves it nowhere and runs the table's own scroll rule for where it is,
+// which scrolls a row below the drawn ones up into the last line and leaves
+// a cursor already in view, the operator's own included, as it was.
 func fitFormatTable(t *table.Model, contentW, rows int) {
 	cols := t.Columns()
 	if len(cols) == 0 {
@@ -857,6 +925,7 @@ func fitFormatTable(t *table.Model, contentW, rows int) {
 	t.SetColumns(cols)
 	t.SetWidth(others + note.Width)
 	t.SetHeight(rows + lipgloss.Height(formatTableStyles().Header.Render("Note")))
+	t.MoveDown(0)
 }
 
 func (m *AddVideoModel) renderTimestamps(w, _ int) string {

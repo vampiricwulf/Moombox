@@ -2731,7 +2731,15 @@ export class MoomboxApp {
     // format list: damaged — encoded short of half the video's length, so its
     // track would stop partway; segmented — served only as fragments, which a
     // whole-file VOD download cannot fetch. Either can still be picked by hand.
-    const marks = (fmt) => (fmt.damaged ? " [damaged]" : "") + (fmt.segmented ? " [segmented]" : "");
+    // Segmented is noted only for a VOD or a finished stream (the owner's
+    // decision): while the stream is live or upcoming every adaptive
+    // rendition it lists is segmented, and the live path fetches exactly
+    // those, so the mark on every row said nothing. The preselection below
+    // still reads it, as the server's badges do. The TUI's Add Video reads
+    // the same streamStatus the same way (notesSegmented,
+    // internal/tui/add_video.go).
+    const onAir = data.streamStatus === "live" || data.streamStatus === "upcoming";
+    const marks = (fmt) => (fmt.damaged ? " [damaged]" : "") + (fmt.segmented && !onAir ? " [segmented]" : "");
 
     // Add video formats
     for (const fmt of data.videoFormats || []) {

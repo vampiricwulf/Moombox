@@ -54,7 +54,10 @@ type pickerFormat struct {
 	// while an intact one of its kind exists.
 	Damaged bool `json:"damaged"`
 	// Segmented is Format.Segmented(): served only as &sq=N fragments, so
-	// the whole-file VOD path cannot fetch it.
+	// the whole-file VOD path cannot fetch it. Sent whatever the stream's
+	// status: both pickers leave its mark off while the answer's
+	// streamStatus is live or upcoming, when every adaptive row carries it,
+	// and still pass a segmented row over for their Best picks.
 	Segmented bool `json:"segmented"`
 }
 
