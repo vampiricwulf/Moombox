@@ -26,10 +26,26 @@ const pageFetchAttempts = 4
 // waits base<<(n-1), 1 s, 2 s, 4 s — doRetryRequest's ladder, which the
 // player calls behind the page already take. yt-dlp sleeps nothing between
 // extractor retries unless --retry-sleep extractor: is given; Moombox waits,
-// because the blips this exists for (a 5xx, a reset at go-live) are the kind
-// a second later outlasts, and the deadline guard keeps the wait off any
-// caller that cannot afford it.
+// going beyond upstream, because the blips this exists for (a 5xx, a reset at
+// go-live) are the kind a second later outlasts. What keeps the waits, and
+// the retries themselves, off the player calls is the retry window
+// (pageRetryShare), not the backoff.
 const pageRetryBackoffBase = time.Second
+
+// pageRetryShare bounds the retry window: a caller with a deadline lets the
+// retries spend at most a third of the budget it had left when the page fetch
+// began, so at least two thirds are the player calls'. The page only leads
+// into the extraction — every client call comes after it, and since
+// fallbackYtcfg and resolvePlayerURL a page that cannot be had costs the
+// extraction little — so a deadline-bound caller is the last place to spend
+// the cascade's budget on it. That caller is mid-download 403 recovery
+// (refreshGvsCredentials, refreshVodURL), whose whole extraction runs under
+// min(45 s, MaxTimeout/3) after the GVS mint, 10 s at the floor: with the
+// window only the deadline, a page answering 503 throughout held every
+// player call back 7 s of those 10, and a hanging one spent all 45 s, so the
+// refresh lost its URL half — the recovery it exists for. Under a third, the
+// 10 s refresh gets one retry, the 45 s one the whole ladder.
+const pageRetryShare = 3
 
 // pageStatusError is a page fetch answered with a status outside 2xx. Its
 // text is the one FetchWatchPage has always returned for it.
@@ -83,35 +99,59 @@ func pageRetryable(err error) bool {
 // truncated past that as the watch page's read always was. what names the
 // page in the errors.
 //
-// The backoff is bounded by the CALLER's deadline the way doRetryRequest's
-// is, and for the same reason: mid-download 403 credential recovery runs a
-// whole extraction under min(45 s, MaxTimeout/3), as little as 10 s, and a
-// ladder that slept through it would turn the page's own error into
-// context.DeadlineExceeded. A wait that would not leave pageRetryBackoffBase
-// for the attempt after it is not taken, and the last attempt's error is
-// returned. A cancelled context ends the loop with its own error
-// (retryExitErr); one that lapsed keeps the page's. The final error says how
-// many attempts it took when there was more than one.
+// The first attempt is the one the page always had, bounded by timeout and
+// the caller's context alone. The retries live in a window that closes at
+// the sooner of one attempt's timeout from the start and pageRetryShare of
+// the caller's remaining budget: a retry whose wait would not leave
+// pageRetryBackoffBase of the window for the attempt after it is not taken,
+// and a retry that is taken runs only until the window closes. So a failing
+// page costs a caller with no deadline (a job start, a go-live) at most one
+// attempt's timeout, as the single attempt before these retries did — four
+// timed-out attempts and the waits between them would hold a stream's start
+// back two minutes — and a caller with a deadline at most a third of what it
+// had left. yt-dlp retries a timed-out page as it retries any network error;
+// a hung page here is not retried past the first attempt's timeout, short of
+// upstream on purpose, because fallbackYtcfg and resolvePlayerURL carry the
+// extraction on without it.
+//
+// A retry the window cuts short says nothing about the page, so the error
+// returned is the one the page gave before it, as it is the last attempt's
+// when the window or the ladder runs out. A cancelled context ends the loop
+// with its own error (retryExitErr); one that lapsed keeps the page's. The
+// final error says how many attempts it took when there was more than one.
 func fetchYouTubePage(ctx context.Context, what, pageURL string, timeout time.Duration, headers map[string]string, maxBytes int64) ([]byte, error) {
+	retryBy := time.Now().Add(timeout)
+	if deadline, ok := ctx.Deadline(); ok {
+		if share := time.Now().Add(time.Until(deadline) / pageRetryShare); share.Before(retryBy) {
+			retryBy = share
+		}
+	}
 	var lastErr error
 	attempts := 0
 	for attempt := range pageFetchAttempts {
 		if err := ctx.Err(); err != nil {
 			return nil, retryExitErr(err, lastErr)
 		}
+		attemptCtx, endAttempt := ctx, context.CancelFunc(func() {})
 		if attempt > 0 {
 			delay := pageRetryBackoffBase << (attempt - 1)
-			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay+pageRetryBackoffBase {
+			if time.Until(retryBy) <= delay+pageRetryBackoffBase {
 				break
 			}
 			if err := utils.Sleep(ctx, delay); err != nil {
 				return nil, retryExitErr(err, lastErr)
 			}
+			attemptCtx, endAttempt = context.WithDeadline(ctx, retryBy)
 		}
 		attempts++
-		body, err := fetchYouTubePageOnce(ctx, what, pageURL, timeout, headers, maxBytes)
+		body, err := fetchYouTubePageOnce(attemptCtx, what, pageURL, timeout, headers, maxBytes)
+		cutShort := attempt > 0 && attemptCtx.Err() != nil && ctx.Err() == nil
+		endAttempt()
 		if err == nil {
 			return body, nil
+		}
+		if cutShort {
+			break
 		}
 		lastErr = err
 		if !pageRetryable(err) {

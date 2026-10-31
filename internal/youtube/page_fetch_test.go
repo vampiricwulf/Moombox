@@ -182,14 +182,24 @@ func TestWatchPageFetchDoesNotRetryARefusal(t *testing.T) {
 }
 
 // TestWatchPageFetchGivesUpWithinItsBudget: four failures are the end, and
-// the error says so; a caller's deadline cuts the ladder short of a wait it
-// cannot afford, returning the page's own error rather than the deadline;
-// and a cancel ends the wait with the cancel.
+// the error says so; the retries stay inside their window — a third of a
+// caller's remaining deadline, and one attempt's timeout from the start —
+// returning the page's own error rather than the deadline; and a cancel
+// ends the wait with the cancel.
 //
-// Mutants: the attempt count past 4 (the first row's count); the deadline
-// guard dropped (the second row sleeps to its deadline — a third request at
-// 3 s, or context.DeadlineExceeded); retryExitErr bypassed (the third row
-// reports the 503, or the second the deadline).
+// The deadline rows are the window's arithmetic for a page answering 503
+// throughout. 10 s, the 403 refresh at the MaximumTimeout floor: the window
+// closes at 3.33 s, so the 1 s retry is taken and the 2 s one (which would
+// leave 0.33 s, under the base reserved for its attempt) is not. 4.5 s: the
+// window closes at 1.5 s, which the 1 s wait would leave only 0.5 s of. 45 s:
+// the window closes at 15 s, room for the whole ladder.
+//
+// Mutants: the attempt count past 4 (the first row's count); the window
+// widened to the whole deadline, the guard as it stood (the 10 s row asks at
+// 3 s and 7 s too, holding the player calls back 7 s of 10) or to half of it
+// (a third request at 3 s); the base reserved for the attempt after a wait
+// dropped (the 4.5 s row retries at 1 s); retryExitErr bypassed (the cancel
+// row reports the 503).
 func TestWatchPageFetchGivesUpWithinItsBudget(t *testing.T) {
 	failing := func(arrivals *pageArrivals) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -212,26 +222,74 @@ func TestWatchPageFetchGivesUpWithinItsBudget(t *testing.T) {
 		})
 	})
 
-	t.Run("a deadline the next wait would outlast", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			arrivals := &pageArrivals{start: time.Now()}
-			servePagesInBubble(t, failing(arrivals), 0)
-			// 2.5 s: the 1 s wait leaves 1.5 s, more than a base for the
-			// attempt after it; the 2 s wait would not leave one.
-			ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
-			defer cancel()
-			_, err := FetchWatchPage(ctx, "test1234567", "")
-			if err == nil || !strings.Contains(err.Error(), "HTTP 503") || errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("err = %v, want the page's 503, not the deadline", err)
-			}
-			if want := []time.Duration{0, time.Second}; !reflect.DeepEqual(arrivals.of("/watch"), want) {
-				t.Errorf("requests arrived at %v, want %v", arrivals.of("/watch"), want)
-			}
-			if time.Since(arrivals.start) != time.Second {
-				t.Errorf("returned after %v, want at once after the second answer (1s), not at the deadline", time.Since(arrivals.start))
-			}
+	for _, tc := range []struct {
+		name     string
+		deadline time.Duration
+		wantAt   []time.Duration
+	}{
+		{name: "a 10 s deadline: one retry", deadline: 10 * time.Second, wantAt: []time.Duration{0, time.Second}},
+		{name: "a 4.5 s deadline: no room for a retry's attempt", deadline: 4500 * time.Millisecond, wantAt: []time.Duration{0}},
+		{name: "a 45 s deadline: the whole ladder", deadline: 45 * time.Second, wantAt: []time.Duration{0, time.Second, 3 * time.Second, 7 * time.Second}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				arrivals := &pageArrivals{start: time.Now()}
+				servePagesInBubble(t, failing(arrivals), 0)
+				ctx, cancel := context.WithTimeout(context.Background(), tc.deadline)
+				defer cancel()
+				_, err := FetchWatchPage(ctx, "test1234567", "")
+				if err == nil || !strings.Contains(err.Error(), "HTTP 503") || errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("err = %v, want the page's 503, not the deadline", err)
+				}
+				if got := arrivals.of("/watch"); !reflect.DeepEqual(got, tc.wantAt) {
+					t.Errorf("requests arrived at %v, want %v", got, tc.wantAt)
+				}
+				if last := tc.wantAt[len(tc.wantAt)-1]; time.Since(arrivals.start) != last {
+					t.Errorf("returned after %v, want at once after the last answer (%v)", time.Since(arrivals.start), last)
+				}
+			})
 		})
-	})
+	}
+
+	// A page that never answers. hangs makes every attempt that reaches the
+	// handler wait for its request to end; dialFails refuses that many dials
+	// first. Without a deadline the window is the first attempt's 30 s.
+	for _, tc := range []struct {
+		name      string
+		dialFails int
+		wantAt    []time.Duration
+		wantErr   string
+		notErr    error
+	}{
+		// The first attempt runs its 30 s and is not retried: four would
+		// have held the extraction back 127 s.
+		{name: "a hung page is not retried past its timeout", wantAt: []time.Duration{0}, wantErr: "failed to fetch watch page"},
+		// A refused dial is retried at 1 s; that retry hangs, and the window
+		// ends it at 30 s, not its own timeout at 31 s. The error is the
+		// page's own answer, the refused dial — not the window's deadline.
+		{name: "a retry that hangs ends with the window", dialFails: 1, wantAt: []time.Duration{time.Second},
+			wantErr: "connection refused", notErr: context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				arrivals := &pageArrivals{start: time.Now()}
+				servePagesInBubble(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					arrivals.note(r.URL.Path)
+					<-r.Context().Done()
+				}), tc.dialFails)
+				_, err := FetchWatchPage(context.Background(), "test1234567", "")
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || (tc.notErr != nil && errors.Is(err, tc.notErr)) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				if got := arrivals.of("/watch"); !reflect.DeepEqual(got, tc.wantAt) {
+					t.Errorf("requests arrived at %v, want %v", got, tc.wantAt)
+				}
+				if took := time.Since(arrivals.start); took != 30*time.Second {
+					t.Errorf("returned after %v, want 30s — one attempt's timeout, the window", took)
+				}
+			})
+		})
+	}
 
 	t.Run("a cancel during the wait", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
@@ -322,6 +380,108 @@ func TestFailedWatchPageKeepsTheCachedIdentity(t *testing.T) {
 			if n := captured.Load(); n != 0 {
 				t.Errorf("OnVisitorData fired %d times for a ytcfg no page stated", n)
 			}
+		})
+	}
+}
+
+// timedPlayerCalls records when each player call went out, on the bubble's
+// clock, and answers it through inner.
+type timedPlayerCalls struct {
+	mu    sync.Mutex
+	start time.Time
+	at    []time.Duration
+	inner http.RoundTripper
+}
+
+func (tr *timedPlayerCalls) RoundTrip(req *http.Request) (*http.Response, error) {
+	tr.mu.Lock()
+	tr.at = append(tr.at, time.Since(tr.start))
+	tr.mu.Unlock()
+	return tr.inner.RoundTrip(req)
+}
+
+func (tr *timedPlayerCalls) calls() []time.Duration {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return append([]time.Duration(nil), tr.at...)
+}
+
+// TestAFailingWatchPageLeavesThePlayerCallsTheirBudget is the retry window
+// seen from the extraction: the page leads into the player calls, and its
+// retries may not eat the budget those calls run on. Under the 403
+// refresh's 10 s floor a page answering 503 throughout gets one retry and
+// the first player call goes out at 1 s — it went out at 7 s with the
+// retries bounded by the deadline alone, and with the iframe API down as
+// well at 8 s, 2 s of 10 left. A hung page costs one attempt's 30 s, deadline
+// or none, as the single attempt before the retries did: bounded by the
+// deadline alone it spent the whole 45 s ceiling and no player call was
+// made, and with no deadline it held the first one back 127 s.
+//
+// Mutants: the window widened to the whole deadline (the 10 s rows' first
+// call at 7 s or 8 s; the 45 s row's never made); the no-deadline window
+// dropped (the last row's first call at 127 s).
+func TestAFailingWatchPageLeavesThePlayerCallsTheirBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		deadline     time.Duration // 0: none
+		hang         bool
+		knownPlayer  bool // a fresh homepage player is remembered
+		wantPage     []time.Duration
+		wantIframe   []time.Duration
+		wantFirstAPI time.Duration
+	}{
+		{name: "a 503 page under a 10 s refresh", deadline: 10 * time.Second, knownPlayer: true,
+			wantPage: []time.Duration{0, time.Second}, wantFirstAPI: time.Second},
+		{name: "a 503 page and iframe API under a 10 s refresh", deadline: 10 * time.Second,
+			wantPage: []time.Duration{0, time.Second}, wantIframe: []time.Duration{time.Second, 2 * time.Second}, wantFirstAPI: 2 * time.Second},
+		{name: "a hung page under the 45 s ceiling", deadline: 45 * time.Second, hang: true, knownPlayer: true,
+			wantPage: []time.Duration{0}, wantFirstAPI: 30 * time.Second},
+		{name: "a hung page with no deadline", hang: true, knownPlayer: true,
+			wantPage: []time.Duration{0}, wantFirstAPI: 30 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				arrivals := &pageArrivals{start: time.Now()}
+				servePagesInBubble(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					arrivals.note(r.URL.Path)
+					if tc.hang {
+						<-r.Context().Done()
+						return
+					}
+					http.Error(w, "down", http.StatusServiceUnavailable)
+				}), 0)
+				orig := fetchIframePlayerURL
+				fetchIframePlayerURL = fetchPlayerURLFromIframeAPI
+				t.Cleanup(func() { fetchIframePlayerURL = orig })
+				calls := &timedPlayerCalls{start: arrivals.start, inner: &clientBodyTransport{}}
+				origClient := apiClient
+				apiClient = &http.Client{Transport: calls}
+				t.Cleanup(func() { apiClient = origClient })
+
+				p := newRetryTestAPI()
+				if tc.knownPlayer {
+					p.rememberPlayerURL(homepagePlayerURL, "homepage")
+				}
+				ctx := context.Background()
+				if tc.deadline > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, tc.deadline)
+					defer cancel()
+				}
+				info, err := p.GetVideoInfoPublic(ctx, "test1234567")
+				if err != nil || len(info.Formats) == 0 {
+					t.Fatalf("GetVideoInfoPublic = %v — the player calls must still have the budget to answer", err)
+				}
+				if got := arrivals.of("/watch"); !reflect.DeepEqual(got, tc.wantPage) {
+					t.Errorf("watch page asked at %v, want %v", got, tc.wantPage)
+				}
+				if got := arrivals.of("/iframe_api"); !reflect.DeepEqual(got, tc.wantIframe) {
+					t.Errorf("iframe API asked at %v, want %v", got, tc.wantIframe)
+				}
+				if got := calls.calls(); len(got) == 0 || got[0] != tc.wantFirstAPI {
+					t.Errorf("player calls at %v, want the first at %v", got, tc.wantFirstAPI)
+				}
+			})
 		})
 	}
 }
