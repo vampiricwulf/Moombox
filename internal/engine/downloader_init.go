@@ -26,8 +26,8 @@ const initForbiddenAttempts = 3
 // sq=0 a manifest-free stream carries its ftyp+moov in — the way yt-dlp
 // fetches a DASH download's fragment 0: retried, never skipped
 // (downloader/fragment.py retries it fragment_retries times and then fails
-// the download; downloader/dash.py marks index 0 fatal). The 5xx, timeout
-// and outage ladder is fetchSegmentWithRetry's; on top of it an
+// the download; downloader/dash.py marks index 0 fatal). The 5xx, timeout,
+// empty-body and outage ladder is fetchSegmentWithRetry's; on top of it an
 // answer of 403/410 (ErrSegmentPermanent) is tried initForbiddenAttempts
 // times in all, each retry after refreshCredentials and, when rebuildURL is
 // non-nil, on a URL rebuilt from the base that refresh installed — never on

@@ -236,6 +236,39 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 			continue // nil means retry
 		}
 
+		// A 2xx that carried no body is not a segment. Written as one, it
+		// advanced currentSeq, refreshed lastSegTime and broke the gone
+		// streak — so past the end of a stream whose edge answers every
+		// sequence with an empty 200 (moonarchive's _dash.py meets one "if
+		// the live replay is unlisted at the end", and at the end of a stream
+		// in general), the loop ran at request speed forever: currentSeq raced
+		// past the head, the resume sidecar recorded a LastSeq beyond it, and
+		// neither MaxTimeout nor CheckStreamStatus — reached only from the
+		// error handlers — ever fired. yt-dlp's HttpFD fails such a fetch
+		// ("Did not get any data blocks", downloader/http.py) and moonarchive
+		// retries it (EmptyFragmentException) before consulting the stream's
+		// status. Here it is a failed fetch of THIS sequence, routed through
+		// handleHTTPError: at or past the head that is the at-edge path
+		// (backoff, head re-probe, CheckStreamStatus every
+		// streamStatusCheckInterval, the MaxTimeout backstop); below it the
+		// transient retry, which escalates to the same checks once the
+		// segment stays stuck. Never handleGoneError: an empty body says
+		// nothing about whether the sequence exists, so it must neither
+		// advance the first-segment hunt nor count toward a gone burst.
+		if len(data) == 0 {
+			d.logger.Debug("[Downloader] segment answered with an empty body — retrying it",
+				"seq", d.currentSeq.Load(), "status", statusCode, "headSeq", d.headSeq.Load())
+			herr := d.handleHTTPError(ctx, hasStartedDownloading, &sameSegRetries, &lastRetrySeq,
+				&sameHeadRetryDelay, &lastConfirmedHead, delayCap)
+			if herr == errStreamDone {
+				return nil
+			}
+			if herr != nil {
+				return herr
+			}
+			continue
+		}
+
 		// Segment body in hand — record the arrival before the write so the
 		// fetched-bytes signal covers every path uniformly (the parallel
 		// catch-up workers record theirs inside fetchSegmentWithRetry).

@@ -415,7 +415,8 @@ func (d *SegmentDownloader) fetchSegment(parent context.Context, segURL string) 
 // Returns:
 //   - (data, nil): success.
 //   - (nil, ErrSegmentPermanent): segment is gone for good (403/410). Don't retry.
-//   - (nil, ErrSegmentRetriesExhausted): transient failure (timeout, 5xx, retries exhausted).
+//   - (nil, ErrSegmentRetriesExhausted): transient failure (timeout, 5xx, an
+//     empty 2xx body, retries exhausted).
 //   - (nil, ctx.Err()): caller's context was cancelled or downloader was cancelled.
 //
 // Consumers use `errors.Is(err, ErrSegmentPermanent)` to distinguish the
@@ -450,7 +451,18 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 			return nil, ctx.Err()
 		}
 		body, status, err := d.fetchSegment(ctx, segURL)
-		if err == nil && status < 400 {
+		// A 2xx with no body is a failed fetch, never a segment: it falls
+		// through to the transient ladder below like a 5xx. Returned as data
+		// it was flushed as nothing — catch-up "wrote" the segment, advanced
+		// past it and recorded no gap, a silent hole in the recording — and
+		// the HLS init it fetched was adopted as an empty init. yt-dlp's HttpFD
+		// fails a fragment that delivered no data ("Did not get any data
+		// blocks", downloader/http.py), and its fragment loop then skips that
+		// fragment as not found (fatal only for fragment 0); this retries it,
+		// as moonarchive does (_dash.py, EmptyFragmentException), and when the
+		// ladder runs out the caller sees ErrSegmentRetriesExhausted — a gap
+		// it reports and the DASH loop re-fetches — never a quiet skip.
+		if err == nil && status < 400 && len(body) > 0 {
 			// Every caller of this function fetches MEDIA payload (catch-up
 			// workers, parallel HLS) — playlists and probes use fetchSegment
 			// directly — so the arrival signal fires here unconditionally.

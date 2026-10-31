@@ -24,8 +24,9 @@ import (
 // values: no fastDelays here) passes on the bubble's clock, and a scenario
 // that spans minutes of stream time runs in milliseconds with no wall-clock
 // bound anywhere. They pin wave W3 of the 2026-10-31 yt-dlp audit: the
-// manifest-free start's sq=0 (G3) and the init fetch (G4). They mutate the
-// package-level engineHTTPClient, so none of them may call t.Parallel().
+// manifest-free start's sq=0 (G3), the init fetch (G4) and empty 2xx bodies
+// (G5). They mutate the package-level engineHTTPClient, so none of them may
+// call t.Parallel().
 
 // gvsAnswer is what memGVS does with one request.
 type gvsAnswer int
@@ -330,7 +331,7 @@ func TestDashHuntHoldsUntilTheHeadReachesIt(t *testing.T) {
 // post-live refresh rebuild) takes its ftyp+moov from sq=0, and that fetch
 // was one bare request whose failure was only logged — the part then recorded
 // for hours into a file FFmpeg could not open. It now has
-// fetchSegmentWithRetry's ladder (5xx, timeouts, outages) and,
+// fetchSegmentWithRetry's ladder (5xx, timeouts, empty bodies, outages) and,
 // on a 403/410, initForbiddenAttempts tries each after refreshCredentials, on
 // the sq=0 URL rebuilt from the base the refresh installed.
 //
@@ -340,6 +341,8 @@ func TestDashHuntHoldsUntilTheHeadReachesIt(t *testing.T) {
 //   - fetchInitSegment without its 403/410 loop: the refused row fails Start.
 //   - writeInitFromSq0 passing no rebuild closure: the refused row retries the
 //     construction-time URL, refused again, and fails Start.
+//   - fetchSegmentWithRetry returning an empty 2xx body as data: the empty
+//     row finds no ftyp in it and fails Start.
 func TestDashInitRetriesRefreshesAndTransientFailures(t *testing.T) {
 	const startSeq, head = 3, 6
 	for _, tc := range []struct {
@@ -362,6 +365,15 @@ func TestDashInitRetriesRefreshesAndTransientFailures(t *testing.T) {
 			sq0: func(_ *http.Request, attempt int) gvsAnswer {
 				if attempt == 1 {
 					return gvsUnavailable
+				}
+				return gvsServe
+			},
+		},
+		{
+			name: "empty 200, then served",
+			sq0: func(_ *http.Request, attempt int) gvsAnswer {
+				if attempt == 1 {
+					return gvsEmpty
 				}
 				return gvsServe
 			},
@@ -491,6 +503,125 @@ func TestDashInitFailureEndsTheStartBeforeAnyMedia(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestDashEmptyBodiesPastTheHeadEndTheStream pins G5 at the edge: an empty
+// 2xx is a failed fetch of that sequence, never a segment. Past the end of a
+// stream whose edge answers with empty 200s (moonarchive's _dash.py meets them
+// when the replay goes unlisted at the end), each one used to count as a
+// written segment — currentSeq raced past the head at request speed,
+// lastSegTime stayed fresh, and neither CheckStreamStatus nor MaxTimeout was
+// ever reached, so the job never ended. Now the loop waits at head+1 on the
+// at-edge path until the status check says the stream ended, and the resume
+// sidecar it keeps names the last real segment.
+//
+// Mutant: runDashLoop writing the empty body as a segment (the code before
+// the fix): the loop asks for head+2, which this test refuses, and Start
+// returns the cancellation instead of nil.
+func TestDashEmptyBodiesPastTheHeadEndTheStream(t *testing.T) {
+	const head = 5
+	var abort atomic.Pointer[context.CancelFunc]
+	var overran atomic.Int32
+	g := serveGVS(t, constHead(head), func(r *http.Request, seq, attempt int) gvsAnswer {
+		if seq <= head {
+			return gvsServe
+		}
+		return gvsEmpty
+	})
+	g.onRequest = func(seq int) {
+		if seq >= head+2 && overran.Add(1) == 1 {
+			(*abort.Load())()
+		}
+	}
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		abort.Store(&cancel)
+		out := filepath.Join(t.TempDir(), "video_stream")
+		var checks atomic.Int32
+		d := NewSegmentDownloader(DownloaderOptions{
+			BaseURL:           gvsBase("empty"),
+			OutputFile:        out,
+			InitInlineAtStart: true,
+			CheckStreamStatus: func(context.Context) (bool, error) {
+				checks.Add(1)
+				return true, nil
+			},
+		})
+
+		if err := d.Start(ctx); err != nil {
+			t.Fatalf("Start = %v, want nil (an ended stream); sequence head+2 requested: %v", err, overran.Load() > 0)
+		}
+		wantFile(t, out, gvsRecording(0, head))
+		if got := d.CurrentSeq(); got != head+1 {
+			t.Errorf("CurrentSeq = %d, want %d (head+1: an empty body is not a segment)", got, head+1)
+		}
+		if checks.Load() == 0 {
+			t.Error("CheckStreamStatus never ran — the loop ended without confirming the stream was over")
+		}
+		raw, err := os.ReadFile(out + resumeFileSuffix)
+		if err != nil {
+			t.Fatalf("resume sidecar: %v", err)
+		}
+		var state ResumeState
+		if err := json.Unmarshal(raw, &state); err != nil {
+			t.Fatalf("resume sidecar: %v", err)
+		}
+		if state.LastSeq != head {
+			t.Errorf("sidecar LastSeq = %d, want %d (the last segment that held media)", state.LastSeq, head)
+		}
+	})
+}
+
+// TestDashCatchUpRetriesAnEmptySegment pins G5 inside catch-up: a segment
+// answered with an empty 200 is retried by fetchSegmentWithRetry like a 5xx.
+// Returned as data, it was flushed as nothing and catch-up moved past it with
+// no gap recorded — a silent hole in the recording.
+//
+// Mutant: fetchSegmentWithRetry returning the empty body as a success: the
+// file lacks sequence 7's fragment.
+func TestDashCatchUpRetriesAnEmptySegment(t *testing.T) {
+	const head, hole = 80, 7
+	serveGVS(t, constHead(head), func(r *http.Request, seq, attempt int) gvsAnswer {
+		switch {
+		case seq == hole && attempt == 1:
+			return gvsEmpty
+		case seq <= head:
+			return gvsServe
+		default:
+			return gvsForbidden
+		}
+	})
+
+	synctest.Test(t, func(t *testing.T) {
+		out := filepath.Join(t.TempDir(), "video_stream")
+		var gaps atomic.Int32
+		d := NewSegmentDownloader(DownloaderOptions{
+			BaseURL:           gvsBase("catchup"),
+			OutputFile:        out,
+			InitInlineAtStart: true,
+			CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
+		})
+		d.OnGap = func(DownloadGap) { gaps.Add(1) }
+		var caughtUp atomic.Bool
+		d.OnProgress = func(p DownloadProgress) {
+			if p.CatchingUp {
+				caughtUp.Store(true)
+			}
+		}
+
+		if err := d.Start(t.Context()); err != nil {
+			t.Fatalf("Start = %v, want nil", err)
+		}
+		if !caughtUp.Load() {
+			t.Fatal("the download never entered catch-up — the scenario did not run")
+		}
+		wantFile(t, out, gvsRecording(0, head))
+		if got := gaps.Load(); got != 0 {
+			t.Errorf("OnGap fired %d times, want 0 (the empty segment was retried in place)", got)
+		}
+	})
 }
 
 // TestDashInlineInitGuardWritesSq0InitFirst pins step 2 of G3: an
