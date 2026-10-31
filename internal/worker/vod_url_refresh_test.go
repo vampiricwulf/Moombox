@@ -47,16 +47,20 @@ func stubRefreshVideoInfo(t *testing.T, fresh func() *youtube.VideoInfo) *atomic
 // (the 2026-09-29 incident's shape). A stream that needs a token is never in
 // that chain and does not ask it.
 //
+// Every served URL here has long expired (expire=1), so the token fallback
+// (vod_token_fallback_test.go) never runs: these are the refresh's own rules.
+//
 // Mutant: dropping `c.ContentLength == served.ContentLength` from
-// sameVodFile — the re-encode row installs a URL for another file. Mutant:
+// vodFileCopy — the re-encode row installs a URL for another file. Mutant:
 // dropping `formats[i].TokenFreeAlternate` from its candidates — the shadow
-// row finds nothing. Mutant: dropping `!tokenClassChanged(...)` — the shadow
-// row takes the web_creator winner's URL. Mutant: dropping
-// `youtube.GvsTokenRequired(served.Source) &&` from refreshVodURL — the
-// shadow row mints a token for a bare URL. Mutant: bypassCache true → false
-// — the tokenised row's mint reads the cache. Mutant: dropping the cookieless
-// re-extract from refreshVodURL — the incident row keeps the expired URL.
-// Mutant: dropping its `!youtube.GvsTokenRequired(served.Source)` gate — the
+// row finds nothing. Mutant: dropping its class test
+// (`youtube.GvsTokenRequired(c.Source) == tokenRequired`) — the shadow row
+// takes the web_creator winner's URL. Mutant: minting whatever the served
+// stream's class (refreshVodURL's `!bare || st.tokenised || step > 0` gate
+// always true) — the shadow row mints a token for a bare URL. Mutant:
+// bypassCache true → false — the tokenised row's mint reads the cache.
+// Mutant: dropping the cookieless re-extract from refreshVodURL — the
+// incident row keeps the expired URL. Mutant: dropping its `bare` gate — the
 // tokenised re-encode row asks the cookieless chain. Mutant: handing the
 // re-extract ctx instead of refreshCtx — the incident row's fetch carries no
 // deadline.
@@ -110,7 +114,7 @@ func TestRefreshVodURLServesTheSameFile(t *testing.T) {
 			served := youtube.Format{Itag: 137, URL: old, ContentLength: "1000", Source: tc.served}
 
 			gotURL, gotToken := refreshVodURL(context.Background(), job, "https://www.youtube.com/s/player/abcd1234/player_ias.vflset/en_US/base.js",
-				served, stubCipherSolver{}, nil, minter, "vodpot", "VOD video")
+				newVodRefreshState(nil, served, old), stubCipherSolver{}, nil, minter, "vodpot", "VOD video")
 			if gotURL != tc.wantURL || gotToken != tc.wantToken {
 				t.Errorf("refreshVodURL = (%q, %q), want (%q, %q)", gotURL, gotToken, tc.wantURL, tc.wantToken)
 			}

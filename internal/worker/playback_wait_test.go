@@ -560,7 +560,7 @@ func TestRefreshVodURLWaitsOutTheFreshAd(t *testing.T) {
 				}
 			}()
 			u, tok := refreshVodURL(ctx, job, "https://www.youtube.com/s/player/abcd1234/player_ias.vflset/en_US/base.js",
-				served, stubCipherSolver{}, nil, nil, "vodpot", "VOD video")
+				newVodRefreshState(nil, served, old), stubCipherSolver{}, nil, nil, "vodpot", "VOD video")
 			out <- refreshed{u, tok}
 		}()
 		return job, logs, out

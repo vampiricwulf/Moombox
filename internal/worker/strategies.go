@@ -605,9 +605,12 @@ func gvsBinding(job *JobContext, videoInfo *youtube.VideoInfo) (value, kind stri
 // mintGvsPoToken is every strategy's first GVS PO token mint (VOD, DASH, HLS,
 // manifestless), behind a package var so the strategy tests can swap in a
 // fake without a real *bgutils.PotProvider. Production never writes it. The
-// 403-recovery re-mint (refreshGvsCredentials) goes through its own
-// gvsTokenMinter interface and is not routed here; it is gated by the same
-// youtube.GvsTokenRequired policy as every other mint.
+// 403-recovery re-mints (refreshGvsCredentials, and the whole-file
+// refreshVodURL through vodRefreshMinter) go through the gvsTokenMinter
+// interface and are not routed here; they are gated by the same
+// youtube.GvsTokenRequired policy as every other mint, save the VOD
+// refresh's token fallback, which mints for a token-free stream only once a
+// refusal long before its URL's expiry says it needs one.
 var mintGvsPoToken = func(ctx context.Context, p *bgutils.PotProvider, binding string) (string, error) {
 	return p.GeneratePoTokenString(ctx, binding, false)
 }
@@ -629,6 +632,12 @@ var mintGvsPoToken = func(ctx context.Context, p *bgutils.PotProvider, binding s
 //     clients tolerate a stray token.
 //
 // A move within one class (web_creator → web, visionos ↔ tv_auth) installs.
+//
+// The whole-file VOD refresh holds the same line (sameVodFile) save for one
+// deliberate crossing: its token fallback's second step moves a token-free
+// stream whose URLs are refused long before their expiry onto a
+// token-requiring copy of the same file, minting the token that copy needs
+// (refreshVodURL), and the stream rides that class from then on.
 func tokenClassChanged(setupSource, freshSource string) bool {
 	return youtube.GvsTokenRequired(setupSource) != youtube.GvsTokenRequired(freshSource)
 }
@@ -654,8 +663,8 @@ var fetchCookielessFormats = (*youtube.Service).CookielessFormats
 // It reads the SETUP pool: on the VOD path a missing_pot swap replaces an
 // itag's winner with its token-free shadow in a filtered copy only, so this
 // would still name the winner's client for a stream riding the shadow's URL.
-// The VOD refresh (refreshVodURL) is therefore handed the served format
-// itself and never asks this.
+// The VOD refresh (refreshVodURL) therefore holds the served format itself
+// (vodRefreshState) and never asks this.
 func formatSourceByItag(formats []youtube.Format, itag int) string {
 	for i := range formats {
 		if formats[i].Itag == itag {

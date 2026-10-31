@@ -48,7 +48,9 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// web_safari / watch_page URL answers the 1-byte Range probe 206 and then
 	// 403s its first 5 MB chunk without one (the VOD 403 of 2026-09-29).
 	// tv, web_embedded, visionos and android_vr carry no requirement, so
-	// those ride bare — see youtube.GvsTokenRequired.
+	// those ride bare — see youtube.GvsTokenRequired — until a refusal long
+	// before a URL's expiry says otherwise (the whole-file refresh's token
+	// fallback, refreshVodURL).
 	// Video and audio can come from different clients, so the token is
 	// minted at most once and passed per stream, only where that stream's
 	// own Source requires it. Bound the same way as the DASH mint (see
@@ -184,7 +186,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			SegmentWorkers:      job.Config.SegmentWorkers,
 			PoToken:             videoPoToken,
 			IsOnline:            isOnline,
-			OnCredentialRefresh: vodURLRefresh(ctx, job, videoInfo, *result.VideoFormat, routedSolver, cipherSolver, potProvider, "VOD video"),
+			OnCredentialRefresh: vodURLRefresh(ctx, job, videoInfo, *result.VideoFormat, videoResolved, routedSolver, cipherSolver, vodRefreshMinter(potProvider), "VOD video"),
 			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 		})
 	}
@@ -200,7 +202,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			SegmentWorkers:      job.Config.SegmentWorkers,
 			PoToken:             audioPoToken,
 			IsOnline:            isOnline,
-			OnCredentialRefresh: vodURLRefresh(ctx, job, videoInfo, *result.AudioFormat, routedSolver, cipherSolver, potProvider, "VOD audio"),
+			OnCredentialRefresh: vodURLRefresh(ctx, job, videoInfo, *result.AudioFormat, audioResolved, routedSolver, cipherSolver, vodRefreshMinter(potProvider), "VOD audio"),
 			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 		})
 	}
