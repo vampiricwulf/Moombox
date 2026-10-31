@@ -95,12 +95,15 @@ type decapiTerminalMemo struct {
 	// and NOT the operator fixing cookies.
 	//
 	// That is sound only because the answer genuinely cannot change from
-	// here: DECAPI probes anonymously and has no authenticated probe at all,
-	// so it could never be the monitor that picks a members-only stream back
-	// up. The feed monitor owns that answer and re-probes the same video on
-	// its own cadence (walk.go's probeRow escalates to the authenticated
-	// probe), which is what this latch relies on as cover — and which needs
-	// monitors.membership_discovery, default on.
+	// here: DECAPI probes anonymously and has no authenticated probe of its
+	// own — the status probe reaches the signed-in TV call only as the one
+	// escalation of a refusal that said nothing about the broadcast (G8,
+	// youtube.Service.ProbeVideoStatus), and a refusal read there is no more
+	// DECAPI's to lift — so it could never be the monitor that picks a
+	// members-only stream back up. The feed monitor owns that answer and
+	// re-probes the same video on its own cadence (walk.go's probeRow
+	// escalates to the authenticated probe), which is what this latch relies
+	// on as cover — and which needs monitors.membership_discovery, default on.
 	denied bool
 	// nonLiveOff records that a terminal sighting was skipped because the
 	// channel does not archive VODs. It holds only while that is still so:

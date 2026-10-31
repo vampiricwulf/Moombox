@@ -232,6 +232,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	if info.HlsManifestURL != "" {
 		info.HlsManifestAvailableAt = availableAt
 	}
+	info.liveFlagsStated = statusLiveFlagsStated(videoDetails, microformat)
 	return info, nil
 }
 

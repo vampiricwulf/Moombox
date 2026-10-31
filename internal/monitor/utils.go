@@ -106,6 +106,16 @@ func endRecheckDelay(step int) time.Duration {
 // This is typically wired to youtube.Service.ProbeVideoStatus. Takes a
 // context so probes inherit the monitor's lifecycle — without it, in-flight
 // probes finish out their full retry budget after the monitor is stopped.
+//
+// A probe that could not tell reports an error, never a result: that wired
+// youtube.Service.ProbeVideoStatus does so for a refusal that says nothing
+// about the broadcast (the bot wall, a made-for-kids video) once its one
+// escalation has settled nothing either (G8). probeAndClassify takes it down
+// its errored path — OutcomeErrored, so the feed walk and DECAPI store no
+// classification, the cooldown records nothing until the failure tracker
+// gives up, and the video is probed again next cycle — where its
+// not_a_stream used to be stored as settled, memoised as terminal, or
+// skipped as non-stream content on a live-only channel.
 type VideoProbeFunc func(ctx context.Context, videoID string) (*VideoProbeResult, error)
 
 // MetadataFailureTracker tracks per-video probe failure counts.
@@ -374,9 +384,10 @@ func isDenied(streamStatus, playabilityError string) bool {
 // REMEMBERED, never whether a job is created — no refusal creates a job.
 //
 //   - members_only: settled. The video IS members-only; an anonymous player
-//     call says so every time. DECAPI has no authenticated probe at all (the
-//     feed path owns that escalation, walk.go's probeRow), so its re-asking
-//     buys nothing but ~240 player calls an hour.
+//     call says so every time. DECAPI has no authenticated probe of its own
+//     (the feed path owns that escalation, walk.go's probeRow; the status
+//     probe's own escalation of a refusal that says nothing, G8, is not
+//     one), so its re-asking buys nothing but ~240 player calls an hour.
 //   - login_required: NOT settled. That is transient anti-bot pushback on a
 //     PUBLIC video and it clears on its own — but the memo that would hold it
 //     is released only by a new newest video, PruneHealth or a restart, so

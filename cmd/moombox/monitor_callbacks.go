@@ -1465,6 +1465,13 @@ func (s *runState) wireMonitorCallbacks() {
 	// Uses the caller-supplied ctx so monitor shutdown cancels in-flight
 	// probes (per audit reports/cross-cutting.md C4). Every monitor probe is
 	// built by monitorProbe (TestEveryMonitorProbeIsBuiltByMonitorProbe).
+	//
+	// ProbeVideoStatus escalates a refusal that says nothing about the
+	// broadcast — to the authenticated TV probe when signed in, which makes
+	// DECAPI's probe credentialed in exactly that case — and reports it as an
+	// error when the escalation settles nothing either, so it reaches the
+	// monitors as an errored probe rather than a not_a_stream to store (G8,
+	// TestABotWalledStatusProbeReachesTheMonitorsAsAnErroredProbe).
 	s.feedMon.ProbeVideo = monitorProbe(s.ytService.ProbeVideoStatus)
 	s.decapiMon.ProbeVideo = monitorProbe(s.ytService.ProbeVideoStatus)
 

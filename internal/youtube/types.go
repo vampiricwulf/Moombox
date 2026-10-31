@@ -118,6 +118,14 @@ type VideoInfo struct {
 	// Never serialised, as the instants it gates are not.
 	PlaybackWaitExempt bool `json:"-"`
 
+	// liveFlagsStated is whether the response this info was parsed from
+	// stated any flag yt-dlp's live_status is decided on
+	// (statusLiveFlagsStated). False is the refused answer that says nothing
+	// about the broadcast, which the status probe escalates instead of
+	// classifying (statusAnswerInconclusive). One response's fact, read only
+	// by the status probe, which parses one.
+	liveFlagsStated bool
+
 	// SessionAuth is the login state YouTube reported for the session that
 	// produced this info (see SessionAuthState). Diagnostic only — nothing
 	// downloads differently because of it — but it is what lets a
