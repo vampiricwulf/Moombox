@@ -332,6 +332,20 @@ type Format struct {
 	// not evict its twin — and the clean one is preferred when both exist.
 	IsDrc bool `json:"isDrc,omitempty"`
 
+	// ApproxDurationMs is the format's own `approxDurationMs`, the length of
+	// media it serves, or nil when the response stated none. Read only to
+	// stamp Damaged; a live or upcoming broadcast states no length of its own
+	// (lengthSeconds 0), so its formats are never held to one.
+	ApproxDurationMs *int64 `json:"-"`
+	// Damaged marks a rendition serving under half the video's length
+	// (markDamagedFormats): one encoded short, whose archive's track stops
+	// partway while the other runs on. The selector ranks it below every
+	// intact rendition, as yt-dlp's preference -10 does. Each copy carries its
+	// own response's verdict, through the dedup and into a shadow. Neither
+	// field is in the format picker's JSON: whether the picker marks a damaged
+	// rendition, as yt-dlp's format list does, is not decided.
+	Damaged bool `json:"-"`
+
 	// EncryptedSig is the `s` field from a signatureCipher entry, captured
 	// at parse-time and decrypted on demand by cipher.ResolveFormatURL.
 	// Empty when the format originated from a direct URL response (no sig

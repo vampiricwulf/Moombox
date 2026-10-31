@@ -182,6 +182,13 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		lengthSeconds = &n
 	}
 
+	// Renditions encoded short, held against this response's own length: the
+	// stamp rides each copy through the dedup, which no later stage that
+	// knows the length could reach.
+	if damaged := markDamagedFormats(formats, videoDurationSeconds(videoDetails, microformat)); len(damaged) > 0 {
+		p.reportDamagedFormats(ctx, damaged)
+	}
+
 	// End timestamp
 	endTimestamp := ""
 	if lbd, ok := getNestedMap(microformat, "liveBroadcastDetails"); ok {
@@ -368,6 +375,9 @@ type extractionStateKey struct{}
 // to be exercised. Three words buy the class away.
 type extractionState struct {
 	drmWarned atomic.Bool
+	// damagedWarned is drmWarned's twin for the damaged-rendition report
+	// (reportDamagedFormats).
+	damagedWarned atomic.Bool
 	// drmSkipped accumulates every response's DRM drop count, and
 	// collapsedRenditions holds the pool's own collapse count. They are what
 	// finishExtraction stamps onto the VideoInfo the cascade returns; see
@@ -617,6 +627,13 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 				format.AudioIsDefault = getBool(at, "audioIsDefault")
 			}
 			format.IsDrc = getBool(f, "isDrc")
+			// The length of media this format serves, which markDamagedFormats
+			// holds against the video's. A decimal string on the wire, like
+			// contentLength; one that does not parse is unstated, never
+			// damaged.
+			if ms, err := strconv.ParseInt(getStr(f, "approxDurationMs"), 10, 64); err == nil && ms >= 0 {
+				format.ApproxDurationMs = &ms
+			}
 
 			formats = append(formats, format)
 		}

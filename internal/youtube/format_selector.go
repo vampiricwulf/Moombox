@@ -71,6 +71,28 @@ func isSelectableVideo(f *Format) bool {
 	return strings.Contains(f.MimeType, "video") && f.URL != ""
 }
 
+// isSelectableAudio is isSelectableVideo's audio half, classified as the
+// selection loop classifies: a muxed format's mimeType names video, so it is
+// video.
+func isSelectableAudio(f *Format) bool {
+	return !strings.Contains(f.MimeType, "video") && strings.Contains(f.MimeType, "audio") && f.URL != ""
+}
+
+// intactRenditions reports whether formats holds a selectable video and a
+// selectable audio rendition that is not Damaged — whether the selector's
+// first rung has anything to put ahead of a damaged one.
+func intactRenditions(formats []Format) (video, audio bool) {
+	for i := range formats {
+		f := &formats[i]
+		if f.Damaged {
+			continue
+		}
+		video = video || isSelectableVideo(f)
+		audio = audio || isSelectableAudio(f)
+	}
+	return video, audio
+}
+
 // audioTrackScore ranks one audio format's TRACK against the others. Ported
 // from yt-dlp's get_language_code_and_preference (_video.py:3277-3291), whose
 // constants are ORIGINAL_LANG_VALUE = 10 and DEFAULT_LANG_VALUE = 5, with
@@ -129,9 +151,25 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 		return score
 	}
 
+	// The first rung, ahead of every other — the cap included: a Damaged
+	// rendition (markDamagedFormats) is taken only when no intact one of its
+	// kind exists. It is yt-dlp's `'preference': -10 if is_damaged`
+	// (_video.py:3474, 0ad92dfb1, #2823). ie_pref, the sort field that reads
+	// a format's preference, is a PRIORITY field, ranked ahead of everything
+	// a user's format sort asks for, resolution included (utils/_utils.py:5392,
+	// 5532-5536) — and the cap is such a sort: `-S res:N`, the closest size
+	// above when nothing is at or below. So a short top AV1 loses to the
+	// intact VP9 beside it, and a pool whose only rendition at the chosen size
+	// is short resolves the cap over the intact ones. Passing over it, rather
+	// than ranking it, leaves the winner among the intact formats exactly as
+	// before. Without it a Finished archive's video track stopped partway,
+	// and the post-mux check, which compares the output against the staged
+	// inputs (verifyAgainstStaging), had nothing longer to hold it to.
+	intactVideo, intactAudio := intactRenditions(formats)
+
 	// Log available video formats (matching TS FormatSelector debug output)
 	if logger != nil {
-		var available []string
+		var available, passedOver []string
 		for i := range formats {
 			f := &formats[i]
 			if strings.Contains(f.MimeType, "video") && f.URL != "" {
@@ -147,9 +185,15 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 				}
 				available = append(available, fmt.Sprintf("itag %d (%dx%d@%dfps, %dbps)", f.Itag, w, h, fps, f.Bitrate))
 			}
+			if f.Damaged && (isSelectableVideo(f) && intactVideo || isSelectableAudio(f) && intactAudio) {
+				passedOver = append(passedOver, fmt.Sprintf("itag %d", f.Itag))
+			}
 		}
 		if len(available) > 0 {
 			logger.Debug(fmt.Sprintf("[FormatSelector] Available video formats with URLs: %s", strings.Join(available, ", ")))
+		}
+		if len(passedOver) > 0 {
+			logger.Debug(fmt.Sprintf("[FormatSelector] Passing over damaged renditions (under half the video's length): %s", strings.Join(passedOver, ", ")))
 		}
 	}
 
@@ -162,7 +206,7 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 	videoCands := make([]utils.Cand, 0, len(formats))
 	for i := range formats {
 		f := &formats[i]
-		if !isSelectableVideo(f) {
+		if !isSelectableVideo(f) || f.Damaged && intactVideo {
 			continue
 		}
 		w, h := f.dims()
@@ -175,7 +219,7 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 		mimeType := f.MimeType
 
 		if strings.Contains(mimeType, "video") {
-			if !isSelectableVideo(f) || !haveCapSize || f.CapDimension() != capSize {
+			if !isSelectableVideo(f) || f.Damaged && intactVideo || !haveCapSize || f.CapDimension() != capSize {
 				continue
 			}
 
@@ -248,7 +292,7 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 				}
 			}
 		} else if strings.Contains(mimeType, "audio") {
-			if f.URL == "" {
+			if f.URL == "" || f.Damaged && intactAudio {
 				continue
 			}
 
