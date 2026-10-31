@@ -169,6 +169,18 @@ type VideoInfo struct {
 	// cause instead of always to "your cookies expired".
 	SessionAuth SessionAuthState `json:"-"`
 
+	// IsPremium is the watch page's verdict that the signed-in session is a
+	// YouTube Premium subscriber (WatchPageResult.IsPremium, yt-dlp's
+	// _is_premium_subscriber), stamped by withAttestation. False whenever the
+	// page did not say so — signed out, a page that could not be fetched, a
+	// topbar without the Premium logo — which is the reading that keeps the
+	// GVS token mandatory. It waives the web family's HTTPS/DASH token
+	// requirement (GvsTokenMandatory: the token is still attached when one
+	// is minted, it is no longer required), and the authenticated cascade
+	// fetches web_creator for it as a format-pool contributor. Never
+	// serialised.
+	IsPremium bool `json:"-"`
+
 	// Chat carries what the watch page already said about live chat, so chat
 	// setup does not fetch that page a second time. In-process hand-off only.
 	Chat ChatSource `json:"-"`
@@ -187,6 +199,16 @@ type VideoInfo struct {
 	// GvsContentBinding — so download strategies never re-derive it.
 	GvsBinding     string `json:"-"`
 	GvsBindingKind string `json:"-"`
+	// GvsBindingGuessed marks a binding GvsContentBinding had to guess: the
+	// session is signed in, the video-ID experiment is off, and the page
+	// stated no datasync ID, so the binding fell to visitor data, the video
+	// ID or the channel ID — values a signed-in session's GVS token is not
+	// bound to. yt-dlp mints nothing there (fetch_po_token, "Missing required
+	// Data Sync ID for account", _video.py:2815-2819); the strategies count
+	// it as a missing token (owner decision D12, 2026-10-31): a stream whose
+	// token is mandatory prefers its token-free copies, and rides a token
+	// minted under the guess only when there is none.
+	GvsBindingGuessed bool `json:"-"`
 
 	// PublishedAt is the probe's authoritative publish date, status-aware
 	// per spec §12 — see extractPublishedAt. RFC3339: a real broadcast
@@ -547,9 +569,10 @@ type YtcfgData struct {
 // family — the watch page IS the web client, and web_safari is the variant
 // Moombox asks first. The public cascade follows _DEFAULT_CLIENTS: tv leads.
 // The two cascades never share a pool, so the two tv levels only need to sit
-// right within their own. web_creator is the premium tuple's lead, but
-// Moombox has no Premium detection and only fetches it as a members-only
-// fallback, so it stays behind the web family.
+// right within their own. web_creator is the premium tuple's lead; Moombox
+// fetches it for a Premium session (VideoInfo.IsPremium) as a contributor to
+// the pool — owner decision D11, 2026-10-31: not the lead — and otherwise
+// only as the members-only fallback, so it stays behind the web family.
 //
 // Until 2026-10-14 tv led the authed tier too, on the reading that upstream
 // "ranks tv first" — the priority-field misreading above — and because its
@@ -653,9 +676,12 @@ const (
 
 // GvsTokenRequired reports whether a URL from source — a Format.Source label
 // (the client label collectFormats stamps) or a VideoInfo manifest source —
-// requires the GVS PO token. It is Moombox's single GVS token policy: the
-// VOD direct path, the live DASH/HLS/manifest-free strategies and the 403
-// re-mint all attach a token iff it answers true — save one deliberate
+// takes the GVS PO token: the client's own policy, upstream's
+// required/recommended, before the session and the stream are asked. It is
+// Moombox's single GVS token policy: the VOD direct path, the live
+// DASH/HLS/manifest-free strategies and the 403 re-mint all attach a minted
+// token iff it answers true — whether a stream may go without one when none
+// can be minted is GvsTokenMandatory's question — save one deliberate
 // exception, the whole-file VOD refresh's token fallback, which tokenises a
 // token-free stream once its URLs are refused long before their expiry, and
 // may move it onto its TokenAlternate (the worker's refreshVodURL) — never
@@ -666,11 +692,13 @@ const (
 // and the per-client entries), label by label:
 //
 //   - watch_page, web, web_safari, web_creator: true. The WEB family's
-//     HTTPS and DASH policy is required=True, not_required_for_premium=True;
-//     Moombox has no Premium detection, so the token is always attached (the
-//     watch page IS the web client). Its HLS policy is recommended rather
-//     than required, and yt-dlp fetches and attaches a token there too, so
-//     the HLS gate asks this same question.
+//     HTTPS and DASH policy is required=True, recommended=True,
+//     not_required_for_premium=True, so the token is attached whenever one
+//     is minted — for a Premium session too, whose waiver only lets a
+//     stream go without one (GvsTokenMandatory) — and the watch page IS the
+//     web client. Its HLS policy is recommended rather than required, and
+//     yt-dlp fetches and attaches a token there too, so the HLS gate asks
+//     this same question.
 //   - tv_auth, tv_public, web_embedded: false. tv and web_embedded have no
 //     GVS_PO_TOKEN_POLICY entry upstream, so the default applies
 //     (required=False) and yt-dlp fetches no GVS token for them.
@@ -689,6 +717,37 @@ func GvsTokenRequired(source string) bool {
 		return true
 	}
 	return false
+}
+
+// GvsTokenMandatory reports whether a URL from source cannot be fetched
+// without the GVS PO token, for a session isPremium says is or is not a
+// Premium subscriber — yt-dlp's gvs_pot_required for the HTTPS and DASH
+// protocols (_video.py:3267-3271): the client's policy is required
+// (GvsTokenRequired), and not waived by not_required_for_premium, which the
+// whole web family carries (_base.py:71-88, and web_creator's own entry at
+// 165-190). A token-requiring URL with no token is what upstream calls
+// missing_pot and skips (_video.py:3440-3442, 3746-3749); the strategies
+// drop it for a token-free copy, or fail the setup (the worker's
+// withoutGvsRequiredFormats and its callers). A Premium session's web-family
+// URL is only recommended a token: one is attached when minted
+// (GvsTokenRequired), and the URL goes out bare when none is. HLS is never
+// mandatory — the web family's HLS policy is recommended only
+// (_base.py:85-88) — so the HLS strategy never asks. An https format's own
+// answer adds the itag 18 exemption (FormatGvsTokenMandatory).
+func GvsTokenMandatory(source string, isPremium bool) bool {
+	return GvsTokenRequired(source) && !isPremium
+}
+
+// FormatGvsTokenMandatory is GvsTokenMandatory for one format: upstream's
+// require_po_token, `stream_id[0] not in ['18'] and gvs_pot_required(...)`
+// (_video.py:3516-3518). The muxed 360p itag 18 is token-optional on every
+// client — upstream still fetches and attaches a token for it when its
+// policy recommends one (3519-3525, 3582-3583), and saves it bare when no
+// token can be had — so it is never dropped from a missing_pot pool and its
+// token is attached when minted (GvsTokenRequired) without being required.
+// A nil format needs nothing.
+func FormatGvsTokenMandatory(f *Format, isPremium bool) bool {
+	return f != nil && f.Itag != 18 && GvsTokenMandatory(f.Source, isPremium)
 }
 
 // HasSplitAdaptiveFormats reports whether formats contains the split
