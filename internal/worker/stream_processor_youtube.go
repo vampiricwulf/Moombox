@@ -321,8 +321,14 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		jitterMax = max(jitterMax, time.Second)
 		jitter := time.Duration(rand.Int63n(int64(jitterMax)))
 
-		// B2: Race sleep against chat surge
-		probeTimer := time.NewTimer(interval + jitter)
+		// B2: Race sleep against chat surge. A go-live confirmation held off
+		// for a rate limit is made when its hold ends, not on the first probe
+		// past it (loopRateLimit.heldFor).
+		wait := interval + jitter
+		if held := rateLimit.heldFor(time.Now()); held > 0 {
+			wait = min(wait, held)
+		}
+		probeTimer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			probeTimer.Stop()
@@ -456,8 +462,9 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				sp.logger.Debug("periodic full fetch failed, will retry later", "videoID", job.VideoID, "err", err)
 			}
 			lastFullFetch = time.Now()
-			if err == nil {
-				sp.noteFetch(job, &rateLimit, fullInfo, false)
+			// A refusal that ends a day of them ends the job (rateLimitCap).
+			if err == nil && sp.noteFetch(job, &rateLimit, fullInfo, false) && rateLimit.outlasted(time.Now()) {
+				return sp.giveUpRateLimited(job, &rateLimit, fullInfo, chatDl), nil
 			}
 		}
 
@@ -554,8 +561,12 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				continue
 			}
 			// A rate limit says nothing about the stream: keep waiting, and
-			// confirm again once it has been waited out (loopRateLimit).
+			// confirm again once it has been waited out (loopRateLimit) — or,
+			// a day of them, give up (rateLimitCap).
 			if sp.noteFetch(job, &rateLimit, fullInfo, true) {
+				if rateLimit.outlasted(time.Now()) {
+					return sp.giveUpRateLimited(job, &rateLimit, fullInfo, chatDl), nil
+				}
 				continue
 			}
 			// Cross-check: if full WEB fetch says still upcoming, the probe was
@@ -589,6 +600,9 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			}
 			// A rate limit, as above.
 			if sp.noteFetch(job, &rateLimit, fullInfo, true) {
+				if rateLimit.outlasted(time.Now()) {
+					return sp.giveUpRateLimited(job, &rateLimit, fullInfo, chatDl), nil
+				}
 				continue
 			}
 			// Cross-check: if full WEB fetch says still upcoming, keep polling.

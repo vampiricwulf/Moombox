@@ -37,7 +37,11 @@ var EventGroups = []EventGroup{
 	// release instead of going silent through every outage.
 	{"Connectivity", []string{"connectivity_resume", "connectivity_split", "connectivity_restored"}},
 	{"Trim", []string{"trim_created", "trim_deleted", "trim_error"}},
-	{"System", []string{"disk_warning", "disk_critical", "disk_ok", "update_available", "update_applied", "update_failed", "crash_recovered", "channel_unhealthy", "channel_healthy", "sidecar_down", "sidecar_restored"}},
+	// captcha_required is the YouTube session's captcha spell, told once a
+	// spell however many jobs it refuses (worker.captchaAlert). It has no
+	// close: the jobs it held fetch again on their own, and the fetch that
+	// answers is the news.
+	{"System", []string{"disk_warning", "disk_critical", "disk_ok", "update_available", "update_applied", "update_failed", "crash_recovered", "channel_unhealthy", "channel_healthy", "sidecar_down", "sidecar_restored", "captcha_required"}},
 }
 
 // KnownEvents is the flat membership set derived from EventGroups, PLUS every

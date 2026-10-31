@@ -522,8 +522,9 @@ func fullCalls(run waitRun) []time.Duration {
 // TestRateLimitedGoLiveKeepsWaiting: a go-live confirmation YouTube refuses
 // for a rate limit leaves the broadcast in its waiting loop — early chat
 // running, status probe polling — and the confirmation is made again once
-// the limit has been waited out, rateLimitRetryInterval later, on the first
-// probe past it; that one goes live. The refusal holds the backlog. Before,
+// the limit has been waited out, on the taper (2 minutes, then 5:
+// TestRateLimitedConfirmationTapers); the one past the limit goes live. The
+// refusals hold the backlog once, a spell. Before,
 // a refusal read as an answer either wrote Live and went on to a download
 // with nothing to download (Error), or, read "still upcoming", sent the whole
 // cascade into the limit on every 30 s probe; and then it was handed back to
@@ -566,17 +567,19 @@ func TestRateLimitedGoLiveKeepsWaiting(t *testing.T) {
 			if run.result == nil || !run.result.ShouldDownload {
 				t.Fatalf("result = %+v, want the download once the limit was waited out; calls:%s", run.result, run)
 			}
-			if len(fulls) != 2 {
-				t.Fatalf("full fetches at %v, want the refused confirmation and the one after the wait; calls:%s", fulls, run)
+			// Refused at about 3 minutes and again 2 minutes later, both
+			// inside the limit's 10; the one 5 minutes after that answers.
+			if len(fulls) != 3 {
+				t.Fatalf("full fetches at %v, want two refused confirmations and the one after the waits; calls:%s", fulls, run)
 			}
-			if gap := fulls[1] - fulls[0]; gap < rateLimitRetryInterval || gap > rateLimitRetryInterval+time.Minute {
-				t.Errorf("confirmations %s apart, want the first probe past %s", gap, rateLimitRetryInterval)
+			if g1, g2 := fulls[1]-fulls[0], fulls[2]-fulls[1]; g1 != confirmationHoldAfter(1) || g2 != confirmationHoldAfter(2) {
+				t.Errorf("confirmations %s and %s apart, want %s and %s", g1, g2, confirmationHoldAfter(1), confirmationHoldAfter(2))
 			}
-			if run.returned != fulls[1] {
-				t.Errorf("the wait returned at %s; it was to wait in its loop until the confirmation at %s", run.returned, fulls[1])
+			if run.returned != fulls[2] {
+				t.Errorf("the wait returned at %s; it was to wait in its loop until the confirmation at %s", run.returned, fulls[2])
 			}
 			if n := run.count("hold"); n != 1 {
-				t.Errorf("%d backlog holds, want the refusal's one; calls:%s", n, run)
+				t.Errorf("%d backlog holds, want the spell's one; calls:%s", n, run)
 			}
 			if wantVod := tc.answer(run.start).StreamStatus == youtube.StreamVOD; run.result.IsVod != wantVod {
 				t.Errorf("IsVod = %v, want %v", run.result.IsVod, wantVod)
@@ -639,12 +642,12 @@ func TestWaitingLoopRateLimitLine(t *testing.T) {
 	if !sp.noteFetch(job, &l, refused, true) || !l.confirmationHeld() {
 		t.Fatal("a refused confirmation did not hold the next one")
 	}
-	if got := progress(); got != rateLimitWaitLine(rateLimitRetryInterval) {
+	if got := progress(); got != rateLimitWaitLine(confirmationHoldAfter(1)) {
 		t.Errorf("line on the refusal = %q", got)
 	}
-	sp.tickRateLimit(job, &l, l.until.Add(-20*time.Minute))
-	if got, want := progress(), rateLimitWaitLine(20*time.Minute); got != want {
-		t.Errorf("line ten minutes in = %q, want %q", got, want)
+	sp.tickRateLimit(job, &l, l.until.Add(-90*time.Second))
+	if got, want := progress(), rateLimitWaitLine(90*time.Second); got != want {
+		t.Errorf("line half a minute in = %q, want %q", got, want)
 	}
 	sp.tickRateLimit(job, &l, l.until)
 	if l.confirmationHeld() || progress() != "" {

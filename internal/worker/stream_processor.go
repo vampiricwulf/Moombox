@@ -138,6 +138,11 @@ type StreamProcessor struct {
 	// it. Wired by NewDownloadWorker via SetOnRateLimited; nil-guarded.
 	onRateLimited func()
 
+	// captcha is the session's captcha spell (captchaAlert, rate_limit.go),
+	// which a captcha the waiting loop's full fetch meets opens and a fetch
+	// it answers ends. The worker's own; set by NewDownloadWorker. nil-safe.
+	captcha *captchaAlert
+
 	// onTwitchAuthLoss reports a Twitch auth downgrade to whatever owns the
 	// PLATFORM's credential status — cookies.RefreshService.NoteTwitchAuthLoss
 	// in production, wired by cmd/moombox. nil is a valid install and the
@@ -527,10 +532,11 @@ func judgeRefreshedVodInfo(info *youtube.VideoInfo) (*youtube.VideoInfo, error) 
 // classification when the video is not playable. The display string is
 // the user-facing error; the sentinel (ErrCookiesRequired for member /
 // login, ErrNotAMember for a members-only wall hit by a live session,
-// ErrNonActionable for age-restricted, ErrRateLimited for a rate limit or a
-// captcha) lets the downstream worker route the job to StatusCookies, wait
-// it out or suppress notifications via errors.Is rather than substring
-// matching. Both empty/nil → playable.
+// ErrNonActionable for age-restricted, ErrRateLimited for a rate limit,
+// errCaptchaRequired — an ErrRateLimited too — for a captcha) lets the
+// downstream worker route the job to StatusCookies, wait it out or suppress
+// notifications via errors.Is rather than substring matching. Both
+// empty/nil → playable.
 //
 // The members-only branch consults info.SessionAuth — YouTube's own verdict
 // on whether the failing request was signed in — because the two causes need
@@ -593,7 +599,12 @@ func playabilityVerdict(info *youtube.VideoInfo) (string, error) {
 		}
 		// Transient: processJob waits it out (outlastRateLimit) rather than
 		// recording it, so this text reaches the job's log, and its error
-		// only once the requeue cannot be made.
+		// only once the requeue cannot be made or the wait has lasted a day.
+		// A captcha is one too (errCaptchaRequired), which someone has to
+		// solve: the operator is told, once a spell (captchaAlert).
+		if isCaptchaReason(reason) {
+			return rateLimitVerdictMessage(reason, info.SessionAuth), errCaptchaRequired
+		}
 		return rateLimitVerdictMessage(reason, info.SessionAuth), ErrRateLimited
 	default:
 		return reason, nil

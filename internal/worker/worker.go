@@ -297,6 +297,11 @@ type DownloadWorker struct {
 	// (endBacklogStreak). Lazily allocated.
 	backlogRetryMu sync.Mutex
 	backlogRetries map[string]int
+	// rateLimitSpells is when each job's spell of rate-limit refusals began,
+	// which rateLimitCap is measured from; captcha is the session's captcha
+	// spell, shared with streamProc (rate_limit.go).
+	rateLimitSpells rateLimitSpells
+	captcha         *captchaAlert
 
 	// processStreamFn and refreshVodInfoFn replace streamProc.Process and
 	// streamProc.RefreshVodInfo when set — a test seam, since youtube.Service
@@ -403,6 +408,10 @@ func NewDownloadWorker(
 	// The waiting loop waits a rate limit out in place, so its refusals hold
 	// the backlog from there (loopRateLimit).
 	sp.SetOnRateLimited(func() { sched.holdForRateLimit(time.Now(), rateLimitBackoff) })
+	// One captcha spell for the session, whichever job meets it: the
+	// waiting loop's fetches and processJob's (captchaAlert).
+	captcha := newCaptchaAlert(nm, logger)
+	sp.captcha = captcha
 
 	// ONE registry, two holders. ExecuteTwitch registers into the
 	// orchestrator's; cmd/moombox broadcasts through the worker's. Two
@@ -427,6 +436,7 @@ func NewDownloadWorker(
 		logger:       logger,
 		conn:         conn,
 		notifyJob:    make(chan struct{}, 1),
+		captcha:      captcha,
 	}
 	// The scheduler reads the disk through the worker, which holds the
 	// config: the output directory and the critical threshold both follow a
@@ -969,8 +979,10 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			return
 		}
 		// An answer ends the spell of rate-limit refusals: one after it — the
-		// stale re-extraction's — is a fresh limit (outlastRateLimit).
+		// stale re-extraction's — is a fresh limit (outlastRateLimit), whose
+		// day is counted from it (noteAnswered).
 		rateLimitSince = time.Time{}
+		w.noteAnswered(job, result.VideoInfo)
 
 		// Check cancellation between stream processing and download
 		if ctx.Err() != nil {

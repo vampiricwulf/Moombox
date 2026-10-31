@@ -168,8 +168,11 @@ func (w *DownloadWorker) noteBacklogRetry(jobID string) int {
 
 // forgetBacklogRetries resets jobID's count: a run of it ended other than
 // back in Queued — its download finished, it ended in Error or COOKIES?, or
-// it was cancelled — or its budget is spent and it is ending in Error.
+// it was cancelled — or its budget is spent and it is ending in Error. Its
+// spell of rate-limit refusals goes with it (rateLimitSpells): a run that
+// ended is not waiting a limit out, and the next one starts the day afresh.
 func (w *DownloadWorker) forgetBacklogRetries(jobID string) {
+	w.rateLimitSpells.end(jobID)
 	w.backlogRetryMu.Lock()
 	defer w.backlogRetryMu.Unlock()
 	delete(w.backlogRetries, jobID)
@@ -200,10 +203,12 @@ func (w *DownloadWorker) endBacklogStreak(jobID string) {
 // top of the old streak, and the hold widened every sweep's NextQueuedJobs
 // until a restart.
 //
-// The counts are the whole set to look through: requeueBacklog notes the
-// retry before it places the hold, and every hold is dropped with its count
-// or gone before the count is (sweep admits a job only once its hold has run
-// out, and held forgets it then), so a held job is always a counted one.
+// The counts and the rate-limit spells are the whole set to look through:
+// requeueBacklog notes the retry before it places the hold, and
+// outlastRateLimit notes the spell before a rate limit's requeue places its
+// hold, which no count notes; and every hold is dropped with its count or
+// spell or gone before either is (sweep admits a job only once its hold has
+// run out, and held forgets it then), so a held job is always one of them.
 //
 // The list is the bulk write's own snapshot, delivered after it returns. A
 // row created after the snapshot was read is not on it, but it has had no run
@@ -221,6 +226,13 @@ func (w *DownloadWorker) endStreaksGoneFrom(jobs []*database.Job) {
 		}
 	}
 	w.backlogRetryMu.Unlock()
+	// And the rate-limit spells, which a backlog VOD the limit alone sent
+	// back to Queued holds with no count (requeueBacklogAfterRateLimit).
+	for _, id := range w.rateLimitSpells.ids() {
+		if !exists[id] {
+			gone = append(gone, id)
+		}
+	}
 	for _, id := range gone {
 		w.endBacklogStreak(id)
 	}

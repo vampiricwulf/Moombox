@@ -155,11 +155,19 @@ func (w *DownloadWorker) refreshStaleVodInfo(ctx context.Context, job *database.
 			if rateLimited && w.scheduler != nil {
 				w.scheduler.holdForRateLimit(time.Now(), rateLimitBackoff)
 			}
+			// A captcha the next job would meet too: the operator is told,
+			// once a spell (captchaAlert).
+			if isCaptcha(err) {
+				w.captcha.raise(job)
+			}
 			return nil
 		}
 		return err
 	}
 	result.VideoInfo = info
+	if answeredFetch(info) {
+		w.captcha.clear()
+	}
 	return nil
 }
 

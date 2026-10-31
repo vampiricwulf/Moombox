@@ -41,6 +41,9 @@ type waitFakes struct {
 	// signedIn gives the processor's service a jar holding an account, so
 	// the B1 switch to the cookied probe can fire; empty otherwise.
 	signedIn bool
+	// cancelAt, when set, is when the operator's Cancel lands: the row is
+	// written Cancelled ahead of the first call made at or after it.
+	cancelAt time.Duration
 }
 
 // waitRun is what one driven wait did.
@@ -121,13 +124,20 @@ func driveWaitForLive(t *testing.T, startIn, budget time.Duration, fakes func(st
 		}
 		run.rec = notificationtest.New()
 		sp.SetNotifier(run.rec)
+		sp.captcha = newCaptchaAlert(run.rec, discardLogger{})
 
 		var mu sync.Mutex
+		cancelled := false
 		answer := func(kind string, fake func(time.Duration) (*youtube.VideoInfo, error), dflt *youtube.VideoInfo) (*youtube.VideoInfo, error) {
 			at := time.Since(t0)
 			mu.Lock()
 			run.calls = append(run.calls, waitCall{at: at, kind: kind})
+			cancelNow := f.cancelAt > 0 && at >= f.cancelAt && !cancelled
+			cancelled = cancelled || cancelNow
 			mu.Unlock()
+			if cancelNow {
+				db.UpdateJobFieldsUnlessTerminal(job.ID, map[string]any{"status": database.StatusCancelled})
+			}
 			if fake == nil {
 				return dflt, nil
 			}

@@ -73,6 +73,7 @@ const NOTIFICATION_EVENT_GROUPS = [
       { id: "channel_healthy", label: "Channel Recovered" },
       { id: "sidecar_down", label: "Sidecar Down" },
       { id: "sidecar_restored", label: "Sidecar Restored" },
+      { id: "captcha_required", label: "Captcha Required" },
     ],
   },
 ];

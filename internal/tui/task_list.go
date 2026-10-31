@@ -702,14 +702,15 @@ func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait
 // renders (worker.activityMessage), the line a job waiting out a
 // connectivity outage shows (worker.networkWaitLine), the line a YouTube
 // download waiting out its player response's pre-roll ad shows
-// (worker.playbackWaitLine), and the line a job waiting out a YouTube rate
-// limit shows (worker.rateLimitWaitLine), carries the "... (<time>)" tail —
-// the time elapsed, or the time left — and no counter format does. The
-// contract is pinned on the worker side by
+// (worker.playbackWaitLine), and the lines a job waiting out a YouTube rate
+// limit or captcha shows (worker.rateLimitWaitLine, worker.captchaWaitLine),
+// carries the "... (<time>)" tail — the time elapsed, or the time left — and
+// no counter format does. The contract is pinned on the worker side by
 // TestActivityMessagesCarryWaitMarker,
 // TestNetworkWaitLineCarriesTheWaitMarker,
-// TestPlaybackWaitLineCarriesTheWaitMarker and
-// TestRateLimitWaitLineCarriesTheWaitMarker.
+// TestPlaybackWaitLineCarriesTheWaitMarker,
+// TestRateLimitWaitLineCarriesTheWaitMarker and
+// TestCaptchaWaitLineCarriesTheWaitMarker.
 func isWaitProgress(s string) bool {
 	return strings.Contains(s, "... (")
 }

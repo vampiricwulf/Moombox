@@ -81,6 +81,12 @@ type Scheduler struct {
 	rateMu           sync.Mutex
 	rateLimitedUntil time.Time
 	rateHeld         bool
+	// recordRateLimitHold is told when the hold runs out each time that
+	// changes (RecordRateLimitHold; nil: memory only), one report at a time
+	// under rateRecordMu, which is never taken with rateMu held. Set before
+	// Start.
+	recordRateLimitHold func(until time.Time)
+	rateRecordMu        sync.Mutex
 }
 
 // newScheduler creates the worker-owned scheduler. resolveSlots stays nil
