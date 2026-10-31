@@ -524,7 +524,12 @@ func isAuthWalledPlayability(err youtube.PlayabilityError) bool {
 // once, and reaches here as the probe's error
 // (*youtube.StatusProbeInconclusiveError) when the escalation settled nothing
 // — an inconclusive check, through the err branch below — or as the
-// escalation's own answer when it did.
+// escalation's own answer when it did. The cost of the rule's reach: a
+// broadcast removed or made unavailable as it ends, whose ANDROID_VR refusal
+// is an ERROR or UNPLAYABLE with no details, no longer reads "ended" at the
+// first check (~30 s); every check is inconclusive, so the capture finalizes
+// on the engine's maximum_timeout backstop (600 s by default) after its last
+// segment.
 //
 // All but one refusal of that shape, that is. A members-only refusal with no
 // broadcast details is handed on as the answer it is (statusAnswerInconclusive

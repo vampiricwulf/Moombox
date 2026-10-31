@@ -73,8 +73,8 @@ func serveFakeYouTube(t *testing.T, bodies map[string]string) *fakeYouTube {
 // web_embedded, and:
 //
 //   - when that refuses the same way, the monitors see a failed probe — no
-//     classification, nothing stored, the failure counted by the tracker
-//     that bounds the re-probes;
+//     classification, nothing stored, the failure counted by the failure
+//     tracker, and the video probed again next cycle;
 //   - when it answers, its answer is the classification, so an upcoming
 //     stream the wall hid becomes a job.
 //
