@@ -47,6 +47,44 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		return nil, fmt.Errorf("no suitable formats found for VOD download")
 	}
 	videoResolved, audioResolved, err := resolveVodURLs(ctx, job, result, pool, nil, segmented, routedSolver, cipherSolver, videoInfo.PlayerURL)
+	// The challenge-free fallback (audit G10). A resolve that failed for a
+	// reason every format needing the player JS shares — the sidecar down or
+	// disabled, a player ejs cannot solve, an n no solver answered, no player
+	// URL (errChallengesUnsolvable) — leaves the job only the formats that
+	// need no JS: the extraction's, with every challenge-bearing copy
+	// dropped, plus the cookieless chain's (challengeFreeFormats, one
+	// re-extract shared with the missing_pot degrade below), on which the
+	// selection runs again under the first one's rules. yt-dlp gets there by
+	// skipping each format whose challenge fails before it records the
+	// stream (_video.py:3509-3511, 3557-3580, 3587-3589), so visionos's copy
+	// is the one it keeps. base is the list the missing_pot degrade then
+	// merges into: the extraction's, or this fallback's.
+	base, challengeFree := videoInfo.Formats, false
+	cookieless := &cookielessReExtract{}
+	if errors.Is(err, errChallengesUnsolvable) {
+		cause := err
+		base, challengeFree = challengeFreeFormats(ctx, job, videoInfo.Formats, cookieless, cause, "VOD"), true
+		pool, segmented = wholeFileVodPool(base)
+		selected, result = selectVodFormats(job, pool, nil, segmented)
+		if !result.HasVideo && !result.HasAudio {
+			return nil, fmt.Errorf("VOD: no format is left that can be fetched without solving the player JS (%w)", cause)
+		}
+		if lostErr := segmentedStreamLost(job, selected, segmented); lostErr != nil {
+			return nil, fmt.Errorf("%w; its only copies that need no player JS are those (%w)", lostErr, cause)
+		}
+		videoResolved, audioResolved, err = resolveVodURLs(ctx, job, result, pool, nil, segmented, routedSolver, cipherSolver, videoInfo.PlayerURL)
+		if err == nil {
+			videoSource, audioSource := "", ""
+			if result.VideoFormat != nil {
+				videoSource = result.VideoFormat.Source
+			}
+			if result.AudioFormat != nil {
+				audioSource = result.AudioFormat.Source
+			}
+			job.Logger.Info("[Cipher] VOD: serving formats that need no player JS",
+				"jobID", job.Job.ID, "videoSource", videoSource, "audioSource", audioSource)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -108,14 +146,17 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			if (lostVideo || lostAudio) && job.YT != nil && ctx.Err() == nil {
 				job.Logger.Info("[POT] missing_pot: re-extracting with the cookieless clients",
 					"jobID", job.Job.ID, "lostVideo", lostVideo, "lostAudio", lostAudio)
-				rxCtx, cancel := context.WithTimeout(ctx, credentialRefreshTimeoutFor(job.Config))
-				extra, rxErr := fetchCookielessFormats(job.YT, rxCtx, job.Job.VideoID)
-				cancel()
+				extra, rxErr := cookieless.fetch(ctx, job)
 				if rxErr != nil {
 					job.Logger.Warn("[POT] missing_pot: cookieless re-extract failed — continuing with the degraded pool",
 						"jobID", job.Job.ID, "err", rxErr)
 				} else {
-					merged := youtube.MergeFormatPool(ctx, videoInfo.Formats, extra)
+					if challengeFree {
+						// Only the copies the challenge-free fallback can
+						// fetch: base holds no other.
+						extra, _ = withoutChallengeFormats(extra)
+					}
+					merged := youtube.MergeFormatPool(ctx, base, extra)
 					pool, dropped, swapped = withoutGvsRequiredFormats(merged)
 					pool, removed = wholeFileVodPool(pool)
 					segmented = append(segmented, removed...)
@@ -408,9 +449,18 @@ func selectVodFormats(job *JobContext, formats, dropped, segmented []youtube.For
 // dropped and segmented are what that selection was handed beside it
 // (selectVodFormats) — so a fully broken cipher state surfaces cleanly. A
 // re-selection rewrites result.VideoFormat / result.AudioFormat.
+//
+// A failure every format needing the player JS shares (systemicResolveFailure:
+// the sidecar down or not configured, a player ejs cannot solve, an n no
+// solver answered, no player URL) is not re-selected around one itag at a
+// time — the alternate would fail alike — and comes back at once, marked
+// errChallengesUnsolvable, for DownloadVod's challenge-free fallback.
 func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult, pool, dropped, segmented []youtube.Format, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, playerURL string) (videoResolved, audioResolved string, err error) {
 	if result.HasVideo && result.VideoFormat != nil {
 		resolvedURL, err := resolveFormatURL(ctx, result.VideoFormat, routedSolver, cipherSolver, playerURL, job.Logger)
+		if systemicResolveFailure(err, result.VideoFormat, playerURL) {
+			return "", "", fmt.Errorf("VOD: video URL resolve failed: %w", markChallengeFailure(err, result.VideoFormat, playerURL))
+		}
 		if err != nil {
 			job.Logger.Warn("[Cipher] VOD video resolve failed; trying re-selection",
 				"itag", result.VideoFormat.Itag, "err", err)
@@ -420,7 +470,7 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 			}
 			resolvedURL, err = resolveFormatURL(ctx, alt.VideoFormat, routedSolver, cipherSolver, playerURL, job.Logger)
 			if err != nil {
-				return "", "", fmt.Errorf("VOD: video URL resolve failed for primary and alternate: %w", err)
+				return "", "", fmt.Errorf("VOD: video URL resolve failed for primary and alternate: %w", markChallengeFailure(err, alt.VideoFormat, playerURL))
 			}
 			// The re-selection's whole stream shape, not just its video: a
 			// progressive primary replaced by a video-only alternate needs the
@@ -436,6 +486,9 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 	}
 	if result.HasAudio && result.AudioFormat != nil {
 		resolvedURL, err := resolveFormatURL(ctx, result.AudioFormat, routedSolver, cipherSolver, playerURL, job.Logger)
+		if systemicResolveFailure(err, result.AudioFormat, playerURL) {
+			return "", "", fmt.Errorf("VOD: audio URL resolve failed: %w", markChallengeFailure(err, result.AudioFormat, playerURL))
+		}
 		if err != nil {
 			job.Logger.Warn("[Cipher] VOD audio resolve failed; trying re-selection",
 				"itag", result.AudioFormat.Itag, "err", err)
@@ -445,7 +498,7 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 			}
 			resolvedURL, err = resolveFormatURL(ctx, retry, routedSolver, cipherSolver, playerURL, job.Logger)
 			if err != nil {
-				return "", "", fmt.Errorf("VOD: audio URL resolve failed for primary and alternate: %w", err)
+				return "", "", fmt.Errorf("VOD: audio URL resolve failed for primary and alternate: %w", markChallengeFailure(err, retry, playerURL))
 			}
 			result.AudioFormat = retry
 			job.Logger.Info("[Cipher] VOD audio re-selection succeeded", "newItag", retry.Itag)

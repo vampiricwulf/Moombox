@@ -72,7 +72,7 @@ func resolveFormatURLByItag(
 				warnLog(logger, "[Cipher] format requires sig decryption but no cipher solver is wired",
 					"playerURL", playerURL, "itag", itag)
 			}
-			return "", fmt.Errorf("cipher: format %d requires sig but no solver wired", itag)
+			return "", fmt.Errorf("cipher: format %d requires sig but no solver wired: %w", itag, cipher.ErrSidecarUnavailable)
 		}
 		return cipher.ResolveFormatURL(ctx, routed, goja, playerURL, cipher.ResolveFormatRequest{
 			URL:          f.URL,
@@ -93,7 +93,13 @@ func resolveFormatURLByItag(
 // In practice cipher failures are systemic (works for all formats from
 // a player or none), so the re-selection rarely fires; this is a hedge
 // against the rare case where one specific URL is broken while
-// siblings work.
+// siblings work. A failure that IS systemic (systemicResolveFailure: the
+// sidecar down or not configured, a player ejs cannot solve, an n no solver
+// answered, no player URL) skips it — the next itag would fail alike — and
+// comes back at once marked errChallengesUnsolvable, which the
+// orchestrator's challenge-free fallback acts on
+// (setupWithChallengeFallback): the live HLS playlist for a capture still
+// on air, the formats that need no player JS for a post-live one.
 func resolveManifestlessStream(
 	ctx context.Context,
 	formatPool []youtube.Format,
@@ -116,6 +122,9 @@ func resolveManifestlessStream(
 	resolved, err := resolveFormatURLByItag(ctx, formatPool, chosen.Itag, routed, goja, playerURL, logger)
 	if err == nil {
 		return resolved, nil, nil
+	}
+	if f := formatByItag(formatPool, chosen.Itag); systemicResolveFailure(err, f, playerURL) {
+		return "", nil, fmt.Errorf("itag %d: %w", chosen.Itag, markChallengeFailure(err, f, playerURL))
 	}
 
 	warnLog(logger, "[Cipher] format resolve failed; attempting re-selection",
@@ -144,7 +153,7 @@ func resolveManifestlessStream(
 
 	resolved, err = resolveFormatURLByItag(ctx, formatPool, retry.Itag, routed, goja, playerURL, logger)
 	if err != nil {
-		return "", nil, fmt.Errorf("re-selection itag %d also failed to resolve: %w", retry.Itag, err)
+		return "", nil, fmt.Errorf("re-selection itag %d also failed to resolve: %w", retry.Itag, markChallengeFailure(err, formatByItag(formatPool, retry.Itag), playerURL))
 	}
 	infoLog(logger, "[Cipher] re-selection succeeded", "originalItag", chosen.Itag, "newItag", retry.Itag)
 	return resolved, retry, nil
@@ -170,7 +179,7 @@ func resolveFormatURL(
 			warnLog(logger, "[Cipher] format requires sig decryption but no cipher solver is wired",
 				"playerURL", playerURL, "itag", f.Itag)
 		}
-		return "", fmt.Errorf("cipher: format %d requires sig but no solver wired", f.Itag)
+		return "", fmt.Errorf("cipher: format %d requires sig but no solver wired: %w", f.Itag, cipher.ErrSidecarUnavailable)
 	}
 	return cipher.ResolveFormatURL(ctx, routed, goja, playerURL, cipher.ResolveFormatRequest{
 		URL:          f.URL,

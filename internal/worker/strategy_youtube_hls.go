@@ -50,7 +50,16 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// to let this run; without either, the n went out as sent.
 	decrypted, err := cipher.RoutedDecryptNInURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, hlsURL)
 	if err != nil {
-		return nil, fmt.Errorf("HLS: n challenge unsolved in the master playlist URL — its segments would be refused: %w", err)
+		// A master whose n no solver answers is passed over for the next
+		// client's, as yt-dlp passes it over (`if solved_n or not
+		// n_challenge`): the cookieless chain's, visionos's first, whose
+		// master carries none (challengeFreeHlsInfo, audit G10). The setup
+		// fails as it did only when that has none either.
+		cf, cfErr := challengeFreeHlsInfo(ctx, job, videoInfo)
+		if cfErr != nil {
+			return nil, fmt.Errorf("HLS: n challenge unsolved in the master playlist URL — its segments would be refused: %w (and no master that needs no player JS: %v)", err, cfErr)
+		}
+		videoInfo, hlsURL, decrypted = cf, cf.HlsManifestURL, cf.HlsManifestURL
 	}
 	if decrypted != hlsURL {
 		hlsURL = decrypted

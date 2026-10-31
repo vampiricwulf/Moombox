@@ -396,7 +396,9 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		strategyCtx.AudioStartSeq = aSeed
 	}
 
-	result, err = strategy.Download(ctx, strategyCtx, videoInfo, deps)
+	// The setup, and the one that needs no player JS when this one fails on
+	// the player's challenges (setupWithChallengeFallback, audit G10).
+	result, err = setupWithChallengeFallback(ctx, strategyCtx, strategy, isVod, videoInfo, deps)
 
 	// The restart seeds are single-use — the initial downloaders above
 	// consumed them. Later refreshDownload call sites manage these fields
