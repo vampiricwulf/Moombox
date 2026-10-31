@@ -77,17 +77,24 @@ func (s *Service) fetchLivenessPage(ctx context.Context, pageURL string) ([]byte
 
 	// Refusing the empty case here is what lets the post-fetch check below be
 	// unconditional: past this point a Cookie header was definitely set, so
-	// finding none on the answering request means it was taken away.
-	sentCookie := s.Auth.GetCookieHeader()
-	if sentCookie == "" {
+	// finding none on the answering request means it was taken away. Asked
+	// of the jar's own cookies: the page header below is never empty (it
+	// always carries PREF), so it cannot say whether there is a session to
+	// send.
+	if s.Auth.GetCookieHeader() == "" {
 		return nil, fmt.Errorf("no session cookies to send to %s", pageURL)
 	}
 
+	// The jar's cookies as a page carries them (Auth.PageCookieHeader): an
+	// English PREF, so the page states its markers and its video list in the
+	// language they are read in, and SOCS=CAI for a jar that is not signed
+	// in, so a consent wall does not stand between a dead session and the
+	// LoggedOut verdict its page would give.
 	headers := map[string]string{
 		"User-Agent":      constants.UserAgents.Web,
 		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 		"Accept-Language": "en-US,en;q=0.5",
-		"Cookie":          sentCookie,
+		"Cookie":          s.Auth.PageCookieHeader(),
 	}
 
 	// FetchWithTimeout, not FetchBody: FetchBody returns bytes only, and

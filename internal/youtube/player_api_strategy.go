@@ -489,9 +489,13 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		p.logger.Warn("[PlayerApi] SyncCookies failed", slog.String("error", err.Error()))
 	}
 	// The account first, then the cookie header the page is fetched with:
-	// see captureVisitorData for why that order.
+	// see captureVisitorData for why that order. The page header, not the
+	// jar's own: PREF with hl=en and tz=UTC, as yt-dlp's _initialize_pref
+	// sends it, because the members-only verdict this cascade can return is
+	// this page's own parse, read by English keyword — a Japanese PREF turned
+	// "not a member" into "Login required" (Auth.PageCookieHeader).
 	account := p.auth.Identity()
-	wp, err := fetchWatchPage(ctx, videoID, p.auth.GetCookieHeader())
+	wp, err := fetchWatchPage(ctx, videoID, p.auth.PageCookieHeader())
 	pageFetched := err == nil
 	if err != nil {
 		p.logger.Warn("[PlayerApi] Could not fetch watch page", slog.String("error", err.Error()))
@@ -865,15 +869,21 @@ func (p *PlayerAPI) fallbackYtcfg(withSession bool) *YtcfgData {
 }
 
 // GetVideoInfoPublic fetches video info for a jar with no complete logged-in
-// session. Only the watch page is fetched without cookies: the Innertube
-// calls build their headers through Auth.GenerateAPIHeaders, which attaches
-// whatever YouTube cookies the jar still holds (a half-cleared jar keeps
-// SAPISID), and only the cookieless chain is credential-free.
+// session. Only the watch page is fetched without the jar's cookies: the
+// Innertube calls build their headers through Auth.GenerateAPIHeaders, which
+// attaches whatever YouTube cookies the jar still holds (a half-cleared jar
+// keeps SAPISID), and only the cookieless chain is credential-free. The page
+// carries the consent and language cookies alone (Auth.ConsentCookieHeader):
+// SOCS, without which an EU, EEA or UK address is sent to the consent
+// interstitial and the extraction loses the page's player URL, STS and
+// visitor data — yt-dlp's _initialize_consent, which sets SOCS=CAI for
+// every session that is not signed in — and an English PREF. Neither is a
+// credential, so the page is as anonymous as it was.
 func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*VideoInfo, error) {
 	// One extraction's scratch state — see GetVideoInfoAuthenticated.
 	ctx = withExtractionState(ctx)
 
-	wp, err := fetchWatchPage(ctx, videoID, "")
+	wp, err := fetchWatchPage(ctx, videoID, p.auth.ConsentCookieHeader())
 	pageFetched := err == nil
 	if err != nil {
 		// Not fatal (the Innertube clients below carry the extraction), but
@@ -1419,7 +1429,7 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	var embedResult *EmbedPageResult
 	if fetchEmbedPage {
 		var err error
-		embedResult, err = FetchEmbedPage(ctx, videoID)
+		embedResult, err = FetchEmbedPage(ctx, videoID, p.auth.ConsentCookieHeader())
 		if err != nil {
 			p.logger.Warn("[PlayerApi] Failed to fetch embed page", slog.String("error", err.Error()))
 			// Continue without encryptedHostFlags — it may still work

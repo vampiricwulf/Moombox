@@ -629,10 +629,10 @@ func earlyChatEpoch(info *youtube.VideoInfo) string {
 func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.Job, info *youtube.VideoInfo, onProgress func(chat.ChatProgress)) (*chat.ChatDownloader, *atomic.Bool) {
 	// The cookie header is only needed for the FALLBACK watch-page fetch.
 	// One-shot call, so a snapshot is correct here; the chat downloader below
-	// gets a live getter.
+	// gets a live getter. The page header, as setupChatDownloader's.
 	cookieHeader := ""
 	if sp.yt != nil && sp.yt.Auth != nil {
-		cookieHeader = sp.yt.Auth.GetCookieHeader()
+		cookieHeader = sp.yt.Auth.PageCookieHeader()
 	}
 
 	// This site is usually called with a ProbeVideoStatus info (ANDROID_VR, no
@@ -683,6 +683,7 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 		// a multi-hour early-chat run tracks the rotating cookie jar. nil Auth
 		// leaves the field nil, which the API reads as "no Cookie header".
 		opts.CookieHeader = sp.yt.Auth.GetCookieHeader
+		opts.PageCookieHeader = sp.yt.Auth.PageCookieHeader
 	}
 	opts.StreamStartTime = earlyChatEpoch(info)
 

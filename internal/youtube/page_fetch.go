@@ -66,8 +66,14 @@ type consentWallError struct {
 	host string
 }
 
+// The advice names SOCS, the consent cookie YouTube reads since CONSENT
+// stopped passing the wall (yt-dlp 378ae9f9f). A session that is not signed
+// in already sends SOCS=CAI (Auth.PageCookieHeader), so the wall standing
+// anyway is a signed-in session without a consent of its own, or a CAI
+// YouTube no longer honours: either way a browser's own consent is the
+// remedy.
 func (e *consentWallError) Error() string {
-	return fmt.Sprintf("%s redirected to consent wall (%s); supply CONSENT cookies via a cookie file", e.what, e.host)
+	return fmt.Sprintf("%s redirected to consent wall (%s); accept YouTube's cookie consent in a browser and supply its cookies, SOCS included, via a cookie file", e.what, e.host)
 }
 
 // pageRetryable is yt-dlp's _download_webpage_with_retries rule
@@ -79,8 +85,9 @@ func (e *consentWallError) Error() string {
 // retried is more of what earned it.
 //
 // The consent interstitial is never retried either. Upstream never sees one
-// as an error at all (it sends SOCS up front, _initialize_consent); here it
-// is the cookie jar's answer, and the next attempt carries the same jar.
+// as an error at all (it sends SOCS up front, _initialize_consent), and the
+// pages here send the same SOCS (Auth.PageCookieHeader); a wall that stands
+// anyway is the cookies' answer, and the next attempt carries the same ones.
 func pageRetryable(err error) bool {
 	if _, ok := errors.AsType[*consentWallError](err); ok {
 		return false

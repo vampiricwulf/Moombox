@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/httpx/httpxtest"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -286,4 +287,68 @@ func TestCookieGetterFromYouTubeAuthTracksTheLiveJar(t *testing.T) {
 	}
 
 	assertCookies(t, rec.requests(), []*string{new("SID=before-rotation"), new("SID=after-rotation")})
+}
+
+// TestFreshContinuationSendsThePageCookie: the watch page a stale
+// continuation is re-read off is a YouTube page, and gets the page header the
+// worker passes as PageCookieHeader (youtube.Auth.PageCookieHeader): the
+// jar's cookies with SOCS=CAI for a jar that is not signed in — the consent
+// an EU address needs to reach ytInitialData at all — and an English PREF.
+// The chat API polls are Innertube and keep the jar's own header.
+//
+// Mutants: NewChatDownloader not wiring PageCookieHeader (the page carries
+// the jar's header); FetchFreshContinuation reading cookieHeader first (the
+// same); fetchChat taking the page header (the poll carries SOCS).
+func TestFreshContinuationSendsThePageCookie(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cookies.txt")
+	writeSyntheticCookieFile(t, path, "SID", "jar-value")
+	jar := cookies.NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatalf("load jar: %v", err)
+	}
+	auth := youtube.NewAuth(jar, chatNopLogger{})
+
+	// Exactly what internal/worker assigns.
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:          "vid",
+		OutputFile:       filepath.Join(t.TempDir(), "chat.json"),
+		CookieHeader:     auth.GetCookieHeader,
+		PageCookieHeader: auth.PageCookieHeader,
+	})
+	rec := newCookieRecorder(t, watchPageHTML("chat-token"))
+	pointWatchPageAt(t, cd.api, rec)
+
+	if _, _, err := cd.api.FetchFreshContinuation(context.Background(), "vid"); err != nil {
+		t.Fatalf("FetchFreshContinuation: %v", err)
+	}
+	// The recorder answers the poll with the page too, which fetchChat
+	// cannot parse; only the request it sent is under test.
+	_, _ = cd.api.fetchChat(context.Background(), rec.server.URL, "cont")
+
+	assertCookies(t, rec.requests(), []*string{new("PREF=hl=en&tz=UTC; SID=jar-value; SOCS=CAI"), new("SID=jar-value")})
+}
+
+// TestFreshContinuationConsentWallNamesSOCS: a wall that stands although the
+// page cookie carries SOCS=CAI is one only a browser's own consent passes, so
+// the error names SOCS — the cookie that replaced CONSENT (yt-dlp
+// 378ae9f9f) — and no longer tells the operator to supply CONSENT.
+//
+// Mutant: the CONSENT advice restored.
+func TestFreshContinuationConsentWallNamesSOCS(t *testing.T) {
+	api := NewChatAPI("", "", nil)
+	api.client = httpxtest.NewClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host == "consent.youtube.com" {
+			fmt.Fprint(w, "<html>Before you continue to YouTube</html>")
+			return
+		}
+		http.Redirect(w, r, "https://consent.youtube.com/m?continue=x", http.StatusFound)
+	}))
+
+	_, _, err := api.FetchFreshContinuation(context.Background(), "vid")
+	if err == nil || !strings.Contains(err.Error(), "consent wall (consent.youtube.com)") {
+		t.Fatalf("err = %v, want the consent wall", err)
+	}
+	if !strings.Contains(err.Error(), "SOCS") || strings.Contains(err.Error(), "CONSENT") {
+		t.Errorf("err = %v, want advice that names SOCS, not CONSENT", err)
+	}
 }

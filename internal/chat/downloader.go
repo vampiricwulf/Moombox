@@ -124,6 +124,7 @@ type ChatDownloaderOptions struct {
 	ApiKey              string
 	VisitorData         string
 	CookieHeader        func() string // Returns the CURRENT Cookie header, re-read per request (nil = send none)
+	PageCookieHeader    func() string // The same for the watch page a fresh continuation is read off, with the page's consent and language cookies (nil = CookieHeader)
 	GenerateAuth        func() string // Returns SAPISIDHASH Authorization header for member-gated chat
 	IsReplay            bool
 	IsLiveOrUpcoming    bool
@@ -386,6 +387,7 @@ func (a chatWarnAdapter) Warn(msg string, args ...any) { a.cd.logDebug(msg, args
 // NewChatDownloader creates a new chat downloader.
 func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 	api := NewChatAPI(opts.ApiKey, opts.VisitorData, opts.CookieHeader)
+	api.pageCookieHeader = opts.PageCookieHeader
 	api.generateAuth = opts.GenerateAuth
 
 	resumeFileAuto := false
