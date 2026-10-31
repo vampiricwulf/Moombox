@@ -577,6 +577,28 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 			// hunt's: this is a wait for the segment to be served, and the
 			// hunt's 100 ms would re-ask a not-yet-published sequence ten
 			// times a second for the whole budget.
+			//
+			// Held BELOW a known head — which only an InitInlineAtStart sq=0
+			// is — the segment demonstrably exists, so a 403 that outlives
+			// the cipher swap (handleDashError fires OnCipherFailure on the
+			// first pre-bytes 403) is stale credentials: a PO token the edge
+			// now refuses, whose "missing_pot" body also suppresses that
+			// swap. The refresh at the top of this function needs
+			// hasStartedDownloading, so without this one the hold re-sent the
+			// same refused credentials for its whole budget and ended with
+			// nothing written, while the same start with the head 40 or more
+			// ahead recovered in place through catch-up's
+			// fetchSegmentWithRetry, which refreshes below the head. The gate
+			// is that refresh's: a 403 only (a 410 is evicted, and no refresh
+			// brings it back), a burst past postBytes403CipherThreshold (the
+			// swap gets its turn first), and behindHeadTailPending, so a hold
+			// at or past the head, or with the head unknown, never refreshes
+			// for a segment that is merely not published yet.
+			// refreshCredentials is cooldown-gated: the hold's ~10 s costs at
+			// most two player-response round trips.
+			if statusCode == 403 && *consecutiveGoneErrors >= postBytes403CipherThreshold && d.behindHeadTailPending() {
+				d.refreshCredentials()
+			}
 			utils.Sleep(ctx, d.delays.singleGoneRetry)
 			return nil // Continue loop
 		}

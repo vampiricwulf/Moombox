@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -210,6 +211,9 @@ func head16(b []byte) []byte { return b[:min(len(b), 16)] }
 //     sq=0's own fragment is missing from the file.
 //   - that rule and ensureInlineInit both gone (the code before the fix):
 //     the file starts with moof.
+//   - the hold refreshing credentials on the first 403, ahead of the swap
+//     (TestDashHuntRefreshesARefusedSq0BelowTheHead): a refresh runs that
+//     the swap had made unnecessary.
 func TestDashHuntRetriesSq0AfterTheCipherSwap(t *testing.T) {
 	const head = 5
 	g := serveGVS(t, constHead(head), func(r *http.Request, seq, attempt int) gvsAnswer {
@@ -225,10 +229,15 @@ func TestDashHuntRetriesSq0AfterTheCipherSwap(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		out := filepath.Join(t.TempDir(), "video_stream")
+		var refreshes atomic.Int32
 		d := NewSegmentDownloader(DownloaderOptions{
 			BaseURL:           gvsBase("hunt"),
 			OutputFile:        out,
 			InitInlineAtStart: true,
+			OnCredentialRefresh: func() (string, string) {
+				refreshes.Add(1)
+				return "", "fresh-token"
+			},
 			CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
 		})
 		var swaps atomic.Int32
@@ -244,10 +253,95 @@ func TestDashHuntRetriesSq0AfterTheCipherSwap(t *testing.T) {
 		if got := swaps.Load(); got != 1 {
 			t.Errorf("OnCipherFailure ran %d times, want 1", got)
 		}
+		if got := refreshes.Load(); got != 0 {
+			t.Errorf("credential refreshes = %d, want 0 (the cipher swap repaired the URL)", got)
+		}
 		if got := g.requested(); len(got) < 2 || got[0] != 0 || got[1] != 0 {
 			t.Errorf("requests began %v, want sq=0 asked again after its 403", got[:min(len(got), 4)])
 		}
 	})
+}
+
+// TestDashHuntRefreshesARefusedSq0BelowTheHead pins the hold's credential
+// refresh: a manifest-free start held on sq=0 below a known head is holding a
+// segment that exists, so a 403 that outlives the cipher swap is stale
+// credentials — a PO token the edge now refuses, whose "missing_pot" body
+// also suppresses the swap — and the hold refreshes them as the post-bytes
+// branch does. It used to re-send them for its whole budget and end with
+// nothing written, while the same start 40 or more behind the head recovered
+// through catch-up's own refresh. A 410 is evicted and is never refreshed: a
+// refresh is a player-response round trip, a mint and a cipher-solver wipe
+// that cannot bring it back.
+//
+// Mutants:
+//   - no refresh in the hold: the stale-token row records nothing.
+//   - the hold refreshing a 410 as well: the evicted row refreshes.
+//   - the hold refreshing on the first 403:
+//     TestDashHuntRetriesSq0AfterTheCipherSwap refreshes.
+//   - the hold refreshing without behindHeadTailPending: the slow go-live row
+//     of TestDashHuntHoldsUntilTheHeadReachesIt refreshes for a segment that
+//     is not published yet.
+func TestDashHuntRefreshesARefusedSq0BelowTheHead(t *testing.T) {
+	const head = 5
+	for _, tc := range []struct {
+		name string
+		// answer is how memGVS answers a sequence up to the head.
+		answer        func(r *http.Request) gvsAnswer
+		wantRecorded  bool
+		wantRefreshes int
+	}{
+		{
+			name: "stale PO token",
+			answer: func(r *http.Request) gvsAnswer {
+				if r.URL.Query().Get("pot") != "fresh" {
+					return gvsForbidden
+				}
+				return gvsServe
+			},
+			wantRecorded:  true,
+			wantRefreshes: 1,
+		},
+		{
+			name:   "sq=0 evicted",
+			answer: func(*http.Request) gvsAnswer { return gvsGone },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serveGVS(t, constHead(head), func(r *http.Request, seq, attempt int) gvsAnswer {
+				if seq > head {
+					return gvsForbidden // past the end
+				}
+				return tc.answer(r)
+			})
+
+			synctest.Test(t, func(t *testing.T) {
+				out := filepath.Join(t.TempDir(), "video_stream")
+				var refreshes atomic.Int32
+				d := NewSegmentDownloader(DownloaderOptions{
+					BaseURL:           gvsBase("pot"),
+					OutputFile:        out,
+					InitInlineAtStart: true,
+					OnCredentialRefresh: func() (string, string) {
+						refreshes.Add(1)
+						return "", "fresh"
+					},
+					CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
+				})
+
+				if err := d.Start(t.Context()); err != nil {
+					t.Fatalf("Start = %v, want nil", err)
+				}
+				var want []byte
+				if tc.wantRecorded {
+					want = gvsRecording(0, head)
+				}
+				wantFile(t, out, want)
+				if got := int(refreshes.Load()); got != tc.wantRefreshes {
+					t.Errorf("credential refreshes = %d, want %d", got, tc.wantRefreshes)
+				}
+			})
+		})
+	}
 }
 
 // TestDashHuntHoldsUntilTheHeadReachesIt pins step 3 of G3: the hunt may
@@ -257,16 +351,23 @@ func TestDashHuntRetriesSq0AfterTheCipherSwap(t *testing.T) {
 // unknown, or at the head itself, is a segment not served yet — and stepping
 // past it asked for later sequences that existed even less, twenty of them in
 // two seconds, until the hunt gave up with nothing written or began the file
-// past the start. Both rows run a plain downloader (no InitInlineAtStart), so
-// the rule they pin is the general one.
+// past the start. Every row runs a plain downloader (no InitInlineAtStart), so
+// the rule they pin is the general one. The hold waits singleGoneRetry
+// between asks, so its goneRetryBeforeFirstSegment budget spans about ten
+// seconds — long enough for a go-live whose first segment takes five — and
+// it never refreshes credentials for a segment the edge has not published.
 //
 // Mutants:
-//   - huntMayAdvance always true (the code before the fix): both rows record
-//     nothing, or begin after sq=0.
-//   - huntMayAdvance advancing while the head is unknown: the go-live row
-//     races past the edge before sq=0 is published.
+//   - huntMayAdvance always true (the code before the fix): every row records
+//     nothing, or begins after sq=0.
+//   - huntMayAdvance advancing while the head is unknown: the go-live rows
+//     race past the edge before sq=0 is published.
 //   - huntMayAdvance advancing whenever the head is known (cur <= head): the
 //     at-the-head row steps off sq=0.
+//   - the hold pausing firstSegmentHuntDelay (100 ms) instead: its budget is
+//     two seconds, and the slow go-live row ends with nothing written.
+//   - the hold refreshing without behindHeadTailPending: the slow go-live row
+//     refreshes.
 func TestDashHuntHoldsUntilTheHeadReachesIt(t *testing.T) {
 	const last = 4 // the broadcast's last segment
 	for _, tc := range []struct {
@@ -276,12 +377,22 @@ func TestDashHuntHoldsUntilTheHeadReachesIt(t *testing.T) {
 		publishedAt func(elapsed time.Duration) int
 		// refusals is how many times sq=0 is refused although published.
 		refusals int
+		// endedAfter is when CheckStreamStatus starts reporting the stream
+		// over; zero is last+2 seconds.
+		endedAfter time.Duration
 	}{
 		{
 			name: "go-live: nothing published, head unknown",
 			publishedAt: func(e time.Duration) int {
 				return min(int((e+250*time.Millisecond)/time.Second)-1, last)
 			},
+		},
+		{
+			name: "go-live: the first segment takes five seconds",
+			publishedAt: func(e time.Duration) int {
+				return min(int((e+250*time.Millisecond)/time.Second)-6, last)
+			},
+			endedAfter: time.Duration(last+7) * time.Second,
 		},
 		{
 			name: "sq=0 is the head and refused twice",
@@ -309,18 +420,27 @@ func TestDashHuntHoldsUntilTheHeadReachesIt(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				start.Store(time.Now().UnixNano())
 				out := filepath.Join(t.TempDir(), "video_stream")
+				endedAfter := cmp.Or(tc.endedAfter, time.Duration(last+2)*time.Second)
+				var refreshes atomic.Int32
 				d := NewSegmentDownloader(DownloaderOptions{
 					BaseURL:    gvsBase("golive"),
 					OutputFile: out,
+					OnCredentialRefresh: func() (string, string) {
+						refreshes.Add(1)
+						return "", "fresh-token"
+					},
 					// Ended once the last segment has been out for a while.
 					CheckStreamStatus: func(context.Context) (bool, error) {
-						return elapsed() > time.Duration(last+2)*time.Second, nil
+						return elapsed() > endedAfter, nil
 					},
 				})
 				if err := d.Start(t.Context()); err != nil {
 					t.Fatalf("Start = %v, want nil", err)
 				}
 				wantFile(t, out, gvsRecording(0, last))
+				if got := refreshes.Load(); got != 0 {
+					t.Errorf("credential refreshes = %d, want 0 (nothing was refused below the head)", got)
+				}
 			})
 		})
 	}
