@@ -148,7 +148,11 @@ func (d *adLogRecorder) adLines() (ads, clients []string) {
 // walked (that case waits 0); the sum replaced by the last ad's wait (the
 // two-pre-roll case waits 5 s); now used as the base instead of its ceiling
 // (every waiting case lands 600 ms early); a response with no ad stamped
-// with now instead of the zero time (the no-ad case).
+// with now instead of the zero time (the no-ad case); a slot's own renderer
+// skipped once it also holds a sequence (the slot with both waits 6 s, not
+// 26 s); an unparseable last length_seconds falling back to an earlier one
+// (that case waits 10 s); a string skipOffsetMilliseconds not read (that
+// case waits its 15 s length).
 func TestPlaybackAvailableAtReadsThePreRollAds(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -211,6 +215,41 @@ func TestPlaybackAvailableAtReadsThePreRollAds(t *testing.T) {
 			})},
 			wait: 12 * time.Second,
 			ads:  []string{"a 12s ad"},
+		},
+		{
+			// upstream's traverse_obj(..., 'length_seconds', -1,
+			// {int_or_none}): the last value is taken first, and one int()
+			// refuses is no length at all — not a cue to look further back.
+			name: "an unparseable last length_seconds is no length",
+			placements: []any{startPlacement("AD_PLACEMENT_KIND_START", map[string]any{
+				"playerVars": "length_seconds=10&length_seconds=15.5",
+			})},
+		},
+		{
+			// float_or_none(scale=1000) reads a numeric string as readily as
+			// a number.
+			name: "a skip time stated as a string",
+			placements: []any{startPlacement("AD_PLACEMENT_KIND_START", map[string]any{
+				"playerVars":             "length_seconds=15",
+				"skipOffsetMilliseconds": "5000",
+			})},
+			wait: 5 * time.Second,
+			ads:  []string{"a 15s ad skippable after 5s"},
+		},
+		{
+			// upstream's (None, (playerBytesSequentialLayoutRenderer ...))
+			// branch walks the content itself AND each of its layouts.
+			name: "a slot holding its own renderer and a sequence counts both",
+			slots: []any{adSlot("SLOT_TRIGGER_EVENT_BEFORE_CONTENT", map[string]any{
+				"instreamVideoAdRenderer": adRenderer(6, -1),
+				"playerBytesSequentialLayoutRenderer": map[string]any{"sequentialLayouts": []any{
+					map[string]any{"playerBytesAdLayoutRenderer": map[string]any{
+						"renderingContent": map[string]any{"instreamVideoAdRenderer": adRenderer(20, -1)},
+					}},
+				}},
+			})},
+			wait: 26 * time.Second,
+			ads:  []string{"a 6s ad", "a 20s ad"},
 		},
 	}
 	for _, tc := range cases {
