@@ -122,23 +122,90 @@ func TestDownloadVodLeavesSegmentedFormatsOut(t *testing.T) {
 // swaps a token-requiring format for its token-free shadow, a copy from
 // another client's response — which can be one a whole-file GET cannot
 // fetch. It leaves the pool as the extraction's own segmented copies do, so
-// the selection takes the next file instead of the shadow's fragment.
+// the selection takes the next file instead of the shadow's fragment; and
+// where no file of the stream is left, the degraded selection is held to the
+// first one's rule (segmentedStreamLost) and fails clearly. That is the
+// shape the dedup makes in a broadcast's processing window — tv's segmented
+// copy loses to the watch page's file and becomes its shadow — and a
+// use_sidecar=false install, which never mints, degrades every web-family
+// winner: the job archived its audio alone, with no error. The cookieless
+// re-extract's merge is filtered the same way, since it unions the
+// extraction's own, unfiltered formats back in.
 //
-// Mutant: the degraded pool not filtered again (the 1080p segmented shadow
-// is chosen).
+// Mutants (each run): the degraded pool not filtered again (the next-file
+// row picks the 1080p segmented shadow); the degraded selection not held to
+// segmentedStreamLost, or the re-filter's removals kept out of the list it
+// reads (the no-file row archives audio alone); the merged pool not filtered
+// again (the merge row picks tv's OTF 1080p); the itags not named once (the
+// merge row's degraded line names 137 twice).
 func TestVodMissingPotSwapNeverLandsOnASegmentedCopy(t *testing.T) {
-	fakeVodMint(t, "", errors.New("sidecar down"))
+	mintErr := errors.New("sidecar down")
 	shadow := vodFormat(137, 1920, 1080, h264, asLiveAdaptive)
 	winner := vodFormat(137, 1920, 1080, h264, withLength, func(f *youtube.Format) { f.Source = "watch_page"; f.TokenFreeAlternate = &shadow })
-	info := segmentedVodInfo(winner, vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength))
-	job, _ := vodPotJob(t)
-	res, err := DownloadVod(context.Background(), job, info, stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
-	if err != nil {
-		t.Fatalf("DownloadVod: %v", err)
-	}
-	if res.VideoFormat == nil || res.VideoFormat.Itag != 136 || res.VideoFormat.Segmented() {
-		t.Errorf("video = %+v, want the 720p file — never the segmented shadow", res.VideoFormat)
-	}
+
+	t.Run("the next file is taken", func(t *testing.T) {
+		fakeVodMint(t, "", mintErr)
+		info := segmentedVodInfo(winner, vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength))
+		job, _ := vodPotJob(t)
+		res, err := DownloadVod(context.Background(), job, info, stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
+		if err != nil {
+			t.Fatalf("DownloadVod: %v", err)
+		}
+		if res.VideoFormat == nil || res.VideoFormat.Itag != 136 || res.VideoFormat.Segmented() {
+			t.Errorf("video = %+v, want the 720p file — never the segmented shadow", res.VideoFormat)
+		}
+	})
+
+	t.Run("a video left with segments alone fails clearly", func(t *testing.T) {
+		fakeVodMint(t, "", mintErr)
+		info := segmentedVodInfo(winner, vodFormat(140, 0, 0, aac, withLength))
+		job, _ := vodPotJob(t)
+		res, err := DownloadVod(context.Background(), job, info, stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
+		if err == nil {
+			t.Fatalf("DownloadVod = %+v (primary %+v), nil — want the job failed, not its audio archived alone", res, res.VideoFormat)
+		}
+		if !strings.Contains(err.Error(), "this video's video only as segments (itags 137:") || !errors.Is(err, mintErr) {
+			t.Errorf("err = %v, want one naming the segmented video and wrapping the mint's failure", err)
+		}
+	})
+
+	t.Run("the cookieless merge is filtered too", func(t *testing.T) {
+		fakeVodMint(t, "", mintErr)
+		// tv lists the 1080p as OTF alone; the 720p and the audio come from
+		// web_creator alone, with no shadow, so the degrade loses both and
+		// the cookieless re-extract supplies visionos copies of them. Its
+		// merge unions the extraction's own formats back in, tv's OTF among
+		// them.
+		otf := withLevel(vodFormat(137, 1920, 1080, h264, asOTF), youtube.AuthLevelTVPublic)
+		video := withLevel(vodFormat(136, 1280, 720, h264, withLength, func(f *youtube.Format) { f.Source = "web_creator" }), youtube.AuthLevelWebCreator)
+		audio := withLevel(vodFormat(140, 0, 0, aac, withLength, func(f *youtube.Format) { f.Source = "web_creator" }), youtube.AuthLevelWebCreator)
+		fakeCookieless(t, []youtube.Format{cookielessCopy(video), cookielessCopy(audio)}, nil)
+		job, logs := reextractJob(t)
+		res, err := DownloadVod(context.Background(), job, segmentedVodInfo(otf, video, audio), stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
+		if err != nil {
+			t.Fatalf("DownloadVod: %v", err)
+		}
+		if logLine(logs, "[POT] missing_pot: cookieless re-extract merged") == nil {
+			t.Fatalf("the merge never ran: %v", logs.lines())
+		}
+		if v := res.VideoFormat; v == nil || v.Itag != 136 || v.Source != "visionos" {
+			t.Errorf("video = %+v, want visionos's 720p file — never tv's OTF 1080p the merge carried back", v)
+		}
+		if a := res.AudioFormat; a == nil || a.Itag != 140 || a.Source != "visionos" {
+			t.Errorf("audio = %+v, want visionos's", a)
+		}
+		// The first selection and the degraded one each say what they left
+		// out, the OTF 1080p every filter met named once.
+		leftOut := logLines(logs, func(m string) bool { return strings.HasPrefix(m, "VOD: left out formats") })
+		if len(leftOut) != 2 {
+			t.Fatalf("left-out lines = %v, want the first selection's and the degraded one's", leftOut)
+		}
+		for _, l := range leftOut {
+			if l["itags"] != "137" {
+				t.Errorf("left-out itags = %v, want 137 once", l["itags"])
+			}
+		}
+	})
 }
 
 // TestPartitionManifestlessFormatsTakesOnlyAudioLessVideo mirrors the gate
