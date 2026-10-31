@@ -376,12 +376,17 @@ func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 // shape a setup resumes is left where it is, and a setup that fails moves
 // nothing.
 //
+// The missing_pot HLS fallback (missingPotFallback) is the same setup site,
+// so it sets the DASH capture aside the same way.
+//
 // Mutants: the set-aside dropped (the first two rows keep both shapes, and
 // the cleanup removes staging); HLS setting aside its own video.ts, or DASH
 // its own pair (the resume rows); the set-aside run before the setup's own
-// outcome is known (the failed row moves the pair).
+// outcome is known (the failed rows move the pair); the missing_pot fallback
+// left out of setupWithFallback (its rows fail to set up).
 func TestSetupSetsTheOtherShapeAside(t *testing.T) {
 	systemic := fmt.Errorf("manifestless DASH: resolve video URL: itag 299: %w: %w", errChallengesUnsolvable, cipher.ErrSidecarUnavailable)
+	missingPot := fmt.Errorf("manifestless DASH: %w: no video adaptive format usable without a GVS PO token, and none could be minted: %w", errMissingPot, errors.New("sidecar down"))
 	dash := []string{"video_stream", "audio_stream"}
 	hlsName := []string{"video.ts"}
 	for _, tc := range []struct {
@@ -396,6 +401,8 @@ func TestSetupSetsTheOtherShapeAside(t *testing.T) {
 		{"the HLS fallback resuming its own video.ts", hlsName, []error{systemic}, nil, false},
 		{"DASH resuming its own pair", dash, []error{nil}, nil, false},
 		{"a setup that fails, the fallback's too", dash, []error{systemic}, errors.New("fake HLS: no variants"), false},
+		{"the missing_pot HLS fallback into a part holding a from-start DASH capture", dash, []error{missingPot}, nil, true},
+		{"a missing_pot fallback whose HLS setup fails too", dash, []error{missingPot}, errors.New("fake HLS: no variants"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			swapHls(t, &fakeStrategy{kind: "hls", answers: []error{tc.hlsErr}})

@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -180,7 +181,9 @@ func TestDownloadVodNamesTheTokenBeforeTheSegments(t *testing.T) {
 // for its token-free shadow (withoutGvsRequiredFormats) records the shadow,
 // which the extraction stamped from its own response, so a damaged file
 // with an intact shadow says nothing and an intact file with a damaged
-// shadow says so.
+// shadow says so — and so does the challenge-free degrade's run, which
+// records the copy that needs no player JS in place of the one whose
+// signature the down sidecar could not solve.
 //
 // Mutants (each run): warnDamagedPins not called (no row finds its line);
 // the line logged at Info (no row finds it at Warn); the line logged from
@@ -194,7 +197,10 @@ func TestDownloadVodNamesTheTokenBeforeTheSegments(t *testing.T) {
 // rows find no line); the recorded video format unread (the video rows and
 // the no-video row find none); warnDamagedPins called ahead of the GVS
 // block, so it reads the pre-degrade pick (the two shadow rows: the damaged
-// file's shadow warns, the damaged shadow's file does not).
+// file's shadow warns, the damaged shadow's file does not); warnDamagedPins
+// called ahead of the first resolve, so a run the challenge-free degrade
+// replaces warns too (the second challenge-free row warns of the copy that
+// needs the player JS, which no download used).
 func TestDownloadVodHonoursADamagedPin(t *testing.T) {
 	damaged := func(f *youtube.Format) { f.Damaged = true }
 	sig := func(f *youtube.Format) { f.EncryptedSig = "SIG" }
@@ -208,6 +214,18 @@ func TestDownloadVodHonoursADamagedPin(t *testing.T) {
 			f.Source, f.TokenFreeAlternate = "web_creator", &shadow
 		}
 	}
+	// webCopy makes f a tv_public file whose signature only the sidecar can
+	// solve, carrying a web_creator copy of itself that needs no player JS —
+	// damaged or not — as its TokenAlternate: what the challenge-free
+	// degrade keeps of the stream once the sidecar is down.
+	webCopy := func(damagedCopy bool) func(*youtube.Format) {
+		return func(f *youtube.Format) {
+			c := vodFormat(f.Itag, 1920, 1080, h264, withLength)
+			c.Source, c.URL, c.Damaged = "web_creator", f.URL+"&c=web_creator", damagedCopy
+			f.EncryptedSig, f.TokenAlternate = "SIG", &c
+		}
+	}
+	sidecarDown := &challengeSolver{sigErr: fmt.Errorf("%w: the sidecar is not running", cipher.ErrSidecarUnavailable)}
 	const (
 		videoLine = "[FormatSelector] Manual video itag 137 is possibly damaged (shorter than the video); recording it as pinned"
 		audioLine = "[FormatSelector] Manual audio itag 140 is possibly damaged (shorter than the video); recording it as pinned"
@@ -260,6 +278,12 @@ func TestDownloadVodHonoursADamagedPin(t *testing.T) {
 		{name: "a video pin whose degrade swaps an intact file for a damaged shadow", video: 137, mintFails: true,
 			formats:   []youtube.Format{vodFormat(137, 1920, 1080, h264, withLength, shadowed(true)), vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength)},
 			wantVideo: 137, wantAudio: 140, wantSource: "tv_public", wantLine: videoLine},
+		{name: "a video pin through the challenge-free degrade, its recorded copy damaged", video: 137, solver: sidecarDown,
+			formats:   []youtube.Format{vodFormat(137, 1920, 1080, h264, withLength, webCopy(true)), vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength)},
+			wantVideo: 137, wantAudio: 140, wantSource: "web_creator", wantLine: videoLine},
+		{name: "a video pin through the challenge-free degrade, the copy it left damaged", video: 137, solver: sidecarDown,
+			formats:   []youtube.Format{vodFormat(137, 1920, 1080, h264, withLength, damaged, webCopy(false)), vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength)},
+			wantVideo: 137, wantAudio: 140, wantSource: "web_creator", wantNoLine: true},
 		{name: "a damaged pin whose own signature fails", video: 137, solver: failingSigSolver{},
 			formats:   []youtube.Format{vodFormat(137, 1920, 1080, h264, withLength, damaged, sig), vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength)},
 			wantVideo: 136, wantAudio: 140, wantNoLine: true, wantReselect: "[Cipher] VOD video re-selection succeeded"},
