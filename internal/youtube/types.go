@@ -293,15 +293,26 @@ type Format struct {
 	// when no token can be minted. The alternate never carries one of its own.
 	// Never serialised: a resume re-extracts. See the AuthLevel block.
 	TokenFreeAlternate *Format `json:"-"`
+	// TokenAlternate is TokenFreeAlternate's mirror: the best copy of this
+	// same stream from a client whose URLs DO need the GVS token
+	// (youtube.GvsTokenRequired true), kept by deduplicateFormats only when
+	// THIS copy won the stream and its own client requires none — a tv or
+	// web_embedded winner over a watch-page or web copy. Consumed by the VOD
+	// URL refresh's token fallback (the worker's refreshVodURL), which moves a
+	// token-free stream whose URLs are refused long before their expiry onto
+	// it, with a minted token. A winner carries one shadow or the other, never
+	// both, and an alternate carries neither. Never serialised: a resume
+	// re-extracts. See the AuthLevel block.
+	TokenAlternate *Format `json:"-"`
 
 	// AvailableAt is when YouTube first lets this format's media be
 	// requested: the end of the pre-roll ad the player response that yielded
 	// it carries, or the moment it may be skipped (yt-dlp's available_at —
 	// see playbackAvailableAt). Zero when that response carried no pre-roll
 	// ad, as a Premium account's never does, which is "at once". Every copy
-	// keeps its own response's value: a TokenFreeAlternate came from another
-	// client's response, with an ad of its own. Whether a download waits on
-	// it is PlaybackWaitApplies' (VideoInfo.PlaybackWaitExempt). Never
+	// keeps its own response's value: a shadow of either kind came from
+	// another client's response, with an ad of its own. Whether a download
+	// waits on it is PlaybackWaitApplies' (VideoInfo.PlaybackWaitExempt). Never
 	// serialised: a resume re-extracts, and the instant is long past by then.
 	AvailableAt time.Time `json:"-"`
 
@@ -515,13 +526,33 @@ type YtcfgData struct {
 // family wherever it returned the stream, a web-family winner's shadow is
 // always a cookieless (visionos, android_vr) copy. The shadow never changes
 // which copy wins.
+//
+// The token-carrying shadow (Format.TokenAlternate) is its mirror. When a
+// stream's winner comes from a client that needs no token — tv or
+// web_embedded, the usual winner on both cascades — deduplicateFormats keeps
+// the lowest-level copy of that stream from a client that DOES need one
+// (the watch page's, web_safari's or web's, whichever the cascade fetched
+// with a URL) as the winner's TokenAlternate. It is for the VOD URL
+// refresh's token fallback: a token-free stream whose URLs are refused long
+// before their expiry is, after a fresh token-free URL with a minted token
+// has been refused too, moved onto this copy of the same file with that
+// token (the worker's refreshVodURL). That is the field report's shape: a
+// signed-in account without Premium, web_embedded holding no copy of the
+// VOD, and every tv_auth URL refused at its first request, while a Premium
+// account downloaded the same video. yt-dlp has no such copy — it
+// downloads its first-seen one — but its web family's GVS policy is
+// not_required_for_premium, so a Premium subscriber, who never sees the
+// refusal, is exactly the account upstream exempts. A winner carries one
+// shadow or the other, never both, and the copy never changes which wins.
 const (
 	// Public cascade: tv leads, as in _DEFAULT_CLIENTS. Its URLs need no GVS
 	// token (GvsTokenRequired is false).
 	AuthLevelTVPublic = 0
 	// Authed cascade: web_embedded leads, tv second, as in
 	// _DEFAULT_AUTHED_CLIENTS. Neither needs a GVS token, so neither carries
-	// a shadow, and both outrank the web family.
+	// a token-free shadow — each carries the token-carrying one instead, when
+	// a web-family client returned the stream too — and both outrank the web
+	// family.
 	AuthLevelWebEmbedded = 1
 	AuthLevelTVAuth      = 2
 	// The web family. The watch page IS the web client; web_safari is the

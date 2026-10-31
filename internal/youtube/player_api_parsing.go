@@ -1059,29 +1059,38 @@ type formatKey struct {
 // recorded here is taken after the cross-client merge. finishExtraction stamps
 // it onto FormatDiag.CollapsedRenditions.
 //
-// The winner is the lowest AuthLevel, exactly as before the shadow existed.
-// When that winner's client requires a GVS token (GvsTokenRequired), the
-// lowest-AuthLevel copy of the same stream from a token-free client rides
-// along as its TokenFreeAlternate: yt-dlp decides the token before it dedups,
-// so a token-less WEB-family copy never hides the next client's; Moombox
-// learns about a failed mint only at download time, and the VOD missing_pot
-// degrade needs that copy to fall back to. A token-free winner carries none.
+// The winner is the lowest AuthLevel, exactly as before the shadows existed,
+// and it carries the lowest-AuthLevel copy of the same stream from a client
+// of the OTHER GVS token class (GvsTokenRequired), when one returned it.
+// Behind a winner whose client requires the token, that is its
+// TokenFreeAlternate: yt-dlp decides the token before it dedups, so a
+// token-less WEB-family copy never hides the next client's; Moombox learns
+// about a failed mint only at download time, and the VOD missing_pot degrade
+// needs that copy to fall back to. Behind a token-free winner it is its
+// TokenAlternate, the copy the VOD URL refresh's token fallback moves a
+// refused token-free stream onto. A winner of either class carries the one
+// shadow only, and a shadow carries none.
 func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 	byStream := make(map[formatKey]Format)
-	// tokenFree holds, per stream, the lowest-AuthLevel copy from a client
-	// whose URLs need no GVS token — the shadow a token-requiring winner
-	// carries (see Format.TokenFreeAlternate). Tracked beside the winner, never
-	// in place of it: the shadow must not change which copy wins.
+	// tokenFree and tokenRequiring hold, per stream, the lowest-AuthLevel copy
+	// from a client of each GVS token class — the shadow a winner of the
+	// other class carries (Format.TokenFreeAlternate, Format.TokenAlternate).
+	// Tracked beside the winner, never in place of it: a shadow must not
+	// change which copy wins. The winner is in its own class's map, so the
+	// other's never hands it back as its own shadow.
 	tokenFree := make(map[formatKey]Format)
+	tokenRequiring := make(map[formatKey]Format)
 	for _, f := range pool {
 		if f.URL == "" {
 			continue
 		}
 		key := formatKey{itag: f.Itag, audioTrackID: f.AudioTrackID, isDrc: f.IsDrc}
-		if !GvsTokenRequired(f.Source) {
-			if best, ok := tokenFree[key]; !ok || authLevelOf(&f) < authLevelOf(&best) {
-				tokenFree[key] = f
-			}
+		class := tokenFree
+		if GvsTokenRequired(f.Source) {
+			class = tokenRequiring
+		}
+		if best, ok := class[key]; !ok || authLevelOf(&f) < authLevelOf(&best) {
+			class[key] = f
 		}
 		existing, exists := byStream[key]
 		if !exists {
@@ -1097,11 +1106,15 @@ func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 
 	result := make([]Format, 0, len(byStream))
 	for key, f := range byStream {
-		f.TokenFreeAlternate = nil
-		if alt, ok := tokenFree[key]; ok && GvsTokenRequired(f.Source) {
+		f.TokenFreeAlternate, f.TokenAlternate = nil, nil
+		other, slot := tokenRequiring, &f.TokenAlternate
+		if GvsTokenRequired(f.Source) {
+			other, slot = tokenFree, &f.TokenFreeAlternate
+		}
+		if alt, ok := other[key]; ok {
 			// Its own copy, with no shadow of its own: no chains.
-			alt.TokenFreeAlternate = nil
-			f.TokenFreeAlternate = &alt
+			alt.TokenFreeAlternate, alt.TokenAlternate = nil, nil
+			*slot = &alt
 		}
 		result = append(result, f)
 	}
@@ -1126,9 +1139,10 @@ func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 // with their client and AuthLevel (the VOD missing_pot re-extract's
 // CookielessFormats) — into an already-deduplicated pool and deduplicates the
 // union, so a WEB-family winner keeps winning and a token-free copy in extra
-// becomes its TokenFreeAlternate. A shadow a pool entry already carries goes
-// back in as a candidate of its own: the shadow is part of the value, not of
-// the slice, and dedup recomputes every shadow from the slice it is handed.
+// becomes its TokenFreeAlternate. A shadow a pool entry already carries, of
+// either kind, goes back in as a candidate of its own: the shadow is part of
+// the value, not of the slice, and dedup recomputes every shadow from the
+// slice it is handed.
 //
 // Always a fresh slice: neither input, nor the spare capacity behind pool, is
 // written. ctx may carry no extraction state (the worker's does not) — the
@@ -1137,8 +1151,10 @@ func MergeFormatPool(ctx context.Context, pool, extra []Format) []Format {
 	union := make([]Format, 0, 2*len(pool)+len(extra))
 	union = append(union, pool...)
 	for i := range pool {
-		if alt := pool[i].TokenFreeAlternate; alt != nil {
-			union = append(union, *alt)
+		for _, alt := range []*Format{pool[i].TokenFreeAlternate, pool[i].TokenAlternate} {
+			if alt != nil {
+				union = append(union, *alt)
+			}
 		}
 	}
 	union = append(union, extra...)
@@ -1155,8 +1171,9 @@ func MergeFormatPool(ctx context.Context, pool, extra []Format) []Format {
 // Video itags are untouched: they carry no track fields, so one itag can only
 // hold one stream and the loop hands it straight back.
 //
-// A kept rendition carries its own TokenFreeAlternate with it (the shadow is
-// part of the Format value), so the collapse needs no shadow logic of its own.
+// A kept rendition carries its own shadow with it, of either kind (a shadow
+// is part of the Format value), so the collapse needs no shadow logic of its
+// own.
 func collapseToPreferredRendition(streams []Format) []Format {
 	preferred := make(map[int]Format, len(streams))
 	order := make([]int, 0, len(streams))
