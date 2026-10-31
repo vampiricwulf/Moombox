@@ -65,10 +65,12 @@ func NewService(jar *cookies.CookieJar, logger interface {
 		logger:    logger,
 	}
 
-	// Wire visitor data capture from watch page fetches
+	// Wire visitor data capture from watch page fetches, and the read back
+	// an extraction falls back on when its watch page cannot be had.
 	playerAPI.OnVisitorData = func(vd string) {
 		svc.SetVisitorData(vd)
 	}
+	playerAPI.cachedVisitorData = svc.GetVisitorData
 
 	return svc
 }

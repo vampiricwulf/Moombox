@@ -470,9 +470,10 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// see captureVisitorData for why that order.
 	account := p.auth.Identity()
 	wp, err := fetchWatchPage(ctx, videoID, p.auth.GetCookieHeader())
+	pageFetched := err == nil
 	if err != nil {
 		p.logger.Warn("[PlayerApi] Could not fetch watch page", slog.String("error", err.Error()))
-		wp = &WatchPageResult{Ytcfg: DefaultYtcfg()}
+		wp = &WatchPageResult{Ytcfg: p.fallbackYtcfg(true)}
 	}
 
 	ytcfg := wp.Ytcfg
@@ -490,8 +491,11 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	}
 
 	// Capture visitor data, and the session under the account the page was
-	// fetched with, for future probe calls
-	p.captureVisitorData(ytcfg, account)
+	// fetched with, for future probe calls. Only off a page: a fallback
+	// ytcfg holds what the caches already do (fallbackYtcfg).
+	if pageFetched {
+		p.captureVisitorData(ytcfg, account)
+	}
 
 	formatPool := []Format{}
 	tally := &mismatchTally{}
@@ -797,6 +801,40 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	return p.finishExtraction(ctx, finalizeVideoInfo(ctx, result, wpParsed, formatPool), wp, videoID, tally, wpParsed)
 }
 
+// fallbackYtcfg is the ytcfg an extraction runs on when its watch page could
+// not be had at all. It used to be DefaultYtcfg — empty — so every client
+// call of the extraction went out with no visitor data (and no PLAYER PO
+// token, which the WEB-family calls mint only with one) and, on the
+// authenticated path, with no session: a brand-account member's calls were
+// judged as the primary account and refused as members-only, and the job
+// parked in COOKIES? over cookies that were fine (audit G13, yt-auth-net-5).
+//
+// The visitor data is the Service's cached one (cachedVisitorData), and the
+// session the one the probe-only calls carry (probeYtcfg): what the last page
+// fetched under the jar's current account stated. Only on the
+// authenticated path, since the public path's own page is fetched without
+// cookies and never states one. The session half goes BEYOND upstream:
+// yt-dlp loses SESSION_INDEX and DELEGATED_SESSION_ID as well when the page
+// finally fails — webpage_ytcfg is then the client's default and there is no
+// initial player response to read them from (_video.py:3913-3915,
+// 2914-2927).
+//
+// The cascades do not capture it back (captureVisitorData): it holds what
+// the caches already do, and storing the visitor data again would only
+// restart its TTL.
+func (p *PlayerAPI) fallbackYtcfg(withSession bool) *YtcfgData {
+	vd := ""
+	if p.cachedVisitorData != nil {
+		vd = p.cachedVisitorData()
+	}
+	if withSession {
+		return p.probeYtcfg(vd)
+	}
+	ytcfg := DefaultYtcfg()
+	ytcfg.VisitorData = vd
+	return ytcfg
+}
+
 // GetVideoInfoPublic fetches video info for a jar with no complete logged-in
 // session. Only the watch page is fetched without cookies: the Innertube
 // calls build their headers through Auth.GenerateAPIHeaders, which attaches
@@ -807,13 +845,14 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	ctx = withExtractionState(ctx)
 
 	wp, err := fetchWatchPage(ctx, videoID, "")
+	pageFetched := err == nil
 	if err != nil {
 		// Not fatal (the Innertube clients below carry the extraction), but
 		// silence here previously hid consent-wall and network failures on
 		// the anonymous path entirely — the authenticated path has always
 		// logged this.
 		p.logger.Warn("[PlayerApi] Could not fetch watch page (public)", slog.String("error", err.Error()))
-		wp = &WatchPageResult{Ytcfg: DefaultYtcfg()}
+		wp = &WatchPageResult{Ytcfg: p.fallbackYtcfg(false)}
 	}
 
 	if wp.AttestationChallenge == "" {
@@ -824,8 +863,10 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	// authenticated path). Load-bearing for anonymous users: after a 403
 	// credential refresh clears the service cache, this is the only refill.
 	// The page was fetched without cookies (account ""), so it keeps no
-	// session.
-	p.captureVisitorData(wp.Ytcfg, "")
+	// session. Only off a page, as on the authenticated path.
+	if pageFetched {
+		p.captureVisitorData(wp.Ytcfg, "")
+	}
 
 	formatPool := []Format{}
 	tally := &mismatchTally{}

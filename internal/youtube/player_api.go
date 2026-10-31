@@ -83,6 +83,11 @@ type PlayerAPI struct {
 	sessionAsked       string
 	sessionRetryAt     time.Time
 	sessionClock       func() time.Time
+	// cachedVisitorData reads the Service's cached visitor data
+	// (Service.GetVisitorData, wired by NewService) for an extraction whose
+	// watch page could not be had (fallbackYtcfg). nil: there is none.
+	cachedVisitorData func() string
+
 	// playbackClock is the clock a player response's pre-roll wait is
 	// measured from (playbackAvailableAt; nil: time.Now), a test seam.
 	playbackClock func() time.Time

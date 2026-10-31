@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -214,6 +213,12 @@ func watchPageURL(videoID string) string {
 }
 
 // FetchWatchPage fetches and parses a YouTube watch page.
+//
+// The fetch is retried (fetchYouTubePage): yt-dlp downloads the watch page
+// through _download_webpage_with_retries (_video.py:3815-3819), and a single
+// attempt here meant one connection reset or 5xx at go-live cost the whole
+// extraction its player URL, STS, visitor data, session verdict and chat
+// continuation (audit G13).
 func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*WatchPageResult, error) {
 	url := watchPageURL(videoID)
 
@@ -226,28 +231,9 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 		headers["Cookie"] = cookieHeader
 	}
 
-	// FetchWithTimeout (not FetchBody) so the FINAL post-redirect URL is
-	// inspectable — the consent interstitial answers 200, so status-code
-	// checks alone can never see it.
-	resp, cancel, err := utils.FetchWithTimeout(ctx, url, 30*time.Second, headers)
+	body, err := fetchYouTubePage(ctx, "watch page", url, 30*time.Second, headers, utils.MaxFetchBodySize)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch watch page: %w", err)
-	}
-	defer cancel()
-	defer resp.Body.Close()
-
-	if isConsentRedirect(resp) {
-		io.Copy(io.Discard, resp.Body)
-		return nil, fmt.Errorf("watch page redirected to consent wall (%s); supply CONSENT cookies via a cookie file", resp.Request.URL.Host)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		io.Copy(io.Discard, resp.Body)
-		return nil, fmt.Errorf("failed to fetch watch page: HTTP %d from %s", resp.StatusCode, url)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, utils.MaxFetchBodySize))
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch watch page: %w", err)
+		return nil, err
 	}
 	// Stamped here, at the instant the page's bytes exist — not at the end of
 	// the extraction that consumes them (close-review Finding 10).
