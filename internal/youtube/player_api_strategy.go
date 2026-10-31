@@ -366,7 +366,8 @@ func (p *PlayerAPI) probeYtcfg(visitorData string) *YtcfgData {
 // a session with an account it does not match, which probeYtcfg never
 // attaches, and never the other way round. The session is kept only from a
 // page that states one and was fetched with an account: the public path's
-// cookieless page (account "") states none, and must not clear what the
+// page (account ""), fetched without the jar's session — the consent and
+// language pair alone — states none, and must not clear what the
 // authenticated path learned.
 //
 // There is one slot, so keeping account B's session evicts whatever the
@@ -901,8 +902,9 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	// Capture visitor data for future probe calls (parity with the
 	// authenticated path). Load-bearing for anonymous users: after a 403
 	// credential refresh clears the service cache, this is the only refill.
-	// The page was fetched without cookies (account ""), so it keeps no
-	// session. Only off a page, as on the authenticated path.
+	// The page was fetched without the jar's session (account "": the
+	// consent and language pair alone), so it keeps no session. Only off a
+	// page, as on the authenticated path.
 	if pageFetched {
 		p.captureVisitorData(wp.Ytcfg, "")
 	}
