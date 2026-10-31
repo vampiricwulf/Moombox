@@ -242,6 +242,7 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 		"skipped", skipped, "probed", probed, "applied", applied,
 		"denied", denied, "errored", errored, "cooldown", cooldown,
 		"dateFetchFailed", dateFetchFailed, "exhausted", len(st.exhausted))
+	fm.pruneFailureSpells(chID, scope)
 	return fresh
 }
 
@@ -333,6 +334,10 @@ func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConf
 //
 // confirm is the end check this probe may make (endCheckFor), passed on to
 // both probes when the refusal escalates.
+//
+// Each probe's failure log follows the row's failure spell (inFailureSpell):
+// Warn for the first failed probe since the row last answered, Debug for
+// every one after it.
 func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem, confirm ConfirmEndFunc) ProbeClassifyResult {
 	probe := fm.ProbeVideo
 	if row.Source == "membership" && fm.ProbeVideoAuth != nil {
@@ -346,8 +351,10 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 		Tracker:    fm.MetadataTracker,
 		Cooldown:   fm.ProbeCooldown,
 		ConfirmEnd: confirm,
+		Repeat:     fm.inFailureSpell(chID, row.VideoID),
 		Logger:     fm.logger,
 	})
+	fm.noteProbeOutcome(chID, row.VideoID, res.Outcome)
 	if res.PlayabilityError != "members_only" {
 		// Covers OutcomeErrored/OutcomeCooldown too: both carry a
 		// zero-valued PlayabilityError, so neither can trigger a flip.
@@ -370,10 +377,80 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 			Tracker:    fm.MetadataTracker,
 			Cooldown:   nil,
 			ConfirmEnd: confirm,
+			Repeat:     fm.inFailureSpell(chID, row.VideoID),
 			Logger:     fm.logger,
 		})
+		fm.noteProbeOutcome(chID, row.VideoID, res.Outcome)
 	}
 	return res
+}
+
+// inFailureSpell reports whether chID's row videoID is in a failure spell:
+// its last probe failed, and none has answered since (failingProbes).
+//
+// It is the feed's rule for a row whose probe keeps failing, the rule DECAPI
+// applies to its newest video (ProcessYouTubeVideoParams.Repeat,
+// sameAsLastAnswer): the first failed probe in a spell logs at Warn, every
+// failed probe after it at Debug (probeRow passes this as
+// ProbeClassifyParams.Repeat), and an answered probe ends the spell, so the
+// next failure warns again (noteProbeOutcome). A spell is a row's run of
+// failed probes — any failure, as DECAPI's repeat is. An inconclusive status
+// probe under a lasting bot wall (G8, youtube.StatusProbeInconclusiveError)
+// is the case it exists for: nothing stores one, so the row is probed again
+// every cycle for as long as the wall stands, and each of those probes
+// logged a Warn. Owner decision (2026-10-31, W6 follow-up): warn once in the
+// walk, as DECAPI does.
+func (fm *FeedMonitor) inFailureSpell(chID, videoID string) bool {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	_, ok := fm.failingProbes[chID][videoID]
+	return ok
+}
+
+// noteProbeOutcome records one probe of chID's row videoID against its
+// failure spell (inFailureSpell): a failed probe starts or continues one,
+// an answered probe (OutcomeProbed, OutcomeDenied — a refusal is an answer)
+// ends it, and a cooldown-suppressed one changes nothing.
+func (fm *FeedMonitor) noteProbeOutcome(chID, videoID string, outcome ProbeOutcome) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	switch outcome {
+	case OutcomeErrored:
+		if fm.failingProbes == nil {
+			fm.failingProbes = make(map[string]map[string]struct{})
+		}
+		if fm.failingProbes[chID] == nil {
+			fm.failingProbes[chID] = make(map[string]struct{})
+		}
+		fm.failingProbes[chID][videoID] = struct{}{}
+	case OutcomeProbed, OutcomeDenied:
+		delete(fm.failingProbes[chID], videoID)
+	}
+}
+
+// pruneFailureSpells drops chID's failure spells for rows outside scope, the
+// walk's: a row that left scope while failing is not probed again, so its
+// spell would otherwise stay for the life of the process. A row that comes
+// back starts a new spell, and its first failure warns.
+func (fm *FeedMonitor) pruneFailureSpells(chID string, scope []database.FeedItem) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	spells := fm.failingProbes[chID]
+	if len(spells) == 0 {
+		return
+	}
+	inScope := make(map[string]struct{}, len(scope))
+	for _, row := range scope {
+		inScope[row.VideoID] = struct{}{}
+	}
+	for id := range spells {
+		if _, ok := inScope[id]; !ok {
+			delete(spells, id)
+		}
+	}
+	if len(spells) == 0 {
+		delete(fm.failingProbes, chID)
+	}
 }
 
 // applyProbe writes a successful probe's classification to the store.

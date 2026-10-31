@@ -256,6 +256,17 @@ type FeedMonitor struct {
 	// by fm.mu.
 	carriedNew map[string]map[string]time.Time
 
+	// failingProbes holds the feed rows in a failure spell: channel ID →
+	// video ID, for each row whose last probe failed (OutcomeErrored) with no
+	// answer since. A failed probe of a row already in one logs at Debug
+	// (probeRow's ProbeClassifyParams.Repeat), so a row whose probe keeps
+	// failing warns once a spell, not once a cycle (inFailureSpell).
+	// Pruned to the walk's scope at the end of each walk and to the
+	// configured channels by PruneHealth, so it is bounded by the scopes.
+	// In-process only: a restart starts every spell over, as DECAPI's memo
+	// does. Guarded by fm.mu.
+	failingProbes map[string]map[string]struct{}
+
 	// FetchRSS overrides the RSS feed fetch (fm.fetchFeed's real HTTP GET)
 	// for tests. Nil uses the real fetch — see rssFetch.
 	FetchRSS RSSFetchFunc
@@ -281,13 +292,22 @@ type FeedMonitor struct {
 // Health returns the per-channel health snapshot for /api/status.
 func (fm *FeedMonitor) Health() []ChannelHealth { return fm.health.snapshot() }
 
-// PruneHealth drops health entries for channels no longer configured.
+// PruneHealth drops health entries — and failure spells (failingProbes) —
+// for channels no longer configured.
 func (fm *FeedMonitor) PruneHealth() {
 	active := make(map[string]struct{})
 	for _, ch := range fm.getYouTubeChannels() {
 		active[ch.ID] = struct{}{}
 	}
 	fm.health.prune(active)
+
+	fm.mu.Lock()
+	for id := range fm.failingProbes {
+		if _, ok := active[id]; !ok {
+			delete(fm.failingProbes, id)
+		}
+	}
+	fm.mu.Unlock()
 }
 
 // SetOnChannelUnhealthy installs the callback fired when a channel crosses

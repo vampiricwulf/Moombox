@@ -429,8 +429,10 @@ type ProbeClassifyParams struct {
 	// about a channel's newest video every 15 s, and a probe that keeps
 	// failing on it — an inconclusive status probe under a lasting bot wall
 	// above all (G8), which is never memoised — logged a Warn every cycle;
-	// the first sighting keeps it. The feed walk leaves it false: its rows
-	// are probed once a feed cycle, and a failure there is each cycle's own.
+	// the first sighting keeps it. The feed walk sets it for a row in a
+	// failure spell — its last probe failed and none has answered since
+	// (FeedMonitor.inFailureSpell) — for the same reason: a row whose probe
+	// keeps failing is probed again every feed cycle, and warned every cycle.
 	Repeat bool
 	Logger interface {
 		Debug(msg string, args ...any)
