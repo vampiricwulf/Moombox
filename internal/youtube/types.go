@@ -489,12 +489,12 @@ type YtcfgData struct {
 // users download from daily, and its URLs need no GVS token either — so a
 // web_embedded winner carries no token-free shadow (below), and nor does a
 // tv one: both outrank the whole web family, so a web-family winner, the
-// only kind that carries a shadow, is a stream neither returned, and its
-// shadow is a cookieless copy. In practice the order decides VODs: a live
-// broadcast is rarely embeddable, and web_embedded answers "unavailable"
-// with no formats, so a live recording's winner is the tv copy — for
-// Moombox and for yt-dlp alike (verified 2026-10-14 on a cookied live
-// extraction: 13 of 14 winners tv_auth).
+// only kind that carries a token-free shadow, is a stream neither returned,
+// and its shadow is a cookieless copy. In practice the order decides VODs:
+// a live broadcast is rarely embeddable, and web_embedded answers
+// "unavailable" with no formats, so a live recording's winner is the tv
+// copy — for Moombox and for yt-dlp alike (verified 2026-10-14 on a cookied
+// live extraction: 13 of 14 winners tv_auth).
 //
 // Where the tuple order is NOT followed: visionos. By first-seen it would
 // rank second on the public path, behind tv and ahead of web; here the
@@ -522,10 +522,10 @@ type YtcfgData struct {
 // requires the token (GvsTokenRequired), deduplicateFormats also keeps the
 // lowest-level token-free copy of that stream as the winner's shadow, and the
 // VOD missing_pot degrade swaps to it. A token-free winner — tv or
-// web_embedded — carries none, and since either outranks the whole web
-// family wherever it returned the stream, a web-family winner's shadow is
-// always a cookieless (visionos, android_vr) copy. The shadow never changes
-// which copy wins.
+// web_embedded — carries no token-free shadow (it carries the token-carrying
+// one, below), and since either outranks the whole web family wherever it
+// returned the stream, a web-family winner's shadow is always a cookieless
+// (visionos, android_vr) copy. The shadow never changes which copy wins.
 //
 // The token-carrying shadow (Format.TokenAlternate) is its mirror. When a
 // stream's winner comes from a client that needs no token — tv or

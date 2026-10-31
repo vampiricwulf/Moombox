@@ -283,7 +283,11 @@ func vodURLRefresh(ctx context.Context, job *JobContext, videoInfo *youtube.Vide
 // unless already tokenised. With no token to mint — no usable minter, or a
 // mint that fails or comes back empty — no step can run: the refresh runs
 // bare as it always did, and a Warn says so. A download that is never
-// refused, a token-requiring stream and an expiry are untouched by all of it.
+// refused and an expiry are untouched by all of it, and so is a
+// token-requiring stream's refresh, save one thing: sameVodFile reads a
+// token-free winner's TokenAlternate for it as well, so a stream whose fresh
+// winner is now tv takes the fresh copy behind it where it used to keep its
+// current URL with a fresh token.
 //
 // The token half runs first, as in refreshGvsCredentials, and is gated by the
 // SERVED stream's own client: a stream riding a missing_pot shadow was left
