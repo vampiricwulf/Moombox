@@ -253,7 +253,7 @@ func invalidate403Caches(job *JobContext, playerURL string, cipherSolver *cipher
 	// A job that has no player URL compiled no solver to drop; "" names
 	// none, and InvalidateSolver would only hash it into a key nothing holds
 	// (and warn that "" is no player URL). The POT and visitor-data halves
-	// below hold whatever the player.
+	// below apply with or without a player.
 	if cipherSolver != nil && playerURL != "" {
 		cipherSolver.InvalidateSolver(playerURL)
 	}

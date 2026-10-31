@@ -315,8 +315,8 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		// to take one from, so the hook does the player-free half alone: the
 		// POT and visitor data are dropped, and its "" sends the engine down
 		// its refresh path, whose re-extraction resolves a player afresh
-		// (resolvePlayerURL). Until then such a job's first 403 invalidated
-		// nothing at all.
+		// (resolvePlayerURL). Gated on the PlayerURL, such a job's first 403
+		// invalidated nothing at all.
 		if routedSolver != nil || cipherSolver != nil {
 			origURL := originalBaseURLs[videoStream.Itag]
 			result.VideoDownloader.OnCipherFailure = func() string {
