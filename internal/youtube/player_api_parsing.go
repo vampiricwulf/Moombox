@@ -233,6 +233,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		info.HlsManifestAvailableAt = availableAt
 	}
 	info.liveFlagsStated = statusLiveFlagsStated(videoDetails, microformat)
+	info.PlayabilityStatus = getStr(playabilityStatus, "status")
 	return info, nil
 }
 

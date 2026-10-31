@@ -360,3 +360,50 @@ func TestStatusLiveFlagsStated(t *testing.T) {
 		})
 	}
 }
+
+// sameBodyTransport answers every player call with one body.
+type sameBodyTransport struct{ body string }
+
+func (tr sameBodyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tr.body)), Header: make(http.Header), Request: req}, nil
+}
+
+// TestAnExtractionKeepsTheRefusalsPlayabilityStatus: the answer to a video
+// YouTube removed for a reason the keyword rules have no word for carries
+// the ERROR it was refused with (VideoInfo.PlayabilityStatus) beside the
+// unknown verdict — out of both cascades, as the waiting loop's full fetch
+// reads them (fullFetchSaysRemoved, internal/worker), and out of the status
+// probe's own parse, which the escalation hands on as its inconclusive error.
+//
+// Mutant: parsePlayerResponse no longer stamping PlayabilityStatus (every
+// row reads "").
+func TestAnExtractionKeepsTheRefusalsPlayabilityStatus(t *testing.T) {
+	const removed = `{"playabilityStatus":{"status":"ERROR","reason":"This video has been removed for violating YouTube's Terms of Service"}}`
+	for name, run := range map[string]func(*PlayerAPI) (*VideoInfo, error){
+		"public cascade": func(p *PlayerAPI) (*VideoInfo, error) {
+			return p.GetVideoInfoPublic(context.Background(), "test1234567")
+		},
+		"authenticated cascade": func(p *PlayerAPI) (*VideoInfo, error) {
+			return p.GetVideoInfoAuthenticated(context.Background(), "test1234567")
+		},
+		"status probe's parse": func(p *PlayerAPI) (*VideoInfo, error) {
+			return p.ProbeVideoStatus(context.Background(), "test1234567", "")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stubWatchPageWithPlayerResponse(t, removed)
+			orig := apiClient
+			apiClient = &http.Client{Transport: sameBodyTransport{removed}}
+			t.Cleanup(func() { apiClient = orig })
+
+			info, err := run(newRetryTestAPI())
+			if err != nil {
+				t.Fatalf("extraction: %v", err)
+			}
+			if info.PlayabilityStatus != "ERROR" || info.PlayabilityError != PlayabilityUnknown || info.StreamStatus != StreamNotAStream {
+				t.Errorf("answer = status %q, verdict %q, stream %q; want ERROR, unknown and not_a_stream",
+					info.PlayabilityStatus, info.PlayabilityError, info.StreamStatus)
+			}
+		})
+	}
+}

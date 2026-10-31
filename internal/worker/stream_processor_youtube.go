@@ -83,6 +83,34 @@ func runEarlyChat(finished *atomic.Bool, onPanic func(r any), run func()) {
 	run()
 }
 
+// fullFetchSaysRemoved reports whether the waiting loop's full fetch answered
+// with YouTube's refusal of a video that is gone, in words the keyword rules
+// do not place: playabilityStatus.status ERROR — the status YouTube files a
+// removed, terminated or copyright-struck video under, and the one yt-dlp's
+// _is_error_response names (_video.py:2912 at b77c9304e) — with a reason
+// parsePlayabilityStatus can only call unknown ("This video has been removed
+// for violating YouTube's Terms of Service", "… the YouTube account associated
+// with this video has been terminated", "… due to a copyright claim", "…
+// removed by the uploader"), and no broadcast left to classify.
+//
+// isTerminalPlayability gives up on the verdicts the rules do place (private,
+// unavailable, region_blocked); this is the rest of a gone video. Before G8
+// the status probe's own not_a_stream ended such a job on the next poll
+// ("unexpected status: not_a_stream"); the probe now calls that refusal
+// inconclusive, as blind as the bot wall's (internal/youtube/status_probe.go),
+// and the full fetch is the authority left — which, reading only the placed
+// verdicts, let the job poll every 30 s past its start for good. yt-dlp ends
+// an extraction on any refusal that yields no formats (raise_no_formats,
+// _video.py:4084); a loop waiting for a broadcast cannot take an auth wall
+// that way, which is why only an ERROR, and only one whose verdict the rules
+// left unknown, counts: a sign-in wall, a members-only or an age-gated
+// refusal is placed, never unknown, and keeps the loop waiting as before, as
+// does an answer that still states a broadcast (any status but not_a_stream).
+func fullFetchSaysRemoved(info *youtube.VideoInfo) bool {
+	return info != nil && info.StreamStatus == youtube.StreamNotAStream &&
+		info.PlayabilityStatus == "ERROR" && info.PlayabilityError == youtube.PlayabilityUnknown
+}
+
 // waitingRoomAuthFlip is the waiting-room poll's B1 decision: whether this
 // probe answer means the cookieless ANDROID_VR probe can no longer see the
 // stream and the poll must switch to the cookied TV one for the rest of the
@@ -359,7 +387,12 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				// fetch (never the lightweight probe) so a misclassification can't
 				// wrongly error a waiting stream. Members-only / login are NOT
 				// terminal here — B1 above switches to the authenticated probe.
-				if isTerminalPlayability(fullInfo.PlayabilityError) {
+				// Neither is an ERROR refusal the keyword rules could not place,
+				// unless it says no broadcast is left (fullFetchSaysRemoved):
+				// that is a video gone for a reason they have no word for, which
+				// nothing else ends now that the status probe calls its own
+				// refusal of it inconclusive (G8).
+				if isTerminalPlayability(fullInfo.PlayabilityError) || fullFetchSaysRemoved(fullInfo) {
 					sp.stopEarlyChat(chatDl)
 					reason := fullInfo.PlayabilityReason
 					if reason == "" {

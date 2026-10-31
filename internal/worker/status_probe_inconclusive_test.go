@@ -174,3 +174,80 @@ func TestWaitingLoopKeepsItsAuthorityThroughAnInconclusiveStatusProbe(t *testing
 		}
 	})
 }
+
+// TestWaitingLoopGivesUpOnARemovalTheRulesCannotPlace: a scheduled stream
+// YouTube removed with a reason parsePlayabilityStatus has no keyword for —
+// an ERROR refusal it can only call unknown — is given up on at the first
+// periodic full fetch, while the status probe calls its own refusal of it
+// inconclusive. Before G8 the probe's not_a_stream ended the job on the next
+// poll; after it, with only the verdicts the rules place
+// (isTerminalPlayability) counted, nothing ended it, and the job polled every
+// 30 s past its start for good.
+//
+// Only that shape: a full fetch walled the way the probe is (a sign-in
+// refusal), an UNPLAYABLE the rules cannot place, an ERROR they place as an
+// age gate, and an ERROR answer that still states an upcoming broadcast keep
+// the loop waiting, as they did.
+//
+// Mutants: fullFetchSaysRemoved left out of the full fetch's give-up (the
+// removal rows wait out the budget); its ERROR conjunct dropped (the
+// UNPLAYABLE row gives up); its unknown conjunct dropped (the age-gate row
+// gives up); its not_a_stream conjunct dropped (the upcoming row gives up);
+// the parse no longer stamping PlayabilityStatus is
+// TestAnExtractionKeepsTheRefusalsPlayabilityStatus's
+// (internal/youtube/status_probe_test.go).
+func TestWaitingLoopGivesUpOnARemovalTheRulesCannotPlace(t *testing.T) {
+	blind := func(time.Duration) (*youtube.VideoInfo, error) { return nil, botWalledProbe(errEscalation400) }
+	const (
+		tos        = "This video has been removed for violating YouTube's Terms of Service"
+		terminated = "This video is no longer available because the YouTube account associated with this video has been terminated."
+	)
+	for _, tc := range []struct {
+		name     string
+		full     youtube.VideoInfo
+		wantGone bool
+	}{
+		{"a Terms of Service removal", youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityStatus: "ERROR",
+			PlayabilityError: youtube.PlayabilityUnknown, PlayabilityReason: tos}, true},
+		{"a terminated account", youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityStatus: "ERROR",
+			PlayabilityError: youtube.PlayabilityUnknown, PlayabilityReason: terminated}, true},
+		{"the full fetch walled too", youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityStatus: "LOGIN_REQUIRED",
+			PlayabilityError: youtube.PlayabilityLoginRequired, PlayabilityReason: "Sign in to confirm you’re not a bot"}, false},
+		{"an UNPLAYABLE the rules cannot place", youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityStatus: "UNPLAYABLE",
+			PlayabilityError: youtube.PlayabilityUnknown, PlayabilityReason: "This video can't be played here"}, false},
+		{"an ERROR the rules place as an age gate", youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityStatus: "ERROR",
+			PlayabilityError: youtube.PlayabilityAgeRestricted, PlayabilityReason: "Sign in to confirm your age"}, false},
+		{"an ERROR that still states the broadcast", youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming, IsUpcoming: true,
+			PlayabilityStatus: "ERROR", PlayabilityError: youtube.PlayabilityUnknown, PlayabilityReason: tos}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := driveWaitForLive(t, 2*time.Minute, 2*fullFetchInterval+10*time.Minute, func(time.Time) waitFakes {
+				return waitFakes{
+					status: blind,
+					full: func(time.Duration) (*youtube.VideoInfo, error) {
+						info := tc.full
+						return &info, nil
+					},
+				}
+			})
+			if !tc.wantGone {
+				if run.returned >= 0 {
+					t.Fatalf("the wait ended with %+v at %v, want it still waiting:%s", run.result, run.returned, run)
+				}
+				return
+			}
+			if run.returned < 0 || run.result == nil || run.result.ShouldDownload {
+				t.Fatalf("the wait ended with %+v at %v, want it given up on the full fetch's verdict:%s", run.result, run.returned, run)
+			}
+			if run.returned > fullFetchInterval+time.Minute || run.count("full") != 1 {
+				t.Errorf("gave up at %v after %d full fetches, want the first periodic full fetch (%v):%s", run.returned, run.count("full"), fullFetchInterval, run)
+			}
+			if want := "stream unavailable: " + tc.full.PlayabilityReason; run.result.Error != want {
+				t.Errorf("Error = %q, want %q", run.result.Error, want)
+			}
+			if !errors.Is(run.result.ErrSentinel, ErrNonActionable) {
+				t.Errorf("ErrSentinel = %v, want ErrNonActionable, as every give-up on the full fetch's verdict", run.result.ErrSentinel)
+			}
+		})
+	}
+}

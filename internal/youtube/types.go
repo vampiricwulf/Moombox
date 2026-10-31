@@ -118,6 +118,17 @@ type VideoInfo struct {
 	// Never serialised, as the instants it gates are not.
 	PlaybackWaitExempt bool `json:"-"`
 
+	// PlayabilityStatus is playabilityStatus.status as YouTube sent it — "OK",
+	// "LOGIN_REQUIRED", "UNPLAYABLE", "ERROR", "LIVE_STREAM_OFFLINE" and the
+	// rest — the code PlayabilityError is read from. Kept for what the verdict
+	// cannot say: that a refusal whose reason the keyword rules do not place
+	// (PlayabilityUnknown) is the ERROR YouTube files a video that is gone
+	// under (yt-dlp's _is_error_response, _video.py:2912 at b77c9304e), which
+	// the waiting loop's full fetch gives up on (fullFetchSaysRemoved,
+	// internal/worker). One response's own; "" for an info no response
+	// produced. Never serialised.
+	PlayabilityStatus string `json:"-"`
+
 	// liveFlagsStated is whether the response this info was parsed from
 	// stated any flag yt-dlp's live_status is decided on
 	// (statusLiveFlagsStated). False is the refused answer that says nothing
