@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -652,6 +653,34 @@ func gvsBinding(job *JobContext, videoInfo *youtube.VideoInfo) (value, kind stri
 // refusal long before its URL's expiry says it needs one.
 var mintGvsPoToken = func(ctx context.Context, p *bgutils.PotProvider, binding string) (string, error) {
 	return p.GeneratePoTokenString(ctx, binding, false)
+}
+
+// errGuessedGvsBinding is the missing_pot cause when the job's GVS content
+// binding is a guess (youtube.VideoInfo.GvsBindingGuessed): signed in, the
+// video-ID experiment off, and no datasync ID on the page. yt-dlp mints
+// nothing there; a strategy counts it as a token it does not have (owner
+// decision D12) and mints under the guess only for a stream whose token is
+// mandatory and that has no token-free copy to take instead.
+var errGuessedGvsBinding = errors.New("the GVS content binding is a guess — signed in, but the page stated no datasync ID")
+
+// strategyGvsToken is a strategy's first GVS mint (mintGvsPoToken) under
+// binding, and the cause of a missing token: the mint's error, an empty
+// token (errEmptyGvsToken), or — unless guessOK — a guessed binding
+// (errGuessedGvsBinding), for which nothing is minted at all. guessOK is the
+// one exit D12 leaves: a stream whose token is mandatory and that has no
+// token-free copy rides a token minted under the guess.
+func strategyGvsToken(ctx context.Context, p *bgutils.PotProvider, videoInfo *youtube.VideoInfo, binding string, guessOK bool) (string, error) {
+	if !guessOK && videoInfo != nil && videoInfo.GvsBindingGuessed {
+		return "", errGuessedGvsBinding
+	}
+	tok, err := mintGvsPoToken(ctx, p, binding)
+	if err == nil && tok == "" {
+		err = errEmptyGvsToken
+	}
+	if err != nil {
+		return "", err
+	}
+	return tok, nil
 }
 
 // tokenClassChanged reports whether a 403 refresh must NOT install the fresh
