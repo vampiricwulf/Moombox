@@ -159,8 +159,8 @@ func TestGoneAlwaysPermanent(t *testing.T) {
 	d.noteHeadSeq(5000)
 	d.currentSeq.Store(10)
 
-	if _, err := d.fetchSegmentWithRetry(t.Context(), d.buildSegmentURL(10), nil); err != ErrSegmentPermanent {
-		t.Fatalf("err = %v, want ErrSegmentPermanent for 410", err)
+	if _, err := d.fetchSegmentWithRetry(t.Context(), d.buildSegmentURL(10), nil); err != errSegmentGone {
+		t.Fatalf("err = %v, want errSegmentGone (an ErrSegmentPermanent) for 410", err)
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("HTTP attempts = %d, want exactly 1 for 410", got)

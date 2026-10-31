@@ -118,7 +118,9 @@ func partitionManifestlessFormats(formats []youtube.Format) (video, audio []Dash
 //  5. Build engine.SegmentDownloader instances. The downloader's
 //     buildSegmentURL auto-detects query-style adaptive URLs and appends
 //     `&sq=N`, while applyPoTokenQuery appends `&pot=POT` per fetch. No
-//     separate init segment — sq=0 carries ftyp+moov inline.
+//     separate init segment — sq=0 carries ftyp+moov inline, which is why a
+//     start from sq=0 sets InitInlineAtStart and a forced later part sets
+//     InitURL to sq=0 instead.
 func DownloadManifestlessDash(
 	ctx context.Context,
 	job *JobContext,
@@ -306,6 +308,10 @@ func DownloadManifestlessDash(
 		// at sq>0, but manifest-free DASH carries the ftyp+moov init only inline
 		// at sq=0. Point InitURL at sq=0 so the engine prepends the extracted
 		// init; otherwise the part file is a bare moof+mdat that won't mux.
+		// Every other start begins at sq=0 itself (or appends to a file that
+		// already holds it), and says so with InitInlineAtStart: the engine
+		// then never lets an empty file begin past sq=0 without that init —
+		// see engine.DownloaderOptions.InitInlineAtStart.
 		videoInitURL := ""
 		if forceVideoSeq && videoStartSeq > 0 {
 			videoInitURL = manifestlessSq0URL(videoStream.BaseURL)
@@ -325,6 +331,7 @@ func DownloadManifestlessDash(
 			DiscardStaged:       manifestlessDiscardStaged(videoInfo.StreamStatus, forceVideoSeq),
 			InitURL:             videoInitURL,
 			InitFromSegment:     videoInitURL != "",
+			InitInlineAtStart:   !forceVideoSeq,
 			PoToken:             videoPot,
 			CookieHeader:        cookieHeader,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
@@ -386,6 +393,7 @@ func DownloadManifestlessDash(
 			DiscardStaged:       manifestlessDiscardStaged(videoInfo.StreamStatus, forceAudioSeq),
 			InitURL:             audioInitURL,
 			InitFromSegment:     audioInitURL != "",
+			InitInlineAtStart:   !forceAudioSeq,
 			PoToken:             audioPot,
 			CookieHeader:        cookieHeader,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,

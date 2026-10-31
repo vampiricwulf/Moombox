@@ -23,7 +23,10 @@ const (
 	goneRetryDuringDownload = 10
 	// goneRetryBeforeFirstSegment is how many 403/410 we tolerate while
 	// hunting for the first valid segment (e.g. pre-roll that's not yet
-	// published). Each failure advances currentSeq by 1.
+	// published). A failure advances currentSeq by 1 only where
+	// huntMayAdvance allows it — below a known head, and never off an
+	// InitInlineAtStart downloader's sq=0; anywhere else the same sequence is
+	// asked again, singleGoneRetry apart.
 	goneRetryBeforeFirstSegment = 20
 
 	// postBytes403CipherThreshold is the number of consecutive post-bytes-
@@ -233,6 +236,39 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 			continue // nil means retry
 		}
 
+		// A 2xx that carried no body is not a segment. Written as one, it
+		// advanced currentSeq, refreshed lastSegTime and broke the gone
+		// streak — so past the end of a stream whose edge answers every
+		// sequence with an empty 200 (moonarchive's _dash.py meets one "if
+		// the live replay is unlisted at the end", and at the end of a stream
+		// in general), the loop ran at request speed forever: currentSeq raced
+		// past the head, the resume sidecar recorded a LastSeq beyond it, and
+		// neither MaxTimeout nor CheckStreamStatus — reached only from the
+		// error handlers — ever fired. yt-dlp's HttpFD fails such a fetch
+		// ("Did not get any data blocks", downloader/http.py) and moonarchive
+		// retries it (EmptyFragmentException) before consulting the stream's
+		// status. Here it is a failed fetch of THIS sequence, routed through
+		// handleHTTPError: at or past the head that is the at-edge path
+		// (backoff, head re-probe, CheckStreamStatus every
+		// streamStatusCheckInterval, the MaxTimeout backstop); below it the
+		// transient retry, which escalates to the same checks once the
+		// segment stays stuck. Never handleGoneError: an empty body says
+		// nothing about whether the sequence exists, so it must neither
+		// advance the first-segment hunt nor count toward a gone burst.
+		if len(data) == 0 {
+			d.logger.Debug("[Downloader] segment answered with an empty body — retrying it",
+				"seq", d.currentSeq.Load(), "status", statusCode, "headSeq", d.headSeq.Load())
+			herr := d.handleHTTPError(ctx, hasStartedDownloading, &sameSegRetries, &lastRetrySeq,
+				&sameHeadRetryDelay, &lastConfirmedHead, delayCap)
+			if herr == errStreamDone {
+				return nil
+			}
+			if herr != nil {
+				return herr
+			}
+			continue
+		}
+
 		// Segment body in hand — record the arrival before the write so the
 		// fetched-bytes signal covers every path uniformly (the parallel
 		// catch-up workers record theirs inside fetchSegmentWithRetry).
@@ -240,6 +276,9 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 
 		// Write segment
 		writeSeq := int(d.currentSeq.Load())
+		if initErr := d.ensureInlineInit(ctx, writeSeq); initErr != nil {
+			return initErr
+		}
 		n, writeErr := d.outputFile.Write(data)
 		if writeErr != nil {
 			return fmt.Errorf("%w: write segment %d: %w", ErrLocalWrite, writeSeq, writeErr)
@@ -532,6 +571,37 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 	}
 	if !hasStartedDownloading && *consecutiveGoneErrors <= goneRetryBeforeFirstSegment {
 		d.emitActivity(ActivityFindingFirstSegment)
+		if !d.huntMayAdvance() {
+			// Same sequence again: the segment past it cannot be the first
+			// one to look for (see huntMayAdvance). The at-edge pause, not the
+			// hunt's: this is a wait for the segment to be served, and the
+			// hunt's 100 ms would re-ask a not-yet-published sequence ten
+			// times a second for the whole budget.
+			//
+			// Held BELOW a known head — which only an InitInlineAtStart sq=0
+			// is — the segment demonstrably exists, so a 403 that outlives
+			// the cipher swap (handleDashError fires OnCipherFailure on the
+			// first pre-bytes 403) is stale credentials: a PO token the edge
+			// now refuses, whose "missing_pot" body also suppresses that
+			// swap. The refresh at the top of this function needs
+			// hasStartedDownloading, so without this one the hold re-sent the
+			// same refused credentials for its whole budget and ended with
+			// nothing written, while the same start with the head 40 or more
+			// ahead recovered in place through catch-up's
+			// fetchSegmentWithRetry, which refreshes below the head. The gate
+			// is that refresh's: a 403 only (a 410 is evicted, and no refresh
+			// brings it back), a burst past postBytes403CipherThreshold (the
+			// swap gets its turn first), and behindHeadTailPending, so a hold
+			// at or past the head, or with the head unknown, never refreshes
+			// for a segment that is merely not published yet.
+			// refreshCredentials is cooldown-gated: the hold's ~10 s costs at
+			// most two player-response round trips.
+			if statusCode == 403 && *consecutiveGoneErrors >= postBytes403CipherThreshold && d.behindHeadTailPending() {
+				d.refreshCredentials()
+			}
+			utils.Sleep(ctx, d.delays.singleGoneRetry)
+			return nil // Continue loop
+		}
 		d.currentSeq.Add(1)
 		utils.Sleep(ctx, firstSegmentHuntDelay)
 		return nil // Continue loop
@@ -545,6 +615,48 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 	d.emitActivity(ActivityWaitingForSegment)
 	utils.Sleep(ctx, d.delays.singleGoneRetry)
 	return nil // Continue loop
+}
+
+// huntMayAdvance reports whether the first-segment hunt may step past the
+// sequence that just answered 403/410 before any byte was written. The hunt
+// exists for a start that sits on evicted or otherwise refused segments; it
+// may only step onto segments the edge has said exist, and never off the one
+// segment the file cannot do without.
+//
+//   - Only below a KNOWN head (currentSeq < headSeq). yt-dlp's live generator
+//     never requests a sequence before X-Head-Seqnum says it exists
+//     (extractor/youtube/_video.py, _live_adaptive_fragments, from 8c1f07d81
+//     #16771 — the manifest-free generator, which keeps the X-Head-Seqnum
+//     bound adbc4ec4b #888 gave the manifest one, _live_dash_fragments):
+//     with the head unknown, or the refused sequence already at or
+//     past it, the segment is most likely not published yet — the go-live
+//     pre-roll goneRetryBeforeFirstSegment's own comment names — and stepping
+//     past it only asks for a later sequence that exists even less. The hunt
+//     used to step twenty sequences past the edge in two seconds, ending
+//     with nothing written or beginning the file wherever the edge caught up
+//     with it.
+//   - Never off sq=0 of an InitInlineAtStart downloader, even below a known
+//     head — yt-dlp's own shape: fragment 0 is fatal, retried, never skipped
+//     (downloader/dash.py, `is_fatal=lambda idx: idx == 0` from 814bba393
+//     #5274; fragment.py). That sq=0 holds the stream's only
+//     ftyp+moov, and its media is the first seconds of the recording.
+//     Stepping past it — even after OnCipherFailure had just repaired the
+//     URL that was refused, which is what that first pre-bytes 403 usually
+//     means — began the file at sq=1 with no init. ensureInlineInit alone
+//     would rescue the init but not sq=0's media; retrying sq=0 keeps both,
+//     and a sq=0 that stays refused ends the hunt with nothing written,
+//     exactly as a refused later one does.
+//
+// The retry is bounded by the same goneRetryBeforeFirstSegment budget, so a
+// start that never finds its segment still ends: with zero bytes and
+// currentSeq where it began, which is where the orchestrator's refresh and
+// diagnoseEvictedStart both expect it.
+func (d *SegmentDownloader) huntMayAdvance() bool {
+	cur := d.currentSeq.Load()
+	if d.opts.InitInlineAtStart && cur == 0 {
+		return false
+	}
+	return cur < d.headSeq.Load()
 }
 
 // behindHeadTailPending reports whether the known head sequence implies

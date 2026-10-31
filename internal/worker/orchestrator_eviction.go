@@ -24,10 +24,13 @@ const minEvictionHead = 100_000
 // starting position for a zero-byte finish to still be considered a
 // candidate evicted-start hunt. The engine's own first-segment hunt
 // (handleGoneError, goneRetryBeforeFirstSegment in
-// internal/engine/downloader_dash.go) advances currentSeq by +1 per 403/410
-// up to 20 attempts before giving up — a genuine evicted-start failure
-// never exceeds that. The engine exports no constant for it, so this value
-// is kept comfortably above 20 by hand. Without this guard, a quality-split
+// internal/engine/downloader_dash.go) gives up after 20 attempts, advancing
+// currentSeq by +1 per 403/410 at most — and only where huntMayAdvance lets
+// it: below a known head, and never off sq=0 of a manifest-free start
+// (InitInlineAtStart), which holds there and so ends an evicted start with
+// CurrentSeq 0. A genuine evicted-start failure never moves further than
+// that. The engine exports no constant for it, so this value is kept
+// comfortably above 20 by hand. Without this guard, a quality-split
 // final part — a fresh seg_N downloader seeded deep via ForceStartSeq that
 // happens to write zero bytes for an unrelated reason — would present a
 // deep HeadSeq alongside a zero-byte finish and get misdiagnosed as
