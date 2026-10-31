@@ -36,7 +36,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// a whole-file GET cannot fetch (wholeFileVodPool) — a filtered COPY, as
 	// a missing_pot degrade's is, never the caller's slice filtered in place.
 	pool, segmented := wholeFileVodPool(videoInfo.Formats)
-	selected, result := selectVodFormats(job, pool, nil)
+	selected, result := selectVodFormats(job, pool, nil, segmented)
 	if err := segmentedStreamLost(job, selected, segmented); err != nil {
 		// selectDownloadStrategy sends a pool that holds a segmented format
 		// to DASH whenever a manifest came with it (its OTF arm), so this
@@ -123,7 +123,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 						"jobID", job.Job.ID, "added", len(extra), "dropped", len(dropped), "swapped", swapped)
 				}
 			}
-			selected, result = selectVodFormats(job, pool, dropped)
+			selected, result = selectVodFormats(job, pool, dropped, segmented)
 			if !result.HasVideo && !result.HasAudio {
 				return nil, fmt.Errorf("VOD: no formats usable without a GVS PO token (mint failed: %w)", mintErr)
 			}
@@ -278,7 +278,17 @@ func vodSelectionBounds(job *JobContext) (maxRes int, prefer60fps bool) {
 // one of them says why it is being ignored instead of "not found" — or, when
 // the drop swapped that format for its token-free shadow (the itag is still
 // in formats), says which client now serves it.
-func selectVodFormats(job *JobContext, formats, dropped []youtube.Format) (youtube.SelectedFormats, *DownloadResult) {
+//
+// segmented is what the whole-file pool left out (wholeFileVodPool), for the
+// same reason: a pin of one says it is segmented, not available as a whole
+// file, rather than "not found" — the format picker offers it, marked
+// segmented, because the manifest-free live and post-live paths fetch it as
+// fragments. A token drop is named first: where the dedup's shadow swap left
+// only a segmented copy of a pinned stream, its whole file is the one the
+// token was needed for. A damaged pin has no arm here: damage only ranks a
+// rendition lower, it never takes one out of the pool, so a damaged pin is
+// found and honoured.
+func selectVodFormats(job *JobContext, formats, dropped, segmented []youtube.Format) (youtube.SelectedFormats, *DownloadResult) {
 	maxRes, prefer60fps := vodSelectionBounds(job)
 	selected := youtube.SelectBestFormatsWithLogger(formats, maxRes, prefer60fps, job.Logger)
 
@@ -315,6 +325,8 @@ func selectVodFormats(job *JobContext, formats, dropped []youtube.Format) (youtu
 				}
 			} else if droppedHasItag(dropped, itag, "video") {
 				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual video itag %d requires a GVS token none could be minted; falling back to auto", itag))
+			} else if droppedHasItag(segmented, itag, "video") {
+				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual video itag %d is segmented, not available as a whole file; falling back to auto", itag))
 			} else {
 				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual video itag %d not found, falling back to auto", itag))
 			}
@@ -341,6 +353,8 @@ func selectVodFormats(job *JobContext, formats, dropped []youtube.Format) (youtu
 				}
 			} else if droppedHasItag(dropped, itag, "audio") {
 				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual audio itag %d requires a GVS token none could be minted; falling back to auto", itag))
+			} else if droppedHasItag(segmented, itag, "audio") {
+				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual audio itag %d is segmented, not available as a whole file; falling back to auto", itag))
 			} else {
 				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual audio itag %d not found, falling back to auto", itag))
 			}
@@ -453,7 +467,7 @@ func reselectVodWithout(job *JobContext, pool []youtube.Format, failedItag int) 
 			rest = append(rest, f)
 		}
 	}
-	_, alt := selectVodFormats(job, rest, nil)
+	_, alt := selectVodFormats(job, rest, nil, nil)
 	return alt
 }
 
@@ -549,7 +563,7 @@ func withoutGvsRequiredFormats(formats []youtube.Format) (kept, dropped []youtub
 
 // droppedHasItag reports whether a missing_pot drop removed a format with
 // this itag of the given kind ("video" / "audio"), matched the way the manual
-// override matches.
+// override matches. Asked of the whole-file pool's segmented formats too.
 func droppedHasItag(dropped []youtube.Format, itag int, kind string) bool {
 	for i := range dropped {
 		f := &dropped[i]
