@@ -190,6 +190,87 @@ func TestDashAndHlsSetupFailOnAnUnsolvedN(t *testing.T) {
 	}
 }
 
+// TestDashInitializationURLGetsItsNSolved: a manifest Initialization is
+// resolved against its representation's BaseURL, so it carries that n, and
+// the downloader fetches it as it is handed over. DownloadDash solved the n
+// of every BaseURL and of no Initialization, so an init went out with its n
+// as YouTube sent it — refused, and a part whose init is refused does not
+// start. Now its n is solved like the BaseURL's, and an Initialization whose
+// n has no answer fails the setup the same way.
+//
+// Mutant: the Initialization left unsolved (the first row's InitURL keeps
+// the challenge, the second row sets up).
+func TestDashInitializationURLGetsItsNSolved(t *testing.T) {
+	const seg = "https://r4---sn.googlevideo.com/videoplayback/id/abc.1/itag/%d/n/" + nChal + "/sq/1"
+	mpd := func(initRef string) string {
+		return `<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <Representation id="299" bandwidth="9000000" width="1920" height="1080">
+        <BaseURL>` + fmt.Sprintf(seg, 299) + `</BaseURL>
+        <SegmentList><Initialization sourceURL="` + initRef + `"/></SegmentList>
+      </Representation>
+    </AdaptationSet>
+    <AdaptationSet mimeType="audio/mp4">
+      <Representation id="140" bandwidth="128000">
+        <BaseURL>` + fmt.Sprintf(seg, 140) + `</BaseURL>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`
+	}
+	// The representations' own n is answered; one an Initialization carries
+	// of its own is answered with the exception sentinel.
+	answer := func(c string) string {
+		if c == nChal {
+			return nSolved
+		}
+		return sentinelOf(c)
+	}
+
+	t.Run("the representation's n", func(t *testing.T) {
+		built := recordDownloaders(t)
+		routed, _ := nSolver(answer, nil)
+		job, _ := vodPotJob(t)
+		srv := newManifestServer(t, mpd("init"))
+		info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer,
+			DashManifestURL: srv.URL + "/api/manifest/dash/id/abc", DashManifestSource: "tv_auth"}
+		if _, err := DownloadDash(context.Background(), job, info, routed, nil, nil, nil); err != nil {
+			t.Fatalf("DownloadDash: %v", err)
+		}
+		var inits int
+		for _, opts := range *built {
+			if opts.InitURL == "" {
+				continue
+			}
+			inits++
+			if !strings.Contains(opts.InitURL, "/n/"+nSolved+"/") || strings.Contains(opts.InitURL, nChal) {
+				t.Errorf("init URL %q, want its n replaced by the answer", opts.InitURL)
+			}
+		}
+		if inits != 1 {
+			t.Errorf("%d downloaders carry an init URL, want the video one", inits)
+		}
+	})
+
+	t.Run("an n of its own, unsolved", func(t *testing.T) {
+		built := recordDownloaders(t)
+		routed, _ := nSolver(answer, nil)
+		job, _ := vodPotJob(t)
+		srv := newManifestServer(t, mpd("https://r4---sn.googlevideo.com/videoplayback/id/abc.1/itag/299/n/initchallenge/init"))
+		info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer,
+			DashManifestURL: srv.URL + "/api/manifest/dash/id/abc", DashManifestSource: "tv_auth"}
+		_, err := DownloadDash(context.Background(), job, info, routed, nil, nil, nil)
+		if !errors.Is(err, cipher.ErrNUnsolved) || !strings.Contains(err.Error(), "n challenge unsolved in the initialization URL") {
+			t.Fatalf("DownloadDash = %v, want a setup error naming the init's unsolved n (cipher.ErrNUnsolved)", err)
+		}
+		if len(*built) != 0 {
+			t.Errorf("%d downloaders built; want none", len(*built))
+		}
+	})
+}
+
 // TestResolveFreshDashURLHandsBackOnlyASolvedURL: the DASH 403 hook's
 // re-solve returns a URL only when it solved the n in it. It used to log
 // "fresh n-param decryption succeeded" and hand the engine whatever came

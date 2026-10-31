@@ -199,6 +199,23 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	}
 	decryptCount := 0
 	for i := range streams {
+		// A manifest Initialization is resolved against its representation's
+		// BaseURL (engine.ParseDash), so it carries that n too, and the
+		// downloader fetches it as is: no 403 hook re-solves it, and a part
+		// whose init is refused does not start (ErrInitSegmentUnavailable).
+		// It gets its n solved like the BaseURL, and fails the setup the
+		// same way when that n is unsolved. It used to go out with its n as
+		// YouTube sent it. YouTube's live manifests carry no Initialization
+		// today (a Period-level SegmentList; moonarchive reads nothing else,
+		// downloaders/youtube/dash_manifest.py), so this is for the one that
+		// does.
+		if streams[i].Initialization != "" {
+			init, err := cipher.RoutedDecryptNInURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, streams[i].Initialization)
+			if err != nil {
+				return nil, fmt.Errorf("DASH: n challenge unsolved in the initialization URL for itag %d — its init segment would be refused: %w", streams[i].Itag, err)
+			}
+			streams[i].Initialization = init
+		}
 		if streams[i].BaseURL == "" {
 			continue
 		}
