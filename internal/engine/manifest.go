@@ -28,7 +28,7 @@ type DashStream struct {
 	Codecs         string
 	Width          int
 	Height         int
-	FPS            int // From frameRate attribute (0 if not present)
+	FPS            int // From frameRate attribute (0 if not present, or 1 or less: knownFPS)
 	Bandwidth      int
 	BaseURL        string        // Template URL with $Number$ placeholder
 	StartNumber    int           // First segment sequence number
@@ -50,7 +50,7 @@ type HlsVariant struct {
 	Bandwidth int
 	Width     int
 	Height    int
-	FPS       int // From FRAME-RATE attribute (0 if not present)
+	FPS       int // From FRAME-RATE attribute (0 if not present, or 1 or less: knownFPS)
 	Codecs    string
 	URL       string
 	Name      string
@@ -240,7 +240,7 @@ func parseDashRepresentation(rep representationXML, as adaptationSetXML, period 
 		Bandwidth: rep.Bandwidth,
 		Width:     rep.Width,
 		Height:    rep.Height,
-		FPS:       parseFrameRate(rep.FrameRate),
+		FPS:       knownFPS(parseFrameRate(rep.FrameRate)),
 		Itag:      -1, // Sentinel: unknown itag. Non-numeric ids leave this as-is.
 	}
 
@@ -556,6 +556,7 @@ func parseMasterPlaylist(lines []string, baseURL string) *HlsParseResult {
 				} else if v, err := strconv.ParseFloat(attr.value, 64); err == nil {
 					variant.FPS = int(math.Round(v))
 				}
+				variant.FPS = knownFPS(variant.FPS)
 			case "CODECS":
 				variant.Codecs = strings.Trim(attr.value, "\"")
 			case "VIDEO":
@@ -877,4 +878,23 @@ func parseFrameRate(s string) int {
 		return int(math.Round(v))
 	}
 	return 0
+}
+
+// knownFPS is a parsed manifest frame rate, or 0 — not stated — when it is 1
+// or less. yt-dlp drops such a rate from every YouTube manifest format, DASH
+// and HLS alike: `if f.get('fps') and f['fps'] <= 1: del f['fps']`
+// (_video.py:3676-3677, 97afb093d), beside the same floor on the player
+// response's own fps — "For some formats, fps is wrongly returned as 1". Kept,
+// a 1 counted as a stated rate of 31 or below, which fpsPreference prefers
+// under prefer_60fps=false. The floor is applied to the ROUNDED rate the
+// selectors rank, so a 1.4 that rounds to 1 is dropped too, where upstream's
+// float keeps it; no real ladder states a rate between 1 and 1.5.
+//
+// Both manifests this file parses are YouTube's: Twitch masters go through
+// internal/twitch/hls.go, and upstream applies no such floor to Twitch.
+func knownFPS(fps int) int {
+	if fps <= 1 {
+		return 0
+	}
+	return fps
 }
