@@ -1589,6 +1589,75 @@ func innertubeHTTPError(clientLabel string, status int, body []byte) error {
 	return fmt.Errorf("%s API error: HTTP %d", clientLabel, status)
 }
 
+// HTTPRateLimitError is an Innertube 429: YouTube saying "too many requests"
+// to this client's call, which doRetryRequest returns at once rather than
+// retrying. It reads as innertubeHTTPError's text — the "HTTP 429" that
+// worker/probe_classify.go calls transient stays at its head — with the
+// Retry-After YouTube asked for, when it asked, after it. Unwrap gives that
+// text; the worker reads RetryAfter off the chain (errors.As) as the least
+// it waits before a backlog VOD it requeues for the failure is fetched again.
+type HTTPRateLimitError struct {
+	Err        error
+	RetryAfter time.Duration // zero: the response named no wait
+}
+
+func (e *HTTPRateLimitError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("%s (Retry-After %s)", e.Err.Error(), e.RetryAfter)
+	}
+	return e.Err.Error()
+}
+
+func (e *HTTPRateLimitError) Unwrap() error { return e.Err }
+
+// retryAfter reads a Retry-After header — delta-seconds, or an HTTP-date
+// measured from now (RFC 9110 §10.2.3). Zero for none, for one that cannot be
+// read, and for a date already past.
+func retryAfter(h http.Header, now time.Time) time.Duration {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		return max(time.Duration(secs)*time.Second, 0)
+	}
+	if at, err := http.ParseTime(v); err == nil {
+		return max(at.Sub(now), 0)
+	}
+	return 0
+}
+
+// unknownErrorAlert returns the message of the alert a 200 response is
+// retried for, or "": upstream's _extract_and_report_alerts raises the LAST
+// alert of type ERROR (_base.py:1104-1127), and _extract_response retries it
+// when its message says "unknown error" (_base.py:1348-1356, yt-dlp #839,
+// "YouTube's servers may return errors we want to retry on in a 200 OK
+// response"). Each alert is an object of one renderer, whose `type` and
+// `text` (simpleText or runs) upstream reads off every value it holds.
+func unknownErrorAlert(data map[string]any) string {
+	alerts, _ := data["alerts"].([]any)
+	last := ""
+	for _, a := range alerts {
+		am, ok := a.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, r := range am {
+			rm, ok := r.(map[string]any)
+			if !ok || !strings.EqualFold(getStr(rm, "type"), "error") {
+				continue
+			}
+			if msg := innertubeText(rm["text"]); msg != "" {
+				last = msg
+			}
+		}
+	}
+	if !strings.Contains(strings.ToLower(last), "unknown error") {
+		return ""
+	}
+	return last
+}
+
 // playerRetryBackoffBase is the first retry delay; attempt n waits
 // base<<(n-1), i.e. 1 s, 2 s, 4 s. A var rather than a const purely so tests
 // can scale the ladder down instead of sleeping for real seconds; production
@@ -1596,10 +1665,21 @@ func innertubeHTTPError(clientLabel string, status int, body []byte) error {
 var playerRetryBackoffBase = time.Second
 
 // doRetryRequest performs an HTTP POST with retry logic (up to 4 attempts with
-// exponential backoff). Retries on transport errors, partial body reads,
-// 5xx/429 responses, and JSON unmarshal failures — all of which have been
-// observed as transient CDN issues that would otherwise unnecessarily push
-// callers through their full fallback chain.
+// exponential backoff). It retries what yt-dlp's _extract_response retries
+// (_base.py:1322-1356 at b77c9304e): a transport error, a partial body read,
+// a 5xx or a 404 (the intermittent one of ytdl-org #28289), a 200 whose body
+// does not parse, and a 200 carrying an ERROR alert that says "unknown error"
+// (yt-dlp #839) — all transient on YouTube's side, and each would otherwise
+// push the caller on through its whole fallback chain.
+//
+// A 429 is returned at once (HTTPRateLimitError), as upstream returns a 403
+// or a 429 at once and moves on to its next client: YouTube has just said too
+// many requests, and the four attempts this used to make into it, on each of
+// the five to seven clients a cascade asks, sent twenty-odd calls in seconds
+// into a limit every job on the account or address shares. The job layer
+// owns the backoff a rate limit wants. Every other status — a 400, a 401, a
+// 403 — is returned at once, as before; upstream retries a 400 and a 401
+// too, which are deterministic here.
 //
 // The backoff is bounded by the CALLER's deadline. Mid-download 403 credential
 // recovery runs under min(45 s, MaxTimeout/3) — as little as 10 s at the
@@ -1671,7 +1751,13 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 			continue
 		}
 
-		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, &HTTPRateLimitError{
+				Err:        innertubeHTTPError(clientLabel, resp.StatusCode, respBody),
+				RetryAfter: retryAfter(resp.Header, time.Now()),
+			}
+		}
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusNotFound {
 			lastErr = innertubeHTTPError(clientLabel, resp.StatusCode, respBody)
 			continue
 		}
@@ -1690,6 +1776,17 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 				slog.Int("attempt", attempt+1),
 				slog.Int("bodyLen", len(respBody)),
 				slog.String("error", err.Error()))
+			continue
+		}
+		if msg := unknownErrorAlert(data); msg != "" {
+			// Upstream's text for the alert it raises, "YouTube said: …", and
+			// YouTube's own words made safe for a log line as an error body's
+			// are (innertubeErrorDetail). No "HTTP <code>" in it: what
+			// probe_classify cannot place it calls transient, as this is.
+			lastErr = fmt.Errorf("%s API error: YouTube said: %s", clientLabel, sanitizeErrorDetail(msg))
+			p.logger.Debug("[PlayerApi] 200 carried an unknown-error alert, retrying",
+				slog.String("client", clientLabel),
+				slog.Int("attempt", attempt+1))
 			continue
 		}
 		return p.parsePlayerResponse(ctx, data, playerURL, ytcfg, videoID)

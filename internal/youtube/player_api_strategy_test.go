@@ -135,11 +135,15 @@ func TestTryCookielessFallbacks(t *testing.T) {
 	})
 
 	t.Run("visionos failure falls through to android_vr", func(t *testing.T) {
+		// A 403, which doRetryRequest returns at once: the transport's 404
+		// default is retried within the ladder (G46), and this subtest
+		// counts calls.
 		tr := &clientKeyedTransport{responses: map[string]struct {
 			status int
 			body   string
 		}{
-			"28": {http.StatusOK, adequateOKBody},
+			"101": {http.StatusForbidden, "{}"},
+			"28":  {http.StatusOK, adequateOKBody},
 		}}
 		swap(t, tr)
 
