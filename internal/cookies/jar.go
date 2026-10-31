@@ -143,8 +143,61 @@ var essentialYouTubeCookies = map[string]bool{
 	// SOCS=CAI). Kept so a user's own consent survives Load, browser
 	// extraction (isEssentialCookie) and Set-Cookie admission
 	// (trackedCookieName) alike, and YouTubePageCookieHeader forwards it
-	// rather than putting CAI in its place.
+	// rather than putting CAI in its place — from a YouTube domain only
+	// (youtubeOnlyEssentialCookies).
 	"SOCS": true,
+}
+
+// youtubeOnlyEssentialCookies are the essential names the jar keeps only
+// from a row www.youtube.com is sent (sentToWWWYouTube), never from one
+// scoped to google.com: SOCS alone.
+//
+// Every other name in essentialYouTubeCookies is admitted on a YouTube or a
+// Google domain, because a Google session is one credential platform over
+// both: SAPISID, SID and the rest are minted on accounts.google.com and
+// youtube.com reads them. SOCS is not that. It is a consent, and google.com
+// keeps its own: an EU browser that accepted Google's terms and never
+// YouTube's holds a .google.com SOCS and no .youtube.com one. Admitted into
+// the jar's one name-keyed map, that google.com consent stood in YouTube's
+// slot, and GetCookieHeader — the header every Innertube call sends —
+// carried it to www.youtube.com as a consent YouTube was never given.
+// yt-dlp's jar never sends it there: its YouTube requests carry what
+// _get_cookies('https://www.youtube.com') returns (the _youtube_cookies
+// property, yt_dlp/extractor/youtube/_base.py:777-779 at b77c9304e, the
+// property since 8cb08028f, #13014), http.cookiejar's domain-matched read
+// for that host (YoutubeDLCookieJar.get_cookie_header, yt_dlp/cookies.py:
+// 1405-1409), which a google.com cookie does not domain-match. The page
+// header helpers already read SOCS that way (youtubeSees); admission now
+// agrees with them, so the Innertube header and the page header hold the
+// same consent. A host www is not under (music.youtube.com) is refused for
+// the same reason: upstream's www.youtube.com read does not see it either.
+var youtubeOnlyEssentialCookies = map[string]bool{"SOCS": true}
+
+// admitsEssentialYouTubeName reports whether a row named name, scoped to
+// domain, is one the jar keeps under essentialYouTubeCookies: an essential
+// name on a YouTube or a Google domain, except that a youtube-only name
+// (youtubeOnlyEssentialCookies) is kept only from a row www.youtube.com is
+// sent. The one rule Load, isEssentialCookie (browser extraction) and
+// trackedCookieName (an unscoped Set-Cookie's admission) apply.
+func admitsEssentialYouTubeName(name, domain string) bool {
+	if !essentialYouTubeCookies[name] {
+		return false
+	}
+	if youtubeOnlyEssentialCookies[name] {
+		return sentToWWWYouTube(domain)
+	}
+	return isYouTubeDomain(domain) || isGoogleDomain(domain)
+}
+
+// sentToWWWYouTube reports whether a cookie scoped to domain is one a request
+// to www.youtube.com carries: RFC 6265's domain-match from the host's side —
+// the domain, leading dot dropped, is www.youtube.com or a YouTube domain it
+// is under (youtube.com). The domain half of yt-dlp's www.youtube.com read,
+// which both admission (admitsEssentialYouTubeName) and the page header
+// (youtubeSees) apply.
+func sentToWWWYouTube(domain string) bool {
+	d := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	return isYouTubeDomain(d) && domainMatches("www.youtube.com", d)
 }
 
 // Essential Twitch cookies.
@@ -549,11 +602,12 @@ func (j *CookieJar) parseInto(data []byte, filePath string) int {
 		switch {
 		case isYouTubeDomain(domain) || isGoogleDomain(domain):
 			// The google.com auth names are admitted on google.com only; the
-			// broader essential set is admitted on either YouTube or Google.
+			// broader essential set is admitted on either YouTube or Google,
+			// SOCS from a YouTube domain alone (admitsEssentialYouTubeName).
 			isGoogleAuth := isGoogleDomain(domain) && (name == "SID" || name == "HSID" ||
 				name == "SSID" || name == "APISID" || name == "SAPISID" ||
 				strings.HasPrefix(name, "__Secure-1P") || strings.HasPrefix(name, "__Secure-3P"))
-			if !essentialYouTubeCookies[name] && !isGoogleAuth {
+			if !admitsEssentialYouTubeName(name, domain) && !isGoogleAuth {
 				continue
 			}
 			dest = youtube

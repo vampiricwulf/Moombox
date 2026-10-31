@@ -28,17 +28,20 @@ const (
 // The jar's SOCS and PREF are read as yt-dlp's www.youtube.com-scoped jar
 // read sees them (youtubeSees): a google.com copy, one on another YouTube
 // host, or an expired one, is not there — CAI and a fresh PREF in its place,
-// and no SOCS for a signed-in jar.
+// and no SOCS for a signed-in jar. A SOCS so scoped is not admitted by Load
+// at all (admitsEssentialYouTubeName, TestSOCSIsAdmittedFromYouTubeDomainsAlone),
+// so its rows here hold whichever of the two rules is broken; PREF, which
+// Load admits on every YouTube and Google domain, is what pins this read's own.
 //
 // Mutants: SOCS never added (every "CAI" row fails); SOCS added for a
 // signed-in jar too (the two signed-in rows); a CAA SOCS kept (its row); a
 // consented SOCS replaced (its row); an empty SOCS kept (its row);
 // HasAnyYouTubeAuthCookie as the signed-in test (the half-signed-in row);
 // PREF forwarded unchanged (every PREF row); PREF rebuilt from hl and tz
-// alone (the f6 rows); the domain read dropped (the google.com rows and the
-// other-host row); isYouTubeDomain in its place (the other-host row); the
-// expiry read dropped (the expired rows); an unexpired expiry read as past
-// (the not-expired row).
+// alone (the f6 rows); the domain read dropped (the google.com PREF row and
+// the other-host PREF row); isYouTubeDomain in its place (the other-host PREF
+// row); the expiry read dropped (the expired rows); an unexpired expiry read
+// as past (the not-expired row).
 func TestYouTubePageCookieHeader(t *testing.T) {
 	sapisid := cookieRow(".youtube.com", "0", "SAPISID", "sap")
 	loginInfo := cookieRow(".youtube.com", "0", "LOGIN_INFO", "li")
@@ -93,6 +96,9 @@ func TestYouTubePageCookieHeader(t *testing.T) {
 			want: "PREF=hl=en&tz=UTC; SOCS=CAESxyz"},
 		{name: "a SOCS scoped to another YouTube host is not www's",
 			rows: []string{cookieRow("music.youtube.com", "0", "SOCS", "CAESxyz")},
+			want: "PREF=hl=en&tz=UTC; SOCS=CAI"},
+		{name: "a PREF scoped to another YouTube host is not www's: a fresh one",
+			rows: []string{cookieRow("music.youtube.com", "0", "PREF", "hl=de&f6=8")},
 			want: "PREF=hl=en&tz=UTC; SOCS=CAI"},
 		{name: "a SOCS on www.youtube.com itself is read",
 			rows: []string{cookieRow("www.youtube.com", "0", "SOCS", "CAESxyz")},

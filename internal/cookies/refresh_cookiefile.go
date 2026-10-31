@@ -80,9 +80,19 @@ func hasRowBreakingChar(s string) bool { return strings.ContainsAny(s, rowBreaki
 // to open speculatively. Adding essentialTwitchCookies here is a one-line change
 // the day a Twitch caller arrives, and it needs that caller's tests, not a
 // guess.
+//
+// A youtube-only name (youtubeOnlyEssentialCookies: SOCS) is tracked only from
+// an origin www.youtube.com is sent the cookie of. An unscoped header is
+// host-scoped to its origin and the insertion loop writes it on that origin's
+// own site, so an unscoped SOCS from google.com would be google.com's consent,
+// written where Load — like yt-dlp's www.youtube.com read — never takes it
+// for YouTube's (admitsEssentialYouTubeName).
 func trackedCookieName(name string, origin cookieOrigin) bool {
 	if origin.platform() != originYouTube.platform() {
 		return false
+	}
+	if youtubeOnlyEssentialCookies[name] {
+		return sentToWWWYouTube(string(origin))
 	}
 	return essentialYouTubeCookies[name] || isGoogleOnlyAuthName(name)
 }
@@ -537,8 +547,7 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 					// Computed inside this branch: nearly every row in a real
 					// cookies.txt matches no pending update, and neither reader
 					// below is reachable for those.
-					rowHasEssential := essentialYouTubeCookies[cookieName] &&
-						(isYouTubeDomain(rowDomain) || isGoogleDomain(rowDomain))
+					rowHasEssential := admitsEssentialYouTubeName(cookieName, rowDomain)
 					if cu.Delete {
 						// Drop the row. Writing it back with an empty value
 						// left a credential-shaped hole nothing could prune.
