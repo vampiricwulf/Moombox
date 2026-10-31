@@ -83,7 +83,10 @@ type PlayerAPI struct {
 	sessionAsked       string
 	sessionRetryAt     time.Time
 	sessionClock       func() time.Time
-	logger             interface {
+	// playbackClock is the clock a player response's pre-roll wait is
+	// measured from (playbackAvailableAt; nil: time.Now), a test seam.
+	playbackClock func() time.Time
+	logger        interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)

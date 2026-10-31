@@ -99,6 +99,14 @@ type VideoInfo struct {
 	DashManifestSource string `json:"dashManifestSource,omitempty"`
 	HlsManifestSource  string `json:"hlsManifestSource,omitempty"`
 
+	// DashManifestAvailableAt / HlsManifestAvailableAt are Format.AvailableAt
+	// for the manifest URL of the same kind: the pre-roll wait of the response
+	// that served it, which moves with the URL (and its source) wherever the
+	// cascade adopts a manifest from another client. Zero: at once. Never
+	// serialised, as Format.AvailableAt is not.
+	DashManifestAvailableAt time.Time `json:"-"`
+	HlsManifestAvailableAt  time.Time `json:"-"`
+
 	// SessionAuth is the login state YouTube reported for the session that
 	// produced this info (see SessionAuthState). Diagnostic only — nothing
 	// downloads differently because of it — but it is what lets a
@@ -274,6 +282,17 @@ type Format struct {
 	// when no token can be minted. The alternate never carries one of its own.
 	// Never serialised: a resume re-extracts. See the AuthLevel block.
 	TokenFreeAlternate *Format `json:"-"`
+
+	// AvailableAt is when YouTube first lets this format's media be
+	// requested: the end of the pre-roll ad the player response that yielded
+	// it carries, or the moment it may be skipped (yt-dlp's available_at —
+	// see playbackAvailableAt). Zero when that response carried no pre-roll
+	// ad, as a Premium account's never does, which is "at once". Every copy
+	// keeps its own response's value: a TokenFreeAlternate came from another
+	// client's response, with an ad of its own. Whether a download waits on
+	// it is PlaybackWaitApplies'. Never serialised: a resume re-extracts, and
+	// the instant is long past by then.
+	AvailableAt time.Time `json:"-"`
 
 	// AudioTrackID is `audioTrack.id` — the per-language identity of a dubbed
 	// audio rendition ("en.4", "ja.3"). Two thirds of upstream's stream

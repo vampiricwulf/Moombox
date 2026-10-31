@@ -586,7 +586,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		collectFormats(&formatPool, webResult.Formats, webLabel, webAuthLevel)
 		if webResult.DashManifestURL != "" && result.DashManifestURL == "" {
 			p.logger.Info("[PlayerApi] Got DASH manifest URL from web client", "videoID", videoID)
-			result.DashManifestURL, result.DashManifestSource = webResult.DashManifestURL, webLabel
+			result.DashManifestURL, result.DashManifestSource, result.DashManifestAvailableAt = webResult.DashManifestURL, webLabel, webResult.DashManifestAvailableAt
 		}
 	}
 
@@ -601,7 +601,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	if result.DashManifestURL == "" && authEmbErr == nil &&
 		authEmb.PlayabilityError == PlayabilityOK && authEmb.DashManifestURL != "" {
 		p.logger.Info("[PlayerApi] Got DASH manifest URL from web_embedded", "videoID", videoID)
-		result.DashManifestURL, result.DashManifestSource = authEmb.DashManifestURL, "web_embedded"
+		result.DashManifestURL, result.DashManifestSource, result.DashManifestAvailableAt = authEmb.DashManifestURL, "web_embedded", authEmb.DashManifestAvailableAt
 	}
 
 	// ANDROID_VR DASH workaround for the YouTube account experiment that
@@ -651,7 +651,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		} else if vrResult.PlayabilityError == PlayabilityOK && vrResult.DashManifestURL != "" {
 			p.logger.Info("[PlayerApi] DASH manifest sourced via ANDROID_VR fallback",
 				"videoID", videoID, "vrFormats", len(vrResult.Formats))
-			result.DashManifestURL, result.DashManifestSource = vrResult.DashManifestURL, "android_vr_dash_fallback"
+			result.DashManifestURL, result.DashManifestSource, result.DashManifestAvailableAt = vrResult.DashManifestURL, "android_vr_dash_fallback", vrResult.DashManifestAvailableAt
 			// Merge ANDROID_VR formats with auth-level dedup. TV/WEB formats
 			// win same-itag ties via deduplicateFormats — this comment
 			// claimed that from the start, but until 2026-08-15 the ranking
@@ -946,7 +946,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		} else if vrResult != nil && vrResult.PlayabilityError == PlayabilityOK && vrResult.DashManifestURL != "" {
 			p.logger.Info("[PlayerApi] DASH manifest sourced via ANDROID_VR fallback (public)",
 				"videoID", videoID, "vrFormats", len(vrResult.Formats))
-			result.DashManifestURL, result.DashManifestSource = vrResult.DashManifestURL, "android_vr_dash_fallback"
+			result.DashManifestURL, result.DashManifestSource, result.DashManifestAvailableAt = vrResult.DashManifestURL, "android_vr_dash_fallback", vrResult.DashManifestAvailableAt
 			if !vrPooled {
 				collectFormats(&formatPool, vrResult.Formats, "android_vr_dash_fallback", AuthLevelAndroidVR)
 			}
@@ -1272,7 +1272,7 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 			if fbResult.PlayabilityError == PlayabilityOK && fbResult.DashManifestURL != "" {
 				p.logger.Info("[PlayerApi] DASH manifest sourced from cookieless fallback",
 					"videoID", videoID, "client", fb.label)
-				chosen.DashManifestURL, chosen.DashManifestSource = fbResult.DashManifestURL, fb.label
+				chosen.DashManifestURL, chosen.DashManifestSource, chosen.DashManifestAvailableAt = fbResult.DashManifestURL, fb.label, fbResult.DashManifestAvailableAt
 				break
 			}
 			continue
@@ -1644,10 +1644,12 @@ func mergeWatchPageMetadata(target *VideoInfo, source *VideoInfo) {
 	if target.DashManifestURL == "" {
 		target.DashManifestURL = source.DashManifestURL
 		target.DashManifestSource = source.DashManifestSource
+		target.DashManifestAvailableAt = source.DashManifestAvailableAt
 	}
 	if target.HlsManifestURL == "" {
 		target.HlsManifestURL = source.HlsManifestURL
 		target.HlsManifestSource = source.HlsManifestSource
+		target.HlsManifestAvailableAt = source.HlsManifestAvailableAt
 	}
 	if target.PlayerURL == "" {
 		target.PlayerURL = source.PlayerURL

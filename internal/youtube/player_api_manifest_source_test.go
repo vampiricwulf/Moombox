@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
 )
@@ -33,6 +34,8 @@ func (tr *manifestSourceTransport) RoundTrip(req *http.Request) (*http.Response,
 	status, body := http.StatusOK, tr.responses[key]
 	if body == "" {
 		status, body = http.StatusNotFound, "{}"
+	} else if secs, ok := clientPreRoll[key]; ok {
+		body = withPreRoll(body, secs)
 	}
 	return &http.Response{
 		StatusCode: status,
@@ -72,6 +75,88 @@ func srcBody(live bool, formats, dash, hls string) string {
 	}`, live, live, strings.Join(sd, ", "))
 }
 
+// clientPreRoll is the pre-roll ad, in seconds, every response a client
+// answers carries (by manifestSourceTransport's key), and watchPagePreRoll
+// the watch page's own: a different length per client, so an instant that
+// moved with the wrong URL — or with none — reads as the wrong number.
+// sourcePreRoll is the same table by the Format.Source label each client's
+// formats and manifests are recorded under.
+var (
+	clientPreRoll = map[string]int{"7": 7, "1s": 11, "1w": 13, "56": 17, "28": 19, "62": 23, "101": 29}
+	sourcePreRoll = map[string]int{
+		"tv_auth": 7, "tv_public": 7, "web_safari": 11, "web": 13, "web_embedded": 17,
+		"android_vr": 19, "android_vr_dash_fallback": 19, "web_creator": 23, "visionos": 29, "watch_page": watchPagePreRoll,
+	}
+)
+
+const watchPagePreRoll = 31
+
+// withPreRoll returns the player response body with one unskippable
+// AD_PLACEMENT_KIND_START ad of secs seconds added (or body itself when it is
+// not a JSON object).
+func withPreRoll(body string, secs int) string {
+	var pr map[string]any
+	if json.Unmarshal([]byte(body), &pr) != nil {
+		return body
+	}
+	pr["adPlacements"] = []any{startPlacement("AD_PLACEMENT_KIND_START", adRenderer(secs, -1))}
+	blob, err := json.Marshal(pr)
+	if err != nil {
+		return body
+	}
+	return string(blob)
+}
+
+// preRollTestAPI is newRetryTestAPI on preRollNow, so each response's
+// pre-roll instant is preRollBase plus its client's ad.
+func preRollTestAPI() *PlayerAPI {
+	p := newRetryTestAPI()
+	p.playbackClock = func() time.Time { return preRollNow }
+	return p
+}
+
+// wantAvailableAt is the instant a format or manifest recorded under source
+// must carry.
+func wantAvailableAt(t *testing.T, source string) time.Time {
+	t.Helper()
+	secs, ok := sourcePreRoll[source]
+	if !ok {
+		t.Fatalf("no pre-roll ad known for source %q", source)
+	}
+	return preRollBase.Add(time.Duration(secs) * time.Second)
+}
+
+// assertAvailabilityMovesWithItsSource checks that every manifest and every
+// pooled format (its token-free shadow too) carries the pre-roll instant of
+// the response it came from — the client its source names — however the
+// cascade handed it on. A format with no source (a probe's, never pooled) is
+// not checked; its manifests are.
+func assertAvailabilityMovesWithItsSource(t *testing.T, info *VideoInfo) {
+	t.Helper()
+	check := func(what, url, source string, got time.Time) {
+		t.Helper()
+		if url == "" {
+			if !got.IsZero() {
+				t.Errorf("%s: no URL, yet available at %v", what, got)
+			}
+			return
+		}
+		if want := wantAvailableAt(t, source); !got.Equal(want) {
+			t.Errorf("%s from %s available at %v, want %v — that client's own response's pre-roll", what, source, got, want)
+		}
+	}
+	check("DASH manifest", info.DashManifestURL, info.DashManifestSource, info.DashManifestAvailableAt)
+	check("HLS manifest", info.HlsManifestURL, info.HlsManifestSource, info.HlsManifestAvailableAt)
+	for _, f := range info.Formats {
+		if f.Source != "" {
+			check(fmt.Sprintf("itag %d", f.Itag), f.URL, f.Source, f.AvailableAt)
+		}
+		if alt := f.TokenFreeAlternate; alt != nil {
+			check(fmt.Sprintf("itag %d shadow", f.Itag), alt.URL, alt.Source, alt.AvailableAt)
+		}
+	}
+}
+
 const ageRestrictedBody = `{
 	"playabilityStatus": {"status": "AGE_VERIFICATION_REQUIRED", "reason": "Sign in to confirm your age"},
 	"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a"}
@@ -101,6 +186,7 @@ func assertManifestSources(t *testing.T, info *VideoInfo, wantDash, wantDashSrc,
 		t.Errorf("HLS = (%q, source %q), want (%q, source %q)",
 			info.HlsManifestURL, info.HlsManifestSource, wantHls, wantHlsSrc)
 	}
+	assertAvailabilityMovesWithItsSource(t, info)
 }
 
 func useManifestSourceTransport(t *testing.T, responses map[string]string) {
@@ -115,7 +201,7 @@ func useManifestSourceTransport(t *testing.T, responses map[string]string) {
 func stubWatchPageWithPlayerResponse(t *testing.T, body string) {
 	t.Helper()
 	var pr map[string]any
-	if err := json.Unmarshal([]byte(body), &pr); err != nil {
+	if err := json.Unmarshal([]byte(withPreRoll(body, watchPagePreRoll)), &pr); err != nil {
 		t.Fatalf("watch-page player response: %v", err)
 	}
 	orig := fetchWatchPage
@@ -138,6 +224,15 @@ func stubWatchPageWithPlayerResponse(t *testing.T, body string) {
 //
 // Mutant: stamping any one site with "" (or the wrong label) fails the
 // scenario named after it.
+//
+// Every response here also carries a pre-roll ad of its client's own length
+// (clientPreRoll), and each manifest and pooled format must come out with its
+// own response's instant (assertAvailabilityMovesWithItsSource): the worker
+// waits on whatever it ends up fetching, so an instant left behind at an
+// adoption is a URL requested before its ad is over. Mutants (each run):
+// dropping the instant from the web_safari, web_embedded, android_vr (authed
+// or public) or cookieless adoption, or from either half of the watch-page
+// merge, fails the scenario named after that site.
 func TestExtractionStampsEveryManifestWithItsClient(t *testing.T) {
 	const (
 		dTV  = "https://m.example/tv.mpd"
@@ -245,7 +340,7 @@ func TestExtractionStampsEveryManifestWithItsClient(t *testing.T) {
 				stubWatchPage(t)
 			}
 			useManifestSourceTransport(t, tc.responses)
-			info, err := newRetryTestAPI().GetVideoInfoAuthenticated(context.Background(), "test1234567")
+			info, err := preRollTestAPI().GetVideoInfoAuthenticated(context.Background(), "test1234567")
 			if err != nil {
 				t.Fatalf("GetVideoInfoAuthenticated: %v", err)
 			}
@@ -304,7 +399,7 @@ func TestExtractionStampsEveryManifestWithItsClient(t *testing.T) {
 				stubWatchPage(t)
 			}
 			useManifestSourceTransport(t, tc.responses)
-			info, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+			info, err := preRollTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
 			if err != nil {
 				t.Fatalf("GetVideoInfoPublic: %v", err)
 			}
@@ -314,7 +409,7 @@ func TestExtractionStampsEveryManifestWithItsClient(t *testing.T) {
 
 	t.Run("probe/ProbeVideoStatus is android_vr", func(t *testing.T) {
 		useManifestSourceTransport(t, map[string]string{"28": srcBody(true, "adequate", dVR, hVis)})
-		info, err := newRetryTestAPI().ProbeVideoStatus(context.Background(), "test1234567", "vd")
+		info, err := preRollTestAPI().ProbeVideoStatus(context.Background(), "test1234567", "vd")
 		if err != nil {
 			t.Fatalf("ProbeVideoStatus: %v", err)
 		}
@@ -323,7 +418,7 @@ func TestExtractionStampsEveryManifestWithItsClient(t *testing.T) {
 
 	t.Run("probe/ProbeVideoStatusAuthenticated is tv_auth", func(t *testing.T) {
 		useManifestSourceTransport(t, map[string]string{"7": srcBody(true, "adequate", dTV, hTV)})
-		info, err := newRetryTestAPI().ProbeVideoStatusAuthenticated(context.Background(), "test1234567", "vd")
+		info, err := preRollTestAPI().ProbeVideoStatusAuthenticated(context.Background(), "test1234567", "vd")
 		if err != nil {
 			t.Fatalf("ProbeVideoStatusAuthenticated: %v", err)
 		}

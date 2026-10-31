@@ -97,6 +97,15 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	// constructing SegmentDownloaders.
 	formats, formatDiag := p.parseFormats(ctx, streamingData)
 
+	// The response's pre-roll ad wait (playbackAvailableAt), stamped on every
+	// format it yields and on each manifest it carries, so that whichever of
+	// them a download ends up fetching — after the dedup, a shadow swap or a
+	// manifest adoption — carries this response's own instant.
+	availableAt := p.playbackAvailableAt(ctx, data, requestedVideoID)
+	for i := range formats {
+		formats[i].AvailableAt = availableAt
+	}
+
 	// Stream classification. hasFormats asks whether the response CARRIED
 	// formats, not whether any survived the parse: a response whose formats
 	// are all DRM still proves the broadcast has media, and classifying on the
@@ -175,7 +184,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 
 	ended, endWeak, onAir := broadcastEnded(videoDetails, playabilityStatus, microformat)
 
-	return &VideoInfo{
+	info := &VideoInfo{
 		Title:              title,
 		ChannelName:        channelName,
 		ChannelID:          channelID,
@@ -202,7 +211,14 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		PublishedAt:        publishedAt,
 		PublishedPrecision: publishedPrecision,
 		FormatDiag:         formatDiag,
-	}, nil
+	}
+	if info.DashManifestURL != "" {
+		info.DashManifestAvailableAt = availableAt
+	}
+	if info.HlsManifestURL != "" {
+		info.HlsManifestAvailableAt = availableAt
+	}
+	return info, nil
 }
 
 // extractScheduledStartTime tries multiple sources for the scheduled start time.
