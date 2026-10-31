@@ -346,10 +346,21 @@ type Format struct {
 	// advertises for an OTF/live adaptive format — the same value that
 	// yt-dlp reads to compute a manifest-free DASH format's segment count.
 	// Used by the worker's eviction diagnosis (Task 9) to convert a
-	// bisected evicted-segment count into an approximate evicted duration.
+	// bisected evicted-segment count into an approximate evicted duration,
+	// and — yt-dlp's own per-format mark of a live adaptive format
+	// (_video.py:3492-3501) — by the routing (Segmented).
 	// Zero when the source format omitted it (a whole-file / non-OTF
 	// format never carries this field).
 	TargetDurationSec int `json:"targetDurationSec,omitempty"`
+
+	// IsOTF marks a format whose `type` is FORMAT_STREAM_TYPE_OTF: an "on
+	// the fly" stream YouTube serves only as &sq=N fragments — the sq=0 init,
+	// then as many fragments as that init's emsg box says — and never as one
+	// file. yt-dlp skips every one on its https pass (_video.py:3503-3507;
+	// the DRM exception there never reaches Moombox, which drops DRM formats
+	// at parse) and takes the stream from the DASH manifest instead
+	// (3726-3764). See Segmented.
+	IsOTF bool `json:"isOtf,omitempty"`
 }
 
 // IsVideo returns true if this format contains video.
@@ -612,8 +623,9 @@ func GvsTokenRequired(source string) bool {
 
 // HasSplitAdaptiveFormats reports whether formats contains the split
 // video + audio adaptive entries that make a manifest-free, &sq=N-segmented
-// download viable: at least one audio-only AND one video-only entry, both
-// with a non-empty URL and NO contentLength.
+// download viable: at least one audio-only AND one video-only entry
+// (IsVideoOnly — a muxed format such as itag 18 is neither), both with a
+// non-empty URL and NO contentLength.
 //
 // This is the canonical implementation of the predicate the worker exposes
 // as HasManifestlessDashFormats, which delegates here — see that function
@@ -633,7 +645,7 @@ func HasSplitAdaptiveFormats(formats []Format) bool {
 		}
 		if f.IsAudio() {
 			hasAudio = true
-		} else if f.Width != nil && *f.Width > 0 {
+		} else if f.IsVideoOnly() {
 			hasVideo = true
 		}
 		if hasAudio && hasVideo {
@@ -641,6 +653,38 @@ func HasSplitAdaptiveFormats(formats []Format) bool {
 		}
 	}
 	return false
+}
+
+// IsVideoOnly reports whether f is a video rendition that carries no audio:
+// an adaptive video-only stream, the half of a split pair. A muxed format —
+// itag 18, whose mimeType names `avc1.42001E, mp4a.40.2` — is not one: it
+// is the progressive file of formats[], which a contentLength-less listing
+// (a post-live response can carry one) used to count as the video half of a
+// manifest-free pair, handing a whole-file URL to the &sq loop that the
+// contentLength rule exists to keep it from. The test is upstream's own:
+// yt-dlp splits the mimeType's codecs into vcodec and acodec (parse_codecs,
+// _video.py:3476-3484), and a stream with both is not single_stream. A
+// mimeType that names no codecs at all reads as video-only, as it did before
+// the test existed.
+func (f *Format) IsVideoOnly() bool {
+	if f.Width == nil || *f.Width <= 0 || f.IsAudio() {
+		return false
+	}
+	_, codecs, named := strings.Cut(f.MimeType, "codecs=")
+	return !named || !strings.Contains(codecs, ",")
+}
+
+// Segmented reports whether f is served only as &sq=N fragments, so that a
+// whole-file GET of its URL answers with one fragment rather than the file —
+// the moov-less "bare media fragment" the whole-file path rejects
+// (engine/downloader_direct.go). Two kinds, the two yt-dlp's https pass
+// skips (_video.py:3492-3507): an OTF stream (IsOTF), skipped always, and a
+// live adaptive one (TargetDurationSec), skipped unless the stream needs
+// live processing (post_live, or a live capture from its start). Either way
+// only one without a contentLength: a format that states its length is a
+// file, whatever else it says, and the whole-file path fetches it whole.
+func (f *Format) Segmented() bool {
+	return f.ContentLength == "" && (f.IsOTF || f.TargetDurationSec > 0)
 }
 
 // Sentinel values written by parsePlayerResponse when metadata is missing.
