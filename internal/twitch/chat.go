@@ -128,8 +128,9 @@ const (
 // from "this install HAD Twitch credentials" to "Twitch would not honour them".
 // The first four are ChatDownloaderOptions.OnAuthDowngrade's reason — the
 // routes from held credentials to a chat session captured anonymously. The
-// fifth (Arc 10 R6) is the playback-token route and is never passed to
-// OnAuthDowngrade; it shares this block because it shares the vocabulary.
+// fifth (Arc 10 R6) is the playback-token route and the sixth (G21) the
+// stream-check route; neither is ever passed to OnAuthDowngrade, and both
+// share this block because they share the vocabulary.
 //
 // Opaque tokens for the consumer to switch on, deliberately not sentences — the
 // consumer renders the operator-facing wording, and the same fact has to reach
@@ -167,6 +168,16 @@ const (
 	// is also the ONLY member a job with chat capture switched off can ever
 	// produce: every other route runs on the IRC path.
 	AuthDowngradePlaybackTokenAnonymous = "playback-token-anonymous"
+	// AuthDowngradeStatusTokenRefused: Twitch refused the saved auth-token
+	// (401/403) on a stream-status batch, and the same batch sent without it
+	// was answered. Live detection carries on signed out; a capture still
+	// needs the login, mints its playback token with the refused one, and
+	// parks for the cookies to be repaired (owner decision D19).
+	//
+	// Reported by Service.streamInfo — the monitor's batch, the manual wait,
+	// the capture's end checks and the add route all reach it — and like the
+	// playback-token route it reaches a job with chat capture switched off.
+	AuthDowngradeStatusTokenRefused = "status-check-token-refused"
 )
 
 // errReauthRequested ends an IRC session that Reauthenticate cancelled.

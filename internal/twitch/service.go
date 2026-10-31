@@ -2,7 +2,9 @@ package twitch
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
@@ -18,6 +20,26 @@ type Service struct {
 		Warn(msg string, args ...any)
 		Error(msg string, args ...any)
 	}
+
+	// onAuthLoss reports a Twitch credential this install holds that Twitch
+	// refused — cookies.RefreshService.NoteTwitchAuthLoss in production, wired
+	// by cmd/moombox through the same goroutine-spawning hook the worker's
+	// downgrade reports use (twitchAuthLossHook). nil is a valid install: the
+	// refusal is still logged. The one reason sent from here is
+	// AuthDowngradeStatusTokenRefused (see streamInfo).
+	//
+	// A func rather than the refresh service: internal/cookies is below this
+	// package, and RefreshService is not something it should know about.
+	onAuthLoss func(reason string)
+
+	// statusTokenRefused is true from a stream check whose auth-token Twitch
+	// refused until a stream check on which Twitch takes it again. It only
+	// decides the log LEVEL of the next refusal (noteStatusTokenRefused): the
+	// monitor asks every 15 s, and a Warn each time would bury the log. The
+	// report itself is made on every refusal — NoteTwitchAuthLoss is
+	// idempotent, and a mark that skipped repeats could miss the one that
+	// follows a credential change.
+	statusTokenRefused atomic.Bool
 }
 
 // NewService creates a new Twitch service.
@@ -35,10 +57,21 @@ func NewService(jar *cookies.CookieJar, logger interface {
 	}
 }
 
+// SetOnAuthLoss wires the credential-loss report (onAuthLoss). Called during
+// startup, before any monitor or job goroutine exists. fn runs on the
+// caller's goroutine — the monitor's poll, a job's wait — and must not block.
+func (s *Service) SetOnAuthLoss(fn func(reason string)) {
+	s.onAuthLoss = fn
+}
+
 // GetStreamInfo fetches live stream info for a channel.
 // Returns nil if the channel is offline.
 func (s *Service) GetStreamInfo(ctx context.Context, channelLogin string) (*TwitchStreamInfo, error) {
-	return s.API.GetStreamInfo(ctx, channelLogin, s.Auth.GetAuthToken())
+	infos, errs, err := s.streamInfo(ctx, streamInfoOp, []string{channelLogin})
+	if err != nil {
+		return nil, err
+	}
+	return collapseStreamInfoError(infos[0], errs[0])
 }
 
 // GetStreamInfoBatch fetches live stream info for many channels in one GQL
@@ -46,7 +79,88 @@ func (s *Service) GetStreamInfo(ctx context.Context, channelLogin string) (*Twit
 // separate whole-request error; when wholeErr is non-nil the per-channel
 // slices are unusable (see the API method's contract).
 func (s *Service) GetStreamInfoBatch(ctx context.Context, channelLogins []string) (infos []*TwitchStreamInfo, errs []error, wholeErr error) {
-	return s.API.GetStreamInfoBatch(ctx, channelLogins, s.Auth.GetAuthToken())
+	return s.streamInfo(ctx, streamInfoBatchOp, channelLogins)
+}
+
+// streamInfo sends one stream-status batch with the jar's auth-token and, when
+// Twitch refuses that token, repeats it ONCE with none (G21, owner decision
+// D19).
+//
+// WHY. gqlRequest turns a 401/403 to a request that carried a token into
+// ErrTwitchAuthExpired, and for a status batch that is a whole-request
+// failure: the monitor's checkChunk logs it and checks no channel at all, so a
+// token invalidated by a password change, "log out everywhere" or plain expiry
+// stopped ALL Twitch live detection until the operator replaced cookies.txt —
+// with cookies.auto_enabled off, the default, for however many broadcasts went
+// live in between. The batch needs no login: StreamMetadata and
+// ComscoreStreamingQuery are public, so the same request without the
+// Authorization header answers the question the dead token could not.
+// Streamlink's fixture for a dead token is exactly that refusal, a hard 401
+// `The "Authorization" token is invalid.` (tests/plugins/test_twitch.py),
+// not a silently anonymous answer.
+//
+// BEYOND UPSTREAM, deliberately. yt-dlp's _download_base_gql sends the
+// auth-token cookie whenever there is one and never retries without it
+// (twitch.py b77c9304e): a one-shot CLI fails visibly and the user re-runs it.
+// A monitor that fails that way misses broadcasts. The repeat is confined to
+// this batch. A capture still mints its playback token with the login and
+// parks in COOKIES? until the cookies are repaired (D19), so detection keeps
+// running and the job it creates waits for the repair rather than record
+// signed out.
+//
+// THE REPORT. A refusal the signed-out repeat then answers is proof that the
+// token, and only the token, was refused, and it is reported through
+// onAuthLoss so the platform still reads as needing a login: the repeat must
+// not make a dead login invisible by making it harmless. A repeat that fails
+// too proves nothing — a 403 refused for some other reason refuses the
+// anonymous request as well — so the refusal is returned as it was,
+// unreported, and every caller classifies it exactly as before.
+//
+// The authenticated request goes first on every call, so a repaired cookie
+// file is used from the very next check, and a refusal costs one extra
+// request per batch while it lasts.
+func (s *Service) streamInfo(ctx context.Context, opName string, channelLogins []string) (infos []*TwitchStreamInfo, errs []error, wholeErr error) {
+	// Read ONCE: the token that decided the request is the one a refusal can
+	// be about.
+	authToken := s.Auth.GetAuthToken()
+	infos, errs, wholeErr = s.API.streamInfo(ctx, opName, channelLogins, authToken)
+	// No token, or no channels — an empty batch sends nothing — and this
+	// request said nothing about the saved token either way.
+	if authToken == "" || len(channelLogins) == 0 {
+		return infos, errs, wholeErr
+	}
+	if !errors.Is(wholeErr, ErrTwitchAuthExpired) {
+		if wholeErr == nil && s.statusTokenRefused.Swap(false) {
+			s.logger.Info("Twitch accepted the saved auth-token on a stream check again")
+		}
+		return infos, errs, wholeErr
+	}
+	anonInfos, anonErrs, anonErr := s.API.streamInfo(ctx, opName, channelLogins, "")
+	if anonErr != nil {
+		s.logger.Debug("twitch stream check: the auth-token was refused and the signed-out repeat failed too",
+			"op", opName, "err", anonErr)
+		return infos, errs, wholeErr
+	}
+	s.noteStatusTokenRefused(opName)
+	return anonInfos, anonErrs, nil
+}
+
+// noteStatusTokenRefused logs and reports one stream check that Twitch answered
+// only signed out. Warn on the first of a run of them, Debug after (see
+// statusTokenRefused); the report on every one. Nothing read from the token,
+// the jar or the response reaches either line: the op label and a fixed
+// vocabulary token are all there is.
+func (s *Service) noteStatusTokenRefused(opName string) {
+	if !s.statusTokenRefused.Swap(true) {
+		s.logger.Warn("Twitch refused the saved auth-token on a stream check and answered it signed out; "+
+			"live detection keeps running, but captures need a working login until the cookies are fixed",
+			"op", opName)
+	} else {
+		s.logger.Debug("twitch stream check answered signed out; the saved auth-token is still refused", "op", opName)
+	}
+	if s.onAuthLoss != nil {
+		s.onAuthLoss(AuthDowngradeStatusTokenRefused)
+	}
 }
 
 // GetVodInfo fetches VOD metadata.

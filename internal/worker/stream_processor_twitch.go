@@ -187,10 +187,11 @@ type notifySend func(title, description string, ntype notifications.Notification
 // rather than say nothing, because a notification that names no problem is
 // worse than the log line it was meant to escape.
 //
-// It covers the WHOLE vocabulary, including the playback-token route that no
-// caller can reach today, so that a later caller cannot land on the generic
-// sentence — a partial mirror is the drift this arc was written to stop. That
-// arm's sentence is correct in isolation; the payload built AROUND it is not.
+// It covers the WHOLE vocabulary, including the playback-token and stream-check
+// routes that no caller can reach today, so that a later caller cannot land on
+// the generic sentence — a partial mirror is the drift this arc was written to
+// stop. Those arms' sentences are correct in isolation; the payload built
+// AROUND them is not.
 // See twitchChatDowngradeNotice's SCOPE note before wiring anything to it.
 func twitchChatDowngradeReason(reason string) string {
 	switch reason {
@@ -204,6 +205,8 @@ func twitchChatDowngradeReason(reason string) string {
 		return "The Twitch login cookie is not a name that can be sent to chat."
 	case twitch.AuthDowngradePlaybackTokenAnonymous:
 		return "Twitch issued an anonymous playback token although saved credentials were sent."
+	case twitch.AuthDowngradeStatusTokenRefused:
+		return "Twitch refused the saved auth-token on a stream check."
 	default:
 		return "The saved Twitch login could not be used."
 	}

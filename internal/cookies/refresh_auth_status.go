@@ -149,11 +149,13 @@ const (
 	twitchLossLoginUnacknowledged = "login-never-acknowledged"
 	twitchLossNoLoginCookie       = "no-login-cookie"
 	twitchLossUnusableLoginCookie = "unusable-login-cookie"
-	// The one member that does NOT come from the chat handshake: the playback
-	// access token Twitch minted for a capture was minted for nobody although
-	// credentials were sent (Arc 10 R6). It is the only route a job with chat
-	// capture switched off can produce.
+	// The two members that do NOT come from the chat handshake. The first: the
+	// playback access token Twitch minted for a capture was minted for nobody
+	// although credentials were sent (Arc 10 R6). The second: Twitch refused
+	// the auth-token on a stream-status check that it then answered signed out
+	// (G21). Both reach a job with chat capture switched off.
 	twitchLossPlaybackTokenAnonymous = "playback-token-anonymous"
+	twitchLossStatusTokenRefused     = "status-check-token-refused"
 )
 
 // twitchAuthLossMessage renders the operator sentence for one downgrade route.
@@ -183,6 +185,8 @@ func twitchAuthLossMessage(reason string) string {
 		return "The Twitch login cookie is not a name that can be sent to chat."
 	case twitchLossPlaybackTokenAnonymous:
 		return "Twitch issued an anonymous playback token although saved credentials were sent."
+	case twitchLossStatusTokenRefused:
+		return "Twitch refused the saved auth-token; live checks continue signed out, but captures need fresh cookies."
 	default:
 		return "The saved Twitch login could not be used."
 	}

@@ -476,30 +476,29 @@ type gqlRawQuery struct {
 	Variables any    `json:"variables,omitempty"`
 }
 
+// The labels gqlRequest's errors and retry lines carry for the one-channel and
+// the many-channel shape of the same StreamMetadata + ComscoreStreamingQuery
+// batch (streamInfo sends both).
+const (
+	streamInfoOp      = "StreamMetadata+ComscoreStreamingQuery"
+	streamInfoBatchOp = "StreamMetadata+ComscoreStreamingQuery(batch)"
+)
+
 // GetStreamInfo fetches stream info for a channel (batched StreamMetadata + ComscoreStreamingQuery).
 // channelLogin is lowercased before the GQL call — Twitch channel names are
 // case-insensitive on lookup, but some response paths (and downstream helpers
 // like the thumbnail CDN URL built below) only produce correct values when
 // the login is the canonical lower-case form. Mixed-case logins entered via
 // config could otherwise silently return an empty stream.
+//
+// A one-channel batch through the same streamInfo the monitor's batch uses, so
+// the two shapes cannot drift apart.
 func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string) (*TwitchStreamInfo, error) {
-	channelLogin = strings.ToLower(channelLogin)
-
-	respData, err := a.gqlRequest(ctx, "StreamMetadata+ComscoreStreamingQuery", streamInfoOps(channelLogin), authToken)
+	infos, errs, err := a.streamInfo(ctx, streamInfoOp, []string{channelLogin}, authToken)
 	if err != nil {
 		return nil, err
 	}
-
-	var results []json.RawMessage
-	if err := json.Unmarshal(respData, &results); err != nil {
-		return nil, fmt.Errorf("parse batch response: %w", err)
-	}
-
-	if len(results) < 2 {
-		return nil, fmt.Errorf("unexpected batch response length: %d", len(results))
-	}
-
-	return collapseStreamInfoError(a.parseStreamInfo(channelLogin, results[0], results[1]))
+	return collapseStreamInfoError(infos[0], errs[0])
 }
 
 // collapseStreamInfoError applies the single-call contract to parseStreamInfo's
@@ -556,6 +555,13 @@ func streamInfoOps(channelLogin string) []gqlPersistedQuery {
 //     (index-mapped isolation — one bad channel never taints its
 //     neighbors).
 func (a *API) GetStreamInfoBatch(ctx context.Context, channelLogins []string, authToken string) (infos []*TwitchStreamInfo, errs []error, wholeErr error) {
+	return a.streamInfo(ctx, streamInfoBatchOp, channelLogins, authToken)
+}
+
+// streamInfo is the one request behind GetStreamInfoBatch and GetStreamInfo:
+// channelLogins' StreamMetadata + Comscore pairs in one GQL batch, sent once
+// with authToken, labelled opName. GetStreamInfoBatch's doc is its contract.
+func (a *API) streamInfo(ctx context.Context, opName string, channelLogins []string, authToken string) (infos []*TwitchStreamInfo, errs []error, wholeErr error) {
 	infos = make([]*TwitchStreamInfo, len(channelLogins))
 	errs = make([]error, len(channelLogins))
 	if len(channelLogins) == 0 {
@@ -569,7 +575,7 @@ func (a *API) GetStreamInfoBatch(ctx context.Context, channelLogins []string, au
 		ops = append(ops, streamInfoOps(lowered[i])...)
 	}
 
-	respData, err := a.gqlRequest(ctx, "StreamMetadata+ComscoreStreamingQuery(batch)", ops, authToken)
+	respData, err := a.gqlRequest(ctx, opName, ops, authToken)
 	if err != nil {
 		return infos, errs, err
 	}

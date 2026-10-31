@@ -302,6 +302,7 @@ func TestTwitchChatDowngradeReasonsAreDistinct(t *testing.T) {
 		twitch.AuthDowngradeNoLoginCookie,
 		twitch.AuthDowngradeUnusableLoginCookie,
 		twitch.AuthDowngradePlaybackTokenAnonymous,
+		twitch.AuthDowngradeStatusTokenRefused,
 	} {
 		sentence := twitchChatDowngradeReason(reason)
 		if sentence == "" {

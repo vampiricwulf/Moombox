@@ -1488,9 +1488,16 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// load-bearing part and what would be waiting behind it otherwise. The
 	// mark itself is read off s.cookieRefresh at FIRE time rather than
 	// captured, by convention with the other injected funcs here.
-	dlWorker.SetOnTwitchAuthLoss(twitchAuthLossHook(func(reason string) {
+	//
+	// The SAME hook marks the platform for the Twitch service's own report: a
+	// stream-status batch whose auth-token Twitch refused and then answered
+	// signed out (twitch.Service.SetOnAuthLoss, G21). That report runs on the
+	// monitor's poll goroutine, which the asynchrony keeps moving too.
+	twitchAuthLoss := twitchAuthLossHook(func(reason string) {
 		s.cookieRefresh.NoteTwitchAuthLoss(reason)
-	}, log))
+	}, log)
+	dlWorker.SetOnTwitchAuthLoss(twitchAuthLoss)
+	twService.SetOnAuthLoss(twitchAuthLoss)
 
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
 	dlWorker.OnCookieRefreshNeeded = func(platform string) worker.CookieRefreshOutcome {
