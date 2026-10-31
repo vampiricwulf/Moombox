@@ -572,7 +572,11 @@ const (
 // (the client label collectFormats stamps) or a VideoInfo manifest source —
 // requires the GVS PO token. It is Moombox's single GVS token policy: the
 // VOD direct path, the live DASH/HLS/manifest-free strategies and the 403
-// re-mint all attach a token iff it answers true. It mirrors the answer
+// re-mint all attach a token iff it answers true — save one deliberate
+// exception, the whole-file VOD refresh's token fallback, which tokenises a
+// token-free stream (never an android_vr one) once its URLs are refused long
+// before their expiry, and may move it onto its TokenAlternate (the worker's
+// refreshVodURL). It mirrors the answer
 // yt-dlp's per-client GVS_PO_TOKEN_POLICY gives
 // (references/yt-dlp/yt_dlp/extractor/youtube/_base.py, WEB_PO_TOKEN_POLICIES
 // and the per-client entries), label by label:
