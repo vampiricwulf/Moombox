@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
+	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -26,6 +27,19 @@ func (w *warnRecorder) Warn(msg string, args ...any) {
 	w.warns = append(w.warns, msg)
 	w.mu.Unlock()
 	w.captureLogger.Warn(msg, args...)
+}
+
+// warnCount is how many lines exactly msg were logged at Warn.
+func (w *warnRecorder) warnCount(msg string) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := 0
+	for _, m := range w.warns {
+		if m == msg {
+			n++
+		}
+	}
+	return n
 }
 
 // warned reports whether a line starting with prefix was logged at Warn.
@@ -148,28 +162,141 @@ func TestDownloadVodNamesTheTokenBeforeTheSegments(t *testing.T) {
 	}
 }
 
-// TestDownloadVodHonoursADamagedPin is the owner's W9 picker follow-up: the
-// picker marks a damaged rendition and badges an intact one, but a damaged
-// one can still be pinned by hand. Damage only ranks a rendition lower — it
-// stays in the pool — so the pin is found and downloaded, with no warning.
+// TestDownloadVodHonoursADamagedPin is the owner's W9 picker follow-up and
+// its second PK follow-up: the picker marks a damaged rendition and badges an
+// intact one, but a damaged one can still be pinned by hand. Damage only
+// ranks a rendition lower — it stays in the pool — so the pin is found and
+// downloaded; it did so without a word, where the archive's track then
+// stopped partway. The job log now says so, at Warn, once: "Manual video
+// itag N is possibly damaged (shorter than the video); recording it as
+// pinned", or audio — once however many times the selection ran to settle
+// the formats (the cipher re-selection an unresolvable sibling sets off, a
+// missing_pot degrade), and only of a pin the job records: an audio pin with
+// no video is recorded in the video's place, and says so; a damaged pin
+// whose own signature failed, which the re-selection replaced, an audio pin
+// beside a muxed video, whose audio rides inside it, a video pin of an itag
+// only an audio format has, and an intact pin say nothing.
 //
-// Mutant: the manual override passing Damaged formats over (the pin falls
-// back to the intact 136 and warns "not found").
+// Mutants (each run): warnDamagedPins not called (no row finds its line);
+// the line logged at Info (no row finds it at Warn); the line logged from
+// selectVodFormats on every selection that honours the pin instead of from
+// the settled result (the re-selection and degrade rows find it twice, the
+// own-signature row finds it of a pick no download used, the muxed row of an
+// audio pin the job does not record); the line logged at Debug (as at
+// Info); the Damaged test dropped (the intact and muxed rows warn of intact
+// formats); the kind test dropped (the
+// audio-itag row warns of a video pin); the audio pin unread (the audio
+// rows find no line); the recorded video format unread (the video rows and
+// the no-video row find none).
 func TestDownloadVodHonoursADamagedPin(t *testing.T) {
-	job, logs := vodPotJob(t)
-	pin := 137
-	job.Job.SelectedVideoItag = &pin
-	damaged := vodFormat(137, 1920, 1080, h264, withLength, func(f *youtube.Format) { f.Damaged = true })
-	res, err := DownloadVod(context.Background(), job, segmentedVodInfo(damaged, vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength)),
-		stubCipherSolver{}, nil, nil, nil)
-	if err != nil {
-		t.Fatalf("DownloadVod: %v", err)
-	}
-	if res.VideoFormat == nil || res.VideoFormat.Itag != 137 {
-		t.Errorf("video %+v, want the pinned damaged 137", res.VideoFormat)
-	}
-	if l := logLines(logs, func(m string) bool { return strings.HasPrefix(m, "[FormatSelector] Manual video itag 137") }); len(l) > 0 {
-		t.Errorf("a honoured pin warned: %v", l)
+	damaged := func(f *youtube.Format) { f.Damaged = true }
+	sig := func(f *youtube.Format) { f.EncryptedSig = "SIG" }
+	const (
+		videoLine = "[FormatSelector] Manual video itag 137 is possibly damaged (shorter than the video); recording it as pinned"
+		audioLine = "[FormatSelector] Manual audio itag 140 is possibly damaged (shorter than the video); recording it as pinned"
+	)
+	for _, tc := range []struct {
+		name         string
+		video, audio int // the pins, 0 for none
+		formats      []youtube.Format
+		solver       cipher.Solver
+		mintFails    bool // a GVS mint that fails, so the selection re-runs degraded
+		wantVideo    int
+		wantAudio    int // 0: no separate audio
+		wantLine     string
+		wantNoLine   bool
+		wantReselect string // a re-selection the row sets off, by its success line
+	}{
+		{name: "a video pin", video: 137,
+			formats:   []youtube.Format{vodFormat(137, 1920, 1080, h264, withLength, damaged), vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength)},
+			wantVideo: 137, wantAudio: 140, wantLine: videoLine},
+		{name: "an audio pin", audio: 140,
+			formats:   []youtube.Format{vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength, damaged), vodFormat(139, 0, 0, aac, withLength)},
+			wantVideo: 136, wantAudio: 140, wantLine: audioLine},
+		{name: "a video pin through the audio's cipher re-selection", video: 137, solver: failingSigSolver{},
+			formats: []youtube.Format{
+				vodFormat(137, 1920, 1080, h264, withLength, damaged),
+				vodFormat(136, 1280, 720, h264, withLength),
+				vodFormat(140, 0, 0, aac, withLength, sig, func(f *youtube.Format) { f.Bitrate = 900_000 }),
+				vodFormat(139, 0, 0, aac, withLength),
+			},
+			wantVideo: 137, wantAudio: 139, wantLine: videoLine, wantReselect: "[Cipher] VOD audio re-selection succeeded"},
+		{name: "an audio pin through the video's cipher re-selection", audio: 140, solver: failingSigSolver{},
+			formats: []youtube.Format{
+				vodFormat(137, 1920, 1080, h264, withLength, sig),
+				vodFormat(136, 1280, 720, h264, withLength),
+				vodFormat(140, 0, 0, aac, withLength, damaged),
+				vodFormat(139, 0, 0, aac, withLength),
+			},
+			wantVideo: 136, wantAudio: 140, wantLine: audioLine, wantReselect: "[Cipher] VOD video re-selection succeeded"},
+		{name: "a video pin through a missing_pot degrade", video: 137, mintFails: true,
+			formats: []youtube.Format{
+				vodFormat(137, 1920, 1080, h264, withLength, damaged),
+				vodFormat(140, 0, 0, aac, withLength, func(f *youtube.Format) { f.Source = "watch_page"; f.Bitrate = 900_000 }),
+				vodFormat(139, 0, 0, aac, withLength),
+			},
+			wantVideo: 137, wantAudio: 139, wantLine: videoLine},
+		{name: "a damaged pin whose own signature fails", video: 137, solver: failingSigSolver{},
+			formats:   []youtube.Format{vodFormat(137, 1920, 1080, h264, withLength, damaged, sig), vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength)},
+			wantVideo: 136, wantAudio: 140, wantNoLine: true, wantReselect: "[Cipher] VOD video re-selection succeeded"},
+		{name: "an audio pin beside a muxed video", video: 18, audio: 140,
+			formats:   []youtube.Format{vodFormat(18, 640, 360, muxed18, withLength, func(f *youtube.Format) { f.AudioQuality = "AUDIO_QUALITY_LOW" }), vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength, damaged)},
+			wantVideo: 18, wantNoLine: true},
+		{name: "an audio pin with no video", video: -1, audio: 140,
+			formats:   []youtube.Format{vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength, damaged), vodFormat(139, 0, 0, aac, withLength)},
+			wantVideo: 140, wantLine: audioLine},
+		{name: "a video pin of an itag only an audio format has", video: 140,
+			formats:   []youtube.Format{vodFormat(136, 1280, 720, h264, withLength), vodFormat(140, 0, 0, aac, withLength, damaged)},
+			wantVideo: 136, wantAudio: 140, wantNoLine: true},
+		{name: "an intact pin", video: 137, audio: 140,
+			formats:   []youtube.Format{vodFormat(137, 1920, 1080, h264, withLength), vodFormat(136, 1280, 720, h264, withLength, damaged), vodFormat(140, 0, 0, aac, withLength), vodFormat(139, 0, 0, aac, withLength, damaged)},
+			wantVideo: 137, wantAudio: 140, wantNoLine: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job, logs := vodPinJob(t)
+			if tc.video != 0 {
+				job.Job.SelectedVideoItag = &tc.video
+			}
+			if tc.audio != 0 {
+				job.Job.SelectedAudioItag = &tc.audio
+			}
+			solver := tc.solver
+			if solver == nil {
+				solver = stubCipherSolver{}
+			}
+			var pot *bgutils.PotProvider
+			if tc.mintFails {
+				fakeVodMint(t, "", errors.New("sidecar down"))
+				pot = &bgutils.PotProvider{}
+			}
+			res, err := DownloadVod(context.Background(), job, segmentedVodInfo(tc.formats...), solver, nil, pot, nil)
+			if err != nil {
+				t.Fatalf("DownloadVod: %v", err)
+			}
+			if tc.mintFails && logLine(logs.captureLogger, "[POT] missing_pot: no GVS token") == nil {
+				t.Fatalf("the degrade never ran: %v", logs.lines())
+			}
+			if tc.wantReselect != "" && logLine(logs.captureLogger, tc.wantReselect) == nil {
+				t.Fatalf("the re-selection never ran: %v", logs.lines())
+			}
+			gotAudio := 0
+			if res.AudioFormat != nil {
+				gotAudio = res.AudioFormat.Itag
+			}
+			if res.VideoFormat == nil || res.VideoFormat.Itag != tc.wantVideo || gotAudio != tc.wantAudio {
+				t.Fatalf("video %+v audio %+v, want %d + %d", res.VideoFormat, res.AudioFormat, tc.wantVideo, tc.wantAudio)
+			}
+			damagedLines := logLines(logs.captureLogger, func(m string) bool { return strings.Contains(m, "is possibly damaged (shorter than the video)") })
+			if tc.wantNoLine {
+				if len(damagedLines) > 0 {
+					t.Errorf("warned of a pin the job does not record damaged: %v", damagedLines)
+				}
+				return
+			}
+			if n := logs.warnCount(tc.wantLine); n != 1 || len(damagedLines) != 1 {
+				t.Errorf("%q logged %d times at Warn, %d at any level; want once, at Warn: %v", tc.wantLine, n, len(damagedLines), logs.lines())
+			}
+		})
 	}
 }
 

@@ -175,6 +175,11 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		audioPoToken = vodPoToken
 	}
 
+	// The formats are settled: every selection, re-selection and degrade
+	// has run. A damaged rendition the operator pinned is recorded as asked,
+	// and says so once (warnDamagedPins).
+	warnDamagedPins(job, result)
+
 	if err := setAsideLiveShapesForVod(job); err != nil { // staging_shapes.go
 		return nil, err
 	}
@@ -287,7 +292,9 @@ func vodSelectionBounds(job *JobContext) (maxRes int, prefer60fps bool) {
 // only a segmented copy of a pinned stream, its whole file is the one the
 // token was needed for. A damaged pin has no arm here: damage only ranks a
 // rendition lower, it never takes one out of the pool, so a damaged pin is
-// found and honoured.
+// found and honoured — and DownloadVod says so once the formats are settled
+// (warnDamagedPins), not here, where the cipher re-selection would say it
+// again.
 func selectVodFormats(job *JobContext, formats, dropped, segmented []youtube.Format) (youtube.SelectedFormats, *DownloadResult) {
 	maxRes, prefer60fps := vodSelectionBounds(job)
 	selected := youtube.SelectBestFormatsWithLogger(formats, maxRes, prefer60fps, job.Logger)
@@ -474,6 +481,53 @@ func reselectVodWithout(job *JobContext, pool, dropped, segmented []youtube.Form
 	}
 	_, alt := selectVodFormats(job, rest, dropped, segmented)
 	return alt
+}
+
+// warnDamagedPins logs one Warn for each manual itag the job pinned that
+// result records and that is damaged (youtube.Format.Damaged, under half the
+// video's length): "Manual video itag N is possibly damaged (shorter than
+// the video); recording it as pinned", or audio — the owner's decision on
+// the picker's second follow-up. The picker marks such a rendition damaged
+// and badges an intact one, but a pin of it is honoured, as every pin is:
+// damage only ranks a rendition lower, the selector's rung, and a pin is the
+// operator overriding the ranking (selectVodFormats). Upstream has no pin to
+// honour — a -f of a damaged format downloads it, and the extraction's "some
+// formats are possibly damaged" warning (_video.py:3436-3438, which the
+// extraction's reportDamagedFormats ports) is the only word of it — so the
+// line is Moombox's own, and a Warn for that warning's reason: the archive's
+// track will stop partway, and nothing after the download says why.
+//
+// It reads the settled result, not a selection, which is what "recording it
+// as pinned" can be said of: a selection's pick can still be replaced — the
+// cipher re-selection (reselectVodWithout) re-runs the job's selection, pins
+// and all, when a pick's signature fails, and a missing_pot degrade re-runs
+// it over another pool — so a line logged per selection would be logged
+// again by every re-run that found the same pin, and of a pick no download
+// used. A pin is recorded when result's video or audio format is that itag
+// of its kind: a pin the selection could not find (a damaged pin is always
+// found, but a cipher failure can take it out of the re-selection's pool)
+// is never the pick, since nothing else of that itag is in the pool; an
+// audio pin with no video is recorded in the video's place; and an audio
+// pin beside a muxed video is not recorded at all, its audio riding inside
+// the video. The format read is the recorded copy, so the verdict is the
+// copy's own, a missing_pot degrade's token-free shadow's included.
+func warnDamagedPins(job *JobContext, result *DownloadResult) {
+	for _, pin := range []struct {
+		kind string
+		itag *int
+	}{{"video", job.Job.SelectedVideoItag}, {"audio", job.Job.SelectedAudioItag}} {
+		if pin.itag == nil || *pin.itag <= 0 {
+			continue
+		}
+		for _, f := range []*youtube.Format{result.VideoFormat, result.AudioFormat} {
+			if f != nil && f.Itag == *pin.itag && strings.Contains(f.MimeType, pin.kind) {
+				if f.Damaged {
+					job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual %s itag %d is possibly damaged (shorter than the video); recording it as pinned", pin.kind, *pin.itag))
+				}
+				break
+			}
+		}
+	}
 }
 
 // wholeFileVodPool splits formats into the ones a whole-file GET can fetch
