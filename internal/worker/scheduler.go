@@ -72,6 +72,15 @@ type Scheduler struct {
 	// Scheduler literal (the tests build several) needs no constructor.
 	holdMu sync.Mutex
 	holds  map[string]time.Time
+
+	// rateLimitedUntil is when the hold a YouTube rate-limit verdict placed on
+	// every backlog admission runs out (holdForRateLimit, rate_limit.go), and
+	// rateHeld whether one stands as far as the last look at it went — what
+	// logs its close and its run-out once each. Set from any job's run and
+	// read by sweep, so under rateMu.
+	rateMu           sync.Mutex
+	rateLimitedUntil time.Time
+	rateHeld         bool
 }
 
 // newScheduler creates the worker-owned scheduler. resolveSlots stays nil
@@ -314,6 +323,14 @@ func (s *Scheduler) sweep() {
 	// subscription sweeps again when it returns.
 	if s.conn != nil && !s.conn.IsOnline() {
 		s.log.Debug("scheduler: offline; backlog admission waits for connectivity")
+		return
+	}
+	// Nor while YouTube rate-limits the session: every admission would be
+	// refused the same way, and free its slot for the next one
+	// (holdForRateLimit). The heartbeat's sweep is what finds the hold run
+	// out.
+	if s.rateLimitGateClosed(time.Now()) {
+		s.log.Debug("scheduler: YouTube rate-limited this session; backlog admission waits for the hold to run out")
 		return
 	}
 

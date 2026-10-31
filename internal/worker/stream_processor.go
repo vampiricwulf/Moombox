@@ -336,7 +336,14 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 	// sees it in the row; a run whose take came before took the flag, and
 	// sends what it took. A read that fails stops nothing, as it stops
 	// nothing in the waiting loop: a database error must not end a live job.
-	announce := sp.takeAnnounceFound(ctx, job)
+	//
+	// A fetch YouTube refused for a rate limit does not take it either:
+	// processJob waits the limit out and runs this again (outlastRateLimit),
+	// and the fetch that answers announces with what it learned, where this
+	// one would have sent the feed's title alone, and the answer's schedule
+	// would have followed as a confirmation of its own. A backlog VOD, which
+	// goes back to Queued instead, is never owed one.
+	announce := info.PlayabilityError != youtube.PlayabilityRateLimited && sp.takeAnnounceFound(ctx, job)
 	if !announce {
 		if ctx.Err() != nil {
 			return cancelledResult(), nil
@@ -505,9 +512,10 @@ func judgeRefreshedVodInfo(info *youtube.VideoInfo) (*youtube.VideoInfo, error) 
 // classification when the video is not playable. The display string is
 // the user-facing error; the sentinel (ErrCookiesRequired for member /
 // login, ErrNotAMember for a members-only wall hit by a live session,
-// ErrNonActionable for age-restricted) lets the downstream worker route
-// the job to StatusCookies or suppress notifications via errors.Is rather
-// than substring matching. Both empty/nil → playable.
+// ErrNonActionable for age-restricted, ErrRateLimited for a rate limit or a
+// captcha) lets the downstream worker route the job to StatusCookies, wait
+// it out or suppress notifications via errors.Is rather than substring
+// matching. Both empty/nil → playable.
 //
 // The members-only branch consults info.SessionAuth — YouTube's own verdict
 // on whether the failing request was signed in — because the two causes need
@@ -555,6 +563,11 @@ func playabilityVerdict(info *youtube.VideoInfo) (string, error) {
 		// string is the user's only breadcrumb — say that cookies are the
 		// fix or a cookie-less user gets a dead-end Error.
 		return fmt.Sprintf("Age restricted: %s (cookies from an age-verified account would allow this)", reason), ErrNonActionable
+	case youtube.PlayabilityRateLimited:
+		// Transient: processJob waits it out (outlastRateLimit) rather than
+		// recording it, so this text reaches the job's log, and its error
+		// only once the requeue cannot be made.
+		return rateLimitVerdictMessage(reason, info.SessionAuth), ErrRateLimited
 	default:
 		return reason, nil
 	}

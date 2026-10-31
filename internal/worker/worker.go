@@ -82,6 +82,14 @@ var ErrNonActionable = errors.New("non-actionable error")
 // handleCancellation instead of comparing error strings.
 var ErrCancelled = errors.New("cancelled")
 
+// ErrRateLimited marks a playability refusal YouTube says will pass
+// (youtube.PlayabilityRateLimited: "try again later", or a captcha
+// challenge), from Process or from a stale VOD's re-extraction. processJob
+// routes it to outlastRateLimit (rate_limit.go) — a backlog VOD back to
+// Queued for an hour, any other job waiting in place — instead of to
+// setJobError, which would end in Error a job that only had to wait.
+var ErrRateLimited = errors.New("rate-limited by YouTube")
+
 // The three ways the off-queue staging verbs refuse. All three are the
 // caller's problem to report, never a job failure: the job's own status is
 // untouched by a refusal, and the REST layer maps each of them to 409.
@@ -893,8 +901,9 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 
 	// One pass per attempt at the job. A pass after the first is a download
 	// whose setup fetch met a connectivity outage, run again from stream
-	// processing once the network is back (waitOutSetupOutage).
-	var setupOutageSince time.Time
+	// processing once the network is back (waitOutSetupOutage), or a job
+	// YouTube rate-limited, run again once it has waited (outlastRateLimit).
+	var setupOutageSince, rateLimitSince time.Time
 	for {
 		// Process stream (probe, wait for live, etc.) — waiting a connectivity
 		// outage out rather than failing on it (outage_wait.go).
@@ -922,6 +931,19 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 				// preserves state.
 				w.handleCancellation(job)
 				return
+			}
+			if errors.Is(result.ErrSentinel, ErrRateLimited) {
+				// A refusal that passes: wait it out rather than record it.
+				fresh, again := w.outlastRateLimit(ctx, job, result.AsError(), &rateLimitSince)
+				if !again {
+					return
+				}
+				if fresh == nil {
+					w.handleCancellation(job)
+					return
+				}
+				job = fresh
+				continue
 			}
 			if result.Error == "" {
 				// Every producer of ShouldDownload:false names a reason today.
@@ -982,6 +1004,20 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			if ctx.Err() != nil || errors.Is(err, ErrCancelled) {
 				w.handleCancellation(job)
 				return
+			}
+			if errors.Is(err, ErrRateLimited) {
+				// The re-extraction's verdict was a rate limit, and the URLs
+				// it would have replaced have expired: as from Process.
+				fresh, again := w.outlastRateLimit(ctx, job, err, &rateLimitSince)
+				if !again {
+					return
+				}
+				if fresh == nil {
+					w.handleCancellation(job)
+					return
+				}
+				job = fresh
+				continue
 			}
 			requeued, err := w.requeueBacklogAfterTransientFailure(job, err)
 			if !requeued {

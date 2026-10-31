@@ -24,7 +24,8 @@ import (
 // give up. Deliberately narrow: members-only / login-required are excluded
 // (B1 switches to the authenticated probe) and age-restricted is excluded
 // (handled at initial Process / resolvable with auth). Only states that no
-// amount of waiting or re-auth can fix are terminal.
+// amount of waiting or re-auth can fix are terminal — never rate_limited,
+// which waiting is exactly what fixes (rate_limit.go).
 func isTerminalPlayability(p youtube.PlayabilityError) bool {
 	switch p {
 	case youtube.PlayabilityPrivate, youtube.PlayabilityUnavailable, youtube.PlayabilityRegionBlocked:
@@ -459,8 +460,10 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				continue
 			}
 			// Cross-check: if full WEB fetch says still upcoming, the probe was
-			// fooled by YouTube's waiting room / offline slate. Keep polling.
-			if fullInfo.StreamStatus == youtube.StreamUpcoming {
+			// fooled by YouTube's waiting room / offline slate. Keep polling —
+			// unless the fetch was refused for a rate limit, which says nothing
+			// about the stream (rateLimitedFetch).
+			if fullInfo.StreamStatus == youtube.StreamUpcoming && !rateLimitedFetch(fullInfo) {
 				sp.updateJobMetadata(job, fullInfo, true)
 				if fullInfo.ScheduledStartTime != "" {
 					scheduledStartTime = fullInfo.ScheduledStartTime
@@ -483,8 +486,9 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				sp.logger.Debug("full fetch on VOD failed; will retry next poll", "videoID", job.VideoID, "err", err)
 				continue
 			}
-			// Cross-check: if full WEB fetch says still upcoming, keep polling.
-			if fullInfo.StreamStatus == youtube.StreamUpcoming {
+			// Cross-check: if full WEB fetch says still upcoming, keep polling
+			// (a rate limit aside, as above).
+			if fullInfo.StreamStatus == youtube.StreamUpcoming && !rateLimitedFetch(fullInfo) {
 				sp.updateJobMetadata(job, fullInfo, true)
 				if fullInfo.ScheduledStartTime != "" {
 					scheduledStartTime = fullInfo.ScheduledStartTime
@@ -544,7 +548,11 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 	// from here to "no download strategy available": a plain Error with no
 	// "Authentication Required" alert, which the credential-recovery sweep —
 	// it resumes COOKIES? rows only — never looked at again.
-	if errMsg, sentinel := sp.checkPlayability(fullInfo); errMsg != "" && credentialVerdict(fullInfo, sentinel) {
+	//
+	// A rate limit on the same fetch is handed back the same way, for
+	// processJob to wait out (outlastRateLimit): it wrote Live and went on
+	// to a download with nothing to download, which ended in Error.
+	if errMsg, sentinel := sp.checkPlayability(fullInfo); errMsg != "" && (credentialVerdict(fullInfo, sentinel) || rateLimitedFetch(fullInfo)) {
 		sp.logger.Warn("playability check failed at go-live",
 			"videoID", job.VideoID,
 			"playability", string(fullInfo.PlayabilityError),
