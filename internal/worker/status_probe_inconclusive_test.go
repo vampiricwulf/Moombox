@@ -340,3 +340,49 @@ func TestAnEscalatedStatusProbeAnswerIsReadForTheBroadcastAlone(t *testing.T) {
 		}
 	})
 }
+
+// TestWaitingLoopSwitchesToTheCookiedProbeOnATVEscalation: a signed-in
+// waiting room whose cookieless probe is bot-walled gets its answer from the
+// probe's TV escalation, and switches to the cookied probe for the rest of
+// the wait (B1), as ANDROID_VR's own login_required refusal made it switch
+// before G8 — one TV call a poll, not ANDROID_VR and TV both. When the stream
+// is then removed, the cookied probe's refusal goes to the default arm's full
+// fetch, which gives up on it as the periodic full fetch does: that arm
+// polled a gone stream for good, a full fetch every 30 s.
+//
+// Mutants: waitingRoomAuthFlip without the tv_auth arm (every poll stays
+// cookieless, and the removal ends the job "unexpected status"); the default
+// arm's give-up dropped (the wait never ends).
+func TestWaitingLoopSwitchesToTheCookiedProbeOnATVEscalation(t *testing.T) {
+	const removedAt = 5 * time.Minute
+	const tos = "This video has been removed for violating YouTube's Terms of Service"
+	removed := func() *youtube.VideoInfo {
+		return &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityStatus: "ERROR",
+			PlayabilityError: youtube.PlayabilityUnknown, PlayabilityReason: tos}
+	}
+	run := driveWaitForLive(t, 2*time.Minute, fullFetchInterval-5*time.Minute, func(time.Time) waitFakes {
+		return waitFakes{
+			signedIn: true,
+			status: func(at time.Duration) (*youtube.VideoInfo, error) {
+				if at < removedAt {
+					return &youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming, IsUpcoming: true, PlayabilityError: youtube.PlayabilityOK,
+						StatusProbeEscalation: youtube.StatusProbeEscalationTVAuth}, nil
+				}
+				return removed(), nil
+			},
+			full: func(time.Duration) (*youtube.VideoInfo, error) { return removed(), nil },
+		}
+	})
+	if n := run.count("status"); n != 1 {
+		t.Errorf("%d cookieless status probes, want 1: the first poll's TV escalation switches the wait to the cookied probe:%s", n, run)
+	}
+	if run.count("status_auth") == 0 {
+		t.Errorf("the cookied probe was never asked:%s", run)
+	}
+	if run.returned < removedAt || run.result == nil || run.result.ShouldDownload {
+		t.Fatalf("the wait ended with %+v at %v, want it given up once the stream was removed at %v:%s", run.result, run.returned, removedAt, run)
+	}
+	if want := "stream unavailable: " + tos; run.result.Error != want {
+		t.Errorf("Error = %q, want %q", run.result.Error, want)
+	}
+}

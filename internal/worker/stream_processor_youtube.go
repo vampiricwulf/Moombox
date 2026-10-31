@@ -111,6 +111,37 @@ func fullFetchSaysRemoved(info *youtube.VideoInfo) bool {
 		info.PlayabilityStatus == "ERROR" && info.PlayabilityError == youtube.PlayabilityUnknown
 }
 
+// fullFetchSaysGone is the waiting loop's give-up on a full fetch: a verdict
+// the keyword rules place as terminal (isTerminalPlayability), or an ERROR
+// refusal they cannot place that states no broadcast (fullFetchSaysRemoved).
+func fullFetchSaysGone(info *youtube.VideoInfo) bool {
+	return isTerminalPlayability(info.PlayabilityError) || fullFetchSaysRemoved(info)
+}
+
+// giveUpUnavailable ends the wait on a full fetch that says the stream is
+// gone (fullFetchSaysGone): the early chat stopped, the reason logged, and a
+// non-actionable result naming it.
+func (sp *StreamProcessor) giveUpUnavailable(job *database.Job, fullInfo *youtube.VideoInfo, chatDl *chat.ChatDownloader) *StreamProcessResult {
+	sp.stopEarlyChat(chatDl)
+	reason := fullInfo.PlayabilityReason
+	if reason == "" {
+		reason = string(fullInfo.PlayabilityError)
+	}
+	sp.logger.Info("upcoming stream became unavailable — giving up",
+		"videoID", job.VideoID, "playability", fullInfo.PlayabilityError, "reason", reason)
+	// The full fetch reached the service (HTTP 200) — report reachability to
+	// the oracle even though the video itself is terminal; a terminal
+	// playability is an application-level verdict, not a connectivity
+	// failure (Layer 4).
+	reportProbeResult("probe/youtube", false)
+	return &StreamProcessResult{
+		VideoInfo:      fullInfo,
+		ShouldDownload: false,
+		Error:          fmt.Sprintf("stream unavailable: %s", reason),
+		ErrSentinel:    ErrNonActionable,
+	}
+}
+
 // waitingRoomAuthFlip is the waiting-room poll's B1 decision: whether this
 // probe answer means the cookieless ANDROID_VR probe can no longer see the
 // stream and the poll must switch to the cookied TV one for the rest of the
@@ -402,25 +433,8 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				// that is a video gone for a reason they have no word for, which
 				// nothing else ends now that the status probe calls its own
 				// refusal of it inconclusive (G8).
-				if isTerminalPlayability(fullInfo.PlayabilityError) || fullFetchSaysRemoved(fullInfo) {
-					sp.stopEarlyChat(chatDl)
-					reason := fullInfo.PlayabilityReason
-					if reason == "" {
-						reason = string(fullInfo.PlayabilityError)
-					}
-					sp.logger.Info("upcoming stream became unavailable — giving up",
-						"videoID", job.VideoID, "playability", fullInfo.PlayabilityError, "reason", reason)
-					// The full fetch reached the service (HTTP 200) — report
-					// reachability to the oracle even though the video itself is
-					// terminal; a terminal playability is an application-level
-					// verdict, not a connectivity failure (Layer 4).
-					reportProbeResult("probe/youtube", false)
-					return &StreamProcessResult{
-						VideoInfo:      fullInfo,
-						ShouldDownload: false,
-						Error:          fmt.Sprintf("stream unavailable: %s", reason),
-						ErrSentinel:    ErrNonActionable,
-					}, nil
+				if fullFetchSaysGone(fullInfo) {
+					return sp.giveUpUnavailable(job, fullInfo, chatDl), nil
 				}
 				sp.logger.Debug("periodic full fetch completed", "videoID", job.VideoID)
 				// It carries the schedule too, so the schedule probe below is
@@ -581,6 +595,15 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 					reportFetchOutcome(err, "probe/youtube")
 					sp.logger.Warn("full fetch after unclear auth probe failed", "err", err)
 					continue // Retry on next iteration
+				}
+				// The same give-up as the periodic full fetch's: this arm runs a
+				// full fetch on every poll the cookied probe cannot read, and a
+				// stream made private or removed under it — a members-only one,
+				// or, since B1 switches on a TV escalation's answer too, a
+				// public one behind a bot wall — was polled here for good, a
+				// full fetch every 30 s.
+				if fullFetchSaysGone(fullInfo) {
+					return sp.giveUpUnavailable(job, fullInfo, chatDl), nil
 				}
 				switch fullInfo.StreamStatus {
 				case youtube.StreamLive, youtube.StreamVOD, youtube.StreamPostLive:
