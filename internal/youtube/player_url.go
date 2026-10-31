@@ -59,9 +59,22 @@ var fetchIframePlayerURL = fetchPlayerURLFromIframeAPI
 // _download_webpage_with_retries), read the player id off it, and build that
 // player's main-variant URL (cipher.PlayerURLForID, upstream's
 // _construct_player_url(player_id=...)).
-func fetchPlayerURLFromIframeAPI(ctx context.Context) (string, error) {
+//
+// cookieHeader is what the request carries: resolvePlayerURL hands it the
+// consent and language pair (Auth.ConsentCookieHeader). Upstream's request
+// goes through the jar _real_initialize gave SOCS=CAI and the English PREF
+// (_base.py:675-704), so the script is read behind the same consent as every
+// page; a consent wall in front of it would otherwise leave the extraction
+// with no player at all, and its error would advise a cookie file this read
+// never carried. The pair, not the session: the read was anonymous before
+// and neither cookie is a credential.
+func fetchPlayerURLFromIframeAPI(ctx context.Context, cookieHeader string) (string, error) {
+	headers := map[string]string{"User-Agent": constants.UserAgents.Web}
+	if cookieHeader != "" {
+		headers["Cookie"] = cookieHeader
+	}
 	body, err := fetchYouTubePage(ctx, "iframe API", constants.YouTubeURLs.Base+"/iframe_api", 15*time.Second,
-		map[string]string{"User-Agent": constants.UserAgents.Web}, iframeAPIMaxBytes)
+		headers, iframeAPIMaxBytes)
 	if err != nil {
 		return "", err
 	}
@@ -147,7 +160,7 @@ func (p *PlayerAPI) resolvePlayerURL(ctx context.Context, videoID, fromPage stri
 			"videoID", videoID, "source", source, "age", time.Since(at).Round(time.Second), "playerURL", known)
 		return known
 	}
-	fresh, err := fetchIframePlayerURL(ctx)
+	fresh, err := fetchIframePlayerURL(ctx, p.auth.ConsentCookieHeader())
 	if err == nil {
 		p.rememberPlayerURL(fresh, "iframe API")
 		p.logger.Info("[PlayerApi] watch page named no player; using the iframe API's",

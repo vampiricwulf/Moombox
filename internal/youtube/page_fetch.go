@@ -68,7 +68,9 @@ type consentWallError struct {
 
 // The advice names SOCS, the consent cookie YouTube reads since CONSENT
 // stopped passing the wall (yt-dlp 378ae9f9f). A session that is not signed
-// in already sends SOCS=CAI (Auth.PageCookieHeader), so the wall standing
+// in already sends SOCS=CAI (Auth.PageCookieHeader; Auth.ConsentCookieHeader
+// on the watch page, embed page and iframe API reads made without the
+// session, which carry a cookie file's own SOCS too), so the wall standing
 // anyway is a signed-in session without a consent of its own, or a CAI
 // YouTube no longer honours: either way a browser's own consent is the
 // remedy.
@@ -86,8 +88,9 @@ func (e *consentWallError) Error() string {
 //
 // The consent interstitial is never retried either. Upstream never sees one
 // as an error at all (it sends SOCS up front, _initialize_consent), and the
-// pages here send the same SOCS (Auth.PageCookieHeader); a wall that stands
-// anyway is the cookies' answer, and the next attempt carries the same ones.
+// pages here send the same SOCS (Auth.PageCookieHeader, or the consent pair
+// alone, Auth.ConsentCookieHeader); a wall that stands anyway is the
+// cookies' answer, and the next attempt carries the same ones.
 func pageRetryable(err error) bool {
 	if _, ok := errors.AsType[*consentWallError](err); ok {
 		return false

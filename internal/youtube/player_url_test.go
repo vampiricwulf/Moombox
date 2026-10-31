@@ -38,7 +38,7 @@ func stubIframeAPI(t *testing.T, url string, err error) *atomic.Int32 {
 	t.Helper()
 	var reads atomic.Int32
 	orig := fetchIframePlayerURL
-	fetchIframePlayerURL = func(context.Context) (string, error) {
+	fetchIframePlayerURL = func(context.Context, string) (string, error) {
 		reads.Add(1)
 		return url, err
 	}
@@ -133,7 +133,7 @@ func TestIframeAPIGivesTheCanonicalPlayerURL(t *testing.T) {
 			mu.Lock()
 			body, paths = tc.script, nil
 			mu.Unlock()
-			got, err := fetchPlayerURLFromIframeAPI(context.Background())
+			got, err := fetchPlayerURLFromIframeAPI(context.Background(), "")
 			if tc.want == "" {
 				if err == nil {
 					t.Fatalf("got %q, nil — a script naming no player must be an error", got)

@@ -25,7 +25,7 @@ var (
 
 // productionIframePlayerURL is fetchIframePlayerURL as the package
 // initialised it, before TestMain stubbed it.
-var productionIframePlayerURL func(context.Context) (string, error)
+var productionIframePlayerURL func(context.Context, string) (string, error)
 
 // TestMain keeps the unit suite off the network. Every fetch in this package
 // goes out through the shared httpx transport (apiClient, utils.FetchBody) or
@@ -52,7 +52,7 @@ func TestMain(m *testing.M) {
 		os.Exit(treeguard.Run(m))
 	}
 	productionIframePlayerURL = fetchIframePlayerURL
-	fetchIframePlayerURL = func(context.Context) (string, error) {
+	fetchIframePlayerURL = func(context.Context, string) (string, error) {
 		return "", errors.New("the unit suite's iframe API answers nothing")
 	}
 

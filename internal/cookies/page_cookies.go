@@ -11,7 +11,9 @@ import (
 // request (_real_initialize, yt_dlp/extractor/youtube/_base.py:700-704), sent
 // here on the Cookie header of YouTube's HTML pages only — the watch page,
 // the homepage, the embed page, the liveness and membership pages and chat's
-// continuation page. Two cookies:
+// continuation page — and of the iframe API script the player-URL fallback
+// reads (a page that cannot reach the jar, the channel page, carries
+// constants.SignedOutYouTubePageCookie). Two cookies:
 //
 //   - SOCS, the consent: CAI ("accept all") for a session that is not signed
 //     in, unless it already holds a SOCS that is not CAA, the not-consented
@@ -79,7 +81,8 @@ func (j *CookieJar) YouTubePageCookieHeader() string {
 // YouTubeConsentCookieHeader is the consent and language cookies alone — SOCS
 // and PREF, the jar's own where it holds them, applied as above for a request
 // that is not signed in — for a page fetched deliberately without the jar's
-// session (GetVideoInfoPublic's watch page). Neither cookie is a credential,
+// session (GetVideoInfoPublic's watch page, the embed page, the iframe API
+// script). Neither cookie is a credential,
 // so the page stays as anonymous as it was; and since no auth cookie rides on
 // it, the request is signed out whatever the jar holds, so SOCS is always
 // sent: the jar's when it is consented, CAI otherwise.

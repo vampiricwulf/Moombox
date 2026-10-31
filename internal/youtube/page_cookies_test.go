@@ -340,6 +340,65 @@ func TestEmbedPageCarriesTheConsentCookies(t *testing.T) {
 	}
 }
 
+// TestIframeAPIPassesTheConsentWall: the player-URL fallback's iframe API
+// read (yt-dlp's _download_player_url) goes out behind the consent pair, as
+// upstream's goes out through its consented jar — SOCS=CAI for an empty jar,
+// the jar's own consent where it holds one, and none of a signed-in jar's
+// session, the read being as anonymous as it was. The stub walls it as it
+// walls the watch page: a request without a consented SOCS is redirected to
+// consent.youtube.com, whose page names no player, and the extraction would
+// run with none.
+//
+// Mutants: resolvePlayerURL handing the read "" (both rows meet the wall);
+// handing it PageCookieHeader (the signed-in row sends SAPISID);
+// fetchPlayerURLFromIframeAPI ignoring its cookie (both rows).
+func TestIframeAPIPassesTheConsentWall(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		jar  []string
+		want string
+	}{
+		{name: "an empty jar", want: "PREF=hl=en&tz=UTC; SOCS=CAI"},
+		{name: "a signed-in jar: its own consent, none of its session",
+			jar:  []string{"SAPISID", "sapisid-a", "LOGIN_INFO", "logininfo-a", "SOCS", "CAESxyz", "PREF", "hl=ja"},
+			want: "PREF=hl=en&tz=UTC; SOCS=CAESxyz"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				rec := &pageRecorder{}
+				servePagesInBubble(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Host == "consent.youtube.com" {
+						rec.note("consent", r.Header.Get("Cookie"))
+						_, _ = w.Write([]byte(`<html>Before you continue to YouTube</html>`))
+						return
+					}
+					rec.note(r.URL.Path, r.Header.Get("Cookie"))
+					if !consented(r.Header.Get("Cookie")) {
+						http.Redirect(w, r, "https://consent.youtube.com/m?continue=x&gl=NL", http.StatusFound)
+						return
+					}
+					_, _ = w.Write([]byte(`var scriptUrl = 'https:\/\/www.youtube.com\/s\/player\/9f3c2b1a\/www-widgetapi.vflset\/www-widgetapi.js';`))
+				}), 0)
+				orig := fetchIframePlayerURL
+				fetchIframePlayerURL = fetchPlayerURLFromIframeAPI
+				t.Cleanup(func() { fetchIframePlayerURL = orig })
+
+				jar := cookies.NewCookieJar()
+				if len(tc.jar) > 0 {
+					jar = loadCookieRows(t, tc.jar...)
+				}
+				p := NewPlayerAPI(NewAuth(jar, noopLogger{}), noopLogger{})
+				if got := p.resolvePlayerURL(context.Background(), "test1234567", ""); got != iframePlayerURL {
+					t.Errorf("resolvePlayerURL = %q, want the iframe API's %q (consent wall reached: %v)", got, iframePlayerURL, len(rec.of("consent")) > 0)
+				}
+				if got := rec.of("/iframe_api"); len(got) != 1 || got[0] != tc.want {
+					t.Errorf("iframe API Cookie = %q, want one read with %q", got, tc.want)
+				}
+			})
+		})
+	}
+}
+
 // TestLivenessPagesCarryThePageCookies: the account and membership probes
 // read their markers and the membership video list off pages fetched with the
 // session, in English now that PREF says hl=en, and a jar that is not fully
