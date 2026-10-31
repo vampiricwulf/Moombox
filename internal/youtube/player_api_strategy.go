@@ -1681,6 +1681,17 @@ var playerRetryBackoffBase = time.Second
 // 403 — is returned at once, as before; upstream retries a 400 and a 401
 // too, which are deterministic here.
 //
+// Any other ERROR alert on a 200 is left where it was before the alert
+// check came: the response is parsed and its playabilityStatus decides —
+// where upstream raises that alert as the client's failure
+// (_extract_and_report_alerts, _base.py:1104-1127, fatal on a player call)
+// and moves on to its next client (_video.py:3118-3120). Deliberately: a
+// player response states its refusal in playabilityStatus, and the parse is
+// what classifies one (a members-only wall, a sign-in, a rate limit); taken
+// as the client's error instead, a refusal whose response also carried an
+// alert would reach the worker as an unclassified "YouTube said: …", which
+// it can only call transient.
+//
 // The backoff is bounded by the CALLER's deadline. Mid-download 403 credential
 // recovery runs under min(45 s, MaxTimeout/3) — as little as 10 s at the
 // configured floor — and the ladder alone is 7 s, so an unconditional sleep

@@ -59,8 +59,14 @@ var productionPlayerRetryBackoffBase time.Duration
 // script: at the production base each such client cost the suite 7 s, some
 // seventy-five times over. The tests about the ladder's timing set their own
 // base (scaleRetryBackoff), and TestPlayerRetryBackoffBaseIsOneSecond pins
-// the production one.
+// the production one. The live suite runs the stubbed tests too, so it is
+// scaled there as well — ahead of its early return, which left the pin
+// reading zero and the suite near go test's ten-minute limit; a live call
+// a server fails is retried within milliseconds, which is no worse for a
+// test.
 func TestMain(m *testing.M) {
+	productionPlayerRetryBackoffBase = playerRetryBackoffBase
+	playerRetryBackoffBase = time.Millisecond
 	if os.Getenv("MOOMBOX_LIVE_YT_TEST") == "1" || os.Getenv("MOOMBOX_LIVE_YT_COOKIES") != "" {
 		os.Exit(treeguard.Run(m))
 	}
@@ -68,8 +74,6 @@ func TestMain(m *testing.M) {
 	fetchIframePlayerURL = func(context.Context) (string, error) {
 		return "", errors.New("the unit suite's iframe API answers nothing")
 	}
-	productionPlayerRetryBackoffBase = playerRetryBackoffBase
-	playerRetryBackoffBase = time.Millisecond
 
 	var mu sync.Mutex
 	reached := map[string]int{}
