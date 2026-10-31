@@ -314,6 +314,38 @@ func TestRateLimitedReextractKeepsUnexpiredURLs(t *testing.T) {
 	}
 }
 
+// TestRateLimitWithFormatsDownloads: a rate-limit verdict on an extraction
+// that came back with formats is not a refusal — upstream words one only
+// when there are none (`if not formats:`, _video.py:4045) — so Process
+// downloads, announcing as it goes, and a stale VOD's re-extraction is
+// taken. Both went to the wait, the formats already in hand.
+//
+// Mutants: drop the formats gate from playabilityVerdict — Process refuses
+// and the re-extraction is a verdict; defer the announcement on the verdict
+// alone — the download sends no "Stream Found".
+func TestRateLimitWithFormatsDownloads(t *testing.T) {
+	info := vodInfoAt("https://r1.googlevideo.com", time.Now().Add(4*time.Hour).Unix(), 1)
+	info.Title, info.ChannelName = "Fetched Title", "A Channel"
+	info.PlayabilityError, info.PlayabilityReason = youtube.PlayabilityRateLimited, rateLimitReason
+	if msg, sentinel := playabilityVerdict(info); msg != "" || sentinel != nil {
+		t.Errorf("playabilityVerdict = %q, %v; want playable", msg, sentinel)
+	}
+	if got, err := judgeRefreshedVodInfo(info); err != nil || got != info {
+		t.Errorf("judgeRefreshedVodInfo = %v, %v; want the extraction", got, err)
+	}
+
+	sp, rec, job := foundTestJob(t)
+	owe(t, sp.db, job)
+	sp.getVideoInfoFn = func(context.Context, string) (*youtube.VideoInfo, error) { return info, nil }
+	res, err := sp.Process(context.Background(), job)
+	if err != nil || !res.ShouldDownload || !res.IsVod {
+		t.Fatalf("Process = %+v, %v; want the VOD download", res, err)
+	}
+	if n := len(rec.ByEvent("found")); n != 1 {
+		t.Errorf("%d found embeds, want the download's one", n)
+	}
+}
+
 // TestRateLimitHoldsBacklogAdmission: while a rate-limit verdict stands the
 // scheduler admits no backlog, a shorter hold never cuts a longer one short,
 // and admission resumes once it has run out.

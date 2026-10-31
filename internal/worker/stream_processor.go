@@ -358,7 +358,7 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 	// one would have sent the feed's title alone, and the answer's schedule
 	// would have followed as a confirmation of its own. A backlog VOD, which
 	// goes back to Queued instead, is never owed one.
-	announce := info.PlayabilityError != youtube.PlayabilityRateLimited && sp.takeAnnounceFound(ctx, job)
+	announce := !rateLimitedFetch(info) && sp.takeAnnounceFound(ctx, job)
 	if !announce {
 		if ctx.Err() != nil {
 			return cancelledResult(), nil
@@ -579,6 +579,18 @@ func playabilityVerdict(info *youtube.VideoInfo) (string, error) {
 		// fix or a cookie-less user gets a dead-end Error.
 		return fmt.Sprintf("Age restricted: %s (cookies from an age-verified account would allow this)", reason), ErrNonActionable
 	case youtube.PlayabilityRateLimited:
+		// Upstream words a rate limit, as every refusal, only for an
+		// extraction that came back with no formats (`if not formats:`,
+		// _video.py:4045 at b77c9304e); one that came back with some is
+		// downloaded. Moombox takes its other verdicts at their word with
+		// formats or without, but this one is the session's and says nothing
+		// of the video: an extraction that pooled formats from a client the
+		// limit spared — the watch page's verdict returned over them, say —
+		// went to the wait (or the backlog to Queued) with what it needed
+		// already in hand. rateLimitedFetch is the same reading.
+		if probeFormatCount(info) > 0 {
+			return "", nil
+		}
 		// Transient: processJob waits it out (outlastRateLimit) rather than
 		// recording it, so this text reaches the job's log, and its error
 		// only once the requeue cannot be made.
