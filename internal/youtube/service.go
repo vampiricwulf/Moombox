@@ -230,11 +230,22 @@ func (s *Service) GetVideoInfo(ctx context.Context, videoID string) (*VideoInfo,
 
 // ProbeVideoStatus performs a lightweight probe (ANDROID_VR, no auth).
 // Uses cached visitor data if available.
+//
+// A refusal that says nothing about the broadcast (statusAnswerInconclusive:
+// the bot wall, a made-for-kids video) is escalated once — the authenticated
+// TV probe when signed in, a public web_embedded call otherwise — and when
+// that settles nothing either, the probe returns a
+// *StatusProbeInconclusiveError instead of the not_a_stream it used to
+// return. See status_probe.go.
 func (s *Service) ProbeVideoStatus(ctx context.Context, videoID string) (*VideoInfo, error) {
 	s.vdMu.RLock()
 	vd := s.visitorData
 	s.vdMu.RUnlock()
-	return s.PlayerAPI.ProbeVideoStatus(ctx, videoID, vd)
+	info, err := s.PlayerAPI.ProbeVideoStatus(ctx, videoID, vd)
+	if err != nil || !statusAnswerInconclusive(info) {
+		return info, err
+	}
+	return s.escalateStatusProbe(ctx, videoID, vd, info)
 }
 
 // CookielessFormats runs only the cookieless clients (visionos, then

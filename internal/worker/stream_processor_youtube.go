@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -83,6 +84,65 @@ func runEarlyChat(finished *atomic.Bool, onPanic func(r any), run func()) {
 	run()
 }
 
+// fullFetchSaysRemoved reports whether the waiting loop's full fetch answered
+// with YouTube's refusal of a video that is gone, in words the keyword rules
+// do not place: playabilityStatus.status ERROR — the status YouTube files a
+// removed, terminated or copyright-struck video under, and the one yt-dlp's
+// _is_error_response names (_video.py:2912 at b77c9304e) — with a reason
+// parsePlayabilityStatus can only call unknown ("This video has been removed
+// for violating YouTube's Terms of Service", "… the YouTube account associated
+// with this video has been terminated", "… due to a copyright claim", "…
+// removed by the uploader"), and no broadcast left to classify.
+//
+// isTerminalPlayability gives up on the verdicts the rules do place (private,
+// unavailable, region_blocked); this is the rest of a gone video. Before G8
+// the status probe's own not_a_stream ended such a job on the next poll
+// ("unexpected status: not_a_stream"); the probe now calls that refusal
+// inconclusive, as blind as the bot wall's (internal/youtube/status_probe.go),
+// and the full fetch is the authority left — which, reading only the placed
+// verdicts, let the job poll every 30 s past its start for good. yt-dlp ends
+// an extraction on any refusal that yields no formats (raise_no_formats,
+// _video.py:4084); a loop waiting for a broadcast cannot take an auth wall
+// that way, which is why only an ERROR, and only one whose verdict the rules
+// left unknown, counts: a sign-in wall, a members-only or an age-gated
+// refusal is placed, never unknown, and keeps the loop waiting as before, as
+// does an answer that still states a broadcast (any status but not_a_stream).
+func fullFetchSaysRemoved(info *youtube.VideoInfo) bool {
+	return info != nil && info.StreamStatus == youtube.StreamNotAStream &&
+		info.PlayabilityStatus == "ERROR" && info.PlayabilityError == youtube.PlayabilityUnknown
+}
+
+// fullFetchSaysGone is the waiting loop's give-up on a full fetch: a verdict
+// the keyword rules place as terminal (isTerminalPlayability), or an ERROR
+// refusal they cannot place that states no broadcast (fullFetchSaysRemoved).
+func fullFetchSaysGone(info *youtube.VideoInfo) bool {
+	return isTerminalPlayability(info.PlayabilityError) || fullFetchSaysRemoved(info)
+}
+
+// giveUpUnavailable ends the wait on a full fetch that says the stream is
+// gone (fullFetchSaysGone): the early chat stopped, the reason logged, and a
+// non-actionable result naming it.
+func (sp *StreamProcessor) giveUpUnavailable(job *database.Job, fullInfo *youtube.VideoInfo, chatDl *chat.ChatDownloader) *StreamProcessResult {
+	sp.stopEarlyChat(chatDl)
+	reason := fullInfo.PlayabilityReason
+	if reason == "" {
+		reason = string(fullInfo.PlayabilityError)
+	}
+	sp.logger.Info("upcoming stream became unavailable — giving up",
+		"videoID", job.VideoID, "playability", fullInfo.PlayabilityError, "reason", reason)
+	// The full fetch reached the service (HTTP 200) — report reachability to
+	// the oracle even though the video itself is terminal; a terminal
+	// playability is an application-level verdict, not a connectivity
+	// failure (Layer 4).
+	reportProbeResult("probe/youtube", false)
+	return &StreamProcessResult{
+		VideoInfo:      fullInfo,
+		ShouldDownload: false,
+		Error:          fmt.Sprintf("stream unavailable: %s", reason),
+		ErrSentinel:    ErrNonActionable,
+	}
+}
+
 // waitingRoomAuthFlip is the waiting-room poll's B1 decision: whether this
 // probe answer means the cookieless ANDROID_VR probe can no longer see the
 // stream and the poll must switch to the cookied TV one for the rest of the
@@ -96,10 +156,20 @@ func runEarlyChat(finished *atomic.Bool, onPanic func(r any), run func()) {
 // that are the documented remedy (close-review Finding 18). One predicate is
 // what stops that happening again.
 //
+// An answer the cookieless probe's signed-in escalation gave in its place
+// (youtube.StatusProbeEscalationTVAuth) switches too, whatever its verdict:
+// ANDROID_VR refused with nothing to say about the broadcast — the bot wall,
+// above all — and the TV call that saw past it is the cookied probe this
+// switch moves to. Before G8 that refusal reached here as ANDROID_VR's own
+// login_required and flipped; with the escalation's answer in its place it
+// did not, and every poll for the rest of the wait paid ANDROID_VR and TV
+// both.
+//
 // hasCookies is passed in rather than read here so the decision is testable
 // without a network-capable *youtube.Service.
 func waitingRoomAuthFlip(info *youtube.VideoInfo, hasCookies bool) bool {
-	return info != nil && hasCookies && isAuthWalledPlayability(info.PlayabilityError)
+	return info != nil && hasCookies &&
+		(isAuthWalledPlayability(info.PlayabilityError) || info.StatusProbeEscalation == youtube.StatusProbeEscalationTVAuth)
 }
 
 // fetchVideoInfo is the full multi-client fetch, Process's and the waiting
@@ -114,6 +184,15 @@ func (sp *StreamProcessor) fetchVideoInfo(ctx context.Context, videoID string) (
 // probeVideoStatus is the waiting loop's status probe: the cookied one once
 // the loop has switched to it (authenticated), the cookieless ANDROID_VR one
 // before — or probeStatusFn when a test set one.
+//
+// The cookieless one does not hand the loop a refusal that says nothing about
+// the broadcast (the bot wall, a made-for-kids video): it escalates once, and
+// when that settles nothing either it returns a
+// *youtube.StatusProbeInconclusiveError, which classifyProbeErr makes
+// network-class, so the loop waits through it, its full fetch and schedule
+// probe still running (the error branch below). It used to come back as
+// not_a_stream, and the switch's default arm ended the job "unexpected
+// status: not_a_stream" on the first poll (G8).
 func (sp *StreamProcessor) probeVideoStatus(ctx context.Context, videoID string, authenticated bool) (*youtube.VideoInfo, error) {
 	if sp.probeStatusFn != nil {
 		return sp.probeStatusFn(ctx, videoID, authenticated)
@@ -290,9 +369,11 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			counted := newCount != consecutiveErrors
 			consecutiveErrors = newCount // unchanged for network-class failures
 			if !counted {
-				// Network-class failure: a transport error or a transient
-				// answer (429, 403, 5xx). Keep waiting through it — the count
-				// did not advance. What the oracle heard is probeVote's call.
+				// Network-class failure: a transport error, a transient
+				// answer (429, 403, 5xx), or a status probe that could not
+				// tell (an inconclusive one). Keep waiting through it — the
+				// count did not advance. What the oracle heard is probeVote's
+				// call.
 				sp.logger.Debug("probe network error — not counting, still waiting", "videoID", job.VideoID, "err", probeErr)
 			} else {
 				sp.logger.Warn("probe error (definitive)", "videoID", job.VideoID, "err", probeErr, "consecutive", consecutiveErrors)
@@ -304,12 +385,27 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				// the stream isn't coming up regardless of further work.
 				return nil, fmt.Errorf("max probe errors: %w (%w)", probeErr, ErrNonActionable)
 			}
-			continue
+			// A status probe that could not tell (G8) is waited through,
+			// not waited out blind: the rest of this tick runs on a stand-in
+			// that says nothing but "still waiting", so the calls that can
+			// still see the broadcast keep their cadence — the periodic full
+			// fetch, the authority that gives up on a stream made private or
+			// removed (whose refusal is as blind as the bot wall's, and
+			// which the default arm used to end on the probe's
+			// not_a_stream), and the WEB schedule probe, which can see the
+			// stream begin while ANDROID_VR cannot. A plain continue here
+			// would skip both for as long as the wall stood, and a removed
+			// stream's job would wait for good.
+			if _, blind := errors.AsType[*youtube.StatusProbeInconclusiveError](probeErr); !blind {
+				continue
+			}
+			probeInfo = &youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming}
+		} else {
+			consecutiveErrors = 0
+			// Successful probe (HTTP 200 reached the service) — feed the oracle so a
+			// wrongly-offline passive latch can self-correct (Layer 4).
+			reportProbeResult("probe/youtube", false)
 		}
-		consecutiveErrors = 0
-		// Successful probe (HTTP 200 reached the service) — feed the oracle so a
-		// wrongly-offline passive latch can self-correct (Layer 4).
-		reportProbeResult("probe/youtube", false)
 
 		// Update local scheduledStartTime for interval calculation
 		if probeInfo.ScheduledStartTime != "" {
@@ -335,25 +431,13 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				// fetch (never the lightweight probe) so a misclassification can't
 				// wrongly error a waiting stream. Members-only / login are NOT
 				// terminal here — B1 above switches to the authenticated probe.
-				if isTerminalPlayability(fullInfo.PlayabilityError) {
-					sp.stopEarlyChat(chatDl)
-					reason := fullInfo.PlayabilityReason
-					if reason == "" {
-						reason = string(fullInfo.PlayabilityError)
-					}
-					sp.logger.Info("upcoming stream became unavailable — giving up",
-						"videoID", job.VideoID, "playability", fullInfo.PlayabilityError, "reason", reason)
-					// The full fetch reached the service (HTTP 200) — report
-					// reachability to the oracle even though the video itself is
-					// terminal; a terminal playability is an application-level
-					// verdict, not a connectivity failure (Layer 4).
-					reportProbeResult("probe/youtube", false)
-					return &StreamProcessResult{
-						VideoInfo:      fullInfo,
-						ShouldDownload: false,
-						Error:          fmt.Sprintf("stream unavailable: %s", reason),
-						ErrSentinel:    ErrNonActionable,
-					}, nil
+				// Neither is an ERROR refusal the keyword rules could not place,
+				// unless it says no broadcast is left (fullFetchSaysRemoved):
+				// that is a video gone for a reason they have no word for, which
+				// nothing else ends now that the status probe calls its own
+				// refusal of it inconclusive (G8).
+				if fullFetchSaysGone(fullInfo) {
+					return sp.giveUpUnavailable(job, fullInfo, chatDl), nil
 				}
 				sp.logger.Debug("periodic full fetch completed", "videoID", job.VideoID)
 				// It carries the schedule too, so the schedule probe below is
@@ -535,6 +619,15 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 					reportFetchOutcome(err, "probe/youtube")
 					sp.logger.Warn("full fetch after unclear auth probe failed", "err", err)
 					continue // Retry on next iteration
+				}
+				// The same give-up as the periodic full fetch's: this arm runs a
+				// full fetch on every poll the cookied probe cannot read, and a
+				// stream made private or removed under it — a members-only one,
+				// or, since B1 switches on a TV escalation's answer too, a
+				// public one behind a bot wall — was polled here for good, a
+				// full fetch every 30 s.
+				if fullFetchSaysGone(fullInfo) {
+					return sp.giveUpUnavailable(job, fullInfo, chatDl), nil
 				}
 				switch fullInfo.StreamStatus {
 				case youtube.StreamLive, youtube.StreamVOD, youtube.StreamPostLive:

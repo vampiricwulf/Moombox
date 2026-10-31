@@ -982,27 +982,32 @@ func TestObserveYouTubeStatusProbe(t *testing.T) {
 	// videoDetails at all, which classifyStream can only file as
 	// StreamNotAStream. That is a statement about the PROBE being blind,
 	// not about the broadcast -- treating it as "ended" finalizes a
-	// still-live recording early. It must surface as an inconclusive check
-	// (non-nil err defers the verdict) exactly like the nil-info guard.
+	// still-live recording early. The probe itself now says so (G8:
+	// Service.ProbeVideoStatus escalates once and then returns a
+	// *youtube.StatusProbeInconclusiveError, pinned in internal/youtube's
+	// status_probe_test.go), whatever the refusal's verdict -- a
+	// made-for-kids UNPLAYABLE included, which the guard that used to sit
+	// here let through as "ended". Here it must surface as an inconclusive
+	// check (non-nil err defers the verdict), exactly like the nil-info guard.
 	for _, tc := range []struct {
 		name string
 		err  youtube.PlayabilityError
 	}{
 		{"login-required", youtube.PlayabilityLoginRequired},
-		{"members-only", youtube.PlayabilityMembersOnly},
-		{"age-restricted", youtube.PlayabilityAgeRestricted},
+		{"unknown (an UNPLAYABLE refusal)", youtube.PlayabilityUnknown},
+		{"unavailable (an ERROR refusal)", youtube.PlayabilityUnavailable},
 	} {
-		t.Run("auth-walled not-a-stream ("+tc.name+") is inconclusive, not ended", func(t *testing.T) {
+		t.Run("an inconclusive probe ("+tc.name+") defers the verdict, not ended", func(t *testing.T) {
 			job := &JobContext{Job: &database.Job{ID: "j1"}, Interruption: &interruptionSignal{}}
-			info := &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityError: tc.err}
+			probeErr := &youtube.StatusProbeInconclusiveError{Playability: tc.err, Escalation: "web_embedded", EscalationErr: errors.New("refused too")}
 
-			ended, err := observeYouTubeStatusProbe(job, info, nil)
+			ended, err := observeYouTubeStatusProbe(job, nil, probeErr)
 
-			if err == nil {
-				t.Fatal("err = nil; an auth-walled probe with no videoDetails must be inconclusive (non-nil err), never a stream-end verdict")
+			if !errors.Is(err, probeErr) {
+				t.Fatalf("err = %v; the probe's inconclusive error must reach the engine as an inconclusive check, never a stream-end verdict", err)
 			}
 			if ended {
-				t.Error("ended = true; a bot-checked/auth-walled probe must never finalize a live recording")
+				t.Error("ended = true; a probe blind to the broadcast must never finalize a live recording")
 			}
 			if job.Interruption.fresh() {
 				t.Error("an inconclusive probe must not arm the interruption signal")
@@ -1010,19 +1015,59 @@ func TestObserveYouTubeStatusProbe(t *testing.T) {
 		})
 	}
 
-	// A clean not-a-stream verdict (no auth wall) is still a real "ended"
-	// answer -- the guard above must not swallow it.
-	t.Run("non-auth-walled not-a-stream still reports ended", func(t *testing.T) {
+	// A not-a-stream answer that reaches here is one the probe stood behind
+	// -- an OK one, or a refusal that stated the video is not live content,
+	// which yt-dlp reads not_live -- and it is a real "ended" answer whatever
+	// its playability. The blind refusal never arrives as an answer (above),
+	// so this site no longer second-guesses the shape on its playability.
+	//
+	// Mutant: the errAuthWalledStatusProbe guard restored here (the
+	// login-required row reads inconclusive).
+	for _, tc := range []struct {
+		name string
+		err  youtube.PlayabilityError
+	}{
+		{"ok", youtube.PlayabilityOK},
+		{"login-required", youtube.PlayabilityLoginRequired},
+	} {
+		t.Run("a not-a-stream answer ("+tc.name+") reports ended", func(t *testing.T) {
+			job := &JobContext{Job: &database.Job{ID: "j1"}, Interruption: &interruptionSignal{}}
+			info := &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityError: tc.err}
+
+			ended, err := observeYouTubeStatusProbe(job, info, nil)
+
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if !ended {
+				t.Error("ended = false for a StreamNotAStream answer, want true")
+			}
+		})
+	}
+
+	// The one refusal of the blind shape the probe hands on as an answer: a
+	// members-only refusal with no broadcast details, the access verdict the
+	// feed walk relabels a row on (statusAnswerInconclusive excludes it). It
+	// still says nothing about whether the broadcast is on air, so the stall
+	// check defers on it, as it did before the rule moved into the probe.
+	//
+	// Mutant: the members-only guard dropped (the row reads ended, and a
+	// still-live members-only recording is finalized on it).
+	t.Run("a members-only refusal with no broadcast details defers the verdict, not ended", func(t *testing.T) {
 		job := &JobContext{Job: &database.Job{ID: "j1"}, Interruption: &interruptionSignal{}}
-		info := &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityError: youtube.PlayabilityOK}
+		info := &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityError: youtube.PlayabilityMembersOnly,
+			PlayabilityReason: "Join this channel to get access to members-only content like this video, and other exclusive perks."}
 
 		ended, err := observeYouTubeStatusProbe(job, info, nil)
 
-		if err != nil {
-			t.Fatalf("err = %v, want nil", err)
+		if !errors.Is(err, errMembersOnlyStatusProbe) {
+			t.Fatalf("err = %v, want errMembersOnlyStatusProbe: an inconclusive check, never a stream-end verdict", err)
 		}
-		if !ended {
-			t.Error("ended = false for a clean StreamNotAStream, want true")
+		if ended {
+			t.Error("ended = true; a members-only refusal says nothing about whether the broadcast is still on air")
+		}
+		if job.Interruption.fresh() {
+			t.Error("a members-only refusal must not arm the interruption signal")
 		}
 	})
 

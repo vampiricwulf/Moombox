@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -28,7 +29,7 @@ import (
 // bubble's clock, counted from the start of the wait.
 type waitCall struct {
 	at   time.Duration
-	kind string // "status", "schedule" or "full"
+	kind string // "status", "status_auth", "schedule" or "full"
 }
 
 // waitFakes answers the loop's three calls. Each func gets the time since
@@ -37,6 +38,9 @@ type waitFakes struct {
 	status   func(at time.Duration) (*youtube.VideoInfo, error)
 	schedule func(at time.Duration) (*youtube.VideoInfo, error)
 	full     func(at time.Duration) (*youtube.VideoInfo, error)
+	// signedIn gives the processor's service a jar holding an account, so
+	// the B1 switch to the cookied probe can fire; empty otherwise.
+	signedIn bool
 }
 
 // waitRun is what one driven wait did.
@@ -97,9 +101,24 @@ func driveWaitForLive(t *testing.T, startIn, budget time.Duration, fakes func(st
 		cfg := &config.MoomboxConfig{}
 		cfg.Downloader.DownloadChat = false
 		// A real service on an empty jar answers the B1 auth-flip check (no
-		// cookies); every call that would reach the network goes through a
-		// seam below.
-		sp := NewStreamProcessor(youtube.NewService(cookies.NewCookieJar(), discardLogger{}), nil, cfg, db, discardLogger{})
+		// cookies), or on a signed-in one when the test asks; every call
+		// that would reach the network goes through a seam below.
+		jar := cookies.NewCookieJar()
+		if f.signedIn {
+			path := filepath.Join(t.TempDir(), "cookies.txt")
+			if err := os.WriteFile(path, []byte("# Netscape HTTP Cookie File\n"+
+				".youtube.com\tTRUE\t/\tTRUE\t2000000000\tSAPISID\tsapisid-a\n"+
+				".youtube.com\tTRUE\t/\tTRUE\t2000000000\tLOGIN_INFO\tlogininfo-a\n"), 0o600); err != nil {
+				t.Fatalf("write cookie file: %v", err)
+			}
+			if err := jar.Load(path); err != nil {
+				t.Fatalf("load cookie file: %v", err)
+			}
+		}
+		sp := NewStreamProcessor(youtube.NewService(jar, discardLogger{}), nil, cfg, db, discardLogger{})
+		if f.signedIn && !sp.yt.Auth.HasAuthCookies() {
+			t.Fatal("setup: the signed-in jar holds no account")
+		}
 		run.rec = notificationtest.New()
 		sp.SetNotifier(run.rec)
 
@@ -114,8 +133,12 @@ func driveWaitForLive(t *testing.T, startIn, budget time.Duration, fakes func(st
 			}
 			return fake(at)
 		}
-		sp.probeStatusFn = func(context.Context, string, bool) (*youtube.VideoInfo, error) {
-			return answer("status", f.status, upcomingAnswer(time.Time{}))
+		sp.probeStatusFn = func(_ context.Context, _ string, authenticated bool) (*youtube.VideoInfo, error) {
+			kind := "status"
+			if authenticated {
+				kind = "status_auth" // the cookied probe, once B1 has switched to it
+			}
+			return answer(kind, f.status, upcomingAnswer(time.Time{}))
 		}
 		sp.probeScheduleFn = func(context.Context, string) (*youtube.VideoInfo, error) {
 			return answer("schedule", f.schedule, upcomingAnswer(run.start))

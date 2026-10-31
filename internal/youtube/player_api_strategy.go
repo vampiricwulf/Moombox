@@ -251,6 +251,10 @@ func withAttestation(info *VideoInfo, wp *WatchPageResult, videoID string) *Vide
 // needed). Marked probe-only: the live strategies re-run it on their own
 // interrupt cadence, so its DRM report belongs at Debug (ANDROID_VR is
 // cookieless and mints no PLAYER token either way, so O-R does not bite here).
+//
+// This is the raw ANDROID_VR answer, refusals included; Service.ProbeVideoStatus
+// is the probe every consumer calls, and it escalates a refusal that says
+// nothing about the broadcast instead of passing it on (status_probe.go).
 func (p *PlayerAPI) ProbeVideoStatus(ctx context.Context, videoID string, visitorData string) (*VideoInfo, error) {
 	info, err := p.fetchWithAndroidVR(withProbeOnlyCall(ctx), videoID, visitorData)
 	stampManifestSources(info, "android_vr")
@@ -1423,8 +1427,16 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 // authenticated extractions ever come back short a client, pass true here
 // first. The age-restriction bypass already passes true, so that path (where
 // web_embedded is load-bearing rather than supplementary) is unaffected.
+//
+// A call whose context is marked probe-only (withProbeOnlyCall — the status
+// probe's signed-out escalation, probeVideoStatusEmbedded) mints no PLAYER PO
+// token, as no probe does (owner decision O-R), and adopts no player for an
+// STS: it is asked for the broadcast's state, which videoDetails carries, and
+// an STS would cost a player fetch on every escalation. The embed page's
+// player is still remembered for later extractions.
 func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg *YtcfgData, sts int, fetchEmbedPage bool) (*VideoInfo, error) {
 	ctx = withPlayerClient(ctx, constants.WebEmbeddedClient.ClientName)
+	probeOnly := playerCallScopeFrom(ctx).probeOnly
 	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
 
 	// Fetch embed page for encryptedHostFlags
@@ -1441,12 +1453,13 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	// page's ytcfg for web_embedded (_video.py:3066-3068). It is remembered
 	// for later extractions (resolvePlayerURL), and adopted for this call
 	// when the extraction got none from anywhere earlier — its STS with it,
-	// and the result carries it as its PlayerURL. Fetched only on the
+	// and the result carries it as its PlayerURL. Fetched on the
 	// age-restricted path, after STS was needed, so it cannot stand ahead of
-	// the other sources there.
+	// the other sources there, and on the status probe's signed-out
+	// escalation, which adopts nothing (probeOnly) and only remembers it.
 	if embedResult != nil && embedResult.PlayerURL != "" {
 		p.rememberPlayerURL(embedResult.PlayerURL, "embed page")
-		if ytcfg == nil || ytcfg.PlayerURL == "" {
+		if !probeOnly && (ytcfg == nil || ytcfg.PlayerURL == "") {
 			adopted := YtcfgData{}
 			if ytcfg != nil {
 				adopted = *ytcfg
@@ -1498,7 +1511,7 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	// Inject PO token for WEB_EMBEDDED (same rationale as fetchWithClient):
 	// bound to the video ID per upstream's PLAYER-context rule, minted via
 	// the sidecar's cached minter (homepage pair, /att/get fallback).
-	if p.potProvider != nil && ytcfg != nil && ytcfg.VisitorData != "" {
+	if !probeOnly && p.potProvider != nil && ytcfg != nil && ytcfg.VisitorData != "" {
 		if poToken, err := p.potProvider.GeneratePoTokenString(ctx, videoID, false); err == nil && poToken != "" {
 			postData["serviceIntegrityDimensions"] = map[string]any{"poToken": poToken}
 		} else if err != nil {

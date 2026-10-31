@@ -130,6 +130,38 @@ type VideoInfo struct {
 	// Never serialised, as the instants it gates are not.
 	PlaybackWaitExempt bool `json:"-"`
 
+	// PlayabilityStatus is playabilityStatus.status as YouTube sent it — "OK",
+	// "LOGIN_REQUIRED", "UNPLAYABLE", "ERROR", "LIVE_STREAM_OFFLINE" and the
+	// rest — the code PlayabilityError is read from. Kept for what the verdict
+	// cannot say: that a refusal whose reason the keyword rules do not place
+	// (PlayabilityUnknown) is the ERROR YouTube files a video that is gone
+	// under (yt-dlp's _is_error_response, _video.py:2912 at b77c9304e), which
+	// the waiting loop's full fetch gives up on (fullFetchSaysRemoved,
+	// internal/worker). One response's own; "" for an info no response
+	// produced. Never serialised.
+	PlayabilityStatus string `json:"-"`
+
+	// StatusProbeEscalation names the client that answered a status probe in
+	// ANDROID_VR's place — StatusProbeEscalationTVAuth or
+	// StatusProbeEscalationWebEmbedded — when ANDROID_VR's own answer was a
+	// refusal that said nothing about the broadcast and the probe's one
+	// escalation answered for it (Service.ProbeVideoStatus,
+	// status_probe.go); "" on every other answer. What the answer says
+	// about the broadcast is the escalation's, and so is everything else:
+	// its formats are another client's, fetched under that client's rules,
+	// so the consumers that read ANDROID_VR's shape (the waiting room's B1
+	// switch, the stall check's interruption signature, the quality probe's
+	// cookied hop) ask which it was. Never serialised.
+	StatusProbeEscalation string `json:"-"`
+
+	// liveFlagsStated is whether the response this info was parsed from
+	// stated any flag yt-dlp's live_status is decided on
+	// (statusLiveFlagsStated). False is the refused answer that says nothing
+	// about the broadcast, which the status probe escalates instead of
+	// classifying (statusAnswerInconclusive). One response's fact, read only
+	// by the status probe, which parses one.
+	liveFlagsStated bool
+
 	// SessionAuth is the login state YouTube reported for the session that
 	// produced this info (see SessionAuthState). Diagnostic only — nothing
 	// downloads differently because of it — but it is what lets a
