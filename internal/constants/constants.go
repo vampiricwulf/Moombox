@@ -103,6 +103,13 @@ const DefaultAPIKey = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 // for a signed-in session, else the jsless one when no JS runtime is
 // available, else the default. How Moombox's format ranking follows them is
 // the AuthLevel block in internal/youtube (types.go).
+//
+// Every Context states hl=en, timeZone=UTC and utcOffsetMinutes=0, the three
+// fields yt-dlp's _extract_context forces into every Innertube context
+// (_base.py:753-759): English reasons for the keyword classification, and
+// times stated in UTC, the zone every stored time is in. The YouTube pages
+// get the same language and zone from their PREF cookie
+// (internal/cookies/page_cookies.go).
 
 // YouTubeClientConfig holds configuration for a YouTube API client.
 type YouTubeClientConfig struct {
@@ -139,6 +146,9 @@ var TVSamsungClient = YouTubeClientConfig{
 		"osName":        "Tizen",
 		"osVersion":     "2.4.0",
 		"hl":            "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -154,6 +164,9 @@ var TVDowngradedClient = YouTubeClientConfig{
 		"clientName":    "TVHTML5",
 		"clientVersion": "5.20260707",
 		"hl":            "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -167,6 +180,9 @@ var WebCreatorClient = YouTubeClientConfig{
 		"clientName":    "WEB_CREATOR",
 		"clientVersion": "1.20260708.06.00",
 		"hl":            "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -180,6 +196,9 @@ var WebClient = YouTubeClientConfig{
 		"clientName":    "WEB",
 		"clientVersion": "2.20260708.00.00",
 		"hl":            "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -197,6 +216,9 @@ var WebSafariClient = YouTubeClientConfig{
 		"clientName":    "WEB",
 		"clientVersion": "2.20260708.00.00",
 		"hl":            "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -211,6 +233,9 @@ var WebEmbeddedClient = YouTubeClientConfig{
 		"clientName":    "WEB_EMBEDDED_PLAYER",
 		"clientVersion": "2.20260708.00.00",
 		"hl":            "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -241,6 +266,9 @@ var VisionOSClient = YouTubeClientConfig{
 		// reasons ("member", "age", "private", "live event will begin", …), so
 		// a localized response misclassifies the stream.
 		"hl": "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 
@@ -276,6 +304,9 @@ var AndroidVRClient = YouTubeClientConfig{
 		// whose playability reason is what classifyStream reads, so without
 		// it a non-English locale misclassifies every probed stream.
 		"hl": "en",
+
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	},
 }
 

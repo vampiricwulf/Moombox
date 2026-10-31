@@ -2,7 +2,9 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -350,5 +352,34 @@ func TestFreshContinuationConsentWallNamesSOCS(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "SOCS") || strings.Contains(err.Error(), "CONSENT") {
 		t.Errorf("err = %v, want advice that names SOCS, not CONSENT", err)
+	}
+}
+
+// TestChatContextIsEnglishAndUTC: the chat polls' Innertube context states
+// hl=en, timeZone=UTC and utcOffsetMinutes=0, as yt-dlp's _extract_context
+// forces into every context (_base.py:753-759).
+//
+// Mutant: either zone field dropped from NewChatAPI's client.
+func TestChatContextIsEnglishAndUTC(t *testing.T) {
+	var body []byte
+	api := NewChatAPI("", "", nil)
+	api.client = httpxtest.NewClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		fmt.Fprint(w, `{}`)
+	}))
+	if _, err := api.fetchChat(context.Background(), "https://www.youtube.com/youtubei/v1/live_chat/get_live_chat", "cont"); err != nil {
+		t.Fatalf("fetchChat: %v", err)
+	}
+	var req struct {
+		Context struct {
+			Client map[string]any `json:"client"`
+		} `json:"context"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("decode %q: %v", body, err)
+	}
+	c := req.Context.Client
+	if c["hl"] != "en" || c["timeZone"] != "UTC" || c["utcOffsetMinutes"] != float64(0) {
+		t.Errorf("chat context hl=%v timeZone=%v utcOffsetMinutes=%v, want en, UTC, 0", c["hl"], c["timeZone"], c["utcOffsetMinutes"])
 	}
 }

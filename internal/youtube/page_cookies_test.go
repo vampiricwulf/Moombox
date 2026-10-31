@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -374,4 +375,78 @@ func TestLivenessPagesCarryThePageCookies(t *testing.T) {
 			}
 		})
 	}
+}
+
+// innertubeClientContext decodes a player or browse request body's
+// context.client.
+func innertubeClientContext(t *testing.T, body string) map[string]any {
+	t.Helper()
+	var req struct {
+		Context struct {
+			Client map[string]any `json:"client"`
+		} `json:"context"`
+	}
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("decode request body %q: %v", body, err)
+	}
+	return req.Context.Client
+}
+
+// TestInnertubeRequestsStateEnglishAndUTC is G20's Innertube half: every
+// player call either cascade makes, and the /browse body, carries hl=en,
+// timeZone=UTC and utcOffsetMinutes=0 — yt-dlp's _extract_context
+// (_base.py:753-759) — whatever the call adds to the client's Context.
+//
+// Mutants: the zone fields dropped from a client's Context (that client's
+// calls); a request builder that stops copying the Context (every call).
+func TestInnertubeRequestsStateEnglishAndUTC(t *testing.T) {
+	check := func(t *testing.T, what, body string) {
+		t.Helper()
+		c := innertubeClientContext(t, body)
+		if c["hl"] != "en" || c["timeZone"] != "UTC" || c["utcOffsetMinutes"] != float64(0) {
+			t.Errorf("%s: hl=%v timeZone=%v utcOffsetMinutes=%v, want en, UTC, 0", what, c["hl"], c["timeZone"], c["utcOffsetMinutes"])
+		}
+	}
+	for _, authed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("authenticated=%v", authed), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				servePagesInBubble(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write([]byte(watchPageFixture))
+				}), 0)
+				// An inadequate TV answer, so the cascades go on to the
+				// clients behind it.
+				tr := serveBodies(t, map[string]string{constants.TVSamsungClient.ClientID: `{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"test1234567"}}`})
+				jar := cookies.NewCookieJar()
+				get := NewPlayerAPI(NewAuth(jar, noopLogger{}), noopLogger{}).GetVideoInfoPublic
+				if authed {
+					jar = loadCookieRows(t, "SAPISID", "sapisid-a", "LOGIN_INFO", "logininfo-a")
+					get = NewPlayerAPI(NewAuth(jar, noopLogger{}), noopLogger{}).GetVideoInfoAuthenticated
+				}
+				if _, err := get(context.Background(), "test1234567"); err != nil {
+					t.Fatalf("extraction: %v", err)
+				}
+				calls := 0
+				for _, c := range []constants.YouTubeClientConfig{
+					constants.TVSamsungClient, constants.WebEmbeddedClient, constants.WebCreatorClient,
+					constants.WebSafariClient, constants.WebClient, constants.VisionOSClient, constants.AndroidVRClient,
+				} {
+					for _, body := range tr.of(c.ClientID) {
+						calls++
+						check(t, c.ClientName, body)
+					}
+				}
+				if calls < 2 {
+					t.Fatalf("%d player calls recorded, want the cascade's", calls)
+				}
+			})
+		})
+	}
+	t.Run("browse", func(t *testing.T) {
+		svc := NewService(cookies.NewCookieJar(), noopLogger{})
+		b, err := json.Marshal(svc.browseRequestBody("UCx", "params", "", "vd"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, "browse", string(b))
+	})
 }

@@ -163,6 +163,12 @@ func NewChatAPI(apiKey, visitorData string, cookieHeader func() string) *ChatAPI
 		"clientVersion": constants.WebClient.ClientVersion,
 		"hl":            "en",
 		"gl":            "US",
+
+		// The two yt-dlp's _extract_context forces beside hl on every
+		// Innertube context (_base.py:753-759), as every player client's
+		// Context states them (constants.go).
+		"timeZone":         "UTC",
+		"utcOffsetMinutes": 0,
 	}
 	if visitorData != "" {
 		client["visitorData"] = visitorData

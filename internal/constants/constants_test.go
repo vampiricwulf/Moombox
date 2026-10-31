@@ -172,3 +172,29 @@ func TestClientRosterIsExactlyTheWiredClients(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryClientContextIsEnglishAndUTC pins the three fields yt-dlp's
+// _extract_context forces into every Innertube context (_base.py:753-759):
+// hl=en, which the keyword classification of playability reasons depends on,
+// and timeZone=UTC with utcOffsetMinutes=0, so a reply's times are stated in
+// the zone every stored time is in. Every client the package defines, the
+// one nothing calls included, since a client is wired by naming it.
+//
+// Mutant: either zone field dropped from any one Context.
+func TestEveryClientContextIsEnglishAndUTC(t *testing.T) {
+	for name, c := range map[string]YouTubeClientConfig{
+		"TVSamsungClient":    TVSamsungClient,
+		"TVDowngradedClient": TVDowngradedClient,
+		"WebCreatorClient":   WebCreatorClient,
+		"WebClient":          WebClient,
+		"WebSafariClient":    WebSafariClient,
+		"WebEmbeddedClient":  WebEmbeddedClient,
+		"VisionOSClient":     VisionOSClient,
+		"AndroidVRClient":    AndroidVRClient,
+	} {
+		if c.Context["hl"] != "en" || c.Context["timeZone"] != "UTC" || c.Context["utcOffsetMinutes"] != 0 {
+			t.Errorf("%s: hl=%v timeZone=%v utcOffsetMinutes=%v, want en, UTC, 0",
+				name, c.Context["hl"], c.Context["timeZone"], c.Context["utcOffsetMinutes"])
+		}
+	}
+}

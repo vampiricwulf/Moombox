@@ -390,7 +390,8 @@ func (s *Service) fetchBrowseContinuation(ctx context.Context, continuation, vis
 }
 
 // browseRequestBody builds the /browse POST body: WEB client context (plus
-// visitorData when known — same shape as fetchWithClient's clientCtx), then
+// visitorData when known — same shape as fetchWithClient's clientCtx; its hl,
+// timeZone and utcOffsetMinutes come with constants.WebClient.Context), then
 // either browseId+params (page 1) or the bare continuation (page 2+), matching
 // internal/chat's fetchChat request.
 func (s *Service) browseRequestBody(browseID, params, continuation, visitorData string) map[string]any {
