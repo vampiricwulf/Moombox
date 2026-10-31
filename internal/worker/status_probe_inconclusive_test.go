@@ -22,9 +22,9 @@ func botWalledProbe(escalationErr error) *youtube.StatusProbeInconclusiveError {
 	}
 }
 
-// escalation400 is the escalation failure that matters to the classifier: an
-// HTTP 4xx in the text, which its terminal arm reads as the video gone.
-var escalation400 = errors.New("WEB_EMBEDDED API error: HTTP 400 — INVALID_ARGUMENT: Request contains an invalid argument.")
+// errEscalation400 is the escalation failure that matters to the classifier:
+// an HTTP 4xx in the text, which its terminal arm reads as the video gone.
+var errEscalation400 = errors.New("WEB_EMBEDDED API error: HTTP 400 — INVALID_ARGUMENT: Request contains an invalid argument")
 
 // TestAnInconclusiveStatusProbeIsNetworkClassAndAnAnswer is G8's waiting-room
 // half (owner decision D6): an inconclusive status probe never counts toward
@@ -46,7 +46,7 @@ func TestAnInconclusiveStatusProbeIsNetworkClassAndAnAnswer(t *testing.T) {
 		wantVote  probeReport
 	}{
 		{"the escalation refused too", botWalledProbe(errors.New("refused with no broadcast details too (login_required)")), classNetwork, reportSuccess},
-		{"the escalation answered HTTP 400", botWalledProbe(escalation400), classNetwork, reportSuccess},
+		{"the escalation answered HTTP 400", botWalledProbe(errEscalation400), classNetwork, reportSuccess},
 		{"the escalation timed out", botWalledProbe(context.DeadlineExceeded), classNetwork, reportSuccess},
 		{"the escalation could not reach the service", botWalledProbe(&net.DNSError{Err: "no such host", Name: "www.youtube.com"}), classNetwork, reportSuccess},
 		{"the caller's context ended", &youtube.StatusProbeInconclusiveError{Playability: youtube.PlayabilityLoginRequired, EscalationErr: context.Canceled}, classCancelled, reportNone},
@@ -78,7 +78,7 @@ func TestWaitingLoopWaitsThroughAnInconclusiveStatusProbe(t *testing.T) {
 		return waitFakes{
 			status: func(at time.Duration) (*youtube.VideoInfo, error) {
 				if at < walled {
-					return nil, botWalledProbe(escalation400)
+					return nil, botWalledProbe(errEscalation400)
 				}
 				return liveAnswer(start), nil
 			},
