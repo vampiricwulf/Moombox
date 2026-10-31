@@ -89,6 +89,15 @@ var ErrTruncateBlocked = errors.New("truncate for resume blocked")
 // triggers this — see ensureHlsInit.
 var ErrInitSegmentChanged = errors.New("HLS init segment changed")
 
+// ErrInitSegmentUnavailable signals that a DASH download could not obtain the
+// ftyp+moov init its media needs — a manifest Initialization, or the sq=0 a
+// manifest-free stream carries it in — after the retries and credential
+// refreshes fetchInitSegment allows. Start returns it before writing any
+// media, so the output file holds nothing a muxer would have to reject:
+// yt-dlp makes the same fragment fatal (downloader/dash.py, fragment 0) rather
+// than record hours of fragments that cannot be opened.
+var ErrInitSegmentUnavailable = errors.New("init segment unavailable")
+
 const (
 	CatchupThreshold     = 10
 	MaxSegmentRetries    = 5
@@ -224,10 +233,26 @@ type DownloaderOptions struct {
 	// InitFromSegment marks InitURL as a full media segment (a manifest-free
 	// DASH sq=0) rather than a standalone init segment: downloadInitSegment
 	// then writes only its extracted ftyp+moov init. Needed for manifestless
-	// parts that force-start at sq>0, whose init lives inline at sq=0.
+	// parts that force-start at sq>0, whose init lives inline at sq=0. A retry
+	// after a credential refresh re-derives that URL from the CURRENT base
+	// (buildSegmentURL(0)) rather than re-sending this construction-time
+	// string — see fetchInitSegment.
 	InitFromSegment bool
-	ForceStartSeq   bool // When true, StartSeq is exact (orchestrator-provided), skip DB-fallback +1 logic
-	ResumeFile      string
+	// InitInlineAtStart says this stream's ftyp+moov init exists only inline
+	// in sq=0 — the manifest-free DASH shape — and that the downloader starts
+	// there rather than force-starting a later part (those set InitURL and
+	// InitFromSegment instead). While its file is still empty two rules
+	// follow, both ports of yt-dlp's fatal fragment 0 (downloader/dash.py,
+	// `is_fatal=lambda idx: idx == 0`, from adbc4ec4b #888): the first-segment
+	// hunt never steps past sq=0 (huntMayAdvance), and media for a later
+	// sequence is never written before the init extracted from sq=0
+	// (ensureInlineInit) — the start fails instead. A file without it is a
+	// bare moof+mdat run FFmpeg rejects with "moov atom not found", however
+	// many hours it holds. Set by the manifest-free strategy whenever it does
+	// not force a start sequence.
+	InitInlineAtStart bool
+	ForceStartSeq     bool // When true, StartSeq is exact (orchestrator-provided), skip DB-fallback +1 logic
+	ResumeFile        string
 	// StreamID is an optional orchestrator-provided stable identity for the
 	// broadcast, persisted in the resume state. When both the saved state
 	// and the current options carry one and they differ, the resume state
@@ -1042,20 +1067,34 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	defer func() { d.outputFile.Close() }()
 
 	// Download init segment first (only if not resuming and not HLS).
-	// Non-fatal: a missing init segment usually still produces a playable
-	// file (FFmpeg can demux the segment data alone for many codecs), and
-	// failing the entire download here would discard hours of recording.
+	//
+	// Fatal, as yt-dlp makes a DASH download's fragment 0 (downloader/dash.py,
+	// `is_fatal=lambda idx: idx == 0`; fragment.py: "fragment … not found,
+	// unable to continue"). Both callers that set InitURL — a manifest
+	// Initialization, and the sq=0 a manifest-free part that force-starts at
+	// sq>0 takes its ftyp+moov from — record fragmented MP4 whose media
+	// segments carry no init of their own, so a part that went on without it
+	// was a bare moof+mdat run FFmpeg rejects with "moov atom not found": the
+	// hours it recorded were lost at mux time, and the empty file it left
+	// re-armed the first-segment hunt, which then skipped real segments at the
+	// split sequence. The comment here used to say a missing init "usually
+	// still produces a playable file" and that failing would "discard hours of
+	// recording"; neither holds — this file was opened empty a moment ago and
+	// nothing has been written to it. Returning before any media hands the
+	// part back to the orchestrator: a live capture's re-verify refreshes and
+	// builds it again from the same sequence, and a post-live download fails
+	// with this error now rather than with FFmpeg's at mux time.
 	if !resuming && d.opts.InitURL != "" && !d.opts.IsHls {
 		if initErr := d.downloadInitSegment(ctx); initErr != nil {
-			if d.opts.InitFromSegment {
-				// A manifest-free part that force-starts at sq>0 has no inline
-				// init; without this fetched ftyp+moov the part file is a bare
-				// moof+mdat that won't mux. Surface it loudly rather than the
-				// usual best-effort Warn (which assumes FFmpeg can demux without).
-				d.logger.Error("[Downloader] Failed to fetch sq=0 init for manifestless part — part may not mux", "error", initErr)
-			} else {
-				d.logger.Warn("[Downloader] Failed to download init segment", "error", initErr)
+			if cerr := d.cancelErr(ctx); cerr != nil {
+				return cerr
 			}
+			if errors.Is(initErr, ErrLocalWrite) {
+				return initErr // the staging, not the stream — see ErrLocalWrite
+			}
+			d.logger.Error("[Downloader] Init segment unavailable — not starting a part FFmpeg could not mux",
+				"fromSegment", d.opts.InitFromSegment, "error", initErr)
+			return fmt.Errorf("%w: %w", ErrInitSegmentUnavailable, initErr)
 		}
 	}
 
@@ -1466,27 +1505,19 @@ func (d *SegmentDownloader) buildSegmentURL(seq int) string {
 	return fmt.Sprintf(youtubeSegPathFormat, base, seq)
 }
 
+// downloadInitSegment fetches InitURL through fetchInitSegment's retries and
+// writes it at the head of the (empty) output file. For InitFromSegment the
+// URL is a whole manifest-free sq=0, re-derived from the current base after a
+// refresh, and only its ftyp+moov is kept (see writeInitFromSq0).
 func (d *SegmentDownloader) downloadInitSegment(ctx context.Context) error {
-	data, status, err := d.fetchSegment(ctx, d.opts.InitURL)
-	if err != nil || status >= 400 {
-		return fmt.Errorf("init segment: status=%d: %w", status, err)
-	}
-	d.noteFetch(len(data))
 	if d.opts.InitFromSegment {
-		// InitURL is a full sq=0 media segment (manifest-free DASH); keep only
-		// its ftyp+moov init so segment 0's media doesn't prefix this part.
-		init := extractMP4InitBoxes(data)
-		if init == nil {
-			return fmt.Errorf("init segment: no ftyp/moov init found in sq=0 (%d bytes)", len(data))
-		}
-		data = init
+		return d.writeInitFromSq0(ctx, d.opts.InitURL)
 	}
-	n, err := d.outputFile.Write(data)
+	data, err := d.fetchInitSegment(ctx, d.opts.InitURL, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("init segment: %w", err)
 	}
-	d.bytesWritten.Add(int64(n))
-	return nil
+	return d.writeInitBytes(data)
 }
 
 // truncateURL returns a URL for a log line: its media credentials cut

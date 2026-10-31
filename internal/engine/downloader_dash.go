@@ -23,7 +23,10 @@ const (
 	goneRetryDuringDownload = 10
 	// goneRetryBeforeFirstSegment is how many 403/410 we tolerate while
 	// hunting for the first valid segment (e.g. pre-roll that's not yet
-	// published). Each failure advances currentSeq by 1.
+	// published). A failure advances currentSeq by 1 only where
+	// huntMayAdvance allows it — below a known head, and never off an
+	// InitInlineAtStart downloader's sq=0; anywhere else the same sequence is
+	// asked again, singleGoneRetry apart.
 	goneRetryBeforeFirstSegment = 20
 
 	// postBytes403CipherThreshold is the number of consecutive post-bytes-
@@ -240,6 +243,9 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 
 		// Write segment
 		writeSeq := int(d.currentSeq.Load())
+		if initErr := d.ensureInlineInit(ctx, writeSeq); initErr != nil {
+			return initErr
+		}
 		n, writeErr := d.outputFile.Write(data)
 		if writeErr != nil {
 			return fmt.Errorf("%w: write segment %d: %w", ErrLocalWrite, writeSeq, writeErr)
@@ -532,6 +538,15 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 	}
 	if !hasStartedDownloading && *consecutiveGoneErrors <= goneRetryBeforeFirstSegment {
 		d.emitActivity(ActivityFindingFirstSegment)
+		if !d.huntMayAdvance() {
+			// Same sequence again: the segment past it cannot be the first
+			// one to look for (see huntMayAdvance). The at-edge pause, not the
+			// hunt's: this is a wait for the segment to be served, and the
+			// hunt's 100 ms would re-ask a not-yet-published sequence ten
+			// times a second for the whole budget.
+			utils.Sleep(ctx, d.delays.singleGoneRetry)
+			return nil // Continue loop
+		}
 		d.currentSeq.Add(1)
 		utils.Sleep(ctx, firstSegmentHuntDelay)
 		return nil // Continue loop
@@ -545,6 +560,45 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 	d.emitActivity(ActivityWaitingForSegment)
 	utils.Sleep(ctx, d.delays.singleGoneRetry)
 	return nil // Continue loop
+}
+
+// huntMayAdvance reports whether the first-segment hunt may step past the
+// sequence that just answered 403/410 before any byte was written. The hunt
+// exists for a start that sits on evicted or otherwise refused segments; it
+// may only step onto segments the edge has said exist, and never off the one
+// segment the file cannot do without.
+//
+//   - Only below a KNOWN head (currentSeq < headSeq). yt-dlp's live generator
+//     never requests a sequence before X-Head-Seqnum says it exists
+//     (extractor/youtube/_video.py, _live_adaptive_fragments, from adbc4ec4b
+//     #888): with the head unknown, or the refused sequence already at or
+//     past it, the segment is most likely not published yet — the go-live
+//     pre-roll goneRetryBeforeFirstSegment's own comment names — and stepping
+//     past it only asks for a later sequence that exists even less. The hunt
+//     used to step twenty sequences past the edge in two seconds, ending
+//     with nothing written or beginning the file wherever the edge caught up
+//     with it.
+//   - Never off sq=0 of an InitInlineAtStart downloader, even below a known
+//     head — yt-dlp's own shape: fragment 0 is fatal, retried, never skipped
+//     (downloader/dash.py, fragment.py). That sq=0 holds the stream's only
+//     ftyp+moov, and its media is the first seconds of the recording.
+//     Stepping past it — even after OnCipherFailure had just repaired the
+//     URL that was refused, which is what that first pre-bytes 403 usually
+//     means — began the file at sq=1 with no init. ensureInlineInit alone
+//     would rescue the init but not sq=0's media; retrying sq=0 keeps both,
+//     and a sq=0 that stays refused ends the hunt with nothing written,
+//     exactly as a refused later one does.
+//
+// The retry is bounded by the same goneRetryBeforeFirstSegment budget, so a
+// start that never finds its segment still ends: with zero bytes and
+// currentSeq where it began, which is where the orchestrator's refresh and
+// diagnoseEvictedStart both expect it.
+func (d *SegmentDownloader) huntMayAdvance() bool {
+	cur := d.currentSeq.Load()
+	if d.opts.InitInlineAtStart && cur == 0 {
+		return false
+	}
+	return cur < d.headSeq.Load()
 }
 
 // behindHeadTailPending reports whether the known head sequence implies

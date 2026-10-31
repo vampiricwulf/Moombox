@@ -576,6 +576,11 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 				break
 			}
 
+			// The sequential write's guard (ensureInlineInit): media above
+			// sq=0 never opens an InitInlineAtStart file without sq=0's init.
+			if err := d.ensureInlineInit(ctx, nextSeq); err != nil {
+				return nextSeq, err
+			}
 			n, err := d.outputFile.Write(data)
 			if err != nil {
 				return nextSeq, fmt.Errorf("%w: write segment %d: %w", ErrLocalWrite, nextSeq, err)
