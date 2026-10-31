@@ -115,7 +115,7 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, serve
 	// refreshCtx: the bound is for the work above, which can hang, and this
 	// wait ends at an instant the response named — see
 	// credentialRefreshTimeoutFor.
-	if !waitForFreshPlayback(ctx, job, fresh.StreamStatus, f, tag) {
+	if !waitForFreshPlayback(ctx, job, fresh, f, tag) {
 		return "", poToken
 	}
 	job.Logger.Info("[POT] VOD URL refresh", "jobID", job.Job.ID, "tag", tag,

@@ -210,7 +210,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// the missing_pot re-extract's — or it is refused with a 403 like every
 	// URL of that response (waitForPlayback).
 	at, source := latestPlayback(result.VideoFormat, result.AudioFormat)
-	if err := waitForPlayback(ctx, job, videoInfo.StreamStatus, at, source, "VOD"); err != nil {
+	if err := waitForPlayback(ctx, job, videoInfo, at, source, "VOD"); err != nil {
 		return nil, fmt.Errorf("VOD: waiting out the pre-roll ad: %w", err)
 	}
 

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -105,6 +106,11 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	for i := range formats {
 		formats[i].AvailableAt = availableAt
 	}
+	// Whether a download waits for it at all is upstream's live_status, read
+	// off its own values (playbackLiveFlags): this response's, and noted for
+	// the extraction's verdict, which finishExtraction stamps over it.
+	liveFlags := readPlaybackLiveFlags(videoDetails, microformat)
+	extractionStateFrom(ctx).notePlaybackLive(liveFlags)
 
 	// Stream classification. hasFormats asks whether the response CARRIED
 	// formats, not whether any survived the parse: a response whose formats
@@ -211,6 +217,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		PublishedAt:        publishedAt,
 		PublishedPrecision: publishedPrecision,
 		FormatDiag:         formatDiag,
+		PlaybackWaitExempt: liveFlags.exempt(),
 	}
 	if info.DashManifestURL != "" {
 		info.DashManifestAvailableAt = availableAt
@@ -367,6 +374,13 @@ type extractionState struct {
 	// FormatDiag for why one is a sum and the other is not.
 	drmSkipped          atomic.Int64
 	collapsedRenditions atomic.Int64
+	// live is the first statement of each value upstream's live_status reads
+	// for the pre-roll wait, over every response parsed so far
+	// (notePlaybackLive); finishExtraction stamps its verdict as
+	// VideoInfo.PlaybackWaitExempt. Three values, not one word, so a mutex
+	// rather than an atomic.
+	liveMu sync.Mutex
+	live   playbackLiveFlags
 }
 
 // withExtractionState opens one extraction's scratch. Called once at the head

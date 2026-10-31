@@ -104,10 +104,16 @@ func (t *mismatchTally) ipBlockShape() bool {
 // figures are stamped here: the VideoInfo handed back is whichever client won,
 // and its own parse only ever saw its own response. The worker reads these to
 // explain an extraction that produced no usable formats, so they have to
-// describe the whole cascade, not the last client in it.
+// describe the whole cascade, not the last client in it. The pre-roll wait's
+// live_status verdict (PlaybackWaitExempt) is stamped here for the same
+// reason: upstream's is one over every player response it holds, the watch
+// page's first, and the winner's own parse read only its own.
 func (p *PlayerAPI) finishExtraction(ctx context.Context, info *VideoInfo, wp *WatchPageResult, videoID string, tally *mismatchTally, wpParsed *VideoInfo) (*VideoInfo, error) {
 	if info != nil {
 		info.FormatDiag.DRMSkipped, info.FormatDiag.CollapsedRenditions = extractionStateFrom(ctx).poolCounts()
+		if live, ok := extractionStateFrom(ctx).playbackLive(); ok {
+			info.PlaybackWaitExempt = live.exempt()
+		}
 	}
 	if tally.ipBlockShape() && wpParsed == nil {
 		// Name the substitute, as upstream's warning does

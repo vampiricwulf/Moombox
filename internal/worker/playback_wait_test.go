@@ -134,33 +134,39 @@ func TestPlaybackWaitLineCarriesTheWaitMarker(t *testing.T) {
 
 // TestPlaybackWaitLeftFollowsUpstreamsClock pins the downloader half's
 // arithmetic: upstream sleeps available_at - int(time.time()), the second it
-// is in counted whole; nothing waits for a stream that is live or post-live,
-// whose formats upstream never stamps; a format with no ad (the zero time)
-// or an instant already past waits nothing. latestPlayback is upstream's
-// max() over the formats a download fetches.
+// is in counted whole; nothing waits for a stream upstream calls live or
+// post-live, whose formats it never stamps — its own live_status
+// (PlaybackWaitExempt), not the extraction's status, which calls a finished
+// broadcast post_live that upstream waits for; a format with no ad (the zero
+// time) or an instant already past waits nothing. latestPlayback is
+// upstream's max() over the formats a download fetches.
 //
 // Mutants: now not truncated to its second (the fractional row waits 5.6 s);
-// the PlaybackWaitApplies gate dropped (the live and post-live rows wait);
-// the max(…, 0) dropped (the no-ad and past rows go negative);
-// latestPlayback taking the first format, or naming the wrong one's client.
+// the PlaybackWaitApplies gate dropped (the exempt rows wait); the gate
+// asked of the status instead (the finished broadcast's row waits nothing,
+// the post-live DVR row 15 s); the max(…, 0) dropped (the no-ad and past
+// rows go negative); latestPlayback taking the first format, or naming the
+// wrong one's client.
 func TestPlaybackWaitLeftFollowsUpstreamsClock(t *testing.T) {
 	base := time.Unix(1_700_000_100, 0)
+	waits := &youtube.VideoInfo{StreamStatus: youtube.StreamVOD}
 	for _, tc := range []struct {
-		name   string
-		status youtube.StreamStatus
-		at     time.Time
-		now    time.Time
-		want   time.Duration
+		name string
+		info *youtube.VideoInfo
+		at   time.Time
+		now  time.Time
+		want time.Duration
 	}{
-		{"a finished stream waits", youtube.StreamVOD, base.Add(15 * time.Second), base, 15 * time.Second},
-		{"a plain upload waits", youtube.StreamNotAStream, base.Add(15 * time.Second), base, 15 * time.Second},
-		{"the second now is in counts whole", youtube.StreamVOD, base.Add(6 * time.Second), base.Add(400 * time.Millisecond), 6 * time.Second},
-		{"a live stream never waits", youtube.StreamLive, base.Add(15 * time.Second), base, 0},
-		{"a post-live stream never waits", youtube.StreamPostLive, base.Add(15 * time.Second), base, 0},
-		{"no ad", youtube.StreamVOD, time.Time{}, base, 0},
-		{"an instant already past", youtube.StreamVOD, base.Add(-time.Second), base, 0},
+		{"a processed VOD waits", waits, base.Add(15 * time.Second), base, 15 * time.Second},
+		{"a plain upload waits", &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream}, base.Add(15 * time.Second), base, 15 * time.Second},
+		{"a finished broadcast the extraction calls post_live waits", &youtube.VideoInfo{StreamStatus: youtube.StreamPostLive}, base.Add(15 * time.Second), base, 15 * time.Second},
+		{"the second now is in counts whole", waits, base.Add(6 * time.Second), base.Add(400 * time.Millisecond), 6 * time.Second},
+		{"a live stream never waits", &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlaybackWaitExempt: true}, base.Add(15 * time.Second), base, 0},
+		{"a post-live DVR the extraction calls a VOD never waits", &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, PlaybackWaitExempt: true}, base.Add(15 * time.Second), base, 0},
+		{"no ad", waits, time.Time{}, base, 0},
+		{"an instant already past", waits, base.Add(-time.Second), base, 0},
 	} {
-		if got := playbackWaitLeft(tc.status, tc.at, tc.now); got != tc.want {
+		if got := playbackWaitLeft(tc.info, tc.at, tc.now); got != tc.want {
 			t.Errorf("%s: playbackWaitLeft = %v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -191,7 +197,9 @@ func TestPlaybackWaitLeftFollowsUpstreamsClock(t *testing.T) {
 // 15 s); the wait taken before the missing_pot degrade, on the setup
 // selection (the shadow row waits 5 s, not 20 s); the progress line not
 // written (the first checkpoint), not rewritten (the 6 s checkpoint), or not
-// cleared (the end); the Info line dropped or naming another client.
+// cleared (the end); the Info line dropped or naming another client; the
+// wait gated on the extraction's status (the post_live broadcast returns at
+// once).
 func TestDownloadVodWaitsOutThePreRollAd(t *testing.T) {
 	t.Run("the latest of the chosen formats", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
@@ -266,31 +274,56 @@ func TestDownloadVodWaitsOutThePreRollAd(t *testing.T) {
 			}
 		})
 	})
+
+	// The reviewer's case: an archived broadcast whose status came from a
+	// WEB-family answer (web_creator after a failed TV, the watch page) reads
+	// post_live off the microformat's endTimestamp, but upstream calls it
+	// was_live and waits — and so does this.
+	t.Run("a finished broadcast the extraction calls post_live", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			job, _ := vodPotJob(t)
+			info := adStamped(vodPotInfo("web_creator", "web_creator"), time.Now().Add(15*time.Second))
+			info.StreamStatus = youtube.StreamPostLive
+			r := startStrategy(t, func() (*DownloadResult, error) {
+				return DownloadVod(context.Background(), job, info, stubCipherSolver{}, nil, nil, nil)
+			})
+			synctest.Wait()
+			if r.returned() {
+				t.Fatalf("DownloadVod returned at once (err %v), want it to wait out the 15 s ad upstream waits for", r.err)
+			}
+			assertWaitsExactly(t, job, r, 15*time.Second)
+		})
+	})
 }
 
 // TestDownloadVodWithoutAnAdStartsAtOnce: no ad, an instant already past, or
-// a live stream's stamped formats (the strategy's fallback for a live pool
-// with no manifest) — none waits, logs or writes a wait line. A Premium
-// account's responses never carry an ad, so its downloads are exactly as
-// they were.
+// the stamped formats of a stream upstream calls live (the strategy's
+// fallback for a live pool with no manifest) or post-live — a TV answer in
+// the post-live DVR window states isPostLiveDvr and no microformat, so the
+// extraction calls it a VOD — none waits, logs or writes a wait line. A
+// Premium account's responses never carry an ad, so its downloads are
+// exactly as they were.
 //
-// Mutant: the PlaybackWaitApplies gate dropped from playbackWaitLeft (the
-// live row waits).
+// Mutants: the PlaybackWaitApplies gate dropped from playbackWaitLeft (the
+// live and post-live rows wait); the gate asked of the status instead (the
+// post-live DVR row waits).
 func TestDownloadVodWithoutAnAdStartsAtOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status youtube.StreamStatus
+		exempt bool
 		in     time.Duration // the ad's instant from now; 0: no ad
 	}{
-		{"no ad", youtube.StreamVOD, 0},
-		{"an instant already past", youtube.StreamVOD, -time.Second},
-		{"a live stream", youtube.StreamLive, 15 * time.Second},
+		{"no ad", youtube.StreamVOD, false, 0},
+		{"an instant already past", youtube.StreamVOD, false, -time.Second},
+		{"a live stream", youtube.StreamLive, true, 15 * time.Second},
+		{"a post-live DVR the extraction calls a VOD", youtube.StreamVOD, true, 15 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				job, logs := vodPotJob(t)
 				info := vodPotInfo("tv_auth", "tv_auth")
-				info.StreamStatus = tc.status
+				info.StreamStatus, info.PlaybackWaitExempt = tc.status, tc.exempt
 				if tc.in != 0 {
 					adStamped(info, time.Now().Add(tc.in))
 				}
@@ -371,27 +404,31 @@ func serveInBubble(t *testing.T, h http.Handler) {
 // TestManifestStrategiesWaitAfterTheManifest: the DASH and HLS strategies
 // fetch the manifest first — upstream fetches it during extraction, before
 // its sleep — and then hold their downloaders until the manifest's own
-// response allows media requests: a finished stream's only. A live stream's
-// manifest, stamped or not, starts at once.
+// response allows media requests: a finished stream's only — a broadcast
+// the extraction calls post_live included, when upstream calls it was_live.
+// A live stream's manifest, stamped or not, starts at once.
 //
 // Mutants (each run): the wait dropped from DownloadDash or DownloadHls (the
 // VOD row returns at once); the wait placed before the manifest fetch (the
 // fetch lands at the ad's end, not at 0); the manifest's own instant swapped
-// for the formats' (no wait — the formats here carry none).
+// for the formats' (no wait — the formats here carry none); the wait gated on
+// the status (the post_live row returns at once).
 func TestManifestStrategiesWaitAfterTheManifest(t *testing.T) {
 	for _, kind := range []string{"DASH", "HLS"} {
 		for _, tc := range []struct {
 			status youtube.StreamStatus
+			exempt bool
 			wait   bool
 		}{
-			{youtube.StreamVOD, true},
-			{youtube.StreamLive, false},
+			{youtube.StreamVOD, false, true},
+			{youtube.StreamPostLive, false, true},
+			{youtube.StreamLive, true, false},
 		} {
 			t.Run(kind+"/"+string(tc.status), func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
 					job, logs := vodPotJob(t)
 					start := time.Now()
-					info := &youtube.VideoInfo{StreamStatus: tc.status}
+					info := &youtube.VideoInfo{StreamStatus: tc.status, PlaybackWaitExempt: tc.exempt}
 					var download func() (*DownloadResult, error)
 					h := &manifestHandler{}
 					if kind == "DASH" {
@@ -435,28 +472,32 @@ func TestManifestStrategiesWaitAfterTheManifest(t *testing.T) {
 
 // TestManifestlessWaitsOnlyOffLive: the manifest-free strategy serves live
 // and post-live streams, which upstream never stamps, so their formats — ad
-// or not — start at once; a stream YouTube has processed into a VOD while
-// its formats are still segmented (a refresh can hand it one) waits for the
-// chosen formats' latest instant.
+// or not — start at once; a stream upstream no longer calls either while its
+// formats are still segmented (a refresh can hand it one: processed into a
+// VOD, or a finished broadcast the extraction still calls post_live off its
+// endTimestamp) waits for the chosen formats' latest instant.
 //
-// Mutants: the wait dropped from DownloadManifestlessDash (the VOD row
-// returns at once); the status gate dropped (the live and post-live rows
-// wait).
+// Mutants: the wait dropped from DownloadManifestlessDash (the waiting rows
+// return at once); the gate dropped (the exempt rows wait); the gate asked of
+// the status (the was_live row returns at once).
 func TestManifestlessWaitsOnlyOffLive(t *testing.T) {
 	for _, tc := range []struct {
+		name   string
 		status youtube.StreamStatus
+		exempt bool
 		wait   bool
 	}{
-		{youtube.StreamVOD, true},
-		{youtube.StreamPostLive, false},
-		{youtube.StreamLive, false},
+		{"processed into a VOD", youtube.StreamVOD, false, true},
+		{"was_live, the extraction says post_live", youtube.StreamPostLive, false, true},
+		{"post_live", youtube.StreamPostLive, true, false},
+		{"live", youtube.StreamLive, true, false},
 	} {
-		t.Run(string(tc.status), func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				job, logs := vodPotJob(t)
 				now := time.Now()
 				info := manifestlessPotInfo("tv_auth", "tv_auth")
-				info.StreamStatus = tc.status
+				info.StreamStatus, info.PlaybackWaitExempt = tc.status, tc.exempt
 				info.Formats[0].AvailableAt = now.Add(7 * time.Second)
 				info.Formats[1].AvailableAt = now.Add(4 * time.Second)
 				r := startStrategy(t, func() (*DownloadResult, error) {
@@ -483,20 +524,24 @@ func TestManifestlessWaitsOnlyOffLive(t *testing.T) {
 // job's context, not the refresh budget: at the 30 s MaximumTimeout floor
 // that budget is 10 s, shorter than this 12 s ad, and the whole-file path
 // has no stall clock running while it waits. A cancel during the wait keeps
-// the current URL.
+// the current URL. A fresh response upstream calls post-live (or live) is
+// never waited for, whatever the extraction's status says — a TV answer in
+// the post-live DVR window reads as a VOD here.
 //
 // Mutants (each run): the wait dropped from refreshVodURL (the URL comes
 // back at once); the wait put on refreshCtx (the 12 s ad outlasts the 10 s
-// budget and the URL never comes back); the wait not ending on the cancel.
+// budget and the URL never comes back); the wait not ending on the cancel;
+// the wait's gate read off anything but the fresh extraction's live_status —
+// the status, or the setup's (the post-live row waits 12 s).
 func TestRefreshVodURLWaitsOutTheFreshAd(t *testing.T) {
 	const old, freshURL = "http://cdn.invalid/videoplayback?expire=1&id=o-A&itag=137&clen=1000",
 		"http://cdn.invalid/videoplayback?expire=2&id=o-B&itag=137&clen=1000"
 	type refreshed struct{ url, token string }
-	run := func(t *testing.T, ctx context.Context) (*JobContext, *captureLogger, chan refreshed) {
+	runAs := func(t *testing.T, ctx context.Context, exempt bool) (*JobContext, *captureLogger, chan refreshed) {
 		t.Helper()
 		at := time.Now().Add(12 * time.Second)
 		stubRefreshVideoInfo(t, func() *youtube.VideoInfo {
-			return &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, PlayerURL: "https://www.youtube.com/s/player/abcd1234/player_ias.vflset/en_US/base.js",
+			return &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, PlaybackWaitExempt: exempt, PlayerURL: "https://www.youtube.com/s/player/abcd1234/player_ias.vflset/en_US/base.js",
 				Formats: []youtube.Format{{Itag: 137, URL: freshURL, ContentLength: "1000", Source: "tv_auth", AvailableAt: at}}}
 		})
 		job, logs := vodPotJob(t)
@@ -515,6 +560,10 @@ func TestRefreshVodURLWaitsOutTheFreshAd(t *testing.T) {
 			out <- refreshed{u, tok}
 		}()
 		return job, logs, out
+	}
+	run := func(t *testing.T, ctx context.Context) (*JobContext, *captureLogger, chan refreshed) {
+		t.Helper()
+		return runAs(t, ctx, false)
 	}
 
 	t.Run("the URL waits for its response's ad", func(t *testing.T) {
@@ -566,6 +615,24 @@ func TestRefreshVodURLWaitsOutTheFreshAd(t *testing.T) {
 			}
 		})
 	})
+
+	t.Run("a post-live response's URL comes back at once", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			_, logs, out := runAs(t, context.Background(), true)
+			synctest.Wait()
+			select {
+			case got := <-out:
+				if got.url != freshURL {
+					t.Errorf("refreshVodURL = %q, want the fresh URL", got.url)
+				}
+			default:
+				t.Fatal("refreshVodURL waiting on a post-live response's ad, which upstream never stamps")
+			}
+			if line := logLine(logs, "credential refresh: waiting out"); line != nil {
+				t.Errorf("logged a refresh wait it did not make: %v", line)
+			}
+		})
+	})
 }
 
 // TestRefreshGvsCredentialsWaitsWithinItsBudget: the segmented refresh
@@ -577,20 +644,21 @@ func TestRefreshVodURLWaitsOutTheFreshAd(t *testing.T) {
 //
 // Mutants (each run): the wait dropped (the VOD row's URL comes back at 0);
 // the deadline check dropped (the long-ad row sleeps to the deadline and
-// returns at 10 s); the status read off the setup info instead of the fresh
+// returns at 10 s); the gate read off the setup info instead of the fresh
 // one (the setup is post-live, so the VOD rows never wait).
 func TestRefreshGvsCredentialsWaitsWithinItsBudget(t *testing.T) {
 	const freshURL = "https://fresh.invalid/videoplayback?id=2&n=abc123"
 	for _, tc := range []struct {
 		name    string
 		status  youtube.StreamStatus
+		exempt  bool
 		ad      time.Duration
 		wantAt  time.Duration // when it returns
 		wantURL bool
 	}{
-		{"a processed VOD's fresh URL waits for its ad", youtube.StreamVOD, 6 * time.Second, 6 * time.Second, true},
-		{"an ad longer than the budget keeps the current URL", youtube.StreamVOD, 20 * time.Second, 0, false},
-		{"a live response never waits", youtube.StreamLive, 6 * time.Second, 0, true},
+		{"a processed VOD's fresh URL waits for its ad", youtube.StreamVOD, false, 6 * time.Second, 6 * time.Second, true},
+		{"an ad longer than the budget keeps the current URL", youtube.StreamVOD, false, 20 * time.Second, 0, false},
+		{"a live response never waits", youtube.StreamLive, true, 6 * time.Second, 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -598,9 +666,10 @@ func TestRefreshGvsCredentialsWaitsWithinItsBudget(t *testing.T) {
 				orig := refreshVideoInfo
 				refreshVideoInfo = func(*youtube.Service, context.Context, string) (*youtube.VideoInfo, error) {
 					return &youtube.VideoInfo{
-						StreamStatus: tc.status,
-						PlayerURL:    "https://www.youtube.com/s/player/deadbeef/player.js",
-						Formats:      []youtube.Format{{Itag: 140, URL: freshURL, Source: "web_creator", AvailableAt: start.Add(tc.ad)}},
+						StreamStatus:       tc.status,
+						PlaybackWaitExempt: tc.exempt,
+						PlayerURL:          "https://www.youtube.com/s/player/deadbeef/player.js",
+						Formats:            []youtube.Format{{Itag: 140, URL: freshURL, Source: "web_creator", AvailableAt: start.Add(tc.ad)}},
 					}, nil
 				}
 				t.Cleanup(func() { refreshVideoInfo = orig })
@@ -614,9 +683,10 @@ func TestRefreshGvsCredentialsWaitsWithinItsBudget(t *testing.T) {
 					Logger: logs,
 				}
 				videoInfo := &youtube.VideoInfo{
-					StreamStatus: youtube.StreamPostLive,
-					PlayerURL:    "https://www.youtube.com/s/player/deadbeef/player.js",
-					Formats:      []youtube.Format{{Itag: 140, URL: "https://setup.invalid/videoplayback?id=1&n=abc123", Source: "web_creator"}},
+					StreamStatus:       youtube.StreamPostLive,
+					PlaybackWaitExempt: true,
+					PlayerURL:          "https://www.youtube.com/s/player/deadbeef/player.js",
+					Formats:            []youtube.Format{{Itag: 140, URL: "https://setup.invalid/videoplayback?id=1&n=abc123", Source: "web_creator"}},
 				}
 
 				var gotURL, gotToken string

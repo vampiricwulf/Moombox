@@ -31,17 +31,103 @@ import (
 // the watch page's ytInitialPlayerResponse); the worker's waitForPlayback is
 // the downloader's.
 
-// PlaybackWaitApplies reports whether a download of a stream in this status
-// waits for its formats' AvailableAt. Not one that is live or post-live:
-// upstream stamps available_at only `if live_status not in ('is_live',
+// PlaybackWaitApplies reports whether a download from info waits for its
+// formats' AvailableAt. Not one of a stream upstream calls is_live or
+// post_live: it stamps available_at only `if live_status not in ('is_live',
 // 'post_live')` (_video.py, process_format_stream and
-// process_manifest_format), so neither its live capture nor its post-live
-// download ever sleeps on a pre-roll ad. Everything else waits — a finished
-// broadcast, a plain upload. The status is the extraction's, as upstream's
-// live_status is one verdict over all its player responses, which is why the
-// stamp itself is made on every response and the rule is applied here.
-func PlaybackWaitApplies(status StreamStatus) bool {
-	return status != StreamLive && status != StreamPostLive
+// process_manifest_format; 5c8bcfdbc / #14124), so neither its live capture
+// nor its post-live download ever sleeps on a pre-roll ad. Everything else
+// waits — a finished broadcast, a plain upload. The verdict is upstream's
+// (VideoInfo.PlaybackWaitExempt), one over all of an extraction's player
+// responses, which is why the stamp itself is made on every response and the
+// rule is applied here.
+//
+// It is not the extraction's StreamStatus, which reads post-live otherwise:
+// classifyStream calls a broadcast post_live once the microformat states an
+// endTimestamp, which every WEB-family answer for a finished broadcast does,
+// while upstream's post_live is videoDetails.isPostLiveDvr and that broadcast
+// is was_live — its formats stamped and waited for. Gating on the status let
+// a finished broadcast whose status came from web_creator or the watch page
+// send its size probe straight at a response with an ad.
+func PlaybackWaitApplies(info *VideoInfo) bool {
+	return info != nil && !info.PlaybackWaitExempt
+}
+
+// playbackLiveFlags are the values upstream's live_status is decided on that
+// say whether it is is_live or post_live (_list_formats): videoDetails.isLive,
+// the microformat's liveBroadcastDetails.isLiveNow — read only when no
+// response states isLive — and videoDetails.isPostLiveDvr. Each is the
+// first one a response states, as upstream's get_first over every player
+// response; nil is one nobody stated.
+type playbackLiveFlags struct {
+	isLive, isLiveNow, postLiveDvr *bool
+}
+
+// readPlaybackLiveFlags reads one response's flags.
+func readPlaybackLiveFlags(videoDetails, microformat map[string]any) playbackLiveFlags {
+	stated := func(m map[string]any, key string) *bool {
+		if v, ok := m[key].(bool); ok {
+			return &v
+		}
+		return nil
+	}
+	lbd, _ := microformat["liveBroadcastDetails"].(map[string]any)
+	return playbackLiveFlags{
+		isLive:      stated(videoDetails, "isLive"),
+		isLiveNow:   stated(lbd, "isLiveNow"),
+		postLiveDvr: stated(videoDetails, "isPostLiveDvr"),
+	}
+}
+
+// then is f with every flag it does not state taken from next, the response
+// after it — get_first's order, the first statement standing.
+func (f playbackLiveFlags) then(next playbackLiveFlags) playbackLiveFlags {
+	if f.isLive == nil {
+		f.isLive = next.isLive
+	}
+	if f.isLiveNow == nil {
+		f.isLiveNow = next.isLiveNow
+	}
+	if f.postLiveDvr == nil {
+		f.postLiveDvr = next.postLiveDvr
+	}
+	return f
+}
+
+// exempt is upstream's `live_status in ('is_live', 'post_live')`: post_live
+// when isPostLiveDvr is true, is_live when isLive is — or, when no response
+// stated isLive at all, when isLiveNow is.
+func (f playbackLiveFlags) exempt() bool {
+	if f.postLiveDvr != nil && *f.postLiveDvr {
+		return true
+	}
+	live := f.isLive
+	if live == nil {
+		live = f.isLiveNow
+	}
+	return live != nil && *live
+}
+
+// notePlaybackLive folds one response's flags into the extraction's, in the
+// order the cascade parses them — the watch page's first, as upstream's
+// player responses open with the page's own. Nil outside a cascade.
+func (s *extractionState) notePlaybackLive(f playbackLiveFlags) {
+	if s == nil {
+		return
+	}
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	s.live = s.live.then(f)
+}
+
+// playbackLive returns the extraction's flags, and false outside a cascade.
+func (s *extractionState) playbackLive() (playbackLiveFlags, bool) {
+	if s == nil {
+		return playbackLiveFlags{}, false
+	}
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	return s.live, true
 }
 
 // playbackNow is the clock a player response's pre-roll wait is measured

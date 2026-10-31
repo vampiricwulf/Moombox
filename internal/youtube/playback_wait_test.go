@@ -346,21 +346,122 @@ func TestDedupKeepsEachCopysOwnAvailability(t *testing.T) {
 	}
 }
 
-// TestPlaybackWaitAppliesAsUpstreamStamps: upstream stamps available_at on
-// every format `if live_status not in ('is_live', 'post_live')`.
+// liveStatusResponse is playerResponseWithAds with a 15 s pre-roll ad, the
+// given videoDetails flags and, unless lbd is nil, a microformat carrying lbd
+// as its liveBroadcastDetails — TV and ANDROID_VR send no microformat at all,
+// the WEB family and the watch page do.
+func liveStatusResponse(t *testing.T, details, lbd map[string]any) map[string]any {
+	t.Helper()
+	pr := playerResponseWithAds(t, []any{startPlacement("AD_PLACEMENT_KIND_START", adRenderer(15, -1))}, nil)
+	vd := pr["videoDetails"].(map[string]any)
+	for k, v := range details {
+		vd[k] = v
+	}
+	if lbd != nil {
+		pr["microformat"] = map[string]any{"playerMicroformatRenderer": map[string]any{"liveBroadcastDetails": lbd}}
+	}
+	return pr
+}
+
+// TestPlaybackWaitFollowsUpstreamsLiveStatus: upstream stamps available_at on
+// every format `if live_status not in ('is_live', 'post_live')`, and its
+// live_status is its own — post_live is videoDetails.isPostLiveDvr, is_live
+// videoDetails.isLive or, when that is not stated, liveBroadcastDetails.
+// isLiveNow. The extraction's StreamStatus reads two of these otherwise, and
+// the wait follows upstream: a finished broadcast a WEB-family client answers
+// is post_live to classifyStream (the microformat's endTimestamp) and
+// was_live upstream, so it waits; a TV answer in the post-live DVR window
+// carries no microformat, is a VOD to classifyStream and post_live upstream,
+// so it does not.
 //
-// Mutant: either exclusion dropped, or a finished stream excluded.
-func TestPlaybackWaitAppliesAsUpstreamStamps(t *testing.T) {
-	for status, want := range map[StreamStatus]bool{
-		StreamLive:       false,
-		StreamPostLive:   false,
-		StreamVOD:        true,
-		StreamNotAStream: true,
-		StreamUpcoming:   true,
+// Mutants (each run): the verdict read off StreamStatus (the first two rows);
+// isPostLiveDvr ignored (the DVR row); isLiveNow ignored (the isLiveNow-only
+// row); isLiveNow read although isLive is stated (the isLive-false row); the
+// parse leaving PlaybackWaitExempt unset (every exempt row).
+func TestPlaybackWaitFollowsUpstreamsLiveStatus(t *testing.T) {
+	ended := map[string]any{"isLiveNow": false, "startTimestamp": "2026-10-01T10:00:00+00:00", "endTimestamp": "2026-10-01T12:00:00+00:00"}
+	onAir := map[string]any{"isLiveNow": true, "startTimestamp": "2026-10-01T10:00:00+00:00"}
+	for _, tc := range []struct {
+		name       string
+		details    map[string]any
+		lbd        map[string]any
+		wantStatus StreamStatus
+		wantWait   bool
+	}{
+		{"a finished broadcast a WEB-family client answers", map[string]any{"isLiveContent": true}, ended, StreamPostLive, true},
+		{"a TV answer in the post-live DVR window", map[string]any{"isLiveContent": true, "isPostLiveDvr": true}, nil, StreamVOD, false},
+		{"a live broadcast", map[string]any{"isLiveContent": true, "isLive": true}, onAir, StreamLive, false},
+		{"live stated by isLiveNow alone", map[string]any{"isLiveContent": true}, onAir, StreamLive, false},
+		{"isLive stated false outranks isLiveNow", map[string]any{"isLiveContent": true, "isLive": false}, onAir, StreamLive, true},
+		{"a plain upload", nil, nil, StreamNotAStream, true},
 	} {
-		if got := PlaybackWaitApplies(status); got != want {
-			t.Errorf("PlaybackWaitApplies(%q) = %v, want %v", status, got, want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			p := &PlayerAPI{logger: noopLogger{}, playbackClock: func() time.Time { return preRollNow }}
+			info, err := p.parsePlayerResponse(context.Background(), liveStatusResponse(t, tc.details, tc.lbd), "", nil, "test1234567")
+			if err != nil {
+				t.Fatalf("parsePlayerResponse: %v", err)
+			}
+			if info.StreamStatus != tc.wantStatus {
+				t.Errorf("status = %q, want %q — the fixture no longer shows the divergence it is here for", info.StreamStatus, tc.wantStatus)
+			}
+			if got := PlaybackWaitApplies(info); got != tc.wantWait {
+				t.Errorf("PlaybackWaitApplies = %v, want %v (PlaybackWaitExempt %v)", got, tc.wantWait, info.PlaybackWaitExempt)
+			}
+		})
+	}
+	if PlaybackWaitApplies(nil) {
+		t.Error("PlaybackWaitApplies(nil) = true; no extraction has nothing to wait for")
+	}
+}
+
+// TestExtractionVerdictIsUpstreamsFirstStatement: upstream's live_status is
+// one verdict over every player response it holds, each value the first one
+// a response states (get_first), the watch page's own response first. The
+// cascade's winner parsed only its own, so finishExtraction stamps the
+// extraction's verdict over it; a substitute's response, which upstream
+// drops, states nothing.
+//
+// Mutants (each run): finishExtraction not stamping the verdict (the first
+// two cases keep the winner's own); a later statement overriding an earlier
+// one (the second case); the flags noted before the video-ID check (the
+// substitute's statement stands).
+func TestExtractionVerdictIsUpstreamsFirstStatement(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		first, winner      map[string]any
+		firstIsSubstitute  bool
+		winnerOwn, wantExt bool
+	}{
+		{"a value only the watch page states", map[string]any{"isPostLiveDvr": true}, nil, false, false, true},
+		{"the first statement stands", map[string]any{"isPostLiveDvr": false}, map[string]any{"isPostLiveDvr": true}, false, true, false},
+		{"a substitute's response states nothing", map[string]any{"isPostLiveDvr": true}, nil, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &PlayerAPI{logger: noopLogger{}, playbackClock: func() time.Time { return preRollNow }}
+			ctx := withExtractionState(context.Background())
+			first := liveStatusResponse(t, tc.first, nil)
+			if tc.firstIsSubstitute {
+				first["videoDetails"].(map[string]any)["videoId"] = "substitute1"
+			}
+			wp, err := p.parsePlayerResponse(withPlayerClient(ctx, "watch_page"), first, "", nil, "test1234567")
+			if tc.firstIsSubstitute != (err != nil) {
+				t.Fatalf("first parse: err %v, want one only for a substitute", err)
+			}
+			winner, err := p.parsePlayerResponse(withPlayerClient(ctx, "TVHTML5"), liveStatusResponse(t, tc.winner, nil), "", nil, "test1234567")
+			if err != nil {
+				t.Fatalf("winner parse: %v", err)
+			}
+			if winner.PlaybackWaitExempt != tc.winnerOwn {
+				t.Fatalf("winner's own verdict = %v, want %v", winner.PlaybackWaitExempt, tc.winnerOwn)
+			}
+			info, err := p.finishExtraction(ctx, winner, nil, "test1234567", &mismatchTally{attempts: 1, survived: 1}, wp)
+			if err != nil {
+				t.Fatalf("finishExtraction: %v", err)
+			}
+			if info.PlaybackWaitExempt != tc.wantExt {
+				t.Errorf("extraction's verdict = %v, want %v", info.PlaybackWaitExempt, tc.wantExt)
+			}
+		})
 	}
 }
 

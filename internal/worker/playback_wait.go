@@ -50,14 +50,15 @@ func formatByItag(formats []youtube.Format, itag int) *youtube.Format {
 	return nil
 }
 
-// playbackWaitLeft is how long a download of a stream in status must still
-// wait at now before requesting media that is available from at: upstream's
+// playbackWaitLeft is how long a download from info must still wait at now
+// before requesting media that is available from at: upstream's
 // `available_at - int(time.time())`, so the second now falls in counts whole,
-// as on upstream's integer clock. Zero when nothing waits: a live or
-// post-live stream (youtube.PlaybackWaitApplies), or an instant already past
-// — which no ad, the zero time, always is.
-func playbackWaitLeft(status youtube.StreamStatus, at, now time.Time) time.Duration {
-	if !youtube.PlaybackWaitApplies(status) {
+// as on upstream's integer clock. Zero when nothing waits: a stream upstream
+// calls live or post-live (youtube.PlaybackWaitApplies — its own live_status,
+// not info.StreamStatus), or an instant already past — which no ad, the zero
+// time, always is.
+func playbackWaitLeft(info *youtube.VideoInfo, at, now time.Time) time.Duration {
+	if !youtube.PlaybackWaitApplies(info) {
 		return 0
 	}
 	return max(at.Sub(now.Truncate(time.Second)), 0)
@@ -79,10 +80,11 @@ func playbackWaitLeft(status youtube.StreamStatus, at, now time.Time) time.Durat
 // and how long is left, cleared however the wait ends, and one Info line
 // names the seconds and the client. Nothing to wait for does nothing and
 // logs nothing. Returns ctx's error when ctx ends first — a cancel or a
-// shutdown — which the strategy hands back as its setup error.
-func waitForPlayback(ctx context.Context, job *JobContext, status youtube.StreamStatus, at time.Time, source, tag string) error {
+// shutdown — which the strategy hands back as its setup error. info is the
+// extraction the URLs came from, whose live_status says whether to wait.
+func waitForPlayback(ctx context.Context, job *JobContext, info *youtube.VideoInfo, at time.Time, source, tag string) error {
 	now := time.Now()
-	left := playbackWaitLeft(status, at, now)
+	left := playbackWaitLeft(info, at, now)
 	if left <= 0 {
 		return nil
 	}
@@ -117,12 +119,12 @@ func waitForPlayback(ctx context.Context, job *JobContext, status youtube.Stream
 // must not be installed — when ctx ends first, or when ctx's deadline falls
 // before the wait would end, in which case it does not wait at all (a Warn
 // says so): a refresh bound too tightly for the ad keeps the current URL, as
-// a refresh that failed would.
-func waitForFreshPlayback(ctx context.Context, job *JobContext, status youtube.StreamStatus, f *youtube.Format, tag string) bool {
+// a refresh that failed would. info is the fresh extraction f came from.
+func waitForFreshPlayback(ctx context.Context, job *JobContext, info *youtube.VideoInfo, f *youtube.Format, tag string) bool {
 	if f == nil {
 		return true
 	}
-	left := playbackWaitLeft(status, f.AvailableAt, time.Now())
+	left := playbackWaitLeft(info, f.AvailableAt, time.Now())
 	if left <= 0 {
 		return true
 	}

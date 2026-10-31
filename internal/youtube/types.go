@@ -107,6 +107,17 @@ type VideoInfo struct {
 	DashManifestAvailableAt time.Time `json:"-"`
 	HlsManifestAvailableAt  time.Time `json:"-"`
 
+	// PlaybackWaitExempt is true when yt-dlp would call this stream is_live
+	// or post_live, the two live_status values whose formats it never stamps
+	// with available_at, so a download from this info waits for no pre-roll
+	// ad (PlaybackWaitApplies). It is upstream's own verdict, read off the
+	// values its live_status is decided on (playbackLiveFlags) — not
+	// StreamStatus, which calls a finished broadcast post_live where
+	// upstream calls it was_live, and waits. A cascade's is the whole
+	// extraction's (finishExtraction), a single parse's its own response's.
+	// Never serialised, as the instants it gates are not.
+	PlaybackWaitExempt bool `json:"-"`
+
 	// SessionAuth is the login state YouTube reported for the session that
 	// produced this info (see SessionAuthState). Diagnostic only — nothing
 	// downloads differently because of it — but it is what lets a
@@ -290,8 +301,8 @@ type Format struct {
 	// ad, as a Premium account's never does, which is "at once". Every copy
 	// keeps its own response's value: a TokenFreeAlternate came from another
 	// client's response, with an ad of its own. Whether a download waits on
-	// it is PlaybackWaitApplies'. Never serialised: a resume re-extracts, and
-	// the instant is long past by then.
+	// it is PlaybackWaitApplies' (VideoInfo.PlaybackWaitExempt). Never
+	// serialised: a resume re-extracts, and the instant is long past by then.
 	AvailableAt time.Time `json:"-"`
 
 	// AudioTrackID is `audioTrack.id` — the per-language identity of a dubbed

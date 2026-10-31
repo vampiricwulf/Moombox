@@ -189,7 +189,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// The master playlist is fetched; the variant playlist and its segments
 	// wait out the pre-roll ad of the response that served the master
 	// (waitForPlayback) — a finished stream's only, a live one never waits.
-	if err := waitForPlayback(ctx, job, videoInfo.StreamStatus, videoInfo.HlsManifestAvailableAt, videoInfo.HlsManifestSource, "HLS"); err != nil {
+	if err := waitForPlayback(ctx, job, videoInfo, videoInfo.HlsManifestAvailableAt, videoInfo.HlsManifestSource, "HLS"); err != nil {
 		return nil, fmt.Errorf("HLS: waiting out the pre-roll ad: %w", err)
 	}
 

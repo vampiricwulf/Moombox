@@ -488,7 +488,7 @@ func refreshGvsCredentials(
 	if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
 		formats := videoInfo.Formats
 		playerURL := videoInfo.PlayerURL
-		status := videoInfo.StreamStatus
+		waitInfo := videoInfo
 		if job.YT != nil {
 			fresh, err := refreshVideoInfo(job.YT, refreshCtx, job.Job.VideoID)
 			if err != nil {
@@ -496,7 +496,7 @@ func refreshGvsCredentials(
 					"jobID", job.Job.ID, "tag", tag, "err", err)
 			} else if fresh != nil {
 				formats = fresh.Formats
-				status = fresh.StreamStatus
+				waitInfo = fresh
 				if fresh.PlayerURL != "" {
 					playerURL = fresh.PlayerURL
 				}
@@ -543,7 +543,7 @@ func refreshGvsCredentials(
 			}
 			job.Logger.Warn("[POT] credential refresh: itag now served by a client of a different token class — keeping the current URL",
 				"jobID", job.Job.ID, "tag", tag, "itag", itag, "setupSource", streamSource, "freshSource", freshSource, "reason", reason)
-		} else if waitForFreshPlayback(refreshCtx, job, status, formatByItag(formats, itag), tag) {
+		} else if waitForFreshPlayback(refreshCtx, job, waitInfo, formatByItag(formats, itag), tag) {
 			// The fresh response's pre-roll ad is waited out first, within
 			// refreshCtx (see the doc above); one that outlasts it leaves the
 			// URL uninstalled, the token half standing.
