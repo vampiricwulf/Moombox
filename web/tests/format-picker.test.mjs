@@ -105,3 +105,53 @@ test("with every badge marked the preselection keeps the old order", { skip }, a
   assert.equal(h.el("video-format-select").value, "303");
   assert.equal(h.el("audio-format-select").value, "140");
 });
+
+// The owner's third picker follow-up: while a stream is live or upcoming
+// every adaptive rendition it lists is segmented — the live path fetches
+// exactly those — so " [segmented]" on every row said nothing. The mark is
+// left off for a live or upcoming streamStatus and kept for a VOD, a
+// finished stream (post_live) and a status the answer did not state. The
+// damaged mark, the badges and the preselection, which still passes a
+// segmented badge over, are the same for every status.
+//
+// MUTANT: the onAir test dropped, or reading "live" alone or "upcoming"
+// alone (that status's rows say segmented); "post_live" or "vod" read as on
+// air (their rows lose the mark); the preselection reading the mark as shown
+// rather than the server's flag (a live stream's segmented WEBM and Opus
+// badges are preselected).
+for (const [streamStatus, shown] of [
+  ["live", false],
+  ["upcoming", false],
+  ["vod", true],
+  ["post_live", true],
+  [undefined, true],
+]) {
+  test(`streamStatus ${streamStatus}: the segmented mark is ${shown ? "shown" : "left off"}`, { skip }, async () => {
+    const h = await harness.makeApp();
+    await h.app.populateFormatSelects({
+      streamStatus,
+      videoFormats: [
+        video(303, 1920, 1080, WEBM, 6_000_000, { segmented: true }),
+        video(299, 1920, 1080, MP4, 6_000_000, { damaged: true, segmented: true }),
+        video(136, 1280, 720, MP4, 2_000_000),
+      ],
+      audioFormats: [
+        audio(251, OPUS, 160_000, { segmented: true }),
+        audio(140, AAC, 128_000),
+      ],
+      bestItags: { bestWebmVideo: 303, bestMp4Video: 136, bestOpusAudio: 251, bestAacAudio: 140 },
+    });
+    const seg = shown ? " [segmented]" : "";
+    assert.deepEqual(options(h, "video-format-select"), [
+      ["303", `1920x1080 WEBM 6000kbps [Best WEBM]${seg}`],
+      ["299", `1920x1080 MP4 6000kbps [damaged]${seg}`],
+      ["136", "1280x720 MP4 2000kbps [Best MP4]"],
+    ]);
+    assert.deepEqual(options(h, "audio-format-select"), [
+      ["251", `160kbps 48000Hz OPUS [Best OPUS]${seg}`],
+      ["140", "128kbps 48000Hz AAC [Best AAC]"],
+    ]);
+    assert.equal(h.el("video-format-select").value, "136", "the intact MP4 badge, past the segmented WEBM one");
+    assert.equal(h.el("audio-format-select").value, "140", "the intact AAC badge, past the segmented Opus one");
+  });
+}
