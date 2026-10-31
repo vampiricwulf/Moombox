@@ -21,8 +21,8 @@ import (
 // to the SegmentDownloader.
 //
 // routedSolver is the composite cipher.Solver (sidecar primary, goja fallback);
-// cipherSolver is the legacy *GojaResolver. Both are used to decrypt the `/n/`
-// throttling parameter in the master URL before fetching — yt-dlp does the
+// cipherSolver is the legacy *GojaResolver. Both are used to solve the `/n/`
+// challenge in the master URL before fetching — yt-dlp does the
 // same in extractor/youtube/_video.py:3684-3690. Without this, YouTube's CDN
 // returns HTTP 403 on every segment for streams whose master URL ships with
 // an encrypted n in its path (cb017549-family players).
