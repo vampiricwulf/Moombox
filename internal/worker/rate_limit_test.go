@@ -592,34 +592,48 @@ func TestRateLimitedGoLiveKeepsWaiting(t *testing.T) {
 }
 
 // TestRateLimitedPeriodicFetchHoldsTheBacklog: the waiting loop's periodic
-// full fetch that YouTube refuses for a rate limit holds the backlog, on the
-// first refusal of a spell: two in a row are one spell, and one after an
-// answer is a new one. The loop's fetches held nothing; a broadcast waiting
-// days was the one job that saw the limit, and the backlog went on being
-// admitted into it.
+// full fetch that YouTube refuses for a rate limit — with its verdict, or
+// with a 429 on the whole cascade — holds the backlog, on the first refusal
+// of a spell: two in a row are one spell, and one after an answer is a new
+// one. The loop's fetches held nothing; a broadcast waiting days was the one
+// job that saw the limit, and the backlog went on being admitted into it.
 //
 // Mutants: drop noteFetch from the periodic fetch — no hold; hold on every
-// refusal — three.
+// refusal — three; drop noteFetchErr from it — the 429 row holds nothing.
 func TestRateLimitedPeriodicFetchHoldsTheBacklog(t *testing.T) {
-	// Six hours out the status probe asks every ten minutes, so the full
-	// fetch is due on the first of those ticks past each half hour.
-	run := driveWaitForLive(t, 6*time.Hour, 2*time.Hour+20*time.Minute, func(start time.Time) waitFakes {
-		n := 0
-		return waitFakes{
-			full: func(time.Duration) (*youtube.VideoInfo, error) {
-				n++
-				if n == 3 {
-					return upcomingAnswer(start), nil
+	for _, tc := range []struct {
+		name    string
+		refusal func() (*youtube.VideoInfo, error)
+	}{
+		{"verdict", func() (*youtube.VideoInfo, error) {
+			return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedOut), nil
+		}},
+		// The limit's HTTP form, a 429 on the whole cascade, is a refusal too.
+		{"429", func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Six hours out the status probe asks every ten minutes, so the
+			// full fetch is due on the first of those ticks past each half
+			// hour.
+			run := driveWaitForLive(t, 6*time.Hour, 2*time.Hour+20*time.Minute, func(start time.Time) waitFakes {
+				n := 0
+				return waitFakes{
+					full: func(time.Duration) (*youtube.VideoInfo, error) {
+						n++
+						if n == 3 {
+							return upcomingAnswer(start), nil
+						}
+						return tc.refusal()
+					},
 				}
-				return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedOut), nil
-			},
-		}
-	})
-	if n := run.count("full"); n != 4 {
-		t.Fatalf("%d periodic full fetches, want 4; calls:%s", n, run)
-	}
-	if n := run.count("hold"); n != 2 {
-		t.Errorf("%d backlog holds for refusals at the 1st, 2nd and 4th fetch, want 2 — one a spell; calls:%s", n, run)
+			})
+			if n := run.count("full"); n != 4 {
+				t.Fatalf("%d periodic full fetches, want 4; calls:%s", n, run)
+			}
+			if n := run.count("hold"); n != 2 {
+				t.Errorf("%d backlog holds for refusals at the 1st, 2nd and 4th fetch, want 2 — one a spell; calls:%s", n, run)
+			}
+		})
 	}
 }
 

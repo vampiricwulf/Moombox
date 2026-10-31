@@ -2,12 +2,14 @@ package worker
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/chat"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
@@ -412,4 +414,106 @@ func TestPrunedRateLimitedBacklogLosesItsSpellAndHold(t *testing.T) {
 		_, held := backlogStreak(w, "spell_pruned")
 		return !held && len(w.rateLimitSpells.ids()) == 0
 	})
+}
+
+// TestRefusedConfirmationsEndInErrorAfterADay: a broadcast that has begun —
+// or ended — while YouTube refuses every go-live confirmation ends in Error
+// too, on the first refused confirmation a day or more after the spell's
+// first, saying it gave up: in the live arm and the VOD arm, refused with
+// the verdict or a 429 on the whole cascade, and in the default arm, whose
+// full fetch confirms a stream the cookied probe cannot read. The error is
+// the verdict as yt-dlp words it, or the 429, and the note; the waiting
+// room's chat stops with it (TestGivingUpOnARateLimitStopsTheChat).
+//
+// Mutants: drop the outlasted check from the verdict or the 429 of the live
+// arm, the VOD arm or the default arm — that row is still waiting at 26 h;
+// reset since on every refusal — every row is.
+func TestRefusedConfirmationsEndInErrorAfterADay(t *testing.T) {
+	verdict, _ := playabilityVerdict(rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedOut))
+	for _, tc := range []struct {
+		name     string
+		signedIn bool
+		status   func(at time.Duration, start time.Time) (*youtube.VideoInfo, error)
+		refusal  func() (*youtube.VideoInfo, error)
+		want     string
+	}{
+		{name: "live arm, the verdict", status: liveFrom3m(liveAnswer),
+			refusal: func() (*youtube.VideoInfo, error) {
+				return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedOut), nil
+			},
+			want: verdict + rateLimitGaveUpNote},
+		{name: "live arm, a 429", status: liveFrom3m(liveAnswer),
+			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
+			want:    rateLimited429(0).Error() + rateLimitGaveUpNote},
+		{name: "VOD arm, the verdict", status: liveFrom3m(vodAnswer),
+			refusal: func() (*youtube.VideoInfo, error) {
+				return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedOut), nil
+			},
+			want: verdict + rateLimitGaveUpNote},
+		{name: "VOD arm, a 429", status: liveFrom3m(vodAnswer),
+			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
+			want:    rateLimited429(0).Error() + rateLimitGaveUpNote},
+		{name: "default arm, the verdict", signedIn: true, status: membersStatus,
+			refusal: func() (*youtube.VideoInfo, error) {
+				return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedOut), nil
+			},
+			want: verdict + rateLimitGaveUpNote},
+		{name: "default arm, a 429", signedIn: true, status: membersStatus,
+			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
+			want:    rateLimited429(0).Error() + rateLimitGaveUpNote},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := driveWaitForLive(t, 2*time.Minute, rateLimitCap+2*time.Hour, func(start time.Time) waitFakes {
+				return waitFakes{
+					signedIn: tc.signedIn,
+					status:   func(at time.Duration) (*youtube.VideoInfo, error) { return tc.status(at, start) },
+					full:     func(time.Duration) (*youtube.VideoInfo, error) { return tc.refusal() },
+				}
+			})
+			fulls := fullCalls(run)
+			if run.result == nil {
+				t.Fatalf("still waiting two hours past a day of refused confirmations (%d made)", len(fulls))
+			}
+			if len(fulls) < 3 {
+				t.Fatalf("full fetches at %v; calls:%s", fulls, run)
+			}
+			first, last, prev := fulls[0], fulls[len(fulls)-1], fulls[len(fulls)-2]
+			if last-first < rateLimitCap || prev-first >= rateLimitCap || run.returned != last {
+				t.Errorf("gave up at %s on the confirmation %s after the first; want on the first one %s or more after it",
+					run.returned, last-first, rateLimitCap)
+			}
+			if run.result.ShouldDownload || run.result.ErrSentinel != nil || run.result.Error != tc.want {
+				t.Errorf("result = download %v, sentinel %v, error %q; want Error %q with no sentinel",
+					run.result.ShouldDownload, run.result.ErrSentinel, run.result.Error, tc.want)
+			}
+			if run.row.Progress != "" {
+				t.Errorf("row progress = %q once the loop gave up, want the wait's line cleared", run.row.Progress)
+			}
+		})
+	}
+}
+
+// TestGivingUpOnARateLimitStopsTheChat: the waiting loop's give-up at the day
+// stops the waiting room's chat, as its other give-ups do: left running, it
+// went on capturing for a job that had ended in Error, beside whatever ran
+// the job next.
+//
+// Mutant: drop stopEarlyChat from giveUpRateLimited — the chat is still
+// tracked.
+func TestGivingUpOnARateLimitStopsTheChat(t *testing.T) {
+	sp, _, job := foundTestJob(t)
+	early := chat.NewChatDownloader(chat.ChatDownloaderOptions{VideoID: job.VideoID,
+		OutputFile: filepath.Join(t.TempDir(), "chat.json")})
+	sp.trackChat(early)
+	l := loopRateLimit{refusing: true, since: time.Now().Add(-rateLimitCap)}
+	res := sp.giveUpRateLimited(job, &l, nil, rateLimited429(0), early)
+	sp.mu.Lock()
+	tracked := len(sp.activeChats)
+	sp.mu.Unlock()
+	if tracked != 0 {
+		t.Errorf("%d chat downloader(s) still tracked after the give-up, want the waiting room's stopped", tracked)
+	}
+	if want := rateLimited429(0).Error() + rateLimitGaveUpNote; res.Error != want {
+		t.Errorf("error = %q, want %q", res.Error, want)
+	}
 }

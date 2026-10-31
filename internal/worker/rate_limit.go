@@ -21,11 +21,16 @@ import (
 // for up to an hour (26feac3dd, #12958), or with a captcha challenge
 // (f484c5159, #12939) — or, in its HTTP form, with a 429 on every client of
 // the cascade (youtube.HTTPRateLimitError; isRateLimited). Upstream words
-// the refusal and ends the extraction (_video.py:4074-4081 at b77c9304e) —
-// one command, one video, and the operator runs it again later. An archiver
-// is the one that runs it again, so here the verdict is transient
-// (ErrRateLimited) and a job waits it out rather than ending in Error, which
-// is going beyond upstream:
+// the refusal (_video.py:4074-4081 at b77c9304e) and, unless --wait-for-video
+// is given, ends the extraction (raise_no_formats, common.py:1264-1271) —
+// one command, one video, and the operator runs it again later. With the
+// flag the refusal is only warned of, and the extraction is run again on the
+// user's flat interval, with no bound (YoutubeDL._wait_for_video's
+// ReExtractInfo, YoutubeDL.py:1755-1799, which _handle_extraction_exceptions
+// re-extracts on, 1723-1736). An archiver is the one that runs it again, so
+// here the verdict is transient (ErrRateLimited) and every job waits it out
+// rather than ending in Error, as if the flag were always given, and goes
+// beyond it in how:
 //
 //   - a backlog VOD goes back to Queued, held for rateLimitBackoff, outside
 //     backlogRetryLimit — a wall the whole session hits says nothing about
@@ -49,7 +54,8 @@ import (
 //     been waited out (loopRateLimit).
 //
 // Four rules bound and shape the wait (the owner's decisions after W5), each
-// beyond upstream as well, which has no wait to bound:
+// beyond upstream as well, whose --wait-for-video waits on one flat interval
+// for as long as the refusals last, and tells no one:
 //
 //   - a spell of refusals ends the job in Error once it has lasted
 //     rateLimitCap, a day, with the refusal as yt-dlp words it — 24 hourly
@@ -206,8 +212,8 @@ func rateLimitVerdictMessage(reason string, auth youtube.SessionAuthState) strin
 var rateLimitGaveUpNote = fmt.Sprintf(" (gave up after %d hours of refusals)", int(rateLimitCap/time.Hour))
 
 // rateLimitGaveUp is the error a job ends with once its spell of refusals
-// has lasted rateLimitCap (outlastRateLimit): the refusal as yt-dlp words it,
-// saying the job gave up. Not an ErrRateLimited any more, which processJob
+// has lasted rateLimitCap (outlastRateLimit, giveUpRateLimited): the refusal
+// as yt-dlp words it, or the 429, saying the job gave up. Not an ErrRateLimited any more, which processJob
 // would wait out again, and without the sentinel's own "(rate-limited by
 // YouTube)", which the wording already says.
 func rateLimitGaveUp(err error) error {
@@ -242,14 +248,18 @@ func answeredFetch(info *youtube.VideoInfo) bool {
 // for as long as the wait lasted, however soon the limit cleared.
 //
 // What the loop holds off is the go-live confirmation, the full cascade the
-// live and VOD arms make when the status probe says the stream has begun:
-// once YouTube has refused one, the next is made confirmationHoldAfter it,
-// tapering from two minutes to rateLimitRetryInterval over the spell's
-// refused confirmations, under the wait's progress line, and the arms read
-// the probe's "live" as nothing until then. The loop's probe timer wakes at
-// the hold's end (heldFor), so the confirmation is made then, not on the
-// first probe past it. The periodic full fetch keeps its own half-hourly
-// cadence. A spell that has lasted rateLimitCap ends the job (outlasted).
+// live and VOD arms make when the status probe says the stream has begun,
+// and the one the default arm makes on every probe the cookied probe cannot
+// read (membersOnly), which confirms a stream it cannot see: once YouTube has
+// refused one, the next is made confirmationHoldAfter it, tapering from two
+// minutes to rateLimitRetryInterval over the spell's refused confirmations,
+// under the wait's progress line, and the arms read the probe's answer as
+// nothing until then. The loop's probe timer wakes at the hold's end
+// (heldFor), so the confirmation is made then, not on the first probe past
+// it. The periodic full fetch keeps its own half-hourly cadence. A refusal is
+// the verdict (noteFetch) or a 429 on the whole cascade, the limit's HTTP
+// form (noteFetchErr). A spell that has lasted rateLimitCap ends the job
+// (outlasted).
 type loopRateLimit struct {
 	// refusing: the last full fetch was refused. The first refusal of a spell
 	// places the backlog hold, as outlastRateLimit's does.
@@ -296,7 +306,6 @@ func (l *loopRateLimit) outlasted(now time.Time) bool {
 // hold on confirmations the periodic fetch finds the limit gone under. The
 // caller reads outlasted after a refusal.
 func (sp *StreamProcessor) noteFetch(job *database.Job, l *loopRateLimit, info *youtube.VideoInfo, confirmation bool) bool {
-	now := time.Now()
 	if !rateLimitedFetch(info) {
 		l.refusing, l.since, l.confirmations = false, time.Time{}, 0
 		if answeredFetch(info) {
@@ -308,6 +317,41 @@ func (sp *StreamProcessor) noteFetch(job *database.Job, l *loopRateLimit, info *
 		}
 		return false
 	}
+	sp.noteRefusal(job, l, confirmation, isCaptchaReason(info.PlayabilityReason), 0, "reason", info.PlayabilityReason)
+	return true
+}
+
+// noteFetchErr reads a full fetch the waiting loop made that failed, and
+// reports whether the failure was YouTube rate-limiting the session: a 429
+// on every client of the cascade (isRateLimited; youtube.HTTPRateLimitError),
+// the HTTP form of the limit noteFetch reads in a verdict, and a refusal as
+// that is — the spell's backlog hold, the taper, the line, the day's cap. It
+// went the way of a blip: a go-live confirmation was made again on the next
+// probe, the whole cascade sent into the limit every 30 s with nothing held
+// and nothing bounding it. The 429's Retry-After is a floor on the
+// confirmation's hold, the least YouTube asked for, up to the hour, as on the
+// wait in place (rateLimitWait). Any other failure is no answer: it reports
+// false and changes nothing, so a spell — and a hold on confirmations —
+// stands through it.
+func (sp *StreamProcessor) noteFetchErr(job *database.Job, l *loopRateLimit, err error, confirmation bool) bool {
+	if !isRateLimited(err) {
+		return false
+	}
+	var floor time.Duration
+	if rl, ok := errors.AsType[*youtube.HTTPRateLimitError](err); ok {
+		floor = min(rl.RetryAfter, rateLimitBackoff)
+	}
+	sp.noteRefusal(job, l, confirmation, isCaptcha(err), floor, "err", err)
+	return true
+}
+
+// noteRefusal is a refusal of the waiting loop's full fetch (noteFetch,
+// noteFetchErr): the spell's first holds backlog admission, a captcha opens
+// the session's captcha spell, and a refused confirmation holds the next one
+// off for its turn of the taper — or for floor, when that is longer — under
+// the wait's progress line. what and why name the refusal in the log.
+func (sp *StreamProcessor) noteRefusal(job *database.Job, l *loopRateLimit, confirmation, captcha bool, floor time.Duration, what string, why any) {
+	now := time.Now()
 	first := !l.refusing
 	if first {
 		l.refusing, l.since = true, now
@@ -315,7 +359,6 @@ func (sp *StreamProcessor) noteFetch(job *database.Job, l *loopRateLimit, info *
 			sp.onRateLimited()
 		}
 	}
-	captcha := isCaptchaReason(info.PlayabilityReason)
 	if captcha {
 		sp.captcha.raise(job)
 	}
@@ -325,16 +368,15 @@ func (sp *StreamProcessor) noteFetch(job *database.Job, l *loopRateLimit, info *
 	}
 	if !confirmation {
 		logRefusal("YouTube rate-limited the waiting loop's periodic full fetch",
-			"videoID", job.VideoID, "reason", info.PlayabilityReason)
-		return true
+			"videoID", job.VideoID, what, why)
+		return
 	}
 	l.confirmations++
-	hold := confirmationHoldAfter(l.confirmations)
+	hold := max(confirmationHoldAfter(l.confirmations), floor)
 	l.until, l.captcha = now.Add(hold), captcha
 	sp.db.UpdateJobFields(job.ID, map[string]any{"progress": waitLineFor(captcha)(hold)})
 	logRefusal("YouTube rate-limited the go-live confirmation; the job keeps waiting, its chat with it, and confirms again",
-		"videoID", job.VideoID, "retryIn", hold, "reason", info.PlayabilityReason)
-	return true
+		"videoID", job.VideoID, "retryIn", hold, what, why)
 }
 
 // tickRateLimit runs once per answered probe, ahead of the loop's reading
@@ -361,16 +403,22 @@ func (sp *StreamProcessor) endRateLimit(job *database.Job, l *loopRateLimit) {
 }
 
 // giveUpRateLimited is the waiting loop's result once its spell of refusals
-// has lasted rateLimitCap (loopRateLimit.outlasted): the refusal as yt-dlp
-// words it, saying the job gave up, with no sentinel — processJob would wait
-// an ErrRateLimited out again — so the job ends in Error (setJobError, which
-// never writes over an operator's Cancel).
-func (sp *StreamProcessor) giveUpRateLimited(job *database.Job, l *loopRateLimit, info *youtube.VideoInfo, chatDl *chat.ChatDownloader) *StreamProcessResult {
+// has lasted rateLimitCap (loopRateLimit.outlasted): the refusal — the
+// verdict info carries, as yt-dlp words it, or err, a 429 on the whole
+// cascade — saying the job gave up (rateLimitGaveUp), with no sentinel —
+// processJob would wait an ErrRateLimited out again — so the job ends in
+// Error (setJobError, which never writes over an operator's Cancel). The
+// waiting room's chat stops with it.
+func (sp *StreamProcessor) giveUpRateLimited(job *database.Job, l *loopRateLimit, info *youtube.VideoInfo, err error, chatDl *chat.ChatDownloader) *StreamProcessResult {
 	sp.stopEarlyChat(chatDl)
-	msg, _ := playabilityVerdict(info)
+	refusal := err
+	if refusal == nil {
+		msg, _ := playabilityVerdict(info)
+		refusal = errors.New(msg)
+	}
 	sp.logger.Warn("YouTube has refused the waiting loop's full fetches for a day; giving up",
-		"videoID", job.VideoID, "since", l.since.UTC().Format(time.RFC3339), "reason", info.PlayabilityReason)
-	return &StreamProcessResult{VideoInfo: info, ShouldDownload: false, Error: msg + rateLimitGaveUpNote}
+		"videoID", job.VideoID, "since", l.since.UTC().Format(time.RFC3339), "refusal", refusal)
+	return &StreamProcessResult{VideoInfo: info, ShouldDownload: false, Error: rateLimitGaveUp(refusal).Error()}
 }
 
 // isRateLimited reports whether err is YouTube rate-limiting the session: a
