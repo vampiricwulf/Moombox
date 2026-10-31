@@ -199,10 +199,11 @@ func swapHls(t *testing.T, hls DownloadStrategy) {
 // TestSetupFallsBackWhenChallengesCannotBeSolved is audit G10's live half and
 // owner decision 7. A live capture whose from-start setup — manifest-free
 // DASH, or a DASH manifest — failed on the player's JS challenges ended the
-// job in Error; it now records the live HLS playlist instead, from the live
-// edge, with a Warn saying why from-start was dropped, as yt-dlp records a
-// live stream by default (HLS, the live adaptive formats skipped). With no
-// master in the extraction the HLS setup asks the cookieless chain for one. A
+// job in Error; it now records the live HLS playlist instead, from the
+// oldest segment its window holds, with a Warn saying why from-start was
+// dropped, as yt-dlp records a live stream by default (HLS, the live adaptive
+// formats skipped). With no master in the extraction the HLS setup asks the
+// cookieless chain for one. A
 // post-live manifest-free capture, which has no live edge, runs again on
 // the formats that need no player JS (the drop, one cookieless re-extract,
 // the merge), from the start still. Any other failure, a VOD's own (which
@@ -216,7 +217,8 @@ func swapHls(t *testing.T, hls DownloadStrategy) {
 // falls back); the empty-master arm dropped from DownloadHls (the no-master
 // row fails to set up); the post-live re-run on the original formats (its row sees
 // the tv copies); the post-live split-pair check dropped (the no-pair row
-// runs the strategy again); the Warn dropped (the live rows).
+// runs the strategy again); the Warn dropped, or claiming the live edge (the
+// live rows).
 func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 	systemic := fmt.Errorf("manifestless DASH: resolve video URL: itag 299: %w: %w", errChallengesUnsolvable, cipher.ErrNUnsolved)
 	live := func() *youtube.VideoInfo {
@@ -269,8 +271,14 @@ func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 			if !warned {
 				t.Errorf("no Warn saying why from-start was dropped: %v", logs.lines())
 			}
-			if line := logLine(logs, "[Cipher] live: recording from the start cannot run"); line == nil || !errors.Is(line["err"].(error), tc.err) {
+			line := logLine(logs, "[Cipher] live: recording from the start cannot run")
+			if line == nil || !errors.Is(line["err"].(error), tc.err) {
 				t.Errorf("fallback line = %v, want the setup failure as its err", line)
+			}
+			// It says where the capture starts: the oldest segment the
+			// playlist's window holds (StartSeq -1), not the live edge.
+			if msg, _ := line[""].(string); !strings.HasSuffix(msg, "from the oldest segment its window holds") {
+				t.Errorf("fallback line %q does not say the capture starts at the window's oldest segment", msg)
 			}
 		})
 	}

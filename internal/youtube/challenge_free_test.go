@@ -111,20 +111,19 @@ const visionosDirectBody = `{
 	], "hlsManifestUrl": "https://manifest.googlevideo.com/api/manifest/hls_variant/id/abc/source/visionos/file/index.m3u8"}
 }`
 
-// TestJSLessExtractionRanksVisionOSFirst is owner decision 4 (audit G10):
-// while the player's JS challenges cannot be solved — the cipher sidecar
-// disabled or down — an extraction ranks for a download without player JS,
-// as yt-dlp asks _DEFAULT_JSLESS_CLIENTS = ('visionos',) when no JS runtime
-// is available (_video.py:144, 2972-2991): visionos is asked even though
-// TV's answer was adequate (the cascade asks the cookieless chain only when
-// it is not), its copies win their streams over TV's signatureCipher ones,
-// its n-free HLS master replaces TV's, and the info says so (JSLess) for the
-// worker's "formats may be missing" warning. While they can be solved, and
-// with no hook at all (the default), nothing changes: visionos is not asked
-// and TV's copies win. When the cookieless chain ran anyway (TV
-// inadequate), visionos is asked once, not twice, and still wins. The
-// signed-in cascade ranks the same way, which goes beyond upstream (its
-// authenticated tuple has no JS-less variant).
+// TestJSLessExtractionRanksVisionOSFirst is owner decision 4 (audit G10): while
+// the player's JS challenges cannot be solved — the cipher sidecar disabled or
+// down — an extraction ranks for a download without player JS, as yt-dlp asks
+// _DEFAULT_JSLESS_CLIENTS = ('visionos',) when no JS runtime is available
+// (_video.py:144, 2972-2977, 2994-3000): visionos is asked even though TV's
+// answer was adequate (the cascade asks the cookieless chain only when it is
+// not), its copies win their streams over TV's signatureCipher ones, its n-free
+// HLS master replaces TV's, and the info says so (JSLess) for the worker's
+// "formats may be missing" warning. While they can be solved, and with no hook
+// at all (the default), nothing changes: visionos is not asked and TV's copies
+// win. When the cookieless chain ran anyway (TV inadequate), visionos is asked
+// once, not twice, and still wins. The signed-in cascade ranks the same way,
+// which goes beyond upstream (its authenticated tuple has no JS-less variant).
 //
 // Two extractions get no extra visionos call though they rank JS-lessly: an
 // upcoming stream's (the waiting room has no formats to rank, and a poll

@@ -355,7 +355,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		"strategy", strategy.Kind())
 	if videoInfo.JSLess {
 		// yt-dlp's own warning when it extracts without a JS runtime
-		// (_video.py:2985-2991): the extraction ranked visionos first, and
+		// (_video.py:2994-3000): the extraction ranked visionos first, and
 		// the renditions only a JS-solving client serves are not there.
 		jobCtx.Logger.Warn("[Cipher] the cipher sidecar is disabled or not running — YouTube formats were ranked for a download without player JS (visionos first), and some formats may be missing",
 			"jobID", jobCtx.Job.ID)

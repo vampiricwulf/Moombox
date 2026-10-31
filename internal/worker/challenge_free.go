@@ -232,7 +232,13 @@ func challengeFreeHlsInfo(ctx context.Context, job *JobContext, info *youtube.Vi
 //     every client (_needs_live_processing), visionos's among them.
 //
 // Any other setup error — or one of these with the job already cancelled —
-// is returned as it came. A fallback that fails too names both failures.
+// is returned as it came. A fallback that fails too names both failures. So
+// is a VOD's or post-live stream's DASH-manifest setup (DashStrategy: an OTF
+// not_a_stream, a post-live stream with a manifest and no split pair) whose
+// manifest n has no answer: yt-dlp skips that manifest and keeps the other
+// clients' copies (_video.py:3730-3751), but the whole-file path cannot
+// fetch an OTF format, and re-routing a post-live manifest stream onto a
+// re-extracted split pair is beyond what the plan asked of this.
 //
 // A setup that built its downloaders, the first one or a fallback's, then
 // clears its part of the other shape's staged media before they write
@@ -261,7 +267,7 @@ func setupOrChallengeFree(ctx context.Context, job *JobContext, strategy Downloa
 	kind := strategy.Kind()
 	switch {
 	case !isVod && (kind == ManifestlessDashStrategy.Kind() || kind == DashStrategy.Kind()):
-		job.Logger.Warn("[Cipher] live: recording from the start cannot run — the player's JS challenges cannot be solved; recording the live HLS playlist from the live edge instead",
+		job.Logger.Warn("[Cipher] live: recording from the start cannot run — the player's JS challenges cannot be solved; recording the live HLS playlist instead, from the oldest segment its window holds",
 			"jobID", job.Job.ID, "strategy", kind, "err", err)
 		hlsResult, hlsErr := HlsStrategy.Download(ctx, job, info, deps)
 		if hlsErr != nil {

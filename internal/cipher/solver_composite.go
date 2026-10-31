@@ -104,8 +104,8 @@ func (c *compositeSolver) sidecar() Solver {
 // the supervisor's restart installs the rebuilt solver (SetSidecar) — which
 // is when no signature can be solved and n has only the goja fallback. The
 // extraction reads it to rank the JS-less client first, yt-dlp's
-// _DEFAULT_JSLESS_CLIENTS (_video.py:144, 2972-2991): youtube.PlayerAPI's
-// SetJSChallengeSolvable, wired in cmd/moombox.
+// _DEFAULT_JSLESS_CLIENTS (_video.py:144, 2972-2977, 2994-3000):
+// youtube.PlayerAPI's SetJSChallengeSolvable, wired in cmd/moombox.
 func (c *compositeSolver) SidecarReady() bool {
 	sc := c.sidecar()
 	return sc != nil && solverReady(sc)

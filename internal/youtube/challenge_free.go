@@ -104,14 +104,14 @@ func (p *PlayerAPI) jsLess() bool {
 
 // jslessState is one extraction's JS-less ranking, owner decision 4 of the
 // yt-dlp parity plan: while the cipher sidecar is disabled or down, yt-dlp's
-// _DEFAULT_JSLESS_CLIENTS — ('visionos',), the client whose URLs need no
-// player JS (_video.py:144, 2972-2991; dae52d838, #17461) — is what upstream
-// asks when no JS runtime is available, with a warning that "some formats
-// may be missing". Moombox pools every client rather than picking one, so
-// the port is a ranking: visionos's copies outrank every other client's
-// (AuthLevelVisionOSJSLess), visionos is asked even where the cascade would
-// not have (rankJSLess), and its live HLS master, which carries no n,
-// replaces one that does. The healthy ranking is unchanged.
+// _DEFAULT_JSLESS_CLIENTS — ('visionos',), the client whose URLs need no player
+// JS (_video.py:144, 2972-2977, 2994-3000; dae52d838, #17461) — is what
+// upstream asks when no JS runtime is available, with a warning that "some
+// formats may be missing". Moombox pools every client rather than picking one,
+// so the port is a ranking: visionos's copies outrank every other client's
+// (AuthLevelVisionOSJSLess), visionos is asked even where the cascade would not
+// have (rankJSLess), and its live HLS master, which carries no n, replaces one
+// that does. The healthy ranking is unchanged.
 //
 // It goes beyond upstream on one side: yt-dlp keeps its authenticated
 // tuple for a signed-in session whatever the JS runtime, and every client
