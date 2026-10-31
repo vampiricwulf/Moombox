@@ -289,6 +289,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// left, or an open disk_critical, starts it closed, and it records its
 	// hold in the same file from here on.
 	restoreDiskGate(s.openAlerts, dlWorker.Scheduler())
+	// And the YouTube rate-limit hold, the same way: one standing when the
+	// last process stopped holds the backlog until it runs out.
+	restoreRateLimitHold(s.openAlerts, dlWorker.Scheduler())
 
 	// Register all routes. See routes_wiring.go.
 	importCleanup := s.wireRoutes()

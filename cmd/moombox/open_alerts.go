@@ -25,8 +25,9 @@ func openAlertsPath(databasePath string) string {
 }
 
 // openAlertsDoc is the file's whole content: every alert that has been sent
-// and whose close has not, one field per family — and the backlog disk gate's
-// hold, which is not an alert but must outlive a restart the same way.
+// and whose close has not, one field per family — and the backlog
+// scheduler's two holds, the disk gate's and the YouTube rate limit's, which
+// are not alerts but must outlive a restart the same way.
 type openAlertsDoc struct {
 	// Disk is the disk family (diskAlerts): an open space warning or
 	// critical, and an open "Disk Monitoring Failed". Nil when neither is.
@@ -46,6 +47,11 @@ type openAlertsDoc struct {
 	// so it can close on a reading the alerts never took; Disk's level alone
 	// then restored it open.
 	DiskGateHeld bool `json:"diskGateHeld,omitempty"`
+	// RateLimitHeldUntil is when the backlog scheduler's YouTube rate-limit
+	// hold runs out (worker.Scheduler.RecordRateLimitHold,
+	// restoreRateLimitHold); zero when none stands. Kept only in memory, a
+	// restart inside the hour reopened admission into the limit.
+	RateLimitHeldUntil time.Time `json:"rateLimitHeldUntil,omitzero"`
 }
 
 // openDiskAlert is diskAlerts' open state.
@@ -163,7 +169,8 @@ func (a *openAlerts) snapshot() openAlertsDoc {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	d := openAlertsDoc{SidecarDown: a.doc.SidecarDown, DiskGateHeld: a.doc.DiskGateHeld}
+	d := openAlertsDoc{SidecarDown: a.doc.SidecarDown, DiskGateHeld: a.doc.DiskGateHeld,
+		RateLimitHeldUntil: a.doc.RateLimitHeldUntil}
 	if a.doc.Disk != nil {
 		disk := *a.doc.Disk
 		d.Disk = &disk
