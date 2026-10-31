@@ -82,6 +82,13 @@ func playbackWaitLeft(info *youtube.VideoInfo, at, now time.Time) time.Duration 
 // logs nothing. Returns ctx's error when ctx ends first — a cancel or a
 // shutdown — which the strategy hands back as its setup error. info is the
 // extraction the URLs came from, whose live_status says whether to wait.
+//
+// A strategy rebuilt mid-download by refreshDownload (the live loop's, or
+// runVodDownloadWithRefresh's) reaches it too, while the job's ProgressTracker
+// still owns the row, and waits there when the fresh extraction is one
+// upstream no longer calls live or post-live — few such rebuilds are. The
+// line it writes, and the blank it leaves, then stand only until the
+// tracker's next write restores the row's own: harmless, so not avoided.
 func waitForPlayback(ctx context.Context, job *JobContext, info *youtube.VideoInfo, at time.Time, source, tag string) error {
 	now := time.Now()
 	left := playbackWaitLeft(info, at, now)
@@ -129,11 +136,11 @@ func waitForFreshPlayback(ctx context.Context, job *JobContext, info *youtube.Vi
 		return true
 	}
 	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < left {
-		job.Logger.Warn("credential refresh: the fresh player response's pre-roll ad outlasts the refresh budget — keeping the current URL",
+		job.Logger.Warn("[POT] credential refresh: the fresh player response's pre-roll ad outlasts the refresh budget — keeping the current URL",
 			"jobID", job.Job.ID, "tag", tag, "seconds", left.Seconds(), "client", f.Source)
 		return false
 	}
-	job.Logger.Info("credential refresh: waiting out the fresh player response's pre-roll ad before using its URL, as YouTube requires",
+	job.Logger.Info("[POT] credential refresh: waiting out the fresh player response's pre-roll ad before using its URL, as YouTube requires",
 		"jobID", job.Job.ID, "tag", tag, "seconds", left.Seconds(), "client", f.Source)
 	return utils.Sleep(ctx, left) == nil
 }

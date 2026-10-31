@@ -50,9 +50,12 @@ func vodURLRefresh(ctx context.Context, job *JobContext, videoInfo *youtube.Vide
 // winner's client). bypassCache, because the cached token may be the
 // credential that was just refused.
 //
-// Bounded by credentialRefreshTimeoutFor like the live refresh: the engine
-// waits on this call. Never returns an error — an empty URL keeps the current
-// one, an empty token the current token, and the chunk's 403 then stands.
+// The re-mint, re-fetch and resolve are bounded by credentialRefreshTimeoutFor
+// like the live refresh: the engine waits on this call. The fresh response's
+// pre-roll ad is then waited out on ctx, beyond that bound
+// (waitForFreshPlayback; credentialRefreshTimeoutFor says why). Never returns
+// an error — an empty URL keeps the current one, an empty token the current
+// token, and the chunk's 403 then stands.
 func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, served youtube.Format, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider gvsTokenMinter, binding, tag string) (baseURL, poToken string) {
 	refreshCtx, cancel := context.WithTimeout(ctx, credentialRefreshTimeoutFor(job.Config))
 	defer cancel()

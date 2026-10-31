@@ -25,6 +25,10 @@ import (
 // preRollWaitMsg is the Info line a strategy's wait logs.
 const preRollWaitMsg = "waiting out the player response's pre-roll ad before the first media request, as YouTube requires"
 
+// refreshWaitMsg opens the Info line a refresh's wait logs, under the [POT]
+// tag every other line of both refreshes carries.
+const refreshWaitMsg = "[POT] credential refresh: waiting out the fresh player response's pre-roll ad"
+
 // strategyRun is a strategy (or a refresh) running in its own goroutine.
 type strategyRun struct {
 	done chan struct{}
@@ -589,7 +593,7 @@ func TestRefreshVodURLWaitsOutTheFreshAd(t *testing.T) {
 			default:
 				t.Fatal("refreshVodURL still waiting once the ad was over")
 			}
-			line := logLine(logs, "credential refresh: waiting out the fresh player response's pre-roll ad")
+			line := logLine(logs, refreshWaitMsg)
 			if line == nil || line["seconds"] != 12.0 || line["client"] != "tv_auth" || line["tag"] != "VOD video" {
 				t.Errorf("refresh wait line = %v, want seconds=12 client=tv_auth tag=VOD video", line)
 			}
@@ -628,7 +632,7 @@ func TestRefreshVodURLWaitsOutTheFreshAd(t *testing.T) {
 			default:
 				t.Fatal("refreshVodURL waiting on a post-live response's ad, which upstream never stamps")
 			}
-			if line := logLine(logs, "credential refresh: waiting out"); line != nil {
+			if line := logLine(logs, refreshWaitMsg); line != nil {
 				t.Errorf("logged a refresh wait it did not make: %v", line)
 			}
 		})
@@ -713,7 +717,7 @@ func TestRefreshGvsCredentialsWaitsWithinItsBudget(t *testing.T) {
 				if installed := strings.Contains(gotURL, "fresh.invalid"); installed != tc.wantURL {
 					t.Errorf("baseURL = %q, want installed=%v", gotURL, tc.wantURL)
 				}
-				warn := logLine(logs, "credential refresh: the fresh player response's pre-roll ad outlasts the refresh budget")
+				warn := logLine(logs, "[POT] credential refresh: the fresh player response's pre-roll ad outlasts the refresh budget")
 				if (warn != nil) != (!tc.wantURL) {
 					t.Errorf("budget Warn = %v, want one only when the URL is kept", warn)
 				}
