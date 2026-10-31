@@ -11,15 +11,28 @@ import (
 )
 
 // initForbiddenAttempts bounds how many times fetchInitSegment asks for an
-// init segment that fetchSegmentWithRetry reported gone (403/410): the first
+// init segment that fetchSegmentWithRetry reported refused (403): the first
 // try and two more, each after a credential refresh. fetchSegmentWithRetry's
-// own 403 refresh only runs for a segment it can prove exists below the known
-// head, and at Start the head is not known yet, so without these a single 403
-// on the init — a stale n/sig or PO token at the moment a part begins, the
-// case refreshCredentials exists for — ended the part. Kept small for the
-// same reason forbiddenRefreshAttempts is: each refresh is a player-response
-// round trip plus a mint, and a URL still refused after two of them is not
-// one a third will fix; the orchestrator's refresh builds the part again.
+// own 403 refresh runs only while behindHeadTailPending holds, and at Start
+// it cannot: the init's own 403 does carry X-Head-Seqnum, but no segment has
+// been written yet (lastSegTime is unset, so the MaxTimeout budget it
+// measures reads as spent) — so without these a single 403 on the init, a
+// stale n/sig or PO token at the moment a part begins, the case
+// refreshCredentials exists for, ended the part. (ensureInlineInit's fetch
+// runs mid-loop, where that gate does open below a known head, so each of
+// its tries also runs fetchSegmentWithRetry's own refresh ladder.) Kept
+// small for the same reason forbiddenRefreshAttempts is: each refresh is a
+// player-response round trip plus a mint, and a URL still refused after two
+// of them is not one a third will fix; the orchestrator's refresh builds the
+// part again.
+//
+// A 410 is not retried at all (errSegmentGone): the engine reads it as
+// evicted, never as stale credentials — fetchSegmentWithRetry and
+// handleGoneError never refresh for one, and moonarchive renews its access
+// only on a 403 (_dash.py) — and on a stream past YouTube's ~120 h window,
+// where every forced part's sq=0 answers 410, two refreshes per part per
+// rebuild bought nothing but player-response round trips and wipes of the
+// shared cipher solver.
 const initForbiddenAttempts = 3
 
 // fetchInitSegment fetches an init segment — a manifest Initialization, or the
@@ -28,15 +41,17 @@ const initForbiddenAttempts = 3
 // (downloader/fragment.py retries it fragment_retries times and then fails
 // the download; downloader/dash.py marks index 0 fatal). The 5xx, timeout,
 // empty-body and outage ladder is fetchSegmentWithRetry's; on top of it an
-// answer of 403/410 (ErrSegmentPermanent) is tried initForbiddenAttempts
-// times in all, each retry after refreshCredentials and, when rebuildURL is
-// non-nil, on a URL rebuilt from the base that refresh installed — never on
-// the construction-time string, which is exactly the credential that was
-// refused. Any other error, and the last 403/410, is returned as is.
+// answer of 403 is tried initForbiddenAttempts times in all, each retry after
+// refreshCredentials and, when rebuildURL is non-nil, on a URL rebuilt from
+// the base that refresh installed — never on the construction-time string,
+// which is exactly the credential that was refused. Any other error, a 410
+// (errSegmentGone: evicted, see initForbiddenAttempts), and the last 403 are
+// returned as is.
 func (d *SegmentDownloader) fetchInitSegment(ctx context.Context, segURL string, rebuildURL func() string) ([]byte, error) {
 	for attempt := 1; ; attempt++ {
 		data, err := d.fetchSegmentWithRetry(ctx, segURL, rebuildURL)
-		if err == nil || !errors.Is(err, ErrSegmentPermanent) || attempt >= initForbiddenAttempts {
+		if err == nil || !errors.Is(err, ErrSegmentPermanent) || errors.Is(err, errSegmentGone) ||
+			attempt >= initForbiddenAttempts {
 			return data, err
 		}
 		d.emitActivity(ActivityRetrying)

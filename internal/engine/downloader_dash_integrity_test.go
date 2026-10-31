@@ -553,22 +553,32 @@ func TestDashInitRetriesRefreshesAndTransientFailures(t *testing.T) {
 // empty, so the orchestrator builds it again rather than record a file that
 // cannot be muxed — and so the empty file cannot re-arm the first-segment hunt,
 // which used to skip real segments at the split sequence. That holds for a
-// manifest Initialization as for a manifest-free sq=0.
+// manifest Initialization as for a manifest-free sq=0. A refused (403) init
+// is asked three times, each retry after a refresh on fresh credentials —
+// the cooldown waited out, so the two refreshes are two real ones; a gone
+// (410) init is evicted and is asked once, never refreshed.
 //
-// Mutant: Start logging the failure and carrying on (the code before the
-// fix): media is requested and written, and Start returns nil.
+// Mutants:
+//   - Start logging the failure and carrying on (the code before the fix):
+//     media is requested and written, and Start returns nil.
+//   - initRefreshWait not waiting out the refresh cooldown: the second
+//     refresh lands inside it and never runs, so the refused rows see one.
+//   - fetchInitSegment retrying and refreshing a 410 like a 403: the gone
+//     row asks three times and refreshes twice.
+//   - initForbiddenAttempts other than 3: the refused rows' counts move.
 func TestDashInitFailureEndsTheStartBeforeAnyMedia(t *testing.T) {
 	const startSeq, head = 3, 6
 	for _, tc := range []struct {
-		name         string
-		manifestInit bool
-		answer       gvsAnswer
-		wantAttempts int
+		name          string
+		manifestInit  bool
+		answer        gvsAnswer
+		wantAttempts  int
+		wantRefreshes int
 	}{
-		{name: "manifest-free sq=0 gone", answer: gvsGone, wantAttempts: initForbiddenAttempts},
-		{name: "manifest-free sq=0 refused", answer: gvsForbidden, wantAttempts: initForbiddenAttempts},
+		{name: "manifest-free sq=0 gone", answer: gvsGone, wantAttempts: 1},
+		{name: "manifest-free sq=0 refused", answer: gvsForbidden, wantAttempts: 3, wantRefreshes: 2},
 		{name: "manifest-free sq=0 unavailable", answer: gvsUnavailable, wantAttempts: MaxSegmentRetries},
-		{name: "manifest Initialization refused", manifestInit: true, answer: gvsForbidden, wantAttempts: initForbiddenAttempts},
+		{name: "manifest Initialization refused", manifestInit: true, answer: gvsForbidden, wantAttempts: 3, wantRefreshes: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := serveGVS(t, constHead(head), func(r *http.Request, seq, attempt int) gvsAnswer {
@@ -585,6 +595,7 @@ func TestDashInitFailureEndsTheStartBeforeAnyMedia(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				out := filepath.Join(t.TempDir(), "video_stream")
 				base := gvsBase("fatal")
+				var refreshes atomic.Int32
 				opts := DownloaderOptions{
 					BaseURL:         base,
 					OutputFile:      out,
@@ -593,6 +604,7 @@ func TestDashInitFailureEndsTheStartBeforeAnyMedia(t *testing.T) {
 					InitURL:         base + "&sq=0",
 					InitFromSegment: true,
 					OnCredentialRefresh: func() (string, string) {
+						refreshes.Add(1)
 						return "", "fresh-token"
 					},
 					CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
@@ -619,6 +631,9 @@ func TestDashInitFailureEndsTheStartBeforeAnyMedia(t *testing.T) {
 				}
 				if got := g.attemptsFor(initSeq); got != tc.wantAttempts {
 					t.Errorf("init fetched %d times, want %d", got, tc.wantAttempts)
+				}
+				if got := int(refreshes.Load()); got != tc.wantRefreshes {
+					t.Errorf("credential refreshes = %d, want %d", got, tc.wantRefreshes)
 				}
 			})
 		})
