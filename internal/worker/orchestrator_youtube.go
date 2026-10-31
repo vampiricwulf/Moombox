@@ -1149,6 +1149,14 @@ func probeVideoInfo(ctx context.Context, yt youtubeProbeClient, videoID string, 
 	// Hop 2 — the cookied recovery hop (O-H's "recovery streams"). Only for
 	// the cookieless branch: the auth-walled branch already made this exact
 	// call above.
+	//
+	// Hop 1 may have made it too: a cookieless refusal that says nothing
+	// about the broadcast is escalated inside ProbeVideoStatus, to this very
+	// call when the jar is signed in (G8, internal/youtube/status_probe.go),
+	// and an escalated answer that is not selectable comes back here as
+	// hop 1's. Asked again, it costs one TV call per tick while the wall
+	// stands; the probe does not say which client answered, and a TV call is
+	// the cheapest thing ahead of the cascade.
 	if !requiresAuth && cookied && ctx.Err() == nil {
 		hopInfo, hopErr := yt.ProbeVideoStatusAuthenticated(ctx, videoID)
 		if hopErr == nil && probeIsSelectable(hopInfo) {

@@ -46,12 +46,23 @@ const (
 // told is probeVote's separate verdict: classNetwork means "do not count", and
 // most of what it covers — a 429, a 403 bot wall, a 5xx, a substitution — is
 // an answer from the service, which proves the network is up.
+//
+// An inconclusive status probe (*youtube.StatusProbeInconclusiveError: a
+// refusal that said nothing about the broadcast, and an escalation that
+// settled nothing either) is network-class by NAME, ahead of every rule that
+// reads the error's text (G8, owner decision D6). Not by the asymmetric
+// default: the error carries the escalation's own failure, and a web_embedded
+// "HTTP 400" in it would meet the terminal "http 4" arm below and count a
+// probe that never said a word about the video toward giving the job up.
 func classifyProbeErr(err error) probeErrClass {
 	if err == nil {
 		return classServer
 	}
 	if errors.Is(err, context.Canceled) {
 		return classCancelled
+	}
+	if _, ok := errors.AsType[*youtube.StatusProbeInconclusiveError](err); ok {
+		return classNetwork
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return classNetwork
@@ -137,12 +148,20 @@ var httpAnswerRe = regexp.MustCompile(`\bhttp [1-5][0-9][0-9]\b`)
 // error and a substitution vote "up", since the request reached the service.
 // Anything else casts no vote: an error that cannot be placed is not evidence
 // either way.
+//
+// An inconclusive status probe votes "up" whatever its escalation met: it
+// exists only because ANDROID_VR answered, with a refusal. Ahead of the
+// transport arms, which would otherwise read a timed-out escalation, carried
+// inside it, as the network being down.
 func probeVote(err error) probeReport {
 	if err == nil {
 		return reportSuccess
 	}
 	if errors.Is(err, context.Canceled) {
 		return reportNone
+	}
+	if _, ok := errors.AsType[*youtube.StatusProbeInconclusiveError](err); ok {
+		return reportSuccess
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return reportFailure

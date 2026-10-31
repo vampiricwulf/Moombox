@@ -113,6 +113,14 @@ func (sp *StreamProcessor) fetchVideoInfo(ctx context.Context, videoID string) (
 // probeVideoStatus is the waiting loop's status probe: the cookied one once
 // the loop has switched to it (authenticated), the cookieless ANDROID_VR one
 // before — or probeStatusFn when a test set one.
+//
+// The cookieless one does not hand the loop a refusal that says nothing about
+// the broadcast (the bot wall, a made-for-kids video): it escalates once, and
+// when that settles nothing either it returns a
+// *youtube.StatusProbeInconclusiveError, which classifyProbeErr makes
+// network-class, so the loop waits through it. It used to come back as
+// not_a_stream, and the switch's default arm ended the job "unexpected
+// status: not_a_stream" on the first poll (G8).
 func (sp *StreamProcessor) probeVideoStatus(ctx context.Context, videoID string, authenticated bool) (*youtube.VideoInfo, error) {
 	if sp.probeStatusFn != nil {
 		return sp.probeStatusFn(ctx, videoID, authenticated)
@@ -287,9 +295,11 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			counted := newCount != consecutiveErrors
 			consecutiveErrors = newCount // unchanged for network-class failures
 			if !counted {
-				// Network-class failure: a transport error or a transient
-				// answer (429, 403, 5xx). Keep waiting through it — the count
-				// did not advance. What the oracle heard is probeVote's call.
+				// Network-class failure: a transport error, a transient
+				// answer (429, 403, 5xx), or a status probe that could not
+				// tell (an inconclusive one). Keep waiting through it — the
+				// count did not advance. What the oracle heard is probeVote's
+				// call.
 				sp.logger.Debug("probe network error — not counting, still waiting", "videoID", job.VideoID, "err", probeErr)
 			} else {
 				sp.logger.Warn("probe error (definitive)", "videoID", job.VideoID, "err", probeErr, "consecutive", consecutiveErrors)
