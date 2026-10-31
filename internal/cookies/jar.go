@@ -850,6 +850,13 @@ func (j *CookieJar) HasYouTubeAuthCookies() bool {
 // hasYouTubeAuthLocked is HasYouTubeAuthCookies for a caller already holding
 // j.mu, so a header built under one read lock (YouTubePageCookieHeader) asks
 // the same question of the same jar contents it emits.
+//
+// It is the question yt-dlp's _has_auth_cookies asks (_base.py:828-833), not
+// the same answer at every edge: upstream also counts __Secure-1PAPISID
+// alone, and takes LOGIN_INFO's presence, empty or not, where this needs
+// SAPISID or __Secure-3PAPISID and a non-empty LOGIN_INFO. A real export
+// carries SAPISID beside the 1P copy and a LOGIN_INFO with a value, so the
+// two agree on what browsers write.
 func (j *CookieJar) hasYouTubeAuthLocked() bool {
 	hasSapisid := j.youtube["SAPISID"].value != "" || j.youtube["__Secure-3PAPISID"].value != ""
 	hasLoginInfo := j.youtube["LOGIN_INFO"].value != ""

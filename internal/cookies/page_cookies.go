@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 )
 
 // The consent and language yt-dlp puts on its cookie jar before any YouTube
@@ -47,19 +48,28 @@ const (
 // YouTubePageCookieHeader is the Cookie header for a YouTube HTML page: the
 // jar's YouTube cookies, as GetCookieHeader sends them, with the consent and
 // language cookies above applied — SOCS=CAI when the jar holds no complete
-// signed-in set (HasYouTubeAuthCookies, yt-dlp's _has_auth_cookies) and no
-// consented SOCS, and PREF carrying hl=en and tz=UTC. A signed-in jar's own
-// SOCS, whatever it holds, goes out as it is: yt-dlp leaves a signed-in
-// session's consent alone. Never empty: PREF is always sent. Callers that
-// must know whether the jar holds anything to send ask GetCookieHeader.
+// signed-in set (HasYouTubeAuthCookies, this port's _has_auth_cookies; see
+// hasYouTubeAuthLocked for where the two differ) and no consented SOCS, and
+// PREF carrying hl=en and tz=UTC. A signed-in jar's own SOCS, whatever it
+// holds, goes out as it is: yt-dlp leaves a signed-in session's consent
+// alone. Never empty: PREF is always sent. Callers that must know whether
+// the jar holds anything to send ask GetCookieHeader.
+//
+// The jar's SOCS and PREF are read as yt-dlp reads them (youtubeSees): one
+// scoped to google.com, or expired, is not the jar's, and is left off the
+// header — so CAI and a fresh PREF take their places, as upstream's would.
 //
 // One read lock over the whole build, so the auth verdict and the cookies
 // emitted are the same jar contents.
 func (j *CookieJar) YouTubePageCookieHeader() string {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
+	now := time.Now().Unix()
 	pairs := make(map[string]string, len(j.youtube)+2)
 	for name, e := range j.youtube {
+		if pageCookieNames[name] && !youtubeSees(e, now) {
+			continue
+		}
 		pairs[name] = e.value
 	}
 	applyPageCookies(pairs, j.hasYouTubeAuthLocked())
@@ -73,17 +83,55 @@ func (j *CookieJar) YouTubePageCookieHeader() string {
 // so the page stays as anonymous as it was; and since no auth cookie rides on
 // it, the request is signed out whatever the jar holds, so SOCS is always
 // sent: the jar's when it is consented, CAI otherwise.
+//
+// The jar's SOCS and PREF are read as YouTubePageCookieHeader reads them
+// (youtubeSees).
 func (j *CookieJar) YouTubeConsentCookieHeader() string {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
+	now := time.Now().Unix()
 	pairs := make(map[string]string, 2)
-	for _, name := range []string{"SOCS", "PREF"} {
-		if e, ok := j.youtube[name]; ok {
+	for name := range pageCookieNames {
+		if e, ok := j.youtube[name]; ok && youtubeSees(e, now) {
 			pairs[name] = e.value
 		}
 	}
 	applyPageCookies(pairs, false)
 	return joinCookiePairs(pairs)
+}
+
+// pageCookieNames are the two cookies applyPageCookies decides on.
+var pageCookieNames = map[string]bool{"SOCS": true, "PREF": true}
+
+// youtubeSees reports whether yt-dlp's read of the jar's YouTube cookies
+// would hold e. _initialize_consent and _initialize_pref read
+// self._youtube_cookies, _get_cookies('https://www.youtube.com')
+// (_base.py:777-779, the property since 8cb08028f, #13014; the read itself
+// is older), which is YoutubeDLCookieJar.get_cookie_header for that URL
+// (yt_dlp/cookies.py:1405-1409): http.cookiejar's add_cookie_header, whose
+// policy returns only a cookie whose domain www.youtube.com domain-matches
+// and that has not expired. Two kinds of the jar's rows fail that read:
+//
+//   - one scoped to google.com (or to a YouTube host www is not under, such
+//     as music.youtube.com). Load admits the essential names on a YouTube or
+//     a Google domain into one map, so with no .youtube.com copy beside it,
+//     google.com's own consent (an EU browser that accepted Google's but
+//     never YouTube's) or PREF stands in the slot. Upstream never sees
+//     either, and sets CAI and a fresh PREF.
+//   - one whose expiry has passed (rowExpired's rule: expiry > 0 and before
+//     now). Load keeps expired rows on purpose (see Load), so a cookies.txt
+//     exported a year ago still holds the consent it had then; no browser,
+//     and no request of upstream's, would send it.
+//
+// Only the two cookies the page decides on are read this way. Every other
+// cookie goes out as GetCookieHeader sends it, google.com's auth names
+// included, which is the jar's contract with every YouTube request.
+//
+// The domain read is RFC 6265's domain-match from the host's side: the row's
+// domain, leading dot dropped, is www.youtube.com or a domain it is under.
+func youtubeSees(e cookieEntry, now int64) bool {
+	domain := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(e.domain)), ".")
+	return domainMatches("www.youtube.com", domain) && !(e.expiry > 0 && e.expiry < now)
 }
 
 // applyPageCookies applies the consent (unless signedIn) and the language to
@@ -124,9 +172,13 @@ type prefField struct{ key, value string }
 // field for field: '&' separates, a field with no '=' or an empty value is
 // dropped (keep_blank_values=False), '+' is a space, a key seen twice keeps
 // its first place and its last value. Its write is urlencode, quote_plus on
-// each side, which url.QueryEscape matches byte for byte. hl and tz keep their
-// places when the PREF has them and are appended, hl first, when it has not:
-// a Python dict's update.
+// each side, which url.QueryEscape matches byte for byte over valid UTF-8 —
+// the only kind a PREF YouTube wrote holds (it is ASCII). An escape of bytes
+// that are not UTF-8 is where the two part: Python's unquote decodes with
+// errors='replace', so %ff comes back %EF%BF%BD, where this keeps %FF, the
+// value the user's PREF actually held. hl and tz keep their places when the
+// PREF has them and are appended, hl first, when it has not: a Python dict's
+// update.
 //
 // A PREF that cannot be read is replaced by hl=en&tz=UTC alone, yt-dlp's
 // except arm. The difference is what cannot be read: Python's unquote leaves
