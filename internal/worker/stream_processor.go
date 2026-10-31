@@ -176,6 +176,10 @@ type StreamProcessor struct {
 	// the playback token and the Usher playlist are network calls.
 	hlsMasterFn func(ctx context.Context, login string) ([]twitch.TwitchHLSVariant, bool, error)
 
+	// twitchLookupFn replaces tw.LookupStreamInfo in waitForTwitchLive when
+	// set, for the same reason (twitchStreamLookup).
+	twitchLookupFn func(ctx context.Context, login string) (*twitch.TwitchStreamInfo, error)
+
 	mu          sync.Mutex
 	activeChats []*chat.ChatDownloader // Track active chat downloaders for cleanup
 }

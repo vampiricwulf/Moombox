@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"errors"
 	"slices"
 	"strings"
 
@@ -211,8 +212,15 @@ type twitchMetadataAdapter struct {
 	svc *twitch.Service
 }
 
+// FetchStreamMetadata answers the add route with the not-found-aware lookup:
+// a login Twitch resolves to no user is routes.ErrTwitchChannelNotFound — the
+// route's 404 — rather than the "offline" GetStreamInfo would have made of it,
+// on which the route created a manual job that waited forever (G53).
 func (a *twitchMetadataAdapter) FetchStreamMetadata(ctx context.Context, login string) (*routes.TwitchJobMetadata, error) {
-	info, err := a.svc.GetStreamInfo(ctx, login)
+	info, err := a.svc.LookupStreamInfo(ctx, login)
+	if errors.Is(err, twitch.ErrChannelNotFound) {
+		return nil, routes.ErrTwitchChannelNotFound
+	}
 	if err != nil {
 		return nil, err
 	}

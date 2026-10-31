@@ -1,11 +1,65 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/twitch"
+	"github.com/vampiricwulf/Moombox/internal/web/routes"
 )
+
+// TestTwitchAddLookupReportsALoginThatDoesNotExist is the adapter between the
+// add route and the Twitch service, driven over a real Service whose GQL
+// endpoint is a local server (G53): a login Twitch answers with user:null is
+// routes.ErrTwitchChannelNotFound — the route's 404 — while an offline channel
+// stays (nil, nil) and a live one its metadata.
+//
+// Mutant: the adapter calling GetStreamInfo again — its collapse turns the
+// missing login into (nil, nil), and the route creates a job that waits
+// forever.
+func TestTwitchAddLookupReportsALoginThatDoesNotExist(t *testing.T) {
+	slots := map[string]string{
+		"missing": `[{"data":{"user":null}},{"data":{"user":{"stream":null}}}]`,
+		"offline": `[{"data":{"user":{"id":"2","displayName":"Off","login":"off","profileImageURL":"","stream":null}}},` +
+			`{"data":{"user":{"stream":null}}}]`,
+		"live": `[{"data":{"user":{"id":"1","displayName":"On","login":"on","profileImageURL":"",` +
+			`"stream":{"id":"77","title":"on air","type":"live","viewersCount":1,"createdAt":"2026-10-31T00:00:00Z","game":null}}}},` +
+			`{"data":{"user":{"stream":null}}}]`,
+	}
+	answer := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, answer)
+	}))
+	defer srv.Close()
+	prev := constants.TwitchURLs.GQL
+	constants.TwitchURLs.GQL = srv.URL
+	t.Cleanup(func() { constants.TwitchURLs.GQL = prev })
+
+	a := &twitchMetadataAdapter{svc: twitch.NewService(cookies.NewCookieJar(), newAuthLossLogger())}
+
+	answer = slots["missing"]
+	if meta, err := a.FetchStreamMetadata(context.Background(), "nosuchstreamer"); meta != nil || !errors.Is(err, routes.ErrTwitchChannelNotFound) {
+		t.Errorf("missing login = %+v, %v; want routes.ErrTwitchChannelNotFound", meta, err)
+	}
+	answer = slots["offline"]
+	if meta, err := a.FetchStreamMetadata(context.Background(), "off"); meta != nil || err != nil {
+		t.Errorf("offline channel = %+v, %v; want nil, nil", meta, err)
+	}
+	answer = slots["live"]
+	if meta, err := a.FetchStreamMetadata(context.Background(), "on"); err != nil || meta == nil || !meta.IsLive || meta.StreamID != "77" {
+		t.Errorf("live channel = %+v, %v; want its metadata", meta, err)
+	}
+}
 
 // TestTwitchServiceAuthLossIsTheWorkersHook pins the production value of the
 // Twitch service's credential-loss seam (twitch.Service.SetOnAuthLoss, G21):

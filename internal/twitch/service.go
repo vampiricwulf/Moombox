@@ -65,13 +65,20 @@ func (s *Service) SetOnAuthLoss(fn func(reason string)) {
 }
 
 // GetStreamInfo fetches live stream info for a channel.
-// Returns nil if the channel is offline.
+// Returns nil if the channel is offline, or if the login does not resolve —
+// LookupStreamInfo tells those two apart.
 func (s *Service) GetStreamInfo(ctx context.Context, channelLogin string) (*TwitchStreamInfo, error) {
+	return collapseStreamInfoError(s.LookupStreamInfo(ctx, channelLogin))
+}
+
+// LookupStreamInfo is GetStreamInfo with the not-found answer kept: (nil,
+// ErrChannelNotFound) for a login that does not resolve (API.LookupStreamInfo).
+func (s *Service) LookupStreamInfo(ctx context.Context, channelLogin string) (*TwitchStreamInfo, error) {
 	infos, errs, err := s.streamInfo(ctx, streamInfoOp, []string{channelLogin})
 	if err != nil {
 		return nil, err
 	}
-	return collapseStreamInfoError(infos[0], errs[0])
+	return infos[0], errs[0]
 }
 
 // GetStreamInfoBatch fetches live stream info for many channels in one GQL

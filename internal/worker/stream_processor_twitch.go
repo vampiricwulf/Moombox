@@ -827,8 +827,36 @@ func syncTwitchJobMetadata(job *database.Job, updates map[string]any) {
 	}
 }
 
+// twitchNotFoundGiveUp is how many "this login does not exist" answers in a
+// row end a manual wait (G53). yt-dlp raises "<channel> does not exist" on the
+// FIRST user:null and waits only on UserNotLive (TwitchStreamIE._real_extract,
+// twitch.py b77c9304e); a wait that can run for days gives Twitch a few
+// minutes' grace instead — ten polls at 15-20 s each — so one odd answer, or an
+// account whose page is down for a moment, does not fail an operator's add.
+// The add route has already refused a login that did not resolve when it was
+// added (404), so what this catches is a channel renamed, banned or deleted
+// while the job waits, and a job whose add-time lookup never got an answer.
+const twitchNotFoundGiveUp = 10
+
+// twitchStreamLookup is tw.LookupStreamInfo — the single lookup that keeps
+// "the login does not exist" apart from "offline" — or twitchLookupFn when a
+// test set one.
+func (sp *StreamProcessor) twitchStreamLookup(ctx context.Context, login string) (*twitch.TwitchStreamInfo, error) {
+	if sp.twitchLookupFn != nil {
+		return sp.twitchLookupFn(ctx, login)
+	}
+	return sp.tw.LookupStreamInfo(ctx, login)
+}
+
 // waitForTwitchLive polls a Twitch channel until it goes live or is cancelled.
 // Returns (streamInfo, nil) when live, (nil, nil) when cancelled, (nil, err) on fatal error.
+//
+// A login Twitch answers twitchNotFoundGiveUp times in a row as not existing
+// is one of those fatal errors, wrapped ErrNonActionable like the probe
+// budget's: it used to read as offline (GetStreamInfo's collapse), and a typo,
+// a rename or a deleted account waited at "Waiting for stream..." forever,
+// polling GQL every 15-20 s. Only answers count, and any answer that resolves
+// the login ends the run; a failed poll is no answer and leaves it as it was.
 func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.Job, login string) (*twitch.TwitchStreamInfo, error) {
 	// Conditional, as waitForLive's is: an operator's Cancel can land after
 	// processJob read the row, and this write turned that Cancelled row back
@@ -845,6 +873,7 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 	defer sp.db.UpdateJobFields(job.ID, map[string]any{"progress": ""})
 
 	consecutiveErrors := 0
+	notFound := 0 // consecutive "does not exist" answers (twitchNotFoundGiveUp)
 	var lastOfflineProbe time.Time
 
 	for {
@@ -897,7 +926,26 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 			lastOfflineProbe = time.Now()
 		}
 
-		streamInfo, err := sp.tw.GetStreamInfo(ctx, login)
+		streamInfo, err := sp.twitchStreamLookup(ctx, login)
+		if errors.Is(err, twitch.ErrChannelNotFound) {
+			// An answer, not a failure: Twitch was reached and resolved no
+			// such user. Fed to the oracle as the success it is, and kept off
+			// the probe-error budget, which counts failures to get one.
+			reportProbeResult("probe/twitch", false)
+			consecutiveErrors = 0
+			notFound++
+			if notFound >= twitchNotFoundGiveUp {
+				return nil, fmt.Errorf("%s does not exist on Twitch (%d checks in a row): %w (%w)",
+					login, notFound, twitch.ErrChannelNotFound, ErrNonActionable)
+			}
+			if notFound == 1 {
+				sp.logger.Warn("twitch says this channel does not exist (renamed, banned, or a typo); the job fails if the next checks agree",
+					"channel", login, "checks", twitchNotFoundGiveUp)
+			} else {
+				sp.logger.Debug("twitch channel still does not exist", "channel", login, "consecutive", notFound)
+			}
+			continue
+		}
 		if err != nil {
 			newCount, giveUp, report, cancelled := applyProbeError(err, consecutiveErrors)
 			switch report {
@@ -925,6 +973,7 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 			continue
 		}
 		consecutiveErrors = 0
+		notFound = 0
 		// Successful poll reached Twitch — feed the oracle (Layer 4).
 		reportProbeResult("probe/twitch", false)
 

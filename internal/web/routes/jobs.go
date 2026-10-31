@@ -84,10 +84,19 @@ type YouTubeJobMetadata struct {
 	ThumbnailURL string
 }
 
+// ErrTwitchChannelNotFound is what a TwitchMetadataFetcher returns (wrapped
+// or bare) for a login Twitch says does not exist. The add route answers it
+// with a 404 instead of creating a job (G53): a manual add of a typo'd,
+// renamed or deleted login used to be accepted as a tw_manual_ job that
+// waited at "Waiting for stream..." forever. yt-dlp refuses the same input at
+// once with "<channel> does not exist" (twitch.py b77c9304e).
+var ErrTwitchChannelNotFound = errors.New("twitch channel not found")
+
 // TwitchMetadataFetcher provides Twitch stream/VOD metadata for job creation.
 type TwitchMetadataFetcher interface {
 	// FetchStreamMetadata returns metadata for a live Twitch channel.
-	// Returns nil if channel is offline or not found.
+	// Returns nil if the channel is offline, and ErrTwitchChannelNotFound if
+	// the login does not resolve to a Twitch user.
 	FetchStreamMetadata(ctx context.Context, login string) (*TwitchJobMetadata, error)
 	// FetchVodMetadata returns metadata for a Twitch VOD.
 	FetchVodMetadata(ctx context.Context, vodID string) (*TwitchJobMetadata, error)
@@ -743,6 +752,15 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			} else {
 				url = "https://www.twitch.tv/" + login
 				meta, err := twitchFetcher.FetchStreamMetadata(req.Context(), login)
+				if errors.Is(err, ErrTwitchChannelNotFound) {
+					// Twitch answered: no such user. Any OTHER error still
+					// falls through to the waiting manual job below — a
+					// lookup that never got an answer is no verdict on the
+					// login, and the wait gives up on its own if Twitch later
+					// says the same (waitForTwitchLive).
+					jsonError(rw, "Twitch channel not found", http.StatusNotFound)
+					return
+				}
 				if err == nil && meta != nil && meta.IsLive {
 					jobID = "tw_" + meta.StreamID
 					title = meta.ChannelName + " — " + meta.Title

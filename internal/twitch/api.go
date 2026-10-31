@@ -37,10 +37,11 @@ var ErrSubscriberOnly = errors.New("subscriber-only content: you must be logged 
 
 // ErrChannelNotFound signals a login that doesn't resolve to a Twitch user
 // (renamed, banned, deleted, or a typo) — GQL returns user:null, which is
-// indistinguishable from "offline" without this. Surfaced ONLY by
-// GetStreamInfoBatch (the monitor's health tracker uses it); the single
-// GetStreamInfo preserves its historical (nil, nil) so worker callers,
-// which treat not-yet-live and not-found identically, are unaffected.
+// indistinguishable from "offline" without this. Surfaced by
+// GetStreamInfoBatch (the monitor's health tracker uses it) and by
+// LookupStreamInfo, the not-found-aware single lookup the manual add and the
+// manual wait use (G53); GetStreamInfo keeps its historical (nil, nil) for
+// the callers that treat not-yet-live and not-found identically.
 var ErrChannelNotFound = errors.New("twitch channel not found (renamed, banned, or invalid login)")
 
 // errStreamSlotUnavailable is a per-channel TRANSIENT failure inside an
@@ -491,20 +492,34 @@ const (
 // the login is the canonical lower-case form. Mixed-case logins entered via
 // config could otherwise silently return an empty stream.
 //
-// A one-channel batch through the same streamInfo the monitor's batch uses, so
-// the two shapes cannot drift apart.
+// A login that does not resolve reads as offline here (collapseStreamInfoError);
+// LookupStreamInfo is the same request without that collapse.
 func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string) (*TwitchStreamInfo, error) {
+	return collapseStreamInfoError(a.LookupStreamInfo(ctx, channelLogin, authToken))
+}
+
+// LookupStreamInfo is GetStreamInfo's request with the not-found answer kept:
+// (info, nil) live, (nil, nil) offline, (nil, ErrChannelNotFound) for a login
+// that does not resolve — GQL's user:null, yt-dlp's "<channel> does not exist"
+// (TwitchStreamIE._real_extract, twitch.py b77c9304e), which upstream raises
+// as an expected error at once rather than wait out as a UserNotLive. A
+// one-channel batch through the same streamInfo the monitor's batch uses, so
+// the two shapes cannot drift apart.
+func (a *API) LookupStreamInfo(ctx context.Context, channelLogin, authToken string) (*TwitchStreamInfo, error) {
 	infos, errs, err := a.streamInfo(ctx, streamInfoOp, []string{channelLogin}, authToken)
 	if err != nil {
 		return nil, err
 	}
-	return collapseStreamInfoError(infos[0], errs[0])
+	return infos[0], errs[0]
 }
 
 // collapseStreamInfoError applies the single-call contract to parseStreamInfo's
-// result. ErrChannelNotFound still reads as offline — every caller
-// (processTwitchLive, waitForTwitchLive, the manual-add route) relies on that,
-// and a login that does not resolve IS a settled answer.
+// result. ErrChannelNotFound still reads as offline for GetStreamInfo's callers
+// (processTwitchLive's first look, the capture's end checks), and a login that
+// does not resolve IS a settled answer there. The two callers for which it is
+// NOT the same answer as offline — the manual-add route, which used to create
+// a job for a typo, and waitForTwitchLive, which then polled it forever (G53)
+// — call LookupStreamInfo, which skips this collapse.
 //
 // errStreamSlotUnavailable no longer does (owner decision O-C, sweep-2
 // ENGINE-3/TWITCH-2). A per-element GQL error or null data is a TRANSIENT
@@ -558,7 +573,7 @@ func (a *API) GetStreamInfoBatch(ctx context.Context, channelLogins []string, au
 	return a.streamInfo(ctx, streamInfoBatchOp, channelLogins, authToken)
 }
 
-// streamInfo is the one request behind GetStreamInfoBatch and GetStreamInfo:
+// streamInfo is the one request behind GetStreamInfoBatch and LookupStreamInfo:
 // channelLogins' StreamMetadata + Comscore pairs in one GQL batch, sent once
 // with authToken, labelled opName. GetStreamInfoBatch's doc is its contract.
 func (a *API) streamInfo(ctx context.Context, opName string, channelLogins []string, authToken string) (infos []*TwitchStreamInfo, errs []error, wholeErr error) {

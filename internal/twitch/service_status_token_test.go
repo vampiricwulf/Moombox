@@ -150,9 +150,9 @@ func statusService(t *testing.T, rows ...string) (*Service, *statusLog, *[]strin
 }
 
 // TestStatusChecksRetrySignedOutWhenTheTokenIsRefused is the wave's first
-// offline test, through both entry points that send the batch: the monitor's
-// GetStreamInfoBatch and GetStreamInfo (the manual wait, the add route and the
-// capture's end checks).
+// offline test, through all three entry points that send the batch: the
+// monitor's GetStreamInfoBatch, the not-found-aware LookupStreamInfo (the add
+// route and the manual wait) and GetStreamInfo (the capture's end checks).
 //
 // For each: the refused authenticated request, then ONE more with no
 // Authorization header and the same body, whose answers are what the caller
@@ -186,6 +186,16 @@ func TestStatusChecksRetrySignedOutWhenTheTokenIsRefused(t *testing.T) {
 				}
 				if !errors.Is(errs[2], ErrChannelNotFound) {
 					return fmt.Errorf("goneone = %+v, %v; want ErrChannelNotFound", infos[2], errs[2])
+				}
+				return nil
+			},
+		},
+		{
+			name:  "the not-found-aware lookup",
+			reply: statusBatch(statusSlot("goneone", "missing")),
+			call: func(svc *Service) error {
+				if info, err := svc.LookupStreamInfo(context.Background(), "goneone"); info != nil || !errors.Is(err, ErrChannelNotFound) {
+					return fmt.Errorf("LookupStreamInfo = %+v, %v; want ErrChannelNotFound", info, err)
 				}
 				return nil
 			},
