@@ -481,11 +481,14 @@ func TestDownloadManifestlessDashMissingPot(t *testing.T) {
 // with errMissingPot before the manifest is fetched — not fetched bare. A
 // Premium session's manifest is only recommended a token and is fetched bare;
 // a guessed binding (D12) has no token-free copy of a manifest to prefer, so
-// the manifest takes the token minted under the guess.
+// the manifest takes the token minted under the guess — unless Premium makes
+// its token recommended, when it is fetched bare with nothing minted.
 //
 // Mutants (each run): fetching bare on a failed mint fails the skip row (one
 // request, no error); ignoring IsPremium fails the Premium row (an error);
-// withholding the guessed token fails the guessed row (an error and no mint).
+// withholding the guessed token fails the guessed row (an error and no mint);
+// minting under the guess for a recommended token fails the Premium-guessed
+// row (a mint, a /pot/ manifest).
 func TestDownloadDashMissingPotSkipsTheManifest(t *testing.T) {
 	sidecarDown := errors.New("sidecar down")
 	for _, tc := range []struct {
@@ -500,6 +503,7 @@ func TestDownloadDashMissingPotSkipsTheManifest(t *testing.T) {
 		{name: "a failed mint skips the manifest", mintErr: sidecarDown, wantErr: true, wantMints: 1},
 		{name: "Premium fetches it bare", mintErr: sidecarDown, premium: true, wantMints: 1},
 		{name: "a guessed binding mints under the guess", guessed: true, wantPot: true, wantMints: 1},
+		{name: "Premium with a guessed binding goes bare", premium: true, guessed: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			token := "tok123"
