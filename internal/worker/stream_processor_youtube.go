@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -118,7 +119,8 @@ func (sp *StreamProcessor) fetchVideoInfo(ctx context.Context, videoID string) (
 // the broadcast (the bot wall, a made-for-kids video): it escalates once, and
 // when that settles nothing either it returns a
 // *youtube.StatusProbeInconclusiveError, which classifyProbeErr makes
-// network-class, so the loop waits through it. It used to come back as
+// network-class, so the loop waits through it, its full fetch and schedule
+// probe still running (the error branch below). It used to come back as
 // not_a_stream, and the switch's default arm ended the job "unexpected
 // status: not_a_stream" on the first poll (G8).
 func (sp *StreamProcessor) probeVideoStatus(ctx context.Context, videoID string, authenticated bool) (*youtube.VideoInfo, error) {
@@ -311,12 +313,27 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				// the stream isn't coming up regardless of further work.
 				return nil, fmt.Errorf("max probe errors: %w (%w)", probeErr, ErrNonActionable)
 			}
-			continue
+			// A status probe that could not tell (G8) is waited through,
+			// not waited out blind: the rest of this tick runs on a stand-in
+			// that says nothing but "still waiting", so the calls that can
+			// still see the broadcast keep their cadence — the periodic full
+			// fetch, the authority that gives up on a stream made private or
+			// removed (whose refusal is as blind as the bot wall's, and
+			// which the default arm used to end on the probe's
+			// not_a_stream), and the WEB schedule probe, which can see the
+			// stream begin while ANDROID_VR cannot. A plain continue here
+			// would skip both for as long as the wall stood, and a removed
+			// stream's job would wait for good.
+			if _, blind := errors.AsType[*youtube.StatusProbeInconclusiveError](probeErr); !blind {
+				continue
+			}
+			probeInfo = &youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming}
+		} else {
+			consecutiveErrors = 0
+			// Successful probe (HTTP 200 reached the service) — feed the oracle so a
+			// wrongly-offline passive latch can self-correct (Layer 4).
+			reportProbeResult("probe/youtube", false)
 		}
-		consecutiveErrors = 0
-		// Successful probe (HTTP 200 reached the service) — feed the oracle so a
-		// wrongly-offline passive latch can self-correct (Layer 4).
-		reportProbeResult("probe/youtube", false)
 
 		// Update local scheduledStartTime for interval calculation
 		if probeInfo.ScheduledStartTime != "" {

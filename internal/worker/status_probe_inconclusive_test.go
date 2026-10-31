@@ -92,3 +92,85 @@ func TestWaitingLoopWaitsThroughAnInconclusiveStatusProbe(t *testing.T) {
 		t.Fatalf("the wait ended with %+v at %v, want a live download once the wall lifted at %v:%s", run.result, run.returned, walled, run)
 	}
 }
+
+// TestWaitingLoopKeepsItsAuthorityThroughAnInconclusiveStatusProbe: the
+// calls that can still see the broadcast keep their cadence while the
+// status probe is blind. The periodic full fetch still gives up on a stream
+// that was removed — whose ANDROID_VR refusal is as blind as the bot wall's,
+// and whose job the default arm used to end on the probe's not_a_stream — and
+// the WEB schedule probe still sees a stream begin. Waited out blind (the
+// error path's plain continue), neither ran: the removed stream's job waited
+// for good, and a stream that went live behind the wall was not recorded
+// until the wall lifted.
+//
+// Only the inconclusive probe gets the stand-in: one that did not reach
+// YouTube at all skips the rest of its tick as before, since the calls behind
+// it would not reach YouTube either.
+//
+// Mutants: the stand-in dropped (continue on an inconclusive probe like any
+// network-class error): the first two rows wait to the budget; the stand-in
+// taken for every network-class error: the last row makes the full fetch and
+// the schedule probe on an unreachable network.
+func TestWaitingLoopKeepsItsAuthorityThroughAnInconclusiveStatusProbe(t *testing.T) {
+	blind := func(time.Duration) (*youtube.VideoInfo, error) { return nil, botWalledProbe(errEscalation400) }
+
+	t.Run("the full fetch says the stream is gone", func(t *testing.T) {
+		run := driveWaitForLive(t, 2*time.Minute, 2*time.Hour, func(time.Time) waitFakes {
+			return waitFakes{
+				status: blind,
+				full: func(time.Duration) (*youtube.VideoInfo, error) {
+					return &youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming, PlayabilityError: youtube.PlayabilityUnavailable,
+						PlayabilityReason: "This video is unavailable"}, nil
+				},
+			}
+		})
+		if run.returned < 0 || run.result == nil || run.result.ShouldDownload {
+			t.Fatalf("the wait ended with %+v at %v, want it given up on the full fetch's verdict:%s", run.result, run.returned, run)
+		}
+		if run.returned > fullFetchInterval+time.Minute || run.count("full") != 1 {
+			t.Errorf("gave up at %v after %d full fetches, want the first periodic full fetch (%v):%s", run.returned, run.count("full"), fullFetchInterval, run)
+		}
+		if run.result.Error != "stream unavailable: This video is unavailable" {
+			t.Errorf("Error = %q, want the full fetch's reason", run.result.Error)
+		}
+	})
+
+	t.Run("the schedule probe sees the stream begin", func(t *testing.T) {
+		const goesLive = 10 * time.Minute
+		run := driveWaitForLive(t, 2*time.Minute, 2*time.Hour, func(start time.Time) waitFakes {
+			return waitFakes{
+				status: blind,
+				schedule: func(at time.Duration) (*youtube.VideoInfo, error) {
+					if at < goesLive {
+						return upcomingAnswer(start), nil
+					}
+					return liveAnswer(start), nil
+				},
+				full: func(at time.Duration) (*youtube.VideoInfo, error) {
+					if at < goesLive {
+						return upcomingAnswer(start), nil
+					}
+					return liveAnswer(start), nil
+				},
+			}
+		})
+		if run.returned < goesLive || run.returned > goesLive+scheduleProbeMin+time.Minute ||
+			run.result == nil || !run.result.ShouldDownload || run.result.IsVod {
+			t.Fatalf("the wait ended with %+v at %v, want a live download within a schedule probe of %v:%s", run.result, run.returned, goesLive, run)
+		}
+	})
+
+	t.Run("a probe that did not reach YouTube still skips its tick", func(t *testing.T) {
+		run := driveWaitForLive(t, 2*time.Minute, fullFetchInterval+10*time.Minute, func(time.Time) waitFakes {
+			return waitFakes{status: func(time.Duration) (*youtube.VideoInfo, error) {
+				return nil, &net.DNSError{Err: "no such host", Name: "www.youtube.com"}
+			}}
+		})
+		if run.returned >= 0 {
+			t.Fatalf("the wait ended with %+v at %v through a network outage, want it still waiting:%s", run.result, run.returned, run)
+		}
+		if n, m := run.count("full"), run.count("schedule"); n != 0 || m != 0 {
+			t.Errorf("%d full fetches and %d schedule probes behind an unreachable status probe, want none:%s", n, m, run)
+		}
+	})
+}
