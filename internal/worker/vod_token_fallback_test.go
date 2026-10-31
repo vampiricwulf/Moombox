@@ -70,11 +70,15 @@ type fallbackRig struct {
 	// failFetch makes every re-fetch fail.
 	failFetch bool
 	gen       int
-	// The fake minter: each mint's bypassCache, and what it answers.
-	mints   []bool
-	mintErr error
-	empty   bool
-	minter  gvsTokenMinter
+	// The fake minter: each mint's bypassCache and content binding, and what
+	// it answers.
+	mints    []bool
+	bindings []string
+	mintErr  error
+	empty    bool
+	minter   gvsTokenMinter
+	// info is the extraction start built the stream from.
+	info    *youtube.VideoInfo
 	refresh func() (string, string)
 }
 
@@ -101,8 +105,9 @@ func newFallbackRig(t *testing.T) *fallbackRig {
 	})
 	r.job, r.logs = vodPotJob(t)
 	r.job.YT = youtube.NewService(nil, &discardLogger{})
-	r.minter = &fakePotProvider{generate: func(_ context.Context, _ string, bypassCache bool) (string, error) {
+	r.minter = &fakePotProvider{generate: func(_ context.Context, binding string, bypassCache bool) (string, error) {
 		r.mints = append(r.mints, bypassCache)
+		r.bindings = append(r.bindings, binding)
 		if r.mintErr != nil {
 			return "", r.mintErr
 		}
@@ -116,11 +121,25 @@ func newFallbackRig(t *testing.T) *fallbackRig {
 
 // start builds the stream's refresh the way DownloadVod does: served is the
 // r.source copy whose resolved URL is servedURL, from an extraction whose
-// verdict exempt is, its own pre-roll ad over at adEnd.
+// verdict exempt is, its own pre-roll ad over at adEnd. The extraction
+// carries a signed-in session's datasync binding, which every mint must use.
 func (r *fallbackRig) start(servedURL string, adEnd time.Time, exempt bool) {
 	served := youtube.Format{Itag: 137, URL: servedURL, ContentLength: "1000", Source: r.source, AvailableAt: adEnd}
-	info := &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, PlaybackWaitExempt: exempt, PlayerURL: fallbackPlayer, Formats: []youtube.Format{served}}
-	r.refresh = vodURLRefresh(context.Background(), r.job, info, served, servedURL, stubCipherSolver{}, nil, r.minter, "VOD video")
+	r.info = &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, PlaybackWaitExempt: exempt, PlayerURL: fallbackPlayer, Formats: []youtube.Format{served},
+		GvsBinding: "datasync-0123", GvsBindingKind: youtube.BindingDataSyncID}
+	r.refresh = vodURLRefresh(context.Background(), r.job, r.info, served, servedURL, stubCipherSolver{}, nil, r.minter, "VOD video")
+}
+
+// checkBindings fails unless every mint so far was bound as every other GVS
+// mint of the job is (gvsBinding of the extraction the stream came from).
+func (r *fallbackRig) checkBindings() {
+	r.t.Helper()
+	want, _ := gvsBinding(r.job, r.info)
+	for i, b := range r.bindings {
+		if b != want {
+			r.t.Errorf("mint %d bound to %q, want %q (gvsBinding)", i+1, b, want)
+		}
+	}
 }
 
 // expect runs one refresh and checks what it hands the engine and what its
@@ -195,7 +214,8 @@ func TestVodTokenFallbackLeavesAnExpiryAlone(t *testing.T) {
 // tv_auth. Mutant: st.served not moved onto the copy (handOut's class
 // switch dropped) — call 3 asks for a tv copy with the token class of
 // tv_auth, and the closing line says step 2 again. Mutant: bypassCache false
-// on the mint — the mint check.
+// on the mint — the mint check. Mutant: the mint bound to "" instead of the
+// job's binding — the binding check.
 func TestVodTokenFallbackSteps(t *testing.T) {
 	r := newFallbackRig(t)
 	r.start(fallbackURL("tv", 0, r.now.Add(5*time.Hour)), time.Time{}, false)
@@ -209,6 +229,7 @@ func TestVodTokenFallbackSteps(t *testing.T) {
 	if want := []bool{true, true, true}; fmt.Sprint(r.mints) != fmt.Sprint(want) {
 		t.Errorf("mints' bypassCache = %v, want %v — the cached token may be the refused one", r.mints, want)
 	}
+	r.checkBindings()
 	lines := r.fallbackLines()
 	if len(lines) != 2 {
 		t.Fatalf("fallback lines = %v, want one per step", lines)
@@ -223,16 +244,37 @@ func TestVodTokenFallbackSteps(t *testing.T) {
 // TestVodTokenFallbackKeepsAWorkingToken: once step 1's token rides the
 // stream, the refresh that meets the URL's real expiry hours later mints one
 // again for the fresh URL rather than sending it bare — the URLs worked with
-// a token, and the engine could not clear one anyway.
+// a token, and the engine could not clear one anyway. A step whose re-fetch
+// fails hands out no URL, and its token rides the current one (keep): that
+// is step 1 run and a token on the stream as much as a fresh URL with one
+// is, so the expiry still mints and the next early refusal is step 2.
 //
-// Mutant: noteToken not recording st.tokenised — the expiry's refresh comes
-// back bare.
+// Mutant: noteToken not recording st.tokenised — each expiry's refresh comes
+// back bare. Mutant: keep() not recording the token (st.noteToken dropped
+// from it) — the "left on the current URL" row's expiry comes back bare, and
+// its next early refusal runs step 1 again instead of moving onto the watch
+// page's copy.
 func TestVodTokenFallbackKeepsAWorkingToken(t *testing.T) {
-	r := newFallbackRig(t)
-	r.start(fallbackURL("tv", 0, r.now.Add(5*time.Hour)), time.Time{}, false)
-	r.expect(fallbackURL("tv", 1, r.now.Add(6*time.Hour)), "tok1", 1, "tv_auth")
-	r.now = r.now.Add(6*time.Hour - 15*time.Minute) // fifteen minutes before tv1's expiry
-	r.expect(fallbackURL("tv", 2, r.now.Add(6*time.Hour)), "tok2", 0, "tv_auth")
+	t.Run("on a fresh URL", func(t *testing.T) {
+		r := newFallbackRig(t)
+		r.start(fallbackURL("tv", 0, r.now.Add(5*time.Hour)), time.Time{}, false)
+		r.expect(fallbackURL("tv", 1, r.now.Add(6*time.Hour)), "tok1", 1, "tv_auth")
+		r.now = r.now.Add(6*time.Hour - 15*time.Minute) // fifteen minutes before tv1's expiry
+		r.expect(fallbackURL("tv", 2, r.now.Add(6*time.Hour)), "tok2", 0, "tv_auth")
+	})
+	t.Run("left on the current URL", func(t *testing.T) {
+		r := newFallbackRig(t)
+		r.failFetch = true
+		r.start(fallbackURL("tv", 0, r.now.Add(5*time.Hour)), time.Time{}, false)
+		if u, tok := r.refresh(); u != "" || tok != "tok1" {
+			t.Fatalf("step 1 with the re-fetch failing = (%q, %q), want (\"\", \"tok1\") — the token on the current URL", u, tok)
+		}
+		r.failFetch, r.withCopy = false, false
+		r.now = r.now.Add(5*time.Hour - 15*time.Minute) // fifteen minutes before tv0's expiry
+		r.expect(fallbackURL("tv", 2, r.now.Add(6*time.Hour)), "tok2", 0, "tv_auth")
+		r.withCopy = true
+		r.expect(fallbackURL("web", 3, r.now.Add(6*time.Hour)), "tok3", 2, "watch_page")
+	})
 }
 
 // TestVodTokenFallbackReadsTheURLItHandedOut: the rule reads the URL the
@@ -335,9 +377,14 @@ func TestVodTokenFallbackWithoutAToken(t *testing.T) {
 // extraction upstream calls live or post-live waits for none, so its URL has
 // no ad window to be refused inside, and an early refusal there runs step 1.
 //
+// The window is the one of the URL being refused: a refreshed URL's is its
+// own response's, not the setup URL's.
+//
 // Mutant: dropping the ad-window check from fallbackStep — the first row
 // runs step 1. Mutant: adWindowEnd ignoring the verdict — the exempt row
-// reads the refusal as the ad and stays bare.
+// reads the refusal as the ad and stays bare. Mutant: handOut not recording
+// st.adEnd — the refreshed-URL row reads the setup URL's window, which is
+// over, and runs step 2.
 func TestVodTokenFallbackSparesTheAdWindow(t *testing.T) {
 	t.Run("inside the ad window", func(t *testing.T) {
 		r := newFallbackRig(t)
@@ -354,6 +401,29 @@ func TestVodTokenFallbackSparesTheAdWindow(t *testing.T) {
 		r := newFallbackRig(t)
 		r.start(fallbackURL("tv", 0, r.now.Add(5*time.Hour)), r.now.Add(10*time.Second), true)
 		r.expect(fallbackURL("tv", 1, r.now.Add(6*time.Hour)), "tok1", 1, "tv_auth")
+	})
+	t.Run("inside a refreshed URL's own ad window", func(t *testing.T) {
+		r := newFallbackRig(t)
+		// The fake clock sits in the real past, so each fresh copy's ad, ten
+		// seconds on from it, is long over by the wall clock the refresh's
+		// own wait reads (waitForFreshPlayback) and the refresh returns at
+		// once, while the rule reads the fake clock and sees the ad ahead.
+		r.now = time.Unix(1_700_000_000, 0)
+		r.pool = func(gen int, exp time.Time) []youtube.Format {
+			ad := r.now.Add(10 * time.Second)
+			return youtube.MergeFormatPool(context.Background(), nil, []youtube.Format{
+				withLevel(youtube.Format{Itag: 137, URL: fallbackURL("tv", gen, exp), ContentLength: "1000", Source: "tv_auth", AvailableAt: ad}, youtube.AuthLevelTVAuth),
+				withLevel(youtube.Format{Itag: 137, URL: fallbackURL("web", gen, exp), ContentLength: "1000", Source: "watch_page", AvailableAt: ad}, youtube.AuthLevelWatchPageAuth),
+			})
+		}
+		r.start(fallbackURL("tv", 0, r.now.Add(5*time.Hour)), time.Time{}, false)
+		r.expect(fallbackURL("tv", 1, r.now.Add(6*time.Hour)), "tok1", 1, "tv_auth")
+		// tv1 refused at the same instant: inside its own ad, though the
+		// setup URL had none. Tokenised by step 1, so the fresh URL mints.
+		r.expect(fallbackURL("tv", 2, r.now.Add(6*time.Hour)), "tok2", 0, "tv_auth")
+		if l := logLine(r.logs, "[POT] VOD URL refresh: refused inside its own pre-roll ad"); l == nil || l["adLeft"] != "10s" {
+			t.Errorf("ad-window line = %v, want one with adLeft=10s", l)
+		}
 	})
 }
 
@@ -695,6 +765,14 @@ func (s *vodTokenServer) pool(gen int, base time.Time) []youtube.Format {
 // from their expiry, refused, and fresh tv_auth URLs served bare. The
 // download completes on a bare tv_auth URL and no token is ever attached.
 //
+// No response here carries a pre-roll ad: the httptest origin runs outside
+// any synctest bubble, and the engine's HTTP client has no seam a worker
+// test could put one on. How the fallback composes with the ad wait is
+// pinned a level down, on the closure itself —
+// TestVodTokenFallbackStepsWaitOutTheirOwnAd and
+// TestVodTokenFallbackSparesTheAdWindow — beside DownloadVod's own wait
+// (TestDownloadVodWaitsOutThePreRollAd).
+//
 // Mutant: dropping the fallback from refreshVodURL — the field row fails on
 // "size probe refused: HTTP 403". Mutant: DownloadVod handing vodURLRefresh
 // "" (or the raw format URL's absence) instead of videoResolved / audioResolved
@@ -777,5 +855,22 @@ func TestVodTokenFallbackRescuesTheFieldCase(t *testing.T) {
 				t.Errorf("minted %d tokens for an expiry", mints.Load())
 			}
 		})
+	}
+}
+
+// TestVodRefreshMinterIsTheJobsProvider pins the seam's production value:
+// the job's own provider, unchanged — every whole-file refresh mint goes
+// through it, the token fallback's and a token-requiring stream's re-mint
+// alike, and a seam that lost it would silently refresh every stream bare —
+// and a disabled (nil) provider as a minter minterUsable turns away.
+//
+// Mutant: the production value returning nil — the first check.
+func TestVodRefreshMinterIsTheJobsProvider(t *testing.T) {
+	p := &bgutils.PotProvider{}
+	if got := vodRefreshMinter(p); got != gvsTokenMinter(p) {
+		t.Errorf("vodRefreshMinter(p) = %#v, want the provider itself", got)
+	}
+	if m := vodRefreshMinter(nil); minterUsable(m) {
+		t.Errorf("vodRefreshMinter(nil) = %#v, which minterUsable accepts — a disabled provider must read as none", m)
 	}
 }

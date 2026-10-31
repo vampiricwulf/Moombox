@@ -59,11 +59,12 @@ func stubRefreshVideoInfo(t *testing.T, fresh func() *youtube.VideoInfo) *atomic
 // stream's class (refreshVodURL's `!bare || st.tokenised || step > 0` gate
 // always true) — the shadow row mints a token for a bare URL. Mutant:
 // bypassCache true → false — the tokenised row's mint reads the cache.
-// Mutant: dropping the cookieless re-extract from refreshVodURL — the
-// incident row keeps the expired URL. Mutant: dropping its `bare` gate — the
-// tokenised re-encode row asks the cookieless chain. Mutant: handing the
-// re-extract ctx instead of refreshCtx — the incident row's fetch carries no
-// deadline.
+// Mutant: the mint bound to "" instead of the binding vodURLRefresh resolved
+// — the tokenised rows' binding check. Mutant: dropping the cookieless
+// re-extract from refreshVodURL — the incident row keeps the expired URL.
+// Mutant: dropping its `bare` gate — the tokenised re-encode row asks the
+// cookieless chain. Mutant: handing the re-extract ctx instead of refreshCtx
+// — the incident row's fetch carries no deadline.
 func TestRefreshVodURLServesTheSameFile(t *testing.T) {
 	const old, freshURL, shadowURL, cookielessURL = "http://cdn.invalid/videoplayback?expire=1&id=o-A&itag=137&clen=1000",
 		"http://cdn.invalid/videoplayback?expire=2&id=o-B&itag=137&clen=1000",
@@ -104,6 +105,9 @@ func TestRefreshVodURLServesTheSameFile(t *testing.T) {
 			var mints int
 			minter := &fakePotProvider{generate: func(ctx context.Context, binding string, bypassCache bool) (string, error) {
 				mints++
+				if binding != "vodpot" {
+					t.Errorf("re-mint bound to %q, want the job's binding %q", binding, "vodpot")
+				}
 				if !bypassCache {
 					return "cached-token", nil
 				}
@@ -127,6 +131,38 @@ func TestRefreshVodURLServesTheSameFile(t *testing.T) {
 				t.Errorf("the cookieless re-extract's ctx carries no deadline — it must run under the refresh's bound")
 			}
 		})
+	}
+}
+
+// TestRefreshVodURLKeepsTheAudioTrack: the same file is the same audio track
+// too. Two language tracks of a multi-audio upload share the itag and can
+// share the byte length, and the engine's own check of a whole-file URL reads
+// only those two (streamIdentity: itag and clen), so vodFileCopy's track
+// check is all that stops a refresh — or the token fallback's move onto
+// another client's copy — appending one language to another's partial. A
+// fresh pool and a cookieless chain that serve only the other track's copy,
+// as a winner and as its token-carrying shadow, refresh nothing.
+//
+// Mutant: dropping `c.AudioTrackID == served.AudioTrackID` from vodFileCopy
+// — the refresh hands out the other track's tv_auth URL.
+func TestRefreshVodURLKeepsTheAudioTrack(t *testing.T) {
+	const old = "http://cdn.invalid/videoplayback?expire=1&id=o-A&itag=140&clen=1000"
+	other := func(dir, source string, level int) youtube.Format {
+		return withLevel(youtube.Format{Itag: 140, URL: "http://cdn.invalid/" + dir + "/videoplayback?expire=2&id=o-B&itag=140&clen=1000",
+			ContentLength: "1000", AudioTrackID: "ja.3", Source: source}, level)
+	}
+	stubRefreshVideoInfo(t, func() *youtube.VideoInfo {
+		return &youtube.VideoInfo{PlayerURL: "https://www.youtube.com/s/player/abcd1234/player_ias.vflset/en_US/base.js",
+			Formats: youtube.MergeFormatPool(context.Background(), nil, []youtube.Format{
+				other("tv", "tv_auth", youtube.AuthLevelTVAuth), other("web", "watch_page", youtube.AuthLevelWatchPageAuth)})}
+	})
+	fakeCookielessCtx(t, []youtube.Format{other("vos", "visionos", youtube.AuthLevelVisionOS)}, nil)
+	job, _ := vodPotJob(t)
+	job.YT = youtube.NewService(nil, &discardLogger{})
+	served := youtube.Format{Itag: 140, URL: old, ContentLength: "1000", AudioTrackID: "en.4", Source: "tv_auth"}
+	if u, tok := refreshVodURL(context.Background(), job, "https://www.youtube.com/s/player/abcd1234/player_ias.vflset/en_US/base.js",
+		newVodRefreshState(nil, served, old), stubCipherSolver{}, nil, nil, "vodpot", "VOD audio"); u != "" || tok != "" {
+		t.Errorf("refreshVodURL = (%q, %q), want nothing — only the other track's copy is served", u, tok)
 	}
 }
 
