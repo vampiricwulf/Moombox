@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -90,6 +93,8 @@ func TestDownloadHlsTakesTheChallengeFreeMaster(t *testing.T) {
 
 // fakeStrategy is a DownloadStrategy of the given kind that answers each
 // Download with the next of answers, recording the VideoInfo it was handed.
+// Its result records HLS when its kind is "hls", as HlsStrategy's does, and
+// it writes nothing.
 type fakeStrategy struct {
 	kind    string
 	answers []error
@@ -107,7 +112,7 @@ func (f *fakeStrategy) Download(_ context.Context, _ *JobContext, info *youtube.
 	if err != nil {
 		return nil, err
 	}
-	return &DownloadResult{HasVideo: true}, nil
+	return &DownloadResult{HasVideo: true, IsHls: f.kind == "hls"}, nil
 }
 
 // swapHls replaces HlsStrategy with hls for the test.
@@ -245,6 +250,104 @@ func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 			t.Error("the caller's VideoInfo was rewritten")
 		}
 	})
+}
+
+// TestSetupSetsTheOtherShapeAside: a job resumed into the part it left
+// unmuxed records there in whatever shape its setup now has, and the
+// challenge-free fallback changes the shape inside the part — HLS into the
+// part holding the earlier session's from-start DASH capture, and DASH again,
+// once solving works, beside the fallback's video.ts. The finalize muxed the
+// recording the setup named and the cleanup deleted staging with the other
+// one unmuxed in it (decideStagingCleanup: removeStaging). The other shape is
+// now set aside once the setup has built its downloaders, under one stamp (a
+// DASH pair stays one recording), resume state travelling with it, so the
+// finalize muxes it to its own file and the cleanup keeps staging for it. The
+// shape a setup resumes is left where it is, and a setup that fails moves
+// nothing.
+//
+// Mutants: the set-aside dropped (the first two rows keep both shapes, and
+// the cleanup removes staging); HLS setting aside its own video.ts, or DASH
+// its own pair (the resume rows); the set-aside run before the setup's own
+// outcome is known (the failed row moves the pair).
+func TestSetupSetsTheOtherShapeAside(t *testing.T) {
+	systemic := fmt.Errorf("manifestless DASH: resolve video URL: itag 299: %w: %w", errChallengesUnsolvable, cipher.ErrSidecarUnavailable)
+	dash := []string{"video_stream", "audio_stream"}
+	hlsName := []string{"video.ts"}
+	for _, tc := range []struct {
+		name      string
+		staged    []string // the earlier session's capture in the part
+		answers   []error  // the manifest-free setup's
+		hlsErr    error
+		wantAside bool
+	}{
+		{"the HLS fallback into a part holding a from-start DASH capture", dash, []error{systemic}, nil, true},
+		{"DASH, solving back, into a part holding the fallback's video.ts", hlsName, []error{nil}, nil, true},
+		{"the HLS fallback resuming its own video.ts", hlsName, []error{systemic}, nil, false},
+		{"DASH resuming its own pair", dash, []error{nil}, nil, false},
+		{"a setup that fails, the fallback's too", dash, []error{systemic}, errors.New("fake HLS: no variants"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			swapHls(t, &fakeStrategy{kind: "hls", answers: []error{tc.hlsErr}})
+			job, logs := reextractJob(t)
+			rec := &warnRecorder{captureLogger: logs}
+			job.Logger = rec
+			dir := job.StagingDir
+			for _, name := range tc.staged {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("an earlier session's "+name), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resume := filepath.Join(dir, tc.staged[0]+".resume.json")
+			if err := os.WriteFile(resume, []byte(`{"lastSeq":7}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer,
+				HlsManifestURL: "https://manifest.googlevideo.com/api/manifest/hls_variant/id/abc/file/index.m3u8", HlsManifestSource: "visionos"}
+			_, err := setupWithChallengeFallback(context.Background(), job, &fakeStrategy{kind: "manifestless_dash", answers: tc.answers}, false, info, &StrategyDeps{})
+			if (err != nil) != (tc.hlsErr != nil) {
+				t.Fatalf("setup = %v", err)
+			}
+			asides := stagedRestartAsides(dir)
+			warned := rec.warned("an earlier capture of this job in another shape was set aside")
+			if !tc.wantAside {
+				for _, name := range tc.staged {
+					if !fileExists(filepath.Join(dir, name)) {
+						t.Errorf("%s was moved, want it left for the setup to resume", name)
+					}
+				}
+				if len(asides) != 0 || warned {
+					t.Errorf("asides %v, warned %v; want none", asides, warned)
+				}
+				return
+			}
+			for _, name := range append(tc.staged, filepath.Base(resume)) {
+				if fileExists(filepath.Join(dir, name)) {
+					t.Errorf("%s is still in the part beside the new shape's capture", name)
+				}
+			}
+			if len(asides) != len(tc.staged) {
+				t.Fatalf("asides = %v, want the earlier capture's %v", asides, tc.staged)
+			}
+			if groups := groupStagedAsides(asides); len(groups) != 1 {
+				t.Errorf("the earlier capture set aside as %d recordings, want one: %+v", len(groups), groups)
+			}
+			travelled := false
+			for _, a := range asides {
+				if strings.HasPrefix(filepath.Base(a), tc.staged[0]+engine.StagedRestartSuffix) {
+					travelled = fileExists(engine.StagedRestartSidecar(a))
+				}
+			}
+			if !travelled {
+				t.Errorf("the resume state did not travel with %s's aside: %v", tc.staged[0], asides)
+			}
+			if !warned {
+				t.Errorf("no Warn naming the set-aside: %v", logs.lines())
+			}
+			if v := decideStagingCleanup(job.DB, nil, job.Job.ID, dir); v.keep != keepStagingForAsides {
+				t.Errorf("staging verdict %v, want it kept for the aside until the finalize muxes it", v.keep)
+			}
+		})
+	}
 }
 
 // TestExecuteWithChatRecordsLiveHlsWhenChallengesCannotBeSolved pins the

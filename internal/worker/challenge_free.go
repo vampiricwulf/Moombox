@@ -200,17 +200,20 @@ func challengeFreeHlsInfo(ctx context.Context, job *JobContext, info *youtube.Vi
 // that needs none (audit G10):
 //
 //   - A live capture on a from-start path — manifest-free DASH or a DASH
-//     manifest — records the live HLS playlist instead (HlsStrategy), from
-//     the live edge, the job log saying why from-start was dropped (owner
-//     decision 7). That is yt-dlp's own default for a live stream: it skips
-//     the live adaptive formats unless --live-from-start asks for them
-//     (_video.py:3492-3501, 3616-3619) and records HLS, and a master whose n
-//     has no answer it passes over for the next client's (3692-3713) —
-//     DownloadHls does the same, through challengeFreeHlsInfo, and so does
-//     this when the extraction carried no master at all. The from-start
-//     paths have no copy to fall to: visionos serves a live stream no DASH
-//     manifest, and a challenge-free adaptive copy is not looked for here
-//     (the plan's call), so the live edge is what is left.
+//     manifest — records the live HLS playlist instead (HlsStrategy), the
+//     job log saying why from-start was dropped (owner decision 7). That is
+//     yt-dlp's own default for a live stream: it skips the live adaptive
+//     formats unless --live-from-start asks for them (_video.py:3492-3501,
+//     3616-3619) and records HLS, and a master whose n has no answer it
+//     passes over for the next client's (3692-3713) — DownloadHls does the
+//     same through challengeFreeHlsInfo, and so does this when the
+//     extraction carried no master at all. The from-start paths have no copy
+//     to fall to: visionos serves a live stream no DASH manifest, and a
+//     challenge-free adaptive copy is not looked for here (the plan's call),
+//     so the live playlist is what is left. It records as any HLS capture
+//     does, from the oldest segment the playlist's window still holds
+//     (StartSeq -1) — not from the edge alone — or from a restart's seed in
+//     a fresh part.
 //   - A post-live manifest-free capture has no live edge to fall to. It runs
 //     again on the formats that need no player JS (challengeFreeFormats: the
 //     drop, one cookieless re-extract, the merge), from the start, as the
@@ -219,7 +222,27 @@ func challengeFreeHlsInfo(ctx context.Context, job *JobContext, info *youtube.Vi
 //
 // Any other setup error — or one of these with the job already cancelled —
 // is returned as it came. A fallback that fails too names both failures.
+//
+// A setup that built its downloaders, the first one or a fallback's, then
+// clears its part of the other shape's staged media before they write
+// (setAsideOtherLiveShape): a job resumed into a part that holds an earlier
+// session's from-start capture records HLS beside it here, and one resumed
+// from this fallback once solving works again records DASH beside its
+// video.ts.
 func setupWithChallengeFallback(ctx context.Context, job *JobContext, strategy DownloadStrategy, isVod bool, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
+	result, err := setupOrChallengeFree(ctx, job, strategy, isVod, info, deps)
+	if err != nil {
+		return result, err
+	}
+	if err := setAsideOtherLiveShape(job, result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// setupOrChallengeFree is setupWithChallengeFallback's choice of setup: the
+// strategy's own, and the fallback's when that fails on the challenges.
+func setupOrChallengeFree(ctx context.Context, job *JobContext, strategy DownloadStrategy, isVod bool, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
 	result, err := strategy.Download(ctx, job, info, deps)
 	if err == nil || ctx.Err() != nil || !setupFailedOnChallenges(err) {
 		return result, err
