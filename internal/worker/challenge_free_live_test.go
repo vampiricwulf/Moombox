@@ -215,7 +215,8 @@ func swapHls(t *testing.T, hls DownloadStrategy) {
 // unrelated row falls back); the cancelled check dropped (the cancelled row
 // falls back); the empty-master arm dropped from DownloadHls (the no-master
 // row fails to set up); the post-live re-run on the original formats (its row sees
-// the tv copies); the Warn dropped (the live rows).
+// the tv copies); the post-live split-pair check dropped (the no-pair row
+// runs the strategy again); the Warn dropped (the live rows).
 func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 	systemic := fmt.Errorf("manifestless DASH: resolve video URL: itag 299: %w: %w", errChallengesUnsolvable, cipher.ErrNUnsolved)
 	live := func() *youtube.VideoInfo {
@@ -327,6 +328,28 @@ func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 		}
 		if info.Formats[0].Source != "tv_public" {
 			t.Error("the caller's VideoInfo was rewritten")
+		}
+	})
+
+	t.Run("post-live with no challenge-free split pair left fails naming the cause", func(t *testing.T) {
+		w, h, fps := 1920, 1080, 30
+		tvVideo := withLevel(youtube.Format{Itag: 299, URL: "https://r1.googlevideo.com/videoplayback?itag=299&n=" + nChal, MimeType: `video/mp4; codecs="avc1.64002a"`,
+			Bitrate: 4_000_000, Width: &w, Height: &h, Fps: &fps, Source: "tv_public", TargetDurationSec: 2}, youtube.AuthLevelTVPublic)
+		tvAudio := withLevel(youtube.Format{Itag: 140, URL: "https://r1.googlevideo.com/videoplayback?itag=140&n=" + nChal, MimeType: `audio/mp4; codecs="mp4a.40.2"`,
+			Bitrate: 128_000, Source: "tv_public", TargetDurationSec: 2}, youtube.AuthLevelTVPublic)
+		// The cookieless chain has the audio alone.
+		au := tvAudio
+		au.Source, au.URL = "visionos", "https://r2.googlevideo.com/videoplayback?itag=140"
+		calls := fakeCookieless(t, []youtube.Format{withLevel(au, youtube.AuthLevelVisionOS)}, nil)
+		job, _ := reextractJob(t)
+		info := &youtube.VideoInfo{StreamStatus: youtube.StreamPostLive, PlayerURL: nPlayer, Formats: []youtube.Format{tvVideo, tvAudio}}
+		s := &fakeStrategy{kind: "manifestless_dash", answers: []error{systemic, nil}}
+		_, err := setupWithChallengeFallback(context.Background(), job, s, true, info, &StrategyDeps{})
+		if !errors.Is(err, errChallengesUnsolvable) || !strings.Contains(fmt.Sprint(err), "no split video and audio pair that needs no player JS is left") {
+			t.Errorf("setup = %v, want the cause and no split pair left", err)
+		}
+		if n := calls.Load(); n != 1 || len(s.seen) != 1 {
+			t.Errorf("cookieless re-extract ran %d time(s), strategy run %d time(s); want 1 and 1 (no re-run on a pool it cannot use)", n, len(s.seen))
 		}
 	})
 }

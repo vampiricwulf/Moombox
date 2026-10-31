@@ -261,3 +261,36 @@ func TestSystemicResolveFailure(t *testing.T) {
 		}
 	}
 }
+
+// TestNoSolverWiredIsTheSidecarUnavailable: a signatureCipher format resolved
+// with no solver wired at all — neither the routed composite nor goja — fails
+// with cipher.ErrSidecarUnavailable wrapped, so it is the systemic failure it
+// is (the sidecar is the only signature solver) and the setup falls back to
+// the formats that need no player JS. It used to be an untyped "requires sig
+// but no solver wired", which the fallback could not tell from one URL's own
+// failure.
+//
+// Mutants: either wrap reverted to the untyped error (its row).
+func TestNoSolverWiredIsTheSidecarUnavailable(t *testing.T) {
+	signed := youtube.Format{Itag: 299, URL: "https://x/videoplayback?itag=299", EncryptedSig: "ENCSIG", SigKey: "sig"}
+	logs := &captureLogger{}
+	for _, tc := range []struct {
+		name    string
+		resolve func() (string, error)
+	}{
+		{"resolveFormatURL", func() (string, error) {
+			return resolveFormatURL(context.Background(), &signed, nil, nil, nPlayer, logs)
+		}},
+		{"resolveFormatURLByItag", func() (string, error) {
+			return resolveFormatURLByItag(context.Background(), []youtube.Format{signed}, 299, nil, nil, nPlayer, logs)
+		}},
+	} {
+		_, err := tc.resolve()
+		if !errors.Is(err, cipher.ErrSidecarUnavailable) {
+			t.Errorf("%s = %v, want cipher.ErrSidecarUnavailable wrapped", tc.name, err)
+		}
+		if !systemicResolveFailure(err, &signed, nPlayer) {
+			t.Errorf("%s: %v is not a systemic resolve failure", tc.name, err)
+		}
+	}
+}
