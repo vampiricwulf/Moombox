@@ -340,7 +340,7 @@ func TestVodAndManifestFreeTreatAnUnsolvedNAsAResolveFailure(t *testing.T) {
 
 	job, _ := vodPotJob(t)
 	result := &DownloadResult{HasVideo: true, VideoFormat: &video}
-	if v, a, err := resolveVodURLs(context.Background(), job, result, []youtube.Format{video}, routed, nil, nPlayer); !errors.Is(err, cipher.ErrNUnsolved) {
+	if v, a, err := resolveVodURLs(context.Background(), job, result, []youtube.Format{video}, nil, nil, routed, nil, nPlayer); !errors.Is(err, cipher.ErrNUnsolved) {
 		t.Errorf("resolveVodURLs = %q, %q, %v; want a resolve failure carrying cipher.ErrNUnsolved", v, a, err)
 	}
 
