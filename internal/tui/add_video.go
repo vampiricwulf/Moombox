@@ -37,7 +37,8 @@ type VideoFormat struct {
 	// Damaged and Segmented are the server's marks (GET /api/formats, the
 	// adapter's pickerFormat): a rendition serving under half the video's
 	// length, and one served only as fragments, which a whole-file VOD
-	// cannot fetch. Each is a note in the picker's Note column.
+	// cannot fetch. Each is a note in the picker's Note column — Segmented
+	// only on a stream that is not live or upcoming (notesSegmented).
 	Damaged   bool
 	Segmented bool
 }
@@ -76,6 +77,26 @@ type FormatsData struct {
 	// were flat fields here, which the decode never filled — the API nests
 	// them — so the TUI showed no Best note at all.
 	BestItags BestItags
+	// StreamStatus is the answer's streamStatus, youtube.StreamStatus as
+	// the extraction called the video: "live", "upcoming", "vod",
+	// "post_live" or "not_a_stream". The Note column reads it to leave the
+	// segmented mark off a live or upcoming stream's rows (notesSegmented).
+	StreamStatus string
+}
+
+// notesSegmented reports whether the picker marks a segmented rendition on a
+// stream of status, the answer's streamStatus — the owner's decision on the
+// picker's third follow-up. While a stream is live or upcoming every
+// adaptive rendition it lists is segmented (live adaptive, served as &sq=N
+// fragments), and the live path fetches exactly those, so the mark on every
+// row said nothing a row could be told apart by. A VOD's and a finished
+// stream's (post_live) segmented rows are the ones a whole-file download
+// cannot fetch, and keep it, as does a status the answer did not state.
+// Only the note is left off: the Best picks still pass a segmented
+// rendition over, as the server's bestItags do. The dashboard reads the
+// same status the same way (populateFormatSelects, web/public/app.js).
+func notesSegmented(status string) bool {
+	return status != "live" && status != "upcoming"
 }
 
 // formatNote is a picker row's Note: its Best label, if any, then the marks,
@@ -211,6 +232,7 @@ func (m *AddVideoModel) buildFormatTables() {
 	}
 
 	ts := formatTableStyles()
+	noteSegmented := notesSegmented(m.formats.StreamStatus)
 
 	// Video table
 	videoCols := []table.Column{
@@ -247,7 +269,7 @@ func (m *AddVideoModel) buildFormatTables() {
 		videoRows = append(videoRows, table.Row{
 			fmt.Sprintf("%d", i+1),
 			fmt.Sprintf("%dx%d", f.Width, f.Height),
-			fps, codec, bitrate, formatNote(best, f.Damaged, f.Segmented),
+			fps, codec, bitrate, formatNote(best, f.Damaged, f.Segmented && noteSegmented),
 		})
 	}
 	m.videoTable = table.New(
@@ -293,7 +315,7 @@ func (m *AddVideoModel) buildFormatTables() {
 		}
 		audioRows = append(audioRows, table.Row{
 			fmt.Sprintf("%d", i+1),
-			bitrate, sampleRate, codec, formatNote(best, f.Damaged, f.Segmented),
+			bitrate, sampleRate, codec, formatNote(best, f.Damaged, f.Segmented && noteSegmented),
 		})
 	}
 	m.audioTable = table.New(

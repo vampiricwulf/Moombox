@@ -165,3 +165,73 @@ func TestAddVideoPickerDrawsEveryRow(t *testing.T) {
 		}
 	}
 }
+
+// TestAddVideoPickerHidesTheSegmentedNoteWhileOnAir is the owner's third
+// picker follow-up, on the TUI: while a stream is live or upcoming every
+// adaptive rendition it lists is segmented — the live path fetches exactly
+// those — so the Note column's "segmented" on every row said nothing. The
+// note is left off for a live or upcoming stream (the answer's
+// streamStatus, decoded into FormatsData through the real fetch), and kept
+// for a VOD, a finished stream and a status the answer did not state. The
+// damaged note and the Best picks are the same for every status.
+//
+// Mutants (each run): notesSegmented answering true for "live", or for
+// "upcoming" (that row's Notes say segmented); answering false for
+// "post_live" or "vod" (theirs do not); FormatsData without StreamStatus
+// (every status notes segmented); either table passing f.Segmented
+// unfiltered (that table's live notes say segmented).
+func TestAddVideoPickerHidesTheSegmentedNoteWhileOnAir(t *testing.T) {
+	for _, tc := range []struct {
+		status    string
+		wantVideo []string
+		wantAudio []string
+	}{
+		{"live", []string{"damaged", "", "Best WEBM", "damaged", "Best MP4"}, []string{"Best OPUS", "Best AAC, damaged", "damaged"}},
+		{"upcoming", []string{"damaged", "", "Best WEBM", "damaged", "Best MP4"}, []string{"Best OPUS", "Best AAC, damaged", "damaged"}},
+		{"vod", []string{"damaged", "segmented", "Best WEBM", "damaged, segmented", "Best MP4"}, []string{"Best OPUS", "Best AAC, damaged", "damaged, segmented"}},
+		{"post_live", []string{"damaged", "segmented", "Best WEBM", "damaged, segmented", "Best MP4"}, []string{"Best OPUS", "Best AAC, damaged", "damaged, segmented"}},
+		{"not_a_stream", []string{"damaged", "segmented", "Best WEBM", "damaged, segmented", "Best MP4"}, []string{"Best OPUS", "Best AAC, damaged", "damaged, segmented"}},
+		{"", []string{"damaged", "segmented", "Best WEBM", "damaged, segmented", "Best MP4"}, []string{"Best OPUS", "Best AAC, damaged", "damaged, segmented"}},
+	} {
+		t.Run(fmt.Sprintf("streamStatus %q", tc.status), func(t *testing.T) {
+			answer := pickerAnswer
+			if tc.status != "" {
+				answer = strings.Replace(pickerAnswer, `"lengthSeconds": 600,`, `"lengthSeconds": 600, "streamStatus": "`+tc.status+`",`, 1)
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(answer))
+			}))
+			defer srv.Close()
+			_, portStr, _ := net.SplitHostPort(srv.Listener.Addr().String())
+			port, _ := strconv.Atoi(portStr)
+			app := NewApp()
+			app.SetWebPort(func() int { return port })
+			msg, ok := app.fetchFormatsCmd("dQw4w9WgXcQ")().(fetchFormatsResultMsg)
+			if !ok || msg.Err != "" || msg.Formats == nil {
+				t.Fatalf("fetch: %#v", msg)
+			}
+			if msg.Formats.StreamStatus != tc.status {
+				t.Fatalf("decoded streamStatus %q, want %q", msg.Formats.StreamStatus, tc.status)
+			}
+			m := NewAddVideoModel()
+			m.SetFormats(msg.Formats)
+			for _, tbl := range []struct {
+				name string
+				rows []table.Row
+				want []string
+			}{
+				{"video", m.videoTable.Rows(), tc.wantVideo},
+				{"audio", m.audioTable.Rows(), tc.wantAudio},
+			} {
+				got := make([]string, len(tbl.rows))
+				for i, r := range tbl.rows {
+					got[i] = r[len(r)-1]
+				}
+				if !slices.Equal(got, tbl.want) {
+					t.Errorf("%s notes = %q, want %q", tbl.name, got, tbl.want)
+				}
+			}
+		})
+	}
+}

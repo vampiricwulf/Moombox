@@ -257,12 +257,16 @@ func TestFormatsPayloadBadgesNoMuxedFileOverASegmentedSibling(t *testing.T) {
 // route's shape. The TUI read the four Best picks as flat fields of
 // FormatsData, where the answer nests them in bestItags, so the decode
 // filled none and the TUI picker never showed a Best note; it reads the
-// nested object now, and the two marks beside each row.
+// nested object now, and the two marks beside each row, and the stream's
+// status, which its Note column leaves the segmented mark off by while the
+// stream is live or upcoming.
 //
 // Mutants: FormatsData's picks flat again (BestItags zero); the TUI's
-// VideoFormat or AudioFormat without Damaged/Segmented (the marks lost).
+// VideoFormat or AudioFormat without Damaged/Segmented (the marks lost);
+// FormatsData without StreamStatus, or the answer without streamStatus (the
+// status lost).
 func TestFormatsPayloadDecodesIntoTheTUIPicker(t *testing.T) {
-	info := &youtube.VideoInfo{Formats: []youtube.Format{
+	info := &youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming, Formats: []youtube.Format{
 		pickerFixture(313, 3840, 20_000_000, pickerWebm, damagedFormat),
 		pickerFixture(248, 1920, 4_000_000, pickerWebm),
 		pickerFixture(137, 1920, 6_000_000, pickerMp4, otfFormat),
@@ -278,6 +282,9 @@ func TestFormatsPayloadDecodesIntoTheTUIPicker(t *testing.T) {
 	}
 	if want := (tui.BestItags{BestWebmVideo: 248, BestMp4Video: 136, BestOpusAudio: 250, BestAacAudio: 140}); data.BestItags != want {
 		t.Errorf("BestItags = %+v, want %+v", data.BestItags, want)
+	}
+	if data.StreamStatus != string(youtube.StreamUpcoming) {
+		t.Errorf("StreamStatus = %q, want %q", data.StreamStatus, youtube.StreamUpcoming)
 	}
 	marks := map[int][2]bool{}
 	for _, f := range data.VideoFormats {
