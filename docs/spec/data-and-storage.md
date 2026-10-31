@@ -222,7 +222,7 @@ Every registration method returns an unsubscribe function. Each subscriber slice
 | total_chat_messages | INTEGER | NULL | |
 | chat_filename | TEXT | NULL | The chat archive's path relative to the job's output directory, resolved as `filename` is |
 | chat_file | TEXT | NULL | Path as written (added v2; see `output_directory`) |
-| thumbnail_file | TEXT | NULL | Path as written (added v3; see `output_directory`) |
+| thumbnail_file | TEXT | NULL | Path as written (added v3; see `output_directory`). A YouTube job with no thumbnail in staging saves the first size `i.ytimg.com` serves of `maxresdefault`, `hq720`, `mqdefault`, `hqdefault`, `sddefault`, `default` (`copyAssets`, `internal/worker/orchestrator_mux.go`): the two 16:9 HD sizes in yt-dlp's order, then the 16:9 `mqdefault` ahead of the larger letterboxed 4:3 sizes, which upstream ranks first. Pinned by `TestCopyAssetsTakesTheFirstUsableThumbnailSize` (`internal/worker/orchestrator_mux_test.go`) |
 | description_file | TEXT | NULL | Path as written (added v3; see `output_directory`) |
 | twitch_quality | TEXT | NULL | The variant the capture is recording, by its playlist name ("chunked", "720p60"): written at the capture start, live and VOD (`StreamProcessor.startTwitchVariant`), and again whenever a split moves the capture to another variant (`recordVariant` in `ExecuteTwitch`). Empty until a capture starts. Both UIs show it as "Quality". Nothing selects from it — until D-T9 it was ALSO the preference: set to it at creation, overwritten at the stream start, and read back as the preference by the next selection. The preference is `quality_preference` |
 | twitch_category | TEXT | NULL | |
