@@ -30,7 +30,17 @@ const (
 	PlayabilityUnavailable   PlayabilityError = "unavailable"
 	PlayabilityPrivate       PlayabilityError = "private"
 	PlayabilityRegionBlocked PlayabilityError = "region_blocked"
-	PlayabilityUnknown       PlayabilityError = "unknown"
+	// PlayabilityRateLimited is a refusal YouTube says will pass: a reason
+	// saying "try again later" — yt-dlp's "This content isn't available, try
+	// again later", which it explains as the account or session being
+	// rate-limited for up to an hour (26feac3dd, #12958) — or a captcha
+	// challenge (errorScreen.playerCaptchaViewModel, f484c5159, #12939).
+	// Upstream only words the refusal and ends the extraction; an archiver
+	// waits it out, so the worker treats this verdict as transient and never
+	// as the job's end (parsePlayabilityStatus; the worker's
+	// playabilityVerdict).
+	PlayabilityRateLimited PlayabilityError = "rate_limited"
+	PlayabilityUnknown     PlayabilityError = "unknown"
 )
 
 // SessionAuthState is what YouTube itself said about the login state of the

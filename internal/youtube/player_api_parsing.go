@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -770,20 +772,163 @@ func hasDesktopLegacyAgeGate(status map[string]any) bool {
 	}
 }
 
-// playabilityReason is the human-readable text a playabilityStatus carries:
-// `reason` when set, else the first entry of `messages`, where some clients
-// put it instead. parsePlayabilityStatus and classifyStream both read it
-// through here, so the two see the same string — a waiting room whose "live
-// event will begin" text sits only in messages[] is upcoming to both, not an
+// playabilityText is what a playabilityStatus says about itself, read the way
+// yt-dlp reads it when a video yields no formats (_video.py:4048-4070 at
+// b77c9304e):
+//
+//   - reason is what the job's error and the log quote. The error screen's
+//     errorScreen.playerErrorMessageRenderer.reason (simpleText or runs) comes
+//     first, ahead of the status's own `reason`; then the first entry of
+//     `messages`, where some clients put the reason instead (Moombox's, not
+//     upstream's); then the interstitial's title,
+//     errorScreen.playerInterstitialRenderer.content.interstitialViewModel
+//     .title.content (a51ef56c0, #17884). The subreason is appended when it
+//     says something the reason does not, and a sign-in reason loses the
+//     "This helps protect our community. Learn more" tail upstream strips.
+//   - subreason is the renderer's subreason, else the interstitial's
+//     description, cleaned of markup as upstream's clean_html cleans it — on
+//     its own for the geo test upstream makes on it (isGeoSubreason).
+//   - match is the lower-cased text every keyword rule reads: the reason,
+//     plus the status's own `reason` and every `messages` entry wherever the
+//     renderer displaced them. A superset of what the rules read before the
+//     renderer was read at all, so no shape they matched can stop matching —
+//     a waiting room whose "live event will begin" sits in `reason` is
+//     upcoming even under a renderer reason that says something else — while
+//     what the renderer adds, a "your country" subreason or a "try again
+//     later" behind a "Video unavailable", is matched too.
+//
+// parsePlayabilityStatus and classifyStream both read it through
+// readPlayabilityText, so the two see the same text: a waiting room whose
+// "live event will begin" sits only in messages[] is upcoming to both, not an
 // error to one and not_a_stream to the other.
-func playabilityReason(status map[string]any) string {
-	reason := getStr(status, "reason")
-	if reason == "" {
-		if msgs, ok := status["messages"].([]any); ok && len(msgs) > 0 {
-			reason, _ = msgs[0].(string)
+type playabilityText struct {
+	reason, subreason, match string
+}
+
+// signInBoilerplate is the tail upstream's remove_end strips from a sign-in
+// reason (_video.py:4072). It is the subreason of YouTube's bot check ("Sign
+// in to confirm you're not a bot"), which the reason now carries.
+const signInBoilerplate = "This helps protect our community. Learn more"
+
+// CaptchaChallengeNote is the sentence yt-dlp appends to the reason of a
+// response that carries a captcha challenge (f484c5159, #12939). The reason
+// parsePlayabilityStatus returns for one ends with it, which is how the
+// worker words the verdict apart from a rate limit's.
+const CaptchaChallengeNote = "YouTube is requiring a captcha challenge before playback"
+
+// geoSubreasonPrefix is the subreason upstream raises geo-restricted on
+// whatever the status says (_video.py:4061), compared lower-cased here.
+const geoSubreasonPrefix = "the uploader has not made this video available in your country"
+
+func readPlayabilityText(status map[string]any) playabilityText {
+	pemr, _ := getNestedMap(status, "errorScreen", "playerErrorMessageRenderer")
+	ivm, _ := getNestedMap(status, "errorScreen", "playerInterstitialRenderer", "content", "interstitialViewModel")
+	own := getStr(status, "reason")
+	var messages []string
+	if msgs, ok := status["messages"].([]any); ok {
+		for _, m := range msgs {
+			if s, ok := m.(string); ok && s != "" {
+				messages = append(messages, s)
+			}
 		}
 	}
-	return reason
+
+	reason := innertubeText(pemr["reason"])
+	if reason == "" {
+		reason = own
+	}
+	if reason == "" && len(messages) > 0 {
+		reason = messages[0]
+	}
+	if reason == "" {
+		reason = getDeepStr(ivm, "title", "content")
+	}
+	subreason := cleanHTMLText(innertubeText(pemr["subreason"]))
+	if subreason == "" {
+		subreason = cleanHTMLText(getDeepStr(ivm, "description", "content"))
+	}
+	if subreason != "" && subreason != reason {
+		// Upstream's `reason += f'. {subreason}'`, without the doubled period
+		// a reason that already ends in one would get, and without the
+		// leading ". " an empty reason would.
+		if reason == "" {
+			reason = subreason
+		} else {
+			reason = strings.TrimSuffix(strings.TrimSpace(reason), ".") + ". " + subreason
+		}
+	}
+	if strings.Contains(strings.ToLower(reason), "sign in") {
+		reason = strings.TrimSuffix(strings.TrimSpace(strings.TrimSuffix(reason, signInBoilerplate)), ".")
+	}
+
+	match := reason
+	for _, s := range append([]string{own}, messages...) {
+		if s != "" && !strings.Contains(match, s) {
+			match += "\n" + s
+		}
+	}
+	return playabilityText{reason: reason, subreason: subreason, match: strings.ToLower(match)}
+}
+
+// innertubeText reads an Innertube text object — {"simpleText": …} or
+// {"runs": [{"text": …}, …]}, joined — as upstream's _get_text does
+// (_base.py:1189-1208). "" for anything else.
+func innertubeText(v any) string {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if s := getStr(m, "simpleText"); s != "" {
+		return s
+	}
+	runs, _ := m["runs"].([]any)
+	var b strings.Builder
+	for _, run := range runs {
+		if rm, ok := run.(map[string]any); ok {
+			b.WriteString(getStr(rm, "text"))
+		}
+	}
+	return b.String()
+}
+
+// htmlTagRe matches a markup tag, as upstream's clean_html strips them.
+var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
+
+// cleanHTMLText is upstream's clean_html (utils/_utils.py:526-539) for a
+// one-line message: tags stripped, entities unescaped, every run of
+// whitespace one space. Upstream turns a <br> or a paragraph break into a
+// newline; the reason here goes into a single-line job error and log record,
+// so it becomes a space like the rest.
+func cleanHTMLText(s string) string {
+	if s == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(html.UnescapeString(htmlTagRe.ReplaceAllString(s, " "))), " ")
+}
+
+// isGeoSubreason reports whether a subreason is the one upstream raises
+// geo-restricted on (_video.py:4061-4066).
+func isGeoSubreason(subreason string) bool {
+	return strings.HasPrefix(strings.ToLower(subreason), geoSubreasonPrefix)
+}
+
+// hasCaptchaChallenge mirrors upstream's
+// `get_first(playability_statuses, ('errorScreen', 'playerCaptchaViewModel',
+// {dict}))` (_video.py:4075) — a truthiness test, so an empty object is not
+// a challenge.
+func hasCaptchaChallenge(status map[string]any) bool {
+	vm, ok := getNestedMap(status, "errorScreen", "playerCaptchaViewModel")
+	return ok && len(vm) > 0
+}
+
+// withSentence appends sentence to reason as upstream's `reason += '. …'`
+// does, minus a doubled period.
+func withSentence(reason, sentence string) string {
+	reason = strings.TrimSuffix(strings.TrimSpace(reason), ".")
+	if reason == "" {
+		return sentence
+	}
+	return reason + ". " + sentence
 }
 
 func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
@@ -792,13 +937,14 @@ func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 	}
 
 	statusCode := getStr(status, "status")
-	reason := playabilityReason(status)
+	text := readPlayabilityText(status)
+	reason := text.reason
 
-	reasonLower := strings.ToLower(reason)
+	reasonLower := text.match
 
 	// Upcoming indicators are not errors. The same check is duplicated in
 	// classifyStream — keep both call sites going through the helper, and
-	// both reading the reason through playabilityReason, so a reason-string
+	// both reading the reason through readPlayabilityText, so a reason-string
 	// change only has to be edited in one place (audit D1).
 	if isUpcomingFromPlayability(statusCode, reasonLower) {
 		return PlayabilityOK, ""
@@ -825,6 +971,47 @@ func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 	// this channel to get access to members-only content".
 	if statusCode != "OK" && (hasDesktopLegacyAgeGate(status) || isAgeGateReason(reasonLower)) {
 		return PlayabilityAgeRestricted, reason
+	}
+
+	// The refusals upstream reads off the error screen ahead of any status
+	// (_video.py:4061-4081 at b77c9304e), off OK for the age gates' reason:
+	// upstream reads them only off a response that yielded no formats, and
+	// one YouTube calls playable is not refused. Below the age gates, which
+	// lead to the web_embedded retry a terminal or transient verdict would
+	// skip; upstream's client selection makes that retry before this code
+	// runs at all.
+	//
+	// The geo subreason first, as upstream raises geo-restricted before it
+	// looks at anything else: the status beside it is often ERROR, whose arm
+	// below called the "Video unavailable" reason unavailable, so the job's
+	// error never named the country restriction a proxy elsewhere would get
+	// past (G47).
+	//
+	// Then the two refusals that pass, which the worker waits out instead of
+	// ending the job on (PlayabilityRateLimited). Never for a reason that
+	// asks to sign in, which upstream's first arm claims for its login hint
+	// — the bot check ("Sign in to confirm you're not a bot") is a cookie
+	// problem, COOKIES?'s to report — then a captcha challenge, then a
+	// reason saying "try again later". Upstream matches the rate limit on
+	// "This content isn't available, try again later" verbatim; matched here
+	// case-insensitively on its tail, anywhere in the text, so a typographic
+	// apostrophe or a rewording of the head cannot turn it back into the
+	// unknown verdict that ended a backlog in Error while the limit lasted
+	// (G7). Before the status switch, too: behind a "Video unavailable"
+	// reason it would read unavailable, and the waiting loop gives up on
+	// that (isTerminalPlayability).
+	if statusCode != "OK" {
+		if isGeoSubreason(text.subreason) {
+			return PlayabilityRegionBlocked, reason
+		}
+		if !strings.Contains(reasonLower, "sign in") {
+			if hasCaptchaChallenge(status) {
+				return PlayabilityRateLimited, withSentence(reason, CaptchaChallengeNote)
+			}
+			if strings.Contains(reasonLower, "try again later") {
+				return PlayabilityRateLimited, reason
+			}
+		}
 	}
 
 	switch statusCode {
@@ -908,7 +1095,7 @@ func broadcastEnded(videoDetails, playabilityStatus, microformat map[string]any)
 		isLive = true
 	}
 	status := getStr(playabilityStatus, "status")
-	reason := strings.ToLower(playabilityReason(playabilityStatus))
+	reason := readPlayabilityText(playabilityStatus).match
 	if isLive || isUpcoming || isUpcomingFromPlayability(status, reason) {
 		return false, false, true
 	}
@@ -938,7 +1125,7 @@ func isPremiereResponse(videoDetails, playabilityStatus, microformat map[string]
 	isLiveContent, _ := videoDetails["isLiveContent"].(bool)
 	isUpcomingVD, _ := videoDetails["isUpcoming"].(bool)
 	lbd, _ := microformat["liveBroadcastDetails"].(map[string]any)
-	reason := strings.ToLower(playabilityReason(playabilityStatus))
+	reason := readPlayabilityText(playabilityStatus).match
 	return lbd != nil && getStr(lbd, "startTimestamp") != "" && !isLiveContent &&
 		(strings.Contains(reason, "premiere") || isUpcomingVD)
 }
@@ -979,7 +1166,7 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 
 	// Check playability for upcoming
 	status := getStr(playabilityStatus, "status")
-	reason := strings.ToLower(playabilityReason(playabilityStatus))
+	reason := readPlayabilityText(playabilityStatus).match
 	isUpcomingPlayability := isUpcomingFromPlayability(status, reason)
 
 	// playabilityStatus.liveStreamability is the renderer YouTube attaches
