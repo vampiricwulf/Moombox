@@ -352,10 +352,15 @@ func TestPagesNamingAPlayerFeedTheFallback(t *testing.T) {
 // is rewritten to its main variant (G50, yt-dlp's _construct_player_url),
 // and the page's ytcfg STS is read (yt-dlp's _extract_signature_timestamp
 // reads ytcfg first). A description quoting `"STS":1` is JSON-escaped on
-// the page, so it cannot pass for the real one.
+// the page, so it cannot pass for the real one. The URL is the first that
+// names a player, as on every other page (pagePlayerURL): a leading script
+// that is not one is passed over, and a page naming none has none — so the
+// fallbacks supply one and the script is never remembered.
 //
 // Mutants: normalizePlayerJSURL not canonicalising (the es6 and locale rows
-// keep their variant); the STS regex dropped or unanchored to a bare quote.
+// keep their variant); the STS regex dropped or unanchored to a bare quote;
+// the first-match read restored, or watchPagePlayerURL not asking
+// cipher.PlayerIDOf (the two non-player rows read desktop_polymer.js).
 func TestWatchPageYtcfgNamesTheMainVariantAndSTS(t *testing.T) {
 	for _, tc := range []struct {
 		name, page, wantURL string
@@ -364,6 +369,9 @@ func TestWatchPageYtcfgNamesTheMainVariantAndSTS(t *testing.T) {
 		{"es6, escaped, relative", `ytcfg.set({"STS":20381,"PLAYER_JS_URL":"\/s\/player\/0a1b2c3d\/player_es6.vflset\/en_US\/base.js"})`, pagePlayer, 20381},
 		{"another locale, absolute", `{"jsUrl":"https://www.youtube.com/s/player/0a1b2c3d/player_ias.vflset/fr_FR/base.js"}`, pagePlayer, 0},
 		{"a quoted STS in a description", `{"shortDescription":"set \"STS\":12345 here","jsUrl":"/s/player/0a1b2c3d/player_ias.vflset/en_US/base.js"}`, pagePlayer, 0},
+		{"a leading script that is not a player", `{"scriptSrc":"https:\/\/www.youtube.com\/s\/desktop\/abc\/jsbin\/desktop_polymer.vflset\/desktop_polymer.js",` +
+			`"PLAYER_JS_URL":"\/s\/player\/0a1b2c3d\/player_es6.vflset\/en_US\/base.js"}`, pagePlayer, 0},
+		{"no script that is a player", `{"scriptSrc":"https:\/\/www.youtube.com\/s\/desktop\/abc\/jsbin\/desktop_polymer.vflset\/desktop_polymer.js"}`, "", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ytcfg, _ := extractYtcfgAndPlayerResponse([]byte(tc.page))

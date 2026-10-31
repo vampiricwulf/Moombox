@@ -72,13 +72,17 @@ func fetchPlayerURLFromIframeAPI(ctx context.Context) (string, error) {
 	return cipher.PlayerURLForID(string(m[1])), nil
 }
 
-// pagePlayerURL reads the player URL off a page that is not the watch page —
-// the homepage, an embed page — as yt-dlp's _extract_player_url reads one off
-// any client's ytcfg: the first jsUrl / PLAYER_JS_URL / scriptSrc that names
-// a player (cipher.PlayerIDOf), on the main variant (normalizePlayerJSURL).
-// "" when none does. Stricter than the watch page's first-match read on
-// purpose: a URL from here is remembered and handed to extractions that
-// never saw the page, so one that names no player must not get that far.
+// pagePlayerURL reads the player URL off a page — the homepage, an embed
+// page, and the watch page through watchPagePlayerURL — as yt-dlp's
+// _extract_player_url reads one off any client's ytcfg: the first jsUrl /
+// PLAYER_JS_URL / scriptSrc that names a player (cipher.PlayerIDOf), on the
+// main variant (normalizePlayerJSURL). "" when none does. A URL from any of
+// these is remembered and handed to extractions that never saw the page, so
+// one that names no player — a leading desktop_polymer scriptSrc — must not
+// get that far; nor can it serve the page's own extraction, whose solver
+// would fetch it as a player. Upstream never takes one either: it reads only
+// PLAYER_JS_URL and jsUrl, and _extract_player_info raises on a URL with no
+// /s/player/<id>/ (_video.py:2149-2155, 2194-2198).
 func pagePlayerURL(page string) string {
 	for _, m := range jsURLRegex.FindAllStringSubmatch(page, -1) {
 		if u := normalizePlayerJSURL(m[1]); cipher.PlayerIDOf(u) != "" {
@@ -86,6 +90,27 @@ func pagePlayerURL(page string) string {
 		}
 	}
 	return ""
+}
+
+// watchPagePlayerURL is pagePlayerURL over the watch page's bytes. It walks
+// the matches one at a time rather than collecting them, and never turns the
+// ~5 MB page into a string: on a page whose first match names the player it
+// costs what the first-match read it replaced did. That read took the first
+// match whatever it named, so a page
+// leading with a non-player scriptSrc ran its extraction on that script and
+// had it remembered for six hours as the fallback (resolvePlayerURL), over
+// the homepage's real player.
+func watchPagePlayerURL(page []byte) string {
+	for rest := page; ; {
+		loc := jsURLRegex.FindSubmatchIndex(rest)
+		if loc == nil {
+			return ""
+		}
+		if u := normalizePlayerJSURL(string(rest[loc[2]:loc[3]])); cipher.PlayerIDOf(u) != "" {
+			return u
+		}
+		rest = rest[loc[1]:]
+	}
 }
 
 // rememberPlayerURL records u as the player the latest source named — source
