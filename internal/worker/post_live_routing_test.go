@@ -208,6 +208,44 @@ func TestVodMissingPotSwapNeverLandsOnASegmentedCopy(t *testing.T) {
 	})
 }
 
+// TestDownloadVodNeverCountsATrackTurnedOffAsLost: a -1 manual itag is "no
+// video" or "no audio" (selectVodFormats), so a track the job turned off is
+// never lost to segments, whatever YouTube served it as — a video-only job
+// whose audio is OTF downloads its video.
+//
+// Mutants (each run): the audio -1 ignored by segmentedStreamLost (the first
+// row fails as lost audio); the video -1 ignored (the second row fails as
+// lost video).
+func TestDownloadVodNeverCountsATrackTurnedOffAsLost(t *testing.T) {
+	off := -1
+	for _, tc := range []struct {
+		name         string
+		video, audio *int
+		formats      []youtube.Format
+		wantPrimary  int // the primary download's itag
+	}{
+		{name: "no audio wanted, the audio served segmented alone", audio: &off,
+			formats: []youtube.Format{vodFormat(137, 1920, 1080, h264, withLength), vodFormat(140, 0, 0, aac, asOTF)}, wantPrimary: 137},
+		{name: "no video wanted, the video served segmented alone", video: &off,
+			formats: []youtube.Format{vodFormat(137, 1920, 1080, h264, asOTF), vodFormat(140, 0, 0, aac, withLength)}, wantPrimary: 140},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job, logs := vodPotJob(t)
+			job.Job.SelectedVideoItag, job.Job.SelectedAudioItag = tc.video, tc.audio
+			res, err := DownloadVod(context.Background(), job, segmentedVodInfo(tc.formats...), stubCipherSolver{}, nil, nil, nil)
+			if err != nil {
+				t.Fatalf("DownloadVod: %v — a track the job turned off is not lost", err)
+			}
+			if res.VideoFormat == nil || res.VideoFormat.Itag != tc.wantPrimary || res.AudioFormat != nil {
+				t.Errorf("primary = %+v, audio = %+v; want itag %d alone", res.VideoFormat, res.AudioFormat, tc.wantPrimary)
+			}
+			if logLine(logs, "VOD: left out formats YouTube serves only as segments") == nil {
+				t.Errorf("no line names the formats left out: %v", logs.lines())
+			}
+		})
+	}
+}
+
 // TestPartitionManifestlessFormatsTakesOnlyAudioLessVideo mirrors the gate
 // (youtube.HasSplitAdaptiveFormats): a muxed itag 18 listed without a
 // contentLength is the progressive file, not a video half, and the &sq loop
