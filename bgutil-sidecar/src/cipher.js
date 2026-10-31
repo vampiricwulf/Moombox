@@ -12,6 +12,12 @@
 
 import ejsMain from "../vendor/ejs.bundle.js";
 
+// ejs is the solver entry point loadPlayer and solveMany call: ejsMain, save
+// under the sidecar's own tests, which stand a stub in for it
+// (_setEjsForTest). What the caches do with an answer is this file's logic,
+// and only a stub can hand it the exception sentinel on demand.
+let ejs = ejsMain;
+
 // Matches solverCacheSize in internal/cipher/solver.go, and for the same
 // reason: multi-channel monitoring routinely has 4+ active players, and a
 // smaller cap thrashed — every eviction cost the Go side an ErrPlayerNotLoaded
@@ -48,7 +54,7 @@ function loadPlayer(playerID, playerJS) {
     // throw would fail permanently instead of self-healing.
     let result;
     try {
-        result = ejsMain({
+        result = ejs({
             type: "player",
             player: playerJS,
             requests: [],
@@ -96,7 +102,7 @@ function solveMany(entry, type, challenges) {
     // event loop, starving queued PO-token RPCs of the request budget.
     let result;
     try {
-        result = ejsMain({
+        result = ejs({
             type: "preprocessed",
             preprocessed_player: entry.preprocessed,
             requests: [{ type, challenges: misses }],
@@ -115,11 +121,33 @@ function solveMany(entry, type, challenges) {
     if (response.type === "error") {
         throw new Error(`ejs solve ${type}: ${response.error}`);
     }
+    // Every answer is checked before any is cached: a throw part-way through
+    // used to leave the answers before it cached, from a response that as a
+    // whole was not to be trusted.
     for (const challenge of misses) {
         const solved = response.data[challenge];
         if (solved === undefined) {
             throw new Error(`ejs solve ${type}: no result for challenge`);
         }
+        // The player's exception sentinel: an n function that throws returns
+        // from its catch block a string ending with its own input, and ejs
+        // hands that back as the answer (its main() returns solver(challenge)
+        // as is). yt-dlp's validate_nsig_challenge_output rejects any n result
+        // that ends with its challenge — "the js function returned with an
+        // exception" (jsc/_director.py:265-278, 6224a3898) — and its
+        // bulk_solve records nothing for it. Not cached here either: it used
+        // to sit in nCache, every URL of the player built with it and 403ing,
+        // until the player was evicted. The label is load-bearing, as
+        // loadPlayer's is: "ejs solve n: no solutions" is what the Go side's
+        // isStaleJSError matches to drop the cached player and retry once with
+        // fresh JS — the rotation this usually is. The challenge is not
+        // quoted: an n is one of the media-URL values the Go side redacts.
+        if (type === "n" && typeof solved === "string" && solved.endsWith(challenge)) {
+            throw new Error("ejs solve n: no solutions (exception sentinel)");
+        }
+    }
+    for (const challenge of misses) {
+        const solved = response.data[challenge];
         if (cache.size >= MAX_CHALLENGES_PER_PLAYER) {
             // Cheap FIFO: evict the oldest-inserted entry. Acceptable for this workload —
             // challenges are mostly one-shot, so true LRU's bookkeeping cost would not pay back.
@@ -171,4 +199,14 @@ export function _cacheStats() {
 
 export function _resetCacheForTest() {
     playerCache.clear();
+}
+
+// _setEjsForTest stands fn in for ejsMain (null restores it); _ejsForTest is
+// what solves now, which the tests pin to ejsMain by default.
+export function _setEjsForTest(fn) {
+    ejs = fn ?? ejsMain;
+}
+
+export function _ejsForTest() {
+    return ejs;
 }
