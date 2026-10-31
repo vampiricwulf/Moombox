@@ -31,7 +31,50 @@ func (a *ytFormatAdapter) GetFormats(ctx context.Context, videoID string) (map[s
 	if err != nil {
 		return nil, err
 	}
+	return formatsPayload(videoID, info), nil
+}
 
+// pickerFormat is one row of the format picker's list: the format as its own
+// JSON serialises it, plus two properties the downloader acts on that the
+// Format's JSON leaves out, so the picker (the dashboard's Add dialog and the
+// TUI's Add Video) can say what it is offering. yt-dlp's format list notes a
+// damaged rendition "DAMAGED" in its format_note (_video.py:3430-3438 decides
+// it, 3458 writes the note), which render_formats_table prints in the MORE
+// INFO column (YoutubeDL.py:4036); Moombox marks it "damaged". "segmented"
+// is Moombox's own: upstream's https pass skips an OTF format always and a
+// live adaptive one unless the stream needs live processing
+// (_video.py:3492-3507), and lists the ones it keeps without a note. The
+// whole-file path here leaves both kinds out of its pool the same way (the
+// worker's wholeFileVodPool), while the manifest-free live and post-live
+// paths fetch them as fragments, so the picker still offers them, marked.
+type pickerFormat struct {
+	youtube.Format
+	// Damaged is Format.Damaged: a rendition serving under half the video's
+	// length (markDamagedFormats), which automatic selection passes over
+	// while an intact one of its kind exists.
+	Damaged bool `json:"damaged"`
+	// Segmented is Format.Segmented(): served only as &sq=N fragments, so
+	// the whole-file VOD path cannot fetch it.
+	Segmented bool `json:"segmented"`
+}
+
+// formatsPayload is GET /api/formats' answer for one extraction: the video
+// and audio formats that carry a URL, each with its damaged/segmented marks
+// (pickerFormat), in the picker's order, and bestItags — the one rendition
+// per container/codec the picker badges [Best …] and preselects.
+//
+// A badge goes to the first rendition of its kind in that order that is
+// neither damaged nor segmented (owner decisions on the W9 and W4
+// follow-ups): automatic selection passes a damaged one over while an intact
+// one of its kind exists, and a whole-file VOD cannot fetch a segmented one,
+// so badging either pointed the operator — and the dashboard's preselection,
+// which follows the badges — at a rendition the downloader would not choose
+// itself. When every rendition of a kind is damaged or segmented, as on a
+// live or post-live stream, where every format is live adaptive, the badge
+// falls back to the first of the kind, the pick it always made, so a badge
+// still exists. Neither mark stops a manual pin: the operator can still
+// choose a marked row by hand.
+func formatsPayload(videoID string, info *youtube.VideoInfo) map[string]any {
 	// Separate video and audio formats, only those with a URL
 	var videoFormats, audioFormats []youtube.Format
 	for _, f := range info.Formats {
@@ -65,28 +108,17 @@ func (a *ytFormatAdapter) GetFormats(ctx context.Context, videoID string) (map[s
 		return cmp.Compare(b.Bitrate, a.Bitrate)
 	})
 
+	videoRows, audioRows := pickerRows(videoFormats), pickerRows(audioFormats)
+	mime := func(sub string) func(*pickerFormat) bool {
+		return func(f *pickerFormat) bool { return strings.Contains(f.MimeType, sub) }
+	}
+
 	// Build bestItags matching TypeScript format: bestWebmVideo, bestMp4Video, bestOpusAudio, bestAacAudio
 	bestItags := map[string]any{
-		"bestWebmVideo": nil,
-		"bestMp4Video":  nil,
-		"bestOpusAudio": nil,
-		"bestAacAudio":  nil,
-	}
-	for _, f := range videoFormats {
-		if bestItags["bestWebmVideo"] == nil && strings.Contains(f.MimeType, "webm") {
-			bestItags["bestWebmVideo"] = f.Itag
-		}
-		if bestItags["bestMp4Video"] == nil && strings.Contains(f.MimeType, "mp4") {
-			bestItags["bestMp4Video"] = f.Itag
-		}
-	}
-	for _, f := range audioFormats {
-		if bestItags["bestOpusAudio"] == nil && strings.Contains(f.MimeType, "opus") {
-			bestItags["bestOpusAudio"] = f.Itag
-		}
-		if bestItags["bestAacAudio"] == nil && strings.Contains(f.MimeType, "mp4a") {
-			bestItags["bestAacAudio"] = f.Itag
-		}
+		"bestWebmVideo": bestPickerItag(videoRows, mime("webm")),
+		"bestMp4Video":  bestPickerItag(videoRows, mime("mp4")),
+		"bestOpusAudio": bestPickerItag(audioRows, mime("opus")),
+		"bestAacAudio":  bestPickerItag(audioRows, mime("mp4a")),
 	}
 
 	return map[string]any{
@@ -95,10 +127,39 @@ func (a *ytFormatAdapter) GetFormats(ctx context.Context, videoID string) (map[s
 		"channelName":   info.ChannelName,
 		"lengthSeconds": info.LengthSeconds,
 		"streamStatus":  info.StreamStatus,
-		"videoFormats":  videoFormats,
-		"audioFormats":  audioFormats,
+		"videoFormats":  videoRows,
+		"audioFormats":  audioRows,
 		"bestItags":     bestItags,
-	}, nil
+	}
+}
+
+// pickerRows marks each format for the picker (pickerFormat), in order.
+func pickerRows(formats []youtube.Format) []pickerFormat {
+	rows := make([]pickerFormat, 0, len(formats))
+	for _, f := range formats {
+		rows = append(rows, pickerFormat{Format: f, Damaged: f.Damaged, Segmented: f.Segmented()})
+	}
+	return rows
+}
+
+// bestPickerItag is the itag of the first row of kind that is neither damaged
+// nor segmented, else of the first row of kind at all (see formatsPayload),
+// or nil — JSON null, as the badge has always been — when no row is of kind.
+func bestPickerItag(rows []pickerFormat, kind func(*pickerFormat) bool) any {
+	var fallback any
+	for i := range rows {
+		r := &rows[i]
+		if !kind(r) {
+			continue
+		}
+		if !r.Damaged && !r.Segmented {
+			return r.Itag
+		}
+		if fallback == nil {
+			fallback = r.Itag
+		}
+	}
+	return fallback
 }
 
 func maxDim(w, h *int) int {
