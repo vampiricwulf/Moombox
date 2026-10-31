@@ -228,6 +228,21 @@ func TestTwitchAuthSentinel(t *testing.T) {
 		}
 	})
 
+	t.Run("wrapped twitch.ErrSubscriberOnlyNotEntitled → itself, never ErrCookiesRequired", func(t *testing.T) {
+		// The same Usher refusal made to a SIGNED-IN session (G52, owner
+		// decision D20): no cookie fixes an account without the subscription,
+		// so it must not be filed under ErrCookiesRequired, and it must survive
+		// the VOD path's %v flattening as itself — cookieRefreshWorthAttempting
+		// reads it there.
+		//
+		// Mutant: the not-entitled clause dropped — nil comes back, and the
+		// flattened VOD error is a plain one that no predicate can recognise.
+		err := fmt.Errorf("twitch VOD HLS error: %w", fmt.Errorf("hls playlist http 403: %w", twitch.ErrSubscriberOnlyNotEntitled))
+		if got := twitchAuthSentinel(err); got != twitch.ErrSubscriberOnlyNotEntitled {
+			t.Errorf("not-entitled: want twitch.ErrSubscriberOnlyNotEntitled, got %v", got)
+		}
+	})
+
 	t.Run("doubly-wrapped twitch.ErrTwitchAuthExpired → ErrCookiesRequired", func(t *testing.T) {
 		// errors.Is walks the wrap chain; a fmt.Errorf around an
 		// already-wrapped sentinel still resolves correctly.
@@ -256,6 +271,10 @@ func TestCookiesStatusError(t *testing.T) {
 		{"wrapped ErrCookiesRequired", fmt.Errorf("x: %w", ErrCookiesRequired), true},
 		{"wrapped twitch.ErrTwitchAuthExpired", fmt.Errorf("x: %w", twitch.ErrTwitchAuthExpired), true},
 		{"wrapped twitch.ErrSubscriberOnly (live path)", fmt.Errorf("twitch HLS: %w", fmt.Errorf("hls playlist http 403: %w", twitch.ErrSubscriberOnly)), true},
+		// A signed-in session without the subscription parks in Error (owner
+		// decision D20). Mutant: the sentinel made a wrap of ErrSubscriberOnly,
+		// or added to cookiesStatusError — true.
+		{"wrapped twitch.ErrSubscriberOnlyNotEntitled (live path)", fmt.Errorf("twitch HLS: %w", fmt.Errorf("hls playlist http 403: %w", twitch.ErrSubscriberOnlyNotEntitled)), false},
 		{"plain error", errors.New("network timeout"), false},
 		{"nil", nil, false},
 	}

@@ -29,11 +29,36 @@ var ErrTwitchAuthExpired = errors.New("twitch auth token expired or invalid")
 
 // ErrSubscriberOnly signals an usher 403 whose body carries error_code
 // vod_manifest_restricted or unauthorized_entitlements — subscriber-only
-// content (yt-dlp twitch.py parity). Distinct from ErrTwitchAuthExpired:
-// the token is fine, the account (or the anonymous session) simply lacks
-// access. The worker routes it to StatusCookies since logging into an
-// account that has access is the fix.
+// content (yt-dlp twitch.py parity) — refused to a session that was NOT
+// shown to be signed in: no auth-token was sent, the playback token Twitch
+// minted for the request belongs to nobody, or its document could not be
+// read (see subscriberOnlyRefusal). Distinct from ErrTwitchAuthExpired: the
+// GQL call took the token, Usher just will not serve this session. The
+// worker routes it to StatusCookies since logging into an account that has
+// access is the fix — the same call yt-dlp makes with raise_login_required.
 var ErrSubscriberOnly = errors.New("subscriber-only content: you must be logged into an account that has access")
+
+// ErrSubscriberOnlyNotEntitled is the same Usher refusal made to a session
+// Twitch itself names as signed in: an auth-token was sent and the playback
+// token minted for it carries a user_id (PlaybackTokenSession, conclusive and
+// signed in). The account is alive and simply has no subscription, so no
+// cookie — fresh, refreshed or restored — fixes it, and the worker parks the
+// job in Error with no automatic cookie refresh (owner decision D20).
+//
+// Ported from yt-dlp's split in _extract_twitch_m3u8_formats (twitch.py,
+// b77c9304e): with an auth-token cookie it raises "Your account does not have
+// access to this subscriber-only content", expected=True, and only without
+// one does it raise login-required. The wording is yt-dlp's, lowercased for a
+// Go error string. Moombox's test is stronger than upstream's cookie-presence
+// check, deliberately: a dead auth-token is still a cookie that is present,
+// and yt-dlp would tell that session it is signed in without access, where
+// the playback token's own user_id says it is anonymous — which stays
+// ErrSubscriberOnly here, and so stays a credential problem.
+//
+// Deliberately NOT a wrap of ErrSubscriberOnly: anything that matches that
+// one (cookiesStatusError, twitchAuthSentinel) would route this refusal back
+// to COOKIES? and a pointless browser refresh.
+var ErrSubscriberOnlyNotEntitled = errors.New("your account does not have access to this subscriber-only content")
 
 // ErrChannelNotFound signals a login that doesn't resolve to a Twitch user
 // (renamed, banned, deleted, or a typo) — GQL returns user:null, which is

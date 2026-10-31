@@ -430,6 +430,32 @@ func isRestrictedEntitlementBody(body []byte) bool {
 		entries[0].ErrorCode == "unauthorized_entitlements"
 }
 
+// subscriberOnlyError is Usher's subscriber-only refusal: the status it came
+// with, and whom it refused. FetchHLSMasterPlaylist cannot tell whom — the
+// body is the same either way — so it always returns the login-required form
+// (ErrSubscriberOnly); the Service, which holds the auth-token it sent and the
+// playback token Twitch minted, re-labels a refusal of a signed-in session as
+// notEntitled (subscriberOnlyRefusal). A type rather than two fmt.Errorf sites
+// so the re-label keeps the status and the "hls playlist http N" head every
+// other Usher failure has, without unpicking an error string.
+type subscriberOnlyError struct {
+	status      int
+	notEntitled bool
+}
+
+func (e *subscriberOnlyError) Error() string {
+	return fmt.Sprintf("hls playlist http %d: %v", e.status, e.Unwrap())
+}
+
+// Unwrap is ErrSubscriberOnlyNotEntitled for a signed-in session and
+// ErrSubscriberOnly otherwise — never both, see ErrSubscriberOnlyNotEntitled.
+func (e *subscriberOnlyError) Unwrap() error {
+	if e.notEntitled {
+		return ErrSubscriberOnlyNotEntitled
+	}
+	return ErrSubscriberOnly
+}
+
 // withoutQuery strips the query string from the URL a *url.Error carries.
 // An usher URL's query is the playback token document (user ID, client IP,
 // entitlements) and its signature, and a transport failure's Error() quotes
@@ -471,9 +497,11 @@ func FetchHLSMasterPlaylist(ctx context.Context, playlistURL string) ([]TwitchHL
 		io.Copy(io.Discard, resp.Body)
 		// Subscriber-only restriction gets its sentinel so the worker can
 		// route the job to COOKIES? with an actionable message instead of
-		// parking it in Error with a raw JSON body.
+		// parking it in Error with a raw JSON body — or, once the Service
+		// has seen that a signed-in session was refused, to Error with
+		// yt-dlp's "your account does not have access" (subscriberOnlyRefusal).
 		if isRestrictedEntitlementBody(body) {
-			return nil, fmt.Errorf("hls playlist http %d: %w", resp.StatusCode, ErrSubscriberOnly)
+			return nil, &subscriberOnlyError{status: resp.StatusCode}
 		}
 		bodyStr := strings.TrimSpace(string(body))
 		if bodyStr != "" {

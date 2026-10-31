@@ -644,10 +644,14 @@ func cookieFileErrorLabel(code string, t barTier) string {
 //   - ParkReasonMembership: the request WAS signed in and YouTube refused
 //     anyway. worker.go:1058 logs "the credentials are alive and the account
 //     simply lacks access". The remedy is cookies from a DIFFERENT account.
-//   - ParkReasonAuth: usually dead credentials — but not only. worker.go:884-890
-//     files twitch.ErrSubscriberOnly here ON PURPOSE, because Usher's 403 cannot
-//     tell an anonymous session from an un-entitled one. So an Auth park can sit
-//     on a perfectly healthy, signed-in Twitch session.
+//   - ParkReasonAuth: usually dead credentials — but not only. The worker
+//     (parkReasonForError) files twitch.ErrSubscriberOnly here ON PURPOSE: it is
+//     Usher's 403 to a session not shown to be signed in, and a refusal whose
+//     playback token could not be read stays in it too. Since G52 a refusal of
+//     a session the playback token names as signed in is
+//     twitch.ErrSubscriberOnlyNotEntitled and parks in Error, not here — so an
+//     Auth park sits on a healthy signed-in Twitch session only when that token
+//     said nothing either way.
 //   - ParkReasonNone: the zero value every pre-v18 COOKIES? row still carries,
 //     because migrateV18 deliberately backfills nothing. Sweeps treat it as
 //     Auth; so does this, by not looking.

@@ -224,18 +224,26 @@ func (s *Service) GetHLSMasterPlaylist(ctx context.Context, channelLogin string)
 
 	url := BuildUsherLiveURL(channelLogin, token)
 	variants, err = FetchHLSMasterPlaylist(ctx, url)
-	return variants, anonymousPlayback, err
+	// A subscriber-only refusal of a session the token names as signed in is
+	// the account's, not the cookies' (subscriberOnlyRefusal).
+	return variants, anonymousPlayback, subscriberOnlyRefusal(authToken, token.Value, err)
 }
 
 // GetVodHLSPlaylist fetches and parses the HLS master playlist for a VOD.
+//
+// The auth-token is read ONCE, as GetHLSMasterPlaylist reads it: the value
+// that went out with the access-token request is the one that decides whether
+// a subscriber-only refusal was made to a signed-in session.
 func (s *Service) GetVodHLSPlaylist(ctx context.Context, vodID string) ([]TwitchHLSVariant, error) {
-	token, err := s.API.GetVodAccessToken(ctx, vodID, s.Auth.GetAuthToken())
+	authToken := s.Auth.GetAuthToken()
+	token, err := s.API.GetVodAccessToken(ctx, vodID, authToken)
 	if err != nil {
 		return nil, fmt.Errorf("get vod access token: %w", err)
 	}
 
 	url := BuildUsherVodURL(vodID, token)
-	return FetchHLSMasterPlaylist(ctx, url)
+	variants, err := FetchHLSMasterPlaylist(ctx, url)
+	return variants, subscriberOnlyRefusal(authToken, token.Value, err)
 }
 
 // SelectBestVariant selects the best HLS variant based on preferences.

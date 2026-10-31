@@ -1669,6 +1669,13 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 // account that has access is the fix). Audit reports/twitch.md #8.
 // ErrNotAMember belongs here too: the session is alive but lacks the
 // membership, and credentials for an account that has it are still the fix.
+//
+// twitch.ErrSubscriberOnlyNotEntitled does NOT, and by its absence here, not
+// by a check: the same Usher refusal made to a session the playback token
+// names as signed in parks in Error (owner decision D20). Unlike ErrNotAMember
+// there is no Twitch account fingerprint a credential sweep could resume it on
+// (CurrentCredentialIdentity has none for Twitch), so COOKIES? would only park
+// it under a "log in" prompt for an operator who already has.
 func cookiesStatusError(err error) bool {
 	return errors.Is(err, ErrCookiesRequired) ||
 		errors.Is(err, ErrNotAMember) ||
@@ -1682,8 +1689,15 @@ func cookiesStatusError(err error) bool {
 // signed-in session, so refreshing (rotating) that same session changes
 // nothing and its failure message would send the operator after credentials
 // that are not the problem.
+//
+// twitch.ErrSubscriberOnlyNotEntitled is excluded for the same reason (owner
+// decision D20): Twitch minted that request's playback token for a signed-in
+// account and Usher still refused it. It parks in Error, which never reaches
+// the refresh, so the exclusion is the second lock rather than the first: a
+// refresh that verified the healthy session would report it restored and
+// re-queue the job into the same refusal, every cycle.
 func cookieRefreshWorthAttempting(err error) bool {
-	return !errors.Is(err, ErrNotAMember)
+	return !errors.Is(err, ErrNotAMember) && !errors.Is(err, twitch.ErrSubscriberOnlyNotEntitled)
 }
 
 // parkReasonForError classifies err into the database.ParkReason persisted
@@ -1697,13 +1711,16 @@ func cookieRefreshWorthAttempting(err error) bool {
 // signed-in request with "members only", so no amount of restoring or
 // rotating THESE credentials can help.
 //
-// twitch.ErrSubscriberOnly looks similar but is not, for two reasons. Usher's
-// 403 does not distinguish an anonymous session from an un-entitled one, so
-// working credentials genuinely may be the fix. And the retry loop this
-// classification exists to break is structurally absent on that side anyway:
-// the auth-recovered sweep only fires on a not-auth → auth TRANSITION, and an
-// un-entitled account with healthy Twitch auth produces no transitions, so
-// nothing re-runs the job in the first place. It stays in the auth class.
+// twitch.ErrSubscriberOnly looks similar but is not, for two reasons. It is
+// what remains of Usher's 403 once the signed-in refusals have been split off
+// (twitch.ErrSubscriberOnlyNotEntitled, which parks in Error and never reaches
+// this): no token was sent, the playback token belonged to nobody, or its
+// document was unreadable — so working credentials genuinely may be the fix.
+// And the retry loop this classification exists to break is structurally
+// absent on that side anyway: the auth-recovered sweep only fires on a
+// not-auth → auth TRANSITION, and an un-entitled account with healthy Twitch
+// auth produces no transitions, so nothing re-runs the job in the first place.
+// It stays in the auth class.
 //
 // Returns ParkReasonNone for anything that does not park at StatusCookies, so
 // callers can write the field unconditionally and never leave a stale

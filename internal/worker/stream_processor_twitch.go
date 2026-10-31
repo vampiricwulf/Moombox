@@ -140,7 +140,18 @@ func (sp *StreamProcessor) hlsMasterPlaylist(ctx context.Context, login string) 
 // access is the fix, so StatusCookies (not a generic Error) is the right
 // resting state. Returns nil for non-auth errors so plain failures don't
 // get spuriously routed to StatusCookies.
+//
+// The one exception is the refusal of a SIGNED-IN session,
+// twitch.ErrSubscriberOnlyNotEntitled (G52, owner decision D20), which is
+// returned as itself: it must keep its identity through the same %v
+// flattening — cookieRefreshWorthAttempting and anything after it read it —
+// and it must not become ErrCookiesRequired, because no cookie fixes an
+// account without the subscription. It parks in Error, as the live path's
+// wrapped form does.
 func twitchAuthSentinel(err error) error {
+	if errors.Is(err, twitch.ErrSubscriberOnlyNotEntitled) {
+		return twitch.ErrSubscriberOnlyNotEntitled
+	}
 	if errors.Is(err, twitch.ErrTwitchAuthExpired) || errors.Is(err, twitch.ErrSubscriberOnly) {
 		return ErrCookiesRequired
 	}
