@@ -609,7 +609,15 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 			if h := getInt(f, "height"); h > 0 {
 				format.Height = &h
 			}
-			if fps := getInt(f, "fps"); fps > 0 {
+			// A frame rate of 1 or less is not one: yt-dlp keeps fps only
+			// above 1 — "For some formats, fps is wrongly returned as 1"
+			// (_video.py:3463, 97afb093d). Kept, a 1 won the selector's FPS
+			// rung under prefer_60fps=false (lower wins) ahead of the codec,
+			// and the live paths' fpsPreference took it for a 30 fps-class
+			// rate. Unstated, the VOD selector reads it as 30 and the live
+			// ones as unknown; formatToDashStreamInfo copies this field, so
+			// the manifestless DASH pool gets the same floor.
+			if fps := getInt(f, "fps"); fps > 1 {
 				format.Fps = &fps
 			}
 
