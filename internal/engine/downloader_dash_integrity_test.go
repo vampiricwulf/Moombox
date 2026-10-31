@@ -446,28 +446,123 @@ func TestDashHuntHoldsUntilTheHeadReachesIt(t *testing.T) {
 	}
 }
 
+// TestDashHuntStepsPastRefusedSegmentsBelowTheHead pins the other side of
+// huntMayAdvance: below a KNOWN head a refused sequence exists and will not
+// come back — a start that sits on evicted segments, the hunt's reason to
+// exist — so the hunt still steps past it to the first one served, for a
+// plain downloader and for an InitInlineAtStart one anywhere but its sq=0.
+// The second row's file then opens with sq=0's init, which ensureInlineInit
+// fetches ahead of the first media it writes.
+//
+// Mutant: huntMayAdvance never advancing: both rows hold the refused
+// sequence for the whole budget and end with nothing written.
+func TestDashHuntStepsPastRefusedSegmentsBelowTheHead(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		head int
+		// resumeAt, when above 0, starts the downloader there through a
+		// resume sidecar that names no bytes (see
+		// TestDashInlineInitGuardWritesSq0InitFirst).
+		resumeAt          int
+		initInlineAtStart bool
+		refused           func(seq int) bool
+		want              []byte
+	}{
+		{
+			name:    "plain downloader, sq=0..2 evicted",
+			head:    10,
+			refused: func(seq int) bool { return seq <= 2 },
+			want: func() []byte {
+				var b bytes.Buffer
+				for seq := 3; seq <= 10; seq++ {
+					b.Write(gvsMedia(seq))
+				}
+				return b.Bytes()
+			}(),
+		},
+		{
+			name:              "manifest-free start resumed at 5, 5 evicted",
+			head:              9,
+			resumeAt:          5,
+			initInlineAtStart: true,
+			refused:           func(seq int) bool { return seq == 5 },
+			want:              gvsRecording(6, 9),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serveGVS(t, constHead(tc.head), func(r *http.Request, seq, attempt int) gvsAnswer {
+				switch {
+				case tc.refused(seq):
+					return gvsGone
+				case seq <= tc.head:
+					return gvsServe
+				default:
+					return gvsForbidden // past the end
+				}
+			})
+
+			synctest.Test(t, func(t *testing.T) {
+				out := filepath.Join(t.TempDir(), "video_stream")
+				base := gvsBase("evicted")
+				if tc.resumeAt > 0 {
+					if err := os.WriteFile(out, nil, 0o644); err != nil {
+						t.Fatal(err)
+					}
+					state, _ := json.Marshal(ResumeState{LastSeq: tc.resumeAt - 1, BytesWritten: 0, Timestamp: time.Now().Unix(), BaseURL: base})
+					if err := os.WriteFile(out+resumeFileSuffix, state, 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				d := NewSegmentDownloader(DownloaderOptions{
+					BaseURL:           base,
+					OutputFile:        out,
+					InitInlineAtStart: tc.initInlineAtStart,
+					CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
+				})
+
+				if err := d.Start(t.Context()); err != nil {
+					t.Fatalf("Start = %v, want nil", err)
+				}
+				wantFile(t, out, tc.want)
+				if got := d.CurrentSeq(); got != tc.head+1 {
+					t.Errorf("CurrentSeq = %d, want %d", got, tc.head+1)
+				}
+			})
+		})
+	}
+}
+
 // TestDashInitRetriesRefreshesAndTransientFailures pins G4 (downloaders-2): a
 // part that force-starts past sq=0 (a quality split, restart discovery, the
 // post-live refresh rebuild) takes its ftyp+moov from sq=0, and that fetch
 // was one bare request whose failure was only logged — the part then recorded
 // for hours into a file FFmpeg could not open. It now has
 // fetchSegmentWithRetry's ladder (5xx, timeouts, empty bodies, outages) and,
-// on a 403/410, initForbiddenAttempts tries each after refreshCredentials, on
-// the sq=0 URL rebuilt from the base the refresh installed.
+// on a 403, initForbiddenAttempts tries each after refreshCredentials, on the
+// sq=0 URL rebuilt from the base the refresh installed. Each of those
+// refreshes is a real one: the second waits out the refresh cooldown the
+// first claimed, so a refresh that came back with credentials the edge still
+// refuses is followed by another rather than by the same URL again.
 //
 // Mutants:
 //   - downloadInitSegment back to one fetchSegment, its failure logged: every
 //     row records the fragments with no init ahead of them.
-//   - fetchInitSegment without its 403/410 loop: the refused row fails Start.
-//   - writeInitFromSq0 passing no rebuild closure: the refused row retries the
-//     construction-time URL, refused again, and fails Start.
+//   - fetchInitSegment without its 403 loop: the refused rows fail Start.
+//   - writeInitFromSq0 passing no rebuild closure: the refused rows retry the
+//     construction-time URL, refused again, and fail Start.
+//   - initRefreshWait not waiting out the cooldown: the second refresh of the
+//     still-refused row lands inside it and never runs, the third attempt
+//     re-sends the URL just refused, and Start fails.
 //   - fetchSegmentWithRetry returning an empty 2xx body as data: the empty
 //     row finds no ftyp in it and fails Start.
 func TestDashInitRetriesRefreshesAndTransientFailures(t *testing.T) {
 	const startSeq, head = 3, 6
 	for _, tc := range []struct {
-		name          string
-		sq0           func(r *http.Request, attempt int) gvsAnswer
+		name string
+		sq0  func(r *http.Request, attempt int) gvsAnswer
+		// refreshedSigs is the sig each successive refresh installs; nil is
+		// "fresh" every time.
+		refreshedSigs []string
 		wantRefreshes int
 	}{
 		{
@@ -479,6 +574,17 @@ func TestDashInitRetriesRefreshesAndTransientFailures(t *testing.T) {
 				return gvsServe
 			},
 			wantRefreshes: 1,
+		},
+		{
+			name: "still refused after the first refresh, served after the second",
+			sq0: func(r *http.Request, _ int) gvsAnswer {
+				if r.URL.Query().Get("sig") != "fresh" {
+					return gvsForbidden
+				}
+				return gvsServe
+			},
+			refreshedSigs: []string{"still-bad", "fresh"},
+			wantRefreshes: 2,
 		},
 		{
 			name: "503, then served",
@@ -523,8 +629,12 @@ func TestDashInitRetriesRefreshesAndTransientFailures(t *testing.T) {
 					InitURL:         base + "&sq=0",
 					InitFromSegment: true,
 					OnCredentialRefresh: func() (string, string) {
-						refreshes.Add(1)
-						return strings.Replace(base, "sig=stale", "sig=fresh", 1), ""
+						n := int(refreshes.Add(1))
+						sig := "fresh"
+						if n <= len(tc.refreshedSigs) {
+							sig = tc.refreshedSigs[n-1]
+						}
+						return strings.Replace(base, "sig=stale", "sig="+sig, 1), ""
 					},
 					CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
 				})

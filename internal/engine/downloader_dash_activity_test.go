@@ -16,14 +16,36 @@ func newActivityDownloader(t *testing.T) (*SegmentDownloader, *DownloadActivity)
 	return d, &got
 }
 
+// TestHandleGoneErrorEmitsFindingFirstSegment covers both arms of the
+// first-segment hunt (huntMayAdvance): the hold, which asks the same
+// sequence again, and the step past a refused sequence below a known head.
 func TestHandleGoneErrorEmitsFindingFirstSegment(t *testing.T) {
-	d, got := newActivityDownloader(t)
-	n := 1 // first-segment hunt: !hasStartedDownloading, n <= goneRetryBeforeFirstSegment
-	if err := d.handleGoneError(t.Context(), 403, &n, false); err != nil {
-		t.Fatalf("handleGoneError returned %v, want nil (continue)", err)
-	}
-	if *got != ActivityFindingFirstSegment {
-		t.Errorf("activity = %v, want ActivityFindingFirstSegment", *got)
+	for _, tc := range []struct {
+		name    string
+		head    int // -1: unknown
+		wantSeq int64
+	}{
+		{name: "head unknown: holds", head: -1, wantSeq: 0},
+		{name: "below a known head: steps", head: 10, wantSeq: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, got := newActivityDownloader(t)
+			if tc.head >= 0 {
+				d.noteHeadSeq(tc.head)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel() // cancelled so the hunt's sleep returns immediately
+			n := 1   // first-segment hunt: !hasStartedDownloading, n <= goneRetryBeforeFirstSegment
+			if err := d.handleGoneError(ctx, 403, &n, false); err != nil {
+				t.Fatalf("handleGoneError returned %v, want nil (continue)", err)
+			}
+			if *got != ActivityFindingFirstSegment {
+				t.Errorf("activity = %v, want ActivityFindingFirstSegment", *got)
+			}
+			if seq := d.currentSeq.Load(); seq != tc.wantSeq {
+				t.Errorf("currentSeq = %d, want %d", seq, tc.wantSeq)
+			}
+		})
 	}
 }
 
