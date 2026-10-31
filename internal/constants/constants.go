@@ -86,6 +86,19 @@ var YouTubeURLs = struct {
 // DefaultAPIKey is the default YouTube API key.
 const DefaultAPIKey = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 
+// SignedOutYouTubePageCookie is the Cookie header of a YouTube page fetched
+// with no cookie jar at all: the consent and language pair yt-dlp's jar
+// carries for a session with no cookies of its own (_initialize_consent and
+// _initialize_pref, yt_dlp/extractor/youtube/_base.py:675-692; SOCS=CAI
+// since 378ae9f9f, #7774, hl since f3aa3c3f9, #1018, tz since 396a76f7b,
+// #2402). It is what cookies.CookieJar.YouTubeConsentCookieHeader yields on
+// an empty jar, and what the BotGuard sidecar's homepage fetch sends
+// (HOMEPAGE_COOKIE, bgutil-sidecar/src/server.js), both pinned by
+// TestSignedOutPageCookieIsTheEmptyJarsPair. It is for the pages that cannot
+// reach the jar: internal/utils' channel-page read, which sits below
+// internal/cookies in the import graph.
+const SignedOutYouTubePageCookie = "PREF=hl=en&tz=UTC; SOCS=CAI"
+
 // =============================================================================
 // YOUTUBE CLIENT CONFIGURATIONS
 // =============================================================================

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/constants"
 )
 
 // Rows' expiry columns: one long past (2001) and one far ahead (2100), so a
@@ -249,5 +251,31 @@ func TestPageCookieHeadersAreSanitisedAsTheJarIs(t *testing.T) {
 		if tc.got != tc.want {
 			t.Errorf("%s() = %q, want %q", tc.name, tc.got, tc.want)
 		}
+	}
+}
+
+// TestSignedOutPageCookieIsTheEmptyJarsPair pins the three places the
+// signed-out page pair is spelled to one value: what the jar builds for a
+// page with no cookies of its own, constants.SignedOutYouTubePageCookie (the
+// channel-page read, which cannot reach the jar), and the sidecar's
+// HOMEPAGE_COOKIE, whose own test (test/homepage-fetch.test.mjs) checks only
+// that it holds SOCS=CAI and an English PREF.
+//
+// Mutants: the constant spelled otherwise (every row); HOMEPAGE_COOKIE
+// changed in server.js (the sidecar row).
+func TestSignedOutPageCookieIsTheEmptyJarsPair(t *testing.T) {
+	jar := NewCookieJar()
+	if got := jar.YouTubeConsentCookieHeader(); got != constants.SignedOutYouTubePageCookie {
+		t.Errorf("empty jar's YouTubeConsentCookieHeader() = %q, constants.SignedOutYouTubePageCookie = %q", got, constants.SignedOutYouTubePageCookie)
+	}
+	if got := jar.YouTubePageCookieHeader(); got != constants.SignedOutYouTubePageCookie {
+		t.Errorf("empty jar's YouTubePageCookieHeader() = %q, constants.SignedOutYouTubePageCookie = %q", got, constants.SignedOutYouTubePageCookie)
+	}
+	src, err := os.ReadFile(filepath.Join("..", "..", "bgutil-sidecar", "src", "server.js"))
+	if err != nil {
+		t.Skipf("bgutil-sidecar/ is not beside this package (%v); nothing to compare against", err)
+	}
+	if want := `const HOMEPAGE_COOKIE = "` + constants.SignedOutYouTubePageCookie + `";`; !strings.Contains(string(src), want) {
+		t.Errorf("bgutil-sidecar/src/server.js does not hold %s", want)
 	}
 }

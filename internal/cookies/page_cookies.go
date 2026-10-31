@@ -85,7 +85,8 @@ func (j *CookieJar) YouTubePageCookieHeader() string {
 // sent: the jar's when it is consented, CAI otherwise.
 //
 // The jar's SOCS and PREF are read as YouTubePageCookieHeader reads them
-// (youtubeSees).
+// (youtubeSees). On an empty jar this is constants.SignedOutYouTubePageCookie,
+// the pair the pages that never see the jar carry.
 func (j *CookieJar) YouTubeConsentCookieHeader() string {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
