@@ -94,11 +94,17 @@ func (f playbackLiveFlags) then(next playbackLiveFlags) playbackLiveFlags {
 	return f
 }
 
+// postLive is upstream's `live_status == 'post_live'`, its first rule:
+// isPostLiveDvr is true (_video.py:3868-3874).
+func (f playbackLiveFlags) postLive() bool {
+	return f.postLiveDvr != nil && *f.postLiveDvr
+}
+
 // exempt is upstream's `live_status in ('is_live', 'post_live')`: post_live
 // when isPostLiveDvr is true, is_live when isLive is — or, when no response
 // stated isLive at all, when isLiveNow is.
 func (f playbackLiveFlags) exempt() bool {
-	if f.postLiveDvr != nil && *f.postLiveDvr {
+	if f.postLive() {
 		return true
 	}
 	live := f.isLive

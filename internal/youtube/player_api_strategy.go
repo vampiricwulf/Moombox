@@ -108,11 +108,33 @@ func (t *mismatchTally) ipBlockShape() bool {
 // live_status verdict (PlaybackWaitExempt) is stamped here for the same
 // reason: upstream's is one over every player response it holds, the watch
 // page's first, and the winner's own parse read only its own.
+//
+// The same verdict decides post-live. Upstream's first live_status rule is
+// videoDetails.isPostLiveDvr (_video.py:3868-3874), read with get_first over
+// every response; classifyStream reads post-live off the microformat's
+// endTimestamp alone, and TV — this cascade's status authority — sends no
+// microformat. So a broadcast in its post-live DVR window, answered by TV
+// with isPostLiveDvr, segmented formats and no dashManifestUrl, came back
+// StreamVOD, went to the whole-file VodStrategy, and failed as a "bare media
+// fragment" — on a Resume of an incomplete_tail job too, after VodStrategy
+// had set the live capture aside. Here a VOD the extraction's responses call
+// post_live becomes StreamPostLive, which the worker routes to the
+// manifest-free path whenever its formats are segmented (the shape gate,
+// HasSplitAdaptiveFormats, still decides that: a processed copy whose
+// formats are whole files keeps the whole-file path). Only here, at the
+// cascade's exit: classifyStream is left as it is, so a single response's
+// parse — every monitor's and probe's — reads as it did. Only a VOD moves:
+// an upcoming verdict has no formats to route, a live one already takes the
+// live path, and not_a_stream is an answer that is not live content at all
+// (a TV answer for a broadcast states isLiveContent, and reads VOD).
 func (p *PlayerAPI) finishExtraction(ctx context.Context, info *VideoInfo, wp *WatchPageResult, videoID string, tally *mismatchTally, wpParsed *VideoInfo) (*VideoInfo, error) {
 	if info != nil {
 		info.FormatDiag.DRMSkipped, info.FormatDiag.CollapsedRenditions = extractionStateFrom(ctx).poolCounts()
 		if live, ok := extractionStateFrom(ctx).playbackLive(); ok {
 			info.PlaybackWaitExempt = live.exempt()
+			if info.StreamStatus == StreamVOD && live.postLive() {
+				info.StreamStatus, info.IsPostLiveDVR = StreamPostLive, true
+			}
 		}
 	}
 	if tally.ipBlockShape() && wpParsed == nil {
