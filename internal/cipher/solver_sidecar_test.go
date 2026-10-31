@@ -295,3 +295,41 @@ func TestSidecarSolverDoubleNotLoadedReturnsWrappedError(t *testing.T) {
 		t.Errorf("expected exactly 2 calls (initial + retry); got %d", got)
 	}
 }
+
+// TestSidecarExceptionSentinelRunsTheFreshJSRetry pins the contract between
+// bgutil-sidecar/src/cipher.js and isStaleJSError: the sidecar refuses an n
+// answer that ends with its own challenge with "ejs solve n: no solutions
+// (exception sentinel)" (its own test, cipher-cache.test.mjs, pins the
+// text), and that is a stale-JS error here — the cached player is dropped and
+// the solve retried once with fresh JS and ForceReload, as after any player
+// rotation. A sentinel that survives the retry is ErrPlayerJSStale.
+//
+// Mutant: isStaleJSError's "ejs solve n: no solutions" arm dropped (no
+// retry; the first error comes back as it is).
+func TestSidecarExceptionSentinelRunsTheFreshJSRetry(t *testing.T) {
+	sentinelErr := errors.New("sidecar: ejs solve n: no solutions (exception sentinel)")
+	for _, recovers := range []bool{true, false} {
+		calls := 0
+		fake := &fakeSidecar{respond: func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+			calls++
+			if calls == 1 || !recovers {
+				return sidecar.SolveCipherResult{}, sentinelErr
+			}
+			return sidecar.SolveCipherResult{NResults: map[string]string{"abcdefghijk": "SOLVEDvalue"}}, nil
+		}}
+		src := &fakePlayerSource{playerID: "P1", js: "stale-js", freshJS: "fresh-js"}
+		s := newSidecarSolverWith(fake, src)
+		s.markPlayerSent("P1")
+
+		out, err := s.N(context.Background(), "P1", "abcdefghijk")
+		if len(fake.calls) != 2 || !fake.calls[1].ForceReload || fake.calls[1].PlayerJS != "fresh-js" || !src.Removed {
+			t.Fatalf("recovers=%v: calls = %+v, removed = %v; want one retry with fresh JS and ForceReload after dropping the player", recovers, fake.calls, src.Removed)
+		}
+		switch {
+		case recovers && (err != nil || out != "SOLVEDvalue"):
+			t.Errorf("N after the retry = %q, %v; want the fresh answer", out, err)
+		case !recovers && !errors.Is(err, ErrPlayerJSStale):
+			t.Errorf("N with the sentinel surviving the retry = %q, %v; want ErrPlayerJSStale", out, err)
+		}
+	}
+}

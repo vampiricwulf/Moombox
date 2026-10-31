@@ -10,8 +10,8 @@ import (
 // manifest under /api/manifest/, the HLS variant playlist and the segments it
 // lists — is signed for the one client that asked for it, and says so in its
 // parameters: the client's public IP address (ip), the signatures that
-// authorise the fetch (sig, lsig), the GVS PO token (pot), the deciphered
-// throttling parameter (n), the event and playback-session ids (ei, cpn), and
+// authorise the fetch (sig, lsig), the GVS PO token (pot), the solved n
+// challenge (n), the event and playback-session ids (ei, cpn), and
 // a dozen more values the server stamped for that session. They sit in the
 // query (…/videoplayback?…&ip=…&sig=…) or, on a live manifest and an HLS
 // segment, as /key/value pairs in the path (…/ip/<addr>/…/sig/<sig>). A

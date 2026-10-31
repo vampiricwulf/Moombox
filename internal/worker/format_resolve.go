@@ -130,13 +130,16 @@ func resolveManifestlessStream(
 		}
 		filtered = append(filtered, candidates[i])
 	}
+	// The resolve error rides both give-ups below, wrapped: it is the reason
+	// the stream has no URL (cipher.ErrNUnsolved for an n no solver answered),
+	// and dropping it left the job's error naming the re-selection alone.
 	if len(filtered) == 0 {
-		return "", nil, fmt.Errorf("no remaining candidates after excluding itag %d", chosen.Itag)
+		return "", nil, fmt.Errorf("no remaining candidates after excluding itag %d: %w", chosen.Itag, err)
 	}
 
 	retry := SelectBestDashStream(filtered, preferItag, maxRes, isVideo, qualityPref, prefer60fps)
 	if retry == nil {
-		return "", nil, fmt.Errorf("re-selection produced no candidate after excluding itag %d", chosen.Itag)
+		return "", nil, fmt.Errorf("re-selection produced no candidate after excluding itag %d: %w", chosen.Itag, err)
 	}
 
 	resolved, err = resolveFormatURLByItag(ctx, formatPool, retry.Itag, routed, goja, playerURL, logger)

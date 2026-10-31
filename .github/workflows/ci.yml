@@ -330,7 +330,8 @@ jobs:
       - name: Sidecar test suite
         # bgutil-sidecar's wired `npm test` covers the homepage-ytcfg
         # extraction and minter keying — the logic behind the open
-        # premiere-attestation field gate.
+        # premiere-attestation field gate — and the cipher answer cache
+        # (the n exception sentinel is never cached).
         working-directory: bgutil-sidecar
         timeout-minutes: 5
         run: npm test

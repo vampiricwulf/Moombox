@@ -95,8 +95,10 @@ func TestResolveFormatURL_DirectURL_OnlyDecryptsN(t *testing.T) {
 			sigCalled = true
 			return "should-not-fire", nil
 		},
+		// Not "DEC_" + in: an answer that ends with its own challenge is the
+		// player's exception sentinel, and is refused (checkNResult).
 		NFn: func(in string) (string, error) {
-			return "DEC_" + in, nil
+			return in + "_DEC", nil
 		},
 	}
 
@@ -110,7 +112,7 @@ func TestResolveFormatURL_DirectURL_OnlyDecryptsN(t *testing.T) {
 	if sigCalled {
 		t.Errorf("sig solver should NOT have been called for direct URL")
 	}
-	if !strings.Contains(got, "n=DEC_ENC") {
+	if !strings.Contains(got, "n=ENC_DEC") {
 		t.Errorf("expected decrypted n in URL: %q", got)
 	}
 }

@@ -3,15 +3,11 @@ package worker
 import (
 	"context"
 	"fmt"
-	"net/url"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/engine"
-	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -236,9 +232,6 @@ var (
 	HlsStrategy              DownloadStrategy = hlsStrategyT{}
 )
 
-// nPathRe matches n-parameter encoded in URL path: /n/{encrypted_value}/
-var nPathRe = regexp.MustCompile(`/n/([a-zA-Z0-9_-]{10,})/`)
-
 // DownloadResult contains the result of a download strategy.
 type DownloadResult struct {
 	VideoDownloader *engine.SegmentDownloader
@@ -269,50 +262,6 @@ type DownloadResult struct {
 	// segment (streamIdentityChanged).
 	VideoItag int
 	AudioItag int
-}
-
-// decryptNParamInURL finds and decrypts the 'n' parameter in a URL.
-// YouTube encodes n-params both in query strings (?n=value) and in URL paths (/n/{value}/).
-// Both forms must be decrypted to avoid throttling/403 errors.
-func decryptNParamInURL(rawURL string, nDecrypt func(string) (string, error)) (string, error) {
-	result := rawURL
-
-	// Check for n parameter in path: /n/{encrypted_value}/
-	// Match values that look like encrypted n-params (10+ alphanumeric/special chars)
-	if matches := nPathRe.FindStringSubmatch(result); len(matches) >= 2 {
-		encryptedN := matches[1]
-		decrypted, err := nDecrypt(encryptedN)
-		if err == nil && decrypted != encryptedN {
-			result = strings.Replace(result, "/n/"+encryptedN+"/", "/n/"+decrypted+"/", 1)
-		}
-	}
-
-	// Also check query string n param.
-	// Use string replacement to preserve original parameter order —
-	// Go's url.Values.Encode() sorts parameters alphabetically, which breaks
-	// YouTube's URL signature verification and causes HTTP 403.
-	parsed, err := url.Parse(result)
-	if err != nil {
-		// url.Parse's refusal quotes the URL — a signed segment URL, the
-		// client's IP and the signature in it — and the caller logs it.
-		return result, redact.MediaError(err)
-	}
-	// Extract raw (percent-encoded) n-param for accurate string matching.
-	rawN, nParam := cipher.RawQueryParam(parsed.RawQuery, "n")
-	if rawN != "" && nParam != "" {
-		decrypted, err := nDecrypt(nParam)
-		if err == nil && decrypted != nParam {
-			for _, prefix := range []string{"?", "&"} {
-				old := prefix + "n=" + rawN
-				if strings.Contains(result, old) {
-					result = strings.Replace(result, old, prefix+"n="+url.QueryEscape(decrypted), 1)
-					break
-				}
-			}
-		}
-	}
-
-	return result, nil
 }
 
 // invalidate403Caches clears cipher solver state, POT caches, and visitor data
