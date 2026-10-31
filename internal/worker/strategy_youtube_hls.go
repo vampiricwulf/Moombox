@@ -72,23 +72,29 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// as HLS only, so its master is the common bare case here; a tv or
 	// web_embedded master rides bare too, as upstream does, and so do the
 	// variant URL and the downloader.
+	//
+	// HLS is never missing_pot: the web family's HLS policy is recommended,
+	// not required (_base.py:85-88), so a master whose token none could be
+	// minted for is fetched bare, as upstream fetches it — which is what
+	// makes it the fallback a token-less manifest-free or DASH setup falls to
+	// (missingPotFallback). A guessed binding counts as no token (D12): the
+	// master goes bare rather than carry a token bound to a guess, as
+	// upstream mints nothing for a signed-in session without a datasync ID.
 	var hlsPoToken string
 	hlsSource := videoInfo.HlsManifestSource
 	if potProvider != nil && !youtube.GvsTokenRequired(hlsSource) {
 		logGvsTokenSkipped(job, hlsSource)
 	} else if potProvider != nil {
 		bindingValue, bindingKind := gvsBinding(job, videoInfo)
-		poToken, err := mintGvsPoToken(ctx, potProvider, bindingValue)
+		poToken, err := strategyGvsToken(ctx, potProvider, videoInfo, bindingValue, false)
 		if err != nil {
-			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
-				"binding", bindingKind, "err", err)
-		} else if poToken != "" {
+			job.Logger.Warn("[POT] no GVS token — fetching the HLS manifest bare: its token is recommended, not required", "jobID", job.Job.ID,
+				"binding", bindingKind, "source", hlsSource, "err", err)
+		} else {
 			hlsPoToken = poToken
 			hlsURL = strings.TrimRight(hlsURL, "/") + "/pot/" + poToken
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
 				"binding", bindingKind, "tokenLength", len(poToken), "source", hlsSource)
-		} else {
-			job.Logger.Warn("[POT] generator returned empty token", "jobID", job.Job.ID)
 		}
 	}
 

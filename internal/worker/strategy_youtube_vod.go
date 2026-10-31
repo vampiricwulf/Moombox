@@ -31,6 +31,32 @@ var errEmptyGvsToken = errors.New("PO token generator returned an empty token")
 // isOnline is the connectivity check the downloaders wait an outage out on,
 // as on the live strategies; nil disables the wait.
 func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
+	res, err := downloadVod(ctx, job, videoInfo, routedSolver, cipherSolver, potProvider, isOnline)
+	if err == nil || !errors.Is(err, errGuessedGvsBinding) || ctx.Err() != nil {
+		return res, err
+	}
+	// D12's last resort. The binding is a guess, so the first run counted the
+	// token as missing and degraded — and the degrade left a chosen stream
+	// with no token-free copy: nothing selectable at all, a stream whose only
+	// copies left are segments, a video or audio stream gone from the
+	// selection, or a pinned rendition gone from the pool (only those
+	// failures wrap the guessed-binding cause, each before anything is built
+	// or written). The run is made once more with the guess trusted: its
+	// selection is the first one again, and the token minted under the guess
+	// rides it.
+	job.Logger.Warn("[POT] missing_pot: a chosen stream has no token-free copy — minting under the guessed binding for the web-family formats",
+		"jobID", job.Job.ID, "binding", videoInfo.GvsBindingKind, "err", err)
+	// A mint that fails there too degrades again, on the mint's own failure,
+	// as any failed mint's does — a lost pin falls to the automatic pick, a
+	// lost stream is left out, nothing selectable is that run's error — and
+	// that run's outcome is the job's.
+	trusted := *videoInfo
+	trusted.GvsBindingGuessed = false
+	return downloadVod(ctx, job, &trusted, routedSolver, cipherSolver, potProvider, isOnline)
+}
+
+// downloadVod is DownloadVod's one run over videoInfo; see DownloadVod.
+func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
 	// pool is the format list selection, cipher re-selection and the
 	// alternate picker all draw from: the extraction's, without the formats
 	// a whole-file GET cannot fetch (wholeFileVodPool) — a filtered COPY, as
@@ -52,10 +78,10 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	}
 
 	// GVS PO token for the direct format URLs. yt-dlp's GVS_PO_TOKEN_POLICY
-	// marks WEB-family HTTPS/DASH URLs required (not_required_for_premium,
-	// and Moombox has no Premium detection), so a web_creator / web /
-	// web_safari / watch_page URL answers the 1-byte Range probe 206 and then
-	// 403s its first 5 MB chunk without one (the VOD 403 of 2026-09-29).
+	// marks WEB-family HTTPS/DASH URLs required (not_required_for_premium),
+	// so a web_creator / web / web_safari / watch_page URL answers the 1-byte
+	// Range probe 206 and then 403s its first 5 MB chunk without one (the VOD
+	// 403 of 2026-09-29).
 	// tv, web_embedded, visionos and android_vr carry no requirement, so
 	// those ride bare — see youtube.GvsTokenRequired — until a refusal long
 	// before a URL's expiry says otherwise (the whole-file refresh's token
@@ -65,28 +91,39 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// own Source requires it. Bound the same way as the DASH mint (see
 	// strategy_youtube_dash.go's mint block for the binding rationale).
 	//
-	// missing_pot (yt-dlp's name for it): when a token is required but the
-	// mint fails or comes back empty, sending the URL bare is a certain 403,
-	// so the WEB-family formats leave the pool and the selection re-runs on
-	// what is left (tv / web_embedded / visionos / android_vr — none of which
-	// needs a token). A dropped format that carries a TokenFreeAlternate (the
-	// dedup shadow) is replaced by it — same itag, bare URL — rather than
-	// lost. A chosen stream that WAS lost triggers one cookieless re-extract
-	// (see the block below). Nothing selectable left is an error naming the
-	// cause.
+	// missing_pot (yt-dlp's name for it): when a chosen stream's token is
+	// mandatory (youtube.FormatGvsTokenMandatory) but the mint fails, comes
+	// back empty or would be bound to a guess (D12, errGuessedGvsBinding),
+	// sending the URL bare is a certain 403, so the formats whose token is
+	// mandatory leave the pool and the selection re-runs on what is left (tv
+	// / web_embedded / visionos / android_vr — none of which needs a token —
+	// and the web family's itag 18, which upstream exempts). A dropped format
+	// that carries a TokenFreeAlternate (the dedup shadow) is replaced by it —
+	// same itag, bare URL — rather than lost. A chosen stream that WAS lost
+	// triggers one cookieless re-extract (see the block below). Nothing
+	// selectable left is an error naming the cause — which, for a guessed
+	// binding, DownloadVod answers by running once more with the guess
+	// trusted, the one exit D12 leaves it. A chosen stream whose token is only
+	// recommended — itag 18, or a Premium session's web family — rides bare
+	// instead, as upstream saves it: its token is attached when minted, never
+	// required.
 	videoNeedsPot := result.VideoFormat != nil && youtube.GvsTokenRequired(result.VideoFormat.Source)
 	audioNeedsPot := result.AudioFormat != nil && youtube.GvsTokenRequired(result.AudioFormat.Source)
 	var vodPoToken string
 	if potProvider != nil && (videoNeedsPot || audioNeedsPot) {
 		bindingValue, bindingKind := gvsBinding(job, videoInfo)
-		tok, mintErr := mintGvsPoToken(ctx, potProvider, bindingValue)
-		if mintErr == nil && tok == "" {
-			mintErr = errEmptyGvsToken
-		}
-		if mintErr != nil {
+		tok, mintErr := strategyGvsToken(ctx, potProvider, videoInfo, bindingValue, false)
+		mandatory := youtube.FormatGvsTokenMandatory(result.VideoFormat, videoInfo.IsPremium) ||
+			youtube.FormatGvsTokenMandatory(result.AudioFormat, videoInfo.IsPremium)
+		if mintErr != nil && !mandatory {
+			job.Logger.Warn("[POT] no GVS token — the chosen web-family formats ride bare: their token is recommended, not required",
+				"jobID", job.Job.ID, "binding", bindingKind, "err", mintErr, "premium", videoInfo.IsPremium,
+				"videoItag", formatItag(result.VideoFormat), "audioItag", formatItag(result.AudioFormat))
+			videoNeedsPot, audioNeedsPot = false, false
+		} else if mintErr != nil {
 			var dropped, removed []youtube.Format
 			var swapped int
-			pool, dropped, swapped = withoutGvsRequiredFormats(pool)
+			pool, dropped, swapped = withoutGvsRequiredFormats(pool, videoInfo.IsPremium)
 			// A shadow swapped in is another response's copy, which can be one
 			// a whole-file GET cannot fetch: it leaves the pool as the
 			// extraction's own did, and its stream counts as lost below. What
@@ -116,13 +153,28 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 						"jobID", job.Job.ID, "err", rxErr)
 				} else {
 					merged := youtube.MergeFormatPool(ctx, videoInfo.Formats, extra)
-					pool, dropped, swapped = withoutGvsRequiredFormats(merged)
+					pool, dropped, swapped = withoutGvsRequiredFormats(merged, videoInfo.IsPremium)
 					pool, removed = wholeFileVodPool(pool)
 					segmented = append(segmented, removed...)
 					job.Logger.Info("[POT] missing_pot: cookieless re-extract merged",
 						"jobID", job.Job.ID, "added", len(extra), "dropped", len(dropped), "swapped", swapped)
 				}
 			}
+			// D12 prefers a token-free copy of what the job would record and
+			// lets the guessed token ride only where there is none. A pinned
+			// rendition is what the job would record: one the degrade dropped
+			// with no token-free copy of its own (no shadow, nothing from the
+			// cookieless chain) is not stood in for by another itag, as it is
+			// when no token can be had at all — under the guess one can. So
+			// the selection is not re-run (its pin arms would say the pin
+			// needs a token none could be minted, where none was asked for):
+			// the failure wraps the guessed-binding cause, and DownloadVod's
+			// trusted run honours the pin with the guessed token.
+			guessed := errors.Is(mintErr, errGuessedGvsBinding)
+			if lost := vodPinsLost(job, result, pool); guessed && len(lost) > 0 {
+				return nil, fmt.Errorf("VOD: the %s has no token-free copy: %w", strings.Join(lost, " and "), mintErr)
+			}
+			first := result
 			selected, result = selectVodFormats(job, pool, dropped, segmented)
 			if !result.HasVideo && !result.HasAudio {
 				return nil, fmt.Errorf("VOD: no formats usable without a GVS PO token (mint failed: %w)", mintErr)
@@ -138,11 +190,20 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			if err := segmentedStreamLost(job, selected, segmented); err != nil {
 				return nil, fmt.Errorf("%w; its whole-file copies need a GVS PO token, and none could be minted (mint failed: %w)", err, mintErr)
 			}
+			// The same rule for a whole stream: a degrade that kept the audio
+			// and lost the video (or the reverse) would archive the one stream
+			// alone — an audio-only file for a video job — where a token
+			// minted under the guess fetches both. A lesser rendition of the
+			// same kind is a token-free copy of the stream, and is kept.
+			if lost := vodStreamsLost(first, result); guessed && len(lost) > 0 {
+				return nil, fmt.Errorf("VOD: the %s stream has no token-free copy: %w", strings.Join(lost, " and "), mintErr)
+			}
 			videoResolved, audioResolved, err = resolveVodURLs(ctx, job, result, pool, dropped, segmented, routedSolver, cipherSolver, videoInfo.PlayerURL)
 			if err != nil {
 				return nil, err
 			}
-			// The degraded pool holds no token-requiring format.
+			// The degraded pool holds no format a token is mandatory for,
+			// and none was minted: nothing rides one.
 			videoNeedsPot, audioNeedsPot = false, false
 			videoSource, audioSource := "", ""
 			if result.VideoFormat != nil {
@@ -543,15 +604,21 @@ func segmentedStreamLost(job *JobContext, selected youtube.SelectedFormats, segm
 }
 
 // withoutGvsRequiredFormats splits formats into the ones usable without a GVS
-// PO token and the WEB-family ones that require it. A dropped format carrying
-// a TokenFreeAlternate (the dedup shadow) contributes that alternate to kept
-// instead — same itag, a URL that needs no token — and counts in swapped; it
-// is still reported in dropped. Both slices are fresh: the caller's list is
-// never filtered in place, and the alternate is copied out of its pointer.
-func withoutGvsRequiredFormats(formats []youtube.Format) (kept, dropped []youtube.Format, swapped int) {
+// PO token and the WEB-family ones whose token is mandatory
+// (youtube.FormatGvsTokenMandatory, for a session isPremium says is or is not
+// a Premium subscriber). A dropped format carrying a TokenFreeAlternate (the
+// dedup shadow) contributes that alternate to kept instead — same itag, a URL
+// that needs no token — and counts in swapped; it is still reported in
+// dropped. A web-family format whose token is only recommended stays in kept
+// as it is: itag 18, which upstream exempts from the requirement on every
+// client (_video.py:3516-3518, audit G31) and saves bare when no token can be
+// had, and every web-family format of a Premium session. Both slices are
+// fresh: the caller's list is never filtered in place, and the alternate is
+// copied out of its pointer.
+func withoutGvsRequiredFormats(formats []youtube.Format, isPremium bool) (kept, dropped []youtube.Format, swapped int) {
 	kept = make([]youtube.Format, 0, len(formats))
 	for _, f := range formats {
-		if !youtube.GvsTokenRequired(f.Source) {
+		if !youtube.FormatGvsTokenMandatory(&f, isPremium) {
 			kept = append(kept, f)
 			continue
 		}
@@ -564,6 +631,14 @@ func withoutGvsRequiredFormats(formats []youtube.Format) (kept, dropped []youtub
 		}
 	}
 	return kept, dropped, swapped
+}
+
+// formatItag is f's itag for a log line, or 0 for none.
+func formatItag(f *youtube.Format) int {
+	if f == nil {
+		return 0
+	}
+	return f.Itag
 }
 
 // droppedHasItag reports whether a missing_pot drop removed a format with
@@ -589,4 +664,62 @@ func poolHasStream(pool []youtube.Format, f *youtube.Format) bool {
 		}
 	}
 	return false
+}
+
+// vodPinsLost names each manual itag the job pinned that first, a
+// selection's result, records and pool no longer holds a copy of
+// (poolHasStream) — "pinned video itag N", or audio — for a guessed
+// binding's degrade, where such a pin has no token-free copy of its own and
+// the guessed token is the way to record it (D12). A pin first did not
+// record (not found, or an audio pin beside a muxed video) is not lost here:
+// the degrade cannot lose what the selection never took.
+func vodPinsLost(job *JobContext, first *DownloadResult, pool []youtube.Format) []string {
+	var lost []string
+	for _, pin := range []struct {
+		kind string
+		itag *int
+	}{{"video", job.Job.SelectedVideoItag}, {"audio", job.Job.SelectedAudioItag}} {
+		if pin.itag == nil || *pin.itag <= 0 {
+			continue
+		}
+		for _, f := range []*youtube.Format{first.VideoFormat, first.AudioFormat} {
+			if f != nil && f.Itag == *pin.itag && strings.Contains(f.MimeType, pin.kind) {
+				if !poolHasStream(pool, f) {
+					lost = append(lost, fmt.Sprintf("pinned %s itag %d", pin.kind, *pin.itag))
+				}
+				break
+			}
+		}
+	}
+	return lost
+}
+
+// vodStreamsLost names the streams — "video", "audio" — that first, a
+// selection's result, records and degraded, the selection a missing_pot
+// degrade re-ran, does not. A result records video when its video input is a
+// video format, and audio when it is an audio-only primary (selectVodFormats
+// files a lone audio stream as the video input), a progressive format's own
+// track, or a separate audio format.
+func vodStreamsLost(first, degraded *DownloadResult) []string {
+	fv, fa := vodStreamKinds(first)
+	dv, da := vodStreamKinds(degraded)
+	var lost []string
+	if fv && !dv {
+		lost = append(lost, "video")
+	}
+	if fa && !da {
+		lost = append(lost, "audio")
+	}
+	return lost
+}
+
+func vodStreamKinds(r *DownloadResult) (video, audio bool) {
+	if f := r.VideoFormat; f != nil {
+		if strings.Contains(f.MimeType, "video") {
+			video, audio = true, IsProgressiveFormat(f)
+		} else {
+			audio = f.IsAudio()
+		}
+	}
+	return video, audio || r.AudioFormat != nil
 }

@@ -185,8 +185,9 @@ func errText(err error) string {
 	return err.Error()
 }
 
-// withAttestation stamps the watch page's session verdict, its chat facts and
-// the GVS PO-token content binding onto the VideoInfo being returned. Applied
+// withAttestation stamps the watch page's session verdict, its Premium
+// verdict, its chat facts and the GVS PO-token content binding (with whether
+// it is a guess) onto the VideoInfo being returned. Applied
 // at every GetVideoInfo* return site explicitly — NOT via
 // mergeWatchPageMetadata, which several early returns skip or call with a nil
 // source.
@@ -237,7 +238,11 @@ func withAttestation(info *VideoInfo, wp *WatchPageResult, videoID string) *Vide
 		// string copy and it is the only thing that can tell a dead cookie
 		// file apart from a live session that simply lacks a membership.
 		info.SessionAuth = wp.SessionAuth
-		info.GvsBinding, info.GvsBindingKind = GvsContentBinding(videoID, wp.Ytcfg, wp.SessionAuth == SessionAuthLoggedIn, info.ChannelID)
+		// The page's Premium verdict, which is only ever made for a signed-in
+		// page (WatchPageResult.IsPremium): it waives the web family's GVS
+		// token requirement for this extraction's streams (GvsTokenMandatory).
+		info.IsPremium = wp.IsPremium
+		info.GvsBinding, info.GvsBindingKind, info.GvsBindingGuessed = gvsContentBinding(videoID, wp.Ytcfg, wp.SessionAuth == SessionAuthLoggedIn, info.ChannelID)
 		return info
 	}
 	// No watch page at all (fetch failed): still produce a usable binding
@@ -634,6 +639,31 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		}
 	}
 
+	// A Premium subscriber's web_creator answer joins the pool (owner
+	// decision D11, 2026-10-31). Upstream leads a Premium session with
+	// web_creator (_DEFAULT_PREMIUM_CLIENTS = web_creator, tv_samsung, web;
+	// _video.py:147, 2973-2974); here it is a contributor, not the lead: its
+	// formats are pooled at AuthLevelWebCreator, behind the web family, so a
+	// stream another client returned keeps that copy and web_creator fills
+	// only what the others did not — the Premium renditions among them. Its
+	// URLs take the GVS token like the rest of the web family, which Premium
+	// makes recommended rather than required (GvsTokenMandatory). A waiting
+	// room is skipped, as the fallback below skips it: an upcoming stream has
+	// no formats to contribute. The answer is kept for the members-only /
+	// no-formats fallback below, which asks the same client.
+	var premiumWC *VideoInfo
+	var premiumWCErr error
+	if wp.IsPremium && !waitingRoom {
+		p.logger.Debug("[PlayerApi] Detected YouTube Premium subscription — fetching web_creator as a format contributor", "videoID", videoID)
+		premiumWC, premiumWCErr = tally.note(p.fetchWithClient(ctx, videoID, constants.WebCreatorClient, ytcfg, sts))
+		if premiumWCErr != nil {
+			p.logger.Debug("[PlayerApi] web_creator (Premium contributor) failed", slog.String("error", premiumWCErr.Error()))
+		} else {
+			collectFormats(&formatPool, premiumWC.Formats, "web_creator", AuthLevelWebCreator)
+			stampManifestSources(premiumWC, "web_creator")
+		}
+	}
+
 	// web_embedded as one more DASH source before the ANDROID_VR round trip
 	// below. Under the account experiment this is likely stripped too (the
 	// embedded call is cookied), but when present it saves the extra call.
@@ -755,15 +785,21 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		result.PlayabilityError == PlayabilityLoginRequired ||
 		len(result.Formats) == 0) {
 
-		wcResult, wcErr := tally.note(p.fetchWithClient(ctx, videoID, constants.WebCreatorClient, ytcfg, sts))
+		// A Premium session asked web_creator above already; its answer is
+		// this one, and its formats are pooled.
+		wcResult, wcErr := premiumWC, premiumWCErr
+		if premiumWC == nil && premiumWCErr == nil {
+			wcResult, wcErr = tally.note(p.fetchWithClient(ctx, videoID, constants.WebCreatorClient, ytcfg, sts))
+			if wcErr == nil {
+				collectFormats(&formatPool, wcResult.Formats, "web_creator", AuthLevelWebCreator)
+				stampManifestSources(wcResult, "web_creator")
+			}
+		}
 		if wcErr != nil {
 			p.logger.Warn("[PlayerApi] WEB_CREATOR failed, will try other clients", slog.String("error", wcErr.Error()))
 			// Fall through to ANDROID_VR / watch page below
 			wcResult = &VideoInfo{}
 		}
-
-		collectFormats(&formatPool, wcResult.Formats, "web_creator", AuthLevelWebCreator)
-		stampManifestSources(wcResult, "web_creator")
 		p.logger.Debug("[PlayerApi] WEB_CREATOR result",
 			"client", constants.WebCreatorClient.ClientName,
 			"formats", len(wcResult.Formats),

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -467,6 +468,10 @@ func minterUsable(m gvsTokenMinter) bool {
 // a URL that needs none (cipher's needsNoPlayer) and fails, as before, for
 // one that does.
 //
+// Nor is a fresh URL installed on a stream that carries a token when the
+// re-extraction ran under another visitor session than the one the token is
+// bound to (the binding guard below, audit G51): the token alone is.
+//
 // A URL from a fresh player response is not installed before that
 // response's pre-roll ad is over (waitForFreshPlayback, yt-dlp's
 // available_at), and the wait runs within refreshCtx — see
@@ -528,6 +533,9 @@ func refreshGvsCredentials(
 		formats := videoInfo.Formats
 		playerURL := videoInfo.PlayerURL
 		waitInfo := videoInfo
+		// freshVisitorBinding is the re-extraction's own GVS binding when it is
+		// a visitor-data one, "" otherwise — see the binding guard below.
+		freshVisitorBinding := ""
 		if job.YT != nil {
 			fresh, err := refreshVideoInfo(job.YT, refreshCtx, job.Job.VideoID)
 			if err != nil {
@@ -538,6 +546,9 @@ func refreshGvsCredentials(
 				waitInfo = fresh
 				if fresh.PlayerURL != "" {
 					playerURL = fresh.PlayerURL
+				}
+				if fresh.GvsBindingKind == youtube.BindingVisitorData {
+					freshVisitorBinding = fresh.GvsBinding
 				}
 			}
 			// Interruption spec Tier 1 evidence: this re-fetch runs on every
@@ -582,6 +593,23 @@ func refreshGvsCredentials(
 			}
 			job.Logger.Warn("[POT] credential refresh: itag now served by a client of a different token class — keeping the current URL",
 				"jobID", job.Job.ID, "tag", tag, "itag", itag, "setupSource", streamSource, "freshSource", freshSource, "reason", reason)
+		} else if youtube.GvsTokenRequired(streamSource) && freshVisitorBinding != "" && freshVisitorBinding != binding {
+			// The binding guard (audit G51). A token rides this stream, and it
+			// is minted under the setup binding; the re-extraction ran under a
+			// visitor session of its own — invalidate403Caches dropped the
+			// cached visitor data above, and a watch page hands out a fresh one
+			// — so its URL and the token would disagree on the session.
+			// yt-dlp never pairs them: each extraction, a live-from-start
+			// refetch included, mints its tokens under its own visitor_data
+			// (_video.py:3084-3096, 1953-1960). Keep the current URL, whose
+			// session the token matches, and install the token alone, as the
+			// token-class guard above does. Only a fresh visitor-data binding
+			// is read: the video-ID experiment's and a datasync ID are the
+			// same on every extraction of the job. A stall refresh rebuilds the
+			// downloaders under the fresh extraction's own binding
+			// (refreshDownload → gvsBinding), so the URL is renewed there.
+			job.Logger.Warn("[POT] credential refresh: the re-extraction's visitor session is not the one the token is bound to — keeping the current URL",
+				"jobID", job.Job.ID, "tag", tag, "itag", itag)
 		} else if waitForFreshPlayback(refreshCtx, job, waitInfo, formatByItag(formats, itag), tag) {
 			// The fresh response's pre-roll ad is waited out first, within
 			// refreshCtx (see the doc above); one that outlasts it leaves the
@@ -652,6 +680,62 @@ func gvsBinding(job *JobContext, videoInfo *youtube.VideoInfo) (value, kind stri
 // refusal long before its URL's expiry says it needs one.
 var mintGvsPoToken = func(ctx context.Context, p *bgutils.PotProvider, binding string) (string, error) {
 	return p.GeneratePoTokenString(ctx, binding, false)
+}
+
+// errGuessedGvsBinding is the missing_pot cause when the job's GVS content
+// binding is a guess (youtube.VideoInfo.GvsBindingGuessed): signed in, the
+// video-ID experiment off, and no datasync ID on the page. yt-dlp mints
+// nothing there; a strategy counts it as a token it does not have (owner
+// decision D12) and mints under the guess only for a stream whose token is
+// mandatory and that has no token-free copy to take instead.
+var errGuessedGvsBinding = errors.New("the GVS content binding is a guess — signed in, but the page stated no datasync ID")
+
+// errMissingPot marks a strategy setup that failed because a stream it would
+// record needs a GVS PO token (youtube.GvsTokenMandatory) that could not be
+// minted, and no token-free copy of it was left to record instead —
+// upstream's missing_pot skip, which it reports and passes over
+// (_video.py:3440-3442, 3746-3749). missingPotFallback reads it.
+var errMissingPot = errors.New("missing_pot")
+
+// strategyGvsToken is a strategy's first GVS mint (mintGvsPoToken) under
+// binding, and the cause of a missing token: the mint's error, an empty
+// token (errEmptyGvsToken), or — unless guessOK — a guessed binding
+// (errGuessedGvsBinding), for which nothing is minted at all. guessOK is the
+// one exit D12 leaves: a stream whose token is mandatory and that has no
+// token-free copy rides a token minted under the guess.
+func strategyGvsToken(ctx context.Context, p *bgutils.PotProvider, videoInfo *youtube.VideoInfo, binding string, guessOK bool) (string, error) {
+	if !guessOK && videoInfo != nil && videoInfo.GvsBindingGuessed {
+		return "", errGuessedGvsBinding
+	}
+	tok, err := mintGvsPoToken(ctx, p, binding)
+	if err == nil && tok == "" {
+		err = errEmptyGvsToken
+	}
+	if err != nil {
+		return "", err
+	}
+	return tok, nil
+}
+
+// missingPotFallback returns the strategy a failed setup falls to, or nil:
+// HlsStrategy for a live capture whose manifest-free or DASH-manifest setup
+// failed for want of a GVS token (errMissingPot) when the extraction carries
+// an HLS manifest. The web family's HLS policy is recommended, not required
+// (_base.py:85-88): upstream records that HLS bare when no token can be had,
+// and so does DownloadHls — the visionos and tv masters need none at all. So
+// a capture that yt-dlp would record from HLS is recorded from HLS, from the
+// live edge, instead of failing; a VOD or post-live setup has no live HLS to
+// fall to, and fails with the missing_pot cause. Only the first setup falls
+// back: a mid-stream refresh (refreshDownload) keeps the strategy the
+// capture runs on, and a refresh that cannot set it up fails as a refresh.
+func missingPotFallback(strategy DownloadStrategy, info *youtube.VideoInfo, err error) DownloadStrategy {
+	if !errors.Is(err, errMissingPot) || info == nil || info.StreamStatus != youtube.StreamLive || info.HlsManifestURL == "" {
+		return nil
+	}
+	if strategy != ManifestlessDashStrategy && strategy != DashStrategy {
+		return nil
+	}
+	return HlsStrategy
 }
 
 // tokenClassChanged reports whether a 403 refresh must NOT install the fresh

@@ -10,6 +10,13 @@ import (
 // datasyncID, otherwise visitorData. Moombox hardcoded the first branch until
 // 2026-08-15; these cases exist so a future reader can see the rule is
 // conditional, not a constant.
+//
+// wantGuess is gvsContentBinding's verdict that the binding is a guess (owner
+// decision D12): signed in, no experiment, no datasync ID — the session
+// upstream mints nothing for. Mutants (each run): reporting no guess fails
+// the two signed-in fallback rows; reporting one for a signed-out visitor
+// binding fails the logged-out row; reporting one under the experiment fails
+// its row.
 func TestGvsContentBinding(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -17,6 +24,7 @@ func TestGvsContentBinding(t *testing.T) {
 		auth        bool
 		wantBinding string
 		wantKind    string
+		wantGuess   bool
 	}{
 		{
 			name:        "experiment wins over everything",
@@ -45,6 +53,7 @@ func TestGvsContentBinding(t *testing.T) {
 			auth:        true,
 			wantBinding: "vd",
 			wantKind:    BindingVisitorData,
+			wantGuess:   true,
 		},
 		{
 			name:        "nothing session-scoped falls back to videoID",
@@ -52,6 +61,7 @@ func TestGvsContentBinding(t *testing.T) {
 			auth:        true,
 			wantBinding: "vid123",
 			wantKind:    BindingVideoID,
+			wantGuess:   true,
 		},
 		{
 			name:        "nil ytcfg still yields a binding",
@@ -67,12 +77,18 @@ func TestGvsContentBinding(t *testing.T) {
 			if got != tc.wantBinding || kind != tc.wantKind {
 				t.Errorf("got (%q,%q), want (%q,%q)", got, kind, tc.wantBinding, tc.wantKind)
 			}
+			if _, _, guessed := gvsContentBinding("vid123", tc.ytcfg, tc.auth, "chan456"); guessed != tc.wantGuess {
+				t.Errorf("guessed = %v, want %v", guessed, tc.wantGuess)
+			}
 		})
 	}
 
 	// Last-resort channel fallback when even the video ID is unavailable.
 	if got, kind := GvsContentBinding("", &YtcfgData{}, false, "chan456"); got != "chan456" || kind != BindingChannelID {
 		t.Errorf("channel fallback: got (%q,%q)", got, kind)
+	}
+	if _, kind, guessed := gvsContentBinding("", &YtcfgData{}, true, "chan456"); kind != BindingChannelID || !guessed {
+		t.Errorf("signed-in channel fallback: kind %q guessed %v, want %q guessed", kind, guessed, BindingChannelID)
 	}
 }
 

@@ -168,7 +168,15 @@ type WatchPageResult struct {
 	// recognisable watch-page shell. Neither "we never saw a page" nor "we
 	// saw something we can't read" may be reported as "logged out": that
 	// verdict is now printed to the user as "your cookies are dead".
-	SessionAuth      SessionAuthState
+	SessionAuth SessionAuthState
+	// IsPremium is yt-dlp's _is_premium_subscriber (_video.py:3899-3908): the
+	// page's ytInitialData topbar logo is YouTube Premium's —
+	// topbar.desktopTopbarRenderer.logo.topbarLogoRenderer carries iconImage
+	// iconType YOUTUBE_PREMIUM_LOGO, or a tooltip that says "premium". Read
+	// only off a page YouTube answered as signed in (SessionAuthLoggedIn), as
+	// upstream reads it only when authenticated: a signed-out page never
+	// claims Premium, whatever its topbar shows. See extractPremiumSubscriber.
+	IsPremium        bool
 	PlayerResponse   map[string]any
 	ChatContinuation string
 	ChatIsReplay     bool
@@ -248,6 +256,9 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 	// so the ~1-5 MB copy this used to make on every watch-page fetch —
 	// monitor polls and quality probes included — is gone.
 	sessionAuth := watchPageSessionAuth(body)
+	// A second, typed pass over ytInitialData for the topbar alone, on a
+	// signed-in page only (WatchPageResult.IsPremium).
+	isPremium := sessionAuth == SessionAuthLoggedIn && extractPremiumSubscriber(body)
 
 	ytcfg, playerResponse := extractYtcfgAndPlayerResponse(body)
 	chatContinuation, chatIsReplay, chatErr := extractChatContinuation(body)
@@ -257,6 +268,7 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 		Ytcfg:                ytcfg,
 		FetchedAt:            fetchedAt,
 		SessionAuth:          sessionAuth,
+		IsPremium:            isPremium,
 		PlayerResponse:       playerResponse,
 		ChatContinuation:     chatContinuation,
 		ChatIsReplay:         chatIsReplay,
@@ -700,6 +712,68 @@ func extractChatContinuation(page []byte) (string, bool, error) {
 		return "", false, fmt.Errorf("no continuations found")
 	}
 	return "", false, fmt.Errorf("no continuation token found")
+}
+
+// topbarLogoEnvelope decodes ONLY the path from ytInitialData down to the
+// topbar's logo renderer, which stays a json.RawMessage so its two fields are
+// read from a slice of a few hundred bytes — the shape watchNextChatEnvelope
+// uses, for the same reason: everything else in the document is skipped
+// without being materialised.
+type topbarLogoEnvelope struct {
+	Topbar struct {
+		DesktopTopbarRenderer struct {
+			Logo struct {
+				TopbarLogoRenderer json.RawMessage `json:"topbarLogoRenderer"`
+			} `json:"logo"`
+		} `json:"desktopTopbarRenderer"`
+	} `json:"topbar"`
+}
+
+// premiumLogoIconType is the topbar logo's iconType on a Premium
+// subscriber's pages (yt-dlp's _is_premium_subscriber).
+const premiumLogoIconType = "YOUTUBE_PREMIUM_LOGO"
+
+// extractPremiumSubscriber reports whether a watch page's ytInitialData
+// topbar shows the YouTube Premium logo: yt-dlp's _is_premium_subscriber
+// (_video.py:3899-3908), which reads topbar.desktopTopbarRenderer.logo.
+// topbarLogoRenderer and answers yes for iconImage.iconType
+// YOUTUBE_PREMIUM_LOGO, or for "premium" anywhere in the lower-cased
+// tooltipText (simpleText or runs, as _get_text reads it). The caller asks
+// only of a signed-in page (FetchWatchPage), as upstream asks only when
+// authenticated.
+//
+// The blob is located by extractYtInitialDataInto, as the chat continuation
+// is, and a candidate is rejected only on a syntax error — a type error
+// elsewhere in the document leaves the logo decoded where it can be. Any
+// other shape — no ytInitialData, no topbar, no logo, a logo of another
+// kind — answers false: the reading under which the GVS token stays
+// mandatory, as it was before this detection existed.
+func extractPremiumSubscriber(page []byte) bool {
+	var env topbarLogoEnvelope
+	if !extractYtInitialDataInto(page, func(obj []byte) bool {
+		var cand topbarLogoEnvelope
+		if _, ok := errors.AsType[*json.SyntaxError](json.Unmarshal(obj, &cand)); ok {
+			return false
+		}
+		env = cand
+		return true
+	}) {
+		return false
+	}
+	raw := env.Topbar.DesktopTopbarRenderer.Logo.TopbarLogoRenderer
+	if len(raw) == 0 {
+		return false
+	}
+	var logo struct {
+		IconImage struct {
+			IconType string `json:"iconType"`
+		} `json:"iconImage"`
+		TooltipText any `json:"tooltipText"`
+	}
+	// A type error leaves whichever field decoded; both are read anyway.
+	_ = json.Unmarshal(raw, &logo)
+	return logo.IconImage.IconType == premiumLogoIconType ||
+		strings.Contains(strings.ToLower(innertubeText(logo.TooltipText)), "premium")
 }
 
 // normalizePlayerJSURL un-escapes a JSON-encoded URL (YouTube emits forward
