@@ -60,6 +60,11 @@ Newest first. One row per Moombox commit that ports upstream work.
 | 2026-10-31 | `33185cd7` | yt-dlp `715af0c63` (#14646) | The downloader half of `available_at`: every YouTube strategy waits for its URLs' player response before its first media request (`waitForPlayback`), a credential refresh for its fresh response (`waitForFreshPlayback`); live and post-live never wait |
 | 2026-10-31 | `1126da36` | yt-dlp `715af0c63` (#14646), `3c279b33c` (#17062) | `available_at` read off each player response's pre-roll ads (adPlacements START, adSlots BEFORE_CONTENT) and stamped on its formats and manifests (`playbackAvailableAt`) |
 | 2026-10-22 | `15fe37f4` | yt-dlp `12ac9aca7` (#17703) | ytInitialData read from `<script id="yt-initial-data" type="application/json">` (staged rollout, cookie-authed pages): third anchor in both locator sets |
+| 2026-10-31 | `0e8a04f8` | yt-dlp `0ad92dfb1` (#2823), `a1b2d8436` (#3083), `a25a42432` | A rendition whose `approxDurationMs` is under the video's length halved in whole seconds is damaged (`markDamagedFormats`); the selector passes over it while an intact one of its kind exists, ahead of the cap, as preference -10 ranks through `ie_pref` |
+| 2026-10-31 | `2d2c3cba` | yt-dlp `97afb093d` | A player response's fps of 1 or less is stored as unstated (`parseFormats`), so it no longer wins the FPS rung under `prefer_60fps` false |
+| 2026-10-31 | `ee699d24` | yt-dlp `97afb093d` | A DASH `frameRate` or HLS `FRAME-RATE` of 1 or less is read as unstated (`knownFPS`) |
+| 2026-10-31 | `d48e51ed` | yt-dlp `cca80fe61` | `hq720` tried after `maxresdefault` in the finalize's thumbnail sizes (`copyAssets`); `mqdefault` stays ahead of the letterboxed 4:3 sizes, where upstream ranks those first |
+| 2026-10-31 | `6915d216` | yt-dlp `0ad92dfb1` (#2823) | The dedup's per-itag collapse keeps an intact copy ahead of a damaged one before the track (`collapseToPreferredRendition`), as upstream keeps every track and ranks `ie_pref` ahead of `lang` (`FormatSorter.default`), so an intact dub is archived when every original-language copy is short |
 
 ## Reviewed, no action (most recent review)
 

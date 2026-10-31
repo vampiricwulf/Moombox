@@ -334,59 +334,75 @@ func TestMuxFromStagingAnnouncesTheMux(t *testing.T) {
 }
 
 // TestCopyAssetsTakesTheFirstUsableThumbnailSize pins copyAssets' YouTube
-// thumbnail order, read through ytThumbnailBase. maxresdefault is missing (a
-// video with no HD thumbnail), so the 16:9 mqdefault must be the one saved —
-// not one of the letterboxed 4:3 sizes after it — and nothing past it is
-// asked for.
+// thumbnail order, read through ytThumbnailBase: the two HD 16:9 sizes in
+// yt-dlp's order (maxresdefault, hq720 — _video.py:4113-4127), then the 16:9
+// mqdefault, and only then the letterboxed 4:3 sizes. Each row names the
+// sizes the stub has no image for; the first size it has must be the one
+// saved, and nothing past it is asked for.
 //
 // Mutants this kills: the URL hard-coded to i.ytimg.com again (the stub sees
-// no request, and the network guard trips), a 4:3 size moved ahead of
-// mqdefault, and a loop that keeps going after a size was saved.
+// no request, and the network guard trips), hq720 dropped or moved behind
+// mqdefault (the "no maxres" row saves mqdefault's 320x180), a 4:3 size moved
+// ahead of mqdefault (the "no HD" row saves it), and a loop that keeps going
+// after a size was saved.
 func TestCopyAssetsTakesTheFirstUsableThumbnailSize(t *testing.T) {
-	mq := bytes.Repeat([]byte("m"), 2000)
-	var mu sync.Mutex
-	var asked []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		asked = append(asked, r.URL.Path)
-		mu.Unlock()
-		switch r.URL.Path {
-		case "/vid/maxresdefault.jpg":
-			http.NotFound(w, r)
-		case "/vid/mqdefault.jpg":
-			w.Write(mq)
-		default:
-			// Every later size would be accepted too, so taking one of them
-			// instead of mqdefault shows up as the wrong bytes.
-			w.Write(bytes.Repeat([]byte("x"), 2000))
-		}
-	}))
-	t.Cleanup(srv.Close)
-	orig := ytThumbnailBase
-	ytThumbnailBase = srv.URL
-	t.Cleanup(func() { ytThumbnailBase = orig })
+	for _, tc := range []struct {
+		name    string
+		missing []string
+		want    string
+	}{
+		{"no maxresdefault: the 1280x720 hq720", []string{"maxresdefault"}, "hq720"},
+		{"no HD size: the 16:9 mqdefault, not a larger 4:3 one", []string{"maxresdefault", "hq720"}, "mqdefault"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			image := func(size string) []byte { return bytes.Repeat([]byte(size[:1]), 2000+len(size)) }
+			var mu sync.Mutex
+			var asked []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				asked = append(asked, r.URL.Path)
+				mu.Unlock()
+				size := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/vid/"), ".jpg")
+				if slices.Contains(tc.missing, size) {
+					http.NotFound(w, r)
+					return
+				}
+				// Every size it has is served, each with its own bytes, so
+				// taking another than the first shows up as the wrong bytes.
+				w.Write(image(size))
+			}))
+			t.Cleanup(srv.Close)
+			orig := ytThumbnailBase
+			ytThumbnailBase = srv.URL
+			t.Cleanup(func() { ytThumbnailBase = orig })
 
-	o := &DownloadOrchestrator{logger: discardLogger{}}
-	jobCtx := &JobContext{Job: &database.Job{ID: "yt_thumb", VideoID: "vid"}, StagingDir: t.TempDir()}
-	outDir := t.TempDir()
-	updates := map[string]any{}
-	o.copyAssets(context.Background(), jobCtx, outDir, "A Job", "A Job", updates, false)
+			o := &DownloadOrchestrator{logger: discardLogger{}}
+			jobCtx := &JobContext{Job: &database.Job{ID: "yt_thumb", VideoID: "vid"}, StagingDir: t.TempDir()}
+			outDir := t.TempDir()
+			updates := map[string]any{}
+			o.copyAssets(context.Background(), jobCtx, outDir, "A Job", "A Job", updates, false)
 
-	mu.Lock()
-	got := slices.Clone(asked)
-	mu.Unlock()
-	if want := []string{"/vid/maxresdefault.jpg", "/vid/mqdefault.jpg"}; !slices.Equal(got, want) {
-		t.Errorf("sizes asked = %v, want %v", got, want)
-	}
-	wantPath := filepath.Join(outDir, "A Job.jpg")
-	if updates["thumbnail_file"] != wantPath {
-		t.Errorf("thumbnail_file = %v, want %s", updates["thumbnail_file"], wantPath)
-	}
-	body, err := os.ReadFile(wantPath)
-	if err != nil {
-		t.Fatalf("read the saved thumbnail: %v", err)
-	}
-	if !bytes.Equal(body, mq) {
-		t.Error("the saved thumbnail is not mqdefault's bytes")
+			mu.Lock()
+			got := slices.Clone(asked)
+			mu.Unlock()
+			var want []string
+			for _, size := range append(slices.Clone(tc.missing), tc.want) {
+				want = append(want, "/vid/"+size+".jpg")
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("sizes asked = %v, want %v", got, want)
+			}
+			wantPath := filepath.Join(outDir, "A Job.jpg")
+			if updates["thumbnail_file"] != wantPath {
+				t.Errorf("thumbnail_file = %v, want %s", updates["thumbnail_file"], wantPath)
+			}
+			body, err := os.ReadFile(wantPath)
+			if err != nil {
+				t.Fatalf("read the saved thumbnail: %v", err)
+			}
+			if !bytes.Equal(body, image(tc.want)) {
+				t.Errorf("the saved thumbnail is not %s's bytes", tc.want)
+			}
+		})
 	}
 }

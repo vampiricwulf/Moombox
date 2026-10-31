@@ -182,6 +182,13 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		lengthSeconds = &n
 	}
 
+	// Renditions encoded short, held against this response's own length: the
+	// stamp rides each copy through the dedup, which no later stage that
+	// knows the length could reach.
+	if damaged := markDamagedFormats(formats, videoDurationSeconds(videoDetails, microformat)); len(damaged) > 0 {
+		p.reportDamagedFormats(ctx, damaged)
+	}
+
 	// End timestamp
 	endTimestamp := ""
 	if lbd, ok := getNestedMap(microformat, "liveBroadcastDetails"); ok {
@@ -368,6 +375,9 @@ type extractionStateKey struct{}
 // to be exercised. Three words buy the class away.
 type extractionState struct {
 	drmWarned atomic.Bool
+	// damagedWarned is drmWarned's twin for the damaged-rendition report
+	// (reportDamagedFormats).
+	damagedWarned atomic.Bool
 	// drmSkipped accumulates every response's DRM drop count, and
 	// collapsedRenditions holds the pool's own collapse count. They are what
 	// finishExtraction stamps onto the VideoInfo the cascade returns; see
@@ -599,7 +609,15 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 			if h := getInt(f, "height"); h > 0 {
 				format.Height = &h
 			}
-			if fps := getInt(f, "fps"); fps > 0 {
+			// A frame rate of 1 or less is not one: yt-dlp keeps fps only
+			// above 1 — "For some formats, fps is wrongly returned as 1"
+			// (_video.py:3463, 97afb093d). Kept, a 1 won the selector's FPS
+			// rung under prefer_60fps=false (lower wins) ahead of the codec,
+			// and the live paths' fpsPreference took it for a 30 fps-class
+			// rate. Unstated, the VOD selector reads it as 30 and the live
+			// ones as unknown; formatToDashStreamInfo copies this field, so
+			// the manifestless DASH pool gets the same floor.
+			if fps := getInt(f, "fps"); fps > 1 {
 				format.Fps = &fps
 			}
 
@@ -617,6 +635,13 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 				format.AudioIsDefault = getBool(at, "audioIsDefault")
 			}
 			format.IsDrc = getBool(f, "isDrc")
+			// The length of media this format serves, which markDamagedFormats
+			// holds against the video's. A decimal string on the wire, like
+			// contentLength; one that does not parse is unstated, never
+			// damaged.
+			if ms, err := strconv.ParseInt(getStr(f, "approxDurationMs"), 10, 64); err == nil && ms >= 0 {
+				format.ApproxDurationMs = &ms
+			}
 
 			formats = append(formats, format)
 		}
@@ -1161,12 +1186,24 @@ func MergeFormatPool(ctx context.Context, pool, extra []Format) []Format {
 	return deduplicateFormats(ctx, union)
 }
 
-// collapseToPreferredRendition keeps one rendition per itag: the highest
-// audioTrackScore (which already ranks a clean rendition above its DRC twin),
-// then the existing lowest-auth-level tie-break. streams arrives sorted by the
-// whole 3-part key, so the winners come out in ascending itag order — the same
-// order, row for row, that the pre-collapse dedup produced for every response
-// without an audioTrack or an isDrc flag.
+// collapseToPreferredRendition keeps one rendition per itag: an intact one
+// ahead of a Damaged one, then the highest audioTrackScore (which already
+// ranks a clean rendition above its DRC twin), then the existing
+// lowest-auth-level tie-break. streams arrives sorted by the whole 3-part
+// key, so the winners come out in ascending itag order — the same order, row
+// for row, that the pre-collapse dedup produced for every response without an
+// audioTrack or an isDrc flag.
+//
+// The damage rung leads because the selector's does (selectBestFormatsImpl):
+// yt-dlp keeps every track as a format of its own and ranks ie_pref — the
+// -10 a damaged one carries (_video.py:3474) — ahead of lang in its default
+// sort ('hidden', 'aud_or_vid', 'hasvid', 'ie_pref', 'lang', …,
+// utils/_utils.py:5363). So where every original-language copy of an itag is
+// encoded short and a dub's is intact, upstream archives the dub. Ranked by
+// track alone, the collapse kept the short original under each itag, the
+// selector found no intact audio left to put ahead of it, and the archive's
+// audio stopped partway. With the same order on both sides, the rendition the
+// collapse keeps per itag is the one the selector would take from it.
 //
 // Video itags are untouched: they carry no track fields, so one itag can only
 // hold one stream and the loop hands it straight back.
@@ -1182,6 +1219,12 @@ func collapseToPreferredRendition(streams []Format) []Format {
 		if !seen {
 			preferred[f.Itag] = f
 			order = append(order, f.Itag)
+			continue
+		}
+		if f.Damaged != best.Damaged {
+			if !f.Damaged {
+				preferred[f.Itag] = f
+			}
 			continue
 		}
 		if fScore, bestScore := audioTrackScore(&f), audioTrackScore(&best); fScore != bestScore {
