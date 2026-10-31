@@ -212,6 +212,7 @@ func TestDirectDownloadCheckpointsFreshRunAndResumes(t *testing.T) {
 		IsDirectURL: true,
 	})
 	d.delays = directDelays()
+	d.chunkJitter = fullChunks // each chunk crosses the one-chunk interval exactly once
 	d.directResumeIntervalOverride = DownloadChunkSize
 	d.onResumeSaved = func(int) {
 		mu.Lock()

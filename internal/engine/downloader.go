@@ -134,8 +134,17 @@ const (
 	ResumeCatchupInterval     = 10 // Save resume state every N catch-up segments
 	// DownloadChunkSize is sourced from the central constants catalog (5 MB).
 	DownloadChunkSize = constants.DownloadChunkSize
-	MaxChunkRetries   = 3                      // Per-chunk retry limit
-	ProgressThrottle  = 500 * time.Millisecond // Throttle VOD progress emission
+	// MaxChunkRetries is how many times the whole-file path asks for one
+	// chunk — and the streaming fallback for the rest of the file — on a 5xx
+	// or a request that got no complete answer: the first try and yt-dlp's
+	// ten retries (HttpFD's RetryManager(params['retries']), --retries
+	// default 10, downloader/http.py and options.py; RetryManager yields
+	// retries+1 times). It counts ATTEMPTS, as it always has. It was 3, a
+	// ladder a burst of fast 503s outlasted in three seconds, and the job
+	// then ended where yt-dlp rides the burst out. The waits between them
+	// are directRetryBackoff's.
+	MaxChunkRetries  = 1 + 10
+	ProgressThrottle = 500 * time.Millisecond // Throttle VOD progress emission
 
 	// stayBehindSegments is the number of segments to stay behind the live edge
 	// during parallel catch-up, avoiding download of in-flight segments.
@@ -629,6 +638,13 @@ type SegmentDownloader struct {
 	// is about the cadence, not the constant — which is itself pinned, by
 	// TestDirectResumeIntervalIsFiftyMegabytes.
 	directResumeIntervalOverride int64
+
+	// chunkJitter is a TEST SEAM like the overrides above: production code
+	// never sets it, and nil draws each whole-file chunk's length from
+	// math/rand/v2 (chunkJitterSource, directChunkSize). A test sets it to
+	// pick the length — the floor, the full chunk — or to keep chunks at
+	// exactly DownloadChunkSize where its server keys on that boundary.
+	chunkJitter func(n int64) int64
 
 	// onResumeSaved is a TEST SEAM, like delays and
 	// catchUpBufferBytesOverride: production code never sets it. When
