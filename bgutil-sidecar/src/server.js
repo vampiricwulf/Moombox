@@ -57,6 +57,17 @@ const CLIENT_VERSION = "2.20260708.00.00";
 const ATT_GET_URL =
     "https://www.youtube.com/youtubei/v1/att/get?prettyPrint=false";
 const HOMEPAGE_URL = "https://www.youtube.com/";
+// The consent and language cookies the homepage fetch carries: yt-dlp's
+// _initialize_consent and _initialize_pref (yt_dlp/extractor/youtube/
+// _base.py:675-692), the pair every YouTube page Moombox fetches carries
+// (internal/cookies/page_cookies.go, in its sorted order). This fetch never
+// has a session, so SOCS is always CAI. Without it an EU, EEA or UK address
+// is redirected to consent.youtube.com, which the manual redirect below turns
+// into a fall back to /att/get — the challenge YouTube rejects tokens from
+// under the binding experiment, which is what the homepage pair exists to
+// avoid. Beyond upstream bgutil, whose homepage fetch sends no cookie
+// (session_manager.ts); it is the consent yt-dlp's own requests carry.
+const HOMEPAGE_COOKIE = "PREF=hl=en&tz=UTC; SOCS=CAI";
 // Per-fetch ceiling for the BotGuard network round-trips. Node's fetch (undici)
 // has no overall request timeout — a hung YouTube endpoint would otherwise wedge
 // the minter generation (minterInflight / serializeChain) for ~300s (undici's
@@ -279,7 +290,9 @@ function clearYtConfig() {
     if (globalThis.window) delete globalThis.window.yt;
 }
 
-async function fetchHomepageChallenge(deadline) {
+// Exported for the test that pins the request's cookie
+// (test/homepage-fetch.test.mjs); nothing outside this file calls it.
+export async function fetchHomepageChallenge(deadline) {
     // Drop any previous run's injection FIRST. Every early return below then
     // means "no ytcfg is installed", never "the last successful load's one is
     // still installed" — the two are indistinguishable to the snapshot but
@@ -290,12 +303,14 @@ async function fetchHomepageChallenge(deadline) {
     try {
         const resp = await fetch(HOMEPAGE_URL, {
             // No redirects: a challenge is only trusted off the constant URL
-            // above. A consent-wall or region redirect lands here and falls
-            // back — consistent with the other fetches in this file.
+            // above. A region redirect, or a consent wall HOMEPAGE_COOKIE did
+            // not pass, lands here and falls back — consistent with the
+            // other fetches in this file.
             redirect: "manual",
             headers: {
                 accept: "*/*",
                 "accept-language": "en-US,en;q=0.7",
+                cookie: HOMEPAGE_COOKIE,
                 "user-agent": USER_AGENT,
             },
             signal: budgetSignal(deadline, HOMEPAGE_FETCH_TIMEOUT_MS),
