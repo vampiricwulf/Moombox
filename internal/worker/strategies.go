@@ -319,6 +319,18 @@ const credentialRefreshTimeout = 45 * time.Second
 // whatever MaxTimeout is configured to. A missing/zero Config leaves the
 // flat ceiling in place (tests that don't wire JobConfig get the documented
 // 45s default rather than a divide-by-zero-shaped clamp to 0).
+//
+// A fresh player response's pre-roll ad (waitForFreshPlayback) is not always
+// waited out inside this bound. The segmented refresh, refreshGvsCredentials,
+// keeps it inside: the stall budget above is exactly what a long wait would
+// eat, and only a stream YouTube processed into a VOD mid-download can meet
+// one there — a live or post-live response never waits. The whole-file
+// refresh, refreshVodURL, waits its ad out on the job's context instead: that
+// path has no stall budget (the engine calls it inline, between one refused
+// request and its retry, with no cooldown and no segment clock running), and
+// this bound is the mint's and the cascade's — 10 s at the 30 s floor,
+// shorter than an unskippable ad, and a cold mint plus the cascade can spend
+// most of the 45 s ceiling before the ad's turn comes.
 func credentialRefreshTimeoutFor(cfg *JobConfig) time.Duration {
 	if cfg == nil || cfg.MaximumTimeout <= 0 {
 		return credentialRefreshTimeout
@@ -416,6 +428,13 @@ func minterUsable(m gvsTokenMinter) bool {
 // single attempt for work that cannot succeed; the token half still runs
 // unconditionally.
 //
+// A URL from a fresh player response is not installed before that
+// response's pre-roll ad is over (waitForFreshPlayback, yt-dlp's
+// available_at), and the wait runs within refreshCtx — see
+// credentialRefreshTimeoutFor for why this refresh's wait is bounded and the
+// whole-file one's is not. An ad that outlasts what is left of the budget
+// keeps the current URL, the token half standing.
+//
 // Never returns an error: a failed refresh yields empty strings, the engine
 // keeps its existing credentials, and the download fails the same way it
 // would have without this callback.
@@ -469,6 +488,7 @@ func refreshGvsCredentials(
 	if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
 		formats := videoInfo.Formats
 		playerURL := videoInfo.PlayerURL
+		status := videoInfo.StreamStatus
 		if job.YT != nil {
 			fresh, err := refreshVideoInfo(job.YT, refreshCtx, job.Job.VideoID)
 			if err != nil {
@@ -476,6 +496,7 @@ func refreshGvsCredentials(
 					"jobID", job.Job.ID, "tag", tag, "err", err)
 			} else if fresh != nil {
 				formats = fresh.Formats
+				status = fresh.StreamStatus
 				if fresh.PlayerURL != "" {
 					playerURL = fresh.PlayerURL
 				}
@@ -522,7 +543,10 @@ func refreshGvsCredentials(
 			}
 			job.Logger.Warn("[POT] credential refresh: itag now served by a client of a different token class — keeping the current URL",
 				"jobID", job.Job.ID, "tag", tag, "itag", itag, "setupSource", streamSource, "freshSource", freshSource, "reason", reason)
-		} else {
+		} else if waitForFreshPlayback(refreshCtx, job, status, formatByItag(formats, itag), tag) {
+			// The fresh response's pre-roll ad is waited out first, within
+			// refreshCtx (see the doc above); one that outlasts it leaves the
+			// URL uninstalled, the token half standing.
 			baseURL = fresh
 		}
 	}

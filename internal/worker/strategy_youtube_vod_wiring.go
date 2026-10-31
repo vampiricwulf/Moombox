@@ -110,6 +110,14 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, serve
 			"jobID", job.Job.ID, "tag", tag, "itag", f.Itag, "err", err)
 		return "", poToken
 	}
+	// The fresh response carries a pre-roll ad of its own, and its URL is
+	// refused until it is over (waitForFreshPlayback). Waited out on ctx, not
+	// refreshCtx: the bound is for the work above, which can hang, and this
+	// wait ends at an instant the response named — see
+	// credentialRefreshTimeoutFor.
+	if !waitForFreshPlayback(ctx, job, fresh.StreamStatus, f, tag) {
+		return "", poToken
+	}
 	job.Logger.Info("[POT] VOD URL refresh", "jobID", job.Job.ID, "tag", tag,
 		"itag", f.Itag, "source", f.Source, "newToken", poToken != "")
 	return resolved, poToken

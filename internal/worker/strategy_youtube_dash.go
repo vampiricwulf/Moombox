@@ -349,5 +349,12 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		}
 	}
 
+	// The manifest is fetched; its segments wait out the pre-roll ad of the
+	// response that served it (waitForPlayback) — a finished stream's only,
+	// a live one never waits.
+	if err := waitForPlayback(ctx, job, videoInfo.StreamStatus, videoInfo.DashManifestAvailableAt, videoInfo.DashManifestSource, "DASH"); err != nil {
+		return nil, fmt.Errorf("DASH: waiting out the pre-roll ad: %w", err)
+	}
+
 	return result, nil
 }

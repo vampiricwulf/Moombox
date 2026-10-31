@@ -415,6 +415,22 @@ func DownloadManifestlessDash(
 		}
 	}
 
+	// The first segment waits out the pre-roll ad of the response each chosen
+	// format came from (waitForPlayback). The strategy serves live and
+	// post-live streams, which never wait; a refresh that finds the broadcast
+	// processed into a VOD while its formats are still segmented would.
+	var videoFormat, audioFormat *youtube.Format
+	if videoStream != nil {
+		videoFormat = formatByItag(videoInfo.Formats, videoStream.Itag)
+	}
+	if audioStream != nil {
+		audioFormat = formatByItag(videoInfo.Formats, audioStream.Itag)
+	}
+	at, source := latestPlayback(videoFormat, audioFormat)
+	if err := waitForPlayback(ctx, job, videoInfo.StreamStatus, at, source, "manifestless DASH"); err != nil {
+		return nil, fmt.Errorf("manifestless DASH: waiting out the pre-roll ad: %w", err)
+	}
+
 	return result, nil
 }
 
