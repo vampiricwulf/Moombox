@@ -3,6 +3,7 @@ package youtube
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -352,6 +353,60 @@ func (tr *cancellingTransport) RoundTrip(req *http.Request) (*http.Response, err
 	tr.calls.Add(1)
 	tr.cancel()
 	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tr.answer)), Header: make(http.Header), Request: req}, nil
+}
+
+// TestRateLimitedStatusProbeIsInconclusiveWithoutEscalating: a rate-limit
+// refusal (W5's PlayabilityRateLimited — "try again later", or a captcha)
+// says nothing about the broadcast, so it is inconclusive like the bot wall,
+// but it refuses the session rather than the video: the escalation would be
+// one more call into the same limit, signed in or out, and yt-dlp never asks
+// another client because of one. The probe returns the inconclusive error
+// after ANDROID_VR's one call, naming why it did not escalate.
+//
+// Mutants: the rate-limit arm in Service.ProbeVideoStatus dropped (the
+// escalation runs: web_embedded and the embed page signed out, TV signed
+// in); the arm returning the refused answer instead of the error (a nil
+// error and not_a_stream, which the feed walk settles).
+func TestRateLimitedStatusProbeIsInconclusiveWithoutEscalating(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+	}{
+		{"try again later", `{"playabilityStatus":{"status":"ERROR","reason":"This content isn't available, try again later."}}`},
+		{"a captcha", `{"playabilityStatus":{"status":"UNPLAYABLE","reason":"Video unavailable","errorScreen":{"playerCaptchaViewModel":{"captchaId":"x"}}}}`},
+	} {
+		for _, signedIn := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, signed in %v", tc.name, signedIn), func(t *testing.T) {
+				embeds := stubEmbedPage(t)
+				stubHomepage(t, nil)
+				tr := serveBodies(t, map[string]string{clientAndroidVR: tc.body, clientTV: liveTVBody, clientWebEmbedded: upcomingEmbeddedBody})
+				jar := cookies.NewCookieJar()
+				if signedIn {
+					jar, _ = loadAccountJar(t, accountCookies("a"))
+				}
+				svc := NewService(jar, noopLogger{})
+
+				info, err := svc.ProbeVideoStatus(context.Background(), "test1234567")
+
+				inconclusive, ok := errors.AsType[*StatusProbeInconclusiveError](err)
+				if !ok || info != nil {
+					t.Fatalf("ProbeVideoStatus = (%+v, %v), want only a *StatusProbeInconclusiveError", info, err)
+				}
+				if inconclusive.Playability != PlayabilityRateLimited || inconclusive.Escalation != "" ||
+					!errors.Is(err, errRateLimitedSession) {
+					t.Errorf("error = %+v, want android_vr's rate_limited, no escalation, and errRateLimitedSession as the reason", inconclusive)
+				}
+				if !strings.Contains(err.Error(), "not escalated") {
+					t.Errorf("error text %q, want it to say the probe was not escalated", err)
+				}
+				if n := len(tr.of(clientAndroidVR)); n != 1 {
+					t.Errorf("android_vr asked %d times, want once", n)
+				}
+				if n := len(tr.of(clientTV)) + len(tr.of(clientWebEmbedded)) + int(embeds.Load()); n != 0 {
+					t.Errorf("%d more requests (TV, web_embedded, embed page), want none into a rate limit", n)
+				}
+			})
+		}
+	}
 }
 
 // TestStatusLiveFlagsStated pins the rule against yt-dlp's live_status

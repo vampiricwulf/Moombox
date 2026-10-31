@@ -237,6 +237,11 @@ func escalationSettledNothing(info *VideoInfo, err error) error {
 	return nil
 }
 
+// errRateLimitedSession is why a rate-limit refusal is not escalated
+// (Service.ProbeVideoStatus): the limit is the session's, and another
+// client would only be another call into it.
+var errRateLimitedSession = errors.New("the session is rate-limited; another client would only be another call into the limit")
+
 // errNilEscalationAnswer is the escalation's answer when its call returned
 // neither an answer nor an error — the (nil, nil) a shutdown race can leave.
 var errNilEscalationAnswer = errors.New("no answer and no error")

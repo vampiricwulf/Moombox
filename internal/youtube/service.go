@@ -237,6 +237,13 @@ func (s *Service) GetVideoInfo(ctx context.Context, videoID string) (*VideoInfo,
 // that settles nothing either, the probe returns a
 // *StatusProbeInconclusiveError instead of the not_a_stream it used to
 // return. See status_probe.go.
+//
+// A rate-limit refusal (PlayabilityRateLimited: "try again later", or a
+// captcha) is inconclusive too, but is never escalated: it refuses the
+// session, not the video, so another client's answer would be one more
+// call into the same limit and settle nothing — and yt-dlp never asks
+// another client because of one (its rate-limit wording is raised once no
+// client yielded formats, _video.py:4074-4081).
 func (s *Service) ProbeVideoStatus(ctx context.Context, videoID string) (*VideoInfo, error) {
 	s.vdMu.RLock()
 	vd := s.visitorData
@@ -244,6 +251,9 @@ func (s *Service) ProbeVideoStatus(ctx context.Context, videoID string) (*VideoI
 	info, err := s.PlayerAPI.ProbeVideoStatus(ctx, videoID, vd)
 	if err != nil || !statusAnswerInconclusive(info) {
 		return info, err
+	}
+	if info.PlayabilityError == PlayabilityRateLimited {
+		return nil, &StatusProbeInconclusiveError{Playability: info.PlayabilityError, Reason: info.PlayabilityReason, EscalationErr: errRateLimitedSession}
 	}
 	return s.escalateStatusProbe(ctx, videoID, vd, info)
 }
