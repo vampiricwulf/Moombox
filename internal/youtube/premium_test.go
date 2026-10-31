@@ -228,17 +228,23 @@ func TestGvsTokenMandatory(t *testing.T) {
 }
 
 // clientCountingTransport is manifestSourceTransport counting the player
-// calls each client key receives.
+// calls each client key receives. A key in refuse is answered with that HTTP
+// status instead — a 400, say, which the player call does not retry.
 type clientCountingTransport struct {
-	inner manifestSourceTransport
-	mu    sync.Mutex
-	calls map[string]int
+	inner  manifestSourceTransport
+	refuse map[string]int
+	mu     sync.Mutex
+	calls  map[string]int
 }
 
 func (tr *clientCountingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	key := req.Header.Get("X-YouTube-Client-Name")
 	tr.mu.Lock()
-	tr.calls[req.Header.Get("X-YouTube-Client-Name")]++
+	tr.calls[key]++
 	tr.mu.Unlock()
+	if status, ok := tr.refuse[key]; ok {
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("{}")), Header: make(http.Header), Request: req}, nil
+	}
 	return tr.inner.RoundTrip(req)
 }
 
@@ -268,24 +274,33 @@ const premiumBody = `{
 // keeps tv's copy, and web_creator adds what tv lacks (the Premium 616). A
 // session without Premium keeps asking web_creator only as the fallback, so
 // a pool tv filled never sees it; and the fallback reuses the Premium answer
-// rather than asking twice.
+// rather than asking twice — a refusal included. A waiting room asks no
+// web_creator at all, Premium or not: an upcoming stream has no formats to
+// contribute, and every waiting-room poll would pay one more player call
+// (owner decision O-I's short-circuit; see
+// TestUpcomingPollSkipsTheFormatHuntingFallbacksAuthenticated).
 //
 // Mutants (each run): skipping the Premium fetch fails the Premium row's call
 // count and its 616; pooling web_creator ahead of tv (a lower AuthLevel)
 // fails the 299 row's source; fetching web_creator again in the fallback
-// fails the no-formats row's single call; asking it without Premium fails
-// the ordinary row.
+// fails the no-formats row's single call; asking it again after the Premium
+// fetch failed fails the refused row's single call; asking it in a waiting
+// room fails the upcoming row; asking it without Premium fails the ordinary
+// row.
 func TestAuthenticatedCascadeFetchesWebCreatorForPremium(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		premium    bool
 		tv         string
+		refuseWC   bool // web_creator answers 400
 		wantCalls  int
 		want616    bool
 		wantSource string // the 299 winner's client
 	}{
 		{name: "Premium: web_creator contributes", premium: true, tv: srcBody(false, "whole", "", ""), wantCalls: 1, want616: true, wantSource: "tv_auth"},
 		{name: "Premium, tv has no formats: asked once", premium: true, tv: srcBody(false, "none", "", ""), wantCalls: 1, want616: true, wantSource: "web_creator"},
+		{name: "Premium, web_creator refused: not asked again", premium: true, tv: srcBody(false, "none", "", ""), refuseWC: true, wantCalls: 1},
+		{name: "Premium, waiting room: not asked", premium: true, tv: upcomingTVBody, wantCalls: 0},
 		{name: "no Premium: tv's pool is enough", tv: srcBody(false, "whole", "", ""), wantCalls: 0, wantSource: "tv_auth"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -295,6 +310,9 @@ func TestAuthenticatedCascadeFetchesWebCreatorForPremium(t *testing.T) {
 			}
 			t.Cleanup(func() { fetchWatchPage = orig })
 			tr := &clientCountingTransport{inner: manifestSourceTransport{responses: map[string]string{"7": tc.tv, "62": premiumBody}}, calls: map[string]int{}}
+			if tc.refuseWC {
+				tr.refuse = map[string]int{"62": http.StatusBadRequest}
+			}
 			origClient := apiClient
 			apiClient = &http.Client{Transport: tr}
 			t.Cleanup(func() { apiClient = origClient })
