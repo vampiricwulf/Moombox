@@ -423,7 +423,16 @@ type ProbeClassifyParams struct {
 	Tracker    *MetadataFailureTracker
 	Cooldown   *ProbeCooldown // optional: skips re-probes within the cooldown window
 	ConfirmEnd ConfirmEndFunc // optional: the end check a weak end needs; nil leaves every weak end unsettled
-	Logger     interface {
+	// Repeat marks a video the caller asked about before and logged then
+	// (ProcessYouTubeVideo's IsReprobe or Repeat): a failed probe of it logs
+	// at Debug, as the classification lines demote for one. DECAPI asks
+	// about a channel's newest video every 15 s, and a probe that keeps
+	// failing on it — an inconclusive status probe under a lasting bot wall
+	// above all (G8), which is never memoised — logged a Warn every cycle;
+	// the first sighting keeps it. The feed walk leaves it false: its rows
+	// are probed once a feed cycle, and a failure there is each cycle's own.
+	Repeat bool
+	Logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -503,6 +512,10 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 	}
 	meta, err := p.ProbeVideo(ctx, p.VideoID)
 	if err != nil {
+		failLog := p.Logger.Warn
+		if p.Repeat {
+			failLog = p.Logger.Debug
+		}
 		count, giveUp := p.Tracker.RecordFailure(p.VideoID)
 		if giveUp {
 			// Give up on this video. Nothing stops re-probing it — DECAPI
@@ -522,14 +535,14 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 			if p.Cooldown.enabled() {
 				next = "backing off"
 			}
-			p.Logger.Warn(fmt.Sprintf("[Monitor] Failed to check metadata for %s %d times, %s: %v",
+			failLog(fmt.Sprintf("[Monitor] Failed to check metadata for %s %d times, %s: %v",
 				p.VideoID, count, next, err))
 		} else {
 			// Transient failure: leave the cooldown UNRECORDED so the next
 			// cycle re-probes promptly — a freshly-live video must not be
 			// blinded by one flaky probe. The failure tracker bounds this to
 			// maxMetadataFailures attempts before the give-up branch above.
-			p.Logger.Warn(fmt.Sprintf("[Monitor] Failed to check metadata for %s (attempt %d/%d): %v",
+			failLog(fmt.Sprintf("[Monitor] Failed to check metadata for %s (attempt %d/%d): %v",
 				p.VideoID, count, maxMetadataFailures, err))
 		}
 		return ProbeClassifyResult{Outcome: OutcomeErrored}
@@ -665,6 +678,7 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		Tracker:    p.Tracker,
 		Cooldown:   p.Cooldown,
 		ConfirmEnd: p.ConfirmEnd,
+		Repeat:     p.IsReprobe || p.Repeat,
 		Logger:     p.Logger,
 	})
 

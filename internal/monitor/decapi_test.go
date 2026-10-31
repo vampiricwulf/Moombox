@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -914,5 +915,55 @@ func TestDecapi_ARepeatedWindowSkipLogsAtDebug(t *testing.T) {
 				t.Errorf("found = %v, want nothing jobbed outside the window", *found)
 			}
 		})
+	}
+}
+
+// A probe that keeps failing on a channel's newest video is re-probed every
+// cycle — an errored probe is never memoised, which is what lets the newest
+// video be found the moment the probe can see it — and it logged a Warn every
+// cycle: "attempt n/3", then the give-up, then again, every 15 s. The probe
+// that fails that way for good is the inconclusive status probe under a
+// lasting bot wall (G8: youtube.Service.ProbeVideoStatus reporting a refusal
+// with no broadcast details as an error), so the wall made a Warn per
+// affected channel per cycle. The first sighting still warns; repeats of the
+// same newest video log at Debug, and a new newest video warns again.
+//
+// Mutant: probeAndClassify's failures logging at Warn whatever Repeat says
+// (or ProcessYouTubeVideo not passing it): a Warn per cycle.
+func TestDecapi_AProbeThatKeepsFailingWarnsOncePerNewestVideo(t *testing.T) {
+	const failMsg = "[Monitor] Failed to check metadata for "
+	db := newTestDB(t)
+	probes := 0
+	dm := newTestDecapiMonitor(t, db, func(context.Context, string) (*VideoProbeResult, error) {
+		probes++
+		return nil, errors.New("status probe inconclusive: android_vr refused with no broadcast details (login_required)")
+	})
+	var records []slog.Record
+	dm.logger = slog.New(recordingHandler{records: &records})
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1"}
+
+	warns := func() int {
+		n := 0
+		for _, r := range records {
+			if r.Level == slog.LevelWarn && strings.HasPrefix(r.Message, failMsg) {
+				n++
+			}
+		}
+		return n
+	}
+	// Seven cycles: two of the failure tracker's give-ups, and a fresh round
+	// after each.
+	for range 7 {
+		_ = dm.processResponse(context.Background(), decapiBody("vidWalled01", "walled stream"), ch)
+	}
+	if probes != 7 {
+		t.Errorf("probed %d times over 7 cycles, want every cycle: an errored probe is never memoised", probes)
+	}
+	if n := warns(); n != 1 {
+		t.Errorf("%d Warn lines over 7 cycles of the same failing newest video, want 1, the first sighting's", n)
+	}
+	_ = dm.processResponse(context.Background(), decapiBody("vidWalled02", "the next stream"), ch)
+	if n := warns(); n != 2 {
+		t.Errorf("%d Warn lines after a new newest video failed too, want 2: its first sighting warns", n)
 	}
 }
