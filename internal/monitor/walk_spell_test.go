@@ -23,38 +23,43 @@ func failedProbeWarns(l *warnRecordingLogger, videoID string) int {
 }
 
 // TestWalk_AProbeThatKeepsFailingWarnsOncePerSpell is the owner's W6
-// follow-up (2026-10-31): the feed walk warns a row's failed probe once a
-// spell, as DECAPI warns once per newest video
-// (TestDecapi_AProbeThatKeepsFailingWarnsOncePerNewestVideo). An
-// inconclusive status probe under a lasting bot wall stores nothing, so the
-// row is probed again every cycle, and every one of those probes logged a
-// Warn. Now the first failed probe since the row last answered warns, every
-// one after it logs at Debug, and an answer ends the spell, so the next
-// failure warns again.
+// follow-up 2 (2026-10-31): the feed walk warns a row's failed probe once a
+// spell — Warn on the first in a spell, Debug after — as DECAPI demotes its
+// repeats (TestDecapi_AProbeThatKeepsFailingWarnsOncePerNewestVideo). A
+// row whose probe keeps failing stores nothing and is probed again, and
+// every one of those probes logged a Warn. Now the first failed probe since
+// the row last answered warns, every one after it logs at Debug, and an
+// answer ends the spell, so the next failure warns again.
 //
-// Two rows over four cycles: "walled" fails every cycle (one Warn, three
+// The failures here are transient (a reset connection), which hold nothing:
+// the row is probed every cycle, five probes in five cycles, where an
+// inconclusive one is held on the ladder
+// (TestWalk_AnInconclusiveRowIsHeldOnTheLadder, whose spell warns once too).
+//
+// Two rows over four cycles: "failing" fails every cycle (one Warn, three
 // Debug); "flaky" fails, fails, answers, fails (two Warns: the second spell's
-// first failure warns too). Five cycles of "walled" also cross the failure
+// first failure warns too). Five cycles of "failing" also cross the failure
 // tracker's give-up, whose line is a repeat's too.
 //
-// Mutants: probeRow passing Repeat false (walled warns every cycle);
+// Mutants: probeRow passing Repeat false (failing warns every cycle);
 // noteProbeOutcome never ending a spell on an answer (flaky's second spell
-// logs at Debug), or never starting one on a failure (walled warns every
-// cycle).
+// logs at Debug), never starting one on a failure (failing warns every
+// cycle), or holding the row on a transient failure (failing is probed
+// once).
 func TestWalk_AProbeThatKeepsFailingWarnsOncePerSpell(t *testing.T) {
 	db := newTestDB(t)
 	now := fixedNow()
 	const chID = "UC1"
-	seedRow(t, db, chID, "walled", now.Add(-1*time.Hour), "exact", "rss", "unknown")
+	seedRow(t, db, chID, "failing", now.Add(-1*time.Hour), "exact", "rss", "unknown")
 	seedRow(t, db, chID, "flaky", now.Add(-2*time.Hour), "exact", "rss", "unknown")
 
 	cycle := 0
-	walledErr := errors.New("status probe inconclusive: android_vr refused with no broadcast details (login_required)")
+	transient := errors.New("dial tcp: connection reset by peer")
 	probe := func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
 		if videoID == "flaky" && cycle == 3 {
 			return &VideoProbeResult{StreamStatus: "upcoming", Title: videoID}, nil
 		}
-		return nil, walledErr
+		return nil, transient
 	}
 	logger := &warnRecordingLogger{}
 	fm := newTestFeedMonitor(t, db, withProbe(probe), withNow(now))
@@ -68,17 +73,17 @@ func TestWalk_AProbeThatKeepsFailingWarnsOncePerSpell(t *testing.T) {
 			}
 		}
 	}
-	if n := failedProbeWarns(logger, "walled"); n != 1 {
-		t.Errorf("walled: %d Warn lines over 5 cycles of failed probes, want 1, the spell's first", n)
+	if n := failedProbeWarns(logger, "failing"); n != 1 {
+		t.Errorf("failing: %d Warn lines over 5 cycles of failed probes, want 1, the spell's first", n)
 	}
 	debugs := 0
 	for _, d := range logger.debugs {
-		if strings.HasPrefix(d, "[Monitor] Failed to check metadata for walled ") {
+		if strings.HasPrefix(d, "[Monitor] Failed to check metadata for failing ") {
 			debugs++
 		}
 	}
 	if debugs != 4 {
-		t.Errorf("walled: %d Debug lines for its failed probes, want 4: every failure after the first is logged, below Warn", debugs)
+		t.Errorf("failing: %d Debug lines for its failed probes, want 4: probed every cycle, and every failure after the first is logged, below Warn", debugs)
 	}
 }
 

@@ -257,15 +257,22 @@ type FeedMonitor struct {
 	carriedNew map[string]map[string]time.Time
 
 	// failingProbes holds the feed rows in a failure spell: channel ID →
-	// video ID, for each row whose last probe failed (OutcomeErrored) with no
-	// answer since. A failed probe of a row already in one logs at Debug
-	// (probeRow's ProbeClassifyParams.Repeat), so a row whose probe keeps
-	// failing warns once a spell, not once a cycle (inFailureSpell).
+	// video ID → the spell, for each row whose last probe failed
+	// (OutcomeErrored) with no answer since. A failed probe of a row already
+	// in one logs at Debug (probeRow's ProbeClassifyParams.Repeat), so a row
+	// whose probe keeps failing warns once a spell, not once a cycle
+	// (inFailureSpell); and a row whose probe was inconclusive is held on
+	// endRecheckBackoff, probed neither by the walk nor by the archive's
+	// refresh until its hold ends (probeHeld, noteProbeOutcome).
 	// Pruned to the walk's scope at the end of each walk and to the
 	// configured channels by PruneHealth, so it is bounded by the scopes.
 	// In-process only: a restart starts every spell over, as DECAPI's memo
-	// does. Guarded by fm.mu.
-	failingProbes map[string]map[string]struct{}
+	// does, so each held row is probed once at the first cycle after one —
+	// the end re-check's schedule, which is the row's own state, is
+	// persisted (feed_items.recheck_at); a hold is the probe's, and a
+	// restart costing one probe a held row is what keeping it out of the
+	// schema buys. Guarded by fm.mu.
+	failingProbes map[string]map[string]probeSpell
 
 	// FetchRSS overrides the RSS feed fetch (fm.fetchFeed's real HTTP GET)
 	// for tests. Nil uses the real fetch — see rssFetch.
@@ -757,10 +764,12 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 	// migrateV24): on the first cycle after it, the channel's not_a_stream
 	// rows inside this walk's scope — this cutoff, this membership toggle —
 	// go back to unknown, so the walk below probes each once under the
-	// inconclusive rule (G8): a stream the bot wall misfiled is found, and a
-	// genuine non-stream answers not_a_stream and settles again. Owed by the
-	// migration and settled here because the scope is configuration, which
-	// the database cannot read. A failure leaves the debt for the next cycle.
+	// inconclusive rule (G8): a stream the bot wall misfiled is found, a
+	// genuine non-stream answers not_a_stream and settles again, and a row
+	// the wall still refuses is held on the ladder (noteProbeOutcome), not
+	// probed every cycle. Owed by the migration and settled here because the
+	// scope is configuration, which the database cannot read. A failure
+	// leaves the debt for the next cycle.
 	includeMembership := fm.membershipDiscoveryEnabled()
 	if n, err := fm.db.ResetMisfiledFeedItems(chID, cutoff, includeMembership); err != nil {
 		fm.logger.Warn("the upgrade's not_a_stream reset failed; retried next cycle", "channel", ch.Name, "err", err)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -118,7 +119,65 @@ func TestABotWalledStatusProbeReachesTheMonitorsAsAnErroredProbe(t *testing.T) {
 			if got := yt.asked(); got != "28,56" {
 				t.Errorf("clients asked %q, want android_vr then its one web_embedded escalation", got)
 			}
+
+			// The failure the monitors see is marked inconclusive, its chain
+			// and text kept: the feed walk holds the row on its backoff
+			// ladder for it, where a transient failure is retried next cycle.
+			_, err := monitorProbe(svc.ProbeVideoStatus)(context.Background(), "test1234567")
+			if got := errors.Is(err, monitor.ErrProbeInconclusive); got != tc.wantFailure {
+				t.Errorf("the probe's error %v is marked inconclusive: %v, want %v", err, got, tc.wantFailure)
+			}
+			if _, ok := errors.AsType[*youtube.StatusProbeInconclusiveError](err); ok != tc.wantFailure {
+				t.Errorf("the probe's error %v keeps the youtube error in its chain: %v, want %v", err, ok, tc.wantFailure)
+			}
 		})
+	}
+}
+
+// TestMonitorProbeMarksOnlyAnInconclusiveProbe: monitorProbe marks a probe
+// that could not tell (*youtube.StatusProbeInconclusiveError) with
+// monitor.ErrProbeInconclusive, which is what the feed walk holds a row on
+// (an hour, then six, then daily — FeedMonitor.noteProbeOutcome), and marks
+// nothing else: a transport failure is transient, and a held freshly live
+// stream would go unseen for an hour. The mark keeps the error's text, so
+// the walk's failure line still names the refusal, and its chain, so a
+// cancelled context still reads as one.
+//
+// Mutants: monitorProbe passing every error through unmarked (the
+// inconclusive one is not marked); marking every error (the transport
+// failure is).
+func TestMonitorProbeMarksOnlyAnInconclusiveProbe(t *testing.T) {
+	inconclusive := &youtube.StatusProbeInconclusiveError{
+		Playability: youtube.PlayabilityLoginRequired, Reason: "Sign in to confirm you’re not a bot",
+		Escalation: youtube.StatusProbeEscalationWebEmbedded, EscalationErr: context.Canceled,
+	}
+	transport := errors.New("dial tcp: connection reset by peer")
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"an inconclusive probe", inconclusive, true},
+		{"a transport failure", transport, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := monitorProbe(func(context.Context, string) (*youtube.VideoInfo, error) {
+				return nil, tc.err
+			})(context.Background(), "test1234567")
+			if got := errors.Is(err, monitor.ErrProbeInconclusive); got != tc.want {
+				t.Errorf("marked inconclusive: %v, want %v", got, tc.want)
+			}
+			if err == nil || err.Error() != tc.err.Error() {
+				t.Errorf("error text %v, want the probe's own, %q", err, tc.err.Error())
+			}
+			if !errors.Is(err, tc.err) {
+				t.Errorf("the probe's error %v is not in the chain", tc.err)
+			}
+		})
+	}
+	_, err := monitorProbe(func(context.Context, string) (*youtube.VideoInfo, error) { return nil, inconclusive })(context.Background(), "test1234567")
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("the mark hides what the youtube error wraps: errors.Is(%v, context.Canceled) is false", err)
 	}
 }
 

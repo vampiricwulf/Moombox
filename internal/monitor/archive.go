@@ -147,6 +147,16 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 				gated++
 				continue
 			}
+			if !isFresh && fm.probeHeld(chID, row.VideoID, now) {
+				// An inconclusive hold (noteProbeOutcome): the row's last
+				// probe could not tell — the walk's this cycle, or a refresh
+				// of an earlier one — and the ladder says when it is asked
+				// again. No refresh probe until then, and so no job: one
+				// every cycle while the refusal stands is the cost the hold
+				// bounds.
+				gated++
+				continue
+			}
 			if !isFresh {
 				var ok bool
 				res, ok = fm.probeRowDated(ctx, ch, chID, row, cutoff, now)
