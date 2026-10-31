@@ -19,7 +19,9 @@ import (
 // rateLimitGateClosed — the run-out is never saved, so the next start reads
 // a hold; RestoreRateLimitHold leaves rateHeld false — the restarted
 // scheduler admits; restore one that has run out — the late start holds; drop
-// the hour's bound — the far one holds past it.
+// the hour's bound — the far one holds past it; drop the report from
+// RestoreRateLimitHold — the far hold's five hours stay saved, and each
+// restart inside them caps the hold at an hour from its own start.
 func TestRateLimitHoldOutlivesARestart(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var saved time.Time
@@ -43,8 +45,13 @@ func TestRateLimitHoldOutlivesARestart(t *testing.T) {
 		s, db, log := testSchedulerSetup(t, 2)
 		queueBacklog(t, db, "UC_restore", "restore_a", "restore_b")
 		s.RecordRateLimitHold(record)
-		if !s.RestoreRateLimitHold(saved) {
+		restored := saved
+		saved = time.Time{}
+		if !s.RestoreRateLimitHold(restored) {
 			t.Fatal("the restart did not restore the standing hold")
+		}
+		if !saved.Equal(restored) {
+			t.Errorf("saved %v once the hold was restored, want it saved again, %v", saved, restored)
 		}
 		s.sweep()
 		if n := log.enqueueCount(); n != 0 {
@@ -70,10 +77,16 @@ func TestRateLimitHoldOutlivesARestart(t *testing.T) {
 			t.Error("a hold that had run out was restored")
 		}
 		// And one hours ahead, a clock set back, holds for the hour only.
+		// That hour is what is saved, so a restart inside it holds no
+		// longer than this process would.
 		far := &Scheduler{log: discardLogger{}}
+		far.RecordRateLimitHold(record)
 		now := time.Now()
 		if !far.RestoreRateLimitHold(now.Add(5 * time.Hour)) {
 			t.Fatal("the far hold was not restored")
+		}
+		if want := now.Add(rateLimitBackoff); !saved.Equal(want) {
+			t.Errorf("saved %v for the far hold, want the hour it is held for, %v", saved, want)
 		}
 		if !far.rateLimitGateClosed(now.Add(rateLimitBackoff-time.Second)) || far.rateLimitGateClosed(now.Add(rateLimitBackoff)) {
 			t.Error("a hold restored five hours out does not run out at the hour")
