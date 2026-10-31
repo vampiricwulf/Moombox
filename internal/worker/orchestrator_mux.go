@@ -1493,14 +1493,20 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 	}
 	if !thumbnailSaved && jobCtx.Job.VideoID != "" {
 		// YouTube thumbnail quality progression. Order matters because
-		// only `maxresdefault` (1280x720) and `mqdefault` (320x180) are
-		// natively 16:9 -- the others (sddefault 640x480, hqdefault
-		// 480x360, default 120x90) are 4:3 with black bars baked into
-		// the image. Once the Web UI prefers the local file, those 4:3
-		// sources letterbox visibly inside the dashboard's 16:9 thumb
-		// box. Try maxres first for quality, mqdefault second for clean
-		// 16:9 framing, only then fall back to the letterboxed sizes.
-		thumbQualities := []string{"maxresdefault", "mqdefault", "hqdefault", "sddefault", "default"}
+		// only `maxresdefault` (1280x720 or more), `hq720` (1280x720) and
+		// `mqdefault` (320x180) are natively 16:9 -- the others
+		// (sddefault 640x480, hqdefault 480x360, default 120x90) are 4:3
+		// with black bars baked into the image. Once the Web UI prefers
+		// the local file, those 4:3 sources letterbox visibly inside the
+		// dashboard's 16:9 thumb box. Try the two HD sizes first, in
+		// yt-dlp's order (`'maxresdefault', 'hq720', ...`,
+		// _video.py:4113-4127, cca80fe61): a video with no maxresdefault
+		// often still has hq720, and without it one saved the 320x180
+		// mqdefault. Then mqdefault for clean 16:9 framing, and only then
+		// the letterboxed sizes. Upstream ranks sddefault and hqdefault
+		// above mqdefault, by size; keeping the 16:9 one ahead of them is
+		// Moombox's own choice, for the framing.
+		thumbQualities := []string{"maxresdefault", "hq720", "mqdefault", "hqdefault", "sddefault", "default"}
 		for _, quality := range thumbQualities {
 			thumbURL := fmt.Sprintf("%s/%s/%s.jpg", ytThumbnailBase, jobCtx.Job.VideoID, quality)
 			thumbDst := filepath.Join(outputDir, filenameBase+".jpg")
