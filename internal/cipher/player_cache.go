@@ -338,7 +338,18 @@ type FetchResult struct {
 // The returned Changed=true also implies that <key>.preprocessed.js has
 // been removed — the cache layer owns its own invalidation so callers
 // don't have to know.
+//
+// The URL fetched is always the main variant of the player asked for
+// (CanonicalPlayerURL), whatever variant the caller named. The disk entry is
+// keyed by player id alone, so it can only hold one variant's body, and the
+// sidecar (playerURLForID) always asks for the main one: a caller fetching
+// another variant under the same key overwrote the sidecar's file with a
+// body of another length, read as a rotation, and a 304 against the other
+// variant's validators served the sidecar that variant's code (audit G50).
+// The extraction already hands every caller the main variant; this is the
+// layer that makes the one-body-per-key rule hold for any caller.
 func (pc *PlayerCache) Fetch(ctx context.Context, playerURL string) (string, bool, error) {
+	playerURL = CanonicalPlayerURL(playerURL)
 	key := CacheKey(playerURL)
 	res, err, _ := pc.fetchSF.Do(key, func() (any, error) {
 		// Detach from the leader's context: coalesced waiters arrive from

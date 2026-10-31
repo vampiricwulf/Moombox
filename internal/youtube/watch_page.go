@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -33,6 +33,10 @@ var (
 	sessionIndexRegex     = regexp.MustCompile(`"SESSION_INDEX":"?(\d+)"?`)
 	delegatedSessionRegex = regexp.MustCompile(`"DELEGATED_SESSION_ID":"([^"]+)"`)
 	dataSyncIDRegex       = regexp.MustCompile(`"datasyncId":"([^"]+)"`)
+	// ytcfgSTSRegex is ytcfg's "STS" (the player's signature timestamp).
+	// The quote before the key is a JSON quote, not a backslash-escaped one,
+	// so a description or title carrying the text cannot match it.
+	ytcfgSTSRegex = regexp.MustCompile(`"STS":(\d+)`)
 	// gvsBindVideoIDRegex detects the html5_generate_content_po_token
 	// experiment inside WEB_PLAYER_CONTEXT_CONFIGS' serializedExperimentFlags.
 	// Those flags are a query string embedded in a JSON string, so '=' arrives
@@ -214,6 +218,12 @@ func watchPageURL(videoID string) string {
 }
 
 // FetchWatchPage fetches and parses a YouTube watch page.
+//
+// The fetch is retried (fetchYouTubePage): yt-dlp downloads the watch page
+// through _download_webpage_with_retries (_video.py:3815-3819), and a single
+// attempt here meant one connection reset or 5xx at go-live cost the whole
+// extraction its player URL, STS, visitor data, session verdict and chat
+// continuation (audit G13).
 func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*WatchPageResult, error) {
 	url := watchPageURL(videoID)
 
@@ -226,28 +236,9 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 		headers["Cookie"] = cookieHeader
 	}
 
-	// FetchWithTimeout (not FetchBody) so the FINAL post-redirect URL is
-	// inspectable — the consent interstitial answers 200, so status-code
-	// checks alone can never see it.
-	resp, cancel, err := utils.FetchWithTimeout(ctx, url, 30*time.Second, headers)
+	body, err := fetchYouTubePage(ctx, "watch page", url, 30*time.Second, headers, utils.MaxFetchBodySize)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch watch page: %w", err)
-	}
-	defer cancel()
-	defer resp.Body.Close()
-
-	if isConsentRedirect(resp) {
-		io.Copy(io.Discard, resp.Body)
-		return nil, fmt.Errorf("watch page redirected to consent wall (%s); supply CONSENT cookies via a cookie file", resp.Request.URL.Host)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		io.Copy(io.Discard, resp.Body)
-		return nil, fmt.Errorf("failed to fetch watch page: HTTP %d from %s", resp.StatusCode, url)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, utils.MaxFetchBodySize))
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch watch page: %w", err)
+		return nil, err
 	}
 	// Stamped here, at the instant the page's bytes exist — not at the end of
 	// the extraction that consumes them (close-review Finding 10).
@@ -712,21 +703,31 @@ func extractChatContinuation(page []byte) (string, bool, error) {
 }
 
 // normalizePlayerJSURL un-escapes a JSON-encoded URL (YouTube emits forward
-// slashes as \/ inside its JSON blobs) and prefixes the YouTube base URL for
-// absolute-path URLs. Keeps cipher compilation robust against literal
-// backslashes that can trip some parsers downstream.
+// slashes as \/ inside its JSON blobs), prefixes the YouTube base URL for
+// absolute-path URLs, and rewrites the result to the player's main variant
+// (cipher.CanonicalPlayerURL). Keeps cipher compilation robust against
+// literal backslashes that can trip some parsers downstream.
+//
+// The variant rewrite is yt-dlp's _construct_player_url, which every page's
+// player URL goes through (_extract_player_url, _video.py:2149-2155; the
+// rewrite from b7b7910d9 / #14430, the default variant 'main' as of
+// 04d6974f5 / #16269). The page's own variant — es6, tce — used to be what
+// STS and the goja fallback fetched while the sidecar fetched main, under one
+// disk entry keyed by player id, so each overwrote the other's in turn
+// (audit G50). A locale other than en_US is rewritten as well, which goes
+// beyond upstream (it keeps the page's locale): see CanonicalPlayerURL.
 //
 // The final Clone matters: raw is a regexp submatch of the full ~5 MB watch
-// page, and when the URL needs neither un-escaping nor a base prefix,
-// ReplaceAll returns it unchanged — an alias that would pin the whole page
-// in memory for as long as the PlayerURL lives (job state, solver caches).
-// Same discipline as the VisitorData Clone below.
+// page, and when the URL needs no un-escaping, no base prefix and no rewrite,
+// it comes back unchanged — an alias that would pin the whole page in memory
+// for as long as the PlayerURL lives (job state, solver caches). Same
+// discipline as the VisitorData Clone below.
 func normalizePlayerJSURL(raw string) string {
 	u := strings.ReplaceAll(raw, `\/`, "/")
 	if strings.HasPrefix(u, "/") {
-		return constants.YouTubeURLs.Base + u
+		u = constants.YouTubeURLs.Base + u
 	}
-	return strings.Clone(u)
+	return strings.Clone(cipher.CanonicalPlayerURL(u))
 }
 
 // extractPlayerResponse returns the decoded ytInitialPlayerResponse object.
@@ -777,9 +778,17 @@ func extractPlayerResponse(page []byte) (map[string]any, bool) {
 func extractYtcfgAndPlayerResponse(page []byte) (*YtcfgData, map[string]any) {
 	ytcfg := &YtcfgData{}
 
-	// Extract player URL
-	if m := jsURLRegex.FindSubmatch(page); m != nil {
-		ytcfg.PlayerURL = normalizePlayerJSURL(string(m[1]))
+	// Extract player URL: the first one that names a player
+	ytcfg.PlayerURL = watchPagePlayerURL(page)
+
+	// The signature timestamp ytcfg states for that player. yt-dlp reads it
+	// before ever opening the player JS (_extract_signature_timestamp:
+	// `traverse_obj(ytcfg, ('STS', {int_or_none}))` first, _video.py:
+	// 2239-2241); extractSTS prefers it the same way.
+	if m := ytcfgSTSRegex.FindSubmatch(page); m != nil {
+		if sts, err := strconv.Atoi(string(m[1])); err == nil && sts > 0 {
+			ytcfg.STS = sts
+		}
 	}
 
 	// Extract visitor data. string(m[1]) is the copy that breaks the
@@ -861,9 +870,14 @@ func extractEncryptedHostFlags(html string) string {
 // EmbedPageResult contains data extracted from a YouTube embed page.
 type EmbedPageResult struct {
 	EncryptedHostFlags string
+	// PlayerURL is the player the embed page names, on the main variant
+	// (pagePlayerURL), or "". yt-dlp reads the player URL off this same page's
+	// ytcfg for web_embedded (_download_ytcfg, _base.py:1013-1038).
+	PlayerURL string
 }
 
-// FetchEmbedPage fetches a YouTube embed page and extracts encryptedHostFlags.
+// FetchEmbedPage fetches a YouTube embed page and extracts encryptedHostFlags
+// and the player URL.
 func FetchEmbedPage(ctx context.Context, videoID string) (*EmbedPageResult, error) {
 	url := fmt.Sprintf("%s/%s?html5=1", constants.YouTubeURLs.Embed, videoID)
 
@@ -881,6 +895,7 @@ func FetchEmbedPage(ctx context.Context, videoID string) (*EmbedPageResult, erro
 	html := string(body)
 	return &EmbedPageResult{
 		EncryptedHostFlags: extractEncryptedHostFlags(html),
+		PlayerURL:          pagePlayerURL(html),
 	}, nil
 }
 

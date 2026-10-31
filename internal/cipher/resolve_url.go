@@ -16,6 +16,10 @@ func (s *GojaResolver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*
 	if req.StreamURL == "" {
 		return nil, fmt.Errorf("stream URL is required")
 	}
+	// Ahead of the player check, not behind it: see needsNoPlayer.
+	if needsNoPlayer(req) {
+		return &ResolveURLResponse{URL: req.StreamURL}, nil
+	}
 	if req.PlayerURL == "" {
 		return nil, fmt.Errorf("player URL is required")
 	}
@@ -107,6 +111,32 @@ func (s *GojaResolver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*
 	}
 
 	return &ResolveURLResponse{URL: result}, nil
+}
+
+// needsNoPlayer reports whether req asks nothing of a player: no encrypted
+// signature to append and no n to transform, neither handed in (NParam) nor
+// in the URL's query, the one form both resolvers rewrite. Such a URL already
+// is the fetchable one, and ResolveURL and RoutedResolveURL hand it back
+// unchanged, whatever PlayerURL says and whether or not a solver is wired.
+//
+// yt-dlp asks no player about it either: _extract_formats solves a signature
+// only `if encrypted_sig` and an n only `if query.get('n')`, so a direct URL
+// with no n goes out as YouTube sent it (_video.py:3556-3579). Moombox failed
+// it with "player URL is required" — RoutedResolveURL hands an empty
+// PlayerURL straight to ResolveURL — so an extraction whose watch page took
+// the player URL down with it failed every VOD and manifest-free resolve,
+// cipher-free visionos and android_vr URLs included. With a player URL it
+// compiled the player for nothing, and failed the URL when that compile did.
+func needsNoPlayer(req ResolveURLRequest) bool {
+	if req.EncryptedSignature != "" || req.NParam != "" {
+		return false
+	}
+	rawQuery := ""
+	if q := strings.Index(req.StreamURL, "?"); q >= 0 {
+		rawQuery = req.StreamURL[q+1:]
+	}
+	rawN, _ := RawQueryParam(rawQuery, "n")
+	return rawN == ""
 }
 
 // RawQueryParam extracts a query parameter's raw (percent-encoded) and decoded

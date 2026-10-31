@@ -107,10 +107,12 @@ func FetchWithTimeout(parent context.Context, url string, timeout time.Duration,
 		// the same as a cancellation: a caller-imposed budget running out
 		// is a caller abort, not transport evidence, and the oracle
 		// converges from the engine sites and its own probes regardless.
-		// The two real callers that hand this helper a deadline parent are
-		// worker/strategies.go's refreshCtx (via GetVideoInfo into
-		// internal/youtube/watch_page.go) and monitor/feed.go's
-		// walkCtx/archiveCtx.
+		// The real callers that hand this helper a deadline parent are the
+		// 403 refreshes' refreshCtx (worker/strategies.go,
+		// worker/strategy_youtube_vod_wiring.go), via GetVideoInfo into
+		// internal/youtube/page_fetch.go — the watch page and the iframe
+		// API, whose retries also run under a window deadline of their own
+		// — and monitor/feed.go's walkCtx/archiveCtx.
 		if parent.Err() == nil {
 			reportConnResult(true)
 		}

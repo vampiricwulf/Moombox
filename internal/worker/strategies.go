@@ -250,7 +250,11 @@ func decryptNParamInURL(rawURL string, nDecrypt func(string) (string, error)) (s
 // video", "DASH audio", "HLS").
 func invalidate403Caches(job *JobContext, playerURL string, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, tag string) {
 	job.Logger.Warn("[Cipher] "+tag+" 403 signal — invalidating solver and POT", "jobID", job.Job.ID, "playerURL", playerURL)
-	if cipherSolver != nil {
+	// A job that has no player URL compiled no solver to drop; "" names
+	// none, and InvalidateSolver would only hash it into a key nothing holds
+	// (and warn that "" is no player URL). The POT and visitor-data halves
+	// below apply with or without a player.
+	if cipherSolver != nil && playerURL != "" {
 		cipherSolver.InvalidateSolver(playerURL)
 	}
 	if potProvider != nil {
@@ -421,12 +425,17 @@ func minterUsable(m gvsTokenMinter) bool {
 // job started with.
 //
 // The URL half (re-fetch + resolve) only runs when a cipher solver is
-// actually wired and the job has a PlayerURL to route through — mirroring
-// OnCipherFailure's install guard. Without a solver, resolution can only
-// fail (RoutedResolveURL requires one even for solver-less passthrough),
-// so skipping it avoids a wasted GetVideoInfo call and a Warn on every
-// single attempt for work that cannot succeed; the token half still runs
-// unconditionally.
+// actually wired — mirroring OnCipherFailure's install guard. Without one it
+// skips the GetVideoInfo call and the Warn every attempt would otherwise pay
+// for a resolve that would mostly fail; the token half still runs
+// unconditionally. It is NOT gated on the job's original PlayerURL any
+// more, and the player it resolves with is the fresh response's whenever
+// that names one: the gate on the original used to mean a job whose
+// extraction started without a player URL (its watch page failed) never
+// picked one up on any refresh, even once a later watch page succeeded
+// (audit G2). With no player URL from either, resolution still succeeds for
+// a URL that needs none (cipher's needsNoPlayer) and fails, as before, for
+// one that does.
 //
 // A URL from a fresh player response is not installed before that
 // response's pre-roll ad is over (waitForFreshPlayback, yt-dlp's
@@ -485,7 +494,7 @@ func refreshGvsCredentials(
 		}
 	}
 
-	if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
+	if routedSolver != nil || cipherSolver != nil {
 		formats := videoInfo.Formats
 		playerURL := videoInfo.PlayerURL
 		waitInfo := videoInfo

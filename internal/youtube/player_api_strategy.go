@@ -470,9 +470,10 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// see captureVisitorData for why that order.
 	account := p.auth.Identity()
 	wp, err := fetchWatchPage(ctx, videoID, p.auth.GetCookieHeader())
+	pageFetched := err == nil
 	if err != nil {
 		p.logger.Warn("[PlayerApi] Could not fetch watch page", slog.String("error", err.Error()))
-		wp = &WatchPageResult{Ytcfg: DefaultYtcfg()}
+		wp = &WatchPageResult{Ytcfg: p.fallbackYtcfg(true)}
 	}
 
 	ytcfg := wp.Ytcfg
@@ -490,14 +491,20 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	}
 
 	// Capture visitor data, and the session under the account the page was
-	// fetched with, for future probe calls
-	p.captureVisitorData(ytcfg, account)
+	// fetched with, for future probe calls. Only off a page: a fallback
+	// ytcfg holds what the caches already do (fallbackYtcfg).
+	if pageFetched {
+		p.captureVisitorData(ytcfg, account)
+	}
 
 	formatPool := []Format{}
 	tally := &mismatchTally{}
 
-	// Extract STS (signatureTimestamp) from player JS for format decryption
-	sts := p.extractSTS(ctx, ytcfg.PlayerURL)
+	// The player URL, the page's or a fallback source's (resolvePlayerURL),
+	// then STS (signatureTimestamp) for format decryption — so the page's
+	// own parse and every client below carry both.
+	ytcfg.PlayerURL = p.resolvePlayerURL(ctx, videoID, ytcfg.PlayerURL)
+	sts := p.extractSTS(ctx, ytcfg)
 
 	// Parse watch page player response
 	var wpParsed *VideoInfo
@@ -797,6 +804,44 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	return p.finishExtraction(ctx, finalizeVideoInfo(ctx, result, wpParsed, formatPool), wp, videoID, tally, wpParsed)
 }
 
+// fallbackYtcfg is the ytcfg an extraction runs on when its watch page could
+// not be had at all. It used to be DefaultYtcfg — empty — so every client
+// call of the extraction went out with no visitor data (and no PLAYER PO
+// token, which the WEB-family calls mint only with one) and, on the
+// authenticated path, with no session: a brand-account member's calls were
+// judged as the primary account and refused as members-only, and the job
+// parked in COOKIES? over cookies that were fine (audit G13, yt-auth-net-5).
+//
+// The visitor data is the Service's cached one (cachedVisitorData), and the
+// session the one the probe-only calls carry (probeYtcfg): what the last page
+// fetched under the jar's current account stated. The session only on the
+// authenticated path, since the public path's own page is fetched without
+// cookies and never states one. Both halves go BEYOND upstream, whose
+// identity never outlives the extraction. yt-dlp loses SESSION_INDEX and
+// DELEGATED_SESSION_ID when the page finally fails — webpage_ytcfg is then
+// the client's default and there is no initial player response to read them
+// from (_video.py:3913-3915, 2914-2927) — and reads visitor data only off
+// this extraction's own ytcfgs and responses (_extract_visitor_data,
+// _base.py:941-950), the per-client config pages it fetches standing in for
+// the page; Moombox fetches none, so the cache stands in for them.
+//
+// The cascades do not capture it back (captureVisitorData): it holds what
+// the caches already do, and storing the visitor data again would only
+// restart its TTL. No player URL either — resolvePlayerURL supplies that for
+// a page that failed and a page that named none alike.
+func (p *PlayerAPI) fallbackYtcfg(withSession bool) *YtcfgData {
+	vd := ""
+	if p.cachedVisitorData != nil {
+		vd = p.cachedVisitorData()
+	}
+	if withSession {
+		return p.probeYtcfg(vd)
+	}
+	ytcfg := DefaultYtcfg()
+	ytcfg.VisitorData = vd
+	return ytcfg
+}
+
 // GetVideoInfoPublic fetches video info for a jar with no complete logged-in
 // session. Only the watch page is fetched without cookies: the Innertube
 // calls build their headers through Auth.GenerateAPIHeaders, which attaches
@@ -807,13 +852,14 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	ctx = withExtractionState(ctx)
 
 	wp, err := fetchWatchPage(ctx, videoID, "")
+	pageFetched := err == nil
 	if err != nil {
 		// Not fatal (the Innertube clients below carry the extraction), but
 		// silence here previously hid consent-wall and network failures on
 		// the anonymous path entirely — the authenticated path has always
 		// logged this.
 		p.logger.Warn("[PlayerApi] Could not fetch watch page (public)", slog.String("error", err.Error()))
-		wp = &WatchPageResult{Ytcfg: DefaultYtcfg()}
+		wp = &WatchPageResult{Ytcfg: p.fallbackYtcfg(false)}
 	}
 
 	if wp.AttestationChallenge == "" {
@@ -824,14 +870,18 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	// authenticated path). Load-bearing for anonymous users: after a 403
 	// credential refresh clears the service cache, this is the only refill.
 	// The page was fetched without cookies (account ""), so it keeps no
-	// session.
-	p.captureVisitorData(wp.Ytcfg, "")
+	// session. Only off a page, as on the authenticated path.
+	if pageFetched {
+		p.captureVisitorData(wp.Ytcfg, "")
+	}
 
 	formatPool := []Format{}
 	tally := &mismatchTally{}
 
-	// Extract STS for public path too
-	stsPublic := p.extractSTS(ctx, wp.Ytcfg.PlayerURL)
+	// The player URL and STS for the public path too (see the
+	// authenticated path).
+	wp.Ytcfg.PlayerURL = p.resolvePlayerURL(ctx, videoID, wp.Ytcfg.PlayerURL)
+	stsPublic := p.extractSTS(ctx, wp.Ytcfg)
 
 	var wpParsed *VideoInfo
 	if wp.PlayerResponse != nil {
@@ -988,10 +1038,26 @@ func finalizeVideoInfo(ctx context.Context, result, wpParsed *VideoInfo, formatP
 	return result
 }
 
-// extractSTS extracts the signatureTimestamp from a player URL.
-// Returns 0 if unavailable (missing player URL, no cipher solver, or extraction error).
-func (p *PlayerAPI) extractSTS(ctx context.Context, playerURL string) int {
-	if playerURL == "" || p.cipherSolver == nil {
+// extractSTS is the signatureTimestamp an extraction's player calls carry:
+// the one ytcfg states, else the one read out of the player JS. 0 when there
+// is no player URL, or neither source has it (no cipher solver, an
+// extraction error).
+//
+// yt-dlp's order (_extract_signature_timestamp, _video.py:2239-2241): ytcfg's
+// "STS" first, the player only when ytcfg has none — which spares the
+// extraction a ~3 MB player fetch the page already answered. And like
+// upstream (`if player_url else None`, _video.py:2942) no player URL means no
+// STS at all: one would only ask for signatures nothing here can solve.
+func (p *PlayerAPI) extractSTS(ctx context.Context, ytcfg *YtcfgData) int {
+	if ytcfg == nil || ytcfg.PlayerURL == "" {
+		return 0
+	}
+	if ytcfg.STS > 0 {
+		p.logger.Debug("[PlayerApi] Got signature timestamp from ytcfg", "sts", ytcfg.STS)
+		return ytcfg.STS
+	}
+	playerURL := ytcfg.PlayerURL
+	if p.cipherSolver == nil {
 		return 0
 	}
 	stsStr, err := p.cipherSolver.GetSts(ctx, playerURL)
@@ -1335,6 +1401,26 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 		if err != nil {
 			p.logger.Warn("[PlayerApi] Failed to fetch embed page", slog.String("error", err.Error()))
 			// Continue without encryptedHostFlags — it may still work
+		}
+	}
+	// The embed page names a player as well, as yt-dlp reads one off this
+	// page's ytcfg for web_embedded (_video.py:3066-3068). It is remembered
+	// for later extractions (resolvePlayerURL), and adopted for this call
+	// when the extraction got none from anywhere earlier — its STS with it,
+	// and the result carries it as its PlayerURL. Fetched only on the
+	// age-restricted path, after STS was needed, so it cannot stand ahead of
+	// the other sources there.
+	if embedResult != nil && embedResult.PlayerURL != "" {
+		p.rememberPlayerURL(embedResult.PlayerURL, "embed page")
+		if ytcfg == nil || ytcfg.PlayerURL == "" {
+			adopted := YtcfgData{}
+			if ytcfg != nil {
+				adopted = *ytcfg
+			}
+			adopted.PlayerURL = embedResult.PlayerURL
+			ytcfg = &adopted
+			sts = p.extractSTS(ctx, ytcfg)
+			p.logger.Info("[PlayerApi] web_embedded: using the embed page's player", "videoID", videoID, "playerURL", ytcfg.PlayerURL)
 		}
 	}
 

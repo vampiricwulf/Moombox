@@ -65,16 +65,19 @@ func NewService(jar *cookies.CookieJar, logger interface {
 		logger:    logger,
 	}
 
-	// Wire visitor data capture from watch page fetches
+	// Wire visitor data capture from watch page fetches, and the read back
+	// an extraction falls back on when its watch page cannot be had.
 	playerAPI.OnVisitorData = func(vd string) {
 		svc.SetVisitorData(vd)
 	}
+	playerAPI.cachedVisitorData = svc.GetVisitorData
 
 	return svc
 }
 
 // Init fetches the YouTube homepage once, at startup, to seed visitor data,
-// the API key and the signed-in session. Init itself is not retried, and
+// the API key, the signed-in session and the player URL an extraction falls
+// back on (resolvePlayerURL). Init itself is not retried, and
 // needs no retry: a failed fetch leaves the built-in API key in place, and
 // visitor data is backfilled by every watch-page fetch through the
 // OnVisitorData callback — the first job or probe after a startup blip
@@ -125,6 +128,12 @@ func (s *Service) Init(ctx context.Context) {
 	// primary account and refused. A cookieless homepage states none and
 	// sets nothing.
 	s.PlayerAPI.captureVisitorData(homepageSession(html), account)
+
+	// The player the homepage names, as yt-dlp's web_safari client reads it
+	// off this same page's ytcfg (_download_ytcfg, _base.py:1013-1038): the
+	// first fallback for an extraction whose watch page names none
+	// (resolvePlayerURL).
+	s.PlayerAPI.rememberPlayerURL(pagePlayerURL(html), "homepage")
 
 	// Extract API key
 	if m := homepageApiKeyRe.FindStringSubmatch(html); m != nil {
@@ -183,6 +192,8 @@ func (s *Service) readAccountSession(ctx context.Context) {
 		return
 	}
 	s.PlayerAPI.captureVisitorData(homepageSession(html), account)
+	// The page names the current player too; keep it, as Init does.
+	s.PlayerAPI.rememberPlayerURL(pagePlayerURL(html), "homepage")
 	s.logger.Debug("[YouTube] Session read off the homepage for the jar's account")
 }
 
