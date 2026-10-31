@@ -26,6 +26,11 @@ import (
 // same in extractor/youtube/_video.py:3684-3690. Without this, YouTube's CDN
 // returns HTTP 403 on every segment for streams whose master URL ships with
 // an encrypted n in its path (cb017549-family players).
+//
+// So a master URL whose n no solver answers fails the setup
+// (cipher.ErrNUnsolved), as yt-dlp uses an HLS manifest only `if solved_n or
+// not n_challenge` (_video.py:3692-3713, d20f58d72). It used to be fetched
+// anyway, behind a Warn that downloads "may be throttled" (audit G9).
 func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
 	if videoInfo.HlsManifestURL == "" {
 		return nil, fmt.Errorf("no HLS manifest URL available")
@@ -34,17 +39,22 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	hlsURL := videoInfo.HlsManifestURL
 
 	// Decrypt /n/<encrypted>/ in master URL before fetching. Mirrors
-	// yt-dlp's HLS path: the master URL ships with a throttled n value
-	// that the CDN rejects on segments unless replaced with a player-JS-
-	// solved n. Master playlist fetch may succeed with the encrypted n
-	// (YouTube only enforces n on /videoplayback segment requests), but
-	// every segment returned by the variant playlist will then 403.
-	if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
-		decrypted := cipher.RoutedDecryptNInURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, hlsURL)
-		if decrypted != hlsURL {
-			hlsURL = decrypted
-			job.Logger.Debug("[Cipher] decrypted n-param in HLS manifest URL")
-		}
+	// yt-dlp's HLS path: the master URL ships with an n value that the CDN
+	// rejects on segments unless replaced with a player-JS-solved n. Master
+	// playlist fetch may succeed with the encrypted n (YouTube only enforces
+	// n on /videoplayback segment requests), but every segment returned by
+	// the variant playlist will then 403. Asked whatever the player URL and
+	// solvers: a master URL that carries no n (visionos's) comes back as it
+	// is, and one with an n but no player or solver to answer it is as
+	// unsolved as one the solvers failed. Only a player URL and a solver used
+	// to let this run; without either, the n went out as sent.
+	decrypted, err := cipher.RoutedDecryptNInURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, hlsURL)
+	if err != nil {
+		return nil, fmt.Errorf("HLS: n challenge unsolved in the master playlist URL — its segments would be refused: %w", err)
+	}
+	if decrypted != hlsURL {
+		hlsURL = decrypted
+		job.Logger.Debug("[Cipher] decrypted n-param in HLS manifest URL")
 	}
 
 	// Generate PO token once and reuse for master URL, variant URL, and

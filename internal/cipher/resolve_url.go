@@ -2,8 +2,8 @@ package cipher
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log/slog"
 	"net/url"
 	"strings"
 )
@@ -21,12 +21,12 @@ func (s *GojaResolver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*
 		return &ResolveURLResponse{URL: req.StreamURL}, nil
 	}
 	if req.PlayerURL == "" {
-		return nil, fmt.Errorf("player URL is required")
+		return nil, unsolvedIfNOnly(req, fmt.Errorf("player URL is required"))
 	}
 
 	solvers, err := s.GetSolvers(ctx, req.PlayerURL)
 	if err != nil {
-		return nil, fmt.Errorf("get solvers: %w", err)
+		return nil, unsolvedIfNOnly(req, fmt.Errorf("get solvers: %w", err))
 	}
 
 	result := req.StreamURL
@@ -85,32 +85,79 @@ func (s *GojaResolver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*
 	} else {
 		nParam = decodedN
 	}
-	if nParam != "" && rawN != "" && solvers.N == nil {
-		// Deliberate degrade, not a failure: unlike a missing sig solver
-		// (hard error above — an unsigned URL 403s), an encrypted n still
-		// serves; YouTube just throttles it. Surface the degrade, or the
-		// only symptom is mysteriously slow downloads. Via slog.Default
-		// (bridged into the full logger pipeline) — this path predates the
-		// struct having any logger.
-		slog.Warn("cipher: no n-param solver — leaving n encrypted, downloads may be throttled",
-			"player", PlayerIDFromURL(req.PlayerURL))
-	}
-	if nParam != "" && rawN != "" && solvers.N != nil {
-		decryptedN, err := solvers.DecryptN(nParam)
-		if err != nil {
-			return nil, fmt.Errorf("decrypt n-parameter: %w", err)
+	if nParam != "" && rawN != "" {
+		// A failure, like a missing sig solver above: an n left as YouTube
+		// sent it is refused, not throttled (ErrNUnsolved says where that
+		// premise went). It used to be a Warn and the URL as it came.
+		playerID := PlayerIDFromURL(req.PlayerURL)
+		if !solvers.HasN() {
+			return nil, fmt.Errorf("%w (player %s): no n function in the player", ErrNUnsolved, playerID)
 		}
-		// Replace the first occurrence of n=<value> that is a proper query parameter
-		for _, prefix := range []string{"?", "&"} {
-			old := prefix + "n=" + rawN
-			if strings.Contains(result, old) {
-				result = strings.Replace(result, old, prefix+"n="+url.QueryEscape(decryptedN), 1)
-				break
-			}
+		decryptedN, err := solvers.DecryptN(nParam)
+		if err == nil {
+			err = checkNResult(nParam, decryptedN)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%w (player %s): decrypt n-parameter: %w", ErrNUnsolved, playerID, err)
+		}
+		var ok bool
+		if result, ok = replaceQueryN(result, rawN, decryptedN); !ok {
+			return nil, fmt.Errorf("%w (player %s): no n parameter in the URL to replace", ErrNUnsolved, playerID)
 		}
 	}
 
 	return &ResolveURLResponse{URL: result}, nil
+}
+
+// checkNResult returns why out is no answer to the n challenge, or nil when
+// it is one: an answer is not empty and does not end with the challenge —
+// which also rules out the challenge itself, handed back unchanged. The
+// suffix is the player's exception sentinel: an n function that throws
+// returns from its catch block a string that ends with its own input
+// ("enhanced_except_…_<challenge>"), which yt-dlp's
+// validate_nsig_challenge_output rejects with "if they end with the input
+// challenge then the js function returned with an exception"
+// (jsc/_director.py:265-278, 6224a3898), and its bulk_solve records nothing
+// for (_director.py:117-124). ejs itself returns whatever the function did
+// (src/yt/solver/main.ts), and both of Moombox's solvers used to install it:
+// the CDN refuses such an n as it refuses an unsolved one. Neither value is
+// quoted: an n is one of the media-URL values redact.MediaURL cuts.
+func checkNResult(challenge, out string) error {
+	switch {
+	case out == "":
+		return errors.New("empty n result")
+	case strings.HasSuffix(out, challenge):
+		return errors.New("n result ends with its own challenge (exception sentinel, or the challenge unchanged)")
+	}
+	return nil
+}
+
+// replaceQueryN swaps the query's n=<raw> for n=<solved> in place, keeping
+// the parameter order, and reports whether it did. yt-dlp checks the same of
+// a manifest path (`solved_n = n_result in manifest_path`, _video.py:3699,
+// 3737, d20f58d72): a solve whose answer never landed in the URL has solved
+// nothing.
+func replaceQueryN(rawURL, rawN, solved string) (string, bool) {
+	for _, prefix := range []string{"?", "&"} {
+		old := prefix + "n=" + rawN
+		if strings.Contains(rawURL, old) {
+			return strings.Replace(rawURL, old, prefix+"n="+url.QueryEscape(solved), 1), true
+		}
+	}
+	return rawURL, false
+}
+
+// unsolvedIfNOnly marks err, which failed req before any solving began (no
+// solver, no player URL, a player that would not compile), as ErrNUnsolved
+// when an n is all req needed the player for: no encrypted signature rides it
+// (needsNoPlayer has already handed back every URL that needs neither). A URL
+// that also carries a signature fails over that first, and the error says so
+// alone.
+func unsolvedIfNOnly(req ResolveURLRequest, err error) error {
+	if req.EncryptedSignature != "" {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrNUnsolved, err)
 }
 
 // needsNoPlayer reports whether req asks nothing of a player: no encrypted

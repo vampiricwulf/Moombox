@@ -2,6 +2,7 @@ package cipher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -54,6 +55,10 @@ func (s *GojaResolver) DecryptSignature(ctx context.Context, req SignatureReques
 //
 // Pass a nil routedSolver to skip the routed path and use gojaResolver directly
 // (matches prior behaviour on startup before the sidecar is healthy).
+//
+// An n in the query that no solver answers fails the URL with ErrNUnsolved,
+// as a signature no solver answers always has; see solveN for what counts as
+// an answer.
 func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *GojaResolver, req ResolveURLRequest) (*ResolveURLResponse, error) {
 	// A URL that asks nothing of a player resolves to itself, ahead of the
 	// solver and player checks below — neither is needed for it, and the
@@ -63,7 +68,7 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 	}
 	if routedSolver == nil || req.PlayerURL == "" {
 		if gojaResolver == nil {
-			return nil, fmt.Errorf("cipher: no solver available")
+			return nil, unsolvedIfNOnly(req, fmt.Errorf("cipher: no solver available"))
 		}
 		return gojaResolver.ResolveURL(ctx, req)
 	}
@@ -118,100 +123,113 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 		nParam = decodedN
 	}
 	if nParam != "" && rawN != "" {
-		decryptedN, err := routedSolver.N(ctx, playerID, nParam)
+		decryptedN, err := solveN(ctx, routedSolver, gojaResolver, req.PlayerURL, playerID, nParam)
 		if err != nil {
-			// Routed N failed — try goja legacy for this param only. When
-			// that fails too, the routed cause stays in the error (see the
-			// sig path above for why).
-			if gojaResolver != nil {
-				solvers, solverErr := gojaResolver.GetSolvers(ctx, req.PlayerURL)
-				if solverErr == nil && solvers.HasN() {
-					routedErr := err
-					if decryptedN, err = solvers.DecryptN(nParam); err != nil {
-						err = fmt.Errorf("routed n: %w (goja fallback: %v)", routedErr, err)
-					}
-				}
-			}
+			// An n left as YouTube sent it is refused, not throttled: this
+			// used to be a Warn and the URL as it came (ErrNUnsolved).
+			return nil, fmt.Errorf("%w (player %s): %w", ErrNUnsolved, playerID, err)
 		}
-		switch {
-		case err != nil:
-			// Deliberate degrade, not a failure: an encrypted n still serves
-			// (unlike a missing sig, which 403s) — YouTube just throttles it.
-			// Surface it, or the only symptom is mysteriously slow downloads.
-			// Goes through slog.Default (bridged into the full logger
-			// pipeline) because this free function carries no logger.
-			slog.Warn("cipher: n-param decryption failed — leaving n encrypted, downloads may be throttled",
-				"player", playerID, "err", err)
-		case decryptedN != nParam:
-			for _, prefix := range []string{"?", "&"} {
-				old := prefix + "n=" + rawN
-				if strings.Contains(result, old) {
-					result = strings.Replace(result, old, prefix+"n="+url.QueryEscape(decryptedN), 1)
-					break
-				}
-			}
+		var ok bool
+		if result, ok = replaceQueryN(result, rawN, decryptedN); !ok {
+			return nil, fmt.Errorf("%w (player %s): no n parameter in the URL to replace", ErrNUnsolved, playerID)
 		}
 	}
 
 	return &ResolveURLResponse{URL: result}, nil
 }
 
-// RoutedDecryptNInURL decrypts the n-parameter (query-string and path forms)
-// in rawURL, routing through the composite Solver first, falling back to the
-// goja resolver on error.  Returns the mutated URL; on a total failure the
-// original rawURL is returned unchanged (the pre-existing fail-open contract
-// of decryptNParamInURL in the worker — an encrypted n still serves, just
-// throttled) with a Warn logged so the degrade is diagnosable.
+// solveN answers one n challenge for RoutedResolveURL and RoutedDecryptNInURL:
+// the routed solver first, then the goja resolver's own compile of playerURL,
+// the next tried whenever one fails or answers with what checkNResult says is
+// no answer. yt-dlp's director moves to its next provider on an invalid
+// response the same way and records nothing for it (jsc/_director.py:105-124,
+// 6224a3898). Before, a routed answer was installed whatever it was, and the
+// goja one too.
 //
-// playerURL is the player.js URL (used for PlayerIDFromURL and the goja
-// GetSolvers cache key).  Pass a nil routedSolver to use goja directly.
-func RoutedDecryptNInURL(ctx context.Context, routedSolver Solver, gojaResolver *GojaResolver, playerURL, rawURL string) string {
-	if rawURL == "" {
-		return rawURL
+// The error names every path that failed: a dead sidecar, a stale player and
+// ejs's "no solutions" otherwise read alike. The routed cause stays the
+// wrapped one (ErrPlayerJSStale, ErrSidecarUnavailable). The callers wrap it
+// in ErrNUnsolved.
+func solveN(ctx context.Context, routedSolver Solver, gojaResolver *GojaResolver, playerURL, playerID, challenge string) (string, error) {
+	var routedErr, gojaErr error
+	if routedSolver != nil {
+		dec, err := routedSolver.N(ctx, playerID, challenge)
+		if err == nil {
+			err = checkNResult(challenge, dec)
+		}
+		if err == nil {
+			return dec, nil
+		}
+		routedErr = err
+		slog.Debug("cipher: routed n-param decryption failed, trying goja",
+			"player", playerID, "err", err)
 	}
-	playerID := PlayerIDFromURL(playerURL)
-
-	// decryptN attempts to decrypt with routed solver then goja fallback. The
-	// error it returns names every path that failed: the Warn its callers
-	// log is the only trace of a degrade, and "n decrypt unavailable" alone
-	// read the same for a dead sidecar, a stale player and an ejs "no
-	// solutions".
-	decryptFn := func(encrypted string) (string, error) {
-		var routedErr, gojaErr error
-		if routedSolver != nil {
-			dec, err := routedSolver.N(ctx, playerID, encrypted)
+	if gojaResolver != nil {
+		solvers, err := gojaResolver.GetSolvers(ctx, playerURL)
+		switch {
+		case err != nil:
+			gojaErr = err
+		case !solvers.HasN():
+			gojaErr = fmt.Errorf("n unavailable for player %s", playerID)
+		default:
+			dec, err := solvers.DecryptN(challenge)
+			if err == nil {
+				err = checkNResult(challenge, dec)
+			}
 			if err == nil {
 				return dec, nil
 			}
-			routedErr = err
-			slog.Debug("cipher: routed n-param decryption failed, trying goja",
-				"player", playerID, "err", err)
+			gojaErr = err
 		}
-		if gojaResolver != nil {
-			solvers, err := gojaResolver.GetSolvers(ctx, playerURL)
-			switch {
-			case err != nil:
-				gojaErr = err
-			case !solvers.HasN():
-				gojaErr = fmt.Errorf("n unavailable for player %s", playerID)
-			default:
-				dec, err := solvers.DecryptN(encrypted)
-				if err == nil {
-					return dec, nil
-				}
-				gojaErr = err
-			}
+	}
+	switch {
+	case routedErr != nil && gojaErr != nil:
+		return "", fmt.Errorf("routed n: %w (goja fallback: %v)", routedErr, gojaErr)
+	case routedErr != nil:
+		return "", fmt.Errorf("routed n: %w (no goja fallback)", routedErr)
+	case gojaErr != nil:
+		return "", fmt.Errorf("goja n: %w", gojaErr)
+	default:
+		return "", errors.New("no solver to ask")
+	}
+}
+
+// RoutedDecryptNInURL solves the n challenge of rawURL in both forms a
+// googlevideo URL carries one, the path's /n/<value>/ (at least 10
+// characters) and the query's n=, through solveN (the composite Solver
+// first, the goja resolver after it), and returns the URL with each answer in
+// its challenge's place. A URL that carries no n comes back unchanged with a
+// nil error, whatever the player and solvers.
+//
+// An n it cannot answer fails the URL: the error wraps ErrNUnsolved and the
+// URL is "". That is no player URL to solve with (no solver is asked), no
+// solver, or every solver failing or answering with no answer (checkNResult).
+// It used to hand the URL back unchanged with a Warn that downloads "may be
+// throttled", and its callers downloaded segments that 403. yt-dlp uses a
+// manifest only once its path n is solved and the answer is in the path
+// (`solved_n = n_result in manifest_path`, _video.py:3699, 3737, d20f58d72);
+// here both forms' answers land by construction, the challenge replaced
+// being the one just read out of the URL.
+//
+// playerURL is the player.js URL (used for PlayerIDFromURL and the goja
+// GetSolvers cache key).  Pass a nil routedSolver to use goja directly.
+func RoutedDecryptNInURL(ctx context.Context, routedSolver Solver, gojaResolver *GojaResolver, playerURL, rawURL string) (string, error) {
+	if rawURL == "" {
+		return rawURL, nil
+	}
+	solve := func(challenge, form string) (string, error) {
+		if playerURL == "" {
+			return "", fmt.Errorf("%w (%s form): no player URL to solve it with", ErrNUnsolved, form)
 		}
-		switch {
-		case routedErr != nil && gojaErr != nil:
-			return encrypted, fmt.Errorf("cipher: routed n: %w (goja fallback: %v)", routedErr, gojaErr)
-		case routedErr != nil:
-			return encrypted, fmt.Errorf("cipher: routed n: %w (no goja fallback)", routedErr)
-		case gojaErr != nil:
-			return encrypted, fmt.Errorf("cipher: n decrypt unavailable for player %s: %w", playerID, gojaErr)
-		default:
-			return encrypted, fmt.Errorf("cipher: n decrypt unavailable for player %s", playerID)
+		// Not before the check above: PlayerIDFromURL warns of a URL it
+		// cannot read an id from, "" included, and its callers now ask with
+		// no player URL too (a URL with no n needs none).
+		playerID := PlayerIDFromURL(playerURL)
+		dec, err := solveN(ctx, routedSolver, gojaResolver, playerURL, playerID, challenge)
+		if err != nil {
+			return "", fmt.Errorf("%w (player %s, %s form): %w", ErrNUnsolved, playerID, form, err)
 		}
+		return dec, nil
 	}
 
 	result := rawURL
@@ -220,18 +238,13 @@ func RoutedDecryptNInURL(ctx context.Context, routedSolver Solver, gojaResolver 
 	const pathPrefix = "/n/"
 	if idx := strings.Index(result, pathPrefix); idx >= 0 {
 		rest := result[idx+len(pathPrefix):]
-		if before, _, ok := strings.Cut(rest, "/"); ok {
-			encryptedN := before
-			if len(encryptedN) >= 10 {
-				dec, err := decryptFn(encryptedN)
-				switch {
-				case err != nil:
-					slog.Warn("cipher: n-param decryption failed — leaving n encrypted, downloads may be throttled",
-						"player", playerID, "form", "path", "err", err)
-				case dec != encryptedN:
-					result = strings.Replace(result, pathPrefix+encryptedN+"/", pathPrefix+dec+"/", 1)
-				}
+		if encryptedN, _, ok := strings.Cut(rest, "/"); ok && len(encryptedN) >= 10 {
+			dec, err := solve(encryptedN, "path")
+			if err != nil {
+				return "", err
 			}
+			// Always lands: the segment replaced is the one just found.
+			result = strings.Replace(result, pathPrefix+encryptedN+"/", pathPrefix+dec+"/", 1)
 		}
 	}
 
@@ -242,23 +255,17 @@ func RoutedDecryptNInURL(ctx context.Context, routedSolver Solver, gojaResolver 
 	}
 	rawN, decodedN := RawQueryParam(rawQuery, "n")
 	if rawN != "" && decodedN != "" {
-		dec, err := decryptFn(decodedN)
-		switch {
-		case err != nil:
-			slog.Warn("cipher: n-param decryption failed — leaving n encrypted, downloads may be throttled",
-				"player", playerID, "form", "query", "err", err)
-		case dec != decodedN:
-			for _, prefix := range []string{"?", "&"} {
-				old := prefix + "n=" + rawN
-				if strings.Contains(result, old) {
-					result = strings.Replace(result, old, prefix+"n="+url.QueryEscape(dec), 1)
-					break
-				}
-			}
+		dec, err := solve(decodedN, "query")
+		if err != nil {
+			return "", err
 		}
+		// Always lands too: rawN was read from this URL's own query, where
+		// it follows a "?" or a "&". RoutedResolveURL's n can come from
+		// elsewhere (NParam), and there a miss is checked.
+		result, _ = replaceQueryN(result, rawN, dec)
 	}
 
-	return result
+	return result, nil
 }
 
 // ResolveFormatRequest carries the parsed components of a YouTube Format

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,13 @@ import (
 // the sidecar V8 ejs path handles n on cb017549-family players.
 // Falls back to the goja resolver (cipherSolver) if nil or on error.
 //
+// An n that is not solved (cipher.ErrNUnsolved), or a URL that carries none
+// and so comes back as it went in, is "" too: an unchanged URL repairs
+// nothing. Both used to log "succeeded" and hand the engine the URL it had —
+// the unsolved n, after a second pass through a legacy goja path that ran the
+// very GetSolvers + DecryptN RoutedDecryptNInURL's own goja fallback had just
+// run, and that swallowed its own failure to solve (audit G9).
+//
 // jobID is included as the first key-value pair on every log line so a
 // 403-triage grep by job stays complete even when the retry path is the
 // only place that logged (audit: OnCipherFailure lines gain jobID).
@@ -39,26 +47,14 @@ func resolveFreshDashURL(ctx context.Context, jobID string, routedSolver cipher.
 	if origURL == "" {
 		return ""
 	}
-	decrypted := cipher.RoutedDecryptNInURL(ctx, routedSolver, cipherSolver, playerURL, origURL)
-	if decrypted == origURL {
-		// No change means decryption either was a no-op (no n param) or
-		// failed.  Fall back to the legacy GetSolvers path so we get the
-		// same warning coverage as before.
-		fresh, err := cipherSolver.GetSolvers(ctx, playerURL)
-		if err != nil {
-			logger.Warn("[Cipher] retry: GetSolvers failed", "jobID", jobID, "err", err)
-			return ""
-		}
-		if fresh == nil || fresh.N == nil {
-			logger.Warn("[Cipher] retry: solver missing N callable", "jobID", jobID)
-			return ""
-		}
-		var decErr error
-		decrypted, decErr = decryptNParamInURL(origURL, fresh.DecryptN)
-		if decErr != nil {
-			logger.Warn("[Cipher] retry: n-param decrypt failed", "jobID", jobID, "err", decErr)
-			return ""
-		}
+	decrypted, err := cipher.RoutedDecryptNInURL(ctx, routedSolver, cipherSolver, playerURL, origURL)
+	switch {
+	case err != nil:
+		logger.Warn("[Cipher] retry: n challenge unsolved — no fresh URL to swap in", "jobID", jobID, "err", err)
+		return ""
+	case decrypted == origURL:
+		logger.Warn("[Cipher] retry: the stream URL carries no n challenge to re-solve — no fresh URL to swap in", "jobID", jobID)
+		return ""
 	}
 	logger.Info("[Cipher] retry: fresh n-param decryption succeeded; engine will swap BaseURL", "jobID", jobID)
 	return decrypted
@@ -70,7 +66,14 @@ func resolveFreshDashURL(ctx context.Context, jobID string, routedSolver cipher.
 //
 // routedSolver is the composite cipher.Solver (sidecar primary, goja fallback)
 // and is used for all sig/n-param URL decryption.  cipherSolver (*GojaResolver)
-// is kept for InvalidateSolver and GetSolvers in the OnCipherFailure retry path.
+// is every n solve's goja fallback, and is what the OnCipherFailure retry path
+// invalidates.
+//
+// A manifest whose n challenge no solver answers fails the setup
+// (cipher.ErrNUnsolved): its segment URLs would be refused, every one. yt-dlp
+// uses a DASH manifest only `if solved_n or not n_challenge`
+// (_video.py:3730-3751). It used to download them anyway, behind a Warn that
+// downloads "may be throttled" (audit G9).
 func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
 	if videoInfo.DashManifestURL == "" {
 		return nil, fmt.Errorf("no DASH manifest URL available")
@@ -81,18 +84,22 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// Step 1: Decrypt the DASH manifest URL itself (signature cipher).
 	// Route through the composite solver (sidecar primary; goja fallback)
 	// so sig decryption works on cb017549-family players where the goja
-	// extractor cannot produce a sig algorithm.
-	if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
-		resolved, err := cipher.RoutedResolveURL(ctx, routedSolver, cipherSolver, cipher.ResolveURLRequest{
-			StreamURL: dashURL,
-			PlayerURL: videoInfo.PlayerURL,
-		})
-		if err != nil {
-			job.Logger.Warn("[Cipher] failed to decrypt DASH manifest URL", "err", err)
-		} else {
-			dashURL = resolved.URL
-			job.Logger.Debug("[Cipher] decrypted DASH manifest URL")
-		}
+	// extractor cannot produce a sig algorithm. Asked whatever the player URL
+	// and solvers: a URL that needs neither comes back as it is, and one whose
+	// query n has no player or solver to answer it is as unsolved as one the
+	// solvers failed (cipher.ErrNUnsolved).
+	resolved, err := cipher.RoutedResolveURL(ctx, routedSolver, cipherSolver, cipher.ResolveURLRequest{
+		StreamURL: dashURL,
+		PlayerURL: videoInfo.PlayerURL,
+	})
+	switch {
+	case errors.Is(err, cipher.ErrNUnsolved):
+		return nil, fmt.Errorf("DASH: n challenge unsolved in the manifest URL — its segments would be refused: %w", err)
+	case err != nil:
+		job.Logger.Warn("[Cipher] failed to decrypt DASH manifest URL", "err", err)
+	case resolved.URL != dashURL:
+		dashURL = resolved.URL
+		job.Logger.Debug("[Cipher] decrypted DASH manifest URL")
 	}
 
 	// Step 2: Generate PO token once, used for both manifest URL injection and segment URLs.
@@ -159,33 +166,42 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			"manifestBytes", len(manifestData))
 	}
 
-	// Step 4: Decrypt n-parameter in each stream's BaseURL (prevents throttling/403).
+	// Step 4: Decrypt n-parameter in each stream's BaseURL (a segment URL
+	// whose n is left as YouTube sent it is refused, 403).
 	//
 	// Snapshot the ORIGINAL (pre-decryption) BaseURL per itag BEFORE the
 	// loop overwrites it — the OnCipherFailure handler below uses these
 	// originals to re-decrypt with a freshly-solved cipher when YouTube
 	// rotates mid-stream. Without the snapshot, the closure would re-decrypt
 	// an already-decrypted URL and produce garbage. DECISIONS #7.
+	//
+	// Every BaseURL is asked, whatever the player URL and solvers, and the
+	// first whose n is unsolved fails the setup: the representations echo
+	// the one n the manifest was fetched with, so an n one of them cannot
+	// have answered none of them can — yt-dlp skips the manifest whole. A
+	// BaseURL that carries no n comes back as it is. Only a player URL and a
+	// solver used to let this run; without either, every n went out as sent.
 	originalBaseURLs := make(map[int]string, len(streams))
 	for i := range streams {
 		if streams[i].BaseURL != "" {
 			originalBaseURLs[streams[i].Itag] = streams[i].BaseURL
 		}
 	}
-	if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
-		decryptCount := 0
-		for i := range streams {
-			if streams[i].BaseURL == "" {
-				continue
-			}
-			decrypted := cipher.RoutedDecryptNInURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, streams[i].BaseURL)
-			if decrypted != streams[i].BaseURL {
-				streams[i].BaseURL = decrypted
-				decryptCount++
-			}
+	decryptCount := 0
+	for i := range streams {
+		if streams[i].BaseURL == "" {
+			continue
 		}
-		job.Logger.Debug("[Cipher] DASH n-param decryption complete", "decrypted", decryptCount, "total", len(streams))
+		decrypted, err := cipher.RoutedDecryptNInURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, streams[i].BaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("DASH: n challenge unsolved for itag %d — the manifest's segments would be refused: %w", streams[i].Itag, err)
+		}
+		if decrypted != streams[i].BaseURL {
+			streams[i].BaseURL = decrypted
+			decryptCount++
+		}
 	}
+	job.Logger.Debug("[Cipher] DASH n-param decryption complete", "decrypted", decryptCount, "total", len(streams))
 
 	// dashPoToken from step 2 is reused for segment URLs via DownloaderOptions.
 

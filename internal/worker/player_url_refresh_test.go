@@ -81,22 +81,26 @@ func TestRefreshGvsCredentialsAdoptsTheFreshPlayerURL(t *testing.T) {
 // nothing, drops no solver for the empty player URL, and returns "".
 //
 // Mutants: the PlayerURL gate restored on the DASH video, DASH audio or HLS
-// hook (that hook is nil); the hook's empty-player return dropped (the
-// solver is asked to re-solve an n under no player); invalidate403Caches
-// dropping a solver for "" (the solver's "invalidated" line).
+// hook (that hook is nil); invalidate403Caches dropping a solver for "" (the
+// solver's "invalidated" line). The hook's own empty-player return is belt
+// and braces since audit W7: without it resolveFreshDashURL asks no solver
+// either (RoutedDecryptNInURL refuses an n it has no player for), and returns
+// "" for a URL it did not change.
 func TestCipherFailureHooksNeedNoPlayerURL(t *testing.T) {
-	// The MPD's segments carry an n in the path, as live ones do.
+	// The MPD's segments carry no n. Live ones carry one in the path, and
+	// without a player URL to solve it with the setup fails before any hook
+	// is built (cipher.ErrNUnsolved, TestDashAndHlsSetupFailOnAnUnsolvedN).
 	const mpd = `<?xml version="1.0"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
   <Period>
     <AdaptationSet mimeType="video/mp4">
       <Representation id="299" bandwidth="9000000" width="1920" height="1080">
-        <BaseURL>https://r4---sn.googlevideo.com/videoplayback/id/abc.1/itag/299/n/abcdefghijkl/sq/1</BaseURL>
+        <BaseURL>https://r4---sn.googlevideo.com/videoplayback/id/abc.1/itag/299/sq/1</BaseURL>
       </Representation>
     </AdaptationSet>
     <AdaptationSet mimeType="audio/mp4">
       <Representation id="140" bandwidth="128000">
-        <BaseURL>https://r4---sn.googlevideo.com/videoplayback/id/abc.1/itag/140/n/abcdefghijkl/sq/1</BaseURL>
+        <BaseURL>https://r4---sn.googlevideo.com/videoplayback/id/abc.1/itag/140/sq/1</BaseURL>
       </Representation>
     </AdaptationSet>
   </Period>

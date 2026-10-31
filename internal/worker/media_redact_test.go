@@ -201,27 +201,3 @@ func TestJobErrorRedactsMediaURL(t *testing.T) {
 		})
 	}
 }
-
-// TestDecryptNParamParseErrorRedactsSignedURL pins the cipher retry's one
-// error that quotes a media URL: url.Parse's refusal of the segment URL,
-// which the DASH 403 retry logs at Warn ("[Cipher] retry: n-param decrypt
-// failed").
-//
-// Mutant (run): decryptNParamInURL returning url.Parse's error bare — the
-// error keeps the IP and the signature.
-func TestDecryptNParamParseErrorRedactsSignedURL(t *testing.T) {
-	// "%zz" is not an escape, so url.Parse refuses the URL.
-	raw := "https://rr3---sn-abc.googlevideo.com/videoplayback/%zz?ip=" + mediaClientIP + "&sig=" + mediaSig + "&n=abc"
-	_, err := decryptNParamInURL(raw, func(s string) (string, error) { return s, nil })
-	if err == nil {
-		t.Fatal("decryptNParamInURL accepted an unparseable URL")
-	}
-	if !strings.Contains(err.Error(), "invalid URL escape") {
-		t.Fatalf("error = %q, want url.Parse's refusal", err.Error())
-	}
-	for _, secret := range []string{mediaClientIP, mediaSig} {
-		if strings.Contains(err.Error(), secret) {
-			t.Errorf("error carries %s: %q", secret, err.Error())
-		}
-	}
-}

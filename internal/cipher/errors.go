@@ -57,3 +57,22 @@ var ErrSigUnavailable = errors.New("cipher: sig unavailable for this player")
 // "cipher pipeline is broken for this player; surfacing as a real error
 // rather than masking with goja fallback."
 var ErrPlayerJSStale = errors.New("cipher: player JS is stale or unsupported")
+
+// ErrNUnsolved signals a stream URL that carries an n challenge no solver
+// produced a valid answer for: every solver failed, or each answered with
+// something that is not an answer (checkNResult), or there was no player or
+// no solver to ask, or the answer could not be put in the challenge's place.
+// RoutedResolveURL, GojaResolver.ResolveURL (and so ResolveFormatURL) and
+// RoutedDecryptNInURL return it, wrapping the cause.
+//
+// It used to be no error at all: the URL went out with its n as YouTube sent
+// it, and a Warn said "downloads may be throttled". yt-dlp dropped that
+// premise in 800ec085c (2024-06-21, "Skip formats if nsig decoding fails",
+// ref youtube-dl#32815), because such URLs are refused outright: an HTTPS
+// format whose n has no answer is skipped (`if not n_result: continue`,
+// _video.py:3570-3580), and an HLS or DASH manifest is used only `if solved_n
+// or not n_challenge` (_video.py:3692-3713, 3730-3751, d20f58d72). The
+// consumers here do the same: the VOD and manifest-free strategies treat it
+// as their format's resolve failure, and the DASH and HLS strategies fail
+// their setup on it rather than download segments that 403.
+var ErrNUnsolved = errors.New("cipher: n challenge unsolved")

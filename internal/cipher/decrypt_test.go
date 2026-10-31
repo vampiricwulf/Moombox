@@ -65,9 +65,12 @@ func TestRoutedResolveURL_NoSigUsesRoutedNOnly(t *testing.T) {
 
 func TestRoutedDecryptNInURL_RoutedSolverHandlesN(t *testing.T) {
 	routed := &staticSolver{n: map[string]string{"abc123": "def456"}}
-	out := RoutedDecryptNInURL(context.Background(), routed, nil,
+	out, err := RoutedDecryptNInURL(context.Background(), routed, nil,
 		"https://www.youtube.com/s/player/cb017549/player_ias.vflset/en_US/base.js",
 		"https://example.com/videoplayback?n=abc123&other=foo")
+	if err != nil {
+		t.Fatalf("RoutedDecryptNInURL: %v", err)
+	}
 	if !strings.Contains(out, "n=def456") {
 		t.Errorf("expected routed n decryption; got %q", out)
 	}
@@ -76,22 +79,24 @@ func TestRoutedDecryptNInURL_RoutedSolverHandlesN(t *testing.T) {
 func TestRoutedDecryptNInURL_NoNParamPassesThrough(t *testing.T) {
 	routed := &staticSolver{}
 	raw := "https://example.com/videoplayback?other=foo"
-	out := RoutedDecryptNInURL(context.Background(), routed, nil,
+	out, err := RoutedDecryptNInURL(context.Background(), routed, nil,
 		"https://www.youtube.com/s/player/cb017549/player_ias.vflset/en_US/base.js",
 		raw)
-	if out != raw {
-		t.Errorf("expected URL unchanged when no n-param; got %q vs %q", out, raw)
+	if err != nil || out != raw {
+		t.Errorf("expected URL unchanged and no error when no n-param; got %q, %v vs %q", out, err, raw)
 	}
 }
 
-func TestRoutedDecryptNInURL_BothNilReturnsRawURL(t *testing.T) {
+// TestRoutedDecryptNInURL_BothNilIsUnsolved: with no solver at all an n
+// cannot be answered, and the URL is refused rather than returned unchanged
+// (ErrNUnsolved). It used to come back as it was.
+func TestRoutedDecryptNInURL_BothNilIsUnsolved(t *testing.T) {
 	raw := "https://example.com/videoplayback?n=abc123"
-	out := RoutedDecryptNInURL(context.Background(), nil, nil,
+	out, err := RoutedDecryptNInURL(context.Background(), nil, nil,
 		"https://www.youtube.com/s/player/cb017549/player_ias.vflset/en_US/base.js",
 		raw)
-	// No solver means no decryption — URL is returned unchanged.
-	if out != raw {
-		t.Errorf("expected raw URL when both solvers nil; got %q", out)
+	if !errors.Is(err, ErrNUnsolved) || out != "" {
+		t.Errorf("RoutedDecryptNInURL with no solver = %q, %v; want \"\" and ErrNUnsolved", out, err)
 	}
 }
 
@@ -112,8 +117,8 @@ func newFailingGojaResolver(t *testing.T) *GojaResolver {
 }
 
 // captureSlog routes slog.Default through a buffer for the test. The routed
-// n-param helpers report a degrade only through slog (they return a URL,
-// never an error), so the log line is the one place the cause can show.
+// n-param helpers log the routed solver's failure there, at Debug, as it
+// happens.
 func captureSlog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -155,40 +160,43 @@ func TestRoutedResolveURL_SigFailureKeepsTheRoutedCauseWhenGojaFailsToo(t *testi
 	}
 }
 
-// TestRoutedDecryptNInURL_WarnNamesEveryFailedPath: decryptFn swallowed the
-// routed N error entirely, so the Warn its callers log read "n decrypt
-// unavailable for player X" for every failure alike. The routed cause is now
-// logged at Debug as it happens and carried into the error the Warn shows,
-// with the goja outcome (or its absence) beside it.
+// TestRoutedDecryptNInURL_ErrorNamesEveryFailedPath: decryptFn swallowed the
+// routed N error entirely, so the Warn its callers logged read "n decrypt
+// unavailable for player X" for every failure alike. The routed cause is
+// logged at Debug as it happens and carried into the error the URL now fails
+// with (ErrNUnsolved, which replaced that Warn), with the goja outcome (or
+// its absence) beside it, and stays the one errors.Is matches.
 //
 // Mutants this kills:
 //   - the routed error dropped again   → "routed n: " / "no solutions" missing
 //   - the goja outcome not carried     → "goja fallback: " missing
 //   - the nil-goja shape misreported   → "(no goja fallback)" missing
-func TestRoutedDecryptNInURL_WarnNamesEveryFailedPath(t *testing.T) {
+//   - %v on the routed error           → errors.Is(ErrPlayerJSStale) fails
+func TestRoutedDecryptNInURL_ErrorNamesEveryFailedPath(t *testing.T) {
 	logs := captureSlog(t)
 	routed := &staticSolver{nErr: fmt.Errorf("%w: ejs solve n: no solutions", ErrPlayerJSStale)}
 	const raw = "https://example.com/videoplayback?n=abc123"
 
-	if out := RoutedDecryptNInURL(context.Background(), routed, newFailingGojaResolver(t), unreachablePlayerURL, raw); out != raw {
-		t.Errorf("URL changed although every solver failed: %q", out)
+	out, err := RoutedDecryptNInURL(context.Background(), routed, newFailingGojaResolver(t), unreachablePlayerURL, raw)
+	if out != "" || !errors.Is(err, ErrNUnsolved) || !errors.Is(err, ErrPlayerJSStale) {
+		t.Fatalf("RoutedDecryptNInURL = %q, %v; want \"\" and an error matching ErrNUnsolved and the routed ErrPlayerJSStale", out, err)
 	}
-	for _, want := range []string{
-		"routed n-param decryption failed",              // the Debug line, as it happens
-		"routed n: ", "no solutions", "goja fallback: ", // the Warn's error
-	} {
-		if !strings.Contains(logs.String(), want) {
-			t.Errorf("log output does not mention %q:\n%s", want, logs.String())
+	if !strings.Contains(logs.String(), "routed n-param decryption failed") {
+		t.Errorf("log output does not carry the routed failure's Debug line:\n%s", logs.String())
+	}
+	for _, want := range []string{"routed n: ", "no solutions", "goja fallback: ", "query form"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
 		}
 	}
 
-	logs.Reset()
-	if out := RoutedDecryptNInURL(context.Background(), routed, nil, unreachablePlayerURL, raw); out != raw {
-		t.Errorf("URL changed although the routed solver failed and there is no goja: %q", out)
+	out, err = RoutedDecryptNInURL(context.Background(), routed, nil, unreachablePlayerURL, raw)
+	if out != "" || !errors.Is(err, ErrNUnsolved) {
+		t.Fatalf("RoutedDecryptNInURL without goja = %q, %v; want \"\" and ErrNUnsolved", out, err)
 	}
 	for _, want := range []string{"routed n: ", "no solutions", "(no goja fallback)"} {
-		if !strings.Contains(logs.String(), want) {
-			t.Errorf("log output without goja does not mention %q:\n%s", want, logs.String())
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error without goja %q does not mention %q", err, want)
 		}
 	}
 }
