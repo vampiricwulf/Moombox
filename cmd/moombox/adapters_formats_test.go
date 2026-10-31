@@ -165,6 +165,94 @@ func TestFormatsPayloadKeepsABadgeWhenEveryRenditionIsMarked(t *testing.T) {
 	}
 }
 
+// pickerMuxed is itag 18's mimeType: video and audio in one file.
+const pickerMuxed = `video/mp4; codecs="avc1.42001E, mp4a.40.2"`
+
+func muxedFormat(f *youtube.Format) { f.AudioQuality = "AUDIO_QUALITY_LOW" }
+
+// TestFormatsPayloadBadgesNoMuxedFileOverASegmentedSibling: a muxed
+// progressive file (itag 18) is a whole file wherever its adaptive siblings
+// are segmented, so a badge that skipped the marks alone gave it [Best MP4]
+// on an OTF VOD, and the dashboard — which puts an intact badge first —
+// preselected the 640x360 file. Such a VOD comes with a manifest and runs
+// on DashStrategy, whose manifest has no itag 18: the pin fell back to
+// automatic selection where the 1080p WEBM preselected before was honoured.
+// The badges go to adaptive renditions, falling back to the first adaptive
+// one of a kind, marked; a muxed row is badged only when its kind has no
+// adaptive row at all.
+//
+// Mutants (each run): muxed() always false — the marks-only skip (18 is
+// [Best MP4] on the OTF VOD and the post-live stream); the muxed fallback
+// ahead of the marked one (18 wins wherever it is listed); the muxed
+// fallback dropped (a kind of muxed rows only has no badge).
+func TestFormatsPayloadBadgesNoMuxedFileOverASegmentedSibling(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		info     *youtube.VideoInfo
+		wantMp4  float64
+		wantWebm any
+	}{
+		{
+			// The worker's own fixture of this stream: OTF adaptive formats
+			// beside a whole muxed 18 (TestDownloadVodLeavesSegmentedFormatsOut).
+			name: "an OTF VOD with a whole muxed 18",
+			info: &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, DashManifestURL: "https://example.invalid/mpd", Formats: []youtube.Format{
+				pickerFixture(248, 1920, 4_000_000, pickerWebm, otfFormat),
+				pickerFixture(137, 1920, 6_000_000, pickerMp4, otfFormat),
+				pickerFixture(136, 1280, 2_000_000, pickerMp4, otfFormat),
+				pickerFixture(18, 640, 500_000, pickerMuxed, muxedFormat),
+				pickerFixture(251, 0, 160_000, pickerOpus, otfFormat),
+				pickerFixture(140, 0, 128_000, pickerAac, otfFormat),
+			}},
+			wantMp4: 137, wantWebm: float64(248),
+		},
+		{
+			// A post-live response can list 18 without a contentLength
+			// (youtube.Format.IsVideoOnly); it is no live adaptive format,
+			// so it is not segmented either.
+			name: "a post-live stream with a contentLength-less muxed 18",
+			info: &youtube.VideoInfo{StreamStatus: youtube.StreamPostLive, Formats: []youtube.Format{
+				pickerFixture(299, 1920, 6_000_000, pickerMp4, liveAdaptiveFormat),
+				pickerFixture(18, 640, 500_000, pickerMuxed, muxedFormat, func(f *youtube.Format) { f.ContentLength = "" }),
+				pickerFixture(140, 0, 128_000, pickerAac, liveAdaptiveFormat),
+			}},
+			wantMp4: 299, wantWebm: nil,
+		},
+		{
+			// Same size and frame rate, so the lower bitrate sorts first: the
+			// muxed file is the first MP4 row, ahead of the segmented 134.
+			name: "a muxed 18 listed ahead of every adaptive MP4",
+			info: &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, DashManifestURL: "https://example.invalid/mpd", Formats: []youtube.Format{
+				pickerFixture(243, 640, 400_000, pickerWebm, otfFormat),
+				pickerFixture(18, 640, 300_000, pickerMuxed, muxedFormat),
+				pickerFixture(134, 640, 400_000, pickerMp4, otfFormat),
+				pickerFixture(140, 0, 128_000, pickerAac, otfFormat),
+			}},
+			wantMp4: 134, wantWebm: float64(243),
+		},
+		{
+			name: "a kind of muxed rows only",
+			info: &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, Formats: []youtube.Format{
+				pickerFixture(248, 1920, 4_000_000, pickerWebm),
+				pickerFixture(18, 640, 500_000, pickerMuxed, muxedFormat),
+				pickerFixture(251, 0, 160_000, pickerOpus),
+			}},
+			wantMp4: 18, wantWebm: float64(248),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, decoded := pickerJSON(t, tc.info)
+			best, _ := decoded["bestItags"].(map[string]any)
+			if best["bestMp4Video"] != tc.wantMp4 || best["bestWebmVideo"] != tc.wantWebm {
+				t.Errorf("bestItags = %v, want bestMp4Video %v and bestWebmVideo %v", best, tc.wantMp4, tc.wantWebm)
+			}
+			if row := pickerRowsByItag(t, decoded, "videoFormats")[18]; row == nil || row["damaged"] != false || row["segmented"] != false {
+				t.Errorf("itag 18 = %v, want listed, unmarked: a whole file is neither", row)
+			}
+		})
+	}
+}
+
 // TestFormatsPayloadDecodesIntoTheTUIPicker holds the TUI's decode to the
 // route's shape. The TUI read the four Best picks as flat fields of
 // FormatsData, where the answer nests them in bestItags, so the decode

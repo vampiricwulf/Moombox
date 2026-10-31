@@ -63,17 +63,31 @@ type pickerFormat struct {
 // (pickerFormat), in the picker's order, and bestItags — the one rendition
 // per container/codec the picker badges [Best …] and preselects.
 //
-// A badge goes to the first rendition of its kind in that order that is
-// neither damaged nor segmented (owner decisions on the W9 and W4
+// A badge goes to the first adaptive rendition of its kind in that order
+// that is neither damaged nor segmented (owner decisions on the W9 and W4
 // follow-ups): automatic selection passes a damaged one over while an intact
 // one of its kind exists, and a whole-file VOD cannot fetch a segmented one,
 // so badging either pointed the operator — and the dashboard's preselection,
 // which follows the badges — at a rendition the downloader would not choose
-// itself. When every rendition of a kind is damaged or segmented, as on a
-// live or post-live stream, where every format is live adaptive, the badge
-// falls back to the first of the kind, the pick it always made, so a badge
-// still exists. Neither mark stops a manual pin: the operator can still
-// choose a marked row by hand.
+// itself. When every adaptive rendition of a kind is damaged or segmented,
+// as on a live or post-live stream, whose adaptive formats are all live
+// adaptive, the badge falls back to the first adaptive rendition of the
+// kind — the pick it always made, unless a muxed file sorted ahead of it —
+// so a badge still exists. Neither mark stops a manual pin: the operator can
+// still choose a marked row by hand.
+//
+// Adaptive, because a muxed progressive file (itag 18, 640x360 with its
+// audio inside) is intact wherever its adaptive siblings are segmented — it
+// is a whole file even beside OTF formats, and a post-live response can list
+// one without a contentLength — so a skip that read the marks alone handed
+// it the [Best MP4] badge on exactly the streams where the badge mattered,
+// and the dashboard preselected it. On an OTF VOD with a manifest, which
+// DashStrategy downloads, the manifest offers no itag 18, so that pin fell
+// back to automatic selection with a warning, where the 1080p WEBM the
+// badges used to preselect is honoured; the manifest-free path takes no
+// muxed format at all (partitionManifestlessFormats). A muxed row is badged
+// only when its kind has no adaptive row, the one case it was the old pick
+// and nothing else could be.
 func formatsPayload(videoID string, info *youtube.VideoInfo) map[string]any {
 	// Separate video and audio formats, only those with a URL
 	var videoFormats, audioFormats []youtube.Format
@@ -142,24 +156,39 @@ func pickerRows(formats []youtube.Format) []pickerFormat {
 	return rows
 }
 
-// bestPickerItag is the itag of the first row of kind that is neither damaged
-// nor segmented, else of the first row of kind at all (see formatsPayload),
-// or nil — JSON null, as the badge has always been — when no row is of kind.
+// bestPickerItag is the itag of the first adaptive row of kind that is
+// neither damaged nor segmented, else of the first adaptive row of kind,
+// else of the first muxed one (see formatsPayload), or nil — JSON null, as
+// the badge has always been — when no row is of kind.
 func bestPickerItag(rows []pickerFormat, kind func(*pickerFormat) bool) any {
-	var fallback any
+	var marked, muxed any
 	for i := range rows {
 		r := &rows[i]
-		if !kind(r) {
-			continue
-		}
-		if !r.Damaged && !r.Segmented {
+		switch {
+		case !kind(r):
+		case r.muxed():
+			if muxed == nil {
+				muxed = r.Itag
+			}
+		case !r.Damaged && !r.Segmented:
 			return r.Itag
-		}
-		if fallback == nil {
-			fallback = r.Itag
+		case marked == nil:
+			marked = r.Itag
 		}
 	}
-	return fallback
+	if marked != nil {
+		return marked
+	}
+	return muxed
+}
+
+// muxed reports whether r is a progressive file rather than an adaptive
+// rendition: a video row that is no video half (youtube.Format.IsVideoOnly —
+// its mimeType names an audio codec beside the video one, upstream's
+// single_stream test), the row the manifest-free path's pool leaves out.
+// Every audio row is adaptive.
+func (r *pickerFormat) muxed() bool {
+	return strings.Contains(r.MimeType, "video") && !r.IsVideoOnly()
 }
 
 func maxDim(w, h *int) int {

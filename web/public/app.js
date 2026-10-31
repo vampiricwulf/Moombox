@@ -2784,10 +2784,11 @@ export class MoomboxApp {
     ]);
 
     // Auto-select best formats: WEBM over MP4, Opus over AAC, as ever, but an
-    // intact badge first. The server badges the best rendition of each kind
-    // that is neither damaged nor segmented, falling back to a marked one
-    // only when every rendition of that kind is marked — so a WEBM badge on a
-    // damaged rendition yields to an intact MP4 one.
+    // intact badge first. The server badges the best adaptive rendition of
+    // each kind that is neither damaged nor segmented, falling back to a
+    // marked one only when every adaptive rendition of that kind is marked
+    // (and to a muxed file only when the kind has nothing else) — so a WEBM
+    // badge on a damaged rendition yields to an intact MP4 one.
     const intact = (list, itag) => (list || []).some((f) => f.itag === itag && !f.damaged && !f.segmented);
     const preselect = (list, ...itags) => itags.find((i) => i && intact(list, i)) ?? itags.find((i) => i);
     const video = preselect(data.videoFormats, bestItags.bestWebmVideo, bestItags.bestMp4Video);
