@@ -106,7 +106,11 @@ func newVodRenditionServer(t *testing.T, size int64) *vodRenditionServer {
 // file splices. Mutant: dropping the audio downloader's StreamID — the audio
 // file does.
 func TestVodResumeChecksTheRendition(t *testing.T) {
-	const size = 10*engine.DownloadChunkSize + 1<<20
+	// Eleven chunks' worth, not ten: the engine draws each chunk from 95-100%
+	// of DownloadChunkSize, so the chunk that crosses the 50 MB checkpoint
+	// can end anywhere up to a chunk past it, and the cut must still find a
+	// request after it.
+	const size = 11*engine.DownloadChunkSize + 1<<20
 	for _, tc := range []struct {
 		name                 string
 		resumeCap, audioItag int
