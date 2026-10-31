@@ -20,14 +20,18 @@ func progressive() youtube.Format {
 
 // TestSelectDownloadStrategy pins the routing table.
 //
-// Mutant (G6): the live adaptive arm dropped (both "live adaptive split"
-// rows go to vod).
+// Mutants (G6, G24; each run): the live adaptive arm dropped (both "live
+// adaptive split" rows go to vod); the OTF-with-a-manifest arm dropped (the
+// not-a-stream OTF row goes to vod); that arm taken without
+// hasSegmentedFormats (the not-a-stream whole-file row goes to dash).
 func TestSelectDownloadStrategy(t *testing.T) {
 	manifestlessFormats := []youtube.Format{adaptiveVideo(), adaptiveAudio()}
 	wholeFileFormats := []youtube.Format{adaptiveVideo(), adaptiveAudio()}
 	wholeFileFormats[0].ContentLength, wholeFileFormats[1].ContentLength = "1048576000", "117000000"
 	liveAdaptiveFormats := []youtube.Format{adaptiveVideo(), adaptiveAudio()}
 	liveAdaptiveFormats[0].TargetDurationSec, liveAdaptiveFormats[1].TargetDurationSec = 2, 2
+	otfFormats := []youtube.Format{adaptiveVideo(), adaptiveAudio()}
+	otfFormats[0].IsOTF, otfFormats[1].IsOTF = true, true
 
 	tests := []struct {
 		name  string
@@ -81,8 +85,8 @@ func TestSelectDownloadStrategy(t *testing.T) {
 			// Updated deliberately with G6: the shape alone — open-ended,
 			// no contentLength — is still no reason to leave the whole-file
 			// path for a VOD. yt-dlp downloads such a format over https too;
-			// only its marks of a segmented format (targetDurationSec, below)
-			// are.
+			// only its two marks of a segmented format (targetDurationSec,
+			// and OTF, below) are.
 			name:  "VOD with open-ended formats that carry neither mark stays on VodStrategy",
 			isVod: true,
 			info: &youtube.VideoInfo{
@@ -114,6 +118,40 @@ func TestSelectDownloadStrategy(t *testing.T) {
 				Formats:         liveAdaptiveFormats,
 			},
 			want: "manifestless_dash",
+		},
+		{
+			// G24: an OTF upload goes to its DASH manifest, as yt-dlp's does;
+			// only not_a_stream reaches the whole-file path with a manifest.
+			name:  "not-a-stream OTF with a manifest uses DashStrategy",
+			isVod: true,
+			info: &youtube.VideoInfo{
+				StreamStatus:    youtube.StreamNotAStream,
+				DashManifestURL: "https://manifest.example/dash.mpd",
+				Formats:         otfFormats,
+			},
+			want: "dash",
+		},
+		{
+			name:  "not-a-stream whole-file with a manifest stays on VodStrategy",
+			isVod: true,
+			info: &youtube.VideoInfo{
+				StreamStatus:    youtube.StreamNotAStream,
+				DashManifestURL: "https://manifest.example/dash.mpd",
+				Formats:         wholeFileFormats,
+			},
+			want: "vod",
+		},
+		{
+			// No manifest to fall back to: the whole-file path takes what it
+			// can fetch whole, and fails clearly when that loses a stream
+			// (TestDownloadVodLeavesSegmentedFormatsOut).
+			name:  "OTF VOD without a manifest goes to VodStrategy",
+			isVod: true,
+			info: &youtube.VideoInfo{
+				StreamStatus: youtube.StreamVOD,
+				Formats:      otfFormats,
+			},
+			want: "vod",
 		},
 		{
 			name:  "not-a-stream uses VodStrategy",

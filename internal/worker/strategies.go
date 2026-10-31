@@ -97,6 +97,18 @@ func selectDownloadStrategy(isVod bool, info *youtube.VideoInfo) (DownloadStrate
 	// failing. Ahead of a manifest for the post-live arm's reason.
 	case isVod && hasLiveAdaptiveSplit(info.Formats):
 		return ManifestlessDashStrategy, nil
+	// An OTF VOD with a manifest: the whole-file path cannot fetch an OTF
+	// format (youtube.Format.Segmented), and yt-dlp takes those streams from
+	// the DASH manifest (_video.py:3503-3507, 3726-3764). Only not_a_stream
+	// reaches the whole-file path with a manifest at all — every other VOD
+	// with one goes to DashStrategy below — so this is the manually added or
+	// include_non_live_content upload YouTube serves on the fly. Not the
+	// manifest-free path: its end detection reads X-Head-Seqnum, a live
+	// header. Without a manifest the whole-file path takes what it can fetch
+	// whole, and says so when that leaves a stream the job wants
+	// (DownloadVod, wholeFileVodPool).
+	case useDirectVod && info.DashManifestURL != "" && hasSegmentedFormats(info.Formats):
+		return DashStrategy, nil
 	case useDirectVod && len(info.Formats) > 0:
 		return VodStrategy, nil
 	case !isVod && HasManifestlessDashFormats(info.Formats):
@@ -137,6 +149,17 @@ func hasLiveAdaptiveSplit(formats []youtube.Format) bool {
 		}
 	}
 	return HasManifestlessDashFormats(live)
+}
+
+// hasSegmentedFormats reports whether formats holds a fetchable format a
+// whole-file GET cannot serve (youtube.Format.Segmented).
+func hasSegmentedFormats(formats []youtube.Format) bool {
+	for i := range formats {
+		if formats[i].URL != "" && formats[i].Segmented() {
+			return true
+		}
+	}
+	return false
 }
 
 // vodStrategyT / dashStrategyT / hlsStrategyT — stateless adapters
