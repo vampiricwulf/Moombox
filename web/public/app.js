@@ -2726,6 +2726,12 @@ export class MoomboxApp {
     audioSelect.querySelectorAll("sl-option:not([value='-1'])").forEach((el) => el.remove());
 
     const bestItags = data.bestItags || {};
+    // The server's marks (cmd/moombox/adapters.go, pickerFormat), noted after
+    // the Best badges as yt-dlp notes a damaged rendition "DAMAGED" in its
+    // format list: damaged — encoded short of half the video's length, so its
+    // track would stop partway; segmented — served only as fragments, which a
+    // whole-file VOD download cannot fetch. Either can still be picked by hand.
+    const marks = (fmt) => (fmt.damaged ? " [damaged]" : "") + (fmt.segmented ? " [segmented]" : "");
 
     // Add video formats
     for (const fmt of data.videoFormats || []) {
@@ -2741,6 +2747,7 @@ export class MoomboxApp {
       let badges = "";
       if (fmt.itag === bestItags.bestWebmVideo) badges += " [Best WEBM]";
       if (fmt.itag === bestItags.bestMp4Video) badges += " [Best MP4]";
+      badges += marks(fmt);
 
       opt.textContent = `${res}${fps} ${container}${bitrate}${badges}`;
       videoSelect.appendChild(opt);
@@ -2763,6 +2770,7 @@ export class MoomboxApp {
       let badges = "";
       if (fmt.itag === bestItags.bestOpusAudio) badges += " [Best OPUS]";
       if (fmt.itag === bestItags.bestAacAudio) badges += " [Best AAC]";
+      badges += marks(fmt);
 
       opt.textContent = `${bitrate}${sampleRate} ${codec}${badges}`;
       audioSelect.appendChild(opt);
@@ -2775,12 +2783,18 @@ export class MoomboxApp {
       audioSelect.updateComplete?.catch(() => {}),
     ]);
 
-    // Auto-select best formats
-    if (bestItags.bestWebmVideo) videoSelect.value = String(bestItags.bestWebmVideo);
-    else if (bestItags.bestMp4Video) videoSelect.value = String(bestItags.bestMp4Video);
-
-    if (bestItags.bestOpusAudio) audioSelect.value = String(bestItags.bestOpusAudio);
-    else if (bestItags.bestAacAudio) audioSelect.value = String(bestItags.bestAacAudio);
+    // Auto-select best formats: WEBM over MP4, Opus over AAC, as ever, but an
+    // intact badge first. The server badges the best adaptive rendition of
+    // each kind that is neither damaged nor segmented, falling back to a
+    // marked one only when every adaptive rendition of that kind is marked
+    // (and to a muxed file only when the kind has nothing else) — so a WEBM
+    // badge on a damaged rendition yields to an intact MP4 one.
+    const intact = (list, itag) => (list || []).some((f) => f.itag === itag && !f.damaged && !f.segmented);
+    const preselect = (list, ...itags) => itags.find((i) => i && intact(list, i)) ?? itags.find((i) => i);
+    const video = preselect(data.videoFormats, bestItags.bestWebmVideo, bestItags.bestMp4Video);
+    if (video) videoSelect.value = String(video);
+    const audio = preselect(data.audioFormats, bestItags.bestOpusAudio, bestItags.bestAacAudio);
+    if (audio) audioSelect.value = String(audio);
 
     // Update end time placeholder with video duration
     if (data.lengthSeconds && data.lengthSeconds > 0) {

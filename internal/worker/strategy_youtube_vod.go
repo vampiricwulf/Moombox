@@ -36,7 +36,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// a whole-file GET cannot fetch (wholeFileVodPool) — a filtered COPY, as
 	// a missing_pot degrade's is, never the caller's slice filtered in place.
 	pool, segmented := wholeFileVodPool(videoInfo.Formats)
-	selected, result := selectVodFormats(job, pool, nil)
+	selected, result := selectVodFormats(job, pool, nil, segmented)
 	if err := segmentedStreamLost(job, selected, segmented); err != nil {
 		// selectDownloadStrategy sends a pool that holds a segmented format
 		// to DASH whenever a manifest came with it (its OTF arm), so this
@@ -46,7 +46,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	if !result.HasVideo && !result.HasAudio {
 		return nil, fmt.Errorf("no suitable formats found for VOD download")
 	}
-	videoResolved, audioResolved, err := resolveVodURLs(ctx, job, result, pool, routedSolver, cipherSolver, videoInfo.PlayerURL)
+	videoResolved, audioResolved, err := resolveVodURLs(ctx, job, result, pool, nil, segmented, routedSolver, cipherSolver, videoInfo.PlayerURL)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +123,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 						"jobID", job.Job.ID, "added", len(extra), "dropped", len(dropped), "swapped", swapped)
 				}
 			}
-			selected, result = selectVodFormats(job, pool, dropped)
+			selected, result = selectVodFormats(job, pool, dropped, segmented)
 			if !result.HasVideo && !result.HasAudio {
 				return nil, fmt.Errorf("VOD: no formats usable without a GVS PO token (mint failed: %w)", mintErr)
 			}
@@ -138,7 +138,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			if err := segmentedStreamLost(job, selected, segmented); err != nil {
 				return nil, fmt.Errorf("%w; its whole-file copies need a GVS PO token, and none could be minted (mint failed: %w)", err, mintErr)
 			}
-			videoResolved, audioResolved, err = resolveVodURLs(ctx, job, result, pool, routedSolver, cipherSolver, videoInfo.PlayerURL)
+			videoResolved, audioResolved, err = resolveVodURLs(ctx, job, result, pool, dropped, segmented, routedSolver, cipherSolver, videoInfo.PlayerURL)
 			if err != nil {
 				return nil, err
 			}
@@ -278,7 +278,17 @@ func vodSelectionBounds(job *JobContext) (maxRes int, prefer60fps bool) {
 // one of them says why it is being ignored instead of "not found" — or, when
 // the drop swapped that format for its token-free shadow (the itag is still
 // in formats), says which client now serves it.
-func selectVodFormats(job *JobContext, formats, dropped []youtube.Format) (youtube.SelectedFormats, *DownloadResult) {
+//
+// segmented is what the whole-file pool left out (wholeFileVodPool), for the
+// same reason: a pin of one says it is segmented, not available as a whole
+// file, rather than "not found" — the format picker offers it, marked
+// segmented, because the manifest-free live and post-live paths fetch it as
+// fragments. A token drop is named first: where the dedup's shadow swap left
+// only a segmented copy of a pinned stream, its whole file is the one the
+// token was needed for. A damaged pin has no arm here: damage only ranks a
+// rendition lower, it never takes one out of the pool, so a damaged pin is
+// found and honoured.
+func selectVodFormats(job *JobContext, formats, dropped, segmented []youtube.Format) (youtube.SelectedFormats, *DownloadResult) {
 	maxRes, prefer60fps := vodSelectionBounds(job)
 	selected := youtube.SelectBestFormatsWithLogger(formats, maxRes, prefer60fps, job.Logger)
 
@@ -315,6 +325,8 @@ func selectVodFormats(job *JobContext, formats, dropped []youtube.Format) (youtu
 				}
 			} else if droppedHasItag(dropped, itag, "video") {
 				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual video itag %d requires a GVS token none could be minted; falling back to auto", itag))
+			} else if droppedHasItag(segmented, itag, "video") {
+				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual video itag %d is segmented, not available as a whole file; falling back to auto", itag))
 			} else {
 				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual video itag %d not found, falling back to auto", itag))
 			}
@@ -341,6 +353,8 @@ func selectVodFormats(job *JobContext, formats, dropped []youtube.Format) (youtu
 				}
 			} else if droppedHasItag(dropped, itag, "audio") {
 				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual audio itag %d requires a GVS token none could be minted; falling back to auto", itag))
+			} else if droppedHasItag(segmented, itag, "audio") {
+				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual audio itag %d is segmented, not available as a whole file; falling back to auto", itag))
 			} else {
 				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual audio itag %d not found, falling back to auto", itag))
 			}
@@ -390,16 +404,17 @@ func selectVodFormats(job *JobContext, formats, dropped []youtube.Format) (youtu
 // engine is handed fetchable URLs. Stage 3 of the cipher pipeline rework:
 // parseFormats leaves URLs raw (with sigCipher entries carrying EncryptedSig
 // + the bare `url=` value). Bound to two attempts via re-selection — the
-// alternate is drawn from pool, the same list the selection ran over — so a
-// fully broken cipher state surfaces cleanly. A re-selection rewrites
-// result.VideoFormat / result.AudioFormat.
-func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult, pool []youtube.Format, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, playerURL string) (videoResolved, audioResolved string, err error) {
+// alternate is drawn from pool, the same list the selection ran over, and
+// dropped and segmented are what that selection was handed beside it
+// (selectVodFormats) — so a fully broken cipher state surfaces cleanly. A
+// re-selection rewrites result.VideoFormat / result.AudioFormat.
+func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult, pool, dropped, segmented []youtube.Format, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, playerURL string) (videoResolved, audioResolved string, err error) {
 	if result.HasVideo && result.VideoFormat != nil {
 		resolvedURL, err := resolveFormatURL(ctx, result.VideoFormat, routedSolver, cipherSolver, playerURL, job.Logger)
 		if err != nil {
 			job.Logger.Warn("[Cipher] VOD video resolve failed; trying re-selection",
 				"itag", result.VideoFormat.Itag, "err", err)
-			alt := reselectVodWithout(job, pool, result.VideoFormat.Itag)
+			alt := reselectVodWithout(job, pool, dropped, segmented, result.VideoFormat.Itag)
 			if !alt.HasVideo || alt.VideoFormat == nil {
 				return "", "", fmt.Errorf("VOD: video URL resolve failed and no alternate format: %w", err)
 			}
@@ -424,7 +439,7 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 		if err != nil {
 			job.Logger.Warn("[Cipher] VOD audio resolve failed; trying re-selection",
 				"itag", result.AudioFormat.Itag, "err", err)
-			retry := reselectVodWithout(job, pool, result.AudioFormat.Itag).AudioFormat
+			retry := reselectVodWithout(job, pool, dropped, segmented, result.AudioFormat.Itag).AudioFormat
 			if retry == nil {
 				return "", "", fmt.Errorf("VOD: audio URL resolve failed and no alternate format: %w", err)
 			}
@@ -445,15 +460,19 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 // simply the highest-bitrate format of the same kind, which ignored the
 // resolution cap, the quality preference, prefer_60fps and audio_only alike:
 // a 720p-capped job whose 720p format failed its signature downloaded the
-// 2160p one, and an audio-only job whose audio failed downloaded video.
-func reselectVodWithout(job *JobContext, pool []youtube.Format, failedItag int) *DownloadResult {
+// 2160p one, and an audio-only job whose audio failed downloaded video. It is
+// handed the dropped and segmented lists the selection it replaces was
+// handed, so a pin that selection gave up on is reported for the same reason
+// again; without them the pin loop warned "not found" of an itag the line
+// before had just called segmented, or token-bound.
+func reselectVodWithout(job *JobContext, pool, dropped, segmented []youtube.Format, failedItag int) *DownloadResult {
 	rest := make([]youtube.Format, 0, len(pool))
 	for _, f := range pool {
 		if f.Itag != failedItag {
 			rest = append(rest, f)
 		}
 	}
-	_, alt := selectVodFormats(job, rest, nil)
+	_, alt := selectVodFormats(job, rest, dropped, segmented)
 	return alt
 }
 
@@ -549,7 +568,7 @@ func withoutGvsRequiredFormats(formats []youtube.Format) (kept, dropped []youtub
 
 // droppedHasItag reports whether a missing_pot drop removed a format with
 // this itag of the given kind ("video" / "audio"), matched the way the manual
-// override matches.
+// override matches. Asked of the whole-file pool's segmented formats too.
 func droppedHasItag(dropped []youtube.Format, itag int, kind string) bool {
 	for i := range dropped {
 		f := &dropped[i]

@@ -65,7 +65,7 @@ func TestVodSelectionHonoursQualityPreference(t *testing.T) {
 		{"1080p60", false, 299},
 		{"1440p", true, 299}, // nothing at 1440: the largest below it
 	} {
-		_, res := selectVodFormats(vodJob(t, 2160, tc.prefer60, tc.pref), pool, nil)
+		_, res := selectVodFormats(vodJob(t, 2160, tc.prefer60, tc.pref), pool, nil, nil)
 		if res.VideoFormat == nil || res.VideoFormat.Itag != tc.want {
 			t.Errorf("pref=%q prefer60=%v: video %+v, want itag %d", tc.pref, tc.prefer60, res.VideoFormat, tc.want)
 		}
@@ -90,11 +90,11 @@ func TestVodReselectionKeepsTheJobsSelection(t *testing.T) {
 			vodAudio(140, `audio/mp4; codecs="mp4a.40.2"`, 128_000, ""),
 		}
 		job := vodJob(t, 720, true, "")
-		_, res := selectVodFormats(job, pool, nil)
+		_, res := selectVodFormats(job, pool, nil, nil)
 		if res.VideoFormat == nil || res.VideoFormat.Itag != 247 {
 			t.Fatalf("fixture: primary %+v, want 247", res.VideoFormat)
 		}
-		if _, _, err := resolveVodURLs(ctx, job, res, pool, failingSigSolver{}, nil, vodTestPlayerURL); err != nil {
+		if _, _, err := resolveVodURLs(ctx, job, res, pool, nil, nil, failingSigSolver{}, nil, vodTestPlayerURL); err != nil {
 			t.Fatalf("resolveVodURLs: %v", err)
 		}
 		if res.VideoFormat.Itag != 136 {
@@ -112,7 +112,7 @@ func TestVodReselectionKeepsTheJobsSelection(t *testing.T) {
 		}
 		job := vodJob(t, 360, true, "")
 		res := &DownloadResult{HasVideo: true, VideoFormat: &pool[0], VideoPath: "video.mp4", HasAudio: true}
-		_, audioURL, err := resolveVodURLs(ctx, job, res, pool, failingSigSolver{}, nil, vodTestPlayerURL)
+		_, audioURL, err := resolveVodURLs(ctx, job, res, pool, nil, nil, failingSigSolver{}, nil, vodTestPlayerURL)
 		if err != nil {
 			t.Fatalf("resolveVodURLs: %v", err)
 		}
@@ -129,11 +129,11 @@ func TestVodReselectionKeepsTheJobsSelection(t *testing.T) {
 			vodVideo(137, `video/mp4; codecs="avc1.640028"`, 1920, 1080, 30, 4_000_000, ""),
 		}
 		job := vodJob(t, 2160, true, "audio_only")
-		_, res := selectVodFormats(job, pool, nil)
+		_, res := selectVodFormats(job, pool, nil, nil)
 		if res.VideoFormat == nil || res.VideoFormat.Itag != 251 {
 			t.Fatalf("fixture: primary %+v, want the opus audio", res.VideoFormat)
 		}
-		if _, _, err := resolveVodURLs(ctx, job, res, pool, failingSigSolver{}, nil, vodTestPlayerURL); err != nil {
+		if _, _, err := resolveVodURLs(ctx, job, res, pool, nil, nil, failingSigSolver{}, nil, vodTestPlayerURL); err != nil {
 			t.Fatalf("resolveVodURLs: %v", err)
 		}
 		if res.VideoFormat.Itag != 140 {

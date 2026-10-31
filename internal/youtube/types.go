@@ -342,8 +342,9 @@ type Format struct {
 	// partway while the other runs on. The selector ranks it below every
 	// intact rendition, as yt-dlp's preference -10 does. Each copy carries its
 	// own response's verdict, through the dedup and into a shadow. Neither
-	// field is in the format picker's JSON: whether the picker marks a damaged
-	// rendition, as yt-dlp's format list does, is not decided.
+	// field is in the Format's own JSON: the format picker's answer marks a
+	// damaged rendition `damaged` beside it, as yt-dlp's format list notes it
+	// DAMAGED, and badges an intact one (cmd/moombox's pickerFormat).
 	Damaged bool `json:"-"`
 
 	// EncryptedSig is the `s` field from a signatureCipher entry, captured

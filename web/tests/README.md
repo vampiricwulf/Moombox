@@ -61,6 +61,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `ffmpeg-path-check.test.mjs` | a checked FFmpeg path reaches the Settings form |
 | `files-panel.test.mjs` | the Files tab's rows: labelled delete controls, set-aside confirms, refusals |
 | `filter-bar.test.mjs` | the filter bar under real typing: the debounce, chips, the caret |
+| `format-picker.test.mjs` | the Add dialog's format picker: the `damaged` / `segmented` marks after the Best badges, and the preselection, an intact badge ahead of a marked one |
 | `import-placeholder.test.mjs` | an imported job's placeholder id draws no dead embed, Stream URL or Open URL; one pure helper test |
 | `imports-importing.test.mjs` | once an import's body is sent the panel says "Importing…" with no Cancel, and Clear and another file wait for the response |
 | `imports-upload.test.mjs` | the import panel's Clear and file choice while an upload runs, and the outcome note or refusal an import answers with |

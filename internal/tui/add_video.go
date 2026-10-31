@@ -34,6 +34,12 @@ type VideoFormat struct {
 	Fps          int
 	Bitrate      int
 	QualityLabel string
+	// Damaged and Segmented are the server's marks (GET /api/formats, the
+	// adapter's pickerFormat): a rendition serving under half the video's
+	// length, and one served only as fragments, which a whole-file VOD
+	// cannot fetch. Each is a note in the picker's Note column.
+	Damaged   bool
+	Segmented bool
 }
 
 // AudioFormat represents an audio format option.
@@ -43,6 +49,19 @@ type AudioFormat struct {
 	Bitrate         int
 	AudioQuality    string
 	AudioSampleRate string
+	Damaged         bool // see VideoFormat
+	Segmented       bool // see VideoFormat
+}
+
+// BestItags is the server's [Best …] pick per container/codec (GET
+// /api/formats' bestItags), 0 for none. The server already passes damaged and
+// segmented renditions over and falls back to the first of a kind when every
+// one is either, so the picker shows its verdict rather than computing one.
+type BestItags struct {
+	BestWebmVideo int
+	BestMp4Video  int
+	BestOpusAudio int
+	BestAacAudio  int
 }
 
 // FormatsData holds format info fetched from API.
@@ -53,10 +72,26 @@ type FormatsData struct {
 	LengthSeconds int
 	VideoFormats  []VideoFormat
 	AudioFormats  []AudioFormat
-	BestWebmVideo int
-	BestMp4Video  int
-	BestOpusAudio int
-	BestAacAudio  int
+	// BestItags is the answer's own nested bestItags object. The four picks
+	// were flat fields here, which the decode never filled — the API nests
+	// them — so the TUI showed no Best note at all.
+	BestItags BestItags
+}
+
+// formatNote is a picker row's Note: its Best label, if any, then the marks,
+// joined as yt-dlp joins a format_note (_video.py:3453-3460, ", ").
+func formatNote(best string, damaged, segmented bool) string {
+	var parts []string
+	if best != "" {
+		parts = append(parts, best)
+	}
+	if damaged {
+		parts = append(parts, "damaged")
+	}
+	if segmented {
+		parts = append(parts, "segmented")
+	}
+	return strings.Join(parts, ", ")
 }
 
 // AddVideoModel manages the add video dialog.
@@ -162,6 +197,13 @@ func (m *AddVideoModel) SetFormats(f *FormatsData) {
 	m.buildFormatTables()
 }
 
+// noteColumnWidth fits the longest Note formatNote writes, "Best WEBM,
+// damaged, segmented" (the Best fallback when every rendition of a kind is
+// both): the video table is then 63 columns wide, which the dialog's content
+// (boxW-2, 78 at most) holds from a 69-column terminal up. Narrower, down to
+// the TUI's minTermWidth, fitFormatTable gives the Note column what is left.
+const noteColumnWidth = 29
+
 // buildFormatTables constructs bubbles/table models for video and audio format selection.
 func (m *AddVideoModel) buildFormatTables() {
 	if m.formats == nil {
@@ -177,7 +219,7 @@ func (m *AddVideoModel) buildFormatTables() {
 		{Title: "FPS", Width: 4},
 		{Title: "Codec", Width: 5},
 		{Title: "Bitrate", Width: 10},
-		{Title: "Note", Width: 12},
+		{Title: "Note", Width: noteColumnWidth},
 	}
 	var videoRows []table.Row
 	for i, f := range m.formats.VideoFormats {
@@ -195,17 +237,17 @@ func (m *AddVideoModel) buildFormatTables() {
 		if f.Fps > 0 {
 			fps = fmt.Sprintf("%d", f.Fps)
 		}
-		note := ""
-		if f.Itag == m.formats.BestMp4Video {
-			note = "Best MP4"
+		best := ""
+		if f.Itag == m.formats.BestItags.BestMp4Video {
+			best = "Best MP4"
 		}
-		if f.Itag == m.formats.BestWebmVideo {
-			note = "Best WEBM"
+		if f.Itag == m.formats.BestItags.BestWebmVideo {
+			best = "Best WEBM"
 		}
 		videoRows = append(videoRows, table.Row{
 			fmt.Sprintf("%d", i+1),
 			fmt.Sprintf("%dx%d", f.Width, f.Height),
-			fps, codec, bitrate, note,
+			fps, codec, bitrate, formatNote(best, f.Damaged, f.Segmented),
 		})
 	}
 	m.videoTable = table.New(
@@ -222,7 +264,7 @@ func (m *AddVideoModel) buildFormatTables() {
 		{Title: "Bitrate", Width: 10},
 		{Title: "Rate", Width: 8},
 		{Title: "Codec", Width: 5},
-		{Title: "Note", Width: 12},
+		{Title: "Note", Width: noteColumnWidth},
 	}
 	var audioRows []table.Row
 	for i, f := range m.formats.AudioFormats {
@@ -242,16 +284,16 @@ func (m *AddVideoModel) buildFormatTables() {
 		} else if strings.Contains(f.MimeType, "mp4a") || strings.Contains(f.MimeType, "aac") {
 			codec = "AAC"
 		}
-		note := ""
-		if f.Itag == m.formats.BestOpusAudio {
-			note = "Best OPUS"
+		best := ""
+		if f.Itag == m.formats.BestItags.BestOpusAudio {
+			best = "Best OPUS"
 		}
-		if f.Itag == m.formats.BestAacAudio {
-			note = "Best AAC"
+		if f.Itag == m.formats.BestItags.BestAacAudio {
+			best = "Best AAC"
 		}
 		audioRows = append(audioRows, table.Row{
 			fmt.Sprintf("%d", i+1),
-			bitrate, sampleRate, codec, note,
+			bitrate, sampleRate, codec, formatNote(best, f.Damaged, f.Segmented),
 		})
 	}
 	m.audioTable = table.New(
@@ -741,7 +783,7 @@ func (m *AddVideoModel) renderURLStep(w, _ int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *AddVideoModel) renderFormatStep(_, h int, isVideo bool) string {
+func (m *AddVideoModel) renderFormatStep(w, h int, isVideo bool) string {
 	var lines []string
 
 	stepNum := "1/4"
@@ -775,10 +817,10 @@ func (m *AddVideoModel) renderFormatStep(_, h int, isVideo bool) string {
 		// Adjust table height to fit available space
 		tableH := max(h-10, 3)
 		if isVideo {
-			m.videoTable.SetHeight(min(tableH, len(m.formats.VideoFormats)))
+			fitFormatTable(&m.videoTable, w, min(tableH, len(m.formats.VideoFormats)))
 			lines = append(lines, m.videoTable.View())
 		} else {
-			m.audioTable.SetHeight(min(tableH, len(m.formats.AudioFormats)))
+			fitFormatTable(&m.audioTable, w, min(tableH, len(m.formats.AudioFormats)))
 			lines = append(lines, m.audioTable.View())
 		}
 	}
@@ -787,6 +829,34 @@ func (m *AddVideoModel) renderFormatStep(_, h int, isVideo bool) string {
 	lines = append(lines, DimStyle.Render("A: Auto | N: None | Enter/1-9: Select | Esc: Back"))
 
 	return strings.Join(lines, "\n")
+}
+
+// fitFormatTable sizes a format table to the dialog each time it is drawn,
+// as its height always was. A table's rows are its viewport's, and a bubbles
+// v2 viewport with no width draws nothing (viewport.View answers "" at width
+// 0): built without one, both tables showed their header and its rule alone
+// — no row at all — from the Charm v2 migration on. The width is the
+// columns' own sum, the Note column (the last, the only one whose content
+// varies in width) narrowed to what contentW leaves beside the others and
+// never past noteColumnWidth, so on a narrow terminal the table truncates a
+// long note with "…" instead of the box wrapping every line of the table in
+// two. The height is rows plus the header's lines, which SetHeight takes out
+// of what it is given: rows alone showed two fewer — and nothing, for a
+// table of two or fewer.
+func fitFormatTable(t *table.Model, contentW, rows int) {
+	cols := t.Columns()
+	if len(cols) == 0 {
+		return
+	}
+	note := &cols[len(cols)-1]
+	others := 0
+	for _, c := range cols[:len(cols)-1] {
+		others += c.Width
+	}
+	note.Width = max(min(noteColumnWidth, contentW-others), len("Note"))
+	t.SetColumns(cols)
+	t.SetWidth(others + note.Width)
+	t.SetHeight(rows + lipgloss.Height(formatTableStyles().Header.Render("Note")))
 }
 
 func (m *AddVideoModel) renderTimestamps(w, _ int) string {
