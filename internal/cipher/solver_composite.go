@@ -3,14 +3,25 @@ package cipher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 )
 
 // ErrSidecarUnavailable is returned by the composite solver when sig is
-// requested but no sidecar solver is configured. Distinguishes from
+// requested but no sidecar solver can answer it: none is configured
+// (`[bgutils] use_sidecar = false`, or a first start that never came up), or
+// the one installed reports its child down — crashed, or between a crash and
+// the supervisor's restart (SidecarReady). Distinguishes from
 // ErrSigUnavailable (player-specific extraction failure) so callers /
-// tests can tell "sig not configured" from "this player can't be sig'd."
-var ErrSidecarUnavailable = errors.New("cipher: sidecar solver not configured")
+// tests can tell "no sig solver running" from "this player can't be sig'd."
+//
+// The down case used to surface as the sidecar's own untyped "sidecar:
+// unhealthy" or "sidecar: not running", which read like any one request's
+// failure. It is the worker's systemic signal (audit G10): every format whose
+// URL needs a signature fails alike while it holds, so the VOD and live
+// strategies drop to formats that need no player JS rather than re-select
+// one itag at a time.
+var ErrSidecarUnavailable = errors.New("cipher: sidecar solver unavailable")
 
 // SidecarSwappable is the composite solver's own interface: a Solver whose
 // sidecar half can be replaced while the process runs. The BotGuard sidecar
@@ -20,6 +31,24 @@ var ErrSidecarUnavailable = errors.New("cipher: sidecar solver not configured")
 type SidecarSwappable interface {
 	Solver
 	SetSidecar(sidecar Solver)
+	// SidecarReady reports whether a sidecar half is installed and its child
+	// is up — whether player JS challenges (sig above all, which is
+	// sidecar-only) can be solved at all right now. See compositeSolver's.
+	SidecarReady() bool
+}
+
+// readinessReporter is the optional half of a Solver that knows whether it
+// can be asked at all: the sidecar solver, through its *sidecar.Sidecar
+// (IsHealthy). A Solver without it — goja, the test fakes — is taken as
+// ready, so the healthy routing is what an unknown solver gets.
+type readinessReporter interface {
+	ready() bool
+}
+
+// solverReady reports whether s, a non-nil sidecar half, can be asked now.
+func solverReady(s Solver) bool {
+	r, ok := s.(readinessReporter)
+	return !ok || r.ready()
 }
 
 // compositeSolver routes cipher requests across two underlying solvers
@@ -69,12 +98,48 @@ func (c *compositeSolver) sidecar() Solver {
 	return c.sidecarSolver
 }
 
+// SidecarReady is the solver's health accessor: true while a sidecar half is
+// installed and reports its child up. It is false for the whole of an outage
+// — `[bgutils] use_sidecar = false`, a first start that failed, a crash until
+// the supervisor's restart installs the rebuilt solver (SetSidecar) — which
+// is when no signature can be solved and n has only the goja fallback. The
+// extraction reads it to rank the JS-less client first, yt-dlp's
+// _DEFAULT_JSLESS_CLIENTS (_video.py:144, 2972-2977, 2994-3000):
+// youtube.PlayerAPI's SetJSChallengeSolvable, wired in cmd/moombox.
+func (c *compositeSolver) SidecarReady() bool {
+	sc := c.sidecar()
+	return sc != nil && solverReady(sc)
+}
+
+// sidecarDown is the error a sig request gets from sidecar half sc that
+// failed with err — or, err nil, that was never asked because it reported
+// itself down: ErrSidecarUnavailable whenever sc is down now, wrapping the
+// child's own error when there is one, and err as it came otherwise. A
+// request in flight when the child dies is drained with an error of the
+// sidecar's own; read after the failure, the readiness types that one too.
+func sidecarDown(sc Solver, err error) error {
+	if solverReady(sc) {
+		return err
+	}
+	if err == nil {
+		return fmt.Errorf("%w: the sidecar is not running", ErrSidecarUnavailable)
+	}
+	return fmt.Errorf("%w: the sidecar is not running: %w", ErrSidecarUnavailable, err)
+}
+
 func (c *compositeSolver) Sig(ctx context.Context, playerID, encryptedSig string) (string, error) {
 	sc := c.sidecar()
 	if sc == nil {
 		return "", ErrSidecarUnavailable
 	}
-	return sc.Sig(ctx, playerID, encryptedSig)
+	if !solverReady(sc) {
+		return "", sidecarDown(sc, nil)
+	}
+	out, err := sc.Sig(ctx, playerID, encryptedSig)
+	if err != nil {
+		return "", sidecarDown(sc, err)
+	}
+	return out, nil
 }
 
 func (c *compositeSolver) N(ctx context.Context, playerID, encryptedN string) (string, error) {
@@ -122,6 +187,13 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 	nResults := map[string]string{}
 
 	sc := c.sidecar()
+	if sc != nil && !solverReady(sc) {
+		// Down: not asked, as Sig does not ask it. The n entries go to goja.
+		if len(sigs) > 0 {
+			return nil, nil, sidecarDown(sc, nil)
+		}
+		sc = nil
+	}
 	if sc != nil {
 		sr, nr, err := sc.Batch(ctx, playerID, sigs, ns)
 		if err == nil {
@@ -129,9 +201,10 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 			return sr, nr, nil
 		}
 		// Sidecar failed. Sig is sidecar-only; if any sigs were
-		// requested, surface the error. n falls back to goja per-element.
+		// requested, surface the error — typed as Sig types it, when the
+		// child is down. n falls back to goja per-element.
 		if len(sigs) > 0 {
-			return nil, nil, err
+			return nil, nil, sidecarDown(sc, err)
 		}
 	} else if len(sigs) > 0 {
 		// No sidecar configured but sig requested.

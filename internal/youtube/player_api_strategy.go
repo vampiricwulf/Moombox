@@ -173,6 +173,7 @@ func (p *PlayerAPI) finishExtraction(ctx context.Context, info *VideoInfo, wp *W
 		// but the verdict must not depend on that to stay a sentence.
 		return nil, errors.New("failed to extract any player response")
 	}
+	p.rankJSLess(ctx, info, wp, videoID)
 	return withAttestation(info, wp, videoID), nil
 }
 
@@ -493,6 +494,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// cascade parses (see extractionState) — it is what keeps the DRM-skip
 	// report to one line per extraction rather than one per client.
 	ctx = withExtractionState(ctx)
+	extractionStateFrom(ctx).markJSLess(p.jsLess())
 
 	// Fetch watch page
 	if err := p.auth.SyncCookies(); err != nil {
@@ -923,6 +925,7 @@ func (p *PlayerAPI) fallbackYtcfg(withSession bool) *YtcfgData {
 func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*VideoInfo, error) {
 	// One extraction's scratch state — see GetVideoInfoAuthenticated.
 	ctx = withExtractionState(ctx)
+	extractionStateFrom(ctx).markJSLess(p.jsLess())
 
 	wp, err := fetchWatchPage(ctx, videoID, p.auth.ConsentCookieHeader())
 	pageFetched := err == nil
@@ -1384,6 +1387,12 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 				slot.result, slot.err = fbResult, fbErr
 			}
 		}
+		level := fb.level
+		if fb.client.ClientName == constants.VisionOSClient.ClientName {
+			// Asked, whatever it answered, and ranked first while no player
+			// JS challenge can be solved (jslessState).
+			level = extractionStateFrom(ctx).noteVisionOS(fbResult, fbErr)
+		}
 		if fbErr != nil {
 			p.logger.Debug("[PlayerApi] cookieless fallback failed",
 				slog.String("client", fb.label), slog.String("error", fbErr.Error()))
@@ -1396,7 +1405,7 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 		}
 		stampManifestSources(fbResult, fb.label)
 		if !alreadyPooled {
-			collectFormats(formatPool, fbResult.Formats, fb.label, fb.level)
+			collectFormats(formatPool, fbResult.Formats, fb.label, level)
 			if slot != nil {
 				slot.pooled = true
 			}
@@ -1991,6 +2000,7 @@ func stampManifestSources(info *VideoInfo, label string) {
 // failure (a timeout, a cancel, an HTTP status) when there was one.
 func (p *PlayerAPI) CookielessFormats(ctx context.Context, videoID, visitorData string) ([]Format, error) {
 	ctx = withExtractionState(ctx)
+	extractionStateFrom(ctx).markJSLess(p.jsLess())
 	formatPool := []Format{}
 	tally := &mismatchTally{}
 	p.tryCookielessFallbacks(ctx, videoID, visitorData, &formatPool, tally, nil)

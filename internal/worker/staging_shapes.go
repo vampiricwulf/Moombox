@@ -147,3 +147,53 @@ func setAsideLiveShapesForVod(job *JobContext) error {
 	}
 	return nil
 }
+
+// setAsideOtherLiveShape clears a capture's part dir (job.StagingDir) of the
+// staged media of the OTHER live shape, once a setup has built the
+// downloaders in result and before they write: the DASH family's
+// video_stream and audio_stream when result records HLS (video.ts), the HLS
+// video.ts when it records anything else. setAsideLiveShapesForVod's rule —
+// two captures cannot share a dir — for the two live shapes; a whole-file
+// download has cleared both already (DownloadVod), so for it this finds
+// nothing.
+//
+// A job resumed after a restart records into the part it left unmuxed
+// (discoverResumeSegment), normally in the shape it had. The live HLS
+// fallback (setupWithFallback) changes the shape inside the part, for either
+// of its causes: a live job resumed while the player cannot be solved (audit
+// G10), or while its web-family streams need a GVS token none can be minted
+// (missing_pot, audit G16), records the live HLS playlist into the part that
+// holds its earlier from-start DASH capture, and once solving or minting
+// works again a job resumed from that fallback — live, or post-live after
+// the broadcast ended — records DASH beside its video.ts. The finalize muxes the one recording result names, the restart
+// mux and the Mux action the one discoverStagingMedia ranks first
+// (video_stream over video.ts), and the cleanup then deleted staging — no
+// part dirs, no whole-file pair, nothing it shields (decideStagingCleanup) —
+// with the other recording unmuxed in it. Set aside, that one is muxed into
+// its own file beside the archive at finalize (muxStagedAsides) and shielded
+// in staging until it is, like any restart's aside.
+//
+// A dir that cannot be cleared fails the setup, as it fails the whole-file
+// download: recording beside a capture the finalize will not take is the
+// loss this exists to prevent.
+func setAsideOtherLiveShape(job *JobContext, result *DownloadResult) error {
+	if result == nil {
+		return nil
+	}
+	other, shape := []string{"video.ts"}, "DASH"
+	if result.IsHls {
+		other, shape = []string{"video_stream", "audio_stream"}, "HLS"
+	}
+	asides, err := setAsideStagedMedia(job.StagingDir, other)
+	lg := newScopedLogger(job.Logger, "jobID", job.Job.ID)
+	if len(asides) > 0 {
+		lg.Warn("an earlier capture of this job in another shape was set aside before the "+shape+" capture records into its part; it is muxed to its own file beside the archive, never into it",
+			"asides", strings.Join(asides, " | "))
+	}
+	if err != nil {
+		lg.Error("could not set an earlier capture in another shape aside; refusing to record the "+shape+" capture beside it",
+			"dir", job.StagingDir, "err", err)
+		return fmt.Errorf("staging holds an earlier capture in another shape that could not be set aside: %w", err)
+	}
+	return nil
+}

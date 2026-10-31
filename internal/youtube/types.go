@@ -155,6 +155,13 @@ type VideoInfo struct {
 	// cookied hop) ask which it was. Never serialised.
 	StatusProbeEscalation string `json:"-"`
 
+	// JSLess is true when this info came from an extraction that ranked the
+	// JS-less client first because no player JS challenge could be solved —
+	// the cipher sidecar disabled or down (PlayerAPI.SetJSChallengeSolvable)
+	// — as yt-dlp asks _DEFAULT_JSLESS_CLIENTS then. The worker warns, as
+	// upstream does, that formats may be missing. Never serialised.
+	JSLess bool `json:"-"`
+
 	// liveFlagsStated is whether the response this info was parsed from
 	// stated any flag yt-dlp's live_status is decided on
 	// (statusLiveFlagsStated). False is the refused answer that says nothing
@@ -598,7 +605,12 @@ type YtcfgData struct {
 // cookieless clients stay the last-resort tier, because a cookieless client
 // winning a same-itag tie is the 2026-08-15 incident this comment block
 // opens with, and android_vr sits under selective enforcement with no token
-// that applies to it.
+// that applies to it. Save while no player JS challenge can be solved (the
+// cipher sidecar disabled or down): visionos is then pooled at
+// AuthLevelVisionOSJSLess, ahead of every tier here, because every other
+// client's copy needs the player JS (yt-dlp asks visionos alone then,
+// _DEFAULT_JSLESS_CLIENTS; challenge_free.go's jslessState) — and so it is
+// a token-free winner too, carrying a web-family copy as its TokenAlternate.
 //
 // Within the last-resort tier, VISIONOS sits above ANDROID_VR. That much IS
 // monotone with upstream, which dropped android_vr from every default client

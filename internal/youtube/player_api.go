@@ -99,7 +99,11 @@ type PlayerAPI struct {
 	// playbackClock is the clock a player response's pre-roll wait is
 	// measured from (playbackAvailableAt; nil: time.Now), a test seam.
 	playbackClock func() time.Time
-	logger        interface {
+	// jsChallengesSolvable reports whether the player's JS challenges can be
+	// solved right now (SetJSChallengeSolvable; nil: they can). While they
+	// cannot, an extraction ranks the JS-less client first (jsLess).
+	jsChallengesSolvable func() bool
+	logger               interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)

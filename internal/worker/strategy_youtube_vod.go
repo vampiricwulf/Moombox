@@ -31,50 +31,156 @@ var errEmptyGvsToken = errors.New("PO token generator returned an empty token")
 // isOnline is the connectivity check the downloaders wait an outage out on,
 // as on the live strategies; nil disables the wait.
 func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
-	res, err := downloadVod(ctx, job, videoInfo, routedSolver, cipherSolver, potProvider, isOnline)
-	if err == nil || !errors.Is(err, errGuessedGvsBinding) || ctx.Err() != nil {
-		return res, err
+	// A run (downloadVod) that cannot record what it selected fails, before
+	// anything is built or written, with one of two causes that a run over
+	// other formats or another binding answers — each at most once, in
+	// whichever order the runs meet them, so a setup makes three runs at
+	// most. Every run reads the setup's degrades (vodDegrades): one
+	// cookieless re-extract both degrades share, the challenge-free formats
+	// once that degrade has run, and the mint.
+	st := &vodDegrades{}
+	info, trusted := videoInfo, false
+	for {
+		res, err := downloadVod(ctx, job, info, st, routedSolver, cipherSolver, potProvider, isOnline)
+		if err == nil || ctx.Err() != nil {
+			return res, err
+		}
+		switch {
+		case st.challengeFree == nil && errors.Is(err, errChallengesUnsolvable):
+			// The challenge-free degrade (audit G10). A resolve failed for a
+			// reason every format needing the player JS shares — the sidecar
+			// down or disabled, a player ejs cannot solve or none could
+			// fetch, an n no solver answered, no player URL — the first
+			// selection's, or the one a missing_pot degrade re-ran. That
+			// leaves the job only the formats that need no JS: the
+			// extraction's, every challenge-bearing copy dropped, plus the
+			// cookieless chain's (challengeFreeFormats, over the setup's one
+			// re-extract), from which every later run selects under the
+			// first one's rules — a missing_pot degrade among them, and the
+			// guessed binding's trusted run, which therefore keeps this
+			// degrade rather than undoing it. yt-dlp gets there by skipping
+			// each format whose challenge fails before it records the stream
+			// (_video.py:3509-3511, 3557-3580, 3587-3589), so visionos's copy
+			// is the one it keeps.
+			st.challengeFree = err
+			st.formats = challengeFreeFormats(ctx, job, videoInfo.Formats, &st.cookieless, err, "VOD")
+		case !trusted && errors.Is(err, errGuessedGvsBinding):
+			// D12's last resort. The binding is a guess, so the run counted
+			// the token as missing and degraded — and the degrade left a
+			// chosen stream with no token-free copy: nothing selectable at
+			// all, a stream whose only copies left are segments, a video or
+			// audio stream gone from the selection, or a pinned rendition
+			// gone from the pool (only those failures wrap the
+			// guessed-binding cause, each before anything is built or
+			// written). The run is made once more with the guess trusted:
+			// its selection is the first one again — over the challenge-free
+			// formats when that degrade has run — and the token minted under
+			// the guess rides it.
+			job.Logger.Warn("[POT] missing_pot: a chosen stream has no token-free copy — minting under the guessed binding for the web-family formats",
+				"jobID", job.Job.ID, "binding", info.GvsBindingKind, "err", err)
+			// A mint that fails there too degrades again, on the mint's own
+			// failure, as any failed mint's does — a lost pin falls to the
+			// automatic pick, a lost stream is left out, nothing selectable
+			// is that run's error — and that run's outcome is the job's,
+			// save a degraded selection that fails on the challenges, which
+			// the challenge-free degrade answers as it answers any run's.
+			guessTrusted := *info
+			guessTrusted.GvsBindingGuessed = false
+			info, trusted = &guessTrusted, true
+		default:
+			return res, err
+		}
 	}
-	// D12's last resort. The binding is a guess, so the first run counted the
-	// token as missing and degraded — and the degrade left a chosen stream
-	// with no token-free copy: nothing selectable at all, a stream whose only
-	// copies left are segments, a video or audio stream gone from the
-	// selection, or a pinned rendition gone from the pool (only those
-	// failures wrap the guessed-binding cause, each before anything is built
-	// or written). The run is made once more with the guess trusted: its
-	// selection is the first one again, and the token minted under the guess
-	// rides it.
-	job.Logger.Warn("[POT] missing_pot: a chosen stream has no token-free copy — minting under the guessed binding for the web-family formats",
-		"jobID", job.Job.ID, "binding", videoInfo.GvsBindingKind, "err", err)
-	// A mint that fails there too degrades again, on the mint's own failure,
-	// as any failed mint's does — a lost pin falls to the automatic pick, a
-	// lost stream is left out, nothing selectable is that run's error — and
-	// that run's outcome is the job's.
-	trusted := *videoInfo
-	trusted.GvsBindingGuessed = false
-	return downloadVod(ctx, job, &trusted, routedSolver, cipherSolver, potProvider, isOnline)
 }
 
-// downloadVod is DownloadVod's one run over videoInfo; see DownloadVod.
-func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
-	// pool is the format list selection, cipher re-selection and the
-	// alternate picker all draw from: the extraction's, without the formats
-	// a whole-file GET cannot fetch (wholeFileVodPool) — a filtered COPY, as
-	// a missing_pot degrade's is, never the caller's slice filtered in place.
-	pool, segmented := wholeFileVodPool(videoInfo.Formats)
+// vodDegrades is one VOD setup's state across DownloadVod's runs of
+// downloadVod. Not safe for concurrent use: a setup runs on one goroutine.
+type vodDegrades struct {
+	// cookieless is the setup's cookieless re-extract, fetched at most once
+	// whichever degrade asks first and in whichever run: the missing_pot one
+	// and the challenge-free one each want the cookieless chain's copies.
+	cookieless cookielessReExtract
+	// challengeFree is the systemic resolve failure the challenge-free
+	// degrade answered, nil until it has; formats is that degrade's list
+	// (challengeFreeFormats), which every later run selects from in place of
+	// the extraction's.
+	challengeFree error
+	formats       []youtube.Format
+	// mint is the setup's GVS mint, made at most once for each reading of
+	// the binding (vodDegrades.gvsToken).
+	mint *vodMint
+}
+
+// vodMint is one GVS mint's answer, and whether the binding it was asked
+// under was distrusted as a guess (youtube.VideoInfo.GvsBindingGuessed).
+type vodMint struct {
+	guessed bool
+	tok     string
+	err     error
+}
+
+// gvsToken is a run's GVS token (strategyGvsToken, the guess distrusted):
+// minted the first time a run asks, and the same answer for a later run
+// that reads the binding as that one did — a run the challenge-free degrade
+// made after a missing_pot degrade's run failed on the challenges does not
+// mint again against the failure it degraded on. The guessed binding's
+// trusted run reads it otherwise, and mints.
+func (st *vodDegrades) gvsToken(ctx context.Context, p *bgutils.PotProvider, info *youtube.VideoInfo, binding string) (string, error) {
+	if st.mint == nil || st.mint.guessed != info.GvsBindingGuessed {
+		tok, err := strategyGvsToken(ctx, p, info, binding, false)
+		st.mint = &vodMint{guessed: info.GvsBindingGuessed, tok: tok, err: err}
+	}
+	return st.mint.tok, st.mint.err
+}
+
+// downloadVod is DownloadVod's one run over videoInfo, under the setup's
+// degrades so far (st); see DownloadVod. A resolve that fails systemically
+// (errChallengesUnsolvable) — the first selection's, or a missing_pot
+// degrade's — ends the run, for DownloadVod's challenge-free degrade to
+// answer.
+func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, st *vodDegrades, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
+	// formats is the list this run selects from: the extraction's, or the
+	// challenge-free degrade's once a run has failed on the player's JS
+	// challenges (st.formats) — the list a missing_pot degrade then merges
+	// into too. pool is the format list selection, cipher re-selection and
+	// the alternate picker all draw from: formats without the ones a
+	// whole-file GET cannot fetch (wholeFileVodPool) — a filtered COPY, as a
+	// missing_pot degrade's is, never the caller's slice filtered in place.
+	formats, cause := videoInfo.Formats, st.challengeFree
+	if cause != nil {
+		formats = st.formats
+	}
+	pool, segmented := wholeFileVodPool(formats)
 	selected, result := selectVodFormats(job, pool, nil, segmented)
 	if err := segmentedStreamLost(job, selected, segmented); err != nil {
+		if cause != nil {
+			return nil, fmt.Errorf("%w; its only copies that need no player JS are those (%w)", err, cause)
+		}
 		// selectDownloadStrategy sends a pool that holds a segmented format
 		// to DASH whenever a manifest came with it (its OTF arm), so this
 		// one had none.
 		return nil, fmt.Errorf("%w, and no DASH manifest came with them", err)
 	}
 	if !result.HasVideo && !result.HasAudio {
+		if cause != nil {
+			return nil, fmt.Errorf("VOD: no format is left that can be fetched without solving the player JS (%w)", cause)
+		}
 		return nil, fmt.Errorf("no suitable formats found for VOD download")
 	}
 	videoResolved, audioResolved, err := resolveVodURLs(ctx, job, result, pool, nil, segmented, routedSolver, cipherSolver, videoInfo.PlayerURL)
 	if err != nil {
 		return nil, err
+	}
+	if cause != nil {
+		videoSource, audioSource := "", ""
+		if result.VideoFormat != nil {
+			videoSource = result.VideoFormat.Source
+		}
+		if result.AudioFormat != nil {
+			audioSource = result.AudioFormat.Source
+		}
+		job.Logger.Info("[Cipher] VOD: serving formats that need no player JS",
+			"jobID", job.Job.ID, "videoSource", videoSource, "audioSource", audioSource)
 	}
 
 	// GVS PO token for the direct format URLs. yt-dlp's GVS_PO_TOKEN_POLICY
@@ -112,7 +218,7 @@ func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	var vodPoToken string
 	if potProvider != nil && (videoNeedsPot || audioNeedsPot) {
 		bindingValue, bindingKind := gvsBinding(job, videoInfo)
-		tok, mintErr := strategyGvsToken(ctx, potProvider, videoInfo, bindingValue, false)
+		tok, mintErr := st.gvsToken(ctx, potProvider, videoInfo, bindingValue)
 		mandatory := youtube.FormatGvsTokenMandatory(result.VideoFormat, videoInfo.IsPremium) ||
 			youtube.FormatGvsTokenMandatory(result.AudioFormat, videoInfo.IsPremium)
 		if mintErr != nil && !mandatory {
@@ -137,22 +243,29 @@ func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			// The cascade runs the cookieless chain only when web_creator was
 			// inadequate, so an adequate web_creator pool holds no token-free
 			// copy at all: fetch one, once, from visionos / android_vr, merge it
-			// into a copy of the extraction's pool (the re-dedup attaches it as
-			// the shadow) and degrade again. A failed fetch falls through to
-			// the degraded pool. An already-cancelled job skips the fetch.
+			// into a copy of formats — the extraction's, or the challenge-free
+			// degrade's, which takes only the fetch's copies that need no
+			// player JS — (the re-dedup attaches it as the shadow) and degrade
+			// again. The fetch is the setup's one (st.cookieless): a
+			// challenge-free degrade that ran first made it already. A failed
+			// fetch falls through to the degraded pool. An already-cancelled
+			// job skips the fetch.
 			lostVideo := result.VideoFormat != nil && !poolHasStream(pool, result.VideoFormat)
 			lostAudio := result.AudioFormat != nil && !poolHasStream(pool, result.AudioFormat)
 			if (lostVideo || lostAudio) && job.YT != nil && ctx.Err() == nil {
 				job.Logger.Info("[POT] missing_pot: re-extracting with the cookieless clients",
 					"jobID", job.Job.ID, "lostVideo", lostVideo, "lostAudio", lostAudio)
-				rxCtx, cancel := context.WithTimeout(ctx, credentialRefreshTimeoutFor(job.Config))
-				extra, rxErr := fetchCookielessFormats(job.YT, rxCtx, job.Job.VideoID)
-				cancel()
+				extra, rxErr := st.cookieless.fetch(ctx, job)
 				if rxErr != nil {
 					job.Logger.Warn("[POT] missing_pot: cookieless re-extract failed — continuing with the degraded pool",
 						"jobID", job.Job.ID, "err", rxErr)
 				} else {
-					merged := youtube.MergeFormatPool(ctx, videoInfo.Formats, extra)
+					if cause != nil {
+						// Only the copies the challenge-free degrade can
+						// fetch: formats holds no other.
+						extra, _ = withoutChallengeFormats(extra)
+					}
+					merged := youtube.MergeFormatPool(ctx, formats, extra)
 					pool, dropped, swapped = withoutGvsRequiredFormats(merged, videoInfo.IsPremium)
 					pool, removed = wholeFileVodPool(pool)
 					segmented = append(segmented, removed...)
@@ -177,6 +290,9 @@ func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			first := result
 			selected, result = selectVodFormats(job, pool, dropped, segmented)
 			if !result.HasVideo && !result.HasAudio {
+				if cause != nil {
+					return nil, fmt.Errorf("VOD: no formats usable without a GVS PO token or the player JS (mint failed: %w; %w)", mintErr, cause)
+				}
 				return nil, fmt.Errorf("VOD: no formats usable without a GVS PO token (mint failed: %w)", mintErr)
 			}
 			// The degraded selection is held to the first one's rule. The
@@ -198,6 +314,13 @@ func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			if lost := vodStreamsLost(first, result); guessed && len(lost) > 0 {
 				return nil, fmt.Errorf("VOD: the %s stream has no token-free copy: %w", strings.Join(lost, " and "), mintErr)
 			}
+			// The degraded selection's resolve can fail where the first one's
+			// did not — a tv copy's signature where the web family's n was
+			// solved — and a systemic failure here ends the run as the first
+			// selection's does: DownloadVod's challenge-free degrade answers
+			// it, and the run it makes degrades for the token again over the
+			// formats that need no player JS, on this run's mint and
+			// re-extract.
 			videoResolved, audioResolved, err = resolveVodURLs(ctx, job, result, pool, dropped, segmented, routedSolver, cipherSolver, videoInfo.PlayerURL)
 			if err != nil {
 				return nil, err
@@ -476,9 +599,18 @@ func selectVodFormats(job *JobContext, formats, dropped, segmented []youtube.For
 // dropped and segmented are what that selection was handed beside it
 // (selectVodFormats) — so a fully broken cipher state surfaces cleanly. A
 // re-selection rewrites result.VideoFormat / result.AudioFormat.
+//
+// A failure every format needing the player JS shares (systemicResolveFailure:
+// the sidecar down or not configured, a player ejs cannot solve, an n no
+// solver answered, no player URL) is not re-selected around one itag at a
+// time — the alternate would fail alike — and comes back at once, marked
+// errChallengesUnsolvable, for DownloadVod's challenge-free fallback.
 func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult, pool, dropped, segmented []youtube.Format, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, playerURL string) (videoResolved, audioResolved string, err error) {
 	if result.HasVideo && result.VideoFormat != nil {
 		resolvedURL, err := resolveFormatURL(ctx, result.VideoFormat, routedSolver, cipherSolver, playerURL, job.Logger)
+		if systemicResolveFailure(err, result.VideoFormat, playerURL) {
+			return "", "", fmt.Errorf("VOD: video URL resolve failed: %w", markChallengeFailure(err, result.VideoFormat, playerURL))
+		}
 		if err != nil {
 			job.Logger.Warn("[Cipher] VOD video resolve failed; trying re-selection",
 				"itag", result.VideoFormat.Itag, "err", err)
@@ -488,7 +620,7 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 			}
 			resolvedURL, err = resolveFormatURL(ctx, alt.VideoFormat, routedSolver, cipherSolver, playerURL, job.Logger)
 			if err != nil {
-				return "", "", fmt.Errorf("VOD: video URL resolve failed for primary and alternate: %w", err)
+				return "", "", fmt.Errorf("VOD: video URL resolve failed for primary and alternate: %w", markChallengeFailure(err, alt.VideoFormat, playerURL))
 			}
 			// The re-selection's whole stream shape, not just its video: a
 			// progressive primary replaced by a video-only alternate needs the
@@ -504,6 +636,9 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 	}
 	if result.HasAudio && result.AudioFormat != nil {
 		resolvedURL, err := resolveFormatURL(ctx, result.AudioFormat, routedSolver, cipherSolver, playerURL, job.Logger)
+		if systemicResolveFailure(err, result.AudioFormat, playerURL) {
+			return "", "", fmt.Errorf("VOD: audio URL resolve failed: %w", markChallengeFailure(err, result.AudioFormat, playerURL))
+		}
 		if err != nil {
 			job.Logger.Warn("[Cipher] VOD audio resolve failed; trying re-selection",
 				"itag", result.AudioFormat.Itag, "err", err)
@@ -513,7 +648,7 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 			}
 			resolvedURL, err = resolveFormatURL(ctx, retry, routedSolver, cipherSolver, playerURL, job.Logger)
 			if err != nil {
-				return "", "", fmt.Errorf("VOD: audio URL resolve failed for primary and alternate: %w", err)
+				return "", "", fmt.Errorf("VOD: audio URL resolve failed for primary and alternate: %w", markChallengeFailure(err, retry, playerURL))
 			}
 			result.AudioFormat = retry
 			job.Logger.Info("[Cipher] VOD audio re-selection succeeded", "newItag", retry.Itag)
