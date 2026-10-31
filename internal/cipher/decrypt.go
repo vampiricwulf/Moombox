@@ -122,6 +122,9 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 	} else {
 		nParam = decodedN
 	}
+	if nParam == "" && rawN != "" {
+		return nil, fmt.Errorf("%w (player %s): %w", ErrNUnsolved, playerID, errNUndecodable)
+	}
 	if nParam != "" && rawN != "" {
 		decryptedN, err := solveN(ctx, routedSolver, gojaResolver, req.PlayerURL, playerID, nParam)
 		if err != nil {
@@ -203,13 +206,21 @@ func solveN(ctx context.Context, routedSolver Solver, gojaResolver *GojaResolver
 //
 // An n it cannot answer fails the URL: the error wraps ErrNUnsolved and the
 // URL is "". That is no player URL to solve with (no solver is asked), no
-// solver, or every solver failing or answering with no answer (checkNResult).
+// solver, every solver failing or answering with no answer (checkNResult),
+// or a query n that does not percent-decode (errNUndecodable).
 // It used to hand the URL back unchanged with a Warn that downloads "may be
 // throttled", and its callers downloaded segments that 403. yt-dlp uses a
 // manifest only once its path n is solved and the answer is in the path
 // (`solved_n = n_result in manifest_path`, _video.py:3699, 3737, d20f58d72);
 // here both forms' answers land by construction, the challenge replaced
 // being the one just read out of the URL.
+//
+// The path form is read only when its value is at least 10 characters: the
+// match is a bare "/n/" substring, and the floor is the shape check the
+// original path regex made of "values that look like encrypted n-params"
+// (`/n/([a-zA-Z0-9_-]{10,})/`). yt-dlp's get_manifest_n_challenge takes any
+// `/n/([^/]+)/` (_video.py:3292-3298); a real challenge is well over the
+// floor, so the two read the same URLs.
 //
 // playerURL is the player.js URL (used for PlayerIDFromURL and the goja
 // GetSolvers cache key).  Pass a nil routedSolver to use goja directly.
@@ -254,7 +265,10 @@ func RoutedDecryptNInURL(ctx context.Context, routedSolver Solver, gojaResolver 
 		rawQuery = result[q+1:]
 	}
 	rawN, decodedN := RawQueryParam(rawQuery, "n")
-	if rawN != "" && decodedN != "" {
+	if rawN != "" && decodedN == "" {
+		return "", fmt.Errorf("%w (query form): %w", ErrNUnsolved, errNUndecodable)
+	}
+	if rawN != "" {
 		dec, err := solve(decodedN, "query")
 		if err != nil {
 			return "", err

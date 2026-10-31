@@ -61,7 +61,8 @@ var ErrPlayerJSStale = errors.New("cipher: player JS is stale or unsupported")
 // ErrNUnsolved signals a stream URL that carries an n challenge no solver
 // produced a valid answer for: every solver failed, or each answered with
 // something that is not an answer (checkNResult), or there was no player or
-// no solver to ask, or the answer could not be put in the challenge's place.
+// no solver to ask, or the n does not percent-decode (errNUndecodable), or
+// the answer could not be put in the challenge's place.
 // RoutedResolveURL, GojaResolver.ResolveURL (and so ResolveFormatURL) and
 // RoutedDecryptNInURL return it, wrapping the cause.
 //

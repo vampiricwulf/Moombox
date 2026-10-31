@@ -85,6 +85,9 @@ func (s *GojaResolver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*
 	} else {
 		nParam = decodedN
 	}
+	if nParam == "" && rawN != "" {
+		return nil, fmt.Errorf("%w (player %s): %w", ErrNUnsolved, PlayerIDFromURL(req.PlayerURL), errNUndecodable)
+	}
 	if nParam != "" && rawN != "" {
 		// A failure, like a missing sig solver above: an n left as YouTube
 		// sent it is refused, not throttled (ErrNUnsolved says where that
@@ -131,6 +134,14 @@ func checkNResult(challenge, out string) error {
 	}
 	return nil
 }
+
+// errNUndecodable is why a query n whose raw value does not percent-decode
+// is unsolved: RawQueryParam reads it as "", so there is no challenge to
+// hand a solver, and the URL would go out with the n as YouTube sent it —
+// refused, like any n left unsolved. All three entry points used to skip
+// such an n and hand the URL back with a nil error. The value is not
+// quoted: an n is one of the media-URL values redact.MediaURL cuts.
+var errNUndecodable = errors.New("the n parameter does not percent-decode")
 
 // replaceQueryN swaps the query's n=<raw> for n=<solved> in place, keeping
 // the parameter order, and reports whether it did. yt-dlp checks the same of

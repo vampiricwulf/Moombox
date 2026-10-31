@@ -268,6 +268,51 @@ func TestNAnswerThatDoesNotLandIsUnsolved(t *testing.T) {
 	}
 }
 
+// TestNThatDoesNotDecodeIsUnsolved: a query n whose raw value does not
+// percent-decode is an n present with no challenge to hand a solver
+// (RawQueryParam reads it as ""). All three entry points used to skip it and
+// hand the URL back as it came, err nil — the n left as YouTube sent it, as
+// refused as one no solver answered. Now each fails it with ErrNUnsolved and
+// no URL, without asking a solver and without quoting the value. The solver
+// here would answer anything, so a row that asks it resolves.
+//
+// Mutants: the undecodable check dropped in RoutedResolveURL (the
+// ResolveFormatURL row resolves), in ResolveURL (the goja row), or in
+// RoutedDecryptNInURL (its row).
+func TestNThatDoesNotDecodeIsUnsolved(t *testing.T) {
+	const raw = "ab%zzcdefghij"
+	const withN = "https://r1.googlevideo.com/videoplayback?itag=18&n=" + raw + "&c=TVHTML5"
+	routed := &fakeRoutedSolver{NFn: func(string) (string, error) { return nAnswer, nil }}
+	goja := gojaWithN(t, answers(func(string) string { return nAnswer }))
+	for _, entry := range []struct {
+		name string
+		call func() (string, error)
+	}{
+		{"ResolveFormatURL", func() (string, error) {
+			return ResolveFormatURL(context.Background(), routed, goja, nTestPlayerURL, ResolveFormatRequest{URL: withN})
+		}},
+		{"GojaResolver.ResolveURL", func() (string, error) {
+			res, err := goja.ResolveURL(context.Background(), ResolveURLRequest{StreamURL: withN, PlayerURL: nTestPlayerURL})
+			if res != nil {
+				return res.URL, err
+			}
+			return "", err
+		}},
+		{"RoutedDecryptNInURL", func() (string, error) {
+			return RoutedDecryptNInURL(context.Background(), routed, goja, nTestPlayerURL, withN)
+		}},
+	} {
+		got, err := entry.call()
+		if !errors.Is(err, ErrNUnsolved) || got != "" {
+			t.Errorf("%s = %q, %v; want \"\" and ErrNUnsolved", entry.name, got, err)
+			continue
+		}
+		if strings.Contains(err.Error(), raw) {
+			t.Errorf("%s error quotes the n: %v", entry.name, err)
+		}
+	}
+}
+
 // TestCheckNResult pins what counts as an answer, row by row.
 func TestCheckNResult(t *testing.T) {
 	for _, tc := range []struct {
