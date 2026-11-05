@@ -33,7 +33,8 @@ import (
 // run the from-start strategy); the age compared against 120 h of the wrong
 // unit or not at all (the 100 h row records HLS); the DASH-manifest kind
 // left out (its row); the isVod guard dropped (the post-live row records
-// HLS); the staged-capture exemption dropped (the resumed row records HLS);
+// HLS); the staged-capture exemption dropped, or narrowed to video_stream
+// (the resumed rows record HLS);
 // the from-start retry after a failed HLS setup dropped (the HLS-fails row
 // returns the HLS error); the Warn dropped (every HLS row).
 func TestMarathonLiveCaptureRecordsTheLiveEdge(t *testing.T) {
@@ -56,6 +57,7 @@ func TestMarathonLiveCaptureRecordsTheLiveEdge(t *testing.T) {
 		{name: "a start that does not parse", kind: "manifestless_dash", start: "2026-01-01", wantFrom: true},
 		{name: "post-live, 130 h", kind: "manifestless_dash", isVod: true, start: ago(130 * time.Hour), wantFrom: true},
 		{name: "resumed into a part holding its DASH capture", kind: "manifestless_dash", start: ago(130 * time.Hour), staged: "video_stream", wantFrom: true},
+		{name: "resumed into a part holding an audio-only DASH capture", kind: "manifestless_dash", start: ago(130 * time.Hour), staged: "audio_stream", wantFrom: true},
 		{name: "the live HLS setup fails", kind: "manifestless_dash", start: ago(130 * time.Hour), hlsErr: errors.New("no HLS manifest URL available"), wantFrom: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -211,7 +213,8 @@ func TestEvictedLiveStartSwitchesToTheLiveEdge(t *testing.T) {
 // the branch sits behind the live strategies' real fetches.
 //
 // Mutants: the call dropped, or moved below `consecutiveLiveChecks.Add(1)`;
-// the switch not adopted (`result = hlsResult` or attachProgress dropped);
+// the switch not adopted (`result = hlsResult`, the currentQuality or
+// monitor-baseline update, or attachProgress dropped);
 // the HLS capture built in the root staging dir instead of curCtx.
 func TestStillLiveBranchSwitchesAnEvictedStartFirst(t *testing.T) {
 	const name = "orchestrator_youtube.go"
@@ -253,7 +256,11 @@ func TestStillLiveBranchSwitchesAnEvictedStartFirst(t *testing.T) {
 		t.Errorf("the HLS capture is not built into the current part (curCtx), its other shape set aside: %s", init)
 	}
 	body := text(first.Body)
-	for _, want := range []string{"result = hlsResult", "attachProgress(result)", "continue"} {
+	// currentQuality and the monitor's baseline move to the HLS capture's
+	// shape too: left on the stopped DASH pair's, the next stall refresh's
+	// newQuality.Changed(currentQuality) would split a part on the shape
+	// change alone.
+	for _, want := range []string{"result = hlsResult", "currentQuality = o.extractQualityFromResult(result)", "monitor.UpdateBaseline(currentQuality)", "attachProgress(result)", "continue"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("a switch does not adopt the HLS capture: missing %q", want)
 		}

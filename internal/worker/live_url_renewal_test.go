@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	neturl "net/url"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,8 @@ import (
 // Mutants: URLExpiry left out of either downloader's options (its row);
 // liveURLRenewal arming a post-live run (the post-live row); the renewal
 // built on refreshGvsCredentials, or renewGvsCredentials invalidating
-// whatever recovering says (the visitor data is gone after the renewal).
+// whatever recovering says (the visitor data is gone after the renewal);
+// either downloader's renewal resolving the other stream's itag (its itag=).
 func TestManifestlessLiveDownloadersRenewBeforeExpiry(t *testing.T) {
 	orig := refreshVideoInfo
 	refreshVideoInfo = func(*youtube.Service, context.Context, string) (*youtube.VideoInfo, error) {
@@ -53,6 +55,7 @@ func TestManifestlessLiveDownloadersRenewBeforeExpiry(t *testing.T) {
 			if len(*built) != 2 {
 				t.Fatalf("built %d downloaders, want video and audio", len(*built))
 			}
+			wantItags := []string{"299", "140"}
 			for i, opts := range *built {
 				if (opts.URLExpiry != nil) != tc.wantArmed || opts.OnProactiveRefresh == nil {
 					t.Fatalf("downloader %d: URLExpiry set %v, OnProactiveRefresh set %v; want renewal armed %v",
@@ -67,6 +70,13 @@ func TestManifestlessLiveDownloadersRenewBeforeExpiry(t *testing.T) {
 				url, _ := opts.OnProactiveRefresh()
 				if !strings.Contains(url, "fresh.invalid") || !strings.Contains(url, "expire=1900000000") {
 					t.Errorf("downloader %d: renewal URL = %q, want the re-extraction's", i, url)
+				}
+				// Each downloader renews its OWN itag: video first, audio
+				// second, as DownloadManifestlessDash builds them. A
+				// closure resolving the other stream's itag would install
+				// the audio URL on the video downloader at its first renewal.
+				if u, err := neturl.Parse(url); err != nil || u.Query().Get("itag") != wantItags[i] {
+					t.Errorf("downloader %d: renewal URL = %q, want itag=%s (its own stream)", i, url, wantItags[i])
 				}
 				if vd := job.YT.GetVisitorData(); vd != "vd-123" {
 					t.Errorf("downloader %d: visitor data after the renewal = %q, want it kept (no 403 invalidation)", i, vd)
