@@ -200,7 +200,9 @@ func TestDownloadVodFallsBackToChallengeFreeFormats(t *testing.T) {
 		// web_creator's copies need nothing solved but a GVS token none can
 		// be minted: the tv video's TokenAlternate and the audio survive the
 		// challenge drop, then leave with missing_pot — the video for the
-		// visionos shadow the re-dedup gives it, the audio lost.
+		// visionos shadow the re-dedup gives it, the audio lost, which fails
+		// the attempt clearly rather than archive the video alone (wave FC:
+		// a real mint failure that loses a stream is errMissingPot).
 		wc := func(f youtube.Format) youtube.Format {
 			f = withLevel(f, youtube.AuthLevelWebCreator)
 			f.Source, f.URL = "web_creator", strings.TrimSuffix(f.URL, "&n="+nChal)
@@ -215,9 +217,9 @@ func TestDownloadVodFallsBackToChallengeFreeFormats(t *testing.T) {
 		info.Formats[1] = wc(info.Formats[1])
 		calls := fakeCookieless(t, append(visionosCopies(info)[:1], vrAudio), nil)
 		job, logs := reextractJob(t)
-		res, err := DownloadVod(context.Background(), job, info, &challengeSolver{n: sentinelOf}, nil, &bgutils.PotProvider{}, nil)
-		if err != nil {
-			t.Fatalf("DownloadVod = %v, want the visionos video", err)
+		_, err := DownloadVod(context.Background(), job, info, &challengeSolver{n: sentinelOf}, nil, &bgutils.PotProvider{}, nil)
+		if !errors.Is(err, errMissingPot) || !strings.Contains(err.Error(), "the audio stream has no copy usable without a GVS PO token") {
+			t.Fatalf("DownloadVod = %v, want the missing_pot failure naming the lost audio", err)
 		}
 		if n := calls.Load(); n != 1 {
 			t.Errorf("cookieless re-extract ran %d times, want 1 across both degrades", n)
@@ -225,8 +227,8 @@ func TestDownloadVodFallsBackToChallengeFreeFormats(t *testing.T) {
 		if logLine(logs, "[POT] missing_pot: cookieless re-extract merged") == nil {
 			t.Errorf("the missing_pot degrade did not merge the shared re-extract: %v", logs.lines())
 		}
-		if v := res.VideoFormat; v == nil || v.Itag != 302 || v.Source != "visionos" {
-			t.Errorf("video format = %+v, want visionos 302, the web_creator copy's shadow", v)
+		if logLine(logs, "[FormatSelector] best video: itag=302") == nil {
+			t.Errorf("the degraded selection did not take visionos 302, the web_creator copy's shadow: %v", logs.lines())
 		}
 	})
 }

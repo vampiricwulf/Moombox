@@ -694,24 +694,23 @@ func TestDownloadVodMissingPotReextractsCookieless(t *testing.T) {
 		}
 	})
 
-	t.Run("partial with no token-free video: the visionos audio becomes the primary", func(t *testing.T) {
-		// Nothing token-free carries video, so the selection is audio-only and
-		// selectVodFormats promotes the audio to the primary input — the same
-		// audio-only fallback every VOD selection has; the terminal error is
-		// only for a selection with neither stream.
+	t.Run("partial with no token-free video: the attempt fails, naming the video", func(t *testing.T) {
+		// Nothing token-free carries video, so the degraded selection would
+		// be audio-only — an audio file archived for a video job. A real mint
+		// failure that loses a stream fails clearly instead (owner decision,
+		// wave FC), wrapping errMissingPot and the mint's cause, for the
+		// job's retry path; the degrade's audio-only promotion is no longer
+		// reached for a stream the first selection carried.
 		fakeVodMint(t, "", mintErr)
 		info := incidentInfo()
 		calls := fakeCookieless(t, []youtube.Format{cookielessCopy(info.Formats[1])}, nil)
 		job, _ := reextractJob(t)
 		res, err := DownloadVod(context.Background(), job, info, stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
-		if err != nil {
-			t.Fatalf("DownloadVod = %v, want the audio-only fallback", err)
+		if !errors.Is(err, errMissingPot) || !errors.Is(err, mintErr) || !strings.Contains(err.Error(), "the video stream has no copy usable without a GVS PO token") {
+			t.Fatalf("DownloadVod = %+v, %v — want the missing_pot failure naming the lost video", res, err)
 		}
 		if n := calls.Load(); n != 1 {
 			t.Errorf("cookieless re-extract ran %d times, want 1", n)
-		}
-		if v := res.VideoFormat; v == nil || v.Itag != 251 || v.Source != "visionos" || res.AudioFormat != nil {
-			t.Errorf("formats = %+v / %+v, want visionos 251 as the only (primary) stream", res.VideoFormat, res.AudioFormat)
 		}
 	})
 

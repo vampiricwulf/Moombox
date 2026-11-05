@@ -69,8 +69,9 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			// the token as missing and degraded — and the degrade left a
 			// chosen stream with no token-free copy: nothing selectable at
 			// all, a stream whose only copies left are segments, a video or
-			// audio stream gone from the selection, or a pinned rendition
-			// gone from the pool (only those failures wrap the
+			// audio stream gone from the selection — the web family's itag
+			// 18 counting as no copy of either (wave FC) — or a pinned
+			// rendition gone from the pool (only those failures wrap the
 			// guessed-binding cause, each before anything is built or
 			// written). The run is made once more with the guess trusted:
 			// its selection is the first one again — over the challenge-free
@@ -80,8 +81,10 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 				"jobID", job.Job.ID, "binding", info.GvsBindingKind, "err", err)
 			// A mint that fails there too degrades again, on the mint's own
 			// failure, as any failed mint's does — a lost pin falls to the
-			// automatic pick, a lost stream is left out, nothing selectable
-			// is that run's error — and that run's outcome is the job's,
+			// automatic pick, the web family's itag 18 is a copy again, a
+			// lost stream fails the run with errMissingPot, nothing
+			// selectable is that run's error — and that run's outcome is the
+			// job's,
 			// save a degraded selection that fails on the challenges, which
 			// the challenge-free degrade answers as it answers any run's.
 			guessTrusted := *info
@@ -229,7 +232,29 @@ func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		} else if mintErr != nil {
 			var dropped, removed []youtube.Format
 			var swapped int
+			// Under a guessed binding the web family's itag 18 is no
+			// token-free copy (owner decision, wave FC): it is token-free
+			// only by YouTube's exemption, and a muxed 360p in place of the
+			// stream the job would record is a loss D12's last resort — the
+			// token minted under the guess — answers better. So it leaves the
+			// degraded pool with the formats whose token is mandatory (its
+			// own token-free shadow, where the dedup kept one, stands in),
+			// and a stream it was the only copy of is lost below, for
+			// DownloadVod's trusted run. That run mints under the guess and
+			// records the first selection; a mint that fails there degrades
+			// on its own failure, which is no guess, and keeps the 18 — as
+			// does a refusal of the guessed token, which the whole-file
+			// refresh's token fallback answers (refreshVodURL). A first
+			// selection that is itself the 18 is what the job records, never
+			// a substitute.
+			guessed := errors.Is(mintErr, errGuessedGvsBinding)
+			drop18 := guessed && !isExemptItag18(result.VideoFormat)
 			pool, dropped, swapped = withoutGvsRequiredFormats(pool, videoInfo.IsPremium)
+			if drop18 {
+				var gone []youtube.Format
+				pool, gone = withoutExemptItag18(pool)
+				dropped = append(dropped, gone...)
+			}
 			// A shadow swapped in is another response's copy, which can be one
 			// a whole-file GET cannot fetch: it leaves the pool as the
 			// extraction's own did, and its stream counts as lost below. What
@@ -267,6 +292,11 @@ func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 					}
 					merged := youtube.MergeFormatPool(ctx, formats, extra)
 					pool, dropped, swapped = withoutGvsRequiredFormats(merged, videoInfo.IsPremium)
+					if drop18 {
+						var gone []youtube.Format
+						pool, gone = withoutExemptItag18(pool)
+						dropped = append(dropped, gone...)
+					}
 					pool, removed = wholeFileVodPool(pool)
 					segmented = append(segmented, removed...)
 					job.Logger.Info("[POT] missing_pot: cookieless re-extract merged",
@@ -283,7 +313,6 @@ func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			// needs a token none could be minted, where none was asked for):
 			// the failure wraps the guessed-binding cause, and DownloadVod's
 			// trusted run honours the pin with the guessed token.
-			guessed := errors.Is(mintErr, errGuessedGvsBinding)
 			if lost := vodPinsLost(job, result, pool); guessed && len(lost) > 0 {
 				return nil, fmt.Errorf("VOD: the %s has no token-free copy: %w", strings.Join(lost, " and "), mintErr)
 			}
@@ -311,8 +340,21 @@ func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			// alone — an audio-only file for a video job — where a token
 			// minted under the guess fetches both. A lesser rendition of the
 			// same kind is a token-free copy of the stream, and is kept.
-			if lost := vodStreamsLost(first, result); guessed && len(lost) > 0 {
-				return nil, fmt.Errorf("VOD: the %s stream has no token-free copy: %w", strings.Join(lost, " and "), mintErr)
+			//
+			// A real mint failure (no guess) that loses a stream fails
+			// clearly too (owner decision, wave FC), as segmentedStreamLost
+			// does above: the one stream alone is never archived in the
+			// job's place. The error wraps errMissingPot and the mint's own
+			// failure, and names the lost stream; the job's retry path makes
+			// the next attempt, which mints afresh. A stream the job never
+			// wanted — the video of an audio-only job, the audio of a
+			// video-only pin (-1) — is not in the first selection, so it is
+			// never lost here.
+			if lost := vodStreamsLost(first, result); len(lost) > 0 {
+				if guessed {
+					return nil, fmt.Errorf("VOD: the %s stream has no token-free copy: %w", strings.Join(lost, " and "), mintErr)
+				}
+				return nil, fmt.Errorf("VOD: %w: the %s stream has no copy usable without a GVS PO token, and none could be minted (mint failed: %w)", errMissingPot, strings.Join(lost, " and "), mintErr)
 			}
 			// The degraded selection's resolve can fail where the first one's
 			// did not — a tv copy's signature where the web family's n was
@@ -820,6 +862,37 @@ func withoutGvsRequiredFormats(formats []youtube.Format, isPremium bool) (kept, 
 		}
 	}
 	return kept, dropped, swapped
+}
+
+// isExemptItag18 reports whether f is a web-family itag 18: a format whose
+// client requires the GVS token (youtube.GvsTokenRequired) that is
+// token-optional only by upstream's itag exemption (require_po_token's
+// `stream_id[0] not in ['18']`, _video.py:3516-3518), not because its client
+// needs none.
+func isExemptItag18(f *youtube.Format) bool {
+	return f != nil && f.Itag == 18 && youtube.GvsTokenRequired(f.Source)
+}
+
+// withoutExemptItag18 is a guessed binding's second missing_pot filter
+// (DownloadVod): pool without each web-family itag 18 (isExemptItag18), which
+// D12 does not count as a token-free copy — each replaced by its token-free
+// shadow where the dedup kept one, as withoutGvsRequiredFormats replaces a
+// dropped format. A filtered COPY; dropped is what left.
+func withoutExemptItag18(pool []youtube.Format) (kept, dropped []youtube.Format) {
+	kept = make([]youtube.Format, 0, len(pool))
+	for _, f := range pool {
+		if !isExemptItag18(&f) {
+			kept = append(kept, f)
+			continue
+		}
+		dropped = append(dropped, f)
+		if alt := f.TokenFreeAlternate; alt != nil && !youtube.GvsTokenRequired(alt.Source) {
+			a := *alt
+			a.TokenFreeAlternate = nil
+			kept = append(kept, a)
+		}
+	}
+	return kept, dropped
 }
 
 // formatItag is f's itag for a log line, or 0 for none.
