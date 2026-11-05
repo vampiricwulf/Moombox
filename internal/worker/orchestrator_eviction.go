@@ -60,7 +60,9 @@ const maxEvictionHuntAdvance = 32
 
 // diagnoseEvictedStart runs after a YouTube manifestless VOD download
 // finishes having written zero bytes (see the minEvictionHead guard for why
-// most zero-byte finishes never reach this point at all). It bisects for
+// most zero-byte finishes never reach this point at all), and in the live
+// loop's still-live branch, whose confirmed eviction sends the capture to the
+// live HLS playlist instead of failing it (evictedStartToLiveEdge). It bisects for
 // the true oldest segment the CDN still serves, fetches that boundary
 // segment, runs engine.InspectSegment on it, logs the full diagnosis at
 // Warn, and — only when eviction is CONFIRMED (the oldest available
