@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -136,8 +137,9 @@ func TestFetchWatchPageReadsPremiumOnlySignedIn(t *testing.T) {
 // TestWithAttestationStampsPremiumAndGuessedBinding pins the hand-off from the
 // page to the strategies: withAttestation carries the page's Premium verdict
 // onto the VideoInfo, and marks the GVS binding a guess exactly when the
-// session is signed in, the video-ID experiment is off and the page stated no
-// datasync ID (gvsContentBinding) — the binding D12 counts as a missing token.
+// session is signed in and the page stated no datasync ID, the video-ID
+// experiment on or off (gvsContentBinding) — the binding D12 counts as a
+// missing token.
 //
 // Mutants (each run): not stamping IsPremium fails the Premium row; stamping
 // the guess from the binding kind alone (visitor data) fails the signed-out
@@ -161,8 +163,15 @@ func TestWithAttestationStampsPremiumAndGuessedBinding(t *testing.T) {
 			wantGuess: true, wantKind: BindingVisitorData,
 		},
 		{
-			name:     "signed in under the video-ID experiment: no guess",
-			wp:       &WatchPageResult{Ytcfg: &YtcfgData{GvsBindToVideoID: true, VisitorData: "vd"}, SessionAuth: SessionAuthLoggedIn},
+			// Upstream refuses this mint (fetch_po_token, _video.py:2815-2819:
+			// no experiment exemption), so it is a guess (wave FC decision 6).
+			name:      "signed in under the video-ID experiment, no datasync ID: a guess",
+			wp:        &WatchPageResult{Ytcfg: &YtcfgData{GvsBindToVideoID: true, VisitorData: "vd"}, SessionAuth: SessionAuthLoggedIn},
+			wantGuess: true, wantKind: BindingVideoID,
+		},
+		{
+			name:     "signed in under the video-ID experiment with its datasync ID: no guess",
+			wp:       &WatchPageResult{Ytcfg: &YtcfgData{GvsBindToVideoID: true, DataSyncID: "ds", VisitorData: "vd"}, SessionAuth: SessionAuthLoggedIn},
 			wantKind: BindingVideoID,
 		},
 		{
@@ -343,6 +352,93 @@ func TestAuthenticatedCascadeFetchesWebCreatorForPremium(t *testing.T) {
 			if source299 != tc.wantSource {
 				t.Errorf("itag 299 served from %q, want %q — web_creator contributes, it does not lead", source299, tc.wantSource)
 			}
+		})
+	}
+}
+
+// TestPremiumWebCreatorManifestsAreTheFallback pins owner decision 5 of wave
+// FC: a Premium session's web_creator answer contributes its DASH and HLS
+// manifests only where no other client — nor the watch page — returned one,
+// each stamped with web_creator's label and its own pre-roll instant, as at
+// every other adoption site. A session without Premium never asks it, and
+// the return web_creator leads (tv with no formats) keeps another client's
+// manifest over its own too.
+//
+// Mutants (each run): not adopting at the main return fails the first row;
+// adopting ahead of the others (overwriting) fails the web_safari row's DASH
+// source; not stamping the source or the instant fails every adopting row's
+// assertAvailabilityMovesWithItsSource; letting web_creator's own manifests
+// lead its return fails the tv-without-formats row; not adopting on the
+// cookieless chain's return fails the inadequate-web_creator row; not
+// adopting on the age-restricted web_embedded return fails the
+// age-restricted row, and on the watch-page return the exhausted row.
+func TestPremiumWebCreatorManifestsAreTheFallback(t *testing.T) {
+	const wcDash, wcHls, safariDash, tvHls = "https://m.example/wc.mpd", "https://m.example/wc.m3u8", "https://m.example/safari.mpd", "https://m.example/tv.m3u8"
+	for _, tc := range []struct {
+		name                    string
+		premium                 bool
+		tv, safari              string
+		wantDash, wantHls       string
+		wantDashSrc, wantHlsSrc string
+		wc, visionos            string // "" for the default web_creator answer, and no visionos
+		embedded                string // web_embedded's answer, "" for none
+		page                    string // the watch page's player response, "" for none
+	}{
+		{name: "nothing else: both are web_creator's", premium: true, tv: srcBody(false, "whole", "", ""), safari: srcBody(false, "none", "", ""),
+			wantDash: wcDash, wantDashSrc: "web_creator", wantHls: wcHls, wantHlsSrc: "web_creator"},
+		{name: "web_safari's DASH is kept", premium: true, tv: srcBody(false, "whole", "", ""), safari: srcBody(false, "none", safariDash, ""),
+			wantDash: safariDash, wantDashSrc: "web_safari", wantHls: wcHls, wantHlsSrc: "web_creator"},
+		{name: "tv's HLS is kept", premium: true, tv: srcBody(false, "whole", "", tvHls), safari: srcBody(false, "none", "", ""),
+			wantDash: wcDash, wantDashSrc: "web_creator", wantHls: tvHls, wantHlsSrc: "tv_auth"},
+		{name: "tv without formats: web_creator leads, its manifests still the fallback", premium: true, tv: srcBody(false, "none", "", ""), safari: srcBody(false, "none", safariDash, ""),
+			wantDash: safariDash, wantDashSrc: "web_safari", wantHls: wcHls, wantHlsSrc: "web_creator"},
+		{name: "web_creator inadequate: the cookieless chain's answer takes its manifests", premium: true, tv: srcBody(false, "none", "", ""), safari: srcBody(false, "none", "", ""),
+			wc: srcBody(false, "audio", wcDash, wcHls), visionos: srcBody(false, "whole", "", ""),
+			wantDash: wcDash, wantDashSrc: "web_creator", wantHls: wcHls, wantHlsSrc: "web_creator"},
+		// The age-restricted web_embedded return takes the fallback too
+		// (wave FC review): web_embedded answered with no manifest.
+		{name: "age-restricted: web_embedded's answer takes its manifests", premium: true, tv: ageRestrictedBody, safari: srcBody(false, "none", "", ""),
+			embedded: srcBody(false, "whole", "", ""),
+			wantDash: wcDash, wantDashSrc: "web_creator", wantHls: wcHls, wantHlsSrc: "web_creator"},
+		// So does the all-clients-exhausted watch-page return: web_creator
+		// answered inadequate (audio alone), the cookieless chain nothing.
+		{name: "every client exhausted: the watch page's parse takes its manifests", premium: true, tv: srcBody(false, "none", "", ""), safari: srcBody(false, "none", "", ""),
+			wc: srcBody(false, "audio", wcDash, wcHls), page: srcBody(false, "none", "", ""),
+			wantDash: wcDash, wantDashSrc: "web_creator", wantHls: wcHls, wantHlsSrc: "web_creator"},
+		{name: "no Premium: never asked", tv: srcBody(false, "whole", "", ""), safari: srcBody(false, "none", "", "")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := fetchWatchPage
+			fetchWatchPage = func(context.Context, string, string) (*WatchPageResult, error) {
+				wp := &WatchPageResult{Ytcfg: DefaultYtcfg(), SessionAuth: SessionAuthLoggedIn, IsPremium: tc.premium}
+				if tc.page != "" {
+					if err := json.Unmarshal([]byte(tc.page), &wp.PlayerResponse); err != nil {
+						t.Fatalf("page: %v", err)
+					}
+				}
+				return wp, nil
+			}
+			t.Cleanup(func() { fetchWatchPage = orig })
+			origClient := apiClient
+			wc := tc.wc
+			if wc == "" {
+				wc = srcBody(false, "whole", wcDash, wcHls)
+			}
+			apiClient = &http.Client{Transport: &manifestSourceTransport{responses: map[string]string{
+				"7": tc.tv, "1s": tc.safari, "62": wc, "101": tc.visionos, "56": tc.embedded}}}
+			t.Cleanup(func() { apiClient = origClient })
+
+			info, err := preRollTestAPI().GetVideoInfoAuthenticated(context.Background(), "test1234567")
+			if err != nil {
+				t.Fatalf("GetVideoInfoAuthenticated: %v", err)
+			}
+			if info.DashManifestURL != tc.wantDash || info.DashManifestSource != tc.wantDashSrc {
+				t.Errorf("DASH = (%q, %q), want (%q, %q)", info.DashManifestURL, info.DashManifestSource, tc.wantDash, tc.wantDashSrc)
+			}
+			if info.HlsManifestURL != tc.wantHls || info.HlsManifestSource != tc.wantHlsSrc {
+				t.Errorf("HLS = (%q, %q), want (%q, %q)", info.HlsManifestURL, info.HlsManifestSource, tc.wantHls, tc.wantHlsSrc)
+			}
+			assertAvailabilityMovesWithItsSource(t, info)
 		})
 	}
 }

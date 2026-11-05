@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -215,24 +217,54 @@ func TestDownloadVodGuessedBindingCountsAsMissing(t *testing.T) {
 	// job errors); computing the mandatory test from the video alone fails
 	// the web-audio and failed-mint rows (web_creator audio rides bare);
 	// reading an audio-only primary as no stream fails the web-video row's
-	// cause (video and audio); reading itag 18 as video alone fails the 18
-	// row (a mint, the 1080p pair).
+	// cause (video and audio).
+	//
+	// Wave FC's owner decisions. Under a guess the web family's itag 18 is no
+	// token-free copy (it is token-optional only by YouTube's exemption), so
+	// the guessed token rides the full-quality selection, and the 18 is the
+	// fallback only for a mint that fails under the guess too; and a real
+	// mint failure that loses a stream fails the attempt with errMissingPot
+	// naming it, where the survivor used to be archived alone — a stream the
+	// job does not want (audio_only, a -1 pin) never counts as lost.
+	// Mutants (each run): never dropping the exempt 18 under a guess fails
+	// both 18 rows and the shadow-18 row (the 360p recorded, no mint);
+	// dropping it without swapping in its token-free shadow fails the
+	// shadow-18 row (a mint); dropping it on a real failure too fails the
+	// failed-mint-under-the-guess row and TestDownloadVodKeepsAWebFamilyItag18
+	// (nothing selectable); not re-filtering the re-extract's merge fails the
+	// merge subtest (the 18 comes back); failing a lost stream under a guess
+	// only fails both lost-stream rows (the survivor alone, no error).
 	shadowed303 := func() *youtube.VideoInfo {
 		info := vodMixedInfo()
 		info.Formats[0] = withTokenFreeShadow(info.Formats[0], "tv_public")
 		return info
 	}
 	pin := func(itag int) *int { return &itag }
+	shadowed18 := func() *youtube.VideoInfo {
+		info := vod18Info()
+		info.Formats[2] = withTokenFreeShadow(info.Formats[2], "tv_public")
+		return info
+	}
+	// vod18TvAudio is vod18Info with its audio from tv_public: the web
+	// family's 137 and 18 the only video, a token-free audio beside them.
+	vod18TvAudio := func() *youtube.VideoInfo {
+		info := vod18Info()
+		info.Formats[1].Source = "tv_public"
+		return info
+	}
 	for _, tc := range []struct {
 		name      string
 		info      *youtube.VideoInfo
 		pin       *int
+		audioPin  *int
+		quality   string
 		mintErr   error
 		wantMints int
 		wantVideo string // "itag/source/token"
 		wantAudio string // "" for no separate audio downloader
 		wantRerun bool
 		wantCause string // in the last resort's err
+		wantErr   string // DownloadVod's error, wrapping errMissingPot and the mint's
 	}{
 		{name: "the video has no token-free copy", info: guessed(vodPotInfo("web_creator", "tv_public")), wantMints: 1,
 			wantVideo: "302/web_creator/tok-guess", wantAudio: "251/tv_public/", wantRerun: true, wantCause: "the video stream has no token-free copy"},
@@ -240,15 +272,38 @@ func TestDownloadVodGuessedBindingCountsAsMissing(t *testing.T) {
 			wantVideo: "302/tv_public/", wantAudio: "251/web_creator/tok-guess", wantRerun: true, wantCause: "the audio stream has no token-free copy"},
 		{name: "a pinned rendition has no token-free copy", info: guessed(vodMixedInfo()), pin: pin(303), wantMints: 1,
 			wantVideo: "303/web_creator/tok-guess", wantAudio: "251/web_creator/tok-guess", wantRerun: true, wantCause: "the pinned video itag 303 has no token-free copy"},
-		// The muxed itag 18 is token-optional (G31) and carries both streams,
-		// so nothing is lost and nothing is minted: the 360p is recorded where
-		// the guessed token would have fetched the 1080p pair — upstream's
-		// outcome too, since it mints nothing under the guess and keeps 18.
-		{name: "the token-free itag 18 carries both streams", info: guessed(vod18Info()), wantVideo: "18/web_creator/"},
+		// The web family's muxed itag 18 is token-optional (G31) only by
+		// YouTube's exemption, so under a guess it is no token-free copy
+		// (owner decision, wave FC): the guessed token rides the 1080p pair
+		// rather than record the 360p. This row pinned the opposite until
+		// then — upstream's outcome, which mints nothing under the guess and
+		// keeps 18 — and was changed deliberately.
+		{name: "the web-family itag 18 is no token-free copy under a guess", info: guessed(vod18Info()), wantMints: 1,
+			wantVideo: "137/web_creator/tok-guess", wantAudio: "140/web_creator/tok-guess", wantRerun: true, wantCause: "no formats usable without a GVS PO token"},
+		{name: "an itag 18 the only token-free video: the guess rides the 1080p", info: guessed(vod18TvAudio()), wantMints: 1,
+			wantVideo: "137/web_creator/tok-guess", wantAudio: "140/tv_public/", wantRerun: true, wantCause: "the video stream has no token-free copy"},
+		// An 18 the dedup shadowed with a client's copy that needs no token
+		// is a token-free copy like any other: no mint.
+		{name: "an itag 18's own token-free shadow is a token-free copy", info: guessed(shadowed18()),
+			wantVideo: "18/tv_public/"},
+		// The guessed token cannot be had: the trusted run degrades on the
+		// mint's own failure, no guess, and the 18 is the fallback.
+		{name: "a failed mint under the guess falls back to the 18", info: guessed(vod18Info()), mintErr: errors.New("sidecar down"), wantMints: 1,
+			wantVideo: "18/web_creator/", wantRerun: true, wantCause: "no formats usable without a GVS PO token"},
 		{name: "a pinned rendition's own shadow is its token-free copy", info: guessed(shadowed303()), pin: pin(303),
 			wantVideo: "303/tv_public/", wantAudio: "250/tv_public/"},
-		{name: "a failed mint is no guess", info: vodPotInfo("tv_public", "web_creator"), mintErr: errors.New("sidecar down"), wantMints: 1,
-			wantVideo: "302/tv_public/"},
+		// A real mint failure that loses a stream fails the attempt clearly
+		// (owner decision, wave FC), never archiving the survivor alone.
+		{name: "a failed mint is no guess, and a lost stream fails", info: vodPotInfo("tv_public", "web_creator"), mintErr: errors.New("sidecar down"), wantMints: 1,
+			wantErr: "the audio stream has no copy usable without a GVS PO token"},
+		{name: "a failed mint that loses the video fails too", info: vodPotInfo("web_creator", "tv_public"), mintErr: errors.New("sidecar down"), wantMints: 1,
+			wantErr: "the video stream has no copy usable without a GVS PO token"},
+		// A stream the job does not want is never lost: a video-only pin's
+		// audio, an audio_only job's video.
+		{name: "an audio_only job keeps a token-free audio", info: vodMixedInfo(), quality: "audio_only", mintErr: errors.New("sidecar down"), wantMints: 1,
+			wantVideo: "250/tv_public/"},
+		{name: "a video-only pin keeps a token-free video", info: vodMixedInfo(), audioPin: pin(-1), mintErr: errors.New("sidecar down"), wantMints: 1,
+			wantVideo: "247/tv_public/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			token := "tok-guess"
@@ -257,13 +312,22 @@ func TestDownloadVodGuessedBindingCountsAsMissing(t *testing.T) {
 			}
 			calls := fakeVodMint(t, token, tc.mintErr)
 			job, logs := vodPotJob(t)
-			job.Job.SelectedVideoItag = tc.pin
+			job.Job.SelectedVideoItag, job.Job.SelectedAudioItag, job.Job.QualityPreference = tc.pin, tc.audioPin, tc.quality
 			res, err := DownloadVod(context.Background(), job, tc.info, stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
-			if err != nil {
-				t.Fatalf("DownloadVod: %v", err)
-			}
 			if n := int(calls.Load()); n != tc.wantMints {
 				t.Errorf("mint ran %d times, want %d", n, tc.wantMints)
+			}
+			if tc.wantErr != "" {
+				if err == nil || !errors.Is(err, tc.mintErr) || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("DownloadVod = %+v, %v — want an error saying %q, wrapping the mint's", res, err, tc.wantErr)
+				}
+				if strings.Contains(tc.wantErr, "has no copy") && !errors.Is(err, errMissingPot) {
+					t.Errorf("err = %v, want it to wrap errMissingPot", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DownloadVod: %v", err)
 			}
 			describe := func(f *youtube.Format, dl interface{ PoToken() string }) string {
 				if f == nil || dl == nil {
@@ -299,6 +363,26 @@ func TestDownloadVodGuessedBindingCountsAsMissing(t *testing.T) {
 			}
 		})
 	}
+
+	// The cookieless re-extract's merge folds the extraction's formats back
+	// in, the web-family 18 among them: it leaves the merged pool too, or
+	// the degrade records it after all.
+	t.Run("the re-extract's merge does not bring the 18 back", func(t *testing.T) {
+		calls := fakeVodMint(t, "tok-guess", nil)
+		info := guessed(vod18TvAudio())
+		rx := fakeCookieless(t, []youtube.Format{cookielessCopy(info.Formats[1])}, nil)
+		job, logs := reextractJob(t)
+		res, err := DownloadVod(context.Background(), job, info, stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
+		if err != nil {
+			t.Fatalf("DownloadVod: %v", err)
+		}
+		if rx.Load() != 1 || logLine(logs, "[POT] missing_pot: cookieless re-extract merged") == nil {
+			t.Fatalf("re-extract ran %d times, want one merged: %v", rx.Load(), logs.lines())
+		}
+		if res.VideoFormat.Itag != 137 || res.VideoDownloader.PoToken() != "tok-guess" || calls.Load() != 1 {
+			t.Errorf("video = %d token %q after %d mints, want the 137 on the guessed token", res.VideoFormat.Itag, res.VideoDownloader.PoToken(), calls.Load())
+		}
+	})
 
 	t.Run("a failed mint under the guess fails the job", func(t *testing.T) {
 		mintErr := errors.New("sidecar down")
@@ -688,6 +772,245 @@ func TestExecuteWithChatFallsToHlsOnMissingPot(t *testing.T) {
 			}
 			if tc.wantHls == 1 && !errors.Is(err, hlsErr) {
 				t.Errorf("err = %v, want the HLS setup's beside it", err)
+			}
+		})
+	}
+}
+
+// TestVodMissingPotFallback pins owner decision 7 of wave FC: a VOD or
+// post-live DASH-manifest setup that failed with errMissingPot falls to the
+// stream's other formats — the manifest-free path for a post-live stream
+// with a manifest-free split, else the whole-file path for a pool holding a
+// format a whole-file GET can fetch — as upstream skips only the manifest
+// (_video.py:3746-3749) and keeps the rest. A live stream is
+// missingPotFallback's; another failure, another strategy, or a pool with
+// nothing either path can take falls to nothing.
+//
+// Mutants (each run): dropping the isVod test fails the row the
+// orchestrator calls live; dropping the StreamLive test fails the live
+// stream's row; dropping the errMissingPot test fails
+// the other-failure row; dropping the strategy test fails the
+// manifest-free-setup row; dropping the post-live arm fails the post-live
+// row (the whole-file path for live adaptive segments); dropping the
+// whole-file test fails the segments-only row.
+func TestVodMissingPotFallback(t *testing.T) {
+	missing := errors.Join(errMissingPot, errors.New("sidecar down"))
+	vod := func() *youtube.VideoInfo {
+		info := vodPotInfo("tv_public", "tv_public")
+		info.StreamStatus = youtube.StreamVOD
+		for i := range info.Formats {
+			info.Formats[i].ContentLength = "1000"
+		}
+		return info
+	}
+	postLive := func() *youtube.VideoInfo {
+		info := manifestlessPotInfo("tv_public", "tv_public")
+		info.StreamStatus = youtube.StreamPostLive
+		for i := range info.Formats {
+			info.Formats[i].TargetDurationSec = 5
+		}
+		return info
+	}
+	segmentsOnly := func() *youtube.VideoInfo {
+		info := postLive()
+		info.StreamStatus = youtube.StreamVOD
+		return info
+	}
+	live := func() *youtube.VideoInfo {
+		info := vod()
+		info.StreamStatus = youtube.StreamLive
+		return info
+	}
+	for _, tc := range []struct {
+		name     string
+		strategy DownloadStrategy
+		isVod    bool
+		info     *youtube.VideoInfo
+		err      error
+		want     DownloadStrategy
+	}{
+		{"a VOD with whole-file formats", DashStrategy, true, vod(), missing, VodStrategy},
+		{"a post-live stream with a manifest-free split", DashStrategy, true, postLive(), missing, ManifestlessDashStrategy},
+		{"segments only, not post-live", DashStrategy, true, segmentsOnly(), missing, nil},
+		{"a live capture is missingPotFallback's", DashStrategy, false, live(), missing, nil},
+		{"a setup the orchestrator calls live", DashStrategy, false, vod(), missing, nil},
+		{"a live stream however it is called", DashStrategy, true, live(), missing, nil},
+		{"another setup failure", DashStrategy, true, vod(), errors.New("DASH: fetch manifest: 503"), nil},
+		{"a manifest-free setup", ManifestlessDashStrategy, true, vod(), missing, nil},
+		{"no formats", DashStrategy, true, &youtube.VideoInfo{StreamStatus: youtube.StreamVOD}, missing, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := vodMissingPotFallback(tc.strategy, tc.isVod, tc.info, tc.err); got != tc.want {
+				t.Errorf("vodMissingPotFallback = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSetupFallsToOtherFormatsOnVodMissingPot is the setup half of owner
+// decision 7 of wave FC, end to end on the real strategies: a VOD whose
+// web-family DASH manifest needs a GVS token none could be minted (DownloadDash
+// skips it, errMissingPot) downloads its token-free whole files instead,
+// where the job used to fail; a whole-file path with nothing token-free
+// either fails with both causes joined; a job cancelled by then sets up
+// nothing more.
+//
+// Mutants (each run): dropping the fallback from setupOrFallback fails the
+// first row (the DASH setup's error); keeping only the fallback's error
+// fails the second row's errMissingPot-of-the-DASH-setup test; dropping the
+// cancel guard fails the third row (the whole-file path runs).
+func TestSetupFallsToOtherFormatsOnVodMissingPot(t *testing.T) {
+	sidecarDown := errors.New("sidecar down")
+	for _, tc := range []struct {
+		name      string
+		audio     string // the whole-file audio's client
+		video     string
+		cancelled bool
+		wantVideo string // the whole-file path's video source, "" for an error
+	}{
+		{name: "the token-free whole files are downloaded", video: "tv_public", audio: "tv_public", wantVideo: "tv_public"},
+		{name: "nothing token-free either: both causes", video: "web_creator", audio: "web_creator"},
+		{name: "a cancelled job sets up nothing more", video: "tv_public", audio: "tv_public", cancelled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := fakeVodMint(t, "", sidecarDown)
+			srv := newManifestServer(t, potTestMPD)
+			job, logs := vodPotJob(t)
+			info := vodPotInfo(tc.video, tc.audio)
+			info.StreamStatus = youtube.StreamVOD
+			for i := range info.Formats {
+				info.Formats[i].ContentLength = "1000"
+			}
+			info.DashManifestURL, info.DashManifestSource = srv.URL+"/api/manifest/dash/id/abc", "web_creator"
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			deps := &StrategyDeps{RoutedCipherSolver: stubCipherSolver{}, PotProvider: &bgutils.PotProvider{}}
+			if tc.cancelled {
+				// The DASH setup sees the cancel as its mint's own failure.
+				orig := mintGvsPoToken
+				mintGvsPoToken = func(context.Context, *bgutils.PotProvider, string) (string, error) {
+					cancel()
+					return "", sidecarDown
+				}
+				t.Cleanup(func() { mintGvsPoToken = orig })
+			}
+			res, err := setupWithFallback(ctx, job, DashStrategy, true, info, deps)
+			fell := logLine(logs, "[POT] missing_pot: no GVS token for the DASH manifest — downloading the vod formats instead") != nil
+			switch {
+			case tc.cancelled:
+				if !errors.Is(err, errMissingPot) || fell {
+					t.Errorf("setup = %v, fell back %v; want the DASH setup's missing_pot and no fallback", err, fell)
+				}
+			case tc.wantVideo == "":
+				if !fell || !errors.Is(err, errMissingPot) || !strings.Contains(err.Error(), "the vod fallback failed too") ||
+					!strings.Contains(err.Error(), "the web_creator manifest needs a GVS PO token") || !strings.Contains(err.Error(), "no formats usable without a GVS PO token") {
+					t.Errorf("setup = %v, fell back %v; want both causes joined", err, fell)
+				}
+			default:
+				if err != nil || res == nil || res.VideoFormat == nil || res.VideoFormat.Source != tc.wantVideo {
+					t.Fatalf("setup = %+v, %v; want the whole-file path's %s formats", res, err, tc.wantVideo)
+				}
+				if !fell {
+					t.Errorf("no fallback line: %v", logs.lines())
+				}
+				if n := calls.Load(); n != 1 {
+					t.Errorf("mint ran %d times, want 1 — the token-free files need none", n)
+				}
+			}
+			srv.mu.Lock()
+			defer srv.mu.Unlock()
+			if len(srv.paths) != 0 {
+				t.Errorf("manifest fetched %v, want it skipped", srv.paths)
+			}
+		})
+	}
+}
+
+// TestLiveGuessedDashManifestFallsToHls pins owner decision 3 of wave FC: a
+// live capture whose only from-start path is a web-family DASH manifest, its
+// binding a guess, mints under the guess (the manifest has no token-free
+// copy) — and when that manifest is refused, or no token can be had under
+// the guess either, the missing_pot fallback records the live HLS playlist
+// instead. A refusal of a token that is no guess is not a missing_pot, and
+// falls to nothing.
+//
+// Mutants (each run): not marking a guessed token's refusal errMissingPot
+// fails the refused row (no HLS); marking every refusal fails the
+// no-guess row (HLS for a token that is no guess); not minting under the
+// guess fails the accepted row (no /pot/ path) and the refused row.
+func TestLiveGuessedDashManifestFallsToHls(t *testing.T) {
+	sidecarDown := errors.New("sidecar down")
+	for _, tc := range []struct {
+		name     string
+		guessed  bool
+		refuse   bool
+		mintErr  error
+		wantHls  bool
+		wantPot  bool // the manifest was asked for with a /pot/ token
+		noFetch  bool
+		wantDash bool // the DASH setup succeeded
+	}{
+		{name: "accepted: the guessed token rides the manifest", guessed: true, wantPot: true, wantDash: true},
+		{name: "refused: HLS takes over", guessed: true, refuse: true, wantPot: true, wantHls: true},
+		{name: "no token under the guess either: HLS", guessed: true, mintErr: sidecarDown, wantHls: true, noFetch: true},
+		{name: "a refused token that is no guess", refuse: true, wantPot: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token := "tok-guess"
+			if tc.mintErr != nil {
+				token = ""
+			}
+			fakeVodMint(t, token, tc.mintErr)
+			ms := &manifestServer{}
+			ms.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ms.mu.Lock()
+				ms.paths = append(ms.paths, r.URL.Path)
+				ms.mu.Unlock()
+				if tc.refuse {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
+				}
+				_, _ = w.Write([]byte(potTestMPD))
+			}))
+			t.Cleanup(ms.Close)
+			hls := &fakeStrategy{kind: "hls"}
+			swapHls(t, hls)
+			job, logs := vodPotJob(t)
+			info := &youtube.VideoInfo{
+				StreamStatus:       youtube.StreamLive,
+				DashManifestURL:    ms.URL + "/api/manifest/dash/id/abc",
+				DashManifestSource: "web_safari",
+				HlsManifestURL:     "https://m.example/x.m3u8",
+				HlsManifestSource:  "web_safari",
+				GvsBindingGuessed:  tc.guessed,
+			}
+			res, err := setupWithFallback(context.Background(), job, DashStrategy, false, info, &StrategyDeps{PotProvider: &bgutils.PotProvider{}})
+			ms.mu.Lock()
+			paths := append([]string(nil), ms.paths...)
+			ms.mu.Unlock()
+			if tc.noFetch {
+				if len(paths) != 0 {
+					t.Errorf("manifest fetched %v, want it skipped", paths)
+				}
+			} else if len(paths) != 1 || strings.Contains(paths[0], "/pot/") != tc.wantPot {
+				t.Errorf("manifest requests = %v, want one, /pot/ %v", paths, tc.wantPot)
+			}
+			if ran := len(hls.seen) == 1; ran != tc.wantHls {
+				t.Fatalf("HLS ran %d times, want %v: %v (%v)", len(hls.seen), tc.wantHls, err, logs.lines())
+			}
+			switch {
+			case tc.wantHls:
+				if err != nil || res == nil || !res.IsHls {
+					t.Errorf("setup = %+v, %v; want the HLS fallback's result", res, err)
+				}
+			case tc.wantDash:
+				if err != nil || res == nil || res.VideoDownloader.PoToken() != "tok-guess" {
+					t.Errorf("setup = %+v, %v; want the DASH capture on the guessed token", res, err)
+				}
+			default:
+				if err == nil || errors.Is(err, errMissingPot) {
+					t.Errorf("setup = %v, want the DASH setup's own failure, no missing_pot", err)
+				}
 			}
 		})
 	}

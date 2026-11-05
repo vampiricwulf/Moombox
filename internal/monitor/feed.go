@@ -274,6 +274,13 @@ type FeedMonitor struct {
 	// schema buys. Guarded by fm.mu.
 	failingProbes map[string]map[string]probeSpell
 
+	// RateLimitHeld reports whether the backlog's YouTube rate-limit hold
+	// stands at now (worker.Scheduler.RateLimitHeld, wired by cmd/moombox):
+	// while it does, a row whose last probe the rate limit refused is not
+	// re-checked (probeHeld). Nil reads as no hold, so such a row is asked
+	// every cycle.
+	RateLimitHeld func(now time.Time) bool
+
 	// FetchRSS overrides the RSS feed fetch (fm.fetchFeed's real HTTP GET)
 	// for tests. Nil uses the real fetch — see rssFetch.
 	FetchRSS RSSFetchFunc

@@ -208,10 +208,11 @@ type VideoInfo struct {
 	GvsBinding     string `json:"-"`
 	GvsBindingKind string `json:"-"`
 	// GvsBindingGuessed marks a binding GvsContentBinding had to guess: the
-	// session is signed in, the video-ID experiment is off, and the page
-	// stated no datasync ID, so the binding fell to visitor data, the video
-	// ID or the channel ID — values a signed-in session's GVS token is not
-	// bound to. yt-dlp mints nothing there (fetch_po_token, "Missing required
+	// session is signed in and the page stated no datasync ID, so the
+	// binding fell to the video-ID experiment's video ID, visitor data, the
+	// video ID or the channel ID — values a signed-in session's GVS token is
+	// not shown to be bound to. yt-dlp mints nothing there, the experiment on
+	// or off (fetch_po_token, "Missing required
 	// Data Sync ID for account", _video.py:2815-2819); the strategies count
 	// it as a missing token (owner decision D12, 2026-10-31): a stream whose
 	// token is mandatory prefers its token-free copies, and rides a token

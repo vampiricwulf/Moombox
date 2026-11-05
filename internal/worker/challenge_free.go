@@ -241,6 +241,15 @@ func challengeFreeHlsInfo(ctx context.Context, job *JobContext, info *youtube.Vi
 //     challengeFreeHlsInfo, and asks it too when the extraction carried no
 //     master at all. visionos serves a live stream no DASH manifest, so a
 //     DASH-manifest capture's no-JS path is the manifest-free one too.
+//   - A VOD or post-live DASH-manifest setup that failed with errMissingPot
+//     downloads the stream's other formats instead (vodMissingPotFallback,
+//     owner decision, wave FC): the manifest-free path for a post-live
+//     stream with a manifest-free split, else the whole-file path for one
+//     whose pool holds a format a whole-file GET can fetch. Either runs its
+//     own missing_pot degrade over the token-free copies, and fails with the
+//     missing_pot cause, joined to the DASH setup's, only when it has
+//     nothing either. Upstream skips only the manifest (_video.py:3746-3749,
+//     yt-dlp 5b57b72c1, #13640) and keeps the formats beside it.
 //   - A post-live manifest-free capture has no live edge to fall to. One
 //     that failed on the challenges runs again on the formats that need no
 //     player JS (challengeFreeFormats: the drop, one cookieless re-extract,
@@ -302,6 +311,15 @@ func setupOrFallback(ctx context.Context, job *JobContext, strategy DownloadStra
 		job.Logger.Warn("[POT] missing_pot: no GVS token for the "+kind+" streams — recording the live HLS playlist instead, from the oldest segment its window holds",
 			"jobID", job.Job.ID, "err", err)
 		return liveHlsInstead(ctx, job, hls, info, deps, err)
+	}
+	if alt := vodMissingPotFallback(strategy, isVod, info, err); alt != nil {
+		job.Logger.Warn("[POT] missing_pot: no GVS token for the DASH manifest — downloading the "+alt.Kind()+" formats instead",
+			"jobID", job.Job.ID, "err", err)
+		altResult, altErr := alt.Download(ctx, job, info, deps)
+		if altErr != nil {
+			return nil, fmt.Errorf("%w; the %s fallback failed too: %w", err, alt.Kind(), altErr)
+		}
+		return altResult, nil
 	}
 	if !setupFailedOnChallenges(err) {
 		return result, err

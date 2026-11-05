@@ -344,6 +344,17 @@ func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConf
 // login_required does neither: on public videos it is anti-bot pushback,
 // not a membership signal (§9).
 //
+// A members_only refusal with no videoDetails reaches here classified
+// not_a_stream, the one classification reached by absence. With no
+// authenticated retry to answer it — membership inactive, no cookies — it
+// stores nothing (owner decision, wave FC): it is returned as the
+// OutcomeDenied a refusal of an upcoming stream is, so the row stays
+// undecided instead of settling not_a_stream, which no rule probes again.
+// The relabel still lands, so the cookie gate parks the row until cookies
+// return, and then the signed-in probe classifies it. A membership row's own
+// probe is that signed-in one: its detail-less refusal is the verdict and
+// is stored not_a_stream, as before.
+//
 // confirm is the end check this probe may make (endCheckFor), passed on to
 // both probes when the refusal escalates.
 //
@@ -353,9 +364,9 @@ func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConf
 // and the row's hold (noteProbeOutcome) as of now, the cycle's instant; the
 // caller has already checked that the row is not held (probeHeld).
 func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem, confirm ConfirmEndFunc, now time.Time) ProbeClassifyResult {
-	probe := fm.ProbeVideo
+	probe, signedIn := fm.ProbeVideo, false
 	if row.Source == "membership" && fm.ProbeVideoAuth != nil {
-		probe = fm.ProbeVideoAuth
+		probe, signedIn = fm.ProbeVideoAuth, true
 	}
 	res := probeAndClassify(ProbeClassifyParams{
 		Ctx:        ctx,
@@ -403,6 +414,12 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 			Logger:     fm.logger,
 		})
 		fm.noteProbeOutcome(ctx, chID, row.VideoID, res, now)
+	} else if !signedIn && res.Outcome == OutcomeProbed && res.StreamStatus == "not_a_stream" {
+		// No authenticated probe answered the detail-less refusal: nothing
+		// is stored on it (see the doc above). One that did — a membership
+		// row's own signed-in probe, cookies stale or no membership — is
+		// the verdict and is stored, as it was before wave FC.
+		res.Outcome = OutcomeDenied
 	}
 	return res
 }
@@ -421,6 +438,11 @@ type probeSpell struct {
 	// cycle — and left as it stands by one that fails transiently once the
 	// hold is due, so that row is retried next cycle too, on the same step.
 	until time.Time
+	// rateLimited: the spell's last probe was refused by the session's rate
+	// limit (ProbeClassifyResult.RateLimited). It climbs no ladder — holds
+	// and until stand as they were — and holds the row only while the
+	// backlog's rate-limit hold stands (FeedMonitor.RateLimitHeld, probeHeld).
+	rateLimited bool
 }
 
 // inFailureSpell reports whether chID's row videoID is in a failure spell:
@@ -450,11 +472,24 @@ func (fm *FeedMonitor) inFailureSpell(chID, videoID string) bool {
 // probeHeld reports whether chID's row videoID is on an inconclusive hold
 // that has not ended by now, the cycle's instant (probeSpell.until): the
 // walk skips its probe, and the archive its refresh probe, until it ends.
+//
+// A row whose last probe was refused by the session's rate limit
+// (probeSpell.rateLimited) is held instead for as long as the backlog's
+// rate-limit hold stands (RateLimitHeld, read outside fm.mu): its re-check
+// would be one more call into the same limit. Once that hold has run out the
+// row is asked every cycle until a probe answers — the limit lifts on its
+// own, and the ladder is for a refusal of the video (owner decision, wave FC).
 func (fm *FeedMonitor) probeHeld(chID, videoID string, now time.Time) bool {
 	fm.mu.Lock()
-	defer fm.mu.Unlock()
 	spell, ok := fm.failingProbes[chID][videoID]
-	return ok && now.Before(spell.until)
+	fm.mu.Unlock()
+	if !ok {
+		return false
+	}
+	if now.Before(spell.until) {
+		return true
+	}
+	return spell.rateLimited && fm.RateLimitHeld != nil && fm.RateLimitHeld(now)
 }
 
 // noteProbeOutcome records one probe of chID's row videoID, made at now, the
@@ -472,7 +507,13 @@ func (fm *FeedMonitor) probeHeld(chID, videoID string, now time.Time) bool {
 //     it is three requests signed out (the escalation). DECAPI's newest video
 //     is not held: it is asked about every cycle (ErrProbeInconclusive). A
 //     transient failure holds nothing — a freshly live video must not be
-//     blinded for an hour by one flaky probe (probeAndClassify);
+//     blinded for an hour by one flaky probe (probeAndClassify). Nor does a
+//     probe refused by the session's rate limit (ProbeClassifyResult
+//     .RateLimited) climb the ladder (owner decision, wave FC): the limit is
+//     the session's, not the video's, so it neither starts nor advances the
+//     row's hold — the spell's step and until stand as they were — and marks
+//     the spell rate-limited, which holds the row only while the backlog's
+//     rate-limit hold stands (probeHeld), then every cycle;
 //   - an answered probe (OutcomeProbed, OutcomeDenied — a refusal is an
 //     answer) ends the spell and resets the ladder, so the row is probed on
 //     its own rule again from the next cycle, and its next inconclusive
@@ -501,7 +542,11 @@ func (fm *FeedMonitor) noteProbeOutcome(ctx context.Context, chID, videoID strin
 			fm.failingProbes[chID] = make(map[string]probeSpell)
 		}
 		spell := fm.failingProbes[chID][videoID]
-		if res.Inconclusive {
+		spell.rateLimited = res.RateLimited
+		if res.RateLimited {
+			fm.logger.Debug("status probe refused by a rate limit; row re-checked once the rate-limit hold has run out",
+				"id", videoID, "channel", chID)
+		} else if res.Inconclusive {
 			spell.until = now.Add(endRecheckDelay(spell.holds))
 			spell.holds++
 			fm.logger.Debug("status probe inconclusive; row held",

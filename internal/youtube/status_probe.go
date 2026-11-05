@@ -109,6 +109,17 @@ func (e *StatusProbeInconclusiveError) Error() string {
 
 func (e *StatusProbeInconclusiveError) Unwrap() error { return e.EscalationErr }
 
+// RateLimited reports whether the probe was inconclusive because the
+// session is rate-limited (ANDROID_VR's PlayabilityRateLimited, which
+// Service.ProbeVideoStatus never escalates: errRateLimitedSession) rather
+// than refused for the video: the limit is the session's and lifts on its
+// own, so a consumer that backs off a video for an inconclusive answer must
+// not back it off for this one (cmd/moombox's monitorProbe marks it
+// monitor.ErrProbeRateLimited).
+func (e *StatusProbeInconclusiveError) RateLimited() bool {
+	return e.Playability == PlayabilityRateLimited || errors.Is(e.EscalationErr, errRateLimitedSession)
+}
+
 // refusalText is one refused answer as the error text names it.
 func refusalText(playability PlayabilityError, reason string) string {
 	if reason == "" {
