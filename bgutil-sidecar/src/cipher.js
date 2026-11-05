@@ -18,6 +18,55 @@ import ejsMain from "../vendor/ejs.bundle.js";
 // and only a stub can hand it the exception sentinel on demand.
 let ejs = ejsMain;
 
+// The globals ejs's setupNodes writes (vendor/ejs/src/yt/solver/setup.ts),
+// which every preprocessed player runs first (preprocessPlayer prepends it,
+// solvers.ts): location unconditionally, the rest only when absent. ejs is
+// built to run in a throwaway process of its own; yt-dlp starts a fresh,
+// --permission-sandboxed Node or Deno for every bulk solve
+// (yt_dlp/extractor/youtube/jsc/_builtin/node.py:26-45, deno.py:38-39), and
+// bgutil's BotGuard server never loads ejs at all. Here it shares a realm with
+// BotGuard, whose snapshot reads its environment off globalThis (server.js
+// passes globalObject: globalThis): after the first solve globalThis.location
+// was a URL for watch?v=yt-dlp-wins instead of JSDOM's Location, for every
+// minter built afterwards (audit G23). Whether BotGuard's attestation reads it
+// is unproven; that it should see the page server.js set up is not.
+//
+// Owner decision D21: save and restore these around every ejs call now; run
+// ejs in a node:vm context later.
+const EJS_GLOBALS = ["location", "XMLHttpRequest", "self", "document", "navigator", "window"];
+
+// withEjsGlobalsRestored runs fn and then puts each of EJS_GLOBALS back as it
+// was, by property descriptor, so an accessor stays an accessor and a
+// non-writable property keeps its flags; one that was absent is deleted. The
+// player's sig and n functions run inside the ejs call (main evaluates the
+// preprocessed source and calls them before it returns), so nothing ejs
+// returns still needs its own globals afterwards. A restore that throws is
+// logged and the rest still restored: one stuck property must not leave the
+// others polluted, nor replace fn's own error.
+function withEjsGlobalsRestored(fn) {
+    const saved = EJS_GLOBALS.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]);
+    try {
+        return fn();
+    } finally {
+        for (const [name, desc] of saved) {
+            try {
+                if (desc) {
+                    Object.defineProperty(globalThis, name, desc);
+                } else {
+                    delete globalThis[name];
+                }
+            } catch (e) {
+                process.stderr.write(`[bgutil-sidecar:warn] ejs: could not restore globalThis.${name}: ${e?.message ?? e}\n`);
+            }
+        }
+    }
+}
+
+// runEjs is the one way this file calls ejs.
+function runEjs(input) {
+    return withEjsGlobalsRestored(() => ejs(input));
+}
+
 // Matches solverCacheSize in internal/cipher/solver.go, and for the same
 // reason: multi-channel monitoring routinely has 4+ active players, and a
 // smaller cap thrashed — every eviction cost the Go side an ErrPlayerNotLoaded
@@ -54,7 +103,7 @@ function loadPlayer(playerID, playerJS) {
     // throw would fail permanently instead of self-healing.
     let result;
     try {
-        result = ejs({
+        result = runEjs({
             type: "player",
             player: playerJS,
             requests: [],
@@ -102,7 +151,7 @@ function solveMany(entry, type, challenges) {
     // event loop, starving queued PO-token RPCs of the request budget.
     let result;
     try {
-        result = ejs({
+        result = runEjs({
             type: "preprocessed",
             preprocessed_player: entry.preprocessed,
             requests: [{ type, challenges: misses }],
