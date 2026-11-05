@@ -411,6 +411,11 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			// Successful probe (HTTP 200 reached the service) — feed the oracle so a
 			// wrongly-offline passive latch can self-correct (Layer 4).
 			reportProbeResult("probe/youtube", false)
+			// A conclusive answer: whether the stream has begun decides
+			// whether a refused periodic fetch counts toward the rate-limit
+			// cap (loopRateLimit.noteStatus). The inconclusive stand-in above
+			// never gets here, so it leaves the last conclusive answer's.
+			rateLimit.noteStatus(probeInfo.StreamStatus)
 		}
 
 		// Update local scheduledStartTime for interval calculation
@@ -509,6 +514,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 					sp.logger.Info("schedule probe says the stream has begun ahead of the status probe; confirming",
 						"videoID", job.VideoID, "status", sched.StreamStatus)
 					probeInfo = sched
+					rateLimit.noteStatus(sched.StreamStatus)
 				} else if sched.IsUpcoming && !sched.IsLive && sched.ScheduledStartTime != "" {
 					sp.updateJobMetadata(job, &youtube.VideoInfo{ScheduledStartTime: sched.ScheduledStartTime, IsUpcoming: true}, true)
 					scheduledStartTime = sched.ScheduledStartTime

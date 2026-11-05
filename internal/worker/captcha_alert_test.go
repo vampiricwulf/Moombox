@@ -11,6 +11,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
@@ -109,7 +110,7 @@ func TestCaptchaTellsTheOperatorOncePerSpell(t *testing.T) {
 		start("captcha_b")
 		synctest.Wait()
 
-		if n := len(rec.ByEvent("captcha_required")); n != 1 {
+		if n := captchaSends(rec, captchaRequiredTitle); n != 1 {
 			t.Errorf("%d captcha notifications for two jobs in one spell, want 1", n)
 		}
 		for _, id := range []string{"captcha_a", "captcha_b"} {
@@ -125,8 +126,11 @@ func TestCaptchaTellsTheOperatorOncePerSpell(t *testing.T) {
 		if row, _ := db.GetJob("captcha_a"); row.Status != database.StatusError {
 			t.Errorf("captcha_a: status %s, want the Error its answer ended it in", row.Status)
 		}
-		if n := len(rec.ByEvent("captcha_required")); n != 2 {
+		if n := captchaSends(rec, captchaRequiredTitle); n != 2 {
 			t.Errorf("%d captcha notifications once a fetch answered and the captcha came back, want 2", n)
+		}
+		if n := captchaSends(rec, captchaClearedTitle); n != 1 {
+			t.Errorf("%d captcha-cleared notifications for the one spell that ended, want 1", n)
 		}
 		cancel()
 		for _, ch := range done {
@@ -227,7 +231,7 @@ func TestWaitingLoopCaptchaLineAndAlert(t *testing.T) {
 	}
 	var l loopRateLimit
 	sp.noteFetch(job, &l, rateLimitedInfo(youtube.StreamNotAStream, youtube.SessionAuthLoggedOut), true)
-	if n := len(rec.ByEvent("captcha_required")); n != 0 {
+	if n := captchaSends(rec, captchaRequiredTitle); n != 0 {
 		t.Fatalf("a try-again-later refusal sent %d captcha notifications", n)
 	}
 	sp.noteFetch(job, &l, upcomingAnswer(time.Time{}), false)
@@ -235,7 +239,7 @@ func TestWaitingLoopCaptchaLineAndAlert(t *testing.T) {
 	if !sp.noteFetch(job, &l, captchaInfo(), true) {
 		t.Fatal("a captcha confirmation was read as an answer")
 	}
-	if got, want := progress(), captchaWaitLine(confirmationHoldAfter(1)); got != want {
+	if got, want := progress(), captchaWaitLine(confirmationHoldAfter(0)); got != want {
 		t.Errorf("line on the refusal = %q, want %q", got, want)
 	}
 	sp.tickRateLimit(job, &l, l.until.Add(-time.Minute))
@@ -243,7 +247,7 @@ func TestWaitingLoopCaptchaLineAndAlert(t *testing.T) {
 		t.Errorf("line a minute in = %q, want %q", got, want)
 	}
 	sp.noteFetch(job, &l, captchaInfo(), false)
-	if n := len(rec.ByEvent("captcha_required")); n != 1 {
+	if n := captchaSends(rec, captchaRequiredTitle); n != 1 {
 		t.Errorf("%d captcha notifications for two refusals of one spell, want 1", n)
 	}
 	// An extraction with formats under the verdict is no refusal, but no
@@ -254,12 +258,12 @@ func TestWaitingLoopCaptchaLineAndAlert(t *testing.T) {
 		t.Error("an extraction with formats under the verdict was read as a refusal")
 	}
 	sp.noteFetch(job, &l, captchaInfo(), false)
-	if n := len(rec.ByEvent("captcha_required")); n != 1 {
+	if n := captchaSends(rec, captchaRequiredTitle); n != 1 {
 		t.Errorf("%d captcha notifications once formats came back under the verdict, want the spell's 1", n)
 	}
 	sp.noteFetch(job, &l, upcomingAnswer(time.Time{}), false)
 	sp.noteFetch(job, &l, captchaInfo(), false)
-	if n := len(rec.ByEvent("captcha_required")); n != 2 {
+	if n := captchaSends(rec, captchaRequiredTitle); n != 2 {
 		t.Errorf("%d captcha notifications once an answer ended the spell and the captcha came back, want 2", n)
 	}
 }
@@ -298,7 +302,7 @@ func TestCaptchaOnAReextractTellsTheOperator(t *testing.T) {
 	if err := reextract(captchaInfo()); err != nil {
 		t.Fatalf("refreshStaleVodInfo = %v, want the download on the stale extraction", err)
 	}
-	if n := len(rec.ByEvent("captcha_required")); n != 1 {
+	if n := captchaSends(rec, captchaRequiredTitle); n != 1 {
 		t.Errorf("%d captcha notifications, want 1", n)
 	}
 	withFormats := vodInfoAt("https://r2.googlevideo.com", now.Add(6*time.Hour).Unix(), 1)
@@ -372,20 +376,97 @@ func TestCaptchaWaitLineCarriesTheWaitMarker(t *testing.T) {
 	}
 }
 
-// TestRateLimitCapAndTaperAreTheOwners pins the follow-up's numbers: a day
-// of refusals, the taper of 2, 5, 10 and 20 minutes and the half hour after
-// it, and the words the give-up adds.
+// TestRateLimitCapAndTaperAreTheOwners pins the follow-ups' numbers: a day
+// of refusals and at least three of them, the taper's retries at +2, +5, +10
+// and +20 minutes from the first refusal and every half hour after it — a
+// confirmation refused at each of those instants waits to the next, and one
+// a Retry-After pushed between two waits to the next ahead — and the words
+// the give-up adds.
+//
+// Mutant: read the taper as gaps (confirmationHoldAfter returning the n-th
+// entry) — every row after the first differs.
 func TestRateLimitCapAndTaperAreTheOwners(t *testing.T) {
-	if rateLimitCap != 24*time.Hour {
-		t.Errorf("rateLimitCap = %s, want 24h", rateLimitCap)
+	m := time.Minute
+	if rateLimitCap != 24*time.Hour || rateLimitCapRefusals != 3 {
+		t.Errorf("rateLimitCap = %s, rateLimitCapRefusals = %d; want 24h and 3", rateLimitCap, rateLimitCapRefusals)
 	}
-	want := []time.Duration{2 * time.Minute, 5 * time.Minute, 10 * time.Minute, 20 * time.Minute, 30 * time.Minute, 30 * time.Minute}
-	for i, d := range want {
-		if got := confirmationHoldAfter(i + 1); got != d {
-			t.Errorf("confirmationHoldAfter(%d) = %s, want %s", i+1, got, d)
+	for _, tc := range []struct{ elapsed, want time.Duration }{
+		{0, 2 * m}, {2 * m, 3 * m}, {5 * m, 5 * m}, {10 * m, 10 * m}, {20 * m, 30 * m}, {50 * m, 30 * m},
+		{4 * m, m}, {7 * m, 3 * m}, {12 * m, 8 * m}, {25 * m, 30 * m},
+	} {
+		if got := confirmationHoldAfter(tc.elapsed); got != tc.want {
+			t.Errorf("confirmationHoldAfter(%s) = %s, want %s", tc.elapsed, got, tc.want)
 		}
 	}
 	if rateLimitGaveUpNote != " (gave up after 24 hours of refusals)" {
 		t.Errorf("rateLimitGaveUpNote = %q", rateLimitGaveUpNote)
+	}
+}
+
+// captchaSends counts rec's sends titled title: the captcha spell's opening
+// and its close share the captcha_required event, so the title tells them
+// apart.
+func captchaSends(rec *notificationtest.Recorder, title string) int {
+	n := 0
+	for _, c := range rec.ByEvent("captcha_required") {
+		if c.Title == title {
+			n++
+		}
+	}
+	return n
+}
+
+// TestCaptchaClearedTellsTheOperatorOnce: the end of a captcha spell — the
+// first fetch YouTube answers — sends one "YouTube Captcha Cleared",
+// success-coloured, on the same captcha_required event as the opening, so
+// it reaches exactly the targets that were told to solve it, naming the
+// spell's first refused video; more answers send nothing more, an answer
+// with no spell open sends nothing, and the next spell closes with its own.
+// Before, the spell ended silently and the operator told to solve the
+// captcha was never told it had passed (the owner's decision on FA's fourth
+// follow-up). captcha_required stays out of the default mention set.
+//
+// Mutants: drop the close from clear — no cleared send; send it on every
+// clear, open or not — the answers before and after the spell send more;
+// send it on another event — the event's count is 1, not 2.
+func TestCaptchaClearedTellsTheOperatorOnce(t *testing.T) {
+	rec := notificationtest.New()
+	a := newCaptchaAlert(rec, discardLogger{})
+	a.clear() // no spell open
+	first := &database.Job{ID: "c1", VideoID: "vid1", Title: "First stream"}
+	a.raise(first)
+	a.raise(&database.Job{ID: "c2", VideoID: "vid2", Title: "Second stream"})
+	a.clear()
+	a.clear()
+	if n := captchaSends(rec, captchaClearedTitle); n != 1 {
+		t.Fatalf("%d captcha-cleared sends for one spell, want 1", n)
+	}
+	if n := len(rec.ByEvent("captcha_required")); n != 2 {
+		t.Errorf("%d sends on captcha_required, want the opening and its close", n)
+	}
+	var cleared notificationtest.Call
+	for _, c := range rec.Calls() {
+		if c.Title == captchaClearedTitle {
+			cleared = c
+		}
+	}
+	if cleared.Type != notifications.TypeSuccess {
+		t.Errorf("the close's type = %v, want success", cleared.Type)
+	}
+	if v, _ := cleared.Field("First Refused"); v != notifications.EscapeMarkdown(first.Title) {
+		t.Errorf("the close names %q as the first refused, want %q", v, first.Title)
+	}
+	if v, _ := cleared.Field("Video ID"); v != first.VideoID {
+		t.Errorf("the close's video ID = %q, want %q", v, first.VideoID)
+	}
+	a.raise(&database.Job{ID: "c3", VideoID: "vid3"})
+	a.clear()
+	if r, c := captchaSends(rec, captchaRequiredTitle), captchaSends(rec, captchaClearedTitle); r != 2 || c != 2 {
+		t.Errorf("after a second spell: %d openings, %d closes; want 2 and 2", r, c)
+	}
+	for _, e := range config.DefaultMentionEvents() {
+		if e == "captcha_required" {
+			t.Error("captcha_required is in the default mention set")
+		}
 	}
 }

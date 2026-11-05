@@ -58,20 +58,35 @@ import (
 // for as long as the refusals last, and tells no one:
 //
 //   - a spell of refusals ends the job in Error once it has lasted
-//     rateLimitCap, a day, with the refusal as yt-dlp words it — 24 hourly
-//     requeues of a backlog VOD, 48 half-hourly tries of a job waiting in
-//     place, or a waiting loop's full fetches refused as long. Measured on the
-//     wall clock from the spell's first refusal (rateLimitSpells,
-//     loopRateLimit.since), so neither a Retry-After that lengthens a wait
+//     rateLimitCap, a day, AND held at least rateLimitCapRefusals (3) refused
+//     attempts, with the refusal as yt-dlp words it — 24 hourly requeues of a
+//     backlog VOD, 48 half-hourly tries of a job waiting in place, or a
+//     waiting loop's counted full fetches refused as long. Measured on the
+//     wall clock from the spell's first (counted) refusal (rateLimitSpells,
+//     loopRateLimit.capSince), so neither a Retry-After that lengthens a wait
 //     nor a requeue admitted late stretches it; a fetch YouTube answers ends
 //     the spell, and so does a dashboard Retry. A limit that outlasts a day is
 //     not the hour upstream says one lasts, and was waited out for good: a
-//     captcha nobody solves, or a refusal the verdict cannot tell from one;
-//   - the waiting loop confirms a go-live YouTube refused again after 2, 5,
-//     10 and 20 minutes, then every rateLimitRetryInterval
-//     (rateLimitConfirmTaper): a broadcast that has just gone live loses what
-//     it airs while its confirmation waits, where it has no DVR window, and a
-//     limit that lifts in minutes cost it the whole half hour;
+//     captcha nobody solves, or a refusal the verdict cannot tell from one.
+//     The refusal floor (owner decision on FA's third follow-up) keeps a day
+//     that saw only one or two attempts — a backlog VOD the scheduler
+//     re-admitted a day later, a broadcast refused once on either side of a
+//     day of waiting — from ending on what is not a day of refusals at all;
+//   - a waiting loop counts its refusals toward that cap only once the
+//     stream has begun (owner decision on FA's second follow-up): while the
+//     status probe still answers upcoming, its periodic full fetch refused
+//     costs the broadcast nothing, since nothing it airs is lost to the wait;
+//     counting starts once the probe, or the schedule probe, says it is live
+//     or over, when the go-live confirmation is what is waited on. A probe
+//     that could not tell (inconclusive) counts as begun only when the last
+//     one that could said so (loopRateLimit.begun);
+//   - the waiting loop confirms a go-live YouTube refused again 2, 5, 10 and
+//     20 minutes after the spell's first refused confirmation, then every
+//     rateLimitRetryInterval (rateLimitConfirmTaper; the owner's reading of
+//     the taper, counted from the first refusal, not as gaps between them):
+//     a broadcast that has just gone live loses what it airs while its
+//     confirmation waits, where it has no DVR window, and a limit that lifts
+//     in minutes cost it the whole half hour;
 //   - the backlog hold outlives a restart, saved beside the disk gate's hold
 //     in open-alerts.json (Scheduler.RecordRateLimitHold,
 //     RestoreRateLimitHold), and still runs out on its own;
@@ -105,18 +120,34 @@ const rateLimitRetryInterval = fullFetchInterval
 // is not going to pass on its own.
 const rateLimitCap = 24 * time.Hour
 
-// rateLimitConfirmTaper is how long the waiting loop holds off its next
-// go-live confirmation after each refused one of a spell, in order — 2, 5,
-// 10 and 20 minutes — and every rateLimitRetryInterval after the last
-// (confirmationHoldAfter). The status probe and the waiting-room chat run on
-// through it.
+// rateLimitCapRefusals is the fewest refused attempts a spell must hold,
+// beside lasting rateLimitCap, before the job ends in Error — on every path:
+// a backlog VOD's requeues, a job waiting in place, a waiting loop's counted
+// refusals (the owner's decision on FA's third follow-up). A day measured from
+// one refusal to a second one a day later is two looks, not a limit that
+// would not pass.
+const rateLimitCapRefusals = 3
+
+// rateLimitConfirmTaper is when the waiting loop makes its go-live
+// confirmations again after a spell's first refused one, counted from that
+// refusal — 2, 5, 10 and 20 minutes after it — and every
+// rateLimitRetryInterval after the last (confirmationHoldAfter). The status
+// probe and the waiting-room chat run on through it.
 var rateLimitConfirmTaper = []time.Duration{2 * time.Minute, 5 * time.Minute, 10 * time.Minute, 20 * time.Minute}
 
-// confirmationHoldAfter is the hold after the n-th refused go-live
-// confirmation of a spell, counted from 1.
-func confirmationHoldAfter(n int) time.Duration {
-	if n >= 1 && n <= len(rateLimitConfirmTaper) {
-		return rateLimitConfirmTaper[n-1]
+// confirmationHoldAfter is the hold after a refused go-live confirmation made
+// elapsed after the spell's first refused one (zero for that one itself): up
+// to the next instant of the taper still ahead of it — so the retries land at
+// +2, +5, +10 and +20 minutes from the first refusal, not 2, 5, 10 and 20
+// minutes apart, which put them at +2, +7, +17 and +37 (the owner's reading
+// of the taper, FA's first follow-up) — and rateLimitRetryInterval once the
+// taper is spent. A confirmation a Retry-After floor pushed past one instant
+// of the taper waits for the next one still ahead.
+func confirmationHoldAfter(elapsed time.Duration) time.Duration {
+	for _, at := range rateLimitConfirmTaper {
+		if at > elapsed {
+			return at - elapsed
+		}
 	}
 	return rateLimitRetryInterval
 }
@@ -251,24 +282,36 @@ func answeredFetch(info *youtube.VideoInfo) bool {
 // live and VOD arms make when the status probe says the stream has begun,
 // and the one the default arm makes on every probe the cookied probe cannot
 // read (membersOnly), which confirms a stream it cannot see: once YouTube has
-// refused one, the next is made confirmationHoldAfter it, tapering from two
-// minutes to rateLimitRetryInterval over the spell's refused confirmations,
-// under the wait's progress line, and the arms read the probe's answer as
+// refused one, the next is made at the taper's next instant counted from the
+// spell's first refused confirmation (confirmationHoldAfter), from two
+// minutes to rateLimitRetryInterval, under the wait's progress line, and the arms read the probe's answer as
 // nothing until then. The loop's probe timer wakes at the hold's end
 // (heldFor), so the confirmation is made then, not on the first probe past
 // it. The periodic full fetch keeps its own half-hourly cadence. A refusal is
 // the verdict (noteFetch) or a 429 on the whole cascade, the limit's HTTP
-// form (noteFetchErr). A spell that has lasted rateLimitCap ends the job
-// (outlasted).
+// form (noteFetchErr). A spell whose counted refusals have lasted
+// rateLimitCap, rateLimitCapRefusals of them at least, ends the job
+// (outlasted); a refusal counts once the stream has begun (counts).
 type loopRateLimit struct {
 	// refusing: the last full fetch was refused. The first refusal of a spell
 	// places the backlog hold, as outlastRateLimit's does.
 	refusing bool
 	// since: when the spell's first refusal came; zero while none stands.
 	since time.Time
-	// confirmations counts the spell's refused go-live confirmations, which
-	// pick the next hold from the taper (confirmationHoldAfter).
-	confirmations int
+	// firstConfirmation: when the spell's first refused go-live confirmation
+	// came, which the taper counts from (confirmationHoldAfter); zero while
+	// none of this spell's was refused.
+	firstConfirmation time.Time
+	// capSince and capRefusals: when the spell's first counted refusal came
+	// (counts), and how many it has had — what rateLimitCap and
+	// rateLimitCapRefusals are read against (outlasted).
+	capSince    time.Time
+	capRefusals int
+	// begun: the status probe's last conclusive answer — or the schedule
+	// probe's, when it overtook it — said the stream is live or over
+	// (noteStatus). While it says upcoming, a refused periodic full fetch is
+	// not counted toward the cap.
+	begun bool
 	// until: zero, or when a go-live confirmation may be made again.
 	until time.Time
 	// captcha: the refusal holding confirmations off was a captcha's, so
@@ -291,9 +334,34 @@ func (l *loopRateLimit) heldFor(now time.Time) time.Duration {
 	return max(l.until.Sub(now), 0)
 }
 
-// outlasted reports whether the spell has lasted rateLimitCap at now.
+// outlasted reports whether the spell's counted refusals have lasted
+// rateLimitCap at now, rateLimitCapRefusals of them at least.
 func (l *loopRateLimit) outlasted(now time.Time) bool {
-	return l.refusing && now.Sub(l.since) >= rateLimitCap
+	return l.refusing && l.capRefusals >= rateLimitCapRefusals && now.Sub(l.capSince) >= rateLimitCap
+}
+
+// noteStatus records a conclusive answer on the stream's state — the status
+// probe's, or the schedule probe's when it overtakes it (waitForLive): live
+// or over sets begun, upcoming clears it, and anything else — an unclear
+// answer, the inconclusive probe's stand-in, which the loop never passes
+// here — leaves it as the last one that could tell said.
+func (l *loopRateLimit) noteStatus(status youtube.StreamStatus) {
+	switch status {
+	case youtube.StreamLive, youtube.StreamVOD, youtube.StreamPostLive:
+		l.begun = true
+	case youtube.StreamUpcoming:
+		l.begun = false
+	}
+}
+
+// counts reports whether a refusal counts toward the cap: every go-live
+// confirmation's — the probe has said the stream began, or cannot read it at
+// all (the default arm) — and the periodic full fetch's once begun says so.
+// A broadcast still upcoming loses nothing it airs to the wait, and a
+// days-out premiere under a captcha nobody solved ended in Error before it
+// began (the owner's decision on FA's second follow-up).
+func (l *loopRateLimit) counts(confirmation bool) bool {
+	return confirmation || l.begun
 }
 
 // noteFetch reads a full fetch the waiting loop made, and reports whether
@@ -307,7 +375,8 @@ func (l *loopRateLimit) outlasted(now time.Time) bool {
 // caller reads outlasted after a refusal.
 func (sp *StreamProcessor) noteFetch(job *database.Job, l *loopRateLimit, info *youtube.VideoInfo, confirmation bool) bool {
 	if !rateLimitedFetch(info) {
-		l.refusing, l.since, l.confirmations = false, time.Time{}, 0
+		l.refusing, l.since, l.firstConfirmation = false, time.Time{}, time.Time{}
+		l.capSince, l.capRefusals = time.Time{}, 0
 		if answeredFetch(info) {
 			sp.captcha.clear()
 		}
@@ -362,17 +431,25 @@ func (sp *StreamProcessor) noteRefusal(job *database.Job, l *loopRateLimit, conf
 	if captcha {
 		sp.captcha.raise(job)
 	}
+	if l.counts(confirmation) {
+		if l.capRefusals == 0 {
+			l.capSince = now
+		}
+		l.capRefusals++
+	}
 	logRefusal := sp.logger.Debug
 	if first {
 		logRefusal = sp.logger.Warn
 	}
 	if !confirmation {
 		logRefusal("YouTube rate-limited the waiting loop's periodic full fetch",
-			"videoID", job.VideoID, what, why)
+			"videoID", job.VideoID, "counted", l.counts(false), what, why)
 		return
 	}
-	l.confirmations++
-	hold := max(confirmationHoldAfter(l.confirmations), floor)
+	if l.firstConfirmation.IsZero() {
+		l.firstConfirmation = now
+	}
+	hold := max(confirmationHoldAfter(now.Sub(l.firstConfirmation)), floor)
 	l.until, l.captcha = now.Add(hold), captcha
 	sp.db.UpdateJobFields(job.ID, map[string]any{"progress": waitLineFor(captcha)(hold)})
 	logRefusal("YouTube rate-limited the go-live confirmation; the job keeps waiting, its chat with it, and confirms again",
@@ -402,8 +479,8 @@ func (sp *StreamProcessor) endRateLimit(job *database.Job, l *loopRateLimit) {
 	}
 }
 
-// giveUpRateLimited is the waiting loop's result once its spell of refusals
-// has lasted rateLimitCap (loopRateLimit.outlasted): the refusal — the
+// giveUpRateLimited is the waiting loop's result once its spell's counted
+// refusals have lasted rateLimitCap (loopRateLimit.outlasted): the refusal — the
 // verdict info carries, as yt-dlp words it, or err, a 429 on the whole
 // cascade — saying the job gave up (rateLimitGaveUp), with no sentinel —
 // processJob would wait an ErrRateLimited out again — so the job ends in
@@ -417,7 +494,7 @@ func (sp *StreamProcessor) giveUpRateLimited(job *database.Job, l *loopRateLimit
 		refusal = errors.New(msg)
 	}
 	sp.logger.Warn("YouTube has refused the waiting loop's full fetches for a day; giving up",
-		"videoID", job.VideoID, "since", l.since.UTC().Format(time.RFC3339), "refusal", refusal)
+		"videoID", job.VideoID, "since", l.capSince.UTC().Format(time.RFC3339), "refusals", l.capRefusals, "refusal", refusal)
 	return &StreamProcessResult{VideoInfo: info, ShouldDownload: false, Error: rateLimitGaveUp(refusal).Error()}
 }
 
@@ -466,22 +543,32 @@ func rateLimitWait(err error) time.Duration {
 // failure, which is no answer, leaves it standing. Lazily allocated.
 type rateLimitSpells struct {
 	mu    sync.Mutex
-	began map[string]time.Time
+	began map[string]rateLimitSpell
 }
 
-// note records a refusal of jobID at now and returns when its spell began:
-// now, for the first of one.
-func (s *rateLimitSpells) note(jobID string, now time.Time) time.Time {
+// rateLimitSpell is one job's spell: when its first refusal came, and how
+// many refusals it has had (rateLimitCapRefusals).
+type rateLimitSpell struct {
+	began    time.Time
+	refusals int
+}
+
+// note records a refusal of jobID at now and returns when its spell began —
+// now, for the first of one — and how many refusals it holds, this one
+// included.
+func (s *rateLimitSpells) note(jobID string, now time.Time) (time.Time, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if began, ok := s.began[jobID]; ok {
-		return began
-	}
 	if s.began == nil {
-		s.began = map[string]time.Time{}
+		s.began = map[string]rateLimitSpell{}
 	}
-	s.began[jobID] = now
-	return now
+	sp, ok := s.began[jobID]
+	if !ok {
+		sp.began = now
+	}
+	sp.refusals++
+	s.began[jobID] = sp
+	return sp.began, sp.refusals
 }
 
 // end forgets jobID's spell.
@@ -519,6 +606,8 @@ func (s *rateLimitSpells) ids() []string {
 // over: the backlog VOD's requeue or its Error, or a run whose ctx ended, or
 // whose row was deleted or left the states the queue processes while it
 // waited (waitOutOutage's re-read) — which this hands to handleCancellation.
+// The cap needs the day and rateLimitCapRefusals refusals both: a backlog VOD
+// re-admitted a day after its first refusal is requeued again, not ended.
 //
 // since is when the run's current spell of refusals began (zero: none yet,
 // or the last pass answered — processJob resets it). Only the spell's first
@@ -545,9 +634,9 @@ func (w *DownloadWorker) outlastRateLimit(ctx context.Context, job *database.Job
 	if captcha {
 		w.captcha.raise(job)
 	}
-	if began := w.rateLimitSpells.note(job.ID, now); now.Sub(began) >= rateLimitCap {
+	if began, refusals := w.rateLimitSpells.note(job.ID, now); now.Sub(began) >= rateLimitCap && refusals >= rateLimitCapRefusals {
 		w.logger.Warn("YouTube has refused this job's fetches for a day; giving up",
-			"jobID", job.ID, "since", began.UTC().Format(time.RFC3339), "err", err)
+			"jobID", job.ID, "since", began.UTC().Format(time.RFC3339), "refusals", refusals, "err", err)
 		w.setJobError(job, rateLimitGaveUp(err))
 		return nil
 	}
@@ -620,10 +709,18 @@ func (w *DownloadWorker) waitOutRateLimit(ctx context.Context, jobID string, wai
 // other captcha refusal of the spell, from that job or any other, sends
 // nothing more. A captcha is the account's (or, with no cookies, the
 // address's), not the video's, so the whole backlog meets the same one, and
-// a notification per job was one per refused video every hour. The spell
-// ends silently: the jobs it held fetch again on their own cadence, and the
-// fetch that answers is the news. In memory: a restart that meets the
-// captcha again tells the operator again. Shared by the worker and its
+// a notification per job was one per refused video every hour. Its end — the
+// first fetch YouTube answers — sends one follow-up, "YouTube Captcha
+// Cleared", success-coloured, through the same event (captcha_required) and
+// so the same targets, the shape the alert pairs (sidecar_down /
+// sidecar_restored, disk_* / disk_ok) close with: the operator told to solve
+// a captcha is told it is solved, rather than left to guess from the jobs
+// that resumed (the owner's decision on FA's fourth follow-up). The jobs it
+// held fetch again on their own cadence. captcha_required stays out of the
+// default mention set (config.DefaultMentionEvents), so neither pings
+// anyone unless a target opts in. In memory: a restart that meets the
+// captcha again tells the operator again, and a spell a restart cut short
+// sends no close. Shared by the worker and its
 // stream processor; nil-safe, so a processor a test builds without one
 // alerts nobody.
 type captchaAlert struct {
@@ -632,7 +729,17 @@ type captchaAlert struct {
 
 	mu   sync.Mutex
 	open bool
+	// firstTitle, firstVideoID: the spell's first refused video, named again
+	// in the close.
+	firstTitle, firstVideoID string
 }
+
+// captchaRequiredTitle and captchaClearedTitle are the spell's opening and
+// closing notifications' titles, both sent on the captcha_required event.
+const (
+	captchaRequiredTitle = "YouTube Captcha Required"
+	captchaClearedTitle  = "YouTube Captcha Cleared"
+)
 
 func newCaptchaAlert(notify notifications.Sender, log logger) *captchaAlert {
 	return &captchaAlert{notify: notify, log: log}
@@ -644,9 +751,16 @@ func (a *captchaAlert) raise(job *database.Job) {
 	if a == nil {
 		return
 	}
+	title := job.Title
+	if title == "" {
+		title = job.VideoID
+	}
 	a.mu.Lock()
 	opening := !a.open
 	a.open = true
+	if opening {
+		a.firstTitle, a.firstVideoID = title, job.VideoID
+	}
 	a.mu.Unlock()
 	if !opening {
 		return
@@ -660,11 +774,7 @@ func (a *captchaAlert) raise(job *database.Job) {
 	if link == "" && job.VideoID != "" {
 		link = "https://www.youtube.com/watch?v=" + job.VideoID
 	}
-	title := job.Title
-	if title == "" {
-		title = job.VideoID
-	}
-	a.notify.Send("YouTube Captcha Required",
+	a.notify.Send(captchaRequiredTitle,
 		fmt.Sprintf("YouTube asks this session to solve a captcha before it plays videos. Solve it in a browser signed in with the same YouTube account Moombox's cookies are from (with no cookies, a browser on the same network) — opening the video below shows it. Until then every job it refuses waits, up to %d hours, then ends in Error",
 			int(rateLimitCap/time.Hour)),
 		notifications.TypeWarning,
@@ -676,8 +786,9 @@ func (a *captchaAlert) raise(job *database.Job) {
 	)
 }
 
-// clear ends the spell: a fetch YouTube answered. The next captcha opens a
-// new one, and tells the operator again.
+// clear ends the spell: a fetch YouTube answered. A spell that was open
+// sends its one close, "YouTube Captcha Cleared", on the captcha_required
+// event; the next captcha opens a new one, and tells the operator again.
 func (a *captchaAlert) clear() {
 	if a == nil {
 		return
@@ -685,10 +796,25 @@ func (a *captchaAlert) clear() {
 	a.mu.Lock()
 	was := a.open
 	a.open = false
+	title, videoID := a.firstTitle, a.firstVideoID
+	a.firstTitle, a.firstVideoID = "", ""
 	a.mu.Unlock()
-	if was {
-		a.log.Info("YouTube answered a fetch again; the captcha spell is over")
+	if !was {
+		return
 	}
+	a.log.Info("YouTube answered a fetch again; the captcha spell is over")
+	if a.notify == nil {
+		return
+	}
+	a.notify.Send(captchaClearedTitle,
+		"YouTube answered a fetch again: the captcha is solved or has passed. The jobs it held fetch again on their own cadence",
+		notifications.TypeSuccess,
+		notifications.NewFieldBuilder().
+			AddIf(title != "", "First Refused", notifications.EscapeMarkdown(title)).
+			AddInlineIf(videoID != "", "Video ID", videoID).
+			Build(),
+		notifications.SendOptions{Event: "captcha_required"},
+	)
 }
 
 // holdForRateLimit holds every backlog admission for d from now — or past

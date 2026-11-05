@@ -307,24 +307,52 @@ func TestCancelAtTheRateLimitCapWins(t *testing.T) {
 }
 
 // TestWaitingLoopRateLimitEndsInErrorAfterADay: a broadcast in its waiting
-// loop whose full fetches YouTube refuses for a day ends in Error too — the
-// periodic one here, half-hourly while the stream is days out. The loop
-// waited it out for good: its refusals are no answer, and the probe kept it
-// waiting. Its result carries no ErrRateLimited, which processJob would wait
-// out again, and a Cancel that lands as the day's last refusal comes back
-// still wins.
+// loop whose full fetches YouTube refuses for a day ends in Error too — once
+// the stream has begun. Here the status probe reads live once, three minutes
+// in, and its go-live confirmation is refused; from then on the probe cannot
+// tell (inconclusive), and the periodic full fetch, half-hourly, is refused
+// on: counted, since the last probe that could tell said live, so the loop
+// gives up on the first refusal a day after the confirmation's. Its result
+// carries no ErrRateLimited, which processJob would wait out again, and a
+// Cancel that lands as the day's last refusal comes back still wins.
 //
-// Mutants: drop the outlasted check from the periodic fetch — the job is
-// still waiting at 26 h; give up with ErrRateLimited as the sentinel —
-// processJob waits it out in place and the row is not Error; reset since on
-// every refusal — likewise.
+// While the probe still answers upcoming — or cannot tell, after a last
+// conclusive answer of upcoming — the same refused periodic fetches do not
+// count (the owner's decision on FA's second follow-up): a premiere days out
+// under a captcha nobody solved waits on, its loop running, rather than
+// ending in Error before it airs; it was ended at 24 h.
+//
+// Mutants: drop the outlasted check from the periodic fetch — the counted
+// rows are still waiting at 26 h; count every refusal (counts returning true)
+// — the upcoming rows end in Error; leave begun alone on a conclusive
+// upcoming (noteStatus) or set it from the inconclusive stand-in — the
+// "inconclusive after upcoming" row ends in Error, or the counted ones never
+// do; give up with ErrRateLimited as the sentinel — processJob waits it out
+// in place and the row is not Error; reset capSince on every refusal — the
+// counted rows wait on.
 func TestWaitingLoopRateLimitEndsInErrorAfterADay(t *testing.T) {
-	for _, cancelAtCap := range []bool{false, true} {
-		name := "error"
-		if cancelAtCap {
-			name = "cancel at the cap wins"
-		}
-		t.Run(name, func(t *testing.T) {
+	inconclusive := &youtube.StatusProbeInconclusiveError{Playability: youtube.PlayabilityLoginRequired,
+		Reason: "Sign in to confirm you're not a bot"}
+	for _, tc := range []struct {
+		name        string
+		probe       func(at time.Duration, liveSeen *bool) (*youtube.VideoInfo, error)
+		counted     bool
+		cancelAtCap bool
+	}{
+		{name: "upcoming: never counted", probe: func(time.Duration, *bool) (*youtube.VideoInfo, error) {
+			return upcomingAnswer(time.Time{}), nil
+		}},
+		{name: "inconclusive after upcoming: never counted", probe: func(at time.Duration, _ *bool) (*youtube.VideoInfo, error) {
+			if at < 3*time.Minute {
+				return upcomingAnswer(time.Time{}), nil
+			}
+			return nil, inconclusive
+		}},
+		{name: "inconclusive after live: counted", counted: true, probe: liveOnceThenInconclusive(inconclusive)},
+		{name: "inconclusive after live: cancel at the cap wins", counted: true, cancelAtCap: true,
+			probe: liveOnceThenInconclusive(inconclusive)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				w, db := testWorkerSetup(t)
 				backlogRetryJob(t, db, "cap_loop", 0, false)
@@ -333,6 +361,7 @@ func TestWaitingLoopRateLimitEndsInErrorAfterADay(t *testing.T) {
 				sp.yt = youtube.NewService(cookies.NewCookieJar(), discardLogger{})
 				var mu sync.Mutex
 				var fulls []time.Duration
+				liveSeen := false
 				t0 := time.Now()
 				sp.getVideoInfoFn = func(_ context.Context, id string) (*youtube.VideoInfo, error) {
 					at := time.Since(t0)
@@ -343,22 +372,35 @@ func TestWaitingLoopRateLimitEndsInErrorAfterADay(t *testing.T) {
 					if n == 1 {
 						return upcomingAnswer(start), nil // Process's own fetch answers
 					}
-					if cancelAtCap && at-fulls[1] >= rateLimitCap {
+					if tc.cancelAtCap && at-fulls[1] >= rateLimitCap {
 						db.UpdateJobFieldsUnlessTerminal(id, map[string]any{"status": database.StatusCancelled})
 					}
 					return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedOut), nil
 				}
 				sp.probeStatusFn = func(context.Context, string, bool) (*youtube.VideoInfo, error) {
-					return upcomingAnswer(time.Time{}), nil
+					mu.Lock()
+					defer mu.Unlock()
+					return tc.probe(time.Since(t0), &liveSeen)
 				}
 				sp.probeScheduleFn = func(context.Context, string) (*youtube.VideoInfo, error) {
 					return upcomingAnswer(start), nil
 				}
-				if !runInBubble(t, w, "cap_loop", rateLimitCap+2*time.Hour) {
-					t.Fatal("the broadcast is still waiting two hours past a day of refusals")
-				}
+				returned := runInBubble(t, w, "cap_loop", rateLimitCap+2*time.Hour)
 				mu.Lock()
 				defer mu.Unlock()
+				row, _ := db.GetJob("cap_loop")
+				if !tc.counted {
+					if returned || row.Status == database.StatusError {
+						t.Fatalf("returned %v, status %s (%q): a broadcast still upcoming ended on refusals that do not count", returned, row.Status, row.Error)
+					}
+					if last := fulls[len(fulls)-1]; last < rateLimitCap {
+						t.Errorf("the last full fetch came at %s; the loop was to keep fetching past the day", last)
+					}
+					return
+				}
+				if !returned {
+					t.Fatal("the broadcast is still waiting two hours past a day of counted refusals")
+				}
 				if len(fulls) < 3 {
 					t.Fatalf("full fetches at %v", fulls)
 				}
@@ -366,8 +408,7 @@ func TestWaitingLoopRateLimitEndsInErrorAfterADay(t *testing.T) {
 				if last-first < rateLimitCap || prev-first >= rateLimitCap {
 					t.Errorf("gave up on the refusal %s after the first; want the first one past %s", last-first, rateLimitCap)
 				}
-				row, _ := db.GetJob("cap_loop")
-				if cancelAtCap {
+				if tc.cancelAtCap {
 					if row.Status != database.StatusCancelled {
 						t.Errorf("status = %s (%q), want the operator's Cancelled", row.Status, row.Error)
 					}
@@ -380,6 +421,96 @@ func TestWaitingLoopRateLimitEndsInErrorAfterADay(t *testing.T) {
 			})
 		})
 	}
+}
+
+// liveOnceThenInconclusive is a status probe that reads upcoming for three
+// minutes, live once — its go-live confirmation is refused — and then cannot
+// tell for good (err).
+func liveOnceThenInconclusive(err error) func(time.Duration, *bool) (*youtube.VideoInfo, error) {
+	return func(at time.Duration, liveSeen *bool) (*youtube.VideoInfo, error) {
+		switch {
+		case at < 3*time.Minute:
+			return upcomingAnswer(time.Time{}), nil
+		case !*liveSeen:
+			*liveSeen = true
+			return liveAnswer(time.Time{}), nil
+		}
+		return nil, err
+	}
+}
+
+// TestRateLimitCapNeedsThreeRefusals: a day of a spell is not enough to end
+// a job — it needs rateLimitCapRefusals (3) refused attempts too, on every
+// path (the owner's decision on FA's third follow-up). A backlog VOD the
+// scheduler re-admits 25 hours after its first refusal is requeued again on
+// its second, and ends on its third; and a broadcast whose go-live
+// confirmation is refused once, three minutes in, that then reads upcoming
+// for a day — its periodic refusals uncounted — and live again, ends not on
+// that refusal, its second counted, a day after the first, but on the next,
+// half an hour later (the spell's taper long spent). Before, either ended on
+// its second look.
+//
+// Mutants: drop the refusal floor from outlastRateLimit — the VOD ends on its
+// second run; from loopRateLimit.outlasted — the broadcast ends on its second
+// counted refusal.
+func TestRateLimitCapNeedsThreeRefusals(t *testing.T) {
+	t.Run("backlog requeue", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			backlogRetryJob(t, db, "floor_vod", 1, true)
+			refused := rateLimitedResult(t)
+			w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+				return refused, nil
+			}
+			for run := 1; run <= 3; run++ {
+				w.processJob(context.Background(), "floor_vod")
+				row, _ := db.GetJob("floor_vod")
+				if run < 3 {
+					if row.Status != database.StatusQueued {
+						t.Fatalf("run %d: status = %s (%q), want Queued — %d refusals are not the cap's", run, row.Status, row.Error, run)
+					}
+					time.Sleep(25 * time.Hour)
+					db.UpdateJobFields("floor_vod", map[string]any{"status": database.StatusUpcoming}) // the admission
+					continue
+				}
+				if row.Status != database.StatusError || row.Error != refused.Error+rateLimitGaveUpNote {
+					t.Fatalf("run 3: status = %s, error %q; want Error, %q", row.Status, row.Error, refused.Error+rateLimitGaveUpNote)
+				}
+			}
+		})
+	})
+	t.Run("waiting loop", func(t *testing.T) {
+		m := time.Minute
+		liveAgain := rateLimitCap + 10*m
+		run := driveWaitForLive(t, 2*m, rateLimitCap+2*time.Hour, func(start time.Time) waitFakes {
+			return waitFakes{
+				status: func(at time.Duration) (*youtube.VideoInfo, error) {
+					if at >= 3*m && at < 4*m || at >= liveAgain {
+						return liveAnswer(start), nil
+					}
+					return upcomingAnswer(time.Time{}), nil
+				},
+				full: func(time.Duration) (*youtube.VideoInfo, error) {
+					return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedOut), nil
+				},
+			}
+		})
+		if run.result == nil {
+			t.Fatalf("still waiting at the budget; calls:%s", run)
+		}
+		var confirmations []time.Duration
+		for _, at := range fullCalls(run) {
+			if at < 4*m || at >= liveAgain {
+				confirmations = append(confirmations, at)
+			}
+		}
+		if len(confirmations) != 3 || run.returned != confirmations[2] || confirmations[1]-confirmations[0] < rateLimitCap {
+			t.Fatalf("confirmations at %v, returned at %s; want the give-up on the third, a day and more after the first", confirmations, run.returned)
+		}
+		if run.result.ShouldDownload || run.result.Error == "" {
+			t.Errorf("result = %+v, want the give-up", run.result)
+		}
+	})
 }
 
 // TestPrunedRateLimitedBacklogLosesItsSpellAndHold: a backlog VOD the limit
