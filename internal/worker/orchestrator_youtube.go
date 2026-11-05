@@ -33,6 +33,18 @@ func stagingPreservedRefusal(err error) bool {
 	return errors.Is(err, engine.ErrStagedMediaPresent) || errors.Is(err, engine.ErrTruncateBlocked)
 }
 
+// liveVideoInfo and runLiveDownloaders are the live loop's player-response
+// re-fetch ((*youtube.Service).GetVideoInfo) and its run of the part's
+// downloaders ((*DownloadOrchestrator).runDownloaders) behind package vars,
+// so a test can drive the loop's refresh branches — a path switch into a new
+// part, above all — without a network or a running engine: job.YT is the
+// concrete *youtube.Service, and a downloader fetches through the engine's
+// own client. Production never writes them.
+var (
+	liveVideoInfo      = (*youtube.Service).GetVideoInfo
+	runLiveDownloaders = (*DownloadOrchestrator).runDownloaders
+)
+
 // runLiveStreamDownload runs downloaders with stream-end verification loop (A2, B4).
 // Supports quality monitoring: when the available quality changes mid-stream,
 // the current download segment is muxed and a new download starts at the new quality.
@@ -293,6 +305,18 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		segJobCtx.AudioStartSeq = oldAudioSeq
 
 		refreshResult, refreshErr := o.refreshDownload(ctx, &segJobCtx, freshInfo, result.IsHls)
+		if liveSwitchWanted(refreshErr, result.IsHls) {
+			// The new part's setup failed on the player's JS challenges: it
+			// is a new part already, so the path switch builds into it
+			// (switchLivePath; switchPart below says why).
+			if res, path, err := switchLivePath(ctx, &segJobCtx, freshInfo, o.strategyDeps(), refreshErr); err == nil {
+				o.logger.Info("live path switched at a quality split", "path", path, "part", segmentIndex+1, "jobID", jobCtx.Job.ID)
+				refreshResult, refreshErr = res, nil
+				newQuality = o.extractQualityFromResult(res)
+			} else {
+				refreshErr = err
+			}
+		}
 		if refreshErr != nil {
 			// The same retry the quality-loss refresh gets: the part was
 			// already closed, and ending the job here finalized a stream
@@ -347,6 +371,83 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		return false, nil
 	}
 
+	// switchPart answers a mid-stream refresh of the current part that failed
+	// with cause — on the player's JS challenges, or, on the no-JS path, with
+	// no split pair left (liveSwitchWanted) — by switching the capture's path
+	// in a NEW part (the owner's decision on W8's second follow-up): first to
+	// the no-JS from-start path, else to the live HLS playlist, each at most
+	// once a run (switchLivePath). The refresh would have continued the
+	// current part's files, and the path switched to is another client's
+	// rendition, or another shape: written into them it would append one
+	// recording's fragments under the other's init segment. So the current
+	// part is closed where it stands and muxed into its own file in the
+	// background, as a quality split's is — never written over, never
+	// discarded however short — and the new downloaders record into the next
+	// part's dir, from the position the stopped ones reached (oldVideoSeq,
+	// oldAudioSeq; a YouTube live stream's segment numbers are one timeline
+	// across its shapes and clients). A current part that holds no media yet
+	// is reused instead. Reports whether it switched; when it did not — the
+	// error is not one a switch answers, or no path is left, or the switch's
+	// own setup failed — the caller handles the failure as it always has,
+	// and an empty new dir is removed. The engine's own URL refresh
+	// (refreshGvsCredentials) cannot switch a path; a capture whose fresh
+	// URLs it cannot solve stops, and the loop's refresh after it is the one
+	// that switches.
+	switchPart := func(freshInfo *youtube.VideoInfo, cause error, oldVideoSeq, oldAudioSeq int) bool {
+		if !liveSwitchWanted(cause, result.IsHls) || ctx.Err() != nil {
+			return false
+		}
+		hasMedia := discoverStagingMedia(curCtx.StagingDir) != nil
+		nextIndex, segStagingDir := segmentIndex, curCtx.StagingDir
+		if hasMedia {
+			nextIndex = segmentIndex + 1
+			segStagingDir = filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", nextIndex))
+			if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
+				o.logger.Error("could not create the part a path switch records into", "err", err, "jobID", jobCtx.Job.ID)
+				return false
+			}
+		}
+		segJobCtx := *jobCtx
+		segJobCtx.StagingDir = segStagingDir
+		segJobCtx.VideoStartSeq, segJobCtx.AudioStartSeq = oldVideoSeq, oldAudioSeq
+		switched, path, err := switchLivePath(ctx, &segJobCtx, freshInfo, o.strategyDeps(), cause)
+		segJobCtx.VideoStartSeq, segJobCtx.AudioStartSeq = 0, 0
+		if err != nil {
+			o.logger.Warn("live path switch could not run", "err", err, "jobID", jobCtx.Job.ID)
+			if hasMedia {
+				_ = os.Remove(segStagingDir) // only when empty
+			}
+			return false
+		}
+		if hasMedia {
+			muxStart := segmentStartTime
+			if partResumed {
+				muxStart = 0
+			}
+			o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
+				muxStart, time.Now().Unix(), currentQuality, result, "youtube", nil)
+			segmentIndex = nextIndex
+		}
+		o.logger.Info("live path switched", "path", path, "part", segmentIndex+1, "jobID", jobCtx.Job.ID)
+		curCtx = &segJobCtx
+		result = switched
+		currentQuality = o.extractQualityFromResult(result)
+		waitedForResume.resolved()
+		waitEpisode.reset()
+		verifyWalled = false
+		segmentStartTime = time.Now().Unix()
+		partResumed = false
+		if monitor != nil {
+			select {
+			case <-qualityChangeCh:
+			default:
+			}
+			monitor.UpdateBaseline(currentQuality)
+		}
+		attachProgress(result)
+		return true
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return result, waitedForResume.value(), ctx.Err()
@@ -362,7 +463,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					downloadDone <- fmt.Errorf("runDownloaders panic: %v", r)
 				}
 			}()
-			err := o.runDownloaders(ctx, result)
+			err := runLiveDownloaders(o, ctx, result)
 			downloadDone <- err
 		}()
 
@@ -417,7 +518,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			// This must happen before muxing so we can skip the split for same-quality.
 			freshInfo, err := qualityChangeInfo(ctx,
 				func(c context.Context) (*youtube.VideoInfo, error) {
-					return jobCtx.YT.GetVideoInfo(c, jobCtx.Job.VideoID)
+					return liveVideoInfo(jobCtx.YT, c, jobCtx.Job.VideoID)
 				},
 				func() time.Duration {
 					return qualityChangeQuiet(waitEpisode.active(time.Now(), jobCtx.Config.InterruptionTimeout),
@@ -481,6 +582,12 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			// Clear orchestrator seqs so they don't persist to future iterations
 			curCtx.VideoStartSeq = 0
 			curCtx.AudioStartSeq = 0
+
+			// A refresh that failed on the player's JS challenges switches
+			// the capture's path in a new part (switchPart).
+			if refreshErr != nil && switchPart(freshInfo, refreshErr, oldVideoSeq, oldAudioSeq) {
+				continue
+			}
 
 			if refreshErr != nil {
 				// The interruption signature (live + zero formats) makes
@@ -608,7 +715,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			"jobID", jobCtx.Job.ID)
 
 		// Verify stream status with YouTube API
-		freshInfo, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
+		freshInfo, err := liveVideoInfo(jobCtx.YT, ctx, jobCtx.Job.VideoID)
 		if err != nil {
 			o.logger.Warn("failed to verify stream status", "err", err, "jobID", jobCtx.Job.ID)
 
@@ -707,8 +814,15 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			if result.AudioDownloader != nil {
 				curCtx.AudioStartSeq = result.AudioDownloader.CurrentSeq()
 			}
+			stoppedVideoSeq, stoppedAudioSeq := curCtx.VideoStartSeq, curCtx.AudioStartSeq
 			refreshResult, refreshErr := o.refreshDownload(ctx, curCtx, freshInfo, result.IsHls)
 			curCtx.VideoStartSeq, curCtx.AudioStartSeq = 0, 0
+
+			// As at the quality-loss refresh: a refresh that failed on the
+			// player's JS challenges switches the path in a new part.
+			if refreshErr != nil && switchPart(freshInfo, refreshErr, stoppedVideoSeq, stoppedAudioSeq) {
+				continue
+			}
 
 			if refreshErr != nil {
 				credErr := liveCredentialFailure(freshInfo)
@@ -1002,14 +1116,37 @@ func qualityChangeQuiet(waiting bool, sinceLastSeg time.Duration) time.Duration 
 // downloader otherwise. Without the manifestless branch, a manifestless
 // job's first transient quality blip or stall refresh would fail with "no
 // DASH manifest URL" and end the recording mid-live.
+//
+// A capture the run moved onto the formats that need no player JS — the
+// challenge-free setup fallback, or a mid-stream path switch
+// (runRecord.noJS) — refreshes on them (noJSSetup: the fresh extraction's
+// copies that need none, and one cookieless re-extract's), the owner's
+// decision on W8's second follow-up: the fresh extraction ranks a tv copy
+// with an n first, and a refresh of the whole pool picked it and failed on it
+// while the challenges still could not be solved.
 func (o *DownloadOrchestrator) refreshDownload(ctx context.Context, jobCtx *JobContext, freshInfo *youtube.VideoInfo, isHls bool) (*DownloadResult, error) {
 	if isHls {
 		return DownloadHls(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
+	}
+	if jobCtx.Run.noJS() {
+		return noJSSetup(ctx, jobCtx, freshInfo, o.strategyDeps(), &cookielessReExtract{}, errNoJSRefresh, "no-JS refresh")
 	}
 	if HasManifestlessDashFormats(freshInfo.Formats) {
 		return DownloadManifestlessDash(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
 	}
 	return DownloadDash(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
+}
+
+// strategyDeps is the StrategyDeps a setup outside ExecuteWithChat's own —
+// a refresh's, a path switch's — builds from: the orchestrator's solvers,
+// minter and connectivity, as ExecuteWithChat hands its setup.
+func (o *DownloadOrchestrator) strategyDeps() *StrategyDeps {
+	return &StrategyDeps{
+		CipherSolver:       o.cipherSolver,
+		RoutedCipherSolver: o.routedCipher,
+		PotProvider:        o.potProvider,
+		IsOnline:           connIsOnline(o.conn),
+	}
 }
 
 // youtubeProbeClient is the narrow slice of *youtube.Service the quality probe

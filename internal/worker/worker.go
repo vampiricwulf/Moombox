@@ -176,10 +176,11 @@ type JobContext struct {
 	// download completed. A boot re-mux of an interrupted Muxing row leaves
 	// it false: that download did complete.
 	CapturedMux bool
-	// Once is the run's record of what it does once across its strategies'
-	// repeated setups (runOnce): a damaged pin's Warn, a live capture's path
-	// switch. Shared by pointer like Interruption; nil-safe.
-	Once *runOnce
+	// Run is the run's record of what holds across its strategies'
+	// repeated setups (runRecord): a damaged pin's one Warn, a live capture's
+	// path switches and the no-JS path it records on. Shared by pointer like
+	// Interruption; nil-safe.
+	Run *runRecord
 }
 
 // JobConfig holds per-job configuration derived from the global config.
@@ -1674,7 +1675,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		Filename:     filename,
 		Logger:       w.logger,
 		Interruption: &interruptionSignal{},
-		Once:         &runOnce{},
+		Run:          &runRecord{},
 	}
 }
 

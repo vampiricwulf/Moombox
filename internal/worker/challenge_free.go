@@ -266,9 +266,11 @@ func challengeFreeHlsInfo(ctx context.Context, job *JobContext, info *youtube.Vi
 // manifest n has no answer: yt-dlp skips that manifest and keeps the other
 // clients' copies (_video.py:3730-3751), but the whole-file path cannot
 // fetch an OTF format, and re-routing a post-live manifest stream onto a
-// re-extracted split pair is beyond what the plan asked of this. Only the
-// first setup falls back: a mid-stream refresh (refreshDownload) keeps the
-// strategy the capture runs on.
+// re-extracted split pair is beyond what the plan asked of this. This site
+// is the first setup's; a mid-stream refresh that fails the same way
+// switches the capture's path in a new part instead (switchLivePath,
+// runLiveStreamDownload's switchPart), and a capture this fallback put on
+// the no-JS path refreshes on it (refreshDownload).
 //
 // A setup that built its downloaders, the first one or a fallback's, then
 // clears its part of the other shape's staged media before they write
@@ -313,7 +315,14 @@ func setupOrFallback(ctx context.Context, job *JobContext, strategy DownloadStra
 		if !HasManifestlessDashFormats(cf.Formats) {
 			return nil, fmt.Errorf("%w; no split video and audio pair that needs no player JS is left", err)
 		}
-		return strategy.Download(ctx, job, &cf, deps)
+		result, err := strategy.Download(ctx, job, &cf, deps)
+		if err == nil {
+			// Its refreshes — the tail an expired URL leaves
+			// (runVodDownloadWithRefresh) — stay on the formats that need
+			// no player JS too (refreshDownload).
+			job.Run.markNoJS()
+		}
+		return result, err
 	}
 	return result, err
 }
@@ -363,15 +372,13 @@ var errNoChallengeFreePair = errors.New("no split video and audio pair that need
 // finalize and never written over. The downloaders read their resume state
 // when they start, not when they are built, so the set-aside after the
 // setup is ahead of it. A dir that cannot be cleared fails the setup.
+//
+// The run then records on the no-JS path (runRecord.markNoJS), so every
+// refresh of the capture stays on it (refreshDownload, noJSSetup).
 func noJSFromStart(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps, rx *cookielessReExtract, cause error) (*DownloadResult, error) {
-	cf := *info
-	cf.Formats = challengeFreeFormats(ctx, job, info.Formats, rx, cause, "live from-start DASH")
-	if !HasManifestlessDashFormats(cf.Formats) {
-		return nil, errNoChallengeFreePair
-	}
-	result, err := ManifestlessDashStrategy.Download(ctx, job, &cf, deps)
+	result, err := noJSSetup(ctx, job, info, deps, rx, cause, "live from-start DASH")
 	if err != nil {
-		return nil, fmt.Errorf("the no-JS from-start setup failed too: %w", err)
+		return nil, err
 	}
 	asides, err := setAsideStagedMedia(job.StagingDir, []string{"video_stream", "audio_stream"})
 	if len(asides) > 0 {
@@ -381,7 +388,88 @@ func noJSFromStart(ctx context.Context, job *JobContext, info *youtube.VideoInfo
 	if err != nil {
 		return nil, fmt.Errorf("staging holds an earlier from-start capture that could not be set aside: %w", err)
 	}
+	job.Run.markNoJS()
 	return result, nil
+}
+
+// noJSSetup is the manifest-free setup on the formats in info that need no
+// player JS, and the cookieless chain's (challengeFreeFormats over rx), on a
+// copy of info: noJSFromStart's, and every refresh's of a capture already on
+// that path (refreshDownload) — a fresh extraction ranks the copies that need
+// the JS first, and a refresh of the whole pool picked one, failed on it, and
+// sent the capture through a path switch it did not need. errNoChallengeFreePair
+// when no split pair is left; the setup's own error otherwise. cause is why the
+// formats that need the JS are dropped, for the log; tag names the setup.
+func noJSSetup(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps, rx *cookielessReExtract, cause error, tag string) (*DownloadResult, error) {
+	cf := *info
+	cf.Formats = challengeFreeFormats(ctx, job, info.Formats, rx, cause, tag)
+	if !HasManifestlessDashFormats(cf.Formats) {
+		return nil, errNoChallengeFreePair
+	}
+	result, err := ManifestlessDashStrategy.Download(ctx, job, &cf, deps)
+	if err != nil {
+		return nil, fmt.Errorf("the no-JS from-start setup failed too: %w", err)
+	}
+	return result, nil
+}
+
+// errNoJSRefresh is the cause a refresh of a capture on the no-JS path names
+// for the formats it drops: the path itself, chosen when the challenges could
+// not be solved.
+var errNoJSRefresh = errors.New("the capture records on the formats that need no player JS")
+
+// errNoLivePathLeft is switchLivePath's answer when the run has already
+// switched to every path it could switch to.
+var errNoLivePathLeft = errors.New("no live path is left to switch to this run")
+
+// switchLivePath builds the downloaders a live capture switches to once a
+// mid-stream refresh of its from-start path — manifest-free DASH or a DASH
+// manifest, not HLS — failed on the player's JS challenges with cause, or,
+// on the no-JS path, found no split pair left (the owner's decision on W8's
+// second follow-up). job is the NEW part's context (runLiveStreamDownload
+// opens it; the current part is kept and muxed as its own file, never
+// written over), info the fresh extraction. First the no-JS from-start path
+// (noJSFromStart, decision 1), then the live HLS playlist, each at most once
+// a run (runRecord.first): a capture already on the no-JS path goes to HLS,
+// and one that has switched to both has nowhere left (errNoLivePathLeft,
+// cause wrapped) — the loop then handles the failure as it always has. Never
+// a loop: a path the run has left is not switched back to, so the budget is
+// not given back either; a later run (a restart, a Resume) starts on the
+// path its setup chooses, which is the JS path again once solving works.
+// path names the one switched to, for the caller's log.
+func switchLivePath(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps, cause error) (result *DownloadResult, path string, err error) {
+	if !job.Run.noJS() && job.Run.first("live-switch:nojs") {
+		result, err := noJSFromStart(ctx, job, info, deps, &cookielessReExtract{}, cause)
+		if err == nil {
+			job.Logger.Warn("[Cipher] live: a refresh failed on the player's JS challenges — switching, in a new part, to recording on the split live formats that need no player JS (manifest-free DASH); the part so far is kept as its own file",
+				"jobID", job.Job.ID, "videoItag", result.VideoItag, "audioItag", result.AudioItag, "err", cause)
+			return result, "no-JS DASH", nil
+		}
+		if ctx.Err() != nil {
+			return nil, "", fmt.Errorf("%w; %w", cause, err)
+		}
+		cause = fmt.Errorf("%w; %w", cause, err)
+	}
+	if job.Run.first("live-switch:hls") {
+		job.Logger.Warn("[Cipher] live: a refresh failed on the player's JS challenges and no split pair that needs no player JS is left — switching, in a new part, to the live HLS playlist; the part so far is kept as its own file",
+			"jobID", job.Job.ID, "err", cause)
+		result, err := liveHlsInstead(ctx, job, HlsStrategy, info, deps, cause)
+		if err != nil {
+			return nil, "", err
+		}
+		return result, "HLS", nil
+	}
+	return nil, "", fmt.Errorf("%w: %w", errNoLivePathLeft, cause)
+}
+
+// liveSwitchWanted reports whether a mid-stream refresh's error is one a
+// path switch answers (switchLivePath): a systemic failure on the player's JS
+// challenges (setupFailedOnChallenges), or a no-JS refresh with no split
+// pair left (errNoChallengeFreePair). Only for a capture that is not HLS:
+// an HLS capture's master is answered by the cookieless chain already
+// (challengeFreeHlsInfo), and there is no path after it.
+func liveSwitchWanted(err error, isHls bool) bool {
+	return !isHls && (setupFailedOnChallenges(err) || errors.Is(err, errNoChallengeFreePair))
 }
 
 // liveHlsInstead is either live arm of setupOrFallback: hls's setup for the

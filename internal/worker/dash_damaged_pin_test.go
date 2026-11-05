@@ -57,7 +57,7 @@ func TestDashManifestWarnsADamagedPinOnce(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := newManifestServer(t, potTestMPD)
 			job, logs := vodPotJob(t)
-			job.Once = &runOnce{}
+			job.Run = &runRecord{}
 			job.Job.SelectedVideoItag, job.Job.SelectedAudioItag = tc.video, tc.audio
 			job.Config.VideoItag = tc.configVideo
 			info := &youtube.VideoInfo{
@@ -84,15 +84,15 @@ func TestDashManifestWarnsADamagedPinOnce(t *testing.T) {
 	}
 }
 
-// TestBuildJobContextGivesTheRunItsOnceRecord pins the production value of
-// JobContext.Once: every run gets a record of its own, so its once-a-run
+// TestBuildJobContextGivesTheRunItsRecord pins the production value of
+// JobContext.Run: every run gets a record of its own, so its once-a-run
 // lines and switches are once a run, not once a setup.
-func TestBuildJobContextGivesTheRunItsOnceRecord(t *testing.T) {
+func TestBuildJobContextGivesTheRunItsRecord(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	backlogRetryJob(t, db, "once_ctx", 0, false)
 	row, _ := db.GetJob("once_ctx")
 	a, b := w.buildJobContext(row), w.buildJobContext(row)
-	if a.Once == nil || b.Once == nil || a.Once == b.Once {
-		t.Errorf("Once = %p and %p, want a fresh record per run", a.Once, b.Once)
+	if a.Run == nil || b.Run == nil || a.Run == b.Run {
+		t.Errorf("Run = %p and %p, want a fresh record per run", a.Run, b.Run)
 	}
 }

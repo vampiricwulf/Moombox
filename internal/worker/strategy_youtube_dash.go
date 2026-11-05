@@ -454,7 +454,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 // extraction marked. The owner's decision on the picker's second follow-up
 // was not limited to the whole-file path (PK2's leftover, the integrator's
 // call), and this path honours a damaged pin as that one does; upstream has
-// no pin to honour (warnDamagedPins). Logged once per job run (JobContext.Once):
+// no pin to honour (warnDamagedPins). Logged once per job run (JobContext.Run):
 // every mid-stream refresh sets the strategy up again (refreshDownload), and
 // a line per refresh would repeat what the first one said.
 func warnDamagedManifestPins(job *JobContext, videoInfo *youtube.VideoInfo, video, audio *DashStreamInfo) {
@@ -471,7 +471,7 @@ func warnDamagedManifestPins(job *JobContext, videoInfo *youtube.VideoInfo, vide
 			if f.Itag != *pin.itag || !strings.Contains(f.MimeType, pin.kind) {
 				continue
 			}
-			if f.Damaged && job.Once.first(fmt.Sprintf("damaged-pin:%s:%d", pin.kind, *pin.itag)) {
+			if f.Damaged && job.Run.first(fmt.Sprintf("damaged-pin:%s:%d", pin.kind, *pin.itag)) {
 				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual %s itag %d is possibly damaged (shorter than the video); recording it as pinned", pin.kind, *pin.itag))
 			}
 			break
