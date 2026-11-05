@@ -855,6 +855,38 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			goto streamEnded
 
 		case youtube.StreamLive:
+			// A start the CDN no longer holds never comes back: a capture
+			// that wrote nothing from a position past YouTube's ~120 h window
+			// records the live HLS playlist into this part now, rather than
+			// spending the still-live checks re-seeding the same evicted
+			// position (evictedStartToLiveEdge, audit G11). The stopped
+			// downloaders' empty DASH files are cleared before HLS writes
+			// (setAsideOtherLiveShape).
+			if hlsResult, ok := o.evictedStartToLiveEdge(ctx, jobCtx, freshInfo, result, func() (*DownloadResult, error) {
+				r, err := o.refreshDownload(ctx, curCtx, freshInfo, true)
+				if err == nil {
+					err = setAsideOtherLiveShape(curCtx, r)
+				}
+				if err != nil {
+					return nil, err
+				}
+				return r, nil
+			}); ok {
+				result = hlsResult
+				currentQuality = o.extractQualityFromResult(result)
+				if monitor != nil {
+					select {
+					case <-qualityChangeCh:
+					default:
+					}
+					monitor.UpdateBaseline(currentQuality)
+				}
+				waitedForResume.resolved()
+				waitEpisode.reset()
+				verifyWalled = false
+				attachProgress(result)
+				continue
+			}
 			checks := consecutiveLiveChecks.Add(1)
 			if checks >= maxConsecutiveLiveChecks {
 				o.logger.Warn("YouTube reported live too many times with no segments, forcing end",

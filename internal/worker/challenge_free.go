@@ -287,8 +287,13 @@ func challengeFreeHlsInfo(ctx context.Context, job *JobContext, info *youtube.Vi
 // session's from-start capture records HLS beside it here, whichever arm
 // sent it there, and one resumed from either fallback once a token can be
 // minted or the player solved again records DASH beside its video.ts.
+//
+// A live capture of a broadcast older than YouTube's ~120 h window
+// (marathonLiveEdge, audit G11, owner decision 10) never tries from the
+// start: its sq=0 is gone. It records the live HLS playlist first, and the
+// from-start setup above runs only when that fails (setupMarathonOr).
 func setupWithFallback(ctx context.Context, job *JobContext, strategy DownloadStrategy, isVod bool, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
-	result, err := setupOrFallback(ctx, job, strategy, isVod, info, deps)
+	result, err := setupMarathonOr(ctx, job, strategy, isVod, info, deps)
 	if err != nil {
 		return result, err
 	}

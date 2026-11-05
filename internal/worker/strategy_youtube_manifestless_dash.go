@@ -411,6 +411,12 @@ func DownloadManifestlessDash(
 			OnCredentialRefresh: func() (string, string) {
 				return refreshGvsCredentials(ctx, job, videoInfo, videoItagChosen, routedSolver, cipherSolver, potProvider, bindingValue, "manifestless DASH video")
 			},
+			// Renewed before its URL expires while the stream is live
+			// (liveURLRenewal, audit G48).
+			URLExpiry: liveURLRenewal(videoInfo),
+			OnProactiveRefresh: func() (string, string) {
+				return renewGvsCredentials(ctx, job, videoInfo, videoItagChosen, routedSolver, cipherSolver, potProvider, bindingValue, "manifestless DASH video (renewal before expiry)", false)
+			},
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
 				return observeYouTubeStatusProbe(job, info, err)
@@ -472,6 +478,12 @@ func DownloadManifestlessDash(
 			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 			OnCredentialRefresh: func() (string, string) {
 				return refreshGvsCredentials(ctx, job, videoInfo, audioItagChosen, routedSolver, cipherSolver, potProvider, bindingValue, "manifestless DASH audio")
+			},
+			// Renewed before its URL expires while the stream is live
+			// (liveURLRenewal, audit G48).
+			URLExpiry: liveURLRenewal(videoInfo),
+			OnProactiveRefresh: func() (string, string) {
+				return renewGvsCredentials(ctx, job, videoInfo, audioItagChosen, routedSolver, cipherSolver, potProvider, bindingValue, "manifestless DASH audio (renewal before expiry)", false)
 			},
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
