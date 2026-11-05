@@ -493,7 +493,18 @@ type YtcfgData struct {
 	VisitorData        string
 	SessionIndex       *int
 	DelegatedSessionID string
-	DataSyncID         string
+	// DataSyncID is the account's datasync id as the page states it, whole —
+	// "delegated||user" or "user||" (see parseDataSyncID): the GVS PO-token
+	// binding of a signed-in session (GvsContentBinding), as yt-dlp binds to
+	// the unsplit value.
+	DataSyncID string
+	// UserSessionID is the signed-in user's session id: ytcfg's
+	// USER_SESSION_ID, else the datasync id's user half
+	// (fillSessionFromDataSync). Parsed only, for now: yt-dlp hashes it into
+	// the SAPISIDHASH ('<uid> ' before the hash input, '_u' after the hash,
+	// _make_sid_authorization, _base.py:762-775), which the cookie jar does
+	// not do yet.
+	UserSessionID string
 	// STS is the signature timestamp the page's ytcfg states, or 0; the one
 	// extractSTS prefers to reading the player JS for it.
 	STS int

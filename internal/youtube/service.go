@@ -199,9 +199,10 @@ func (s *Service) readAccountSession(ctx context.Context) {
 }
 
 // homepageSession reads the signed-in session's identity — SESSION_INDEX and
-// DELEGATED_SESSION_ID — off the homepage HTML, as extractYtcfg reads them off
-// a watch page. Visitor data is deliberately not here: Init reads it under
-// its own sticky rule above.
+// DELEGATED_SESSION_ID, or the delegated half of the datasync id when the
+// page states no DELEGATED_SESSION_ID (fillSessionFromDataSync) — off the
+// homepage HTML, as extractYtcfg reads them off a watch page. Visitor data is
+// deliberately not here: Init reads it under its own sticky rule above.
 func homepageSession(html string) *YtcfgData {
 	session := &YtcfgData{}
 	if m := sessionIndexRegex.FindStringSubmatch(html); m != nil {
@@ -212,6 +213,14 @@ func homepageSession(html string) *YtcfgData {
 	if m := delegatedSessionRegex.FindStringSubmatch(html); m != nil {
 		session.DelegatedSessionID = strings.Clone(m[1])
 	}
+	find := func(re *regexp.Regexp) string {
+		if m := re.FindStringSubmatch(html); m != nil {
+			return strings.Clone(m[1])
+		}
+		return ""
+	}
+	session.DataSyncID = dataSyncID(find)
+	session.fillSessionFromDataSync(find(userSessionIDRegex))
 	return session
 }
 
