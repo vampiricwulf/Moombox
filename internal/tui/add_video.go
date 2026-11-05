@@ -12,6 +12,8 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // AddVideoStep represents steps in the add video dialog.
@@ -553,8 +555,12 @@ func (m *AddVideoModel) handleURLStep(key string) (string, string) {
 		}
 
 		vid, plat := extractMediaID(input)
-		if plat == "twitch_clip" {
-			m.errorMsg = "Twitch clips are not supported"
+		switch plat {
+		case "twitch_clip":
+			m.errorMsg = (&utils.TwitchTarget{Type: utils.TwitchClip}).Unsupported()
+			return "", ""
+		case "twitch_listing":
+			m.errorMsg = (&utils.TwitchTarget{Type: utils.TwitchVideosListing}).Unsupported()
 			return "", ""
 		}
 		if vid == "" {
@@ -1138,110 +1144,33 @@ func extractYouTubeVideoID(input string) string {
 	return ""
 }
 
-// twitchReservedPaths are paths on twitch.tv that are not channel names (match TS).
-var twitchReservedPaths = map[string]bool{
-	"directory": true, "downloads": true, "jobs": true,
-	"settings": true, "videos": true, "search": true, "p": true,
-}
-
-// extractTwitchTarget extracts Twitch channel/VOD/clip from URL or raw input.
-// Returns (id, type) where type is "twitch", "twitch_clip", or "".
+// extractTwitchTarget extracts a Twitch channel, VOD, clip or listing from a
+// URL or raw input. Returns (id, type) where type is "twitch" (id a login, or
+// "tw_v"+VOD ID), "twitch_clip" or "twitch_listing" (refused, id empty), or
+// "". The parse is utils.ExtractTwitchTarget's — the one URL table the
+// daemon's CLI and the dashboard follow too (internal/utils/testdata/
+// twitch_urls.json) — rather than a copy that knew only www and bare hosts,
+// /videos/ and /<ch>/video/, so /<ch>/v/<id>, schedule?vodID=, m./go./player.
+// links and listings no longer became a channel's live-wait job.
 func extractTwitchTarget(input string) (string, string) {
-	input = strings.TrimSpace(input)
-	if input == "" {
+	target := utils.ExtractTwitchTarget(input)
+	if target == nil {
 		return "", ""
 	}
-
-	// Try URL patterns
-	urlStr := input
-	if !strings.HasPrefix(urlStr, "http://") && !strings.HasPrefix(urlStr, "https://") {
-		if strings.HasPrefix(urlStr, "twitch.tv") || strings.HasPrefix(urlStr, "www.twitch.tv") || strings.HasPrefix(urlStr, "clips.twitch.tv") {
-			urlStr = "https://" + urlStr
-		}
+	switch target.Type {
+	case utils.TwitchChannel:
+		return target.Value, "twitch"
+	case utils.TwitchVOD:
+		return "tw_v" + target.Value, "twitch"
+	case utils.TwitchClip:
+		return "", "twitch_clip"
 	}
-
-	if strings.HasPrefix(urlStr, "http") {
-		// Extract host and path
-		rest := urlStr
-		if _, after, ok := strings.Cut(rest, "://"); ok {
-			rest = after
-		}
-		host, pathStr, _ := strings.Cut(rest, "/")
-		if pathStr != "" {
-			pathStr = "/" + pathStr
-		}
-		host = strings.TrimPrefix(host, "www.")
-		// Remove port if present
-		host, _, _ = strings.Cut(host, ":")
-
-		// clips.twitch.tv/{slug}
-		if host == "clips.twitch.tv" {
-			slug := firstPathSegment(pathStr)
-			if slug != "" {
-				return "", "twitch_clip"
-			}
-		}
-
-		if host == "twitch.tv" {
-			parts := splitPathSegments(pathStr)
-
-			// /videos/{id}
-			if len(parts) >= 2 && parts[0] == "videos" && isNumeric(parts[1]) {
-				return "tw_v" + parts[1], "twitch"
-			}
-
-			// /{login}/video/{id}
-			if len(parts) >= 3 && parts[1] == "video" && isNumeric(parts[2]) {
-				return "tw_v" + parts[2], "twitch"
-			}
-
-			// /{login}/clip/{slug}
-			if len(parts) >= 3 && parts[1] == "clip" && parts[2] != "" {
-				return "", "twitch_clip"
-			}
-
-			// /{login} (not reserved)
-			if len(parts) >= 1 && parts[0] != "" {
-				login := strings.ToLower(parts[0])
-				if !twitchReservedPaths[login] && len(login) <= 25 && isAlphaNumUnderscore(login) {
-					return login, "twitch"
-				}
-			}
-		}
-	}
-
-	// Raw VOD ID with "v" prefix (e.g., "v2345678901")
-	if len(input) >= 2 && input[0] == 'v' && len(input) <= 13 && isNumeric(input[1:]) {
-		return "tw_v" + input[1:], "twitch"
-	}
-
-	// Raw numeric ID → VOD (7-12 digits)
-	if len(input) >= 7 && len(input) <= 12 && isNumeric(input) {
-		return "tw_v" + input, "twitch"
-	}
-
-	// Raw username (1-25 alphanumeric+underscore, must start with letter — match TS)
-	if len(input) >= 1 && len(input) <= 25 && ((input[0] >= 'a' && input[0] <= 'z') || (input[0] >= 'A' && input[0] <= 'Z')) {
-		if isAlphaNumUnderscore(input) {
-			return strings.ToLower(input), "twitch"
-		}
-	}
-
-	return "", ""
+	return "", "twitch_listing"
 }
 
 func isVideoIDChar(s string) bool {
 	for _, c := range s {
 		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
-			return false
-		}
-	}
-	return true
-}
-
-func isAlphaNumUnderscore(s string) bool {
-	for _, c := range s {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
 			return false
 		}
 	}
@@ -1258,23 +1187,6 @@ func isNumeric(s string) bool {
 		}
 	}
 	return true
-}
-
-func firstPathSegment(path string) string {
-	path = strings.TrimPrefix(path, "/")
-	path, _, _ = strings.Cut(path, "/")
-	path, _, _ = strings.Cut(path, "?")
-	return path
-}
-
-func splitPathSegments(path string) []string {
-	path = strings.TrimPrefix(path, "/")
-	path, _, _ = strings.Cut(path, "?")
-	path = strings.TrimRight(path, "/")
-	if path == "" {
-		return nil
-	}
-	return strings.Split(path, "/")
 }
 
 // validClockFields reports whether the minutes and seconds of an MM:SS or

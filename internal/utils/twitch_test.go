@@ -1,6 +1,11 @@
 package utils
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestExtractTwitchTarget(t *testing.T) {
 	tests := []struct {
@@ -243,5 +248,74 @@ func TestExtractTwitchTarget(t *testing.T) {
 				t.Errorf("ExtractTwitchTarget(%q).Value = %q, want %q", tt.input, result.Value, tt.expected.Value)
 			}
 		})
+	}
+}
+
+// twitchURLRow is one row of testdata/twitch_urls.json, the table the Go
+// parser, the TUI and the dashboard are all tested against.
+type twitchURLRow struct {
+	Input string `json:"input"`
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+func loadTwitchURLTable(t *testing.T) []twitchURLRow {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "twitch_urls.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var table struct {
+		Rows []twitchURLRow `json:"rows"`
+	}
+	if err := json.Unmarshal(data, &table); err != nil {
+		t.Fatal(err)
+	}
+	if len(table.Rows) == 0 {
+		t.Fatal("the shared Twitch URL table is empty")
+	}
+	return table.Rows
+}
+
+// TestExtractTwitchTargetSharedURLTable runs ExtractTwitchTarget over the
+// shared table (G35): yt-dlp's URL forms on www, go and m hosts, /v/ and
+// /video/, schedule?vodID=, player.twitch.tv's video= and channel=, clips
+// with and without a channel, and the listings that must never be taken for a
+// channel (a silent live-wait job instead of the refusal).
+//
+// Mutants: dropping the go. host, the /v/ case, the schedule?vodID= case, the
+// channel-less /clip/ case, the last-segment clip slug, or the listing cases
+// each fails its rows.
+func TestExtractTwitchTargetSharedURLTable(t *testing.T) {
+	for _, row := range loadTwitchURLTable(t) {
+		t.Run(row.Input, func(t *testing.T) {
+			got := ExtractTwitchTarget(row.Input)
+			if row.Type == "" {
+				if got != nil {
+					t.Errorf("= {%s %q}, want nil", got.Type, got.Value)
+				}
+				return
+			}
+			if got == nil || string(got.Type) != row.Type || got.Value != row.Value {
+				t.Errorf("= %+v, want {%s %q}", got, row.Type, row.Value)
+			}
+		})
+	}
+}
+
+// TestTwitchTargetUnsupported pins which kinds the add paths refuse until
+// their jobs exist: clips (D26's clip job is a later wave) and the listings
+// (W14), each with its own message; a channel and a VOD are accepted.
+func TestTwitchTargetUnsupported(t *testing.T) {
+	for typ, wantRefused := range map[TwitchTargetType]bool{
+		TwitchChannel: false, TwitchVOD: false, TwitchClip: true,
+		TwitchVideosListing: true, TwitchClipsListing: true, TwitchCollection: true,
+	} {
+		if got := (&TwitchTarget{Type: typ}).Unsupported() != ""; got != wantRefused {
+			t.Errorf("%s: refused = %v, want %v", typ, got, wantRefused)
+		}
+	}
+	if (*TwitchTarget)(nil).Unsupported() != "" {
+		t.Error("a nil target has no refusal")
 	}
 }

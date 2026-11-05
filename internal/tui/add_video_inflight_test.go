@@ -1,6 +1,9 @@
 package tui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestAddVideoSubmitsOnce: Enter returned "submit" every time, with nothing
 // on screen while POST /api/jobs (a live metadata fetch, seconds long) ran, so
@@ -117,5 +120,29 @@ func TestAddVideoAutoAdvanceHonoursEsc(t *testing.T) {
 	a.Update(fetchFormatsAutoAdvanceMsg{VideoID: "dQw4w9WgXcQ"})
 	if a.addVideo.step != AddStepConfirm {
 		t.Errorf("a failed fetch no longer auto-advances: step %v", a.addVideo.step)
+	}
+}
+
+// TestAddVideoRefusesTwitchClipsAndListings: a clip, a channel's video list
+// and a collection are refused in the dialog with the add paths' shared
+// message (utils.TwitchTarget.Unsupported), instead of a listing being read as
+// the channel and submitted as its live-wait job.
+//
+// Mutant: dropping the "twitch_listing" case — the video list submits.
+func TestAddVideoRefusesTwitchClipsAndListings(t *testing.T) {
+	for input, want := range map[string]string{
+		"https://www.twitch.tv/clip/FaintLightGullWholeWheat": "Twitch clips are not supported yet.",
+		"https://www.twitch.tv/spamfish/videos":               "Twitch video lists and collections are not supported yet.",
+		"https://www.twitch.tv/collections/o9zZer3IQBhTJw":    "Twitch video lists and collections are not supported yet.",
+	} {
+		m := NewAddVideoModel()
+		m.Open()
+		m.urlInput = input
+		if a, _ := m.HandleKey(keyEnter); a != "" {
+			t.Errorf("%s: Enter = %q, want a refusal", input, a)
+		}
+		if !strings.HasPrefix(m.errorMsg, want) {
+			t.Errorf("%s: errorMsg = %q, want it to start %q", input, m.errorMsg, want)
+		}
 	}
 }
