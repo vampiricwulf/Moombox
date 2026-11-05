@@ -25,7 +25,8 @@ package youtube
 // One deliberate deviation from upstream: when a session is authenticated but
 // its datasync ID did not survive extraction, yt-dlp warns and mints nothing
 // at all ("Missing required Data Sync ID for account", fetch_po_token,
-// _video.py:2815-2819), whereas this returns visitor data (and, failing that,
+// _video.py:2815-2819) — the experiment on or off — whereas this returns the
+// video ID the experiment names, or else visitor data (and, failing that,
 // the video ID). Moombox has no user to warn and no way to pass one in by
 // hand, so an empty binding would simply mint a token bound to nothing; a
 // second-best real binding is strictly more useful, and the provenance log
@@ -72,12 +73,20 @@ func GvsContentBinding(videoID string, ytcfg *YtcfgData, isAuthenticated bool, c
 // video ID, whose datasync ID did not survive extraction, so the rule fell
 // past the one binding such a session's GVS token carries — upstream's
 // "Missing required Data Sync ID for account", for which it mints nothing.
-// The experiment's video-ID binding is no guess, signed in or out: it is the
-// binding the experiment names, whatever the session. withAttestation stamps
-// the verdict on VideoInfo.GvsBindingGuessed.
+//
+// The experiment's video-ID binding is a guess too when the session is
+// signed in and its datasync ID did not survive (owner decision, wave FC):
+// upstream's external-fetch refusal (fetch_po_token, _video.py:2815-2819,
+// yt-dlp b77c9304e) tests `not data_sync_id and self.is_authenticated` with
+// no `gvs_bind_to_video_id` exemption — unlike the visitor-data refusal and
+// the config-token warning above it, which both exempt the experiment — so a
+// signed-in session without its datasync ID mints nothing under the
+// experiment either. Signed out, or signed in with the datasync ID present,
+// the experiment's binding is the one it names and no guess. withAttestation
+// stamps the verdict on VideoInfo.GvsBindingGuessed.
 func gvsContentBinding(videoID string, ytcfg *YtcfgData, isAuthenticated bool, channelID string) (binding, kind string, guessed bool) {
 	if ytcfg != nil && ytcfg.GvsBindToVideoID && videoID != "" {
-		return videoID, BindingVideoID, false
+		return videoID, BindingVideoID, isAuthenticated && ytcfg.DataSyncID == ""
 	}
 	if ytcfg != nil {
 		if isAuthenticated && ytcfg.DataSyncID != "" {

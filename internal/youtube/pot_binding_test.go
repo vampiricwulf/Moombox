@@ -16,7 +16,9 @@ import (
 // upstream mints nothing for. Mutants (each run): reporting no guess fails
 // the two signed-in fallback rows; reporting one for a signed-out visitor
 // binding fails the logged-out row; reporting one under the experiment fails
-// its row.
+// its datasync and signed-out rows; reporting none under the experiment
+// without a datasync ID, signed in, fails that row (wave FC decision 6:
+// upstream's datasync refusal has no experiment exemption).
 func TestGvsContentBinding(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -30,6 +32,25 @@ func TestGvsContentBinding(t *testing.T) {
 			name:        "experiment wins over everything",
 			ytcfg:       &YtcfgData{GvsBindToVideoID: true, DataSyncID: "ds", VisitorData: "vd"},
 			auth:        true,
+			wantBinding: "vid123",
+			wantKind:    BindingVideoID,
+		},
+		{
+			// Upstream's GVS refusal for a signed-in session with no datasync
+			// ID has no experiment exemption (fetch_po_token,
+			// _video.py:2815-2819), so the experiment's binding is a guess
+			// there (wave FC decision 6).
+			name:        "experiment signed in without datasync is a guess",
+			ytcfg:       &YtcfgData{GvsBindToVideoID: true, VisitorData: "vd"},
+			auth:        true,
+			wantBinding: "vid123",
+			wantKind:    BindingVideoID,
+			wantGuess:   true,
+		},
+		{
+			name:        "experiment signed out is no guess",
+			ytcfg:       &YtcfgData{GvsBindToVideoID: true, VisitorData: "vd"},
+			auth:        false,
 			wantBinding: "vid123",
 			wantKind:    BindingVideoID,
 		},

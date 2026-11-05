@@ -683,8 +683,8 @@ var mintGvsPoToken = func(ctx context.Context, p *bgutils.PotProvider, binding s
 }
 
 // errGuessedGvsBinding is the missing_pot cause when the job's GVS content
-// binding is a guess (youtube.VideoInfo.GvsBindingGuessed): signed in, the
-// video-ID experiment off, and no datasync ID on the page. yt-dlp mints
+// binding is a guess (youtube.VideoInfo.GvsBindingGuessed): signed in, and no
+// datasync ID on the page, the video-ID experiment on or off. yt-dlp mints
 // nothing there; a strategy counts it as a token it does not have (owner
 // decision D12) and mints under the guess only for a stream whose token is
 // mandatory and that has no token-free copy to take instead.

@@ -136,8 +136,9 @@ func TestFetchWatchPageReadsPremiumOnlySignedIn(t *testing.T) {
 // TestWithAttestationStampsPremiumAndGuessedBinding pins the hand-off from the
 // page to the strategies: withAttestation carries the page's Premium verdict
 // onto the VideoInfo, and marks the GVS binding a guess exactly when the
-// session is signed in, the video-ID experiment is off and the page stated no
-// datasync ID (gvsContentBinding) — the binding D12 counts as a missing token.
+// session is signed in and the page stated no datasync ID, the video-ID
+// experiment on or off (gvsContentBinding) — the binding D12 counts as a
+// missing token.
 //
 // Mutants (each run): not stamping IsPremium fails the Premium row; stamping
 // the guess from the binding kind alone (visitor data) fails the signed-out
@@ -161,8 +162,15 @@ func TestWithAttestationStampsPremiumAndGuessedBinding(t *testing.T) {
 			wantGuess: true, wantKind: BindingVisitorData,
 		},
 		{
-			name:     "signed in under the video-ID experiment: no guess",
-			wp:       &WatchPageResult{Ytcfg: &YtcfgData{GvsBindToVideoID: true, VisitorData: "vd"}, SessionAuth: SessionAuthLoggedIn},
+			// Upstream refuses this mint (fetch_po_token, _video.py:2815-2819:
+			// no experiment exemption), so it is a guess (wave FC decision 6).
+			name:      "signed in under the video-ID experiment, no datasync ID: a guess",
+			wp:        &WatchPageResult{Ytcfg: &YtcfgData{GvsBindToVideoID: true, VisitorData: "vd"}, SessionAuth: SessionAuthLoggedIn},
+			wantGuess: true, wantKind: BindingVideoID,
+		},
+		{
+			name:     "signed in under the video-ID experiment with its datasync ID: no guess",
+			wp:       &WatchPageResult{Ytcfg: &YtcfgData{GvsBindToVideoID: true, DataSyncID: "ds", VisitorData: "vd"}, SessionAuth: SessionAuthLoggedIn},
 			wantKind: BindingVideoID,
 		},
 		{
