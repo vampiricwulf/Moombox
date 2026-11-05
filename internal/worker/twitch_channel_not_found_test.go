@@ -28,10 +28,11 @@ import (
 type twitchAnswer int
 
 const (
-	twMissing twitchAnswer = iota // (nil, ErrChannelNotFound): user:null
-	twOffline                     // (nil, nil): the login resolves, no stream
-	twNetErr                      // a failure to reach Twitch at all
-	twLive                        // the channel is live
+	twMissing   twitchAnswer = iota // (nil, ErrChannelNotFound): user:null
+	twOffline                       // (nil, nil): the login resolves, no stream
+	twNetErr                        // a failure to reach Twitch at all
+	twServerErr                     // a definitive refusal (classServer): counted
+	twLive                          // the channel is live
 )
 
 // twitchWaitRun is what one driven wait did.
@@ -48,6 +49,12 @@ type twitchWaitRun struct {
 // script's end with twMissing.
 func driveTwitchWait(t *testing.T, script ...twitchAnswer) twitchWaitRun {
 	t.Helper()
+	return driveTwitchWaitFor(t, "nosuchstreamer", script...)
+}
+
+// driveTwitchWaitFor is driveTwitchWait for a login the test names.
+func driveTwitchWaitFor(t *testing.T, login string, script ...twitchAnswer) twitchWaitRun {
+	t.Helper()
 	var run twitchWaitRun
 	synctest.Test(t, func(t *testing.T) {
 		db, err := database.Open(filepath.Join(t.TempDir(), "twitch-wait.db"))
@@ -55,7 +62,6 @@ func driveTwitchWait(t *testing.T, script ...twitchAnswer) twitchWaitRun {
 			t.Fatalf("database.Open: %v", err)
 		}
 		defer db.Close()
-		const login = "nosuchstreamer"
 		jobID := "tw_manual_" + login + "_1"
 		job := &database.Job{ID: jobID, VideoID: jobID, URL: "https://www.twitch.tv/" + login,
 			Platform: "twitch", Status: database.StatusUpcoming, ManuallyAdded: true, QualityPreference: "best"}
@@ -83,6 +89,8 @@ func driveTwitchWait(t *testing.T, script ...twitchAnswer) twitchWaitRun {
 				return nil, nil
 			case twNetErr:
 				return nil, fmt.Errorf("gql request (op): %w", &netTimeoutError{})
+			case twServerErr:
+				return nil, fmt.Errorf("gql http 404")
 			case twLive:
 				return &twitch.TwitchStreamInfo{IsLive: true, StreamID: "42", ChannelLogin: login}, nil
 			default:
@@ -221,5 +229,90 @@ func TestTwitchStreamLookupIsTheNotFoundAwareLookup(t *testing.T) {
 	info, err := sp.twitchStreamLookup(context.Background(), "nosuchstreamer")
 	if info != nil || !errors.Is(err, twitch.ErrChannelNotFound) {
 		t.Errorf("twitchStreamLookup = %+v, %v; want twitch.ErrChannelNotFound", info, err)
+	}
+}
+
+// probeTagReporter counts what the connectivity oracle is told, per verdict.
+// Only the waiting goroutine reports, and the counts are read after it ended.
+type probeTagReporter struct{ fails, oks int }
+
+func (r *probeTagReporter) ReportFailure(string) { r.fails++ }
+func (r *probeTagReporter) ReportSuccess(string) { r.oks++ }
+
+// TestTwitchWaitNotFoundIsAnAnswerToTheBudgetAndTheOracle: a "does not exist"
+// answer is Twitch answering, so it resets the definitive-error budget —
+// which counts failures to GET an answer — and is reported to the
+// connectivity oracle as a success.
+//
+// Mutants: `consecutiveErrors = 0` deleted from the not-found arm (nine
+// server errors, the not-found answer, one more server error reach
+// maxConsecutiveProbeErrors and the wait gives up before the live answer);
+// the arm's reportProbeResult deleted (no success reported for the ten
+// not-found answers).
+func TestTwitchWaitNotFoundIsAnAnswerToTheBudgetAndTheOracle(t *testing.T) {
+	t.Run("the budget", func(t *testing.T) {
+		script := append(repeat(twServerErr, maxConsecutiveProbeErrors-1), twMissing, twServerErr, twLive)
+		run := driveTwitchWait(t, script...)
+		if !run.ended || run.err != nil || run.info == nil || run.info.StreamID != "42" {
+			t.Fatalf("wait = %+v, %v after %d polls; want the live stream at poll %d — the not-found answer resets the error budget",
+				run.info, run.err, run.polls, len(script))
+		}
+	})
+	t.Run("the oracle", func(t *testing.T) {
+		rep := &probeTagReporter{}
+		t.Cleanup(func() { SetConnectivityReporter(nil) })
+		SetConnectivityReporter(rep)
+		run := driveTwitchWait(t)
+		SetConnectivityReporter(nil)
+		if !run.ended {
+			t.Fatalf("still waiting after %d polls", run.polls)
+		}
+		if rep.oks != twitchNotFoundGiveUp || rep.fails != 0 {
+			t.Errorf("oracle told %d successes, %d failures; want %d successes, none failed — each not-found answer reached Twitch",
+				rep.oks, rep.fails, twitchNotFoundGiveUp)
+		}
+	})
+}
+
+// TestTwitchNotFoundGiveUpIsNoTransportFailure: the give-up error leads with
+// the login, which is free text, and the worker's failure path reads that
+// error through isTransportFailure (outageCalled, markTwitchUnreachable) and
+// parkReasonForError. A login holding "eof", "tls" or "timeout" must still
+// read as Twitch's answer: no transport failure, no unreachable wrapper, no
+// park reason.
+//
+// Mutant: the twitch.ErrChannelNotFound arm deleted from probeVote — the
+// string fallback reads "theofficialfoo" as an EOF, isTransportFailure is
+// true and the row parks as ParkReasonTwitchUnreachable; the same arm
+// deleted from classifyProbeErr — the give-up reads as classNetwork.
+func TestTwitchNotFoundGiveUpIsNoTransportFailure(t *testing.T) {
+	for _, login := range []string{"theofficialfoo", "tlsgamer", "timeoutking"} {
+		t.Run(login, func(t *testing.T) {
+			run := driveTwitchWaitFor(t, login)
+			if !run.ended || !errors.Is(run.err, twitch.ErrChannelNotFound) {
+				t.Fatalf("wait = %+v, %v after %d polls; want the not-found give-up", run.info, run.err, run.polls)
+			}
+			if !strings.HasPrefix(run.err.Error(), login+" does not exist on Twitch") {
+				t.Fatalf("err = %v, want it to lead with the login (the case this test is about)", run.err)
+			}
+			if isTransportFailure(run.err) {
+				t.Errorf("isTransportFailure(%q) = true, want false — Twitch answered", run.err)
+			}
+			if got := probeVote(run.err); got != reportSuccess {
+				t.Errorf("probeVote = %v, want reportSuccess", got)
+			}
+			if got := classifyProbeErr(run.err); got != classServer {
+				t.Errorf("classifyProbeErr = %v, want classServer", got)
+			}
+			w := &DownloadWorker{}
+			job := &database.Job{ID: "tw_manual_" + login + "_1", VideoID: "tw_manual_" + login + "_1", Platform: "twitch"}
+			marked := w.markTwitchUnreachable(job, run.err)
+			if _, ok := errors.AsType[*twitchUnreachableError](marked); ok {
+				t.Errorf("markTwitchUnreachable wrapped the not-found give-up as unreachable")
+			}
+			if got := parkReasonForError(marked); got != database.ParkReasonNone {
+				t.Errorf("parkReasonForError = %q, want none", got)
+			}
+		})
 	}
 }
