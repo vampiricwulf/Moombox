@@ -132,6 +132,11 @@ type vodRefreshState struct {
 	// refresh moved the stream onto a fresh extraction's visitor session
 	// (refreshVodURL's re-mint); "" until then, for the setup's binding.
 	binding string
+	// bindingGuessed is whether that binding is a guess
+	// (VideoInfo.GvsBindingGuessed): the setup's, seeded by vodURLRefresh,
+	// and the fresh extraction's once a re-mint moved the stream. A guessed
+	// binding never replaces one that is not (refreshVodURL's re-mint).
+	bindingGuessed bool
 }
 
 // newVodRefreshState seeds a stream's refresh state from the format it was
@@ -235,6 +240,7 @@ func (st *vodRefreshState) handOut(info *youtube.VideoInfo, f *youtube.Format, u
 func vodURLRefresh(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, served youtube.Format, servedURL string, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider gvsTokenMinter, tag string) func() (string, string) {
 	binding, _ := gvsBinding(job, videoInfo)
 	st := newVodRefreshState(videoInfo, served, servedURL)
+	st.bindingGuessed = videoInfo != nil && videoInfo.GvsBindingGuessed
 	return func() (string, string) {
 		return refreshVodURL(ctx, job, videoInfo.PlayerURL, st, routedSolver, cipherSolver, potProvider, binding, tag)
 	}
@@ -308,6 +314,12 @@ func vodURLRefresh(ctx context.Context, job *JobContext, videoInfo *youtube.Vide
 // wait; the stream pairs with the fresh binding from then on (st.binding). A
 // re-mint that fails keeps the current URL with the token minted under its
 // own binding, as the refresh does whenever it cannot hand out a fresh pair.
+// A guessed fresh binding never replaces a stated one (st.bindingGuessed): a
+// signed-in re-extraction whose page lost its datasync ID is the same
+// account, not a moved session, so the token minted under the stated binding
+// rides the fresh URL as it is — yt-dlp mints nothing under such a guess
+// (_video.py:2815-2819), and owner decision D12 keeps it a last resort. A
+// guessed pair may move to another guess, as any visitor session does.
 // The live refreshGvsCredentials instead keeps its URL whenever the session
 // moved (its binding guard): it has no budget of its own to mint twice in.
 //
@@ -463,7 +475,8 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, st *v
 	// bound to: re-mint under the fresh binding, so URL and token go out as
 	// one session's pair (see the doc above).
 	pairBinding, currentToken := binding, poToken
-	if poToken != "" && fresh.GvsBindingKind == youtube.BindingVisitorData && fresh.GvsBinding != "" && fresh.GvsBinding != binding {
+	if poToken != "" && (!fresh.GvsBindingGuessed || st.bindingGuessed) &&
+		fresh.GvsBindingKind == youtube.BindingVisitorData && fresh.GvsBinding != "" && fresh.GvsBinding != binding {
 		tok, mintErr := potProvider.GeneratePoTokenString(refreshCtx, fresh.GvsBinding, true)
 		if mintErr == nil && tok == "" {
 			mintErr = errEmptyGvsToken
@@ -484,7 +497,7 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, st *v
 	}
 	st.handOut(fresh, f, resolved, poToken, step)
 	if pairBinding != binding {
-		st.binding = pairBinding
+		st.binding, st.bindingGuessed = pairBinding, fresh.GvsBindingGuessed
 	}
 	job.Logger.Info("[POT] VOD URL refresh", "jobID", job.Job.ID, "tag", tag,
 		"itag", f.Itag, "source", f.Source, "newToken", poToken != "", "step", step)
