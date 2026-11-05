@@ -49,7 +49,11 @@ type PlayerCache struct {
 	// Keyed on CacheKey(playerURL) so locale-variant URLs collapse — same
 	// rationale as the in-memory solverData LRU.
 	fetchSF singleflight.Group
-	logger  interface {
+	// specMu serialises the read-modify-write of a player's sig spec file
+	// (PutSigSpec): two lengths learned at once must not each write a file
+	// holding only their own. Separate from mu, which atomicWrite takes.
+	specMu sync.Mutex
+	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -191,6 +195,60 @@ func (pc *PlayerCache) FilePathPreprocessed(playerURL string) string {
 func (pc *PlayerCache) FilePathMeta(playerURL string) string {
 	key := CacheKey(playerURL)
 	return filepath.Join(pc.cacheDir, key+".meta.json")
+}
+
+// FilePathSigSpec returns the path of the player's signature specs: the
+// permutation the sig function applies, one per signature length, learned
+// from the sidecar (compositeSolver.learnSigSpecs) so a signature can still be
+// answered while the sidecar is down. Same key and TTL as the raw cache, and
+// removed with it (Remove, and a Fetch that brings a changed body).
+func (pc *PlayerCache) FilePathSigSpec(playerURL string) string {
+	key := CacheKey(playerURL)
+	return filepath.Join(pc.cacheDir, key+".sigspec.json")
+}
+
+// readSigSpecs returns the player's stored specs by signature length, or nil
+// when there are none, the file has outlived the TTL, or it does not parse.
+func (pc *PlayerCache) readSigSpecs(playerURL string) map[int][]int {
+	path := pc.FilePathSigSpec(playerURL)
+	info, err := os.Stat(path)
+	if err != nil || time.Since(info.ModTime()) > playerCacheTTL {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var specs map[int][]int
+	if json.Unmarshal(data, &specs) != nil {
+		return nil
+	}
+	return specs
+}
+
+// GetSigSpec returns the stored spec for signatures of the given length.
+func (pc *PlayerCache) GetSigSpec(playerURL string, length int) ([]int, bool) {
+	pc.specMu.Lock()
+	defer pc.specMu.Unlock()
+	spec, ok := pc.readSigSpecs(playerURL)[length]
+	return spec, ok && len(spec) > 0
+}
+
+// PutSigSpec stores spec for signatures of the given length beside the
+// player's other entries, keeping the lengths already there.
+func (pc *PlayerCache) PutSigSpec(playerURL string, length int, spec []int) error {
+	pc.specMu.Lock()
+	defer pc.specMu.Unlock()
+	specs := pc.readSigSpecs(playerURL)
+	if specs == nil {
+		specs = make(map[int][]int, 1)
+	}
+	specs[length] = spec
+	data, err := json.Marshal(specs)
+	if err != nil {
+		return err
+	}
+	return pc.atomicWrite(pc.FilePathSigSpec(playerURL), string(data))
 }
 
 // readMeta returns the persisted meta for a player URL. Returns the
@@ -455,12 +513,16 @@ func (pc *PlayerCache) fetchInternal(ctx context.Context, playerURL string) (Fet
 
 		// Real change (or cold cache). Write new content + meta, drop the
 		// preprocessed sidecar — it was derived from the old JS and would
-		// otherwise short-circuit the next compile to stale bindings.
+		// otherwise short-circuit the next compile to stale bindings — and
+		// the sig specs, learned from the old JS for the same reason.
 		if err := pc.Put(playerURL, js); err != nil && pc.logger != nil {
 			pc.logger.Warn("cipher: failed to cache player JS to disk", "err", err)
 		}
 		pc.writeMeta(playerURL, newMeta)
 		_ = os.Remove(pc.FilePathPreprocessed(playerURL))
+		pc.specMu.Lock()
+		_ = os.Remove(pc.FilePathSigSpec(playerURL))
+		pc.specMu.Unlock()
 
 		return FetchResult{JS: js, Changed: true}, nil
 
@@ -490,6 +552,7 @@ func (pc *PlayerCache) touchCacheGroup(playerURL string) {
 		pc.FilePath(playerURL),
 		pc.FilePathPreprocessed(playerURL),
 		pc.FilePathMeta(playerURL),
+		pc.FilePathSigSpec(playerURL),
 	} {
 		// Errors are non-fatal — a missing preprocessed/meta is normal on
 		// migration or first-fetch flows.
@@ -548,10 +611,12 @@ func (pc *PlayerCache) Evict() error {
 	return nil
 }
 
-// Remove deletes the cached player JS, preprocessed sidecar, and meta for
-// a specific URL. Errors are logged but not returned — removal is
+// Remove deletes the cached player JS, preprocessed sidecar, meta and sig
+// specs for a specific URL. Errors are logged but not returned — removal is
 // best-effort (file may be held by another reader on Windows).
 func (pc *PlayerCache) Remove(playerURL string) {
+	pc.specMu.Lock()
+	defer pc.specMu.Unlock()
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
@@ -559,6 +624,7 @@ func (pc *PlayerCache) Remove(playerURL string) {
 		pc.FilePath(playerURL),
 		pc.FilePathPreprocessed(playerURL),
 		pc.FilePathMeta(playerURL),
+		pc.FilePathSigSpec(playerURL),
 	} {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			if pc.logger != nil {

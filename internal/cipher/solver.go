@@ -221,7 +221,10 @@ func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID st
 // cache and the disk player cache. Called when a solver is known to be broken
 // (e.g., producing 403 errors at runtime). The STS cache keyed on the same
 // player is also dropped — if we keep the stale signatureTimestamp and pair
-// it with a freshly-compiled solver, we can hit an invalidation loop.
+// it with a freshly-compiled solver, we can hit an invalidation loop. The
+// player's sig specs go with its disk entry (PlayerCache.Remove): a spec the
+// sidecar's stale-JS recovery has just called into question must not answer
+// the next signature in its place.
 func (s *GojaResolver) InvalidateSolver(playerURL string) {
 	key := CacheKey(playerURL)
 
@@ -503,11 +506,28 @@ func (s *GojaResolver) dropSolverData(key string) {
 	}
 }
 
+// sigSpec satisfies sigSpecStore: the spec learned for signatures of this
+// length on this player, from its player cache entry.
+func (s *GojaResolver) sigSpec(playerID string, length int) ([]int, bool) {
+	return s.playerCache.GetSigSpec(playerURLForID(playerID), length)
+}
+
+// putSigSpec satisfies sigSpecStore. A failed write only costs the spec: the
+// next signature of this length learns it again.
+func (s *GojaResolver) putSigSpec(playerID string, length int, spec []int) {
+	if err := s.playerCache.PutSigSpec(playerURLForID(playerID), length, spec); err != nil {
+		s.logger.Debug("cipher: sig spec write failed", "playerID", playerID, "err", err)
+	}
+}
+
 // Compile-time check: GojaResolver satisfies the cipher.Solver interface.
 var _ Solver = (*GojaResolver)(nil)
 
 // Compile-time check: GojaResolver satisfies cipher.PlayerSource.
 var _ PlayerSource = (*GojaResolver)(nil)
+
+// Compile-time check: GojaResolver is the composite solver's sig spec store.
+var _ sigSpecStore = (*GojaResolver)(nil)
 
 // callTimeout is the bound callWithTimeout puts on a call: CipherTimeout, a
 // variable so a test can interrupt a hung call without waiting it out.

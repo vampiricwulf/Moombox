@@ -37,12 +37,23 @@ const dom = new JSDOM(
         userAgent: USER_AGENT,
     },
 );
-Object.assign(globalThis, {
-    window: dom.window,
-    document: dom.window.document,
-    location: dom.window.location,
-    origin: dom.window.origin,
-});
+// installDomGlobals puts the JSDOM page on globalThis. Run once here, and
+// again right before every BotGuardClient.create (generateMinter), so each
+// snapshot sees this page whatever ran in the realm in between. The player
+// code ejs evaluates for cipher solving runs here too, and its setupNodes
+// overwrites globalThis.location with a URL for watch?v=yt-dlp-wins (audit
+// G23): cipher.js restores those globals after every ejs call, and this is
+// the second guard, the way the yt re-assert below guards EVENT_ID against
+// the interpreter. Exported for test/ejs-globals.test.mjs.
+export function installDomGlobals() {
+    Object.assign(globalThis, {
+        window: dom.window,
+        document: dom.window.document,
+        location: dom.window.location,
+        origin: dom.window.origin,
+    });
+}
+installDomGlobals();
 if (!Reflect.has(globalThis, "navigator")) {
     Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator });
 }
@@ -493,9 +504,13 @@ async function generateMinter(challenge, deadline, homepageAttempted = false) {
     new Function(interpJS)();
 
     // 4. Spin up the BotGuard client, take its snapshot.
-    // Re-assert the ytcfg binding: `new Function(interpJS)()` above just ran
-    // Google-authored code with full globalThis access, and if it defined or
-    // reset `yt` the snapshot would silently read the wrong EVENT_ID.
+    // Re-assert the JSDOM page (installDomGlobals) and the ytcfg binding:
+    // `new Function(interpJS)()` above just ran Google-authored code with full
+    // globalThis access, and if it defined or reset `yt` the snapshot would
+    // silently read the wrong EVENT_ID; cipher solving between two mints runs
+    // the player's code in this realm too, and its setupNodes replaces
+    // globalThis.location (audit G23; cipher.js restores it after each solve).
+    installDomGlobals();
     if (ytObj) {
         globalThis.yt = ytObj;
         if (globalThis.window) globalThis.window.yt = ytObj;

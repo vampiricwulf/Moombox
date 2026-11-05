@@ -139,10 +139,17 @@ func TestFetch_304_ReturnsCached(t *testing.T) {
 		t.Fatalf("first Fetch body: want %q got %q", oldBody, js1)
 	}
 
+	// A sig spec beside it (audit G49), refreshed with the rest.
+	if err := pc.PutSigSpec(fs.URL(), 3, []int{2, 0, 1}); err != nil {
+		t.Fatalf("PutSigSpec: %v", err)
+	}
+
 	// Backdate the cache file so mtime refresh is observable.
 	old := time.Now().Add(-1 * time.Hour)
-	if err := os.Chtimes(pc.FilePath(fs.URL()), old, old); err != nil {
-		t.Fatalf("Chtimes: %v", err)
+	for _, path := range []string{pc.FilePath(fs.URL()), pc.FilePathSigSpec(fs.URL())} {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatalf("Chtimes: %v", err)
+		}
 	}
 	metaBefore, _ := os.ReadFile(pc.FilePathMeta(fs.URL()))
 
@@ -164,6 +171,9 @@ func TestFetch_304_ReturnsCached(t *testing.T) {
 	}
 	if !info.ModTime().After(old.Add(30 * time.Minute)) {
 		t.Errorf("304 path mtime: want refreshed past %v, got %v", old, info.ModTime())
+	}
+	if info, err := os.Stat(pc.FilePathSigSpec(fs.URL())); err != nil || !info.ModTime().After(old.Add(30*time.Minute)) {
+		t.Errorf("304 path: the sig spec's mtime should be refreshed with the player's (stat err = %v)", err)
 	}
 
 	metaAfter, _ := os.ReadFile(pc.FilePathMeta(fs.URL()))
@@ -198,6 +208,10 @@ func TestFetch_200_DifferentSize_RotatesCache(t *testing.T) {
 	if err := pc.PutPreprocessed(fs.URL(), "preprocessed-from-old-js"); err != nil {
 		t.Fatalf("PutPreprocessed: %v", err)
 	}
+	// And a sig spec learned from the old JS (audit G49), likewise.
+	if err := pc.PutSigSpec(fs.URL(), 3, []int{2, 0, 1}); err != nil {
+		t.Fatalf("PutSigSpec: %v", err)
+	}
 
 	// Server rotates.
 	fs.Set(newBody, "Thu, 02 Jan 2025 00:00:00 GMT", `"v2"`)
@@ -216,6 +230,9 @@ func TestFetch_200_DifferentSize_RotatesCache(t *testing.T) {
 	// Preprocessed must be gone.
 	if _, err := os.Stat(pc.FilePathPreprocessed(fs.URL())); !os.IsNotExist(err) {
 		t.Errorf("preprocessed.js should be removed on rotation, stat err = %v", err)
+	}
+	if _, ok := pc.GetSigSpec(fs.URL(), 3); ok {
+		t.Errorf("the sig spec should be removed on rotation")
 	}
 
 	// Meta should reflect new headers.

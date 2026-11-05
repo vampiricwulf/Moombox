@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +38,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/net/http/httpproxy"
 )
 
 // Logger is the structured logging interface Moombox uses everywhere.
@@ -222,6 +225,81 @@ func New(cfg Config) *Sidecar {
 	return s
 }
 
+// childEnv is the environment the Node child runs with: Moombox's own, with
+// the proxy variables replaced by Go's own answer, so the sidecar's fetches
+// (the homepage, /att/get, the interpreter script, GenerateIT, all https)
+// take the route every Go client takes through http.ProxyFromEnvironment
+// (internal/httpx/client.go). Node's fetch ignores those variables unless it
+// is told to read them (--use-env-proxy, or NODE_USE_ENV_PROXY=1, on the
+// pinned v24). Without it a Moombox run behind a proxy minted its integrity
+// token and PO tokens from the host's own address while the player request
+// and the media went through the proxy, and YouTube refuses a token minted
+// from another IP than the one using it (audit G22). bgutil's server mints
+// through the request's proxy or HTTPS_PROXY / HTTP_PROXY / ALL_PROXY
+// (server/src/session_manager.ts:563-574 at 26475e9); ALL_PROXY is not read
+// here, as Go does not read it either: the point is the same route as Go's.
+//
+// The raw variables are not handed through, because Node does not read them
+// as Go does, and every difference is a split route or a dead sidecar:
+//   - a scheme-less HTTPS_PROXY ("proxy.corp:3128") is http:// to Go and an
+//     "Invalid URL protocol" to Node, which throws while it sets the agent
+//     up, before server.js runs: the sidecar never got to ready;
+//   - with only HTTP_PROXY set, Node sends https fetches through it, where
+//     Go uses HTTP_PROXY for http:// URLs alone and goes direct;
+//   - an empty https_proxy beside a set HTTPS_PROXY is "direct" to Node and
+//     skipped by Go, which takes the uppercase one.
+//
+// So every HTTPS_PROXY / HTTP_PROXY / NO_PROXY spelling and any inherited
+// NODE_USE_ENV_PROXY are taken out, and the child gets only Go's resolved
+// HTTPS proxy, scheme included (httpproxy.FromEnvironment, the package
+// net/http's ProxyFromEnvironment is built on, normalising it the same way),
+// with Go's NO_PROXY beside it and NODE_USE_ENV_PROXY=1. With no HTTPS proxy
+// for Go there is nothing to set, and the child goes direct as Go does. A
+// proxy Go would use that Node's agent cannot (socks5://, which Go's
+// transport dials itself) is not handed over either, as Node would refuse
+// to start on it; the child then goes direct, as it did before this change,
+// and note says so for the caller to log. NO_PROXY is matched on the
+// hostnames the sidecar fetches, all of which both read alike (Go's CIDR
+// entries, which Node does not read, name addresses, not those hosts).
+//
+// The child still trusts Node's bundled CA list, not the system store Go
+// trusts: behind a TLS-intercepting proxy the proxy's CA has to be given to
+// it with NODE_EXTRA_CA_CERTS, which is passed through.
+//
+// proxy is Go's reading of the environment, httpproxy.FromEnvironment() in
+// production: the same reading, with the same precedence of the uppercase
+// name over the lowercase and of a set value over an empty one, that every
+// Go client's http.ProxyFromEnvironment makes.
+func childEnv(parent []string, proxy *httpproxy.Config) (env []string, note string) {
+	env = make([]string, 0, len(parent)+3)
+	for _, kv := range parent {
+		k, _, _ := strings.Cut(kv, "=")
+		switch strings.ToUpper(k) {
+		case "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY":
+			continue
+		}
+		env = append(env, kv)
+	}
+	if proxy == nil || proxy.HTTPSProxy == "" {
+		return env, ""
+	}
+	// Only HTTPSProxy is set, so the answer is the normalised proxy URL
+	// itself; www.youtube.com stands for any host NO_PROXY does not name,
+	// which here is every host, as NoProxy is left empty.
+	u, err := (&httpproxy.Config{HTTPSProxy: proxy.HTTPSProxy}).ProxyFunc()(&url.URL{Scheme: "https", Host: "www.youtube.com"})
+	if err != nil || u == nil {
+		return env, "the HTTPS proxy in the environment does not parse; the sidecar goes direct"
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return env, "the HTTPS proxy's scheme " + u.Scheme + " is not one the sidecar's Node can use; the sidecar goes direct"
+	}
+	env = append(env, "HTTPS_PROXY="+u.String())
+	if proxy.NoProxy != "" {
+		env = append(env, "NO_PROXY="+proxy.NoProxy)
+	}
+	return append(env, "NODE_USE_ENV_PROXY=1"), ""
+}
+
 // Start extracts the embedded blobs (if needed), launches the Node
 // subprocess pinned to a Windows Job Object, and waits for the sidecar
 // to emit a `ready` notification on stdout signaling that server.js has
@@ -290,6 +368,11 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 
 	cmd := exec.CommandContext(context.Background(), nodeExe, nodeArgs...)
 	cmd.Dir = cacheDir
+	env, proxyNote := childEnv(os.Environ(), httpproxy.FromEnvironment())
+	if proxyNote != "" {
+		s.cfg.Logger.Warn("sidecar: "+proxyNote+", while Moombox's own requests use it", "audit", "G22")
+	}
+	cmd.Env = env
 	// Parent-death cleanup, pre-start half: Linux sets PR_SET_PDEATHSIG
 	// here (must be configured before fork); Windows is a no-op because
 	// the Job Object assigned after Start covers it.

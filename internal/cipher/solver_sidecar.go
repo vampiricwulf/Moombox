@@ -296,5 +296,34 @@ func (s *sidecarSolver) ready() bool {
 	return !ok || h.IsHealthy()
 }
 
+// probeSigs asks the sidecar the synthetic sig challenges compositeSolver
+// learns a player's sig specs from, with none of solve's stale-JS recovery.
+// That recovery evicts every cache layer of the player (RemovePlayerJS),
+// refetches it and has the sidecar re-preprocess it; it is for a real
+// signature the player can no longer answer, not for a probe whose real
+// signature was answered a moment before. A player function that throws on
+// the control characters of the synthetic challenge makes ejs answer "no
+// solutions", which isStaleJSError matches: through solve, every later
+// signature of that length used to wipe and refetch a healthy player on
+// the sidecar's single-threaded loop, which also serves PO-token mints.
+// A sidecar that has lost the player (ErrPlayerNotLoaded) is re-sent it
+// once, as solve does; that evicts nothing.
+func (s *sidecarSolver) probeSigs(ctx context.Context, playerID string, sigs []string) (map[string]string, error) {
+	res, err := s.callOnce(ctx, playerID, !s.playerSent(playerID), false, sigs, nil)
+	if errors.Is(err, sidecar.ErrPlayerNotLoaded) {
+		s.clearPlayerSent(playerID)
+		res, err = s.callOnce(ctx, playerID, true, false, sigs, nil)
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, sig := range sigs {
+		if _, ok := res.SigResults[sig]; !ok {
+			return nil, fmt.Errorf("cipher: sidecar probe missing sig result for input")
+		}
+	}
+	return res.SigResults, nil
+}
+
 // Compile-time check: sidecarSolver satisfies cipher.Solver.
 var _ Solver = (*sidecarSolver)(nil)
