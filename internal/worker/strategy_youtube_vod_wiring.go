@@ -128,6 +128,10 @@ type vodRefreshState struct {
 	// tokenised records that a minted token rides this token-free stream: a
 	// fallback step handed one out, and every later refresh mints one too.
 	tokenised bool
+	// binding is the GVS content binding url's session pairs with, once a
+	// refresh moved the stream onto a fresh extraction's visitor session
+	// (refreshVodURL's re-mint); "" until then, for the setup's binding.
+	binding string
 }
 
 // newVodRefreshState seeds a stream's refresh state from the format it was
@@ -289,6 +293,24 @@ func vodURLRefresh(ctx context.Context, job *JobContext, videoInfo *youtube.Vide
 // winner is now tv takes the fresh copy behind it where it used to keep its
 // current URL with a fresh token.
 //
+// A moved visitor session (owner decision, wave FC). A token rides the
+// stream's URL as a pair: both belong to one visitor session. The fresh
+// extraction runs under a session of its own — invalidate403Caches drops the
+// cached visitor data, and a watch page hands out fresh — so when its
+// visitor-data binding (VideoInfo.GvsBinding of kind visitorData) is not the
+// one the current URL's token is minted under, the token minted above is
+// re-minted under the fresh binding (bypassCache) and handed out with the
+// fresh URL, the two together. That is yt-dlp's per-response pairing: each
+// extraction mints its tokens under its own visitor_data (_video.py:3084-3096,
+// 1953-1960). It runs only when the session moved and a token rides the
+// hand-out — a fallback step's, a token-requiring stream's or a tokenised
+// one's — inside the refresh's bound, before the fresh response's pre-roll
+// wait; the stream pairs with the fresh binding from then on (st.binding). A
+// re-mint that fails keeps the current URL with the token minted under its
+// own binding, as the refresh does whenever it cannot hand out a fresh pair.
+// The live refreshGvsCredentials instead keeps its URL whenever the session
+// moved (its binding guard): it has no budget of its own to mint twice in.
+//
 // The token half runs first, as in refreshGvsCredentials, and is gated by the
 // SERVED stream's own client: a stream riding a missing_pot shadow was left
 // bare and stays bare until the fallback says otherwise, which is why the
@@ -311,6 +333,9 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, st *v
 	refreshCtx, cancel := context.WithTimeout(ctx, credentialRefreshTimeoutFor(job.Config))
 	defer cancel()
 
+	if st.binding != "" {
+		binding = st.binding
+	}
 	served := st.served
 	bare := !youtube.GvsTokenRequired(served.Source)
 	step := 0
@@ -434,10 +459,33 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, st *v
 	// wait ends at an instant the response named — see
 	// credentialRefreshTimeoutFor. Every fallback step's URL waits here too,
 	// gated on the fresh extraction's own verdict.
+	// The fresh response's visitor session is not the one the token above is
+	// bound to: re-mint under the fresh binding, so URL and token go out as
+	// one session's pair (see the doc above).
+	pairBinding, currentToken := binding, poToken
+	if poToken != "" && fresh.GvsBindingKind == youtube.BindingVisitorData && fresh.GvsBinding != "" && fresh.GvsBinding != binding {
+		tok, mintErr := potProvider.GeneratePoTokenString(refreshCtx, fresh.GvsBinding, true)
+		if mintErr == nil && tok == "" {
+			mintErr = errEmptyGvsToken
+		}
+		if mintErr != nil {
+			job.Logger.Warn("[POT] VOD URL refresh: the re-extraction's visitor session moved, and no token could be minted for it — keeping the current URL",
+				"jobID", job.Job.ID, "tag", tag, "itag", f.Itag, "err", mintErr)
+			return keep()
+		}
+		job.Logger.Info("[POT] VOD URL refresh: the re-extraction's visitor session moved — re-minted the token for it",
+			"jobID", job.Job.ID, "tag", tag, "itag", f.Itag, "tokenLength", len(tok))
+		poToken, pairBinding = tok, fresh.GvsBinding
+	}
 	if !waitForFreshPlayback(ctx, job, fresh, f, tag) {
+		// The current URL stays, with the token of its own session.
+		poToken = currentToken
 		return keep()
 	}
 	st.handOut(fresh, f, resolved, poToken, step)
+	if pairBinding != binding {
+		st.binding = pairBinding
+	}
 	job.Logger.Info("[POT] VOD URL refresh", "jobID", job.Job.ID, "tag", tag,
 		"itag", f.Itag, "source", f.Source, "newToken", poToken != "", "step", step)
 	return resolved, poToken
