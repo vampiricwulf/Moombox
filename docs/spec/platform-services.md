@@ -504,6 +504,20 @@ The Twitch integration has five components:
 6. **ChatDownloader** (`chat.go`) -- IRC WebSocket chat recording.
 7. **VodChatDownloader** (`vod_chat.go`) -- GQL-based VOD chat archival.
 
+### Twitch URL Forms
+
+Every add path reads a Twitch link through one table: `utils.ExtractTwitchTarget` (`internal/utils/twitch.go`) — which the CLI's `moombox add`, the API's url-only `POST /api/jobs`, a channel field and the TUI's Add Video (`extractTwitchTarget`, `internal/tui/add_video.go`) all call — and its mirror in the dashboard (`extractTwitchTarget`, `web/public/app.js`). All three are tested against `internal/utils/testdata/twitch_urls.json` (`TestExtractTwitchTargetSharedURLTable` in `internal/utils/twitch_test.go` and `internal/tui/tui_test.go`, and `web/tests/twitch-urls.test.mjs`). The forms are yt-dlp's Twitch extractors' (`yt_dlp/extractor/twitch.py`, b77c9304e):
+
+| Kind | Forms |
+|------|-------|
+| Channel | `twitch.tv/<login>` on the `www.`, `go.`, `m.` or bare host; `player.twitch.tv/?channel=<login>` |
+| VOD | `/videos/<id>`, `/<login>/v/<id>`, `/<login>/video/<id>`, `/<login>/schedule?vodID=<id>`; `player.twitch.tv/?video=v<id>` (which wins over `channel=`) |
+| Clip | `/clip/<slug>` with or without a login before it; `clips.twitch.tv/<slug>`, `clips.twitch.tv/<login>/<slug>` (the last segment is the slug; a trailing `/edit` is dropped) and `clips.twitch.tv/embed?clip=<slug>` |
+| Video or clip list | `/<login>/videos[?filter=…]`, `/<login>/profile`; `/<login>/clips` and `/<login>/videos?filter=clips` |
+| Collection | `/collections/<id>` |
+
+The three parsers used to know only some of these — the Go one refused `go.` and `player.` and the dashboard every `m.` link, and `/<login>/v/<id>`, `schedule?vodID=`, `/collections/<id>` and the listings were read as the CHANNEL, which silently made a live-wait job where the operator meant a VOD. A clip, a list and a collection are parsed but refused at every add path with one message (`TwitchTarget.Unsupported`): Twitch clip jobs (owner decision D26) and list jobs come later, and only the refusal changes when they do. The API's url-only path takes a login from a channel URL alone; a channel field also takes the login from a channel's video or clip list, as it did when those parsed as the channel.
+
 ### GQL API Protocol
 
 #### Endpoint and Headers
@@ -592,6 +606,12 @@ Twitch GQL returns HTTP 200 even for application-level errors. The `gqlRequest` 
 
 After parsing stream info, the `StreamType` field is normalized: anything that is not `"rerun"` is set to `"live"`.
 
+#### VOD Metadata
+
+`GetVodInfo` (`internal/twitch/api.go`) reads `VideoMetadata` as yt-dlp's `_extract_info_gql` does (`yt_dlp/extractor/twitch.py` 513-526, b77c9304e). A `previewThumbnailURL` that is Twitch's `/404_processing_<size>.png` placeholder is dropped whatever the broadcast type — it used to be stored, rewritten into a sized URL that exists nowhere — and behind it `TwitchVodInfo.IsRecording` is set only for a `broadcastType` of `ARCHIVE`: a highlight shows the same placeholder while it is processed and is not recording (yt-dlp #14455). While a VOD is recording its `lengthSeconds` is the length so far and its playlist has no `#EXT-X-ENDLIST`; `processTwitchVod` stores no thumbnail for it and flags the result (`StreamProcessResult.TwitchVodRecording`), and the capture's end check and post-download re-read below follow from that. An empty title is `"Untitled Broadcast"` (yt-dlp's `info.get('title') or 'Untitled Broadcast'`), so the job title both writers build — `processTwitchVod`'s and the manual-add route's `"<Channel> — <title>"` — and the filename built from it never end on a dangling separator. Pinned by `TestGetVodInfoRecordingPlaceholderAndUntitled` (`internal/twitch/vod_info_test.go`) and `TestProcessTwitchVodRecordingAndUntitled` (`internal/worker/twitch_vod_recording_test.go`).
+
+**A VOD's end.** The engine follows a VOD playlist that has no ENDLIST as it follows a live one, and asks `CheckStreamStatus` once the playlist has been stale for its window (five reloads). A VOD's answer used to be a flat "not ended", so a playlist that never gained ENDLIST — a broadcast that ended but whose VOD Twitch left unfinalized — reloaded forever and held its download slot. It is now `twitchVodEnded` (`internal/worker/orchestrator_twitch.go`), which re-reads VideoMetadata through the `VodInfoFn` the worker wires for every VOD (`wireTwitchVodInfo`): ended once the video is no longer recording, so the stale branch finalizes what was downloaded; while it is still recording the download keeps following it; a failed read is no verdict and the next stale window asks again. yt-dlp hands a recording VOD to ffmpeg, whose hls demuxer gives up after `max_reload` reloads without a new segment; this reaches the same outcome without cutting off a VOD that is still growing behind a stalled CDN. A VOD that was recording when its job was set up has its length and thumbnail re-read once its download ends (`refreshRecordedVodInfo`), ahead of the chat wait bounded by the row's length and of the finalize, whose thumbnail fallback reads the re-read URL. Not done: the VOD chat downloader still ends when a page reports `hasNextPage` false, which for a recording VOD is the current end — a follow mode that re-polls from the last cursor is an optional extension whose behaviour against a recording VOD is unmeasured. Pinned by `TestTwitchVodNoLongerRecordingFinalizes`, `TestTwitchVodStillRecordingKeepsFollowing`, `TestTwitchVodEndedAnswers` and `TestWireTwitchVodInfo` (`internal/worker/twitch_vod_recording_test.go`).
+
 ### HLS Download
 
 #### URL Construction
@@ -625,6 +645,10 @@ Both include these query parameters:
 #### Subscriber-only Refusals
 
 Usher answers subscriber-only content with a 403 whose JSON body's first `error_code` is `vod_manifest_restricted` or `unauthorized_entitlements` (`isRestrictedEntitlementBody`, `internal/twitch/hls.go`). The body is the same whoever asked, so `FetchHLSMasterPlaylist` returns it as `ErrSubscriberOnly`, the login-required form, and the Service — which holds the `auth-token` it sent and the playback token Twitch minted for the request — splits it (`subscriberOnlyRefusal`, `internal/twitch/playback_token.go`; G52, owner decision D20): with a token sent and a playback token whose `user_id` names a signed-in session (`PlaybackTokenSession`, conclusive), it is `ErrSubscriberOnlyNotEntitled`, "your account does not have access to this subscriber-only content" — yt-dlp's wording from `_extract_twitch_m3u8_formats`, which splits on whether an `auth-token` cookie was sent — and the job ends in Error with no automatic cookie refresh rather than in `COOKIES?` under a login prompt. Anything else stays `ErrSubscriberOnly`: no token sent, a token minted for nobody (a dead credential, which yt-dlp's cookie-presence test would misread as signed in), or an unreadable document. Both keep Usher's `hls playlist http 403` head. `GetVodHLSPlaylist` reads the auth-token once for this, as `GetHLSMasterPlaylist` does. Pinned by `TestSubscriberOnlyRefusalIsSplitByWhomItRefused` and `TestVodSubscriberOnlyVerdictReadsTheAuthTokenOnce` (`internal/twitch/service_subscriber_only_test.go`).
+
+#### Usher Errors
+
+Any other non-200 usher answer becomes `hls playlist http <status>: <text>`, the text rendered as yt-dlp renders an usher refusal (`twitch.py` 207-223): the body is a JSON array whose first object carries `error_code` and `error`, joined as `error_code: error` (`usherErrorText`, `internal/twitch/hls.go`). The object's `url` field is never shown: filled, it is the playback URL with the token document (user ID, client IP, entitlements) and its `sig`, and this text reaches the job's error column, the dashboard, the TUI, notifications and the mid-capture variant-refresh Warn lines (which `setJobError`'s redaction does not cover). JSON naming neither field leaves the bare status. A body that is not JSON — an HTML page, or a JSON body the 4 KB read cut short — keeps its bounded prefix, passed through `redact.MediaText`. Upstream renders this only for a 403 with a JSON content type; Moombox reads every non-200 the same way, since usher's 404s (`transcode_does_not_exist`, an offline channel) have the same shape. It used to put the raw body, up to 4 KB of JSON, into the error. Pinned by `TestFetchHLSMasterPlaylistUsherErrorText` (`internal/twitch/hls_test.go`).
 
 #### Master Playlist Parsing
 
