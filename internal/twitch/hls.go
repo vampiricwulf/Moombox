@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -430,6 +431,45 @@ func isRestrictedEntitlementBody(body []byte) bool {
 		entries[0].ErrorCode == "unauthorized_entitlements"
 }
 
+// usherErrorText renders a non-200 usher body for the error text, the way
+// yt-dlp does (twitch.py 207-223): the body is a JSON array whose first
+// object carries error_code and error, and the message is
+// join_nonempty('error_code', 'error', delim=': '). The object's url field is
+// never shown. When usher fills it, it is the playback URL — the token
+// document (user ID, client IP, entitlements) and its sig — and this text
+// reaches the job's error column, the dashboard, the TUI, notifications and
+// the mid-capture variant-refresh Warn lines. JSON that carries neither field
+// renders nothing, leaving the bare status, as yt-dlp re-raises the HTTP
+// error. A body that is not JSON (an HTML error page, or a JSON body the 4 KB
+// prefix cut short) keeps its bounded raw prefix, passed through
+// redact.MediaText so no URL in it carries its query. yt-dlp renders this
+// only for a 403 with application/json; Moombox reads every non-200 the same
+// way, since usher's 404s (offline, transcode_does_not_exist) have the same
+// shape and the raw JSON read no better there.
+func usherErrorText(body []byte) string {
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		return ""
+	}
+	if json.Valid([]byte(text)) {
+		var entries []struct {
+			ErrorCode string `json:"error_code"`
+			Error     string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(text), &entries); err != nil || len(entries) == 0 {
+			return ""
+		}
+		var parts []string
+		for _, p := range []string{entries[0].ErrorCode, entries[0].Error} {
+			if p = strings.TrimSpace(p); p != "" {
+				parts = append(parts, p)
+			}
+		}
+		text = strings.Join(parts, ": ")
+	}
+	return redact.MediaText(text)
+}
+
 // subscriberOnlyError is Usher's subscriber-only refusal: the status it came
 // with, and whom it refused. FetchHLSMasterPlaylist cannot tell whom — the
 // body is the same either way — so it always returns the login-required form
@@ -490,9 +530,9 @@ func FetchHLSMasterPlaylist(ctx context.Context, playlistURL string) ([]TwitchHL
 		// Usher returns 404 for "channel offline" vs "unauthorized" vs
 		// "geoblocked" — each with a distinct body. Previously we
 		// discarded the body and returned "hls playlist http 404", which
-		// left users guessing why. Include a bounded prefix of the body
-		// in the error (yt-dlp does the same — see references/yt-dlp
-		// twitch.py). Drain the rest for connection reuse.
+		// left users guessing why. Read a bounded prefix of the body and
+		// render its error_code and error (usherErrorText, as yt-dlp
+		// twitch.py does). Drain the rest for connection reuse.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10)) // 4 KB prefix
 		io.Copy(io.Discard, resp.Body)
 		// Subscriber-only restriction gets its sentinel so the worker can
@@ -503,9 +543,8 @@ func FetchHLSMasterPlaylist(ctx context.Context, playlistURL string) ([]TwitchHL
 		if isRestrictedEntitlementBody(body) {
 			return nil, &subscriberOnlyError{status: resp.StatusCode}
 		}
-		bodyStr := strings.TrimSpace(string(body))
-		if bodyStr != "" {
-			return nil, fmt.Errorf("hls playlist http %d: %s", resp.StatusCode, bodyStr)
+		if text := usherErrorText(body); text != "" {
+			return nil, fmt.Errorf("hls playlist http %d: %s", resp.StatusCode, text)
 		}
 		return nil, fmt.Errorf("hls playlist http %d", resp.StatusCode)
 	}

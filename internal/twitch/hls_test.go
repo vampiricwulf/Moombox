@@ -47,6 +47,76 @@ func TestFetchHLSMasterPlaylistSubscriberOnly(t *testing.T) {
 	}
 }
 
+// TestFetchHLSMasterPlaylistUsherErrorText pins how a non-200 usher body
+// becomes the error text, as yt-dlp renders it (twitch.py 207-223): the first
+// array element's "error_code: error", never its url — which, filled, is the
+// playback URL carrying the token document and sig — and nothing past the
+// status for JSON that names neither. A body that is not JSON keeps its
+// bounded prefix with every URL's query cut (redact.MediaText).
+//
+// Mutant: rendering the raw body again fails the url and readability rows;
+// dropping the MediaText pass fails "non-JSON body".
+func TestFetchHLSMasterPlaylistUsherErrorText(t *testing.T) {
+	const tokenURL = "https://usher.ttvnw.net/api/channel/hls/x.m3u8?sig=secret-sig&token=%7B%22user_id%22%3A42%7D"
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"geoblock with url filled", http.StatusForbidden,
+			`[{"url":"` + tokenURL + `","error":"Content is geo-blocked","error_code":"content_geoblocked","type":"error"}]`,
+			"hls playlist http 403: content_geoblocked: Content is geo-blocked"},
+		{"error_code alone", http.StatusNotFound,
+			`[{"url":"","error":"","error_code":"transcode_does_not_exist","type":"error"}]`,
+			"hls playlist http 404: transcode_does_not_exist"},
+		{"error alone", http.StatusNotFound,
+			`[{"url":"","error":"Can not find channel","type":"error"}]`,
+			"hls playlist http 404: Can not find channel"},
+		{"JSON naming neither", http.StatusForbidden, `[{"url":"` + tokenURL + `"}]`, "hls playlist http 403"},
+		{"JSON object", http.StatusForbidden, `{"message":"nope"}`, "hls playlist http 403"},
+		{"empty body", http.StatusForbidden, ``, "hls playlist http 403"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			_, err := FetchHLSMasterPlaylist(context.Background(), srv.URL)
+			if err == nil {
+				t.Fatal("want an error, got nil")
+			}
+			if err.Error() != tc.want {
+				t.Errorf("err = %q, want %q", err.Error(), tc.want)
+			}
+		})
+	}
+
+	t.Run("non-JSON body", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte("<html>Forbidden: " + tokenURL + "</html>"))
+		}))
+		defer srv.Close()
+		_, err := FetchHLSMasterPlaylist(context.Background(), srv.URL)
+		if err == nil {
+			t.Fatal("want an error, got nil")
+		}
+		msg := err.Error()
+		if !strings.HasPrefix(msg, "hls playlist http 403: <html>Forbidden: https://usher.ttvnw.net/") {
+			t.Errorf("err = %q, want the bounded raw prefix", msg)
+		}
+		for _, secret := range []string{"secret-sig", "user_id"} {
+			if strings.Contains(msg, secret) {
+				t.Errorf("err = %q carries %q from the URL's query", msg, secret)
+			}
+		}
+	})
+}
+
 func TestParseHLSMasterPlaylistBasic(t *testing.T) {
 	content := `#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,FRAME-RATE=60.000,VIDEO="chunked"
