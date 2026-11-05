@@ -251,19 +251,23 @@ func twitchChatDowngradeReason(reason string) string {
 // later, with nothing above Info in the log to explain them.
 //
 // SCOPE: the four IRC chat-handshake routes ONLY. The vocabulary has a fifth
-// member — twitch.AuthDowngradePlaybackTokenAnonymous — and this payload is
-// wrong for it in THREE places, not one: the title says "chat"; the first
-// clause says chat is still being recorded, when that route's whole reason to
-// exist is the job with chat capture OFF; and the tail says THIS download is
-// unaffected, which is the exact inverse of what that route reports — the
-// token this capture is being served under is the anonymous one.
+// and a sixth member — twitch.AuthDowngradePlaybackTokenAnonymous and
+// twitch.AuthDowngradeStatusTokenRefused — and this payload is wrong for
+// both. The sixth is a stream check, not a capture: no job, no chat, no
+// "this download". The fifth is wrong in THREE places, not one: the title
+// says "chat"; the first clause says chat is still being recorded, when that
+// route's whole reason to exist is the job with chat capture OFF; and the
+// tail says THIS download is unaffected, which is the exact inverse of what
+// that route reports — the token this capture is being served under is the
+// anonymous one.
 //
-// Nothing routes it here today: the HLS side marks the platform and logs, it
-// does not notify. A caller that wants a notice for it needs its OWN renderer.
-// Do not widen this one, and do not add the fifth reason to
+// Nothing routes either here today: the HLS side and twitch.Service's stream
+// checks mark the platform and log, they do not notify. A caller that wants a
+// notice for one needs its OWN renderer. Do not widen this one, and do not
+// add the fifth or sixth reason to
 // TestTwitchChatDowngradeNoticeCarriesNoCredential's list expecting the shared
 // tail to hold — it asserts "NEXT capture will start anonymous", which is
-// false for that route.
+// false for the fifth route.
 func twitchChatDowngradeNotice(job *database.Job, channel, reason string) (
 	title, description string, fields []notifications.Field, opts notifications.SendOptions,
 ) {
