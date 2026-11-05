@@ -344,6 +344,15 @@ func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConf
 // login_required does neither: on public videos it is anti-bot pushback,
 // not a membership signal (§9).
 //
+// A members_only refusal with no videoDetails reaches here classified
+// not_a_stream, the one classification reached by absence. With no
+// authenticated retry to answer it — membership inactive, no cookies — it
+// stores nothing (owner decision, wave FC): it is returned as the
+// OutcomeDenied a refusal of an upcoming stream is, so the row stays
+// undecided instead of settling not_a_stream, which no rule probes again.
+// The relabel still lands, so the cookie gate parks the row until cookies
+// return, and then the signed-in probe classifies it.
+//
 // confirm is the end check this probe may make (endCheckFor), passed on to
 // both probes when the refusal escalates.
 //
@@ -403,6 +412,10 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 			Logger:     fm.logger,
 		})
 		fm.noteProbeOutcome(ctx, chID, row.VideoID, res, now)
+	} else if res.Outcome == OutcomeProbed && res.StreamStatus == "not_a_stream" {
+		// No authenticated retry answered the detail-less refusal: nothing
+		// is stored on it (see the doc above).
+		res.Outcome = OutcomeDenied
 	}
 	return res
 }

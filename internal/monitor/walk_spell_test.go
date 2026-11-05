@@ -189,3 +189,71 @@ func TestWalk_ADetaillessMembersOnlyRefusalIsTheVerdict(t *testing.T) {
 		t.Error("the refusal put the row in a failure spell: it is an answer, not a failed probe")
 	}
 }
+
+// TestWalk_ADetaillessMembersOnlyRefusalWithMembershipInactiveStoresNothing
+// is owner decision 9 of wave FC. With membership inactive — no cookies, so
+// no authenticated retry — the detail-less members-only refusal (classified
+// not_a_stream, the one classification reached by absence) used to be
+// stored as the row's not_a_stream, which no rule probes again: the
+// members-only stream was lost for good, cookies or none. Now it stores
+// nothing, as an upcoming members-only refusal (OutcomeDenied) does: the row
+// stays unknown, the relabel to membership still lands, the cookie gate
+// parks it while membership is inactive, and once cookies return the
+// signed-in probe classifies it.
+//
+// Mutants: probeRow returning the refusal as probed (the row is stored
+// not_a_stream, and the signed-in probe never runs once cookies return);
+// storing nothing for a members-only answer whatever its status (the
+// refusal with details, the vod row, stores nothing).
+func TestWalk_ADetaillessMembersOnlyRefusalWithMembershipInactiveStoresNothing(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	const chID = "UC1"
+	seedRow(t, db, chID, "m2", now.Add(-1*time.Hour), "exact", "rss", "unknown")
+
+	var anonCalls, authCalls []string
+	anon, auth := escalationProbes(
+		&VideoProbeResult{StreamStatus: "not_a_stream", PlayabilityError: "members_only"},
+		&VideoProbeResult{StreamStatus: "upcoming", Title: "m2"},
+		&anonCalls, &authCalls)
+	fm := newTestFeedMonitor(t, db, withProbe(anon), withProbeAuth(auth), withNow(now))
+
+	fresh := fm.walkForTest(t, chID)
+	if len(anonCalls) != 1 || len(authCalls) != 0 {
+		t.Fatalf("probes anon=%v auth=%v, want the anonymous one alone: no cookies, no retry", anonCalls, authCalls)
+	}
+	row := mustGetFeedItem(t, db, chID, "m2")
+	if row.Status != "unknown" || row.Source != "membership" {
+		t.Errorf("row = %s/%s, want unknown/membership: nothing stored, the relabel kept", row.Status, row.Source)
+	}
+	if res, ok := fresh["m2"]; ok {
+		t.Errorf("fresh[m2] = %+v, want none: nothing was classified", res)
+	}
+
+	// Cookies return: the signed-in probe answers the row.
+	fm.FetchMembership = membWith()
+	fm.walkForTest(t, chID)
+	if len(authCalls) != 1 {
+		t.Fatalf("authenticated probes = %v once cookies returned, want one", authCalls)
+	}
+	if got := mustGetFeedItem(t, db, chID, "m2").Status; got != "upcoming" {
+		t.Errorf("status = %q once cookies returned, want the signed-in probe's upcoming", got)
+	}
+}
+
+// A members-only answer that does state the broadcast (here a vod) is that
+// classification, stored as it always was: only the detail-less shape is
+// held back.
+func TestWalk_AMembersOnlyAnswerWithDetailsIsStoredWithMembershipInactive(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	const chID = "UC1"
+	seedRow(t, db, chID, "m3", now.Add(-1*time.Hour), "exact", "rss", "unknown")
+	var anonCalls, authCalls []string
+	anon, auth := escalationProbes(&VideoProbeResult{StreamStatus: "vod", PlayabilityError: "members_only"}, nil, &anonCalls, &authCalls)
+	fm := newTestFeedMonitor(t, db, withProbe(anon), withProbeAuth(auth), withNow(now))
+	fm.walkForTest(t, chID)
+	if got := mustGetFeedItem(t, db, chID, "m3").Status; got != "vod" {
+		t.Errorf("status = %q, want vod, the answer's own classification", got)
+	}
+}
