@@ -310,7 +310,8 @@ type loopRateLimit struct {
 	// begun: the status probe's last conclusive answer — or the schedule
 	// probe's, when it overtook it — said the stream is live or over
 	// (noteStatus). While it says upcoming, a refused periodic full fetch is
-	// not counted toward the cap.
+	// not counted toward the cap. It outlives a spell (noteFetch's reset
+	// leaves it): it records the stream's state, not the refusals.
 	begun bool
 	// until: zero, or when a go-live confirmation may be made again.
 	until time.Time

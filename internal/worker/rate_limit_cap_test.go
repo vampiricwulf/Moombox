@@ -648,3 +648,40 @@ func TestGivingUpOnARateLimitStopsTheChat(t *testing.T) {
 		t.Errorf("error = %q, want %q", res.Error, want)
 	}
 }
+
+// TestLoopRateLimitCountsOnceTheStreamBegan pins noteStatus and counts on
+// every answer the probe gives (the owner's decision on FA's second
+// follow-up): a refused periodic fetch counts toward the cap once the last
+// conclusive answer said the stream is live or over — live, a VOD, post-live
+// — and not while it says upcoming, nor before any answer; an answer that
+// tells nothing (not a stream) leaves the last one standing. A go-live
+// confirmation's refusal counts whatever was said.
+//
+// Mutants: count only on live (the VOD and post-live rows do not count);
+// leave begun set on upcoming (the "live, then upcoming" row counts).
+func TestLoopRateLimitCountsOnceTheStreamBegan(t *testing.T) {
+	for _, tc := range []struct {
+		answers []youtube.StreamStatus
+		want    bool
+	}{
+		{nil, false},
+		{[]youtube.StreamStatus{youtube.StreamUpcoming}, false},
+		{[]youtube.StreamStatus{youtube.StreamLive}, true},
+		{[]youtube.StreamStatus{youtube.StreamVOD}, true},
+		{[]youtube.StreamStatus{youtube.StreamPostLive}, true},
+		{[]youtube.StreamStatus{youtube.StreamLive, youtube.StreamUpcoming}, false},
+		{[]youtube.StreamStatus{youtube.StreamPostLive, youtube.StreamNotAStream}, true},
+		{[]youtube.StreamStatus{youtube.StreamUpcoming, youtube.StreamNotAStream}, false},
+	} {
+		var l loopRateLimit
+		for _, s := range tc.answers {
+			l.noteStatus(s)
+		}
+		if got := l.counts(false); got != tc.want {
+			t.Errorf("after %v a refused periodic fetch counts = %v, want %v", tc.answers, got, tc.want)
+		}
+		if !l.counts(true) {
+			t.Errorf("after %v a refused confirmation does not count", tc.answers)
+		}
+	}
+}
