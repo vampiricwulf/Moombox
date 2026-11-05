@@ -262,8 +262,8 @@ func TestLivePathSwitchesAreBounded(t *testing.T) {
 
 	job, noJS, hls = setup(t)
 	job.Run.markNoJS()
-	if _, path, err := switchLivePath(context.Background(), job, info, &StrategyDeps{}, cause); err != nil || path != "HLS" || len(noJS.seen) != 0 {
-		t.Errorf("a no-JS run's switch = %q, %v (no-JS set up %d time(s)); want HLS", path, err, len(noJS.seen))
+	if _, path, err := switchLivePath(context.Background(), job, info, &StrategyDeps{}, cause); err != nil || path != "HLS" || len(noJS.seen) != 0 || len(hls.seen) != 1 {
+		t.Errorf("a no-JS run's switch = %q, %v (no-JS set up %d time(s), HLS %d); want HLS", path, err, len(noJS.seen), len(hls.seen))
 	}
 }
 
