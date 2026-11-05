@@ -25,10 +25,18 @@ import (
 // sequence back once more they apply the engine's refused-segment rule to it
 // instead — the rebuilds were the fresh credentials that rule waits for —
 // and the loop closes the part there (ErrSegmentRefused). A sequence the rule
-// cannot take, because the head is not more than two past it, comes back as
-// ErrQualityLost once more; past the cap the loop stops rebuilding and
-// verifies the stream on the still-live branch's five-minute cadence and
-// budget instead.
+// cannot take yet — a 5xx that has not failed for long enough, or a refusal
+// with no later segment served either — comes back as ErrQualityLost once
+// more; past the cap the loop stops rebuilding at once and verifies the
+// stream on the still-live branch's five-minute cadence and budget instead.
+//
+// Only a stall the rule could act on counts: a DASH stream stopped more than
+// two segments below its head (engine.SegmentDownloader.StoppedWellBehindHead).
+// An HLS capture, and a DASH one stalled at the live edge — a broadcast
+// interrupted while YouTube still calls it live, whose edge answers 403 or
+// 410 until it resumes — are rebuilt as often as it takes, as before the cap:
+// the verify branch's budget would end such a capture after about half an
+// hour of a wait interruption_timeout allows two hours for.
 const sameSeqRebuildCap = 3
 
 // seqRun counts consecutive rebuilds of one stream at one sequence, and
@@ -48,6 +56,17 @@ func (r *seqRun) note(seq int) int {
 	return r.count
 }
 
+// noteStopped records a rebuild of the stream d stopped where it did: counted
+// when it stopped well behind its head, otherwise the run is over — a stream
+// at the edge is not stuck at a refused segment.
+func (r *seqRun) noteStopped(d *engine.SegmentDownloader) int {
+	if !d.StoppedWellBehindHead() {
+		*r = seqRun{}
+		return 0
+	}
+	return r.note(d.CurrentSeq())
+}
+
 // sameSeqRebuilds counts the live loop's ErrQualityLost rebuilds per stream:
 // a stream whose downloader stopped where the previous rebuild started it
 // made no progress across that rebuild. Per stream, because the sibling of a
@@ -57,14 +76,20 @@ type sameSeqRebuilds struct{ video, audio seqRun }
 
 // note records an ErrQualityLost rebuild of res's downloaders at the
 // sequences they stopped at, and returns the larger of the two streams'
-// counts.
+// counts. An HLS result is never counted — the cap is about the DASH loop's
+// refused segment, and the HLS loop never reads its arming — nor is a stream
+// that stopped within two of its head.
 func (s *sameSeqRebuilds) note(res *DownloadResult) int {
+	if res.IsHls {
+		*s = sameSeqRebuilds{}
+		return 0
+	}
 	n := 0
 	if res.VideoDownloader != nil {
-		n = max(n, s.video.note(res.VideoDownloader.CurrentSeq()))
+		n = max(n, s.video.noteStopped(res.VideoDownloader))
 	}
 	if res.AudioDownloader != nil {
-		n = max(n, s.audio.note(res.AudioDownloader.CurrentSeq()))
+		n = max(n, s.audio.noteStopped(res.AudioDownloader))
 	}
 	return n
 }

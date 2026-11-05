@@ -1,23 +1,51 @@
 package worker
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 )
 
 // downloaderAt is a downloader whose CurrentSeq is seq — what the live loop
-// reads off a stopped one.
+// reads off a stopped one — stopped well behind its head, where a refused
+// segment sits.
 func downloaderAt(t *testing.T, seq int) *engine.SegmentDownloader {
 	t.Helper()
-	return engine.NewSegmentDownloader(engine.DownloaderOptions{
+	return downloaderAtHead(t, seq, seq+100)
+}
+
+// downloaderAtHead is downloaderAt with the head it learned: primed the way
+// a failing download learns it, from the X-Head-Seqnum of one refused
+// response (a probe, which writes nothing).
+func downloaderAtHead(t *testing.T, seq, head int) *engine.SegmentDownloader {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Head-Seqnum", strconv.Itoa(head))
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+	d := engine.NewSegmentDownloader(engine.DownloaderOptions{
+		BaseURL:    srv.URL + "/videoplayback?id=refused.1&itag=299",
 		OutputFile: t.TempDir() + "/stream",
 		StartSeq:   seq,
 	})
+	if _, _, err := d.ProbeSegmentAvailable(context.Background(), seq); err != nil {
+		t.Fatalf("priming probe: %v", err)
+	}
+	if got := d.HeadSeq(); got != head {
+		t.Fatalf("HeadSeq priming: got %d, want %d", got, head)
+	}
+	return d
 }
 
 // TestSameSeqRebuildCapIsThree pins the production value of the cap: owner
@@ -65,6 +93,43 @@ func TestSameSeqRebuildsCountsTheStuckStream(t *testing.T) {
 	}
 }
 
+// TestSameSeqRebuildsCountsOnlyAStallTheRuleCanTake pins what the cap leaves
+// uncounted, so it never sends these to the verify branch's half-hour budget:
+//   - an HLS capture: the HLS loop has no refused-segment rule and never
+//     reads the arming;
+//   - a DASH stream stalled within two of its head — the live edge of a
+//     broadcast interrupted while YouTube still calls it live, answering 403
+//     or 410 there until it resumes — which the rule can never take.
+//
+// A stall that moves from the edge to well behind it starts counting from 1.
+//
+// Mutants: note without its IsHls check, or seqRun counting whatever the
+// head: the matching row reaches the cap.
+func TestSameSeqRebuildsCountsOnlyAStallTheRuleCanTake(t *testing.T) {
+	t.Run("HLS", func(t *testing.T) {
+		var r sameSeqRebuilds
+		for i := range sameSeqRebuildCap + 2 {
+			res := &DownloadResult{IsHls: true, VideoDownloader: downloaderAt(t, 50)}
+			if got := r.note(res); got != 0 {
+				t.Fatalf("rebuild %d: count = %d, want 0", i+1, got)
+			}
+		}
+	})
+	t.Run("at the live edge", func(t *testing.T) {
+		var r sameSeqRebuilds
+		for i, head := range []int{50, 51, 52, 51} { // cur 50: the edge, head-1, head-2
+			res := &DownloadResult{VideoDownloader: downloaderAtHead(t, 50, head), AudioDownloader: downloaderAtHead(t, 50, head)}
+			if got := r.note(res); got != 0 {
+				t.Fatalf("rebuild %d (head %d): count = %d, want 0", i+1, head, got)
+			}
+		}
+		res := &DownloadResult{VideoDownloader: downloaderAtHead(t, 50, 53)}
+		if got := r.note(res); got != 1 {
+			t.Errorf("first rebuild well behind the head: count = %d, want 1", got)
+		}
+	})
+}
+
 // TestSameSeqRebuildsArmsTheCappedRebuild pins which downloaders the cap
 // arms: the rebuild that brings a stream's count to sameSeqRebuildCap — the
 // third at the sequence — and every one built for it after, at the stuck
@@ -77,23 +142,52 @@ func TestSameSeqRebuildsCountsTheStuckStream(t *testing.T) {
 //   - arm with `>` for `>=`: the third rebuild is not armed.
 //   - arm without its count check: the first rebuild is armed.
 //   - arm naming the wrong stream: the audio downloader is armed.
+//   - seqRun.note restarting its clock on every rebuild at the sequence: the
+//     armed since is the latest rebuild's, not the first's.
 func TestSameSeqRebuildsArmsTheCappedRebuild(t *testing.T) {
-	var r sameSeqRebuilds
+	type pair struct{ stopped, next *DownloadResult }
+	var rebuilds []pair
 	for rebuild := 1; rebuild <= sameSeqRebuildCap+1; rebuild++ {
-		r.note(&DownloadResult{VideoDownloader: downloaderAt(t, 50), AudioDownloader: downloaderAt(t, 60+rebuild)})
-		next := &DownloadResult{VideoDownloader: downloaderAt(t, 50), AudioDownloader: downloaderAt(t, 60+rebuild)}
-		r.arm(next)
-		want := -1
-		if rebuild >= sameSeqRebuildCap {
-			want = 50
-		}
-		if got := next.VideoDownloader.RebuildsExhaustedSeq(); got != want {
-			t.Errorf("rebuild %d: video armed at %d, want %d", rebuild, got, want)
-		}
-		if got := next.AudioDownloader.RebuildsExhaustedSeq(); got != -1 {
-			t.Errorf("rebuild %d: audio armed at %d, want unarmed (it kept moving)", rebuild, got)
-		}
+		rebuilds = append(rebuilds, pair{
+			stopped: &DownloadResult{VideoDownloader: downloaderAt(t, 50), AudioDownloader: downloaderAt(t, 60+rebuild)},
+			next:    &DownloadResult{VideoDownloader: downloaderAt(t, 50), AudioDownloader: downloaderAt(t, 60+rebuild)},
+		})
 	}
+
+	// In a bubble, so each rebuild lands a minute after the last on a clock
+	// that moves only when told to.
+	synctest.Test(t, func(t *testing.T) {
+		var r sameSeqRebuilds
+		var first time.Time
+		for i, p := range rebuilds {
+			rebuild := i + 1
+			if rebuild > 1 {
+				time.Sleep(time.Minute)
+			}
+			r.note(p.stopped)
+			if rebuild == 1 {
+				first = time.Now()
+			}
+			r.arm(p.next)
+			want := -1
+			if rebuild >= sameSeqRebuildCap {
+				want = 50
+			}
+			if got := p.next.VideoDownloader.RebuildsExhaustedSeq(); got != want {
+				t.Errorf("rebuild %d: video armed at %d, want %d", rebuild, got, want)
+			}
+			if want >= 0 {
+				// The persistence a 5xx must outlast runs from the run's first
+				// rebuild, not from this one.
+				if got := p.next.VideoDownloader.RebuildsExhaustedSince(); !got.Equal(first) {
+					t.Errorf("rebuild %d: armed since %v, want the first rebuild's %v", rebuild, got, first)
+				}
+			}
+			if got := p.next.AudioDownloader.RebuildsExhaustedSeq(); got != -1 {
+				t.Errorf("rebuild %d: audio armed at %d, want unarmed (it kept moving)", rebuild, got)
+			}
+		}
+	})
 }
 
 // TestPastRefusedSegment pins where the part after a refused segment starts
