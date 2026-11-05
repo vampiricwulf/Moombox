@@ -1479,7 +1479,7 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	var embedResult *EmbedPageResult
 	if fetchEmbedPage {
 		var err error
-		embedResult, err = FetchEmbedPage(ctx, videoID, p.auth.ConsentCookieHeader())
+		embedResult, err = FetchEmbedPage(ctx, videoID, p.embedPageCookieHeader())
 		if err != nil {
 			p.logger.Warn("[PlayerApi] Failed to fetch embed page", slog.String("error", err.Error()))
 			// Continue without encryptedHostFlags — it may still work
@@ -1507,9 +1507,13 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 		}
 	}
 
+	// No Referer on the player call. It used to carry
+	// https://www.youtube.com/embed/<id> while its context claimed reddit as
+	// the embedding page — two hosts in one request. Upstream's player call
+	// sends none (generate_api_headers, _base.py:980-999): the Referer
+	// belongs to the embed page fetch, where it is the embedUrl
+	// (FetchEmbedPage, f2bd3202c).
 	headers := p.auth.GenerateAPIHeaders(constants.WebEmbeddedClient, ytcfg)
-	// Embedded requests need Referer from the embed URL
-	headers["Referer"] = fmt.Sprintf("%s/%s", constants.YouTubeURLs.Embed, videoID)
 
 	// Build client context with thirdParty embedUrl
 	clientCtx := make(map[string]any, len(constants.WebEmbeddedClient.Context))
@@ -1522,7 +1526,7 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 		"context": map[string]any{
 			"client": clientCtx,
 			"thirdParty": map[string]any{
-				"embedUrl": "https://www.reddit.com/",
+				"embedUrl": embedThirdPartyURL,
 			},
 		},
 		"videoId":        videoID,
@@ -1565,6 +1569,28 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	info, err := p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "WEB_EMBEDDED", videoID)
 	stampManifestSources(info, "web_embedded")
 	return info, err
+}
+
+// embedPageCookieHeader is the Cookie header the embed page is fetched with
+// (owner decision D24, 2026-10-31): the page cookies when the jar is signed
+// in — its session, with an English PREF, as yt-dlp's cookiejar sends the
+// session on this page as on every other request (_download_ytcfg goes out
+// through the same jar) — and otherwise the consent and language pair alone.
+// Signed in is HasAuthCookies, the predicate that sends an extraction down
+// the authenticated cascade (Service.GetVideoInfo) and the status probe's
+// escalation to the authenticated TV probe, so the age-gate retry of the
+// authenticated cascade fetches the page signed in and that of the public
+// cascade, like the probe's signed-out escalation, fetches it as anonymously
+// as the public watch page (GetVideoInfoPublic): a half-cleared jar's
+// leftover SAPISID stays off it. It used to be the consent pair on every
+// path, so an account's embed page was read signed out — flags for a viewer
+// the player call, which carries the jar's cookies (GenerateAPIHeaders), is
+// not.
+func (p *PlayerAPI) embedPageCookieHeader() string {
+	if p.auth.HasAuthCookies() {
+		return p.auth.PageCookieHeader()
+	}
+	return p.auth.ConsentCookieHeader()
 }
 
 // innertubeErrorDetailMax bounds what a failure message may quote back from
