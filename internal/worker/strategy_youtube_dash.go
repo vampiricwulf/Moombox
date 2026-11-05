@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -155,6 +156,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// of its own to prefer, so a mandatory one takes the token minted under
 	// the guess — the last resort D12 leaves it; a recommended one goes bare.
 	var dashPoToken string
+	var guessedPot bool // dashPoToken was minted under a guessed binding
 	dashSource := videoInfo.DashManifestSource
 	if potProvider != nil && !youtube.GvsTokenRequired(dashSource) {
 		logGvsTokenSkipped(job, dashSource)
@@ -166,6 +168,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			job.Logger.Warn("[POT] missing_pot: the GVS content binding is a guess, and a DASH manifest has no token-free copy — minting under it",
 				"jobID", job.Job.ID, "binding", bindingKind, "source", dashSource)
 			poToken, err = strategyGvsToken(ctx, potProvider, videoInfo, bindingValue, true)
+			guessedPot = err == nil
 		}
 		switch {
 		case err == nil:
@@ -184,9 +187,23 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	}
 
 	// Step 3: Fetch and parse DASH manifest
-	manifestData, _, err := fetchURL(ctx, dashURL)
+	manifestData, status, err := fetchURL(ctx, dashURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch DASH manifest: %w", err)
+	}
+	// A manifest refused (403) the token minted under a guessed binding was
+	// refused for that token, most likely: it is bound to an identity the
+	// session's GVS token is not shown to carry (D12). So it is no token at
+	// all, and the setup fails as a manifest none could be minted for does
+	// (errMissingPot), for the fallbacks that answer that — a live capture's
+	// HLS manifest, whose token is only recommended (missingPotFallback; owner
+	// decision, wave FC: "if refused, the missing_pot fallback drops to HLS"),
+	// a VOD's other formats (vodMissingPotFallback). A refusal of a token
+	// that is no guess is left to fail as it always did, at the parse.
+	if guessedPot && status == http.StatusForbidden {
+		job.Logger.Warn("[POT] missing_pot: the DASH manifest refused the token minted under the guessed binding",
+			"jobID", job.Job.ID, "source", dashSource, "status", status)
+		return nil, fmt.Errorf("DASH: %w: the %s manifest refused the GVS PO token minted under the guessed binding (HTTP %d): %w", errMissingPot, dashSource, status, errGuessedGvsBinding)
 	}
 
 	streams, err := engine.ParseDash(string(manifestData), videoInfo.DashManifestURL)

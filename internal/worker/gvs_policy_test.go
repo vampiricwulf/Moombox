@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -919,6 +921,96 @@ func TestSetupFallsToOtherFormatsOnVodMissingPot(t *testing.T) {
 			defer srv.mu.Unlock()
 			if len(srv.paths) != 0 {
 				t.Errorf("manifest fetched %v, want it skipped", srv.paths)
+			}
+		})
+	}
+}
+
+// TestLiveGuessedDashManifestFallsToHls pins owner decision 3 of wave FC: a
+// live capture whose only from-start path is a web-family DASH manifest, its
+// binding a guess, mints under the guess (the manifest has no token-free
+// copy) — and when that manifest is refused, or no token can be had under
+// the guess either, the missing_pot fallback records the live HLS playlist
+// instead. A refusal of a token that is no guess is not a missing_pot, and
+// falls to nothing.
+//
+// Mutants (each run): not marking a guessed token's refusal errMissingPot
+// fails the refused row (no HLS); marking every refusal fails the
+// no-guess row (HLS for a token that is no guess); not minting under the
+// guess fails the accepted row (no /pot/ path) and the refused row.
+func TestLiveGuessedDashManifestFallsToHls(t *testing.T) {
+	sidecarDown := errors.New("sidecar down")
+	for _, tc := range []struct {
+		name     string
+		guessed  bool
+		refuse   bool
+		mintErr  error
+		wantHls  bool
+		wantPot  bool // the manifest was asked for with a /pot/ token
+		noFetch  bool
+		wantDash bool // the DASH setup succeeded
+	}{
+		{name: "accepted: the guessed token rides the manifest", guessed: true, wantPot: true, wantDash: true},
+		{name: "refused: HLS takes over", guessed: true, refuse: true, wantPot: true, wantHls: true},
+		{name: "no token under the guess either: HLS", guessed: true, mintErr: sidecarDown, wantHls: true, noFetch: true},
+		{name: "a refused token that is no guess", refuse: true, wantPot: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token := "tok-guess"
+			if tc.mintErr != nil {
+				token = ""
+			}
+			fakeVodMint(t, token, tc.mintErr)
+			ms := &manifestServer{}
+			ms.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ms.mu.Lock()
+				ms.paths = append(ms.paths, r.URL.Path)
+				ms.mu.Unlock()
+				if tc.refuse {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
+				}
+				_, _ = w.Write([]byte(potTestMPD))
+			}))
+			t.Cleanup(ms.Close)
+			hls := &fakeStrategy{kind: "hls"}
+			swapHls(t, hls)
+			job, logs := vodPotJob(t)
+			info := &youtube.VideoInfo{
+				StreamStatus:       youtube.StreamLive,
+				DashManifestURL:    ms.URL + "/api/manifest/dash/id/abc",
+				DashManifestSource: "web_safari",
+				HlsManifestURL:     "https://m.example/x.m3u8",
+				HlsManifestSource:  "web_safari",
+				GvsBindingGuessed:  tc.guessed,
+			}
+			res, err := setupWithFallback(context.Background(), job, DashStrategy, false, info, &StrategyDeps{PotProvider: &bgutils.PotProvider{}})
+			ms.mu.Lock()
+			paths := append([]string(nil), ms.paths...)
+			ms.mu.Unlock()
+			if tc.noFetch {
+				if len(paths) != 0 {
+					t.Errorf("manifest fetched %v, want it skipped", paths)
+				}
+			} else if len(paths) != 1 || strings.Contains(paths[0], "/pot/") != tc.wantPot {
+				t.Errorf("manifest requests = %v, want one, /pot/ %v", paths, tc.wantPot)
+			}
+			if ran := len(hls.seen) == 1; ran != tc.wantHls {
+				t.Fatalf("HLS ran %d times, want %v: %v (%v)", len(hls.seen), tc.wantHls, err, logs.lines())
+			}
+			switch {
+			case tc.wantHls:
+				if err != nil || res == nil || !res.IsHls {
+					t.Errorf("setup = %+v, %v; want the HLS fallback's result", res, err)
+				}
+			case tc.wantDash:
+				if err != nil || res == nil || res.VideoDownloader.PoToken() != "tok-guess" {
+					t.Errorf("setup = %+v, %v; want the DASH capture on the guessed token", res, err)
+				}
+			default:
+				if err == nil || errors.Is(err, errMissingPot) {
+					t.Errorf("setup = %v, want the DASH setup's own failure, no missing_pot", err)
+				}
 			}
 		})
 	}
