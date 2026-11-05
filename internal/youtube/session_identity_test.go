@@ -1,7 +1,14 @@
 package youtube
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"sync"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/constants"
 )
 
 // The datasync id splits as yt-dlp's _parse_data_sync_id splits it
@@ -98,5 +105,85 @@ func TestPageSessionIdentityFromDataSyncID(t *testing.T) {
 			check("watch page", watch)
 			check("homepage", homepageSession(tc.page))
 		})
+	}
+}
+
+// A brand account's homepage that states its datasync id and not
+// DELEGATED_SESSION_ID hands the probes the delegated half: the page id
+// reaches X-Goog-PageId on the session the probes, /browse and chat carry.
+//
+// Mutant: homepageSession not calling fillSessionFromDataSync.
+func TestADataSyncIDOnlyHomepageGivesTheProbesItsBrandPage(t *testing.T) {
+	jar, _ := loadAccountJar(t, accountCookies("a"))
+	p := NewPlayerAPI(NewAuth(jar, noopLogger{}), noopLogger{})
+	p.captureVisitorData(homepageSession(`ytcfg.set({"SESSION_INDEX":"0","DATASYNC_ID":"brand-d||user-u"});`), jar.YouTubeIdentity())
+	got := accountSessionHeaders(p.probeYtcfg(""))
+	if got["X-Goog-PageId"] != "brand-d" || got["X-Goog-AuthUser"] != "0" {
+		t.Errorf("session headers = %v, want X-Goog-PageId brand-d and X-Goog-AuthUser 0", got)
+	}
+}
+
+// /browse — the backlog scanner's channel tabs, the membership tab among them
+// — carries the signed-in session the probes carry (probeYtcfg), as yt-dlp's
+// tab requests pass the ytcfg's session into generate_api_headers
+// (_tab.py:591-592, 833-834, 939-940): X-Goog-AuthUser and the brand
+// account's X-Goog-PageId, beside the visitor id. Once the jar holds another
+// account the old account's page id is not sent.
+//
+// Mutant: browsePost building its headers from DefaultYtcfg (no AuthUser, no
+// PageId); browsePost dropping the visitor data.
+func TestBrowseCarriesTheAccountsSession(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		seen []http.Header
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Clone())
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(browseVideosPage1))
+	}))
+	t.Cleanup(srv.Close)
+
+	jar, path := loadAccountJar(t, accountCookies("a"))
+	s := NewService(jar, noopLogger{})
+	s.browse.endpoint = srv.URL
+	idx := 1
+	s.PlayerAPI.captureVisitorData(&YtcfgData{SessionIndex: &idx, DelegatedSessionID: "brand-a"}, jar.YouTubeIdentity())
+	s.SetVisitorData("vd-browse")
+
+	if _, err := s.FetchChannelTabPage(context.Background(), "UCbrowsetest0000000000ab", "videos", ""); err != nil {
+		t.Fatalf("FetchChannelTabPage: %v", err)
+	}
+	// Another account's cookies, as an import writes them: the tab's next
+	// first page must not name account a's brand page.
+	if err := os.WriteFile(path, []byte(accountCookies("bb")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.FetchChannelTabPage(context.Background(), "UCbrowsetest0000000000ab", "videos", ""); err != nil {
+		t.Fatalf("FetchChannelTabPage after the switch: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 {
+		t.Fatalf("server saw %d browse requests, want 2", len(seen))
+	}
+	first := seen[0]
+	if got := first.Get("X-Goog-AuthUser"); got != "1" {
+		t.Errorf("X-Goog-AuthUser = %q, want 1", got)
+	}
+	if got := first.Get("X-Goog-PageId"); got != "brand-a" {
+		t.Errorf("X-Goog-PageId = %q, want brand-a", got)
+	}
+	if got := first.Get("X-Goog-Visitor-Id"); got != "vd-browse" {
+		t.Errorf("X-Goog-Visitor-Id = %q, want vd-browse", got)
+	}
+	if got := first.Get("X-YouTube-Client-Name"); got != constants.WebClient.ClientID {
+		t.Errorf("X-YouTube-Client-Name = %q, want %q", got, constants.WebClient.ClientID)
+	}
+	if got := seen[1].Get("X-Goog-PageId"); got != "" {
+		t.Errorf("after the account switch X-Goog-PageId = %q, want none", got)
 	}
 }

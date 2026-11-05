@@ -110,16 +110,8 @@ func (a *Auth) GenerateAPIHeaders(client constants.YouTubeClientConfig, ytcfg *Y
 			headers["X-Goog-Visitor-Id"] = ytcfg.VisitorData
 		}
 
-		if ytcfg.DelegatedSessionID != "" {
-			headers["X-Goog-PageId"] = ytcfg.DelegatedSessionID
-		}
-
-		if ytcfg.DelegatedSessionID != "" || ytcfg.SessionIndex != nil {
-			idx := 0
-			if ytcfg.SessionIndex != nil {
-				idx = *ytcfg.SessionIndex
-			}
-			headers["X-Goog-AuthUser"] = strconv.Itoa(idx)
+		for k, v := range accountSessionHeaders(ytcfg) {
+			headers[k] = v
 		}
 	}
 
@@ -139,5 +131,30 @@ func (a *Auth) GenerateAPIHeaders(client constants.YouTubeClientConfig, ytcfg *Y
 		slog.Bool("cookies", cookieHeader != ""),
 	)
 
+	return headers
+}
+
+// accountSessionHeaders is the signed-in account's identity a ytcfg names, as
+// yt-dlp's _generate_cookie_auth_headers states it (_base.py:960-978):
+// X-Goog-PageId for a delegated (brand) session, and X-Goog-AuthUser — the
+// session index, 0 when only a delegated session is named — whenever either
+// is. Empty for a ytcfg that names no session. GenerateAPIHeaders' and
+// Service.ChatSessionHeaders' one source, so chat cannot drift from the
+// player calls.
+func accountSessionHeaders(ytcfg *YtcfgData) map[string]string {
+	headers := map[string]string{}
+	if ytcfg == nil {
+		return headers
+	}
+	if ytcfg.DelegatedSessionID != "" {
+		headers["X-Goog-PageId"] = ytcfg.DelegatedSessionID
+	}
+	if ytcfg.DelegatedSessionID != "" || ytcfg.SessionIndex != nil {
+		idx := 0
+		if ytcfg.SessionIndex != nil {
+			idx = *ytcfg.SessionIndex
+		}
+		headers["X-Goog-AuthUser"] = strconv.Itoa(idx)
+	}
 	return headers
 }
