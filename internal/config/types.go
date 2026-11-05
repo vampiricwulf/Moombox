@@ -228,6 +228,14 @@ type DownloaderConfig struct {
 	ProgressIntervalMS int  `toml:"progress_interval_ms" json:"progress_interval_ms"`
 	DownloadChat       bool `toml:"download_chat" json:"download_chat"`
 	Prefer60fps        bool `toml:"prefer_60fps" json:"prefer_60fps"`
+	// PreferHDR ranks an HDR rendition above an SDR one of the same size and
+	// frame rate on YouTube (owner decision D13; the dynamic-range rung of
+	// youtube's shared rank, rangeScore). Default true, as yt-dlp's `hdr:12`
+	// sort ranks; false keeps SDR for players that cannot tone-map. Read per
+	// job start like Prefer60fps, and per request by the format picker: not
+	// restart-required. No migration: a config file without the key decodes
+	// over Defaults(), so it reads as true.
+	PreferHDR bool `toml:"prefer_hdr" json:"prefer_hdr"`
 	// MaximumTimeout (seconds, YouTube livestreams only) is how long to keep
 	// retrying — checking every 30s whether the stream has ended — before
 	// force-finalizing the recording, even if YouTube still reports the stream

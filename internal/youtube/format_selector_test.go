@@ -16,7 +16,7 @@ func TestSelectBestFormats(t *testing.T) {
 
 	// max_video_resolution=1080: the cap is the SHORT edge now, so 1080
 	// admits every 1920x1080 rendition here (it used to need 1920).
-	result := SelectBestFormats(formats, 1080, true)
+	result := SelectBestFormats(formats, 1080, true, true)
 
 	if result.Video == nil {
 		t.Fatal("expected video format")
@@ -44,7 +44,7 @@ func TestSelectBestFormatsResolutionLimit(t *testing.T) {
 
 	// The cap is the SHORT edge (R1), so 720 admits 1280x720 and rejects
 	// 1920x1080. Before this arc the same intent was written as 1280.
-	result := SelectBestFormats(formats, 720, true)
+	result := SelectBestFormats(formats, 720, true, true)
 	if result.Video == nil {
 		t.Fatal("expected video format")
 	}
@@ -61,7 +61,7 @@ func TestSelectWithManualItag(t *testing.T) {
 	}
 
 	videoItag := 136
-	result := SelectWithOptions(formats, 1080, true, &videoItag, nil)
+	result := SelectWithOptions(formats, 1080, true, true, &videoItag, nil)
 	if result.Video == nil || result.Video.Itag != 136 {
 		t.Error("expected manual video itag 136")
 	}
@@ -74,7 +74,7 @@ func TestSelectSkipStream(t *testing.T) {
 	}
 
 	skipVideo := -1
-	result := SelectWithOptions(formats, 1080, true, &skipVideo, nil)
+	result := SelectWithOptions(formats, 1080, true, true, &skipVideo, nil)
 	if result.Video != nil {
 		t.Error("expected nil video when itag=-1")
 	}
@@ -118,7 +118,7 @@ func TestSelectBestFormats_AuthLevelTiebreaker(t *testing.T) {
 		{Itag: 141, MimeType: "audio/mp4; codecs=\"mp4a.40.2\"", Bitrate: 128000, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://example.com/a2", AuthLevel: &vrAuth},
 	}
 
-	result := SelectBestFormats(formats, 1920, true)
+	result := SelectBestFormats(formats, 1920, true, true)
 
 	if result.Video == nil {
 		t.Fatal("expected video format")
@@ -138,7 +138,7 @@ func TestSelectBestFormats_AuthLevelTiebreaker(t *testing.T) {
 }
 
 func TestSelectBestFormats_EmptyFormats(t *testing.T) {
-	result := SelectBestFormats([]Format{}, 1920, true)
+	result := SelectBestFormats([]Format{}, 1920, true, true)
 	if result.Video != nil {
 		t.Error("expected nil video for empty formats")
 	}
@@ -148,7 +148,7 @@ func TestSelectBestFormats_EmptyFormats(t *testing.T) {
 }
 
 func TestSelectBestFormats_NilFormats(t *testing.T) {
-	result := SelectBestFormats(nil, 1920, true)
+	result := SelectBestFormats(nil, 1920, true, true)
 	if result.Video != nil || result.Audio != nil {
 		t.Error("expected nil results for nil formats")
 	}
@@ -161,7 +161,7 @@ func TestSelectBestFormats_Prefer30fps(t *testing.T) {
 	}
 
 	// prefer60fps=false should pick 30fps
-	result := SelectBestFormats(formats, 1920, false)
+	result := SelectBestFormats(formats, 1920, false, true)
 	if result.Video == nil {
 		t.Fatal("expected video format")
 	}
@@ -178,7 +178,7 @@ func TestSelectBestFormats_NoURLSkipped(t *testing.T) {
 		{Itag: 251, MimeType: "audio/webm; codecs=\"opus\"", Bitrate: 160000, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://example.com/a2"},
 	}
 
-	result := SelectBestFormats(formats, 1920, true)
+	result := SelectBestFormats(formats, 1920, true, true)
 	if result.Video == nil {
 		t.Fatal("expected video format")
 	}
@@ -200,7 +200,7 @@ func TestSelectBestFormats_CodecTiebreaker(t *testing.T) {
 		{Itag: 248, MimeType: "video/webm; codecs=\"vp9\"", Bitrate: 3500000, Width: new(1920), Height: new(1080), Fps: new(30), URL: "https://example.com/v2"},
 	}
 
-	result := SelectBestFormats(formats, 1920, true)
+	result := SelectBestFormats(formats, 1920, true, true)
 	if result.Video == nil {
 		t.Fatal("expected video format")
 	}
@@ -224,7 +224,7 @@ func TestSelectBestFormats_MatchesYtDlp(t *testing.T) {
 		{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`, Bitrate: 131072, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://x/aac"},
 	}
 
-	result := SelectBestFormats(formats, 1920, true)
+	result := SelectBestFormats(formats, 1920, true, true)
 	if result.Video == nil || result.Video.Itag != 721 {
 		t.Fatalf("expected itag 721 (AV1 Premium — highest codec + bitrate), got %v", result.Video)
 	}
@@ -264,10 +264,14 @@ func TestScoreAudioCodec(t *testing.T) {
 		codec string
 		want  int
 	}{
-		{"opus", 4},
-		{"mp4a.40.5", 2},
-		{"mp4a.40.2", 2},
-		{"mp4a.40.1", 1},
+		{"opus", 6},
+		{"mp4a.40.5", 5},
+		{"mp4a.40.2", 5},
+		{"mp4a.40.1", 4},
+		// yt-dlp's order below AAC: ac-4, then E-AC-3, then AC-3.
+		{"ac-4.02.01.01", 3},
+		{"ec-3", 2},
+		{"ac-3", 1},
 		{"unknown", 0},
 		{"", 0},
 	}
@@ -318,7 +322,7 @@ func TestSelectBestAudioPrefersTheOriginalNonDRCTrack(t *testing.T) {
 		mk("en.4", "English original", false, false, 128000, "https://x/en-orig"),
 	}
 
-	got := SelectBestFormats(formats, 1080, true)
+	got := SelectBestFormats(formats, 1080, true, true)
 	if got.Audio == nil {
 		t.Fatal("no audio format selected")
 	}
@@ -370,7 +374,7 @@ func TestSelectBestFormatsCapIsTheShortEdge(t *testing.T) {
 	}
 
 	t.Run("4K under the default cap", func(t *testing.T) {
-		got := SelectBestFormats(ladder, 2160, true)
+		got := SelectBestFormats(ladder, 2160, true, true)
 		if got.Video == nil {
 			t.Fatal("no video selected at max_video_resolution=2160 — the 3840x2160 format is 2160 on its SHORT edge and must be admitted")
 		}
@@ -383,7 +387,7 @@ func TestSelectBestFormatsCapIsTheShortEdge(t *testing.T) {
 		portrait := []Format{
 			{Itag: 400, MimeType: "video/mp4; codecs=\"av01.0.12M.08\"", Bitrate: 18000000, Width: new(2160), Height: new(3840), Fps: new(30), URL: "https://example.com/portrait"},
 		}
-		got := SelectBestFormats(portrait, 2160, true)
+		got := SelectBestFormats(portrait, 2160, true, true)
 		if got.Video == nil {
 			t.Fatal("no video selected for a 2160x3840 portrait source at cap 2160 — its short edge is 2160")
 		}
@@ -393,7 +397,7 @@ func TestSelectBestFormatsCapIsTheShortEdge(t *testing.T) {
 	})
 
 	t.Run("nothing at or below the cap picks the closest above", func(t *testing.T) {
-		got := SelectBestFormats(ladder[1:], 1080, true)
+		got := SelectBestFormats(ladder[1:], 1080, true, true)
 		if got.Video == nil {
 			t.Fatal("no video selected at cap 1080 with only 1440p and 2160p on offer — the cap is a preference, never an exclusion that leaves nothing")
 		}
@@ -403,7 +407,7 @@ func TestSelectBestFormatsCapIsTheShortEdge(t *testing.T) {
 	})
 
 	t.Run("cap 0 is unbounded", func(t *testing.T) {
-		got := SelectBestFormats(ladder, 0, true)
+		got := SelectBestFormats(ladder, 0, true, true)
 		if got.Video == nil {
 			t.Fatal("no video selected at max_video_resolution=0 — 0 means unbounded")
 		}
@@ -443,7 +447,7 @@ func TestSelectBestAudioTakesAACLCOverHEAAC(t *testing.T) {
 		{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`, Bitrate: 129000, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://x/lc"},
 		{Itag: 139, MimeType: `audio/mp4; codecs="mp4a.40.5"`, Bitrate: 48000, AudioQuality: "AUDIO_QUALITY_LOW", URL: "https://x/he"},
 	}
-	result := SelectBestFormats(formats, 1920, true)
+	result := SelectBestFormats(formats, 1920, true, true)
 	if result.Audio == nil || result.Audio.Itag != 140 {
 		t.Fatalf("expected itag 140 (AAC-LC, 128 kbps), got %v", result.Audio)
 	}

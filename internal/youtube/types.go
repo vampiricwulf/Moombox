@@ -407,6 +407,12 @@ type Format struct {
 	// not evict its twin — and the clean one is preferred when both exist.
 	IsDrc bool `json:"isDrc,omitempty"`
 
+	// AudioChannels is `audioChannels`: 2 for stereo, 6 for the 5.1
+	// renditions (256/258 AAC, 328 E-AC-3, 380 AC-3) some clients list. 0
+	// when unstated. yt-dlp's `channels` rung (_video.py:3464), which ranks
+	// a 5.1 track above stereo Opus (AudioRank).
+	AudioChannels int `json:"audioChannels,omitempty"`
+
 	// ApproxDurationMs is the format's own `approxDurationMs`, the length of
 	// media it serves, or nil when the response stated none. Read only to
 	// stamp Damaged; a live or upcoming broadcast states no length of its own

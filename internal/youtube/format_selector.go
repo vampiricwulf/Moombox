@@ -1,6 +1,7 @@
 package youtube
 
 import (
+	"cmp"
 	"fmt"
 	"regexp"
 	"strings"
@@ -34,13 +35,25 @@ var videoCodecPatterns = []struct {
 // HE-AAC (mp4a.40.5, itag 139) scored above AAC-LC (mp4a.40.2, itag 140) and,
 // codec outranking bitrate, a pool with no Opus took the 48 kbps track over
 // the 128 kbps one.
+//
+// Below AAC, yt-dlp's acodec order goes on `ac-?4`, `e-?a?c-?3`, `ac-?3`
+// (utils/_utils.py:5375-5376): the surround codecs of the 5.1 renditions
+// (328 E-AC-3, 380 AC-3). They scored 0 here, last; they still rank below
+// Opus and AAC on this rung, and win only through the channels rung ahead of
+// it (AudioRank) — a 5.1 track over a stereo one, as upstream ranks. Both
+// stream-copy into the MP4 archive beside H.264, VP9 and AV1 video
+// (owner decision D15's check: TestSurroundAudioStreamCopiesIntoMP4,
+// internal/engine).
 var audioCodecPatterns = []struct {
 	pattern *regexp.Regexp
 	score   int
 }{
-	{regexp.MustCompile(`^opus`), 4},
-	{regexp.MustCompile(`^mp4a\.40\.[25]`), 2},
-	{regexp.MustCompile(`^mp4a`), 1},
+	{regexp.MustCompile(`^opus`), 6},
+	{regexp.MustCompile(`^mp4a\.40\.[25]`), 5},
+	{regexp.MustCompile(`^mp4a`), 4},
+	{regexp.MustCompile(`^ac-?4`), 3},
+	{regexp.MustCompile(`^e-?a?c-?3`), 2},
+	{regexp.MustCompile(`^ac-?3`), 1},
 }
 
 // SelectedFormats contains the best video and audio formats.
@@ -51,15 +64,66 @@ type SelectedFormats struct {
 
 // SelectBestFormats selects the best video and audio formats based on configuration.
 // Use SelectBestFormatsWithLogger to get debug logging of format selection.
-func SelectBestFormats(formats []Format, maxResolution int, prefer60fps bool) SelectedFormats {
-	return selectBestFormatsImpl(formats, maxResolution, prefer60fps, nil)
+// preferHDR is downloader.prefer_hdr (rangeScore).
+func SelectBestFormats(formats []Format, maxResolution int, prefer60fps, preferHDR bool) SelectedFormats {
+	return selectBestFormatsImpl(formats, maxResolution, prefer60fps, preferHDR, nil)
 }
 
 // SelectBestFormatsWithLogger selects formats with debug logging (matching TS formatSelector).
-func SelectBestFormatsWithLogger(formats []Format, maxResolution int, prefer60fps bool, logger interface {
+func SelectBestFormatsWithLogger(formats []Format, maxResolution int, prefer60fps, preferHDR bool, logger interface {
 	Debug(msg string, args ...any)
 }) SelectedFormats {
-	return selectBestFormatsImpl(formats, maxResolution, prefer60fps, logger)
+	return selectBestFormatsImpl(formats, maxResolution, prefer60fps, preferHDR, logger)
+}
+
+// CompareVideoFormats orders two video renditions as the selector ranks
+// them once the cap has chosen a size: the long edge, then the frame rate
+// prefer60fps asks for (higher with it, lower without; an unstated rate reads
+// as 30), then the shared VideoRank (dynamic range under preferHDR, Premium,
+// codec), then the higher bitrate, then the lower auth level. Positive when a
+// ranks above b. The format picker's [Best …] badges rank with it too, so a
+// badge names the rendition automatic selection would take of its kind.
+func CompareVideoFormats(a, b *Format, prefer60fps, preferHDR bool) int {
+	if c := cmp.Compare(a.MaxDimension(), b.MaxDimension()); c != 0 {
+		return c
+	}
+	aFps, bFps := 30, 30
+	if a.Fps != nil {
+		aFps = *a.Fps
+	}
+	if b.Fps != nil {
+		bFps = *b.Fps
+	}
+	if aFps != bFps {
+		if prefer60fps {
+			return cmp.Compare(aFps, bFps)
+		}
+		return cmp.Compare(bFps, aFps)
+	}
+	if c := CompareVideoRank(a.videoRank(), b.videoRank(), preferHDR); c != 0 {
+		return c
+	}
+	// Higher bitrate wins: yt-dlp's size/br sort, which takes the
+	// higher-quality stream at the same res/fps/range/codec (e.g. AV1 Premium
+	// 721 over the base AV1 399 where both are labelled alike).
+	if c := cmp.Compare(a.Bitrate, b.Bitrate); c != 0 {
+		return c
+	}
+	return cmp.Compare(authLevelOf(b), authLevelOf(a))
+}
+
+// CompareAudioFormats orders two audio renditions as the selector ranks
+// them: the shared AudioRank (track, audioQuality, channels, codec), then
+// the higher bitrate, then the lower auth level. Positive when a ranks above
+// b.
+func CompareAudioFormats(a, b *Format) int {
+	if c := CompareAudioRank(AudioRankOf(a), AudioRankOf(b)); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(a.Bitrate, b.Bitrate); c != 0 {
+		return c
+	}
+	return cmp.Compare(authLevelOf(b), authLevelOf(a))
 }
 
 // isSelectableVideo reports whether a format is a video rendition the selector
@@ -94,18 +158,27 @@ func intactRenditions(formats []Format) (video, audio bool) {
 }
 
 // audioTrackScore ranks one audio format's TRACK against the others. Ported
-// from yt-dlp's get_language_code_and_preference (_video.py:3277-3291), whose
-// constants are ORIGINAL_LANG_VALUE = 10 and DEFAULT_LANG_VALUE = 5, with
-// 'descriptive' at -10 and everything else at -1.
+// from yt-dlp's get_language_code_and_preference (_video.py:3276-3291 at
+// b77c9304e), whose constants are ORIGINAL_LANG_VALUE = 10 and
+// DEFAULT_LANG_VALUE = 5, with 'descriptive' at -10 and everything else at
+// -1.
 //
-// The DRC penalty is upstream's too, and sits in the same relative position:
-// yt-dlp folds it into the `quality` rung (`q(quality) - bool(isDrc) / 2`,
-// _video.py:3467), and `quality` falls between `lang` and `acodec`/`br` in the
-// default sort (utils/_utils.py:5357) — exactly where this applies it. Only
-// the encoding differs: doubled rungs and a -1 here, a -0.5 there. It is a
-// TIE-BREAK inside a track, never across tracks: a loudness-normalised
-// rendition is a processed copy of the same audio, so given both we archive
-// the untouched one.
+// Where it ranks is Moombox's own: the track is the FIRST audio rung here
+// (AudioRank), ahead of quality, channels and codec, because archiving the
+// wrong language is worse than archiving a lesser encode. yt-dlp's YouTube
+// sort puts `lang` much later — `quality, res, fps, hdr:12, source, vcodec,
+// channels, acodec, lang` (_video.py:4204-4207) — so upstream can take a
+// dub's HIGH rendition over the original's MEDIUM one; this port keeps the
+// track first by decision (the deliberate divergence the audit kept).
+//
+// The DRC penalty is upstream's, but it sits on a different rung there:
+// yt-dlp folds it into `quality` (`q(quality) - bool(isDrc) / 2`,
+// _video.py:3466), the first rung of that sort. Here it is a TIE-BREAK inside
+// a track — doubled rungs and a -1 — never across tracks: a
+// loudness-normalised rendition is a processed copy of the same audio, so
+// given both we archive the untouched one. The dedup's collapse removes a DRC
+// twin wherever the clean rendition of its itag exists, so in practice the
+// two encodings agree.
 func audioTrackScore(f *Format) int {
 	name := strings.ToLower(f.AudioTrackName)
 	score := -1
@@ -125,31 +198,10 @@ func audioTrackScore(f *Format) int {
 	return score
 }
 
-func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool, logger interface {
+func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps, preferHDR bool, logger interface {
 	Debug(msg string, args ...any)
 }) SelectedFormats {
 	var bestVideo, bestAudio *Format
-	var bestVideoCodecScore, bestAudioCodecScore int
-
-	// Cache codec scores by mimeType to avoid redundant regex matching
-	codecScoreCache := make(map[string]int)
-	cachedVideoCodecScore := func(mimeType string) int {
-		if score, ok := codecScoreCache[mimeType]; ok {
-			return score
-		}
-		score := scoreVideoCodec(extractCodec(mimeType))
-		codecScoreCache[mimeType] = score
-		return score
-	}
-	cachedAudioCodecScore := func(mimeType string) int {
-		key := "a:" + mimeType
-		if score, ok := codecScoreCache[key]; ok {
-			return score
-		}
-		score := scoreAudioCodec(extractCodec(mimeType))
-		codecScoreCache[key] = score
-		return score
-	}
 
 	// The first rung, ahead of every other — the cap included: a Damaged
 	// rendition (markDamagedFormats) is taken only when no intact one of its
@@ -226,116 +278,24 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 				continue
 			}
 
-			maxDim := f.MaxDimension()
-
-			if bestVideo == nil {
+			// Within the chosen size: long edge, frame rate, dynamic range,
+			// Premium, codec, bitrate, auth level (CompareVideoFormats).
+			if bestVideo == nil || CompareVideoFormats(f, bestVideo, prefer60fps, preferHDR) > 0 {
 				bestVideo = f
-				bestVideoCodecScore = cachedVideoCodecScore(f.MimeType)
-				continue
-			}
-
-			bestMaxDim := bestVideo.MaxDimension()
-
-			// Prefer higher resolution
-			if maxDim > bestMaxDim {
-				bestVideo = f
-				bestVideoCodecScore = cachedVideoCodecScore(f.MimeType)
-				continue
-			}
-
-			if maxDim == bestMaxDim {
-				fFps := 30
-				if f.Fps != nil {
-					fFps = *f.Fps
-				}
-				bestFps := 30
-				if bestVideo.Fps != nil {
-					bestFps = *bestVideo.Fps
-				}
-
-				// FPS tiebreaker. Keep the cached codec score in sync with
-				// the new best — a stale score would skew every later codec
-				// comparison at this resolution/FPS.
-				if fFps != bestFps {
-					if prefer60fps && fFps > bestFps {
-						bestVideo = f
-						bestVideoCodecScore = cachedVideoCodecScore(f.MimeType)
-					} else if !prefer60fps && fFps < bestFps {
-						bestVideo = f
-						bestVideoCodecScore = cachedVideoCodecScore(f.MimeType)
-					}
-					continue
-				}
-
-				// Codec score tiebreaker
-				fCodec := cachedVideoCodecScore(f.MimeType)
-				if fCodec != bestVideoCodecScore {
-					if fCodec > bestVideoCodecScore {
-						bestVideo = f
-						bestVideoCodecScore = fCodec
-					}
-					continue
-				}
-
-				// Higher bitrate wins (better quality). Matches yt-dlp's
-				// size/br sort, which prefers the higher-quality / Premium
-				// stream at the same res/fps/codec (e.g. AV1 Premium 721 over
-				// the base AV1 399). YouTube only serves a Premium format's URL
-				// to accounts entitled to it, so a non-entitled session simply
-				// never sees it here (URL empty → skipped upstream).
-				if f.Bitrate > bestVideo.Bitrate {
-					bestVideo = f
-				} else if f.Bitrate == bestVideo.Bitrate {
-					// Lower auth level wins
-					fAuth := authLevelOf(f)
-					bestAuth := authLevelOf(bestVideo)
-					if fAuth < bestAuth {
-						bestVideo = f
-					}
-				}
 			}
 		} else if strings.Contains(mimeType, "audio") {
 			if f.URL == "" || f.Damaged && intactAudio {
 				continue
 			}
-
-			if bestAudio == nil {
-				bestAudio = f
-				bestAudioCodecScore = cachedAudioCodecScore(f.MimeType)
-				continue
-			}
-
 			// Track identity first: archiving the wrong LANGUAGE is worse than
-			// archiving a lesser encoder, so this outranks codec and bitrate.
-			fTrack := audioTrackScore(f)
-			bestTrack := audioTrackScore(bestAudio)
-			if fTrack != bestTrack {
-				if fTrack > bestTrack {
-					bestAudio = f
-					bestAudioCodecScore = cachedAudioCodecScore(f.MimeType)
-				}
-				continue
-			}
-
-			// Codec score
-			fCodec := cachedAudioCodecScore(f.MimeType)
-			if fCodec != bestAudioCodecScore {
-				if fCodec > bestAudioCodecScore {
-					bestAudio = f
-					bestAudioCodecScore = fCodec
-				}
-				continue
-			}
-
-			// Higher bitrate wins
-			if f.Bitrate > bestAudio.Bitrate {
+			// archiving a lesser encoder, so this outranks every other rung.
+			// Then yt-dlp's audio order: the audioQuality ladder, channels,
+			// codec, bitrate (CompareAudioFormats). Before it codec outranked
+			// quality and channels, so a 5.1 track lost to stereo Opus,
+			// Premium 141 (HIGH) lost to 251 (MEDIUM), and with 251 gone 250
+			// (Opus, LOW, ~70 kbps) beat 140 (AAC, MEDIUM, 128 kbps).
+			if bestAudio == nil || CompareAudioFormats(f, bestAudio) > 0 {
 				bestAudio = f
-			} else if f.Bitrate == bestAudio.Bitrate {
-				fAuth := authLevelOf(f)
-				bestAuth := authLevelOf(bestAudio)
-				if fAuth < bestAuth {
-					bestAudio = f
-				}
 			}
 		}
 	}
@@ -349,16 +309,17 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 			if bestVideo.Height != nil {
 				h = *bestVideo.Height
 			}
-			logger.Debug(fmt.Sprintf("[FormatSelector] best video: itag=%d %s %dx%d %dbps (source=%s)",
-				bestVideo.Itag, extractCodec(bestVideo.MimeType),
+			rank := bestVideo.videoRank()
+			logger.Debug(fmt.Sprintf("[FormatSelector] best video: itag=%d %s %s%s %dx%d %dbps (source=%s)",
+				bestVideo.Itag, extractCodec(bestVideo.MimeType), rank.Range, premiumTag(rank.Premium),
 				w, h,
 				bestVideo.Bitrate, bestVideo.Source))
 		} else {
 			logger.Debug("[FormatSelector] no suitable video format found")
 		}
 		if bestAudio != nil {
-			logger.Debug(fmt.Sprintf("[FormatSelector] best audio: itag=%d %s %dbps (source=%s)",
-				bestAudio.Itag, extractCodec(bestAudio.MimeType),
+			logger.Debug(fmt.Sprintf("[FormatSelector] best audio: itag=%d %s %s %dch %dbps (source=%s)",
+				bestAudio.Itag, extractCodec(bestAudio.MimeType), bestAudio.AudioQuality, bestAudio.AudioChannels,
 				bestAudio.Bitrate, bestAudio.Source))
 		} else {
 			logger.Debug("[FormatSelector] no suitable audio format found")
@@ -369,7 +330,7 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 }
 
 // SelectWithOptions selects formats with optional manual itag override.
-func SelectWithOptions(formats []Format, maxResolution int, prefer60fps bool, videoItag, audioItag *int) SelectedFormats {
+func SelectWithOptions(formats []Format, maxResolution int, prefer60fps, preferHDR bool, videoItag, audioItag *int) SelectedFormats {
 	var video, audio *Format
 
 	// Manual video selection
@@ -397,7 +358,7 @@ func SelectWithOptions(formats []Format, maxResolution int, prefer60fps bool, vi
 	skipAudio := audioItag != nil && *audioItag == -1
 
 	// Auto-select for unresolved
-	auto := SelectBestFormats(formats, maxResolution, prefer60fps)
+	auto := SelectBestFormats(formats, maxResolution, prefer60fps, preferHDR)
 	if video == nil && !skipVideo {
 		video = auto.Video
 	}
@@ -432,6 +393,14 @@ func scoreAudioCodec(codec string) int {
 		}
 	}
 	return 0
+}
+
+// premiumTag is the selector log's mark of a Premium rendition.
+func premiumTag(premium bool) string {
+	if premium {
+		return " Premium"
+	}
+	return ""
 }
 
 func authLevelOf(f *Format) int {

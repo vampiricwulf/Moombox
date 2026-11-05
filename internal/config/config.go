@@ -216,6 +216,7 @@ func Defaults() *MoomboxConfig {
 			ProgressIntervalMS:          16, // ms; ~60 progress reports/second per job
 			DownloadChat:                true,
 			Prefer60fps:                 true,
+			PreferHDR:                   true,
 			MaximumTimeout:              600,
 			InterruptionTimeout:         FlexDuration{Value: 120}, // minutes
 			IncompleteStagingExpiryDays: FlexDuration{Value: 7},   // days

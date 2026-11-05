@@ -216,7 +216,7 @@ func TestDamagedRenditionsRankBelowEveryIntactOne(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := SelectBestFormats(tc.formats, tc.maxRes, true)
+			got := SelectBestFormats(tc.formats, tc.maxRes, true, true)
 			if got.Video == nil || got.Video.Itag != tc.wantVideo {
 				t.Errorf("video = %v, want itag %d", itagOf(got.Video), tc.wantVideo)
 			}
@@ -265,7 +265,7 @@ func TestSelectorNamesThePassedOverRenditions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			lg := &damageLogger{}
-			SelectBestFormatsWithLogger(append(slices.Clone(video), tc.audio...), 1080, true, lg)
+			SelectBestFormatsWithLogger(append(slices.Clone(video), tc.audio...), 1080, true, true, lg)
 			got := lg.damaged(lg.debugs)
 			if len(got) != 1 {
 				t.Fatalf("passed-over lines = %q, want one naming %v", got, tc.want)
@@ -310,7 +310,7 @@ func TestAShortRenditionIsNotArchived(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsePlayerResponse: %v", err)
 	}
-	got := SelectBestFormats(info.Formats, 1080, true)
+	got := SelectBestFormats(info.Formats, 1080, true, true)
 	if got.Video == nil || got.Video.Itag != 248 {
 		t.Errorf("video = %v, want the intact VP9 248 — the short AV1 would stop at 200 s of 600", itagOf(got.Video))
 	}
@@ -539,7 +539,7 @@ func TestTheCollapseKeepsAnIntactTrackOverADamagedOne(t *testing.T) {
 				t.Errorf("the short AV1 after the dedup = %+v, want it and its web shadow still Damaged", av1)
 			}
 
-			got := SelectBestFormats(deduped, 1080, true)
+			got := SelectBestFormats(deduped, 1080, true, true)
 			if got.Video == nil || got.Video.Itag != 248 {
 				t.Errorf("video = %v, want the intact VP9 248", itagOf(got.Video))
 			}

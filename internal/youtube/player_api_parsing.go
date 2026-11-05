@@ -631,6 +631,7 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 			format.QualityLabel = getStr(f, "qualityLabel")
 			format.AudioQuality = getStr(f, "audioQuality")
 			format.AudioSampleRate = getStr(f, "audioSampleRate")
+			format.AudioChannels = getInt(f, "audioChannels")
 			if td := getInt(f, "targetDurationSec"); td > 0 {
 				format.TargetDurationSec = td
 			}
@@ -1330,10 +1331,12 @@ func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 	// other's never hands it back as its own shadow.
 	tokenFree := make(map[formatKey]Format)
 	tokenRequiring := make(map[formatKey]Format)
+	facts := make(map[int]streamFacts)
 	for _, f := range pool {
 		if f.URL == "" {
 			continue
 		}
+		facts[f.Itag] = facts[f.Itag].note(&f)
 		key := formatKey{itag: f.Itag, audioTrackID: f.AudioTrackID, isDrc: f.IsDrc}
 		class := tokenFree
 		if GvsTokenRequired(f.Source) {
@@ -1354,6 +1357,7 @@ func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 
 	result := make([]Format, 0, len(byStream))
 	for key, f := range byStream {
+		facts[f.Itag].fill(&f)
 		f.TokenFreeAlternate, f.TokenAlternate = nil, nil
 		other, slot := tokenRequiring, &f.TokenAlternate
 		if GvsTokenRequired(f.Source) {
@@ -1381,6 +1385,47 @@ func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 	collapsed := collapseToPreferredRendition(result)
 	extractionStateFrom(ctx).noteCollapsedRenditions(len(result) - len(collapsed))
 	return collapsed
+}
+
+// streamFacts is what any client stated of an audio itag's quality and
+// channels, the first statement of each kept. The selector ranks audio by
+// the audioQuality ladder and channels (AudioRank), and some clients — the
+// tv family's adaptiveFormats — state neither: a stream whose winning copy
+// came from one would rank as "tiny" next to another itag whose winner
+// stated its quality, so 251 lost to 250. The dedup fills the winner in from
+// a copy that stated them, as yt-dlp fills a manifest format's quality from
+// the itag's https copies (`itag_qualities`, _video.py:3404-3406, 3670). An
+// itag's quality and channels are its encode's, the same from every client.
+type streamFacts struct {
+	quality  string
+	channels int
+}
+
+// note folds one copy's statements in. Only an audio copy's count: an
+// audioQuality on a video format is IsProgressiveFormat's mark of a muxed
+// file, which must never spread to the itag's other copies.
+func (s streamFacts) note(f *Format) streamFacts {
+	if !f.IsAudio() {
+		return s
+	}
+	if s.quality == "" {
+		s.quality = f.AudioQuality
+	}
+	if s.channels == 0 {
+		s.channels = f.AudioChannels
+	}
+	return s
+}
+
+// fill gives a format that stated no quality or channels the itag's — only
+// ever an audio itag's, since note keeps nothing of a video copy.
+func (s streamFacts) fill(f *Format) {
+	if f.AudioQuality == "" {
+		f.AudioQuality = s.quality
+	}
+	if f.AudioChannels == 0 {
+		f.AudioChannels = s.channels
+	}
 }
 
 // MergeFormatPool folds extra — formats fetched after the extraction, labelled
