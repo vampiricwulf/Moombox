@@ -81,8 +81,8 @@ func (j *CookieJar) YouTubePageCookieHeader() string {
 // YouTubeConsentCookieHeader is the consent and language cookies alone — SOCS
 // and PREF, the jar's own where it holds them, applied as above for a request
 // that is not signed in — for a page fetched deliberately without the jar's
-// session (GetVideoInfoPublic's watch page, the embed page, the iframe API
-// script). Neither cookie is a credential,
+// session (GetVideoInfoPublic's watch page, the embed page while the jar is
+// not signed in, the iframe API script). Neither cookie is a credential,
 // so the page stays as anonymous as it was; and since no auth cookie rides on
 // it, the request is signed out whatever the jar holds, so SOCS is always
 // sent: the jar's when it is consented, CAI otherwise.
