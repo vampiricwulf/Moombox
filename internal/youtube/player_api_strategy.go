@@ -774,6 +774,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 				collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
 			}
 			mergeWatchPageMetadata(embResult, wpParsed)
+			p.adoptPremiumManifests(embResult, premiumWC, videoID)
 			embResult.Formats = deduplicateFormats(ctx, formatPool)
 			return p.finishExtraction(ctx, embResult, wp, videoID, tally, wpParsed)
 		} else if embResult != authEmb {
@@ -850,6 +851,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			// traceable origin in the log.
 			if wpParsed != nil {
 				wpParsed.Formats = deduplicateFormats(ctx, formatPool)
+				p.adoptPremiumManifests(wpParsed, premiumWC, videoID)
 				p.logger.Debug("[PlayerApi] returning watch-page parse (all clients exhausted)",
 					"client", "watch_page",
 					"videoID", videoID,

@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -368,7 +369,9 @@ func TestAuthenticatedCascadeFetchesWebCreatorForPremium(t *testing.T) {
 // source; not stamping the source or the instant fails every adopting row's
 // assertAvailabilityMovesWithItsSource; letting web_creator's own manifests
 // lead its return fails the tv-without-formats row; not adopting on the
-// cookieless chain's return fails the inadequate-web_creator row.
+// cookieless chain's return fails the inadequate-web_creator row; not
+// adopting on the age-restricted web_embedded return fails the
+// age-restricted row, and on the watch-page return the exhausted row.
 func TestPremiumWebCreatorManifestsAreTheFallback(t *testing.T) {
 	const wcDash, wcHls, safariDash, tvHls = "https://m.example/wc.mpd", "https://m.example/wc.m3u8", "https://m.example/safari.mpd", "https://m.example/tv.m3u8"
 	for _, tc := range []struct {
@@ -378,6 +381,8 @@ func TestPremiumWebCreatorManifestsAreTheFallback(t *testing.T) {
 		wantDash, wantHls       string
 		wantDashSrc, wantHlsSrc string
 		wc, visionos            string // "" for the default web_creator answer, and no visionos
+		embedded                string // web_embedded's answer, "" for none
+		page                    string // the watch page's player response, "" for none
 	}{
 		{name: "nothing else: both are web_creator's", premium: true, tv: srcBody(false, "whole", "", ""), safari: srcBody(false, "none", "", ""),
 			wantDash: wcDash, wantDashSrc: "web_creator", wantHls: wcHls, wantHlsSrc: "web_creator"},
@@ -390,12 +395,28 @@ func TestPremiumWebCreatorManifestsAreTheFallback(t *testing.T) {
 		{name: "web_creator inadequate: the cookieless chain's answer takes its manifests", premium: true, tv: srcBody(false, "none", "", ""), safari: srcBody(false, "none", "", ""),
 			wc: srcBody(false, "audio", wcDash, wcHls), visionos: srcBody(false, "whole", "", ""),
 			wantDash: wcDash, wantDashSrc: "web_creator", wantHls: wcHls, wantHlsSrc: "web_creator"},
+		// The age-restricted web_embedded return takes the fallback too
+		// (wave FC review): web_embedded answered with no manifest.
+		{name: "age-restricted: web_embedded's answer takes its manifests", premium: true, tv: ageRestrictedBody, safari: srcBody(false, "none", "", ""),
+			embedded: srcBody(false, "whole", "", ""),
+			wantDash: wcDash, wantDashSrc: "web_creator", wantHls: wcHls, wantHlsSrc: "web_creator"},
+		// So does the all-clients-exhausted watch-page return: web_creator
+		// answered inadequate (audio alone), the cookieless chain nothing.
+		{name: "every client exhausted: the watch page's parse takes its manifests", premium: true, tv: srcBody(false, "none", "", ""), safari: srcBody(false, "none", "", ""),
+			wc: srcBody(false, "audio", wcDash, wcHls), page: srcBody(false, "none", "", ""),
+			wantDash: wcDash, wantDashSrc: "web_creator", wantHls: wcHls, wantHlsSrc: "web_creator"},
 		{name: "no Premium: never asked", tv: srcBody(false, "whole", "", ""), safari: srcBody(false, "none", "", "")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			orig := fetchWatchPage
 			fetchWatchPage = func(context.Context, string, string) (*WatchPageResult, error) {
-				return &WatchPageResult{Ytcfg: DefaultYtcfg(), SessionAuth: SessionAuthLoggedIn, IsPremium: tc.premium}, nil
+				wp := &WatchPageResult{Ytcfg: DefaultYtcfg(), SessionAuth: SessionAuthLoggedIn, IsPremium: tc.premium}
+				if tc.page != "" {
+					if err := json.Unmarshal([]byte(tc.page), &wp.PlayerResponse); err != nil {
+						t.Fatalf("page: %v", err)
+					}
+				}
+				return wp, nil
 			}
 			t.Cleanup(func() { fetchWatchPage = orig })
 			origClient := apiClient
@@ -404,7 +425,7 @@ func TestPremiumWebCreatorManifestsAreTheFallback(t *testing.T) {
 				wc = srcBody(false, "whole", wcDash, wcHls)
 			}
 			apiClient = &http.Client{Transport: &manifestSourceTransport{responses: map[string]string{
-				"7": tc.tv, "1s": tc.safari, "62": wc, "101": tc.visionos}}}
+				"7": tc.tv, "1s": tc.safari, "62": wc, "101": tc.visionos, "56": tc.embedded}}}
 			t.Cleanup(func() { apiClient = origClient })
 
 			info, err := preRollTestAPI().GetVideoInfoAuthenticated(context.Background(), "test1234567")
