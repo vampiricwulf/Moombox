@@ -386,3 +386,96 @@ func TestStatusTokenRefusalIsWarnedOncePerRun(t *testing.T) {
 		}
 	}
 }
+
+// TestStatusTokenRefusalOfAReplacedTokenIsNotReported: a check refused for a
+// token the operator has since replaced says nothing about the token the jar
+// holds now, and must not mark it dead. The jar is reloaded with a new token
+// INSIDE the refused request — the window a repair lands in — and the
+// signed-out repeat is answered: the caller still gets that answer, nothing
+// is reported, and the next check carries the new token.
+//
+// Mutant: the token re-read before the report dropped — the stale refusal is
+// reported, and NoteTwitchAuthLoss would key the mark to the new pair.
+func TestStatusTokenRefusalOfAReplacedTokenIsNotReported(t *testing.T) {
+	const newToken = "test-token-bbbb"
+	var svc *Service
+	var path string
+	repaired := false
+	answer := statusBatch(statusSlot("offone", "offline"))
+	stub := installStatusStub(t, func(auth string) (int, string) {
+		if auth == "OAuth "+statusTestToken {
+			if !repaired {
+				repaired = true
+				hlsJarFile(t, path, row(".twitch.tv", "auth-token", newToken))
+				if err := svc.Auth.cookieJar.Reload(); err != nil {
+					t.Errorf("reload jar: %v", err)
+				}
+			}
+			return http.StatusUnauthorized, statusRefusalBody
+		}
+		return http.StatusOK, answer
+	})
+	svc, _, reasons := statusService(t, row(".twitch.tv", "auth-token", statusTestToken))
+	path = svc.Auth.cookieJar.GetFilePath()
+
+	infos, errs, err := svc.GetStreamInfoBatch(context.Background(), []string{"offone"})
+	if err != nil || infos[0] != nil || errs[0] != nil {
+		t.Fatalf("GetStreamInfoBatch = %+v, %v, %v; want the signed-out offline answer", infos, errs, err)
+	}
+	if len(*reasons) != 0 {
+		t.Errorf("reported %q for a refusal of a token the jar no longer holds, want nothing", *reasons)
+	}
+	if _, _, err := svc.GetStreamInfoBatch(context.Background(), []string{"offone"}); err != nil {
+		t.Fatalf("second GetStreamInfoBatch: %v", err)
+	}
+	seen := stub.requests()
+	if last := seen[len(seen)-1]; last.auth != "OAuth "+newToken {
+		t.Errorf("the next check went out with %q, want the new token", last.auth)
+	}
+	if len(*reasons) != 0 {
+		t.Errorf("reported %q after the new token was taken, want nothing", *reasons)
+	}
+}
+
+// TestStatusTokenRefusalRunSurvivesAFailedCheck: only a check Twitch ANSWERED
+// with the token ends a run of refusals. A failure in between says nothing about
+// the token: no "accepted again" line, and the refusal after it is the same
+// run's, Debug, not a fresh Warn.
+//
+// Mutant: the wholeErr == nil condition on clearing the latch dropped — the
+// failed check writes the false recovery Info and the next refusal Warns again.
+func TestStatusTokenRefusalRunSurvivesAFailedCheck(t *testing.T) {
+	failing := false
+	answer := statusBatch(statusSlot("offone", "offline"))
+	installStatusStub(t, func(auth string) (int, string) {
+		if failing {
+			// A 400, not a 5xx: gqlRequest retries a 5xx on a wall-clock
+			// backoff, and any failure that is not ErrTwitchAuthExpired is
+			// the case under test.
+			return http.StatusBadRequest, `{"error":"Bad Request"}`
+		}
+		if auth != "" {
+			return http.StatusUnauthorized, statusRefusalBody
+		}
+		return http.StatusOK, answer
+	})
+	svc, log, _ := statusService(t, row(".twitch.tv", "auth-token", statusTestToken))
+
+	if _, _, err := svc.GetStreamInfoBatch(context.Background(), []string{"offone"}); err != nil {
+		t.Fatalf("refused check: %v", err)
+	}
+	failing = true
+	if _, _, err := svc.GetStreamInfoBatch(context.Background(), []string{"offone"}); err == nil {
+		t.Fatalf("the failing check succeeded, want its error")
+	}
+	failing = false
+	if _, _, err := svc.GetStreamInfoBatch(context.Background(), []string{"offone"}); err != nil {
+		t.Fatalf("second refused check: %v", err)
+	}
+	if infos := log.at("info"); len(infos) != 0 {
+		t.Errorf("Info lines = %q, want none — a failed check is no news that the token was taken", infos)
+	}
+	if n := len(log.at("warn")); n != 1 {
+		t.Errorf("%d Warn lines, want 1 — the run of refusals did not end", n)
+	}
+}

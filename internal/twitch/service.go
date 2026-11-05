@@ -148,6 +148,21 @@ func (s *Service) streamInfo(ctx context.Context, opName string, channelLogins [
 			"op", opName, "err", anonErr)
 		return infos, errs, wholeErr
 	}
+	// Report only while the refused token is still the saved one. A check in
+	// flight when the operator repairs cookies.txt is refused for the OLD
+	// token, and NoteTwitchAuthLoss keys its mark to the jar's identity at
+	// delivery — by then the new, working pair, which refresh's clear rule
+	// (a changed identity) would never clear: the platform stayed marked
+	// dead, and its parked COOKIES? jobs unresumed, until the next cookie
+	// change or a restart. The monitor polls every 15 s for as long as the
+	// token is dead, so a repair is exactly when a check is likely in flight.
+	// What this leaves open is the instant between this read and the mark's
+	// own, which the playback-token and chat routes share.
+	if s.Auth.GetAuthToken() != authToken {
+		s.logger.Debug("twitch stream check: the refused auth-token was replaced while the check was in flight; not reported",
+			"op", opName)
+		return anonInfos, anonErrs, nil
+	}
 	s.noteStatusTokenRefused(opName)
 	return anonInfos, anonErrs, nil
 }
