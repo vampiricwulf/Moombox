@@ -1347,11 +1347,17 @@ func trimStatusFrames(hub interface {
 // marked monitor.ErrProbeInconclusive, its text and chain kept, so the feed
 // walk holds the row on its backoff ladder rather than re-probing it every
 // cycle, and tells it from a transient failure, which it retries next cycle
-// (TestABotWalledStatusProbeReachesTheMonitorsAsAnErroredProbe).
+// (TestABotWalledStatusProbeReachesTheMonitorsAsAnErroredProbe). One the
+// session's rate limit refused is marked monitor.ErrProbeRateLimited as
+// well, so the walk holds it for the rate-limit hold rather than its ladder
+// (TestMonitorProbeMarksARateLimitDistinctly).
 func monitorProbe(probe func(ctx context.Context, videoID string) (*youtube.VideoInfo, error)) monitor.VideoProbeFunc {
 	return func(ctx context.Context, videoID string) (*monitor.VideoProbeResult, error) {
 		meta, err := probe(ctx, videoID)
-		if _, inconclusive := errors.AsType[*youtube.StatusProbeInconclusiveError](err); inconclusive {
+		if inc, inconclusive := errors.AsType[*youtube.StatusProbeInconclusiveError](err); inconclusive {
+			if inc.RateLimited() {
+				return nil, monitor.RateLimitedProbe(err)
+			}
 			return nil, monitor.InconclusiveProbe(err)
 		}
 		if err != nil {
@@ -1508,6 +1514,11 @@ func (s *runState) wireMonitorCallbacks() {
 	// classifies it correctly (vod/live/upcoming). Only the feed monitor's
 	// membership path uses it; RSS/DECAPI stay on the anonymous probe.
 	s.feedMon.ProbeVideoAuth = monitorProbe(s.ytService.ProbeVideoStatusAuthenticated)
+
+	// A row whose probe the session's rate limit refused is re-checked once
+	// the backlog's rate-limit hold has run out, not on its inconclusive
+	// ladder (owner decision, wave FC).
+	s.feedMon.RateLimitHeld = s.dlWorker.Scheduler().RateLimitHeld
 
 	// Membership discovery: authenticated /membership tab scan for members-only
 	// videos the RSS feed never lists. Wired on the feed monitor only. The

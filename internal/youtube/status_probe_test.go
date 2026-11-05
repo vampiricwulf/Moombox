@@ -366,7 +366,8 @@ func (tr *cancellingTransport) RoundTrip(req *http.Request) (*http.Response, err
 // Mutants: the rate-limit arm in Service.ProbeVideoStatus dropped (the
 // escalation runs: web_embedded and the embed page signed out, TV signed
 // in); the arm returning the refused answer instead of the error (a nil
-// error and not_a_stream, which the feed walk settles).
+// error and not_a_stream, which the feed walk settles); RateLimited
+// answering false (wave FC: the feed walk would climb the row's ladder).
 func TestRateLimitedStatusProbeIsInconclusiveWithoutEscalating(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
@@ -397,6 +398,9 @@ func TestRateLimitedStatusProbeIsInconclusiveWithoutEscalating(t *testing.T) {
 				}
 				if !strings.Contains(err.Error(), "not escalated") {
 					t.Errorf("error text %q, want it to say the probe was not escalated", err)
+				}
+				if !inconclusive.RateLimited() {
+					t.Errorf("RateLimited() = false for %+v, want the rate limit told apart from a refusal of the video", inconclusive)
 				}
 				if n := len(tr.of(clientAndroidVR)); n != 1 {
 					t.Errorf("android_vr asked %d times, want once", n)
@@ -523,6 +527,30 @@ func TestEscalationSettledNothing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := escalationSettledNothing(tc.info, tc.err); !tc.wantErr(got) {
 				t.Errorf("escalationSettledNothing = %v", got)
+			}
+		})
+	}
+}
+
+// TestStatusProbeInconclusiveErrorRateLimited: only a probe the session's
+// rate limit refused reads RateLimited — a bot wall, escalated or not, is a
+// refusal of the video, which the feed walk holds on its ladder (wave FC).
+//
+// Mutant: RateLimited answering true for every inconclusive probe fails the
+// bot-wall rows.
+func TestStatusProbeInconclusiveErrorRateLimited(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  *StatusProbeInconclusiveError
+		want bool
+	}{
+		{"a rate limit", &StatusProbeInconclusiveError{Playability: PlayabilityRateLimited, EscalationErr: errRateLimitedSession}, true},
+		{"a bot wall, escalated", &StatusProbeInconclusiveError{Playability: PlayabilityLoginRequired, Escalation: StatusProbeEscalationWebEmbedded, EscalationErr: errors.New("refused too")}, false},
+		{"a bot wall, cancelled before escalating", &StatusProbeInconclusiveError{Playability: PlayabilityLoginRequired, EscalationErr: context.Canceled}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.err.RateLimited(); got != tc.want {
+				t.Errorf("RateLimited() = %v, want %v", got, tc.want)
 			}
 		})
 	}

@@ -148,6 +148,29 @@ type inconclusiveProbeError struct{ err error }
 func (e inconclusiveProbeError) Error() string   { return e.err.Error() }
 func (e inconclusiveProbeError) Unwrap() []error { return []error{ErrProbeInconclusive, e.err} }
 
+// ErrProbeRateLimited marks a VideoProbeFunc error as an inconclusive probe
+// (it is ErrProbeInconclusive too) that YouTube refused because the session
+// is rate-limited (RateLimitedProbe; youtube.StatusProbeInconclusiveError's
+// RateLimited, which cmd/moombox's monitorProbe reads, keeping this package
+// decoupled from youtube's types). The limit is the session's, not the
+// video's, and lifts on its own: the feed walk does not climb a row's
+// endRecheckBackoff ladder for it, but skips the row's re-check while the
+// backlog's rate-limit hold stands (FeedMonitor.RateLimitHeld) and asks again
+// every cycle once it has run out (owner decision, wave FC). DECAPI is
+// unaffected: it never backs off.
+var ErrProbeRateLimited = errors.New("status probe refused by a rate limit")
+
+// RateLimitedProbe marks err as ErrProbeRateLimited and ErrProbeInconclusive:
+// its text stays err's, and its chain keeps err.
+func RateLimitedProbe(err error) error { return rateLimitedProbeError{err} }
+
+type rateLimitedProbeError struct{ err error }
+
+func (e rateLimitedProbeError) Error() string { return e.err.Error() }
+func (e rateLimitedProbeError) Unwrap() []error {
+	return []error{ErrProbeRateLimited, ErrProbeInconclusive, e.err}
+}
+
 // MetadataFailureTracker tracks per-video probe failure counts.
 // It is safe for concurrent use.
 type MetadataFailureTracker struct {
@@ -492,6 +515,11 @@ type ProbeClassifyResult struct {
 	// not tell (ErrProbeInconclusive), not a transient failure. The feed
 	// walk holds the row on endRecheckBackoff for it (noteProbeOutcome).
 	Inconclusive bool
+	// RateLimited: an Inconclusive probe whose refusal was the session's
+	// rate limit (ErrProbeRateLimited). The feed walk holds no ladder for
+	// it, and skips the row's re-check while the rate-limit hold stands
+	// (noteProbeOutcome, probeHeld).
+	RateLimited bool
 
 	// EndUnconfirmed: StreamStatus is post_live on weak end signals alone
 	// (VideoProbeResult.BroadcastEndWeak) that the end check could not
@@ -584,7 +612,7 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 			failLog(fmt.Sprintf("[Monitor] Failed to check metadata for %s (attempt %d/%d): %v",
 				p.VideoID, count, maxMetadataFailures, err))
 		}
-		return ProbeClassifyResult{Outcome: OutcomeErrored, Inconclusive: errors.Is(err, ErrProbeInconclusive)}
+		return ProbeClassifyResult{Outcome: OutcomeErrored, Inconclusive: errors.Is(err, ErrProbeInconclusive), RateLimited: errors.Is(err, ErrProbeRateLimited)}
 	}
 
 	// Successful probe: record the (configured) cooldown to limit total
