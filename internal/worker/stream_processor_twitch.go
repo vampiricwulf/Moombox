@@ -140,7 +140,18 @@ func (sp *StreamProcessor) hlsMasterPlaylist(ctx context.Context, login string) 
 // access is the fix, so StatusCookies (not a generic Error) is the right
 // resting state. Returns nil for non-auth errors so plain failures don't
 // get spuriously routed to StatusCookies.
+//
+// The one exception is the refusal of a SIGNED-IN session,
+// twitch.ErrSubscriberOnlyNotEntitled (G52, owner decision D20), which is
+// returned as itself: it must keep its identity through the same %v
+// flattening — cookieRefreshWorthAttempting and anything after it read it —
+// and it must not become ErrCookiesRequired, because no cookie fixes an
+// account without the subscription. It parks in Error, as the live path's
+// wrapped form does.
 func twitchAuthSentinel(err error) error {
+	if errors.Is(err, twitch.ErrSubscriberOnlyNotEntitled) {
+		return twitch.ErrSubscriberOnlyNotEntitled
+	}
 	if errors.Is(err, twitch.ErrTwitchAuthExpired) || errors.Is(err, twitch.ErrSubscriberOnly) {
 		return ErrCookiesRequired
 	}
@@ -187,10 +198,11 @@ type notifySend func(title, description string, ntype notifications.Notification
 // rather than say nothing, because a notification that names no problem is
 // worse than the log line it was meant to escape.
 //
-// It covers the WHOLE vocabulary, including the playback-token route that no
-// caller can reach today, so that a later caller cannot land on the generic
-// sentence — a partial mirror is the drift this arc was written to stop. That
-// arm's sentence is correct in isolation; the payload built AROUND it is not.
+// It covers the WHOLE vocabulary, including the playback-token and stream-check
+// routes that no caller can reach today, so that a later caller cannot land on
+// the generic sentence — a partial mirror is the drift this arc was written to
+// stop. Those arms' sentences are correct in isolation; the payload built
+// AROUND them is not.
 // See twitchChatDowngradeNotice's SCOPE note before wiring anything to it.
 func twitchChatDowngradeReason(reason string) string {
 	switch reason {
@@ -204,6 +216,8 @@ func twitchChatDowngradeReason(reason string) string {
 		return "The Twitch login cookie is not a name that can be sent to chat."
 	case twitch.AuthDowngradePlaybackTokenAnonymous:
 		return "Twitch issued an anonymous playback token although saved credentials were sent."
+	case twitch.AuthDowngradeStatusTokenRefused:
+		return "Twitch refused the saved auth-token on a stream check."
 	default:
 		return "The saved Twitch login could not be used."
 	}
@@ -237,19 +251,23 @@ func twitchChatDowngradeReason(reason string) string {
 // later, with nothing above Info in the log to explain them.
 //
 // SCOPE: the four IRC chat-handshake routes ONLY. The vocabulary has a fifth
-// member — twitch.AuthDowngradePlaybackTokenAnonymous — and this payload is
-// wrong for it in THREE places, not one: the title says "chat"; the first
-// clause says chat is still being recorded, when that route's whole reason to
-// exist is the job with chat capture OFF; and the tail says THIS download is
-// unaffected, which is the exact inverse of what that route reports — the
-// token this capture is being served under is the anonymous one.
+// and a sixth member — twitch.AuthDowngradePlaybackTokenAnonymous and
+// twitch.AuthDowngradeStatusTokenRefused — and this payload is wrong for
+// both. The sixth is a stream check, not a capture: no job, no chat, no
+// "this download". The fifth is wrong in THREE places, not one: the title
+// says "chat"; the first clause says chat is still being recorded, when that
+// route's whole reason to exist is the job with chat capture OFF; and the
+// tail says THIS download is unaffected, which is the exact inverse of what
+// that route reports — the token this capture is being served under is the
+// anonymous one.
 //
-// Nothing routes it here today: the HLS side marks the platform and logs, it
-// does not notify. A caller that wants a notice for it needs its OWN renderer.
-// Do not widen this one, and do not add the fifth reason to
+// Nothing routes either here today: the HLS side and twitch.Service's stream
+// checks mark the platform and log, they do not notify. A caller that wants a
+// notice for one needs its OWN renderer. Do not widen this one, and do not
+// add the fifth or sixth reason to
 // TestTwitchChatDowngradeNoticeCarriesNoCredential's list expecting the shared
 // tail to hold — it asserts "NEXT capture will start anonymous", which is
-// false for that route.
+// false for the fifth route.
 func twitchChatDowngradeNotice(job *database.Job, channel, reason string) (
 	title, description string, fields []notifications.Field, opts notifications.SendOptions,
 ) {
@@ -824,8 +842,36 @@ func syncTwitchJobMetadata(job *database.Job, updates map[string]any) {
 	}
 }
 
+// twitchNotFoundGiveUp is how many "this login does not exist" answers in a
+// row end a manual wait (G53). yt-dlp raises "<channel> does not exist" on the
+// FIRST user:null and waits only on UserNotLive (TwitchStreamIE._real_extract,
+// twitch.py b77c9304e); a wait that can run for days gives Twitch a few
+// minutes' grace instead — ten polls at 15-20 s each — so one odd answer, or an
+// account whose page is down for a moment, does not fail an operator's add.
+// The add route has already refused a login that did not resolve when it was
+// added (404), so what this catches is a channel renamed, banned or deleted
+// while the job waits, and a job whose add-time lookup never got an answer.
+const twitchNotFoundGiveUp = 10
+
+// twitchStreamLookup is tw.LookupStreamInfo — the single lookup that keeps
+// "the login does not exist" apart from "offline" — or twitchLookupFn when a
+// test set one.
+func (sp *StreamProcessor) twitchStreamLookup(ctx context.Context, login string) (*twitch.TwitchStreamInfo, error) {
+	if sp.twitchLookupFn != nil {
+		return sp.twitchLookupFn(ctx, login)
+	}
+	return sp.tw.LookupStreamInfo(ctx, login)
+}
+
 // waitForTwitchLive polls a Twitch channel until it goes live or is cancelled.
 // Returns (streamInfo, nil) when live, (nil, nil) when cancelled, (nil, err) on fatal error.
+//
+// A login Twitch answers twitchNotFoundGiveUp times in a row as not existing
+// is one of those fatal errors, wrapped ErrNonActionable like the probe
+// budget's: it used to read as offline (GetStreamInfo's collapse), and a typo,
+// a rename or a deleted account waited at "Waiting for stream..." forever,
+// polling GQL every 15-20 s. Only answers count, and any answer that resolves
+// the login ends the run; a failed poll is no answer and leaves it as it was.
 func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.Job, login string) (*twitch.TwitchStreamInfo, error) {
 	// Conditional, as waitForLive's is: an operator's Cancel can land after
 	// processJob read the row, and this write turned that Cancelled row back
@@ -842,6 +888,7 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 	defer sp.db.UpdateJobFields(job.ID, map[string]any{"progress": ""})
 
 	consecutiveErrors := 0
+	notFound := 0 // consecutive "does not exist" answers (twitchNotFoundGiveUp)
 	var lastOfflineProbe time.Time
 
 	for {
@@ -894,7 +941,26 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 			lastOfflineProbe = time.Now()
 		}
 
-		streamInfo, err := sp.tw.GetStreamInfo(ctx, login)
+		streamInfo, err := sp.twitchStreamLookup(ctx, login)
+		if errors.Is(err, twitch.ErrChannelNotFound) {
+			// An answer, not a failure: Twitch was reached and resolved no
+			// such user. Fed to the oracle as the success it is, and kept off
+			// the probe-error budget, which counts failures to get one.
+			reportProbeResult("probe/twitch", false)
+			consecutiveErrors = 0
+			notFound++
+			if notFound >= twitchNotFoundGiveUp {
+				return nil, fmt.Errorf("%s does not exist on Twitch (%d checks in a row): %w (%w)",
+					login, notFound, twitch.ErrChannelNotFound, ErrNonActionable)
+			}
+			if notFound == 1 {
+				sp.logger.Warn("twitch says this channel does not exist (renamed, banned, or a typo); the job fails if the next checks agree",
+					"channel", login, "checks", twitchNotFoundGiveUp)
+			} else {
+				sp.logger.Debug("twitch channel still does not exist", "channel", login, "consecutive", notFound)
+			}
+			continue
+		}
 		if err != nil {
 			newCount, giveUp, report, cancelled := applyProbeError(err, consecutiveErrors)
 			switch report {
@@ -922,6 +988,7 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 			continue
 		}
 		consecutiveErrors = 0
+		notFound = 0
 		// Successful poll reached Twitch — feed the oracle (Layer 4).
 		reportProbeResult("probe/twitch", false)
 

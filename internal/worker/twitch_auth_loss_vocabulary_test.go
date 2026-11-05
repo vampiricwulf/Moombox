@@ -30,6 +30,7 @@ func TestTwitchAuthLossVocabularyCoversEveryDowngradeReason(t *testing.T) {
 		twitch.AuthDowngradeNoLoginCookie,
 		twitch.AuthDowngradeUnusableLoginCookie,
 		twitch.AuthDowngradePlaybackTokenAnonymous,
+		twitch.AuthDowngradeStatusTokenRefused,
 	}
 
 	// The sentence an unrecognised token renders, discovered rather than

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -54,6 +55,12 @@ const (
 // default: the error carries the escalation's own failure, and a web_embedded
 // "HTTP 400" in it would meet the terminal "http 4" arm below and count a
 // probe that never said a word about the video toward giving the job up.
+//
+// twitch.ErrChannelNotFound — GQL's user:null — is a definitive answer by
+// NAME too, ahead of the string fallback. waitForTwitchLive keeps it off the
+// probe budget in its own arm, but its give-up error leads with the login the
+// operator typed, and a login is free text to every rule below: "theofficialx"
+// holds "eof", "tlsgamer" holds "tls".
 func classifyProbeErr(err error) probeErrClass {
 	if err == nil {
 		return classServer
@@ -63,6 +70,9 @@ func classifyProbeErr(err error) probeErrClass {
 	}
 	if _, ok := errors.AsType[*youtube.StatusProbeInconclusiveError](err); ok {
 		return classNetwork
+	}
+	if errors.Is(err, twitch.ErrChannelNotFound) {
+		return classServer
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return classNetwork
@@ -153,6 +163,14 @@ var httpAnswerRe = regexp.MustCompile(`\bhttp [1-5][0-9][0-9]\b`)
 // exists only because ANDROID_VR answered, with a refusal. Ahead of the
 // transport arms, which would otherwise read a timed-out escalation, carried
 // inside it, as the network being down.
+//
+// So does twitch.ErrChannelNotFound, by name and ahead of the string fallback:
+// Twitch answered, "no such user". The manual wait's give-up error leads with
+// the login (G53), and without this arm a login holding "eof", "tls" or
+// "timeout" read as a transport failure — outageCalled waited out its confirm
+// window for an outage that was not there, and markTwitchUnreachable parked
+// the row as ParkReasonTwitchUnreachable, the reason the Twitch monitor's
+// recovery keys on, for a channel that does not exist.
 func probeVote(err error) probeReport {
 	if err == nil {
 		return reportSuccess
@@ -161,6 +179,9 @@ func probeVote(err error) probeReport {
 		return reportNone
 	}
 	if _, ok := errors.AsType[*youtube.StatusProbeInconclusiveError](err); ok {
+		return reportSuccess
+	}
+	if errors.Is(err, twitch.ErrChannelNotFound) {
 		return reportSuccess
 	}
 	if errors.Is(err, context.DeadlineExceeded) {

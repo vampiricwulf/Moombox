@@ -1,6 +1,9 @@
 package twitch
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+)
 
 // PlaybackTokenSession reports what a playback access token says about the
 // session it was issued to: (signedIn, conclusive).
@@ -85,4 +88,44 @@ func playbackTokenReportsAnonymous(authToken, tokenValue string) bool {
 	}
 	signedIn, conclusive := PlaybackTokenSession(tokenValue)
 	return conclusive && !signedIn
+}
+
+// subscriberOnlyRefusal is the WHOLE decision behind splitting Usher's
+// subscriber-only refusal by whom it refused (G52, owner decision D20): err
+// comes back re-labelled ErrSubscriberOnlyNotEntitled when a signed-in session
+// was refused, and unchanged otherwise.
+//
+// yt-dlp makes the split on the request, not the reply — Usher's 403 body is
+// the same for both sessions — by asking whether an auth-token cookie was sent
+// (_extract_twitch_m3u8_formats, twitch.py b77c9304e). The worker had the
+// documented reason "Usher's 403 does not distinguish" for not splitting, which
+// is true of the body and not of the request: the Service knows what it sent,
+// and the playback token Twitch minted for it names the session. Three
+// conditions, each doing its own work:
+//
+//   - the refusal is the subscriber-only one (a *subscriberOnlyError not yet
+//     re-labelled). Every other failure passes through untouched.
+//   - authToken != "" — credentials were SENT. A cookieless install is refused
+//     as nobody, and the fix for it is a login: ErrSubscriberOnly.
+//   - the token document is conclusive AND signed in (PlaybackTokenSession).
+//     An anonymous document with credentials sent is a dead credential — the
+//     playback-token-anonymous mark's case — so it stays a cookie problem, which
+//     is where Moombox goes beyond yt-dlp's cookie-presence test; and an
+//     unreadable one is silence, never a verdict, so it stays where it always
+//     was rather than become the one refusal no cookie repair can resume.
+//
+// A named function rather than inline in GetHLSMasterPlaylist and
+// GetVodHLSPlaylist for the reason playbackTokenReportsAnonymous is one: both
+// make a GQL call and then fetch a real Usher playlist, and a condition
+// restated in a test passes under every mutation of the real one.
+func subscriberOnlyRefusal(authToken, tokenValue string, err error) error {
+	se, ok := errors.AsType[*subscriberOnlyError](err)
+	if !ok || se.notEntitled || authToken == "" {
+		return err
+	}
+	signedIn, conclusive := PlaybackTokenSession(tokenValue)
+	if !conclusive || !signedIn {
+		return err
+	}
+	return &subscriberOnlyError{status: se.status, notEntitled: true}
 }

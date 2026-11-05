@@ -112,6 +112,14 @@ func TestNotAMemberSuppressesAutoRefresh(t *testing.T) {
 		{"not-a-member wrapped", (&StreamProcessResult{Error: "m", ErrSentinel: ErrNotAMember}).AsError(), false},
 		{"plain cookies-required", ErrCookiesRequired, true},
 		{"twitch auth expired", errors.New("boom"), true},
+		// Twitch named the session signed in and Usher still refused it (owner
+		// decision D20): rotating that live login adds no subscription. Both
+		// shapes: the live path's wrap, and the VOD path's flattened AsError
+		// carrying twitchAuthSentinel's answer. Mutant: the exclusion dropped.
+		{"twitch not entitled (live)", fmt.Errorf("twitch HLS: %w", twitch.ErrSubscriberOnlyNotEntitled), false},
+		{"twitch not entitled (vod)", (&StreamProcessResult{Error: "twitch VOD HLS error: x",
+			ErrSentinel: twitchAuthSentinel(fmt.Errorf("x: %w", twitch.ErrSubscriberOnlyNotEntitled))}).AsError(), false},
+		{"twitch subscriber-only, signed out", fmt.Errorf("twitch HLS: %w", twitch.ErrSubscriberOnly), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,6 +225,47 @@ func TestSetJobErrorWiring(t *testing.T) {
 			wantIdentity:     "",
 			wantIdentityCall: false,
 			jobIDSuffix:      "generic",
+		},
+		{
+			// G52, owner decision D20: Usher refused a session Twitch named as
+			// signed in. The account lacks the subscription, so it parks in
+			// Error — not COOKIES? under a "log in" prompt — with no refresh,
+			// no park reason and no account. Both producer shapes: the live
+			// path's %w chain and the VOD path's flattened result.
+			//
+			// Mutants: ErrSubscriberOnlyNotEntitled made a wrap of
+			// ErrSubscriberOnly, or added to cookiesStatusError (COOKIES?, the
+			// refresh fires); twitchAuthSentinel filing it as
+			// ErrCookiesRequired (the vod row parks in COOKIES?).
+			name:        "a signed-in twitch account without the subscription parks in Error with no refresh (live)",
+			err:         fmt.Errorf("twitch HLS: %w", fmt.Errorf("hls playlist http 403: %w", twitch.ErrSubscriberOnlyNotEntitled)),
+			platform:    "twitch",
+			wantRefresh: false,
+			wantStatus:  database.StatusError,
+			wantReason:  database.ParkReasonNone,
+			jobIDSuffix: "twnotentitledlive",
+		},
+		{
+			name: "a signed-in twitch account without the subscription parks in Error with no refresh (vod)",
+			err: (&StreamProcessResult{Error: "twitch VOD HLS error: hls playlist http 403: x",
+				ErrSentinel: twitchAuthSentinel(fmt.Errorf("x: %w", twitch.ErrSubscriberOnlyNotEntitled))}).AsError(),
+			platform:    "twitch",
+			wantRefresh: false,
+			wantStatus:  database.StatusError,
+			wantReason:  database.ParkReasonNone,
+			jobIDSuffix: "twnotentitledvod",
+		},
+		{
+			// The refusal of a session NOT shown signed in stays a credential
+			// problem: COOKIES?, auth, and the refresh fires.
+			name: "a twitch subscriber-only refusal of a signed-out session still parks in COOKIES? and refreshes",
+			err: (&StreamProcessResult{Error: "twitch VOD HLS error: x",
+				ErrSentinel: twitchAuthSentinel(fmt.Errorf("x: %w", twitch.ErrSubscriberOnly))}).AsError(),
+			platform:    "twitch",
+			wantRefresh: true,
+			wantStatus:  database.StatusCookies,
+			wantReason:  database.ParkReasonAuth,
+			jobIDSuffix: "twsubonly",
 		},
 		{
 			// A multi-%w error can satisfy cookiesStatusError AND
@@ -344,14 +393,22 @@ func TestParkReasonForError(t *testing.T) {
 			want: database.ParkReasonAuth,
 		},
 		{
-			// Ambiguous by construction: usher's 403 does not say whether the
-			// session was anonymous or simply un-entitled, so supplying
-			// working credentials may well be the fix. It must keep being
-			// swept — classifying it as "membership" would strand the
-			// anonymous case.
+			// What is left of usher's 403 once the signed-in refusals are
+			// split off (the row below): no token sent, a token minted for
+			// nobody, or an unreadable token document — so supplying working
+			// credentials may well be the fix. It must keep being swept —
+			// classifying it as "membership" would strand the anonymous case.
 			name: "twitch subscriber-only",
 			err:  fmt.Errorf("usher: %w", twitch.ErrSubscriberOnly),
 			want: database.ParkReasonAuth,
+		},
+		{
+			// The signed-in half of that refusal, split off by the Service
+			// (G52, owner decision D20), is not a cookie park at all: Error,
+			// with no reason recorded.
+			name: "twitch subscriber-only, signed in and not entitled",
+			err:  fmt.Errorf("usher: %w", twitch.ErrSubscriberOnlyNotEntitled),
+			want: database.ParkReasonNone,
 		},
 		{
 			// Not a cookie park at all — the job goes to Error, and the reason

@@ -229,9 +229,10 @@ func TestWaitForTwitchLiveConsumesHint(t *testing.T) {
 		t.Fatalf("waitForTwitchLive calls takeLiveHint %d time(s), want exactly 1 — the monitor's "+
 			"stashed answer must be consumed by the wait, not left for a second GQL stream", len(takes))
 	}
-	probes := methodCallPositions(wait, "GetStreamInfo")
+	// The poll is the not-found-aware lookup (G53), through its test seam.
+	probes := methodCallPositions(wait, "twitchStreamLookup")
 	if len(probes) != 1 || takes[0] > probes[0] {
-		t.Errorf("takeLiveHint is at line %d and GetStreamInfo at %v — the hint must be consumed "+
+		t.Errorf("takeLiveHint is at line %d and twitchStreamLookup at %v — the hint must be consumed "+
 			"BEFORE the poll, or it saves nothing",
 			fset.Position(takes[0]).Line, probes)
 	}

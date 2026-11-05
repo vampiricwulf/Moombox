@@ -413,6 +413,11 @@ func (tm *TwitchMonitor) streamInfoBatch(ctx context.Context, logins []string) (
 // channel's fault — log once and leave every channel's health streak untouched
 // (recording it would falsely mark all channels unhealthy on one shared
 // outage). Retried next cycle; the caller still staggers before the next chunk.
+//
+// A refusal of the saved auth-token is not one of those failures: the Service
+// repeats the batch signed out and reports the lost login itself (G21,
+// twitch.Service.streamInfo), so a dead token reaches this as an ordinary
+// answer and every channel is still checked.
 func (tm *TwitchMonitor) checkChunk(ctx context.Context, chunk []config.ChannelConfig) {
 	logins := make([]string, len(chunk))
 	for i := range chunk {

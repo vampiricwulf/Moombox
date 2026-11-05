@@ -303,6 +303,7 @@ func TestTwitchAuthLossReasonIsTheVocabularyOnly(t *testing.T) {
 		twitchLossNoLoginCookie,
 		twitchLossUnusableLoginCookie,
 		twitchLossPlaybackTokenAnonymous,
+		twitchLossStatusTokenRefused,
 	}
 	seen := map[string]string{}
 	generic := twitchAuthLossMessage("a-token-no-arm-was-ever-written-for")

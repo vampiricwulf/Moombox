@@ -24,7 +24,8 @@ func (rs *RefreshService) CheckTwitchAuth(ctx context.Context) (bool, error) {
 
 // NoteTwitchAuthLoss records that Twitch credentials this install HOLDS were
 // refused, or could not be used, by something other than the periodic
-// oauth2/validate check — today the IRC chat handshake.
+// oauth2/validate check — today the IRC chat handshake, a capture's playback
+// token, and twitch.Service's stream-status checks.
 //
 // THIS IS THE SECOND WRITER OF rs.status, and the only one that is not
 // refresh's status block. Both write under rs.mu, and the rule between them is
@@ -51,12 +52,15 @@ func (rs *RefreshService) CheckTwitchAuth(ctx context.Context) (bool, error) {
 // endpoint check makes.
 //
 // Callers reach this from ChatDownloader's OnAuthDowngrade, which runs on the
-// IRC session goroutine with the read loop parked behind it. This function
+// IRC session goroutine with the read loop parked behind it, from a capture's
+// playback-token verdict on its job goroutine, and from
+// twitch.Service.SetOnAuthLoss on the Twitch monitor's poll goroutine. This function
 // makes no network call and holds no lock across a callback — but the
 // callbacks it invokes may block (handleRecoveryNeeded's auto_enabled=false
 // arm sends a webhook synchronously), so cmd/moombox's wiring must call it on
 // its own goroutine. That wiring is twitchAuthLossHook in
-// cmd/moombox/services.go, plugged into DownloadWorker.SetOnTwitchAuthLoss:
+// cmd/moombox/services.go, plugged into DownloadWorker.SetOnTwitchAuthLoss
+// and, the same value, into twitch.Service.SetOnAuthLoss:
 // it spawns the recover-guarded goroutine before calling here, so the
 // obligation is met in the tree, not merely stated.
 func (rs *RefreshService) NoteTwitchAuthLoss(reason string) {

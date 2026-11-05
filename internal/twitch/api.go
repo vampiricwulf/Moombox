@@ -29,18 +29,44 @@ var ErrTwitchAuthExpired = errors.New("twitch auth token expired or invalid")
 
 // ErrSubscriberOnly signals an usher 403 whose body carries error_code
 // vod_manifest_restricted or unauthorized_entitlements — subscriber-only
-// content (yt-dlp twitch.py parity). Distinct from ErrTwitchAuthExpired:
-// the token is fine, the account (or the anonymous session) simply lacks
-// access. The worker routes it to StatusCookies since logging into an
-// account that has access is the fix.
+// content (yt-dlp twitch.py parity) — refused to a session that was NOT
+// shown to be signed in: no auth-token was sent, the playback token Twitch
+// minted for the request belongs to nobody, or its document could not be
+// read (see subscriberOnlyRefusal). Distinct from ErrTwitchAuthExpired: the
+// GQL call took the token, Usher just will not serve this session. The
+// worker routes it to StatusCookies since logging into an account that has
+// access is the fix — the same call yt-dlp makes with raise_login_required.
 var ErrSubscriberOnly = errors.New("subscriber-only content: you must be logged into an account that has access")
+
+// ErrSubscriberOnlyNotEntitled is the same Usher refusal made to a session
+// Twitch itself names as signed in: an auth-token was sent and the playback
+// token minted for it carries a user_id (PlaybackTokenSession, conclusive and
+// signed in). The account is alive and simply has no subscription, so no
+// cookie — fresh, refreshed or restored — fixes it, and the worker parks the
+// job in Error with no automatic cookie refresh (owner decision D20).
+//
+// Ported from yt-dlp's split in _extract_twitch_m3u8_formats (twitch.py,
+// b77c9304e): with an auth-token cookie it raises "Your account does not have
+// access to this subscriber-only content", expected=True, and only without
+// one does it raise login-required. The wording is yt-dlp's, lowercased for a
+// Go error string. Moombox's test is stronger than upstream's cookie-presence
+// check, deliberately: a dead auth-token is still a cookie that is present,
+// and yt-dlp would tell that session it is signed in without access, where
+// the playback token's own user_id says it is anonymous — which stays
+// ErrSubscriberOnly here, and so stays a credential problem.
+//
+// Deliberately NOT a wrap of ErrSubscriberOnly: anything that matches that
+// one (cookiesStatusError, twitchAuthSentinel) would route this refusal back
+// to COOKIES? and a pointless browser refresh.
+var ErrSubscriberOnlyNotEntitled = errors.New("your account does not have access to this subscriber-only content")
 
 // ErrChannelNotFound signals a login that doesn't resolve to a Twitch user
 // (renamed, banned, deleted, or a typo) — GQL returns user:null, which is
-// indistinguishable from "offline" without this. Surfaced ONLY by
-// GetStreamInfoBatch (the monitor's health tracker uses it); the single
-// GetStreamInfo preserves its historical (nil, nil) so worker callers,
-// which treat not-yet-live and not-found identically, are unaffected.
+// indistinguishable from "offline" without this. Surfaced by
+// GetStreamInfoBatch (the monitor's health tracker uses it) and by
+// LookupStreamInfo, the not-found-aware single lookup the manual add and the
+// manual wait use (G53); GetStreamInfo keeps its historical (nil, nil) for
+// the callers that treat not-yet-live and not-found identically.
 var ErrChannelNotFound = errors.New("twitch channel not found (renamed, banned, or invalid login)")
 
 // errStreamSlotUnavailable is a per-channel TRANSIENT failure inside an
@@ -476,36 +502,49 @@ type gqlRawQuery struct {
 	Variables any    `json:"variables,omitempty"`
 }
 
+// The labels gqlRequest's errors and retry lines carry for the one-channel and
+// the many-channel shape of the same StreamMetadata + ComscoreStreamingQuery
+// batch (streamInfo sends both).
+const (
+	streamInfoOp      = "StreamMetadata+ComscoreStreamingQuery"
+	streamInfoBatchOp = "StreamMetadata+ComscoreStreamingQuery(batch)"
+)
+
 // GetStreamInfo fetches stream info for a channel (batched StreamMetadata + ComscoreStreamingQuery).
 // channelLogin is lowercased before the GQL call — Twitch channel names are
 // case-insensitive on lookup, but some response paths (and downstream helpers
 // like the thumbnail CDN URL built below) only produce correct values when
 // the login is the canonical lower-case form. Mixed-case logins entered via
 // config could otherwise silently return an empty stream.
+//
+// A login that does not resolve reads as offline here (collapseStreamInfoError);
+// LookupStreamInfo is the same request without that collapse.
 func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string) (*TwitchStreamInfo, error) {
-	channelLogin = strings.ToLower(channelLogin)
+	return collapseStreamInfoError(a.LookupStreamInfo(ctx, channelLogin, authToken))
+}
 
-	respData, err := a.gqlRequest(ctx, "StreamMetadata+ComscoreStreamingQuery", streamInfoOps(channelLogin), authToken)
+// LookupStreamInfo is GetStreamInfo's request with the not-found answer kept:
+// (info, nil) live, (nil, nil) offline, (nil, ErrChannelNotFound) for a login
+// that does not resolve — GQL's user:null, yt-dlp's "<channel> does not exist"
+// (TwitchStreamIE._real_extract, twitch.py b77c9304e), which upstream raises
+// as an expected error at once rather than wait out as a UserNotLive. A
+// one-channel batch through the same streamInfo the monitor's batch uses, so
+// the two shapes cannot drift apart.
+func (a *API) LookupStreamInfo(ctx context.Context, channelLogin, authToken string) (*TwitchStreamInfo, error) {
+	infos, errs, err := a.streamInfo(ctx, streamInfoOp, []string{channelLogin}, authToken)
 	if err != nil {
 		return nil, err
 	}
-
-	var results []json.RawMessage
-	if err := json.Unmarshal(respData, &results); err != nil {
-		return nil, fmt.Errorf("parse batch response: %w", err)
-	}
-
-	if len(results) < 2 {
-		return nil, fmt.Errorf("unexpected batch response length: %d", len(results))
-	}
-
-	return collapseStreamInfoError(a.parseStreamInfo(channelLogin, results[0], results[1]))
+	return infos[0], errs[0]
 }
 
 // collapseStreamInfoError applies the single-call contract to parseStreamInfo's
-// result. ErrChannelNotFound still reads as offline — every caller
-// (processTwitchLive, waitForTwitchLive, the manual-add route) relies on that,
-// and a login that does not resolve IS a settled answer.
+// result. ErrChannelNotFound still reads as offline for GetStreamInfo's callers
+// (processTwitchLive's first look, the capture's end checks), and a login that
+// does not resolve IS a settled answer there. The two callers for which it is
+// NOT the same answer as offline — the manual-add route, which used to create
+// a job for a typo, and waitForTwitchLive, which then polled it forever (G53)
+// — call LookupStreamInfo, which skips this collapse.
 //
 // errStreamSlotUnavailable no longer does (owner decision O-C, sweep-2
 // ENGINE-3/TWITCH-2). A per-element GQL error or null data is a TRANSIENT
@@ -556,6 +595,13 @@ func streamInfoOps(channelLogin string) []gqlPersistedQuery {
 //     (index-mapped isolation — one bad channel never taints its
 //     neighbors).
 func (a *API) GetStreamInfoBatch(ctx context.Context, channelLogins []string, authToken string) (infos []*TwitchStreamInfo, errs []error, wholeErr error) {
+	return a.streamInfo(ctx, streamInfoBatchOp, channelLogins, authToken)
+}
+
+// streamInfo is the one request behind GetStreamInfoBatch and LookupStreamInfo:
+// channelLogins' StreamMetadata + Comscore pairs in one GQL batch, sent once
+// with authToken, labelled opName. GetStreamInfoBatch's doc is its contract.
+func (a *API) streamInfo(ctx context.Context, opName string, channelLogins []string, authToken string) (infos []*TwitchStreamInfo, errs []error, wholeErr error) {
 	infos = make([]*TwitchStreamInfo, len(channelLogins))
 	errs = make([]error, len(channelLogins))
 	if len(channelLogins) == 0 {
@@ -569,7 +615,7 @@ func (a *API) GetStreamInfoBatch(ctx context.Context, channelLogins []string, au
 		ops = append(ops, streamInfoOps(lowered[i])...)
 	}
 
-	respData, err := a.gqlRequest(ctx, "StreamMetadata+ComscoreStreamingQuery(batch)", ops, authToken)
+	respData, err := a.gqlRequest(ctx, opName, ops, authToken)
 	if err != nil {
 		return infos, errs, err
 	}
