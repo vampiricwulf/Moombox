@@ -26,7 +26,12 @@ const defaultSegmentDuration = 2.0
 // filtered, YoutubeDL.py), and the format list's twin of this guard is the
 // drmFamilies skip in internal/youtube (player_api_parsing.go), whose
 // "DRM-protected" wording this error shares. The strategy that fetched the
-// manifest fails with it, so selection can fall back to another.
+// manifest fails with it and the job ends on that clear error rather than
+// on an archive of ciphertext: nothing falls back to another strategy (the
+// one post-setup fallback, missingPotFallback in internal/worker, acts on a
+// missing PO token alone). Where yt-dlp drops the has_drm formats and picks
+// from the rest, a DASH manifest that is all protected here is not retried
+// over the response's HLS manifest.
 var ErrDRMProtected = errors.New("DRM-protected or encrypted media")
 
 // DashSegment represents a segment in a DASH timeline.

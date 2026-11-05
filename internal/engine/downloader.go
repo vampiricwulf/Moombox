@@ -142,7 +142,13 @@ const (
 	// retries+1 times). It counts ATTEMPTS, as it always has. It was 3, a
 	// ladder a burst of fast 503s outlasted in three seconds, and the job
 	// then ended where yt-dlp rides the burst out. The waits between them
-	// are directRetryBackoff's.
+	// are directRetryBackoff's. Moombox goes beyond upstream in one way, on
+	// purpose: HttpFD holds ONE RetryManager for the whole download and a
+	// completed chunk refunds only the attempt it used (NextFragment,
+	// `retry.attempt -= 1`), so failures add up across every chunk and ten
+	// retries are a budget for the transfer; here each chunk gets its own
+	// eleven, so a multi-GB VOD does not spend one budget on unrelated
+	// bursts hours apart.
 	MaxChunkRetries  = 1 + 10
 	ProgressThrottle = 500 * time.Millisecond // Throttle VOD progress emission
 

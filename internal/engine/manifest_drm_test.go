@@ -166,7 +166,8 @@ func TestHlsRefusesAnEncryptedPlaylistBeforeTheFirstWrite(t *testing.T) {
 // ParseDash's streams — yt-dlp's is_drm_protected marks it has_drm and the
 // format is dropped (extractor/common.py, YoutubeDL.py) — and a manifest with
 // nothing else left is ErrDRMProtected, in the DRM wording, so DashStrategy
-// fails it and selection can fall back. ParseDash took every Representation,
+// fails with it and the job ends on that error, not on an archive of
+// ciphertext (no other strategy is tried). ParseDash took every Representation,
 // so a protected manifest was recorded as ciphertext.
 //
 // Mutant: dropping the isDRMProtected skip — the protected representations

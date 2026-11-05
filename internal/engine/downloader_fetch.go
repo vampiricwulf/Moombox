@@ -499,8 +499,12 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 			// every fragment HTTPError, 403/404/410 included,
 			// fragment_retries (10) times before it skips the fragment
 			// (downloader/fragment.py, download_fragment). Moombox asks
-			// headlessRefusalAttempts times in all, on the 403-refresh
-			// path's doubling backoff and without a refresh, since nothing
+			// up to headlessRefusalAttempts times in all, counted on this
+			// segment's one attempt counter with its 5xx and transport
+			// failures — as upstream's fragment RetryManager shares one
+			// counter across error kinds — so a refusal after two failed
+			// attempts is permanent at once. It waits on the 403-refresh
+			// path's doubling backoff and does not refresh, since nothing
 			// here derives the URL from a base: a 403 on Twitch's VOD CDN
 			// is usually permanent (a muted part), and neither tool can
 			// fetch those, so ten attempts would only hold a worker longer.

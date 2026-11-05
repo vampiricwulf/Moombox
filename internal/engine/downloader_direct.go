@@ -50,7 +50,8 @@ func validateDownloadedMP4(path string) error {
 }
 
 // directResumeInterval is how many bytes a whole-file download writes between
-// resume checkpoints — ten 5 MB chunks. An interrupted multi-GB VOD then
+// resume checkpoints — 50 MB: ten full-size 5 MB chunks, about eleven of the
+// jittered ones directChunkSize draws (95-100% of the size). An interrupted multi-GB VOD then
 // resumes from its last checkpoint instead of re-downloading from byte 0, and
 // the cadence keeps the save (which now fsyncs the media first, owner decision
 // O-G) off the hot path: once per 50 MB is nothing beside the transfer itself.
@@ -361,9 +362,13 @@ var errDirectRestToCome = errors.New("the answer ended before the file did")
 // with.
 //
 // A total that moved by less than directEndTolerance is the same file, as it
-// is to yt-dlp's end-of-file check: the few bytes YouTube adds or removes at
-// the end of a file (youtube-dl #175) used to discard a multi-GB partial and
-// fetch it again from byte 0. The partial is kept, logged, and the download
+// is to yt-dlp's end-of-file check (the few bytes YouTube adds or removes at
+// the end of a file, youtube-dl #175). This reaches only a probe whose total
+// moved while the URL's identity did not: a YouTube VOD URL carries `clen`,
+// which streamIdentity fingerprints (and the worker's StreamID names), so a
+// changed clen is discarded at Start by resumeIdentityMismatch before this
+// runs. A total that moved under the same identity — or on a URL without
+// clen — used to discard a multi-GB partial and fetch it again from byte 0. The partial is kept, logged, and the download
 // continues to the new total — provided the partial is not already longer
 // than that total, which the case below still refuses.
 func (d *SegmentDownloader) differentFileReason(staged, total int64, source string) string {
