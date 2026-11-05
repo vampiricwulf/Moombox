@@ -772,3 +772,90 @@ func TestResolveURL(t *testing.T) {
 		}
 	}
 }
+
+// TestParseHls_TwitchAmazonTitleIsAd pins streamlink's second ad signal
+// (_is_segment_ad, plugins/twitch.py a685512: `"Amazon" in title`): an
+// #EXTINF titled "Amazon" marks its segment an ad whether or not a bounded
+// stitched-ad DATERANGE covers it, and needs no PROGRAM-DATE-TIME. The title
+// is per segment — a later segment without its own #EXTINF must not inherit
+// it — and empty or "live" titles (YouTube HLS, Twitch content) classify
+// exactly as before.
+//
+// Mutant: dropping the title term from IsAd fails the first two rows; not
+// resetting curTitle at the segment line fails "title does not leak".
+func TestParseHls_TwitchAmazonTitleIsAd(t *testing.T) {
+	cases := []struct {
+		name string
+		m3u8 string
+		want []bool
+	}{
+		{
+			name: "unbounded ad daterange, Amazon titles",
+			m3u8: `#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad",START-DATE="2026-07-01T00:00:02.000Z"
+#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:00.000Z
+#EXTINF:2.000,live
+seg0.ts
+#EXTINF:2.000,Amazon
+ad0.ts
+#EXTINF:2.000,Amazon
+ad1.ts
+#EXTINF:2.000,live
+seg3.ts`,
+			want: []bool{false, true, true, false},
+		},
+		{
+			name: "no daterange and no PDT, Amazon titles",
+			m3u8: `#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXTINF:2.000,live
+seg0.ts
+#EXTINF:2.000,Amazon|123456789
+ad0.ts
+#EXTINF:2.000,live
+seg2.ts`,
+			want: []bool{false, true, false},
+		},
+		{
+			name: "title does not leak onto a segment without EXTINF",
+			m3u8: `#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXTINF:2.000,Amazon
+ad0.ts
+seg1.ts`,
+			want: []bool{true, false},
+		},
+		{
+			name: "empty titles unchanged (YouTube HLS)",
+			m3u8: `#EXTM3U
+#EXT-X-TARGETDURATION:5
+#EXTINF:5.000,
+seg0.ts
+#EXTINF:5.000
+seg1.ts`,
+			want: []bool{false, false},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ParseHls(tc.m3u8, "https://example.com/")
+			if result == nil || result.Playlist == nil {
+				t.Fatal("expected playlist")
+			}
+			segs := result.Playlist.Segments
+			if len(segs) != len(tc.want) {
+				t.Fatalf("got %d segments, want %d", len(segs), len(tc.want))
+			}
+			for i, w := range tc.want {
+				if segs[i].IsAd != w {
+					t.Errorf("seg[%d] (%s) IsAd = %v, want %v", i, segs[i].URL, segs[i].IsAd, w)
+				}
+			}
+			// The title must not disturb the duration parse.
+			if segs[0].Duration != result.Playlist.TargetDuration {
+				t.Errorf("seg[0].Duration = %v, want %v", segs[0].Duration, result.Playlist.TargetDuration)
+			}
+		})
+	}
+}

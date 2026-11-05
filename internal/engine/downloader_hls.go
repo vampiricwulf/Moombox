@@ -559,7 +559,8 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			// part file keeps an inline timestamp jump where the break was —
 			// the same discontinuity a non-exempt viewer's player rides over.
 			// Never fires for ad-free tokens or YouTube HLS (IsAd requires
-			// twitch-stitched-ad DATERANGE markers; see collectAdDateRanges).
+			// an "Amazon" EXTINF title or a twitch-stitched-ad DATERANGE; see
+			// parseMediaPlaylist and collectAdDateRanges).
 			if seg.IsAd {
 				if !inAdBreak {
 					inAdBreak = true
