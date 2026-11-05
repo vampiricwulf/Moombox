@@ -257,3 +257,33 @@ func TestWalk_AMembersOnlyAnswerWithDetailsIsStoredWithMembershipInactive(t *tes
 		t.Errorf("status = %q, want vod, the answer's own classification", got)
 	}
 }
+
+// A membership row is probed signed in while membership is active, and its
+// detail-less members-only refusal (cookies stale, or the account is no
+// member) is that probe's verdict: it is stored not_a_stream, as before
+// wave FC — decision 9 holds back only the refusal no signed-in probe
+// answered. The wave FC review found the walk dropping it too, so the row
+// stayed unknown and was asked signed in every cycle.
+//
+// Mutant: converting the refusal whatever probe made it (the row stays
+// unknown, and a second walk asks the signed-in probe again).
+func TestWalk_ASignedInDetaillessMembersOnlyRefusalIsStored(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	const chID = "UC1"
+	seedRow(t, db, chID, "m4", now.Add(-1*time.Hour), "exact", "membership", "unknown")
+	var anonCalls, authCalls []string
+	anon, auth := escalationProbes(nil,
+		&VideoProbeResult{StreamStatus: "not_a_stream", PlayabilityError: "members_only"},
+		&anonCalls, &authCalls)
+	fm := newTestFeedMonitor(t, db, withProbe(anon), withProbeAuth(auth), withMembership(membWith()), withNow(now))
+
+	fm.walkForTest(t, chID)
+	fm.walkForTest(t, chID)
+	if len(anonCalls) != 0 || len(authCalls) != 1 {
+		t.Fatalf("probes anon=%v auth=%v, want one signed-in probe: its answer settles the row", anonCalls, authCalls)
+	}
+	if got := mustGetFeedItem(t, db, chID, "m4").Status; got != "not_a_stream" {
+		t.Errorf("status = %q, want not_a_stream, the signed-in probe's verdict", got)
+	}
+}

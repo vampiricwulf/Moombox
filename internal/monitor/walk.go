@@ -351,7 +351,9 @@ func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConf
 // OutcomeDenied a refusal of an upcoming stream is, so the row stays
 // undecided instead of settling not_a_stream, which no rule probes again.
 // The relabel still lands, so the cookie gate parks the row until cookies
-// return, and then the signed-in probe classifies it.
+// return, and then the signed-in probe classifies it. A membership row's own
+// probe is that signed-in one: its detail-less refusal is the verdict and
+// is stored not_a_stream, as before.
 //
 // confirm is the end check this probe may make (endCheckFor), passed on to
 // both probes when the refusal escalates.
@@ -362,9 +364,9 @@ func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConf
 // and the row's hold (noteProbeOutcome) as of now, the cycle's instant; the
 // caller has already checked that the row is not held (probeHeld).
 func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem, confirm ConfirmEndFunc, now time.Time) ProbeClassifyResult {
-	probe := fm.ProbeVideo
+	probe, signedIn := fm.ProbeVideo, false
 	if row.Source == "membership" && fm.ProbeVideoAuth != nil {
-		probe = fm.ProbeVideoAuth
+		probe, signedIn = fm.ProbeVideoAuth, true
 	}
 	res := probeAndClassify(ProbeClassifyParams{
 		Ctx:        ctx,
@@ -412,9 +414,11 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 			Logger:     fm.logger,
 		})
 		fm.noteProbeOutcome(ctx, chID, row.VideoID, res, now)
-	} else if res.Outcome == OutcomeProbed && res.StreamStatus == "not_a_stream" {
-		// No authenticated retry answered the detail-less refusal: nothing
-		// is stored on it (see the doc above).
+	} else if !signedIn && res.Outcome == OutcomeProbed && res.StreamStatus == "not_a_stream" {
+		// No authenticated probe answered the detail-less refusal: nothing
+		// is stored on it (see the doc above). One that did — a membership
+		// row's own signed-in probe, cookies stale or no membership — is
+		// the verdict and is stored, as it was before wave FC.
 		res.Outcome = OutcomeDenied
 	}
 	return res
