@@ -32,7 +32,16 @@ var (
 	visitorDataRegex      = regexp.MustCompile(`"(?:visitorData|visitor_data)":"([^"]+)"`)
 	sessionIndexRegex     = regexp.MustCompile(`"SESSION_INDEX":"?(\d+)"?`)
 	delegatedSessionRegex = regexp.MustCompile(`"DELEGATED_SESSION_ID":"([^"]+)"`)
-	dataSyncIDRegex       = regexp.MustCompile(`"datasyncId":"([^"]+)"`)
+	// The account's datasync id has two spellings, and yt-dlp reads both
+	// (_extract_data_sync_id, _base.py:929-939): ytcfg's DATASYNC_ID, and the
+	// responseContext.mainAppWebResponseContext.datasyncId of an Innertube
+	// response (ytInitialData's and ytInitialPlayerResponse's on a page). It
+	// reads ytcfg first, so ytcfgDataSyncIDRegex is tried first (dataSyncID).
+	ytcfgDataSyncIDRegex = regexp.MustCompile(`"DATASYNC_ID":"([^"]+)"`)
+	dataSyncIDRegex      = regexp.MustCompile(`"datasyncId":"([^"]+)"`)
+	// userSessionIDRegex is ytcfg's USER_SESSION_ID, which yt-dlp prefers to
+	// the datasync id's user half (_extract_user_session_id, _base.py:917-927).
+	userSessionIDRegex = regexp.MustCompile(`"USER_SESSION_ID":"([^"]+)"`)
 	// ytcfgSTSRegex is ytcfg's "STS" (the player's signature timestamp).
 	// The quote before the key is a JSON quote, not a backslash-escaped one,
 	// so a description or title carrying the text cannot match it.
@@ -888,10 +897,19 @@ func extractYtcfgAndPlayerResponse(page []byte) (*YtcfgData, map[string]any) {
 		ytcfg.DelegatedSessionID = string(m[1])
 	}
 
-	// Extract datasync ID (copied — see VisitorData comment).
-	if m := dataSyncIDRegex.FindSubmatch(page); m != nil {
-		ytcfg.DataSyncID = string(m[1])
+	// Extract datasync ID (copied — see VisitorData comment), and the two
+	// session ids it carries (fillSessionFromDataSync).
+	ytcfg.DataSyncID = dataSyncID(func(re *regexp.Regexp) string {
+		if m := re.FindSubmatch(page); m != nil {
+			return string(m[1])
+		}
+		return ""
+	})
+	userSessionID := ""
+	if m := userSessionIDRegex.FindSubmatch(page); m != nil {
+		userSessionID = string(m[1])
 	}
+	ytcfg.fillSessionFromDataSync(userSessionID)
 
 	// Detect the experiment that switches GVS PO-token binding to the video
 	// ID (see GvsContentBinding). Presence of the flag anywhere in the page's
@@ -927,6 +945,62 @@ func extractYtcfgAndPlayerResponse(page []byte) (*YtcfgData, map[string]any) {
 	}
 
 	return ytcfg, playerResponse
+}
+
+// dataSyncID is the account's datasync id off a page, read through find
+// (which returns the copied first submatch of a regex, or ""): ytcfg's
+// DATASYNC_ID when the page states it, else an Innertube response's
+// datasyncId — yt-dlp's order (_extract_data_sync_id, _base.py:929-939, whose
+// traversal visits the webpage ytcfg before the initial player response).
+// Shared by the watch page (extractYtcfgAndPlayerResponse) and the homepage
+// (homepageSession), whose bodies are []byte and string.
+func dataSyncID(find func(*regexp.Regexp) string) string {
+	if id := find(ytcfgDataSyncIDRegex); id != "" {
+		return id
+	}
+	return find(dataSyncIDRegex)
+}
+
+// parseDataSyncID splits a datasync id into the delegated and the user
+// session id, a port of yt-dlp's _parse_data_sync_id (_base.py:886-902): a
+// brand (secondary) channel's id is "delegated||user", the primary channel's
+// "user||" — so a value with nothing after its "||", or with no "||" at all,
+// is the user session id alone.
+func parseDataSyncID(id string) (delegated, user string) {
+	if id == "" {
+		return "", ""
+	}
+	first, second, _ := strings.Cut(id, "||")
+	if second != "" {
+		return first, second
+	}
+	return "", first
+}
+
+// fillSessionFromDataSync fills the session ids a page did not state
+// literally from its datasync id, as yt-dlp's extractors fall back
+// (_extract_delegated_session_id, _base.py:904-915, and
+// _extract_user_session_id, _base.py:917-927): DelegatedSessionID only when
+// DELEGATED_SESSION_ID was absent — a brand account's page that states its
+// datasync id and not the literal key would otherwise send no X-Goog-PageId,
+// and be judged as the primary account — and UserSessionID from
+// USER_SESSION_ID (userSessionID, "" when the page has none) before the
+// datasync id's user half. The datasync id read here is either spelling
+// (dataSyncID), the response's responseContext datasyncId included, as
+// yt-dlp's player and tab requests read it (_video.py:2920-2927, passing the
+// initial player response; _tab.py:834, passing the tab's data); its live
+// chat path reads the ytcfg alone (_base.py:962 with ytcfg only), so for chat
+// Moombox's page-wide read is a superset — one session, kept once, for every
+// caller.
+func (y *YtcfgData) fillSessionFromDataSync(userSessionID string) {
+	delegated, user := parseDataSyncID(y.DataSyncID)
+	if y.DelegatedSessionID == "" {
+		y.DelegatedSessionID = delegated
+	}
+	if userSessionID == "" {
+		userSessionID = user
+	}
+	y.UserSessionID = userSessionID
 }
 
 // DefaultYtcfg creates a default (empty) ytcfg.

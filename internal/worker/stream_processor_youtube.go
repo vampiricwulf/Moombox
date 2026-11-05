@@ -858,6 +858,9 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 		// leaves the field nil, which the API reads as "no Cookie header".
 		opts.CookieHeader = sp.yt.Auth.GetCookieHeader
 		opts.PageCookieHeader = sp.yt.Auth.PageCookieHeader
+		// Per poll as well, as setupChatDownloader wires it: the account's
+		// identity headers (Service.ChatSessionHeaders).
+		opts.SessionHeaders = sp.yt.ChatSessionHeaders
 	}
 	opts.StreamStartTime = earlyChatEpoch(info)
 

@@ -127,6 +127,12 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 		// The watch page a stale continuation is re-read off is a page, and
 		// gets the page header, as the fallback fetch above does.
 		opts.PageCookieHeader = jobCtx.YT.Auth.PageCookieHeader
+		// Method value again: the account's identity (X-Goog-AuthUser,
+		// X-Goog-PageId) is read per poll off the session the probes carry,
+		// never snapshotted off the page this source came from, so a capture
+		// that outlives an account switch stops naming the old account's
+		// brand page (Service.ChatSessionHeaders).
+		opts.SessionHeaders = jobCtx.YT.ChatSessionHeaders
 	}
 
 	if videoInfo.ScheduledStartTime != "" {

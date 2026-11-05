@@ -199,9 +199,10 @@ func (s *Service) readAccountSession(ctx context.Context) {
 }
 
 // homepageSession reads the signed-in session's identity — SESSION_INDEX and
-// DELEGATED_SESSION_ID — off the homepage HTML, as extractYtcfg reads them off
-// a watch page. Visitor data is deliberately not here: Init reads it under
-// its own sticky rule above.
+// DELEGATED_SESSION_ID, or the delegated half of the datasync id when the
+// page states no DELEGATED_SESSION_ID (fillSessionFromDataSync) — off the
+// homepage HTML, as extractYtcfg reads them off a watch page. Visitor data is
+// deliberately not here: Init reads it under its own sticky rule above.
 func homepageSession(html string) *YtcfgData {
 	session := &YtcfgData{}
 	if m := sessionIndexRegex.FindStringSubmatch(html); m != nil {
@@ -212,6 +213,14 @@ func homepageSession(html string) *YtcfgData {
 	if m := delegatedSessionRegex.FindStringSubmatch(html); m != nil {
 		session.DelegatedSessionID = strings.Clone(m[1])
 	}
+	find := func(re *regexp.Regexp) string {
+		if m := re.FindStringSubmatch(html); m != nil {
+			return strings.Clone(m[1])
+		}
+		return ""
+	}
+	session.DataSyncID = dataSyncID(find)
+	session.fillSessionFromDataSync(find(userSessionIDRegex))
 	return session
 }
 
@@ -397,6 +406,40 @@ func (s *Service) GetVisitorData() string {
 // GetCookieHeader returns the Cookie header string for authenticated requests.
 func (s *Service) GetCookieHeader() string {
 	return s.Auth.GetCookieHeader()
+}
+
+// ChatSessionHeaders is the signed-in account's identity for a live chat
+// request — X-Goog-AuthUser, and X-Goog-PageId for a brand account
+// (accountSessionHeaders) — read at call time off the session the probes
+// carry (probeYtcfg): the one the last page fetched with the jar's cookies
+// stated, and only while the jar still holds the account it was read under.
+// yt-dlp's live chat downloader sends the watch-page ytcfg's session on every
+// get_live_chat(_replay) POST (downloader/youtube_live_chat.py:151-180,
+// generate_api_headers); a members-only chat whose membership is held on a
+// brand account or on a second login exists only under that identity, and
+// was polled as the primary account — refused, or answered without the
+// members' messages. A getter and not the page's ytcfg snapshotted into the
+// downloader: a capture runs for hours and outlives an account switch (a
+// cookie import), after which the old account's page id names an account
+// the credentials no longer hold. Empty when there is no such session, or
+// no player API to keep one (a hand-built Service).
+//
+// With them goes X-Youtube-Bootstrap-Logged-In whenever the jar holds a
+// signed-in set, as GenerateAPIHeaders sends it on the player calls and
+// /browse: yt-dlp's _generate_cookie_auth_headers adds it when the ytcfg says
+// LOGGED_IN (_base.py:975-976), and generate_api_headers spreads that into
+// every chat poll's headers. It is read off the jar at call time like the
+// rest, so a capture whose cookies are removed mid-stream stops claiming a
+// login.
+func (s *Service) ChatSessionHeaders() map[string]string {
+	if s == nil || s.PlayerAPI == nil {
+		return nil
+	}
+	headers := accountSessionHeaders(s.PlayerAPI.probeYtcfg(""))
+	if s.Auth != nil && s.Auth.HasAuthCookies() {
+		headers["X-Youtube-Bootstrap-Logged-In"] = "true"
+	}
+	return headers
 }
 
 // GetFormats fetches available formats and returns them with best-selection info.

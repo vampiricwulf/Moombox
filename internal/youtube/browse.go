@@ -420,14 +420,23 @@ func (s *Service) browseRequestBody(browseID, params, continuation, visitorData 
 // visitorData rides both the X-Goog-Visitor-Id header (via ytcfg) and the
 // request context. No internal retry: the scanner owns pacing and the sweep
 // retries a failed scan next cycle, mirroring chat's single-attempt fetchChat.
+//
+// The ytcfg is the probes' (probeYtcfg): the signed-in session the last page
+// fetched with the jar's cookies stated, while the jar still holds that
+// account — so the request carries X-Goog-AuthUser and, for a brand account,
+// X-Goog-PageId. yt-dlp's tab requests pass the ytcfg's session into
+// generate_api_headers the same way (_tab.py:591-592, 833-834, 939-940;
+// _base.py:960-999). It used to be a bare DefaultYtcfg: a membership held on
+// a brand account or on a second login exists only under that identity, so
+// the membership tab was answered for the primary account and its
+// members-only backlog read as absent or cleanly exhausted.
 func (s *Service) browsePost(ctx context.Context, reqBody map[string]any, visitorData string) ([]byte, error) {
 	endpoint := s.browse.endpointOrDefault()
 	if key := s.PlayerAPI.APIKey(); key != "" {
 		endpoint += "?key=" + key
 	}
 
-	ytcfg := DefaultYtcfg()
-	ytcfg.VisitorData = visitorData
+	ytcfg := s.PlayerAPI.probeYtcfg(visitorData)
 	headers := s.Auth.GenerateAPIHeaders(constants.WebClient, ytcfg)
 	headers["Referer"] = constants.YouTubeURLs.Base + "/"
 
