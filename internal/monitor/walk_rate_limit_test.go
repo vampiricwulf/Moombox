@@ -100,6 +100,49 @@ func TestWalk_ARateLimitDoesNotAdvanceTheLadder(t *testing.T) {
 	})
 }
 
+// TestWalk_ATransientFailureAfterARateLimitIsRetriedNextCycle: the rate
+// limit marks the spell's LAST probe, not the spell. A row rate-limited at
+// 0 is let through at 10 m (the hold is off for that cycle alone) and fails
+// transiently (a transport error); the hold stands again from 20 m, but the
+// row's last probe was not rate-limited, so it is retried the next cycle
+// and every cycle after, as any transient failure is, rather than held for
+// the hold.
+//
+// Mutant: a sticky flag (spell.rateLimited = spell.rateLimited ||
+// res.RateLimited) holds the row from 10 m to 1 h.
+func TestWalk_ATransientFailureAfterARateLimitIsRetriedNextCycle(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		db := newTestDB(t)
+		t0 := time.Now()
+		const chID = "UC1"
+		seedRow(t, db, chID, "t", t0.Add(-time.Hour), "exact", "rss", "unknown")
+
+		var at []time.Duration
+		probe := func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+			since := time.Since(t0)
+			at = append(at, since)
+			if since == 0 {
+				return nil, errRateLimited()
+			}
+			return nil, errors.New("connection reset")
+		}
+		fm := newTestFeedMonitor(t, db, withProbe(probe), withWindowDays(30))
+		// The hold is off for the 10 m cycle alone (a first hold run out,
+		// a second placed by the backlog after it), standing otherwise.
+		fm.RateLimitHeld = func(now time.Time) bool { return now.Sub(t0) != 10*time.Minute }
+
+		for time.Since(t0) <= 30*time.Minute {
+			fm.walkForTest(t, chID)
+			time.Sleep(10 * time.Minute)
+		}
+
+		want := []time.Duration{0, 10 * time.Minute, 20 * time.Minute, 30 * time.Minute}
+		if !slices.Equal(at, want) {
+			t.Errorf("probed at %v, want %v: a transient failure after the rate limit is retried next cycle", at, want)
+		}
+	})
+}
+
 // TestProbeAndClassifyMarksARateLimitedProbe: the classification carries the
 // rate limit apart from the generic inconclusive case (it is both), and a
 // bot wall is not rate-limited.
