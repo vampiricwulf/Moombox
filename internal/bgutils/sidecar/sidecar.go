@@ -222,6 +222,29 @@ func New(cfg Config) *Sidecar {
 	return s
 }
 
+// childEnv is the environment the Node child runs with: Moombox's own, plus
+// NODE_USE_ENV_PROXY=1, so the sidecar's fetches (the homepage, /att/get,
+// the interpreter script, GenerateIT) take HTTPS_PROXY, HTTP_PROXY and
+// NO_PROXY exactly as every Go client does through http.ProxyFromEnvironment
+// (internal/httpx/client.go). Node's fetch ignores those variables unless it
+// is told to read them (--use-env-proxy, or this variable, on the pinned
+// v24). Without it a Moombox run behind a proxy minted its integrity token
+// and PO tokens from the host's own address while the player request and the
+// media went through the proxy, and YouTube refuses a token minted from
+// another IP than the one using it (audit G22). bgutil's server mints through
+// the request's proxy or HTTPS_PROXY / HTTP_PROXY / ALL_PROXY
+// (server/src/session_manager.ts:563-574 at 26475e9); ALL_PROXY is not read
+// here, as Go does not read it either: the point is the same route as Go's.
+//
+// The variable is set last, so a NODE_USE_ENV_PROXY=0 inherited from the
+// parent cannot switch it off: the sidecar going one way while Go goes
+// another is the bug, not a preference.
+func childEnv(parent []string) []string {
+	env := make([]string, 0, len(parent)+1)
+	env = append(env, parent...)
+	return append(env, "NODE_USE_ENV_PROXY=1")
+}
+
 // Start extracts the embedded blobs (if needed), launches the Node
 // subprocess pinned to a Windows Job Object, and waits for the sidecar
 // to emit a `ready` notification on stdout signaling that server.js has
@@ -290,6 +313,7 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 
 	cmd := exec.CommandContext(context.Background(), nodeExe, nodeArgs...)
 	cmd.Dir = cacheDir
+	cmd.Env = childEnv(os.Environ())
 	// Parent-death cleanup, pre-start half: Linux sets PR_SET_PDEATHSIG
 	// here (must be configured before fork); Windows is a no-op because
 	// the Job Object assigned after Start covers it.

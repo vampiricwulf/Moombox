@@ -482,6 +482,8 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 
 "Restart?" is whether a change waits for a restart. `network_access` decides who is admitted as soon as it is saved; only moving off `localhost` needs the restart, to listen on the network. Settings marked "No" apply when saved — the downloader ones to jobs that start afterwards.
 
+**Outbound proxy.** Moombox's own requests read `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` from its environment, and the BotGuard sidecar is started to read the same variables, so PO tokens are minted from the same address the player requests and downloads come from (YouTube refuses a token minted from another). Set them before starting Moombox; a change needs a restart.
+
 ### Channel Monitoring
 
 ```toml
