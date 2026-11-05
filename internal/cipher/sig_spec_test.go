@@ -3,9 +3,14 @@ package cipher
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
 )
 
 // permutingSidecar stands in for the sidecar's sig solving with a transform
@@ -21,6 +26,14 @@ type permutingSidecar struct {
 	// they carried.
 	batches   int
 	synthetic int
+	// syntheticErr, when set, fails every Batch carrying a synthetic
+	// challenge, as a player function that throws on its control
+	// characters does; real signatures are still answered. afterSig runs
+	// after Sig answers. syntheticGate, when set, holds every synthetic
+	// Batch until it is closed.
+	syntheticErr  error
+	afterSig      func()
+	syntheticGate chan struct{}
 }
 
 // scramble reverses, swaps two positions and drops the first character.
@@ -55,6 +68,9 @@ func (p *permutingSidecar) Sig(_ context.Context, _, s string) (string, error) {
 	if err := p.failing(); err != nil {
 		return "", err
 	}
+	if p.afterSig != nil {
+		defer p.afterSig()
+	}
 	return p.transform(s), nil
 }
 
@@ -68,14 +84,23 @@ func (p *permutingSidecar) N(_ context.Context, _, n string) (string, error) {
 func (p *permutingSidecar) Batch(_ context.Context, _ string, sigs, ns []string) (map[string]string, map[string]string, error) {
 	p.mu.Lock()
 	p.batches++
+	synthetic := false
 	for _, s := range sigs {
 		if strings.ContainsRune(s, 0) {
 			p.synthetic++
+			synthetic = true
 		}
 	}
+	synthErr, gate := p.syntheticErr, p.syntheticGate
 	p.mu.Unlock()
 	if err := p.failing(); err != nil {
 		return nil, nil, err
+	}
+	if synthetic && gate != nil {
+		<-gate
+	}
+	if synthetic && synthErr != nil {
+		return nil, nil, synthErr
 	}
 	sr := make(map[string]string, len(sigs))
 	for _, s := range sigs {
@@ -365,4 +390,232 @@ func TestApplySigSpecRefusesAnOutOfRangeIndex(t *testing.T) {
 	if out, ok := applySigSpec([]rune("abc"), []int{2, 0}); !ok || out != "ca" {
 		t.Fatalf("applySigSpec = %q, %v; want ca", out, ok)
 	}
+}
+
+// A synthetic challenge the sidecar fails outright is not asked again of
+// that sidecar on every later signature of the length; a sidecar installed
+// after it (a supervisor restart) is asked once more.
+//
+// Mutants: learnSigSpecs not remembering the failure (every signature asks
+// again); SetSidecar not clearing it (the restarted sidecar is never asked).
+func TestAFailedSyntheticChallengeIsAskedOncePerSidecar(t *testing.T) {
+	g := newSpecResolver(t, t.TempDir())
+	side := newPermutingSidecar()
+	side.syntheticErr = errors.New("sidecar: solve: ejs solve sig: no solutions: TypeError")
+	c := newCompositeSolverWith(side, g)
+	ctx := context.Background()
+	for _, s := range []string{sigA, sigB, sigA} {
+		if got, err := c.Sig(ctx, specPlayer, s); err != nil || got != scramble(s) {
+			t.Fatalf("Sig = %q, %v; want the sidecar's answer though the synthetic challenge fails", got, err)
+		}
+	}
+	if _, synth := side.counts(); synth != 1 {
+		t.Fatalf("synthetic challenges asked of one sidecar = %d, want 1", synth)
+	}
+
+	side.mu.Lock()
+	side.syntheticErr = nil
+	side.mu.Unlock()
+	c.SetSidecar(side)
+	if _, err := c.Sig(ctx, specPlayer, sigA); err != nil {
+		t.Fatalf("Sig after SetSidecar: %v", err)
+	}
+	if _, synth := side.counts(); synth != 2 {
+		t.Fatalf("synthetic challenges after a new sidecar = %d, want 2", synth)
+	}
+	if _, ok := g.sigSpec(specPlayer, len(sigA)); !ok {
+		t.Fatalf("the new sidecar's answer was not kept as the spec")
+	}
+}
+
+// A synthetic challenge that failed because the caller's context ended says
+// nothing about the challenge: the next signature asks it again.
+//
+// Mutant: the failure remembered whatever the context.
+func TestASyntheticChallengeCutShortByTheCallerIsAskedAgain(t *testing.T) {
+	g := newSpecResolver(t, t.TempDir())
+	side := newPermutingSidecar()
+	c := newCompositeSolverWith(side, g)
+	ctx, cancel := context.WithCancel(context.Background())
+	side.afterSig = cancel
+	side.syntheticErr = context.Canceled
+	if _, err := c.Sig(ctx, specPlayer, sigA); err != nil {
+		t.Fatalf("Sig: %v", err)
+	}
+	side.mu.Lock()
+	side.afterSig, side.syntheticErr = nil, nil
+	side.mu.Unlock()
+	if _, err := c.Sig(context.Background(), specPlayer, sigA); err != nil {
+		t.Fatalf("second Sig: %v", err)
+	}
+	if _, synth := side.counts(); synth != 2 {
+		t.Fatalf("synthetic challenges asked = %d, want 2 (the cut-short one asked again)", synth)
+	}
+	if _, ok := g.sigSpec(specPlayer, len(sigA)); !ok {
+		t.Fatalf("no spec learned on the second ask")
+	}
+}
+
+// droppingSidecar answers a synthetic Batch without an answer for the
+// challenge, a contract breach no real sidecar half makes, which says the
+// same of the length as a spec that does not verify.
+type droppingSidecar struct{ *permutingSidecar }
+
+func (d droppingSidecar) Batch(ctx context.Context, playerID string, sigs, ns []string) (map[string]string, map[string]string, error) {
+	sr, nr, err := d.permutingSidecar.Batch(ctx, playerID, sigs, ns)
+	for k := range sr {
+		if strings.ContainsRune(k, 0) {
+			delete(sr, k)
+		}
+	}
+	return sr, nr, err
+}
+
+// Mutant: the missing answer not remembered as refused.
+func TestASyntheticChallengeLeftUnansweredIsNotAskedAgain(t *testing.T) {
+	side := newPermutingSidecar()
+	c := newCompositeSolverWith(droppingSidecar{side}, newSpecResolver(t, t.TempDir()))
+	for _, s := range []string{sigA, sigB} {
+		if _, err := c.Sig(context.Background(), specPlayer, s); err != nil {
+			t.Fatalf("Sig: %v", err)
+		}
+	}
+	if _, synth := side.counts(); synth != 1 {
+		t.Fatalf("synthetic challenges asked = %d, want 1", synth)
+	}
+}
+
+// The synthetic challenge goes through the sidecar half's probe path, never
+// the stale-JS recovery a real signature gets: an ejs that throws on its
+// control characters ("ejs solve sig: no solutions", which isStaleJSError
+// matches) used to make every later signature of that length evict the
+// player's every cache layer, refetch it and have the sidecar re-preprocess
+// it. A sidecar that lost the player is re-sent it once, as solve does.
+//
+// Mutants: learnSigSpecs asking through Batch (RemovePlayerJS runs and the
+// sidecar is called with ForceReload); probeSigs not re-sending the player
+// on ErrPlayerNotLoaded (no spec is learned).
+func TestTheSyntheticChallengeNeverRunsTheStaleJSRecovery(t *testing.T) {
+	permute := func(s string) string { return scramble(s) }
+	t.Run("no solutions", func(t *testing.T) {
+		fake := &fakeSidecar{respond: func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+			for _, s := range req.SigChallenges {
+				if strings.ContainsRune(s, 0) {
+					return sidecar.SolveCipherResult{}, errors.New("sidecar: solve: ejs solve sig: no solutions: TypeError")
+				}
+			}
+			out := map[string]string{}
+			for _, s := range req.SigChallenges {
+				out[s] = permute(s)
+			}
+			return sidecar.SolveCipherResult{SigResults: out}, nil
+		}}
+		src := &fakePlayerSource{playerID: specPlayer, js: "JS"}
+		c := newCompositeSolverWith(newSidecarSolverWith(fake, src), &specGoja{specs: map[string][]int{}})
+		for _, s := range []string{sigA, sigB, sigA} {
+			if _, err := c.Sig(context.Background(), specPlayer, s); err != nil {
+				t.Fatalf("Sig: %v", err)
+			}
+		}
+		if src.Removed {
+			t.Errorf("the synthetic challenge's failure ran RemovePlayerJS on a healthy player")
+		}
+		synth := 0
+		for _, req := range fake.calls {
+			if req.ForceReload {
+				t.Errorf("a call went out with ForceReload: the stale-JS recovery ran")
+			}
+			for _, s := range req.SigChallenges {
+				if strings.ContainsRune(s, 0) {
+					synth++
+				}
+			}
+		}
+		if synth != 1 {
+			t.Errorf("synthetic challenges sent = %d, want 1", synth)
+		}
+	})
+	t.Run("player not loaded", func(t *testing.T) {
+		lost := true
+		fake := &fakeSidecar{respond: func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+			out := map[string]string{}
+			for _, s := range req.SigChallenges {
+				if strings.ContainsRune(s, 0) && lost && req.PlayerJS == "" {
+					lost = false
+					return sidecar.SolveCipherResult{}, sidecar.ErrPlayerNotLoaded
+				}
+				out[s] = permute(s)
+			}
+			return sidecar.SolveCipherResult{SigResults: out}, nil
+		}}
+		src := &fakePlayerSource{playerID: specPlayer, js: "JS"}
+		goja := &specGoja{specs: map[string][]int{}}
+		c := newCompositeSolverWith(newSidecarSolverWith(fake, src), goja)
+		if _, err := c.Sig(context.Background(), specPlayer, sigA); err != nil {
+			t.Fatalf("Sig: %v", err)
+		}
+		if _, ok := goja.sigSpec(specPlayer, len(sigA)); !ok {
+			t.Errorf("no spec learned: the probe did not re-send the player the sidecar lost")
+		}
+		if src.Removed {
+			t.Errorf("a lost player was evicted, not re-sent")
+		}
+	})
+}
+
+// A sig spec file older than the player cache's TTL answers nothing, as the
+// player's other files do not.
+//
+// Mutant: readSigSpecs without the TTL check.
+func TestASigSpecPastTheTTLIsNotAnswered(t *testing.T) {
+	g := newSpecResolver(t, t.TempDir())
+	c := newCompositeSolverWith(newPermutingSidecar(), g)
+	if _, err := c.Sig(context.Background(), specPlayer, sigA); err != nil {
+		t.Fatalf("Sig: %v", err)
+	}
+	old := time.Now().Add(-playerCacheTTL - time.Hour)
+	if err := os.Chtimes(g.playerCache.FilePathSigSpec(playerURLForID(specPlayer)), old, old); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	c.SetSidecar(nil)
+	if out, err := c.Sig(context.Background(), specPlayer, sigB); !errors.Is(err, ErrSidecarUnavailable) {
+		t.Fatalf("Sig from an expired spec = %q, %v; want ErrSidecarUnavailable", out, err)
+	}
+}
+
+// A burst of first signatures of one length asks the synthetic challenge
+// once: the rest find it being learned and return with their answers.
+//
+// Mutant: learnSigSpecs ignoring the learning map (every signature in the
+// burst asks).
+func TestConcurrentFirstSignaturesLearnTheSpecOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		side := newPermutingSidecar()
+		side.syntheticGate = make(chan struct{})
+		goja := &specGoja{specs: map[string][]int{}}
+		c := newCompositeSolverWith(side, goja)
+		const burst = 4
+		var wg sync.WaitGroup
+		for range burst {
+			wg.Go(func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Errorf("Sig goroutine panic: %v", r)
+					}
+				}()
+				if _, err := c.Sig(context.Background(), specPlayer, sigA); err != nil {
+					t.Errorf("Sig: %v", err)
+				}
+			})
+		}
+		synctest.Wait() // one learner held at the gate, the rest returned
+		if _, synth := side.counts(); synth != 1 {
+			t.Errorf("synthetic challenges asked by a burst of %d = %d, want 1", burst, synth)
+		}
+		close(side.syntheticGate)
+		wg.Wait()
+		if _, ok := goja.sigSpec(specPlayer, len(sigA)); !ok {
+			t.Errorf("no spec learned")
+		}
+	})
 }

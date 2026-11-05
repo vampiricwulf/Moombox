@@ -63,14 +63,28 @@ type compositeSolver struct {
 	// goja is not a store, and then nothing is learned.
 	specs sigSpecStore
 
-	// specMu guards learning and refused. learning holds the (player,
-	// length) pairs a learnSigSpecs is already asking the sidecar about, so
-	// a burst of first signatures asks once. refused holds the pairs whose
-	// spec failed verification: asking again each signature would add a
-	// round-trip to every solve for a player whose spec never verifies.
+	// specMu guards learning, refused and failed. learning holds the
+	// (player, length) pairs a learnSigSpecs is already asking the sidecar
+	// about, so a burst of first signatures asks once. refused holds the
+	// pairs whose spec failed verification, or whose synthetic challenge the
+	// sidecar answered without an answer for it: the spec is the player's,
+	// and asking again each signature would add a round-trip to every solve
+	// for a player whose spec never verifies. failed holds the pairs whose
+	// synthetic challenge the sidecar failed outright (an ejs that throws on
+	// it, a timeout, a crash), for as long as that sidecar is installed:
+	// SetSidecar clears it, so a restarted child is asked once more, while
+	// the one that failed is not asked again on every signature.
 	specMu   sync.Mutex
 	learning map[string]struct{}
 	refused  map[string]struct{}
+	failed   map[string]struct{}
+}
+
+// sigSpecProber is the sidecar half's way to ask the synthetic challenge
+// without its stale-JS recovery (sidecarSolver.probeSigs). A sidecar half
+// that has none is asked through Batch.
+type sigSpecProber interface {
+	probeSigs(ctx context.Context, playerID string, sigs []string) (map[string]string, error)
 }
 
 // sigSpecStore keeps the sig specs compositeSolver learns, by player id and
@@ -100,15 +114,21 @@ func newCompositeSolverWith(sidecar, goja Solver) *compositeSolver {
 		specs:         specs,
 		learning:      make(map[string]struct{}),
 		refused:       make(map[string]struct{}),
+		failed:        make(map[string]struct{}),
 	}
 }
 
 // SetSidecar installs (or, with nil, removes) the sidecar half. Safe to call
 // while other goroutines are solving.
+// The synthetic challenges the previous sidecar failed are asked again of
+// the new one.
 func (c *compositeSolver) SetSidecar(sidecar Solver) {
 	c.mu.Lock()
 	c.sidecarSolver = sidecar
 	c.mu.Unlock()
+	c.specMu.Lock()
+	clear(c.failed)
+	c.specMu.Unlock()
 }
 
 // sidecar returns the current sidecar half. Every method takes ONE snapshot
@@ -305,8 +325,10 @@ func sigSpecKey(playerID string, length int) string {
 // is not there to be asked, and a wrong one would build URLs that 403.
 //
 // Best-effort and synchronous: it runs at most once per player and length
-// (persisted), its failure costs only the spec, and the caller already has
-// its answer.
+// (persisted) while it succeeds, and once per installed sidecar while the
+// synthetic challenge fails; its failure costs only the spec, and the caller
+// already has its answer. The challenge goes through the sidecar's probe
+// path, which never runs the stale-JS recovery a real signature gets.
 func (c *compositeSolver) learnSigSpecs(ctx context.Context, sc Solver, playerID string, solved map[string]string) {
 	if c.specs == nil {
 		return
@@ -335,7 +357,8 @@ func (c *compositeSolver) learnSigSpecs(ctx context.Context, sc Solver, playerID
 		key := sigSpecKey(playerID, n)
 		_, busy := c.learning[key]
 		_, refused := c.refused[key]
-		if busy || refused {
+		_, failed := c.failed[key]
+		if busy || refused || failed {
 			delete(samples, n)
 			continue
 		}
@@ -357,14 +380,32 @@ func (c *compositeSolver) learnSigSpecs(ctx context.Context, sc Solver, playerID
 	for n := range samples {
 		synth = append(synth, syntheticSigChallenge(n))
 	}
-	answers, _, err := sc.Batch(ctx, playerID, synth, nil)
+	var answers map[string]string
+	var err error
+	if p, ok := sc.(sigSpecProber); ok {
+		answers, err = p.probeSigs(ctx, playerID, synth)
+	} else {
+		answers, _, err = sc.Batch(ctx, playerID, synth, nil)
+	}
 	if err != nil {
+		// The caller's own ended context says nothing about the challenge:
+		// the next signature asks it again.
+		if ctx.Err() == nil {
+			c.specMu.Lock()
+			for n := range samples {
+				c.failed[sigSpecKey(playerID, n)] = struct{}{}
+			}
+			c.specMu.Unlock()
+		}
 		slog.Debug("cipher: sig spec: synthetic challenge failed", "playerID", playerID, "err", err)
 		return
 	}
 	for n, smp := range samples {
 		ans, ok := answers[syntheticSigChallenge(n)]
 		if !ok {
+			c.specMu.Lock()
+			c.refused[sigSpecKey(playerID, n)] = struct{}{}
+			c.specMu.Unlock()
 			continue
 		}
 		spec := make([]int, 0, len(ans))
