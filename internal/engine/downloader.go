@@ -98,6 +98,30 @@ var ErrInitSegmentChanged = errors.New("HLS init segment changed")
 // than record hours of fragments that cannot be opened.
 var ErrInitSegmentUnavailable = errors.New("init segment unavailable")
 
+// ErrSegmentRefused signals that the DASH loop met a segment YouTube keeps
+// refusing although it demonstrably exists — it failed again after fresh
+// credentials were installed for it, with the head more than two segments
+// past it — and that this downloader's caller closes the part there
+// (SegmentDownloader.SplitOnRefusedSegment). It always arrives as a
+// *SegmentRefusedError naming the sequence; the downloader stops AT that
+// sequence (CurrentSeq() == Seq) with its resume state kept, so the caller
+// can mux the part as it stands and start the next one past the hole. See
+// refuseSegment (downloader_dash.go) for the rule and where it comes from.
+var ErrSegmentRefused = errors.New("segment refused through fresh credentials")
+
+// SegmentRefusedError is ErrSegmentRefused with the refused sequence.
+type SegmentRefusedError struct {
+	Seq int
+}
+
+func (e *SegmentRefusedError) Error() string {
+	return fmt.Sprintf("%v: sequence %d", ErrSegmentRefused, e.Seq)
+}
+
+// Is makes errors.Is(err, ErrSegmentRefused) hold for every
+// *SegmentRefusedError.
+func (e *SegmentRefusedError) Is(target error) bool { return target == ErrSegmentRefused }
+
 const (
 	CatchupThreshold     = 10
 	MaxSegmentRetries    = 5
@@ -521,6 +545,12 @@ type SegmentDownloader struct {
 	// Download-loop goroutine only, like the fields above.
 	directCheckpoint int64
 
+	// partInitBytes is the size of the init Start wrote at the head of a
+	// fresh file (downloadInitSegment), 0 otherwise. A file no bigger than it
+	// holds no media yet — the case refuseSegment must not close as a part.
+	// Download-loop goroutine only, like the fields above.
+	partInitBytes int64
+
 	// reportFirstSegment arms the one OnFirstSegment call: set by Start when
 	// it opens the output file fresh (not resuming), cleared by the first
 	// media write. Download-loop goroutine only, like the fields above.
@@ -587,6 +617,18 @@ type SegmentDownloader struct {
 	// lastCredentialRefresh gates OnCredentialRefresh to one call per
 	// credentialRefreshCooldown.
 	lastCredentialRefresh atomicTime
+
+	// credentialRenewals counts the refreshes refreshCredentials actually
+	// installed (a URL or a token). The sequential DASH loop reads it to tell
+	// a segment that failed AGAIN after fresh credentials arrived — the
+	// refused-segment rule's trigger — from one that has only ever been asked
+	// with the credentials it first failed on. Atomic: catch-up workers
+	// refresh from their own goroutines.
+	credentialRenewals atomic.Int64
+
+	// rebuildsExhaustedSeq is the sequence NoteRebuildsExhausted named, or -1.
+	// Written before Start, read on the download-loop goroutine.
+	rebuildsExhaustedSeq atomic.Int64
 
 	// lastCatchUpFailure timestamps the most recent catch-up failure episode.
 	// The batch ceiling is throttled relative to it so a 403 burst stops
@@ -657,6 +699,17 @@ type SegmentDownloader struct {
 	// MayResume reports whether the broadcast may resume — stall evidence.
 	// Called only from the download-loop goroutine. nil = feature off.
 	MayResume func() bool
+	// SplitOnRefusedSegment arms the DASH loop's refused-segment rule
+	// (refuseSegment, downloader_dash.go) and says this downloader's caller
+	// can close the part at the hole and start a new one past it: the live
+	// loop sets it on every DASH downloader it runs (owner decision D8 of
+	// the 2026-10-31 audit). A refused segment then ends the download with a
+	// *SegmentRefusedError — or, when the new part could not get its init
+	// because the stream's sq=0 is no longer served, is skipped in place
+	// with a gap row. Unset — the post-live and VOD downloads, which have no
+	// parts — the rule never fires and a refused segment is retried and
+	// verified exactly as before. Assign before Start, like the callbacks.
+	SplitOnRefusedSegment bool
 	// OnFetch reports n bytes of media payload ARRIVING off the network —
 	// fired at every successful segment/chunk body read, including catch-up
 	// workers whose data sits in the reorder buffer long before it flushes
@@ -778,6 +831,9 @@ func (d *SegmentDownloader) refreshCredentials() bool {
 		d.SetPoToken(freshToken)
 		installed = true
 	}
+	if installed {
+		d.credentialRenewals.Add(1)
+	}
 	if installed && d.logger != nil {
 		d.logger.Info("[Downloader] credentials refreshed after 403",
 			"newURL", freshURL != "", "newToken", freshToken != "")
@@ -878,8 +934,26 @@ func NewSegmentDownloader(opts DownloaderOptions) *SegmentDownloader {
 	}
 	d.currentSeq.Store(int64(opts.StartSeq))
 	d.headSeq.Store(-1)
+	d.rebuildsExhaustedSeq.Store(-1)
 	return d
 }
+
+// NoteRebuildsExhausted tells the downloader that its caller has already
+// rebuilt the download at seq — each time on a fresh player response, so on
+// fresh credentials — as many times as it will (the live loop's same-seq
+// rebuild cap, sameSeqRebuildCap in internal/worker). Where this downloader
+// would hand seq back for one more rebuild (ErrQualityLost), it applies the
+// refused-segment rule to it instead: the rebuild that built it was the
+// credential refresh that rule waits for. Only a SplitOnRefusedSegment
+// downloader acts on it. Call before Start.
+func (d *SegmentDownloader) NoteRebuildsExhausted(seq int) {
+	d.rebuildsExhaustedSeq.Store(int64(seq))
+}
+
+// RebuildsExhaustedSeq reports the sequence NoteRebuildsExhausted named, or
+// -1. Read-only; the worker tests use it to assert which downloaders the live
+// loop armed.
+func (d *SegmentDownloader) RebuildsExhaustedSeq() int { return int(d.rebuildsExhaustedSeq.Load()) }
 
 // Start begins the download process.
 func (d *SegmentDownloader) Start(ctx context.Context) error {
@@ -1096,6 +1170,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 				"fromSegment", d.opts.InitFromSegment, "error", initErr)
 			return fmt.Errorf("%w: %w", ErrInitSegmentUnavailable, initErr)
 		}
+		d.partInitBytes = d.bytesWritten.Load()
 	}
 
 	if d.OnStart != nil {
