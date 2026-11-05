@@ -726,8 +726,8 @@ func strategyGvsToken(ctx context.Context, p *bgutils.PotProvider, videoInfo *yo
 // a capture that yt-dlp would record from HLS is recorded from HLS — from
 // the oldest segment the playlist's window holds, as any HLS capture records
 // — instead of failing; a VOD or post-live setup has no live HLS to fall to,
-// and falls to its other formats instead (vodMissingPotFallback). The strategy is read by its kind, as
-// setupOrFallback's challenge arm reads it. Only the first setup falls back
+// and falls to its other formats instead (vodMissingPotFallback). The
+// strategy is read by its kind, as setupOrFallback's challenge arm reads it. Only the first setup falls back
 // (setupWithFallback, ExecuteWithChat's one fallback site, which sets an
 // earlier capture of the other shape aside first): a mid-stream refresh
 // (refreshDownload) keeps the strategy the capture runs on, and a refresh
@@ -753,9 +753,18 @@ func missingPotFallback(strategy DownloadStrategy, info *youtube.VideoInfo, err 
 //
 //   - a post-live stream whose pool holds a manifest-free split
 //     (HasManifestlessDashFormats) records it from the start on the
-//     manifest-free path (ManifestlessDashStrategy);
+//     manifest-free path (ManifestlessDashStrategy). selectDownloadStrategy
+//     already takes that path for such a stream ahead of any manifest, so
+//     no caller today reaches this arm with one; it is the decision's
+//     post-live route, kept for any future caller that hands such a stream
+//     to DashStrategy rather than left to the whole-file arm below, which
+//     cannot fetch a live adaptive fragment;
 //   - otherwise a stream whose pool holds a format a whole-file GET can
-//     fetch (wholeFileVodPool) takes the whole-file path (VodStrategy).
+//     fetch (wholeFileVodPool) takes the whole-file path (VodStrategy). A
+//     post-live stream with no manifest-free split lands here too: the
+//     files upstream lists for it are the ones it would download
+//     (_video.py:3492-3501 skips only the live adaptive formats), and
+//     wholeFileVodPool admits only those.
 //
 // Each runs its own missing_pot degrade — the token-free copies, the
 // cookieless re-extract, D12's last resort — and fails with the missing_pot

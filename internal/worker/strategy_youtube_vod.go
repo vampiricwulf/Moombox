@@ -246,7 +246,14 @@ func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			// does a refusal of the guessed token, which the whole-file
 			// refresh's token fallback answers (refreshVodURL). A first
 			// selection that is itself the 18 is what the job records, never
-			// a substitute.
+			// a substitute — a belt, today: the 18 is progressive, so such a
+			// selection has no separate audio, and the 18's own token is not
+			// mandatory, so it never reaches this degrade. This goes beyond upstream on purpose: yt-dlp
+			// mints nothing under such a guess (fetch_po_token's datasync
+			// refusal, _video.py:2815-2819) and keeps the 18 bare by its
+			// exemption (_video.py:3516-3518), so it records the 360p here;
+			// Moombox mints under the guess instead, by owner decision (D12
+			// together with wave FC's decision 1).
 			guessed := errors.Is(mintErr, errGuessedGvsBinding)
 			drop18 := guessed && !isExemptItag18(result.VideoFormat)
 			pool, dropped, swapped = withoutGvsRequiredFormats(pool, videoInfo.IsPremium)
