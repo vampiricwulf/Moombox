@@ -304,27 +304,34 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		segJobCtx.VideoStartSeq = oldVideoSeq
 		segJobCtx.AudioStartSeq = oldAudioSeq
 
-		refreshResult, refreshErr := o.refreshDownload(ctx, &segJobCtx, freshInfo, result.IsHls)
-		if liveSwitchWanted(refreshErr, result.IsHls) {
-			// The new part's setup failed on the player's JS challenges: it
-			// is a new part already, so the path switch builds into it
-			// (switchLivePath; switchPart below says why).
-			if res, path, err := switchLivePath(ctx, &segJobCtx, freshInfo, o.strategyDeps(), refreshErr); err == nil {
-				o.logger.Info("live path switched at a quality split", "path", path, "part", segmentIndex+1, "jobID", jobCtx.Job.ID)
-				refreshResult, refreshErr = res, nil
-				newQuality = o.extractQualityFromResult(res)
-			} else {
-				refreshErr = err
+		// refreshOrSwitch is the new part's refresh over info: when it fails
+		// on the player's JS challenges (liveSwitchWanted) the part is a new
+		// one already, so the path switch builds into it (switchLivePath;
+		// switchPart below says why). The first refresh and every still-live
+		// retry of it go through here: a first refresh that failed for
+		// another reason — a transient fetch, an interruption's empty
+		// extraction — and a retry that then met the challenges used to be
+		// retried on the same formats until the budget ran out, and the
+		// loop finalized a stream YouTube still called live.
+		refreshOrSwitch := func(info *youtube.VideoInfo) (*DownloadResult, error) {
+			res, err := o.refreshDownload(ctx, &segJobCtx, info, result.IsHls)
+			if !liveSwitchWanted(info, err, result.IsHls) || ctx.Err() != nil {
+				return res, err
 			}
+			switched, path, swErr := switchLivePath(ctx, &segJobCtx, info, o.strategyDeps(), err)
+			if swErr != nil {
+				return nil, swErr
+			}
+			o.logger.Info("live path switched at a quality split", "path", path, "part", segmentIndex+1, "jobID", jobCtx.Job.ID)
+			newQuality = o.extractQualityFromResult(switched)
+			return switched, nil
 		}
+		refreshResult, refreshErr := refreshOrSwitch(freshInfo)
 		if refreshErr != nil {
 			// The same retry the quality-loss refresh gets: the part was
 			// already closed, and ending the job here finalized a stream
 			// YouTube still calls live.
-			refreshResult, refreshErr = o.refreshWhileLive(ctx, jobCtx, freshInfo, refreshErr, &consecutiveLiveChecks, tracker,
-				func(info *youtube.VideoInfo) (*DownloadResult, error) {
-					return o.refreshDownload(ctx, &segJobCtx, info, result.IsHls)
-				})
+			refreshResult, refreshErr = o.refreshWhileLive(ctx, jobCtx, freshInfo, refreshErr, &consecutiveLiveChecks, tracker, refreshOrSwitch)
 		}
 
 		if cookiesStatusError(refreshErr) {
@@ -394,7 +401,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// URLs it cannot solve stops, and the loop's refresh after it is the one
 	// that switches.
 	switchPart := func(freshInfo *youtube.VideoInfo, cause error, oldVideoSeq, oldAudioSeq int) bool {
-		if !liveSwitchWanted(cause, result.IsHls) || ctx.Err() != nil {
+		if !liveSwitchWanted(freshInfo, cause, result.IsHls) || ctx.Err() != nil {
 			return false
 		}
 		hasMedia := discoverStagingMedia(curCtx.StagingDir) != nil
@@ -647,12 +654,30 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				// transient manifest or cipher fetch. Retry on the still-live
 				// verify branch's cadence and budget first, from the same
 				// forced position.
-				curCtx.VideoStartSeq, curCtx.AudioStartSeq = oldVideoSeq, oldAudioSeq
+				//
+				// A retry that fails on the player's JS challenges switches
+				// the capture's path in a new part, as the first refresh's
+				// failure does (switchPart), and stops the retries
+				// (errLivePathSwitched): the first one may have failed for
+				// another reason — a transient fetch, an interruption's
+				// empty extraction — and retrying the same formats after
+				// the challenges failed ran the budget out and finalized a
+				// stream YouTube still called live. refreshCtx is the part
+				// the retries refresh; a switch moves curCtx past it.
+				refreshCtx := curCtx
+				refreshCtx.VideoStartSeq, refreshCtx.AudioStartSeq = oldVideoSeq, oldAudioSeq
 				refreshResult, refreshErr = o.refreshWhileLive(ctx, jobCtx, freshInfo, refreshErr, &consecutiveLiveChecks, tracker,
 					func(info *youtube.VideoInfo) (*DownloadResult, error) {
-						return o.refreshDownload(ctx, curCtx, info, result.IsHls)
+						res, err := o.refreshDownload(ctx, refreshCtx, info, result.IsHls)
+						if err != nil && switchPart(info, err, oldVideoSeq, oldAudioSeq) {
+							return nil, errLivePathSwitched
+						}
+						return res, err
 					})
-				curCtx.VideoStartSeq, curCtx.AudioStartSeq = 0, 0
+				refreshCtx.VideoStartSeq, refreshCtx.AudioStartSeq = 0, 0
+				if errors.Is(refreshErr, errLivePathSwitched) {
+					continue
+				}
 				if cookiesStatusError(refreshErr) {
 					o.logger.Error("the capture's credentials stopped working — stopping with staging kept",
 						"err", refreshErr, "jobID", jobCtx.Job.ID)
@@ -1001,9 +1026,14 @@ type liveRefreshProber interface {
 // a stream YouTube had just called live Finished mid-broadcast.
 func (o *DownloadOrchestrator) refreshWhileLive(ctx context.Context, jobCtx *JobContext, info *youtube.VideoInfo, err error,
 	checks *atomic.Int32, tracker *ProgressTracker, refresh func(*youtube.VideoInfo) (*DownloadResult, error)) (*DownloadResult, error) {
+	// Through the live loop's seam (liveVideoInfo), as its other player
+	// reads are, so a test can drive the retries.
 	var prober liveRefreshProber
 	if jobCtx.YT != nil {
-		prober = jobCtx.YT
+		yt := jobCtx.YT
+		prober = liveRefreshProberFunc(func(ctx context.Context, videoID string) (*youtube.VideoInfo, error) {
+			return liveVideoInfo(yt, ctx, videoID)
+		})
 	}
 	return refreshWhileLiveWith(ctx, prober, jobCtx.Job.VideoID, info, err, checks,
 		func() {
@@ -1012,6 +1042,18 @@ func (o *DownloadOrchestrator) refreshWhileLive(ctx context.Context, jobCtx *Job
 			}
 		}, liveRefreshRetryWait, refresh, o.logger, jobCtx.Job.ID)
 }
+
+// liveRefreshProberFunc is a func as a liveRefreshProber.
+type liveRefreshProberFunc func(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
+
+func (f liveRefreshProberFunc) GetVideoInfo(ctx context.Context, videoID string) (*youtube.VideoInfo, error) {
+	return f(ctx, videoID)
+}
+
+// errLivePathSwitched is a refresh retry's answer once its failure switched
+// the capture's path in a new part (switchPart): refreshWhileLiveWith stops
+// retrying on it, and the live loop goes on with the switched downloaders.
+var errLivePathSwitched = errors.New("the live capture switched path in a new part")
 
 // liveRefreshRetryWait is refreshWhileLive's pause between attempts; a
 // variable so tests need not sleep it out.
@@ -1062,6 +1104,9 @@ func refreshWhileLiveWith(ctx context.Context, prober liveRefreshProber, videoID
 		r, refreshErr := refresh(info)
 		if refreshErr == nil {
 			return r, nil
+		}
+		if errors.Is(refreshErr, errLivePathSwitched) {
+			return nil, refreshErr
 		}
 		err = refreshErr
 	}

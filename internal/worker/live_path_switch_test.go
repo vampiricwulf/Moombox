@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -36,6 +38,38 @@ func liveSwitchFormats(source string) []youtube.Format {
 	}
 }
 
+// gateSolver answers every challenge while open, and fails each one once
+// closed: a solver that stops working mid-stream.
+type gateSolver struct{ open atomic.Bool }
+
+func (s *gateSolver) Sig(context.Context, string, string) (string, error) {
+	if s.open.Load() {
+		return "SIGNED", nil
+	}
+	return "", errors.New("sig solve failed")
+}
+
+func (s *gateSolver) N(context.Context, string, string) (string, error) {
+	if s.open.Load() {
+		return nSolved, nil
+	}
+	return "", errors.New("n solve failed")
+}
+
+func (s *gateSolver) Batch(context.Context, string, []string, []string) (map[string]string, map[string]string, error) {
+	return nil, nil, errors.New("gateSolver: Batch not used")
+}
+
+// splitSender is a notification sender that runs onSplit when a quality
+// split is announced, ahead of the new part's refresh.
+type splitSender struct{ onSplit func() }
+
+func (s splitSender) Send(title, _ string, _ notifications.NotificationType, _ []notifications.Field, _ notifications.SendOptions) {
+	if strings.HasSuffix(title, "Quality Split") {
+		s.onSplit()
+	}
+}
+
 // TestLiveRefreshFailingOnTheChallengesSwitchesPathInANewPart drives the
 // live loop (runLiveStreamDownload) through a real refresh: a manifest-free
 // capture of tv's formats, recording into a part that already holds its
@@ -48,28 +82,57 @@ func liveSwitchFormats(source string) []youtube.Format {
 // formats from one cookieless re-extract), else the live HLS playlist — from
 // the position the stopped downloaders reached, and the current part is kept
 // as it stands, its files and resume state never written over, muxed as its
-// own file. A current part with no media yet is reused. Before, the refresh
-// failure was waited on and retried on the same tv formats until the loop
-// gave up and finalized a stream YouTube still called live.
+// own file (the background part mux runs for it: here, with no ffmpeg, its
+// failure is logged once). A current part with no media yet is reused.
+// Before, the refresh failure was waited on and retried on the same tv
+// formats until the loop gave up and finalized a stream YouTube still called
+// live.
+//
+// The switch answers the challenges wherever a refresh meets them: a
+// still-live retry (refreshWhileLive) of a first refresh that failed for
+// another reason — here an interruption's empty extraction — and a quality
+// split's new-part refresh (splitPart), whose first look at the new quality
+// still solved. And only them: a capture already on the no-JS path whose
+// refresh found no pair because the extraction is the interruption
+// signature (live, zero formats), or because the cookieless re-extract
+// failed, is waited on and retried as any failed refresh, its one HLS switch
+// unspent.
 //
 // Mutants: drop switchPart from the quality-loss branch (that row's refresh
 // retries on tv, no downloaders built), or from the verify branch (its row);
 // build into the current part (the old files are the new downloaders'
 // output); drop the forced position (StartSeq is not the stopped seq); skip
 // the HLS leg in switchLivePath (the no-pair row builds nothing); reuse the
-// part even when it holds media (likewise, the old files are the output).
+// part even when it holds media (likewise, the old files are the output);
+// drop switchPart's background mux (no part mux runs); drop the switch from
+// the retry closure (the later-retry row builds nothing), or from splitPart
+// (the split row's new part gets no downloaders); drop the zero-formats or
+// the failed-re-extract refusal from liveSwitchWanted (the no-JS rows switch
+// to HLS).
 func TestLiveRefreshFailingOnTheChallengesSwitchesPathInANewPart(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		branch   string // "quality-lost" or "verify"
-		chain    []youtube.Format
-		staged   bool // the current part holds this session's capture so far
-		wantPath string
+		name       string
+		branch     string // "quality-lost" or "verify"
+		chain      []youtube.Format
+		chainErr   error
+		staged     bool // the current part holds this session's capture so far
+		noJS       bool // the run is on the no-JS path already
+		firstEmpty bool // the first player read is the interruption signature
+		allEmpty   bool // every live player read is
+		split      bool // the solver answers until a quality split is announced
+		wantPath   string
 	}{
-		{"quality loss, no-JS DASH", "quality-lost", liveSwitchFormats("visionos"), true, "nojs"},
-		{"still-live verify, no-JS DASH", "verify", liveSwitchFormats("visionos"), true, "nojs"},
-		{"no no-JS pair, HLS", "quality-lost", nil, true, "hls"},
-		{"an empty part is reused", "quality-lost", liveSwitchFormats("visionos"), false, "nojs"},
+		{name: "quality loss, no-JS DASH", branch: "quality-lost", chain: liveSwitchFormats("visionos"), staged: true, wantPath: "nojs"},
+		{name: "still-live verify, no-JS DASH", branch: "verify", chain: liveSwitchFormats("visionos"), staged: true, wantPath: "nojs"},
+		{name: "no no-JS pair, HLS", branch: "quality-lost", staged: true, wantPath: "hls"},
+		{name: "an empty part is reused", branch: "quality-lost", chain: liveSwitchFormats("visionos"), wantPath: "nojs"},
+		{name: "a later retry meets the challenges", branch: "quality-lost", chain: liveSwitchFormats("visionos"), staged: true, firstEmpty: true, wantPath: "nojs"},
+		{name: "a quality split's new-part refresh", branch: "quality-lost", chain: liveSwitchFormats("visionos"), staged: true, split: true, wantPath: "nojs"},
+		{name: "a no-JS capture's interruption is no switch", branch: "quality-lost", staged: true, noJS: true, allEmpty: true, wantPath: "none"},
+		{name: "a no-JS capture's failed re-extract is no switch", branch: "quality-lost", chainErr: errors.New("dial tcp: i/o timeout"), staged: true, noJS: true, wantPath: "none"},
+		// A re-extract whose failure reads like the challenges' own (it
+		// could not fetch the player) is the re-extract's failure still.
+		{name: "a no-JS capture's re-extract failing on a player fetch is no switch", branch: "quality-lost", chainErr: fmt.Errorf("visionos: %w", cipher.ErrPlayerJSFetch), staged: true, noJS: true, wantPath: "none"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -82,12 +145,23 @@ func TestLiveRefreshFailingOnTheChallengesSwitchesPathInANewPart(t *testing.T) {
 				}
 				o := w.orchestrator
 				o.routedCipher, o.cipherSolver, o.potProvider = failingSigSolver{}, nil, &bgutils.PotProvider{}
+				if tc.split {
+					gate := &gateSolver{}
+					gate.open.Store(true)
+					o.routedCipher = gate
+					o.notifier = splitSender{onSplit: func() { gate.open.Store(false) }}
+				}
 				o.SetFfmpegPath(filepath.Join(t.TempDir(), "no-ffmpeg"))
+				muxLogs := &captureLogger{}
+				o.logger = muxLogs
 				logs := &captureLogger{}
 				root := t.TempDir()
 				jobCtx := &JobContext{Job: job, DB: db, Config: &JobConfig{}, YT: youtube.NewService(nil, &discardLogger{}),
 					StagingDir: root, OutputDir: t.TempDir(), Filename: "switch1", Logger: logs,
 					Interruption: &interruptionSignal{}, Run: &runRecord{}}
+				if tc.noJS {
+					jobCtx.Run.markNoJS()
+				}
 
 				// The capture so far: tv's pair, stopped at segment 42.
 				staged := map[string]string{}
@@ -123,6 +197,9 @@ func TestLiveRefreshFailingOnTheChallengesSwitchesPathInANewPart(t *testing.T) {
 					if runs > 1 {
 						return &youtube.VideoInfo{StreamStatus: youtube.StreamPostLive}, nil
 					}
+					if tc.allEmpty || (tc.firstEmpty && fetches == 1) {
+						return &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer}, nil
+					}
 					cp := *live
 					return &cp, nil
 				}
@@ -136,7 +213,7 @@ func TestLiveRefreshFailingOnTheChallengesSwitchesPathInANewPart(t *testing.T) {
 					return nil
 				}
 				built := recordDownloaders(t)
-				calls := fakeCookieless(t, tc.chain, nil)
+				calls := fakeCookieless(t, tc.chain, tc.chainErr)
 				hls := &fakeStrategy{kind: "hls"}
 				swapHls(t, hls)
 
@@ -151,7 +228,7 @@ func TestLiveRefreshFailingOnTheChallengesSwitchesPathInANewPart(t *testing.T) {
 				if err != nil {
 					t.Fatalf("runLiveStreamDownload = %v", err)
 				}
-				if n := calls.Load(); n != 1 {
+				if n := calls.Load(); tc.wantPath != "none" && n != 1 {
 					t.Errorf("cookieless re-extracts = %d, want the switch's one", n)
 				}
 
@@ -159,12 +236,19 @@ func TestLiveRefreshFailingOnTheChallengesSwitchesPathInANewPart(t *testing.T) {
 				if !tc.staged {
 					newPart = root
 				}
+				// A split row's first look at the new quality built tv's
+				// pair in the current part, discarded unrun; the switch's
+				// are the last two.
+				switched := *built
+				if tc.split && len(switched) >= 2 {
+					switched = switched[len(switched)-2:]
+				}
 				switch tc.wantPath {
 				case "nojs":
-					if len(*built) != 2 || len(hls.seen) != 0 {
-						t.Fatalf("built %d downloaders, HLS %d; want the no-JS pair alone", len(*built), len(hls.seen))
+					if want := map[bool]int{true: 4, false: 2}[tc.split]; len(*built) != want || len(hls.seen) != 0 {
+						t.Fatalf("built %d downloaders, HLS %d; want %d and no HLS", len(*built), len(hls.seen), want)
 					}
-					for _, opts := range *built {
+					for _, opts := range switched {
 						if filepath.Dir(opts.OutputFile) != newPart {
 							t.Errorf("a switched downloader writes %s, want into %s", opts.OutputFile, newPart)
 						}
@@ -188,6 +272,22 @@ func TestLiveRefreshFailingOnTheChallengesSwitchesPathInANewPart(t *testing.T) {
 					if logLine(logs, "[Cipher] live: a refresh failed on the player's JS challenges and no split pair") == nil {
 						t.Errorf("no Warn naming the HLS switch: %v", logs.lines())
 					}
+				case "none":
+					if len(hls.seen) != 0 || len(*built) != 0 {
+						t.Fatalf("HLS handed %d time(s), %d DASH downloaders built; want no switch", len(hls.seen), len(*built))
+					}
+					if !jobCtx.Run.first("live-switch:hls") {
+						t.Error("the run's one HLS switch was spent on a failure a switch does not answer")
+					}
+				}
+				// The part the capture stopped in is muxed as its own part
+				// whenever the new downloaders record into another.
+				wantMux := 0
+				if tc.staged && tc.wantPath != "none" {
+					wantMux = 1
+				}
+				if n := len(logLines(muxLogs, func(m string) bool { return m == "failed to mux quality segment" })); n != wantMux {
+					t.Errorf("part muxes run = %d, want %d", n, wantMux)
 				}
 				for name, body := range staged {
 					got, err := os.ReadFile(filepath.Join(root, name))

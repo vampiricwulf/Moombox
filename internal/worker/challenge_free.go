@@ -392,18 +392,39 @@ func noJSFromStart(ctx context.Context, job *JobContext, info *youtube.VideoInfo
 	return result, nil
 }
 
+// errNoJSReExtractFailed is noJSSetup's answer when no split pair is left
+// and the cookieless re-extract that should have added one failed — one
+// network error, a brief outage — so nothing says the chain has no pair to
+// give. Not errNoChallengeFreePair: a capture on the no-JS path that read
+// this as "no pair left" spent its one HLS switch, and left a healthy no-JS
+// path for good, over a fetch the live loop's still-live retries
+// (refreshWhileLive) would have got past. liveSwitchWanted refuses it.
+var errNoJSReExtractFailed = errors.New("no split pair that needs no player JS is in the extraction, and the cookieless re-extract for one failed")
+
 // noJSSetup is the manifest-free setup on the formats in info that need no
 // player JS, and the cookieless chain's (challengeFreeFormats over rx), on a
 // copy of info: noJSFromStart's, and every refresh's of a capture already on
 // that path (refreshDownload) — a fresh extraction ranks the copies that need
 // the JS first, and a refresh of the whole pool picked one, failed on it, and
 // sent the capture through a path switch it did not need. errNoChallengeFreePair
-// when no split pair is left; the setup's own error otherwise. cause is why the
-// formats that need the JS are dropped, for the log; tag names the setup.
+// when no split pair is left; errNoJSReExtractFailed, wrapping the fetch's
+// error, when none is left because the re-extract failed; the setup's own
+// error otherwise. cause is why the formats that need the JS are dropped, for
+// the log; tag names the setup.
+//
+// yt-dlp's live-from-start refresh (`_prepare_live_from_start_formats`'s
+// url_feed, _video.py:1948-1984) re-extracts and keeps the format with the
+// same `_itag` and the same `_client`; this re-selects among the no-JS
+// copies instead, so it may pick another itag or client than the one
+// recording, and streamIdentityChanged then splits the part rather than
+// append one rendition's fragments under the other's init segment.
 func noJSSetup(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps, rx *cookielessReExtract, cause error, tag string) (*DownloadResult, error) {
 	cf := *info
 	cf.Formats = challengeFreeFormats(ctx, job, info.Formats, rx, cause, tag)
 	if !HasManifestlessDashFormats(cf.Formats) {
+		if rx.done && rx.err != nil {
+			return nil, fmt.Errorf("%w: %w", errNoJSReExtractFailed, rx.err)
+		}
 		return nil, errNoChallengeFreePair
 	}
 	result, err := ManifestlessDashStrategy.Download(ctx, job, &cf, deps)
@@ -462,14 +483,27 @@ func switchLivePath(ctx context.Context, job *JobContext, info *youtube.VideoInf
 	return nil, "", fmt.Errorf("%w: %w", errNoLivePathLeft, cause)
 }
 
-// liveSwitchWanted reports whether a mid-stream refresh's error is one a
-// path switch answers (switchLivePath): a systemic failure on the player's JS
-// challenges (setupFailedOnChallenges), or a no-JS refresh with no split
-// pair left (errNoChallengeFreePair). Only for a capture that is not HLS:
-// an HLS capture's master is answered by the cookieless chain already
-// (challengeFreeHlsInfo), and there is no path after it.
-func liveSwitchWanted(err error, isHls bool) bool {
-	return !isHls && (setupFailedOnChallenges(err) || errors.Is(err, errNoChallengeFreePair))
+// liveSwitchWanted reports whether a mid-stream refresh over info that failed
+// with err is one a path switch answers (switchLivePath): a systemic failure
+// on the player's JS challenges (setupFailedOnChallenges), or a no-JS
+// refresh with no split pair left (errNoChallengeFreePair). Only for a
+// capture that is not HLS: an HLS capture's master is answered by the
+// cookieless chain already (challengeFreeHlsInfo), and there is no path
+// after it.
+//
+// Never for a refresh that failed for a reason a switch does not answer,
+// though its error may read like one, since each switch is spent once a run
+// and a switched capture never goes back: an extraction with no formats at
+// all — the interruption signature (live, zero formats; interruptionSignal),
+// which no path can record from and the resume wait is for, though a no-JS
+// refresh of it finds "no pair" — and a no-JS refresh whose cookieless
+// re-extract failed (errNoJSReExtractFailed), which the still-live retries
+// get past. Both are handled as any other failed refresh.
+func liveSwitchWanted(info *youtube.VideoInfo, err error, isHls bool) bool {
+	if isHls || info == nil || len(info.Formats) == 0 || errors.Is(err, errNoJSReExtractFailed) {
+		return false
+	}
+	return setupFailedOnChallenges(err) || errors.Is(err, errNoChallengeFreePair)
 }
 
 // liveHlsInstead is either live arm of setupOrFallback: hls's setup for the
