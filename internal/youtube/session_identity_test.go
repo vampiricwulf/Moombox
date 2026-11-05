@@ -187,3 +187,32 @@ func TestBrowseCarriesTheAccountsSession(t *testing.T) {
 		t.Errorf("after the account switch X-Goog-PageId = %q, want none", got)
 	}
 }
+
+// ChatSessionHeaders is the probes' session (probeYtcfg) as identity headers,
+// read at call time: account a's while the jar holds a, nothing once the jar
+// holds another account, and nothing on a Service with no player API.
+//
+// Mutants: ChatSessionHeaders returning accountSessionHeaders of a bare
+// DefaultYtcfg; caching the first answer; the nil-PlayerAPI guard dropped.
+func TestChatSessionHeadersFollowTheJarsAccount(t *testing.T) {
+	jar, path := loadAccountJar(t, accountCookies("a"))
+	s := NewService(jar, noopLogger{})
+	idx := 2
+	s.PlayerAPI.captureVisitorData(&YtcfgData{SessionIndex: &idx, DelegatedSessionID: "brand-a"}, jar.YouTubeIdentity())
+	got := s.ChatSessionHeaders()
+	if got["X-Goog-AuthUser"] != "2" || got["X-Goog-PageId"] != "brand-a" {
+		t.Errorf("chat session headers = %v, want X-Goog-AuthUser 2, X-Goog-PageId brand-a", got)
+	}
+	if err := os.WriteFile(path, []byte(accountCookies("bb")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Auth.SyncCookies(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ChatSessionHeaders(); len(got) != 0 {
+		t.Errorf("after the account switch chat session headers = %v, want none", got)
+	}
+	if got := (&Service{}).ChatSessionHeaders(); len(got) != 0 {
+		t.Errorf("a Service with no player API answered %v, want none", got)
+	}
+}

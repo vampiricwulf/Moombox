@@ -103,7 +103,17 @@ type ChatAPI struct {
 	// language itself.
 	pageCookieHeader func() string
 	generateAuth     func() string // Returns Authorization header (SAPISIDHASH) for authenticated requests
-	client           *http.Client
+	// sessionHeaders returns the signed-in account's identity headers —
+	// X-Goog-AuthUser, and X-Goog-PageId for a brand account — re-read per
+	// chat API request like cookieHeader (youtube.Service.ChatSessionHeaders,
+	// whose comment says why it is not the page's session snapshotted). nil,
+	// or an empty map, sends none.
+	sessionHeaders func() map[string]string
+	// visitorData is the visitor data clientContext carries, sent again as
+	// X-Goog-Visitor-Id on every chat API request, as yt-dlp's
+	// generate_api_headers does (_base.py:986). "" sends no header.
+	visitorData string
+	client      *http.Client
 	// clientContext is the constant Innertube "context" object (client info +
 	// visitorData), built once and reused for every poll. Live chat polls the
 	// same endpoint every ~5s for hours; rebuilding + re-marshaling this nested
@@ -176,6 +186,7 @@ func NewChatAPI(apiKey, visitorData string, cookieHeader func() string) *ChatAPI
 	return &ChatAPI{
 		apiKey:        apiKey,
 		cookieHeader:  cookieHeader,
+		visitorData:   visitorData,
 		client:        httpx.Client(chatHTTPTimeout),
 		clientContext: map[string]any{"client": client},
 	}
@@ -302,6 +313,26 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 		if auth := api.generateAuth(); auth != "" {
 			req.Header.Set("Authorization", auth)
 			req.Header.Set("X-Origin", youtubeBase)
+		}
+	}
+	// The Innertube headers yt-dlp's live chat downloader sends on every
+	// get_live_chat(_replay) POST (downloader/youtube_live_chat.py:179,
+	// generate_api_headers, _base.py:980-999): the client the context names,
+	// the visitor data it carries, and the signed-in account's identity. The
+	// last is what a members-only chat on a brand account or a second login
+	// needs: without X-Goog-PageId and X-Goog-AuthUser the poll is judged as
+	// the primary account, and refused or answered without the members'
+	// messages.
+	req.Header.Set("X-YouTube-Client-Name", constants.WebClient.ClientID)
+	req.Header.Set("X-YouTube-Client-Version", constants.WebClient.ClientVersion)
+	if api.visitorData != "" {
+		req.Header.Set("X-Goog-Visitor-Id", api.visitorData)
+	}
+	if api.sessionHeaders != nil {
+		for k, v := range api.sessionHeaders() {
+			if v != "" {
+				req.Header.Set(k, v)
+			}
 		}
 	}
 

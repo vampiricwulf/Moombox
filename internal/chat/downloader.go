@@ -130,6 +130,11 @@ type ChatDownloaderOptions struct {
 	IsLiveOrUpcoming    bool
 	StreamStartTime     string
 	ResumeFile          string
+
+	// SessionHeaders returns the signed-in account's identity headers
+	// (X-Goog-AuthUser, X-Goog-PageId), re-read per chat API request
+	// (youtube.Service.ChatSessionHeaders). nil sends none.
+	SessionHeaders func() map[string]string
 }
 
 // ChatDownloader downloads YouTube live chat messages.
@@ -389,6 +394,7 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 	api := NewChatAPI(opts.ApiKey, opts.VisitorData, opts.CookieHeader)
 	api.pageCookieHeader = opts.PageCookieHeader
 	api.generateAuth = opts.GenerateAuth
+	api.sessionHeaders = opts.SessionHeaders
 
 	resumeFileAuto := false
 	if opts.ResumeFile == "" {
