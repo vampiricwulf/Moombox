@@ -93,6 +93,18 @@ func (tr *ageGateTransport) embeddedCalls() []embeddedCall {
 	return append([]embeddedCall(nil), tr.embedded...)
 }
 
+// flagged counts the web_embedded calls that carried the embed page's flags:
+// the age-gate retry's.
+func (tr *ageGateTransport) flagged() int {
+	n := 0
+	for _, c := range tr.embeddedCalls() {
+		if strings.Contains(c.body, embedPageFlags) {
+			n++
+		}
+	}
+	return n
+}
+
 func serveAgeGate(t *testing.T, answers map[string]ageGateAnswer) *ageGateTransport {
 	t.Helper()
 	tr := &ageGateTransport{answers: answers}
@@ -167,6 +179,114 @@ func TestEmbedPageIsFetchedFromTheEmbeddingHost(t *testing.T) {
 			}
 			if !strings.Contains(calls[0].body, `"encryptedHostFlags":"`+embedPageFlags+`"`) {
 				t.Errorf("player call carries not the embed page's flags: %s", calls[0].body)
+			}
+		})
+	}
+}
+
+// TestAgeGateRetryWhenTVFailsAtTheHTTPLevel is G29 (owner decision D24):
+// the web_embedded age-gate retry, encryptedHostFlags and all, fires on TV's
+// verdict and, when TV failed at the HTTP level, on the watch page's — or,
+// on the authenticated cascade, the web client's. It used to be keyed on TV
+// alone, so a TV refused with a 403 left the age-gated video to the
+// cookieless chain, which cannot serve one, and the extraction returned the
+// watch page's age-restricted parse. And TV's verdict stays final when TV
+// answered: a TV that serves the formats is not second-guessed by the watch
+// page's gate.
+//
+// Here every client but the ones a row names is refused 403, and
+// web_embedded passes the gate only with the embed page's flags.
+//
+// Mutants: the retry keyed on TV alone again (the three "TV failed" rows
+// return the age-restricted parse, no flagged call); the tvFailed guard
+// dropped from ageGateRetryWitness (the "TV answered" row makes a flagged
+// call); the web witness left out of the authenticated cascade (the "web
+// says" row); the public cascade passing tvFailed false (the public "TV
+// failed" row).
+func TestAgeGateRetryWhenTVFailsAtTheHTTPLevel(t *testing.T) {
+	tvOK := map[string]ageGateAnswer{constants.TVSamsungClient.ClientID: {status: http.StatusOK, body: adequateOKBody}}
+	webGated := map[string]ageGateAnswer{constants.WebClient.ClientID: {status: http.StatusOK, body: ageRestrictedBody}}
+	for _, tc := range []struct {
+		name        string
+		public      bool
+		watchPage   string // the page's player response; "" for none
+		answers     map[string]ageGateAnswer
+		wantFlagged int
+		wantPlay    PlayabilityError
+	}{
+		{name: "public: TV failed, the watch page says age-gated", public: true,
+			watchPage: ageRestrictedBody, wantFlagged: 1, wantPlay: PlayabilityOK},
+		{name: "authenticated: TV failed, the watch page says age-gated",
+			watchPage: ageRestrictedBody, wantFlagged: 1, wantPlay: PlayabilityOK},
+		{name: "authenticated: TV failed, the web client says age-gated",
+			answers: webGated, wantFlagged: 1, wantPlay: PlayabilityOK},
+		{name: "public: TV answered with formats, the watch page's gate does not overrule it", public: true,
+			watchPage: ageRestrictedBody, answers: tvOK, wantFlagged: 0, wantPlay: PlayabilityOK},
+		{name: "public: TV failed and nothing says age-gated", public: true,
+			wantFlagged: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serveEmbedPage(t)
+			tr := serveAgeGate(t, tc.answers)
+			if tc.watchPage != "" {
+				stubWatchPageWithPlayerResponse(t, tc.watchPage)
+			} else {
+				stubWatchPage(t)
+			}
+			p := newRetryTestAPI()
+			var info *VideoInfo
+			var err error
+			if tc.public {
+				info, err = p.GetVideoInfoPublic(context.Background(), "test1234567")
+			} else {
+				info, err = p.GetVideoInfoAuthenticated(context.Background(), "test1234567")
+			}
+			if got := tr.flagged(); got != tc.wantFlagged {
+				t.Errorf("web_embedded calls with the embed page's flags = %d, want %d", got, tc.wantFlagged)
+			}
+			if tc.wantPlay == "" {
+				return // nothing answered: the error is finishExtraction's, pinned elsewhere
+			}
+			if err != nil {
+				t.Fatalf("extraction: %v", err)
+			}
+			if info.PlayabilityError != tc.wantPlay {
+				t.Errorf("playability = %q, want %q", info.PlayabilityError, tc.wantPlay)
+			}
+			if len(info.Formats) == 0 {
+				t.Error("no formats: the gate was not passed")
+			}
+		})
+	}
+}
+
+// TestAgeGateRetryWitness pins the witness order and its log labels: TV's
+// verdict first; the others only when TV failed, the first age-gated one
+// named; nil answers skipped.
+//
+// Mutants: the others consulted while TV answered; a nil info dereferenced
+// (panics); the last witness named instead of the first.
+func TestAgeGateRetryWitness(t *testing.T) {
+	gated := &VideoInfo{PlayabilityError: PlayabilityAgeRestricted}
+	ok := &VideoInfo{PlayabilityError: PlayabilityOK}
+	empty := &VideoInfo{}
+	for _, tc := range []struct {
+		name     string
+		tv       *VideoInfo
+		tvFailed bool
+		others   []ageGateWitness
+		want     string
+	}{
+		{name: "TV says it", tv: gated, others: []ageGateWitness{{"watch_page", gated}}, want: "tv"},
+		{name: "TV answered otherwise", tv: ok, others: []ageGateWitness{{"watch_page", gated}}, want: ""},
+		{name: "TV failed, the page says it", tv: empty, tvFailed: true,
+			others: []ageGateWitness{{"watch_page", nil}, {"web_safari", gated}, {"web", gated}}, want: "web_safari"},
+		{name: "TV failed, nobody says it", tv: empty, tvFailed: true,
+			others: []ageGateWitness{{"watch_page", ok}, {"web", nil}}, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ageGateRetryWitness(tc.tv, tc.tvFailed, tc.others...); got != tc.want {
+				t.Errorf("ageGateRetryWitness = %q, want %q", got, tc.want)
 			}
 		})
 	}
