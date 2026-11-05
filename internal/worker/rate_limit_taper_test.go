@@ -12,23 +12,28 @@ import (
 
 // The waiting loop's taper (rateLimitConfirmTaper, rate_limit.go): a go-live
 // confirmation YouTube refused is made again 2, 5, 10 and 20 minutes after
-// each refusal of a spell, then every half hour, at those instants exactly.
+// the spell's first refused one, then every half hour, at those instants
+// exactly.
 
 // TestRateLimitedConfirmationTapers drives the loop through two spells. The
-// first refuses seven confirmations, made 2, 5, 10, 20, 30 and 30 minutes
-// apart — at those instants, not on the first 30 s probe past them — until
+// first refuses seven confirmations, made at +2, +5, +10 and +20 minutes from
+// the first refusal, then half an hour apart — 2, 3, 5, 10, 30 and 30 minutes
+// apart, at those instants, not on the first 30 s probe past them — until
 // the probe reads the stream upcoming again; a periodic full fetch then
 // answers, which ends the spell; and the second spell's confirmations start
 // the taper over, from two minutes, until the one past the limit goes live.
 // One backlog hold a spell. Before, every refused confirmation waited a flat
 // half hour: a stream that had just gone live waited thirty minutes on a
-// limit that lifted in two, its opening lost where it had no DVR window.
+// limit that lifted in two, its opening lost where it had no DVR window; and
+// then the taper was read as gaps between refusals (+2, +7, +17, +37), where
+// the owner's reading counts it from the first (FA's first follow-up).
 //
 // Mutants: hold every confirmation for rateLimitRetryInterval — the gaps are
-// 30 minutes; count the refusal after picking its hold — the first gap is
-// 30; drop the probe timer's cut to the hold's end — the gaps run a probe
-// over; keep the count through an answer — the second spell's first gap is
-// 30 minutes.
+// 30 minutes; read the taper as gaps (hold the n-th refusal's entry) — the
+// gaps are 2, 5, 10, 20; anchor the taper at each refusal rather than the
+// first — likewise; drop the probe timer's cut to the hold's end — the gaps
+// run a probe over; keep the anchor through an answer — the second spell's
+// first gap is 30 minutes.
 func TestRateLimitedConfirmationTapers(t *testing.T) {
 	m := time.Minute
 	live := func(at time.Duration) bool { return at >= 3*m && at < 110*m || at >= 150*m }
@@ -44,7 +49,7 @@ func TestRateLimitedConfirmationTapers(t *testing.T) {
 				switch {
 				case at >= 125*m && at < 150*m:
 					return upcomingAnswer(start), nil // the periodic fetch answers
-				case at >= 180*m:
+				case at >= 170*m:
 					return liveAnswer(start), nil // the limit is over
 				}
 				return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedOut), nil
@@ -70,8 +75,8 @@ func TestRateLimitedConfirmationTapers(t *testing.T) {
 		from, to int
 		want     []time.Duration
 	}{
-		{"first spell", 0, 6, []time.Duration{2 * m, 5 * m, 10 * m, 20 * m, 30 * m, 30 * m}},
-		{"second spell", 9, 13, []time.Duration{2 * m, 5 * m, 10 * m, 20 * m}},
+		{"first spell", 0, 6, []time.Duration{2 * m, 3 * m, 5 * m, 10 * m, 30 * m, 30 * m}},
+		{"second spell", 9, 13, []time.Duration{2 * m, 3 * m, 5 * m, 10 * m}},
 	} {
 		got := gaps(spell.from, spell.to)
 		for i := range spell.want {
@@ -201,9 +206,10 @@ func membersArmProbe(at time.Duration) (*youtube.VideoInfo, error) {
 // Retry-After a floor on each hold, and the default arm's full fetch, which
 // confirms a stream the cookied probe cannot read, refused with the verdict
 // reading upcoming or live, with a 429, or with a captcha. Each is made again
-// 2, 5 and 10 minutes after the refusals of its spell — the one after those
-// answers and the stream downloads — with one backlog hold a spell, the
-// wait's line cleared at the answer, and a captcha told the operator once.
+// 2, 5 and 10 minutes after the first refusal of its spell — the one after
+// those answers and the stream downloads — with one backlog hold a spell, the
+// wait's line cleared at the answer, and a captcha told the operator once,
+// and told it cleared once.
 // The 429 went the way of a blip, and the default arm was left out of the
 // rules: both sent the whole cascade into the limit on every 30 s probe,
 // holding nothing and bounded by nothing, and the default arm wrote Live on
@@ -212,7 +218,7 @@ func membersArmProbe(at time.Duration) (*youtube.VideoInfo, error) {
 //
 // Mutants: drop noteFetchErr from the live arm, from the VOD arm, or from
 // the default arm — that row confirms on every probe, with no hold; drop the
-// Retry-After floor — the floored row's first gap is 2 minutes; drop noteFetch
+// Retry-After floor — the floored row's gaps are 2, 3 and 5 minutes; drop noteFetch
 // from the default arm — its verdict rows confirm on every probe, the live
 // one downloads on the first refusal; drop its confirmationHeld gate — every
 // probe confirms.
@@ -229,29 +235,29 @@ func TestEveryConfirmationRefusalTapers(t *testing.T) {
 	}{
 		{name: "live arm, a 429", status: liveFrom3m(liveAnswer),
 			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
-			answer:  liveAnswer, gaps: []time.Duration{2 * m, 5 * m, 10 * m}},
+			answer:  liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m}},
 		{name: "live arm, a 429 asking for 4 minutes", status: liveFrom3m(liveAnswer),
 			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(4 * m) },
-			answer:  liveAnswer, gaps: []time.Duration{4 * m, 5 * m, 10 * m}},
+			answer:  liveAnswer, gaps: []time.Duration{4 * m, 4 * m, 4 * m}},
 		{name: "VOD arm, a 429", status: liveFrom3m(vodAnswer),
 			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
-			answer:  vodAnswer, gaps: []time.Duration{2 * m, 5 * m, 10 * m}},
+			answer:  vodAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m}},
 		{name: "default arm, the verdict reading upcoming", signedIn: true, status: membersStatus,
 			refusal: func() (*youtube.VideoInfo, error) {
 				return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedIn), nil
 			},
-			answer: liveAnswer, gaps: []time.Duration{2 * m, 5 * m, 10 * m}},
+			answer: liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m}},
 		{name: "default arm, the verdict reading live", signedIn: true, status: membersStatus,
 			refusal: func() (*youtube.VideoInfo, error) {
 				return rateLimitedInfo(youtube.StreamLive, youtube.SessionAuthLoggedIn), nil
 			},
-			answer: liveAnswer, gaps: []time.Duration{2 * m, 5 * m, 10 * m}},
+			answer: liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m}},
 		{name: "default arm, a 429", signedIn: true, status: membersStatus,
 			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
-			answer:  liveAnswer, gaps: []time.Duration{2 * m, 5 * m, 10 * m}},
+			answer:  liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m}},
 		{name: "default arm, a captcha", signedIn: true, status: membersStatus,
 			refusal: func() (*youtube.VideoInfo, error) { return captchaInfo(), nil },
-			answer:  liveAnswer, gaps: []time.Duration{2 * m, 5 * m, 10 * m}, captcha: true},
+			answer:  liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m}, captcha: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -304,8 +310,11 @@ func TestEveryConfirmationRefusalTapers(t *testing.T) {
 			if tc.captcha {
 				want = 1
 			}
-			if n := len(run.rec.ByEvent("captcha_required")); n != want {
+			if n := captchaSends(run.rec, captchaRequiredTitle); n != want {
 				t.Errorf("%d captcha notifications, want %d", n, want)
+			}
+			if n := captchaSends(run.rec, captchaClearedTitle); n != want {
+				t.Errorf("%d captcha-cleared notifications once the confirmation answered, want %d", n, want)
 			}
 		})
 	}
@@ -356,7 +365,7 @@ func TestABlippedConfirmationIsNoRefusal(t *testing.T) {
 	if len(fulls) != 2 || run.result == nil || !run.result.ShouldDownload {
 		t.Fatalf("full fetches at %v, result %+v; want the blip and the download on the next probe; calls:%s", fulls, run.result, run)
 	}
-	if gap := fulls[1] - fulls[0]; gap >= confirmationHoldAfter(1) {
+	if gap := fulls[1] - fulls[0]; gap >= confirmationHoldAfter(0) {
 		t.Errorf("the confirmation after the blip came %s later, want the next probe's", gap)
 	}
 	if n := run.count("hold"); n != 0 {

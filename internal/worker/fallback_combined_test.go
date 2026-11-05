@@ -100,9 +100,16 @@ func TestExecuteWithChatSetsTheDashCaptureAsideForEitherHlsFallback(t *testing.T
 				}
 			}
 			jobCtx := &JobContext{Job: job, DB: db, Config: &JobConfig{}, StagingDir: dir, Logger: rec}
+			// Formats that need the player JS (an n), and no service to ask
+			// the cookieless chain with: the challenge arm's no-JS from-start
+			// path has no pair, so it records HLS
+			// (TestLiveChallengeFailureRecordsFromStartWithoutJS has the pair).
+			v, a := adaptiveVideo(), adaptiveAudio()
+			v.URL += "&n=" + nChal
+			a.URL += "&n=" + nChal
 			info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer,
 				HlsManifestURL: "https://manifest.googlevideo.com/api/manifest/hls_variant/id/abc/file/index.m3u8", HlsManifestSource: "tv_public",
-				Formats: []youtube.Format{adaptiveVideo(), adaptiveAudio()}}
+				Formats: []youtube.Format{v, a}}
 
 			if err := w.orchestrator.ExecuteWithChat(ctx, jobCtx, info, false, nil); !errors.Is(err, context.Canceled) {
 				t.Fatalf("ExecuteWithChat = %v, want the cancel the HLS setup made", err)

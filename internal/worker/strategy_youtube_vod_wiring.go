@@ -363,6 +363,18 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, st *v
 			"jobID", job.Job.ID, "tag", tag, "err", err)
 		return keep()
 	}
+	// The cookieless chain is asked at most once a refresh, by whichever of
+	// the two lookups below needs it first.
+	var extra []youtube.Format
+	var rxErr error
+	rxAsked := false
+	cookieless := func() ([]youtube.Format, error) {
+		if !rxAsked {
+			rxAsked = true
+			extra, rxErr = fetchCookielessFormats(job.YT, refreshCtx, job.Job.VideoID)
+		}
+		return extra, rxErr
+	}
 	var f *youtube.Format
 	if step == 2 {
 		f = vodFileCopy(fresh.Formats, &served, true)
@@ -380,12 +392,40 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, st *v
 		// fetch needs no merge into the pool to be searched. A stream that
 		// needs a token cannot come from that chain, so its refresh does not
 		// ask it.
-		extra, rxErr := fetchCookielessFormats(job.YT, refreshCtx, job.Job.VideoID)
-		if rxErr != nil {
+		if extra, rxErr := cookieless(); rxErr != nil {
 			job.Logger.Warn("[POT] VOD URL refresh: cookieless re-extract failed",
 				"jobID", job.Job.ID, "tag", tag, "err", rxErr)
 		} else {
 			f = sameVodFile(extra, &served)
+		}
+	}
+	// A stream riding a copy that needs no player JS — visionos's, the copy
+	// the challenge-free fallback or the JS-less ranking served — stays on
+	// one (the owner's decision on W8's second follow-up). A fresh copy that
+	// needs the JS — a tv winner's, with an n to solve — is the file the
+	// refresh found because the fresh extraction ranked it first, and while
+	// the challenges cannot be solved its resolve fails and the refusal
+	// stands, the download stopping partway on a stream a cookieless client
+	// would still have served. So the cookieless chain's copy of the same
+	// file (same itag, track and length, of the class the refresh settled
+	// on) is taken first; the fresh copy that needs the JS is kept only when
+	// the chain has none, and then rides on solving working. A fresh copy
+	// that needs no JS is taken as it is, with no extra fetch: either answer
+	// keeps the stream JS-free. yt-dlp has no refresh, but every extraction
+	// it makes keeps the copy whose challenges need no answer
+	// (_video.py:3557-3581, "if not n_result: continue"), and this is that
+	// rule on the refresh's extraction.
+	if f != nil && !served.NeedsPlayerJS() && f.NeedsPlayerJS() {
+		if extra, rxErr := cookieless(); rxErr != nil {
+			job.Logger.Warn("[Cipher] VOD URL refresh: the fresh copy of this no-JS stream needs the player JS, and the cookieless re-extract failed — trying it",
+				"jobID", job.Job.ID, "tag", tag, "itag", served.Itag, "source", f.Source, "err", rxErr)
+		} else if c := vodFileCopy(extra, &served, youtube.GvsTokenRequired(f.Source)); c != nil && !c.NeedsPlayerJS() {
+			job.Logger.Info("[Cipher] VOD URL refresh: the fresh copy needs the player JS — keeping this stream on the cookieless chain's copy, which needs none",
+				"jobID", job.Job.ID, "tag", tag, "itag", served.Itag, "freshSource", f.Source, "source", c.Source)
+			f = c
+		} else {
+			job.Logger.Info("[Cipher] VOD URL refresh: no copy of the same file that needs no player JS — the fresh copy rides on solving",
+				"jobID", job.Job.ID, "tag", tag, "itag", served.Itag, "source", f.Source)
 		}
 	}
 	if f == nil {

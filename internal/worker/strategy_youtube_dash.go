@@ -296,6 +296,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		audioStream = SelectBestDashStream(streamInfos, audioItag, 0, false, "", false)
 	}
 	warnUnhonouredPins(job, videoItag, videoStream, audioItag, audioStream)
+	warnDamagedManifestPins(job, videoInfo, videoStream, audioStream)
 
 	// DASH requires both video and audio streams (matching TS), unless user explicitly excluded one
 	if videoStream == nil && videoItag != -1 {
@@ -439,4 +440,41 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	}
 
 	return result, nil
+}
+
+// warnDamagedManifestPins is warnDamagedPins for the DASH-manifest path: one
+// Warn for each manual itag the job pinned (Job.SelectedVideoItag,
+// SelectedAudioItag — the operator's pin, not the config default) that the
+// manifest honoured, video or audio — the selection's stream is that itag —
+// and whose copy in videoInfo.Formats is damaged (youtube.Format.Damaged,
+// under half the video's length): "Manual video itag N is possibly damaged
+// (shorter than the video); recording it as pinned". The manifest's
+// Representation carries no length to judge, so the verdict is read off the
+// player response's own copy of the itag, of the pin's kind, which the
+// extraction marked. The owner's decision on the picker's second follow-up
+// was not limited to the whole-file path (PK2's leftover, the integrator's
+// call), and this path honours a damaged pin as that one does; upstream has
+// no pin to honour (warnDamagedPins). Logged once per job run (JobContext.Run):
+// every mid-stream refresh sets the strategy up again (refreshDownload), and
+// a line per refresh would repeat what the first one said.
+func warnDamagedManifestPins(job *JobContext, videoInfo *youtube.VideoInfo, video, audio *DashStreamInfo) {
+	for _, pin := range []struct {
+		kind   string
+		itag   *int
+		stream *DashStreamInfo
+	}{{"video", job.Job.SelectedVideoItag, video}, {"audio", job.Job.SelectedAudioItag, audio}} {
+		if pin.itag == nil || *pin.itag <= 0 || pin.stream == nil || pin.stream.Itag != *pin.itag {
+			continue
+		}
+		for i := range videoInfo.Formats {
+			f := &videoInfo.Formats[i]
+			if f.Itag != *pin.itag || !strings.Contains(f.MimeType, pin.kind) {
+				continue
+			}
+			if f.Damaged && job.Run.first(fmt.Sprintf("damaged-pin:%s:%d", pin.kind, *pin.itag)) {
+				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual %s itag %d is possibly damaged (shorter than the video); recording it as pinned", pin.kind, *pin.itag))
+			}
+			break
+		}
+	}
 }
