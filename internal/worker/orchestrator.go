@@ -353,6 +353,13 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		"hasHls", videoInfo.HlsManifestURL != "",
 		"formatCount", len(videoInfo.Formats),
 		"strategy", strategy.Kind())
+	if videoInfo.JSLess {
+		// yt-dlp's own warning when it extracts without a JS runtime
+		// (_video.py:2994-3000): the extraction ranked visionos first, and
+		// the renditions only a JS-solving client serves are not there.
+		jobCtx.Logger.Warn("[Cipher] the cipher sidecar is disabled or not running — YouTube formats were ranked for a download without player JS (visionos first), and some formats may be missing",
+			"jobID", jobCtx.Job.ID)
+	}
 	deps := &StrategyDeps{
 		CipherSolver:       o.cipherSolver,
 		RoutedCipherSolver: o.routedCipher,
@@ -396,23 +403,12 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		strategyCtx.AudioStartSeq = aSeed
 	}
 
-	result, err = strategy.Download(ctx, strategyCtx, videoInfo, deps)
-	if fallback := missingPotFallback(strategy, videoInfo, err); fallback != nil && ctx.Err() == nil {
-		// A live stream whose web-family streams need a GVS token none could
-		// be minted for: its HLS manifest is recorded instead, from the live
-		// edge (missingPotFallback). The failed setup built no downloader, so
-		// the restart seeds are still unused. A job cancelled meanwhile —
-		// whose mint the cancel may be the failure of — sets up nothing more.
-		jobCtx.Logger.Warn("[POT] missing_pot: no GVS token for the "+strategy.Kind()+" streams — recording the HLS stream from the live edge instead",
-			"jobID", jobCtx.Job.ID, "err", err)
-		setupErr := err
-		strategy = fallback
-		result, err = strategy.Download(ctx, strategyCtx, videoInfo, deps)
-		if err != nil {
-			// Both causes: why HLS ran, and why it could not either.
-			err = fmt.Errorf("%w; the live HLS fallback failed too: %w", setupErr, err)
-		}
-	}
+	// The setup, and the one ExecuteWithChat falls to when it fails for want
+	// of a GVS token or on the player's JS challenges (setupWithFallback): a
+	// live capture records its HLS playlist instead, a post-live manifest-free
+	// one runs again on the formats that need no player JS. A job cancelled
+	// meanwhile sets up nothing more.
+	result, err = setupWithFallback(ctx, strategyCtx, strategy, isVod, videoInfo, deps)
 
 	// The restart seeds are single-use — the initial downloaders above
 	// consumed them. Later refreshDownload call sites manage these fields

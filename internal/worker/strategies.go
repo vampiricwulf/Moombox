@@ -723,16 +723,20 @@ func strategyGvsToken(ctx context.Context, p *bgutils.PotProvider, videoInfo *yo
 // an HLS manifest. The web family's HLS policy is recommended, not required
 // (_base.py:85-88): upstream records that HLS bare when no token can be had,
 // and so does DownloadHls — the visionos and tv masters need none at all. So
-// a capture that yt-dlp would record from HLS is recorded from HLS, from the
-// live edge, instead of failing; a VOD or post-live setup has no live HLS to
-// fall to, and fails with the missing_pot cause. Only the first setup falls
-// back: a mid-stream refresh (refreshDownload) keeps the strategy the
-// capture runs on, and a refresh that cannot set it up fails as a refresh.
+// a capture that yt-dlp would record from HLS is recorded from HLS — from
+// the oldest segment the playlist's window holds, as any HLS capture records
+// — instead of failing; a VOD or post-live setup has no live HLS to fall to,
+// and fails with the missing_pot cause. The strategy is read by its kind, as
+// setupOrFallback's challenge arm reads it. Only the first setup falls back
+// (setupWithFallback, ExecuteWithChat's one fallback site, which sets an
+// earlier capture of the other shape aside first): a mid-stream refresh
+// (refreshDownload) keeps the strategy the capture runs on, and a refresh
+// that cannot set it up fails as a refresh.
 func missingPotFallback(strategy DownloadStrategy, info *youtube.VideoInfo, err error) DownloadStrategy {
 	if !errors.Is(err, errMissingPot) || info == nil || info.StreamStatus != youtube.StreamLive || info.HlsManifestURL == "" {
 		return nil
 	}
-	if strategy != ManifestlessDashStrategy && strategy != DashStrategy {
+	if k := strategy.Kind(); k != ManifestlessDashStrategy.Kind() && k != DashStrategy.Kind() {
 		return nil
 	}
 	return HlsStrategy

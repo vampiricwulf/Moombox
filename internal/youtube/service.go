@@ -269,6 +269,17 @@ func (s *Service) CookielessFormats(ctx context.Context, videoID string) ([]Form
 	return s.PlayerAPI.CookielessFormats(ctx, videoID, vd)
 }
 
+// CookielessHlsManifest asks the cookieless clients (visionos, then
+// android_vr) for a live HLS master playlist that needs no player JS — the
+// worker's challenge-free live fallback; see PlayerAPI.CookielessHlsManifest.
+// Uses cached visitor data the way CookielessFormats does.
+func (s *Service) CookielessHlsManifest(ctx context.Context, videoID string) (manifestURL, source string, err error) {
+	s.vdMu.RLock()
+	vd := s.visitorData
+	s.vdMu.RUnlock()
+	return s.PlayerAPI.CookielessHlsManifest(ctx, videoID, vd)
+}
+
 // ProbeVideoDate fetches only a video's publish date via one WEB-family player
 // call, carrying whatever credentials the jar holds — see
 // PlayerAPI.ProbeVideoDate. The date-completing half of the monitors'

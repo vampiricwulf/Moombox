@@ -929,6 +929,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// (RoutedCipherSolver below): sig flows through the sidecar's V8 ejs, and
 	// n falls back to goja if the sidecar is unavailable.
 	ytService.PlayerAPI.SetCipherSolver(gojaSolver)
+	// While the sidecar is disabled or down no signature can be solved, and
+	// an extraction ranks the JS-less client (visionos) first, as yt-dlp
+	// asks _DEFAULT_JSLESS_CLIENTS with no JS runtime (audit G10, owner
+	// decision 4). The composite's own health accessor answers it.
+	ytService.PlayerAPI.SetJSChallengeSolvable(cipherSolver.SidecarReady)
 
 	// Wire PO token provider into Innertube player requests (audit youtube.md C1).
 	ytService.PlayerAPI.SetPotProvider(potProvider)

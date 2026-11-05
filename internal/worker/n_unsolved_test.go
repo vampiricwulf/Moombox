@@ -320,31 +320,56 @@ func TestResolveFreshDashURLHandsBackOnlyASolvedURL(t *testing.T) {
 
 // TestVodAndManifestFreeTreatAnUnsolvedNAsAResolveFailure: the strategies
 // that resolve a chosen format's URL treat an n no solver answered as that
-// format's resolve failure, cipher.ErrNUnsolved kept in the error (the
-// systemic-failure fallback, audit W8, classifies on it). They used to be
-// handed the URL with its n as YouTube sent it, and no error.
+// format's resolve failure, cipher.ErrNUnsolved kept in the error. They used
+// to be handed the URL with its n as YouTube sent it, and no error. Every
+// format of a player shares its n function, so the failure is systemic
+// (audit G10): it comes back at once, marked errChallengesUnsolvable for the
+// challenge-free fallback, without the single-itag re-selection — the solver
+// is asked once.
 //
-// resolveManifestlessStream gives up two ways once the broken itag is
-// excluded — no candidate left at all, or candidates left of which the
-// re-selection picks none (here an audio rendition, for a video stream) — and
-// each keeps the resolve error.
+// resolveManifestlessStream's two give-ups for a failure that is NOT
+// systemic — no candidate left once the broken itag is excluded, or
+// candidates left of which the re-selection picks none (here an audio
+// rendition, for a video stream) — each keep the resolve error: a signature
+// the routed solver failed with an error of its own, the sidecar up.
 //
 // Mutants: cipher's routed n failure back to a Warn and the URL as it came
-// (every row resolves); either of resolveManifestlessStream's give-ups
-// dropping the resolve error (that give-up's row's errors.Is fails).
+// (the n rows resolve); either of resolveManifestlessStream's give-ups
+// dropping the resolve error (that give-up's row loses the solver's error);
+// the systemic check dropped from either strategy (the n rows ask the solver
+// twice, and lose errChallengesUnsolvable).
 func TestVodAndManifestFreeTreatAnUnsolvedNAsAResolveFailure(t *testing.T) {
-	routed, _ := nSolver(sentinelOf, nil)
+	routed, asked := nSolver(sentinelOf, nil)
 	w, h, fps := 1280, 720, 30
 	video := youtube.Format{Itag: 302, URL: "https://r1.googlevideo.com/videoplayback?itag=302&n=" + nChal,
 		MimeType: `video/webm; codecs="vp9"`, Bitrate: 2_000_000, Width: &w, Height: &h, Fps: &fps, Source: "tv_auth"}
+	other := video
+	other.Itag, other.URL = 303, "https://r1.googlevideo.com/videoplayback?itag=303&n="+nChal
 
 	job, _ := vodPotJob(t)
 	result := &DownloadResult{HasVideo: true, VideoFormat: &video}
-	if v, a, err := resolveVodURLs(context.Background(), job, result, []youtube.Format{video}, nil, nil, routed, nil, nPlayer); !errors.Is(err, cipher.ErrNUnsolved) {
-		t.Errorf("resolveVodURLs = %q, %q, %v; want a resolve failure carrying cipher.ErrNUnsolved", v, a, err)
+	v, a, err := resolveVodURLs(context.Background(), job, result, []youtube.Format{video, other}, nil, nil, routed, nil, nPlayer)
+	if !errors.Is(err, cipher.ErrNUnsolved) || !errors.Is(err, errChallengesUnsolvable) {
+		t.Errorf("resolveVodURLs = %q, %q, %v; want a resolve failure carrying cipher.ErrNUnsolved, marked errChallengesUnsolvable", v, a, err)
+	}
+	if n := asked.Load(); n != 1 {
+		t.Errorf("resolveVodURLs asked the solver %d times, want 1: a systemic failure is not re-selected around", n)
 	}
 
 	cand := DashStreamInfo{Itag: 302, MimeType: video.MimeType, Width: w, Height: h, FPS: fps, Bandwidth: video.Bitrate}
+	cand2 := DashStreamInfo{Itag: 303, MimeType: video.MimeType, Width: w, Height: h, FPS: fps, Bandwidth: video.Bitrate - 1}
+	asked.Store(0)
+	u, _, err := resolveManifestlessStream(context.Background(), []youtube.Format{video, other}, []DashStreamInfo{cand, cand2}, &cand,
+		0, 0, true, "", false, routed, nil, nPlayer, map[int]bool{}, &discardLogger{})
+	if !errors.Is(err, cipher.ErrNUnsolved) || !errors.Is(err, errChallengesUnsolvable) {
+		t.Errorf("resolveManifestlessStream = %q, %v; want cipher.ErrNUnsolved, marked errChallengesUnsolvable", u, err)
+	}
+	if n := asked.Load(); n != 1 {
+		t.Errorf("resolveManifestlessStream asked the solver %d times, want 1: a systemic failure is not re-selected around", n)
+	}
+
+	signed := video
+	signed.URL, signed.EncryptedSig = "https://r1.googlevideo.com/videoplayback?itag=302", "SIGNATURE"
 	audio := DashStreamInfo{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`, Bandwidth: 128_000}
 	for _, tc := range []struct {
 		name       string
@@ -354,10 +379,10 @@ func TestVodAndManifestFreeTreatAnUnsolvedNAsAResolveFailure(t *testing.T) {
 		{"no candidate left", []DashStreamInfo{cand}, "no remaining candidates"},
 		{"none the re-selection takes", []DashStreamInfo{cand, audio}, "re-selection produced no candidate"},
 	} {
-		u, _, err := resolveManifestlessStream(context.Background(), []youtube.Format{video}, tc.candidates, &cand,
+		u, _, err := resolveManifestlessStream(context.Background(), []youtube.Format{signed}, tc.candidates, &cand,
 			0, 0, true, "", false, routed, nil, nPlayer, map[int]bool{}, &discardLogger{})
-		if !errors.Is(err, cipher.ErrNUnsolved) || !strings.Contains(fmt.Sprint(err), tc.giveUp) {
-			t.Errorf("resolveManifestlessStream, %s = %q, %v; want the %q give-up carrying cipher.ErrNUnsolved", tc.name, u, err, tc.giveUp)
+		if msg := fmt.Sprint(err); !strings.Contains(msg, tc.giveUp) || !strings.Contains(msg, "Sig not implemented") || errors.Is(err, errChallengesUnsolvable) {
+			t.Errorf("resolveManifestlessStream, %s = %q, %v; want the %q give-up carrying the solver's own error, unmarked", tc.name, u, err, tc.giveUp)
 		}
 	}
 }

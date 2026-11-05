@@ -633,19 +633,6 @@ func TestMissingPotFallback(t *testing.T) {
 	}
 }
 
-// fakeStrategy is a DownloadStrategy that records its call and answers err.
-type fakeStrategy struct {
-	kind  string
-	calls atomic.Int32
-	err   error
-}
-
-func (f *fakeStrategy) Kind() string { return f.kind }
-func (f *fakeStrategy) Download(context.Context, *JobContext, *youtube.VideoInfo, *StrategyDeps) (*DownloadResult, error) {
-	f.calls.Add(1)
-	return nil, f.err
-}
-
 // TestExecuteWithChatFallsToHlsOnMissingPot pins the orchestrator's half of
 // the live missing_pot fallback: ExecuteWithChat's first setup, failing with
 // errMissingPot on a live stream that carries an HLS manifest, runs the HLS
@@ -661,15 +648,15 @@ func TestExecuteWithChatFallsToHlsOnMissingPot(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		cancelled bool
-		wantHls   int32
+		wantHls   int
 	}{
 		{name: "a live stream falls to HLS", wantHls: 1},
 		{name: "a cancelled job does not", cancelled: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hlsErr := errors.New("hls ran")
-			mf := &fakeStrategy{kind: "manifestless_dash", err: errors.Join(errMissingPot, errors.New("sidecar down"))}
-			hls := &fakeStrategy{kind: "hls", err: hlsErr}
+			mf := &fakeStrategy{kind: "manifestless_dash", answers: []error{errors.Join(errMissingPot, errors.New("sidecar down"))}}
+			hls := &fakeStrategy{kind: "hls", answers: []error{hlsErr}}
 			origMF, origHLS := ManifestlessDashStrategy, HlsStrategy
 			ManifestlessDashStrategy, HlsStrategy = mf, hls
 			t.Cleanup(func() { ManifestlessDashStrategy, HlsStrategy = origMF, origHLS })
@@ -690,8 +677,8 @@ func TestExecuteWithChatFallsToHlsOnMissingPot(t *testing.T) {
 			}
 
 			err := w.orchestrator.ExecuteWithChat(ctx, jobCtx, info, false, nil)
-			if mf.calls.Load() != 1 || hls.calls.Load() != tc.wantHls {
-				t.Fatalf("manifest-free ran %d, HLS %d times; want 1 and %d", mf.calls.Load(), hls.calls.Load(), tc.wantHls)
+			if len(mf.seen) != 1 || len(hls.seen) != tc.wantHls {
+				t.Fatalf("manifest-free ran %d, HLS %d times; want 1 and %d", len(mf.seen), len(hls.seen), tc.wantHls)
 			}
 			if !errors.Is(err, errMissingPot) {
 				t.Errorf("err = %v, want one naming the manifest-free setup's missing_pot", err)

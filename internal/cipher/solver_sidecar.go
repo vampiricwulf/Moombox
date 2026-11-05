@@ -286,5 +286,15 @@ func (s *sidecarSolver) Batch(ctx context.Context, playerID string, sigs, ns []s
 	return res.SigResults, res.NResults, nil
 }
 
+// ready reports whether the sidecar this solver asks is up, for the
+// composite's SidecarReady and its typed sig failure (readinessReporter): its
+// client's IsHealthy, which *sidecar.Sidecar flips false the moment the
+// child dies or a write stalls and true again once a restart is up. A
+// client that cannot say — the test fakes — is taken as up.
+func (s *sidecarSolver) ready() bool {
+	h, ok := s.client.(interface{ IsHealthy() bool })
+	return !ok || h.IsHealthy()
+}
+
 // Compile-time check: sidecarSolver satisfies cipher.Solver.
 var _ Solver = (*sidecarSolver)(nil)
