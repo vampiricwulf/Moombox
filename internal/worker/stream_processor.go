@@ -62,6 +62,10 @@ type StreamProcessResult struct {
 	TwitchVariant        *twitch.TwitchHLSVariant
 	TwitchChatDownloader *twitch.ChatDownloader
 	TwitchVodChatDl      *twitch.VodChatDownloader
+	// TwitchVodRecording marks a Twitch VOD that VideoMetadata reported still
+	// recording (twitch.TwitchVodInfo.IsRecording) when the job was set up:
+	// its thumbnail and length are re-read once the download ends.
+	TwitchVodRecording bool
 }
 
 // AsError converts the result's failure into an error, preserving the

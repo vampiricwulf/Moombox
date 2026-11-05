@@ -1100,6 +1100,9 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 					return variants, err
 				}
 			}
+			if result.IsVod && w.tw != nil {
+				wireTwitchVodInfo(variant, job, result, w.tw.GetVodInfo)
+			}
 			// Determine which Twitch chat downloader to use
 			var twitchChat ChatSource
 			if result.TwitchChatDownloader != nil {
