@@ -114,6 +114,18 @@ func probeWithRetry(ctx context.Context, probe func(ctx context.Context, seq int
 // exception is noteHeadSeqFromResponse, which is harmless and correct here
 // too — GVS attaches X-Head-Seqnum to every response, success or error.
 func (d *SegmentDownloader) ProbeSegmentAvailable(parent context.Context, seq int) (bool, []byte, error) {
+	status, body, err := d.probeSegment(parent, seq)
+	if err != nil || status >= 400 {
+		return false, nil, err
+	}
+	return true, body, nil
+}
+
+// probeSegment is ProbeSegmentAvailable with the status code: the one GET,
+// its answer's status and — for a status below 400 — its body, capped as
+// above. The refused-segment rule (downloader_dash.go) needs the status
+// itself: only a 410 says a segment is evicted, as fetchInitSegment reads it.
+func (d *SegmentDownloader) probeSegment(parent context.Context, seq int) (int, []byte, error) {
 	ctx, cancel := context.WithTimeout(parent, SegmentTimeout)
 	defer cancel()
 
@@ -121,7 +133,7 @@ func (d *SegmentDownloader) ProbeSegmentAvailable(parent context.Context, seq in
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, segURL, nil)
 	if err != nil {
-		return false, nil, redact.MediaError(err)
+		return 0, nil, redact.MediaError(err)
 	}
 	d.setCommonHeaders(req, uaWeb)
 
@@ -131,7 +143,7 @@ func (d *SegmentDownloader) ProbeSegmentAvailable(parent context.Context, seq in
 		// A transport error embeds the request URL, which carries the
 		// PO token, the client's IP and the URL's signature; the
 		// orchestrator logs this error at Warn.
-		return false, nil, redact.MediaError(err)
+		return 0, nil, redact.MediaError(err)
 	}
 	reportSuccess("engine/fetch")
 	defer resp.Body.Close()
@@ -140,10 +152,10 @@ func (d *SegmentDownloader) ProbeSegmentAvailable(parent context.Context, seq in
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, probeSegmentMaxBodyBytes))
 	if err != nil {
-		return false, nil, err
+		return 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
-		return false, nil, nil
+		return resp.StatusCode, nil, nil
 	}
-	return true, body, nil
+	return resp.StatusCode, body, nil
 }

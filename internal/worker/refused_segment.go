@@ -1,6 +1,10 @@
 package worker
 
-import "github.com/vampiricwulf/Moombox/internal/engine"
+import (
+	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/engine"
+)
 
 // sameSeqRebuildCap is how many times the live loop rebuilds a YouTube DASH
 // capture at the same sequence before it stops: owner decision D8 of the
@@ -27,15 +31,19 @@ import "github.com/vampiricwulf/Moombox/internal/engine"
 // budget instead.
 const sameSeqRebuildCap = 3
 
-// seqRun counts consecutive rebuilds of one stream at one sequence.
-type seqRun struct{ seq, count int }
+// seqRun counts consecutive rebuilds of one stream at one sequence, and
+// when the first of them was.
+type seqRun struct {
+	seq, count int
+	since      time.Time
+}
 
 // note records a rebuild at seq and returns how many in a row were at it.
 func (r *seqRun) note(seq int) int {
 	if r.count > 0 && r.seq == seq {
 		r.count++
 	} else {
-		r.seq, r.count = seq, 1
+		r.seq, r.count, r.since = seq, 1, time.Now()
 	}
 	return r.count
 }
@@ -67,10 +75,10 @@ func (s *sameSeqRebuilds) note(res *DownloadResult) int {
 // it is harmless.
 func (s *sameSeqRebuilds) arm(res *DownloadResult) {
 	if s.video.count >= sameSeqRebuildCap && res.VideoDownloader != nil {
-		res.VideoDownloader.NoteRebuildsExhausted(s.video.seq)
+		res.VideoDownloader.NoteRebuildsExhausted(s.video.seq, s.video.since)
 	}
 	if s.audio.count >= sameSeqRebuildCap && res.AudioDownloader != nil {
-		res.AudioDownloader.NoteRebuildsExhausted(s.audio.seq)
+		res.AudioDownloader.NoteRebuildsExhausted(s.audio.seq, s.audio.since)
 	}
 }
 

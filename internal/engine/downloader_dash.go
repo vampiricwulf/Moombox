@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -18,6 +20,11 @@ var errStreamDone = errors.New("stream done")
 // the refused sequence in place (currentSeq is already past it and its gap
 // row recorded), and the loop carries on with fresh per-segment retry state.
 var errSegmentSkipped = errors.New("segment skipped")
+
+// errNotRefused is refuseSegment declining: no later segment is served
+// either, so the failure is not one segment's, and the caller's ordinary
+// handling goes on. Never leaves the package.
+var errNotRefused = errors.New("not a refused segment")
 
 // Retry state thresholds and delays for the DASH error handler chain.
 // All named here so grep-for-literal tuning is unambiguous.
@@ -139,6 +146,18 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 	// that count moved on is the "failed again after fresh credentials" the
 	// rule waits for.
 	stuckSeq, stuckRenewals := -1, int64(0)
+	// afterSkip runs once refuseSegment has skipped a sequence in place. The
+	// next sequence starts with fresh per-segment retry state, and — as
+	// moonarchive sets `last_seq_auth_expiry = cur_seq` after a skip, "to
+	// avoid multiple player requests on sequential 403s" — counts as already
+	// asked on fresh credentials: a 403 there meets the rule at once, so a
+	// run of refused sequences is walked in one pass instead of one refresh,
+	// or one rebuild, per sequence. Each step still needs a later segment
+	// served (refuseSegment), so a refusal of everything stops the walk.
+	afterSkip := func() {
+		stuckSeq, stuckRenewals = int(d.currentSeq.Load()), d.credentialRenewals.Load()-1
+		consecutiveGoneErrors, sameSegRetries = 0, 0
+	}
 
 	// Backoff-sleep cap for at-edge retries (fixed). The operator knob is now
 	// MaxTimeout (config.MaximumTimeout) — how long to keep waiting/verifying
@@ -249,14 +268,21 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 			} else if statusCode == 403 && d.credentialRenewals.Load() > stuckRenewals && d.refusable(failedSeq) {
 				herr := d.refuseSegment(ctx, failedSeq)
 				if herr == errSegmentSkipped {
+					afterSkip()
 					continue
 				}
-				return herr
+				if herr != errNotRefused {
+					return herr
+				}
+				// Not one segment's refusal: handled as before, and asked
+				// again only after the next fresh credentials.
+				stuckRenewals = d.credentialRenewals.Load()
 			}
 			herr := d.handleDashError(ctx, statusCode, err, &consecutiveGoneErrors, hasStartedDownloading,
 				&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, delayCap)
 			if herr == errSegmentSkipped {
-				continue // refuseSegment moved past the hole
+				afterSkip() // refuseSegment moved past the hole
+				continue
 			}
 			if herr == errStreamDone {
 				return nil // Clean exit
@@ -292,7 +318,8 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 			herr := d.handleHTTPError(ctx, hasStartedDownloading, &sameSegRetries, &lastRetrySeq,
 				&sameHeadRetryDelay, &lastConfirmedHead, delayCap)
 			if herr == errSegmentSkipped {
-				continue // refuseSegment moved past the hole
+				afterSkip() // refuseSegment moved past the hole
+				continue
 			}
 			if herr == errStreamDone {
 				return nil
@@ -540,7 +567,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 			case checkErr != nil:
 				d.logger.Warn("stream status check failed; deferring end verdict", "err", checkErr)
 			case !ended:
-				return d.handBackForRebuild(ctx)
+				return d.handBackForRebuild(ctx, true)
 			default:
 				d.streamEndVerified = true
 				verdictKnown = true
@@ -743,10 +770,12 @@ func (d *SegmentDownloader) finalizeBehindHead() bool {
 	return false
 }
 
-// refusable reports whether the refused-segment rule may act on seq: the
+// refusable reports whether the refused-segment rule may consider seq: the
 // caller can close a part there (SplitOnRefusedSegment), data is already in
 // the file — before the first byte the first-segment hunt owns refusals —
-// seq is not sq=0, and the head is more than two segments past it.
+// seq is not sq=0, and the tracked head is more than two segments past it.
+// It is the cheap gate; refuseSegment confirms the head on a served segment
+// before it gives anything up (laterSegmentServed).
 //
 // The head bound is moonarchive's (`max_seq - 2 > cur_seq`, _dash.py): it
 // gives up only on a segment the edge has demonstrably moved well past,
@@ -759,6 +788,17 @@ func (d *SegmentDownloader) finalizeBehindHead() bool {
 func (d *SegmentDownloader) refusable(seq int) bool {
 	return d.SplitOnRefusedSegment && d.bytesWritten.Load() > 0 && seq > 0 &&
 		d.headSeq.Load()-2 > int64(seq)
+}
+
+// noteServedHeadSeq advances servedHeadSeq to n when greater (monotonic
+// max, as noteHeadSeq): the head a served segment response reported.
+func (d *SegmentDownloader) noteServedHeadSeq(n int) {
+	for {
+		cur := d.servedHeadSeq.Load()
+		if int64(n) <= cur || d.servedHeadSeq.CompareAndSwap(cur, int64(n)) {
+			return
+		}
+	}
 }
 
 // refuseSegment acts on a segment YouTube keeps refusing although later ones
@@ -776,6 +816,16 @@ func (d *SegmentDownloader) refusable(seq int) bool {
 // rest of the broadcast, recording nothing after the hole (2026-10-31 audit,
 // G15).
 //
+// It goes beyond moonarchive in one check before it gives anything up: a
+// later segment must actually be served now (laterSegmentServed). moonarchive
+// skips on its head bound alone, so a refusal of EVERY segment — a PO token
+// or an address YouTube stopped accepting, which no fresh player response
+// mends — walks its capture forward one dropped segment at a time while it
+// lasts. Here such a refusal is not a refused segment: refuseSegment
+// declines (errNotRefused) and the caller's old handling — retries, the
+// stream-status check, the live loop's rebuild — goes on holding the hole
+// until the stream serves again.
+//
 // It goes beyond both upstreams in what it does with the hole, by owner
 // decision D8: the part is CLOSED there and the next one starts past it with
 // its own init, so every file stays internally gapless — the shape Twitch's
@@ -787,13 +837,20 @@ func (d *SegmentDownloader) refusable(seq int) bool {
 // segment is skipped in place, as the upstreams skip it: the file goes on
 // past a hole, its fMP4 fragments carrying their own decode times (tfdt),
 // with a gap row for the missing sequence (errSegmentSkipped). A file that
-// holds its init and no media yet — a part that a split has just opened,
-// refused at its very first segment — is skipped in place too: there is no
-// part to close, and the file stays gapless from its first fragment. Closing
-// it would have opened one init-only part per refused sequence of a run.
+// holds its init and no media yet (holdsNoMedia) — a part that a split has
+// just opened, refused at its very first segment — is skipped in place too:
+// there is no part to close, and the file stays gapless from its first
+// fragment. Closing it would have opened one init-only part per refused
+// sequence of a run.
 func (d *SegmentDownloader) refuseSegment(ctx context.Context, seq int) error {
-	head := d.headSeq.Load()
-	initOnly := d.bytesWritten.Load() <= d.partInitBytes
+	served, later := d.laterSegmentServed(ctx)
+	head := d.servedHeadSeq.Load()
+	if !served || head-2 <= int64(seq) {
+		d.logger.Warn("[Downloader] segment refused again on fresh credentials, but no later segment is served well past it — not giving it up",
+			"seq", seq, "probedSeq", later, "served", served, "servedHeadSeq", head)
+		return errNotRefused
+	}
+	initOnly := d.holdsNoMedia()
 	if !initOnly && !d.newPartInitEvicted(ctx) {
 		d.logger.Warn("[Downloader] segment refused again on fresh credentials while later segments are served — closing the part at it",
 			"seq", seq, "headSeq", head)
@@ -812,20 +869,75 @@ func (d *SegmentDownloader) refuseSegment(ctx context.Context, seq int) error {
 	return errSegmentSkipped
 }
 
+// laterSegmentServed probes the segment just below the tracked head — past
+// the hole, past any run of refused sequences after it, and below the head,
+// so it should exist — and reports whether it is served now (a 2xx with a
+// body), with the sequence it asked. refusable has already put that
+// sequence at least two past the hole. Served, its response also records
+// the head refuseSegment then measures the hole against (servedHeadSeq): the
+// rule's bound always rests on a served segment's X-Head-Seqnum, as
+// moonarchive's max_seq does, never on a refusal's.
+func (d *SegmentDownloader) laterSegmentServed(ctx context.Context) (bool, int) {
+	later := int(d.headSeq.Load()) - 1
+	status, body, err := d.probeSegment(ctx, later)
+	return err == nil && status < 300 && len(body) > 0, later
+}
+
+// holdsNoMedia reports whether the output file holds no media fragment yet:
+// its top-level boxes are the init alone, no moof or mdat among them. It is
+// read from the file, not remembered from Start, because the live loop
+// rebuilds a part in place — a fresh downloader appending to the same file —
+// and that downloader never wrote the init it finds there. A file it cannot
+// read as boxes counts as holding media, so D8's default, the split, stands.
+func (d *SegmentDownloader) holdsNoMedia() bool {
+	f, err := os.Open(d.opts.OutputFile)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	size := d.bytesWritten.Load()
+	wk := &fmp4Walker{r: f, size: size}
+	for pos := int64(0); pos < size; {
+		b, err := wk.readBox(pos)
+		if err != nil || b.pastEOF {
+			return false
+		}
+		switch b.typ {
+		case "moof", "mdat":
+			return false
+		}
+		pos = b.end()
+	}
+	return true
+}
+
 // newPartInitEvicted reports whether a part started past the hole could not
 // get its init: the stream keeps it only inline in sq=0, and sq=0 answers
-// with a refusal. A transport error is not an answer — the new part's own
-// init fetch retries those (fetchInitSegment) — so it reads as "not
-// evicted", and D8's default, the split, stands. A stream whose init is a
-// manifest Initialization is never asked: that URL is not a segment the edge
-// evicts.
+// 410 — evicted, the one answer fetchInitSegment (downloader_init.go) also
+// reads as gone for good. Any other answer is not eviction: a 403 is the
+// refusal the new part's init ladder refreshes credentials for, a 429 or a
+// 5xx is transient, and a transport error is no answer at all — so each
+// reads as "not evicted", and D8's default, the split, stands. A stream whose
+// init is a manifest Initialization is never asked: that URL is not a
+// segment the edge evicts.
 func (d *SegmentDownloader) newPartInitEvicted(ctx context.Context) bool {
 	if !d.opts.InitInlineAtStart && !d.opts.InitFromSegment {
 		return false
 	}
-	available, _, err := d.ProbeSegmentAvailable(ctx, 0)
-	return err == nil && !available
+	status, _, err := d.probeSegment(ctx, 0)
+	return err == nil && status == http.StatusGone
 }
+
+// unservedSegmentPersistence is how long a segment that only FAILS — a 5xx,
+// an empty body — must have kept failing since the live loop's first rebuild
+// at it before a rebuild-exhausted downloader gives it up
+// (handBackForRebuild). A 403 or a 410 is a refusal and is given up at the
+// cap; a server error says the server failed, not that the segment is
+// refused, and the cap's three rebuilds take about two minutes, short enough
+// for a googlevideo 5xx burst to outlast. Ten minutes is DefaultMaxTimeout,
+// the budget the DASH loop already gives a failing segment below the head
+// of an ended stream.
+const unservedSegmentPersistence = 10 * time.Minute
 
 // handBackForRebuild is what the error handlers return where a still-live
 // stream's segment below the head will not come: ErrQualityLost, the request
@@ -835,10 +947,19 @@ func (d *SegmentDownloader) newPartInitEvicted(ctx context.Context) bool {
 // instead: each of those rebuilds was a credential refresh, and the segment
 // failed again after every one. That is the path for a 410 or a 5xx, which
 // no in-loop refresh answers (the 403 rule in runDashLoop never sees them).
-func (d *SegmentDownloader) handBackForRebuild(ctx context.Context) error {
+// refused is the handler's verdict on the answer: a 403 or a 410 is taken
+// at once, anything else only once it has persisted for
+// unservedSegmentPersistence.
+func (d *SegmentDownloader) handBackForRebuild(ctx context.Context, refused bool) error {
 	seq := int(d.currentSeq.Load())
-	if int64(seq) == d.rebuildsExhaustedSeq.Load() && d.refusable(seq) {
-		return d.refuseSegment(ctx, seq)
+	if int64(seq) != d.rebuildsExhaustedSeq.Load() || !d.refusable(seq) {
+		return ErrQualityLost
+	}
+	if !refused && time.Since(d.rebuildsExhaustedSince) < unservedSegmentPersistence {
+		return ErrQualityLost
+	}
+	if err := d.refuseSegment(ctx, seq); err != errNotRefused {
+		return err
 	}
 	return ErrQualityLost
 }
@@ -964,7 +1085,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		} else if behindHead && hasStartedDownloading {
 			// Still live, but a segment we KNOW exists (curSeq < head) won't
 			// come — the format/URL likely rotated; refresh via ErrQualityLost.
-			return d.handBackForRebuild(ctx)
+			return d.handBackForRebuild(ctx, false)
 		}
 		// Still live and simply at the live edge — keep waiting for the next segment.
 	}
