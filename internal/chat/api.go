@@ -104,14 +104,15 @@ type ChatAPI struct {
 	pageCookieHeader func() string
 	generateAuth     func() string // Returns Authorization header (SAPISIDHASH) for authenticated requests
 	// sessionHeaders returns the signed-in account's identity headers —
-	// X-Goog-AuthUser, and X-Goog-PageId for a brand account — re-read per
+	// X-Goog-AuthUser, and X-Goog-PageId for a brand account — and
+	// X-Youtube-Bootstrap-Logged-In while the jar is signed in, re-read per
 	// chat API request like cookieHeader (youtube.Service.ChatSessionHeaders,
 	// whose comment says why it is not the page's session snapshotted). nil,
 	// or an empty map, sends none.
 	sessionHeaders func() map[string]string
 	// visitorData is the visitor data clientContext carries, sent again as
 	// X-Goog-Visitor-Id on every chat API request, as yt-dlp's
-	// generate_api_headers does (_base.py:986). "" sends no header.
+	// generate_api_headers does (_base.py:990). "" sends no header.
 	visitorData string
 	client      *http.Client
 	// clientContext is the constant Innertube "context" object (client info +
@@ -318,9 +319,9 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 	// The Innertube headers yt-dlp's live chat downloader sends on every
 	// get_live_chat(_replay) POST (downloader/youtube_live_chat.py:179,
 	// generate_api_headers, _base.py:980-999): the client the context names,
-	// the visitor data it carries, and the signed-in account's identity. The
-	// last is what a members-only chat on a brand account or a second login
-	// needs: without X-Goog-PageId and X-Goog-AuthUser the poll is judged as
+	// the visitor data it carries, the signed-in account's identity and the
+	// logged-in flag (sessionHeaders). The identity is what a members-only
+	// chat on a brand account or a second login needs: without X-Goog-PageId and X-Goog-AuthUser the poll is judged as
 	// the primary account, and refused or answered without the members'
 	// messages.
 	req.Header.Set("X-YouTube-Client-Name", constants.WebClient.ClientID)

@@ -412,11 +412,23 @@ func (s *Service) GetCookieHeader() string {
 // cookie import), after which the old account's page id names an account
 // the credentials no longer hold. Empty when there is no such session, or
 // no player API to keep one (a hand-built Service).
+//
+// With them goes X-Youtube-Bootstrap-Logged-In whenever the jar holds a
+// signed-in set, as GenerateAPIHeaders sends it on the player calls and
+// /browse: yt-dlp's _generate_cookie_auth_headers adds it when the ytcfg says
+// LOGGED_IN (_base.py:975-976), and generate_api_headers spreads that into
+// every chat poll's headers. It is read off the jar at call time like the
+// rest, so a capture whose cookies are removed mid-stream stops claiming a
+// login.
 func (s *Service) ChatSessionHeaders() map[string]string {
 	if s == nil || s.PlayerAPI == nil {
 		return nil
 	}
-	return accountSessionHeaders(s.PlayerAPI.probeYtcfg(""))
+	headers := accountSessionHeaders(s.PlayerAPI.probeYtcfg(""))
+	if s.Auth != nil && s.Auth.HasAuthCookies() {
+		headers["X-Youtube-Bootstrap-Logged-In"] = "true"
+	}
+	return headers
 }
 
 // GetFormats fetches available formats and returns them with best-selection info.

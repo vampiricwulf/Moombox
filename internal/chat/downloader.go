@@ -132,7 +132,8 @@ type ChatDownloaderOptions struct {
 	ResumeFile          string
 
 	// SessionHeaders returns the signed-in account's identity headers
-	// (X-Goog-AuthUser, X-Goog-PageId), re-read per chat API request
+	// (X-Goog-AuthUser, X-Goog-PageId) and X-Youtube-Bootstrap-Logged-In,
+	// re-read per chat API request
 	// (youtube.Service.ChatSessionHeaders). nil sends none.
 	SessionHeaders func() map[string]string
 }

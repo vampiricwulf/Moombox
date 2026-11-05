@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 // The datasync id splits as yt-dlp's _parse_data_sync_id splits it
@@ -209,10 +210,79 @@ func TestChatSessionHeadersFollowTheJarsAccount(t *testing.T) {
 	if err := s.Auth.SyncCookies(); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.ChatSessionHeaders(); len(got) != 0 {
-		t.Errorf("after the account switch chat session headers = %v, want none", got)
+	got = s.ChatSessionHeaders()
+	if _, ok := got["X-Goog-AuthUser"]; ok {
+		t.Errorf("after the account switch chat session headers = %v, want no X-Goog-AuthUser", got)
+	}
+	if _, ok := got["X-Goog-PageId"]; ok {
+		t.Errorf("after the account switch chat session headers = %v, want no X-Goog-PageId", got)
 	}
 	if got := (&Service{}).ChatSessionHeaders(); len(got) != 0 {
 		t.Errorf("a Service with no player API answered %v, want none", got)
+	}
+}
+
+// accountSessionHeaders keeps _generate_cookie_auth_headers' rule
+// (_base.py:960-978): X-Goog-PageId for a delegated session, X-Goog-AuthUser
+// whenever either id is named — the session index, else 0. The delegated-only
+// row is the shape a page that names its brand session only through its
+// datasync id ("D||U", no SESSION_INDEX) now yields, so it must still say
+// which login it is.
+//
+// Mutants: X-Goog-AuthUser only when SessionIndex is set (the delegated-only
+// row sends a page id with no AuthUser); X-Goog-AuthUser always sent (the
+// empty row); the index dropped for 0.
+func TestAccountSessionHeaders(t *testing.T) {
+	idx := 3
+	for _, tc := range []struct {
+		name  string
+		ytcfg *YtcfgData
+		want  map[string]string
+	}{
+		{"nil", nil, map[string]string{}},
+		{"empty", &YtcfgData{}, map[string]string{}},
+		{"session index only", &YtcfgData{SessionIndex: &idx}, map[string]string{"X-Goog-AuthUser": "3"}},
+		{"delegated only", &YtcfgData{DelegatedSessionID: "brand-d"}, map[string]string{"X-Goog-PageId": "brand-d", "X-Goog-AuthUser": "0"}},
+		{"both", &YtcfgData{SessionIndex: &idx, DelegatedSessionID: "brand-d"}, map[string]string{"X-Goog-PageId": "brand-d", "X-Goog-AuthUser": "3"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := accountSessionHeaders(tc.ytcfg)
+			if len(got) != len(tc.want) {
+				t.Fatalf("accountSessionHeaders = %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Errorf("accountSessionHeaders[%s] = %q, want %q (all: %v)", k, got[k], v, got)
+				}
+			}
+		})
+	}
+}
+
+// A chat poll says it is logged in while the jar holds a signed-in set, as
+// the player calls do (GenerateAPIHeaders) and as yt-dlp's
+// generate_api_headers does from the ytcfg's LOGGED_IN (_base.py:975-976) —
+// read at call time, so cookies removed mid-capture stop the claim, and an
+// anonymous install never makes it.
+//
+// Mutants: ChatSessionHeaders never setting X-Youtube-Bootstrap-Logged-In;
+// setting it unconditionally.
+func TestChatSessionHeadersSayLoggedInWhileTheJarIs(t *testing.T) {
+	jar, path := loadAccountJar(t, accountCookies("a"))
+	s := NewService(jar, noopLogger{})
+	if got := s.ChatSessionHeaders()["X-Youtube-Bootstrap-Logged-In"]; got != "true" {
+		t.Errorf("signed in: X-Youtube-Bootstrap-Logged-In = %q, want true", got)
+	}
+	if err := os.WriteFile(path, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Auth.SyncCookies(); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := s.ChatSessionHeaders()["X-Youtube-Bootstrap-Logged-In"]; ok {
+		t.Errorf("after the cookies were removed: X-Youtube-Bootstrap-Logged-In = %q, want absent", got)
+	}
+	if got, ok := NewService(cookies.NewCookieJar(), noopLogger{}).ChatSessionHeaders()["X-Youtube-Bootstrap-Logged-In"]; ok {
+		t.Errorf("anonymous: X-Youtube-Bootstrap-Logged-In = %q, want absent", got)
 	}
 }
