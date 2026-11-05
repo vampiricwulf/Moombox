@@ -774,3 +774,152 @@ func TestExecuteWithChatFallsToHlsOnMissingPot(t *testing.T) {
 		})
 	}
 }
+
+// TestVodMissingPotFallback pins owner decision 7 of wave FC: a VOD or
+// post-live DASH-manifest setup that failed with errMissingPot falls to the
+// stream's other formats — the manifest-free path for a post-live stream
+// with a manifest-free split, else the whole-file path for a pool holding a
+// format a whole-file GET can fetch — as upstream skips only the manifest
+// (_video.py:3746-3749) and keeps the rest. A live stream is
+// missingPotFallback's; another failure, another strategy, or a pool with
+// nothing either path can take falls to nothing.
+//
+// Mutants (each run): dropping the isVod test fails the row the
+// orchestrator calls live; dropping the StreamLive test fails the live
+// stream's row; dropping the errMissingPot test fails
+// the other-failure row; dropping the strategy test fails the
+// manifest-free-setup row; dropping the post-live arm fails the post-live
+// row (the whole-file path for live adaptive segments); dropping the
+// whole-file test fails the segments-only row.
+func TestVodMissingPotFallback(t *testing.T) {
+	missing := errors.Join(errMissingPot, errors.New("sidecar down"))
+	vod := func() *youtube.VideoInfo {
+		info := vodPotInfo("tv_public", "tv_public")
+		info.StreamStatus = youtube.StreamVOD
+		for i := range info.Formats {
+			info.Formats[i].ContentLength = "1000"
+		}
+		return info
+	}
+	postLive := func() *youtube.VideoInfo {
+		info := manifestlessPotInfo("tv_public", "tv_public")
+		info.StreamStatus = youtube.StreamPostLive
+		for i := range info.Formats {
+			info.Formats[i].TargetDurationSec = 5
+		}
+		return info
+	}
+	segmentsOnly := func() *youtube.VideoInfo {
+		info := postLive()
+		info.StreamStatus = youtube.StreamVOD
+		return info
+	}
+	live := func() *youtube.VideoInfo {
+		info := vod()
+		info.StreamStatus = youtube.StreamLive
+		return info
+	}
+	for _, tc := range []struct {
+		name     string
+		strategy DownloadStrategy
+		isVod    bool
+		info     *youtube.VideoInfo
+		err      error
+		want     DownloadStrategy
+	}{
+		{"a VOD with whole-file formats", DashStrategy, true, vod(), missing, VodStrategy},
+		{"a post-live stream with a manifest-free split", DashStrategy, true, postLive(), missing, ManifestlessDashStrategy},
+		{"segments only, not post-live", DashStrategy, true, segmentsOnly(), missing, nil},
+		{"a live capture is missingPotFallback's", DashStrategy, false, live(), missing, nil},
+		{"a setup the orchestrator calls live", DashStrategy, false, vod(), missing, nil},
+		{"a live stream however it is called", DashStrategy, true, live(), missing, nil},
+		{"another setup failure", DashStrategy, true, vod(), errors.New("DASH: fetch manifest: 503"), nil},
+		{"a manifest-free setup", ManifestlessDashStrategy, true, vod(), missing, nil},
+		{"no formats", DashStrategy, true, &youtube.VideoInfo{StreamStatus: youtube.StreamVOD}, missing, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := vodMissingPotFallback(tc.strategy, tc.isVod, tc.info, tc.err); got != tc.want {
+				t.Errorf("vodMissingPotFallback = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSetupFallsToOtherFormatsOnVodMissingPot is the setup half of owner
+// decision 7 of wave FC, end to end on the real strategies: a VOD whose
+// web-family DASH manifest needs a GVS token none could be minted (DownloadDash
+// skips it, errMissingPot) downloads its token-free whole files instead,
+// where the job used to fail; a whole-file path with nothing token-free
+// either fails with both causes joined; a job cancelled by then sets up
+// nothing more.
+//
+// Mutants (each run): dropping the fallback from setupOrFallback fails the
+// first row (the DASH setup's error); keeping only the fallback's error
+// fails the second row's errMissingPot-of-the-DASH-setup test; dropping the
+// cancel guard fails the third row (the whole-file path runs).
+func TestSetupFallsToOtherFormatsOnVodMissingPot(t *testing.T) {
+	sidecarDown := errors.New("sidecar down")
+	for _, tc := range []struct {
+		name      string
+		audio     string // the whole-file audio's client
+		video     string
+		cancelled bool
+		wantVideo string // the whole-file path's video source, "" for an error
+	}{
+		{name: "the token-free whole files are downloaded", video: "tv_public", audio: "tv_public", wantVideo: "tv_public"},
+		{name: "nothing token-free either: both causes", video: "web_creator", audio: "web_creator"},
+		{name: "a cancelled job sets up nothing more", video: "tv_public", audio: "tv_public", cancelled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := fakeVodMint(t, "", sidecarDown)
+			srv := newManifestServer(t, potTestMPD)
+			job, logs := vodPotJob(t)
+			info := vodPotInfo(tc.video, tc.audio)
+			info.StreamStatus = youtube.StreamVOD
+			for i := range info.Formats {
+				info.Formats[i].ContentLength = "1000"
+			}
+			info.DashManifestURL, info.DashManifestSource = srv.URL+"/api/manifest/dash/id/abc", "web_creator"
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			deps := &StrategyDeps{RoutedCipherSolver: stubCipherSolver{}, PotProvider: &bgutils.PotProvider{}}
+			if tc.cancelled {
+				// The DASH setup sees the cancel as its mint's own failure.
+				orig := mintGvsPoToken
+				mintGvsPoToken = func(context.Context, *bgutils.PotProvider, string) (string, error) {
+					cancel()
+					return "", sidecarDown
+				}
+				t.Cleanup(func() { mintGvsPoToken = orig })
+			}
+			res, err := setupWithFallback(ctx, job, DashStrategy, true, info, deps)
+			fell := logLine(logs, "[POT] missing_pot: no GVS token for the DASH manifest — downloading the vod formats instead") != nil
+			switch {
+			case tc.cancelled:
+				if !errors.Is(err, errMissingPot) || fell {
+					t.Errorf("setup = %v, fell back %v; want the DASH setup's missing_pot and no fallback", err, fell)
+				}
+			case tc.wantVideo == "":
+				if !fell || !errors.Is(err, errMissingPot) || !strings.Contains(err.Error(), "the vod fallback failed too") ||
+					!strings.Contains(err.Error(), "the web_creator manifest needs a GVS PO token") || !strings.Contains(err.Error(), "no formats usable without a GVS PO token") {
+					t.Errorf("setup = %v, fell back %v; want both causes joined", err, fell)
+				}
+			default:
+				if err != nil || res == nil || res.VideoFormat == nil || res.VideoFormat.Source != tc.wantVideo {
+					t.Fatalf("setup = %+v, %v; want the whole-file path's %s formats", res, err, tc.wantVideo)
+				}
+				if !fell {
+					t.Errorf("no fallback line: %v", logs.lines())
+				}
+				if n := calls.Load(); n != 1 {
+					t.Errorf("mint ran %d times, want 1 — the token-free files need none", n)
+				}
+			}
+			srv.mu.Lock()
+			defer srv.mu.Unlock()
+			if len(srv.paths) != 0 {
+				t.Errorf("manifest fetched %v, want it skipped", srv.paths)
+			}
+		})
+	}
+}

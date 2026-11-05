@@ -76,7 +76,8 @@ func resolveFreshDashURL(ctx context.Context, jobID string, routedSolver cipher.
 // downloads "may be throttled" (audit G9). So does a web-family manifest whose
 // GVS token is mandatory and could not be minted (errMissingPot, the mint
 // block below), which a live capture answers from its HLS manifest
-// (missingPotFallback).
+// (missingPotFallback) and a VOD or post-live stream from its other formats
+// (vodMissingPotFallback).
 func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
 	if videoInfo.DashManifestURL == "" {
 		return nil, fmt.Errorf("no DASH manifest URL available")
@@ -146,7 +147,8 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// not po_token` skip (_video.py:3746-3749), which a bare fetch earns as a
 	// 403 on every segment and a refresh budget spent re-minting against the
 	// same failure (audit G16). The setup fails with errMissingPot, and a live
-	// capture falls to its HLS manifest (missingPotFallback). A Premium
+	// capture falls to its HLS manifest (missingPotFallback), a VOD or
+	// post-live stream to its other formats (vodMissingPotFallback). A Premium
 	// session's manifest is only recommended a token (GvsTokenMandatory): it
 	// is fetched bare when none can be had, as upstream fetches it. A guessed
 	// binding counts as no token (D12), and a manifest has no token-free copy

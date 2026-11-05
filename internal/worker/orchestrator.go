@@ -405,9 +405,10 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	// The setup, and the one ExecuteWithChat falls to when it fails for want
 	// of a GVS token or on the player's JS challenges (setupWithFallback): a
-	// live capture records its HLS playlist instead, a post-live manifest-free
-	// one runs again on the formats that need no player JS. A job cancelled
-	// meanwhile sets up nothing more.
+	// live capture records its HLS playlist instead, a VOD or post-live DASH
+	// manifest with no token falls to the stream's other formats, a post-live
+	// manifest-free one runs again on the formats that need no player JS. A
+	// job cancelled meanwhile sets up nothing more.
 	result, err = setupWithFallback(ctx, strategyCtx, strategy, isVod, videoInfo, deps)
 
 	// The restart seeds are single-use — the initial downloaders above

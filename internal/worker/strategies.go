@@ -726,7 +726,7 @@ func strategyGvsToken(ctx context.Context, p *bgutils.PotProvider, videoInfo *yo
 // a capture that yt-dlp would record from HLS is recorded from HLS — from
 // the oldest segment the playlist's window holds, as any HLS capture records
 // — instead of failing; a VOD or post-live setup has no live HLS to fall to,
-// and fails with the missing_pot cause. The strategy is read by its kind, as
+// and falls to its other formats instead (vodMissingPotFallback). The strategy is read by its kind, as
 // setupOrFallback's challenge arm reads it. Only the first setup falls back
 // (setupWithFallback, ExecuteWithChat's one fallback site, which sets an
 // earlier capture of the other shape aside first): a mid-stream refresh
@@ -740,6 +740,41 @@ func missingPotFallback(strategy DownloadStrategy, info *youtube.VideoInfo, err 
 		return nil
 	}
 	return HlsStrategy
+}
+
+// vodMissingPotFallback is missingPotFallback's sibling for a stream that is
+// not live (owner decision, wave FC): the strategy a VOD or post-live
+// DASH-manifest setup that failed for want of a GVS token (errMissingPot —
+// the manifest's token is mandatory and none could be minted, its skip in
+// DownloadDash) falls to, or nil. yt-dlp skips only the manifest
+// (_video.py:3746-3749, yt-dlp 5b57b72c1, #13640) and keeps every other
+// format the responses listed, so a stream it would download from those is
+// downloaded from them here too:
+//
+//   - a post-live stream whose pool holds a manifest-free split
+//     (HasManifestlessDashFormats) records it from the start on the
+//     manifest-free path (ManifestlessDashStrategy);
+//   - otherwise a stream whose pool holds a format a whole-file GET can
+//     fetch (wholeFileVodPool) takes the whole-file path (VodStrategy).
+//
+// Each runs its own missing_pot degrade — the token-free copies, the
+// cookieless re-extract, D12's last resort — and fails with the missing_pot
+// cause when it has nothing either, which setupOrFallback joins to the DASH
+// setup's. A live stream is missingPotFallback's (its HLS manifest), and a
+// setup that failed for another reason, or any strategy but DASH, falls to
+// nothing here. A stream with no format either path can take fails as it
+// did, with the DASH setup's missing_pot cause.
+func vodMissingPotFallback(strategy DownloadStrategy, isVod bool, info *youtube.VideoInfo, err error) DownloadStrategy {
+	if !isVod || !errors.Is(err, errMissingPot) || info == nil || info.StreamStatus == youtube.StreamLive || strategy.Kind() != DashStrategy.Kind() {
+		return nil
+	}
+	if info.StreamStatus == youtube.StreamPostLive && HasManifestlessDashFormats(info.Formats) {
+		return ManifestlessDashStrategy
+	}
+	if pool, _ := wholeFileVodPool(info.Formats); len(pool) > 0 {
+		return VodStrategy
+	}
+	return nil
 }
 
 // tokenClassChanged reports whether a 403 refresh must NOT install the fresh
