@@ -77,7 +77,8 @@ func (a *Auth) PageCookieHeader() string {
 
 // ConsentCookieHeader is the consent and language cookies alone, for a
 // YouTube read made without the jar's session: the public cascade's watch
-// page, the embed page and the iframe API script. See
+// page, the embed page while the jar is not signed in
+// (PlayerAPI.embedPageCookieHeader) and the iframe API script. See
 // cookies.CookieJar.YouTubeConsentCookieHeader.
 func (a *Auth) ConsentCookieHeader() string {
 	return a.jar.YouTubeConsentCookieHeader()

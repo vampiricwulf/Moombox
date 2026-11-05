@@ -311,35 +311,6 @@ func TestHomepageIsFetchedWithThePageCookies(t *testing.T) {
 	}
 }
 
-// TestEmbedPageCarriesTheConsentCookies: the embed page web_embedded reads
-// encryptedHostFlags and a player URL off is fetched without the jar's
-// session, as it always was, but behind the same SOCS the watch page passes
-// the wall with — none of the signed-in jar's credentials.
-//
-// Mutants: FetchEmbedPage sending no Cookie (the request carries none); the
-// call site passing PageCookieHeader (SAPISID rides along, and no SOCS).
-func TestEmbedPageCarriesTheConsentCookies(t *testing.T) {
-	rec := &pageRecorder{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rec.note("embed", r.Header.Get("Cookie"))
-		_, _ = w.Write([]byte(`<html><script>ytcfg.set({"encryptedHostFlags":"ehf"});</script></html>`))
-	}))
-	t.Cleanup(srv.Close)
-	orig := constants.YouTubeURLs.Embed
-	constants.YouTubeURLs.Embed = srv.URL + "/embed"
-	t.Cleanup(func() { constants.YouTubeURLs.Embed = orig })
-	serveBodies(t, nil)
-
-	jar := loadCookieRows(t, "SAPISID", "sapisid-a", "LOGIN_INFO", "logininfo-a", "PREF", "hl=fr")
-	p := NewPlayerAPI(NewAuth(jar, noopLogger{}), noopLogger{})
-	if _, err := p.fetchWithEmbedded(context.Background(), "test1234567", DefaultYtcfg(), 0, true); err != nil {
-		t.Fatalf("fetchWithEmbedded: %v", err)
-	}
-	if got, want := rec.of("embed"), "PREF=hl=en&tz=UTC; SOCS=CAI"; len(got) != 1 || got[0] != want {
-		t.Errorf("embed page Cookie = %q, want one fetch with %q", got, want)
-	}
-}
-
 // TestIframeAPIPassesTheConsentWall: the player-URL fallback's iframe API
 // read (yt-dlp's _download_player_url) goes out behind the consent pair, as
 // upstream's goes out through its consented jar — SOCS=CAI for an empty jar,

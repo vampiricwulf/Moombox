@@ -488,6 +488,52 @@ func tvSaysWaitingRoom(result *VideoInfo) bool {
 	return result != nil && result.StreamStatus == StreamUpcoming && result.PlayabilityError == PlayabilityOK
 }
 
+// ageGateWitness is one answer an extraction holds that may say the video is
+// age-gated, under the label the age-gate retry's log line names it by.
+type ageGateWitness struct {
+	label string
+	info  *VideoInfo
+}
+
+// ageGateRetryWitness names what sends a cascade to its web_embedded
+// age-gate retry — "tv", or the label of the first of others that says
+// PlayabilityAgeRestricted — or "" when nothing does.
+//
+// TV's verdict first and, when TV answered, alone: it is each cascade's
+// playability authority, and an answer TV gave that is not the age gate
+// (formats, a members-only refusal) is not overruled by another client's.
+// When TV failed at the HTTP level (tvFailed: its call returned an error — a
+// 403, a 5xx after the retry ladder, or an answer about another video, which
+// is no verdict about this one either) there is nothing to defer to, and the
+// others' stand in for it —
+// the watch page's player response on both cascades, the web client's on the
+// authenticated one (owner decision D24, 2026-10-31; audit G29). Before, the
+// retry was keyed on TV alone, so an age-gated video whose TV call failed was
+// never asked of web_embedded, the one client that can bypass the gate, and
+// the job ended "Age restricted" where yt-dlp would have downloaded it.
+//
+// Upstream goes further: _is_agegated is evaluated on every player response
+// it holds, the webpage's initial one included (it is the web client's pr,
+// _video.py:3078-3080), and any of them appends web_embedded
+// (_video.py:3155-3157). Moombox stops at D24's line, keeping TV's verdict
+// final whenever TV answered, so a TV that serves an age-gated video's
+// formats does not cost an embed page and a player call on every extraction.
+// nil infos are skipped.
+func ageGateRetryWitness(tv *VideoInfo, tvFailed bool, others ...ageGateWitness) string {
+	if tv != nil && tv.PlayabilityError == PlayabilityAgeRestricted {
+		return "tv"
+	}
+	if !tvFailed {
+		return ""
+	}
+	for _, w := range others {
+		if w.info != nil && w.info.PlayabilityError == PlayabilityAgeRestricted {
+			return w.label
+		}
+	}
+	return ""
+}
+
 // GetVideoInfoAuthenticated fetches video info using the full multi-client strategy.
 func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID string) (*VideoInfo, error) {
 	// One extraction's scratch state, shared by every player response this
@@ -579,6 +625,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 
 	// Try TV client
 	result, err := tally.note(p.fetchWithClient(ctx, videoID, constants.TVSamsungClient, ytcfg, sts))
+	tvFailed := err != nil // read by the age-gate retry below (ageGateRetryWitness)
 	if err != nil {
 		// HTTP error (not a playability error) — log warning and continue to try
 		// WEB_CREATOR / VISIONOS / ANDROID_VR instead of returning immediately.
@@ -752,12 +799,20 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// embed page). encryptedHostFlags — the only thing the heavier variant
 	// adds — is needed exactly when the plain shape FAILS, so a result that
 	// already succeeded demonstrably did not need it.
-	if result.PlayabilityError == PlayabilityAgeRestricted {
+	//
+	// What says "age-restricted" is TV's verdict, or, when TV failed at the
+	// HTTP level, the watch page's or the web client's (ageGateRetryWitness).
+	var webAnswer *VideoInfo
+	if webErr == nil {
+		webAnswer = webResult
+	}
+	if witness := ageGateRetryWitness(result, tvFailed,
+		ageGateWitness{"watch_page", wpParsed}, ageGateWitness{webLabel, webAnswer}); witness != "" {
 		embResult, embErr := authEmb, authEmbErr
 		if embErr == nil && embResult.PlayabilityError == PlayabilityOK && hasAdequateFormats(embResult) {
-			p.logger.Info("[PlayerApi] Age-restricted content detected, reusing cascade web_embedded result", "videoID", videoID)
+			p.logger.Info("[PlayerApi] Age-restricted content detected, reusing cascade web_embedded result", "videoID", videoID, "by", witness)
 		} else {
-			p.logger.Info("[PlayerApi] Age-restricted content detected, retrying web_embedded with encryptedHostFlags", "videoID", videoID)
+			p.logger.Info("[PlayerApi] Age-restricted content detected, retrying web_embedded with encryptedHostFlags", "videoID", videoID, "by", witness)
 			embResult, embErr = tally.note(p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, true))
 		}
 
@@ -977,6 +1032,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	}
 
 	result, err := tally.note(p.fetchWithClient(ctx, videoID, constants.TVSamsungClient, wp.Ytcfg, stsPublic))
+	tvFailed := err != nil // read by the age-gate retry below (ageGateRetryWitness)
 	if err != nil {
 		// Every TV failure is now a SKIP, not the end of the extraction —
 		// the shape GetVideoInfoAuthenticated's own TV arm has always had:
@@ -1011,9 +1067,14 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	// decision O-I), from the same authority: TV.
 	waitingRoom := tvSaysWaitingRoom(result)
 
-	// Try web_embedded for age-restricted content (public path)
-	if result.PlayabilityError == PlayabilityAgeRestricted {
-		p.logger.Info("[PlayerApi] Age-restricted content detected (public), trying web_embedded", "videoID", videoID)
+	// Try web_embedded for age-restricted content (public path): on TV's
+	// verdict, or the watch page's when TV failed at the HTTP level
+	// (ageGateRetryWitness). Before, a TV refused with a 403 or a 5xx left
+	// result empty, the cookieless chain below — which cannot serve an
+	// age-gated video — ran, and the watch page's age-restricted parse was
+	// returned with web_embedded never asked.
+	if witness := ageGateRetryWitness(result, tvFailed, ageGateWitness{"watch_page", wpParsed}); witness != "" {
+		p.logger.Info("[PlayerApi] Age-restricted content detected (public), trying web_embedded", "videoID", videoID, "by", witness)
 		embResult, embErr := tally.note(p.fetchWithEmbedded(ctx, videoID, wp.Ytcfg, stsPublic, true))
 		if embErr != nil {
 			p.logger.Warn("[PlayerApi] web_embedded failed", slog.String("error", embErr.Error()))
@@ -1488,7 +1549,7 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	var embedResult *EmbedPageResult
 	if fetchEmbedPage {
 		var err error
-		embedResult, err = FetchEmbedPage(ctx, videoID, p.auth.ConsentCookieHeader())
+		embedResult, err = FetchEmbedPage(ctx, videoID, p.embedPageCookieHeader())
 		if err != nil {
 			p.logger.Warn("[PlayerApi] Failed to fetch embed page", slog.String("error", err.Error()))
 			// Continue without encryptedHostFlags — it may still work
@@ -1516,9 +1577,13 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 		}
 	}
 
+	// No Referer on the player call. It used to carry
+	// https://www.youtube.com/embed/<id> while its context claimed reddit as
+	// the embedding page — two hosts in one request. Upstream's player call
+	// sends none (generate_api_headers, _base.py:980-999): the Referer
+	// belongs to the embed page fetch, where it is the embedUrl
+	// (FetchEmbedPage, f2bd3202c).
 	headers := p.auth.GenerateAPIHeaders(constants.WebEmbeddedClient, ytcfg)
-	// Embedded requests need Referer from the embed URL
-	headers["Referer"] = fmt.Sprintf("%s/%s", constants.YouTubeURLs.Embed, videoID)
 
 	// Build client context with thirdParty embedUrl
 	clientCtx := make(map[string]any, len(constants.WebEmbeddedClient.Context))
@@ -1531,7 +1596,7 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 		"context": map[string]any{
 			"client": clientCtx,
 			"thirdParty": map[string]any{
-				"embedUrl": "https://www.reddit.com/",
+				"embedUrl": embedThirdPartyURL,
 			},
 		},
 		"videoId":        videoID,
@@ -1574,6 +1639,28 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	info, err := p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "WEB_EMBEDDED", videoID)
 	stampManifestSources(info, "web_embedded")
 	return info, err
+}
+
+// embedPageCookieHeader is the Cookie header the embed page is fetched with
+// (owner decision D24, 2026-10-31): the page cookies when the jar is signed
+// in — its session, with an English PREF, as yt-dlp's cookiejar sends the
+// session on this page as on every other request (_download_ytcfg goes out
+// through the same jar) — and otherwise the consent and language pair alone.
+// Signed in is HasAuthCookies, the predicate that sends an extraction down
+// the authenticated cascade (Service.GetVideoInfo) and the status probe's
+// escalation to the authenticated TV probe, so the age-gate retry of the
+// authenticated cascade fetches the page signed in and that of the public
+// cascade, like the probe's signed-out escalation, fetches it as anonymously
+// as the public watch page (GetVideoInfoPublic): a half-cleared jar's
+// leftover SAPISID stays off it. It used to be the consent pair on every
+// path, so an account's embed page was read signed out — flags for a viewer
+// the player call, which carries the jar's cookies (GenerateAPIHeaders), is
+// not.
+func (p *PlayerAPI) embedPageCookieHeader() string {
+	if p.auth.HasAuthCookies() {
+		return p.auth.PageCookieHeader()
+	}
+	return p.auth.ConsentCookieHeader()
 }
 
 // innertubeErrorDetailMax bounds what a failure message may quote back from

@@ -950,12 +950,34 @@ type EmbedPageResult struct {
 	PlayerURL string
 }
 
+// embedThirdPartyURL is the page web_embedded claims to be embedded on: the
+// player call's context.thirdParty.embedUrl (fetchWithEmbedded) and the
+// Referer of the embed page that call's encryptedHostFlags are read off
+// (FetchEmbedPage). One constant, because upstream's is one value read twice:
+// _fix_embedded_ytcfg puts https://www.reddit.com/ ("can be any valid
+// non-YouTube URL") on the web_embedded ytcfg's INNERTUBE_CONTEXT, and
+// _download_ytcfg sends that same thirdParty.embedUrl as the embed page's
+// Referer (yt_dlp/extractor/youtube/_base.py:420-423, 1013-1037). The Referer,
+// the reddit embedUrl and the encryptedHostFlags plumbing all came in one
+// fix, f2bd3202c (#16177, "Fix web_embedded player client"): flags read off a
+// page fetched with no embedding host are flags for no host, sent beside a
+// request that claims reddit.
+const embedThirdPartyURL = "https://www.reddit.com/"
+
 // FetchEmbedPage fetches a YouTube embed page and extracts encryptedHostFlags
-// and the player URL. cookieHeader is the consent and language pair
-// (Auth.ConsentCookieHeader): the page is fetched without the jar's session,
-// as it always was — neither value it is read for depends on one — but the
-// consent wall stands in front of it as in front of the watch page, and
-// yt-dlp fetches it behind the same SOCS (_initialize_consent).
+// and the player URL. It is fetched as yt-dlp's _download_ytcfg fetches it
+// (_base.py:1013-1037, f2bd3202c): Referer embedThirdPartyURL, the page the
+// player call then claims as its embedUrl, so the flags the page states are
+// the flags for that host. The User-Agent stays Chrome's, where upstream sends
+// the web_embedded client's Safari UA: that swap is the owner-deferred
+// c7fb478d2 (docs/spec/upstream-ports.md, open items; owner decision D24).
+//
+// cookieHeader is the caller's (PlayerAPI.embedPageCookieHeader): the page
+// cookies (Auth.PageCookieHeader) when the jar is signed in, as yt-dlp's jar
+// sends the session on this page as on every other, and otherwise the
+// consent and language pair alone (Auth.ConsentCookieHeader), the public
+// watch page's — the consent wall stands in front of this page as in front of
+// that one, and yt-dlp fetches it behind the same SOCS (_initialize_consent).
 func FetchEmbedPage(ctx context.Context, videoID, cookieHeader string) (*EmbedPageResult, error) {
 	url := fmt.Sprintf("%s/%s?html5=1", constants.YouTubeURLs.Embed, videoID)
 
@@ -963,6 +985,7 @@ func FetchEmbedPage(ctx context.Context, videoID, cookieHeader string) (*EmbedPa
 		"User-Agent":      constants.UserAgents.Web,
 		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 		"Accept-Language": "en-US,en;q=0.5",
+		"Referer":         embedThirdPartyURL,
 	}
 	if cookieHeader != "" {
 		headers["Cookie"] = cookieHeader
