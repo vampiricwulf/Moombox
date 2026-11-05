@@ -218,7 +218,8 @@ func swapHls(t *testing.T, hls DownloadStrategy) {
 // row fails to set up); the post-live re-run on the original formats (its row sees
 // the tv copies); the post-live split-pair check dropped (the no-pair row
 // runs the strategy again); the Warn dropped, or claiming the live edge (the
-// live rows).
+// live rows); the cancel guard confined to the live arms (the post-live
+// cancelled row runs the challenge-free drop and wraps the error).
 func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 	systemic := fmt.Errorf("manifestless DASH: resolve video URL: itag 299: %w: %w", errChallengesUnsolvable, cipher.ErrNUnsolved)
 	live := func() *youtube.VideoInfo {
@@ -340,6 +341,32 @@ func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 		}
 	})
 
+	t.Run("post-live, cancelled, is returned as it came", func(t *testing.T) {
+		// The cancel guard sits ahead of the post-live arm too: no
+		// cookieless re-extract and no second run for a job already
+		// cancelled.
+		hls := &fakeStrategy{kind: "hls"}
+		swapHls(t, hls)
+		calls := fakeCookieless(t, nil, nil)
+		job, logs := reextractJob(t)
+		rec := &warnRecorder{captureLogger: logs}
+		job.Logger = rec
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		info := &youtube.VideoInfo{StreamStatus: youtube.StreamPostLive, PlayerURL: nPlayer}
+		s := &fakeStrategy{kind: "manifestless_dash", answers: []error{systemic, nil}}
+		_, err := setupWithFallback(ctx, job, s, true, info, &StrategyDeps{})
+		if err != systemic { // the very error, not one wrapping it
+			t.Errorf("setup = %v, want the strategy's own error as it came", err)
+		}
+		if rec.warned("[Cipher] post-live manifest-free DASH: the player's JS challenges cannot be solved") {
+			t.Errorf("a cancelled job ran the challenge-free drop: %v", logs.lines())
+		}
+		if n := calls.Load(); n != 0 || len(s.seen) != 1 || len(hls.seen) != 0 {
+			t.Errorf("cookieless re-extract ran %d time(s), strategy run %d time(s), HLS %d; want 0, 1, 0", n, len(s.seen), len(hls.seen))
+		}
+	})
+
 	t.Run("post-live with no challenge-free split pair left fails naming the cause", func(t *testing.T) {
 		w, h, fps := 1920, 1080, 30
 		tvVideo := withLevel(youtube.Format{Itag: 299, URL: "https://r1.googlevideo.com/videoplayback?itag=299&n=" + nChal, MimeType: `video/mp4; codecs="avc1.64002a"`,
@@ -383,7 +410,8 @@ func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 // the cleanup removes staging); HLS setting aside its own video.ts, or DASH
 // its own pair (the resume rows); the set-aside run before the setup's own
 // outcome is known (the failed rows move the pair); the missing_pot fallback
-// left out of setupWithFallback (its rows fail to set up).
+// left out of setupWithFallback (its rows fail to set up); the cancel guard
+// moved below either arm (the cancelled rows run HLS and set the pair aside).
 func TestSetupSetsTheOtherShapeAside(t *testing.T) {
 	systemic := fmt.Errorf("manifestless DASH: resolve video URL: itag 299: %w: %w", errChallengesUnsolvable, cipher.ErrSidecarUnavailable)
 	missingPot := fmt.Errorf("manifestless DASH: %w: no video adaptive format usable without a GVS PO token, and none could be minted: %w", errMissingPot, errors.New("sidecar down"))
@@ -394,18 +422,22 @@ func TestSetupSetsTheOtherShapeAside(t *testing.T) {
 		staged    []string // the earlier session's capture in the part
 		answers   []error  // the manifest-free setup's
 		hlsErr    error
+		cancel    bool
 		wantAside bool
 	}{
-		{"the HLS fallback into a part holding a from-start DASH capture", dash, []error{systemic}, nil, true},
-		{"DASH, solving back, into a part holding the fallback's video.ts", hlsName, []error{nil}, nil, true},
-		{"the HLS fallback resuming its own video.ts", hlsName, []error{systemic}, nil, false},
-		{"DASH resuming its own pair", dash, []error{nil}, nil, false},
-		{"a setup that fails, the fallback's too", dash, []error{systemic}, errors.New("fake HLS: no variants"), false},
-		{"the missing_pot HLS fallback into a part holding a from-start DASH capture", dash, []error{missingPot}, nil, true},
-		{"a missing_pot fallback whose HLS setup fails too", dash, []error{missingPot}, errors.New("fake HLS: no variants"), false},
+		{"the HLS fallback into a part holding a from-start DASH capture", dash, []error{systemic}, nil, false, true},
+		{"DASH, solving back, into a part holding the fallback's video.ts", hlsName, []error{nil}, nil, false, true},
+		{"the HLS fallback resuming its own video.ts", hlsName, []error{systemic}, nil, false, false},
+		{"DASH resuming its own pair", dash, []error{nil}, nil, false, false},
+		{"a setup that fails, the fallback's too", dash, []error{systemic}, errors.New("fake HLS: no variants"), false, false},
+		{"the missing_pot HLS fallback into a part holding a from-start DASH capture", dash, []error{missingPot}, nil, false, true},
+		{"a missing_pot fallback whose HLS setup fails too", dash, []error{missingPot}, errors.New("fake HLS: no variants"), false, false},
+		{"a cancelled missing_pot setup", dash, []error{missingPot}, nil, true, false},
+		{"a cancelled challenge setup", dash, []error{systemic}, nil, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			swapHls(t, &fakeStrategy{kind: "hls", answers: []error{tc.hlsErr}})
+			hls := &fakeStrategy{kind: "hls", answers: []error{tc.hlsErr}}
+			swapHls(t, hls)
 			job, logs := reextractJob(t)
 			rec := &warnRecorder{captureLogger: logs}
 			job.Logger = rec
@@ -421,9 +453,17 @@ func TestSetupSetsTheOtherShapeAside(t *testing.T) {
 			}
 			info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer,
 				HlsManifestURL: "https://manifest.googlevideo.com/api/manifest/hls_variant/id/abc/file/index.m3u8", HlsManifestSource: "visionos"}
-			_, err := setupWithFallback(context.Background(), job, &fakeStrategy{kind: "manifestless_dash", answers: tc.answers}, false, info, &StrategyDeps{})
-			if (err != nil) != (tc.hlsErr != nil) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancel {
+				cancel()
+			}
+			_, err := setupWithFallback(ctx, job, &fakeStrategy{kind: "manifestless_dash", answers: tc.answers}, false, info, &StrategyDeps{})
+			if (err != nil) != (tc.hlsErr != nil || tc.cancel) {
 				t.Fatalf("setup = %v", err)
+			}
+			if tc.cancel && len(hls.seen) != 0 {
+				t.Errorf("a cancelled setup ran HLS %d time(s), want none", len(hls.seen))
 			}
 			asides := stagedRestartAsides(dir)
 			warned := rec.warned("an earlier capture of this job in another shape was set aside")
