@@ -493,6 +493,32 @@ func refreshGvsCredentials(
 	binding string,
 	tag string,
 ) (baseURL string, poToken string) {
+	return renewGvsCredentials(ctx, job, videoInfo, itag, routedSolver, cipherSolver, potProvider, binding, tag, true)
+}
+
+// renewGvsCredentials is refreshGvsCredentials, and the live downloaders'
+// proactive renewal before their URL expires (liveURLRenewal, audit G48) when
+// recovering is false. A renewal recovers from nothing — no segment was
+// refused — so it skips invalidate403Caches: the shared cipher solver, the
+// POT caches and the session's visitor data are all still good. Dropping them
+// would cost a player-JS recompile for the sibling downloader for nothing
+// (the cost the verifier of yt-live-5 named), and, for a token bound to the
+// visitor session, hand the re-extraction a session of its own, whose URL
+// the binding guard below then refuses to install — leaving the renewal a
+// token alone and the URL to expire after all. The token is still re-minted
+// fresh (bypassCache), as yt-dlp mints each re-extraction's own.
+func renewGvsCredentials(
+	ctx context.Context,
+	job *JobContext,
+	videoInfo *youtube.VideoInfo,
+	itag int,
+	routedSolver cipher.Solver,
+	cipherSolver *cipher.GojaResolver,
+	potProvider gvsTokenMinter,
+	binding string,
+	tag string,
+	recovering bool,
+) (baseURL string, poToken string) {
 	var cfg *JobConfig
 	if job != nil {
 		cfg = job.Config
@@ -500,7 +526,9 @@ func refreshGvsCredentials(
 	refreshCtx, cancel := context.WithTimeout(ctx, credentialRefreshTimeoutFor(cfg))
 	defer cancel()
 
-	invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, asPotProvider(potProvider), tag)
+	if recovering {
+		invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, asPotProvider(potProvider), tag)
+	}
 
 	// Mint FIRST — before the URL half spends any of the shared refreshCtx
 	// deadline. See the doc comment above for why: the clamp can leave as

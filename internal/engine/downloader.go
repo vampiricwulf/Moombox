@@ -349,7 +349,22 @@ type DownloaderOptions struct {
 	// 403 or 410 — its URL expired mid-transfer — and accepts only a URL
 	// naming the same file (refreshDirectURL in downloader_direct.go).
 	OnCredentialRefresh func() (baseURL string, poToken string)
-	Logger              DownloaderLogger
+	// OnProactiveRefresh, with URLExpiry, renews the credentials BEFORE they
+	// fail: a timer at min(expiry − proactiveRefreshLead, last renewal +
+	// proactiveRefreshEvery) calls it and installs what it returns as
+	// OnCredentialRefresh's answer is installed (runProactiveRefresh). It
+	// bypasses the behind-head gate OnCredentialRefresh waits for — at the
+	// live edge that gate never opens, so an expired URL used to cost a gone
+	// burst, a status check and a full downloader rebuild — and shares its
+	// cooldown. The callback should renew rather than recover: nothing has
+	// failed, so it has no cache to invalidate. Optional; nil (or a nil
+	// URLExpiry) runs no timer.
+	OnProactiveRefresh func() (baseURL string, poToken string)
+	// URLExpiry reads the instant a segment URL stops being served — for
+	// googlevideo its expire= parameter — and false when the URL names none,
+	// in which case the timer falls back to proactiveRefreshEvery alone.
+	URLExpiry func(baseURL string) (time.Time, bool)
+	Logger    DownloaderLogger
 	// SegmentWorkers is how many segments this download fetches
 	// concurrently. Zero means ParallelDownloads, preserving the historical
 	// behaviour for callers that do not set it. No upper limit is enforced —
@@ -761,14 +776,22 @@ func (d *SegmentDownloader) getBaseURL() string {
 // every failed segment, but only one player-response round trip per
 // credentialRefreshCooldown is allowed through.
 func (d *SegmentDownloader) refreshCredentials() bool {
-	if d.opts.OnCredentialRefresh == nil {
+	return d.installCredentials(d.opts.OnCredentialRefresh, "[Downloader] credentials refreshed after 403")
+}
+
+// installCredentials is refreshCredentials for any credential callback — the
+// 403 recovery's OnCredentialRefresh, or the proactive timer's
+// OnProactiveRefresh — under the one cooldown both share, logging msg when it
+// installed something.
+func (d *SegmentDownloader) installCredentials(refresh func() (string, string), msg string) bool {
+	if refresh == nil {
 		return false
 	}
 	if !d.lastCredentialRefresh.TryClaim(credentialRefreshCooldown) {
 		return false
 	}
 
-	freshURL, freshToken := d.opts.OnCredentialRefresh()
+	freshURL, freshToken := refresh()
 	installed := false
 	if freshURL != "" {
 		d.SetBaseURL(freshURL)
@@ -779,7 +802,7 @@ func (d *SegmentDownloader) refreshCredentials() bool {
 		installed = true
 	}
 	if installed && d.logger != nil {
-		d.logger.Info("[Downloader] credentials refreshed after 403",
+		d.logger.Info(msg,
 			"newURL", freshURL != "", "newToken", freshToken != "")
 	}
 	return installed
@@ -1100,6 +1123,15 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 
 	if d.OnStart != nil {
 		d.OnStart(int(d.currentSeq.Load()), resuming)
+	}
+
+	// The proactive credential renewal runs beside the loop and ends with it
+	// (runProactiveRefresh). Started here, past the resume validation above,
+	// for SetBaseURL's reason: nothing may swap the URL that validation reads.
+	if !d.opts.IsDirectURL && d.opts.OnProactiveRefresh != nil && d.opts.URLExpiry != nil {
+		refreshCtx, stopRefresh := context.WithCancel(ctx)
+		defer stopRefresh()
+		go d.runProactiveRefresh(refreshCtx)
 	}
 
 	// Run download loop
