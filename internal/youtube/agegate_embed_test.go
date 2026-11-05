@@ -202,10 +202,21 @@ func TestEmbedPageIsFetchedFromTheEmbeddingHost(t *testing.T) {
 // dropped from ageGateRetryWitness (the "TV answered" row makes a flagged
 // call); the web witness left out of the authenticated cascade (the "web
 // says" row); the public cascade passing tvFailed false (the public "TV
-// failed" row).
+// failed" row); the authenticated cascade passing tvFailed true (its "TV
+// answered" row makes a flagged call); either cascade's tvFailed computed
+// from transport errors alone, a substituted answer counted as TV answering
+// (its "another video" row returns the age-restricted parse).
 func TestAgeGateRetryWhenTVFailsAtTheHTTPLevel(t *testing.T) {
 	tvOK := map[string]ageGateAnswer{constants.TVSamsungClient.ClientID: {status: http.StatusOK, body: adequateOKBody}}
 	webGated := map[string]ageGateAnswer{constants.WebClient.ClientID: {status: http.StatusOK, body: ageRestrictedBody}}
+	tvOKWebGated := map[string]ageGateAnswer{
+		constants.TVSamsungClient.ClientID: {status: http.StatusOK, body: adequateOKBody},
+		constants.WebClient.ClientID:       {status: http.StatusOK, body: ageRestrictedBody},
+	}
+	// TV answering about another video is TV failing (fetchWithClient
+	// returns a *VideoIDMismatchError): it says nothing about this one.
+	tvOther := map[string]ageGateAnswer{constants.TVSamsungClient.ClientID: {status: http.StatusOK,
+		body: strings.Replace(adequateOKBody, `"videoId": "test1234567"`, `"videoId": "other123456"`, 1)}}
 	for _, tc := range []struct {
 		name        string
 		public      bool
@@ -222,6 +233,12 @@ func TestAgeGateRetryWhenTVFailsAtTheHTTPLevel(t *testing.T) {
 			answers: webGated, wantFlagged: 1, wantPlay: PlayabilityOK},
 		{name: "public: TV answered with formats, the watch page's gate does not overrule it", public: true,
 			watchPage: ageRestrictedBody, answers: tvOK, wantFlagged: 0, wantPlay: PlayabilityOK},
+		{name: "authenticated: TV answered with formats, the watch page's and web's gates do not overrule it",
+			watchPage: ageRestrictedBody, answers: tvOKWebGated, wantFlagged: 0, wantPlay: PlayabilityOK},
+		{name: "public: TV answered about another video, the watch page says age-gated", public: true,
+			watchPage: ageRestrictedBody, answers: tvOther, wantFlagged: 1, wantPlay: PlayabilityOK},
+		{name: "authenticated: TV answered about another video, the watch page says age-gated",
+			watchPage: ageRestrictedBody, answers: tvOther, wantFlagged: 1, wantPlay: PlayabilityOK},
 		{name: "public: TV failed and nothing says age-gated", public: true,
 			wantFlagged: 0},
 	} {
