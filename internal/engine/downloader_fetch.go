@@ -625,6 +625,9 @@ func (d *SegmentDownloader) noteHeadSeqFromResponse(resp *http.Response) {
 	if err != nil || n < 0 {
 		return
 	}
+	if resp.StatusCode < 300 {
+		d.noteServedHeadSeq(n)
+	}
 	if d.noteHeadSeq(n) {
 		// Refresh the probe-pacing clock only when the harvest ADVANCED
 		// head: a healthy live edge keeps advancing (dedicated probes stay

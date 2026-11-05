@@ -98,6 +98,31 @@ var ErrInitSegmentChanged = errors.New("HLS init segment changed")
 // than record hours of fragments that cannot be opened.
 var ErrInitSegmentUnavailable = errors.New("init segment unavailable")
 
+// ErrSegmentRefused signals that the DASH loop met a segment YouTube keeps
+// refusing although it demonstrably exists — it failed again after fresh
+// credentials were installed for it, while a later segment is served and the
+// head that served segment reported is more than two segments past it — and
+// that this downloader's caller closes the part there
+// (SegmentDownloader.SplitOnRefusedSegment). It always arrives as a
+// *SegmentRefusedError naming the sequence; the downloader stops AT that
+// sequence (CurrentSeq() == Seq) with its resume state kept, so the caller
+// can mux the part as it stands and start the next one past the hole. See
+// refuseSegment (downloader_dash.go) for the rule and where it comes from.
+var ErrSegmentRefused = errors.New("segment refused through fresh credentials")
+
+// SegmentRefusedError is ErrSegmentRefused with the refused sequence.
+type SegmentRefusedError struct {
+	Seq int
+}
+
+func (e *SegmentRefusedError) Error() string {
+	return fmt.Sprintf("%v: sequence %d", ErrSegmentRefused, e.Seq)
+}
+
+// Is makes errors.Is(err, ErrSegmentRefused) hold for every
+// *SegmentRefusedError.
+func (e *SegmentRefusedError) Is(target error) bool { return target == ErrSegmentRefused }
+
 const (
 	CatchupThreshold     = 10
 	MaxSegmentRetries    = 5
@@ -603,6 +628,31 @@ type SegmentDownloader struct {
 	// credentialRefreshCooldown.
 	lastCredentialRefresh atomicTime
 
+	// credentialRenewals counts the refreshes refreshCredentials actually
+	// installed (a URL or a token). The sequential DASH loop reads it to tell
+	// a segment that failed AGAIN after fresh credentials arrived — the
+	// refused-segment rule's trigger — from one that has only ever been asked
+	// with the credentials it first failed on. Atomic: catch-up workers
+	// refresh from their own goroutines.
+	credentialRenewals atomic.Int64
+
+	// rebuildsExhaustedSeq is the sequence NoteRebuildsExhausted named, or -1,
+	// and rebuildsExhaustedSince when the caller's run of rebuilds at it
+	// began. Written before Start, read on the download-loop goroutine.
+	rebuildsExhaustedSeq   atomic.Int64
+	rebuildsExhaustedSince time.Time
+
+	// servedHeadSeq is the highest X-Head-Seqnum a SERVED response (2xx)
+	// carried, or -1: the head the refused-segment rule measures a hole
+	// against before it gives the hole up (refuseSegment).
+	// headSeq also takes the header from refusals and from probes that can
+	// correct it, which is right for the end guards but not for this rule —
+	// moonarchive's `max_seq` is assigned only after `raise_for_status()`
+	// passed (downloaders/youtube/_dash.py). Atomic: catch-up workers and
+	// probes harvest it from their own goroutines; monotonic, like headSeq's
+	// ratchet (noteServedHeadSeq).
+	servedHeadSeq atomic.Int64
+
 	// lastCatchUpFailure timestamps the most recent catch-up failure episode.
 	// The batch ceiling is throttled relative to it so a 403 burst stops
 	// being answered with 48 simultaneous requests (moonarchive damps its
@@ -679,6 +729,17 @@ type SegmentDownloader struct {
 	// MayResume reports whether the broadcast may resume — stall evidence.
 	// Called only from the download-loop goroutine. nil = feature off.
 	MayResume func() bool
+	// SplitOnRefusedSegment arms the DASH loop's refused-segment rule
+	// (refuseSegment, downloader_dash.go) and says this downloader's caller
+	// can close the part at the hole and start a new one past it: the live
+	// loop sets it on every DASH downloader it runs (owner decision D8 of
+	// the 2026-10-31 audit). A refused segment then ends the download with a
+	// *SegmentRefusedError — or, when the new part could not get its init
+	// because the stream's sq=0 is no longer served, is skipped in place
+	// with a gap row. Unset — the post-live and VOD downloads, which have no
+	// parts — the rule never fires and a refused segment is retried and
+	// verified exactly as before. Assign before Start, like the callbacks.
+	SplitOnRefusedSegment bool
 	// OnFetch reports n bytes of media payload ARRIVING off the network —
 	// fired at every successful segment/chunk body read, including catch-up
 	// workers whose data sits in the reorder buffer long before it flushes
@@ -800,6 +861,9 @@ func (d *SegmentDownloader) refreshCredentials() bool {
 		d.SetPoToken(freshToken)
 		installed = true
 	}
+	if installed {
+		d.credentialRenewals.Add(1)
+	}
 	if installed && d.logger != nil {
 		d.logger.Info("[Downloader] credentials refreshed after 403",
 			"newURL", freshURL != "", "newToken", freshToken != "")
@@ -900,8 +964,35 @@ func NewSegmentDownloader(opts DownloaderOptions) *SegmentDownloader {
 	}
 	d.currentSeq.Store(int64(opts.StartSeq))
 	d.headSeq.Store(-1)
+	d.rebuildsExhaustedSeq.Store(-1)
+	d.servedHeadSeq.Store(-1)
 	return d
 }
+
+// NoteRebuildsExhausted tells the downloader that its caller has already
+// rebuilt the download at seq — each time on a fresh player response, so on
+// fresh credentials — as many times as it will (the live loop's same-seq
+// rebuild cap, sameSeqRebuildCap in internal/worker), the first of those
+// rebuilds at since. Where this downloader would hand seq back for one more
+// rebuild (ErrQualityLost), it applies the refused-segment rule to it
+// instead: the rebuild that built it was the credential refresh that rule
+// waits for. A refusal (403, 410) is taken at once; a segment that only
+// fails — a 5xx, an empty body — is taken once it has failed for
+// unservedSegmentPersistence since since (handBackForRebuild). Only a
+// SplitOnRefusedSegment downloader acts on it. Call before Start.
+func (d *SegmentDownloader) NoteRebuildsExhausted(seq int, since time.Time) {
+	d.rebuildsExhaustedSeq.Store(int64(seq))
+	d.rebuildsExhaustedSince = since
+}
+
+// RebuildsExhaustedSeq reports the sequence NoteRebuildsExhausted named, or
+// -1. Read-only; the worker tests use it to assert which downloaders the live
+// loop armed.
+func (d *SegmentDownloader) RebuildsExhaustedSeq() int { return int(d.rebuildsExhaustedSeq.Load()) }
+
+// RebuildsExhaustedSince reports the since NoteRebuildsExhausted was given,
+// or the zero time. Read-only, for the same tests.
+func (d *SegmentDownloader) RebuildsExhaustedSince() time.Time { return d.rebuildsExhaustedSince }
 
 // Start begins the download process.
 func (d *SegmentDownloader) Start(ctx context.Context) error {
@@ -1452,6 +1543,19 @@ func (d *SegmentDownloader) FinalizedDuringInterruption() bool {
 
 // HeadSeq returns the last known head sequence (-1 if never learned).
 func (d *SegmentDownloader) HeadSeq() int { return int(d.headSeq.Load()) }
+
+// StoppedWellBehindHead reports whether the download stands more than two
+// segments below its tracked head — the only position the refused-segment
+// rule can act on (refusable's head bound). The live loop counts a same-seq
+// rebuild toward its cap only from here (sameSeqRebuilds in
+// internal/worker): a stall at the live edge — an interruption YouTube still
+// calls live — is not a refused segment, and is rebuilt as often as it
+// takes. It reads the tracked head, refusals' headers included, not the
+// served one: a downloader rebuilt at a hole asks for the hole first and may
+// never be served a segment before it stops.
+func (d *SegmentDownloader) StoppedWellBehindHead() bool {
+	return d.headSeq.Load()-2 > d.currentSeq.Load()
+}
 
 // BytesWritten returns total bytes written (lock-free).
 func (d *SegmentDownloader) BytesWritten() int64 {
