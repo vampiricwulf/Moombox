@@ -652,7 +652,9 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// makes recommended rather than required (GvsTokenMandatory). A waiting
 	// room is skipped, as the fallback below skips it: an upcoming stream has
 	// no formats to contribute. The answer is kept for the members-only /
-	// no-formats fallback below, which asks the same client.
+	// no-formats fallback below, which asks the same client. Its manifests
+	// are adopted last, only where no other client returned one
+	// (adoptPremiumManifests).
 	var premiumWC *VideoInfo
 	var premiumWCErr error
 	if wp.IsPremium && !waitingRoom {
@@ -831,6 +833,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			if wcResult.PlayabilityError != PlayabilityMembersOnly {
 				if cfResult := p.tryCookielessFallbacks(ctx, videoID, ytcfg.VisitorData, &formatPool, tally, vrPrefetch); cfResult != nil {
 					mergeWatchPageMetadata(cfResult, wpParsed)
+					p.adoptPremiumManifests(cfResult, premiumWC, videoID)
 					cfResult.Formats = deduplicateFormats(ctx, formatPool)
 					return p.finishExtraction(ctx, cfResult, wp, videoID, tally, wpParsed)
 				}
@@ -863,14 +866,54 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			}
 		}
 
+		if wcResult == premiumWC {
+			// The Premium answer leads this return, but its manifests are
+			// the fallback (adoptPremiumManifests): a manifest another
+			// client handed result, or the watch page, is the one kept.
+			lead := *wcResult
+			lead.DashManifestURL, lead.DashManifestSource, lead.DashManifestAvailableAt = result.DashManifestURL, result.DashManifestSource, result.DashManifestAvailableAt
+			lead.HlsManifestURL, lead.HlsManifestSource, lead.HlsManifestAvailableAt = result.HlsManifestURL, result.HlsManifestSource, result.HlsManifestAvailableAt
+			wcResult = &lead
+		}
 		if wpParsed != nil {
 			mergeWatchPageMetadata(wcResult, wpParsed)
 		}
+		p.adoptPremiumManifests(wcResult, premiumWC, videoID)
 		wcResult.Formats = deduplicateFormats(ctx, formatPool)
 		return p.finishExtraction(ctx, wcResult, wp, videoID, tally, wpParsed)
 	}
 
-	return p.finishExtraction(ctx, finalizeVideoInfo(ctx, result, wpParsed, formatPool), wp, videoID, tally, wpParsed)
+	final := finalizeVideoInfo(ctx, result, wpParsed, formatPool)
+	p.adoptPremiumManifests(final, premiumWC, videoID)
+	return p.finishExtraction(ctx, final, wp, videoID, tally, wpParsed)
+}
+
+// adoptPremiumManifests gives target the Premium web_creator answer's DASH
+// and HLS manifests where no other client returned one (owner decision, wave
+// FC): web_creator joins a Premium session's cascade as a format contributor
+// (D11), and its manifests are the fallback — adopted last, after every other
+// client's and the watch page's, so a manifest any of those returned is the
+// one kept. Upstream leads a Premium session with web_creator
+// (_DEFAULT_PREMIUM_CLIENTS, _video.py:147, 2973-2974) and takes its manifests
+// as any client's; here it stays behind the others, as its formats do. Each
+// moves with its client's label and its own pre-roll instant, as at every
+// other adoption site, and Premium makes its token recommended, not required
+// (GvsTokenMandatory), so a failed mint fetches it bare. A web_creator answer
+// that failed, was refused or is not playable adopts nothing, as no sibling
+// enrichment adopts a manifest off an unplayable response; a session without
+// Premium has none (premium nil).
+func (p *PlayerAPI) adoptPremiumManifests(target, premium *VideoInfo, videoID string) {
+	if target == nil || premium == nil || premium.PlayabilityError != PlayabilityOK {
+		return
+	}
+	if target.DashManifestURL == "" && premium.DashManifestURL != "" {
+		p.logger.Info("[PlayerApi] Got DASH manifest URL from web_creator (Premium fallback)", "videoID", videoID)
+		target.DashManifestURL, target.DashManifestSource, target.DashManifestAvailableAt = premium.DashManifestURL, "web_creator", premium.DashManifestAvailableAt
+	}
+	if target.HlsManifestURL == "" && premium.HlsManifestURL != "" {
+		p.logger.Info("[PlayerApi] Got HLS manifest URL from web_creator (Premium fallback)", "videoID", videoID)
+		target.HlsManifestURL, target.HlsManifestSource, target.HlsManifestAvailableAt = premium.HlsManifestURL, "web_creator", premium.HlsManifestAvailableAt
+	}
 }
 
 // fallbackYtcfg is the ytcfg an extraction runs on when its watch page could
