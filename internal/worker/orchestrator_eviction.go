@@ -18,7 +18,28 @@ import (
 // the tens or low hundreds at most, since the head is learned from the
 // first few fetch attempts — never reach it. The guard keeps every
 // unrelated failure from paying for a bisection.
+//
+// That is the floor for 1 s segments only. The diagnosis reads it in
+// segments of the selected format's own duration (evictionHeadFloor), as
+// yt-dlp converts its 120 h window with each format's targetDurationSec
+// (MAX_DURATION // fragment_duration, extractor/youtube/_video.py
+// _live_adaptive_fragments): 120 h of a normal-latency stream's 5 s
+// segments is 86,400, below this constant, so a 5 s stream aged 120-139 h
+// was never diagnosed at all (audit G30).
 const minEvictionHead = 100_000
+
+// evictionHeadFloor is minEvictionHead in segments of targetDuration seconds
+// — the same ~27.8 h into the broadcast whatever the stream's cadence:
+// 100,000 at 1 s, 50,000 at 2 s, 20,000 at 5 s. A duration no format
+// advertised (unknown, selectedVideoTargetDuration's fallback) keeps the
+// 1 s floor, the highest, so a guess never lowers the bar a bisection must
+// clear.
+func evictionHeadFloor(targetDuration int, unknown bool) int {
+	if unknown || targetDuration <= 1 {
+		return minEvictionHead
+	}
+	return minEvictionHead / targetDuration
+}
 
 // maxEvictionHuntAdvance bounds how far CurrentSeq may have moved from its
 // starting position for a zero-byte finish to still be considered a
@@ -76,7 +97,8 @@ func (o *DownloadOrchestrator) diagnoseEvictedStart(ctx context.Context, jobCtx 
 		return nil
 	}
 	head := result.VideoDownloader.HeadSeq()
-	if head <= minEvictionHead {
+	targetDuration, durationUnknown := selectedVideoTargetDuration(jobCtx, videoInfo)
+	if head <= evictionHeadFloor(targetDuration, durationUnknown) {
 		return nil
 	}
 
@@ -103,7 +125,6 @@ func (o *DownloadOrchestrator) diagnoseEvictedStart(ctx context.Context, jobCtx 
 		inspection = engine.InspectSegment(body)
 	}
 
-	targetDuration, durationUnknown := selectedVideoTargetDuration(jobCtx, videoInfo)
 	evictedHours := float64(oldest) * float64(targetDuration) / 3600
 
 	o.logger.Warn("stream exceeds YouTube's retention window — segments evicted from the CDN",

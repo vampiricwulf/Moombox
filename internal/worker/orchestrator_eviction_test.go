@@ -272,3 +272,75 @@ func TestDiagnoseEvictedStart_DeadURLSkipsEvictionError(t *testing.T) {
 		t.Error("expected a Warn log explaining the aborted bisection")
 	}
 }
+
+// TestDiagnoseEvictedStart_FloorFollowsTargetDuration pins audit G30: the
+// diagnosis floor is ~27.8 h in segments of the selected format's own
+// duration (evictionHeadFloor), as yt-dlp converts its 120 h window with
+// each format's targetDurationSec (MAX_DURATION // fragment_duration,
+// _video.py _live_adaptive_fragments). A 5 s stream whose head is 30,000
+// segments deep — ~41.7 h, below the 1 s floor of 100,000 — is diagnosed;
+// the same head with no duration advertised keeps the 1 s floor and is not.
+//
+// Mutants: comparing head against minEvictionHead again (the 5 s row returns
+// nil — the stream is never diagnosed); evictionHeadFloor dividing an
+// unknown duration too (the floor table's unknown row).
+func TestDiagnoseEvictedStart_FloorFollowsTargetDuration(t *testing.T) {
+	for _, tc := range []struct {
+		sec     int
+		unknown bool
+		want    int
+	}{
+		{1, false, 100_000}, {2, false, 50_000}, {5, false, 20_000}, {5, true, 100_000}, {0, false, 100_000},
+	} {
+		if got := evictionHeadFloor(tc.sec, tc.unknown); got != tc.want {
+			t.Errorf("evictionHeadFloor(%d, %v) = %d, want %d", tc.sec, tc.unknown, got, tc.want)
+		}
+	}
+
+	const head = 30_000
+	const front = 25_000
+	const itag = 137
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Head-Seqnum", strconv.Itoa(head))
+		if seq, _ := strconv.Atoi(r.URL.Query().Get("sq")); seq < front {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.Write([]byte{0, 0, 0, 8, 'f', 't', 'y', 'p'})
+	}))
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		name         string
+		targetDur    int
+		wantDiagnose bool
+	}{
+		{"5 s segments, 41.7 h deep", 5, true},
+		{"no duration advertised", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			videoDl := engine.NewSegmentDownloader(engine.DownloaderOptions{
+				BaseURL: srv.URL + "/videoplayback?id=floor-test&itag=137",
+			})
+			if _, _, err := videoDl.ProbeSegmentAvailable(context.Background(), 0); err != nil {
+				t.Fatalf("priming probe failed: %v", err)
+			}
+			o := &DownloadOrchestrator{logger: &discardLogger{}}
+			jobCtx := &JobContext{Job: &database.Job{ID: "j1", VideoID: "vid1", Platform: "youtube", SelectedVideoItag: new(itag)}}
+			videoInfo := &youtube.VideoInfo{Formats: []youtube.Format{
+				{Itag: itag, Width: new(1920), Height: new(1080), TargetDurationSec: tc.targetDur},
+			}}
+			err := o.diagnoseEvictedStart(context.Background(), jobCtx, videoInfo, &DownloadResult{VideoDownloader: videoDl})
+			if tc.wantDiagnose {
+				want := evictionError(front, float64(front)*5/3600).Error()
+				if err == nil || err.Error() != want {
+					t.Errorf("diagnoseEvictedStart = %v, want %q", err, want)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("diagnoseEvictedStart = %v, want nil (head below the 1 s floor)", err)
+			}
+		})
+	}
+}
