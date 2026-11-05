@@ -985,7 +985,13 @@ func parseDataSyncID(id string) (delegated, user string) {
 // datasync id and not the literal key would otherwise send no X-Goog-PageId,
 // and be judged as the primary account — and UserSessionID from
 // USER_SESSION_ID (userSessionID, "" when the page has none) before the
-// datasync id's user half.
+// datasync id's user half. The datasync id read here is either spelling
+// (dataSyncID), the response's responseContext datasyncId included, as
+// yt-dlp's player and tab requests read it (_video.py:2920-2927, passing the
+// initial player response; _tab.py:834, passing the tab's data); its live
+// chat path reads the ytcfg alone (_base.py:962 with ytcfg only), so for chat
+// Moombox's page-wide read is a superset — one session, kept once, for every
+// caller.
 func (y *YtcfgData) fillSessionFromDataSync(userSessionID string) {
 	delegated, user := parseDataSyncID(y.DataSyncID)
 	if y.DelegatedSessionID == "" {
