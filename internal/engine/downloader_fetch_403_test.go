@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 )
@@ -102,37 +104,47 @@ func TestForbiddenBehindHeadNoCallbackStaysPermanent(t *testing.T) {
 // TestForbiddenAtHeadStaysPermanent guards end-of-stream detection: a 403 at
 // or past the head is how a finished stream terminates, and VOD/post-live
 // finalization depends on it. Recovery must not touch that case.
+//
+// A head of 0 is a head: a stream right at go-live names X-Head-Seqnum: 0,
+// and a 403 past it is still the end of the stream on its first answer, not
+// one of the three asks fetchSegmentWithRetry gives a refusal while no head
+// is known (headSeq < 0, audit G33). Mutant: `d.headSeq.Load() < 0` →
+// `<= 0` — the head-0 row asks three times.
 func TestForbiddenAtHeadStaysPermanent(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("X-Head-Seqnum", "100")
-		w.WriteHeader(http.StatusForbidden)
-	}))
-	defer srv.Close()
+	for _, head := range []int{100, 0} {
+		t.Run(fmt.Sprintf("head %d", head), func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("X-Head-Seqnum", strconv.Itoa(head))
+				w.WriteHeader(http.StatusForbidden)
+			}))
+			defer srv.Close()
 
-	var refreshCalls atomic.Int32
-	d := NewSegmentDownloader(DownloaderOptions{
-		BaseURL:    srv.URL + "/v?x=1",
-		OutputFile: "x",
-		PoToken:    "stale",
-		OnCredentialRefresh: func() (string, string) {
-			refreshCalls.Add(1)
-			return "", "fresh"
-		},
-	})
-	d.noteHeadSeq(100)
-	d.currentSeq.Store(101) // past head — this is the end of the stream
+			var refreshCalls atomic.Int32
+			d := NewSegmentDownloader(DownloaderOptions{
+				BaseURL:    srv.URL + "/v?x=1",
+				OutputFile: "x",
+				PoToken:    "stale",
+				OnCredentialRefresh: func() (string, string) {
+					refreshCalls.Add(1)
+					return "", "fresh"
+				},
+			})
+			d.noteHeadSeq(head)
+			d.currentSeq.Store(int64(head + 1)) // past head — this is the end of the stream
 
-	_, err := d.fetchSegmentWithRetry(t.Context(), d.buildSegmentURL(101), nil)
-	if err != ErrSegmentPermanent {
-		t.Fatalf("err = %v, want ErrSegmentPermanent at head", err)
-	}
-	if got := calls.Load(); got != 1 {
-		t.Errorf("HTTP attempts = %d, want exactly 1 (no retry past head)", got)
-	}
-	if got := refreshCalls.Load(); got != 0 {
-		t.Errorf("refresh calls = %d, want 0 past head", got)
+			_, err := d.fetchSegmentWithRetry(t.Context(), d.buildSegmentURL(head+1), nil)
+			if err != ErrSegmentPermanent {
+				t.Fatalf("err = %v, want ErrSegmentPermanent at head", err)
+			}
+			if got := calls.Load(); got != 1 {
+				t.Errorf("HTTP attempts = %d, want exactly 1 (no retry past head)", got)
+			}
+			if got := refreshCalls.Load(); got != 0 {
+				t.Errorf("refresh calls = %d, want 0 past head", got)
+			}
+		})
 	}
 }
 

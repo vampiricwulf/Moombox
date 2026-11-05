@@ -264,7 +264,11 @@ func notSatisfiable(contentRange string) func(w http.ResponseWriter, from int64)
 //
 // Mutant: directEndsWithinTolerance returning false — every completing row
 // errors, as it did. Mutant: `short >= directEndTolerance` → `short >
-// directEndTolerance` — the 100-byte rows complete.
+// directEndTolerance` — the 100-byte rows complete. The final 100% progress
+// callback reports the file's real length as its total, so the job's line
+// does not read "4999950 of 5000000 bytes" at 100%. Mutant: dropping
+// `totalSize = offset` from the 416 tolerance arm — the 416 rows' last
+// callback keeps the probed total; from the empty-206 arm — that row's does.
 func TestDirectEndToleranceCompletesAFewBytesShort(t *testing.T) {
 	body := headedBody(300_000, 'V')
 	n := int64(len(body))
@@ -289,6 +293,13 @@ func TestDirectEndToleranceCompletesAFewBytesShort(t *testing.T) {
 			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true, Logger: lg})
 			d.delays = directDelays()
 			d.directResumeIntervalOverride = 64 << 10 // a sidecar exists before the end
+			var progMu sync.Mutex
+			var last DownloadProgress
+			d.OnProgress = func(p DownloadProgress) {
+				progMu.Lock()
+				last = p
+				progMu.Unlock()
+			}
 			err := d.Start(t.Context())
 			_, statErr := os.Stat(out + resumeFileSuffix)
 			if !tc.complete {
@@ -311,6 +322,11 @@ func TestDirectEndToleranceCompletesAFewBytesShort(t *testing.T) {
 			}
 			if hits := lg.containing("100-byte tolerance"); len(hits) != 1 || !strings.HasPrefix(hits[0], "INFO ") {
 				t.Errorf("log lines naming the tolerance = %q, want one Info line", hits)
+			}
+			progMu.Lock()
+			defer progMu.Unlock()
+			if last.Percent != 100 || last.Bytes != n || last.TotalBytes != n {
+				t.Errorf("last progress = %+v, want 100%% with Bytes = TotalBytes = %d (the file's real length)", last, n)
 			}
 		})
 	}
@@ -391,7 +407,9 @@ func TestDirectFallbackEndToleranceCompletesAFewBytesShort(t *testing.T) {
 // (differentFileReason). 100 bytes or more is still a different file.
 //
 // Mutant: restoring `total != d.directTotalSize` in differentFileReason —
-// both keeping rows refetch from byte 0.
+// both keeping rows refetch from byte 0. A kept partial is the one record
+// that the total moved under it, so it is logged once at Info with both
+// totals. Mutant: disabling that log line — the keeping rows find none.
 func TestDirectResumeKeepsThePartialWhenTheTotalMovedAFewBytes(t *testing.T) {
 	const savedTotal = 300_000
 	const staged = 120_000
@@ -425,13 +443,23 @@ func TestDirectResumeKeepsThePartialWhenTheTotalMovedAFewBytes(t *testing.T) {
 				serve(w, r)
 			}))
 			t.Cleanup(srv.Close)
-			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
+			lg := &secretLogger{}
+			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true, Logger: lg})
 			d.delays = directDelays()
 			if err := d.Start(t.Context()); err != nil {
 				t.Fatalf("Start = %v", err)
 			}
 			if got, _ := os.ReadFile(out); !bytes.Equal(got, body) {
 				t.Fatalf("output is %d bytes, want the %d-byte file intact", len(got), len(body))
+			}
+			hits := lg.containing("keeping the partial")
+			if tc.keep {
+				want := fmt.Sprint("savedTotal", savedTotal, "total", savedTotal+tc.move)
+				if len(hits) != 1 || !strings.HasPrefix(hits[0], "INFO ") || !strings.Contains(hits[0], want) {
+					t.Errorf("log lines keeping the partial = %q, want one Info line carrying %q", hits, want)
+				}
+			} else if len(hits) != 0 {
+				t.Errorf("log lines keeping the partial = %q, want none for a different file", hits)
 			}
 			mu.Lock()
 			defer mu.Unlock()
