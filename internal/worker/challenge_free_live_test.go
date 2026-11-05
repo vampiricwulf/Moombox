@@ -199,9 +199,11 @@ func swapHls(t *testing.T, hls DownloadStrategy) {
 // TestSetupFallsBackWhenChallengesCannotBeSolved is audit G10's live half and
 // owner decision 7. A live capture whose from-start setup — manifest-free
 // DASH, or a DASH manifest — failed on the player's JS challenges ended the
-// job in Error; it now records the live HLS playlist instead, from the
-// oldest segment its window holds, with a Warn saying why from-start was
-// dropped, as yt-dlp records a live stream by default (HLS, the live adaptive
+// job in Error; it now records from the start without JS when it can
+// (TestLiveChallengeFailureRecordsFromStartWithoutJS), and, here, where the
+// formats that need no player JS hold no split pair, the live HLS playlist
+// instead, from the oldest segment its window holds, with a Warn saying why
+// from-start was dropped, as yt-dlp records a live stream by default (HLS, the live adaptive
 // formats skipped). With no master in the extraction the HLS setup asks the
 // cookieless chain for one. A
 // post-live manifest-free capture, which has no live edge, runs again on
@@ -245,6 +247,11 @@ func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			hls := &fakeStrategy{kind: "hls"}
 			swapHls(t, hls)
+			// The cookieless chain serves no split pair here, so the no-JS
+			// from-start path finds nothing and HLS records
+			// (TestLiveChallengeFailureRecordsFromStartWithoutJS covers the
+			// chain that does).
+			fakeCookieless(t, nil, nil)
 			job, logs := reextractJob(t)
 			rec := &warnRecorder{captureLogger: logs}
 			job.Logger = rec
@@ -289,6 +296,7 @@ func TestSetupFallsBackWhenChallengesCannotBeSolved(t *testing.T) {
 		// the master the extraction lacks.
 		srv := newManifestServer(t, potTestMaster)
 		calls := fakeCookielessHls(t, srv.URL+"/api/manifest/hls_variant/id/abc/source/visionos/file/index.m3u8", "visionos", nil)
+		fakeCookieless(t, nil, nil)
 		recordDownloaders(t)
 		job, _ := reextractJob(t)
 		info := live()
@@ -438,6 +446,7 @@ func TestSetupSetsTheOtherShapeAside(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			hls := &fakeStrategy{kind: "hls", answers: []error{tc.hlsErr}}
 			swapHls(t, hls)
+			fakeCookieless(t, nil, nil) // no no-JS pair: the challenge rows fall to HLS
 			job, logs := reextractJob(t)
 			rec := &warnRecorder{captureLogger: logs}
 			job.Logger = rec
@@ -529,10 +538,17 @@ func TestExecuteWithChatRecordsLiveHlsWhenChallengesCannotBeSolved(t *testing.T)
 	ManifestlessDashStrategy = ms
 	t.Cleanup(func() { ManifestlessDashStrategy = origMs })
 	swapHls(t, hls)
+	fakeCookieless(t, nil, nil)
 
+	// Formats that need the player JS (an n challenge), and a cookieless
+	// chain with none to offer: the no-JS from-start path has no pair, so
+	// HLS records.
+	v, a := adaptiveVideo(), adaptiveAudio()
+	v.URL += "&n=" + nChal
+	a.URL += "&n=" + nChal
 	info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer,
 		HlsManifestURL: "https://manifest.googlevideo.com/api/manifest/hls_variant/id/abc/file/index.m3u8", HlsManifestSource: "visionos",
-		Formats: []youtube.Format{adaptiveVideo(), adaptiveAudio()}}
+		Formats: []youtube.Format{v, a}}
 	err := w.orchestrator.ExecuteWithChat(context.Background(), w.buildJobContext(job), info, false, nil)
 	if !errors.Is(err, errDownloadSetup) || !errors.Is(err, hlsErr) || !errors.Is(err, errChallengesUnsolvable) {
 		t.Errorf("ExecuteWithChat = %v, want a setup failure naming the manifest-free and the HLS failures", err)
@@ -594,5 +610,139 @@ func TestChallengeFreeSeamsAreTheServiceMethods(t *testing.T) {
 	}
 	if reflect.ValueOf(fetchCookielessFormats).Pointer() != reflect.ValueOf((*youtube.Service).CookielessFormats).Pointer() {
 		t.Error("fetchCookielessFormats is not (*youtube.Service).CookielessFormats")
+	}
+}
+
+// TestLiveChallengeFailureRecordsFromStartWithoutJS is the owner's decision
+// on W8's first follow-up: a live capture whose from-start setup —
+// manifest-free DASH, or a DASH manifest — failed on the player's JS
+// challenges re-extracts the cookieless chain and records from the start on
+// visionos's split live formats, which need no signature and no n, on the
+// manifest-free path, as yt-dlp's --live-from-start keeps the copy whose n
+// needs no answer (_video.py:3573-3581). Its Warn says which path ran and
+// why. HLS records only when that leaves no split video and audio pair, or
+// when the no-JS setup fails too, and a Warn says that instead. A DASH
+// capture already in the part dir is set aside before the new one records
+// (one recording, its resume state with it), never written over, and an HLS
+// video.ts beside it too. Before, every such capture dropped to the live
+// HLS playlist, losing what the window no longer held.
+//
+// Mutants: go straight to HLS on a live challenge failure (the pair rows run
+// HLS); run the no-JS setup on the extraction's own formats (its handed
+// formats are tv's, needing JS); skip the pair check (the audio-only row runs
+// the no-JS setup); return the no-JS setup's failure without falling to HLS
+// (the failing row errors); drop the DASH set-aside (the staged row keeps
+// video_stream in place); the Warn dropped or naming HLS (the pair rows).
+func TestLiveChallengeFailureRecordsFromStartWithoutJS(t *testing.T) {
+	systemic := fmt.Errorf("manifestless DASH: resolve video URL: itag 299: %w: %w", errChallengesUnsolvable, cipher.ErrNUnsolved)
+	w, h, fps := 1920, 1080, 30
+	tvVideo := withLevel(youtube.Format{Itag: 299, URL: "https://r1.googlevideo.com/videoplayback?itag=299&n=" + nChal, MimeType: `video/mp4; codecs="avc1.64002a"`,
+		Bitrate: 4_000_000, Width: &w, Height: &h, Fps: &fps, Source: "tv_public", TargetDurationSec: 2}, youtube.AuthLevelTVPublic)
+	tvAudio := withLevel(youtube.Format{Itag: 140, URL: "https://r1.googlevideo.com/videoplayback?itag=140&n=" + nChal, MimeType: `audio/mp4; codecs="mp4a.40.2"`,
+		Bitrate: 128_000, Source: "tv_public", TargetDurationSec: 2}, youtube.AuthLevelTVPublic)
+	visionos := func(f youtube.Format) youtube.Format {
+		f.Source, f.URL = "visionos", strings.Replace(strings.Split(f.URL, "&n=")[0], "r1.", "r2.", 1)
+		return withLevel(f, youtube.AuthLevelVisionOS)
+	}
+	pair := []youtube.Format{visionos(tvVideo), visionos(tvAudio)}
+	for _, tc := range []struct {
+		name      string
+		kind      string
+		chain     []youtube.Format
+		noJSErr   error
+		staged    []string
+		wantNoJS  bool // the no-JS from-start capture records
+		wantHls   bool
+		wantAside []string
+	}{
+		{name: "manifest-free, visionos serves a pair", kind: "manifestless_dash", chain: pair, wantNoJS: true},
+		{name: "DASH manifest, visionos serves a pair", kind: "dash", chain: pair, wantNoJS: true},
+		{name: "visionos serves the audio alone", kind: "manifestless_dash", chain: pair[1:], wantHls: true},
+		{name: "the no-JS setup fails too", kind: "manifestless_dash", chain: pair, noJSErr: errors.New("fake manifest-free: no fragments"), wantHls: true},
+		{name: "a part holding a DASH capture and a video.ts", kind: "dash", chain: pair, staged: []string{"video_stream", "audio_stream", "video.ts"},
+			wantNoJS: true, wantAside: []string{"video_stream", "audio_stream", "video.ts"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hls := &fakeStrategy{kind: "hls"}
+			swapHls(t, hls)
+			noJS := &fakeStrategy{kind: "manifestless_dash", answers: []error{tc.noJSErr}}
+			orig := ManifestlessDashStrategy
+			ManifestlessDashStrategy = noJS
+			t.Cleanup(func() { ManifestlessDashStrategy = orig })
+			calls := fakeCookieless(t, tc.chain, nil)
+			job, logs := reextractJob(t)
+			rec := &warnRecorder{captureLogger: logs}
+			job.Logger = rec
+			for _, name := range tc.staged {
+				if err := os.WriteFile(filepath.Join(job.StagingDir, name), []byte("an earlier session's "+name), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(tc.staged) > 0 {
+				if err := os.WriteFile(filepath.Join(job.StagingDir, "video_stream.resume.json"), []byte(`{"lastSeq":7}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer, Formats: []youtube.Format{tvVideo, tvAudio},
+				HlsManifestURL: "https://manifest.googlevideo.com/api/manifest/hls_variant/id/abc/file/index.m3u8", HlsManifestSource: "visionos"}
+			first := &fakeStrategy{kind: tc.kind, answers: []error{systemic}}
+			res, err := setupWithFallback(context.Background(), job, first, false, info, &StrategyDeps{})
+			if err != nil || res == nil {
+				t.Fatalf("setup = %v, want a capture", err)
+			}
+			if n := calls.Load(); n != 1 {
+				t.Errorf("cookieless re-extract ran %d time(s), want once", n)
+			}
+			noJSWarned := rec.warned("[Cipher] live: the player's JS challenges cannot be solved — recording from the start on the split live formats that need no player JS")
+			hlsWarned := rec.warned("[Cipher] live: recording from the start cannot run")
+			if tc.wantNoJS {
+				if len(noJS.seen) != 1 || len(hls.seen) != 0 || res.IsHls {
+					t.Fatalf("no-JS setup run %d time(s), HLS %d; want the no-JS capture alone", len(noJS.seen), len(hls.seen))
+				}
+				handed := noJS.seen[0]
+				if handed == info || len(handed.Formats) != 2 {
+					t.Fatalf("no-JS setup handed %+v, want a copy holding visionos's pair", handed.Formats)
+				}
+				for _, f := range handed.Formats {
+					if f.Source != "visionos" || f.NeedsPlayerJS() {
+						t.Errorf("no-JS format %d from %s (needs JS %v), want visionos's copy", f.Itag, f.Source, f.NeedsPlayerJS())
+					}
+				}
+				if !noJSWarned || hlsWarned {
+					t.Errorf("warned no-JS %v, HLS %v; want the Warn naming the no-JS from-start path alone: %v", noJSWarned, hlsWarned, logs.lines())
+				}
+				if line := logLine(logs, "[Cipher] live: the player's JS challenges cannot be solved"); line == nil || !errors.Is(line["err"].(error), systemic) {
+					t.Errorf("no-JS line = %v, want the setup failure as its err", line)
+				}
+			}
+			if tc.wantHls {
+				if len(hls.seen) != 1 || hls.seen[0] != info || !res.IsHls {
+					t.Fatalf("HLS handed %v, want the extraction's VideoInfo once", hls.seen)
+				}
+				if !hlsWarned || noJSWarned {
+					t.Errorf("warned HLS %v, no-JS %v; want the HLS Warn alone: %v", hlsWarned, noJSWarned, logs.lines())
+				}
+			}
+			if info.Formats[0].Source != "tv_public" {
+				t.Error("the caller's VideoInfo was rewritten")
+			}
+			asides := stagedRestartAsides(job.StagingDir)
+			if len(asides) != len(tc.wantAside) {
+				t.Fatalf("asides = %v, want the earlier %v", asides, tc.wantAside)
+			}
+			for _, name := range tc.wantAside {
+				if fileExists(filepath.Join(job.StagingDir, name)) {
+					t.Errorf("%s is still in the part beside the no-JS capture", name)
+				}
+			}
+			if len(tc.wantAside) > 0 {
+				if fileExists(filepath.Join(job.StagingDir, "video_stream.resume.json")) {
+					t.Error("video_stream's resume state stayed beside the no-JS capture")
+				}
+				if groups := groupStagedAsides(asides); len(groups) != 2 {
+					t.Errorf("the earlier captures set aside as %d recordings, want the DASH pair and the video.ts: %+v", len(groups), groups)
+				}
+			}
+		})
 	}
 }

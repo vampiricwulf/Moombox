@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
@@ -218,18 +219,28 @@ func challengeFreeHlsInfo(ctx context.Context, job *JobContext, info *youtube.Vi
 //     token is recommended only (_base.py:85-88), so upstream records that
 //     HLS bare, and so does DownloadHls (audit G16).
 //   - A live capture on a from-start path whose setup failed on the
-//     player's JS challenges (setupFailedOnChallenges, audit G10) records
-//     the live HLS playlist instead, the job log saying why from-start was
-//     dropped (owner decision 7). That is yt-dlp's own default for a live
-//     stream: it skips the live adaptive formats unless --live-from-start
-//     asks for them (_video.py:3492-3501, 3616-3619) and records HLS, and a
-//     master whose n has no answer it passes over for the next client's
-//     (3692-3713) — DownloadHls does the same through challengeFreeHlsInfo,
-//     and asks it too when the extraction carried no master at all. The
-//     from-start paths have no copy to fall to: visionos serves a live
-//     stream no DASH manifest, and a challenge-free adaptive copy is not
-//     looked for here (the plan's call), so the live playlist is what is
-//     left.
+//     player's JS challenges (setupFailedOnChallenges, audit G10) first
+//     records from the start without JS (noJSFromStart, the owner's
+//     decision on W8's first follow-up): the formats that need no player JS
+//     — the extraction's, plus one cookieless re-extract's, visionos's split
+//     live adaptive formats first (challengeFreeFormats) — on the
+//     manifest-free path, from the start, as the post-live arm below
+//     already does. That is yt-dlp's --live-from-start: it keeps the live
+//     adaptive formats of every client (_video.py:3492-3501,
+//     _needs_live_processing) and skips each whose n has no answer
+//     (3573-3581, "if not n_result: continue"), so a client whose formats
+//     carry no n challenge — visionos, the JS-less default client
+//     (_DEFAULT_JSLESS_CLIENTS, 144) — is the one that records. Only when
+//     that leaves no split video and audio pair, or its setup fails too,
+//     does the capture record the live HLS playlist, the job log saying
+//     which path ran and why (owner decision 7). That is yt-dlp's own
+//     default for a live stream: it skips the live adaptive formats unless
+//     --live-from-start asks for them (3492-3501, 3616-3619) and records
+//     HLS, and a master whose n has no answer it passes over for the next
+//     client's (3692-3713) — DownloadHls does the same through
+//     challengeFreeHlsInfo, and asks it too when the extraction carried no
+//     master at all. visionos serves a live stream no DASH manifest, so a
+//     DASH-manifest capture's no-JS path is the manifest-free one too.
 //   - A post-live manifest-free capture has no live edge to fall to. One
 //     that failed on the challenges runs again on the formats that need no
 //     player JS (challengeFreeFormats: the drop, one cookieless re-extract,
@@ -295,9 +306,7 @@ func setupOrFallback(ctx context.Context, job *JobContext, strategy DownloadStra
 	}
 	switch {
 	case !isVod && (kind == ManifestlessDashStrategy.Kind() || kind == DashStrategy.Kind()):
-		job.Logger.Warn("[Cipher] live: recording from the start cannot run — the player's JS challenges cannot be solved; recording the live HLS playlist instead, from the oldest segment its window holds",
-			"jobID", job.Job.ID, "strategy", kind, "err", err)
-		return liveHlsInstead(ctx, job, HlsStrategy, info, deps, err)
+		return noJSFromStartOrHls(ctx, job, kind, info, deps, &cookielessReExtract{}, err)
 	case isVod && kind == ManifestlessDashStrategy.Kind():
 		cf := *info
 		cf.Formats = challengeFreeFormats(ctx, job, info.Formats, &cookielessReExtract{}, err, "post-live manifest-free DASH")
@@ -307,6 +316,72 @@ func setupOrFallback(ctx context.Context, job *JobContext, strategy DownloadStra
 		return strategy.Download(ctx, job, &cf, deps)
 	}
 	return result, err
+}
+
+// noJSFromStartOrHls is the challenge arm's live path, for a capture on the
+// from-start path kind whose setup — or, mid-stream, whose refresh
+// (switchLivePath) — failed on the player's JS challenges with cause: from
+// the start without JS (noJSFromStart) when the formats that need none hold a
+// split video and audio pair, and the live HLS playlist when they do not, or
+// when that setup fails too. Each says, at Warn, which path ran and why. rx
+// is the setup's one cookieless re-extract.
+func noJSFromStartOrHls(ctx context.Context, job *JobContext, kind string, info *youtube.VideoInfo, deps *StrategyDeps, rx *cookielessReExtract, cause error) (*DownloadResult, error) {
+	result, err := noJSFromStart(ctx, job, info, deps, rx, cause)
+	if err == nil {
+		job.Logger.Warn("[Cipher] live: the player's JS challenges cannot be solved — recording from the start on the split live formats that need no player JS (manifest-free DASH), not the live HLS playlist",
+			"jobID", job.Job.ID, "strategy", kind, "videoItag", result.VideoItag, "audioItag", result.AudioItag, "err", cause)
+		return result, nil
+	}
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("%w; %w", cause, err)
+	}
+	job.Logger.Warn("[Cipher] live: recording from the start cannot run — the player's JS challenges cannot be solved and "+err.Error()+"; recording the live HLS playlist instead, from the oldest segment its window holds",
+		"jobID", job.Job.ID, "strategy", kind, "err", cause)
+	return liveHlsInstead(ctx, job, HlsStrategy, info, deps, fmt.Errorf("%w; %w", cause, err))
+}
+
+// errNoChallengeFreePair is noJSFromStart's answer when the formats that need
+// no player JS hold no split video and audio pair to record from the start.
+var errNoChallengeFreePair = errors.New("no split video and audio pair that needs no player JS is left")
+
+// noJSFromStart is a live capture's from-start setup on the formats that
+// need no player JS (challengeFreeFormats: the extraction's own, and the
+// cookieless chain's, visionos first) on the manifest-free path, for a
+// capture whose from-start setup failed on the challenges with cause. A copy
+// of info carries them: info is never written. It fails with
+// errNoChallengeFreePair when they hold no split pair, and with the setup's
+// own error when that fails.
+//
+// The capture it builds is DASH-shaped (video_stream, audio_stream) and may
+// be another client's rendition of the stream than the one the part dir
+// already holds — a tv or web DASH capture an earlier session of the job, or
+// this one, recorded before the challenges stopped being solvable. Recorded
+// into the same names it would resume through their sidecar, appending one
+// rendition's fragments under the other's init segment; so any DASH capture
+// in the part dir is set aside first, as the shape set-aside sets one aside
+// (setAsideStagedMedia), muxed into its own file beside the archive at
+// finalize and never written over. The downloaders read their resume state
+// when they start, not when they are built, so the set-aside after the
+// setup is ahead of it. A dir that cannot be cleared fails the setup.
+func noJSFromStart(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps, rx *cookielessReExtract, cause error) (*DownloadResult, error) {
+	cf := *info
+	cf.Formats = challengeFreeFormats(ctx, job, info.Formats, rx, cause, "live from-start DASH")
+	if !HasManifestlessDashFormats(cf.Formats) {
+		return nil, errNoChallengeFreePair
+	}
+	result, err := ManifestlessDashStrategy.Download(ctx, job, &cf, deps)
+	if err != nil {
+		return nil, fmt.Errorf("the no-JS from-start setup failed too: %w", err)
+	}
+	asides, err := setAsideStagedMedia(job.StagingDir, []string{"video_stream", "audio_stream"})
+	if len(asides) > 0 {
+		job.Logger.Warn("an earlier from-start capture of this job was set aside before the no-JS from-start capture records into its part; it is muxed to its own file beside the archive, never into it",
+			"jobID", job.Job.ID, "asides", strings.Join(asides, " | "))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("staging holds an earlier from-start capture that could not be set aside: %w", err)
+	}
+	return result, nil
 }
 
 // liveHlsInstead is either live arm of setupOrFallback: hls's setup for the
