@@ -14,8 +14,9 @@ const (
 	// proactiveRefreshEvery is the longest a downloader goes without a
 	// renewal, whatever its URL says: yt-dlp's url_feed re-extracts every
 	// 18000 s during a live-from-start download, refused segments or not
-	// (extractor/youtube/_video.py _live_adaptive_fragments, from adbc4ec4b
-	// #888). It is the whole cadence for a URL that names no expiry.
+	// (extractor/youtube/_video.py _live_adaptive_fragments: url_feed came
+	// with adbc4ec4b #888, its 18000 s delay with 185bf3107). It is the
+	// whole cadence for a URL that names no expiry.
 	proactiveRefreshEvery = 5 * time.Hour
 	// proactiveRefreshRetry is the wait after a renewal that installed no
 	// new URL — the callback failed, kept the URL on purpose, or the
@@ -63,6 +64,16 @@ func proactiveRefreshDue(renewed time.Time, url string, expiry func(string) (tim
 // proactiveRefreshRetry later; a URL the recovery has swapped in meanwhile is
 // not renewed on top of it when the timer next fires — the cadence restarts
 // there, the swapped URL's own expiry setting the next renewal.
+//
+// The timer, its cooldown and its callback are per downloader, so a
+// manifest-free capture's video and audio downloaders — whose URLs come from
+// one extraction and carry the same expire= — renew together, each with its
+// own player request and bypass-cache mint (twice that on every retry). That
+// is a known divergence from yt-dlp, whose refetch_manifest serves every
+// format's generator from one player request under one lock and one
+// start_time (_video.py _prepare_live_from_start_formats); at one renewal
+// per ~5 h it costs one extra request, not worth a per-job singleflight
+// shared across downloaders.
 func (d *SegmentDownloader) runProactiveRefresh(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {

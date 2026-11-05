@@ -135,6 +135,67 @@ func TestProactiveRefreshRenewsBeforeTheURLExpires(t *testing.T) {
 	})
 }
 
+// TestProactiveRefreshSharesTheRecoveryCooldown pins that the renewal and the
+// 403 recovery (refreshCredentials) take the one credentialRefreshCooldown
+// claim (installCredentials), so the two never run back to back: a renewal
+// falling due a moment after a recovery is held, and asked again
+// proactiveRefreshRetry later; a recovery a moment after a renewal is held.
+//
+// Mutants: the renewal calling OnProactiveRefresh and installing its answer
+// without the claim (it runs at +1h30m, a second after the recovery); the
+// claim dropped from installCredentials altogether (the same, and the
+// recovery runs right after the renewal).
+func TestProactiveRefreshSharesTheRecoveryCooldown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		var renewals, recoveries atomic.Int32
+		d := NewSegmentDownloader(DownloaderOptions{
+			BaseURL:   expiringURL(1, start.Add(2*time.Hour)),
+			URLExpiry: testURLExpiry,
+			OnProactiveRefresh: func() (string, string) {
+				n := int(renewals.Add(1))
+				return expiringURL(n+1, time.Now().Add(6*time.Hour)), ""
+			},
+			OnCredentialRefresh: func() (string, string) {
+				recoveries.Add(1)
+				return "", "" // installs nothing, so the URL the timer watches stays
+			},
+		})
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			d.runProactiveRefresh(ctx)
+		}()
+
+		// +1h29m59s: a 403 recovery runs a second before the renewal is due.
+		time.Sleep(90*time.Minute - time.Second)
+		synctest.Wait()
+		d.refreshCredentials()
+		if n := recoveries.Load(); n != 1 {
+			t.Fatalf("recovery calls = %d, want 1", n)
+		}
+		time.Sleep(time.Minute) // +1h30m59s: the renewal fell due inside the cooldown
+		synctest.Wait()
+		if n := renewals.Load(); n != 0 {
+			t.Fatalf("at +%v: %d renewal(s), want 0 (held by the recovery's cooldown)", time.Since(start), n)
+		}
+		time.Sleep(4*time.Minute + time.Second) // +1h35m: asked again proactiveRefreshRetry after the held ask (+1h30m)
+		synctest.Wait()
+		if n := renewals.Load(); n != 1 {
+			t.Fatalf("at +%v: %d renewal(s), want 1", time.Since(start), n)
+		}
+		// The renewal just claimed the cooldown: a recovery right after is held.
+		d.refreshCredentials()
+		if n := recoveries.Load(); n != 1 {
+			t.Errorf("recovery calls after the renewal = %d, want 1 (held by the renewal's cooldown)", n)
+		}
+
+		cancel()
+		<-done
+	})
+}
+
 func mustQuery(t *testing.T, raw, key string) string {
 	t.Helper()
 	u, err := url.Parse(raw)
