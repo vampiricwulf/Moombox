@@ -113,3 +113,42 @@ func setupMarathonOr(ctx context.Context, job *JobContext, strategy DownloadStra
 		"jobID", job.Job.ID, "err", err)
 	return setupOrFallback(ctx, job, strategy, isVod, info, deps)
 }
+
+// evictedStartToLiveEdge is the live loop's answer to a still-live capture
+// whose downloaders stopped having written nothing because what they start
+// from is gone (audit G11): a stream older than YouTube's window that the
+// setup's age check could not see — no start on the row, or a resumed
+// capture whose position the CDN has since dropped too. diagnoseEvictedStart
+// confirms it the way it confirms a post-live one: the downloaders wrote
+// zero bytes, never left the first-segment hunt's window, and stopped under
+// a head past the eviction floor (evictionHeadFloor), and the bisection
+// finds the oldest segment the CDN still serves above sq 0. Then hls builds
+// the live HLS capture into the current part, and it replaces result — the
+// still-live checks are not spent on a start that cannot come back, which
+// is what they did for half an hour, re-seeding each refreshed downloader at
+// the same evicted position.
+//
+// It returns the HLS result and true when it switched. Anything short of a
+// confirmed eviction — bytes written, an HLS capture already, a head not
+// deep enough, a bisection that found sq 0 or a dead URL — returns false
+// before hls runs, and the still-live checks go on as before; so does an HLS
+// setup that fails, with a Warn. The job log says why from-start was
+// dropped (owner decision 7), beside diagnoseEvictedStart's own diagnosis.
+func (o *DownloadOrchestrator) evictedStartToLiveEdge(ctx context.Context, jobCtx *JobContext, info *youtube.VideoInfo, result *DownloadResult, hls func() (*DownloadResult, error)) (*DownloadResult, bool) {
+	if result == nil || result.IsHls {
+		return nil, false
+	}
+	evicted := o.diagnoseEvictedStart(ctx, jobCtx, info, result)
+	if evicted == nil {
+		return nil, false
+	}
+	jobCtx.Logger.Warn("[Live] the capture's start is gone from YouTube's ~120 h window — recording from the start cannot run; recording the live HLS playlist instead, from the live edge",
+		"jobID", jobCtx.Job.ID, "err", evicted)
+	hlsResult, err := hls()
+	if err != nil {
+		jobCtx.Logger.Warn("[Live] the live HLS setup failed — the still-live checks go on",
+			"jobID", jobCtx.Job.ID, "err", err)
+		return nil, false
+	}
+	return hlsResult, true
+}
