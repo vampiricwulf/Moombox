@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/httpx"
@@ -153,46 +154,45 @@ func TestStreamingFallbackDiscardsWhenRangeIgnored(t *testing.T) {
 // forever. A stall is a request with no complete answer, so the fallback asks
 // again, MaxChunkRetries times in all, before the stall's error stands.
 //
+// It runs in a synctest bubble over serveEngineInMemory: the idle bound, the
+// eleven attempts' stalls and the ladder between them are the bubble's clock,
+// not 80 ms of wall clock each (the ladder grew from three attempts to
+// eleven).
+//
 // Mutant: dropping the withReadProgressDeadline/idleBody pair from
-// runDirectDownloadFallback — the call never returns and this test fails on
-// its own guard (safetyNet).
+// runDirectDownloadFallback — the call never returns, and the bubble reports
+// every goroutine in it blocked.
 func TestStreamingFallbackFailsOnIdleStall(t *testing.T) {
 	prev := SegmentTimeout
 	t.Cleanup(func() { SegmentTimeout = prev })
 	SegmentTimeout = 80 * time.Millisecond
 
-	block := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var asked atomic.Int32
+	serveEngineInMemory(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked.Add(1)
 		w.WriteHeader(http.StatusOK)
-		if fl, ok := w.(http.Flusher); ok {
-			fl.Flush()
-		}
-		<-block
+		<-r.Context().Done() // headers, then silence until the client gives up
 	}))
-	t.Cleanup(func() { close(block); srv.Close() })
 
-	path := filepath.Join(t.TempDir(), "video.mp4")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		t.Fatalf("open output: %v", err)
-	}
-	t.Cleanup(func() { f.Close() })
+	synctest.Test(t, func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "video.mp4")
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatalf("open output: %v", err)
+		}
+		t.Cleanup(func() { f.Close() })
 
-	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, OutputFile: path, IsDirectURL: true})
-	d.outputFile = f
-	d.delays = directDelays()
+		d := NewSegmentDownloader(DownloaderOptions{BaseURL: inMemoryOrigin, OutputFile: path, IsDirectURL: true})
+		d.outputFile = f
+		d.delays = directDelays()
 
-	done := make(chan error, 1)
-	go func() { done <- d.runDirectDownloadFallback(context.Background()) }()
-
-	select {
-	case err := <-done:
-		if !errors.Is(err, errFetchIdle) {
+		if err := d.runDirectDownloadFallback(context.Background()); !errors.Is(err, errFetchIdle) {
 			t.Fatalf("runDirectDownloadFallback = %v, want errFetchIdle", err)
 		}
-	case <-time.After(safetyNet):
-		t.Fatal("runDirectDownloadFallback never returned — the streaming fallback has no deadline")
-	}
+		if got := asked.Load(); got != MaxChunkRetries {
+			t.Errorf("requests = %d, want %d (a stall is asked again, MaxChunkRetries times in all)", got, MaxChunkRetries)
+		}
+	})
 }
 
 // TestProbeFileSizeDrainIsBounded pins ENGINE-14 (report #50): the 1-byte

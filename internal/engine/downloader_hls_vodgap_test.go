@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -17,10 +18,12 @@ import (
 // (ENDLIST + !StopOnGap) with an early segment that permanently 403s. The
 // gap-sentinel fix must: skip the missing segment (not wedge the consumer and
 // buffer the whole VOD), fire OnGap exactly for it, and write the rest in
-// order — while completing (no hang).
+// order — while completing (no hang). An HLS fetch knows no head, so the 403
+// is asked headlessRefusalAttempts times before it is a gap, and no more.
 func TestHlsVodParallel_EarlyGapBoundedAndSkipped(t *testing.T) {
 	const total = 40
 	const goneIdx = 2 // an early hole — the worst case for the old buffer wedge
+	var goneAsks atomic.Int32
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/playlist.m3u8", func(w http.ResponseWriter, r *http.Request) {
@@ -35,6 +38,7 @@ func TestHlsVodParallel_EarlyGapBoundedAndSkipped(t *testing.T) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), ".ts")
 		if name == fmt.Sprintf("seg%d", goneIdx) {
+			goneAsks.Add(1)
 			w.WriteHeader(http.StatusForbidden) // permanent gone -> gap sentinel
 			return
 		}
@@ -52,6 +56,10 @@ func TestHlsVodParallel_EarlyGapBoundedAndSkipped(t *testing.T) {
 		IsHls:      true,
 		// StopOnGap:false (default) -> ENDLIST routes to runHlsVodParallel.
 	})
+
+	// The headless 403's backoff (singleGoneRetry) at test scale; the
+	// attempt count is production's.
+	d.delays = fastDelays()
 
 	var gapMu sync.Mutex
 	var gaps []DownloadGap
@@ -91,6 +99,9 @@ func TestHlsVodParallel_EarlyGapBoundedAndSkipped(t *testing.T) {
 	}
 	if gaps[0].From != goneIdx || gaps[0].To != goneIdx {
 		t.Errorf("gap = %+v, want From=To=%d", gaps[0], goneIdx)
+	}
+	if got := goneAsks.Load(); got != headlessRefusalAttempts {
+		t.Errorf("the refused segment was asked for %d times, want %d (headlessRefusalAttempts)", got, headlessRefusalAttempts)
 	}
 
 	// currentSeq must be INDEX-aligned (== total), not written-count (which
@@ -141,6 +152,7 @@ func TestHlsVodParallel_TrailingGapClosed(t *testing.T) {
 		StartSeq:   -1,
 		IsHls:      true,
 	})
+	d.delays = fastDelays() // three headless 410s per gone segment, at test scale
 	var gaps []DownloadGap
 	var mu sync.Mutex
 	d.OnGap = func(g DownloadGap) { mu.Lock(); gaps = append(gaps, g); mu.Unlock() }

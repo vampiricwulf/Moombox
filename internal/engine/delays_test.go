@@ -129,13 +129,23 @@ func fast(d time.Duration) time.Duration { return d / fastScale }
 // monitor calls it) are written at this scale too.
 const directScale = 5
 
+// directLadderScale is how much further the ladder's unit moves: the
+// whole-file ladder is MaxChunkRetries' eleven attempts 181 units apart
+// (directRetryBackoff), and at directScale's 10 ms unit every test that runs
+// one out paid 1.8 s for it. The unit also paces the outage verdict's polls,
+// not its window (3 x connectivityPoll), so a finer unit polls the same
+// window more often and changes no count a test reads.
+const directLadderScale = 10
+
 // directDelays is fastDelays() with the direct path's three waits divided by
-// directScale: genericRetry 20 ms, atEdgeBackoffUnit 10 ms, connectivityPoll
-// 50 ms (production ÷ 100), so the verdict window is 150 ms.
+// directScale — genericRetry 20 ms, connectivityPoll 50 ms (production ÷
+// 100), so the verdict window is 150 ms — and the ladder's unit by
+// directLadderScale besides: atEdgeBackoffUnit 1 ms, an exhausted ladder
+// 181 ms.
 func directDelays() delays {
 	d := fastDelays()
 	d.genericRetry /= directScale
-	d.atEdgeBackoffUnit /= directScale
+	d.atEdgeBackoffUnit /= directScale * directLadderScale
 	d.connectivityPoll /= directScale
 	return d
 }

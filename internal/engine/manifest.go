@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -13,6 +14,25 @@ import (
 )
 
 const defaultSegmentDuration = 2.0
+
+// ErrDRMProtected marks media Moombox refuses because it is encrypted: an HLS
+// media playlist with an #EXT-X-KEY or #EXT-X-SESSION-KEY whose METHOD is not
+// NONE (runHlsLoop, before the first write), or a DASH manifest whose every
+// Representation carries ContentProtection (ParseDash). Both paths write
+// what they fetch as it comes, with no decryption, so a protected stream
+// would be archived as ciphertext and fail only at mux time — an unplayable
+// file the job reported as Finished. yt-dlp refuses DRM the same way
+// ("This format is DRM protected", downloader/hls.py; has_drm formats are
+// filtered, YoutubeDL.py), and the format list's twin of this guard is the
+// drmFamilies skip in internal/youtube (player_api_parsing.go), whose
+// "DRM-protected" wording this error shares. The strategy that fetched the
+// manifest fails with it and the job ends on that clear error rather than
+// on an archive of ciphertext: nothing falls back to another strategy (the
+// one post-setup fallback, missingPotFallback in internal/worker, acts on a
+// missing PO token alone). Where yt-dlp drops the has_drm formats and picks
+// from the rest, a DASH manifest that is all protected here is not retried
+// over the response's HLS manifest.
+var ErrDRMProtected = errors.New("DRM-protected or encrypted media")
 
 // DashSegment represents a segment in a DASH timeline.
 type DashSegment struct {
@@ -89,6 +109,75 @@ type HlsPlaylist struct {
 	TargetDuration float64
 	MediaSequence  int
 	EndList        bool
+	// Encryption is the playlist's first #EXT-X-KEY or #EXT-X-SESSION-KEY
+	// whose METHOD is not NONE, or an #EXT-X-FAXS-CM tag; nil for a playlist
+	// served in the clear — every Twitch and YouTube playlist today. Any key
+	// anywhere refuses the whole playlist (runHlsLoop), as yt-dlp's
+	// can_download reads the whole document (downloader/hls.py).
+	Encryption *HlsKey
+}
+
+// HlsKey is the key tag that made a media playlist encrypted (see
+// HlsPlaylist.Encryption).
+type HlsKey struct {
+	Tag       string // "EXT-X-KEY", "EXT-X-SESSION-KEY" or "EXT-X-FAXS-CM"
+	Method    string // AES-128, SAMPLE-AES, ...; "" when the tag stated none
+	KeyFormat string // KEYFORMAT, "" when absent (identity)
+	URI       string // the key URI as written, unresolved
+}
+
+// DRM reports whether the key is a DRM system's rather than plain AES
+// encryption — yt-dlp's HlsFD._has_drm: an Apple FairPlay key (an skd:// URI
+// or KEYFORMAT com.apple.streamingkeydelivery), a Microsoft PlayReady one
+// (KEYFORMAT com.microsoft.playready), or Adobe Flash Access (#EXT-X-FAXS-CM).
+// It changes only the refusal's wording: Moombox decrypts neither kind.
+func (k *HlsKey) DRM() bool {
+	return k.Tag == "EXT-X-FAXS-CM" ||
+		strings.HasPrefix(k.URI, "skd://") ||
+		k.KeyFormat == "com.apple.streamingkeydelivery" ||
+		k.KeyFormat == "com.microsoft.playready"
+}
+
+// hlsEncryptionError is runHlsLoop's refusal of an encrypted playlist.
+func hlsEncryptionError(k *HlsKey) error {
+	kind := "encrypted"
+	if k.DRM() {
+		kind = "DRM-protected"
+	}
+	method := k.Method
+	if method == "" {
+		method = "(none stated)"
+	}
+	detail := "#" + k.Tag + " METHOD=" + method
+	if k.KeyFormat != "" {
+		detail += " KEYFORMAT=" + k.KeyFormat
+	}
+	return fmt.Errorf("%w: the HLS playlist is %s (%s) — Moombox writes segments as fetched and decrypts none, so it refuses the playlist rather than archive ciphertext",
+		ErrDRMProtected, kind, detail)
+}
+
+// parseHlsKey reads an #EXT-X-KEY or #EXT-X-SESSION-KEY line, returning nil
+// for METHOD=NONE — the tag that ends encryption for the segments after it,
+// and the only method yt-dlp's can_download lets through untouched besides
+// the AES-128 it decrypts. A key tag that states no METHOD at all (which RFC
+// 8216 requires) is taken as encrypted: it announces a key, and archiving
+// what might be ciphertext is the failure this exists to stop.
+func parseHlsKey(tag, attrs string) *HlsKey {
+	k := &HlsKey{Tag: tag}
+	for _, a := range parseAttributes(attrs) {
+		switch a.key {
+		case "METHOD":
+			k.Method = a.value
+		case "KEYFORMAT":
+			k.KeyFormat = a.value
+		case "URI":
+			k.URI = a.value
+		}
+	}
+	if k.Method == "NONE" {
+		return nil
+	}
+	return k
 }
 
 // HlsParseResult contains either master variants or media segments.
@@ -120,6 +209,9 @@ type adaptationSetXML struct {
 	Representations []representationXML `xml:"Representation"`
 	SegmentTemplate *segmentTemplateXML `xml:"SegmentTemplate"`
 	SegmentList     *segmentListXML     `xml:"SegmentList"`
+	// ContentProtection elements make every Representation in the set DRM
+	// (isDRMProtected); only their presence is read.
+	ContentProtection []struct{} `xml:"ContentProtection"`
 }
 
 type representationXML struct {
@@ -133,6 +225,8 @@ type representationXML struct {
 	BaseURL         string              `xml:"BaseURL"`
 	SegmentTemplate *segmentTemplateXML `xml:"SegmentTemplate"`
 	SegmentList     *segmentListXML     `xml:"SegmentList"`
+	// ContentProtection on the Representation itself, as on its set.
+	ContentProtection []struct{} `xml:"ContentProtection"`
 }
 
 type segmentTemplateXML struct {
@@ -166,7 +260,10 @@ type initXML struct {
 
 var sqPattern = regexp.MustCompile(`/sq/\d+`)
 
-// ParseDash parses a DASH MPD manifest and returns available streams.
+// ParseDash parses a DASH MPD manifest and returns available streams. A
+// Representation that carries ContentProtection, or sits in an AdaptationSet
+// that does, is left out (isDRMProtected); when that leaves nothing, the
+// error is ErrDRMProtected.
 func ParseDash(xmlContent string, manifestURL string) ([]DashStream, error) {
 	var mpd mpdXML
 	if err := xml.Unmarshal([]byte(xmlContent), &mpd); err != nil {
@@ -203,6 +300,7 @@ func ParseDash(xmlContent string, manifestURL string) ([]DashStream, error) {
 	}
 
 	var streams []DashStream
+	drmSkipped := 0
 
 	for _, period := range mpd.Periods {
 		periodBase := mpdBaseURL
@@ -224,6 +322,10 @@ func ParseDash(xmlContent string, manifestURL string) ([]DashStream, error) {
 		}
 		for _, as := range period.AdaptationSets {
 			for _, rep := range as.Representations {
+				if isDRMProtected(as, rep) {
+					drmSkipped++
+					continue
+				}
 				stream := parseDashRepresentation(rep, as, period, periodBase)
 				if stream != nil {
 					streams = append(streams, *stream)
@@ -232,7 +334,30 @@ func ParseDash(xmlContent string, manifestURL string) ([]DashStream, error) {
 		}
 	}
 
+	if drmSkipped > 0 {
+		if len(streams) == 0 {
+			return nil, fmt.Errorf("%w: every Representation in the DASH manifest carries ContentProtection (%d skipped) — its segments are encrypted, and an archive of them would not play",
+				ErrDRMProtected, drmSkipped)
+		}
+		slog.Debug("manifest: skipped DRM-protected representations (ContentProtection)",
+			"skipped", drmSkipped, "kept", len(streams))
+	}
 	return streams, nil
+}
+
+// isDRMProtected reports whether a Representation is DRM-protected: it, or
+// the AdaptationSet it sits in, carries a ContentProtection element —
+// yt-dlp's is_drm_protected, which sets has_drm on the format either way
+// (extractor/common.py, _parse_mpd_periods), after which
+// YoutubeDL drops it (YoutubeDL.py, process_video_result). ParseDash skips
+// such a Representation, as the youtube package drops a drmFamilies format
+// (player_api_parsing.go): its segments are ciphertext, and recorded they mux
+// into an unplayable file. The trigger is narrow — DashStrategy reads a
+// manifest only when the format pool has no split adaptive formats, and
+// nothing shows YouTube marking tv's live MPD this way — but the guard costs
+// one element lookup.
+func isDRMProtected(as adaptationSetXML, rep representationXML) bool {
+	return len(as.ContentProtection) > 0 || len(rep.ContentProtection) > 0
 }
 
 func parseDashRepresentation(rep representationXML, as adaptationSetXML, period periodXML, baseURL string) *DashStream {
@@ -624,6 +749,22 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 				if attr.key == "URI" && attr.value != "" {
 					curMapURI = resolveURL(baseURL, attr.value)
 				}
+			}
+
+		case strings.HasPrefix(line, "#EXT-X-KEY:"), strings.HasPrefix(line, "#EXT-X-SESSION-KEY:"):
+			// Encryption: segments under a key are ciphertext, and this
+			// engine decrypts none. Recorded here, refused by runHlsLoop
+			// before anything is written. The first key that is not NONE
+			// names the playlist's encryption.
+			tag, attrs, _ := strings.Cut(line[1:], ":")
+			if k := parseHlsKey(tag, attrs); k != nil && playlist.Encryption == nil {
+				playlist.Encryption = k
+			}
+
+		case strings.HasPrefix(line, "#EXT-X-FAXS-CM:"):
+			// Adobe Flash Access, the third DRM yt-dlp's _has_drm names.
+			if playlist.Encryption == nil {
+				playlist.Encryption = &HlsKey{Tag: "EXT-X-FAXS-CM"}
 			}
 
 		case strings.HasPrefix(line, "#EXTINF:"):

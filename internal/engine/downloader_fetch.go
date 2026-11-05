@@ -405,6 +405,13 @@ func (d *SegmentDownloader) fetchSegment(parent context.Context, segURL string) 
 	return data, resp.StatusCode, nil
 }
 
+// headlessRefusalAttempts is how many times fetchSegmentWithRetry asks for a
+// segment refused with 403 or 410 while no head is known (headSeq < 0): the
+// first try and two more, singleGoneRetry and twice it apart (500 ms, 1 s).
+// See the call site for why a headless refusal is retried at all, and why
+// not yt-dlp's ten times.
+const headlessRefusalAttempts = 3
+
 // errSegmentGone is the ErrSegmentPermanent fetchSegmentWithRetry returns for
 // a 410: the same message, and errors.Is(err, ErrSegmentPermanent) for every
 // caller that only needs "permanent", but distinct from a 403's for the one
@@ -419,6 +426,9 @@ var errSegmentGone = fmt.Errorf("%w", ErrSegmentPermanent)
 // other transient failure waits a LINEAR 5s x (attempt+1) — 5s, 10s, 15s, 20s
 // over the default MaxSegmentRetries=5, with the final attempt's sleep
 // skipped because no fetch follows it.
+// A 403 or 410 while no head is known is asked again headlessRefusalAttempts
+// times in all before it is permanent; with a head known it is permanent at
+// once, unless a 403 below the head gets the refresh path above.
 // Returns:
 //   - (data, nil): success.
 //   - (nil, ErrSegmentPermanent): segment is gone for good (403/410). Don't retry.
@@ -477,6 +487,39 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 			// directly — so the arrival signal fires here unconditionally.
 			d.noteFetch(len(body))
 			return body, nil
+		}
+		if (status == 403 || status == 410) && d.headSeq.Load() < 0 {
+			// No head is known — no response has carried X-Head-Seqnum, so
+			// nothing says whether the segment exists: every HLS fetch
+			// (Twitch VOD segments, a #EXT-X-MAP init through
+			// ensureHlsInit) and a DASH init a non-GVS origin refused. A
+			// refusal was permanent at once here, which made one transient
+			// edge 403 a permanent gap in a Twitch VOD and, on the fMP4
+			// init, ended the whole VOD (runHlsVodParallel). yt-dlp retries
+			// every fragment HTTPError, 403/404/410 included,
+			// fragment_retries (10) times before it skips the fragment
+			// (downloader/fragment.py, download_fragment). Moombox asks
+			// up to headlessRefusalAttempts times in all, counted on this
+			// segment's one attempt counter with its 5xx and transport
+			// failures — as upstream's fragment RetryManager shares one
+			// counter across error kinds — so a refusal after two failed
+			// attempts is permanent at once. It waits on the 403-refresh
+			// path's doubling backoff and does not refresh, since nothing
+			// here derives the URL from a base: a 403 on Twitch's VOD CDN
+			// is usually permanent (a muted part), and neither tool can
+			// fetch those, so ten attempts would only hold a worker longer.
+			// With a head known the old rules below stand unchanged — past
+			// it a 403 is how a finished stream says "no such segment",
+			// and a 410 is an eviction.
+			if attempt >= min(headlessRefusalAttempts, d.opts.MaxRetries)-1 {
+				if status == 410 {
+					return nil, errSegmentGone
+				}
+				return nil, ErrSegmentPermanent
+			}
+			d.emitActivity(ActivityRetrying)
+			utils.Sleep(ctx, d.delays.singleGoneRetry<<attempt)
+			continue
 		}
 		if status == 410 {
 			// Genuinely evicted. Never retried, never refreshed.
@@ -932,8 +975,34 @@ func (d *SegmentDownloader) probeFileSizeWithRetry(ctx context.Context) (int64, 
 	return 0, d.cancelErr(ctx)
 }
 
-// fetchChunkWithRetry downloads a byte range with exponential backoff retry.
-// MaxChunkRetries counts ATTEMPTS, not retries after the first. Every failure
+// directBackoffCapUnits caps directRetryBackoff, in atEdgeBackoffUnit: the
+// doubling ladder stops growing at 30 s, so MaxChunkRetries' eleven attempts
+// span 1+2+4+8+16+30×5 = 181 s of waiting — about three minutes for a 5xx
+// burst or a flapping link to pass before the job ends. The cap used to be
+// 60, which a three-attempt ladder never reached.
+const directBackoffCapUnits = 30
+
+// directRetryBackoff is the wait after the n-th (from 0) failed attempt of
+// the whole-file ladder — fetchChunkWithRetry's per chunk, and
+// runDirectDownloadFallback's for the rest of the file — before the next:
+// 1, 2, 4, 8, 16 s, then directBackoffCapUnits seconds for each one after.
+// yt-dlp retries at once by default (--retry-sleep unset, options.py; its
+// RetryManager sleeps only when one is given); Moombox deliberately backs
+// off instead, because a gateway answering 5xx for an origin it cannot reach
+// and a link that keeps dropping are both things that pass with time, and
+// ten immediate retries spend the budget inside the burst they are meant to
+// outlast.
+func (d *SegmentDownloader) directRetryBackoff(n int) time.Duration {
+	units := time.Duration(directBackoffCapUnits)
+	if n < 5 { // 1<<5 = 32 is past the cap; never shift further than that
+		units = min(time.Duration(1)<<uint(max(n, 0)), units)
+	}
+	return units * d.delays.atEdgeBackoffUnit
+}
+
+// fetchChunkWithRetry downloads a byte range with exponential backoff retry
+// (directRetryBackoff). MaxChunkRetries counts ATTEMPTS, not retries after the
+// first — eleven, yt-dlp's ten retries after the first try. Every failure
 // it reports carries the last fetch's own error and status: a direct VOD that
 // dies on a flaky link ends with "HTTP 503" or the idle-stall text in its row,
 // not a bare attempt count. A 416 and a cancellation are handed back as they
@@ -952,9 +1021,11 @@ func (d *SegmentDownloader) probeFileSizeWithRetry(ctx context.Context) (int64, 
 //     out and retries. Before a failure with no complete answer is charged
 //     as the LAST attempt, the monitor is given the time it needs to call an
 //     outage (awaitOutageVerdict): a reset or refused connection or a DNS
-//     miss fails at once, so the ladder ran out in three seconds, well inside
-//     the two polls the monitor takes to notice — an outage longer than that
-//     failed the job.
+//     miss fails at once, so the three-attempt ladder this used to be ran
+//     out in three seconds, well inside the two polls the monitor takes to
+//     notice — an outage longer than that failed the job. The eleven-attempt
+//     ladder outlasts those polls by itself; the verdict stays as the last
+//     attempt's backstop.
 func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end int64) ([]byte, int, error) {
 	var (
 		lastErr    error
@@ -996,9 +1067,9 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 		// offset (fetchChunk) rides the same ladder, as fetchChunk intends.
 		incomplete := status < 300
 
-		// Retry on 5xx or network errors with exponential backoff (capped at
-		// 60s). Skip the backoff after the final attempt — no fetch follows,
-		// so it only delays the already-decided failure.
+		// Retry on 5xx or network errors on directRetryBackoff's ladder.
+		// Skip the backoff after the final attempt — no fetch follows, so it
+		// only delays the already-decided failure.
 		if status >= 500 || incomplete {
 			lastErr, lastStatus = err, status
 			if d.opts.IsOnline != nil {
@@ -1016,9 +1087,7 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 				}
 			}
 			if attempt < MaxChunkRetries-1 {
-				delay := time.Duration(1<<uint(attempt)) * d.delays.atEdgeBackoffUnit
-				delay = min(delay, 60*d.delays.atEdgeBackoffUnit)
-				utils.Sleep(ctx, delay)
+				utils.Sleep(ctx, d.directRetryBackoff(attempt))
 			}
 			continue
 		}

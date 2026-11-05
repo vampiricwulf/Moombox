@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"time"
@@ -49,7 +50,8 @@ func validateDownloadedMP4(path string) error {
 }
 
 // directResumeInterval is how many bytes a whole-file download writes between
-// resume checkpoints — ten 5 MB chunks. An interrupted multi-GB VOD then
+// resume checkpoints — 50 MB: ten full-size 5 MB chunks, about eleven of the
+// jittered ones directChunkSize draws (95-100% of the size). An interrupted multi-GB VOD then
 // resumes from its last checkpoint instead of re-downloading from byte 0, and
 // the cadence keeps the save (which now fsyncs the media first, owner decision
 // O-G) off the hot path: once per 50 MB is nothing beside the transfer itself.
@@ -85,8 +87,9 @@ func (d *SegmentDownloader) checkpointDirect(staged int64) {
 }
 
 // runDirectDownload downloads a complete file from a direct URL (for VODs).
-// Uses 5MB chunked Range requests with per-chunk retry and percentage progress.
-// Falls back to streaming download if the server doesn't support Range requests.
+// Uses chunked Range requests of 95-100% of 5 MB each (directChunkSize) with
+// per-chunk retry and percentage progress. Falls back to streaming download
+// if the server doesn't support Range requests.
 func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	// The checkpoint cadence counts from where this run starts: the offset
 	// Start restored from the sidecar, or 0.
@@ -118,7 +121,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	}
 	d.directTotalSize = totalSize
 
-	// Chunked download with 5MB Range requests. Resume from the byte position
+	// Chunked download with ~5MB Range requests. Resume from the byte position
 	// Start() restored: on a resumed run it loaded a valid resume sidecar,
 	// validated identity (the caller's StreamID, then the URL's itag/clen
 	// fingerprint) and file size, and truncated the output to the fsync'd
@@ -135,7 +138,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 			return d.cancelErr(ctx)
 		}
 
-		end := offset + DownloadChunkSize - 1
+		end := offset + d.directChunkSize() - 1
 		if end >= totalSize {
 			end = totalSize - 1
 		}
@@ -149,7 +152,13 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 				// a truncated file to validation, which reads the header
 				// alone — the job finished over a short archive. An error
 				// keeps the sidecar for a Resume, whose fresh probe settles
-				// whether the origin's file really changed.
+				// whether the origin's file really changed — unless the file
+				// stops within directEndTolerance of the total, which is
+				// yt-dlp's complete file (directEndsWithinTolerance).
+				if d.directEndsWithinTolerance("416 Range Not Satisfiable", offset, totalSize) {
+					totalSize = offset
+					break
+				}
 				return directShortFileError("416 Range Not Satisfiable", offset, totalSize)
 			}
 			// Already phrased by fetchChunkWithRetry ("chunk download failed
@@ -175,7 +184,12 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 
 		if len(data) == 0 {
 			// Same reading as the 416 above: below the probed total an empty
-			// 206 is a short origin, not the end of the file.
+			// 206 is a short origin, not the end of the file — and within
+			// directEndTolerance of it, the end of a complete one.
+			if d.directEndsWithinTolerance("an empty 206", offset, totalSize) {
+				totalSize = offset
+				break
+			}
 			return directShortFileError("an empty 206", offset, totalSize)
 		}
 		d.noteFetch(len(data))
@@ -267,6 +281,67 @@ func directShortFileError(answer string, offset, totalSize int64) error {
 		answer, offset, totalSize)
 }
 
+// directEndTolerance is how many bytes short of the total a whole-file
+// download may stop and still be the complete file: yt-dlp's HttpFD reads a
+// 416 on resume as "already fully downloaded" when the file's length is
+// within 100 bytes either side of what is on disk (downloader/http.py,
+// `resume_len - 100 < content_length < resume_len + 100` — "YouTube
+// sometimes adds or removes a few bytes from the end of the file", youtube-dl
+// #175). The bound is strict, as upstream's is: 99 bytes short completes, 100
+// does not. Moombox reads it in three places, all through the same constant:
+// a 416 or an empty 206 that stops the chunked loop, the streaming fallback's
+// same two answers (directEndsWithinTolerance), and a resume whose probe
+// states a total that moved by less than it (differentFileReason).
+const directEndTolerance = 100
+
+// directEndsWithinTolerance reports whether an origin that stopped serving at
+// offset, answer being how it said so, has delivered the whole file whose
+// total its size probe or the resume state declared: offset is short of it,
+// but by less than directEndTolerance. It logs the completion, so a file a
+// few bytes short of its probed size is never finished silently; a shortfall
+// it does not forgive is left to directShortFileError. Where upstream
+// re-requests the file without a Range to read its length again, Moombox
+// compares against the total it already holds — the same length the probe
+// and the resume state agreed on, without a request that would start
+// streaming the whole file.
+func (d *SegmentDownloader) directEndsWithinTolerance(answer string, offset, total int64) bool {
+	short := total - offset
+	if short <= 0 || short >= directEndTolerance {
+		return false
+	}
+	d.logger.Info("[Downloader] Whole-file download stopped a few bytes short of its total — complete, within yt-dlp's 100-byte tolerance",
+		"answer", answer, "bytes", offset, "total", total, "short", short)
+	return true
+}
+
+// directChunkFloor is the smallest chunk directChunkSize asks for: 95% of
+// DownloadChunkSize, rounded down as yt-dlp's int(chunk_size * 0.95) is.
+const directChunkFloor = DownloadChunkSize * 95 / 100
+
+// directChunkSize is the length of the next chunk the whole-file loop asks
+// for: a fresh pick from directChunkFloor to DownloadChunkSize, both ends
+// included — yt-dlp's random.randint(int(chunk_size * 0.95), chunk_size),
+// drawn for every connection HttpFD establishes (downloader/http.py,
+// "Randomize HTTP chunk size", youtube-dl b91a7a4e5). Every request used to
+// end exactly 5 MiB past the last: a perfectly regular Range pattern, a
+// request fingerprint upstream avoids. Each chunk's offset still follows the
+// bytes actually written, so the jitter moves where requests end, never what
+// is stored.
+func (d *SegmentDownloader) directChunkSize() int64 {
+	return directChunkFloor + d.chunkJitterSource()(DownloadChunkSize-directChunkFloor+1)
+}
+
+// chunkJitterSource is the random source directChunkSize draws from: the
+// chunkJitter test seam when one is set, else math/rand/v2's Int64N — a
+// pick in [0, n). Production never sets the seam (pinned by
+// TestDirectChunkJitterDrawsFromMathRand).
+func (d *SegmentDownloader) chunkJitterSource() func(n int64) int64 {
+	if d.chunkJitter != nil {
+		return d.chunkJitter
+	}
+	return rand.Int64N
+}
+
 // errDirectRestToCome is streamDirectOnce's word that its 206 ended cleanly
 // short of the file's total after taking the file past the offset it was
 // asked from, so runDirectDownloadFallback asks for the rest from the new
@@ -285,15 +360,31 @@ var errDirectRestToCome = errors.New("the answer ended before the file did")
 // loop of its size probe, and the streaming fallback — which a failed probe
 // routes a resume into — of the Content-Range its resume Range is answered
 // with.
+//
+// A total that moved by less than directEndTolerance is the same file, as it
+// is to yt-dlp's end-of-file check (the few bytes YouTube adds or removes at
+// the end of a file, youtube-dl #175). This reaches only a probe whose total
+// moved while the URL's identity did not: a YouTube VOD URL carries `clen`,
+// which streamIdentity fingerprints (and the worker's StreamID names), so a
+// changed clen is discarded at Start by resumeIdentityMismatch before this
+// runs. A total that moved under the same identity — or on a URL without
+// clen — used to discard a multi-GB partial and fetch it again from byte 0. The partial is kept, logged, and the download
+// continues to the new total — provided the partial is not already longer
+// than that total, which the case below still refuses.
 func (d *SegmentDownloader) differentFileReason(staged, total int64, source string) string {
+	moved := total - d.directTotalSize
 	switch {
 	case staged <= 0:
 		return ""
-	case d.directTotalSize > 0 && total != d.directTotalSize:
+	case d.directTotalSize > 0 && (moved <= -directEndTolerance || moved >= directEndTolerance):
 		return fmt.Sprintf("%s states a total of %d, not the %d the resume state was saved against — a different file",
 			source, total, d.directTotalSize)
 	case staged > total:
 		return fmt.Sprintf("%d bytes staged but %s states a total of %d — a different file", staged, source, total)
+	}
+	if d.directTotalSize > 0 && moved != 0 {
+		d.logger.Info("[Downloader] Whole-file total moved by a few bytes since the resume state was saved — the same file, within yt-dlp's 100-byte tolerance; keeping the partial",
+			"source", source, "savedTotal", d.directTotalSize, "total", total, "staged", staged)
 	}
 	return ""
 }
@@ -363,8 +454,9 @@ func (d *SegmentDownloader) discardStagedMedia(reason string) error {
 //     expired on the way ended the job on its 403;
 //   - a 5xx, or a request that got no complete answer — none at all, or a
 //     body that broke off — is asked again, at most MaxChunkRetries times
-//     without the file getting further between them, 1 s and then 2 s apart
-//     (atEdgeBackoffUnit), as the chunked loop asks for a chunk again. While
+//     without the file getting further between them, on the chunked loop's
+//     ladder (directRetryBackoff: 1, 2, 4, 8, 16 s, then 30 s), as the
+//     chunked loop asks for a chunk again. While
 //     IsOnline reports the device offline the failure is waited out instead
 //     and not counted, and before a failure with no complete answer is
 //     counted as the last, the monitor is given the time it needs to call an
@@ -438,7 +530,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 			if failures++; failures >= MaxChunkRetries {
 				return err
 			}
-			utils.Sleep(parent, time.Duration(1<<uint(failures-1))*d.delays.atEdgeBackoffUnit)
+			utils.Sleep(parent, d.directRetryBackoff(failures-1))
 		default:
 			return err
 		}
@@ -546,7 +638,7 @@ func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool,
 			} else {
 				total = d.directTotalSize
 			}
-			if total > 0 && total != offset {
+			if total > 0 && total != offset && !d.directEndsWithinTolerance("416 Range Not Satisfiable", offset, total) {
 				return status, false, directShortFileError("416 Range Not Satisfiable", offset, total)
 			}
 			d.logger.Info("[Downloader] Resume offset is at or past EOF — staged file is already complete",
@@ -618,9 +710,12 @@ func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool,
 	// without end.
 	if staged := d.bytesWritten.Load(); total > 0 && staged < total {
 		if staged <= offset {
-			return status, false, directShortFileError("a 206 that brought nothing past the resume offset", staged, total)
+			if !d.directEndsWithinTolerance("a 206 that brought nothing past the resume offset", staged, total) {
+				return status, false, directShortFileError("a 206 that brought nothing past the resume offset", staged, total)
+			}
+		} else {
+			return status, false, errDirectRestToCome
 		}
-		return status, false, errDirectRestToCome
 	}
 
 	// Fully downloaded — clear the resume sidecar, exactly as the chunked

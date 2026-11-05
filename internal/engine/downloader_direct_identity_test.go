@@ -92,6 +92,7 @@ func TestDirectResumeRefusesADifferentTotal(t *testing.T) {
 	defer srvA.Close()
 	d1 := NewSegmentDownloader(DownloaderOptions{BaseURL: srvA.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
 	d1.delays = directDelays()
+	d1.chunkJitter = fullChunks // the origin cuts at the second chunk's start
 	d1.directResumeIntervalOverride = DownloadChunkSize
 	if err := d1.Start(t.Context()); err == nil {
 		t.Fatal("run 1 Start = nil, want the 404 that cuts it")
@@ -157,10 +158,16 @@ func TestDirectResumeRefusesAPartialLongerThanTheFile(t *testing.T) {
 // TestDifferentFileReason pins the rule both whole-file paths hold a resumed
 // partial to. Nothing staged has nothing to refuse — that is also what bounds
 // restartDirectFallback to one level, since its discard zeroes the counter
-// before it re-enters the fallback.
+// before it re-enters the fallback. A total that moved by less than
+// directEndTolerance from the recorded one is the same file (yt-dlp's
+// 100-byte tolerance, downloader/http.py), as long as the partial still fits
+// in it; 100 bytes either way is a different file.
 //
 // Mutant: dropping the `staged <= 0` case — the nothing-staged row returns a
 // reason, and a fallback re-entered after a discard would restart forever.
+// Mutant: restoring `total != d.directTotalSize` — both 99-byte rows return a
+// reason. Mutant: `>= directEndTolerance` → `> directEndTolerance` — the
+// 100-byte-longer row reads as the same file.
 func TestDifferentFileReason(t *testing.T) {
 	for _, tc := range []struct {
 		name                    string
@@ -169,12 +176,16 @@ func TestDifferentFileReason(t *testing.T) {
 	}{
 		{"nothing staged", 0, 1000, 16, false},
 		{"the recorded total", 8, 16, 16, false},
-		{"another total than the recorded one", 8, 16, 32, true},
+		{"a total 99 bytes longer than the recorded one — the same file", 8, 16, 16 + directEndTolerance - 1, false},
+		{"a total 99 bytes shorter, the partial within it — the same file", 8, 1000, 1000 - directEndTolerance + 1, false},
+		{"a total 100 bytes longer — a different file", 8, 16, 16 + directEndTolerance, true},
+		{"a total 100 bytes shorter — a different file", 8, 1000, 1000 - directEndTolerance, true},
+		{"a total a few bytes shorter than the partial — a different file", 1000, 1050, 990, true},
 		{"no recorded total, the partial within the file", 8, 0, 16, false},
 		{"no recorded total, the partial longer than the file", 8, 0, 4, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d := &SegmentDownloader{directTotalSize: tc.recorded}
+			d := &SegmentDownloader{directTotalSize: tc.recorded, logger: nopLogger{}}
 			if got := d.differentFileReason(tc.staged, tc.total, "the probe"); (got != "") != tc.want {
 				t.Errorf("differentFileReason(%d, %d) with %d recorded = %q, want a reason: %v",
 					tc.staged, tc.total, tc.recorded, got, tc.want)

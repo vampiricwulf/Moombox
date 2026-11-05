@@ -107,6 +107,7 @@ func TestDirectRefreshRefusesAnotherFile(t *testing.T) {
 		},
 	})
 	d.delays = directDelays()
+	d.chunkJitter = fullChunks // the origin refuses from the second chunk's start
 	d.directResumeIntervalOverride = DownloadChunkSize
 	err := d.Start(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "different stream") {

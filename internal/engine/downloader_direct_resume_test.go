@@ -271,6 +271,7 @@ func TestDirectChunkedLoopShortOriginIsAnError(t *testing.T) {
 			out := filepath.Join(t.TempDir(), "video.mp4")
 			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
 			d.delays = directDelays()
+			d.chunkJitter = fullChunks                         // the origin keys on a chunk starting at the cut
 			d.directResumeIntervalOverride = DownloadChunkSize // a checkpoint exists before the cut
 			err := d.Start(t.Context())
 			if err == nil || !strings.Contains(err.Error(), "short of its probed size") {
@@ -358,6 +359,7 @@ func TestDirectHandoffHoldsTheFallbackToTheProbedTotal(t *testing.T) {
 			out := filepath.Join(t.TempDir(), "video.mp4")
 			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
 			d.delays = directDelays()
+			d.chunkJitter = fullChunks                         // the origin keys on the chunk at the cut
 			d.directResumeIntervalOverride = DownloadChunkSize // a checkpoint exists before the cut
 			// A safety net, not a budget: the run writes 20 MB with a
 			// checkpoint (two fsyncs and a rename) per chunk, which a loaded

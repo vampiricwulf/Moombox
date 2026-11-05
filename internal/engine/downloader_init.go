@@ -26,7 +26,9 @@ import (
 // of them is not one a third will fix; the orchestrator's refresh builds the
 // part again.
 //
-// A 410 is not retried at all (errSegmentGone): the engine reads it as
+// A 410 is not retried here at all (errSegmentGone) — beyond the
+// headlessRefusalAttempts fetchSegmentWithRetry gives any refusal while no
+// head is known, which a GVS answer names itself: the engine reads it as
 // evicted, never as stale credentials — fetchSegmentWithRetry and
 // handleGoneError never refresh for one, and moonarchive renews its access
 // only on a 403 (_dash.py) — and on a stream past YouTube's ~120 h window,
