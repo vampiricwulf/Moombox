@@ -39,9 +39,13 @@ const marathonLiveEdgeAge = 118 * time.Hour
 // the position it reached, not from sq=0, and needs no init it does not
 // already hold, so it carries on in place. A restart resumed into a FRESH
 // part dir at a DB seed has nothing to append to and needs sq=0's init
-// (manifestlessSq0URL), which is gone — that one does go to HLS. Whatever a
-// resumed capture still cannot fetch, the live loop's own eviction check
-// sends to HLS (evictedStartToLiveEdge).
+// (manifestlessSq0URL), which is gone — that one does go to HLS. A resumed
+// capture whose own position the CDN has since dropped is NOT caught later
+// either: the live loop's eviction check (evictedStartToLiveEdge) diagnoses
+// only a downloader that never left the first-segment hunt's window near
+// sq 0 (diagnoseEvictedStart's maxEvictionHuntAdvance guard), and a resume
+// sits at its deep sidecar or DB position, so it still spends the
+// still-live checks and ends with zero bytes, as before this wave.
 //
 // Post-live marathons are not touched: a stream that has ended has no live
 // HLS to fall to (yt-dlp skips HLS for post_live, _video.py 3620-3621), and
@@ -117,8 +121,11 @@ func setupMarathonOr(ctx context.Context, job *JobContext, strategy DownloadStra
 // evictedStartToLiveEdge is the live loop's answer to a still-live capture
 // whose downloaders stopped having written nothing because what they start
 // from is gone (audit G11): a stream older than YouTube's window that the
-// setup's age check could not see — no start on the row, or a resumed
-// capture whose position the CDN has since dropped too. diagnoseEvictedStart
+// setup's age check could not see — no start on the row, or an age the row
+// got wrong — with the capture starting at or near sq 0. A resumed capture
+// seeded at a deep position is not one: diagnoseEvictedStart's
+// maxEvictionHuntAdvance guard returns nil for a CurrentSeq past the hunt
+// window, so it is never switched here. diagnoseEvictedStart
 // confirms it the way it confirms a post-live one: the downloaders wrote
 // zero bytes, never left the first-segment hunt's window, and stopped under
 // a head past the eviction floor (evictionHeadFloor), and the bisection
