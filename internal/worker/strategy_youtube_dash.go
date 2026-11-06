@@ -497,34 +497,31 @@ func warnDamagedManifestPins(job *JobContext, videoInfo *youtube.VideoInfo, vide
 // yt-dlp's language_preference for a DASH-manifest format (_video.py:
 // 3655-3663).
 //
-// A manifest states no audioQuality and no channel count, so both come from
-// the extraction's own copy of the same itag (formats, VideoInfo.Formats):
-// the quality as yt-dlp's process_manifest_format fills a manifest format's
-// from the https formats of its itag (`f['quality'] = q(itag_qualities…)`,
-// _video.py:3670, filled at 3409-3411), and the channels likewise — there
-// Moombox goes beyond upstream, whose MPD parse reads no
-// AudioChannelConfiguration and so ties every manifest track on channels:
-// owner decision D14 ranks this path like VOD, and the VOD path ranks a 5.1
-// rendition above stereo at one quality (D15), which a tie would hand back
-// to the codec rung (stereo Opus over E-AC-3 5.1). An itag's channel count
-// is a property of the itag, so the https copy states the manifest's. With
-// no copy of the itag the rungs stay 0 and tie, as upstream's do.
+// A manifest states no audioQuality, so it comes from the extraction's own
+// copy of the same itag (formats, VideoInfo.Formats), as yt-dlp's
+// process_manifest_format fills a manifest format's quality from the https
+// formats of its itag (`f['quality'] = q(itag_qualities…)`, _video.py:3670,
+// filled at 3409-3411). With no copy of the itag the rung stays 0 and ties,
+// as upstream's does.
+//
+// The channel count is not borrowed. yt-dlp's MPD parse reads no
+// AudioChannelConfiguration, so every manifest track ties on channels and,
+// at one quality, the codec rung decides — stereo Opus 251 over E-AC-3 5.1
+// 328. Owner decision FE-11 matches that here: this path used to take the
+// itag's channel count from the extraction (W20, ef6285cec) so that it ranked
+// 5.1 above stereo like VOD. D15's 5.1-over-stereo stays on the VOD path, the
+// manifest-free live path and the HLS path, which read a channel count the
+// format itself states.
 func manifestStreamInfos(streams []engine.DashStream, langs youtube.AudioLanguages, formats []youtube.Format) []DashStreamInfo {
-	type facts struct{ quality, channels int }
-	byItag := make(map[int]facts)
+	qualityByItag := make(map[int]int)
 	for i := range formats {
 		f := &formats[i]
 		if !strings.Contains(f.MimeType, "audio") {
 			continue
 		}
-		have := byItag[f.Itag]
-		if have.quality == 0 {
-			have.quality = youtube.AudioQualityRung(f.AudioQuality)
+		if qualityByItag[f.Itag] == 0 {
+			qualityByItag[f.Itag] = youtube.AudioQualityRung(f.AudioQuality)
 		}
-		if have.channels == 0 {
-			have.channels = f.AudioChannels
-		}
-		byItag[f.Itag] = have
 	}
 	infos := make([]DashStreamInfo, 0, len(streams))
 	for _, s := range streams {
@@ -541,12 +538,10 @@ func manifestStreamInfos(streams []engine.DashStream, langs youtube.AudioLanguag
 			Lang:           s.Lang,
 		}
 		if strings.Contains(s.MimeType, "audio") {
-			fill := byItag[s.Itag]
 			info.Audio = youtube.AudioRank{
-				Track:    youtube.LanguageTrackScore(s.Lang, langs),
-				Quality:  fill.quality,
-				Channels: fill.channels,
-				Codec:    youtube.ScoreAudioCodec(s.Codecs),
+				Track:   youtube.LanguageTrackScore(s.Lang, langs),
+				Quality: qualityByItag[s.Itag],
+				Codec:   youtube.ScoreAudioCodec(s.Codecs),
 			}
 		}
 		infos = append(infos, info)
