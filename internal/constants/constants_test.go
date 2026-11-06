@@ -1,6 +1,7 @@
 package constants
 
 import (
+	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
@@ -196,5 +197,49 @@ func TestEveryClientContextIsEnglishAndUTC(t *testing.T) {
 			t.Errorf("%s: hl=%v timeZone=%v utcOffsetMinutes=%v, want en, UTC, 0",
 				name, c.Context["hl"], c.Context["timeZone"], c.Context["utcOffsetMinutes"])
 		}
+	}
+}
+
+// TestInnertubeContextSnapshots pins each client's Innertube context as the
+// JSON body states it. client.userAgent is stated exactly where yt-dlp's
+// INNERTUBE_CONTEXT.client states it — web_safari, tv_samsung, visionos and
+// android_vr (_base.py:116, 238, 303, 374), with upstream's strings — and
+// nowhere else: yt-dlp's web and web_creator contexts carry none
+// (_base.py:102-109, 164-171). Upstream's web_embedded (_base.py:128) and
+// tv_downgraded (_base.py:361) do; web_embedded's stays off under the owner's
+// c7fb478d2 deferral, and tv_downgraded has no caller and is pinned as it
+// was. Each stated one is the client's own User-Agent header, so body and
+// header agree.
+//
+// Mutants: the userAgent entry dropped from any of the four contexts; the
+// web_safari UA left at Version/17.6 without ",gzip(gfe)"; a userAgent added
+// to WebClient.
+func TestInnertubeContextSnapshots(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		client YouTubeClientConfig
+		want   string
+	}{
+		{"web_safari", WebSafariClient, `{"clientName":"WEB","clientVersion":"2.20260708.00.00","hl":"en","timeZone":"UTC","userAgent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)","utcOffsetMinutes":0}`},
+		{"tv_samsung", TVSamsungClient, `{"clientName":"TVHTML5","clientVersion":"5.20260707","deviceMake":"Samsung","deviceModel":"UKS9800","hl":"en","osName":"Tizen","osVersion":"2.4.0","timeZone":"UTC","userAgent":"Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1","utcOffsetMinutes":0}`},
+		{"visionos", VisionOSClient, `{"clientName":"VISIONOS","clientVersion":"1.02","deviceMake":"Apple","deviceModel":"RealityDevice17,1","hl":"en","osName":"visionOS","osVersion":"26.5.23O471","timeZone":"UTC","userAgent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15","utcOffsetMinutes":0}`},
+		{"android_vr", AndroidVRClient, `{"androidSdkVersion":32,"clientName":"ANDROID_VR","clientVersion":"1.65.10","deviceMake":"Oculus","deviceModel":"Quest 3","hl":"en","osName":"Android","osVersion":"12L","timeZone":"UTC","userAgent":"com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip","utcOffsetMinutes":0}`},
+		{"web", WebClient, `{"clientName":"WEB","clientVersion":"2.20260708.00.00","hl":"en","timeZone":"UTC","utcOffsetMinutes":0}`},
+		{"web_creator", WebCreatorClient, `{"clientName":"WEB_CREATOR","clientVersion":"1.20260708.06.00","hl":"en","timeZone":"UTC","utcOffsetMinutes":0}`},
+		{"web_embedded", WebEmbeddedClient, `{"clientName":"WEB_EMBEDDED_PLAYER","clientVersion":"2.20260708.00.00","hl":"en","timeZone":"UTC","utcOffsetMinutes":0}`},
+		{"tv_downgraded", TVDowngradedClient, `{"clientName":"TVHTML5","clientVersion":"5.20260707","hl":"en","timeZone":"UTC","utcOffsetMinutes":0}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.client.Context)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(b) != tc.want {
+				t.Errorf("context\n got: %s\nwant: %s", b, tc.want)
+			}
+			if ua, ok := tc.client.Context["userAgent"]; ok && ua != tc.client.UserAgent {
+				t.Errorf("context userAgent %q != User-Agent header %q", ua, tc.client.UserAgent)
+			}
+		})
 	}
 }

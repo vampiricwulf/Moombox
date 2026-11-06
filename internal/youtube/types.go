@@ -535,11 +535,24 @@ type YtcfgData struct {
 	DataSyncID string
 	// UserSessionID is the signed-in user's session id: ytcfg's
 	// USER_SESSION_ID, else the datasync id's user half
-	// (fillSessionFromDataSync). Parsed only, for now: yt-dlp hashes it into
-	// the SAPISIDHASH ('<uid> ' before the hash input, '_u' after the hash,
-	// _make_sid_authorization, _base.py:762-775), which the cookie jar does
-	// not do yet.
+	// (fillSessionFromDataSync). GenerateAPIHeaders hashes it into the
+	// Authorization header as yt-dlp does ('<uid> ' before the hash input,
+	// '_u' after the hash: _make_sid_authorization, _base.py:762-775, fed by
+	// _extract_user_session_id in _generate_cookie_auth_headers, :970);
+	// "" sends the unbound form (cookies.CookieJar.GenerateAuthorizationHeaderForUser).
 	UserSessionID string
+	// LoginState is the page's own LOGGED_IN verdict: the watch page's
+	// (watchPageSessionAuth) or the homepage's (livenessVerdict), Unknown for
+	// a ytcfg no page stated. Only SessionAuthLoggedIn sends
+	// X-Youtube-Bootstrap-Logged-In, as upstream's
+	// `if traverse_obj(ytcfg, 'LOGGED_IN', expected_type=bool)` decides it
+	// (_base.py:975-976), so a request whose ytcfg is not a signed-in page's —
+	// a watch page YouTube answered logged out on cookies it no longer
+	// honours, a probe with no kept session — makes no such claim, whatever
+	// the jar holds. LoggedOut is kept apart from Unknown for the probes'
+	// sake: a page stating it withdraws the claim the kept session made
+	// (PlayerAPI.captureVisitorData), where a page stating nothing leaves it.
+	LoginState SessionAuthState
 	// STS is the signature timestamp the page's ytcfg states, or 0; the one
 	// extractSTS prefers to reading the player JS for it.
 	STS int

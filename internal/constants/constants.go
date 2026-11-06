@@ -56,7 +56,7 @@ var UserAgents = struct {
 	// so randomizing them independently would create a contradictory
 	// fingerprint rather than blend into one.
 	Web:       randomizedWebUA(),
-	WebSafari: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
+	WebSafari: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)",
 	Android:   "com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip",
 	AndroidVR: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
 	TV:        "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
@@ -124,6 +124,16 @@ const SignedOutYouTubePageCookie = "PREF=hl=en&tz=UTC; SOCS=CAI"
 // times stated in UTC, the zone every stored time is in. The YouTube pages
 // get the same language and zone from their PREF cookie
 // (internal/cookies/page_cookies.go).
+//
+// A Context states userAgent exactly where yt-dlp's INNERTUBE_CONTEXT.client
+// does — web_safari, tv_samsung, visionos and android_vr (_base.py:116,
+// 238, 303, 374) — and always as the client's own UserAgent, so the body and
+// the User-Agent header cannot disagree. web and web_creator state none
+// upstream (their header UA comes from yt-dlp's default), and none here.
+// Upstream's web_embedded states the Safari UA (_base.py:128); it stays off
+// here under the owner's c7fb478d2 deferral. Upstream's tv_downgraded states
+// "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version" (_base.py:361);
+// nothing calls TVDowngradedClient, so it is left as it was.
 
 // YouTubeClientConfig holds configuration for a YouTube API client.
 type YouTubeClientConfig struct {
@@ -157,6 +167,7 @@ var TVSamsungClient = YouTubeClientConfig{
 		"clientVersion": "5.20260707",
 		"deviceMake":    "Samsung",
 		"deviceModel":   "UKS9800",
+		"userAgent":     UserAgents.TVSamsung,
 		"osName":        "Tizen",
 		"osVersion":     "2.4.0",
 		"hl":            "en",
@@ -221,6 +232,11 @@ var WebClient = YouTubeClientConfig{
 // HLS formats to some logged-in or "trusted" sessions (yt-dlp demoted
 // web_safari from its defaults for this reason, 69ea20006); logged-out
 // sessions get the same adaptive formats a plain WEB client would.
+//
+// Its UA is yt-dlp's web_safari string verbatim (_base.py:116), Version/15.5
+// and the ",gzip(gfe)" tail included — it was Version/17.6 with no tail — and
+// it is the User-Agent header and the context's client.userAgent alike, as
+// generate_api_headers reads the header off that context (_base.py:997).
 var WebSafariClient = YouTubeClientConfig{
 	ClientName:    "WEB",
 	ClientVersion: "2.20260708.00.00",
@@ -229,6 +245,7 @@ var WebSafariClient = YouTubeClientConfig{
 	Context: map[string]any{
 		"clientName":    "WEB",
 		"clientVersion": "2.20260708.00.00",
+		"userAgent":     UserAgents.WebSafari,
 		"hl":            "en",
 
 		"timeZone":         "UTC",
@@ -272,6 +289,7 @@ var VisionOSClient = YouTubeClientConfig{
 		"clientVersion": "1.02",
 		"deviceMake":    "Apple",
 		"deviceModel":   "RealityDevice17,1",
+		"userAgent":     UserAgents.VisionOS,
 		"osName":        "visionOS",
 		"osVersion":     "26.5.23O471",
 		// hl is not in yt-dlp's visionos entry because build_innertube_clients
@@ -313,6 +331,7 @@ var AndroidVRClient = YouTubeClientConfig{
 		"osVersion":         "12L",
 		"deviceMake":        "Oculus",
 		"deviceModel":       "Quest 3",
+		"userAgent":         UserAgents.AndroidVR,
 		// See VisionOSClient for why hl is mandatory rather than cosmetic.
 		// It matters most on THIS client: ANDROID_VR serves ProbeVideoStatus,
 		// whose playability reason is what classifyStream reads, so without

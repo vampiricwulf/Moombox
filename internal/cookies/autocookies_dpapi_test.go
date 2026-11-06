@@ -538,6 +538,15 @@ func TestDpapiProfileScore(t *testing.T) {
 			},
 			10,
 		},
+		{
+			// As HasYouTubeAuthCookies counts it (yt-dlp's _has_auth_cookies).
+			"__Secure-1PAPISID substitutes for SAPISID",
+			[]extractedCookie{
+				{domain: ".youtube.com", name: "__Secure-1PAPISID", value: "x"},
+				{domain: ".youtube.com", name: "LOGIN_INFO", value: "x"},
+			},
+			10,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -259,17 +259,24 @@ func TestAccountSessionHeaders(t *testing.T) {
 	}
 }
 
-// A chat poll says it is logged in while the jar holds a signed-in set, as
-// the player calls do (GenerateAPIHeaders) and as yt-dlp's
+// A chat poll says it is logged in only when the kept session's page said
+// LOGGED_IN, as the player calls do (GenerateAPIHeaders) and as yt-dlp's
 // generate_api_headers does from the ytcfg's LOGGED_IN (_base.py:975-976) —
-// read at call time, so cookies removed mid-capture stop the claim, and an
-// anonymous install never makes it.
+// not merely because the jar holds a signed-in set. Read at call time, so
+// cookies removed mid-capture stop the claim (probeYtcfg attaches the session
+// only while the jar holds its account), and an anonymous install never
+// makes it.
 //
 // Mutants: ChatSessionHeaders never setting X-Youtube-Bootstrap-Logged-In;
-// setting it unconditionally.
-func TestChatSessionHeadersSayLoggedInWhileTheJarIs(t *testing.T) {
+// setting it unconditionally; setting it from Auth.HasAuthCookies (the
+// signed-in jar with no kept page sends it).
+func TestChatSessionHeadersSayLoggedInOnlyWhenThePageDid(t *testing.T) {
 	jar, path := loadAccountJar(t, accountCookies("a"))
 	s := NewService(jar, noopLogger{})
+	if got, ok := s.ChatSessionHeaders()["X-Youtube-Bootstrap-Logged-In"]; ok {
+		t.Errorf("signed-in jar, no page read: X-Youtube-Bootstrap-Logged-In = %q, want absent", got)
+	}
+	s.PlayerAPI.captureVisitorData(&YtcfgData{LoginState: SessionAuthLoggedIn}, jar.YouTubeIdentity())
 	if got := s.ChatSessionHeaders()["X-Youtube-Bootstrap-Logged-In"]; got != "true" {
 		t.Errorf("signed in: X-Youtube-Bootstrap-Logged-In = %q, want true", got)
 	}

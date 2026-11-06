@@ -858,7 +858,7 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 		IsLiveOrUpcoming:    true,
 	}
 	if sp.yt != nil && sp.yt.Auth != nil {
-		opts.GenerateAuth = sp.yt.Auth.GenerateAuthorizationHeader
+		opts.GenerateAuth = sp.yt.ChatAuthorizationHeader // Service.ChatAuthorizationHeader
 		// Method value, exactly like GenerateAuth above — re-read per poll so
 		// a multi-hour early-chat run tracks the rotating cookie jar. nil Auth
 		// leaves the field nil, which the API reads as "no Cookie header".

@@ -366,6 +366,10 @@ func (p *PlayerAPI) probeYtcfg(visitorData string) *YtcfgData {
 	p.sessionMu.RLock()
 	if account != "" && account == p.sessionAccount {
 		ytcfg.SessionIndex, ytcfg.DelegatedSessionID = p.sessionIndex, p.delegatedSessionID
+		ytcfg.UserSessionID = p.sessionUserID
+	}
+	if account != "" && account == p.loginAccount && p.sessionLoggedIn {
+		ytcfg.LoginState = SessionAuthLoggedIn
 	}
 	p.sessionMu.RUnlock()
 	return ytcfg
@@ -403,14 +407,39 @@ func (p *PlayerAPI) captureVisitorData(ytcfg *YtcfgData, account string) {
 	if ytcfg.VisitorData != "" && p.OnVisitorData != nil {
 		p.OnVisitorData(ytcfg.VisitorData)
 	}
-	if account != "" && (ytcfg.SessionIndex != nil || ytcfg.DelegatedSessionID != "") {
-		p.sessionMu.Lock()
+	if account == "" {
+		return
+	}
+	loggedIn := ytcfg.LoginState == SessionAuthLoggedIn
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	if ytcfg.SessionIndex != nil || ytcfg.DelegatedSessionID != "" || ytcfg.UserSessionID != "" {
 		p.sessionIndex, p.delegatedSessionID = ytcfg.SessionIndex, ytcfg.DelegatedSessionID
+		p.sessionUserID = ytcfg.UserSessionID
 		p.sessionAccount = account
 		if p.sessionAsked != account {
 			p.sessionAsked, p.sessionRetryAt = "", time.Time{}
 		}
-		p.sessionMu.Unlock()
+		// The verdict is the page's own, whatever it says: a page that
+		// states a session but not LOGGED_IN (logged out, or silent)
+		// claims no logged-in bootstrap for it.
+		p.loginAccount, p.sessionLoggedIn = account, loggedIn
+		return
+	}
+	// A page that states its LOGGED_IN verdict but no session carries the
+	// verdict alone (loginAccount): the page id, index and user session id
+	// it did not restate stay as they were, as a page naming no session
+	// never cleared them, and it is not kept as its account's session, so a
+	// homepage read that account still wants (claimSessionRead) is still
+	// made. Its logged-out answer — cookies YouTube stopped honouring — is
+	// what stops the probes and chat sending X-Youtube-Bootstrap-Logged-In
+	// on a session its own page just denied. Another account's logged-out
+	// page changes nothing: it has no claim of its own to withdraw.
+	if ytcfg.LoginState == SessionAuthUnknown {
+		return
+	}
+	if loggedIn || account == p.loginAccount {
+		p.loginAccount, p.sessionLoggedIn = account, loggedIn
 	}
 }
 

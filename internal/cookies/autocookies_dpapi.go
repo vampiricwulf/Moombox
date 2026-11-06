@@ -503,7 +503,9 @@ func dpapiProfileScore(cookies []extractedCookie) int {
 		switch {
 		case isYouTubeDomain(c.domain) || isGoogleDomain(c.domain):
 			switch c.name {
-			case "SAPISID", "__Secure-3PAPISID":
+			// The SAPISID variants HasYouTubeAuthCookies accepts, the 1P
+			// copy alone included (yt-dlp's _has_auth_cookies).
+			case "SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID":
 				hasSapisid = true
 			case "LOGIN_INFO":
 				hasLoginInfo = true

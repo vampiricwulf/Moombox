@@ -105,7 +105,7 @@ type ChatAPI struct {
 	generateAuth     func() string // Returns Authorization header (SAPISIDHASH) for authenticated requests
 	// sessionHeaders returns the signed-in account's identity headers —
 	// X-Goog-AuthUser, and X-Goog-PageId for a brand account — and
-	// X-Youtube-Bootstrap-Logged-In while the jar is signed in, re-read per
+	// X-Youtube-Bootstrap-Logged-In while its page said LOGGED_IN, re-read per
 	// chat API request like cookieHeader (youtube.Service.ChatSessionHeaders,
 	// whose comment says why it is not the page's session snapshotted). nil,
 	// or an empty map, sends none.
