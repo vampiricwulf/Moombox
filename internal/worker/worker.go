@@ -501,7 +501,7 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 
 	// Twitch archive-VOD gap-fill (owner decision D17): the plans finished
 	// live captures left in twitch_gap_fills, looked at on their backoff.
-	go w.runTwitchGapFills(ctx, newTwitchGapFiller(w.db, w.tw, w.orchestrator, w.logger))
+	go w.runTwitchGapFills(ctx, w.newTwitchGapFiller())
 
 	// Process jobs from queue
 	for {
@@ -2712,7 +2712,8 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 	// is a boot re-mux of a download that completed; anything else is the
 	// operator muxing whatever was captured (JobContext.CapturedMux).
 	capturedMux := true
-	if prior, _ := w.db.GetJob(jobID); prior != nil && prior.Status == database.StatusMuxing {
+	prior, _ := w.db.GetJob(jobID)
+	if prior != nil && prior.Status == database.StatusMuxing {
 		capturedMux = false
 	}
 	// A mux of the staging ends what an unconfirmed-end marker was waiting
@@ -2791,6 +2792,9 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 
 		jobCtx := w.buildJobContext(job)
 		jobCtx.CapturedMux = capturedMux
+		// Read from the staging's coverage before the mux reclaims it, kept
+		// once the row is Finished (owner decision D17).
+		gapPlan := w.twitchMuxGapFillPlan(prior, job, jobCtx)
 
 		// This mux takes the same download slot a queued job takes: a boot
 		// that finds N interrupted Muxing rows would otherwise start N
@@ -2844,6 +2848,10 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 				"error":  failure(err),
 			})
 			return
+		}
+
+		if gapPlan != nil {
+			w.orchestrator.keepTwitchGapFillPlan(gapPlan)
 		}
 
 		// The recording is in the archive now: reclaim staging exactly the way

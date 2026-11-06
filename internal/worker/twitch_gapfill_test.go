@@ -34,7 +34,8 @@ func covPart(idx int, from, to time.Duration, adBreak bool) stagedPartCoverage {
 //
 // Mutants: the late-start threshold dropped (a 30 s join is lost); the
 // minimum gap dropped (the 1 s seam of a lossless split is a span); the ad
-// break kept without the opt-in; the tail left out.
+// break kept without the opt-in; the tail left out; the gap <= 0 guard on an
+// ad break's hole dropped (a zero-width span is planned).
 func TestGapSpansFor(t *testing.T) {
 	parts := []stagedPartCoverage{
 		covPart(2, 50*time.Minute, 60*time.Minute, false),
@@ -64,6 +65,13 @@ func TestGapSpansFor(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Errorf("%d spans, want the late start and the outage", len(got))
+	}
+
+	// A part closed at an ad break whose next part picks up where it ended
+	// (the break was stitched over no lost footage) has nothing to fill.
+	seam := []stagedPartCoverage{covPart(0, 0, 10*time.Minute, true), covPart(1, 10*time.Minute, 20*time.Minute, false)}
+	if got := gapSpansFor(gapStart, seam, true, false); len(got) != 0 {
+		t.Errorf("a zero-width ad break has spans %+v", got)
 	}
 
 	// A join 30 s after the start is on time.
@@ -149,6 +157,9 @@ type gapFillFixture struct {
 	vodID   string
 	endList bool
 	failURL string
+	// refuse answers a 403 for each URL in it, on every attempt.
+	refuse  map[string]bool
+	fetched int
 }
 
 func newGapFillFixture(t *testing.T) *gapFillFixture {
@@ -183,6 +194,10 @@ func newGapFillFixture(t *testing.T) *gapFillFixture {
 			}, nil
 		},
 		fetch: func(_ context.Context, url string) ([]byte, error) {
+			f.fetched++
+			if f.refuse[url] {
+				return nil, &httpError{StatusCode: http.StatusForbidden}
+			}
 			if url == "https://vod.example/chunked/index-dvr.m3u8" {
 				var b strings.Builder
 				b.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n")
@@ -256,7 +271,7 @@ func (f *gapFillFixture) row(t *testing.T) *twitchGapFillPlan {
 // (the 720p60 rendition is cut).
 func TestGapFillInsertsTheLateStartAsAPart(t *testing.T) {
 	f := newGapFillFixture(t)
-	f.plan(t, []stagedPartCoverage{covPart(0, 25*time.Second, 50*time.Minute, false)},
+	f.plan(t, []stagedPartCoverage{covPart(0, 25*time.Second, time.Minute, false)},
 		[]gapSpan{{FromMs: ms(0), ToMs: ms(25 * time.Second), Kind: gapKindLateStart, AfterPart: -1}},
 		gapStart.Add(25*time.Hour))
 	row, _ := f.db.GetGapFill("tw_1")
@@ -295,10 +310,13 @@ func TestGapFillInsertsTheLateStartAsAPart(t *testing.T) {
 }
 
 // TestGapFillFillsBetweenRecordedParts: a span lost between two recorded
-// parts is inserted between them, and the parts renumbered in time order.
+// parts is inserted between them, and the parts renumbered in time order. The
+// cut overlaps the span by the pad on both sides: 20-40 s widened to 19-41 s
+// takes the VOD's segments 1 through 4.
 //
-// Mutant: the recorded parts keyed by their row's unix_start instead of the
-// plan's coverage (rows whose unix_start disagrees sort wrongly).
+// Mutants: the recorded parts keyed by their row's unix_start instead of the
+// plan's coverage (rows whose unix_start disagrees sort wrongly); the pad
+// left off the span's start (segment 1 is not cut) or its end (segment 4).
 func TestGapFillFillsBetweenRecordedParts(t *testing.T) {
 	f := newGapFillFixture(t)
 	p1 := filepath.Join(f.dir, "Streamer - Big day - part1.mp4")
@@ -329,6 +347,9 @@ func TestGapFillFillsBetweenRecordedParts(t *testing.T) {
 	if strings.Join(names, " ") != want {
 		t.Errorf("parts %v, want %s", names, want)
 	}
+	if data, _ := os.ReadFile(filepath.Join(f.dir, "Streamer - Big day - recovered1.mp4")); string(data) != "MP4[v1][v2][v3][v4]" {
+		t.Errorf("recovered part holds %q, want the VOD's segments 1-4 (the span and its pad)", data)
+	}
 }
 
 // TestGapFillWaitsForTheCompleteVod (follow-up 4): a VOD that is not listed,
@@ -336,14 +357,18 @@ func TestGapFillFillsBetweenRecordedParts(t *testing.T) {
 // kept, its reason recorded and its next look put on the backoff — and the
 // archive is left as it was.
 //
+// The output volume at disk_critical is a wait like these, before anything
+// is fetched.
+//
 // Mutants: the IsRecording check removed (the fill runs on a growing VOD);
 // the ENDLIST check removed (likewise); the backoff not applied (next look at
-// once).
+// once); the disk gate removed (the fill writes onto a full volume).
 func TestGapFillWaitsForTheCompleteVod(t *testing.T) {
 	for name, setup := range map[string]func(*gapFillFixture){
 		"not listed":      func(f *gapFillFixture) { f.vodID = "" },
 		"still recording": func(f *gapFillFixture) { f.vodInfo.IsRecording = true },
 		"no ENDLIST":      func(f *gapFillFixture) { f.endList = false },
+		"disk critical":   func(f *gapFillFixture) { f.filler.diskCritical = func() bool { return true } },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newGapFillFixture(t)
@@ -366,7 +391,31 @@ func TestGapFillWaitsForTheCompleteVod(t *testing.T) {
 			if job, _ := f.db.GetJob("tw_1"); len(job.Segments) != 0 || job.OutputFile != f.archive {
 				t.Errorf("the job changed: %+v", job)
 			}
+			if name == "disk critical" && f.fetched != 0 {
+				t.Errorf("%d fetches on a critically full volume, want none", f.fetched)
+			}
 		})
+	}
+}
+
+// TestGapFillNextLookIsCappedAtTheDeadline: a look whose backoff would land
+// past the deadline is put one second after it instead, where the plan is
+// dropped with its line, rather than outliving the window by up to three
+// hours.
+//
+// Mutant: the cap removed (the next look is the full backoff away).
+func TestGapFillNextLookIsCappedAtTheDeadline(t *testing.T) {
+	f := newGapFillFixture(t)
+	f.vodID = ""
+	now := gapStart.Add(70 * time.Minute)
+	deadline := now.Add(5 * time.Minute)
+	f.plan(t, []stagedPartCoverage{covPart(0, 25*time.Second, time.Minute, false)},
+		[]gapSpan{{FromMs: ms(0), ToMs: ms(25 * time.Second), Kind: gapKindLateStart, AfterPart: -1}}, deadline)
+	row, _ := f.db.GetGapFill("tw_1")
+	f.filler.step(context.Background(), *row, now)
+	g, _ := f.db.GetGapFill("tw_1")
+	if want := deadline.Add(time.Second).Format(time.RFC3339); g == nil || g.NextCheckAt != want {
+		t.Errorf("next look %+v, want %s", g, want)
 	}
 }
 

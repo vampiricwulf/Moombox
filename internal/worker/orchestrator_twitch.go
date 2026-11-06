@@ -70,8 +70,8 @@ type TwitchVariantInfo struct {
 	// finds the broadcast's archive VOD by; GapFillAdBreaks is that channel's
 	// twitch_gap_fill_ad_breaks, which splits the capture at each stitched-ad
 	// break so the hole sits between two parts (owner decision D17 follow-up
-	// 3). Both unset for a VOD, a test, or the Mux action's own path: no plan
-	// is made without a login.
+	// 3). Both unset for a VOD or a test: no plan is made without a login.
+	// The Mux action's path builds its own (twitchMuxGapFillPlan).
 	ChannelLogin    string
 	GapFillAdBreaks bool
 }

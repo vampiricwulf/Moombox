@@ -136,6 +136,10 @@ type twitchGapFiller struct {
 	fetch func(ctx context.Context, url string) ([]byte, error)
 	// mux turns the cut span's MPEG-TS into the part's MP4.
 	mux func(ctx context.Context, tsPath, outPath string) error
+	// diskCritical reports the output volume at the disk_critical threshold
+	// (production: DownloadWorker.readOutputDisk's reading, the one the
+	// backlog scheduler's admission gate closes on); nil never is.
+	diskCritical func() bool
 }
 
 // newTwitchGapFiller is the production filler.
@@ -152,6 +156,18 @@ func newTwitchGapFiller(db *database.Database, tw *twitch.Service, o *DownloadOr
 		f.mux = func(ctx context.Context, tsPath, outPath string) error {
 			return o.mux().MuxCopy(ctx, tsPath, "", outPath)
 		}
+	}
+	return f
+}
+
+// newTwitchGapFiller is the worker's filler: newTwitchGapFiller over its
+// database, Twitch service and orchestrator, with the disk gate read off the
+// same output-volume reading the backlog scheduler admits on.
+func (w *DownloadWorker) newTwitchGapFiller() *twitchGapFiller {
+	f := newTwitchGapFiller(w.db, w.tw, w.orchestrator, w.logger)
+	f.diskCritical = func() bool {
+		r, err := w.readOutputDisk()
+		return err == nil && r.critical
 	}
 	return f
 }
@@ -178,7 +194,9 @@ const gapFillPollInterval = 5 * time.Minute
 
 // runTwitchGapFills sweeps the due plans every gapFillPollInterval until ctx
 // ends, the first sweep one interval after start (past the boot's cleanup and
-// its burst of requests).
+// its burst of requests). A panic in one plan's look is recovered in sweep
+// (stepRecovered), so this loop outlives it; the recover here is the
+// goroutine's own backstop.
 func (w *DownloadWorker) runTwitchGapFills(ctx context.Context, f *twitchGapFiller) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -208,8 +226,23 @@ func (f *twitchGapFiller) sweep(ctx context.Context, now time.Time) {
 		if ctx.Err() != nil {
 			return
 		}
-		f.step(ctx, row, now)
+		f.stepRecovered(ctx, row, now)
 	}
+}
+
+// stepRecovered is step with a recover of its own. A plan whose look panicked
+// is dropped — the archive kept as recorded — rather than left due, where it
+// would panic again at the next sweep and at every boot after; the sweep goes
+// on to the next plan.
+func (f *twitchGapFiller) stepRecovered(ctx context.Context, row database.GapFill, now time.Time) {
+	defer func() {
+		if r := recover(); r != nil {
+			f.logger.Error("panic in a Twitch gap-fill; its plan is dropped and the archive kept as recorded",
+				"jobID", row.JobID, "panic", fmt.Sprint(r))
+			_ = f.db.DeleteGapFill(row.JobID)
+		}
+	}()
+	f.step(ctx, row, now)
 }
 
 // step takes one look at a plan: it fills the job, or reschedules the plan on
@@ -293,12 +326,61 @@ func vodSegmentRange(offsets []float64, fromSec, toSec float64) (first, last int
 }
 
 // recoveredPart is one span the fill cut and muxed, before it is committed.
+// refused counts the segments left out of it because the VOD will not serve
+// them (refusedVodSegment), refusedSec their length.
 type recoveredPart struct {
-	span     gapSpan
-	path     string
-	size     int64
-	duration float64
-	muted    int
+	span       gapSpan
+	path       string
+	size       int64
+	duration   float64
+	muted      int
+	refused    int
+	refusedSec float64
+}
+
+// gapFillTimelineSlack is how much shorter than the capture's own covered
+// stretch the archive VOD may be before its timeline is distrusted: the VOD's
+// last segments trail the live edge's by some seconds, and the capture's
+// program date-times and the VOD's createdAt-based offsets agree only to
+// within a second or so.
+const gapFillTimelineSlack = time.Minute
+
+// coveredUntilMs is the latest end any part's coverage records (epoch ms), 0
+// for none.
+func coveredUntilMs(parts []stagedPartCoverage) int64 {
+	var end int64
+	for _, p := range parts {
+		end = max(end, p.Cov.EndMs)
+	}
+	return end
+}
+
+// errSpanRefused is cutSpan's answer when the VOD refused every segment of
+// the span: nothing to insert, and no reason to look again.
+var errSpanRefused = errors.New("the archive VOD refuses every segment of the span")
+
+// refusedVodSegment reports a fetch error that is the VOD's lasting answer
+// for that segment rather than a passing failure: a 403, 404 or 410 that
+// held through gapFillSegmentAttempts tries. On Twitch's VOD CDN a lasting
+// 403 is a muted part that neither yt-dlp nor streamlink can fetch either —
+// the engine's VOD downloader skips it as a gap and completes the VOD
+// (fetchSegmentWithRetry) — so the fill leaves it out of the span, logged,
+// and inserts the rest (owner decision D17 follow-up 2: use what the VOD
+// has, and say so). It is yt-dlp's skip_unavailable_fragments, on by default
+// (FragmentFD, yt_dlp/downloader/fragment.py b77c9304e: a fragment that
+// fails every retry is skipped and the download goes on), narrowed to the
+// answers that are lasting: a transport error or a 5xx is a reason to look
+// again later, not a segment to leave out.
+func refusedVodSegment(err error) bool {
+	var he *httpError
+	if !errors.As(err, &he) {
+		return false
+	}
+	switch he.StatusCode {
+	case http.StatusForbidden, http.StatusNotFound, http.StatusGone:
+		return true
+	}
+	return false
 }
 
 // fill tries the plan once. It reports filled when the job was re-finalized
@@ -312,6 +394,12 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 	}
 	if f.findVod == nil || f.vodInfo == nil || f.vodVariants == nil || f.fetch == nil || f.mux == nil {
 		return false, "no Twitch service to read the archive VOD with"
+	}
+	// A fill writes each span twice over (its TS, then its MP4) onto the
+	// archive's volume — a late start of hours is tens of GB — so it waits,
+	// as the backlog does, while that volume is at disk_critical.
+	if f.diskCritical != nil && f.diskCritical() {
+		return false, "the output volume is critically full"
 	}
 	if plan.VodID == "" {
 		end, _ := time.Parse(time.RFC3339, plan.EndedAt)
@@ -368,6 +456,21 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 	segs := parsed.Playlist.Segments
 	offsets := vodSegmentOffsets(segs)
 
+	// The mapping's premise is that the VOD's offset 0 is the broadcast's
+	// createdAt and that the VOD runs on with the wall clock. A VOD shorter
+	// than the stretch the capture itself covered breaks it — the VOD left
+	// something out, or does not start where the broadcast did — and every
+	// cut from it would hold the wrong footage, silently. Such a VOD is not
+	// used.
+	if covered := coveredUntilMs(plan.Parts) - start.UnixMilli(); covered > 0 {
+		vodMs := int64(offsets[len(offsets)-1] * 1000)
+		if vodMs+gapFillTimelineSlack.Milliseconds() < covered {
+			f.logger.Info("gap-fill: the archive VOD is shorter than the capture's own recording, so its timeline cannot be placed; the archive is kept as recorded",
+				"jobID", plan.JobID, "vodID", plan.VodID, "vodSec", math.Round(float64(vodMs)/1000), "capturedSec", math.Round(float64(covered)/1000))
+			return true, ""
+		}
+	}
+
 	outDir, base := gapFillOutputLocation(job)
 	if outDir == "" {
 		f.logger.Warn("gap-fill: the archive's location is unknown; it is kept as recorded", "jobID", plan.JobID)
@@ -396,13 +499,23 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 			continue
 		}
 		part, err := f.cutSpan(ctx, segs[first:last+1], outDir, base, len(made)+1)
+		if errors.Is(err, errSpanRefused) {
+			f.logger.Info("gap-fill: the archive VOD refuses every segment of a lost span; it stays a gap",
+				"jobID", plan.JobID, "kind", sp.Kind, "vodFromSec", math.Round(offsets[first]), "vodToSec", math.Round(offsets[last+1]))
+			continue
+		}
 		if err != nil {
 			undo()
 			return false, fmt.Sprintf("a span could not be cut from the archive VOD (%v)", err)
 		}
 		part.span = sp
-		part.duration = offsets[last+1] - offsets[first]
+		part.duration = offsets[last+1] - offsets[first] - part.refusedSec
 		made = append(made, part)
+		if part.refused > 0 {
+			f.logger.Info("gap-fill: a recovered span leaves out VOD segments Twitch refuses to serve — a muted stretch neither tool can fetch",
+				"jobID", plan.JobID, "kind", sp.Kind, "vodFromSec", math.Round(offsets[first]), "vodToSec", math.Round(offsets[last+1]),
+				"refusedSegments", part.refused, "segments", last-first+1)
+		}
 		if part.muted > 0 {
 			f.logger.Info("gap-fill: a recovered span uses muted VOD segments — its video is intact, its audio silent where Twitch muted it",
 				"jobID", plan.JobID, "kind", sp.Kind, "vodFromSec", math.Round(offsets[first]), "vodToSec", math.Round(offsets[last+1]),
@@ -460,6 +573,11 @@ func (f *twitchGapFiller) cutSpan(ctx context.Context, segs []engine.HlsSegment,
 			}
 			data, err := f.fetchRetry(ctx, s.URL)
 			if err != nil {
+				if ctx.Err() == nil && refusedVodSegment(err) {
+					part.refused++
+					part.refusedSec += s.Duration
+					continue
+				}
 				return err
 			}
 			if _, err := ts.Write(data); err != nil {
@@ -473,6 +591,9 @@ func (f *twitchGapFiller) cutSpan(ctx context.Context, segs []engine.HlsSegment,
 	}()
 	if writeErr != nil {
 		return part, writeErr
+	}
+	if part.refused == len(segs) {
+		return part, errSpanRefused
 	}
 	if err := f.mux(ctx, tsPath, outPath); err != nil {
 		_ = os.Remove(outPath)
@@ -528,8 +649,12 @@ func gapFillOutputLocation(job *database.Job) (dir, base string) {
 // — and the recovered ones in time order, renumbered, and the job's length,
 // size and first file updated to match. Only while the job is still Finished.
 func (f *twitchGapFiller) commit(plan *twitchGapFillPlan, job *database.Job, v *twitch.TwitchHLSVariant, made []recoveredPart) error {
+	// The recorded parts are read fresh, and the job's status is checked by
+	// ReplaceJobSegmentsIf below, in the transaction that writes them: an
+	// operator's re-run, reset or delete that lands while the fill ran is
+	// never written over.
 	fresh, err := f.db.GetJob(job.ID)
-	if err != nil || fresh == nil || fresh.Status != database.StatusFinished {
+	if err != nil || fresh == nil {
 		return fmt.Errorf("the job changed while its gap-fill ran")
 	}
 	startOf := map[int]int64{}
@@ -609,16 +734,21 @@ func (f *twitchGapFiller) commit(plan *twitchGapFillPlan, job *database.Job, v *
 			bytes += *k.seg.FileSize
 		}
 	}
-	if err := f.db.ReplaceJobSegments(job.ID, segs); err != nil {
+	applied, err := f.db.ReplaceJobSegmentsIf(job.ID, database.StatusFinished, segs)
+	if err != nil {
 		return err
+	}
+	if !applied {
+		return fmt.Errorf("the job changed while its gap-fill ran")
 	}
 	updates := map[string]any{"output_file": segs[0].FilePath, "length_seconds": int(total)}
 	if bytes > 0 {
 		updates["file_size"] = bytes
 	}
 	if !f.db.UpdateJobFieldsIf(job.ID, database.StatusFinished, updates) {
-		// The parts are recorded; the row moved on under the commit (a
-		// delete or a re-run). Its own finalize rewrites these fields.
+		// The parts are recorded; the row moved on in the instant between
+		// the guarded replace and this write (a delete or a re-run). Its
+		// own finalize rewrites these fields.
 		f.logger.Warn("gap-fill: the job changed as its recovered parts were recorded", "jobID", job.ID)
 	}
 	return nil

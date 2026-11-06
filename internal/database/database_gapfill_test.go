@@ -40,3 +40,36 @@ func TestGapFillRows(t *testing.T) {
 		t.Error("b is gone")
 	}
 }
+
+// TestReplaceJobSegmentsIf: the gap-fill commit's guarded replace writes the
+// rows only while the job's status is still the one expected, and writes
+// nothing for a row that moved on or is gone.
+//
+// Mutant: the status check dropped (the Downloading row's parts replaced).
+func TestReplaceJobSegmentsIf(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.AddJob(&Job{ID: "j", VideoID: "j", Platform: "twitch", Status: StatusFinished}); err != nil {
+		t.Fatal(err)
+	}
+	segs := []Segment{{SegmentIndex: 0, Filename: "a.mp4", FilePath: "/x/a.mp4"}, {SegmentIndex: 1, Filename: "b.mp4", FilePath: "/x/b.mp4"}}
+	if ok, err := db.ReplaceJobSegmentsIf("j", StatusFinished, segs); err != nil || !ok {
+		t.Fatalf("Finished row: applied %v, err %v", ok, err)
+	}
+	if got, _ := db.GetSegments("j"); len(got) != 2 {
+		t.Fatalf("segments %+v, want two", got)
+	}
+	db.UpdateJobFields("j", map[string]any{"status": StatusDownloading})
+	if ok, err := db.ReplaceJobSegmentsIf("j", StatusFinished, segs[:1]); err != nil || ok {
+		t.Errorf("moved row: applied %v, err %v; want not applied", ok, err)
+	}
+	if got, _ := db.GetSegments("j"); len(got) != 2 {
+		t.Errorf("the moved row's segments were replaced: %+v", got)
+	}
+	if ok, err := db.ReplaceJobSegmentsIf("gone", StatusFinished, segs); err != nil || ok {
+		t.Errorf("missing row: applied %v, err %v; want not applied", ok, err)
+	}
+}

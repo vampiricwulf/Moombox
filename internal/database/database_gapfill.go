@@ -1,5 +1,10 @@
 package database
 
+import (
+	"database/sql"
+	"errors"
+)
+
 // GapFill is one twitch_gap_fills row: a finished live Twitch job owed a
 // gap-fill from its archive VOD (owner decision D17). Plan is the worker's
 // JSON, opaque here; NextCheckAt is RFC3339 UTC.
@@ -68,4 +73,45 @@ func (db *Database) DueGapFills(now string) ([]GapFill, error) {
 		out = append(out, g)
 	}
 	return out, rows.Err()
+}
+
+// ReplaceJobSegmentsIf is ReplaceJobSegments applied only while jobID's status
+// is still expected, checked inside the same transaction that replaces the
+// rows: the gap-fill's commit (owner decision D17), decided on a Finished row
+// it read minutes earlier, must not write its parts over a row an operator has
+// since re-run, reset or deleted. applied is false, and nothing is written,
+// when the row is gone or its status is another.
+func (db *Database) ReplaceJobSegmentsIf(jobID string, expected JobStatus, segs []Segment) (applied bool, err error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	ctx := db.getCtx()
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var status string
+	switch err := tx.QueryRowContext(ctx, "SELECT status FROM jobs WHERE id = ?", jobID).Scan(&status); {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	if JobStatus(status) != expected {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM segments WHERE job_id = ?", jobID); err != nil {
+		return false, err
+	}
+	for i := range segs {
+		if err := insertSegmentExec(ctx, tx, jobID, &segs[i]); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }

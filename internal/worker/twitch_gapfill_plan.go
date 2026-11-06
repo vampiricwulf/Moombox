@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -35,10 +37,18 @@ const twitchCoverageFile = "twitch_coverage.json"
 // first segment the file holds and the end of the last one (epoch ms), and
 // whether the part was closed at the end of a stitched-ad break
 // (engine.ErrAdBreakEnded), which makes the hole after it an ad break's.
+//
+// StartUnknown marks a part whose file already held footage when its
+// recorder was made and had no coverage file to say since when — a part a
+// build without the gap-fill began, resumed by one with it (an upgrade
+// mid-broadcast). Its StartMs is the first segment written after the resume,
+// not the first the file holds, so the footage before it reads as lost when it
+// is not; gapSpansFor makes no plan for a capture with such a part.
 type partCoverage struct {
 	StartMs        int64 `json:"startMs,omitempty"`
 	EndMs          int64 `json:"endMs,omitempty"`
 	EndedAtAdBreak bool  `json:"endedAtAdBreak,omitempty"`
+	StartUnknown   bool  `json:"startUnknown,omitempty"`
 }
 
 // coverageSaveEvery is how far a part's recorded end may run ahead of the one
@@ -59,9 +69,29 @@ type coverageRecorder struct {
 
 func newCoverageRecorder(dir string) *coverageRecorder {
 	r := &coverageRecorder{dir: dir}
+	if _, err := os.Stat(filepath.Join(dir, twitchCoverageFile)); err != nil && partHoldsMedia(dir) {
+		// Footage with no record of where it starts: say so on disk at
+		// once, so a crash before the first note still leaves the mark.
+		r.cov.StartUnknown = true
+		r.mu.Lock()
+		r.saveLocked()
+		r.mu.Unlock()
+		return r
+	}
 	r.cov = readPartCoverage(dir)
 	r.savedTo = r.cov.EndMs
 	return r
+}
+
+// partHoldsMedia reports whether a part dir holds a non-empty staged media
+// file (discoverStagingMedia's), the footage a coverage file would describe.
+func partHoldsMedia(dir string) bool {
+	m := discoverStagingMedia(dir)
+	if m == nil || m.VideoPath == "" {
+		return false
+	}
+	fi, err := os.Stat(m.VideoPath)
+	return err == nil && fi.Size() > 0
 }
 
 // readPartCoverage reads dir's coverage; a missing or unreadable file is none.
@@ -157,23 +187,38 @@ type gapSpan struct {
 }
 
 // stagedPartCoverage is one part's coverage with the segment index its file
-// was muxed under.
+// was muxed under. HasMedia reports that the part's dir held footage when the
+// plan was made (partHoldsMedia), so a part with footage and no coverage is
+// told from an empty one.
 type stagedPartCoverage struct {
-	Index int          `json:"index"`
-	Cov   partCoverage `json:"cov"`
+	Index    int          `json:"index"`
+	Cov      partCoverage `json:"cov"`
+	HasMedia bool         `json:"hasMedia,omitempty"`
 }
 
 // gapSpansFor computes the spans a capture lacks from its parts' coverage (in
-// any order; parts without any are left out): the opening before the first
+// any order; empty parts without any are left out): the opening before the first
 // part when it began more than gapFillLateStartAfter after streamStart, each
 // hole between consecutive parts wider than gapFillMinGap, and every hole
 // after a part the capture closed at an ad break when adBreaks is set — and,
 // with tailOpen (the broadcast ended while
 // the capture was cut off), the rest of the broadcast after the last part.
+//
+// A part that holds footage but cannot say which — no coverage file at all (a
+// part a build without the gap-fill recorded and closed), or a start that is
+// only the resume's (partCoverage.StartUnknown) — makes no spans at all: its
+// footage cannot be placed, and every span computed around it could be
+// footage it already holds, which the fill would download again and insert
+// beside it as a duplicate part. Only the capture that straddles the upgrade
+// to this build has such a part.
 func gapSpansFor(streamStart time.Time, parts []stagedPartCoverage, adBreaks, tailOpen bool) []gapSpan {
 	var have []stagedPartCoverage
 	for _, p := range parts {
-		if p.Cov.StartMs > 0 && p.Cov.EndMs > p.Cov.StartMs {
+		placed := p.Cov.StartMs > 0 && p.Cov.EndMs > p.Cov.StartMs
+		if p.Cov.StartUnknown || (p.HasMedia && !placed) {
+			return nil
+		}
+		if placed {
 			have = append(have, p)
 		}
 	}
@@ -217,10 +262,56 @@ func gapSpansFor(streamStart time.Time, parts []stagedPartCoverage, adBreaks, ta
 func stagedPartCoverages(stagingDir string) []stagedPartCoverage {
 	var out []stagedPartCoverage
 	if rootIsPartZero(stagingDir) {
-		out = append(out, stagedPartCoverage{Index: 0, Cov: readPartCoverage(stagingDir)})
+		out = append(out, stagedPartCoverage{Index: 0, Cov: readPartCoverage(stagingDir), HasMedia: partHoldsMedia(stagingDir)})
 	}
 	for _, s := range stagedSegDirs(stagingDir) {
-		out = append(out, stagedPartCoverage{Index: s.idx, Cov: readPartCoverage(s.dir)})
+		out = append(out, stagedPartCoverage{Index: s.idx, Cov: readPartCoverage(s.dir), HasMedia: partHoldsMedia(s.dir)})
 	}
 	return out
+}
+
+// twitchMuxGapFillPlan is the gap-fill plan for a live Twitch capture that did
+// not finalize itself and is muxed from its staging instead (muxJob), nil for
+// any other mux. Two such captures lose what owner decision D17 says is
+// always filled — the late start and every gap split, which their parts'
+// coverage still records in staging, and the tail after the last part:
+//
+//   - one whose broadcast ended while Moombox was down (prior's error
+//     twitchEndedOfflineErrMsg), muxed by the operator's Mux action;
+//   - one that stopped with its broadcast's end unconfirmed (park_reason
+//     twitch_end_unconfirmed), muxed by AutoMuxEndedBroadcast once the
+//     monitor confirms the broadcast over (owner decision D-T4), or by the
+//     operator's Mux before that.
+//
+// prior is the row as muxJob found it, before its Muxing write cleared the
+// marker; job is the row the mux runs on. The tail is open in both: the
+// broadcast ran on past the capture's last segment. A Mux of a Cancelled row
+// (the operator stopped it) or of an Error row for any other reason makes no
+// plan, as the recorded footage is then all that was wanted or possible. The
+// selection the capture ran on is read back from the row (twitch_quality, the
+// variant it last recorded, and quality_preference) and the job context's
+// snapshot of the global selection settings, as newTwitchVariantInfo reads it.
+func (w *DownloadWorker) twitchMuxGapFillPlan(prior, job *database.Job, jobCtx *JobContext) *twitchGapFillPlan {
+	if prior == nil || job == nil || jobCtx == nil || prior.Platform != "twitch" || prior.IsVod || prior.Status != database.StatusError {
+		return nil
+	}
+	if prior.Error != twitchEndedOfflineErrMsg && prior.ParkReason != database.ParkReasonTwitchEndUnconfirmed {
+		return nil
+	}
+	login := TwitchJobLogin(job)
+	if login == "" {
+		return nil
+	}
+	variant := &TwitchVariantInfo{
+		Name:         job.TwitchQuality,
+		QualityPref:  job.QualityPreference,
+		ChannelLogin: login,
+	}
+	if jobCtx.Config != nil {
+		variant.MaxResolution, variant.Prefer60fps = jobCtx.Config.MaxVideoResolution, jobCtx.Config.Prefer60fps
+	}
+	w.readConfig(func(c *config.MoomboxConfig) {
+		variant.GapFillAdBreaks = twitchChannelGapFillAdBreaks(c.Channels, login)
+	})
+	return newTwitchGapFillPlan(job, variant, stagedPartCoverages(jobCtx.StagingDir), true, time.Now())
 }

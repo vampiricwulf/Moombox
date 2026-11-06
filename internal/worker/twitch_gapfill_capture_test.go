@@ -114,7 +114,7 @@ func TestTwitchGapFillHooksAreWired(t *testing.T) {
 	for _, n := range []string{
 		"variant.ChannelLogin = login",
 		"variant.GapFillAdBreaks = twitchChannelGapFillAdBreaks(c.Channels, login)",
-		"go w.runTwitchGapFills(ctx, newTwitchGapFiller(w.db, w.tw, w.orchestrator, w.logger))",
+		"go w.runTwitchGapFills(ctx, w.newTwitchGapFiller())",
 	} {
 		if !strings.Contains(string(src), n) {
 			t.Errorf("worker.go no longer carries %q", n)
