@@ -7,11 +7,29 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-// HasStagingFiles returns true if the staging directory for a job exists and is non-empty.
+// HasStagingFiles returns true if the staging directory for a job exists and
+// holds anything a run left behind.
+//
+// The yt:stretch display-aspect record (displayAspectFile) does not count: it
+// is written before the download's first request (ExecuteWithChat), so a
+// stretched video whose run failed or was cancelled before any media byte
+// would otherwise read as preserved staging — the failure notice saying
+// "Resume available", both UIs and the /resume route offering Resume and
+// delete-staging, channel removal counting the row as footage — on a
+// directory holding nothing recoverable. It is metadata about a recording,
+// never a recording.
 func HasStagingFiles(stagingBase, jobID string) bool {
 	dir := filepath.Join(stagingBase, jobID)
 	entries, err := os.ReadDir(dir)
-	return err == nil && len(entries) > 0
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.Name() != displayAspectFile {
+			return true
+		}
+	}
+	return false
 }
 
 // HasSegmentFiles returns true if the staging directory contains recognized
