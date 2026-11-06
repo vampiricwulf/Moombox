@@ -108,7 +108,8 @@ type TwitchClipInfo struct {
 	DurationSeconds    int    `json:"durationSeconds,omitempty"`
 	ViewCount          int    `json:"viewCount,omitempty"`
 	// ThumbnailURL is the best thumbnail: the default asset's, else the
-	// clip's own small one (yt-dlp's "default", then "small").
+	// clip's own small one, else the portrait asset's. Unlike upstream,
+	// which ranks the portrait one (-1) above the small one (-2); see info.
 	ThumbnailURL string              `json:"thumbnailUrl,omitempty"`
 	Qualities    []TwitchClipQuality `json:"qualities,omitempty"`
 }
@@ -265,8 +266,11 @@ func (c *clipNode) info(slug string) (*TwitchClipInfo, error) {
 		}
 	}
 	// Thumbnails, best first: the default asset's ("default", preference 0),
-	// then the clip's own ("small", -2). The portrait asset's (-1) is a crop
-	// of the same frame and only stands in when it is all there is.
+	// then the clip's own ("small", -2). DIFFERENT FROM UPSTREAM: yt-dlp
+	// ranks the portrait asset's (-1) above the small one (twitch.py
+	// b77c9304e 1246-1266); Moombox takes one thumbnail, embedded in a
+	// landscape archive, and the portrait one is a vertical crop of the same
+	// frame, so it only stands in when it is all there is.
 	var portraitThumb string
 	if len(c.Assets) > 1 {
 		portraitThumb = c.Assets[1].ThumbnailURL
@@ -393,7 +397,11 @@ func (a *API) ListClips(ctx context.Context, login string, filter ClipFilter, au
 				continue
 			}
 			// The cursor of the last entry yielded, as _entries keeps it; a
-			// non-string cursor ends the listing there.
+			// non-string cursor ends the listing there. DIFFERENT FROM
+			// UPSTREAM: the cursor is reset at the top of each page (above),
+			// so a page that yields no clip ends the listing; _entries keeps
+			// the previous page's cursor across it and would ask for the
+			// same page again, without end if Twitch kept answering it so.
 			var c string
 			if json.Unmarshal(e.Cursor, &c) == nil {
 				cursor = c
