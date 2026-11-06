@@ -407,6 +407,56 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 	}
 }
 
+// TestMuxedTwitchCaptureThatLacksNothingDropsAStaleGapFillRow is the Mux
+// path's half of TestTwitchCaptureThatLacksNothingDropsAStaleGapFillRow
+// (owner decision PR-R5): a job whose earlier archive left a settled
+// gap-fill outcome is re-recorded, its mux fails, and the operator's Mux
+// finalizes the new capture, which lacks nothing. The earlier outcome is
+// about footage this archive does not have; the Mux drops it, and the job
+// API's gapFill reads nothing.
+//
+// Mutant: the Mux's DeleteGapFill branch removed (the old {filled 2} is
+// still reported).
+func TestMuxedTwitchCaptureThatLacksNothingDropsAStaleGapFillRow(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	id := "tw_stale_mux"
+	latchedJob(t, w, db, id, 10, false)
+	db.UpdateJobFields(id, map[string]any{
+		"stream_start_time": gapStart.Format(time.RFC3339),
+		"stream_end_time":   gapStart.Add(6 * time.Minute).Format(time.RFC3339),
+		"twitch_quality":    "chunked",
+		"error":             "ffmpeg mux failed",
+	})
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+	// Coverage from the broadcast's start: no late start, nothing to fill.
+	cov, _ := json.Marshal(partCoverage{StartMs: gapStart.UnixMilli(), EndMs: gapStart.Add(6 * time.Minute).UnixMilli()})
+	if err := os.WriteFile(filepath.Join(stagingBase, id, twitchCoverageFile), cov, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := &twitchGapFillPlan{JobID: id, Login: "streamer", Outcome: &gapFillOutcome{State: GapFillFilled, Spans: 2}}
+	if err := saveTwitchGapFillPlan(db, stale, gapStart.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	w.twitchLiveness = func(context.Context, string) (*twitch.TwitchStreamInfo, error) { return nil, nil }
+
+	if err := w.MuxJob(id); err != nil {
+		t.Fatal(err)
+	}
+	w.wg.Wait()
+
+	j, _ := db.GetJob(id)
+	if j == nil || j.Status != database.StatusFinished {
+		t.Fatalf("muxed row = %v (error %q), want Finished", statusOf(j), errorOf(j))
+	}
+	if st := TwitchGapFillStateOf(db, j); st != nil {
+		t.Errorf("gapFill = %+v after a Mux that lacks nothing, want none: the earlier archive's outcome", *st)
+	}
+	if g, _ := db.GetGapFill(id); g != nil {
+		t.Errorf("the earlier archive's gap-fill row was kept: %s", g.Plan)
+	}
+}
+
 // TestTwitchMuxTailOpenClosesOnACancel pins owner decision FQ-2 on the rule
 // itself: a Cancelled row's tail is closed whatever else it carries, and the
 // close lasts only while the row is Cancelled — the Cancel is read off the
