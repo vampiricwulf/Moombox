@@ -96,3 +96,27 @@ test("the details dialog shows the gap-fill the enriched job carries", { skip },
   h.app.details._preserveStagingFields(h.app.jobs, [raw]);
   assert.deepEqual(raw.gapFill, { state: "kept", spans: 0, reason: "no archive VOD" });
 });
+
+// A pending gap-fill moves on while the dialog is open: a job_update for the
+// open job asks the enriched job again, and the row shows what it answers.
+//
+// Mutant: updateJobDetails not re-fetching (the row stays pending).
+test("the details dialog follows a pending gap-fill to its end", { skip }, async () => {
+  const job = live({ id: "tw-2", platform: "twitch" });
+  let state = { state: "pending", spans: 2 };
+  const h = await harness.makeApp({ routes: { "GET /api/jobs/:id": () => ({ ...job, gapFill: state }) } });
+  h.app.jobs = [job];
+  h.app.selectedJobId = "tw-2";
+  h.el("details-dialog").open = true;
+  h.app.details.renderJobDetails(job);
+  await h.app.details._fetchStagingFields("tw-2");
+  assert.equal(field(h, "gap-fill"), "Gap-fill pending: 2 spans");
+
+  state = { state: "filled", spans: 2 };
+  const { gapFill: _pending, ...raw } = h.app.jobs[0];
+  h.app.details._preserveStagingFields(h.app.jobs, [raw]);
+  h.app.jobs = [raw];
+  h.app.details.updateJobDetails(raw);
+  await h.flush();
+  assert.equal(field(h, "gap-fill"), gapFillText({ gapFill: state }));
+});

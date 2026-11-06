@@ -369,12 +369,19 @@ export class JobDetailsController {
     }
 
     // The late-start and gap-fill lines (owner decisions PR-R2, PR-R5): set
-    // by a job_update long after the dialog opened — the reason when the
-    // capture falls to the live edge, the gap-fill once the job finishes and
-    // as the fill goes on — so, like the incomplete-tail badge above, each
-    // is created, patched or removed here rather than only drawn at open.
+    // by a job_update long after the dialog opened, so, like the
+    // incomplete-tail badge above, each is created, patched or removed here
+    // rather than only drawn at open. The live-edge reason is a column the
+    // raw row carries. The gap-fill is computed (worker.TwitchGapFillStateOf)
+    // and only GET /api/jobs/{id} answers it — a WS row carries the value
+    // fetched at open (_preserveStagingFields) — so while that says pending,
+    // a job_update for the open job (the fill's re-finalize writes one) asks
+    // again and the row moves on to filled or kept.
     this.syncTextRow(content, "live-edge", "Start:", liveEdgeText(job));
     this.syncTextRow(content, "gap-fill", "Gap-fill:", gapFillText(job));
+    if (job.gapFill?.state === "pending" && this.app.selectedJobId === job.id) {
+      this._fetchStagingFields(job.id);
+    }
 
     // Update speed if present
     const speedRow = document.getElementById("speed-row");
