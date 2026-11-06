@@ -18,7 +18,7 @@ import (
 // aspect.
 func TestWithDisplayAspect(t *testing.T) {
 	m := NewMuxer("ffmpeg", &testLogger{})
-	args := m.buildArgs("video.mp4", "audio.m4a", "out.mp4", nil, false, InputOffsets{})
+	args := m.buildArgs("video.mp4", "audio.m4a", "out.mp4", nil, false, InputOffsets{}, "")
 	got := withDisplayAspect(args, "1.777778")
 	want := append(slices.Clone(args[:len(args)-1]), "-aspect", "1.777778", "out.mp4")
 	if !slices.Equal(got, want) {

@@ -159,6 +159,18 @@ type ChatDownloader struct {
 	continuation  string
 	streamStartMs int64
 	flushedToDisk bool
+
+	// pendingMarkers are the deletion and replacement markers that may name
+	// a message already on disk, applied by one rewrite at the end of the run
+	// (applyPendingMarkers); rawPending the raw sidecar lines not yet
+	// appended (flushRawActions). Loop-goroutine state, like messages.
+	pendingMarkers []pendingChatMarker
+	rawPending     []json.RawMessage
+	// liveRawOffsetMs / hasLiveRawOffset: the offset of the newest live
+	// message seen, which a live raw line is stamped with (yt-dlp's
+	// live_offset, carried across batches the same way).
+	liveRawOffsetMs  int64
+	hasLiveRawOffset bool
 	// resumeFileAuto is true when ResumeFile was synthesized from OutputFile in
 	// NewChatDownloader (caller did not pass an explicit ResumeFile). Used by
 	// SetOutputFile to know whether it's safe to re-derive ResumeFile from the
@@ -766,6 +778,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	var rerun *replayRerun
 	if !resuming && !cd.opts.IsLiveOrUpcoming {
 		rerun = cd.beginReplayRerun()
+		cd.startRawSidecarFresh()
 	}
 
 	if cd.OnStart != nil {
@@ -788,6 +801,10 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	if len(cd.messages) > 0 {
 		cd.writeChatFile()
 	}
+	// The markers that named messages already on disk, in one rewrite, and
+	// the raw sidecar's last lines.
+	cd.applyPendingMarkers()
+	cd.flushRawActions()
 
 	// Update header metadata if we flushed earlier
 	if cd.flushedToDisk && cd.messageCount > 0 {
@@ -900,6 +917,7 @@ func (cd *ChatDownloader) finishReplayRerun(rr *replayRerun, completed bool) boo
 	if !ioErr && statErr == nil && (completed || got >= rr.existing) {
 		err := utils.ReplaceFile(tmp, rr.outputFile)
 		if err == nil {
+			cd.settleRerunRawSidecar(tmp, rr.outputFile, true)
 			cd.logInfo("chat: the replay re-run replaced the archive",
 				"videoID", cd.opts.VideoID, "messages", got, "archiveMessages", rr.existing, "complete", completed)
 			return true
@@ -909,6 +927,7 @@ func (cd *ChatDownloader) finishReplayRerun(rr *replayRerun, completed bool) boo
 	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
 		cd.logDebug("chat: could not remove the discarded re-run", "file", tmp, "err", err)
 	}
+	cd.settleRerunRawSidecar(tmp, rr.outputFile, false)
 	cd.mu.Lock()
 	cd.messageCount = rr.existing
 	cd.messages = nil
@@ -1123,6 +1142,7 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 		}
 
 		newInBatch, lastTs := cd.processBatch(resp)
+		cd.flushRawActions()
 		if newInBatch > 0 {
 			cd.callOnProgress(ChatProgress{
 				MessageCount:  cd.messageCount,
@@ -1453,6 +1473,11 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 			cd.hasReplayHighWater = true
 		}
 	}
+	// The batch's deletions and replacements, after its messages are
+	// committed (a deletion never precedes its message), and everything that
+	// did not become a message for the raw sidecar (G36, D16).
+	cd.applyMarkers(resp.Markers)
+	cd.queueRawActions(resp)
 	if len(resp.Messages) > 0 {
 		lastTs = resp.Messages[len(resp.Messages)-1].TimestampText
 	}
@@ -1678,6 +1703,20 @@ func (cd *ChatDownloader) epochRFC3339() string {
 	return cd.opts.StreamStartTime
 }
 
+// chatFileData is the document writeFullChatFile writes: the header, then
+// messages. applyPendingMarkers' streamed rewrite writes the same header.
+func (cd *ChatDownloader) chatFileData(messages []ChatMessage) ChatData {
+	return ChatData{
+		VideoID:         cd.opts.VideoID,
+		VideoTitle:      cd.opts.VideoTitle,
+		ChannelName:     cd.opts.ChannelName,
+		StreamStartTime: cd.epochRFC3339(),
+		DownloadedAt:    time.Now().UTC().Format(time.RFC3339),
+		MessageCount:    cd.messageCount,
+		Messages:        messages,
+	}
+}
+
 func (cd *ChatDownloader) writeFullChatFile() bool {
 	outputFile, _ := cd.getOutputPaths()
 
@@ -1688,15 +1727,7 @@ func (cd *ChatDownloader) writeFullChatFile() bool {
 		// (and report) before rewriting the file.
 		messages = []ChatMessage{}
 	}
-	data := ChatData{
-		VideoID:         cd.opts.VideoID,
-		VideoTitle:      cd.opts.VideoTitle,
-		ChannelName:     cd.opts.ChannelName,
-		StreamStartTime: cd.epochRFC3339(),
-		DownloadedAt:    time.Now().UTC().Format(time.RFC3339),
-		MessageCount:    cd.messageCount,
-		Messages:        messages,
-	}
+	data := cd.chatFileData(messages)
 
 	if err := utils.WriteChatFileAtomic(outputFile, &data); err != nil {
 		cd.reportIOError(fmt.Errorf("write chat file: %w", err))

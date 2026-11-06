@@ -1,6 +1,8 @@
 // Package twitch provides Twitch GQL API, chat, and HLS integration.
 package twitch
 
+import "github.com/vampiricwulf/Moombox/internal/utils"
+
 // TwitchStreamInfo contains live stream information from Twitch GQL.
 type TwitchStreamInfo struct {
 	StreamID           string `json:"streamId"`
@@ -64,6 +66,14 @@ type TwitchVodInfo struct {
 	// not recording (yt-dlp #14455). While it is true, Duration is the length
 	// so far and the playlist has no ENDLIST yet.
 	IsRecording bool `json:"isRecording,omitempty"`
+	// Description is the VOD's own description (VideoMetadata's
+	// `description`, as yt-dlp's _extract_info_gql reads it), G68. Empty for
+	// most past broadcasts; highlights and uploads carry one.
+	Description string `json:"description,omitempty"`
+	// Chapters are the VOD's game segments in its own timeline
+	// (VideoPlayer_ChapterSelectButtonVideo's moments, or one chapter named
+	// after the game when it has none — vodChapters), owner decision D23.
+	Chapters []utils.Chapter `json:"chapters,omitempty"`
 }
 
 // TwitchChatMessage represents a single Twitch chat message.

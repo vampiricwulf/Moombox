@@ -80,6 +80,7 @@ var restartRequiredKeys = map[string]bool{
 	"probe_targets":         true,
 	"sidecar_hard_limit_mb": true,
 	"use_sidecar":           true,
+	"client_id":             true,
 }
 
 // resolutionPresets are the max_video_resolution values the arrow keys step
@@ -218,6 +219,12 @@ var sections = []settingsSection{
 		name: "BotGuard Sidecar",
 		fields: []fieldDef{
 			{"use_sidecar", "Enable sidecar", fieldToggle, nil, "Node + JSDOM + bgutils-js for real BotGuard PO tokens and signature solving (default: on; when off, no PO tokens are minted and signature-ciphered formats are unavailable) (requires restart)", nil},
+		},
+	},
+	{
+		name: "Twitch",
+		fields: []fieldDef{
+			{"client_id", "Client-ID override", fieldText, nil, "Client-ID sent on every Twitch GQL and playlist request; empty = the built-in one (requires restart)", nil},
 		},
 	},
 	{
@@ -731,6 +738,9 @@ func loadSettingsValues(v map[string]string, cfg *config.MoomboxConfig) {
 	// BotGuard sidecar
 	v["use_sidecar"] = boolToDisplay(cfg.Bgutils.UseSidecar)
 
+	// Twitch
+	v["client_id"] = cfg.Twitch.ClientID
+
 	// Memory
 	v["go_soft_limit_mb"] = strconv.Itoa(cfg.Memory.GoSoftLimitMB)
 	v["sidecar_soft_limit_mb"] = strconv.Itoa(cfg.Memory.SidecarSoftLimitMB)
@@ -990,6 +1000,12 @@ func validateSettingsValues(v map[string]string, passwordHash string, checkBrows
 		return p, fmt.Sprintf("Public dashboard URL: %v", err)
 	}
 	p.publicURL = publicURL
+
+	// Validate twitch.client_id: config.Validate refuses a malformed one, so
+	// gate it here with the same check, as the two gates above do.
+	if !config.ValidTwitchClientID(strings.TrimSpace(v["client_id"])) {
+		return p, "Twitch Client-ID override must be 1-64 letters and digits, or empty for the built-in one"
+	}
 
 	// Validate browser_path if set: quickBrowserCheck's static checks, by
 	// way of checkBrowser.
@@ -1307,6 +1323,10 @@ func writeSettingsField(c *config.MoomboxConfig, key string, v map[string]string
 	// BotGuard sidecar
 	case "use_sidecar":
 		c.Bgutils.UseSidecar = yes
+
+	// Twitch
+	case "client_id":
+		c.Twitch.ClientID = strings.TrimSpace(val)
 
 	// Memory
 	case "go_soft_limit_mb":

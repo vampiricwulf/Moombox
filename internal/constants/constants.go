@@ -371,7 +371,9 @@ var TwitchURLs = struct {
 // _CLIENT_ID), driven by integrity-token enforcement on the old ID. The
 // classic ID still works for our persisted queries and Usher access tokens
 // today, but if Twitch tightens GQL access this is the first thing to
-// rotate. Audit-finding #9.
+// rotate. Audit-finding #9. An install can now rotate it without a release:
+// `[twitch] client_id` in config.toml overrides it (twitch.SetClientID, G70),
+// as yt-dlp's `--extractor-args twitch:client_id=` overrides its _CLIENT_ID.
 const TwitchGQLClientID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 
 // TwitchGQLHashes contains persisted query hashes for Twitch GQL.
@@ -381,16 +383,25 @@ const TwitchGQLClientID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 // upstream and bump as needed — Twitch invalidates persisted queries on
 // schema changes, so a stale hash returns a "PersistedQueryNotFound"
 // error and breaks the relevant code path silently. Audit-finding #33.
+//
+// VideoPlayerChapterSelectButtonVideo (a VOD's moments, its chapters) and
+// FilterableVideoTowerVideos (a channel's video list, which finds a live
+// broadcast's archive VOD) were added 2026-10-31 from the same table at
+// b77c9304e, for the chapter port (owner decision D23).
 var TwitchGQLHashes = struct {
-	StreamMetadata                string
-	ComscoreStreamingQuery        string
-	VideoMetadata                 string
-	VideoCommentsByOffsetOrCursor string
+	StreamMetadata                      string
+	ComscoreStreamingQuery              string
+	VideoMetadata                       string
+	VideoCommentsByOffsetOrCursor       string
+	VideoPlayerChapterSelectButtonVideo string
+	FilterableVideoTowerVideos          string
 }{
-	StreamMetadata:                "ad022ca32220d5523d03a23cbcb5beaa1e0999889c1f8f78f9f2520dafb5cae6",
-	ComscoreStreamingQuery:        "e1edae8122517d013405f237ffcc124515dc6ded82480a88daef69c83b53ac01",
-	VideoMetadata:                 "45111672eea2e507f8ba44d101a61862f9c56b11dee09a15634cb75cb9b9084d",
-	VideoCommentsByOffsetOrCursor: "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a",
+	StreamMetadata:                      "ad022ca32220d5523d03a23cbcb5beaa1e0999889c1f8f78f9f2520dafb5cae6",
+	ComscoreStreamingQuery:              "e1edae8122517d013405f237ffcc124515dc6ded82480a88daef69c83b53ac01",
+	VideoMetadata:                       "45111672eea2e507f8ba44d101a61862f9c56b11dee09a15634cb75cb9b9084d",
+	VideoCommentsByOffsetOrCursor:       "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a",
+	VideoPlayerChapterSelectButtonVideo: "71835d5ef425e154bf282453a926d99b328cdc5e32f36d3a209d0f4778b41203",
+	FilterableVideoTowerVideos:          "67004f7881e65c297936f32c75246470629557a393788fb5a69d6d9a25a8fd5f",
 }
 
 // TwitchEmoteAPIs contains third-party emote API endpoints.

@@ -14,10 +14,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/httpx"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // ErrTwitchAuthExpired signals that Twitch rejected the provided auth-token
@@ -84,6 +86,37 @@ var errStreamSlotUnavailable = errors.New("twitch stream metadata slot unavailab
 // requests. Backed by the shared httpx transport for keep-alive
 // amortisation across the 6-8 GQL calls per monitor cycle.
 var twitchHTTPClient = httpx.Client(30 * time.Second)
+
+// clientIDOverride is the `[twitch] client_id` an install configured, or nil
+// for the built-in constants.TwitchGQLClientID (G70). yt-dlp makes its own
+// Client-ID an extractor argument for the same reason
+// (`--extractor-args twitch:client_id=…`, TwitchBaseIE._CLIENT_ID, twitch.py
+// b77c9304e): it is the first thing Twitch's integrity checks rotate out from
+// under a client, and a hard-coded one can then only be fixed by a release.
+// Process-wide, like the ID it replaces: every GQL call and every Usher
+// playlist fetch sends it. Set once at boot (the setting is restart-required),
+// atomic so a test that sets it races nothing.
+var clientIDOverride atomic.Pointer[string]
+
+// SetClientID installs the configured Client-ID override. An empty id
+// restores the built-in one.
+func SetClientID(id string) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		clientIDOverride.Store(nil)
+		return
+	}
+	clientIDOverride.Store(&id)
+}
+
+// ClientID is the Client-ID every Twitch request sends: the configured
+// override, else constants.TwitchGQLClientID.
+func ClientID() string {
+	if id := clientIDOverride.Load(); id != nil {
+		return *id
+	}
+	return constants.TwitchGQLClientID
+}
 
 var (
 	safeLoginRe   = regexp.MustCompile(`[^a-zA-Z0-9_]`)
@@ -371,7 +404,7 @@ func (a *API) doGQLOnce(ctx context.Context, data []byte, authToken string) ([]b
 		return nil, 0, "", err
 	}
 
-	req.Header.Set("Client-ID", constants.TwitchGQLClientID)
+	req.Header.Set("Client-ID", ClientID())
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", constants.UserAgents.Web)
 	if authToken != "" {
@@ -658,15 +691,23 @@ func (a *API) parseStreamInfo(channelLogin string, smRaw, csRaw json.RawMessage)
 				DisplayName     string `json:"displayName"`
 				Login           string `json:"login"`
 				ProfileImageURL string `json:"profileImageURL"`
-				Stream          *struct {
-					ID           string `json:"id"`
-					Title        string `json:"title"`
-					Type         string `json:"type"`
-					ViewersCount int    `json:"viewersCount"`
-					CreatedAt    string `json:"createdAt"`
-					Game         *struct {
-						DisplayName string `json:"displayName"`
-					} `json:"game"`
+				// LastBroadcast is where streamlink reads a live channel's
+				// title (plugins/twitch.py metadata_channel), one of the
+				// title fallbacks below. Speculative here: streamlink sends
+				// a different StreamMetadata persisted query (b57f9b91…)
+				// from the one Moombox sends (yt-dlp's ad022ca3…), and a
+				// persisted query fixes its selection set, so whether this
+				// reply carries it at all is unverified. Absent, it is "".
+				LastBroadcast *struct {
+					Title string `json:"title"`
+				} `json:"lastBroadcast"`
+				Stream *struct {
+					ID           string           `json:"id"`
+					Title        string           `json:"title"`
+					Type         string           `json:"type"`
+					ViewersCount int              `json:"viewersCount"`
+					CreatedAt    string           `json:"createdAt"`
+					Game         *twitchGameField `json:"game"`
 				} `json:"stream"`
 			} `json:"user"`
 		} `json:"data"`
@@ -719,9 +760,7 @@ func (a *API) parseStreamInfo(channelLogin string, smRaw, csRaw json.RawMessage)
 		RawStreamType:      user.Stream.Type, // preserved before normalization (audit twitch.md #29)
 	}
 
-	if user.Stream.Game != nil {
-		info.GameCategory = user.Stream.Game.DisplayName
-	}
+	info.GameCategory = user.Stream.Game.name()
 
 	// Build thumbnail URL (only if we have a login)
 	if login != "" {
@@ -729,33 +768,54 @@ func (a *API) parseStreamInfo(channelLogin string, smRaw, csRaw json.RawMessage)
 			constants.TwitchURLs.PreviewCDN, strings.ToLower(login))
 	}
 
-	// Parse ComscoreStreamingQuery for title fallback
+	// ComscoreStreamingQuery, for the title and category fallbacks. Two
+	// shapes are read: yt-dlp's, user.broadcastSettings (TwitchStreamIE
+	// _real_extract, twitch.py b77c9304e, which takes its live description
+	// from user.broadcastSettings.title), and the user.stream.broadcaster
+	// path this parser read alone until G69, which no reference uses.
 	var csResp struct {
 		Data struct {
 			User struct {
-				Stream *struct {
+				BroadcastSettings *twitchBroadcastSettings `json:"broadcastSettings"`
+				Stream            *struct {
 					Broadcaster struct {
-						BroadcastSettings struct {
-							Title string `json:"title"`
-							Game  *struct {
-								DisplayName string `json:"displayName"`
-							} `json:"game"`
-						} `json:"broadcastSettings"`
+						BroadcastSettings twitchBroadcastSettings `json:"broadcastSettings"`
 					} `json:"broadcaster"`
 				} `json:"stream"`
 			} `json:"user"`
 		} `json:"data"`
 	}
+	var ytdlpSettings, legacySettings twitchBroadcastSettings
+	if err := json.Unmarshal(csRaw, &csResp); err == nil {
+		if csResp.Data.User.BroadcastSettings != nil {
+			ytdlpSettings = *csResp.Data.User.BroadcastSettings
+		}
+		if csResp.Data.User.Stream != nil {
+			legacySettings = csResp.Data.User.Stream.Broadcaster.BroadcastSettings
+		}
+	}
+	var lastBroadcastTitle string
+	if user.LastBroadcast != nil {
+		lastBroadcastTitle = user.LastBroadcast.Title
+	}
 
-	if err := json.Unmarshal(csRaw, &csResp); err == nil && csResp.Data.User.Stream != nil {
-		bs := csResp.Data.User.Stream.Broadcaster.BroadcastSettings
-		// Comscore title is only a fallback — stream title takes priority
-		if info.Title == "" && bs.Title != "" {
-			info.Title = bs.Title
-		}
-		if bs.Game != nil && bs.Game.DisplayName != "" && info.GameCategory == "" {
-			info.GameCategory = bs.Game.DisplayName
-		}
+	// THE TITLE, first non-empty of (G69): StreamMetadata's own
+	// user.stream.title; Comscore user.broadcastSettings.title (yt-dlp);
+	// StreamMetadata user.lastBroadcast.title (streamlink's path, but
+	// streamlink validates it under its own StreamMetadata hash, b57f9b91…,
+	// not the yt-dlp one Moombox sends, so whether this reply carries it is
+	// unverified — harmless when absent); and last the Comscore path read
+	// before. The Comscore path is sound: its hash is yt-dlp's own. The order cannot be checked
+	// against a capture from here — MOOMBOX_LIVE_TWITCH_TEST needs a live
+	// channel — so it is built from the two references' field paths: the
+	// primary path stays first because production titles show today.
+	if info.Title == "" {
+		info.Title = firstNonEmpty(ytdlpSettings.Title, lastBroadcastTitle, legacySettings.Title)
+	}
+	// The category, the same way: stream.game (displayName, then the
+	// game.name streamlink reads), then each Comscore shape's game.
+	if info.GameCategory == "" {
+		info.GameCategory = firstNonEmpty(ytdlpSettings.Game.name(), legacySettings.Game.name())
 	}
 
 	// Profile image URL is already part of the StreamMetadata response above
@@ -779,6 +839,40 @@ func (a *API) parseStreamInfo(channelLogin string, smRaw, csRaw json.RawMessage)
 	}
 
 	return info, nil
+}
+
+// twitchGameField is a GQL game: displayName where Moombox has always read
+// it, name where streamlink reads it (StreamMetadata user.stream.game.name —
+// under streamlink's own StreamMetadata hash, so whether Moombox's reply
+// carries it is unverified; absent, it is "").
+type twitchGameField struct {
+	DisplayName string `json:"displayName"`
+	Name        string `json:"name"`
+}
+
+// name is the game's display name, else its name; "" for no game.
+func (g *twitchGameField) name() string {
+	if g == nil {
+		return ""
+	}
+	return firstNonEmpty(g.DisplayName, g.Name)
+}
+
+// twitchBroadcastSettings is a ComscoreStreamingQuery broadcastSettings
+// object, at either of the paths parseStreamInfo reads.
+type twitchBroadcastSettings struct {
+	Title string           `json:"title"`
+	Game  *twitchGameField `json:"game"`
+}
+
+// firstNonEmpty is the first of vals that is not "".
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // unknownStreamTypesSeen tracks Twitch StreamType values we've already
@@ -887,16 +981,45 @@ func (a *API) GetVodAccessToken(ctx context.Context, vodID, authToken string) (*
 	return resp.Data.VideoPlaybackAccessToken, nil
 }
 
-// GetVodInfo fetches VOD metadata via GQL.
+// GetVodInfo fetches VOD metadata via GQL: VideoMetadata, batched with
+// VideoPlayer_ChapterSelectButtonVideo for the VOD's chapters, as yt-dlp's
+// TwitchVodIE._download_info batches them (twitch.py b77c9304e; it also sends
+// VideoPlayer_VODSeekbarPreviewVideo, for the storyboard, which Moombox has no
+// use for). The description is VideoMetadata's own field, as upstream reads it
+// (_extract_info_gql), G68.
+//
+// The chapter half is best effort: the batch answers per element, and a
+// chapter op Twitch errors on (a rotated hash) still returns the metadata — the
+// VOD downloads without chapters, never fails over them (parseGQLBody fails a
+// batch only when EVERY element errored). A reply that is a single object
+// rather than an array is read as VideoMetadata alone.
 func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchVodInfo, error) {
-	query := newPersistedQuery("VideoMetadata", constants.TwitchGQLHashes.VideoMetadata, map[string]any{
-		"channelLogin": "",
-		"videoID":      vodID,
-	})
+	ops := []gqlPersistedQuery{
+		newPersistedQuery("VideoMetadata", constants.TwitchGQLHashes.VideoMetadata, map[string]any{
+			"channelLogin": "",
+			"videoID":      vodID,
+		}),
+		newPersistedQuery("VideoPlayer_ChapterSelectButtonVideo", constants.TwitchGQLHashes.VideoPlayerChapterSelectButtonVideo, map[string]any{
+			"includePrivate": false,
+			"videoID":        vodID,
+		}),
+	}
 
-	respData, err := a.gqlRequest(ctx, "VideoMetadata", query, authToken)
+	respData, err := a.gqlRequest(ctx, "VideoMetadata+VideoPlayer_ChapterSelectButtonVideo", ops, authToken)
 	if err != nil {
 		return nil, err
+	}
+
+	var results []json.RawMessage
+	if len(respData) > 0 && respData[0] == '[' {
+		if err := json.Unmarshal(respData, &results); err != nil {
+			return nil, fmt.Errorf("parse vod info: %w", err)
+		}
+	} else {
+		results = []json.RawMessage{respData}
+	}
+	if len(results) == 0 {
+		return nil, fmt.Errorf("parse vod info: empty batch reply")
 	}
 
 	var resp struct {
@@ -904,6 +1027,7 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 			Video *struct {
 				ID            string `json:"id"`
 				Title         string `json:"title"`
+				Description   string `json:"description"`
 				LengthSeconds int    `json:"lengthSeconds"`
 				PreviewURL    string `json:"previewThumbnailURL"`
 				BroadcastType string `json:"broadcastType"`
@@ -921,7 +1045,7 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 		} `json:"data"`
 	}
 
-	if err := json.Unmarshal(respData, &resp); err != nil {
+	if err := json.Unmarshal(results[0], &resp); err != nil {
 		return nil, fmt.Errorf("parse vod info: %w", err)
 	}
 
@@ -945,6 +1069,7 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 	info := &TwitchVodInfo{
 		VodID:              v.ID,
 		Title:              title,
+		Description:        v.Description,
 		ChannelLogin:       v.Owner.Login,
 		ChannelDisplayName: v.Owner.DisplayName,
 		ChannelID:          v.Owner.ID,
@@ -979,7 +1104,177 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 		info.GameCategory = v.Game.DisplayName
 	}
 
+	var moments []vodMoment
+	if len(results) > 1 {
+		moments = parseVodMoments(results[1])
+	}
+	info.Chapters = vodChapters(moments, info.GameCategory)
+
 	return info, nil
+}
+
+// vodMoment is one node of VideoPlayer_ChapterSelectButtonVideo's
+// data.video.moments.edges: a game segment of the VOD.
+type vodMoment struct {
+	PositionMilliseconds *int64 `json:"positionMilliseconds"`
+	DurationMilliseconds *int64 `json:"durationMilliseconds"`
+	Description          string `json:"description"`
+}
+
+// parseVodMoments reads the moments out of the chapter op's reply; a reply
+// that is not that shape, or an errored element, has none.
+func parseVodMoments(raw json.RawMessage) []vodMoment {
+	var resp struct {
+		Data struct {
+			Video *struct {
+				Moments struct {
+					Edges []struct {
+						Node *vodMoment `json:"node"`
+					} `json:"edges"`
+				} `json:"moments"`
+			} `json:"video"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &resp) != nil || resp.Data.Video == nil {
+		return nil
+	}
+	var out []vodMoment
+	for _, e := range resp.Data.Video.Moments.Edges {
+		if e.Node != nil {
+			out = append(out, *e.Node)
+		}
+	}
+	return out
+}
+
+// vodChapters is yt-dlp's TwitchVodIE._extract_chapters (twitch.py
+// b77c9304e): one chapter per moment, from positionMilliseconds for
+// durationMilliseconds and titled with its description, a moment missing
+// either time skipped (upstream warns "Important chapter information
+// missing"); and with no moments at all, the whole VOD as one chapter named
+// after its game, when it has one. That single chapter is open-ended, as
+// upstream yields it ({'title': game}, ended by process_info's fill-in at the
+// video's duration): utils.SanitizeChapters ends it at the archive's probed
+// span at mux. Ending it at lengthSeconds cut it short for a VOD still being
+// recorded, whose length at extraction is only the length so far.
+func vodChapters(moments []vodMoment, game string) []utils.Chapter {
+	if len(moments) == 0 {
+		if game == "" {
+			return nil
+		}
+		return []utils.Chapter{{StartMs: 0, Title: game}}
+	}
+	var out []utils.Chapter
+	for _, m := range moments {
+		if m.PositionMilliseconds == nil || m.DurationMilliseconds == nil {
+			continue
+		}
+		out = append(out, utils.Chapter{
+			StartMs: *m.PositionMilliseconds,
+			EndMs:   *m.PositionMilliseconds + *m.DurationMilliseconds,
+			Title:   m.Description,
+		})
+	}
+	return out
+}
+
+// ArchiveVodFor finds the archive VOD of the broadcast a live capture
+// recorded: the newest of the channel's videos published at or after the
+// broadcast's start. It is yt-dlp's live_from_start lookup
+// (TwitchStreamIE._real_extract, twitch.py b77c9304e: `next(self._entries(
+// channel_name, None, 'time'))`, kept when its timestamp >= the stream's
+// createdAt), over the same FilterableVideoTower_Videos op its
+// TwitchVideosIE pages, filtered to past broadcasts (see the broadcastType
+// variable); the first page is enough, since the archive of a broadcast that
+// just ended is the newest archive. Moombox reads it at a live
+// capture's finalize, for the VOD's chapters (owner decision D23 follow-up 1:
+// VOD first, the categories the capture observed as the fallback).
+//
+// Returns "" with no error when the channel has no such video — VODs off, or
+// Twitch has not listed it yet.
+func (a *API) ArchiveVodFor(ctx context.Context, channelLogin, startedAt, authToken string) (string, error) {
+	start, err := time.Parse(time.RFC3339, startedAt)
+	if err != nil {
+		return "", fmt.Errorf("archive vod lookup: stream start %q: %w", startedAt, err)
+	}
+	query := newPersistedQuery("FilterableVideoTower_Videos", constants.TwitchGQLHashes.FilterableVideoTowerVideos, map[string]any{
+		"channelOwnerLogin": strings.ToLower(channelLogin),
+		// "ARCHIVE", where upstream sends None (all types): yt-dlp looks as
+		// the stream starts, when its in-progress archive is the newest
+		// video, but Moombox looks at finalize, hours later, when a
+		// highlight or upload published during the broadcast is newer than
+		// the archive (whose publishedAt is the stream's start) and would be
+		// taken in its place. Past broadcasts only is yt-dlp's own
+		// _BROADCASTS 'archives' filter.
+		"broadcastType": "ARCHIVE",
+		"videoSort":     "TIME",
+		"limit":         archiveVodLookupLimit,
+	})
+	respData, err := a.gqlRequest(ctx, "FilterableVideoTower_Videos", query, authToken)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Data struct {
+			User *struct {
+				Videos *struct {
+					Edges []struct {
+						TypeName string `json:"__typename"`
+						Node     *struct {
+							TypeName    string `json:"__typename"`
+							ID          string `json:"id"`
+							PublishedAt string `json:"publishedAt"`
+						} `json:"node"`
+					} `json:"edges"`
+				} `json:"videos"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respData, &resp); err != nil {
+		return "", fmt.Errorf("parse archive vod lookup: %w", err)
+	}
+	if resp.Data.User == nil || resp.Data.User.Videos == nil {
+		return "", nil
+	}
+	// The newest entry decides, as upstream's next(...) does: an older VOD
+	// is another broadcast's, whatever it holds.
+	for _, e := range resp.Data.User.Videos.Edges {
+		if e.Node == nil || e.Node.ID == "" || (e.TypeName != "" && e.TypeName != "VideoEdge") ||
+			(e.Node.TypeName != "" && e.Node.TypeName != "Video") {
+			continue
+		}
+		published, err := time.Parse(time.RFC3339, e.Node.PublishedAt)
+		if err != nil || published.Before(start) {
+			return "", nil
+		}
+		return e.Node.ID, nil
+	}
+	return "", nil
+}
+
+// archiveVodLookupLimit is the page ArchiveVodFor asks for. Only the newest
+// entry is read; a few more cover entries the edge filter skips.
+const archiveVodLookupLimit = 5
+
+// thumbOriginalSizeRe is yt-dlp's _get_thumbnails rewrite
+// (`\d+x\d+(\.\w+)($|(?=[?#]))` → `0x0\1`, twitch.py b77c9304e), which asks
+// the CDN for the image at its original size. RE2 has no lookahead, so the
+// "?" or "#" that ends the match is captured and put back.
+var thumbOriginalSizeRe = regexp.MustCompile(`\d+x\d+(\.\w+)($|[?#])`)
+
+// OriginalSizeThumbnailURL is a Twitch thumbnail URL rewritten to its
+// original size (0x0), the form yt-dlp ranks first (preference 1) with the
+// sized URL as its fallback (G45). "" when the URL carries no WxH size to
+// rewrite.
+func OriginalSizeThumbnailURL(u string) string {
+	if !thumbOriginalSizeRe.MatchString(u) {
+		return ""
+	}
+	out := thumbOriginalSizeRe.ReplaceAllString(u, "0x0${1}${2}")
+	if out == u {
+		return ""
+	}
+	return out
 }
 
 // BuildUsherLiveURL constructs the Usher HLS master playlist URL for a live channel.

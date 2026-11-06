@@ -555,6 +555,17 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		}
 	}
 
+	// Twitch sub-fields (G70): config.ValidTwitchClientID, the rule Validate
+	// applies on load and save.
+	if tw, ok := updates["twitch"].(map[string]any); ok {
+		if raw, present := tw["client_id"]; present {
+			v, isStr := raw.(string)
+			if !isStr || !config.ValidTwitchClientID(strings.TrimSpace(v)) {
+				errs["twitch.client_id"] = "client_id must be 1-64 letters and digits, or empty for the built-in one"
+			}
+		}
+	}
+
 	// Cookies sub-fields
 	if ck, ok := updates["cookies"].(map[string]any); ok {
 		// browser_profile_dir may be empty ("auto-cookies not configured");
@@ -1097,6 +1108,13 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 	if bg, ok := updates["bgutils"].(map[string]any); ok {
 		if v, ok := bg["use_sidecar"].(bool); ok {
 			cfg.Bgutils.UseSidecar = v
+		}
+	}
+
+	// Twitch
+	if tw, ok := updates["twitch"].(map[string]any); ok {
+		if v, ok := tw["client_id"].(string); ok {
+			cfg.Twitch.ClientID = strings.TrimSpace(v)
 		}
 	}
 

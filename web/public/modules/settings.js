@@ -130,6 +130,7 @@ const RESTART_REQUIRED_FIELDS = [
   { path: "connectivity.probe_targets", id: "cfg-probe-targets" },
   { path: "memory.sidecar_hard_limit_mb", id: "cfg-memory-sidecar-hard-limit-mb" },
   { path: "bgutils.use_sidecar", id: "cfg-bgutils-use-sidecar" },
+  { path: "twitch.client_id", id: "cfg-twitch-client-id" },
 ];
 
 /**
@@ -883,6 +884,9 @@ export class SettingsController {
       useSidecarSwitch.checked = config.bgutils?.use_sidecar !== false;
     }
 
+    // Twitch
+    this.app.setInputValue("cfg-twitch-client-id", config.twitch?.client_id ?? "");
+
     // Reverse-proxy / DPAPI toggles
     const trustForwardedProtoSwitch = document.getElementById("cfg-trust-forwarded-proto");
     if (trustForwardedProtoSwitch) {
@@ -1109,6 +1113,8 @@ export class SettingsController {
 
       "bgutils.use_sidecar": checked("cfg-bgutils-use-sidecar", true),
 
+      "twitch.client_id": text("cfg-twitch-client-id"),
+
       // An empty list would fail the "at least one" check; the stored
       // targets are kept instead.
       "connectivity.probe_targets": probeTargets.length ? probeTargets : undefined,
@@ -1310,7 +1316,7 @@ export class SettingsController {
       // shown a list naming four things they did not touch reads this as a
       // prompt about something else and dismisses it — which is the failure the
       // cookie entries exist to prevent.
-      "Some settings require a restart to take effect (port, network access, HTTPS/TLS, connectivity probe targets, database path, log settings, cookie settings, sidecar settings).\n\nRestart Moombox now?",
+      "Some settings require a restart to take effect (port, network access, HTTPS/TLS, connectivity probe targets, database path, log settings, cookie settings, sidecar settings, Twitch Client-ID).\n\nRestart Moombox now?",
       { okLabel: "Restart", okVariant: "primary", title: "Restart Required" },
     );
     if (!shouldRestart) {

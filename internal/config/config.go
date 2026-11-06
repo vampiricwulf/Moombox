@@ -1181,7 +1181,26 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		}
 	}
 
+	if !ValidTwitchClientID(cfg.Twitch.ClientID) {
+		fail("twitch.client_id %q must be 1-64 letters and digits, or empty for the built-in one", cfg.Twitch.ClientID)
+		if !reportOnly {
+			cfg.Twitch.ClientID = defaults.Twitch.ClientID
+		}
+	}
+
 	return errs
+}
+
+// twitchClientIDRe is the shape a Twitch Client-ID takes (30 lowercase
+// alphanumerics today), with room to spare and nothing a header could be
+// split on.
+var twitchClientIDRe = regexp.MustCompile(`^[A-Za-z0-9]{1,64}$`)
+
+// ValidTwitchClientID reports whether id can be `[twitch] client_id`: empty
+// (the built-in Client-ID), or 1-64 letters and digits. Shared by Validate
+// and the PUT /api/config check so the two cannot drift.
+func ValidTwitchClientID(id string) bool {
+	return id == "" || twitchClientIDRe.MatchString(id)
 }
 
 // channelWindowInRange and channelSlotsInRange are the per-channel

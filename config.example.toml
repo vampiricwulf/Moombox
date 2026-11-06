@@ -359,6 +359,14 @@
 # [bgutils]
 # use_sidecar = true                         # Default: true. Set to false to disable.
 
+# ─── Twitch ─────────────────────────────────────────────────────────────────
+# The Client-ID every Twitch GQL call and Usher playlist fetch sends. Empty
+# keeps the built-in one; set it only when Twitch has rotated that one out
+# (yt-dlp's `--extractor-args twitch:client_id=` is the same override).
+# 1-64 letters and digits. Restart required.
+# [twitch]
+# client_id = ""
+
 # ─── Memory Limits ──────────────────────────────────────────────────────────
 # Soft caps on steady-state memory for the Go process and the BotGuard
 # sidecar. See docs/spec/operations.md "Memory Limits" for the design.

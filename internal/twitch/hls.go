@@ -518,7 +518,7 @@ func FetchHLSMasterPlaylist(ctx context.Context, playlistURL string) ([]TwitchHL
 		return nil, withoutQuery(err)
 	}
 	req.Header.Set("User-Agent", constants.UserAgents.Web)
-	req.Header.Set("Client-ID", constants.TwitchGQLClientID)
+	req.Header.Set("Client-ID", ClientID())
 
 	resp, err := twitchHTTPClient.Do(req)
 	if err != nil {

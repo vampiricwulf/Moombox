@@ -637,7 +637,7 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 		// (engine.RestartSiblingStem) and so never offered for deletion, while
 		// asideOutputPath's counter wrote the successful retry to "-2" beside
 		// it.
-		verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, g.video, g.audio, out)
+		verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, g.video, g.audio, out, "")
 		if err != nil {
 			if verdict.short != nil {
 				o.logger.Error("a set-aside recording's copy came out short; it stays in staging and the dir is kept",
@@ -1092,7 +1092,10 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// that leaves out only the unreadable bytes, checked track by track
 	// against its fragments' own timeline, and finishes with a gap there; the
 	// record copyStaged leaves beside it keeps staging (W30-A11).
-	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputFile)
+	// The archive's chapters (owner decision D23): this single-file shape is
+	// the one that carries them.
+	chaptersPath := o.prepareArchiveChapters(ctx, jobCtx, videoPath, audioPath)
+	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputFile, chaptersPath)
 	if err != nil {
 		if verdict.short != nil {
 			return verdict.short
@@ -1464,6 +1467,16 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 			updates["chat_filename"] = relBase + ".chat.json"
 			updates["chat_status"] = chatFileStatus(jobCtx)
 		}
+		// The chat's raw sidecar (owner decision D16): every action of the
+		// capture that is not a message, verbatim. Beside the archive as
+		// <name>.chat.raw.jsonl; best effort, it is the lossless extra and
+		// the chat file stands without it.
+		rawSrc := filepath.Join(jobCtx.StagingDir, "chat.raw.jsonl")
+		if _, err := os.Stat(rawSrc); err == nil {
+			if err := copyFile(rawSrc, filepath.Join(outputDir, filenameBase+".chat.raw.jsonl")); err != nil {
+				o.logger.Warn("could not copy the chat's raw sidecar beside the archive", "err", err, "jobID", jobCtx.Job.ID)
+			}
+		}
 	}
 
 	// Save video description as .description (matching TypeScript assetDownloader).
@@ -1529,7 +1542,14 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 				ext = ".webp"
 			}
 			thumbDst := filepath.Join(outputDir, filenameBase+ext)
-			if DownloadFileMinSize(ctx, thumbURL, thumbDst, 1000, o.logger) == nil {
+			var fetch error
+			if jobCtx.Job.Platform == "twitch" && thumbURL == jobCtx.Job.ThumbnailURL {
+				// The original size first, the sized URL as the fallback (G45).
+				fetch = downloadTwitchThumbnail(ctx, thumbURL, thumbDst, o.logger)
+			} else {
+				fetch = DownloadFileMinSize(ctx, thumbURL, thumbDst, 1000, o.logger)
+			}
+			if fetch == nil {
 				updates["thumbnail_file"] = thumbDst
 			}
 		}
@@ -1758,7 +1778,7 @@ func (o *DownloadOrchestrator) muxSegment(
 	// A damaged part is repaired and recorded like the archive (copyStaged);
 	// its seg_N dir keeps the record that shields it, which the part merge
 	// and the staging cleanup both read.
-	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputPath)
+	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputPath, "")
 	if err != nil {
 		return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
 	}

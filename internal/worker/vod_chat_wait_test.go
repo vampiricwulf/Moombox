@@ -543,9 +543,10 @@ func TestStagingKeptForIncompleteChatExpires(t *testing.T) {
 // incomplete_staging_expiry_days (7) would hold tens of GB per long VOD to
 // protect two small JSON files.
 //
-// Mutant: keepOnlyChatCapture left as a no-op (or the call dropped from
+// Mutants: keepOnlyChatCapture left as a no-op (or the call dropped from
 // worker.go's preserveForChat branch) — the muxed-away media parts are still
-// there a week later, and this test fails on the leftovers.
+// there a week later, and this test fails on the leftovers; isChatCaptureFile
+// not matching chat.raw.jsonl — the YouTube chat's raw sidecar is pruned.
 func TestStagingKeptForIncompleteChatKeepsOnlyTheChatCapture(t *testing.T) {
 	dir := t.TempDir()
 	for _, rel := range []string{
@@ -556,6 +557,7 @@ func TestStagingKeptForIncompleteChatKeepsOnlyTheChatCapture(t *testing.T) {
 		"chat.json",
 		"chat.json.resume.json",
 		"chat.json.lostbatch.json",
+		"chat.raw.jsonl",
 		filepath.Join("seg_0", "video.ts"),
 		filepath.Join("seg_0", "chat.json"),
 		filepath.Join("seg_0", "chat.json.resume.json"),
@@ -578,6 +580,7 @@ func TestStagingKeptForIncompleteChatKeepsOnlyTheChatCapture(t *testing.T) {
 		"chat.json":                                     true,
 		"chat.json.resume.json":                         true,
 		"chat.json.lostbatch.json":                      true,
+		"chat.raw.jsonl":                                true,
 		filepath.Join("seg_0", "chat.json"):             true,
 		filepath.Join("seg_0", "chat.json.resume.json"): true,
 	}
