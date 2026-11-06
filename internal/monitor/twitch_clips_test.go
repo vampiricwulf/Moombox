@@ -14,11 +14,10 @@ import (
 
 // clipRecorder is a TwitchMonitor's clip listing and OnClipFound, recorded.
 type clipRecorder struct {
-	mu     sync.Mutex
-	asked  []string // "<login>/<filter>"
-	found  []string // slugs handed to OnClipFound
-	cards  map[string][]twitch.TwitchClipCard
-	listed chan struct{}
+	mu    sync.Mutex
+	asked []string // "<login>/<filter>"
+	found []string // slugs handed to OnClipFound
+	cards map[string][]twitch.TwitchClipCard
 }
 
 func (r *clipRecorder) wire(tm *TwitchMonitor) {
