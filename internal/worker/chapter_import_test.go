@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -249,6 +252,7 @@ func TestChapterImportClaimExcludesTheOtherVerbs(t *testing.T) {
 	if w.chapterImportRunning(id) {
 		t.Error("the refused import left its claim held")
 	}
+
 }
 
 // TestRemuxArchiveChaptersStopsWhenTheRowIsDeleted: a row deleted while the
@@ -274,5 +278,41 @@ func TestRemuxArchiveChaptersStopsWhenTheRowIsDeleted(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(r.archive); !bytes.Equal(before, after) {
 		t.Error("the deleted job's archive was replaced")
+	}
+}
+
+// TestSingleFileFinalizeDropsAnImportedChapterList: a finalize that writes a
+// new single-file archive at a name an import saved a chapter list beside
+// removes that list (owner decision CI-1) — it was fitted to the file just
+// replaced, and GET /api/jobs/{id}/chapters reads an import's list ahead of
+// the file's own, so it would go on overriding the new archive's chapters
+// and Restore would put the old file's original onto it. The new archive
+// carries its own finalize's chapters.
+//
+// Mutant: muxAndFinalize not calling dropImportedArchiveChapters (the list
+// is still there).
+func TestSingleFileFinalizeDropsAnImportedChapterList(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	o, jobCtx := muxTestOrchestrator(t, notificationtest.New(), 0)
+	o.muxer = engine.NewMuxer(ffmpegPath, discardLogger{})
+	jobCtx.Config = &JobConfig{}
+	jobCtx.StagingDir = t.TempDir()
+	jobCtx.OutputDir = t.TempDir()
+	jobCtx.Filename = "a-job"
+	video := filepath.Join(jobCtx.StagingDir, "video.mp4")
+	writeMuxFixture(t, ffmpegPath, video, 4)
+	// The previous archive's import, beside the name the finalize writes.
+	sidecar := filepath.Join(jobCtx.OutputDir, "a-job"+utils.ChaptersSidecarSuffix)
+	if err := utils.WriteImportedChaptersSidecar(sidecar, []utils.Chapter{{StartMs: 0, EndMs: 60_000, Title: "imported"}}, []utils.SidecarChapter{{Start: 0, End: 60, Title: "old original"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.muxAndFinalize(context.Background(), jobCtx, &DownloadResult{HasVideo: true, VideoPath: video}); err != nil {
+		t.Fatalf("muxAndFinalize: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(jobCtx.OutputDir, "a-job.mp4")); err != nil {
+		t.Fatalf("no archive: %v", err)
+	}
+	if _, err := os.Stat(sidecar); !os.IsNotExist(err) {
+		t.Errorf("the imported chapter list outlived the archive it described (%v)", err)
 	}
 }

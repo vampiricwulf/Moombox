@@ -946,7 +946,8 @@ func (o *outputOwners) ownerOf(absPath string) (owner, how string) {
 
 // Derived sidecars (owner decision FE-16): files the finalize writes beside an
 // archive under its base name and records on no column — the chat's raw
-// sidecar and a split archive's chapter list (utils.ChaptersSidecarSuffix).
+// sidecar and a split archive's chapter list (utils.ChaptersSidecarSuffix),
+// or a chapter import's beside a single-file archive (owner decision CI-1).
 const chatRawSidecarSuffix = ".chat.raw.jsonl"
 
 // archiveDerivedStem returns the stems a derived sidecar may be owned

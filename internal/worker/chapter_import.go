@@ -270,3 +270,25 @@ func verifyArchiveRemux(orig, out *archiveShape, wantChapters int) error {
 	}
 	return nil
 }
+
+// dropImportedArchiveChapters removes the chapter list an import saved beside
+// a single-file archive (owner decision CI-1, `<name>.chapters.json` with its
+// "original"), once a finalize has written a new archive at that name: a
+// Reinitialize's re-download, the Mux action over an imported Error or
+// Cancelled row, a complete VOD that superseded the parts. The list was
+// fitted to the file it replaced, and GET /api/jobs/{id}/chapters answers an
+// import's list ahead of the file's own — so a list left behind would go on
+// overriding the new archive's chapters, and Restore would put the old
+// file's original onto it. The new archive carries the chapters its own
+// finalize chose. A split archive's list has its own lifecycle
+// (removeSplitArchiveChapters, writeSplitArchiveChapters). Best effort: a
+// removal that fails is logged.
+func dropImportedArchiveChapters(outputFile string, lg logger) {
+	path := ArchiveSidecarPath(outputFile, utils.ChaptersSidecarSuffix)
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		lg.Warn("could not remove the archive's imported chapter list", "path", path, "err", err)
+	}
+}

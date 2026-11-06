@@ -13,8 +13,12 @@ import (
 // a recorded part is never re-muxed to add one. <name> is the base the parts
 // share — "X" for "X - part1.mp4" — as for the job's chat archive and its raw
 // sidecar, and like them it is named on no column: it is found from the
-// archive's own name (GET /api/jobs/{id}/chapters, the orphan sweep). Not the
-// staging dir's StagedChaptersFile, which is the capture's input to the mux.
+// archive's own name (GET /api/jobs/{id}/chapters, the orphan sweep). A
+// chapter import (owner decision CI-1) writes one beside a single-file archive
+// too, marked by its "original" (WriteImportedChaptersSidecar): GET answers it
+// ahead of the file's embedded chapters, and a finalize that writes a new
+// archive at that name removes it. Not the staging dir's StagedChaptersFile,
+// which is the capture's input to the mux.
 const ChaptersSidecarSuffix = ".chapters.json"
 
 // SidecarChapter is one chapter of a ChaptersSidecarSuffix file: a span on
