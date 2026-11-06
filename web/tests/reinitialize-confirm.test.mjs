@@ -94,6 +94,45 @@ test("a Reinitialize whose preview fails still confirms", { skip }, async () => 
   assert.deepEqual(h.fetchLog.filter((c) => c.method === "POST").map((c) => c.url), []);
 });
 
+// A preview whose allowed is false — the POST's own status gate says no —
+// gets no confirm: a warning names why and nothing is posted.
+//
+// Mutant: allowed ignored (the confirm opens).
+test("a Reinitialize the server would refuse asks nothing", { skip }, async () => {
+  const h = await harness.makeApp({
+    routes: {
+      "GET /api/jobs/:id/reinitialize/preview": () => ({ allowed: false }),
+      "POST /api/jobs/:id/reinitialize": () => ({ success: true }),
+    },
+  });
+  h.app.jobs = [errJob()];
+  let asked = false;
+  h.app.showConfirm = async () => { asked = true; return true; };
+  const toasts = [];
+  h.app.showToast = (msg, variant) => toasts.push([msg, variant]);
+  await h.app.reinitializeJob("e1");
+  await h.flush();
+  assert.equal(asked, false, "no confirm for a reset the server refuses");
+  assert.deepEqual(toasts, [["Not reinitialized — the job is Error now", "warning"]]);
+  assert.deepEqual(h.fetchLog.filter((c) => c.method === "POST").map((c) => c.url), []);
+});
+
+// A job a monitor restarted while the confirm was open is not reset under
+// its run: the status is read again after the confirm.
+//
+// Mutant: the post-confirm re-check dropped (the POST goes out).
+test("a Reinitialize re-checks the status after its confirm", { skip }, async () => {
+  const h = await boot({ e1: { stagedFiles: 1, stagedBytes: 10 } });
+  h.app.jobs = [errJob()];
+  h.app.showConfirm = async () => { h.app.jobs = [errJob({ status: "Downloading" })]; return true; };
+  const toasts = [];
+  h.app.showToast = (msg, variant) => toasts.push([msg, variant]);
+  await h.app.reinitializeJob("e1");
+  await h.flush();
+  assert.deepEqual(h.fetchLog.filter((c) => c.method === "POST").map((c) => c.url), []);
+  assert.deepEqual(toasts, [["Not reinitialized — the job is Downloading now", "warning"]]);
+});
+
 // The batch confirm names the totals across the jobs it will act on.
 //
 // Mutant: the batch not asking the preflight (the old bare "Reinitialize 2

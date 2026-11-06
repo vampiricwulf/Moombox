@@ -3056,8 +3056,11 @@ export class MoomboxApp {
   /**
    * reinitializeDeletes asks the server what reinitializing ids would delete
    * (GET /api/jobs/{id}/reinitialize/preview, owner decision PR-M1) and
-   * answers the confirm's clause for their totals, or null when a preview
-   * could not be read — the confirm then says so rather than nothing.
+   * answers the confirm's clause for their totals as text — null when a
+   * preview could not be read, and the confirm then says so rather than
+   * nothing — and refused, the ids whose preview says the server would not
+   * reinitialize them now (allowed false: the POST's own status gate, which
+   * a row the WebSocket has not caught up with may still look past).
    */
   async reinitializeDeletes(ids) {
     try {
@@ -3066,9 +3069,12 @@ export class MoomboxApp {
         if (!res.ok) throw new Error(res.statusText);
         return res.json();
       }));
-      return reinitializeDeletesText(sumReinitializePreviews(previews));
+      return {
+        text: reinitializeDeletesText(sumReinitializePreviews(previews)),
+        refused: ids.filter((_, i) => previews[i]?.allowed === false),
+      };
     } catch {
-      return null;
+      return { text: null, refused: [] };
     }
   }
 
@@ -3080,7 +3086,14 @@ export class MoomboxApp {
     // set-asides, the recorded parts, the staging and an imported chapter
     // list. The row icon and the details button both ask first, naming
     // those from the server's preflight (owner decision PR-M1).
-    const deletes = await this.reinitializeDeletes([id]);
+    const { text: deletes, refused } = await this.reinitializeDeletes([id]);
+    if (refused.length > 0) {
+      // The server's gate already says no: no confirm for a reset the POST
+      // would refuse.
+      const status = this._currentJob(id)?.status;
+      this.showToast(`Not reinitialized — ${status ? `the job is ${status} now` : "the job can no longer be reinitialized"}`, "warning");
+      return;
+    }
     const title = this._currentJob(id)?.title;
     const what = deletes
       ? `This ${deletes}.`
@@ -4066,7 +4079,7 @@ export class MoomboxApp {
         if (targets.length > 0) {
           // Name the totals the reset deletes across them (owner decision
           // PR-M1), as the single confirm does.
-          const deletes = await this.reinitializeDeletes(targets.map((j) => j.id));
+          const { text: deletes } = await this.reinitializeDeletes(targets.map((j) => j.id));
           confirmMsg += deletes
             ? ` This ${deletes}. This cannot be undone.`
             : " What it would delete could not be read: it deletes each job's set-aside recordings, recorded parts, staged data and imported chapters. This cannot be undone.";
