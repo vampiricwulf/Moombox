@@ -630,7 +630,9 @@ All endpoints are available under `/api/`. Real-time updates are delivered via W
 | GET | `/api/formats/{videoId}` | Get available formats for a video |
 | POST | `/api/jobs` | Add new job |
 | POST | `/api/jobs/{id}/cancel` | Cancel job |
-| POST | `/api/jobs/{id}/retry` | Retry failed job |
+| POST | `/api/jobs/{id}/retry` | Retry a job: continue the same recording from staging (alias of `/resume`) |
+| POST | `/api/jobs/{id}/resume` | Continue a YouTube job's recording from its staging files |
+| POST | `/api/jobs/{id}/reinitialize` | Start a job over: delete its staging and record afresh |
 | DELETE | `/api/jobs/{id}` | Delete job |
 | POST | `/api/jobs/{id}/trims` | Start a trimmed clip — answers 202 at once; the encode runs on the server, and its progress and result arrive as `trim_status` WebSocket messages |
 | POST | `/api/import` | Import zip archive |

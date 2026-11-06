@@ -1057,47 +1057,23 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
-	// POST /api/jobs/:id/retry — backward compat, delegates to ReinitializeJob
-	r.Post("/api/jobs/{id}/retry", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/jobs/:id/resume and POST /api/jobs/:id/retry — continue the
+	// same recording from its staging files. Retry and Resume are one verb:
+	// both continue what the job already recorded, as the worker's automatic
+	// re-runs do, and keep what belongs to that recording (an imported chapter
+	// list, owner decision CK-1). Neither ever deletes staging; starting over
+	// is Reinitialize alone (below). /retry used to be an alias of
+	// Reinitialize — it wiped staging — and is now an alias of Resume, so the
+	// API's names match the two verbs the UIs offer.
+	resume := func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		job, ok := loadJob(rw, db, jobID)
 		if !ok {
 			return
 		}
 
-		// Only allow retry from terminal/cookies states. A Finished job
-		// flagged IncompleteTail must NOT be retried here: retry delegates
-		// to ReinitializeJob, which os.RemoveAll's the staging directory
-		// and clears the seq columns for a full redownload — destroying the
-		// preserved staging + resume sidecar that IncompleteTail exists to
-		// protect. Resume (below) is the correct affordance for that case.
-		allowed := false
-		switch job.Status {
-		case database.StatusError, database.StatusCancelled, database.StatusCookies:
-			allowed = true
-		}
-		if !allowed {
-			jsonError(rw, "Job cannot be retried in current state", http.StatusBadRequest)
-			return
-		}
-
-		if w != nil {
-			w.ReinitializeJob(jobID)
-		}
-
-		jsonResponse(rw, map[string]any{"success": true})
-	})
-
-	// POST /api/jobs/:id/resume — resume a YouTube job preserving staging files
-	r.Post("/api/jobs/{id}/resume", func(rw http.ResponseWriter, req *http.Request) {
-		jobID := chi.URLParam(req, "id")
-		job, ok := loadJob(rw, db, jobID)
-		if !ok {
-			return
-		}
-
-		// Same gate as retry above — a Finished job flagged IncompleteTail
-		// is recoverable via the preserved staging + resume sidecar.
+		// A Finished job flagged IncompleteTail is recoverable via the
+		// preserved staging + resume sidecar.
 		allowed := false
 		switch job.Status {
 		case database.StatusError, database.StatusCancelled, database.StatusCookies:
@@ -1111,7 +1087,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		if job.Platform != "youtube" {
-			jsonError(rw, "Resume is only supported for YouTube jobs", http.StatusBadRequest)
+			jsonError(rw, "Resume is only supported for YouTube jobs — use Reinitialize instead", http.StatusBadRequest)
 			return
 		}
 
@@ -1130,7 +1106,9 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})
-	})
+	}
+	r.Post("/api/jobs/{id}/resume", resume)
+	r.Post("/api/jobs/{id}/retry", resume)
 
 	// POST /api/jobs/:id/reinitialize — reset job to fresh state and re-enqueue
 	r.Post("/api/jobs/{id}/reinitialize", func(rw http.ResponseWriter, req *http.Request) {

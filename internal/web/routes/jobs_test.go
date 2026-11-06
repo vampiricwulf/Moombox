@@ -700,14 +700,48 @@ func TestJobCancel404(t *testing.T) {
 }
 
 // --- POST /api/jobs/{id}/retry ---
+//
+// /retry is an alias of /resume: it continues the same recording from its
+// staging files and never wipes them (owner decision, 2026-11-06). Each test
+// below pins a gate /retry now shares with /resume and that the old
+// Reinitialize alias did not have.
 
-func TestJobRetryAllowsErrorState(t *testing.T) {
+// seedStaging writes one staged file for id, as HasStagingFiles looks for it.
+func (f *jobsFixture) seedStaging(t *testing.T, id string) string {
+	t.Helper()
+	stageDir := filepath.Join(f.stagingDir, id)
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		t.Fatalf("mkdir staging fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stageDir, "seg_0.ts"), []byte("data"), 0o644); err != nil {
+		t.Fatalf("write staging fixture: %v", err)
+	}
+	return stageDir
+}
+
+// Mutant: /retry routed to the old Reinitialize handler (no staging needed).
+func TestJobRetryAllowsErrorStateWithStaging(t *testing.T) {
 	f := newJobsFixture(t)
 	f.addJob(t, "yt_err", func(j *database.Job) { j.Status = database.StatusError })
+	f.seedStaging(t, "yt_err")
 
 	rec := doRequest(t, f.router, "POST", "/api/jobs/yt_err/retry", nil)
 	if rec.Code != http.StatusOK {
-		t.Errorf("retry error-state: want 200, got %d", rec.Code)
+		t.Errorf("retry error-state: want 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// Nothing left to continue: /retry refuses and names Reinitialize, rather
+// than starting over itself.
+//
+// Mutant: /retry routed to the old Reinitialize handler (200, a wipe).
+func TestJobRetryWithoutStagingNamesReinitialize(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "yt_err_empty", func(j *database.Job) { j.Status = database.StatusError })
+
+	rec := doRequest(t, f.router, "POST", "/api/jobs/yt_err_empty/retry", nil)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Reinitialize") {
+		t.Errorf("retry with no staging: want 400 naming Reinitialize, got %d (%s)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -721,40 +755,50 @@ func TestJobRetryRejectsActiveState(t *testing.T) {
 	}
 }
 
-func TestJobRetryRejectsFinishedWithIncompleteTail(t *testing.T) {
-	// A Finished job flagged IncompleteTail preserves its staging + resume
-	// sidecar so the missing tail can be appended later. Retry must NOT be
-	// reachable from this state: retry delegates to ReinitializeJob, which
-	// os.RemoveAll's the staging directory and clears the seq columns for a
-	// full redownload — destroying exactly what IncompleteTail is meant to
-	// protect. Resume is the correct (and only) affordance for this state;
-	// see TestJobResumeAllowsFinishedWithIncompleteTail below.
+// A Finished job flagged IncompleteTail kept its staging so the missing tail
+// can be appended. /retry used to refuse it, because it wiped staging; it
+// continues the recording now, so it opens for it as /resume does.
+//
+// Mutant: /retry routed to the old Reinitialize handler (400).
+func TestJobRetryAllowsFinishedWithIncompleteTail(t *testing.T) {
 	f := newJobsFixture(t)
 	f.addJob(t, "yt_finished_tail", func(j *database.Job) { j.Status = database.StatusFinished })
-	// insertJobExec doesn't carry incomplete_tail — only UpdateJobFields
-	// flips it (see database.TestMigrateV17IncompleteTail), matching how
-	// Task 4 actually sets the flag on a real job.
 	if updated := f.db.UpdateJobFields("yt_finished_tail", map[string]any{"incomplete_tail": true}); updated == nil {
 		t.Fatal("UpdateJobFields(incomplete_tail) returned nil")
 	}
+	f.seedStaging(t, "yt_finished_tail")
 
 	rec := doRequest(t, f.router, "POST", "/api/jobs/yt_finished_tail/retry", nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("retry finished+incompleteTail: want 400, got %d (body: %s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Errorf("retry finished+incompleteTail: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 }
 
 func TestJobRetryRejectsFinishedWithoutIncompleteTail(t *testing.T) {
-	// A cleanly Finished job (no incomplete-tail flag) must keep hitting
-	// the existing rejection — only the flagged case opens the gate.
 	f := newJobsFixture(t)
 	f.addJob(t, "yt_finished_clean", func(j *database.Job) {
 		j.Status = database.StatusFinished
 	})
+	f.seedStaging(t, "yt_finished_clean")
 
 	rec := doRequest(t, f.router, "POST", "/api/jobs/yt_finished_clean/retry", nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("retry finished-clean: want 400, got %d", rec.Code)
+	}
+}
+
+// Mutant: /retry routed to the old Reinitialize handler (200 for Twitch).
+func TestJobRetryRejectsTwitch(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "tw_retry", func(j *database.Job) {
+		j.Platform = "twitch"
+		j.Status = database.StatusError
+	})
+	f.seedStaging(t, "tw_retry")
+
+	rec := doRequest(t, f.router, "POST", "/api/jobs/tw_retry/retry", nil)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Reinitialize") {
+		t.Errorf("retry twitch: want 400 naming Reinitialize, got %d (%s)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -795,8 +839,7 @@ func TestJobResume404(t *testing.T) {
 }
 
 func TestJobResumeAllowsFinishedWithIncompleteTail(t *testing.T) {
-	// Unlike retry (see TestJobRetryRejectsFinishedWithIncompleteTail above),
-	// resume's status gate must open for a flagged Finished job — resume
+	// Resume's status gate must open for a flagged Finished job — resume
 	// preserves staging rather than destroying it. Resume also requires
 	// staging files to exist, so seed the fixture directory the same way
 	// HasStagingFiles checks it (non-empty jobID subdir).
