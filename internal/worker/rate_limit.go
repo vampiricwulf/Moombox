@@ -691,8 +691,14 @@ func (w *DownloadWorker) outlastRateLimit(ctx context.Context, job *database.Job
 // Error the rework of the rate-limit verdict exists to prevent — while the
 // waiting loop, which the same broadcast reaches once a fetch is answered,
 // counted nothing (loopRateLimit.begun). Such a job waits in place, fetching
-// again every rateLimitRetryInterval, for as long as it is refused; the
-// refusals count from the fetch after it goes Live or its start passes.
+// again every rateLimitRetryInterval, for as long as it is refused. The two
+// arms are the owner's words ("while the stream is Upcoming or its scheduled
+// start is in the future"), so neither bounds the other: a refused fetch
+// never moves a row, and an Upcoming row stays exempt while it is refused
+// even once its scheduled start has passed — a broadcast that aired, was
+// deleted or went private while YouTube kept refusing the session waits
+// rather than ending in Error after a day. The refusals count from the first
+// one after an answered fetch moves the row to Live (or marks it a VOD).
 func rateLimitCountsFor(job *database.Job, now time.Time) bool {
 	if start := parseRFC3339(job.StreamStartTime); !start.IsZero() && start.After(now) {
 		return false

@@ -751,6 +751,9 @@ func TestRateLimitCountsFor(t *testing.T) {
 		want bool
 	}{
 		{"Upcoming broadcast", database.Job{Status: database.StatusUpcoming}, false},
+		// Owner decision PR-R4 exempts an Upcoming row whatever its start:
+		// one whose scheduled start passed days ago, still refused, waits.
+		{"Upcoming broadcast, start long passed", database.Job{Status: database.StatusUpcoming, StreamStartTime: "2026-10-28T11:00:00Z"}, false},
 		{"Upcoming backlog VOD", database.Job{Status: database.StatusUpcoming, QueuePriority: 1, ChannelID: &ch}, true},
 		{"Upcoming row known to be a VOD", database.Job{Status: database.StatusUpcoming, IsVod: true}, true},
 		{"Live", database.Job{Status: database.StatusLive}, true},
