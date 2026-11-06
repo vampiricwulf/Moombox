@@ -263,6 +263,14 @@ type DownloadResult struct {
 	// segment (streamIdentityChanged).
 	VideoItag int
 	AudioItag int
+	// SegmentDurationSec is the live stream's advertised per-segment
+	// duration where no VideoFormat/AudioFormat carries it (0 when unknown):
+	// the live HLS path, whose variants map to no player-response format, sets
+	// it from the extraction's adaptive formats (advertisedSegmentDuration) —
+	// every format of one live broadcast shares the cadence its sequence
+	// numbers count in. The finalize's join point (joinOffsetSeconds, owner
+	// decision CJ-3) multiplies an MPEG-TS capture's first sequence by it.
+	SegmentDurationSec int
 }
 
 // invalidate403Caches clears cipher solver state, POT caches, and visitor data

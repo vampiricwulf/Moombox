@@ -9,6 +9,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/utils"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 // recordingStartFile records, in a staging dir, the sequence each staged
@@ -171,9 +172,13 @@ func recordedFromStart(paths ...string) bool {
 //     the broadcast's timeline does not share), the entry's sequence times
 //     the stream's advertised segment duration (Format.TargetDurationSec,
 //     the cadence yt-dlp's live downloader paces itself by, _video.py
-//     b77c9304e) — a sequence N began N segments into the broadcast;
-//   - an input with no entry, or no duration to multiply by, is unknown:
-//     never a guess, as recordedFromStart never guesses.
+//     b77c9304e) — a sequence N began N segments into the broadcast. The
+//     live HLS path fetches no player-response format, so its result
+//     carries the extraction's cadence as SegmentDurationSec instead
+//     (advertisedSegmentDuration); a Mux action from staging has neither;
+//   - an input with neither is unknown, and the next late input is asked;
+//     none answering is unknown: never a guess, as recordedFromStart never
+//     guesses.
 func (o *DownloadOrchestrator) joinOffsetSeconds(ctx context.Context, result *DownloadResult, videoPath, audioPath string) (float64, bool) {
 	if recordedFromStart(videoPath, audioPath) {
 		return 0, true
@@ -195,13 +200,13 @@ func (o *DownloadOrchestrator) joinOffsetSeconds(ctx context.Context, result *Do
 		if in.target > 0 {
 			return float64(seq * in.target), true
 		}
-		return 0, false
 	}
 	return 0, false
 }
 
 // formatTargetDuration is the advertised per-segment duration of the format
-// result's video (or audio) downloader fetched, 0 when it is not known.
+// result's video (or audio) downloader fetched, else the result's own
+// SegmentDurationSec (the live HLS path's); 0 when it is not known.
 func formatTargetDuration(result *DownloadResult, video bool) int {
 	if result == nil {
 		return 0
@@ -210,8 +215,33 @@ func formatTargetDuration(result *DownloadResult, video bool) int {
 	if video {
 		f = result.VideoFormat
 	}
-	if f == nil {
-		return 0
+	if f == nil || f.TargetDurationSec <= 0 {
+		return result.SegmentDurationSec
 	}
 	return f.TargetDurationSec
+}
+
+// advertisedSegmentDuration is the per-segment duration a live extraction's
+// adaptive formats advertise (targetDurationSec), from the first of infos
+// that carries one: a video format's first, else any format's; 0 when none
+// does. The formats of one live broadcast share the cadence its sequence
+// numbers count in, as selectedVideoTargetDuration relies on for the
+// eviction math, so any one is the HLS variant's too.
+func advertisedSegmentDuration(infos ...*youtube.VideoInfo) int {
+	for _, info := range infos {
+		if info == nil {
+			continue
+		}
+		for i := range info.Formats {
+			if f := &info.Formats[i]; f.IsVideo() && f.TargetDurationSec > 0 {
+				return f.TargetDurationSec
+			}
+		}
+		for i := range info.Formats {
+			if f := &info.Formats[i]; f.TargetDurationSec > 0 {
+				return f.TargetDurationSec
+			}
+		}
+	}
+	return 0
 }
