@@ -12,7 +12,7 @@ import (
 // for) or a 400 on a value the file loader would have kept.
 //
 // Mutant: shifting either bound by one in channelWindowInRange or
-// channelSlotsInRange, or dropping one of the three checks.
+// channelSlotsInRange, or dropping one of the four checks.
 func TestChannelOverrideErrorsMatchesValidate(t *testing.T) {
 	ip := func(v int) *int { return &v }
 	for _, tc := range []struct {
@@ -31,6 +31,9 @@ func TestChannelOverrideErrorsMatchesValidate(t *testing.T) {
 		{"unknown quality", ChannelConfig{QualityPreference: "1080i"}, []string{"quality_preference"}},
 		{"all three", ChannelConfig{QualityPreference: "x", ArchiveWindowDays: ip(-1), ArchiveSlots: ip(-1)},
 			[]string{"archive_slots", "archive_window_days", "quality_preference"}},
+		// archive_clips (owner decision D26 follow-up 2) is Twitch's alone.
+		{"clips on twitch", ChannelConfig{Platform: "twitch", ArchiveClips: true}, nil},
+		{"clips on youtube", ChannelConfig{ArchiveClips: true}, []string{"archive_clips"}},
 	} {
 		got := slices.Sorted(maps.Keys(ChannelOverrideErrors(tc.ch)))
 		if !slices.Equal(got, tc.want) {

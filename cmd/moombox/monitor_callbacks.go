@@ -1,12 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -1321,6 +1323,39 @@ func newTwitchStreamJob(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig,
 	}
 }
 
+// newTwitchClipJob is the row the Twitch monitor's clip sweep creates for a
+// new clip of a channel whose archive_clips is on (owner decision D26
+// follow-up 2): the clip kind's VOD-style row ("tw_clip_<slug>"), Queued at
+// queue_priority 1 with the channel's ID — the backlog VOD's shape, so the
+// archive-slots scheduler admits it M at a time per channel, and a COOKIES?
+// park returns it to Queued — and its own published time. The worker's read
+// of the clip fills in the rest (processTwitchClip).
+func newTwitchClipJob(card twitch.TwitchClipCard, ch *config.ChannelConfig, outputDir string, now time.Time) *database.Job {
+	stamp := now.UTC().Format(time.RFC3339)
+	id := twitch.ClipJobID(card.Slug)
+	channelID := ch.ID
+	name := cmp.Or(ch.Name, ch.ID)
+	title := name + " — " + cmp.Or(card.Title, card.Slug)
+	return &database.Job{
+		ID:                id,
+		VideoID:           id,
+		URL:               "https://www.twitch.tv/" + strings.ToLower(ch.ID) + "/clip/" + card.Slug,
+		Title:             title,
+		ChannelName:       name,
+		Platform:          "twitch",
+		Status:            database.StatusQueued,
+		QueuePriority:     1,
+		ChannelID:         &channelID,
+		IsVod:             true,
+		ThumbnailURL:      card.ThumbnailURL,
+		StreamStartTime:   card.CreatedAt,
+		QualityPreference: worker.TwitchJobQualityPreference(ch.QualityPreference),
+		OutputDirectory:   outputDir,
+		CreatedAt:         stamp,
+		UpdatedAt:         stamp,
+	}
+}
+
 // trimStatusFrames is the trim service's event hook: each worker.TrimEvent
 // goes out as one trim_status frame, the payload exactly the event (its id,
 // jobId, range, progress and state, then the record or the reason). A
@@ -1816,6 +1851,34 @@ func (s *runState) wireMonitorCallbacks() {
 		// Same as the YouTube path — AddJob's OnJobAdded handler
 		// broadcasts the new job; no explicit BroadcastJobsUpdate
 		// needed. DECISIONS #21 consumer migration.
+	}
+
+	// Twitch monitor -> Worker: a new clip of a channel whose archive_clips
+	// is on (owner decision D26 follow-up 2) rests in Queued until the
+	// archive-slots scheduler admits it, like a backlog VOD. The live config
+	// decides, as for a YouTube find: a sweep that began before the channel
+	// was removed, disabled or opted out creates nothing.
+	s.twitchMon.OnClipFound = func(card twitch.TwitchClipCard, ch *config.ChannelConfig) {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("Panic in OnClipFound (twitch)", slog.Any("panic", r))
+			}
+		}()
+		if !channelArchivesClips(s.configStore, ch.ID) {
+			return
+		}
+		job := newTwitchClipJob(card, ch, resolveOutputDir(ch, s.configStore), time.Now())
+		added, err := s.db.AddJob(job)
+		if err != nil {
+			s.log.Error("Failed to add Twitch clip job", slog.String("error", err.Error()))
+			return
+		}
+		if !added {
+			return // the clip already has a job (dedupe by slug)
+		}
+		s.log.Info("Clip found by Twitch monitor", slog.String("jobID", job.ID), slog.String("channel", ch.ID))
+		s.db.AddToHistory(job.ID)
+		s.dlWorker.Scheduler().Wake()
 	}
 
 	s.twitchMon.OnStreamRecover = func(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig, jobID string) {

@@ -33,6 +33,7 @@ func channelToValues(ch config.ChannelConfig) map[string]string {
 		"enabled":             enabled,
 		"terms":               terms,
 		"include_non_live":    boolToDisplay(ch.IncludeNonLiveContent),
+		"archive_clips":       boolToDisplay(ch.ArchiveClips),
 		"quality_preference":  cmp.Or(ch.QualityPreference, "best"),
 		"output_directory":    ch.OutputDirectory,
 		"archive_window_days": optIntString(ch.ArchiveWindowDays),
@@ -96,6 +97,7 @@ func valuesToChannel(vals map[string]string, existing *config.ChannelConfig) con
 		}
 	}
 	ch.IncludeNonLiveContent = vals["platform"] == "youtube" && vals["include_non_live"] == "Yes"
+	ch.ArchiveClips = vals["platform"] == "twitch" && vals["archive_clips"] == "Yes"
 	ch.QualityPreference = ""
 	if q := vals["quality_preference"]; q != "" && q != "best" {
 		ch.QualityPreference = q
@@ -160,7 +162,7 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 		m.channelEditValues = map[string]string{
 			"id": "", "name": "", "platform": "youtube",
 			"enabled": "Yes", "terms": "",
-			"include_non_live": "No", "quality_preference": "best",
+			"include_non_live": "No", "archive_clips": "No", "quality_preference": "best",
 			"output_directory":    "",
 			"archive_window_days": "", "archive_slots": "",
 		}
@@ -411,6 +413,8 @@ func writeChannelField(dst *config.ChannelConfig, src config.ChannelConfig, key 
 		dst.Terms = src.Terms
 	case "include_non_live":
 		dst.IncludeNonLiveContent = src.IncludeNonLiveContent
+	case "archive_clips":
+		dst.ArchiveClips = src.ArchiveClips
 	case "quality_preference":
 		dst.QualityPreference = src.QualityPreference
 	case "output_directory":

@@ -1126,6 +1126,12 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 				ch.ArchiveSlots = nil
 			}
 		}
+		if ch.ArchiveClips && ch.GetPlatform() != "twitch" {
+			fail("channels[%d].archive_clips applies to Twitch channels only", i)
+			if !reportOnly {
+				ch.ArchiveClips = false
+			}
+		}
 	}
 
 	// notifications[i].mention / mention_events / mode. mention is validated as a
@@ -1210,9 +1216,10 @@ func channelWindowInRange(days int) bool { return days >= 1 && days <= 3650 }
 func channelSlotsInRange(slots int) bool { return slots >= 1 && slots <= 100 }
 
 // ChannelOverrideErrors returns, keyed by JSON field name, each per-channel
-// override Validate refuses: an unknown quality_preference, or an
-// archive_window_days / archive_slots outside 1..3650 / 1..100. nil when the
-// entry is sound.
+// override Validate refuses: an unknown quality_preference, an
+// archive_window_days / archive_slots outside 1..3650 / 1..100, or
+// archive_clips on a channel that is not Twitch. nil when the entry is
+// sound.
 //
 // For the web writers — PUT /api/config's channels[] and POST
 // /api/config/channels — to answer 400 naming the field. Without it they
@@ -1234,6 +1241,9 @@ func ChannelOverrideErrors(ch ChannelConfig) map[string]string {
 	}
 	if ch.ArchiveSlots != nil && !channelSlotsInRange(*ch.ArchiveSlots) {
 		add("archive_slots", "archive_slots must be between 1 and 100")
+	}
+	if ch.ArchiveClips && ch.GetPlatform() != "twitch" {
+		add("archive_clips", "archive_clips applies to Twitch channels only")
 	}
 	return errs
 }

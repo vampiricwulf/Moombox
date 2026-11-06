@@ -306,3 +306,42 @@ func TestChannelNumberFieldsAreEditable(t *testing.T) {
 		t.Errorf("wizard: channelEditValues[archive_slots] = %q, want %q", got, "9")
 	}
 }
+
+// TestChannelArchiveClipsRoundTrip pins the channel editor's archive_clips
+// toggle (owner decision D26 follow-up 2): shown for a Twitch channel only,
+// read from the config and written back as set, and never written onto a
+// YouTube channel whatever the form holds.
+//
+// Mutants: valuesToChannel not reading the toggle (an enabled channel saves
+// off); the platform gate dropped (a YouTube channel saves it on); the field
+// left unfiltered (shown for YouTube).
+func TestChannelArchiveClipsRoundTrip(t *testing.T) {
+	tw := config.ChannelConfig{ID: "vanillatv", Platform: "twitch", ArchiveClips: true}
+	vals := channelToValues(tw)
+	if vals["archive_clips"] != "Yes" {
+		t.Errorf("form shows archive_clips %q, want Yes", vals["archive_clips"])
+	}
+	if got := valuesToChannel(vals, &tw); !got.ArchiveClips {
+		t.Error("a Twitch channel's archive_clips was lost on save")
+	}
+	vals["archive_clips"] = "No"
+	if got := valuesToChannel(vals, &tw); got.ArchiveClips {
+		t.Error("turning archive_clips off did not save")
+	}
+
+	yt := map[string]string{"id": "UCx", "platform": "youtube", "archive_clips": "Yes"}
+	if got := valuesToChannel(yt, nil); got.ArchiveClips {
+		t.Error("a YouTube channel saved archive_clips")
+	}
+	shown := func(platform string) bool {
+		for _, f := range filterChannelFieldsByPlatform(channelFields, map[string]string{"platform": platform}) {
+			if f.key == "archive_clips" {
+				return true
+			}
+		}
+		return false
+	}
+	if !shown("twitch") || shown("youtube") {
+		t.Errorf("archive_clips shown for twitch %v, youtube %v; want Twitch only", shown("twitch"), shown("youtube"))
+	}
+}

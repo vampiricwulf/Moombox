@@ -441,6 +441,9 @@
 # name = "Channel Name"                      # Display name (optional)
 # platform = "twitch"                        # Required for Twitch channels
 # quality_preference = "best"                # Quality cap for this channel (optional, see below)
+# archive_clips = false                      # Also archive the channel's new clips (default: false):
+#                                            # an hourly sweep queues each clip, paced by archive_slots.
+#                                            # A pasted clip URL works either way.
 #
 # quality_preference works on YouTube and Twitch channels alike. Accepted
 # values: "best", "2160p60", "2160p", "1440p60", "1440p", "1080p60", "1080p",
