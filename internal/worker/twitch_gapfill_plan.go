@@ -290,15 +290,22 @@ func stagedPartCoverages(stagingDir string) []stagedPartCoverage {
 //
 // Each loses what owner decision D17 says is always filled — the late start
 // and every gap split, which their parts' coverage still records, and the
-// tail after the last part. A Muxing row (a boot re-mux of a capture that
+// tail after the last part where the capture was cut off (twitchMuxTailOpen).
+// A Muxing row (a boot re-mux of a capture that
 // completed) is not this: its own finalize was the orchestrator's, whose plan
 // knows whether the broadcast ended (ExecuteTwitch's outageFinalize).
 // No coverage on disk, or none that can be placed, is no plan
 // (gapSpansFor).
 //
 // prior is the row as muxJob found it, before its Muxing write cleared the
-// marker; job is the row the mux runs on. The tail is open in all of them:
-// the capture stopped before its broadcast's end was seen. The selection the
+// marker; job is the row the mux runs on. The tail is open only where the
+// capture stopped before its broadcast's end was seen (twitchMuxTailOpen):
+// a row that reached ExecuteTwitch's finalize and then failed or was
+// cancelled — its mux failed after a normal end, the operator cancelled it
+// while Muxing — already holds the broadcast to its end, and a tail planned
+// for it would cut the VOD's last segments a second time as a "recovered"
+// duplicate part (vodSegmentRange keeps every segment the padded span
+// touches). Its late start and gap splits are still filled. The selection the
 // capture ran on is read back from the row (twitch_quality, the variant it
 // last recorded, and quality_preference) and the job context's snapshot of
 // the global selection settings, as newTwitchVariantInfo reads it.
@@ -324,5 +331,28 @@ func (w *DownloadWorker) twitchMuxGapFillPlan(prior, job *database.Job, jobCtx *
 	w.readConfig(func(c *config.MoomboxConfig) {
 		variant.GapFillAdBreaks = twitchChannelGapFillAdBreaks(c.Channels, login)
 	})
-	return newTwitchGapFillPlan(job, variant, stagedPartCoverages(jobCtx.StagingDir), true, time.Now())
+	return newTwitchGapFillPlan(job, variant, stagedPartCoverages(jobCtx.StagingDir), twitchMuxTailOpen(prior), time.Now())
+}
+
+// twitchMuxTailOpen reports whether a live Twitch row muxed from its staging
+// stopped before its broadcast's end was seen, so the plan's tail stays open.
+// The two markers say so outright: twitchEndedOfflineErrMsg (the broadcast
+// ended while Moombox was down) and park_reason twitch_end_unconfirmed. Any
+// other Error or Cancelled row is read by stream_end_time, which a live
+// Twitch capture writes in ExecuteTwitch's finalize just before
+// muxAndFinalize and nowhere earlier (a retry or re-initialisation clears
+// it): set, the capture reached its end and only its mux failed or was
+// cancelled, and the tail is closed; empty, the capture was cut off
+// mid-broadcast and the tail is open.
+//
+// One row is closed here that ran on past its capture: an outage finalize
+// (outageFinalize — the broadcast ended or changed while connectivity was
+// down) whose own mux then failed. stream_end_time is written on that path
+// too, and nothing on the row tells it apart from a normal end. Its tail is
+// not filled on the Mux; before FE-25 that row made no plan at all.
+func twitchMuxTailOpen(prior *database.Job) bool {
+	if prior.Error == twitchEndedOfflineErrMsg || prior.ParkReason == database.ParkReasonTwitchEndUnconfirmed {
+		return true
+	}
+	return prior.StreamEndTime == ""
 }
