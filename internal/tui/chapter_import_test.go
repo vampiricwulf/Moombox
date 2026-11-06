@@ -257,7 +257,7 @@ func TestChapterImportConfirmSaves(t *testing.T) {
 	if !r.app.chapterDlg.IsSaving() {
 		t.Fatal("y did not start the save")
 	}
-	r.app.Update(r.app.saveChaptersCmd()())
+	r.app.Update(r.app.saveChaptersCmd(r.app.chapterDlg.saves)())
 	if !r.app.chapterDlg.IsVisible() || !strings.Contains(r.app.chapterDlg.View(), "Not saved: The job is Muxing") {
 		t.Fatalf("a refused save:\n%s", r.app.chapterDlg.View())
 	}
@@ -268,7 +268,7 @@ func TestChapterImportConfirmSaves(t *testing.T) {
 	if !r.app.chapterDlg.IsSaving() {
 		t.Fatal("Enter at the confirm did not start the save")
 	}
-	r.app.Update(r.app.saveChaptersCmd()())
+	r.app.Update(r.app.saveChaptersCmd(r.app.chapterDlg.saves)())
 	if r.app.chapterDlg.IsVisible() {
 		t.Error("a saved import left the overlay open")
 	}
@@ -277,6 +277,60 @@ func TestChapterImportConfirmSaves(t *testing.T) {
 	}
 	if !strings.Contains(r.app.feedback.msg, "Imported 2 chapters: Irys tournament") {
 		t.Errorf("feedback = %q", r.app.feedback.msg)
+	}
+}
+
+// TestChapterImportLateSaveResultIsNotTheOverlays: a save keeps running when
+// its overlay is closed with Esc, and its late answer belongs to the feedback
+// line, never to an overlay since reopened for a later save — a success must
+// not close it while its own save runs, and a refusal must not be shown in
+// it as its own.
+//
+// Mutant: handleChapterSaveResult matching on IsSaving() alone (the late
+// success closes the second save's overlay; the late refusal is shown in it).
+func TestChapterImportLateSaveResultIsNotTheOverlays(t *testing.T) {
+	r := newChapterRig(t)
+	r.previewFn = func(text, _ string) ChapterImportView {
+		if text == "" {
+			return ChapterImportView{Error: "No timestamps found"}
+		}
+		return ChapterImportView{Chapters: []ChapterImportRow{{Start: 0, End: 5, Title: "a"}}}
+	}
+	ctrlS := tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}
+	startSave := func() int {
+		t.Helper()
+		r.app.dispatchAction("A H", r.job)
+		previewNow(t, r.app)
+		typeIntoApp(r.app, "0:00 a")
+		previewNow(t, r.app)
+		r.app.Update(ctrlS)
+		typeIntoApp(r.app, "y")
+		if !r.app.chapterDlg.IsSaving() {
+			t.Fatal("the save did not start")
+		}
+		return r.app.chapterDlg.saves
+	}
+	first := startSave()
+	r.app.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if r.app.chapterDlg.IsVisible() {
+		t.Fatal("Esc did not close the saving overlay")
+	}
+	second := startSave()
+
+	r.app.Update(chapterSaveResultMsg{Title: "first", Save: first, Err: errors.New("first refused")})
+	if !r.app.chapterDlg.IsSaving() || strings.Contains(r.app.chapterDlg.View(), "first refused") {
+		t.Errorf("the first save's refusal was taken as the open overlay's:\n%s", r.app.chapterDlg.View())
+	}
+	if !strings.Contains(r.app.feedback.msg, "Chapters not saved (first): first refused") {
+		t.Errorf("feedback = %q", r.app.feedback.msg)
+	}
+	r.app.Update(chapterSaveResultMsg{Title: "first", Save: first, View: ChapterImportView{Chapters: []ChapterImportRow{{}}}})
+	if !r.app.chapterDlg.IsSaving() {
+		t.Error("the first save's success closed the overlay waiting for the second")
+	}
+	r.app.Update(chapterSaveResultMsg{Title: "second", Save: second, View: ChapterImportView{Chapters: []ChapterImportRow{{}}}})
+	if r.app.chapterDlg.IsVisible() {
+		t.Error("the second save's own success left its overlay open")
 	}
 }
 

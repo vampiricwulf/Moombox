@@ -174,6 +174,7 @@ type (
 	// with Restore set, OnRestoreChapters (A U).
 	chapterSaveResultMsg struct {
 		Title   string
+		Save    int // the overlay's save number (SetSaving); 0 for a restore
 		Restore bool
 		View    ChapterImportView
 		Err     error

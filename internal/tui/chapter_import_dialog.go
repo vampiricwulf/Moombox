@@ -76,6 +76,11 @@ type ChapterImportDialogModel struct {
 	view       *ChapterImportView
 	previewErr string
 	saveErr    string
+	// saves numbers the saves this overlay started, so a save's result is
+	// matched to the save the overlay waits for and to no other: one closed
+	// with Esc keeps running, and its late answer must not close, or show
+	// its refusal in, the overlay since reopened for a later save.
+	saves int
 }
 
 // NewChapterImportDialogModel creates the chapter import overlay.
@@ -93,9 +98,16 @@ func NewChapterImportDialogModel() *ChapterImportDialogModel {
 // IsVisible returns true if the dialog is shown.
 func (m *ChapterImportDialogModel) IsVisible() bool { return m.visible }
 
-// IsSaving reports whether the overlay waits for the save IT started.
+// IsSaving reports whether the overlay waits for a save it started.
 func (m *ChapterImportDialogModel) IsSaving() bool {
 	return m.visible && m.step == chapterImportStepSaving
+}
+
+// IsSavingFor reports whether the overlay waits for save n (SetSaving's
+// number): the result of an earlier save, one whose overlay was closed while
+// it ran, is not this overlay's.
+func (m *ChapterImportDialogModel) IsSavingFor(n int) bool {
+	return m.IsSaving() && m.saves == n
 }
 
 // SetSize updates the dialog dimensions.
@@ -159,10 +171,13 @@ func (m *ChapterImportDialogModel) previewOK() bool {
 	return m.view != nil && m.view.Error == "" && len(m.view.Chapters) > 0 && m.text.Value() != ""
 }
 
-// SetSaving moves to the saving step.
-func (m *ChapterImportDialogModel) SetSaving() {
+// SetSaving moves to the saving step and numbers the save, for its result
+// to be matched by (IsSavingFor).
+func (m *ChapterImportDialogModel) SetSaving() int {
 	m.step = chapterImportStepSaving
 	m.saveErr = ""
+	m.saves++
+	return m.saves
 }
 
 // SetSaveError returns to editing with the save's refusal shown.
@@ -373,17 +388,19 @@ func (a *App) previewChaptersCmd(seq int) tea.Cmd {
 
 // saveChaptersCmd runs OnSaveChapters for the overlay's paste: the sidecar,
 // then the archive's re-mux, which takes as long as a copy of the file.
-func (a *App) saveChaptersCmd() tea.Cmd {
+func (a *App) saveChaptersCmd(save int) tea.Cmd {
 	fn := a.OnSaveChapters
 	jobID, text, offset := a.chapterDlg.Request()
 	title := a.chapterDlg.title
 	return safeCmdOr(func() tea.Msg {
 		if fn == nil {
-			return chapterSaveResultMsg{Title: title, Err: fmt.Errorf("chapter import is not available in this process")}
+			return chapterSaveResultMsg{Title: title, Save: save, Err: fmt.Errorf("chapter import is not available in this process")}
 		}
 		v, err := fn(jobID, text, offset)
-		return chapterSaveResultMsg{Title: title, View: v, Err: err}
-	}, func(text string) tea.Msg { return chapterSaveResultMsg{Title: title, Err: fmt.Errorf("%s", text)} })
+		return chapterSaveResultMsg{Title: title, Save: save, View: v, Err: err}
+	}, func(text string) tea.Msg {
+		return chapterSaveResultMsg{Title: title, Save: save, Err: fmt.Errorf("%s", text)}
+	})
 }
 
 // restoreChaptersCmd runs OnRestoreChapters for job (A U).
@@ -410,14 +427,14 @@ func (a *App) handleChapterSaveResult(msg chapterSaveResultMsg) (tea.Model, tea.
 		verb = "Restored the original"
 	}
 	if msg.Err != nil {
-		if !msg.Restore && a.chapterDlg.IsSaving() {
+		if !msg.Restore && a.chapterDlg.IsSavingFor(msg.Save) {
 			a.chapterDlg.SetSaveError(msg.Err)
 			return a, nil
 		}
 		a.setFeedbackWithSeverity(fmt.Sprintf("Chapters not saved (%s): %s", msg.Title, msg.Err), severityWarning)
 		return a, nil
 	}
-	if !msg.Restore && a.chapterDlg.IsSaving() {
+	if !msg.Restore && a.chapterDlg.IsSavingFor(msg.Save) {
 		a.chapterDlg.Close()
 	}
 	line := fmt.Sprintf("%s %d chapters: %s", verb, len(msg.View.Chapters), msg.Title)

@@ -320,8 +320,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if a.chapterDlg.IsVisible() {
 		if a.chapterDlg.HandleKey(key) == "save" {
-			a.chapterDlg.SetSaving()
-			return a, a.saveChaptersCmd()
+			return a, a.saveChaptersCmd(a.chapterDlg.SetSaving())
 		}
 		return a, nil
 	}
