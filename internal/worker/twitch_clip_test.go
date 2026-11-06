@@ -23,10 +23,13 @@ import (
 // testClip is a ShareClipRenderStatus reading (twitch.TwitchClipInfo) modelled
 // on yt-dlp's TwitchClipsIE test case FaintLightGullWholeWheat, its
 // renditions served from base: a 720p60 and a 1080p30 landscape one and a
-// taller portrait crop, each signed as GetClip signs them.
+// taller portrait crop, each signed as GetClip signs them. It was cut from
+// VOD 1234567890, 1h2m5s in.
 func testClip(base string) *twitch.TwitchClipInfo {
 	signed := func(name string) string { return base + "/" + name + "?sig=s1&token=t1" }
+	offset := 3725
 	return &twitch.TwitchClipInfo{
+		VideoID: "1234567890", VideoOffsetSeconds: &offset,
 		ID: "396245304", Slug: "FaintLightGullWholeWheat",
 		Title:            "EA Play 2016 Live from the Novo Theatre",
 		BroadcasterLogin: "ea", BroadcasterDisplayName: "EA",
@@ -134,13 +137,15 @@ func TestTwitchClipJobDownloadsTheBestRenditionAndFinalizes(t *testing.T) {
 	if _, err := os.Stat(got.OutputFile); err != nil {
 		t.Errorf("archive: %v", err)
 	}
-	// The curator line is the row's description (owner decision FE-32), and
-	// the finalize writes it beside the archive as a VOD's is.
-	if got.Description != "Clipped by stereotype_" {
-		t.Errorf("description = %q, want the curator line", got.Description)
+	// The curator line, the title and the source VOD link are the row's
+	// description (owner decisions FE-32 and FQ-3), and the finalize writes
+	// it beside the archive as a VOD's is.
+	const wantDesc = "Clipped by stereotype_\n\nEA Play 2016 Live from the Novo Theatre\n\nhttps://www.twitch.tv/videos/1234567890?t=1h2m5s"
+	if got.Description != wantDesc {
+		t.Errorf("description = %q, want %q", got.Description, wantDesc)
 	}
-	if b, err := os.ReadFile(got.DescriptionFile); err != nil || string(b) != "Clipped by stereotype_" {
-		t.Errorf(".description %q = %q, %v; want the curator line", got.DescriptionFile, b, err)
+	if b, err := os.ReadFile(got.DescriptionFile); err != nil || string(b) != wantDesc {
+		t.Errorf(".description %q = %q, %v; want %q", got.DescriptionFile, b, err, wantDesc)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -444,15 +449,22 @@ func TestTwitchClipHonoursQualityPreferenceAndCap(t *testing.T) {
 	}
 }
 
-// TestTwitchClipDescriptionNamesTheCurator is owner decision FE-32: a clip
-// job's description reads "Clipped by <curator>" — the display name, else the
-// login — followed by the clip's own description when there is one; a clip
-// that names no curator has its own description only, or none.
+// TestTwitchClipDescriptionNamesTheCurator is owner decisions FE-32 and
+// FQ-3: a clip job's description reads, a blank line between each, "Clipped
+// by <curator>" — the display name, else the login — then the clip's title,
+// then a link to the source VOD at the clip's start when the answer names a
+// VOD and an offset, then the clip's own description when there is one. A
+// part the clip has nothing for is left out.
 //
 // Mutants: the login fallback dropped (the login-only row is empty); the
-// clip's description dropped (the third row lacks it); the curator line
-// dropped (every row but the description-only one fails).
+// clip's description dropped (its rows lack it); the curator line dropped
+// (every row with a curator fails); the title dropped (the titled rows lack
+// it); the link dropped, or written without the VOD check (the no-VOD and
+// no-offset rows gain one); the offset's units miscomputed — minutes as
+// offset/60 (the 1h2m5s link reads 1h62m5s), or a zero unit left out (the
+// 0h0m5s link reads 5s); the order of the parts changed.
 func TestTwitchClipDescriptionNamesTheCurator(t *testing.T) {
+	at := func(s int) *int { return &s }
 	for _, c := range []struct {
 		clip twitch.TwitchClipInfo
 		want string
@@ -462,6 +474,20 @@ func TestTwitchClipDescriptionNamesTheCurator(t *testing.T) {
 		{twitch.TwitchClipInfo{CuratorDisplayName: "Stereotype_", Description: "The play of the year."}, "Clipped by Stereotype_\n\nThe play of the year."},
 		{twitch.TwitchClipInfo{Description: "  Only this.  "}, "Only this."},
 		{twitch.TwitchClipInfo{}, ""},
+		// With a source VOD and an offset into it.
+		{twitch.TwitchClipInfo{CuratorDisplayName: "okSTFUdude", Title: " MISSILE ", VideoID: "2919684247", VideoOffsetSeconds: at(8973), Description: "What a shot."},
+			"Clipped by okSTFUdude\n\nMISSILE\n\nhttps://www.twitch.tv/videos/2919684247?t=2h29m33s\n\nWhat a shot."},
+		{twitch.TwitchClipInfo{CuratorDisplayName: "a", Title: "t", VideoID: "1", VideoOffsetSeconds: at(3725)},
+			"Clipped by a\n\nt\n\nhttps://www.twitch.tv/videos/1?t=1h2m5s"},
+		{twitch.TwitchClipInfo{Title: "t", VideoID: "1", VideoOffsetSeconds: at(5)}, "t\n\nhttps://www.twitch.tv/videos/1?t=0h0m5s"},
+		{twitch.TwitchClipInfo{Title: "t", VideoID: "1", VideoOffsetSeconds: at(0)}, "t\n\nhttps://www.twitch.tv/videos/1?t=0h0m0s"},
+		// Without one: no VOD (deleted, never saved), no offset, an offset
+		// no VOD has, an ID no VOD has.
+		{twitch.TwitchClipInfo{CuratorDisplayName: "okSTFUdude", Title: "A day in the life of xQc", VideoOffsetSeconds: at(10)},
+			"Clipped by okSTFUdude\n\nA day in the life of xQc"},
+		{twitch.TwitchClipInfo{Title: "t", VideoID: "1"}, "t"},
+		{twitch.TwitchClipInfo{Title: "t", VideoID: "1", VideoOffsetSeconds: at(-1)}, "t"},
+		{twitch.TwitchClipInfo{Title: "t", VideoID: "v1/../x", VideoOffsetSeconds: at(1)}, "t"},
 	} {
 		if got := twitchClipDescription(&c.clip); got != c.want {
 			t.Errorf("twitchClipDescription(%+v) = %q, want %q", c.clip, got, c.want)

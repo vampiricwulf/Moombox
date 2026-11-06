@@ -151,21 +151,53 @@ func (sp *StreamProcessor) processTwitchClip(ctx context.Context, job *database.
 	}, nil
 }
 
-// twitchClipDescription is a clip job's description (owner decision FE-32):
-// "Clipped by <curator>" — the curator's display name, else the login — then,
-// after a blank line, the clip's own description when it has one. It is the
-// row's description column, so job details show it and the finalize writes it
-// beside the archive as the .description, as it does a VOD's; no schema
-// change. A clip that names no curator has only its own description, or none.
+// twitchClipDescription is a clip job's description (owner decisions FE-32
+// and FQ-3), its parts in this order, a blank line between each:
+//
+//   - "Clipped by <curator>" — the curator's display name, else the login;
+//   - the clip's title;
+//   - a link to the source VOD at the clip's start
+//     (twitchClipVodLink, https://www.twitch.tv/videos/<id>?t=<h>h<m>m<s>s),
+//     when ShareClipRenderStatus names the VOD and an offset into it;
+//   - the clip's own description, when it has one.
+//
+// A part the clip has nothing for is left out. It is the row's description
+// column, so job details show it and the finalize writes it beside the
+// archive as the .description, as it does a VOD's; no schema change.
 func twitchClipDescription(clip *twitch.TwitchClipInfo) string {
 	var parts []string
 	if curator := cmp.Or(strings.TrimSpace(clip.CuratorDisplayName), clip.CuratorLogin); curator != "" {
 		parts = append(parts, "Clipped by "+curator)
 	}
+	if t := strings.TrimSpace(clip.Title); t != "" {
+		parts = append(parts, t)
+	}
+	if link := twitchClipVodLink(clip); link != "" {
+		parts = append(parts, link)
+	}
 	if d := strings.TrimSpace(clip.Description); d != "" {
 		parts = append(parts, d)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// twitchClipVodLink is the clip's source VOD at the clip's start, in the
+// form Twitch's own share links take — https://www.twitch.tv/videos/<id>
+// ?t=<h>h<m>m<s>s, every unit written, 0h0m5s for a clip five seconds in —
+// or "" when the answer names no VOD (deleted, or never saved: `video` is
+// null), gives no offset, or gives one no VOD has (negative). A VOD ID that
+// is not all digits is no Twitch VOD's and makes no link.
+func twitchClipVodLink(clip *twitch.TwitchClipInfo) string {
+	if clip.VideoID == "" || clip.VideoOffsetSeconds == nil || *clip.VideoOffsetSeconds < 0 {
+		return ""
+	}
+	for _, r := range clip.VideoID {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	off := *clip.VideoOffsetSeconds
+	return fmt.Sprintf("https://www.twitch.tv/videos/%s?t=%dh%dm%ds", clip.VideoID, off/3600, off%3600/60, off%60)
 }
 
 // twitchClipErrorText is the job's error for a clip Twitch answered about: a

@@ -115,6 +115,17 @@ type TwitchClipInfo struct {
 	CreatedAt       string `json:"createdAt,omitempty"`
 	DurationSeconds int    `json:"durationSeconds,omitempty"`
 	ViewCount       int    `json:"viewCount,omitempty"`
+	// VideoID is the source VOD the clip was cut from, and VideoOffsetSeconds
+	// where in it the clip starts (nil when the answer gives no offset), for
+	// the clip job's link back to it (owner decision FQ-3). BEYOND UPSTREAM:
+	// yt-dlp's TwitchClipsIE reads neither, but its own ShareClipRenderStatus
+	// answer carries both — Twitch's selection set for that persisted query
+	// (hash 2db6a3b2…, the one yt-dlp sends at b77c9304e) holds
+	// `video { id broadcastType title }` and `videoOffsetSeconds`, null when
+	// the VOD is gone or was never saved, as a live probe of yt-dlp's own
+	// test clips showed on 2026-11-06. No second query is sent for them.
+	VideoID            string `json:"videoId,omitempty"`
+	VideoOffsetSeconds *int   `json:"videoOffsetSeconds,omitempty"`
 	// ThumbnailURL is the best thumbnail: the default asset's, else the
 	// clip's own small one, else the portrait asset's. Unlike upstream,
 	// which ranks the portrait one (-1) above the small one (-2); see info.
@@ -200,6 +211,8 @@ type clipNode struct {
 	Broadcaster     *clipUser     `json:"broadcaster"`
 	Curator         *clipUser     `json:"curator"`
 	Game            *clipGame     `json:"game"`
+	Video           *clipVideo    `json:"video"`
+	VideoOffset     *flexInt      `json:"videoOffsetSeconds"`
 	AccessToken     *clipToken    `json:"playbackAccessToken"`
 	Assets          []clipAssetRW `json:"assets"`
 }
@@ -208,6 +221,12 @@ type clipUser struct {
 	ID          string `json:"id"`
 	Login       string `json:"login"`
 	DisplayName string `json:"displayName"`
+}
+
+// clipVideo is the clip's source VOD (`data.clip.video`): null when the VOD
+// was deleted or never saved.
+type clipVideo struct {
+	ID string `json:"id"`
 }
 
 type clipGame struct {
@@ -259,6 +278,13 @@ func (c *clipNode) info(slug string) (*TwitchClipInfo, error) {
 	}
 	if c.Game != nil {
 		out.GameCategory = cmp.Or(c.Game.DisplayName, c.Game.Name)
+	}
+	if c.Video != nil {
+		out.VideoID = strings.TrimSpace(c.Video.ID)
+	}
+	if c.VideoOffset != nil {
+		offset := int(*c.VideoOffset)
+		out.VideoOffsetSeconds = &offset
 	}
 	for i, asset := range c.Assets {
 		if i > 1 {
