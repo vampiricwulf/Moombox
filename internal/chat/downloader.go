@@ -1695,6 +1695,20 @@ func (cd *ChatDownloader) epochRFC3339() string {
 	return cd.opts.StreamStartTime
 }
 
+// chatFileData is the document writeFullChatFile writes: the header, then
+// messages. applyPendingMarkers' streamed rewrite writes the same header.
+func (cd *ChatDownloader) chatFileData(messages []ChatMessage) ChatData {
+	return ChatData{
+		VideoID:         cd.opts.VideoID,
+		VideoTitle:      cd.opts.VideoTitle,
+		ChannelName:     cd.opts.ChannelName,
+		StreamStartTime: cd.epochRFC3339(),
+		DownloadedAt:    time.Now().UTC().Format(time.RFC3339),
+		MessageCount:    cd.messageCount,
+		Messages:        messages,
+	}
+}
+
 func (cd *ChatDownloader) writeFullChatFile() bool {
 	outputFile, _ := cd.getOutputPaths()
 
@@ -1705,15 +1719,7 @@ func (cd *ChatDownloader) writeFullChatFile() bool {
 		// (and report) before rewriting the file.
 		messages = []ChatMessage{}
 	}
-	data := ChatData{
-		VideoID:         cd.opts.VideoID,
-		VideoTitle:      cd.opts.VideoTitle,
-		ChannelName:     cd.opts.ChannelName,
-		StreamStartTime: cd.epochRFC3339(),
-		DownloadedAt:    time.Now().UTC().Format(time.RFC3339),
-		MessageCount:    cd.messageCount,
-		Messages:        messages,
-	}
+	data := cd.chatFileData(messages)
 
 	if err := utils.WriteChatFileAtomic(outputFile, &data); err != nil {
 		cd.reportIOError(fmt.Errorf("write chat file: %w", err))

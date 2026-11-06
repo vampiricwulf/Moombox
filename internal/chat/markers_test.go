@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // TestParseResponseKeepsEveryAction is G36's parser half (owner decision
@@ -95,7 +98,9 @@ func TestParseResponseKeepsEveryAction(t *testing.T) {
 //
 // Mutants: applyPendingMarkers not run (the on-disk messages carry no flags);
 // the sweep bound by the file's length at the end rather than at the marker
-// (the later message is flagged too); flushRawActions not writing.
+// (the later message is flagged too); flushRawActions not writing; a sweep
+// not held once it hit a buffered message of the same author (b, on disk,
+// stays unflagged).
 func TestMarkersFlagStoredMessages(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "chat.json")
 	cd := NewChatDownloader(ChatDownloaderOptions{
@@ -115,7 +120,9 @@ func TestMarkersFlagStoredMessages(t *testing.T) {
 			return &ChatApiResponse{Messages: []ChatMessage{msg("a", "UCx", 0), msg("b", "UCban", 1), msg("c", "UCx", 2)}, NextContinuation: "live1", TimeoutMs: 1}, nil
 		case 2: // buffered (inside writeInterval), deleted in the same batch
 			return &ChatApiResponse{
-				Messages: []ChatMessage{msg("e", "UCx", 3)},
+				// g: the banned author has a buffered message too, and the
+				// sweep must still be held for their one on disk.
+				Messages: []ChatMessage{msg("e", "UCx", 3), msg("g", "UCban", 5)},
 				Markers: []ChatMarker{
 					{Kind: MarkerDeleted, TargetID: "e"},
 					{Kind: MarkerDeleted, TargetID: "a", State: "[message deleted]"},
@@ -138,8 +145,8 @@ func TestMarkersFlagStoredMessages(t *testing.T) {
 	for _, m := range d.Messages {
 		got[m.ID] = m
 	}
-	if len(d.Messages) != 5 || d.MessageCount != 5 {
-		t.Fatalf("file holds %d messages (header %d), want 5", len(d.Messages), d.MessageCount)
+	if len(d.Messages) != 6 || d.MessageCount != 6 {
+		t.Fatalf("file holds %d messages (header %d), want 6", len(d.Messages), d.MessageCount)
 	}
 	if !got["e"].Deleted {
 		t.Error("the buffered message's deletion was not applied")
@@ -150,8 +157,9 @@ func TestMarkersFlagStoredMessages(t *testing.T) {
 	if c := got["c"]; !c.Replaced || len(c.Replacement) != 1 || c.Replacement[0].Text != "new" || c.Message[0].Text != "x" {
 		t.Errorf("replacement: %+v, want flagged, the new text beside the original", c)
 	}
-	if !got["b"].Deleted || got["f"].Deleted {
-		t.Errorf("author sweep: b deleted %v, f deleted %v; want only the message before the sweep", got["b"].Deleted, got["f"].Deleted)
+	if !got["b"].Deleted || !got["g"].Deleted || got["f"].Deleted {
+		t.Errorf("author sweep: b deleted %v, g deleted %v, f deleted %v; want the on-disk and buffered messages before the sweep, not the later one",
+			got["b"].Deleted, got["g"].Deleted, got["f"].Deleted)
 	}
 
 	f, err := os.Open(filepath.Join(filepath.Dir(out), "chat.raw.jsonl"))
@@ -212,5 +220,83 @@ func TestApplyMarkersToTheBuffer(t *testing.T) {
 	}
 	if len(cd.pendingMarkers) != 0 {
 		t.Errorf("held %d markers for a file that was never flushed", len(cd.pendingMarkers))
+	}
+}
+
+// TestPendingMarkersRewriteIsStreamed: the end-of-run rewrite holds one batch
+// of messages at a time, never the file — every message reaches the new file
+// through appends of at most markerRewriteBatch — and the flags, the sweep's
+// bound and the order of the messages come through it. A held marker that
+// names nothing on disk costs no rewrite at all.
+//
+// Mutants: the rewrite reading the file whole (SalvageChatMessages and
+// writeFullChatFile, as it was: no batched appends); the first pass's
+// no-match return removed (the no-op marker rewrites the file).
+func TestPendingMarkersRewriteIsStreamed(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "vid", OutputFile: out, StreamStartTime: "2025-01-01T00:00:00Z"})
+	var ids []string
+	for i := range 7 {
+		m := damagedResumeMsg(fmt.Sprintf("m%d", i), i)
+		m.AuthorChannelID = "UCx"
+		if i%2 == 1 {
+			m.AuthorChannelID = "UCban"
+		}
+		cd.messages = append(cd.messages, m)
+		ids = append(ids, m.ID)
+	}
+	cd.messageCount = len(cd.messages)
+	if !cd.writeFullChatFile() {
+		t.Fatal("seed write failed")
+	}
+	cd.messages, cd.flushedToDisk = nil, true
+
+	oldBatch, real := markerRewriteBatch, appendChatMessages
+	t.Cleanup(func() { markerRewriteBatch, appendChatMessages = oldBatch, real })
+	markerRewriteBatch = 2
+	var batches []int
+	appendChatMessages = func(path string, msgs []ChatMessage, count int, l utils.ChatFileLogger) error {
+		if path != out {
+			batches = append(batches, len(msgs))
+		}
+		return real(path, msgs, count, l)
+	}
+
+	// Nothing on disk is named: no rewrite.
+	cd.pendingMarkers = []pendingChatMarker{
+		{marker: ChatMarker{Kind: MarkerReplaced, TargetID: "placeholder"}, onDisk: 7},
+		{marker: ChatMarker{Kind: MarkerAuthorDeleted, AuthorChannelID: "UCnobody"}, onDisk: 7},
+	}
+	cd.applyPendingMarkers()
+	if len(batches) != 0 {
+		t.Fatalf("a marker naming nothing on disk rewrote the file (%v)", batches)
+	}
+
+	// The sweep arrived when 5 messages were on disk: m5 is after it.
+	cd.pendingMarkers = []pendingChatMarker{
+		{marker: ChatMarker{Kind: MarkerDeleted, TargetID: "m2", State: "[message retracted]"}, onDisk: 7},
+		{marker: ChatMarker{Kind: MarkerAuthorDeleted, AuthorChannelID: "UCban"}, onDisk: 5},
+	}
+	cd.applyPendingMarkers()
+	if !reflect.DeepEqual(batches, []int{2, 2, 2, 1}) {
+		t.Errorf("rewrite appended %v, want batches of at most 2 covering all 7", batches)
+	}
+	d := readDamagedResumeFile(t, out)
+	var gotIDs []string
+	for _, m := range d.Messages {
+		gotIDs = append(gotIDs, m.ID)
+		wantDeleted := m.ID == "m1" || m.ID == "m2" || m.ID == "m3"
+		if m.Deleted != wantDeleted {
+			t.Errorf("%s deleted = %v, want %v", m.ID, m.Deleted, wantDeleted)
+		}
+	}
+	if !reflect.DeepEqual(gotIDs, ids) || d.MessageCount != 7 || cd.messageCount != 7 {
+		t.Errorf("rewritten file holds %v (header %d, count %d), want %v", gotIDs, d.MessageCount, cd.messageCount, ids)
+	}
+	if d.Messages[2].DeletedState != "[message retracted]" {
+		t.Errorf("m2's state = %q", d.Messages[2].DeletedState)
+	}
+	if left, _ := filepath.Glob(out + ".markers-*"); len(left) != 0 {
+		t.Errorf("rewrite left %v behind", left)
 	}
 }

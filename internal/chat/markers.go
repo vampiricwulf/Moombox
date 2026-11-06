@@ -1,9 +1,13 @@
 package chat
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -115,7 +119,17 @@ func (cd *ChatDownloader) applyMarkers(markers []ChatMarker) {
 // append-only while the run polls (a mid-run rewrite of a marathon chat would
 // cost its whole size per deletion), so this is the one place they land.
 // Skipped — the raw sidecar still holds every marker — when the buffer was
-// not flushed (the rewrite would drop it), or the file cannot be read whole.
+// not flushed (the rewrite would drop it), or the file cannot be read.
+//
+// STREAMED, like readChatFileAdoptionSummary and for the same reason: an
+// author sweep is held for every ban and timeout, so nearly every moderated
+// live chat ends here, and a marathon's chat.json runs to hundreds of
+// megabytes. A first pass reads only each message's id and author to see
+// whether any held marker names one (a placeholder's replacement, or a ban of
+// an author with nothing on disk, changes nothing and costs no write); only
+// then does a second pass decode the messages one at a time, flag them, and
+// append them markerRewriteBatch at a time to a temp file that is swapped in.
+// Peak memory is one batch, never the file.
 func (cd *ChatDownloader) applyPendingMarkers() {
 	pending := cd.pendingMarkers
 	cd.pendingMarkers = nil
@@ -126,36 +140,206 @@ func (cd *ChatDownloader) applyPendingMarkers() {
 	if outputFile == "" {
 		return
 	}
-	existing, damaged, err := utils.SalvageChatMessages[ChatMessage](outputFile)
-	if err != nil || damaged {
-		cd.logInfo("chat: could not read the chat file to apply its deletion markers; they are in the raw sidecar",
-			"videoID", cd.opts.VideoID, "markers", len(pending), "err", err, "damaged", damaged)
+	held := indexHeldMarkers(pending)
+	match, err := streamChatFileMessages(outputFile, func(i int, m *heldMarkerKey) bool {
+		return held.matches(i, m.ID, m.AuthorChannelID)
+	})
+	if err == nil && !match {
 		return
 	}
-	changed := false
-	for _, p := range pending {
-		limit := len(existing)
+	var n int
+	if err == nil {
+		n, err = cd.rewriteChatFileWithMarkers(outputFile, held)
+	}
+	if err != nil {
+		cd.logInfo("chat: could not rewrite the chat file to apply its deletion markers; they are in the raw sidecar",
+			"videoID", cd.opts.VideoID, "markers", len(pending), "err", err)
+		return
+	}
+	cd.mu.Lock()
+	cd.messageCount = n
+	cd.mu.Unlock()
+}
+
+// markerRewriteBatch is how many messages applyPendingMarkers' rewrite holds
+// before appending them to its temp file. A var so a test can watch the
+// batches.
+var markerRewriteBatch = 1000
+
+// heldMarkers indexes the held markers by the message ID and the author they
+// name; the indices into list keep the order they arrived in, which decides a
+// DeletedState two of them set.
+type heldMarkers struct {
+	list     []pendingChatMarker
+	byTarget map[string][]int
+	byAuthor map[string][]int
+}
+
+func indexHeldMarkers(pending []pendingChatMarker) heldMarkers {
+	h := heldMarkers{list: pending, byTarget: map[string][]int{}, byAuthor: map[string][]int{}}
+	for i, p := range pending {
 		if p.marker.Kind == MarkerAuthorDeleted {
-			limit = p.onDisk
+			h.byAuthor[p.marker.AuthorChannelID] = append(h.byAuthor[p.marker.AuthorChannelID], i)
+		} else {
+			h.byTarget[p.marker.TargetID] = append(h.byTarget[p.marker.TargetID], i)
 		}
-		if applyMarker(existing, p.marker, limit) {
-			changed = true
+	}
+	return h
+}
+
+// forMessage calls fn with each held marker that applies to the file's
+// message idx, in arrival order: one naming its ID, or a sweep of its author
+// that arrived after it was on disk (onDisk > idx).
+func (h heldMarkers) forMessage(idx int, id, author string, fn func(ChatMarker)) {
+	t, a := h.byTarget[id], h.byAuthor[author]
+	if id == "" {
+		t = nil
+	}
+	if author == "" {
+		a = nil
+	}
+	for len(t) > 0 || len(a) > 0 {
+		var i int
+		if len(a) == 0 || (len(t) > 0 && t[0] < a[0]) {
+			i, t = t[0], t[1:]
+		} else {
+			i, a = a[0], a[1:]
+			if idx >= h.list[i].onDisk {
+				continue
+			}
+		}
+		fn(h.list[i].marker)
+	}
+}
+
+func (h heldMarkers) matches(idx int, id, author string) bool {
+	hit := false
+	h.forMessage(idx, id, author, func(ChatMarker) { hit = true })
+	return hit
+}
+
+// heldMarkerKey is all the first pass decodes of a message.
+type heldMarkerKey struct {
+	ID              string `json:"id"`
+	AuthorChannelID string `json:"authorChannelId"`
+}
+
+// streamChatFileMessages walks path's messages array one message at a time,
+// decoding each into a T and handing it to fn with its index, and stops
+// early, reporting true, once fn does. Any key may come before or after the
+// array; a file that is not one of ours whole is an error.
+func streamChatFileMessages[T any](path string, fn func(int, *T) bool) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	dec := json.NewDecoder(bufio.NewReaderSize(f, chatFileReadBuffer))
+	if tok, terr := dec.Token(); terr != nil || tok != json.Delim('{') {
+		return false, fmt.Errorf("parse chat file: top level is not a JSON object")
+	}
+	idx := 0
+	for {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return false, fmt.Errorf("parse chat file: %w", err)
+		}
+		if keyTok == json.Delim('}') {
+			break
+		}
+		if key, ok := keyTok.(string); !ok || key != "messages" {
+			if !ok {
+				return false, fmt.Errorf("parse chat file: unexpected token %v", keyTok)
+			}
+			if err := utils.SkipJSONValue(dec); err != nil {
+				return false, fmt.Errorf("parse chat file: %w", err)
+			}
+			continue
+		}
+		opening, err := dec.Token()
+		if err != nil {
+			return false, fmt.Errorf("parse chat messages: %w", err)
+		}
+		if opening == nil {
+			continue
+		}
+		if opening != json.Delim('[') {
+			return false, fmt.Errorf("parse chat messages: not an array")
+		}
+		for dec.More() {
+			var m T
+			if err := dec.Decode(&m); err != nil {
+				return false, fmt.Errorf("parse chat messages: %w", err)
+			}
+			if fn(idx, &m) {
+				return true, nil
+			}
+			idx++
+		}
+		if _, err := dec.Token(); err != nil {
+			return false, fmt.Errorf("parse chat messages: %w", err)
 		}
 	}
-	if !changed {
-		return
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("parse chat file: trailing data after the top-level object")
 	}
-	cd.mu.Lock()
-	prevCount := cd.messageCount
-	cd.messages, cd.messageCount = existing, len(existing)
-	cd.mu.Unlock()
-	ok := cd.writeFullChatFile()
-	cd.mu.Lock()
-	cd.messages = nil
-	if !ok {
-		cd.messageCount = prevCount
+	return false, nil
+}
+
+// rewriteChatFileWithMarkers is applyPendingMarkers' second pass: the file
+// rewritten through a temp beside it — the header as writeFullChatFile writes
+// it, then the messages, flagged, appended a batch at a time the way every
+// flush appends them — and swapped in. Returns how many messages it holds.
+// On any failure the temp is removed and the file is as it was.
+func (cd *ChatDownloader) rewriteChatFileWithMarkers(path string, held heldMarkers) (int, error) {
+	tf, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".markers-*")
+	if err != nil {
+		return 0, err
 	}
-	cd.mu.Unlock()
+	tmp := tf.Name()
+	tf.Close()
+	committed := false
+	defer func() {
+		if !committed {
+			os.Remove(tmp)
+		}
+	}()
+	header := cd.chatFileData([]ChatMessage{})
+	header.MessageCount = 0
+	if err := utils.WriteChatFileAtomic(tmp, &header); err != nil {
+		return 0, err
+	}
+	batch := make([]ChatMessage, 0, markerRewriteBatch)
+	n := 0
+	var appendErr error
+	flush := func() bool {
+		if len(batch) == 0 {
+			return true
+		}
+		appendErr = appendChatMessages(tmp, batch, n, chatWarnAdapter{cd})
+		batch = batch[:0]
+		return appendErr == nil
+	}
+	if _, err := streamChatFileMessages(path, func(i int, m *ChatMessage) bool {
+		held.forMessage(i, m.ID, m.AuthorChannelID, func(mk ChatMarker) {
+			one := []ChatMessage{*m}
+			applyMarker(one, mk, 1)
+			*m = one[0]
+		})
+		batch = append(batch, *m)
+		n++
+		return len(batch) >= markerRewriteBatch && !flush()
+	}); err != nil {
+		return 0, err
+	}
+	if appendErr != nil || !flush() {
+		return 0, appendErr
+	}
+	if err := utils.ReplaceFile(tmp, path); err != nil {
+		return 0, err
+	}
+	committed = true
+	return n, nil
 }
 
 // rawSidecarPath is the raw sidecar beside a chat file: "chat.json" →
