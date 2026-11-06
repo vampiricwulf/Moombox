@@ -1697,14 +1697,14 @@ func (s *runState) initServices(logLevelOverride string) error {
 }
 
 // channelArchivesClips asks the live config whether chID is a configured,
-// enabled channel with archive_clips on — the Twitch clip sweep's check
+// enabled channel with twitch_archive_clips on — the Twitch clip sweep's check
 // before it creates a job (OnClipFound).
 func channelArchivesClips(store *config.Store, chID string) bool {
 	on := false
 	store.Read(func(c *config.MoomboxConfig) {
 		for i := range c.Channels {
 			if c.Channels[i].ID == chID {
-				on = c.Channels[i].IsEnabled() && c.Channels[i].ArchiveClips
+				on = c.Channels[i].IsEnabled() && c.Channels[i].TwitchArchiveClips
 				return
 			}
 		}

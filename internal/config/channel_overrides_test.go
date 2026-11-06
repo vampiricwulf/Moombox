@@ -31,9 +31,9 @@ func TestChannelOverrideErrorsMatchesValidate(t *testing.T) {
 		{"unknown quality", ChannelConfig{QualityPreference: "1080i"}, []string{"quality_preference"}},
 		{"all three", ChannelConfig{QualityPreference: "x", ArchiveWindowDays: ip(-1), ArchiveSlots: ip(-1)},
 			[]string{"archive_slots", "archive_window_days", "quality_preference"}},
-		// archive_clips (owner decision D26 follow-up 2) is Twitch's alone.
-		{"clips on twitch", ChannelConfig{Platform: "twitch", ArchiveClips: true}, nil},
-		{"clips on youtube", ChannelConfig{ArchiveClips: true}, []string{"archive_clips"}},
+		// twitch_archive_clips (owner decision D26 follow-up 2) is Twitch's alone.
+		{"clips on twitch", ChannelConfig{Platform: "twitch", TwitchArchiveClips: true}, nil},
+		{"clips on youtube", ChannelConfig{TwitchArchiveClips: true}, []string{"twitch_archive_clips"}},
 	} {
 		got := slices.Sorted(maps.Keys(ChannelOverrideErrors(tc.ch)))
 		if !slices.Equal(got, tc.want) {

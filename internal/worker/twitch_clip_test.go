@@ -372,7 +372,7 @@ func TestTwitchClipKeepsAnOutcomeThatLandedFirst(t *testing.T) {
 }
 
 // TestRecordPastedClipEntersOnlyClips: a pasted clip is entered in the
-// processing history (the archive_clips sweep's dedupe), and every other
+// processing history (the twitch_archive_clips sweep's dedupe), and every other
 // manual add is left out of it, as it always was.
 //
 // Mutants: the IsTwitchClipJob check dropped (the live channel's row is

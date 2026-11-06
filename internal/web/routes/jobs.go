@@ -857,7 +857,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 				return
 			}
 			// A pasted clip is in the history as a found one is, so an
-			// archive_clips sweep never queues it again once its row is
+			// twitch_archive_clips sweep never queues it again once its row is
 			// deleted (worker.RecordPastedClip).
 			if err := worker.RecordPastedClip(db, job); err != nil {
 				slog.Warn("add: could not record the pasted clip in the processing history", "jobID", job.ID, "err", err)

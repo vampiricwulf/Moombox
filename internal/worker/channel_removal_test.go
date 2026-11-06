@@ -192,7 +192,7 @@ func TestSummarizeTwitchChannelRemoval(t *testing.T) {
 }
 
 // TestTwitchChannelRemovalCountsItsQueuedClips: the clips a Twitch channel's
-// archive_clips sweep queued carry its login as channel_id
+// twitch_archive_clips sweep queued carry its login as channel_id
 // (newTwitchClipJob), so its removal counts them as a YouTube channel's rows
 // are — a Queued clip pending, one with a partial in staging named as
 // footage, a Finished one in the total alone — and "delete its pending jobs"

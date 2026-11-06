@@ -43,18 +43,18 @@ func cards(slugs ...string) []twitch.TwitchClipCard {
 }
 
 // TestClipSweepOptInDedupesAndPaces is owner decision D26 follow-up 2's
-// monitor opt-in: only a channel whose archive_clips is on is listed; its
+// monitor opt-in: only a channel whose twitch_archive_clips is on is listed; its
 // first sweep asks for the last week and every later one for the last day,
 // each at most once an hour; and a clip is handed on once — a slug in the
 // processing history (a job was made for it) or one that is a job now (it
 // was pasted) is skipped, by the clip's job ID.
 //
-// Mutants: the ArchiveClips filter dropped (the off channel is listed); the
+// Mutants: the TwitchArchiveClips filter dropped (the off channel is listed); the
 // hourly gate dropped (the second sweep lists again at once); the first-sweep
 // filter LAST_DAY; the history check dropped (the processed clip is handed on
 // again); the JobExists check dropped (the pasted clip is handed on).
 func TestClipSweepOptInDedupesAndPaces(t *testing.T) {
-	on := config.ChannelConfig{ID: "vanillatv", Name: "VanillaTV", Platform: "twitch", ArchiveClips: true}
+	on := config.ChannelConfig{ID: "vanillatv", Name: "VanillaTV", Platform: "twitch", TwitchArchiveClips: true}
 	off := config.ChannelConfig{ID: "quiet", Name: "Quiet", Platform: "twitch"}
 	tm := newTestTwitchMonitor(t, nil, on, off)
 	rec := &clipRecorder{cards: map[string][]twitch.TwitchClipCard{
@@ -110,7 +110,7 @@ func equalStrings(a, b []string) bool {
 // dropped (two sweeps of the same channel at once).
 func TestClipSweepRidesThePollOffItsGoroutine(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		on := config.ChannelConfig{ID: "vanillatv", Name: "VanillaTV", Platform: "twitch", ArchiveClips: true}
+		on := config.ChannelConfig{ID: "vanillatv", Name: "VanillaTV", Platform: "twitch", TwitchArchiveClips: true}
 		offline := func(_ context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
 			return make([]*twitch.TwitchStreamInfo, len(logins)), make([]error, len(logins)), nil
 		}
@@ -162,7 +162,7 @@ func TestClipSweepRidesThePollOffItsGoroutine(t *testing.T) {
 // listed channel (the four-day gap asks LAST_DAY); its week arm answering for
 // any gap (the ten-day gap asks LAST_WEEK).
 func TestClipSweepFilterReachesBackToTheLastWholeListing(t *testing.T) {
-	on := config.ChannelConfig{ID: "vanillatv", Name: "VanillaTV", Platform: "twitch", ArchiveClips: true}
+	on := config.ChannelConfig{ID: "vanillatv", Name: "VanillaTV", Platform: "twitch", TwitchArchiveClips: true}
 	tm := newTestTwitchMonitor(t, nil, on)
 	var asked []string
 	calls := 0

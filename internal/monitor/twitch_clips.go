@@ -12,7 +12,7 @@ import (
 )
 
 // The Twitch monitor's clip sweep (owner decision D26 follow-up 2: "paste
-// only, with a monitor opt-in"). A channel whose archive_clips is on has its
+// only, with a monitor opt-in"). A channel whose twitch_archive_clips is on has its
 // new clips listed through ClipsCards__User (twitch.API.ListClips, yt-dlp's
 // TwitchVideosClipsIE) and each clip no job has been made for handed to
 // OnClipFound, which queues it as a Queued backlog job the archive-slots
@@ -102,11 +102,11 @@ func (tm *TwitchMonitor) startClipSweep(ctx context.Context, channels []config.C
 	}()
 }
 
-// clipChannelsOf is the channels with archive_clips on.
+// clipChannelsOf is the channels with twitch_archive_clips on.
 func clipChannelsOf(channels []config.ChannelConfig) []config.ChannelConfig {
 	var out []config.ChannelConfig
 	for _, ch := range channels {
-		if ch.ArchiveClips {
+		if ch.TwitchArchiveClips {
 			out = append(out, ch)
 		}
 	}

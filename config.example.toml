@@ -443,7 +443,7 @@
 # quality_preference = "best"                # Quality cap for this channel (optional, see below)
 # twitch_gap_fill_ad_breaks = false          # Also fill skipped ad breaks from the archive VOD (default: false)
 # twitch_vod_backlog = false                 # Queue the channel's past VODs, highlights and uploads (default: false)
-# archive_clips = false                      # Also archive the channel's new clips (default: false):
+# twitch_archive_clips = false               # Also archive the channel's new clips (default: false):
 #                                            # an hourly sweep queues each clip, paced by archive_slots.
 #                                            # A pasted clip URL works either way.
 #

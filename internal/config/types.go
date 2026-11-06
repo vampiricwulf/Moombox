@@ -532,12 +532,15 @@ type ChannelConfig struct {
 	// the channel's videos on a slow cadence and queue each one no job has
 	// had yet as a backlog VOD, paced by archive_slots — owner decision D18.
 	TwitchVodBacklog bool `toml:"twitch_vod_backlog,omitempty" json:"twitch_vod_backlog,omitempty"`
-	// ArchiveClips makes the Twitch monitor archive this channel's new clips
-	// (owner decision D26 follow-up 2): an hourly ClipsCards__User sweep
-	// queues each clip it has not seen as a Queued job, paced by
+	// TwitchArchiveClips makes the Twitch monitor archive this channel's new
+	// clips (owner decision D26 follow-up 2): an hourly ClipsCards__User
+	// sweep queues each clip it has not seen as a Queued job, paced by
 	// archive_slots like a backlog VOD, and deduped by slug. Default off — a
-	// pasted clip always works without it. Twitch channels only.
-	ArchiveClips bool `toml:"archive_clips,omitempty" json:"archive_clips,omitempty"`
+	// pasted clip always works without it. Twitch channels only, so the key
+	// carries the twitch_ prefix the other Twitch-only channel options carry
+	// (owner decision FE-34; unreleased under its old name archive_clips, so
+	// no migration).
+	TwitchArchiveClips bool `toml:"twitch_archive_clips,omitempty" json:"twitch_archive_clips,omitempty"`
 }
 
 // IsEnabled returns whether the channel is enabled (defaults to true).

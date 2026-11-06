@@ -459,7 +459,7 @@ func TestRateLimitHoldsBacklogAdmission(t *testing.T) {
 
 // TestRateLimitHoldAdmitsATwitchChannelsBacklog: the rate-limit hold is
 // YouTube's. While it stands a YouTube channel's backlog waits, and a Twitch
-// channel's — the clips its archive_clips sweep queued, under its login —
+// channel's — the clips its twitch_archive_clips sweep queued, under its login —
 // is admitted all the same: Twitch refused nothing.
 //
 // Mutant: the gate returning from sweep for every channel again (the clip

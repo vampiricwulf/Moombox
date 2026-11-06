@@ -41,7 +41,7 @@ func IsTwitchClipJob(job *database.Job) bool {
 // RecordPastedClip enters a clip row an add path just created (POST
 // /api/jobs, `moombox add`) in the processing history, as the monitor's
 // OnClipFound does for the clips its sweep finds. The sweep of a channel
-// whose archive_clips is on skips a clip whose job ID is in the history or
+// whose twitch_archive_clips is on skips a clip whose job ID is in the history or
 // is a job now (TwitchMonitor.sweepClips); a pasted clip was only the
 // second, so once its Finished row was deleted the next sweep whose window
 // still held it archived it again — the dedupe by slug that archives a clip
