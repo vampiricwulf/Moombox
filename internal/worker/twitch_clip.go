@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -270,8 +271,21 @@ func twitchClipURLRefresh(ctx context.Context, clip *TwitchClipDownload, log log
 // was asked to leave out.
 func (o *DownloadOrchestrator) twitchClipDownloadResult(ctx context.Context, jobCtx *JobContext, clip *TwitchClipDownload) *DownloadResult {
 	path := filepath.Join(jobCtx.StagingDir, "video.mp4")
+	stale := []string{twitchClipSourceFile, twitchClipAudioFile}
 	if twitchClipAudioOnly(jobCtx.Job) {
 		path = filepath.Join(jobCtx.StagingDir, twitchClipSourceFile)
+		stale = []string{"video.mp4"}
+	}
+	// An attempt under the other shape (quality_preference edited on a
+	// failed clip) left its files here, and discoverStagingMedia reads
+	// video.mp4 and audio.m4a whenever both exist: a later Mux or boot
+	// re-mux would mux a leftover audio.m4a in as a second track beside a
+	// video download, or archive a leftover video.mp4 beside the audio an
+	// audio_only clip kept. Neither is this shape's to resume, so they go.
+	for _, name := range stale {
+		if err := os.Remove(filepath.Join(jobCtx.StagingDir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			o.logger.Warn("twitch clip: could not remove another shape's staged file", "jobID", jobCtx.Job.ID, "file", name, "err", err)
+		}
 	}
 	result := &DownloadResult{
 		HasVideo:    true,
@@ -315,8 +329,11 @@ func twitchClipAudioOnly(job *database.Job) bool {
 // staging/clip-source.mp4), stream-copied into staging/audio.m4a
 // (engine.Muxer.ExtractAudioCopy, `-map 0:a -c copy`) and verified like
 // every other copy before it takes that name: the copy must hold an audio
-// stream and no other, and be no shorter than its source
-// (verifyMuxedDuration, ENGINE-9's check). result then carries the audio as
+// stream and no other, and it goes through verifyMuxedDuration (ENGINE-9's
+// check) as every copy does — though that comparison only runs for a source
+// of at least muxDurationCheckFloor (a minute), so for a clip, which Twitch
+// caps at a minute, it practically never does, and the stream checks are
+// what verify the copy. result then carries the audio as
 // its primary input, as a YouTube audio-only download's does
 // (selectVodFormats: the audio as VideoPath, HasAudio cleared), so the
 // ordinary finalize archives it in the container every audio_only job's

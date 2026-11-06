@@ -169,3 +169,56 @@ func TestTwitchClipAudioOnlyStagesItsSourceOutOfTheMuxesSight(t *testing.T) {
 		t.Errorf("staged media with the audio extracted = %+v, want the audio alone", found)
 	}
 }
+
+// TestTwitchClipDropsTheOtherShapesStagedFiles: a clip whose
+// quality_preference was edited between attempts finds the other shape's
+// files in its staging, and discoverStagingMedia reads video.mp4 and
+// audio.m4a whenever both exist — a later Mux would add a leftover audio as
+// a second track beside a video download, or archive a leftover video beside
+// the audio an audio_only clip kept. Each shape removes the other's files
+// and keeps its own (the partial it resumes).
+//
+// Mutants: the removal skipped (both leftovers stay); the audio_only shape
+// removing its own clip-source.mp4 instead of video.mp4 (the leftover video
+// stays, the partial is lost).
+func TestTwitchClipDropsTheOtherShapesStagedFiles(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	job := addClipJob(t, db, t.TempDir())
+	clip := &TwitchClipDownload{Slug: "FaintLightGullWholeWheat", Quality: testClip("https://cdn.example").Qualities[0]}
+	stage := func(staging string, names ...string) {
+		t.Helper()
+		if err := os.MkdirAll(staging, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range names {
+			if err := os.WriteFile(filepath.Join(staging, n), []byte(n), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	present := func(staging, name string) bool {
+		_, err := os.Stat(filepath.Join(staging, name))
+		return err == nil
+	}
+
+	job.QualityPreference = "audio_only"
+	jobCtx := w.buildJobContext(job)
+	stage(jobCtx.StagingDir, "video.mp4", twitchClipSourceFile)
+	w.orchestrator.twitchClipDownloadResult(context.Background(), jobCtx, clip)
+	if present(jobCtx.StagingDir, "video.mp4") || !present(jobCtx.StagingDir, twitchClipSourceFile) {
+		t.Errorf("audio_only: video.mp4 kept = %v, clip-source.mp4 kept = %v; want the video gone and the source kept",
+			present(jobCtx.StagingDir, "video.mp4"), present(jobCtx.StagingDir, twitchClipSourceFile))
+	}
+
+	job.QualityPreference = "best"
+	jobCtx = w.buildJobContext(job)
+	stage(jobCtx.StagingDir, "video.mp4", twitchClipAudioFile)
+	w.orchestrator.twitchClipDownloadResult(context.Background(), jobCtx, clip)
+	if present(jobCtx.StagingDir, twitchClipAudioFile) || present(jobCtx.StagingDir, twitchClipSourceFile) || !present(jobCtx.StagingDir, "video.mp4") {
+		t.Errorf("best: the audio_only files kept (audio %v, source %v) or the video lost (%v)",
+			present(jobCtx.StagingDir, twitchClipAudioFile), present(jobCtx.StagingDir, twitchClipSourceFile), !present(jobCtx.StagingDir, "video.mp4"))
+	}
+	if found := discoverStagingMedia(jobCtx.StagingDir); found == nil || !found.HasVideo || found.AudioPath != "" {
+		t.Errorf("staged media = %+v, want the video alone", found)
+	}
+}
