@@ -229,11 +229,12 @@ type Job struct {
 	// recording began, in seconds of the broadcast's own timeline — the
 	// video's, which a viewer's timestamp comment counts in (owner decision
 	// CJ-3). 0 for a capture recorded from sq=0; the join point of one that
-	// joined late. Written by the single-file finalize from the staged
-	// recording (joinOffsetSeconds, internal/worker/recording_start.go); nil
-	// while unknown — a VOD, a Twitch capture, a split archive, a row from
-	// before the column, a capture whose start was not recorded. The chapter import pre-fills its
-	// offset with it negated (defaultChapterOffset).
+	// joined late. Written by the finalize from the staged recording
+	// (joinOffsetSeconds, internal/worker/recording_start.go; a split
+	// archive's is part 1's, splitJoinOffsetSeconds, owner decision CK-3);
+	// nil while unknown — a VOD, a Twitch capture, a row from before the
+	// column, a capture whose start was not recorded. The chapter import
+	// pre-fills its offset with it negated (defaultChapterOffset).
 	JoinOffsetSeconds *float64 `json:"joinOffsetSeconds,omitempty"`
 	// NotificationMsgs maps a notification target's stable key — the first 16
 	// hex digits of SHA-256 over the RESOLVED webhook URL, the same key
