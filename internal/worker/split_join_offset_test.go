@@ -29,12 +29,16 @@ import (
 //   - part 1 in seg_0, the root holding a short span the split discarded
 //     (a seg_0 dir makes the root no part: rootIsPartZero): seg_0's start,
 //     never the root's;
+//   - part 1 recorded as part index 1 in seg_1, with no seg_0 and nothing
+//     in the root (part 0 never recorded): seg_1's start — the root is
+//     part 1's only when part 1 is index 0;
 //   - part 1's start never recorded: NULL, over an older value the row held;
 //   - a Twitch split capture: not written.
 //
 // Mutants: the split finalize not writing join_offset_seconds (every row
 // keeps its fixture value); splitJoinOffsetSeconds reading the root for a
-// part 1 staged in seg_0 (the discarded span's 50 s); muxAndFinalize not
+// part 1 staged in seg_0 (the discarded span's 50 s); the index-0 guard
+// dropped, reading the empty root for a part 1 of index 1 (NULL); muxAndFinalize not
 // handing its result to the split finalize (the TS join reads NULL); the platform gate dropped
 // (the Twitch row reads 208); an unknown start leaving the older value.
 func TestSplitFinalizeRecordsPartOnesJoinOffset(t *testing.T) {
@@ -47,6 +51,7 @@ func TestSplitFinalizeRecordsPartOnesJoinOffset(t *testing.T) {
 		name     string
 		platform string
 		partDir  string // part 1's staging dir, relative to the root
+		first    int    // part 1's SegmentIndex
 		file     string
 		stage    func(t *testing.T, p string)
 		starts   map[string]int
@@ -61,6 +66,8 @@ func TestSplitFinalizeRecordsPartOnesJoinOffset(t *testing.T) {
 		{name: "from the start", file: "video_stream", stage: fragment(0),
 			starts: map[string]int{"video_stream": 0}, want: f64(0)},
 		{name: "part 1 in seg_0", partDir: "seg_0", file: "video_stream", stage: fragment(900),
+			starts: map[string]int{"video_stream": 300}, want: f64(900)},
+		{name: "part 1 of index 1 in seg_1", partDir: "seg_1", first: 1, file: "video_stream", stage: fragment(900),
 			starts: map[string]int{"video_stream": 300}, want: f64(900)},
 		{name: "start never recorded", file: "video_stream", stage: fragment(208)},
 		{name: "Twitch", platform: "twitch", file: "video_stream", stage: fragment(208),
@@ -85,8 +92,9 @@ func TestSplitFinalizeRecordsPartOnesJoinOffset(t *testing.T) {
 			jobCtx.Filename = "a-job"
 
 			// The root holds a short discarded span that sits 50 s in, when
-			// part 1 is staged in a seg dir of its own.
-			if tc.partDir != "" {
+			// part 1 is staged in seg_0. (With no seg_0, media in the root
+			// is part 0, and the finalize muxes it as part 1.)
+			if tc.partDir == "seg_0" {
 				fragment(50)(t, filepath.Join(jobCtx.StagingDir, "video_stream"))
 				writeStarts(t, jobCtx.StagingDir, map[string]int{"video_stream": 25})
 			}
@@ -105,7 +113,7 @@ func TestSplitFinalizeRecordsPartOnesJoinOffset(t *testing.T) {
 				if err := os.WriteFile(p, []byte("part"), 0o644); err != nil {
 					t.Fatal(err)
 				}
-				if err := o.db.AddSegment(&database.Segment{JobID: jobCtx.Job.ID, SegmentIndex: i, Filename: name, FilePath: p, DurationSeconds: 100}); err != nil {
+				if err := o.db.AddSegment(&database.Segment{JobID: jobCtx.Job.ID, SegmentIndex: tc.first + i, Filename: name, FilePath: p, DurationSeconds: 100}); err != nil {
 					t.Fatal(err)
 				}
 			}
