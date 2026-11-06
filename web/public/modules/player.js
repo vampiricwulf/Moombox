@@ -314,6 +314,14 @@ export class PlayerController {
 
     // Multi-segment playback
     this._seg = new SegmentPlayer();
+    /**
+     * The open job's chapters on the global timeline, in time order
+     * ({start, end, title}, seconds — GET /api/jobs/{id}/chapters), and the
+     * index of the one playback is in (-1 = before the first, or none).
+     * Decoration only: an empty list draws nothing.
+     */
+    this._chapters = [];
+    this._activeChapter = -1;
     /** Monotonic counter to detect stale responses from rapid job switching */
     this._selectionSeq = 0;
     /**
@@ -433,6 +441,15 @@ export class PlayerController {
 
     // Video timeupdate
     video.addEventListener("timeupdate", () => this.onPlayerTimeUpdate());
+    // The chapter highlight follows playback on its own listener:
+    // onPlayerTimeUpdate returns at once for a job with no chat, and a job
+    // with chapters but no chat must still move its highlight.
+    video.addEventListener("timeupdate", () => this._updateActiveChapter());
+    // A single-file job's chapter strip is laid out against the element's
+    // own duration, which is only known once metadata is in (and a
+    // multi-part job's parts each fire this as they load — harmless, the
+    // strip there reads the parts' summed durations).
+    video.addEventListener("durationchange", () => this._renderChapterStrip());
 
     // Video seeking — un-anchor the overlay BEFORE the seek's own timeupdate.
     // The HTML seek algorithm queues `timeupdate` and only THEN `seeked`, so
@@ -896,6 +913,7 @@ export class PlayerController {
     // Remove segment indicator if present
     const segIndicator = document.getElementById("player-segment-indicator");
     if (segIndicator) segIndicator.remove();
+    this._setChapters([]);
     this.clearNicoOverlay();
   }
 
@@ -995,7 +1013,170 @@ export class PlayerController {
       indicator.appendChild(block);
     });
 
-    document.getElementById("player-video-column")?.appendChild(indicator);
+    // Under the chapter strip and above the chapter list, so the strip stays
+    // directly under the video it is aligned to. Both sit in the markup;
+    // appended at the end of the column when the list is not there.
+    const column = document.getElementById("player-video-column");
+    column?.insertBefore(indicator, document.getElementById("player-chapters"));
+  }
+
+  /**
+   * Fetch the job's chapters (GET /api/jobs/{id}/chapters — read from the
+   * archive file(s) by ffprobe, already on the global timeline) and draw them.
+   * Never awaited by onPlayerJobSelect: a slow or failed fetch must not delay
+   * playback, and a failure is silent — chapters are decoration, and the
+   * server already answers an unreadable archive with an empty list, so a
+   * non-2xx here is the job going away or the server being unreachable, both
+   * of which the rest of the player reports.
+   */
+  async _loadChapters(jobId, selectionId) {
+    let list = [];
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/chapters`);
+      if (this._selectionSeq !== selectionId) return;
+      if (!res.ok) return;
+      const data = await res.json();
+      if (this._selectionSeq !== selectionId) return;
+      list = Array.isArray(data?.chapters) ? data.chapters : [];
+    } catch {
+      return;
+    }
+    this._setChapters(list
+      .filter((c) => c && Number.isFinite(c.start) && c.start >= 0)
+      .map((c) => ({
+        start: c.start,
+        end: Number.isFinite(c.end) ? Math.max(c.end, c.start) : c.start,
+        title: typeof c.title === "string" ? c.title : "",
+      }))
+      .sort((a, b) => a.start - b.start));
+  }
+
+  /** Replace the chapter list and redraw the strip and the list from it. */
+  _setChapters(chapters) {
+    this._chapters = chapters;
+    this._activeChapter = -1;
+    this._renderChapterStrip();
+    this._renderChapterList();
+    this._updateActiveChapter();
+  }
+
+  /** "Chapter 2: Elden Ring" — one name for a tooltip, a row and a reader. */
+  _chapterLabel(i) {
+    const title = this._chapters[i].title;
+    return title ? `Chapter ${i + 1}: ${title}` : `Chapter ${i + 1}`;
+  }
+
+  /**
+   * The length of the timeline the strip is laid out on, in seconds: the
+   * parts' summed durations for a multi-part job (SegmentPlayer's global
+   * timeline, the one seekToGlobalTime takes), the element's own duration for
+   * a single file once metadata is in, and before that the last chapter's
+   * end — W22 closes the last chapter at the archive's duration, so the
+   * markers do not move when the metadata lands.
+   */
+  _chapterTimelineDuration() {
+    if (this._seg.active) return this._seg.totalDuration > 0 ? this._seg.totalDuration : 0;
+    const video = document.getElementById("player-video");
+    const d = video ? video.duration : NaN;
+    if (Number.isFinite(d) && d > 0) return d;
+    const last = this._chapters[this._chapters.length - 1];
+    return last ? last.end : 0;
+  }
+
+  /**
+   * The thin strip under the video: one marker per chapter start, at its
+   * share of the global timeline. A native `<video controls>` seek bar cannot
+   * be decorated, so this sits under it the way the segment indicator does,
+   * across the same width as the video element. Each marker is a button —
+   * its title the hover text, its aria-label the same name for a reader —
+   * and seeks to its chapter's start through seekToGlobalTime.
+   */
+  _renderChapterStrip() {
+    const strip = document.getElementById("player-chapter-strip");
+    if (!strip) return;
+    const total = this._chapterTimelineDuration();
+    if (this._chapters.length === 0 || !(total > 0)) {
+      strip.replaceChildren();
+      strip.hidden = true;
+      return;
+    }
+    const markers = this._chapters.map((c, i) => {
+      const marker = document.createElement("button");
+      marker.type = "button";
+      marker.className = "chapter-strip-marker";
+      if (i === this._activeChapter) marker.classList.add("active");
+      const pct = Math.min(100, Math.max(0, (c.start / total) * 100));
+      marker.style.left = `${pct}%`;
+      const at = formatTimestamp(c.start);
+      marker.title = `${this._chapterLabel(i)} (${at})`;
+      marker.setAttribute("aria-label", `Seek to ${this._chapterLabel(i)}, at ${at}`);
+      marker.addEventListener("click", () => this.seekToGlobalTime(c.start));
+      return marker;
+    });
+    strip.replaceChildren(...markers);
+    strip.hidden = false;
+  }
+
+  /**
+   * The collapsible chapter list: one row per chapter (start time and title)
+   * that seeks on click. Hidden outright when the job has none; collapsed by
+   * default otherwise, so it never takes the video's height unasked.
+   */
+  _renderChapterList() {
+    const details = document.getElementById("player-chapters");
+    const list = document.getElementById("player-chapter-list");
+    if (!details || !list) return;
+    if (this._chapters.length === 0) {
+      list.replaceChildren();
+      details.hidden = true;
+      details.open = false;
+      return;
+    }
+    const rows = this._chapters.map((c, i) => {
+      const li = document.createElement("li");
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "chapter-row";
+      const at = formatTimestamp(c.start);
+      row.setAttribute("aria-label", `Seek to ${this._chapterLabel(i)}, at ${at}`);
+      const time = document.createElement("span");
+      time.className = "chapter-row-time";
+      time.textContent = at;
+      const title = document.createElement("span");
+      title.className = "chapter-row-title";
+      title.textContent = c.title || `Chapter ${i + 1}`;
+      row.append(time, title);
+      row.addEventListener("click", () => this.seekToGlobalTime(c.start));
+      li.appendChild(row);
+      return li;
+    });
+    list.replaceChildren(...rows);
+    details.setAttribute("summary", `Chapters (${this._chapters.length})`);
+    details.hidden = false;
+  }
+
+  /**
+   * Highlight the chapter playback is in, on the strip and in the list: the
+   * last one whose start is at or before the global time. Writes the DOM only
+   * when the index changes, since this runs on every `timeupdate`.
+   */
+  _updateActiveChapter() {
+    let idx = -1;
+    if (this._chapters.length > 0) {
+      const video = document.getElementById("player-video");
+      const t = this._seg.getGlobalTime(video);
+      for (let i = 0; i < this._chapters.length && this._chapters[i].start <= t; i++) idx = i;
+    }
+    if (idx === this._activeChapter) return;
+    this._activeChapter = idx;
+    const markers = document.getElementById("player-chapter-strip")?.children || [];
+    for (let i = 0; i < markers.length; i++) markers[i].classList.toggle("active", i === idx);
+    const rows = document.querySelectorAll("#player-chapter-list .chapter-row");
+    rows.forEach((row, i) => {
+      row.classList.toggle("active", i === idx);
+      if (i === idx) row.setAttribute("aria-current", "true");
+      else row.removeAttribute("aria-current");
+    });
   }
 
   /**
@@ -1179,6 +1360,12 @@ export class PlayerController {
     } else {
       video.src = `/api/jobs/${jobId}/video`;
     }
+
+    // Chapters: the previous job's go at once, and this job's are fetched
+    // beside the watch-state and chat fetches below but never awaited — the
+    // source is already assigned, and nothing else waits on them.
+    this._setChapters([]);
+    this._loadChapters(jobId, selectionId);
 
     // Fetch fresh watch state (not cached like the job endpoint)
     this._clearWatchTracking();
