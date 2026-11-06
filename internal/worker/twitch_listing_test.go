@@ -17,7 +17,8 @@ import (
 // M9): the add's answer counts the failures, and only the log names them.
 //
 // Mutants: the guard removed (a Queued row with a NULL channel_id is added);
-// either not-queued log line removed.
+// either not-queued log line removed; the channel field always o.Login
+// (logged empty for the owner-less VOD, and for a collection's VOD).
 func TestQueueTwitchVideosRefusesAnOwnerlessVod(t *testing.T) {
 	db := openTestDB(t)
 	owned := twitch.TwitchVideo{ID: "8", Title: "a", PublishedAt: "2026-10-01T00:00:00Z"}
@@ -33,6 +34,9 @@ func TestQueueTwitchVideosRefusesAnOwnerlessVod(t *testing.T) {
 	}
 	if vod, logged := lg.field("twitch listing: a VOD could not be queued — no channel to pace it under: neither the listing nor Twitch named its owner", "vod"); !logged || vod != "9" {
 		t.Errorf("the owner-less VOD's failure logged %v (%v); lines %v", vod, logged, lg.lines())
+	}
+	if ch, _ := lg.field("twitch listing: a VOD could not be queued — no channel to pace it under: neither the listing nor Twitch named its owner", "channel"); ch != nil {
+		t.Errorf("the owner-less VOD's line names channel %q; nothing names one", ch)
 	}
 
 	if j, _ := db.GetJob("tw_v9"); j != nil {
@@ -52,5 +56,11 @@ func TestQueueTwitchVideosRefusesAnOwnerlessVod(t *testing.T) {
 	}
 	if vod, logged := lg.field("twitch listing: a VOD could not be queued — the job could not be created", "vod"); !logged || vod != "8" {
 		t.Errorf("the failed insert logged %v (%v); lines %v", vod, logged, lg.lines())
+	}
+	// A collection's options name no login: the video's owner is the channel.
+	lg.reset()
+	QueueTwitchVideos(db, []twitch.TwitchVideo{owned}, TwitchListingOptions{Logger: lg}, time.Now())
+	if ch, _ := lg.field("twitch listing: a VOD could not be queued — the job could not be created", "channel"); ch != "Alice" {
+		t.Errorf("a collection VOD's failure names channel %v, want its owner Alice; lines %v", ch, lg.lines())
 	}
 }

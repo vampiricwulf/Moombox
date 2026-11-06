@@ -111,13 +111,23 @@ func QueueTwitchVideos(db *database.Database, videos []twitch.TwitchVideo, opts 
 }
 
 // warnNotQueued logs a VOD QueueTwitchVideos counted as Failed, when the
-// caller gave it a logger.
+// caller gave it a logger. The channel is the listing's login, else the
+// video's own owner; a collection names neither in its options, and an
+// owner-less VOD has neither, so the field is left out rather than logged
+// empty.
 func (o TwitchListingOptions) warnNotQueued(v twitch.TwitchVideo, reason string, args ...any) {
 	if o.Logger == nil {
 		return
 	}
-	o.Logger.Warn("twitch listing: a VOD could not be queued — "+reason,
-		append([]any{"vod", v.ID, "title", v.Title, "channel", o.Login}, args...)...)
+	fields := []any{"vod", v.ID, "title", v.Title}
+	channel := o.Login
+	if channel == "" && v.Owner != nil {
+		channel = v.Owner.Login
+	}
+	if channel != "" {
+		fields = append(fields, "channel", channel)
+	}
+	o.Logger.Warn("twitch listing: a VOD could not be queued — "+reason, append(fields, args...)...)
 }
 
 // Logger is the worker's logger, for a caller outside the package that
