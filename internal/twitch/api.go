@@ -91,6 +91,9 @@ var (
 	thumbWidthRe  = regexp.MustCompile(`[%{]*width[}]*`)
 	thumbHeightRe = regexp.MustCompile(`[%{]*height[}]*`)
 	thumbDimRe    = regexp.MustCompile(`[-_]\d+x\d+\.`)
+	// vodProcessingThumbRe is Twitch's "still processing" placeholder
+	// thumbnail, yt-dlp's `/404_processing_[^.?#]+\.png` (twitch.py 516).
+	vodProcessingThumbRe = regexp.MustCompile(`/404_processing_[^.?#]+\.png`)
 )
 
 // twitchGQLRatePerSec is the steady-state ceiling for outbound GQL
@@ -903,6 +906,7 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 				Title         string `json:"title"`
 				LengthSeconds int    `json:"lengthSeconds"`
 				PreviewURL    string `json:"previewThumbnailURL"`
+				BroadcastType string `json:"broadcastType"`
 				CreatedAt     string `json:"createdAt"`
 				ViewCount     int    `json:"viewCount"`
 				Owner         struct {
@@ -926,9 +930,21 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 	}
 
 	v := resp.Data.Video
+	// yt-dlp's `info.get('title') or 'Untitled Broadcast'` (twitch.py 526):
+	// every title written from this one — the stream processor's
+	// "<Channel> — <title>" and the manual-add route's — then names the
+	// broadcast instead of ending on a dangling separator, and so does the
+	// filename built from it. Beyond yt-dlp, a whitespace-only title counts as
+	// empty too (it would dangle the separator just the same); a title with
+	// text is kept exactly as Twitch sent it, surrounding spaces included, as
+	// yt-dlp keeps it.
+	title := v.Title
+	if strings.TrimSpace(title) == "" {
+		title = "Untitled Broadcast"
+	}
 	info := &TwitchVodInfo{
 		VodID:              v.ID,
-		Title:              v.Title,
+		Title:              title,
 		ChannelLogin:       v.Owner.Login,
 		ChannelDisplayName: v.Owner.DisplayName,
 		ChannelID:          v.Owner.ID,
@@ -937,7 +953,14 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 		ViewCount:          v.ViewCount,
 	}
 
-	if v.PreviewURL != "" {
+	// The processing placeholder is no thumbnail of the broadcast: yt-dlp
+	// drops it (thumbnail = None) whatever the broadcast type, and only an
+	// ARCHIVE behind it is still recording. Stored, it was rewritten by
+	// thumbDimRe into a 404_processing-640x360.png that exists nowhere, which
+	// the dashboard, notifications and the staging thumbnail fetch all read.
+	if vodProcessingThumbRe.MatchString(v.PreviewURL) {
+		info.IsRecording = v.BroadcastType == "ARCHIVE"
+	} else if v.PreviewURL != "" {
 		hadTemplate := thumbWidthRe.MatchString(v.PreviewURL) || thumbHeightRe.MatchString(v.PreviewURL)
 		thumbURL := thumbWidthRe.ReplaceAllString(v.PreviewURL, "640")
 		thumbURL = thumbHeightRe.ReplaceAllString(thumbURL, "360")

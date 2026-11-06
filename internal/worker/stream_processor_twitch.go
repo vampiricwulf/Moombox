@@ -496,6 +496,15 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 	}
 	sp.db.UpdateJobFields(job.ID, vodUpdates)
 	syncTwitchJobMetadata(job, vodUpdates)
+	if vodInfo.IsRecording {
+		// The broadcast is still live and this is its growing archive: the
+		// playlist has no ENDLIST yet (the download follows it until it
+		// does), the length is the length so far, and GetVodInfo stored no
+		// thumbnail — Twitch shows only a processing placeholder. Both are
+		// re-read once the download ends (refreshRecordedVodInfo).
+		sp.logger.Info("twitch VOD is still recording; following it until the broadcast ends",
+			"vodID", vodID, "lengthSoFar", vodInfo.Duration)
+	}
 
 	variants, err := sp.tw.GetVodHLSPlaylist(ctx, vodID)
 	if err != nil {
@@ -525,9 +534,10 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 	sp.logger.Info("twitch VOD ready", "vodID", vodID, "quality", variant.Name)
 
 	result := &StreamProcessResult{
-		ShouldDownload: true,
-		IsVod:          true,
-		TwitchVariant:  variant,
+		ShouldDownload:     true,
+		IsVod:              true,
+		TwitchVariant:      variant,
+		TwitchVodRecording: vodInfo.IsRecording,
 	}
 
 	// Create VOD chat downloader if chat download is enabled

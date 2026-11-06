@@ -43,8 +43,11 @@ func ResolveChannelInput(ctx context.Context, input string) (*ResolvedChannel, e
 		input = "https://www.youtube.com/" + input
 	}
 
-	// Try Twitch URL extraction
-	if target := ExtractTwitchTarget(input); target != nil && target.Type == TwitchChannel {
+	// Try Twitch URL extraction. A channel's video or clip list names the
+	// channel as surely as its page does — and, before the listing kinds,
+	// parsed as that channel — so a channel field takes its login.
+	if target := ExtractTwitchTarget(input); target != nil &&
+		(target.Type == TwitchChannel || target.Type == TwitchVideosListing || target.Type == TwitchClipsListing) {
 		return &ResolvedChannel{
 			ID:       target.Value,
 			Platform: "twitch",

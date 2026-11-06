@@ -2533,9 +2533,14 @@ export class MoomboxApp {
       let body;
 
       if (target.platform === "twitch") {
-        // Reject clips client-side (not supported)
+        // Refused client-side until their jobs exist: the messages are
+        // utils.TwitchTarget.Unsupported's, which the CLI and the TUI show.
         if (target.type === "clip") {
-          this.showToast("Twitch clips are not supported. Use a channel or VOD URL.", "warning");
+          this.showToast("Twitch clips are not supported yet. Use a channel or VOD URL.", "warning");
+          return;
+        }
+        if (target.type !== "channel" && target.type !== "vod") {
+          this.showToast("Twitch video lists and collections are not supported yet. Use a channel or VOD URL.", "warning");
           return;
         }
         // Twitch job
@@ -3530,42 +3535,90 @@ export class MoomboxApp {
     return null;
   }
 
+  /**
+   * Parse a Twitch URL or identifier. Its URL forms mirror
+   * utils.ExtractTwitchTarget (internal/utils/twitch.go) row for row: both —
+   * and the TUI, which calls the Go one — are tested against
+   * internal/utils/testdata/twitch_urls.json, which holds URL rows only. The
+   * bare-identifier fallbacks below are this parser's own and differ from Go's:
+   * a "v"-prefixed or bare numeric VOD ID needs 7-12 digits here (Go's v
+   * prefix takes 1-12), and a bare reserved word ("videos", "clip") is no
+   * channel here where Go takes it as one.
+   * The forms are yt-dlp's (yt_dlp/extractor/twitch.py b77c9304e): hosts www.,
+   * go., m. and bare; /videos/<id>, /<ch>/v/<id>, /<ch>/video/<id>,
+   * /<ch>/schedule?vodID=<id>; player.twitch.tv ?video=v<id> / ?channel=;
+   * clips with or without a channel; and the listings — /<ch>/videos,
+   * /<ch>/profile, /<ch>/clips, /collections/<id> — which parse to their own
+   * types so they are refused rather than read as a channel's live-wait job.
+   * Returns { platform: "twitch", type, id } or null; type is channel, vod,
+   * clip, videos, clips or collection.
+   */
   extractTwitchTarget(input) {
     const trimmed = input.trim();
     if (!trimmed) return null;
 
-    const reserved = new Set(["directory", "downloads", "jobs", "settings", "videos", "search", "p"]);
+    const reserved = new Set([
+      "directory", "downloads", "jobs", "settings", "videos", "search", "p", "store", "tag", "tags",
+      "turbo", "drops", "wallet", "prime", "subs", "subscriptions", "friends", "inventory", "payments",
+      "collections", "clip",
+    ]);
+    const siteHosts = new Set(["twitch.tv", "www.twitch.tv", "go.twitch.tv", "m.twitch.tv"]);
+    const loginRe = /^[a-zA-Z][a-zA-Z0-9_]{0,24}$/;
+    const vodIdRe = /^\d{1,12}$/;
+    const slugRe = /^[a-zA-Z0-9_-]+$/;
+    const target = (type, id) => ({ platform: "twitch", type, id });
+    const vod = (id) => (vodIdRe.test(id || "") ? target("vod", id) : null);
+    const clip = (slug) => (slugRe.test(slug || "") ? target("clip", slug) : null);
 
+    let url = null;
     try {
       let urlStr = trimmed;
-      if (!urlStr.startsWith("http")) {
-        if (urlStr.includes("twitch.tv")) urlStr = "https://" + urlStr;
-      }
-      if (urlStr.startsWith("http")) {
-        const url = new URL(urlStr);
-        const host = url.hostname.replace("www.", "");
-        // clips.twitch.tv/{slug}
-        if (host === "clips.twitch.tv") {
-          const slug = url.pathname.split("/").filter(Boolean)[0];
-          if (slug) return { platform: "twitch", type: "clip", id: slug };
-        }
-        if (host === "twitch.tv") {
-          const parts = url.pathname.split("/").filter(Boolean);
-          if (parts[0] === "videos" && parts[1] && /^\d+$/.test(parts[1])) {
-            return { platform: "twitch", type: "vod", id: parts[1] };
-          }
-          if (parts.length >= 3 && parts[1] === "video" && /^\d+$/.test(parts[2])) {
-            return { platform: "twitch", type: "vod", id: parts[2] };
-          }
-          if (parts.length >= 3 && parts[1] === "clip" && parts[2]) {
-            return { platform: "twitch", type: "clip", id: parts[2] };
-          }
-          if (parts[0] && !reserved.has(parts[0].toLowerCase()) && /^[a-zA-Z0-9_]{1,25}$/.test(parts[0])) {
-            return { platform: "twitch", type: "channel", id: parts[0].toLowerCase() };
-          }
-        }
-      }
+      const lower = urlStr.toLowerCase();
+      const bareHost = ["twitch.tv", "www.twitch.tv", "go.twitch.tv", "m.twitch.tv", "player.twitch.tv", "clips.twitch.tv"]
+        .some((h) => lower.startsWith(h + "/"));
+      if (bareHost) urlStr = "https://" + urlStr;
+      if (/^https?:\/\//i.test(urlStr)) url = new URL(urlStr);
     } catch {}
+
+    if (url) {
+      const host = url.hostname.toLowerCase();
+      const parts = url.pathname.split("/").filter(Boolean);
+      const q = url.searchParams;
+      if (host === "player.twitch.tv") {
+        const v = q.get("video");
+        if (v) return vod(v.replace(/^v/, ""));
+        const login = (q.get("channel") || "").toLowerCase();
+        return loginRe.test(login) ? target("channel", login) : null;
+      }
+      if (host === "clips.twitch.tv") {
+        if (parts.length >= 2 && parts[parts.length - 1] === "edit") parts.pop();
+        const slug = parts.length === 1 && parts[0] === "embed" ? q.get("clip") : parts[parts.length - 1];
+        return clip(slug);
+      }
+      if (siteHosts.has(host)) {
+        if (parts.length === 0) return null;
+        if (parts[0] === "videos") return parts.length >= 2 ? vod(parts[1]) : null;
+        if (parts[0] === "clip") return parts.length >= 2 ? clip(parts[1]) : null;
+        if (parts[0] === "collections") {
+          return parts.length >= 2 && slugRe.test(parts[1]) ? target("collection", parts[1]) : null;
+        }
+        const login = parts[0].toLowerCase();
+        if (reserved.has(login)) return null;
+        if (parts.length >= 2) {
+          if (parts[1] === "v" || parts[1] === "video") return parts.length >= 3 ? vod(parts[2]) : null;
+          if (parts[1] === "clip") return parts.length >= 3 ? clip(parts[2]) : null;
+          if (parts[1] === "schedule" && q.get("vodID")) return vod(q.get("vodID"));
+        }
+        if (!loginRe.test(login)) return null;
+        if (parts.length >= 2) {
+          if (parts[1] === "videos" || parts[1] === "profile") {
+            return target(parts[1] === "videos" && q.get("filter") === "clips" ? "clips" : "videos", login);
+          }
+          if (parts[1] === "clips") return target("clips", login);
+        }
+        return target("channel", login);
+      }
+    }
 
     // Raw VOD ID with v prefix
     if (/^v\d{7,12}$/.test(trimmed)) {

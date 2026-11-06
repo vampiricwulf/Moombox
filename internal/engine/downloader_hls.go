@@ -559,7 +559,8 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			// part file keeps an inline timestamp jump where the break was —
 			// the same discontinuity a non-exempt viewer's player rides over.
 			// Never fires for ad-free tokens or YouTube HLS (IsAd requires
-			// twitch-stitched-ad DATERANGE markers; see collectAdDateRanges).
+			// an "Amazon" EXTINF title or a twitch-stitched-ad DATERANGE; see
+			// parseMediaPlaylist and collectAdDateRanges).
 			if seg.IsAd {
 				if !inAdBreak {
 					inAdBreak = true
@@ -788,8 +789,14 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					continue
 				}
 				d.emitActivity(ActivityVerifyingEnd)
-				if d.opts.CheckStreamStatus != nil {
-					ended, _ := d.opts.CheckStreamStatus(ctx)
+				// A stale window is the one site CheckStaleEnd answers in
+				// CheckStreamStatus's place (see its doc comment).
+				checkEnd := d.opts.CheckStreamStatus
+				if d.opts.CheckStaleEnd != nil {
+					checkEnd = d.opts.CheckStaleEnd
+				}
+				if checkEnd != nil {
+					ended, _ := checkEnd(ctx)
 					if ended {
 						d.streamEnded.Store(true)
 						return nil
@@ -1058,10 +1065,19 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	nextIdx := 0
 	gapStart := -1
 
+	// closeGap reports the range in SEQUENCE space, as the live loop does and
+	// as the worker stores it (the job's gaps column): nextIdx and gapStart
+	// index pl.Segments, and runHlsLoop hands this path only the segments not
+	// yet written, as a playlist whose MediaSequence is the first of them.
+	// Reported as slice indexes, a resumed VOD (or a recording one finished
+	// here once ENDLIST appeared) recorded a hole at seq curSeq+k as k..k.
+	// yt-dlp numbers fragments over the whole playlist the same way and
+	// reports a skipped one by that absolute index (downloader/hls.py
+	// 204-226, fragment.py 472-476).
 	closeGap := func(endIdx int) {
 		if gapStart >= 0 {
 			if d.OnGap != nil {
-				d.OnGap(DownloadGap{From: gapStart, To: endIdx})
+				d.OnGap(DownloadGap{From: pl.MediaSequence + gapStart, To: pl.MediaSequence + endIdx})
 			}
 			gapStart = -1
 		}
@@ -1120,11 +1136,15 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 			// worker blocked waiting for room.
 			rb.setHead(nextIdx)
 
+			// Total is the playlist's end in sequence space, the scale Seq
+			// is on. The slice length alone (the REMAINING count) sat below
+			// Seq whenever MediaSequence > 0, so a resumed VOD read ~100%
+			// from its first segment.
 			if d.OnProgress != nil {
 				d.OnProgress(DownloadProgress{
 					Seq:   writtenSeq,
 					Bytes: d.bytesWritten.Load(),
-					Total: totalSegs,
+					Total: pl.MediaSequence + totalSegs,
 				})
 			}
 

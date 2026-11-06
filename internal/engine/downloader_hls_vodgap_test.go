@@ -169,3 +169,109 @@ func TestHlsVodParallel_TrailingGapClosed(t *testing.T) {
 		t.Errorf("trailing gap = %+v, want one From=%d To=%d", gaps, goneFrom, total-1)
 	}
 }
+
+// TestHlsVodParallel_GapAndTotalInSequenceSpace pins the VOD-parallel path's
+// reports to SEQUENCE space whenever the slice it is handed does not start at
+// sequence 0: a playlist whose MEDIA-SEQUENCE is 100, and a VOD resumed at
+// sequence 10 (the slice runHlsLoop builds holds only segments 10 onward, as
+// a playlist whose MediaSequence is 10). The worker stores OnGap ranges as
+// the job's gaps and computes percent from Seq over Total, so both must be on
+// the scale Seq is: a hole at absolute sequence S is S..S (it used to be
+// reported as its slice index), and Total is the playlist's end (it used to
+// be the remaining count, which sat below Seq and read ~100% at once).
+//
+// Mutant: reporting gapStart/endIdx unshifted fails the gap assertion of
+// both rows; reporting Total as the slice length fails the Total assertion.
+func TestHlsVodParallel_GapAndTotalInSequenceSpace(t *testing.T) {
+	cases := []struct {
+		name      string
+		mediaSeq  int // the playlist's EXT-X-MEDIA-SEQUENCE
+		startSeq  int // where the downloader starts (ForceStartSeq when >0)
+		total     int // segments in the playlist
+		goneSeq   int // absolute sequence of the permanently refused segment
+		wantFirst int // first sequence written
+	}{
+		{name: "media sequence 100", mediaSeq: 100, startSeq: -1, total: 12, goneSeq: 104, wantFirst: 100},
+		{name: "resumed at sequence 10", mediaSeq: 0, startSeq: 10, total: 20, goneSeq: 13, wantFirst: 10},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/playlist.m3u8", func(w http.ResponseWriter, r *http.Request) {
+				var b strings.Builder
+				fmt.Fprintf(&b, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:%d\n", tc.mediaSeq)
+				for i := range tc.total {
+					fmt.Fprintf(&b, "#EXTINF:1.0,\nseg%d.ts\n", tc.mediaSeq+i)
+				}
+				b.WriteString("#EXT-X-ENDLIST\n")
+				fmt.Fprint(w, b.String())
+			})
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), ".ts")
+				if name == fmt.Sprintf("seg%d", tc.goneSeq) {
+					w.WriteHeader(http.StatusGone)
+					return
+				}
+				fmt.Fprintf(w, "[%s]", name)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			outFile := filepath.Join(t.TempDir(), "video.ts")
+			d := NewSegmentDownloader(DownloaderOptions{
+				BaseURL:       srv.URL + "/playlist.m3u8",
+				OutputFile:    outFile,
+				StartSeq:      tc.startSeq,
+				ForceStartSeq: tc.startSeq > 0,
+				IsHls:         true,
+			})
+			d.delays = fastDelays()
+			var mu sync.Mutex
+			var gaps []DownloadGap
+			var progress []DownloadProgress
+			d.OnGap = func(g DownloadGap) { mu.Lock(); gaps = append(gaps, g); mu.Unlock() }
+			d.OnProgress = func(p DownloadProgress) { mu.Lock(); progress = append(progress, p); mu.Unlock() }
+
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			if err := d.Start(ctx); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			data, err := os.ReadFile(outFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want strings.Builder
+			for s := tc.wantFirst; s < tc.mediaSeq+tc.total; s++ {
+				if s != tc.goneSeq {
+					fmt.Fprintf(&want, "[seg%d]", s)
+				}
+			}
+			if string(data) != want.String() {
+				t.Errorf("output mismatch.\n got=%q\nwant=%q", string(data), want.String())
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(gaps) != 1 || gaps[0].From != tc.goneSeq || gaps[0].To != tc.goneSeq {
+				t.Errorf("gaps = %+v, want one From=To=%d (sequence space)", gaps, tc.goneSeq)
+			}
+			end := tc.mediaSeq + tc.total
+			if len(progress) == 0 {
+				t.Fatal("no progress reported")
+			}
+			for _, p := range progress {
+				if p.Total != end {
+					t.Fatalf("progress %+v: Total = %d, want %d (the playlist's end in sequence space)", p, p.Total, end)
+				}
+				if p.Seq >= p.Total {
+					t.Fatalf("progress %+v: Seq must stay below Total", p)
+				}
+			}
+			if last := progress[len(progress)-1]; last.Seq != end-1 {
+				t.Errorf("last progress Seq = %d, want %d", last.Seq, end-1)
+			}
+		})
+	}
+}

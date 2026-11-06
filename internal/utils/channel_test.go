@@ -72,6 +72,20 @@ func TestResolveChannelInputTwitchURL(t *testing.T) {
 	}
 }
 
+// TestResolveChannelInputTwitchListing: a channel's video or clip list,
+// pasted into a channel field, still names that channel — the listing kinds
+// ExtractTwitchTarget now returns for them (G35) are not a regression there.
+//
+// Mutant: accepting TwitchChannel alone again.
+func TestResolveChannelInputTwitchListing(t *testing.T) {
+	for _, in := range []string{"https://www.twitch.tv/shroud/videos?filter=archives", "https://www.twitch.tv/shroud/clips"} {
+		got, err := ResolveChannelInput(t.Context(), in)
+		if err != nil || got == nil || got.ID != "shroud" || got.Platform != "twitch" {
+			t.Errorf("ResolveChannelInput(%q) = %+v, %v; want shroud on twitch", in, got, err)
+		}
+	}
+}
+
 // TestResolveChannelInputDirectChannelID covers the no-network YouTube
 // path: a /channel/UCxxx URL needs no resolution.
 func TestResolveChannelInputDirectChannelID(t *testing.T) {

@@ -89,6 +89,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `sidecar-warning.test.mjs` | the header warning while the BotGuard sidecar is down |
 | `stats-storage.test.mjs` | the Stats tab's storage breakdown, Cancelled included |
 | `trimmer.test.mjs` | the trim dialog's failure states and keyboard reach |
+| `twitch-urls.test.mjs` | `extractTwitchTarget` against the shared Twitch URL table (`internal/utils/testdata/twitch_urls.json`), and the Add dialog refusing clips and lists |
 | `update-check-debounce.test.mjs` | a debounced update check reports the wait, not "Up to date" |
 | `update-check-keep.test.mjs` | an up-to-date check keeps a release that reached the page during its round trip |
 | `update-dialog.test.mjs` | the update dialog's Update Now and Skip name the release on screen, and the dialog closes, saying why, once that release is skipped or withdrawn elsewhere |

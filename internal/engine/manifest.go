@@ -81,12 +81,15 @@ type HlsVariant struct {
 type HlsSegment struct {
 	Duration float64
 	URL      string
-	// IsAd marks a Twitch server-side stitched-ad segment, classified by the
-	// segment's #EXT-X-PROGRAM-DATE-TIME falling inside an ad #EXT-X-DATERANGE
-	// (see collectAdDateRanges). The live download loop skips these without
+	// IsAd marks a Twitch server-side stitched-ad segment, classified as
+	// streamlink's _is_segment_ad does (plugins/twitch.py, a685512): the
+	// segment's #EXTINF title contains "Amazon", or its
+	// #EXT-X-PROGRAM-DATE-TIME falls inside an ad #EXT-X-DATERANGE (see
+	// collectAdDateRanges). The live download loop skips these without
 	// writing — during a stitched break the real feed isn't served to this
 	// token at all, so nothing recordable is lost. Always false for playlists
-	// without ad markers (ad-free tokens, YouTube HLS).
+	// without ad markers (ad-free tokens, YouTube HLS, whose EXTINF titles
+	// are empty).
 	IsAd bool
 	// MapURI is the resolved #EXT-X-MAP init-segment URI governing this
 	// segment (fMP4/CMAF delivery — Twitch's TS→fMP4 migration). Empty for
@@ -723,6 +726,13 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 	// segments (RFC 8216 §4.3.2.5: the tag applies until the next EXT-X-MAP).
 	// Empty for TS playlists, which never carry the tag.
 	var curMapURI string
+	// curTitle is the title of the pending segment's #EXTINF — the text after
+	// the duration's comma. Twitch titles its stitched-ad segments "Amazon"
+	// and content segments "live"; streamlink keys its first ad signal on it
+	// (_is_segment_ad: `"Amazon" in title`). Per segment, like
+	// currentDuration: reset at each segment line, so a title never carries
+	// onto a later segment whose own #EXTINF is missing.
+	var curTitle string
 
 	for _, rawLine := range lines {
 		line := strings.TrimSpace(rawLine)
@@ -768,8 +778,8 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 			}
 
 		case strings.HasPrefix(line, "#EXTINF:"):
-			durationStr := line[len("#EXTINF:"):]
-			durationStr, _, _ = strings.Cut(durationStr, ",")
+			var durationStr string
+			durationStr, curTitle, _ = strings.Cut(line[len("#EXTINF:"):], ",")
 			currentDuration, _ = strconv.ParseFloat(durationStr, 64)
 
 		case line == "#EXT-X-ENDLIST":
@@ -788,10 +798,15 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 					segDur = defaultSegmentDuration
 				}
 			}
+			// IsAd is either of streamlink's two signals. The title catches
+			// an ad break whose DATERANGE this playlist does not bound (sent
+			// without DURATION/END-DATE, dropped from a reload while its
+			// segments are still in the window, or a START-DATE rounded past
+			// the first ad segment), and needs no PDT at all.
 			segment := HlsSegment{
 				Duration:        segDur,
 				URL:             resolveURL(baseURL, line),
-				IsAd:            inAdRange(adRanges, curDate),
+				IsAd:            strings.Contains(curTitle, "Amazon") || inAdRange(adRanges, curDate),
 				MapURI:          curMapURI,
 				ProgramDateTime: curDate,
 			}
@@ -800,6 +815,7 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 				curDate = curDate.Add(time.Duration(segDur * float64(time.Second)))
 			}
 			currentDuration = 0
+			curTitle = ""
 		}
 	}
 
@@ -816,8 +832,12 @@ type hlsAdRange struct {
 // collectAdDateRanges extracts stitched-ad windows from a media playlist's
 // #EXT-X-DATERANGE tags. A daterange is classified as an ad when it carries
 // CLASS="twitch-stitched-ad", an ID with the "stitched-ad-" prefix, or any
-// X-TV-TWITCH-AD-* attribute (the same three signals streamlink keys on).
-// Ranges without a usable bound (no END-DATE and no positive DURATION /
+// X-TV-TWITCH-AD-* attribute. Streamlink keys on the first two only
+// (_is_daterange_ad, plugins/twitch.py a685512): its 1557310 dropped the
+// X-TV-TWITCH-AD-* check as unnecessary, since every range carrying one also
+// carries the class. Moombox keeps it — it can only add a range the class
+// already names — and adds streamlink's EXTINF "Amazon" title signal per
+// segment in parseMediaPlaylist. Ranges without a usable bound (no END-DATE and no positive DURATION /
 // PLANNED-DURATION) are DROPPED: an unbounded range would classify everything
 // after it as ad forever, so the safe failure mode is to not filter — worst
 // case the ad is recorded, which is the status quo. Non-ad dateranges are

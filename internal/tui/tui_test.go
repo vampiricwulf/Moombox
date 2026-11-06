@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"encoding/json"
 	"image/color"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -515,5 +518,48 @@ func TestApplyValuesProbeTargets(t *testing.T) {
 	m.applyValues()
 	if got := cfg.Connectivity.ProbeTargets; len(got) != 2 || got[0] != "1.0.0.1:443" {
 		t.Errorf("blank must keep the stored targets, got %v", got)
+	}
+}
+
+// TestExtractTwitchTargetSharedURLTable runs the TUI's add-dialog parser over
+// the one Twitch URL table the Go parser and the dashboard are tested against
+// (internal/utils/testdata/twitch_urls.json, G35), mapped to the TUI's
+// (id, type) shape: a channel is (login, "twitch"), a VOD ("tw_v"+id,
+// "twitch"), a clip "twitch_clip" and a listing "twitch_listing", both of
+// which handleURLStep refuses.
+//
+// Mutant: the TUI's own parser before G35 (www and bare hosts only, no /v/,
+// schedule, player., channel-less /clip/ or listings) fails the rows that
+// name those forms.
+func TestExtractTwitchTargetSharedURLTable(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "utils", "testdata", "twitch_urls.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var table struct {
+		Rows []struct {
+			Input string `json:"input"`
+			Type  string `json:"type"`
+			Value string `json:"value"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(data, &table); err != nil || len(table.Rows) == 0 {
+		t.Fatalf("shared table: %v (%d rows)", err, len(table.Rows))
+	}
+	for _, row := range table.Rows {
+		var wantID, wantType string
+		switch row.Type {
+		case "channel":
+			wantID, wantType = row.Value, "twitch"
+		case "vod":
+			wantID, wantType = "tw_v"+row.Value, "twitch"
+		case "clip":
+			wantType = "twitch_clip"
+		case "videos", "clips", "collection":
+			wantType = "twitch_listing"
+		}
+		if gotID, gotType := extractTwitchTarget(row.Input); gotID != wantID || gotType != wantType {
+			t.Errorf("extractTwitchTarget(%q) = (%q, %q), want (%q, %q)", row.Input, gotID, gotType, wantID, wantType)
+		}
 	}
 }

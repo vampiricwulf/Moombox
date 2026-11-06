@@ -1297,14 +1297,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 
 var (
 	youtubeURLRe = regexp.MustCompile(`(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/live/)([a-zA-Z0-9_-]{11})`)
-	// Anchored to the channel-URL host shape: a bare substring match would
-	// capture "videos" from twitch.tv/videos/<id> (creating a bogus
-	// "videos" channel job) and the clip slug from clips.twitch.tv/<slug>.
-	// VOD/clip URLs are deliberately NOT matched here — callers without a
-	// videoId get an error instead of a wrong job type.
-	twitchURLRe = regexp.MustCompile(`(?:^|/)(?:www\.|m\.)?twitch\.tv/([a-zA-Z0-9_]+)(?:[/?#]|$)`)
-	// twitchIDRe is a Twitch login or a numeric VOD ID: the character class
-	// twitchURLRe captures, at Twitch's 25-character login limit.
+	// twitchIDRe is a Twitch login or a numeric VOD ID, at Twitch's
+	// 25-character login limit.
 	twitchIDRe = regexp.MustCompile(`^[a-zA-Z0-9_]{1,25}$`)
 )
 
@@ -1312,13 +1306,16 @@ func extractVideoIDFromURL(url string) string {
 	if m := youtubeURLRe.FindStringSubmatch(url); m != nil {
 		return m[1]
 	}
-	if m := twitchURLRe.FindStringSubmatch(url); m != nil {
-		// Reserved path segments are not channel logins.
-		switch strings.ToLower(m[1]) {
-		case "videos", "directory", "clip", "clips", "settings", "subscriptions":
-			return ""
+	// A Twitch URL yields its login only when it names a CHANNEL, by the one
+	// URL table every add path follows (utils.ExtractTwitchTarget). VOD, clip
+	// and listing URLs are deliberately NOT taken here — a caller without a
+	// videoId gets an error instead of a wrong job type. The anchored regex
+	// this replaces read /<ch>/v/<id>, /<ch>/schedule?vodID=, /<ch>/videos
+	// and /collections/<id> as a channel's live-wait job.
+	if strings.Contains(strings.ToLower(url), "twitch.tv") {
+		if t := utils.ExtractTwitchTarget(url); t != nil && t.Type == utils.TwitchChannel {
+			return t.Value
 		}
-		return m[1]
 	}
 	return ""
 }

@@ -174,3 +174,59 @@ func TestHlsLive_TwitchStitchedAdSkipped(t *testing.T) {
 		t.Errorf("OnGap fired for ad skip: %+v", gaps)
 	}
 }
+
+// TestHlsLive_FMP4AmazonTitledAdSkippedWithoutSplit drives the Twitch live
+// configuration (StopOnGap) through an fMP4 playlist whose ad break carries
+// its own EXT-X-MAP and NO DATERANGE at all — only the "Amazon" EXTINF
+// titles streamlink also keys on. Classified as ads, the segments are skipped
+// before their init is ever consulted, so the content's init stays the
+// part's and the capture runs straight through. Unclassified, the ad's
+// different init returned ErrInitSegmentChanged on the way in (a needless
+// part split, the ad its own part).
+//
+// Mutant: dropping the title term from IsAd fails this with
+// ErrInitSegmentChanged.
+func TestHlsLive_FMP4AmazonTitledAdSkippedWithoutSplit(t *testing.T) {
+	srv, _, initFetches := fmp4TestServer(t, func(int32) string {
+		var b strings.Builder
+		b.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n")
+		b.WriteString(`#EXT-X-MAP:URI="init-content.mp4"` + "\n")
+		b.WriteString("#EXTINF:1.000,live\nseg0.mp4\n")
+		b.WriteString(`#EXT-X-MAP:URI="init-ad.mp4"` + "\n")
+		b.WriteString("#EXTINF:1.000,Amazon\nad1.mp4\n")
+		b.WriteString("#EXTINF:1.000,Amazon\nad2.mp4\n")
+		b.WriteString(`#EXT-X-MAP:URI="init-content.mp4"` + "\n")
+		b.WriteString("#EXTINF:1.000,live\nseg3.mp4\n")
+		b.WriteString("#EXT-X-ENDLIST\n")
+		return b.String()
+	}, map[string]string{"init-content.mp4": "(C)", "init-ad.mp4": "(AD)"})
+
+	outFile := filepath.Join(t.TempDir(), "video_stream")
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    srv.URL + "/playlist.m3u8",
+		OutputFile: outFile,
+		StartSeq:   -1,
+		IsHls:      true,
+		StopOnGap:  true,
+	})
+	d.delays = fastDelays()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start: %v (ErrInitSegmentChanged here means the Amazon-titled ad was not classified)", err)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "(C)[seg0][seg3]"; got != want {
+		t.Errorf("output = %q, want %q", got, want)
+	}
+	if n := initFetches("init-ad.mp4"); n != 0 {
+		t.Errorf("the ad's init was fetched %d times; a skipped ad must never reach ensureHlsInit", n)
+	}
+	if got := d.CurrentSeq(); got != 4 {
+		t.Errorf("CurrentSeq() = %d, want 4", got)
+	}
+}

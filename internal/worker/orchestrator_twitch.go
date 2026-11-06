@@ -45,6 +45,15 @@ type TwitchVariantInfo struct {
 	QualityPref     string // the job's quality_preference, e.g. "1080p60" or "best"
 	MaxResolution   int    // from global config
 	Prefer60fps     bool   // from global config (prefer_60fps)
+
+	// VodInfoFn re-reads the VOD's VideoMetadata. Set by the worker for VOD
+	// jobs only. It is what a VOD's CheckStaleEnd asks when the playlist
+	// stops growing without ENDLIST (twitchVodEnded), and what
+	// refreshRecordedVodInfo reads once a VodRecording download ends.
+	VodInfoFn func(ctx context.Context) (*twitch.TwitchVodInfo, error)
+	// VodRecording marks a VOD that was still recording when the job was set
+	// up (StreamProcessResult.TwitchVodRecording).
+	VodRecording bool
 }
 
 // newTwitchVariantInfo builds the variant a Twitch capture runs on from the
@@ -390,6 +399,12 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// first segment it writes, and that is the part's chat base — the chat
 	// file of the SAME part directory, so a late report from a downloader
 	// since replaced can only reach the part it belonged to.
+	// A VOD's stale-playlist end check asks VideoMetadata (twitchVodEnded);
+	// a live capture has none — its end is CheckStreamStatus's at every site.
+	var vodStaleEnd func(ctx context.Context) (bool, error)
+	if isVod {
+		vodStaleEnd = func(ctx context.Context) (bool, error) { return twitchVodEnded(ctx, variant) }
+	}
 	createDownloader := func(variantURL, stagingDir string, startSeq int, forceStartSeq bool) (*engine.SegmentDownloader, string) {
 		videoPath := filepath.Join(stagingDir, "video_stream")
 		var onFirstSegment func(time.Time)
@@ -426,6 +441,13 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			Logger:   newScopedLogger(jobCtx.Logger, "jobID", jobCtx.Job.ID, "stream", "video"),
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				if isVod {
+					// A VOD has no live end to confirm: its failure sites
+					// (404/410, fetch/parse escalations, stuck skips, init
+					// exhaustion) keep reading "not ended", so a transient
+					// failure stays an error the job lands in Error with
+					// its staging kept for (TestTwitchVodDownloadFailureLandsInError).
+					// Its VideoMetadata answer ends a stale playlist only,
+					// through CheckStaleEnd below.
 					return false, nil
 				}
 				info, err := variant.CheckStreamFn(ctx)
@@ -434,6 +456,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 				}
 				return !info, nil // Returns true when stream ended (NOT live)
 			},
+			CheckStaleEnd: vodStaleEnd,
 		})
 		return dl, videoPath
 	}
@@ -1388,6 +1411,14 @@ sessionLoop:
 		muxCtx = o.muxRoot()
 	}
 
+	// A VOD that was still recording when the job was set up has ended now:
+	// re-read its length and thumbnail before the chat wait (bounded by the
+	// row's length, resolveVodChatOutcome) and the finalize (whose thumbnail
+	// fallback reads the reloaded row) use them.
+	if isVod && variant.VodRecording {
+		o.refreshRecordedVodInfo(finalCtx, jobCtx, variant)
+	}
+
 	// Signal chat to finish BEFORE muxing the final part: the drain flushes
 	// the tail of the chat and runs emote enrichment, and the final part's
 	// chat file is copied beside its video by the mux below — copying before
@@ -1477,6 +1508,89 @@ sessionLoop:
 		VideoPath: videoPath,
 	}
 	return o.muxAndFinalize(muxCtx, jobCtx, dlResult)
+}
+
+// wireTwitchVodInfo gives a VOD capture its VideoMetadata re-read: the
+// engine's end check (twitchVodEnded) and the post-download refresh
+// (refreshRecordedVodInfo) both call it, keyed by the job's own VOD ID.
+// getVodInfo is twitch.Service.GetVodInfo in production. A live result is
+// left alone: its end is the stream's, which CheckStreamFn answers.
+func wireTwitchVodInfo(variant *TwitchVariantInfo, job *database.Job, result *StreamProcessResult,
+	getVodInfo func(ctx context.Context, vodID string) (*twitch.TwitchVodInfo, error)) {
+	if !result.IsVod || getVodInfo == nil {
+		return
+	}
+	vodID := strings.TrimPrefix(job.VideoID, "tw_v")
+	variant.VodInfoFn = func(ctx context.Context) (*twitch.TwitchVodInfo, error) {
+		return getVodInfo(ctx, vodID)
+	}
+	variant.VodRecording = result.TwitchVodRecording
+}
+
+// twitchVodEnded is a VOD's answer to the engine's CheckStaleEnd, asked only
+// when the playlist has stopped growing for a stale window without ENDLIST —
+// never at the engine's failure sites, whose "ended" would turn a transient
+// 404, 5xx run or dead segment into a truncated Finished archive (a VOD's
+// segments stay fetchable after its broadcast ends, so those sites keep
+// CheckStreamStatus's flat "not ended").
+// It used to be a flat "not ended", so a VOD whose playlist never gained
+// ENDLIST — a broadcast that ended but whose VOD Twitch left unfinalized —
+// reloaded forever and held its download slot. It now asks VideoMetadata:
+// ended once the video is no longer recording (twitch.TwitchVodInfo
+// IsRecording, yt-dlp's 404_processing + ARCHIVE reading, twitch.py
+// 513-522), so the stale branch finalizes what was downloaded. That is the
+// outcome ffmpeg's hls demuxer reaches by its max_reload give-up (100 reloads
+// without a new segment), which is how yt-dlp downloads a recording VOD, but
+// without cutting off a VOD that is still growing behind a stalled CDN. A
+// failed read is no verdict: the engine keeps reloading and asks again on the
+// next stale window. With no VodInfoFn wired the answer stays "not ended".
+func twitchVodEnded(ctx context.Context, variant *TwitchVariantInfo) (bool, error) {
+	if variant.VodInfoFn == nil {
+		return false, nil
+	}
+	info, err := variant.VodInfoFn(ctx)
+	if err != nil {
+		return false, err
+	}
+	return info != nil && !info.IsRecording, nil
+}
+
+// refreshRecordedVodInfo re-reads VideoMetadata for a VOD that was still
+// recording when its job was set up, once its download has ended: the length
+// stored then was the length so far, and no thumbnail was stored at all
+// (Twitch served only its processing placeholder). The fresh values are
+// written to the row, which is what both consumers read: the VOD chat wait
+// bounds itself on the row's length_seconds (resolveVodChatOutcome re-reads
+// it) and muxAndFinalize reloads the row into jobCtx.Job before the
+// thumbnail fallback reads ThumbnailURL. The jobCtx.Job sync is defensive —
+// it is what each of them falls back to when that re-read fails. A failed
+// read, or one still answering with the
+// placeholder, keeps what the row has — the archive is not held for its
+// metadata.
+func (o *DownloadOrchestrator) refreshRecordedVodInfo(ctx context.Context, jobCtx *JobContext, variant *TwitchVariantInfo) {
+	if variant.VodInfoFn == nil {
+		return
+	}
+	info, err := variant.VodInfoFn(ctx)
+	if err != nil || info == nil {
+		o.logger.Warn("could not re-read the recorded Twitch VOD's metadata; keeping the values from its start",
+			"jobID", jobCtx.Job.ID, "err", err)
+		return
+	}
+	updates := map[string]any{}
+	if info.ThumbnailURL != "" {
+		updates["thumbnail_url"] = info.ThumbnailURL
+	}
+	if info.Duration > 0 {
+		updates["length_seconds"] = info.Duration
+	}
+	if len(updates) == 0 {
+		return
+	}
+	o.db.UpdateJobFields(jobCtx.Job.ID, updates)
+	syncTwitchJobMetadata(jobCtx.Job, updates)
+	o.logger.Info("re-read the recorded Twitch VOD's metadata",
+		"jobID", jobCtx.Job.ID, "lengthSeconds", info.Duration, "thumbnail", info.ThumbnailURL != "")
 }
 
 // qualityInfoFromVariant converts a selected HLS variant into the

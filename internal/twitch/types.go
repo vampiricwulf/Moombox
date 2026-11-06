@@ -56,6 +56,14 @@ type TwitchVodInfo struct {
 	CreatedAt          string `json:"createdAt,omitempty"`
 	ViewCount          int    `json:"viewCount,omitempty"`
 	GameCategory       string `json:"gameCategory,omitempty"`
+	// IsRecording reports a past broadcast that is still being recorded —
+	// the channel is live and this is its growing archive. yt-dlp's reading
+	// (_extract_info_gql, twitch.py 513-522): previewThumbnailURL is Twitch's
+	// /404_processing_<size>.png placeholder AND broadcastType is ARCHIVE. A
+	// highlight shows the same placeholder while it is being processed and is
+	// not recording (yt-dlp #14455). While it is true, Duration is the length
+	// so far and the playlist has no ENDLIST yet.
+	IsRecording bool `json:"isRecording,omitempty"`
 }
 
 // TwitchChatMessage represents a single Twitch chat message.
