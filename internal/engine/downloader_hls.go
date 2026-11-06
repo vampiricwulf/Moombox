@@ -756,11 +756,8 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			d.bytesWritten.Add(int64(n))
 			d.currentSeq.Add(1)
 			d.lastSegTime.StoreNow()
-			if d.reportFirstSegment {
-				d.reportFirstSegment = false
-				if d.opts.OnFirstSegment != nil {
-					d.opts.OnFirstSegment(seg.ProgramDateTime)
-				}
+			if d.firstMediaWritten(hlsSeq) && d.opts.OnFirstSegment != nil {
+				d.opts.OnFirstSegment(seg.ProgramDateTime)
 			}
 			if d.opts.OnSegmentWritten != nil && !seg.ProgramDateTime.IsZero() {
 				d.opts.OnSegmentWritten(seg.ProgramDateTime, seg.Duration)

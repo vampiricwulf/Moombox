@@ -27,6 +27,7 @@ import (
 // took the whole process down — every other job's capture with it — where
 // the live loop's "runDownloaders panic" error was meant to end this one.
 func (o *DownloadOrchestrator) runDownloaders(ctx context.Context, result *DownloadResult) error {
+	recordStartsOf(result)
 	g, gctx := errgroup.WithContext(ctx)
 
 	start := func(name string, d *engine.SegmentDownloader) {

@@ -346,6 +346,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		}
 		d.bytesWritten.Add(int64(n))
 		d.lastSegTime.StoreNow()
+		d.firstMediaWritten(writeSeq)
 		consecutiveGoneErrors = 0
 		sameHeadRetryDelay = 0
 		sameSegRetries = 0

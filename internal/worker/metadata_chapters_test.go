@@ -37,22 +37,31 @@ import (
 // six-second capture: a Twitch VOD's staged chapters, and a YouTube VOD's
 // from the chapter source, come out of the mux as the archive's chapters,
 // fitted to the media (the last one ends at six seconds, one past the end is
-// gone). A YouTube job that is not a VOD is not asked.
+// gone). A live YouTube capture is asked only when its recording is known to
+// have begun at sq=0 (recordingStartFile, owner decision FE-18): it then
+// shares the VOD's timeline. One that joined late, or whose start was never
+// recorded, is not asked.
 //
 // Mutants: muxAndFinalize passing "" for the chapters; the staged list not
-// read; the IsVod gate removed (the live YouTube job is asked).
+// read; the from-start gate removed (the late and unknown live jobs are
+// asked); the from-start arm removed, back to IsVod alone (the sq=0 live job
+// is not); recordedFromStart taking any recorded start (the late job is
+// asked).
 func TestMuxAndFinalizeEmbedsTheChapters(t *testing.T) {
 	ffmpegPath, _ := requireFFmpegTools(t)
 	for _, tc := range []struct {
 		name      string
 		platform  string
 		isVod     bool
+		startSeq  *int // the recording's recorded start; nil records none
 		staged    []utils.Chapter
 		wantTitle []string
 	}{
-		{"twitch VOD", "twitch", true, []utils.Chapter{{StartMs: 0, EndMs: 2000, Title: "Chatting"}, {StartMs: 2000, EndMs: 60_000, Title: "Game"}, {StartMs: 90_000, Title: "Past"}}, []string{"Chatting", "Game"}},
-		{"youtube VOD", "youtube", true, nil, []string{"Intro", "Main"}},
-		{"youtube live capture", "youtube", false, nil, nil},
+		{"twitch VOD", "twitch", true, nil, []utils.Chapter{{StartMs: 0, EndMs: 2000, Title: "Chatting"}, {StartMs: 2000, EndMs: 60_000, Title: "Game"}, {StartMs: 90_000, Title: "Past"}}, []string{"Chatting", "Game"}},
+		{"youtube VOD", "youtube", true, nil, nil, []string{"Intro", "Main"}},
+		{"youtube live capture from sq=0", "youtube", false, new(0), nil, []string{"Intro", "Main"}},
+		{"youtube live capture that joined late", "youtube", false, new(1234), nil, nil},
+		{"youtube live capture of unknown start", "youtube", false, nil, nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			asked := false
@@ -77,13 +86,16 @@ func TestMuxAndFinalizeEmbedsTheChapters(t *testing.T) {
 			jobCtx.Filename = "a-job"
 			video := filepath.Join(jobCtx.StagingDir, "video.mp4")
 			writeMuxFixture(t, ffmpegPath, video, 6)
+			if tc.startSeq != nil {
+				noteRecordingStart(video, *tc.startSeq)
+			}
 			if err := utils.WriteStagedChapters(jobCtx.StagingDir, tc.staged); err != nil {
 				t.Fatal(err)
 			}
 			if err := o.muxAndFinalize(context.Background(), jobCtx, &DownloadResult{HasVideo: true, VideoPath: video}); err != nil {
 				t.Fatalf("muxAndFinalize: %v", err)
 			}
-			if asked != (tc.platform == "youtube" && tc.isVod) {
+			if want := tc.platform == "youtube" && tc.wantTitle != nil; asked != want {
 				t.Errorf("the YouTube chapter source asked: %v", asked)
 			}
 			titles, lastEnd := probeChapters(t, filepath.Join(jobCtx.OutputDir, "a-job.mp4"))

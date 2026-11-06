@@ -973,6 +973,7 @@ Callback fields:
 - `OnProgress func(p DownloadProgress)`: Called per segment/chunk with progress data.
 - `OnGap func(g DownloadGap)`: Called when a gap (missing segment) is detected.
 - `OnFinish func()`: Called when download completes.
+- `OnFirstMedia func(seq int)`: Called once, from the live DASH loop (its catch-up writes included) and the live HLS loop, with the sequence of the first media segment written into a file the downloader opened empty — never on a resume or an append. `runDownloaders` records it beside the staged file (`recordingStartFile`, `recording-start.json`, `internal/worker/recording_start.go`), which is how a finalize knows a live YouTube capture began at sq=0 (data-and-storage.md § Archive Chapters; `TestDashLiveReportsTheFirstWrittenSequence`, `TestHlsLiveReportsTheFirstWrittenSequence`, `TestRunDownloadersRecordsWhereEachRecordingBegins`).
 
 ### monitor.FeedMonitor / DecapiMonitor / TwitchMonitor
 
