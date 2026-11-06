@@ -2660,6 +2660,140 @@ sl-progress-bar {
     outline-offset: -2px;
 }
 
+/* Chapter strip (under the video) and chapter list (GET /api/jobs/{id}/chapters).
+   The strip spans the video column, as the segment indicator does, so its
+   percentages line up with the video element's own width; each marker is a
+   button whose hit area is wider than the 2px tick it draws. */
+.chapter-strip {
+    position: relative;
+    height: 12px;
+    margin: 4px 0 0;
+    border-radius: 2px;
+    background: var(--sl-color-neutral-200);
+    flex-shrink: 0;
+}
+
+.chapter-strip[hidden],
+.player-chapters[hidden] {
+    display: none;
+}
+
+.chapter-strip-marker {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 12px;
+    margin-left: -6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+.chapter-strip-marker::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 5px;
+    width: 2px;
+    background: var(--sl-color-neutral-600);
+}
+
+.chapter-strip-marker:hover::before,
+.chapter-strip-marker.active::before {
+    background: var(--sl-color-primary-600);
+}
+
+.chapter-strip-marker:focus-visible {
+    outline: 2px solid var(--sl-color-primary-500);
+    outline-offset: 0;
+}
+
+.player-chapters {
+    flex-shrink: 0;
+    margin-top: var(--sl-spacing-x-small);
+}
+
+.player-chapters::part(content) {
+    padding: 0;
+}
+
+.chapter-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 12rem;
+    overflow-y: auto;
+}
+
+.chapter-row {
+    display: flex;
+    gap: var(--sl-spacing-small);
+    width: 100%;
+    padding: var(--sl-spacing-2x-small) var(--sl-spacing-small);
+    border: 0;
+    background: transparent;
+    color: var(--sl-color-neutral-800);
+    font: inherit;
+    font-size: var(--sl-font-size-small);
+    text-align: left;
+    cursor: pointer;
+}
+
+.chapter-row:hover {
+    background: var(--sl-color-neutral-100);
+}
+
+.chapter-row.active {
+    background: var(--sl-color-primary-100);
+    color: var(--sl-color-primary-800);
+    font-weight: var(--sl-font-weight-semibold);
+}
+
+.chapter-row:focus-visible {
+    outline: 2px solid var(--sl-color-primary-500);
+    outline-offset: -2px;
+}
+
+.chapter-row-time {
+    flex-shrink: 0;
+    min-width: 4.5em;
+    font-family: var(--sl-font-mono);
+    color: var(--sl-color-neutral-600);
+}
+
+.chapter-row-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Touch: a taller strip and taller rows, so a finger can hit a marker. */
+@media (max-width: 768px), (hover: none) {
+    .chapter-strip {
+        height: 20px;
+    }
+
+    .chapter-strip-marker {
+        width: 20px;
+        margin-left: -10px;
+    }
+
+    .chapter-strip-marker::before {
+        left: 9px;
+    }
+
+    .chapter-row {
+        padding: var(--sl-spacing-x-small) var(--sl-spacing-small);
+    }
+
+    .chapter-list {
+        max-height: 9rem;
+    }
+}
+
 /* Client token rows (settings > network > security) */
 .client-token-row {
     display: flex;

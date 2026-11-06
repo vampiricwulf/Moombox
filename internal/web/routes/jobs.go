@@ -294,46 +294,9 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		if job.Filename == "" && job.OutputFile == "" {
-			jsonError(rw, "no output file", http.StatusNotFound)
-			return
-		}
-
-		// Build file path from output directory + relative filename
-		outputDir := resolveOutputDir(job, store)
-
-		filename := job.Filename
-		if filename == "" {
-			filename = job.OutputFile
-		}
-
-		filePath, err := filepath.Abs(filepath.Join(outputDir, filename))
-		if err != nil {
-			jsonError(rw, "invalid path", http.StatusBadRequest)
-			return
-		}
-
-		// Fallback: if file not found at outputDir+filename, try outputFile
-		// directly (it stores the full relative path from CWD).
-		if _, err := os.Stat(filePath); os.IsNotExist(err) && job.OutputFile != "" {
-			if alt, err2 := filepath.Abs(job.OutputFile); err2 == nil {
-				if _, err3 := os.Stat(alt); err3 == nil {
-					filePath = alt
-				}
-			}
-		}
-
-		// Path traversal guard: resolve symlinks before prefix check
-		resolvedPath, ok := validatePathTraversal(filePath, outputDir)
-		if !ok {
-			jsonError(rw, "access denied", http.StatusForbidden)
-			return
-		}
-		filePath = resolvedPath
-
-		// Check file existence before serving (match TS: 404 if file not present)
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			jsonError(rw, "video file not found", http.StatusNotFound)
+		filePath, msg, code := jobVideoPath(job, store)
+		if code != 0 {
+			jsonError(rw, msg, code)
 			return
 		}
 
@@ -1570,6 +1533,55 @@ func loadJob(rw http.ResponseWriter, db *database.Database, jobID string) (*data
 		return nil, false
 	}
 	return job, true
+}
+
+// jobVideoPath resolves a single-file job's archive on disk, the file
+// GET /api/jobs/{id}/video serves: Filename under the job's output directory,
+// else OutputFile as stored (a full path relative to the working directory),
+// behind the same symlink-resolving containment guard. A non-zero code is the
+// refusal the video route answers with, and msg its reason. Shared with
+// GET /api/jobs/{id}/chapters, so the chapters are read from exactly the file
+// the player plays.
+func jobVideoPath(job *database.Job, store *config.Store) (path, msg string, code int) {
+	if job.Filename == "" && job.OutputFile == "" {
+		return "", "no output file", http.StatusNotFound
+	}
+
+	// Build file path from output directory + relative filename
+	outputDir := resolveOutputDir(job, store)
+
+	filename := job.Filename
+	if filename == "" {
+		filename = job.OutputFile
+	}
+
+	filePath, err := filepath.Abs(filepath.Join(outputDir, filename))
+	if err != nil {
+		return "", "invalid path", http.StatusBadRequest
+	}
+
+	// Fallback: if file not found at outputDir+filename, try outputFile
+	// directly (it stores the full relative path from CWD).
+	if _, err := os.Stat(filePath); os.IsNotExist(err) && job.OutputFile != "" {
+		if alt, err2 := filepath.Abs(job.OutputFile); err2 == nil {
+			if _, err3 := os.Stat(alt); err3 == nil {
+				filePath = alt
+			}
+		}
+	}
+
+	// Path traversal guard: resolve symlinks before prefix check
+	resolvedPath, ok := validatePathTraversal(filePath, outputDir)
+	if !ok {
+		return "", "access denied", http.StatusForbidden
+	}
+	filePath = resolvedPath
+
+	// Check file existence before serving (match TS: 404 if file not present)
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return "", "video file not found", http.StatusNotFound
+	}
+	return filePath, "", 0
 }
 
 // resolveOutputDir resolves the effective output directory for a job's

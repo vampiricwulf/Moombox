@@ -74,6 +74,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `open-folder.test.mjs` | Open Folder surfaces a refusal |
 | `password-forms.test.mjs` | the wizard's External Access Password and Settings' Set Password: the bounds the login enforces, checked before posting; the password sent as typed; the warning while it starts or ends with a space |
 | `player.test.mjs` | `player.js`: selection, the chat sidebar and offset, seeking, search, the overlay; a few pure helper tests |
+| `player-chapters.test.mjs` | `player.js`'s chapters: the marker strip under the video and the chapter list, laid out on the global timeline, seeking on click, the current chapter highlighted, nothing drawn for none or a failed fetch, and a slow fetch never holding up playback |
 | `release-notes-toast.test.mjs` | a failed release-notes fetch toasts rather than blocking the tab |
 | `render-diff.test.mjs` | a repeated `job_update` makes no DOM write in the details dialog or the status bar |
 | `resolution-picker.test.mjs` | the Max Resolution picker in Settings and the setup wizard; its preset-mapping tests are pure |

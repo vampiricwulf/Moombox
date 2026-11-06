@@ -219,6 +219,11 @@ function defineShoelaceStubs(window) {
     get value() { return this._value ?? this.getAttribute("value") ?? ""; }
     set value(v) { this._value = v == null ? "" : String(v); }
   }
+  class SlDetails extends HTMLElement {
+    // `open` — the chapter list collapses itself when a job has no chapters.
+    get open() { return this._open ?? this.hasAttribute("open"); }
+    set open(v) { this._open = !!v; }
+  }
   // No behaviour of their own; they exist so the markup parses into real
   // elements with the right tagName (the Space guard tests tagName).
   class Passive extends HTMLElement {}
@@ -228,6 +233,7 @@ function defineShoelaceStubs(window) {
     "sl-button": class extends Passive {}, "sl-icon-button": class extends Passive {},
     "sl-icon": class extends Passive {}, "sl-tab-panel": class extends Passive {},
     "sl-dialog": class extends Passive {}, "sl-switch": class extends Passive {},
+    "sl-details": SlDetails,
   };
   for (const [tag, cls] of Object.entries(defs)) window.customElements.define(tag, cls);
 }
@@ -283,6 +289,7 @@ const ZERO = { w: 0, h: 0, left: 0, top: 0 };
  * @param {object} [opts.chat]        GET /api/jobs/:id/chat fallback
  * @param {object} [opts.chatById]
  * @param {object} [opts.segmentChatById]  GET /api/jobs/:id/segments/:i/chat, keyed "id/i"
+ * @param {object} [opts.chaptersById]  GET /api/jobs/:id/chapters per id (default: no chapters)
  * @param {object} [opts.geom]        layout overrides (see DEFAULT_GEOM; `msgH`
  *                                    defaults to `rowH` when left unset)
  * @param {object} [opts.storage]     localStorage seed, applied BEFORE initPlayer
@@ -462,6 +469,8 @@ export function makePlayer(opts = {}) {
       (opts.chatById || {})[params.id] ?? opts.chat ?? response({ status: 404 }))
     .on("GET /api/jobs/:id/segments/:i/chat", ({ params }) =>
       (opts.segmentChatById || {})[`${params.id}/${params.i}`] ?? response({ status: 404 }))
+    .on("GET /api/jobs/:id/chapters", ({ params }) =>
+      (opts.chaptersById || {})[params.id] ?? { chapters: [] })
     .on("PUT /api/jobs/:id/chat-offset", () => ({}))
     .on("DELETE /api/jobs/:id/chat-offset", () => ({}))
     .on("PUT /api/jobs/:id/resume-position", () => ({}))
