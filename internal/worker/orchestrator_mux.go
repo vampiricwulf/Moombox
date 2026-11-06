@@ -1103,13 +1103,19 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// The archive's chapters (owner decision D23): this single-file shape is
 	// the one that carries them.
 	// A re-finalize of the same recording keeps a chapter import (owner
-	// decision CJ-2): read from beside the archive the row names (the
-	// template may now resolve elsewhere) or the one this writes.
+	// decision CJ-2): read only from beside the archive the row names (the
+	// template may now resolve elsewhere; write moves it to the new name).
+	// Never from beside the name this finalize writes when the row names
+	// none: a row with no output_file never had an archive, so no import of
+	// its own can exist (chapterTargetFor needs one), and a list found at
+	// that name is another recording's left behind at a reused name (a
+	// deleted row's files kept, a template that resolves alike) — dropped
+	// below, as before CJ-2.
 	var priorArchive string
 	if jobCtx.Job != nil {
 		priorArchive = ArchiveSidecarPath(jobCtx.Job.OutputFile, utils.ChaptersSidecarSuffix)
 	}
-	kept := keptImportFor(jobCtx, o.logger, priorArchive, ArchiveSidecarPath(outputFile, utils.ChaptersSidecarSuffix))
+	kept := keptImportFor(jobCtx, o.logger, priorArchive)
 	chaptersPath := o.prepareArchiveChapters(ctx, jobCtx, videoPath, audioPath, kept)
 	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputFile, chaptersPath)
 	if err != nil {
