@@ -400,21 +400,62 @@ func TestChapterImportChordsFromTheKeyboard(t *testing.T) {
 
 // TestChapterImportPrefillsTheJoinPoint is owner decision CJ-3 in the A C
 // overlay: the opening preview's default offset — a late-joined live
-// capture's join point, negated — fills the empty offset field, and the
-// overlay says where it came from, as the Web dialog does.
+// capture's join point, negated — fills the empty offset field as a signed
+// clock (owner decision CK-2: "-1:23:45", not "-5025"), and the overlay says
+// where it came from, as the Web dialog does.
 //
-// Mutants: SetPreview not filling the field (empty); the note not drawn.
+// Mutants: SetPreview not filling the field (empty); the field filled from
+// the seconds ("-5025"); the note not drawn.
 func TestChapterImportPrefillsTheJoinPoint(t *testing.T) {
 	r := newChapterRig(t)
 	r.previewFn = func(text, offset string) ChapterImportView {
-		return ChapterImportView{Error: "No timestamps found", DefaultOffsetSeconds: -5025, DefaultOffsetNote: "joined 1:23:45 in"}
+		return ChapterImportView{Error: "No timestamps found", DefaultOffsetSeconds: -5025,
+			DefaultOffsetText: "-1:23:45", DefaultOffsetNote: "joined 1:23:45 in"}
 	}
 	r.app.dispatchAction("A C", r.job)
 	previewNow(t, r.app)
-	if got := r.app.chapterDlg.offset.Value(); got != "-5025" {
-		t.Errorf("offset field = %q, want the pre-filled -5025", got)
+	if got := r.app.chapterDlg.offset.Value(); got != "-1:23:45" {
+		t.Errorf("offset field = %q, want the pre-filled -1:23:45", got)
 	}
 	if v := r.app.chapterDlg.View(); !strings.Contains(v, "Pre-filled: joined 1:23:45 in") {
 		t.Errorf("the overlay does not say where the offset came from:\n%s", v)
+	}
+}
+
+// TestChapterImportOffsetNoteVariants: the overlay always says where the
+// offset came from (owner decision CK-2) — after "Pre-filled: " when the
+// field was pre-filled (a capture from the start and a VOD at "0:00"), and
+// bare when the start is unknown and the field is left empty for the
+// operator.
+//
+// Mutants: the note drawn only for a non-zero offset (the from-start and
+// VOD notes missing); "Pre-filled: " in front of the unknown note; the
+// field filled from DefaultOffsetSeconds ("0", not "0:00").
+func TestChapterImportOffsetNoteVariants(t *testing.T) {
+	for _, c := range []struct {
+		name, text, note, wantField, wantLine, notLine string
+	}{
+		{"from the start", "0:00", "recorded from the start", "0:00", "Pre-filled: recorded from the start", ""},
+		{"VOD", "0:00", "VOD", "0:00", "Pre-filled: VOD", ""},
+		{"unknown", "", "start unknown — enter it by hand", "", "start unknown — enter it by hand", "Pre-filled: start unknown"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newChapterRig(t)
+			r.previewFn = func(text, offset string) ChapterImportView {
+				return ChapterImportView{Error: "No timestamps found", DefaultOffsetText: c.text, DefaultOffsetNote: c.note}
+			}
+			r.app.dispatchAction("A C", r.job)
+			previewNow(t, r.app)
+			if got := r.app.chapterDlg.offset.Value(); got != c.wantField {
+				t.Errorf("offset field = %q, want %q", got, c.wantField)
+			}
+			v := r.app.chapterDlg.View()
+			if !strings.Contains(v, c.wantLine) {
+				t.Errorf("the overlay does not show %q:\n%s", c.wantLine, v)
+			}
+			if c.notLine != "" && strings.Contains(v, c.notLine) {
+				t.Errorf("the overlay shows %q:\n%s", c.notLine, v)
+			}
+		})
 	}
 }

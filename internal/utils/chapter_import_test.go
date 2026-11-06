@@ -319,7 +319,11 @@ func TestParseChapterOffset(t *testing.T) {
 		"1:02:03":  3723000,
 		"-1:02:03": -3723000,
 		"−0:05":    -5000,
-		"－１：００":    0, // the full-width minus is not a sign: refused below
+		// A clock with a fraction, as the pre-filled offset is written
+		// (FormatChapterOffset, owner decision CK-2).
+		"-1:23:45.033": -5025033,
+		"-3:28.5":      -208500,
+		"－１：００":        0, // the full-width minus is not a sign: refused below
 	} {
 		got, err := ParseChapterOffset(in)
 		if in == "－１：００" {
@@ -335,9 +339,37 @@ func TestParseChapterOffset(t *testing.T) {
 	if got, err := ParseChapterOffset("１：００"); err != nil || got != 60000 {
 		t.Errorf("full-width clock: %d %v", got, err)
 	}
-	for _, bad := range []string{"abc", "1:2:3", "--5", "1e3", "5s", "1:60"} {
+	for _, bad := range []string{"abc", "1:2:3", "--5", "1e3", "5s", "1:60", "1:00.", "1:00.1234", "1:00.5.5", "1:00.-5"} {
 		if _, err := ParseChapterOffset(bad); !errors.Is(err, ErrBadChapterOffset) {
 			t.Errorf("%q: want ErrBadChapterOffset, got %v", bad, err)
+		}
+	}
+}
+
+// TestFormatChapterOffset pins the pre-filled offset's clock (owner
+// decision CK-2): signed, H:MM:SS from an hour up and M:SS under one, with
+// milliseconds only when the value has a fraction — and every one reads back
+// through ParseChapterOffset to the value it was made from.
+//
+// Mutants: the sign dropped ("1:23:45"); the fraction dropped
+// ("-3:28"); hours always written ("-0:03:28.033"); ParseChapterOffset
+// refusing a clock's fraction (the round trip fails).
+func TestFormatChapterOffset(t *testing.T) {
+	for ms, want := range map[int64]string{
+		-5025000: "-1:23:45",
+		-5025033: "-1:23:45.033",
+		-208033:  "-3:28.033",
+		-208500:  "-3:28.500",
+		0:        "0:00",
+		90000:    "1:30",
+		3600000:  "1:00:00",
+		-59999:   "-0:59.999",
+	} {
+		if got := FormatChapterOffset(ms); got != want {
+			t.Errorf("FormatChapterOffset(%d) = %q, want %q", ms, got, want)
+		}
+		if back, err := ParseChapterOffset(want); err != nil || back != ms {
+			t.Errorf("ParseChapterOffset(%q) = %d %v, want %d", want, back, err, ms)
 		}
 	}
 }
