@@ -62,7 +62,7 @@ func TestGapFillSweepRunsOnAKick(t *testing.T) {
 	w.orchestrator.gapFillKick <- struct{}{}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if g, _ := f.db.GetGapFill("tw_1"); g == nil {
+		if f.outcome(t) != nil {
 			break
 		}
 		if time.Now().After(deadline) {

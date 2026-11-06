@@ -163,6 +163,10 @@ func TestGapFillSweepSurvivesAPanic(t *testing.T) {
 	if f.row(t) != nil {
 		t.Error("the plan whose look panicked was kept")
 	}
+	// Its job's details say the archive was kept, and why (PR-R5).
+	if o := f.outcome(t); o == nil || o.State != GapFillKept || o.Reason == "" {
+		t.Errorf("outcome %+v, want kept with a reason", o)
+	}
 	if len(looked) != 2 {
 		t.Errorf("%d looks, want the panicking plan and the next one", len(looked))
 	}
@@ -392,6 +396,12 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 			}
 			if strings.Join(kinds, ",") != tc.wantKinds || p.Login != "streamer" || p.VariantName != "chunked" {
 				t.Errorf("plan %+v, want spans %s of streamer's chunked capture", p, tc.wantKinds)
+			}
+			// Owner decision PR-R6: the end is known only where the capture
+			// reached its finalize and only its mux failed — no tail, not
+			// cancelled (twitchMuxEndKnown).
+			if wantEnd := !strings.Contains(tc.wantKinds, gapKindTail) && !tc.cancelled; p.EndKnown != wantEnd {
+				t.Errorf("plan.EndKnown = %v, want %v", p.EndKnown, wantEnd)
 			}
 		})
 	}

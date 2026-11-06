@@ -332,7 +332,23 @@ func (w *DownloadWorker) twitchMuxGapFillPlan(prior, job *database.Job, jobCtx *
 	w.readConfig(func(c *config.MoomboxConfig) {
 		variant.GapFillAdBreaks = twitchChannelGapFillAdBreaks(c.Channels, login)
 	})
-	return newTwitchGapFillPlan(job, variant, stagedPartCoverages(jobCtx.StagingDir), twitchMuxTailOpen(prior), time.Now())
+	tailOpen := twitchMuxTailOpen(prior)
+	return newTwitchGapFillPlan(job, variant, stagedPartCoverages(jobCtx.StagingDir), tailOpen, twitchMuxEndKnown(prior, tailOpen), time.Now())
+}
+
+// twitchMuxEndKnown reports whether a live Twitch row muxed from its staging
+// saw its broadcast end, so the gap-fill can measure the VOD's drift against
+// the last part's coverage (owner decision PR-R6): an Error row whose tail
+// twitchMuxTailOpen closed — by stream_end_time, the capture having reached
+// ExecuteTwitch's finalize with only its mux failing. A Cancelled row (or one
+// whose Mux after a Cancel failed) closed its tail where the operator stopped
+// it, not where the broadcast ended, and an open tail is an end not seen. The
+// one row read wrong is twitchMuxTailOpen's own: an outage finalize whose mux
+// failed, which stream_end_time does not tell apart — its fill is skipped as
+// drifted when the outage cost the capture more than gapFillDriftLimit of the
+// broadcast's end.
+func twitchMuxEndKnown(prior *database.Job, tailOpen bool) bool {
+	return !tailOpen && prior.Status == database.StatusError && prior.ParkReason != database.ParkReasonMuxAfterCancel
 }
 
 // twitchMuxTailOpen reports whether a live Twitch row muxed from its staging

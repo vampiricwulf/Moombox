@@ -244,7 +244,27 @@ func (f *gapFillFixture) plan(t *testing.T, parts []stagedPartCoverage, spans []
 	}
 }
 
+// row is tw_1's pending plan, nil when it has none: no row, or a row that
+// records how its fill ended (outcome).
 func (f *gapFillFixture) row(t *testing.T) *twitchGapFillPlan {
+	t.Helper()
+	p := f.stored(t)
+	if p == nil || p.Outcome != nil {
+		return nil
+	}
+	return p
+}
+
+// outcome is how tw_1's fill ended, nil while it has not (or has no row).
+func (f *gapFillFixture) outcome(t *testing.T) *gapFillOutcome {
+	t.Helper()
+	if p := f.stored(t); p != nil {
+		return p.Outcome
+	}
+	return nil
+}
+
+func (f *gapFillFixture) stored(t *testing.T) *twitchGapFillPlan {
 	t.Helper()
 	g, err := f.db.GetGapFill("tw_1")
 	if err != nil || g == nil {
@@ -265,10 +285,15 @@ func (f *gapFillFixture) row(t *testing.T) *twitchGapFillPlan {
 // part, untouched, chat and all. The muted segment is used and logged; the
 // plan is dropped.
 //
+// output_file stays on the recording (owner decision PR-R5), and the row
+// records the fill as filled, one span.
+//
 // Mutants: the recovered part appended after the archive (time order lost);
 // the archive's own row not synthesized (the job loses its recording); the
 // muted log line removed; the variant matched by selection instead of name
-// (the 720p60 rendition is cut).
+// (the 720p60 rendition is cut); output_file set to the first part in time
+// order (the recovered opening becomes the main file); the outcome not
+// recorded.
 func TestGapFillInsertsTheLateStartAsAPart(t *testing.T) {
 	f := newGapFillFixture(t)
 	f.plan(t, []stagedPartCoverage{covPart(0, 25*time.Second, time.Minute, false)},
@@ -298,8 +323,13 @@ func TestGapFillInsertsTheLateStartAsAPart(t *testing.T) {
 	if data, _ := os.ReadFile(f.archive); string(data) != "RECORDED" {
 		t.Errorf("the recording changed: %q", data)
 	}
-	if job.OutputFile != wantRec || job.LengthSeconds == nil || *job.LengthSeconds != 3030 {
-		t.Errorf("job output_file %q, length %v; want the first part and the sum", job.OutputFile, job.LengthSeconds)
+	// Owner decision PR-R5: output_file stays on the recording; the
+	// recovered opening is an extra part, never the main file.
+	if job.OutputFile != f.archive || job.LengthSeconds == nil || *job.LengthSeconds != 3030 {
+		t.Errorf("job output_file %q, length %v; want the recording and the sum", job.OutputFile, job.LengthSeconds)
+	}
+	if o := f.outcome(t); o == nil || o.State != GapFillFilled || o.Spans != 1 || o.Reason != "" {
+		t.Errorf("outcome %+v, want filled, one span", o)
 	}
 	if _, logged := f.log.field("gap-fill: a recovered span uses muted VOD segments — its video is intact, its audio silent where Twitch muted it", "mutedSegments"); !logged {
 		t.Error("the muted span was not logged")
@@ -497,14 +527,14 @@ func TestNewTwitchGapFillPlan(t *testing.T) {
 	v := &TwitchVariantInfo{Name: "chunked", QualityPref: "1080p60", ChannelLogin: "streamer"}
 	late := []stagedPartCoverage{covPart(0, 5*time.Minute, time.Hour, false)}
 	now := gapStart.Add(time.Hour)
-	p := newTwitchGapFillPlan(job, v, late, false, now)
+	p := newTwitchGapFillPlan(job, v, late, false, false, now)
 	if p == nil || p.VariantName != "chunked" || p.QualityPref != "1080p60" || p.Deadline != now.Add(24*time.Hour).Format(time.RFC3339) || len(p.Spans) != 1 {
 		t.Fatalf("plan %+v", p)
 	}
-	if newTwitchGapFillPlan(job, v, []stagedPartCoverage{covPart(0, 10*time.Second, time.Hour, false)}, false, now) != nil {
+	if newTwitchGapFillPlan(job, v, []stagedPartCoverage{covPart(0, 10*time.Second, time.Hour, false)}, false, false, now) != nil {
 		t.Error("a capture that lacks nothing got a plan")
 	}
-	if newTwitchGapFillPlan(job, &TwitchVariantInfo{Name: "chunked"}, late, false, now) != nil {
+	if newTwitchGapFillPlan(job, &TwitchVariantInfo{Name: "chunked"}, late, false, false, now) != nil {
 		t.Error("a capture without a channel login got a plan")
 	}
 }

@@ -1611,11 +1611,13 @@ sessionLoop:
 	// The gap-fill plan (owner decision D17): read from the parts' coverage
 	// while the staging still holds it, kept once the job is Finished. A
 	// broadcast that ended while the capture was cut off (outageFinalize)
-	// lacks its tail as well.
+	// lacks its tail as well; any other finalize here saw the broadcast end,
+	// so the last part's coverage ends where the broadcast did, and the fill
+	// can measure the VOD's drift against it (owner decision PR-R6).
 	var gapPlan *twitchGapFillPlan
 	if !isVod {
 		coverageFor(curStagingDir).close(false)
-		gapPlan = newTwitchGapFillPlan(jobCtx.Job, variant, stagedPartCoverages(jobCtx.StagingDir), outageFinalize, time.Now())
+		gapPlan = newTwitchGapFillPlan(jobCtx.Job, variant, stagedPartCoverages(jobCtx.StagingDir), outageFinalize, !outageFinalize, time.Now())
 	}
 
 	// Mux Twitch .ts → .mp4
@@ -1626,6 +1628,12 @@ sessionLoop:
 	err := o.muxAndFinalize(muxCtx, jobCtx, dlResult)
 	if err == nil && gapPlan != nil {
 		o.keepTwitchGapFillPlan(gapPlan)
+	} else if err == nil && !isVod {
+		// A capture that lacks nothing: a row an earlier archive of this job
+		// left (its fill's outcome, owner decision PR-R5 — a Retry or a
+		// Reinitialize re-recorded it since) is about footage this archive
+		// does not have, and the job's details would go on showing it.
+		_ = o.db.DeleteGapFill(jobCtx.Job.ID)
 	}
 	return err
 }
