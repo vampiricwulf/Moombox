@@ -80,6 +80,7 @@ export class FooController {
 |--------|------|---------|
 | App | `app.js` | Main SPA shell, WebSocket, job list, status bar, logs |
 | Player | `modules/player.js` | Video playback, chat overlay, multi-segment seeking, chapter strip and list (`GET /api/jobs/{id}/chapters`) |
+| Chapter import | `modules/chapter-import.js` | The player's Import chapters dialog: paste box, offset, debounced preview from `POST /api/jobs/{id}/chapters/preview` (no client-side parser), save and restore (`POST /api/jobs/{id}/chapters`, `/chapters/restore`) |
 | Setup | `modules/setup.js` | First-run wizard, FFmpeg install |
 | Settings | `modules/settings.js` | Config editor (all sections) |
 | Trimmer | `modules/trimmer.js` | Clip creation |

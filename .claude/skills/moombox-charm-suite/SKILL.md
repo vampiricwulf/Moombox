@@ -25,7 +25,7 @@ Components currently used in the codebase are marked with *.
 | `filepicker` * | `charm.land/bubbles/v2/filepicker` | File/directory selection (used in files dialog) |
 | `cursor` | `charm.land/bubbles/v2/cursor` | Cursor rendering modes (used internally by textinput/textarea) |
 | `key` * | `charm.land/bubbles/v2/key` | Key binding definitions |
-| `textarea` | `charm.land/bubbles/v2/textarea` | Multi-line text entry (available, not currently used) |
+| `textarea` | `charm.land/bubbles/v2/textarea` | Multi-line text entry — the `A H` chapter import's paste box (`chapter_import_dialog.go`); its own keys (Tab, Ctrl+S, Esc) are kept from it in `UpdateComponents` |
 | `paginator` | `charm.land/bubbles/v2/paginator` | Page navigation (available, not currently used) |
 | `stopwatch` | `charm.land/bubbles/v2/stopwatch` | Elapsed time tracking (available, not currently used) |
 | `timer` | `charm.land/bubbles/v2/timer` | Countdown timer (available, not currently used) |
@@ -62,7 +62,7 @@ lipgloss.JoinVertical(lipgloss.Left, top, bottom)
 ## Moombox TUI Patterns
 
 ### Overlay Pattern
-All 15 overlays (dialogs, forms, pickers) follow this interface — embedded in `App`, not standalone `tea.Model`s:
+All 16 overlays (dialogs, forms, pickers) follow this interface — embedded in `App`, not standalone `tea.Model`s:
 ```go
 func (m *SomeOverlay) Open()              { m.visible = true; m.reset() }
 func (m *SomeOverlay) Close()             { m.visible = false }
