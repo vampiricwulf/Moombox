@@ -57,6 +57,7 @@ var navigationKeys = helpSection{
 		{"/", "Filter query (Tasks) · Find text (Logs · Job Log)"},
 		{"", "Filter: status:live channel:\"name\" platform:youtube"},
 		{"", "        -negate  a|b (either)  \"quoted phrase\""},
+		{"", "        type:clip (Twitch clip jobs)"},
 		{"n / N", "Next / previous search match (Logs · Job Log)"},
 		{"c", "Clear the log view (Logs)"},
 	},

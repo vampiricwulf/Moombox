@@ -2,8 +2,11 @@ package tui
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
@@ -195,4 +198,46 @@ func equalIDs(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestTasksPanelMarksClipsAndFiltersThem is owner decision FE-28 in the TUI:
+// a Twitch clip job's row (its ID twitch.ClipJobIDPrefix, the platform
+// "twitch" like any Twitch job's) carries [CLIP] after its [TW] tag, counted
+// in the title's width so the row still fits; the / box's type:clip keeps
+// only clips and -type:clip leaves them out.
+//
+// Mutants (each run): the [CLIP] tag not rendered; titleWidth not counting
+// it (the row runs past the panel); IsClipJob reading the platform (the VOD
+// is tagged and passes type:clip).
+func TestTasksPanelMarksClipsAndFiltersThem(t *testing.T) {
+	jobs := append(tokenFixtureJobs(), &database.Job{
+		ID: "tw_clip_FaintLightGullWholeWheat", VideoID: "tw_clip_FaintLightGullWholeWheat",
+		Title: strings.Repeat("A long clip title ", 8), ChannelName: "Another Ch",
+		Status: database.StatusFinished, Platform: "twitch",
+	})
+	const width = 80
+	m := NewTaskListModel()
+	m.SetSize(width, 30)
+	m.SetJobs(jobs)
+	clip, vod := stripANSI(m.renderJob(jobs[4], false, false)), stripANSI(m.renderJob(jobs[2], false, false))
+	if !strings.Contains(clip, "[TW] [CLIP] ") {
+		t.Errorf("the clip row %q carries no [CLIP] after [TW]", clip)
+	}
+	if strings.Contains(vod, "[CLIP]") {
+		t.Errorf("the VOD row %q is tagged a clip", vod)
+	}
+	if w := ansi.StringWidth(clip); w > width-2 {
+		t.Errorf("the clip row is %d cells, the panel's content %d", w, width-2)
+	}
+	for query, want := range map[string][]string{
+		"type:clip":  {"tw_clip_FaintLightGullWholeWheat"},
+		"-type:clip": {"1", "2", "3", "4"},
+	} {
+		m.applyQuery(query)
+		got := visibleIDs(m)
+		slices.Sort(got)
+		if !equalIDs(got, want) {
+			t.Errorf("%q → %v, want %v", query, got, want)
+		}
+	}
 }

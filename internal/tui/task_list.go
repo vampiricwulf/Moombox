@@ -35,6 +35,13 @@ const (
 	watchedGlyphWidth = 2 // "• "
 )
 
+// clipTag marks a Twitch clip job's row, after its [TW] tag (owner decision
+// FE-28); clipTagWidth is its width, counted in titleWidth.
+const (
+	clipTag      = "[CLIP] "
+	clipTagWidth = 7
+)
+
 // Filter is the F key's cycle position. It is no longer state — the task
 // list filters on one []jobfilter.Token query, and this position is derived
 // from the status token in it by filterPosition().
@@ -724,6 +731,9 @@ func (m *TaskListModel) titleWidth(job *database.Job) int {
 	if job.Platform == "twitch" {
 		platformTagWidth = 5
 	}
+	if jobfilter.IsClipJob(job) {
+		platformTagWidth += clipTagWidth
+	}
 	watchedW := 0
 	if job.Watched {
 		watchedW = watchedGlyphWidth
@@ -1411,6 +1421,16 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 			tagStyle = tagStyle.Faint(true)
 		}
 		parts = append(parts, tagStyle.Render("[TW] "))
+	}
+	// A Twitch clip job (owner decision FE-28): its own tag after [TW], as
+	// the dashboard's job list shows CLIP after TW. Told by its ID
+	// (jobfilter.IsClipJob); titleWidth counts it.
+	if jobfilter.IsClipJob(job) {
+		tagStyle := DimStyle
+		if dimmed {
+			tagStyle = tagStyle.Faint(true)
+		}
+		parts = append(parts, tagStyle.Render(clipTag))
 	}
 
 	// Watched glyph — same position titleWidth accounts for it.

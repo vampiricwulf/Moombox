@@ -11,6 +11,7 @@ import { FilesController } from "./modules/files.js";
 import { LogPanelController } from "./modules/log-panel.js";
 import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
+import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController } from "./modules/job-details.js";
 import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
@@ -2208,6 +2209,22 @@ export class MoomboxApp {
     }
   }
 
+  /**
+   * The small tags ahead of a job row's title: TW for a Twitch job, and CLIP
+   * for a Twitch clip job (owner decision FE-28) — told by its ID
+   * (isClipJob), the platform being "twitch" for every Twitch job. The TUI's
+   * Tasks panel marks the same rows (internal/tui clipTag).
+   */
+  titleBadgesHtml(job) {
+    let html = job.platform === "twitch"
+      ? '<sl-tag size="small" variant="primary" style="margin-right:4px;font-size:0.7em">TW</sl-tag>'
+      : '';
+    if (isClipJob(job)) {
+      html += '<sl-tag class="clip-tag" size="small" variant="neutral" style="margin-right:4px;font-size:0.7em">CLIP</sl-tag>';
+    }
+    return html;
+  }
+
   /** Returns eyeball overlay HTML for a job thumbnail, or empty string. */
   watchIndicatorHtml(job) {
     if (job.status !== "Finished") return "";
@@ -2264,9 +2281,7 @@ export class MoomboxApp {
     const progress = this.formatProgress(job);
     const progressHtml = this.formatProgressHtml(job);
     const percent = job.percent || 0;
-    const platformBadge = isTwitch
-      ? '<sl-tag size="small" variant="primary" style="margin-right:4px;font-size:0.7em">TW</sl-tag>'
-      : '';
+    const platformBadge = this.titleBadgesHtml(job);
 
     // Quick action button based on status
     const canCancel = CANCEL_STATUSES.has(job.status);
@@ -2385,11 +2400,7 @@ export class MoomboxApp {
     // Update title only when changed (avoids recreating sl-tag shadow DOM for TW badge)
     const titleEl = card.querySelector(".stream-title");
     if (titleEl && titleEl.title !== job.title) {
-      const isTwitch = job.platform === "twitch";
-      const platformBadge = isTwitch
-        ? '<sl-tag size="small" variant="primary" style="margin-right:4px;font-size:0.7em">TW</sl-tag>'
-        : '';
-      titleEl.innerHTML = platformBadge + this.escapeHtml(job.title);
+      titleEl.innerHTML = this.titleBadgesHtml(job) + this.escapeHtml(job.title);
       titleEl.title = job.title;
     }
     const authorEl = card.querySelector(".stream-author");

@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
 // Kind is a token's namespace.
@@ -21,7 +22,11 @@ const (
 	KindStatus   Kind = "status"
 	KindChannel  Kind = "channel"
 	KindPlatform Kind = "platform"
-	KindOr       Kind = "or"
+	// KindType is a job's kind where no column holds it (owner decision
+	// FE-28): type:clip, a Twitch clip job (IsClipJob). The only value; any
+	// other matches nothing.
+	KindType Kind = "type"
+	KindOr   Kind = "or"
 )
 
 // namespaces mirrors filter-parser.js's NAMESPACES set — the only prefixes
@@ -30,6 +35,7 @@ var namespaces = map[string]Kind{
 	"status":   KindStatus,
 	"channel":  KindChannel,
 	"platform": KindPlatform,
+	"type":     KindType,
 }
 
 // Token is one parsed unit: a term (Kind text/status/channel/platform with
@@ -236,7 +242,8 @@ func quoteValue(value string, isText bool) string {
 	needs := strings.ContainsAny(value, " |") ||
 		strings.HasPrefix(value, `"`) || strings.HasPrefix(value, "'") ||
 		(isText && (strings.HasPrefix(value, "-") ||
-			strings.HasPrefix(lower, "status:") || strings.HasPrefix(lower, "channel:") || strings.HasPrefix(lower, "platform:")))
+			strings.HasPrefix(lower, "status:") || strings.HasPrefix(lower, "channel:") || strings.HasPrefix(lower, "platform:") ||
+			strings.HasPrefix(lower, "type:")))
 	if !needs {
 		return value
 	}
@@ -274,6 +281,8 @@ func matchTerm(t Token, job *database.Job) bool {
 		result = equalFoldLower(job.ChannelName, t.lower)
 	case KindPlatform:
 		result = equalFoldLower(job.Platform, t.lower)
+	case KindType:
+		result = t.lower == "clip" && IsClipJob(job)
 	default:
 		result = true
 	}
@@ -380,6 +389,15 @@ func lowerRune(r rune) rune {
 		return r
 	}
 	return unicode.ToLower(r)
+}
+
+// IsClipJob reports whether job is a Twitch clip job: its ID carries
+// twitch.ClipJobIDPrefix ("tw_clip_<slug>"). The one test behind type:clip
+// and the Tasks panel's [CLIP] tag (owner decision FE-28): a clip's platform
+// is "twitch" like any Twitch job's, and no column names the kind. The
+// dashboard's isClipJob (web/public/modules/utils.js) is its twin.
+func IsClipJob(job *database.Job) bool {
+	return job != nil && strings.HasPrefix(job.ID, twitch.ClipJobIDPrefix)
 }
 
 // Match reports whether job passes every token (AND across tokens, OR within
