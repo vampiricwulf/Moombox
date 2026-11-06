@@ -47,8 +47,9 @@ test("the strip draws one marker per chapter start, at its share of the timeline
   assert.equal(strip.hidden, false);
   // Before metadata: laid out against the last chapter's end (400 s).
   assert.deepEqual(lefts(h), ["0%", "30%", "75%"]);
-  // Hover text and accessible name carry the title and the start time.
-  assert.equal(markers(h)[1].title, "Chapter 2: Elden Ring (2:00)");
+  // Hover text and accessible name carry the title and the start time — the
+  // hover text in the marker's sl-tooltip (FE-37).
+  assert.equal(markers(h)[1].closest("sl-tooltip")?.getAttribute("content"), "Chapter 2: Elden Ring (2:00)");
   assert.equal(markers(h)[1].getAttribute("aria-label"), "Seek to Chapter 2: Elden Ring, at 2:00");
   assert.equal(markers(h)[1].type, "button");
 
@@ -217,5 +218,100 @@ test("a failed chapters fetch leaves playback working and draws nothing", { skip
     // Playback ticks on unharmed.
     h.tick(5000);
     assert.equal(h.el("player-chapters").hidden, true);
+  }
+});
+
+// Owner decision FE-37: a marker's name is in an sl-tooltip, not a title
+// attribute — shown on hover AND on keyboard focus (the title showed on hover
+// only, and never to a keyboard) — and the aria-label stays. The tooltip
+// wraps the marker, so the strip still lays the buttons out, and the current
+// chapter's highlight still reaches them.
+//
+// Mutants: the title attribute kept (or the tooltip dropped); the tooltip's
+// trigger without focus; the highlight still walking the strip's children
+// (now the tooltips, so no marker is highlighted).
+test("chapter markers name themselves in an sl-tooltip, on hover and on focus", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("v")], chaptersById: { v: THREE } });
+  await h.selectJob("v");
+  const tips = [...h.el("player-chapter-strip").children];
+  assert.equal(tips.length, 3);
+  for (const [i, tip] of tips.entries()) {
+    assert.equal(tip.tagName, "SL-TOOLTIP");
+    const marker = tip.querySelector(".chapter-strip-marker");
+    assert.ok(marker, `tooltip ${i} wraps its marker`);
+    assert.equal(marker.hasAttribute("title"), false, "no title attribute beside the tooltip");
+    assert.ok(/\bfocus\b/.test(tip.getAttribute("trigger") || ""), "the tooltip opens on keyboard focus");
+    assert.ok(/\bhover\b/.test(tip.getAttribute("trigger") || ""), "and on hover");
+  }
+  assert.equal(tips[2].getAttribute("content"), "Chapter 3: Outro (5:00)");
+  assert.equal(markers(h)[2].getAttribute("aria-label"), "Seek to Chapter 3: Outro, at 5:00");
+
+  h.video.currentTime = 130;
+  h.video.dispatchEvent(new h.window.Event("timeupdate"));
+  assert.deepEqual(markers(h).map((m) => m.classList.contains("active")), [false, true, false]);
+});
+
+// Owner decision FE-36: the chapter list remembers its open or collapsed
+// state per browser, in localStorage — collapsed the first time, then as the
+// viewer last left it, job after job. A job with no chapters collapses and
+// hides the list without forgetting the state, and a storage that throws on
+// every access costs nothing: the list opens collapsed and still toggles.
+//
+// Mutants: the state not read on render (the second job opens collapsed);
+// not written on sl-show/sl-hide (same); the hidden guard dropped (the
+// no-chapters job's collapse is saved and the next job opens collapsed);
+// either storage access unguarded (the throwing storage breaks the render or
+// the toggle).
+test("the chapter list remembers its open state per browser, and survives a storage that throws", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("a"), finished("b"), finished("none"), finished("c")],
+    chaptersById: { a: THREE, b: THREE, c: THREE },
+  });
+  const details = h.el("player-chapters");
+  const toggle = (type) => details.dispatchEvent(new h.window.CustomEvent(type, { bubbles: true }));
+
+  await h.selectJob("a");
+  assert.equal(details.open, false, "collapsed the first time");
+  details.open = true;
+  toggle("sl-show"); // the viewer opens it
+  assert.equal(h.window.localStorage.getItem("player-chapters-open"), "true");
+
+  await h.selectJob("b");
+  assert.equal(details.open, true, "the next job's list opens as it was left");
+
+  await h.selectJob("none");
+  assert.equal(details.hidden, true);
+  toggle("sl-hide"); // Shoelace's event for the collapse a chapterless job makes
+  assert.equal(h.window.localStorage.getItem("player-chapters-open"), "true", "a hidden list's collapse is not the viewer's");
+
+  await h.selectJob("c");
+  assert.equal(details.open, true);
+  toggle("sl-hide");
+  assert.equal(h.window.localStorage.getItem("player-chapters-open"), "false");
+  await h.selectJob("a");
+  assert.equal(details.open, false);
+
+  // Storage that throws on every access.
+  const throwing = {
+    getItem() { throw new Error("SecurityError"); },
+    setItem() { throw new Error("QuotaExceededError"); },
+  };
+  const real = globalThis.localStorage;
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: throwing });
+  try {
+    await h.selectJob("b");
+    assert.equal(details.hidden, false);
+    assert.equal(details.open, false, "nothing readable: collapsed");
+    assert.equal(rows(h).length, 3, "the list is still drawn");
+    // A listener's exception does not reach dispatchEvent's caller; jsdom
+    // reports it on the window instead.
+    const errors = [];
+    const onError = (e) => { errors.push(e.error?.message || e.message); e.preventDefault(); };
+    h.window.addEventListener("error", onError);
+    toggle("sl-show");
+    h.window.removeEventListener("error", onError);
+    assert.deepEqual(errors, [], "the toggle's save threw");
+  } finally {
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: real });
   }
 });

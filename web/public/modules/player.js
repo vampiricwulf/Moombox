@@ -123,6 +123,36 @@ function chatChangeTag(label) {
   return tag;
 }
 
+/**
+ * The localStorage key the chapter list's open state is kept under (owner
+ * decision FE-36): "true" open, anything else — nothing stored, the first
+ * time — collapsed.
+ */
+export const CHAPTER_LIST_OPEN_KEY = "player-chapters-open";
+
+/**
+ * Whether the chapter list opens expanded. Every storage access is guarded:
+ * localStorage can throw (a private window's quota, storage disabled), and a
+ * remembered preference must never cost the player its chapter list.
+ * @returns {boolean}
+ */
+export function readChapterListOpen() {
+  try {
+    return localStorage.getItem(CHAPTER_LIST_OPEN_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+/** Remember the chapter list's state; a storage that throws remembers nothing. */
+function writeChapterListOpen(open) {
+  try {
+    localStorage.setItem(CHAPTER_LIST_OPEN_KEY, open ? "true" : "false");
+  } catch {
+    // Not remembered; the list still opens and closes.
+  }
+}
+
 /** msg-param-sub-plan (internal/twitch: SubPlan) → the name Twitch shows. */
 const TWITCH_PLAN_NAMES = { 1000: "Tier 1", 2000: "Tier 2", 3000: "Tier 3", Prime: "Prime" };
 
@@ -480,6 +510,19 @@ export class PlayerController {
     // multi-part job's parts each fire this as they load — harmless, the
     // strip there reads the parts' summed durations).
     video.addEventListener("durationchange", () => this._renderChapterStrip());
+    // The chapter list's open or collapsed state, remembered per browser
+    // (owner decision FE-36): saved when the viewer opens or closes it. The
+    // events also fire for the collapse _renderChapterList makes when a job
+    // has no chapters, after `hidden` is set — that one is not the viewer's
+    // and is not saved. Only the details' own events: a component inside it
+    // that emits sl-show bubbles here too.
+    const chaptersDetails = document.getElementById("player-chapters");
+    for (const [type, open] of [["sl-show", true], ["sl-hide", false]]) {
+      chaptersDetails?.addEventListener(type, (e) => {
+        if (e.target !== chaptersDetails || chaptersDetails.hidden) return;
+        writeChapterListOpen(open);
+      });
+    }
 
     // Video seeking — un-anchor the overlay BEFORE the seek's own timeupdate.
     // The HTML seek algorithm queues `timeupdate` and only THEN `seeked`, so
@@ -1118,8 +1161,12 @@ export class PlayerController {
    * share of the global timeline. A native `<video controls>` seek bar cannot
    * be decorated, so this sits under it the way the segment indicator does,
    * across the same width as the video element. Each marker is a button —
-   * its title the hover text, its aria-label the same name for a reader —
-   * and seeks to its chapter's start through seekToGlobalTime.
+   * its name in an sl-tooltip, shown on hover and on keyboard focus (owner
+   * decision FE-37: the title attribute showed on hover only, after the
+   * browser's delay, and never to a keyboard), its aria-label the same name
+   * for a reader — and seeks to its chapter's start through
+   * seekToGlobalTime. sl-tooltip's host is display: contents, so the button
+   * is still the positioned box the strip lays out.
    */
   _renderChapterStrip() {
     const strip = document.getElementById("player-chapter-strip");
@@ -1138,10 +1185,13 @@ export class PlayerController {
       const pct = Math.min(100, Math.max(0, (c.start / total) * 100));
       marker.style.left = `${pct}%`;
       const at = formatTimestamp(c.start);
-      marker.title = `${this._chapterLabel(i)} (${at})`;
       marker.setAttribute("aria-label", `Seek to ${this._chapterLabel(i)}, at ${at}`);
       marker.addEventListener("click", () => this.seekToGlobalTime(c.start));
-      return marker;
+      const tooltip = document.createElement("sl-tooltip");
+      tooltip.setAttribute("content", `${this._chapterLabel(i)} (${at})`);
+      tooltip.setAttribute("trigger", "hover focus");
+      tooltip.appendChild(marker);
+      return tooltip;
     });
     strip.replaceChildren(...markers);
     strip.hidden = false;
@@ -1149,8 +1199,10 @@ export class PlayerController {
 
   /**
    * The collapsible chapter list: one row per chapter (start time and title)
-   * that seeks on click. Hidden outright when the job has none; collapsed by
-   * default otherwise, so it never takes the video's height unasked.
+   * that seeks on click. Hidden outright when the job has none; otherwise
+   * open or collapsed as this browser last left it (readChapterListOpen,
+   * owner decision FE-36) — collapsed the first time, so it never takes the
+   * video's height unasked.
    */
   _renderChapterList() {
     const details = document.getElementById("player-chapters");
@@ -1183,6 +1235,7 @@ export class PlayerController {
     list.replaceChildren(...rows);
     details.setAttribute("summary", `Chapters (${this._chapters.length})`);
     details.hidden = false;
+    details.open = readChapterListOpen();
   }
 
   /**
@@ -1199,7 +1252,7 @@ export class PlayerController {
     }
     if (idx === this._activeChapter) return;
     this._activeChapter = idx;
-    const markers = document.getElementById("player-chapter-strip")?.children || [];
+    const markers = document.querySelectorAll("#player-chapter-strip .chapter-strip-marker");
     for (let i = 0; i < markers.length; i++) markers[i].classList.toggle("active", i === idx);
     const rows = document.querySelectorAll("#player-chapter-list .chapter-row");
     rows.forEach((row, i) => {
