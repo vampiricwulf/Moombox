@@ -1509,12 +1509,6 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// cancelJob is the cancel route's write: the worker's CancelJob, which also
-// stops a run in flight, or with no worker the same conditional write alone.
-// Neither writes over a terminal status, and cancelled says whether the job
-// was cancelled; workerWillNotify, whether a run was flagged to announce it.
-// A variable so a test can land a status change between the route's read
-// and the write.
 // refuseWhileChapterImport answers 409 and reports true when a chapter import
 // holds jobID's claim (owner decision PR-M5): Resume and Retry start a run
 // whose finalize writes the archive the import's re-mux is about to rename
@@ -1529,6 +1523,12 @@ func refuseWhileChapterImport(rw http.ResponseWriter, w *worker.DownloadWorker, 
 	return true
 }
 
+// cancelJob is the cancel route's write: the worker's CancelJob, which also
+// stops a run in flight, or with no worker the same conditional write alone.
+// Neither writes over a terminal status, and cancelled says whether the job
+// was cancelled; workerWillNotify, whether a run was flagged to announce it.
+// A variable so a test can land a status change between the route's read
+// and the write.
 var cancelJob = func(db *database.Database, w *worker.DownloadWorker, jobID string) (cancelled, workerWillNotify bool) {
 	if w != nil {
 		return w.CancelJob(jobID)
