@@ -11,7 +11,9 @@
 //
 // MUTANT: stripping only "www." from the host again (the pre-G35 parser) —
 // every m., go. and player. row fails; dropping the listing branch — the
-// listing rows come back as channels.
+// listing rows come back as channels; the bare fallbacks before FE-6 (a "v"
+// prefix needing 7 digits, reserved words refused) — the v12345, videos, clip
+// and collections rows fail.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -43,6 +45,20 @@ test("extractTwitchTarget follows the shared Twitch URL table", { skip }, async 
     const want = row.type ? { platform: "twitch", type: row.type, id: row.value } : null;
     assert.deepEqual(got, want, row.input);
   }
+});
+
+// Owner decision FE-6: a bare "v" and digits is a Twitch VOD before it is a
+// YouTube video ID — "v" and 10 digits is 11 characters, a YouTube ID's shape —
+// as the TUI's extractMediaID reads it; an 11-character ID of any other shape
+// stays YouTube's, and a bare reserved word is a channel.
+// MUTANT: the v-prefix check in extractMediaTarget removed — v1234567890 comes
+// back as a YouTube video; the reserved-word exclusion restored in
+// extractTwitchTarget — "videos" comes back null.
+test("extractMediaTarget reads bare Twitch identifiers as Go does", { skip }, async () => {
+  const h = await harness.makeApp();
+  assert.deepEqual(h.app.extractMediaTarget("v1234567890"), { platform: "twitch", type: "vod", id: "1234567890" });
+  assert.deepEqual(h.app.extractMediaTarget("dQw4w9WgXcQ"), { platform: "youtube", videoId: "dQw4w9WgXcQ" });
+  assert.deepEqual(h.app.extractMediaTarget("videos"), { platform: "twitch", type: "channel", id: "videos" });
 });
 
 // MUTANT: dropping the clip-list refusal in addVideo — the clip list is posted

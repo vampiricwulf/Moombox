@@ -3526,6 +3526,11 @@ export class MoomboxApp {
       return this.extractTwitchTarget(trimmed);
     }
 
+    // A "v"-prefixed Twitch VOD ID before YouTube, as the TUI's
+    // extractMediaID takes it: "v" and 10 digits is 11 characters and would
+    // otherwise pass for a YouTube video ID (owner decision FE-6).
+    if (/^v\d{1,12}$/.test(trimmed)) return this.extractTwitchTarget(trimmed);
+
     // Try YouTube
     const videoId = this.extractVideoId(trimmed);
     if (videoId) return { platform: "youtube", videoId };
@@ -3565,11 +3570,11 @@ export class MoomboxApp {
    * Parse a Twitch URL or identifier. Its URL forms mirror
    * utils.ExtractTwitchTarget (internal/utils/twitch.go) row for row: both —
    * and the TUI, which calls the Go one — are tested against
-   * internal/utils/testdata/twitch_urls.json, which holds URL rows only. The
-   * bare-identifier fallbacks below are this parser's own and differ from Go's:
-   * a "v"-prefixed or bare numeric VOD ID needs 7-12 digits here (Go's v
-   * prefix takes 1-12), and a bare reserved word ("videos", "clip") is no
-   * channel here where Go takes it as one.
+   * internal/utils/testdata/twitch_urls.json, URL rows and bare identifiers
+   * alike. A bare identifier reads as Go reads it (owner decision FE-6): "v"
+   * and 1-12 digits, or 7-12 bare digits, is a VOD, and any other valid login
+   * is a channel — a bare "videos" or "clip" too, since the reserved words
+   * name site pages only as a URL's first path segment.
    * The forms are yt-dlp's (yt_dlp/extractor/twitch.py b77c9304e): hosts www.,
    * go., m. and bare; /videos/<id>, /<ch>/v/<id>, /<ch>/video/<id>,
    * /<ch>/schedule?vodID=<id>; player.twitch.tv ?video=v<id> / ?channel=;
@@ -3647,16 +3652,16 @@ export class MoomboxApp {
       }
     }
 
-    // Raw VOD ID with v prefix
-    if (/^v\d{7,12}$/.test(trimmed)) {
+    // Raw VOD ID with v prefix: 1-12 digits, as Go's twitchVODPrefixRe
+    if (/^v\d{1,12}$/.test(trimmed)) {
       return { platform: "twitch", type: "vod", id: trimmed.slice(1) };
     }
-    // Raw numeric VOD ID
+    // Raw numeric VOD ID: 7-12 digits, to tell it from other numbers
     if (/^\d{7,12}$/.test(trimmed)) {
       return { platform: "twitch", type: "vod", id: trimmed };
     }
-    // Raw username (exclude reserved Twitch path segments)
-    if (/^[a-zA-Z][a-zA-Z0-9_]{0,24}$/.test(trimmed) && !reserved.has(trimmed.toLowerCase())) {
+    // Raw login, a reserved path word included (Go's bare-login rule)
+    if (loginRe.test(trimmed)) {
       return { platform: "twitch", type: "channel", id: trimmed.toLowerCase() };
     }
     return null;
