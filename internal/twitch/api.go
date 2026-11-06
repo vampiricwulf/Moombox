@@ -690,7 +690,11 @@ func (a *API) parseStreamInfo(channelLogin string, smRaw, csRaw json.RawMessage)
 				ProfileImageURL string `json:"profileImageURL"`
 				// LastBroadcast is where streamlink reads a live channel's
 				// title (plugins/twitch.py metadata_channel), one of the
-				// title fallbacks below.
+				// title fallbacks below. Speculative here: streamlink sends
+				// a different StreamMetadata persisted query (b57f9b91…)
+				// from the one Moombox sends (yt-dlp's ad022ca3…), and a
+				// persisted query fixes its selection set, so whether this
+				// reply carries it at all is unverified. Absent, it is "".
 				LastBroadcast *struct {
 					Title string `json:"title"`
 				} `json:"lastBroadcast"`
@@ -794,9 +798,11 @@ func (a *API) parseStreamInfo(channelLogin string, smRaw, csRaw json.RawMessage)
 
 	// THE TITLE, first non-empty of (G69): StreamMetadata's own
 	// user.stream.title; Comscore user.broadcastSettings.title (yt-dlp);
-	// StreamMetadata user.lastBroadcast.title (streamlink, whose schema
-	// validation fails loudly when Twitch drops a key, so the path is live);
-	// and last the Comscore path read before. The order cannot be checked
+	// StreamMetadata user.lastBroadcast.title (streamlink's path, but
+	// streamlink validates it under its own StreamMetadata hash, b57f9b91…,
+	// not the yt-dlp one Moombox sends, so whether this reply carries it is
+	// unverified — harmless when absent); and last the Comscore path read
+	// before. The Comscore path is sound: its hash is yt-dlp's own. The order cannot be checked
 	// against a capture from here — MOOMBOX_LIVE_TWITCH_TEST needs a live
 	// channel — so it is built from the two references' field paths: the
 	// primary path stays first because production titles show today.
@@ -833,7 +839,9 @@ func (a *API) parseStreamInfo(channelLogin string, smRaw, csRaw json.RawMessage)
 }
 
 // twitchGameField is a GQL game: displayName where Moombox has always read
-// it, name where streamlink reads it (StreamMetadata user.stream.game.name).
+// it, name where streamlink reads it (StreamMetadata user.stream.game.name —
+// under streamlink's own StreamMetadata hash, so whether Moombox's reply
+// carries it is unverified; absent, it is "").
 type twitchGameField struct {
 	DisplayName string `json:"displayName"`
 	Name        string `json:"name"`
