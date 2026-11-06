@@ -112,8 +112,14 @@ func TestTwitchVodNoLongerRecordingFinalizes(t *testing.T) {
 	if row.ThumbnailFile == "" {
 		t.Error("thumbnail_file is empty: the finalize never fetched the re-read thumbnail")
 	}
-	if n := served("thumb-640x360.jpg"); n != 1 {
-		t.Errorf("re-read thumbnail fetched %d times, want once", n)
+	// The finalize asks for the thumbnail's original size first
+	// (downloadTwitchThumbnail, G45); this server serves it, so the sized
+	// URL is never needed.
+	if n := served("thumb-0x0.jpg"); n != 1 {
+		t.Errorf("re-read thumbnail's original size fetched %d times, want once", n)
+	}
+	if n := served("thumb-640x360.jpg"); n != 0 {
+		t.Errorf("re-read thumbnail's sized URL fetched %d times, want none once the original size answered", n)
 	}
 	if row.Status != database.StatusFinished {
 		t.Errorf("status = %s, want Finished", row.Status)
