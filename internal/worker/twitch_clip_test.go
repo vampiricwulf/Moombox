@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
@@ -65,7 +66,7 @@ func addClipJob(t *testing.T, db *database.Database, outDir string) *database.Jo
 // Mutants: the clip routing in processTwitch removed (the row is taken for a
 // live channel "faintlightgullwholewheat" and never reaches the server); the
 // worker's TwitchClip arm removed (no download: "stream processing" result
-// with no variant goes to the YouTube path and fails); BestClipQuality
+// with no variant goes to the YouTube path and fails); SelectClipQuality
 // replaced by Qualities[0] (720 fetched); the metadata write dropped (the
 // title stays "Manual Add").
 func TestTwitchClipJobDownloadsTheBestRenditionAndFinalizes(t *testing.T) {
@@ -391,5 +392,45 @@ func TestRecordPastedClipEntersOnlyClips(t *testing.T) {
 	}
 	if seen, _ := db.HasProcessed(live.ID); seen {
 		t.Error("a live channel's manual add was entered in the processing history")
+	}
+}
+
+// TestTwitchClipHonoursQualityPreferenceAndCap is owner decision FE-29 on the
+// worker: processTwitchClip selects through twitch.SelectClipQuality with the
+// row's quality_preference and the downloader's max_video_resolution read
+// from the config, and records the pick as twitch_quality.
+//
+// Mutant: processTwitchClip back on BestClipQuality (the 1080p30 rendition in
+// both rows); the cap not read from the config (the 1080p30 rendition under
+// the 720 cap).
+func TestTwitchClipHonoursQualityPreferenceAndCap(t *testing.T) {
+	for _, c := range []struct {
+		pref, want string
+		cap        int
+	}{
+		{"720p60", "720p60", 0},
+		{"best", "720p60", 720},
+	} {
+		w, db := testWorkerSetup(t)
+		cfg := config.Defaults()
+		cfg.Paths.StagingDirectory = t.TempDir()
+		cfg.Downloader.MaxVideoResolution = c.cap
+		w.SetConfigStore(config.NewStore(cfg, ""))
+		job := addClipJob(t, db, t.TempDir())
+		db.UpdateJobFields(job.ID, map[string]any{"quality_preference": c.pref})
+		job.QualityPreference = c.pref
+		w.streamProc.clipFn = func(context.Context, string) (*twitch.TwitchClipInfo, error) {
+			return testClip("https://clips.example"), nil
+		}
+		res, err := w.streamProc.processTwitchClip(context.Background(), job, "FaintLightGullWholeWheat")
+		if err != nil || res.TwitchClip == nil {
+			t.Fatalf("pref %q cap %d: %+v, %v", c.pref, c.cap, res, err)
+		}
+		if got := twitchClipQualityLabel(&res.TwitchClip.Quality); got != c.want {
+			t.Errorf("pref %q cap %d took %s, want %s", c.pref, c.cap, got, c.want)
+		}
+		if row, _ := db.GetJob(job.ID); row.TwitchQuality != c.want {
+			t.Errorf("pref %q cap %d recorded twitch_quality %q, want %s", c.pref, c.cap, row.TwitchQuality, c.want)
+		}
 	}
 }

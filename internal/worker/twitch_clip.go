@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
@@ -94,7 +95,17 @@ func (sp *StreamProcessor) processTwitchClip(ctx context.Context, job *database.
 		}, nil
 	}
 
-	best := twitch.BestClipQuality(clip.Qualities)
+	// The rendition under the job's quality_preference and the downloader's
+	// max_video_resolution and prefer_60fps, by the rule a VOD's selection
+	// follows, read fresh from the config as selectTwitchVariant reads them;
+	// the best rendition when none fits (owner decision FE-29).
+	var maxRes int
+	var prefer60fps bool
+	sp.readConfig(func(c *config.MoomboxConfig) {
+		maxRes = c.Downloader.MaxVideoResolution
+		prefer60fps = c.Downloader.Prefer60fps
+	})
+	best := twitch.SelectClipQuality(clip.Qualities, job.QualityPreference, maxRes, prefer60fps)
 	if best == nil {
 		return &StreamProcessResult{ShouldDownload: false, IsVod: true, Error: "twitch clip error: the clip lists no downloadable rendition"}, nil
 	}
