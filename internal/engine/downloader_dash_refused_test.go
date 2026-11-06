@@ -889,3 +889,35 @@ func TestDashSkippedSegmentLeavesFreshRetryState(t *testing.T) {
 		wantFile(t, out, append(gvsRecording(0, refusedHole-1), gvsFragments(refusedHole+1, refusedHead)...))
 	})
 }
+
+// WholeStreamRefused speaks for the hole the download stopped at, not for any
+// decline in its life: the rule is also asked from inside the loop after a
+// credential renewal, and a decline there followed by progress left the
+// verdict latched, so a later, genuine single refused segment's stop reset
+// the live loop's same-seq count instead of adding to it.
+//
+// Mutant: WholeStreamRefused reading a latch (any decline) instead of
+// comparing the declined hole with CurrentSeq — the row that moved on reads
+// true.
+func TestWholeStreamRefusedIsTheStoppedHolesOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		declined int // the hole the rule declined; -1 for none
+		stopped  int
+		want     bool
+	}{
+		{"no decline", -1, 50, false},
+		{"stopped at the declined hole", 50, 50, true},
+		{"declined at 0, stopped there", 0, 0, true},
+		{"moved on past the declined hole", 50, 80, false},
+	} {
+		d := NewSegmentDownloader(DownloaderOptions{OutputFile: filepath.Join(t.TempDir(), "video_stream")})
+		if tc.declined >= 0 {
+			d.wholeStreamRefusedAt.Store(int64(tc.declined) + 1)
+		}
+		d.currentSeq.Store(int64(tc.stopped))
+		if got := d.WholeStreamRefused(); got != tc.want {
+			t.Errorf("%s: WholeStreamRefused = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

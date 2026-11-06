@@ -706,14 +706,17 @@ type SegmentDownloader struct {
 	// ratchet (noteServedHeadSeq).
 	servedHeadSeq atomic.Int64
 
-	// wholeStreamRefused latches when the refused-segment rule declined a
-	// hole (refuseSegment's errNotRefused): no segment well past it was
-	// served, measured against servedHeadSeq. The live loop reads it
-	// (WholeStreamRefused) so the rebuild that follows is not counted toward
-	// its same-seq cap — a refusal of the whole stream, or a stall at the
-	// edge the stream has served, is waited out, never finalized (owner
-	// decision PR-M2).
-	wholeStreamRefused atomic.Bool
+	// wholeStreamRefusedAt records, as seq+1 (0: none), the hole the
+	// refused-segment rule last declined (refuseSegment's errNotRefused): no
+	// segment well past it was served, measured against servedHeadSeq. The
+	// live loop reads it (WholeStreamRefused) so the rebuild that follows is
+	// not counted toward its same-seq cap — a refusal of the whole stream,
+	// or a stall at the edge the stream has served, is waited out, never
+	// finalized (owner decision PR-M2). A sequence, not a flag: the rule is
+	// also asked from inside the loop after a credential renewal, and a
+	// decline there followed by progress must not make a later, genuine
+	// single refused segment read as the whole stream's.
+	wholeStreamRefusedAt atomic.Int64
 
 	// lastCatchUpFailure timestamps the most recent catch-up failure episode.
 	// The batch ceiling is throttled relative to it so a 403 burst stops
@@ -1664,8 +1667,14 @@ func (d *SegmentDownloader) StoppedWellBehindHead() bool {
 // or a stall at the edge the stream has actually served; the live loop does
 // not count the rebuild it answers toward its same-seq cap (sameSeqRebuilds
 // in internal/worker, owner decision PR-M2), so a capture YouTube still calls
-// live waits it out, as it did before the cap. Valid once Start returned.
-func (d *SegmentDownloader) WholeStreamRefused() bool { return d.wholeStreamRefused.Load() }
+// live waits it out, as it did before the cap. Only for the hole the download
+// stopped at: a decline the download has since moved past (one met after a
+// credential renewal inside the loop, then cleared) says nothing about where
+// it stopped. Valid once Start returned.
+func (d *SegmentDownloader) WholeStreamRefused() bool {
+	at := d.wholeStreamRefusedAt.Load()
+	return at > 0 && at-1 == d.currentSeq.Load()
+}
 
 // BytesWritten returns total bytes written (lock-free).
 func (d *SegmentDownloader) BytesWritten() int64 {
