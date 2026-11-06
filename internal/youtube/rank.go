@@ -86,9 +86,13 @@ func rangeScore(r DynamicRange, preferHDR bool) int {
 }
 
 // codecParts is parse_codecs' normalisation of one codec: the fourcc
-// lower-cased, every run of zeros that precedes a digit dropped
-// (`re.sub(r'0+(?=\d)', ...)`), then split on dots — so
-// "av01.0.12M.10" becomes [av1 0 12M 10] and "vp09.02.51.10" [vp9 2 51 10].
+// lower-cased, `re.sub(r'0+(?=\d)', ...)` applied, then split on dots —
+// so "av01.0.12M.10" becomes [av1 0 12M 10] and "vp09.02.51.10" [vp9 2 51 10].
+// The regex backtracks: a run of zeros followed by a digit goes whole, one
+// followed by anything else (a dot, a letter, the end) keeps its last zero —
+// "vp09.00.51.08" is [vp9 0 51 8], "av01.0.00M.10" [av1 0 0M 10],
+// "avc1.100.40" [avc1 10 40] (the trailing zero of "100" stays, the one
+// before it, followed by that zero, goes).
 func codecParts(codec string) []string {
 	codec = strings.TrimSpace(codec)
 	if fourcc, rest, ok := strings.Cut(codec, "."); ok {
@@ -107,6 +111,11 @@ func codecParts(codec string) []string {
 				i = j - 1
 				continue
 			}
+			// Not followed by a digit: every zero but the last is followed by
+			// a zero, a digit, so those go and the last stays.
+			b.WriteByte('0')
+			i = j - 1
+			continue
 		}
 		b.WriteByte(codec[i])
 	}
@@ -183,11 +192,14 @@ type VideoRank struct {
 func VideoRankOf(codecs string, premium bool) VideoRank {
 	codec := VideoCodecOf(codecs)
 	if codec == "" {
-		// A codecs value parse_codecs does not know, kept as the first entry:
-		// it scores whatever the patterns give it, and is SDR.
+		// A codecs value parse_codecs does not know (or none at all — an HLS
+		// variant with no CODECS), kept as the first entry: it scores
+		// whatever the patterns give it, and is SDR. Premium still holds:
+		// upstream's source_preference +100 reads the label or the itag,
+		// never the codec (_video.py:3444, 3666-3668).
 		codec, _, _ = strings.Cut(codecs, ",")
 		codec = strings.TrimSpace(codec)
-		return VideoRank{Codec: scoreVideoCodec(codec)}
+		return VideoRank{Premium: premium, Codec: scoreVideoCodec(codec)}
 	}
 	return VideoRank{Range: dynamicRangeOf(codec), Premium: premium, Codec: scoreVideoCodec(codec)}
 }
@@ -228,8 +240,8 @@ func (f *Format) videoRank() VideoRank {
 // (3401-3403). The index is the rung: a format that states no audioQuality
 // is "tiny", 0, below every one that does — as upstream ranks the tv
 // client's audio formats, which state none (the dedup fills one in from
-// another client's copy of the same stream, fillStreamFacts, as upstream's
-// itag_qualities does for manifest formats).
+// another client's copy of the same stream, fillStreamFacts — beyond
+// upstream, which fills only manifest formats so, from itag_qualities).
 var audioQualityLadder = map[string]int{
 	"AUDIO_QUALITY_ULTRALOW": 1,
 	"AUDIO_QUALITY_LOW":      2,

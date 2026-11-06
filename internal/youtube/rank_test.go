@@ -3,6 +3,7 @@ package youtube
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -166,11 +167,14 @@ func TestHDRNeverOutranksSizeOrFrameRate(t *testing.T) {
 //     quality — and, all four together, AAC 258 (the higher bitrate of the
 //     two AAC 5.1) over E-AC-3 and AC-3, the codec rung below channels.
 //   - 141 vs 251: the Premium HIGH AAC over MEDIUM Opus.
+//   - 141 vs 256: yt-dlp's `quality` sorts ahead of `channels`, so stereo
+//     HIGH beats 5.1 MEDIUM.
 //   - The track still comes first (the deliberate divergence): a 5.1 dub
 //     loses to the stereo original.
 //
 // Mutants (each run): the quality rung removed from CompareAudioRank (250
-// beats 140, 251 beats 141); the channels rung removed (251 beats every 5.1
+// beats 140, 251 beats 141); the quality and channels rungs swapped (256
+// beats 141); the channels rung removed (251 beats every 5.1
 // row); codec ahead of quality (250 beats 140); the ec-3/ac-3 patterns
 // dropped (pinned by TestScoreAudioCodec instead); the track rung dropped
 // (the dub wins).
@@ -195,6 +199,7 @@ func TestAudioRankingMatchesYtDlp(t *testing.T) {
 			rankAudio(258, "mp4a.40.2", medium, 6, 384_000),
 		}, 258},
 		{"141 over 251", []Format{opus251, rankAudio(141, "mp4a.40.2", high, 2, 255_000)}, 141},
+		{"quality before channels: 141 over 256", []Format{rankAudio(256, "mp4a.40.5", medium, 6, 192_000), rankAudio(141, "mp4a.40.2", high, 2, 255_000)}, 141},
 		{"the stereo original over a 5.1 dub", func() []Format {
 			orig := rankAudio(251, "opus", medium, 2, 160_000)
 			orig.AudioTrackID, orig.AudioTrackName = "ja.4", "Japanese original"
@@ -232,8 +237,9 @@ func TestParseFormatsReadsAudioChannels(t *testing.T) {
 // TestDedupFillsAStreamsQualityFromAnotherClient: a tv-family copy states
 // no audioQuality; where it wins its stream's dedup, the quality ladder read
 // it as "tiny" and ranked 251 below 250. The dedup now fills the winner from
-// another client's copy of the same itag, as yt-dlp fills a format's quality
-// from its itag's (itag_qualities), and never touches a video format, whose
+// another client's copy of the same itag — modelled on yt-dlp's
+// itag_qualities, which fills only manifest formats, so beyond upstream for
+// the https copies — and never touches a video format, whose
 // audioQuality marks a muxed file.
 //
 // Mutants: the fill call removed from deduplicateFormats (250 wins); note
@@ -406,5 +412,41 @@ func TestStretchedRatioFromKeywords(t *testing.T) {
 	}
 	if info.StretchedRatio != 16.0/9 {
 		t.Errorf("the extraction's ratio = %v, want the first stating response's 16/9", info.StretchedRatio)
+	}
+}
+
+// TestCodecPartsFollowsParseCodecs: codecParts is parse_codecs'
+// `re.sub(r'0+(?=\d)', ...)` exactly, backtracking included — a run of
+// zeros not followed by a digit keeps its last zero. Each row's want is
+// Python's output (re.sub on the lower-cased fourcc's codec, split on dots).
+//
+// Mutant (run): the not-followed-by-a-digit arm dropped, so the whole run is
+// kept ("00", "00M", "100").
+func TestCodecPartsFollowsParseCodecs(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"vp09.00.51.08", "vp9 0 51 8"},
+		{"av01.0.00M.10", "av1 0 0M 10"},
+		{"avc1.100.40", "avc1 10 40"},
+		{"av01.0.12M.10", "av1 0 12M 10"},
+		{"vp09.02.51.10", "vp9 2 51 10"},
+		{"mp4a.40.2", "mp4a 40 2"},
+	} {
+		if got := strings.Join(codecParts(tc.in), " "); got != tc.want {
+			t.Errorf("codecParts(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestPremiumHoldsWithoutAKnownCodec: Premium is yt-dlp's source_preference
+// +100, read off the label or the HLS itag, never the codec
+// (_video.py:3444, 3666-3668) — so an HLS variant with no CODECS attribute
+// keeps it.
+//
+// Mutant (run): the unknown-codec branch of VideoRankOf dropping Premium.
+func TestPremiumHoldsWithoutAKnownCodec(t *testing.T) {
+	for _, codecs := range []string{"", "unknown.1"} {
+		if r := VideoRankOf(codecs, true); !r.Premium {
+			t.Errorf("VideoRankOf(%q, true) = %+v, want Premium", codecs, r)
+		}
 	}
 }

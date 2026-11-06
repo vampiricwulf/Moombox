@@ -1511,8 +1511,12 @@ func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 // tv family's adaptiveFormats — state neither: a stream whose winning copy
 // came from one would rank as "tiny" next to another itag whose winner
 // stated its quality, so 251 lost to 250. The dedup fills the winner in from
-// a copy that stated them, as yt-dlp fills a manifest format's quality from
-// the itag's https copies (`itag_qualities`, _video.py:3404-3406, 3670). An
+// a copy that stated them. Here Moombox goes beyond upstream: yt-dlp fills
+// only a manifest (HLS/DASH) format's quality from the itag's https copies
+// (`itag_qualities`, _video.py:3404-3411, 3670); its https formats keep
+// their own statement, and since the first client's copy wins its stream_id
+// dedup (3510-3513) a tv-won copy ranks as "tiny" there. The fill is
+// modelled on itag_qualities and extended to the https copies, because an
 // itag's quality and channels are its encode's, the same from every client.
 type streamFacts struct {
 	quality  string
