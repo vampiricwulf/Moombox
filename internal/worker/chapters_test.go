@@ -470,3 +470,24 @@ func TestTwitchChapterHooksAreWired(t *testing.T) {
 		}
 	}
 }
+
+// TestCopyAssetsCopiesTheChatRawSidecar: a capture's chat.raw.jsonl (owner
+// decision D16) goes beside the archive with its chat, as
+// <name>.chat.raw.jsonl.
+//
+// Mutant: the raw copy removed.
+func TestCopyAssetsCopiesTheChatRawSidecar(t *testing.T) {
+	staging, outDir := t.TempDir(), t.TempDir()
+	for name, body := range map[string]string{"chat.json": `{"messages":[]}`, "chat.raw.jsonl": "{\"a\":1}\n"} {
+		if err := os.WriteFile(filepath.Join(staging, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	o := &DownloadOrchestrator{logger: discardLogger{}}
+	jobCtx := &JobContext{Job: &database.Job{ID: "yt_raw"}, StagingDir: staging}
+	o.copyAssets(context.Background(), jobCtx, outDir, "A Job", "A Job", map[string]any{}, false)
+	got, err := os.ReadFile(filepath.Join(outDir, "A Job.chat.raw.jsonl"))
+	if err != nil || string(got) != "{\"a\":1}\n" {
+		t.Errorf("raw sidecar beside the archive: %q, %v", got, err)
+	}
+}

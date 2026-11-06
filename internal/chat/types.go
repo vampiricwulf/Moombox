@@ -38,7 +38,43 @@ type ChatMessage struct {
 	// ruling K4, "sidebar only"). Empty on every other kind of message and on
 	// every file written before this field existed.
 	MembershipText string `json:"membershipText,omitempty"`
+
+	// Deleted marks a message YouTube took back after it was sent — deleted
+	// by a moderator, retracted by its author, or swept with every message of
+	// an author who was banned or timed out (markChatItemAsDeletedAction,
+	// markChatItemsByAuthorAsDeletedAction). Owner decision D16, MARKERS: the
+	// message itself is kept as it was sent; DeletedState is the line YouTube
+	// shows in its place ("[message retracted]", "[message deleted]"), when it
+	// sent one.
+	//
+	// Replaced marks a message whose item YouTube replaced
+	// (replaceChatItemAction), its new text in Replacement beside the
+	// original. All four are omitempty: a reader of files written before
+	// them, or of a message nothing happened to, sees no difference.
+	Deleted      bool          `json:"deleted,omitempty"`
+	DeletedState string        `json:"deletedState,omitempty"`
+	Replaced     bool          `json:"replaced,omitempty"`
+	Replacement  []MessagePart `json:"replacement,omitempty"`
 }
+
+// ChatMarker is a deletion or replacement a chat batch carried, to apply to
+// the stored messages it names (ChatDownloader.applyMarkers). Kind is one of
+// the Marker constants: TargetID names the message for MarkerDeleted and
+// MarkerReplaced, AuthorChannelID the author for MarkerAuthorDeleted.
+type ChatMarker struct {
+	Kind            string
+	TargetID        string
+	AuthorChannelID string
+	State           string
+	Replacement     []MessagePart
+}
+
+// ChatMarker kinds.
+const (
+	MarkerDeleted       = "deleted"
+	MarkerAuthorDeleted = "author_deleted"
+	MarkerReplaced      = "replaced"
+)
 
 // MessagePart represents a text or emoji segment in a chat message.
 //

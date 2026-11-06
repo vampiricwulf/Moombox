@@ -155,6 +155,12 @@ type ChatDownloader struct {
 	lastMessageAt time.Time
 	messages      []ChatMessage // Unwritten messages in memory
 	messageCount  int
+	// pendingMarkers are the deletion and replacement markers that may name
+	// a message already on disk, applied by one rewrite at the end of the run
+	// (applyPendingMarkers); rawPending the raw sidecar lines not yet
+	// appended (flushRawActions). Loop-goroutine state, like messages.
+	pendingMarkers []pendingChatMarker
+	rawPending     []json.RawMessage
 	dedup         *utils.OrderedDedup[string]
 	continuation  string
 	streamStartMs int64
@@ -788,6 +794,10 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	if len(cd.messages) > 0 {
 		cd.writeChatFile()
 	}
+	// The markers that named messages already on disk, in one rewrite, and
+	// the raw sidecar's last lines.
+	cd.applyPendingMarkers()
+	cd.flushRawActions()
 
 	// Update header metadata if we flushed earlier
 	if cd.flushedToDisk && cd.messageCount > 0 {
@@ -1123,6 +1133,7 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 		}
 
 		newInBatch, lastTs := cd.processBatch(resp)
+		cd.flushRawActions()
 		if newInBatch > 0 {
 			cd.callOnProgress(ChatProgress{
 				MessageCount:  cd.messageCount,
@@ -1453,6 +1464,11 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 			cd.hasReplayHighWater = true
 		}
 	}
+	// The batch's deletions and replacements, after its messages are
+	// committed (a deletion never precedes its message), and everything that
+	// did not become a message for the raw sidecar (G36, D16).
+	cd.applyMarkers(resp.Markers)
+	cd.queueRawActions(resp.RawActions)
 	if len(resp.Messages) > 0 {
 		lastTs = resp.Messages[len(resp.Messages)-1].TimestampText
 	}

@@ -76,7 +76,16 @@ var ytInitialDataAnchors = []*regexp.Regexp{
 
 // ChatApiResponse contains the parsed response from a chat API call.
 type ChatApiResponse struct {
-	Messages            []ChatMessage
+	Messages []ChatMessage
+	// Markers are the deletions and replacements the batch carried, in the
+	// order they arrived, for the downloader to apply against the messages
+	// it has stored (owner decision D16; ChatDownloader.applyMarkers).
+	Markers []ChatMarker
+	// RawActions are every action of the batch that did not become a
+	// message, verbatim — the markers too, and an action inside a replay
+	// wrapper re-wrapped with its own videoOffsetTimeMsec, as yt-dlp's
+	// live_chat.json carries it — for the chat.raw.jsonl sidecar.
+	RawActions          []json.RawMessage
 	NextContinuation    string
 	AllChatContinuation string // Unfiltered "Live Chat" token from header (first response only)
 	TimeoutMs           int
@@ -475,9 +484,7 @@ func (api *ChatAPI) parseResponse(data map[string]any) (*ChatApiResponse, error)
 		if actionMap == nil {
 			continue
 		}
-		if msg := api.parseAction(actionMap); msg != nil {
-			result.Messages = append(result.Messages, *msg)
-		}
+		api.collectAction(actionMap, result)
 	}
 
 	if header, _ := liveChatCont["header"].(map[string]any); header != nil {
@@ -524,30 +531,106 @@ func extractNextContinuation(liveChatCont map[string]any, defaultTimeoutMs int) 
 	return
 }
 
-// parseAction parses a single chat action into a ChatMessage. Handles the
-// replay wrapper unwrap, replay-offset extraction, renderer-type selection,
-// superchat / sticker / membership annotation. Returns nil when the action
-// is not a chat message we recognise (missing renderer, malformed replay
-// wrapper, non-chat action type).
+// parseAction parses a single chat action into a ChatMessage: the first
+// message collectAction finds in it, nil when it holds none. The parser's
+// own unit tests read it; parseResponse goes through collectAction, which
+// keeps every message and every other action.
 func (api *ChatAPI) parseAction(actionMap map[string]any) *ChatMessage {
-	var replayOffsetMs int64
-	hasReplayOffset := false
-	if replayAction, ok := actionMap["replayChatItemAction"].(map[string]any); ok {
-		innerActions, _ := replayAction["actions"].([]any)
-		if len(innerActions) > 0 {
-			inner, _ := innerActions[0].(map[string]any)
-			if inner == nil {
-				return nil
-			}
-			actionMap = inner
-		}
-		replayOffsetMs, hasReplayOffset = api.extractReplayOffset(replayAction)
-	}
-
-	addAction, _ := actionMap["addChatItemAction"].(map[string]any)
-	if addAction == nil {
+	var res ChatApiResponse
+	api.collectAction(actionMap, &res)
+	if len(res.Messages) == 0 {
 		return nil
 	}
+	return &res.Messages[0]
+}
+
+// collectAction sorts one action of a chat batch into res: a message, a
+// marker, or a raw action for the sidecar (G36, owner decision D16).
+//
+// EVERY inner action of a replayChatItemAction is read. This read only the
+// first, and a replay batch's wrapper can carry several — each one after the
+// first was dropped. yt-dlp writes the whole wrapper (youtube_live_chat.py
+// b77c9304e, 47-52), so it never lost them; the inner actions all share the
+// wrapper's videoOffsetTimeMsec.
+func (api *ChatAPI) collectAction(actionMap map[string]any, res *ChatApiResponse) {
+	replayAction, isReplay := actionMap["replayChatItemAction"].(map[string]any)
+	if !isReplay {
+		api.collectInnerAction(actionMap, nil, 0, false, res)
+		return
+	}
+	offset, hasOffset := api.extractReplayOffset(replayAction)
+	innerActions, _ := replayAction["actions"].([]any)
+	for _, a := range innerActions {
+		if inner, _ := a.(map[string]any); inner != nil {
+			api.collectInnerAction(inner, replayAction, offset, hasOffset, res)
+		}
+	}
+}
+
+// collectInnerAction is collectAction for one unwrapped action. replay is the
+// wrapper it came in (nil for a live action), which a raw copy is re-wrapped
+// in so the sidecar line keeps its offset.
+func (api *ChatAPI) collectInnerAction(action, replay map[string]any, replayOffsetMs int64, hasReplayOffset bool, res *ChatApiResponse) {
+	if add, ok := action["addChatItemAction"].(map[string]any); ok {
+		if msg := api.parseAddChatItem(add, replayOffsetMs, hasReplayOffset); msg != nil {
+			res.Messages = append(res.Messages, *msg)
+			return
+		}
+	} else if marker, ok := api.parseMarker(action); ok {
+		res.Markers = append(res.Markers, marker)
+	}
+	// Everything not stored as a message goes to the sidecar verbatim: the
+	// markers too, so one that lands on a message already on disk survives a
+	// crash before the end-of-run rewrite applies it.
+	raw := action
+	if replay != nil {
+		wrapper := map[string]any{"actions": []any{action}}
+		if off, ok := replay["videoOffsetTimeMsec"]; ok {
+			wrapper["videoOffsetTimeMsec"] = off
+		}
+		raw = map[string]any{"replayChatItemAction": wrapper}
+	}
+	if b, err := json.Marshal(raw); err == nil {
+		res.RawActions = append(res.RawActions, b)
+	}
+}
+
+// parseMarker reads the three actions YouTube rewrites stored messages with
+// (owner decision D16): markChatItemAsDeletedAction (one message deleted or
+// retracted, its deletedStateMessage the "[message retracted]" line the
+// player shows), markChatItemsByAuthorAsDeletedAction (every message of a
+// banned or timed-out author), and replaceChatItemAction (a message's item
+// replaced by a new one). A replacement whose new item is not a message
+// Moombox parses is no marker — the raw sidecar keeps it.
+func (api *ChatAPI) parseMarker(action map[string]any) (ChatMarker, bool) {
+	if a, ok := action["markChatItemAsDeletedAction"].(map[string]any); ok {
+		id, _ := a["targetItemId"].(string)
+		return ChatMarker{Kind: MarkerDeleted, TargetID: id, State: renderedText(a["deletedStateMessage"])}, id != ""
+	}
+	if a, ok := action["markChatItemsByAuthorAsDeletedAction"].(map[string]any); ok {
+		author, _ := a["externalChannelId"].(string)
+		return ChatMarker{Kind: MarkerAuthorDeleted, AuthorChannelID: author, State: renderedText(a["deletedStateMessage"])}, author != ""
+	}
+	if a, ok := action["replaceChatItemAction"].(map[string]any); ok {
+		id, _ := a["targetItemId"].(string)
+		item, _ := a["replacementItem"].(map[string]any)
+		if id == "" || item == nil {
+			return ChatMarker{}, false
+		}
+		repl := api.parseAddChatItem(map[string]any{"item": item}, 0, false)
+		if repl == nil {
+			return ChatMarker{}, false
+		}
+		return ChatMarker{Kind: MarkerReplaced, TargetID: id, Replacement: repl.Message}, true
+	}
+	return ChatMarker{}, false
+}
+
+// parseAddChatItem parses an addChatItemAction into a ChatMessage: renderer
+// selection, superchat / sticker / membership annotation, and the replay
+// offset when the action came in a replay wrapper. nil when the item is not a
+// chat message we recognise (missing renderer, non-chat item type).
+func (api *ChatAPI) parseAddChatItem(addAction map[string]any, replayOffsetMs int64, hasReplayOffset bool) *ChatMessage {
 	item, _ := addAction["item"].(map[string]any)
 	if item == nil {
 		return nil

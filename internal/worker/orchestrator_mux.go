@@ -1467,6 +1467,16 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 			updates["chat_filename"] = relBase + ".chat.json"
 			updates["chat_status"] = chatFileStatus(jobCtx)
 		}
+		// The chat's raw sidecar (owner decision D16): every action of the
+		// capture that is not a message, verbatim. Beside the archive as
+		// <name>.chat.raw.jsonl; best effort, it is the lossless extra and
+		// the chat file stands without it.
+		rawSrc := filepath.Join(jobCtx.StagingDir, "chat.raw.jsonl")
+		if _, err := os.Stat(rawSrc); err == nil {
+			if err := copyFile(rawSrc, filepath.Join(outputDir, filenameBase+".chat.raw.jsonl")); err != nil {
+				o.logger.Warn("could not copy the chat's raw sidecar beside the archive", "err", err, "jobID", jobCtx.Job.ID)
+			}
+		}
 	}
 
 	// Save video description as .description (matching TypeScript assetDownloader).
