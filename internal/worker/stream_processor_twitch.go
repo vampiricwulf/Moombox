@@ -26,8 +26,10 @@ const TwitchOfflineErrMsg = "twitch channel is offline"
 
 // twitchEndedOfflineErrMsg is the error a Twitch job interrupted mid-capture
 // takes when its broadcast is over by the time Moombox is back: the staged
-// footage is complete as far as it will ever get (Twitch has no DVR to fetch
-// the gap from), and the Mux action turns it into the archive.
+// footage is complete as far as the live edge will ever give it (the live
+// playlist has no DVR to fetch the gap from), and the Mux action turns it into
+// the archive. Such a muxed job makes no gap-fill plan: only a capture that
+// finalizes itself records one (owner decision D17).
 const twitchEndedOfflineErrMsg = "stream ended while Moombox was offline — captured data can be muxed via the Mux action"
 
 // twitchOfflineError picks the error a non-manual Twitch job takes when its

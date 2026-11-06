@@ -492,8 +492,10 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			// never latch) when MayResume is nil.
 			InterruptionTimeout: jobCtx.Config.InterruptionTimeout,
 			// Twitch live has no DVR: segments that left the playlist window
-			// are gone. Stop at real gaps so every part file stays internally
-			// gapless — the loop below muxes the part and starts the next.
+			// are gone from the live edge (the archive VOD still has them,
+			// and the gap-fill recovers them from it — owner decision D17).
+			// Stop at real gaps so every part file stays internally gapless —
+			// the loop below muxes the part and starts the next.
 			StopOnGap: !isVod,
 			// Connectivity awareness: the engine rides out offline blips
 			// (waits instead of erroring) so a flap right after an outage
