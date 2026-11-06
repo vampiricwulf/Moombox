@@ -79,12 +79,20 @@ type PlayerAPI struct {
 	// (releaseSessionRead): at once when its caller abandoned it, and at
 	// sessionRetryAt when it failed. sessionClock is the clock sessionRetryAt
 	// is read on (nil: time.Now), a test seam.
+	//
+	// loginAccount is the account the LOGGED_IN verdict (sessionLoggedIn)
+	// belongs to, kept apart from sessionAccount: a page that states the
+	// verdict but no session (no SESSION_INDEX, DELEGATED_SESSION_ID or user
+	// session id) carries the verdict for its account without standing in for
+	// that account's session, so claimSessionRead still asks the homepage for
+	// the brand page id the page did not state.
 	sessionMu          sync.RWMutex
 	sessionIndex       *int
 	delegatedSessionID string
 	sessionUserID      string
 	sessionLoggedIn    bool
 	sessionAccount     string
+	loginAccount       string
 	sessionAsked       string
 	sessionRetryAt     time.Time
 	sessionClock       func() time.Time

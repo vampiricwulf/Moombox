@@ -359,9 +359,9 @@ func (p *PlayerAPI) probeYtcfg(visitorData string) *YtcfgData {
 	if account != "" && account == p.sessionAccount {
 		ytcfg.SessionIndex, ytcfg.DelegatedSessionID = p.sessionIndex, p.delegatedSessionID
 		ytcfg.UserSessionID = p.sessionUserID
-		if p.sessionLoggedIn {
-			ytcfg.LoginState = SessionAuthLoggedIn
-		}
+	}
+	if account != "" && account == p.loginAccount && p.sessionLoggedIn {
+		ytcfg.LoginState = SessionAuthLoggedIn
 	}
 	p.sessionMu.RUnlock()
 	return ytcfg
@@ -403,37 +403,35 @@ func (p *PlayerAPI) captureVisitorData(ytcfg *YtcfgData, account string) {
 		return
 	}
 	loggedIn := ytcfg.LoginState == SessionAuthLoggedIn
-	statesSession := ytcfg.SessionIndex != nil || ytcfg.DelegatedSessionID != "" || ytcfg.UserSessionID != ""
-	if !statesSession && ytcfg.LoginState != SessionAuthUnknown {
-		// A page that states its LOGGED_IN verdict but no session updates
-		// the kept session's verdict for that account, and only that: the
-		// page id, index and user session id it did not restate stay as
-		// they were, as a page naming no session never cleared them. Its
-		// logged-out answer — cookies YouTube stopped honouring — is what
-		// stops the probes and chat sending X-Youtube-Bootstrap-Logged-In
-		// on a session its own page just denied. Another account's logged-
-		// in page has nothing kept to update and is kept below as its own
-		// session; its logged-out page keeps nothing.
-		p.sessionMu.Lock()
-		if account == p.sessionAccount {
-			p.sessionLoggedIn = loggedIn
-			p.sessionMu.Unlock()
-			return
-		}
-		p.sessionMu.Unlock()
-		if !loggedIn {
-			return
-		}
-	}
-	if statesSession || loggedIn {
-		p.sessionMu.Lock()
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	if ytcfg.SessionIndex != nil || ytcfg.DelegatedSessionID != "" || ytcfg.UserSessionID != "" {
 		p.sessionIndex, p.delegatedSessionID = ytcfg.SessionIndex, ytcfg.DelegatedSessionID
-		p.sessionUserID, p.sessionLoggedIn = ytcfg.UserSessionID, loggedIn
+		p.sessionUserID = ytcfg.UserSessionID
 		p.sessionAccount = account
 		if p.sessionAsked != account {
 			p.sessionAsked, p.sessionRetryAt = "", time.Time{}
 		}
-		p.sessionMu.Unlock()
+		// The verdict is the page's own, whatever it says: a page that
+		// states a session but not LOGGED_IN (logged out, or silent)
+		// claims no logged-in bootstrap for it.
+		p.loginAccount, p.sessionLoggedIn = account, loggedIn
+		return
+	}
+	// A page that states its LOGGED_IN verdict but no session carries the
+	// verdict alone (loginAccount): the page id, index and user session id
+	// it did not restate stay as they were, as a page naming no session
+	// never cleared them, and it is not kept as its account's session, so a
+	// homepage read that account still wants (claimSessionRead) is still
+	// made. Its logged-out answer — cookies YouTube stopped honouring — is
+	// what stops the probes and chat sending X-Youtube-Bootstrap-Logged-In
+	// on a session its own page just denied. Another account's logged-out
+	// page changes nothing: it has no claim of its own to withdraw.
+	if ytcfg.LoginState == SessionAuthUnknown {
+		return
+	}
+	if loggedIn || account == p.loginAccount {
+		p.loginAccount, p.sessionLoggedIn = account, loggedIn
 	}
 }
 

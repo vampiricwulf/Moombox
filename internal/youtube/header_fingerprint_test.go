@@ -33,7 +33,7 @@ func wantSidHash(scheme, sid, uid, token string) string {
 // "_u" follows the hash. A ytcfg naming no user session id — or none at all —
 // sends today's unbound form exactly.
 //
-// Mutants: GenerateAPIHeaders calling the unbound GenerateAuthorizationHeader
+// Mutants: GenerateAPIHeaders sending the unbound jar form
 // (the bound row loses "_u"); passing the delegated id instead of the user
 // session id (the bound row's hash differs).
 func TestGenerateAPIHeadersBindsTheUserSessionID(t *testing.T) {
@@ -129,18 +129,25 @@ func TestPagesCarryTheirLoginState(t *testing.T) {
 
 // The probes and chat carry the kept session's user session id and LOGGED_IN
 // verdict (probeYtcfg) while the jar holds the account they were read under.
-// A later page of the same account that states it logged out and names no
-// session withdraws the LOGGED_IN claim alone — the page id, index and user
-// session id it did not restate stay — and a later logged-in page naming no
-// session restores it the same way, while a page stating nothing, or another
-// account's logged-out page, leaves the claim standing.
+// A page that states only LOGGED_IN carries the verdict for its account but
+// is not kept as that account's session, so the homepage read the account
+// still wants (claimSessionRead) is still made. A later page of the same
+// account that states it logged out and names no session withdraws the
+// LOGGED_IN claim alone — the page id, index and user session id it did not
+// restate stay — and a later logged-in page naming no session restores it the
+// same way, while a page stating nothing, or another account's logged-out
+// page, leaves the claim standing; another account's logged-in page carries
+// that account's verdict, which this account's probes do not attach.
 //
 // Mutants: probeYtcfg not carrying UserSessionID, or not LoginState;
-// captureVisitorData not keeping a session that states only LOGGED_IN; the
-// withdrawal dropped (the logged-out step keeps the claim); the withdrawal
-// clearing the whole session (the page id goes); the withdrawal not checking
-// the account (another account's page withdraws it); a logged-in page naming
-// no session overwriting the kept one (the last step loses the page id).
+// captureVisitorData not keeping the verdict of a page that states only
+// LOGGED_IN; such a page kept as its account's session (the homepage read is
+// no longer wanted); the withdrawal dropped (the logged-out step keeps the
+// claim); the withdrawal clearing the whole session (the page id goes); the
+// withdrawal not checking the account (another account's page withdraws it);
+// a logged-in page naming no session overwriting the kept one (the last step
+// loses the page id); probeYtcfg attaching a verdict without checking whose
+// it is (another account's logged-in page claims a login for this one).
 func TestProbeSessionCarriesTheUserSessionAndLoginState(t *testing.T) {
 	jar, _ := loadAccountJar(t, accountCookies("a"))
 	p := NewPlayerAPI(NewAuth(jar, noopLogger{}), noopLogger{})
@@ -150,6 +157,10 @@ func TestProbeSessionCarriesTheUserSessionAndLoginState(t *testing.T) {
 	if got := p.probeYtcfg("").LoginState; got != SessionAuthLoggedIn {
 		t.Fatalf("a page stating only LOGGED_IN: probe LoginState = %q, want logged in", got)
 	}
+	if !p.claimSessionRead(account) {
+		t.Fatal("a page stating only LOGGED_IN stood in for the account's session: its homepage read is no longer wanted")
+	}
+	p.releaseSessionRead(account, true)
 
 	idx := 1
 	p.captureVisitorData(&YtcfgData{SessionIndex: &idx, DelegatedSessionID: "brand-d", UserSessionID: "user-u", LoginState: SessionAuthLoggedIn}, account)
@@ -178,14 +189,55 @@ func TestProbeSessionCarriesTheUserSessionAndLoginState(t *testing.T) {
 	if got.LoginState != SessionAuthLoggedIn || got.DelegatedSessionID != "brand-d" || got.UserSessionID != "user-u" {
 		t.Errorf("after the account's logged-in page naming no session: probe ytcfg = %+v, want the claim back and the session kept", got)
 	}
+
+	// Another account's logged-in page naming no session carries that
+	// account's verdict, not this one's: the jar still holds account a.
+	p.captureVisitorData(&YtcfgData{LoginState: SessionAuthLoggedIn}, "other-account")
+	got = p.probeYtcfg("")
+	if got.LoginState != SessionAuthUnknown || got.DelegatedSessionID != "brand-d" {
+		t.Errorf("after another account's logged-in page: probe ytcfg = %+v, want no claim and a's session kept", got)
+	}
+}
+
+// A page that states a session replaces the kept one with its own verdict,
+// whatever that verdict is: a session its page answered logged out, or whose
+// page states no LOGGED_IN at all, claims no logged-in bootstrap on the
+// probes, /browse or chat, though the ids it stated are kept.
+//
+// Mutant: the full-session branch of captureVisitorData storing
+// sessionLoggedIn = true (both rows keep the claim).
+func TestProbeSessionTakesTheVerdictOfThePageThatStatedIt(t *testing.T) {
+	for _, state := range []SessionAuthState{SessionAuthLoggedOut, SessionAuthUnknown} {
+		t.Run(string(state), func(t *testing.T) {
+			jar, _ := loadAccountJar(t, accountCookies("a"))
+			p := NewPlayerAPI(NewAuth(jar, noopLogger{}), noopLogger{})
+			account := jar.YouTubeIdentity()
+
+			idx := 0
+			p.captureVisitorData(&YtcfgData{SessionIndex: &idx, UserSessionID: "user-u", LoginState: SessionAuthLoggedIn}, account)
+			if got := p.probeYtcfg("").LoginState; got != SessionAuthLoggedIn {
+				t.Fatalf("logged-in session: probe LoginState = %q, want logged in", got)
+			}
+
+			idx2 := 1
+			p.captureVisitorData(&YtcfgData{SessionIndex: &idx2, UserSessionID: "user-v", LoginState: state}, account)
+			got := p.probeYtcfg("")
+			if got.LoginState != SessionAuthUnknown {
+				t.Errorf("session restated with LoginState %q: probe LoginState = %q, want no claim", state, got.LoginState)
+			}
+			if got.UserSessionID != "user-v" || got.SessionIndex == nil || *got.SessionIndex != 1 {
+				t.Errorf("session restated with LoginState %q: probe ytcfg = %+v, want user-v at index 1", state, got)
+			}
+		})
+	}
 }
 
 // ChatAuthorizationHeader is bound to the kept session's user session id, as
 // yt-dlp's chat downloader binds it through generate_api_headers, and is the
 // unbound form without one; a Service with no Auth signs nothing.
 //
-// Mutants: ChatAuthorizationHeader returning the unbound
-// Auth.GenerateAuthorizationHeader (the bound step loses "_u"); the nil-Auth
+// Mutants: ChatAuthorizationHeader returning the unbound jar form (the
+// bound step loses "_u"); the nil-Auth
 // guard dropped (panics).
 func TestChatAuthorizationHeaderBindsTheKeptUserSession(t *testing.T) {
 	jar, _ := loadAccountJar(t, accountCookies("a"))
