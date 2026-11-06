@@ -1224,6 +1224,16 @@ the file with fragments that reference a different `moov`.
   a later Start cannot resume the regrown file against the old offsets.
 - Preserved on shutdown/cancel so downloads can be resumed on restart.
 
+### Archive Chapters
+
+A single-file archive carries chapters (owner decision D23 and its follow-ups), embedded at mux as an FFMETADATA1 input (`-f ffmetadata -i chapters.ffmeta -map_chapters N`, `Muxer.MuxCopyAtChapters`, `internal/engine/muxer.go` — yt-dlp's `--embed-chapters` input, `FFmpegMetadataPP`). `prepareArchiveChapters` (`internal/worker/chapters.go`) chooses the list and fits it to the staged media's span (`utils.SanitizeChapters`: yt-dlp's fill-in — an untitled chapter in front of a late first one, ends from the next start, `<Untitled Chapter N>` — clamped so none runs past the last frame):
+
+- **Twitch VOD**: its moments (`GetVodInfo`), staged as `chapters.json` (`utils.StagedChaptersFile`) before the finalize.
+- **Twitch live capture**: its archive VOD's moments when `ArchiveVodFor` finds the VOD at finalize; otherwise the categories the capture observed — the one it started in, then each change a once-a-minute `StreamMetadata` poll saw (`pollTwitchCategory`) — timed from the stream start. Either list is shifted by where the capture began in the broadcast (the root part's first segment's program date-time). The raw material is `twitch_timeline.json` in staging, so the Mux action over a crashed capture still builds the observed list.
+- **YouTube VOD** (including a finished stream added as one): the watch page's chapter markers read at the mux, in yt-dlp's order — `chapteredPlayerBarRenderer`, then the engagement panel's `macroMarkersListRenderer` — falling back to the description's timestamps (`ChaptersFromDescription`, yt-dlp's `_extract_chapters_from_description`). A live YouTube capture carries none: where it began in the video is not known.
+
+A split job's parts carry none: they are muxed while the broadcast runs, before any list is known. Pinned by `TestMuxCopyAtChaptersEmbedsThem` (`internal/engine/muxer_chapters_test.go`), `TestMuxAndFinalizeEmbedsTheChapters`, `TestLiveTwitchChaptersVodFirstObservedFallback`, `TestStageTwitchChapters` and `TestPollTwitchCategoryNotesEachMinute` (`internal/worker/chapters_test.go`), `TestChaptersFromWatchPage` and `TestFetchChaptersFallsBackToTheDescription` (`internal/youtube/chapters_test.go`), and `TestChaptersFromDescription` and `TestSanitizeChapters` (`internal/utils/chapters_test.go`).
+
 ### Chat Files
 
 Chat is stored as JSON with the following top-level structure:
@@ -1246,6 +1256,8 @@ type ChatData struct {
 
 - `emoteOffsets` names the index space each message's `emotes[].start`/`end` count in. `"utf16"` is the only value any writer produces (`chatEmoteOffsetsUTF16`, `internal/twitch/chat.go`), and its ABSENCE is the era marker: a file written before 2026-09-15 holds the live IRC path's raw code-point offsets, because that path mistook Twitch's code-point offsets for UTF-16 units. The player repairs such a file once at load — `correctLegacyTwitchEmotes` (`web/public/modules/chat-timeline.js`) maps the spans and unwraps `/me` text, per part, before `mergePartChats` (which keeps no header scalars). Only messages carrying `raw` are touched: VOD comments have none and were UTF-16 all along. **Known window:** only the two full-file writers set the scalar, so a part file created before the change and appended to after it keeps an unmarked header while its newest messages already carry UTF-16 offsets; those few are over-shifted at replay, and the window closes at the next part roll or at job end.
 - `isAction` marks a `/me` message. The CTCP wrapper `\x01ACTION …\x01` is stripped at parse time so `message` holds only the text and the emote offsets line up; `raw` keeps the verbatim IRC line.
+
+**Markers and the raw sidecar (YouTube, owner decision D16).** A message YouTube deleted, retracted or swept with a banned author's carries `deleted: true` and, when YouTube sent one, `deletedState` ("[message retracted]"); a replaced one `replaced: true` and its new parts in `replacement` — the original text always kept. All four are omitempty. Every action that did not become a message is in `chat.raw.jsonl` beside the chat file (`<name>.chat.raw.jsonl` beside the archive), one JSON per line. See platform-services.md § Message Types.
 
 **Incremental append pattern:**
 
