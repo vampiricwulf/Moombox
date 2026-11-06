@@ -121,6 +121,9 @@ func TestDashRefusedSegmentClosesThePart(t *testing.T) {
 		if refused.Seq != refusedHole {
 			t.Errorf("refused sequence = %d, want %d", refused.Seq, refusedHole)
 		}
+		if d.WholeStreamRefused() {
+			t.Error("WholeStreamRefused = true for one segment refused while later ones are served")
+		}
 		if got := d.CurrentSeq(); got != refusedHole {
 			t.Errorf("CurrentSeq = %d, want %d (stopped at the hole)", got, refusedHole)
 		}
@@ -486,10 +489,15 @@ func gvsFragments(from, to int) []byte {
 // where moonarchive's head bound alone would walk forward one dropped
 // segment at a time.
 //
+// The decline is reported (WholeStreamRefused), so the live loop does not
+// count the rebuild that follows toward its same-seq cap (owner decision
+// PR-M2).
+//
 // Mutants: laterSegmentServed answering true whatever the probe says: Start
 // returns a *SegmentRefusedError at the first refused sequence. runDashLoop
 // not re-snapshotting the renewal count once the rule declined: the later
-// segment is probed on every 403 of the hold.
+// segment is probed on every 403 of the hold. refuseSegment not latching
+// wholeStreamRefused when it declines.
 func TestDashRefusedSegmentNeedsALaterSegmentServed(t *testing.T) {
 	g := serveGVS(t, constHead(refusedHead), func(r *http.Request, seq, attempt int) gvsAnswer {
 		if seq >= refusedHole {
@@ -523,6 +531,9 @@ func TestDashRefusedSegmentNeedsALaterSegmentServed(t *testing.T) {
 		}
 		if got := d.CurrentSeq(); got != refusedHole {
 			t.Errorf("CurrentSeq = %d, want %d (held at the hole)", got, refusedHole)
+		}
+		if !d.WholeStreamRefused() {
+			t.Error("WholeStreamRefused = false after the rule declined the hole")
 		}
 		wantFile(t, out, gvsRecording(0, refusedHole-1))
 		if got := gaps.all(); len(got) != 0 {
@@ -562,6 +573,11 @@ func (w *headByStatus) WriteHeader(code int) {
 // within two of the head the stream has demonstrably served, so it is handed
 // back, not given up.
 //
+// Declined on the served head, the downloader reports it (WholeStreamRefused):
+// the stall is at the edge the stream has served, which the live loop's
+// same-seq cap must not count (owner decision PR-M2), though the tracked head
+// says the stream stopped well behind it.
+//
 // Mutant: refuseSegment without its servedHeadSeq bound (the tracked head
 // alone, as refusable reads it): Start returns a *SegmentRefusedError.
 func TestDashRefusedSegmentTrustsOnlyAServedHead(t *testing.T) {
@@ -595,6 +611,10 @@ func TestDashRefusedSegmentTrustsOnlyAServedHead(t *testing.T) {
 		}
 		if got := d.HeadSeq(); got != refusedHead {
 			t.Fatalf("headSeq = %d, want %d — the scenario needs the refusals' head tracked", got, refusedHead)
+		}
+		if !d.StoppedWellBehindHead() || !d.WholeStreamRefused() {
+			t.Errorf("StoppedWellBehindHead = %v, WholeStreamRefused = %v; want both — the loop must read the served head's verdict, not the tracked head's",
+				d.StoppedWellBehindHead(), d.WholeStreamRefused())
 		}
 	})
 }

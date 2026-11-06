@@ -706,6 +706,15 @@ type SegmentDownloader struct {
 	// ratchet (noteServedHeadSeq).
 	servedHeadSeq atomic.Int64
 
+	// wholeStreamRefused latches when the refused-segment rule declined a
+	// hole (refuseSegment's errNotRefused): no segment well past it was
+	// served, measured against servedHeadSeq. The live loop reads it
+	// (WholeStreamRefused) so the rebuild that follows is not counted toward
+	// its same-seq cap — a refusal of the whole stream, or a stall at the
+	// edge the stream has served, is waited out, never finalized (owner
+	// decision PR-M2).
+	wholeStreamRefused atomic.Bool
+
 	// lastCatchUpFailure timestamps the most recent catch-up failure episode.
 	// The batch ceiling is throttled relative to it so a 403 burst stops
 	// being answered with 48 simultaneous requests (moonarchive damps its
@@ -1638,10 +1647,25 @@ func (d *SegmentDownloader) HeadSeq() int { return int(d.headSeq.Load()) }
 // calls live — is not a refused segment, and is rebuilt as often as it
 // takes. It reads the tracked head, refusals' headers included, not the
 // served one: a downloader rebuilt at a hole asks for the hole first and may
-// never be served a segment before it stops.
+// never be served a segment before it stops. Refusals' headers can therefore
+// make a refusal of the whole stream, or a stall at the edge it has served,
+// read as well behind the head; the rule's own probe, on the served head,
+// tells them apart, and a rebuild after it declined is not counted
+// (WholeStreamRefused, owner decision PR-M2).
 func (d *SegmentDownloader) StoppedWellBehindHead() bool {
 	return d.headSeq.Load()-2 > d.currentSeq.Load()
 }
+
+// WholeStreamRefused reports whether the refused-segment rule declined a hole
+// in this download: it probed past the hole and no later segment was served,
+// or the head served segments report stands within two of it
+// (refuseSegment's errNotRefused). That is not one segment YouTube keeps
+// refusing but the whole stream — a GVS, PO-token or bot-detection outage —
+// or a stall at the edge the stream has actually served; the live loop does
+// not count the rebuild it answers toward its same-seq cap (sameSeqRebuilds
+// in internal/worker, owner decision PR-M2), so a capture YouTube still calls
+// live waits it out, as it did before the cap. Valid once Start returned.
+func (d *SegmentDownloader) WholeStreamRefused() bool { return d.wholeStreamRefused.Load() }
 
 // BytesWritten returns total bytes written (lock-free).
 func (d *SegmentDownloader) BytesWritten() int64 {
