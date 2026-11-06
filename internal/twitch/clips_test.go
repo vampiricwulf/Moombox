@@ -14,8 +14,8 @@ import (
 // clipReply is a ShareClipRenderStatus answer modelled on yt-dlp's first
 // TwitchClipsIE test case (FaintLightGullWholeWheat, id 396245304, "EA Play
 // 2016 Live from the Novo Theatre", 32 s, broadcaster EA, curator
-// stereotype_), with a portrait asset beside the default one and a quality
-// whose URL is no URL.
+// stereotype_), with a portrait asset beside the default one, a quality
+// whose URL is no URL, and a third asset yt-dlp does not read.
 const clipReply = `{"data":{"clip":{
 	"id":"396245304","slug":"FaintLightGullWholeWheat",
 	"title":"EA Play 2016 Live from the Novo Theatre",
@@ -33,6 +33,9 @@ const clipReply = `{"data":{"clip":{
 		]},
 		{"aspectRatio":0.56,"thumbnailURL":"https://clips-media-assets2.twitch.tv/portrait-preview.jpg","videoQualities":[
 			{"sourceURL":"https://production.assets.clips.twitchcdn.net/v2/media/A/portrait-1920.mp4","quality":"1920","frameRate":60}
+		]},
+		{"aspectRatio":1.0,"thumbnailURL":"https://clips-media-assets2.twitch.tv/third-preview.jpg","videoQualities":[
+			{"sourceURL":"https://production.assets.clips.twitchcdn.net/v2/media/A/third-2160.mp4","quality":"2160","frameRate":60}
 		]}
 	]}}}`
 
@@ -47,7 +50,9 @@ const clipReply = `{"data":{"clip":{
 //
 // Mutants: the URL left unsigned (no sig/token); the hash taken from another
 // op; the portrait flag dropped; the url_or_none guard dropped (the "not a
-// url" quality kept); the small thumbnail preferred to the default asset's.
+// url" quality kept); the small thumbnail preferred to the default asset's;
+// the assets[1] bound dropped (the third asset's taller 2160 rendition
+// listed, as a landscape one that outranks the real clip).
 func TestGetClipReadsShareClipRenderStatus(t *testing.T) {
 	var sent string
 	stubGQL(t, func(body string) string { sent = body; return clipReply })
@@ -79,7 +84,7 @@ func TestGetClipReadsShareClipRenderStatus(t *testing.T) {
 		t.Errorf("ThumbnailURL = %q, want the default asset's", info.ThumbnailURL)
 	}
 	if len(info.Qualities) != 3 {
-		t.Fatalf("qualities = %+v, want the two landscape and the one portrait rendition", info.Qualities)
+		t.Fatalf("qualities = %+v, want the two landscape and the one portrait rendition, nothing of a third asset", info.Qualities)
 	}
 	for _, rq := range info.Qualities {
 		u, err := url.Parse(rq.URL)

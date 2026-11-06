@@ -208,7 +208,8 @@ func (*netTimeoutErr) Temporary() bool { return true }
 // it.
 //
 // Mutants: IsDirectURL false (segmented); the refresh matching any rendition
-// (the 720 URL returned); the refresh returning the stale URL.
+// (the 720 URL returned); the refresh returning the stale URL; the refresh
+// matching the quality label alone (the portrait crop's URL returned).
 func TestTwitchClipDownloadIsOneWholeFile(t *testing.T) {
 	var built []engine.DownloaderOptions
 	prev := newSegmentDownloader
@@ -249,6 +250,17 @@ func TestTwitchClipDownloadIsOneWholeFile(t *testing.T) {
 	}
 	if u, _ := opts.OnCredentialRefresh(); u != "" {
 		t.Errorf("refresh with the rendition gone = %q, want nothing", u)
+	}
+	// A portrait rendition under the same label is another file: appending
+	// it to the landscape partial would splice two renditions into one.
+	clip.Reread = func(context.Context, string) (*twitch.TwitchClipInfo, error) {
+		crop := testClip("https://cdn.example/crop")
+		crop.Qualities = []twitch.TwitchClipQuality{{URL: "https://cdn.example/crop/portrait-1080.mp4?sig=s1&token=t1",
+			Quality: "1080", Height: 1080, FrameRate: 30, Portrait: true}}
+		return crop, nil
+	}
+	if u, _ := opts.OnCredentialRefresh(); u != "" {
+		t.Errorf("refresh answered by a portrait rendition of the same label = %q, want nothing", u)
 	}
 }
 
@@ -295,5 +307,66 @@ func TestClipFnSeamIsUnsetInProduction(t *testing.T) {
 	w, _ := testWorkerSetup(t)
 	if w.streamProc.clipFn != nil {
 		t.Error("NewDownloadWorker wired a clipFn; production must read clips through tw.GetClip")
+	}
+}
+
+// TestTwitchClipKeepsAnOutcomeThatLandedFirst: ExecuteTwitchClip's two status
+// writes never overwrite an outcome. A Cancel that landed between the
+// admission and the Downloading write stops the clip before it is fetched,
+// the row still Cancelled; an outcome that landed while the file came down
+// (here an Error, which the Cancel listener does not act on) stops it before
+// Muxing, the row still in its outcome.
+//
+// Mutants: the Downloading write unconditional (UpdateJobFields: the
+// Cancelled row turns Downloading and the clip is fetched); the Muxing guard
+// dropped together with muxAndFinalize's own (FFmpeg runs past the Error).
+// Either Muxing guard alone holds the row: muxAndFinalize writes Muxing
+// unless an outcome stands too, so dropping ExecuteTwitchClip's alone is
+// caught by the finalize's and changes nothing this test can see.
+func TestTwitchClipKeepsAnOutcomeThatLandedFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		before      bool // the outcome lands before ExecuteTwitchClip, else mid-download
+		outcome     database.JobStatus
+		wantFetched bool
+	}{
+		{"cancelled before the download", true, database.StatusCancelled, false},
+		{"errored during the download", false, database.StatusError, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			job := addClipJob(t, db, t.TempDir())
+			var mu sync.Mutex
+			fetched := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				fetched++
+				mu.Unlock()
+				if !tc.before {
+					db.UpdateJobFields(job.ID, map[string]any{"status": tc.outcome})
+				}
+				http.ServeContent(rw, r, "clip.mp4", time.Time{}, strings.NewReader("not really an mp4"))
+			}))
+			defer srv.Close()
+			if tc.before {
+				db.UpdateJobFields(job.ID, map[string]any{"status": tc.outcome})
+			}
+			jobCtx := w.buildJobContext(job)
+			clip := &TwitchClipDownload{Slug: "FaintLightGullWholeWheat", Quality: testClip(srv.URL).Qualities[1]}
+
+			err := w.orchestrator.ExecuteTwitchClip(context.Background(), jobCtx, clip)
+			if !errors.Is(err, ErrCancelled) {
+				t.Errorf("ExecuteTwitchClip = %v, want ErrCancelled", err)
+			}
+			got, _ := db.GetJob(job.ID)
+			if got.Status != tc.outcome {
+				t.Errorf("status = %s, want %s kept", got.Status, tc.outcome)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if (fetched > 0) != tc.wantFetched {
+				t.Errorf("CDN requests = %d, want fetched %v", fetched, tc.wantFetched)
+			}
+		})
 	}
 }
