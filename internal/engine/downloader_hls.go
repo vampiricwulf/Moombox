@@ -756,11 +756,8 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			d.bytesWritten.Add(int64(n))
 			d.currentSeq.Add(1)
 			d.lastSegTime.StoreNow()
-			if d.reportFirstSegment {
-				d.reportFirstSegment = false
-				if d.opts.OnFirstSegment != nil {
-					d.opts.OnFirstSegment(seg.ProgramDateTime)
-				}
+			if d.firstMediaWritten(hlsSeq) && d.opts.OnFirstSegment != nil {
+				d.opts.OnFirstSegment(seg.ProgramDateTime)
 			}
 			if d.opts.OnSegmentWritten != nil && !seg.ProgramDateTime.IsZero() {
 				d.opts.OnSegmentWritten(seg.ProgramDateTime, seg.Duration)
@@ -1139,6 +1136,11 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 			// convention as every other emitter (see the live loop above) —
 			// so the persisted seq columns mean one thing on every path.
 			writtenSeq := int(d.currentSeq.Load())
+			// A fresh file's recording begins here (OnFirstMedia), as on the
+			// live loop: the live loop hands any ENDLIST playlist outside
+			// StopOnGap to this writer, so a capture that met a finished
+			// playlist first would otherwise report no start at all (FE-18).
+			d.firstMediaWritten(writtenSeq)
 			d.currentSeq.Add(1)
 			nextIdx++
 			// Slide the ceiling's exemption to the new head and wake any

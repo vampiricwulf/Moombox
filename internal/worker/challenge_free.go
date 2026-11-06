@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/cipher"
+	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -312,6 +313,22 @@ func setupOrFallback(ctx context.Context, job *JobContext, strategy DownloadStra
 		return result, err
 	}
 	kind := strategy.Kind()
+	if hls := drmHlsFallback(strategy, info, err); hls != nil {
+		job.Logger.Warn("[DRM] every DASH Representation of a kind the job needs is DRM-protected — recording the HLS manifest instead",
+			"jobID", job.Job.ID, "err", err)
+		result, hlsErr := hls.Download(ctx, job, info, deps)
+		switch {
+		case hlsErr == nil:
+			return result, nil
+		case errors.Is(hlsErr, engine.ErrDRMProtected):
+			return nil, drmUnrecordable(fmt.Errorf("%w; the HLS fallback is DRM-protected too: %w", err, hlsErr))
+		default:
+			return nil, fmt.Errorf("%w; the HLS fallback failed too: %w", err, hlsErr)
+		}
+	}
+	if errors.Is(err, engine.ErrDRMProtected) {
+		return nil, drmUnrecordable(err)
+	}
 	if hls := missingPotFallback(strategy, info, err); hls != nil {
 		job.Logger.Warn("[POT] missing_pot: no GVS token for the "+kind+" streams — recording the live HLS playlist instead, from the oldest segment its window holds",
 			"jobID", job.Job.ID, "err", err)

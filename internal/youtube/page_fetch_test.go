@@ -206,6 +206,66 @@ func TestWatchPageFetchDoesNotRetryARefusal(t *testing.T) {
 	}
 }
 
+// TestEmbedPageFetchRetriesAsTheWatchPageDoes is FE-2: FetchEmbedPage goes
+// through fetchYouTubePage, the watch page's own policy, as yt-dlp's
+// _download_ytcfg downloads the embed page through the same
+// _download_webpage_with_retries (_base.py:1030-1035). A 5xx, a refused dial
+// or a 404 is retried on the 1 s, 2 s ladder and the page that answers is
+// read (its encryptedHostFlags and player); a 403 or a 429 is asked once.
+// It used to be one FetchBody attempt, so one 503 lost the flags.
+//
+// Mutants: FetchEmbedPage back on a single attempt (utils.FetchBody, or
+// fetchYouTubePage with one attempt — the retry rows fail); pageRetryable
+// retrying 403/429 (those rows ask twice or more).
+func TestEmbedPageFetchRetriesAsTheWatchPageDoes(t *testing.T) {
+	const embedFixture = `<html><script>ytcfg.set({"WEB_PLAYER_CONTEXT_CONFIGS":{"WEB_PLAYER_CONTEXT_CONFIG_ID_EMBEDDED_PLAYER":{"encryptedHostFlags":"flags-x"}},` +
+		`"PLAYER_JS_URL":"\/s\/player\/0a1b2c3d\/player_es6.vflset\/en_US\/base.js"});</script></html>`
+	for _, tc := range []struct {
+		name      string
+		statuses  []int // answered in turn, then 200
+		dialFails int
+		wantAt    []time.Duration
+		wantErr   string
+	}{
+		{name: "503, 500, 200", statuses: []int{503, 500}, wantAt: []time.Duration{0, time.Second, 3 * time.Second}},
+		{name: "a refused dial, then 200", dialFails: 1, wantAt: []time.Duration{time.Second}},
+		{name: "404, then 200, as the watch page", statuses: []int{404}, wantAt: []time.Duration{0, time.Second}},
+		{name: "403 is asked once", statuses: []int{403}, wantAt: []time.Duration{0}, wantErr: "failed to fetch embed page: HTTP 403 from "},
+		{name: "429 is asked once", statuses: []int{429}, wantAt: []time.Duration{0}, wantErr: "failed to fetch embed page: HTTP 429 from "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				arrivals := &pageArrivals{start: time.Now()}
+				servePagesInBubble(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					n := arrivals.note(r.URL.Path)
+					if n <= len(tc.statuses) {
+						http.Error(w, "blip", tc.statuses[n-1])
+						return
+					}
+					_, _ = w.Write([]byte(embedFixture))
+				}), tc.dialFails)
+
+				res, err := FetchEmbedPage(context.Background(), "test1234567", "")
+				if got := arrivals.of("/embed/test1234567"); !reflect.DeepEqual(got, tc.wantAt) {
+					t.Errorf("embed page requests arrived at %v, want %v", got, tc.wantAt)
+				}
+				if tc.wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+						t.Fatalf("FetchEmbedPage err = %v, want %q", err, tc.wantErr)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("FetchEmbedPage: %v — a transient failure must be retried", err)
+				}
+				if res.EncryptedHostFlags != "flags-x" || res.PlayerURL == "" {
+					t.Errorf("result = %+v, want the page's flags and player", res)
+				}
+			})
+		})
+	}
+}
+
 // TestWatchPageFetchGivesUpWithinItsBudget: four failures are the end, and
 // the error says so; the retries stay inside their window — a third of a
 // caller's remaining deadline, and one attempt's timeout from the start —

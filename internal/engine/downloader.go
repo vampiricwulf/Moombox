@@ -613,9 +613,10 @@ type SegmentDownloader struct {
 	// Download-loop goroutine only, like the fields above.
 	directCheckpoint int64
 
-	// reportFirstSegment arms the one OnFirstSegment call: set by Start when
-	// it opens the output file fresh (not resuming), cleared by the first
-	// media write. Download-loop goroutine only, like the fields above.
+	// reportFirstSegment arms the one OnFirstSegment / OnFirstMedia call:
+	// set by Start when it opens the output file fresh (not resuming),
+	// cleared by the first media write (firstMediaWritten). Download-loop
+	// goroutine only, like the fields above.
 	reportFirstSegment bool
 
 	// hlsOutages counts the connectivity outages the HLS loop has waited out
@@ -767,6 +768,21 @@ type SegmentDownloader struct {
 	OnProgress func(p DownloadProgress)
 	OnGap      func(g DownloadGap)
 	OnFinish   func()
+	// OnFirstMedia is called once, from the live DASH loop (sequential and
+	// catch-up writes alike), the live HLS loop and the HLS VOD-parallel
+	// writer it hands a finished playlist to, with the sequence of the
+	// first media segment this downloader writes into an output file it
+	// started EMPTY — never on a resume or an append, whose file began at
+	// some earlier segment this downloader never saw. That sequence is where
+	// the file's recording begins: 0 for a capture from the broadcast's
+	// start, the split, restart or live-edge position otherwise (a
+	// first-segment hunt that stepped past a missing head reports the
+	// segment it landed on, not the one it was seeded at). The worker
+	// records it beside the staged file so a finalize can tell a from-start
+	// recording, which shares the VOD's timeline, from a late one
+	// (recordingStartFile, FE-18). Runs on the download goroutine, so it must
+	// not block. Assign before Start, like the callbacks above.
+	OnFirstMedia func(seq int)
 	// OnCipherFailure is called once on first 403 before any bytes
 	// written (likely cipher rotation). The callback should
 	// invalidate any cached cipher solver and OPTIONALLY return a
@@ -1226,7 +1242,8 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 		flags |= os.O_TRUNC
 	}
 	// A file opened O_TRUNC starts at whatever segment is written first, and
-	// OnFirstSegment reports that segment's wall-clock time. A resumed or
+	// OnFirstSegment reports that segment's wall-clock time, OnFirstMedia its
+	// sequence. A resumed or
 	// appended file started long before this downloader existed.
 	d.reportFirstSegment = !resuming
 
@@ -1725,4 +1742,20 @@ func truncateURL(u string, maxLen int) string {
 		return u
 	}
 	return u[:maxLen] + "..."
+}
+
+// firstMediaWritten disarms the first-segment report after a media segment
+// of sequence seq landed in the output file, and reports whether this was
+// the file's first: OnFirstMedia hears the sequence then, and the HLS loop
+// adds its OnFirstSegment date-time. A no-op after the first, and on a
+// resumed or appended file, which Start never arms.
+func (d *SegmentDownloader) firstMediaWritten(seq int) bool {
+	if !d.reportFirstSegment {
+		return false
+	}
+	d.reportFirstSegment = false
+	if d.OnFirstMedia != nil {
+		d.OnFirstMedia(seq)
+	}
+	return true
 }

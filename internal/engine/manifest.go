@@ -26,12 +26,13 @@ const defaultSegmentDuration = 2.0
 // filtered, YoutubeDL.py), and the format list's twin of this guard is the
 // drmFamilies skip in internal/youtube (player_api_parsing.go), whose
 // "DRM-protected" wording this error shares. The strategy that fetched the
-// manifest fails with it and the job ends on that clear error rather than
-// on an archive of ciphertext: nothing falls back to another strategy (the
-// one post-setup fallback, missingPotFallback in internal/worker, acts on a
-// missing PO token alone). Where yt-dlp drops the has_drm formats and picks
-// from the rest, a DASH manifest that is all protected here is not retried
-// over the response's HLS manifest.
+// manifest fails with it rather than archive ciphertext. A DASH-manifest
+// setup that fails with it — every Representation of the kind it needs is
+// protected (ParseDashDRM) — falls to the extraction's HLS manifest when it
+// lists one (drmHlsFallback in internal/worker, owner decision FE-1), as
+// yt-dlp drops the has_drm formats and picks from the rest; with no HLS
+// manifest, or an HLS playlist refused here too, the job ends on "DRM-
+// protected; Moombox cannot record it".
 var ErrDRMProtected = errors.New("DRM-protected or encrypted media")
 
 // DashSegment represents a segment in a DASH timeline.
@@ -277,18 +278,40 @@ type initXML struct {
 
 var sqPattern = regexp.MustCompile(`/sq/\d+`)
 
+// DashDRM says which kinds of stream a DASH manifest lost whole to DRM: Video
+// (or Audio) is true when ParseDash skipped at least one video (audio)
+// Representation as DRM-protected and kept none of that kind. A kind the
+// manifest never listed is false, as is one with a clean Representation left.
+type DashDRM struct {
+	Video, Audio bool
+}
+
 // ParseDash parses a DASH MPD manifest and returns available streams. A
 // Representation that carries ContentProtection, or sits in an AdaptationSet
 // that does, is left out (isDRMProtected); when that leaves nothing, the
 // error is ErrDRMProtected.
 func ParseDash(xmlContent string, manifestURL string) ([]DashStream, error) {
+	streams, _, err := ParseDashDRM(xmlContent, manifestURL)
+	return streams, err
+}
+
+// ParseDashDRM is ParseDash, and which kinds the DRM skip emptied (DashDRM).
+// A manifest whose every video Representation is protected while its audio
+// is clear parses without error — its audio is still recordable — and says
+// so in DashDRM.Video, which is how DownloadDash (internal/worker) tells a
+// video stream it could not find because it is DRM-protected from one the
+// manifest never had, and falls to the extraction's HLS manifest for the
+// first (owner decision FE-1), as yt-dlp drops the has_drm formats and takes
+// whatever playable format remains (YoutubeDL.py, the has_drm filter in
+// process_video_result).
+func ParseDashDRM(xmlContent string, manifestURL string) ([]DashStream, DashDRM, error) {
 	var mpd mpdXML
 	if err := xml.Unmarshal([]byte(xmlContent), &mpd); err != nil {
-		return nil, fmt.Errorf("parse MPD XML: %w", err)
+		return nil, DashDRM{}, fmt.Errorf("parse MPD XML: %w", err)
 	}
 
 	if len(mpd.Periods) == 0 {
-		return nil, nil
+		return nil, DashDRM{}, nil
 	}
 
 	// Resolve the manifest's directory base once (used both when there is no
@@ -318,6 +341,9 @@ func ParseDash(xmlContent string, manifestURL string) ([]DashStream, error) {
 
 	var streams []DashStream
 	drmSkipped := 0
+	// Per kind ("video", "audio"): Representations skipped as DRM-protected,
+	// and clean ones kept.
+	drmByKind, keptByKind := map[string]int{}, map[string]int{}
 
 	for _, period := range mpd.Periods {
 		periodBase := mpdBaseURL
@@ -341,25 +367,47 @@ func ParseDash(xmlContent string, manifestURL string) ([]DashStream, error) {
 			for _, rep := range as.Representations {
 				if isDRMProtected(as, rep) {
 					drmSkipped++
+					drmByKind[dashKind(as, rep)]++
 					continue
 				}
 				stream := parseDashRepresentation(rep, as, period, periodBase)
 				if stream != nil {
 					streams = append(streams, *stream)
+					keptByKind[dashKind(as, rep)]++
 				}
 			}
 		}
 	}
 
+	drm := DashDRM{
+		Video: drmByKind["video"] > 0 && keptByKind["video"] == 0,
+		Audio: drmByKind["audio"] > 0 && keptByKind["audio"] == 0,
+	}
 	if drmSkipped > 0 {
 		if len(streams) == 0 {
-			return nil, fmt.Errorf("%w: every Representation in the DASH manifest carries ContentProtection (%d skipped) — its segments are encrypted, and an archive of them would not play",
+			return nil, drm, fmt.Errorf("%w: every Representation in the DASH manifest carries ContentProtection (%d skipped) — its segments are encrypted, and an archive of them would not play",
 				ErrDRMProtected, drmSkipped)
 		}
 		slog.Debug("manifest: skipped DRM-protected representations (ContentProtection)",
 			"skipped", drmSkipped, "kept", len(streams))
 	}
-	return streams, nil
+	return streams, drm, nil
+}
+
+// dashKind is a Representation's kind, "video" or "audio", from its own
+// mimeType or else its AdaptationSet's; "" for anything else (text tracks).
+func dashKind(as adaptationSetXML, rep representationXML) string {
+	mime := rep.MimeType
+	if mime == "" {
+		mime = as.MimeType
+	}
+	switch {
+	case strings.HasPrefix(mime, "video/"):
+		return "video"
+	case strings.HasPrefix(mime, "audio/"):
+		return "audio"
+	}
+	return ""
 }
 
 // isDRMProtected reports whether a Representation is DRM-protected: it, or

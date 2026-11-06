@@ -136,16 +136,18 @@ func (a *Auth) GenerateAPIHeaders(client constants.YouTubeClientConfig, ytcfg *Y
 	// alone, so a session YouTube's own page had just answered logged out
 	// still claimed a logged-in bootstrap on every call made under it.
 	//
-	// Moombox applies it to the ytcfg the call carries — the master watch
-	// page's, or the kept session's (probeYtcfg) — on every client. That
-	// diverges from upstream per client: yt-dlp reads each client's own
-	// player ytcfg (_video.py:3064-3066), which _download_ytcfg leaves empty
-	// for tv_samsung, android_vr and visionos (_base.py:1013-1024), so its
-	// calls by those clients never carry the header, while Moombox's
-	// tv_samsung cascade call and status probe, the web_safari schedule
-	// probe, /browse and chat carry the page's verdict, as they carry the
-	// page's session (W15).
-	if ytcfg != nil && ytcfg.LoginState == SessionAuthLoggedIn {
+	// And only from a client that carries a page ytcfg of its own
+	// (clientCarriesPageYtcfg), as yt-dlp builds the header per client from
+	// that client's player ytcfg (_video.py:3064-3066, generate_api_headers'
+	// ytcfg): _download_ytcfg leaves it empty for tv_samsung, android_vr and
+	// visionos (_base.py:1013-1024), so upstream's calls by those clients
+	// never carry the header. Moombox hands every client the master watch
+	// page's ytcfg, or the kept session's (probeYtcfg), for its session
+	// identity and Authorization binding (W15, W21) — those stay on every
+	// client — but the logged-in bootstrap claim went out on the tv_samsung
+	// cascade call and status probe, android_vr and visionos too, a header
+	// those clients' own apps never send.
+	if ytcfg != nil && ytcfg.LoginState == SessionAuthLoggedIn && clientCarriesPageYtcfg(client) {
 		headers["X-Youtube-Bootstrap-Logged-In"] = "true"
 	}
 
@@ -155,6 +157,24 @@ func (a *Auth) GenerateAPIHeaders(client constants.YouTubeClientConfig, ytcfg *Y
 	)
 
 	return headers
+}
+
+// clientCarriesPageYtcfg reports whether yt-dlp would build this client's
+// Innertube headers from a page ytcfg: web (the watch page's own,
+// webpage_ytcfg), web_safari (www.youtube.com read under its UA), web_creator
+// (studio.youtube.com) and web_embedded (the embed page) are in
+// _download_ytcfg's page map (_base.py:1013-1024); tv_samsung, tv_downgraded,
+// android_vr and visionos are not and carry {}. /browse goes out as web, and
+// chat builds its own headers (Service.ChatSessionHeaders) off the watch
+// page's ytcfg, as yt-dlp's live chat downloader does. Keyed on the
+// Innertube client name, which the four page-carrying clients and the
+// page-less ones never share.
+func clientCarriesPageYtcfg(client constants.YouTubeClientConfig) bool {
+	switch client.ClientName {
+	case "WEB", "WEB_CREATOR", "WEB_EMBEDDED_PLAYER":
+		return true
+	}
+	return false
 }
 
 // accountSessionHeaders is the signed-in account's identity a ytcfg names, as

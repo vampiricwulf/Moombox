@@ -538,6 +538,17 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				"err", downloadErr, "jobID", jobCtx.Job.ID)
 			return result, waitedForResume.value(), downloadErr
 		}
+		// Nor can one whose playlist the engine refused as encrypted (the HLS
+		// the DRM fallback fell to, drmHlsFallback, or one that turned
+		// encrypted mid-stream): every refresh would fetch the same key.
+		// Read as a possible stream end, it would be re-verified and then
+		// finished over whatever was recorded before the key appeared, with
+		// nothing said (owner decision FE-1).
+		if errors.Is(downloadErr, engine.ErrDRMProtected) {
+			o.logger.Error("the stream is DRM-protected — stopping",
+				"err", downloadErr, "jobID", jobCtx.Job.ID)
+			return result, waitedForResume.value(), drmUnrecordable(downloadErr)
+		}
 
 		// Check for reactive quality loss (download loop returned ErrQualityLost)
 		isQualityLost := errors.Is(downloadErr, engine.ErrQualityLost)

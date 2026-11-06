@@ -292,19 +292,20 @@ func TestHlsAudioOnlyKeepsTheOriginalLanguage(t *testing.T) {
 	}
 }
 
-// TestManifestAudioTakesItsItagsQualityAndChannels: a DASH manifest states
-// no audioQuality or channel count, so manifestStreamInfos fills both from
-// the extraction's copy of the same itag — the quality as yt-dlp's
-// itag_qualities fill (_video.py:3670), the channels beyond upstream so this
-// path ranks like VOD (D14, D15). Without the fill the codec rung decided
-// and stereo Opus 251 beat the E-AC-3 5.1 328 that SelectBestFormats picks
-// from the same two (and that the old bandwidth-only rule picked); with no
-// copy of an itag the rungs tie and the codec decides, as upstream's do.
+// TestManifestAudioTakesItsItagsQualityNotItsChannels: a DASH manifest
+// states no audioQuality, so manifestStreamInfos fills it from the
+// extraction's copy of the same itag, as yt-dlp's itag_qualities fill does
+// (_video.py:3670). It states no channel count either, and that stays
+// unstated (owner decision FE-11): yt-dlp's MPD parse reads none, so every
+// manifest track ties on channels and at one quality the codec rung decides
+// — stereo Opus 251 over E-AC-3 5.1 328, where the VOD selector, which reads
+// the format's own channel count (D15), picks 328 from the same two.
 //
-// Mutants (each run): the fill dropped (251 wins the first row); the
-// channels fill dropped (251 wins); the quality fill dropped (the LOW 5.1
-// row's 328 beats the MEDIUM stereo 251 on channels).
-func TestManifestAudioTakesItsItagsQualityAndChannels(t *testing.T) {
+// Mutants (each run): the channel count borrowed again from the itag's copy,
+// as W20 had it (the first row's manifest pick is 328); the quality fill
+// dropped (the MEDIUM 328 over the LOW 251 row's manifest pick is 251); the
+// VOD selector's channels rung dropped (the first row's VOD pick is 251).
+func TestManifestAudioTakesItsItagsQualityNotItsChannels(t *testing.T) {
 	streams := []engine.DashStream{
 		{Itag: 251, MimeType: "audio/webm", Codecs: "opus", Bandwidth: 160_000, BaseURL: "https://x/251"},
 		{Itag: 328, MimeType: "audio/mp4", Codecs: "ec-3", Bandwidth: 384_000, BaseURL: "https://x/328"},
@@ -315,27 +316,32 @@ func TestManifestAudioTakesItsItagsQualityAndChannels(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		formats []youtube.Format
-		want    int
+		want    int // the manifest's pick
+		wantVOD int // the VOD selector's pick from the same itags
 	}{
-		{"5.1 over stereo at one quality", []youtube.Format{
+		{"one quality: the manifest ties on channels, VOD takes 5.1", []youtube.Format{
 			audioFormat(251, `audio/webm; codecs="opus"`, "AUDIO_QUALITY_MEDIUM", 2),
 			audioFormat(328, `audio/mp4; codecs="ec-3"`, "AUDIO_QUALITY_MEDIUM", 6),
-		}, 328},
+		}, 251, 328},
+		{"the itag's quality decides before the codec", []youtube.Format{
+			audioFormat(251, `audio/webm; codecs="opus"`, "AUDIO_QUALITY_LOW", 2),
+			audioFormat(328, `audio/mp4; codecs="ec-3"`, "AUDIO_QUALITY_MEDIUM", 6),
+		}, 328, 328},
 		{"quality before channels", []youtube.Format{
 			audioFormat(251, `audio/webm; codecs="opus"`, "AUDIO_QUALITY_MEDIUM", 2),
 			audioFormat(328, `audio/mp4; codecs="ec-3"`, "AUDIO_QUALITY_LOW", 6),
-		}, 251},
-		{"no copy of the itags: the codec decides", nil, 251},
+		}, 251, 251},
+		{"no copy of the itags: the codec decides", nil, 251, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := SelectBestDashStream(manifestStreamInfos(streams, youtube.AudioLanguages{}, tc.formats), 0, 1080, false, "", true, true)
 			if got == nil || got.Itag != tc.want {
-				t.Errorf("audio = %+v, want %d", got, tc.want)
+				t.Errorf("manifest audio = %+v, want %d", got, tc.want)
 			}
 			if tc.formats != nil {
 				vod := youtube.SelectBestFormats(tc.formats, 1080, true, true)
-				if vod.Audio == nil || vod.Audio.Itag != tc.want {
-					t.Errorf("the VOD selector picks %+v from the same itags, want %d", vod.Audio, tc.want)
+				if vod.Audio == nil || vod.Audio.Itag != tc.wantVOD {
+					t.Errorf("the VOD selector picks %+v from the same itags, want %d", vod.Audio, tc.wantVOD)
 				}
 			}
 		})

@@ -275,7 +275,8 @@ const archiveChaptersFile = "chapters.ffmeta"
 // prepareArchiveChapters writes the chapter list a single-file archive is
 // muxed with and returns its path, "" for none. The staged Twitch list wins;
 // a live Twitch job with none staged (the Mux action over a crashed capture)
-// is given its observed categories; a YouTube VOD asks youtubeChapters. Every
+// is given its observed categories; a YouTube VOD, or a live YouTube capture
+// recorded from sq=0, asks youtubeChapters. Every
 // list is fitted to the staged media's span (utils.SanitizeChapters) — the
 // row's length is the fallback when the probe cannot measure it.
 func (o *DownloadOrchestrator) prepareArchiveChapters(ctx context.Context, jobCtx *JobContext, videoPath, audioPath string) string {
@@ -296,7 +297,15 @@ func (o *DownloadOrchestrator) prepareArchiveChapters(ctx context.Context, jobCt
 		}
 		list = liveTwitchChapters(start, readTwitchTimeline(jobCtx.StagingDir), nil)
 	}
-	needYouTube := len(list) == 0 && !isTwitch && job.IsVod && jobCtx.YT != nil && job.VideoID != ""
+	// A YouTube VOD asks for its chapters, and so does a live capture whose
+	// recording began at sq=0 (owner decision FE-18): it holds the broadcast
+	// from its first frame, the VOD's own timeline, so the description's
+	// timestamps land where they belong. A capture that joined late — the
+	// live edge, a restart past the head — or whose start is unknown
+	// (recordedFromStart) gets none: its timeline starts somewhere the
+	// chapters do not know.
+	fromStart := job.IsVod || recordedFromStart(videoPath, audioPath)
+	needYouTube := len(list) == 0 && !isTwitch && fromStart && jobCtx.YT != nil && job.VideoID != ""
 	if len(list) == 0 && !needYouTube {
 		return ""
 	}

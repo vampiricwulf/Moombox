@@ -433,7 +433,10 @@ func (p *PlayerAPI) captureVisitorData(ytcfg *YtcfgData, account string) {
 	// homepage read that account still wants (claimSessionRead) is still
 	// made. Its logged-out answer — cookies YouTube stopped honouring — is
 	// what stops the probes and chat sending X-Youtube-Bootstrap-Logged-In
-	// on a session its own page just denied. Another account's logged-out
+	// on a session its own page just denied — those that send it at all: the
+	// header goes only from a client that carries a page ytcfg
+	// (clientCarriesPageYtcfg), so the web_safari schedule probe and chat,
+	// never the tv_samsung status probe. Another account's logged-out
 	// page changes nothing: it has no claim of its own to withdraw.
 	if ytcfg.LoginState == SessionAuthUnknown {
 		return

@@ -50,7 +50,7 @@ const pageRetryShare = 3
 // pageStatusError is a page fetch answered with a status outside 2xx. Its
 // text is the one FetchWatchPage has always returned for it.
 type pageStatusError struct {
-	what   string // "watch page", "iframe API"
+	what   string // "watch page", "iframe API", "embed page"
 	status int
 	url    string
 }
@@ -104,7 +104,8 @@ func pageRetryable(err error) bool {
 // fetchYouTubePage GETs a YouTube page and returns its body, retrying what
 // pageRetryable allows up to pageFetchAttempts times — yt-dlp's
 // _download_webpage_with_retries, which serves the watch page
-// (_video.py:3815-3819) and the iframe API (_video.py:2162-2165) alike.
+// (_video.py:3815-3819), the iframe API (_video.py:2162-2165) and the embed
+// page (_download_ytcfg, _base.py:1030-1035) alike.
 // Each attempt has timeout to itself; body reads at most maxBytes, silently
 // truncated past that as the watch page's read always was. what names the
 // page in the errors.

@@ -166,8 +166,8 @@ func TestHlsRefusesAnEncryptedPlaylistBeforeTheFirstWrite(t *testing.T) {
 // ParseDash's streams — yt-dlp's is_drm_protected marks it has_drm and the
 // format is dropped (extractor/common.py, YoutubeDL.py) — and a manifest with
 // nothing else left is ErrDRMProtected, in the DRM wording, so DashStrategy
-// fails with it and the job ends on that error, not on an archive of
-// ciphertext (no other strategy is tried). ParseDash took every Representation,
+// fails with it rather than archive ciphertext (and falls to the HLS
+// manifest when there is one, drmHlsFallback). ParseDash took every Representation,
 // so a protected manifest was recorded as ciphertext.
 //
 // Mutant: dropping the isDRMProtected skip — the protected representations
@@ -236,4 +236,60 @@ func TestParseDashSkipsContentProtection(t *testing.T) {
 			t.Errorf("error = %q, want the DRM wording and the count", err)
 		}
 	})
+}
+
+// TestParseDashDRMSaysWhichKindWasLost: ParseDashDRM reports a kind whose
+// every Representation the DRM skip took (owner decision FE-1) — a protected
+// video AdaptationSet beside clear audio parses without error, its audio
+// kept, and says Video; one protected video Representation beside a clean
+// one says nothing; every Representation protected says both beside
+// ErrDRMProtected. The kind comes from the Representation's mimeType, else
+// its AdaptationSet's.
+//
+// Mutants: the kind read from the AdaptationSet alone (the
+// representation-mimeType row says nothing); a kind lost on any skip, kept
+// ones ignored (the one-protected row says Video); the flags never set
+// (the protected-set rows say nothing).
+func TestParseDashDRMSaysWhichKindWasLost(t *testing.T) {
+	const cp = `<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc"/>`
+	rep := func(id, mime, prot string) string {
+		attr := ""
+		if mime != "" {
+			attr = ` mimeType="` + mime + `"`
+		}
+		return `<Representation id="` + id + `" bandwidth="1000"` + attr + `>` + prot + `<BaseURL>https://cdn.example/` + id + `/</BaseURL></Representation>`
+	}
+	set := func(mime, prot string, reps ...string) string {
+		attr := ""
+		if mime != "" {
+			attr = ` mimeType="` + mime + `"`
+		}
+		return `<AdaptationSet` + attr + `>` + prot + strings.Join(reps, "") + `</AdaptationSet>`
+	}
+	doc := func(sets ...string) string {
+		return `<?xml version="1.0"?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period>` + strings.Join(sets, "") + `</Period></MPD>`
+	}
+	for _, tc := range []struct {
+		name    string
+		doc     string
+		want    DashDRM
+		wantErr bool
+	}{
+		{"in the clear", doc(set("video/mp4", "", rep("137", "", "")), set("audio/mp4", "", rep("140", "", ""))), DashDRM{}, false},
+		{"protected video set, clear audio", doc(set("video/mp4", cp, rep("137", "", ""), rep("136", "", "")), set("audio/mp4", "", rep("140", "", ""))), DashDRM{Video: true}, false},
+		{"protected audio set, clear video", doc(set("video/mp4", "", rep("137", "", "")), set("audio/mp4", cp, rep("140", "", ""))), DashDRM{Audio: true}, false},
+		{"one video protected, one clear", doc(set("video/mp4", "", rep("137", "", cp), rep("136", "", "")), set("audio/mp4", "", rep("140", "", ""))), DashDRM{}, false},
+		{"the kind on the Representation", doc(set("", "", rep("137", "video/mp4", cp), rep("140", "audio/mp4", ""))), DashDRM{Video: true}, false},
+		{"everything protected", doc(set("video/mp4", cp, rep("137", "", "")), set("audio/mp4", cp, rep("140", "", ""))), DashDRM{Video: true, Audio: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, drm, err := ParseDashDRM(tc.doc, "https://manifest.example/dash.mpd")
+			if (err != nil) != tc.wantErr || (tc.wantErr && !errors.Is(err, ErrDRMProtected)) {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if drm != tc.want {
+				t.Errorf("DashDRM = %+v, want %+v", drm, tc.want)
+			}
+		})
+	}
 }
