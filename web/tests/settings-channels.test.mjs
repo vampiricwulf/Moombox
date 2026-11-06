@@ -269,3 +269,27 @@ test("a 409 from a stale list reloads it and switches to editing the channel", {
   assert.equal(h.http.matching("/api/config/channels", "POST").length, 1);
   assertEditingStored(h);
 });
+
+// Owner decisions D17 follow-up 3 and D18: a Twitch channel's dialog shows the
+// two Twitch-only options, filled from the stored channel, and posts them; a
+// YouTube channel's dialog hides them.
+// Mutants killed: the save not sending them (the post lacks
+// twitch_gap_fill_ad_breaks); the dialog not filling them (the checkbox reads
+// unchecked); the row shown for YouTube.
+test("the channel dialog fills and posts the Twitch-only options", { skip }, async () => {
+  const stored = { id: "streamer", platform: "twitch", twitch_vod_backlog: true };
+  const h = await openWith([structuredClone(stored)]);
+  h.app.settings.editChannel("streamer");
+  assert.equal(h.el("channel-twitch-options-row").style.display, "", "shown for Twitch");
+  assert.equal(h.el("channel-twitch-vod-backlog").checked, true, "filled from the stored channel");
+  assert.equal(h.el("channel-twitch-gap-fill-ads").checked, false);
+  h.el("channel-twitch-gap-fill-ads").checked = true;
+  await h.app.settings.saveChannel();
+  await h.flush();
+  const post = h.http.matching("/api/config/channels", "POST").at(-1);
+  assert.equal(post?.body?.twitch_gap_fill_ad_breaks, true);
+  assert.equal(post?.body?.twitch_vod_backlog, true);
+
+  h.app.settings.showAddChannelDialog();
+  assert.equal(h.el("channel-twitch-options-row").style.display, "none", "hidden for YouTube");
+});

@@ -1192,6 +1192,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 	decapiMon.IsOnline = s.connMon.IsOnline
 	twitchMon.IsOnline = s.connMon.IsOnline
 
+	// The per-channel Twitch VOD backlog (owner decision D18): its rows are
+	// Queued backlog VODs, so the scheduler is woken for them.
+	s.twitchBacklog = monitor.NewTwitchBacklog(s.configStore, db, twService, log)
+	s.twitchBacklog.IsOnline = s.connMon.IsOnline
+	s.twitchBacklog.OnQueued = func(int) { dlWorker.Scheduler().Wake() }
+
 	// =========================================================================
 	// 15. Cookie refresh service
 	// =========================================================================

@@ -790,8 +790,11 @@ func TestAdvanceToNewPartCallSitesAllLatch(t *testing.T) {
 		return true
 	})
 
-	if len(sites) != 5 {
-		t.Errorf("found %d advanceToNewPart call sites (%v), want exactly 5 — a new one needs its "+
+	// Six: the gap, init-change and quality splits, their refresh-failure
+	// tail split, the post-outage quality change, and the ad-break split
+	// (owner decision D17 follow-up 3), which latches like the rest.
+	if len(sites) != 6 {
+		t.Errorf("found %d advanceToNewPart call sites (%v), want exactly 6 — a new one needs its "+
 			"own latch decision, and a vanished one means this pin is reading the wrong thing",
 			len(sites), sites)
 	}

@@ -652,6 +652,18 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
+		// A Twitch channel video list or collection (owner decision D18)
+		// queues one VOD job per video rather than making one job.
+		if body.Platform == "twitch" && body.TwitchType == TwitchListingType {
+			if body.OutputDirectory != "" && strings.Contains(body.OutputDirectory, "..") {
+				jsonError(rw, "output directory must not contain path traversal", http.StatusBadRequest)
+				return
+			}
+			addTwitchListing(rw, req, db, store, w, twitchFetcher, body.URL,
+				body.QualityPreference, body.OutputDirectory)
+			return
+		}
+
 		videoID := body.VideoID
 		if videoID == "" && body.URL != "" {
 			videoID = extractVideoIDFromURL(body.URL)

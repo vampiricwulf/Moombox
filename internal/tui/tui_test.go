@@ -555,8 +555,11 @@ func TestExtractTwitchTargetSharedURLTable(t *testing.T) {
 			wantID, wantType = "tw_v"+row.Value, "twitch"
 		case "clip":
 			wantType = "twitch_clip"
-		case "videos", "clips", "collection":
-			wantType = "twitch_listing"
+		case "videos", "collection":
+			// The input itself: the add posts it as the listing's URL.
+			wantID, wantType = row.Input, "twitch_listing"
+		case "clips":
+			wantType = "twitch_clips"
 		}
 		if gotID, gotType := extractTwitchTarget(row.Input); gotID != wantID || gotType != wantType {
 			t.Errorf("extractTwitchTarget(%q) = (%q, %q), want (%q, %q)", row.Input, gotID, gotType, wantID, wantType)

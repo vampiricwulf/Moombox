@@ -2539,8 +2539,15 @@ export class MoomboxApp {
           this.showToast("Twitch clips are not supported yet. Use a channel or VOD URL.", "warning");
           return;
         }
-        if (target.type !== "channel" && target.type !== "vod") {
-          this.showToast("Twitch video lists and collections are not supported yet. Use a channel or VOD URL.", "warning");
+        if (target.type === "clips") {
+          this.showToast("Twitch clip lists are not supported yet. Use a channel, VOD, video list or collection URL.", "warning");
+          return;
+        }
+        if (target.type === "videos" || target.type === "collection") {
+          // A channel's video list or a collection (owner decision D18): the
+          // server reads the listing — the URL as pasted, so its ?filter=
+          // and ?sort= reach it — and queues one VOD job per video.
+          await this.addTwitchListing(value);
           return;
         }
         // Twitch job
@@ -2605,6 +2612,27 @@ export class MoomboxApp {
       submitBtn.loading = false;
       submitBtn.disabled = false;
     }
+  }
+
+  /**
+   * Queue a Twitch video list or collection (POST /api/jobs, twitchType
+   * "listing"): the server answers with how many VOD jobs it queued and
+   * skipped. The dialog closes once anything was listed.
+   */
+  async addTwitchListing(url) {
+    const response = await fetch("/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ platform: "twitch", twitchType: "listing", url }),
+    });
+    const data = await response.json().catch(() => ({ error: response.statusText }));
+    if (!response.ok) {
+      this.showToast(data.error || "Failed to add the Twitch listing", "danger");
+      return;
+    }
+    document.getElementById("add-dialog").hide();
+    const skipped = data.skipped ? `, ${data.skipped} already queued` : "";
+    this.showToast(`Queued ${data.added} Twitch VOD${data.added === 1 ? "" : "s"}${skipped}`, "success");
   }
 
   /**
@@ -3549,7 +3577,8 @@ export class MoomboxApp {
    * /<ch>/schedule?vodID=<id>; player.twitch.tv ?video=v<id> / ?channel=;
    * clips with or without a channel; and the listings — /<ch>/videos,
    * /<ch>/profile, /<ch>/clips, /collections/<id> — which parse to their own
-   * types so they are refused rather than read as a channel's live-wait job.
+   * types so none is read as a channel's live-wait job: a video list or a
+   * collection queues its VODs (addTwitchListing), a clip list is refused.
    * Returns { platform: "twitch", type, id } or null; type is channel, vod,
    * clip, videos, clips or collection.
    */

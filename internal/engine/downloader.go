@@ -89,6 +89,16 @@ var ErrTruncateBlocked = errors.New("truncate for resume blocked")
 // triggers this — see ensureHlsInit.
 var ErrInitSegmentChanged = errors.New("HLS init segment changed")
 
+// ErrAdBreakEnded signals that a Twitch stitched-ad break the live loop
+// skipped has ended and DownloaderOptions.SplitOnAdBreak is set: the loop
+// stops before writing the first content segment after the break, its
+// position NOT advanced past it, so the caller can close the current file as
+// a finished part and start a fresh one there. The hole the break left then
+// sits between two parts, where a gap-fill from the broadcast's archive VOD
+// can insert the footage the break replaced as a part of its own (owner
+// decision D17 follow-up 3). Only returned when the file already holds data.
+var ErrAdBreakEnded = errors.New("stitched-ad break ended")
+
 // ErrInitSegmentUnavailable signals that a DASH download could not obtain the
 // ftyp+moov init its media needs — a manifest Initialization, or the sq=0 a
 // manifest-free stream carries it in — after the retries and credential
@@ -386,6 +396,20 @@ type DownloaderOptions struct {
 	// skipped, not written, so the first CONTENT segment is the one reported.
 	// Optional; runs on the download goroutine, so it must not block.
 	OnFirstSegment func(programDateTime time.Time)
+	// OnSegmentWritten is called from the HLS live loop after each media
+	// segment it writes, with that segment's program date-time and EXTINF
+	// duration (seconds), when the playlist carries a date-time (it is
+	// skipped for a zero one). The Twitch capture records from it the
+	// wall-clock span each part's file holds, which is what maps a part's
+	// gaps onto the broadcast's archive VOD (owner decision D17). Optional;
+	// runs on the download goroutine, so it must not block.
+	OnSegmentWritten func(programDateTime time.Time, durationSec float64)
+	// SplitOnAdBreak makes the HLS live loop return ErrAdBreakEnded at the
+	// first content segment after a stitched-ad break, when the file already
+	// holds data. Set for a Twitch channel whose ad breaks are gap-filled
+	// (twitch_gap_fill_ad_breaks); without it the loop rides over the break
+	// and the file keeps an inline timestamp jump where it was.
+	SplitOnAdBreak bool
 	// OnCredentialRefresh is called when segments 403 while the downloader is
 	// still behind the live head — i.e. the segments demonstrably exist and
 	// our credentials, not the stream, are the problem. The callback should

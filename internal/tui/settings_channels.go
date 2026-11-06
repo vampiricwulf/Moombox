@@ -27,16 +27,18 @@ func channelToValues(ch config.ChannelConfig) map[string]string {
 		enabled = "No"
 	}
 	return map[string]string{
-		"id":                  ch.ID,
-		"name":                ch.Name,
-		"platform":            ch.GetPlatform(),
-		"enabled":             enabled,
-		"terms":               terms,
-		"include_non_live":    boolToDisplay(ch.IncludeNonLiveContent),
-		"quality_preference":  cmp.Or(ch.QualityPreference, "best"),
-		"output_directory":    ch.OutputDirectory,
-		"archive_window_days": optIntString(ch.ArchiveWindowDays),
-		"archive_slots":       optIntString(ch.ArchiveSlots),
+		"id":                        ch.ID,
+		"name":                      ch.Name,
+		"platform":                  ch.GetPlatform(),
+		"enabled":                   enabled,
+		"terms":                     terms,
+		"include_non_live":          boolToDisplay(ch.IncludeNonLiveContent),
+		"quality_preference":        cmp.Or(ch.QualityPreference, "best"),
+		"output_directory":          ch.OutputDirectory,
+		"archive_window_days":       optIntString(ch.ArchiveWindowDays),
+		"archive_slots":             optIntString(ch.ArchiveSlots),
+		"twitch_gap_fill_ad_breaks": boolToDisplay(ch.TwitchGapFillAdBreaks),
+		"twitch_vod_backlog":        boolToDisplay(ch.TwitchVodBacklog),
 	}
 }
 
@@ -103,6 +105,8 @@ func valuesToChannel(vals map[string]string, existing *config.ChannelConfig) con
 	ch.OutputDirectory = strings.TrimSpace(vals["output_directory"])
 	ch.ArchiveWindowDays = optIntFromString(vals["archive_window_days"])
 	ch.ArchiveSlots = optIntFromString(vals["archive_slots"])
+	ch.TwitchGapFillAdBreaks = vals["platform"] == "twitch" && vals["twitch_gap_fill_ad_breaks"] == "Yes"
+	ch.TwitchVodBacklog = vals["platform"] == "twitch" && vals["twitch_vod_backlog"] == "Yes"
 	return ch
 }
 
@@ -419,6 +423,10 @@ func writeChannelField(dst *config.ChannelConfig, src config.ChannelConfig, key 
 		dst.ArchiveWindowDays = src.ArchiveWindowDays
 	case "archive_slots":
 		dst.ArchiveSlots = src.ArchiveSlots
+	case "twitch_gap_fill_ad_breaks":
+		dst.TwitchGapFillAdBreaks = src.TwitchGapFillAdBreaks
+	case "twitch_vod_backlog":
+		dst.TwitchVodBacklog = src.TwitchVodBacklog
 	default:
 		return false
 	}

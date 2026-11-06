@@ -304,12 +304,15 @@ func TestExtractTwitchTargetSharedURLTable(t *testing.T) {
 }
 
 // TestTwitchTargetUnsupported pins which kinds the add paths refuse until
-// their jobs exist: clips (D26's clip job is a later wave) and the listings
-// (W14), each with its own message; a channel and a VOD are accepted.
+// their jobs exist: clips (D26's clip job is a later wave) and clip lists, each
+// with its own message; a channel, a VOD, a channel's video list and a
+// collection (owner decision D18, W14) are accepted.
+//
+// Mutant: the listings left refused (videos and collection fail).
 func TestTwitchTargetUnsupported(t *testing.T) {
 	for typ, wantRefused := range map[TwitchTargetType]bool{
 		TwitchChannel: false, TwitchVOD: false, TwitchClip: true,
-		TwitchVideosListing: true, TwitchClipsListing: true, TwitchCollection: true,
+		TwitchVideosListing: false, TwitchClipsListing: true, TwitchCollection: false,
 	} {
 		if got := (&TwitchTarget{Type: typ}).Unsupported() != ""; got != wantRefused {
 			t.Errorf("%s: refused = %v, want %v", typ, got, wantRefused)
@@ -317,5 +320,22 @@ func TestTwitchTargetUnsupported(t *testing.T) {
 	}
 	if (*TwitchTarget)(nil).Unsupported() != "" {
 		t.Error("a nil target has no refusal")
+	}
+}
+
+// TestTwitchVideosQuery reads a pasted /<ch>/videos URL's ?filter= and ?sort=,
+// with or without its scheme, as yt-dlp's TwitchVideosIE parse_qs does.
+//
+// Mutant: the sort read from "filter" (the views row fails).
+func TestTwitchVideosQuery(t *testing.T) {
+	for in, want := range map[string][2]string{
+		"https://www.twitch.tv/spamfish/videos?filter=archives&sort=views": {"archives", "views"},
+		"twitch.tv/spamfish/videos?filter=highlights":                      {"highlights", ""},
+		"https://www.twitch.tv/spamfish/videos":                            {"", ""},
+		"spamfish":                                                         {"", ""},
+	} {
+		if f, s := TwitchVideosQuery(in); f != want[0] || s != want[1] {
+			t.Errorf("TwitchVideosQuery(%q) = (%q, %q), want %v", in, f, s, want)
+		}
 	}
 }

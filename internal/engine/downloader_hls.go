@@ -579,6 +579,12 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				d.logger.Info("[Downloader] Twitch stitched-ad break ended",
 					"adSegmentsSkipped", adSegmentsSkipped, "resumeSeq", d.currentSeq.Load())
 				adSegmentsSkipped = 0
+				// Gap-filled ad breaks: end the part here, before this first
+				// content segment, which the successor re-fetches at the
+				// same position (currentSeq has not advanced past it).
+				if d.opts.SplitOnAdBreak && d.bytesWritten.Load() > 0 {
+					return ErrAdBreakEnded
+				}
 			}
 
 			segData, segStatus, segErr := d.fetchSegment(ctx, seg.URL)
@@ -755,6 +761,9 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				if d.opts.OnFirstSegment != nil {
 					d.opts.OnFirstSegment(seg.ProgramDateTime)
 				}
+			}
+			if d.opts.OnSegmentWritten != nil && !seg.ProgramDateTime.IsZero() {
+				d.opts.OnSegmentWritten(seg.ProgramDateTime, seg.Duration)
 			}
 
 			if d.OnProgress != nil {

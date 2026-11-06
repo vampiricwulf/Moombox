@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 24
+const schemaVersion = 25
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -242,6 +242,12 @@ CREATE INDEX IF NOT EXISTS idx_feed_items_recheck ON feed_items(channel_id, rech
 
 CREATE TABLE IF NOT EXISTS feed_reprobe_owed (
     channel_id TEXT PRIMARY KEY  -- v24: owed one reset of its in-scope not_a_stream rows (ResetMisfiledFeedItems)
+);
+
+CREATE TABLE IF NOT EXISTS twitch_gap_fills (
+    job_id        TEXT PRIMARY KEY,  -- v25: a finished live Twitch job owed a gap-fill from its archive VOD
+    plan          TEXT NOT NULL,     -- the worker's plan (JSON): spans, deadline, attempts
+    next_check_at TEXT NOT NULL      -- RFC3339 UTC: when the worker looks at it again
 );
 `
 
@@ -768,6 +774,15 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 25 {
+		if _, err := db.db.ExecContext(db.getCtx(), createTwitchGapFillsSQL); err != nil {
+			return fmt.Errorf("v25 table: %w", err)
+		}
+		if err := db.writeUserVersion(25); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -1022,4 +1037,15 @@ func (db *Database) migrateV24() error {
 const createFeedReprobeOwedSQL = `
 CREATE TABLE IF NOT EXISTS feed_reprobe_owed (
     channel_id TEXT PRIMARY KEY
+)`
+
+// createTwitchGapFillsSQL is v25's table: one row per finished live Twitch
+// job that is owed a gap-fill from its broadcast's archive VOD (owner decision
+// D17, internal/worker/twitch_gapfill.go). The plan is the worker's own JSON;
+// next_check_at is all the database reads of it. Idempotent.
+const createTwitchGapFillsSQL = `
+CREATE TABLE IF NOT EXISTS twitch_gap_fills (
+    job_id        TEXT PRIMARY KEY,
+    plan          TEXT NOT NULL,
+    next_check_at TEXT NOT NULL
 )`

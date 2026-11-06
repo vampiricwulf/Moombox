@@ -1674,6 +1674,16 @@
                     >Also archive uploads &amp; premieres (YouTube only)</sl-checkbox
                 >
             </div>
+            <div id="channel-twitch-options-row" style="display: none">
+                <sl-checkbox id="channel-twitch-gap-fill-ads"
+                    help-text="Lost-data gaps (late start, restart, outage) are always filled from the archive VOD; this also fills skipped ad breaks."
+                    >Fill ad breaks from the archive VOD (Twitch only)</sl-checkbox
+                >
+                <sl-checkbox id="channel-twitch-vod-backlog"
+                    help-text="List the channel's videos hourly and queue each new one as a backlog VOD, paced by archive slots."
+                    >Queue past VODs, highlights &amp; uploads (Twitch only)</sl-checkbox
+                >
+            </div>
             <div id="channel-quality-row">
                 <sl-select
                     id="channel-quality-select"

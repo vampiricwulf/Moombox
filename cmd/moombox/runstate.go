@@ -79,6 +79,9 @@ type runState struct {
 	feedMon   *monitor.FeedMonitor
 	decapiMon *monitor.DecapiMonitor
 	twitchMon *monitor.TwitchMonitor
+	// twitchBacklog is the opt-in Twitch VOD backlog (twitch_vod_backlog);
+	// it winds down with the run context.
+	twitchBacklog *monitor.TwitchBacklog
 	// backfillWorker is the §11 feed-history backfill: the serial scan
 	// queue + in-flight set driven by feedMon.BackfillSweep. Started in
 	// run() just before the monitors; winds down with the run context (no

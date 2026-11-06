@@ -559,9 +559,17 @@ func (m *AddVideoModel) handleURLStep(key string) (string, string) {
 		case "twitch_clip":
 			m.errorMsg = (&utils.TwitchTarget{Type: utils.TwitchClip}).Unsupported()
 			return "", ""
-		case "twitch_listing":
-			m.errorMsg = (&utils.TwitchTarget{Type: utils.TwitchVideosListing}).Unsupported()
+		case "twitch_clips":
+			m.errorMsg = (&utils.TwitchTarget{Type: utils.TwitchClipsListing}).Unsupported()
 			return "", ""
+		case "twitch_listing":
+			// A channel's video list or a collection (owner decision D18):
+			// the URL goes to the server as pasted — its ?filter= and ?sort=
+			// are the server's to read — which queues one VOD job per video.
+			if filter, _ := utils.TwitchVideosQuery(input); filter == "collections" {
+				m.errorMsg = utils.TwitchCollectionsListingRefusal
+				return "", ""
+			}
 		}
 		if vid == "" {
 			m.errorMsg = "Invalid video ID or URL"
@@ -1146,7 +1154,9 @@ func extractYouTubeVideoID(input string) string {
 
 // extractTwitchTarget extracts a Twitch channel, VOD, clip or listing from a
 // URL or raw input. Returns (id, type) where type is "twitch" (id a login, or
-// "tw_v"+VOD ID), "twitch_clip" or "twitch_listing" (refused, id empty), or
+// "tw_v"+VOD ID), "twitch_listing" (a video list or collection; id is the
+// input itself, which the add posts as the listing's URL), "twitch_clip" or
+// "twitch_clips" (refused, id empty), or
 // "". The parse is utils.ExtractTwitchTarget's — the one URL table the
 // daemon's CLI and the dashboard follow too (internal/utils/testdata/
 // twitch_urls.json) — rather than a copy that knew only www and bare hosts,
@@ -1164,8 +1174,10 @@ func extractTwitchTarget(input string) (string, string) {
 		return "tw_v" + target.Value, "twitch"
 	case utils.TwitchClip:
 		return "", "twitch_clip"
+	case utils.TwitchVideosListing, utils.TwitchCollection:
+		return strings.TrimSpace(input), "twitch_listing"
 	}
-	return "", "twitch_listing"
+	return "", "twitch_clips"
 }
 
 func isVideoIDChar(s string) bool {
