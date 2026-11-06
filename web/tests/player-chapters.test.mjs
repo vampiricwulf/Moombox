@@ -80,7 +80,9 @@ test("a multi-part job's strip is laid out on the global timeline, beside the se
   assert.deepEqual(lefts(h), ["0%", "25%", "75%"]);
   const column = h.el("player-video-column");
   const order = [...column.children].map((c) => c.id);
-  assert.deepEqual(order.slice(1), ["player-chapter-strip", "player-segment-indicator", "player-chapters", "player-chapter-actions"],
+  // The unplayable-audio notice (owner decision PR-R7) sits right under the
+  // video, ahead of the strip.
+  assert.deepEqual(order.slice(1), ["player-audio-notice", "player-chapter-strip", "player-segment-indicator", "player-chapters", "player-chapter-actions"],
     `column order: ${order.join(", ")}`);
 });
 

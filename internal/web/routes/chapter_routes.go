@@ -98,6 +98,9 @@ func ChapterRoutes(r chi.Router, deps *ChapterRouteDeps) *ChapterService {
 func chapterRoutes(r chi.Router, deps *ChapterRouteDeps, cache *chapterCache) *ChapterService {
 	svc := &ChapterService{deps: deps, cache: cache}
 	chapterImportRoutes(r, svc)
+	// The player's other archive read beside its chapters: which codec the
+	// audio is, for the unplayable-audio notice (owner decision PR-R7).
+	audioInfoRoute(r, deps.DB, deps.Store, deps.Logger)
 	r.Get("/api/jobs/{id}/chapters", func(rw http.ResponseWriter, req *http.Request) {
 		job, ok := loadJob(rw, deps.DB, chi.URLParam(req, "id"))
 		if !ok {

@@ -1011,6 +1011,40 @@ export function gapFillText(job) {
 }
 
 /**
+ * The MIME type a browser's canPlayType is asked about for an archive audio
+ * codec as ffprobe names it (GET /api/jobs/{id}/audio-info), and the label
+ * the notice names it by. A codec not listed is not judged: no notice.
+ */
+const AUDIO_CODECS = {
+  aac: { mime: 'audio/mp4; codecs="mp4a.40.2"', label: "AAC" },
+  opus: { mime: 'audio/mp4; codecs="opus"', label: "Opus" },
+  eac3: { mime: 'audio/mp4; codecs="ec-3"', label: "E-AC-3" },
+  ac3: { mime: 'audio/mp4; codecs="ac-3"', label: "AC-3" },
+  mp3: { mime: "audio/mpeg", label: "MP3" },
+  flac: { mime: 'audio/mp4; codecs="flac"', label: "FLAC" },
+};
+
+/**
+ * unplayableAudioText is the player's notice for an archive whose audio the
+ * browser cannot play (owner decision PR-R7): Moombox keeps yt-dlp's audio
+ * ranking, which puts a 5.1 E-AC-3 track above stereo Opus and AAC, and most
+ * Chrome and Firefox builds cannot decode it, so the archive played in
+ * silence with nothing saying why. "" when the codec is unknown or canPlay
+ * — the video element's canPlayType — answers anything but "".
+ * @param {{codec?: string, channels?: number}} info
+ * @param {(mime: string) => string} canPlay
+ * @returns {string}
+ */
+export function unplayableAudioText(info, canPlay) {
+  const known = AUDIO_CODECS[info?.codec];
+  if (!known || canPlay(known.mime) !== "") return "";
+  const ch = Number(info.channels) || 0;
+  const layout = { 1: "mono", 2: "stereo", 6: "5.1", 8: "7.1" }[ch] || (ch > 0 ? `${ch} channels` : "");
+  const what = layout ? `${known.label}, ${layout}` : known.label;
+  return `This archive's audio (${what}) can't play in this browser; the file is fine. Open it in VLC or mpv.`;
+}
+
+/**
  * reinitializeDeletesText is the clause a Reinitialize confirm names what the
  * reset deletes with (owner decision PR-M1), from GET
  * /api/jobs/{id}/reinitialize/preview — or the sum of several, for a batch.
