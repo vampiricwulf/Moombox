@@ -67,7 +67,8 @@ func TestShortSpanIsSetAsideNotDeleted(t *testing.T) {
 //
 // Mutants: either split back on its os.Remove discard, or not calling
 // setAsideShortSpan, or no longer falling back to muxing the span as a part
-// when the set-aside fails.
+// when the set-aside fails; YouTube's notification sent before the set-aside
+// or told the span was set aside when it was muxed as a part.
 func TestQualitySplitsSetTheShortSpanAside(t *testing.T) {
 	section := func(file, from, to string) string {
 		t.Helper()
@@ -87,8 +88,15 @@ func TestQualitySplitsSetTheShortSpanAside(t *testing.T) {
 		return body[i : i+j]
 	}
 	yt := section("orchestrator_youtube.go", "splitPart := func(", "segJobCtx := *jobCtx")
-	if !strings.Contains(yt, "if !shortSegment || !o.setAsideShortSpan(curCtx.StagingDir, jobCtx.Job.ID) {") {
+	decide := "setAside := shortSegment && o.setAsideShortSpan(curCtx.StagingDir, jobCtx.Job.ID)"
+	notify := `o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex, !setAside)`
+	if !strings.Contains(yt, decide) || !strings.Contains(yt, "if !setAside {") {
 		t.Error("splitPart does not set a short span aside (or mux it when it cannot be)")
+	}
+	// The notification says what the span became, so it follows the
+	// set-aside and reports a span that could not be set aside as a part.
+	if d, n := strings.Index(yt, decide), strings.Index(yt, notify); d < 0 || n < 0 || n < d {
+		t.Error("splitPart's quality-split notification does not follow the set-aside and report its outcome")
 	}
 	tw := section("orchestrator_twitch.go", "advanceToNewPart := func(", "segmentIndex = nextIdx")
 	if !strings.Contains(tw, "if !muxCurrent && !o.setAsideShortSpan(curStagingDir, jobCtx.Job.ID) {\n\t\t\tmuxCurrent = true") {

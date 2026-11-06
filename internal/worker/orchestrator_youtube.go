@@ -273,20 +273,24 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			o.logger.Warn("YouTube kept refusing a segment its stream had moved well past — closing the part at it and continuing in a new one",
 				"seq", hole, "segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
 		}
+		// A span too short to be a part is set aside (setAsideShortSpan:
+		// muxed into its own file beside the archive at finalize, never
+		// deleted — PR-R9), and one that cannot be set aside is closed as a
+		// part like any other. Decided before the notification, which says
+		// which of the two the span became: sent first, it said "set aside"
+		// of a span then muxed as a part.
+		setAside := shortSegment && o.setAsideShortSpan(curCtx.StagingDir, jobCtx.Job.ID)
 		if hole < 0 || newQuality.Changed(currentQuality) {
 			o.logger.Info("quality split",
 				"from", currentQuality.Label, "to", newQuality.Label,
 				"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
 
-			o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex, !shortSegment)
+			o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex, !setAside)
 		}
 
-		// Mux the old segment in the background, unless too short: a short
-		// span is set aside instead (setAsideShortSpan: muxed into its own
-		// file beside the archive at finalize, never deleted — PR-R9), and
-		// one that cannot be set aside is closed as a part like any other.
+		// Mux the old segment in the background, unless it was set aside.
 		// No preMux: YouTube chat stays a single whole-job file.
-		if !shortSegment || !o.setAsideShortSpan(curCtx.StagingDir, jobCtx.Job.ID) {
+		if !setAside {
 			// A resumed part's true start pre-dates this session — pass
 			// the sentinel so muxSegment derives it from the muxed
 			// duration instead of stamping it with the restart time.
