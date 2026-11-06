@@ -83,9 +83,56 @@ func TestBootstrapLoggedInFollowsThePagesLoginState(t *testing.T) {
 		{"no ytcfg", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := auth.GenerateAPIHeaders(constants.TVSamsungClient, tc.ytcfg)["X-Youtube-Bootstrap-Logged-In"]
+			got, ok := auth.GenerateAPIHeaders(constants.WebClient, tc.ytcfg)["X-Youtube-Bootstrap-Logged-In"]
 			if ok != tc.want || (ok && got != "true") {
 				t.Errorf("X-Youtube-Bootstrap-Logged-In = %q (present %v), want present %v", got, ok, tc.want)
+			}
+		})
+	}
+}
+
+// X-Youtube-Bootstrap-Logged-In goes only from the clients yt-dlp builds from
+// a page ytcfg (_download_ytcfg's page map, _base.py:1013-1024; the watch
+// page's own for web): web, web_safari, web_creator and web_embedded keep it
+// on a logged-in page's ytcfg, while tv_samsung, tv_downgraded, android_vr
+// and visionos — whose upstream ytcfg is {} — drop it. The session identity
+// and the Authorization hash stay on every client: only the bootstrap claim
+// is per client.
+//
+// Mutants: clientCarriesPageYtcfg always true (the page-less rows send it);
+// always false, or WEB_EMBEDDED_PLAYER / WEB_CREATOR left out (those rows
+// lose it); the session headers gated by it too (the page-less rows lose
+// X-Goog-AuthUser).
+func TestBootstrapLoggedInOnlyFromClientsCarryingAPageYtcfg(t *testing.T) {
+	jar, _ := loadAccountJar(t, accountCookies("a"))
+	auth := NewAuth(jar, noopLogger{})
+	idx := 1
+	ytcfg := &YtcfgData{LoginState: SessionAuthLoggedIn, SessionIndex: &idx}
+	for _, tc := range []struct {
+		name   string
+		client constants.YouTubeClientConfig
+		want   bool
+	}{
+		{"web", constants.WebClient, true},
+		{"web_safari", constants.WebSafariClient, true},
+		{"web_creator", constants.WebCreatorClient, true},
+		{"web_embedded", constants.WebEmbeddedClient, true},
+		{"tv_samsung", constants.TVSamsungClient, false},
+		{"tv_downgraded", constants.TVDowngradedClient, false},
+		{"android_vr", constants.AndroidVRClient, false},
+		{"visionos", constants.VisionOSClient, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := auth.GenerateAPIHeaders(tc.client, ytcfg)
+			got, ok := h["X-Youtube-Bootstrap-Logged-In"]
+			if ok != tc.want || (ok && got != "true") {
+				t.Errorf("X-Youtube-Bootstrap-Logged-In = %q (present %v), want present %v", got, ok, tc.want)
+			}
+			if h["X-Goog-AuthUser"] != "1" {
+				t.Errorf("X-Goog-AuthUser = %q, want 1 on every client", h["X-Goog-AuthUser"])
+			}
+			if h["Authorization"] == "" {
+				t.Error("Authorization missing: the hash rides every client")
 			}
 		})
 	}
