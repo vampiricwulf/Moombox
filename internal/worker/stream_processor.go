@@ -70,6 +70,9 @@ type StreamProcessResult struct {
 	// TwitchVodChapters are a Twitch VOD's chapters (GetVodInfo, owner
 	// decision D23), which ExecuteTwitch stages for the mux.
 	TwitchVodChapters []utils.Chapter
+	// TwitchClip is a clip job's download (processTwitchClip, owner decision
+	// D26), which ExecuteTwitchClip runs in place of ExecuteTwitch.
+	TwitchClip *TwitchClipDownload
 }
 
 // AsError converts the result's failure into an error, preserving the
@@ -192,6 +195,11 @@ type StreamProcessor struct {
 	// twitchLookupFn replaces tw.LookupStreamInfo in waitForTwitchLive when
 	// set, for the same reason (twitchStreamLookup).
 	twitchLookupFn func(ctx context.Context, login string) (*twitch.TwitchStreamInfo, error)
+
+	// clipFn replaces tw.GetClip in processTwitchClip, and in the clip
+	// download's URL refresh, when set (getClip): ShareClipRenderStatus is a
+	// network call.
+	clipFn func(ctx context.Context, slug string) (*twitch.TwitchClipInfo, error)
 
 	mu          sync.Mutex
 	activeChats []*chat.ChatDownloader // Track active chat downloaders for cleanup

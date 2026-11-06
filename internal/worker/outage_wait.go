@@ -349,9 +349,10 @@ func (e *twitchUnreachableError) Unwrap() error { return e.err }
 
 // markTwitchUnreachable wraps err in twitchUnreachableError when it is a
 // transport failure of a Twitch live job's stream processing. A VOD
-// (tw_v…) is left as it is: the monitor's recovery is for live broadcasts.
+// (tw_v…) or a clip (tw_clip_…) is left as it is: the monitor's recovery is
+// for live broadcasts.
 func (w *DownloadWorker) markTwitchUnreachable(job *database.Job, err error) error {
-	if job.Platform != "twitch" || strings.HasPrefix(job.VideoID, "tw_v") || !isTransportFailure(err) {
+	if job.Platform != "twitch" || strings.HasPrefix(job.VideoID, "tw_v") || IsTwitchClipJob(job) || !isTransportFailure(err) {
 		return err
 	}
 	return &twitchUnreachableError{err: err}

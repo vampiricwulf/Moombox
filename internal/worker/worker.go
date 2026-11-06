@@ -1059,7 +1059,10 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 
 		// Route to platform-specific orchestrator
 		var dlErr error
-		if job.Platform == "twitch" && result.TwitchVariant != nil {
+		if job.Platform == "twitch" && result.TwitchClip != nil {
+			// A clip: one whole MP4, no variant, no chat (owner decision D26).
+			dlErr = w.orchestrator.ExecuteTwitchClip(ctx, jobCtx, result.TwitchClip)
+		} else if job.Platform == "twitch" && result.TwitchVariant != nil {
 			variant := newTwitchVariantInfo(job, result.TwitchVariant, jobCtx.Config)
 			// Stable broadcast identity for engine resume validation: the live
 			// stream ID when known, else the job's video/VOD ID.

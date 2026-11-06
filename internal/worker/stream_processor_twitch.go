@@ -428,6 +428,16 @@ func twitchChatDowngradeCallback(
 
 // processTwitch handles Twitch stream/VOD processing.
 func (sp *StreamProcessor) processTwitch(ctx context.Context, job *database.Job) (*StreamProcessResult, error) {
+	if sp.tw == nil && sp.clipFn == nil {
+		return &StreamProcessResult{ShouldDownload: false, Error: "twitch service not available"}, nil
+	}
+
+	// A clip (owner decision D26) is addressed by its slug, as a VOD is by
+	// its ID, and is routed before the login below: a pasted
+	// clips.twitch.tv/<slug> names no channel at all.
+	if slug, ok := twitch.ClipSlugFromJobID(job.VideoID); ok {
+		return sp.processTwitchClip(ctx, job, slug)
+	}
 	if sp.tw == nil {
 		return &StreamProcessResult{ShouldDownload: false, Error: "twitch service not available"}, nil
 	}
@@ -1020,8 +1030,9 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 
 // extractTwitchLoginFromJob extracts the Twitch channel login from a job.
 func extractTwitchLoginFromJob(job *database.Job) string {
-	// Try URL first
-	if job.URL != "" && strings.Contains(job.URL, "twitch.tv/") {
+	// Try URL first. clips.twitch.tv/<slug> names a clip and no channel:
+	// its first path segment is the slug.
+	if job.URL != "" && strings.Contains(job.URL, "twitch.tv/") && !strings.Contains(job.URL, "clips.twitch.tv/") {
 		parts := strings.Split(job.URL, "twitch.tv/")
 		if len(parts) >= 2 {
 			login, _, _ := strings.Cut(parts[1], "/")
