@@ -206,7 +206,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		return nil, fmt.Errorf("DASH: %w: the %s manifest refused the GVS PO token minted under the guessed binding (HTTP %d): %w", errMissingPot, dashSource, status, errGuessedGvsBinding)
 	}
 
-	streams, err := engine.ParseDash(string(manifestData), videoInfo.DashManifestURL)
+	streams, drm, err := engine.ParseDashDRM(string(manifestData), videoInfo.DashManifestURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse DASH manifest: %w", err)
 	}
@@ -305,6 +305,19 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	warnUnhonouredPins(job, videoItag, videoStream, audioItag, audioStream)
 	warnDamagedManifestPins(job, videoInfo, videoStream, audioStream)
 
+	// A kind the job needs whose every Representation the DRM skip took
+	// (engine.DashDRM) is a manifest this path cannot record, not one that
+	// lacks the stream: the setup fails with engine.ErrDRMProtected, which
+	// setupOrFallback answers from the extraction's HLS manifest when it has
+	// one (drmHlsFallback, owner decision FE-1). The selection is asked
+	// first, so a pin of an itag that is still clear, or audio_only beside a
+	// protected video set, is unaffected.
+	if videoStream == nil && videoItag != -1 && drm.Video {
+		return nil, fmt.Errorf("DASH: %w: every video Representation in the manifest carries ContentProtection", engine.ErrDRMProtected)
+	}
+	if audioStream == nil && audioItag != -1 && drm.Audio {
+		return nil, fmt.Errorf("DASH: %w: every audio Representation in the manifest carries ContentProtection", engine.ErrDRMProtected)
+	}
 	// DASH requires both video and audio streams (matching TS), unless user explicitly excluded one
 	if videoStream == nil && videoItag != -1 {
 		return nil, fmt.Errorf("could not find suitable video stream in DASH manifest")

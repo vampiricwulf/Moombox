@@ -513,6 +513,9 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// VOD: run downloaders, refreshing URLs across the ~6h googlevideo
 		// lifetime for post-live jobs whose wall clock outlives one grant.
 		result, err = o.runVodDownloadWithRefresh(ctx, jobCtx, result, tracker)
+		// An HLS playlist the engine refused as encrypted (the DRM fallback's,
+		// drmHlsFallback) is a stream nothing here can record.
+		err = drmUnrecordable(err)
 
 		if err == nil {
 			// A zero-byte YouTube finish with a deep HeadSeq is checked for
