@@ -369,9 +369,10 @@ func TestResumeKeepsAnImportedChapterList(t *testing.T) {
 
 // TestSplitResumeKeepsTheImportBesideTheRowsArchive: a split archive's
 // import kept by a Resume's finalize is read only from beside the archive
-// the row names. Here the resumed run's parts landed under a name the
-// template now resolves afresh ("New"), where a list another recording left
-// sits; the row names "Old - part1.mp4", whose import is the one kept —
+// the row named when the run began. Here a Finished single file ("Old.mp4",
+// no parts) was resumed, and the resumed run split into parts under a name
+// the template now resolves afresh ("New"), where a list another recording
+// left sits; the row's own import, beside Old.mp4, is the one kept —
 // refitted to the parts and moved beside them — and the foreign list is not
 // mistaken for it.
 //
@@ -383,7 +384,7 @@ func TestSplitResumeKeepsTheImportBesideTheRowsArchive(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	o := w.orchestrator
 	root := t.TempDir()
-	oldPart := filepath.Join(root, "Old - part1.mp4")
+	oldPart := filepath.Join(root, "Old.mp4")
 	job := &database.Job{ID: "yt_split_resume", VideoID: "yt_split_resume", URL: "u", Platform: "youtube", Status: database.StatusError}
 	if _, err := db.AddJob(job); err != nil {
 		t.Fatal(err)
@@ -428,5 +429,69 @@ func TestSplitResumeKeepsTheImportBesideTheRowsArchive(t *testing.T) {
 	}
 	if fileExists(ownSidecar) {
 		t.Error("the import is still under the row's old name as well")
+	}
+}
+
+// TestSplitRefinalizeReadsTheImportWhereTheRouteSavedIt: a resumed single
+// file ("Old.mp4") whose resumed run split into parts under a name the
+// template now resolves afresh ("New - partN") and then stopped short keeps
+// output_file at Old.mp4 with those parts recorded. The import route saves
+// such a row's import beside its first part (routes.splitSidecarPath), so
+// the next re-finalize — the Mux action's or a Resume's — reads it there,
+// not beside output_file, where only an older list (the one the import
+// replaced) may sit.
+//
+// Mutants: writeSplitArchiveChapters reading beside output_file ahead of
+// the row's recorded parts (the operator's import is written over);
+// buildJobContext not recording the first part (the same).
+func TestSplitRefinalizeReadsTheImportWhereTheRouteSavedIt(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	o := w.orchestrator
+	root := t.TempDir()
+	old := filepath.Join(root, "Old.mp4")
+	job := &database.Job{ID: "yt_split_route", VideoID: "yt_split_route", URL: "u", Platform: "youtube", Status: database.StatusCancelled}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	db.UpdateJobFields(job.ID, map[string]any{"output_file": old})
+	var segments []database.Segment
+	for i := range 2 {
+		name := "New - part" + strconv.Itoa(i+1) + ".mp4"
+		p := filepath.Join(root, name)
+		if err := os.WriteFile(p, []byte("part"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		seg := database.Segment{JobID: job.ID, SegmentIndex: i, Filename: name, FilePath: p, DurationSeconds: 200}
+		if err := db.AddSegment(&seg); err != nil {
+			t.Fatal(err)
+		}
+		segments = append(segments, seg)
+	}
+	stale := ArchiveSidecarPath(old, utils.ChaptersSidecarSuffix)
+	if err := utils.WriteImportedChaptersSidecar(stale,
+		[]utils.Chapter{{StartMs: 0, EndMs: 300_000, Title: "Stale"}}, []utils.SidecarChapter{}); err != nil {
+		t.Fatal(err)
+	}
+	// Where the route saves a split row's import: beside its first part.
+	routes := ArchiveSidecarPath(segments[0].FilePath, utils.ChaptersSidecarSuffix)
+	if err := utils.WriteImportedChaptersSidecar(routes,
+		[]utils.Chapter{{StartMs: 0, EndMs: 100_000, Title: "Imported A"}, {StartMs: 100_000, EndMs: 400_000, Title: "Imported B"}},
+		[]utils.SidecarChapter{{Start: 0, End: 400, Title: "Automatic"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, _ := db.GetJob(job.ID)
+	jobCtx := w.runJobContext(fresh)
+	if !jobCtx.Refinalize {
+		t.Fatal("a row with recorded parts does not continue its recording")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // no network for copyAssets' thumbnail fallback
+	o.writeSplitArchiveChapters(ctx, jobCtx, segments)
+
+	kept := readImport(t, routes) // fails when the automatic list replaced the import
+	want := []utils.SidecarChapter{{Start: 0, End: 100, Title: "Imported A"}, {Start: 100, End: 400, Title: "Imported B"}}
+	if !reflect.DeepEqual(kept.Chapters, want) {
+		t.Errorf("list beside the parts = %+v, want the operator's import: %+v", kept.Chapters, want)
 	}
 }

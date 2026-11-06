@@ -188,6 +188,15 @@ type JobContext struct {
 	// import when it resets the row (reinitializeNow), so no finalize after
 	// one can find it.
 	Refinalize bool
+	// RecordedFirstPart is the first recorded part's file (segment rows, in
+	// GetSegments' order) as the row stood when the context was built, ""
+	// for a row with no parts. It is where the import route saved a split
+	// row's chapter import (routes.splitSidecarPath: beside the first part,
+	// whatever the row's output_file names), so a split re-finalize reads a
+	// kept import there (writeSplitArchiveChapters) — read at the run's
+	// start, so parts the run itself records under a name the template now
+	// resolves afresh never count.
+	RecordedFirstPart string
 	// Run is the run's record of what holds across its strategies'
 	// repeated setups (runRecord): a damaged pin's one Warn, a live capture's
 	// path switches and the no-JS path it records on. Shared by pointer like
@@ -1749,6 +1758,12 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 	if filename == "" {
 		filename = job.VideoID
 	}
+	var firstPart string
+	if w.db != nil {
+		if segs, err := w.db.GetSegments(job.ID); err == nil && len(segs) > 0 {
+			firstPart = segs[0].FilePath
+		}
+	}
 
 	return &JobContext{
 		Job: job,
@@ -1773,6 +1788,8 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		Logger:       w.logger,
 		Interruption: &interruptionSignal{},
 		Run:          &runRecord{},
+
+		RecordedFirstPart: firstPart,
 	}
 }
 
