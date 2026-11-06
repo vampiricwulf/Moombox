@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -119,4 +120,66 @@ func TestReinitializePreviewSummary(t *testing.T) {
 	if sum != (ReinitializePreview{2, 3, 4, 5, 6, 7}) {
 		t.Errorf("Add = %+v", sum)
 	}
+}
+
+// TestPreviewReinitializeFindsEachImportedList pins the two places the
+// preview looks for an imported chapter list, each on its own: beside the
+// single archive a row with no part rows names (dropImportedArchiveChapters'
+// case, the common one), and beside part 1 of a split archive whose row
+// names no output_file — a live job that errored after its parts were
+// recorded, before a finalize wrote one (removeSplitArchiveChapters' case).
+// Every part of one archive resolves to the same list
+// (recordedArchiveLocation strips " - partN"), so only a row naming no file
+// tells the two arms apart.
+//
+// Mutants: the output_file arm dropped (the single-file case reads 0); the
+// part-1 arm dropped (the split case reads 0).
+func TestPreviewReinitializeFindsEachImportedList(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+	imported := func(t *testing.T, archive string, n int) {
+		t.Helper()
+		chs := make([]utils.Chapter, n)
+		for i := range chs {
+			chs[i] = utils.Chapter{StartMs: int64(i) * 1000, EndMs: int64(i+1) * 1000, Title: fmt.Sprintf("C%d", i)}
+		}
+		if err := utils.WriteImportedChaptersSidecar(ArchiveSidecarPath(archive, utils.ChaptersSidecarSuffix), chs, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("single file", func(t *testing.T) {
+		_, outputDir := muxFixtureJob(t, w, db, "j-pre-one")
+		archive := filepath.Join(outputDir, "show.mp4")
+		if err := os.WriteFile(archive, make([]byte, 5), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		imported(t, archive, 3)
+		db.UpdateJobFields("j-pre-one", map[string]any{"status": database.StatusError, "output_file": archive})
+		job, _ := db.GetJob("j-pre-one")
+		if got := PreviewReinitialize(db, stagingBase, job).ImportedChapters; got != 3 {
+			t.Errorf("single-file archive: ImportedChapters = %d, want 3", got)
+		}
+	})
+
+	t.Run("split, no output_file", func(t *testing.T) {
+		_, outputDir := muxFixtureJob(t, w, db, "j-pre-split")
+		part1 := filepath.Join(outputDir, "show - part1.mp4")
+		part2 := filepath.Join(outputDir, "show - part2.mp4")
+		for i, p := range []string{part1, part2} {
+			if err := os.WriteFile(p, make([]byte, 5), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.AddSegment(&database.Segment{JobID: "j-pre-split", SegmentIndex: i, Filename: filepath.Base(p), FilePath: p}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		imported(t, part1, 4)
+		db.UpdateJobFields("j-pre-split", map[string]any{"status": database.StatusError, "output_file": ""})
+		job, _ := db.GetJob("j-pre-split")
+		if got := PreviewReinitialize(db, stagingBase, job).ImportedChapters; got != 4 {
+			t.Errorf("split archive: ImportedChapters = %d, want 4", got)
+		}
+	})
 }
