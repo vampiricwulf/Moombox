@@ -358,7 +358,7 @@ func (l cliTwitchLister) ChannelCollectionVideos(ctx context.Context, login stri
 // FE-27), as on every add path.
 func queueCLITwitchListing(ctx context.Context, lister routes.TwitchListingFetcher, db *database.Database,
 	channels []config.ChannelConfig, input string, tw *utils.TwitchTarget, now time.Time) (worker.TwitchListingResult, error) {
-	opts := worker.TwitchListingOptions{Channels: channels, ManuallyAdded: true}
+	opts := worker.TwitchListingOptions{Channels: channels, ManuallyAdded: true, Logger: cliNotifyLogger(os.Stderr)}
 	var (
 		videos []twitch.TwitchVideo
 		err    error

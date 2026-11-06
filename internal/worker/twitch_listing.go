@@ -42,9 +42,19 @@ type TwitchListingOptions struct {
 	// OutputDirectory, when set, is every row's output_directory; else the
 	// owner channel's, when it has one.
 	OutputDirectory string
+	// Logger, when set, is told of each VOD that could not be queued, with
+	// why (purpose review M9): the counts the caller answers with say how
+	// many, never which.
+	Logger interface {
+		Debug(msg string, args ...any)
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+		Error(msg string, args ...any)
+	}
 }
 
-// TwitchListingResult counts what QueueTwitchVideos did.
+// TwitchListingResult counts what QueueTwitchVideos did: every listed video
+// is exactly one of Added, Skipped and Failed.
 type TwitchListingResult struct {
 	Added   []*database.Job
 	Skipped int // already a job (or, with SkipHistory, in history)
@@ -81,11 +91,13 @@ func QueueTwitchVideos(db *database.Database, videos []twitch.TwitchVideo, opts 
 			// reported it queued. A collection node whose owner neither the
 			// listing nor VideoMetadata named (twitch.API.CollectionVideos).
 			res.Failed++
+			opts.warnNotQueued(v, "no channel to pace it under: neither the listing nor Twitch named its owner")
 			continue
 		}
 		added, err := db.AddJob(job)
 		if err != nil {
 			res.Failed++
+			opts.warnNotQueued(v, "the job could not be created", "err", err)
 			continue
 		}
 		if !added { // a job already has the ID (INSERT OR IGNORE)
@@ -96,6 +108,27 @@ func QueueTwitchVideos(db *database.Database, videos []twitch.TwitchVideo, opts 
 		res.Added = append(res.Added, job)
 	}
 	return res
+}
+
+// warnNotQueued logs a VOD QueueTwitchVideos counted as Failed, when the
+// caller gave it a logger.
+func (o TwitchListingOptions) warnNotQueued(v twitch.TwitchVideo, reason string, args ...any) {
+	if o.Logger == nil {
+		return
+	}
+	o.Logger.Warn("twitch listing: a VOD could not be queued — "+reason,
+		append([]any{"vod", v.ID, "title", v.Title, "channel", o.Login}, args...)...)
+}
+
+// Logger is the worker's logger, for a caller outside the package that
+// queues on its behalf (the add route's TwitchListingOptions.Logger).
+func (w *DownloadWorker) Logger() interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+} {
+	return w.logger
 }
 
 // newTwitchListingJob is the Queued backlog row for one listed VOD. The

@@ -172,7 +172,7 @@ func (b *TwitchBacklog) RunCycle(ctx context.Context, now time.Time) {
 			fresh = append(fresh, v)
 		}
 		res := worker.QueueTwitchVideos(b.db, fresh, worker.TwitchListingOptions{
-			Channels: channels, Login: login, SkipHistory: true,
+			Channels: channels, Login: login, SkipHistory: true, Logger: b.logger,
 		}, now)
 		if n := len(res.Added); n > 0 {
 			b.logger.Info("twitch VOD backlog: queued the channel's new videos", "channel", ch.ID, "queued", n)
