@@ -544,7 +544,9 @@ type YtcfgData struct {
 	// LoginState is the page's own LOGGED_IN verdict: the watch page's
 	// (watchPageSessionAuth) or the homepage's (livenessVerdict), Unknown for
 	// a ytcfg no page stated. Only SessionAuthLoggedIn sends
-	// X-Youtube-Bootstrap-Logged-In, as upstream's
+	// X-Youtube-Bootstrap-Logged-In, and only from a client that carries a
+	// page ytcfg (clientCarriesPageYtcfg: not tv_samsung, android_vr or
+	// visionos, whose upstream ytcfg is empty), as upstream's
 	// `if traverse_obj(ytcfg, 'LOGGED_IN', expected_type=bool)` decides it
 	// (_base.py:975-976), so a request whose ytcfg is not a signed-in page's —
 	// a watch page YouTube answered logged out on cookies it no longer

@@ -1063,7 +1063,11 @@ const embedThirdPartyURL = "https://www.reddit.com/"
 // watch page's backoff and window, and a 403, a 429 or the consent wall ends
 // it at once. It used to be one attempt, so a single reset or 503 cost the
 // age-gate bypass (and the signed-out status escalation) its
-// encryptedHostFlags and the page's player.
+// encryptedHostFlags and the page's player. Two smaller things changed with
+// the helper, both the watch page's own behaviour: a body past
+// utils.MaxFetchBodySize is cut off at the cap rather than refused, and a
+// consent-wall redirect is an error (consentWallError) where the single
+// attempt read the wall's 200 as a page with no flags.
 func FetchEmbedPage(ctx context.Context, videoID, cookieHeader string) (*EmbedPageResult, error) {
 	url := fmt.Sprintf("%s/%s?html5=1", constants.YouTubeURLs.Embed, videoID)
 
