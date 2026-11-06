@@ -219,12 +219,14 @@ func TestCollectionVideos(t *testing.T) {
 // seconds before start is never reached); the upper bound dropped ("later"
 // taken in the no-end deleted-archive row, "next" in the deleted-archive
 // row); the oldest candidate tried first instead of the closest ("early"
-// taken in the two-archives row); the VideoMetadata confirmation skipped
+// taken in the two-archives row); no sort at all, the list's newest-first
+// order kept ("late" taken in the closest-listed-after-a-newer row); the
+// VideoMetadata confirmation skipped
 // ("up" taken in the upload-and-highlight row).
 func TestArchiveVodBetween(t *testing.T) {
 	start := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	end := start.Add(4 * time.Hour)
-	types := map[string]string{"next": "ARCHIVE", "hl": "HIGHLIGHT", "a": "ARCHIVE", "older": "ARCHIVE", "up": "UPLOAD", "later": "ARCHIVE", "early": "ARCHIVE"}
+	types := map[string]string{"next": "ARCHIVE", "hl": "HIGHLIGHT", "a": "ARCHIVE", "older": "ARCHIVE", "up": "UPLOAD", "later": "ARCHIVE", "early": "ARCHIVE", "late": "ARCHIVE"}
 	cases := []struct {
 		name  string
 		edges []string
@@ -267,6 +269,12 @@ func TestArchiveVodBetween(t *testing.T) {
 		{"two archives in the window: the closest to start", []string{
 			videoEdge("a", "2026-10-01T12:00:01Z", ""),
 			videoEdge("early", "2026-10-01T11:55:00Z", ""),
+		}, end, "a"},
+		// The closest is not the newest: the list's own order (newest
+		// first) would try "late" first.
+		{"two archives in the window: the closest, listed after a newer one", []string{
+			videoEdge("late", "2026-10-01T12:04:00Z", ""),
+			videoEdge("a", "2026-10-01T11:59:58Z", ""),
 		}, end, "a"},
 	}
 	for _, c := range cases {

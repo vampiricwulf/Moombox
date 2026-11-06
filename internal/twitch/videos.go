@@ -489,10 +489,13 @@ func (a *API) ArchiveVodFor(ctx context.Context, channelLogin, startedAt, authTo
 //     and with an end, only one published before it.
 //
 // Exact identity — the VOD's stream ID against the capture's — would be the
-// better test, but no query this package makes returns one for a video:
-// VideoMetadata and FilterableVideoTower_Videos are persisted queries whose
-// selection sets are Twitch's, and neither yt-dlp nor streamlink reads a
-// stream or broadcast ID off a video. The publish time is all there is.
+// better test, but no field of either query this lookup uses
+// (VideoMetadata, FilterableVideoTower_Videos — persisted queries whose
+// selection sets are Twitch's) carries one, and neither yt-dlp nor
+// streamlink reads a stream or broadcast ID off a video. Whether a raw,
+// non-persisted video(id) query (gqlRawQuery, as the access-token requests
+// send) can read one has not been probed; until it is, the publish time is
+// all there is.
 //
 // Returns "" with no error when no such video exists: VODs off, the archive
 // deleted, or not listed yet. Reads at most archiveVodLookupPages pages.
