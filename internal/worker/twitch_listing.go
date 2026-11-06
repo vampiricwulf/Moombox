@@ -48,7 +48,7 @@ type TwitchListingOptions struct {
 type TwitchListingResult struct {
 	Added   []*database.Job
 	Skipped int // already a job (or, with SkipHistory, in history)
-	Failed  int // the insert errored
+	Failed  int // the insert errored, or the video names no owner to pace it under
 }
 
 // QueueTwitchVideos creates one Queued tw_v<id> row per video, skipping a VOD
@@ -74,6 +74,15 @@ func QueueTwitchVideos(db *database.Database, videos []twitch.TwitchVideo, opts 
 			}
 		}
 		job := newTwitchListingJob(v, opts, stamp)
+		if job.ChannelID == nil {
+			// No channel to pace it under: the scheduler admits Queued rows
+			// channel by channel (QueuedChannels, channel_id IS NOT NULL),
+			// and a row without one would sit Queued forever while the add
+			// reported it queued. A collection node whose owner neither the
+			// listing nor VideoMetadata named (twitch.API.CollectionVideos).
+			res.Failed++
+			continue
+		}
 		added, err := db.AddJob(job)
 		if err != nil {
 			res.Failed++

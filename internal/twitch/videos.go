@@ -3,6 +3,7 @@ package twitch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -68,9 +69,11 @@ func VideoListBroadcastType(filter string) string {
 	return ""
 }
 
-// VideoListSort maps a ?sort= value onto the videoSort variable, as
-// TwitchVideosIE does (`sort.upper()`, with "time" its default): "VIEWS" for
-// "views", "TIME" for anything else.
+// VideoListSort maps a ?sort= value onto the videoSort variable: "VIEWS" for
+// "views", "TIME" for anything else. TwitchVideosIE sends whatever ?sort= says
+// upper-cased (`sort.upper()`, "time" its default — twitch.py b77c9304e), so
+// ?sort=foo asks Twitch for FOO; Moombox sends only the two values Twitch's
+// own site uses, TIME (its default) for any other.
 func VideoListSort(sort string) string {
 	if sort == "views" {
 		return "VIEWS"
@@ -166,7 +169,18 @@ func (a *API) EachChannelVideo(ctx context.Context, channelLogin, sort string, m
 // VideoListBroadcastType) matches. A node that carries no broadcastType is
 // classified through VideoMetadata, one request per such node, and only when
 // a type was asked for; a node whose VideoMetadata cannot be read is left out
-// (it cannot be shown to be of the type asked for).
+// (it cannot be shown to be of the type asked for). That is a request per
+// node of a filtered listing whose nodes come without the field — up to
+// maxPages × 100 of them, one after another, inside the add request. Whether
+// FilterableVideoTower_Videos' nodes carry broadcastType is the persisted
+// query's selection set, Twitch's, and only a live listing shows it.
+//
+// A page that fails after the first ends the walk with what was read, as
+// yt-dlp's _entries does (`fatal=False`, then `if not page: break` —
+// twitch.py b77c9304e): a 50-page catalogue that hits one passing GQL error
+// on page 37 is queued as far as it was read, with a warning, rather than
+// not at all. A first page that fails, or a channel that does not exist, is
+// the error.
 func (a *API) ListChannelVideos(ctx context.Context, channelLogin, broadcastType, sort string, maxPages int, authToken string) ([]TwitchVideo, error) {
 	var out []TwitchVideo
 	err := a.EachChannelVideo(ctx, channelLogin, sort, maxPages, authToken, func(v TwitchVideo) bool {
@@ -174,7 +188,13 @@ func (a *API) ListChannelVideos(ctx context.Context, channelLogin, broadcastType
 		return true
 	})
 	if err != nil {
-		return nil, err
+		if len(out) == 0 || errors.Is(err, ErrChannelNotFound) || ctx.Err() != nil {
+			return nil, err
+		}
+		if a.logger != nil {
+			a.logger.Warn("twitch: a page of the channel's video list could not be read; the listing ends with what was read",
+				"channel", channelLogin, "videos", len(out), "err", err)
+		}
 	}
 	if broadcastType == "" {
 		return out, nil
@@ -238,6 +258,25 @@ func (a *API) CollectionVideos(ctx context.Context, collectionID, authToken stri
 		if e.Node != nil && e.Node.ID != "" {
 			out = append(out, *e.Node)
 		}
+	}
+	// A collection spans channels and its nodes need not name their owner
+	// (yt-dlp's _make_video_result reads none), yet a backlog VOD is paced
+	// by its owner's channel and a row without one is never admitted. A
+	// node with no owner login takes VideoMetadata's, one request per such
+	// node; one whose VideoMetadata cannot be read stays without, and
+	// worker.QueueTwitchVideos refuses it.
+	for i := range out {
+		if out[i].Owner != nil && out[i].Owner.Login != "" {
+			continue
+		}
+		info, err := a.GetVodInfo(ctx, out[i].ID, authToken)
+		if err != nil || info == nil || info.ChannelLogin == "" {
+			continue
+		}
+		out[i].Owner = &struct {
+			Login       string `json:"login"`
+			DisplayName string `json:"displayName"`
+		}{Login: info.ChannelLogin, DisplayName: info.ChannelDisplayName}
 	}
 	return resp.Data.Collection.Title, out, nil
 }

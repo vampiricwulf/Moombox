@@ -195,7 +195,7 @@ func TestCollectionVideos(t *testing.T) {
 			!strings.Contains(body, constants.TwitchGQLHashes.CollectionSideBar) {
 			t.Fatalf("request %s", body)
 		}
-		return `{"data":{"collection":{"title":"Playthrough Archives","items":{"edges":[{"node":{"id":"1","title":"one"}},{"node":{"title":"no id"}},{"node":{"id":"2","title":"two"}}]}}}}`
+		return `{"data":{"collection":{"title":"Playthrough Archives","items":{"edges":[{"node":{"id":"1","title":"one","owner":{"login":"a"}}},{"node":{"title":"no id"}},{"node":{"id":"2","title":"two","owner":{"login":"a"}}}]}}}}`
 	})
 	title, vids, err := NewAPI(&testLogger{}).CollectionVideos(context.Background(), "o9zZer3IQBhTJw", "")
 	if err != nil || title != "Playthrough Archives" || len(vids) != 2 || vids[0].ID != "1" || vids[1].ID != "2" {
@@ -276,5 +276,64 @@ func TestArchiveVodBetween(t *testing.T) {
 				t.Errorf("ArchiveVodBetween = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestListChannelVideosKeepsWhatWasReadOnALaterPageError is yt-dlp's
+// _entries on a failed page (`fatal=False`, then `if not page: break` —
+// twitch.py b77c9304e): a page after the first that fails ends the listing
+// with the videos already read; a first page that fails is the error.
+//
+// Mutant: any page error failing the listing (the 50-page catalogue that
+// hits one error on page 2 queues nothing).
+func TestListChannelVideosKeepsWhatWasReadOnALaterPageError(t *testing.T) {
+	stubGQL(t, func(body string) string {
+		_, vars := sentVariables(t, body)
+		if vars["cursor"] == nil {
+			return videosPage("1", videoEdge("2", "2026-10-02T00:00:00Z", ""), videoEdge("1", "2026-10-01T00:00:00Z", ""))
+		}
+		return `not json`
+	})
+	vids, err := NewAPI(&testLogger{}).ListChannelVideos(context.Background(), "streamer", "", "time", 0, "")
+	if err != nil || len(vids) != 2 || vids[0].ID != "2" || vids[1].ID != "1" {
+		t.Errorf("ListChannelVideos = %+v, %v; want page 1's two videos and no error", vids, err)
+	}
+
+	stubGQL(t, func(string) string { return `not json` })
+	if vids, err := NewAPI(&testLogger{}).ListChannelVideos(context.Background(), "streamer", "", "time", 0, ""); err == nil {
+		t.Errorf("a failed first page = %+v, nil; want the error", vids)
+	}
+}
+
+// TestCollectionVideosResolvesMissingOwners: a collection node that names no
+// owner — yt-dlp reads none off it — takes VideoMetadata's, so its backlog
+// row has a channel to be paced under; a node that names one is not asked
+// about.
+//
+// Mutant: the owner lookup removed (the owner-less node stays without one).
+func TestCollectionVideosResolvesMissingOwners(t *testing.T) {
+	stubGQL(t, func(body string) string {
+		op, vars := sentVariables(t, body)
+		switch op {
+		case "CollectionSideBar":
+			return `{"data":{"collection":{"title":"Mixed","items":{"edges":[{"node":{"id":"1","title":"one","owner":{"login":"alice","displayName":"Alice"}}},{"node":{"id":"2","title":"two"}}]}}}}`
+		case "VideoMetadata":
+			if vars["videoID"] != "2" {
+				t.Errorf("VideoMetadata asked for %v; only the owner-less node needs it", vars["videoID"])
+			}
+			return `{"data":{"video":{"id":"2","title":"two","owner":{"id":"9","login":"bob","displayName":"Bob"}}}}`
+		}
+		t.Fatalf("unexpected op %s", op)
+		return ""
+	})
+	_, vids, err := NewAPI(&testLogger{}).CollectionVideos(context.Background(), "c", "")
+	if err != nil || len(vids) != 2 {
+		t.Fatalf("CollectionVideos = %+v, %v", vids, err)
+	}
+	if vids[0].Owner == nil || vids[0].Owner.Login != "alice" {
+		t.Errorf("first node's owner %+v, want its own", vids[0].Owner)
+	}
+	if vids[1].Owner == nil || vids[1].Owner.Login != "bob" || vids[1].Owner.DisplayName != "Bob" {
+		t.Errorf("owner-less node's owner %+v, want VideoMetadata's bob", vids[1].Owner)
 	}
 }
