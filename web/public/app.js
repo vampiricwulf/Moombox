@@ -13,7 +13,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -2299,8 +2299,23 @@ export class MoomboxApp {
       actionsHtml += `<sl-icon-button name="x-circle" label="Cancel" data-quick-action="cancel" data-job-id="${escId}"></sl-icon-button>`;
       overflowItems.push(`<sl-menu-item value="cancel" data-job-id="${escId}"><sl-icon slot="prefix" name="x-circle"></sl-icon>Cancel</sl-menu-item>`);
     }
+    // The row's restart icon is Resume where the job can continue its
+    // recording, and Reinitialize — which deletes it, and confirms first —
+    // only where it cannot (owner decision PR-M1): an arrow read as "retry"
+    // used to start a recoverable job over. Both stay in the overflow menu.
+    // A list row carries no hasStaging, so canResumeJob passes it through to
+    // the server, which answers "use Reinitialize" when there is none. Only
+    // the rows that offered Reinitialize change: a Finished row with an
+    // incomplete tail keeps its Resume in the details dialog, as before.
+    const canResumeRow = canReinit && canResumeJob(job);
+    if (canResumeRow) {
+      actionsHtml += `<sl-icon-button name="play-fill" label="Resume" data-quick-action="resume" data-job-id="${escId}"></sl-icon-button>`;
+      overflowItems.push(`<sl-menu-item value="resume" data-job-id="${escId}"><sl-icon slot="prefix" name="play-fill"></sl-icon>Resume</sl-menu-item>`);
+    }
     if (canReinit) {
-      actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Reinitialize" data-quick-action="reinitialize" data-job-id="${escId}"></sl-icon-button>`;
+      if (!canResumeRow) {
+        actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Reinitialize" data-quick-action="reinitialize" data-job-id="${escId}"></sl-icon-button>`;
+      }
       overflowItems.push(`<sl-menu-item value="reinitialize" data-job-id="${escId}"><sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>Reinitialize</sl-menu-item>`);
     }
     if (canDelete) {
@@ -3052,9 +3067,48 @@ export class MoomboxApp {
     }
   }
 
+  /**
+   * reinitializeDeletes asks the server what reinitializing ids would delete
+   * (GET /api/jobs/{id}/reinitialize/preview, owner decision PR-M1) and
+   * answers the confirm's clause for their totals, or null when a preview
+   * could not be read — the confirm then says so rather than nothing.
+   */
+  async reinitializeDeletes(ids) {
+    try {
+      const previews = await Promise.all(ids.map(async (id) => {
+        const res = await fetch(`/api/jobs/${encodeURIComponent(id)}/reinitialize/preview`);
+        if (!res.ok) throw new Error(res.statusText);
+        return res.json();
+      }));
+      return reinitializeDeletesText(sumReinitializePreviews(previews));
+    } catch {
+      return null;
+    }
+  }
+
   async reinitializeJob(jobId) {
     const id = jobId || this.selectedJobId;
     if (!id || this._jobActionsInFlight.has(id)) return;
+
+    // Reinitialize starts over and deletes what the job recorded: the
+    // set-asides, the recorded parts, the staging and an imported chapter
+    // list. The row icon and the details button both ask first, naming
+    // those from the server's preflight (owner decision PR-M1).
+    const deletes = await this.reinitializeDeletes([id]);
+    const title = this._currentJob(id)?.title;
+    const what = deletes
+      ? `This ${deletes}.`
+      : "What it would delete could not be read: it deletes the job's set-aside recordings, recorded parts, staged data and imported chapters.";
+    const msg = `Reinitialize ${title ? `"${title}"` : "this job"} and download it again from the start? ${what} This cannot be undone.`;
+    if (!await this.showConfirm(msg, { title: "Reinitialize", okLabel: "Reinitialize", okVariant: "danger" })) return;
+    // Re-read after the confirm, as deleteJob does: a job a monitor retried
+    // while the dialog was open is not reset under its run.
+    const now = this._currentJob(id);
+    if (now && !REINIT_STATUSES.has(now.status)) {
+      this.showToast(`Not reinitialized — the job is ${now.status} now`, "warning");
+      return;
+    }
+    if (this._jobActionsInFlight.has(id)) return;
 
     this._jobActionsInFlight.add(id);
     try {
@@ -4023,6 +4077,14 @@ export class MoomboxApp {
         qualifies = j => REINIT_STATUSES.has(j.status);
         targets = eligibleJobs.filter(qualifies);
         confirmMsg = `Reinitialize ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
+        if (targets.length > 0) {
+          // Name the totals the reset deletes across them (owner decision
+          // PR-M1), as the single confirm does.
+          const deletes = await this.reinitializeDeletes(targets.map((j) => j.id));
+          confirmMsg += deletes
+            ? ` This ${deletes}. This cannot be undone.`
+            : " What it would delete could not be read: it deletes each job's set-aside recordings, recorded parts, staged data and imported chapters. This cannot be undone.";
+        }
         apiCall = (id) => fetch(`/api/jobs/${id}/reinitialize`, { method: "POST" });
         break;
       case "delete":
@@ -4058,7 +4120,7 @@ export class MoomboxApp {
     const confirmed = await this.showConfirm(confirmMsg, {
       title: "Batch " + action.charAt(0).toUpperCase() + action.slice(1),
       okLabel: action.charAt(0).toUpperCase() + action.slice(1),
-      okVariant: action === "delete" ? "danger" : action === "cancel" ? "warning" : "primary"
+      okVariant: action === "delete" || action === "reinitialize" ? "danger" : action === "cancel" ? "warning" : "primary"
     });
     if (!confirmed) return;
 

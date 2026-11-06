@@ -735,9 +735,11 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 			// "delete 1 jobs" for a selection of one Downloading job, whose
 			// confirm then found nothing deletable.
 			eligible := 0
+			var eligibleIDs []string
 			for _, id := range a.taskList.SelectedIDs() {
 				if j := a.taskList.GetJobByID(id); j != nil && (item.JobFilter == nil || item.JobFilter(j)) {
 					eligible++
+					eligibleIDs = append(eligibleIDs, id)
 				}
 			}
 			if eligible == 0 {
@@ -746,8 +748,8 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 			}
 			a.chord.action = key
 			a.chord.actionTime = time.Now()
-			a.setFeedback(fmt.Sprintf("Press %s to confirm %s %s (3s)",
-				strings.ToUpper(key), strings.ToLower(item.HintLabel), jobCount(eligible)))
+			a.setFeedback(fmt.Sprintf("Press %s to confirm %s %s%s (3s)",
+				strings.ToUpper(key), strings.ToLower(item.HintLabel), jobCount(eligible), confirmDetail(item, eligibleIDs)))
 			return a, nil, true
 		}
 		job := a.taskList.SelectedJob()
@@ -758,8 +760,8 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 		a.chord.action = key
 		a.chord.actionTime = time.Now()
 		a.chord.jobID = job.ID
-		a.setFeedback(fmt.Sprintf("Press %s to confirm %s \"%s\" (3s)",
-			strings.ToUpper(key), strings.ToLower(item.HintLabel), job.Title))
+		a.setFeedback(fmt.Sprintf("Press %s to confirm %s \"%s\"%s (3s)",
+			strings.ToUpper(key), strings.ToLower(item.HintLabel), job.Title, confirmDetail(item, []string{job.ID})))
 		return a, nil, true
 	}
 
@@ -795,6 +797,18 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 	a.chord = chordState{}
 	m, cmd := a.dispatchAction(chord, nil)
 	return m, cmd, true
+}
+
+// confirmDetail is item's ConfirmDetail for ids as the confirm line's
+// clause (": deletes …"), "" when the item has none or it says nothing.
+func confirmDetail(item *ActionMenuItem, ids []string) string {
+	if item.ConfirmDetail == nil {
+		return ""
+	}
+	if d := item.ConfirmDetail(ids); d != "" {
+		return ": " + d
+	}
+	return ""
 }
 
 // rejectChordForJob answers a registered NeedsJob chord whose selected job

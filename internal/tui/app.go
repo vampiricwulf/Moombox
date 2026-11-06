@@ -657,7 +657,12 @@ type App struct {
 	OnSetWatched      func(ids []string, watched bool) error
 	OnResumeJob       func(jobID string)
 	OnReinitializeJob func(jobID string)
-	OnMuxJob          func(jobID string) error
+	// ReinitializeSummary says what reinitializing jobIDs would delete
+	// (worker.ReinitializePreview.Summary over their totals, owner decision
+	// PR-M1), for A I's confirm line. A disk probe: run when the confirm is
+	// armed, never when the menu opens. nil leaves the line as it was.
+	ReinitializeSummary func(jobIDs []string) string
+	OnMuxJob            func(jobID string) error
 	// OnRecoverAsides muxes the recordings the engine set aside for a job into
 	// their own files beside the archive (the A S chord). Deliberately NOT
 	// OnMuxJob: /mux and A M mean "mux the recording", and an aside overlaps

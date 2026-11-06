@@ -884,11 +884,16 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 				return (j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies || (j.Status == database.StatusFinished && j.IncompleteTail)) &&
 					j.Platform == "youtube"
 			}},
-		{Chord: "A I", Label: "Reinitialize Job", HintLabel: "Reinit", Category: "Action", NeedsJob: true, SupportsBatch: true,
+		// Confirm-gated (A I I within 3 s), and the confirm names what the
+		// reset deletes (owner decision PR-M1): the one verb that destroys
+		// captured footage — set-asides, recorded parts, staging, an
+		// imported chapter list — no longer runs on two keypresses.
+		{Chord: "A I", Label: "Reinitialize Job", HintLabel: "Reinit", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
 			DisabledReason: "no jobs to reinitialize",
 			JobFilter: func(j *database.Job) bool {
 				return j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies
-			}},
+			},
+			ConfirmDetail: a.ReinitializeSummary},
 		{Chord: "A M", Label: "Mux Job", HintLabel: "Mux", Category: "Action", NeedsJob: true, NeedsConfirm: true,
 			DisabledReason: "no muxable jobs",
 			JobFilter: func(j *database.Job) bool {

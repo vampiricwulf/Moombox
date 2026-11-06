@@ -1139,6 +1139,30 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
+	// GET /api/jobs/:id/reinitialize/preview — what a Reinitialize would
+	// delete (owner decision PR-M1): the set-aside recordings, the recorded
+	// parts' files, the staged data and an imported chapter list, counted by
+	// worker.PreviewReinitialize. Both UIs name these counts in their confirm
+	// before they POST /reinitialize; the route above stays the verb itself,
+	// unguarded for scripts as before. allowed says whether the job's status
+	// lets it be reinitialized at all, so a confirm opened on a row that has
+	// since moved on can say so instead of offering the button.
+	r.Get("/api/jobs/{id}/reinitialize/preview", func(rw http.ResponseWriter, req *http.Request) {
+		job, ok := loadJob(rw, db, chi.URLParam(req, "id"))
+		if !ok {
+			return
+		}
+		var stagingBase string
+		store.Read(func(c *config.MoomboxConfig) {
+			stagingBase = c.Paths.EffectiveStagingDir()
+		})
+		allowed := job.Status == database.StatusError || job.Status == database.StatusCancelled || job.Status == database.StatusCookies
+		jsonResponse(rw, struct {
+			Allowed bool `json:"allowed"`
+			worker.ReinitializePreview
+		}{allowed, worker.PreviewReinitialize(db, stagingBase, job)})
+	})
+
 	// POST /api/jobs/:id/mux — force-mux from staging files
 	r.Post("/api/jobs/{id}/mux", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")

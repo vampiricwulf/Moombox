@@ -961,6 +961,41 @@ export function canResumeJob(job, { requireKnownStaging = false } = {}) {
 }
 
 /**
+ * reinitializeDeletesText is the clause a Reinitialize confirm names what the
+ * reset deletes with (owner decision PR-M1), from GET
+ * /api/jobs/{id}/reinitialize/preview — or the sum of several, for a batch.
+ * The Go twin is worker.ReinitializePreview.Summary, which the TUI's A I
+ * confirm line reads: the same words, sizes as formatBytes writes them.
+ * @param {{setAsideRecordings?: number, recordedParts?: number, recordedPartBytes?: number,
+ *          stagedFiles?: number, stagedBytes?: number, importedChapters?: number}} p
+ * @returns {string}
+ */
+export function reinitializeDeletesText(p) {
+  const n = (k) => Number(p?.[k]) || 0;
+  const plural = (count, one, many) => (count === 1 ? `1 ${one}` : `${count} ${many}`);
+  const parts = [];
+  if (n("setAsideRecordings") > 0) parts.push(plural(n("setAsideRecordings"), "set-aside recording", "set-aside recordings"));
+  if (n("recordedParts") > 0) parts.push(`${plural(n("recordedParts"), "recorded part", "recorded parts")} (${formatBytes(n("recordedPartBytes"))})`);
+  if (n("stagedFiles") > 0) parts.push(`${plural(n("stagedFiles"), "staged file", "staged files")} (${formatBytes(n("stagedBytes"))})`);
+  if (n("importedChapters") > 0) parts.push(plural(n("importedChapters"), "imported chapter", "imported chapters"));
+  if (parts.length === 0) return "deletes nothing recorded";
+  if (parts.length === 1) return `deletes ${parts[0]}`;
+  return `deletes ${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * sumReinitializePreviews adds several previews' counts, for a batch confirm.
+ * @param {object[]} previews
+ * @returns {object}
+ */
+export function sumReinitializePreviews(previews) {
+  const keys = ["setAsideRecordings", "recordedParts", "recordedPartBytes", "stagedFiles", "stagedBytes", "importedChapters"];
+  const out = Object.fromEntries(keys.map((k) => [k, 0]));
+  for (const p of previews) for (const k of keys) out[k] += Number(p?.[k]) || 0;
+  return out;
+}
+
+/**
  * streamUrl is the JS twin of the TUI's streamURL (internal/tui/app_actions.go,
  * the O C chord): the job's own url when it has one, else derived from the
  * platform. Twitch VOD ids carry a "tw_v" prefix on the wire. A Twitch live

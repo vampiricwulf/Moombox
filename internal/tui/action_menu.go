@@ -41,6 +41,14 @@ type ActionMenuItem struct {
 	// bubbletea goroutine froze the M key for seconds against a NAS staging
 	// directory (CORE-9). nil means JobFilter is already cheap and is used.
 	StatusFilter func(*database.Job) bool
+
+	// ConfirmDetail, when set on a NeedsConfirm chord, adds what the action
+	// will do to the jobs it is about to act on to the confirm line — A I's
+	// "deletes 2 set-aside recordings, …" (owner decision PR-M1) — on the
+	// chord's confirm and on the menu's second-Enter footer alike. It may
+	// read the disk: it runs once, when the confirm is armed, never when
+	// the menu opens (CORE-9).
+	ConfirmDetail func(jobIDs []string) string
 }
 
 // menuActionItem is a list.Item for the main action menu.
@@ -150,6 +158,10 @@ type ActionMenuModel struct {
 	filtered      []*database.Job // filtered job list for current action
 	jobList       list.Model
 	jobConfirm    bool // true after first Enter (waiting for second)
+	// pendingDetail is the pending item's ConfirmDetail; confirmDetail its
+	// answer for the job the first Enter armed, shown in the footer.
+	pendingDetail func(jobIDs []string) string
+	confirmDetail string
 
 	// Confirm prompt (for R P etc.)
 	confirmLabel string
@@ -398,6 +410,7 @@ func (m *ActionMenuModel) handleMainKey(key string) string {
 		if item.NeedsJob {
 			m.pendingAction = item.Chord
 			m.pendingLabel = item.Label
+			m.pendingDetail = item.ConfirmDetail
 			m.filtered = m.filterJobs(item.JobFilter)
 			m.jobConfirm = false
 			if len(m.filtered) == 0 {
@@ -481,6 +494,10 @@ func (m *ActionMenuModel) handleJobSelectKey(key string) string {
 			return action
 		}
 		m.jobConfirm = true
+		m.confirmDetail = ""
+		if m.pendingDetail != nil {
+			m.confirmDetail = m.pendingDetail([]string{ji.job.ID})
+		}
 		return ""
 	}
 	return ""
@@ -633,8 +650,12 @@ func (m *ActionMenuModel) renderJobSelect(boxW int) string {
 
 	var footer string
 	if m.jobConfirm {
+		detail := ""
+		if m.confirmDetail != "" {
+			detail = " — " + m.confirmDetail
+		}
 		footer = YellowBoldStyle.Render(
-			fmt.Sprintf("Enter: confirm %s | Esc: cancel", strings.ToLower(m.pendingLabel)))
+			fmt.Sprintf("Enter: confirm %s%s | Esc: cancel", strings.ToLower(m.pendingLabel), detail))
 	} else {
 		footer = DimStyle.Render("Enter: select | Esc: back")
 	}
