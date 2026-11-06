@@ -371,3 +371,64 @@ func TestChapterImportRefusals(t *testing.T) {
 		t.Error("a refused save wrote the sidecar")
 	}
 }
+
+// TestChapterImportFirstSaveKeepsTheArchivesChapters: the first import keeps
+// what the archive carries as the original to restore (owner decision CI-3)
+// even when the request goes away under the save — the re-mux runs on the
+// mux root and outlives it, so a read cut short by the request would have
+// re-muxed the archive's own chapters away and kept "none" to restore — and a
+// read of them that fails refuses the save, with nothing written and the
+// archive as it was.
+//
+// Mutant: apply reading the original with jobChapters under the request's
+// context (the cancelled save keeps an empty original; the failed probe is
+// saved over, the archive re-muxed).
+func TestChapterImportFirstSaveKeepsTheArchivesChapters(t *testing.T) {
+	t.Run("the request gone", func(t *testing.T) {
+		ffmpegPath := requireFFmpeg(t)
+		imp := &fakeChapterImporter{}
+		f := newChapterImportFixture(t, imp)
+		useRealWorker(f, imp, ffmpegPath)
+		archive := filepath.Join(f.outputDir, "vod.mp4")
+		makeChapteredMP4(t, ffmpegPath, archive, 6, []utils.Chapter{{StartMs: 0, Title: "embedded A"}, {StartMs: 3000, Title: "embedded B"}})
+		length := 6
+		f.addJob(t, "yt_vod", func(j *database.Job) { j.Filename = "vod.mp4"; j.OutputFile = archive; j.LengthSeconds = &length })
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if _, err := f.svc.Save(ctx, "yt_vod", "0:01 one\n0:04 two", ""); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		imported, ok, err := utils.ReadImportedChaptersSidecar(filepath.Join(f.outputDir, "vod"+utils.ChaptersSidecarSuffix))
+		if err != nil || !ok {
+			t.Fatalf("sidecar: %v %v", ok, err)
+		}
+		if got := strings.Join(titlesOf(sidecarToChapters(imported.Original)), "|"); got != "embedded A|embedded B" {
+			t.Errorf("original = %q, want the archive's own chapters", got)
+		}
+	})
+	t.Run("the read failing", func(t *testing.T) {
+		imp := &fakeChapterImporter{}
+		f := newChapterImportFixture(t, imp)
+		archive := filepath.Join(f.outputDir, "vod.mp4")
+		if err := os.WriteFile(archive, []byte("recorded"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f.cache.probe = func(context.Context, string, string) ([]Chapter, error) {
+			return nil, context.DeadlineExceeded
+		}
+		length := 600
+		f.addJob(t, "yt_vod", func(j *database.Job) { j.Filename = "vod.mp4"; j.LengthSeconds = &length })
+
+		code, _, body := f.postImport(t, "/api/jobs/yt_vod/chapters", map[string]any{"text": "0:01 one"})
+		if code != http.StatusServiceUnavailable || !strings.Contains(body, "could not be kept to restore") {
+			t.Errorf("save over an unreadable original: %d %s", code, body)
+		}
+		if _, err := os.Stat(filepath.Join(f.outputDir, "vod"+utils.ChaptersSidecarSuffix)); !os.IsNotExist(err) {
+			t.Errorf("the refused save wrote the sidecar (%v)", err)
+		}
+		if imp.remuxCount() != 0 || string(readFile(t, archive)) != "recorded" {
+			t.Errorf("the refused save re-muxed (%d) or changed the archive", imp.remuxCount())
+		}
+	})
+}

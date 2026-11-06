@@ -394,7 +394,20 @@ func (s *ChapterService) apply(ctx context.Context, jobID string, list []utils.C
 	if imp, imported, rerr := utils.ReadImportedChaptersSidecar(t.sidecar); rerr == nil && imported {
 		original = imp.Original
 	} else {
-		for _, c := range jobChapters(ctx, s.deps, s.cache, job) {
+		// The first import: what the archive carries now becomes the
+		// original, read strictly — a probe that failed (ffprobe's exit, its
+		// timeout) must refuse the save, not record "none" and then re-mux
+		// the archive's own chapters away for good. Not under the request's
+		// context: the re-mux below runs on the mux root and outlives the
+		// request, so a closed tab must not be what cut this read short and
+		// turned the archive's chapters into an empty original.
+		current, cerr := jobChaptersStrict(context.WithoutCancel(ctx), s.deps, s.cache, job)
+		if cerr != nil {
+			s.deps.Logger.Warn("Chapter import: could not read the archive's chapters to keep as the original; nothing was changed",
+				"job", jobID, "error", cerr)
+			return nil, refuseChapters(http.StatusServiceUnavailable, "The archive's current chapters could not be read, so they could not be kept to restore; nothing was changed")
+		}
+		for _, c := range current {
 			original = append(original, utils.SidecarChapter{Start: c.Start, End: c.End, Title: c.Title})
 		}
 	}
