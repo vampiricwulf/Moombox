@@ -25,12 +25,16 @@ var errChallengesUnsolvable = errors.New("the player's JS challenges cannot be s
 //
 //   - cipher.ErrSidecarUnavailable: no sidecar configured, or the one
 //     configured is down. Signatures are sidecar-only, so no signatureCipher
-//     format resolves until it is back.
+//     format resolves until it is back. A child that went down is waited for
+//     first, within a minute of the outage's start (the composite solver's
+//     sidecarReadyGrace, owner decision PR-R3), so a supervisor restart does
+//     not reach here.
 //   - cipher.ErrPlayerJSStale: ejs could not solve the player even after a
 //     fresh fetch of it — the case of a player rotation ejs does not handle
 //     yet.
 //   - cipher.ErrPlayerJSFetch: the player could not be fetched, with no
-//     cached copy to serve instead (PlayerCache.Fetch). Nothing solves a
+//     cached copy to serve instead, in three tries (PlayerCache.Fetch,
+//     playerFetchAttempts, owner decision PR-R3). Nothing solves a
 //     challenge against a player it does not have; yt-dlp's challenge
 //     director catches a provider that fails on a player it cannot load and
 //     leaves its challenges unanswered (jsc/_director.py:95-140), so every

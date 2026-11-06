@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"time"
 )
 
 // ErrSidecarUnavailable is returned by the composite solver when sig is
@@ -107,7 +108,31 @@ type compositeSolver struct {
 	learning map[string]struct{}
 	refused  map[string]struct{}
 	failed   map[string]struct{}
+
+	// downMu guards downSince: when an installed sidecar half was first
+	// found down in the outage now running, zero while it is up. What the
+	// readiness grace (sidecarReadyGrace) is measured from.
+	downMu    sync.Mutex
+	downSince time.Time
 }
+
+// sidecarReadyGrace is how long an installed sidecar half may report its
+// child down before a signature it cannot answer fails with
+// ErrSidecarUnavailable (owner decision PR-R3): a request meeting a down
+// child within it waits for the child to come back. The supervisor restarts
+// a crashed child in seconds, and ErrSidecarUnavailable is systemic to the
+// worker (systemicResolveFailure): it drops every format needing the player
+// JS for the run's setup, and a live capture switches path, for good. A
+// several-streams-at-once BotGuard burst that restarts the child no longer
+// commits every capture it meets to the fallback path. Measured from the
+// outage's start, not per request: once the child has been down this long,
+// every request fails at once, as before. A variable so a test can shorten
+// it; production never writes it.
+var sidecarReadyGrace = 60 * time.Second
+
+// sidecarReadyPoll is how often a request waiting out the grace asks the
+// installed half whether its child is back.
+var sidecarReadyPoll = time.Second
 
 // sigSpecProber is the sidecar half's way to ask the synthetic challenge
 // without its stale-JS recovery (sidecarSolver.probeSigs). A sidecar half
@@ -181,6 +206,52 @@ func (c *compositeSolver) SidecarReady() bool {
 	return sc != nil && solverReady(sc)
 }
 
+// awaitSidecar waits, within the readiness grace (sidecarReadyGrace) of the
+// outage now running, for an installed sidecar half to report its child up,
+// and returns it then; nil when the grace is spent, ctx ends, or no half is
+// installed (`use_sidecar = false`, or a first start that never came up:
+// there is no child to wait for). The caller has already found the half it
+// snapshotted down, and the player's sig spec unable to answer.
+func (c *compositeSolver) awaitSidecar(ctx context.Context) Solver {
+	if c.sidecar() == nil {
+		return nil
+	}
+	c.downMu.Lock()
+	if c.downSince.IsZero() {
+		c.downSince = time.Now()
+	}
+	left := sidecarReadyGrace - time.Since(c.downSince)
+	c.downMu.Unlock()
+	if left <= 0 {
+		return nil
+	}
+	deadline := time.NewTimer(left)
+	defer deadline.Stop()
+	poll := time.NewTicker(sidecarReadyPoll)
+	defer poll.Stop()
+	for {
+		if sc := c.sidecar(); sc != nil && solverReady(sc) {
+			c.markSidecarUp()
+			return sc
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-deadline.C:
+			return nil
+		case <-poll.C:
+		}
+	}
+}
+
+// markSidecarUp ends the outage the readiness grace is measured over: the
+// next time the child is found down starts a new one.
+func (c *compositeSolver) markSidecarUp() {
+	c.downMu.Lock()
+	c.downSince = time.Time{}
+	c.downMu.Unlock()
+}
+
 // sidecarDown is the error a sig request gets from sidecar half sc that
 // failed with err — or, err nil, that was never asked because it reported
 // itself down: ErrSidecarUnavailable whenever sc is down now, wrapping the
@@ -212,13 +283,30 @@ func (c *compositeSolver) Sig(ctx context.Context, playerID, encryptedSig string
 		if out, ok := c.sigFromSpec(playerID, encryptedSig); ok {
 			return out, nil
 		}
-		return "", sidecarDown(sc, nil)
+		// Within the outage's readiness grace, wait for the child (PR-R3).
+		up := c.awaitSidecar(ctx)
+		if up == nil {
+			return "", sidecarDown(sc, nil)
+		}
+		sc = up
+	} else {
+		c.markSidecarUp()
 	}
 	out, err := sc.Sig(ctx, playerID, encryptedSig)
 	if err != nil {
 		if ctx.Err() == nil {
 			if out, ok := c.sigFromSpec(playerID, encryptedSig); ok {
 				return out, nil
+			}
+			// A request the child died under: once it is back within the
+			// grace, asked once more of the half that is up.
+			if !solverReady(sc) {
+				if up := c.awaitSidecar(ctx); up != nil {
+					if out, rerr := up.Sig(ctx, playerID, encryptedSig); rerr == nil {
+						c.learnSigSpecs(ctx, up, playerID, map[string]string{encryptedSig: out})
+						return out, nil
+					}
+				}
 			}
 		}
 		return "", sidecarDown(sc, err)
@@ -274,13 +362,19 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 	sc := c.sidecar()
 	if sc != nil && !solverReady(sc) {
 		// Down: not asked, as Sig does not ask it. The n entries go to goja.
+		// Signatures no spec answers wait for the child within the outage's
+		// readiness grace, as Sig's do (PR-R3), and go to it once it is back.
+		down := sc
+		sc = nil
 		if len(sigs) > 0 {
 			var ok bool
 			if sigResults, ok = c.sigsFromSpecs(playerID, sigs); !ok {
-				return nil, nil, sidecarDown(sc, nil)
+				if sc = c.awaitSidecar(ctx); sc == nil {
+					return nil, nil, sidecarDown(down, nil)
+				}
+				sigResults = map[string]string{}
 			}
 		}
-		sc = nil
 	}
 	if sc != nil {
 		sr, nr, err := sc.Batch(ctx, playerID, sigs, ns)

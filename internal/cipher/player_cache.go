@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,6 +34,24 @@ const (
 // playerHTTPClient fetches player.js. Backed by the shared httpx.Client
 // transport for keep-alive amortisation across cipher / youtube / etc.
 var playerHTTPClient = httpx.Client(30 * time.Second)
+
+// playerFetchAttempts is how many times a COLD player GET — one with no
+// cached copy to serve instead — is made before Fetch fails with
+// ErrPlayerJSFetch (owner decision PR-R3: "retry a cold player GET 3 times").
+// The failure is systemic to the worker (systemicResolveFailure): every
+// format needing the player JS is dropped for the run's setup and a live
+// capture switches path for good. The first fetch of a newly rotated player,
+// met by several streams going live at once, is exactly when a CDN blip
+// costs the most, and a single GET used to decide it. Beyond yt-dlp, whose
+// player fetch is one _download_webpage with no retry of its own
+// (_load_player, yt_dlp/extractor/youtube/_video.py:2197-2206 at b77c9304e):
+// one command, one video, and its operator runs it again; an archiver's
+// capture runs once, on whatever path the failure sent it to.
+const playerFetchAttempts = 3
+
+// playerFetchRetryDelay is the pause between cold player GETs: a variable so
+// a test can read it; production never writes it.
+var playerFetchRetryDelay = 2 * time.Second
 
 // fallbackLoggedURLs tracks URLs we've already warned about for the
 // extract-fallback case. Bounded by the set of unique URLs Moombox
@@ -415,7 +434,21 @@ func (pc *PlayerCache) Fetch(ctx context.Context, playerURL string) (string, boo
 		// every waiter with context.Canceled even though their own contexts
 		// are live. playerHTTPClient's own 30s timeout still bounds the
 		// round-trip.
-		return pc.fetchInternal(context.WithoutCancel(ctx), playerURL)
+		dctx := context.WithoutCancel(ctx)
+		for attempt := 1; ; attempt++ {
+			fr, err := pc.fetchInternal(dctx, playerURL)
+			if err == nil || !errors.Is(err, ErrPlayerJSFetch) || attempt >= playerFetchAttempts {
+				return fr, err
+			}
+			// Only a cold fetch fails this way: one with a cached copy
+			// serves it instead (fetchInternal).
+			if pc.logger != nil {
+				pc.logger.Debug("cipher: player JS fetch failed with nothing cached; trying again",
+					"attempt", attempt, "of", playerFetchAttempts, "err", err)
+			}
+			t := time.NewTimer(playerFetchRetryDelay)
+			<-t.C
+		}
 	})
 	if err != nil {
 		return "", false, err
