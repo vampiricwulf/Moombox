@@ -201,3 +201,92 @@ func TestAddTwitchListingRefusals(t *testing.T) {
 		})
 	}
 }
+
+// TestJobCreateFromTwitchURLRoutesEveryKind is owner decision FE-5: a POST
+// /api/jobs carrying only a Twitch `url` routes it by the shared URL table
+// (utils.ExtractTwitchTarget, G35), as the dashboard routes the same paste —
+// a VOD URL (/<ch>/v/<id>, schedule?vodID=) is its tw_v job, a video list,
+// a collection list and a collection queue their VODs (addTwitchListing),
+// a clip list gets the shared refusal, and a channel URL on the m. or go.
+// host still makes the channel's job. (A clip URL makes the clip's own job,
+// owner decision D26: TestTwitchAddAcceptsAPastedClip.) Before FE-5 the VOD
+// and listing URLs were a 400, and before G35 a channel's live-wait job.
+//
+// Mutants: the URL-only routing removed (the VOD and listing rows are 400);
+// its VOD arm dropped (the VOD rows are 400); its listing arm dropped (the
+// listing rows are 400); its clip-list arm dropped (the clip list is "video
+// ID or URL required", not the shared refusal); the platform guard dropped
+// (the youtube-platform row becomes a Twitch job).
+func TestJobCreateFromTwitchURLRoutesEveryKind(t *testing.T) {
+	vods := map[string]string{
+		"https://www.twitch.tv/riotgames/v/6528877":                    "tw_v6528877",
+		"https://www.twitch.tv/northernlion/schedule?vodID=1234567890": "tw_v1234567890",
+	}
+	for u, id := range vods {
+		r, db := newListingRouter(t, &fakeTwitchLister{}, nil)
+		rec := doRequest(t, r, "POST", "/api/jobs", map[string]any{"url": u})
+		if rec.Code != http.StatusCreated {
+			t.Errorf("%s: want 201, got %d (body: %s)", u, rec.Code, rec.Body.String())
+			continue
+		}
+		if j, _ := db.GetJob(id); j == nil || !j.IsVod || j.Platform != "twitch" || j.URL != "https://www.twitch.tv/videos/"+strings.TrimPrefix(id, "tw_v") {
+			t.Errorf("%s: %s = %+v, want the VOD's job", u, id, j)
+		}
+	}
+
+	listings := []struct {
+		url                   string
+		login, collect, owner string
+	}{
+		{"https://www.twitch.tv/spamfish/videos", "spamfish", "", ""},
+		{"https://www.twitch.tv/collections/o9zZer3IQBhTJw", "", "o9zZer3IQBhTJw", ""},
+		{"https://www.twitch.tv/spamfish/videos?filter=collections", "", "", "spamfish"},
+	}
+	for _, l := range listings {
+		tw := &fakeTwitchLister{videos: []twitch.TwitchVideo{{ID: "77", Title: "x"}}}
+		tw.videos[0].Owner = &struct {
+			Login       string `json:"login"`
+			DisplayName string `json:"displayName"`
+		}{Login: "spamfish"}
+		r, db := newListingRouter(t, tw, nil)
+		rec := doRequest(t, r, "POST", "/api/jobs", map[string]any{"url": l.url})
+		if rec.Code != http.StatusCreated || tw.gotLogin != l.login || tw.gotCollect != l.collect || tw.gotOwner != l.owner {
+			t.Errorf("%s: %d, read (%q, %q, %q), want 201 reading (%q, %q, %q): %s", l.url, rec.Code,
+				tw.gotLogin, tw.gotCollect, tw.gotOwner, l.login, l.collect, l.owner, rec.Body.String())
+			continue
+		}
+		if j, _ := db.GetJob("tw_v77"); j == nil || j.Status != database.StatusQueued {
+			t.Errorf("%s: tw_v77 = %+v, want a Queued VOD", l.url, j)
+		}
+	}
+
+	r, db := newListingRouter(t, &fakeTwitchLister{videos: []twitch.TwitchVideo{{ID: "1"}}}, nil)
+	rec := doRequest(t, r, "POST", "/api/jobs", map[string]any{"url": "https://www.twitch.tv/spamfish/clips"})
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Twitch clip lists are not supported yet.") {
+		t.Errorf("clip list: %d %s, want 400 with the shared refusal", rec.Code, rec.Body.String())
+	}
+	// A caller that says the platform is YouTube is not second-guessed.
+	rec = doRequest(t, r, "POST", "/api/jobs", map[string]any{"url": "https://www.twitch.tv/videos/6528877", "platform": "youtube"})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("youtube platform with a Twitch VOD URL: %d %s, want 400", rec.Code, rec.Body.String())
+	}
+	if jobs, _ := db.GetAllJobs(); len(jobs) != 0 {
+		t.Errorf("%d jobs created by refused posts, want none", len(jobs))
+	}
+
+	for _, u := range []string{"https://go.twitch.tv/Shroud", "https://m.twitch.tv/shroud"} {
+		f := newJobsFixture(t)
+		rec := doRequest(t, f.router, "POST", "/api/jobs", map[string]any{"url": u})
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Errorf("%s: want the channel's job, got %d (body: %s)", u, rec.Code, rec.Body.String())
+			continue
+		}
+		var body struct {
+			ChannelName string `json:"channelName"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if body.ChannelName != "" && body.ChannelName != "shroud" {
+			t.Errorf("%s: channel = %q, want shroud", u, body.ChannelName)
+		}
+	}
+}

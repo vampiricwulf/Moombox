@@ -631,6 +631,30 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
+		// A URL-only post ({"url": ...}, no videoId and no twitchType) of a
+		// Twitch URL routes by the one URL table every add path follows
+		// (utils.ExtractTwitchTarget), as the dashboard routes the same paste
+		// (owner decision FE-5): a VOD becomes its tw_v job, a video list,
+		// collection list or collection is queued as a listing, a clip list
+		// gets the shared refusal. A channel takes its login below
+		// (extractVideoIDFromURL) and a clip its slug, as before. It used to
+		// take a channel and a clip only, so a VOD URL was "video ID or URL
+		// required" and a listing URL a 400 too.
+		if body.VideoID == "" && body.TwitchType == "" && (body.Platform == "" || body.Platform == "twitch") &&
+			strings.Contains(strings.ToLower(body.URL), "twitch.tv") {
+			if t := utils.ExtractTwitchTarget(body.URL); t != nil {
+				switch t.Type {
+				case utils.TwitchVOD:
+					body.VideoID, body.TwitchType, body.Platform = t.Value, "vod", "twitch"
+				case utils.TwitchVideosListing, utils.TwitchCollection:
+					body.TwitchType, body.Platform = TwitchListingType, "twitch"
+				case utils.TwitchClipsListing:
+					jsonError(rw, t.Unsupported(), http.StatusBadRequest)
+					return
+				}
+			}
+		}
+
 		// A Twitch channel video list or collection (owner decision D18)
 		// queues one VOD job per video rather than making one job.
 		if body.Platform == "twitch" && body.TwitchType == TwitchListingType {
@@ -1351,8 +1375,9 @@ func extractVideoIDFromURL(url string) string {
 	}
 	// A Twitch URL yields its login only when it names a CHANNEL, by the one
 	// URL table every add path follows (utils.ExtractTwitchTarget). VOD, clip
-	// and listing URLs are deliberately NOT taken here — a caller without a
-	// videoId gets an error instead of a wrong job type. The anchored regex
+	// and listing URLs are deliberately NOT taken here, where they would be a
+	// channel's job: the add route routes each to its own kind before it
+	// gets here (owner decision FE-5). The anchored regex
 	// this replaces read /<ch>/v/<id>, /<ch>/schedule?vodID=, /<ch>/videos
 	// and /collections/<id> as a channel's live-wait job.
 	if strings.Contains(strings.ToLower(url), "twitch.tv") {
