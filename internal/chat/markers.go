@@ -343,12 +343,54 @@ func (cd *ChatDownloader) rewriteChatFileWithMarkers(path string, held heldMarke
 }
 
 // rawSidecarPath is the raw sidecar beside a chat file: "chat.json" →
-// "chat.raw.jsonl". A replay re-run's temporary file shares the archive's
-// sidecar — the sidecar is a log of what the endpoint served, and the
-// re-run's file is swapped in or thrown away whole while the log is not.
+// "chat.raw.jsonl". A replay re-run's temporary file has one of its own,
+// "chat.raw.jsonl.rerun", settled with it (finishReplayRerun): the re-run
+// fetches the replay from the top, so sharing the archive's sidecar appended
+// every action a second time, and again on each later re-run, even one that
+// was thrown away.
 func rawSidecarPath(chatFile string) string {
-	base := strings.TrimSuffix(chatFile, replayRerunSuffix)
-	return strings.TrimSuffix(base, ".json") + ".raw.jsonl"
+	if base, ok := strings.CutSuffix(chatFile, replayRerunSuffix); ok {
+		return rawSidecarPath(base) + replayRerunSuffix
+	}
+	return strings.TrimSuffix(chatFile, ".json") + ".raw.jsonl"
+}
+
+// startRawSidecarFresh removes the sidecar a non-resuming replay run would
+// otherwise append to. Such a run fetches the replay from the top and writes
+// its chat file whole (or a re-run's beside the archive), so the sidecar
+// starts over with it, as yt-dlp's live_chat.json does on every run; an
+// earlier run's lines kept would be served again and appended twice. A
+// resuming run, and every live run, appends: its file keeps the history.
+func (cd *ChatDownloader) startRawSidecarFresh() {
+	outputFile, _ := cd.getOutputPaths()
+	if outputFile == "" {
+		return
+	}
+	path := rawSidecarPath(outputFile)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		cd.logDebug("chat: could not remove the raw sidecar a fresh replay run starts over", "file", path, "err", err)
+	}
+}
+
+// settleRerunRawSidecar is the sidecar half of finishReplayRerun: the
+// re-run's replaces the archive's when the re-run became the archive (none
+// written means the replay served none, so the archive's goes too), and is
+// removed when it was discarded.
+func (cd *ChatDownloader) settleRerunRawSidecar(rerunChatFile, archiveChatFile string, swapped bool) {
+	tmp, dst := rawSidecarPath(rerunChatFile), rawSidecarPath(archiveChatFile)
+	if swapped {
+		err := utils.ReplaceFile(tmp, dst)
+		if os.IsNotExist(err) {
+			err = os.Remove(dst)
+		}
+		if err == nil || os.IsNotExist(err) {
+			return
+		}
+		cd.logDebug("chat: could not settle the re-run's raw sidecar", "file", dst, "err", err)
+	}
+	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+		cd.logDebug("chat: could not remove the discarded re-run's raw sidecar", "file", tmp, "err", err)
+	}
 }
 
 // queueRawActions buffers a batch's raw actions for the sidecar.

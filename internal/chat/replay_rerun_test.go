@@ -2,10 +2,12 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -144,5 +146,83 @@ func TestReplayGiveUpKeepsItsSidecar(t *testing.T) {
 	}
 	if n, dups := readChatFileMessages(t, out); n != 2000 || dups != 0 {
 		t.Errorf("chat.json holds %d messages (%d duplicates), want 2000", n, dups)
+	}
+}
+
+// TestReplayRerunRawSidecarHoldsOneCopy: a replay re-run fetches the replay
+// from the top, so its raw lines go to a sidecar of its own, settled with
+// its chat file — swapped in when the re-run becomes the archive, removed
+// when it is discarded — and a fresh replay run over no archive starts the
+// sidecar over. Each run that is the archive leaves exactly one copy of
+// every raw line.
+//
+// Mutants: rawSidecarPath giving a re-run the archive's sidecar (the first
+// re-run doubles every line); the swap not moving the re-run's sidecar in
+// (no lines after it, the re-run's left behind); the discard not removing
+// it; startRawSidecarFresh a no-op (the fresh run doubles every line).
+func TestReplayRerunRawSidecarHoldsOneCopy(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+	sidecar := rawSidecarPath(out)
+	run := func(failFrom int) error {
+		cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "vidRerun", OutputFile: out, IsReplay: true, InitialContinuation: "replay-0"})
+		cd.testBackoffOverride = time.Millisecond
+		fetch := replayFetch(cd, 2000, failFrom)
+		cd.testFetchOverride = func(ctx context.Context) (*ChatApiResponse, error) {
+			var from int
+			fmt.Sscanf(cd.continuation, "replay-%d", &from)
+			resp, err := fetch(ctx)
+			if resp != nil {
+				resp.RawActions = []json.RawMessage{json.RawMessage(fmt.Sprintf(`{"tick":%d}`, from))}
+			}
+			return resp, err
+		}
+		return cd.Start(context.Background())
+	}
+	lines := func(when string) []string {
+		t.Helper()
+		data, err := os.ReadFile(sidecar)
+		if err != nil {
+			t.Fatalf("%s: raw sidecar: %v", when, err)
+		}
+		got := strings.Split(strings.TrimSpace(string(data)), "\n")
+		seen := map[string]bool{}
+		for _, l := range got {
+			if seen[l] {
+				t.Errorf("%s: %s is in the raw sidecar twice (%d lines)", when, l, len(got))
+				break
+			}
+			seen[l] = true
+		}
+		if _, err := os.Stat(rawSidecarPath(out + replayRerunSuffix)); !os.IsNotExist(err) {
+			t.Errorf("%s: the re-run's raw sidecar is still on disk (%v)", when, err)
+		}
+		return got
+	}
+
+	if err := run(-1); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	first := lines("run 1")
+	if err := run(-1); err != nil { // a complete re-run: swapped in
+		t.Fatalf("run 2: %v", err)
+	}
+	if got := lines("complete re-run"); len(got) != len(first) {
+		t.Errorf("complete re-run: %d raw lines, want %d", len(got), len(first))
+	}
+	if err := run(archivePageSize); err == nil { // gives up: discarded
+		t.Fatal("run 3 was meant to give up")
+	}
+	if got := lines("discarded re-run"); len(got) != len(first) {
+		t.Errorf("discarded re-run: %d raw lines, want the archive's %d", len(got), len(first))
+	}
+	// The archive gone, its sidecar left: a fresh run starts the sidecar over.
+	if err := os.Remove(out); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(-1); err != nil {
+		t.Fatalf("run 4: %v", err)
+	}
+	if got := lines("fresh run"); len(got) != len(first) {
+		t.Errorf("fresh run: %d raw lines, want %d", len(got), len(first))
 	}
 }

@@ -773,6 +773,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	var rerun *replayRerun
 	if !resuming && !cd.opts.IsLiveOrUpcoming {
 		rerun = cd.beginReplayRerun()
+		cd.startRawSidecarFresh()
 	}
 
 	if cd.OnStart != nil {
@@ -911,6 +912,7 @@ func (cd *ChatDownloader) finishReplayRerun(rr *replayRerun, completed bool) boo
 	if !ioErr && statErr == nil && (completed || got >= rr.existing) {
 		err := utils.ReplaceFile(tmp, rr.outputFile)
 		if err == nil {
+			cd.settleRerunRawSidecar(tmp, rr.outputFile, true)
 			cd.logInfo("chat: the replay re-run replaced the archive",
 				"videoID", cd.opts.VideoID, "messages", got, "archiveMessages", rr.existing, "complete", completed)
 			return true
@@ -920,6 +922,7 @@ func (cd *ChatDownloader) finishReplayRerun(rr *replayRerun, completed bool) boo
 	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
 		cd.logDebug("chat: could not remove the discarded re-run", "file", tmp, "err", err)
 	}
+	cd.settleRerunRawSidecar(tmp, rr.outputFile, false)
 	cd.mu.Lock()
 	cd.messageCount = rr.existing
 	cd.messages = nil

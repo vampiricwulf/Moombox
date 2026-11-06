@@ -193,11 +193,11 @@ func TestUnmarkedMessageSerializesAsBefore(t *testing.T) {
 }
 
 // TestRawSidecarPath: chat.json's sidecar is chat.raw.jsonl, and a replay
-// re-run's temporary file shares the archive's.
+// re-run's temporary file has its own beside it.
 func TestRawSidecarPath(t *testing.T) {
 	for in, want := range map[string]string{
 		"/s/chat.json":                     "/s/chat.raw.jsonl",
-		"/s/chat.json" + replayRerunSuffix: "/s/chat.raw.jsonl",
+		"/s/chat.json" + replayRerunSuffix: "/s/chat.raw.jsonl" + replayRerunSuffix,
 	} {
 		if got := rawSidecarPath(in); got != want {
 			t.Errorf("rawSidecarPath(%q) = %q, want %q", in, got, want)
