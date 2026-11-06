@@ -665,6 +665,7 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 | QualityPreference | string | "" | `quality_preference` | e.g. "1080p60", "best", "audio_only" |
 | TwitchGapFillAdBreaks | bool | false | `twitch_gap_fill_ad_breaks` | Twitch only (owner decision D17 follow-up 3). Also fills the stitched-ad breaks a live capture skipped from the broadcast's archive VOD; a capture of such a channel ends a part at each break so the hole sits between two parts. Lost-data gaps are filled whatever it says ([architecture.md](architecture.md) § Twitch Archive-VOD Gap-Fill). Editable in both channel editors. |
 | TwitchVodBacklog | bool | false | `twitch_vod_backlog` | Twitch only (owner decision D18). The Twitch monitor lists the channel's videos hourly and queues each one no job has had as a Queued backlog VOD (`monitor.TwitchBacklog`). Editable in both channel editors. |
+| TwitchArchiveClips | bool | false | `twitch_archive_clips` | Twitch only (owner decision D26 follow-up 2; named with the `twitch_` prefix by FE-34, unreleased as `archive_clips`, so no migration). The Twitch monitor lists the channel's clips hourly and queues each one it has not seen as a Queued clip job, paced by archive_slots (`internal/monitor/twitch_clips.go`). Normalized off on a non-Twitch channel; editable in both channel editors. |
 
 #### [[notifications]] (array of tables)
 
