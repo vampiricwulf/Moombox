@@ -123,17 +123,18 @@ func TestAddVideoAutoAdvanceHonoursEsc(t *testing.T) {
 	}
 }
 
-// TestAddVideoRefusesTwitchClipsAndListings: a clip, a channel's video list
-// and a collection are refused in the dialog with the add paths' shared
-// message (utils.TwitchTarget.Unsupported), instead of a listing being read as
-// the channel and submitted as its live-wait job.
+// TestAddVideoRefusesTwitchClipsAndListings: a channel's video list and a
+// collection are refused in the dialog with the add paths' shared message
+// (utils.TwitchTarget.Unsupported), instead of a listing being read as the
+// channel and submitted as its live-wait job; a clip — its own job since
+// owner decision D26 — is submitted as "tw_clip_<slug>".
 //
-// Mutant: dropping the "twitch_listing" case — the video list submits.
+// Mutants: dropping the "twitch_listing" case — the video list submits; the
+// clip refusal restored — the clip does not.
 func TestAddVideoRefusesTwitchClipsAndListings(t *testing.T) {
 	for input, want := range map[string]string{
-		"https://www.twitch.tv/clip/FaintLightGullWholeWheat": "Twitch clips are not supported yet.",
-		"https://www.twitch.tv/spamfish/videos":               "Twitch video lists and collections are not supported yet.",
-		"https://www.twitch.tv/collections/o9zZer3IQBhTJw":    "Twitch video lists and collections are not supported yet.",
+		"https://www.twitch.tv/spamfish/videos":            "Twitch video lists and collections are not supported yet.",
+		"https://www.twitch.tv/collections/o9zZer3IQBhTJw": "Twitch video lists and collections are not supported yet.",
 	} {
 		m := NewAddVideoModel()
 		m.Open()
@@ -144,5 +145,11 @@ func TestAddVideoRefusesTwitchClipsAndListings(t *testing.T) {
 		if !strings.HasPrefix(m.errorMsg, want) {
 			t.Errorf("%s: errorMsg = %q, want it to start %q", input, m.errorMsg, want)
 		}
+	}
+	m := NewAddVideoModel()
+	m.Open()
+	m.urlInput = "https://www.twitch.tv/clip/FaintLightGullWholeWheat"
+	if a, id := m.HandleKey(keyEnter); a != "submit" || id != "tw_clip_FaintLightGullWholeWheat" || m.errorMsg != "" {
+		t.Errorf("clip: Enter = (%q, %q), errorMsg %q; want it submitted as tw_clip_FaintLightGullWholeWheat", a, id, m.errorMsg)
 	}
 }

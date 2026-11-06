@@ -19,27 +19,33 @@ const (
 	// and a collection (/collections/<id> — TwitchCollectionIE). Value is the
 	// login, or the collection ID. They parse so that none is taken for a
 	// channel (which silently made a live-wait job); no add path creates a
-	// job from one yet (Unsupported).
+	// job from one yet (Unsupported). A clip is a job of its own (owner
+	// decision D26): every add path accepts one.
 	TwitchVideosListing TwitchTargetType = "videos"
 	TwitchClipsListing  TwitchTargetType = "clips"
 	TwitchCollection    TwitchTargetType = "collection"
 )
 
 // Unsupported returns the refusal every add path shows for a target it cannot
-// make a job from yet, or "" for a channel or a VOD. The parse is kept here,
-// in the one table every parser follows, so a later clip job (owner decision
-// D26) or listing job only changes what this returns.
+// make a job from yet, or "" for a channel, a VOD or a clip. The parse is kept
+// here, in the one table every parser follows, so a later listing job only
+// changes what this returns — as the clip job (owner decision D26) did.
 func (t *TwitchTarget) Unsupported() string {
 	if t == nil {
 		return ""
 	}
 	switch t.Type {
-	case TwitchClip:
-		return "Twitch clips are not supported yet. Use a channel or VOD URL."
 	case TwitchVideosListing, TwitchClipsListing, TwitchCollection:
 		return "Twitch video lists and collections are not supported yet. Use a channel or VOD URL."
 	}
 	return ""
+}
+
+// ValidTwitchClipSlug reports whether slug can name a clip — the shape the
+// URL table accepts from a clip URL, which the add route also holds a raw
+// slug to (it becomes the job ID and the staging directory's name).
+func ValidTwitchClipSlug(slug string) bool {
+	return len(slug) <= 100 && twitchClipSlugRe.MatchString(slug)
 }
 
 // TwitchTarget represents a parsed Twitch URL or identifier.

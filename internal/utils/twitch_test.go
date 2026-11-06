@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -304,11 +305,13 @@ func TestExtractTwitchTargetSharedURLTable(t *testing.T) {
 }
 
 // TestTwitchTargetUnsupported pins which kinds the add paths refuse until
-// their jobs exist: clips (D26's clip job is a later wave) and the listings
-// (W14), each with its own message; a channel and a VOD are accepted.
+// their jobs exist: the listings (W14); a channel, a VOD and — since the clip
+// job (owner decision D26) — a clip are accepted.
+//
+// Mutant: the clip refusal restored (TwitchClip refused).
 func TestTwitchTargetUnsupported(t *testing.T) {
 	for typ, wantRefused := range map[TwitchTargetType]bool{
-		TwitchChannel: false, TwitchVOD: false, TwitchClip: true,
+		TwitchChannel: false, TwitchVOD: false, TwitchClip: false,
 		TwitchVideosListing: true, TwitchClipsListing: true, TwitchCollection: true,
 	} {
 		if got := (&TwitchTarget{Type: typ}).Unsupported() != ""; got != wantRefused {
@@ -317,5 +320,25 @@ func TestTwitchTargetUnsupported(t *testing.T) {
 	}
 	if (*TwitchTarget)(nil).Unsupported() != "" {
 		t.Error("a nil target has no refusal")
+	}
+}
+
+// TestValidTwitchClipSlug pins the shape the add route holds a raw clip slug
+// to: the URL table's (letters, digits, "_" and "-"), at most 100 bytes — the
+// slug becomes the job ID and a staging directory's name.
+//
+// Mutant: the length cap dropped; "/" or ".." accepted.
+func TestValidTwitchClipSlug(t *testing.T) {
+	for slug, want := range map[string]bool{
+		"FaintLightGullWholeWheat":                      true,
+		"CulturedAmazingKuduDatSheffy-TiZ_-ixAGYR3y2Uy": true,
+		"":                       false,
+		"../etc":                 false,
+		"a/b":                    false,
+		strings.Repeat("a", 101): false,
+	} {
+		if got := ValidTwitchClipSlug(slug); got != want {
+			t.Errorf("ValidTwitchClipSlug(%q) = %v, want %v", slug, got, want)
+		}
 	}
 }

@@ -30,6 +30,11 @@
     {"input": "https://www.twitch.tv/sergeynixon/clip/StormyThankfulSproutFutureMan", "type": "clip", "value": "StormyThankfulSproutFutureMan"},
     {"input": "https://m.twitch.tv/clip/FaintLightGullWholeWheat", "type": "clip", "value": "FaintLightGullWholeWheat"},
     {"input": "https://www.twitch.tv/clip/AwkwardSalamander-271WrMRkSrlpFvOY", "type": "clip", "value": "AwkwardSalamander-271WrMRkSrlpFvOY"},
+    {"input": "https://www.twitch.tv/xqc/clip/CulturedAmazingKuduDatSheffy-TiZ_-ixAGYR3y2Uy", "type": "clip", "value": "CulturedAmazingKuduDatSheffy-TiZ_-ixAGYR3y2Uy"},
+    {"input": "https://clips.twitch.tv/rflegendary/UninterestedBeeDAESuppy", "type": "clip", "value": "UninterestedBeeDAESuppy"},
+    {"input": "https://clips.twitch.tv/embed?clip=InquisitiveBreakableYogurtJebaited", "type": "clip", "value": "InquisitiveBreakableYogurtJebaited"},
+    {"input": "https://m.twitch.tv/rossbroadcast/clip/ConfidentBraveHumanChefFrank", "type": "clip", "value": "ConfidentBraveHumanChefFrank"},
+    {"input": "https://go.twitch.tv/rossbroadcast/clip/ConfidentBraveHumanChefFrank", "type": "clip", "value": "ConfidentBraveHumanChefFrank"},
 
     {"input": "https://www.twitch.tv/spamfish/videos", "type": "videos", "value": "spamfish"},
     {"input": "https://www.twitch.tv/spamfish/videos?filter=all&sort=views", "type": "videos", "value": "spamfish"},

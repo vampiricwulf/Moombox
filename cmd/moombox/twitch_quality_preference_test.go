@@ -56,6 +56,11 @@ func TestNewCLITwitchJob(t *testing.T) {
 	}{
 		{&utils.TwitchTarget{Type: utils.TwitchChannel, Value: "streamer"}, "streamer", "https://www.twitch.tv/streamer", "480p", "streamer"},
 		{&utils.TwitchTarget{Type: utils.TwitchVOD, Value: "123"}, "tw_v123", "https://www.twitch.tv/videos/123", "best", "Manual"},
+		// A clip (owner decision D26): its own kind's ID, a VOD-style row.
+		// Mutant: the TwitchClip case dropped (the slug becomes a channel's
+		// live-wait row).
+		{&utils.TwitchTarget{Type: utils.TwitchClip, Value: "FaintLightGullWholeWheat"}, "tw_clip_FaintLightGullWholeWheat",
+			"https://clips.twitch.tv/FaintLightGullWholeWheat", "best", "Manual"},
 	} {
 		job := newCLITwitchJob(channels, tc.target, "2026-10-09T00:00:00Z")
 		if job.ID != tc.id || job.VideoID != tc.id || job.URL != tc.url || job.ChannelName != tc.channel {

@@ -123,8 +123,11 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		}
 		if platform == "twitch" {
 			body["platform"] = "twitch"
-			// Detect VOD vs channel
-			if vodID, ok := strings.CutPrefix(input, "tw_v"); ok {
+			// Detect clip vs VOD vs channel
+			if slug, ok := strings.CutPrefix(input, "tw_clip_"); ok {
+				body["twitchType"] = "clip"
+				body["videoId"] = slug
+			} else if vodID, ok := strings.CutPrefix(input, "tw_v"); ok {
 				body["twitchType"] = "vod"
 				body["videoId"] = vodID
 			} else {
@@ -171,7 +174,9 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 
 		label := "Added to queue"
 		if platform == "twitch" {
-			if strings.HasPrefix(input, "tw_v") {
+			if strings.HasPrefix(input, "tw_clip_") {
+				label = "Added Twitch clip to queue"
+			} else if strings.HasPrefix(input, "tw_v") {
 				label = "Added Twitch VOD to queue"
 			} else {
 				label = "Added Twitch channel to queue"

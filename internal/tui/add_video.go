@@ -556,9 +556,6 @@ func (m *AddVideoModel) handleURLStep(key string) (string, string) {
 
 		vid, plat := extractMediaID(input)
 		switch plat {
-		case "twitch_clip":
-			m.errorMsg = (&utils.TwitchTarget{Type: utils.TwitchClip}).Unsupported()
-			return "", ""
 		case "twitch_listing":
 			m.errorMsg = (&utils.TwitchTarget{Type: utils.TwitchVideosListing}).Unsupported()
 			return "", ""
@@ -1145,9 +1142,9 @@ func extractYouTubeVideoID(input string) string {
 }
 
 // extractTwitchTarget extracts a Twitch channel, VOD, clip or listing from a
-// URL or raw input. Returns (id, type) where type is "twitch" (id a login, or
-// "tw_v"+VOD ID), "twitch_clip" or "twitch_listing" (refused, id empty), or
-// "". The parse is utils.ExtractTwitchTarget's — the one URL table the
+// URL or raw input. Returns (id, type) where type is "twitch" (id a login,
+// "tw_v"+VOD ID, or "tw_clip_"+clip slug — the clip job's own ID, owner
+// decision D26), "twitch_listing" (refused, id empty), or "". The parse is utils.ExtractTwitchTarget's — the one URL table the
 // daemon's CLI and the dashboard follow too (internal/utils/testdata/
 // twitch_urls.json) — rather than a copy that knew only www and bare hosts,
 // /videos/ and /<ch>/video/, so /<ch>/v/<id>, schedule?vodID=, m./go./player.
@@ -1163,7 +1160,7 @@ func extractTwitchTarget(input string) (string, string) {
 	case utils.TwitchVOD:
 		return "tw_v" + target.Value, "twitch"
 	case utils.TwitchClip:
-		return "", "twitch_clip"
+		return "tw_clip_" + target.Value, "twitch"
 	}
 	return "", "twitch_listing"
 }

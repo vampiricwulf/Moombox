@@ -26,6 +26,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobfilter"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
+	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/worker"
@@ -102,6 +103,17 @@ type TwitchMetadataFetcher interface {
 	FetchVodMetadata(ctx context.Context, vodID string) (*TwitchJobMetadata, error)
 }
 
+// TwitchClipMetadataFetcher is the clip half of a TwitchMetadataFetcher,
+// optional so a fetcher that predates clips (owner decision D26) still
+// serves the other kinds: without it a clip job is created with placeholder
+// metadata, which the worker's own read of the clip replaces.
+type TwitchClipMetadataFetcher interface {
+	// FetchClipMetadata returns metadata for a Twitch clip, and
+	// twitch.ErrClipUnavailable (wrapped or bare) for a slug Twitch has no
+	// clip for.
+	FetchClipMetadata(ctx context.Context, slug string) (*TwitchJobMetadata, error)
+}
+
 // TwitchJobMetadata holds metadata needed for creating a Twitch job.
 type TwitchJobMetadata struct {
 	StreamID     string
@@ -112,6 +124,9 @@ type TwitchJobMetadata struct {
 	StartedAt    string
 	GameCategory string
 	IsLive       bool
+	// ChannelLogin is the channel's login, when the source names one (a
+	// clip's broadcaster); "" otherwise.
+	ChannelLogin string
 }
 
 // filterJobsByAge splits jobs into active vs archived based on the
@@ -655,6 +670,15 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		videoID := body.VideoID
 		if videoID == "" && body.URL != "" {
 			videoID = extractVideoIDFromURL(body.URL)
+			// A clip URL (owner decision D26) yields its slug, by the same
+			// URL table, and says what it is: a caller posting only a URL has
+			// no twitchType to send.
+			if videoID == "" {
+				if t := utils.ExtractTwitchTarget(body.URL); t != nil && t.Type == utils.TwitchClip &&
+					strings.Contains(strings.ToLower(body.URL), "twitch.tv") {
+					videoID, body.TwitchType = t.Value, "clip"
+				}
+			}
 		}
 
 		if videoID == "" {
@@ -711,7 +735,12 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 				return
 			}
 		case "twitch":
-			if !twitchIDRe.MatchString(videoID) {
+			if body.TwitchType == "clip" {
+				if !utils.ValidTwitchClipSlug(videoID) {
+					jsonError(rw, "invalid Twitch clip slug", http.StatusBadRequest)
+					return
+				}
+			} else if !twitchIDRe.MatchString(videoID) {
 				jsonError(rw, "invalid Twitch channel name or VOD ID", http.StatusBadRequest)
 				return
 			}
@@ -726,6 +755,9 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			// Twitch job creation — fetch metadata from Twitch API
 			login := strings.ToLower(videoID)
 			isVod := body.TwitchType == "vod"
+			// A clip (owner decision D26): a VOD-style row, the slug kept as
+			// sent — it is case-sensitive, unlike a login.
+			isClip := body.TwitchType == "clip"
 
 			var (
 				jobID           string
@@ -738,7 +770,33 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 				twitchCategory  string
 			)
 
-			if isVod {
+			if isClip {
+				jobID = twitch.ClipJobID(videoID)
+				url = "https://clips.twitch.tv/" + videoID
+				title = "Clip " + videoID + " — Manual Add"
+				channelName = "Manual"
+				if cf, ok := twitchFetcher.(TwitchClipMetadataFetcher); ok {
+					meta, err := cf.FetchClipMetadata(req.Context(), videoID)
+					if errors.Is(err, twitch.ErrClipUnavailable) {
+						// Twitch answered: no such clip. Any other error
+						// still creates the job, whose own read of the clip
+						// then says what is wrong (a re-hashed op's message,
+						// an outage waited out).
+						jsonError(rw, "Twitch clip not found", http.StatusNotFound)
+						return
+					}
+					if err == nil && meta != nil {
+						title = meta.ChannelName + " — " + meta.Title
+						channelName = meta.ChannelName
+						thumbnailURL = meta.ThumbnailURL
+						streamStartTime = meta.StartedAt
+						twitchCategory = meta.GameCategory
+						if meta.ChannelLogin != "" {
+							url = "https://www.twitch.tv/" + meta.ChannelLogin + "/clip/" + videoID
+						}
+					}
+				}
+			} else if isVod {
 				jobID = "tw_v" + login
 				url = "https://www.twitch.tv/videos/" + login
 				meta, err := twitchFetcher.FetchVodMetadata(req.Context(), login)
@@ -803,7 +861,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 				StreamStartTime:   streamStartTime,
 				TwitchCategory:    twitchCategory,
 				QualityPreference: worker.TwitchJobQualityPreference(body.QualityPreference),
-				IsVod:             isVod,
+				IsVod:             isVod || isClip,
 				ManuallyAdded:     true,
 				OutputDirectory:   body.OutputDirectory,
 				CreatedAt:         now,
