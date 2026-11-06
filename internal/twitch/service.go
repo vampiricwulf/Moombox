@@ -192,6 +192,12 @@ func (s *Service) GetVodInfo(ctx context.Context, vodID string) (*TwitchVodInfo,
 
 // GetVodComments fetches a page of VOD comments. A non-empty cursor selects the
 // page after that edge; otherwise the offset selects the page containing it.
+// ArchiveVodFor finds the archive VOD of the broadcast that started at
+// startedAt on channelLogin (API.ArchiveVodFor), "" when there is none.
+func (s *Service) ArchiveVodFor(ctx context.Context, channelLogin, startedAt string) (string, error) {
+	return s.API.ArchiveVodFor(ctx, channelLogin, startedAt, s.Auth.GetAuthToken())
+}
+
 func (s *Service) GetVodComments(ctx context.Context, vodID string, contentOffsetSeconds float64, cursor string) ([]VodCommentEdge, bool, error) {
 	return s.API.GetVodComments(ctx, vodID, contentOffsetSeconds, cursor, s.Auth.GetAuthToken())
 }
