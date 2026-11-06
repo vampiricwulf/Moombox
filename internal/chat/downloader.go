@@ -1371,16 +1371,42 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 // Pre-stream "waiting-room" chat legitimately produces negative offsets, so
 // HasOffset (not OffsetMs == 0) is the sentinel for "offset not yet set".
 func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, lastTs string) {
+	newInBatch = cd.commitMessages(resp.Messages, true)
+	// The batch's deletions and replacements, after its messages are
+	// committed (a deletion never precedes its message), and everything that
+	// did not become a message for the raw sidecar (G36, D16). A replacement
+	// whose target was never stored comes back from applyMarkers as a message
+	// of its own (owner decision FE-14) and is committed exactly as the
+	// batch's messages are — its offset from its own timestamp, the dedup,
+	// the count — but past the replay high-water mark: the batch's own
+	// messages have just advanced it, and a replacement is stamped with when
+	// the message was sent, before them.
+	if orphans := cd.applyMarkers(resp.Markers); len(orphans) > 0 {
+		newInBatch += cd.commitMessages(orphans, false)
+	}
+	cd.queueRawActions(resp)
+	if len(resp.Messages) > 0 {
+		lastTs = resp.Messages[len(resp.Messages)-1].TimestampText
+	}
+	return
+}
+
+// commitMessages is processBatch's commit of a batch's messages: the
+// live-mode offset of each that needs one, the replay high-water skip, the
+// ID dedup, and the append to cd.messages. Returns how many were new.
+// underMark false leaves the replay high-water skip out (an orphaned
+// replacement, see processBatch); the dedup still applies.
+func (cd *ChatDownloader) commitMessages(msgs []ChatMessage, underMark bool) (newInBatch int) {
 	// Collect newly-seen messages first, then commit the whole batch under a
 	// single cd.mu acquisition rather than locking once per message. Offset
 	// computation and dedup touch only loop-goroutine-owned state (cd.dedup,
 	// cd.streamStartMs), so they stay outside the lock as before.
 	var fresh []ChatMessage
-	replayPass := cd.isReplay()
+	replayPass := underMark && cd.isReplay()
 	highWater, haveHighWater := cd.replayHighWaterUsec, cd.hasReplayHighWater
 	batchMaxUsec, batchHasUsec := int64(0), false
-	for i := range resp.Messages {
-		msg := &resp.Messages[i]
+	for i := range msgs {
+		msg := &msgs[i]
 
 		// The absolute wallclock, parsed once: the offset derivation below
 		// needs it, and so does the high-water mark.
@@ -1472,14 +1498,6 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 			cd.replayHighWaterUsec = batchMaxUsec
 			cd.hasReplayHighWater = true
 		}
-	}
-	// The batch's deletions and replacements, after its messages are
-	// committed (a deletion never precedes its message), and everything that
-	// did not become a message for the raw sidecar (G36, D16).
-	cd.applyMarkers(resp.Markers)
-	cd.queueRawActions(resp)
-	if len(resp.Messages) > 0 {
-		lastTs = resp.Messages[len(resp.Messages)-1].TimestampText
 	}
 	return
 }

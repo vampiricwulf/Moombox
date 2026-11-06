@@ -60,11 +60,15 @@ type AudioFormat struct {
 // /api/formats' bestItags), 0 for none. The server already passes damaged and
 // segmented renditions over and falls back to the first of a kind when every
 // one is either, so the picker shows its verdict rather than computing one.
+// BestAudio is the audio rendition automatic selection takes, of any codec
+// (owner decision FE-10) — a 5.1 E-AC-3 track that outranks both codec picks
+// — noted "Best" beside the codec notes.
 type BestItags struct {
 	BestWebmVideo int
 	BestMp4Video  int
 	BestOpusAudio int
 	BestAacAudio  int
+	BestAudio     int
 }
 
 // FormatsData holds format info fetched from API.
@@ -256,6 +260,34 @@ func (m *AddVideoModel) SetFormats(f *FormatsData) {
 // the TUI's minTermWidth, fitFormatTable gives the Note column what is left.
 const noteColumnWidth = 29
 
+// audioNoteColumnWidth is the audio table's: its longest Note is "Best, Best
+// OPUS, damaged, segmented" (the automatic pick, its codec's pick too, both
+// marks — the fallback when every rendition is both). Its other columns are
+// 8 narrower than the video table's, so at this width it is still the
+// narrower table (61 columns), and narrows the same way (fitFormatTable).
+const audioNoteColumnWidth = 35
+
+// audioCodecLabel is an audio row's Codec column: OPUS, AAC, and the 5.1
+// codecs the shared rank can put first — EC-3 (E-AC-3) and AC-3 — named for
+// what they are. The mime's container said nothing of them (an E-AC-3 track
+// is audio/mp4, and its column read blank). Checked ahead of AAC: "ec-3" is
+// no "mp4a", but the order keeps a future mp4a-prefixed surround codec out of
+// the AAC label too.
+func audioCodecLabel(mimeType string) string {
+	codecs := strings.ToLower(mimeType)
+	switch {
+	case strings.Contains(codecs, "opus"):
+		return "OPUS"
+	case strings.Contains(codecs, "ec-3") || strings.Contains(codecs, "eac3"):
+		return "EC-3"
+	case strings.Contains(codecs, "ac-3"):
+		return "AC-3"
+	case strings.Contains(codecs, "mp4a") || strings.Contains(codecs, "aac"):
+		return "AAC"
+	}
+	return ""
+}
+
 // buildFormatTables constructs bubbles/table models for video and audio format selection.
 func (m *AddVideoModel) buildFormatTables() {
 	if m.formats == nil {
@@ -321,7 +353,7 @@ func (m *AddVideoModel) buildFormatTables() {
 		{Title: "Bitrate", Width: 10},
 		{Title: "Rate", Width: 8},
 		{Title: "Codec", Width: 5},
-		{Title: "Note", Width: noteColumnWidth},
+		{Title: "Note", Width: audioNoteColumnWidth},
 	}
 	var audioRows []table.Row
 	for i, f := range m.formats.AudioFormats {
@@ -335,19 +367,17 @@ func (m *AddVideoModel) buildFormatTables() {
 				sampleRate = fmt.Sprintf("%dkHz", rate/1000)
 			}
 		}
-		codec := ""
-		if strings.Contains(f.MimeType, "opus") {
-			codec = "OPUS"
-		} else if strings.Contains(f.MimeType, "mp4a") || strings.Contains(f.MimeType, "aac") {
-			codec = "AAC"
+		codec := audioCodecLabel(f.MimeType)
+		var bests []string
+		if f.Itag == m.formats.BestItags.BestAudio {
+			bests = append(bests, "Best")
 		}
-		best := ""
 		if f.Itag == m.formats.BestItags.BestOpusAudio {
-			best = "Best OPUS"
+			bests = append(bests, "Best OPUS")
+		} else if f.Itag == m.formats.BestItags.BestAacAudio {
+			bests = append(bests, "Best AAC")
 		}
-		if f.Itag == m.formats.BestItags.BestAacAudio {
-			best = "Best AAC"
-		}
+		best := strings.Join(bests, ", ")
 		audioRows = append(audioRows, table.Row{
 			fmt.Sprintf("%d", i+1),
 			bitrate, sampleRate, codec, formatNote(best, f.Damaged, f.Segmented && noteSegmented),
@@ -884,10 +914,10 @@ func (m *AddVideoModel) renderFormatStep(w, h int, isVideo bool) string {
 		// Adjust table height to fit available space
 		tableH := max(h-10, 3)
 		if isVideo {
-			fitFormatTable(&m.videoTable, w, min(tableH, len(m.formats.VideoFormats)))
+			fitFormatTable(&m.videoTable, w, min(tableH, len(m.formats.VideoFormats)), noteColumnWidth)
 			lines = append(lines, m.videoTable.View())
 		} else {
-			fitFormatTable(&m.audioTable, w, min(tableH, len(m.formats.AudioFormats)))
+			fitFormatTable(&m.audioTable, w, min(tableH, len(m.formats.AudioFormats)), audioNoteColumnWidth)
 			lines = append(lines, m.audioTable.View())
 		}
 	}
@@ -905,7 +935,8 @@ func (m *AddVideoModel) renderFormatStep(w, h int, isVideo bool) string {
 // — no row at all — from the Charm v2 migration on. The width is the
 // columns' own sum, the Note column (the last, the only one whose content
 // varies in width) narrowed to what contentW leaves beside the others and
-// never past noteColumnWidth, so on a narrow terminal the table truncates a
+// never past maxNote (noteColumnWidth, or the audio table's
+// audioNoteColumnWidth), so on a narrow terminal the table truncates a
 // long note with "…" instead of the box wrapping every line of the table in
 // two. The height is rows plus the header's lines, which SetHeight takes out
 // of what it is given: rows alone showed two fewer — and nothing, for a
@@ -919,7 +950,7 @@ func (m *AddVideoModel) renderFormatStep(w, h int, isVideo bool) string {
 // moves it nowhere and runs the table's own scroll rule for where it is,
 // which scrolls a row below the drawn ones up into the last line and leaves
 // a cursor already in view, the operator's own included, as it was.
-func fitFormatTable(t *table.Model, contentW, rows int) {
+func fitFormatTable(t *table.Model, contentW, rows, maxNote int) {
 	cols := t.Columns()
 	if len(cols) == 0 {
 		return
@@ -929,7 +960,7 @@ func fitFormatTable(t *table.Model, contentW, rows int) {
 	for _, c := range cols[:len(cols)-1] {
 		others += c.Width
 	}
-	note.Width = max(min(noteColumnWidth, contentW-others), len("Note"))
+	note.Width = max(min(maxNote, contentW-others), len("Note"))
 	t.SetColumns(cols)
 	t.SetWidth(others + note.Width)
 	t.SetHeight(rows + lipgloss.Height(formatTableStyles().Header.Render("Note")))

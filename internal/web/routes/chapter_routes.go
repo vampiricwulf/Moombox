@@ -20,6 +20,8 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/utils"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // chapterProbeTimeout bounds one ffprobe -show_chapters run. The chapter list
@@ -194,7 +196,46 @@ func jobChaptersUnsorted(ctx context.Context, deps *ChapterRouteDeps, cache *cha
 			all = append(all, c)
 		}
 	}
+	if len(all) == 0 {
+		return splitArchiveChapters(job, segments, outputDir, deps)
+	}
 	return all
+}
+
+// splitArchiveChapters is the chapter list a split archive's finalize wrote
+// beside its parts, "<name>.chapters.json" (owner decision FE-15,
+// worker.writeSplitArchiveChapters), read when the parts carry none of their
+// own — and they carry none unless a part was muxed whole with chapters (a
+// W14 gap-fill's original file): the parts are muxed as they finish, before
+// a list for the broadcast exists, and never again. The file is already on
+// the player's global timeline. It is named on no column: its path is the
+// first part's base name (worker.ArchiveSidecarPath), under the same
+// containment guard as the parts. A missing or unreadable file is no
+// chapters, as everywhere here.
+func splitArchiveChapters(job *database.Job, segments []database.Segment, outputDir string, deps *ChapterRouteDeps) []Chapter {
+	sidecar := worker.ArchiveSidecarPath(segments[0].FilePath, utils.ChaptersSidecarSuffix)
+	if sidecar == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(sidecar)
+	if err != nil {
+		return nil
+	}
+	path, ok := validatePathTraversal(abs, outputDir)
+	if !ok {
+		deps.Logger.Debug("Chapters: the split archive's chapter list is missing or outside the output directory", "job", job.ID)
+		return nil
+	}
+	list, err := utils.ReadChaptersSidecar(path)
+	if err != nil {
+		deps.Logger.Debug("Chapters: the split archive's chapter list is unreadable", "job", job.ID, "file", filepath.Base(path), "error", err)
+		return nil
+	}
+	out := make([]Chapter, 0, len(list))
+	for _, c := range list {
+		out = append(out, Chapter{Start: c.Start, End: max(c.End, c.Start), Title: c.Title})
+	}
+	return out
 }
 
 // chapterCache holds each archive file's chapter list, keyed by its path and

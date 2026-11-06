@@ -137,7 +137,12 @@ func formatsPayload(videoID string, info *youtube.VideoInfo, prefer60fps, prefer
 		return func(f *pickerFormat) bool { return strings.Contains(f.MimeType, sub) }
 	}
 
-	// Build bestItags matching TypeScript format: bestWebmVideo, bestMp4Video, bestOpusAudio, bestAacAudio
+	// Build bestItags matching TypeScript format: bestWebmVideo, bestMp4Video, bestOpusAudio, bestAacAudio,
+	// and bestAudio — the audio rendition automatic selection takes, of any
+	// codec (owner decision FE-10): the shared AudioRank ranks a 5.1 E-AC-3
+	// track above stereo Opus and AAC alike, and it is neither, so no codec
+	// badge was ever on the track the downloader would take. The two codec
+	// badges stay beside it.
 	video := func(a, b *youtube.Format) int { return youtube.CompareVideoFormats(a, b, prefer60fps, preferHDR) }
 	audio := youtube.CompareAudioFormats
 	bestItags := map[string]any{
@@ -145,6 +150,7 @@ func formatsPayload(videoID string, info *youtube.VideoInfo, prefer60fps, prefer
 		"bestMp4Video":  bestPickerItag(videoRows, mime("mp4"), video),
 		"bestOpusAudio": bestPickerItag(audioRows, mime("opus"), audio),
 		"bestAacAudio":  bestPickerItag(audioRows, mime("mp4a"), audio),
+		"bestAudio":     bestPickerItag(audioRows, mime("audio"), audio),
 	}
 
 	return map[string]any{

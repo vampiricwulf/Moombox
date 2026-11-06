@@ -1914,6 +1914,38 @@ sl-progress-bar {
     text-decoration: underline;
 }
 
+/* W22's chat markers in the viewer (owner decision FE-13): a deleted message
+   dimmed and struck through, a replaced one with an "edited" tag whose
+   sl-tooltip holds the original. Dimmed by colour, not opacity: the row's
+   opacity is the playback state's (.future / .active). */
+.chat-msg-deleted .chat-msg-struck,
+.chat-msg-deleted .chat-card-body {
+    text-decoration: line-through;
+    color: var(--sl-color-neutral-500);
+}
+
+.chat-msg-tag {
+    display: inline-block;
+    margin-left: var(--sl-spacing-2x-small);
+    padding: 0 var(--sl-spacing-2x-small);
+    border-radius: var(--sl-border-radius-small);
+    border: 1px solid var(--sl-color-neutral-300);
+    color: var(--sl-color-neutral-600);
+    font-size: var(--sl-font-size-2x-small);
+    line-height: 1.4;
+    text-decoration: none;
+    vertical-align: baseline;
+}
+
+.chat-msg-tag-edited {
+    cursor: help;
+}
+
+.chat-msg-tag-edited:focus-visible {
+    outline: var(--sl-focus-ring);
+    outline-offset: 1px;
+}
+
 .chat-msg-author {
     font-weight: var(--sl-font-weight-semibold);
     margin-right: var(--sl-spacing-2x-small);

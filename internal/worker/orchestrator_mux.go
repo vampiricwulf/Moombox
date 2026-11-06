@@ -808,6 +808,14 @@ func copyKeptChatSidecar(stagingDir, output, jobChatPath string) (string, error)
 	if err := copyFile(src, dst); err != nil {
 		return "", err
 	}
+	// The capture's raw sidecar goes with it (owner decision FE-16), as
+	// copyAssets carries it beside the archive: <stem>.chat.raw.jsonl, which
+	// the sweep folds under the recovered recording as it does the chat.
+	// Best effort: the chat stands without it.
+	rawSrc := filepath.Join(filepath.Dir(src), "chat.raw.jsonl")
+	if fileExists(rawSrc) {
+		_ = copyFile(rawSrc, strings.TrimSuffix(dst, ".json")+".raw.jsonl")
+	}
 	return dst, nil
 }
 
@@ -1337,6 +1345,9 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 
 	// Copy assets
 	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates, anyPartChat)
+	// The chapter list a single file embeds, beside the parts instead (owner
+	// decision FE-15): they are already muxed, and are never muxed again.
+	o.writeSplitArchiveChapters(ctx, jobCtx, segments)
 
 	o.keepIncompleteTailProgress(jobCtx.Job.ID, updates)
 

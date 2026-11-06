@@ -430,6 +430,7 @@ export class FilterBarController {
       return token.value === "youtube" ? "YouTube" : token.value === "twitch" ? "Twitch" : token.value;
     }
     if (token.type === "channel") return token.value;
+    if (token.type === "type" && token.value.toLowerCase() === "clip") return "Clips";
     return token.value;
   }
 }

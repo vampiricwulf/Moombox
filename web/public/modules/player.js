@@ -93,6 +93,66 @@ export function isDimTwitchNotice(msg) {
   return msg.messageType === "system" && !!msg.systemMsg;
 }
 
+/**
+ * Whether a chat.json message carries W22's replacement marker with new
+ * parts to show (internal/chat: Replaced, Replacement). A marker with no
+ * parts is drawn as sent: there is nothing to put in the original's place.
+ * @param {object} msg
+ * @returns {boolean}
+ */
+export function isReplacedMessage(msg) {
+  return msg.replaced === true && Array.isArray(msg.replacement) && msg.replacement.length > 0;
+}
+
+/**
+ * A message's parts as plain text, an emoji as its own text (its shortcut or
+ * the character): the original a replaced message's "edited" tooltip shows.
+ * @param {Array<{text?: string}>|string} parts
+ * @returns {string}
+ */
+export function chatPartsText(parts) {
+  if (typeof parts === "string") return parts;
+  return (Array.isArray(parts) ? parts : []).map((p) => p?.text || "").join("");
+}
+
+/** The small "deleted" / "edited" tag a marked chat message carries. */
+function chatChangeTag(label) {
+  const tag = document.createElement("span");
+  tag.className = `chat-msg-tag chat-msg-tag-${label}`;
+  tag.textContent = label;
+  return tag;
+}
+
+/**
+ * The localStorage key the chapter list's open state is kept under (owner
+ * decision FE-36): "true" open, anything else — nothing stored, the first
+ * time — collapsed.
+ */
+export const CHAPTER_LIST_OPEN_KEY = "player-chapters-open";
+
+/**
+ * Whether the chapter list opens expanded. Every storage access is guarded:
+ * localStorage can throw (a private window's quota, storage disabled), and a
+ * remembered preference must never cost the player its chapter list.
+ * @returns {boolean}
+ */
+export function readChapterListOpen() {
+  try {
+    return localStorage.getItem(CHAPTER_LIST_OPEN_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+/** Remember the chapter list's state; a storage that throws remembers nothing. */
+function writeChapterListOpen(open) {
+  try {
+    localStorage.setItem(CHAPTER_LIST_OPEN_KEY, open ? "true" : "false");
+  } catch {
+    // Not remembered; the list still opens and closes.
+  }
+}
+
 /** msg-param-sub-plan (internal/twitch: SubPlan) → the name Twitch shows. */
 const TWITCH_PLAN_NAMES = { 1000: "Tier 1", 2000: "Tier 2", 3000: "Tier 3", Prime: "Prime" };
 
@@ -450,6 +510,19 @@ export class PlayerController {
     // multi-part job's parts each fire this as they load — harmless, the
     // strip there reads the parts' summed durations).
     video.addEventListener("durationchange", () => this._renderChapterStrip());
+    // The chapter list's open or collapsed state, remembered per browser
+    // (owner decision FE-36): saved when the viewer opens or closes it. The
+    // events also fire for the collapse _renderChapterList makes when a job
+    // has no chapters, after `hidden` is set — that one is not the viewer's
+    // and is not saved. Only the details' own events: a component inside it
+    // that emits sl-show bubbles here too.
+    const chaptersDetails = document.getElementById("player-chapters");
+    for (const [type, open] of [["sl-show", true], ["sl-hide", false]]) {
+      chaptersDetails?.addEventListener(type, (e) => {
+        if (e.target !== chaptersDetails || chaptersDetails.hidden) return;
+        writeChapterListOpen(open);
+      });
+    }
 
     // Video seeking — un-anchor the overlay BEFORE the seek's own timeupdate.
     // The HTML seek algorithm queues `timeupdate` and only THEN `seeked`, so
@@ -846,13 +919,17 @@ export class PlayerController {
     for (let i = 0; i < this.playerChatMessages.length; i++) {
       const msg = this.playerChatMessages[i];
       const authorMatch = (msg.authorName || "").toLowerCase().includes(needle);
-      const textParts = msg.message || [];
-      let textMatch = false;
-      if (typeof textParts === "string") {
-        textMatch = textParts.toLowerCase().includes(needle);
-      } else if (Array.isArray(textParts)) {
-        textMatch = textParts.some((p) => (p.text || "").toLowerCase().includes(needle));
-      }
+      const partsMatch = (textParts) => {
+        if (typeof textParts === "string") return textParts.toLowerCase().includes(needle);
+        if (Array.isArray(textParts)) return textParts.some((p) => (p.text || "").toLowerCase().includes(needle));
+        return false;
+      };
+      // A replaced message's row shows its replacement (FE-13), so that text
+      // is what a search must find; the original stays findable too — the
+      // row's "edited" tooltip names it, and a moderator looking for what was
+      // said first should not lose the row.
+      let textMatch = partsMatch(msg.message || []) ||
+        (isReplacedMessage(msg) && partsMatch(msg.replacement));
       // The lines the sidebar shows beside or instead of the message (2026-09-25
       // K1-K3): the member line, the amount and the Twitch system line are on
       // screen, so they must be findable too.
@@ -1088,8 +1165,12 @@ export class PlayerController {
    * share of the global timeline. A native `<video controls>` seek bar cannot
    * be decorated, so this sits under it the way the segment indicator does,
    * across the same width as the video element. Each marker is a button —
-   * its title the hover text, its aria-label the same name for a reader —
-   * and seeks to its chapter's start through seekToGlobalTime.
+   * its name in an sl-tooltip, shown on hover and on keyboard focus (owner
+   * decision FE-37: the title attribute showed on hover only, after the
+   * browser's delay, and never to a keyboard), its aria-label the same name
+   * for a reader — and seeks to its chapter's start through
+   * seekToGlobalTime. sl-tooltip's host is display: contents, so the button
+   * is still the positioned box the strip lays out.
    */
   _renderChapterStrip() {
     const strip = document.getElementById("player-chapter-strip");
@@ -1108,10 +1189,13 @@ export class PlayerController {
       const pct = Math.min(100, Math.max(0, (c.start / total) * 100));
       marker.style.left = `${pct}%`;
       const at = formatTimestamp(c.start);
-      marker.title = `${this._chapterLabel(i)} (${at})`;
       marker.setAttribute("aria-label", `Seek to ${this._chapterLabel(i)}, at ${at}`);
       marker.addEventListener("click", () => this.seekToGlobalTime(c.start));
-      return marker;
+      const tooltip = document.createElement("sl-tooltip");
+      tooltip.setAttribute("content", `${this._chapterLabel(i)} (${at})`);
+      tooltip.setAttribute("trigger", "hover focus");
+      tooltip.appendChild(marker);
+      return tooltip;
     });
     strip.replaceChildren(...markers);
     strip.hidden = false;
@@ -1119,8 +1203,10 @@ export class PlayerController {
 
   /**
    * The collapsible chapter list: one row per chapter (start time and title)
-   * that seeks on click. Hidden outright when the job has none; collapsed by
-   * default otherwise, so it never takes the video's height unasked.
+   * that seeks on click. Hidden outright when the job has none; otherwise
+   * open or collapsed as this browser last left it (readChapterListOpen,
+   * owner decision FE-36) — collapsed the first time, so it never takes the
+   * video's height unasked.
    */
   _renderChapterList() {
     const details = document.getElementById("player-chapters");
@@ -1153,6 +1239,7 @@ export class PlayerController {
     list.replaceChildren(...rows);
     details.setAttribute("summary", `Chapters (${this._chapters.length})`);
     details.hidden = false;
+    details.open = readChapterListOpen();
   }
 
   /**
@@ -1169,7 +1256,7 @@ export class PlayerController {
     }
     if (idx === this._activeChapter) return;
     this._activeChapter = idx;
-    const markers = document.getElementById("player-chapter-strip")?.children || [];
+    const markers = document.querySelectorAll("#player-chapter-strip .chapter-strip-marker");
     for (let i = 0; i < markers.length; i++) markers[i].classList.toggle("active", i === idx);
     const rows = document.querySelectorAll("#player-chapter-list .chapter-row");
     rows.forEach((row, i) => {
@@ -1631,20 +1718,66 @@ export class PlayerController {
     // search filter and scroll maths all address rows by container.children[i]
     // and would not notice the class going — but every `.chat-msg.<state>`
     // rule in moombox.css would, and so would the jsdom harness's measured box.
+    //
+    // A replaced message (W22's marker) is drawn with its new text: each
+    // shape is handed a view whose `message` is the replacement, and the
+    // original goes in the "edited" tag's tooltip (_markChatChange). The
+    // archived message itself is never touched.
+    const view = isReplacedMessage(msg) ? { ...msg, message: msg.replacement } : msg;
     if (msg.superchat) {
-      this._fillSuperchatCard(div, msg);
-      return div;
+      this._fillSuperchatCard(div, view);
+    } else if (msg.isMembership) {
+      this._fillMemberCard(div, view);
+    } else if (TWITCH_NOTICE_TYPES.has(msg.messageType) || isDimTwitchNotice(msg)) {
+      this._fillTwitchNotice(div, view);
+    } else {
+      this._fillPlainRow(div, view);
     }
-    if (msg.isMembership) {
-      this._fillMemberCard(div, msg);
-      return div;
-    }
-    if (TWITCH_NOTICE_TYPES.has(msg.messageType) || isDimTwitchNotice(msg)) {
-      this._fillTwitchNotice(div, msg);
-      return div;
-    }
-    this._fillPlainRow(div, msg);
+    this._markChatChange(div, msg);
     return div;
+  }
+
+  /**
+   * W22's chat markers, shown (owner decision FE-13). internal/chat keeps a
+   * message YouTube took back or replaced exactly as it was sent and flags it
+   * in chat.json — `deleted` (and `deletedState`, the line YouTube shows in
+   * its place) for a moderator's deletion, an author's retraction or a ban's
+   * sweep; `replaced` with the new parts in `replacement` — and the viewer
+   * drew every one as an ordinary message, so a retracted message read as if
+   * it still stood.
+   *
+   * A deleted message is dimmed and struck through (.chat-msg-struck on a
+   * flat row's content, the body of a card), with a small "deleted" tag. A replaced one shows its new text (the view _buildChatMessageEl
+   * fills the row from) with an "edited" tag whose sl-tooltip holds the
+   * original text, on hover and on keyboard focus — the tag is focusable for
+   * that. The tag sits after the message: in a card's body (or its header,
+   * when the card has no body), else at the end of the row. A message can be
+   * both, replaced and later deleted: it gets both tags.
+   */
+  _markChatChange(div, msg) {
+    const deleted = msg.deleted === true;
+    const replaced = isReplacedMessage(msg);
+    if (!deleted && !replaced) return;
+    const host = div.querySelector(".chat-card-body") || div.querySelector(".chat-card-header") || div;
+    if (deleted) {
+      div.classList.add("chat-msg-deleted");
+      // The struck text: a card's body (by the stylesheet's own rule), or a
+      // flat row's content span, its last child — the time, the author and a
+      // cheer chip are never struck.
+      const content = host === div ? div.lastElementChild : null;
+      if (content && !content.matches(".chat-msg-time, .chat-msg-author, .cheer-chip")) content.classList.add("chat-msg-struck");
+      host.appendChild(chatChangeTag("deleted"));
+    }
+    if (replaced) {
+      div.classList.add("chat-msg-edited");
+      const tooltip = document.createElement("sl-tooltip");
+      tooltip.content = `Original: ${chatPartsText(msg.message)}`;
+      tooltip.setAttribute("content", tooltip.content);
+      const tag = chatChangeTag("edited");
+      tag.tabIndex = 0;
+      tooltip.appendChild(tag);
+      host.appendChild(tooltip);
+    }
   }
 
   /**

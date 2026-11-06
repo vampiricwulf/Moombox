@@ -219,7 +219,7 @@ func twitchTestJobCtx(dir string, isVod bool, streamStart string) *JobContext {
 // TestTwitchChapterHooksAreWired pins, by source, the call sites a unit test
 // cannot reach without a real live capture: ExecuteTwitch notes the starting
 // category, runs the category poll, records the root part's start and stages
-// the chapters before the single-part finalize; processJob hands the VOD's
+// the chapters before the finalize (single-part or split); processJob hands the VOD's
 // chapters, the archive lookup and the category read to the variant.
 //
 // Mutant: any one of those lines removed.

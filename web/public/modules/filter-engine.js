@@ -3,6 +3,26 @@
  * All tokens AND (intersect). OR tokens are unions within.
  */
 
+/**
+ * The job ID prefix of a Twitch clip job, the clip's slug after it
+ * ("tw_clip_FaintLightGullWholeWheat") — internal/twitch ClipJobIDPrefix,
+ * which TestTypeClipMatchesTheDashboard (internal/jobfilter) holds this
+ * copy to. A clip is told from any other job by its ID alone (owner decision
+ * FE-28): its platform is "twitch" like a VOD's or a live capture's, and no
+ * column says "clip".
+ */
+export const CLIP_JOB_ID_PREFIX = "tw_clip_";
+
+/**
+ * Whether a job is a Twitch clip job (CLIP_JOB_ID_PREFIX): the job list's
+ * CLIP badge and the filter language's type:clip both ask it.
+ * @param {{id?: string}} job
+ * @returns {boolean}
+ */
+export function isClipJob(job) {
+  return typeof job?.id === "string" && job.id.startsWith(CLIP_JOB_ID_PREFIX);
+}
+
 const STATUS_FILTER_MAP = {
   active: ["Downloading", "Live", "Upcoming", "Muxing", "Queued"],
   // "Issues" is everything waiting on a human — failed, cancelled, or parked
@@ -59,6 +79,13 @@ function matchTerm(term, job) {
       break;
     case "platform":
       result = (job.platform || "").toLowerCase() === term.value.toLowerCase();
+      break;
+    case "type":
+      // A job's kind where no column holds it (owner decision FE-28): clip,
+      // a Twitch clip job by its ID (isClipJob). The only kind there is; any
+      // other value matches nothing, so a typo empties the list rather than
+      // passing everything.
+      result = term.value.toLowerCase() === "clip" && isClipJob(job);
       break;
     default:
       result = true;

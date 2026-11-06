@@ -9,11 +9,12 @@
  *   - Quotes for values with spaces: channel:"shachi too"
  *
  * Token types:
- *   { type: "text"|"status"|"channel"|"platform", value: string, negate: boolean }
+ *   { type: "text"|"status"|"channel"|"platform"|"type", value: string, negate: boolean }
+ *   (type:clip is a Twitch clip job — owner decision FE-28.)
  *   { type: "or", terms: [{ type, value, negate }, ...] }
  */
 
-const NAMESPACES = new Set(["status", "channel", "platform"]);
+const NAMESPACES = new Set(["status", "channel", "platform", "type"]);
 
 /**
  * Parse a single term (no pipes) into a token object.
@@ -156,7 +157,7 @@ export function serializeToken(token) {
 function quoteValue(value, isText) {
   const needs = /[ |]/.test(value) ||
     value.startsWith('"') || value.startsWith("'") ||
-    (isText && (value.startsWith("-") || /^(status|channel|platform):/i.test(value)));
+    (isText && (value.startsWith("-") || /^(status|channel|platform|type):/i.test(value)));
   if (!needs) return value;
   const q = value.includes('"') && !value.includes("'") ? "'" : '"';
   return `${q}${value}${q}`;

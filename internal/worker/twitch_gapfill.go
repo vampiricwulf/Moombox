@@ -741,6 +741,13 @@ func (f *twitchGapFiller) commit(plan *twitchGapFillPlan, job *database.Job, v *
 	if !applied {
 		return fmt.Errorf("the job changed while its gap-fill ran")
 	}
+	// A split archive's chapter list (owner decision FE-15) was laid on the
+	// parts as they stood; the recovered parts move every point after them.
+	madePaths := make(map[string]bool, len(made))
+	for _, p := range made {
+		madePaths[p.path] = true
+	}
+	refitSplitArchiveChapters(recorded, segs, madePaths, f.logger)
 	updates := map[string]any{"output_file": segs[0].FilePath, "length_seconds": int(total)}
 	if bytes > 0 {
 		updates["file_size"] = bytes

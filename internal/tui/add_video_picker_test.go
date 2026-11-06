@@ -399,3 +399,61 @@ func TestAddVideoPickerHidesTheSegmentedNoteWhileOnAir(t *testing.T) {
 		})
 	}
 }
+
+// TestAddVideoPickerNotesTheAutomaticAudioPick is owner decision FE-10 in the
+// TUI: the audio row automatic selection takes (bestItags.bestAudio) is noted
+// "Best" — a 5.1 E-AC-3 track, which neither codec pick names, alone; a track
+// that is also its codec's pick carries both — and the E-AC-3 track's Codec
+// column says EC-3, where it read blank. The longest audio note still fits
+// its column, and the audio table is still the narrower of the two.
+//
+// Mutants (each run): the "Best" note left out (row 0 reads ""); the codec
+// note replacing it rather than joining it (row 1 reads "Best OPUS");
+// audioCodecLabel without EC-3 (row 0's codec blank); the audio Note column
+// at noteColumnWidth (the longest note does not fit).
+func TestAddVideoPickerNotesTheAutomaticAudioPick(t *testing.T) {
+	for _, tc := range []struct {
+		best      int
+		wantNotes []string
+	}{
+		{328, []string{"Best", "Best OPUS", "Best AAC"}},
+		{251, []string{"", "Best, Best OPUS", "Best AAC"}},
+	} {
+		m := NewAddVideoModel()
+		m.SetFormats(&FormatsData{
+			StreamStatus: "vod",
+			AudioFormats: []AudioFormat{
+				{Itag: 328, MimeType: `audio/mp4; codecs="ec-3"`, Bitrate: 384000},
+				{Itag: 251, MimeType: `audio/webm; codecs="opus"`, Bitrate: 160000},
+				{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`, Bitrate: 128000},
+			},
+			BestItags: BestItags{BestOpusAudio: 251, BestAacAudio: 140, BestAudio: tc.best},
+		})
+		rows := m.audioTable.Rows()
+		for i, want := range tc.wantNotes {
+			if rows[i][4] != want {
+				t.Errorf("best %d: row %d note = %q, want %q", tc.best, i, rows[i][4], want)
+			}
+		}
+		if rows[0][3] != "EC-3" || rows[1][3] != "OPUS" || rows[2][3] != "AAC" {
+			t.Errorf("codecs = %q %q %q, want EC-3, OPUS, AAC", rows[0][3], rows[1][3], rows[2][3])
+		}
+	}
+	m := NewAddVideoModel()
+	m.SetFormats(&FormatsData{AudioFormats: []AudioFormat{{Itag: 1}}})
+	cols := m.audioTable.Columns()
+	if n := len(formatNote("Best, Best OPUS", true, true)); n > cols[len(cols)-1].Width {
+		t.Errorf("the longest audio note is %d wide, its column %d", n, cols[len(cols)-1].Width)
+	}
+	audioW, videoW := 0, 0
+	for _, c := range cols {
+		audioW += c.Width
+	}
+	m.SetFormats(&FormatsData{VideoFormats: []VideoFormat{{Itag: 1}}})
+	for _, c := range m.videoTable.Columns() {
+		videoW += c.Width
+	}
+	if audioW > videoW {
+		t.Errorf("the audio table is %d wide, the video table %d", audioW, videoW)
+	}
+}

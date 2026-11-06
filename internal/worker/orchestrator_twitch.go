@@ -1598,12 +1598,15 @@ sessionLoop:
 		o.queue.ReleaseDownloadSlot(jobCtx.Job.ID)
 	}
 
-	// The archive's chapters, staged for muxAndFinalize: a single-part
-	// archive only — a split job's parts were muxed while the broadcast ran,
-	// before any chapter list was known.
-	if segmentIndex == 0 && curStagingDir == jobCtx.StagingDir {
-		o.stageTwitchChapters(muxCtx, jobCtx, variant, isVod)
-	}
+	// The archive's chapters, staged in the job's staging root for
+	// muxAndFinalize: a single-part archive embeds them at its mux; a split
+	// one's parts were muxed while the broadcast ran, before any chapter
+	// list was known, and its finalize writes the staged list beside them as
+	// <name>.chapters.json (writeSplitArchiveChapters, owner decision FE-15).
+	// Staged for both, so a split live capture gets its archive VOD's
+	// chapters too, the source a single file has, not the observed
+	// categories alone. No part's mux reads the staged list.
+	o.stageTwitchChapters(muxCtx, jobCtx, variant, isVod)
 
 	// The gap-fill plan (owner decision D17): read from the parts' coverage
 	// while the staging still holds it, kept once the job is Finished. A

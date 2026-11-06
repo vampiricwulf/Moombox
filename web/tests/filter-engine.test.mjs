@@ -142,3 +142,19 @@ test("status: a negated Object.prototype name keeps every job", () => {
 test("status: an Object.prototype name in an OR group leaves the other branch working", () => {
   assert.deepEqual(filterWith("status:constructor|status:finished"), ["2"]);
 });
+
+// Owner decision FE-28: type:clip is a Twitch clip job, told by its ID's
+// tw_clip_ prefix (isClipJob) — the platform is "twitch" for every Twitch
+// job; the chip reads "Clips". internal/jobfilter's TestTypeClipMatchesTheDashboard
+// holds the TUI twin to the same answers.
+// MUTANT: "type" missing from NAMESPACES (type:clip is a text search, finds
+// nothing); isClipJob reading the platform (job 3 matches).
+test("type:clip selects the clip jobs, by their ID", async () => {
+  const { isClipJob } = await import("../public/modules/filter-engine.js");
+  const withClip = [...jobs, { id: "tw_clip_FaintLightGullWholeWheat", title: "A clip", channelName: "Another Ch", status: "Finished", platform: "twitch" }];
+  const ids = (q) => applyFilterTokens(withClip, parseFilterQuery(q)).map((j) => j.id);
+  assert.deepEqual(ids("type:clip"), ["tw_clip_FaintLightGullWholeWheat"]);
+  assert.deepEqual(ids("-type:clip platform:twitch"), ["3"]);
+  assert.deepEqual(ids("type:vod"), []);
+  assert.equal(isClipJob({ id: "tw_v1", platform: "twitch" }), false);
+});

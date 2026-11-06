@@ -582,7 +582,7 @@ func (api *ChatAPI) collectInnerAction(action, replay map[string]any, replayOffs
 			res.Messages = append(res.Messages, *msg)
 			return
 		}
-	} else if marker, ok := api.parseMarker(action); ok {
+	} else if marker, ok := api.parseMarker(action, replayOffsetMs, hasReplayOffset); ok {
 		res.Markers = append(res.Markers, marker)
 	}
 	// Everything not stored as a message goes to the sidecar verbatim: the
@@ -612,8 +612,13 @@ func (api *ChatAPI) collectInnerAction(action, replay map[string]any, replayOffs
 // player shows), markChatItemsByAuthorAsDeletedAction (every message of a
 // banned or timed-out author), and replaceChatItemAction (a message's item
 // replaced by a new one). A replacement whose new item is not a message
-// Moombox parses is no marker — the raw sidecar keeps it.
-func (api *ChatAPI) parseMarker(action map[string]any) (ChatMarker, bool) {
+// Moombox parses is no marker — the raw sidecar keeps it. A replacement
+// carries its item parsed whole too (ChatMarker.Message), at the offset of
+// the replay wrapper it came in, so one whose target was never stored — a
+// liveChatPlaceholderItemRenderer's, the item YouTube shows while a message
+// is held for review, which Moombox never stores — becomes that message
+// (owner decision FE-14).
+func (api *ChatAPI) parseMarker(action map[string]any, replayOffsetMs int64, hasReplayOffset bool) (ChatMarker, bool) {
 	if a, ok := action["markChatItemAsDeletedAction"].(map[string]any); ok {
 		id, _ := a["targetItemId"].(string)
 		return ChatMarker{Kind: MarkerDeleted, TargetID: id, State: renderedText(a["deletedStateMessage"])}, id != ""
@@ -628,11 +633,11 @@ func (api *ChatAPI) parseMarker(action map[string]any) (ChatMarker, bool) {
 		if id == "" || item == nil {
 			return ChatMarker{}, false
 		}
-		repl := api.parseAddChatItem(map[string]any{"item": item}, 0, false)
+		repl := api.parseAddChatItem(map[string]any{"item": item}, replayOffsetMs, hasReplayOffset)
 		if repl == nil {
 			return ChatMarker{}, false
 		}
-		return ChatMarker{Kind: MarkerReplaced, TargetID: id, Replacement: repl.Message}, true
+		return ChatMarker{Kind: MarkerReplaced, TargetID: id, Replacement: repl.Message, Message: repl}, true
 	}
 	return ChatMarker{}, false
 }

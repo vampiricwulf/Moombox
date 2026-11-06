@@ -71,8 +71,16 @@ func TestParseResponseKeepsEveryAction(t *testing.T) {
 		{Kind: MarkerAuthorDeleted, AuthorChannelID: "UCb"},
 		{Kind: MarkerReplaced, TargetID: "m2", Replacement: []MessagePart{{Type: "text", Text: "edited"}}},
 	}
+	// The replacement's item parsed whole (FE-14) is checked apart.
+	var repl *ChatMessage
+	if len(res.Markers) == 3 {
+		repl, res.Markers[2].Message = res.Markers[2].Message, nil
+	}
 	if !reflect.DeepEqual(res.Markers, want) {
 		t.Errorf("markers = %+v, want %+v", res.Markers, want)
+	}
+	if repl == nil || repl.ID != "m2" || repl.TimestampUsec != "1700000000000000" || len(repl.Message) != 1 || repl.Message[0].Text != "edited" {
+		t.Errorf("the replacement's message = %+v, want m2's new item whole", repl)
 	}
 	if len(res.RawActions) != 5 {
 		t.Fatalf("raw actions = %d, want the ticker, three markers and the banner", len(res.RawActions))

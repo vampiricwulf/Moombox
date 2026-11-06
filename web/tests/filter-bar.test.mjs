@@ -292,3 +292,16 @@ test("a text-only OR query lives in the box: clearing or editing the box replace
   assert.deepEqual(f.tokens(), []);
   assert.deepEqual(f.shown(), ["1", "2", "3"]);
 });
+
+// Owner decision FE-28: type:clip typed into the box chips as "Clips" and
+// leaves the clip jobs alone in the list (isClipJob: the tw_clip_ ID).
+// Mutant: _filterTokenLabel without its type arm (the chip reads "clip").
+test("type:clip chips as Clips and keeps the clip jobs", { skip }, async () => {
+  const f = await setup();
+  f.h.app.jobs.push({ id: "tw_clip_Slug", status: "Finished", title: "A clip", channelName: "Shachi Too", platform: "twitch", videoId: "tw_clip_Slug" });
+  f.h.app.renderJobs();
+  f.type("type:clip ");
+  f.pause();
+  assert.deepEqual(f.chips(), ["Clips"]);
+  assert.deepEqual(f.shown(), ["tw_clip_Slug"]);
+});

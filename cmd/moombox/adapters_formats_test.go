@@ -280,7 +280,7 @@ func TestFormatsPayloadDecodesIntoTheTUIPicker(t *testing.T) {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		t.Fatalf("decode into tui.FormatsData: %v", err)
 	}
-	if want := (tui.BestItags{BestWebmVideo: 248, BestMp4Video: 136, BestOpusAudio: 250, BestAacAudio: 140}); data.BestItags != want {
+	if want := (tui.BestItags{BestWebmVideo: 248, BestMp4Video: 136, BestOpusAudio: 250, BestAacAudio: 140, BestAudio: 250}); data.BestItags != want {
 		t.Errorf("BestItags = %+v, want %+v", data.BestItags, want)
 	}
 	if data.StreamStatus != string(youtube.StreamUpcoming) {
@@ -352,5 +352,61 @@ func TestFormatsPayloadBadgesFollowTheSharedRank(t *testing.T) {
 				t.Errorf("prefer_hdr=%v: bestItags.%s = %v, want %v", tc.preferHDR, key, best[key], want)
 			}
 		}
+	}
+}
+
+// TestFormatsPayloadBadgesTheAutomaticAudioPick is owner decision FE-10: the
+// picker badges [Best] the audio rendition automatic selection takes, of any
+// codec — youtube.SelectBestFormats' own pick, by the shared AudioRank. The
+// badges were per codec only (Opus, AAC), so a 5.1 E-AC-3 track, which the
+// rank puts above stereo Opus and AAC by its channels, carried no badge at
+// all though it is what the downloader takes. The codec badges stay, and a
+// damaged winner yields the badge to the best intact track, as every badge
+// does. The TUI decodes the new pick from the same answer.
+//
+// Mutants (each run): bestAudio left out of bestItags (nil, and the TUI's
+// BestAudio 0); bestAudio ranked within Opus only (251); the TUI's
+// BestItags without BestAudio (0).
+func TestFormatsPayloadBadgesTheAutomaticAudioPick(t *testing.T) {
+	eac3 := `audio/mp4; codecs="ec-3"`
+	surround := func(f *youtube.Format) { f.AudioQuality, f.AudioChannels = "AUDIO_QUALITY_MEDIUM", 6 }
+	stereo := func(f *youtube.Format) { f.AudioQuality, f.AudioChannels = "AUDIO_QUALITY_MEDIUM", 2 }
+	for _, tc := range []struct {
+		name    string
+		damaged bool
+		want    float64
+	}{
+		{"the 5.1 track wins", false, 328},
+		{"a damaged 5.1 track yields to the best intact one", true, 251},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mods := []func(*youtube.Format){surround}
+			if tc.damaged {
+				mods = append(mods, damagedFormat)
+			}
+			info := &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, Formats: []youtube.Format{
+				pickerFixture(248, 1920, 4_000_000, pickerWebm),
+				pickerFixture(328, 0, 384_000, eac3, mods...),
+				pickerFixture(251, 0, 160_000, pickerOpus, stereo),
+				pickerFixture(140, 0, 128_000, pickerAac, stereo),
+			}}
+			if !tc.damaged {
+				if sel := youtube.SelectBestFormats(info.Formats, 0, true, true); sel.Audio == nil || float64(sel.Audio.Itag) != tc.want {
+					t.Fatalf("automatic selection took %+v, want itag %v: the fixture no longer says what it should", sel.Audio, tc.want)
+				}
+			}
+			raw, decoded := pickerJSON(t, info)
+			best, _ := decoded["bestItags"].(map[string]any)
+			if best["bestAudio"] != tc.want || best["bestOpusAudio"] != float64(251) || best["bestAacAudio"] != float64(140) {
+				t.Errorf("bestItags = %v, want bestAudio %v beside Opus 251 and AAC 140", best, tc.want)
+			}
+			var data tui.FormatsData
+			if err := json.Unmarshal(raw, &data); err != nil {
+				t.Fatal(err)
+			}
+			if float64(data.BestItags.BestAudio) != tc.want {
+				t.Errorf("the TUI decoded BestAudio %d, want %v", data.BestItags.BestAudio, tc.want)
+			}
+		})
 	}
 }

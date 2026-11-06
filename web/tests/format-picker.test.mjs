@@ -155,3 +155,30 @@ for (const [streamStatus, shown] of [
     assert.equal(h.el("audio-format-select").value, "140", "the intact AAC badge, past the segmented Opus one");
   });
 }
+
+// Owner decision FE-10: the audio rendition automatic selection takes is
+// badged [Best] whatever its codec — a 5.1 E-AC-3 track the shared rank puts
+// above stereo Opus and AAC had no badge at all, and was labelled AAC (its
+// container). A track that is also its codec's pick carries both badges.
+// The preselection still follows the codec badges.
+//
+// MUTANT: the [Best] badge dropped (the E-AC-3 row has none); the E-AC-3
+// label dropped (the row reads AAC); [Best] keyed on bestOpusAudio (the
+// Opus row carries it in the first case).
+test("the automatic audio pick is badged [Best], beside the codec badges", { skip }, async () => {
+  const EAC3 = 'audio/mp4; codecs="ec-3"';
+  for (const [bestAudio, want] of [
+    [328, ["384kbps 48000Hz EC-3 [Best]", "160kbps 48000Hz OPUS [Best OPUS]", "128kbps 48000Hz AAC [Best AAC]"]],
+    [251, ["384kbps 48000Hz EC-3", "160kbps 48000Hz OPUS [Best] [Best OPUS]", "128kbps 48000Hz AAC [Best AAC]"]],
+  ]) {
+    const h = await harness.makeApp();
+    await h.app.populateFormatSelects({
+      streamStatus: "vod",
+      videoFormats: [video(248, 1920, 1080, WEBM, 4_000_000)],
+      audioFormats: [audio(328, EAC3, 384_000), audio(251, OPUS, 160_000), audio(140, AAC, 128_000)],
+      bestItags: { bestWebmVideo: 248, bestMp4Video: null, bestOpusAudio: 251, bestAacAudio: 140, bestAudio },
+    });
+    assert.deepEqual(options(h, "audio-format-select").map(([, text]) => text), want);
+    assert.equal(h.el("audio-format-select").value, "251", "the preselection still follows the codec badges");
+  }
+});

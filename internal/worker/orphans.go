@@ -565,7 +565,12 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		isThumbnail := ext == ".jpg" || ext == ".webp" || ext == ".png"
 		isChat := strings.HasSuffix(strings.ToLower(path), ".chat.json")
 		isDescription := ext == ".description"
-		if !inTrimDir && !isMedia && !isThumbnail && !isChat && !isDescription {
+		// The chat's raw sidecar and a split archive's chapter list, which
+		// are named after the archive and on no column (owner decision
+		// FE-16): owned while the archive they derive from is
+		// (archiveDerivedStem), listed once it is gone, as its chat is.
+		_, isDerived := archiveDerivedStem(path)
+		if !inTrimDir && !isMedia && !isThumbnail && !isChat && !isDescription && !isDerived {
 			return nil
 		}
 
@@ -925,11 +930,46 @@ func (o *outputOwners) ownerOf(absPath string) (owner, how string) {
 				return row, "names its archive"
 			}
 		}
+		if stems, ok := archiveDerivedStem(n); ok {
+			for _, stem := range stems {
+				if row, ok := o.stems[stem]; ok {
+					return row, "names the archive it derives from"
+				}
+			}
+		}
 		if row, ok := o.dirs[n]; ok {
 			return row, "names a file in it"
 		}
 	}
 	return "", ""
+}
+
+// Derived sidecars (owner decision FE-16): files the finalize writes beside an
+// archive under its base name and records on no column — the chat's raw
+// sidecar and a split archive's chapter list (utils.ChaptersSidecarSuffix).
+const chatRawSidecarSuffix = ".chat.raw.jsonl"
+
+// archiveDerivedStem returns the stems a derived sidecar may be owned
+// through, and whether path is one: "<X>.chat.raw.jsonl" belongs to the
+// archive X or to the chat archive "<X>.chat.json" (whose stem, less its last
+// extension, is "<X>.chat"), and "<X>.chapters.json" to the archive X —
+// X being the base a split job's parts share ("X - part1.mp4"), which
+// newOutputOwners indexes as a stem too. Like the chat archive itself, each
+// is owned while a row names what it derives from, and an orphan once none
+// does: the sweep listed neither, so a deleted job's raw chat and chapter
+// list stayed in the output tree for good, invisible to the Files tab. A
+// recovered recording's ("<X>.restart-<ts>.chat.raw.jsonl") is found by
+// asideSiblingStem instead.
+func archiveDerivedStem(path string) ([]string, bool) {
+	lower := strings.ToLower(path)
+	switch {
+	case strings.HasSuffix(lower, chatRawSidecarSuffix):
+		x := path[:len(path)-len(chatRawSidecarSuffix)]
+		return []string{normalizePath(x), normalizePath(x + ".chat")}, true
+	case strings.HasSuffix(lower, utils.ChaptersSidecarSuffix):
+		return []string{normalizePath(path[:len(path)-len(utils.ChaptersSidecarSuffix)])}, true
+	}
+	return nil, false
 }
 
 // asideSiblingStem returns the normalised stem a recovered set-aside
@@ -944,8 +984,12 @@ func (o *outputOwners) ownerOf(absPath string) (owner, how string) {
 // sibling itself was correctly owned.
 func asideSiblingStem(absPath string) (string, bool) {
 	base := filepath.Base(absPath)
-	if strings.HasSuffix(strings.ToLower(base), ".chat.json") {
+	switch lower := strings.ToLower(base); {
+	case strings.HasSuffix(lower, ".chat.json"):
 		base = base[:len(base)-len(".json")]
+	case strings.HasSuffix(lower, chatRawSidecarSuffix):
+		// The raw sidecar of the recovered recording's chat (FE-16).
+		base = base[:len(base)-len(".raw.jsonl")]
 	}
 	stem, ok := engine.RestartSiblingStem(base)
 	if !ok {

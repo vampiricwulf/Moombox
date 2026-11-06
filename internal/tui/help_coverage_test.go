@@ -72,6 +72,7 @@ func TestHelpRowsWrapInsteadOfBeingCut(t *testing.T) {
 	for _, want := range []string{
 		`Filter: status:live channel:"name" platform:youtube`,
 		`-negate  a|b (either)  "quoted phrase"`,
+		`type:clip (Twitch clip jobs)`,
 	} {
 		if !strings.Contains(view, want) {
 			t.Errorf("help view at width 80 lacks %q — the row was cut instead of wrapped:\n%s", want, view)
