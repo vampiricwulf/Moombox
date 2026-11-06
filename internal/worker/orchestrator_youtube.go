@@ -484,9 +484,21 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// themselves are: a fallback the run took for a transient cause (a
 	// sidecar restart longer than its grace, a player CDN outage) no longer
 	// costs the rest of a broadcast its from-start, highest-quality path.
+	//
+	// A capture on the live HLS playlist has no audio downloader — its one
+	// stream is the muxed playlist — so oldAudioSeq is 0 there. Left at 0,
+	// the from-start pair's audio was not forced and fell back to the job's
+	// resume position, which nothing moved while HLS recorded: sq 0 for a
+	// setup fallback, a stale one otherwise, so the new part's audio covered
+	// another stretch of the broadcast than its video and re-downloaded all
+	// of it. Its audio starts where the playlist's video stopped instead —
+	// one timeline across shapes, as switchPart relies on.
 	switchBack := func(freshInfo *youtube.VideoInfo, oldVideoSeq, oldAudioSeq int) bool {
 		if !jobCtx.Run.canSwitchBack() || ctx.Err() != nil || freshInfo == nil {
 			return false
+		}
+		if result.IsHls && result.AudioDownloader == nil {
+			oldAudioSeq = oldVideoSeq
 		}
 		var strategy DownloadStrategy
 		switch {
@@ -709,8 +721,23 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			// A capture on a fallback path goes back to the from-start
 			// path, in a new part, once the challenges can be solved again
-			// (switchBack, PR-R3).
-			if switchBack(freshInfo, oldVideoSeq, oldAudioSeq) {
+			// (switchBack, PR-R3). At a refused segment the switch is also
+			// the split at it (owner decision D8): the new part starts each
+			// stream stopped at the hole past it, and the stopped
+			// downloaders record the gap rows for it, exactly as the
+			// isRefused split below does. Built at the hole itself, the new
+			// downloaders asked for the refused segment again, no gap row
+			// was written, and the refusal loop restarted from its top.
+			backVideoSeq, backAudioSeq := oldVideoSeq, oldAudioSeq
+			var backVideoMoved, backAudioMoved bool
+			if isRefused {
+				backVideoSeq, backAudioSeq, backVideoMoved, backAudioMoved = pastRefusedSegment(refused.Seq, oldVideoSeq, oldAudioSeq)
+			}
+			stopped := result
+			if switchBack(freshInfo, backVideoSeq, backAudioSeq) {
+				if isRefused {
+					noteRefusedHole(stopped, refused.Seq, backVideoMoved, backAudioMoved)
+				}
 				continue
 			}
 

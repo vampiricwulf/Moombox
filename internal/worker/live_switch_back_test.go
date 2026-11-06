@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -35,15 +36,30 @@ import (
 // are the new downloaders' output); markSwitchedBack not clearing the no-JS
 // mark (the run still reads no-JS); switchBack spending the switch on a
 // failed setup (the failing row's canSwitchBack is false).
+//
+// The refused row stops the no-JS pair at a segment YouTube kept refusing
+// (engine.SegmentRefusedError at 42): the switch back is also the split at
+// it (owner decision D8), so the new part starts both streams past the hole,
+// at 43, and each stopped stream records its gap row. The HLS row switches
+// back from the live HLS fallback, whose result has a video downloader only:
+// the new pair's audio starts, forced, where the playlist stopped, as its
+// video does. Mutants: switchBack handed the stopped positions unmoved (the
+// refused row's pair starts at 42, no gap row); the audio position not
+// seeded from the HLS video's (the HLS row's audio starts at 0, unforced).
 func TestAFallbackCaptureSwitchesBackOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		branch   string // "quality-lost" or "verify"
 		solvable bool
+		refused  bool // the first run stops at a refused segment, 42
+		hls      bool // the capture is on the live HLS fallback
 	}{
-		{"quality loss, the challenges solvable again", "quality-lost", true},
-		{"still-live verify, the challenges solvable again", "verify", true},
-		{"quality loss, the challenges still fail", "quality-lost", false},
+		{"quality loss, the challenges solvable again", "quality-lost", true, false, false},
+		{"still-live verify, the challenges solvable again", "verify", true, false, false},
+		{"quality loss, the challenges still fail", "quality-lost", false, false, false},
+		{"refused segment, the challenges solvable again", "quality-lost", true, true, false},
+		{"HLS fallback, quality loss", "quality-lost", true, false, true},
+		{"HLS fallback, still-live verify", "verify", true, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -66,10 +82,16 @@ func TestAFallbackCaptureSwitchesBackOnce(t *testing.T) {
 				jobCtx := &JobContext{Job: job, DB: db, Config: &JobConfig{}, YT: youtube.NewService(nil, &discardLogger{}),
 					StagingDir: root, OutputDir: t.TempDir(), Filename: "back1", Logger: logs,
 					Interruption: &interruptionSignal{}, Run: &runRecord{}}
-				jobCtx.Run.markNoJS()
+				names := []string{"video_stream", "audio_stream", "video_stream.resume.json", "audio_stream.resume.json"}
+				if tc.hls {
+					jobCtx.Run.markHlsFallback()
+					names = []string{"video.ts"}
+				} else {
+					jobCtx.Run.markNoJS()
+				}
 
 				staged := map[string]string{}
-				for _, name := range []string{"video_stream", "audio_stream", "video_stream.resume.json", "audio_stream.resume.json"} {
+				for _, name := range names {
 					body := "the no-JS capture's " + name
 					if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
 						t.Fatal(err)
@@ -83,7 +105,10 @@ func TestAFallbackCaptureSwitchesBackOnce(t *testing.T) {
 				result := &DownloadResult{VideoDownloader: stopped("video_stream"), AudioDownloader: stopped("audio_stream"),
 					VideoPath: filepath.Join(root, "video_stream"), AudioPath: filepath.Join(root, "audio_stream"),
 					HasVideo: true, HasAudio: true, VideoItag: 299, AudioItag: 140}
-
+				if tc.hls {
+					result = &DownloadResult{VideoDownloader: stopped("video.ts"), VideoPath: filepath.Join(root, "video.ts"),
+						HasVideo: true, HasAudio: true, IsHls: true}
+				}
 				var mu sync.Mutex
 				runs := 0
 				live := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer, Formats: liveSwitchFormats("tv_public")}
@@ -102,6 +127,9 @@ func TestAFallbackCaptureSwitchesBackOnce(t *testing.T) {
 					mu.Lock()
 					defer mu.Unlock()
 					runs++
+					if runs == 1 && tc.refused {
+						return &engine.SegmentRefusedError{Seq: 42}
+					}
 					if runs == 1 && tc.branch == "quality-lost" {
 						return fmt.Errorf("segment 43: HTTP 403: %w", engine.ErrQualityLost)
 					}
@@ -152,9 +180,25 @@ func TestAFallbackCaptureSwitchesBackOnce(t *testing.T) {
 					if !strings.Contains(opts.BaseURL, "r1.googlevideo.com") || !strings.Contains(opts.BaseURL, "n="+nSolved) {
 						t.Errorf("a switched-back downloader fetches %s, want tv's copy, its n solved", opts.BaseURL)
 					}
-					if opts.StartSeq != 42 || !opts.ForceStartSeq {
-						t.Errorf("a switched-back downloader starts at %d (forced %v), want the stopped position 42", opts.StartSeq, opts.ForceStartSeq)
+					want := 42
+					if tc.refused {
+						want = 43 // past the refused segment
 					}
+					if opts.StartSeq != want || !opts.ForceStartSeq {
+						t.Errorf("a switched-back downloader %s starts at %d (forced %v), want %d, forced", opts.OutputFile, opts.StartSeq, opts.ForceStartSeq, want)
+					}
+				}
+				// The gap rows the stopped streams' tracker callbacks
+				// recorded (noteRefusedHole), as the job's gap list shows them.
+				tracker.mu.Lock()
+				gaps := slices.Clone(tracker.gaps)
+				tracker.mu.Unlock()
+				var wantGaps []database.Gap
+				if tc.refused {
+					wantGaps = []database.Gap{{JobID: job.ID, From: 42, To: 42, Stream: "video"}, {JobID: job.ID, From: 42, To: 42, Stream: "audio"}}
+				}
+				if !slices.Equal(gaps, wantGaps) {
+					t.Errorf("gap rows = %+v, want %+v", gaps, wantGaps)
 				}
 				if n := len(logLines(muxLogs, func(m string) bool { return m == "failed to mux quality segment" })); n != 1 {
 					t.Errorf("part muxes run = %d, want the no-JS part's one", n)
