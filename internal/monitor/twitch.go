@@ -76,6 +76,15 @@ type TwitchMonitor struct {
 	// FetchBatch overrides the GQL batch call (tm.tw.GetStreamInfoBatch) for
 	// tests. Nil uses the real client — see streamInfoBatch.
 	FetchBatch StreamInfoBatchFunc
+
+	// OnClipFound is called for each new clip of a channel whose
+	// archive_clips is on (owner decision D26 follow-up 2; twitch_clips.go):
+	// the receiver queues it. Called on the clip sweep's goroutine. Nil
+	// sweeps nothing.
+	OnClipFound func(card twitch.TwitchClipCard, channel *config.ChannelConfig)
+	// FetchClips overrides the clip listing (tm.tw.ListClips) for tests.
+	FetchClips ClipListFunc
+	clips      clipSweeper
 }
 
 // Health returns the per-channel health snapshot for /api/status.
@@ -368,6 +377,9 @@ func (tm *TwitchMonitor) doCheck(ctx context.Context) {
 	}
 
 	tm.logger.Debug("twitch checking", "channels", len(channels))
+	// The opted-in channels' clips, on a goroutine of their own: hourly, and
+	// never in the live poll's way (startClipSweep).
+	tm.startClipSweep(ctx, clipChannelsOf(channels))
 
 	// Batch: one GQL request per chunk instead of one per channel. An
 	// N-channel cycle collapses from N serialized round-trips (~0.8s each)

@@ -390,6 +390,14 @@ const TwitchGQLClientID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 // b77c9304e, for the chapter port (owner decision D23). CollectionSideBar (a
 // collection's videos, /collections/<id>) was added 2026-10-31 from the same
 // table, for the VOD discovery port (owner decision D18).
+//
+// ShareClipRenderStatus (one clip: its metadata and signed MP4 renditions)
+// and ClipsCards__User (a channel's clip list) were added 2026-10-31 from the
+// same table at b77c9304e, for clip jobs (owner decision D26). yt-dlp
+// re-hashed ShareClipRenderStatus three times in 14 months: these two lines
+// are the one place a re-hash is applied, and a stale one fails the job with
+// "Twitch changed its clip API (<op>); update Moombox"
+// (twitch.ClipAPIChangedError), never a generic error.
 var TwitchGQLHashes = struct {
 	StreamMetadata                      string
 	ComscoreStreamingQuery              string
@@ -398,6 +406,8 @@ var TwitchGQLHashes = struct {
 	VideoPlayerChapterSelectButtonVideo string
 	FilterableVideoTowerVideos          string
 	CollectionSideBar                   string
+	ShareClipRenderStatus               string
+	ClipsCardsUser                      string
 }{
 	StreamMetadata:                      "ad022ca32220d5523d03a23cbcb5beaa1e0999889c1f8f78f9f2520dafb5cae6",
 	ComscoreStreamingQuery:              "e1edae8122517d013405f237ffcc124515dc6ded82480a88daef69c83b53ac01",
@@ -406,6 +416,8 @@ var TwitchGQLHashes = struct {
 	VideoPlayerChapterSelectButtonVideo: "71835d5ef425e154bf282453a926d99b328cdc5e32f36d3a209d0f4778b41203",
 	FilterableVideoTowerVideos:          "67004f7881e65c297936f32c75246470629557a393788fb5a69d6d9a25a8fd5f",
 	CollectionSideBar:                   "016e1e4ccee0eb4698eb3bf1a04dc1c077fb746c78c82bac9a8f0289658fbd1a",
+	ShareClipRenderStatus:               "2db6a3b20eabf510bd3cf465ae2408834b59eb6b8af89ca73ab1486cacecfb63",
+	ClipsCardsUser:                      "1cd671bfa12cec480499c087319f26d21925e9695d1f80225aae6a4354f23088",
 }
 
 // TwitchEmoteAPIs contains third-party emote API endpoints.

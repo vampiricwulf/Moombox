@@ -40,8 +40,9 @@ type ChannelRemoval struct {
 	// its login (summarizeTwitchChannelRemoval).
 	Total int `json:"total"`
 	// Pending is the rows "delete its pending jobs" deletes: Queued,
-	// Upcoming and COOKIES?, less Footage. Always 0 for a Twitch channel,
-	// whose rows the delete never reaches.
+	// Upcoming and COOKIES?, less Footage. For a Twitch channel, only the
+	// clips its archive_clips sweep queued: the delete reaches no other row
+	// of its.
 	Pending int `json:"pending"`
 	// Footage is the pending-status rows whose staging directory is not
 	// empty, which neither choice deletes. A COOKIES? row can be a live
@@ -69,31 +70,51 @@ func SummarizeChannelRemoval(db *database.Database, stagingBase, channelID, plat
 	return summarizeRemoval(jobs, stagingBase, true), nil
 }
 
-// summarizeTwitchChannelRemoval counts a Twitch channel's jobs. No Twitch row
-// carries a channel_id, so they are the Twitch rows TwitchJobLogin ties to
-// the channel's login, its config ID — the rule by which the Twitch monitor
-// hands an errored capture to its channel (dispatchEndedBroadcasts): the
-// monitor's own rows, whose URL is https://twitch.tv/<login>, and a Web or
-// CLI add of the channel, live or offline. Counted by channel_id they were
-// none, and both prompts told the operator "It has no jobs." over a capture
-// in progress or one parked with its footage.
+// summarizeTwitchChannelRemoval counts a Twitch channel's jobs. Its live
+// captures and VODs carry no channel_id, so they are the Twitch rows
+// TwitchJobLogin ties to the channel's login, its config ID — the rule by
+// which the Twitch monitor hands an errored capture to its channel
+// (dispatchEndedBroadcasts): the monitor's own rows, whose URL is
+// https://twitch.tv/<login>, and a Web or CLI add of the channel, live or
+// offline. Counted by channel_id they were none, and both prompts told the
+// operator "It has no jobs." over a capture in progress or one parked with
+// its footage.
 //
-// None of them is pending: "delete its pending jobs" is the delete the
-// departure prune used to make, by channel_id, which never reached a Twitch
-// row, so it is not offered for a Twitch channel. A parked capture with
-// footage is still named, and a download in progress counted.
+// None of those is pending: "delete its pending jobs" is the delete the
+// departure prune used to make, by channel_id, which never reaches them. A
+// parked capture with footage is still named, and a download in progress
+// counted. The one Twitch row that does carry the channel's ID is a clip its
+// archive_clips sweep queued (newTwitchClipJob, the login as channel_id):
+// that backlog is what DeletePendingChannelJobs deletes, so those rows are
+// counted as a YouTube channel's are, pending included — a confirmation
+// that offered nothing to delete over a week's queued clips left them
+// admitted under the global archive_slots after the channel was gone.
 func summarizeTwitchChannelRemoval(db *database.Database, stagingBase, login string) (ChannelRemoval, error) {
+	carried, err := db.ListChannelJobs(login)
+	if err != nil {
+		return ChannelRemoval{}, err
+	}
+	byID := make(map[string]bool, len(carried))
+	for _, j := range carried {
+		byID[j.ID] = true
+	}
 	rows, err := db.ListTwitchJobs()
 	if err != nil {
 		return ChannelRemoval{}, err
 	}
 	var jobs []database.ChannelJob
 	for _, j := range rows {
-		if strings.EqualFold(TwitchJobLogin(j), login) {
+		if !byID[j.ID] && strings.EqualFold(TwitchJobLogin(j), login) {
 			jobs = append(jobs, database.ChannelJob{ID: j.ID, Title: j.Title, Status: j.Status})
 		}
 	}
-	return summarizeRemoval(jobs, stagingBase, false), nil
+	sum := summarizeRemoval(jobs, stagingBase, false)
+	clips := summarizeRemoval(carried, stagingBase, true)
+	sum.Total += clips.Total
+	sum.Pending += clips.Pending
+	sum.Active += clips.Active
+	sum.Footage = append(sum.Footage, clips.Footage...)
+	return sum, nil
 }
 
 // summarizeRemoval sorts a channel's jobs as the confirmation counts them.
@@ -122,8 +143,9 @@ func summarizeRemoval(jobs []database.ChannelJob, stagingBase string, deletable 
 // deleted and the footage rows it kept. The summary is taken afresh rather
 // than trusted from the confirmation, and the delete re-applies the status
 // filter, so a row that started downloading in between is left alone. The
-// rows are the ones carrying channelID: a Twitch channel's carry none, and
-// it deletes nothing of theirs (summarizeTwitchChannelRemoval).
+// rows are the ones carrying channelID: of a Twitch channel's, only the
+// clips its archive_clips sweep queued carry it, and its captures and VODs
+// are never reached (summarizeTwitchChannelRemoval).
 //
 // The caller removes the channel from the config FIRST: the monitors ask the
 // live config before they create a job (createYouTubeJob), so a cycle that

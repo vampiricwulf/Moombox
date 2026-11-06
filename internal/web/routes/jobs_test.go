@@ -32,6 +32,9 @@ type fakeTwitchFetcher struct {
 	streamErr  error
 	vodMeta    *TwitchJobMetadata
 	vodErr     error
+	clipMeta   *TwitchJobMetadata
+	clipErr    error
+	clipSlugs  []string
 }
 
 func (f *fakeTwitchFetcher) FetchStreamMetadata(ctx context.Context, login string) (*TwitchJobMetadata, error) {
@@ -39,6 +42,10 @@ func (f *fakeTwitchFetcher) FetchStreamMetadata(ctx context.Context, login strin
 }
 func (f *fakeTwitchFetcher) FetchVodMetadata(ctx context.Context, vodID string) (*TwitchJobMetadata, error) {
 	return f.vodMeta, f.vodErr
+}
+func (f *fakeTwitchFetcher) FetchClipMetadata(ctx context.Context, slug string) (*TwitchJobMetadata, error) {
+	f.clipSlugs = append(f.clipSlugs, slug)
+	return f.clipMeta, f.clipErr
 }
 
 type fakeYouTubeFetcher struct {
@@ -1784,7 +1791,8 @@ func TestJobCreateStoresTheCanonicalYouTubeURL(t *testing.T) {
 // anchored regex it replaces read /<ch>/v/<id>, /<ch>/schedule?vodID=,
 // /<ch>/videos and /collections/<id> as a channel — a live-wait job for the
 // wrong thing, created silently with 201. A channel URL on the m. or go. host
-// still makes the channel's job.
+// still makes the channel's job. (A clip URL makes the clip's own job, owner
+// decision D26: TestTwitchAddAcceptsAPastedClip.)
 //
 // Mutant: the pre-G35 twitchURLRe branch — the VOD and listing URLs are
 // accepted as channel jobs.
@@ -1794,7 +1802,6 @@ func TestJobCreateFromTwitchURLTakesOnlyChannels(t *testing.T) {
 		"https://www.twitch.tv/northernlion/schedule?vodID=1234567890",
 		"https://www.twitch.tv/spamfish/videos",
 		"https://www.twitch.tv/collections/o9zZer3IQBhTJw",
-		"https://m.twitch.tv/clip/FaintLightGullWholeWheat",
 	} {
 		f := newJobsFixture(t)
 		rec := doRequest(t, f.router, "POST", "/api/jobs", map[string]any{"url": u})

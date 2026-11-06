@@ -502,6 +502,7 @@ id = "channelname"                    # Twitch login name
 name = "Channel Name"
 platform = "twitch"                   # Required for Twitch channels
 quality_preference = "best"            # Optional, any channel: "best", "1080p60", "720p", "audio_only", ...
+archive_clips = false                  # Twitch only: also archive the channel's new clips (default: false)
 ```
 
 Template variables for `output_template`: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start_time}`

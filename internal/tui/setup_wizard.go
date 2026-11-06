@@ -918,7 +918,7 @@ func (m *SetupWizardModel) handleChannelListKey(key string, onEsc func() string,
 		m.channelEditValues = map[string]string{
 			"id": "", "name": "", "platform": "youtube",
 			"enabled": "Yes", "terms": "",
-			"include_non_live": "No", "quality_preference": "best",
+			"include_non_live": "No", "archive_clips": "No", "quality_preference": "best",
 			"output_directory":    "",
 			"archive_window_days": "", "archive_slots": "",
 		}

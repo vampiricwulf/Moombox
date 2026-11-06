@@ -128,7 +128,8 @@ func TestDeletePendingChannelJobs(t *testing.T) {
 // channel_id they were none, and both prompts said "It has no jobs." over a
 // capture in progress and one parked with its footage. None is pending: the
 // delete reaches rows by channel_id alone, and DeletePendingChannelJobs
-// deletes nothing of a Twitch channel's.
+// deletes none of a Twitch channel's captures or VODs (its queued clips,
+// which carry the login, are TestTwitchChannelRemovalCountsItsQueuedClips').
 //
 // Mutants killed: the twitch branch of SummarizeChannelRemoval dropped (total
 // 0); strings.EqualFold made a lowercased == (the mixed-case config ID
@@ -187,5 +188,77 @@ func TestSummarizeTwitchChannelRemoval(t *testing.T) {
 	}
 	if j, _ := db.GetJob("tw_manual_somestreamer_17"); j == nil {
 		t.Error("the delete reached a Twitch row")
+	}
+}
+
+// TestTwitchChannelRemovalCountsItsQueuedClips: the clips a Twitch channel's
+// archive_clips sweep queued carry its login as channel_id
+// (newTwitchClipJob), so its removal counts them as a YouTube channel's rows
+// are — a Queued clip pending, one with a partial in staging named as
+// footage, a Finished one in the total alone — and "delete its pending jobs"
+// deletes the pending one with its history, while the channel's capture,
+// tied by login and pending in status, is counted in the total and never
+// deleted.
+//
+// Mutants: the carried rows summarized with deletable false (pending 0, a
+// delete the UIs would not offer); the carried rows left out of the summary
+// (total 2).
+func TestTwitchChannelRemovalCountsItsQueuedClips(t *testing.T) {
+	db := openTestDB(t)
+	staging := t.TempDir()
+	login := "vanillatv"
+	for i, row := range []struct {
+		id, url string
+		ch      *string
+		status  database.JobStatus
+		staged  bool
+	}{
+		{"tw_clip_QueuedSlug", "https://www.twitch.tv/vanillatv/clip/QueuedSlug", &login, database.StatusQueued, false},
+		{"tw_clip_PartialSlug", "https://www.twitch.tv/vanillatv/clip/PartialSlug", &login, database.StatusQueued, true},
+		{"tw_clip_DoneSlug", "https://www.twitch.tv/vanillatv/clip/DoneSlug", &login, database.StatusFinished, false},
+		{"tw_manual_vanillatv_1", "https://www.twitch.tv/vanillatv", nil, database.StatusUpcoming, false},
+	} {
+		created := fmt.Sprintf("2026-07-01T00:00:%02dZ", i)
+		if _, err := db.AddJob(&database.Job{ID: row.id, VideoID: row.id, URL: row.url, Title: "T " + row.id,
+			ChannelName: "VanillaTV", Platform: "twitch", Status: row.status, ChannelID: row.ch, QueuePriority: 1,
+			CreatedAt: created, UpdatedAt: created}); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.AddToHistory(row.id); err != nil {
+			t.Fatal(err)
+		}
+		if row.staged {
+			dir := filepath.Join(staging, row.id)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "video.mp4"), []byte("partial"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	sum, err := SummarizeChannelRemoval(db, staging, login, "twitch")
+	if err != nil {
+		t.Fatalf("SummarizeChannelRemoval: %v", err)
+	}
+	if sum.Total != 4 || sum.Pending != 1 || sum.Active != 0 {
+		t.Errorf("total/pending/active = %d/%d/%d, want 4/1/0", sum.Total, sum.Pending, sum.Active)
+	}
+	if want := []ChannelJobRef{{ID: "tw_clip_PartialSlug", Title: "T tw_clip_PartialSlug", Status: database.StatusQueued}}; !slices.Equal(sum.Footage, want) {
+		t.Errorf("footage = %+v, want %+v", sum.Footage, want)
+	}
+
+	n, _, err := DeletePendingChannelJobs(db, staging, login)
+	if err != nil || n != sum.Pending {
+		t.Errorf("delete = %d deleted (%v), want the %d the summary counted", n, err, sum.Pending)
+	}
+	if j, _ := db.GetJob("tw_clip_QueuedSlug"); j != nil {
+		t.Error("the queued clip survived the delete")
+	}
+	for _, id := range []string{"tw_clip_PartialSlug", "tw_clip_DoneSlug", "tw_manual_vanillatv_1"} {
+		if j, _ := db.GetJob(id); j == nil {
+			t.Errorf("%s was deleted", id)
+		}
 	}
 }

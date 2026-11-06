@@ -45,16 +45,15 @@ test("extractTwitchTarget follows the shared Twitch URL table", { skip }, async 
   }
 });
 
-// MUTANT: dropping the clip refusals in addVideo — the clip and the clip list
-// are posted to /api/jobs as jobs.
-test("addVideo refuses Twitch clips and clip lists with the shared message", { skip }, async () => {
+// MUTANT: dropping the clip-list refusal in addVideo — the clip list is posted
+// to /api/jobs as a job.
+test("addVideo refuses Twitch clip lists with the shared message", { skip }, async () => {
   const posts = [];
   const h = await harness.makeApp({
     routes: { "POST /api/jobs": (req) => { posts.push(req); return { id: "x" }; } },
   });
   for (const [input, want] of [
     ["https://www.twitch.tv/spamfish/clips", "Twitch clip lists are not supported yet."],
-    ["https://m.twitch.tv/clip/FaintLightGullWholeWheat", "Twitch clips are not supported yet."],
   ]) {
     h.document.getElementById("video-url-input").value = input;
     await h.app.addVideo();
@@ -86,4 +85,19 @@ test("addVideo posts Twitch video lists and collections as listings", { skip }, 
   assert.deepEqual(posts, inputs.map((url) => ({ platform: "twitch", twitchType: "listing", url })));
   const toasts = h.toasts().map((t) => t.textContent);
   assert.ok(toasts.some((t) => t.includes("Queued 2 Twitch VODs, 1 already queued")), JSON.stringify(toasts));
+});
+
+// A pasted clip is a job (owner decision D26): addVideo posts it by its slug,
+// case kept, with twitchType "clip".
+// MUTANT: the clip refusal restored in addVideo — nothing is posted.
+test("addVideo posts a Twitch clip by its slug", { skip }, async () => {
+  const posts = [];
+  const h = await harness.makeApp({
+    routes: { "POST /api/jobs": (req) => { posts.push(req); return { id: "x" }; } },
+  });
+  h.document.getElementById("video-url-input").value = "https://m.twitch.tv/clip/FaintLightGullWholeWheat";
+  await h.app.addVideo();
+  assert.equal(posts.length, 1, "the clip was not posted");
+  const body = typeof posts[0].body === "string" ? JSON.parse(posts[0].body) : posts[0].body;
+  assert.deepEqual(body, { platform: "twitch", videoId: "FaintLightGullWholeWheat", twitchType: "clip" });
 });

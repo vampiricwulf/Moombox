@@ -68,9 +68,9 @@ func TestExtractTwitchTarget(t *testing.T) {
 		// Login/video/{id} format
 		{"https://www.twitch.tv/shroud/video/1234567890", "tw_v1234567890", "twitch"},
 		// Clip URL (clips subdomain)
-		{"https://clips.twitch.tv/SomeClipSlug", "", "twitch_clip"},
+		{"https://clips.twitch.tv/SomeClipSlug", "tw_clip_SomeClipSlug", "twitch"},
 		// Clip URL (login/clip/slug)
-		{"https://www.twitch.tv/shroud/clip/SomeSlug", "", "twitch_clip"},
+		{"https://www.twitch.tv/shroud/clip/SomeSlug", "tw_clip_SomeSlug", "twitch"},
 		// Raw VOD with v prefix
 		{"v1234567890", "tw_v1234567890", "twitch"},
 		// Raw numeric VOD (7-12 digits)
@@ -525,8 +525,8 @@ func TestApplyValuesProbeTargets(t *testing.T) {
 // the one Twitch URL table the Go parser and the dashboard are tested against
 // (internal/utils/testdata/twitch_urls.json, G35), mapped to the TUI's
 // (id, type) shape: a channel is (login, "twitch"), a VOD ("tw_v"+id,
-// "twitch"), a clip "twitch_clip" and a listing "twitch_listing", both of
-// which handleURLStep refuses.
+// "twitch"), a clip ("tw_clip_"+slug, "twitch") — its own job since owner
+// decision D26 — and a listing "twitch_listing", which handleURLStep refuses.
 //
 // Mutant: the TUI's own parser before G35 (www and bare hosts only, no /v/,
 // schedule, player., channel-less /clip/ or listings) fails the rows that
@@ -554,7 +554,7 @@ func TestExtractTwitchTargetSharedURLTable(t *testing.T) {
 		case "vod":
 			wantID, wantType = "tw_v"+row.Value, "twitch"
 		case "clip":
-			wantType = "twitch_clip"
+			wantID, wantType = "tw_clip_"+row.Value, "twitch"
 		case "videos", "collection":
 			// The input itself: the add posts it as the listing's URL.
 			wantID, wantType = row.Input, "twitch_listing"

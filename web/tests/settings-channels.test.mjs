@@ -293,3 +293,36 @@ test("the channel dialog fills and posts the Twitch-only options", { skip }, asy
   h.app.settings.showAddChannelDialog();
   assert.equal(h.el("channel-twitch-options-row").style.display, "none", "hidden for YouTube");
 });
+
+// archive_clips (owner decision D26 follow-up 2): the Edit dialog shows the
+// toggle for a Twitch channel only, filled from the stored channel, and posts
+// what it shows — set when checked, left out when not, never for YouTube.
+// Mutants killed: the toggle not read in saveChannel (archive_clips missing);
+// not filled from the channel (it posts unchecked); the row shown for YouTube.
+test("the channel dialog round-trips a Twitch channel's archive_clips", { skip }, async () => {
+  const TW = { id: "vanillatv", name: "VanillaTV", platform: "twitch", archive_clips: true };
+  const h = await openWith([structuredClone(TW)]);
+  h.app.settings.editChannel(TW.id);
+  assert.equal(h.el("channel-archive-clips-row").style.display, "", "the toggle is shown for Twitch");
+  assert.equal(h.el("channel-archive-clips").checked, true, "filled from the stored channel");
+  await h.app.settings.saveChannel();
+  await h.flush();
+  let post = h.http.matching("/api/config/channels", "POST").at(-1);
+  assert.equal(post?.body?.archive_clips, true, "a checked toggle is saved");
+
+  h.app.settings.editChannel(TW.id);
+  h.el("channel-archive-clips").checked = false;
+  await h.app.settings.saveChannel();
+  await h.flush();
+  post = h.http.matching("/api/config/channels", "POST").at(-1);
+  assert.equal(post?.body?.archive_clips, undefined, "an unchecked toggle saves nothing");
+
+  const y = await openWith([structuredClone(STORED)]);
+  y.app.settings.editChannel(STORED.id);
+  assert.equal(y.el("channel-archive-clips-row").style.display, "none", "hidden for YouTube");
+  y.el("channel-archive-clips").checked = true;
+  await y.app.settings.saveChannel();
+  await y.flush();
+  post = y.http.matching("/api/config/channels", "POST").at(-1);
+  assert.equal(post?.body?.archive_clips, undefined, "never posted for YouTube");
+});

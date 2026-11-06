@@ -138,3 +138,36 @@ func TestAddVideoPostsTwitchListing(t *testing.T) {
 		t.Errorf("posted %s, want the listing body", got)
 	}
 }
+
+// TestAddVideoPostsAClipAsItsSlug: the dialog's "tw_clip_<slug>" (owner
+// decision D26) reaches POST /api/jobs as the route reads a clip — platform
+// twitch, twitchType "clip", the bare slug as videoId — and the feedback
+// names it a clip.
+//
+// Mutant: the tw_clip_ arm dropped (posted as a channel named
+// "tw_clip_…", which the route refuses).
+func TestAddVideoPostsAClipAsItsSlug(t *testing.T) {
+	var got []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	_, portStr, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+
+	a := NewApp()
+	a.SetWebPort(func() int { return port })
+	a.addVideo.platform = "twitch"
+	msg, ok := a.addVideoCmd("tw_clip_FaintLightGullWholeWheat")().(addVideoResultMsg)
+	if !ok || msg.Feedback != "Added Twitch clip to queue" {
+		t.Errorf("feedback = %#v", msg)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("body %s: %v", got, err)
+	}
+	if body["platform"] != "twitch" || body["twitchType"] != "clip" || body["videoId"] != "FaintLightGullWholeWheat" {
+		t.Errorf("posted %s, want a clip by its slug", got)
+	}
+}

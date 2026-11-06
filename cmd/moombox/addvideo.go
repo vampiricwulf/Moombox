@@ -178,8 +178,10 @@ func addVideo(input, configPath string) {
 
 	if target.Platform == "twitch" {
 		tw := target.Twitch
-		// A clip or a channel's clip list: refused with the message every
-		// add path shows, rather than read as a channel's live-wait job.
+		// A channel's clip list: refused with the message every add path
+		// shows, rather than read as a channel's live-wait job. A clip is a
+		// job (owner decision D26), and a video list or a collection queues
+		// its VODs (D18).
 		if msg := tw.Unsupported(); msg != "" {
 			fmt.Fprintln(os.Stderr, msg)
 			os.Exit(1)
@@ -216,12 +218,18 @@ func addVideo(input, configPath string) {
 		}
 		if added {
 			kind := "channel"
-			if tw.Type == utils.TwitchVOD {
+			switch tw.Type {
+			case utils.TwitchVOD:
 				kind = "VOD"
+			case utils.TwitchClip:
+				kind = "clip"
 			}
 			fmt.Printf("Added Twitch %s %s to queue.\n", kind, jobID)
+			if err := worker.RecordPastedClip(db, job); err != nil {
+				fmt.Fprintf(os.Stderr, "Could not record the clip in the processing history: %v\n", err)
+			}
 			login := ""
-			if tw.Type != utils.TwitchVOD {
+			if tw.Type == utils.TwitchChannel {
 				login = tw.Value
 			}
 			notifyMgr.Send(notifications.JobAdded(cliAddedFacts("twitch", jobID, jobURL, login)))
@@ -269,8 +277,8 @@ func addVideo(input, configPath string) {
 	notifyMgr.Wait()
 }
 
-// newCLITwitchJob is the row `moombox add` creates for a Twitch channel or VOD
-// target: Upcoming and manually added — a channel's job ID is its login until
+// newCLITwitchJob is the row `moombox add` creates for a Twitch channel, VOD
+// or clip target: Upcoming and manually added — a channel's job ID is its login until
 // the worker resolves the broadcast — and carrying the quality_preference
 // every Twitch variant selection reads (cliTwitchQualityPreference).
 // twitch_quality is left empty until a capture records a variant.
@@ -284,11 +292,19 @@ func newCLITwitchJob(channels []config.ChannelConfig, tw *utils.TwitchTarget, no
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
-	if tw.Type == utils.TwitchVOD {
+	switch tw.Type {
+	case utils.TwitchVOD:
 		job.ID = "tw_v" + tw.Value
 		job.URL = "https://www.twitch.tv/videos/" + tw.Value
 		job.ChannelName = "Manual"
-	} else {
+	case utils.TwitchClip:
+		// A clip (owner decision D26): VOD-style, addressed by its slug; the
+		// worker's read of the clip fills in its title and channel.
+		job.ID = twitch.ClipJobID(tw.Value)
+		job.URL = "https://clips.twitch.tv/" + tw.Value
+		job.ChannelName = "Manual"
+		job.IsVod = true
+	default:
 		job.ID = tw.Value // Will be resolved by the worker
 		job.URL = "https://www.twitch.tv/" + tw.Value
 		job.ChannelName = tw.Value
@@ -304,7 +320,7 @@ func newCLITwitchJob(channels []config.ChannelConfig, tw *utils.TwitchTarget, no
 // a VOD, or a channel the config does not hold, records "best". The row used
 // to carry no preference at all, which selects as "best" too.
 func cliTwitchQualityPreference(channels []config.ChannelConfig, tw *utils.TwitchTarget) string {
-	if tw == nil || tw.Type == utils.TwitchVOD {
+	if tw == nil || tw.Type != utils.TwitchChannel {
 		return worker.TwitchJobQualityPreference("")
 	}
 	return worker.TwitchChannelQualityPreference(channels, tw.Value)

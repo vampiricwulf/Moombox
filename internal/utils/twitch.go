@@ -19,27 +19,26 @@ const (
 	// and a collection (/collections/<id> — TwitchCollectionIE). Value is the
 	// login, or the collection ID. They parse so that none is taken for a
 	// channel (which silently made a live-wait job). A video list and a
-	// collection queue one VOD job per video (owner decision D18); a clip
-	// list is refused (Unsupported).
+	// collection queue one VOD job per video (owner decision D18), and a clip
+	// is a job of its own (owner decision D26); a clip list is refused
+	// (Unsupported).
 	TwitchVideosListing TwitchTargetType = "videos"
 	TwitchClipsListing  TwitchTargetType = "clips"
 	TwitchCollection    TwitchTargetType = "collection"
 )
 
 // Unsupported returns the refusal every add path shows for a target it cannot
-// make a job from yet, or "" for a channel, a VOD, a channel's video list or a
-// collection. The parse is kept here,
-// in the one table every parser follows, so a later clip job (owner decision
-// D26) or listing job only changes what this returns.
+// make a job from yet, or "" for a channel, a VOD, a clip, a channel's video
+// list or a collection. The parse is kept here, in the one table every parser
+// follows, so a later clip-list job only changes what this returns — as the
+// clip job (owner decision D26) and the listing jobs (D18) did.
 func (t *TwitchTarget) Unsupported() string {
 	if t == nil {
 		return ""
 	}
 	switch t.Type {
-	case TwitchClip:
-		return "Twitch clips are not supported yet. Use a channel or VOD URL."
 	case TwitchClipsListing:
-		return "Twitch clip lists are not supported yet. Use a channel, VOD, video list or collection URL."
+		return "Twitch clip lists are not supported yet. Use a channel, VOD, clip, video list or collection URL."
 	}
 	return ""
 }
@@ -62,6 +61,13 @@ func TwitchVideosQuery(input string) (filter, sort string) {
 	}
 	q := u.Query()
 	return q.Get("filter"), q.Get("sort")
+}
+
+// ValidTwitchClipSlug reports whether slug can name a clip — the shape the
+// URL table accepts from a clip URL, which the add route also holds a raw
+// slug to (it becomes the job ID and the staging directory's name).
+func ValidTwitchClipSlug(slug string) bool {
+	return len(slug) <= 100 && twitchClipSlugRe.MatchString(slug)
 }
 
 // TwitchTarget represents a parsed Twitch URL or identifier.

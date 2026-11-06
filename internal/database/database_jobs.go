@@ -388,9 +388,12 @@ func (db *Database) TwitchEndUnconfirmedJobs() ([]*Job, error) {
 }
 
 // QueuedChannels returns the distinct channel IDs that currently have Queued
-// (un-admitted backlog) jobs. NULL channel_id rows are excluded: Twitch and
-// manual adds have no channel affiliation and are never scheduler-paced, and
-// a defensive NULL-channel Queued row must not wedge the admission sweep.
+// (un-admitted backlog) jobs. NULL channel_id rows are excluded: manual adds
+// and a Twitch channel's live and VOD rows have no channel affiliation and
+// are never scheduler-paced — the one Twitch row that carries a channel_id
+// is a clip the monitor's archive_clips sweep queued (newTwitchClipJob), the
+// channel's login as its ID — and a defensive NULL-channel Queued row must
+// not wedge the admission sweep.
 func (db *Database) QueuedChannels() ([]string, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -398,6 +401,33 @@ func (db *Database) QueuedChannels() ([]string, error) {
 	rows, err := db.db.QueryContext(db.getCtx(),
 		`SELECT DISTINCT channel_id FROM jobs WHERE status = ? AND channel_id IS NOT NULL`,
 		StatusQueued)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channels []string
+	for rows.Next() {
+		var ch string
+		if err := rows.Scan(&ch); err != nil {
+			return nil, err
+		}
+		channels = append(channels, ch)
+	}
+	return channels, rows.Err()
+}
+
+// QueuedChannelsOnPlatform is QueuedChannels narrowed to the channels whose
+// Queued rows are platform's: what the backlog admission still admits from
+// while a hold placed for another platform stands (the scheduler's YouTube
+// rate-limit gate admits a Twitch channel's clip backlog all the same).
+func (db *Database) QueuedChannelsOnPlatform(platform string) ([]string, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT DISTINCT channel_id FROM jobs WHERE status = ? AND channel_id IS NOT NULL AND platform = ?`,
+		StatusQueued, platform)
 	if err != nil {
 		return nil, err
 	}
@@ -424,8 +454,9 @@ type ChannelJob struct {
 
 // ListChannelJobs returns every job carrying channelID — whatever its status
 // — oldest first. jobs.channel_id is nullable and `channel_id = ?` never
-// matches NULL, so Twitch and manually added jobs are never listed: a Twitch
-// channel's are ListTwitchJobs'.
+// matches NULL, so manually added jobs and a Twitch channel's captures and
+// VODs are never listed (those are ListTwitchJobs'); the clips a Twitch
+// channel's archive_clips sweep queued carry its login and are.
 func (db *Database) ListChannelJobs(channelID string) ([]ChannelJob, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -451,9 +482,11 @@ func (db *Database) ListChannelJobs(channelID string) ([]ChannelJob, error) {
 // ListTwitchJobs returns every Twitch job — whatever its status — oldest
 // first, with the fields that tie one to a channel (ID, VideoID, URL and
 // ChannelName, which worker.TwitchJobLogin reads) and its Title and Status:
-// what a Twitch channel's removal confirmation counts. No Twitch row carries
-// a channel_id — neither the Twitch monitor's (newTwitchStreamJob) nor a
-// manual add sets one — so ListChannelJobs never finds one.
+// what a Twitch channel's removal confirmation counts. A Twitch channel's
+// captures and VODs carry no channel_id — neither the Twitch monitor's
+// (newTwitchStreamJob) nor a manual add sets one — so ListChannelJobs never
+// finds them; the clips its archive_clips sweep queued (newTwitchClipJob)
+// carry its login, and ListChannelJobs finds those.
 func (db *Database) ListTwitchJobs() ([]*Job, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -556,9 +589,10 @@ func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error
 // package rule (see ListOrphanedHistory) is that history-vs-jobs matching
 // MUST be against jobs.id, never jobs.video_id. The plan text originally
 // wrote the subquery over video_id — equivalent for every job this helper
-// can currently match (channel-affiliated jobs are YouTube-only, where
+// can currently match (channel-affiliated jobs are YouTube's and the
+// Twitch clips an archive_clips sweep queued, "tw_clip_<slug>" as both, so
 // ID == VideoID), but jobs.id stays correct even if a channel-affiliated
-// job class with a prefixed ID ever appears.
+// job class whose two differ ever appears.
 //
 // jobs.channel_id is nullable; SQL `channel_id = ?` never matches NULL, so
 // Twitch/manual jobs (no channel affiliation) are untouchable here.

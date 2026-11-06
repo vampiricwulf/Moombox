@@ -2533,14 +2533,12 @@ export class MoomboxApp {
       let body;
 
       if (target.platform === "twitch") {
-        // Refused client-side until their jobs exist: the messages are
-        // utils.TwitchTarget.Unsupported's, which the CLI and the TUI show.
-        if (target.type === "clip") {
-          this.showToast("Twitch clips are not supported yet. Use a channel or VOD URL.", "warning");
-          return;
-        }
+        // A clip list is refused client-side until its job exists: the message
+        // is utils.TwitchTarget.Unsupported's, which the CLI and the TUI show.
+        // A clip is a job of its own (owner decision D26), posted by its slug
+        // with twitchType "clip".
         if (target.type === "clips") {
-          this.showToast("Twitch clip lists are not supported yet. Use a channel, VOD, video list or collection URL.", "warning");
+          this.showToast("Twitch clip lists are not supported yet. Use a channel, VOD, clip, video list or collection URL.", "warning");
           return;
         }
         if (target.type === "videos" || target.type === "collection") {

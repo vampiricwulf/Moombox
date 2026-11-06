@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -304,14 +305,15 @@ func TestExtractTwitchTargetSharedURLTable(t *testing.T) {
 }
 
 // TestTwitchTargetUnsupported pins which kinds the add paths refuse until
-// their jobs exist: clips (D26's clip job is a later wave) and clip lists, each
-// with its own message; a channel, a VOD, a channel's video list and a
-// collection (owner decision D18, W14) are accepted.
+// their jobs exist: clip lists only. A channel, a VOD, a clip (owner decision
+// D26), a channel's video list and a collection (owner decision D18, W14) are
+// accepted.
 //
-// Mutant: the listings left refused (videos and collection fail).
+// Mutants: the listings left refused (videos and collection fail); the clip
+// refusal restored (TwitchClip fails).
 func TestTwitchTargetUnsupported(t *testing.T) {
 	for typ, wantRefused := range map[TwitchTargetType]bool{
-		TwitchChannel: false, TwitchVOD: false, TwitchClip: true,
+		TwitchChannel: false, TwitchVOD: false, TwitchClip: false,
 		TwitchVideosListing: false, TwitchClipsListing: true, TwitchCollection: false,
 	} {
 		if got := (&TwitchTarget{Type: typ}).Unsupported() != ""; got != wantRefused {
@@ -336,6 +338,26 @@ func TestTwitchVideosQuery(t *testing.T) {
 	} {
 		if f, s := TwitchVideosQuery(in); f != want[0] || s != want[1] {
 			t.Errorf("TwitchVideosQuery(%q) = (%q, %q), want %v", in, f, s, want)
+		}
+	}
+}
+
+// TestValidTwitchClipSlug pins the shape the add route holds a raw clip slug
+// to: the URL table's (letters, digits, "_" and "-"), at most 100 bytes — the
+// slug becomes the job ID and a staging directory's name.
+//
+// Mutant: the length cap dropped; "/" or ".." accepted.
+func TestValidTwitchClipSlug(t *testing.T) {
+	for slug, want := range map[string]bool{
+		"FaintLightGullWholeWheat":                      true,
+		"CulturedAmazingKuduDatSheffy-TiZ_-ixAGYR3y2Uy": true,
+		"":                       false,
+		"../etc":                 false,
+		"a/b":                    false,
+		strings.Repeat("a", 101): false,
+	} {
+		if got := ValidTwitchClipSlug(slug); got != want {
+			t.Errorf("ValidTwitchClipSlug(%q) = %v, want %v", slug, got, want)
 		}
 	}
 }

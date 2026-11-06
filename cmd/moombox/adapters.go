@@ -291,6 +291,22 @@ func (a *twitchMetadataAdapter) CollectionVideos(ctx context.Context, collection
 	return a.svc.API.CollectionVideos(ctx, collectionID, a.svc.Auth.GetAuthToken())
 }
 
+// FetchClipMetadata reads a clip for the add route (routes.TwitchClipMetadataFetcher).
+func (a *twitchMetadataAdapter) FetchClipMetadata(ctx context.Context, slug string) (*routes.TwitchJobMetadata, error) {
+	info, err := a.svc.GetClip(ctx, slug)
+	if err != nil {
+		return nil, err
+	}
+	return &routes.TwitchJobMetadata{
+		Title:        info.Title,
+		ChannelName:  info.BroadcasterDisplayName,
+		ChannelLogin: info.BroadcasterLogin,
+		ThumbnailURL: info.ThumbnailURL,
+		StartedAt:    info.CreatedAt,
+		GameCategory: info.GameCategory,
+	}, nil
+}
+
 // youtubeMetadataAdapter implements routes.YouTubeMetadataFetcher.
 type youtubeMetadataAdapter struct {
 	svc *youtube.Service
