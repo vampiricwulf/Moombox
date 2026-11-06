@@ -1747,7 +1747,11 @@ export class PlayerController {
    * it still stood.
    *
    * A deleted message is dimmed and struck through (.chat-msg-struck on a
-   * flat row's content, the body of a card), with a small "deleted" tag. A replaced one shows its new text (the view _buildChatMessageEl
+   * flat row's content, the body of a card), with a small "deleted" tag. When
+   * chat.json carries YouTube's own line for it (`deletedState`, the
+   * deletedStateMessage W22 stores — "[message retracted]", "[message
+   * deleted]"), the tag sits in an sl-tooltip holding that wording, focusable
+   * as the edited tag is (owner decision FQ-5); without one, the bare tag. A replaced one shows its new text (the view _buildChatMessageEl
    * fills the row from) with an "edited" tag whose sl-tooltip holds the
    * original text, on hover and on keyboard focus — the tag is focusable for
    * that. The tag sits after the message: in a card's body (or its header,
@@ -1766,7 +1770,18 @@ export class PlayerController {
       // cheer chip are never struck.
       const content = host === div ? div.lastElementChild : null;
       if (content && !content.matches(".chat-msg-time, .chat-msg-author, .cheer-chip")) content.classList.add("chat-msg-struck");
-      host.appendChild(chatChangeTag("deleted"));
+      const tag = chatChangeTag("deleted");
+      const state = typeof msg.deletedState === "string" ? msg.deletedState.trim() : "";
+      if (state) {
+        const tooltip = document.createElement("sl-tooltip");
+        tooltip.content = state;
+        tooltip.setAttribute("content", state);
+        tag.tabIndex = 0;
+        tooltip.appendChild(tag);
+        host.appendChild(tooltip);
+      } else {
+        host.appendChild(tag);
+      }
     }
     if (replaced) {
       div.classList.add("chat-msg-edited");
@@ -2567,12 +2582,18 @@ export class PlayerController {
    * @returns {HTMLElement|null}
    */
   _buildNicoEl(msg) {
+    // W22's markers on the video (owner decision FQ-5): a deleted message
+    // never flies — the overlay has no room for a struck-through line and a
+    // tag, and YouTube took it off the screen — and a replaced one flies as
+    // its replacement, the text the sidebar row shows. The archived message
+    // is not touched.
+    if (msg.deleted === true) return null;
     const el = document.createElement("div");
     el.className = "nico-message";
     if (msg.messageType === "announcement") {
       el.classList.add("announcement", `announcement-${announcementColorClass(msg.announcementColor)}`);
     }
-    this.appendChatContent(el, msg.message || [], msg.emotes);
+    this.appendChatContent(el, isReplacedMessage(msg) ? msg.replacement : (msg.message || []), msg.emotes);
     if (!el.hasChildNodes()) return null;
     // Nico emotes must load immediately — override the default lazy loading set
     // by _createEmoteImg (right for the sidebar's thousands of off-screen

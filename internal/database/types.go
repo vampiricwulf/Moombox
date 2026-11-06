@@ -22,8 +22,9 @@ const (
 )
 
 // ParkReason records WHY a job was parked at StatusCookies — and, for two
-// Twitch cases, why it stopped in StatusError (ParkReasonTwitchEndUnconfirmed
-// and ParkReasonTwitchUnreachable, the only values an Error row carries). The
+// Twitch cases, why it stopped in StatusError (ParkReasonTwitchEndUnconfirmed,
+// ParkReasonTwitchUnreachable and ParkReasonMuxAfterCancel, the only values
+// an Error row carries). The
 // status alone
 // says "credentials are the fix", which is true for every value here — but it
 // does not say WHICH credentials, and the automatic recovery sweeps need that
@@ -82,6 +83,18 @@ const (
 	// from the error's type, never inferred from its text; the
 	// re-initialisation clears it.
 	ParkReasonTwitchUnreachable ParkReason = "twitch_unreachable"
+
+	// ParkReasonMuxAfterCancel is the third reason an ERROR row carries: the
+	// operator's Mux of a Cancelled row failed (MuxJob). The Cancel closed a
+	// live Twitch capture's gap-fill tail (owner decision FQ-2), and CancelJob
+	// writes nothing on the row but its status, which the failed Mux then
+	// rewrites to Error — so without this marker the next Mux read the row as
+	// a capture cut off mid-broadcast and filled the rest of the broadcast
+	// the operator cancelled. Written by MuxJob's failure writes only, and
+	// carried forward by them while the Mux keeps failing; a Retry or a
+	// Reinitialize clears it with every other park_reason, which is what ends
+	// the Cancel's close. Read by twitchMuxTailOpen alone.
+	ParkReasonMuxAfterCancel ParkReason = "mux_after_cancel"
 )
 
 // Job is the primary data model for a download job.

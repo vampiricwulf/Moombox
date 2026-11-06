@@ -111,8 +111,11 @@ func notesSegmented(status string) bool {
 // web/public/app.js), so Enter on a freshly opened table takes the same
 // rendition there as a submit with the dashboard's defaults — the owner's
 // decision on the picker's first follow-up. picks are the server's Best
-// itags in the dashboard's order, WEBM ahead of MP4 and Opus ahead of AAC
-// (0 for a pick the answer had none of): the first whose row is intact,
+// itags in the dashboard's order, WEBM ahead of MP4 and, for audio, the
+// [Best] pick (BestAudio, automatic selection's youtube.AudioRank pick, of
+// any codec — owner decision FQ-1) ahead of Opus ahead of AAC, which only an
+// answer without BestAudio falls to (0 for a pick the answer had none of):
+// the first whose row is intact,
 // neither damaged nor segmented, else the first with a row at all, as the
 // dashboard falls back to a marked badge only when no badge is intact. With
 // no Best row — no pick at all, or none matching a row — row 0, where the
@@ -393,7 +396,7 @@ func (m *AddVideoModel) buildFormatTables() {
 	af := m.formats.AudioFormats
 	m.audioTable.SetCursor(preselectedRow(len(af), func(i int) (int, bool) {
 		return af[i].Itag, !af[i].Damaged && !af[i].Segmented
-	}, m.formats.BestItags.BestOpusAudio, m.formats.BestItags.BestAacAudio))
+	}, m.formats.BestItags.BestAudio, m.formats.BestItags.BestOpusAudio, m.formats.BestItags.BestAacAudio))
 }
 
 // SetError is called when a format fetch fails.

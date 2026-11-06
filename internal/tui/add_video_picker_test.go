@@ -181,6 +181,12 @@ func TestAddVideoPickerDrawsEveryRow(t *testing.T) {
 // damaged WEBM fallback is opened on over the intact MP4, the segmented
 // Opus over the intact AAC); preselectedRow skipping a marked pick even
 // when no pick is intact (the live rows open on 0, no Best row there).
+//
+// Owner decision FQ-1: the audio table opens on the [Best] row (BestAudio,
+// automatic selection's pick of any codec) ahead of the codec picks, which
+// only an answer without BestAudio falls to (every earlier case). Mutant:
+// BestAudio dropped from the audio table's picks (the E-AC-3 case opens on
+// the Opus row, 1).
 func TestAddVideoPickerOpensOnTheBestRow(t *testing.T) {
 	v := func(itag int, mime string, height int, damaged, segmented bool) VideoFormat {
 		return VideoFormat{Itag: itag, MimeType: mime, Width: height * 16 / 9, Height: height, Damaged: damaged, Segmented: segmented}
@@ -218,6 +224,14 @@ func TestAddVideoPickerOpensOnTheBestRow(t *testing.T) {
 				BestItags:    BestItags{BestWebmVideo: 303, BestMp4Video: 299, BestOpusAudio: 251, BestAacAudio: 140},
 			},
 			wantVideo: 1, wantAudio: 1, wantVideoI: 303, wantAudioI: 251},
+		{name: "the [Best] audio pick, an E-AC-3 track above the Opus and AAC badges",
+			formats: FormatsData{
+				StreamStatus: "vod",
+				VideoFormats: []VideoFormat{v(248, webm, 1080, false, false)},
+				AudioFormats: []AudioFormat{a(251, opus, false, false), a(328, `audio/mp4; codecs="ec-3"`, false, false), a(140, aac, false, false)},
+				BestItags:    BestItags{BestWebmVideo: 248, BestOpusAudio: 251, BestAacAudio: 140, BestAudio: 328},
+			},
+			wantVideo: 0, wantAudio: 1, wantVideoI: 248, wantAudioI: 328},
 		{name: "no Best row: row 0",
 			formats: FormatsData{
 				VideoFormats: []VideoFormat{v(248, webm, 1080, false, false), v(136, mp4, 720, false, false)},

@@ -77,6 +77,13 @@ export class FilterBarController {
       { type: "platform", value: "youtube", label: "YouTube" },
       { type: "platform", value: "twitch", label: "Twitch" },
     ];
+    // The job kinds the filter language names by type: (owner decisions
+    // FE-28 and FQ-6): Clips inserts type:clip, a Twitch clip job, as the
+    // groups above insert theirs — chipped as "Clips" (_filterTokenLabel),
+    // excludable as -type:clip.
+    const TYPE_OPTIONS = [
+      { type: "type", value: "clip", label: "Clips" },
+    ];
 
     // The tokens parsed from the input box, as opposed to its chips. Every
     // sync re-parses them from the box's text, so a token the box no longer
@@ -249,6 +256,7 @@ export class FilterBarController {
       const groups = [
         { header: "Statuses", items: STATUS_OPTIONS },
         { header: "Platforms", items: PLATFORM_OPTIONS },
+        { header: "Type", items: TYPE_OPTIONS },
         { header: "Channels", items: getChannels().map(ch => ({ type: "channel", value: ch, label: ch })) },
       ];
 

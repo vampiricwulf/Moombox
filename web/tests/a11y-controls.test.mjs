@@ -461,7 +461,7 @@ test("the exclude controls are built as buttons named for their option", { skip 
   const h = await harness.makeApp();
   openTasksDropdown(h);
   const controls = [...h.el("tasks-filter").querySelectorAll(".filter-item-exclude")];
-  assert.ok(controls.length >= 5, "the three statuses and two platforms each carry an exclude control");
+  assert.ok(controls.length >= 6, "the three statuses, two platforms and the Clips type each carry an exclude control");
   for (const el of controls) {
     assert.equal(el.tagName, "SPAN", "a span around the icon, for the same reason as the clear-all control");
     assert.ok(el.querySelector("sl-icon"));
@@ -471,7 +471,7 @@ test("the exclude controls are built as buttons named for their option", { skip 
   }
   assert.deepEqual(
     controls.map((el) => el.getAttribute("aria-label")),
-    ["Exclude Active", "Exclude Issues", "Exclude Finished", "Exclude YouTube", "Exclude Twitch"],
+    ["Exclude Active", "Exclude Issues", "Exclude Finished", "Exclude YouTube", "Exclude Twitch", "Exclude Clips"],
   );
   assert.ok(excludeControl(h, "YouTube").closest("sl-menu-item"), "each control is inside its own menu item");
 });

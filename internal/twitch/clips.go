@@ -115,6 +115,17 @@ type TwitchClipInfo struct {
 	CreatedAt       string `json:"createdAt,omitempty"`
 	DurationSeconds int    `json:"durationSeconds,omitempty"`
 	ViewCount       int    `json:"viewCount,omitempty"`
+	// VideoID is the source VOD the clip was cut from, and VideoOffsetSeconds
+	// where in it the clip starts (nil when the answer gives no offset), for
+	// the clip job's link back to it (owner decision FQ-3). BEYOND UPSTREAM:
+	// yt-dlp's TwitchClipsIE reads neither, but its own ShareClipRenderStatus
+	// answer carries both — Twitch's selection set for that persisted query
+	// (hash 2db6a3b2…, the one yt-dlp sends at b77c9304e) holds
+	// `video { id broadcastType title }` and `videoOffsetSeconds`, null when
+	// the VOD is gone or was never saved, as a live probe of yt-dlp's own
+	// test clips showed on 2026-11-06. No second query is sent for them.
+	VideoID            string `json:"videoId,omitempty"`
+	VideoOffsetSeconds *int   `json:"videoOffsetSeconds,omitempty"`
 	// ThumbnailURL is the best thumbnail: the default asset's, else the
 	// clip's own small one, else the portrait asset's. Unlike upstream,
 	// which ranks the portrait one (-1) above the small one (-2); see info.
@@ -200,6 +211,8 @@ type clipNode struct {
 	Broadcaster     *clipUser     `json:"broadcaster"`
 	Curator         *clipUser     `json:"curator"`
 	Game            *clipGame     `json:"game"`
+	Video           *clipVideo    `json:"video"`
+	VideoOffset     *flexInt      `json:"videoOffsetSeconds"`
 	AccessToken     *clipToken    `json:"playbackAccessToken"`
 	Assets          []clipAssetRW `json:"assets"`
 }
@@ -208,6 +221,12 @@ type clipUser struct {
 	ID          string `json:"id"`
 	Login       string `json:"login"`
 	DisplayName string `json:"displayName"`
+}
+
+// clipVideo is the clip's source VOD (`data.clip.video`): null when the VOD
+// was deleted or never saved.
+type clipVideo struct {
+	ID string `json:"id"`
 }
 
 type clipGame struct {
@@ -259,6 +278,13 @@ func (c *clipNode) info(slug string) (*TwitchClipInfo, error) {
 	}
 	if c.Game != nil {
 		out.GameCategory = cmp.Or(c.Game.DisplayName, c.Game.Name)
+	}
+	if c.Video != nil {
+		out.VideoID = strings.TrimSpace(c.Video.ID)
+	}
+	if c.VideoOffset != nil {
+		offset := int(*c.VideoOffset)
+		out.VideoOffsetSeconds = &offset
 	}
 	for i, asset := range c.Assets {
 		if i > 1 {
@@ -349,10 +375,12 @@ func BestClipQuality(qs []TwitchClipQuality) *TwitchClipQuality {
 // a landscape rendition still ranks above every portrait one whatever the
 // cap and the preference say (yt-dlp's quality -2, as BestClipQuality).
 //
-// When nothing fits — no rendition at or under a set cap, or a preference no
-// clip rendition can meet ("audio_only": a clip has no audio-only rendition)
-// — it is BestClipQuality, the best rendition, where a VOD's cap would take
-// the smallest size above it (utils.SelectByCap): the owner's rule for clips.
+// When nothing fits — no rendition at or under a set cap — it is
+// BestClipQuality, the best rendition, where a VOD's cap would take the
+// smallest size above it (utils.SelectByCap): the owner's rule for clips.
+// "audio_only" is SmallestClipQuality, whatever the cap: a clip has no
+// audio-only rendition, and the job keeps only the audio of the one it
+// downloads (owner decision FQ-4), so the fewest video bytes are the best.
 // A preference with no rendition of its size descends as a VOD's does, to the
 // next lower size and then the best under the cap. nil when qs is empty.
 //
@@ -386,7 +414,10 @@ func SelectClipQuality(qs []TwitchClipQuality, qualityPref string, maxResolution
 			fits = true
 		}
 	}
-	if !fits || strings.EqualFold(qualityPref, "audio_only") {
+	if strings.EqualFold(qualityPref, "audio_only") {
+		return SmallestClipQuality(qs)
+	}
+	if !fits {
 		return BestClipQuality(qs)
 	}
 	pick := SelectBestVariant(variants, qualityPref, maxResolution, prefer60fps)
@@ -398,6 +429,37 @@ func SelectClipQuality(qs []TwitchClipQuality, qualityPref string, maxResolution
 		return BestClipQuality(qs)
 	}
 	return &qs[i]
+}
+
+// SmallestClipQuality is the rendition an audio_only clip job downloads to
+// keep its audio alone (owner decision FQ-4): the shortest landscape one —
+// lowest height, then lowest frame rate — and a portrait one only when the
+// clip has no landscape rendition, as SelectClipQuality's pool is drawn. A
+// clip's renditions are encodes of one source whose audio rides beside
+// every one of them, so the smallest video is the fewest bytes for the same
+// track. Twitch lists none smaller than the clip's own (BEYOND UPSTREAM:
+// yt-dlp's clip extractor offers no audio-only format, and its `-x` would
+// take bestaudio — the best rendition, video and all — before extracting).
+// nil when qs is empty.
+func SmallestClipQuality(qs []TwitchClipQuality) *TwitchClipQuality {
+	var landscape bool
+	for i := range qs {
+		if !qs[i].Portrait {
+			landscape = true
+			break
+		}
+	}
+	var small *TwitchClipQuality
+	for i := range qs {
+		q := &qs[i]
+		if landscape && q.Portrait {
+			continue
+		}
+		if small == nil || q.Height < small.Height || (q.Height == small.Height && q.FrameRate < small.FrameRate) {
+			small = q
+		}
+	}
+	return small
 }
 
 func clipQualityBetter(a, b *TwitchClipQuality) bool {

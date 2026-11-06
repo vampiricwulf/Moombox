@@ -15,7 +15,9 @@ import (
 // TwitchClipsIE test case (FaintLightGullWholeWheat, id 396245304, "EA Play
 // 2016 Live from the Novo Theatre", 32 s, broadcaster EA, curator
 // stereotype_), with a portrait asset beside the default one, a quality
-// whose URL is no URL, and a third asset yt-dlp does not read.
+// whose URL is no URL, a third asset yt-dlp does not read, and the source
+// VOD and offset Twitch's ShareClipRenderStatus selection set carries
+// (`video`, `videoOffsetSeconds`; a live answer, 2026-11-06).
 const clipReply = `{"data":{"clip":{
 	"id":"396245304","slug":"FaintLightGullWholeWheat",
 	"title":"EA Play 2016 Live from the Novo Theatre",
@@ -24,6 +26,7 @@ const clipReply = `{"data":{"clip":{
 	"broadcaster":{"id":"25163635","login":"EA","displayName":"EA"},
 	"curator":{"id":"43566419","login":"stereotype_","displayName":"stereotype_"},
 	"game":{"displayName":"Just Chatting"},
+	"video":{"id":"2919684247","broadcastType":"ARCHIVE","title":"the broadcast"},"videoOffsetSeconds":8973,
 	"playbackAccessToken":{"signature":"sig123","value":"{\"clip_uri\":\"x\"}"},
 	"assets":[
 		{"aspectRatio":1.77,"thumbnailURL":"https://clips-media-assets2.twitch.tv/default-preview.jpg","videoQualities":[
@@ -52,7 +55,9 @@ const clipReply = `{"data":{"clip":{
 // op; the portrait flag dropped; the url_or_none guard dropped (the "not a
 // url" quality kept); the small thumbnail preferred to the default asset's;
 // the assets[1] bound dropped (the third asset's taller 2160 rendition
-// listed, as a landscape one that outranks the real clip).
+// listed, as a landscape one that outranks the real clip); the source VOD or
+// its offset not read (owner decision FQ-3: VideoID or VideoOffsetSeconds
+// empty).
 func TestGetClipReadsShareClipRenderStatus(t *testing.T) {
 	var sent string
 	stubGQL(t, func(body string) string { sent = body; return clipReply })
@@ -80,6 +85,9 @@ func TestGetClipReadsShareClipRenderStatus(t *testing.T) {
 		info.CuratorDisplayName != "stereotype_" || info.CuratorLogin != "stereotype_" || info.Description != "" ||
 		info.GameCategory != "Just Chatting" {
 		t.Errorf("metadata = %+v", info)
+	}
+	if info.VideoID != "2919684247" || info.VideoOffsetSeconds == nil || *info.VideoOffsetSeconds != 8973 {
+		t.Errorf("source VOD = %q at %v, want 2919684247 at 8973 s", info.VideoID, info.VideoOffsetSeconds)
 	}
 	if info.ThumbnailURL != "https://clips-media-assets2.twitch.tv/default-preview.jpg" {
 		t.Errorf("ThumbnailURL = %q, want the default asset's", info.ThumbnailURL)
@@ -186,6 +194,28 @@ func TestGetClipGoneIsUnavailable(t *testing.T) {
 	})
 	if info, err := NewAPI(&testLogger{}).GetClip(context.Background(), "NoToken", ""); err == nil {
 		t.Errorf("tokenless clip: got %+v, want an error", info)
+	}
+}
+
+// TestGetClipWithoutASourceVOD: a clip whose VOD is gone, or was never
+// saved, is answered with `"video": null` and `"videoOffsetSeconds": null`
+// (yt-dlp's second TwitchClipsIE test clip, live, 2026-11-06), and reads as
+// no source VOD and no offset — not an offset of 0, which is a real one and
+// would make a link (owner decision FQ-3).
+//
+// Mutant: VideoOffsetSeconds set from a null offset (it reads 0).
+func TestGetClipWithoutASourceVOD(t *testing.T) {
+	stubGQL(t, func(string) string {
+		return `{"data":{"clip":{"id":"3207364882","video":null,"videoOffsetSeconds":null,` +
+			`"playbackAccessToken":{"signature":"s","value":"v"},` +
+			`"assets":[{"videoQualities":[{"sourceURL":"https://example.invalid/a.mp4","quality":"720"}]}]}}}`
+	})
+	info, err := NewAPI(&testLogger{}).GetClip(context.Background(), "CulturedAmazingKuduDatSheffy-TiZ_-ixAGYR3y2Uy", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.VideoID != "" || info.VideoOffsetSeconds != nil {
+		t.Errorf("source VOD = %q at %v, want none", info.VideoID, info.VideoOffsetSeconds)
 	}
 }
 
@@ -307,8 +337,10 @@ func TestClipJobIDRoundTrip(t *testing.T) {
 // Mutants: SelectBestVariant skipped (BestClipQuality: 1080 in every row);
 // the cap fallback taking the VOD rule's smallest size above the cap (360 in
 // the cap-below-everything row); portrait renditions kept in the pool beside
-// landscape ones (the 1920 portrait crop for "1920p"); audio_only handed to
-// SelectBestVariant (its last-variant fallback, 360).
+// landscape ones (the 1920 portrait crop for "1920p"); audio_only taking
+// the best rendition (1080), as it did before owner decision FQ-4, or the
+// smallest of every asset (a portrait crop below the landscape ones), or
+// the smallest by frame rate before height.
 func TestSelectClipQualityFollowsTheVodRule(t *testing.T) {
 	qs := []TwitchClipQuality{
 		{Quality: "1080", Height: 1080, FrameRate: 60},
@@ -335,11 +367,12 @@ func TestSelectClipQualityFollowsTheVodRule(t *testing.T) {
 		{"", 0, "1080"},
 		{"best", 720, "720"},
 		{"480p", 1080, "480"},
-		{"900p", 0, "720"},           // no 900: the next lower size
-		{"1080p60", 720, "720"},      // the cap bounds the preference
-		{"1920p", 0, "1080"},         // landscape ranks above portrait
-		{"best", 240, "1080"},        // nothing fits: the best rendition
-		{"audio_only", 1080, "1080"}, // no audio-only rendition: the best
+		{"900p", 0, "720"},          // no 900: the next lower size
+		{"1080p60", 720, "720"},     // the cap bounds the preference
+		{"1920p", 0, "1080"},        // landscape ranks above portrait
+		{"best", 240, "1080"},       // nothing fits: the best rendition
+		{"audio_only", 1080, "360"}, // no audio-only rendition: the smallest (FQ-4)
+		{"audio_only", 240, "360"},  // whatever the cap
 	} {
 		if got := label(SelectClipQuality(qs, c.pref, c.cap, false)); got != c.want {
 			t.Errorf("SelectClipQuality(%q, cap %d) = %s, want %s", c.pref, c.cap, got, c.want)
@@ -352,7 +385,19 @@ func TestSelectClipQualityFollowsTheVodRule(t *testing.T) {
 	if got := label(SelectClipQuality(portrait, "best", 1280, false)); got != "portrait 1280" {
 		t.Errorf("portrait-only clip under a 1280 cap = %s, want portrait 1280", got)
 	}
-	if SelectClipQuality(nil, "best", 0, false) != nil {
+	if got := label(SelectClipQuality(portrait, "audio_only", 0, false)); got != "portrait 1280" {
+		t.Errorf("portrait-only clip, audio_only = %s, want portrait 1280", got)
+	}
+	tied := []TwitchClipQuality{
+		{Quality: "360", Height: 360, FrameRate: 60},
+		{Quality: "720", Height: 720, FrameRate: 30},
+		{Quality: "360", Height: 360, FrameRate: 30},
+		{Quality: "240", Height: 240, FrameRate: 30, Portrait: true},
+	}
+	if got := SelectClipQuality(tied, "audio_only", 0, false); got != &tied[2] {
+		t.Errorf("audio_only over a tie = %+v, want the 360p30 landscape rendition", got)
+	}
+	if SelectClipQuality(nil, "best", 0, false) != nil || SelectClipQuality(nil, "audio_only", 0, false) != nil {
 		t.Error("no renditions must select nothing")
 	}
 }

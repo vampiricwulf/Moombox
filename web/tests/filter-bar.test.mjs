@@ -305,3 +305,35 @@ test("type:clip chips as Clips and keeps the clip jobs", { skip }, async () => {
   assert.deepEqual(f.chips(), ["Clips"]);
   assert.deepEqual(f.shown(), ["tw_clip_Slug"]);
 });
+
+// Owner decision FQ-6: the dropdown has a "Type" group, after Platforms, whose
+// one item, Clips, inserts type:clip as a Statuses or Platforms item inserts
+// its token — chipped "Clips", the clip jobs alone left — and whose exclude
+// control inserts -type:clip.
+// Mutants: the Type group left out of renderDropdownItems' groups (no
+// header, no item); its item carrying another value (the chip and the list
+// differ); the group placed before Platforms (the headers' order).
+test("the dropdown's Type group inserts type:clip", { skip }, async () => {
+  const f = await setup();
+  f.h.app.jobs.push({ id: "tw_clip_Slug", status: "Finished", title: "A clip", channelName: "Shachi Too", platform: "twitch", videoId: "tw_clip_Slug" });
+  f.h.app.renderJobs();
+  const container = f.h.el("tasks-filter");
+  const menu = container.querySelector(".unified-filter-menu");
+  const headers = [...menu.querySelectorAll("sl-menu-item[data-group-header]")].map((i) => i.textContent);
+  assert.deepEqual(headers.slice(0, 3), ["Statuses", "Platforms", "Type"]);
+  const clips = [...menu.querySelectorAll("sl-menu-item[value]")].find((i) => i.textContent === "Clips");
+  assert.ok(clips, "the Type group offers Clips");
+  assert.deepEqual(JSON.parse(clips.value), { type: "type", value: "clip" });
+
+  const dropdown = container.querySelector(".unified-filter-dropdown");
+  dropdown.dispatchEvent(new f.h.window.CustomEvent("sl-select", { detail: { item: clips } }));
+  assert.deepEqual(f.chips(), ["Clips"]);
+  assert.deepEqual(f.tokens(), [{ type: "type", value: "clip", negate: false }]);
+  assert.deepEqual(f.shown(), ["tw_clip_Slug"]);
+
+  // Its exclude control is -type:clip: every job but the clip.
+  const excl = [...menu.querySelectorAll(".filter-item-exclude")].find((x) => JSON.parse(x.dataset.exclude).type === "type");
+  excl.dispatchEvent(new f.h.window.MouseEvent("click", { bubbles: true }));
+  assert.deepEqual(f.chips(), ["-Clips"]);
+  assert.deepEqual(f.shown(), ["1", "2", "3"]);
+});
