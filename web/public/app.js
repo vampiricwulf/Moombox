@@ -2797,16 +2797,28 @@ export class MoomboxApp {
       const opt = document.createElement("sl-option");
       opt.value = String(fmt.itag);
 
+      // The 5.1 codecs the shared rank can put first are named for what they
+      // are: an E-AC-3 or AC-3 track is audio/mp4, and the container test
+      // below called it AAC. The TUI names them the same (audioCodecLabel).
       const mime = fmt.mimeType || "";
+      const lower = mime.toLowerCase();
       let codec = "";
-      if (mime.includes("opus") || mime.includes("webm")) codec = "OPUS";
+      if (lower.includes("ec-3") || lower.includes("eac3")) codec = "EC-3";
+      else if (lower.includes("ac-3")) codec = "AC-3";
+      else if (mime.includes("opus") || mime.includes("webm")) codec = "OPUS";
       else if (mime.includes("mp4a") || mime.includes("mp4")) codec = "AAC";
       else codec = mime.split(";")[0]?.split("/")[1] || "?";
 
       const bitrate = fmt.bitrate ? `${(fmt.bitrate / 1000).toFixed(0)}kbps` : "?";
       const sampleRate = fmt.audioSampleRate ? ` ${fmt.audioSampleRate}Hz` : "";
 
+      // [Best] is the rendition automatic selection takes, of any codec
+      // (bestItags.bestAudio, owner decision FE-10): a 5.1 E-AC-3 track the
+      // shared rank puts above both codec picks carried no badge at all. The
+      // codec badges stay beside it; the preselection below still follows
+      // them, as it always has.
       let badges = "";
+      if (bestItags.bestAudio != null && fmt.itag === bestItags.bestAudio) badges += " [Best]";
       if (fmt.itag === bestItags.bestOpusAudio) badges += " [Best OPUS]";
       if (fmt.itag === bestItags.bestAacAudio) badges += " [Best AAC]";
       badges += marks(fmt);
