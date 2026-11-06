@@ -138,3 +138,38 @@ func TestNoSidecarIsNotWaitedFor(t *testing.T) {
 		}
 	})
 }
+
+// Batch ends an outage when it finds the child up, as Sig does: a Batch-only
+// caller that waited past one outage's grace and then met the child back
+// gives the next outage its own grace.
+//
+// Mutant: Batch not calling markSidecarUp on finding the half ready (the
+// second outage's Batch fails at once).
+func TestBatchEndsTheOutageItFindsOver(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		side := &reportingSidecar{permutingSidecar: newPermutingSidecar()}
+		c := newCompositeSolverWith(side, &specGoja{specs: map[string][]int{}})
+		ctx := context.Background()
+
+		if _, _, err := c.Batch(ctx, specPlayer, []string{sigA}, nil); !errors.Is(err, ErrSidecarUnavailable) {
+			t.Fatalf("Batch with the child down past the grace = %v, want ErrSidecarUnavailable", err)
+		}
+		side.up.Store(true)
+		if _, _, err := c.Batch(ctx, specPlayer, []string{sigA}, nil); err != nil {
+			t.Fatalf("Batch with the child back: %v", err)
+		}
+		side.up.Store(false)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("panic: %v", r)
+				}
+			}()
+			time.Sleep(30 * time.Second)
+			side.up.Store(true)
+		}()
+		if _, _, err := c.Batch(ctx, specPlayer, []string{sigB + "y"}, nil); err != nil {
+			t.Errorf("a new outage's Batch within its own grace = %v, want the child's answer", err)
+		}
+	})
+}

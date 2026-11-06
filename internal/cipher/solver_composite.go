@@ -375,6 +375,11 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 				sigResults = map[string]string{}
 			}
 		}
+	} else if sc != nil {
+		// Up: the outage, if one was open, is over, as Sig ends it. Left
+		// open, a Batch-only caller that waited past the grace kept
+		// downSince, and the next outage was given no grace at all.
+		c.markSidecarUp()
 	}
 	if sc != nil {
 		sr, nr, err := sc.Batch(ctx, playerID, sigs, ns)
