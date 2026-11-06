@@ -196,10 +196,25 @@ test("a save lets go of the player's source and assigns the rewritten archive at
 
 // Mutants: Restore original shown without an original; the restore not
 // reloading the chapters; a refused restore closing the dialog.
+//
+// Owner decision PR-I1: Restore asks once, naming how many chapters the
+// original holds, and a declined confirm sends nothing. Mutants: the
+// confirm dropped (the declined restore posts); the count not read from the
+// preview's originalCount (the message says "original 0" or none).
 test("Restore original is offered only when the job has one, and reloads the chapters", { skip }, async () => {
-  const h = await openDialog({ current: [{ start: 0, end: 600, title: "imported" }], hasOriginal: true });
+  const h = await openDialog({ preview: (body) => view({ current: [{ start: 0, end: 600, title: "imported" }], hasOriginal: true, originalCount: 3, error: body.text ? "" : "No timestamps found" }) });
   const restore = h.el("chapter-import-restore");
   assert.equal(restore.hidden, false);
+
+  h.app.confirmAnswer = false;
+  let posted = 0;
+  h.http.on("POST /api/jobs/:id/chapters/restore", () => { posted++; return view(); });
+  restore.click();
+  await h.flush();
+  await h.flush();
+  assert.deepEqual(h.app.confirms, ["Replace the imported chapters with the original 3?"]);
+  assert.equal(posted, 0, "a declined confirm restored anyway");
+  h.app.confirmAnswer = true;
 
   h.http.on("POST /api/jobs/:id/chapters/restore", () => ({ __response: true, status: 409, body: { error: "The job is Muxing; chapters can be imported once it has finished" } }));
   restore.click();

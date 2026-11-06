@@ -497,6 +497,11 @@ export function makePlayer(opts = {}) {
     toasts: [],
     resumeUpdates: [],
     showToast(message, variant) { this.toasts.push({ message, variant }); },
+    // The app's confirm dialog: each message is recorded, and the answer is
+    // confirmAnswer (a test sets it false to decline).
+    confirms: [],
+    confirmAnswer: true,
+    async showConfirm(message) { this.confirms.push(message); return this.confirmAnswer; },
     _updateJobResumePosition(jobId, position) { this.resumeUpdates.push({ jobId, position }); },
   };
 

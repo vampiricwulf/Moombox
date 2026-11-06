@@ -283,7 +283,8 @@ func TestChapterImportFailedRemuxKeepsTheSidecar(t *testing.T) {
 // the parts laid end to end.
 //
 // Mutants: apply re-muxing a split archive too (remuxes 1); GET not reading
-// a split archive's imported sidecar ahead of its parts' own chapters.
+// a split archive's imported sidecar ahead of its parts' own chapters; the
+// view not counting the original (OriginalCount 0).
 func TestChapterImportSplitArchiveSidecarOnly(t *testing.T) {
 	imp := &fakeChapterImporter{}
 	f := newChapterImportFixture(t, imp)
@@ -325,6 +326,11 @@ func TestChapterImportSplitArchiveSidecarOnly(t *testing.T) {
 	}
 	if !f.svc.HasOriginal("tw_split") {
 		t.Error("HasOriginal after an import (the TUI's A U gate)")
+	}
+	// The view names how many chapters the original holds, for the
+	// dashboard's Restore confirm (owner decision PR-I1).
+	if v.OriginalCount != 1 {
+		t.Errorf("view.OriginalCount = %d, want the parts' own 1", v.OriginalCount)
 	}
 	assertChapters(t, f.get(t, "tw_split"), []Chapter{{Start: 0, End: 120, Title: "a"}, {Start: 120, End: 160, Title: "b"}})
 	for _, p := range []string{p1, p2} {
