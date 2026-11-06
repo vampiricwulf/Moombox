@@ -273,16 +273,28 @@ func verifyArchiveRemux(orig, out *archiveShape, wantChapters int) error {
 
 // dropImportedArchiveChapters removes the chapter list an import saved beside
 // a single-file archive (owner decision CI-1, `<name>.chapters.json` with its
-// "original"), once a finalize has written a new archive at that name: a
-// Reinitialize's re-download, the Mux action over an imported Error or
-// Cancelled row, a complete VOD that superseded the parts. The list was
-// fitted to the file it replaced, and GET /api/jobs/{id}/chapters answers an
-// import's list ahead of the file's own — so a list left behind would go on
-// overriding the new archive's chapters, and Restore would put the old
-// file's original onto it. The new archive carries the chapters its own
-// finalize chose. A split archive's list has its own lifecycle
-// (removeSplitArchiveChapters, writeSplitArchiveChapters). Best effort: a
-// removal that fails is logged.
+// "original"), once a finalize of a NEW recording has written an archive at
+// that name, and when a Reinitialize resets the row (reinitializeNow). The
+// list was fitted to the recording it was imported into, and GET
+// /api/jobs/{id}/chapters answers an import's list ahead of the file's own —
+// so a list left behind would go on overriding the new archive's chapters,
+// and Restore would put the old file's original onto it. The new archive
+// carries the chapters its own finalize chose.
+//
+// Which finalizes drop it (owner decision CJ-2): a Reinitialize's
+// re-download, a new recording; and every other finalize of the download
+// pipeline, as before CJ-2 — an archive name can be reused (a deleted row's
+// files kept, a template that resolves alike), and a list beside it cannot
+// be told from the job's own there, so only the verbs that are known to
+// re-finalize the same staging keep one. A complete VOD that superseded the
+// parts is a new recording too, and drops the parts' list on its own
+// (supersedePartsWithVod). A re-finalize of the recording
+// the archive already holds — MuxJob's (JobContext.Refinalize: the Mux
+// action over an imported Error or Cancelled row, the automatic mux of an
+// ended Twitch broadcast, a boot re-mux) and a Twitch gap-fill
+// (refitSplitArchiveChapters) — keeps the import instead (keptImportFor).
+// A split archive's list has its own lifecycle (removeSplitArchiveChapters,
+// writeSplitArchiveChapters). Best effort: a removal that fails is logged.
 func dropImportedArchiveChapters(outputFile string, lg logger) {
 	path := ArchiveSidecarPath(outputFile, utils.ChaptersSidecarSuffix)
 	if path == "" {
@@ -290,5 +302,70 @@ func dropImportedArchiveChapters(outputFile string, lg logger) {
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		lg.Warn("could not remove the archive's imported chapter list", "path", path, "err", err)
+	}
+}
+
+// keptImport is a chapter import a re-finalize carries onto the archive it
+// writes (owner decision CJ-2): the imported list and the original it kept,
+// both on the player's global timeline, as the import saved them. fit
+// refits both to the new archive and writes them.
+type keptImport struct {
+	from     string // the sidecar it was read from
+	chapters []utils.Chapter
+	original []utils.Chapter
+}
+
+// keptImportFor is the import a finalize keeps, nil for none: only a
+// re-finalize of the same recording (jobCtx.Refinalize) keeps one, read from
+// the first of paths — the sidecars it could sit beside — that an import
+// wrote. A sidecar that cannot be read is no import to keep: the finalize
+// then writes its own chapters, as before CJ-2, and says so.
+func keptImportFor(jobCtx *JobContext, lg logger, paths ...string) *keptImport {
+	if !jobCtx.Refinalize {
+		return nil
+	}
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		imp, imported, err := utils.ReadImportedChaptersSidecar(p)
+		if err != nil {
+			lg.Warn("re-finalize: the archive's imported chapter list is unreadable; the archive gets its own chapters", "path", p, "err", err)
+			continue
+		}
+		if imported {
+			return &keptImport{
+				from:     p,
+				chapters: utils.ChaptersFromSidecar(imp.Chapters),
+				original: utils.ChaptersFromSidecar(imp.Original),
+			}
+		}
+	}
+	return nil
+}
+
+// refit fits the import and its original to a timeline durationMs long
+// (utils.RefitImportedChapters) and returns the imported list as fitted.
+func (k *keptImport) refit(durationMs int64) []utils.Chapter {
+	k.chapters = utils.RefitImportedChapters(k.chapters, durationMs)
+	k.original = utils.RefitImportedChapters(k.original, durationMs)
+	return k.chapters
+}
+
+// write saves the kept import at path — "original" and all, so Restore
+// still offers it — and removes the sidecar it was read from when that was
+// another (an archive the re-finalize moved to a fresh template name).
+func (k *keptImport) write(path string, lg logger) {
+	if path == "" {
+		return
+	}
+	if err := utils.WriteImportedChaptersSidecar(path, k.chapters, utils.SidecarFromChapters(k.original)); err != nil {
+		lg.Warn("re-finalize: could not keep the archive's imported chapter list", "path", path, "err", err)
+		return
+	}
+	if k.from != path {
+		if err := os.Remove(k.from); err != nil && !os.IsNotExist(err) {
+			lg.Warn("re-finalize: could not remove the imported chapter list under the archive's old name", "path", k.from, "err", err)
+		}
 	}
 }

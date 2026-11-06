@@ -384,3 +384,22 @@ func TestImportedChaptersSidecar(t *testing.T) {
 		t.Errorf("a missing file: %v %v", ok, err)
 	}
 }
+
+// TestRefitImportedChapters pins the refit a re-finalize applies to a kept
+// import: a chapter at or past the new end goes, one running past it is cut,
+// the last runs to the new end, and an unknown length leaves the list alone.
+func TestRefitImportedChapters(t *testing.T) {
+	list := []Chapter{{StartMs: 0, EndMs: 1000, Title: "Intro"}, {StartMs: 1000, EndMs: 5000, Title: "a"}, {StartMs: 5000, EndMs: 9000, Title: "b"}}
+	got := RefitImportedChapters(list, 4000)
+	want := []Chapter{{StartMs: 0, EndMs: 1000, Title: "Intro"}, {StartMs: 1000, EndMs: 4000, Title: "a"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("shorter: %+v, want %+v", got, want)
+	}
+	got = RefitImportedChapters(list, 12000)
+	if got[2].EndMs != 12000 || got[1].EndMs != 5000 {
+		t.Errorf("longer: %+v, want b running to 12 s and a unchanged", got)
+	}
+	if got := RefitImportedChapters(list, 0); !reflect.DeepEqual(got, list) {
+		t.Errorf("unknown length changed the list: %+v", got)
+	}
+}

@@ -277,8 +277,13 @@ const archiveChaptersFile = "chapters.ffmeta"
 // against the staged media's span). A live YouTube capture is given its
 // chapters only when every mux input was recorded from sq=0
 // (recordedFromStart, owner decision FE-18).
-func (o *DownloadOrchestrator) prepareArchiveChapters(ctx context.Context, jobCtx *JobContext, videoPath, audioPath string) string {
-	chapters := o.archiveChapters(ctx, jobCtx, recordedFromStart(videoPath, audioPath), func() int64 {
+//
+// kept is a chapter import a re-finalize carries over (owner decision CJ-2,
+// keptImportFor), nil for none: its list, refitted to the staged media's
+// span, is what the archive is muxed with in place of the automatic one, so
+// the re-mux embeds what the player shows.
+func (o *DownloadOrchestrator) prepareArchiveChapters(ctx context.Context, jobCtx *JobContext, videoPath, audioPath string, kept *keptImport) string {
+	measure := func() int64 {
 		durationMs := int64(0)
 		for _, in := range []string{videoPath, audioPath} {
 			if in == "" {
@@ -289,7 +294,17 @@ func (o *DownloadOrchestrator) prepareArchiveChapters(ctx context.Context, jobCt
 			}
 		}
 		return durationMs
-	})
+	}
+	var chapters []utils.Chapter
+	if kept != nil {
+		durationMs := measure()
+		if durationMs == 0 && jobCtx.Job != nil && jobCtx.Job.LengthSeconds != nil {
+			durationMs = int64(*jobCtx.Job.LengthSeconds) * 1000
+		}
+		chapters = kept.refit(durationMs)
+	} else {
+		chapters = o.archiveChapters(ctx, jobCtx, recordedFromStart(videoPath, audioPath), measure)
+	}
 	if len(chapters) == 0 {
 		return ""
 	}

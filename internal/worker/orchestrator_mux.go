@@ -1102,7 +1102,15 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// record copyStaged leaves beside it keeps staging (W30-A11).
 	// The archive's chapters (owner decision D23): this single-file shape is
 	// the one that carries them.
-	chaptersPath := o.prepareArchiveChapters(ctx, jobCtx, videoPath, audioPath)
+	// A re-finalize of the same recording keeps a chapter import (owner
+	// decision CJ-2): read from beside the archive the row names (the
+	// template may now resolve elsewhere) or the one this writes.
+	var priorArchive string
+	if jobCtx.Job != nil {
+		priorArchive = ArchiveSidecarPath(jobCtx.Job.OutputFile, utils.ChaptersSidecarSuffix)
+	}
+	kept := keptImportFor(jobCtx, o.logger, priorArchive, ArchiveSidecarPath(outputFile, utils.ChaptersSidecarSuffix))
+	chaptersPath := o.prepareArchiveChapters(ctx, jobCtx, videoPath, audioPath, kept)
 	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputFile, chaptersPath)
 	if err != nil {
 		if verdict.short != nil {
@@ -1111,9 +1119,16 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		return fmt.Errorf("mux: %w", err)
 	}
 	probeData := verdict.probe
-	// The archive at this name is a new file: a chapter import's list beside
-	// the one it replaced no longer describes it.
-	dropImportedArchiveChapters(outputFile, o.logger)
+	// The archive at this name is a new file. A re-finalize of the same
+	// recording embedded the import it keeps, and saves it beside the new
+	// file with its original (owner decision CJ-2); any other finalize's
+	// archive is a new recording, which a list beside the one it replaced no
+	// longer describes.
+	if kept != nil {
+		kept.write(ArchiveSidecarPath(outputFile, utils.ChaptersSidecarSuffix), o.logger)
+	} else {
+		dropImportedArchiveChapters(outputFile, o.logger)
+	}
 
 	// Get file info
 	info, err := os.Stat(outputFile)

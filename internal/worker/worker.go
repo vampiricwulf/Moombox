@@ -176,6 +176,16 @@ type JobContext struct {
 	// download completed. A boot re-mux of an interrupted Muxing row leaves
 	// it false: that download did complete.
 	CapturedMux bool
+	// Refinalize marks a finalize of the recording the job's archive already
+	// holds: MuxJob's, which re-muxes the staging the archive was (or was to
+	// be) made from — the Mux action over an Error or Cancelled row, the
+	// automatic mux of an ended Twitch broadcast, the boot re-mux of an
+	// interrupted Muxing row. It keeps a chapter import's list beside the
+	// archive (owner decision CJ-2, keptImportFor) where every other
+	// finalize drops it. A Reinitialize is a new recording and drops the
+	// import when it resets the row (reinitializeNow), so no MuxJob after
+	// one can find it.
+	Refinalize bool
 	// Run is the run's record of what holds across its strategies'
 	// repeated setups (runRecord): a damaged pin's one Warn, a live capture's
 	// path switches and the no-JS path it records on. Shared by pointer like
@@ -2520,6 +2530,16 @@ func (w *DownloadWorker) reinitializeNow(jobID string) {
 	// files, silently discarding the freshly-downloaded media. (AutoReinit
 	// deliberately does NOT do this — see that method.)
 	w.clearJobParts(jobID)
+	// And a single-file archive's imported chapter list (owner decision
+	// CJ-2): the re-download is a new recording whose timeline can differ
+	// from the one the list was fitted to. Dropped here, as the reset clears
+	// output_file below, and not only by the new archive's finalize
+	// (dropImportedArchiveChapters): a re-download Cancelled and then muxed
+	// by the Mux action is a re-finalize (JobContext.Refinalize), which
+	// would otherwise carry the old recording's list onto the new one.
+	if prior, err := w.db.GetJob(jobID); err == nil && prior != nil && prior.OutputFile != "" {
+		dropImportedArchiveChapters(prior.OutputFile, w.logger)
+	}
 
 	// The backlog retry budget is in memory, not a column: a fresh one too.
 	w.endBacklogStreak(jobID)
@@ -2809,6 +2829,7 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 
 		jobCtx := w.buildJobContext(job)
 		jobCtx.CapturedMux = capturedMux
+		jobCtx.Refinalize = true
 		// Read from the staging's coverage before the mux reclaims it, kept
 		// once the row is Finished (owner decision D17).
 		gapPlan := w.twitchMuxGapFillPlan(prior, job, jobCtx)

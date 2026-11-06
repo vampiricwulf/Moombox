@@ -291,7 +291,7 @@ func TestPrepareArchiveChaptersLiveTwitchFallsBackToTheTimeline(t *testing.T) {
 	path := o.prepareArchiveChapters(context.Background(), &JobContext{
 		Job:        &database.Job{ID: "j", Platform: "twitch", StreamStartTime: start.Format(time.RFC3339), LengthSeconds: &length},
 		StagingDir: dir,
-	}, "", "")
+	}, "", "", nil)
 	if path == "" {
 		t.Fatal("no chapters for a live Twitch capture with an observed timeline")
 	}

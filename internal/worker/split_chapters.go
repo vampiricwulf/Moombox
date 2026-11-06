@@ -39,12 +39,28 @@ func ArchiveSidecarPath(outputFile, suffix string) string {
 // the parts carry no chapters of their own. Best effort, like the embed: a
 // failure costs the player a chapter list and nothing else. A finalize that
 // finds no list removes one an earlier finalize wrote.
+//
+// A re-finalize of the same recording (jobCtx.Refinalize: MuxJob's) that
+// finds an import's list there keeps it instead (owner decision CJ-2): the
+// imported list and its original, refitted to the parts' timeline as it now
+// stands — their durations laid end to end, the timeline the import was
+// fitted to (chapterTargetFor) — and not replaced by the automatic list.
 func (o *DownloadOrchestrator) writeSplitArchiveChapters(ctx context.Context, jobCtx *JobContext, segments []database.Segment) {
 	if len(segments) == 0 || jobCtx.Job == nil {
 		return
 	}
 	path := ArchiveSidecarPath(segments[0].FilePath, utils.ChaptersSidecarSuffix)
 	if path == "" {
+		return
+	}
+	if kept := keptImportFor(jobCtx, o.logger, path); kept != nil {
+		var totalMs int64
+		for _, s := range segments {
+			totalMs += int64(math.Round(s.DurationSeconds * 1000))
+		}
+		kept.refit(totalMs)
+		kept.write(path, o.logger)
+		o.logger.Info("kept the split archive's imported chapter list", "jobID", jobCtx.Job.ID, "chapters", len(kept.chapters), "file", filepath.Base(path))
 		return
 	}
 	live := !jobCtx.Job.IsVod
@@ -175,6 +191,13 @@ func removeSplitArchiveChapters(segments []database.Segment, lg logger) {
 // part 1) and one left under the old base is removed. No list, nothing to do;
 // best effort, like the finalize's write.
 //
+// A chapter import's list (owner decision CJ-2) is the same recording's
+// too — the fill adds footage, it does not re-record — so it is kept, not
+// replaced or dropped: its points shift as an automatic list's do, and so do
+// those of the original it keeps, which lies on the same timeline and which
+// Restore must still put back where it was; both are written back with the
+// original, so Restore is still offered.
+//
 // oldSegs are the parts in the order the list was laid on (a single-file
 // archive its one synthesized part), newSegs the committed ones, recovered
 // the paths of the parts the fill made.
@@ -187,12 +210,19 @@ func refitSplitArchiveChapters(oldSegs, newSegs []database.Segment, recovered ma
 	if oldPath == "" || newPath == "" {
 		return
 	}
-	list, err := utils.ReadChaptersSidecar(oldPath)
+	imp, imported, err := utils.ReadImportedChaptersSidecar(oldPath)
 	if err != nil {
 		lg.Warn("gap-fill: the split archive's chapter list is unreadable; it is left as it was", "path", oldPath, "err", err)
 		return
 	}
-	if len(list) == 0 {
+	var list, original []utils.SidecarChapter
+	if imported {
+		list, original = imp.Chapters, imp.Original
+	} else if list, err = utils.ReadChaptersSidecar(oldPath); err != nil {
+		lg.Warn("gap-fill: the split archive's chapter list is unreadable; it is left as it was", "path", oldPath, "err", err)
+		return
+	}
+	if len(list) == 0 && len(original) == 0 {
 		return
 	}
 	type insert struct{ at, dur int64 }
@@ -215,12 +245,20 @@ func refitSplitArchiveChapters(oldSegs, newSegs []database.Segment, recovered ma
 		}
 		return out
 	}
-	chapters := make([]utils.Chapter, 0, len(list))
-	for _, c := range list {
-		start, end := int64(math.Round(c.Start*1000)), int64(math.Round(c.End*1000))
-		chapters = append(chapters, utils.Chapter{StartMs: shift(start), EndMs: shift(end), Title: c.Title})
+	shiftAll := func(in []utils.SidecarChapter) []utils.Chapter {
+		out := make([]utils.Chapter, 0, len(in))
+		for _, c := range utils.ChaptersFromSidecar(in) {
+			out = append(out, utils.Chapter{StartMs: shift(c.StartMs), EndMs: shift(c.EndMs), Title: c.Title})
+		}
+		return out
 	}
-	if err := utils.WriteChaptersSidecar(newPath, chapters); err != nil {
+	chapters := shiftAll(list)
+	if imported {
+		err = utils.WriteImportedChaptersSidecar(newPath, chapters, utils.SidecarFromChapters(shiftAll(original)))
+	} else {
+		err = utils.WriteChaptersSidecar(newPath, chapters)
+	}
+	if err != nil {
 		lg.Warn("gap-fill: could not rewrite the split archive's chapter list for its recovered parts", "path", newPath, "err", err)
 		return
 	}
