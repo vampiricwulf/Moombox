@@ -30,26 +30,49 @@ const twitchClipSweepEvery = time.Hour
 // twitch.Service.ListClips seam, which tests replace (TwitchMonitor.FetchClips).
 type ClipListFunc func(ctx context.Context, login string, filter twitch.ClipFilter) ([]twitch.TwitchClipCard, error)
 
-// clipSweeper is the sweep's state: when each channel was last listed, and
-// whether a sweep is running (one at a time, off the poll's goroutine).
+// clipSweeper is the sweep's state: when each channel's listing was last
+// tried (sweptAt, the hourly pacing) and when one last came back whole
+// (listedAt, what the next listing must reach back to), and whether a sweep
+// is running (one at a time, off the poll's goroutine).
 type clipSweeper struct {
 	mu       sync.Mutex
 	sweptAt  map[string]time.Time
+	listedAt map[string]time.Time
 	sweeping atomic.Bool
 }
 
-// clipFilterFor is the time filter a channel's sweep asks for. The first
-// sweep of a channel in this process asks for the last week (LAST_WEEK, the
-// filter yt-dlp's clip page defaults to): it covers a restart, or the
-// install being down, for up to a week. Every later one, at most
-// twitchClipSweepEvery after the last, asks for the last day (LAST_DAY),
-// which overlaps it many times over; the dedupe by slug makes the overlap
-// free.
-func clipFilterFor(swept bool) twitch.ClipFilter {
-	if swept {
-		return twitch.ClipFilterLastDay
+// clipDayFilterReach is how long ago a channel's last whole listing may be
+// for the next one to ask for the last day only: under the day LAST_DAY
+// covers, by an hour's margin — one sweep's pacing — so a sweep that runs a
+// little late, or a clock a little off Twitch's, still overlaps the last.
+const clipDayFilterReach = 23 * time.Hour
+
+// clipFilterFor is the time filter a channel's sweep asks for: the narrowest
+// that reaches back to its last whole listing. A channel never listed whole
+// in this process asks for the last week (LAST_WEEK, the filter yt-dlp's
+// clip page defaults to): it covers a restart, or the install being down,
+// for up to a week. One listed within the day — every sweep but the first,
+// while Twitch answers — asks for the last day (LAST_DAY), which overlaps the
+// last listing many times over; the dedupe by slug makes the overlap free.
+// One whose last whole listing is older — the listings failed for a day (an
+// outage, a re-hashed op until Moombox is updated), or the poll did not run
+// (offline, a machine asleep) — asks for the week, then the month, so the
+// clips made in the gap are listed when the listing comes back rather than
+// lost to a LAST_DAY that no longer reaches them. Past a month it stays at
+// LAST_MONTH: a first sweep never reaches past a week, and a gap that long
+// is not taken as a reason to archive the channel's whole history.
+func clipFilterFor(listedAt time.Time, listed bool, now time.Time) twitch.ClipFilter {
+	if !listed {
+		return twitch.ClipFilterLastWeek
 	}
-	return twitch.ClipFilterLastWeek
+	switch gap := now.Sub(listedAt); {
+	case gap <= clipDayFilterReach:
+		return twitch.ClipFilterLastDay
+	case gap <= 7*24*time.Hour-time.Hour:
+		return twitch.ClipFilterLastWeek
+	default:
+		return twitch.ClipFilterLastMonth
+	}
 }
 
 // listClips is the injectable seam: FetchClips when a test has wired one,
@@ -96,8 +119,9 @@ func clipChannelsOf(channels []config.ChannelConfig) []config.ChannelConfig {
 // history (a job was made, even one since deleted) nor a job now (a pasted
 // clip). A channel whose listing fails is marked swept all the same — a
 // re-hashed op fails every hour until Moombox is updated, not every 15 s —
-// and the failure is logged, at Warn for a re-hashed op, whose message says
-// what to do.
+// but not listed: its last whole listing stays where it was, so the next
+// sweep's filter still reaches back to it (clipFilterFor). The failure is
+// logged, at Warn for a re-hashed op, whose message says what to do.
 func (tm *TwitchMonitor) sweepClips(ctx context.Context, channels []config.ChannelConfig, now time.Time) {
 	for i := range channels {
 		if ctx.Err() != nil {
@@ -107,20 +131,26 @@ func (tm *TwitchMonitor) sweepClips(ctx context.Context, channels []config.Chann
 		tm.clips.mu.Lock()
 		if tm.clips.sweptAt == nil {
 			tm.clips.sweptAt = map[string]time.Time{}
+			tm.clips.listedAt = map[string]time.Time{}
 		}
 		last, swept := tm.clips.sweptAt[ch.ID]
 		due := !swept || now.Sub(last) >= twitchClipSweepEvery
 		if due {
 			tm.clips.sweptAt[ch.ID] = now
 		}
+		listedAt, listed := tm.clips.listedAt[ch.ID]
 		tm.clips.mu.Unlock()
 		if !due {
 			continue
 		}
 
-		filter := clipFilterFor(swept)
+		filter := clipFilterFor(listedAt, listed, now)
 		cards, err := tm.listClips(ctx, ch.ID, filter)
-		if err != nil {
+		if err == nil {
+			tm.clips.mu.Lock()
+			tm.clips.listedAt[ch.ID] = now
+			tm.clips.mu.Unlock()
+		} else {
 			var changed *twitch.ClipAPIChangedError
 			if errors.As(err, &changed) {
 				tm.logger.Warn("twitch clip sweep failed: "+changed.Error(), "channel", ch.ID)

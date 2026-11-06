@@ -148,3 +148,56 @@ func TestClipSweepRidesThePollOffItsGoroutine(t *testing.T) {
 		}
 	})
 }
+
+// TestClipSweepFilterReachesBackToTheLastWholeListing: a sweep's time filter
+// reaches back to the channel's last listing that came back whole, not to
+// its last attempt. A first listing that fails (a network blip at boot) keeps
+// the week's catch-up for the next, an hour on; a channel whose poll did not
+// run for days (offline, a machine asleep) asks for the week when it comes
+// back, and past a week for the month; within the day it asks for the day.
+// A failed listing is still paced hourly.
+//
+// Mutants: the last listing stamped on a failed one as well (the sweep after
+// the failed first asks LAST_DAY); clipFilterFor answering LAST_DAY for every
+// listed channel (the four-day gap asks LAST_DAY); its week arm answering for
+// any gap (the ten-day gap asks LAST_WEEK).
+func TestClipSweepFilterReachesBackToTheLastWholeListing(t *testing.T) {
+	on := config.ChannelConfig{ID: "vanillatv", Name: "VanillaTV", Platform: "twitch", ArchiveClips: true}
+	tm := newTestTwitchMonitor(t, nil, on)
+	var asked []string
+	calls := 0
+	tm.FetchClips = func(_ context.Context, login string, filter twitch.ClipFilter) ([]twitch.TwitchClipCard, error) {
+		calls++
+		asked = append(asked, string(filter))
+		if calls == 1 {
+			return nil, &netTimeoutErr{}
+		}
+		return nil, nil
+	}
+	tm.OnClipFound = func(twitch.TwitchClipCard, *config.ChannelConfig) {}
+
+	start := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	chans := clipChannelsOf(tm.getTwitchChannels())
+	for _, at := range []time.Duration{
+		0,                             // fails
+		30 * time.Minute,              // not due: a failure is paced hourly too
+		time.Hour,                     // the week's catch-up, still owed
+		2 * time.Hour,                 // within the day of the last whole listing
+		2*time.Hour + 4*24*time.Hour,  // four days asleep
+		2*time.Hour + 14*24*time.Hour, // ten days on from that
+	} {
+		tm.sweepClips(ctx, chans, start.Add(at))
+	}
+	want := []string{"LAST_WEEK", "LAST_WEEK", "LAST_DAY", "LAST_WEEK", "LAST_MONTH"}
+	if !equalStrings(asked, want) {
+		t.Errorf("filters asked = %v, want %v", asked, want)
+	}
+}
+
+// netTimeoutErr is a transport failure: a net.Error timing out.
+type netTimeoutErr struct{}
+
+func (*netTimeoutErr) Error() string   { return "dial tcp: i/o timeout" }
+func (*netTimeoutErr) Timeout() bool   { return true }
+func (*netTimeoutErr) Temporary() bool { return true }
