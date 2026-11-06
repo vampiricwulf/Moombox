@@ -200,7 +200,8 @@ func (s *Service) readAccountSession(ctx context.Context) {
 
 // homepageSession reads the signed-in session's identity — SESSION_INDEX and
 // DELEGATED_SESSION_ID, or the delegated half of the datasync id when the
-// page states no DELEGATED_SESSION_ID (fillSessionFromDataSync) — off the
+// page states no DELEGATED_SESSION_ID (fillSessionFromDataSync), the user
+// session id and the page's LOGGED_IN — off the
 // homepage HTML, as extractYtcfg reads them off a watch page. Visitor data is
 // deliberately not here: Init reads it under its own sticky rule above.
 func homepageSession(html string) *YtcfgData {
@@ -221,6 +222,11 @@ func homepageSession(html string) *YtcfgData {
 	}
 	session.DataSyncID = dataSyncID(find)
 	session.fillSessionFromDataSync(find(userSessionIDRegex))
+	// The homepage's own LOGGED_IN, read as the liveness probe reads it —
+	// the explicit marker alone (livenessVerdict) — so the probes and chat
+	// claim a logged-in bootstrap only on a session the homepage said was
+	// one (YtcfgData.LoginState).
+	session.LoginState = livenessVerdict([]byte(html))
 	return session
 }
 
@@ -424,22 +430,47 @@ func (s *Service) GetCookieHeader() string {
 // the credentials no longer hold. Empty when there is no such session, or
 // no player API to keep one (a hand-built Service).
 //
-// With them goes X-Youtube-Bootstrap-Logged-In whenever the jar holds a
-// signed-in set, as GenerateAPIHeaders sends it on the player calls and
-// /browse: yt-dlp's _generate_cookie_auth_headers adds it when the ytcfg says
-// LOGGED_IN (_base.py:975-976), and generate_api_headers spreads that into
-// every chat poll's headers. It is read off the jar at call time like the
-// rest, so a capture whose cookies are removed mid-stream stops claiming a
-// login.
+// With them goes X-Youtube-Bootstrap-Logged-In when that session's page said
+// LOGGED_IN (YtcfgData.LoginState), the rule GenerateAPIHeaders applies to the
+// player calls and /browse: yt-dlp's _generate_cookie_auth_headers adds it
+// only when the ytcfg says LOGGED_IN (_base.py:975-976), and
+// generate_api_headers spreads that into every chat poll's headers. It used
+// to follow the jar alone, so a jar whose cookies YouTube had stopped
+// honouring kept claiming a logged-in bootstrap its own page had just
+// denied. Read at call time like the rest: probeYtcfg attaches the session
+// only while the jar still holds the account it was read under, so a capture
+// whose cookies are removed mid-stream stops claiming a login.
 func (s *Service) ChatSessionHeaders() map[string]string {
 	if s == nil || s.PlayerAPI == nil {
 		return nil
 	}
-	headers := accountSessionHeaders(s.PlayerAPI.probeYtcfg(""))
-	if s.Auth != nil && s.Auth.HasAuthCookies() {
+	session := s.PlayerAPI.probeYtcfg("")
+	headers := accountSessionHeaders(session)
+	if session.LoginState == SessionAuthLoggedIn {
 		headers["X-Youtube-Bootstrap-Logged-In"] = "true"
 	}
 	return headers
+}
+
+// ChatAuthorizationHeader is the SAPISIDHASH Authorization header for a live
+// chat request, bound to the user session id of the session the probes carry
+// (probeYtcfg), as yt-dlp's live chat downloader builds it through
+// generate_api_headers from the watch page's ytcfg
+// (downloader/youtube_live_chat.py, _base.py:970) — "<uid> " leading each
+// hash input and "_u" after each hash. Read per chat poll like
+// ChatSessionHeaders, so it follows the ~30-minute cookie rotation and an
+// account switch; without a kept session it is the unbound form
+// (cookies.CookieJar.GenerateAuthorizationHeader). "" when there is no Auth
+// or the jar signs nothing.
+func (s *Service) ChatAuthorizationHeader() string {
+	if s == nil || s.Auth == nil {
+		return ""
+	}
+	uid := ""
+	if s.PlayerAPI != nil {
+		uid = s.PlayerAPI.probeYtcfg("").UserSessionID
+	}
+	return s.Auth.generateAuthorizationHeaderForUser(uid)
 }
 
 // GetFormats fetches available formats and returns them with best-selection info.

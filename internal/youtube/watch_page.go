@@ -270,6 +270,9 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 	isPremium := sessionAuth == SessionAuthLoggedIn && extractPremiumSubscriber(body)
 
 	ytcfg, playerResponse := extractYtcfgAndPlayerResponse(body)
+	// The page's LOGGED_IN verdict, carried on the ytcfg the player calls'
+	// headers are built from (YtcfgData.LoginState).
+	ytcfg.LoginState = sessionAuth
 	chatContinuation, chatIsReplay, chatErr := extractChatContinuation(body)
 	attestationChallenge, attestationReason := extractAttestationChallenge(body)
 

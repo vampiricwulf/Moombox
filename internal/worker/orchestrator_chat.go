@@ -117,7 +117,9 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 		IsLiveOrUpcoming:    videoInfo.IsLive || videoInfo.IsUpcoming,
 	}
 	if jobCtx.YT != nil && jobCtx.YT.Auth != nil {
-		opts.GenerateAuth = jobCtx.YT.Auth.GenerateAuthorizationHeader
+		// Bound to the kept session's user session id, as yt-dlp's chat
+		// downloader binds it (Service.ChatAuthorizationHeader).
+		opts.GenerateAuth = jobCtx.YT.ChatAuthorizationHeader
 		// Method value, exactly like GenerateAuth above: it re-reads the jar
 		// on every chat poll, so the hours-long download follows the ~30-min
 		// cookie rotation instead of presenting the header it started with.

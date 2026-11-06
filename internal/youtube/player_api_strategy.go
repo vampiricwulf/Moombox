@@ -358,6 +358,10 @@ func (p *PlayerAPI) probeYtcfg(visitorData string) *YtcfgData {
 	p.sessionMu.RLock()
 	if account != "" && account == p.sessionAccount {
 		ytcfg.SessionIndex, ytcfg.DelegatedSessionID = p.sessionIndex, p.delegatedSessionID
+		ytcfg.UserSessionID = p.sessionUserID
+		if p.sessionLoggedIn {
+			ytcfg.LoginState = SessionAuthLoggedIn
+		}
 	}
 	p.sessionMu.RUnlock()
 	return ytcfg
@@ -395,9 +399,36 @@ func (p *PlayerAPI) captureVisitorData(ytcfg *YtcfgData, account string) {
 	if ytcfg.VisitorData != "" && p.OnVisitorData != nil {
 		p.OnVisitorData(ytcfg.VisitorData)
 	}
-	if account != "" && (ytcfg.SessionIndex != nil || ytcfg.DelegatedSessionID != "") {
+	if account == "" {
+		return
+	}
+	loggedIn := ytcfg.LoginState == SessionAuthLoggedIn
+	statesSession := ytcfg.SessionIndex != nil || ytcfg.DelegatedSessionID != "" || ytcfg.UserSessionID != ""
+	if !statesSession && ytcfg.LoginState != SessionAuthUnknown {
+		// A page that states its LOGGED_IN verdict but no session updates
+		// the kept session's verdict for that account, and only that: the
+		// page id, index and user session id it did not restate stay as
+		// they were, as a page naming no session never cleared them. Its
+		// logged-out answer — cookies YouTube stopped honouring — is what
+		// stops the probes and chat sending X-Youtube-Bootstrap-Logged-In
+		// on a session its own page just denied. Another account's logged-
+		// in page has nothing kept to update and is kept below as its own
+		// session; its logged-out page keeps nothing.
+		p.sessionMu.Lock()
+		if account == p.sessionAccount {
+			p.sessionLoggedIn = loggedIn
+			p.sessionMu.Unlock()
+			return
+		}
+		p.sessionMu.Unlock()
+		if !loggedIn {
+			return
+		}
+	}
+	if statesSession || loggedIn {
 		p.sessionMu.Lock()
 		p.sessionIndex, p.delegatedSessionID = ytcfg.SessionIndex, ytcfg.DelegatedSessionID
+		p.sessionUserID, p.sessionLoggedIn = ytcfg.UserSessionID, loggedIn
 		p.sessionAccount = account
 		if p.sessionAsked != account {
 			p.sessionAsked, p.sessionRetryAt = "", time.Time{}

@@ -924,7 +924,8 @@ func (j *CookieJar) GetCookieHeader() string {
 	return j.GetCookieHeaderFor(PlatformYouTube)
 }
 
-// HasYouTubeAuthCookies returns true if SAPISID (or __Secure-3PAPISID) AND LOGIN_INFO are present.
+// HasYouTubeAuthCookies returns true if a SAPISID variant (SAPISID,
+// __Secure-3PAPISID or __Secure-1PAPISID) AND LOGIN_INFO are present.
 func (j *CookieJar) HasYouTubeAuthCookies() bool {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
@@ -935,14 +936,17 @@ func (j *CookieJar) HasYouTubeAuthCookies() bool {
 // j.mu, so a header built under one read lock (YouTubePageCookieHeader) asks
 // the same question of the same jar contents it emits.
 //
-// It is the question yt-dlp's _has_auth_cookies asks (_base.py:828-833), not
-// the same answer at every edge: upstream also counts __Secure-1PAPISID
-// alone, and takes LOGIN_INFO's presence, empty or not, where this needs
-// SAPISID or __Secure-3PAPISID and a non-empty LOGIN_INFO. A real export
-// carries SAPISID beside the 1P copy and a LOGIN_INFO with a value, so the
-// two agree on what browsers write.
+// It is the question yt-dlp's _has_auth_cookies asks (_base.py:828-833):
+// LOGIN_INFO and any of the three SAPISID variants _get_sid_cookies reads
+// (_base.py:781-795), __Secure-1PAPISID alone included — a jar holding only
+// that one is signed in for upstream, and the authenticated cascade runs on
+// it here too, its hash sent as SAPISID1PHASH. One edge stays apart: upstream
+// takes LOGIN_INFO's presence, empty or not, where this needs a non-empty
+// one, which is what browsers write. Expiry is not consulted, by the Load
+// ruling ("Expiry is a diagnostic, not a gate").
 func (j *CookieJar) hasYouTubeAuthLocked() bool {
-	hasSapisid := j.youtube["SAPISID"].value != "" || j.youtube["__Secure-3PAPISID"].value != ""
+	hasSapisid := j.youtube["SAPISID"].value != "" || j.youtube["__Secure-3PAPISID"].value != "" ||
+		j.youtube["__Secure-1PAPISID"].value != ""
 	hasLoginInfo := j.youtube["LOGIN_INFO"].value != ""
 	return hasSapisid && hasLoginInfo
 }
@@ -1308,12 +1312,19 @@ func (j *CookieJar) youTubeSessionParts() (sapisid, loginInfo string) {
 	// refresh loop's Reload run on different goroutines.
 	//
 	// The SAPISID fallback is inlined rather than delegated for that reason —
-	// KEEP IN SYNC with GetSapisid.
+	// KEEP IN SYNC with GetSapisid. It goes one step further than GetSapisid,
+	// to __Secure-1PAPISID: hasYouTubeAuthLocked counts a jar holding only
+	// that variant as signed in, and YouTubeIdentity must be "" exactly when
+	// it is not. A jar holding SAPISID or __Secure-3PAPISID fingerprints as
+	// it always did.
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 	sapisid = j.youtube["SAPISID"].value
 	if sapisid == "" {
 		sapisid = j.youtube["__Secure-3PAPISID"].value
+	}
+	if sapisid == "" {
+		sapisid = j.youtube["__Secure-1PAPISID"].value
 	}
 	return sapisid, j.youtube["LOGIN_INFO"].value
 }
@@ -1359,7 +1370,25 @@ var allowedSAPISIDHASHOrigins = map[string]struct{}{
 // GenerateAuthorizationHeader generates the full Authorization header with SAPISIDHASH variants.
 // If origin is not a recognized YouTube origin, returns "" — callers must not
 // use the result to authenticate against arbitrary origins.
+//
+// It is GenerateAuthorizationHeaderForUser with no user session id: the form
+// a request that has no page's session to state takes (the refresh service's
+// guide probe), and yt-dlp's own form when _extract_user_session_id finds
+// none (_get_sid_authorization_header, _base.py:797-822).
 func (j *CookieJar) GenerateAuthorizationHeader(origin string) string {
+	return j.GenerateAuthorizationHeaderForUser(origin, "")
+}
+
+// GenerateAuthorizationHeaderForUser is GenerateAuthorizationHeader bound to
+// the signed-in user's session id (youtube.YtcfgData.UserSessionID: ytcfg's
+// USER_SESSION_ID, else the datasync id's user half), as yt-dlp's
+// _get_sid_authorization_header binds it (_base.py:797-822, the id passed as
+// additional_parts {'u': id}): each scheme's hash input is prefixed with the
+// id and each part gains a "_u" suffix (makeSidAuthorization). That is the
+// shape YouTube's own web client sends for every signed-in session, primary
+// accounts included. An empty id is exactly today's unbound form, so a
+// session whose page stated neither id is sent what it always was.
+func (j *CookieJar) GenerateAuthorizationHeaderForUser(origin, userSessionID string) string {
 	if _, ok := allowedSAPISIDHASHOrigins[origin]; !ok {
 		return ""
 	}
@@ -1370,13 +1399,13 @@ func (j *CookieJar) GenerateAuthorizationHeader(origin string) string {
 	var parts []string
 
 	if sapisid != "" {
-		parts = append(parts, makeSidAuthorization("SAPISIDHASH", sapisid, origin, now))
+		parts = append(parts, makeSidAuthorization("SAPISIDHASH", sapisid, origin, userSessionID, now))
 	}
 	if sapisid1p != "" {
-		parts = append(parts, makeSidAuthorization("SAPISID1PHASH", sapisid1p, origin, now))
+		parts = append(parts, makeSidAuthorization("SAPISID1PHASH", sapisid1p, origin, userSessionID, now))
 	}
 	if sapisid3p != "" {
-		parts = append(parts, makeSidAuthorization("SAPISID3PHASH", sapisid3p, origin, now))
+		parts = append(parts, makeSidAuthorization("SAPISID3PHASH", sapisid3p, origin, userSessionID, now))
 	}
 
 	if len(parts) == 0 {
@@ -1386,10 +1415,25 @@ func (j *CookieJar) GenerateAuthorizationHeader(origin string) string {
 	return strings.Join(parts, " ")
 }
 
-func makeSidAuthorization(scheme, sid, origin string, unixTime int64) string {
+// makeSidAuthorization is one scheme's part of the Authorization header, a
+// port of yt-dlp's _make_sid_authorization (_base.py:762-775):
+// "{scheme} {ts}_{sha1(ts + " " + sid + " " + origin)}" with no user session
+// id, and with one "{scheme} {ts}_{sha1(uid + " " + ts + " " + sid + " " +
+// origin)}_u". Upstream joins additional_parts' values with ":" into the
+// hash input and their keys into the suffix; its only additional part is
+// {'u': user_session_id}, so the value alone leads the input and the key
+// "u" alone is the suffix — pinned against a vector computed with
+// upstream's own formula by TestMakeSidAuthorizationUserSessionVector.
+func makeSidAuthorization(scheme, sid, origin, userSessionID string, unixTime int64) string {
 	timestamp := strconv.FormatInt(unixTime, 10)
 	hashInput := timestamp + " " + sid + " " + origin
+	if userSessionID != "" {
+		hashInput = userSessionID + " " + hashInput
+	}
 	hash := fmt.Sprintf("%x", sha1.Sum([]byte(hashInput)))
+	if userSessionID != "" {
+		return fmt.Sprintf("%s %s_%s_u", scheme, timestamp, hash)
+	}
 	return fmt.Sprintf("%s %s_%s", scheme, timestamp, hash)
 }
 

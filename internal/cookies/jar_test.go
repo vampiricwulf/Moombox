@@ -3,6 +3,7 @@ package cookies
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -203,10 +204,117 @@ func TestMakeSidAuthorizationKnownVector(t *testing.T) {
 	// sha1("1234567890 test-sid https://www.youtube.com") computed once:
 	// printf '%s' "1234567890 test-sid https://www.youtube.com" | sha1sum
 	// = 96d13ea75f0bf102d71aebdfdaa599807584b65c
-	got := makeSidAuthorization("SAPISIDHASH", "test-sid", "https://www.youtube.com", 1234567890)
+	got := makeSidAuthorization("SAPISIDHASH", "test-sid", "https://www.youtube.com", "", 1234567890)
 	want := "SAPISIDHASH 1234567890_96d13ea75f0bf102d71aebdfdaa599807584b65c"
 	if got != want {
 		t.Errorf("SAPISIDHASH mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestMakeSidAuthorizationUserSessionVector pins the user-bound form against
+// vectors computed with yt-dlp's own _make_sid_authorization (_base.py:
+// 762-775), its body run verbatim under Python with time.time() fixed at
+// 1234567890 and additional_parts {'u': 'user-u'}:
+//
+//	SAPISIDHASH 1234567890_913a5d4e2d9dc1ef79e0aa78ebf82441c7007663_u
+//	SAPISID1PHASH 1234567890_39f8e63c3a2e4cd1629dc3df93c3c67908dfea64_u
+//
+// i.e. sha1("user-u 1234567890 test-sid https://www.youtube.com") with "_u"
+// appended. With {} the same function gives the unbound vector above, which
+// is why an empty id must stay exactly today's form.
+//
+// Mutants: the id appended to the hash input instead of prefixed; the "_u"
+// suffix dropped; the suffix written as the id ("_user-u") instead of the
+// key; the "_u" suffix added with an empty id.
+func TestMakeSidAuthorizationUserSessionVector(t *testing.T) {
+	for _, tc := range []struct {
+		scheme, sid, uid, want string
+	}{
+		{"SAPISIDHASH", "test-sid", "user-u", "SAPISIDHASH 1234567890_913a5d4e2d9dc1ef79e0aa78ebf82441c7007663_u"},
+		{"SAPISID1PHASH", "sapisid1p_val", "user-u", "SAPISID1PHASH 1234567890_39f8e63c3a2e4cd1629dc3df93c3c67908dfea64_u"},
+		{"SAPISIDHASH", "test-sid", "", "SAPISIDHASH 1234567890_96d13ea75f0bf102d71aebdfdaa599807584b65c"},
+	} {
+		if got := makeSidAuthorization(tc.scheme, tc.sid, "https://www.youtube.com", tc.uid, 1234567890); got != tc.want {
+			t.Errorf("makeSidAuthorization(%s, %s, uid %q)\n got: %q\nwant: %q", tc.scheme, tc.sid, tc.uid, got, tc.want)
+		}
+	}
+}
+
+// GenerateAuthorizationHeaderForUser binds every scheme the jar can sign to
+// the one user session id — SAPISIDHASH, SAPISID1PHASH and SAPISID3PHASH
+// alike, as _get_sid_authorization_header passes the same additional_parts
+// to each (_base.py:797-822) — and GenerateAuthorizationHeader is the
+// unbound form. Each part is checked against the hash recomputed from its own
+// timestamp, so the test needs no clock.
+//
+// Mutants: GenerateAuthorizationHeaderForUser dropping the id for the 1P or
+// 3P scheme; GenerateAuthorizationHeader passing a non-empty id.
+func TestGenerateAuthorizationHeaderForUserBindsEveryScheme(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cookies.txt")
+	content := ".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tsap\n" +
+		".youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-1PAPISID\tsap1p\n" +
+		".youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PAPISID\tsap3p\n" +
+		".youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tli\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jar := NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	const origin = "https://www.youtube.com"
+	check := func(header, uid string) {
+		t.Helper()
+		parts := strings.Split(header, " ")
+		if len(parts) != 6 {
+			t.Fatalf("uid %q: header %q, want three scheme parts", uid, header)
+		}
+		sids := map[string]string{"SAPISIDHASH": "sap", "SAPISID1PHASH": "sap1p", "SAPISID3PHASH": "sap3p"}
+		for i := 0; i < len(parts); i += 2 {
+			scheme, token := parts[i], parts[i+1]
+			sid, ok := sids[scheme]
+			if !ok {
+				t.Fatalf("uid %q: unexpected scheme %q in %q", uid, scheme, header)
+			}
+			ts, _, _ := strings.Cut(token, "_")
+			unix, err := strconv.ParseInt(ts, 10, 64)
+			if err != nil {
+				t.Fatalf("uid %q: token %q has no timestamp", uid, token)
+			}
+			if want := makeSidAuthorization(scheme, sid, origin, uid, unix); scheme+" "+token != want {
+				t.Errorf("uid %q: %s part = %q, want %q", uid, scheme, scheme+" "+token, want)
+			}
+		}
+	}
+	check(jar.GenerateAuthorizationHeaderForUser(origin, "user-u"), "user-u")
+	check(jar.GenerateAuthorizationHeader(origin), "")
+}
+
+// A jar holding LOGIN_INFO and __Secure-1PAPISID alone is signed in, as
+// yt-dlp's _has_auth_cookies counts it (_base.py:781-795, 828-833), and has
+// an identity, which is "" exactly when the predicate is false.
+//
+// Mutants: hasYouTubeAuthLocked without the __Secure-1PAPISID alternative;
+// youTubeSessionParts without the __Secure-1PAPISID fallback.
+func TestSecure1PAPISIDAloneIsSignedIn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cookies.txt")
+	content := ".youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-1PAPISID\tsap1p\n" +
+		".youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tli\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jar := NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if !jar.HasYouTubeAuthCookies() {
+		t.Error("HasYouTubeAuthCookies = false for LOGIN_INFO + __Secure-1PAPISID, want true")
+	}
+	if jar.YouTubeIdentity() == "" {
+		t.Error("YouTubeIdentity = \"\" for a signed-in jar, want an identity")
+	}
+	if got := jar.GenerateAuthorizationHeader("https://www.youtube.com"); !strings.HasPrefix(got, "SAPISID1PHASH ") {
+		t.Errorf("Authorization = %q, want a SAPISID1PHASH part", got)
 	}
 }
 

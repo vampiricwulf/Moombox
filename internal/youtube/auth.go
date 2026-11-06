@@ -30,8 +30,17 @@ func NewAuth(jar *cookies.CookieJar, logger interface {
 }
 
 // GenerateAuthorizationHeader generates the SAPISIDHASH Authorization header for YouTube API requests.
+// It is the unbound form, with no user session id; chat sends
+// Service.ChatAuthorizationHeader, which binds the session's.
 func (a *Auth) GenerateAuthorizationHeader() string {
-	return a.jar.GenerateAuthorizationHeader("https://www.youtube.com")
+	return a.generateAuthorizationHeaderForUser("")
+}
+
+// generateAuthorizationHeaderForUser is the Authorization header for
+// www.youtube.com bound to userSessionID ("" for the unbound form); see
+// cookies.CookieJar.GenerateAuthorizationHeaderForUser.
+func (a *Auth) generateAuthorizationHeaderForUser(userSessionID string) string {
+	return a.jar.GenerateAuthorizationHeaderForUser("https://www.youtube.com", userSessionID)
 }
 
 // HasAuthCookies returns true if valid authentication cookies are present.
@@ -116,14 +125,24 @@ func (a *Auth) GenerateAPIHeaders(client constants.YouTubeClientConfig, ytcfg *Y
 		}
 	}
 
-	// Add authorization header
-	authHeader := a.jar.GenerateAuthorizationHeader(origin)
+	// The Authorization header, bound to the ytcfg's user session id when it
+	// names one, as _generate_cookie_auth_headers binds it
+	// (_extract_user_session_id, _base.py:970; YtcfgData.UserSessionID).
+	userSessionID := ""
+	if ytcfg != nil {
+		userSessionID = ytcfg.UserSessionID
+	}
+	authHeader := a.jar.GenerateAuthorizationHeaderForUser(origin, userSessionID)
 	if authHeader != "" {
 		headers["Authorization"] = authHeader
 		headers["X-Origin"] = origin
 	}
 
-	if a.jar.HasYouTubeAuthCookies() {
+	// Only when the ytcfg says LOGGED_IN, as upstream sends it (_base.py:
+	// 975-976; YtcfgData.LoginState). It used to follow the jar's cookies
+	// alone, so a session YouTube's own page had just answered logged out
+	// still claimed a logged-in bootstrap on every call made under it.
+	if ytcfg != nil && ytcfg.LoginState == SessionAuthLoggedIn {
 		headers["X-Youtube-Bootstrap-Logged-In"] = "true"
 	}
 

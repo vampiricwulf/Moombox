@@ -49,7 +49,10 @@ type PlayerAPI struct {
 	OnVisitorData func(visitorData string)
 	// session is the signed-in session's identity as the last watch page
 	// stated it — SESSION_INDEX and DELEGATED_SESSION_ID, which
-	// GenerateAPIHeaders sends as X-Goog-AuthUser and X-Goog-PageId. A
+	// GenerateAPIHeaders sends as X-Goog-AuthUser and X-Goog-PageId, and the
+	// user session id and LOGGED_IN verdict (sessionUserID, sessionLoggedIn),
+	// which bind its Authorization hash and decide its
+	// X-Youtube-Bootstrap-Logged-In. A
 	// membership held on a brand account exists only under that delegated
 	// identity: a credentialed call without the headers is judged as the
 	// primary account and refused, so the probe-only calls (no watch page of
@@ -79,6 +82,8 @@ type PlayerAPI struct {
 	sessionMu          sync.RWMutex
 	sessionIndex       *int
 	delegatedSessionID string
+	sessionUserID      string
+	sessionLoggedIn    bool
 	sessionAccount     string
 	sessionAsked       string
 	sessionRetryAt     time.Time
