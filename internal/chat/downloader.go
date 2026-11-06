@@ -155,16 +155,17 @@ type ChatDownloader struct {
 	lastMessageAt time.Time
 	messages      []ChatMessage // Unwritten messages in memory
 	messageCount  int
+	dedup         *utils.OrderedDedup[string]
+	continuation  string
+	streamStartMs int64
+	flushedToDisk bool
+
 	// pendingMarkers are the deletion and replacement markers that may name
 	// a message already on disk, applied by one rewrite at the end of the run
 	// (applyPendingMarkers); rawPending the raw sidecar lines not yet
 	// appended (flushRawActions). Loop-goroutine state, like messages.
 	pendingMarkers []pendingChatMarker
 	rawPending     []json.RawMessage
-	dedup         *utils.OrderedDedup[string]
-	continuation  string
-	streamStartMs int64
-	flushedToDisk bool
 	// resumeFileAuto is true when ResumeFile was synthesized from OutputFile in
 	// NewChatDownloader (caller did not pass an explicit ResumeFile). Used by
 	// SetOutputFile to know whether it's safe to re-derive ResumeFile from the
