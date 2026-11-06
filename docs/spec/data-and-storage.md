@@ -631,6 +631,12 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 |-------|------|---------|----------|-------|
 | UseSidecar | bool | true | `use_sidecar` | Node + JSDOM + bgutils-js sidecar for real PO tokens. **Restart-required**; both UIs mark it so. |
 
+#### [twitch]
+
+| Field | Type | Default | TOML Key | Notes |
+|-------|------|---------|----------|-------|
+| ClientID | string | `""` | `client_id` | Overrides the Client-ID every Twitch GQL call and Usher playlist fetch sends (`twitch.SetClientID`, installed by `initServices` before the Twitch service is built); empty keeps `constants.TwitchGQLClientID`. yt-dlp's `twitch:client_id` extractor argument is the same override (G70). 1-64 letters and digits (`config.ValidTwitchClientID`, the one check `config.Validate`, `PUT /api/config` and the TUI's save share); a malformed one is put back to empty on load. Both settings UIs show it in their Twitch section. **Restart-required**; both UIs mark it so. |
+
 #### [connectivity]
 
 | Field | Type | Default | TOML Key | Notes |

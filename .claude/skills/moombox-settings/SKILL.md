@@ -56,7 +56,7 @@ Nine callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go
 - `OnMaxParallelChange(n)` → `dlWorker.SetParallelDownloads()`
 - `OnHideFinishedAgeChanged()` → re-broadcasts the job list
 - `OnChannelChange()` → `kickMonitors` to re-evaluate channels
-- `OnNotificationsChange()` → `notifyMgr.Reload()` — the notification targets follow the save; it also fires for a `network.public_url` change, and the per-target `enabled`/`mention`/`mention_events`/`mode` keys all hot-reload through it too (the restart list stays at 16)
+- `OnNotificationsChange()` → `notifyMgr.Reload()` — the notification targets follow the save; it also fires for a `network.public_url` change, and the per-target `enabled`/`mention`/`mention_events`/`mode` keys all hot-reload through it too (the restart list stays at 17)
 - `OnGoSoftLimitChange(mb)` → `debug.SetMemoryLimit` (0 restores the boot limit)
 - `OnTrustForwardedProtoChange(trust)` → the `internal/web` atomic flag
 - `OnFfmpegPathChange(path)` → `applyFfmpegPath` (`cmd/moombox/hot_reload.go`): `SetFfmpegPath` on the trim service and the download worker
@@ -76,7 +76,7 @@ Some keys are deliberately `config.toml`-only: no Settings row in either UI, abs
 
 ## Restart-Required Fields
 
-Both UIs check if changed fields require restart. The two lists are `RESTART_REQUIRED_FIELDS` (`web/public/modules/settings.js`) and `restartRequiredKeys` (`internal/tui/settings.go`), pinned equal by `TestRestartRequiredListsAgree`. Current list (16): `network.{port,network_access,https_enabled,tls_cert_path,tls_key_path}`, `paths.{database_path,log_file_path}`, `logs.{log_max_file_size,log_max_files}`, `cookies.{cookie_file,refresh_interval,auto_enabled,browser_profile_dir}`, `connectivity.probe_targets`, `memory.sidecar_hard_limit_mb`, `bgutils.use_sidecar`.
+Both UIs check if changed fields require restart. The two lists are `RESTART_REQUIRED_FIELDS` (`web/public/modules/settings.js`) and `restartRequiredKeys` (`internal/tui/settings.go`), pinned equal by `TestRestartRequiredListsAgree`. Current list (17): `network.{port,network_access,https_enabled,tls_cert_path,tls_key_path}`, `paths.{database_path,log_file_path}`, `logs.{log_max_file_size,log_max_files}`, `cookies.{cookie_file,refresh_interval,auto_enabled,browser_profile_dir}`, `connectivity.probe_targets`, `memory.sidecar_hard_limit_mb`, `bgutils.use_sidecar`, `twitch.client_id`.
 
 ## Common Mistakes
 

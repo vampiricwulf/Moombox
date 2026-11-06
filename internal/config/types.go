@@ -14,6 +14,7 @@ type MoomboxConfig struct {
 	Bgutils       BgutilsConfig        `toml:"bgutils" json:"bgutils"`
 	Memory        MemoryConfig         `toml:"memory" json:"memory"`
 	Connectivity  ConnectivityConfig   `toml:"connectivity" json:"connectivity"`
+	Twitch        TwitchConfig         `toml:"twitch" json:"twitch"`
 	Channels      []ChannelConfig      `toml:"channels,omitempty" json:"channels,omitempty"`
 	Notifications []NotificationConfig `toml:"notifications,omitempty" json:"notifications,omitempty"`
 
@@ -480,6 +481,17 @@ type BgutilsConfig struct {
 	// runs only the goja path, which BotGuard's timing check rejects — it
 	// mints no PO tokens.
 	UseSidecar bool `toml:"use_sidecar" json:"use_sidecar"`
+}
+
+// TwitchConfig holds Twitch client settings.
+type TwitchConfig struct {
+	// ClientID overrides the Client-ID every Twitch GQL call and Usher
+	// playlist fetch sends (twitch.SetClientID, G70). Empty — the default —
+	// keeps the built-in one (constants.TwitchGQLClientID). It is the first
+	// thing Twitch rotates when it tightens GQL access; yt-dlp makes it an
+	// extractor argument (`twitch:client_id`) for the same reason. Applied at
+	// boot (restart required).
+	ClientID string `toml:"client_id" json:"client_id"`
 }
 
 // ChannelConfig holds channel-specific monitoring settings.

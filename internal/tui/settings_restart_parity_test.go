@@ -208,6 +208,7 @@ func TestRestartOverlayNamesEveryCategoryItCovers(t *testing.T) {
 		"refresh_interval":      "cookie",
 		"probe_targets":         "connectivity",
 		"sidecar_hard_limit_mb": "sidecar", "use_sidecar": "sidecar",
+		"client_id": "twitch",
 	}
 	var wanted []string
 	seen := map[string]bool{}

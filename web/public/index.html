@@ -534,6 +534,13 @@
                                 ></sl-icon>
                                 BotGuard
                             </sl-menu-item>
+                            <sl-menu-item value="twitch">
+                                <sl-icon
+                                    slot="prefix"
+                                    name="twitch"
+                                ></sl-icon>
+                                Twitch
+                            </sl-menu-item>
                             <sl-menu-item value="memory">
                                 <sl-icon
                                     slot="prefix"
@@ -1331,6 +1338,28 @@
                                 Enable sidecar
                                 <span slot="help-text">Use the embedded Node sidecar for real BotGuard PO tokens (default: on). Requires restart.</span>
                             </sl-switch>
+                        </div>
+
+                        <!-- Twitch Settings -->
+                        <div
+                            id="settings-twitch"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h2>Twitch</h2>
+                            <p class="settings-help">
+                                The Client-ID every Twitch GQL and playlist
+                                request sends. Leave empty for the built-in one;
+                                set it only when Twitch has rotated that one out
+                                and a newer web Client-ID is known. Requires
+                                restart.
+                            </p>
+                            <sl-input
+                                id="cfg-twitch-client-id"
+                                label="Client-ID override"
+                                placeholder="built-in"
+                                help-text="1-64 letters and digits; empty = the built-in Client-ID. Requires restart."
+                            ></sl-input>
                         </div>
 
                         <!-- Memory Settings -->

@@ -793,6 +793,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	// 6. Twitch service
 	// =========================================================================
+	// `[twitch] client_id` (G70): installed before the first Twitch request,
+	// once — the setting is restart-required.
+	if cfg.Twitch.ClientID != "" {
+		twitch.SetClientID(cfg.Twitch.ClientID)
+		log.Info("[Twitch] Using the configured Client-ID override")
+	}
 	twService := twitch.NewService(jar, log)
 	if twService.Auth.HasAuthToken() {
 		log.Info("[Twitch] Authenticated (auth-token found in cookies)")

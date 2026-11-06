@@ -1112,3 +1112,29 @@ func TestConfigPutRefreshIntervalNullAndStringForms(t *testing.T) {
 		t.Errorf("refresh_interval after \"2h\" = %v, want 120 minutes", got)
 	}
 }
+
+// TestConfigUpdatesTwitchClientID: PUT /api/config validates
+// twitch.client_id with config.ValidTwitchClientID and applies it trimmed;
+// an empty one restores the built-in Client-ID.
+//
+// Mutants: the validateConfigUpdates arm removed (the bad value passes); the
+// applyConfigUpdates arm removed (the good value is not saved).
+func TestConfigUpdatesTwitchClientID(t *testing.T) {
+	bad := map[string]any{"twitch": map[string]any{"client_id": "a b"}}
+	if errs := validateConfigUpdates(bad); errs["twitch.client_id"] == "" {
+		t.Errorf("a Client-ID with a space was accepted: %v", errs)
+	}
+	good := map[string]any{"twitch": map[string]any{"client_id": " ue6666qo983tsx6so1t0vnawi233wa "}}
+	if errs := validateConfigUpdates(good); len(errs) != 0 {
+		t.Errorf("a valid Client-ID was rejected: %v", errs)
+	}
+	cfg := config.Defaults()
+	applyConfigUpdates(cfg, good)
+	if cfg.Twitch.ClientID != "ue6666qo983tsx6so1t0vnawi233wa" {
+		t.Errorf("applied client_id = %q", cfg.Twitch.ClientID)
+	}
+	applyConfigUpdates(cfg, map[string]any{"twitch": map[string]any{"client_id": ""}})
+	if cfg.Twitch.ClientID != "" {
+		t.Errorf("clearing left client_id = %q", cfg.Twitch.ClientID)
+	}
+}
