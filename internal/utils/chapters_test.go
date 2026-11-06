@@ -49,7 +49,7 @@ func TestChaptersFromDescription(t *testing.T) {
 			{StartMs: 0, Title: "【雑談】 はじめに"}, {StartMs: 754_000, Title: "Song one"}}},
 		{"0:00 - 雑談 開始\n1:00\u3000歌", []Chapter{
 			{StartMs: 0, Title: "雑談 開始"}, {StartMs: 60_000, Title: "歌"}}},
-		{"オープニング 0:00\n歌】 5:00\n", []Chapter{
+		{"オープニング 0:00\n歌】 5:00\n※※ 7:00\n", []Chapter{
 			{StartMs: 0, Title: "オープニング"}, {StartMs: 300_000, Title: "歌"}}},
 	} {
 		if got := ChaptersFromDescription(tc.desc, 3600_000); !reflect.DeepEqual(got, tc.want) {
