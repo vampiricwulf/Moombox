@@ -43,7 +43,11 @@ func TestAudioInfoRoute(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	f.addJob(t, "one", func(j *database.Job) { j.Status = database.StatusFinished; j.OutputFile = single; j.Filename = "single.mp4" })
+	f.addJob(t, "one", func(j *database.Job) {
+		j.Status = database.StatusFinished
+		j.OutputFile = single
+		j.Filename = "single.mp4"
+	})
 	f.addJob(t, "split", func(j *database.Job) {
 		j.Status = database.StatusFinished
 		j.OutputFile = single

@@ -8,10 +8,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/vampiricwulf/Moombox/internal/childproc"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
-	"github.com/vampiricwulf/Moombox/internal/childproc"
 )
 
 // audioProbeTimeout bounds the one ffprobe -show_streams run behind GET
