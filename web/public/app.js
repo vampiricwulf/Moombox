@@ -2791,8 +2791,8 @@ export class MoomboxApp {
     // Segmented is noted only for a VOD or a finished stream (the owner's
     // decision): while the stream is live or upcoming every adaptive
     // rendition it lists is segmented, and the live path fetches exactly
-    // those, so the mark on every row said nothing. The preselection below
-    // still reads it, as the server's badges do. The TUI's Add Video reads
+    // those, so the mark on every row said nothing. The server's badges
+    // still pass a segmented rendition over. The TUI's Add Video reads
     // the same streamStatus the same way (notesSegmented,
     // internal/tui/add_video.go).
     const onAir = data.streamStatus === "live" || data.streamStatus === "upcoming";
@@ -2841,8 +2841,7 @@ export class MoomboxApp {
       // [Best] is the rendition automatic selection takes, of any codec
       // (bestItags.bestAudio, owner decision FE-10): a 5.1 E-AC-3 track the
       // shared rank puts above both codec picks carried no badge at all. The
-      // codec badges stay beside it; the preselection below follows [Best]
-      // (owner decision FQ-1).
+      // codec badges stay beside it.
       let badges = "";
       if (bestItags.bestAudio != null && fmt.itag === bestItags.bestAudio) badges += " [Best]";
       if (fmt.itag === bestItags.bestOpusAudio) badges += " [Best OPUS]";
@@ -2853,33 +2852,16 @@ export class MoomboxApp {
       audioSelect.appendChild(opt);
     }
 
-    // Wait for Shoelace to register the new options before setting values.
-    // Without this, the select's internal state may not recognize the options yet.
-    await Promise.all([
-      videoSelect.updateComplete?.catch(() => {}),
-      audioSelect.updateComplete?.catch(() => {}),
-    ]);
-
-    // Auto-select best formats: WEBM over MP4, as ever, but an intact badge
-    // first. The server badges the best adaptive rendition of each kind that
-    // is neither damaged nor segmented, falling back to a marked one only
-    // when every adaptive rendition of that kind is marked (and to a muxed
-    // file only when the kind has nothing else) — so a WEBM badge on a
-    // damaged rendition yields to an intact MP4 one. Audio opens on the
-    // [Best] rendition, the one automatic selection takes (youtube.AudioRank
-    // through bestPickerItag, cmd/moombox/adapters.go), so a submit with the
-    // defaults takes the track an automatic download would — a 5.1 E-AC-3
-    // track the rank puts first is no longer passed over for stereo Opus
-    // (owner decision FQ-1). The codec badges follow only for an answer
-    // with no bestAudio (a server from before it); bestAudio is itself
-    // intact-first across every codec, so it is marked only when every
-    // audio row is, and the codec badges can never be intact past it.
-    const intact = (list, itag) => (list || []).some((f) => f.itag === itag && !f.damaged && !f.segmented);
-    const preselect = (list, ...itags) => itags.find((i) => i && intact(list, i)) ?? itags.find((i) => i);
-    const video = preselect(data.videoFormats, bestItags.bestWebmVideo, bestItags.bestMp4Video);
-    if (video) videoSelect.value = String(video);
-    const audio = preselect(data.audioFormats, bestItags.bestAudio, bestItags.bestOpusAudio, bestItags.bestAacAudio);
-    if (audio) audioSelect.value = String(audio);
+    // Both selects start on Auto (owner decision PR-R8, superseding FQ-1's
+    // preselection): nothing is pinned unless the operator picks a
+    // rendition. The [Best] badges above show what Auto takes. A preselected
+    // video itag turned an untouched Advanced form into a pinned job — and a
+    // pinned video itag turns a live job's quality monitoring off — for a
+    // rendition the selector itself might not have picked. A select left on
+    // a previous video's rendition is cleared too: its itag is not this
+    // video's choice.
+    videoSelect.value = "";
+    audioSelect.value = "";
 
     // Update end time placeholder with video duration
     if (data.lengthSeconds && data.lengthSeconds > 0) {
