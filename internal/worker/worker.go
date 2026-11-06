@@ -452,6 +452,11 @@ func NewDownloadWorker(
 	// config: the output directory and the critical threshold both follow a
 	// Settings save without a restart.
 	sched.readDisk = w.readOutputDisk
+	// A trim asks the worker whether a chapter import holds the job's
+	// archive (ClaimChapterImport has the other half).
+	if trims != nil {
+		trims.setArchiveRewriting(w.chapterImportRunning)
+	}
 	// A deleted row takes its backlog retry streak with it. The id is the
 	// video id, so a backlog rescan can create the row again, and it would
 	// have inherited the old count and hold. For the worker's lifetime,

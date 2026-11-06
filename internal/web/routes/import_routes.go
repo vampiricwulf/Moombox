@@ -891,7 +891,11 @@ func importSegment(jobID string, video *importFile, files []*importFile) *databa
 // importProbeDuration reads a file's duration in seconds with ffprobe; 0 when
 // it cannot (no ffprobe, or a file it cannot read). A variable so a test can
 // stand one in.
-var importProbeDuration = func(ctx context.Context, ffprobePath, file string) float64 {
+var importProbeDuration = ffprobeDurationSeconds
+
+// ffprobeDurationSeconds is importProbeDuration's production probe, which the
+// chapter import also measures an archive with (ChapterService).
+func ffprobeDurationSeconds(ctx context.Context, ffprobePath, file string) float64 {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	out, err := childproc.CommandContext(ctx, ffprobePath, "-v", "quiet", "-print_format", "json", "-show_format", engine.FFmpegPathArg(file)).Output()

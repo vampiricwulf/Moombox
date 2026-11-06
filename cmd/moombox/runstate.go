@@ -20,6 +20,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/web"
+	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
@@ -69,6 +70,9 @@ type runState struct {
 	notifyMgr notifications.Notifier
 	dlWorker  *worker.DownloadWorker
 	trimSvc   *worker.TrimService
+	// chapterSvc is the chapter import (routes.ChapterRoutes, owner
+	// decision CI-4): the Web UI reaches it over its routes, the TUI here.
+	chapterSvc *routes.ChapterService
 
 	// openAlerts is the persisted set of alerts sent and not yet closed
 	// (open_alerts.go), loaded in run() before any alerter is wired so each
