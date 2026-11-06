@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -266,5 +267,43 @@ func TestCopyAssetsCopiesTheChatRawSidecar(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(outDir, "A Job.chat.raw.jsonl"))
 	if err != nil || string(got) != "{\"a\":1}\n" {
 		t.Errorf("raw sidecar beside the archive: %q, %v", got, err)
+	}
+}
+
+// TestPrepareArchiveChaptersLiveTwitchFallsBackToTheTimeline is the Mux
+// action over a crashed live Twitch capture: nothing was staged, so the
+// archive's chapters are built from the categories twitch_timeline.json
+// observed, shifted into the capture's timeline (it began 10 s into the
+// broadcast) and ended at the archive's length.
+//
+// Mutant: the live Twitch arm of prepareArchiveChapters removed (no chapters).
+func TestPrepareArchiveChaptersLiveTwitchFallsBackToTheTimeline(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	tl := `{"recordingStartMs":` + strconv.FormatInt(start.Add(10*time.Second).UnixMilli(), 10) +
+		`,"categories":[{"atMs":` + strconv.FormatInt(start.Add(12*time.Second).UnixMilli(), 10) + `,"title":"Just Chatting"},` +
+		`{"atMs":` + strconv.FormatInt(start.Add(10*time.Minute).UnixMilli(), 10) + `,"title":"Elden Ring"}]}`
+	if err := os.WriteFile(filepath.Join(dir, twitchTimelineFile), []byte(tl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	length := 3600
+	o := &DownloadOrchestrator{logger: discardLogger{}}
+	path := o.prepareArchiveChapters(context.Background(), &JobContext{
+		Job:        &database.Job{ID: "j", Platform: "twitch", StreamStartTime: start.Format(time.RFC3339), LengthSeconds: &length},
+		StagingDir: dir,
+	}, "", "")
+	if path == "" {
+		t.Fatal("no chapters for a live Twitch capture with an observed timeline")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := utils.FFMetadataChapters([]utils.Chapter{
+		{StartMs: 0, EndMs: 590_000, Title: "Just Chatting"},
+		{StartMs: 590_000, EndMs: 3_600_000, Title: "Elden Ring"},
+	})
+	if string(data) != want {
+		t.Errorf("chapters file =\n%s\nwant\n%s", data, want)
 	}
 }
