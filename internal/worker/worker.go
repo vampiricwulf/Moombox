@@ -499,6 +499,10 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 	// for Queued by design) — so Run carries its own restart-on-panic wrapper.
 	go w.scheduler.Run(ctx)
 
+	// Twitch archive-VOD gap-fill (owner decision D17): the plans finished
+	// live captures left in twitch_gap_fills, looked at on their backoff.
+	go w.runTwitchGapFills(ctx, newTwitchGapFiller(w.db, w.tw, w.orchestrator, w.logger))
+
 	// Process jobs from queue
 	for {
 		jobID, jobCtx, ok := w.queue.Dequeue(ctx)
@@ -1087,6 +1091,10 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 					}
 					return info.GameCategory, nil
 				}
+				variant.ChannelLogin = login
+				w.readConfig(func(c *config.MoomboxConfig) {
+					variant.GapFillAdBreaks = twitchChannelGapFillAdBreaks(c.Channels, login)
+				})
 				variant.ArchiveChaptersFn = func(innerCtx context.Context) []utils.Chapter {
 					return w.twitchArchiveChapters(innerCtx, login, startedAt)
 				}

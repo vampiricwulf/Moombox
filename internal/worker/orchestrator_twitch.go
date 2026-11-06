@@ -66,6 +66,14 @@ type TwitchVariantInfo struct {
 	// it is offline or has none) for the category poll that feeds the live
 	// chapter fallback (pollTwitchCategory). nil runs no poll.
 	CategoryFn func(ctx context.Context) (string, error)
+	// ChannelLogin is a live capture's channel, which its gap-fill plan
+	// finds the broadcast's archive VOD by; GapFillAdBreaks is that channel's
+	// twitch_gap_fill_ad_breaks, which splits the capture at each stitched-ad
+	// break so the hole sits between two parts (owner decision D17 follow-up
+	// 3). Both unset for a VOD, a test, or the Mux action's own path: no plan
+	// is made without a login.
+	ChannelLogin    string
+	GapFillAdBreaks bool
 }
 
 // newTwitchVariantInfo builds the variant a Twitch capture runs on from the
@@ -428,6 +436,19 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	if isVod {
 		vodStaleEnd = func(ctx context.Context) (bool, error) { return twitchVodEnded(ctx, variant) }
 	}
+	// Each live part's wall-clock coverage (twitch_coverage.json), which the
+	// gap-fill plan is built from at finalize (owner decision D17). One
+	// recorder per part dir, made and read on this goroutine only; the
+	// downloader's OnSegmentWritten feeds the one its dir was given.
+	coverage := map[string]*coverageRecorder{}
+	coverageFor := func(dir string) *coverageRecorder {
+		r := coverage[dir]
+		if r == nil {
+			r = newCoverageRecorder(dir)
+			coverage[dir] = r
+		}
+		return r
+	}
 	createDownloader := func(variantURL, stagingDir string, startSeq int, forceStartSeq bool) (*engine.SegmentDownloader, string) {
 		videoPath := filepath.Join(stagingDir, "video_stream")
 		var onFirstSegment func(time.Time)
@@ -448,9 +469,15 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 				noteTwitchRecordingStart(stagingDir, pdt)
 			}
 		}
+		var onSegmentWritten func(time.Time, float64)
+		if !isVod {
+			onSegmentWritten = coverageFor(stagingDir).note
+		}
 		dl := newSegmentDownloader(engine.DownloaderOptions{
-			OnFirstSegment: onFirstSegment,
-			BaseURL:        variantURL,
+			OnFirstSegment:   onFirstSegment,
+			OnSegmentWritten: onSegmentWritten,
+			SplitOnAdBreak:   !isVod && variant.GapFillAdBreaks,
+			BaseURL:          variantURL,
 			OutputFile:     videoPath,
 			StartSeq:       startSeq,
 			ForceStartSeq:  forceStartSeq,
@@ -705,6 +732,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			}
 		}
 		if muxCurrent {
+			if !isVod {
+				coverageFor(curStagingDir).close(false)
+			}
 			// A resumed part's true start pre-dates this session — pass the
 			// sentinel so muxSegment derives it from the muxed duration
 			// instead of stamping hours of footage with the restart time.
@@ -728,6 +758,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			}
 			if err := os.Remove(oldVideo + ".resume.json"); err != nil && !os.IsNotExist(err) {
 				o.logger.Warn("failed to remove discarded short-segment resume state", "err", err, "jobID", jobCtx.Job.ID)
+			}
+			if !isVod {
+				coverageFor(curStagingDir).reset()
 			}
 		}
 		segmentIndex = nextIdx
@@ -861,6 +894,27 @@ sessionLoop:
 
 			if ctx.Err() != nil {
 				break
+			}
+
+			// A stitched-ad break ended on a channel whose ad breaks are
+			// gap-filled (SplitOnAdBreak): close the part here, nothing lost
+			// from the stream as served, and continue at the first content
+			// segment after the break on the same variant — the hole between
+			// the two parts is what the gap-fill inserts the VOD's footage
+			// into, as a part of its own (owner decision D17 follow-up 3).
+			if errors.Is(dlErr, engine.ErrAdBreakEnded) {
+				o.logger.Info("Twitch stitched-ad break ended — starting a new part so the break can be filled from the archive VOD",
+					"closedPart", segmentIndex+1, "jobID", jobCtx.Job.ID)
+				coverageFor(curStagingDir).close(true)
+				nextSeq := videoDl.CurrentSeq()
+				if err := advanceToNewPart(true, time.Now().Unix()); err != nil {
+					latchPartFailure(err)
+					break
+				}
+				videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, nextSeq, nextSeq > 0)
+				tracker.AttachVideoDownloader(videoDl)
+				drainQualityCh()
+				continue
 			}
 
 			isQualityLost := errors.Is(dlErr, engine.ErrQualityLost)
@@ -1545,12 +1599,45 @@ sessionLoop:
 		o.stageTwitchChapters(muxCtx, jobCtx, variant, isVod)
 	}
 
+	// The gap-fill plan (owner decision D17): read from the parts' coverage
+	// while the staging still holds it, kept once the job is Finished. A
+	// broadcast that ended while the capture was cut off (outageFinalize)
+	// lacks its tail as well.
+	var gapPlan *twitchGapFillPlan
+	if !isVod {
+		coverageFor(curStagingDir).close(false)
+		gapPlan = newTwitchGapFillPlan(jobCtx.Job, variant, stagedPartCoverages(jobCtx.StagingDir), outageFinalize, time.Now())
+	}
+
 	// Mux Twitch .ts → .mp4
 	dlResult := &DownloadResult{
 		HasVideo:  true,
 		VideoPath: videoPath,
 	}
-	return o.muxAndFinalize(muxCtx, jobCtx, dlResult)
+	err := o.muxAndFinalize(muxCtx, jobCtx, dlResult)
+	if err == nil && gapPlan != nil {
+		o.keepTwitchGapFillPlan(gapPlan)
+	}
+	return err
+}
+
+// keepTwitchGapFillPlan stores a finished live capture's gap-fill plan for its
+// first look gapFillFirstCheck from now, when the job did finish. Nothing
+// waits on it (owner decision D17 follow-up 4).
+func (o *DownloadOrchestrator) keepTwitchGapFillPlan(plan *twitchGapFillPlan) {
+	if j, err := o.db.GetJob(plan.JobID); err != nil || j == nil || j.Status != database.StatusFinished {
+		return
+	}
+	if err := saveTwitchGapFillPlan(o.db, plan, time.Now().Add(gapFillFirstCheck)); err != nil {
+		o.logger.Warn("could not keep the gap-fill plan; the archive stays as recorded", "err", err, "jobID", plan.JobID)
+		return
+	}
+	kinds := make([]string, 0, len(plan.Spans))
+	for _, sp := range plan.Spans {
+		kinds = append(kinds, sp.Kind)
+	}
+	o.logger.Info("the capture lacks parts of the broadcast; they are filled from its archive VOD once it is complete (up to 24 hours)",
+		"jobID", plan.JobID, "spans", len(plan.Spans), "kinds", strings.Join(kinds, ","))
 }
 
 // wireTwitchVodInfo gives a VOD capture its VideoMetadata re-read: the
