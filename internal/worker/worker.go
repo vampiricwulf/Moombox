@@ -2480,6 +2480,9 @@ func (w *DownloadWorker) clearJobParts(jobID string) {
 				}
 			}
 		}
+		// The parts' chapter list goes with them (owner decision FE-16): it
+		// is derived from them, named after their base, on no column.
+		removeSplitArchiveChapters(segs, w.logger)
 	}
 	if err := w.db.ClearJobSegmentsAndGaps(jobID); err != nil {
 		w.logger.Warn("reinit: failed to clear segment/gap rows", "jobID", jobID, "err", err)

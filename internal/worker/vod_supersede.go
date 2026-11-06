@@ -261,6 +261,11 @@ func (o *DownloadOrchestrator) supersedePartsWithVod(jobCtx *JobContext) error {
 	if err := o.db.ClearJobSegmentsAndGaps(jobCtx.Job.ID); err != nil {
 		return fmt.Errorf("clear the superseded part rows: %w", err)
 	}
+	// The parts' chapter list (writeSplitArchiveChapters) laid their timeline
+	// out; the single file muxed next carries its own chapters inside it, and
+	// a list left under the same base would be the archive's to the sweep and
+	// describe parts that are no longer it. Derived, so removed, not kept.
+	removeSplitArchiveChapters(segments, o.logger)
 	o.logger.Info("the complete VOD download replaces the job's parts as its archive",
 		"parts", len(segments), "jobID", jobCtx.Job.ID)
 	return nil

@@ -273,15 +273,45 @@ func fetchYouTubeChapters(ctx context.Context, yt *youtube.Service, videoID, des
 const archiveChaptersFile = "chapters.ffmeta"
 
 // prepareArchiveChapters writes the chapter list a single-file archive is
-// muxed with and returns its path, "" for none. The staged Twitch list wins;
-// a live Twitch job with none staged (the Mux action over a crashed capture)
-// is given its observed categories; a YouTube VOD asks youtubeChapters. Every
-// list is fitted to the staged media's span (utils.SanitizeChapters) — the
-// row's length is the fallback when the probe cannot measure it.
+// muxed with and returns its path, "" for none (archiveChapters, measured
+// against the staged media's span).
 func (o *DownloadOrchestrator) prepareArchiveChapters(ctx context.Context, jobCtx *JobContext, videoPath, audioPath string) string {
+	chapters := o.archiveChapters(ctx, jobCtx, func() int64 {
+		durationMs := int64(0)
+		for _, in := range []string{videoPath, audioPath} {
+			if in == "" {
+				continue
+			}
+			if span := o.runFFprobe(ctx, in).spanSec(); span > 0 {
+				durationMs = max(durationMs, int64(span*1000))
+			}
+		}
+		return durationMs
+	})
+	if len(chapters) == 0 {
+		return ""
+	}
+	path := filepath.Join(jobCtx.StagingDir, archiveChaptersFile)
+	if err := utils.WriteFileAtomic(path, []byte(utils.FFMetadataChapters(chapters)), 0o644); err != nil {
+		o.logger.Warn("could not write the archive's chapters; muxing without them", "err", err, "jobID", jobCtx.Job.ID)
+		return ""
+	}
+	o.logger.Info("embedding chapters", "jobID", jobCtx.Job.ID, "chapters", len(chapters))
+	return path
+}
+
+// archiveChapters is an archive's chapter list in its own timeline, nil for
+// none: the single-file mux embeds it (prepareArchiveChapters), and a split
+// archive's finalize writes it beside the parts (writeSplitArchiveChapters).
+// The staged Twitch list wins; a live Twitch job with none staged (the Mux
+// action over a crashed capture) is given its observed categories; a YouTube
+// VOD asks youtubeChapters. Every list is fitted to the media's span
+// (utils.SanitizeChapters), which measure answers — asked only when there is
+// a list to fit — with the row's length as the fallback when it cannot.
+func (o *DownloadOrchestrator) archiveChapters(ctx context.Context, jobCtx *JobContext, measure func() int64) []utils.Chapter {
 	job := jobCtx.Job
 	if job == nil || jobCtx.StagingDir == "" {
-		return ""
+		return nil
 	}
 	list, err := utils.ReadStagedChapters(jobCtx.StagingDir)
 	if err != nil {
@@ -298,40 +328,22 @@ func (o *DownloadOrchestrator) prepareArchiveChapters(ctx context.Context, jobCt
 	}
 	needYouTube := len(list) == 0 && !isTwitch && job.IsVod && jobCtx.YT != nil && job.VideoID != ""
 	if len(list) == 0 && !needYouTube {
-		return ""
+		return nil
 	}
 
-	durationMs := int64(0)
-	for _, in := range []string{videoPath, audioPath} {
-		if in == "" {
-			continue
-		}
-		if span := o.runFFprobe(ctx, in).spanSec(); span > 0 {
-			durationMs = max(durationMs, int64(span*1000))
-		}
-	}
+	durationMs := measure()
 	if durationMs == 0 && job.LengthSeconds != nil {
 		durationMs = int64(*job.LengthSeconds) * 1000
 	}
 	if durationMs == 0 {
-		return ""
+		return nil
 	}
 	if needYouTube {
 		fetchCtx, cancel := context.WithTimeout(ctx, twitchChapterLookupTimeout)
 		list = youtubeChapters(fetchCtx, jobCtx.YT, job.VideoID, job.Description, durationMs)
 		cancel()
 	}
-	chapters := utils.SanitizeChapters(list, durationMs)
-	if len(chapters) == 0 {
-		return ""
-	}
-	path := filepath.Join(jobCtx.StagingDir, archiveChaptersFile)
-	if err := utils.WriteFileAtomic(path, []byte(utils.FFMetadataChapters(chapters)), 0o644); err != nil {
-		o.logger.Warn("could not write the archive's chapters; muxing without them", "err", err, "jobID", job.ID)
-		return ""
-	}
-	o.logger.Info("embedding chapters", "jobID", job.ID, "chapters", len(chapters))
-	return path
+	return utils.SanitizeChapters(list, durationMs)
 }
 
 // downloadTwitchThumbnail saves a Twitch thumbnail at its original size when
