@@ -261,7 +261,8 @@ test("chapter markers name themselves in an sl-tooltip, on hover and on focus", 
 // not written on sl-show/sl-hide (same); the hidden guard dropped (the
 // no-chapters job's collapse is saved and the next job opens collapsed);
 // either storage access unguarded (the throwing storage breaks the render or
-// the toggle).
+// the toggle); the e.target guard dropped (a child component's bubbling
+// sl-show is saved as the list opening).
 test("the chapter list remembers its open state per browser, and survives a storage that throws", { skip }, async () => {
   const h = harness.makePlayer({
     jobs: [finished("a"), finished("b"), finished("none"), finished("c")],
@@ -288,6 +289,12 @@ test("the chapter list remembers its open state per browser, and survives a stor
   assert.equal(details.open, true);
   toggle("sl-hide");
   assert.equal(h.window.localStorage.getItem("player-chapters-open"), "false");
+  // A Shoelace component inside the list (a marker's tooltip, say) fires its
+  // own sl-show, which bubbles to the details: that is not the list opening.
+  const child = details.firstElementChild;
+  assert.ok(child, "the list has a child to fire from");
+  child.dispatchEvent(new h.window.CustomEvent("sl-show", { bubbles: true }));
+  assert.equal(h.window.localStorage.getItem("player-chapters-open"), "false", "a child's bubbling sl-show is not saved");
   await h.selectJob("a");
   assert.equal(details.open, false);
 

@@ -919,13 +919,17 @@ export class PlayerController {
     for (let i = 0; i < this.playerChatMessages.length; i++) {
       const msg = this.playerChatMessages[i];
       const authorMatch = (msg.authorName || "").toLowerCase().includes(needle);
-      const textParts = msg.message || [];
-      let textMatch = false;
-      if (typeof textParts === "string") {
-        textMatch = textParts.toLowerCase().includes(needle);
-      } else if (Array.isArray(textParts)) {
-        textMatch = textParts.some((p) => (p.text || "").toLowerCase().includes(needle));
-      }
+      const partsMatch = (textParts) => {
+        if (typeof textParts === "string") return textParts.toLowerCase().includes(needle);
+        if (Array.isArray(textParts)) return textParts.some((p) => (p.text || "").toLowerCase().includes(needle));
+        return false;
+      };
+      // A replaced message's row shows its replacement (FE-13), so that text
+      // is what a search must find; the original stays findable too — the
+      // row's "edited" tooltip names it, and a moderator looking for what was
+      // said first should not lose the row.
+      let textMatch = partsMatch(msg.message || []) ||
+        (isReplacedMessage(msg) && partsMatch(msg.replacement));
       // The lines the sidebar shows beside or instead of the message (2026-09-25
       // K1-K3): the member line, the amount and the Twitch system line are on
       // screen, so they must be findable too.

@@ -6,7 +6,7 @@
 /**
  * The job ID prefix of a Twitch clip job, the clip's slug after it
  * ("tw_clip_FaintLightGullWholeWheat") — internal/twitch ClipJobIDPrefix,
- * which TestClipJobIDPrefixMatchesTheDashboard (internal/jobfilter) holds this
+ * which TestTypeClipMatchesTheDashboard (internal/jobfilter) holds this
  * copy to. A clip is told from any other job by its ID alone (owner decision
  * FE-28): its platform is "twitch" like a VOD's or a live capture's, and no
  * column says "clip".

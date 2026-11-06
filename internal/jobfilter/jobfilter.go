@@ -395,7 +395,8 @@ func lowerRune(r rune) rune {
 // twitch.ClipJobIDPrefix ("tw_clip_<slug>"). The one test behind type:clip
 // and the Tasks panel's [CLIP] tag (owner decision FE-28): a clip's platform
 // is "twitch" like any Twitch job's, and no column names the kind. The
-// dashboard's isClipJob (web/public/modules/utils.js) is its twin.
+// dashboard's isClipJob (web/public/modules/filter-engine.js, where
+// the goja parity test can evaluate it) is its twin.
 func IsClipJob(job *database.Job) bool {
 	return job != nil && strings.HasPrefix(job.ID, twitch.ClipJobIDPrefix)
 }

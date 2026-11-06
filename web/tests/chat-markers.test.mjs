@@ -80,3 +80,30 @@ test("deleted and replaced messages are marked in the chat replay", { skip }, as
   assert.equal(archived.message[0].text, "first draft");
   assert.equal(archived.replacement[0].text, "final words");
 });
+
+// The chat search reads what a replaced row shows. filterChat matched only
+// `message`, the original parts, so searching for the replacement text the
+// row displays hid the row. The new text is now matched; the original stays
+// findable, as the row's "edited" tooltip names it.
+// MUTANT: the replacement arm dropped from filterChat's text match (a search
+// for "final" hides the replaced row).
+test("search finds a replaced message by the text it shows", { skip }, async () => {
+  const messages = [
+    ytMsg(0, "plain"),
+    ytMsg(2000, "first draft", { replaced: true, replacement: [{ type: "text", text: "final words" }] }),
+  ];
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: { platform: "youtube", streamStartTime: "2026-09-01T00:00:00Z", messages },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  const shown = () => [...h.sidebar().children].map((c) => !c.classList.contains("search-hidden"));
+  h.player.filterChat("final");
+  assert.deepEqual(shown(), [false, true], "the replacement text the row shows is findable");
+  h.player.filterChat("draft");
+  assert.deepEqual(shown(), [false, true], "the original stays findable");
+  h.player.filterChat("plain");
+  assert.deepEqual(shown(), [true, false]);
+});
