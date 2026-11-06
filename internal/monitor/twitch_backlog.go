@@ -229,7 +229,13 @@ func (b *TwitchBacklog) capturedStarts() map[string][]capturedBroadcast {
 // operator chose to stop, FQ-2), or it already has a gap-fill plan, or it is
 // still capturing (Upcoming, Live, Downloading or Muxing: a capture whose
 // first segment is moments away is not a capture that recorded nothing, and
-// queuing the VOD beside it would record the broadcast twice).
+// queuing the VOD beside it would record the broadcast twice), or it is an
+// Error row the Twitch monitor will re-initialise when the same broadcast
+// is found live again (isRecoverableTwitchError at MaxTwitchAutoRetries —
+// a TwitchOfflineErrMsg or twitch_unreachable stop before the first
+// segment, retries left): that row is a capture that is about to resume,
+// and the VOD queued in the gap would record the broadcast a second time
+// beside it. Its VOD is queued only once no automatic restart is left.
 //
 // What is left is a capture that failed or parked — Error, COOKIES? —
 // before it recorded anything. stream_start_time is written before the
@@ -242,6 +248,9 @@ func (b *TwitchBacklog) capturedLiveJob(j *database.Job, stagingBase string) boo
 	switch j.Status {
 	case database.StatusCancelled, database.StatusUpcoming, database.StatusLive,
 		database.StatusDownloading, database.StatusMuxing:
+		return true
+	}
+	if isRecoverableTwitchError(j, worker.MaxTwitchAutoRetries) {
 		return true
 	}
 	if j.OutputFile != "" {

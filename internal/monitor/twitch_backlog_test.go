@@ -17,6 +17,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // TestTwitchBacklogQueuesNewVods is owner decision D18's monitor backlog: an
@@ -191,6 +192,15 @@ func TestTwitchBacklogCountsOnlyRealCaptures(t *testing.T) {
 	}
 	live("tw_err_empty", 10, database.StatusError, nil)
 	live("tw_cookies_empty", 11, database.StatusCookies, nil)
+	// An outage-blip stop before the first segment, retries left: the
+	// monitor re-initialises it when the broadcast is live again, so it is
+	// still this broadcast's capture.
+	live("tw_err_recoverable", 12, database.StatusError, func(j *database.Job) { j.Error = worker.TwitchOfflineErrMsg })
+	// The same stop with no retry left is a capture that recorded nothing.
+	live("tw_err_exhausted", 9, database.StatusError, func(j *database.Job) { j.Error = worker.TwitchOfflineErrMsg })
+	if db.UpdateJobFields("tw_err_exhausted", map[string]any{"auto_retry_count": worker.MaxTwitchAutoRetries}) == nil {
+		t.Fatal("tw_err_exhausted: auto_retry_count not written")
+	}
 	live("tw_err_staged", 13, database.StatusError, nil)
 	if err := os.MkdirAll(filepath.Join(staging, "tw_err_staged"), 0o755); err != nil {
 		t.Fatal(err)
@@ -214,19 +224,19 @@ func TestTwitchBacklogCountsOnlyRealCaptures(t *testing.T) {
 	b := &TwitchBacklog{configStore: store, db: db, logger: lg}
 	b.ListVideos = func(context.Context, string) ([]twitch.TwitchVideo, error) {
 		var out []twitch.TwitchVideo
-		for _, h := range []int{18, 17, 16, 15, 14, 13, 11, 10} {
+		for _, h := range []int{18, 17, 16, 15, 14, 13, 12, 11, 10, 9} {
 			out = append(out, twitch.TwitchVideo{ID: strconv.Itoa(h), Title: "b", PublishedAt: fmt.Sprintf("2026-10-03T%02d:00:03Z", h)})
 		}
 		return out, nil
 	}
 	b.RunCycle(context.Background(), time.Now())
 
-	for _, id := range []string{"tw_v10", "tw_v11"} {
+	for _, id := range []string{"tw_v9", "tw_v10", "tw_v11"} {
 		if !db.JobExists(id) {
 			t.Errorf("%s not queued; its live capture recorded nothing", id)
 		}
 	}
-	for _, id := range []string{"tw_v13", "tw_v14", "tw_v15", "tw_v16", "tw_v17", "tw_v18"} {
+	for _, id := range []string{"tw_v12", "tw_v13", "tw_v14", "tw_v15", "tw_v16", "tw_v17", "tw_v18"} {
 		if db.JobExists(id) {
 			t.Errorf("%s queued; its live capture holds the broadcast", id)
 		}
