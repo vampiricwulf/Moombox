@@ -11,7 +11,11 @@
 // for a replaced message (the original text shows); the tooltip holding the
 // replacement rather than the original; the edited tag not focusable; the
 // flat row's content span not given chat-msg-struck (the strike-through rule
-// reaches nothing); a replacement marker without parts treated as one.
+// reaches nothing); a replacement marker without parts treated as one; the
+// deleted tag given no tooltip, or one with no deletedState (owner decision
+// FQ-5: the card's bare tag sits in an empty tooltip).
+//
+// The video overlay (owner decision FQ-5) is its own test below.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 
@@ -59,6 +63,11 @@ test("deleted and replaced messages are marked in the chat replay", { skip }, as
   assert.ok(deleted.classList.contains("chat-msg-deleted"));
   assert.equal(deleted.querySelector(".chat-msg-tag-deleted")?.textContent, "deleted");
   assert.equal(deleted.querySelector(".chat-msg-struck")?.textContent, "gone soon", "the struck text is the message as sent");
+  // Owner decision FQ-5: the tag keeps its text and gains YouTube's own
+  // wording for the deletion as its tooltip, focusable for the keyboard.
+  const deletedTip = deleted.querySelector("sl-tooltip");
+  assert.equal(deletedTip?.getAttribute("content"), "[message retracted]", "the tooltip is YouTube's deletedState line");
+  assert.equal(deletedTip.querySelector(".chat-msg-tag-deleted")?.tabIndex, 0);
 
   assert.ok(replaced.classList.contains("chat-msg-edited"));
   assert.equal(replaced.children[2]?.textContent, "final words", "the new text is shown");
@@ -74,6 +83,7 @@ test("deleted and replaced messages are marked in the chat replay", { skip }, as
 
   assert.ok(card.classList.contains("chat-msg-deleted"));
   assert.ok(card.querySelector(".chat-card-body .chat-msg-tag-deleted"), "a card's tag is in its body");
+  assert.equal(card.querySelector("sl-tooltip"), null, "with no deletedState the tag stands bare");
 
   // The archived objects are untouched: exports read them as they are.
   const archived = h.player.playerChatMessages[2];
@@ -106,4 +116,35 @@ test("search finds a replaced message by the text it shows", { skip }, async () 
   assert.deepEqual(shown(), [false, true], "the original stays findable");
   h.player.filterChat("plain");
   assert.deepEqual(shown(), [true, false]);
+});
+
+// Owner decision FQ-5 on the video: the nico overlay drew every message as
+// sent, so a retracted message flew across the picture and a replaced one
+// showed the words its author took back. A deleted message no longer flies;
+// a replaced one flies as its replacement text.
+//
+// MUTANT: _buildNicoEl without the deleted guard (the retracted line flies);
+// the overlay drawing msg.message for a replaced message (the original
+// flies); a replacement marker without parts read as one (its row flies
+// empty, or not at all).
+test("the video overlay hides deleted messages and shows replacements", { skip }, async () => {
+  const messages = [
+    ytMsg(2000, "plain"),
+    ytMsg(2000, "gone soon", { deleted: true, deletedState: "[message retracted]" }),
+    ytMsg(2000, "first draft", { replaced: true, replacement: [{ type: "text", text: "final words" }] }),
+    ytMsg(2000, "marked, nothing new", { replaced: true }),
+    ytMsg(2000, "edited, then deleted", { deleted: true, replaced: true, replacement: [{ type: "text", text: "x" }] }),
+  ];
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: { platform: "youtube", streamStartTime: "2026-09-01T00:00:00Z", messages },
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+  });
+  await h.selectJob("j1");
+  h.tick(600);
+  h.tick(2000);
+  const flying = [...h.overlay().children].map((c) => c.textContent).sort();
+  assert.deepEqual(flying, ["final words", "marked, nothing new", "plain"]);
+  assert.equal(h.player.playerChatMessages[2].message[0].text, "first draft", "the archived message is untouched");
 });
