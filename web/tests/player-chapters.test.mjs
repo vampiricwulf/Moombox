@@ -115,7 +115,7 @@ test("clicking a marker or a list row seeks to that chapter's start", { skip }, 
 
 // Mutants: the timeupdate listener dropped (no highlight); the highlight
 // taking the first chapter whose start is AFTER the time; aria-current not
-// cleared from the previous row.
+// cleared from the previous row; a strip re-layout dropping the highlight.
 test("the current chapter is highlighted as playback moves", { skip }, async () => {
   const h = harness.makePlayer({ jobs: [finished("v")], chaptersById: { v: THREE } });
   await h.selectJob("v");
@@ -127,6 +127,10 @@ test("the current chapter is highlighted as playback moves", { skip }, async () 
   assert.deepEqual(current(), [false, true, false]);
   assert.ok(rows(h)[1].classList.contains("active"));
   assert.deepEqual(markers(h).map((m) => m.classList.contains("active")), [false, true, false]);
+  // A re-layout of the strip (metadata landing) keeps the highlight.
+  h.video.duration = 800;
+  h.video.dispatchEvent(new h.window.Event("durationchange"));
+  assert.deepEqual(markers(h).map((m) => m.classList.contains("active")), [false, true, false]);
 
   h.tick(300_000); // exactly on a start: that chapter
   assert.deepEqual(current(), [false, false, true]);
@@ -136,7 +140,7 @@ test("the current chapter is highlighted as playback moves", { skip }, async () 
 
 // Mutants: the strip or the list rendered with no chapters (an empty strip
 // shown, the list not hidden); the previous job's chapters left in place
-// when the next job has none.
+// until the next job's answer (the clear at selection dropped).
 test("a job with no chapters draws nothing, and a switch clears the previous job's", { skip }, async () => {
   const h = harness.makePlayer({ jobs: [finished("v"), finished("none")], chaptersById: { v: THREE } });
   await h.selectJob("v");
@@ -144,13 +148,25 @@ test("a job with no chapters draws nothing, and a switch clears the previous job
   assert.equal(h.el("player-chapters").hidden, false);
   assert.equal(h.el("player-chapters").getAttribute("summary"), "Chapters (3)");
 
+  // The previous job's chapters go the moment the next is opened, not when
+  // its own (here parked) chapters answer.
+  const parked = h.http.deferBody("GET /api/jobs/none/chapters");
   await h.selectJob("none");
+  assert.equal(markers(h).length, 0, "job v's markers still drawn while job none's chapters are in flight");
+  assert.equal(h.el("player-chapters").hidden, true);
+  parked.resolve({ chapters: [] });
+  await h.flush();
   assert.equal(h.el("player-chapter-strip").hidden, true);
   assert.equal(markers(h).length, 0);
   assert.equal(h.el("player-chapters").hidden, true);
   assert.equal(rows(h).length, 0);
 
+  // Closing the player (the picker cleared) drops them too.
+  await h.selectJob("v");
+  assert.equal(markers(h).length, 3);
   h.player.clearPlayer();
+  assert.equal(markers(h).length, 0);
+  assert.equal(h.el("player-chapter-strip").hidden, true);
   assert.equal(h.el("player-chapters").hidden, true);
 });
 
