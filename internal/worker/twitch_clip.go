@@ -134,6 +134,9 @@ func (sp *StreamProcessor) processTwitchClip(ctx context.Context, job *database.
 	if clip.GameCategory != "" {
 		updates["twitch_category"] = clip.GameCategory
 	}
+	if desc := twitchClipDescription(clip); desc != "" {
+		updates["description"] = desc
+	}
 	sp.db.UpdateJobFields(job.ID, updates)
 	syncTwitchJobMetadata(job, updates)
 
@@ -144,6 +147,23 @@ func (sp *StreamProcessor) processTwitchClip(ctx context.Context, job *database.
 		IsVod:          true,
 		TwitchClip:     &TwitchClipDownload{Slug: slug, Quality: *best, Reread: sp.getClip},
 	}, nil
+}
+
+// twitchClipDescription is a clip job's description (owner decision FE-32):
+// "Clipped by <curator>" — the curator's display name, else the login — then,
+// after a blank line, the clip's own description when it has one. It is the
+// row's description column, so job details show it and the finalize writes it
+// beside the archive as the .description, as it does a VOD's; no schema
+// change. A clip that names no curator has only its own description, or none.
+func twitchClipDescription(clip *twitch.TwitchClipInfo) string {
+	var parts []string
+	if curator := cmp.Or(strings.TrimSpace(clip.CuratorDisplayName), clip.CuratorLogin); curator != "" {
+		parts = append(parts, "Clipped by "+curator)
+	}
+	if d := strings.TrimSpace(clip.Description); d != "" {
+		parts = append(parts, d)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // twitchClipErrorText is the job's error for a clip Twitch answered about: a

@@ -101,12 +101,20 @@ type TwitchClipInfo struct {
 	BroadcasterLogin       string `json:"broadcasterLogin,omitempty"`
 	BroadcasterDisplayName string `json:"broadcasterDisplayName"`
 	BroadcasterID          string `json:"broadcasterId,omitempty"`
-	// Curator is who made the clip (yt-dlp's uploader).
+	// Curator is who made the clip (yt-dlp's uploader: curator.displayName,
+	// and uploader_id the curator's id). The login is kept beside the display
+	// name, which a clip job's description names it by and falls back from
+	// (owner decision FE-32).
 	CuratorDisplayName string `json:"curatorDisplayName,omitempty"`
-	GameCategory       string `json:"gameCategory,omitempty"`
-	CreatedAt          string `json:"createdAt,omitempty"`
-	DurationSeconds    int    `json:"durationSeconds,omitempty"`
-	ViewCount          int    `json:"viewCount,omitempty"`
+	CuratorLogin       string `json:"curatorLogin,omitempty"`
+	// Description is the clip's own description when the answer carries one.
+	// yt-dlp reads none off ShareClipRenderStatus, whose selection set is
+	// Twitch's: "" whenever the node has no description field.
+	Description     string `json:"description,omitempty"`
+	GameCategory    string `json:"gameCategory,omitempty"`
+	CreatedAt       string `json:"createdAt,omitempty"`
+	DurationSeconds int    `json:"durationSeconds,omitempty"`
+	ViewCount       int    `json:"viewCount,omitempty"`
 	// ThumbnailURL is the best thumbnail: the default asset's, else the
 	// clip's own small one, else the portrait asset's. Unlike upstream,
 	// which ranks the portrait one (-1) above the small one (-2); see info.
@@ -184,6 +192,7 @@ type clipNode struct {
 	ID              string        `json:"id"`
 	Slug            string        `json:"slug"`
 	Title           string        `json:"title"`
+	Description     string        `json:"description"`
 	DurationSeconds flexInt       `json:"durationSeconds"`
 	ViewCount       flexInt       `json:"viewCount"`
 	CreatedAt       string        `json:"createdAt"`
@@ -234,6 +243,7 @@ func (c *clipNode) info(slug string) (*TwitchClipInfo, error) {
 		ID:              cmp.Or(c.ID, slug),
 		Slug:            cmp.Or(c.Slug, slug),
 		Title:           c.Title,
+		Description:     strings.TrimSpace(c.Description),
 		CreatedAt:       c.CreatedAt,
 		DurationSeconds: int(c.DurationSeconds),
 		ViewCount:       int(c.ViewCount),
@@ -245,6 +255,7 @@ func (c *clipNode) info(slug string) (*TwitchClipInfo, error) {
 	}
 	if c.Curator != nil {
 		out.CuratorDisplayName = c.Curator.DisplayName
+		out.CuratorLogin = strings.ToLower(c.Curator.Login)
 	}
 	if c.Game != nil {
 		out.GameCategory = cmp.Or(c.Game.DisplayName, c.Game.Name)

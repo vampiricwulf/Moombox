@@ -77,7 +77,8 @@ func TestGetClipReadsShareClipRenderStatus(t *testing.T) {
 		info.Title != "EA Play 2016 Live from the Novo Theatre" || info.DurationSeconds != 32 ||
 		info.ViewCount != 1234 || info.CreatedAt != "2016-06-12T21:36:33Z" ||
 		info.BroadcasterDisplayName != "EA" || info.BroadcasterLogin != "ea" || info.BroadcasterID != "25163635" ||
-		info.CuratorDisplayName != "stereotype_" || info.GameCategory != "Just Chatting" {
+		info.CuratorDisplayName != "stereotype_" || info.CuratorLogin != "stereotype_" || info.Description != "" ||
+		info.GameCategory != "Just Chatting" {
 		t.Errorf("metadata = %+v", info)
 	}
 	if info.ThumbnailURL != "https://clips-media-assets2.twitch.tv/default-preview.jpg" {

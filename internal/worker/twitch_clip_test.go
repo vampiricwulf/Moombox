@@ -30,6 +30,7 @@ func testClip(base string) *twitch.TwitchClipInfo {
 		ID: "396245304", Slug: "FaintLightGullWholeWheat",
 		Title:            "EA Play 2016 Live from the Novo Theatre",
 		BroadcasterLogin: "ea", BroadcasterDisplayName: "EA",
+		CuratorDisplayName: "stereotype_", CuratorLogin: "stereotype_",
 		GameCategory: "Just Chatting", CreatedAt: "2016-06-12T21:36:33Z",
 		DurationSeconds: 32, ThumbnailURL: base + "/preview.jpg",
 		Qualities: []twitch.TwitchClipQuality{
@@ -132,6 +133,14 @@ func TestTwitchClipJobDownloadsTheBestRenditionAndFinalizes(t *testing.T) {
 	}
 	if _, err := os.Stat(got.OutputFile); err != nil {
 		t.Errorf("archive: %v", err)
+	}
+	// The curator line is the row's description (owner decision FE-32), and
+	// the finalize writes it beside the archive as a VOD's is.
+	if got.Description != "Clipped by stereotype_" {
+		t.Errorf("description = %q, want the curator line", got.Description)
+	}
+	if b, err := os.ReadFile(got.DescriptionFile); err != nil || string(b) != "Clipped by stereotype_" {
+		t.Errorf(".description %q = %q, %v; want the curator line", got.DescriptionFile, b, err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -431,6 +440,31 @@ func TestTwitchClipHonoursQualityPreferenceAndCap(t *testing.T) {
 		}
 		if row, _ := db.GetJob(job.ID); row.TwitchQuality != c.want {
 			t.Errorf("pref %q cap %d recorded twitch_quality %q, want %s", c.pref, c.cap, row.TwitchQuality, c.want)
+		}
+	}
+}
+
+// TestTwitchClipDescriptionNamesTheCurator is owner decision FE-32: a clip
+// job's description reads "Clipped by <curator>" — the display name, else the
+// login — followed by the clip's own description when there is one; a clip
+// that names no curator has its own description only, or none.
+//
+// Mutants: the login fallback dropped (the login-only row is empty); the
+// clip's description dropped (the third row lacks it); the curator line
+// dropped (every row but the description-only one fails).
+func TestTwitchClipDescriptionNamesTheCurator(t *testing.T) {
+	for _, c := range []struct {
+		clip twitch.TwitchClipInfo
+		want string
+	}{
+		{twitch.TwitchClipInfo{CuratorDisplayName: "Stereotype_", CuratorLogin: "stereotype_"}, "Clipped by Stereotype_"},
+		{twitch.TwitchClipInfo{CuratorLogin: "stereotype_"}, "Clipped by stereotype_"},
+		{twitch.TwitchClipInfo{CuratorDisplayName: "Stereotype_", Description: "The play of the year."}, "Clipped by Stereotype_\n\nThe play of the year."},
+		{twitch.TwitchClipInfo{Description: "  Only this.  "}, "Only this."},
+		{twitch.TwitchClipInfo{}, ""},
+	} {
+		if got := twitchClipDescription(&c.clip); got != c.want {
+			t.Errorf("twitchClipDescription(%+v) = %q, want %q", c.clip, got, c.want)
 		}
 	}
 }
