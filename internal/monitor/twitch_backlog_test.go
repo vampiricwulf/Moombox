@@ -2,10 +2,13 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +53,8 @@ func TestTwitchBacklogQueuesNewVods(t *testing.T) {
 	// The broadcast captured live started at 12:00; its archive (3) was
 	// published four seconds later.
 	if _, err := db.AddJob(&database.Job{ID: "tw_live", VideoID: "live", URL: "https://twitch.tv/streamer",
-		Platform: "twitch", Status: database.StatusFinished, StreamStartTime: "2026-10-03T12:00:00Z"}); err != nil {
+		Platform: "twitch", Status: database.StatusFinished, StreamStartTime: "2026-10-03T12:00:00Z",
+		OutputFile: "/out/streamer.mp4"}); err != nil {
 		t.Fatal(err)
 	}
 	db.AddToHistory("tw_v2") // a job was created once, and since deleted
@@ -132,5 +136,115 @@ func TestTwitchBacklogProductionLister(t *testing.T) {
 	}
 	if twitchBacklogInterval != time.Hour {
 		t.Errorf("cadence %v, want an hour", twitchBacklogInterval)
+	}
+	// The window is the gap-fill lookup's (owner decision PR-M3): the two
+	// ask whether a video is one broadcast's archive.
+	if twitchBacklogCapturedWindow != 10*time.Minute {
+		t.Errorf("captured window %v, want 10 minutes, the archive lookup's", twitchBacklogCapturedWindow)
+	}
+}
+
+// backlogLogLines records the Info lines a backlog cycle logs.
+type backlogLogLines struct {
+	testMonitorLogger
+	info []string
+}
+
+func (l *backlogLogLines) Info(msg string, args ...any) {
+	l.info = append(l.info, fmt.Sprint(append([]any{msg}, args...)...))
+}
+
+// TestTwitchBacklogCountsOnlyRealCaptures is owner decision PR-M4: a live
+// job stands for its broadcast's archive — and the backlog skips the VOD —
+// only when it holds footage (an archive file, recorded parts, staged media),
+// was Cancelled, already has a gap-fill plan, or is still capturing. A
+// capture that failed or parked in COOKIES? before its first segment holds
+// nothing, and the VOD, the broadcast's only copy, is queued. A skip logs the
+// job it deferred to, once.
+//
+// Mutants: every live row counted as before (tw_v10 and tw_v11 skipped); the
+// staging check dropped (tw_v13 queued beside the staged capture); the
+// segments check dropped (tw_v14 queued); the gap-fill check dropped (tw_v15
+// queued); the in-progress statuses not counted (tw_v17 queued beside the
+// running capture); the skip's log line dropped, or logged every cycle.
+func TestTwitchBacklogCountsOnlyRealCaptures(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	staging := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Paths.StagingDirectory = staging
+	cfg.Channels = []config.ChannelConfig{{ID: "streamer", Platform: "twitch", TwitchVodBacklog: true}}
+	store := config.NewStore(cfg, filepath.Join(t.TempDir(), "config.toml"))
+
+	live := func(id string, hour int, status database.JobStatus, mut func(*database.Job)) {
+		j := &database.Job{ID: id, VideoID: id, URL: "https://twitch.tv/streamer", Platform: "twitch",
+			Status: status, StreamStartTime: fmt.Sprintf("2026-10-03T%02d:00:00Z", hour)}
+		if mut != nil {
+			mut(j)
+		}
+		if _, err := db.AddJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	live("tw_err_empty", 10, database.StatusError, nil)
+	live("tw_cookies_empty", 11, database.StatusCookies, nil)
+	live("tw_err_staged", 13, database.StatusError, nil)
+	if err := os.MkdirAll(filepath.Join(staging, "tw_err_staged"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "tw_err_staged", "video.ts"), []byte("ts"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	live("tw_err_parts", 14, database.StatusError, nil)
+	if err := db.AddSegment(&database.Segment{JobID: "tw_err_parts", Filename: "p0.mp4", FilePath: "/out/p0.mp4"}); err != nil {
+		t.Fatal(err)
+	}
+	live("tw_err_plan", 15, database.StatusError, nil)
+	if err := db.SaveGapFill(database.GapFill{JobID: "tw_err_plan", Plan: "{}", NextCheckAt: "2026-10-03T16:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	live("tw_cancelled", 16, database.StatusCancelled, nil)
+	live("tw_running", 17, database.StatusDownloading, nil)
+	live("tw_finished", 18, database.StatusFinished, func(j *database.Job) { j.OutputFile = "/out/x.mp4" })
+
+	lg := &backlogLogLines{}
+	b := &TwitchBacklog{configStore: store, db: db, logger: lg}
+	b.ListVideos = func(context.Context, string) ([]twitch.TwitchVideo, error) {
+		var out []twitch.TwitchVideo
+		for _, h := range []int{18, 17, 16, 15, 14, 13, 11, 10} {
+			out = append(out, twitch.TwitchVideo{ID: strconv.Itoa(h), Title: "b", PublishedAt: fmt.Sprintf("2026-10-03T%02d:00:03Z", h)})
+		}
+		return out, nil
+	}
+	b.RunCycle(context.Background(), time.Now())
+
+	for _, id := range []string{"tw_v10", "tw_v11"} {
+		if !db.JobExists(id) {
+			t.Errorf("%s not queued; its live capture recorded nothing", id)
+		}
+	}
+	for _, id := range []string{"tw_v13", "tw_v14", "tw_v15", "tw_v16", "tw_v17", "tw_v18"} {
+		if db.JobExists(id) {
+			t.Errorf("%s queued; its live capture holds the broadcast", id)
+		}
+	}
+	deferred := func() int {
+		n := 0
+		for _, l := range lg.info {
+			if strings.Contains(l, "its live capture holds it") && strings.Contains(l, "tw_err_staged") {
+				n++
+			}
+		}
+		return n
+	}
+	if n := deferred(); n != 1 {
+		t.Errorf("the skip for tw_v13 logged %d times naming tw_err_staged, want once; lines %q", n, lg.info)
+	}
+	b.RunCycle(context.Background(), time.Now())
+	if n := deferred(); n != 1 {
+		t.Errorf("after a second cycle the skip logged %d times, want once", n)
 	}
 }
