@@ -389,10 +389,12 @@ func (db *Database) TwitchEndUnconfirmedJobs() ([]*Job, error) {
 
 // QueuedChannels returns the distinct channel IDs that currently have Queued
 // (un-admitted backlog) jobs. NULL channel_id rows are excluded: manual adds
-// and a Twitch channel's live and VOD rows have no channel affiliation and
-// are never scheduler-paced — the one Twitch row that carries a channel_id
-// is a clip the monitor's twitch_archive_clips sweep queued (newTwitchClipJob), the
-// channel's login as its ID — and a defensive NULL-channel Queued row must
+// and a Twitch channel's live captures have no channel affiliation and are
+// never scheduler-paced — the Twitch rows that carry a channel_id are the
+// Queued ones: a clip the monitor's twitch_archive_clips sweep queued
+// (newTwitchClipJob) and a VOD its twitch_vod_backlog or a pasted listing
+// queued (worker.QueueTwitchVideos), the configured channel's ID or the
+// owner's login as their ID — and a defensive NULL-channel Queued row must
 // not wedge the admission sweep.
 func (db *Database) QueuedChannels() ([]string, error) {
 	db.mu.RLock()
@@ -445,24 +447,29 @@ func (db *Database) QueuedChannelsOnPlatform(platform string) ([]string, error) 
 }
 
 // ChannelJob is one job of a channel as ListChannelJobs reads it: what a
-// channel removal's confirmation counts and names.
+// channel removal's confirmation counts and names. ManuallyAdded marks a row
+// an operator added (a pasted Twitch listing's VOD), which a removal never
+// deletes (worker.DeletePendingChannelJobs, owner decision PR-D1).
 type ChannelJob struct {
-	ID     string
-	Title  string
-	Status JobStatus
+	ID            string
+	Title         string
+	Status        JobStatus
+	ManuallyAdded bool
 }
 
 // ListChannelJobs returns every job carrying channelID — whatever its status
 // — oldest first. jobs.channel_id is nullable and `channel_id = ?` never
-// matches NULL, so manually added jobs and a Twitch channel's captures and
-// VODs are never listed (those are ListTwitchJobs'); the clips a Twitch
-// channel's twitch_archive_clips sweep queued carry its login and are.
+// matches NULL, so a manually added YouTube job and a Twitch channel's live
+// captures are never listed (those are ListTwitchJobs'); the clips a Twitch
+// channel's twitch_archive_clips sweep queued and the VODs its
+// twitch_vod_backlog or a pasted listing queued carry its ID or login and
+// are.
 func (db *Database) ListChannelJobs(channelID string) ([]ChannelJob, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	rows, err := db.db.QueryContext(db.getCtx(),
-		`SELECT id, title, status FROM jobs WHERE channel_id = ? ORDER BY created_at, id`, channelID)
+		`SELECT id, title, status, COALESCE(manually_added, 0) FROM jobs WHERE channel_id = ? ORDER BY created_at, id`, channelID)
 	if err != nil {
 		return nil, err
 	}
@@ -471,9 +478,11 @@ func (db *Database) ListChannelJobs(channelID string) ([]ChannelJob, error) {
 	var jobs []ChannelJob
 	for rows.Next() {
 		var j ChannelJob
-		if err := rows.Scan(&j.ID, &j.Title, &j.Status); err != nil {
+		var manual int
+		if err := rows.Scan(&j.ID, &j.Title, &j.Status, &manual); err != nil {
 			return nil, err
 		}
+		j.ManuallyAdded = manual != 0
 		jobs = append(jobs, j)
 	}
 	return jobs, rows.Err()
@@ -483,10 +492,12 @@ func (db *Database) ListChannelJobs(channelID string) ([]ChannelJob, error) {
 // first, with the fields that tie one to a channel (ID, VideoID, URL and
 // ChannelName, which worker.TwitchJobLogin reads) and its Title and Status:
 // what a Twitch channel's removal confirmation counts. A Twitch channel's
-// captures and VODs carry no channel_id — neither the Twitch monitor's
-// (newTwitchStreamJob) nor a manual add sets one — so ListChannelJobs never
-// finds them; the clips its twitch_archive_clips sweep queued (newTwitchClipJob)
-// carry its login, and ListChannelJobs finds those.
+// live captures and its pasted VOD URLs carry no channel_id — neither the
+// Twitch monitor's (newTwitchStreamJob) nor a manual add sets one — so
+// ListChannelJobs never finds them; the clips its twitch_archive_clips sweep
+// queued (newTwitchClipJob) and the VODs its twitch_vod_backlog or a pasted
+// listing queued (worker.QueueTwitchVideos) carry its ID or login, and
+// ListChannelJobs finds those.
 func (db *Database) ListTwitchJobs() ([]*Job, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -575,9 +586,10 @@ func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error
 // in keep, and returns the number of jobs deleted. Its one caller is the
 // "delete its pending jobs" choice of a channel removal
 // (worker.DeletePendingChannelJobs), with {Queued, Upcoming, COOKIES?} and
-// keep naming the rows whose staging holds recorded footage: a COOKIES? row
+// keep naming the rows whose staging holds recorded footage — a COOKIES? row
 // can be a live capture parked mid-stream, and deleting it left its footage
-// with no job to resume or mux it from. AddToHistory fires at job CREATION,
+// with no job to resume or mux it from — and the rows an operator added (a
+// pasted Twitch listing's VODs, owner decision PR-D1). AddToHistory fires at job CREATION,
 // so deleting the job while its history row survives manufactures an orphan
 // — HasProcessed keeps answering true and the re-added channel can never
 // re-archive the video (the exact class that re-armed gr-ZTohjwnQ).
@@ -589,13 +601,16 @@ func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error
 // package rule (see ListOrphanedHistory) is that history-vs-jobs matching
 // MUST be against jobs.id, never jobs.video_id. The plan text originally
 // wrote the subquery over video_id — equivalent for every job this helper
-// can currently match (channel-affiliated jobs are YouTube's and the
-// Twitch clips an twitch_archive_clips sweep queued, "tw_clip_<slug>" as both, so
-// ID == VideoID), but jobs.id stays correct even if a channel-affiliated
-// job class whose two differ ever appears.
+// can currently match (channel-affiliated jobs are YouTube's, the Twitch
+// clips a twitch_archive_clips sweep queued, "tw_clip_<slug>" as both, and
+// the Twitch VODs a twitch_vod_backlog queued, "tw_v<id>" as both, so ID ==
+// VideoID), but jobs.id stays correct even if a channel-affiliated job class
+// whose two differ ever appears.
 //
 // jobs.channel_id is nullable; SQL `channel_id = ?` never matches NULL, so
-// Twitch/manual jobs (no channel affiliation) are untouchable here.
+// Twitch live captures and manual YouTube adds (no channel affiliation) are
+// untouchable here. A pasted Twitch listing's VODs carry one, for pacing,
+// and are spared through keep.
 //
 // Dispatch: one OnJobsChange full-list refresh after commit — the
 // BatchSetWatched bulk pattern, and for the same reason: a deep prune can

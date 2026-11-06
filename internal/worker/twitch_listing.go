@@ -136,6 +136,11 @@ func (w *DownloadWorker) Logger() interface {
 // archive_slots paces it as that channel's), else the owner's login — paced
 // under the global archive_slots, as a removed channel's kept backlog is
 // (W25-09) — since the scheduler sweeps channels and never a NULL one.
+//
+// That channel_id is for pacing. A row a pasted listing queued is also
+// manually_added, and removing its channel never deletes it (owner decision
+// PR-D1, DeletePendingChannelJobs); the monitor backlog's rows are the
+// channel's own, and its "delete its pending jobs" does.
 func newTwitchListingJob(v twitch.TwitchVideo, opts TwitchListingOptions, stamp string) *database.Job {
 	login := strings.ToLower(opts.Login)
 	display := login

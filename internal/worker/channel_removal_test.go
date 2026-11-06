@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -200,9 +201,15 @@ func TestSummarizeTwitchChannelRemoval(t *testing.T) {
 // tied by login and pending in status, is counted in the total and never
 // deleted.
 //
+// The VODs its twitch_vod_backlog queued carry its login too and are deleted
+// like the clips; a VOD of a listing the operator pasted carries it for
+// pacing only, and is counted in the total and never deleted (owner decision
+// PR-D1).
+//
 // Mutants: the carried rows summarized with deletable false (pending 0, a
 // delete the UIs would not offer); the carried rows left out of the summary
-// (total 2).
+// (total 4); the pasted VOD counted as pending (pending 3), or not kept by
+// the delete (deleted).
 func TestTwitchChannelRemovalCountsItsQueuedClips(t *testing.T) {
 	db := openTestDB(t)
 	staging := t.TempDir()
@@ -212,16 +219,19 @@ func TestTwitchChannelRemovalCountsItsQueuedClips(t *testing.T) {
 		ch      *string
 		status  database.JobStatus
 		staged  bool
+		manual  bool
 	}{
-		{"tw_clip_QueuedSlug", "https://www.twitch.tv/vanillatv/clip/QueuedSlug", &login, database.StatusQueued, false},
-		{"tw_clip_PartialSlug", "https://www.twitch.tv/vanillatv/clip/PartialSlug", &login, database.StatusQueued, true},
-		{"tw_clip_DoneSlug", "https://www.twitch.tv/vanillatv/clip/DoneSlug", &login, database.StatusFinished, false},
-		{"tw_manual_vanillatv_1", "https://www.twitch.tv/vanillatv", nil, database.StatusUpcoming, false},
+		{"tw_clip_QueuedSlug", "https://www.twitch.tv/vanillatv/clip/QueuedSlug", &login, database.StatusQueued, false, false},
+		{"tw_clip_PartialSlug", "https://www.twitch.tv/vanillatv/clip/PartialSlug", &login, database.StatusQueued, true, false},
+		{"tw_clip_DoneSlug", "https://www.twitch.tv/vanillatv/clip/DoneSlug", &login, database.StatusFinished, false, false},
+		{"tw_manual_vanillatv_1", "https://www.twitch.tv/vanillatv", nil, database.StatusUpcoming, false, false},
+		{"tw_v1", "https://www.twitch.tv/videos/1", &login, database.StatusQueued, false, false}, // the backlog's
+		{"tw_v2", "https://www.twitch.tv/videos/2", &login, database.StatusQueued, false, true},  // a pasted listing's
 	} {
 		created := fmt.Sprintf("2026-07-01T00:00:%02dZ", i)
 		if _, err := db.AddJob(&database.Job{ID: row.id, VideoID: row.id, URL: row.url, Title: "T " + row.id,
 			ChannelName: "VanillaTV", Platform: "twitch", Status: row.status, ChannelID: row.ch, QueuePriority: 1,
-			CreatedAt: created, UpdatedAt: created}); err != nil {
+			IsVod: strings.HasPrefix(row.id, "tw_v"), ManuallyAdded: row.manual, CreatedAt: created, UpdatedAt: created}); err != nil {
 			t.Fatal(err)
 		}
 		if err := db.AddToHistory(row.id); err != nil {
@@ -242,8 +252,8 @@ func TestTwitchChannelRemovalCountsItsQueuedClips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SummarizeChannelRemoval: %v", err)
 	}
-	if sum.Total != 4 || sum.Pending != 1 || sum.Active != 0 {
-		t.Errorf("total/pending/active = %d/%d/%d, want 4/1/0", sum.Total, sum.Pending, sum.Active)
+	if sum.Total != 6 || sum.Pending != 2 || sum.Active != 0 {
+		t.Errorf("total/pending/active = %d/%d/%d, want 6/2/0", sum.Total, sum.Pending, sum.Active)
 	}
 	if want := []ChannelJobRef{{ID: "tw_clip_PartialSlug", Title: "T tw_clip_PartialSlug", Status: database.StatusQueued}}; !slices.Equal(sum.Footage, want) {
 		t.Errorf("footage = %+v, want %+v", sum.Footage, want)
@@ -253,10 +263,12 @@ func TestTwitchChannelRemovalCountsItsQueuedClips(t *testing.T) {
 	if err != nil || n != sum.Pending {
 		t.Errorf("delete = %d deleted (%v), want the %d the summary counted", n, err, sum.Pending)
 	}
-	if j, _ := db.GetJob("tw_clip_QueuedSlug"); j != nil {
-		t.Error("the queued clip survived the delete")
+	for _, id := range []string{"tw_clip_QueuedSlug", "tw_v1"} {
+		if j, _ := db.GetJob(id); j != nil {
+			t.Errorf("%s, the channel's backlog, survived the delete", id)
+		}
 	}
-	for _, id := range []string{"tw_clip_PartialSlug", "tw_clip_DoneSlug", "tw_manual_vanillatv_1"} {
+	for _, id := range []string{"tw_clip_PartialSlug", "tw_clip_DoneSlug", "tw_manual_vanillatv_1", "tw_v2"} {
 		if j, _ := db.GetJob(id); j == nil {
 			t.Errorf("%s was deleted", id)
 		}

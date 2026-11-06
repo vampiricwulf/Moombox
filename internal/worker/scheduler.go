@@ -351,7 +351,8 @@ func (s *Scheduler) sweep() {
 	// Nor, for a YouTube channel, while YouTube rate-limits the session:
 	// every admission would be refused the same way, and free its slot for
 	// the next one (holdForRateLimit). A Twitch channel's backlog (the clips
-	// its twitch_archive_clips sweep queued) is admitted all the same: Twitch
+	// its twitch_archive_clips sweep queued, the VODs its twitch_vod_backlog
+	// or a pasted listing queued) is admitted all the same: Twitch
 	// refused nothing, and holding it for YouTube's verdict stalled a clip
 	// archive for as long as the hold ran, up to a day. After the disk gate,
 	// so the disk is read, and its gate closes and reopens, on the sweeps it
