@@ -71,6 +71,17 @@ var ErrSubscriberOnlyNotEntitled = errors.New("your account does not have access
 // the callers that treat not-yet-live and not-found identically.
 var ErrChannelNotFound = errors.New("twitch channel not found (renamed, banned, or invalid login)")
 
+// ErrPersistedQueryNotFound is what a GQL call returns (wrapped) when Twitch
+// answers `{"errors":[{"message":"PersistedQueryNotFound"}]}`: the sha256Hash
+// it was sent (constants.TwitchGQLHashes) names no query Twitch still holds —
+// Twitch re-hashed the operation, and every call of it fails the same way
+// until the hash is bumped. The text stays the one Twitch sent, so a log line
+// reads as before; what it adds is an identity callers can tell apart from a
+// query's other errors without matching on it (ClipAPIChangedError).
+var ErrPersistedQueryNotFound = errors.New(persistedQueryNotFoundMsg)
+
+const persistedQueryNotFoundMsg = "PersistedQueryNotFound"
+
 // errStreamSlotUnavailable is a per-channel TRANSIENT failure inside an
 // otherwise-successful batch (that channel's StreamMetadata element carried
 // a GQL error or null data). Distinct from ErrChannelNotFound so the
@@ -467,6 +478,9 @@ func (a *API) parseGQLBody(opName string, respData []byte) (json.RawMessage, err
 			if msg == "" {
 				msg = "unknown error"
 			}
+			if msg == persistedQueryNotFoundMsg {
+				return nil, fmt.Errorf("gql error (%s): %w", opLabel(opName), ErrPersistedQueryNotFound)
+			}
 			return nil, fmt.Errorf("gql error (%s): %s", opLabel(opName), msg)
 		}
 	} else if len(respData) > 0 && respData[0] == '[' {
@@ -501,6 +515,9 @@ func (a *API) parseGQLBody(opName string, respData []byte) (json.RawMessage, err
 		if allErrored {
 			if firstErrMsg == "" {
 				firstErrMsg = "all batch elements returned errors"
+			}
+			if firstErrMsg == persistedQueryNotFoundMsg {
+				return nil, fmt.Errorf("gql batch error (%s): %w", opLabel(opName), ErrPersistedQueryNotFound)
 			}
 			return nil, fmt.Errorf("gql batch error (%s): %s", opLabel(opName), firstErrMsg)
 		}
