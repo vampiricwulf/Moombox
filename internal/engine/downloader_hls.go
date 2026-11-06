@@ -789,8 +789,14 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					continue
 				}
 				d.emitActivity(ActivityVerifyingEnd)
-				if d.opts.CheckStreamStatus != nil {
-					ended, _ := d.opts.CheckStreamStatus(ctx)
+				// A stale window is the one site CheckStaleEnd answers in
+				// CheckStreamStatus's place (see its doc comment).
+				checkEnd := d.opts.CheckStreamStatus
+				if d.opts.CheckStaleEnd != nil {
+					checkEnd = d.opts.CheckStaleEnd
+				}
+				if checkEnd != nil {
+					ended, _ := checkEnd(ctx)
 					if ended {
 						d.streamEnded.Store(true)
 						return nil

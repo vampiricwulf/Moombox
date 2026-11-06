@@ -362,6 +362,19 @@ type DownloaderOptions struct {
 	InterruptionTimeout time.Duration
 	CheckStreamStatus   func(ctx context.Context) (bool, error) // Returns true if stream ended
 	IsOnline            func() bool                             // Returns false if device has no internet
+	// CheckStaleEnd, when set, is what the HLS loop asks INSTEAD of
+	// CheckStreamStatus at its stale-playlist site alone (the playlist has
+	// not grown for five reloads without ENDLIST); every other site that
+	// consults the stream's end — the playlist 404/410 branch, the fetch- and
+	// parse-failure escalations, the stuck-skip exit and the init-failure
+	// escalation — keeps asking CheckStreamStatus. Those sites read "ended" as
+	// "what is left is gone", a live-stream rule; a Twitch VOD's segments stay
+	// listed and fetchable after its broadcast ends, so a VOD's "no longer
+	// recording" answer may only end a playlist that has stopped growing, not
+	// turn a transient playlist or segment failure into a truncated Finished
+	// archive. Set by the worker for Twitch VODs (twitchVodEnded); nil
+	// everywhere else.
+	CheckStaleEnd func(ctx context.Context) (bool, error)
 	// OnFirstSegment is called once, from the HLS live loop, when this
 	// downloader writes the first media segment into an output file it
 	// started EMPTY — never on a resume or an append, whose file already

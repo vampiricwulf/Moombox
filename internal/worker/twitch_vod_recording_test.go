@@ -284,3 +284,81 @@ func TestProcessTwitchVodRecordingAndUntitled(t *testing.T) {
 		t.Errorf("title = %q, want %q", row.Title, want)
 	}
 }
+
+// TestTwitchVodFailureWithMetadataWiredLandsInError is the W18 review's
+// regression: twitchVodEnded was first wired as a VOD's whole
+// CheckStreamStatus, so every engine site that consults it — the playlist
+// 404/410 branch, the fetch- and parse-failure escalations, the stuck-skip
+// exit and the init-failure escalation — read a finished VOD's "no longer
+// recording" as a confirmed end. A VOD whose playlist failed then muxed a
+// truncated capture and was written Finished, and processJob deleted its
+// staging with the resume sidecar, where TestTwitchVodDownloadFailureLandsInError
+// (whose harness wires no VodInfoFn) pins Error with staging kept. The
+// VideoMetadata answer now reaches only the stale-window site (CheckStaleEnd);
+// with it wired, a failed VOD still lands in Error, whether the playlist
+// is dead from the first fetch or starts failing mid-download.
+//
+// Mutant: ExecuteTwitch's VOD CheckStreamStatus returning twitchVodEnded
+// again (both rows return nil, or a mux error after Muxing).
+func TestTwitchVodFailureWithMetadataWiredLandsInError(t *testing.T) {
+	ts := oneSecondTS(t)
+	cases := []struct {
+		name   string
+		failAt int // segment requests served before the server answers 500 to everything; -1: playlist 404 at once
+	}{
+		{"playlist dead from the start", -1},
+		{"5xx mid-download", 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newEndVerdictHarness(t, "tw_v2000000009")
+			statuses := h.watchStatuses()
+			var segs atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.failAt < 0 {
+					http.NotFound(w, r)
+					return
+				}
+				if strings.HasSuffix(r.URL.Path, ".m3u8") {
+					if int(segs.Load()) >= tc.failAt {
+						http.Error(w, "cdn down", http.StatusInternalServerError)
+						return
+					}
+					var b strings.Builder
+					b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n")
+					for i := range 6 {
+						fmt.Fprintf(&b, "#EXTINF:1.000,\nseg%d.ts\n", i)
+					}
+					_, _ = w.Write([]byte(b.String()))
+					return
+				}
+				if int(segs.Add(1)) > tc.failAt {
+					http.Error(w, "cdn down", http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(ts)
+			}))
+			t.Cleanup(srv.Close)
+			h.variant.URL = srv.URL + "/vod.m3u8"
+			h.variant.VodInfoFn = func(context.Context) (*twitch.TwitchVodInfo, error) {
+				return &twitch.TwitchVodInfo{IsRecording: false}, nil
+			}
+			h.jobCtx.OutputDir = t.TempDir()
+			h.jobCtx.Filename = "vod"
+
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, true, nil)
+			if err == nil {
+				t.Fatal("ExecuteTwitch = nil for a VOD whose download failed — its truncated capture was finalized")
+			}
+			if seq := statuses(); sawMuxing(seq) {
+				t.Errorf("the failed VOD was advertised Muxing (sequence %v), err %v", seq, err)
+			}
+			if row, _ := h.db.GetJob(h.job.ID); row != nil && row.Status == database.StatusFinished {
+				t.Error("the failed VOD was written Finished")
+			}
+		})
+	}
+}

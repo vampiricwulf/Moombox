@@ -47,7 +47,7 @@ type TwitchVariantInfo struct {
 	Prefer60fps     bool   // from global config (prefer_60fps)
 
 	// VodInfoFn re-reads the VOD's VideoMetadata. Set by the worker for VOD
-	// jobs only. It is what a VOD's CheckStreamStatus asks when the playlist
+	// jobs only. It is what a VOD's CheckStaleEnd asks when the playlist
 	// stops growing without ENDLIST (twitchVodEnded), and what
 	// refreshRecordedVodInfo reads once a VodRecording download ends.
 	VodInfoFn func(ctx context.Context) (*twitch.TwitchVodInfo, error)
@@ -399,6 +399,12 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// first segment it writes, and that is the part's chat base — the chat
 	// file of the SAME part directory, so a late report from a downloader
 	// since replaced can only reach the part it belonged to.
+	// A VOD's stale-playlist end check asks VideoMetadata (twitchVodEnded);
+	// a live capture has none — its end is CheckStreamStatus's at every site.
+	var vodStaleEnd func(ctx context.Context) (bool, error)
+	if isVod {
+		vodStaleEnd = func(ctx context.Context) (bool, error) { return twitchVodEnded(ctx, variant) }
+	}
 	createDownloader := func(variantURL, stagingDir string, startSeq int, forceStartSeq bool) (*engine.SegmentDownloader, string) {
 		videoPath := filepath.Join(stagingDir, "video_stream")
 		var onFirstSegment func(time.Time)
@@ -435,7 +441,14 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			Logger:   newScopedLogger(jobCtx.Logger, "jobID", jobCtx.Job.ID, "stream", "video"),
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				if isVod {
-					return twitchVodEnded(ctx, variant)
+					// A VOD has no live end to confirm: its failure sites
+					// (404/410, fetch/parse escalations, stuck skips, init
+					// exhaustion) keep reading "not ended", so a transient
+					// failure stays an error the job lands in Error with
+					// its staging kept for (TestTwitchVodDownloadFailureLandsInError).
+					// Its VideoMetadata answer ends a stale playlist only,
+					// through CheckStaleEnd below.
+					return false, nil
 				}
 				info, err := variant.CheckStreamFn(ctx)
 				if err != nil {
@@ -443,6 +456,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 				}
 				return !info, nil // Returns true when stream ended (NOT live)
 			},
+			CheckStaleEnd: vodStaleEnd,
 		})
 		return dl, videoPath
 	}
@@ -1400,7 +1414,7 @@ sessionLoop:
 	// A VOD that was still recording when the job was set up has ended now:
 	// re-read its length and thumbnail before the chat wait (bounded by the
 	// row's length, resolveVodChatOutcome) and the finalize (whose thumbnail
-	// fallback reads jobCtx.Job) use them.
+	// fallback reads the reloaded row) use them.
 	if isVod && variant.VodRecording {
 		o.refreshRecordedVodInfo(finalCtx, jobCtx, variant)
 	}
@@ -1513,8 +1527,12 @@ func wireTwitchVodInfo(variant *TwitchVariantInfo, job *database.Job, result *St
 	variant.VodRecording = result.TwitchVodRecording
 }
 
-// twitchVodEnded is a VOD's answer to the engine's CheckStreamStatus, asked
-// when the playlist has stopped growing for a stale window without ENDLIST.
+// twitchVodEnded is a VOD's answer to the engine's CheckStaleEnd, asked only
+// when the playlist has stopped growing for a stale window without ENDLIST —
+// never at the engine's failure sites, whose "ended" would turn a transient
+// 404, 5xx run or dead segment into a truncated Finished archive (a VOD's
+// segments stay fetchable after its broadcast ends, so those sites keep
+// CheckStreamStatus's flat "not ended").
 // It used to be a flat "not ended", so a VOD whose playlist never gained
 // ENDLIST — a broadcast that ended but whose VOD Twitch left unfinalized —
 // reloaded forever and held its download slot. It now asks VideoMetadata:
@@ -1541,8 +1559,12 @@ func twitchVodEnded(ctx context.Context, variant *TwitchVariantInfo) (bool, erro
 // recording when its job was set up, once its download has ended: the length
 // stored then was the length so far, and no thumbnail was stored at all
 // (Twitch served only its processing placeholder). The fresh values are
-// written to the row and to jobCtx.Job, which the finalize's thumbnail
-// fallback reads. A failed read, or one still answering with the
+// written to the row, which is what both consumers read: the VOD chat wait
+// bounds itself on the row's length_seconds (resolveVodChatOutcome re-reads
+// it) and muxAndFinalize reloads the row into jobCtx.Job before the
+// thumbnail fallback reads ThumbnailURL. The jobCtx.Job sync is defensive —
+// it is what each of them falls back to when that re-read fails. A failed
+// read, or one still answering with the
 // placeholder, keeps what the row has — the archive is not held for its
 // metadata.
 func (o *DownloadOrchestrator) refreshRecordedVodInfo(ctx context.Context, jobCtx *JobContext, variant *TwitchVariantInfo) {
