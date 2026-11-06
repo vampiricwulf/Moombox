@@ -457,6 +457,31 @@ func TestRateLimitHoldsBacklogAdmission(t *testing.T) {
 	}
 }
 
+// TestRateLimitHoldAdmitsATwitchChannelsBacklog: the rate-limit hold is
+// YouTube's. While it stands a YouTube channel's backlog waits, and a Twitch
+// channel's — the clips its archive_clips sweep queued, under its login —
+// is admitted all the same: Twitch refused nothing.
+//
+// Mutant: the gate returning from sweep for every channel again (the clip
+// waits out YouTube's hold).
+func TestRateLimitHoldAdmitsATwitchChannelsBacklog(t *testing.T) {
+	s, db, log := testSchedulerSetup(t, 2)
+	yt := "UC_rl"
+	addSchedJob(t, db, &yt, "rl_yt", database.StatusQueued, 1)
+	addFeedItemRow(t, db, yt, "rl_yt", "2026-07-10T00:00:00Z")
+	login := "vanillatv"
+	clip := "tw_clip_FaintLightGullWholeWheat"
+	if _, err := db.AddJob(&database.Job{ID: clip, VideoID: clip, URL: "https://www.twitch.tv/vanillatv/clip/FaintLightGullWholeWheat",
+		Platform: "twitch", Status: database.StatusQueued, ChannelID: &login, QueuePriority: 1, IsVod: true}); err != nil {
+		t.Fatal(err)
+	}
+	s.holdForRateLimit(time.Now(), time.Hour)
+	s.sweep()
+	if got := log.admitted(); len(got) != 1 || got[0] != clip {
+		t.Errorf("admitted under a YouTube rate-limit hold = %v, want only the Twitch clip %s", got, clip)
+	}
+}
+
 // TestRateLimited429WaitsInPlaceAtLeastItsRetryAfter: a job that is not
 // backlog, whose whole cascade was answered 429, waits in place as a
 // rate-limit verdict does — it ended in Error, a broadcast lost before it

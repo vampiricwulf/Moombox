@@ -388,9 +388,12 @@ func (db *Database) TwitchEndUnconfirmedJobs() ([]*Job, error) {
 }
 
 // QueuedChannels returns the distinct channel IDs that currently have Queued
-// (un-admitted backlog) jobs. NULL channel_id rows are excluded: Twitch and
-// manual adds have no channel affiliation and are never scheduler-paced, and
-// a defensive NULL-channel Queued row must not wedge the admission sweep.
+// (un-admitted backlog) jobs. NULL channel_id rows are excluded: manual adds
+// and a Twitch channel's live and VOD rows have no channel affiliation and
+// are never scheduler-paced — the one Twitch row that carries a channel_id
+// is a clip the monitor's archive_clips sweep queued (newTwitchClipJob), the
+// channel's login as its ID — and a defensive NULL-channel Queued row must
+// not wedge the admission sweep.
 func (db *Database) QueuedChannels() ([]string, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -398,6 +401,33 @@ func (db *Database) QueuedChannels() ([]string, error) {
 	rows, err := db.db.QueryContext(db.getCtx(),
 		`SELECT DISTINCT channel_id FROM jobs WHERE status = ? AND channel_id IS NOT NULL`,
 		StatusQueued)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channels []string
+	for rows.Next() {
+		var ch string
+		if err := rows.Scan(&ch); err != nil {
+			return nil, err
+		}
+		channels = append(channels, ch)
+	}
+	return channels, rows.Err()
+}
+
+// QueuedChannelsOnPlatform is QueuedChannels narrowed to the channels whose
+// Queued rows are platform's: what the backlog admission still admits from
+// while a hold placed for another platform stands (the scheduler's YouTube
+// rate-limit gate admits a Twitch channel's clip backlog all the same).
+func (db *Database) QueuedChannelsOnPlatform(platform string) ([]string, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT DISTINCT channel_id FROM jobs WHERE status = ? AND channel_id IS NOT NULL AND platform = ?`,
+		StatusQueued, platform)
 	if err != nil {
 		return nil, err
 	}

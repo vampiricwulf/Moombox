@@ -825,8 +825,8 @@ func (a *captchaAlert) clear() {
 // until the hold runs out (rateLimitGateClosed), and a fresh verdict meanwhile
 // pushes it on. Only backlog waits, as on a full disk: live, upcoming and
 // manually added jobs never pass through the scheduler, and a backlog VOD
-// already admitted runs on. All backlog is YouTube's today; a Twitch backlog
-// would want its own hold. Saved for the next process on every change
+// already admitted runs on. The hold is YouTube's: a Twitch channel's
+// backlog (its archive_clips sweep's clips) is admitted through it (sweep). Saved for the next process on every change
 // (RecordRateLimitHold), as the disk gate's hold is.
 //
 // Called from any job's run, while sweep reads it on Run's goroutine.

@@ -348,15 +348,22 @@ func (s *Scheduler) sweep() {
 	if (len(channels) > 0 || s.diskHeld) && s.diskGateClosed() {
 		return
 	}
-	// Nor while YouTube rate-limits the session: every admission would be
-	// refused the same way, and free its slot for the next one
-	// (holdForRateLimit). After the disk gate, so the disk is read, and its
-	// gate closes and reopens, on the sweeps it always was. The heartbeat's
-	// sweep is what finds the hold run out.
+	// Nor, for a YouTube channel, while YouTube rate-limits the session:
+	// every admission would be refused the same way, and free its slot for
+	// the next one (holdForRateLimit). A Twitch channel's backlog (the clips
+	// its archive_clips sweep queued) is admitted all the same: Twitch
+	// refused nothing, and holding it for YouTube's verdict stalled a clip
+	// archive for as long as the hold ran, up to a day. After the disk gate,
+	// so the disk is read, and its gate closes and reopens, on the sweeps it
+	// always was. The heartbeat's sweep is what finds the hold run out.
 	now := time.Now()
 	if s.rateLimitGateClosed(now) {
-		s.log.Debug("scheduler: YouTube rate-limited this session; backlog admission waits for the hold to run out")
-		return
+		channels, err = s.db.QueuedChannelsOnPlatform("twitch")
+		if err != nil {
+			s.log.Error("scheduler: QueuedChannelsOnPlatform failed", "err", err)
+			return
+		}
+		s.log.Debug("scheduler: YouTube rate-limited this session; its backlog admission waits for the hold to run out", "twitchChannels", len(channels))
 	}
 	for _, ch := range channels {
 		inFlight, err := s.db.CountBacklogInFlight(ch)
