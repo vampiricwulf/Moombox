@@ -328,14 +328,14 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		return fmt.Errorf("create staging dir: %w", err)
 	}
 	// The category the broadcast is in as the capture starts: the first
-	// entry of the live chapter fallback (noteTwitchCategory; every poll of
-	// CheckStreamFn adds the changes after it).
+	// entry of the live chapter fallback (noteTwitchCategory; every tick of
+	// the category poll, pollTwitchCategory over variant.CategoryFn, adds the
+	// changes after it). The poll is joined on the way out: the worker
+	// removes staging right after this returns.
 	if !isVod {
 		noteTwitchCategory(jobCtx.StagingDir, jobCtx.Job.TwitchCategory, time.Now())
 		if variant.CategoryFn != nil {
-			pollCtx, stopPoll := context.WithCancel(parentCtx)
-			defer stopPoll()
-			go o.pollTwitchCategory(pollCtx, jobCtx.StagingDir, variant.CategoryFn)
+			defer o.startTwitchCategoryPoll(parentCtx, jobCtx.StagingDir, variant.CategoryFn)()
 		}
 	}
 

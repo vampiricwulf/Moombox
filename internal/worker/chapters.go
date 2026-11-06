@@ -119,9 +119,29 @@ func noteTwitchRecordingStart(dir string, pdt time.Time) {
 // monitor's every-15-seconds batch for the whole channel list.
 const twitchCategoryPollInterval = time.Minute
 
+// startTwitchCategoryPoll runs pollTwitchCategory on its own goroutine and
+// returns the stop that cancels it AND waits for it to end. Joined, not just
+// cancelled: ExecuteTwitch's caller removes staging as soon as it returns, and
+// a poll whose read succeeded just before the cancel would otherwise still be
+// writing twitch_timeline.json's temp into the directory os.RemoveAll walks,
+// which then fails and leaves staging behind.
+func (o *DownloadOrchestrator) startTwitchCategoryPoll(parent context.Context, dir string, read func(context.Context) (string, error)) (stop func()) {
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		o.pollTwitchCategory(ctx, dir, read)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 // pollTwitchCategory notes the broadcast's category every
 // twitchCategoryPollInterval until ctx ends. A failed read is skipped; the
-// next tick tries again.
+// next tick tries again. A read that returns after ctx ended is not noted:
+// the capture is over, and its staging may be on its way out.
 func (o *DownloadOrchestrator) pollTwitchCategory(ctx context.Context, dir string, read func(context.Context) (string, error)) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -137,6 +157,9 @@ func (o *DownloadOrchestrator) pollTwitchCategory(ctx context.Context, dir strin
 		case <-t.C:
 		}
 		category, err := read(ctx)
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil {
 			o.logger.Debug("twitch category poll failed", "err", err, "dir", dir)
 			continue

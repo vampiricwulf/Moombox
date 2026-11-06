@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -135,6 +136,40 @@ func TestPollTwitchCategoryNotesEachMinute(t *testing.T) {
 	})
 }
 
+// TestTwitchCategoryPollStopJoins: the stop ExecuteTwitch defers waits for
+// the poll to end, and a read that returns after the cancel is not noted, so
+// nothing writes into staging once ExecuteTwitch has returned and the worker
+// removes it. The read here is still running when stop is called and takes
+// another (fake) second to come back with a category.
+//
+// Mutants: stop only cancelling, not waiting (it returns while the read is
+// still out); the ctx check after the read removed ("Late" is noted).
+func TestTwitchCategoryPollStopJoins(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		entered := make(chan struct{})
+		var returned atomic.Bool
+		read := func(ctx context.Context) (string, error) {
+			close(entered)
+			<-ctx.Done()
+			time.Sleep(time.Second)
+			returned.Store(true)
+			return "Late", nil
+		}
+		o := &DownloadOrchestrator{logger: discardLogger{}}
+		stop := o.startTwitchCategoryPoll(context.Background(), dir, read)
+		time.Sleep(twitchCategoryPollInterval)
+		<-entered
+		stop()
+		if !returned.Load() {
+			t.Fatal("stop returned while the poll's read was still running")
+		}
+		if tl := readTwitchTimeline(dir); len(tl.Categories) != 0 {
+			t.Errorf("categories = %+v, want none noted after the cancel", tl.Categories)
+		}
+	})
+}
+
 // TestStageTwitchChapters: a VOD stages its own chapters; a live capture
 // stages its archive VOD's, looked up at finalize, in its own timeline.
 //
@@ -191,7 +226,7 @@ func TestTwitchChapterHooksAreWired(t *testing.T) {
 	for file, needles := range map[string][]string{
 		"orchestrator_twitch.go": {
 			"noteTwitchCategory(jobCtx.StagingDir, jobCtx.Job.TwitchCategory, time.Now())",
-			"go o.pollTwitchCategory(pollCtx, jobCtx.StagingDir, variant.CategoryFn)",
+			"defer o.startTwitchCategoryPoll(parentCtx, jobCtx.StagingDir, variant.CategoryFn)()",
 			"noteTwitchRecordingStart(stagingDir, pdt)",
 			"o.stageTwitchChapters(muxCtx, jobCtx, variant, isVod)",
 		},
