@@ -337,8 +337,10 @@ func TestClipJobIDRoundTrip(t *testing.T) {
 // Mutants: SelectBestVariant skipped (BestClipQuality: 1080 in every row);
 // the cap fallback taking the VOD rule's smallest size above the cap (360 in
 // the cap-below-everything row); portrait renditions kept in the pool beside
-// landscape ones (the 1920 portrait crop for "1920p"); audio_only handed to
-// SelectBestVariant (its last-variant fallback, 360).
+// landscape ones (the 1920 portrait crop for "1920p"); audio_only taking
+// the best rendition (1080), as it did before owner decision FQ-4, or the
+// smallest of every asset (a portrait crop below the landscape ones), or
+// the smallest by frame rate before height.
 func TestSelectClipQualityFollowsTheVodRule(t *testing.T) {
 	qs := []TwitchClipQuality{
 		{Quality: "1080", Height: 1080, FrameRate: 60},
@@ -365,11 +367,12 @@ func TestSelectClipQualityFollowsTheVodRule(t *testing.T) {
 		{"", 0, "1080"},
 		{"best", 720, "720"},
 		{"480p", 1080, "480"},
-		{"900p", 0, "720"},           // no 900: the next lower size
-		{"1080p60", 720, "720"},      // the cap bounds the preference
-		{"1920p", 0, "1080"},         // landscape ranks above portrait
-		{"best", 240, "1080"},        // nothing fits: the best rendition
-		{"audio_only", 1080, "1080"}, // no audio-only rendition: the best
+		{"900p", 0, "720"},          // no 900: the next lower size
+		{"1080p60", 720, "720"},     // the cap bounds the preference
+		{"1920p", 0, "1080"},        // landscape ranks above portrait
+		{"best", 240, "1080"},       // nothing fits: the best rendition
+		{"audio_only", 1080, "360"}, // no audio-only rendition: the smallest (FQ-4)
+		{"audio_only", 240, "360"},  // whatever the cap
 	} {
 		if got := label(SelectClipQuality(qs, c.pref, c.cap, false)); got != c.want {
 			t.Errorf("SelectClipQuality(%q, cap %d) = %s, want %s", c.pref, c.cap, got, c.want)
@@ -382,7 +385,19 @@ func TestSelectClipQualityFollowsTheVodRule(t *testing.T) {
 	if got := label(SelectClipQuality(portrait, "best", 1280, false)); got != "portrait 1280" {
 		t.Errorf("portrait-only clip under a 1280 cap = %s, want portrait 1280", got)
 	}
-	if SelectClipQuality(nil, "best", 0, false) != nil {
+	if got := label(SelectClipQuality(portrait, "audio_only", 0, false)); got != "portrait 1280" {
+		t.Errorf("portrait-only clip, audio_only = %s, want portrait 1280", got)
+	}
+	tied := []TwitchClipQuality{
+		{Quality: "360", Height: 360, FrameRate: 60},
+		{Quality: "720", Height: 720, FrameRate: 30},
+		{Quality: "360", Height: 360, FrameRate: 30},
+		{Quality: "240", Height: 240, FrameRate: 30, Portrait: true},
+	}
+	if got := SelectClipQuality(tied, "audio_only", 0, false); got != &tied[2] {
+		t.Errorf("audio_only over a tie = %+v, want the 360p30 landscape rendition", got)
+	}
+	if SelectClipQuality(nil, "best", 0, false) != nil || SelectClipQuality(nil, "audio_only", 0, false) != nil {
 		t.Error("no renditions must select nothing")
 	}
 }

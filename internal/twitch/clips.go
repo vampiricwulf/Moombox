@@ -375,10 +375,12 @@ func BestClipQuality(qs []TwitchClipQuality) *TwitchClipQuality {
 // a landscape rendition still ranks above every portrait one whatever the
 // cap and the preference say (yt-dlp's quality -2, as BestClipQuality).
 //
-// When nothing fits — no rendition at or under a set cap, or a preference no
-// clip rendition can meet ("audio_only": a clip has no audio-only rendition)
-// — it is BestClipQuality, the best rendition, where a VOD's cap would take
-// the smallest size above it (utils.SelectByCap): the owner's rule for clips.
+// When nothing fits — no rendition at or under a set cap — it is
+// BestClipQuality, the best rendition, where a VOD's cap would take the
+// smallest size above it (utils.SelectByCap): the owner's rule for clips.
+// "audio_only" is SmallestClipQuality, whatever the cap: a clip has no
+// audio-only rendition, and the job keeps only the audio of the one it
+// downloads (owner decision FQ-4), so the fewest video bytes are the best.
 // A preference with no rendition of its size descends as a VOD's does, to the
 // next lower size and then the best under the cap. nil when qs is empty.
 //
@@ -412,7 +414,10 @@ func SelectClipQuality(qs []TwitchClipQuality, qualityPref string, maxResolution
 			fits = true
 		}
 	}
-	if !fits || strings.EqualFold(qualityPref, "audio_only") {
+	if strings.EqualFold(qualityPref, "audio_only") {
+		return SmallestClipQuality(qs)
+	}
+	if !fits {
 		return BestClipQuality(qs)
 	}
 	pick := SelectBestVariant(variants, qualityPref, maxResolution, prefer60fps)
@@ -424,6 +429,37 @@ func SelectClipQuality(qs []TwitchClipQuality, qualityPref string, maxResolution
 		return BestClipQuality(qs)
 	}
 	return &qs[i]
+}
+
+// SmallestClipQuality is the rendition an audio_only clip job downloads to
+// keep its audio alone (owner decision FQ-4): the shortest landscape one —
+// lowest height, then lowest frame rate — and a portrait one only when the
+// clip has no landscape rendition, as SelectClipQuality's pool is drawn. A
+// clip's renditions are encodes of one source whose audio rides beside
+// every one of them, so the smallest video is the fewest bytes for the same
+// track. Twitch lists none smaller than the clip's own (BEYOND UPSTREAM:
+// yt-dlp's clip extractor offers no audio-only format, and its `-x` would
+// take bestaudio — the best rendition, video and all — before extracting).
+// nil when qs is empty.
+func SmallestClipQuality(qs []TwitchClipQuality) *TwitchClipQuality {
+	var landscape bool
+	for i := range qs {
+		if !qs[i].Portrait {
+			landscape = true
+			break
+		}
+	}
+	var small *TwitchClipQuality
+	for i := range qs {
+		q := &qs[i]
+		if landscape && q.Portrait {
+			continue
+		}
+		if small == nil || q.Height < small.Height || (q.Height == small.Height && q.FrameRate < small.FrameRate) {
+			small = q
+		}
+	}
+	return small
 }
 
 func clipQualityBetter(a, b *TwitchClipQuality) bool {

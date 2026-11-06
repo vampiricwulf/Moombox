@@ -262,9 +262,17 @@ func twitchClipURLRefresh(ctx context.Context, clip *TwitchClipDownload, log log
 
 // twitchClipDownloadResult builds the clip's download: one whole-file
 // downloader writing staging/video.mp4, the MP4 carrying its own audio (as a
-// YouTube progressive format's does: VideoPath alone, HasAudio set).
+// YouTube progressive format's does: VideoPath alone, HasAudio set). An
+// audio_only clip's rendition is written as staging/clip-source.mp4 instead,
+// a name discoverStagingMedia does not know: it is not the archive's media
+// but what twitchClipExtractAudio takes the audio out of, and a boot re-mux
+// or a Mux action that found it as video.mp4 would archive the video the job
+// was asked to leave out.
 func (o *DownloadOrchestrator) twitchClipDownloadResult(ctx context.Context, jobCtx *JobContext, clip *TwitchClipDownload) *DownloadResult {
 	path := filepath.Join(jobCtx.StagingDir, "video.mp4")
+	if twitchClipAudioOnly(jobCtx.Job) {
+		path = filepath.Join(jobCtx.StagingDir, twitchClipSourceFile)
+	}
 	result := &DownloadResult{
 		HasVideo:    true,
 		HasAudio:    true,
@@ -283,6 +291,70 @@ func (o *DownloadOrchestrator) twitchClipDownloadResult(ctx context.Context, job
 		Logger:              newScopedLogger(jobCtx.Logger, "jobID", jobCtx.Job.ID, "stream", "clip"),
 	})
 	return result
+}
+
+// twitchClipSourceFile is the staging name of the rendition an audio_only
+// clip downloads (twitchClipDownloadResult), and twitchClipAudioFile the
+// name of its audio once extracted — audio.m4a, the name a YouTube
+// audio-only download stages its track under and discoverStagingMedia reads
+// back as the job's audio.
+const (
+	twitchClipSourceFile = "clip-source.mp4"
+	twitchClipAudioFile  = "audio.m4a"
+)
+
+// twitchClipAudioOnly reports whether a clip job keeps only its audio: its
+// quality_preference is audio_only, read as twitch.SelectClipQuality reads
+// it.
+func twitchClipAudioOnly(job *database.Job) bool {
+	return job != nil && strings.EqualFold(job.QualityPreference, "audio_only")
+}
+
+// twitchClipExtractAudio is owner decision FQ-4: an audio_only clip keeps
+// only the audio of the rendition it downloaded (twitch.SmallestClipQuality,
+// staging/clip-source.mp4), stream-copied into staging/audio.m4a
+// (engine.Muxer.ExtractAudioCopy, `-map 0:a -c copy`) and verified like
+// every other copy before it takes that name: the copy must hold an audio
+// stream and no other, and be no shorter than its source
+// (verifyMuxedDuration, ENGINE-9's check). result then carries the audio as
+// its primary input, as a YouTube audio-only download's does
+// (selectVodFormats: the audio as VideoPath, HasAudio cleared), so the
+// ordinary finalize archives it in the container every audio_only job's
+// archive takes, an .mp4 with one audio track. A clip with no audio track
+// fails with that said; the source stays in staging until the job's own
+// cleanup, so a Retry neither re-downloads a whole rendition nor loses it.
+//
+// BEYOND UPSTREAM: yt-dlp's TwitchClipsIE lists no audio-only format, and
+// its -x re-encodes by default; the copy keeps Twitch's AAC as it is.
+func (o *DownloadOrchestrator) twitchClipExtractAudio(ctx context.Context, jobCtx *JobContext, result *DownloadResult) error {
+	source := result.VideoPath
+	audio := filepath.Join(jobCtx.StagingDir, twitchClipAudioFile)
+	check := func(ctx context.Context, path string) error {
+		probe := o.runFFprobe(ctx, path)
+		if probe == nil {
+			return nil // a copy ffprobe cannot read passes, as verifiedCopy lets one
+		}
+		for _, st := range probe.Streams {
+			if st.CodecType != "audio" {
+				return fmt.Errorf("the extracted audio carries a %s stream", st.CodecType)
+			}
+		}
+		if len(probe.Streams) == 0 {
+			return engine.ErrNoAudioTrack
+		}
+		return o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probe.DurationSec, source)
+	}
+	if err := o.mux().ExtractAudioCopy(ctx, source, audio, check); err != nil {
+		if errors.Is(err, engine.ErrNoAudioTrack) {
+			return errors.New("twitch clip error: the clip has no audio track to keep for audio_only")
+		}
+		return fmt.Errorf("extract the clip's audio: %w", err)
+	}
+	result.VideoPath = audio
+	result.HasAudio = false
+	result.VideoHeight, result.VideoFps = 0, 0
+	o.logger.Info("twitch clip audio extracted", "jobID", jobCtx.Job.ID, "source", filepath.Base(source))
+	return nil
 }
 
 // ExecuteTwitchClip downloads a clip and finalizes it — ExecuteWithChat's VOD
@@ -371,6 +443,14 @@ func (o *DownloadOrchestrator) ExecuteTwitchClip(ctx context.Context, jobCtx *Jo
 	// Release the download slot before muxing — the mux is CPU-bound.
 	if o.queue != nil {
 		o.queue.ReleaseDownloadSlot(jobID)
+	}
+	if twitchClipAudioOnly(jobCtx.Job) {
+		if err := o.twitchClipExtractAudio(ctx, jobCtx, result); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
 	}
 	if err := o.muxAndFinalize(ctx, jobCtx, result); err != nil {
 		if ctx.Err() != nil {
