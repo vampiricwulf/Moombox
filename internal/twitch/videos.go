@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -458,8 +459,8 @@ func (a *API) ArchiveVodFor(ctx context.Context, channelLogin, startedAt, authTo
 // start (and, when end is not zero, ended at end) on channelLogin. It is
 // yt-dlp's live_from_start lookup (TwitchStreamIE._real_extract, twitch.py
 // b77c9304e: `next(self._entries(channel_name, None, 'time'))`, kept when its
-// timestamp >= the stream's createdAt, 00b1bec55), with two corrections an
-// audit verifier made to it:
+// timestamp >= the stream's createdAt, 00b1bec55), with three corrections an
+// audit verifier and the purpose review made to it:
 //
 //   - the list is asked for with broadcastType null, as upstream asks — the
 //     server-side ARCHIVE filter returns nothing (see EachChannelVideo) — and
@@ -469,24 +470,44 @@ func (a *API) ArchiveVodFor(ctx context.Context, channelLogin, startedAt, authTo
 //     the broadcast is newer than its archive (whose publishedAt is the
 //     stream's start), and Moombox looks at finalize and, for gap-fill
 //     (owner decision D17), up to a day later;
-//   - the video taken is the OLDEST archive published at or after start, not
-//     the newest, and with an end, one published before it. A day after a
-//     broadcast the channel may have streamed again, and that broadcast's
-//     archive is newer than this one's and also published after start; gap
-//     footage cut from it would be another broadcast's. The walk stops at the
-//     first video published before start, every one after it being older.
+//   - only a video published within ArchiveVodStartTolerance of start, on
+//     either side, is a candidate (owner decision PR-M3, purpose review M3
+//     and A1). Upstream's ">= createdAt" has no upper bound, because it looks
+//     the moment the stream is live, when no later broadcast can exist yet.
+//     Moombox looks up to a day later (gap-fill), and on the Mux path and the
+//     outage finalize end is the time of the look, not the broadcast's end:
+//     with this broadcast's archive gone (expired, deleted, DMCA) the next
+//     broadcast's was "the oldest archive published after start", and its
+//     footage was cut at this broadcast's offsets and inserted as recovered
+//     parts. And the lower bound has the same tolerance: an archive whose
+//     publishedAt sits a second before the stream's createdAt stopped the
+//     newest-first walk short of it, leaving only later broadcasts' archives
+//     to be found. The window is the backlog's (the monitor's
+//     twitchBacklogCapturedWindow names this one), the two being the same
+//     question: is this video that broadcast's archive;
+//   - of the candidates, the one published closest to start is taken first,
+//     and with an end, only one published before it.
+//
+// Exact identity — the VOD's stream ID against the capture's — would be the
+// better test, but no query this package makes returns one for a video:
+// VideoMetadata and FilterableVideoTower_Videos are persisted queries whose
+// selection sets are Twitch's, and neither yt-dlp nor streamlink reads a
+// stream or broadcast ID off a video. The publish time is all there is.
 //
 // Returns "" with no error when no such video exists: VODs off, the archive
 // deleted, or not listed yet. Reads at most archiveVodLookupPages pages.
 func (a *API) ArchiveVodBetween(ctx context.Context, channelLogin string, start, end time.Time, authToken string) (string, error) {
-	var candidates []TwitchVideo // newest first
+	var candidates []TwitchVideo
 	err := a.EachChannelVideo(ctx, channelLogin, "time", archiveVodLookupPages, authToken, func(v TwitchVideo) bool {
 		published := v.Published()
 		if published.IsZero() {
 			return true
 		}
-		if published.Before(start) {
-			return false
+		if published.Before(start.Add(-ArchiveVodStartTolerance)) {
+			return false // every video after it is older still
+		}
+		if published.After(start.Add(ArchiveVodStartTolerance)) {
+			return true // a later broadcast's, or something published during this one
 		}
 		if end.IsZero() || published.Before(end) {
 			candidates = append(candidates, v)
@@ -496,8 +517,15 @@ func (a *API) ArchiveVodBetween(ctx context.Context, channelLogin string, start,
 	if err != nil {
 		return "", err
 	}
-	for i := len(candidates) - 1; i >= 0; i-- {
-		v := candidates[i]
+	distance := func(v TwitchVideo) time.Duration {
+		d := v.Published().Sub(start)
+		if d < 0 {
+			return -d
+		}
+		return d
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return distance(candidates[i]) < distance(candidates[j]) })
+	for _, v := range candidates {
 		if v.BroadcastType != "" && v.BroadcastType != "ARCHIVE" {
 			continue // the node already says it is not a past broadcast
 		}
@@ -511,6 +539,15 @@ func (a *API) ArchiveVodBetween(ctx context.Context, channelLogin string, start,
 	}
 	return "", nil
 }
+
+// ArchiveVodStartTolerance is how far a video's publishedAt may sit from a
+// broadcast's createdAt, on either side, and still be that broadcast's
+// archive (ArchiveVodBetween; the monitor's VOD backlog matches with the same
+// window). Twitch publishes a broadcast's archive as the stream starts; a
+// broadcast that started within ten minutes of another one's start on the
+// same channel is a restart of it, not another broadcast an archive could be
+// mistaken for.
+const ArchiveVodStartTolerance = 10 * time.Minute
 
 // archiveVodLookupPages bounds ArchiveVodBetween's walk: three pages of 100
 // newest videos. A channel that published more than that since the broadcast

@@ -126,8 +126,9 @@ type twitchGapFiller struct {
 	db     *database.Database
 	logger logger
 
-	// findVod is twitch.API.ArchiveVodBetween: the oldest ARCHIVE published
-	// in [start, end), "" when there is none.
+	// findVod is twitch.API.ArchiveVodBetween: the ARCHIVE published closest
+	// to start, within twitch.ArchiveVodStartTolerance of it and before end
+	// (owner decision PR-M3), "" when there is none.
 	findVod func(ctx context.Context, login string, start, end time.Time) (string, error)
 	// vodInfo is twitch.Service.GetVodInfo.
 	vodInfo func(ctx context.Context, vodID string) (*twitch.TwitchVodInfo, error)
@@ -416,7 +417,12 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 			return false, fmt.Sprintf("the archive VOD lookup failed (%v)", err)
 		}
 		if id == "" {
-			return false, "no archive VOD of the broadcast is listed"
+			// Nothing published within ArchiveVodStartTolerance of the
+			// broadcast's start is an archive: not listed yet, or gone. The
+			// plan is looked at again until its deadline, and the archive
+			// then kept as recorded with this reason (step); a later
+			// broadcast's archive is never taken in its place (PR-M3).
+			return false, "no archive VOD published within 10 minutes of the broadcast's start is listed"
 		}
 		plan.VodID = id
 	}

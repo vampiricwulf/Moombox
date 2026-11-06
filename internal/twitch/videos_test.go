@@ -209,19 +209,22 @@ func TestCollectionVideos(t *testing.T) {
 }
 
 // TestArchiveVodBetween is yt-dlp's live_from_start lookup with the audit's
-// corrections (owner decision D17): the list asked for with broadcastType
-// null, the candidate confirmed ARCHIVE through VideoMetadata, published at or
-// after the stream's start — and, with the broadcast's end known, before it,
-// the OLDEST such archive taken.
+// corrections (owner decisions D17 and PR-M3): the list asked for with
+// broadcastType null, the candidate confirmed ARCHIVE through VideoMetadata,
+// published within ArchiveVodStartTolerance of the stream's start on either
+// side — and, with the broadcast's end known, before it — the one closest to
+// the start taken.
 //
-// Mutants: the publishedAt >= start test dropped ("older" taken in the
-// deleted-archive row); the end bound dropped ("next" taken there); the newest
-// candidate tried first ("next" taken in the no-end row); the VideoMetadata
-// confirmation skipped ("up" taken in the upload-and-highlight row).
+// Mutants: the lower bound without its tolerance (the archive published
+// seconds before start is never reached); the upper bound dropped ("later"
+// taken in the no-end deleted-archive row, "next" in the deleted-archive
+// row); the oldest candidate tried first instead of the closest ("early"
+// taken in the two-archives row); the VideoMetadata confirmation skipped
+// ("up" taken in the upload-and-highlight row).
 func TestArchiveVodBetween(t *testing.T) {
 	start := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	end := start.Add(4 * time.Hour)
-	types := map[string]string{"next": "ARCHIVE", "hl": "HIGHLIGHT", "a": "ARCHIVE", "older": "ARCHIVE", "up": "UPLOAD"}
+	types := map[string]string{"next": "ARCHIVE", "hl": "HIGHLIGHT", "a": "ARCHIVE", "older": "ARCHIVE", "up": "UPLOAD", "later": "ARCHIVE", "early": "ARCHIVE"}
 	cases := []struct {
 		name  string
 		edges []string
@@ -247,6 +250,24 @@ func TestArchiveVodBetween(t *testing.T) {
 			videoEdge("next", "2026-10-02T12:00:05Z", ""),
 			videoEdge("older", "2026-09-30T12:00:00Z", ""),
 		}, end, ""},
+		// Owner decision PR-M3: on the Mux path and the outage finalize the
+		// window's end is the time of the look, hours past the broadcast;
+		// a later broadcast's archive inside it is not this one's.
+		{"no end: archive deleted, a later broadcast's the same day is not taken", []string{
+			videoEdge("later", "2026-10-01T18:00:03Z", ""),
+			videoEdge("older", "2026-09-30T12:00:00Z", ""),
+		}, time.Time{}, ""},
+		// Purpose review A1: an archive published a little before the
+		// stream's createdAt is still found; the walk used to stop at it.
+		{"archive published seconds before start", []string{
+			videoEdge("later", "2026-10-01T18:00:03Z", ""),
+			videoEdge("a", "2026-10-01T11:59:58Z", ""),
+			videoEdge("older", "2026-09-30T12:00:00Z", ""),
+		}, time.Time{}, "a"},
+		{"two archives in the window: the closest to start", []string{
+			videoEdge("a", "2026-10-01T12:00:01Z", ""),
+			videoEdge("early", "2026-10-01T11:55:00Z", ""),
+		}, end, "a"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
