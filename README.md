@@ -471,6 +471,7 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 | `cookies.cookie_file` | `"./cookies.txt"` | Yes | Netscape-format cookie file |
 | `downloader.download_chat` | `true` | No | Download live chat alongside streams |
 | `downloader.prefer_60fps` | `true` | No | Prefer 60fps when same resolution available |
+| `downloader.prefer_hdr` | `true` | No | YouTube: prefer HDR over SDR at the same resolution and fps |
 | `downloader.num_parallel_downloads` | `10` | No | Simultaneous download jobs |
 | `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | No | Output path template |
 | `feed_check_interval` | `10` | No | Minutes between RSS feed checks (also accepts `"10m"`) |

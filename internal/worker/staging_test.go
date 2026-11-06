@@ -17,6 +17,15 @@ func TestHasStagingFiles(t *testing.T) {
 	if HasStagingFiles(dir, "job1") {
 		t.Fatal("expected false for empty dir")
 	}
+	// Only the yt:stretch display-aspect record, which ExecuteWithChat writes
+	// before the first request: a run that ended there left nothing to
+	// resume, so it must not read as preserved staging.
+	if err := recordDisplayAspect(filepath.Join(dir, "job1"), 16.0/9); err != nil {
+		t.Fatal(err)
+	}
+	if HasStagingFiles(dir, "job1") {
+		t.Fatal("expected false for a staging dir holding only the display-aspect record")
+	}
 	// With file
 	os.WriteFile(filepath.Join(dir, "job1", "chat.json"), []byte("{}"), 0o644)
 	if !HasStagingFiles(dir, "job1") {

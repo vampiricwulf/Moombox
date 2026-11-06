@@ -41,7 +41,7 @@ const (
 // back the way a client reads it.
 func pickerJSON(t *testing.T, info *youtube.VideoInfo) (raw []byte, decoded map[string]any) {
 	t.Helper()
-	raw, err := json.Marshal(formatsPayload("vid", info))
+	raw, err := json.Marshal(formatsPayload("vid", info, true, true))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestFormatsPayloadMarksDamagedAndSegmentedRenditions(t *testing.T) {
 		"bestWebmVideo": 248, // past the damaged 313 and the OTF 271
 		"bestMp4Video":  264, // the OTF file; the live adaptive 137 is past it anyway
 		"bestOpusAudio": 250, // past the damaged 251
-		"bestAacAudio":  140, // every AAC is damaged: the old pick, the first
+		"bestAacAudio":  140, // every AAC is damaged: the best-ranked of them
 	} {
 		if best[key] != want {
 			t.Errorf("bestItags.%s = %v, want %v", key, best[key], want)
@@ -143,7 +143,7 @@ func TestFormatsPayloadMarksDamagedAndSegmentedRenditions(t *testing.T) {
 
 // TestFormatsPayloadKeepsABadgeWhenEveryRenditionIsMarked: on a live or
 // post-live stream every format is live adaptive, so every row is segmented.
-// The badges then keep the pick they always made — the first of each kind —
+// The badges then fall back to the best-ranked rendition of each kind, marked,
 // rather than vanish, and a kind with no rendition at all is still null.
 //
 // Mutant: bestPickerItag without its fallback (every badge is null).
@@ -156,7 +156,7 @@ func TestFormatsPayloadKeepsABadgeWhenEveryRenditionIsMarked(t *testing.T) {
 	_, decoded := pickerJSON(t, info)
 	best, _ := decoded["bestItags"].(map[string]any)
 	if best["bestMp4Video"] != float64(299) || best["bestAacAudio"] != float64(140) {
-		t.Errorf("bestItags = %v, want the first MP4 (299) and AAC (140) though every one is segmented", best)
+		t.Errorf("bestItags = %v, want the best MP4 (299) and AAC (140) though every one is segmented", best)
 	}
 	for _, key := range []string{"bestWebmVideo", "bestOpusAudio"} {
 		if v, ok := best[key]; !ok || v != nil {
@@ -296,6 +296,61 @@ func TestFormatsPayloadDecodesIntoTheTUIPicker(t *testing.T) {
 	for itag, want := range map[int][2]bool{313: {true, false}, 248: {}, 137: {false, true}, 136: {}, 251: {false, true}, 250: {}, 140: {true, false}} {
 		if marks[itag] != want {
 			t.Errorf("itag %d: [damaged segmented] = %v, want %v", itag, marks[itag], want)
+		}
+	}
+}
+
+// TestFormatsPayloadBadgesFollowTheSharedRank is the W9 follow-up's rule
+// for wave W20: the [Best …] badges follow the selector's rank, so the badge
+// names the rendition automatic selection takes of its kind. They used to go
+// to the first row of a kind in the display order — size, frame rate, then
+// bitrate ASCENDING — so at one size the lowest-bitrate rendition was
+// badged whatever its codec or range, and audio was badged by bitrate alone.
+//
+//   - MP4: the av01 399 over the avc1 137 at 1080p (the codec rung), though
+//     137 lists first by its lower bitrate.
+//   - WEBM: the VP9.2 HDR 335 over the VP9 248 under prefer_hdr, and the
+//     248 with prefer_hdr off (owner decision D13).
+//   - AAC: Premium 141 (AUDIO_QUALITY_HIGH, stereo) over 258 (MEDIUM, 5.1,
+//     the higher bitrate) — the quality ladder ahead of channels and bitrate.
+//
+// Mutants (each run): bestPickerItag keeping the first intact row again (137,
+// the lower-bitrate VP9, 258); formatsPayload passing preferHDR true always
+// (the prefer_hdr=false row keeps 335).
+func TestFormatsPayloadBadgesFollowTheSharedRank(t *testing.T) {
+	hdr := `video/webm; codecs="vp09.02.41.10.01.09.16.09.00"`
+	av1 := `video/mp4; codecs="av01.0.09M.08"`
+	quality := func(q string, ch int) func(*youtube.Format) {
+		return func(f *youtube.Format) { f.AudioQuality, f.AudioChannels = q, ch }
+	}
+	info := &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, Formats: []youtube.Format{
+		pickerFixture(137, 1920, 4_000_000, pickerMp4),
+		pickerFixture(399, 1920, 4_500_000, av1),
+		pickerFixture(248, 1920, 2_500_000, pickerWebm),
+		pickerFixture(335, 1920, 3_000_000, hdr),
+		pickerFixture(258, 0, 384_000, pickerAac, quality("AUDIO_QUALITY_MEDIUM", 6)),
+		pickerFixture(141, 0, 255_000, pickerAac, quality("AUDIO_QUALITY_HIGH", 2)),
+	}}
+	for _, tc := range []struct {
+		preferHDR bool
+		want      map[string]float64
+	}{
+		{true, map[string]float64{"bestMp4Video": 399, "bestWebmVideo": 335, "bestAacAudio": 141}},
+		{false, map[string]float64{"bestMp4Video": 399, "bestWebmVideo": 248, "bestAacAudio": 141}},
+	} {
+		raw, err := json.Marshal(formatsPayload("vid", info, true, tc.preferHDR))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		best, _ := decoded["bestItags"].(map[string]any)
+		for key, want := range tc.want {
+			if best[key] != want {
+				t.Errorf("prefer_hdr=%v: bestItags.%s = %v, want %v", tc.preferHDR, key, best[key], want)
+			}
 		}
 	}
 }

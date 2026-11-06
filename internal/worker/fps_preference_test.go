@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 // prefer_60fps was honoured only by the whole-file VOD selector: every live
@@ -47,11 +48,11 @@ func TestLiveSelectorsHonourPrefer60fps(t *testing.T) {
 		{"1080p60", false, 60, 1080}, // an explicit ask outranks the setting
 		{"720p", true, 30, 720},      // nothing at 60 there: the preference cannot empty a size
 	} {
-		d := SelectBestDashStream(dash, 0, 2160, true, tc.pref, tc.prefer60)
+		d := SelectBestDashStream(dash, 0, 2160, true, tc.pref, tc.prefer60, true)
 		if d == nil || d.FPS != tc.wantFPS || d.Height != tc.wantShort {
 			t.Errorf("DASH pref=%q prefer60=%v: got %+v, want %dp%d", tc.pref, tc.prefer60, d, tc.wantShort, tc.wantFPS)
 		}
-		h := selectHlsVariant(hls, tc.pref, 2160, tc.prefer60)
+		h := selectHlsVariant(hls, tc.pref, 2160, tc.prefer60, true, youtube.AudioLanguages{})
 		if h == nil || h.FPS != tc.wantFPS || h.Height != tc.wantShort {
 			t.Errorf("HLS pref=%q prefer60=%v: got %+v, want %dp%d", tc.pref, tc.prefer60, h, tc.wantShort, tc.wantFPS)
 		}
@@ -64,7 +65,7 @@ func TestLiveSelectorsHonourPrefer60fps(t *testing.T) {
 		{Itag: 2, MimeType: "video/mp4", Width: 1920, Height: 1080, Bandwidth: 2},
 	}
 	for _, prefer60 := range []bool{true, false} {
-		if d := SelectBestDashStream(unknown, 0, 2160, true, "", prefer60); d == nil || d.Itag != 2 {
+		if d := SelectBestDashStream(unknown, 0, 2160, true, "", prefer60, true); d == nil || d.Itag != 2 {
 			t.Errorf("prefer60=%v with no stated frame rates: got %+v, want the higher bandwidth", prefer60, d)
 		}
 	}
@@ -83,10 +84,10 @@ func TestPortraitPreferenceMatchesTheShortEdge(t *testing.T) {
 		{Itag: 2, MimeType: "video/mp4", Width: 720, Height: 1280, FPS: 30, Bandwidth: 3},
 		{Itag: 3, MimeType: "video/mp4", Width: 480, Height: 854, FPS: 30, Bandwidth: 1},
 	}
-	if d := SelectBestDashStream(dash, 0, 2160, true, "1080p", true); d == nil || d.Itag != 1 {
+	if d := SelectBestDashStream(dash, 0, 2160, true, "1080p", true, true); d == nil || d.Itag != 1 {
 		t.Errorf("DASH portrait 1080p: got %+v, want the 1080x1920 rendition", d)
 	}
-	if d := SelectBestDashStream(dash, 0, 2160, true, "900p", true); d == nil || d.Itag != 2 {
+	if d := SelectBestDashStream(dash, 0, 2160, true, "900p", true, true); d == nil || d.Itag != 2 {
 		t.Errorf("DASH portrait 900p: got %+v, want the next lower short edge, 720x1280", d)
 	}
 	hls := []engine.HlsVariant{
@@ -94,10 +95,10 @@ func TestPortraitPreferenceMatchesTheShortEdge(t *testing.T) {
 		{Width: 720, Height: 1280, FPS: 30, Bandwidth: 3, URL: "720"},
 		{Width: 480, Height: 854, FPS: 30, Bandwidth: 1, URL: "480"},
 	}
-	if h := selectHlsVariant(hls, "1080p", 2160, true); h == nil || h.URL != "1080" {
+	if h := selectHlsVariant(hls, "1080p", 2160, true, true, youtube.AudioLanguages{}); h == nil || h.URL != "1080" {
 		t.Errorf("HLS portrait 1080p: got %+v, want the 1080x1920 variant", h)
 	}
-	if h := selectHlsVariant(hls, "900p", 2160, true); h == nil || h.URL != "720" {
+	if h := selectHlsVariant(hls, "900p", 2160, true, true, youtube.AudioLanguages{}); h == nil || h.URL != "720" {
 		t.Errorf("HLS portrait 900p: got %+v, want the next lower short edge, 720x1280", h)
 	}
 }
@@ -136,23 +137,24 @@ func TestQualityDescentRanksTheLowerSizeByFrameRate(t *testing.T) {
 		for i, s := range dash {
 			hls[i] = engine.HlsVariant{Width: s.Width, Height: s.Height, FPS: s.FPS, Bandwidth: s.Bandwidth}
 		}
-		if d := SelectBestDashStream(dash, 0, 2160, true, tc.pref, tc.prefer60); d == nil || d.Height != 1080 || d.FPS != tc.wantFPS {
+		if d := SelectBestDashStream(dash, 0, 2160, true, tc.pref, tc.prefer60, true); d == nil || d.Height != 1080 || d.FPS != tc.wantFPS {
 			t.Errorf("DASH pref=%q prefer60=%v: got %+v, want 1080p%d", tc.pref, tc.prefer60, d, tc.wantFPS)
 		}
-		if h := selectHlsVariant(hls, tc.pref, 2160, tc.prefer60); h == nil || h.Height != 1080 || h.FPS != tc.wantFPS {
+		if h := selectHlsVariant(hls, tc.pref, 2160, tc.prefer60, true, youtube.AudioLanguages{}); h == nil || h.Height != 1080 || h.FPS != tc.wantFPS {
 			t.Errorf("HLS pref=%q prefer60=%v: got %+v, want 1080p%d", tc.pref, tc.prefer60, h, tc.wantFPS)
 		}
 	}
 }
 
-// Every VIDEO selection outside tests must carry the job's prefer_60fps — the
-// strategies, the cipher re-selection and above all the quality probe: a probe
-// that ranked frame rates differently from the downloader would report a
-// "quality change" on every 30 s tick and split the recording each time.
-// Pinned structurally because the probe runs against the concrete
-// *youtube.Service.
+// Every VIDEO selection outside tests must carry the job's prefer_60fps and
+// prefer_hdr — the strategies, the cipher re-selection and above all the
+// quality probe: a probe that ranked frame rates or dynamic ranges
+// differently from the downloader would report a "quality change" on every
+// 30 s tick and split the recording each time. Pinned structurally because
+// the probe runs against the concrete *youtube.Service.
 //
-// Mutant: any call site passing a literal true/false for a video selection.
+// Mutant: any call site passing a literal true/false for a video selection's
+// prefer_60fps or prefer_hdr.
 func TestEveryVideoSelectionCarriesPrefer60fps(t *testing.T) {
 	files, _ := filepath.Glob("*.go")
 	fset := token.NewFileSet()
@@ -181,20 +183,24 @@ func TestEveryVideoSelectionCarriesPrefer60fps(t *testing.T) {
 			if !ok {
 				return true
 			}
-			var arg ast.Expr
+			var fps, hdr ast.Expr
 			switch {
-			case id.Name == "SelectBestDashStream" && len(call.Args) == 6 && text(call.Args[3]) == "true":
-				arg = call.Args[5]
-			case id.Name == "selectHlsVariant" && len(call.Args) == 4:
-				arg = call.Args[3]
-			case id.Name == "resolveManifestlessStream" && len(call.Args) > 8 && text(call.Args[6]) == "true":
-				arg = call.Args[8]
+			case id.Name == "SelectBestDashStream" && len(call.Args) == 7 && text(call.Args[3]) == "true":
+				fps, hdr = call.Args[5], call.Args[6]
+			case id.Name == "selectHlsVariant" && len(call.Args) == 6:
+				fps, hdr = call.Args[3], call.Args[4]
+			case id.Name == "resolveManifestlessStream" && len(call.Args) > 9 && text(call.Args[6]) == "true":
+				fps, hdr = call.Args[8], call.Args[9]
 			default:
 				return true
 			}
 			checked++
-			if a := text(arg); !strings.Contains(strings.ToLower(a), "prefer60fps") {
+			if a := text(fps); !strings.Contains(strings.ToLower(a), "prefer60fps") {
 				t.Errorf("%s: %s passes %q for prefer_60fps — a video selection must carry the job's setting",
+					fset.Position(call.Pos()), id.Name, a)
+			}
+			if a := text(hdr); !strings.Contains(strings.ToLower(a), "preferhdr") {
+				t.Errorf("%s: %s passes %q for prefer_hdr — a video selection must carry the job's setting",
 					fset.Position(call.Pos()), id.Name, a)
 			}
 			return true

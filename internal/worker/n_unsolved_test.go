@@ -360,7 +360,9 @@ func TestVodAndManifestFreeTreatAnUnsolvedNAsAResolveFailure(t *testing.T) {
 	cand2 := DashStreamInfo{Itag: 303, MimeType: video.MimeType, Width: w, Height: h, FPS: fps, Bandwidth: video.Bitrate - 1}
 	asked.Store(0)
 	u, _, err := resolveManifestlessStream(context.Background(), []youtube.Format{video, other}, []DashStreamInfo{cand, cand2}, &cand,
-		0, 0, true, "", false, routed, nil, nPlayer, map[int]bool{}, &discardLogger{})
+		0, 0, true, "", false, true,
+		routed, nil, nPlayer, map[int]bool{}, &discardLogger{})
+
 	if !errors.Is(err, cipher.ErrNUnsolved) || !errors.Is(err, errChallengesUnsolvable) {
 		t.Errorf("resolveManifestlessStream = %q, %v; want cipher.ErrNUnsolved, marked errChallengesUnsolvable", u, err)
 	}
@@ -380,7 +382,9 @@ func TestVodAndManifestFreeTreatAnUnsolvedNAsAResolveFailure(t *testing.T) {
 		{"none the re-selection takes", []DashStreamInfo{cand, audio}, "re-selection produced no candidate"},
 	} {
 		u, _, err := resolveManifestlessStream(context.Background(), []youtube.Format{signed}, tc.candidates, &cand,
-			0, 0, true, "", false, routed, nil, nPlayer, map[int]bool{}, &discardLogger{})
+			0, 0, true, "", false, true,
+			routed, nil, nPlayer, map[int]bool{}, &discardLogger{})
+
 		if msg := fmt.Sprint(err); !strings.Contains(msg, tc.giveUp) || !strings.Contains(msg, "Sig not implemented") || errors.Is(err, errChallengesUnsolvable) {
 			t.Errorf("resolveManifestlessStream, %s = %q, %v; want the %q give-up carrying the solver's own error, unmarked", tc.name, u, err, tc.giveUp)
 		}

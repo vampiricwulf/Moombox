@@ -443,12 +443,12 @@ func (s *Service) ChatSessionHeaders() map[string]string {
 }
 
 // GetFormats fetches available formats and returns them with best-selection info.
-func (s *Service) GetFormats(ctx context.Context, videoID string, maxRes int, prefer60fps bool) (*VideoInfo, *SelectedFormats, error) {
+func (s *Service) GetFormats(ctx context.Context, videoID string, maxRes int, prefer60fps, preferHDR bool) (*VideoInfo, *SelectedFormats, error) {
 	info, err := s.GetVideoInfo(ctx, videoID)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	selected := SelectBestFormatsWithLogger(info.Formats, maxRes, prefer60fps, s.logger)
+	selected := SelectBestFormatsWithLogger(info.Formats, maxRes, prefer60fps, preferHDR, s.logger)
 	return info, &selected, nil
 }

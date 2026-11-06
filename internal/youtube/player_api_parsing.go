@@ -99,6 +99,10 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	// strategy resolves them via cipher.ResolveFormatURL right before
 	// constructing SegmentDownloaders.
 	formats, formatDiag := p.parseFormats(ctx, streamingData)
+	langs := noteAudioLanguages(streamingData)
+	extractionStateFrom(ctx).noteAudioLanguages(langs)
+	stretch, keywordsStated := stretchedRatio(videoDetails)
+	extractionStateFrom(ctx).noteStretch(stretch, keywordsStated)
 
 	// The response's pre-roll ad wait (playbackAvailableAt), stamped on every
 	// format it yields and on each manifest it carries, so that whichever of
@@ -227,6 +231,8 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		PublishedPrecision: publishedPrecision,
 		FormatDiag:         formatDiag,
 		PlaybackWaitExempt: liveFlags.exempt(),
+		AudioLanguages:     langs,
+		StretchedRatio:     stretch,
 	}
 	if info.DashManifestURL != "" {
 		info.DashManifestAvailableAt = availableAt
@@ -397,6 +403,118 @@ type extractionState struct {
 	live   playbackLiveFlags
 	// jsl is the extraction's JS-less ranking state (challenge_free.go).
 	jsl jslessState
+	// langs is the extraction's language_map, each language the first a
+	// parsed response stated (noteAudioLanguages); finishExtraction stamps
+	// it as VideoInfo.AudioLanguages.
+	langsMu sync.Mutex
+	langs   AudioLanguages
+	// stretch is the yt:stretch ratio of the first parsed response that
+	// stated videoDetails.keywords (stretchStated), upstream's
+	// get_first(video_details, 'keywords'); under langsMu.
+	stretch       float64
+	stretchStated bool
+}
+
+// noteStretch records a response's yt:stretch ratio when it is the first to
+// state keywords. Nil outside a cascade.
+func (s *extractionState) noteStretch(ratio float64, stated bool) {
+	if s == nil || !stated {
+		return
+	}
+	s.langsMu.Lock()
+	defer s.langsMu.Unlock()
+	if !s.stretchStated {
+		s.stretch, s.stretchStated = ratio, true
+	}
+}
+
+// stretchedRatio is the extraction's yt:stretch ratio and whether any
+// response stated keywords at all.
+func (s *extractionState) stretchedRatio() (float64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.langsMu.Lock()
+	defer s.langsMu.Unlock()
+	return s.stretch, s.stretchStated
+}
+
+// stretchRegex is upstream's `(\d+)\s*:\s*(\d+)` search in a yt:stretch
+// keyword (_video.py:4093).
+var stretchRegex = regexp.MustCompile(`(\d+)\s*:\s*(\d+)`)
+
+// stretchedRatio reads videoDetails.keywords for `yt:stretch=W:H` as
+// _real_extract does (_video.py:4087-4101): the first keyword starting with
+// it whose W and H both parse and are above 0 gives W/H; a malformed one is
+// passed over for the next. stated reports whether the response carried a
+// keywords list at all. Upstream also reads og:video:tag off the watch page
+// when no response states keywords; Moombox's watch page reaches this parse
+// as its ytInitialPlayerResponse, whose videoDetails carry the same list.
+func stretchedRatio(videoDetails map[string]any) (ratio float64, stated bool) {
+	keywords, ok := videoDetails["keywords"].([]any)
+	if !ok {
+		return 0, false
+	}
+	for _, k := range keywords {
+		kw, _ := k.(string)
+		if !strings.HasPrefix(kw, "yt:stretch=") {
+			continue
+		}
+		m := stretchRegex.FindStringSubmatch(kw)
+		if m == nil {
+			continue
+		}
+		w, errW := strconv.ParseFloat(m[1], 64)
+		h, errH := strconv.ParseFloat(m[2], 64)
+		if errW == nil && errH == nil && w > 0 && h > 0 {
+			return w / h, true
+		}
+	}
+	return 0, true
+}
+
+// noteAudioLanguages folds one response's languages into the extraction's.
+// Nil outside a cascade.
+func (s *extractionState) noteAudioLanguages(l AudioLanguages) {
+	if s == nil {
+		return
+	}
+	s.langsMu.Lock()
+	defer s.langsMu.Unlock()
+	s.langs.merge(l)
+}
+
+// audioLanguages is the extraction's language_map so far.
+func (s *extractionState) audioLanguages() AudioLanguages {
+	if s == nil {
+		return AudioLanguages{}
+	}
+	s.langsMu.Lock()
+	defer s.langsMu.Unlock()
+	return s.langs
+}
+
+// noteAudioLanguages is one response's language_map, read from every entry
+// of its adaptiveFormats and formats — the URL-less ones a client YouTube
+// forced onto SABR lists, and DRM ones, included — before parseFormats drops
+// anything. yt-dlp registers the original and default languages from a
+// URL-less format for exactly this reason (_video.py:3528-3531, #14883): a
+// SABR-forced VOD's only fetchable media can be an HLS master with one
+// pre-merged variant per audio track, and its HTTPS formats are then the only
+// record of which track is the original. parseFormats discarded a URL-less
+// entry whole, its audioTrack with it.
+func noteAudioLanguages(streamingData map[string]any) AudioLanguages {
+	var l AudioLanguages
+	for _, key := range []string{"adaptiveFormats", "formats"} {
+		arr, _ := streamingData[key].([]any)
+		for _, item := range arr {
+			f, _ := item.(map[string]any)
+			if at, ok := f["audioTrack"].(map[string]any); ok {
+				l.note(getStr(at, "id"), getStr(at, "displayName"), getBool(at, "audioIsDefault"))
+			}
+		}
+	}
+	return l
 }
 
 // withExtractionState opens one extraction's scratch. Called once at the head
@@ -631,6 +749,7 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 			format.QualityLabel = getStr(f, "qualityLabel")
 			format.AudioQuality = getStr(f, "audioQuality")
 			format.AudioSampleRate = getStr(f, "audioSampleRate")
+			format.AudioChannels = getInt(f, "audioChannels")
 			if td := getInt(f, "targetDurationSec"); td > 0 {
 				format.TargetDurationSec = td
 			}
@@ -1330,10 +1449,12 @@ func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 	// other's never hands it back as its own shadow.
 	tokenFree := make(map[formatKey]Format)
 	tokenRequiring := make(map[formatKey]Format)
+	facts := make(map[int]streamFacts)
 	for _, f := range pool {
 		if f.URL == "" {
 			continue
 		}
+		facts[f.Itag] = facts[f.Itag].note(&f)
 		key := formatKey{itag: f.Itag, audioTrackID: f.AudioTrackID, isDrc: f.IsDrc}
 		class := tokenFree
 		if GvsTokenRequired(f.Source) {
@@ -1354,6 +1475,7 @@ func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 
 	result := make([]Format, 0, len(byStream))
 	for key, f := range byStream {
+		facts[f.Itag].fill(&f)
 		f.TokenFreeAlternate, f.TokenAlternate = nil, nil
 		other, slot := tokenRequiring, &f.TokenAlternate
 		if GvsTokenRequired(f.Source) {
@@ -1381,6 +1503,51 @@ func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 	collapsed := collapseToPreferredRendition(result)
 	extractionStateFrom(ctx).noteCollapsedRenditions(len(result) - len(collapsed))
 	return collapsed
+}
+
+// streamFacts is what any client stated of an audio itag's quality and
+// channels, the first statement of each kept. The selector ranks audio by
+// the audioQuality ladder and channels (AudioRank), and some clients — the
+// tv family's adaptiveFormats — state neither: a stream whose winning copy
+// came from one would rank as "tiny" next to another itag whose winner
+// stated its quality, so 251 lost to 250. The dedup fills the winner in from
+// a copy that stated them. Here Moombox goes beyond upstream: yt-dlp fills
+// only a manifest (HLS/DASH) format's quality from the itag's https copies
+// (`itag_qualities`, _video.py:3404-3411, 3670); its https formats keep
+// their own statement, and since the first client's copy wins its stream_id
+// dedup (3510-3513) a tv-won copy ranks as "tiny" there. The fill is
+// modelled on itag_qualities and extended to the https copies, because an
+// itag's quality and channels are its encode's, the same from every client.
+type streamFacts struct {
+	quality  string
+	channels int
+}
+
+// note folds one copy's statements in. Only an audio copy's count: an
+// audioQuality on a video format is IsProgressiveFormat's mark of a muxed
+// file, which must never spread to the itag's other copies.
+func (s streamFacts) note(f *Format) streamFacts {
+	if !f.IsAudio() {
+		return s
+	}
+	if s.quality == "" {
+		s.quality = f.AudioQuality
+	}
+	if s.channels == 0 {
+		s.channels = f.AudioChannels
+	}
+	return s
+}
+
+// fill gives a format that stated no quality or channels the itag's — only
+// ever an audio itag's, since note keeps nothing of a video copy.
+func (s streamFacts) fill(f *Format) {
+	if f.AudioQuality == "" {
+		f.AudioQuality = s.quality
+	}
+	if f.AudioChannels == 0 {
+		f.AudioChannels = s.channels
+	}
 }
 
 // MergeFormatPool folds extra — formats fetched after the extraction, labelled

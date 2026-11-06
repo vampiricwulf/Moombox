@@ -245,6 +245,26 @@ type VideoInfo struct {
 	// publish date from one that carried a time, for "Stream Found"'s Published
 	// field (addFoundFacts, internal/worker/found_announce.go).
 	UploadDate string `json:"uploadDate,omitempty"`
+
+	// AudioLanguages is the extraction's language_map: the original and
+	// default audio tracks' languages, recorded from every format entry of
+	// every response, URL-less ones included (noteAudioLanguages). The
+	// selectors that know a rendition only by its language — an HLS
+	// variant's YT-EXT-AUDIO-CONTENT-ID, a DASH manifest's lang — rank it
+	// against these (LanguageTrackScore). A cascade's VideoInfo carries the
+	// whole extraction's (finishExtraction); any other, its one response's.
+	AudioLanguages AudioLanguages `json:"audioLanguages,omitzero"`
+
+	// StretchedRatio is the display aspect a `yt:stretch=W:H` keyword asks
+	// for (videoDetails.keywords), W/H, or 0 when the video carries none:
+	// yt-dlp's `stretched_ratio` (_video.py:4087-4101), which its default
+	// fixup applies as `-aspect` on a stream copy (FFmpegFixupStretchedPP).
+	// Old anamorphic uploads store 4:3 frames meant for 16:9. The worker
+	// records it beside the job's staging for the archive mux
+	// (recordDisplayAspect). A cascade's VideoInfo carries the first
+	// response's that states keywords (finishExtraction), as upstream's
+	// get_first does.
+	StretchedRatio float64 `json:"stretchedRatio,omitempty"`
 }
 
 // ChatSource carries the chat-setup facts the WATCH PAGE this VideoInfo was
@@ -406,6 +426,12 @@ type Format struct {
 	// A separate STREAM upstream, not a variant of the clean one, so it must
 	// not evict its twin — and the clean one is preferred when both exist.
 	IsDrc bool `json:"isDrc,omitempty"`
+
+	// AudioChannels is `audioChannels`: 2 for stereo, 6 for the 5.1
+	// renditions (256/258 AAC, 328 E-AC-3, 380 AC-3) some clients list. 0
+	// when unstated. yt-dlp's `channels` rung (_video.py:3464), which ranks
+	// a 5.1 track above stereo Opus (AudioRank).
+	AudioChannels int `json:"audioChannels,omitempty"`
 
 	// ApproxDurationMs is the format's own `approxDurationMs`, the length of
 	// media it serves, or nil when the response stated none. Read only to

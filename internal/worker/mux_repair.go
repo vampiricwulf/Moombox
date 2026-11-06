@@ -199,7 +199,10 @@ func (o *DownloadOrchestrator) copyStaged(ctx context.Context, jobID, videoPath,
 	defer o.removeRepairedCopies(jobID, ins)
 	v.inputs = ins
 	video, audio := ins.readPaths()
-	if err := o.mux().MuxCopyAt(ctx, video, audio, outputPath, ins.offsets, o.verifiedCopy(jobID, &v, ins)); err != nil {
+	// The yt:stretch display aspect recorded beside the staged video, if any
+	// (stagedDisplayAspect): read off the original path, not a repaired copy.
+	aspect := stagedDisplayAspect(videoPath)
+	if err := o.mux().MuxCopyAspect(ctx, video, audio, outputPath, ins.offsets, aspect, o.verifiedCopy(jobID, &v, ins)); err != nil {
 		return v, err
 	}
 	o.reportStagingRepairs(jobID, ins, outputPath)

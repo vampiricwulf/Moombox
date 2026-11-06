@@ -276,19 +276,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// dashPoToken from step 2 is reused for segment URLs via DownloaderOptions.
 
 	// Convert to DashStreamInfo for selection
-	streamInfos := make([]DashStreamInfo, 0, len(streams))
-	for _, s := range streams {
-		streamInfos = append(streamInfos, DashStreamInfo{
-			Itag:           s.Itag,
-			MimeType:       s.MimeType,
-			Width:          s.Width,
-			Height:         s.Height,
-			FPS:            s.FPS,
-			Bandwidth:      s.Bandwidth,
-			BaseURL:        s.BaseURL,
-			Initialization: s.Initialization,
-		})
-	}
+	streamInfos := manifestStreamInfos(streams, videoInfo.AudioLanguages, videoInfo.Formats)
 
 	// Select best video/audio streams — per-job itag selection overrides config defaults (matches TS)
 	videoItag := job.Config.VideoItag
@@ -309,10 +297,10 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// -1 means user explicitly chose "no video/audio"
 	var videoStream, audioStream *DashStreamInfo
 	if videoItag != -1 {
-		videoStream = SelectBestDashStream(streamInfos, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps)
+		videoStream = SelectBestDashStream(streamInfos, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps, job.Config.PreferHDR)
 	}
 	if audioItag != -1 {
-		audioStream = SelectBestDashStream(streamInfos, audioItag, 0, false, "", false)
+		audioStream = SelectBestDashStream(streamInfos, audioItag, 0, false, "", false, false)
 	}
 	warnUnhonouredPins(job, videoItag, videoStream, audioItag, audioStream)
 	warnDamagedManifestPins(job, videoInfo, videoStream, audioStream)
@@ -496,4 +484,72 @@ func warnDamagedManifestPins(job *JobContext, videoInfo *youtube.VideoInfo, vide
 			break
 		}
 	}
+}
+
+// manifestStreamInfos converts a parsed DASH manifest's streams into the
+// DashStreamInfo shape SelectBestDashStream ranks — for the DASH-manifest
+// download (DownloadDash) and the quality probe's manifest branch alike, so
+// the probe ranks exactly what the download would. The conversion used to
+// drop the Representation's codecs, leaving the selector nothing to rank but
+// bandwidth (G37); it carries them now, and an audio stream's rank: its
+// codec score, and its track — the Representation's lang against the
+// extraction's original and default languages (youtube.LanguageTrackScore),
+// yt-dlp's language_preference for a DASH-manifest format (_video.py:
+// 3655-3663).
+//
+// A manifest states no audioQuality and no channel count, so both come from
+// the extraction's own copy of the same itag (formats, VideoInfo.Formats):
+// the quality as yt-dlp's process_manifest_format fills a manifest format's
+// from the https formats of its itag (`f['quality'] = q(itag_qualities…)`,
+// _video.py:3670, filled at 3409-3411), and the channels likewise — there
+// Moombox goes beyond upstream, whose MPD parse reads no
+// AudioChannelConfiguration and so ties every manifest track on channels:
+// owner decision D14 ranks this path like VOD, and the VOD path ranks a 5.1
+// rendition above stereo at one quality (D15), which a tie would hand back
+// to the codec rung (stereo Opus over E-AC-3 5.1). An itag's channel count
+// is a property of the itag, so the https copy states the manifest's. With
+// no copy of the itag the rungs stay 0 and tie, as upstream's do.
+func manifestStreamInfos(streams []engine.DashStream, langs youtube.AudioLanguages, formats []youtube.Format) []DashStreamInfo {
+	type facts struct{ quality, channels int }
+	byItag := make(map[int]facts)
+	for i := range formats {
+		f := &formats[i]
+		if !strings.Contains(f.MimeType, "audio") {
+			continue
+		}
+		have := byItag[f.Itag]
+		if have.quality == 0 {
+			have.quality = youtube.AudioQualityRung(f.AudioQuality)
+		}
+		if have.channels == 0 {
+			have.channels = f.AudioChannels
+		}
+		byItag[f.Itag] = have
+	}
+	infos := make([]DashStreamInfo, 0, len(streams))
+	for _, s := range streams {
+		info := DashStreamInfo{
+			Itag:           s.Itag,
+			MimeType:       s.MimeType,
+			Width:          s.Width,
+			Height:         s.Height,
+			FPS:            s.FPS,
+			Bandwidth:      s.Bandwidth,
+			BaseURL:        s.BaseURL,
+			Initialization: s.Initialization,
+			Codecs:         s.Codecs,
+			Lang:           s.Lang,
+		}
+		if strings.Contains(s.MimeType, "audio") {
+			fill := byItag[s.Itag]
+			info.Audio = youtube.AudioRank{
+				Track:    youtube.LanguageTrackScore(s.Lang, langs),
+				Quality:  fill.quality,
+				Channels: fill.channels,
+				Codec:    youtube.ScoreAudioCodec(s.Codecs),
+			}
+		}
+		infos = append(infos, info)
+	}
+	return infos
 }

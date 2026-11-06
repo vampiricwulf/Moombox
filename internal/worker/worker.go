@@ -223,6 +223,11 @@ type JobConfig struct {
 	// test needs no value. Snapshotted at job start like MaximumTimeout
 	// above, so a config save applies to the next job, not a running one.
 	ProgressInterval time.Duration
+	// PreferHDR is downloader.prefer_hdr, snapshotted at job start: the
+	// dynamic-range rung of every YouTube selection this job makes — the
+	// VOD selector, the live and DASH-manifest selector, the HLS variant
+	// selector and the quality probe alike (youtube's rangeScore).
+	PreferHDR bool
 }
 
 // DownloadWorker manages the job processing loop.
@@ -1603,7 +1608,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		cfgOutputDir, cfgStagingDir, cfgTemplate string
 		cfgMaxRes, cfgMaxTimeout, cfgSegWorkers  int
 		cfgProgressMS                            int
-		cfgPrefer60, cfgChat                     bool
+		cfgPrefer60, cfgChat, cfgPreferHDR       bool
 		cfgInterruptionTimeout                   config.FlexDuration
 	)
 	w.readConfig(func(c *config.MoomboxConfig) {
@@ -1612,6 +1617,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		cfgTemplate = c.Downloader.OutputTemplate
 		cfgMaxRes = c.Downloader.MaxVideoResolution
 		cfgPrefer60 = c.Downloader.Prefer60fps
+		cfgPreferHDR = c.Downloader.PreferHDR
 		cfgChat = c.Downloader.DownloadChat
 		cfgMaxTimeout = c.Downloader.MaximumTimeout
 		cfgSegWorkers = c.Downloader.SegmentWorkers
@@ -1663,6 +1669,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		Config: &JobConfig{
 			MaxVideoResolution:  cfgMaxRes,
 			Prefer60fps:         cfgPrefer60,
+			PreferHDR:           cfgPreferHDR,
 			OutputDirectory:     outputDir,
 			StagingDirectory:    stagingDir,
 			FilenameTemplate:    template,

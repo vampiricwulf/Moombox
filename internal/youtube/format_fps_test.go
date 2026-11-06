@@ -52,7 +52,7 @@ func TestABogusFrameRateDoesNotWinTheFPSRung(t *testing.T) {
 	}
 	sd := decodePlayerJSON(t, `{"adaptiveFormats": [`+video(137, "avc1.640028", 1)+`,`+video(399, "av01.0.08M.08", 30)+`]}`)
 	formats, _ := NewPlayerAPI(nil, noopLogger{}).parseFormats(context.Background(), sd)
-	got := SelectBestFormats(formats, 1080, false)
+	got := SelectBestFormats(formats, 1080, false, true)
 	if got.Video == nil || got.Video.Itag != 399 {
 		t.Errorf("video = %v, want the av01 399 — the avc1's 1 fps is not a frame rate", itagOf(got.Video))
 	}

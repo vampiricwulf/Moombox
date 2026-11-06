@@ -1543,6 +1543,7 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 	// that ranked frame rates differently from the downloader would see a
 	// "quality change" on every tick and split the recording every 30 s.
 	prefer60fps := jobCtx.Config.Prefer60fps
+	preferHDR := jobCtx.Config.PreferHDR
 	probeLog := newScopedLogger(o.logger, "jobID", jobCtx.Job.ID)
 
 	return func(ctx context.Context) (*QualityInfo, error) {
@@ -1567,7 +1568,7 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 			// disk-runaway class); an unguarded probe pool here would
 			// mis-report quality and churn refresh cycles every probe tick.
 			videoPool, _ := partitionManifestlessFormats(info.Formats)
-			best := SelectBestDashStream(videoPool, videoItag, maxRes, true, qualityPref, prefer60fps)
+			best := SelectBestDashStream(videoPool, videoItag, maxRes, true, qualityPref, prefer60fps, preferHDR)
 			if best == nil {
 				return nil, fmt.Errorf("manifestless DASH probe: no video stream selected")
 			}
@@ -1594,20 +1595,11 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 			return nil, fmt.Errorf("parse DASH manifest: %w", err)
 		}
 
-		var streamInfos []DashStreamInfo
-		for _, s := range streams {
-			streamInfos = append(streamInfos, DashStreamInfo{
-				Itag:      s.Itag,
-				MimeType:  s.MimeType,
-				Width:     s.Width,
-				Height:    s.Height,
-				FPS:       s.FPS,
-				Bandwidth: s.Bandwidth,
-			})
-		}
+		// The download's own conversion, so the probe ranks what it ranks.
+		streamInfos := manifestStreamInfos(streams, info.AudioLanguages, info.Formats)
 
 		// Select best video stream using same criteria as the download
-		best := SelectBestDashStream(streamInfos, videoItag, maxRes, true, qualityPref, prefer60fps)
+		best := SelectBestDashStream(streamInfos, videoItag, maxRes, true, qualityPref, prefer60fps, preferHDR)
 		if best == nil {
 			return nil, fmt.Errorf("no video stream found")
 		}

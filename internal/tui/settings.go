@@ -180,6 +180,7 @@ var sections = []settingsSection{
 			{"reorder_budget_mb", "Reorder budget total", fieldNumber, nil, "MB every download's reorder buffer may hold between them; 0 = unbounded (default: 4096; 1024 on arm64)", nil},
 			{"download_chat", "Download chat", fieldToggle, nil, "save live chat as JSON alongside video", nil},
 			{"prefer_60fps", "Prefer 60fps", fieldToggle, nil, "prefer 60fps when same resolution available", nil},
+			{"prefer_hdr", "Prefer HDR", fieldToggle, nil, "YouTube: prefer an HDR rendition over SDR at the same resolution and fps; No keeps SDR for players that cannot show HDR", nil},
 			{"maximum_timeout", "YouTube max timeout", fieldNumber, nil, "seconds to keep retrying a stalled YouTube livestream (30s live-checks) before finalizing even if YouTube still reports it live (default: 600, min 30, no max; very large values risk account consequences)", nil},
 			{"interruption_timeout", "Interruption resume timeout", fieldNumber, nil, "minutes finalize may stall waiting for an interrupted broadcast to resume; 0 = disabled, finalize never stalls (default: 120, no max)", nil},
 			{"incomplete_staging_expiry_days", "Incomplete staging expiry", fieldNumber, nil, "days an incomplete-tail recording keeps staging preserved for Resume; badge never expires, 0 = preserve forever (default: 7, no max)", nil},
@@ -702,6 +703,7 @@ func loadSettingsValues(v map[string]string, cfg *config.MoomboxConfig) {
 	v["reorder_budget_mb"] = strconv.Itoa(cfg.Downloader.ReorderBudgetMB)
 	v["download_chat"] = boolToDisplay(cfg.Downloader.DownloadChat)
 	v["prefer_60fps"] = boolToDisplay(cfg.Downloader.Prefer60fps)
+	v["prefer_hdr"] = boolToDisplay(cfg.Downloader.PreferHDR)
 	v["maximum_timeout"] = strconv.Itoa(cfg.Downloader.MaximumTimeout)
 	v["interruption_timeout"] = strconv.FormatFloat(cfg.Downloader.InterruptionTimeout.Minutes(), 'f', -1, 64)
 	v["incomplete_staging_expiry_days"] = strconv.FormatFloat(cfg.Downloader.IncompleteStagingExpiryDays.Days(), 'f', -1, 64)
@@ -1243,6 +1245,8 @@ func writeSettingsField(c *config.MoomboxConfig, key string, v map[string]string
 		c.Downloader.DownloadChat = yes
 	case "prefer_60fps":
 		c.Downloader.Prefer60fps = yes
+	case "prefer_hdr":
+		c.Downloader.PreferHDR = yes
 	case "maximum_timeout":
 		c.Downloader.MaximumTimeout = n
 	case "interruption_timeout":

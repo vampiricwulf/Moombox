@@ -981,6 +981,9 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		if v, ok := dl["prefer_60fps"].(bool); ok {
 			cfg.Downloader.Prefer60fps = v
 		}
+		if v, ok := dl["prefer_hdr"].(bool); ok {
+			cfg.Downloader.PreferHDR = v
+		}
 		if v, ok := dl["maximum_timeout"].(float64); ok {
 			cfg.Downloader.MaximumTimeout = int(v)
 		}

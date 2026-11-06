@@ -23,16 +23,17 @@ func (a *ytFormatAdapter) GetFormats(ctx context.Context, videoID string) (map[s
 	// Snapshot under the store lock — raw per-request field reads race
 	// config.Store.Update, which mutates the shared struct in place.
 	var maxRes int
-	var prefer60 bool
+	var prefer60, preferHDR bool
 	a.store.Read(func(c *config.MoomboxConfig) {
 		maxRes = c.Downloader.MaxVideoResolution
 		prefer60 = c.Downloader.Prefer60fps
+		preferHDR = c.Downloader.PreferHDR
 	})
-	info, _, err := a.svc.GetFormats(ctx, videoID, maxRes, prefer60)
+	info, _, err := a.svc.GetFormats(ctx, videoID, maxRes, prefer60, preferHDR)
 	if err != nil {
 		return nil, err
 	}
-	return formatsPayload(videoID, info), nil
+	return formatsPayload(videoID, info, prefer60, preferHDR), nil
 }
 
 // pickerFormat is one row of the format picker's list: the format as its own
@@ -67,17 +68,22 @@ type pickerFormat struct {
 // (pickerFormat), in the picker's order, and bestItags — the one rendition
 // per container/codec the picker badges [Best …] and preselects.
 //
-// A badge goes to the first adaptive rendition of its kind in that order
-// that is neither damaged nor segmented (owner decisions on the W9 and W4
+// A badge goes to the adaptive rendition of its kind automatic selection
+// ranks best — youtube.CompareVideoFormats / CompareAudioFormats, the shared
+// rank under the operator's prefer_60fps and prefer_hdr (wave W20: the
+// badges follow the selector, so an HDR or Premium rendition, or a 5.1 or
+// HIGH-quality audio track, is badged where the downloader would take it) —
+// among those that are neither damaged nor segmented (owner decisions on the W9 and W4
 // follow-ups): automatic selection passes a damaged one over while an intact
 // one of its kind exists, and a whole-file VOD cannot fetch a segmented one,
 // so badging either pointed the operator — and the dashboard's preselection,
 // which follows the badges — at a rendition the downloader would not choose
 // itself. When every adaptive rendition of a kind is damaged or segmented,
 // as on a live or post-live stream, whose adaptive formats are all live
-// adaptive, the badge falls back to the first adaptive rendition of the
-// kind — the pick it always made, unless a muxed file sorted ahead of it —
-// so a badge still exists. Neither mark stops a manual pin: the operator can
+// adaptive, the badge falls back to the best-ranked adaptive rendition of
+// the kind, marked or not, so a badge still exists. The list order (size,
+// frame rate, then bitrate ascending, as the TypeScript picker sorted) is the
+// display's only; it no longer decides a badge. Neither mark stops a manual pin: the operator can
 // still choose a marked row by hand.
 //
 // Adaptive, because a muxed progressive file (itag 18, 640x360 with its
@@ -92,7 +98,7 @@ type pickerFormat struct {
 // muxed format at all (partitionManifestlessFormats). A muxed row is badged
 // only when its kind has no adaptive row, the one case it was the old pick
 // and nothing else could be.
-func formatsPayload(videoID string, info *youtube.VideoInfo) map[string]any {
+func formatsPayload(videoID string, info *youtube.VideoInfo, prefer60fps, preferHDR bool) map[string]any {
 	// Separate video and audio formats, only those with a URL
 	var videoFormats, audioFormats []youtube.Format
 	for _, f := range info.Formats {
@@ -132,11 +138,13 @@ func formatsPayload(videoID string, info *youtube.VideoInfo) map[string]any {
 	}
 
 	// Build bestItags matching TypeScript format: bestWebmVideo, bestMp4Video, bestOpusAudio, bestAacAudio
+	video := func(a, b *youtube.Format) int { return youtube.CompareVideoFormats(a, b, prefer60fps, preferHDR) }
+	audio := youtube.CompareAudioFormats
 	bestItags := map[string]any{
-		"bestWebmVideo": bestPickerItag(videoRows, mime("webm")),
-		"bestMp4Video":  bestPickerItag(videoRows, mime("mp4")),
-		"bestOpusAudio": bestPickerItag(audioRows, mime("opus")),
-		"bestAacAudio":  bestPickerItag(audioRows, mime("mp4a")),
+		"bestWebmVideo": bestPickerItag(videoRows, mime("webm"), video),
+		"bestMp4Video":  bestPickerItag(videoRows, mime("mp4"), video),
+		"bestOpusAudio": bestPickerItag(audioRows, mime("opus"), audio),
+		"bestAacAudio":  bestPickerItag(audioRows, mime("mp4a"), audio),
 	}
 
 	return map[string]any{
@@ -160,12 +168,16 @@ func pickerRows(formats []youtube.Format) []pickerFormat {
 	return rows
 }
 
-// bestPickerItag is the itag of the first adaptive row of kind that is
-// neither damaged nor segmented, else of the first adaptive row of kind,
-// else of the first muxed one (see formatsPayload), or nil — JSON null, as
-// the badge has always been — when no row is of kind.
-func bestPickerItag(rows []pickerFormat, kind func(*pickerFormat) bool) any {
-	var marked, muxed any
+// bestPickerItag is the itag of the adaptive row of kind that rank puts
+// first among those neither damaged nor segmented, else among every adaptive
+// row of kind, else of the first muxed one (see formatsPayload), or nil —
+// JSON null, as the badge has always been — when no row is of kind. rank is
+// positive when its first argument ranks above its second; a tie keeps the
+// row listed first.
+func bestPickerItag(rows []pickerFormat, kind func(*pickerFormat) bool, rank func(a, b *youtube.Format) int) any {
+	var intact, marked *pickerFormat
+	var muxed any
+	better := func(r, best *pickerFormat) bool { return best == nil || rank(&r.Format, &best.Format) > 0 }
 	for i := range rows {
 		r := &rows[i]
 		switch {
@@ -175,13 +187,18 @@ func bestPickerItag(rows []pickerFormat, kind func(*pickerFormat) bool) any {
 				muxed = r.Itag
 			}
 		case !r.Damaged && !r.Segmented:
-			return r.Itag
-		case marked == nil:
-			marked = r.Itag
+			if better(r, intact) {
+				intact = r
+			}
+		case better(r, marked):
+			marked = r
 		}
 	}
-	if marked != nil {
-		return marked
+	switch {
+	case intact != nil:
+		return intact.Itag
+	case marked != nil:
+		return marked.Itag
 	}
 	return muxed
 }

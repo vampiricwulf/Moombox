@@ -130,6 +130,14 @@ func (t *mismatchTally) ipBlockShape() bool {
 func (p *PlayerAPI) finishExtraction(ctx context.Context, info *VideoInfo, wp *WatchPageResult, videoID string, tally *mismatchTally, wpParsed *VideoInfo) (*VideoInfo, error) {
 	if info != nil {
 		info.FormatDiag.DRMSkipped, info.FormatDiag.CollapsedRenditions = extractionStateFrom(ctx).poolCounts()
+		// The whole extraction's language_map, the response that yielded info
+		// filling in whatever no earlier response stated.
+		langs := extractionStateFrom(ctx).audioLanguages()
+		langs.merge(info.AudioLanguages)
+		info.AudioLanguages = langs
+		if ratio, stated := extractionStateFrom(ctx).stretchedRatio(); stated {
+			info.StretchedRatio = ratio
+		}
 		if live, ok := extractionStateFrom(ctx).playbackLive(); ok {
 			info.PlaybackWaitExempt = live.exempt()
 			if info.StreamStatus == StreamVOD && live.postLive() {

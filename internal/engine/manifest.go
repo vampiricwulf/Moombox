@@ -55,6 +55,11 @@ type DashStream struct {
 	Timescale      int           // Time unit divisor
 	Segments       []DashSegment // Segment timeline
 	Initialization string        // Init segment URL
+	// Lang is the stream's lang attribute, the Representation's or else its
+	// AdaptationSet's, as yt-dlp's _parse_mpd_formats reads it
+	// (extractor/common.py); "" when neither states one. The worker ranks a
+	// dubbed audio stream by it against the extraction's original language.
+	Lang string
 }
 
 // SegmentRange maps a time range to segment indices.
@@ -75,6 +80,13 @@ type HlsVariant struct {
 	URL       string
 	Name      string
 	IsSource  bool
+	// AudioContentID is YouTube's YT-EXT-AUDIO-CONTENT-ID: the audio track a
+	// pre-merged variant carries ("en.4"), one variant per track at each
+	// size on a dubbed video. yt-dlp makes its part before the dot the
+	// format's language (extractor/common.py:2390-2392) and ranks the
+	// original language first (_video.py:3655-3663). "" when absent, as on
+	// every Twitch and most YouTube playlists.
+	AudioContentID string
 }
 
 // HlsSegment represents a segment in an HLS media playlist.
@@ -208,6 +220,7 @@ type periodXML struct {
 type adaptationSetXML struct {
 	MimeType        string              `xml:"mimeType,attr"`
 	Codecs          string              `xml:"codecs,attr"`
+	Lang            string              `xml:"lang,attr"`
 	BaseURL         string              `xml:"BaseURL"`
 	Representations []representationXML `xml:"Representation"`
 	SegmentTemplate *segmentTemplateXML `xml:"SegmentTemplate"`
@@ -224,6 +237,7 @@ type representationXML struct {
 	Height          int                 `xml:"height,attr"`
 	FrameRate       string              `xml:"frameRate,attr"` // e.g. "30", "60", "30/1"
 	Codecs          string              `xml:"codecs,attr"`
+	Lang            string              `xml:"lang,attr"`
 	MimeType        string              `xml:"mimeType,attr"`
 	BaseURL         string              `xml:"BaseURL"`
 	SegmentTemplate *segmentTemplateXML `xml:"SegmentTemplate"`
@@ -391,6 +405,12 @@ func parseDashRepresentation(rep representationXML, as adaptationSetXML, period 
 	stream.Codecs = rep.Codecs
 	if stream.Codecs == "" {
 		stream.Codecs = as.Codecs
+	}
+
+	// Lang: representation > adaptation set
+	stream.Lang = rep.Lang
+	if stream.Lang == "" {
+		stream.Lang = as.Lang
 	}
 
 	// BaseURL resolution chain: Representation > AdaptationSet > Period > MPD
@@ -687,6 +707,8 @@ func parseMasterPlaylist(lines []string, baseURL string) *HlsParseResult {
 				variant.FPS = knownFPS(variant.FPS)
 			case "CODECS":
 				variant.Codecs = strings.Trim(attr.value, "\"")
+			case "YT-EXT-AUDIO-CONTENT-ID":
+				variant.AudioContentID = strings.Trim(attr.value, "\"")
 			case "VIDEO":
 				name := strings.Trim(attr.value, "\"")
 				variant.Name = name

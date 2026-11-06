@@ -530,7 +530,7 @@ func vodSelectionBounds(job *JobContext) (maxRes int, prefer60fps bool) {
 // again.
 func selectVodFormats(job *JobContext, formats, dropped, segmented []youtube.Format) (youtube.SelectedFormats, *DownloadResult) {
 	maxRes, prefer60fps := vodSelectionBounds(job)
-	selected := youtube.SelectBestFormatsWithLogger(formats, maxRes, prefer60fps, job.Logger)
+	selected := youtube.SelectBestFormatsWithLogger(formats, maxRes, prefer60fps, job.Config.PreferHDR, job.Logger)
 
 	// Per-job itag overrides (from manual format selection in the UI).
 	// A value of -1 means "explicitly no video/audio" (skip that track).

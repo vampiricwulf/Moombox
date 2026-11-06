@@ -193,6 +193,11 @@
 # Prefer 60fps streams when available at the same resolution
 # prefer_60fps = true
 
+# YouTube: prefer an HDR rendition (VP9.2, 10-bit AV1) over an SDR one of the
+# same resolution and frame rate. false keeps SDR, for players that cannot
+# tone-map HDR. Dolby Vision ranks last either way.
+# prefer_hdr = true
+
 # YouTube livestreams: how long (seconds) to keep retrying — re-checking stream
 # status every 30s — before assuming the stream has finished even if YouTube
 # still reports it live. The clock resets whenever a segment arrives. Minimum 30;

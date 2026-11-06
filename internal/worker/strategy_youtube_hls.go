@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -148,14 +149,15 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	if qualityPref == "audio_only" {
 		job.Logger.Warn("audio_only preference with HLS: YouTube HLS has no audio-only variants, selecting lowest bandwidth")
 	}
-	bestVariant := selectHlsVariant(parsed.Variants, qualityPref, job.Config.MaxVideoResolution, job.Config.Prefer60fps)
+	bestVariant := selectHlsVariant(parsed.Variants, qualityPref, job.Config.MaxVideoResolution, job.Config.Prefer60fps, job.Config.PreferHDR, videoInfo.AudioLanguages)
 	if bestVariant == nil {
 		return nil, fmt.Errorf("invalid HLS master playlist (no variants found)")
 	}
 
 	job.Logger.Info("selected HLS variant",
 		"width", bestVariant.Width, "height", bestVariant.Height,
-		"bandwidth", bestVariant.Bandwidth)
+		"bandwidth", bestVariant.Bandwidth, "codecs", bestVariant.Codecs,
+		"audioTrack", bestVariant.AudioContentID)
 
 	// Step 4: Store variant dimensions on the job
 	if bestVariant.Width > 0 || bestVariant.Height > 0 {
@@ -252,9 +254,22 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 // size (so a per-job 720p under a 2160 cap still resolves to 720p); the
 // no-preference path ranks only the variants AT the chosen size.
 //
+// Within a size the variants rank as every YouTube selector ranks (owner
+// decision D14): the frame rate, then the shared rank — dynamic range under
+// preferHDR, Premium (itags 616 and 235, as yt-dlp's process_manifest_format
+// marks them, _video.py:3666-3668), codec — then the audio track, then
+// bandwidth. The track is yt-dlp's `lang` rung for a pre-merged variant
+// (extractor/common.py:2390-2392 reads YT-EXT-AUDIO-CONTENT-ID, _video.py:
+// 3655-3663 ranks the original language at 10 and the default at 5): a
+// dubbed VOD's master lists one variant per audio track at each size, alike
+// on every other rung, and bandwidth alone could hand the archive a dub. The
+// languages are the extraction's (VideoInfo.AudioLanguages), from every
+// format entry, URL-less ones included, so a SABR-forced VOD whose only
+// fetchable media is this master still knows its original.
+//
 // Returns nil only for an empty variant list — DownloadHls rejects a master
 // playlist with no variants before calling this.
-func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes int, prefer60fps bool) *engine.HlsVariant {
+func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes int, prefer60fps, preferHDR bool, langs youtube.AudioLanguages) *engine.HlsVariant {
 	if len(variants) == 0 {
 		return nil
 	}
@@ -276,11 +291,20 @@ func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes i
 	if qualityPref == "audio_only" {
 		// YouTube HLS has no audio-only variants — take the lowest bandwidth
 		// to minimise wasted video data (audio quality is the same across
-		// variants). DownloadHls logs the warning.
+		// variants). DownloadHls logs the warning. The audio track comes
+		// first, though: on a dubbed VOD's master each track is pre-merged
+		// into its own variant at every size, and an audio-only archive is
+		// the one where the track is the whole point — the lowest bandwidth
+		// alone could be a dub's. So the variants of the best track (the
+		// same LanguageTrackScore the other paths rank by) compete on
+		// bandwidth; with no language map every track scores alike and this
+		// is the plain lowest bandwidth it always was.
 		best := capped[0]
+		bestTrack := youtube.LanguageTrackScore(best.AudioContentID, langs)
 		for _, v := range capped[1:] {
-			if v.Bandwidth < best.Bandwidth {
-				best = v
+			track := youtube.LanguageTrackScore(v.AudioContentID, langs)
+			if track > bestTrack || (track == bestTrack && v.Bandwidth < best.Bandwidth) {
+				best, bestTrack = v, track
 			}
 		}
 		return best
@@ -289,11 +313,11 @@ func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes i
 	if qualityPref != "" && qualityPref != "best" {
 		targetHeight, targetFPS := ParseQualityPreference(qualityPref)
 		if targetHeight > 0 {
-			prefer := fpsPreference(targetFPS, prefer60fps)
-			if v := selectHlsByHeight(capped, targetHeight, prefer); v != nil {
+			prefer := rankRule{fps: fpsPreference(targetFPS, prefer60fps), preferHDR: preferHDR}
+			if v := selectHlsByHeight(capped, targetHeight, prefer, langs); v != nil {
 				return v
 			}
-			if v := selectNextLowerHls(capped, targetHeight, prefer); v != nil {
+			if v := selectNextLowerHls(capped, targetHeight, prefer, langs); v != nil {
 				return v
 			}
 			// No lower heights — fall through to source/best
@@ -312,7 +336,7 @@ func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes i
 			atSize = exact
 		}
 	}
-	return atSize[rankByFPSThenBandwidth(atSize, hlsFieldAccessor, fpsPreference(0, prefer60fps))]
+	return atSize[rankRenditions(atSize, hlsFields(langs), rankRule{fps: fpsPreference(0, prefer60fps), preferHDR: preferHDR})]
 }
 
 // pinnedVideoItag is the manual video itag the job asks for, the per-job
@@ -326,16 +350,36 @@ func pinnedVideoItag(job *JobContext) int {
 	return max(pin, 0)
 }
 
-// hlsFieldAccessor measures a variant by its frame's shorter edge — see
-// dashFieldAccessor.
-func hlsFieldAccessor(v *engine.HlsVariant) (int, int, int) {
-	return utils.CapDimension(v.Width, v.Height), v.FPS, v.Bandwidth
+// hlsItagRegex is yt-dlp's `/itag/(\d+)` read of a YouTube HLS variant URL
+// (_video.py:3722-3723).
+var hlsItagRegex = regexp.MustCompile(`/itag/(\d+)`)
+
+// hlsPremiumItag reports whether a variant URL is one of the HLS itags
+// yt-dlp marks Premium (616, 235; _video.py:3666-3668).
+func hlsPremiumItag(variantURL string) bool {
+	m := hlsItagRegex.FindStringSubmatch(variantURL)
+	return m != nil && (m[1] == "616" || m[1] == "235")
+}
+
+// hlsFields measures a variant by its frame's shorter edge — see
+// dashFieldAccessor — and ranks it: its CODECS (the video one of a
+// pre-merged list), its Premium itag, and its audio track against langs.
+func hlsFields(langs youtube.AudioLanguages) func(v *engine.HlsVariant) renditionFields {
+	return func(v *engine.HlsVariant) renditionFields {
+		return renditionFields{
+			size:      utils.CapDimension(v.Width, v.Height),
+			fps:       v.FPS,
+			rank:      youtube.VideoRankOf(v.Codecs, hlsPremiumItag(v.URL)),
+			track:     youtube.LanguageTrackScore(v.AudioContentID, langs),
+			bandwidth: v.Bandwidth,
+		}
+	}
 }
 
 // selectHlsByHeight finds an HLS variant matching the target height, optionally with FPS.
 // Thin wrapper around the generic selectAtHeightIdx (audit reports/worker.md F35).
-func selectHlsByHeight(variants []*engine.HlsVariant, targetHeight int, prefer func(int) bool) *engine.HlsVariant {
-	idx := selectAtHeightIdx(variants, hlsFieldAccessor, targetHeight, prefer)
+func selectHlsByHeight(variants []*engine.HlsVariant, targetHeight int, prefer rankRule, langs youtube.AudioLanguages) *engine.HlsVariant {
+	idx := selectAtHeightIdx(variants, hlsFields(langs), targetHeight, prefer)
 	if idx < 0 {
 		return nil
 	}
@@ -343,11 +387,11 @@ func selectHlsByHeight(variants []*engine.HlsVariant, targetHeight int, prefer f
 }
 
 // selectNextLowerHls finds the HLS variant a preference picks at the next
-// lower size below the target height, ranked by frame rate (prefer) and then
-// bandwidth. Thin wrapper around selectNextLowerIdx (audit reports/worker.md
+// lower size below the target height, ranked by the rule prefer (frame rate,
+// the shared rank) and then bandwidth. Thin wrapper around selectNextLowerIdx (audit reports/worker.md
 // F36).
-func selectNextLowerHls(variants []*engine.HlsVariant, targetHeight int, prefer func(int) bool) *engine.HlsVariant {
-	idx := selectNextLowerIdx(variants, hlsFieldAccessor, targetHeight, prefer)
+func selectNextLowerHls(variants []*engine.HlsVariant, targetHeight int, prefer rankRule, langs youtube.AudioLanguages) *engine.HlsVariant {
+	idx := selectNextLowerIdx(variants, hlsFields(langs), targetHeight, prefer)
 	if idx < 0 {
 		return nil
 	}
