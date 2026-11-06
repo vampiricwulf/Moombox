@@ -207,7 +207,7 @@ func TestRemuxArchiveChaptersRefusedLeavesTheArchive(t *testing.T) {
 //
 // Mutants: ClaimChapterImport not looking for a trim; TrimService.prepare not
 // asking archiveRewriting; NewDownloadWorker not installing it; the active
-// status check dropped.
+// status check dropped; the IsProcessing refusal dropped.
 func TestChapterImportClaimExcludesTheOtherVerbs(t *testing.T) {
 	r := newTrimRig(t, "ffmpeg-unused")
 	cfg := &config.MoomboxConfig{}
@@ -253,6 +253,25 @@ func TestChapterImportClaimExcludesTheOtherVerbs(t *testing.T) {
 		t.Error("the refused import left its claim held")
 	}
 
+	// A run still registered (a Cancelled row whose run has not stopped is
+	// about to be written again): refused until it exits.
+	r.db.UpdateJobFields(id, map[string]any{"status": database.StatusCancelled})
+	w.queue.Enqueue(id, database.StatusLive)
+	if got, _, ok := w.queue.Dequeue(context.Background()); !ok || got != id {
+		t.Fatalf("Dequeue = %q %v", got, ok)
+	}
+	if _, err := w.ClaimChapterImport(id); !errors.Is(err, ErrStagingBusy) || !strings.Contains(err.Error(), "still stopping") {
+		t.Errorf("an import while the job's run is registered: %v", err)
+	}
+	if w.chapterImportRunning(id) {
+		t.Error("the refused import left its claim held")
+	}
+	w.queue.Complete(id)
+	release, err = w.ClaimChapterImport(id)
+	if err != nil {
+		t.Fatalf("an import once the run has exited: %v", err)
+	}
+	release()
 }
 
 // TestRemuxArchiveChaptersStopsWhenTheRowIsDeleted: a row deleted while the
