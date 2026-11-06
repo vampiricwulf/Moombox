@@ -1055,6 +1055,15 @@ const embedThirdPartyURL = "https://www.reddit.com/"
 // consent and language pair alone (Auth.ConsentCookieHeader), the public
 // watch page's — the consent wall stands in front of this page as in front of
 // that one, and yt-dlp fetches it behind the same SOCS (_initialize_consent).
+//
+// The fetch is retried as the watch page's is (fetchYouTubePage, the one
+// policy): _download_ytcfg downloads this page through the same
+// _download_webpage_with_retries (_base.py:1030-1035) as the watch page, so a
+// transport error, a cut-off body or a 5xx gets another attempt with the
+// watch page's backoff and window, and a 403, a 429 or the consent wall ends
+// it at once. It used to be one attempt, so a single reset or 503 cost the
+// age-gate bypass (and the signed-out status escalation) its
+// encryptedHostFlags and the page's player.
 func FetchEmbedPage(ctx context.Context, videoID, cookieHeader string) (*EmbedPageResult, error) {
 	url := fmt.Sprintf("%s/%s?html5=1", constants.YouTubeURLs.Embed, videoID)
 
@@ -1068,9 +1077,9 @@ func FetchEmbedPage(ctx context.Context, videoID, cookieHeader string) (*EmbedPa
 		headers["Cookie"] = cookieHeader
 	}
 
-	body, err := utils.FetchBody(ctx, url, 30*time.Second, headers)
+	body, err := fetchYouTubePage(ctx, "embed page", url, 30*time.Second, headers, utils.MaxFetchBodySize)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch embed page: %w", err)
+		return nil, err
 	}
 
 	html := string(body)
