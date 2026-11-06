@@ -2656,7 +2656,11 @@ export class MoomboxApp {
     }
     document.getElementById("add-dialog").hide();
     const skipped = data.skipped ? `, ${data.skipped} already queued` : "";
-    this.showToast(`Queued ${data.added} Twitch VOD${data.added === 1 ? "" : "s"}${skipped}`, "success");
+    // The VODs the server could not queue (owner decision PR-M9): the toast
+    // was a green "Queued N" while they were dropped, each named only in the
+    // log (QueueTwitchVideos). It warns now, and says how many.
+    const failed = data.failed ? `, ${data.failed} could not be queued` : "";
+    this.showToast(`Queued ${data.added} Twitch VOD${data.added === 1 ? "" : "s"}${skipped}${failed}`, data.failed ? "warning" : "success");
   }
 
   /**

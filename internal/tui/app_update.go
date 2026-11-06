@@ -585,7 +585,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case addVideoResultMsg:
 		if msg.Feedback != "" {
-			a.setFeedback(msg.Feedback)
+			if msg.Warn {
+				a.setFeedbackWithSeverity(msg.Feedback, severityWarning)
+			} else {
+				a.setFeedback(msg.Feedback)
+			}
 		}
 		// Only the dialog that sent this closes on it: one Esc'd during the
 		// request and reopened for the next video must not vanish under the

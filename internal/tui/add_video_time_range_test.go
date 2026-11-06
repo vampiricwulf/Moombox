@@ -171,3 +171,42 @@ func TestAddVideoPostsAClipAsItsSlug(t *testing.T) {
 		t.Errorf("posted %s, want a clip by its slug", got)
 	}
 }
+
+// TestAddVideoListingNamesWhatCouldNotBeQueued pins owner decision PR-M9 on
+// the TUI: a listing answer with failed > 0 says how many VODs could not be
+// queued, as a warning, where the line was "Queued N Twitch VODs" alone; an
+// answer with none failed reads as before, no warning.
+//
+// Mutants: Failed not decoded, or not appended (no "could not be queued");
+// Warn not set, or the update not reading it (the feedback is no warning).
+func TestAddVideoListingNamesWhatCouldNotBeQueued(t *testing.T) {
+	for _, tc := range []struct {
+		body     string
+		want     string
+		wantWarn bool
+	}{
+		{`{"listed":6,"added":3,"skipped":1,"failed":2}`, "Queued 3 Twitch VODs, 1 already queued, 2 could not be queued", true},
+		{`{"listed":4,"added":3,"skipped":1,"failed":0}`, "Queued 3 Twitch VODs, 1 already queued", false},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			io.WriteString(w, tc.body)
+		}))
+		_, portStr, _ := net.SplitHostPort(srv.Listener.Addr().String())
+		port, _ := strconv.Atoi(portStr)
+
+		a := NewApp()
+		a.SetWebPort(func() int { return port })
+		a.addVideo.platform = "twitch_listing"
+		msg, ok := a.addVideoCmd("https://www.twitch.tv/spamfish/videos")().(addVideoResultMsg)
+		srv.Close()
+		if !ok || msg.Feedback != tc.want || msg.Warn != tc.wantWarn {
+			t.Errorf("%s: result %#v, want %q warn %v", tc.body, msg, tc.want, tc.wantWarn)
+			continue
+		}
+		a.Update(msg)
+		if gotWarn := a.feedback.sev == severityWarning; gotWarn != tc.wantWarn || a.feedback.msg != tc.want {
+			t.Errorf("%s: feedback %q (warning %v), want %q (warning %v)", tc.body, a.feedback.msg, gotWarn, tc.want, tc.wantWarn)
+		}
+	}
+}

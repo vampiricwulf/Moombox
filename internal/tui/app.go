@@ -137,6 +137,9 @@ type (
 	addVideoResultMsg struct {
 		VideoID  string
 		Feedback string
+		// Warn shows Feedback as a warning: a pasted Twitch listing some of
+		// whose VODs could not be queued (owner decision PR-M9).
+		Warn bool
 	}
 	fetchFormatsResultMsg struct {
 		VideoID string
