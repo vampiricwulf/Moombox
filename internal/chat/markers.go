@@ -170,13 +170,22 @@ func (cd *ChatDownloader) applyPendingMarkers() {
 		return
 	}
 	held := indexHeldMarkers(pending)
-	var orphanable map[string]bool // a held replacement's target: found on disk
+	// orphanable holds a held replacement's target and its new item's own ID,
+	// each set once found on disk. The own ID matters when the two differ: a
+	// replacement already stored as an orphan, in an earlier pass or a run
+	// this one resumed, is past what the dedup remembers, and commitMessages
+	// skips the replay high-water check for orphans, so only the file can
+	// say it is there already.
+	var orphanable map[string]bool
 	for _, p := range pending {
 		if p.marker.Kind == MarkerReplaced && p.marker.Message != nil {
 			if orphanable == nil {
 				orphanable = map[string]bool{}
 			}
 			orphanable[p.marker.TargetID] = false
+			if id := p.marker.Message.ID; id != "" {
+				orphanable[id] = false
+			}
 		}
 	}
 	match := false
@@ -213,10 +222,11 @@ func (cd *ChatDownloader) applyPendingMarkers() {
 		if p.marker.Kind != MarkerReplaced || p.marker.Message == nil {
 			continue
 		}
-		if found, ok := orphanable[p.marker.TargetID]; ok && !found {
-			orphans = append(orphans, *p.marker.Message)
-			delete(orphanable, p.marker.TargetID) // one message per target
+		if found, ok := orphanable[p.marker.TargetID]; !ok || found || orphanable[p.marker.Message.ID] {
+			continue // the target is on disk, or the item itself already is
 		}
+		orphans = append(orphans, *p.marker.Message)
+		delete(orphanable, p.marker.TargetID) // one message per target
 	}
 	if len(orphans) > 0 && cd.commitMessages(orphans, false) > 0 {
 		cd.writeChatFile()
