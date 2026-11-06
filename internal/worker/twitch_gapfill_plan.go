@@ -290,7 +290,8 @@ func stagedPartCoverages(stagingDir string) []stagedPartCoverage {
 //
 // Each loses what owner decision D17 says is always filled — the late start
 // and every gap split, which their parts' coverage still records, and the
-// tail after the last part where the capture was cut off (twitchMuxTailOpen).
+// tail after the last part where the capture was cut off (twitchMuxTailOpen)
+// — never for a Cancelled row, whose Cancel closed it (owner decision FQ-2).
 // A Muxing row (a boot re-mux of a capture that
 // completed) is not this: its own finalize was the orchestrator's, whose plan
 // knows whether the broadcast ended (ExecuteTwitch's outageFinalize).
@@ -336,7 +337,21 @@ func (w *DownloadWorker) twitchMuxGapFillPlan(prior, job *database.Job, jobCtx *
 
 // twitchMuxTailOpen reports whether a live Twitch row muxed from its staging
 // stopped before its broadcast's end was seen, so the plan's tail stays open.
-// The two markers say so outright: twitchEndedOfflineErrMsg (the broadcast
+//
+// A Cancelled row never is (owner decision FQ-2): the operator's Cancel says
+// the recording ends where it stopped, so its Mux plans only the late start
+// and the gap splits, whenever the Cancel landed — while Downloading, where
+// stream_end_time is still empty and the rule below read the capture as cut
+// off mid-broadcast and filled the rest of it from the VOD, and while
+// Muxing alike. It is read off the row's status alone, which CancelJob
+// writes (with nothing else that lasts), so it holds only while the row is
+// Cancelled: a Retry or Reinitialize writes another status, and a row that
+// then fails again is read by the rules below as any other. It is checked
+// ahead of the markers, which a Cancel leaves on the row (it writes no
+// error and no park_reason): a Mux of an ended-offline Error row cancelled
+// while Muxing keeps twitchEndedOfflineErrMsg, and its tail is closed too.
+//
+// Otherwise the two markers say so outright: twitchEndedOfflineErrMsg (the broadcast
 // ended while Moombox was down) and park_reason twitch_end_unconfirmed. Any
 // other Error or Cancelled row is read by stream_end_time, which a live
 // Twitch capture writes in ExecuteTwitch's finalize just before
@@ -351,6 +366,9 @@ func (w *DownloadWorker) twitchMuxGapFillPlan(prior, job *database.Job, jobCtx *
 // too, and nothing on the row tells it apart from a normal end. Its tail is
 // not filled on the Mux; before FE-25 that row made no plan at all.
 func twitchMuxTailOpen(prior *database.Job) bool {
+	if prior.Status == database.StatusCancelled {
+		return false
+	}
 	if prior.Error == twitchEndedOfflineErrMsg || prior.ParkReason == database.ParkReasonTwitchEndUnconfirmed {
 		return true
 	}

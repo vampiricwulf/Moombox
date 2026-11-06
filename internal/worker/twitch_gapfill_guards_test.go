@@ -296,12 +296,18 @@ func TestGapSpansForAPartItCannotPlace(t *testing.T) {
 // staging still holds, its tail open (owner decision D17). So does any other
 // Mux of a live capture's staging (owner decision FE-25): an Error row for
 // any other reason, and a Cancelled row — the operator's Mux of either. A
-// clip (a VOD-style row) keeps none.
+// clip (a VOD-style row) keeps none. A Cancelled row's tail is closed
+// whenever it was cancelled (owner decision FQ-2): cancelled while
+// Downloading (no stream_end_time) as while Muxing, and whatever marker the
+// Cancel left on the row.
 //
 // Mutants: muxJob not calling twitchMuxGapFillPlan (no plan on any path); the
 // old error/marker gate restored (the plain Error and the Cancelled rows get
 // no plan); the status gate dropping Cancelled (the Cancelled row gets none);
-// the IsVod guard removed (the clip row gets a plan); the tail not left open.
+// the IsVod guard removed (the clip row gets a plan); the tail not left open;
+// twitchMuxTailOpen without its Cancelled test (the row cancelled while
+// Downloading plans a tail), or with it after the markers (the cancelled
+// ended-offline row plans one).
 func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -316,7 +322,8 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 		{"end unconfirmed, auto-muxed", true, "", true, false, false, false, "late_start,tail"},
 		{"ended while offline, Mux action", false, twitchEndedOfflineErrMsg, false, false, false, false, "late_start,tail"},
 		{"another error, Mux action", false, "", false, false, false, false, "late_start,tail"},
-		{"cancelled, Mux action", false, "", false, true, false, false, "late_start,tail"},
+		{"cancelled while downloading, Mux action", false, "", false, true, false, false, "late_start"},
+		{"cancelled while muxing an ended-offline row, Mux action", false, twitchEndedOfflineErrMsg, false, true, false, false, "late_start"},
 		{"a VOD-style row, Mux action", false, "", false, false, true, false, ""},
 		// The capture reached its finalize after a normal end and only its
 		// mux failed, or the operator cancelled it while Muxing: it holds
@@ -387,5 +394,38 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 				t.Errorf("plan %+v, want spans %s of streamer's chunked capture", p, tc.wantKinds)
 			}
 		})
+	}
+}
+
+// TestTwitchMuxTailOpenClosesOnACancel pins owner decision FQ-2 on the rule
+// itself: a Cancelled row's tail is closed whatever else it carries, and the
+// close lasts only while the row is Cancelled — the Cancel is read off the
+// status, which a Retry (ResumeJob, Downloading) or a Reinitialize (Upcoming)
+// rewrites, so the same capture failing again after one is read by its
+// markers and stream_end_time like any other row.
+//
+// Mutants: the Cancelled test dropped (the rows cancelled with no end time or
+// with a marker read open); the end-time rule closing every unmarked row, as
+// a close that outlived the Cancel would (the retried row cut off again
+// reads closed).
+func TestTwitchMuxTailOpenClosesOnACancel(t *testing.T) {
+	end := gapStart.Add(6 * time.Minute).Format(time.RFC3339)
+	for _, tc := range []struct {
+		name string
+		row  database.Job
+		want bool
+	}{
+		{"cancelled while downloading", database.Job{Status: database.StatusCancelled}, false},
+		{"cancelled while muxing", database.Job{Status: database.StatusCancelled, StreamEndTime: end}, false},
+		{"cancelled, the ended-offline error left on it", database.Job{Status: database.StatusCancelled, Error: twitchEndedOfflineErrMsg}, false},
+		{"cancelled, end unconfirmed left on it", database.Job{Status: database.StatusCancelled, ParkReason: database.ParkReasonTwitchEndUnconfirmed}, false},
+		{"retried after a cancel, cut off again", database.Job{Status: database.StatusError}, true},
+		{"retried after a cancel, its broadcast ended offline", database.Job{Status: database.StatusError, Error: twitchEndedOfflineErrMsg, StreamEndTime: end}, true},
+		{"retried after a cancel, end unconfirmed", database.Job{Status: database.StatusError, ParkReason: database.ParkReasonTwitchEndUnconfirmed}, true},
+		{"retried after a cancel, its mux failed after a normal end", database.Job{Status: database.StatusError, StreamEndTime: end}, false},
+	} {
+		if got := twitchMuxTailOpen(&tc.row); got != tc.want {
+			t.Errorf("%s: tail open = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
