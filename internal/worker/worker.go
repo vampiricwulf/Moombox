@@ -2950,6 +2950,14 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 
 		if gapPlan != nil {
 			w.orchestrator.keepTwitchGapFillPlan(gapPlan)
+		} else if job.Platform == "twitch" && !job.IsVod {
+			// A live capture that lacks nothing, as ExecuteTwitch's finalize
+			// treats one: a row an earlier archive of this job left (its
+			// fill's outcome, owner decision PR-R5 — a Retry or a
+			// Reinitialize re-recorded it since, and this Mux finalized the
+			// new recording) is about footage this archive does not have,
+			// and the job's details would go on showing it.
+			_ = w.db.DeleteGapFill(jobID)
 		}
 
 		// The recording is in the archive now: reclaim staging exactly the way

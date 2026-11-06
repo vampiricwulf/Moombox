@@ -56,6 +56,11 @@ type jobWithStaging struct {
 	// no age rule, and the only place that says so once the job's in-memory
 	// log is gone. Never null.
 	MuxGaps []worker.MuxGap `json:"muxGaps"`
+	// GapFill is a Finished live Twitch job's archive-VOD gap-fill (owner
+	// decisions D17, PR-R5): pending with its spans and deadline, then
+	// filled or kept and why (worker.TwitchGapFillStateOf). Absent for a job
+	// that has none.
+	GapFill *worker.GapFillState `json:"gapFill,omitempty"`
 }
 
 // enrichJob adds computed staging fields to a job response.
@@ -69,6 +74,7 @@ func enrichJob(db *database.Database, job *database.Job, stagingBase string) job
 		KeptChatSidecar: report.KeptChatSidecar,
 		UnmuxedParts:    job.Status == database.StatusFinished && worker.HasUnmuxedParts(db, stagingBase, job.ID),
 		MuxGaps:         worker.ScanMuxGaps(stagingBase, job.ID),
+		GapFill:         worker.TwitchGapFillStateOf(db, job),
 	}
 }
 

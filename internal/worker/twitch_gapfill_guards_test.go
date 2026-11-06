@@ -24,7 +24,8 @@ import (
 //
 // Mutants: refusedVodSegment answering false (the 403 fails the fill, the
 // plan is kept); the errSpanRefused branch removed (an empty part is muxed
-// and inserted); the refused log line removed.
+// and inserted); the refused log line removed; the outcome's Spans counting
+// the plan's spans, or its stay-gaps reason never set (one span of two).
 func TestGapFillLeavesOutRefusedSegments(t *testing.T) {
 	t.Run("one segment refused", func(t *testing.T) {
 		f := newGapFillFixture(t)
@@ -68,6 +69,26 @@ func TestGapFillLeavesOutRefusedSegments(t *testing.T) {
 		}
 		if job, _ := f.db.GetJob("tw_1"); len(job.Segments) != 0 || job.OutputFile != f.archive {
 			t.Errorf("the job changed: %+v", job)
+		}
+	})
+	// Owner decision PR-R5: a partial fill's outcome counts the spans it
+	// recovered, not the ones it planned, and says how many stay gaps —
+	// job details read it as "Filled N spans".
+	t.Run("one span of two refused", func(t *testing.T) {
+		f := newGapFillFixture(t)
+		f.refuse = map[string]bool{"https://vod.example/chunked/4.ts": true}
+		f.plan(t, []stagedPartCoverage{covPart(0, 0, 41*time.Second, false), covPart(1, 49*time.Second, time.Minute, false)},
+			[]gapSpan{
+				{FromMs: ms(41 * time.Second), ToMs: ms(49 * time.Second), Kind: gapKindLost, AfterPart: 0},
+				{FromMs: ms(time.Minute), ToMs: ms(time.Minute + 15*time.Second), Kind: gapKindTail, AfterPart: 1},
+			},
+			gapStart.Add(25*time.Hour))
+		row, _ := f.db.GetGapFill("tw_1")
+		f.filler.step(context.Background(), *row, gapStart.Add(70*time.Minute))
+
+		out := f.outcome(t)
+		if out == nil || out.State != GapFillFilled || out.Spans != 1 || !strings.Contains(out.Reason, "1 of 2 spans stay gaps") {
+			t.Errorf("outcome = %+v, want filled with 1 span and \"1 of 2 spans stay gaps\"", out)
 		}
 	})
 }
@@ -162,6 +183,10 @@ func TestGapFillSweepSurvivesAPanic(t *testing.T) {
 
 	if f.row(t) != nil {
 		t.Error("the plan whose look panicked was kept")
+	}
+	// Its job's details say the archive was kept, and why (PR-R5).
+	if o := f.outcome(t); o == nil || o.State != GapFillKept || o.Reason == "" {
+		t.Errorf("outcome %+v, want kept with a reason", o)
 	}
 	if len(looked) != 2 {
 		t.Errorf("%d looks, want the panicking plan and the next one", len(looked))
@@ -393,7 +418,63 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 			if strings.Join(kinds, ",") != tc.wantKinds || p.Login != "streamer" || p.VariantName != "chunked" {
 				t.Errorf("plan %+v, want spans %s of streamer's chunked capture", p, tc.wantKinds)
 			}
+			// Owner decision PR-R6: the end is known only where the capture
+			// reached its finalize and only its mux failed — no tail, not
+			// cancelled (twitchMuxEndKnown).
+			if wantEnd := !strings.Contains(tc.wantKinds, gapKindTail) && !tc.cancelled; p.EndKnown != wantEnd {
+				t.Errorf("plan.EndKnown = %v, want %v", p.EndKnown, wantEnd)
+			}
 		})
+	}
+}
+
+// TestMuxedTwitchCaptureThatLacksNothingDropsAStaleGapFillRow is the Mux
+// path's half of TestTwitchCaptureThatLacksNothingDropsAStaleGapFillRow
+// (owner decision PR-R5): a job whose earlier archive left a settled
+// gap-fill outcome is re-recorded, its mux fails, and the operator's Mux
+// finalizes the new capture, which lacks nothing. The earlier outcome is
+// about footage this archive does not have; the Mux drops it, and the job
+// API's gapFill reads nothing.
+//
+// Mutant: the Mux's DeleteGapFill branch removed (the old {filled 2} is
+// still reported).
+func TestMuxedTwitchCaptureThatLacksNothingDropsAStaleGapFillRow(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	id := "tw_stale_mux"
+	latchedJob(t, w, db, id, 10, false)
+	db.UpdateJobFields(id, map[string]any{
+		"stream_start_time": gapStart.Format(time.RFC3339),
+		"stream_end_time":   gapStart.Add(6 * time.Minute).Format(time.RFC3339),
+		"twitch_quality":    "chunked",
+		"error":             "ffmpeg mux failed",
+	})
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+	// Coverage from the broadcast's start: no late start, nothing to fill.
+	cov, _ := json.Marshal(partCoverage{StartMs: gapStart.UnixMilli(), EndMs: gapStart.Add(6 * time.Minute).UnixMilli()})
+	if err := os.WriteFile(filepath.Join(stagingBase, id, twitchCoverageFile), cov, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := &twitchGapFillPlan{JobID: id, Login: "streamer", Outcome: &gapFillOutcome{State: GapFillFilled, Spans: 2}}
+	if err := saveTwitchGapFillPlan(db, stale, gapStart.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	w.twitchLiveness = func(context.Context, string) (*twitch.TwitchStreamInfo, error) { return nil, nil }
+
+	if err := w.MuxJob(id); err != nil {
+		t.Fatal(err)
+	}
+	w.wg.Wait()
+
+	j, _ := db.GetJob(id)
+	if j == nil || j.Status != database.StatusFinished {
+		t.Fatalf("muxed row = %v (error %q), want Finished", statusOf(j), errorOf(j))
+	}
+	if st := TwitchGapFillStateOf(db, j); st != nil {
+		t.Errorf("gapFill = %+v after a Mux that lacks nothing, want none: the earlier archive's outcome", *st)
+	}
+	if g, _ := db.GetGapFill(id); g != nil {
+		t.Errorf("the earlier archive's gap-fill row was kept: %s", g.Plan)
 	}
 }
 

@@ -41,7 +41,10 @@ type twitchListingResponse struct {
 	Listed  int    `json:"listed"`
 	Added   int    `json:"added"`
 	Skipped int    `json:"skipped"`
-	Failed  int    `json:"failed,omitempty"`
+	// Failed is always sent, 0 included: the add dialogs show "F could not
+	// be queued" from it (purpose review M9), and an absent field read as
+	// undefined.
+	Failed int `json:"failed"`
 }
 
 // addTwitchListing answers POST /api/jobs for a Twitch channel video list or
@@ -83,6 +86,9 @@ func addTwitchListing(rw http.ResponseWriter, req *http.Request, db *database.Da
 	)
 	if store != nil {
 		store.Read(func(c *config.MoomboxConfig) { opts.Channels = append([]config.ChannelConfig(nil), c.Channels...) })
+	}
+	if w != nil {
+		opts.Logger = w.Logger()
 	}
 	switch {
 	case target.Type == utils.TwitchCollection:

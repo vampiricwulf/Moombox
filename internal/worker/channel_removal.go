@@ -40,9 +40,12 @@ type ChannelRemoval struct {
 	// its login (summarizeTwitchChannelRemoval).
 	Total int `json:"total"`
 	// Pending is the rows "delete its pending jobs" deletes: Queued,
-	// Upcoming and COOKIES?, less Footage. For a Twitch channel, only the
-	// clips its twitch_archive_clips sweep queued: the delete reaches no other row
-	// of its.
+	// Upcoming and COOKIES?, less Footage and less the rows an operator added
+	// (owner decision PR-D1). For a Twitch channel, the clips its
+	// twitch_archive_clips sweep queued and the VODs its twitch_vod_backlog
+	// queued: the delete reaches no other row of its — not its captures, and
+	// not the VODs of a listing an operator pasted, which carry its login for
+	// pacing only.
 	Pending int `json:"pending"`
 	// Footage is the pending-status rows whose staging directory is not
 	// empty, which neither choice deletes. A COOKIES? row can be a live
@@ -71,10 +74,10 @@ func SummarizeChannelRemoval(db *database.Database, stagingBase, channelID, plat
 }
 
 // summarizeTwitchChannelRemoval counts a Twitch channel's jobs. Its live
-// captures and VODs carry no channel_id, so they are the Twitch rows
-// TwitchJobLogin ties to the channel's login, its config ID — the rule by
-// which the Twitch monitor hands an errored capture to its channel
-// (dispatchEndedBroadcasts): the monitor's own rows, whose URL is
+// captures and its pasted VOD URLs carry no channel_id, so they are the
+// Twitch rows TwitchJobLogin ties to the channel's login, its config ID —
+// the rule by which the Twitch monitor hands an errored capture to its
+// channel (dispatchEndedBroadcasts): the monitor's own rows, whose URL is
 // https://twitch.tv/<login>, and a Web or CLI add of the channel, live or
 // offline. Counted by channel_id they were none, and both prompts told the
 // operator "It has no jobs." over a capture in progress or one parked with
@@ -83,12 +86,16 @@ func SummarizeChannelRemoval(db *database.Database, stagingBase, channelID, plat
 // None of those is pending: "delete its pending jobs" is the delete the
 // departure prune used to make, by channel_id, which never reaches them. A
 // parked capture with footage is still named, and a download in progress
-// counted. The one Twitch row that does carry the channel's ID is a clip its
-// twitch_archive_clips sweep queued (newTwitchClipJob, the login as channel_id):
-// that backlog is what DeletePendingChannelJobs deletes, so those rows are
-// counted as a YouTube channel's are, pending included — a confirmation
-// that offered nothing to delete over a week's queued clips left them
-// admitted under the global archive_slots after the channel was gone.
+// counted. The Twitch rows that do carry the channel's ID are its backlog:
+// a clip its twitch_archive_clips sweep queued (newTwitchClipJob) and a VOD
+// its twitch_vod_backlog queued (QueueTwitchVideos), the login or config ID
+// as channel_id. That backlog is what DeletePendingChannelJobs deletes, so
+// those rows are counted as a YouTube channel's are, pending included — a
+// confirmation that offered nothing to delete over a week's queued clips
+// left them admitted under the global archive_slots after the channel was
+// gone. A pasted listing's VODs carry the channel's ID too, so the
+// scheduler paces them under it, but they are the operator's own add: they
+// are counted in the total and never deleted (owner decision PR-D1).
 func summarizeTwitchChannelRemoval(db *database.Database, stagingBase, login string) (ChannelRemoval, error) {
 	carried, err := db.ListChannelJobs(login)
 	if err != nil {
@@ -119,7 +126,9 @@ func summarizeTwitchChannelRemoval(db *database.Database, stagingBase, login str
 
 // summarizeRemoval sorts a channel's jobs as the confirmation counts them.
 // deletable says whether "delete its pending jobs" reaches them: when it
-// does not, a pending row without footage is counted in Total alone.
+// does not — or the row is one an operator added (a pasted Twitch listing's
+// VOD, owner decision PR-D1) — a pending row without footage is counted in
+// Total alone.
 func summarizeRemoval(jobs []database.ChannelJob, stagingBase string, deletable bool) ChannelRemoval {
 	sum := ChannelRemoval{Total: len(jobs), Footage: []ChannelJobRef{}}
 	for _, j := range jobs {
@@ -129,7 +138,7 @@ func summarizeRemoval(jobs []database.ChannelJob, stagingBase string, deletable 
 		case slices.Contains(pendingRemovalStatuses, j.Status):
 			if HasStagingFiles(stagingBase, j.ID) {
 				sum.Footage = append(sum.Footage, ChannelJobRef{ID: j.ID, Title: j.Title, Status: j.Status})
-			} else if deletable {
+			} else if deletable && !j.ManuallyAdded {
 				sum.Pending++
 			}
 		}
@@ -143,9 +152,11 @@ func summarizeRemoval(jobs []database.ChannelJob, stagingBase string, deletable 
 // deleted and the footage rows it kept. The summary is taken afresh rather
 // than trusted from the confirmation, and the delete re-applies the status
 // filter, so a row that started downloading in between is left alone. The
-// rows are the ones carrying channelID: of a Twitch channel's, only the
-// clips its twitch_archive_clips sweep queued carry it, and its captures and VODs
-// are never reached (summarizeTwitchChannelRemoval).
+// rows are the ones carrying channelID, less those an operator added: of a
+// Twitch channel's, the clips its twitch_archive_clips sweep queued and the
+// VODs its twitch_vod_backlog queued; its captures and its pasted VODs —
+// URLs and listings alike — are never reached (summarizeTwitchChannelRemoval,
+// owner decision PR-D1).
 //
 // The caller removes the channel from the config FIRST: the monitors ask the
 // live config before they create a job (createYouTubeJob), so a cycle that
@@ -156,9 +167,14 @@ func DeletePendingChannelJobs(db *database.Database, stagingBase, channelID stri
 		return 0, nil, err
 	}
 	sum := summarizeRemoval(jobs, stagingBase, true)
-	keep := make([]string, len(sum.Footage))
-	for i, f := range sum.Footage {
-		keep[i] = f.ID
+	keep := make([]string, 0, len(sum.Footage))
+	for _, f := range sum.Footage {
+		keep = append(keep, f.ID)
+	}
+	for _, j := range jobs {
+		if j.ManuallyAdded {
+			keep = append(keep, j.ID)
+		}
 	}
 	n, err := db.DeleteJobsAndHistoryForChannel(channelID, pendingRemovalStatuses, keep)
 	if err != nil {

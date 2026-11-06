@@ -127,9 +127,9 @@ func TestListChannelJobs(t *testing.T) {
 		t.Fatalf("ListChannelJobs: %v", err)
 	}
 	want := []ChannelJob{
-		{"queued", "title queued", StatusQueued},
-		{"downloading", "title downloading", StatusDownloading},
-		{"finished", "title finished", StatusFinished},
+		{"queued", "title queued", StatusQueued, false},
+		{"downloading", "title downloading", StatusDownloading, false},
+		{"finished", "title finished", StatusFinished, false},
 	}
 	if !slices.Equal(jobs, want) {
 		t.Errorf("ListChannelJobs = %+v, want %+v", jobs, want)

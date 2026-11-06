@@ -99,6 +99,47 @@ func TestTwitchCaptureSplitsAtAdBreaksAndKeepsAGapFillPlan(t *testing.T) {
 	if strings.Join(kinds, ",") != gapKindLateStart+","+gapKindAdBreak || plan.Login != "streamer" || plan.VariantName != "720p60" {
 		t.Errorf("plan %+v (kinds %v), want the late start and the ad break of streamer's 720p60 capture", plan, kinds)
 	}
+	// The capture saw its broadcast end (ENDLIST, then offline), so the fill
+	// may measure the VOD's drift against it (owner decision PR-R6).
+	if !plan.EndKnown {
+		t.Error("plan.EndKnown false for a capture that saw its broadcast end")
+	}
+}
+
+// TestTwitchCaptureThatLacksNothingDropsAStaleGapFillRow: a live capture
+// whose finalize plans nothing removes the gap-fill row an earlier archive
+// of the same job left — its fill's outcome (owner decision PR-R5) — which
+// is about footage this archive does not have, so job details stop showing
+// it.
+//
+// Mutant: the delete removed (the earlier archive's "filled" stays).
+func TestTwitchCaptureThatLacksNothingDropsAStaleGapFillRow(t *testing.T) {
+	h := newEndVerdictHarness(t, "tw_gapfill_stale")
+	pdt0 := time.Date(2026, 9, 1, 20, 5, 0, 0, time.UTC)
+	srv := adBreakBroadcast(t, pdt0)
+	h.job.StreamStartTime = pdt0.Format(time.RFC3339)
+	h.db.UpdateJobFields(h.job.ID, map[string]any{"stream_start_time": h.job.StreamStartTime})
+	h.jobCtx.OutputDir = t.TempDir()
+	h.jobCtx.Filename = "streamer - capture"
+	h.variant.URL = srv.URL + "/live.m3u8"
+	h.variant.ChannelLogin = "streamer"
+	h.variant.CheckStreamFn = func(context.Context) (bool, error) { return false, nil }
+	stale := &twitchGapFillPlan{JobID: h.job.ID, Login: "streamer", Outcome: &gapFillOutcome{State: GapFillFilled, Spans: 1}}
+	if err := saveTwitchGapFillPlan(h.db, stale, pdt0.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil); err != nil {
+		t.Fatalf("ExecuteTwitch = %v", err)
+	}
+	if job, _ := h.db.GetJob(h.job.ID); job.Status != database.StatusFinished {
+		t.Fatalf("job %s, want Finished", job.Status)
+	}
+	if g, _ := h.db.GetGapFill(h.job.ID); g != nil {
+		t.Errorf("the earlier archive's gap-fill row was kept: %s", g.Plan)
+	}
 }
 
 // TestTwitchGapFillHooksAreWired pins the wiring no harness drives: processJob

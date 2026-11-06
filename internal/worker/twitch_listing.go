@@ -42,9 +42,19 @@ type TwitchListingOptions struct {
 	// OutputDirectory, when set, is every row's output_directory; else the
 	// owner channel's, when it has one.
 	OutputDirectory string
+	// Logger, when set, is told of each VOD that could not be queued, with
+	// why (purpose review M9): the counts the caller answers with say how
+	// many, never which.
+	Logger interface {
+		Debug(msg string, args ...any)
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+		Error(msg string, args ...any)
+	}
 }
 
-// TwitchListingResult counts what QueueTwitchVideos did.
+// TwitchListingResult counts what QueueTwitchVideos did: every listed video
+// is exactly one of Added, Skipped and Failed.
 type TwitchListingResult struct {
 	Added   []*database.Job
 	Skipped int // already a job (or, with SkipHistory, in history)
@@ -81,11 +91,13 @@ func QueueTwitchVideos(db *database.Database, videos []twitch.TwitchVideo, opts 
 			// reported it queued. A collection node whose owner neither the
 			// listing nor VideoMetadata named (twitch.API.CollectionVideos).
 			res.Failed++
+			opts.warnNotQueued(v, "no channel to pace it under: neither the listing nor Twitch named its owner")
 			continue
 		}
 		added, err := db.AddJob(job)
 		if err != nil {
 			res.Failed++
+			opts.warnNotQueued(v, "the job could not be created", "err", err)
 			continue
 		}
 		if !added { // a job already has the ID (INSERT OR IGNORE)
@@ -98,11 +110,47 @@ func QueueTwitchVideos(db *database.Database, videos []twitch.TwitchVideo, opts 
 	return res
 }
 
+// warnNotQueued logs a VOD QueueTwitchVideos counted as Failed, when the
+// caller gave it a logger. The channel is the listing's login, else the
+// video's own owner; a collection names neither in its options, and an
+// owner-less VOD has neither, so the field is left out rather than logged
+// empty.
+func (o TwitchListingOptions) warnNotQueued(v twitch.TwitchVideo, reason string, args ...any) {
+	if o.Logger == nil {
+		return
+	}
+	fields := []any{"vod", v.ID, "title", v.Title}
+	channel := o.Login
+	if channel == "" && v.Owner != nil {
+		channel = v.Owner.Login
+	}
+	if channel != "" {
+		fields = append(fields, "channel", channel)
+	}
+	o.Logger.Warn("twitch listing: a VOD could not be queued — "+reason, append(fields, args...)...)
+}
+
+// Logger is the worker's logger, for a caller outside the package that
+// queues on its behalf (the add route's TwitchListingOptions.Logger).
+func (w *DownloadWorker) Logger() interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+} {
+	return w.logger
+}
+
 // newTwitchListingJob is the Queued backlog row for one listed VOD. The
 // channel_id is the configured channel's ID when its owner is one (so
 // archive_slots paces it as that channel's), else the owner's login — paced
 // under the global archive_slots, as a removed channel's kept backlog is
 // (W25-09) — since the scheduler sweeps channels and never a NULL one.
+//
+// That channel_id is for pacing. A row a pasted listing queued is also
+// manually_added, and removing its channel never deletes it (owner decision
+// PR-D1, DeletePendingChannelJobs); the monitor backlog's rows are the
+// channel's own, and its "delete its pending jobs" does.
 func newTwitchListingJob(v twitch.TwitchVideo, opts TwitchListingOptions, stamp string) *database.Job {
 	login := strings.ToLower(opts.Login)
 	display := login

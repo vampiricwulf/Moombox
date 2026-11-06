@@ -27,7 +27,11 @@ import (
 // the archive of a broadcast a live job of the channel captured — its
 // publishedAt within twitchBacklogCapturedWindow of that job's
 // stream_start_time — since the live capture is that broadcast's archive, and
-// gap-fill (owner decision D17) is what recovers what it missed.
+// gap-fill (owner decision D17) is what recovers what it missed. A live job
+// counts as a capture only when it recorded something or still may
+// (capturedLiveJob, owner decision PR-M4): a capture that failed or parked
+// before its first segment holds nothing of the broadcast, and the VOD,
+// then its only copy, is queued.
 type TwitchBacklog struct {
 	configStore *config.Store
 	db          *database.Database
@@ -46,6 +50,13 @@ type TwitchBacklog struct {
 	OnQueued func(n int)
 	// IsOnline gates a cycle (nil: always online).
 	IsOnline func() bool
+
+	// deferLogged is the VODs whose skip for a live capture was logged this
+	// process: the skip is decided again every cycle (a skipped VOD is not
+	// recorded in history), and one Info line per VOD per hour said nothing
+	// the first did not. Touched only by RunCycle, on the backlog's one
+	// goroutine.
+	deferLogged map[string]bool
 }
 
 // twitchBacklogInterval is the backlog's cadence: Twitch keeps a past
@@ -61,8 +72,10 @@ const twitchBacklogFirstDelay = 2 * time.Minute
 // live job's stream_start_time and still be that broadcast's archive. Twitch
 // publishes a broadcast's archive as the stream starts; a highlight or upload
 // published within minutes of another broadcast's start is rare enough to
-// cost nothing when it is wrongly taken for the archive.
-const twitchBacklogCapturedWindow = 10 * time.Minute
+// cost nothing when it is wrongly taken for the archive. The gap-fill's
+// archive lookup asks the same question with the same window
+// (twitch.ArchiveVodStartTolerance, owner decision PR-M3).
+const twitchBacklogCapturedWindow = twitch.ArchiveVodStartTolerance
 
 // NewTwitchBacklog builds the backlog over tw's GQL client.
 func NewTwitchBacklog(store *config.Store, db *database.Database, tw *twitch.Service, logger interface {
@@ -142,12 +155,24 @@ func (b *TwitchBacklog) RunCycle(ctx context.Context, now time.Time) {
 			// live broadcasts (TwitchMonitor) and a YouTube channel's
 			// backfill (archive.go): a broadcast the monitor deliberately
 			// skipped is not archived through the back door.
-			if !capturedLive(v, starts[login]) && MatchesTerms(v.Title, &ch) {
-				fresh = append(fresh, v)
+			if !MatchesTerms(v.Title, &ch) {
+				continue
 			}
+			if by := capturedLive(v, starts[login]); by != "" {
+				if !b.deferLogged[v.ID] {
+					if b.deferLogged == nil {
+						b.deferLogged = map[string]bool{}
+					}
+					b.deferLogged[v.ID] = true
+					b.logger.Info("twitch VOD backlog: not queuing a broadcast's archive; its live capture holds it",
+						"channel", ch.ID, "vod", v.ID, "jobID", by)
+				}
+				continue
+			}
+			fresh = append(fresh, v)
 		}
 		res := worker.QueueTwitchVideos(b.db, fresh, worker.TwitchListingOptions{
-			Channels: channels, Login: login, SkipHistory: true,
+			Channels: channels, Login: login, SkipHistory: true, Logger: b.logger,
 		}, now)
 		if n := len(res.Added); n > 0 {
 			b.logger.Info("twitch VOD backlog: queued the channel's new videos", "channel", ch.ID, "queued", n)
@@ -159,16 +184,26 @@ func (b *TwitchBacklog) RunCycle(ctx context.Context, now time.Time) {
 	}
 }
 
-// capturedStarts maps each Twitch login to the stream_start_times of its live
-// jobs (any status: a capture that ended in Error still recorded the
-// broadcast). The login is read off the job's URL, the one place every live
-// Twitch row names its channel — the monitor's, a manual add's and a
-// recovered one's alike.
-func (b *TwitchBacklog) capturedStarts() map[string][]time.Time {
-	out := map[string][]time.Time{}
+// capturedBroadcast is one live capture's broadcast: its stream_start_time
+// and the job that captured it.
+type capturedBroadcast struct {
+	start time.Time
+	jobID string
+}
+
+// capturedStarts maps each Twitch login to the broadcasts its live jobs
+// captured (capturedLiveJob). The login is read off the job's URL, the one
+// place every live Twitch row names its channel — the monitor's, a manual
+// add's and a recovered one's alike.
+func (b *TwitchBacklog) capturedStarts() map[string][]capturedBroadcast {
+	out := map[string][]capturedBroadcast{}
 	jobs, err := b.db.GetAllJobs()
 	if err != nil {
 		return out
+	}
+	stagingBase := ""
+	if b.configStore != nil {
+		b.configStore.Read(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
 	}
 	for _, j := range jobs {
 		if j.Platform != "twitch" || j.IsVod || j.StreamStartTime == "" {
@@ -179,12 +214,55 @@ func (b *TwitchBacklog) capturedStarts() map[string][]time.Time {
 			continue
 		}
 		login := twitchLoginFromURL(j.URL)
-		if login == "" {
+		if login == "" || !b.capturedLiveJob(j, stagingBase) {
 			continue
 		}
-		out[login] = append(out[login], start)
+		out[login] = append(out[login], capturedBroadcast{start: start, jobID: j.ID})
 	}
 	return out
+}
+
+// capturedLiveJob reports whether a live Twitch job stands for its
+// broadcast's archive, so the backlog leaves the VOD to it (owner decision
+// PR-M4): it holds footage — recorded parts, an archive file, or staged
+// media a Resume or a Mux can still finalize — or it was Cancelled (the
+// operator chose to stop, FQ-2), or it already has a gap-fill plan, or it is
+// still capturing (Upcoming, Live, Downloading or Muxing: a capture whose
+// first segment is moments away is not a capture that recorded nothing, and
+// queuing the VOD beside it would record the broadcast twice), or it is an
+// Error row the Twitch monitor will re-initialise when the same broadcast
+// is found live again (isRecoverableTwitchError at MaxTwitchAutoRetries —
+// a TwitchOfflineErrMsg or twitch_unreachable stop before the first
+// segment, retries left): that row is a capture that is about to resume,
+// and the VOD queued in the gap would record the broadcast a second time
+// beside it. Its VOD is queued only once no automatic restart is left.
+//
+// What is left is a capture that failed or parked — Error, COOKIES? —
+// before it recorded anything. stream_start_time is written before the
+// first segment (the monitor's row, the processor's StartedAt), and every
+// such row used to count: a non-recoverable error or a cookie park early in
+// a broadcast skipped its archive VOD, the only copy, which then expired
+// from Twitch unqueued, with nothing logged. Nothing else picks it up:
+// gap-fill runs only for a Finished row.
+func (b *TwitchBacklog) capturedLiveJob(j *database.Job, stagingBase string) bool {
+	switch j.Status {
+	case database.StatusCancelled, database.StatusUpcoming, database.StatusLive,
+		database.StatusDownloading, database.StatusMuxing:
+		return true
+	}
+	if isRecoverableTwitchError(j, worker.MaxTwitchAutoRetries) {
+		return true
+	}
+	if j.OutputFile != "" {
+		return true
+	}
+	if segs, err := b.db.GetSegments(j.ID); err != nil || len(segs) > 0 {
+		return true // a read that failed is taken as footage: skipping is what this did before
+	}
+	if g, err := b.db.GetGapFill(j.ID); err != nil || g != nil {
+		return true
+	}
+	return stagingBase != "" && worker.HasSegmentFiles(stagingBase, j.ID)
 }
 
 // twitchLoginFromURL is the login a live Twitch job's URL names
@@ -200,18 +278,17 @@ func twitchLoginFromURL(u string) string {
 	return ""
 }
 
-// capturedLive reports whether v was published within
-// twitchBacklogCapturedWindow of one of starts — the archive of a broadcast a
-// live job captured.
-func capturedLive(v twitch.TwitchVideo, starts []time.Time) bool {
+// capturedLive is the job whose broadcast v is the archive of — v published
+// within twitchBacklogCapturedWindow of its stream_start_time — "" for none.
+func capturedLive(v twitch.TwitchVideo, starts []capturedBroadcast) string {
 	published := v.Published()
 	if published.IsZero() {
-		return false
+		return ""
 	}
-	for _, s := range starts {
-		if d := published.Sub(s); d > -twitchBacklogCapturedWindow && d < twitchBacklogCapturedWindow {
-			return true
+	for _, c := range starts {
+		if d := published.Sub(c.start); d > -twitchBacklogCapturedWindow && d < twitchBacklogCapturedWindow {
+			return c.jobID
 		}
 	}
-	return false
+	return ""
 }
