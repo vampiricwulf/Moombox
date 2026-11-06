@@ -335,3 +335,46 @@ func TestSingleFileFinalizeDropsAnImportedChapterList(t *testing.T) {
 		t.Errorf("the imported chapter list outlived the archive it described (%v)", err)
 	}
 }
+
+// TestRefinalizeOfANeverMuxedRowDropsAForeignImport: a re-finalize (the Mux
+// action over an Error row whose download failed before its mux, a boot
+// re-mux of a first download's interrupted Muxing row) of a row that names
+// no archive has no import of its own — an import needs an archive to be
+// saved beside — so a list already at the name it writes is another
+// recording's, left at a reused name. The archive embeds none of it and the
+// list goes, as before CJ-2.
+//
+// Mutant: keptImportFor also reading beside the name the finalize writes
+// (the foreign list is embedded and kept).
+func TestRefinalizeOfANeverMuxedRowDropsAForeignImport(t *testing.T) {
+	ffmpegPath, ffprobePath := requireFFmpegTools(t)
+	o, jobCtx := muxTestOrchestrator(t, notificationtest.New(), 0)
+	o.muxer = engine.NewMuxer(ffmpegPath, discardLogger{})
+	jobCtx.Config = &JobConfig{}
+	jobCtx.Refinalize = true
+	jobCtx.Job.OutputFile = ""
+	jobCtx.StagingDir = t.TempDir()
+	jobCtx.OutputDir = t.TempDir()
+	jobCtx.Filename = "a-job"
+	video := filepath.Join(jobCtx.StagingDir, "video.mp4")
+	writeMuxFixture(t, ffmpegPath, video, 4)
+	sidecar := filepath.Join(jobCtx.OutputDir, "a-job"+utils.ChaptersSidecarSuffix)
+	foreign := []utils.Chapter{{StartMs: 0, EndMs: 2000, Title: "Foreign A"}, {StartMs: 2000, EndMs: 60_000, Title: "Foreign B"}}
+	if err := utils.WriteImportedChaptersSidecar(sidecar, foreign, []utils.SidecarChapter{{Start: 0, End: 60, Title: "old original"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.muxAndFinalize(context.Background(), jobCtx, &DownloadResult{HasVideo: true, VideoPath: video}); err != nil {
+		t.Fatalf("muxAndFinalize: %v", err)
+	}
+	archive := filepath.Join(jobCtx.OutputDir, "a-job.mp4")
+	shape, err := probeArchiveShape(context.Background(), ffprobePath, archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shape.chapters != 0 {
+		t.Errorf("the archive embeds %d chapters, want none of the foreign list's", shape.chapters)
+	}
+	if _, err := os.Stat(sidecar); !os.IsNotExist(err) {
+		t.Errorf("the foreign imported chapter list was kept beside the new archive (%v)", err)
+	}
+}

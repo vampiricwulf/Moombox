@@ -3,6 +3,7 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 )
 
@@ -74,6 +75,61 @@ func WriteImportedChaptersSidecar(path string, chapters []Chapter, original []Si
 		return err
 	}
 	return WriteFileAtomic(path, data, 0o644)
+}
+
+// ChaptersFromSidecar is a sidecar list in milliseconds, the shape the
+// fitting and the muxer work in.
+func ChaptersFromSidecar(list []SidecarChapter) []Chapter {
+	out := make([]Chapter, 0, len(list))
+	for _, c := range list {
+		out = append(out, Chapter{StartMs: int64(math.Round(c.Start * 1000)), EndMs: int64(math.Round(c.End * 1000)), Title: c.Title})
+	}
+	return out
+}
+
+// SidecarFromChapters is ChaptersFromSidecar's inverse, in seconds.
+func SidecarFromChapters(list []Chapter) []SidecarChapter {
+	out := make([]SidecarChapter, 0, len(list))
+	for _, c := range list {
+		out = append(out, SidecarChapter{Start: float64(c.StartMs) / 1000, End: float64(c.EndMs) / 1000, Title: c.Title})
+	}
+	return out
+}
+
+// RefitImportedChapters fits a list an import saved (or the original it
+// kept) to a re-finalized archive of the same recording whose timeline is
+// now durationMs long (owner decision CJ-2): a chapter that starts at or
+// past the new end is dropped, one that ran past it is cut there, and the
+// last one runs to the new end — the list was fitted to the archive it was
+// imported into, whose last chapter ended at that archive's end, and a
+// re-mux that carried more of the recording (the Mux action over staging
+// the import never saw, a part recorded after it) extends that chapter
+// rather than leave the new footage outside every chapter. Starts and
+// titles are kept as they are: the timeline is the same recording's, so a
+// point in it means what it meant. An unknown length (0) leaves the list
+// as it is; nil when nothing is left.
+func RefitImportedChapters(list []Chapter, durationMs int64) []Chapter {
+	if durationMs <= 0 {
+		return list
+	}
+	var out []Chapter
+	for _, c := range list {
+		if c.StartMs >= durationMs {
+			continue
+		}
+		if c.EndMs <= 0 {
+			c.EndMs = durationMs
+		}
+		c.EndMs = min(c.EndMs, durationMs)
+		if c.EndMs <= c.StartMs {
+			continue
+		}
+		out = append(out, c)
+	}
+	if n := len(out); n > 0 {
+		out[n-1].EndMs = durationMs
+	}
+	return out
 }
 
 // ReadImportedChaptersSidecar reads a ChaptersSidecarSuffix file and reports

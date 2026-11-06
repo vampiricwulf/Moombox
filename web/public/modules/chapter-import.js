@@ -63,6 +63,7 @@ export class ChapterImportDialog {
     this._previewOk = false;
     this._el("chapter-import-text").value = "";
     this._el("chapter-import-offset").value = "";
+    this._offsetSource("");
     this._renderPreview(null, "");
     this._setSaveEnabled();
     const dialog = this._el("chapter-import-dialog");
@@ -70,8 +71,21 @@ export class ChapterImportDialog {
     const view = await this._preview({ initial: true });
     if (view && this._el("chapter-import-offset").value === "") {
       const def = Number(view.defaultOffsetSeconds) || 0;
-      if (def !== 0) this._el("chapter-import-offset").value = String(def);
+      if (def !== 0) {
+        this._el("chapter-import-offset").value = String(def);
+        // Where the pre-filled value came from (owner decision CJ-3): the
+        // server's note, "joined 1:23:45 in" for a late-joined live capture.
+        this._offsetSource(view.defaultOffsetNote ? `Pre-filled: ${view.defaultOffsetNote}` : "");
+      }
     }
+  }
+
+  /** Show (or hide, for "") the note under the offset field. */
+  _offsetSource(text) {
+    const el = this._el("chapter-import-offset-source");
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = !text;
   }
 
   close() {

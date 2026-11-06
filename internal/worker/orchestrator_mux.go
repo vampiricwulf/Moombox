@@ -1102,7 +1102,21 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// record copyStaged leaves beside it keeps staging (W30-A11).
 	// The archive's chapters (owner decision D23): this single-file shape is
 	// the one that carries them.
-	chaptersPath := o.prepareArchiveChapters(ctx, jobCtx, videoPath, audioPath)
+	// A re-finalize of the same recording keeps a chapter import (owner
+	// decision CJ-2): read only from beside the archive the row names (the
+	// template may now resolve elsewhere; write moves it to the new name).
+	// Never from beside the name this finalize writes when the row names
+	// none: a row with no output_file never had an archive, so no import of
+	// its own can exist (chapterTargetFor needs one), and a list found at
+	// that name is another recording's left behind at a reused name (a
+	// deleted row's files kept, a template that resolves alike) — dropped
+	// below, as before CJ-2.
+	var priorArchive string
+	if jobCtx.Job != nil {
+		priorArchive = ArchiveSidecarPath(jobCtx.Job.OutputFile, utils.ChaptersSidecarSuffix)
+	}
+	kept := keptImportFor(jobCtx, o.logger, priorArchive)
+	chaptersPath := o.prepareArchiveChapters(ctx, jobCtx, videoPath, audioPath, kept)
 	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputFile, chaptersPath)
 	if err != nil {
 		if verdict.short != nil {
@@ -1111,9 +1125,16 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		return fmt.Errorf("mux: %w", err)
 	}
 	probeData := verdict.probe
-	// The archive at this name is a new file: a chapter import's list beside
-	// the one it replaced no longer describes it.
-	dropImportedArchiveChapters(outputFile, o.logger)
+	// The archive at this name is a new file. A re-finalize of the same
+	// recording embedded the import it keeps, and saves it beside the new
+	// file with its original (owner decision CJ-2); any other finalize's
+	// archive is a new recording, which a list beside the one it replaced no
+	// longer describes.
+	if kept != nil {
+		kept.write(ArchiveSidecarPath(outputFile, utils.ChaptersSidecarSuffix), o.logger)
+	} else {
+		dropImportedArchiveChapters(outputFile, o.logger)
+	}
 
 	// Get file info
 	info, err := os.Stat(outputFile)
@@ -1159,6 +1180,17 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		}
 		if result.VideoFormat.Fps != nil {
 			updates["video_fps"] = *result.VideoFormat.Fps
+		}
+	}
+
+	// Where in the broadcast a live YouTube capture began (owner decision
+	// CJ-3), for the chapter import's offset; NULL when it is not known, so a
+	// re-finalize that can no longer tell does not leave an older value.
+	if jobCtx.Job != nil && jobCtx.Job.Platform == "youtube" && !jobCtx.Job.IsVod {
+		if join, ok := o.joinOffsetSeconds(ctx, result, videoPath, audioPath); ok {
+			updates["join_offset_seconds"] = join
+		} else {
+			updates["join_offset_seconds"] = nil
 		}
 	}
 

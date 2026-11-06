@@ -135,7 +135,7 @@ func TestChapterImportPreviewDoesNotWrite(t *testing.T) {
 		t.Fatalf("preview: %d %s", code, body)
 	}
 	// 0:06:55 and 0:08:26 shifted by -6:52 land at 3 s and past the end.
-	if got := titlesOf(v.Chapters); strings.Join(got, "|") != "<Untitled Chapter 1>|irysHirys Start | スタート" {
+	if got := titlesOf(v.Chapters); strings.Join(got, "|") != "Intro|irysHirys Start | スタート" {
 		t.Errorf("previewed list = %q", got)
 	}
 	if v.OffsetSeconds != -412 || v.DurationSeconds < 5.9 {
@@ -197,7 +197,7 @@ func TestChapterImportSaveRemuxesAndRestores(t *testing.T) {
 	if !v.Embedded || v.EmbedError != "" || !v.HasOriginal {
 		t.Errorf("save view: %+v", v)
 	}
-	wantImported := []Chapter{{Start: 0, End: 2, Title: "<Untitled Chapter 1>"}, {Start: 2, End: 5, Title: "one"}, {Start: 5, End: 6, Title: "two"}}
+	wantImported := []Chapter{{Start: 0, End: 2, Title: "Intro"}, {Start: 2, End: 5, Title: "one"}, {Start: 5, End: 6, Title: "two"}}
 	assertChapters(t, v.Chapters, wantImported)
 	assertChapters(t, f.get(t, "yt_vod"), wantImported)
 	probed, err := ffprobeChapters(t.Context(), "ffprobe", archive)
@@ -431,4 +431,57 @@ func TestChapterImportFirstSaveKeepsTheArchivesChapters(t *testing.T) {
 			t.Errorf("the refused save re-muxed (%d) or changed the archive", imp.remuxCount())
 		}
 	})
+}
+
+// TestChapterImportPrefillsTheJoinPoint is owner decision CJ-3 through the
+// preview route: a live YouTube capture that joined 1:23:45 into the
+// broadcast (join_offset_seconds on its row) opens the import with the
+// offset -5025 — a viewer's "1:30:00" lands 6:15 into the archive — and the
+// note saying where it came from, which both UIs show beside the field.
+//
+// Mutants: defaultChapterOffset ignoring the row (0, no note); the join
+// point not negated (+5025); the note left out of the view.
+func TestChapterImportPrefillsTheJoinPoint(t *testing.T) {
+	ffmpegPath := requireFFmpeg(t)
+	f := newChapterImportFixture(t, &fakeChapterImporter{})
+	makeChapteredMP4(t, ffmpegPath, filepath.Join(f.outputDir, "late.mp4"), 6, nil)
+	f.addJob(t, "yt_late", func(j *database.Job) { j.Filename = "late.mp4" })
+	f.db.UpdateJobFields("yt_late", map[string]any{"join_offset_seconds": 5025.0})
+
+	code, v, body := f.postImport(t, "/api/jobs/yt_late/chapters/preview", map[string]any{"text": ""})
+	if code != http.StatusOK {
+		t.Fatalf("preview: %d %s", code, body)
+	}
+	if v.DefaultOffsetSeconds != -5025 || v.DefaultOffsetNote != "joined 1:23:45 in" {
+		t.Errorf("default offset %v, note %q; want -5025, %q", v.DefaultOffsetSeconds, v.DefaultOffsetNote, "joined 1:23:45 in")
+	}
+}
+
+// TestDefaultChapterOffset pins every row shape CI-5's pre-fill reads (owner
+// decision CJ-3): a late join is its join point negated, with a note; a
+// capture from the start, a VOD, and a row whose join point is unknown are
+// 0 with none — unknown stays 0 and editable, as before.
+//
+// Mutants: the VOD guard dropped (the VOD row pre-fills -60); a from-start
+// row given a note ("joined 0:00 in").
+func TestDefaultChapterOffset(t *testing.T) {
+	f64 := func(v float64) *float64 { return &v }
+	cases := []struct {
+		name     string
+		job      *database.Job
+		want     float64
+		wantNote string
+	}{
+		{"late join", &database.Job{JoinOffsetSeconds: f64(208.0334)}, -208.033, "joined 3:28 in"},
+		{"hours in", &database.Job{JoinOffsetSeconds: f64(5025)}, -5025, "joined 1:23:45 in"},
+		{"from the start", &database.Job{JoinOffsetSeconds: f64(0)}, 0, ""},
+		{"unknown", &database.Job{}, 0, ""},
+		{"VOD", &database.Job{IsVod: true, JoinOffsetSeconds: f64(60)}, 0, ""},
+	}
+	for _, c := range cases {
+		got, note := defaultChapterOffset(c.job)
+		if got != c.want || note != c.wantNote {
+			t.Errorf("%s: %v %q, want %v %q", c.name, got, note, c.want, c.wantNote)
+		}
+	}
 }

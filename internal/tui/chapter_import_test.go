@@ -168,7 +168,7 @@ func TestChapterImportPreviewRenders(t *testing.T) {
 			return ChapterImportView{Current: []ChapterImportRow{{Start: 0, End: 10, Title: "old"}}, Error: "No timestamps found"}
 		}
 		return ChapterImportView{
-			Chapters: []ChapterImportRow{{Start: 0, End: 60, Title: "<Untitled Chapter 1>"}, {Start: 3725, End: 4000, Title: "Numb - Linkin Park"}},
+			Chapters: []ChapterImportRow{{Start: 0, End: 60, Title: "Intro"}, {Start: 3725, End: 4000, Title: "Numb - Linkin Park"}},
 			Current:  []ChapterImportRow{{Start: 0, End: 10, Title: "old"}}, OffsetSeconds: -5,
 		}
 	}
@@ -200,7 +200,7 @@ func TestChapterImportPreviewRenders(t *testing.T) {
 		t.Errorf("preview asked for %q", last)
 	}
 	view := r.app.chapterDlg.View()
-	for _, want := range []string{"Preview: 2 chapters", "0:00  <Untitled Chapter 1>", "1:02:05  Numb - Linkin Park", "(offset -5s)"} {
+	for _, want := range []string{"Preview: 2 chapters", "0:00  Intro", "1:02:05  Numb - Linkin Park", "(offset -5s)"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view lacks %q:\n%s", want, view)
 		}
@@ -395,5 +395,26 @@ func TestChapterImportChordsFromTheKeyboard(t *testing.T) {
 	press("ac")
 	if !r.app.chapterDlg.IsVisible() {
 		t.Fatal("A C from the keyboard did not open the overlay")
+	}
+}
+
+// TestChapterImportPrefillsTheJoinPoint is owner decision CJ-3 in the A C
+// overlay: the opening preview's default offset — a late-joined live
+// capture's join point, negated — fills the empty offset field, and the
+// overlay says where it came from, as the Web dialog does.
+//
+// Mutants: SetPreview not filling the field (empty); the note not drawn.
+func TestChapterImportPrefillsTheJoinPoint(t *testing.T) {
+	r := newChapterRig(t)
+	r.previewFn = func(text, offset string) ChapterImportView {
+		return ChapterImportView{Error: "No timestamps found", DefaultOffsetSeconds: -5025, DefaultOffsetNote: "joined 1:23:45 in"}
+	}
+	r.app.dispatchAction("A C", r.job)
+	previewNow(t, r.app)
+	if got := r.app.chapterDlg.offset.Value(); got != "-5025" {
+		t.Errorf("offset field = %q, want the pre-filled -5025", got)
+	}
+	if v := r.app.chapterDlg.View(); !strings.Contains(v, "Pre-filled: joined 1:23:45 in") {
+		t.Errorf("the overlay does not say where the offset came from:\n%s", v)
 	}
 }

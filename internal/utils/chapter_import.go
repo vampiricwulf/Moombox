@@ -189,8 +189,8 @@ func chapterRuns(line string) []chapterRun {
 // keeps its first line's title; an empty title becomes "Chapter N", N being
 // its place in the parsed list — the paste's timed lines, in time order — not
 // in the list as finally saved: FitImportedChapters may drop chapters outside
-// the recording and put an "<Untitled Chapter 1>" in front of a late first
-// one, and the numbers are not redone. ErrNoTimestamps when no line carries
+// the recording and put an "Intro" in front of a late first one, and the
+// numbers are not redone. ErrNoTimestamps when no line carries
 // one. The list is not yet fitted to any archive — FitImportedChapters does
 // that.
 //
@@ -261,12 +261,19 @@ func parseChapterLine(line string) (startMs int64, title string, ok bool) {
 	return ms, strings.TrimSpace(strings.TrimRightFunc(body[:last.from], isChapterTitleSep)), true
 }
 
+// ImportedIntroTitle names the chapter FitImportedChapters puts in front of an
+// imported list whose first chapter starts after 0 (owner decision CJ-1).
+const ImportedIntroTitle = "Intro"
+
 // FitImportedChapters shifts a parsed list by offsetMs (owner decision CI-5:
 // the operator's offset, or the capture's known one, moves every chapter),
 // drops each chapter that lands before 0 or at or past durationMs, and fits
-// what is left to the archive with SanitizeChapters, which sets every end and
-// puts an untitled chapter in front of a list that does not start at 0, as
-// yt-dlp's fill-in does. ErrChapterLengthUnknown without a length;
+// what is left to the archive with SanitizeChapters, which sets every end.
+// A list that does not start at 0 is led by a chapter named "Intro"
+// (ImportedIntroTitle, owner decision CJ-1) — the stretch before a viewer's
+// first timestamp is the stream's opening, and an import names it so —
+// where yt-dlp's fill-in, which the automatic lists keep, would put an
+// "<Untitled Chapter 1>". ErrChapterLengthUnknown without a length;
 // ErrNoChaptersInRange when nothing is left.
 func FitImportedChapters(parsed []Chapter, offsetMs, durationMs int64) ([]Chapter, error) {
 	if durationMs <= 0 {
@@ -279,6 +286,12 @@ func FitImportedChapters(parsed []Chapter, offsetMs, durationMs int64) ([]Chapte
 			continue
 		}
 		kept = append(kept, Chapter{StartMs: start, Title: c.Title})
+	}
+	// Titled here, ahead of SanitizeChapters, which then has no untitled
+	// chapter to put in front: only the leading one is the import's own, and
+	// the fill-in's numbering of anything else is unchanged.
+	if len(kept) > 0 && kept[0].StartMs > 0 {
+		kept = append([]Chapter{{StartMs: 0, Title: ImportedIntroTitle}}, kept...)
 	}
 	out := SanitizeChapters(kept, durationMs)
 	if len(out) == 0 {

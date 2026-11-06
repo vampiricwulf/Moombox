@@ -31,10 +31,13 @@ type ChapterImportView struct {
 	HasOriginal          bool
 	OffsetSeconds        float64
 	DefaultOffsetSeconds float64
-	Split                bool
-	Error                string
-	Embedded             bool
-	EmbedError           string
+	// DefaultOffsetNote is where DefaultOffsetSeconds came from ("joined
+	// 1:23:45 in", owner decision CJ-3), shown under the offset field.
+	DefaultOffsetNote string
+	Split             bool
+	Error             string
+	Embedded          bool
+	EmbedError        string
 }
 
 // The steps of the A C overlay.
@@ -282,7 +285,12 @@ func (m *ChapterImportDialogModel) View() string {
 	b.WriteString(m.text.View())
 	b.WriteString("\n")
 	b.WriteString(m.offset.View())
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	if m.view != nil && m.view.DefaultOffsetNote != "" {
+		b.WriteString(DimStyle.Render("Pre-filled: " + m.view.DefaultOffsetNote))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
 	// The rows the preview may take: what is left of the box below the
 	// fields, its own headings and the key line.

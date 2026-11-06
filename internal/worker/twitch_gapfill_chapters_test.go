@@ -76,6 +76,51 @@ func TestGapFillRefitsTheSplitArchiveChapters(t *testing.T) {
 		}
 	})
 
+	// Owner decision CJ-2: a chapter import's list is the same recording's,
+	// so the fill shifts it as it shifts an automatic one, and the original
+	// it keeps with it — on the same timeline — and writes both back as an
+	// import's, so Restore is still offered. Mutants: the refit reading the
+	// file as a finalize's list (the original dropped); the original written
+	// back unshifted (Before still ends at 40 s).
+	t.Run("an imported list keeps its original", func(t *testing.T) {
+		f := newGapFillFixture(t)
+		p1 := filepath.Join(f.dir, "Streamer - Big day - part1.mp4")
+		p2 := filepath.Join(f.dir, "Streamer - Big day - part2.mp4")
+		for _, p := range []string{p1, p2} {
+			os.WriteFile(p, []byte("RECORDED"), 0o644)
+		}
+		if err := f.db.ReplaceJobSegments("tw_1", []database.Segment{
+			{SegmentIndex: 0, Filename: filepath.Base(p1), FilePath: p1, DurationSeconds: 20, UnixStart: 900},
+			{SegmentIndex: 1, Filename: filepath.Base(p2), FilePath: p2, DurationSeconds: 20, UnixStart: 100},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		sidecar := filepath.Join(f.dir, "Streamer - Big day.chapters.json")
+		if err := utils.WriteImportedChaptersSidecar(sidecar,
+			[]utils.Chapter{{StartMs: 0, EndMs: 25_000, Title: "Intro"}, {StartMs: 25_000, EndMs: 40_000, Title: "Raid"}},
+			[]utils.SidecarChapter{{Start: 0, End: 40, Title: "Before"}}); err != nil {
+			t.Fatal(err)
+		}
+		f.plan(t, []stagedPartCoverage{covPart(0, 0, 20*time.Second, false), covPart(1, 40*time.Second, 60*time.Second, false)},
+			[]gapSpan{{FromMs: ms(20 * time.Second), ToMs: ms(40 * time.Second), Kind: gapKindLost, AfterPart: 0}},
+			gapStart.Add(25*time.Hour))
+		row, _ := f.db.GetGapFill("tw_1")
+		f.filler.step(context.Background(), *row, gapStart.Add(70*time.Minute))
+
+		imp, imported, err := utils.ReadImportedChaptersSidecar(sidecar)
+		if err != nil || !imported {
+			t.Fatalf("after the fill the list is not an import's (imported=%v, err=%v)", imported, err)
+		}
+		want := []utils.SidecarChapter{{Start: 0, End: 65, Title: "Intro"}, {Start: 65, End: 80, Title: "Raid"}}
+		if !reflect.DeepEqual(imp.Chapters, want) {
+			t.Errorf("imported list = %+v, want %+v", imp.Chapters, want)
+		}
+		wantOrig := []utils.SidecarChapter{{Start: 0, End: 80, Title: "Before"}}
+		if !reflect.DeepEqual(imp.Original, wantOrig) {
+			t.Errorf("original = %+v, want %+v", imp.Original, wantOrig)
+		}
+	})
+
 	t.Run("a recovered opening", func(t *testing.T) {
 		f := newGapFillFixture(t)
 		old := filepath.Join(f.dir, "Streamer - Big day.chapters.json")

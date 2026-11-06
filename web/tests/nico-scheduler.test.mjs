@@ -216,6 +216,31 @@ test("countDrop is strict at the anchor: entering exactly on it is not a drop", 
   assert.equal(s.dropped, 1);
 });
 
+// Owner decision CJ-4: a deleted message the tooLate walk steps over is not a
+// drop — the overlay hides it whenever it comes due — but the cursor still
+// steps over it, so the array the cursor indexes is never filtered.
+test("a deleted message that ages out is skipped without counting, and the cursor still passes it", () => {
+  const lanes = fakeLanes();
+  const s = make(lanes);
+  const rec = fakeHooks(lanes);
+  const msgs = [
+    { offsetMs: 3000, deleted: true },
+    { offsetMs: 3100 },
+    { offsetMs: 3200, deleted: true },
+  ];
+  s.anchor(msgs, 0);
+  // Every entry (2000, 2100, 2200) is more than the bound behind 9000.
+  const r = s.tick(msgs, 9000, rec.hooks);
+  assert.deepEqual(r, { placed: 0, deferred: 0, skipped: 3 }, "all three are stepped over");
+  assert.equal(s.cursor, 3, "the cursor walks past the deleted ones as it does the rest");
+  assert.equal(s.dropped, 1, "only the live message counts toward the pill");
+  assert.equal(msgs.length, 3, "the message array is not filtered");
+
+  // countDrop itself refuses a deleted message, whatever its time.
+  s.countDrop({ offsetMs: 50000, deleted: true });
+  assert.equal(s.dropped, 1);
+});
+
 test("the lateness bound is strict: exactly NICO_MAX_LATENESS_MS late still flies", () => {
   // One message, entering at 2000 (offsetMs − NICO_LEAD_MS), anchored at 0 so
   // a drop would be counted.

@@ -20,6 +20,8 @@ var runtimeOnlyJobFields = []string{
 	"Watched", "ResumePosition", "ChatOffset",
 	// Parking and notification bookkeeping, written by their own paths.
 	"ParkReason", "ParkIdentity", "NotificationMsgs",
+	// Written at finalize (owner decision CJ-3).
+	"JoinOffsetSeconds",
 }
 
 // AddJob's INSERT names a fixed column list, so a Job field outside it takes

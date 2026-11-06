@@ -177,3 +177,43 @@ func TestDownloadHlsAttachesTokenOnlyWhereRequired(t *testing.T) {
 		})
 	}
 }
+
+// TestDownloadHlsCarriesTheSegmentDuration: an HLS variant maps to no
+// player-response format, so the live HLS result carries the extraction's
+// advertised segment cadence itself (SegmentDurationSec) — what the
+// finalize's join point (owner decision CJ-3) multiplies a late-joined
+// MPEG-TS capture's first sequence by. A video format's cadence is preferred;
+// an extraction advertising none leaves it 0 (unknown, never a guess).
+//
+// Mutant: DownloadHls not setting SegmentDurationSec (0 for both rows that
+// advertise one).
+func TestDownloadHlsCarriesTheSegmentDuration(t *testing.T) {
+	h := 1080
+	for _, tc := range []struct {
+		name    string
+		formats []youtube.Format
+		want    int
+	}{
+		{name: "video cadence", formats: []youtube.Format{{Itag: 140, TargetDurationSec: 5}, {Itag: 299, Height: &h, TargetDurationSec: 2}}, want: 2},
+		{name: "audio only advertises", formats: []youtube.Format{{Itag: 140, TargetDurationSec: 5}, {Itag: 299, Height: &h}}, want: 5},
+		{name: "none advertised", formats: []youtube.Format{{Itag: 299, Height: &h}}, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newManifestServer(t, potTestMaster)
+			job, _ := vodPotJob(t)
+			info := &youtube.VideoInfo{
+				StreamStatus:      youtube.StreamLive,
+				HlsManifestURL:    srv.URL + "/api/manifest/hls_variant/id/abc/file/index.m3u8",
+				HlsManifestSource: "visionos",
+				Formats:           tc.formats,
+			}
+			res, err := DownloadHls(context.Background(), job, info, nil, nil, nil, nil)
+			if err != nil {
+				t.Fatalf("DownloadHls: %v", err)
+			}
+			if res.SegmentDurationSec != tc.want {
+				t.Errorf("SegmentDurationSec = %d, want %d", res.SegmentDurationSec, tc.want)
+			}
+		})
+	}
+}

@@ -2766,6 +2766,12 @@ sl-progress-bar {
     max-width: 14rem;
 }
 
+.chapter-import-offset-source {
+    margin: var(--sl-spacing-2x-small) 0 0;
+    color: var(--sl-color-neutral-600);
+    font-size: var(--sl-font-size-small);
+}
+
 .chapter-import-status {
     min-height: 1.25em;
     margin: var(--sl-spacing-small) 0;

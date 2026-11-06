@@ -36,6 +36,10 @@ import (
 // anyway, behind a Warn that downloads "may be throttled" (audit G9). An
 // extraction that carries no master at all asks the same chain.
 func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
+	// The extraction's segment cadence, read before a cookieless chain's
+	// extraction may replace it below: that one can carry no adaptive
+	// formats (an HLS-only client), where this one does.
+	extracted := videoInfo
 	if videoInfo.HlsManifestURL == "" {
 		// An extraction with no master is passed over for the cookieless
 		// chain's, as a master whose n has no answer is below: the
@@ -175,6 +179,11 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		VideoWidth:  bestVariant.Width,
 		VideoHeight: bestVariant.Height,
 		VideoFps:    bestVariant.FPS,
+		// An HLS variant maps to no player-response format, so no
+		// VideoFormat says how long a segment runs; the finalize's join
+		// point (owner decision CJ-3) needs it for an MPEG-TS that joined
+		// late.
+		SegmentDurationSec: advertisedSegmentDuration(extracted, videoInfo),
 	}
 
 	// Reuse hlsPoToken from the master-URL step above; no need to mint twice.
