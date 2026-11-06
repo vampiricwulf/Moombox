@@ -140,13 +140,16 @@ test("the current chapter is highlighted as playback moves", { skip }, async () 
 
 // Mutants: the strip or the list rendered with no chapters (an empty strip
 // shown, the list not hidden); the previous job's chapters left in place
-// until the next job's answer (the clear at selection dropped).
+// until the next job's answer (the clear at selection dropped); the list's
+// collapse not reset with it (job v's list reopens expanded).
 test("a job with no chapters draws nothing, and a switch clears the previous job's", { skip }, async () => {
   const h = harness.makePlayer({ jobs: [finished("v"), finished("none")], chaptersById: { v: THREE } });
   await h.selectJob("v");
   assert.equal(markers(h).length, 3);
   assert.equal(h.el("player-chapters").hidden, false);
   assert.equal(h.el("player-chapters").getAttribute("summary"), "Chapters (3)");
+  // The viewer expands job v's list; the next job's list starts collapsed.
+  h.el("player-chapters").open = true;
 
   // The previous job's chapters go the moment the next is opened, not when
   // its own (here parked) chapters answer.
@@ -164,6 +167,7 @@ test("a job with no chapters draws nothing, and a switch clears the previous job
   // Closing the player (the picker cleared) drops them too.
   await h.selectJob("v");
   assert.equal(markers(h).length, 3);
+  assert.equal(h.el("player-chapters").open, false, "the list must come back collapsed, as its default is");
   h.player.clearPlayer();
   assert.equal(markers(h).length, 0);
   assert.equal(h.el("player-chapter-strip").hidden, true);
