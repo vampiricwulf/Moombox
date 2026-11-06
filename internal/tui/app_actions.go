@@ -352,6 +352,17 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		a.filesDlg.SetSize(a.width, a.height)
 		a.filesDlg.Open()
 		return a, tea.Batch(a.fetchOrphansCmd(), a.fetchOrphanedHistoryCmd(), a.filesDlg.SpinnerInit())
+	case "A H":
+		if job != nil && a.OnPreviewChapters != nil && a.OnSaveChapters != nil {
+			a.clearFeedback()
+			a.chapterDlg.SetSize(a.width, a.height)
+			return a, a.chapterDlg.Open(job)
+		}
+	case "A U":
+		if job != nil && a.OnRestoreChapters != nil {
+			a.setFeedback(fmt.Sprintf("Restoring the original chapters: %s", job.Title))
+			return a, a.restoreChaptersCmd(job)
+		}
 	case "A K":
 		if a.OnListClientTokens != nil {
 			a.clientTokensDlg.SetSize(a.width, a.height)
@@ -931,6 +942,25 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 
 	if a.OnListClientTokens != nil {
 		items = append(items, ActionMenuItem{Chord: "A K", Label: "Manage Client Tokens", HintLabel: "Tokens", Category: "Action"})
+	}
+	// The chapter import (owner decision CI-4): A H pastes a timestamp
+	// comment as the job's chapters, A U brings back the chapters an import
+	// replaced. Both act on a job that is not active and has an archive —
+	// the service re-checks, under the job's claim. A U's HasOriginalChapters
+	// reads the disk, so it runs when A U is chosen and its job selector is
+	// built; the menu's "no jobs" answer is the status alone (CORE-9).
+	if a.OnPreviewChapters != nil && a.OnSaveChapters != nil {
+		items = append(items, ActionMenuItem{Chord: "A H", Label: "Import Chapters", HintLabel: "Chapters", Category: "Action", NeedsJob: true,
+			DisabledReason: "no finished jobs with an archive",
+			JobFilter:      chapterImportable})
+	}
+	if a.OnRestoreChapters != nil && a.HasOriginalChapters != nil {
+		items = append(items, ActionMenuItem{Chord: "A U", Label: "Restore Original Chapters", HintLabel: "Restore Chapters", Category: "Action", NeedsJob: true, NeedsConfirm: true,
+			DisabledReason: "no jobs with imported chapters",
+			JobFilter: func(j *database.Job) bool {
+				return chapterImportable(j) && a.HasOriginalChapters(j.ID)
+			},
+			StatusFilter: chapterImportable})
 	}
 
 	// Request — conditional on callbacks being set

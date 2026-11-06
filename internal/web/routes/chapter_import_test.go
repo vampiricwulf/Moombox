@@ -66,7 +66,7 @@ func newChapterImportFixture(t *testing.T, imp *fakeChapterImporter) *chapterFix
 	t.Helper()
 	f := &chapterFixture{jobsFixture: newJobsFixture(t), logger: &chapterLogger{}}
 	f.cache = newChapterCache(chapterCacheSize)
-	chapterRoutes(f.router, &ChapterRouteDeps{DB: f.db, Store: f.store, Importer: imp, Logger: f.logger}, f.cache)
+	f.svc = chapterRoutes(f.router, &ChapterRouteDeps{DB: f.db, Store: f.store, Importer: imp, Logger: f.logger}, f.cache)
 	return f
 }
 
@@ -223,6 +223,9 @@ func TestChapterImportSaveRemuxesAndRestores(t *testing.T) {
 		t.Errorf("the second save's original = %+v", imported.Original)
 	}
 
+	if !f.svc.HasOriginal("yt_vod") {
+		t.Error("HasOriginal after an import of a single-file archive")
+	}
 	code, v, body = f.postImport(t, "/api/jobs/yt_vod/chapters/restore", nil)
 	if code != http.StatusOK || !v.Embedded {
 		t.Fatalf("restore: %d %s", code, body)
@@ -307,12 +310,18 @@ func TestChapterImportSplitArchiveSidecarOnly(t *testing.T) {
 			{SegmentIndex: 1, Filename: filepath.Base(p2), FilePath: p2, DurationSeconds: 60},
 		}
 	})
+	if f.svc.HasOriginal("tw_split") {
+		t.Error("HasOriginal before any import")
+	}
 	code, v, body := f.postImport(t, "/api/jobs/tw_split/chapters", map[string]any{"text": "0:00 a\n2:00 b\n3:00 past"})
 	if code != http.StatusOK {
 		t.Fatalf("save: %d %s", code, body)
 	}
 	if !v.Split || v.Embedded || imp.remuxCount() != 0 {
 		t.Errorf("view %+v, remuxes %d", v, imp.remuxCount())
+	}
+	if !f.svc.HasOriginal("tw_split") {
+		t.Error("HasOriginal after an import (the TUI's A U gate)")
 	}
 	assertChapters(t, f.get(t, "tw_split"), []Chapter{{Start: 0, End: 120, Title: "a"}, {Start: 120, End: 160, Title: "b"}})
 	for _, p := range []string{p1, p2} {

@@ -163,6 +163,21 @@ type (
 		Result cookies.ImportResult
 		Err    error
 	}
+	// chapterPreviewResultMsg is the async answer of OnPreviewChapters for
+	// the A H overlay's edit number Seq.
+	chapterPreviewResultMsg struct {
+		Seq  int
+		View ChapterImportView
+		Err  error
+	}
+	// chapterSaveResultMsg is the async result of OnSaveChapters (A H) or,
+	// with Restore set, OnRestoreChapters (A U).
+	chapterSaveResultMsg struct {
+		Title   string
+		Restore bool
+		View    ChapterImportView
+		Err     error
+	}
 	createTrimResultMsg struct {
 		Filename string
 		Err      string
@@ -444,6 +459,7 @@ type App struct {
 	addVideo        *AddVideoModel
 	importDlg       *ImportDialogModel
 	cookieImportDlg *CookieImportDialogModel
+	chapterDlg      *ChapterImportDialogModel
 	trimDlg         *TrimDialogModel
 	filesDlg        *FilesDialogModel
 	clientTokensDlg *ClientTokensDialogModel
@@ -646,7 +662,20 @@ type App struct {
 	// OnMuxJob: /mux and A M mean "mux the recording", and an aside overlaps
 	// the recording from sequence 0 — it can only ever be a sibling.
 	OnRecoverAsides func(jobID string) error
-	HasStagingFiles func(jobID string) bool // checks if staging dir has files
+	// The chapter import (owner decision CI-4), the same
+	// routes.ChapterService the Web player's dialog reaches over
+	// /api/jobs/{id}/chapters/*: OnPreviewChapters parses a paste against a
+	// job's archive without saving (A H's live preview), OnSaveChapters saves
+	// it, OnRestoreChapters brings back the original (A U), and
+	// HasOriginalChapters says whether there is one to bring back. Each reads
+	// or rewrites the disk, so each runs off the update goroutine. A H is
+	// registered only with OnPreviewChapters and OnSaveChapters, A U only
+	// with OnRestoreChapters and HasOriginalChapters.
+	OnPreviewChapters   func(jobID, text, offset string) (ChapterImportView, error)
+	OnSaveChapters      func(jobID, text, offset string) (ChapterImportView, error)
+	OnRestoreChapters   func(jobID string) (ChapterImportView, error)
+	HasOriginalChapters func(jobID string) bool
+	HasStagingFiles     func(jobID string) bool // checks if staging dir has files
 	HasSegmentFiles func(jobID string) bool // checks if staging dir has segment files
 	// HasUnmuxedParts reports whether a Finished job's staging still holds a
 	// split part its finalize could not mux (worker.HasUnmuxedParts) — what
@@ -826,6 +855,7 @@ func NewApp() *App {
 		addVideo:          NewAddVideoModel(),
 		importDlg:         NewImportDialogModel(),
 		cookieImportDlg:   NewCookieImportDialogModel(),
+		chapterDlg:        NewChapterImportDialogModel(),
 		trimDlg:           NewTrimDialogModel(),
 		filesDlg:          NewFilesDialogModel(),
 		clientTokensDlg:   NewClientTokensDialogModel(),
@@ -1241,6 +1271,7 @@ func (a *App) hasActiveOverlay() bool {
 		(a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen()) ||
 		a.importDlg.IsVisible() ||
 		a.cookieImportDlg.IsVisible() ||
+		a.chapterDlg.IsVisible() ||
 		a.addVideo.IsVisible() ||
 		a.trimDlg.IsVisible() ||
 		a.filesDlg.IsVisible() ||

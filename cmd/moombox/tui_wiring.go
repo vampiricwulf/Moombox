@@ -278,6 +278,23 @@ func (s *runState) runTUI() {
 		}
 		return out
 	}
+	// The chapter import (A H, A U): the routes' ChapterService in
+	// process, the one the Web player's dialog reaches over HTTP.
+	if svc := s.chapterSvc; svc != nil {
+		app.OnPreviewChapters = func(jobID, text, offset string) (tui.ChapterImportView, error) {
+			v, err := svc.Preview(context.Background(), jobID, text, offset)
+			return tuiChapterView(v), err
+		}
+		app.OnSaveChapters = func(jobID, text, offset string) (tui.ChapterImportView, error) {
+			v, err := svc.Save(context.Background(), jobID, text, offset)
+			return tuiChapterView(v), err
+		}
+		app.OnRestoreChapters = func(jobID string) (tui.ChapterImportView, error) {
+			v, err := svc.Restore(context.Background(), jobID)
+			return tuiChapterView(v), err
+		}
+		app.HasOriginalChapters = svc.HasOriginal
+	}
 	app.OnRecoverAsides = func(jobID string) error {
 		// Returns one of worker's typed refusals synchronously, or nil once
 		// the recovery is running; the TUI renders whichever it gets on its
@@ -1409,5 +1426,31 @@ func forwardTUILogs(ctx context.Context, sub <-chan logger.Line, backfillSeq uin
 				dropped.Add(1)
 			}
 		}
+	}
+}
+
+// tuiChapterView is a routes.ChapterImportView in the TUI's own shape (the
+// tui package does not import routes); nil is the zero view.
+func tuiChapterView(v *routes.ChapterImportView) tui.ChapterImportView {
+	if v == nil {
+		return tui.ChapterImportView{}
+	}
+	rows := func(list []routes.Chapter) []tui.ChapterImportRow {
+		out := make([]tui.ChapterImportRow, 0, len(list))
+		for _, c := range list {
+			out = append(out, tui.ChapterImportRow{Start: c.Start, End: c.End, Title: c.Title})
+		}
+		return out
+	}
+	return tui.ChapterImportView{
+		Chapters:             rows(v.Chapters),
+		Current:              rows(v.Current),
+		HasOriginal:          v.HasOriginal,
+		OffsetSeconds:        v.OffsetSeconds,
+		DefaultOffsetSeconds: v.DefaultOffsetSeconds,
+		Split:                v.Split,
+		Error:                v.Error,
+		Embedded:             v.Embedded,
+		EmbedError:           v.EmbedError,
 	}
 }

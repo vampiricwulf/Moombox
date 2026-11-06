@@ -150,6 +150,37 @@ func (s *ChapterService) ffprobePath() string {
 	return engine.NewMuxer(ffmpegPath, s.deps.Logger).FFprobePath()
 }
 
+// HasOriginal reports whether jobID's chapters were imported, so an original
+// is kept to restore (the TUI's A U is offered only then). It reads the
+// sidecar and nothing else — no probe — because the TUI asks it per job
+// while it builds a chord's job list.
+func (s *ChapterService) HasOriginal(jobID string) bool {
+	job, err := s.load(jobID)
+	if err != nil || !importableStatus(job.Status) {
+		return false
+	}
+	var sidecar string
+	segments, err := s.deps.DB.GetSegments(job.ID)
+	switch {
+	case err != nil:
+		return false
+	case len(segments) > 0:
+		p, ok := splitSidecarPath(job, segments, s.deps)
+		if !ok {
+			return false
+		}
+		sidecar = p
+	default:
+		path, _, code := jobVideoPath(job, s.deps.Store)
+		if code != 0 {
+			return false
+		}
+		sidecar = worker.ArchiveSidecarPath(path, utils.ChaptersSidecarSuffix)
+	}
+	_, imported, err := utils.ReadImportedChaptersSidecar(sidecar)
+	return err == nil && imported
+}
+
 // defaultChapterOffset is the offset the import's field starts at (owner
 // decision CI-5: the capture's known start in the video's timeline, negated,
 // and 0 otherwise). Every archive Moombox can import into starts at 0 of the
