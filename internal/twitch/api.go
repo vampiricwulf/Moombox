@@ -1151,8 +1151,9 @@ func vodChapters(moments []vodMoment, game string, durationMs int64) []utils.Cha
 // (TwitchStreamIE._real_extract, twitch.py b77c9304e: `next(self._entries(
 // channel_name, None, 'time'))`, kept when its timestamp >= the stream's
 // createdAt), over the same FilterableVideoTower_Videos op its
-// TwitchVideosIE pages; the first page is enough, since the archive of a
-// broadcast that just ended is the newest video. Moombox reads it at a live
+// TwitchVideosIE pages, filtered to past broadcasts (see the broadcastType
+// variable); the first page is enough, since the archive of a broadcast that
+// just ended is the newest archive. Moombox reads it at a live
 // capture's finalize, for the VOD's chapters (owner decision D23 follow-up 1:
 // VOD first, the categories the capture observed as the fallback).
 //
@@ -1165,9 +1166,16 @@ func (a *API) ArchiveVodFor(ctx context.Context, channelLogin, startedAt, authTo
 	}
 	query := newPersistedQuery("FilterableVideoTower_Videos", constants.TwitchGQLHashes.FilterableVideoTowerVideos, map[string]any{
 		"channelOwnerLogin": strings.ToLower(channelLogin),
-		"broadcastType":     nil,
-		"videoSort":         "TIME",
-		"limit":             archiveVodLookupLimit,
+		// "ARCHIVE", where upstream sends None (all types): yt-dlp looks as
+		// the stream starts, when its in-progress archive is the newest
+		// video, but Moombox looks at finalize, hours later, when a
+		// highlight or upload published during the broadcast is newer than
+		// the archive (whose publishedAt is the stream's start) and would be
+		// taken in its place. Past broadcasts only is yt-dlp's own
+		// _BROADCASTS 'archives' filter.
+		"broadcastType": "ARCHIVE",
+		"videoSort":     "TIME",
+		"limit":         archiveVodLookupLimit,
 	})
 	respData, err := a.gqlRequest(ctx, "FilterableVideoTower_Videos", query, authToken)
 	if err != nil {

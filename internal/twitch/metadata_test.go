@@ -107,10 +107,12 @@ func TestGetVodInfoChapterOpFailureKeepsTheMetadata(t *testing.T) {
 }
 
 // TestArchiveVodFor is yt-dlp's live_from_start lookup: the channel's newest
-// video counts only when it was published at or after the broadcast began.
+// video counts only when it was published at or after the broadcast began,
+// and only past broadcasts are asked for.
 //
-// Mutant: the publishedAt comparison dropped (an older broadcast's VOD is
-// returned).
+// Mutants: the publishedAt comparison dropped (an older broadcast's VOD is
+// returned); broadcastType sent as upstream's null (a highlight published
+// mid-stream, newer than the archive by finalize, would be taken).
 func TestArchiveVodFor(t *testing.T) {
 	cases := []struct {
 		name, reply, want string
@@ -132,6 +134,11 @@ func TestArchiveVodFor(t *testing.T) {
 			}
 			if !strings.Contains(sent, constants.TwitchGQLHashes.FilterableVideoTowerVideos) || !strings.Contains(sent, `"channelOwnerLogin":"streamer"`) {
 				t.Errorf("request %s, want FilterableVideoTower_Videos for the lower-cased login", sent)
+			}
+			// Past broadcasts only: at finalize, a highlight published during
+			// the broadcast is newer than its archive and would be taken.
+			if !strings.Contains(sent, `"broadcastType":"ARCHIVE"`) {
+				t.Errorf("request %s, want broadcastType ARCHIVE", sent)
 			}
 		})
 	}
