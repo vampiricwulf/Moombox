@@ -168,7 +168,7 @@ func TestChapterImportPreviewRenders(t *testing.T) {
 			return ChapterImportView{Current: []ChapterImportRow{{Start: 0, End: 10, Title: "old"}}, Error: "No timestamps found"}
 		}
 		return ChapterImportView{
-			Chapters: []ChapterImportRow{{Start: 0, End: 60, Title: "<Untitled Chapter 1>"}, {Start: 3725, End: 4000, Title: "Numb - Linkin Park"}},
+			Chapters: []ChapterImportRow{{Start: 0, End: 60, Title: "Intro"}, {Start: 3725, End: 4000, Title: "Numb - Linkin Park"}},
 			Current:  []ChapterImportRow{{Start: 0, End: 10, Title: "old"}}, OffsetSeconds: -5,
 		}
 	}
@@ -200,7 +200,7 @@ func TestChapterImportPreviewRenders(t *testing.T) {
 		t.Errorf("preview asked for %q", last)
 	}
 	view := r.app.chapterDlg.View()
-	for _, want := range []string{"Preview: 2 chapters", "0:00  <Untitled Chapter 1>", "1:02:05  Numb - Linkin Park", "(offset -5s)"} {
+	for _, want := range []string{"Preview: 2 chapters", "0:00  Intro", "1:02:05  Numb - Linkin Park", "(offset -5s)"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view lacks %q:\n%s", want, view)
 		}

@@ -135,7 +135,7 @@ func TestChapterImportPreviewDoesNotWrite(t *testing.T) {
 		t.Fatalf("preview: %d %s", code, body)
 	}
 	// 0:06:55 and 0:08:26 shifted by -6:52 land at 3 s and past the end.
-	if got := titlesOf(v.Chapters); strings.Join(got, "|") != "<Untitled Chapter 1>|irysHirys Start | スタート" {
+	if got := titlesOf(v.Chapters); strings.Join(got, "|") != "Intro|irysHirys Start | スタート" {
 		t.Errorf("previewed list = %q", got)
 	}
 	if v.OffsetSeconds != -412 || v.DurationSeconds < 5.9 {
@@ -197,7 +197,7 @@ func TestChapterImportSaveRemuxesAndRestores(t *testing.T) {
 	if !v.Embedded || v.EmbedError != "" || !v.HasOriginal {
 		t.Errorf("save view: %+v", v)
 	}
-	wantImported := []Chapter{{Start: 0, End: 2, Title: "<Untitled Chapter 1>"}, {Start: 2, End: 5, Title: "one"}, {Start: 5, End: 6, Title: "two"}}
+	wantImported := []Chapter{{Start: 0, End: 2, Title: "Intro"}, {Start: 2, End: 5, Title: "one"}, {Start: 5, End: 6, Title: "two"}}
 	assertChapters(t, v.Chapters, wantImported)
 	assertChapters(t, f.get(t, "yt_vod"), wantImported)
 	probed, err := ffprobeChapters(t.Context(), "ffprobe", archive)

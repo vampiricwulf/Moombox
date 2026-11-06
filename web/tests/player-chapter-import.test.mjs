@@ -61,7 +61,7 @@ function type(h, id, value) {
 test("the dialog previews the paste through the server, debounced, with the offset as typed", { skip }, async () => {
   const h = await openDialog({
     preview: (body) => body.text
-      ? view({ chapters: [{ start: 0, end: 30, title: "<Untitled Chapter 1>" }, { start: 30, end: 600, title: "Numb - Linkin Park" }], offsetSeconds: -60 })
+      ? view({ chapters: [{ start: 0, end: 30, title: "Intro" }, { start: 30, end: 600, title: "Numb - Linkin Park" }], offsetSeconds: -60 })
       : view({ current: [{ start: 0, end: 600, title: "old" }], error: "No timestamps found" }),
   });
   assert.equal(h.el("chapter-import-dialog").open, true);
@@ -84,7 +84,7 @@ test("the dialog previews the paste through the server, debounced, with the offs
   const calls = h.http.matching("/chapters/preview", "POST");
   assert.equal(calls.length, 2, "one preview for the burst of input");
   assert.deepEqual(calls[1].body, { text: "├01:00:30 Numb - Linkin Park", offsetSeconds: "-1:00" });
-  assert.deepEqual(previewRows(h), [["0:00", "<Untitled Chapter 1>"], ["0:30", "Numb - Linkin Park"]]);
+  assert.deepEqual(previewRows(h), [["0:00", "Intro"], ["0:30", "Numb - Linkin Park"]]);
   assert.equal(h.el("chapter-import-save").disabled, false);
 });
 

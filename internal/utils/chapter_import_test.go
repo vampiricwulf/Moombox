@@ -234,15 +234,51 @@ func TestParseChapterCommentEdgeRows(t *testing.T) {
 	}
 }
 
+// TestImportedListIsLedByIntro pins owner decision CJ-1: an import whose first
+// chapter starts after 0 is led by "Intro", while the same list fitted as an
+// automatic one (SanitizeChapters, W22's sources) keeps yt-dlp's
+// "<Untitled Chapter 1>" — the rename is the import's alone. A list that
+// starts at 0 gets no leading chapter at all.
+func TestImportedListIsLedByIntro(t *testing.T) {
+	parsed := []Chapter{{StartMs: 90000, Title: "Opening song"}, {StartMs: 300000, Title: "Zatsudan"}}
+	got, err := FitImportedChapters(parsed, 0, 600000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Chapter{
+		{StartMs: 0, EndMs: 90000, Title: ImportedIntroTitle},
+		{StartMs: 90000, EndMs: 300000, Title: "Opening song"},
+		{StartMs: 300000, EndMs: 600000, Title: "Zatsudan"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("import:\n got  %+v\nwant %+v", got, want)
+	}
+	if ImportedIntroTitle != "Intro" {
+		t.Errorf("ImportedIntroTitle = %q, the owner's word is \"Intro\"", ImportedIntroTitle)
+	}
+	auto := SanitizeChapters(parsed, 600000)
+	if len(auto) != 3 || auto[0].Title != "<Untitled Chapter 1>" {
+		t.Errorf("an automatic list keeps yt-dlp's filler: %+v", auto)
+	}
+	fromZero, err := FitImportedChapters([]Chapter{{StartMs: 0, Title: "Start"}, {StartMs: 1000, Title: "b"}}, 0, 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fromZero) != 2 || fromZero[0].Title != "Start" {
+		t.Errorf("a list from 0 gets no Intro: %+v", fromZero)
+	}
+}
+
 func TestFitImportedChapters(t *testing.T) {
 	parsed := []Chapter{{StartMs: 5000, Title: "a"}, {StartMs: 20000, Title: "b"}, {StartMs: 60000, Title: "past"}}
 	// The offset shifts every chapter; one before 0 or at or past the end is
-	// dropped; SanitizeChapters sets the ends and fills the opening.
+	// dropped; SanitizeChapters sets the ends, and the opening is "Intro"
+	// (owner decision CJ-1).
 	got, err := FitImportedChapters(parsed, -10000, 50000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []Chapter{{StartMs: 0, EndMs: 10000, Title: "<Untitled Chapter 1>"}, {StartMs: 10000, EndMs: 50000, Title: "b"}}
+	want := []Chapter{{StartMs: 0, EndMs: 10000, Title: "Intro"}, {StartMs: 10000, EndMs: 50000, Title: "b"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("offset -10s:\n got  %+v\nwant %+v", got, want)
 	}
