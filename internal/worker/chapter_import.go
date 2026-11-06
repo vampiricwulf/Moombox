@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/childproc"
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/disk"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -32,6 +34,19 @@ const opChapterImport = "chapter import"
 // finished and cannot be rewritten (owner decision CI-1: only a job that is not
 // active can be imported). The REST layer maps it to 409.
 var ErrArchiveJobActive = errors.New("job is active; its archive cannot be rewritten while it records or muxes")
+
+// ErrArchiveRemuxNoSpace: the archive's volume has no room for the re-mux's
+// temporary copy (owner decision PR-I4), so the archive is left as it is and
+// the chapter list stays a sidecar only. The REST layer reports it on the
+// save's view (ChapterImportView.NoSpace) and in its embed error, which both
+// UIs show.
+var ErrArchiveRemuxNoSpace = errors.New("not enough free space to re-mux the archive")
+
+// remuxHeadroom is what the archive's volume must keep free beyond the
+// re-mux's full temporary copy of the archive: the FFMETADATA file, the
+// copy's own index growing past the original's, and room for whatever else
+// writes to the volume (a live capture) while the copy is written.
+const remuxHeadroom = 256 << 20
 
 // ClaimChapterImport takes the job's per-job claim for a chapter import and
 // returns its release, to be called once the import is done. The claim is
@@ -174,6 +189,10 @@ func (w *DownloadWorker) RemuxArchiveChapters(jobID string, expect database.JobS
 	})
 	defer unsubscribe()
 
+	if err := w.remuxRoom(path); err != nil {
+		return nil, err
+	}
+
 	muxer := w.orchestrator.mux()
 	ffprobePath := muxer.FFprobePath()
 	orig, err := probeArchiveShape(ctx, ffprobePath, path)
@@ -242,6 +261,47 @@ func (w *DownloadWorker) RemuxArchiveChapters(jobID string, expect database.JobS
 		}
 	}
 	return res, nil
+}
+
+// remuxRoom is the re-mux's disk check, made before it writes anything (owner
+// decision PR-I4): the re-mux writes a full temporary copy of the archive
+// beside it, so the archive's volume needs the archive's size plus
+// remuxHeadroom free, and the copy must not take the volume to the
+// disk_critical threshold — the reading that closes backlog admission and
+// alerts the operator. Gap-fill (diskCritical) and the mux repair
+// (repairDiskSpace) guard their copies the same way; the import wrote one
+// with no check at all, which on a shared, nearly full volume starved a live
+// capture of the space it was writing into. A volume that cannot be read is
+// not refused: the copy's own write fails cleanly, leaving the archive.
+func (w *DownloadWorker) remuxRoom(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil // the probe after this reports the archive's own error
+	}
+	query := w.diskSpace
+	if query == nil {
+		query = disk.GetDiskSpace
+	}
+	ds, err := query(filepath.Dir(path))
+	if err != nil || ds == nil {
+		return nil
+	}
+	need := uint64(info.Size()) + remuxHeadroom
+	if ds.Free < need {
+		return fmt.Errorf("%w: the archive's re-mux needs %s free on its volume, which has %s; the file was not re-muxed",
+			ErrArchiveRemuxNoSpace, utils.FormatFileSize(int64(need)), utils.FormatFileSize(int64(ds.Free)))
+	}
+	var thresholds config.DiskConfig
+	w.readConfig(func(c *config.MoomboxConfig) { thresholds = c.Disk })
+	after := ds.UsedPct
+	if ds.Total > 0 {
+		after += float64(need) / float64(ds.Total) * 100
+	}
+	if thresholds.AtCritical(after) {
+		return fmt.Errorf("%w: the archive's re-mux would take its volume to %.1f%% used, past the disk_critical threshold (%d%%); the file was not re-muxed",
+			ErrArchiveRemuxNoSpace, after, thresholds.CriticalPercent)
+	}
+	return nil
 }
 
 // archiveStillAsRead is the re-mux's last question before its rename: is the

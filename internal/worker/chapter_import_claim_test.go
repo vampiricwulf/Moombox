@@ -13,6 +13,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/disk"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -242,5 +243,89 @@ func TestWorkerGapFillerAsksTheImportClaim(t *testing.T) {
 	defer release()
 	if !f.archiveRewriting(id) {
 		t.Error("the filler does not see the import's claim")
+	}
+}
+
+// TestRemuxRoom pins the chapter re-mux's disk check (owner decision PR-I4):
+// the archive's volume needs the archive's size plus remuxHeadroom free, and
+// the copy must not take it to disk_critical. A volume that cannot be read
+// is not refused.
+//
+// Mutants: the free-space comparison dropped (the 1 GiB-short row passes);
+// the projected-usage check dropped, or judged on the reading before the
+// copy (the 93%-plus-the-copy row passes); an unreadable volume refused.
+func TestRemuxRoom(t *testing.T) {
+	db := openTestDB(t)
+	cfg := &config.MoomboxConfig{}
+	cfg.Paths.StagingDirectory = filepath.Join(t.TempDir(), "staging")
+	cfg.Disk.CriticalPercent = 95
+	w := NewDownloadWorker(db, nil, cfg, &discardLogger{}, &DownloadWorkerDeps{})
+	archive := filepath.Join(t.TempDir(), "archive.mp4")
+	const size = 4 << 30 // a 4 GiB archive (sparse)
+	f, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	const total = 100 << 30
+	for _, tc := range []struct {
+		name    string
+		free    uint64
+		usedPct float64
+		err     error
+		ok      bool
+	}{
+		{"room to spare", 50 << 30, 50, nil, true},
+		{"1 GiB short of the copy (a quota, the usage low)", 3 << 30, 10, nil, false},
+		{"room, but the copy crosses disk_critical", 7 << 30, 93, nil, false},
+		{"room, and the copy stays under it", 20 << 30, 80, nil, true},
+		{"the volume cannot be read", 0, 0, errors.New("statfs: no such device"), true},
+	} {
+		w.diskSpace = func(string) (*disk.DiskSpace, error) {
+			if tc.err != nil {
+				return nil, tc.err
+			}
+			return &disk.DiskSpace{Free: tc.free, Total: total, UsedPct: tc.usedPct}, nil
+		}
+		err := w.remuxRoom(archive)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: remuxRoom = %v, want ok=%v", tc.name, err, tc.ok)
+		}
+		if err != nil && !errors.Is(err, ErrArchiveRemuxNoSpace) {
+			t.Errorf("%s: %v is not ErrArchiveRemuxNoSpace", tc.name, err)
+		}
+	}
+}
+
+// TestRemuxArchiveChaptersChecksTheVolumeFirst: a volume with no room for the
+// copy leaves the archive untouched and writes nothing beside it — the check
+// comes before the probe and FFmpeg (owner decision PR-I4).
+//
+// Mutant: RemuxArchiveChapters not calling remuxRoom — the archive is
+// re-muxed into a volume the reading says is full.
+func TestRemuxArchiveChaptersChecksTheVolumeFirst(t *testing.T) {
+	r := newImportRig(t)
+	r.w.diskSpace = func(string) (*disk.DiskSpace, error) {
+		return &disk.DiskSpace{Free: 1 << 20, Total: 100 << 30, UsedPct: 99}, nil
+	}
+	before, err := os.ReadFile(r.archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := utils.SanitizeChapters([]utils.Chapter{{StartMs: 0, Title: "one"}}, 4000)
+	if _, err := r.w.RemuxArchiveChapters(r.job.ID, database.StatusFinished, r.archive, list); !errors.Is(err, ErrArchiveRemuxNoSpace) {
+		t.Fatalf("RemuxArchiveChapters = %v, want ErrArchiveRemuxNoSpace", err)
+	}
+	if after, _ := os.ReadFile(r.archive); !bytes.Equal(before, after) {
+		t.Error("the archive changed on a full volume")
+	}
+	entries, _ := os.ReadDir(filepath.Dir(r.archive))
+	for _, e := range entries {
+		if e.Name() != "archive.mp4" {
+			t.Errorf("left beside the archive: %s", e.Name())
+		}
 	}
 }
