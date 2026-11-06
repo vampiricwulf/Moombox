@@ -95,15 +95,35 @@ func applyMarker(msgs []ChatMessage, m ChatMarker, limit int) bool {
 // holds for the end-of-run rewrite every marker that may name a message the
 // file already holds: an author sweep always (their earlier messages may be
 // anywhere), a single-message one when the buffer does not have it.
-func (cd *ChatDownloader) applyMarkers(markers []ChatMarker) {
+//
+// It returns, as messages, the replacements whose target was never stored
+// (owner decision FE-14), for processBatch to commit. YouTube replaces an
+// item Moombox never kept — a liveChatPlaceholderItemRenderer, shown while a
+// message is held for review, is the usual one — with the message itself,
+// and a marker on nothing dropped that message from chat.json, the raw
+// sidecar its only copy. Moombox goes beyond yt-dlp here as everywhere
+// markers are concerned: upstream writes the action verbatim and stores no
+// messages (youtube_live_chat.py b77c9304e). "Never stored" is decided now
+// when it can be: nothing is on disk, or the dedup still holds the ID of
+// every message stored (dedup.Len() >= messageCount — it holds no other) and
+// not this one. Otherwise — the target may be on disk past the dedup's
+// window — the marker is held with the message, and applyPendingMarkers
+// stores it at the end of the run if no message on disk is its target.
+func (cd *ChatDownloader) applyMarkers(markers []ChatMarker) (orphans []ChatMessage) {
 	if len(markers) == 0 {
-		return
+		return nil
 	}
 	cd.mu.Lock()
 	defer cd.mu.Unlock()
 	onDisk := cd.messageCount - len(cd.messages)
 	for _, m := range markers {
 		hit := applyMarker(cd.messages, m, len(cd.messages))
+		if !hit && m.Kind == MarkerReplaced && m.Message != nil {
+			if !cd.flushedToDisk || onDisk <= 0 || (!cd.dedup.Seen(m.TargetID) && cd.dedup.Len() >= cd.messageCount) {
+				orphans = append(orphans, *m.Message)
+				continue
+			}
+		}
 		if !cd.flushedToDisk || onDisk <= 0 || (hit && m.Kind != MarkerAuthorDeleted) {
 			continue
 		}
@@ -114,6 +134,7 @@ func (cd *ChatDownloader) applyMarkers(markers []ChatMarker) {
 		}
 		cd.pendingMarkers = append(cd.pendingMarkers, pendingChatMarker{marker: m, onDisk: onDisk})
 	}
+	return orphans
 }
 
 // applyPendingMarkers rewrites the chat file once, at the end of a run, with
@@ -127,11 +148,17 @@ func (cd *ChatDownloader) applyMarkers(markers []ChatMarker) {
 // author sweep is held for every ban and timeout, so nearly every moderated
 // live chat ends here, and a marathon's chat.json runs to hundreds of
 // megabytes. A first pass reads only each message's id and author to see
-// whether any held marker names one (a placeholder's replacement, or a ban of
-// an author with nothing on disk, changes nothing and costs no write); only
-// then does a second pass decode the messages one at a time, flag them, and
-// append them markerRewriteBatch at a time to a temp file that is swapped in.
-// Peak memory is one batch, never the file.
+// whether any held marker names one (a ban of an author with nothing on
+// disk changes nothing and costs no write); only then does a second pass
+// decode the messages one at a time, flag them, and append them
+// markerRewriteBatch at a time to a temp file that is swapped in. Peak
+// memory is one batch, never the file.
+//
+// A held replacement that carries its item (applyMarkers) makes the first
+// pass read the whole file, not stop at the first match: a replacement no
+// message on disk is the target of is stored as a message of its own (owner
+// decision FE-14), committed and appended like any other — the player sorts
+// a chat by offset, so its place at the end of the array is no matter.
 func (cd *ChatDownloader) applyPendingMarkers() {
 	pending := cd.pendingMarkers
 	cd.pendingMarkers = nil
@@ -143,24 +170,57 @@ func (cd *ChatDownloader) applyPendingMarkers() {
 		return
 	}
 	held := indexHeldMarkers(pending)
-	match, err := streamChatFileMessages(outputFile, func(i int, m *heldMarkerKey) bool {
-		return held.matches(i, m.ID, m.AuthorChannelID)
+	var orphanable map[string]bool // a held replacement's target: found on disk
+	for _, p := range pending {
+		if p.marker.Kind == MarkerReplaced && p.marker.Message != nil {
+			if orphanable == nil {
+				orphanable = map[string]bool{}
+			}
+			orphanable[p.marker.TargetID] = false
+		}
+	}
+	match := false
+	_, err := streamChatFileMessages(outputFile, func(i int, m *heldMarkerKey) bool {
+		if held.matches(i, m.ID, m.AuthorChannelID) {
+			match = true
+			if orphanable == nil {
+				return true
+			}
+		}
+		if _, ok := orphanable[m.ID]; ok && m.ID != "" {
+			orphanable[m.ID] = true
+		}
+		return false
 	})
-	if err == nil && !match {
-		return
-	}
-	var n int
-	if err == nil {
-		n, err = cd.rewriteChatFileWithMarkers(outputFile, held)
-	}
 	if err != nil {
 		cd.logInfo("chat: could not rewrite the chat file to apply its deletion markers; they are in the raw sidecar",
 			"videoID", cd.opts.VideoID, "markers", len(pending), "err", err)
 		return
 	}
-	cd.mu.Lock()
-	cd.messageCount = n
-	cd.mu.Unlock()
+	if match {
+		n, err := cd.rewriteChatFileWithMarkers(outputFile, held)
+		if err != nil {
+			cd.logInfo("chat: could not rewrite the chat file to apply its deletion markers; they are in the raw sidecar",
+				"videoID", cd.opts.VideoID, "markers", len(pending), "err", err)
+			return
+		}
+		cd.mu.Lock()
+		cd.messageCount = n
+		cd.mu.Unlock()
+	}
+	var orphans []ChatMessage
+	for _, p := range pending {
+		if p.marker.Kind != MarkerReplaced || p.marker.Message == nil {
+			continue
+		}
+		if found, ok := orphanable[p.marker.TargetID]; ok && !found {
+			orphans = append(orphans, *p.marker.Message)
+			delete(orphanable, p.marker.TargetID) // one message per target
+		}
+	}
+	if len(orphans) > 0 && cd.commitMessages(orphans, false) > 0 {
+		cd.writeChatFile()
+	}
 }
 
 // markerRewriteBatch is how many messages applyPendingMarkers' rewrite holds

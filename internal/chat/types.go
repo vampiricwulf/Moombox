@@ -67,6 +67,11 @@ type ChatMarker struct {
 	AuthorChannelID string
 	State           string
 	Replacement     []MessagePart
+	// Message is a MarkerReplaced's replacement item parsed as a message of
+	// its own — its own ID, author and timestamp, and its wrapper's replay
+	// offset — which is stored as a new message when the target was never
+	// stored (owner decision FE-14; applyMarkers, applyPendingMarkers).
+	Message *ChatMessage
 }
 
 // ChatMarker kinds.
