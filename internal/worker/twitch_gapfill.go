@@ -141,6 +141,9 @@ type twitchGapFiller struct {
 	// (production: DownloadWorker.readOutputDisk's reading, the one the
 	// backlog scheduler's admission gate closes on); nil never is.
 	diskCritical func() bool
+	// archiveRewriting reports a chapter import holding the job's claim
+	// (production: DownloadWorker.chapterImportRunning); nil never is.
+	archiveRewriting func(jobID string) bool
 }
 
 // newTwitchGapFiller is the production filler.
@@ -170,6 +173,7 @@ func (w *DownloadWorker) newTwitchGapFiller() *twitchGapFiller {
 		r, err := w.readOutputDisk()
 		return err == nil && r.critical
 	}
+	f.archiveRewriting = w.chapterImportRunning
 	return f
 }
 
@@ -270,6 +274,13 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 	if job == nil || job.Status != database.StatusFinished {
 		f.logger.Info("gap-fill: the job is gone or no longer finished; nothing filled", "jobID", plan.JobID)
 		_ = f.db.DeleteGapFill(plan.JobID)
+		return
+	}
+	if f.archiveRewriting != nil && f.archiveRewriting(plan.JobID) {
+		// A chapter import is rewriting the archive the fill would add parts
+		// beside and refit the chapters of (owner decision PR-M5): the plan
+		// is left as it is, due, and the next sweep looks again.
+		f.logger.Info("gap-fill: a chapter import is rewriting the archive; looking again at the next sweep", "jobID", plan.JobID)
 		return
 	}
 	deadline, _ := time.Parse(time.RFC3339, plan.Deadline)

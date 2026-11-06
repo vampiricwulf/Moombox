@@ -164,10 +164,13 @@ func probeChapterTitles(t *testing.T, path string) []string {
 // TestRemuxArchiveChaptersEmbedsAndRecordsTheFile runs the real FFmpeg: the
 // archive comes back with the chapters, and the row's file_size and
 // length_seconds follow the replaced file — but only while the row still holds
-// the status the caller read (UpdateJobFieldsIf).
+// the status the caller read. A row that moved on before the re-mux finished
+// keeps its archive, and its row, as they are (archiveStillAsRead, PR-M5;
+// UpdateJobFieldsIf guards the write after the rename the same way).
 //
-// Mutants: the row write dropped (file_size stays 1); written unconditionally
-// (the Cancelled row's size moves).
+// Mutants: the row write dropped (file_size stays 1); the re-read before the
+// rename dropped, with the write unconditional (the Cancelled row's size
+// moves).
 func TestRemuxArchiveChaptersEmbedsAndRecordsTheFile(t *testing.T) {
 	r := newImportRig(t)
 	list := utils.SanitizeChapters([]utils.Chapter{{StartMs: 0, Title: "one"}, {StartMs: 2000, Title: "two"}}, 4000)
@@ -189,8 +192,11 @@ func TestRemuxArchiveChaptersEmbedsAndRecordsTheFile(t *testing.T) {
 
 	// The row moved on (an operator's action) since the caller read it.
 	r.db.UpdateJobFields(r.job.ID, map[string]any{"status": database.StatusCancelled, "file_size": int64(7)})
-	if _, err := r.w.RemuxArchiveChapters(r.job.ID, database.StatusFinished, r.archive, list[:1]); err != nil {
-		t.Fatal(err)
+	if _, err := r.w.RemuxArchiveChapters(r.job.ID, database.StatusFinished, r.archive, list[:1]); err == nil {
+		t.Fatal("the archive of a row that moved on was replaced")
+	}
+	if got := probeChapterTitles(t, r.archive); !reflect.DeepEqual(got, []string{"one", "two"}) {
+		t.Errorf("archive chapters = %v, want the first import's, untouched", got)
 	}
 	row, _ = r.db.GetJob(r.job.ID)
 	if row.Status != database.StatusCancelled || row.FileSize == nil || *row.FileSize != 7 {

@@ -82,6 +82,53 @@ func (w *DownloadWorker) chapterImportRunning(jobID string) bool {
 	return w.stagingClaims[jobID] == opChapterImport
 }
 
+// ChapterImportRunning reports whether a chapter import holds jobID's claim:
+// the REST layer's question before Resume, Retry and Reinitialize, which it
+// refuses with 409 while one does (owner decision PR-M5). Each of them starts
+// what the import must not race — a run whose finalize writes the archive
+// the re-mux is about to rename its copy over, or a reset that deletes the
+// parts and staging beside it.
+func (w *DownloadWorker) ChapterImportRunning(jobID string) bool {
+	return w.chapterImportRunning(jobID)
+}
+
+// waitChapterImport returns once no chapter import holds jobID's claim, or
+// reports false when ctx ends first. What waits (what) is logged once, when
+// there is something to wait for. The finalize of a run (muxAndFinalize,
+// through the orchestrator's waitArchiveRewrite) and a deferred Resume or
+// Reinitialize (afterJobExit) wait here (owner decision PR-M5): the import
+// replaces the archive in place, and a finalize that wrote it meanwhile was
+// renamed over by the import's copy of the OLD archive.
+func (w *DownloadWorker) waitChapterImport(ctx context.Context, jobID, what string) bool {
+	logged := false
+	for {
+		w.stagingClaimMu.Lock()
+		if w.stagingClaims[jobID] != opChapterImport {
+			w.stagingClaimMu.Unlock()
+			return true
+		}
+		if w.stagingClaimFreed == nil {
+			w.stagingClaimFreed = map[string]chan struct{}{}
+		}
+		freed, ok := w.stagingClaimFreed[jobID]
+		if !ok {
+			freed = make(chan struct{})
+			w.stagingClaimFreed[jobID] = freed
+		}
+		w.stagingClaimMu.Unlock()
+		if !logged {
+			w.logger.Info("waiting for the chapter import rewriting the archive to finish before "+what, "jobID", jobID)
+			logged = true
+		}
+		select {
+		case <-freed:
+			// Asked again: the claim may have been taken anew since.
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
 // ArchiveRemuxResult is what RemuxArchiveChapters measured on the archive it
 // put in place.
 type ArchiveRemuxResult struct {
@@ -162,9 +209,18 @@ func (w *DownloadWorker) RemuxArchiveChapters(jobID string, expect database.JobS
 		if err := remuxCheck(orig, got, len(chapters)); err != nil {
 			return err
 		}
-		// Asked last, so a row deleted while FFmpeg wrote, or while the
-		// copy was being probed, puts nothing back in its archive's place.
-		return ctx.Err()
+		// Asked last, immediately before the rename, so a row deleted while
+		// FFmpeg wrote, or while the copy was being probed, puts nothing back
+		// in its archive's place — and nor does a row that moved on (owner
+		// decision PR-M5). The copy is of the archive as it was when the
+		// import read it: a row no longer in the status the caller read, or
+		// with a run in flight, may have a new archive at this name by now,
+		// or one about to be written, and the rename would put the old one
+		// back over it.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return w.archiveStillAsRead(jobID, expect)
 	}
 	if err := muxer.RemuxChapters(ctx, path, path, metaPath, check); err != nil {
 		return nil, err
@@ -186,6 +242,27 @@ func (w *DownloadWorker) RemuxArchiveChapters(jobID string, expect database.JobS
 		}
 	}
 	return res, nil
+}
+
+// archiveStillAsRead is the re-mux's last question before its rename: is the
+// row still in expect, the status the import read under its claim, with no
+// run of the job in flight? An error says what moved, and the archive is
+// left as it is.
+func (w *DownloadWorker) archiveStillAsRead(jobID string, expect database.JobStatus) error {
+	if w.queue.IsProcessing(jobID) {
+		return fmt.Errorf("a run of the job started while the archive was re-muxed; the archive is left as it was")
+	}
+	fresh, err := w.db.GetJob(jobID)
+	if err != nil {
+		return fmt.Errorf("re-read the job before replacing the archive: %w", err)
+	}
+	if fresh == nil {
+		return fmt.Errorf("the job was deleted while the archive was re-muxed; the archive is left as it was")
+	}
+	if fresh.Status != expect {
+		return fmt.Errorf("the job's status moved from %s to %s while the archive was re-muxed; the archive is left as it was", expect, fresh.Status)
+	}
+	return nil
 }
 
 // archiveShape is what the re-mux check compares: the duration ffprobe gives

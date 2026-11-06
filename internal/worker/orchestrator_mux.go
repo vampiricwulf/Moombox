@@ -999,6 +999,17 @@ func (o *DownloadOrchestrator) sendMuxingStarting(jobCtx *JobContext) {
 func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobContext, result *DownloadResult) error {
 	o.logger.Info("muxing", "jobID", jobCtx.Job.ID)
 
+	// A chapter import rewriting this job's archive is let finish first
+	// (owner decision PR-M5): its re-mux renames its copy of the archive it
+	// read over whatever is at the name, so a finalize that wrote the new
+	// recording there meanwhile was replaced by the old, shorter one. The
+	// verbs that start a run refuse or wait while an import holds the claim
+	// (ChapterImportRunning, afterJobExit); this is for a run that was
+	// already going, or started another way.
+	if o.waitArchiveRewrite != nil && !o.waitArchiveRewrite(ctx, jobCtx.Job.ID, "the finalize") {
+		return ctx.Err()
+	}
+
 	// Re-resolve filename template with fresh metadata (matches TS muxFinalize behavior).
 	if resolved, freshJob := o.resolveFreshFilename(jobCtx); freshJob != nil {
 		jobCtx.Filename = resolved

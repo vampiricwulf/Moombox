@@ -285,6 +285,10 @@ type DownloadWorker struct {
 	// several) needs no constructor change.
 	stagingClaimMu sync.Mutex
 	stagingClaims  map[string]string
+	// stagingClaimFreed holds, per job, a channel closed when that job's
+	// claim is released — what waitChapterImport waits on. Created by the
+	// first waiter, under stagingClaimMu; lazily allocated like the claims.
+	stagingClaimFreed map[string]chan struct{}
 
 	// afterExitPending holds the jobs with an afterJobExit reset waiting on
 	// their previous run, so a second click does not queue a second reset.
@@ -477,6 +481,11 @@ func NewDownloadWorker(
 	// archive (ClaimChapterImport has the other half).
 	if trims != nil {
 		trims.setArchiveRewriting(w.chapterImportRunning)
+	}
+	// And a finalize waits for one (owner decision PR-M5): it writes the
+	// archive the import's re-mux is about to rename its copy over.
+	if orchestrator != nil {
+		orchestrator.waitArchiveRewrite = w.waitChapterImport
 	}
 	// A deleted row takes its backlog retry streak with it. The id is the
 	// video id, so a backlog rescan can create the row again, and it would
@@ -2514,15 +2523,27 @@ const afterJobExitTimeout = 60 * time.Second
 // status, and Reinitialize deleted the staging the run was still writing its
 // chat resume sidecar into. Callers stay synchronous (the TUI calls these on
 // its update goroutine); the wait happens here, one per job.
+//
+// It waits, too, for a chapter import that holds the job's claim (owner
+// decision PR-M5): a Resume, a retry or a Reinitialize let through while the
+// import re-muxes the archive started a run whose finalize the re-mux's
+// rename then wrote the old, shorter archive back over, or deleted the
+// staging and parts beside an archive mid-replace. The REST verbs refuse
+// with 409 first (ChapterImportRunning); this is the wait for the callers
+// that cannot be refused — the TUI's, the monitor's auto-resume. The import
+// is bounded by its own re-mux, which Stop cancels.
 func (w *DownloadWorker) afterJobExit(jobID, what string, fn func()) {
-	if !w.queue.IsProcessing(jobID) {
+	running, importing := w.queue.IsProcessing(jobID), w.ChapterImportRunning(jobID)
+	if !running && !importing {
 		fn()
 		return
 	}
 	if _, waiting := w.afterExitPending.LoadOrStore(jobID, struct{}{}); waiting {
 		return // a reset is already waiting on this run
 	}
-	w.logger.Info("waiting for the job's previous run to stop before "+what, "jobID", jobID)
+	if running {
+		w.logger.Info("waiting for the job's previous run to stop before "+what, "jobID", jobID)
+	}
 	w.wg.Go(func() {
 		defer w.afterExitPending.Delete(jobID)
 		defer func() {
@@ -2530,11 +2551,12 @@ func (w *DownloadWorker) afterJobExit(jobID, what string, fn func()) {
 				w.logger.Error("panic in deferred "+what, "jobID", jobID, "panic", fmt.Sprint(r))
 			}
 		}()
-		if !w.WaitForJobExit(jobID, afterJobExitTimeout) {
+		if running && !w.WaitForJobExit(jobID, afterJobExitTimeout) {
 			w.logger.Warn(what+" skipped: the job's previous run did not stop", "jobID", jobID,
 				"waited", afterJobExitTimeout)
 			return
 		}
+		w.waitChapterImport(context.Background(), jobID, what)
 		fn()
 	})
 }
@@ -2984,6 +3006,10 @@ func (w *DownloadWorker) claimJobOperation(jobID, op string) (func(), error) {
 		w.stagingClaimMu.Lock()
 		defer w.stagingClaimMu.Unlock()
 		delete(w.stagingClaims, jobID)
+		if freed, ok := w.stagingClaimFreed[jobID]; ok {
+			close(freed)
+			delete(w.stagingClaimFreed, jobID)
+		}
 	}, nil
 }
 
