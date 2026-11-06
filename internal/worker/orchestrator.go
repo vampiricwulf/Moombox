@@ -96,12 +96,14 @@ type DownloadOrchestrator struct {
 	// beside it, both FFmpegs wrote the same .partial.mp4, and the clip stored
 	// was unplayable. Nor did the dashboard see that trim running.
 	trims  *TrimService
+	logger logger
+
 	// waitArchiveRewrite holds a finalize while a chapter import rewrites the
 	// job's archive (DownloadWorker.waitChapterImport, set by the worker;
 	// owner decision PR-M5) and reports false when ctx ends first. nil (an
 	// orchestrator a test builds by struct literal) never waits.
 	waitArchiveRewrite func(ctx context.Context, jobID, what string) bool
-	logger             logger
+
 	// muxRootCtx parents every mux that must OUTLIVE its job's own context —
 	// the background part muxes, the connectivity-outage finalize and the
 	// off-queue restart mux, all of which used context.Background() and were
