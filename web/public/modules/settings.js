@@ -1848,7 +1848,10 @@ export class SettingsController {
             twitch_gap_fill_ad_breaks: document.getElementById("channel-twitch-gap-fill-ads").checked || undefined,
             twitch_vod_backlog: document.getElementById("channel-twitch-vod-backlog").checked || undefined,
           }
-        : {}),
+        : // Cleared, not carried over from the stored entry: the server
+          // refuses both on a channel that is not Twitch (owner decision
+          // PR-I3), as it does twitch_archive_clips.
+          { twitch_gap_fill_ad_breaks: undefined, twitch_vod_backlog: undefined }),
       // Unset, not false, when off — as include_non_live_content — and
       // never on a YouTube channel, which the server refuses.
       twitch_archive_clips: (isTwitch && archiveClips) || undefined,

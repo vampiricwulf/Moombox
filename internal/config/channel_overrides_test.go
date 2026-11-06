@@ -34,6 +34,10 @@ func TestChannelOverrideErrorsMatchesValidate(t *testing.T) {
 		// twitch_archive_clips (owner decision D26 follow-up 2) is Twitch's alone.
 		{"clips on twitch", ChannelConfig{Platform: "twitch", TwitchArchiveClips: true}, nil},
 		{"clips on youtube", ChannelConfig{TwitchArchiveClips: true}, []string{"twitch_archive_clips"}},
+		// So are the VOD backlog and the ad-break fill (owner decision PR-I3).
+		{"backlog and ad fill on twitch", ChannelConfig{Platform: "twitch", TwitchVodBacklog: true, TwitchGapFillAdBreaks: true}, nil},
+		{"backlog on youtube", ChannelConfig{TwitchVodBacklog: true}, []string{"twitch_vod_backlog"}},
+		{"ad fill on youtube", ChannelConfig{TwitchGapFillAdBreaks: true}, []string{"twitch_gap_fill_ad_breaks"}},
 	} {
 		got := slices.Sorted(maps.Keys(ChannelOverrideErrors(tc.ch)))
 		if !slices.Equal(got, tc.want) {

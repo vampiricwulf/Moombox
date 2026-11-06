@@ -45,3 +45,33 @@ func TestTwitchArchiveClipsRoundTripsAndStaysTwitchOnly(t *testing.T) {
 		t.Error("Normalize left twitch_archive_clips on a YouTube channel")
 	}
 }
+
+// TestTwitchOnlyChannelKeysClearedOffTwitch pins owner decision PR-I3: the
+// VOD backlog and the ad-break gap-fill are Twitch's alone, as
+// twitch_archive_clips is. A config file that sets them on a YouTube channel
+// loads with them cleared (Normalize), Validate refuses them, and a Twitch
+// channel keeps them.
+//
+// Mutants: either new arm in validateOrNormalize dropped (the YouTube channel
+// keeps that key, and Validate passes it).
+func TestTwitchOnlyChannelKeysClearedOffTwitch(t *testing.T) {
+	yt := Defaults()
+	yt.Channels = []ChannelConfig{{ID: "UCx", Name: "x", TwitchVodBacklog: true, TwitchGapFillAdBreaks: true}}
+	if errs := Validate(yt); len(errs) != 2 {
+		t.Errorf("Validate = %v, want the backlog and the ad-break fill refused", errs)
+	}
+	Normalize(yt)
+	if yt.Channels[0].TwitchVodBacklog || yt.Channels[0].TwitchGapFillAdBreaks {
+		t.Errorf("Normalize left a Twitch-only key on a YouTube channel: %+v", yt.Channels[0])
+	}
+
+	tw := Defaults()
+	tw.Channels = []ChannelConfig{{ID: "streamer", Name: "s", Platform: "twitch", TwitchVodBacklog: true, TwitchGapFillAdBreaks: true}}
+	if errs := Validate(tw); len(errs) != 0 {
+		t.Errorf("Validate refused a Twitch channel's own keys: %v", errs)
+	}
+	Normalize(tw)
+	if !tw.Channels[0].TwitchVodBacklog || !tw.Channels[0].TwitchGapFillAdBreaks {
+		t.Errorf("Normalize cleared a Twitch channel's own keys: %+v", tw.Channels[0])
+	}
+}
