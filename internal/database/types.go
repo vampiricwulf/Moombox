@@ -225,6 +225,16 @@ type Job struct {
 	//
 	// json:"-": it is the notifier's bookkeeping, of no use to any UI.
 	AnnounceFound bool `json:"-"`
+	// JoinOffsetSeconds is where in the broadcast a live YouTube capture's
+	// recording began, in seconds of the broadcast's own timeline — the
+	// video's, which a viewer's timestamp comment counts in (owner decision
+	// CJ-3). 0 for a capture recorded from sq=0; the join point of one that
+	// joined late. Written by the single-file finalize from the staged
+	// recording (recordJoinOffset, internal/worker); nil while unknown — a
+	// VOD, a Twitch capture, a split archive, a row from before the column, a
+	// capture whose start was not recorded. The chapter import pre-fills its
+	// offset with it negated (defaultChapterOffset).
+	JoinOffsetSeconds *float64 `json:"joinOffsetSeconds,omitempty"`
 	// NotificationMsgs maps a notification target's stable key — the first 16
 	// hex digits of SHA-256 over the RESOLVED webhook URL, the same key
 	// notifications.buildTargets dedupes on — to the id of the one Discord

@@ -1448,6 +1448,7 @@ func tuiChapterView(v *routes.ChapterImportView) tui.ChapterImportView {
 		HasOriginal:          v.HasOriginal,
 		OffsetSeconds:        v.OffsetSeconds,
 		DefaultOffsetSeconds: v.DefaultOffsetSeconds,
+		DefaultOffsetNote:    v.DefaultOffsetNote,
 		Split:                v.Split,
 		Error:                v.Error,
 		Embedded:             v.Embedded,

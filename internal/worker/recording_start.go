@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -146,4 +147,71 @@ func recordedFromStart(paths ...string) bool {
 		found = true
 	}
 	return found
+}
+
+// joinOffsetSeconds is where in the broadcast a live YouTube capture's
+// single-file recording began, in seconds (owner decision CJ-3: the row's
+// join_offset_seconds, which the chapter import's offset pre-fills from);
+// ok is false when it is not known. Asked by the finalize for a live YouTube
+// job only: a VOD's archive is the video's own timeline, which the import's
+// 0 already is, and a Twitch capture's comments count in a VOD Moombox does
+// not hold.
+//
+// The start comes from what the staged recording already records:
+//
+//   - every input recorded from sq=0 (recordedFromStart) is 0;
+//   - else the first input whose recordingStartFile entry is past 0 joined
+//     late, and where it joined is read from the segment's own timing when
+//     the file carries it: a fragmented MP4 (YouTube's DASH) keeps each
+//     fragment's decode time on the broadcast's timeline, so ffprobe's
+//     start_time of the staged file IS the join point (the same reading
+//     ffprobeData.spanSec corrects for) — exact even where segments ran
+//     long or short;
+//   - failing that (an MPEG-TS from the HLS path, whose start_time is a PTS
+//     the broadcast's timeline does not share), the entry's sequence times
+//     the stream's advertised segment duration (Format.TargetDurationSec,
+//     the cadence yt-dlp's live downloader paces itself by, _video.py
+//     b77c9304e) — a sequence N began N segments into the broadcast;
+//   - an input with no entry, or no duration to multiply by, is unknown:
+//     never a guess, as recordedFromStart never guesses.
+func (o *DownloadOrchestrator) joinOffsetSeconds(ctx context.Context, result *DownloadResult, videoPath, audioPath string) (float64, bool) {
+	if recordedFromStart(videoPath, audioPath) {
+		return 0, true
+	}
+	for _, in := range []struct {
+		path   string
+		target int
+	}{{videoPath, formatTargetDuration(result, true)}, {audioPath, formatTargetDuration(result, false)}} {
+		if in.path == "" {
+			continue
+		}
+		seq, ok := readRecordingStarts(filepath.Dir(in.path))[filepath.Base(in.path)]
+		if !ok || seq <= 0 {
+			continue
+		}
+		if p := o.runFFprobe(ctx, in.path); p != nil && isMovContainer(p.FormatName) && p.StartSec > 0 {
+			return p.StartSec, true
+		}
+		if in.target > 0 {
+			return float64(seq * in.target), true
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+// formatTargetDuration is the advertised per-segment duration of the format
+// result's video (or audio) downloader fetched, 0 when it is not known.
+func formatTargetDuration(result *DownloadResult, video bool) int {
+	if result == nil {
+		return 0
+	}
+	f := result.AudioFormat
+	if video {
+		f = result.VideoFormat
+	}
+	if f == nil {
+		return 0
+	}
+	return f.TargetDurationSec
 }

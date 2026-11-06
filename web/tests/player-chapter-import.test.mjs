@@ -243,3 +243,26 @@ test("the open dialog keeps the player's shortcuts off", { skip }, async () => {
   h.key(" ");
   assert.equal(h.video.paused, false, "closed, the shortcut works again");
 });
+
+// Owner decision CJ-3: a late-joined live capture's join point, negated, is
+// the offset the field opens with, and the note under it says where it came
+// from; a job with no known join point opens at an empty field and no note.
+// Mutants: the default offset not filled (empty field); the note left hidden;
+// the note kept from the previous job's dialog.
+test("the offset opens pre-filled with the join point, and says so", { skip }, async () => {
+  const h = await openDialog({
+    preview: () => view({ error: "No timestamps found", defaultOffsetSeconds: -5025, defaultOffsetNote: "joined 1:23:45 in" }),
+  });
+  assert.equal(h.el("chapter-import-offset").value, "-5025");
+  const note = h.el("chapter-import-offset-source");
+  assert.equal(note.hidden, false);
+  assert.equal(note.textContent, "Pre-filled: joined 1:23:45 in");
+
+  // Reopened for a job whose join point is unknown: nothing pre-filled.
+  h.http.on("POST /api/jobs/:id/chapters/preview", () => view({ error: "No timestamps found" }));
+  h.el("chapter-import-cancel").click();
+  h.el("player-chapters-import").click();
+  await h.flush();
+  assert.equal(h.el("chapter-import-offset").value, "");
+  assert.equal(note.hidden, true);
+});

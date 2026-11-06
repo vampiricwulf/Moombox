@@ -64,7 +64,11 @@ type ChapterImportView struct {
 	// decision CI-5): the capture's start in the video's own timeline,
 	// negated, where Moombox knows it. See defaultChapterOffset.
 	DefaultOffsetSeconds float64 `json:"defaultOffsetSeconds"`
-	DurationSeconds      float64 `json:"durationSeconds"`
+	// DefaultOffsetNote says where a non-zero DefaultOffsetSeconds came from
+	// ("joined 1:23:45 in", owner decision CJ-3); both UIs show it beside
+	// the field.
+	DefaultOffsetNote string  `json:"defaultOffsetNote,omitempty"`
+	DurationSeconds   float64 `json:"durationSeconds"`
 	// Split: the archive is in parts, so the list is saved beside them only
 	// (owner decision CI-1: recorded parts are never rewritten).
 	Split bool `json:"split"`
@@ -183,22 +187,39 @@ func (s *ChapterService) HasOriginal(jobID string) bool {
 
 // defaultChapterOffset is the offset the import's field starts at (owner
 // decision CI-5: the capture's known start in the video's timeline, negated,
-// and 0 otherwise). Every archive Moombox can import into starts at 0 of the
-// timeline a viewer's comment counts in, or at a point the row does not
-// record:
+// and 0 otherwise), with the note both UIs show beside it to say where it
+// came from ("joined 1:23:45 in", owner decision CJ-3; "" when there is
+// nothing to explain).
 //
-//   - a VOD, and a live capture recorded from sq=0, is the video's own
-//     timeline: 0;
-//   - a live capture that joined late knows where it joined only while its
-//     staging lives (recording-start.json, recordedFromStart), and staging is
-//     reclaimed when the job finishes; the row keeps neither the sequence nor
-//     the time, so the start is unknown: 0, for the operator to set;
-//   - a trim is a file of its own beside the archive (TrimService), never the
-//     archive the import rewrites, so no imported archive has a trim start.
-//
-// So it is 0 for every job today, and the one place to change when a row
-// learns its capture's start.
-func defaultChapterOffset(*database.Job) float64 { return 0 }
+//   - a VOD is the video's own timeline: 0;
+//   - a live YouTube capture's join point is on its row since CJ-3
+//     (join_offset_seconds, written by the single-file finalize from the
+//     staged recording): a capture recorded from sq=0 has 0, one that joined
+//     late its join point, so a viewer's "1:30:00" lands 1:30:00 minus the
+//     join into the archive; a row whose join point is unknown (NULL: a
+//     Twitch capture, a split archive, a row from before the column, a
+//     start never recorded) is 0, for the operator to set, as before;
+//   - a trim's start would be negated too, and added to the join point when
+//     both apply — but a trim is a file of its own beside the archive
+//     (TrimService), never the archive the import rewrites, so no imported
+//     archive has a trim start, and that term is always 0.
+func defaultChapterOffset(job *database.Job) (seconds float64, note string) {
+	if job == nil || job.IsVod || job.JoinOffsetSeconds == nil || *job.JoinOffsetSeconds <= 0 {
+		return 0, ""
+	}
+	join := math.Round(*job.JoinOffsetSeconds*1000) / 1000
+	return -join, "joined " + clockText(join) + " in"
+}
+
+// clockText is a non-negative number of seconds as H:MM:SS, or M:SS under
+// an hour — the chapter tables' own format (formatTimestamp, chapterClock).
+func clockText(sec float64) string {
+	s := int64(max(sec, 0))
+	if s >= 3600 {
+		return fmt.Sprintf("%d:%02d:%02d", s/3600, s/60%60, s%60)
+	}
+	return fmt.Sprintf("%d:%02d", s/60, s%60)
+}
 
 // chapterImportBody is the three POST routes' body: the pasted comment and
 // the offset, as a number of seconds or as the field's own text ("-1:30",
@@ -234,9 +255,11 @@ func toChapters(list []utils.Chapter) []Chapter {
 // view starts a ChapterImportView for job: its chapters as the player shows
 // them now and whether an original is kept.
 func (s *ChapterService) view(ctx context.Context, job *database.Job, t *chapterTarget) *ChapterImportView {
+	defaultOffset, defaultNote := defaultChapterOffset(job)
 	v := &ChapterImportView{
 		Current:              jobChapters(ctx, s.deps, s.cache, job),
-		DefaultOffsetSeconds: defaultChapterOffset(job),
+		DefaultOffsetSeconds: defaultOffset,
+		DefaultOffsetNote:    defaultNote,
 		DurationSeconds:      float64(t.durationMs) / 1000,
 		Split:                t.split,
 		Chapters:             []Chapter{},

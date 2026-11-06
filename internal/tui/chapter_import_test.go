@@ -397,3 +397,24 @@ func TestChapterImportChordsFromTheKeyboard(t *testing.T) {
 		t.Fatal("A C from the keyboard did not open the overlay")
 	}
 }
+
+// TestChapterImportPrefillsTheJoinPoint is owner decision CJ-3 in the A C
+// overlay: the opening preview's default offset — a late-joined live
+// capture's join point, negated — fills the empty offset field, and the
+// overlay says where it came from, as the Web dialog does.
+//
+// Mutants: SetPreview not filling the field (empty); the note not drawn.
+func TestChapterImportPrefillsTheJoinPoint(t *testing.T) {
+	r := newChapterRig(t)
+	r.previewFn = func(text, offset string) ChapterImportView {
+		return ChapterImportView{Error: "No timestamps found", DefaultOffsetSeconds: -5025, DefaultOffsetNote: "joined 1:23:45 in"}
+	}
+	r.app.dispatchAction("A C", r.job)
+	previewNow(t, r.app)
+	if got := r.app.chapterDlg.offset.Value(); got != "-5025" {
+		t.Errorf("offset field = %q, want the pre-filled -5025", got)
+	}
+	if v := r.app.chapterDlg.View(); !strings.Contains(v, "Pre-filled: joined 1:23:45 in") {
+		t.Errorf("the overlay does not say where the offset came from:\n%s", v)
+	}
+}

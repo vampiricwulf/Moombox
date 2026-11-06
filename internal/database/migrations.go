@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 25
+const schemaVersion = 26
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -150,7 +150,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     park_reason TEXT NOT NULL DEFAULT '',
     park_identity TEXT NOT NULL DEFAULT '',
     notification_msgs TEXT,
-    announce_found INTEGER NOT NULL DEFAULT 0
+    announce_found INTEGER NOT NULL DEFAULT 0,
+    join_offset_seconds REAL
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -783,6 +784,15 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 26 {
+		if err := db.migrateV26(); err != nil {
+			return err
+		}
+		if err := db.writeUserVersion(26); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -1038,6 +1048,19 @@ const createFeedReprobeOwedSQL = `
 CREATE TABLE IF NOT EXISTS feed_reprobe_owed (
     channel_id TEXT PRIMARY KEY
 )`
+
+// migrateV26 adds join_offset_seconds to jobs: where in the broadcast a live
+// YouTube capture's recording began, in seconds (owner decision CJ-3; see the
+// Job.JoinOffsetSeconds doc comment in types.go). Nullable with no default:
+// a row from before it, and any row whose join point is unknown, stays NULL —
+// there is no backfill, since nothing the row kept says where it joined.
+// Guarded ALTER, like migrateV19's: a crash mid-block re-runs it.
+func (db *Database) migrateV26() error {
+	if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN join_offset_seconds REAL`); err != nil && !isDuplicateColumnErr(err) {
+		return fmt.Errorf("v26 alter: %w", err)
+	}
+	return nil
+}
 
 // createTwitchGapFillsSQL is v25's table: one row per finished live Twitch
 // job that is owed a gap-fill from its broadcast's archive VOD (owner decision

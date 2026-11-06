@@ -1177,6 +1177,17 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		}
 	}
 
+	// Where in the broadcast a live YouTube capture began (owner decision
+	// CJ-3), for the chapter import's offset; NULL when it is not known, so a
+	// re-finalize that can no longer tell does not leave an older value.
+	if jobCtx.Job != nil && jobCtx.Job.Platform == "youtube" && !jobCtx.Job.IsVod {
+		if join, ok := o.joinOffsetSeconds(ctx, result, videoPath, audioPath); ok {
+			updates["join_offset_seconds"] = join
+		} else {
+			updates["join_offset_seconds"] = nil
+		}
+	}
+
 	// Copy assets (chat, description, thumbnail) to output directory
 	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates, false)
 
