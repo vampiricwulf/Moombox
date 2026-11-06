@@ -1395,11 +1395,16 @@ func keepOnlyChatCapture(dir string) error {
 // that name — chat.json.resume.json (the resume sidecar,
 // internal/twitch/vod_chat.go and internal/chat/downloader.go) and
 // chat.json.lostbatch.json (a batch spilled when a write failed,
-// internal/twitch/chat_recording.go). Media resume sidecars are NOT matched:
-// they are named after their media file (video.ts.resume.json), which this
-// prune is deleting because it has already been muxed.
+// internal/twitch/chat_recording.go) — and the YouTube chat's raw sidecar,
+// chat.raw.jsonl (internal/chat/markers.go), every action that did not
+// become a message: pruned, the chat's re-run started it over with only its
+// own lines and copyAssets copied that over the archive's, losing every
+// marker and action the first run kept. Media resume sidecars are NOT
+// matched: they are named after their media file (video.ts.resume.json),
+// which this prune is deleting because it has already been muxed.
 func isChatCaptureFile(name string) bool {
-	return name == "chat.json" || strings.HasPrefix(name, "chat.json.")
+	return name == "chat.json" || strings.HasPrefix(name, "chat.json.") ||
+		name == "chat.raw.jsonl" || strings.HasPrefix(name, "chat.raw.jsonl.")
 }
 
 // hasUnmuxedParts reports whether any quality/gap-split part still has
