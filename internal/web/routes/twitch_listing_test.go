@@ -29,6 +29,7 @@ type fakeTwitchLister struct {
 	gotType    string
 	gotSort    string
 	gotCollect string
+	gotOwner   string
 }
 
 func (f *fakeTwitchLister) ListChannelVideos(_ context.Context, login, broadcastType, sort string) ([]twitch.TwitchVideo, error) {
@@ -39,6 +40,11 @@ func (f *fakeTwitchLister) ListChannelVideos(_ context.Context, login, broadcast
 func (f *fakeTwitchLister) CollectionVideos(_ context.Context, id string) (string, []twitch.TwitchVideo, error) {
 	f.gotCollect = id
 	return "Playthrough Archives", f.videos, f.err
+}
+
+func (f *fakeTwitchLister) ChannelCollectionVideos(_ context.Context, login string) ([]twitch.TwitchVideo, error) {
+	f.gotOwner = login
+	return f.videos, f.err
 }
 
 func newListingRouter(t *testing.T, tw TwitchMetadataFetcher, channels []config.ChannelConfig) (chi.Router, *database.Database) {
@@ -138,12 +144,39 @@ func TestAddTwitchCollectionQueuesEachVod(t *testing.T) {
 	}
 }
 
-// TestAddTwitchListingRefusals: a channel's collection list, a clip list, a
-// channel Twitch does not have and a fetcher that cannot read listings each
-// queue nothing.
+// TestAddTwitchCollectionListQueuesEveryCollectionsVods is owner decision
+// FE-27: /<ch>/videos?filter=collections — yt-dlp's TwitchVideosCollectionsIE,
+// which TwitchCollectionsListingRefusal used to turn away — is read as the
+// channel's collections, never as its video list, and each VOD is queued as a
+// Queued backlog row of the channel, a node without an owner taking the
+// channel's login.
 //
-// Mutants: the ?filter=collections refusal removed (201); the not-found
-// mapping removed (502).
+// Mutants: the collections case removed (read as the video list: gotOwner
+// "", gotLogin "spamfish"); opts.Login not set (the owner-less VOD names no
+// channel and is not queued).
+func TestAddTwitchCollectionListQueuesEveryCollectionsVods(t *testing.T) {
+	tw := &fakeTwitchLister{videos: []twitch.TwitchVideo{{ID: "41", Title: "Act 1"}, {ID: "42", Title: "Act 2"}}}
+	r, db := newListingRouter(t, tw, []config.ChannelConfig{{ID: "Spamfish", Platform: "twitch"}})
+	rec := postListing(t, r, "https://www.twitch.tv/spamfish/videos?filter=collections")
+	if rec.Code != http.StatusCreated || tw.gotOwner != "spamfish" || tw.gotLogin != "" {
+		t.Fatalf("status %d, collections of %q, video list of %q: %s", rec.Code, tw.gotOwner, tw.gotLogin, rec.Body)
+	}
+	var res twitchListingResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil || res.Listed != 2 || res.Added != 2 {
+		t.Fatalf("response %s, want 2 listed and added", rec.Body)
+	}
+	for _, id := range []string{"tw_v41", "tw_v42"} {
+		j, _ := db.GetJob(id)
+		if j == nil || j.Status != database.StatusQueued || j.ChannelID == nil || *j.ChannelID != "Spamfish" {
+			t.Errorf("%s = %+v, want a Queued row of channel Spamfish", id, j)
+		}
+	}
+}
+
+// TestAddTwitchListingRefusals: a clip list, a channel Twitch does not have
+// and a fetcher that cannot read listings each queue nothing.
+//
+// Mutant: the not-found mapping removed (502).
 func TestAddTwitchListingRefusals(t *testing.T) {
 	cases := []struct {
 		name string
@@ -151,7 +184,7 @@ func TestAddTwitchListingRefusals(t *testing.T) {
 		tw   TwitchMetadataFetcher
 		want int
 	}{
-		{"collection list", "https://www.twitch.tv/spamfish/videos?filter=collections", &fakeTwitchLister{videos: []twitch.TwitchVideo{{ID: "1"}}}, http.StatusBadRequest},
+		{"unknown channel's collections", "https://www.twitch.tv/nobody/videos?filter=collections", &fakeTwitchLister{err: twitch.ErrChannelNotFound}, http.StatusNotFound},
 		{"clip list", "https://www.twitch.tv/spamfish/clips", &fakeTwitchLister{videos: []twitch.TwitchVideo{{ID: "1"}}}, http.StatusBadRequest},
 		{"unknown channel", "https://www.twitch.tv/nobody/videos", &fakeTwitchLister{err: twitch.ErrChannelNotFound}, http.StatusNotFound},
 		{"no lister", "https://www.twitch.tv/spamfish/videos", &fakeTwitchFetcher{}, http.StatusServiceUnavailable},

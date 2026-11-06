@@ -13,8 +13,8 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
-// TwitchListingFetcher reads the two Twitch listings the add route queues
-// (owner decision D18). The route type-asserts it off its
+// TwitchListingFetcher reads the Twitch listings the add route queues (owner
+// decisions D18 and FE-27). The route type-asserts it off its
 // TwitchMetadataFetcher, so a fetcher that does not read listings (a test's)
 // answers a listing with 503 rather than a job.
 type TwitchListingFetcher interface {
@@ -23,6 +23,10 @@ type TwitchListingFetcher interface {
 	ListChannelVideos(ctx context.Context, login, broadcastType, sort string) ([]twitch.TwitchVideo, error)
 	// CollectionVideos is a /collections/<id> listing in its own order.
 	CollectionVideos(ctx context.Context, collectionID string) (string, []twitch.TwitchVideo, error)
+	// ChannelCollectionVideos is a /<ch>/videos?filter=collections listing:
+	// the videos of every collection the channel lists
+	// (twitch.API.ChannelCollectionVideos).
+	ChannelCollectionVideos(ctx context.Context, login string) ([]twitch.TwitchVideo, error)
 }
 
 // TwitchListingType is the twitchType an add request names a listing by. The
@@ -45,7 +49,9 @@ type twitchListingResponse struct {
 // (worker.QueueTwitchVideos), which the archive-slots scheduler admits
 // archive_slots at a time. 201 with the counts when anything was listed, 404
 // for a channel or collection Twitch does not have, 400 for a URL that names
-// neither or for a channel's collection list (TwitchCollectionsListingRefusal).
+// neither. A channel's collection list (/<ch>/videos?filter=collections,
+// yt-dlp's TwitchVideosCollectionsIE) queues the VODs of every collection it
+// lists (owner decision FE-27), where it used to be refused.
 //
 // No "Job Added" notification is sent per VOD: a catalogue paste queues
 // hundreds, and each announces itself with "Twitch Download Starting" when the
@@ -63,10 +69,6 @@ func addTwitchListing(rw http.ResponseWriter, req *http.Request, db *database.Da
 		return
 	}
 	filter, sort := utils.TwitchVideosQuery(rawURL)
-	if target.Type == utils.TwitchVideosListing && filter == "collections" {
-		jsonError(rw, utils.TwitchCollectionsListingRefusal, http.StatusBadRequest)
-		return
-	}
 	lister, ok := fetcher.(TwitchListingFetcher)
 	if !ok || fetcher == nil {
 		jsonError(rw, "Twitch listings are unavailable", http.StatusServiceUnavailable)
@@ -82,9 +84,15 @@ func addTwitchListing(rw http.ResponseWriter, req *http.Request, db *database.Da
 	if store != nil {
 		store.Read(func(c *config.MoomboxConfig) { opts.Channels = append([]config.ChannelConfig(nil), c.Channels...) })
 	}
-	if target.Type == utils.TwitchCollection {
+	switch {
+	case target.Type == utils.TwitchCollection:
 		title, videos, err = lister.CollectionVideos(req.Context(), target.Value)
-	} else {
+	case filter == "collections":
+		// The collections' VODs are the channel's own: a node without an
+		// owner is paced under it, as a video list's is.
+		opts.Login = target.Value
+		videos, err = lister.ChannelCollectionVideos(req.Context(), target.Value)
+	default:
 		opts.Login = target.Value
 		videos, err = lister.ListChannelVideos(req.Context(), target.Value, twitch.VideoListBroadcastType(filter), sort)
 	}

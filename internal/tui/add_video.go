@@ -560,13 +560,10 @@ func (m *AddVideoModel) handleURLStep(key string) (string, string) {
 			m.errorMsg = (&utils.TwitchTarget{Type: utils.TwitchClipsListing}).Unsupported()
 			return "", ""
 		case "twitch_listing":
-			// A channel's video list or a collection (owner decision D18):
-			// the URL goes to the server as pasted — its ?filter= and ?sort=
-			// are the server's to read — which queues one VOD job per video.
-			if filter, _ := utils.TwitchVideosQuery(input); filter == "collections" {
-				m.errorMsg = utils.TwitchCollectionsListingRefusal
-				return "", ""
-			}
+			// A channel's video list, collection list or a collection (owner
+			// decisions D18 and FE-27): the URL goes to the server as pasted —
+			// its ?filter= and ?sort= are the server's to read — which queues
+			// one VOD job per video.
 		}
 		if vid == "" {
 			m.errorMsg = "Invalid video ID or URL"

@@ -291,6 +291,11 @@ func (a *twitchMetadataAdapter) CollectionVideos(ctx context.Context, collection
 	return a.svc.API.CollectionVideos(ctx, collectionID, a.svc.Auth.GetAuthToken())
 }
 
+// ChannelCollectionVideos implements routes.TwitchListingFetcher.
+func (a *twitchMetadataAdapter) ChannelCollectionVideos(ctx context.Context, login string) ([]twitch.TwitchVideo, error) {
+	return a.svc.API.ChannelCollectionVideos(ctx, login, twitchListingPages, a.svc.Auth.GetAuthToken())
+}
+
 // FetchClipMetadata reads a clip for the add route (routes.TwitchClipMetadataFetcher).
 func (a *twitchMetadataAdapter) FetchClipMetadata(ctx context.Context, slug string) (*routes.TwitchJobMetadata, error) {
 	info, err := a.svc.GetClip(ctx, slug)

@@ -347,10 +347,15 @@ func (l cliTwitchLister) CollectionVideos(ctx context.Context, collectionID stri
 	return l.api.CollectionVideos(ctx, collectionID, "")
 }
 
+func (l cliTwitchLister) ChannelCollectionVideos(ctx context.Context, login string) ([]twitch.TwitchVideo, error) {
+	return l.api.ChannelCollectionVideos(ctx, login, twitchListingPages, "")
+}
+
 // queueCLITwitchListing reads a pasted video list or collection and queues
 // its VODs (worker.QueueTwitchVideos), as the add route does. The listing's
 // ?filter= and ?sort= come from input as typed; a channel's collection list
-// (?filter=collections) is refused, as on every add path.
+// (?filter=collections) queues every collection's VODs (owner decision
+// FE-27), as on every add path.
 func queueCLITwitchListing(ctx context.Context, lister routes.TwitchListingFetcher, db *database.Database,
 	channels []config.ChannelConfig, input string, tw *utils.TwitchTarget, now time.Time) (worker.TwitchListingResult, error) {
 	opts := worker.TwitchListingOptions{Channels: channels, ManuallyAdded: true}
@@ -358,13 +363,14 @@ func queueCLITwitchListing(ctx context.Context, lister routes.TwitchListingFetch
 		videos []twitch.TwitchVideo
 		err    error
 	)
-	if tw.Type == utils.TwitchCollection {
+	filter, sort := utils.TwitchVideosQuery(input)
+	switch {
+	case tw.Type == utils.TwitchCollection:
 		_, videos, err = lister.CollectionVideos(ctx, tw.Value)
-	} else {
-		filter, sort := utils.TwitchVideosQuery(input)
-		if filter == "collections" {
-			return worker.TwitchListingResult{}, fmt.Errorf("%s", utils.TwitchCollectionsListingRefusal)
-		}
+	case filter == "collections":
+		opts.Login = tw.Value
+		videos, err = lister.ChannelCollectionVideos(ctx, tw.Value)
+	default:
 		opts.Login = tw.Value
 		videos, err = lister.ListChannelVideos(ctx, tw.Value, twitch.VideoListBroadcastType(filter), sort)
 	}
