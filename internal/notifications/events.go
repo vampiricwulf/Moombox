@@ -19,7 +19,7 @@ type EventGroup struct {
 // unregistered event is silently unfilterable AND stripped from
 // hand-edited configs on the next UI save.
 var EventGroups = []EventGroup{
-	{"Job Lifecycle", []string{"found", "added", "scheduled", "rescheduled", "downloading", "quality_split", "gap_split", "muxing", "finished", "error", "cancelled", "auth", "auth_recovered"}},
+	{"Job Lifecycle", []string{"found", "added", "scheduled", "rescheduled", "downloading", "quality_split", "gap_split", "live_edge", "muxing", "finished", "error", "cancelled", "auth", "auth_recovered"}},
 	// connectivity_restored fires the post-restore "Outage Alert" (start/
 	// end/duration). There is deliberately NO connectivity_lost event: a
 	// lost-connectivity webhook has no connectivity to deliver over, so the

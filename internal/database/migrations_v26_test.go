@@ -30,8 +30,8 @@ func TestMigrationV26(t *testing.T) {
 	if err := db.migrate(); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if v, _ := db.readUserVersion(); v != schemaVersion || schemaVersion != 26 {
-		t.Fatalf("user_version = %d (schemaVersion %d), want 26", v, schemaVersion)
+	if v, _ := db.readUserVersion(); v != schemaVersion || schemaVersion < 26 {
+		t.Fatalf("user_version = %d (schemaVersion %d), want the current schema, 26 or later", v, schemaVersion)
 	}
 	var cols int
 	if err := db.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'join_offset_seconds'`).Scan(&cols); err != nil || cols != 1 {

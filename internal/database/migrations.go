@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 26
+const schemaVersion = 27
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -151,7 +151,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     park_identity TEXT NOT NULL DEFAULT '',
     notification_msgs TEXT,
     announce_found INTEGER NOT NULL DEFAULT 0,
-    join_offset_seconds REAL
+    join_offset_seconds REAL,
+    live_edge_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -793,6 +794,15 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 27 {
+		if err := db.migrateV27(); err != nil {
+			return err
+		}
+		if err := db.writeUserVersion(27); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -1058,6 +1068,18 @@ CREATE TABLE IF NOT EXISTS feed_reprobe_owed (
 func (db *Database) migrateV26() error {
 	if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN join_offset_seconds REAL`); err != nil && !isDuplicateColumnErr(err) {
 		return fmt.Errorf("v26 alter: %w", err)
+	}
+	return nil
+}
+
+// migrateV27 adds live_edge_reason to jobs: why a live YouTube capture
+// recorded from the live edge instead of the broadcast's start (owner
+// decision PR-R2; see the Job.LiveEdgeReason doc comment in types.go).
+// Nullable with no default and no backfill: a row from before it never said
+// why, and only the job log of that run did. Guarded ALTER, like v26's.
+func (db *Database) migrateV27() error {
+	if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN live_edge_reason TEXT`); err != nil && !isDuplicateColumnErr(err) {
+		return fmt.Errorf("v27 alter: %w", err)
 	}
 	return nil
 }

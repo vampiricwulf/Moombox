@@ -271,6 +271,13 @@ type DownloadResult struct {
 	// numbers count in. The finalize's join point (joinOffsetSeconds, owner
 	// decision CJ-3) multiplies an MPEG-TS capture's first sequence by it.
 	SegmentDurationSec int
+	// LiveEdgeReason is set by the setup fallbacks that put a live capture's
+	// first setup on the live HLS playlist instead of from the start, saying
+	// why (owner decision PR-R2): setupMarathonOr's age arm and
+	// setupOrFallback's DRM, missing_pot and no-JS arms. ExecuteWithChat
+	// records it on the row and notifies once (recordLiveEdgeStart). Empty
+	// for every capture that records from the start.
+	LiveEdgeReason string
 }
 
 // invalidate403Caches clears cipher solver state, POT caches, and visitor data

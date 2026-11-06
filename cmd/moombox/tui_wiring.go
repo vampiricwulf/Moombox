@@ -269,6 +269,17 @@ func (s *runState) runTUI() {
 		})
 		return worker.HasUnmuxedParts(s.db, base, jobID)
 	}
+	app.JobGapFill = func(jobID string) *tui.GapFillView {
+		job, err := s.db.GetJob(jobID)
+		if err != nil || job == nil {
+			return nil
+		}
+		g := worker.TwitchGapFillStateOf(s.db, job)
+		if g == nil {
+			return nil
+		}
+		return &tui.GapFillView{State: g.State, Spans: g.Spans, Until: g.Until, Reason: g.Reason}
+	}
 	app.JobAsides = func(jobID string) tui.AsideSummary {
 		report, err := s.dlWorker.Asides(jobID)
 		if err != nil {

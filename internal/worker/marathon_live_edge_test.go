@@ -134,7 +134,9 @@ func TestMarathonLiveEdgeAge(t *testing.T) {
 // Mutants: evictedStartToLiveEdge switching without the diagnosis (the
 // "sq 0 still served" row switches); the IsHls guard dropped (the HLS row
 // runs a bisection and switches); the HLS failure returned as a switch (the
-// failing row hands back a nil result); the Warn dropped (the switch row).
+// failing row hands back a nil result); the Warn dropped (the switch row);
+// recordLiveEdgeStart dropped (the switch row's live_edge_reason is empty,
+// owner decision PR-R2).
 func TestEvictedLiveStartSwitchesToTheLiveEdge(t *testing.T) {
 	const head = 30_000
 	const itag = 137
@@ -172,7 +174,7 @@ func TestEvictedLiveStartSwitchesToTheLiveEdge(t *testing.T) {
 			info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, Formats: []youtube.Format{
 				{Itag: itag, Width: new(1920), Height: new(1080), TargetDurationSec: 5},
 			}}
-			o := &DownloadOrchestrator{logger: &discardLogger{}}
+			o := &DownloadOrchestrator{logger: &discardLogger{}, db: job.DB}
 			want := &DownloadResult{IsHls: true}
 			asked := 0
 			got, ok := o.evictedStartToLiveEdge(context.Background(), job, info, &DownloadResult{VideoDownloader: videoDl, IsHls: tc.isHls},
@@ -188,6 +190,15 @@ func TestEvictedLiveStartSwitchesToTheLiveEdge(t *testing.T) {
 			}
 			if (asked == 1) != tc.wantHls || asked > 1 {
 				t.Errorf("the HLS setup ran %d time(s), want %v", asked, tc.wantHls)
+			}
+			// The switch is a late start the row records (owner decision
+			// PR-R2); no switch records nothing.
+			wantReason := ""
+			if ok {
+				wantReason = liveEdgeEvicted
+			}
+			if row, _ := job.DB.GetJob(job.Job.ID); row == nil || row.LiveEdgeReason != wantReason {
+				t.Errorf("live_edge_reason = %v, want %q", row, wantReason)
 			}
 			const warnMsg = "[Live] the capture's start is gone from YouTube's ~120 h window — recording from the start cannot run; recording the live HLS playlist instead, from the live edge"
 			if rec.warned(warnMsg) != tc.wantHls {

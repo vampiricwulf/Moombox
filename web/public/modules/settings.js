@@ -35,6 +35,7 @@ const NOTIFICATION_EVENT_GROUPS = [
       { id: "downloading", label: "Downloading" },
       { id: "quality_split", label: "Quality Split" },
       { id: "gap_split", label: "Gap Split" },
+      { id: "live_edge", label: "Live Edge Start" },
       { id: "muxing", label: "Muxing" },
       { id: "finished", label: "Finished" },
       { id: "error", label: "Error" },

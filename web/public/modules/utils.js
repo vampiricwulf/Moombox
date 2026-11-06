@@ -961,6 +961,56 @@ export function canResumeJob(job, { requireKnownStaging = false } = {}) {
 }
 
 /**
+ * liveEdgeText is the job-details line for a live YouTube capture that
+ * recorded from the live edge instead of the broadcast's start (owner
+ * decision PR-R2): "Recorded from the live edge: <reason>, joined 1:23:45 in"
+ * from the row's liveEdgeReason and joinOffsetSeconds, without the join when
+ * it is not known yet (the finalize writes it). "" for a capture with no
+ * reason, and for one whose archive records from 0 after all — a Resume
+ * that recorded from the start again. The TUI's twin is liveEdgeLine
+ * (internal/tui/job_details.go).
+ * @param {{liveEdgeReason?: string, joinOffsetSeconds?: number|null}} job
+ * @returns {string}
+ */
+export function liveEdgeText(job) {
+  const reason = job?.liveEdgeReason;
+  if (!reason) return "";
+  const join = job.joinOffsetSeconds;
+  if (join === 0) return "";
+  const joined = typeof join === "number" && join > 0 ? `, joined ${formatTimestamp(join)} in` : "";
+  return `Recorded from the live edge: ${reason}${joined}`;
+}
+
+/**
+ * gapFillText is the job-details line for a Finished live Twitch job's
+ * archive-VOD gap-fill (owner decision PR-R5), from the job API's gapFill
+ * field (worker.GapFillState): "Gap-fill pending: 2 spans, until <time>"
+ * while it waits (with why, when a look said), then "Filled 2 spans" or
+ * "Kept as recorded: <reason>". "" for a job with none. until renders in the
+ * viewer's locale, as the dialog's other timestamps do. The TUI's twin is
+ * gapFillLine (internal/tui/job_details.go).
+ * @param {{gapFill?: {state: string, spans?: number, until?: string, reason?: string}}} job
+ * @returns {string}
+ */
+export function gapFillText(job) {
+  const g = job?.gapFill;
+  if (!g || !g.state) return "";
+  const spans = Number(g.spans) || 0;
+  const n = `${spans} span${spans === 1 ? "" : "s"}`;
+  switch (g.state) {
+    case "pending": {
+      const until = g.until && !isNaN(Date.parse(g.until)) ? `, until ${new Date(g.until).toLocaleString()}` : "";
+      return `Gap-fill pending: ${n}${until}${g.reason ? ` (${g.reason})` : ""}`;
+    }
+    case "filled":
+      return `Gap-fill: filled ${n}${g.reason ? ` — ${g.reason}` : ""}`;
+    case "kept":
+      return `Gap-fill: kept as recorded${g.reason ? `: ${g.reason}` : ""}`;
+  }
+  return "";
+}
+
+/**
  * reinitializeDeletesText is the clause a Reinitialize confirm names what the
  * reset deletes with (owner decision PR-M1), from GET
  * /api/jobs/{id}/reinitialize/preview — or the sum of several, for a batch.

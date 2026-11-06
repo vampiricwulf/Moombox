@@ -692,7 +692,12 @@ type App struct {
 	// dir still holds a chat capture. A DISK probe like HasStagingFiles and
 	// HasSegmentFiles beside it, so the same rule applies: it runs on
 	// SELECTION, never when the action menu opens (CORE-9).
-	JobAsides    func(jobID string) AsideSummary
+	JobAsides func(jobID string) AsideSummary
+	// JobGapFill reports a Finished live Twitch job's archive-VOD gap-fill
+	// (worker.TwitchGapFillStateOf, the job API's gapFill; owner decision
+	// PR-R5), nil for none. One row read; asked on selection, and only for
+	// a Finished live Twitch job, the only kind that has one.
+	JobGapFill   func(jobID string) *GapFillView
 	OnCreateTrim func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
 	OnDeleteTrim func(jobID, trimID string) error
 	OnOpenFolder func(jobID string)

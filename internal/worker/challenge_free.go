@@ -319,6 +319,9 @@ func setupOrFallback(ctx context.Context, job *JobContext, strategy DownloadStra
 		result, hlsErr := hls.Download(ctx, job, info, deps)
 		switch {
 		case hlsErr == nil:
+			if !isVod {
+				result = withLiveEdge(result, liveEdgeDRM)
+			}
 			return result, nil
 		case errors.Is(hlsErr, engine.ErrDRMProtected):
 			return nil, drmUnrecordable(fmt.Errorf("%w; the HLS fallback is DRM-protected too: %w", err, hlsErr))
@@ -332,7 +335,7 @@ func setupOrFallback(ctx context.Context, job *JobContext, strategy DownloadStra
 	if hls := missingPotFallback(strategy, info, err); hls != nil {
 		job.Logger.Warn("[POT] missing_pot: no GVS token for the "+kind+" streams — recording the live HLS playlist instead, from the oldest segment its window holds",
 			"jobID", job.Job.ID, "err", err)
-		return liveHlsInstead(ctx, job, hls, info, deps, err)
+		return withLiveEdgeErr(liveEdgeMissingPot)(liveHlsInstead(ctx, job, hls, info, deps, err))
 	}
 	if alt := vodMissingPotFallback(strategy, isVod, info, err); alt != nil {
 		job.Logger.Warn("[POT] missing_pot: no GVS token for the DASH manifest — downloading the "+alt.Kind()+" formats instead",
@@ -386,7 +389,7 @@ func noJSFromStartOrHls(ctx context.Context, job *JobContext, kind string, info 
 	}
 	job.Logger.Warn("[Cipher] live: recording from the start cannot run — the player's JS challenges cannot be solved and "+err.Error()+"; recording the live HLS playlist instead, from the oldest segment its window holds",
 		"jobID", job.Job.ID, "strategy", kind, "err", cause)
-	return liveHlsInstead(ctx, job, HlsStrategy, info, deps, fmt.Errorf("%w; %w", cause, err))
+	return withLiveEdgeErr(liveEdgeNoJS)(liveHlsInstead(ctx, job, HlsStrategy, info, deps, fmt.Errorf("%w; %w", cause, err)))
 }
 
 // errNoChallengeFreePair is noJSFromStart's answer when the formats that need

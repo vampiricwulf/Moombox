@@ -428,6 +428,9 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	// manifest-free one runs again on the formats that need no player JS. A
 	// job cancelled meanwhile sets up nothing more.
 	result, err = setupWithFallback(ctx, strategyCtx, strategy, isVod, videoInfo, deps)
+	if err == nil && result != nil && result.LiveEdgeReason != "" {
+		o.recordLiveEdgeStart(jobCtx, result.LiveEdgeReason)
+	}
 
 	// The restart seeds are single-use — the initial downloaders above
 	// consumed them. Later refreshDownload call sites manage these fields
