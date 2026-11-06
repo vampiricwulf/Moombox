@@ -404,8 +404,12 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 // rewrites, so the same capture failing again after one is read by its
 // markers and stream_end_time like any other row.
 //
+// A Mux of the Cancelled row that fails rewrites it to Error and leaves
+// ParkReasonMuxAfterCancel on it; that marker keeps the close too.
+//
 // Mutants: the Cancelled test dropped (the rows cancelled with no end time or
-// with a marker read open); the end-time rule closing every unmarked row, as
+// with a marker read open); the ParkReasonMuxAfterCancel test dropped (the
+// rows whose Mux after a cancel failed read open); the end-time rule closing every unmarked row, as
 // a close that outlived the Cancel would (the retried row cut off again
 // reads closed).
 func TestTwitchMuxTailOpenClosesOnACancel(t *testing.T) {
@@ -419,6 +423,8 @@ func TestTwitchMuxTailOpenClosesOnACancel(t *testing.T) {
 		{"cancelled while muxing", database.Job{Status: database.StatusCancelled, StreamEndTime: end}, false},
 		{"cancelled, the ended-offline error left on it", database.Job{Status: database.StatusCancelled, Error: twitchEndedOfflineErrMsg}, false},
 		{"cancelled, end unconfirmed left on it", database.Job{Status: database.StatusCancelled, ParkReason: database.ParkReasonTwitchEndUnconfirmed}, false},
+		{"its Mux after a cancel failed", database.Job{Status: database.StatusError, Error: "mux failed: disk full", ParkReason: database.ParkReasonMuxAfterCancel}, false},
+		{"its Mux after a cancel failed, ended-offline", database.Job{Status: database.StatusError, Error: twitchEndedOfflineErrMsg, ParkReason: database.ParkReasonMuxAfterCancel}, false},
 		{"retried after a cancel, cut off again", database.Job{Status: database.StatusError}, true},
 		{"retried after a cancel, its broadcast ended offline", database.Job{Status: database.StatusError, Error: twitchEndedOfflineErrMsg, StreamEndTime: end}, true},
 		{"retried after a cancel, end unconfirmed", database.Job{Status: database.StatusError, ParkReason: database.ParkReasonTwitchEndUnconfirmed}, true},
@@ -428,4 +434,91 @@ func TestTwitchMuxTailOpenClosesOnACancel(t *testing.T) {
 			t.Errorf("%s: tail open = %v, want %v", tc.name, got, tc.want)
 		}
 	}
+}
+
+// TestACancelledCaptureKeepsItsCloseThroughAFailedMux is owner decision FQ-2
+// past a failed Mux: a live capture cancelled while Downloading (no
+// stream_end_time) whose first Mux fails is rewritten to Error, and the
+// operator's next Mux still plans the late start alone — the Cancel's close
+// is carried on the row by ParkReasonMuxAfterCancel, which a second failure
+// keeps, and which a Retry clears with the close.
+//
+// Mutants: MuxJob's failure write not putting the marker on (the first
+// failed Mux leaves none); the marker written only from a Cancelled prior,
+// not carried from a marked one (the second failed Mux drops it);
+// twitchMuxTailOpen not reading the marker (the last Mux plans a tail).
+func TestACancelledCaptureKeepsItsCloseThroughAFailedMux(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	const id = "tw_40"
+	latchedJob(t, w, db, id, 10, false)
+	db.UpdateJobFields(id, map[string]any{
+		"stream_start_time": gapStart.Format(time.RFC3339),
+		"twitch_quality":    "chunked",
+		"status":            database.StatusCancelled,
+	})
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+	staging := filepath.Join(stagingBase, id)
+	cov, _ := json.Marshal(partCoverage{StartMs: ms(5 * time.Minute), EndMs: ms(5*time.Minute + 10*time.Second)})
+	if err := os.WriteFile(filepath.Join(staging, twitchCoverageFile), cov, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.twitchLiveness = func(context.Context, string) (*twitch.TwitchStreamInfo, error) { return nil, nil }
+
+	// Two Muxes fail on a recording FFmpeg cannot read: the first from the
+	// Cancelled row, the second from the Error row the first left.
+	media := filepath.Join(staging, "video.mp4")
+	good, err := os.ReadFile(media)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(media, []byte("not a recording"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := w.MuxJob(id); err != nil {
+			t.Fatal(err)
+		}
+		w.wg.Wait()
+		j, _ := db.GetJob(id)
+		if j == nil || j.Status != database.StatusError || j.ParkReason != database.ParkReasonMuxAfterCancel {
+			t.Fatalf("after a failed Mux the row = %v (park_reason %q), want Error carrying %q", statusOf(j), parkOf(j), database.ParkReasonMuxAfterCancel)
+		}
+	}
+	if g, _ := db.GetGapFill(id); g != nil {
+		t.Fatalf("a failed Mux kept a plan: %s", g.Plan)
+	}
+
+	if err := os.WriteFile(media, good, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.MuxJob(id); err != nil {
+		t.Fatal(err)
+	}
+	w.wg.Wait()
+	if j, _ := db.GetJob(id); j == nil || j.Status != database.StatusFinished {
+		t.Fatalf("muxed row = %v (error %q), want Finished", statusOf(j), errorOf(j))
+	}
+	g, _ := db.GetGapFill(id)
+	if g == nil {
+		t.Fatal("no gap-fill plan was kept")
+	}
+	var p twitchGapFillPlan
+	if err := json.Unmarshal([]byte(g.Plan), &p); err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	for _, sp := range p.Spans {
+		kinds = append(kinds, sp.Kind)
+	}
+	if got := strings.Join(kinds, ","); got != "late_start" {
+		t.Errorf("plan spans %s, want late_start alone: the Cancel closed the tail", got)
+	}
+}
+
+func parkOf(j *database.Job) database.ParkReason {
+	if j == nil {
+		return ""
+	}
+	return j.ParkReason
 }

@@ -2730,6 +2730,18 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 		"status":      database.StatusMuxing,
 		"park_reason": database.ParkReasonNone,
 	})
+	// failed is the Error write this Mux's failure paths make. A Mux of a
+	// Cancelled row (or of one whose earlier Mux after a Cancel failed) puts
+	// ParkReasonMuxAfterCancel back with it: the Error status replaces the
+	// Cancelled one, and the Cancel's gap-fill close (owner decision FQ-2,
+	// twitchMuxTailOpen) would otherwise not outlive the failed Mux.
+	failed := func(msg string) map[string]any {
+		fields := map[string]any{"status": database.StatusError, "error": msg}
+		if prior != nil && (prior.Status == database.StatusCancelled || prior.ParkReason == database.ParkReasonMuxAfterCancel) {
+			fields["park_reason"] = database.ParkReasonMuxAfterCancel
+		}
+		return fields
+	}
 
 	w.wg.Go(func() {
 		defer release()
@@ -2743,10 +2755,7 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 				// The Muxing write above came before this goroutine, so
 				// whichever terminal status the row holds landed during this
 				// mux and stands.
-				w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
-					"status": database.StatusError,
-					"error":  fmt.Sprintf("internal panic: %v", r),
-				})
+				w.db.UpdateJobFieldsUnlessTerminal(jobID, failed(fmt.Sprintf("internal panic: %v", r)))
 			}
 		}()
 
@@ -2780,10 +2789,7 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 		job, err := w.db.GetJob(jobID)
 		if err != nil {
 			w.logger.Error("MuxJob: get job failed", "jobID", jobID, "err", err)
-			w.db.UpdateJobFields(jobID, map[string]any{
-				"status": database.StatusError,
-				"error":  fmt.Sprintf("mux setup failed: %v", err),
-			})
+			w.db.UpdateJobFields(jobID, failed(fmt.Sprintf("mux setup failed: %v", err)))
 			return
 		}
 		if job == nil {
@@ -2849,10 +2855,7 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 				return
 			}
 			w.logger.Error("MuxJob failed", "jobID", jobID, "err", err)
-			w.db.UpdateJobFields(jobID, map[string]any{
-				"status": database.StatusError,
-				"error":  failure(err),
-			})
+			w.db.UpdateJobFields(jobID, failed(failure(err)))
 			return
 		}
 

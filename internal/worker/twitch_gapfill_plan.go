@@ -343,22 +343,25 @@ func (w *DownloadWorker) twitchMuxGapFillPlan(prior, job *database.Job, jobCtx *
 // and the gap splits, whenever the Cancel landed — while Downloading, where
 // stream_end_time is still empty and the rule below read the capture as cut
 // off mid-broadcast and filled the rest of it from the VOD, and while
-// Muxing alike. It is read off the row's status alone, which CancelJob
-// writes (with nothing else that lasts), so it holds only while the row is
-// Cancelled: a Retry or Reinitialize writes another status, and a row that
-// then fails again is read by the rules below as any other. It is checked
-// ahead of the markers, which a Cancel leaves on the row (it writes no
-// error and no park_reason): a Mux of an ended-offline Error row cancelled
-// while Muxing keeps twitchEndedOfflineErrMsg, and its tail is closed too.
+// Muxing alike. CancelJob writes nothing that lasts but the status, so a
+// Mux of the Cancelled row that fails, rewriting it to Error, writes
+// ParkReasonMuxAfterCancel with it (MuxJob's failure writes), and that
+// marker keeps the close through every later Mux that fails too. Only a
+// Retry or a Reinitialize ends it: each writes another status and clears
+// park_reason, and a row that then fails again is read by the rules below
+// as any other. Both are checked ahead of the markers, which a Cancel
+// leaves on the row (it writes no error and no park_reason): a Mux of an
+// ended-offline Error row cancelled while Muxing keeps
+// twitchEndedOfflineErrMsg, and its tail is closed too.
 //
-// Otherwise the two markers say so outright: twitchEndedOfflineErrMsg (the broadcast
-// ended while Moombox was down) and park_reason twitch_end_unconfirmed. Any
-// other Error or Cancelled row is read by stream_end_time, which a live
-// Twitch capture writes in ExecuteTwitch's finalize just before
+// Otherwise the two markers say so outright: twitchEndedOfflineErrMsg (the
+// broadcast ended while Moombox was down) and park_reason
+// twitch_end_unconfirmed. Any other Error row is read by stream_end_time,
+// which a live Twitch capture writes in ExecuteTwitch's finalize just before
 // muxAndFinalize and nowhere earlier (a retry or re-initialisation clears
-// it): set, the capture reached its end and only its mux failed or was
-// cancelled, and the tail is closed; empty, the capture was cut off
-// mid-broadcast and the tail is open.
+// it): set, the capture reached its end and only its mux failed, and the
+// tail is closed; empty, the capture was cut off mid-broadcast and the tail
+// is open.
 //
 // One row is closed here that ran on past its capture: an outage finalize
 // (outageFinalize — the broadcast ended or changed while connectivity was
@@ -366,7 +369,7 @@ func (w *DownloadWorker) twitchMuxGapFillPlan(prior, job *database.Job, jobCtx *
 // too, and nothing on the row tells it apart from a normal end. Its tail is
 // not filled on the Mux; before FE-25 that row made no plan at all.
 func twitchMuxTailOpen(prior *database.Job) bool {
-	if prior.Status == database.StatusCancelled {
+	if prior.Status == database.StatusCancelled || prior.ParkReason == database.ParkReasonMuxAfterCancel {
 		return false
 	}
 	if prior.Error == twitchEndedOfflineErrMsg || prior.ParkReason == database.ParkReasonTwitchEndUnconfirmed {
