@@ -81,7 +81,7 @@ func TestGapFillLine(t *testing.T) {
 //
 // Mutants: the Start row left out of buildRows; the Gap-fill row left out;
 // updateSelectedJob not pushing the gap-fill; gapFillFor asking for any job
-// (the YouTube row asks).
+// (the YouTube row asks); its IsVod guard dropped (the Twitch VOD row asks).
 func TestDetailsPanelShowsLateStartAndGapFill(t *testing.T) {
 	app := NewApp()
 	var asked []string
@@ -93,6 +93,7 @@ func TestDetailsPanelShowsLateStartAndGapFill(t *testing.T) {
 	app.taskList.SetJobs([]*database.Job{
 		{ID: "tw", Title: "Twitch", Platform: "twitch", Status: database.StatusFinished, CreatedAt: "2026-10-04T10:00:00Z"},
 		{ID: "yt", Title: "YouTube", Platform: "youtube", Status: database.StatusFinished, LiveEdgeReason: edgeReason, CreatedAt: "2026-10-04T09:00:00Z"},
+		{ID: "twv", Title: "Twitch VOD", Platform: "twitch", IsVod: true, Status: database.StatusFinished, CreatedAt: "2026-10-04T08:00:00Z"},
 	})
 	app.updateSelectedJob()
 	if sel := app.taskList.SelectedJob(); sel == nil || sel.ID != "tw" {
@@ -115,5 +116,18 @@ func TestDetailsPanelShowsLateStartAndGapFill(t *testing.T) {
 	}
 	if r := fieldRow(app.details, "Start"); r == nil || r.value != "Recorded from the live edge: "+edgeReason {
 		t.Errorf("Start row = %+v", r)
+	}
+
+	// A Twitch VOD is downloaded whole: it has no gap-fill to ask about.
+	app.taskList.MoveDown()
+	app.updateSelectedJob()
+	if sel := app.taskList.SelectedJob(); sel == nil || sel.ID != "twv" {
+		t.Fatalf("premise lost: selected %v", sel)
+	}
+	if strings.Join(asked, ",") != "tw" {
+		t.Errorf("JobGapFill asked for %v; a Twitch VOD has no gap-fill to ask about", asked)
+	}
+	if r := fieldRow(app.details, "Gap-fill"); r != nil {
+		t.Errorf("the Twitch VOD shows a gap-fill: %+v", r)
 	}
 }
