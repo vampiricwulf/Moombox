@@ -24,8 +24,10 @@ func TestProbeAudioStreamIsFFprobe(t *testing.T) {
 // channels answered; a job with no archive answers {} without a probe.
 //
 // Mutants: the route not registered (404); the split job's single
-// output_file probed instead of its first part; the probe's answer dropped
-// ({} for the single file).
+// output_file probed instead of its first part, or its last part instead of
+// its first; the probe's answer dropped ({} for the single file); the
+// containment guard dropped (the part outside the output directory is
+// probed).
 func TestAudioInfoRoute(t *testing.T) {
 	f := newChapterImportFixture(t, &fakeChapterImporter{})
 	var probed []string
@@ -38,7 +40,9 @@ func TestAudioInfoRoute(t *testing.T) {
 
 	single := filepath.Join(f.outputDir, "single.mp4")
 	part1 := filepath.Join(f.outputDir, "split - part1.mp4")
-	for _, p := range []string{single, part1} {
+	part2 := filepath.Join(f.outputDir, "split - part2.mp4")
+	outside := filepath.Join(t.TempDir(), "elsewhere - part1.mp4")
+	for _, p := range []string{single, part1, part2, outside} {
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -51,7 +55,14 @@ func TestAudioInfoRoute(t *testing.T) {
 	f.addJob(t, "split", func(j *database.Job) {
 		j.Status = database.StatusFinished
 		j.OutputFile = single
-		j.Segments = []database.Segment{{SegmentIndex: 0, Filename: filepath.Base(part1), FilePath: part1, DurationSeconds: 10}}
+		j.Segments = []database.Segment{
+			{SegmentIndex: 0, Filename: filepath.Base(part1), FilePath: part1, DurationSeconds: 10},
+			{SegmentIndex: 1, Filename: filepath.Base(part2), FilePath: part2, DurationSeconds: 10},
+		}
+	})
+	f.addJob(t, "outside", func(j *database.Job) {
+		j.Status = database.StatusFinished
+		j.Segments = []database.Segment{{SegmentIndex: 0, Filename: filepath.Base(outside), FilePath: outside, DurationSeconds: 10}}
 	})
 	f.addJob(t, "none", func(j *database.Job) { j.Status = database.StatusError })
 
@@ -68,6 +79,10 @@ func TestAudioInfoRoute(t *testing.T) {
 	got = AudioInfo{Codec: "x"}
 	if body := f.getJSON(t, "/api/jobs/none/audio-info", &got); len(probed) != 2 || body != "{}\n" && body != "{}" {
 		t.Errorf("a job with no archive: body %q, probed %v", body, probed)
+	}
+	got = AudioInfo{Codec: "x"}
+	if body := f.getJSON(t, "/api/jobs/outside/audio-info", &got); len(probed) != 2 || body != "{}\n" && body != "{}" {
+		t.Errorf("a part outside the output directory: body %q, probed %v; want {} and no probe", body, probed)
 	}
 }
 

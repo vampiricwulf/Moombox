@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -83,7 +84,15 @@ func audioInfoRoute(r chi.Router, db *database.Database, store *config.Store, lg
 		}
 		path := ""
 		if segs, err := db.GetSegments(job.ID); err == nil && len(segs) > 0 {
-			path = segs[0].FilePath
+			// The containment guard GET /api/jobs/{id}/segments/{index}/video
+			// and the chapters route apply to the same part: ffprobe reads
+			// the file the player would play, and no other. A part outside
+			// the output directory (or gone) is no archive, and answers {}.
+			if abs, aerr := filepath.Abs(segs[0].FilePath); aerr == nil && segs[0].FilePath != "" {
+				if p, ok := validatePathTraversal(abs, resolveOutputDir(job, store)); ok {
+					path = p
+				}
+			}
 		} else if p, _, code := jobVideoPath(job, store); code == 0 {
 			path = p
 		}
