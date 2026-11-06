@@ -346,7 +346,9 @@ func TestGapFillInsertsTheLateStartAsAPart(t *testing.T) {
 //
 // Mutants: the recorded parts keyed by their row's unix_start instead of the
 // plan's coverage (rows whose unix_start disagrees sort wrongly); the pad
-// left off the span's start (segment 1 is not cut) or its end (segment 4).
+// left off the span's start (segment 1 is not cut) or its end (segment 4);
+// commit's main-file loop without its break (the last recorded part, part2,
+// becomes output_file).
 func TestGapFillFillsBetweenRecordedParts(t *testing.T) {
 	f := newGapFillFixture(t)
 	p1 := filepath.Join(f.dir, "Streamer - Big day - part1.mp4")
@@ -379,6 +381,11 @@ func TestGapFillFillsBetweenRecordedParts(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(filepath.Join(f.dir, "Streamer - Big day - recovered1.mp4")); string(data) != "MP4[v1][v2][v3][v4]" {
 		t.Errorf("recovered part holds %q, want the VOD's segments 1-4 (the span and its pad)", data)
+	}
+	// Owner decision PR-R5: the main file is the first recorded part in
+	// time order, never the recovered one nor a later recorded one.
+	if job.OutputFile != p1 {
+		t.Errorf("output_file = %q, want the first recorded part %q", job.OutputFile, p1)
 	}
 }
 

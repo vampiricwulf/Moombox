@@ -24,7 +24,8 @@ import (
 //
 // Mutants: refusedVodSegment answering false (the 403 fails the fill, the
 // plan is kept); the errSpanRefused branch removed (an empty part is muxed
-// and inserted); the refused log line removed.
+// and inserted); the refused log line removed; the outcome's Spans counting
+// the plan's spans, or its stay-gaps reason never set (one span of two).
 func TestGapFillLeavesOutRefusedSegments(t *testing.T) {
 	t.Run("one segment refused", func(t *testing.T) {
 		f := newGapFillFixture(t)
@@ -68,6 +69,26 @@ func TestGapFillLeavesOutRefusedSegments(t *testing.T) {
 		}
 		if job, _ := f.db.GetJob("tw_1"); len(job.Segments) != 0 || job.OutputFile != f.archive {
 			t.Errorf("the job changed: %+v", job)
+		}
+	})
+	// Owner decision PR-R5: a partial fill's outcome counts the spans it
+	// recovered, not the ones it planned, and says how many stay gaps —
+	// job details read it as "Filled N spans".
+	t.Run("one span of two refused", func(t *testing.T) {
+		f := newGapFillFixture(t)
+		f.refuse = map[string]bool{"https://vod.example/chunked/4.ts": true}
+		f.plan(t, []stagedPartCoverage{covPart(0, 0, 41*time.Second, false), covPart(1, 49*time.Second, time.Minute, false)},
+			[]gapSpan{
+				{FromMs: ms(41 * time.Second), ToMs: ms(49 * time.Second), Kind: gapKindLost, AfterPart: 0},
+				{FromMs: ms(time.Minute), ToMs: ms(time.Minute + 15*time.Second), Kind: gapKindTail, AfterPart: 1},
+			},
+			gapStart.Add(25*time.Hour))
+		row, _ := f.db.GetGapFill("tw_1")
+		f.filler.step(context.Background(), *row, gapStart.Add(70*time.Minute))
+
+		out := f.outcome(t)
+		if out == nil || out.State != GapFillFilled || out.Spans != 1 || !strings.Contains(out.Reason, "1 of 2 spans stay gaps") {
+			t.Errorf("outcome = %+v, want filled with 1 span and \"1 of 2 spans stay gaps\"", out)
 		}
 	})
 }

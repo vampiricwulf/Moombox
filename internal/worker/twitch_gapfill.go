@@ -936,7 +936,14 @@ func (f *twitchGapFiller) commit(plan *twitchGapFillPlan, job *database.Job, v *
 	// recovered part is an extra part beside the archive, never its main
 	// file. A late-start fill used to move it to "recovered1", a cut of the
 	// VOD the capture never recorded. The first recorded part in time order
-	// is it: the archive file itself for a single-file archive.
+	// is it: the archive file itself for a single-file archive. This rule is
+	// output_file's alone. A split archive's chapter sidecar stays keyed on
+	// the first part in time order, segments[0] (split_chapters.go,
+	// chapter_routes.go), which after a late-start fill is "recovered1", so
+	// the main file and the file the chapters sit beside can differ; every
+	// sidecar reader and writer reads segments[0], so they agree among
+	// themselves. A later re-mux from staging writes output_file by its own
+	// first-part rule (muxAndFinalize, orchestrator_mux.go).
 	mainFile := ""
 	for _, sg := range segs {
 		if !madePaths[sg.FilePath] {
