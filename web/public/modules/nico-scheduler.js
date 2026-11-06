@@ -99,8 +99,17 @@ export class NicoScheduler {
    * ENTERED at the last anchor is a seed-window skip, not a drop — the viewer
    * landed in the middle of its flight — so the comparison is on entry time,
    * not on the timestamp a whole NICO_LEAD_MS later.
+   *
+   * A deleted message is never counted (owner decision CJ-4): the overlay
+   * hides it whenever it comes due (player.js _buildNicoEl, FQ-5), so one
+   * that aged out unseen lost the viewer nothing, and "+N not shown" would
+   * promise N messages the overlay was never going to show. It is skipped
+   * here, at the count, and nowhere else: the cursor still steps over it and
+   * the message array is not filtered, so every index the cursor, the seed
+   * and the sidebar's rows share stays aligned.
    */
   countDrop(msg) {
+    if (msg.deleted === true) return;
     if (msg.offsetMs - this.leadMs > this.anchorMs) this.dropped++;
   }
 

@@ -820,6 +820,40 @@ test("the lateness bound is measured from the entry instant, not the timestamp",
   assert.equal(h.player.nico.dropped, 1, "the bound is 2 s from the entry, 1 s from the timestamp");
 });
 
+// Owner decision CJ-4: the overlay never shows a deleted message (FQ-5), so
+// one that ages out is not a message the overlay owed the viewer — the pill
+// counts only the live ones that missed their flight.
+test("the \"+N not shown\" pill leaves out deleted messages", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf([
+      { ...msg(5000, "retracted"), deleted: true },
+      msg(5000, "late"),
+      { ...msg(5100, "also retracted"), deleted: true },
+      msg(9000, "next"),
+    ]),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+
+  h.tick(1000);
+  assert.equal(h.player.nico.dropped, 0);
+
+  // 6200: all three of the first messages entered more than 2 s ago.
+  h.tick(6200);
+  assert.equal(h.overlay().children.length, 0, "nothing placed");
+  assert.equal(h.player.nico.dropped, 1, "only the live message is counted");
+  assert.equal(h.el("player-nico-dropped").textContent, "+1 not shown");
+  assert.equal(h.player.nico.cursor, 3, "the cursor stepped over the deleted ones too");
+
+  // The message after them still flies: the index alignment held.
+  h.tick(8500);
+  assert.equal(h.overlay().children.length, 1);
+  assert.equal(h.overlay().children[0].textContent, "next");
+});
+
 // The seed and the drop counter both work in ENTRY time: a message that was
 // already flying when the seek landed is chat the viewer joined mid-flight, not
 // a message the overlay failed to show.
