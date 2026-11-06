@@ -47,15 +47,23 @@ func HasManifestlessDashFormats(formats []youtube.Format) bool {
 }
 
 // formatToDashStreamInfo converts a youtube.Format into the DashStreamInfo
-// shape that SelectBestDashStream expects. Mirrors the conversion done in
-// strategy_youtube_dash.go:160-172 for parsed-manifest streams; sharing a
-// single helper would couple two unrelated types so we keep it inline.
+// shape that SelectBestDashStream expects. Mirrors manifestStreamInfos, the
+// conversion of parsed-manifest streams; sharing a single helper would couple
+// two unrelated types so we keep it inline. The rank inputs come from the
+// format itself: the codecs of its mimeType, its Premium label, and for audio
+// the whole youtube.AudioRank (track, audioQuality, channels, codec) the VOD
+// selector ranks by.
 func formatToDashStreamInfo(f *youtube.Format) DashStreamInfo {
 	info := DashStreamInfo{
 		Itag:      f.Itag,
 		MimeType:  f.MimeType,
 		Bandwidth: f.Bitrate,
 		BaseURL:   f.URL,
+		Codecs:    youtube.CodecsOf(f.MimeType),
+		Premium:   f.IsPremium(),
+	}
+	if f.IsAudio() {
+		info.Audio = youtube.AudioRankOf(f)
 	}
 	if f.Width != nil {
 		info.Width = *f.Width
@@ -157,10 +165,10 @@ func DownloadManifestlessDash(
 
 	var videoStream, audioStream *DashStreamInfo
 	if videoItag != -1 {
-		videoStream = SelectBestDashStream(videoStreams, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps)
+		videoStream = SelectBestDashStream(videoStreams, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps, job.Config.PreferHDR)
 	}
 	if audioItag != -1 {
-		audioStream = SelectBestDashStream(audioStreams, audioItag, 0, false, "", false)
+		audioStream = SelectBestDashStream(audioStreams, audioItag, 0, false, "", false, false)
 	}
 	warnUnhonouredPins(job, videoItag, videoStream, audioItag, audioStream)
 	if videoStream == nil && videoItag != -1 {
@@ -188,7 +196,7 @@ func DownloadManifestlessDash(
 	excludedVideoItags := map[int]bool{}
 	excludedAudioItags := map[int]bool{}
 	if videoStream != nil {
-		resolved, retryStream, err := resolveManifestlessStream(ctx, videoInfo.Formats, videoStreams, videoStream, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps, routedSolver, cipherSolver, videoInfo.PlayerURL, excludedVideoItags, job.Logger)
+		resolved, retryStream, err := resolveManifestlessStream(ctx, videoInfo.Formats, videoStreams, videoStream, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps, job.Config.PreferHDR, routedSolver, cipherSolver, videoInfo.PlayerURL, excludedVideoItags, job.Logger)
 		if err != nil {
 			return nil, fmt.Errorf("manifestless DASH: resolve video URL: %w", err)
 		}
@@ -198,7 +206,7 @@ func DownloadManifestlessDash(
 		videoStream.BaseURL = resolved
 	}
 	if audioStream != nil {
-		resolved, retryStream, err := resolveManifestlessStream(ctx, videoInfo.Formats, audioStreams, audioStream, audioItag, 0, false, "", false, routedSolver, cipherSolver, videoInfo.PlayerURL, excludedAudioItags, job.Logger)
+		resolved, retryStream, err := resolveManifestlessStream(ctx, videoInfo.Formats, audioStreams, audioStream, audioItag, 0, false, "", false, false, routedSolver, cipherSolver, videoInfo.PlayerURL, excludedAudioItags, job.Logger)
 		if err != nil {
 			return nil, fmt.Errorf("manifestless DASH: resolve audio URL: %w", err)
 		}
@@ -553,10 +561,10 @@ func manifestlessMissingPot(ctx context.Context, job *JobContext, videoInfo *you
 	videoStreams, audioStreams := partitionManifestlessFormats(pool)
 	var video, audio *DashStreamInfo
 	if videoItag != -1 {
-		video = SelectBestDashStream(videoStreams, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps)
+		video = SelectBestDashStream(videoStreams, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps, job.Config.PreferHDR)
 	}
 	if audioItag != -1 {
-		audio = SelectBestDashStream(audioStreams, audioItag, 0, false, "", false)
+		audio = SelectBestDashStream(audioStreams, audioItag, 0, false, "", false, false)
 	}
 	var lost []string
 	if video == nil && videoItag != -1 {
@@ -596,7 +604,7 @@ func manifestlessMissingPot(ctx context.Context, job *JobContext, videoInfo *you
 		warnUnhonouredPins(job, -1, nil, audioItag, audio)
 	}
 	if video != nil {
-		resolved, retry, err := resolveManifestlessStream(ctx, pool, videoStreams, video, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps, routedSolver, cipherSolver, videoInfo.PlayerURL, map[int]bool{}, job.Logger)
+		resolved, retry, err := resolveManifestlessStream(ctx, pool, videoStreams, video, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps, job.Config.PreferHDR, routedSolver, cipherSolver, videoInfo.PlayerURL, map[int]bool{}, job.Logger)
 		if err != nil {
 			return nil, fmt.Errorf("manifestless DASH: resolve video URL: %w", err)
 		}
@@ -606,7 +614,7 @@ func manifestlessMissingPot(ctx context.Context, job *JobContext, videoInfo *you
 		video.BaseURL = resolved
 	}
 	if audio != nil {
-		resolved, retry, err := resolveManifestlessStream(ctx, pool, audioStreams, audio, audioItag, 0, false, "", false, routedSolver, cipherSolver, videoInfo.PlayerURL, map[int]bool{}, job.Logger)
+		resolved, retry, err := resolveManifestlessStream(ctx, pool, audioStreams, audio, audioItag, 0, false, "", false, false, routedSolver, cipherSolver, videoInfo.PlayerURL, map[int]bool{}, job.Logger)
 		if err != nil {
 			return nil, fmt.Errorf("manifestless DASH: resolve audio URL: %w", err)
 		}

@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"cmp"
+	"regexp"
 	"strings"
 )
 
@@ -147,6 +148,19 @@ func dynamicRangeOf(codec string) DynamicRange {
 		return RangeHDR10
 	}
 	return RangeSDR
+}
+
+// mimeCodecsRegex reads a mimeType's whole codecs list.
+var mimeCodecsRegex = regexp.MustCompile(`codecs="([^"]+)"`)
+
+// CodecsOf is a mimeType's codecs list — `video/mp4; codecs="avc1.42001E,
+// mp4a.40.2"` gives "avc1.42001E, mp4a.40.2" — or "" when it names none. The
+// worker fills a manifest-free stream's DashStreamInfo.Codecs with it.
+func CodecsOf(mimeType string) string {
+	if m := mimeCodecsRegex.FindStringSubmatch(mimeType); m != nil {
+		return m[1]
+	}
+	return extractCodec(mimeType)
 }
 
 // VideoRank is the part of a video rendition's rank that every YouTube

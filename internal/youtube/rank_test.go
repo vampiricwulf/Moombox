@@ -264,3 +264,77 @@ func TestDedupFillsAStreamsQualityFromAnotherClient(t *testing.T) {
 		t.Errorf("video %+v: a video format must not take an audioQuality", got.Video)
 	}
 }
+
+// TestAudioLanguagesComeFromURLLessFormatsToo is yt-dlp #14883
+// (_video.py:3528-3531) for G41: the original and default track languages
+// are recorded from every format entry, the URL-less ones a SABR-forced
+// client lists included — and across the extraction's responses, first
+// statement winning, stamped on the cascade's VideoInfo. parseFormats
+// discarded a URL-less entry whole, so a SABR-forced dubbed VOD had no
+// record of its original for the HLS variants to be ranked against.
+//
+// Mutants (each run): noteAudioLanguages skipping entries without a url (the
+// SABR response states nothing); the descriptive guard dropped (the
+// descriptive German track, listed first and marked default, becomes the
+// default); finishExtraction not restamping (the winner's own, empty, map
+// survives); merge letting a later response overwrite (the default reads
+// "fr").
+func TestAudioLanguagesComeFromURLLessFormatsToo(t *testing.T) {
+	sabr := decodePlayerJSON(t, `{"videoDetails": {"videoId": "test1234567", "lengthSeconds": "600"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {"serverAbrStreamingUrl": "https://x/sabr", "adaptiveFormats": [
+			{"itag": 251, "mimeType": "audio/webm; codecs=\"opus\"", "audioTrack": {"id": "de.5", "displayName": "German descriptive", "audioIsDefault": true}},
+			{"itag": 251, "mimeType": "audio/webm; codecs=\"opus\"", "audioTrack": {"id": "ja.3", "displayName": "Japanese original", "audioIsDefault": false}},
+			{"itag": 251, "mimeType": "audio/webm; codecs=\"opus\"", "audioTrack": {"id": "en.3", "displayName": "English", "audioIsDefault": true}}]}}`)
+	later := decodePlayerJSON(t, `{"videoDetails": {"videoId": "test1234567", "lengthSeconds": "600"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {"hlsManifestUrl": "https://x/master.m3u8", "adaptiveFormats": [
+			{"itag": 140, "url": "https://x/140", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "audioTrack": {"id": "fr.3", "displayName": "French", "audioIsDefault": true}}]}}`)
+	bare := decodePlayerJSON(t, `{"videoDetails": {"videoId": "test1234567", "lengthSeconds": "600"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {"hlsManifestUrl": "https://x/master.m3u8"}}`)
+
+	p := NewPlayerAPI(nil, noopLogger{})
+	ctx := withExtractionState(context.Background())
+	first, err := p.parsePlayerResponse(ctx, sabr, "", nil, "test1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := AudioLanguages{Original: "ja", Default: "en"}
+	if first.AudioLanguages != want {
+		t.Errorf("the SABR response's own languages = %+v, want %+v", first.AudioLanguages, want)
+	}
+	if _, err := p.parsePlayerResponse(ctx, later, "", nil, "test1234567"); err != nil {
+		t.Fatal(err)
+	}
+	winner, err := p.parsePlayerResponse(ctx, bare, "", nil, "test1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := p.finishExtraction(ctx, winner, nil, "test1234567", &mismatchTally{attempts: 3, survived: 3}, nil)
+	if err != nil {
+		t.Fatalf("finishExtraction: %v", err)
+	}
+	if info.AudioLanguages != want {
+		t.Errorf("the extraction's languages = %+v, want %+v", info.AudioLanguages, want)
+	}
+}
+
+// TestLanguageTrackScore: a rendition known only by its language ranks the
+// original first, then the default, then any other, as
+// process_manifest_format's language_preference does (10, 5, -1); a track
+// id's part after the dot is not part of the language.
+func TestLanguageTrackScore(t *testing.T) {
+	langs := AudioLanguages{Original: "ja", Default: "en"}
+	for _, tc := range []struct {
+		lang string
+		want int
+	}{{"ja.4", 20}, {"ja", 20}, {"en.3", 10}, {"fr.2", -2}, {"", -2}} {
+		if got := LanguageTrackScore(tc.lang, langs); got != tc.want {
+			t.Errorf("LanguageTrackScore(%q) = %d, want %d", tc.lang, got, tc.want)
+		}
+	}
+	if got := LanguageTrackScore("", AudioLanguages{}); got != -2 {
+		t.Errorf("an unstated language against an empty map = %d, want -2 (no match on \"\")", got)
+	}
+}

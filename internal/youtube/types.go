@@ -245,6 +245,15 @@ type VideoInfo struct {
 	// publish date from one that carried a time, for "Stream Found"'s Published
 	// field (addFoundFacts, internal/worker/found_announce.go).
 	UploadDate string `json:"uploadDate,omitempty"`
+
+	// AudioLanguages is the extraction's language_map: the original and
+	// default audio tracks' languages, recorded from every format entry of
+	// every response, URL-less ones included (noteAudioLanguages). The
+	// selectors that know a rendition only by its language — an HLS
+	// variant's YT-EXT-AUDIO-CONTENT-ID, a DASH manifest's lang — rank it
+	// against these (LanguageTrackScore). A cascade's VideoInfo carries the
+	// whole extraction's (finishExtraction); any other, its one response's.
+	AudioLanguages AudioLanguages `json:"audioLanguages,omitzero"`
 }
 
 // ChatSource carries the chat-setup facts the WATCH PAGE this VideoInfo was

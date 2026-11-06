@@ -99,6 +99,8 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	// strategy resolves them via cipher.ResolveFormatURL right before
 	// constructing SegmentDownloaders.
 	formats, formatDiag := p.parseFormats(ctx, streamingData)
+	langs := noteAudioLanguages(streamingData)
+	extractionStateFrom(ctx).noteAudioLanguages(langs)
 
 	// The response's pre-roll ad wait (playbackAvailableAt), stamped on every
 	// format it yields and on each manifest it carries, so that whichever of
@@ -227,6 +229,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		PublishedPrecision: publishedPrecision,
 		FormatDiag:         formatDiag,
 		PlaybackWaitExempt: liveFlags.exempt(),
+		AudioLanguages:     langs,
 	}
 	if info.DashManifestURL != "" {
 		info.DashManifestAvailableAt = availableAt
@@ -397,6 +400,55 @@ type extractionState struct {
 	live   playbackLiveFlags
 	// jsl is the extraction's JS-less ranking state (challenge_free.go).
 	jsl jslessState
+	// langs is the extraction's language_map, each language the first a
+	// parsed response stated (noteAudioLanguages); finishExtraction stamps
+	// it as VideoInfo.AudioLanguages.
+	langsMu sync.Mutex
+	langs   AudioLanguages
+}
+
+// noteAudioLanguages folds one response's languages into the extraction's.
+// Nil outside a cascade.
+func (s *extractionState) noteAudioLanguages(l AudioLanguages) {
+	if s == nil {
+		return
+	}
+	s.langsMu.Lock()
+	defer s.langsMu.Unlock()
+	s.langs.merge(l)
+}
+
+// audioLanguages is the extraction's language_map so far.
+func (s *extractionState) audioLanguages() AudioLanguages {
+	if s == nil {
+		return AudioLanguages{}
+	}
+	s.langsMu.Lock()
+	defer s.langsMu.Unlock()
+	return s.langs
+}
+
+// noteAudioLanguages is one response's language_map, read from every entry
+// of its adaptiveFormats and formats — the URL-less ones a client YouTube
+// forced onto SABR lists, and DRM ones, included — before parseFormats drops
+// anything. yt-dlp registers the original and default languages from a
+// URL-less format for exactly this reason (_video.py:3528-3531, #14883): a
+// SABR-forced VOD's only fetchable media can be an HLS master with one
+// pre-merged variant per audio track, and its HTTPS formats are then the only
+// record of which track is the original. parseFormats discarded a URL-less
+// entry whole, its audioTrack with it.
+func noteAudioLanguages(streamingData map[string]any) AudioLanguages {
+	var l AudioLanguages
+	for _, key := range []string{"adaptiveFormats", "formats"} {
+		arr, _ := streamingData[key].([]any)
+		for _, item := range arr {
+			f, _ := item.(map[string]any)
+			if at, ok := f["audioTrack"].(map[string]any); ok {
+				l.note(getStr(at, "id"), getStr(at, "displayName"), getBool(at, "audioIsDefault"))
+			}
+		}
+	}
+	return l
 }
 
 // withExtractionState opens one extraction's scratch. Called once at the head

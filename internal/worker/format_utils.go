@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
 
@@ -26,7 +27,9 @@ func IsProgressiveFormat(f *youtube.Format) bool {
 //     "1080p60" among everything at or below the chosen size, so a per-job
 //     preference lower than the cap is still honoured
 //  4. Among the streams AT the chosen size (source/best): the frame rate
-//     prefer60fps asks for, then the highest bandwidth
+//     prefer60fps asks for, then the shared rank — dynamic range under
+//     preferHDR, Premium, codec (youtube.VideoRank) — then the highest
+//     bandwidth
 //
 // Sizes are the frame's SHORTER edge (utils.CapDimension) throughout — the
 // cap's own measure — so a portrait stream's "1080p" is its 1080x1920
@@ -34,9 +37,21 @@ func IsProgressiveFormat(f *youtube.Format) bool {
 // ranked by fpsPreference: an explicit "…p60" asks for 60, and otherwise
 // prefer60fps decides, as it does on the whole-file VOD path.
 //
-// For audio streams (isVideo=false), qualityPref, maxRes and prefer60fps are
-// ignored.
-func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, isVideo bool, qualityPref string, prefer60fps bool) *DashStreamInfo {
+// The shared rank is owner decision D14, "rank like VOD": this selector
+// serves the manifest-free live and post-live paths, the DASH-manifest path
+// (a StreamVOD with a dashManifestUrl included) and the quality probe, and it
+// ranked bandwidth alone at a size — so at 1080p60 the avc1 299 usually beat
+// the vp9 303 by its higher peak bitrate, and the VOD and live paths of one
+// video picked different codecs. Frame rate stays ahead of the rank, the
+// YouTube order (_video.py:4204-4207: res, fps, hdr:12, source, vcodec),
+// unlike Twitch's codec-first ruling (R2/D-Y2). The probe ranks with this
+// same function and reports dimensions only, so a codec moving at one size
+// cannot read as a quality change.
+//
+// For audio streams (isVideo=false), qualityPref, maxRes, prefer60fps and
+// preferHDR are ignored: the track, then the audioQuality ladder, channels and
+// codec (youtube.AudioRank, DashStreamInfo.Audio), then the highest bandwidth.
+func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, isVideo bool, qualityPref string, prefer60fps, preferHDR bool) *DashStreamInfo {
 	// Manual itag selection — bypasses all other logic
 	if preferItag > 0 {
 		for i := range streams {
@@ -90,7 +105,7 @@ func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, 
 	if isVideo && qualityPref != "" && qualityPref != "best" {
 		targetHeight, targetFPS := ParseQualityPreference(qualityPref)
 		if targetHeight > 0 {
-			prefer := fpsPreference(targetFPS, prefer60fps)
+			prefer := rankRule{fps: fpsPreference(targetFPS, prefer60fps), preferHDR: preferHDR}
 			if match := selectByHeightPref(streams, candidates, targetHeight, prefer); match != nil {
 				return match
 			}
@@ -103,7 +118,7 @@ func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, 
 		}
 	}
 
-	// Default: highest bandwidth AT the chosen size (source/best). Restricting
+	// Default: the best-ranked stream AT the chosen size (source/best). Restricting
 	// to the chosen size is what makes "the largest rendition at or below the
 	// cap" true even when a smaller rendition happens to carry more bits.
 	atSize := candidates
@@ -122,7 +137,7 @@ func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, 
 	if !isVideo {
 		best := atSize[0]
 		for _, idx := range atSize[1:] {
-			if streams[idx].Bandwidth > streams[best].Bandwidth {
+			if c := youtube.CompareAudioRank(streams[idx].Audio, streams[best].Audio); c > 0 || c == 0 && streams[idx].Bandwidth > streams[best].Bandwidth {
 				best = idx
 			}
 		}
@@ -132,7 +147,7 @@ func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, 
 	for i, idx := range atSize {
 		filtered[i] = streams[idx]
 	}
-	return &streams[atSize[rankByFPSThenBandwidth(filtered, dashFieldAccessor, fpsPreference(0, prefer60fps))]]
+	return &streams[atSize[rankRenditions(filtered, dashFieldAccessor, rankRule{fps: fpsPreference(0, prefer60fps), preferHDR: preferHDR})]]
 }
 
 // fpsPreference is the frame-rate test a rendition is ranked by among those of
@@ -152,37 +167,67 @@ func fpsPreference(targetFPS int, prefer60fps bool) func(fps int) bool {
 	}
 }
 
-// rankByFPSThenBandwidth returns the index of the best item: the highest
-// bandwidth among those whose frame rate prefer accepts, or among all of them
-// when it accepts none. items must not be empty.
-func rankByFPSThenBandwidth[T any](items []T, accessor func(T) (size, fps, bandwidth int), prefer func(int) bool) int {
-	best, bestPreferred := -1, false
-	var bestBw int
-	for i, item := range items {
-		_, f, bw := accessor(item)
-		preferred := prefer(f)
-		switch {
-		case best < 0, preferred && !bestPreferred:
-		case preferred == bestPreferred && bw > bestBw:
-		default:
-			continue
+// renditionFields is what the live and HLS selectors rank a rendition by
+// within its size: its frame rate, the shared rank (youtube.VideoRank), a
+// track score (an HLS variant's audio language, youtube.LanguageTrackScore;
+// 0 for a DASH stream, whose audio is a stream of its own) and its bandwidth.
+// size is the frame's shorter edge, the cap's measure.
+type renditionFields struct {
+	size, fps int
+	rank      youtube.VideoRank
+	track     int
+	bandwidth int
+}
+
+// rankRule is how a selection ranks the renditions of one size: the frame
+// rate test (fpsPreference) and downloader.prefer_hdr.
+type rankRule struct {
+	fps       func(fps int) bool
+	preferHDR bool
+}
+
+// compareRenditions orders two renditions of one size: the frame rate the
+// rule accepts, then the shared rank, then the track, then bandwidth.
+// Positive when a ranks above b.
+func compareRenditions(a, b renditionFields, rule rankRule) int {
+	if ap, bp := rule.fps(a.fps), rule.fps(b.fps); ap != bp {
+		if ap {
+			return 1
 		}
-		best, bestPreferred, bestBw = i, preferred, bw
+		return -1
+	}
+	if c := youtube.CompareVideoRank(a.rank, b.rank, rule.preferHDR); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(a.track, b.track); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.bandwidth, b.bandwidth)
+}
+
+// rankRenditions returns the index of the best item by compareRenditions —
+// the first of equals. items must not be empty.
+func rankRenditions[T any](items []T, accessor func(T) renditionFields, rule rankRule) int {
+	best := 0
+	for i := 1; i < len(items); i++ {
+		if compareRenditions(accessor(items[i]), accessor(items[best]), rule) > 0 {
+			best = i
+		}
 	}
 	return best
 }
 
 // selectAtHeightIdx returns the index into items of the best entry at
-// targetHeight — ranked by rankByFPSThenBandwidth under prefer — or -1 when no
-// entry matches the target height. Accessor extracts (size, fps, bandwidth)
-// from each item, size being the frame's shorter edge.
+// targetHeight — ranked by rankRenditions under prefer — or -1 when no
+// entry matches the target height. Accessor extracts each item's
+// renditionFields, size being the frame's shorter edge.
 //
 // Shared between DASH and HLS variant selection — the algorithm is identical
 // modulo the underlying stream type (audit reports/worker.md F35).
-func selectAtHeightIdx[T any](items []T, accessor func(T) (size, fps, bandwidth int), targetHeight int, prefer func(int) bool) int {
+func selectAtHeightIdx[T any](items []T, accessor func(T) renditionFields, targetHeight int, prefer rankRule) int {
 	var at []int
 	for i, item := range items {
-		if h, _, _ := accessor(item); h == targetHeight {
+		if accessor(item).size == targetHeight {
 			at = append(at, i)
 		}
 	}
@@ -193,7 +238,7 @@ func selectAtHeightIdx[T any](items []T, accessor func(T) (size, fps, bandwidth 
 	for i, idx := range at {
 		sub[i] = items[idx]
 	}
-	return at[rankByFPSThenBandwidth(sub, accessor, prefer)]
+	return at[rankRenditions(sub, accessor, prefer)]
 }
 
 // selectNextLowerIdx returns the index into items of the entry a preference
@@ -208,10 +253,10 @@ func selectAtHeightIdx[T any](items []T, accessor func(T) (size, fps, bandwidth 
 // land on a 30 fps rendition that out-bit the 60 beside it. Twitch's descent
 // (selectNextLowerVariant) has applied its size's ranking, fps suffix
 // included, since D-Y2.
-func selectNextLowerIdx[T any](items []T, accessor func(T) (size, fps, bandwidth int), targetHeight int, prefer func(int) bool) int {
+func selectNextLowerIdx[T any](items []T, accessor func(T) renditionFields, targetHeight int, prefer rankRule) int {
 	lower := 0
 	for _, item := range items {
-		if h, _, _ := accessor(item); h < targetHeight && h > lower {
+		if h := accessor(item).size; h < targetHeight && h > lower {
 			lower = h
 		}
 	}
@@ -225,13 +270,18 @@ func selectNextLowerIdx[T any](items []T, accessor func(T) (size, fps, bandwidth
 // own measure (ruling R1): a preference compared against the raw Height sent a
 // portrait stream's "1080p" (1080x1920) down the next-lower-height descent to
 // its 480x854 rendition.
-func dashFieldAccessor(s DashStreamInfo) (int, int, int) {
-	return utils.CapDimension(s.Width, s.Height), s.FPS, s.Bandwidth
+func dashFieldAccessor(s DashStreamInfo) renditionFields {
+	return renditionFields{
+		size:      utils.CapDimension(s.Width, s.Height),
+		fps:       s.FPS,
+		rank:      youtube.VideoRankOf(s.Codecs, s.Premium),
+		bandwidth: s.Bandwidth,
+	}
 }
 
 // selectByHeightPref finds a DASH stream matching the target height, ranked by
-// frame rate (prefer) and then bandwidth.
-func selectByHeightPref(streams []DashStreamInfo, candidates []int, targetHeight int, prefer func(int) bool) *DashStreamInfo {
+// frame rate (prefer), the shared rank and then bandwidth.
+func selectByHeightPref(streams []DashStreamInfo, candidates []int, targetHeight int, prefer rankRule) *DashStreamInfo {
 	// Build a filtered view so the generic helper operates on exactly the
 	// caller's candidate set; map the returned index back to the original.
 	filtered := make([]DashStreamInfo, len(candidates))
@@ -246,9 +296,9 @@ func selectByHeightPref(streams []DashStreamInfo, candidates []int, targetHeight
 }
 
 // selectNextLowerHeight finds the DASH stream a preference picks at the next
-// lower size below the target height, ranked by frame rate (prefer) and then
-// bandwidth. Returns nil if no lower size exists.
-func selectNextLowerHeight(streams []DashStreamInfo, candidates []int, targetHeight int, prefer func(int) bool) *DashStreamInfo {
+// lower size below the target height, ranked by the rule prefer (frame rate,
+// the shared rank) and then bandwidth. Returns nil if no lower size exists.
+func selectNextLowerHeight(streams []DashStreamInfo, candidates []int, targetHeight int, prefer rankRule) *DashStreamInfo {
 	filtered := make([]DashStreamInfo, len(candidates))
 	for i, idx := range candidates {
 		filtered[i] = streams[idx]
@@ -286,4 +336,22 @@ type DashStreamInfo struct {
 	Bandwidth      int
 	BaseURL        string
 	Initialization string // Init segment URL
+
+	// Codecs is the stream's codecs list: an MPD Representation's codecs
+	// attribute (engine.DashStream.Codecs), or the codecs="…" of a format's
+	// mimeType on the manifest-free paths. The shared rank reads its video
+	// codec and dynamic range from it (youtube.VideoRankOf). Empty ranks as
+	// an unknown SDR codec, so a stream built without one ranks by bandwidth
+	// as every stream once did.
+	Codecs string
+	// Lang is an MPD audio Representation's lang (or its AdaptationSet's);
+	// "" elsewhere. Read only to fill Audio's track score at conversion.
+	Lang string
+	// Premium is the format's own Premium label (youtube.Format.IsPremium),
+	// on the manifest-free paths; an MPD carries no qualityLabel.
+	Premium bool
+	// Audio is an audio stream's rank ahead of bandwidth — track, quality,
+	// channels, codec — filled at conversion (formatToDashStreamInfo,
+	// manifestStreamInfos). Zero for a video stream.
+	Audio youtube.AudioRank
 }
