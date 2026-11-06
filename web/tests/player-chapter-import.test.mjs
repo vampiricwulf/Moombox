@@ -244,25 +244,48 @@ test("the open dialog keeps the player's shortcuts off", { skip }, async () => {
   assert.equal(h.video.paused, false, "closed, the shortcut works again");
 });
 
-// Owner decision CJ-3: a late-joined live capture's join point, negated, is
-// the offset the field opens with, and the note under it says where it came
-// from; a job with no known join point opens at an empty field and no note.
-// Mutants: the default offset not filled (empty field); the note left hidden;
-// the note kept from the previous job's dialog.
+// Owner decisions CJ-3, CK-2: a late-joined live capture's join point,
+// negated, is the offset the field opens with — the server's signed clock,
+// "-1:23:45", not the seconds — and the note under it says where it came
+// from; a job whose join point is unknown opens at an empty field and a note
+// saying so.
+// Mutants: the default offset not filled (empty field); the field filled from
+// defaultOffsetSeconds ("-5025"); the note left hidden; the note kept from the
+// previous job's dialog; "Pre-filled: " in front of the unknown note.
 test("the offset opens pre-filled with the join point, and says so", { skip }, async () => {
   const h = await openDialog({
-    preview: () => view({ error: "No timestamps found", defaultOffsetSeconds: -5025, defaultOffsetNote: "joined 1:23:45 in" }),
+    preview: () => view({ error: "No timestamps found", defaultOffsetSeconds: -5025,
+      defaultOffsetText: "-1:23:45", defaultOffsetNote: "joined 1:23:45 in" }),
   });
-  assert.equal(h.el("chapter-import-offset").value, "-5025");
+  assert.equal(h.el("chapter-import-offset").value, "-1:23:45");
   const note = h.el("chapter-import-offset-source");
   assert.equal(note.hidden, false);
   assert.equal(note.textContent, "Pre-filled: joined 1:23:45 in");
 
-  // Reopened for a job whose join point is unknown: nothing pre-filled.
-  h.http.on("POST /api/jobs/:id/chapters/preview", () => view({ error: "No timestamps found" }));
+  // Reopened for a job whose join point is unknown: nothing pre-filled, and
+  // the note says why.
+  h.http.on("POST /api/jobs/:id/chapters/preview", () => view({ error: "No timestamps found",
+    defaultOffsetText: "", defaultOffsetNote: "start unknown — enter it by hand" }));
   h.el("chapter-import-cancel").click();
   h.el("player-chapters-import").click();
   await h.flush();
   assert.equal(h.el("chapter-import-offset").value, "");
-  assert.equal(note.hidden, true);
+  assert.equal(note.hidden, false);
+  assert.equal(note.textContent, "start unknown — enter it by hand");
 });
+
+// Owner decision CK-2: the note is there for a zero offset too — a capture
+// recorded from the start and a VOD open at "0:00", saying so.
+// Mutants: the note shown only for a non-zero offset (hidden here); the
+// field left empty for a known zero.
+for (const [label, noteText] of [["a from-start capture", "recorded from the start"], ["a VOD", "VOD"]]) {
+  test(`${label} opens at 0:00 and says where it came from`, { skip }, async () => {
+    const h = await openDialog({
+      preview: () => view({ error: "No timestamps found", defaultOffsetText: "0:00", defaultOffsetNote: noteText }),
+    });
+    assert.equal(h.el("chapter-import-offset").value, "0:00");
+    const note = h.el("chapter-import-offset-source");
+    assert.equal(note.hidden, false);
+    assert.equal(note.textContent, `Pre-filled: ${noteText}`);
+  });
+}

@@ -436,11 +436,14 @@ func TestChapterImportFirstSaveKeepsTheArchivesChapters(t *testing.T) {
 // TestChapterImportPrefillsTheJoinPoint is owner decision CJ-3 through the
 // preview route: a live YouTube capture that joined 1:23:45 into the
 // broadcast (join_offset_seconds on its row) opens the import with the
-// offset -5025 — a viewer's "1:30:00" lands 6:15 into the archive — and the
-// note saying where it came from, which both UIs show beside the field.
+// offset -5025, pre-filled as "-1:23:45" (owner decision CK-2) — a viewer's
+// "1:30:00" lands 6:15 into the archive — and the note saying where it came
+// from, which both UIs show beside the field; a row whose start is unknown
+// says that instead.
 //
 // Mutants: defaultChapterOffset ignoring the row (0, no note); the join
-// point not negated (+5025); the note left out of the view.
+// point not negated (+5025); the note or the clock text left out of the
+// view.
 func TestChapterImportPrefillsTheJoinPoint(t *testing.T) {
 	ffmpegPath := requireFFmpeg(t)
 	f := newChapterImportFixture(t, &fakeChapterImporter{})
@@ -452,36 +455,101 @@ func TestChapterImportPrefillsTheJoinPoint(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("preview: %d %s", code, body)
 	}
-	if v.DefaultOffsetSeconds != -5025 || v.DefaultOffsetNote != "joined 1:23:45 in" {
-		t.Errorf("default offset %v, note %q; want -5025, %q", v.DefaultOffsetSeconds, v.DefaultOffsetNote, "joined 1:23:45 in")
+	if v.DefaultOffsetSeconds != -5025 || v.DefaultOffsetText != "-1:23:45" || v.DefaultOffsetNote != "joined 1:23:45 in" {
+		t.Errorf("default offset %v, text %q, note %q; want -5025, %q, %q", v.DefaultOffsetSeconds, v.DefaultOffsetText, v.DefaultOffsetNote, "-1:23:45", "joined 1:23:45 in")
+	}
+	// A row whose start is unknown still says so (owner decision CK-2),
+	// and leaves the field empty.
+	makeChapteredMP4(t, ffmpegPath, filepath.Join(f.outputDir, "unknown.mp4"), 6, nil)
+	f.addJob(t, "yt_unknown", func(j *database.Job) { j.Filename = "unknown.mp4" })
+	code, v, body = f.postImport(t, "/api/jobs/yt_unknown/chapters/preview", map[string]any{"text": ""})
+	if code != http.StatusOK {
+		t.Fatalf("preview: %d %s", code, body)
+	}
+	if v.DefaultOffsetText != "" || v.DefaultOffsetNote != "start unknown — enter it by hand" {
+		t.Errorf("unknown start: text %q, note %q; want none and the unknown note", v.DefaultOffsetText, v.DefaultOffsetNote)
+	}
+}
+
+// TestChapterImportSplitArchivePrefillsPartOnesJoinPoint is owner decision
+// CK-3 through the preview route: a split live YouTube capture's row now
+// carries part 1's join point, and the import — which lays the parts end to
+// end from part 1's start — opens at it, negated and as a clock, a viewer's
+// "1:30:00" landing 1:30:00 minus the join into the parts' timeline. A
+// split archive's fitted list is the comment shifted by that one offset:
+// gaps between the parts are not compensated.
+//
+// The worker's half — the split finalize storing the join point — is
+// TestSplitFinalizeRecordsPartOnesJoinOffset (internal/worker).
+//
+// Mutants: defaultChapterOffset ignoring the row (no pre-fill, the unknown
+// note); the offset not applied to the list (Song lands at 1:30:00).
+func TestChapterImportSplitArchivePrefillsPartOnesJoinPoint(t *testing.T) {
+	f := newChapterImportFixture(t, &fakeChapterImporter{})
+	p1 := filepath.Join(f.outputDir, "Live - part1.mp4")
+	p2 := filepath.Join(f.outputDir, "Live - part2.mp4")
+	for _, p := range []string{p1, p2} {
+		if err := os.WriteFile(p, []byte("recorded "+p), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.cache.probe = func(context.Context, string, string) ([]Chapter, error) { return nil, nil }
+	f.addJob(t, "yt_split_late", func(j *database.Job) {
+		j.OutputFile = p1
+		j.Segments = []database.Segment{
+			{SegmentIndex: 0, Filename: filepath.Base(p1), FilePath: p1, DurationSeconds: 3600},
+			{SegmentIndex: 1, Filename: filepath.Base(p2), FilePath: p2, DurationSeconds: 3600},
+		}
+	})
+	f.db.UpdateJobFields("yt_split_late", map[string]any{"join_offset_seconds": 1800.0})
+
+	code, v, body := f.postImport(t, "/api/jobs/yt_split_late/chapters/preview", map[string]any{"text": ""})
+	if code != http.StatusOK {
+		t.Fatalf("preview: %d %s", code, body)
+	}
+	if !v.Split || v.DefaultOffsetText != "-30:00" || v.DefaultOffsetNote != "joined 30:00 in" {
+		t.Fatalf("split %v, text %q, note %q; want a split archive pre-filled -30:00, joined 30:00 in", v.Split, v.DefaultOffsetText, v.DefaultOffsetNote)
+	}
+	code, v, body = f.postImport(t, "/api/jobs/yt_split_late/chapters/preview",
+		map[string]any{"text": "0:00 Start\n1:30:00 Song", "offsetSeconds": v.DefaultOffsetText})
+	if code != http.StatusOK || v.Error != "" {
+		t.Fatalf("preview: %d %s", code, body)
+	}
+	if len(v.Chapters) == 0 || v.Chapters[len(v.Chapters)-1].Title != "Song" || v.Chapters[len(v.Chapters)-1].Start != 3600 {
+		t.Errorf("chapters = %+v, want Song at 1:00:00 of the parts' timeline", v.Chapters)
 	}
 }
 
 // TestDefaultChapterOffset pins every row shape CI-5's pre-fill reads (owner
-// decision CJ-3): a late join is its join point negated, with a note; a
-// capture from the start, a VOD, and a row whose join point is unknown are
-// 0 with none — unknown stays 0 and editable, as before.
+// decisions CJ-3, CK-2): a late join is its join point negated, pre-filled
+// as a signed clock (with milliseconds when it has a fraction); a capture
+// from the start and a VOD are 0, pre-filled "0:00"; a row whose join point
+// is unknown is 0 with the field left empty. Each says where its value came
+// from — the note is never empty.
 //
-// Mutants: the VOD guard dropped (the VOD row pre-fills -60); a from-start
-// row given a note ("joined 0:00 in").
+// Mutants: the VOD guard dropped (the VOD row pre-fills -60); the pre-fill
+// written as plain seconds ("-5025"); the fraction dropped ("-3:28"); a
+// from-start row given the late-join note ("joined 0:00 in"); the unknown
+// row pre-filled ("0:00"); any note left empty.
 func TestDefaultChapterOffset(t *testing.T) {
 	f64 := func(v float64) *float64 { return &v }
 	cases := []struct {
 		name     string
 		job      *database.Job
 		want     float64
+		wantText string
 		wantNote string
 	}{
-		{"late join", &database.Job{JoinOffsetSeconds: f64(208.0334)}, -208.033, "joined 3:28 in"},
-		{"hours in", &database.Job{JoinOffsetSeconds: f64(5025)}, -5025, "joined 1:23:45 in"},
-		{"from the start", &database.Job{JoinOffsetSeconds: f64(0)}, 0, ""},
-		{"unknown", &database.Job{}, 0, ""},
-		{"VOD", &database.Job{IsVod: true, JoinOffsetSeconds: f64(60)}, 0, ""},
+		{"late join", &database.Job{JoinOffsetSeconds: f64(208.0334)}, -208.033, "-3:28.033", "joined 3:28 in"},
+		{"hours in", &database.Job{JoinOffsetSeconds: f64(5025)}, -5025, "-1:23:45", "joined 1:23:45 in"},
+		{"from the start", &database.Job{JoinOffsetSeconds: f64(0)}, 0, "0:00", "recorded from the start"},
+		{"unknown", &database.Job{}, 0, "", "start unknown — enter it by hand"},
+		{"VOD", &database.Job{IsVod: true, JoinOffsetSeconds: f64(60)}, 0, "0:00", "VOD"},
 	}
 	for _, c := range cases {
-		got, note := defaultChapterOffset(c.job)
-		if got != c.want || note != c.wantNote {
-			t.Errorf("%s: %v %q, want %v %q", c.name, got, note, c.want, c.wantNote)
+		got, text, note := defaultChapterOffset(c.job)
+		if got != c.want || text != c.wantText || note != c.wantNote {
+			t.Errorf("%s: %v %q %q, want %v %q %q", c.name, got, text, note, c.want, c.wantText, c.wantNote)
 		}
 	}
 }

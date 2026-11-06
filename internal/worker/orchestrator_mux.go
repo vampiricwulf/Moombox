@@ -1043,7 +1043,7 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	if segments, err := o.db.GetSegments(jobCtx.Job.ID); err != nil {
 		o.logger.Warn("failed to check segments, falling back to single-file mux", "err", err, "jobID", jobCtx.Job.ID)
 	} else if len(segments) > 0 {
-		return o.finalizeMultiSegmentJob(ctx, jobCtx, segments)
+		return o.finalizeMultiSegmentJob(ctx, jobCtx, segments, result)
 	}
 
 	// Resolve output path — template may contain subdirectory (e.g. "${channel}/...")
@@ -1103,7 +1103,8 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// The archive's chapters (owner decision D23): this single-file shape is
 	// the one that carries them.
 	// A re-finalize of the same recording keeps a chapter import (owner
-	// decision CJ-2): read only from beside the archive the row names (the
+	// decisions CJ-2, CK-1: the Mux action's, a Resume's, a retry's): read
+	// only from beside the archive the row names (the
 	// template may now resolve elsewhere; write moves it to the new name).
 	// Never from beside the name this finalize writes when the row names
 	// none: a row with no output_file never had an archive, so no import of
@@ -1242,7 +1243,10 @@ func (o *DownloadOrchestrator) keepIncompleteTailProgress(jobID string, updates 
 
 // finalizeMultiSegmentJob handles the finalization path for jobs with quality-split segments.
 // Individual segment .mp4 files are already muxed; this method copies assets and updates the job.
-func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobCtx *JobContext, segments []database.Segment) error {
+// result is the download result the finalize was handed (muxAndFinalize's;
+// nil from the Mux action's staging, which has none): only its advertised
+// segment duration is read, for part 1's join point (splitJoinOffsetSeconds).
+func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobCtx *JobContext, segments []database.Segment, result *DownloadResult) error {
 	// The plain-name rename, the merge temporaries and the assets are on no
 	// row until the writes below land (see outputClaims): claim the job's
 	// template stem and every part's base for the whole finalize.
@@ -1376,6 +1380,18 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 		updates["chat_file"] = segments[0].ChatFile
 		updates["chat_filename"] = filepath.Join(filepath.Dir(relBase), filepath.Base(segments[0].ChatFile))
 		updates["chat_status"] = chatFileStatus(jobCtx)
+	}
+
+	// Where in the broadcast part 1 — the split archive's timeline, which
+	// the chapter import lays the parts end to end on — began (owner
+	// decision CK-3), by the single-file finalize's rules; NULL when it is
+	// not known, as there.
+	if jobCtx.Job.Platform == "youtube" && !jobCtx.Job.IsVod {
+		if join, ok := o.splitJoinOffsetSeconds(ctx, jobCtx, segments, result); ok {
+			updates["join_offset_seconds"] = join
+		} else {
+			updates["join_offset_seconds"] = nil
+		}
 	}
 
 	// Copy assets
@@ -1942,7 +1958,7 @@ func (o *DownloadOrchestrator) muxFromStaging(ctx context.Context, jobCtx *JobCo
 			// so it needs its own announcement, after the Muxing write
 			// above. A manual mux is a mux.
 			o.sendMuxingStarting(jobCtx)
-			return o.finalizeMultiSegmentJob(ctx, jobCtx, segments)
+			return o.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil)
 		}
 		return fmt.Errorf("no segment files found in staging directory")
 	}

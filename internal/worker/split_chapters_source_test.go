@@ -63,7 +63,7 @@ func TestSplitLiveCaptureGetsItsArchiveVodChapters(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // no network for copyAssets' thumbnail fallback
-	if err := o.finalizeMultiSegmentJob(ctx, jobCtx, segments); err != nil {
+	if err := o.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil); err != nil {
 		t.Fatalf("finalizeMultiSegmentJob: %v", err)
 	}
 	got, err := utils.ReadChaptersSidecar(filepath.Join(root, "Show"+utils.ChaptersSidecarSuffix))

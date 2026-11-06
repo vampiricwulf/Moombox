@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"fmt"
 	"math"
 	"regexp"
 	"slices"
@@ -304,9 +305,22 @@ func FitImportedChapters(parsed []Chapter, offsetMs, durationMs int64) ([]Chapte
 // off: a decimal number.
 var chapterOffsetNumberRe = regexp.MustCompile(`^(?:\d+(?:\.\d*)?|\.\d+)$`)
 
+// chapterOffsetFractionRe is the fraction of a second a clock offset may
+// end in, after its ".": one to three digits, the millisecond precision the
+// offset is kept at.
+var chapterOffsetFractionRe = regexp.MustCompile(`^\d{1,3}$`)
+
+// chapterOffsetLongClockRe is an offset clock past the comment shapes' 99
+// hours: H:MM:SS with three or more hour digits. FormatChapterOffset writes
+// one for a join point that deep into a 24/7 or multi-day broadcast, and the
+// field must read back what it was pre-filled with; a pasted comment's
+// timestamps keep the owner's shapes (chapterClockRe).
+var chapterOffsetLongClockRe = regexp.MustCompile(`^(\d{3,}):([0-5]\d):([0-5]\d)$`)
+
 // ParseChapterOffset reads the import's offset field (owner decision CI-5):
-// seconds ("-90", "12.5") or a clock with an optional sign ("-1:02:03",
-// "+1:30", full-width digits too), as milliseconds. Empty is 0.
+// seconds ("-90", "12.5") or a clock with an optional sign and fraction
+// ("-1:02:03", "+1:30", "-1:02:03.033", full-width digits too), as
+// milliseconds. Empty is 0.
 // ErrBadChapterOffset for anything else.
 func ParseChapterOffset(s string) (int64, error) {
 	s = strings.TrimSpace(s)
@@ -332,11 +346,28 @@ func ParseChapterOffset(s string) (int64, error) {
 	}
 	body = folded.String()
 	if strings.Contains(body, ":") {
-		ms, ok := parseChapterClock(body)
+		// A clock may carry a fraction of a second ("1:23:45.033"): the
+		// pre-filled offset is written that way when the join point has one
+		// (FormatChapterOffset, owner decision CK-2), so the field must read
+		// back what it was given. Only here: a pasted comment's timestamps
+		// keep the owner's whole-second shapes (parseChapterClock).
+		clock, frac, hasFrac := strings.Cut(body, ".")
+		fracMs := int64(0)
+		if hasFrac {
+			if !chapterOffsetFractionRe.MatchString(frac) {
+				return 0, ErrBadChapterOffset
+			}
+			f, _ := strconv.ParseFloat("0."+frac, 64)
+			fracMs = int64(math.Round(f * 1000))
+		}
+		ms, ok := parseChapterClock(clock)
+		if !ok {
+			ms, ok = parseLongOffsetClock(clock)
+		}
 		if !ok {
 			return 0, ErrBadChapterOffset
 		}
-		return sign * ms, nil
+		return sign * (ms + fracMs), nil
 	}
 	if !chapterOffsetNumberRe.MatchString(body) {
 		return 0, ErrBadChapterOffset
@@ -346,4 +377,46 @@ func ParseChapterOffset(s string) (int64, error) {
 		return 0, ErrBadChapterOffset
 	}
 	return sign * int64(math.Round(sec*1000)), nil
+}
+
+// parseLongOffsetClock reads an offset clock of 100 hours or more
+// (chapterOffsetLongClockRe) as milliseconds, bounded as a seconds offset
+// is (1e9 s); ok is false for anything else.
+func parseLongOffsetClock(clock string) (int64, bool) {
+	m := chapterOffsetLongClockRe.FindStringSubmatch(clock)
+	if m == nil {
+		return 0, false
+	}
+	h, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil || h > int64(1e9)/3600 {
+		return 0, false
+	}
+	mins, _ := strconv.ParseInt(m[2], 10, 64)
+	sec, _ := strconv.ParseInt(m[3], 10, 64)
+	return ((h*60+mins)*60 + sec) * 1000, true
+}
+
+// FormatChapterOffset is ms as the offset field shows it pre-filled (owner
+// decision CK-2): a signed clock, H:MM:SS from an hour up and M:SS under
+// one — the chapter tables' own shapes — with ".mmm" when the value is not
+// a whole second ("-1:23:45", "-3:28.033", "0:00"). ParseChapterOffset
+// reads every string it returns back to ms, a clock of 100 hours or more
+// included (parseLongOffsetClock) — a late join that deep into a 24/7 or
+// multi-day broadcast.
+func FormatChapterOffset(ms int64) string {
+	sign := ""
+	if ms < 0 {
+		sign, ms = "-", -ms
+	}
+	s := ms / 1000
+	var clock string
+	if s >= 3600 {
+		clock = fmt.Sprintf("%d:%02d:%02d", s/3600, s/60%60, s%60)
+	} else {
+		clock = fmt.Sprintf("%d:%02d", s/60, s%60)
+	}
+	if frac := ms % 1000; frac != 0 {
+		clock += fmt.Sprintf(".%03d", frac)
+	}
+	return sign + clock
 }

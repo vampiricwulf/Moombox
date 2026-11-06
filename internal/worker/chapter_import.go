@@ -281,18 +281,19 @@ func verifyArchiveRemux(orig, out *archiveShape, wantChapters int) error {
 // and Restore would put the old file's original onto it. The new archive
 // carries the chapters its own finalize chose.
 //
-// Which finalizes drop it (owner decision CJ-2): a Reinitialize's
-// re-download, a new recording; and every other finalize of the download
-// pipeline, as before CJ-2 — an archive name can be reused (a deleted row's
-// files kept, a template that resolves alike), and a list beside it cannot
-// be told from the job's own there, so only the verbs that are known to
-// re-finalize the same staging keep one. A complete VOD that superseded the
-// parts is a new recording too, and drops the parts' list on its own
-// (supersedePartsWithVod). A re-finalize of the recording
-// the archive already holds — MuxJob's (JobContext.Refinalize: the Mux
-// action over an imported Error or Cancelled row, the automatic mux of an
-// ended Twitch broadcast, a boot re-mux) and a Twitch gap-fill
-// (refitSplitArchiveChapters) — keeps the import instead (keptImportFor).
+// Which finalizes drop it (owner decisions CJ-2, CK-1): a Reinitialize's
+// re-download, a new recording, and a first download of a fresh row — an
+// archive name can be reused (a deleted row's files kept, a template that
+// resolves alike), and a list beside it cannot be told from the job's own
+// there. A complete VOD that superseded the parts is a new recording too,
+// and drops the parts' list on its own (supersedePartsWithVod). A
+// re-finalize of the recording the archive already holds — MuxJob's
+// (JobContext.Refinalize: the Mux action over an imported Error or
+// Cancelled row, the automatic mux of an ended Twitch broadcast, a boot
+// re-mux), a download run that continues it (a Resume, a retry:
+// runJobContext, continuesRecording) and a Twitch gap-fill
+// (refitSplitArchiveChapters) — keeps the import instead (keptImportFor),
+// read only from beside the archive the row names.
 // A split archive's list has its own lifecycle (removeSplitArchiveChapters,
 // writeSplitArchiveChapters). Best effort: a removal that fails is logged.
 func dropImportedArchiveChapters(outputFile string, lg logger) {
@@ -316,7 +317,8 @@ type keptImport struct {
 }
 
 // keptImportFor is the import a finalize keeps, nil for none: only a
-// re-finalize of the same recording (jobCtx.Refinalize) keeps one, read from
+// re-finalize of the same recording (jobCtx.Refinalize: MuxJob's, CJ-2, or
+// a Resume's or retry's, CK-1) keeps one, read from
 // the first of paths — the sidecars it could sit beside — that an import
 // wrote. A sidecar that cannot be read is no import to keep: the finalize
 // then writes its own chapters, as before CJ-2, and says so.

@@ -64,10 +64,18 @@ type ChapterImportView struct {
 	// decision CI-5): the capture's start in the video's own timeline,
 	// negated, where Moombox knows it. See defaultChapterOffset.
 	DefaultOffsetSeconds float64 `json:"defaultOffsetSeconds"`
-	// DefaultOffsetNote says where a non-zero DefaultOffsetSeconds came from
-	// ("joined 1:23:45 in", owner decision CJ-3); both UIs show it beside
-	// the field.
-	DefaultOffsetNote string  `json:"defaultOffsetNote,omitempty"`
+	// DefaultOffsetText is DefaultOffsetSeconds as the field shows it
+	// pre-filled, a signed clock ("-1:23:45", "-3:28.033"; owner decision
+	// CK-2), and "" when the start is unknown and the field is left empty
+	// for the operator. Both UIs pre-fill from it, so the clock is written
+	// in one place (utils.FormatChapterOffset).
+	DefaultOffsetText string `json:"defaultOffsetText"`
+	// DefaultOffsetNote says where the offset came from, always (owner
+	// decisions CJ-3, CK-2): "joined 1:23:45 in", "recorded from the
+	// start", "VOD", or "start unknown — enter it by hand". Both UIs show
+	// it under the field, after "Pre-filled: " when DefaultOffsetText is
+	// set.
+	DefaultOffsetNote string  `json:"defaultOffsetNote"`
 	DurationSeconds   float64 `json:"durationSeconds"`
 	// Split: the archive is in parts, so the list is saved beside them only
 	// (owner decision CI-1: recorded parts are never rewritten).
@@ -185,30 +193,46 @@ func (s *ChapterService) HasOriginal(jobID string) bool {
 	return err == nil && imported
 }
 
+// The notes defaultChapterOffset gives beside the pre-filled offset (owner
+// decision CK-2) when it is not a late join's "joined H:MM:SS in".
+const (
+	offsetNoteFromStart = "recorded from the start"
+	offsetNoteVod       = "VOD"
+	offsetNoteUnknown   = "start unknown — enter it by hand"
+)
+
 // defaultChapterOffset is the offset the import's field starts at (owner
 // decision CI-5: the capture's known start in the video's timeline, negated,
-// and 0 otherwise), with the note both UIs show beside it to say where it
-// came from ("joined 1:23:45 in", owner decision CJ-3; "" when there is
-// nothing to explain).
+// and 0 otherwise), the field's pre-filled text (a signed clock, owner
+// decision CK-2; "" when the start is unknown) and the note both UIs show
+// beside it to say where it came from — always one (CK-2):
 //
-//   - a VOD is the video's own timeline: 0;
+//   - a VOD is the video's own timeline: 0, "VOD";
 //   - a live YouTube capture's join point is on its row since CJ-3
-//     (join_offset_seconds, written by the single-file finalize from the
-//     staged recording): a capture recorded from sq=0 has 0, one that joined
+//     (join_offset_seconds, written by the finalize from the staged
+//     recording — a split archive's from part 1's since CK-3): a capture
+//     recorded from sq=0 has 0, "recorded from the start"; one that joined
 //     late its join point, so a viewer's "1:30:00" lands 1:30:00 minus the
-//     join into the archive; a row whose join point is unknown (NULL: a
-//     Twitch capture, a split archive, a row from before the column, a
-//     start never recorded) is 0, for the operator to set, as before;
+//     join into the archive, "joined 1:23:45 in";
+//   - a row whose join point is unknown (NULL: a Twitch capture, a row from
+//     before the column, a start never recorded) is 0 with the field left
+//     empty, "start unknown — enter it by hand", for the operator to set;
 //   - a trim's start would be negated too, and added to the join point when
 //     both apply — but a trim is a file of its own beside the archive
 //     (TrimService), never the archive the import rewrites, so no imported
 //     archive has a trim start, and that term is always 0.
-func defaultChapterOffset(job *database.Job) (seconds float64, note string) {
-	if job == nil || job.IsVod || job.JoinOffsetSeconds == nil || *job.JoinOffsetSeconds <= 0 {
-		return 0, ""
+func defaultChapterOffset(job *database.Job) (seconds float64, text, note string) {
+	switch {
+	case job != nil && job.IsVod:
+		return 0, utils.FormatChapterOffset(0), offsetNoteVod
+	case job == nil || job.JoinOffsetSeconds == nil:
+		return 0, "", offsetNoteUnknown
+	case *job.JoinOffsetSeconds <= 0:
+		return 0, utils.FormatChapterOffset(0), offsetNoteFromStart
 	}
-	join := math.Round(*job.JoinOffsetSeconds*1000) / 1000
-	return -join, "joined " + clockText(join) + " in"
+	joinMs := int64(math.Round(*job.JoinOffsetSeconds * 1000))
+	join := float64(joinMs) / 1000
+	return -join, utils.FormatChapterOffset(-joinMs), "joined " + clockText(join) + " in"
 }
 
 // clockText is a non-negative number of seconds as H:MM:SS, or M:SS under
@@ -255,10 +279,11 @@ func toChapters(list []utils.Chapter) []Chapter {
 // view starts a ChapterImportView for job: its chapters as the player shows
 // them now and whether an original is kept.
 func (s *ChapterService) view(ctx context.Context, job *database.Job, t *chapterTarget) *ChapterImportView {
-	defaultOffset, defaultNote := defaultChapterOffset(job)
+	defaultOffset, defaultText, defaultNote := defaultChapterOffset(job)
 	v := &ChapterImportView{
 		Current:              jobChapters(ctx, s.deps, s.cache, job),
 		DefaultOffsetSeconds: defaultOffset,
+		DefaultOffsetText:    defaultText,
 		DefaultOffsetNote:    defaultNote,
 		DurationSeconds:      float64(t.durationMs) / 1000,
 		Split:                t.split,

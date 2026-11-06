@@ -31,8 +31,13 @@ type ChapterImportView struct {
 	HasOriginal          bool
 	OffsetSeconds        float64
 	DefaultOffsetSeconds float64
-	// DefaultOffsetNote is where DefaultOffsetSeconds came from ("joined
-	// 1:23:45 in", owner decision CJ-3), shown under the offset field.
+	// DefaultOffsetText is the offset field's pre-filled text, a signed
+	// clock ("-1:23:45", owner decision CK-2); "" leaves the field empty
+	// (the start is unknown).
+	DefaultOffsetText string
+	// DefaultOffsetNote is where the offset came from ("joined 1:23:45
+	// in", "recorded from the start", "VOD", "start unknown — enter it by
+	// hand"; owner decisions CJ-3, CK-2), shown under the offset field.
 	DefaultOffsetNote string
 	Split             bool
 	Error             string
@@ -75,8 +80,13 @@ type ChapterImportDialogModel struct {
 	step          int
 	// seq numbers the edits; a preview answers for the edit it was asked
 	// for, and only the newest one is drawn.
-	seq        int
-	view       *ChapterImportView
+	seq  int
+	view *ChapterImportView
+	// prefill is set by Open and cleared by the first preview drawn after
+	// it, the only one whose offset fills the field (owner decision CK-2):
+	// a field the operator clears stays empty, as in the Web dialog, which
+	// fills it from its opening preview alone.
+	prefill    bool
 	previewErr string
 	saveErr    string
 	// saves numbers the saves this overlay started, so a save's result is
@@ -135,6 +145,7 @@ func (m *ChapterImportDialogModel) Open(job *database.Job) tea.Cmd {
 	m.offset.SetValue("")
 	m.focusOffset = false
 	m.offset.Blur()
+	m.prefill = true
 	m.seq++
 	seq := m.seq
 	return tea.Batch(m.text.Focus(), func() tea.Msg { return chapterPreviewTickMsg{Seq: seq} })
@@ -154,7 +165,8 @@ func (m *ChapterImportDialogModel) Request() (jobID, text, offset string) {
 }
 
 // SetPreview draws the answer to the preview asked for edit seq, if it is
-// still the newest. The opening preview's offset fills an empty field.
+// still the newest. The first one drawn after Open fills an empty offset
+// field with the pre-filled offset; no later one does (prefill).
 func (m *ChapterImportDialogModel) SetPreview(seq int, v ChapterImportView, err error) {
 	if !m.visible || seq != m.seq {
 		return
@@ -164,9 +176,25 @@ func (m *ChapterImportDialogModel) SetPreview(seq int, v ChapterImportView, err 
 		return
 	}
 	m.view, m.previewErr = &v, ""
-	if m.offset.Value() == "" && v.DefaultOffsetSeconds != 0 {
-		loadTextInput(&m.offset, fmt.Sprintf("%g", v.DefaultOffsetSeconds))
+	if m.prefill && m.offset.Value() == "" && v.DefaultOffsetText != "" {
+		loadTextInput(&m.offset, v.DefaultOffsetText)
 	}
+	m.prefill = false
+}
+
+// offsetSourceNote is the line under the offset field saying where its
+// value came from (owner decision CK-2: always, once a preview has answered):
+// "Pre-filled: joined 1:23:45 in" when the field was pre-filled, the bare
+// note ("start unknown — enter it by hand") when it was left empty. The Web
+// dialog's _offsetSource line, worded alike.
+func offsetSourceNote(v *ChapterImportView) string {
+	switch {
+	case v == nil || v.DefaultOffsetNote == "":
+		return ""
+	case v.DefaultOffsetText != "":
+		return "Pre-filled: " + v.DefaultOffsetNote
+	}
+	return v.DefaultOffsetNote
 }
 
 // previewOK reports whether the drawn preview is a list Save can write.
@@ -286,8 +314,8 @@ func (m *ChapterImportDialogModel) View() string {
 	b.WriteString("\n")
 	b.WriteString(m.offset.View())
 	b.WriteString("\n")
-	if m.view != nil && m.view.DefaultOffsetNote != "" {
-		b.WriteString(DimStyle.Render("Pre-filled: " + m.view.DefaultOffsetNote))
+	if note := offsetSourceNote(m.view); note != "" {
+		b.WriteString(DimStyle.Render(note))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")

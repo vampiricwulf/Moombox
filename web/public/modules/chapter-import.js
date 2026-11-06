@@ -70,13 +70,17 @@ export class ChapterImportDialog {
     if (dialog) dialog.open = true;
     const view = await this._preview({ initial: true });
     if (view && this._el("chapter-import-offset").value === "") {
-      const def = Number(view.defaultOffsetSeconds) || 0;
-      if (def !== 0) {
-        this._el("chapter-import-offset").value = String(def);
-        // Where the pre-filled value came from (owner decision CJ-3): the
-        // server's note, "joined 1:23:45 in" for a late-joined live capture.
-        this._offsetSource(view.defaultOffsetNote ? `Pre-filled: ${view.defaultOffsetNote}` : "");
-      }
+      // The server writes the pre-filled offset as a signed clock
+      // ("-1:23:45", owner decision CK-2; utils.FormatChapterOffset), so
+      // the page formats nothing; "" leaves the field empty — the start is
+      // unknown. The note under it always says where the value came from
+      // (CJ-3, CK-2): "Pre-filled: joined 1:23:45 in", "Pre-filled:
+      // recorded from the start", "Pre-filled: VOD", or the bare "start
+      // unknown — enter it by hand" — the TUI overlay's offsetSourceNote.
+      const text = view.defaultOffsetText || "";
+      if (text) this._el("chapter-import-offset").value = text;
+      const note = view.defaultOffsetNote || "";
+      this._offsetSource(note && text ? `Pre-filled: ${note}` : note);
     }
   }
 

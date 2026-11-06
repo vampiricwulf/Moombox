@@ -40,11 +40,22 @@ func ArchiveSidecarPath(outputFile, suffix string) string {
 // failure costs the player a chapter list and nothing else. A finalize that
 // finds no list removes one an earlier finalize wrote.
 //
-// A re-finalize of the same recording (jobCtx.Refinalize: MuxJob's) that
-// finds an import's list there keeps it instead (owner decision CJ-2): the
-// imported list and its original, refitted to the parts' timeline as it now
-// stands — their durations laid end to end, the timeline the import was
-// fitted to (chapterTargetFor) — and not replaced by the automatic list.
+// A re-finalize of the same recording (jobCtx.Refinalize: MuxJob's, owner
+// decision CJ-2, and a Resume's or a retry's, CK-1) that finds an import's
+// list keeps it instead: the imported list and its original, refitted to the
+// parts' timeline as it now stands — their durations laid end to end, the
+// timeline the import was fitted to (chapterTargetFor) — and not replaced by
+// the automatic list. The list is read where the import route saved it, as
+// the row stood when the run began: beside the first part the row had
+// recorded by then (JobContext.RecordedFirstPart; routes.splitSidecarPath
+// saves a split row's import there, whatever its output_file names — a
+// resumed single file whose split run stopped short still names the single
+// file), else beside the archive the row names (its output_file: a resumed
+// single file that now splits into parts under a name the template resolves
+// afresh keeps its import, moved beside the parts). A list found beside
+// parts at a name the row never held — parts this run recorded — is another
+// recording's, written over. A row with neither has had nothing imported,
+// and the list is read beside the parts as before.
 func (o *DownloadOrchestrator) writeSplitArchiveChapters(ctx context.Context, jobCtx *JobContext, segments []database.Segment) {
 	if len(segments) == 0 || jobCtx.Job == nil {
 		return
@@ -53,7 +64,14 @@ func (o *DownloadOrchestrator) writeSplitArchiveChapters(ctx context.Context, jo
 	if path == "" {
 		return
 	}
-	if kept := keptImportFor(jobCtx, o.logger, path); kept != nil {
+	from := path
+	switch {
+	case jobCtx.RecordedFirstPart != "":
+		from = ArchiveSidecarPath(jobCtx.RecordedFirstPart, utils.ChaptersSidecarSuffix)
+	case jobCtx.Job.OutputFile != "":
+		from = ArchiveSidecarPath(jobCtx.Job.OutputFile, utils.ChaptersSidecarSuffix)
+	}
+	if kept := keptImportFor(jobCtx, o.logger, from); kept != nil {
 		var totalMs int64
 		for _, s := range segments {
 			totalMs += int64(math.Round(s.DurationSeconds * 1000))

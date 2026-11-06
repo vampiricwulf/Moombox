@@ -21,13 +21,13 @@ func TestTUIChapterViewCarriesEveryField(t *testing.T) {
 	in := &routes.ChapterImportView{
 		Chapters:    []routes.Chapter{{Start: 1, End: 2, Title: "a"}},
 		Current:     []routes.Chapter{{Start: 0, End: 9, Title: "old"}},
-		HasOriginal: true, OffsetSeconds: -5, DefaultOffsetSeconds: 3, DefaultOffsetNote: "joined 0:03 in", DurationSeconds: 9,
+		HasOriginal: true, OffsetSeconds: -5, DefaultOffsetSeconds: 3, DefaultOffsetText: "-0:03", DefaultOffsetNote: "joined 0:03 in", DurationSeconds: 9,
 		Split: true, Error: "No timestamps found", Embedded: true, EmbedError: "e",
 	}
 	want := tui.ChapterImportView{
 		Chapters:    []tui.ChapterImportRow{{Start: 1, End: 2, Title: "a"}},
 		Current:     []tui.ChapterImportRow{{Start: 0, End: 9, Title: "old"}},
-		HasOriginal: true, OffsetSeconds: -5, DefaultOffsetSeconds: 3, DefaultOffsetNote: "joined 0:03 in",
+		HasOriginal: true, OffsetSeconds: -5, DefaultOffsetSeconds: 3, DefaultOffsetText: "-0:03", DefaultOffsetNote: "joined 0:03 in",
 		Split: true, Error: "No timestamps found", Embedded: true, EmbedError: "e",
 	}
 	if got := tuiChapterView(in); !reflect.DeepEqual(got, want) {
