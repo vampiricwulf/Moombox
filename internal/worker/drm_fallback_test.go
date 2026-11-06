@@ -23,6 +23,11 @@ import (
 var drmVideoMPD = strings.Replace(potTestMPD, `<AdaptationSet mimeType="video/mp4">`,
 	`<AdaptationSet mimeType="video/mp4"><ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc"/>`, 1)
 
+// drmAudioMPD is potTestMPD the other way round: its audio AdaptationSet
+// DRM-protected and its video in the clear.
+var drmAudioMPD = strings.Replace(potTestMPD, `<AdaptationSet mimeType="audio/mp4">`,
+	`<AdaptationSet mimeType="audio/mp4"><ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc"/>`, 1)
+
 // TestDashManifestAllDRMFallsToHls pins owner decision FE-1: a DASH-manifest
 // setup whose every Representation of a kind it needs is DRM-protected (here
 // the whole video set) records the extraction's HLS manifest instead, as
@@ -30,20 +35,27 @@ var drmVideoMPD = strings.Replace(potTestMPD, `<AdaptationSet mimeType="video/mp
 // manifest, or an HLS playlist refused as protected too, the job's error
 // leads with "DRM-protected; Moombox cannot record it". An HLS fallback that
 // fails for any other reason says so without that claim, and a manifest in
-// the clear never asks HLS.
+// the clear never asks HLS. A protected audio set beside clear video falls
+// to HLS as a protected video set does, and an audio_only job beside a
+// protected video set needs no video: it records the clear DASH audio and
+// never asks HLS.
 //
 // Mutants (each run): DownloadDash not reporting the lost kind as
 // ErrDRMProtected (every DRM row ends on "could not find suitable video
 // stream", HLS never asked); drmHlsFallback dropped from setupOrFallback (the
 // HLS row fails, HLS never asked); the no-HLS arm returning the bare error
 // (its message is missing); every HLS failure labelled DRM (the
-// transient-HLS row claims DRM).
+// transient-HLS row claims DRM); the audio check disabled (the protected-
+// audio row ends on "could not find suitable audio stream", HLS never
+// asked); the video check without its videoItag != -1 guard (the audio_only
+// row falls to HLS).
 func TestDashManifestAllDRMFallsToHls(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		mpd        string
 		hlsURL     string
 		hlsErr     error
+		audioOnly  bool
 		wantHls    bool
 		wantDash   bool
 		wantDRMMsg bool
@@ -55,6 +67,9 @@ func TestDashManifestAllDRMFallsToHls(t *testing.T) {
 		{name: "protected video, HLS fails otherwise", mpd: drmVideoMPD, hlsURL: "https://m.example/x.m3u8",
 			hlsErr: errors.New("fetch HLS manifest: connection reset"), wantHls: true},
 		{name: "in the clear: DASH records", mpd: potTestMPD, hlsURL: "https://m.example/x.m3u8", wantDash: true},
+		{name: "protected audio, HLS listed: HLS records", mpd: drmAudioMPD, hlsURL: "https://m.example/x.m3u8", wantHls: true},
+		{name: "audio_only beside protected video: DASH audio records", mpd: drmVideoMPD, hlsURL: "https://m.example/x.m3u8",
+			audioOnly: true, wantDash: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +79,9 @@ func TestDashManifestAllDRMFallsToHls(t *testing.T) {
 			hls := &fakeStrategy{kind: "hls", answers: []error{tc.hlsErr}}
 			swapHls(t, hls)
 			job, logs := vodPotJob(t)
+			if tc.audioOnly {
+				job.Job.QualityPreference = "audio_only"
+			}
 			info := &youtube.VideoInfo{
 				StreamStatus:       youtube.StreamLive,
 				DashManifestURL:    srv.URL + "/api/manifest/dash/id/abc",
@@ -82,6 +100,10 @@ func TestDashManifestAllDRMFallsToHls(t *testing.T) {
 				t.Errorf("err = %q, want it to lead with the DRM message", err)
 			}
 			switch {
+			case tc.wantDash && tc.audioOnly:
+				if err != nil || res == nil || res.IsHls || res.AudioDownloader == nil || res.VideoDownloader != nil {
+					t.Errorf("setup = %+v, %v; want the DASH audio alone", res, err)
+				}
 			case tc.wantDash:
 				if err != nil || res == nil || res.IsHls || res.VideoDownloader == nil {
 					t.Errorf("setup = %+v, %v; want the DASH capture", res, err)
@@ -226,13 +248,45 @@ func TestVodDRMEverywhereFailsWithTheMessage(t *testing.T) {
 	}
 	jobCtx := &JobContext{Job: job, DB: db, Config: &JobConfig{}, StagingDir: filepath.Join(t.TempDir(), "staging"), Logger: &captureLogger{}}
 	info := &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, DashManifestURL: "https://m.example/dash.mpd", HlsManifestURL: "https://m.example/x.m3u8"}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	err := w.orchestrator.ExecuteWithChat(ctx, jobCtx, info, true, nil)
+	// No deadline: the engine refuses the encrypted playlist on its first
+	// fetch, so nothing here waits on a clock.
+	err := w.orchestrator.ExecuteWithChat(context.Background(), jobCtx, info, true, nil)
 	if len(dash.seen) != 1 || hls.seen != 1 {
 		t.Fatalf("DASH ran %d, HLS %d times; want once each", len(dash.seen), hls.seen)
 	}
 	if !errors.Is(err, errDRMUnrecordable) || !errors.Is(err, engine.ErrDRMProtected) {
 		t.Errorf("ExecuteWithChat = %v, want the DRM-unrecordable error over the engine's refusal", err)
+	}
+}
+
+// TestDrmHlsFallbackAnswersOnlyADashSetup: the HLS fallback answers a DRM
+// refusal from the DASH-manifest setup alone. One from any other setup — the
+// HLS setup itself, the manifest-free path — is not handed HLS again (the
+// playlist that was just refused, set up a second time as its own fallback);
+// it ends on errDRMUnrecordable in setupOrFallback. Nor is a DASH failure
+// that is not DRM, or one whose extraction lists no HLS manifest.
+//
+// Mutant: the Kind clause dropped from drmHlsFallback (the HLS and
+// manifest-free rows are handed HLS).
+func TestDrmHlsFallbackAnswersOnlyADashSetup(t *testing.T) {
+	drm := fmt.Errorf("setup: %w", engine.ErrDRMProtected)
+	withHls := &youtube.VideoInfo{HlsManifestURL: "https://m.example/x.m3u8"}
+	for _, tc := range []struct {
+		name     string
+		strategy DownloadStrategy
+		info     *youtube.VideoInfo
+		err      error
+		want     bool
+	}{
+		{"DASH manifest, DRM, HLS listed", DashStrategy, withHls, drm, true},
+		{"HLS setup, DRM", HlsStrategy, withHls, drm, false},
+		{"manifest-free, DRM", ManifestlessDashStrategy, withHls, drm, false},
+		{"DASH manifest, not DRM", DashStrategy, withHls, errors.New("could not find suitable video stream"), false},
+		{"DASH manifest, DRM, no HLS", DashStrategy, &youtube.VideoInfo{}, drm, false},
+		{"DASH manifest, DRM, no extraction", DashStrategy, nil, drm, false},
+	} {
+		if got := drmHlsFallback(tc.strategy, tc.info, tc.err) != nil; got != tc.want {
+			t.Errorf("%s: fallback %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
