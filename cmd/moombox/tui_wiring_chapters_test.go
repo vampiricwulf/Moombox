@@ -11,7 +11,7 @@ import (
 )
 
 // TestTUIChapterViewCarriesEveryField pins the routes → tui conversion the
-// A H and A U callbacks answer through: every field of the view, both
+// A C and A U callbacks answer through: every field of the view, both
 // lists' rows, and the zero view for nil.
 //
 // Mutant: any field dropped from tuiChapterView (EmbedError, HasOriginal,

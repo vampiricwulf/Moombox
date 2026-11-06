@@ -37,7 +37,7 @@ type ChapterImportView struct {
 	EmbedError           string
 }
 
-// The steps of the A H overlay.
+// The steps of the A C overlay.
 const (
 	chapterImportStepEdit    = iota // pasting / editing, the preview following
 	chapterImportStepConfirm        // Ctrl+S pressed: y saves, anything else goes back
@@ -53,7 +53,7 @@ const chapterPreviewDebounce = 300 * time.Millisecond
 // newest edit's tick asks for a preview.
 type chapterPreviewTickMsg struct{ Seq int }
 
-// ChapterImportDialogModel is the A H overlay (owner decision CI-4): a
+// ChapterImportDialogModel is the A C overlay (owner decision CI-4): a
 // multi-line paste box (bubbles textarea) and the offset, with the parsed
 // preview below them — the answer of the same preview the Web dialog asks
 // for (App.OnPreviewChapters → routes.ChapterService.Preview), never a parse
@@ -360,7 +360,7 @@ func (m *ChapterImportDialogModel) renderRows(rows []ChapterImportRow, limit, wi
 	return b.String()
 }
 
-// chapterImportable is A H's and A U's job rule: a job that is not active and
+// chapterImportable is A C's and A U's job rule: a job that is not active and
 // has an archive (owner decision CI-1) — Finished, or an Error or Cancelled
 // row that names a file or has parts. routes.ChapterService re-checks it, and
 // that the file is there, before it writes anything.

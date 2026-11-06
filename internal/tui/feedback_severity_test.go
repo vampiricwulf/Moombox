@@ -29,11 +29,11 @@ func TestAdvisoryFeedbackStatesItsSeverity(t *testing.T) {
 		drive func(*App)
 		want  color.Color
 	}{
-		{"A C with nothing cancellable in the selection", func(a *App) {
+		{"A X with nothing cancellable in the selection", func(a *App) {
 			a.OnCancelJob = func(string) bool { return true }
 			a.taskList.SetJobs([]*database.Job{finished()})
 			a.taskList.ToggleSelection("f")
-			a.dispatchAction("A C", nil)
+			a.dispatchAction("A X", nil)
 		}, ColorYellow},
 		{"A D with nothing deletable in the selection", func(a *App) {
 			a.OnDeleteJob = func(string) {}

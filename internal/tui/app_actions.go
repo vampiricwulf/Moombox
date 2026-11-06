@@ -227,7 +227,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				a.setFeedback(fmt.Sprintf("Recovering set-aside recordings: %s", job.Title))
 			}
 		}
-	case "A C":
+	case "A X":
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnCancelJob != nil {
 			// ended counts the jobs the list showed cancellable that had
 			// finished, failed or been cancelled by the time the cancel
@@ -352,7 +352,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		a.filesDlg.SetSize(a.width, a.height)
 		a.filesDlg.Open()
 		return a, tea.Batch(a.fetchOrphansCmd(), a.fetchOrphanedHistoryCmd(), a.filesDlg.SpinnerInit())
-	case "A H":
+	case "A C":
 		if job != nil && a.OnPreviewChapters != nil && a.OnSaveChapters != nil {
 			a.clearFeedback()
 			a.chapterDlg.SetSize(a.width, a.height)
@@ -782,7 +782,7 @@ func (a *App) refreshTrimList(job *database.Job) {
 // Two readers on purpose: the A D menu item's JobFilter (which gates the
 // chord, the job selector and the confirm-window re-validation) and the batch
 // arm of dispatchAction, which is dispatched with a nil job and so never sees
-// the filter — the same split A C and A W already carry.
+// the filter — the same split A X and A W already carry.
 //
 // It happens to select the same four statuses as isProgressTerminal
 // (app_update.go) today, but it is a DIFFERENT rule with a different owner:
@@ -921,7 +921,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 			StatusFilter: func(j *database.Job) bool {
 				return !JobIsActive(j.Status)
 			}},
-		{Chord: "A C", Label: "Cancel Job", HintLabel: "Cancel", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
+		{Chord: "A X", Label: "Cancel Job", HintLabel: "Cancel", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
 			DisabledReason: "no active jobs",
 			JobFilter: func(j *database.Job) bool {
 				return j.Status != database.StatusFinished && j.Status != database.StatusCancelled && j.Status != database.StatusError
@@ -943,14 +943,14 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	if a.OnListClientTokens != nil {
 		items = append(items, ActionMenuItem{Chord: "A K", Label: "Manage Client Tokens", HintLabel: "Tokens", Category: "Action"})
 	}
-	// The chapter import (owner decision CI-4): A H pastes a timestamp
+	// The chapter import (owner decision CI-4): A C pastes a timestamp
 	// comment as the job's chapters, A U brings back the chapters an import
 	// replaced. Both act on a job that is not active and has an archive —
 	// the service re-checks, under the job's claim. A U's HasOriginalChapters
 	// reads the disk, so it runs when A U is chosen and its job selector is
 	// built; the menu's "no jobs" answer is the status alone (CORE-9).
 	if a.OnPreviewChapters != nil && a.OnSaveChapters != nil {
-		items = append(items, ActionMenuItem{Chord: "A H", Label: "Import Chapters", HintLabel: "Chapters", Category: "Action", NeedsJob: true,
+		items = append(items, ActionMenuItem{Chord: "A C", Label: "Import Chapters", HintLabel: "Chapters", Category: "Action", NeedsJob: true,
 			DisabledReason: "no finished jobs with an archive",
 			JobFilter:      chapterImportable})
 	}

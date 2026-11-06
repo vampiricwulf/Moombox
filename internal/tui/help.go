@@ -247,7 +247,7 @@ func (m *HelpModel) sectionsFromMenu() []helpSection {
 
 		chord := item.Chord
 		if item.NeedsConfirm {
-			// Show confirm chord: "A C" → "A C C", "R P" → "R P P"
+			// Show confirm chord: "A X" → "A X X", "R P" → "R P P"
 			parts := strings.Fields(chord)
 			if len(parts) == 2 {
 				chord = chord + " " + parts[1]

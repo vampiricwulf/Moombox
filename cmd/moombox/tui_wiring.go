@@ -278,7 +278,7 @@ func (s *runState) runTUI() {
 		}
 		return out
 	}
-	// The chapter import (A H, A U): the routes' ChapterService in
+	// The chapter import (A C, A U): the routes' ChapterService in
 	// process, the one the Web player's dialog reaches over HTTP.
 	if svc := s.chapterSvc; svc != nil {
 		app.OnPreviewChapters = func(jobID, text, offset string) (tui.ChapterImportView, error) {

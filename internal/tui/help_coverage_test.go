@@ -14,7 +14,7 @@ import (
 // dropped by sectionsFromMenu and covered by hand in quickKeys. That split
 // is deliberate (the static text is written for newcomers and is richer
 // than the terse menu labels), but it silently drops any chord added to a
-// category the derived path skips. This test is the seam: add "A X" and
+// category the derived path skips. This test is the seam: add an "A" chord and
 // help picks it up automatically; add an Other-category chord and this
 // fails until it is documented somewhere the reader can actually see.
 func TestHelpCoversEveryChord(t *testing.T) {
@@ -41,7 +41,7 @@ func TestHelpCoversEveryChord(t *testing.T) {
 			continue
 		}
 		// A NeedsConfirm chord is deliberately DISPLAYED with its confirm
-		// keypress ("A C" -> "A C C"), because that is what the operator
+		// keypress ("A X" -> "A X X"), because that is what the operator
 		// actually has to type. Accept either spelling rather than
 		// re-deriving the rule here, so this stays a coverage check and not
 		// a copy of sectionsFromMenu's formatting.

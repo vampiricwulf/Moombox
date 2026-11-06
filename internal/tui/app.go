@@ -164,13 +164,13 @@ type (
 		Err    error
 	}
 	// chapterPreviewResultMsg is the async answer of OnPreviewChapters for
-	// the A H overlay's edit number Seq.
+	// the A C overlay's edit number Seq.
 	chapterPreviewResultMsg struct {
 		Seq  int
 		View ChapterImportView
 		Err  error
 	}
-	// chapterSaveResultMsg is the async result of OnSaveChapters (A H) or,
+	// chapterSaveResultMsg is the async result of OnSaveChapters (A C) or,
 	// with Restore set, OnRestoreChapters (A U).
 	chapterSaveResultMsg struct {
 		Title   string
@@ -666,10 +666,10 @@ type App struct {
 	// The chapter import (owner decision CI-4), the same
 	// routes.ChapterService the Web player's dialog reaches over
 	// /api/jobs/{id}/chapters/*: OnPreviewChapters parses a paste against a
-	// job's archive without saving (A H's live preview), OnSaveChapters saves
+	// job's archive without saving (A C's live preview), OnSaveChapters saves
 	// it, OnRestoreChapters brings back the original (A U), and
 	// HasOriginalChapters says whether there is one to bring back. Each reads
-	// or rewrites the disk, so each runs off the update goroutine. A H is
+	// or rewrites the disk, so each runs off the update goroutine. A C is
 	// registered only with OnPreviewChapters and OnSaveChapters, A U only
 	// with OnRestoreChapters and HasOriginalChapters.
 	OnPreviewChapters   func(jobID, text, offset string) (ChapterImportView, error)

@@ -65,7 +65,7 @@ func TestDeleteMenuEntryIsDisabledWithOnlyActiveJobs(t *testing.T) {
 }
 
 // The batch arm never sees JobFilter (dispatchAction is handed a nil job), so
-// it applies the same rule itself — as A C and A W already do. Mutant:
+// it applies the same rule itself — as A X and A W already do. Mutant:
 // filtering the menu but deleting the whole selection anyway.
 func TestDeleteBatchSkipsActiveJobs(t *testing.T) {
 	app := NewApp()

@@ -7,7 +7,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-// TestCancelChordReportsACancelThatDidNotHappen: A C decides on the row the
+// TestCancelChordReportsACancelThatDidNotHappen: A X decides on the row the
 // list shows, and the job may have finished, failed or been cancelled since.
 // OnCancelJob leaves such a job as it ended and says so, and the feedback
 // line now does too — it read "Cancelled" for a job nothing cancelled. A
@@ -33,9 +33,9 @@ func TestCancelChordReportsACancelThatDidNotHappen(t *testing.T) {
 
 	t.Run("single", func(t *testing.T) {
 		a := withCancel()
-		a.dispatchAction("A C", &database.Job{ID: "gone", Title: "Old Stream", Status: database.StatusDownloading})
+		a.dispatchAction("A X", &database.Job{ID: "gone", Title: "Old Stream", Status: database.StatusDownloading})
 		check(t, a, "Not cancelled — Old Stream had already ended", true)
-		a.dispatchAction("A C", &database.Job{ID: "live", Title: "New Stream", Status: database.StatusDownloading})
+		a.dispatchAction("A X", &database.Job{ID: "live", Title: "New Stream", Status: database.StatusDownloading})
 		check(t, a, "Cancelled: New Stream", false)
 	})
 
@@ -49,7 +49,7 @@ func TestCancelChordReportsACancelThatDidNotHappen(t *testing.T) {
 		for _, id := range ids {
 			a.taskList.ToggleSelection(id)
 		}
-		a.dispatchAction("A C", nil)
+		a.dispatchAction("A X", nil)
 		return a
 	}
 	t.Run("batch, one ended", func(t *testing.T) {

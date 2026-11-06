@@ -87,7 +87,7 @@ func helpHasChord(app *App, chord string) bool {
 	return false
 }
 
-// TestChapterImportChordsInMenuHelpAndHints: A H "Import Chapters" and A U
+// TestChapterImportChordsInMenuHelpAndHints: A C "Import Chapters" and A U
 // "Restore Original Chapters" are in the action menu, the help overlay and
 // the A hint line once wired, and nowhere without their callbacks; A U is
 // offered for a job only while it has an original (owner decision CI-4).
@@ -97,28 +97,28 @@ func helpHasChord(app *App, chord string) bool {
 func TestChapterImportChordsInMenuHelpAndHints(t *testing.T) {
 	r := newChapterRig(t)
 	items := r.app.buildMenuItems()
-	h, u := menuChord(items, "A H"), menuChord(items, "A U")
+	h, u := menuChord(items, "A C"), menuChord(items, "A U")
 	if h == nil || h.Label != "Import Chapters" || u == nil || u.Label != "Restore Original Chapters" {
-		t.Fatalf("menu items: A H %+v, A U %+v", h, u)
+		t.Fatalf("menu items: A C %+v, A U %+v", h, u)
 	}
-	if !helpHasChord(r.app, "A H") || !helpHasChord(r.app, "A U U") {
-		t.Error("the help overlay is missing A H or A U U (its confirm chord)")
+	if !helpHasChord(r.app, "A C") || !helpHasChord(r.app, "A U U") {
+		t.Error("the help overlay is missing A C or A U U (its confirm chord)")
 	}
 	if !h.JobFilter(r.job) {
-		t.Error("A H refuses a Finished job with an archive")
+		t.Error("A C refuses a Finished job with an archive")
 	}
 	if h.JobFilter(&database.Job{Status: database.StatusDownloading, OutputFile: "x"}) {
-		t.Error("A H offered for an active job")
+		t.Error("A C offered for an active job")
 	}
 	if h.JobFilter(&database.Job{Status: database.StatusError}) {
-		t.Error("A H offered for an Error row with no archive")
+		t.Error("A C offered for an Error row with no archive")
 	}
 	if !u.NeedsConfirm {
 		t.Error("A U restores without a confirm keypress")
 	}
 
 	hint := r.app.chordFeedback("a")
-	if !strings.Contains(hint, "H Chapters") || strings.Contains(hint, "U Restore Chapters") {
+	if !strings.Contains(hint, "C Chapters") || strings.Contains(hint, "U Restore Chapters") {
 		t.Errorf("hint with no original = %q", hint)
 	}
 	r.original = true
@@ -127,7 +127,7 @@ func TestChapterImportChordsInMenuHelpAndHints(t *testing.T) {
 	}
 
 	bare := NewApp()
-	if menuChord(bare.buildMenuItems(), "A H") != nil || menuChord(bare.buildMenuItems(), "A U") != nil || helpHasChord(bare, "A H") {
+	if menuChord(bare.buildMenuItems(), "A C") != nil || menuChord(bare.buildMenuItems(), "A U") != nil || helpHasChord(bare, "A C") {
 		t.Error("the chords are offered with no callbacks wired")
 	}
 }
@@ -153,7 +153,7 @@ func previewNow(t *testing.T, app *App) {
 	app.Update(cmd())
 }
 
-// TestChapterImportPreviewRenders drives A H through App.Update: the paste
+// TestChapterImportPreviewRenders drives A C through App.Update: the paste
 // and the offset are typed once each (never doubled), the preview is the
 // callback's answer for the newest edit, drawn with its start times, and an
 // older edit's tick or answer changes nothing.
@@ -172,9 +172,9 @@ func TestChapterImportPreviewRenders(t *testing.T) {
 			Current:  []ChapterImportRow{{Start: 0, End: 10, Title: "old"}}, OffsetSeconds: -5,
 		}
 	}
-	r.app.dispatchAction("A H", r.job)
+	r.app.dispatchAction("A C", r.job)
 	if !r.app.chapterDlg.IsVisible() {
-		t.Fatal("A H did not open the overlay")
+		t.Fatal("A C did not open the overlay")
 	}
 	previewNow(t, r.app) // the opening preview
 	if v := r.app.chapterDlg.View(); !strings.Contains(v, "Current: 1 chapters") || !strings.Contains(v, "Paste a timestamp comment") {
@@ -227,7 +227,7 @@ func TestChapterImportConfirmSaves(t *testing.T) {
 		}
 		return ChapterImportView{Chapters: []ChapterImportRow{{Start: 0, End: 5, Title: "a"}, {Start: 5, End: 10, Title: "b"}}, Current: []ChapterImportRow{{Title: "old"}}}
 	}
-	r.app.dispatchAction("A H", r.job)
+	r.app.dispatchAction("A C", r.job)
 	previewNow(t, r.app)
 	ctrlS := tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}
 	// Nothing to save yet: Ctrl+S does nothing.
@@ -299,7 +299,7 @@ func TestChapterImportLateSaveResultIsNotTheOverlays(t *testing.T) {
 	ctrlS := tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}
 	startSave := func() int {
 		t.Helper()
-		r.app.dispatchAction("A H", r.job)
+		r.app.dispatchAction("A C", r.job)
 		previewNow(t, r.app)
 		typeIntoApp(r.app, "0:00 a")
 		previewNow(t, r.app)
@@ -364,7 +364,7 @@ func TestChapterImportRestoreChord(t *testing.T) {
 // the overlay, and "a u u" — the confirm keypress — restores; "a u" alone
 // does not.
 //
-// Mutant: the dispatchAction case for A H or A U dropped.
+// Mutant: the dispatchAction case for A C or A U dropped.
 func TestChapterImportChordsFromTheKeyboard(t *testing.T) {
 	r := newChapterRig(t)
 	r.original = true
@@ -392,8 +392,8 @@ func TestChapterImportChordsFromTheKeyboard(t *testing.T) {
 		t.Fatalf("restores = %v", r.restores)
 	}
 	r.app.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
-	press("ah")
+	press("ac")
 	if !r.app.chapterDlg.IsVisible() {
-		t.Fatal("A H from the keyboard did not open the overlay")
+		t.Fatal("A C from the keyboard did not open the overlay")
 	}
 }
