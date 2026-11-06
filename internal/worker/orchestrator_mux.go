@@ -1111,6 +1111,9 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		return fmt.Errorf("mux: %w", err)
 	}
 	probeData := verdict.probe
+	// The archive at this name is a new file: a chapter import's list beside
+	// the one it replaced no longer describes it.
+	dropImportedArchiveChapters(outputFile, o.logger)
 
 	// Get file info
 	info, err := os.Stat(outputFile)

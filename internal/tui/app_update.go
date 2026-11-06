@@ -664,6 +664,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.cookieImportDlg.SetResult(msg.Result, msg.Err)
 		return a, nil
 
+	case chapterPreviewTickMsg:
+		// Only the newest edit's debounce asks: an older one finds its seq
+		// overtaken and does nothing.
+		if a.chapterDlg.IsVisible() && msg.Seq == a.chapterDlg.seq {
+			return a, a.previewChaptersCmd(msg.Seq)
+		}
+		return a, nil
+
+	case chapterPreviewResultMsg:
+		a.chapterDlg.SetPreview(msg.Seq, msg.View, msg.Err)
+		return a, nil
+
+	case chapterSaveResultMsg:
+		return a.handleChapterSaveResult(msg)
+
 	case createTrimResultMsg:
 		a.trimInProgress = false
 		if a.trimDlg.IsVisible() {
@@ -1728,6 +1743,9 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	}
 	if a.cookieImportDlg.IsVisible() {
 		return a.cookieImportDlg.UpdateComponents(msg)
+	}
+	if a.chapterDlg.IsVisible() {
+		return a.chapterDlg.UpdateComponents(msg)
 	}
 	if a.addVideo.IsVisible() {
 		return a.addVideo.UpdateComponents(msg)

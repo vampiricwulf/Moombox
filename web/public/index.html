@@ -314,6 +314,12 @@
                             <sl-details id="player-chapters" class="player-chapters" summary="Chapters" hidden>
                                 <ol id="player-chapter-list" class="chapter-list" aria-label="Chapters"></ol>
                             </sl-details>
+                            <div id="player-chapter-actions" class="player-chapter-actions">
+                                <sl-button id="player-chapters-import" size="small">
+                                    <sl-icon slot="prefix" name="list-ol"></sl-icon>
+                                    Import chapters
+                                </sl-button>
+                            </div>
                         </div>
                         <div id="player-sidebar" style="display: none">
                             <div id="player-sidebar-header">
@@ -339,6 +345,21 @@
                         <p class="empty-state-subtext">Choose from the dropdown above to watch with synced chat overlay</p>
                     </div>
                 </div>
+                <sl-dialog id="chapter-import-dialog" class="chapter-import-dialog" label="Import chapters">
+                    <sl-textarea id="chapter-import-text" label="Timestamp comment" placeholder="0:00 Intro&#10;12:34 First song" rows="8" resize="vertical" help-text="Every line with a timestamp becomes a chapter"></sl-textarea>
+                    <sl-input id="chapter-import-offset" label="Offset" placeholder="0" size="small" help-text="Seconds or ±H:MM:SS, added to every timestamp"></sl-input>
+                    <p id="chapter-import-status" class="chapter-import-status" role="status" aria-live="polite"></p>
+                    <table id="chapter-import-preview" class="chapter-import-preview" hidden>
+                        <thead><tr><th scope="col">Start</th><th scope="col">Title</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                    <sl-details id="chapter-import-current" class="chapter-import-current" summary="Current chapters" hidden>
+                        <ol id="chapter-import-current-list" class="chapter-import-current-list" aria-label="Current chapters"></ol>
+                    </sl-details>
+                    <sl-button slot="footer" id="chapter-import-restore" hidden>Restore original</sl-button>
+                    <sl-button slot="footer" id="chapter-import-cancel">Cancel</sl-button>
+                    <sl-button slot="footer" id="chapter-import-save" variant="primary" disabled>Save</sl-button>
+                </sl-dialog>
             </sl-tab-panel>
 
             <!-- Imports Panel -->

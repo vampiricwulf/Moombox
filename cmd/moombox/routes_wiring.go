@@ -31,10 +31,17 @@ func (s *runState) wireRoutes() func() {
 		&youtubeMetadataAdapter{svc: s.ytService},
 		s.notifyMgr,
 	)
-	routes.ChapterRoutes(s.r, &routes.ChapterRouteDeps{
-		DB:     s.db,
-		Store:  s.configStore,
-		Logger: s.log,
+	// The chapter import's worker half (owner decision CI-1); the service
+	// is kept for the TUI's import, which calls it in process.
+	var chapterImporter routes.ChapterImporter
+	if s.dlWorker != nil {
+		chapterImporter = s.dlWorker
+	}
+	s.chapterSvc = routes.ChapterRoutes(s.r, &routes.ChapterRouteDeps{
+		DB:       s.db,
+		Store:    s.configStore,
+		Importer: chapterImporter,
+		Logger:   s.log,
 	})
 	routes.FormatRoutes(s.r, &routes.FormatRoutesDeps{
 		DB:        s.db,

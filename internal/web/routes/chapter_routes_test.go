@@ -50,6 +50,7 @@ type chapterFixture struct {
 	logger *chapterLogger
 	mu     sync.Mutex
 	probes int
+	svc    *ChapterService // the chapter import's, when wired
 }
 
 func newChapterFixture(t *testing.T) *chapterFixture {

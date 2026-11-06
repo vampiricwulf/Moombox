@@ -185,6 +185,51 @@ func (m *Muxer) MuxCopyArchive(ctx context.Context, videoPath, audioPath, output
 	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, aspect, chaptersPath, checks)
 }
 
+// RemuxChapters rewrites a finished archive with a new chapter list (owner
+// decision CI-1, the chapter import): a stream copy of archive onto output
+// that keeps every stream, the global metadata and each stream's own —
+// `-map 0 -map_metadata 0 -c copy`, so a yt:stretch display aspect, carried
+// as the video stream's sample aspect ratio, survives the copy as it is —
+// less the data streams (`-map -0:d`): an MP4's chapter list rides in a text
+// track of its own, which ffprobe lists as a data stream, and `-map 0` copies
+// it as one beside the new list's track, so every import would add one. And it
+// takes its chapters from the FFMETADATA1 file at chaptersPath (the same
+// `-f ffmetadata -i … -map_chapters N` input MuxCopyAtChapters adds, built by
+// the same buildArgs), or, when chaptersPath is empty, none at all
+// (`-map_chapters -1`: a restore to an archive that had none).
+//
+// It goes through writeOutput like every archive write: FFmpeg writes a
+// temporary file beside output, checks run on it, and only a file that
+// passed them replaces output — so a failed or refused copy leaves output
+// exactly as it was. output may be archive itself.
+func (m *Muxer) RemuxChapters(ctx context.Context, archive, output, chaptersPath string, checks ...OutputCheck) error {
+	if _, err := os.Stat(archive); err != nil {
+		return fmt.Errorf("archive not found: %w", err)
+	}
+	return m.writeOutput(ctx, output, checks, func(tmp string) error {
+		args := withAllStreamsKept(m.buildArgs(archive, "", tmp, nil, false, InputOffsets{}, chaptersPath), chaptersPath == "")
+		m.logger.Debug("ffmpeg", "args", strings.Join(args, " "))
+		return m.runFFmpeg(ctx, args)
+	})
+}
+
+// withAllStreamsKept adds the output options that make a buildArgs argv over
+// one input a whole-file copy — `-map 0` (every stream, not FFmpeg's default
+// one-video-one-audio pick) less `-map -0:d` (the old chapter track; see
+// RemuxChapters), `-map_metadata 0` (the input's global metadata), and
+// `-map_chapters -1` when no chapter input replaces the input's own — ahead
+// of the output path (its last argument).
+func withAllStreamsKept(args []string, dropChapters bool) []string {
+	extra := []string{"-map", "0", "-map", "-0:d", "-map_metadata", "0"}
+	if dropChapters {
+		extra = append(extra, "-map_chapters", "-1")
+	}
+	out := make([]string, 0, len(args)+len(extra))
+	out = append(out, args[:len(args)-1]...)
+	out = append(out, extra...)
+	return append(out, args[len(args)-1])
+}
+
 // Mux performs FFmpeg muxing with optional trimming/encoding, into a
 // temporary file renamed onto outputPath once FFmpeg has exited 0
 // (writeOutput).

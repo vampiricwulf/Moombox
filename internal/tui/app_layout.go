@@ -81,6 +81,7 @@ func (a *App) recalcLayout() {
 	a.addVideo.SetSize(a.width, a.height)
 	a.importDlg.SetSize(a.width, a.height)
 	a.cookieImportDlg.SetSize(a.width, a.height)
+	a.chapterDlg.SetSize(a.width, a.height)
 	a.trimDlg.SetSize(a.width, a.height)
 	a.filesDlg.SetSize(a.width, a.height)
 	a.clientTokensDlg.SetSize(a.width, a.height)
@@ -147,6 +148,9 @@ func (a *App) View() tea.View {
 	}
 	if a.cookieImportDlg.IsVisible() {
 		return a.viewWithMode(a.cookieImportDlg.View())
+	}
+	if a.chapterDlg.IsVisible() {
+		return a.viewWithMode(a.chapterDlg.View())
 	}
 	if a.addVideo.IsVisible() {
 		return a.viewWithMode(a.addVideo.View())

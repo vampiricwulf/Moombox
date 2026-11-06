@@ -17,7 +17,8 @@ import (
 // its parts share ("X - part1.mp4"), as copyAssets writes them. "" when
 // outputFile is empty. The worker's finalize and GET /api/jobs/{id}/chapters
 // both derive the split archive's chapter list this way (owner decisions
-// FE-15, FE-16): it is named on no column.
+// FE-15, FE-16): it is named on no column. A chapter import's list beside a
+// single-file archive (owner decision CI-1) is found the same way.
 func ArchiveSidecarPath(outputFile, suffix string) string {
 	dir, base, ok := recordedArchiveLocation(outputFile)
 	if !ok {

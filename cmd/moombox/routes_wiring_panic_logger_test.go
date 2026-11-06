@@ -49,8 +49,11 @@ func TestWireRoutesRegistersTheChaptersRoute(t *testing.T) {
 	}
 	end := strings.Index(body[start:], "})")
 	call := body[start : start+end]
-	for _, field := range []string{"DB:     s.db", "Store:  s.configStore", "Logger: s.log"} {
-		if !strings.Contains(call, field) {
+	// Whitespace-tolerant: gofmt aligns the keys, so the run of spaces moves
+	// whenever a field is added to the deps (the chapter import's Importer).
+	squeezed := strings.Join(strings.Fields(call), " ")
+	for _, field := range []string{"DB: s.db", "Store: s.configStore", "Importer: chapterImporter", "Logger: s.log"} {
+		if !strings.Contains(squeezed, field) {
 			t.Errorf("ChapterRoutes deps lack %q", field)
 		}
 	}

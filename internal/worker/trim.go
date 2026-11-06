@@ -133,6 +133,11 @@ type TrimService struct {
 	activeOps map[string]*TrimTask
 	stopped   bool // set by Stop, under activeMu: no trim starts after it
 	onEvent   func(TrimEvent)
+	// archiveRewriting reports whether a chapter import is rewriting the
+	// job's archive right now (DownloadWorker.chapterImportRunning, set by
+	// NewDownloadWorker; nil: never). prepare refuses a trim while it does
+	// (owner decision CI-1: the import's re-mux never overlaps a trim).
+	archiveRewriting func(jobID string) bool
 	// progressInterval is trimProgressInterval; a field so a test can take
 	// every report, or none.
 	progressInterval time.Duration
@@ -315,7 +320,15 @@ func (ts *TrimService) prepare(job *database.Job, startTime, endTime float64) (*
 	task := &TrimTask{}
 	ts.activeOps[job.ID] = task
 	ts.wg.Add(1)
+	rewriting := ts.archiveRewriting
 	ts.activeMu.Unlock()
+	// After the slot is held, never before: ClaimChapterImport takes its
+	// claim and then looks for this slot, so one of the two always sees the
+	// other.
+	if rewriting != nil && rewriting(job.ID) {
+		ts.release(job.ID)
+		return nil, conflictTrim("a chapter import is rewriting this job's archive")
+	}
 
 	var plan *trimPlan
 	var err error
@@ -340,6 +353,22 @@ func (ts *TrimService) prepare(job *database.Job, startTime, endTime float64) (*
 	ts.activeMu.Unlock()
 	plan.task = task
 	return plan, nil
+}
+
+// trimming reports whether a trim holds jobID's slot — a reservation still
+// being checked included — the chapter import's question before it rewrites
+// the archive (ClaimChapterImport).
+func (ts *TrimService) trimming(jobID string) bool {
+	ts.activeMu.Lock()
+	defer ts.activeMu.Unlock()
+	return ts.activeOps[jobID] != nil
+}
+
+// setArchiveRewriting installs the chapter import's check (archiveRewriting).
+func (ts *TrimService) setArchiveRewriting(fn func(jobID string) bool) {
+	ts.activeMu.Lock()
+	defer ts.activeMu.Unlock()
+	ts.archiveRewriting = fn
 }
 
 // release gives back the job's trim slot and the Stop wait it counts in.

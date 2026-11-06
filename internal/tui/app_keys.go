@@ -318,6 +318,12 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	}
+	if a.chapterDlg.IsVisible() {
+		if a.chapterDlg.HandleKey(key) == "save" {
+			return a, a.saveChaptersCmd(a.chapterDlg.SetSaving())
+		}
+		return a, nil
+	}
 	if a.addVideo.IsVisible() {
 		action, data := a.addVideo.HandleKey(key)
 		switch action {

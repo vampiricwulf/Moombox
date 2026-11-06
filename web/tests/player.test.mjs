@@ -216,7 +216,7 @@ test("player shortcuts fire only when nothing else owns the key", { skip }, asyn
   h.document.body.insertAdjacentHTML("beforeend", "<sl-dialog open></sl-dialog>");
   h.key(" ");
   assert.equal(video.paused, true, "an open sl-dialog swallows the shortcut");
-  h.document.querySelector("sl-dialog").remove();
+  h.document.querySelector("sl-dialog[open]").remove();
 
   // ...and not when a button owns the key (it would activate itself).
   h.key(" ", { target: h.el("player-sync-btn") });

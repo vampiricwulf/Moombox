@@ -51,9 +51,12 @@ type Chapter struct {
 // (read per request, so a hot-reloaded FFmpeg path is the one probed, as the
 // import's duration probe does), and the logger a failed probe is reported on.
 type ChapterRouteDeps struct {
-	DB     *database.Database
-	Store  *config.Store
-	Logger interface {
+	DB    *database.Database
+	Store *config.Store
+	// Importer is the worker's half of the chapter import (ChapterImporter,
+	// owner decision CI-1); nil answers the import's routes 503.
+	Importer ChapterImporter
+	Logger   interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -82,13 +85,19 @@ type ChapterRouteDeps struct {
 // empty list, because the player treats chapters as decoration and must never
 // error over them. The failure is logged (a probe failure once per file
 // version, at Warn; the rest at Debug).
-func ChapterRoutes(r chi.Router, deps *ChapterRouteDeps) {
-	chapterRoutes(r, deps, newChapterCache(chapterCacheSize))
+//
+// Beside it, the chapter import's three POST routes (chapterImportRoutes,
+// owner decision CI-4), over the same cache. The ChapterService returned is
+// the one the TUI's import calls in process.
+func ChapterRoutes(r chi.Router, deps *ChapterRouteDeps) *ChapterService {
+	return chapterRoutes(r, deps, newChapterCache(chapterCacheSize))
 }
 
 // chapterRoutes is ChapterRoutes over a given cache, so a test can count the
 // probes behind it.
-func chapterRoutes(r chi.Router, deps *ChapterRouteDeps, cache *chapterCache) {
+func chapterRoutes(r chi.Router, deps *ChapterRouteDeps, cache *chapterCache) *ChapterService {
+	svc := &ChapterService{deps: deps, cache: cache}
+	chapterImportRoutes(r, svc)
 	r.Get("/api/jobs/{id}/chapters", func(rw http.ResponseWriter, req *http.Request) {
 		job, ok := loadJob(rw, deps.DB, chi.URLParam(req, "id"))
 		if !ok {
@@ -103,6 +112,7 @@ func chapterRoutes(r chi.Router, deps *ChapterRouteDeps, cache *chapterCache) {
 		rw.Header().Set("Cache-Control", "private, no-cache")
 		jsonResponse(rw, map[string]any{"chapters": chapters})
 	})
+	return svc
 }
 
 // jobChapters is the job's chapter list on the player's global timeline, in
@@ -112,7 +122,44 @@ func chapterRoutes(r chi.Router, deps *ChapterRouteDeps, cache *chapterCache) {
 // as given), and the player's strip, list and current-chapter highlight all
 // read the list as sorted.
 func jobChapters(ctx context.Context, deps *ChapterRouteDeps, cache *chapterCache, job *database.Job) []Chapter {
-	all := jobChaptersUnsorted(ctx, deps, cache, job)
+	ffprobePath := chapterFFprobePath(deps)
+	// Every failure here is "no chapters": the player treats them as
+	// decoration, and the cache keeps a file's refusal (chapterCache.chapters).
+	all, _ := readJobChapters(deps, job, func(path string) ([]Chapter, error) {
+		return cache.chapters(ctx, ffprobePath, path, job.ID, deps.Logger), nil
+	})
+	sortChapters(all)
+	return all
+}
+
+// jobChaptersStrict is jobChapters for a caller that must tell "the archive
+// has no chapters" from "they could not be read": the chapter import's first
+// save, which keeps what the archive carried as the original to restore
+// (owner decision CI-3) and then re-muxes the archive with the import —
+// recording a read that failed as "none" would lose the archive's own
+// chapters for good once the re-mux replaces them. Every file is probed
+// afresh, past the cache (whose entry for a file ffprobe refused reads the
+// same as one with no chapters), and any probe or parts-read failure is the
+// error. ctx is the caller's to bound; ffprobeChapters adds its own timeout.
+func jobChaptersStrict(ctx context.Context, deps *ChapterRouteDeps, cache *chapterCache, job *database.Job) ([]Chapter, error) {
+	ffprobePath := chapterFFprobePath(deps)
+	all, err := readJobChapters(deps, job, func(path string) ([]Chapter, error) {
+		return cache.probe(ctx, ffprobePath, path)
+	})
+	if err != nil {
+		return nil, err
+	}
+	sortChapters(all)
+	return all, nil
+}
+
+func chapterFFprobePath(deps *ChapterRouteDeps) string {
+	var ffmpegPath string
+	deps.Store.Read(func(c *config.MoomboxConfig) { ffmpegPath = c.Paths.FfmpegPath })
+	return engine.NewMuxer(ffmpegPath, deps.Logger).FFprobePath()
+}
+
+func sortChapters(all []Chapter) {
 	slices.SortStableFunc(all, func(a, b Chapter) int {
 		switch {
 		case a.Start < b.Start:
@@ -122,18 +169,16 @@ func jobChapters(ctx context.Context, deps *ChapterRouteDeps, cache *chapterCach
 		}
 		return 0
 	})
-	return all
 }
 
-func jobChaptersUnsorted(ctx context.Context, deps *ChapterRouteDeps, cache *chapterCache, job *database.Job) []Chapter {
-	var ffmpegPath string
-	deps.Store.Read(func(c *config.MoomboxConfig) { ffmpegPath = c.Paths.FfmpegPath })
-	ffprobePath := engine.NewMuxer(ffmpegPath, deps.Logger).FFprobePath()
-
+// readJobChapters is the job's chapters in the order read, each archive file
+// read through read; the error is read's, or the parts' row read failing. A
+// job with no archive file to read has none (nil, nil).
+func readJobChapters(deps *ChapterRouteDeps, job *database.Job, read func(path string) ([]Chapter, error)) ([]Chapter, error) {
 	segments, err := deps.DB.GetSegments(job.ID)
 	if err != nil {
 		deps.Logger.Debug("Chapters: could not read the job's parts", "job", job.ID, "error", err)
-		return nil
+		return nil, err
 	}
 	// The same test the player makes (onPlayerJobSelect): any part row at
 	// all, and the job plays as parts, so its chapters come from the parts.
@@ -141,9 +186,17 @@ func jobChaptersUnsorted(ctx context.Context, deps *ChapterRouteDeps, cache *cha
 		path, msg, code := jobVideoPath(job, deps.Store)
 		if code != 0 {
 			deps.Logger.Debug("Chapters: no archive file to read", "job", job.ID, "reason", msg)
-			return nil
+			return nil, nil
 		}
-		return cache.chapters(ctx, ffprobePath, path, job.ID, deps.Logger)
+		if list, ok := importedSidecarChapters(job, worker.ArchiveSidecarPath(path, utils.ChaptersSidecarSuffix), deps); ok {
+			return list, nil
+		}
+		return read(path)
+	}
+	if sidecar, ok := splitSidecarPath(job, segments, deps); ok {
+		if list, ok := importedSidecarChapters(job, sidecar, deps); ok {
+			return list, nil
+		}
 	}
 
 	outputDir := resolveOutputDir(job, deps.Store)
@@ -169,7 +222,11 @@ func jobChaptersUnsorted(ctx context.Context, deps *ChapterRouteDeps, cache *cha
 			deps.Logger.Debug("Chapters: part file missing or outside the output directory", "job", job.ID, "segment", seg.SegmentIndex)
 			continue
 		}
-		for _, c := range cache.chapters(ctx, ffprobePath, path, job.ID, deps.Logger) {
+		partChapters, err := read(path)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range partChapters {
 			c.Start += start
 			c.End += start
 			// A chapter cannot run past its own part: the next part's span
@@ -197,9 +254,9 @@ func jobChaptersUnsorted(ctx context.Context, deps *ChapterRouteDeps, cache *cha
 		}
 	}
 	if len(all) == 0 {
-		return splitArchiveChapters(job, segments, outputDir, deps)
+		return splitArchiveChapters(job, segments, outputDir, deps), nil
 	}
-	return all
+	return all, nil
 }
 
 // splitArchiveChapters is the chapter list a split archive's finalize wrote
@@ -236,6 +293,32 @@ func splitArchiveChapters(job *database.Job, segments []database.Segment, output
 		out = append(out, Chapter{Start: c.Start, End: max(c.End, c.Start), Title: c.Title})
 	}
 	return out
+}
+
+// importedSidecarChapters is the list a chapter import saved beside the
+// archive (owner decision CI-1), and true, when the sidecar at path is an
+// import's (utils.ReadImportedChaptersSidecar) — the job's chapters ahead of
+// whatever the file or its parts carry, so the player shows an import at
+// once, and goes on showing it when the re-mux that embeds it in the file
+// failed. An empty imported list is still an answer: a restore to an archive
+// that had none. Not an import's, missing or unreadable: false.
+func importedSidecarChapters(job *database.Job, path string, deps *ChapterRouteDeps) ([]Chapter, bool) {
+	if path == "" {
+		return nil, false
+	}
+	imp, imported, err := utils.ReadImportedChaptersSidecar(path)
+	if err != nil {
+		deps.Logger.Debug("Chapters: the imported chapter list is unreadable", "job", job.ID, "file", filepath.Base(path), "error", err)
+		return nil, false
+	}
+	if !imported {
+		return nil, false
+	}
+	out := make([]Chapter, 0, len(imp.Chapters))
+	for _, c := range imp.Chapters {
+		out = append(out, Chapter{Start: c.Start, End: max(c.End, c.Start), Title: c.Title})
+	}
+	return out, true
 }
 
 // chapterCache holds each archive file's chapter list, keyed by its path and
