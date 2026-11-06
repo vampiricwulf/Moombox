@@ -498,9 +498,11 @@ var errNoLivePathLeft = errors.New("no live path is left to switch to this run")
 // a run (runRecord.first): a capture already on the no-JS path goes to HLS,
 // and one that has switched to both has nowhere left (errNoLivePathLeft,
 // cause wrapped) — the loop then handles the failure as it always has. Never
-// a loop: a path the run has left is not switched back to, so the budget is
-// not given back either; a later run (a restart, a Resume) starts on the
-// path its setup chooses, which is the JS path again once solving works.
+// a loop: a spent switch is not given back. The way back is the live loop's
+// own, once a run (switchBack, owner decision PR-R3): a capture on either
+// fallback returns to the from-start path that needs the JS, in a new part,
+// once that path can be set up again — and a later run (a restart, a Resume)
+// starts on the path its setup chooses, the JS path once solving works.
 // path names the one switched to, for the caller's log.
 func switchLivePath(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps, cause error) (result *DownloadResult, path string, err error) {
 	if !job.Run.noJS() && job.Run.first("live-switch:nojs") {
@@ -558,5 +560,7 @@ func liveHlsInstead(ctx context.Context, job *JobContext, hls DownloadStrategy, 
 	if err != nil {
 		return nil, fmt.Errorf("%w; the live HLS fallback failed too: %w", setupErr, err)
 	}
+	// What the live loop's switch back reads (runRecord.canSwitchBack).
+	job.Run.markHlsFallback()
 	return result, nil
 }

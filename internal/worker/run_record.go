@@ -20,6 +20,56 @@ type runRecord struct {
 	// a mid-stream path switch did (switchLivePath) — so its refreshes stay
 	// there (refreshDownload).
 	onNoJS bool
+	// onHlsFallback: a fallback put the capture on the live HLS playlist
+	// (liveHlsInstead: a from-start setup or refresh that failed for want of
+	// a GVS token or on the player's JS challenges). The marathon live-edge
+	// capture and an evicted start's HLS are not fallbacks: their from-start
+	// path is gone, not unsolvable.
+	onHlsFallback bool
+}
+
+// switchBackKey is the run's one switch back to the from-start path
+// (canSwitchBack, markSwitchedBack; owner decision PR-R3).
+const switchBackKey = "live-switch:back"
+
+// markHlsFallback records that a fallback put the capture on the live HLS
+// playlist. A nil record keeps nothing.
+func (r *runRecord) markHlsFallback() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.onHlsFallback = true
+	r.mu.Unlock()
+}
+
+// canSwitchBack reports whether the capture records on a fallback path —
+// the formats that need no player JS, or the live HLS playlist a fallback
+// chose — and has not yet used the run's one switch back to the from-start
+// path that needs the JS (owner decision PR-R3).
+func (r *runRecord) canSwitchBack() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return (r.onNoJS || r.onHlsFallback) && !r.done[switchBackKey]
+}
+
+// markSwitchedBack records the run's one switch back: the capture records on
+// the from-start path again, its refreshes with it (refreshDownload), and no
+// other switch back is made this run.
+func (r *runRecord) markSwitchedBack() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onNoJS, r.onHlsFallback = false, false
+	if r.done == nil {
+		r.done = map[string]bool{}
+	}
+	r.done[switchBackKey] = true
 }
 
 // first reports whether key is new to the run, and records it.

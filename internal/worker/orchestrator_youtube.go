@@ -466,6 +466,93 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		return true
 	}
 
+	// switchBack is the other direction (owner decision PR-R3): a capture a
+	// fallback put on the formats that need no player JS, or on the live HLS
+	// playlist, goes back to the from-start path that needs the JS once it
+	// can be solved again — at most once a run (runRecord.canSwitchBack). It
+	// is tried at the refreshes that would otherwise rebuild the fallback
+	// path (the quality-loss and still-live-verify branches): the from-start
+	// setup on the fresh extraction (manifest-free DASH, else the DASH
+	// manifest), which fails as it did while the challenges stay unsolvable,
+	// and then nothing changes and the fallback's own refresh runs. When it
+	// builds, the switch is made as switchPart makes one: in a NEW part from
+	// the position the stopped downloaders reached, the fallback part closed
+	// where it stands and muxed as its own file in the background — kept
+	// beside the archive, never written over, never deleted — and a current
+	// part that holds no media yet reused. yt-dlp has nothing to switch back
+	// from: it picks a path once per extraction. Beyond it, as the switches
+	// themselves are: a fallback the run took for a transient cause (a
+	// sidecar restart longer than its grace, a player CDN outage) no longer
+	// costs the rest of a broadcast its from-start, highest-quality path.
+	switchBack := func(freshInfo *youtube.VideoInfo, oldVideoSeq, oldAudioSeq int) bool {
+		if !jobCtx.Run.canSwitchBack() || ctx.Err() != nil || freshInfo == nil {
+			return false
+		}
+		var strategy DownloadStrategy
+		switch {
+		case HasManifestlessDashFormats(freshInfo.Formats):
+			strategy = ManifestlessDashStrategy
+		case freshInfo.DashManifestURL != "":
+			strategy = DashStrategy
+		default:
+			return false
+		}
+		hasMedia := discoverStagingMedia(curCtx.StagingDir) != nil
+		nextIndex, segStagingDir := segmentIndex, curCtx.StagingDir
+		if hasMedia {
+			nextIndex = segmentIndex + 1
+			segStagingDir = filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", nextIndex))
+			if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
+				o.logger.Error("could not create the part a switch back records into", "err", err, "jobID", jobCtx.Job.ID)
+				return false
+			}
+		}
+		segJobCtx := *jobCtx
+		segJobCtx.StagingDir = segStagingDir
+		segJobCtx.VideoStartSeq, segJobCtx.AudioStartSeq = oldVideoSeq, oldAudioSeq
+		back, err := strategy.Download(ctx, &segJobCtx, freshInfo, o.strategyDeps())
+		if err == nil {
+			err = setAsideOtherLiveShape(&segJobCtx, back)
+		}
+		segJobCtx.VideoStartSeq, segJobCtx.AudioStartSeq = 0, 0
+		if err != nil {
+			o.logger.Debug("the from-start path still cannot be set up; the capture stays on its fallback path", "err", err, "jobID", jobCtx.Job.ID)
+			if hasMedia {
+				_ = os.Remove(segStagingDir) // only when empty
+			}
+			return false
+		}
+		jobCtx.Run.markSwitchedBack()
+		if hasMedia {
+			muxStart := segmentStartTime
+			if partResumed {
+				muxStart = 0
+			}
+			o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
+				muxStart, time.Now().Unix(), currentQuality, result, "youtube", nil)
+			segmentIndex = nextIndex
+		}
+		o.logger.Warn("[Cipher] live: the player's JS challenges can be solved again — switching back, in a new part, to recording from the start on the "+strategy.Kind()+" formats; the fallback recording so far is kept as its own file",
+			"part", segmentIndex+1, "videoItag", back.VideoItag, "audioItag", back.AudioItag, "jobID", jobCtx.Job.ID)
+		curCtx = &segJobCtx
+		result = back
+		currentQuality = o.extractQualityFromResult(result)
+		waitedForResume.resolved()
+		waitEpisode.reset()
+		verifyWalled = false
+		segmentStartTime = time.Now().Unix()
+		partResumed = false
+		if monitor != nil {
+			select {
+			case <-qualityChangeCh:
+			default:
+			}
+			monitor.UpdateBaseline(currentQuality)
+		}
+		attachProgress(result)
+		return true
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return result, waitedForResume.value(), ctx.Err()
@@ -618,6 +705,13 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			}
 			if result.AudioDownloader != nil {
 				oldAudioSeq = result.AudioDownloader.CurrentSeq()
+			}
+
+			// A capture on a fallback path goes back to the from-start
+			// path, in a new part, once the challenges can be solved again
+			// (switchBack, PR-R3).
+			if switchBack(freshInfo, oldVideoSeq, oldAudioSeq) {
+				continue
 			}
 
 			// Create fresh downloaders in the current staging dir to check quality.
@@ -932,6 +1026,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				curCtx.AudioStartSeq = result.AudioDownloader.CurrentSeq()
 			}
 			stoppedVideoSeq, stoppedAudioSeq := curCtx.VideoStartSeq, curCtx.AudioStartSeq
+			if switchBack(freshInfo, stoppedVideoSeq, stoppedAudioSeq) {
+				// curCtx is the new part's now: the stopped part's context,
+				// and the forced start on it, are not read again.
+				continue
+			}
 			refreshResult, refreshErr := o.refreshDownload(ctx, curCtx, freshInfo, result.IsHls)
 			curCtx.VideoStartSeq, curCtx.AudioStartSeq = 0, 0
 
