@@ -1064,14 +1064,26 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 				variant.StreamID = job.VideoID
 			}
 			// For live streams, provide a stream-end check function and quality probe
+			variant.VodChapters = result.TwitchVodChapters
 			if !result.IsVod && result.TwitchStreamInfo != nil && w.tw != nil {
 				login := result.TwitchStreamInfo.ChannelLogin
+				startedAt := result.TwitchStreamInfo.StartedAt
 				variant.CheckStreamFn = func(innerCtx context.Context) (bool, error) {
 					info, err := w.confirmTwitchStreamInfo(innerCtx, login)
 					if err != nil {
 						return false, err
 					}
 					return info != nil && info.IsLive, nil
+				}
+				variant.CategoryFn = func(innerCtx context.Context) (string, error) {
+					info, err := w.tw.GetStreamInfo(innerCtx, login)
+					if err != nil || info == nil || !info.IsLive {
+						return "", err
+					}
+					return info.GameCategory, nil
+				}
+				variant.ArchiveChaptersFn = func(innerCtx context.Context) []utils.Chapter {
+					return w.twitchArchiveChapters(innerCtx, login, startedAt)
 				}
 				variant.RecheckStreamFn = func(innerCtx context.Context) (*twitch.TwitchStreamInfo, error) {
 					return w.confirmTwitchStreamInfo(innerCtx, login)

@@ -12,6 +12,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -62,6 +63,9 @@ type StreamProcessResult struct {
 	TwitchVariant        *twitch.TwitchHLSVariant
 	TwitchChatDownloader *twitch.ChatDownloader
 	TwitchVodChatDl      *twitch.VodChatDownloader
+	// TwitchVodChapters are a Twitch VOD's chapters (GetVodInfo, owner
+	// decision D23), which ExecuteTwitch stages for the mux.
+	TwitchVodChapters []utils.Chapter
 }
 
 // AsError converts the result's failure into an error, preserving the

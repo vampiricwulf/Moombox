@@ -190,7 +190,9 @@ func (s *stagedInputs) keepsStaging() bool {
 // under FFmpeg's temporary name (verifiedCopy), and removes the repaired
 // copies again. The verdict carries the inputs, so a caller knows whether its
 // staging must be kept (stagedInputs.keepsStaging) and what to report.
-func (o *DownloadOrchestrator) copyStaged(ctx context.Context, jobID, videoPath, audioPath, outputPath string) (muxVerdict, error) {
+// chaptersPath is an FFMETADATA chapter list to embed (prepareArchiveChapters),
+// "" for none — only the single-file archive passes one.
+func (o *DownloadOrchestrator) copyStaged(ctx context.Context, jobID, videoPath, audioPath, outputPath, chaptersPath string) (muxVerdict, error) {
 	var v muxVerdict
 	ins, err := o.prepareStagedInputs(ctx, jobID, outputPath, videoPath, audioPath)
 	if err != nil {
@@ -199,7 +201,7 @@ func (o *DownloadOrchestrator) copyStaged(ctx context.Context, jobID, videoPath,
 	defer o.removeRepairedCopies(jobID, ins)
 	v.inputs = ins
 	video, audio := ins.readPaths()
-	if err := o.mux().MuxCopyAt(ctx, video, audio, outputPath, ins.offsets, o.verifiedCopy(jobID, &v, ins)); err != nil {
+	if err := o.mux().MuxCopyAtChapters(ctx, video, audio, outputPath, ins.offsets, chaptersPath, o.verifiedCopy(jobID, &v, ins)); err != nil {
 		return v, err
 	}
 	o.reportStagingRepairs(jobID, ins, outputPath)

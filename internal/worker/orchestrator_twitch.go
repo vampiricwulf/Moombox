@@ -45,6 +45,19 @@ type TwitchVariantInfo struct {
 	QualityPref     string // the job's quality_preference, e.g. "1080p60" or "best"
 	MaxResolution   int    // from global config
 	Prefer60fps     bool   // from global config (prefer_60fps)
+
+	// VodChapters are a VOD job's chapters, in the VOD's own timeline
+	// (StreamProcessResult.TwitchVodChapters); ArchiveChaptersFn finds a live
+	// capture's archive VOD at finalize and returns ITS chapters, in the
+	// broadcast's timeline, nil when there is none. stageTwitchChapters reads
+	// whichever applies (owner decision D23 and its follow-up 1). Both nil is
+	// a job with no chapter source — a test, or the Mux action's own path.
+	VodChapters       []utils.Chapter
+	ArchiveChaptersFn func(ctx context.Context) []utils.Chapter
+	// CategoryFn reads the live broadcast's category ("" with no error when
+	// it is offline or has none) for the category poll that feeds the live
+	// chapter fallback (pollTwitchCategory). nil runs no poll.
+	CategoryFn func(ctx context.Context) (string, error)
 }
 
 // newTwitchVariantInfo builds the variant a Twitch capture runs on from the
@@ -314,6 +327,17 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	if err := os.MkdirAll(jobCtx.StagingDir, 0o755); err != nil {
 		return fmt.Errorf("create staging dir: %w", err)
 	}
+	// The category the broadcast is in as the capture starts: the first
+	// entry of the live chapter fallback (noteTwitchCategory; every poll of
+	// CheckStreamFn adds the changes after it).
+	if !isVod {
+		noteTwitchCategory(jobCtx.StagingDir, jobCtx.Job.TwitchCategory, time.Now())
+		if variant.CategoryFn != nil {
+			pollCtx, stopPoll := context.WithCancel(parentCtx)
+			defer stopPoll()
+			go o.pollTwitchCategory(pollCtx, jobCtx.StagingDir, variant.CategoryFn)
+		}
+	}
 
 	// Pre-download Twitch thumbnail to staging while stream is still live
 	// (Twitch live preview URLs 404 after stream ends, so muxFinalize would be too late)
@@ -333,7 +357,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			if strings.Contains(thumbURL, ".webp") {
 				thumbPath = filepath.Join(stagingDir, "thumbnail.webp")
 			}
-			DownloadFileMinSize(thumbCtx, thumbURL, thumbPath, 1000, o.logger)
+			downloadTwitchThumbnail(thumbCtx, thumbURL, thumbPath, o.logger)
 		}()
 	}
 
@@ -396,6 +420,19 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		if irc != nil {
 			partChat := chatPathFor(stagingDir)
 			onFirstSegment = func(pdt time.Time) { irc.SettlePartBase(partChat, pdt) }
+		}
+		// The capture's own start in the broadcast, which the live chapter
+		// list is shifted by: the program date-time of the first segment the
+		// root part's file holds (noteTwitchRecordingStart). Only the root —
+		// chapters are embedded in a single-part archive alone.
+		if !isVod && stagingDir == jobCtx.StagingDir {
+			chatBase := onFirstSegment
+			onFirstSegment = func(pdt time.Time) {
+				if chatBase != nil {
+					chatBase(pdt)
+				}
+				noteTwitchRecordingStart(stagingDir, pdt)
+			}
 		}
 		dl := newSegmentDownloader(engine.DownloaderOptions{
 			OnFirstSegment: onFirstSegment,
@@ -1469,6 +1506,13 @@ sessionLoop:
 	// Release download slot before muxing
 	if o.queue != nil {
 		o.queue.ReleaseDownloadSlot(jobCtx.Job.ID)
+	}
+
+	// The archive's chapters, staged for muxAndFinalize: a single-part
+	// archive only — a split job's parts were muxed while the broadcast ran,
+	// before any chapter list was known.
+	if segmentIndex == 0 && curStagingDir == jobCtx.StagingDir {
+		o.stageTwitchChapters(muxCtx, jobCtx, variant, isVod)
 	}
 
 	// Mux Twitch .ts → .mp4

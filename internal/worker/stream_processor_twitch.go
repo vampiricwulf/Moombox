@@ -491,6 +491,11 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 		"thumbnail_url":  vodInfo.ThumbnailURL,
 		"length_seconds": vodInfo.Duration,
 	}
+	// The VOD's own description (G68), which copyAssets writes beside the
+	// archive as .description, as it does for YouTube.
+	if vodInfo.Description != "" {
+		vodUpdates["description"] = vodInfo.Description
+	}
 	if vodInfo.GameCategory != "" {
 		vodUpdates["twitch_category"] = vodInfo.GameCategory
 	}
@@ -525,9 +530,10 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 	sp.logger.Info("twitch VOD ready", "vodID", vodID, "quality", variant.Name)
 
 	result := &StreamProcessResult{
-		ShouldDownload: true,
-		IsVod:          true,
-		TwitchVariant:  variant,
+		ShouldDownload:    true,
+		IsVod:             true,
+		TwitchVariant:     variant,
+		TwitchVodChapters: vodInfo.Chapters,
 	}
 
 	// Create VOD chat downloader if chat download is enabled
@@ -839,6 +845,9 @@ func syncTwitchJobMetadata(job *database.Job, updates map[string]any) {
 	}
 	if v, ok := updates["length_seconds"].(int); ok {
 		job.LengthSeconds = &v
+	}
+	if v, ok := updates["description"].(string); ok {
+		job.Description = v
 	}
 }
 
