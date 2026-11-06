@@ -58,9 +58,11 @@ type twitchGapFillPlan struct {
 // archive VOD (owner decision D17 follow-up 4: up to 24 h).
 const gapFillWindow = 24 * time.Hour
 
-// gapFillFirstCheck is when, after the capture finalized, the fill first looks
-// for the VOD: Twitch appends ENDLIST to a finished broadcast's archive within
-// minutes, and its last segments are listed a little after the live edge's.
+// gapFillFirstCheck is the wait after a look found the VOD not ready, the
+// first being the one the finished capture asks for at once
+// (keepTwitchGapFillPlan): Twitch appends ENDLIST to a finished broadcast's
+// archive within minutes, and its last segments are listed a little after the
+// live edge's.
 const gapFillFirstCheck = 10 * time.Minute
 
 // gapFillBackoff is the wait before the next look after the n-th (1-based)
@@ -109,8 +111,7 @@ func newTwitchGapFillPlan(job *database.Job, variant *TwitchVariantInfo, parts [
 	}
 }
 
-// saveTwitchGapFillPlan stores plan for its first look gapFillFirstCheck after
-// it was made.
+// saveTwitchGapFillPlan stores plan for its next look at next.
 func saveTwitchGapFillPlan(db *database.Database, plan *twitchGapFillPlan, next time.Time) error {
 	data, err := json.Marshal(plan)
 	if err != nil {
@@ -193,9 +194,11 @@ func gapFillFetch(ctx context.Context, url string) ([]byte, error) {
 const gapFillPollInterval = 5 * time.Minute
 
 // runTwitchGapFills sweeps the due plans every gapFillPollInterval until ctx
-// ends, the first sweep one interval after start (past the boot's cleanup and
-// its burst of requests). A panic in one plan's look is recovered in sweep
-// (stepRecovered), so this loop outlives it; the recover here is the
+// ends, the first tick one interval after start (past the boot's cleanup and
+// its burst of requests), and at once whenever a finished capture stores a
+// plan (the orchestrator's gapFillKick), so a VOD that is already complete is
+// filled without waiting for a tick. A panic in one plan's look is recovered
+// in sweep (stepRecovered), so this loop outlives it; the recover here is the
 // goroutine's own backstop.
 func (w *DownloadWorker) runTwitchGapFills(ctx context.Context, f *twitchGapFiller) {
 	defer func() {
@@ -203,6 +206,10 @@ func (w *DownloadWorker) runTwitchGapFills(ctx context.Context, f *twitchGapFill
 			w.logger.Error("panic in the Twitch gap-fill sweep", "panic", fmt.Sprint(r))
 		}
 	}()
+	var kick <-chan struct{}
+	if w.orchestrator != nil {
+		kick = w.orchestrator.gapFillKick
+	}
 	t := time.NewTicker(gapFillPollInterval)
 	defer t.Stop()
 	for {
@@ -210,6 +217,7 @@ func (w *DownloadWorker) runTwitchGapFills(ctx context.Context, f *twitchGapFill
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		case <-kick:
 		}
 		f.sweep(ctx, time.Now())
 	}

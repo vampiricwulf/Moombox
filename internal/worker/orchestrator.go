@@ -78,7 +78,12 @@ type DownloadOrchestrator struct {
 	routedCipher cipher.Solver
 	potProvider  *bgutils.PotProvider
 	notifier     notifications.Sender
-	conn         Connectivity
+	// gapFillKick wakes the worker's gap-fill sweep (runTwitchGapFills) when
+	// a finished capture stores a plan, so its first look at the archive VOD
+	// happens at once rather than at the next 5-minute tick. Buffered 1: a
+	// kick while one is pending is dropped, the pending sweep covers it.
+	gapFillKick chan struct{}
+	conn        Connectivity
 	// twitchChats is the live Twitch IRC chat downloaders, shared with the
 	// DownloadWorker that owns this orchestrator (NewDownloadWorker assigns
 	// ONE registry to both). ExecuteTwitch registers into it; cmd/moombox
@@ -122,6 +127,7 @@ func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath 
 		routedCipher:  routedCs,
 		potProvider:   pp,
 		notifier:      nm,
+		gapFillKick:   make(chan struct{}, 1),
 		conn:          conn,
 		logger:        logger,
 		muxRootCtx:    muxRootCtx,

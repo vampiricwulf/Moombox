@@ -1630,14 +1630,16 @@ sessionLoop:
 	return err
 }
 
-// keepTwitchGapFillPlan stores a finished live capture's gap-fill plan for its
-// first look gapFillFirstCheck from now, when the job did finish. Nothing
-// waits on it (owner decision D17 follow-up 4).
+// keepTwitchGapFillPlan stores a finished live capture's gap-fill plan, due
+// at once, and wakes the gap-fill sweep: a VOD Twitch has already completed
+// is filled right away, and one that is not ready yet falls to the plan's
+// backoff (gapFillFirstCheck, then doubling). It applies only when the job
+// did finish. Nothing waits on it (owner decision D17 follow-up 4).
 func (o *DownloadOrchestrator) keepTwitchGapFillPlan(plan *twitchGapFillPlan) {
 	if j, err := o.db.GetJob(plan.JobID); err != nil || j == nil || j.Status != database.StatusFinished {
 		return
 	}
-	if err := saveTwitchGapFillPlan(o.db, plan, time.Now().Add(gapFillFirstCheck)); err != nil {
+	if err := saveTwitchGapFillPlan(o.db, plan, time.Now()); err != nil {
 		o.logger.Warn("could not keep the gap-fill plan; the archive stays as recorded", "err", err, "jobID", plan.JobID)
 		return
 	}
@@ -1647,6 +1649,10 @@ func (o *DownloadOrchestrator) keepTwitchGapFillPlan(plan *twitchGapFillPlan) {
 	}
 	o.logger.Info("the capture lacks parts of the broadcast; they are filled from its archive VOD once it is complete (up to 24 hours)",
 		"jobID", plan.JobID, "spans", len(plan.Spans), "kinds", strings.Join(kinds, ","))
+	select {
+	case o.gapFillKick <- struct{}{}:
+	default:
+	}
 }
 
 // wireTwitchVodInfo gives a VOD capture its VideoMetadata re-read: the
