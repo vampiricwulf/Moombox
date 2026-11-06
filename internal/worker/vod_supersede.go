@@ -276,8 +276,9 @@ func (o *DownloadOrchestrator) supersedePartsWithVod(jobCtx *JobContext) error {
 // the whole dir for one.
 //
 // For a job that finalized as PARTS, the root is part 0 (used, through its
-// row) or a short span its split did not make a part (set aside since PR-R9,
-// so muxed beside the archive and never here)
+// row) or a short span its split did not make a part (normally set aside
+// since PR-R9, so muxed beside the archive; one still here predates that —
+// a span whose set-aside failed was muxed as a part, and is the part)
 // — unless it holds a from-the-start recording, which a finalize that took the
 // parts did not use: the root a VOD run claimed (vodRootMarkerFile), or the
 // whole-file pair, which only DownloadVod ever writes and no part is made

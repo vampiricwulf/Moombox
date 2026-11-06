@@ -84,7 +84,11 @@ type stoppedStream interface {
 // (about 35 minutes). Reset, the loop rebuilds for as long as the stream is
 // live, as it did before the cap, and the rule asks again — with a fresh
 // probe past the hole — every third rebuild. The cap stays for one segment
-// refused while later ones are served: that rule takes it.
+// refused while later ones are served: that rule takes it. moonarchive stops
+// the capture on this repeated near-edge 403 instead (its
+// RepeatedFragmentExpiryException when max_seq - 2 <= cur_seq,
+// src/moonarchive/downloaders/youtube/_dash.py:241-262); waiting it out goes
+// beyond it, by owner decision PR-M2.
 func (r *seqRun) noteStopped(d stoppedStream) int {
 	if d.WholeStreamRefused() || !d.StoppedWellBehindHead() {
 		*r = seqRun{}
