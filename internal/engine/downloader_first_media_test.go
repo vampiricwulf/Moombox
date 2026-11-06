@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -138,5 +140,48 @@ func TestHlsLiveReportsTheFirstWrittenSequence(t *testing.T) {
 	}
 	if got := run(appendTo, 3, true); len(got) != 0 {
 		t.Errorf("an append reports %v, want nothing", got)
+	}
+}
+
+// TestHlsVodParallelReportsTheFirstWrittenSequence: a finished playlist the
+// HLS loop hands to the VOD-parallel writer (runHlsVodParallel — any ENDLIST
+// playlist outside StopOnGap) reports the first written segment's media
+// sequence into a fresh file as the live loop does: here 7, where the
+// playlist's window opens. Without it a fresh recording written there
+// reported no start at all, and the worker's record kept whatever an
+// earlier recording of the same name had left (FE-18).
+//
+// Mutant: firstMediaWritten dropped from runHlsVodParallel's write (nothing
+// is reported).
+func TestHlsVodParallelReportsTheFirstWrittenSequence(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if filepath.Ext(r.URL.Path) == ".m3u8" {
+			fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:7\n"+
+				"#EXTINF:2.000,\nseg7.ts\n#EXTINF:2.000,\nseg8.ts\n#EXT-X-ENDLIST\n")
+			return
+		}
+		fmt.Fprintf(w, "[%s]", r.URL.Path)
+	}))
+	t.Cleanup(srv.Close)
+	out := filepath.Join(t.TempDir(), "video.ts")
+	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/v.m3u8", OutputFile: out, StartSeq: -1, IsHls: true})
+	var mu sync.Mutex
+	var got []int
+	d.OnFirstMedia = func(seq int) {
+		mu.Lock()
+		got = append(got, seq)
+		mu.Unlock()
+	}
+	d.delays = fastDelays()
+	if err := d.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if data, _ := os.ReadFile(out); string(data) != "[/seg7.ts][/seg8.ts]" {
+		t.Fatalf("output = %q, want both segments (the VOD-parallel writer)", data)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(got, []int{7}) {
+		t.Errorf("OnFirstMedia reports = %v, want [7]", got)
 	}
 }

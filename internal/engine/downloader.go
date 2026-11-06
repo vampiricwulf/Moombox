@@ -769,7 +769,8 @@ type SegmentDownloader struct {
 	OnGap      func(g DownloadGap)
 	OnFinish   func()
 	// OnFirstMedia is called once, from the live DASH loop (sequential and
-	// catch-up writes alike) and the live HLS loop, with the sequence of the
+	// catch-up writes alike), the live HLS loop and the HLS VOD-parallel
+	// writer it hands a finished playlist to, with the sequence of the
 	// first media segment this downloader writes into an output file it
 	// started EMPTY — never on a resume or an append, whose file began at
 	// some earlier segment this downloader never saw. That sequence is where
