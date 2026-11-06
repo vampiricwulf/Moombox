@@ -3,10 +3,12 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
@@ -152,8 +154,9 @@ func recordedFromStart(paths ...string) bool {
 
 // joinOffsetSeconds is where in the broadcast a live YouTube capture's
 // single-file recording began, in seconds (owner decision CJ-3: the row's
-// join_offset_seconds, which the chapter import's offset pre-fills from);
-// ok is false when it is not known. Asked by the finalize for a live YouTube
+// join_offset_seconds, which the chapter import's offset pre-fills from;
+// a split archive's is part 1's, splitJoinOffsetSeconds, CK-3); ok is
+// false when it is not known. Asked by the finalize for a live YouTube
 // job only: a VOD's archive is the video's own timeline, which the import's
 // 0 already is, and a Twitch capture's comments count in a VOD Moombox does
 // not hold.
@@ -202,6 +205,40 @@ func (o *DownloadOrchestrator) joinOffsetSeconds(ctx context.Context, result *Do
 		}
 	}
 	return 0, false
+}
+
+// splitJoinOffsetSeconds is joinOffsetSeconds for a split archive (owner
+// decision CK-3): where in the broadcast part 1 — segments[0], the first
+// part the archive keeps — began, read from that part's own staged recording
+// and its recordingStartFile entry by the single-file rules: 0 when it was
+// recorded from sq=0, the fragmented MP4's start_time or its first sequence
+// times the advertised segment duration for a late join, unknown otherwise.
+// Part 1 is staged in the job's staging root (part 0, unless a seg_0 dir
+// exists: rootIsPartZero) or in seg_<its index> — a part merge folds a run's
+// later parts into its first and keeps the first's dir, and the dirs stay
+// until the finalize's staging cleanup. result is the finalize's download
+// result, whose advertised cadence is the broadcast's (one live broadcast's
+// formats share it, as advertisedSegmentDuration relies on); nil from the
+// Mux action's staging, which leaves the fragments' own timing and sq=0.
+//
+// The chapter import lays the parts end to end from this point. Whatever
+// fell between two parts — an outage, the seconds a quality split spent
+// re-opening — is in the broadcast's timeline but in no part, so a comment's
+// timestamps past a gap land later in the archive than they should by the
+// gap's length: not compensated, as the import's single offset cannot.
+func (o *DownloadOrchestrator) splitJoinOffsetSeconds(ctx context.Context, jobCtx *JobContext, segments []database.Segment, result *DownloadResult) (float64, bool) {
+	if len(segments) == 0 || jobCtx.StagingDir == "" {
+		return 0, false
+	}
+	dir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segments[0].SegmentIndex))
+	if segments[0].SegmentIndex == 0 && rootIsPartZero(jobCtx.StagingDir) {
+		dir = jobCtx.StagingDir
+	}
+	media := discoverStagingMedia(dir)
+	if media == nil {
+		return 0, false
+	}
+	return o.joinOffsetSeconds(ctx, result, media.VideoPath, media.AudioPath)
 }
 
 // formatTargetDuration is the advertised per-segment duration of the format

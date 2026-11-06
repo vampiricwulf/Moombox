@@ -103,7 +103,7 @@ func TestSplitArchiveFinalizeWritesItsChapterList(t *testing.T) {
 		OutputDir: root, Filename: "Show", Logger: &discardLogger{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // no network for copyAssets' thumbnail fallback
-	if err := o.finalizeMultiSegmentJob(ctx, jobCtx, segments); err != nil {
+	if err := o.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil); err != nil {
 		t.Fatalf("finalizeMultiSegmentJob: %v", err)
 	}
 
@@ -137,7 +137,7 @@ func TestSplitArchiveFinalizeWritesItsChapterList(t *testing.T) {
 	if err := os.Remove(filepath.Join(staging, twitchTimelineFile)); err != nil {
 		t.Fatal(err)
 	}
-	if err := o.finalizeMultiSegmentJob(ctx, jobCtx, segments); err != nil {
+	if err := o.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil); err != nil {
 		t.Fatalf("re-finalize: %v", err)
 	}
 	if fileExists(sidecar) {

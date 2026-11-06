@@ -471,6 +471,55 @@ func TestChapterImportPrefillsTheJoinPoint(t *testing.T) {
 	}
 }
 
+// TestChapterImportSplitArchivePrefillsPartOnesJoinPoint is owner decision
+// CK-3 through the preview route: a split live YouTube capture's row now
+// carries part 1's join point, and the import — which lays the parts end to
+// end from part 1's start — opens at it, negated and as a clock, a viewer's
+// "1:30:00" landing 1:30:00 minus the join into the parts' timeline. A
+// split archive's fitted list is the comment shifted by that one offset:
+// gaps between the parts are not compensated.
+//
+// The worker's half — the split finalize storing the join point — is
+// TestSplitFinalizeRecordsPartOnesJoinOffset (internal/worker).
+//
+// Mutants: defaultChapterOffset ignoring the row (no pre-fill, the unknown
+// note); the offset not applied to the list (Song lands at 1:30:00).
+func TestChapterImportSplitArchivePrefillsPartOnesJoinPoint(t *testing.T) {
+	f := newChapterImportFixture(t, &fakeChapterImporter{})
+	p1 := filepath.Join(f.outputDir, "Live - part1.mp4")
+	p2 := filepath.Join(f.outputDir, "Live - part2.mp4")
+	for _, p := range []string{p1, p2} {
+		if err := os.WriteFile(p, []byte("recorded "+p), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.cache.probe = func(context.Context, string, string) ([]Chapter, error) { return nil, nil }
+	f.addJob(t, "yt_split_late", func(j *database.Job) {
+		j.OutputFile = p1
+		j.Segments = []database.Segment{
+			{SegmentIndex: 0, Filename: filepath.Base(p1), FilePath: p1, DurationSeconds: 3600},
+			{SegmentIndex: 1, Filename: filepath.Base(p2), FilePath: p2, DurationSeconds: 3600},
+		}
+	})
+	f.db.UpdateJobFields("yt_split_late", map[string]any{"join_offset_seconds": 1800.0})
+
+	code, v, body := f.postImport(t, "/api/jobs/yt_split_late/chapters/preview", map[string]any{"text": ""})
+	if code != http.StatusOK {
+		t.Fatalf("preview: %d %s", code, body)
+	}
+	if !v.Split || v.DefaultOffsetText != "-30:00" || v.DefaultOffsetNote != "joined 30:00 in" {
+		t.Fatalf("split %v, text %q, note %q; want a split archive pre-filled -30:00, joined 30:00 in", v.Split, v.DefaultOffsetText, v.DefaultOffsetNote)
+	}
+	code, v, body = f.postImport(t, "/api/jobs/yt_split_late/chapters/preview",
+		map[string]any{"text": "0:00 Start\n1:30:00 Song", "offsetSeconds": v.DefaultOffsetText})
+	if code != http.StatusOK || v.Error != "" {
+		t.Fatalf("preview: %d %s", code, body)
+	}
+	if len(v.Chapters) == 0 || v.Chapters[len(v.Chapters)-1].Title != "Song" || v.Chapters[len(v.Chapters)-1].Start != 3600 {
+		t.Errorf("chapters = %+v, want Song at 1:00:00 of the parts' timeline", v.Chapters)
+	}
+}
+
 // TestDefaultChapterOffset pins every row shape CI-5's pre-fill reads (owner
 // decisions CJ-3, CK-2): a late join is its join point negated, pre-filled
 // as a signed clock (with milliseconds when it has a fraction); a capture

@@ -51,7 +51,7 @@ func TestMultiPartAssetsFollowThePinnedParts(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // no network for the thumbnail fallback inside copyAssets
-	if err := o.finalizeMultiSegmentJob(ctx, jobCtx, segments); err != nil {
+	if err := o.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil); err != nil {
 		t.Fatalf("finalizeMultiSegmentJob: %v", err)
 	}
 	fresh, _ := db.GetJob(job.ID)

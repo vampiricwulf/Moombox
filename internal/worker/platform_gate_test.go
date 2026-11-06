@@ -89,7 +89,7 @@ func TestFinalizeMultiSegmentJob_PlatformGate(t *testing.T) {
 			StagingDir: stagingDir,
 		}
 
-		if err := o.finalizeMultiSegmentJob(context.Background(), jobCtx, segments); err != nil {
+		if err := o.finalizeMultiSegmentJob(context.Background(), jobCtx, segments, nil); err != nil {
 			t.Fatalf("finalizeMultiSegmentJob: %v", err)
 		}
 		return probeCalls

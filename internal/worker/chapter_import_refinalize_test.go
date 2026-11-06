@@ -179,7 +179,7 @@ func TestSplitRefinalizeKeepsAnImportedChapterList(t *testing.T) {
 
 	jobCtx := &JobContext{Job: job, DB: db, Config: &JobConfig{}, StagingDir: staging,
 		OutputDir: root, Filename: "Show", Logger: &discardLogger{}, Refinalize: true}
-	if err := o.finalizeMultiSegmentJob(ctx, jobCtx, segments); err != nil {
+	if err := o.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil); err != nil {
 		t.Fatalf("re-finalize: %v", err)
 	}
 	kept := readImport(t, sidecar)
@@ -196,7 +196,7 @@ func TestSplitRefinalizeKeepsAnImportedChapterList(t *testing.T) {
 	writeImport()
 	db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusMuxing})
 	jobCtx.Refinalize = false
-	if err := o.finalizeMultiSegmentJob(ctx, jobCtx, segments); err != nil {
+	if err := o.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 	if _, imported, _ := utils.ReadImportedChaptersSidecar(sidecar); imported {
