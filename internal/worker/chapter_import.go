@@ -237,14 +237,42 @@ func probeArchiveShape(ctx context.Context, ffprobePath, path string) (*archiveS
 // variable so a test can refuse a copy FFmpeg made well.
 var remuxCheck = verifyArchiveRemux
 
+// Re-mux shortfall tolerance (owner decision PR-M7): how much shorter than
+// the archive it copies a re-mux's stream, or the file, may be. The larger of
+// remuxShortfallMinSec and remuxShortfallFraction of the original's length,
+// with no floor below which nothing is measured.
+//
+// Deliberately NOT the live capture's muxedOutputIsShort (a 20 s shortfall
+// allowed, nothing under 60 s judged): that tolerance is for a mux of raw
+// fragments whose container metadata is unreliable, and this is a stream copy
+// of one finished file into a copy that REPLACES it, the only copy there is.
+// A whole-file copy has no reason to lose anything, so a second (container
+// rounding of the last frame or audio packet) or half a percent (an edit list
+// or a stretched timebase measured a little differently, on a long archive)
+// is all it is allowed; a clip under a minute is now measured too.
+const (
+	remuxShortfallMinSec   = 1.0
+	remuxShortfallFraction = 0.005
+)
+
+// remuxIsShort reports whether a re-mux's duration, outSec, falls short of
+// the original's, origSec, by more than the re-mux tolerance. An original the
+// probe could not read (0) cannot be judged; an output LONGER than its
+// original never counts as short.
+func remuxIsShort(origSec, outSec float64) bool {
+	if origSec <= 0 {
+		return false
+	}
+	return origSec-outSec > max(remuxShortfallMinSec, remuxShortfallFraction*origSec)
+}
+
 // verifyArchiveRemux holds a re-mux to the archive it copies: the same media
 // streams, each kind as many as before, none of them — and not the file —
-// shorter than its original by more than the archive copy's own tolerance
-// (muxedOutputIsShort, ENGINE-9's check, which judges only an input long
-// enough to be measured), and exactly the chapters the list asked for. A
-// stream copy of a whole file has no reason to differ from it in anything
-// but its chapters, so any difference means the copy went wrong and the
-// archive must stay as it is.
+// shorter than its original by more than the re-mux's own tolerance
+// (remuxIsShort: about a second or 0.5%, measured however short the archive
+// is), and exactly the chapters the list asked for. A stream copy of a whole
+// file has no reason to differ from it in anything but its chapters, so any
+// difference means the copy went wrong and the archive must stay as it is.
 func verifyArchiveRemux(orig, out *archiveShape, wantChapters int) error {
 	for kind, durs := range orig.streams {
 		got := out.streams[kind]
@@ -252,8 +280,8 @@ func verifyArchiveRemux(orig, out *archiveShape, wantChapters int) error {
 			return fmt.Errorf("the re-mux has %d %s stream(s), the archive %d; the archive is left as it was", len(got), kind, len(durs))
 		}
 		for i := range durs {
-			if muxedOutputIsShort(durs[i], got[i]) {
-				return fmt.Errorf("the re-mux's %s stream is %.0fs, the archive's %.0fs; the archive is left as it was", kind, got[i], durs[i])
+			if remuxIsShort(durs[i], got[i]) {
+				return fmt.Errorf("the re-mux's %s stream is %.1fs, the archive's %.1fs; the archive is left as it was", kind, got[i], durs[i])
 			}
 		}
 	}
@@ -262,8 +290,8 @@ func verifyArchiveRemux(orig, out *archiveShape, wantChapters int) error {
 			return fmt.Errorf("the re-mux has a %s stream the archive does not; the archive is left as it was", kind)
 		}
 	}
-	if muxedOutputIsShort(orig.durationSec, out.durationSec) {
-		return fmt.Errorf("the re-mux is %.0fs, the archive %.0fs; the archive is left as it was", out.durationSec, orig.durationSec)
+	if remuxIsShort(orig.durationSec, out.durationSec) {
+		return fmt.Errorf("the re-mux is %.1fs, the archive %.1fs; the archive is left as it was", out.durationSec, orig.durationSec)
 	}
 	if out.chapters != wantChapters {
 		return fmt.Errorf("the re-mux carries %d chapter(s), %d were asked for; the archive is left as it was", out.chapters, wantChapters)
