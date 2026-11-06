@@ -36,6 +36,26 @@ func TestChaptersFromDescription(t *testing.T) {
 	if got := ChaptersFromDescription(desc, 0); got != nil {
 		t.Errorf("chapters without a duration = %+v, want none", got)
 	}
+
+	// Non-ASCII titles, each expectation Python's re.findall with yt-dlp's
+	// sep_re: RE2's ASCII `\W` would swallow the title and the newline.
+	for _, tc := range []struct {
+		desc string
+		want []Chapter
+	}{
+		{"0:00 イントロ 開始\n5:00 歌枠 パート2\n10:00 エンディング", []Chapter{
+			{StartMs: 0, Title: "イントロ 開始"}, {StartMs: 300_000, Title: "歌枠 パート2"}, {StartMs: 600_000, Title: "エンディング"}}},
+		{"0:00 【雑談】 はじめに\n12:34 Song one", []Chapter{
+			{StartMs: 0, Title: "【雑談】 はじめに"}, {StartMs: 754_000, Title: "Song one"}}},
+		{"0:00 - 雑談 開始\n1:00\u3000歌", []Chapter{
+			{StartMs: 0, Title: "雑談 開始"}, {StartMs: 60_000, Title: "歌"}}},
+		{"オープニング 0:00\n歌】 5:00\n", []Chapter{
+			{StartMs: 0, Title: "オープニング"}, {StartMs: 300_000, Title: "歌"}}},
+	} {
+		if got := ChaptersFromDescription(tc.desc, 3600_000); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("ChaptersFromDescription(%q) = %+v, want %+v", tc.desc, got, tc.want)
+		}
+	}
 }
 
 // TestSanitizeChapters is yt-dlp's fill-in (YoutubeDL.py process_info) plus

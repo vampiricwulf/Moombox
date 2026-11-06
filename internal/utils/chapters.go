@@ -159,12 +159,32 @@ func FFMetadataChapters(chapters []Chapter) string {
 // chapters, `(?:\d+:)?\d{1,2}:\d{2}`.
 const descriptionChapterDuration = `(?:\d+:)?\d{1,2}:\d{2}`
 
+// pySpace, pyNonWord and pyWord are Python 3's Unicode `\s`, `\W` and `\w`
+// (str.isspace; not str.isalnum and not '_'; str.isalnum or '_'), which
+// yt-dlp's sep_re is written against. RE2's `\s`, `\W` and `\b` are
+// ASCII-only, and a literal port lets `\W*` eat a Japanese title and the
+// newline after it, so "0:00 雑談\n5:00 歌枠" came out as one chapter titled
+// "5:00 歌枠", and a CJK title ending never met `\b`. Like Python's, pySpace
+// and pyNonWord include the newline: the shapes must match exactly what
+// upstream's do, line joins included.
+const (
+	pySpace   = `[\t\n\v\f\r\x1c-\x1f\x85\p{Z}]`
+	pyNonWord = `[^\p{L}\p{N}_]`
+	pyWord    = `[\p{L}\p{N}_]`
+)
+
 // descriptionChapterTimeFirst and descriptionChapterTimeLast are yt-dlp's two
-// sep_re shapes (_extract_chapters_from_description, common.py b77c9304e):
-// "0:00 Intro" lines, and failing those, "Intro 0:00" lines.
+// sep_re shapes (_extract_chapters_from_description, common.py b77c9304e),
+// `^\s*(dur)\b\W*\s(.+?)\s*$` and `^\s*(.+?)\b\W*\s(dur)\s*$`: "0:00 Intro"
+// lines, and failing those, "Intro 0:00" lines, with Python's Unicode classes
+// spelled out. The `\b` after the duration is dropped: the `\W*\s` that
+// follows already demands a non-word character there, which is all the
+// boundary asks of a duration ending in a digit. The `\b` after a time-last
+// title, with a non-word character after it, means the title ends on a word
+// character, so the title group is written to end on one.
 var (
-	descriptionChapterTimeFirst = regexp.MustCompile(`(?m)^\s*(` + descriptionChapterDuration + `)\b\W*\s(.+?)\s*$`)
-	descriptionChapterTimeLast  = regexp.MustCompile(`(?m)^\s*(.+?)\b\W*\s(` + descriptionChapterDuration + `)\s*$`)
+	descriptionChapterTimeFirst = regexp.MustCompile(`(?m)^` + pySpace + `*(` + descriptionChapterDuration + `)` + pyNonWord + `*` + pySpace + `(.+?)` + pySpace + `*$`)
+	descriptionChapterTimeLast  = regexp.MustCompile(`(?m)^` + pySpace + `*(.*?` + pyWord + `)` + pyNonWord + `*` + pySpace + `(` + descriptionChapterDuration + `)` + pySpace + `*$`)
 )
 
 // ChaptersFromDescription is yt-dlp's _extract_chapters_from_description: the
