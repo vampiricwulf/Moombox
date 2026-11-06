@@ -281,9 +281,12 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex, !shortSegment)
 		}
 
-		// Mux the old segment in the background (unless too short).
+		// Mux the old segment in the background, unless too short: a short
+		// span is set aside instead (setAsideShortSpan: muxed into its own
+		// file beside the archive at finalize, never deleted — PR-R9), and
+		// one that cannot be set aside is closed as a part like any other.
 		// No preMux: YouTube chat stays a single whole-job file.
-		if !shortSegment {
+		if !shortSegment || !o.setAsideShortSpan(curCtx.StagingDir, jobCtx.Job.ID) {
 			// A resumed part's true start pre-dates this session — pass
 			// the sentinel so muxSegment derives it from the muxed
 			// duration instead of stamping it with the restart time.
@@ -294,36 +297,17 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
 				muxStart, segmentEndTime, currentQuality, result, "youtube", nil)
 			segmentIndex++
-		} else {
-			o.logger.Debug("skipping short segment mux",
-				"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
-				"jobID", jobCtx.Job.ID)
 		}
 
 		// Create downloaders in the NEW staging dir. The caller's refresh points
 		// at the old staging dir and was used only to check quality — it is
-		// discarded unrun.
+		// discarded unrun. A short span reuses the index, and its dir when
+		// that was the current one: setAsideShortSpan has cleared it of the
+		// span's media and resume state, so the engine starts the new quality
+		// fresh instead of resume-appending it onto the old.
 		segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
 		if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
 			return true, fmt.Errorf("create segment staging dir: %w", err)
-		}
-		if shortSegment && segStagingDir == curCtx.StagingDir {
-			// Short-span discard reusing the same index/dir: physically
-			// remove the span's media and resume sidecars, or the engine
-			// would resume-append the NEW quality onto the discarded
-			// old-quality data — a mixed-codec file under a stale init
-			// segment. Mirrors the Twitch discard in advanceToNewPart.
-			// video.ts is the YouTube HLS strategy's staging name;
-			// video_stream/audio_stream are the DASH family's.
-			for _, name := range []string{"video_stream", "audio_stream", "video.ts"} {
-				p := filepath.Join(segStagingDir, name)
-				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-					o.logger.Warn("failed to remove discarded short-span media", "file", p, "err", err)
-				}
-				if err := os.Remove(p + ".resume.json"); err != nil && !os.IsNotExist(err) {
-					o.logger.Warn("failed to remove discarded short-span resume state", "file", p, "err", err)
-				}
-			}
 		}
 
 		segJobCtx := *jobCtx

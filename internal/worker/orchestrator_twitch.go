@@ -708,15 +708,21 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// forward. The caller creates the next downloader against the new dir.
 	//
 	// muxCurrent=false reuses the same index for the next dir (the
-	// quality-split short-segment rule: the flapping span's media is
-	// dropped); gap splits always mux — that data is irreplaceable. When the
-	// reused dir IS the current dir, the chat deliberately keeps its file:
+	// quality-split short-segment rule: the flapping span's media is set
+	// aside, muxed into its own file at finalize — PR-R9); gap splits always
+	// mux — that data is irreplaceable. When the reused dir IS the current
+	// dir, the chat deliberately keeps its file:
 	// rolling onto the same path would rewrite it from scratch.
 	//
 	// Returns the reason the advance failed — os.MkdirAll is the only one —
 	// so the caller can latch it. A part advance that cannot create its next
 	// staging dir must never let the job finalize Finished (sweep-2 R2).
 	advanceToNewPart := func(muxCurrent bool, segmentEndTime int64) error {
+		// A short span is set aside, never deleted (PR-R9, setAsideShortSpan);
+		// one that cannot be is closed and muxed as a part like any other.
+		if !muxCurrent && !o.setAsideShortSpan(curStagingDir, jobCtx.Job.ID) {
+			muxCurrent = true
+		}
 		nextIdx := segmentIndex
 		if muxCurrent {
 			nextIdx = segmentIndex + 1
@@ -752,19 +758,11 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
 				muxStart, segmentEndTime, currentQuality, muxResult, "twitch", enrich)
 		} else if nextDir == curStagingDir {
-			// Short-segment discard, reusing the same index/dir: the dropped
-			// span's media and its resume sidecar must actually be removed —
-			// the engine's resume path would otherwise trust the sidecar
-			// (same StreamID, opaque weaver URLs carry no identity) and
-			// APPEND the new quality's data onto the discarded old-quality
-			// span instead of starting the part fresh.
-			oldVideo := filepath.Join(curStagingDir, "video_stream")
-			if err := os.Remove(oldVideo); err != nil && !os.IsNotExist(err) {
-				o.logger.Warn("failed to remove discarded short-segment media", "err", err, "jobID", jobCtx.Job.ID)
-			}
-			if err := os.Remove(oldVideo + ".resume.json"); err != nil && !os.IsNotExist(err) {
-				o.logger.Warn("failed to remove discarded short-segment resume state", "err", err, "jobID", jobCtx.Job.ID)
-			}
+			// The short span reusing the same index/dir was set aside above,
+			// media and resume sidecar both: the engine's resume path would
+			// otherwise trust the sidecar (same StreamID, opaque weaver URLs
+			// carry no identity) and APPEND the new quality's data onto the
+			// closed old-quality span instead of starting the part fresh.
 			if !isVod {
 				coverageFor(curStagingDir).reset()
 			}

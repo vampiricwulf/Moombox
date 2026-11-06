@@ -2146,7 +2146,8 @@ func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx
 	}
 
 	// Root staging files are segment 0 — unless seg_0 exists, in which case
-	// the root data was a short segment the pipeline deliberately skipped, or
+	// the root data was a short span a quality split set aside (PR-R9; any
+	// left here predates that, or its set-aside failed), or
 	// the from-the-start download a VOD run claimed the root for.
 	if rootIsPartZero(jobCtx.StagingDir) && !recorded[0] && discoverStagingMedia(jobCtx.StagingDir) != nil {
 		segDirs = append([]stagedSeg{{idx: 0, dir: jobCtx.StagingDir}}, segDirs...)
