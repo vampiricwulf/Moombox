@@ -339,7 +339,7 @@ func TestParseChapterOffset(t *testing.T) {
 	if got, err := ParseChapterOffset("１：００"); err != nil || got != 60000 {
 		t.Errorf("full-width clock: %d %v", got, err)
 	}
-	for _, bad := range []string{"abc", "1:2:3", "--5", "1e3", "5s", "1:60", "1:00.", "1:00.1234", "1:00.5.5", "1:00.-5"} {
+	for _, bad := range []string{"abc", "1:2:3", "--5", "1e3", "5s", "1:60", "1:00.", "1:00.1234", "1:00.5.5", "1:00.-5", "100:60:00", "100:00", "277778:00:00"} {
 		if _, err := ParseChapterOffset(bad); !errors.Is(err, ErrBadChapterOffset) {
 			t.Errorf("%q: want ErrBadChapterOffset, got %v", bad, err)
 		}
@@ -353,7 +353,8 @@ func TestParseChapterOffset(t *testing.T) {
 //
 // Mutants: the sign dropped ("1:23:45"); the fraction dropped
 // ("-3:28"); hours always written ("-0:03:28.033"); ParseChapterOffset
-// refusing a clock's fraction (the round trip fails).
+// refusing a clock's fraction (the round trip fails); ParseChapterOffset
+// refusing a clock of 100 hours or more (the 24/7 rows fail).
 func TestFormatChapterOffset(t *testing.T) {
 	for ms, want := range map[int64]string{
 		-5025000: "-1:23:45",
@@ -364,6 +365,11 @@ func TestFormatChapterOffset(t *testing.T) {
 		90000:    "1:30",
 		3600000:  "1:00:00",
 		-59999:   "-0:59.999",
+		// A late join 100 hours and more into a 24/7 broadcast: the field
+		// reads back what it was pre-filled with.
+		-360000000:     "-100:00:00",
+		-1000000000:    "-277:46:40",
+		-1000000000033: "-277777:46:40.033",
 	} {
 		if got := FormatChapterOffset(ms); got != want {
 			t.Errorf("FormatChapterOffset(%d) = %q, want %q", ms, got, want)

@@ -310,6 +310,13 @@ var chapterOffsetNumberRe = regexp.MustCompile(`^(?:\d+(?:\.\d*)?|\.\d+)$`)
 // offset is kept at.
 var chapterOffsetFractionRe = regexp.MustCompile(`^\d{1,3}$`)
 
+// chapterOffsetLongClockRe is an offset clock past the comment shapes' 99
+// hours: H:MM:SS with three or more hour digits. FormatChapterOffset writes
+// one for a join point that deep into a 24/7 or multi-day broadcast, and the
+// field must read back what it was pre-filled with; a pasted comment's
+// timestamps keep the owner's shapes (chapterClockRe).
+var chapterOffsetLongClockRe = regexp.MustCompile(`^(\d{3,}):([0-5]\d):([0-5]\d)$`)
+
 // ParseChapterOffset reads the import's offset field (owner decision CI-5):
 // seconds ("-90", "12.5") or a clock with an optional sign and fraction
 // ("-1:02:03", "+1:30", "-1:02:03.033", full-width digits too), as
@@ -355,6 +362,9 @@ func ParseChapterOffset(s string) (int64, error) {
 		}
 		ms, ok := parseChapterClock(clock)
 		if !ok {
+			ms, ok = parseLongOffsetClock(clock)
+		}
+		if !ok {
 			return 0, ErrBadChapterOffset
 		}
 		return sign * (ms + fracMs), nil
@@ -369,11 +379,30 @@ func ParseChapterOffset(s string) (int64, error) {
 	return sign * int64(math.Round(sec*1000)), nil
 }
 
+// parseLongOffsetClock reads an offset clock of 100 hours or more
+// (chapterOffsetLongClockRe) as milliseconds, bounded as a seconds offset
+// is (1e9 s); ok is false for anything else.
+func parseLongOffsetClock(clock string) (int64, bool) {
+	m := chapterOffsetLongClockRe.FindStringSubmatch(clock)
+	if m == nil {
+		return 0, false
+	}
+	h, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil || h > int64(1e9)/3600 {
+		return 0, false
+	}
+	mins, _ := strconv.ParseInt(m[2], 10, 64)
+	sec, _ := strconv.ParseInt(m[3], 10, 64)
+	return ((h*60+mins)*60 + sec) * 1000, true
+}
+
 // FormatChapterOffset is ms as the offset field shows it pre-filled (owner
 // decision CK-2): a signed clock, H:MM:SS from an hour up and M:SS under
 // one — the chapter tables' own shapes — with ".mmm" when the value is not
 // a whole second ("-1:23:45", "-3:28.033", "0:00"). ParseChapterOffset
-// reads every string it returns back to ms, up to its 99-hour clock.
+// reads every string it returns back to ms, a clock of 100 hours or more
+// included (parseLongOffsetClock) — a late join that deep into a 24/7 or
+// multi-day broadcast.
 func FormatChapterOffset(ms int64) string {
 	sign := ""
 	if ms < 0 {
