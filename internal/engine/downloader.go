@@ -97,7 +97,7 @@ var ErrInitSegmentChanged = errors.New("HLS init segment changed")
 // sits between two parts, where a gap-fill from the broadcast's archive VOD
 // can insert the footage the break replaced as a part of its own (owner
 // decision D17 follow-up 3). Only returned when the file already holds data.
-var ErrAdBreakEnded = errors.New("Twitch stitched-ad break ended")
+var ErrAdBreakEnded = errors.New("stitched-ad break ended")
 
 // ErrInitSegmentUnavailable signals that a DASH download could not obtain the
 // ftyp+moov init its media needs — a manifest Initialization, or the sq=0 a

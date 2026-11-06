@@ -348,7 +348,7 @@ func queueCLITwitchListing(ctx context.Context, lister routes.TwitchListingFetch
 	} else {
 		filter, sort := utils.TwitchVideosQuery(input)
 		if filter == "collections" {
-			return worker.TwitchListingResult{}, errors.New(utils.TwitchCollectionsListingRefusal)
+			return worker.TwitchListingResult{}, fmt.Errorf("%s", utils.TwitchCollectionsListingRefusal)
 		}
 		opts.Login = tw.Value
 		videos, err = lister.ListChannelVideos(ctx, tw.Value, twitch.VideoListBroadcastType(filter), sort)
