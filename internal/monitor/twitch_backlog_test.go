@@ -22,9 +22,14 @@ import (
 // of the channel captured — and the scheduler is woken once; a channel that
 // did not opt in, or is disabled, is not listed at all.
 //
+// The channel's title terms apply, as to its live broadcasts: "picky" asks
+// for karaoke, and only its karaoke VOD is queued.
+//
 // Mutants: the opt-in check dropped ("plain" listed); the enabled check
 // dropped ("off" listed); SkipHistory not set (tw_v2, whose job was deleted,
-// queued again); the captured-broadcast skip dropped (tw_v3 queued);
+// queued again); the captured-broadcast skip dropped (tw_v3 queued); the
+// window's side before the stream start dropped (tw_v4, published five
+// minutes ahead of it, queued); the terms not applied (tw_v7 queued);
 // OnQueued not called.
 func TestTwitchBacklogQueuesNewVods(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "t.db"))
@@ -38,6 +43,7 @@ func TestTwitchBacklogQueuesNewVods(t *testing.T) {
 		{ID: "streamer", Platform: "twitch", TwitchVodBacklog: true},
 		{ID: "plain", Platform: "twitch"},
 		{ID: "off", Platform: "twitch", Enabled: &off, TwitchVodBacklog: true},
+		{ID: "picky", Platform: "twitch", TwitchVodBacklog: true, Terms: config.ChannelTerms{Simple: "karaoke"}},
 	}
 	store := config.NewStore(cfg, filepath.Join(t.TempDir(), "config.toml"))
 
@@ -53,7 +59,14 @@ func TestTwitchBacklogQueuesNewVods(t *testing.T) {
 	b := &TwitchBacklog{configStore: store, db: db, logger: &testMonitorLogger{}}
 	b.ListVideos = func(_ context.Context, login string) ([]twitch.TwitchVideo, error) {
 		listed[login] = true
+		if login == "picky" {
+			return []twitch.TwitchVideo{
+				{ID: "8", Title: "karaoke night", PublishedAt: "2026-10-01T20:00:00Z"},
+				{ID: "7", Title: "minecraft all night", PublishedAt: "2026-10-01T10:00:00Z"},
+			}, nil
+		}
 		return []twitch.TwitchVideo{
+			{ID: "4", Title: "published a little early", PublishedAt: "2026-10-03T11:55:00Z"},
 			{ID: "3", Title: "the captured one", PublishedAt: "2026-10-03T12:00:04Z"},
 			{ID: "2", Title: "seen before", PublishedAt: "2026-10-02T12:00:00Z"},
 			{ID: "1", Title: "missed", PublishedAt: "2026-10-01T12:00:00Z"},
@@ -64,19 +77,22 @@ func TestTwitchBacklogQueuesNewVods(t *testing.T) {
 
 	b.RunCycle(context.Background(), time.Now())
 
-	if !listed["streamer"] || listed["plain"] || listed["off"] {
+	if !listed["streamer"] || !listed["picky"] || listed["plain"] || listed["off"] {
 		t.Errorf("listed %v, want only the opted-in, enabled channel", listed)
 	}
 	if j, _ := db.GetJob("tw_v1"); j == nil || j.Status != database.StatusQueued || j.QueuePriority != 1 || j.ManuallyAdded {
 		t.Errorf("tw_v1 = %+v, want a Queued backlog row", j)
 	}
-	for _, id := range []string{"tw_v2", "tw_v3"} {
+	for _, id := range []string{"tw_v2", "tw_v3", "tw_v4", "tw_v7"} {
 		if db.JobExists(id) {
 			t.Errorf("%s queued, want it skipped", id)
 		}
 	}
-	if woken != 1 {
-		t.Errorf("OnQueued told %d, want 1", woken)
+	if !db.JobExists("tw_v8") {
+		t.Error("picky's karaoke VOD was not queued")
+	}
+	if woken != 2 {
+		t.Errorf("OnQueued told %d, want 2", woken)
 	}
 
 	// A second cycle finds nothing new and wakes nothing.

@@ -178,9 +178,8 @@ func addVideo(input, configPath string) {
 
 	if target.Platform == "twitch" {
 		tw := target.Twitch
-		// A clip, a channel's video or clip list, or a collection: refused
-		// with the message every add path shows, rather than a listing read
-		// as a channel's live-wait job.
+		// A clip or a channel's clip list: refused with the message every
+		// add path shows, rather than read as a channel's live-wait job.
 		if msg := tw.Unsupported(); msg != "" {
 			fmt.Fprintln(os.Stderr, msg)
 			os.Exit(1)

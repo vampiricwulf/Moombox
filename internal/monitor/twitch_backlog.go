@@ -21,7 +21,9 @@ import (
 // b77c9304e); with no monitor of its own, a broadcast Moombox missed, and
 // every highlight and upload, would otherwise expire from Twitch unarchived.
 //
-// Skipped, besides a VOD already in history (a job was created for it once):
+// Skipped, besides a VOD already in history (a job was created for it once)
+// and one whose title the channel's terms do not match (MatchesTerms, as for
+// every monitor creator):
 // the archive of a broadcast a live job of the channel captured — its
 // publishedAt within twitchBacklogCapturedWindow of that job's
 // stream_start_time — since the live capture is that broadcast's archive, and
@@ -136,7 +138,11 @@ func (b *TwitchBacklog) RunCycle(ctx context.Context, now time.Time) {
 		}
 		var fresh []twitch.TwitchVideo
 		for _, v := range videos {
-			if !capturedLive(v, starts[login]) {
+			// The channel's title terms gate the backlog as they gate its
+			// live broadcasts (TwitchMonitor) and a YouTube channel's
+			// backfill (archive.go): a broadcast the monitor deliberately
+			// skipped is not archived through the back door.
+			if !capturedLive(v, starts[login]) && MatchesTerms(v.Title, &ch) {
 				fresh = append(fresh, v)
 			}
 		}
