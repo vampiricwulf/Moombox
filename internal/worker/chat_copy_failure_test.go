@@ -10,6 +10,9 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/engine"
 )
 
 // A chat copy that fails at finalize used to be one Warn: the row went
@@ -165,5 +168,98 @@ func TestUnreadablePartChatFailsBeforeTheMux(t *testing.T) {
 	var pe *fs.PathError
 	if !errors.As(err, &pe) || pe.Path != sock {
 		t.Errorf("muxSegment err = %v, want the chat's open failure before any mux", err)
+	}
+}
+
+// The chat's raw sidecar (chat.raw.jsonl) is the only record of the banners,
+// polls and markers the chat file leaves out, and the staged one is the only
+// copy. A failed copy of it used to be a Warn, and the staging cleanup then
+// deleted it with everything else: the chat.json copy had succeeded, so
+// nothing read "incomplete". It now keeps the capture exactly as a failed
+// chat.json copy does (owner decision PR-M6).
+//
+// Mutant: copyAssets' raw-copy failure arm not writing chat_status (the Warn
+// it was) — chat_status reads "finished" and chat.raw.jsonl is gone.
+func TestRawChatCopyFailureKeepsTheCapture(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+
+	staging, outputDir := muxFixtureJob(t, w, db, "j-raw-kept")
+	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 5)
+	if err := os.WriteFile(filepath.Join(staging, "chat.json"), []byte(`{"videoId":"j-raw-kept","messageCount":1,"messages":[{"id":"m1"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw := filepath.Join(staging, "chat.raw.jsonl")
+	if err := os.WriteFile(raw, []byte(`{"addBannerToLiveChatCommand":{}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db.UpdateJobFields("j-raw-kept", map[string]any{"chat_status": "finished", "total_chat_messages": 1})
+	job, _ := db.GetJob("j-raw-kept")
+	dst := filepath.Join(outputDir, filepath.Base(w.buildJobContext(job).Filename)+".chat.raw.jsonl")
+	if err := os.MkdirAll(dst, 0o755); err != nil { // a directory squatting on the raw sidecar's name
+		t.Fatal(err)
+	}
+
+	if err := w.MuxJob("j-raw-kept"); err != nil {
+		t.Fatalf("MuxJob: %v", err)
+	}
+	w.Stop()
+
+	fresh, _ := db.GetJob("j-raw-kept")
+	if fresh.ChatFile == "" {
+		t.Fatal("the chat itself was not copied: the fixture no longer isolates the raw sidecar's copy")
+	}
+	if fresh.ChatStatus != chatStatusIncomplete {
+		t.Errorf("chat_status = %q after a failed raw-sidecar copy, want %q", fresh.ChatStatus, chatStatusIncomplete)
+	}
+	if _, err := os.Stat(raw); err != nil {
+		t.Errorf("the only copy of the raw chat sidecar was deleted with staging: %v", err)
+	}
+}
+
+// The recovered-sibling path (A S) dropped a failed raw-sidecar copy outright
+// (`_ = copyFile`), and its "it stays in staging" for a failed chat copy was
+// not true either: nothing kept staging once the asides were out of it. Both
+// failures now mark the chat incomplete, which prunes staging down to the
+// capture instead of deleting it (PR-M6).
+//
+// Mutants: copyKeptChatSidecar dropping the raw copy's error again (the row
+// stays "finished" and staging is reclaimed); recoverAsides not writing
+// chat_status on the error (the same).
+func TestRecoveredRawChatCopyFailureKeepsTheCapture(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+
+	staging, outputDir := muxFixtureJob(t, w, db, "j-raw-aside")
+	db.UpdateJobFields("j-raw-aside", map[string]any{"status": database.StatusCancelled, "chat_status": "finished"})
+	writeAsideFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"+engine.StagedRestartSuffix+"1700000000"), 5)
+	if err := os.WriteFile(filepath.Join(staging, "chat.json"), []byte(`{"messages":[{"id":"m1"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw := filepath.Join(staging, "chat.raw.jsonl")
+	if err := os.WriteFile(raw, []byte(`{"addBannerToLiveChatCommand":{}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	job, _ := db.GetJob("j-raw-aside")
+	base, _ := w.orchestrator.resolveFreshFilename(w.buildJobContext(job))
+	squat := filepath.Join(outputDir, filepath.Base(base)+engine.StagedRestartSuffix+"1700000000.chat.raw.jsonl")
+	if err := os.MkdirAll(squat, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.RecoverAsides("j-raw-aside"); err != nil {
+		t.Fatalf("RecoverAsides: %v", err)
+	}
+	w.Stop()
+
+	if mp4Named(t, outputDir, engine.StagedRestartSuffix+"1700000000.mp4") == "" {
+		t.Fatalf("recovery produced %v, want the sibling", mp4sIn(t, outputDir))
+	}
+	fresh, _ := db.GetJob("j-raw-aside")
+	if fresh.ChatStatus != chatStatusIncomplete {
+		t.Errorf("chat_status = %q after a failed raw-sidecar copy, want %q", fresh.ChatStatus, chatStatusIncomplete)
+	}
+	if _, err := os.Stat(raw); err != nil {
+		t.Errorf("the only copy of the raw chat sidecar was deleted with staging: %v", err)
 	}
 }

@@ -811,10 +811,19 @@ func copyKeptChatSidecar(stagingDir, output, jobChatPath string) (string, error)
 	// The capture's raw sidecar goes with it (owner decision FE-16), as
 	// copyAssets carries it beside the archive: <stem>.chat.raw.jsonl, which
 	// the sweep folds under the recovered recording as it does the chat.
-	// Best effort: the chat stands without it.
+	//
+	// A failed copy is an ERROR, returned with the chat's dst: the raw sidecar
+	// is the only record of the banners, polls and markers the chat file does
+	// not carry (and of every action past the message cap), and the staged one
+	// is the only copy. The error used to be dropped (`_ = copyFile`), the
+	// recovery's cleanup then saw nothing to keep and deleted it with staging.
+	// The caller keeps the capture exactly as it does for a failed chat.json
+	// copy (owner decision PR-M6).
 	rawSrc := filepath.Join(filepath.Dir(src), "chat.raw.jsonl")
 	if fileExists(rawSrc) {
-		_ = copyFile(rawSrc, strings.TrimSuffix(dst, ".json")+".raw.jsonl")
+		if err := copyFile(rawSrc, strings.TrimSuffix(dst, ".json")+".raw.jsonl"); err != nil {
+			return dst, fmt.Errorf("copy the chat's raw sidecar: %w", err)
+		}
 	}
 	return dst, nil
 }
@@ -886,7 +895,14 @@ func (o *DownloadOrchestrator) recoverAsides(ctx context.Context, jobCtx *JobCon
 		dst, err := copyKeptChatSidecar(jobCtx.StagingDir, recovered[0], jobChat)
 		switch {
 		case err != nil:
-			o.logger.Warn("could not copy the kept chat capture beside a recovered recording; it stays in staging",
+			// The staged capture is the only copy of what did not land (the
+			// chat, or its raw sidecar), and RecoverAsides' cleanup reclaims
+			// staging once no media is left in it. "incomplete" is what keeps
+			// it there, pruned down to the capture, exactly as copyAssets
+			// keeps it after a failed chat copy at finalize (PR-M6). The log
+			// line said "it stays in staging" before this write made it true.
+			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"chat_status": chatStatusIncomplete})
+			o.logger.Error("could not copy the kept chat capture beside a recovered recording; it is kept in staging",
 				"err", err, "jobID", jobCtx.Job.ID)
 		case dst != "":
 			o.logger.Info("the kept chat capture was copied beside the first recovered recording",
@@ -1531,12 +1547,18 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		}
 		// The chat's raw sidecar (owner decision D16): every action of the
 		// capture that is not a message, verbatim. Beside the archive as
-		// <name>.chat.raw.jsonl; best effort, it is the lossless extra and
-		// the chat file stands without it.
+		// <name>.chat.raw.jsonl. The chat file stands without it, but it is
+		// the only record of the banners, polls and markers (and of every
+		// action past the message cap), and the staged one is the only copy:
+		// a failed copy keeps the capture exactly as a failed chat.json copy
+		// does above, logged at Error (owner decision PR-M6). It used to be a
+		// Warn, and the staging cleanup then deleted the only copy.
 		rawSrc := filepath.Join(jobCtx.StagingDir, "chat.raw.jsonl")
 		if _, err := os.Stat(rawSrc); err == nil {
 			if err := copyFile(rawSrc, filepath.Join(outputDir, filenameBase+".chat.raw.jsonl")); err != nil {
-				o.logger.Warn("could not copy the chat's raw sidecar beside the archive", "err", err, "jobID", jobCtx.Job.ID)
+				updates["chat_status"] = chatStatusIncomplete
+				o.logger.Error("could not copy the chat's raw sidecar beside the archive; the chat capture is kept in staging",
+					"err", err, "raw", rawSrc, "jobID", jobCtx.Job.ID)
 			}
 		}
 	}
