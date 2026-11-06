@@ -1085,7 +1085,7 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 	if len(results) > 1 {
 		moments = parseVodMoments(results[1])
 	}
-	info.Chapters = vodChapters(moments, info.GameCategory, int64(info.Duration)*1000)
+	info.Chapters = vodChapters(moments, info.GameCategory)
 
 	return info, nil
 }
@@ -1129,15 +1129,17 @@ func parseVodMoments(raw json.RawMessage) []vodMoment {
 // durationMilliseconds and titled with its description, a moment missing
 // either time skipped (upstream warns "Important chapter information
 // missing"); and with no moments at all, the whole VOD as one chapter named
-// after its game, when it has one. That single chapter needs the duration to
-// have an end — upstream's fill-in gives it the video's; one is left out when
-// the length is unknown.
-func vodChapters(moments []vodMoment, game string, durationMs int64) []utils.Chapter {
+// after its game, when it has one. That single chapter is open-ended, as
+// upstream yields it ({'title': game}, ended by process_info's fill-in at the
+// video's duration): utils.SanitizeChapters ends it at the archive's probed
+// span at mux. Ending it at lengthSeconds cut it short for a VOD still being
+// recorded, whose length at extraction is only the length so far.
+func vodChapters(moments []vodMoment, game string) []utils.Chapter {
 	if len(moments) == 0 {
-		if game == "" || durationMs <= 0 {
+		if game == "" {
 			return nil
 		}
-		return []utils.Chapter{{StartMs: 0, EndMs: durationMs, Title: game}}
+		return []utils.Chapter{{StartMs: 0, Title: game}}
 	}
 	var out []utils.Chapter
 	for _, m := range moments {

@@ -86,7 +86,8 @@ func TestGetVodInfoReadsDescriptionAndChapters(t *testing.T) {
 // and so does a reply that is a single object.
 //
 // Mutants: the errored element failing GetVodInfo; the no-moments fallback
-// removed (no chapters); a single-object reply refused.
+// removed (no chapters); a single-object reply refused; the game chapter
+// ended at lengthSeconds (a VOD still recording loses its tail).
 func TestGetVodInfoChapterOpFailureKeepsTheMetadata(t *testing.T) {
 	for name, reply := range map[string]string{
 		"errored element": `[` + vodMetadataReply + `,{"errors":[{"message":"PersistedQueryNotFound"}]}]`,
@@ -98,7 +99,9 @@ func TestGetVodInfoChapterOpFailureKeepsTheMetadata(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := []utils.Chapter{{StartMs: 0, EndMs: 3600000, Title: "Just Chatting"}}
+			// Open-ended, as upstream yields it: the mux ends it at the
+			// archive's span, not at a still-recording VOD's length so far.
+			want := []utils.Chapter{{StartMs: 0, Title: "Just Chatting"}}
 			if info.Title != "Big day" || !reflect.DeepEqual(info.Chapters, want) {
 				t.Errorf("info = %q, %+v; want the metadata and %+v", info.Title, info.Chapters, want)
 			}
