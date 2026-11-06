@@ -338,3 +338,73 @@ func TestLanguageTrackScore(t *testing.T) {
 		t.Errorf("an unstated language against an empty map = %d, want -2 (no match on \"\")", got)
 	}
 }
+
+// TestStretchedRatioFromKeywords is G44: `yt:stretch=W:H` in
+// videoDetails.keywords is the display aspect an old anamorphic upload asks
+// for, read as _real_extract reads it (_video.py:4087-4101) — the first
+// keyword with the prefix whose W and H parse above 0, a malformed or
+// zero one passed over — and the extraction's is the first response's that
+// states keywords at all (get_first). Nothing read the keywords before.
+//
+// Mutants (each run): the w > 0 && h > 0 guard dropped (the 0:9 row reads
+// 0 and stops, the 16:9 after it lost — and 16:0 divides to +Inf); the loop
+// stopping at the first prefixed keyword (the malformed row loses its
+// valid sibling); the prefix test loosened to a substring
+// ("not:stretch=4:3" counts);
+// finishExtraction not restamping (the winner's own "no keywords" 0
+// survives); noteStretch letting a later response replace the first.
+func TestStretchedRatioFromKeywords(t *testing.T) {
+	for _, tc := range []struct {
+		keywords string // the JSON list, "" for none stated
+		want     float64
+		stated   bool
+	}{
+		{"", 0, false},
+		{`["music", "live"]`, 0, true},
+		{`["yt:stretch=16:9"]`, 16.0 / 9, true},
+		{`["yt:stretch=16 : 9"]`, 16.0 / 9, true},
+		{`["yt:stretch=0:9", "yt:stretch=16:9"]`, 16.0 / 9, true},
+		{`["yt:stretch=16:0"]`, 0, true},
+		{`["yt:stretch=wide", "yt:stretch=4:3"]`, 4.0 / 3, true},
+		{`["not:stretch=4:3"]`, 0, true},
+	} {
+		vd := `{"videoId": "test1234567"}`
+		if tc.keywords != "" {
+			vd = `{"videoId": "test1234567", "keywords": ` + tc.keywords + `}`
+		}
+		got, stated := stretchedRatio(decodePlayerJSON(t, vd))
+		if got != tc.want || stated != tc.stated {
+			t.Errorf("keywords %s: ratio %v stated %v, want %v %v", tc.keywords, got, stated, tc.want, tc.stated)
+		}
+	}
+
+	response := func(keywords string) map[string]any {
+		vd := `"videoId": "test1234567", "lengthSeconds": "600"`
+		if keywords != "" {
+			vd += `, "keywords": ` + keywords
+		}
+		return decodePlayerJSON(t, `{"videoDetails": {`+vd+`}, "playabilityStatus": {"status": "OK"},
+			"streamingData": {"adaptiveFormats": [{"itag": 18, "url": "https://x/18", "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"", "width": 480, "height": 360}]}}`)
+	}
+	p := NewPlayerAPI(nil, noopLogger{})
+	ctx := withExtractionState(context.Background())
+	for _, kw := range []string{"", `["yt:stretch=16:9"]`, `["yt:stretch=4:3"]`} {
+		if _, err := p.parsePlayerResponse(ctx, response(kw), "", nil, "test1234567"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	winner, err := p.parsePlayerResponse(ctx, response(""), "", nil, "test1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if winner.StretchedRatio != 0 {
+		t.Fatalf("a response without keywords carries ratio %v", winner.StretchedRatio)
+	}
+	info, err := p.finishExtraction(ctx, winner, nil, "test1234567", &mismatchTally{attempts: 4, survived: 4}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.StretchedRatio != 16.0/9 {
+		t.Errorf("the extraction's ratio = %v, want the first stating response's 16/9", info.StretchedRatio)
+	}
+}

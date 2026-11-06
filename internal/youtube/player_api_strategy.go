@@ -135,6 +135,9 @@ func (p *PlayerAPI) finishExtraction(ctx context.Context, info *VideoInfo, wp *W
 		langs := extractionStateFrom(ctx).audioLanguages()
 		langs.merge(info.AudioLanguages)
 		info.AudioLanguages = langs
+		if ratio, stated := extractionStateFrom(ctx).stretchedRatio(); stated {
+			info.StretchedRatio = ratio
+		}
 		if live, ok := extractionStateFrom(ctx).playbackLive(); ok {
 			info.PlaybackWaitExempt = live.exempt()
 			if info.StreamStatus == StreamVOD && live.postLive() {

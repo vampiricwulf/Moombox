@@ -101,6 +101,8 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	formats, formatDiag := p.parseFormats(ctx, streamingData)
 	langs := noteAudioLanguages(streamingData)
 	extractionStateFrom(ctx).noteAudioLanguages(langs)
+	stretch, keywordsStated := stretchedRatio(videoDetails)
+	extractionStateFrom(ctx).noteStretch(stretch, keywordsStated)
 
 	// The response's pre-roll ad wait (playbackAvailableAt), stamped on every
 	// format it yields and on each manifest it carries, so that whichever of
@@ -230,6 +232,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		FormatDiag:         formatDiag,
 		PlaybackWaitExempt: liveFlags.exempt(),
 		AudioLanguages:     langs,
+		StretchedRatio:     stretch,
 	}
 	if info.DashManifestURL != "" {
 		info.DashManifestAvailableAt = availableAt
@@ -405,6 +408,69 @@ type extractionState struct {
 	// it as VideoInfo.AudioLanguages.
 	langsMu sync.Mutex
 	langs   AudioLanguages
+	// stretch is the yt:stretch ratio of the first parsed response that
+	// stated videoDetails.keywords (stretchStated), upstream's
+	// get_first(video_details, 'keywords'); under langsMu.
+	stretch       float64
+	stretchStated bool
+}
+
+// noteStretch records a response's yt:stretch ratio when it is the first to
+// state keywords. Nil outside a cascade.
+func (s *extractionState) noteStretch(ratio float64, stated bool) {
+	if s == nil || !stated {
+		return
+	}
+	s.langsMu.Lock()
+	defer s.langsMu.Unlock()
+	if !s.stretchStated {
+		s.stretch, s.stretchStated = ratio, true
+	}
+}
+
+// stretchedRatio is the extraction's yt:stretch ratio and whether any
+// response stated keywords at all.
+func (s *extractionState) stretchedRatio() (float64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.langsMu.Lock()
+	defer s.langsMu.Unlock()
+	return s.stretch, s.stretchStated
+}
+
+// stretchRegex is upstream's `(\d+)\s*:\s*(\d+)` search in a yt:stretch
+// keyword (_video.py:4093).
+var stretchRegex = regexp.MustCompile(`(\d+)\s*:\s*(\d+)`)
+
+// stretchedRatio reads videoDetails.keywords for `yt:stretch=W:H` as
+// _real_extract does (_video.py:4087-4101): the first keyword starting with
+// it whose W and H both parse and are above 0 gives W/H; a malformed one is
+// passed over for the next. stated reports whether the response carried a
+// keywords list at all. Upstream also reads og:video:tag off the watch page
+// when no response states keywords; Moombox's watch page reaches this parse
+// as its ytInitialPlayerResponse, whose videoDetails carry the same list.
+func stretchedRatio(videoDetails map[string]any) (ratio float64, stated bool) {
+	keywords, ok := videoDetails["keywords"].([]any)
+	if !ok {
+		return 0, false
+	}
+	for _, k := range keywords {
+		kw, _ := k.(string)
+		if !strings.HasPrefix(kw, "yt:stretch=") {
+			continue
+		}
+		m := stretchRegex.FindStringSubmatch(kw)
+		if m == nil {
+			continue
+		}
+		w, errW := strconv.ParseFloat(m[1], 64)
+		h, errH := strconv.ParseFloat(m[2], 64)
+		if errW == nil && errH == nil && w > 0 && h > 0 {
+			return w / h, true
+		}
+	}
+	return 0, true
 }
 
 // noteAudioLanguages folds one response's languages into the extraction's.

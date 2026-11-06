@@ -254,6 +254,17 @@ type VideoInfo struct {
 	// against these (LanguageTrackScore). A cascade's VideoInfo carries the
 	// whole extraction's (finishExtraction); any other, its one response's.
 	AudioLanguages AudioLanguages `json:"audioLanguages,omitzero"`
+
+	// StretchedRatio is the display aspect a `yt:stretch=W:H` keyword asks
+	// for (videoDetails.keywords), W/H, or 0 when the video carries none:
+	// yt-dlp's `stretched_ratio` (_video.py:4087-4101), which its default
+	// fixup applies as `-aspect` on a stream copy (FFmpegFixupStretchedPP).
+	// Old anamorphic uploads store 4:3 frames meant for 16:9. The worker
+	// records it beside the job's staging for the archive mux
+	// (recordDisplayAspect). A cascade's VideoInfo carries the first
+	// response's that states keywords (finishExtraction), as upstream's
+	// get_first does.
+	StretchedRatio float64 `json:"stretchedRatio,omitempty"`
 }
 
 // ChatSource carries the chat-setup facts the WATCH PAGE this VideoInfo was

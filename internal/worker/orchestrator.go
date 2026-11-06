@@ -342,6 +342,18 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	// branch.
 	var waitedForResume bool
 
+	// The yt:stretch display aspect, recorded in the staging root for the
+	// archive mux (recordDisplayAspect) — or cleared, for a video that no
+	// longer asks for one. A failure costs only the aspect fix, so it is
+	// logged, not fatal.
+	if err := recordDisplayAspect(jobCtx.StagingDir, videoInfo.StretchedRatio); err != nil {
+		jobCtx.Logger.Warn("could not record the yt:stretch display aspect; the archive keeps its stored aspect",
+			"jobID", jobCtx.Job.ID, "ratio", videoInfo.StretchedRatio, "err", err)
+	} else if videoInfo.StretchedRatio > 0 && videoInfo.StretchedRatio != 1 {
+		jobCtx.Logger.Info("yt:stretch: the archive's display aspect will be set at mux",
+			"jobID", jobCtx.Job.ID, "ratio", videoInfo.StretchedRatio)
+	}
+
 	strategy, err := selectDownloadStrategy(isVod, videoInfo)
 	if err != nil {
 		return err

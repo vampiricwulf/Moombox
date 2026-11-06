@@ -136,7 +136,7 @@ func deriveFFprobePath(ffmpegPath string) string {
 // before it is renamed into place (writeOutput): an archive mux passes its
 // duration check here, so a short copy never takes the archive's name.
 func (m *Muxer) MuxCopy(ctx context.Context, videoPath, audioPath, outputPath string, checks ...OutputCheck) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, nil, InputOffsets{}, checks)
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, InputOffsets{}, "", checks)
 }
 
 // InputOffsets delays the inputs of a MuxCopyAt, in seconds, each passed to
@@ -149,17 +149,28 @@ type InputOffsets struct{ Video, Audio float64 }
 // MuxCopyAt is MuxCopy with each input delayed by its offset: the input's
 // first sample lands that far into the output.
 func (m *Muxer) MuxCopyAt(ctx context.Context, videoPath, audioPath, outputPath string, off InputOffsets, checks ...OutputCheck) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, checks)
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, "", checks)
+}
+
+// MuxCopyAspect is MuxCopyAt that also sets the video's display aspect ratio
+// to aspect — FFmpeg's `-aspect`, which a stream copy carries as container
+// metadata without re-encoding a frame. It is yt-dlp's FFmpegFixupStretchedPP
+// (postprocessor/ffmpeg.py:860-867: stream copy plus `-aspect` with the
+// ratio as `%f`) folded into the archive's own copy, where upstream runs it
+// as a second remux: the yt:stretch fix for an old anamorphic upload. An
+// empty aspect is MuxCopyAt.
+func (m *Muxer) MuxCopyAspect(ctx context.Context, videoPath, audioPath, outputPath string, off InputOffsets, aspect string, checks ...OutputCheck) error {
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, aspect, checks)
 }
 
 // Mux performs FFmpeg muxing with optional trimming/encoding, into a
 // temporary file renamed onto outputPath once FFmpeg has exited 0
 // (writeOutput).
 func (m *Muxer) Mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, opts, InputOffsets{}, nil)
+	return m.mux(ctx, videoPath, audioPath, outputPath, opts, InputOffsets{}, "", nil)
 }
 
-func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions, off InputOffsets, checks []OutputCheck) error {
+func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions, off InputOffsets, aspect string, checks []OutputCheck) error {
 	// Validate inputs
 	if videoPath != "" {
 		if _, err := os.Stat(videoPath); err != nil {
@@ -188,6 +199,9 @@ func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string
 			return m.runTwoPassEncode(ctx, videoPath, audioPath, tmp, opts)
 		}
 		args := m.buildArgs(videoPath, audioPath, tmp, opts, needsEncode, off)
+		if videoPath != "" {
+			args = withDisplayAspect(args, aspect)
+		}
 		m.logger.Debug("ffmpeg", "args", strings.Join(args, " "))
 		if opts != nil && opts.ProgressFn != nil && hasTrim(opts) && opts.TrimDuration > 0 {
 			return m.runFFmpegWithProgress(ctx, args, opts.TrimDuration, opts.ProgressFn)
@@ -236,6 +250,18 @@ func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOpt
 	args = append(args, ffmpegPathArg(outputPath))
 
 	return args
+}
+
+// withDisplayAspect adds `-aspect aspect` to an argv buildArgs made, as an
+// output option ahead of the output path (its last argument); an empty
+// aspect leaves the argv as it was.
+func withDisplayAspect(args []string, aspect string) []string {
+	if aspect == "" || len(args) == 0 {
+		return args
+	}
+	out := make([]string, 0, len(args)+2)
+	out = append(out, args[:len(args)-1]...)
+	return append(out, "-aspect", aspect, args[len(args)-1])
 }
 
 // appendInputOffset adds the -itsoffset that delays the next input by sec
