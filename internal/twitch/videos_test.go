@@ -460,7 +460,24 @@ func TestChannelCollectionVideosQueuesEveryCollection(t *testing.T) {
 		}
 		return `{"data":{"collection":null}}`
 	})
-	if vids, err := NewAPI(&testLogger{}).ChannelCollectionVideos(context.Background(), "spamfish", 0, ""); !errors.Is(err, ErrCollectionNotFound) {
-		t.Errorf("every collection gone = %+v, %v; want ErrCollectionNotFound", vids, err)
+	// Every listed collection gone is an empty listing, not
+	// ErrCollectionNotFound: the paste named the channel, and the route
+	// would answer "Twitch collection not found" for it.
+	if vids, err := NewAPI(&testLogger{}).ChannelCollectionVideos(context.Background(), "spamfish", 0, ""); err != nil || len(vids) != 0 {
+		t.Errorf("every collection gone = %+v, %v; want no videos and no error", vids, err)
+	}
+
+	// Every listed collection unreadable is the failure.
+	stubGQL(t, func(body string) string {
+		if op, vars := sentVariables(t, body); op == "ChannelCollectionsContent" {
+			if vars["cursor"] != nil {
+				return collectionsPage("1")
+			}
+			return collectionsPage("1", collectionEdge("broken"))
+		}
+		return `{`
+	})
+	if vids, err := NewAPI(&testLogger{}).ChannelCollectionVideos(context.Background(), "spamfish", 0, ""); err == nil || errors.Is(err, ErrCollectionNotFound) {
+		t.Errorf("every collection unreadable = %+v, %v; want the read failure", vids, err)
 	}
 }

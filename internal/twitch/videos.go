@@ -396,7 +396,11 @@ func (a *API) ChannelCollections(ctx context.Context, channelLogin string, maxPa
 // queue nothing of a channel's dozen collections. yt-dlp, without
 // --ignore-errors, stops at that entry instead; Moombox's add has no partial
 // "stop here", so it keeps what it read. Only when nothing was read at all is
-// the failure the answer.
+// the failure the answer — and then only a failure to read: a collection
+// that is gone (ErrCollectionNotFound — deleted or made private since the
+// list named it) is not, as the paste named a channel, not that collection,
+// and a channel whose every listed collection is gone has a collection list
+// with no videos in it, which is what the caller is told (an empty result).
 func (a *API) ChannelCollectionVideos(ctx context.Context, channelLogin string, maxPages int, authToken string) ([]TwitchVideo, error) {
 	cols, err := a.ChannelCollections(ctx, channelLogin, maxPages, authToken)
 	if err != nil {
@@ -413,7 +417,9 @@ func (a *API) ChannelCollectionVideos(ctx context.Context, channelLogin string, 
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			lastErr = err
+			if !errors.Is(err, ErrCollectionNotFound) {
+				lastErr = err
+			}
 			if a.logger != nil {
 				a.logger.Warn("twitch: a collection of the channel's collection list could not be read; it is left out",
 					"channel", channelLogin, "collection", c.ID, "err", err)
