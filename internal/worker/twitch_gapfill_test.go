@@ -38,7 +38,7 @@ func covPart(idx int, from, to time.Duration, adBreak bool) stagedPartCoverage {
 func TestGapSpansFor(t *testing.T) {
 	parts := []stagedPartCoverage{
 		covPart(2, 50*time.Minute, 60*time.Minute, false),
-		covPart(0, 5*time.Minute, 20*time.Minute, true),           // closed at an ad break
+		covPart(0, 5*time.Minute, 20*time.Minute, true),                        // closed at an ad break
 		covPart(1, 22*time.Minute, 30*time.Minute+500*time.Millisecond, false), // after a 2 min ad break
 		covPart(3, 60*time.Minute+time.Second, 70*time.Minute, false),          // a lossless 1 s seam
 	}

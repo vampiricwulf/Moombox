@@ -474,10 +474,8 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			onSegmentWritten = coverageFor(stagingDir).note
 		}
 		dl := newSegmentDownloader(engine.DownloaderOptions{
-			OnFirstSegment:   onFirstSegment,
-			OnSegmentWritten: onSegmentWritten,
-			SplitOnAdBreak:   !isVod && variant.GapFillAdBreaks,
-			BaseURL:          variantURL,
+			OnFirstSegment: onFirstSegment,
+			BaseURL:        variantURL,
 			OutputFile:     videoPath,
 			StartSeq:       startSeq,
 			ForceStartSeq:  forceStartSeq,
@@ -520,6 +518,12 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 				return !info, nil // Returns true when stream ended (NOT live)
 			},
 			CheckStaleEnd: vodStaleEnd,
+
+			// The gap-fill's capture half (owner decision D17): each written
+			// segment's span, and on a channel that fills its ad breaks the
+			// split at each one's end.
+			OnSegmentWritten: onSegmentWritten,
+			SplitOnAdBreak:   !isVod && variant.GapFillAdBreaks,
 		})
 		return dl, videoPath
 	}
