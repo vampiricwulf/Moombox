@@ -293,23 +293,30 @@ func TestGapSpansForAPartItCannotPlace(t *testing.T) {
 // finalize itself — its broadcast's end unconfirmed, muxed automatically once
 // the end is confirmed (D-T4), or its broadcast over while Moombox was down,
 // muxed by the operator — keeps a gap-fill plan from the coverage its
-// staging still holds, its tail open (owner decision D17). A Mux of an Error
-// row for any other reason keeps none.
+// staging still holds, its tail open (owner decision D17). So does any other
+// Mux of a live capture's staging (owner decision FE-25): an Error row for
+// any other reason, and a Cancelled row — the operator's Mux of either. A
+// clip (a VOD-style row) keeps none.
 //
-// Mutants: muxJob not calling twitchMuxGapFillPlan (no plan on either path);
-// the prior-row gate removed (the plain Error row gets a plan); the tail not
-// left open.
+// Mutants: muxJob not calling twitchMuxGapFillPlan (no plan on any path); the
+// old error/marker gate restored (the plain Error and the Cancelled rows get
+// no plan); the status gate dropping Cancelled (the Cancelled row gets none);
+// the IsVod guard removed (the clip row gets a plan); the tail not left open.
 func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 	cases := []struct {
-		name     string
-		marked   bool
-		errMsg   string
-		auto     bool
-		wantPlan bool
+		name      string
+		marked    bool
+		errMsg    string
+		auto      bool
+		cancelled bool
+		vod       bool
+		wantPlan  bool
 	}{
-		{"end unconfirmed, auto-muxed", true, "", true, true},
-		{"ended while offline, Mux action", false, twitchEndedOfflineErrMsg, false, true},
-		{"another error, Mux action", false, "", false, false},
+		{"end unconfirmed, auto-muxed", true, "", true, false, false, true},
+		{"ended while offline, Mux action", false, twitchEndedOfflineErrMsg, false, false, false, true},
+		{"another error, Mux action", false, "", false, false, false, true},
+		{"cancelled, Mux action", false, "", false, true, false, true},
+		{"a VOD-style row, Mux action", false, "", false, false, true, false},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -319,6 +326,12 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 			fields := map[string]any{"stream_start_time": gapStart.Format(time.RFC3339), "twitch_quality": "chunked"}
 			if tc.errMsg != "" {
 				fields["error"] = tc.errMsg
+			}
+			if tc.cancelled {
+				fields["status"] = database.StatusCancelled
+			}
+			if tc.vod {
+				fields["is_vod"] = true
 			}
 			db.UpdateJobFields(id, fields)
 			var stagingBase string

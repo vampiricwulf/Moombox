@@ -272,30 +272,41 @@ func stagedPartCoverages(stagingDir string) []stagedPartCoverage {
 
 // twitchMuxGapFillPlan is the gap-fill plan for a live Twitch capture that did
 // not finalize itself and is muxed from its staging instead (muxJob), nil for
-// any other mux. Two such captures lose what owner decision D17 says is
-// always filled — the late start and every gap split, which their parts'
-// coverage still records in staging, and the tail after the last part:
+// any other mux. Owner decision FE-25: ANY Mux that finalizes a live capture
+// whose parts' coverage records survive in staging plans a fill, from an
+// Error row and from a Cancelled one alike —
 //
 //   - one whose broadcast ended while Moombox was down (prior's error
 //     twitchEndedOfflineErrMsg), muxed by the operator's Mux action;
 //   - one that stopped with its broadcast's end unconfirmed (park_reason
 //     twitch_end_unconfirmed), muxed by AutoMuxEndedBroadcast once the
 //     monitor confirms the broadcast over (owner decision D-T4), or by the
-//     operator's Mux before that.
+//     operator's Mux before that;
+//   - one that failed for any other reason, or that the operator cancelled,
+//     muxed by the operator's Mux action. These made no plan before FE-25,
+//     on the reading that the recorded footage was all that was wanted or
+//     possible; the owner chose the fill, which only ever adds parts beside
+//     the archive and never touches what was recorded (twitch_gapfill.go).
+//
+// Each loses what owner decision D17 says is always filled — the late start
+// and every gap split, which their parts' coverage still records, and the
+// tail after the last part. A Muxing row (a boot re-mux of a capture that
+// completed) is not this: its own finalize was the orchestrator's, whose plan
+// knows whether the broadcast ended (ExecuteTwitch's outageFinalize).
+// No coverage on disk, or none that can be placed, is no plan
+// (gapSpansFor).
 //
 // prior is the row as muxJob found it, before its Muxing write cleared the
-// marker; job is the row the mux runs on. The tail is open in both: the
-// broadcast ran on past the capture's last segment. A Mux of a Cancelled row
-// (the operator stopped it) or of an Error row for any other reason makes no
-// plan, as the recorded footage is then all that was wanted or possible. The
-// selection the capture ran on is read back from the row (twitch_quality, the
-// variant it last recorded, and quality_preference) and the job context's
-// snapshot of the global selection settings, as newTwitchVariantInfo reads it.
+// marker; job is the row the mux runs on. The tail is open in all of them:
+// the capture stopped before its broadcast's end was seen. The selection the
+// capture ran on is read back from the row (twitch_quality, the variant it
+// last recorded, and quality_preference) and the job context's snapshot of
+// the global selection settings, as newTwitchVariantInfo reads it.
 func (w *DownloadWorker) twitchMuxGapFillPlan(prior, job *database.Job, jobCtx *JobContext) *twitchGapFillPlan {
-	if prior == nil || job == nil || jobCtx == nil || prior.Platform != "twitch" || prior.IsVod || prior.Status != database.StatusError {
+	if prior == nil || job == nil || jobCtx == nil || prior.Platform != "twitch" || prior.IsVod {
 		return nil
 	}
-	if prior.Error != twitchEndedOfflineErrMsg && prior.ParkReason != database.ParkReasonTwitchEndUnconfirmed {
+	if prior.Status != database.StatusError && prior.Status != database.StatusCancelled {
 		return nil
 	}
 	login := TwitchJobLogin(job)
