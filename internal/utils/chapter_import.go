@@ -187,8 +187,12 @@ func chapterRuns(line string) []chapterRun {
 //
 // The list comes back in time order with EndMs unset; a start pasted twice
 // keeps its first line's title; an empty title becomes "Chapter N", N being
-// its place in the list. ErrNoTimestamps when no line carries one. The list
-// is not yet fitted to any archive — FitImportedChapters does that.
+// its place in the parsed list — the paste's timed lines, in time order — not
+// in the list as finally saved: FitImportedChapters may drop chapters outside
+// the recording and put an "<Untitled Chapter 1>" in front of a late first
+// one, and the numbers are not redone. ErrNoTimestamps when no line carries
+// one. The list is not yet fitted to any archive — FitImportedChapters does
+// that.
 //
 // This is not yt-dlp's _extract_chapters_from_description (ChaptersFromDescription,
 // common.py b77c9304e), which reads a video's own description and keeps its

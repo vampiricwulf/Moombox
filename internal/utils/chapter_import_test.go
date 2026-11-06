@@ -205,6 +205,8 @@ func TestParseChapterCommentEdgeRows(t *testing.T) {
 			want: []Chapter{{StartMs: ms(0, 1, 0), Title: "a"}, {StartMs: ms(0, 2, 0), Title: "b"}}},
 		{name: "bullets and separators", text: "• 0:01 - one\n▶ 0:02 | two\n* 0:03 ： three\n・0:04・four\n— 0:05 – five\n┃ 0:06: six",
 			want: []Chapter{{StartMs: 1000, Title: "one"}, {StartMs: 2000, Title: "two"}, {StartMs: 3000, Title: "three"}, {StartMs: 4000, Title: "four"}, {StartMs: 5000, Title: "five"}, {StartMs: 6000, Title: "six"}}},
+		{name: "full-width colon after a full-width timestamp", text: "０：０６：　six\n１：２３：４５：title",
+			want: []Chapter{{StartMs: 6000, Title: "six"}, {StartMs: ms(1, 23, 45), Title: "title"}}},
 		{name: "CRLF line ends", text: "0:01 a\r\n0:02 b\r\n",
 			want: []Chapter{{StartMs: 1000, Title: "a"}, {StartMs: 2000, Title: "b"}}},
 		{name: "nothing timed", text: "just a comment\n⚔1.\n________", noneQ: true},
