@@ -393,7 +393,9 @@ func (a *App) restoreChaptersCmd(job *database.Job) tea.Cmd {
 	return safeCmdOr(func() tea.Msg {
 		v, err := fn(id)
 		return chapterSaveResultMsg{Title: title, Restore: true, View: v, Err: err}
-	}, func(text string) tea.Msg { return chapterSaveResultMsg{Title: title, Restore: true, Err: fmt.Errorf("%s", text)} })
+	}, func(text string) tea.Msg {
+		return chapterSaveResultMsg{Title: title, Restore: true, Err: fmt.Errorf("%s", text)}
+	})
 }
 
 // handleChapterSaveResult reports a save or a restore. A refused save goes

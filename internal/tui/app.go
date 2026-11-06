@@ -676,7 +676,7 @@ type App struct {
 	OnRestoreChapters   func(jobID string) (ChapterImportView, error)
 	HasOriginalChapters func(jobID string) bool
 	HasStagingFiles     func(jobID string) bool // checks if staging dir has files
-	HasSegmentFiles func(jobID string) bool // checks if staging dir has segment files
+	HasSegmentFiles     func(jobID string) bool // checks if staging dir has segment files
 	// HasUnmuxedParts reports whether a Finished job's staging still holds a
 	// split part its finalize could not mux (worker.HasUnmuxedParts) — what
 	// makes A M offer itself on a Finished row. A disk probe like the two
