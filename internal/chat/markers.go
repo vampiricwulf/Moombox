@@ -8,7 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -393,15 +395,79 @@ func (cd *ChatDownloader) settleRerunRawSidecar(rerunChatFile, archiveChatFile s
 	}
 }
 
-// queueRawActions buffers a batch's raw actions for the sidecar.
-func (cd *ChatDownloader) queueRawActions(raw []json.RawMessage) {
+// queueRawActions buffers a batch's raw actions for the sidecar. A live
+// action is wrapped as yt-dlp's live path writes every action
+// (youtube_live_chat.py parse_actions_live, b77c9304e): {"replayChatItemAction":
+// {"actions": [action]}, "videoOffsetTimeMsec": "<offset>", "isLive": true},
+// the offset that of the newest message before it, in this batch or an
+// earlier one. Without it a live deletion, banner or poll — none of which
+// carries a time of its own — could not be placed on the archive's timeline.
+// Moombox's offset counts from the chat file's epoch, as its messages' do,
+// where upstream's counts from when its download began; before any message
+// with a timestamp, it is the wall clock's distance from the epoch, and with
+// no epoch at all the line carries no offset.
+func (cd *ChatDownloader) queueRawActions(resp *ChatApiResponse) {
+	raw := resp.RawActions
 	if len(raw) == 0 {
+		cd.noteLiveRawOffset(resp.Messages)
 		return
 	}
-	cd.rawPending = append(cd.rawPending, raw...)
+	scanned := 0
+	for i, action := range raw {
+		after := -1
+		if i < len(resp.RawLiveAfter) {
+			after = min(resp.RawLiveAfter[i], len(resp.Messages))
+		}
+		if after < 0 {
+			cd.rawPending = append(cd.rawPending, action)
+			continue
+		}
+		if after > scanned {
+			cd.noteLiveRawOffset(resp.Messages[scanned:after])
+			scanned = after
+		}
+		wrapper := map[string]any{
+			"replayChatItemAction": map[string]any{"actions": []json.RawMessage{action}},
+			"isLive":               true,
+		}
+		if off, ok := cd.liveRawOffset(); ok {
+			wrapper["videoOffsetTimeMsec"] = strconv.FormatInt(off, 10)
+		}
+		if b, err := json.Marshal(wrapper); err == nil {
+			cd.rawPending = append(cd.rawPending, b)
+		}
+	}
+	if scanned < len(resp.Messages) {
+		cd.noteLiveRawOffset(resp.Messages[scanned:])
+	}
 	if over := len(cd.rawPending) - maxPendingRawActions; over > 0 {
 		cd.rawPending = cd.rawPending[over:]
 	}
+}
+
+// noteLiveRawOffset advances the live raw lines' offset to the newest of msgs
+// with a timestamp, against the chat file's epoch.
+func (cd *ChatDownloader) noteLiveRawOffset(msgs []ChatMessage) {
+	if cd.streamStartMs <= 0 {
+		return
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if usec, err := strconv.ParseInt(msgs[i].TimestampUsec, 10, 64); err == nil && usec > 0 {
+			cd.liveRawOffsetMs, cd.hasLiveRawOffset = usec/1000-cd.streamStartMs, true
+			return
+		}
+	}
+}
+
+// liveRawOffset is the offset a live raw line is stamped with.
+func (cd *ChatDownloader) liveRawOffset() (int64, bool) {
+	if cd.hasLiveRawOffset {
+		return cd.liveRawOffsetMs, true
+	}
+	if cd.streamStartMs > 0 {
+		return time.Now().UnixMilli() - cd.streamStartMs, true
+	}
+	return 0, false
 }
 
 // flushRawActions appends the buffered raw actions to the sidecar, one JSON

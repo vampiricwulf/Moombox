@@ -166,6 +166,11 @@ type ChatDownloader struct {
 	// appended (flushRawActions). Loop-goroutine state, like messages.
 	pendingMarkers []pendingChatMarker
 	rawPending     []json.RawMessage
+	// liveRawOffsetMs / hasLiveRawOffset: the offset of the newest live
+	// message seen, which a live raw line is stamped with (yt-dlp's
+	// live_offset, carried across batches the same way).
+	liveRawOffsetMs  int64
+	hasLiveRawOffset bool
 	// resumeFileAuto is true when ResumeFile was synthesized from OutputFile in
 	// NewChatDownloader (caller did not pass an explicit ResumeFile). Used by
 	// SetOutputFile to know whether it's safe to re-derive ResumeFile from the
@@ -1472,7 +1477,7 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 	// committed (a deletion never precedes its message), and everything that
 	// did not become a message for the raw sidecar (G36, D16).
 	cd.applyMarkers(resp.Markers)
-	cd.queueRawActions(resp.RawActions)
+	cd.queueRawActions(resp)
 	if len(resp.Messages) > 0 {
 		lastTs = resp.Messages[len(resp.Messages)-1].TimestampText
 	}

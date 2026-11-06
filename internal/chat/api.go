@@ -85,7 +85,13 @@ type ChatApiResponse struct {
 	// message, verbatim — the markers too, and an action inside a replay
 	// wrapper re-wrapped with its own videoOffsetTimeMsec, as yt-dlp's
 	// live_chat.json carries it — for the chat.raw.jsonl sidecar.
-	RawActions          []json.RawMessage
+	RawActions []json.RawMessage
+	// RawLiveAfter, parallel to RawActions, marks the actions that came bare
+	// from the live endpoint: how many of Messages preceded each, so the
+	// downloader can wrap it in yt-dlp's pseudo-replay shape at the offset of
+	// the newest message before it (queueRawActions). -1 (or an index past
+	// its end) is an action that needs no wrapping.
+	RawLiveAfter        []int
 	NextContinuation    string
 	AllChatContinuation string // Unfiltered "Live Chat" token from header (first response only)
 	TimeoutMs           int
@@ -592,6 +598,11 @@ func (api *ChatAPI) collectInnerAction(action, replay map[string]any, replayOffs
 	}
 	if b, err := json.Marshal(raw); err == nil {
 		res.RawActions = append(res.RawActions, b)
+		after := -1
+		if replay == nil {
+			after = len(res.Messages)
+		}
+		res.RawLiveAfter = append(res.RawLiveAfter, after)
 	}
 }
 

@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -298,5 +300,90 @@ func TestPendingMarkersRewriteIsStreamed(t *testing.T) {
 	}
 	if left, _ := filepath.Glob(out + ".markers-*"); len(left) != 0 {
 		t.Errorf("rewrite left %v behind", left)
+	}
+}
+
+// TestLiveRawLinesCarryTheirOffset: a live action that did not become a
+// message is written in yt-dlp's live shape, {"replayChatItemAction":
+// {"actions":[action]}, "videoOffsetTimeMsec": ..., "isLive": true}, at the
+// offset of the newest message before it — in its own batch, or carried from
+// an earlier one — against the chat file's epoch, so a deletion or a banner
+// (no time of its own) can be placed on the archive's timeline. A replay
+// action keeps the wrapper it came in.
+//
+// Mutants: live actions written bare (no wrapper); the offset taken from the
+// batch's last message rather than the newest one before the action; the
+// offset not carried to the next batch.
+func TestLiveRawLinesCarryTheirOffset(t *testing.T) {
+	epoch := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	text := func(id string, at time.Duration) map[string]any {
+		return map[string]any{"addChatItemAction": map[string]any{"item": map[string]any{
+			"liveChatTextMessageRenderer": map[string]any{
+				"id": id, "timestampUsec": strconv.FormatInt(epoch.Add(at).UnixMicro(), 10),
+				"authorName":              map[string]any{"simpleText": "a"},
+				"authorExternalChannelId": "UCa",
+				"message":                 map[string]any{"runs": []any{map[string]any{"text": "hi"}}},
+			},
+		}}}
+	}
+	batch := func(actions ...any) *ChatApiResponse {
+		res, err := (&ChatAPI{}).parseResponse(map[string]any{"continuationContents": map[string]any{
+			"liveChatContinuation": map[string]any{"actions": actions}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	del := func(id string) map[string]any {
+		return map[string]any{"markChatItemAsDeletedAction": map[string]any{"targetItemId": id}}
+	}
+	first := batch(text("m1", 5*time.Second), del("m1"), text("m2", 9*time.Second),
+		map[string]any{"addBannerToLiveChatCommand": map[string]any{}})
+	first.NextContinuation, first.TimeoutMs, first.IsComplete = "live1", 1, false
+	second := batch(del("m2"))
+	second.NextContinuation, second.TimeoutMs, second.IsComplete = "live2", 1, false
+
+	out := filepath.Join(t.TempDir(), "chat.json")
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID: "vid", OutputFile: out, InitialContinuation: "live0",
+		IsLiveOrUpcoming: true, StreamStartTime: epoch.Format(time.RFC3339),
+	})
+	call := 0
+	cd.testFetchOverride = func(ctx context.Context) (*ChatApiResponse, error) {
+		call++
+		switch call {
+		case 1:
+			return first, nil
+		case 2:
+			return second, nil
+		}
+		return &ChatApiResponse{IsComplete: true}, nil
+	}
+	cd.testRecoveryOverride = func(ctx context.Context) bool { return false }
+	_ = cd.Start(context.Background())
+
+	data, err := os.ReadFile(rawSidecarPath(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	want := []struct{ offset, key string }{{"5000", "markChatItemAsDeletedAction"}, {"9000", "addBannerToLiveChatCommand"}, {"9000", "markChatItemAsDeletedAction"}}
+	if len(lines) != len(want) {
+		t.Fatalf("raw sidecar = %q, want %d lines", lines, len(want))
+	}
+	for i, w := range want {
+		var line struct {
+			Replay struct {
+				Actions []map[string]json.RawMessage `json:"actions"`
+			} `json:"replayChatItemAction"`
+			Offset string `json:"videoOffsetTimeMsec"`
+			IsLive bool   `json:"isLive"`
+		}
+		if err := json.Unmarshal([]byte(lines[i]), &line); err != nil {
+			t.Fatalf("line %d: %v", i, err)
+		}
+		if !line.IsLive || line.Offset != w.offset || len(line.Replay.Actions) != 1 || line.Replay.Actions[0][w.key] == nil {
+			t.Errorf("line %d = %s, want %s wrapped live at offset %s", i, lines[i], w.key, w.offset)
+		}
 	}
 }
