@@ -80,8 +80,13 @@ type ChapterImportDialogModel struct {
 	step          int
 	// seq numbers the edits; a preview answers for the edit it was asked
 	// for, and only the newest one is drawn.
-	seq        int
-	view       *ChapterImportView
+	seq  int
+	view *ChapterImportView
+	// prefill is set by Open and cleared by the first preview drawn after
+	// it, the only one whose offset fills the field (owner decision CK-2):
+	// a field the operator clears stays empty, as in the Web dialog, which
+	// fills it from its opening preview alone.
+	prefill    bool
 	previewErr string
 	saveErr    string
 	// saves numbers the saves this overlay started, so a save's result is
@@ -140,6 +145,7 @@ func (m *ChapterImportDialogModel) Open(job *database.Job) tea.Cmd {
 	m.offset.SetValue("")
 	m.focusOffset = false
 	m.offset.Blur()
+	m.prefill = true
 	m.seq++
 	seq := m.seq
 	return tea.Batch(m.text.Focus(), func() tea.Msg { return chapterPreviewTickMsg{Seq: seq} })
@@ -159,7 +165,8 @@ func (m *ChapterImportDialogModel) Request() (jobID, text, offset string) {
 }
 
 // SetPreview draws the answer to the preview asked for edit seq, if it is
-// still the newest. The opening preview's offset fills an empty field.
+// still the newest. The first one drawn after Open fills an empty offset
+// field with the pre-filled offset; no later one does (prefill).
 func (m *ChapterImportDialogModel) SetPreview(seq int, v ChapterImportView, err error) {
 	if !m.visible || seq != m.seq {
 		return
@@ -169,9 +176,10 @@ func (m *ChapterImportDialogModel) SetPreview(seq int, v ChapterImportView, err 
 		return
 	}
 	m.view, m.previewErr = &v, ""
-	if m.offset.Value() == "" && v.DefaultOffsetText != "" {
+	if m.prefill && m.offset.Value() == "" && v.DefaultOffsetText != "" {
 		loadTextInput(&m.offset, v.DefaultOffsetText)
 	}
+	m.prefill = false
 }
 
 // offsetSourceNote is the line under the offset field saying where its

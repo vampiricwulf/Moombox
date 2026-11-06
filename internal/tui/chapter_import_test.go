@@ -402,10 +402,12 @@ func TestChapterImportChordsFromTheKeyboard(t *testing.T) {
 // overlay: the opening preview's default offset — a late-joined live
 // capture's join point, negated — fills the empty offset field as a signed
 // clock (owner decision CK-2: "-1:23:45", not "-5025"), and the overlay says
-// where it came from, as the Web dialog does.
+// where it came from, as the Web dialog does. Only the opening preview
+// fills it: a field the operator clears stays empty.
 //
 // Mutants: SetPreview not filling the field (empty); the field filled from
-// the seconds ("-5025"); the note not drawn.
+// the seconds ("-5025"); the note not drawn; every preview filling an empty
+// field (the cleared field is filled again).
 func TestChapterImportPrefillsTheJoinPoint(t *testing.T) {
 	r := newChapterRig(t)
 	r.previewFn = func(text, offset string) ChapterImportView {
@@ -419,6 +421,20 @@ func TestChapterImportPrefillsTheJoinPoint(t *testing.T) {
 	}
 	if v := r.app.chapterDlg.View(); !strings.Contains(v, "Pre-filled: joined 1:23:45 in") {
 		t.Errorf("the overlay does not say where the offset came from:\n%s", v)
+	}
+
+	// Only the opening preview fills the field, as in the Web dialog: one
+	// the operator clears stays empty through the next preview.
+	r.app.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	for range len("-1:23:45") {
+		r.app.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	}
+	if got := r.app.chapterDlg.offset.Value(); got != "" {
+		t.Fatalf("offset field after clearing = %q", got)
+	}
+	previewNow(t, r.app)
+	if got := r.app.chapterDlg.offset.Value(); got != "" {
+		t.Errorf("a later preview filled the cleared offset field again: %q", got)
 	}
 }
 
