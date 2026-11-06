@@ -19,11 +19,14 @@ import (
 // TestSetupNamesWhyItFellToTheLiveEdge pins owner decision PR-R2's setup
 // half: each arm that puts a live capture's first setup on the live HLS
 // playlist marks its result with why (DownloadResult.LiveEdgeReason), and a
-// setup that records from the start marks nothing — nor does a VOD's DRM
-// fallback, whose HLS manifest is the whole video.
+// setup that records from the start marks nothing — nor does a finished
+// VOD's DRM fallback, whose HLS manifest is the whole video. A post-live
+// stream's DRM fallback is marked: its HLS holds only the last ~2 h
+// (yt-dlp _video.py, adjust_incomplete_format).
 //
 // Mutants: any one arm's withLiveEdge dropped (its row reads ""); the DRM
-// arm's isVod guard dropped (the post-live DRM row reads liveEdgeDRM).
+// arm marking every isVod setup (the VOD row reads liveEdgePostLiveDRM) or
+// none (the post-live row reads "").
 func TestSetupNamesWhyItFellToTheLiveEdge(t *testing.T) {
 	ago := func(d time.Duration) string { return time.Now().Add(-d).UTC().Format(time.RFC3339) }
 	hlsInfo := func() *youtube.VideoInfo {
@@ -61,12 +64,14 @@ func TestSetupNamesWhyItFellToTheLiveEdge(t *testing.T) {
 	})
 	t.Run("DRM", func(t *testing.T) {
 		for _, tc := range []struct {
-			name  string
-			isVod bool
-			want  string
+			name   string
+			isVod  bool
+			status youtube.StreamStatus
+			want   string
 		}{
-			{name: "live", want: liveEdgeDRM},
-			{name: "post-live", isVod: true},
+			{name: "live", status: youtube.StreamLive, want: liveEdgeDRM},
+			{name: "post-live", isVod: true, status: youtube.StreamPostLive, want: liveEdgePostLiveDRM},
+			{name: "VOD", isVod: true, status: youtube.StreamVOD},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,11 +80,8 @@ func TestSetupNamesWhyItFellToTheLiveEdge(t *testing.T) {
 				t.Cleanup(srv.Close)
 				swapHls(t, &fakeStrategy{kind: "hls"})
 				job, _ := vodPotJob(t)
-				info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, DashManifestURL: srv.URL + "/api/manifest/dash/id/abc",
+				info := &youtube.VideoInfo{StreamStatus: tc.status, DashManifestURL: srv.URL + "/api/manifest/dash/id/abc",
 					DashManifestSource: "tv_public", HlsManifestURL: "https://m.example/x.m3u8", HlsManifestSource: "tv_public"}
-				if tc.isVod {
-					info.StreamStatus = youtube.StreamPostLive
-				}
 				res, err := setupWithFallback(context.Background(), job, DashStrategy, tc.isVod, info, &StrategyDeps{})
 				if err != nil || res == nil || !res.IsHls {
 					t.Fatalf("setup = %+v, %v; want the HLS fallback", res, err)
@@ -166,5 +168,48 @@ func TestLiveEdgeStartIsRecordedAndNotifiedOnce(t *testing.T) {
 	w.reinitializeNow(job.ID)
 	if row, _ := db.GetJob(job.ID); row.LiveEdgeReason != "" {
 		t.Errorf("after a Reinitialize live_edge_reason = %q, want it cleared", row.LiveEdgeReason)
+	}
+}
+
+// TestLiveEdgeFallInALaterPartIsNotALateStart pins that a restart which
+// resumes a live job into a later part (part 1 already recorded, so
+// discoverResumeSegment answers seg_1) and falls to the live edge there
+// records no live_edge_reason and sends no notification: the archive's
+// first part holds the broadcast's start.
+func TestLiveEdgeFallInALaterPartIsNotALateStart(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	rec := notificationtest.New()
+	w.orchestrator.notifier = rec
+	job := &database.Job{ID: "yt_edge2", VideoID: "edge2", URL: "https://www.youtube.com/watch?v=edge2", Platform: "youtube",
+		Title: "Split", ChannelName: "Chan", Status: database.StatusLive}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	part1 := filepath.Join(t.TempDir(), "Split - part1.mp4")
+	if err := db.AddSegment(&database.Segment{JobID: job.ID, SegmentIndex: 0, Filename: filepath.Base(part1), FilePath: part1}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	missing := errors.Join(errMissingPot, errors.New("sidecar down"))
+	mf := &cancellingStrategy{fakeStrategy: fakeStrategy{kind: "manifestless_dash", answers: []error{missing}}, cancel: cancel}
+	hls := &cancellingStrategy{fakeStrategy: fakeStrategy{kind: "hls"}, cancel: cancel}
+	origMF, origHLS := ManifestlessDashStrategy, HlsStrategy
+	ManifestlessDashStrategy, HlsStrategy = mf, hls
+	defer func() { ManifestlessDashStrategy, HlsStrategy = origMF, origHLS }()
+	row, _ := db.GetJob(job.ID)
+	jobCtx := &JobContext{Job: row, DB: db, Config: &JobConfig{}, StagingDir: filepath.Join(t.TempDir(), "staging"), Logger: &captureLogger{}}
+	info := manifestlessPotInfo("web_creator", "web_creator")
+	info.HlsManifestURL, info.HlsManifestSource = "https://m.example/x.m3u8", "web_safari"
+	_ = w.orchestrator.ExecuteWithChat(ctx, jobCtx, info, false, nil)
+
+	if len(hls.seen) == 0 {
+		t.Fatal("the restart never fell to the HLS playlist; the test does not exercise the later-part fall")
+	}
+	if row, _ := db.GetJob(job.ID); row.LiveEdgeReason != "" {
+		t.Errorf("a fall in part 2 recorded live_edge_reason %q, want none", row.LiveEdgeReason)
+	}
+	if sent := rec.ByEvent("live_edge"); len(sent) != 0 {
+		t.Errorf("a fall in part 2 sent %d live_edge notification(s), want none", len(sent))
 	}
 }

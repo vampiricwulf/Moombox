@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/vampiricwulf/Moombox/internal/notifications"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 // Why a live YouTube capture recorded from the live edge instead of the
@@ -18,9 +19,16 @@ const (
 	// evictedStartToLiveEdge: the start was gone though the row's age did
 	// not say so (owner decision 7).
 	liveEdgeEvicted = "the stream's start was already gone from YouTube's ~120 h window"
-	// setupOrFallback's DRM arm (owner decision FE-1), live only: a VOD's
-	// HLS manifest is the whole video.
+	// setupOrFallback's DRM arm (owner decision FE-1), live: the live HLS
+	// playlist's window starts near the live edge.
 	liveEdgeDRM = "every DASH format of a kind the job needs was DRM-protected"
+	// The same arm on a post-live stream (isVod, StreamPostLive): its HLS
+	// manifest holds only the broadcast's last ~2 hours — yt-dlp marks a
+	// post-live stream's non-from-start formats "(Last 2 hours)"
+	// (_video.py b77c9304e, adjust_incomplete_format: "Post-live DASH and
+	// m3u8 manifests only have the last ~2 hours"). A finished VOD's HLS
+	// manifest is the whole video and marks nothing.
+	liveEdgePostLiveDRM = "every DASH format of a kind the job needs was DRM-protected, and a post-live stream's HLS holds only its last ~2 h"
 	// setupOrFallback's missing_pot arm (owner decision D7).
 	liveEdgeMissingPot = "no GVS token could be minted for the from-start formats (missing_pot)"
 	// noJSFromStartOrHls's HLS arm (owner decision D7, FD decision 1).
@@ -47,6 +55,20 @@ func withLiveEdgeErr(reason string) func(*DownloadResult, error) (*DownloadResul
 	}
 }
 
+// drmLiveEdgeReason is the live_edge_reason of a setup the DRM arm put on the
+// HLS manifest: liveEdgeDRM for a live capture, liveEdgePostLiveDRM for a
+// post-live one (it reaches the setup as isVod, but its HLS is the last ~2 h,
+// not the whole broadcast), "" for a finished VOD.
+func drmLiveEdgeReason(isVod bool, info *youtube.VideoInfo) string {
+	switch {
+	case !isVod:
+		return liveEdgeDRM
+	case info != nil && (info.StreamStatus == youtube.StreamPostLive || info.IsPostLiveDVR):
+		return liveEdgePostLiveDRM
+	}
+	return ""
+}
+
 // recordLiveEdgeStart records on the job's row that its live capture is
 // recording from the live edge, and why (owner decision PR-R2), where until
 // now only a job-log Warn said so while a missing tail got a details row and
@@ -59,7 +81,8 @@ func withLiveEdgeErr(reason string) func(*DownloadResult, error) (*DownloadResul
 // when the row held no reason yet. A Resume or restart of the same recording
 // that falls back again rewrites the reason without a second notification;
 // a Reinitialize clears it with the rest of the row, so its new recording
-// notifies afresh. Only a capture's first setup is recorded — a mid-stream
+// notifies afresh. Only a capture's first setup in the job's first part is
+// recorded (ExecuteWithChat skips a resume into a later part) — a mid-stream
 // path switch (switchLivePath) keeps the earlier part, recorded from the
 // start, and is not a late start.
 func (o *DownloadOrchestrator) recordLiveEdgeStart(jobCtx *JobContext, reason string) {

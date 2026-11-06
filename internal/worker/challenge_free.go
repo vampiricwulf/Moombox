@@ -319,8 +319,8 @@ func setupOrFallback(ctx context.Context, job *JobContext, strategy DownloadStra
 		result, hlsErr := hls.Download(ctx, job, info, deps)
 		switch {
 		case hlsErr == nil:
-			if !isVod {
-				result = withLiveEdge(result, liveEdgeDRM)
+			if reason := drmLiveEdgeReason(isVod, info); reason != "" {
+				result = withLiveEdge(result, reason)
 			}
 			return result, nil
 		case errors.Is(hlsErr, engine.ErrDRMProtected):

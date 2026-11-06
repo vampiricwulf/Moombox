@@ -428,7 +428,13 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	// manifest-free one runs again on the formats that need no player JS. A
 	// job cancelled meanwhile sets up nothing more.
 	result, err = setupWithFallback(ctx, strategyCtx, strategy, isVod, videoInfo, deps)
-	if err == nil && result != nil && result.LiveEdgeReason != "" {
+	// Only the job's first part can be a late start (PR-R2): a restart that
+	// resumes into a later part (startSegmentIndex > 0, a quality or gap
+	// split already recorded part 1) and falls to the live edge there has
+	// the broadcast's start in its earlier part — or, if part 1 itself fell
+	// back, the reason is on the row from then — so it records nothing and
+	// sends no "the start cannot be recorded" alert.
+	if err == nil && result != nil && result.LiveEdgeReason != "" && startSegmentIndex == 0 {
 		o.recordLiveEdgeStart(jobCtx, result.LiveEdgeReason)
 	}
 
