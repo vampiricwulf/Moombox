@@ -66,6 +66,11 @@ type TwitchVodInfo struct {
 	// not recording (yt-dlp #14455). While it is true, Duration is the length
 	// so far and the playlist has no ENDLIST yet.
 	IsRecording bool `json:"isRecording,omitempty"`
+	// BroadcastType is VideoMetadata's broadcastType — ARCHIVE (a past
+	// broadcast), HIGHLIGHT, UPLOAD or PAST_PREMIERE — "" when the reply
+	// carried none. What ArchiveVodBetween confirms a candidate by, and what
+	// a filtered listing classifies a node by when the node carries none.
+	BroadcastType string `json:"broadcastType,omitempty"`
 	// Description is the VOD's own description (VideoMetadata's
 	// `description`, as yt-dlp's _extract_info_gql reads it), G68. Empty for
 	// most past broadcasts; highlights and uploads carry one.

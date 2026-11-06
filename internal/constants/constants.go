@@ -387,7 +387,9 @@ const TwitchGQLClientID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 // VideoPlayerChapterSelectButtonVideo (a VOD's moments, its chapters) and
 // FilterableVideoTowerVideos (a channel's video list, which finds a live
 // broadcast's archive VOD) were added 2026-10-31 from the same table at
-// b77c9304e, for the chapter port (owner decision D23).
+// b77c9304e, for the chapter port (owner decision D23). CollectionSideBar (a
+// collection's videos, /collections/<id>) was added 2026-10-31 from the same
+// table, for the VOD discovery port (owner decision D18).
 var TwitchGQLHashes = struct {
 	StreamMetadata                      string
 	ComscoreStreamingQuery              string
@@ -395,6 +397,7 @@ var TwitchGQLHashes = struct {
 	VideoCommentsByOffsetOrCursor       string
 	VideoPlayerChapterSelectButtonVideo string
 	FilterableVideoTowerVideos          string
+	CollectionSideBar                   string
 }{
 	StreamMetadata:                      "ad022ca32220d5523d03a23cbcb5beaa1e0999889c1f8f78f9f2520dafb5cae6",
 	ComscoreStreamingQuery:              "e1edae8122517d013405f237ffcc124515dc6ded82480a88daef69c83b53ac01",
@@ -402,6 +405,7 @@ var TwitchGQLHashes = struct {
 	VideoCommentsByOffsetOrCursor:       "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a",
 	VideoPlayerChapterSelectButtonVideo: "71835d5ef425e154bf282453a926d99b328cdc5e32f36d3a209d0f4778b41203",
 	FilterableVideoTowerVideos:          "67004f7881e65c297936f32c75246470629557a393788fb5a69d6d9a25a8fd5f",
+	CollectionSideBar:                   "016e1e4ccee0eb4698eb3bf1a04dc1c077fb746c78c82bac9a8f0289658fbd1a",
 }
 
 // TwitchEmoteAPIs contains third-party emote API endpoints.

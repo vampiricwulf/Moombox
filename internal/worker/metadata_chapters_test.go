@@ -260,7 +260,7 @@ func TestTwitchArchiveChaptersLooksUpTheVod(t *testing.T) {
 			io.WriteString(rw, `[{"data":{"video":null}},{"data":{}}]`)
 			return
 		}
-		io.WriteString(rw, `[{"data":{"video":{"id":"777","title":"t","lengthSeconds":600,"owner":{"login":"s"}}}},{"data":{"video":{"moments":{"edges":[{"node":{"positionMilliseconds":0,"durationMilliseconds":600000,"description":"Music"}}]}}}}]`)
+		io.WriteString(rw, `[{"data":{"video":{"id":"777","title":"t","lengthSeconds":600,"broadcastType":"ARCHIVE","owner":{"login":"s"}}}},{"data":{"video":{"moments":{"edges":[{"node":{"positionMilliseconds":0,"durationMilliseconds":600000,"description":"Music"}}]}}}}]`)
 	}))
 	t.Cleanup(srv.Close)
 	old := constants.TwitchURLs.GQL

@@ -109,44 +109,6 @@ func TestGetVodInfoChapterOpFailureKeepsTheMetadata(t *testing.T) {
 	}
 }
 
-// TestArchiveVodFor is yt-dlp's live_from_start lookup: the channel's newest
-// video counts only when it was published at or after the broadcast began,
-// and only past broadcasts are asked for.
-//
-// Mutants: the publishedAt comparison dropped (an older broadcast's VOD is
-// returned); broadcastType sent as upstream's null (a highlight published
-// mid-stream, newer than the archive by finalize, would be taken).
-func TestArchiveVodFor(t *testing.T) {
-	cases := []struct {
-		name, reply, want string
-	}{
-		{"newest is this broadcast's", `{"data":{"user":{"videos":{"edges":[{"__typename":"VideoEdge","node":{"__typename":"Video","id":"900","publishedAt":"2026-10-01T12:00:05Z"}},{"__typename":"VideoEdge","node":{"__typename":"Video","id":"899","publishedAt":"2026-09-30T12:00:00Z"}}]}}}}`, "900"},
-		{"newest is an older broadcast's", `{"data":{"user":{"videos":{"edges":[{"__typename":"VideoEdge","node":{"__typename":"Video","id":"899","publishedAt":"2026-09-30T12:00:00Z"}}]}}}}`, ""},
-		{"no videos", `{"data":{"user":{"videos":{"edges":[]}}}}`, ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			var sent string
-			stubGQL(t, func(body string) string { sent = body; return c.reply })
-			got, err := NewAPI(&testLogger{}).ArchiveVodFor(context.Background(), "Streamer", "2026-10-01T12:00:00Z", "")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != c.want {
-				t.Errorf("ArchiveVodFor = %q, want %q", got, c.want)
-			}
-			if !strings.Contains(sent, constants.TwitchGQLHashes.FilterableVideoTowerVideos) || !strings.Contains(sent, `"channelOwnerLogin":"streamer"`) {
-				t.Errorf("request %s, want FilterableVideoTower_Videos for the lower-cased login", sent)
-			}
-			// Past broadcasts only: at finalize, a highlight published during
-			// the broadcast is newer than its archive and would be taken.
-			if !strings.Contains(sent, `"broadcastType":"ARCHIVE"`) {
-				t.Errorf("request %s, want broadcastType ARCHIVE", sent)
-			}
-		})
-	}
-}
-
 // TestOriginalSizeThumbnailURL is yt-dlp's _get_thumbnails rewrite (G45): the
 // size before the extension becomes 0x0, a query or fragment is kept, and a
 // URL with no size yields nothing to try.

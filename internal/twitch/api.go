@@ -1076,6 +1076,7 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 		Duration:           v.LengthSeconds,
 		CreatedAt:          v.CreatedAt,
 		ViewCount:          v.ViewCount,
+		BroadcastType:      v.BroadcastType,
 	}
 
 	// The processing placeholder is no thumbnail of the broadcast: yt-dlp
@@ -1177,84 +1178,6 @@ func vodChapters(moments []vodMoment, game string) []utils.Chapter {
 	}
 	return out
 }
-
-// ArchiveVodFor finds the archive VOD of the broadcast a live capture
-// recorded: the newest of the channel's videos published at or after the
-// broadcast's start. It is yt-dlp's live_from_start lookup
-// (TwitchStreamIE._real_extract, twitch.py b77c9304e: `next(self._entries(
-// channel_name, None, 'time'))`, kept when its timestamp >= the stream's
-// createdAt), over the same FilterableVideoTower_Videos op its
-// TwitchVideosIE pages, filtered to past broadcasts (see the broadcastType
-// variable); the first page is enough, since the archive of a broadcast that
-// just ended is the newest archive. Moombox reads it at a live
-// capture's finalize, for the VOD's chapters (owner decision D23 follow-up 1:
-// VOD first, the categories the capture observed as the fallback).
-//
-// Returns "" with no error when the channel has no such video — VODs off, or
-// Twitch has not listed it yet.
-func (a *API) ArchiveVodFor(ctx context.Context, channelLogin, startedAt, authToken string) (string, error) {
-	start, err := time.Parse(time.RFC3339, startedAt)
-	if err != nil {
-		return "", fmt.Errorf("archive vod lookup: stream start %q: %w", startedAt, err)
-	}
-	query := newPersistedQuery("FilterableVideoTower_Videos", constants.TwitchGQLHashes.FilterableVideoTowerVideos, map[string]any{
-		"channelOwnerLogin": strings.ToLower(channelLogin),
-		// "ARCHIVE", where upstream sends None (all types): yt-dlp looks as
-		// the stream starts, when its in-progress archive is the newest
-		// video, but Moombox looks at finalize, hours later, when a
-		// highlight or upload published during the broadcast is newer than
-		// the archive (whose publishedAt is the stream's start) and would be
-		// taken in its place. Past broadcasts only is yt-dlp's own
-		// _BROADCASTS 'archives' filter.
-		"broadcastType": "ARCHIVE",
-		"videoSort":     "TIME",
-		"limit":         archiveVodLookupLimit,
-	})
-	respData, err := a.gqlRequest(ctx, "FilterableVideoTower_Videos", query, authToken)
-	if err != nil {
-		return "", err
-	}
-	var resp struct {
-		Data struct {
-			User *struct {
-				Videos *struct {
-					Edges []struct {
-						TypeName string `json:"__typename"`
-						Node     *struct {
-							TypeName    string `json:"__typename"`
-							ID          string `json:"id"`
-							PublishedAt string `json:"publishedAt"`
-						} `json:"node"`
-					} `json:"edges"`
-				} `json:"videos"`
-			} `json:"user"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(respData, &resp); err != nil {
-		return "", fmt.Errorf("parse archive vod lookup: %w", err)
-	}
-	if resp.Data.User == nil || resp.Data.User.Videos == nil {
-		return "", nil
-	}
-	// The newest entry decides, as upstream's next(...) does: an older VOD
-	// is another broadcast's, whatever it holds.
-	for _, e := range resp.Data.User.Videos.Edges {
-		if e.Node == nil || e.Node.ID == "" || (e.TypeName != "" && e.TypeName != "VideoEdge") ||
-			(e.Node.TypeName != "" && e.Node.TypeName != "Video") {
-			continue
-		}
-		published, err := time.Parse(time.RFC3339, e.Node.PublishedAt)
-		if err != nil || published.Before(start) {
-			return "", nil
-		}
-		return e.Node.ID, nil
-	}
-	return "", nil
-}
-
-// archiveVodLookupLimit is the page ArchiveVodFor asks for. Only the newest
-// entry is read; a few more cover entries the edge filter skips.
-const archiveVodLookupLimit = 5
 
 // thumbOriginalSizeRe is yt-dlp's _get_thumbnails rewrite
 // (`\d+x\d+(\.\w+)($|(?=[?#]))` → `0x0\1`, twitch.py b77c9304e), which asks
