@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -304,5 +305,44 @@ func TestChannelNumberFieldsAreEditable(t *testing.T) {
 	w.syncFromTextInput()
 	if got := w.channelEditValues["archive_slots"]; got != "9" {
 		t.Errorf("wizard: channelEditValues[archive_slots] = %q, want %q", got, "9")
+	}
+}
+
+// TestTwitchChannelFieldsRoundTrip: the two Twitch-only channel settings
+// (owner decisions D17 follow-up 3 and D18) show for a Twitch channel only,
+// survive the editor's round trip, and a field-scoped save writes each one.
+//
+// Mutants: either valuesToChannel assignment dropped (the round trip loses
+// it); either writeChannelField case dropped (reports false); the platform
+// filter removed (the fields show for YouTube).
+func TestTwitchChannelFieldsRoundTrip(t *testing.T) {
+	ch := config.ChannelConfig{ID: "streamer", Platform: "twitch", TwitchGapFillAdBreaks: true, TwitchVodBacklog: true}
+	got := valuesToChannel(channelToValues(ch), nil)
+	if !got.TwitchGapFillAdBreaks || !got.TwitchVodBacklog {
+		t.Errorf("round trip = %+v, want both set", got)
+	}
+	for _, key := range []string{"twitch_gap_fill_ad_breaks", "twitch_vod_backlog"} {
+		var dst config.ChannelConfig
+		if !writeChannelField(&dst, ch, key) || reflect.DeepEqual(dst, config.ChannelConfig{}) {
+			t.Errorf("writeChannelField(%s) wrote nothing", key)
+		}
+	}
+	yt := valuesToChannel(map[string]string{"id": "UC1", "platform": "youtube", "twitch_vod_backlog": "Yes"}, nil)
+	if yt.TwitchVodBacklog {
+		t.Error("a YouTube channel took the Twitch-only backlog setting")
+	}
+	shown := map[string]bool{}
+	for _, f := range filterChannelFieldsByPlatform(channelFields, map[string]string{"platform": "youtube"}) {
+		shown[f.key] = true
+	}
+	if shown["twitch_gap_fill_ad_breaks"] || shown["twitch_vod_backlog"] {
+		t.Error("the Twitch-only fields show for a YouTube channel")
+	}
+	shown = map[string]bool{}
+	for _, f := range filterChannelFieldsByPlatform(channelFields, map[string]string{"platform": "twitch"}) {
+		shown[f.key] = true
+	}
+	if !shown["twitch_gap_fill_ad_breaks"] || !shown["twitch_vod_backlog"] {
+		t.Error("the Twitch-only fields do not show for a Twitch channel")
 	}
 }

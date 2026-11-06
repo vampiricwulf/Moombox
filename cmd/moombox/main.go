@@ -328,6 +328,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	feedMon.Start(ctx)
 	decapiMon.Start(ctx)
 	twitchMon.Start(ctx)
+	s.twitchBacklog.Start(ctx)
 
 	// Start download worker (runs in goroutine — Start() blocks on job queue)
 	go func() {

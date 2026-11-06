@@ -117,3 +117,27 @@ func TestChannelAddResolvesURLsUnderTheLimiter(t *testing.T) {
 		}
 	}
 }
+
+// TestChannelWriterStoresTwitchOptions: the two per-channel Twitch settings
+// (owner decisions D17 follow-up 3 and D18) reach the stored config through
+// POST /api/config/channels, and survive the TOML round trip.
+//
+// Mutant: either field's toml/json tag dropped (`json:"-"`) — the posted
+// value never lands.
+func TestChannelWriterStoresTwitchOptions(t *testing.T) {
+	f := newChannelRoutesFixture(t)
+	rec := postChannel(t, f.router, map[string]any{"id": "streamer", "platform": "twitch",
+		"twitch_gap_fill_ad_breaks": true, "twitch_vod_backlog": true})
+	if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+		t.Fatalf("POST: %d %s", rec.Code, rec.Body)
+	}
+	var got config.ChannelConfig
+	f.store.Read(func(c *config.MoomboxConfig) {
+		if len(c.Channels) == 1 {
+			got = c.Channels[0]
+		}
+	})
+	if !got.TwitchGapFillAdBreaks || !got.TwitchVodBacklog {
+		t.Errorf("stored %+v, want both Twitch options set", got)
+	}
+}

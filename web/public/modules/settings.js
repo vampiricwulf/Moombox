@@ -1499,6 +1499,8 @@ export class SettingsController {
             : ""
         }
         ${ch.include_non_live_content ? '<sl-badge variant="neutral">Include VODs</sl-badge>' : ""}
+        ${ch.twitch_vod_backlog ? '<sl-badge variant="neutral">Past VODs</sl-badge>' : ""}
+        ${ch.twitch_gap_fill_ad_breaks ? '<sl-badge variant="neutral">Fill ad breaks</sl-badge>' : ""}
         ${ch.quality_preference ? `<sl-badge variant="neutral">Quality: ${this.app.escapeHtml(ch.quality_preference)}</sl-badge>` : ""}
         <span class="channel-backfill" data-backfill-for="${this.app.escapeHtml(ch.id)}">${this._backfillBadgeHtml(ch.id)}</span>
       </div>
@@ -1663,6 +1665,11 @@ export class SettingsController {
     this._channelTermsSeed = termsValue;
     document.getElementById("channel-include-vods").checked =
       channel?.include_non_live_content || false;
+    // The two Twitch-only settings (owner decisions D17 follow-up 3, D18).
+    document.getElementById("channel-twitch-gap-fill-ads").checked =
+      channel?.twitch_gap_fill_ad_breaks || false;
+    document.getElementById("channel-twitch-vod-backlog").checked =
+      channel?.twitch_vod_backlog || false;
 
     this.app.setInputValue("channel-output-dir-input", channel?.output_directory ?? "");
     this.app.setInputValue("channel-archive-window-input", channel?.archive_window_days ?? "");
@@ -1707,6 +1714,7 @@ export class SettingsController {
     const isTwitch = platform === "twitch";
     const idInput = document.getElementById("channel-id-input");
     const includeVodsRow = document.getElementById("channel-include-vods-row");
+    const twitchRow = document.getElementById("channel-twitch-options-row");
     const qualityRow = document.getElementById("channel-quality-row");
 
     if (idInput) {
@@ -1717,6 +1725,7 @@ export class SettingsController {
 
     // Toggle YouTube-only fields (quality preference applies to both platforms)
     if (includeVodsRow) includeVodsRow.style.display = isTwitch ? "none" : "";
+    if (twitchRow) twitchRow.style.display = isTwitch ? "" : "none";
     if (qualityRow) qualityRow.style.display = "";
   }
 
@@ -1827,6 +1836,12 @@ export class SettingsController {
       enabled,
       ...(isTwitch ? { platform: "twitch" } : {}),
       ...(!isTwitch ? { include_non_live_content: includeVods || undefined } : {}),
+      ...(isTwitch
+        ? {
+            twitch_gap_fill_ad_breaks: document.getElementById("channel-twitch-gap-fill-ads").checked || undefined,
+            twitch_vod_backlog: document.getElementById("channel-twitch-vod-backlog").checked || undefined,
+          }
+        : {}),
     };
 
     // Preserve terms structure: an untouched field keeps whatever shape the

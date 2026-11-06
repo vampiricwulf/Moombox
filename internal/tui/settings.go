@@ -340,6 +340,8 @@ var channelFields = []channelFieldDef{
 	{"output_directory", "Output directory", fieldText, nil, "per-channel override; blank = the global output directory", ""},
 	{"archive_window_days", "Archive window (days)", fieldNumber, nil, "per-channel override, 1-3650; blank = global", ""},
 	{"archive_slots", "Archive slots", fieldNumber, nil, "per-channel override, 1-100; blank = global", ""},
+	{"twitch_gap_fill_ad_breaks", "Fill ad breaks from the VOD (Twitch only)", fieldToggle, []string{"No", "Yes"}, "also recover skipped ad breaks from the archive VOD; lost-data gaps are always filled", "twitch"},
+	{"twitch_vod_backlog", "Queue past VODs (Twitch only)", fieldToggle, []string{"No", "Yes"}, "list the channel's videos hourly and queue each new one as a backlog VOD", "twitch"},
 }
 
 // SettingsModel manages the settings overlay panel.

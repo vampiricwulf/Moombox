@@ -521,6 +521,17 @@ type ChannelConfig struct {
 	ArchiveWindowDays *int   `toml:"archive_window_days,omitempty" json:"archive_window_days,omitempty"`
 	ArchiveSlots      *int   `toml:"archive_slots,omitempty" json:"archive_slots,omitempty"`
 	QualityPreference string `toml:"quality_preference,omitempty" json:"quality_preference,omitempty"`
+	// TwitchGapFillAdBreaks (Twitch only, default off) also fills, from the
+	// broadcast's archive VOD, the stitched-ad breaks a live capture skipped
+	// — owner decision D17 follow-up 3. The lost-data gaps (a late start, a
+	// restart, an outage, a gap split) are filled whatever it says; an ad
+	// break only where it is set, since it splits the capture at every break
+	// to leave the hole between two parts.
+	TwitchGapFillAdBreaks bool `toml:"twitch_gap_fill_ad_breaks,omitempty" json:"twitch_gap_fill_ad_breaks,omitempty"`
+	// TwitchVodBacklog (Twitch only, default off) has the Twitch monitor list
+	// the channel's videos on a slow cadence and queue each one no job has
+	// had yet as a backlog VOD, paced by archive_slots — owner decision D18.
+	TwitchVodBacklog bool `toml:"twitch_vod_backlog,omitempty" json:"twitch_vod_backlog,omitempty"`
 }
 
 // IsEnabled returns whether the channel is enabled (defaults to true).
