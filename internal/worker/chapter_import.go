@@ -393,9 +393,29 @@ func (k *keptImport) write(path string, lg logger) {
 		lg.Warn("re-finalize: could not keep the archive's imported chapter list", "path", path, "err", err)
 		return
 	}
-	if k.from != path {
+	if !sameFilePath(k.from, path) {
 		if err := os.Remove(k.from); err != nil && !os.IsNotExist(err) {
 			lg.Warn("re-finalize: could not remove the imported chapter list under the archive's old name", "path", k.from, "err", err)
 		}
 	}
+}
+
+// sameFilePath reports whether a and b name the same file: the same path once
+// normalised (normalizePath, which folds case on Windows, as output_claims.go
+// compares stems), or two names the filesystem resolves to one file
+// (os.SameFile: a case-only difference on NTFS or a case-insensitive APFS
+// volume, a symlinked directory, a hard link).
+//
+// The question a re-finalize asks before it removes the sidecar it read from
+// once it has written the one beside the archive (owner decision PR-M8). A raw
+// string compare called "X.chapters.json" and "x.chapters.json" two files, and
+// on NTFS removing the first deletes the second, the file just written: the
+// import and the original it kept were gone, on Windows only.
+func sameFilePath(a, b string) bool {
+	if normalizePath(a) == normalizePath(b) {
+		return true
+	}
+	ai, aerr := os.Stat(a)
+	bi, berr := os.Stat(b)
+	return aerr == nil && berr == nil && os.SameFile(ai, bi)
 }
