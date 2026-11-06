@@ -219,6 +219,18 @@ function defineShoelaceStubs(window) {
     get value() { return this._value ?? this.getAttribute("value") ?? ""; }
     set value(v) { this._value = v == null ? "" : String(v); }
   }
+  class SlTextarea extends HTMLElement {
+    // `value` — the chapter import's paste box.
+    get value() { return this._value ?? this.getAttribute("value") ?? ""; }
+    set value(v) { this._value = v == null ? "" : String(v); }
+  }
+  class SlDialog extends HTMLElement {
+    // `open` — reflected to the attribute, as Shoelace does: the player's
+    // shortcut guard looks for `sl-dialog[open]`, and the chapter import
+    // opens and closes its dialog through the property.
+    get open() { return this.hasAttribute("open"); }
+    set open(v) { this.toggleAttribute("open", !!v); }
+  }
   class SlDetails extends HTMLElement {
     // `open` — the chapter list collapses itself when a job has no chapters.
     get open() { return this._open ?? this.hasAttribute("open"); }
@@ -230,9 +242,10 @@ function defineShoelaceStubs(window) {
 
   const defs = {
     "sl-select": SlSelect, "sl-option": SlOption, "sl-checkbox": SlCheckbox, "sl-input": SlInput,
+    "sl-textarea": SlTextarea,
     "sl-button": class extends Passive {}, "sl-icon-button": class extends Passive {},
     "sl-icon": class extends Passive {}, "sl-tab-panel": class extends Passive {},
-    "sl-dialog": class extends Passive {}, "sl-switch": class extends Passive {},
+    "sl-dialog": SlDialog, "sl-switch": class extends Passive {},
     "sl-details": SlDetails,
   };
   for (const [tag, cls] of Object.entries(defs)) window.customElements.define(tag, cls);

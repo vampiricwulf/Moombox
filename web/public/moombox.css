@@ -2747,6 +2747,72 @@ sl-progress-bar {
     margin-top: var(--sl-spacing-x-small);
 }
 
+/* "Import chapters" under the chapter list, and its dialog (owner decision
+   CI-4): a paste box, the offset, the live preview table and the current
+   chapters collapsed. */
+.player-chapter-actions {
+    display: flex;
+    justify-content: flex-end;
+    flex-shrink: 0;
+    margin-top: var(--sl-spacing-2x-small);
+}
+
+.chapter-import-dialog::part(panel) {
+    width: min(40rem, calc(100vw - 2rem));
+}
+
+.chapter-import-dialog sl-input {
+    margin-top: var(--sl-spacing-small);
+    max-width: 14rem;
+}
+
+.chapter-import-status {
+    min-height: 1.25em;
+    margin: var(--sl-spacing-small) 0;
+    color: var(--sl-color-neutral-600);
+    font-size: var(--sl-font-size-small);
+}
+
+.chapter-import-preview {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--sl-font-size-small);
+    display: block;
+    max-height: 16rem;
+    overflow-y: auto;
+}
+
+.chapter-import-preview[hidden],
+.chapter-import-current[hidden] {
+    display: none;
+}
+
+.chapter-import-preview th,
+.chapter-import-preview td {
+    padding: var(--sl-spacing-3x-small) var(--sl-spacing-small);
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+}
+
+.chapter-import-start {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    color: var(--sl-color-neutral-600);
+}
+
+.chapter-import-current {
+    margin-top: var(--sl-spacing-small);
+}
+
+.chapter-import-current-list {
+    margin: 0;
+    padding-left: var(--sl-spacing-large);
+    max-height: 10rem;
+    overflow-y: auto;
+    font-size: var(--sl-font-size-small);
+}
+
 .player-chapters::part(content) {
     padding: 0;
 }

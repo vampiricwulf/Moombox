@@ -17,6 +17,7 @@ import {
 import { LaneAllocator, seedCursorIndex } from "./nico-lanes.js";
 import { letterboxStage, rowsFor, sameStage, nextGeometry, NICO_GEO_SETTLE_MS } from "./nico-geometry.js";
 import { NicoScheduler, NICO_DURATION_MS, NICO_LEAD_MS, NICO_LANE_GAP_MS } from "./nico-scheduler.js";
+import { ChapterImportDialog } from "./chapter-import.js";
 
 const ANNOUNCEMENT_COLORS = new Set(["primary", "blue", "green", "orange", "purple"]);
 
@@ -523,6 +524,10 @@ export class PlayerController {
         writeChapterListOpen(open);
       });
     }
+    // "Import chapters" (owner decision CI-4): shown with every open job,
+    // chapters or none; the dialog reloads this player's list after a save.
+    this.chapterImport = new ChapterImportDialog(this);
+    this.chapterImport.init();
 
     // Video seeking — un-anchor the overlay BEFORE the seek's own timeupdate.
     // The HTML seek algorithm queues `timeupdate` and only THEN `seeked`, so
