@@ -18,7 +18,8 @@ import (
 //
 // Mutants: the clip URL branch in the body.URL parse dropped (400 "video ID
 // or URL required"); the clip slug held to the login regexp ("-" refused,
-// 400); isClip not setting is_vod; the ErrClipUnavailable arm dropped (201).
+// 400); isClip not setting is_vod; the ErrClipUnavailable arm dropped (201);
+// the RecordPastedClip call dropped (the clip is not in the history).
 func TestTwitchAddAcceptsAPastedClip(t *testing.T) {
 	f := newJobsFixture(t)
 	f.tw.clipMeta = &TwitchJobMetadata{Title: "A day in the life of xQc", ChannelName: "xQc", ChannelLogin: "xqc",
@@ -41,6 +42,11 @@ func TestTwitchAddAcceptsAPastedClip(t *testing.T) {
 	if len(f.tw.clipSlugs) != 1 || f.tw.clipSlugs[0] != slug {
 		t.Errorf("clip metadata asked for %v, want the slug as pasted", f.tw.clipSlugs)
 	}
+	// In the processing history, as a found clip is: an archive_clips sweep
+	// never queues it again once its row is deleted.
+	if seen, err := f.db.HasProcessed(twitch.ClipJobID(slug)); err != nil || !seen {
+		t.Errorf("pasted clip in the processing history = %v (%v), want true", seen, err)
+	}
 
 	rec = doRequest(t, f.router, "POST", "/api/jobs", map[string]any{"platform": "twitch", "videoId": slug, "twitchType": "clip"})
 	if rec.Code != http.StatusConflict {
@@ -59,5 +65,24 @@ func TestTwitchAddAcceptsAPastedClip(t *testing.T) {
 	rec = doRequest(t, f.router, "POST", "/api/jobs", map[string]any{"platform": "twitch", "videoId": "../x", "twitchType": "clip"})
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("a malformed slug: want 400, got %d", rec.Code)
+	}
+}
+
+// TestTwitchAddClipTitleFallsBackLikeTheJob: a clip answer with no display
+// name or title names the row as the job's own read of the clip will
+// (processTwitchClip): the login for the channel, the slug for the title —
+// never " — " with a side missing.
+//
+// Mutant: the route's cmp.Or fallbacks dropped (" — ").
+func TestTwitchAddClipTitleFallsBackLikeTheJob(t *testing.T) {
+	f := newJobsFixture(t)
+	f.tw.clipMeta = &TwitchJobMetadata{ChannelLogin: "xqc"}
+	rec := doRequest(t, f.router, "POST", "/api/jobs", map[string]any{"platform": "twitch", "videoId": "UntitledClipSlug", "twitchType": "clip"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	job, _ := f.db.GetJob(twitch.ClipJobID("UntitledClipSlug"))
+	if job == nil || job.Title != "xqc — UntitledClipSlug" || job.ChannelName != "xqc" {
+		t.Errorf("row = %+v, want title \"xqc — UntitledClipSlug\", channel \"xqc\"", job)
 	}
 }

@@ -3,6 +3,7 @@ package routes
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -786,8 +787,11 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 						return
 					}
 					if err == nil && meta != nil {
-						title = meta.ChannelName + " — " + meta.Title
-						channelName = meta.ChannelName
+						// The fallbacks the job's own read of the clip uses
+						// (processTwitchClip), so an answer with no display
+						// name or title never names the row " — X".
+						channelName = cmp.Or(meta.ChannelName, meta.ChannelLogin, channelName)
+						title = channelName + " — " + cmp.Or(strings.TrimSpace(meta.Title), videoID)
 						thumbnailURL = meta.ThumbnailURL
 						streamStartTime = meta.StartedAt
 						twitchCategory = meta.GameCategory
@@ -876,6 +880,12 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			if !added {
 				jsonError(rw, "job already exists", http.StatusConflict)
 				return
+			}
+			// A pasted clip is in the history as a found one is, so an
+			// archive_clips sweep never queues it again once its row is
+			// deleted (worker.RecordPastedClip).
+			if err := worker.RecordPastedClip(db, job); err != nil {
+				slog.Warn("add: could not record the pasted clip in the processing history", "jobID", job.ID, "err", err)
 			}
 			// Announced before the enqueue (see the YouTube add below).
 			if notifier != nil {

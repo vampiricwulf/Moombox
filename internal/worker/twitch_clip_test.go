@@ -370,3 +370,26 @@ func TestTwitchClipKeepsAnOutcomeThatLandedFirst(t *testing.T) {
 		})
 	}
 }
+
+// TestRecordPastedClipEntersOnlyClips: a pasted clip is entered in the
+// processing history (the archive_clips sweep's dedupe), and every other
+// manual add is left out of it, as it always was.
+//
+// Mutants: the IsTwitchClipJob check dropped (the live channel's row is
+// entered); the AddToHistory call dropped (the clip is not).
+func TestRecordPastedClipEntersOnlyClips(t *testing.T) {
+	_, db := testWorkerSetup(t)
+	clip := &database.Job{ID: "tw_clip_X", VideoID: "tw_clip_X", Platform: "twitch"}
+	live := &database.Job{ID: "tw_manual_ea_1", VideoID: "tw_manual_ea_1", Platform: "twitch"}
+	for _, j := range []*database.Job{clip, live} {
+		if err := RecordPastedClip(db, j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if seen, _ := db.HasProcessed(clip.ID); !seen {
+		t.Error("the pasted clip is not in the processing history")
+	}
+	if seen, _ := db.HasProcessed(live.ID); seen {
+		t.Error("a live channel's manual add was entered in the processing history")
+	}
+}
