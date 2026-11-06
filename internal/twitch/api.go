@@ -934,9 +934,12 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 	// every title written from this one — the stream processor's
 	// "<Channel> — <title>" and the manual-add route's — then names the
 	// broadcast instead of ending on a dangling separator, and so does the
-	// filename built from it.
-	title := strings.TrimSpace(v.Title)
-	if title == "" {
+	// filename built from it. Beyond yt-dlp, a whitespace-only title counts as
+	// empty too (it would dangle the separator just the same); a title with
+	// text is kept exactly as Twitch sent it, surrounding spaces included, as
+	// yt-dlp keeps it.
+	title := v.Title
+	if strings.TrimSpace(title) == "" {
 		title = "Untitled Broadcast"
 	}
 	info := &TwitchVodInfo{

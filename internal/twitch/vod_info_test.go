@@ -15,11 +15,13 @@ import (
 //     that exists nowhere — whatever the broadcast type;
 //   - behind that placeholder only an ARCHIVE is still recording: a
 //     HIGHLIGHT shows it while it is processed and is not (yt-dlp #14455);
-//   - an empty title is "Untitled Broadcast".
+//   - an empty title is "Untitled Broadcast" — and, beyond yt-dlp, so is a
+//     whitespace-only one; a title with text is kept as Twitch sent it.
 //
 // Mutants: storing the placeholder like any thumbnail fails the two
 // placeholder rows' ThumbnailURL; IsRecording without the ARCHIVE check fails
-// "highlight placeholder"; dropping the title default fails "untitled".
+// "highlight placeholder"; dropping the title default fails "untitled"; trimming the
+// stored title fails "padded title kept as sent".
 func TestGetVodInfoRecordingPlaceholderAndUntitled(t *testing.T) {
 	const placeholder = "https://vod-secure.twitch.tv/_404/404_processing_320x180.png"
 	cases := []struct {
@@ -38,6 +40,7 @@ func TestGetVodInfoRecordingPlaceholderAndUntitled(t *testing.T) {
 			"Done", "https://static-cdn.jtvnw.net/cf_vods/d1m7jfoe9zdc1j/abc/thumb/thumb0-640x360.jpg", false},
 		{"untitled", "", "", "ARCHIVE", "Untitled Broadcast", "", false},
 		{"whitespace title", "   ", "", "ARCHIVE", "Untitled Broadcast", "", false},
+		{"padded title kept as sent", " Late night ", "", "ARCHIVE", " Late night ", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
