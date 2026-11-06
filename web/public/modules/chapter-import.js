@@ -195,12 +195,62 @@ export class ChapterImportDialog {
    * Save or restore, then reload the player's chapters. A re-mux that could
    * not embed the list (embedError) is still a save — the list is kept beside
    * the archive, which the player reads — and the toast says so.
+   *
+   * The player's own source for the job is let go for the save and assigned
+   * again after it, at the same position and play state: a re-mux replaces
+   * the archive behind the same /video URL with a different byte layout (the
+   * chapter track resizes the moov, and every sample offset moves), so an
+   * element that kept the old file's sample table would read the new file's
+   * bytes at the old offsets; and on Windows a file the player is streaming
+   * cannot be replaced, so a save that left the source in place would fall
+   * back to the sidecar.
    */
   async _commit(url, body, done) {
     const jobId = this.jobId;
     this._busy = true;
     this._setSaveEnabled();
     this._status("Saving…");
+    const held = this._releaseSource(jobId);
+    try {
+      await this._send(url, body, done, jobId);
+    } finally {
+      this._reattachSource(jobId, held);
+    }
+  }
+
+  /**
+   * Let go of the player's single-file source for jobId: its position and
+   * whether it played, or null when the player is not playing that job's
+   * archive as one file (another job, or a split archive's parts, which an
+   * import never rewrites).
+   */
+  _releaseSource(jobId) {
+    const video = this._el("player-video");
+    if (!video || this.player.playerJob?.id !== jobId || this.player._seg?.active || !video.getAttribute("src")) return null;
+    const held = { time: video.currentTime, paused: video.paused };
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    return held;
+  }
+
+  /**
+   * Assign the source released by _releaseSource again — the archive as it
+   * now is — and put back the position and play state once its metadata is
+   * in. Not when the player has since moved on (another job selected, or
+   * this one reopened: it assigned a source of its own).
+   */
+  _reattachSource(jobId, held) {
+    const video = this._el("player-video");
+    if (!held || !video || this.player.playerJob?.id !== jobId || video.getAttribute("src")) return;
+    video.addEventListener("loadedmetadata", () => {
+      video.currentTime = held.time;
+      if (!held.paused) video.play()?.catch?.(() => {});
+    }, { once: true });
+    video.src = `/api/jobs/${jobId}/video`;
+  }
+
+  async _send(url, body, done, jobId) {
     let res;
     try {
       res = await fetch(url, {

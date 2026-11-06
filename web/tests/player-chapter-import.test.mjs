@@ -146,6 +146,54 @@ test("a save the re-mux could not embed still reloads, and says the list is kept
   assert.match(toast.message, /saved beside it: the re-mux carries 0 chapter\(s\)/);
 });
 
+// Mutants: the source not released for the save (it is still assigned when
+// the server answers); not assigned again after it; the position or the play
+// state not put back; the source assigned again after a refused save left
+// out (the player stays blank).
+test("a save lets go of the player's source and assigns the rewritten archive at the same place", { skip }, async () => {
+  const h = await openDialog({ preview: () => view({ chapters: [{ start: 0, end: 600, title: "x" }] }) });
+  const video = h.video;
+  assert.equal(video.getAttribute("src"), "/api/jobs/v/video");
+  video.play();
+  video.currentTime = 42;
+  type(h, "chapter-import-text", "0:00 x");
+  h.advance(CHAPTER_PREVIEW_DEBOUNCE_MS);
+  await h.flush();
+
+  let srcDuringSave = "unset";
+  h.http.on("POST /api/jobs/:id/chapters", () => {
+    srcDuringSave = video.getAttribute("src");
+    return view({ chapters: [{ start: 0, end: 600, title: "x" }], embedded: true });
+  });
+  h.el("chapter-import-save").click();
+  await h.flush();
+  await h.flush();
+  assert.equal(srcDuringSave, null, "the player still held the archive while it was rewritten");
+  assert.equal(video.getAttribute("src"), "/api/jobs/v/video", "the rewritten archive is assigned again");
+  assert.equal(video.paused, true, "the new source starts paused until its metadata is in");
+  video.currentTime = 0;
+  video.dispatchEvent(new h.window.Event("loadedmetadata"));
+  assert.equal(video.currentTime, 42);
+  assert.equal(video.paused, false, "playback resumes where it was");
+
+  // A refused save puts the same source back too, paused as it was.
+  video.pause();
+  video.currentTime = 7;
+  h.el("player-chapters-import").click();
+  await h.flush();
+  type(h, "chapter-import-text", "0:00 x");
+  h.advance(CHAPTER_PREVIEW_DEBOUNCE_MS);
+  await h.flush();
+  h.http.on("POST /api/jobs/:id/chapters", () => ({ __response: true, status: 409, body: { error: "busy" } }));
+  h.el("chapter-import-save").click();
+  await h.flush();
+  await h.flush();
+  assert.equal(video.getAttribute("src"), "/api/jobs/v/video");
+  video.dispatchEvent(new h.window.Event("loadedmetadata"));
+  assert.equal(video.currentTime, 7);
+  assert.equal(video.paused, true);
+});
+
 // Mutants: Restore original shown without an original; the restore not
 // reloading the chapters; a refused restore closing the dialog.
 test("Restore original is offered only when the job has one, and reloads the chapters", { skip }, async () => {
