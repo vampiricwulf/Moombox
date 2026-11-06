@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 
@@ -150,5 +151,81 @@ func removeSplitArchiveChapters(segments []database.Segment, lg logger) {
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		lg.Warn("could not remove the parts' chapter list", "path", path, "err", err)
+	}
+}
+
+// refitSplitArchiveChapters keeps a split archive's chapter list true after a
+// gap-fill re-finalize (owner decision D17) inserted recovered parts between,
+// before or after the recorded ones. The list was laid on the global timeline
+// of the parts as they stood (splitArchiveChapters), and the player lays the
+// new parts end to end, so every point past an inserted part now reads early
+// by that part's length. The list's wall-clock source is gone by now — the
+// staging it was built from is reclaimed once the job finished — and the rows'
+// unix_start is the session's clock, not the footage's (twitchGapFiller.commit
+// keys the parts by the plan's coverage for that reason), so the list is not
+// rebuilt: each point is shifted by the length of every recovered part
+// inserted at or before it in the old timeline. A point that sat where a
+// recovered part goes — a chapter that began in the lost span, which
+// splitArchiveChapters placed at the start of the part after it — moves past
+// the recovered part with the part it began in, so the chapter running into
+// the gap covers it; the list's start (0) stays the start, so the first
+// chapter covers a recovered opening. The list is written where the chapters
+// route now looks (the new first part's base: a recovered opening becomes
+// part 1) and one left under the old base is removed. No list, nothing to do;
+// best effort, like the finalize's write.
+//
+// oldSegs are the parts in the order the list was laid on (a single-file
+// archive its one synthesized part), newSegs the committed ones, recovered
+// the paths of the parts the fill made.
+func refitSplitArchiveChapters(oldSegs, newSegs []database.Segment, recovered map[string]bool, lg logger) {
+	if len(oldSegs) == 0 || len(newSegs) == 0 {
+		return
+	}
+	oldPath := ArchiveSidecarPath(oldSegs[0].FilePath, utils.ChaptersSidecarSuffix)
+	newPath := ArchiveSidecarPath(newSegs[0].FilePath, utils.ChaptersSidecarSuffix)
+	if oldPath == "" || newPath == "" {
+		return
+	}
+	list, err := utils.ReadChaptersSidecar(oldPath)
+	if err != nil {
+		lg.Warn("gap-fill: the split archive's chapter list is unreadable; it is left as it was", "path", oldPath, "err", err)
+		return
+	}
+	if len(list) == 0 {
+		return
+	}
+	type insert struct{ at, dur int64 }
+	var inserts []insert
+	var oldOffset int64
+	for _, s := range newSegs {
+		d := int64(s.DurationSeconds * 1000)
+		if recovered[s.FilePath] {
+			inserts = append(inserts, insert{at: oldOffset, dur: d})
+			continue
+		}
+		oldOffset += d
+	}
+	shift := func(p int64) int64 {
+		out := p
+		for _, in := range inserts {
+			if p > 0 && in.at <= p {
+				out += in.dur
+			}
+		}
+		return out
+	}
+	chapters := make([]utils.Chapter, 0, len(list))
+	for _, c := range list {
+		start, end := int64(math.Round(c.Start*1000)), int64(math.Round(c.End*1000))
+		chapters = append(chapters, utils.Chapter{StartMs: shift(start), EndMs: shift(end), Title: c.Title})
+	}
+	if err := utils.WriteChaptersSidecar(newPath, chapters); err != nil {
+		lg.Warn("gap-fill: could not rewrite the split archive's chapter list for its recovered parts", "path", newPath, "err", err)
+		return
+	}
+	if oldPath != newPath {
+		if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+			lg.Warn("gap-fill: could not remove the chapter list under the archive's old base", "path", oldPath, "err", err)
+		}
 	}
 }
