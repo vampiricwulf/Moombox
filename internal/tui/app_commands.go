@@ -121,7 +121,9 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		body := map[string]any{
 			"videoId": input,
 		}
-		if platform == "twitch" {
+		if platform == "twitch_listing" {
+			body = map[string]any{"platform": "twitch", "twitchType": "listing", "url": input}
+		} else if platform == "twitch" {
 			body["platform"] = "twitch"
 			// Detect VOD vs channel
 			if vodID, ok := strings.CutPrefix(input, "tw_v"); ok {
@@ -170,7 +172,17 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		}
 
 		label := "Added to queue"
-		if platform == "twitch" {
+		if platform == "twitch_listing" {
+			var res struct {
+				Added   int `json:"added"`
+				Skipped int `json:"skipped"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&res)
+			label = fmt.Sprintf("Queued %d Twitch VODs", res.Added)
+			if res.Skipped > 0 {
+				label += fmt.Sprintf(", %d already queued", res.Skipped)
+			}
+		} else if platform == "twitch" {
 			if strings.HasPrefix(input, "tw_v") {
 				label = "Added Twitch VOD to queue"
 			} else {

@@ -276,6 +276,21 @@ func (a *twitchMetadataAdapter) FetchVodMetadata(ctx context.Context, vodID stri
 	}, nil
 }
 
+// twitchListingPages bounds a pasted channel video list: 50 pages of 100,
+// newest first — a channel's whole catalogue in all but the rarest case,
+// without paging a 10-year history in one request.
+const twitchListingPages = 50
+
+// ListChannelVideos implements routes.TwitchListingFetcher.
+func (a *twitchMetadataAdapter) ListChannelVideos(ctx context.Context, login, broadcastType, sort string) ([]twitch.TwitchVideo, error) {
+	return a.svc.API.ListChannelVideos(ctx, login, broadcastType, sort, twitchListingPages, a.svc.Auth.GetAuthToken())
+}
+
+// CollectionVideos implements routes.TwitchListingFetcher.
+func (a *twitchMetadataAdapter) CollectionVideos(ctx context.Context, collectionID string) (string, []twitch.TwitchVideo, error) {
+	return a.svc.API.CollectionVideos(ctx, collectionID, a.svc.Auth.GetAuthToken())
+}
+
 // youtubeMetadataAdapter implements routes.YouTubeMetadataFetcher.
 type youtubeMetadataAdapter struct {
 	svc *youtube.Service

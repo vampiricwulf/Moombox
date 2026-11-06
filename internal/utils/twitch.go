@@ -18,15 +18,17 @@ const (
 	// clip list (/<ch>/clips, /<ch>/videos?filter=clips — TwitchVideosClipsIE)
 	// and a collection (/collections/<id> — TwitchCollectionIE). Value is the
 	// login, or the collection ID. They parse so that none is taken for a
-	// channel (which silently made a live-wait job); no add path creates a
-	// job from one yet (Unsupported).
+	// channel (which silently made a live-wait job). A video list and a
+	// collection queue one VOD job per video (owner decision D18); a clip
+	// list is refused (Unsupported).
 	TwitchVideosListing TwitchTargetType = "videos"
 	TwitchClipsListing  TwitchTargetType = "clips"
 	TwitchCollection    TwitchTargetType = "collection"
 )
 
 // Unsupported returns the refusal every add path shows for a target it cannot
-// make a job from yet, or "" for a channel or a VOD. The parse is kept here,
+// make a job from yet, or "" for a channel, a VOD, a channel's video list or a
+// collection. The parse is kept here,
 // in the one table every parser follows, so a later clip job (owner decision
 // D26) or listing job only changes what this returns.
 func (t *TwitchTarget) Unsupported() string {
@@ -36,10 +38,30 @@ func (t *TwitchTarget) Unsupported() string {
 	switch t.Type {
 	case TwitchClip:
 		return "Twitch clips are not supported yet. Use a channel or VOD URL."
-	case TwitchVideosListing, TwitchClipsListing, TwitchCollection:
-		return "Twitch video lists and collections are not supported yet. Use a channel or VOD URL."
+	case TwitchClipsListing:
+		return "Twitch clip lists are not supported yet. Use a channel, VOD, video list or collection URL."
 	}
 	return ""
+}
+
+// TwitchCollectionsListingRefusal is the refusal for /<ch>/videos?filter=
+// collections — yt-dlp's TwitchVideosCollectionsIE, a list of the channel's
+// collections rather than of its videos — which parses as the channel's video
+// list (TwitchVideosListing) and must not be queued as one.
+const TwitchCollectionsListingRefusal = "Twitch collection lists are not supported yet. Paste a /collections/<id> URL."
+
+// TwitchVideosQuery reads a /<ch>/videos URL's ?filter= and ?sort= (yt-dlp's
+// TwitchVideosIE, twitch.py b77c9304e: filter defaults to "all", sort to
+// "time"). Both are "" for input that is not a URL, or names neither.
+func TwitchVideosQuery(input string) (filter, sort string) {
+	// A scheme-less paste ("twitch.tv/<ch>/videos?filter=…") parses too:
+	// the query is the query whatever the rest reads as.
+	u, err := url.Parse(strings.TrimSpace(input))
+	if err != nil {
+		return "", ""
+	}
+	q := u.Query()
+	return q.Get("filter"), q.Get("sort")
 }
 
 // TwitchTarget represents a parsed Twitch URL or identifier.

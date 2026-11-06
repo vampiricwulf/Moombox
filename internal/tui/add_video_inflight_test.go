@@ -123,17 +123,18 @@ func TestAddVideoAutoAdvanceHonoursEsc(t *testing.T) {
 	}
 }
 
-// TestAddVideoRefusesTwitchClipsAndListings: a clip, a channel's video list
-// and a collection are refused in the dialog with the add paths' shared
-// message (utils.TwitchTarget.Unsupported), instead of a listing being read as
-// the channel and submitted as its live-wait job.
+// TestAddVideoRefusesTwitchClipsAndListings: a clip, a channel's clip list
+// and a channel's collection list are refused in the dialog with the add
+// paths' shared message, instead of a listing being read as the channel and
+// submitted as its live-wait job.
 //
-// Mutant: dropping the "twitch_listing" case — the video list submits.
+// Mutant: dropping the "twitch_clips" case — the clip list submits; dropping
+// the collections refusal — ?filter=collections submits as a video list.
 func TestAddVideoRefusesTwitchClipsAndListings(t *testing.T) {
 	for input, want := range map[string]string{
-		"https://www.twitch.tv/clip/FaintLightGullWholeWheat": "Twitch clips are not supported yet.",
-		"https://www.twitch.tv/spamfish/videos":               "Twitch video lists and collections are not supported yet.",
-		"https://www.twitch.tv/collections/o9zZer3IQBhTJw":    "Twitch video lists and collections are not supported yet.",
+		"https://www.twitch.tv/clip/FaintLightGullWholeWheat":      "Twitch clips are not supported yet.",
+		"https://www.twitch.tv/spamfish/clips":                     "Twitch clip lists are not supported yet.",
+		"https://www.twitch.tv/spamfish/videos?filter=collections": "Twitch collection lists are not supported yet.",
 	} {
 		m := NewAddVideoModel()
 		m.Open()
@@ -143,6 +144,25 @@ func TestAddVideoRefusesTwitchClipsAndListings(t *testing.T) {
 		}
 		if !strings.HasPrefix(m.errorMsg, want) {
 			t.Errorf("%s: errorMsg = %q, want it to start %q", input, m.errorMsg, want)
+		}
+	}
+}
+
+// TestAddVideoSubmitsTwitchListings is owner decision D18: a channel's video
+// list and a collection submit, with the input as pasted, for the server to
+// queue one VOD job per video.
+//
+// Mutant: the "twitch_listing" case refusing again — Enter is no submit.
+func TestAddVideoSubmitsTwitchListings(t *testing.T) {
+	for _, input := range []string{
+		"https://www.twitch.tv/spamfish/videos?filter=archives",
+		"https://www.twitch.tv/collections/o9zZer3IQBhTJw",
+	} {
+		m := NewAddVideoModel()
+		m.Open()
+		m.urlInput = input
+		if a, id := m.HandleKey(keyEnter); a != "submit" || id != input || m.GetPlatform() != "twitch_listing" {
+			t.Errorf("%s: Enter = (%q, %q), platform %q; want a twitch_listing submit of the input", input, a, id, m.GetPlatform())
 		}
 	}
 }

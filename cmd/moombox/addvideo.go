@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -13,7 +15,9 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
+	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/utils"
+	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
@@ -181,6 +185,23 @@ func addVideo(input, configPath string) {
 			fmt.Fprintln(os.Stderr, msg)
 			os.Exit(1)
 		}
+		// A channel's video list or a collection (owner decision D18):
+		// one Queued VOD job per video, which the daemon's archive-slots
+		// scheduler admits on its next sweep. Read signed out — this side
+		// process holds no Twitch login — so a subscriber-only VOD is
+		// listed as anyone sees it, and its job reads it with the daemon's.
+		if tw.Type == utils.TwitchVideosListing || tw.Type == utils.TwitchCollection {
+			twitch.SetClientID(cfg.Twitch.ClientID)
+			res, err := queueCLITwitchListing(context.Background(), cliTwitchLister{twitch.NewAPI(cliNotifyLogger(os.Stderr))},
+				db, cfg.Channels, input, tw, time.Now())
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Not added: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Queued %d Twitch VOD(s); %d already queued.\n", len(res.Added), res.Skipped)
+			notifyMgr.Wait()
+			return
+		}
 
 		job := newCLITwitchJob(cfg.Channels, tw, now)
 		jobID, jobURL := job.ID, job.URL
@@ -297,4 +318,46 @@ func cliTwitchQualityPreference(channels []config.ChannelConfig, tw *utils.Twitc
 // failed without a trace anywhere.
 func cliNotifyLogger(w io.Writer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn}))
+}
+
+// cliTwitchLister is `moombox add`'s routes.TwitchListingFetcher: the Twitch
+// GQL API signed out, its listings bounded as the daemon's (twitchListingPages).
+type cliTwitchLister struct{ api *twitch.API }
+
+func (l cliTwitchLister) ListChannelVideos(ctx context.Context, login, broadcastType, sort string) ([]twitch.TwitchVideo, error) {
+	return l.api.ListChannelVideos(ctx, login, broadcastType, sort, twitchListingPages, "")
+}
+
+func (l cliTwitchLister) CollectionVideos(ctx context.Context, collectionID string) (string, []twitch.TwitchVideo, error) {
+	return l.api.CollectionVideos(ctx, collectionID, "")
+}
+
+// queueCLITwitchListing reads a pasted video list or collection and queues
+// its VODs (worker.QueueTwitchVideos), as the add route does. The listing's
+// ?filter= and ?sort= come from input as typed; a channel's collection list
+// (?filter=collections) is refused, as on every add path.
+func queueCLITwitchListing(ctx context.Context, lister routes.TwitchListingFetcher, db *database.Database,
+	channels []config.ChannelConfig, input string, tw *utils.TwitchTarget, now time.Time) (worker.TwitchListingResult, error) {
+	opts := worker.TwitchListingOptions{Channels: channels, ManuallyAdded: true}
+	var (
+		videos []twitch.TwitchVideo
+		err    error
+	)
+	if tw.Type == utils.TwitchCollection {
+		_, videos, err = lister.CollectionVideos(ctx, tw.Value)
+	} else {
+		filter, sort := utils.TwitchVideosQuery(input)
+		if filter == "collections" {
+			return worker.TwitchListingResult{}, errors.New(utils.TwitchCollectionsListingRefusal)
+		}
+		opts.Login = tw.Value
+		videos, err = lister.ListChannelVideos(ctx, tw.Value, twitch.VideoListBroadcastType(filter), sort)
+	}
+	if err != nil {
+		return worker.TwitchListingResult{}, err
+	}
+	if len(videos) == 0 {
+		return worker.TwitchListingResult{}, errors.New("the Twitch listing has no videos")
+	}
+	return worker.QueueTwitchVideos(db, videos, opts, now), nil
 }

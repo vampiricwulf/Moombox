@@ -106,3 +106,35 @@ func TestAddVideoTimestampsStepRefusesEmptyRanges(t *testing.T) {
 		}
 	}
 }
+
+// TestAddVideoPostsTwitchListing is owner decision D18 on the TUI's side of
+// POST /api/jobs: a video list or collection posts as twitchType "listing"
+// with the pasted URL, and the feedback reads the queued count back.
+//
+// Mutant: the twitch_listing branch dropped — the URL posts as a YouTube
+// videoId; the count not read — the feedback says 0.
+func TestAddVideoPostsTwitchListing(t *testing.T) {
+	var got []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		io.WriteString(w, `{"listed":5,"added":4,"skipped":1}`)
+	}))
+	defer srv.Close()
+	_, portStr, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+
+	a := NewApp()
+	a.SetWebPort(func() int { return port })
+	a.addVideo.platform = "twitch_listing"
+	const url = "https://www.twitch.tv/spamfish/videos?filter=archives"
+	msg, ok := a.addVideoCmd(url)().(addVideoResultMsg)
+	if !ok || msg.Feedback != "Queued 4 Twitch VODs, 1 already queued" {
+		t.Errorf("feedback %#v", msg)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(got, &body); err != nil ||
+		body["platform"] != "twitch" || body["twitchType"] != "listing" || body["url"] != url || len(body) != 3 {
+		t.Errorf("posted %s, want the listing body", got)
+	}
+}

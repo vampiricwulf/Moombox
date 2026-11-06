@@ -45,16 +45,15 @@ test("extractTwitchTarget follows the shared Twitch URL table", { skip }, async 
   }
 });
 
-// MUTANT: dropping the listing refusal in addVideo — the video list is posted
-// to /api/jobs as a job.
-test("addVideo refuses Twitch listings and clips with the shared message", { skip }, async () => {
+// MUTANT: dropping the clip refusals in addVideo — the clip and the clip list
+// are posted to /api/jobs as jobs.
+test("addVideo refuses Twitch clips and clip lists with the shared message", { skip }, async () => {
   const posts = [];
   const h = await harness.makeApp({
     routes: { "POST /api/jobs": (req) => { posts.push(req); return { id: "x" }; } },
   });
   for (const [input, want] of [
-    ["https://www.twitch.tv/spamfish/videos", "Twitch video lists and collections are not supported yet."],
-    ["https://www.twitch.tv/collections/o9zZer3IQBhTJw", "Twitch video lists and collections are not supported yet."],
+    ["https://www.twitch.tv/spamfish/clips", "Twitch clip lists are not supported yet."],
     ["https://m.twitch.tv/clip/FaintLightGullWholeWheat", "Twitch clips are not supported yet."],
   ]) {
     h.document.getElementById("video-url-input").value = input;
@@ -63,4 +62,28 @@ test("addVideo refuses Twitch listings and clips with the shared message", { ski
     assert.ok(toasts.some((t) => t.includes(want)), `${input}: toasts ${JSON.stringify(toasts)} lack "${want}"`);
   }
   assert.equal(posts.length, 0, "a refused target was posted");
+});
+
+// Owner decision D18: a channel video list and a collection are posted as a
+// listing, with the URL as pasted (its ?filter= and ?sort= are the server's to
+// read), and the queued count is shown.
+// MUTANT: posting the listing as a channel job (videoId/twitchType "videos") —
+// the body check fails; posting target.id instead of the pasted URL — the
+// filter is lost and the url check fails.
+test("addVideo posts Twitch video lists and collections as listings", { skip }, async () => {
+  const posts = [];
+  const h = await harness.makeApp({
+    routes: { "POST /api/jobs": (req) => { posts.push(req.body); return { listed: 3, added: 2, skipped: 1 }; } },
+  });
+  const inputs = [
+    "https://www.twitch.tv/spamfish/videos?filter=archives&sort=time",
+    "https://www.twitch.tv/collections/o9zZer3IQBhTJw",
+  ];
+  for (const input of inputs) {
+    h.document.getElementById("video-url-input").value = input;
+    await h.app.addVideo();
+  }
+  assert.deepEqual(posts, inputs.map((url) => ({ platform: "twitch", twitchType: "listing", url })));
+  const toasts = h.toasts().map((t) => t.textContent);
+  assert.ok(toasts.some((t) => t.includes("Queued 2 Twitch VODs, 1 already queued")), JSON.stringify(toasts));
 });
