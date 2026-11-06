@@ -3536,9 +3536,14 @@ export class MoomboxApp {
   }
 
   /**
-   * Parse a Twitch URL or identifier. Mirrors utils.ExtractTwitchTarget
-   * (internal/utils/twitch.go) row for row: both — and the TUI, which calls
-   * the Go one — are tested against internal/utils/testdata/twitch_urls.json.
+   * Parse a Twitch URL or identifier. Its URL forms mirror
+   * utils.ExtractTwitchTarget (internal/utils/twitch.go) row for row: both —
+   * and the TUI, which calls the Go one — are tested against
+   * internal/utils/testdata/twitch_urls.json, which holds URL rows only. The
+   * bare-identifier fallbacks below are this parser's own and differ from Go's:
+   * a "v"-prefixed or bare numeric VOD ID needs 7-12 digits here (Go's v
+   * prefix takes 1-12), and a bare reserved word ("videos", "clip") is no
+   * channel here where Go takes it as one.
    * The forms are yt-dlp's (yt_dlp/extractor/twitch.py b77c9304e): hosts www.,
    * go., m. and bare; /videos/<id>, /<ch>/v/<id>, /<ch>/video/<id>,
    * /<ch>/schedule?vodID=<id>; player.twitch.tv ?video=v<id> / ?channel=;
