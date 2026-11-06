@@ -17,7 +17,8 @@ import (
 // ("video_stream", "audio_stream", "video.ts"). An entry is written once per
 // file a downloader starts and left alone by every resume and append, which
 // continue a file that began where the entry says; a downloader that starts
-// the file over (a set-aside, a discarded partial) writes its own.
+// the file over (a set-aside, a discarded partial) drops the entry when it
+// opens the file empty and writes its own (recordStartsOf).
 //
 // It is what tells a finalize that a live YouTube capture recorded from
 // sq=0 — the broadcast's own start, which shares the VOD's timeline, so the
@@ -69,10 +70,43 @@ func noteRecordingStart(path string, seq int) {
 	_ = utils.WriteFileAtomic(filepath.Join(dir, recordingStartFile), data, 0o644)
 }
 
+// forgetRecordingStart drops the staged file at path's entry, so the file
+// reads as of unknown start until its first media write records one. Best
+// effort, like noteRecordingStart: an entry that cannot be dropped is
+// overwritten by that write all the same.
+func forgetRecordingStart(path string) {
+	if path == "" {
+		return
+	}
+	recordingStartMu.Lock()
+	defer recordingStartMu.Unlock()
+	dir := filepath.Dir(path)
+	starts := readRecordingStarts(dir)
+	if _, ok := starts[filepath.Base(path)]; !ok {
+		return
+	}
+	delete(starts, filepath.Base(path))
+	data, err := json.Marshal(starts)
+	if err != nil {
+		return
+	}
+	_ = utils.WriteFileAtomic(filepath.Join(dir, recordingStartFile), data, 0o644)
+}
+
 // recordStartsOf has each of result's downloaders record the sequence its
 // file begins at (noteRecordingStart), unless something else already
 // listens. Installed by runDownloaders ahead of Start, so every capture it
 // runs — live, post-live and VOD alike — leaves the record.
+//
+// An entry describes the recording that was in the file when it was
+// written, and a file of the same name is started over — set aside by the
+// engine's no-truncate guard or setAsideStagedMedia, a discarded partial —
+// with that entry still in the record. So a downloader that opens its file
+// empty (OnStart with resuming false) first drops the file's entry, and the
+// fresh recording is of unknown start until its own first media write
+// records one: a fresh file whose writer reports no start, or whose first
+// write never comes, is never read as the earlier recording's sq=0. A
+// listener a caller installed on OnStart still runs, after the drop.
 func recordStartsOf(result *DownloadResult) {
 	for _, pair := range []struct {
 		d    *engine.SegmentDownloader
@@ -82,6 +116,15 @@ func recordStartsOf(result *DownloadResult) {
 			continue
 		}
 		path := pair.path
+		prev := pair.d.OnStart
+		pair.d.OnStart = func(seq int, resuming bool) {
+			if !resuming {
+				forgetRecordingStart(path)
+			}
+			if prev != nil {
+				prev(seq, resuming)
+			}
+		}
 		pair.d.OnFirstMedia = func(seq int) { noteRecordingStart(path, seq) }
 	}
 }
