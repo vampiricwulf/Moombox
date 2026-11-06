@@ -160,7 +160,9 @@ func previewNow(t *testing.T, app *App) {
 //
 // Mutants: HandleKey feeding the textarea too (doubled text); Tab not
 // moving the typing to the offset; the tick asking for an overtaken edit;
-// SetPreview drawing a stale answer.
+// SetPreview drawing a stale answer; the offset written in raw seconds
+// ("-5s"); the current chapters counted but not listed (owner decision
+// PR-I2).
 func TestChapterImportPreviewRenders(t *testing.T) {
 	r := newChapterRig(t)
 	r.previewFn = func(text, offset string) ChapterImportView {
@@ -177,7 +179,7 @@ func TestChapterImportPreviewRenders(t *testing.T) {
 		t.Fatal("A C did not open the overlay")
 	}
 	previewNow(t, r.app) // the opening preview
-	if v := r.app.chapterDlg.View(); !strings.Contains(v, "Current: 1 chapters") || !strings.Contains(v, "Paste a timestamp comment") {
+	if v := r.app.chapterDlg.View(); !strings.Contains(v, "Current: 1 chapters") || !strings.Contains(v, "0:00  old") || !strings.Contains(v, "Paste a timestamp comment") {
 		t.Errorf("opening view:\n%s", v)
 	}
 
@@ -200,7 +202,9 @@ func TestChapterImportPreviewRenders(t *testing.T) {
 		t.Errorf("preview asked for %q", last)
 	}
 	view := r.app.chapterDlg.View()
-	for _, want := range []string{"Preview: 2 chapters", "0:00  Intro", "1:02:05  Numb - Linkin Park", "(offset -5s)"} {
+	// The offset reads as a clock, and the current chapters are listed
+	// beside the preview, not only counted (owner decision PR-I2).
+	for _, want := range []string{"Preview: 2 chapters", "0:00  Intro", "1:02:05  Numb - Linkin Park", "(offset -0:05)", "0:00  old"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view lacks %q:\n%s", want, view)
 		}

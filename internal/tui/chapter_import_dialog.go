@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // ChapterImportRow is one chapter of a ChapterImportView: a span on the
@@ -321,8 +323,18 @@ func (m *ChapterImportDialogModel) View() string {
 	b.WriteString("\n")
 
 	// The rows the preview may take: what is left of the box below the
-	// fields, its own headings and the key line.
+	// fields, its own headings and the key line — shared with the current
+	// chapters' list below when both are drawn.
 	rowsLeft := max(boxH-m.text.Height()-12, 3)
+	previewDrawn := m.previewErr == "" && m.view != nil && m.text.Value() != "" && m.view.Error == ""
+	currentRows := 0
+	if m.view != nil && len(m.view.Current) > 0 {
+		currentRows = rowsLeft
+		if previewDrawn {
+			currentRows = max(rowsLeft/2, 3)
+			rowsLeft = max(rowsLeft-currentRows, 3)
+		}
+	}
 	switch {
 	case m.previewErr != "":
 		b.WriteString(ErrorStyle.Render(m.previewErr))
@@ -339,7 +351,10 @@ func (m *ChapterImportDialogModel) View() string {
 	default:
 		b.WriteString(fmt.Sprintf("Preview: %d chapters", len(m.view.Chapters)))
 		if m.view.OffsetSeconds != 0 {
-			b.WriteString(DimStyle.Render(fmt.Sprintf("  (offset %gs)", m.view.OffsetSeconds)))
+			// As a clock, as the offset field is pre-filled and the
+			// dashboard writes it (owner decisions CK-2, PR-I2):
+			// "offset -1:23:45", where it read "-5025s".
+			b.WriteString(DimStyle.Render("  (offset " + utils.FormatChapterOffset(int64(math.Round(m.view.OffsetSeconds*1000))) + ")"))
 		}
 		b.WriteString("\n")
 		b.WriteString(m.renderRows(m.view.Chapters, rowsLeft, contentW))
@@ -350,6 +365,12 @@ func (m *ChapterImportDialogModel) View() string {
 			b.WriteString(DimStyle.Render(" · the original can be restored (A U)"))
 		}
 		b.WriteString("\n")
+		// The chapters themselves, start and title, as the dashboard's
+		// dialog lists them (owner decision PR-I2): a count alone did not
+		// say what a save would replace.
+		if currentRows > 0 {
+			b.WriteString(DimStyle.Render(m.renderRows(m.view.Current, currentRows, contentW)))
+		}
 	}
 	if m.saveErr != "" {
 		b.WriteString(ErrorStyle.Render("Not saved: " + m.saveErr))
