@@ -128,9 +128,12 @@ const SignedOutYouTubePageCookie = "PREF=hl=en&tz=UTC; SOCS=CAI"
 // A Context states userAgent exactly where yt-dlp's INNERTUBE_CONTEXT.client
 // does — web_safari, tv_samsung, visionos and android_vr (_base.py:116,
 // 238, 303, 374) — and always as the client's own UserAgent, so the body and
-// the User-Agent header cannot disagree. web, web_creator, web_embedded and
-// tv_downgraded state none upstream (their header UA comes from yt-dlp's
-// default), and none here.
+// the User-Agent header cannot disagree. web and web_creator state none
+// upstream (their header UA comes from yt-dlp's default), and none here.
+// Upstream's web_embedded states the Safari UA (_base.py:128); it stays off
+// here under the owner's c7fb478d2 deferral. Upstream's tv_downgraded states
+// "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version" (_base.py:361);
+// nothing calls TVDowngradedClient, so it is left as it was.
 
 // YouTubeClientConfig holds configuration for a YouTube API client.
 type YouTubeClientConfig struct {

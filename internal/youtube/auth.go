@@ -29,13 +29,6 @@ func NewAuth(jar *cookies.CookieJar, logger interface {
 	return &Auth{jar: jar, logger: logger}
 }
 
-// GenerateAuthorizationHeader generates the SAPISIDHASH Authorization header for YouTube API requests.
-// It is the unbound form, with no user session id; chat sends
-// Service.ChatAuthorizationHeader, which binds the session's.
-func (a *Auth) GenerateAuthorizationHeader() string {
-	return a.generateAuthorizationHeaderForUser("")
-}
-
 // generateAuthorizationHeaderForUser is the Authorization header for
 // www.youtube.com bound to userSessionID ("" for the unbound form); see
 // cookies.CookieJar.GenerateAuthorizationHeaderForUser.
@@ -138,10 +131,20 @@ func (a *Auth) GenerateAPIHeaders(client constants.YouTubeClientConfig, ytcfg *Y
 		headers["X-Origin"] = origin
 	}
 
-	// Only when the ytcfg says LOGGED_IN, as upstream sends it (_base.py:
+	// Only when the ytcfg says LOGGED_IN, upstream's condition (_base.py:
 	// 975-976; YtcfgData.LoginState). It used to follow the jar's cookies
 	// alone, so a session YouTube's own page had just answered logged out
 	// still claimed a logged-in bootstrap on every call made under it.
+	//
+	// Moombox applies it to the ytcfg the call carries — the master watch
+	// page's, or the kept session's (probeYtcfg) — on every client. That
+	// diverges from upstream per client: yt-dlp reads each client's own
+	// player ytcfg (_video.py:3064-3066), which _download_ytcfg leaves empty
+	// for tv_samsung, android_vr and visionos (_base.py:1013-1024), so its
+	// calls by those clients never carry the header, while Moombox's
+	// tv_samsung cascade call and status probe, the web_safari schedule
+	// probe, /browse and chat carry the page's verdict, as they carry the
+	// page's session (W15).
 	if ytcfg != nil && ytcfg.LoginState == SessionAuthLoggedIn {
 		headers["X-Youtube-Bootstrap-Logged-In"] = "true"
 	}

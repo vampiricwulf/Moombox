@@ -24,7 +24,7 @@ import (
 //
 // Mutant: either site leaving opts.SessionHeaders unset, or setting it to a
 // closure over a snapshot; either site setting opts.GenerateAuth to the
-// unbound Auth.GenerateAuthorizationHeader.
+// unbound jar form (an Auth method that sent it is gone for that reason).
 func TestChatDownloadersGetTheSessionHeadersGetter(t *testing.T) {
 	for _, site := range []struct{ file, fn, recv string }{
 		{"orchestrator_chat.go", "setupChatDownloader", "YT"},

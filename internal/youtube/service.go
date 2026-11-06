@@ -462,6 +462,12 @@ func (s *Service) ChatSessionHeaders() map[string]string {
 // account switch; without a kept session it is the unbound form
 // (cookies.CookieJar.GenerateAuthorizationHeader). "" when there is no Auth
 // or the jar signs nothing.
+//
+// It reads the kept session on its own, apart from ChatSessionHeaders, so a
+// session captured between the two reads of one poll can pair this hash's uid
+// with the next session's X-Goog-AuthUser/PageId. That lasts one poll, during
+// an account switch the next poll reads whole again; accepted rather than
+// threading one snapshot through the chat downloader's two getters.
 func (s *Service) ChatAuthorizationHeader() string {
 	if s == nil || s.Auth == nil {
 		return ""

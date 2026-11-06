@@ -204,9 +204,12 @@ func TestEveryClientContextIsEnglishAndUTC(t *testing.T) {
 // JSON body states it. client.userAgent is stated exactly where yt-dlp's
 // INNERTUBE_CONTEXT.client states it — web_safari, tv_samsung, visionos and
 // android_vr (_base.py:116, 238, 303, 374), with upstream's strings — and
-// nowhere else: yt-dlp's web, web_creator and web_embedded contexts carry
-// none (_base.py:102-109, 164-171), nor does tv_downgraded. Each stated one
-// is the client's own User-Agent header, so body and header agree.
+// nowhere else: yt-dlp's web and web_creator contexts carry none
+// (_base.py:102-109, 164-171). Upstream's web_embedded (_base.py:128) and
+// tv_downgraded (_base.py:361) do; web_embedded's stays off under the owner's
+// c7fb478d2 deferral, and tv_downgraded has no caller and is pinned as it
+// was. Each stated one is the client's own User-Agent header, so body and
+// header agree.
 //
 // Mutants: the userAgent entry dropped from any of the four contexts; the
 // web_safari UA left at Version/17.6 without ",gzip(gfe)"; a userAgent added
