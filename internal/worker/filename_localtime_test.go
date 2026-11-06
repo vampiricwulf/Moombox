@@ -1,6 +1,9 @@
 package worker
 
 import (
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,8 +22,24 @@ import (
 // Mutant: drop `now = now.In(time.Local)` in config.ResolveTemplate (every
 // row resolves in UTC).
 //
-// Do not add t.Parallel(): it sets the process-wide time.Local.
+// It runs in a child process of the test binary, alone: it sets the
+// process-wide time.Local, and in the shared binary that write raced every
+// goroutine another test left reading it (a twitch.API rate-limiter ticker,
+// an HTTP keep-alive read loop), so the suite was race-free only in file
+// order and failed under -shuffle. The child runs nothing else.
 func TestFilenamesUseTheHostsLocalDate(t *testing.T) {
+	if os.Getenv(localDateChildEnv) != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestFilenamesUseTheHostsLocalDate$", "-test.count=1", "-test.v")
+		cmd.Env = append(os.Environ(), localDateChildEnv+"=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("the child run failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "--- PASS: TestFilenamesUseTheHostsLocalDate") {
+			t.Fatalf("the child ran no test:\n%s", out)
+		}
+		return
+	}
 	prev := time.Local
 	time.Local = time.FixedZone("PDT", -7*3600)
 	t.Cleanup(func() { time.Local = prev })
@@ -56,3 +75,7 @@ func TestFilenamesUseTheHostsLocalDate(t *testing.T) {
 		}
 	}
 }
+
+// localDateChildEnv marks the child process TestFilenamesUseTheHostsLocalDate
+// runs its body in.
+const localDateChildEnv = "MOOMBOX_WORKER_LOCALDATE_CHILD"

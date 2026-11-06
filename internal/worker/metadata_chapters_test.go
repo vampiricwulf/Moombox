@@ -29,10 +29,9 @@ import (
 // fetch through the shared transport leaves a keep-alive connection whose
 // read loop calls time.Now, and a real twitch.API starts a GQL rate-limiter
 // ticker that lives for the rest of the test binary. Both read time.Local,
-// which TestFilenamesUseTheHostsLocalDate assigns, so they sit in a file that
-// sorts after filename_localtime_test.go, as twitch_vod_queue_status_test.go
-// and orchestrator_mux_test.go do; the race detector reports the pair
-// otherwise.
+// which TestFilenamesUseTheHostsLocalDate assigns — in a child process of its
+// own, so neither these nor any other test depends on running before or
+// after it (they used to, by file order, and raced it under -shuffle).
 
 // TestMuxAndFinalizeEmbedsTheChapters runs the real finalize over a real
 // six-second capture: a Twitch VOD's staged chapters, and a YouTube VOD's
