@@ -136,7 +136,7 @@ func deriveFFprobePath(ffmpegPath string) string {
 // before it is renamed into place (writeOutput): an archive mux passes its
 // duration check here, so a short copy never takes the archive's name.
 func (m *Muxer) MuxCopy(ctx context.Context, videoPath, audioPath, outputPath string, checks ...OutputCheck) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, nil, InputOffsets{}, checks)
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, InputOffsets{}, "", checks)
 }
 
 // InputOffsets delays the inputs of a MuxCopyAt, in seconds, each passed to
@@ -149,17 +149,32 @@ type InputOffsets struct{ Video, Audio float64 }
 // MuxCopyAt is MuxCopy with each input delayed by its offset: the input's
 // first sample lands that far into the output.
 func (m *Muxer) MuxCopyAt(ctx context.Context, videoPath, audioPath, outputPath string, off InputOffsets, checks ...OutputCheck) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, checks)
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, "", checks)
+}
+
+// MuxCopyAtChapters is MuxCopyAt that also embeds the chapters of an
+// FFMETADATA1 file (utils.FFMetadataChapters) as the output's chapter list.
+// An empty chaptersPath is MuxCopyAt exactly.
+//
+// The chapters ride in as one more input, `-f ffmetadata -i <file>`, mapped
+// with `-map_chapters <its index>` — the same input yt-dlp's FFmpegMetadataPP
+// adds for --embed-chapters (postprocessor/ffmpeg.py, b77c9304e), which maps
+// it with -map_metadata instead and so also replaces the global metadata; only
+// the chapters are taken here. The file has no streams, so FFmpeg's default
+// stream selection — no -map is given — still picks the same video and audio.
+// Owner decision D23: the chapter plumbing is new to Moombox.
+func (m *Muxer) MuxCopyAtChapters(ctx context.Context, videoPath, audioPath, outputPath string, off InputOffsets, chaptersPath string, checks ...OutputCheck) error {
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, chaptersPath, checks)
 }
 
 // Mux performs FFmpeg muxing with optional trimming/encoding, into a
 // temporary file renamed onto outputPath once FFmpeg has exited 0
 // (writeOutput).
 func (m *Muxer) Mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, opts, InputOffsets{}, nil)
+	return m.mux(ctx, videoPath, audioPath, outputPath, opts, InputOffsets{}, "", nil)
 }
 
-func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions, off InputOffsets, checks []OutputCheck) error {
+func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions, off InputOffsets, chaptersPath string, checks []OutputCheck) error {
 	// Validate inputs
 	if videoPath != "" {
 		if _, err := os.Stat(videoPath); err != nil {
@@ -187,7 +202,7 @@ func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string
 		if needsTwoPass {
 			return m.runTwoPassEncode(ctx, videoPath, audioPath, tmp, opts)
 		}
-		args := m.buildArgs(videoPath, audioPath, tmp, opts, needsEncode, off)
+		args := m.buildArgs(videoPath, audioPath, tmp, opts, needsEncode, off, chaptersPath)
 		m.logger.Debug("ffmpeg", "args", strings.Join(args, " "))
 		if opts != nil && opts.ProgressFn != nil && hasTrim(opts) && opts.TrimDuration > 0 {
 			return m.runFFmpegWithProgress(ctx, args, opts.TrimDuration, opts.ProgressFn)
@@ -196,7 +211,7 @@ func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string
 	})
 }
 
-func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOptions, needsEncode bool, off InputOffsets) []string {
+func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOptions, needsEncode bool, off InputOffsets, chaptersPath string) []string {
 	args := []string{"-y"} // Overwrite
 
 	// Input args with optional trim
@@ -217,6 +232,19 @@ func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOpt
 		}
 		args = appendInputOffset(args, off.Audio)
 		args = append(args, "-i", ffmpegPathArg(audioPath))
+	}
+
+	// Chapters (MuxCopyAtChapters): the FFMETADATA file is the last input, and
+	// its index is the number of media inputs ahead of it.
+	if chaptersPath != "" {
+		idx := 0
+		if videoPath != "" {
+			idx++
+		}
+		if audioPath != "" {
+			idx++
+		}
+		args = append(args, "-f", "ffmetadata", "-i", ffmpegPathArg(chaptersPath), "-map_chapters", strconv.Itoa(idx))
 	}
 
 	// Duration limit
