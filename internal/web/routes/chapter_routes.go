@@ -174,8 +174,21 @@ func jobChaptersUnsorted(ctx context.Context, deps *ChapterRouteDeps, cache *cha
 			// begins where this one's duration ends on the global timeline,
 			// and an end read from the file's own (slightly longer, or
 			// re-muxed) timeline would overlap the next part's first chapter.
+			// One that starts at or past the part's end is dropped, not kept
+			// as a zero-length span: it would sit inside the next part, sort
+			// after that part's first chapter, and the player's highlight
+			// (the last chapter started) would name it through the next
+			// part's opening. A W14 gap-fill's original-file row is the
+			// VOD's whole-second length, up to a second short of the file,
+			// so a chapter in that last second is the realistic case. A
+			// part with no duration yet (a live part not yet measured) has
+			// no end to clamp to and keeps its chapters as read.
 			if seg.DurationSeconds > 0 {
-				c.End = min(c.End, start+seg.DurationSeconds)
+				partEnd := start + seg.DurationSeconds
+				if c.Start >= partEnd {
+					continue
+				}
+				c.End = min(c.End, partEnd)
 			}
 			c.End = max(c.End, c.Start)
 			all = append(all, c)
@@ -219,13 +232,18 @@ func newChapterCache(max int) *chapterCache {
 // only when no entry for this version of the file is held.
 //
 // What is cached is the probe's verdict on this version of the file: its
-// chapters, none, or ffprobe's refusal of it (an exit status, unparsable
-// output, or the probe's own timeout) — the file will not read differently
-// until it changes, and its key changes with it, so the refusal is logged
-// once at Warn and not re-probed on every open. What is NOT cached is a
-// failure that says nothing about the file: the request going away under the
-// probe, or ffprobe not starting at all (not installed yet, a path being
-// fixed in Settings) — those are retried on the next open.
+// chapters, none, or ffprobe's refusal of it (an exit status or unparsable
+// output) — the file will not read differently until it changes, and its key
+// changes with it, so the refusal is logged once at Warn and not re-probed on
+// every open. What is NOT cached is a failure that says nothing about the
+// file: the request going away under the probe (CommandContext kills the
+// child, so that arrives as an *exec.ExitError too — hence the ctx check
+// ahead of the error's shape), ffprobe not starting at all (not installed
+// yet, a path being fixed in Settings), or the probe's own timeout — the
+// bound exists for a stalled network share, and a share that recovers keeps
+// the file's size and mtime, so a cached timeout would leave the file
+// chapterless until a restart. Those are retried on the next open; the
+// player's fetch is never awaited, so a retried slow probe costs it nothing.
 func (c *chapterCache) chapters(ctx context.Context, ffprobePath, path, jobID string, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
@@ -243,9 +261,9 @@ func (c *chapterCache) chapters(ctx context.Context, ffprobePath, path, jobID st
 	got, err := c.probe(ctx, ffprobePath, path)
 	if err != nil {
 		var exitErr *exec.ExitError
-		cacheable := ctx.Err() == nil && (errors.As(err, &exitErr) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errUnreadableChapters))
+		cacheable := ctx.Err() == nil && !errors.Is(err, context.DeadlineExceeded) && (errors.As(err, &exitErr) || errors.Is(err, errUnreadableChapters))
 		if !cacheable {
-			logger.Debug("Chapters: ffprobe did not run", "job", jobID, "file", filepath.Base(path), "error", err)
+			logger.Debug("Chapters: ffprobe did not answer; retried on the next open", "job", jobID, "file", filepath.Base(path), "error", err)
 			return nil
 		}
 		logger.Warn("Chapters: ffprobe could not read the archive's chapters; the player shows none", "job", jobID, "file", filepath.Base(path), "error", err)
@@ -301,12 +319,18 @@ func ffprobeChapters(ctx context.Context, ffprobePath, file string) ([]Chapter, 
 	out, err := childproc.CommandContext(ctx, ffprobePath, "-v", "quiet", "-print_format", "json", "-show_chapters", engine.FFmpegPathArg(file)).Output()
 	if err != nil {
 		// Killed by the bound: say so, so the cache can tell its own
-		// timeout (a verdict on the file) from a request that went away.
+		// timeout (retried) from ffprobe's exit-status refusal (cached).
 		if ctx.Err() != nil {
 			return nil, errors.Join(err, ctx.Err())
 		}
 		return nil, err
 	}
+	return parseFFprobeChapters(out)
+}
+
+// parseFFprobeChapters reads ffprobe's -show_chapters JSON: each chapter's
+// start and end in the file's seconds and its title tag, in the order listed.
+func parseFFprobeChapters(out []byte) ([]Chapter, error) {
 	var probe struct {
 		Chapters []struct {
 			StartTime string            `json:"start_time"`

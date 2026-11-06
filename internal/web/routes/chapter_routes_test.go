@@ -399,8 +399,18 @@ func TestChapterCacheIsBounded(t *testing.T) {
 // on the file, so it is not cached and the next open probes again; ffprobe's
 // refusal of the file (unreadable output here) is, and is reported once.
 //
-// Mutants: every error cached (the not-installed probe is not retried);
-// none cached (the refused file is probed and warned about twice).
+// The request-gone case is the real shape ffprobeChapters returns for it:
+// CommandContext kills the child, which answers an *exec.ExitError ("signal:
+// killed") joined with the context's error, so only the ctx check keeps it
+// from reading as an exit-status refusal. A probe that hit its own timeout
+// is retried too: the bound is for a stalled share, which recovers with the
+// file's size and mtime unchanged.
+//
+// Mutants: every error cached (the not-installed probe is not retried); none
+// cached (the refused file is probed and warned about twice); the ctx check
+// dropped (the killed probe is cached and warned about); a timeout cached.
+//
+// Covered too: an exit status alone is a refusal, cached and warned once.
 func TestChapterCacheRetriesWhatSaysNothingAboutTheFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a.mp4")
@@ -415,9 +425,10 @@ func TestChapterCacheRetriesWhatSaysNothingAboutTheFile(t *testing.T) {
 		wantWarns int
 	}{
 		{"ffprobe did not start", exec.ErrNotFound, false, 2, 0},
-		{"request went away", context.Canceled, true, 2, 0},
+		{"request went away", errors.Join(&exec.ExitError{}, context.Canceled), true, 2, 0},
 		{"ffprobe refused the file", errors.Join(errUnreadableChapters, errors.New("bad json")), false, 1, 1},
-		{"probe timed out", errors.Join(errors.New("signal: killed"), context.DeadlineExceeded), false, 1, 1},
+		{"ffprobe exited non-zero", &exec.ExitError{}, false, 1, 1},
+		{"probe timed out", errors.Join(&exec.ExitError{}, context.DeadlineExceeded), false, 2, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			probes := 0
@@ -442,6 +453,90 @@ func TestChapterCacheRetriesWhatSaysNothingAboutTheFile(t *testing.T) {
 				t.Errorf("probes = %d, warns = %d; want %d, %d", probes, log.warnCount(), tc.wantProbe, tc.wantWarns)
 			}
 		})
+	}
+}
+
+// TestChaptersPartsFollowThePlayersTimeline: the multi-part route lays parts
+// out as SegmentPlayer.init does and reads only what segment /video would
+// serve. Offline: the probe is stood in. The parts, in segment_index order:
+//   - 0: no file yet, 50 s — skipped, but still holds its 50 s of timeline;
+//   - 1: a file outside the job's output directory, 10 s — refused by the
+//     containment guard (its titles never served), still 10 s of timeline;
+//   - 2: in the directory, 200 s — shifted by both, 60 s; its row is a
+//     whole-second length a little short of the file (a W14 gap-fill's
+//     original-file row), so its chapter starting past 200 s is dropped
+//     rather than kept as a zero-length span inside part 3;
+//   - 3: in the directory, no duration yet — its chapter's end is kept as
+//     read, not collapsed onto its start.
+//
+// Mutants: the offset advanced only past a part with a file (C lands at 150);
+// the containment guard bypassed (the outside part's chapter is served); the
+// late chapter kept; the end clamp applied to a part with no duration (D's
+// end is 260).
+func TestChaptersPartsFollowThePlayersTimeline(t *testing.T) {
+	f := newChapterFixture(t)
+	outside := filepath.Join(t.TempDir(), "elsewhere.mp4")
+	p2 := filepath.Join(f.outputDir, "p2.mp4")
+	p3 := filepath.Join(f.outputDir, "p3.mp4")
+	for _, p := range []string{outside, p2, p3} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lists := map[string][]Chapter{
+		outside: {{Start: 0, End: 10, Title: "outside"}},
+		p2:      {{Start: 0, End: 100, Title: "B"}, {Start: 100, End: 200.5, Title: "C"}, {Start: 200.5, End: 200.9, Title: "C tail"}},
+		p3:      {{Start: 0, End: 30, Title: "D"}},
+	}
+	f.cache.probe = func(ctx context.Context, ffprobePath, file string) ([]Chapter, error) {
+		for want, l := range lists {
+			if same, _ := filepath.EvalSymlinks(want); file == want || file == same {
+				return slices.Clone(l), nil
+			}
+		}
+		return nil, nil
+	}
+	f.addJob(t, "tw_gaps", func(j *database.Job) {
+		j.Platform = "twitch"
+		j.Segments = []database.Segment{
+			{SegmentIndex: 0, DurationSeconds: 50},
+			{SegmentIndex: 1, FilePath: outside, DurationSeconds: 10},
+			{SegmentIndex: 2, FilePath: p2, DurationSeconds: 200},
+			{SegmentIndex: 3, FilePath: p3},
+		}
+	})
+	got := f.get(t, "tw_gaps")
+	want := []Chapter{
+		{Start: 60, End: 160, Title: "B"},
+		{Start: 160, End: 260, Title: "C"},
+		{Start: 260, End: 290, Title: "D"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("chapters = %+v, want %+v", got, want)
+	}
+}
+
+// TestParseFFprobeChaptersReadsTheTitleTag: ffprobe's JSON chapter list is
+// read in the file's seconds, a chapter's title from its "title" tag or, for
+// a muxer that writes the tag in capitals (Matroska), its "TITLE" tag; an
+// untitled chapter keeps an empty title, and output that is not ffprobe's
+// JSON is errUnreadableChapters.
+//
+// Mutant: the TITLE fallback dropped (the second chapter's title is empty).
+func TestParseFFprobeChaptersReadsTheTitleTag(t *testing.T) {
+	got, err := parseFFprobeChapters([]byte(`{"chapters":[
+		{"start_time":"0.000000","end_time":"12.500000","tags":{"title":"Lower"}},
+		{"start_time":"12.500000","end_time":"30.000000","tags":{"TITLE":"Upper"}},
+		{"start_time":"30.000000","end_time":"31.000000"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Chapter{{Start: 0, End: 12.5, Title: "Lower"}, {Start: 12.5, End: 30, Title: "Upper"}, {Start: 30, End: 31}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("chapters = %+v, want %+v", got, want)
+	}
+	if _, err := parseFFprobeChapters([]byte("not json")); !errors.Is(err, errUnreadableChapters) {
+		t.Errorf("unreadable output: err = %v, want errUnreadableChapters", err)
 	}
 }
 
