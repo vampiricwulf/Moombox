@@ -180,10 +180,12 @@ type JobContext struct {
 	// holds: MuxJob's, which re-muxes the staging the archive was (or was to
 	// be) made from — the Mux action over an Error or Cancelled row, the
 	// automatic mux of an ended Twitch broadcast, the boot re-mux of an
-	// interrupted Muxing row. It keeps a chapter import's list beside the
-	// archive (owner decision CJ-2, keptImportFor) where every other
+	// interrupted Muxing row (owner decision CJ-2) — and a download run that
+	// continues it (owner decision CK-1: a Resume, the monitor's auto-resume,
+	// a parked or requeued row's retry — runJobContext). It keeps a chapter
+	// import's list beside the archive (keptImportFor) where every other
 	// finalize drops it. A Reinitialize is a new recording and drops the
-	// import when it resets the row (reinitializeNow), so no MuxJob after
+	// import when it resets the row (reinitializeNow), so no finalize after
 	// one can find it.
 	Refinalize bool
 	// Run is the run's record of what holds across its strategies'
@@ -1074,7 +1076,7 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		}
 
 		// Build job context
-		jobCtx := w.buildJobContext(job)
+		jobCtx := w.runJobContext(job)
 
 		// Route to platform-specific orchestrator
 		var dlErr error
@@ -1643,6 +1645,48 @@ func cancelledChatStatus(current string) (string, bool) {
 		return "", true
 	}
 	return "", false
+}
+
+// runJobContext is the JobContext processJob runs a job's download with:
+// buildJobContext's, marked a re-finalize (JobContext.Refinalize) when the
+// run continues the recording the row already holds (continuesRecording),
+// so its finalize keeps a chapter import as MuxJob's does (owner decision
+// CK-1).
+func (w *DownloadWorker) runJobContext(job *database.Job) *JobContext {
+	jobCtx := w.buildJobContext(job)
+	jobCtx.Refinalize = w.continuesRecording(job)
+	return jobCtx
+}
+
+// continuesRecording reports whether a download run of job, as read at the
+// run's start, continues the recording the row already holds (owner decision
+// CK-1): the row names an archive (output_file, which only a finalize writes)
+// or has recorded parts (segment rows). That is every run that is not a new
+// recording — a Resume, which keeps both, and every automatic re-run that
+// leaves the row as it was: the monitor's auto-resume (ResumeJob), a parked
+// COOKIES? row re-admitted once its cookies are repaired, a backlog VOD
+// requeued after a transient failure, a boot resume of an interrupted row.
+// A first download of a fresh row has neither, and a Reinitialize clears
+// both (reinitializeNow; clearJobParts), so neither is ever a re-finalize.
+// An auto-reinitialize keeps the parts of the same still-live broadcast and
+// continues at the next one (AutoReinitializeJob), and continues the
+// recording too.
+//
+// Keyed on the row rather than on the verb that started the run, so a
+// Resume that a restart interrupted, and resumed from its Downloading row
+// at boot, still continues the recording. Which import a re-finalize may
+// keep is keptImportFor's callers' to say — only one beside the archive the
+// row names, never one at a name a new run resolved to. A segment read that
+// fails answers false: the finalize writes its own chapters, as before CK-1.
+func (w *DownloadWorker) continuesRecording(job *database.Job) bool {
+	if job == nil {
+		return false
+	}
+	if job.OutputFile != "" {
+		return true
+	}
+	segs, err := w.db.GetSegments(job.ID)
+	return err == nil && len(segs) > 0
 }
 
 func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {

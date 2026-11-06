@@ -1103,7 +1103,8 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// The archive's chapters (owner decision D23): this single-file shape is
 	// the one that carries them.
 	// A re-finalize of the same recording keeps a chapter import (owner
-	// decision CJ-2): read only from beside the archive the row names (the
+	// decisions CJ-2, CK-1: the Mux action's, a Resume's, a retry's): read
+	// only from beside the archive the row names (the
 	// template may now resolve elsewhere; write moves it to the new name).
 	// Never from beside the name this finalize writes when the row names
 	// none: a row with no output_file never had an archive, so no import of
