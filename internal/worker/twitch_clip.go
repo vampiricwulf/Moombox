@@ -23,9 +23,11 @@ import (
 // VOD's — platform "twitch", is_vod, its own title, channel, thumbnail and
 // published time (stream_start_time, the clip's createdAt) — told apart by
 // its ID, "tw_clip_<slug>" (twitch.ClipJobIDPrefix), as a VOD is by "tw_v".
-// It downloads the best rendition ShareClipRenderStatus lists
-// (twitch.BestClipQuality) as a whole file through the engine's direct
-// downloader, the path a YouTube VOD's whole-file formats take, and then runs
+// It downloads the rendition twitch.SelectClipQuality takes from those
+// ShareClipRenderStatus lists, under the job's quality_preference and the
+// config's max_video_resolution and prefer_60fps (owner decision FE-29),
+// falling back to twitch.BestClipQuality when none fits, as a whole file
+// through the engine's direct downloader, the path a YouTube VOD's whole-file formats take, and then runs
 // the ordinary finalize (muxAndFinalize: stream copy, thumbnail, metadata,
 // Finished). No chat is captured: a clip has none.
 
