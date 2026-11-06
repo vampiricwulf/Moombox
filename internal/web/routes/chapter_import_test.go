@@ -297,7 +297,10 @@ func TestChapterImportSplitArchiveSidecarOnly(t *testing.T) {
 	// Part 1 carries a chapter of its own (a W14 gap-fill's original file):
 	// the import's list answers ahead of it.
 	f.cache.probe = func(_ context.Context, _, file string) ([]Chapter, error) {
-		if file == p1 {
+		// By name: the route reads the path its containment guard resolved,
+		// which on Windows can spell the temp dir differently (8.3 short
+		// names such as RUNNER~1) from the path the test joined.
+		if filepath.Base(file) == filepath.Base(p1) {
 			return []Chapter{{Start: 0, End: 100, Title: "part 1's own"}}, nil
 		}
 		return nil, nil

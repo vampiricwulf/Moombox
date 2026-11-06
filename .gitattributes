@@ -45,3 +45,9 @@ Dockerfile text eol=lf
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+
+# Test fixtures compared byte for byte (the chapter-import goldens and the
+# owner's pasted comments, full-width spaces and all) keep their LF on a
+# Windows checkout: core.autocrlf would turn them CRLF and every golden
+# comparison would fail there.
+internal/utils/testdata/chapter_import/* -text

@@ -173,11 +173,14 @@ func TestTheSidecarFetchesThroughTheEnvironmentsProxy(t *testing.T) {
 		}
 	}()
 
-	t.Setenv("https_proxy", ln.Addr().String())
-	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	// Clear first, then set: on Windows a variable's name is not case
+	// sensitive, so clearing HTTPS_PROXY after setting https_proxy cleared
+	// the proxy itself, and the mint went direct.
 	for _, k := range []string{"HTTPS_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "NODE_USE_ENV_PROXY"} {
 		t.Setenv(k, "")
 	}
+	t.Setenv("https_proxy", ln.Addr().String())
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
 
 	s := startSidecar(t)
 	ctx, cancel := context.WithCancel(context.Background())

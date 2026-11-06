@@ -17,7 +17,11 @@
 # attempt too, since apt gives up only on total silence: a mirror that
 # trickled bytes once hung a run for 22 minutes. apt downloads first and then
 # installs with --no-download, so the part that cannot be cut off half-way
-# never waits on a mirror; that offline install runs once, unretried. choco
+# never waits on a mirror; that offline install runs once, unretried. The
+# tests need only the ffmpeg and ffprobe programs, so apt leaves out the
+# recommended GPU and VA drivers, most of the ~94 MB a full install fetched;
+# a download attempt gets 150 s, and a retry resumes what the last one
+# fetched (apt keeps finished packages and partials in its cache). choco
 # gets no per-attempt limit (cutting an install off half-way is worse than
 # waiting), so a hung attempt is never retried: the waiting step's
 # timeout-minutes is its bound, and the bound of the whole.
@@ -34,8 +38,8 @@ install() {
 	case ${RUNNER_OS:-$(uname -s)} in
 	Linux)
 		bash "$here/retry.sh" 3 90 sudo apt-get update -q &&
-			bash "$here/retry.sh" 3 90 sudo apt-get install -y -q --download-only ffmpeg &&
-			sudo apt-get install -y -q --no-download ffmpeg
+			bash "$here/retry.sh" 3 150 sudo apt-get install -y -q --no-install-recommends --download-only ffmpeg &&
+			sudo apt-get install -y -q --no-install-recommends --no-download ffmpeg
 		;;
 	Windows)
 		bash "$here/retry.sh" 3 0 choco install ffmpeg -y --no-progress
