@@ -1596,7 +1596,7 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 		}
 
 		// The download's own conversion, so the probe ranks what it ranks.
-		streamInfos := manifestStreamInfos(streams, info.AudioLanguages)
+		streamInfos := manifestStreamInfos(streams, info.AudioLanguages, info.Formats)
 
 		// Select best video stream using same criteria as the download
 		best := SelectBestDashStream(streamInfos, videoItag, maxRes, true, qualityPref, prefer60fps, preferHDR)

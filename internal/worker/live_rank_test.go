@@ -269,3 +269,75 @@ func TestHlsVariantRanksCodecBeforeLanguage(t *testing.T) {
 		t.Errorf("got %+v, want the Premium 616", got)
 	}
 }
+
+// TestHlsAudioOnlyKeepsTheOriginalLanguage is G41 under the audio_only
+// preference: YouTube HLS has no audio-only variant, so the cheapest variant
+// is taken — but among the variants of the original track, never a dub's
+// that happens to be cheaper. With no language map it is the plain lowest
+// bandwidth it always was (TestSelectHlsVariantCap's audio_only row).
+//
+// Mutant (run): the audio_only branch comparing bandwidth alone again (the
+// 300k English dub wins).
+func TestHlsAudioOnlyKeepsTheOriginalLanguage(t *testing.T) {
+	variants := []engine.HlsVariant{
+		{Width: 256, Height: 144, FPS: 30, Bandwidth: 300_000, Codecs: "avc1.4d400c,mp4a.40.5", AudioContentID: "en.3", URL: "https://x/itag/269/en"},
+		{Width: 256, Height: 144, FPS: 30, Bandwidth: 310_000, Codecs: "avc1.4d400c,mp4a.40.5", AudioContentID: "ja.4", URL: "https://x/itag/269/ja"},
+		{Width: 1280, Height: 720, FPS: 30, Bandwidth: 1_900_000, Codecs: "avc1.4d401f,mp4a.40.2", AudioContentID: "ja.4", URL: "https://x/itag/95/ja"},
+	}
+	if got := selectHlsVariant(variants, "audio_only", 2160, true, true, youtube.AudioLanguages{Original: "ja", Default: "en"}); got == nil || got.URL != variants[1].URL {
+		t.Errorf("got %+v, want the cheapest original-language variant", got)
+	}
+	if got := selectHlsVariant(variants, "audio_only", 2160, true, true, youtube.AudioLanguages{}); got == nil || got.URL != variants[0].URL {
+		t.Errorf("no map: got %+v, want the lowest bandwidth", got)
+	}
+}
+
+// TestManifestAudioTakesItsItagsQualityAndChannels: a DASH manifest states
+// no audioQuality or channel count, so manifestStreamInfos fills both from
+// the extraction's copy of the same itag — the quality as yt-dlp's
+// itag_qualities fill (_video.py:3670), the channels beyond upstream so this
+// path ranks like VOD (D14, D15). Without the fill the codec rung decided
+// and stereo Opus 251 beat the E-AC-3 5.1 328 that SelectBestFormats picks
+// from the same two (and that the old bandwidth-only rule picked); with no
+// copy of an itag the rungs tie and the codec decides, as upstream's do.
+//
+// Mutants (each run): the fill dropped (251 wins the first row); the
+// channels fill dropped (251 wins); the quality fill dropped (the LOW 5.1
+// row's 328 beats the MEDIUM stereo 251 on channels).
+func TestManifestAudioTakesItsItagsQualityAndChannels(t *testing.T) {
+	streams := []engine.DashStream{
+		{Itag: 251, MimeType: "audio/webm", Codecs: "opus", Bandwidth: 160_000, BaseURL: "https://x/251"},
+		{Itag: 328, MimeType: "audio/mp4", Codecs: "ec-3", Bandwidth: 384_000, BaseURL: "https://x/328"},
+	}
+	audioFormat := func(itag int, mime, quality string, channels int) youtube.Format {
+		return youtube.Format{Itag: itag, URL: fmt.Sprintf("https://x/%d", itag), MimeType: mime, AudioQuality: quality, AudioChannels: channels}
+	}
+	for _, tc := range []struct {
+		name    string
+		formats []youtube.Format
+		want    int
+	}{
+		{"5.1 over stereo at one quality", []youtube.Format{
+			audioFormat(251, `audio/webm; codecs="opus"`, "AUDIO_QUALITY_MEDIUM", 2),
+			audioFormat(328, `audio/mp4; codecs="ec-3"`, "AUDIO_QUALITY_MEDIUM", 6),
+		}, 328},
+		{"quality before channels", []youtube.Format{
+			audioFormat(251, `audio/webm; codecs="opus"`, "AUDIO_QUALITY_MEDIUM", 2),
+			audioFormat(328, `audio/mp4; codecs="ec-3"`, "AUDIO_QUALITY_LOW", 6),
+		}, 251},
+		{"no copy of the itags: the codec decides", nil, 251},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SelectBestDashStream(manifestStreamInfos(streams, youtube.AudioLanguages{}, tc.formats), 0, 1080, false, "", true, true)
+			if got == nil || got.Itag != tc.want {
+				t.Errorf("audio = %+v, want %d", got, tc.want)
+			}
+			if tc.formats != nil {
+				vod := youtube.SelectBestFormats(tc.formats, 1080, true, true)
+				if vod.Audio == nil || vod.Audio.Itag != tc.want {
+					t.Errorf("the VOD selector picks %+v from the same itags, want %d", vod.Audio, tc.want)
+				}
+			}
+		})
+	}
+}

@@ -291,11 +291,20 @@ func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes i
 	if qualityPref == "audio_only" {
 		// YouTube HLS has no audio-only variants — take the lowest bandwidth
 		// to minimise wasted video data (audio quality is the same across
-		// variants). DownloadHls logs the warning.
+		// variants). DownloadHls logs the warning. The audio track comes
+		// first, though: on a dubbed VOD's master each track is pre-merged
+		// into its own variant at every size, and an audio-only archive is
+		// the one where the track is the whole point — the lowest bandwidth
+		// alone could be a dub's. So the variants of the best track (the
+		// same LanguageTrackScore the other paths rank by) compete on
+		// bandwidth; with no language map every track scores alike and this
+		// is the plain lowest bandwidth it always was.
 		best := capped[0]
+		bestTrack := youtube.LanguageTrackScore(best.AudioContentID, langs)
 		for _, v := range capped[1:] {
-			if v.Bandwidth < best.Bandwidth {
-				best = v
+			track := youtube.LanguageTrackScore(v.AudioContentID, langs)
+			if track > bestTrack || (track == bestTrack && v.Bandwidth < best.Bandwidth) {
+				best, bestTrack = v, track
 			}
 		}
 		return best

@@ -276,7 +276,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// dashPoToken from step 2 is reused for segment URLs via DownloaderOptions.
 
 	// Convert to DashStreamInfo for selection
-	streamInfos := manifestStreamInfos(streams, videoInfo.AudioLanguages)
+	streamInfos := manifestStreamInfos(streams, videoInfo.AudioLanguages, videoInfo.Formats)
 
 	// Select best video/audio streams — per-job itag selection overrides config defaults (matches TS)
 	videoItag := job.Config.VideoItag
@@ -495,9 +495,37 @@ func warnDamagedManifestPins(job *JobContext, videoInfo *youtube.VideoInfo, vide
 // codec score, and its track — the Representation's lang against the
 // extraction's original and default languages (youtube.LanguageTrackScore),
 // yt-dlp's language_preference for a DASH-manifest format (_video.py:
-// 3655-3663). A manifest states no audioQuality or channels, so those rungs
-// tie.
-func manifestStreamInfos(streams []engine.DashStream, langs youtube.AudioLanguages) []DashStreamInfo {
+// 3655-3663).
+//
+// A manifest states no audioQuality and no channel count, so both come from
+// the extraction's own copy of the same itag (formats, VideoInfo.Formats):
+// the quality as yt-dlp's process_manifest_format fills a manifest format's
+// from the https formats of its itag (`f['quality'] = q(itag_qualities…)`,
+// _video.py:3670, filled at 3409-3411), and the channels likewise — there
+// Moombox goes beyond upstream, whose MPD parse reads no
+// AudioChannelConfiguration and so ties every manifest track on channels:
+// owner decision D14 ranks this path like VOD, and the VOD path ranks a 5.1
+// rendition above stereo at one quality (D15), which a tie would hand back
+// to the codec rung (stereo Opus over E-AC-3 5.1). An itag's channel count
+// is a property of the itag, so the https copy states the manifest's. With
+// no copy of the itag the rungs stay 0 and tie, as upstream's do.
+func manifestStreamInfos(streams []engine.DashStream, langs youtube.AudioLanguages, formats []youtube.Format) []DashStreamInfo {
+	type facts struct{ quality, channels int }
+	byItag := make(map[int]facts)
+	for i := range formats {
+		f := &formats[i]
+		if !strings.Contains(f.MimeType, "audio") {
+			continue
+		}
+		have := byItag[f.Itag]
+		if have.quality == 0 {
+			have.quality = youtube.AudioQualityRung(f.AudioQuality)
+		}
+		if have.channels == 0 {
+			have.channels = f.AudioChannels
+		}
+		byItag[f.Itag] = have
+	}
 	infos := make([]DashStreamInfo, 0, len(streams))
 	for _, s := range streams {
 		info := DashStreamInfo{
@@ -513,9 +541,12 @@ func manifestStreamInfos(streams []engine.DashStream, langs youtube.AudioLanguag
 			Lang:           s.Lang,
 		}
 		if strings.Contains(s.MimeType, "audio") {
+			fill := byItag[s.Itag]
 			info.Audio = youtube.AudioRank{
-				Track: youtube.LanguageTrackScore(s.Lang, langs),
-				Codec: youtube.ScoreAudioCodec(s.Codecs),
+				Track:    youtube.LanguageTrackScore(s.Lang, langs),
+				Quality:  fill.quality,
+				Channels: fill.channels,
+				Codec:    youtube.ScoreAudioCodec(s.Codecs),
 			}
 		}
 		infos = append(infos, info)
