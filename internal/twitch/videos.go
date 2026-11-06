@@ -285,6 +285,160 @@ func (a *API) CollectionVideos(ctx context.Context, collectionID, authToken stri
 // does not have (deleted, private, or a mistyped ID).
 var ErrCollectionNotFound = fmt.Errorf("twitch collection not found")
 
+// TwitchCollectionRef is one entry of a channel's collection list
+// (ChannelCollectionsContent): the collection's ID, which its own listing
+// (CollectionVideos) is read by, and its title. yt-dlp's
+// TwitchVideosCollectionsIE._extract_entry reads these two and the thumbnail,
+// length, update time and view count beside them (twitch.py b77c9304e), none
+// of which a queued VOD row needs.
+type TwitchCollectionRef struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// collectionsPageLimit is TwitchPlaylistBaseIE._PAGE_LIMIT (twitch.py
+// b77c9304e), the page ChannelCollectionsContent is asked for, as
+// FilterableVideoTower_Videos is.
+const collectionsPageLimit = 100
+
+// ChannelCollections walks a channel's collection list, the page
+// /<ch>/videos?filter=collections shows — yt-dlp's TwitchVideosCollectionsIE
+// over TwitchPlaylistBaseIE._entries (twitch.py b77c9304e 649-697, 896-949):
+//
+//   - op ChannelCollectionsContent with variables ownerLogin, limit 100 and,
+//     after the first page, the cursor;
+//   - the edges at data.user.collections.edges; an edge that is not a
+//     CollectionsItemEdge, a node that is not a Collection, or one without an
+//     id is skipped, and the cursor carried to the next page is the last kept
+//     edge's;
+//   - a user whose id is "" is a login that does not resolve,
+//     ErrChannelNotFound (yt-dlp #15450, as EachChannelVideo);
+//   - the walk ends on a page without edges or without a cursor, or after
+//     maxPages pages (maxPages <= 0: no bound).
+//
+// A page that fails after the first ends the walk with what was read, as
+// _entries does (fatal=False, then `if not page: break`) and as
+// ListChannelVideos does; a first page that fails is the error.
+func (a *API) ChannelCollections(ctx context.Context, channelLogin string, maxPages int, authToken string) ([]TwitchCollectionRef, error) {
+	login := strings.ToLower(channelLogin)
+	var out []TwitchCollectionRef
+	cursor := ""
+	for page := 1; maxPages <= 0 || page <= maxPages; page++ {
+		vars := map[string]any{"ownerLogin": login, "limit": collectionsPageLimit}
+		if cursor != "" {
+			vars["cursor"] = cursor
+		}
+		query := newPersistedQuery("ChannelCollectionsContent", constants.TwitchGQLHashes.ChannelCollectionsContent, vars)
+		respData, err := a.gqlRequest(ctx, "ChannelCollectionsContent", query, authToken)
+		if err == nil {
+			var resp struct {
+				Data struct {
+					User *struct {
+						ID          *string `json:"id"`
+						Collections *struct {
+							Edges []struct {
+								TypeName string `json:"__typename"`
+								Cursor   string `json:"cursor"`
+								Node     *struct {
+									TypeName string `json:"__typename"`
+									TwitchCollectionRef
+								} `json:"node"`
+							} `json:"edges"`
+						} `json:"collections"`
+					} `json:"user"`
+				} `json:"data"`
+			}
+			if err = json.Unmarshal(respData, &resp); err == nil {
+				user := resp.Data.User
+				if user != nil && user.ID != nil && *user.ID == "" {
+					return nil, ErrChannelNotFound
+				}
+				if user == nil || user.Collections == nil || len(user.Collections.Edges) == 0 {
+					return out, nil
+				}
+				next := ""
+				for _, e := range user.Collections.Edges {
+					if e.TypeName != "CollectionsItemEdge" || e.Node == nil || e.Node.TypeName != "Collection" || e.Node.ID == "" {
+						continue
+					}
+					next = e.Cursor
+					out = append(out, e.Node.TwitchCollectionRef)
+				}
+				if next == "" {
+					return out, nil
+				}
+				cursor = next
+				continue
+			}
+			err = fmt.Errorf("parse channel collections: %w", err)
+		}
+		if page == 1 || ctx.Err() != nil {
+			return nil, err
+		}
+		if a.logger != nil {
+			a.logger.Warn("twitch: a page of the channel's collection list could not be read; the listing ends with what was read",
+				"channel", channelLogin, "collections", len(out), "err", err)
+		}
+		return out, nil
+	}
+	return out, nil
+}
+
+// ChannelCollectionVideos is a /<ch>/videos?filter=collections listing (owner
+// decision FE-27): every collection ChannelCollections lists, each read
+// through CollectionVideos — yt-dlp hands each entry to TwitchCollectionIE
+// (url_transparent) — their videos in list order, then each collection's own
+// order, a VOD that two collections hold kept once.
+//
+// A collection that cannot be read — gone since the list named it, or one
+// passing failure — is left out, with a warning, and the rest are still
+// queued: a playlist of playlists that fails whole for one bad entry would
+// queue nothing of a channel's dozen collections. yt-dlp, without
+// --ignore-errors, stops at that entry instead; Moombox's add has no partial
+// "stop here", so it keeps what it read. Only when nothing was read at all is
+// the failure the answer — and then only a failure to read: a collection
+// that is gone (ErrCollectionNotFound — deleted or made private since the
+// list named it) is not, as the paste named a channel, not that collection,
+// and a channel whose every listed collection is gone has a collection list
+// with no videos in it, which is what the caller is told (an empty result).
+func (a *API) ChannelCollectionVideos(ctx context.Context, channelLogin string, maxPages int, authToken string) ([]TwitchVideo, error) {
+	cols, err := a.ChannelCollections(ctx, channelLogin, maxPages, authToken)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		out     []TwitchVideo
+		seen    = map[string]bool{}
+		lastErr error
+	)
+	for _, c := range cols {
+		_, vids, err := a.CollectionVideos(ctx, c.ID, authToken)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if !errors.Is(err, ErrCollectionNotFound) {
+				lastErr = err
+			}
+			if a.logger != nil {
+				a.logger.Warn("twitch: a collection of the channel's collection list could not be read; it is left out",
+					"channel", channelLogin, "collection", c.ID, "err", err)
+			}
+			continue
+		}
+		for _, v := range vids {
+			if !seen[v.ID] {
+				seen[v.ID] = true
+				out = append(out, v)
+			}
+		}
+	}
+	if len(out) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+	return out, nil
+}
+
 // ArchiveVodFor finds the archive VOD of the broadcast a live capture
 // recorded, with no end to bound it (ArchiveVodBetween with a zero end): the
 // lookup a live capture's finalize makes for its chapters (owner decision D23

@@ -101,12 +101,20 @@ type TwitchClipInfo struct {
 	BroadcasterLogin       string `json:"broadcasterLogin,omitempty"`
 	BroadcasterDisplayName string `json:"broadcasterDisplayName"`
 	BroadcasterID          string `json:"broadcasterId,omitempty"`
-	// Curator is who made the clip (yt-dlp's uploader).
+	// Curator is who made the clip (yt-dlp's uploader: curator.displayName,
+	// and uploader_id the curator's id). The login is kept beside the display
+	// name, which a clip job's description names it by and falls back from
+	// (owner decision FE-32).
 	CuratorDisplayName string `json:"curatorDisplayName,omitempty"`
-	GameCategory       string `json:"gameCategory,omitempty"`
-	CreatedAt          string `json:"createdAt,omitempty"`
-	DurationSeconds    int    `json:"durationSeconds,omitempty"`
-	ViewCount          int    `json:"viewCount,omitempty"`
+	CuratorLogin       string `json:"curatorLogin,omitempty"`
+	// Description is the clip's own description when the answer carries one.
+	// yt-dlp reads none off ShareClipRenderStatus, whose selection set is
+	// Twitch's: "" whenever the node has no description field.
+	Description     string `json:"description,omitempty"`
+	GameCategory    string `json:"gameCategory,omitempty"`
+	CreatedAt       string `json:"createdAt,omitempty"`
+	DurationSeconds int    `json:"durationSeconds,omitempty"`
+	ViewCount       int    `json:"viewCount,omitempty"`
 	// ThumbnailURL is the best thumbnail: the default asset's, else the
 	// clip's own small one, else the portrait asset's. Unlike upstream,
 	// which ranks the portrait one (-1) above the small one (-2); see info.
@@ -184,6 +192,7 @@ type clipNode struct {
 	ID              string        `json:"id"`
 	Slug            string        `json:"slug"`
 	Title           string        `json:"title"`
+	Description     string        `json:"description"`
 	DurationSeconds flexInt       `json:"durationSeconds"`
 	ViewCount       flexInt       `json:"viewCount"`
 	CreatedAt       string        `json:"createdAt"`
@@ -234,6 +243,7 @@ func (c *clipNode) info(slug string) (*TwitchClipInfo, error) {
 		ID:              cmp.Or(c.ID, slug),
 		Slug:            cmp.Or(c.Slug, slug),
 		Title:           c.Title,
+		Description:     strings.TrimSpace(c.Description),
 		CreatedAt:       c.CreatedAt,
 		DurationSeconds: int(c.DurationSeconds),
 		ViewCount:       int(c.ViewCount),
@@ -245,6 +255,7 @@ func (c *clipNode) info(slug string) (*TwitchClipInfo, error) {
 	}
 	if c.Curator != nil {
 		out.CuratorDisplayName = c.Curator.DisplayName
+		out.CuratorLogin = strings.ToLower(c.Curator.Login)
 	}
 	if c.Game != nil {
 		out.GameCategory = cmp.Or(c.Game.DisplayName, c.Game.Name)
@@ -311,8 +322,9 @@ func httpURL(raw string) string {
 	return strings.TrimSpace(raw)
 }
 
-// BestClipQuality is the rendition a clip job downloads: the best landscape
-// one — tallest, then highest frame rate — and a portrait one only when the
+// BestClipQuality is a clip's best rendition — the one SelectClipQuality
+// falls back to when nothing fits the job's cap and preference: the best
+// landscape one — tallest, then highest frame rate — and a portrait one only when the
 // clip has no landscape rendition at all. That is yt-dlp's default ranking of
 // TwitchClipsIE's formats: the portrait ones carry quality -2, below every
 // landscape one, and within each the height then the fps decide. nil when
@@ -326,6 +338,66 @@ func BestClipQuality(qs []TwitchClipQuality) *TwitchClipQuality {
 		}
 	}
 	return best
+}
+
+// SelectClipQuality is the rendition a clip job downloads under the job's
+// quality_preference and the downloader's max_video_resolution and
+// prefer_60fps (owner decision FE-29): the rendition a VOD's selection would
+// take from the same ladder — SelectBestVariant, the rule every Twitch
+// capture starts on (selectTwitchVariant) — over the clip's landscape
+// renditions, or over its portrait ones only when it has no landscape one, so
+// a landscape rendition still ranks above every portrait one whatever the
+// cap and the preference say (yt-dlp's quality -2, as BestClipQuality).
+//
+// When nothing fits — no rendition at or under a set cap, or a preference no
+// clip rendition can meet ("audio_only": a clip has no audio-only rendition)
+// — it is BestClipQuality, the best rendition, where a VOD's cap would take
+// the smallest size above it (utils.SelectByCap): the owner's rule for clips.
+// A preference with no rendition of its size descends as a VOD's does, to the
+// next lower size and then the best under the cap. nil when qs is empty.
+//
+// yt-dlp has no cap or preference of its own (its -f/-S are the user's);
+// this is Moombox's setting applied to the formats TwitchClipsIE lists.
+func SelectClipQuality(qs []TwitchClipQuality, qualityPref string, maxResolution int, prefer60fps bool) *TwitchClipQuality {
+	pool := make([]int, 0, len(qs))
+	for i := range qs {
+		if !qs[i].Portrait {
+			pool = append(pool, i)
+		}
+	}
+	if len(pool) == 0 {
+		for i := range qs {
+			pool = append(pool, i)
+		}
+	}
+	if len(pool) == 0 {
+		return nil
+	}
+	fits := maxResolution <= 0
+	variants := make([]TwitchHLSVariant, len(pool))
+	for n, i := range pool {
+		q := &qs[i]
+		// The clip's label is its height (yt-dlp takes it for both); a
+		// variant without a width measures by it (utils.CapDimension). The
+		// URL carries the index back, since the pick may point into
+		// SelectBestVariant's own filtered copy.
+		variants[n] = TwitchHLSVariant{URL: strconv.Itoa(i), Name: q.Quality + "p", Height: q.Height, FPS: q.FrameRate}
+		if q.Height > 0 && q.Height <= maxResolution {
+			fits = true
+		}
+	}
+	if !fits || strings.EqualFold(qualityPref, "audio_only") {
+		return BestClipQuality(qs)
+	}
+	pick := SelectBestVariant(variants, qualityPref, maxResolution, prefer60fps)
+	if pick == nil {
+		return BestClipQuality(qs)
+	}
+	i, err := strconv.Atoi(pick.URL)
+	if err != nil || i < 0 || i >= len(qs) {
+		return BestClipQuality(qs)
+	}
+	return &qs[i]
 }
 
 func clipQualityBetter(a, b *TwitchClipQuality) bool {

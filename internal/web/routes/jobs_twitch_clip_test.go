@@ -42,7 +42,7 @@ func TestTwitchAddAcceptsAPastedClip(t *testing.T) {
 	if len(f.tw.clipSlugs) != 1 || f.tw.clipSlugs[0] != slug {
 		t.Errorf("clip metadata asked for %v, want the slug as pasted", f.tw.clipSlugs)
 	}
-	// In the processing history, as a found clip is: an archive_clips sweep
+	// In the processing history, as a found clip is: an twitch_archive_clips sweep
 	// never queues it again once its row is deleted.
 	if seen, err := f.db.HasProcessed(twitch.ClipJobID(slug)); err != nil || !seen {
 		t.Errorf("pasted clip in the processing history = %v (%v), want true", seen, err)

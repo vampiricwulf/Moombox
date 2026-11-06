@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
@@ -22,9 +23,11 @@ import (
 // VOD's — platform "twitch", is_vod, its own title, channel, thumbnail and
 // published time (stream_start_time, the clip's createdAt) — told apart by
 // its ID, "tw_clip_<slug>" (twitch.ClipJobIDPrefix), as a VOD is by "tw_v".
-// It downloads the best rendition ShareClipRenderStatus lists
-// (twitch.BestClipQuality) as a whole file through the engine's direct
-// downloader, the path a YouTube VOD's whole-file formats take, and then runs
+// It downloads the rendition twitch.SelectClipQuality takes from those
+// ShareClipRenderStatus lists, under the job's quality_preference and the
+// config's max_video_resolution and prefer_60fps (owner decision FE-29),
+// falling back to twitch.BestClipQuality when none fits, as a whole file
+// through the engine's direct downloader, the path a YouTube VOD's whole-file formats take, and then runs
 // the ordinary finalize (muxAndFinalize: stream copy, thumbnail, metadata,
 // Finished). No chat is captured: a clip has none.
 
@@ -41,7 +44,7 @@ func IsTwitchClipJob(job *database.Job) bool {
 // RecordPastedClip enters a clip row an add path just created (POST
 // /api/jobs, `moombox add`) in the processing history, as the monitor's
 // OnClipFound does for the clips its sweep finds. The sweep of a channel
-// whose archive_clips is on skips a clip whose job ID is in the history or
+// whose twitch_archive_clips is on skips a clip whose job ID is in the history or
 // is a job now (TwitchMonitor.sweepClips); a pasted clip was only the
 // second, so once its Finished row was deleted the next sweep whose window
 // still held it archived it again — the dedupe by slug that archives a clip
@@ -94,7 +97,17 @@ func (sp *StreamProcessor) processTwitchClip(ctx context.Context, job *database.
 		}, nil
 	}
 
-	best := twitch.BestClipQuality(clip.Qualities)
+	// The rendition under the job's quality_preference and the downloader's
+	// max_video_resolution and prefer_60fps, by the rule a VOD's selection
+	// follows, read fresh from the config as selectTwitchVariant reads them;
+	// the best rendition when none fits (owner decision FE-29).
+	var maxRes int
+	var prefer60fps bool
+	sp.readConfig(func(c *config.MoomboxConfig) {
+		maxRes = c.Downloader.MaxVideoResolution
+		prefer60fps = c.Downloader.Prefer60fps
+	})
+	best := twitch.SelectClipQuality(clip.Qualities, job.QualityPreference, maxRes, prefer60fps)
 	if best == nil {
 		return &StreamProcessResult{ShouldDownload: false, IsVod: true, Error: "twitch clip error: the clip lists no downloadable rendition"}, nil
 	}
@@ -123,6 +136,9 @@ func (sp *StreamProcessor) processTwitchClip(ctx context.Context, job *database.
 	if clip.GameCategory != "" {
 		updates["twitch_category"] = clip.GameCategory
 	}
+	if desc := twitchClipDescription(clip); desc != "" {
+		updates["description"] = desc
+	}
 	sp.db.UpdateJobFields(job.ID, updates)
 	syncTwitchJobMetadata(job, updates)
 
@@ -133,6 +149,23 @@ func (sp *StreamProcessor) processTwitchClip(ctx context.Context, job *database.
 		IsVod:          true,
 		TwitchClip:     &TwitchClipDownload{Slug: slug, Quality: *best, Reread: sp.getClip},
 	}, nil
+}
+
+// twitchClipDescription is a clip job's description (owner decision FE-32):
+// "Clipped by <curator>" — the curator's display name, else the login — then,
+// after a blank line, the clip's own description when it has one. It is the
+// row's description column, so job details show it and the finalize writes it
+// beside the archive as the .description, as it does a VOD's; no schema
+// change. A clip that names no curator has only its own description, or none.
+func twitchClipDescription(clip *twitch.TwitchClipInfo) string {
+	var parts []string
+	if curator := cmp.Or(strings.TrimSpace(clip.CuratorDisplayName), clip.CuratorLogin); curator != "" {
+		parts = append(parts, "Clipped by "+curator)
+	}
+	if d := strings.TrimSpace(clip.Description); d != "" {
+		parts = append(parts, d)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // twitchClipErrorText is the job's error for a clip Twitch answered about: a

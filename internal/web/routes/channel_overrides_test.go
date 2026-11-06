@@ -142,25 +142,25 @@ func TestChannelWriterStoresTwitchOptions(t *testing.T) {
 	}
 }
 
-// archive_clips (owner decision D26 follow-up 2) round-trips through the
+// twitch_archive_clips (owner decision D26 follow-up 2) round-trips through the
 // channel writer for a Twitch channel — stored, and read back by GET
 // /api/config's channels — and is refused by 400, naming the field, on a
 // YouTube channel, where Save's Validate would refuse it.
 //
-// Mutant: the archive_clips arm dropped from ChannelOverrideErrors (the
+// Mutant: the twitch_archive_clips arm dropped from ChannelOverrideErrors (the
 // YouTube post is a 500 from Save, or stored).
-func TestChannelWriterRoundTripsArchiveClips(t *testing.T) {
+func TestChannelWriterRoundTripsTwitchArchiveClips(t *testing.T) {
 	f := newChannelRoutesFixture(t)
-	if rec := postChannel(t, f.router, map[string]any{"id": "vanillatv", "platform": "twitch", "archive_clips": true}); rec.Code != http.StatusOK {
-		t.Fatalf("Twitch channel with archive_clips: %d (body %s)", rec.Code, rec.Body.String())
+	if rec := postChannel(t, f.router, map[string]any{"id": "vanillatv", "platform": "twitch", "twitch_archive_clips": true}); rec.Code != http.StatusOK {
+		t.Fatalf("Twitch channel with twitch_archive_clips: %d (body %s)", rec.Code, rec.Body.String())
 	}
 	f.store.Read(func(c *config.MoomboxConfig) {
-		if len(c.Channels) != 1 || !c.Channels[0].ArchiveClips {
-			t.Errorf("stored %+v, want archive_clips on", c.Channels)
+		if len(c.Channels) != 1 || !c.Channels[0].TwitchArchiveClips {
+			t.Errorf("stored %+v, want twitch_archive_clips on", c.Channels)
 		}
 	})
-	rec := postChannel(t, f.router, map[string]any{"id": "UCx", "archive_clips": true})
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "archive_clips") {
-		t.Errorf("YouTube channel with archive_clips: %d (body %s), want 400 naming the field", rec.Code, rec.Body.String())
+	rec := postChannel(t, f.router, map[string]any{"id": "UCx", "twitch_archive_clips": true})
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "twitch_archive_clips") {
+		t.Errorf("YouTube channel with twitch_archive_clips: %d (body %s), want 400 naming the field", rec.Code, rec.Body.String())
 	}
 }

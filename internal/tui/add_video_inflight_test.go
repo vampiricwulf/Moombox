@@ -123,19 +123,16 @@ func TestAddVideoAutoAdvanceHonoursEsc(t *testing.T) {
 	}
 }
 
-// TestAddVideoRefusesTwitchClipsAndListings: a channel's clip list and a
-// channel's collection list are refused in the dialog with the add paths'
-// shared message, instead of a listing being read as the channel and
-// submitted as its live-wait job; a clip — its own job since owner decision
-// D26 — is submitted as "tw_clip_<slug>".
+// TestAddVideoRefusesTwitchClipsAndListings: a channel's clip list is refused
+// in the dialog with the add paths' shared message, instead of a listing
+// being read as the channel and submitted as its live-wait job; a clip — its
+// own job since owner decision D26 — is submitted as "tw_clip_<slug>".
 //
-// Mutants: dropping the "twitch_clips" case — the clip list submits; dropping
-// the collections refusal — ?filter=collections submits as a video list; the
-// clip refusal restored — the clip does not submit.
+// Mutants: dropping the "twitch_clips" case — the clip list submits; the clip
+// refusal restored — the clip does not submit.
 func TestAddVideoRefusesTwitchClipsAndListings(t *testing.T) {
 	for input, want := range map[string]string{
-		"https://www.twitch.tv/spamfish/clips":                     "Twitch clip lists are not supported yet.",
-		"https://www.twitch.tv/spamfish/videos?filter=collections": "Twitch collection lists are not supported yet.",
+		"https://www.twitch.tv/spamfish/clips": "Twitch clip lists are not supported yet.",
 	} {
 		m := NewAddVideoModel()
 		m.Open()
@@ -156,13 +153,16 @@ func TestAddVideoRefusesTwitchClipsAndListings(t *testing.T) {
 }
 
 // TestAddVideoSubmitsTwitchListings is owner decision D18: a channel's video
-// list and a collection submit, with the input as pasted, for the server to
-// queue one VOD job per video.
+// list, a channel's collection list (owner decision FE-27) and a collection
+// submit, with the input as pasted, for the server to queue one VOD job per
+// video.
 //
-// Mutant: the "twitch_listing" case refusing again — Enter is no submit.
+// Mutants: the "twitch_listing" case refusing again — Enter is no submit; the
+// collections refusal restored — the ?filter=collections row is no submit.
 func TestAddVideoSubmitsTwitchListings(t *testing.T) {
 	for _, input := range []string{
 		"https://www.twitch.tv/spamfish/videos?filter=archives",
+		"https://www.twitch.tv/spamfish/videos?filter=collections",
 		"https://www.twitch.tv/collections/o9zZer3IQBhTJw",
 	} {
 		m := NewAddVideoModel()

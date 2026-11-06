@@ -337,3 +337,147 @@ func TestCollectionVideosResolvesMissingOwners(t *testing.T) {
 		t.Errorf("owner-less node's owner %+v, want VideoMetadata's bob", vids[1].Owner)
 	}
 }
+
+// collectionEdge renders one ChannelCollectionsContent edge, the shape yt-dlp's
+// TwitchVideosCollectionsIE reads through TwitchPlaylistBaseIE._entries
+// (twitch.py b77c9304e): a CollectionsItemEdge with a cursor around a
+// Collection node.
+func collectionEdge(id string) string {
+	return fmt.Sprintf(`{"__typename":"CollectionsItemEdge","cursor":"k%s","node":{"__typename":"Collection","id":%q,"title":"T%s"}}`, id, id, id)
+}
+
+func collectionsPage(userID string, edges ...string) string {
+	return fmt.Sprintf(`{"data":{"user":{"id":%q,"collections":{"edges":[%s]}}}}`, userID, strings.Join(edges, ","))
+}
+
+// TestChannelCollectionsPagesByCursor is TwitchVideosCollectionsIE (owner
+// decision FE-27): ChannelCollectionsContent with its own hash, ownerLogin
+// lower-cased and limit 100, the last kept edge's cursor sent for the next
+// page, an edge that is not a CollectionsItemEdge, a node that is not a
+// Collection and a node without an id skipped, and the walk ending on a page
+// without edges; a user whose id is "" is a login that does not resolve.
+//
+// Mutants: the cursor not sent (page 1 again, the walk never ends); the edge
+// typename check dropped (the VideoEdge's node kept); the node typename check
+// dropped (the Video node kept); the empty-id user read as an empty list.
+func TestChannelCollectionsPagesByCursor(t *testing.T) {
+	var sent []map[string]any
+	stubGQL(t, func(body string) string {
+		op, vars := sentVariables(t, body)
+		if op != "ChannelCollectionsContent" || !strings.Contains(body, constants.TwitchGQLHashes.ChannelCollectionsContent) {
+			t.Fatalf("op %s, want ChannelCollectionsContent with its hash", op)
+		}
+		sent = append(sent, vars)
+		if len(sent) > 5 {
+			t.Errorf("page %d requested: the walk is not advancing its cursor", len(sent))
+			return collectionsPage("1")
+		}
+		switch vars["cursor"] {
+		case nil:
+			return collectionsPage("1", collectionEdge("a"),
+				`{"__typename":"VideoEdge","cursor":"bad","node":{"__typename":"Collection","id":"x"}}`,
+				`{"__typename":"CollectionsItemEdge","cursor":"bad","node":{"__typename":"Video","id":"y"}}`,
+				`{"__typename":"CollectionsItemEdge","cursor":"bad","node":{"__typename":"Collection"}}`,
+				collectionEdge("b"))
+		case "kb":
+			return collectionsPage("1", collectionEdge("c"))
+		}
+		return collectionsPage("1")
+	})
+	cols, err := NewAPI(&testLogger{}).ChannelCollections(context.Background(), "Spamfish", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, c := range cols {
+		ids = append(ids, c.ID+"/"+c.Title)
+	}
+	if strings.Join(ids, ",") != "a/Ta,b/Tb,c/Tc" {
+		t.Errorf("collections %v, want a, b, c with their titles", ids)
+	}
+	if len(sent) != 3 || sent[0]["ownerLogin"] != "spamfish" || sent[0]["limit"] != float64(100) || sent[1]["cursor"] != "kb" {
+		t.Errorf("requests %v, want three pages of 100 for spamfish, the second after cursor kb", sent)
+	}
+
+	stubGQL(t, func(string) string { return `{"data":{"user":{"id":"","collections":{"edges":[]}}}}` })
+	if _, err := NewAPI(&testLogger{}).ChannelCollections(context.Background(), "nobody", 0, ""); !errors.Is(err, ErrChannelNotFound) {
+		t.Errorf("unknown login: err %v, want ErrChannelNotFound", err)
+	}
+}
+
+// TestChannelCollectionVideosQueuesEveryCollection is owner decision FE-27 on
+// the client: every listed collection is read through CollectionSideBar (as
+// yt-dlp hands each entry to TwitchCollectionIE), their videos returned in
+// list order with a VOD two collections hold kept once, a collection that
+// cannot be read left out while the rest stand, and the failure returned only
+// when nothing was read.
+//
+// Mutants: only the first collection read (42 and 43 missing); the dedupe
+// dropped (41 twice); a failed collection failing the whole listing (an
+// error); the all-failed case returning an empty list (nil error).
+func TestChannelCollectionVideosQueuesEveryCollection(t *testing.T) {
+	var read []string
+	stubGQL(t, func(body string) string {
+		op, vars := sentVariables(t, body)
+		switch op {
+		case "ChannelCollectionsContent":
+			if vars["cursor"] != nil {
+				return collectionsPage("1")
+			}
+			return collectionsPage("1", collectionEdge("a"), collectionEdge("gone"), collectionEdge("b"))
+		case "CollectionSideBar":
+			id, _ := vars["collectionID"].(string)
+			read = append(read, id)
+			switch id {
+			case "a":
+				return `{"data":{"collection":{"title":"A","items":{"edges":[{"node":{"id":"41","owner":{"login":"spamfish"}}},{"node":{"id":"42","owner":{"login":"spamfish"}}}]}}}}`
+			case "b":
+				return `{"data":{"collection":{"title":"B","items":{"edges":[{"node":{"id":"41","owner":{"login":"spamfish"}}},{"node":{"id":"43","owner":{"login":"spamfish"}}}]}}}}`
+			}
+			return `{"data":{"collection":null}}`
+		}
+		t.Fatalf("unexpected op %s", op)
+		return ""
+	})
+	vids, err := NewAPI(&testLogger{}).ChannelCollectionVideos(context.Background(), "spamfish", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, v := range vids {
+		ids = append(ids, v.ID)
+	}
+	if strings.Join(ids, ",") != "41,42,43" || strings.Join(read, ",") != "a,gone,b" {
+		t.Errorf("videos %v from collections %v, want 41,42,43 from a, gone and b", ids, read)
+	}
+
+	stubGQL(t, func(body string) string {
+		if op, vars := sentVariables(t, body); op == "ChannelCollectionsContent" {
+			if vars["cursor"] != nil {
+				return collectionsPage("1")
+			}
+			return collectionsPage("1", collectionEdge("gone"))
+		}
+		return `{"data":{"collection":null}}`
+	})
+	// Every listed collection gone is an empty listing, not
+	// ErrCollectionNotFound: the paste named the channel, and the route
+	// would answer "Twitch collection not found" for it.
+	if vids, err := NewAPI(&testLogger{}).ChannelCollectionVideos(context.Background(), "spamfish", 0, ""); err != nil || len(vids) != 0 {
+		t.Errorf("every collection gone = %+v, %v; want no videos and no error", vids, err)
+	}
+
+	// Every listed collection unreadable is the failure.
+	stubGQL(t, func(body string) string {
+		if op, vars := sentVariables(t, body); op == "ChannelCollectionsContent" {
+			if vars["cursor"] != nil {
+				return collectionsPage("1")
+			}
+			return collectionsPage("1", collectionEdge("broken"))
+		}
+		return `{`
+	})
+	if vids, err := NewAPI(&testLogger{}).ChannelCollectionVideos(context.Background(), "spamfish", 0, ""); err == nil || errors.Is(err, ErrCollectionNotFound) {
+		t.Errorf("every collection unreadable = %+v, %v; want the read failure", vids, err)
+	}
+}

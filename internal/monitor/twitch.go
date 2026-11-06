@@ -78,7 +78,7 @@ type TwitchMonitor struct {
 	FetchBatch StreamInfoBatchFunc
 
 	// OnClipFound is called for each new clip of a channel whose
-	// archive_clips is on (owner decision D26 follow-up 2; twitch_clips.go):
+	// twitch_archive_clips is on (owner decision D26 follow-up 2; twitch_clips.go):
 	// the receiver queues it. Called on the clip sweep's goroutine. Nil
 	// sweeps nothing.
 	OnClipFound func(card twitch.TwitchClipCard, channel *config.ChannelConfig)

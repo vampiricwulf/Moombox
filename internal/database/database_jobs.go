@@ -391,7 +391,7 @@ func (db *Database) TwitchEndUnconfirmedJobs() ([]*Job, error) {
 // (un-admitted backlog) jobs. NULL channel_id rows are excluded: manual adds
 // and a Twitch channel's live and VOD rows have no channel affiliation and
 // are never scheduler-paced — the one Twitch row that carries a channel_id
-// is a clip the monitor's archive_clips sweep queued (newTwitchClipJob), the
+// is a clip the monitor's twitch_archive_clips sweep queued (newTwitchClipJob), the
 // channel's login as its ID — and a defensive NULL-channel Queued row must
 // not wedge the admission sweep.
 func (db *Database) QueuedChannels() ([]string, error) {
@@ -456,7 +456,7 @@ type ChannelJob struct {
 // — oldest first. jobs.channel_id is nullable and `channel_id = ?` never
 // matches NULL, so manually added jobs and a Twitch channel's captures and
 // VODs are never listed (those are ListTwitchJobs'); the clips a Twitch
-// channel's archive_clips sweep queued carry its login and are.
+// channel's twitch_archive_clips sweep queued carry its login and are.
 func (db *Database) ListChannelJobs(channelID string) ([]ChannelJob, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -485,7 +485,7 @@ func (db *Database) ListChannelJobs(channelID string) ([]ChannelJob, error) {
 // what a Twitch channel's removal confirmation counts. A Twitch channel's
 // captures and VODs carry no channel_id — neither the Twitch monitor's
 // (newTwitchStreamJob) nor a manual add sets one — so ListChannelJobs never
-// finds them; the clips its archive_clips sweep queued (newTwitchClipJob)
+// finds them; the clips its twitch_archive_clips sweep queued (newTwitchClipJob)
 // carry its login, and ListChannelJobs finds those.
 func (db *Database) ListTwitchJobs() ([]*Job, error) {
 	db.mu.RLock()
@@ -590,7 +590,7 @@ func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error
 // MUST be against jobs.id, never jobs.video_id. The plan text originally
 // wrote the subquery over video_id — equivalent for every job this helper
 // can currently match (channel-affiliated jobs are YouTube's and the
-// Twitch clips an archive_clips sweep queued, "tw_clip_<slug>" as both, so
+// Twitch clips an twitch_archive_clips sweep queued, "tw_clip_<slug>" as both, so
 // ID == VideoID), but jobs.id stays correct even if a channel-affiliated
 // job class whose two differ ever appears.
 //

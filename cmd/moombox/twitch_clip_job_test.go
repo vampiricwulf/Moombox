@@ -19,7 +19,7 @@ import (
 // Mutants: Upcoming instead of Queued (admitted at once, unpaced); the
 // channel_id left nil (the scheduler never admits it); priority 0.
 func TestNewTwitchClipJobIsAPacedBacklogRow(t *testing.T) {
-	ch := &config.ChannelConfig{ID: "vanillatv", Name: "VanillaTV", Platform: "twitch", ArchiveClips: true, QualityPreference: "720p"}
+	ch := &config.ChannelConfig{ID: "vanillatv", Name: "VanillaTV", Platform: "twitch", TwitchArchiveClips: true, QualityPreference: "720p"}
 	card := twitch.TwitchClipCard{Slug: "FaintLightGullWholeWheat", Title: "Big play", CreatedAt: "2026-10-30T10:00:00Z",
 		ThumbnailURL: "https://clips-media-assets2.twitch.tv/x.jpg"}
 	job := newTwitchClipJob(card, ch, "/out", time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC))
@@ -40,14 +40,14 @@ func TestNewTwitchClipJobIsAPacedBacklogRow(t *testing.T) {
 // the live config, so a channel opted out, disabled or removed since the
 // sweep began creates nothing.
 //
-// Mutant: the ArchiveClips term dropped (the opted-out channel creates jobs).
+// Mutant: the TwitchArchiveClips term dropped (the opted-out channel creates jobs).
 func TestChannelArchivesClipsReadsTheLiveConfig(t *testing.T) {
 	off := false
 	cfg := config.Defaults()
 	cfg.Channels = []config.ChannelConfig{
-		{ID: "on", Platform: "twitch", ArchiveClips: true},
+		{ID: "on", Platform: "twitch", TwitchArchiveClips: true},
 		{ID: "optedout", Platform: "twitch"},
-		{ID: "disabled", Platform: "twitch", ArchiveClips: true, Enabled: &off},
+		{ID: "disabled", Platform: "twitch", TwitchArchiveClips: true, Enabled: &off},
 	}
 	store := config.NewStore(cfg, "")
 	for id, want := range map[string]bool{"on": true, "optedout": false, "disabled": false, "gone": false} {

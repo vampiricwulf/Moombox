@@ -1501,7 +1501,7 @@ export class SettingsController {
         ${ch.include_non_live_content ? '<sl-badge variant="neutral">Include VODs</sl-badge>' : ""}
         ${ch.twitch_vod_backlog ? '<sl-badge variant="neutral">Past VODs</sl-badge>' : ""}
         ${ch.twitch_gap_fill_ad_breaks ? '<sl-badge variant="neutral">Fill ad breaks</sl-badge>' : ""}
-        ${ch.archive_clips ? '<sl-badge variant="neutral">Archive clips</sl-badge>' : ""}
+        ${ch.twitch_archive_clips ? '<sl-badge variant="neutral">Archive clips</sl-badge>' : ""}
         ${ch.quality_preference ? `<sl-badge variant="neutral">Quality: ${this.app.escapeHtml(ch.quality_preference)}</sl-badge>` : ""}
         <span class="channel-backfill" data-backfill-for="${this.app.escapeHtml(ch.id)}">${this._backfillBadgeHtml(ch.id)}</span>
       </div>
@@ -1671,8 +1671,8 @@ export class SettingsController {
       channel?.twitch_gap_fill_ad_breaks || false;
     document.getElementById("channel-twitch-vod-backlog").checked =
       channel?.twitch_vod_backlog || false;
-    const archiveClips = document.getElementById("channel-archive-clips");
-    if (archiveClips) archiveClips.checked = channel?.archive_clips || false;
+    const archiveClips = document.getElementById("channel-twitch-archive-clips");
+    if (archiveClips) archiveClips.checked = channel?.twitch_archive_clips || false;
 
     this.app.setInputValue("channel-output-dir-input", channel?.output_directory ?? "");
     this.app.setInputValue("channel-archive-window-input", channel?.archive_window_days ?? "");
@@ -1718,7 +1718,7 @@ export class SettingsController {
     const idInput = document.getElementById("channel-id-input");
     const includeVodsRow = document.getElementById("channel-include-vods-row");
     const twitchRow = document.getElementById("channel-twitch-options-row");
-    const archiveClipsRow = document.getElementById("channel-archive-clips-row");
+    const archiveClipsRow = document.getElementById("channel-twitch-archive-clips-row");
     const qualityRow = document.getElementById("channel-quality-row");
 
     if (idInput) {
@@ -1730,7 +1730,7 @@ export class SettingsController {
     // Toggle YouTube-only fields (quality preference applies to both platforms)
     if (includeVodsRow) includeVodsRow.style.display = isTwitch ? "none" : "";
     if (twitchRow) twitchRow.style.display = isTwitch ? "" : "none";
-    // archive_clips (owner decision D26 follow-up 2) is Twitch's alone.
+    // twitch_archive_clips (owner decision D26 follow-up 2) is Twitch's alone.
     if (archiveClipsRow) archiveClipsRow.style.display = isTwitch ? "" : "none";
     if (qualityRow) qualityRow.style.display = "";
   }
@@ -1755,7 +1755,7 @@ export class SettingsController {
       .getElementById("channel-terms-input")
       .value.trim();
     const includeVods = document.getElementById("channel-include-vods").checked;
-    const archiveClips = document.getElementById("channel-archive-clips")?.checked || false;
+    const archiveClips = document.getElementById("channel-twitch-archive-clips")?.checked || false;
 
     if (!id) {
       this.app.showToast("Channel ID is required", "warning");
@@ -1851,7 +1851,7 @@ export class SettingsController {
         : {}),
       // Unset, not false, when off — as include_non_live_content — and
       // never on a YouTube channel, which the server refuses.
-      archive_clips: (isTwitch && archiveClips) || undefined,
+      twitch_archive_clips: (isTwitch && archiveClips) || undefined,
     };
 
     // Preserve terms structure: an untouched field keeps whatever shape the

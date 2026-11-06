@@ -347,7 +347,7 @@ func TestTwitchChannelFieldsRoundTrip(t *testing.T) {
 	}
 }
 
-// TestChannelArchiveClipsRoundTrip pins the channel editor's archive_clips
+// TestChannelTwitchArchiveClipsRoundTrip pins the channel editor's twitch_archive_clips
 // toggle (owner decision D26 follow-up 2): shown for a Twitch channel only,
 // read from the config and written back as set, and never written onto a
 // YouTube channel whatever the form holds.
@@ -355,33 +355,33 @@ func TestTwitchChannelFieldsRoundTrip(t *testing.T) {
 // Mutants: valuesToChannel not reading the toggle (an enabled channel saves
 // off); the platform gate dropped (a YouTube channel saves it on); the field
 // left unfiltered (shown for YouTube).
-func TestChannelArchiveClipsRoundTrip(t *testing.T) {
-	tw := config.ChannelConfig{ID: "vanillatv", Platform: "twitch", ArchiveClips: true}
+func TestChannelTwitchArchiveClipsRoundTrip(t *testing.T) {
+	tw := config.ChannelConfig{ID: "vanillatv", Platform: "twitch", TwitchArchiveClips: true}
 	vals := channelToValues(tw)
-	if vals["archive_clips"] != "Yes" {
-		t.Errorf("form shows archive_clips %q, want Yes", vals["archive_clips"])
+	if vals["twitch_archive_clips"] != "Yes" {
+		t.Errorf("form shows twitch_archive_clips %q, want Yes", vals["twitch_archive_clips"])
 	}
-	if got := valuesToChannel(vals, &tw); !got.ArchiveClips {
-		t.Error("a Twitch channel's archive_clips was lost on save")
+	if got := valuesToChannel(vals, &tw); !got.TwitchArchiveClips {
+		t.Error("a Twitch channel's twitch_archive_clips was lost on save")
 	}
-	vals["archive_clips"] = "No"
-	if got := valuesToChannel(vals, &tw); got.ArchiveClips {
-		t.Error("turning archive_clips off did not save")
+	vals["twitch_archive_clips"] = "No"
+	if got := valuesToChannel(vals, &tw); got.TwitchArchiveClips {
+		t.Error("turning twitch_archive_clips off did not save")
 	}
 
-	yt := map[string]string{"id": "UCx", "platform": "youtube", "archive_clips": "Yes"}
-	if got := valuesToChannel(yt, nil); got.ArchiveClips {
-		t.Error("a YouTube channel saved archive_clips")
+	yt := map[string]string{"id": "UCx", "platform": "youtube", "twitch_archive_clips": "Yes"}
+	if got := valuesToChannel(yt, nil); got.TwitchArchiveClips {
+		t.Error("a YouTube channel saved twitch_archive_clips")
 	}
 	shown := func(platform string) bool {
 		for _, f := range filterChannelFieldsByPlatform(channelFields, map[string]string{"platform": platform}) {
-			if f.key == "archive_clips" {
+			if f.key == "twitch_archive_clips" {
 				return true
 			}
 		}
 		return false
 	}
 	if !shown("twitch") || shown("youtube") {
-		t.Errorf("archive_clips shown for twitch %v, youtube %v; want Twitch only", shown("twitch"), shown("youtube"))
+		t.Errorf("twitch_archive_clips shown for twitch %v, youtube %v; want Twitch only", shown("twitch"), shown("youtube"))
 	}
 }

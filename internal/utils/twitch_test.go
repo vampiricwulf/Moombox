@@ -281,8 +281,9 @@ func loadTwitchURLTable(t *testing.T) []twitchURLRow {
 // TestExtractTwitchTargetSharedURLTable runs ExtractTwitchTarget over the
 // shared table (G35): yt-dlp's URL forms on www, go and m hosts, /v/ and
 // /video/, schedule?vodID=, player.twitch.tv's video= and channel=, clips
-// with and without a channel, and the listings that must never be taken for a
-// channel (a silent live-wait job instead of the refusal).
+// with and without a channel, the listings that must never be taken for a
+// channel (a silent live-wait job instead of the refusal), and the bare
+// identifiers the dashboard reads the same way since owner decision FE-6.
 //
 // Mutants: dropping the go. host, the /v/ case, the schedule?vodID= case, the
 // channel-less /clip/ case, the last-segment clip slug, or the listing cases

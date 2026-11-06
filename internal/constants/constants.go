@@ -391,6 +391,11 @@ const TwitchGQLClientID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 // collection's videos, /collections/<id>) was added 2026-10-31 from the same
 // table, for the VOD discovery port (owner decision D18).
 //
+// ChannelCollectionsContent (a channel's collections, /<ch>/videos?filter=
+// collections — TwitchVideosCollectionsIE) was added 2026-10-31 from the same
+// table at b77c9304e, so the collection list queues each collection's VODs
+// (owner decision FE-27).
+//
 // ShareClipRenderStatus (one clip: its metadata and signed MP4 renditions)
 // and ClipsCards__User (a channel's clip list) were added 2026-10-31 from the
 // same table at b77c9304e, for clip jobs (owner decision D26). yt-dlp
@@ -406,6 +411,7 @@ var TwitchGQLHashes = struct {
 	VideoPlayerChapterSelectButtonVideo string
 	FilterableVideoTowerVideos          string
 	CollectionSideBar                   string
+	ChannelCollectionsContent           string
 	ShareClipRenderStatus               string
 	ClipsCardsUser                      string
 }{
@@ -416,6 +422,7 @@ var TwitchGQLHashes = struct {
 	VideoPlayerChapterSelectButtonVideo: "71835d5ef425e154bf282453a926d99b328cdc5e32f36d3a209d0f4778b41203",
 	FilterableVideoTowerVideos:          "67004f7881e65c297936f32c75246470629557a393788fb5a69d6d9a25a8fd5f",
 	CollectionSideBar:                   "016e1e4ccee0eb4698eb3bf1a04dc1c077fb746c78c82bac9a8f0289658fbd1a",
+	ChannelCollectionsContent:           "5247910a19b1cd2b760939bf4cba4dcbd3d13bdf8c266decd16956f6ef814077",
 	ShareClipRenderStatus:               "2db6a3b20eabf510bd3cf465ae2408834b59eb6b8af89ca73ab1486cacecfb63",
 	ClipsCardsUser:                      "1cd671bfa12cec480499c087319f26d21925e9695d1f80225aae6a4354f23088",
 }

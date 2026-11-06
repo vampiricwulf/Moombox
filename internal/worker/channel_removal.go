@@ -41,7 +41,7 @@ type ChannelRemoval struct {
 	Total int `json:"total"`
 	// Pending is the rows "delete its pending jobs" deletes: Queued,
 	// Upcoming and COOKIES?, less Footage. For a Twitch channel, only the
-	// clips its archive_clips sweep queued: the delete reaches no other row
+	// clips its twitch_archive_clips sweep queued: the delete reaches no other row
 	// of its.
 	Pending int `json:"pending"`
 	// Footage is the pending-status rows whose staging directory is not
@@ -84,7 +84,7 @@ func SummarizeChannelRemoval(db *database.Database, stagingBase, channelID, plat
 // departure prune used to make, by channel_id, which never reaches them. A
 // parked capture with footage is still named, and a download in progress
 // counted. The one Twitch row that does carry the channel's ID is a clip its
-// archive_clips sweep queued (newTwitchClipJob, the login as channel_id):
+// twitch_archive_clips sweep queued (newTwitchClipJob, the login as channel_id):
 // that backlog is what DeletePendingChannelJobs deletes, so those rows are
 // counted as a YouTube channel's are, pending included — a confirmation
 // that offered nothing to delete over a week's queued clips left them
@@ -144,7 +144,7 @@ func summarizeRemoval(jobs []database.ChannelJob, stagingBase string, deletable 
 // than trusted from the confirmation, and the delete re-applies the status
 // filter, so a row that started downloading in between is left alone. The
 // rows are the ones carrying channelID: of a Twitch channel's, only the
-// clips its archive_clips sweep queued carry it, and its captures and VODs
+// clips its twitch_archive_clips sweep queued carry it, and its captures and VODs
 // are never reached (summarizeTwitchChannelRemoval).
 //
 // The caller removes the channel from the config FIRST: the monitors ask the

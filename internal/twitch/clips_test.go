@@ -77,7 +77,8 @@ func TestGetClipReadsShareClipRenderStatus(t *testing.T) {
 		info.Title != "EA Play 2016 Live from the Novo Theatre" || info.DurationSeconds != 32 ||
 		info.ViewCount != 1234 || info.CreatedAt != "2016-06-12T21:36:33Z" ||
 		info.BroadcasterDisplayName != "EA" || info.BroadcasterLogin != "ea" || info.BroadcasterID != "25163635" ||
-		info.CuratorDisplayName != "stereotype_" || info.GameCategory != "Just Chatting" {
+		info.CuratorDisplayName != "stereotype_" || info.CuratorLogin != "stereotype_" || info.Description != "" ||
+		info.GameCategory != "Just Chatting" {
 		t.Errorf("metadata = %+v", info)
 	}
 	if info.ThumbnailURL != "https://clips-media-assets2.twitch.tv/default-preview.jpg" {
@@ -293,5 +294,65 @@ func TestClipJobIDRoundTrip(t *testing.T) {
 		if _, ok := ClipSlugFromJobID(other); ok {
 			t.Errorf("ClipSlugFromJobID(%q) claims a clip", other)
 		}
+	}
+}
+
+// TestSelectClipQualityFollowsTheVodRule is owner decision FE-29: a clip
+// takes the rendition the VOD selection (SelectBestVariant) takes under the
+// job's quality_preference and max_video_resolution — the tallest at or under
+// the cap, the preference's own size, the next lower size for a size the clip
+// lacks — always from its landscape renditions while it has any, and the
+// best rendition when nothing fits.
+//
+// Mutants: SelectBestVariant skipped (BestClipQuality: 1080 in every row);
+// the cap fallback taking the VOD rule's smallest size above the cap (360 in
+// the cap-below-everything row); portrait renditions kept in the pool beside
+// landscape ones (the 1920 portrait crop for "1920p"); audio_only handed to
+// SelectBestVariant (its last-variant fallback, 360).
+func TestSelectClipQualityFollowsTheVodRule(t *testing.T) {
+	qs := []TwitchClipQuality{
+		{Quality: "1080", Height: 1080, FrameRate: 60},
+		{Quality: "720", Height: 720, FrameRate: 60},
+		{Quality: "480", Height: 480, FrameRate: 30},
+		{Quality: "360", Height: 360, FrameRate: 30},
+		{Quality: "1920", Height: 1920, FrameRate: 60, Portrait: true},
+	}
+	label := func(q *TwitchClipQuality) string {
+		if q == nil {
+			return "nil"
+		}
+		if q.Portrait {
+			return "portrait " + q.Quality
+		}
+		return q.Quality
+	}
+	for _, c := range []struct {
+		pref string
+		cap  int
+		want string
+	}{
+		{"best", 0, "1080"},
+		{"", 0, "1080"},
+		{"best", 720, "720"},
+		{"480p", 1080, "480"},
+		{"900p", 0, "720"},           // no 900: the next lower size
+		{"1080p60", 720, "720"},      // the cap bounds the preference
+		{"1920p", 0, "1080"},         // landscape ranks above portrait
+		{"best", 240, "1080"},        // nothing fits: the best rendition
+		{"audio_only", 1080, "1080"}, // no audio-only rendition: the best
+	} {
+		if got := label(SelectClipQuality(qs, c.pref, c.cap, false)); got != c.want {
+			t.Errorf("SelectClipQuality(%q, cap %d) = %s, want %s", c.pref, c.cap, got, c.want)
+		}
+	}
+	portrait := []TwitchClipQuality{
+		{Quality: "1920", Height: 1920, Portrait: true},
+		{Quality: "1280", Height: 1280, Portrait: true},
+	}
+	if got := label(SelectClipQuality(portrait, "best", 1280, false)); got != "portrait 1280" {
+		t.Errorf("portrait-only clip under a 1280 cap = %s, want portrait 1280", got)
+	}
+	if SelectClipQuality(nil, "best", 0, false) != nil {
+		t.Error("no renditions must select nothing")
 	}
 }

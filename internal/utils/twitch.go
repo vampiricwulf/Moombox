@@ -43,15 +43,13 @@ func (t *TwitchTarget) Unsupported() string {
 	return ""
 }
 
-// TwitchCollectionsListingRefusal is the refusal for /<ch>/videos?filter=
-// collections — yt-dlp's TwitchVideosCollectionsIE, a list of the channel's
-// collections rather than of its videos — which parses as the channel's video
-// list (TwitchVideosListing) and must not be queued as one.
-const TwitchCollectionsListingRefusal = "Twitch collection lists are not supported yet. Paste a /collections/<id> URL."
-
 // TwitchVideosQuery reads a /<ch>/videos URL's ?filter= and ?sort= (yt-dlp's
 // TwitchVideosIE, twitch.py b77c9304e: filter defaults to "all", sort to
 // "time"). Both are "" for input that is not a URL, or names neither.
+// ?filter=collections makes the video list the channel's collection list
+// (TwitchVideosCollectionsIE), which still parses as TwitchVideosListing: the
+// add paths read the filter and queue every collection's VODs (owner decision
+// FE-27).
 func TwitchVideosQuery(input string) (filter, sort string) {
 	// A scheme-less paste ("twitch.tv/<ch>/videos?filter=…") parses too:
 	// the query is the query whatever the rest reads as.

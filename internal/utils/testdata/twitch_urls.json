@@ -1,5 +1,5 @@
 {
-  "_comment": "The one Twitch URL table. internal/utils (ExtractTwitchTarget), the TUI (internal/tui extractTwitchTarget) and the dashboard (web/public/app.js extractTwitchTarget, web/tests/twitch-urls.test.mjs) are all tested against these rows. type is a utils.TwitchTargetType (channel, vod, clip, videos, clips, collection) or empty for an input that names no target. Forms are yt-dlp's Twitch extractors' (yt_dlp/extractor/twitch.py b77c9304e).",
+  "_comment": "The one Twitch URL table. internal/utils (ExtractTwitchTarget), the TUI (internal/tui extractTwitchTarget) and the dashboard (web/public/app.js extractTwitchTarget, web/tests/twitch-urls.test.mjs) are all tested against these rows. type is a utils.TwitchTargetType (channel, vod, clip, videos, clips, collection) or empty for an input that names no target. The bare identifiers (owner decision FE-6) are read alike by all three: v and 1-12 digits, or 7-12 bare digits, is a VOD; any other valid login, a reserved path word included, is a channel. URL forms are yt-dlp's Twitch extractors' (yt_dlp/extractor/twitch.py b77c9304e).",
   "rows": [
     {"input": "https://www.twitch.tv/shroud", "type": "channel", "value": "shroud"},
     {"input": "https://twitch.tv/Shroud", "type": "channel", "value": "shroud"},
@@ -50,6 +50,19 @@
     {"input": "https://www.twitch.tv/videos", "type": "", "value": ""},
     {"input": "https://twitch.tv/", "type": "", "value": ""},
     {"input": "https://www.twitch.tv/shroud/v/notanumber", "type": "", "value": ""},
-    {"input": "https://player.twitch.tv/?parent=example.com", "type": "", "value": ""}
+    {"input": "https://player.twitch.tv/?parent=example.com", "type": "", "value": ""},
+
+    {"input": "shroud", "type": "channel", "value": "shroud"},
+    {"input": "Shroud", "type": "channel", "value": "shroud"},
+    {"input": "videos", "type": "channel", "value": "videos"},
+    {"input": "clip", "type": "channel", "value": "clip"},
+    {"input": "collections", "type": "channel", "value": "collections"},
+    {"input": "v1234567890", "type": "vod", "value": "1234567890"},
+    {"input": "v6528877", "type": "vod", "value": "6528877"},
+    {"input": "v12345", "type": "vod", "value": "12345"},
+    {"input": "1234567890", "type": "vod", "value": "1234567890"},
+    {"input": "123456", "type": "", "value": ""},
+    {"input": "1shroud", "type": "", "value": ""},
+    {"input": "V1234567890123", "type": "channel", "value": "v1234567890123"}
   ]
 }

@@ -293,23 +293,40 @@ func TestGapSpansForAPartItCannotPlace(t *testing.T) {
 // finalize itself — its broadcast's end unconfirmed, muxed automatically once
 // the end is confirmed (D-T4), or its broadcast over while Moombox was down,
 // muxed by the operator — keeps a gap-fill plan from the coverage its
-// staging still holds, its tail open (owner decision D17). A Mux of an Error
-// row for any other reason keeps none.
+// staging still holds, its tail open (owner decision D17). So does any other
+// Mux of a live capture's staging (owner decision FE-25): an Error row for
+// any other reason, and a Cancelled row — the operator's Mux of either. A
+// clip (a VOD-style row) keeps none.
 //
-// Mutants: muxJob not calling twitchMuxGapFillPlan (no plan on either path);
-// the prior-row gate removed (the plain Error row gets a plan); the tail not
-// left open.
+// Mutants: muxJob not calling twitchMuxGapFillPlan (no plan on any path); the
+// old error/marker gate restored (the plain Error and the Cancelled rows get
+// no plan); the status gate dropping Cancelled (the Cancelled row gets none);
+// the IsVod guard removed (the clip row gets a plan); the tail not left open.
 func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 	cases := []struct {
-		name     string
-		marked   bool
-		errMsg   string
-		auto     bool
-		wantPlan bool
+		name      string
+		marked    bool
+		errMsg    string
+		auto      bool
+		cancelled bool
+		vod       bool
+		ended     bool // stream_end_time set: the capture reached its finalize
+		wantKinds string
 	}{
-		{"end unconfirmed, auto-muxed", true, "", true, true},
-		{"ended while offline, Mux action", false, twitchEndedOfflineErrMsg, false, true},
-		{"another error, Mux action", false, "", false, false},
+		{"end unconfirmed, auto-muxed", true, "", true, false, false, false, "late_start,tail"},
+		{"ended while offline, Mux action", false, twitchEndedOfflineErrMsg, false, false, false, false, "late_start,tail"},
+		{"another error, Mux action", false, "", false, false, false, false, "late_start,tail"},
+		{"cancelled, Mux action", false, "", false, true, false, false, "late_start,tail"},
+		{"a VOD-style row, Mux action", false, "", false, false, true, false, ""},
+		// The capture reached its finalize after a normal end and only its
+		// mux failed, or the operator cancelled it while Muxing: it holds
+		// the broadcast to its end, so the Mux fills the late start alone —
+		// an open tail would cut the VOD's last segments again as a
+		// duplicate "recovered" part.
+		{"mux failed after a normal end, Mux action", false, "ffmpeg mux failed", false, false, false, true, "late_start"},
+		{"cancelled while muxing after a normal end, Mux action", false, "", false, true, false, true, "late_start"},
+		// The markers keep the tail open whatever else the row carries.
+		{"ended while offline with an end time, Mux action", false, twitchEndedOfflineErrMsg, false, false, false, true, "late_start,tail"},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -319,6 +336,15 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 			fields := map[string]any{"stream_start_time": gapStart.Format(time.RFC3339), "twitch_quality": "chunked"}
 			if tc.errMsg != "" {
 				fields["error"] = tc.errMsg
+			}
+			if tc.cancelled {
+				fields["status"] = database.StatusCancelled
+			}
+			if tc.vod {
+				fields["is_vod"] = true
+			}
+			if tc.ended {
+				fields["stream_end_time"] = gapStart.Add(6 * time.Minute).Format(time.RFC3339)
 			}
 			db.UpdateJobFields(id, fields)
 			var stagingBase string
@@ -340,7 +366,7 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 				t.Fatalf("muxed row = %v (error %q), want Finished", statusOf(j), errorOf(j))
 			}
 			g, _ := db.GetGapFill(id)
-			if !tc.wantPlan {
+			if tc.wantKinds == "" {
 				if g != nil {
 					t.Errorf("a plan was kept: %s", g.Plan)
 				}
@@ -357,8 +383,8 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 			for _, sp := range p.Spans {
 				kinds = append(kinds, sp.Kind)
 			}
-			if strings.Join(kinds, ",") != "late_start,tail" || p.Login != "streamer" || p.VariantName != "chunked" {
-				t.Errorf("plan %+v, want the late start and the tail of streamer's chunked capture", p)
+			if strings.Join(kinds, ",") != tc.wantKinds || p.Login != "streamer" || p.VariantName != "chunked" {
+				t.Errorf("plan %+v, want spans %s of streamer's chunked capture", p, tc.wantKinds)
 			}
 		})
 	}

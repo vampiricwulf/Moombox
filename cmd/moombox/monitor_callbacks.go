@@ -1324,7 +1324,7 @@ func newTwitchStreamJob(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig,
 }
 
 // newTwitchClipJob is the row the Twitch monitor's clip sweep creates for a
-// new clip of a channel whose archive_clips is on (owner decision D26
+// new clip of a channel whose twitch_archive_clips is on (owner decision D26
 // follow-up 2): the clip kind's VOD-style row ("tw_clip_<slug>"), Queued at
 // queue_priority 1 with the channel's ID — the backlog VOD's shape, so the
 // archive-slots scheduler admits it M at a time per channel, and a COOKIES?
@@ -1853,7 +1853,7 @@ func (s *runState) wireMonitorCallbacks() {
 		// needed. DECISIONS #21 consumer migration.
 	}
 
-	// Twitch monitor -> Worker: a new clip of a channel whose archive_clips
+	// Twitch monitor -> Worker: a new clip of a channel whose twitch_archive_clips
 	// is on (owner decision D26 follow-up 2) rests in Queued until the
 	// archive-slots scheduler admits it, like a backlog VOD. The live config
 	// decides, as for a YouTube find: a sweep that began before the channel

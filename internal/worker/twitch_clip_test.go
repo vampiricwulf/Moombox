@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
@@ -29,6 +30,7 @@ func testClip(base string) *twitch.TwitchClipInfo {
 		ID: "396245304", Slug: "FaintLightGullWholeWheat",
 		Title:            "EA Play 2016 Live from the Novo Theatre",
 		BroadcasterLogin: "ea", BroadcasterDisplayName: "EA",
+		CuratorDisplayName: "stereotype_", CuratorLogin: "stereotype_",
 		GameCategory: "Just Chatting", CreatedAt: "2016-06-12T21:36:33Z",
 		DurationSeconds: 32, ThumbnailURL: base + "/preview.jpg",
 		Qualities: []twitch.TwitchClipQuality{
@@ -65,7 +67,7 @@ func addClipJob(t *testing.T, db *database.Database, outDir string) *database.Jo
 // Mutants: the clip routing in processTwitch removed (the row is taken for a
 // live channel "faintlightgullwholewheat" and never reaches the server); the
 // worker's TwitchClip arm removed (no download: "stream processing" result
-// with no variant goes to the YouTube path and fails); BestClipQuality
+// with no variant goes to the YouTube path and fails); SelectClipQuality
 // replaced by Qualities[0] (720 fetched); the metadata write dropped (the
 // title stays "Manual Add").
 func TestTwitchClipJobDownloadsTheBestRenditionAndFinalizes(t *testing.T) {
@@ -131,6 +133,14 @@ func TestTwitchClipJobDownloadsTheBestRenditionAndFinalizes(t *testing.T) {
 	}
 	if _, err := os.Stat(got.OutputFile); err != nil {
 		t.Errorf("archive: %v", err)
+	}
+	// The curator line is the row's description (owner decision FE-32), and
+	// the finalize writes it beside the archive as a VOD's is.
+	if got.Description != "Clipped by stereotype_" {
+		t.Errorf("description = %q, want the curator line", got.Description)
+	}
+	if b, err := os.ReadFile(got.DescriptionFile); err != nil || string(b) != "Clipped by stereotype_" {
+		t.Errorf(".description %q = %q, %v; want the curator line", got.DescriptionFile, b, err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -372,7 +382,7 @@ func TestTwitchClipKeepsAnOutcomeThatLandedFirst(t *testing.T) {
 }
 
 // TestRecordPastedClipEntersOnlyClips: a pasted clip is entered in the
-// processing history (the archive_clips sweep's dedupe), and every other
+// processing history (the twitch_archive_clips sweep's dedupe), and every other
 // manual add is left out of it, as it always was.
 //
 // Mutants: the IsTwitchClipJob check dropped (the live channel's row is
@@ -391,5 +401,70 @@ func TestRecordPastedClipEntersOnlyClips(t *testing.T) {
 	}
 	if seen, _ := db.HasProcessed(live.ID); seen {
 		t.Error("a live channel's manual add was entered in the processing history")
+	}
+}
+
+// TestTwitchClipHonoursQualityPreferenceAndCap is owner decision FE-29 on the
+// worker: processTwitchClip selects through twitch.SelectClipQuality with the
+// row's quality_preference and the downloader's max_video_resolution read
+// from the config, and records the pick as twitch_quality.
+//
+// Mutant: processTwitchClip back on BestClipQuality (the 1080p30 rendition in
+// both rows); the cap not read from the config (the 1080p30 rendition under
+// the 720 cap).
+func TestTwitchClipHonoursQualityPreferenceAndCap(t *testing.T) {
+	for _, c := range []struct {
+		pref, want string
+		cap        int
+	}{
+		{"720p60", "720p60", 0},
+		{"best", "720p60", 720},
+	} {
+		w, db := testWorkerSetup(t)
+		cfg := config.Defaults()
+		cfg.Paths.StagingDirectory = t.TempDir()
+		cfg.Downloader.MaxVideoResolution = c.cap
+		w.SetConfigStore(config.NewStore(cfg, ""))
+		job := addClipJob(t, db, t.TempDir())
+		db.UpdateJobFields(job.ID, map[string]any{"quality_preference": c.pref})
+		job.QualityPreference = c.pref
+		w.streamProc.clipFn = func(context.Context, string) (*twitch.TwitchClipInfo, error) {
+			return testClip("https://clips.example"), nil
+		}
+		res, err := w.streamProc.processTwitchClip(context.Background(), job, "FaintLightGullWholeWheat")
+		if err != nil || res.TwitchClip == nil {
+			t.Fatalf("pref %q cap %d: %+v, %v", c.pref, c.cap, res, err)
+		}
+		if got := twitchClipQualityLabel(&res.TwitchClip.Quality); got != c.want {
+			t.Errorf("pref %q cap %d took %s, want %s", c.pref, c.cap, got, c.want)
+		}
+		if row, _ := db.GetJob(job.ID); row.TwitchQuality != c.want {
+			t.Errorf("pref %q cap %d recorded twitch_quality %q, want %s", c.pref, c.cap, row.TwitchQuality, c.want)
+		}
+	}
+}
+
+// TestTwitchClipDescriptionNamesTheCurator is owner decision FE-32: a clip
+// job's description reads "Clipped by <curator>" — the display name, else the
+// login — followed by the clip's own description when there is one; a clip
+// that names no curator has its own description only, or none.
+//
+// Mutants: the login fallback dropped (the login-only row is empty); the
+// clip's description dropped (the third row lacks it); the curator line
+// dropped (every row but the description-only one fails).
+func TestTwitchClipDescriptionNamesTheCurator(t *testing.T) {
+	for _, c := range []struct {
+		clip twitch.TwitchClipInfo
+		want string
+	}{
+		{twitch.TwitchClipInfo{CuratorDisplayName: "Stereotype_", CuratorLogin: "stereotype_"}, "Clipped by Stereotype_"},
+		{twitch.TwitchClipInfo{CuratorLogin: "stereotype_"}, "Clipped by stereotype_"},
+		{twitch.TwitchClipInfo{CuratorDisplayName: "Stereotype_", Description: "The play of the year."}, "Clipped by Stereotype_\n\nThe play of the year."},
+		{twitch.TwitchClipInfo{Description: "  Only this.  "}, "Only this."},
+		{twitch.TwitchClipInfo{}, ""},
+	} {
+		if got := twitchClipDescription(&c.clip); got != c.want {
+			t.Errorf("twitchClipDescription(%+v) = %q, want %q", c.clip, got, c.want)
+		}
 	}
 }

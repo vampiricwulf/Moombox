@@ -13,9 +13,10 @@ import (
 )
 
 type stubCLILister struct {
-	videos  []twitch.TwitchVideo
-	gotType string
-	gotColl string
+	videos   []twitch.TwitchVideo
+	gotType  string
+	gotColl  string
+	gotOwner string
 }
 
 func (s *stubCLILister) ListChannelVideos(_ context.Context, _, broadcastType, _ string) ([]twitch.TwitchVideo, error) {
@@ -28,14 +29,21 @@ func (s *stubCLILister) CollectionVideos(_ context.Context, id string) (string, 
 	return "", s.videos, nil
 }
 
+func (s *stubCLILister) ChannelCollectionVideos(_ context.Context, login string) ([]twitch.TwitchVideo, error) {
+	s.gotOwner = login
+	return s.videos, nil
+}
+
 // TestQueueCLITwitchListing is owner decision D18 on `moombox add`: a pasted
 // video list is read with its ?filter= type and each VOD queued Queued, a
-// collection is read as the collection, and a channel's collection list is
-// refused as on every add path.
+// collection is read as the collection, and a channel's collection list
+// queues the VODs of every collection it lists (owner decision FE-27), paced
+// under the channel.
 //
 // Mutants: the filter not read from the input (gotType ""); the
-// ?filter=collections refusal removed (rows created); a collection read as
-// a channel list (gotColl "").
+// ?filter=collections case removed (read as the channel's video list:
+// gotOwner "", no tw_v21) or the old refusal restored (an error); a
+// collection read as a channel list (gotColl "").
 func TestQueueCLITwitchListing(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
@@ -57,11 +65,13 @@ func TestQueueCLITwitchListing(t *testing.T) {
 
 	in = "https://www.twitch.tv/spamfish/videos?filter=collections"
 	lister.videos = []twitch.TwitchVideo{{ID: "21"}}
-	if _, err := queueCLITwitchListing(ctx, lister, db, nil, in, utils.ExtractTwitchTarget(in), now); err == nil || err.Error() != utils.TwitchCollectionsListingRefusal {
-		t.Errorf("collection list: err %v, want the refusal", err)
+	lister.gotType = "unread"
+	if res, err := queueCLITwitchListing(ctx, lister, db, nil, in, utils.ExtractTwitchTarget(in), now); err != nil || len(res.Added) != 1 ||
+		lister.gotOwner != "spamfish" || lister.gotType != "unread" {
+		t.Errorf("collection list: %+v, %v, read the collections of %q (video list type %q)", res, err, lister.gotOwner, lister.gotType)
 	}
-	if db.JobExists("tw_v21") {
-		t.Error("a refused collection list queued a VOD")
+	if j, _ := db.GetJob("tw_v21"); j == nil || j.Status != database.StatusQueued || j.ChannelID == nil || *j.ChannelID != "spamfish" {
+		t.Errorf("tw_v21 = %+v, want a Queued row of spamfish", j)
 	}
 
 	in = "https://www.twitch.tv/collections/abc"
