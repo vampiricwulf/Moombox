@@ -93,6 +93,36 @@ export function isDimTwitchNotice(msg) {
   return msg.messageType === "system" && !!msg.systemMsg;
 }
 
+/**
+ * Whether a chat.json message carries W22's replacement marker with new
+ * parts to show (internal/chat: Replaced, Replacement). A marker with no
+ * parts is drawn as sent: there is nothing to put in the original's place.
+ * @param {object} msg
+ * @returns {boolean}
+ */
+export function isReplacedMessage(msg) {
+  return msg.replaced === true && Array.isArray(msg.replacement) && msg.replacement.length > 0;
+}
+
+/**
+ * A message's parts as plain text, an emoji as its own text (its shortcut or
+ * the character): the original a replaced message's "edited" tooltip shows.
+ * @param {Array<{text?: string}>|string} parts
+ * @returns {string}
+ */
+export function chatPartsText(parts) {
+  if (typeof parts === "string") return parts;
+  return (Array.isArray(parts) ? parts : []).map((p) => p?.text || "").join("");
+}
+
+/** The small "deleted" / "edited" tag a marked chat message carries. */
+function chatChangeTag(label) {
+  const tag = document.createElement("span");
+  tag.className = `chat-msg-tag chat-msg-tag-${label}`;
+  tag.textContent = label;
+  return tag;
+}
+
 /** msg-param-sub-plan (internal/twitch: SubPlan) → the name Twitch shows. */
 const TWITCH_PLAN_NAMES = { 1000: "Tier 1", 2000: "Tier 2", 3000: "Tier 3", Prime: "Prime" };
 
@@ -1631,20 +1661,66 @@ export class PlayerController {
     // search filter and scroll maths all address rows by container.children[i]
     // and would not notice the class going — but every `.chat-msg.<state>`
     // rule in moombox.css would, and so would the jsdom harness's measured box.
+    //
+    // A replaced message (W22's marker) is drawn with its new text: each
+    // shape is handed a view whose `message` is the replacement, and the
+    // original goes in the "edited" tag's tooltip (_markChatChange). The
+    // archived message itself is never touched.
+    const view = isReplacedMessage(msg) ? { ...msg, message: msg.replacement } : msg;
     if (msg.superchat) {
-      this._fillSuperchatCard(div, msg);
-      return div;
+      this._fillSuperchatCard(div, view);
+    } else if (msg.isMembership) {
+      this._fillMemberCard(div, view);
+    } else if (TWITCH_NOTICE_TYPES.has(msg.messageType) || isDimTwitchNotice(msg)) {
+      this._fillTwitchNotice(div, view);
+    } else {
+      this._fillPlainRow(div, view);
     }
-    if (msg.isMembership) {
-      this._fillMemberCard(div, msg);
-      return div;
-    }
-    if (TWITCH_NOTICE_TYPES.has(msg.messageType) || isDimTwitchNotice(msg)) {
-      this._fillTwitchNotice(div, msg);
-      return div;
-    }
-    this._fillPlainRow(div, msg);
+    this._markChatChange(div, msg);
     return div;
+  }
+
+  /**
+   * W22's chat markers, shown (owner decision FE-13). internal/chat keeps a
+   * message YouTube took back or replaced exactly as it was sent and flags it
+   * in chat.json — `deleted` (and `deletedState`, the line YouTube shows in
+   * its place) for a moderator's deletion, an author's retraction or a ban's
+   * sweep; `replaced` with the new parts in `replacement` — and the viewer
+   * drew every one as an ordinary message, so a retracted message read as if
+   * it still stood.
+   *
+   * A deleted message is dimmed and struck through (.chat-msg-struck on a
+   * flat row's content, the body of a card), with a small "deleted" tag. A replaced one shows its new text (the view _buildChatMessageEl
+   * fills the row from) with an "edited" tag whose sl-tooltip holds the
+   * original text, on hover and on keyboard focus — the tag is focusable for
+   * that. The tag sits after the message: in a card's body (or its header,
+   * when the card has no body), else at the end of the row. A message can be
+   * both, replaced and later deleted: it gets both tags.
+   */
+  _markChatChange(div, msg) {
+    const deleted = msg.deleted === true;
+    const replaced = isReplacedMessage(msg);
+    if (!deleted && !replaced) return;
+    const host = div.querySelector(".chat-card-body") || div.querySelector(".chat-card-header") || div;
+    if (deleted) {
+      div.classList.add("chat-msg-deleted");
+      // The struck text: a card's body (by the stylesheet's own rule), or a
+      // flat row's content span, its last child — the time, the author and a
+      // cheer chip are never struck.
+      const content = host === div ? div.lastElementChild : null;
+      if (content && !content.matches(".chat-msg-time, .chat-msg-author, .cheer-chip")) content.classList.add("chat-msg-struck");
+      host.appendChild(chatChangeTag("deleted"));
+    }
+    if (replaced) {
+      div.classList.add("chat-msg-edited");
+      const tooltip = document.createElement("sl-tooltip");
+      tooltip.content = `Original: ${chatPartsText(msg.message)}`;
+      tooltip.setAttribute("content", tooltip.content);
+      const tag = chatChangeTag("edited");
+      tag.tabIndex = 0;
+      tooltip.appendChild(tag);
+      host.appendChild(tooltip);
+    }
   }
 
   /**
