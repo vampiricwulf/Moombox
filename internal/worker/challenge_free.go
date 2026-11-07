@@ -501,16 +501,20 @@ var errNoLivePathLeft = errors.New("no live path is left to switch to this run")
 // a run (runRecord.first): a capture already on the no-JS path goes to HLS,
 // and one that has switched to both has nowhere left (errNoLivePathLeft,
 // cause wrapped) — the loop then handles the failure as it always has. Never
-// a loop: a spent switch is not given back. The way back is the live loop's
-// own, once a run (switchBack, owner decision PR-R3): a capture on either
+// a loop: a spent switch is given back only by the live loop's one switch
+// back a run (switchBack, owner decision PR-R3), when a capture on either
 // fallback returns to the from-start path that needs the JS, in a new part,
-// once that path can be set up again — and a later run (a restart, a Resume)
-// starts on the path its setup chooses, the JS path once solving works.
-// path names the one switched to, for the caller's log.
+// once that path can be set up again; that re-arms the switch that put it
+// on the fallback it leaves (runRecord.markSwitchedBack, owner decision
+// PE-3), and the switch made here is recorded for it (markSwitchedTo). A
+// later run (a restart, a Resume) starts on the path its setup chooses, the
+// JS path once solving works. path names the one switched to, for the
+// caller's log.
 func switchLivePath(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps, cause error) (result *DownloadResult, path string, err error) {
-	if !job.Run.noJS() && job.Run.first("live-switch:nojs") {
+	if !job.Run.noJS() && job.Run.first(noJSSwitchKey) {
 		result, err := noJSFromStart(ctx, job, info, deps, &cookielessReExtract{}, cause)
 		if err == nil {
+			job.Run.markSwitchedTo(noJSSwitchKey)
 			job.Logger.Warn("[Cipher] live: a refresh failed on the player's JS challenges — switching, in a new part, to recording on the split live formats that need no player JS (manifest-free DASH); the part so far is kept as its own file",
 				"jobID", job.Job.ID, "videoItag", result.VideoItag, "audioItag", result.AudioItag, "err", cause)
 			return result, "no-JS DASH", nil
@@ -520,13 +524,14 @@ func switchLivePath(ctx context.Context, job *JobContext, info *youtube.VideoInf
 		}
 		cause = fmt.Errorf("%w; %w", cause, err)
 	}
-	if job.Run.first("live-switch:hls") {
+	if job.Run.first(hlsSwitchKey) {
 		job.Logger.Warn("[Cipher] live: a refresh failed on the player's JS challenges and no split pair that needs no player JS is left — switching, in a new part, to the live HLS playlist; the part so far is kept as its own file",
 			"jobID", job.Job.ID, "err", cause)
 		result, err := liveHlsInstead(ctx, job, HlsStrategy, info, deps, cause)
 		if err != nil {
 			return nil, "", err
 		}
+		job.Run.markSwitchedTo(hlsSwitchKey)
 		return result, "HLS", nil
 	}
 	return nil, "", fmt.Errorf("%w: %w", errNoLivePathLeft, cause)
