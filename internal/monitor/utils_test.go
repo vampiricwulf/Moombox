@@ -385,7 +385,7 @@ func TestProcessYouTubeVideo_UnknownTitleNotOverwrite(t *testing.T) {
 }
 
 func TestIsDenied_CanonicalTable(t *testing.T) {
-	// Spec §9 table — all seven rows (plus one extra not_a_stream row). Both
+	// Spec §9 table — all seven rows (plus the private rows and one extra not_a_stream row). Both
 	// conjuncts load-bearing.
 	cases := []struct {
 		status, playability string
@@ -393,6 +393,8 @@ func TestIsDenied_CanonicalTable(t *testing.T) {
 	}{
 		{"upcoming", "members_only", true},
 		{"upcoming", "login_required", true},
+		{"upcoming", "private", true},         // once login_required, on the same refusal
+		{"not_a_stream", "private", false},    // states no broadcast: the status conjunct
 		{"upcoming", "ok", false},             // genuine upcoming — goal 3
 		{"upcoming", "age_restricted", false}, // premieres reach upcoming with non-ok playability
 		{"upcoming", "unknown", false},        // unknown is not a refusal
