@@ -18,6 +18,16 @@ import { formatTimestamp, serverErrorMessage } from "./utils.js";
  */
 export const CHAPTER_PREVIEW_DEBOUNCE_MS = 300;
 
+/**
+ * Whether a job may have chapters imported (the server's importableJob): a
+ * complete Finished job only. An Error, Cancelled or incomplete-tail job can
+ * still be resumed, and a resumed run rewrites the archive an import would be
+ * rewriting.
+ */
+export function chapterImportAllowed(job) {
+  return !!job && job.status === "Finished" && !job.incompleteTail;
+}
+
 export class ChapterImportDialog {
   /**
    * @param {object} player the PlayerController: its open job, its toast

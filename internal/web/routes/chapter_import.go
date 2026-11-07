@@ -116,16 +116,15 @@ type chapterTarget struct {
 	split      bool
 }
 
-// importableStatus is the rows an import may rewrite (owner decision CI-1): a
-// job that is not active and has an archive — Finished, or an Error or
-// Cancelled row whose archive file exists (chapterTargetFor refuses one
-// without).
-func importableStatus(s database.JobStatus) bool {
-	switch s {
-	case database.StatusFinished, database.StatusError, database.StatusCancelled:
-		return true
-	}
-	return false
+// importableJob is the rows an import may rewrite: a complete Finished job
+// (owner decision, 2026-11-07, narrowing CI-1). An Error or Cancelled row,
+// and a Finished one flagged incomplete_tail, can still be resumed — by the
+// operator or the monitors' auto-resume — and a resumed run rewrites the
+// archive the import would be rewriting; offering import only where nothing
+// can resume the job removes that overlap. (The chapter-import claim still
+// fences the two as a safety net, PR-M5.)
+func importableJob(job *database.Job) bool {
+	return job.Status == database.StatusFinished && !job.IncompleteTail
 }
 
 // chapterTargetFor resolves job's archive and sidecar under the containment
@@ -137,8 +136,8 @@ func (s *ChapterService) chapterTargetFor(ctx context.Context, job *database.Job
 	if worker.IsActiveJobStatus(job.Status) {
 		return nil, refuseChapters(http.StatusConflict, "The job is %s; chapters can be imported once it has finished", job.Status)
 	}
-	if !importableStatus(job.Status) {
-		return nil, refuseChapters(http.StatusConflict, "The job has no finished archive to import chapters into")
+	if !importableJob(job) {
+		return nil, refuseChapters(http.StatusConflict, "Chapters can be imported only into a finished, complete archive")
 	}
 	segments, err := s.deps.DB.GetSegments(job.ID)
 	if err != nil {
@@ -178,7 +177,7 @@ func (s *ChapterService) ffprobePath() string {
 // while it builds a chord's job list.
 func (s *ChapterService) HasOriginal(jobID string) bool {
 	job, err := s.load(jobID)
-	if err != nil || !importableStatus(job.Status) {
+	if err != nil || !importableJob(job) {
 		return false
 	}
 	var sidecar string

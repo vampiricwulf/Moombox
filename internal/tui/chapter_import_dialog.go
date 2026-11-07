@@ -417,16 +417,18 @@ func (m *ChapterImportDialogModel) renderRows(rows []ChapterImportRow, limit, wi
 	return b.String()
 }
 
-// chapterImportable is A C's and A U's job rule: a job that is not active and
-// has an archive (owner decision CI-1) — Finished, or an Error or Cancelled
-// row that names a file or has parts. routes.ChapterService re-checks it, and
-// that the file is there, before it writes anything.
+// chapterImportable is A C's and A U's job rule: a complete Finished job
+// (not flagged incomplete_tail) that names a file or has parts.
+// routes.ChapterService re-checks it, and that the file is there, before it
+// writes anything.
 func chapterImportable(j *database.Job) bool {
-	switch j.Status {
-	case database.StatusFinished, database.StatusError, database.StatusCancelled:
-		return j.OutputFile != "" || j.Filename != "" || len(j.Segments) > 0
+	// A complete Finished job only (the route's importableJob): an Error,
+	// Cancelled or incomplete-tail row can be resumed, and a resumed run
+	// rewrites the archive an import would be rewriting.
+	if j.Status != database.StatusFinished || j.IncompleteTail {
+		return false
 	}
-	return false
+	return j.OutputFile != "" || j.Filename != "" || len(j.Segments) > 0
 }
 
 // previewChaptersCmd asks OnPreviewChapters for the paste as it stands, for

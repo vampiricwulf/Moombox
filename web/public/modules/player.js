@@ -17,7 +17,7 @@ import {
 import { LaneAllocator, seedCursorIndex } from "./nico-lanes.js";
 import { letterboxStage, rowsFor, sameStage, nextGeometry, NICO_GEO_SETTLE_MS } from "./nico-geometry.js";
 import { NicoScheduler, NICO_DURATION_MS, NICO_LEAD_MS, NICO_LANE_GAP_MS } from "./nico-scheduler.js";
-import { ChapterImportDialog } from "./chapter-import.js";
+import { ChapterImportDialog, chapterImportAllowed } from "./chapter-import.js";
 
 const ANNOUNCEMENT_COLORS = new Set(["primary", "blue", "green", "orange", "purple"]);
 
@@ -1430,6 +1430,11 @@ export class PlayerController {
       // re-check before anything observable (playerJob, video.src) is touched.
       if (this._selectionSeq !== selectionId) return;
       this.playerJob = job;
+      // Chapter import is offered only for a complete Finished job (the
+      // server's importableJob): an Error, Cancelled or incomplete-tail job
+      // can still be resumed, and a resumed run rewrites the archive.
+      const importBtn = document.getElementById("player-chapters-import");
+      if (importBtn) importBtn.hidden = !chapterImportAllowed(job);
     } catch (e) {
       console.error("Failed to fetch job:", e);
       refuse(e.message);
