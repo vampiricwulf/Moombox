@@ -145,3 +145,56 @@ func TestPlayabilityMatchKeepsTheTextTheRendererDisplaced(t *testing.T) {
 		t.Errorf("classifyStream = %q (upcoming %v), want upcoming", status, upcoming)
 	}
 }
+
+// The three answers YouTube gave anonymously for one private video
+// (yZIXLfi8CZQ), verbatim: the player's on ANDROID_VR and WEB, and the watch
+// page's. None states videoDetails. What a signed-in session is told has not
+// been captured.
+const (
+	privateVideoAndroidVR = `{"status":"LOGIN_REQUIRED","reason":"Please sign in","messages":["This is a private video. Please sign in to verify that you may see it."]}`
+	privateVideoWeb       = `{"status":"LOGIN_REQUIRED","messages":["This is a private video. Please sign in to verify that you may see it."],"errorScreen":{"playerErrorMessageRenderer":{"reason":{"simpleText":"Private video"},"subreason":{"simpleText":"Sign in if you've been granted access to this video"}}}}`
+	privateVideoWatch     = `{"status":"LOGIN_REQUIRED","reason":"Private video","messages":["This is a private video. Please sign in to verify that you may see it."]}`
+)
+
+// TestParsePlayabilityStatusPlacesAPrivateLoginRequired: YouTube refuses a
+// private video with LOGIN_REQUIRED, and the arm for that status looked only
+// for a membership, so it read login_required. The waiting loop does not give
+// up on that, and a stream made private while it waited was fetched every 32 s
+// for 31 hours until the operator cancelled it. The word is matched across the
+// whole text, since ANDROID_VR says it only in messages[]; the sign-in walls
+// and the membership refusal keep their own verdicts.
+//
+// Mutants: drop the private arm (the three measured rows read login_required);
+// read only the displayed reason (the ANDROID_VR row does); put it above the
+// member check (the membership row that says private reads private).
+func TestParsePlayabilityStatusPlacesAPrivateLoginRequired(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     string
+		want       PlayabilityError
+		wantReason string
+	}{
+		{"android_vr's private video", privateVideoAndroidVR, PlayabilityPrivate, "Please sign in"},
+		{"web's private video", privateVideoWeb, PlayabilityPrivate, "Private video. Sign in if you've been granted access to this video"},
+		{"the watch page's private video", privateVideoWatch, PlayabilityPrivate, "Private video"},
+		{"the bot wall", `{"status":"LOGIN_REQUIRED","reason":"Sign in to confirm you’re not a bot","messages":["Sign in to confirm you’re not a bot"]}`,
+			PlayabilityLoginRequired, "Sign in to confirm you’re not a bot"},
+		{"a plain sign-in", `{"status":"LOGIN_REQUIRED","reason":"Please sign in"}`, PlayabilityLoginRequired, "Please sign in"},
+		{"a membership", `{"status":"LOGIN_REQUIRED","reason":"Join this channel to get access to members-only content"}`,
+			PlayabilityMembersOnly, "Join this channel to get access to members-only content"},
+		{"a membership that also says private", `{"status":"LOGIN_REQUIRED","reason":"Join this channel","messages":["This is a private video."]}`,
+			PlayabilityMembersOnly, "Join this channel"},
+		{"a word that only starts the same", `{"status":"LOGIN_REQUIRED","reason":"Please sign in to review our privacy policy"}`,
+			PlayabilityLoginRequired, "Please sign in to review our privacy policy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, reason := parsePlayabilityStatus(decodePlayerJSON(t, tc.status))
+			if got != tc.want {
+				t.Errorf("verdict = %q, want %q", got, tc.want)
+			}
+			if reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+		})
+	}
+}

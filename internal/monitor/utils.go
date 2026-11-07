@@ -420,17 +420,22 @@ func nonLiveSkipReason(includeNonLive, isReprobe bool) (skip bool, reason string
 // defers here. Distrust a probe result only when YouTube said it refused us
 // AND the classifier was guessing:
 //
-//	denied ⇔ StreamStatus == 'upcoming' AND PlayabilityError ∈ {members_only, login_required}
+//	denied ⇔ StreamStatus == 'upcoming' AND PlayabilityError ∈ {members_only, login_required, private}
+//
+// private belongs here because YouTube refuses a private video with
+// LOGIN_REQUIRED, which read login_required until the parser learned to place
+// it. Left out, the same refusal classified upcoming would make a job, and the
+// row would stop being probed again.
 //
 // Broader rules are rejected in the spec: "trust only ok" kills genuine
 // premieres; "any non-ok" refuses downloadable age-restricted VODs; "unknown"
 // is not a refusal (it is 'we could not read the answer').
 func isDenied(streamStatus, playabilityError string) bool {
 	return streamStatus == "upcoming" &&
-		(playabilityError == "members_only" || playabilityError == "login_required")
+		(playabilityError == "members_only" || playabilityError == "login_required" || playabilityError == "private")
 }
 
-// deniedIsSettled splits the two refusals isDenied recognises by whether
+// deniedIsSettled splits the refusals isDenied recognises by whether
 // asking again could ever produce a different answer for a prober that has no
 // credentials to retry with. Callers reach it only for a refusal (it does not
 // re-test isDenied's status half); it decides whether the verdict may be
@@ -446,6 +451,8 @@ func isDenied(streamStatus, playabilityError string) bool {
 //     is released only by a new newest video, PruneHealth or a restart, so
 //     remembering it would disable the RSS redundancy for that video long
 //     after YouTube started answering again.
+//   - private: NOT settled. An owner can make the video public again, and an
+//     anonymous call would then say so.
 //
 // age_restricted never reaches here: isDenied excludes it deliberately (the
 // spec rejects "any non-ok" because it would refuse downloadable

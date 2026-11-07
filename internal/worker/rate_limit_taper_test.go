@@ -190,8 +190,7 @@ func TestCancelDuringAHeldConfirmationWins(t *testing.T) {
 // membersArmProbe is the status probe of a signed-in wait whose cookied
 // probe cannot read the stream: a TV escalation's answer in the first minute
 // switches the loop to the cookied probe (B1), and every probe after it reads
-// not_a_stream, so the switch's default arm confirms the stream with a full
-// fetch on every probe it cannot read (membersOnly).
+// not_a_stream, so the switch's default arm is what decides (membersOnly).
 func membersArmProbe(at time.Duration) (*youtube.VideoInfo, error) {
 	if at < time.Minute {
 		return &youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming, IsUpcoming: true, PlayabilityError: youtube.PlayabilityOK,
@@ -204,8 +203,10 @@ func membersArmProbe(at time.Duration) (*youtube.VideoInfo, error) {
 // every full fetch that confirms a stream and every shape YouTube refuses
 // one in — a 429 on the whole cascade in the live and VOD arms, its
 // Retry-After a floor on each hold, and the default arm's full fetch, which
-// confirms a stream the cookied probe cannot read, refused with the verdict
-// reading upcoming or live, with a 429, or with a captcha. Each is made again
+// confirms a stream the cookied probe cannot read once the schedule probe says
+// it has begun, refused with the verdict reading upcoming or live, with a 429,
+// or with a captcha, after the routine fetch that opened its spell. Each is
+// made again
 // 2, 5 and 10 minutes after the first refusal of its spell — the one after
 // those answers and the stream downloads — with one backlog hold a spell, the
 // wait's line cleared at the answer, and a captcha told the operator once,
@@ -221,7 +222,8 @@ func membersArmProbe(at time.Duration) (*youtube.VideoInfo, error) {
 // Retry-After floor — the floored row's gaps are 2, 3 and 5 minutes; drop noteFetch
 // from the default arm — its verdict rows confirm on every probe, the live
 // one downloads on the first refusal; drop its confirmationHeld gate — every
-// probe confirms.
+// probe confirms; let a fetch due on the interval go ahead of the schedule probe
+// at a hold's end — the past-the-taper rows make two full fetches per hold.
 func TestEveryConfirmationRefusalTapers(t *testing.T) {
 	m := time.Minute
 	for _, tc := range []struct {
@@ -232,6 +234,9 @@ func TestEveryConfirmationRefusalTapers(t *testing.T) {
 		answer   func(start time.Time) *youtube.VideoInfo
 		gaps     []time.Duration
 		captcha  bool
+		// webLive: the schedule probe says the stream is live, which is what
+		// makes the default arm confirm between its half-hourly full fetches.
+		webLive bool
 	}{
 		{name: "live arm, a 429", status: liveFrom3m(liveAnswer),
 			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
@@ -242,20 +247,30 @@ func TestEveryConfirmationRefusalTapers(t *testing.T) {
 		{name: "VOD arm, a 429", status: liveFrom3m(vodAnswer),
 			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
 			answer:  vodAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m}},
-		{name: "default arm, the verdict reading upcoming", signedIn: true, status: membersStatus,
+		{name: "default arm, the verdict reading upcoming", signedIn: true, webLive: true, status: membersStatus,
 			refusal: func() (*youtube.VideoInfo, error) {
 				return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedIn), nil
 			},
 			answer: liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m}},
-		{name: "default arm, the verdict reading live", signedIn: true, status: membersStatus,
+		{name: "default arm, the verdict reading live", signedIn: true, webLive: true, status: membersStatus,
 			refusal: func() (*youtube.VideoInfo, error) {
 				return rateLimitedInfo(youtube.StreamLive, youtube.SessionAuthLoggedIn), nil
 			},
 			answer: liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m}},
-		{name: "default arm, a 429", signedIn: true, status: membersStatus,
+		{name: "default arm, a 429", signedIn: true, webLive: true, status: membersStatus,
 			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
 			answer:  liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m}},
-		{name: "default arm, a captcha", signedIn: true, status: membersStatus,
+		// Past the taper a hold is as long as the fetch interval, so the fetch comes
+		// due on the very poll the hold ends. One cascade per hold, not two 30 s apart.
+		{name: "default arm, the verdict, past the taper", signedIn: true, webLive: true, status: membersStatus,
+			refusal: func() (*youtube.VideoInfo, error) {
+				return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedIn), nil
+			},
+			answer: liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m, 10 * m, 30 * m, 30 * m}},
+		{name: "default arm, a 429, past the taper", signedIn: true, webLive: true, status: membersStatus,
+			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
+			answer:  liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m, 10 * m, 30 * m, 30 * m}},
+		{name: "default arm, a captcha", signedIn: true, webLive: true, status: membersStatus,
 			refusal: func() (*youtube.VideoInfo, error) { return captchaInfo(), nil },
 			answer:  liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m}, captcha: true},
 	} {
@@ -269,7 +284,7 @@ func TestEveryConfirmationRefusalTapers(t *testing.T) {
 				span += g
 			}
 			run := driveWaitForLive(t, 2*m, 2*time.Hour, func(start time.Time) waitFakes {
-				return waitFakes{
+				f := waitFakes{
 					signedIn: tc.signedIn,
 					status:   func(at time.Duration) (*youtube.VideoInfo, error) { return tc.status(at, start) },
 					full: func(at time.Duration) (*youtube.VideoInfo, error) {
@@ -285,8 +300,17 @@ func TestEveryConfirmationRefusalTapers(t *testing.T) {
 						return tc.answer(start), nil
 					},
 				}
+				if tc.webLive {
+					f.schedule = func(time.Duration) (*youtube.VideoInfo, error) { return liveAnswer(start), nil }
+				}
+				return f
 			})
 			fulls := fullCalls(run)
+			if tc.webLive && len(fulls) > 0 {
+				// The spell's first answer is routine: the schedule probe, which
+				// is what makes a fetch a confirmation, runs only after it.
+				fulls = fulls[1:]
+			}
 			if len(fulls) != len(tc.gaps)+1 {
 				t.Fatalf("full fetches at %v, want %d refused confirmations and the one that answered; calls:%s",
 					fulls, len(tc.gaps), run)

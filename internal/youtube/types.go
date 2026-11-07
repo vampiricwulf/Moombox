@@ -177,6 +177,13 @@ type VideoInfo struct {
 	// cause instead of always to "your cookies expired".
 	SessionAuth SessionAuthState `json:"-"`
 
+	// SessionCredentialed is whether the extraction was made with the jar's
+	// auth cookies: the authenticated cascade ran, which it does only when the
+	// jar holds them. Read with SessionAuth it says whether cookies YouTube was
+	// sent are still a session. SessionAuth alone cannot, since a public page
+	// reads logged out too. Stamped by withAttestation.
+	SessionCredentialed bool `json:"-"`
+
 	// IsPremium is the watch page's verdict that the signed-in session is a
 	// YouTube Premium subscriber (WatchPageResult.IsPremium, yt-dlp's
 	// _is_premium_subscriber), stamped by withAttestation. False whenever the

@@ -41,6 +41,14 @@ func TestInterruptionSignalRecordsZeroFormatsLive(t *testing.T) {
 		}
 	})
 
+	t.Run("a private refusal stating live must not mark fresh", func(t *testing.T) {
+		sig := &interruptionSignal{}
+		sig.observe(&youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayabilityError: youtube.PlayabilityPrivate})
+		if sig.fresh() {
+			t.Error("a stream made private does not come back by waiting, so it is no interruption")
+		}
+	})
+
 	t.Run("status ended must not mark fresh", func(t *testing.T) {
 		sig := &interruptionSignal{}
 		sig.observe(&youtube.VideoInfo{StreamStatus: youtube.StreamPostLive, Formats: nil})
