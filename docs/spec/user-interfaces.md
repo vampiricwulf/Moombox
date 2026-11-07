@@ -1419,7 +1419,7 @@ The tests that pin the behaviour above, by the section they pin. Each bullet nam
 **Per-endpoint response bodies**
 
 - The browser-read tokens are pinned by `internal/web/routes/cookies_browserread_test.go`, the held profile's by `internal/web/routes/cookies_profile_in_use_test.go`.
-- `hasStaging` on the jobs list's terminal rows: `TestJobsListReportsHasStagingForTerminalRows` (`internal/web/routes/jobs_list_staging_test.go`), and on the WebSocket rows `TestDashboardJobRowsCarryHasStaging` (`cmd/moombox/ws_job_rows_test.go`); the row icon that reads it, `web/tests/reinitialize-confirm.test.mjs`.
+- `hasStaging` on the jobs list's terminal rows: `TestJobsListReportsHasStagingForTerminalRows` and, on the archived list, `TestArchivedJobsListReportsHasStaging` (`internal/web/routes/jobs_list_staging_test.go`), and on the WebSocket rows `TestDashboardJobRowsCarryHasStaging` (`cmd/moombox/ws_job_rows_test.go`); the row icon that reads it, `web/tests/reinitialize-confirm.test.mjs`.
 
 **What the Web UI renders**
 

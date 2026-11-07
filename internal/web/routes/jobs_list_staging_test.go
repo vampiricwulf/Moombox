@@ -1,11 +1,13 @@
 package routes
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
@@ -87,4 +89,68 @@ func TestJobsListReportsHasStagingForTerminalRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(t, paged.Data)
+}
+
+// TestArchivedJobsListReportsHasStaging is the archived half of owner
+// decision PE-5: the dashboard's archived panel (Finished rows older than
+// hide_finished_age_days) is built from GET /api/jobs/archived, which sends
+// its page through the same sendPaginated as /api/jobs, so an archived row
+// carries hasStaging read from the configured staging base too — true over a
+// staged file, false over none. The rows are aged by writing updated_at
+// straight into the database (AddJob stamps "now"), so the 30-day default
+// threshold archives them without a clock.
+//
+// Mutant (run): the archived route reading staging from "" — every
+// archived row reads false, and the staged one is caught.
+func TestArchivedJobsListReportsHasStaging(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "old_staged", nil)
+	f.addJob(t, "old_empty", nil)
+	raw, err := sql.Open("sqlite", filepath.Join(filepath.Dir(f.outputDir), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	aged := time.Now().UTC().Add(-40 * 24 * time.Hour).Format(time.RFC3339)
+	if _, err := raw.Exec(`UPDATE jobs SET updated_at = ? WHERE id IN ('old_staged', 'old_empty')`, aged); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(f.stagingDir, "old_staged")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "video_stream"), []byte("media"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"old_staged": true, "old_empty": false}
+
+	for _, path := range []string{"/api/jobs/archived", "/api/jobs/archived?limit=100"} {
+		rec := doRequest(t, f.router, "GET", path, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d", path, rec.Code)
+		}
+		var rows []map[string]any
+		if path == "/api/jobs/archived" {
+			if err := json.NewDecoder(rec.Body).Decode(&rows); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			var paged struct {
+				Data []map[string]any `json:"data"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&paged); err != nil {
+				t.Fatal(err)
+			}
+			rows = paged.Data
+		}
+		if len(rows) != len(want) {
+			t.Fatalf("%s: listed %d rows, want %d (the aged rows must be archived)", path, len(rows), len(want))
+		}
+		for _, row := range rows {
+			id, _ := row["id"].(string)
+			if got, present := row["hasStaging"]; got != want[id] {
+				t.Errorf("%s %s: hasStaging = %v (present %v), want %v", path, id, got, present, want[id])
+			}
+		}
+	}
 }
