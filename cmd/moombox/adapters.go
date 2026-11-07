@@ -232,6 +232,15 @@ func bestPickerItag(rows []pickerFormat, kind func(*pickerFormat) bool, rank fun
 // as the selector resolves it over the renditions it may take
 // (selectBestFormatsImpl's videoCands), so a cap whose only rendition at
 // the chosen size is damaged settles on an intact size instead.
+//
+// So the badge is the best adaptive rendition at the size Auto settles on,
+// which is the rendition Auto takes everywhere but one corner: the VOD
+// whole-file pool (wholeFileVodPool) keeps muxed files, and under a low cap
+// whose size only avc1 adaptive rows reach, the muxed itag 18 can outrank
+// them (its bitrate counts its audio) — Auto then downloads 18 while the
+// badge sits on the adaptive row of that size. The brief binds the badge to
+// the audio pick's skip rules, which leave muxed rows out while an adaptive
+// one exists, so that corner is accepted rather than ranked in.
 func bestAutoVideoItag(rows []pickerFormat, maxRes int, rank func(a, b *youtube.Format) int) any {
 	var intact, marked []*pickerFormat
 	var muxed any
