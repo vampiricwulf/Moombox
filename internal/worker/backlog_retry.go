@@ -113,9 +113,12 @@ func (w *DownloadWorker) requeueBacklog(job *database.Job, err error, what strin
 // a rate-limit verdict (ErrRateLimited) back to Queued, held for
 // rateLimitBackoff (rate_limit.go). Outside backlogRetryLimit: the limit is
 // the session's, so the job's streak neither counts it nor ends with it, and
-// a rate limit that outlasts three hourly retries still never ends a backlog
-// VOD in Error. Which jobs qualify is requeueBacklog's rule; a job that does
-// not is outlastRateLimit's to wait for in place.
+// a rate limit that outlasts three hourly retries does not end a backlog VOD
+// in Error. Only the rate-limit cap does: a spell of refusals that has lasted
+// rateLimitCap with at least rateLimitCapRefusals of them, which
+// outlastRateLimit checks before it calls this. Which jobs qualify is
+// requeueBacklog's rule; a job that does not is outlastRateLimit's to wait
+// for in place.
 func (w *DownloadWorker) requeueBacklogAfterRateLimit(job *database.Job, err error) (bool, error) {
 	if w.scheduler == nil || CookieResumeStatus(job) != database.StatusQueued {
 		return false, err

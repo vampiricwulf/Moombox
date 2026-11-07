@@ -2222,8 +2222,9 @@ func (s *runState) syncJobLogRouting(job *database.Job) {
 }
 
 // syncJobLogRoutingOnChange is the OnJobChange half. A job that LEAVES a
-// terminal state must be routed to again: /retry (ReinitializeJob), /resume
-// (ResumeJob) and auto-retry each resurrect a job with a plain
+// terminal state must be routed to again: /resume (ResumeJob, which /retry
+// is an alias of), /reinitialize (ReinitializeJob) and auto-retry each
+// resurrect a job with a plain
 // UpdateJobFields(status=…), which fires only this event — an untrack-only
 // subscriber meant the whole re-run produced no per-job log lines until a
 // restart.
