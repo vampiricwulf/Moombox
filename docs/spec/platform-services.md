@@ -551,7 +551,7 @@ The `parsePlayabilityStatus` function classifies the video's accessibility. The 
 | any status but `OK`, reason not asking to "sign in" | "try again later" anywhere in the text | `rate_limited` |
 | `AGE_VERIFICATION_REQUIRED`, `AGE_CHECK_REQUIRED` | -- | `age_restricted` |
 | `LOGIN_REQUIRED` + "member"/"join" in reason | -- | `members_only` |
-| `LOGIN_REQUIRED` + "private" in reason or `messages` | -- | `private` (signed out, the answer every client gives a private video; what a signed-in session is told has not been captured) |
+| `LOGIN_REQUIRED` + "private" in reason or `messages` | -- | `private` (measured signed out, on ANDROID_VR, WEB and the watch page, for one private video; what a signed-in session is told has not been captured) |
 | `LOGIN_REQUIRED` | -- | `login_required` |
 | `UNPLAYABLE` + "member" in reason | -- | `members_only` |
 | `UNPLAYABLE` + "private" in reason | -- | `private` |
@@ -1913,6 +1913,9 @@ The tests that pin the behaviour above, by the section they pin. Each bullet nam
 - “The rows' keyword tests read that reason plus the…”: `TestPlayabilityMatchKeepsTheTextTheRendererDisplaced`
 - “Before, only `reason` and `messages[0]` were read: a geo…”: `TestParsePlayabilityStatusReadsTheErrorScreen`
 - “Both read `unknown` before — or `unavailable` behind a…”: `TestParsePlayabilityStatusRecognisesTransientRefusals`
+- The `LOGIN_REQUIRED` + "private" row: `TestParsePlayabilityStatusPlacesAPrivateLoginRequired`, `TestAPrivateVideoReadsPrivateThroughEveryCall`, and `TestAPrivateVideoLeavesTheStatusProbeInconclusive`.
+- What the worker reads beside a private verdict (`VideoInfo.SessionCredentialed`, set only by the authenticated cascade, and `SessionAuth`), on every return of both cascades: `TestEveryCascadeReturnSaysWhetherTheSessionWasCredentialed`.
+- The denied predicate's private row: `TestIsDenied_CanonicalTable`.
 
 **N-Parameter and Signature Decryption**
 

@@ -359,7 +359,7 @@ A YouTube post-live download that still finalizes behind head after the VOD-bran
 There is no typed error hierarchy and no errors package under `internal/`. Errors are plain Go errors built with `fmt.Errorf("...: %w", err)`, and the only classification is sentinel matching with `errors.Is`:
 
 ```go
-worker.ErrCookiesRequired   // player-API "login required" / "member-only": park at COOKIES?
+worker.ErrCookiesRequired   // player-API "login required" / "member-only": park at COOKIES?; "private" too, but only when the jar's cookies were sent and YouTube answered signed out (at Process, a queued VOD's re-extraction, the waiting loop, go-live and mid-capture); any other private verdict is Error
 worker.ErrNotAMember        // members-only refused to a SIGNED-IN session: park at COOKIES?, but no auto cookie refresh
 twitch.ErrTwitchAuthExpired // Twitch token dead: park at COOKIES?
 twitch.ErrSubscriberOnly    // sub-only VOD/stream refused to a session not shown signed in: park at COOKIES?
