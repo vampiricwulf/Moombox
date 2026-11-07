@@ -298,8 +298,9 @@ func answeredFetch(info *youtube.VideoInfo) bool {
 // hold nothing off, so the schedule probe keeps running. A refusal is
 // the verdict (noteFetch) or a 429 on the whole cascade, the limit's HTTP
 // form (noteFetchErr). A spell whose counted refusals have lasted
-// rateLimitCap, rateLimitCapRefusals of them at least, ends the job
-// (outlasted); a refusal counts once the stream has begun (counts).
+// rateLimitCap, rateLimitCapRefusals of them at least, ends the job on a
+// refusal that counted itself (outlasted); a refusal counts once the stream has
+// begun (counts).
 type loopRateLimit struct {
 	// refusing: the last full fetch was refused. The first refusal of a spell
 	// places the backlog hold, as outlastRateLimit's does.
@@ -315,6 +316,9 @@ type loopRateLimit struct {
 	// rateLimitCapRefusals are read against (outlasted).
 	capSince    time.Time
 	capRefusals int
+	// counted: the spell's latest refusal counted. One that did not, being of a
+	// stream nothing says has begun, ends nothing however many stand behind it.
+	counted bool
 	// begun: the status probe's last conclusive answer — or the schedule
 	// probe's, when it overtook it or the status probe cannot read the stream —
 	// said the stream is live or over (noteStatus). While it says upcoming, a
@@ -345,9 +349,13 @@ func (l *loopRateLimit) heldFor(now time.Time) time.Duration {
 }
 
 // outlasted reports whether the spell's counted refusals have lasted
-// rateLimitCap at now, rateLimitCapRefusals of them at least.
+// rateLimitCap at now, rateLimitCapRefusals of them at least, and the refusal
+// just noted is one of them. Confirmations refused during a go-live that did
+// not hold (a test broadcast, a slate that flipped) stand until a fetch is
+// answered, and without that last condition the first refusal a day on, counted
+// or not, ended a stream that was still days from its start.
 func (l *loopRateLimit) outlasted(now time.Time) bool {
-	return l.refusing && l.capRefusals >= rateLimitCapRefusals && now.Sub(l.capSince) >= rateLimitCap
+	return l.refusing && l.counted && l.capRefusals >= rateLimitCapRefusals && now.Sub(l.capSince) >= rateLimitCap
 }
 
 // noteStatus records a conclusive answer on the stream's state — the status
@@ -442,7 +450,8 @@ func (sp *StreamProcessor) noteRefusal(job *database.Job, l *loopRateLimit, conf
 	if captcha {
 		sp.captcha.raise(job)
 	}
-	if l.counts(confirmation) {
+	l.counted = l.counts(confirmation)
+	if l.counted {
 		if l.capRefusals == 0 {
 			l.capSince = now
 		}

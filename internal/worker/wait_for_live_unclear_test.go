@@ -414,3 +414,82 @@ func TestAStreamTheCookiedProbeCannotReadOutlastsADayOfRefusedRoutineFetches(t *
 		})
 	}
 }
+
+// falseGoLive says the stream has begun for this long (a test broadcast, or a
+// slate that flipped), and upcoming after it: long enough for several refused
+// confirmations on the taper.
+const falseGoLive = 90 * time.Minute
+
+// A go-live that did not hold cannot end the wait a day later. The confirmations
+// refused while something said begun count, and nothing but an answered fetch
+// used to clear that count, so with every fetch refused the first refusal a day
+// on ended the job, though it counted for nothing itself and the stream was still
+// two days out. Only a refusal that counted can end a wait now, and the periodic
+// fetch is held to that as the default arm's routine one is.
+//
+// Mutant: outlasted not reading counted (every row gives up a day in).
+func TestAGoLiveThatDidNotHoldCannotEndTheWaitADayLater(t *testing.T) {
+	const budget = rateLimitCap + 6*time.Hour
+	statusLiveThenUpcoming := func(start time.Time) func(time.Duration) (*youtube.VideoInfo, error) {
+		return func(at time.Duration) (*youtube.VideoInfo, error) {
+			if at < falseGoLive {
+				return liveAnswer(start), nil
+			}
+			return upcomingAnswer(time.Time{}), nil
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		fakes func(start time.Time) waitFakes
+	}{
+		{name: "default arm, the WEB probe says begun and then upcoming", fakes: func(start time.Time) waitFakes {
+			return waitFakes{signedIn: true, status: membersArmProbe,
+				schedule: func(at time.Duration) (*youtube.VideoInfo, error) {
+					if at < falseGoLive {
+						return liveAnswer(start), nil
+					}
+					return upcomingAnswer(start), nil
+				}}
+		}},
+		{name: "periodic fetch, the WEB probe says upcoming", fakes: func(start time.Time) waitFakes {
+			return waitFakes{status: statusLiveThenUpcoming(start)}
+		}},
+		{name: "periodic fetch, the WEB probe refused", fakes: func(start time.Time) waitFakes {
+			return waitFakes{status: statusLiveThenUpcoming(start),
+				schedule: func(time.Duration) (*youtube.VideoInfo, error) {
+					return &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityError: youtube.PlayabilityMembersOnly}, nil
+				}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := driveWaitForLive(t, 72*time.Hour, budget, func(start time.Time) waitFakes {
+				f := tc.fakes(start)
+				f.full = func(time.Duration) (*youtube.VideoInfo, error) {
+					return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedIn), nil
+				}
+				return f
+			})
+			if run.returned >= 0 {
+				t.Fatalf("the wait ended with %+v at %v, want it still waiting at %v", run.result, run.returned, budget)
+			}
+			early, late := 0, 0
+			for _, at := range fullCalls(run) {
+				if at < falseGoLive {
+					early++
+				}
+				if at > rateLimitCap {
+					late++
+				}
+			}
+			if early < rateLimitCapRefusals+1 {
+				t.Errorf("%d full fetches while the go-live stood, want enough refused confirmations to meet the cap", early)
+			}
+			if late == 0 {
+				t.Error("no full fetch past the day, so nothing tested that a refusal then cannot end the wait")
+			}
+			if run.row.Status != database.StatusUpcoming || run.row.Progress != "" {
+				t.Errorf("row = %q, progress %q; want Upcoming with no wait line", run.row.Status, run.row.Progress)
+			}
+		})
+	}
+}
