@@ -307,7 +307,8 @@ func TestLiveRefreshFailingOnTheChallengesSwitchesPathInANewPart(t *testing.T) {
 // — the no-JS from-start path, then the live HLS playlist — and a third
 // switch finds no path left and says so, the cause wrapped; a capture
 // already on the no-JS path (the setup fallback put it there) goes to HLS.
-// Never a loop: nothing gives a spent switch back.
+// Never a loop: only the run's one switch back gives a spent switch back
+// (TestASwitchBackReArmsTheFallbackItLeaves).
 //
 // Mutants: drop the "live-switch:nojs" record — a run whose no-JS attempt
 // found no pair tries it again; drop the "live-switch:hls" one — the third call switches to
@@ -450,5 +451,82 @@ func TestLiveLoopSeamsAreTheProductionMethods(t *testing.T) {
 	}
 	if reflect.ValueOf(runLiveDownloaders).Pointer() != reflect.ValueOf((*DownloadOrchestrator).runDownloaders).Pointer() {
 		t.Error("runLiveDownloaders is not (*DownloadOrchestrator).runDownloaders")
+	}
+}
+
+// TestASwitchBackReArmsTheFallbackItLeaves is owner decision PE-3: the run's
+// one switch back to the from-start path (runRecord.markSwitchedBack) gives
+// back the mid-stream switch that put the capture on the fallback it leaves,
+// so a second systemic failure later in the run falls back again, in a new
+// part, where it found that switch spent and the capture stopped on the
+// failure. One use, the switch being left: a capture that went no-JS, then
+// HLS, gets HLS back and not the no-JS attempt; one a setup fallback put on
+// a path gets nothing back, having spent nothing; and the switch back stays
+// spent, so after the second fallback none is offered.
+//
+// Mutants (each run): markSwitchedBack not giving fallbackKey back (the
+// no-JS row's second failure goes to HLS, the HLS row's finds no path
+// left); switchLivePath not recording the no-JS switch (markSwitchedTo
+// dropped from that arm: the no-JS row goes to HLS) or the HLS one (the HLS
+// row finds no path left); markSwitchedBack giving back every spent switch
+// (the HLS row's second failure goes no-JS).
+func TestASwitchBackReArmsTheFallbackItLeaves(t *testing.T) {
+	cause := fmt.Errorf("manifestless DASH: resolve video URL: %w", cipher.ErrNUnsolved)
+	info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer, Formats: liveSwitchFormats("tv_public")}
+	for _, tc := range []struct {
+		name      string
+		setupNoJS bool // a setup fallback put the capture on the no-JS path
+		before    int  // mid-stream switches before the switch back
+		want      []string
+	}{
+		// A mid-stream no-JS switch, a switch back, then the no-JS path
+		// again, then HLS, then nothing: each still once after the re-arm.
+		{"a no-JS switch is given back", false, 1, []string{"no-JS DASH", "HLS", "none"}},
+		// no-JS then HLS, a switch back: HLS again, never no-JS again.
+		{"the HLS switch is given back, not the no-JS one", false, 2, []string{"HLS", "none"}},
+		// A setup fallback onto no-JS spent no switch: no-JS is still
+		// unspent after the switch back, HLS as before.
+		{"a setup fallback spent nothing to give back", true, 0, []string{"no-JS DASH", "HLS", "none"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hls := &fakeStrategy{kind: "hls"}
+			swapHls(t, hls)
+			noJS := &fakeStrategy{kind: "manifestless_dash"}
+			orig := ManifestlessDashStrategy
+			ManifestlessDashStrategy = noJS
+			t.Cleanup(func() { ManifestlessDashStrategy = orig })
+			fakeCookieless(t, liveSwitchFormats("visionos"), nil)
+			job, _ := reextractJob(t)
+			job.Run = &runRecord{}
+			if tc.setupNoJS {
+				job.Run.markNoJS()
+			}
+			for range tc.before {
+				if _, _, err := switchLivePath(context.Background(), job, info, &StrategyDeps{}, cause); err != nil {
+					t.Fatalf("a switch before the switch back failed: %v", err)
+				}
+			}
+			if !job.Run.canSwitchBack() {
+				t.Fatal("the capture is not offered its switch back")
+			}
+			job.Run.markSwitchedBack()
+			var paths []string
+			for range len(tc.want) {
+				_, path, err := switchLivePath(context.Background(), job, info, &StrategyDeps{}, cause)
+				if err != nil {
+					if !errors.Is(err, errNoLivePathLeft) {
+						t.Fatalf("switch = %v, want a path or errNoLivePathLeft", err)
+					}
+					path = "none"
+				}
+				paths = append(paths, path)
+			}
+			if !reflect.DeepEqual(paths, tc.want) {
+				t.Errorf("switches after the switch back = %v, want %v", paths, tc.want)
+			}
+			if job.Run.canSwitchBack() {
+				t.Error("a second switch back is offered")
+			}
+		})
 	}
 }

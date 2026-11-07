@@ -945,14 +945,16 @@ export function channelRemovedToast(choice, summary, data) {
  * three conditions (jobs.go resume route); this keeps the UI from offering
  * what the server will refuse.
  *
- * `hasStaging` is only populated when the details view fetched the job; list
- * rows (the batch bar's input) do not carry it, so `undefined` means unknown
- * and passes through to the server's check — only a known `false` excludes.
+ * `hasStaging` is on every terminal list row (the server's worker.ListJob,
+ * owner decision PE-5) and on the details view's fetched job; a row without
+ * it (`undefined`) is unknown, and by default passes through to the server's
+ * check — only a known `false` excludes.
  *
- * `requireKnownStaging` inverts that tolerance for the one caller that DOES
- * fetch staging: the details view renders before _fetchStagingFields resolves,
- * so pass-through would flash the button and leave it showing when the fetch
- * fails. There, staging must be exactly `true`.
+ * `requireKnownStaging` inverts that tolerance where staging must be known:
+ * the details view renders before _fetchStagingFields resolves, so
+ * pass-through would flash the button and leave it showing when the fetch
+ * fails, and the row's inline icon is Resume only over staging the server
+ * reported. There, staging must be exactly `true`.
  */
 export function canResumeJob(job, { requireKnownStaging = false } = {}) {
   const statusOk = RESUMABLE_STATUSES.has(job.status) || (job.status === "Finished" && !!job.incompleteTail);

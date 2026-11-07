@@ -99,7 +99,7 @@ func TestAddVideoPickerNotesTheBestAndTheMarks(t *testing.T) {
 
 	// The longest note there is still fits its column, so a marked Best row
 	// never loses a mark to the table's truncation.
-	if n := len(formatNote("Best WEBM", true, true)); n > noteColumnWidth {
+	if n := len(formatNote("Best, Best WEBM", true, true)); n > noteColumnWidth {
 		t.Errorf("the longest note is %d wide, its column %d", n, noteColumnWidth)
 	}
 }
@@ -508,5 +508,54 @@ func TestAddVideoPickerNotesTheAutomaticAudioPick(t *testing.T) {
 	}
 	if audioW > videoW {
 		t.Errorf("the audio table is %d wide, the video table %d", audioW, videoW)
+	}
+}
+
+// TestAddVideoPickerNotesTheAutomaticVideoPick is owner decision PE-1 in the
+// TUI: the video row automatic selection takes (bestItags.bestVideo) is
+// noted "Best" — alone on a row neither container pick names, joined with
+// its container's note on a row that is both — and the table's cursor, once
+// the operator's first navigation key shows it, is on that row ahead of the
+// WEBM and MP4 picks. The longest video note, "Best, Best WEBM, damaged,
+// segmented", still fits its column.
+//
+// Mutants (each run): the "Best" note left out (the 720p row reads ""); the
+// container note replacing it rather than joining it (the 1080p row reads
+// "Best WEBM"); BestVideo dropped from the video table's picks (the cursor
+// opens on the WEBM row, 0); noteColumnWidth back at 29 (the longest note
+// does not fit).
+func TestAddVideoPickerNotesTheAutomaticVideoPick(t *testing.T) {
+	const webm, mp4 = `video/webm; codecs="vp9"`, `video/mp4; codecs="avc1"`
+	for _, tc := range []struct {
+		best       int
+		wantNotes  []string
+		wantCursor int
+	}{
+		{248, []string{"Best, Best WEBM", "Best MP4", ""}, 0},
+		{136, []string{"Best WEBM", "Best MP4", "Best"}, 2},
+	} {
+		m := NewAddVideoModel()
+		m.SetFormats(&FormatsData{
+			StreamStatus: "vod",
+			VideoFormats: []VideoFormat{
+				{Itag: 248, MimeType: webm, Width: 1920, Height: 1080},
+				{Itag: 137, MimeType: mp4, Width: 1920, Height: 1080},
+				{Itag: 136, MimeType: mp4, Width: 1280, Height: 720},
+			},
+			AudioFormats: []AudioFormat{{Itag: 251, MimeType: `audio/webm; codecs="opus"`}},
+			BestItags:    BestItags{BestWebmVideo: 248, BestMp4Video: 137, BestOpusAudio: 251, BestVideo: tc.best},
+		})
+		rows := m.videoTable.Rows()
+		for i, want := range tc.wantNotes {
+			if rows[i][5] != want {
+				t.Errorf("best %d: row %d note = %q, want %q", tc.best, i, rows[i][5], want)
+			}
+		}
+		if got := m.videoTable.Cursor(); got != tc.wantCursor {
+			t.Errorf("best %d: the video table opens on row %d, want %d", tc.best, got, tc.wantCursor)
+		}
+	}
+	if n := len(formatNote("Best, Best WEBM", true, true)); n > noteColumnWidth {
+		t.Errorf("the longest video note is %d wide, its column %d", n, noteColumnWidth)
 	}
 }

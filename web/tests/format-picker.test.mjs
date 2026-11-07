@@ -171,3 +171,28 @@ test("the automatic audio pick is badged [Best]", { skip }, async () => {
     assert.equal(h.el("audio-format-select").value, "", "the select stays on Auto");
   }
 });
+
+// Owner decision PE-1: the video list badges [Best] the rendition automatic
+// selection takes, of either container (bestItags.bestVideo, the server's
+// cap-aware pick), beside the container badges, as the audio list's [Best]
+// does. The select itself starts on Auto (owner decision PR-R8).
+//
+// MUTANT: the [Best] badge dropped (no video row carries it); [Best] keyed on
+// bestWebmVideo (the WEBM row carries it in the second case).
+test("the automatic video pick is badged [Best]", { skip }, async () => {
+  for (const [bestVideo, want] of [
+    [248, ["1920x1080 WEBM 4000kbps [Best] [Best WEBM]", "1920x1080 MP4 3000kbps [Best MP4]", "1280x720 MP4 2000kbps"]],
+    [136, ["1920x1080 WEBM 4000kbps [Best WEBM]", "1920x1080 MP4 3000kbps [Best MP4]", "1280x720 MP4 2000kbps [Best]"]],
+    [null, ["1920x1080 WEBM 4000kbps [Best WEBM]", "1920x1080 MP4 3000kbps [Best MP4]", "1280x720 MP4 2000kbps"]],
+  ]) {
+    const h = await harness.makeApp();
+    await h.app.populateFormatSelects({
+      streamStatus: "vod",
+      videoFormats: [video(248, 1920, 1080, WEBM, 4_000_000), video(137, 1920, 1080, MP4, 3_000_000), video(136, 1280, 720, MP4, 2_000_000)],
+      audioFormats: [audio(251, OPUS, 160_000)],
+      bestItags: { bestWebmVideo: 248, bestMp4Video: 137, bestOpusAudio: 251, bestAacAudio: null, bestAudio: 251, bestVideo },
+    });
+    assert.deepEqual(options(h, "video-format-select").map(([, text]) => text), want);
+    assert.equal(h.el("video-format-select").value, "", "the select stays on Auto");
+  }
+});

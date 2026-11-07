@@ -276,7 +276,7 @@ func (s *runState) broadcastHideFinishedAge() {
 			slog.String("error", err.Error()))
 		return
 	}
-	s.wsHub.BroadcastJobsUpdate(filterJobsByAgeThreshold(jobs, hideAge))
+	s.wsHub.BroadcastJobsUpdate(listedJobs(s.configStore, filterJobsByAgeThreshold(jobs, hideAge)))
 	// Recorded only once the dashboards really have the new list.
 	s.hideAgeBroadcast.Store(&hideAge)
 }

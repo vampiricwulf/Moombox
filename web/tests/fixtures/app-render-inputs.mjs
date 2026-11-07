@@ -43,14 +43,16 @@ export const JOBS = {
     watched: true, incompleteTail: true,
   },
   // Long enough to hit formatProgressHtml's 50-char truncation.
+  // Terminal rows carry the server's hasStaging (worker.ListJob, owner
+  // decision PE-5); true keeps their row icon Resume.
   Error: {
-    ...BASE, status: "Error",
+    ...BASE, status: "Error", hasStaging: true,
     error: 'download failed after 3 attempts: unexpected <status> 403 from the CDN & no fallback',
   },
-  Cancelled: { ...BASE, status: "Cancelled" },
+  Cancelled: { ...BASE, status: "Cancelled", hasStaging: true },
   // Membership park: the remedy text, not the generic "needs cookie refresh".
   "COOKIES?": {
-    ...BASE, status: "COOKIES?", parkReason: "membership",
+    ...BASE, status: "COOKIES?", parkReason: "membership", hasStaging: true,
     error: "switch the browser to the account that holds the membership",
   },
   Queued: { ...BASE, status: "Queued" },

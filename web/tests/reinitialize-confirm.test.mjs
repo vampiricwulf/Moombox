@@ -151,13 +151,17 @@ test("the batch Reinitialize confirm names the totals", { skip }, async () => {
 });
 
 // The row's restart icon is Resume where the job can continue, and
-// Reinitialize only where it cannot; both stay in the overflow menu.
+// Reinitialize only where it cannot; both stay in the overflow menu. Owner
+// decision PE-5: "can continue" needs the server's hasStaging, which every
+// terminal list row carries — a resumable row with nothing staged, or one
+// without the flag, gets Reinitialize.
 //
-// Mutant: the row keeping the arrow-clockwise Reinitialize icon for a
-// resumable YouTube job.
+// Mutants: the row keeping the arrow-clockwise Reinitialize icon for a
+// resumable YouTube job; canResumeJob without requireKnownStaging (the row
+// with no flag offers Resume).
 test("the row icon is Resume where the job can resume", { skip }, async () => {
   const h = await boot({});
-  const yt = h.app.renderJobItem(errJob());
+  const yt = h.app.renderJobItem(errJob({ hasStaging: true }));
   assert.match(yt, /<sl-icon-button name="play-fill" label="Resume" data-quick-action="resume"/);
   assert.doesNotMatch(yt, /data-quick-action="reinitialize"/);
   assert.match(yt, /<sl-menu-item value="reinitialize"/);
@@ -168,4 +172,9 @@ test("the row icon is Resume where the job can resume", { skip }, async () => {
 
   const noStaging = h.app.renderJobItem(errJob({ hasStaging: false }));
   assert.match(noStaging, /data-quick-action="reinitialize"/);
+  assert.doesNotMatch(noStaging, /data-quick-action="resume"/);
+
+  const unknown = h.app.renderJobItem(errJob());
+  assert.match(unknown, /data-quick-action="reinitialize"/);
+  assert.doesNotMatch(unknown, /data-quick-action="resume"/);
 });

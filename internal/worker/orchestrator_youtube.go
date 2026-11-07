@@ -487,7 +487,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// from: it picks a path once per extraction. Beyond it, as the switches
 	// themselves are: a fallback the run took for a transient cause (a
 	// sidecar restart longer than its grace, a player CDN outage) no longer
-	// costs the rest of a broadcast its from-start, highest-quality path.
+	// costs the rest of a broadcast its from-start, highest-quality path. The
+	// switch back re-arms the mid-stream switch that put the capture on the
+	// fallback it leaves (runRecord.markSwitchedBack, owner decision PE-3), so
+	// the same cause striking again later falls back again in a new part
+	// rather than stopping the capture on a spent switch.
 	//
 	// A capture on the live HLS playlist has no audio downloader — its one
 	// stream is the muxed playlist — so oldAudioSeq is 0 there. Left at 0,

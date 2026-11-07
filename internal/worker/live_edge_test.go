@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,17 +111,22 @@ func (c *cancellingStrategy) Download(ctx context.Context, job *JobContext, info
 	return res, err
 }
 
-// TestLiveEdgeStartIsRecordedAndNotifiedOnce pins owner decision PR-R2's
-// row half: ExecuteWithChat writes the setup's reason to the row's
-// live_edge_reason and sends one "live_edge" notification; a second fall of
-// the same recording (a Resume, a restart) rewrites the reason and sends
-// nothing more; a capture recording from the start writes none; and a
-// Reinitialize clears it so the new recording would notify afresh.
+// TestLiveEdgeStartIsRecordedAndNotifiedOnEveryFall pins owner decision
+// PR-R2's row half: ExecuteWithChat writes the setup's reason to the row's
+// live_edge_reason and sends a "live_edge" notification; a capture recording
+// from the start writes none; and a Reinitialize clears it. Owner decision
+// PE-4: a second fall of the same recording (a Resume, a restart) rewrites
+// the reason and notifies again — it sent nothing once the row held a
+// reason, so the stretch a resumed capture lost to the live edge went
+// unannounced. The second notification says the stretch since the last
+// capture is lost, not the start: the earlier capture holds what it recorded.
 //
 // Mutants: ExecuteWithChat not calling recordLiveEdgeStart (no reason on the
-// row, no notification); the prior-reason check dropped (two
-// notifications); the Reinitialize reset not clearing live_edge_reason.
-func TestLiveEdgeStartIsRecordedAndNotifiedOnce(t *testing.T) {
+// row, no notification); the prior-reason check back (the second fall sends
+// nothing, one notification in all); the prior reason not read (the second
+// fall says the start is lost); the Reinitialize reset not clearing
+// live_edge_reason.
+func TestLiveEdgeStartIsRecordedAndNotifiedOnEveryFall(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	rec := notificationtest.New()
 	w.orchestrator.notifier = rec
@@ -157,11 +163,16 @@ func TestLiveEdgeStartIsRecordedAndNotifiedOnce(t *testing.T) {
 	}
 	if sent := rec.ByEvent("live_edge"); len(sent) != 1 {
 		t.Fatalf("sent %d live_edge notification(s), want 1", len(sent))
+	} else if !strings.HasPrefix(sent[0].Description, "The start of the stream cannot be recorded") {
+		t.Errorf("the first fall says %q, want the start lost", sent[0].Description)
 	}
 
-	run(missing) // the same recording falls back again
-	if sent := rec.ByEvent("live_edge"); len(sent) != 1 {
-		t.Errorf("a second fall of the same recording sent %d live_edge notification(s) in all, want still 1", len(sent))
+	run(missing) // the same recording falls back again, as after a Resume
+	if sent := rec.ByEvent("live_edge"); len(sent) != 2 {
+		t.Errorf("a second fall of the same recording: %d live_edge notification(s) in all, want 2", len(sent))
+	} else if d := sent[1].Description; !strings.HasPrefix(d, "Recording resumed from the live edge") ||
+		!strings.Contains(d, "the stretch since the last capture cannot be recorded") {
+		t.Errorf("the second fall says %q, want the stretch since the last capture lost, not the start", d)
 	}
 
 	db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusError})

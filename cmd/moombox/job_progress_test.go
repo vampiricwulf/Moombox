@@ -179,7 +179,7 @@ func TestJobChangeSubscriberRoutesProgressTicksToTheSlimFrame(t *testing.T) {
 	for _, want := range []string{
 		"if database.IsProgressOnlyChange(ev.Changes) {",
 		"s.wsHub.BroadcastJobProgress(newJobProgressFrame(job))",
-		"s.wsHub.BroadcastJobUpdate(job)",
+		"s.wsHub.BroadcastJobUpdate(listedJob(s.configStore, job))",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the OnJobChange subscriber does not contain %q — progress ticks are not being "+
@@ -255,7 +255,7 @@ func TestEveryProgressTickStillProducesExactlyOneFrame(t *testing.T) {
 		"\t\t\ts.wsHub.BroadcastJobProgress(newJobProgressFrame(job))\n" +
 		"\t\t\treturn\n" +
 		"\t\t}\n" +
-		"\t\ts.wsHub.BroadcastJobUpdate(job)\n"
+		"\t\ts.wsHub.BroadcastJobUpdate(listedJob(s.configStore, job))\n"
 	if !strings.Contains(string(src), dispatch) {
 		t.Errorf("the OnJobChange dispatch is not the exact block\n%s\n— anything inserted between the "+
 			"classifier and the broadcast can drop or coalesce a tick, and the cadence is protected "+

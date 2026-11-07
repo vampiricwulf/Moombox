@@ -2303,11 +2303,15 @@ export class MoomboxApp {
     // recording, and Reinitialize — which deletes it, and confirms first —
     // only where it cannot (owner decision PR-M1): an arrow read as "retry"
     // used to start a recoverable job over. Both stay in the overflow menu.
-    // A list row carries no hasStaging, so canResumeJob passes it through to
-    // the server, which answers "use Reinitialize" when there is none. Only
-    // the rows that offered Reinitialize change: a Finished row with an
-    // incomplete tail keeps its Resume in the details dialog, as before.
-    const canResumeRow = canReinit && canResumeJob(job);
+    // Resume only where there is staging to resume (owner decision PE-5): a
+    // terminal list row carries the server's hasStaging (worker.ListJob, on
+    // every jobs frame and GET /api/jobs), so a resumable row with nothing
+    // staged offers Reinitialize, where it offered a Resume the server
+    // answered with "use Reinitialize". A row without the flag is not
+    // offered Resume. Only the rows that offered Reinitialize change: a
+    // Finished row with an incomplete tail keeps its Resume in the details
+    // dialog, as before.
+    const canResumeRow = canReinit && canResumeJob(job, { requireKnownStaging: true });
     if (canResumeRow) {
       actionsHtml += `<sl-icon-button name="play-fill" label="Resume" data-quick-action="resume" data-job-id="${escId}"></sl-icon-button>`;
       overflowItems.push(`<sl-menu-item value="resume" data-job-id="${escId}"><sl-icon slot="prefix" name="play-fill"></sl-icon>Resume</sl-menu-item>`);
@@ -2813,7 +2817,12 @@ export class MoomboxApp {
       const fps = fmt.fps ? `@${fmt.fps}fps` : "";
       const bitrate = fmt.bitrate ? ` ${(fmt.bitrate / 1000).toFixed(0)}kbps` : "";
 
+      // [Best] is the rendition automatic selection takes, of either
+      // container and under the resolution cap (bestItags.bestVideo, owner
+      // decision PE-1), as the audio list's [Best] is; the container badges
+      // stay beside it.
       let badges = "";
+      if (bestItags.bestVideo != null && fmt.itag === bestItags.bestVideo) badges += " [Best]";
       if (fmt.itag === bestItags.bestWebmVideo) badges += " [Best WEBM]";
       if (fmt.itag === bestItags.bestMp4Video) badges += " [Best MP4]";
       badges += marks(fmt);

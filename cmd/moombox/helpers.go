@@ -21,6 +21,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // mergeChannelHealth combines the feed and DECAPI health lists (both track
@@ -321,6 +322,26 @@ func checkAndBroadcastUpdate(
 // filterJobsByAge removes finished jobs older than hide_finished_age_days from
 // the slice, reading the threshold from the config store. Convenience wrapper
 // around filterJobsByAgeThreshold for callers that don't already hold the value.
+// listedJobs and listedJob are the dashboard's WebSocket job rows
+// (initial_state, jobs_update, job_update) as the REST jobs list sends them
+// (worker.ListJob): a terminal row carries hasStaging, read from the
+// configured staging base, so the row's inline button can be Resume only
+// where there is staging to resume (owner decision PE-5).
+func listedJobs(store *config.Store, jobs []*database.Job) []worker.ListedJob {
+	return worker.ListJobs(stagingBaseOf(store), jobs)
+}
+
+func listedJob(store *config.Store, job *database.Job) worker.ListedJob {
+	return worker.ListJob(stagingBaseOf(store), job)
+}
+
+// stagingBaseOf is the effective staging base under the store's lock.
+func stagingBaseOf(store *config.Store) string {
+	var dir string
+	store.Read(func(c *config.MoomboxConfig) { dir = c.Paths.EffectiveStagingDir() })
+	return dir
+}
+
 func filterJobsByAge(jobs []*database.Job, store *config.Store) []*database.Job {
 	var hideAgeDays float64
 	store.Read(func(c *config.MoomboxConfig) {

@@ -277,7 +277,8 @@ type DownloadResult struct {
 	// setupOrFallback's DRM, missing_pot and no-JS arms — the DRM arm also
 	// for a post-live stream, whose HLS holds only the last ~2 h
 	// (drmLiveEdgeReason). ExecuteWithChat records it on the row and
-	// notifies once (recordLiveEdgeStart), for the job's first part only.
+	// notifies on every fall (recordLiveEdgeStart, owner decision PE-4), for
+	// the job's first part only.
 	// Empty for every capture that records from the start. A live stream
 	// whose extraction offers no from-start format at all is put on HLS by
 	// selectDownloadStrategy, not by a setup fallback, and is not marked:

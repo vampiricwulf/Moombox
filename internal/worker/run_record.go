@@ -26,11 +26,38 @@ type runRecord struct {
 	// capture and an evicted start's HLS are not fallbacks: their from-start
 	// path is gone, not unsolvable.
 	onHlsFallback bool
+	// fallbackKey is the mid-stream switch (switchLivePath's noJSSwitchKey
+	// or hlsSwitchKey) that put the capture on the fallback path it records
+	// on, empty when a setup fallback put it there — a setup fallback spends
+	// no switch. The switch back gives that one use back (markSwitchedBack,
+	// owner decision PE-3).
+	fallbackKey string
 }
 
 // switchBackKey is the run's one switch back to the from-start path
 // (canSwitchBack, markSwitchedBack; owner decision PR-R3).
 const switchBackKey = "live-switch:back"
+
+// noJSSwitchKey and hlsSwitchKey are the run's mid-stream path switches
+// (switchLivePath), each spent once: to the no-JS from-start path, and to
+// the live HLS playlist.
+const (
+	noJSSwitchKey = "live-switch:nojs"
+	hlsSwitchKey  = "live-switch:hls"
+)
+
+// markSwitchedTo records that the mid-stream switch key (noJSSwitchKey or
+// hlsSwitchKey) put the capture on the fallback path it now records on, the
+// use the switch back gives back (markSwitchedBack). A nil record keeps
+// nothing.
+func (r *runRecord) markSwitchedTo(key string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.fallbackKey = key
+	r.mu.Unlock()
+}
 
 // markHlsFallback records that a fallback put the capture on the live HLS
 // playlist. A nil record keeps nothing.
@@ -59,6 +86,18 @@ func (r *runRecord) canSwitchBack() bool {
 // markSwitchedBack records the run's one switch back: the capture records on
 // the from-start path again, its refreshes with it (refreshDownload), and no
 // other switch back is made this run.
+//
+// It re-arms one fallback (owner decision PE-3): the mid-stream switch that
+// put the capture on the path it leaves (fallbackKey) is given back, so a
+// second systemic failure later in the run — the same transient cause
+// again, a sidecar restart, a player CDN outage — can fall back once more,
+// in a new part with the recordings so far kept, where it found the switch
+// spent and the capture stopped on the failure. One use only, the switch
+// the capture is leaving: a no-JS attempt that found no pair before the HLS
+// switch stays spent, and the switch back itself stays spent, so a capture
+// that falls back again after it records on that fallback to the end of
+// the run. A setup fallback spent no switch, and nothing is given back
+// for it.
 func (r *runRecord) markSwitchedBack() {
 	if r == nil {
 		return
@@ -68,6 +107,10 @@ func (r *runRecord) markSwitchedBack() {
 	r.onNoJS, r.onHlsFallback = false, false
 	if r.done == nil {
 		r.done = map[string]bool{}
+	}
+	if r.fallbackKey != "" {
+		delete(r.done, r.fallbackKey)
+		r.fallbackKey = ""
 	}
 	r.done[switchBackKey] = true
 }

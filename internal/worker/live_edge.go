@@ -76,15 +76,22 @@ func drmLiveEdgeReason(isVod bool, info *youtube.VideoInfo) string {
 // is the only one who can fetch the missing start, and the details row —
 // with join_offset_seconds, which the finalize writes — tells them how much.
 //
-// One notification ("live_edge", a Job Lifecycle event like gap_split, on
-// by default as that is) is sent the first time the recording falls back:
-// when the row held no reason yet. A Resume or restart of the same recording
-// that falls back again rewrites the reason without a second notification;
-// a Reinitialize clears it with the rest of the row, so its new recording
-// notifies afresh. Only a capture's first setup in the job's first part is
-// recorded (ExecuteWithChat skips a resume into a later part) — a mid-stream
-// path switch (switchLivePath) keeps the earlier part, recorded from the
-// start, and is not a late start.
+// A notification ("live_edge", a Job Lifecycle event like gap_split, on by
+// default as that is) is sent on every fall (owner decision PE-4), each
+// rewriting the reason: a Resume or restart of the same recording that falls
+// back again is another stretch of the broadcast lost to the live edge — the
+// part a resumed from-start capture would have filled from its resume
+// position — and it is sent where it used to be suppressed, the row already
+// holding a reason from the first fall. The two say different things: the
+// first fall loses the broadcast's start ("The start of the stream cannot be
+// recorded"), while a later one — the row already holding a reason, read
+// before it is rewritten — loses the stretch between the earlier capture and
+// the live edge, the earlier capture (set aside and kept, or itself from the
+// live edge) still holding what it recorded, so its text says that instead.
+// A Reinitialize clears the reason with the rest of the row. Only a capture's first setup in the job's first
+// part is recorded (ExecuteWithChat skips a resume into a later part) — a
+// mid-stream path switch (switchLivePath) keeps the earlier part, recorded
+// from the start, and is not a late start.
 func (o *DownloadOrchestrator) recordLiveEdgeStart(jobCtx *JobContext, reason string) {
 	if jobCtx == nil || jobCtx.Job == nil || reason == "" || o.db == nil {
 		return
@@ -96,14 +103,17 @@ func (o *DownloadOrchestrator) recordLiveEdgeStart(jobCtx *JobContext, reason st
 	}
 	o.db.UpdateJobFields(jobID, map[string]any{"live_edge_reason": reason})
 	jobCtx.Job.LiveEdgeReason = reason
-	if prior != "" || o.notifier == nil {
+	if o.notifier == nil {
 		return
 	}
 	f := NotifyFacts(jobCtx.Job)
+	msg := "The start of the stream cannot be recorded (%s); recording from the live edge instead: %s"
+	if prior != "" {
+		msg = "Recording resumed from the live edge (%s); the stretch since the last capture cannot be recorded: %s"
+	}
 	o.notifier.Send(
 		"Recording From the Live Edge",
-		fmt.Sprintf("The start of the stream cannot be recorded (%s); recording from the live edge instead: %s",
-			reason, notifications.EscapeMarkdown(jobCtx.Job.Title)),
+		fmt.Sprintf(msg, reason, notifications.EscapeMarkdown(jobCtx.Job.Title)),
 		notifications.TypeWarning,
 		[]notifications.Field{
 			{Name: "Channel", Value: notifications.EscapeMarkdown(jobCtx.Job.ChannelName), Inline: true},

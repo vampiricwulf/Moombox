@@ -63,13 +63,16 @@ type AudioFormat struct {
 // one is either, so the picker shows its verdict rather than computing one.
 // BestAudio is the audio rendition automatic selection takes, of any codec
 // (owner decision FE-10) — a 5.1 E-AC-3 track that outranks both codec picks
-// — noted "Best" beside the codec notes.
+// — noted "Best" beside the codec notes. BestVideo is its video half (owner
+// decision PE-1): the video rendition automatic selection takes, of either
+// container, under the operator's resolution cap.
 type BestItags struct {
 	BestWebmVideo int
 	BestMp4Video  int
 	BestOpusAudio int
 	BestAacAudio  int
 	BestAudio     int
+	BestVideo     int
 }
 
 // FormatsData holds format info fetched from API.
@@ -113,7 +116,10 @@ func notesSegmented(status string) bool {
 // by the operator's first navigation key (startPicking) — the Best row the
 // owner's decision on the picker's first follow-up put it on, so a choice
 // starts from what Auto would take. picks are the server's Best
-// itags in the dashboard's order, WEBM ahead of MP4 and, for audio, the
+// itags in the dashboard's order: for video the [Best] pick (BestVideo,
+// automatic selection's pick of either container — owner decision PE-1)
+// ahead of WEBM ahead of MP4, which only an answer without BestVideo falls
+// to, and, for audio, the
 // [Best] pick (BestAudio, automatic selection's youtube.AudioRank pick, of
 // any codec — owner decision FQ-1) ahead of Opus ahead of AAC, which only an
 // answer without BestAudio falls to (0 for a pick the answer had none of):
@@ -299,12 +305,14 @@ func (m *AddVideoModel) startPicking(msg tea.Msg) bool {
 	return true
 }
 
-// noteColumnWidth fits the longest Note formatNote writes, "Best WEBM,
-// damaged, segmented" (the Best fallback when every rendition of a kind is
-// both): the video table is then 63 columns wide, which the dialog's content
-// (boxW-2, 78 at most) holds from a 69-column terminal up. Narrower, down to
-// the TUI's minTermWidth, fitFormatTable gives the Note column what is left.
-const noteColumnWidth = 29
+// noteColumnWidth fits the longest Note formatNote writes, "Best, Best
+// WEBM, damaged, segmented" (automatic selection's pick, its container's
+// pick too, both marks — the Best fallback when every rendition of a kind
+// is both): the video table is then 69 columns wide, which the dialog's
+// content (boxW-2, 78 at most) holds from a 75-column terminal up. Narrower,
+// down to the TUI's minTermWidth, fitFormatTable gives the Note column what
+// is left.
+const noteColumnWidth = 35
 
 // audioNoteColumnWidth is the audio table's: its longest Note is "Best, Best
 // OPUS, damaged, segmented" (the automatic pick, its codec's pick too, both
@@ -367,13 +375,18 @@ func (m *AddVideoModel) buildFormatTables() {
 		if f.Fps > 0 {
 			fps = fmt.Sprintf("%d", f.Fps)
 		}
-		best := ""
-		if f.Itag == m.formats.BestItags.BestMp4Video {
-			best = "Best MP4"
+		// "Best" is automatic selection's pick (BestVideo, owner decision
+		// PE-1), ahead of the codec pick the same row may also be.
+		var bests []string
+		if f.Itag == m.formats.BestItags.BestVideo {
+			bests = append(bests, "Best")
 		}
 		if f.Itag == m.formats.BestItags.BestWebmVideo {
-			best = "Best WEBM"
+			bests = append(bests, "Best WEBM")
+		} else if f.Itag == m.formats.BestItags.BestMp4Video {
+			bests = append(bests, "Best MP4")
 		}
+		best := strings.Join(bests, ", ")
 		videoRows = append(videoRows, table.Row{
 			fmt.Sprintf("%d", i+1),
 			fmt.Sprintf("%dx%d", f.Width, f.Height),
@@ -390,7 +403,7 @@ func (m *AddVideoModel) buildFormatTables() {
 	vf := m.formats.VideoFormats
 	m.videoTable.SetCursor(preselectedRow(len(vf), func(i int) (int, bool) {
 		return vf[i].Itag, !vf[i].Damaged && !vf[i].Segmented
-	}, m.formats.BestItags.BestWebmVideo, m.formats.BestItags.BestMp4Video))
+	}, m.formats.BestItags.BestVideo, m.formats.BestItags.BestWebmVideo, m.formats.BestItags.BestMp4Video))
 
 	// Audio table
 	audioCols := []table.Column{
