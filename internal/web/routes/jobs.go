@@ -172,9 +172,19 @@ func filterJobsByAge(jobs []*database.Job, archived bool, store *config.Store) [
 	return result
 }
 
+// effectiveStagingDir is the staging base under the store's lock.
+func effectiveStagingDir(store *config.Store) string {
+	var dir string
+	store.Read(func(c *config.MoomboxConfig) { dir = c.Paths.EffectiveStagingDir() })
+	return dir
+}
+
 // sendPaginated applies optional offset/limit pagination and writes the response.
 // Matches TypeScript validateOffsetPagination: returns 400 for invalid values.
-func sendPaginated(rw http.ResponseWriter, req *http.Request, items []*database.Job) {
+// Each row of the page is sent as worker.ListJob makes it, with hasStaging
+// read from stagingBase for a terminal row (owner decision PE-5) — one
+// directory read per row of the page, not of the whole list.
+func sendPaginated(rw http.ResponseWriter, req *http.Request, items []*database.Job, stagingBase string) {
 	offsetStr := req.URL.Query().Get("offset")
 	limitStr := req.URL.Query().Get("limit")
 	hasPagination := offsetStr != "" || limitStr != ""
@@ -206,14 +216,12 @@ func sendPaginated(rw http.ResponseWriter, req *http.Request, items []*database.
 	end := min(offset+limit, len(items))
 	paged := items[offset:end]
 
-	// Ensure non-nil slice so JSON serializes as [] not null
-	if paged == nil {
-		paged = []*database.Job{}
-	}
+	// ListJobs answers a non-nil slice, so JSON serializes as [] not null.
+	rows := worker.ListJobs(stagingBase, paged)
 
 	if hasPagination {
 		jsonResponse(rw, map[string]any{
-			"data": paged,
+			"data": rows,
 			"pagination": map[string]any{
 				"total":   total,
 				"offset":  offset,
@@ -222,7 +230,7 @@ func sendPaginated(rw http.ResponseWriter, req *http.Request, items []*database.
 			},
 		})
 	} else {
-		jsonResponse(rw, paged)
+		jsonResponse(rw, rows)
 	}
 }
 
@@ -240,7 +248,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 
 		// Filter out finished jobs older than hide_finished_age_days
 		filtered := filterJobsByAge(jobs, false, store)
-		sendPaginated(rw, req, filtered)
+		sendPaginated(rw, req, filtered, effectiveStagingDir(store))
 	})
 
 	// GET /api/jobs/archived — finished jobs older than hide_finished_age_days
@@ -265,7 +273,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return 0
 		})
 
-		sendPaginated(rw, req, archived)
+		sendPaginated(rw, req, archived, effectiveStagingDir(store))
 	})
 
 	// GET /api/jobs/:id

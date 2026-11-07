@@ -2070,7 +2070,7 @@ func (s *runState) wireMonitorCallbacks() {
 			s.wsHub.BroadcastJobProgress(newJobProgressFrame(job))
 			return
 		}
-		s.wsHub.BroadcastJobUpdate(job)
+		s.wsHub.BroadcastJobUpdate(listedJob(s.configStore, job))
 	})
 
 	// OnJobAdded subscriber: AddJob no longer fires OnJobsChange (the
@@ -2085,7 +2085,7 @@ func (s *runState) wireMonitorCallbacks() {
 	s.unsubWSJobAdded = s.db.OnJobAdded(func(ev *database.JobAdded) {
 		job := ev.Job
 		s.syncJobLogRouting(job)
-		s.wsHub.BroadcastJobUpdate(job)
+		s.wsHub.BroadcastJobUpdate(listedJob(s.configStore, job))
 	})
 
 	// OnTrimsChanged subscriber: AddTrim/DeleteTrim no longer fire
@@ -2099,7 +2099,7 @@ func (s *runState) wireMonitorCallbacks() {
 		if err != nil || job == nil {
 			return
 		}
-		s.wsHub.BroadcastJobUpdate(job)
+		s.wsHub.BroadcastJobUpdate(listedJob(s.configStore, job))
 	})
 
 	// Trim service -> WebSocket: a dashboard trim runs detached from the
@@ -2290,5 +2290,5 @@ func (s *runState) onJobsChange(jobs []*database.Job) {
 		}
 		s.notifyMgr.RetainJobs(activeIDs)
 	}
-	s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
+	s.wsHub.BroadcastJobsUpdate(listedJobs(s.configStore, filterJobsByAge(jobs, s.configStore)))
 }

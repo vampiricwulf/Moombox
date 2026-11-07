@@ -32,6 +32,54 @@ func HasStagingFiles(stagingBase, jobID string) bool {
 	return false
 }
 
+// ListedJob is a job row as the jobs list carries it — GET /api/jobs and
+// /api/jobs/archived, and the dashboard's WebSocket rows (initial_state,
+// jobs_update, job_update) — with HasStaging (HasStagingFiles) for a row in a
+// status Resume can be offered from (owner decision PE-5): the dashboard's
+// row icon is Resume only where the job is resumable and has staging to
+// resume, else Reinitialize, and with no flag on the list's rows it offered
+// Resume on every resumable row and let the server answer "use
+// Reinitialize". One directory read per such row, computed server-side, so
+// the dashboard makes no extra request per row. Absent (nil) for a row in
+// any other status — a live capture's staging is its own — which the
+// dashboard reads as unknown and keeps what it last held. The job's own
+// fields, and its JobVersion (the hub's frame ordering), come through the
+// embedded row unchanged.
+type ListedJob struct {
+	*database.Job
+	HasStaging *bool `json:"hasStaging,omitempty"`
+}
+
+// stagingFlagStatuses are the statuses ListedJob carries HasStaging for:
+// the dashboard's resumable ones (Error, Cancelled, COOKIES?) and Finished,
+// which a capture with an incomplete tail resumes from.
+var stagingFlagStatuses = map[database.JobStatus]bool{
+	database.StatusError:     true,
+	database.StatusCancelled: true,
+	database.StatusCookies:   true,
+	database.StatusFinished:  true,
+}
+
+// ListJob is job as the jobs list carries it (ListedJob), its staging read
+// from stagingBase when its status is one stagingFlagStatuses names.
+func ListJob(stagingBase string, job *database.Job) ListedJob {
+	row := ListedJob{Job: job}
+	if job != nil && stagingFlagStatuses[job.Status] {
+		has := HasStagingFiles(stagingBase, job.ID)
+		row.HasStaging = &has
+	}
+	return row
+}
+
+// ListJobs is ListJob over a list, in order; never nil.
+func ListJobs(stagingBase string, jobs []*database.Job) []ListedJob {
+	rows := make([]ListedJob, 0, len(jobs))
+	for _, j := range jobs {
+		rows = append(rows, ListJob(stagingBase, j))
+	}
+	return rows
+}
+
 // HasSegmentFiles returns true if the staging directory contains recognized
 // segment files, either at the root or inside a quality-split seg_N
 // subdirectory (post-split jobs keep their newest data there — without the

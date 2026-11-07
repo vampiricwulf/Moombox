@@ -127,7 +127,7 @@ func (s *runState) wireWebSocket() {
 		// (W24-14).
 		logs, logSeq := s.log.RecentLines()
 		return map[string]any{
-			"jobs":                jobs,
+			"jobs":                listedJobs(s.configStore, jobs),
 			"logs":                logs,
 			"logSeq":              logSeq,
 			"nextFeedCheck":       s.feedMon.GetNextCheckAt(),
