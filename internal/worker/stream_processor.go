@@ -576,6 +576,9 @@ func judgeRefreshedVodInfo(info *youtube.VideoInfo) (*youtube.VideoInfo, error) 
 // "this account is signed in but is not a member of that channel" both
 // produced the identical string and both parked the job in COOKIES?, so an
 // operator whose credentials were perfectly healthy was told to refresh them.
+//
+// A private verdict is ErrCookiesRequired on the one reading that repairing the
+// cookies could change: see its arm in playabilityVerdict.
 func (sp *StreamProcessor) checkPlayability(info *youtube.VideoInfo) (string, error) {
 	return playabilityVerdict(info)
 }
@@ -611,6 +614,20 @@ func playabilityVerdict(info *youtube.VideoInfo) (string, error) {
 		}
 	case youtube.PlayabilityLoginRequired:
 		return fmt.Sprintf("Login required: %s", reason), ErrCookiesRequired
+	case youtube.PlayabilityPrivate:
+		// An account granted access whose cookies have lapsed is refused in the
+		// same words as everyone else, so this much can be told apart only by
+		// YouTube answering cookies it was sent as signed out. Repairing those
+		// may restore the access, and it is what the park and its sweep do; if
+		// not, the sweep's next fetch reads signed in and ends here in Error.
+		// Without cookies a signed-out answer means nothing, since public pages
+		// read that way too, and a session that is signed in or unread has
+		// nothing to repair. What YouTube sends a dead session for a private
+		// video has not been captured; this reads it as it read signed out.
+		if info.SessionCredentialed && info.SessionAuth == youtube.SessionAuthLoggedOut {
+			return fmt.Sprintf("Private video: %s — YouTube answered this request as signed out though cookies are loaded, so they look dead; if this account was granted access, export a fresh Netscape cookies.txt from a signed-in browser", reason), ErrCookiesRequired
+		}
+		return reason, nil
 	case youtube.PlayabilityAgeRestricted:
 		// ErrNonActionable suppresses the notification, so the display
 		// string is the user's only breadcrumb — say that cookies are the

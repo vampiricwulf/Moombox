@@ -247,6 +247,7 @@ func withAttestation(info *VideoInfo, wp *WatchPageResult, videoID string) *Vide
 		// string copy and it is the only thing that can tell a dead cookie
 		// file apart from a live session that simply lacks a membership.
 		info.SessionAuth = wp.SessionAuth
+		info.SessionCredentialed = wp.Credentialed
 		// The page's Premium verdict, which is only ever made for a signed-in
 		// page (WatchPageResult.IsPremium): it waives the web family's GVS
 		// token requirement for this extraction's streams (GvsTokenMandatory).
@@ -599,6 +600,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		p.logger.Warn("[PlayerApi] Could not fetch watch page", slog.String("error", err.Error()))
 		wp = &WatchPageResult{Ytcfg: p.fallbackYtcfg(true)}
 	}
+	wp.Credentialed = true
 
 	ytcfg := wp.Ytcfg
 

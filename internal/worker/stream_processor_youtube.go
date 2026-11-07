@@ -119,6 +119,38 @@ func fullFetchSaysGone(info *youtube.VideoInfo) bool {
 	return isTerminalPlayability(info.PlayabilityError) || fullFetchSaysRemoved(info)
 }
 
+// endGoneWait ends the wait on a full fetch that says the stream is gone
+// (fullFetchSaysGone). One whose verdict is a credential failure (a private
+// stream to a session that reads signed out, playabilityVerdict) parks, since
+// repairing the cookies may bring it back; any other gives up.
+func (sp *StreamProcessor) endGoneWait(job *database.Job, fullInfo *youtube.VideoInfo, chatDl *chat.ChatDownloader) *StreamProcessResult {
+	if errMsg, sentinel := playabilityVerdict(fullInfo); errMsg != "" && credentialVerdict(fullInfo, sentinel) {
+		return sp.parkOnCredentials(job, fullInfo, chatDl, errMsg, sentinel)
+	}
+	return sp.giveUpUnavailable(job, fullInfo, chatDl)
+}
+
+// parkOnCredentials ends the wait on a full fetch whose verdict is a credential
+// failure (credentialVerdict): the result that sends the job to COOKIES?.
+func (sp *StreamProcessor) parkOnCredentials(job *database.Job, fullInfo *youtube.VideoInfo, chatDl *chat.ChatDownloader, errMsg string, sentinel error) *StreamProcessResult {
+	sp.logger.Warn("playability check failed while waiting",
+		"videoID", job.VideoID,
+		"playability", string(fullInfo.PlayabilityError),
+		"sessionAuth", string(fullInfo.SessionAuth),
+		"reason", errMsg)
+	// What the fetch says about the job still reaches the row, as on the
+	// initial Process's park: blanks filled, nothing overwritten (and no
+	// schedule notification for a job that is not going to record).
+	sp.updateJobMetadata(job, fullInfo, false)
+	sp.stopEarlyChat(chatDl)
+	return &StreamProcessResult{
+		VideoInfo:      fullInfo,
+		ShouldDownload: false,
+		Error:          errMsg,
+		ErrSentinel:    sentinel,
+	}
+}
+
 // giveUpUnavailable ends the wait on a full fetch that says the stream is
 // gone (fullFetchSaysGone): the early chat stopped, the reason logged, and a
 // non-actionable result naming it.
@@ -471,7 +503,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				// nothing else ends now that the status probe calls its own
 				// refusal of it inconclusive (G8).
 				if fullFetchSaysGone(fullInfo) {
-					return sp.giveUpUnavailable(job, fullInfo, chatDl), nil
+					return sp.endGoneWait(job, fullInfo, chatDl), nil
 				}
 				sp.logger.Debug("periodic full fetch completed", "videoID", job.VideoID)
 				// It carries the schedule too, so the schedule probe below is
@@ -749,7 +781,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				// B1 switches on a TV escalation's answer too, a public one behind
 				// a bot wall, reaches no other.
 				if fullFetchSaysGone(fullInfo) {
-					return sp.giveUpUnavailable(job, fullInfo, chatDl), nil
+					return sp.endGoneWait(job, fullInfo, chatDl), nil
 				}
 				if sp.noteFetch(job, &rateLimit, fullInfo, confirmation) {
 					if rateLimit.outlasted(time.Now()) {
@@ -792,22 +824,7 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 	// "Authentication Required" alert, which the credential-recovery sweep —
 	// it resumes COOKIES? rows only — never looked at again.
 	if errMsg, sentinel := sp.checkPlayability(fullInfo); errMsg != "" && credentialVerdict(fullInfo, sentinel) {
-		sp.logger.Warn("playability check failed at go-live",
-			"videoID", job.VideoID,
-			"playability", string(fullInfo.PlayabilityError),
-			"sessionAuth", string(fullInfo.SessionAuth),
-			"reason", errMsg)
-		// What the fetch says about the job still reaches the row, as on the
-		// initial Process's park: blanks filled, nothing overwritten (and no
-		// schedule notification for a job that is not going to record).
-		sp.updateJobMetadata(job, fullInfo, false)
-		sp.stopEarlyChat(chatDl)
-		return &StreamProcessResult{
-			VideoInfo:      fullInfo,
-			ShouldDownload: false,
-			Error:          errMsg,
-			ErrSentinel:    sentinel,
-		}
+		return sp.parkOnCredentials(job, fullInfo, chatDl, errMsg, sentinel)
 	}
 
 	isVod := fullInfo.StreamStatus == youtube.StreamVOD || fullInfo.StreamStatus == youtube.StreamPostLive

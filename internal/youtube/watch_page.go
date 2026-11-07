@@ -178,6 +178,10 @@ type WatchPageResult struct {
 	// saw something we can't read" may be reported as "logged out": that
 	// verdict is now printed to the user as "your cookies are dead".
 	SessionAuth SessionAuthState
+	// Credentialed is set by the authenticated cascade, on a fetched page and a
+	// synthesized one alike: it holds the jar's auth cookies, and asked with
+	// them. Stamped as VideoInfo.SessionCredentialed.
+	Credentialed bool
 	// IsPremium is yt-dlp's _is_premium_subscriber (_video.py:3899-3908): the
 	// page's ytInitialData topbar logo is YouTube Premium's —
 	// topbar.desktopTopbarRenderer.logo.topbarLogoRenderer carries iconImage
