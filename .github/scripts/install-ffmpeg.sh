@@ -37,9 +37,19 @@ state=$temp/ffmpeg-install
 install() {
 	case ${RUNNER_OS:-$(uname -s)} in
 	Linux)
+		# The .debs land in a runner-owned directory that ci.yml restores
+		# from and saves to the Actions cache, so a run whose cache hit
+		# fetches nothing (or only a newer package) from the Ubuntu mirror,
+		# which stalls mid-package often enough to have failed whole runs.
+		debs=${FFMPEG_APT_CACHE:-$HOME/.cache/apt-ffmpeg}
+		mkdir -p "$debs/partial"
+		echo "Cached FFmpeg packages: $(find "$debs" -maxdepth 1 -name '*.deb' | wc -l)"
 		bash "$here/retry.sh" 3 90 sudo apt-get update -q &&
-			bash "$here/retry.sh" 3 150 sudo apt-get install -y -q --no-install-recommends --download-only ffmpeg &&
-			sudo apt-get install -y -q --no-install-recommends --no-download ffmpeg
+			bash "$here/retry.sh" 3 150 sudo apt-get install -y -q --no-install-recommends --download-only \
+				-o Dir::Cache::archives="$debs" ffmpeg &&
+			sudo apt-get install -y -q --no-install-recommends --no-download \
+				-o Dir::Cache::archives="$debs" ffmpeg &&
+			sudo chmod -R a+rX "$debs"
 		;;
 	Windows)
 		bash "$here/retry.sh" 3 0 choco install ffmpeg -y --no-progress

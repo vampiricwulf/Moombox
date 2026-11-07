@@ -372,6 +372,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Restore the FFmpeg package cache
+        # The .debs install-ffmpeg.sh downloads, kept in the Actions cache so
+        # a run does not depend on the Ubuntu mirror, which has stalled
+        # mid-package often enough to fail whole runs. Linux's rest shard
+        # saves it below once an install succeeds.
+        if: runner.os == 'Linux'
+        id: cache-ffmpeg
+        uses: actions/cache/restore@v6
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: ~/.cache/apt-ffmpeg
+          key: apt-ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-v1
+
       - name: Start installing FFmpeg
         # apt on ubuntu, choco on windows: 20-40 s that needs nothing the
         # setup steps below make, so it runs in the background while they
@@ -473,8 +487,18 @@ jobs:
         # Prints the background install's log and fails the job if it
         # failed, so muxer_concatcopy_test.go and probe_params_test.go run
         # instead of skipping.
+        id: finish-ffmpeg
         timeout-minutes: 10
         run: bash .github/scripts/install-ffmpeg.sh --wait
+
+      - name: Save the FFmpeg package cache
+        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.flavour == 'linux' && matrix.shard == 'rest' && steps.cache-ffmpeg.outputs.cache-hit != 'true' && steps.finish-ffmpeg.outcome == 'success' }}
+        uses: actions/cache/save@v6
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: ~/.cache/apt-ffmpeg
+          key: apt-ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-v1
 
       - name: go test
         id: gotest
