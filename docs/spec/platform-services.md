@@ -551,7 +551,7 @@ The `parsePlayabilityStatus` function classifies the video's accessibility. The 
 | any status but `OK`, reason not asking to "sign in" | "try again later" anywhere in the text | `rate_limited` |
 | `AGE_VERIFICATION_REQUIRED`, `AGE_CHECK_REQUIRED` | -- | `age_restricted` |
 | `LOGIN_REQUIRED` + "member"/"join" in reason | -- | `members_only` |
-| `LOGIN_REQUIRED` + "private" in reason or `messages` | -- | `private` (measured signed out, on ANDROID_VR, WEB and the watch page, for one private video; what a signed-in session is told has not been captured) |
+| `LOGIN_REQUIRED` + "private" in reason or `messages` | -- | `private` (measured signed out on ANDROID_VR, VISIONOS, WEB, WEB_EMBEDDED and the watch page, on private videos, 2026-11-07. A session with healthy cookies gets `ERROR` from every cookied client instead, reading `unavailable` below, which ends a wait the same way. What a dead session is told has not been captured) |
 | `LOGIN_REQUIRED` | -- | `login_required` |
 | `UNPLAYABLE` + "member" in reason | -- | `members_only` |
 | `UNPLAYABLE` + "private" in reason | -- | `private` |

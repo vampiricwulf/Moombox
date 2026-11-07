@@ -167,6 +167,40 @@ const (
 // Mutants: drop the private arm (the three measured rows read login_required);
 // read only the displayed reason (the ANDROID_VR row does); put it above the
 // member check (the membership row that says private reads private).
+// TestParsePlayabilityStatusPlacesWhatASignedInSessionIsTold: the refusals a
+// healthy signed-in session was given on 2026-11-07, for a private YouTube Rewind
+// video and for DrxyGDJCuc8 once its uploader had removed it. Every cookied client
+// answered ERROR, so these read unavailable, or unknown for the one reason with
+// neither keyword, and the cascade's answer for both is the watch page's
+// unavailable, which ends a wait (isTerminalPlayability).
+//
+// Mutant: the ERROR arm not reading the reason for private.
+func TestParsePlayabilityStatusPlacesWhatASignedInSessionIsTold(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     string
+		want       PlayabilityError
+		wantReason string
+	}{
+		{"private, tv and web_creator", `{"status":"ERROR","reason":"This video is private"}`, PlayabilityUnavailable, "This video is private"},
+		{"private, web and web_embedded", `{"status":"ERROR","reason":"Video unavailable","errorScreen":{"playerErrorMessageRenderer":{"reason":{"simpleText":"Video unavailable"},"subreason":{"simpleText":"This video is private"}}}}`,
+			PlayabilityUnavailable, "Video unavailable. This video is private"},
+		{"removed, tv and web_creator", `{"status":"ERROR","reason":"This video has been removed by the uploader"}`, PlayabilityUnknown, "This video has been removed by the uploader"},
+		{"removed, web and web_embedded", `{"status":"ERROR","reason":"Video unavailable","errorScreen":{"playerErrorMessageRenderer":{"reason":{"simpleText":"Video unavailable"},"subreason":{"simpleText":"This video has been removed by the uploader"}}}}`,
+			PlayabilityUnavailable, "Video unavailable. This video has been removed by the uploader"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, reason := parsePlayabilityStatus(decodePlayerJSON(t, tc.status))
+			if got != tc.want {
+				t.Errorf("verdict = %q, want %q", got, tc.want)
+			}
+			if reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+		})
+	}
+}
+
 func TestParsePlayabilityStatusPlacesAPrivateLoginRequired(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
