@@ -49,6 +49,12 @@ install() {
 				-o Dir::Cache::archives="$debs" ffmpeg &&
 			sudo apt-get install -y -q --no-install-recommends --no-download \
 				-o Dir::Cache::archives="$debs" ffmpeg &&
+			{
+				# A cache restored from an older runner image (restore-keys)
+				# holds versions apt no longer offers; drop them so the saved
+				# cache stays the size of one install.
+				sudo apt-get autoclean -q -o Dir::Cache::archives="$debs" || true
+			} &&
 			sudo chmod -R a+rX "$debs"
 		;;
 	Windows)

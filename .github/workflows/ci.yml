@@ -372,6 +372,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Name the runner image
+        # ImageOS and ImageVersion are set in the runner's environment, not
+        # in the workflow's env context, so ${{ env.ImageOS }} read empty in
+        # the cache key. A new image gets a new key; restore-keys below
+        # still start it from the previous image's packages.
+        if: runner.os == 'Linux'
+        id: runner-image
+        run: echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
       - name: Restore the FFmpeg package cache
         # The .debs install-ffmpeg.sh downloads, kept in the Actions cache so
         # a run does not depend on the Ubuntu mirror, which has stalled
@@ -384,7 +393,8 @@ jobs:
         continue-on-error: true
         with:
           path: ~/.cache/apt-ffmpeg
-          key: apt-ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-v1
+          key: apt-ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.image }}-v1
+          restore-keys: apt-ffmpeg-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Start installing FFmpeg
         # apt on ubuntu, choco on windows: 20-40 s that needs nothing the
@@ -498,7 +508,7 @@ jobs:
         continue-on-error: true
         with:
           path: ~/.cache/apt-ffmpeg
-          key: apt-ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-v1
+          key: apt-ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.image }}-v1
 
       - name: go test
         id: gotest
