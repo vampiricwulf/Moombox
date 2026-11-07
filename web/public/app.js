@@ -2813,7 +2813,12 @@ export class MoomboxApp {
       const fps = fmt.fps ? `@${fmt.fps}fps` : "";
       const bitrate = fmt.bitrate ? ` ${(fmt.bitrate / 1000).toFixed(0)}kbps` : "";
 
+      // [Best] is the rendition automatic selection takes, of either
+      // container and under the resolution cap (bestItags.bestVideo, owner
+      // decision PE-1), as the audio list's [Best] is; the container badges
+      // stay beside it.
       let badges = "";
+      if (bestItags.bestVideo != null && fmt.itag === bestItags.bestVideo) badges += " [Best]";
       if (fmt.itag === bestItags.bestWebmVideo) badges += " [Best WEBM]";
       if (fmt.itag === bestItags.bestMp4Video) badges += " [Best MP4]";
       badges += marks(fmt);

@@ -9,6 +9,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
@@ -33,7 +34,7 @@ func (a *ytFormatAdapter) GetFormats(ctx context.Context, videoID string) (map[s
 	if err != nil {
 		return nil, err
 	}
-	return formatsPayload(videoID, info, prefer60, preferHDR), nil
+	return formatsPayload(videoID, info, maxRes, prefer60, preferHDR), nil
 }
 
 // pickerFormat is one row of the format picker's list: the format as its own
@@ -98,7 +99,12 @@ type pickerFormat struct {
 // muxed format at all (partitionManifestlessFormats). A muxed row is badged
 // only when its kind has no adaptive row, the one case it was the old pick
 // and nothing else could be.
-func formatsPayload(videoID string, info *youtube.VideoInfo, prefer60fps, preferHDR bool) map[string]any {
+//
+// maxRes is downloader.max_video_resolution, which only the video [Best]
+// badge reads (bestAutoVideoItag): it is the rendition automatic selection
+// takes, and that selection resolves the cap first. The codec badges rank
+// every size, as they always have.
+func formatsPayload(videoID string, info *youtube.VideoInfo, maxRes int, prefer60fps, preferHDR bool) map[string]any {
 	// Separate video and audio formats, only those with a URL
 	var videoFormats, audioFormats []youtube.Format
 	for _, f := range info.Formats {
@@ -142,7 +148,11 @@ func formatsPayload(videoID string, info *youtube.VideoInfo, prefer60fps, prefer
 	// codec (owner decision FE-10): the shared AudioRank ranks a 5.1 E-AC-3
 	// track above stereo Opus and AAC alike, and it is neither, so no codec
 	// badge was ever on the track the downloader would take. The two codec
-	// badges stay beside it.
+	// badges stay beside it. bestVideo is its video half (owner decision
+	// PE-1): the rendition automatic selection takes, of either container,
+	// under the operator's resolution cap (bestAutoVideoItag) — the codec
+	// badges named the best WEBM and the best MP4, but not which of the two,
+	// if either, Auto would download.
 	video := func(a, b *youtube.Format) int { return youtube.CompareVideoFormats(a, b, prefer60fps, preferHDR) }
 	audio := youtube.CompareAudioFormats
 	bestItags := map[string]any{
@@ -151,6 +161,7 @@ func formatsPayload(videoID string, info *youtube.VideoInfo, prefer60fps, prefer
 		"bestOpusAudio": bestPickerItag(audioRows, mime("opus"), audio),
 		"bestAacAudio":  bestPickerItag(audioRows, mime("mp4a"), audio),
 		"bestAudio":     bestPickerItag(audioRows, mime("audio"), audio),
+		"bestVideo":     bestAutoVideoItag(videoRows, maxRes, video),
 	}
 
 	return map[string]any{
@@ -205,6 +216,55 @@ func bestPickerItag(rows []pickerFormat, kind func(*pickerFormat) bool, rank fun
 		return intact.Itag
 	case marked != nil:
 		return marked.Itag
+	}
+	return muxed
+}
+
+// bestAutoVideoItag is the video [Best] badge's itag (owner decision PE-1):
+// the rendition automatic selection would take, ranked as the downloader
+// ranks — youtube.SelectBestFormats resolves the resolution cap to one size
+// (utils.SelectByCap: the largest short edge at or below maxRes, else the
+// smallest above it, 0 unbounded) and takes the best of that size by
+// youtube.CompareVideoFormats. The pool follows bestPickerItag's skip rules,
+// the ones the audio [Best] pick uses: the adaptive rows that are neither
+// damaged nor segmented, else every adaptive row, else the first muxed one,
+// else nil. The cap is resolved within the pool the badge is chosen from,
+// as the selector resolves it over the renditions it may take
+// (selectBestFormatsImpl's videoCands), so a cap whose only rendition at
+// the chosen size is damaged settles on an intact size instead.
+func bestAutoVideoItag(rows []pickerFormat, maxRes int, rank func(a, b *youtube.Format) int) any {
+	var intact, marked []*pickerFormat
+	var muxed any
+	for i := range rows {
+		r := &rows[i]
+		switch {
+		case !strings.Contains(r.MimeType, "video"):
+		case r.muxed():
+			if muxed == nil {
+				muxed = r.Itag
+			}
+		case !r.Damaged && !r.Segmented:
+			intact = append(intact, r)
+		default:
+			marked = append(marked, r)
+		}
+	}
+	for _, pool := range [][]*pickerFormat{intact, marked} {
+		cands := make([]utils.Cand, 0, len(pool))
+		for _, r := range pool {
+			cands = append(cands, utils.Cand{Width: derefInt(r.Width), Height: derefInt(r.Height)})
+		}
+		size, ok := utils.SelectByCap(maxRes, cands)
+		if !ok {
+			continue
+		}
+		var best *pickerFormat
+		for _, r := range pool {
+			if r.CapDimension() == size && (best == nil || rank(&r.Format, &best.Format) > 0) {
+				best = r
+			}
+		}
+		return best.Itag
 	}
 	return muxed
 }

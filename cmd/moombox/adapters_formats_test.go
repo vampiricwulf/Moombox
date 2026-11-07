@@ -41,7 +41,7 @@ const (
 // back the way a client reads it.
 func pickerJSON(t *testing.T, info *youtube.VideoInfo) (raw []byte, decoded map[string]any) {
 	t.Helper()
-	raw, err := json.Marshal(formatsPayload("vid", info, true, true))
+	raw, err := json.Marshal(formatsPayload("vid", info, 0, true, true))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestFormatsPayloadDecodesIntoTheTUIPicker(t *testing.T) {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		t.Fatalf("decode into tui.FormatsData: %v", err)
 	}
-	if want := (tui.BestItags{BestWebmVideo: 248, BestMp4Video: 136, BestOpusAudio: 250, BestAacAudio: 140, BestAudio: 250}); data.BestItags != want {
+	if want := (tui.BestItags{BestWebmVideo: 248, BestMp4Video: 136, BestOpusAudio: 250, BestAacAudio: 140, BestAudio: 250, BestVideo: 248}); data.BestItags != want {
 		t.Errorf("BestItags = %+v, want %+v", data.BestItags, want)
 	}
 	if data.StreamStatus != string(youtube.StreamUpcoming) {
@@ -338,7 +338,7 @@ func TestFormatsPayloadBadgesFollowTheSharedRank(t *testing.T) {
 		{true, map[string]float64{"bestMp4Video": 399, "bestWebmVideo": 335, "bestAacAudio": 141}},
 		{false, map[string]float64{"bestMp4Video": 399, "bestWebmVideo": 248, "bestAacAudio": 141}},
 	} {
-		raw, err := json.Marshal(formatsPayload("vid", info, true, tc.preferHDR))
+		raw, err := json.Marshal(formatsPayload("vid", info, 0, true, tc.preferHDR))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -406,6 +406,90 @@ func TestFormatsPayloadBadgesTheAutomaticAudioPick(t *testing.T) {
 			}
 			if float64(data.BestItags.BestAudio) != tc.want {
 				t.Errorf("the TUI decoded BestAudio %d, want %v", data.BestItags.BestAudio, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatsPayloadBadgesTheAutomaticVideoPick is owner decision PE-1: the
+// picker badges [Best] the video rendition automatic selection takes, of
+// either container (bestItags.bestVideo) — the codec badges named the best
+// WEBM and the best MP4, never which one Auto downloads. It is ranked as
+// the downloader ranks: the resolution cap resolved first (a 720 cap takes
+// the 720p MP4 though both codec badges sit on 1080p rows), then the shared
+// rank at that size. Damaged and segmented rows are passed over as the
+// audio pick passes them, and on a live stream, where every adaptive row is
+// segmented, the badge falls back to the best of them, never to the muxed
+// itag 18. Where the pool holds only intact adaptive rows, the badge is
+// youtube.SelectBestFormats' own pick, so the two cannot drift. The TUI
+// decodes the pick from the same answer.
+//
+// Mutants (each run): bestVideo left out of bestItags (nil, and the TUI's
+// BestVideo 0); the cap ignored (the 720 case badges 1080p 248); damaged or
+// segmented rows not passed over (the 2160p damaged or 1440p segmented row
+// is badged); the cap resolved over every row rather than the pool (the
+// 1440 cap lands on the segmented 1440p size, and the badge with it).
+func TestFormatsPayloadBadgesTheAutomaticVideoPick(t *testing.T) {
+	fps := func(n int) func(*youtube.Format) { return func(f *youtube.Format) { f.Fps = &n } }
+	muxed := pickerFixture(18, 640, 500_000, `video/mp4; codecs="avc1.42001E, mp4a.40.2"`)
+	vod := []youtube.Format{
+		pickerFixture(313, 3840, 20_000_000, pickerWebm, damagedFormat, fps(30)),
+		pickerFixture(271, 2560, 9_000_000, pickerWebm, otfFormat, fps(30)),
+		pickerFixture(248, 1920, 4_000_000, pickerWebm, fps(30)),
+		pickerFixture(137, 1920, 3_000_000, pickerMp4, fps(30)),
+		pickerFixture(136, 1280, 2_000_000, pickerMp4, fps(30)),
+		pickerFixture(247, 1280, 1_500_000, pickerWebm, fps(30)),
+		muxed,
+		pickerFixture(251, 0, 160_000, pickerOpus),
+	}
+	live := []youtube.Format{
+		muxed,
+		pickerFixture(303, 1920, 4_000_000, pickerWebm, liveAdaptiveFormat, fps(60)),
+		pickerFixture(299, 1920, 5_000_000, pickerMp4, liveAdaptiveFormat, fps(60)),
+		pickerFixture(298, 1280, 3_000_000, pickerMp4, liveAdaptiveFormat, fps(60)),
+		pickerFixture(140, 0, 128_000, pickerAac, liveAdaptiveFormat),
+	}
+	for _, tc := range []struct {
+		name    string
+		status  youtube.StreamStatus
+		formats []youtube.Format
+		maxRes  int
+		want    float64
+		// intactOnly: every row the badge may be chosen from is intact
+		// and adaptive, so SelectBestFormats must agree.
+		intactOnly bool
+	}{
+		{"unbounded: the best intact 1080p, past damaged 2160p and segmented 1440p", youtube.StreamVOD, vod, 0, 248, false},
+		{"a 720 cap: the best 720p, of either container", youtube.StreamVOD, vod, 720, 247, false},
+		{"a 1440 cap settles on the intact sizes below", youtube.StreamVOD, vod, 1440, 248, false},
+		{"a cap below every size: the smallest above it", youtube.StreamVOD, vod[2:6], 480, 247, true},
+		{"live: every adaptive row segmented, the best of them, not the muxed 18", youtube.StreamLive, live, 0, 303, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.intactOnly {
+				if sel := youtube.SelectBestFormats(tc.formats, tc.maxRes, true, true); sel.Video == nil || float64(sel.Video.Itag) != tc.want {
+					t.Fatalf("automatic selection took %+v, want itag %v", sel.Video, tc.want)
+				}
+			}
+			info := &youtube.VideoInfo{StreamStatus: tc.status, Formats: tc.formats}
+			raw, err := json.Marshal(formatsPayload("vid", info, tc.maxRes, true, true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal(raw, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			best, _ := decoded["bestItags"].(map[string]any)
+			if best["bestVideo"] != tc.want {
+				t.Errorf("bestItags.bestVideo = %v, want %v (bestItags %v)", best["bestVideo"], tc.want, best)
+			}
+			var data tui.FormatsData
+			if err := json.Unmarshal(raw, &data); err != nil {
+				t.Fatal(err)
+			}
+			if float64(data.BestItags.BestVideo) != tc.want {
+				t.Errorf("the TUI decoded BestVideo %d, want %v", data.BestItags.BestVideo, tc.want)
 			}
 		})
 	}
