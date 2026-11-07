@@ -114,8 +114,8 @@ func TestUnclearProbeCostsOneFullFetchPerInterval(t *testing.T) {
 
 // The schedule probe is what sees a stream the cookied probe cannot read go
 // live, and its answer gets the confirming full fetch on that same poll, so a
-// go-live is not an instant slower than when every poll made the full fetch. An
-// answer that says the stream is over goes the same way.
+// go-live that probe can see is not an instant slower than when every poll made
+// the full fetch. An answer that says the stream is over goes the same way.
 //
 // Mutants: a begun answer not due a full fetch (the wait runs to the next half
 // hour); no schedule probe in the arm (likewise).
@@ -150,6 +150,40 @@ func TestUnclearProbeConfirmsWhatTheScheduleProbeSeesBegin(t *testing.T) {
 				t.Errorf("the last poll made %s, want status_auth,schedule,full:%s", got, run)
 			}
 		})
+	}
+}
+
+// A go-live the schedule probe is refused too is seen only by the cascade's
+// other clients, so it waits for the next fetch due. That is the price of not
+// making the fetch on every poll, and this pins its bound: the half-hourly fetch
+// finds the stream, and nothing is later than that.
+//
+// Mutant: the fetch due only on a spell's first answer (the wait runs to the
+// budget).
+func TestUnclearProbeSeesAGoLiveTheScheduleProbeCannotAtTheNextFetchDue(t *testing.T) {
+	const begins = 5 * time.Minute
+	run := driveWaitForLive(t, 2*time.Minute, 2*fullFetchInterval, func(start time.Time) waitFakes {
+		return waitFakes{
+			signedIn: true,
+			status:   membersArmProbe,
+			schedule: func(time.Duration) (*youtube.VideoInfo, error) { return loginRequiredAnswer(), nil },
+			full: func(at time.Duration) (*youtube.VideoInfo, error) {
+				if at < begins {
+					return loginRequiredAnswer(), nil
+				}
+				return liveAnswer(start), nil
+			},
+		}
+	})
+	if run.result == nil || !run.result.ShouldDownload {
+		t.Fatalf("the wait ended with %+v at %v, want the download:%s", run.result, run.returned, run)
+	}
+	fulls := fullCalls(run)
+	if len(fulls) != 2 || fulls[0] >= begins {
+		t.Fatalf("full fetches at %v, want the spell's first ahead of %v and the one that found it:%s", fulls, begins, run)
+	}
+	if gap := fulls[1] - fulls[0]; gap < fullFetchInterval || gap > fullFetchInterval+time.Minute {
+		t.Errorf("the go-live was found %v after the first fetch, want within a poll of %v:%s", gap, fullFetchInterval, run)
 	}
 }
 

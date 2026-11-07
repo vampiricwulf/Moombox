@@ -285,12 +285,15 @@ func answeredFetch(info *youtube.VideoInfo) bool {
 // live and VOD arms make when the status probe says the stream has begun,
 // and the one the default arm makes while the cookied probe cannot read the
 // stream (membersOnly), which confirms a stream it cannot see: once YouTube has
-// refused one, the next is made at the taper's next instant counted from the
+// refused one, the next waits for the taper's next instant counted from the
 // spell's first refused confirmation (confirmationHoldAfter), from two
-// minutes to rateLimitRetryInterval, under the wait's progress line, and the arms read the probe's answer as
-// nothing until then. The loop's probe timer wakes at the hold's end
-// (heldFor), so the confirmation is made then, not on the first probe past
-// it. The periodic full fetch keeps its own half-hourly cadence. A refusal is
+// minutes to rateLimitRetryInterval, under the wait's progress line, and the
+// arms read the probe's answer as nothing until then. The loop's probe timer
+// wakes at the hold's end (heldFor), so the live and VOD arms confirm then, not
+// on the first probe past it. The default arm does so only while its schedule
+// probe says the stream has begun: otherwise nothing is due until its next
+// half-hourly fetch, and the hold is only a floor under that one.
+// The periodic full fetch keeps its own half-hourly cadence. A refusal is
 // the verdict (noteFetch) or a 429 on the whole cascade, the limit's HTTP
 // form (noteFetchErr). A spell whose counted refusals have lasted
 // rateLimitCap, rateLimitCapRefusals of them at least, ends the job

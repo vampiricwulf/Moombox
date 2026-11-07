@@ -682,8 +682,12 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				// once; every fullFetchInterval, which bounds what a refusal that
 				// never settles can cost; and when the one-call schedule probe,
 				// asked on the polls between, says the stream has begun. That
-				// probe is what sees a go-live here, but only the full fetch may
-				// act on it or give up (the periodic fetch's comment above).
+				// probe is what sees a go-live on those polls. A go-live it is
+				// refused too waits for the next fetch due, since the fetch has
+				// clients the probe does not, which costs up to fullFetchInterval
+				// of the stream's start where there is no DVR to go back through.
+				// Only the full fetch may act on the probe's answer or give up
+				// (the periodic fetch's comment above).
 				//
 				// A rate limit holds this fetch off as it holds the live and VOD
 				// arms' (loopRateLimit): left out, a refusal that read live wrote
