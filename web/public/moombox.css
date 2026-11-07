@@ -2663,6 +2663,19 @@ sl-progress-bar {
 }
 
 /* Segment indicator bar (multi-segment playback) */
+/* The unplayable-audio notice under the player (owner decision PR-R7). */
+.player-audio-notice {
+  margin: 6px 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--sl-color-warning-600);
+  background: var(--sl-color-warning-50);
+  color: var(--sl-color-neutral-800);
+  font-size: var(--sl-font-size-small);
+}
+.player-audio-notice[hidden] {
+  display: none;
+}
+
 .segment-indicator {
     display: flex;
     height: 20px;

@@ -103,6 +103,22 @@ test("addVideo posts Twitch video lists and collections as listings", { skip }, 
   assert.ok(toasts.some((t) => t.includes("Queued 2 Twitch VODs, 1 already queued")), JSON.stringify(toasts));
 });
 
+// Owner decision PR-M9: a listing some of whose VODs could not be queued
+// says how many, as a warning toast, where it was a green "Queued N".
+// MUTANT: data.failed not read (no "could not be queued"); the toast left
+// "success".
+test("a Twitch listing names the VODs that could not be queued", { skip }, async () => {
+  const h = await harness.makeApp({
+    routes: { "POST /api/jobs": () => ({ listed: 5, added: 2, skipped: 1, failed: 2 }) },
+  });
+  h.document.getElementById("video-url-input").value = "https://www.twitch.tv/spamfish/videos?filter=archives";
+  await h.app.addVideo();
+  const toast = h.toasts().find((t) => t.textContent.includes("Queued 2 Twitch VODs"));
+  assert.ok(toast, JSON.stringify(h.toasts().map((t) => t.textContent)));
+  assert.ok(toast.textContent.includes("Queued 2 Twitch VODs, 1 already queued, 2 could not be queued"), toast.textContent);
+  assert.equal(toast.getAttribute("variant") ?? toast.variant, "warning");
+});
+
 // A pasted clip is a job (owner decision D26): addVideo posts it by its slug,
 // case kept, with twitchType "clip".
 // MUTANT: the clip refusal restored in addVideo — nothing is posted.

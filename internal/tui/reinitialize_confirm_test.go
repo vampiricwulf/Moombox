@@ -1,0 +1,109 @@
+package tui
+
+import (
+	"slices"
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
+)
+
+// TestReinitializeIsConfirmGatedAndNamesWhatItDeletes pins owner decision
+// PR-M1 in the TUI: A I no longer reinitializes on two keypresses. "a i"
+// arms a confirm whose line names what the reset deletes, from the
+// ReinitializeSummary callback for the job the prompt names; only the third
+// "i" runs OnReinitializeJob. A batch asks the callback once for the jobs
+// it will act on, and its line names their totals.
+//
+// Mutants: NeedsConfirm dropped from A I (the second key already
+// reinitializes); ConfirmDetail not wired to ReinitializeSummary, or
+// confirmDetail not appended (the line lacks "deletes"); the batch passing
+// the whole selection rather than the eligible jobs (the Finished one is
+// asked about).
+func TestReinitializeIsConfirmGatedAndNamesWhatItDeletes(t *testing.T) {
+	press := func(app *App, r rune) {
+		app.handleKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	app := NewApp()
+	var reinit []string
+	var asked [][]string
+	app.OnReinitializeJob = func(id string) { reinit = append(reinit, id) }
+	app.ReinitializeSummary = func(ids []string) string {
+		asked = append(asked, append([]string(nil), ids...))
+		return "deletes 2 set-aside recordings"
+	}
+	app.taskList.SetJobs([]*database.Job{
+		{ID: "a", Title: "Alpha", Status: database.StatusError, CreatedAt: "2026-10-04T10:00:00Z"},
+		{ID: "b", Title: "Beta", Status: database.StatusCancelled, CreatedAt: "2026-10-04T09:00:00Z"},
+		{ID: "c", Title: "Gamma", Status: database.StatusFinished, CreatedAt: "2026-10-04T08:00:00Z"},
+	})
+
+	press(app, 'a')
+	press(app, 'i')
+	if len(reinit) != 0 {
+		t.Fatalf("A I reinitialized %v without a confirm", reinit)
+	}
+	if !strings.Contains(app.feedback.msg, `Press I to confirm reinit "Alpha": deletes 2 set-aside recordings (3s)`) {
+		t.Errorf("confirm line = %q, want it to name what the reset deletes", app.feedback.msg)
+	}
+	if len(asked) != 1 || len(asked[0]) != 1 || asked[0][0] != "a" {
+		t.Errorf("summary asked for %v, want [[a]]", asked)
+	}
+	press(app, 'i')
+	if len(reinit) != 1 || reinit[0] != "a" {
+		t.Fatalf("A I I reinitialized %v, want [a]", reinit)
+	}
+
+	// A batch: the line names the totals of the jobs it will act on.
+	reinit, asked = nil, nil
+	for _, id := range []string{"a", "b", "c"} {
+		app.taskList.ToggleSelection(id)
+	}
+	press(app, 'a')
+	press(app, 'i')
+	if len(reinit) != 0 {
+		t.Fatalf("batch A I reinitialized %v without a confirm", reinit)
+	}
+	if !strings.Contains(app.feedback.msg, "Press I to confirm reinit 2 jobs: deletes 2 set-aside recordings (3s)") {
+		t.Errorf("batch confirm line = %q", app.feedback.msg)
+	}
+	if len(asked) == 1 {
+		slices.Sort(asked[0])
+	}
+	if len(asked) != 1 || strings.Join(asked[0], ",") != "a,b" {
+		t.Errorf("batch summary asked for %v, want the two reinitializable jobs", asked)
+	}
+	press(app, 'i')
+	slices.Sort(reinit)
+	if strings.Join(reinit, ",") != "a,b" {
+		t.Errorf("batch A I I reinitialized %v, want a and b", reinit)
+	}
+}
+
+// TestActionMenuReinitializeFooterNamesWhatItDeletes: the menu's own confirm
+// for A I — the second Enter on the job — says what the reset deletes, from
+// the same ConfirmDetail, asked once the first Enter armed it.
+//
+// Mutant: the footer not carrying confirmDetail.
+func TestActionMenuReinitializeFooterNamesWhatItDeletes(t *testing.T) {
+	m := NewActionMenuModel()
+	m.SetSize(120, 40)
+	job := &database.Job{ID: "a", Title: "Alpha", Status: database.StatusError}
+	m.SetJobs([]*database.Job{job})
+	m.Open([]ActionMenuItem{{Chord: "A I", Label: "Reinitialize Job", Category: "Action", NeedsJob: true, NeedsConfirm: true,
+		ConfirmDetail: func(ids []string) string { return "deletes 3 recorded parts (" + strings.Join(ids, ",") + ")" }}})
+	m.skipMainForward()
+	m.HandleKey(keyEnter) // pick the action
+	m.HandleKey(keyEnter) // pick the job: arms the confirm
+	if !m.jobConfirm {
+		t.Fatal("premise lost: the first Enter on the job did not arm the confirm")
+	}
+	// The footer wraps inside the box: read its words in order.
+	words := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(m.View()), "│", " ")), " ")
+	if v := words; !strings.Contains(v, "deletes 3 recorded parts (a)") {
+		t.Errorf("menu confirm footer lacks what the reset deletes:\n%s", v)
+	}
+}

@@ -22,6 +22,9 @@ var runtimeOnlyJobFields = []string{
 	"ParkReason", "ParkIdentity", "NotificationMsgs",
 	// Written at finalize (owner decision CJ-3).
 	"JoinOffsetSeconds",
+	// LiveEdgeReason is the worker's, written when a capture falls to the
+	// live edge (owner decision PR-R2): never a creation field.
+	"LiveEdgeReason",
 }
 
 // AddJob's INSERT names a fixed column list, so a Job field outside it takes

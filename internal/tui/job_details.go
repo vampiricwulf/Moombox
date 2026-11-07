@@ -36,6 +36,9 @@ type JobDetailsModel struct {
 	// resize, and the answer comes off the disk. Cleared by SetJob on a job
 	// switch so a stale summary is never rendered under a new job.
 	asides AsideSummary
+	// gapFill is the selected job's archive-VOD gap-fill (owner decision
+	// PR-R5), pushed by the App from its JobGapFill callback; nil for none.
+	gapFill *GapFillView
 
 	// Marquee for scrolling the title value when it overflows.
 	marquee Marquee
@@ -139,6 +142,7 @@ func (m *JobDetailsModel) SetJob(job *database.Job) {
 		// the new one straight after this call; until then the panel says
 		// nothing rather than something false.
 		m.asides = AsideSummary{}
+		m.gapFill = nil
 	}
 
 	// Transient view state (progress overlay, scroll position, marquee
@@ -367,6 +371,80 @@ func (s AsideSummary) sameAs(other AsideSummary) bool {
 	return true
 }
 
+// GapFillView is a job's archive-VOD gap-fill as the details panel reads it:
+// internal/worker's GapFillState re-declared, as AsideEntry is, so the TUI
+// does not import the worker. State is "pending", "filled" or "kept".
+type GapFillView struct {
+	State  string
+	Spans  int
+	Until  string // RFC 3339, while pending
+	Reason string
+}
+
+// SetGapFill gives the panel the selected job's gap-fill state. A no-op when
+// nothing changed.
+func (m *JobDetailsModel) SetGapFill(g *GapFillView) {
+	if (g == nil && m.gapFill == nil) || (g != nil && m.gapFill != nil && *g == *m.gapFill) {
+		return
+	}
+	m.gapFill = g
+	m.buildRows()
+	m.updateViewportContent()
+}
+
+// liveEdgeLine is the details line for a live YouTube capture that recorded
+// from the live edge (owner decision PR-R2), the dashboard's liveEdgeText
+// (web/public/modules/utils.js): the stored reason and, once the finalize
+// wrote it, where in the broadcast the recording joined. "" for a capture
+// with no reason, and for one whose archive records from 0 after all.
+func liveEdgeLine(j *database.Job) string {
+	if j == nil || j.LiveEdgeReason == "" {
+		return ""
+	}
+	if j.JoinOffsetSeconds == nil {
+		return "Recorded from the live edge: " + j.LiveEdgeReason
+	}
+	if *j.JoinOffsetSeconds <= 0 {
+		return ""
+	}
+	return "Recorded from the live edge: " + j.LiveEdgeReason + ", joined " + chapterClock(*j.JoinOffsetSeconds) + " in"
+}
+
+// gapFillLine is the details line for a job's gap-fill (owner decision
+// PR-R5), the dashboard's gapFillText: pending with its spans and deadline
+// (local time) and why it still waits, then filled or kept and why.
+func gapFillLine(g *GapFillView, now time.Time) string {
+	if g == nil {
+		return ""
+	}
+	n := fmt.Sprintf("%d spans", g.Spans)
+	if g.Spans == 1 {
+		n = "1 span"
+	}
+	switch g.State {
+	case "pending":
+		line := "Gap-fill pending: " + n
+		if _, err := time.Parse(time.RFC3339, g.Until); err == nil {
+			line += ", until " + formatDateStrRelative(g.Until, now)
+		}
+		if g.Reason != "" {
+			line += " (" + g.Reason + ")"
+		}
+		return line
+	case "filled":
+		if g.Reason != "" {
+			return "Gap-fill: filled " + n + " — " + g.Reason
+		}
+		return "Gap-fill: filled " + n
+	case "kept":
+		if g.Reason != "" {
+			return "Gap-fill: kept as recorded: " + g.Reason
+		}
+		return "Gap-fill: kept as recorded"
+	}
+	return ""
+}
+
 // SetAsides gives the panel the selected job's set-aside summary. A no-op when
 // nothing changed.
 func (m *JobDetailsModel) SetAsides(s AsideSummary) {
@@ -421,6 +499,14 @@ func (m *JobDetailsModel) buildRows() {
 		m.addField("Type", "VOD")
 	} else {
 		m.addField("Type", "Live")
+	}
+	// A late start and the gap-fill (owner decisions PR-R2, PR-R5), as the
+	// dashboard's details dialog shows them.
+	if line := liveEdgeLine(j); line != "" {
+		m.addFieldColor("Start", line, ColorWarning)
+	}
+	if line := gapFillLine(m.gapFill, time.Now()); line != "" {
+		m.addField("Gap-fill", line)
 	}
 	if isTwitch {
 		m.addFieldColor("Platform", "Twitch", ColorTwitch)

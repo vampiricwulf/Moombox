@@ -1,7 +1,7 @@
 /**
  * Player Controller — Video player + chat replay
  */
-import { formatMsToTime, formatTimestamp, isTypingInInput, safePlay, serverErrorMessage } from "./utils.js";
+import { formatMsToTime, formatTimestamp, isTypingInInput, safePlay, serverErrorMessage, unplayableAudioText } from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
 import {
   normalizeOffsetMs,
@@ -1061,6 +1061,33 @@ export class PlayerController {
   }
 
   /**
+   * Say when the browser cannot play the archive's audio (owner decision
+   * PR-R7): GET /api/jobs/{id}/audio-info names the codec ffprobe reads, and
+   * the video element's canPlayType judges it (unplayableAudioText). The
+   * previous job's notice goes at once; a failed fetch, or an answer for a
+   * job no longer selected, shows nothing.
+   */
+  async _checkAudioPlayable(jobId, selectionId) {
+    const notice = document.getElementById("player-audio-notice");
+    if (!notice) return;
+    notice.hidden = true;
+    notice.textContent = "";
+    let info;
+    try {
+      const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/audio-info`);
+      if (!res.ok) return;
+      info = await res.json();
+    } catch {
+      return;
+    }
+    if (this._selectionSeq !== selectionId) return;
+    const video = document.getElementById("player-video");
+    const text = unplayableAudioText(info, (mime) => (video?.canPlayType ? video.canPlayType(mime) : "maybe"));
+    notice.textContent = text;
+    notice.hidden = !text;
+  }
+
+  /**
    * Build a segment indicator bar showing quality changes below the video.
    */
   buildSegmentIndicator() {
@@ -1458,6 +1485,8 @@ export class PlayerController {
     // source is already assigned, and nothing else waits on them.
     this._setChapters([]);
     this._loadChapters(jobId, selectionId);
+    // So is the audio check, the same way (owner decision PR-R7).
+    this._checkAudioPlayable(jobId, selectionId);
 
     // Fetch fresh watch state (not cached like the job endpoint)
     this._clearWatchTracking();

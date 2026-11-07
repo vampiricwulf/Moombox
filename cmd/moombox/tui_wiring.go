@@ -230,6 +230,21 @@ func (s *runState) runTUI() {
 	app.OnReinitializeJob = func(jobID string) {
 		s.dlWorker.ReinitializeJob(jobID)
 	}
+	app.ReinitializeSummary = func(jobIDs []string) string {
+		var base string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			base = c.Paths.EffectiveStagingDir()
+		})
+		var total worker.ReinitializePreview
+		for _, id := range jobIDs {
+			job, err := s.db.GetJob(id)
+			if err != nil || job == nil {
+				continue
+			}
+			total.Add(worker.PreviewReinitialize(s.db, base, job))
+		}
+		return total.Summary()
+	}
 	app.OnMuxJob = func(jobID string) error {
 		return s.dlWorker.MuxJob(jobID)
 	}
@@ -253,6 +268,17 @@ func (s *runState) runTUI() {
 			base = c.Paths.EffectiveStagingDir()
 		})
 		return worker.HasUnmuxedParts(s.db, base, jobID)
+	}
+	app.JobGapFill = func(jobID string) *tui.GapFillView {
+		job, err := s.db.GetJob(jobID)
+		if err != nil || job == nil {
+			return nil
+		}
+		g := worker.TwitchGapFillStateOf(s.db, job)
+		if g == nil {
+			return nil
+		}
+		return &tui.GapFillView{State: g.State, Spans: g.Spans, Until: g.Until, Reason: g.Reason}
 	}
 	app.JobAsides = func(jobID string) tui.AsideSummary {
 		report, err := s.dlWorker.Asides(jobID)

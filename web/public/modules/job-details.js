@@ -2,7 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, DELETE_STATUSES } from "./utils.js";
+import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, DELETE_STATUSES } from "./utils.js";
 
 /** A running trim's progress as the whole percentage its bar shows. */
 function trimPercent(progress) {
@@ -183,8 +183,14 @@ export class JobDetailsController {
       job.keptChatSidecar = !!enriched.keptChatSidecar;
       job.unmuxedParts = !!enriched.unmuxedParts;
       job.muxGaps = Array.isArray(enriched.muxGaps) ? enriched.muxGaps : [];
+      // The gap-fill state is computed too (worker.TwitchGapFillStateOf):
+      // null, not absent, for a job with none, so _preserveStagingFields
+      // does not carry an earlier answer over it.
+      job.gapFill = enriched.gapFill || null;
       // Re-evaluate button visibility if the dialog is still on this job
       if (this.app.selectedJobId === jobId && document.getElementById("details-dialog").open) {
+        const content = document.getElementById("job-details-content");
+        if (content) this.syncTextRow(content, "gap-fill", "Gap-fill:", gapFillText(job));
         if (job.asides.length > 0 || job.muxGaps.length > 0) {
           // The sections are part of the rendered body, not static elements,
           // so they can only appear on a rebuild. Rare by construction: only a
@@ -197,6 +203,40 @@ export class JobDetailsController {
         }
       }
     } catch { /* network blip — buttons stay hidden, same as before the fetch */ }
+  }
+
+  /**
+   * syncTextRow keeps one conditional text row of the details body in step
+   * with text: created (above the Type row, where the incomplete-tail badge
+   * goes) when text appears, patched when it changes, removed when it is "".
+   */
+  syncTextRow(content, field, label, text) {
+    const value = content.querySelector(`[data-field="${field}"]`);
+    if (!text) {
+      value?.closest(".details-row")?.remove();
+      return;
+    }
+    if (value) {
+      if (value.textContent !== text) value.textContent = text;
+      return;
+    }
+    let typeRow = null;
+    for (const row of content.querySelectorAll(".details-row")) {
+      const l = row.querySelector(".details-label");
+      if (l && l.textContent === "Type:") { typeRow = row; break; }
+    }
+    if (!typeRow) return;
+    const newRow = document.createElement("div");
+    newRow.className = "details-row";
+    const labelEl = document.createElement("span");
+    labelEl.className = "details-label";
+    labelEl.textContent = label;
+    const valueEl = document.createElement("span");
+    valueEl.className = "details-value";
+    valueEl.dataset.field = field;
+    valueEl.textContent = text;
+    newRow.append(labelEl, valueEl);
+    typeRow.parentNode.insertBefore(newRow, typeRow);
   }
 
   // Update job details without rebuilding logs section
@@ -326,6 +366,21 @@ export class JobDetailsController {
       }
     } else if (!shouldShowIncompleteTail && incompleteTailValue) {
       incompleteTailValue.closest(".details-row")?.remove();
+    }
+
+    // The late-start and gap-fill lines (owner decisions PR-R2, PR-R5): set
+    // by a job_update long after the dialog opened, so, like the
+    // incomplete-tail badge above, each is created, patched or removed here
+    // rather than only drawn at open. The live-edge reason is a column the
+    // raw row carries. The gap-fill is computed (worker.TwitchGapFillStateOf)
+    // and only GET /api/jobs/{id} answers it — a WS row carries the value
+    // fetched at open (_preserveStagingFields) — so while that says pending,
+    // a job_update for the open job (the fill's re-finalize writes one) asks
+    // again and the row moves on to filled or kept.
+    this.syncTextRow(content, "live-edge", "Start:", liveEdgeText(job));
+    this.syncTextRow(content, "gap-fill", "Gap-fill:", gapFillText(job));
+    if (job.gapFill?.state === "pending" && this.app.selectedJobId === job.id) {
+      this._fetchStagingFields(job.id);
     }
 
     // Update speed if present
@@ -651,6 +706,16 @@ export class JobDetailsController {
           <div class="details-row">
             <span class="details-label"></span>
             <span class="details-value" data-field="incomplete-tail"><sl-badge variant="warning">Incomplete tail</sl-badge></span>
+          </div>` : ""}
+          ${liveEdgeText(job) ? `
+          <div class="details-row">
+            <span class="details-label">Start:</span>
+            <span class="details-value" data-field="live-edge">${this.app.escapeHtml(liveEdgeText(job))}</span>
+          </div>` : ""}
+          ${gapFillText(job) ? `
+          <div class="details-row">
+            <span class="details-label">Gap-fill:</span>
+            <span class="details-value" data-field="gap-fill">${this.app.escapeHtml(gapFillText(job))}</span>
           </div>` : ""}
           ${
             job.isVod
@@ -1034,6 +1099,9 @@ export class JobDetailsController {
       }
       if (job.muxGaps === undefined && old.muxGaps !== undefined) {
         job.muxGaps = old.muxGaps;
+      }
+      if (job.gapFill === undefined && old.gapFill !== undefined) {
+        job.gapFill = old.gapFill;
       }
     }
   }

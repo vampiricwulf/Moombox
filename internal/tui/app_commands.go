@@ -179,11 +179,19 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 			var res struct {
 				Added   int `json:"added"`
 				Skipped int `json:"skipped"`
+				Failed  int `json:"failed"`
 			}
 			_ = json.NewDecoder(resp.Body).Decode(&res)
 			label = fmt.Sprintf("Queued %d Twitch VODs", res.Added)
 			if res.Skipped > 0 {
 				label += fmt.Sprintf(", %d already queued", res.Skipped)
+			}
+			// The VODs the server could not queue (owner decision PR-M9):
+			// the line said "Queued N" in green while they were dropped,
+			// each one named only in the log (QueueTwitchVideos).
+			if res.Failed > 0 {
+				label += fmt.Sprintf(", %d could not be queued", res.Failed)
+				return addVideoResultMsg{VideoID: input, Feedback: label, Warn: true}
 			}
 		} else if platform == "twitch" {
 			if strings.HasPrefix(input, "tw_clip_") {

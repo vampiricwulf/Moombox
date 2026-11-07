@@ -271,6 +271,18 @@ type DownloadResult struct {
 	// numbers count in. The finalize's join point (joinOffsetSeconds, owner
 	// decision CJ-3) multiplies an MPEG-TS capture's first sequence by it.
 	SegmentDurationSec int
+	// LiveEdgeReason is set by the setup fallbacks that put a live capture's
+	// first setup on the live HLS playlist instead of from the start, saying
+	// why (owner decision PR-R2): setupMarathonOr's age arm and
+	// setupOrFallback's DRM, missing_pot and no-JS arms — the DRM arm also
+	// for a post-live stream, whose HLS holds only the last ~2 h
+	// (drmLiveEdgeReason). ExecuteWithChat records it on the row and
+	// notifies once (recordLiveEdgeStart), for the job's first part only.
+	// Empty for every capture that records from the start. A live stream
+	// whose extraction offers no from-start format at all is put on HLS by
+	// selectDownloadStrategy, not by a setup fallback, and is not marked:
+	// the plan (PR-R2) names only the setup fallbacks.
+	LiveEdgeReason string
 }
 
 // invalidate403Caches clears cipher solver state, POT caches, and visitor data

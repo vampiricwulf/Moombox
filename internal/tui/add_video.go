@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/table"
 	"charm.land/bubbles/v2/textinput"
@@ -106,11 +107,12 @@ func notesSegmented(status string) bool {
 	return status != "live" && status != "upcoming"
 }
 
-// preselectedRow is the row a format table's cursor opens on: the one the
-// dashboard's Add dialog preselects (populateFormatSelects,
-// web/public/app.js), so Enter on a freshly opened table takes the same
-// rendition there as a submit with the dashboard's defaults — the owner's
-// decision on the picker's first follow-up. picks are the server's Best
+// preselectedRow is the row a format table's cursor opens on, hidden while
+// the table is on Auto (owner decision PR-R8: Enter on a freshly opened
+// table takes Auto, as the dashboard's untouched selects do) and shown there
+// by the operator's first navigation key (startPicking) — the Best row the
+// owner's decision on the picker's first follow-up put it on, so a choice
+// starts from what Auto would take. picks are the server's Best
 // itags in the dashboard's order, WEBM ahead of MP4 and, for audio, the
 // [Best] pick (BestAudio, automatic selection's youtube.AudioRank pick, of
 // any codec — owner decision FQ-1) ahead of Opus ahead of AAC, which only an
@@ -186,6 +188,14 @@ type AddVideoModel struct {
 	// Format tables (built when formats arrive)
 	videoTable table.Model
 	audioTable table.Model
+	// videoPicking / audioPicking: the operator has moved into that table
+	// to choose a rendition. Until then the table is on Auto (owner
+	// decision PR-R8): no row is drawn highlighted, and Enter takes Auto —
+	// nothing is pinned unless chosen. The first navigation key only shows
+	// the cursor where it opened, on the Best row (preselectedRow); the
+	// next ones move it, and Enter then takes the highlighted row.
+	videoPicking bool
+	audioPicking bool
 
 	// Timestamps (advanced)
 	startTimeInput string
@@ -253,7 +263,40 @@ func (m *AddVideoModel) reset() {
 func (m *AddVideoModel) SetFormats(f *FormatsData) {
 	m.formats = f
 	m.loading = false
+	m.videoPicking, m.audioPicking = false, false
 	m.buildFormatTables()
+}
+
+// autoTableStyles is a format table's styles while it is on Auto: the
+// cursor's row drawn as any other, so no rendition reads as chosen.
+func autoTableStyles() table.Styles {
+	s := formatTableStyles()
+	s.Selected = s.Cell
+	return s
+}
+
+// startPicking leaves Auto for the step's table on the operator's first
+// navigation key: the cursor, on the Best row, is drawn from now on and the
+// key itself is spent showing it. It reports whether it did.
+func (m *AddVideoModel) startPicking(msg tea.Msg) bool {
+	kp, ok := msg.(tea.KeyPressMsg)
+	if !ok {
+		return false
+	}
+	t, picking := &m.videoTable, &m.videoPicking
+	if m.step == AddStepAudioFormat {
+		t, picking = &m.audioTable, &m.audioPicking
+	}
+	if *picking {
+		return false
+	}
+	km := t.KeyMap
+	if !key.Matches(kp, km.LineUp, km.LineDown, km.PageUp, km.PageDown, km.HalfPageUp, km.HalfPageDown, km.GotoTop, km.GotoBottom) {
+		return false
+	}
+	*picking = true
+	t.SetStyles(formatTableStyles())
+	return true
 }
 
 // noteColumnWidth fits the longest Note formatNote writes, "Best WEBM,
@@ -297,7 +340,6 @@ func (m *AddVideoModel) buildFormatTables() {
 		return
 	}
 
-	ts := formatTableStyles()
 	noteSegmented := notesSegmented(m.formats.StreamStatus)
 
 	// Video table
@@ -343,7 +385,7 @@ func (m *AddVideoModel) buildFormatTables() {
 		table.WithRows(videoRows),
 		table.WithHeight(min(8, len(videoRows))),
 		table.WithFocused(true),
-		table.WithStyles(ts),
+		table.WithStyles(autoTableStyles()),
 	)
 	vf := m.formats.VideoFormats
 	m.videoTable.SetCursor(preselectedRow(len(vf), func(i int) (int, bool) {
@@ -391,7 +433,7 @@ func (m *AddVideoModel) buildFormatTables() {
 		table.WithRows(audioRows),
 		table.WithHeight(min(8, len(audioRows))),
 		table.WithFocused(true),
-		table.WithStyles(ts),
+		table.WithStyles(autoTableStyles()),
 	)
 	af := m.formats.AudioFormats
 	m.audioTable.SetCursor(preselectedRow(len(af), func(i int) (int, bool) {
@@ -445,7 +487,11 @@ func (m *AddVideoModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, cmd)
 		}
 	}
-	// Route table events during format selection
+	// Route table events during format selection. A table still on Auto
+	// spends the first navigation key showing its cursor (startPicking).
+	if !m.loading && m.formats != nil && (m.step == AddStepVideoFormat || m.step == AddStepAudioFormat) && m.startPicking(msg) {
+		return tea.Batch(cmds...)
+	}
 	if !m.loading && m.formats != nil {
 		switch m.step {
 		case AddStepVideoFormat:
@@ -654,8 +700,22 @@ func (m *AddVideoModel) handleFormatStep(key string, isVideo bool) (string, stri
 		return "", ""
 
 	case keyEnter:
-		// Select the table's highlighted row
+		// Select the table's highlighted row — or Auto, while the operator
+		// has not moved into the table to choose one (owner decision PR-R8).
 		if m.formats == nil {
+			return "", ""
+		}
+		if picking := m.videoPicking; !isVideo {
+			picking = m.audioPicking
+			if !picking {
+				m.selectedAudioItag = nil
+				m.step = AddStepTimestamps
+				m.syncToTextInput()
+				return "", ""
+			}
+		} else if !picking {
+			m.selectedVideoItag = nil
+			m.step = AddStepAudioFormat
 			return "", ""
 		}
 		if isVideo {
@@ -926,7 +986,11 @@ func (m *AddVideoModel) renderFormatStep(w, h int, isVideo bool) string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, DimStyle.Render("A: Auto | N: None | Enter/1-9: Select | Esc: Back"))
+	if picking := m.videoPicking; (isVideo && !picking) || (!isVideo && !m.audioPicking) {
+		lines = append(lines, DimStyle.Render("Enter/A: Auto | ↑↓: Choose a row | N: None | 1-9: Select | Esc: Back"))
+	} else {
+		lines = append(lines, DimStyle.Render("A: Auto | N: None | Enter/1-9: Select | Esc: Back"))
+	}
 
 	return strings.Join(lines, "\n")
 }

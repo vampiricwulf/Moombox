@@ -137,6 +137,9 @@ type (
 	addVideoResultMsg struct {
 		VideoID  string
 		Feedback string
+		// Warn shows Feedback as a warning: a pasted Twitch listing some of
+		// whose VODs could not be queued (owner decision PR-M9).
+		Warn bool
 	}
 	fetchFormatsResultMsg struct {
 		VideoID string
@@ -657,7 +660,12 @@ type App struct {
 	OnSetWatched      func(ids []string, watched bool) error
 	OnResumeJob       func(jobID string)
 	OnReinitializeJob func(jobID string)
-	OnMuxJob          func(jobID string) error
+	// ReinitializeSummary says what reinitializing jobIDs would delete
+	// (worker.ReinitializePreview.Summary over their totals, owner decision
+	// PR-M1), for A I's confirm line. A disk probe: run when the confirm is
+	// armed, never when the menu opens. nil leaves the line as it was.
+	ReinitializeSummary func(jobIDs []string) string
+	OnMuxJob            func(jobID string) error
 	// OnRecoverAsides muxes the recordings the engine set aside for a job into
 	// their own files beside the archive (the A S chord). Deliberately NOT
 	// OnMuxJob: /mux and A M mean "mux the recording", and an aside overlaps
@@ -687,7 +695,12 @@ type App struct {
 	// dir still holds a chat capture. A DISK probe like HasStagingFiles and
 	// HasSegmentFiles beside it, so the same rule applies: it runs on
 	// SELECTION, never when the action menu opens (CORE-9).
-	JobAsides    func(jobID string) AsideSummary
+	JobAsides func(jobID string) AsideSummary
+	// JobGapFill reports a Finished live Twitch job's archive-VOD gap-fill
+	// (worker.TwitchGapFillStateOf, the job API's gapFill; owner decision
+	// PR-R5), nil for none. One row read; asked on selection, and only for
+	// a Finished live Twitch job, the only kind that has one.
+	JobGapFill   func(jobID string) *GapFillView
 	OnCreateTrim func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
 	OnDeleteTrim func(jobID, trimID string) error
 	OnOpenFolder func(jobID string)

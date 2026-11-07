@@ -585,7 +585,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case addVideoResultMsg:
 		if msg.Feedback != "" {
-			a.setFeedback(msg.Feedback)
+			if msg.Warn {
+				a.setFeedbackWithSeverity(msg.Feedback, severityWarning)
+			} else {
+				a.setFeedback(msg.Feedback)
+			}
 		}
 		// Only the dialog that sent this closes on it: one Esc'd during the
 		// request and reopened for the next video must not vanish under the
@@ -1709,6 +1713,16 @@ func (a *App) updateSelectedJob() {
 	// After SetJob: it clears the previous job's summary on a switch, and
 	// SetAsides is a no-op when nothing changed.
 	a.details.SetAsides(a.asidesFor(job))
+	a.details.SetGapFill(a.gapFillFor(job))
+}
+
+// gapFillFor is job's gap-fill for the details panel: asked of JobGapFill
+// only for a Finished live Twitch job, the only kind that has one.
+func (a *App) gapFillFor(job *database.Job) *GapFillView {
+	if job == nil || a.JobGapFill == nil || job.Platform != "twitch" || job.IsVod || job.Status != database.StatusFinished {
+		return nil
+	}
+	return a.JobGapFill(job.ID)
 }
 
 // routeComponentMsg forwards tea.Msg to the active dialog's embedded components

@@ -174,7 +174,12 @@ func TestAddVideoPickerDrawsEveryRow(t *testing.T) {
 // never preselects. Each table now opens on the row the dashboard
 // preselects (populateFormatSelects): the WEBM pick ahead of the MP4 one and
 // the Opus ahead of the AAC, the first that is intact, else the first that
-// exists; row 0 when there is no Best row. Enter takes it.
+// exists; row 0 when there is no Best row.
+//
+// Owner decision PR-R8 (superseding FQ-1's preselection): the tables open on
+// Auto. Enter on a freshly opened table takes Auto — nothing is pinned —
+// and the cursor's Best row is where the operator's first navigation key
+// shows the cursor, without moving it, so Enter then takes that row.
 //
 // Mutants (each run): no SetCursor on the video table, or on the audio one
 // (that table's rows open on 0); preselectedRow ignoring intact (the
@@ -186,7 +191,10 @@ func TestAddVideoPickerDrawsEveryRow(t *testing.T) {
 // automatic selection's pick of any codec) ahead of the codec picks, which
 // only an answer without BestAudio falls to (every earlier case). Mutant:
 // BestAudio dropped from the audio table's picks (the E-AC-3 case opens on
-// the Opus row, 1).
+// the Opus row, 1). PR-R8's mutants: Enter taking the highlighted row while
+// the table is on Auto (an itag is pinned on the untouched pass); the first
+// navigation key moving the cursor instead of showing it (the next row is
+// taken).
 func TestAddVideoPickerOpensOnTheBestRow(t *testing.T) {
 	v := func(itag int, mime string, height int, damaged, segmented bool) VideoFormat {
 		return VideoFormat{Itag: itag, MimeType: mime, Width: height * 16 / 9, Height: height, Damaged: damaged, Segmented: segmented}
@@ -258,9 +266,28 @@ func TestAddVideoPickerOpensOnTheBestRow(t *testing.T) {
 			if got := m.audioTable.Cursor(); got != tc.wantAudio {
 				t.Errorf("audio table opens on row %d, want %d", got, tc.wantAudio)
 			}
+			// Untouched, both tables stay on Auto.
 			m.View()
 			m.HandleKey(keyEnter)
 			m.View()
+			m.HandleKey(keyEnter)
+			if m.selectedVideoItag != nil || m.selectedAudioItag != nil {
+				t.Errorf("Enter on untouched tables pinned video %v, audio %v; want Auto (nil) for both", m.selectedVideoItag, m.selectedAudioItag)
+			}
+
+			// A navigation key shows the cursor on the Best row; Enter
+			// then takes it.
+			m = NewAddVideoModel()
+			m.Open()
+			m.SetSize(100, 40)
+			m.step = AddStepVideoFormat
+			m.SetFormats(&tc.formats)
+			down := tea.KeyPressMsg{Code: tea.KeyDown}
+			m.View()
+			m.UpdateComponents(down)
+			m.HandleKey(keyEnter)
+			m.View()
+			m.UpdateComponents(down)
 			m.HandleKey(keyEnter)
 			if m.selectedVideoItag == nil || *m.selectedVideoItag != tc.wantVideoI {
 				t.Errorf("Enter took video %v, want itag %d", m.selectedVideoItag, tc.wantVideoI)
@@ -281,8 +308,13 @@ func TestAddVideoPickerOpensOnTheBestRow(t *testing.T) {
 // and the operator's Down and Up from there move the highlight a drawn row
 // at a time, as the table's own scrolling always did.
 //
+// The table opens on Auto (owner decision PR-R8): no row is drawn
+// highlighted until the operator's first navigation key, which shows the
+// cursor on the Best row without moving it.
+//
 // Mutant: fitFormatTable without its MoveDown(0) (no row is drawn
-// highlighted, and the Best row is not drawn).
+// highlighted, and the Best row is not drawn); the table drawn with the
+// highlight while on Auto (a row is highlighted before any key).
 func TestAddVideoPickerDrawsTheBestRowHighlighted(t *testing.T) {
 	var formats FormatsData
 	for i := range 12 {
@@ -316,11 +348,18 @@ func TestAddVideoPickerDrawsTheBestRowHighlighted(t *testing.T) {
 				rows = append(rows, strings.Fields(strings.Trim(ansi.Strip(l), " │"))[0])
 			}
 		}
-		if len(rows) != 1 {
-			t.Fatalf("%d rows drawn highlighted, want one:\n%s", len(rows), ansi.Strip(strings.Join(raw, "\n")))
+		if len(rows) > 1 {
+			t.Fatalf("%d rows drawn highlighted, want at most one:\n%s", len(rows), ansi.Strip(strings.Join(raw, "\n")))
+		}
+		if len(rows) == 0 {
+			return ""
 		}
 		return rows[0]
 	}
+	if got := highlighted(); got != "" {
+		t.Errorf("row %s drawn highlighted while the table is on Auto, want none", got)
+	}
+	m.UpdateComponents(tea.KeyPressMsg{Code: tea.KeyDown}) // shows the cursor
 	if got := highlighted(); got != "11" {
 		t.Errorf("row %s drawn highlighted, want the Best row, 11", got)
 	}

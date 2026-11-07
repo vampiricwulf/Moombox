@@ -961,6 +961,125 @@ export function canResumeJob(job, { requireKnownStaging = false } = {}) {
 }
 
 /**
+ * liveEdgeText is the job-details line for a live YouTube capture that
+ * recorded from the live edge instead of the broadcast's start (owner
+ * decision PR-R2): "Recorded from the live edge: <reason>, joined 1:23:45 in"
+ * from the row's liveEdgeReason and joinOffsetSeconds, without the join when
+ * it is not known yet (the finalize writes it). "" for a capture with no
+ * reason, and for one whose archive records from 0 after all — a Resume
+ * that recorded from the start again. The TUI's twin is liveEdgeLine
+ * (internal/tui/job_details.go).
+ * @param {{liveEdgeReason?: string, joinOffsetSeconds?: number|null}} job
+ * @returns {string}
+ */
+export function liveEdgeText(job) {
+  const reason = job?.liveEdgeReason;
+  if (!reason) return "";
+  const join = job.joinOffsetSeconds;
+  if (join === 0) return "";
+  const joined = typeof join === "number" && join > 0 ? `, joined ${formatTimestamp(join)} in` : "";
+  return `Recorded from the live edge: ${reason}${joined}`;
+}
+
+/**
+ * gapFillText is the job-details line for a Finished live Twitch job's
+ * archive-VOD gap-fill (owner decision PR-R5), from the job API's gapFill
+ * field (worker.GapFillState): "Gap-fill pending: 2 spans, until <time>"
+ * while it waits (with why, when a look said), then "Filled 2 spans" or
+ * "Kept as recorded: <reason>". "" for a job with none. until renders in the
+ * viewer's locale, as the dialog's other timestamps do. The TUI's twin is
+ * gapFillLine (internal/tui/job_details.go).
+ * @param {{gapFill?: {state: string, spans?: number, until?: string, reason?: string}}} job
+ * @returns {string}
+ */
+export function gapFillText(job) {
+  const g = job?.gapFill;
+  if (!g || !g.state) return "";
+  const spans = Number(g.spans) || 0;
+  const n = `${spans} span${spans === 1 ? "" : "s"}`;
+  switch (g.state) {
+    case "pending": {
+      const until = g.until && !isNaN(Date.parse(g.until)) ? `, until ${new Date(g.until).toLocaleString()}` : "";
+      return `Gap-fill pending: ${n}${until}${g.reason ? ` (${g.reason})` : ""}`;
+    }
+    case "filled":
+      return `Gap-fill: filled ${n}${g.reason ? ` — ${g.reason}` : ""}`;
+    case "kept":
+      return `Gap-fill: kept as recorded${g.reason ? `: ${g.reason}` : ""}`;
+  }
+  return "";
+}
+
+/**
+ * The MIME type a browser's canPlayType is asked about for an archive audio
+ * codec as ffprobe names it (GET /api/jobs/{id}/audio-info), and the label
+ * the notice names it by. A codec not listed is not judged: no notice.
+ */
+const AUDIO_CODECS = {
+  aac: { mime: 'audio/mp4; codecs="mp4a.40.2"', label: "AAC" },
+  opus: { mime: 'audio/mp4; codecs="opus"', label: "Opus" },
+  eac3: { mime: 'audio/mp4; codecs="ec-3"', label: "E-AC-3" },
+  ac3: { mime: 'audio/mp4; codecs="ac-3"', label: "AC-3" },
+  mp3: { mime: "audio/mpeg", label: "MP3" },
+  flac: { mime: 'audio/mp4; codecs="flac"', label: "FLAC" },
+};
+
+/**
+ * unplayableAudioText is the player's notice for an archive whose audio the
+ * browser cannot play (owner decision PR-R7): Moombox keeps yt-dlp's audio
+ * ranking, which puts a 5.1 E-AC-3 track above stereo Opus and AAC, and most
+ * Chrome and Firefox builds cannot decode it, so the archive played in
+ * silence with nothing saying why. "" when the codec is unknown or canPlay
+ * — the video element's canPlayType — answers anything but "".
+ * @param {{codec?: string, channels?: number}} info
+ * @param {(mime: string) => string} canPlay
+ * @returns {string}
+ */
+export function unplayableAudioText(info, canPlay) {
+  const known = AUDIO_CODECS[info?.codec];
+  if (!known || canPlay(known.mime) !== "") return "";
+  const ch = Number(info.channels) || 0;
+  const layout = { 1: "mono", 2: "stereo", 6: "5.1", 8: "7.1" }[ch] || (ch > 0 ? `${ch} channels` : "");
+  const what = layout ? `${known.label}, ${layout}` : known.label;
+  return `This archive's audio (${what}) can't play in this browser; the file is fine. Open it in VLC or mpv.`;
+}
+
+/**
+ * reinitializeDeletesText is the clause a Reinitialize confirm names what the
+ * reset deletes with (owner decision PR-M1), from GET
+ * /api/jobs/{id}/reinitialize/preview — or the sum of several, for a batch.
+ * The Go twin is worker.ReinitializePreview.Summary, which the TUI's A I
+ * confirm line reads: the same words, sizes as formatBytes writes them.
+ * @param {{setAsideRecordings?: number, recordedParts?: number, recordedPartBytes?: number,
+ *          stagedFiles?: number, stagedBytes?: number, importedChapters?: number}} p
+ * @returns {string}
+ */
+export function reinitializeDeletesText(p) {
+  const n = (k) => Number(p?.[k]) || 0;
+  const plural = (count, one, many) => (count === 1 ? `1 ${one}` : `${count} ${many}`);
+  const parts = [];
+  if (n("setAsideRecordings") > 0) parts.push(plural(n("setAsideRecordings"), "set-aside recording", "set-aside recordings"));
+  if (n("recordedParts") > 0) parts.push(`${plural(n("recordedParts"), "recorded part", "recorded parts")} (${formatBytes(n("recordedPartBytes"))})`);
+  if (n("stagedFiles") > 0) parts.push(`${plural(n("stagedFiles"), "staged file", "staged files")} (${formatBytes(n("stagedBytes"))})`);
+  if (n("importedChapters") > 0) parts.push(plural(n("importedChapters"), "imported chapter", "imported chapters"));
+  if (parts.length === 0) return "deletes nothing recorded";
+  if (parts.length === 1) return `deletes ${parts[0]}`;
+  return `deletes ${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * sumReinitializePreviews adds several previews' counts, for a batch confirm.
+ * @param {object[]} previews
+ * @returns {object}
+ */
+export function sumReinitializePreviews(previews) {
+  const keys = ["setAsideRecordings", "recordedParts", "recordedPartBytes", "stagedFiles", "stagedBytes", "importedChapters"];
+  const out = Object.fromEntries(keys.map((k) => [k, 0]));
+  for (const p of previews) for (const k of keys) out[k] += Number(p?.[k]) || 0;
+  return out;
+}
+
+/**
  * streamUrl is the JS twin of the TUI's streamURL (internal/tui/app_actions.go,
  * the O C chord): the job's own url when it has one, else derived from the
  * platform. Twitch VOD ids carry a "tw_v" prefix on the wire. A Twitch live

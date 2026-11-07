@@ -66,44 +66,34 @@ test("the picker marks damaged and segmented renditions after their badges", { s
     ["251", "160kbps 48000Hz OPUS [Best OPUS]"],
     ["140", "128kbps 48000Hz AAC [Best AAC] [damaged]"],
   ]);
-  assert.equal(h.el("video-format-select").value, "248", "the intact WEBM badge is preselected");
-  assert.equal(h.el("audio-format-select").value, "251");
+  // Owner decision PR-R8: both selects start on Auto, whatever the badges.
+  assert.equal(h.el("video-format-select").value, "", "the video select starts on Auto");
+  assert.equal(h.el("audio-format-select").value, "", "the audio select starts on Auto");
 });
 
-// MUTANT: the preselection back to "the WEBM badge, else the MP4 one" — the
-// damaged WEBM fallback is preselected over an intact MP4, and the damaged
-// Opus over an intact AAC.
-test("the preselection goes to an intact badge before a marked one", { skip }, async () => {
+// Owner decision PR-R8, superseding FQ-1's preselection: the picker starts
+// both selects on Auto, so an untouched Advanced form pins nothing — a
+// preselected video itag turned it into a pinned job, and a pinned video
+// itag turns a live job's quality monitoring off. A select left on an
+// earlier video's rendition is cleared when the next video's formats load.
+// (The submit sends an itag only for a select that holds one.)
+//
+// MUTANT: the preselection back (either select holds a badge's itag); the
+// clear dropped (the earlier video's 248 survives the second load).
+test("the picker starts both selects on Auto", { skip }, async () => {
   const h = await harness.makeApp();
-  await h.app.populateFormatSelects({
-    videoFormats: [
-      video(313, 3840, 2160, WEBM, 20_000_000, { damaged: true }), // every WEBM is damaged
-      video(136, 1280, 720, MP4, 2_000_000),
-    ],
-    audioFormats: [
-      audio(251, OPUS, 160_000, { segmented: true }), // every Opus is segmented
-      audio(140, AAC, 128_000),
-    ],
-    bestItags: { bestWebmVideo: 313, bestMp4Video: 136, bestOpusAudio: 251, bestAacAudio: 140 },
-  });
-  assert.equal(h.el("video-format-select").value, "136");
-  assert.equal(h.el("audio-format-select").value, "140");
-});
+  const answer = {
+    videoFormats: [video(248, 1920, 1080, WEBM, 4_000_000), video(136, 1280, 720, MP4, 2_000_000)],
+    audioFormats: [audio(251, OPUS, 160_000), audio(140, AAC, 128_000)],
+    bestItags: { bestWebmVideo: 248, bestMp4Video: 136, bestOpusAudio: 251, bestAacAudio: 140, bestAudio: 251 },
+  };
+  await h.app.populateFormatSelects(answer);
+  assert.equal(h.el("video-format-select").value, "");
+  assert.equal(h.el("audio-format-select").value, "");
 
-// MUTANT: the preselection skipping a marked badge even when no intact one
-// exists — a live stream, every rendition segmented, preselects nothing.
-test("with every badge marked the preselection keeps the old order", { skip }, async () => {
-  const h = await harness.makeApp();
-  await h.app.populateFormatSelects({
-    videoFormats: [
-      video(303, 1920, 1080, WEBM, 6_000_000, { segmented: true }),
-      video(299, 1920, 1080, MP4, 6_000_000, { segmented: true }),
-    ],
-    audioFormats: [audio(140, AAC, 128_000, { segmented: true })],
-    bestItags: { bestWebmVideo: 303, bestMp4Video: 299, bestOpusAudio: null, bestAacAudio: 140 },
-  });
-  assert.equal(h.el("video-format-select").value, "303");
-  assert.equal(h.el("audio-format-select").value, "140");
+  h.el("video-format-select").value = "248"; // the operator picks one…
+  await h.app.populateFormatSelects(answer); // …then another video's formats load
+  assert.equal(h.el("video-format-select").value, "", "an earlier video's rendition survived the next load");
 });
 
 // The owner's third picker follow-up: while a stream is live or upcoming
@@ -111,14 +101,12 @@ test("with every badge marked the preselection keeps the old order", { skip }, a
 // exactly those — so " [segmented]" on every row said nothing. The mark is
 // left off for a live or upcoming streamStatus and kept for a VOD, a
 // finished stream (post_live) and a status the answer did not state. The
-// damaged mark, the badges and the preselection, which still passes a
-// segmented badge over, are the same for every status.
+// damaged mark and the badges are the same for every status, and both
+// selects start on Auto (owner decision PR-R8).
 //
 // MUTANT: the onAir test dropped, or reading "live" alone or "upcoming"
 // alone (that status's rows say segmented); "post_live" or "vod" read as on
-// air (their rows lose the mark); the preselection reading the mark as shown
-// rather than the server's flag (a live stream's segmented WEBM and Opus
-// badges are preselected).
+// air (their rows lose the mark).
 for (const [streamStatus, shown] of [
   ["live", false],
   ["upcoming", false],
@@ -151,8 +139,8 @@ for (const [streamStatus, shown] of [
       ["251", `160kbps 48000Hz OPUS [Best OPUS]${seg}`],
       ["140", "128kbps 48000Hz AAC [Best AAC]"],
     ]);
-    assert.equal(h.el("video-format-select").value, "136", "the intact MP4 badge, past the segmented WEBM one");
-    assert.equal(h.el("audio-format-select").value, "140", "the intact AAC badge, past the segmented Opus one");
+    assert.equal(h.el("video-format-select").value, "", "Auto, whatever the badges");
+    assert.equal(h.el("audio-format-select").value, "");
   });
 }
 
@@ -160,14 +148,13 @@ for (const [streamStatus, shown] of [
 // badged [Best] whatever its codec — a 5.1 E-AC-3 track the shared rank puts
 // above stereo Opus and AAC had no badge at all, and was labelled AAC (its
 // container). A track that is also its codec's pick carries both badges.
-// Owner decision FQ-1: the preselection follows [Best], so a submit with the
-// defaults takes the track an automatic download would.
+// The select itself starts on Auto (owner decision PR-R8); [Best] shows
+// what Auto takes.
 //
 // MUTANT: the [Best] badge dropped (the E-AC-3 row has none); the E-AC-3
 // label dropped (the row reads AAC); [Best] keyed on bestOpusAudio (the
-// Opus row carries it in the first case); the audio preselection back to
-// Opus, then AAC (the first case preselects 251).
-test("the automatic audio pick is badged [Best], and preselected", { skip }, async () => {
+// Opus row carries it in the first case).
+test("the automatic audio pick is badged [Best]", { skip }, async () => {
   const EAC3 = 'audio/mp4; codecs="ec-3"';
   for (const [bestAudio, want] of [
     [328, ["384kbps 48000Hz EC-3 [Best]", "160kbps 48000Hz OPUS [Best OPUS]", "128kbps 48000Hz AAC [Best AAC]"]],
@@ -181,21 +168,6 @@ test("the automatic audio pick is badged [Best], and preselected", { skip }, asy
       bestItags: { bestWebmVideo: 248, bestMp4Video: null, bestOpusAudio: 251, bestAacAudio: 140, bestAudio },
     });
     assert.deepEqual(options(h, "audio-format-select").map(([, text]) => text), want);
-    assert.equal(h.el("audio-format-select").value, String(bestAudio), "the preselection follows [Best]");
+    assert.equal(h.el("audio-format-select").value, "", "the select stays on Auto");
   }
-});
-
-// FQ-1's fallback: an answer with no bestAudio (null, or a server from
-// before it) preselects by the codec badges, Opus then AAC, as it always did.
-//
-// MUTANT: bestAudio read with no fallback (nothing is preselected).
-test("with no [Best] audio pick the preselection falls to the codec badges", { skip }, async () => {
-  const h = await harness.makeApp();
-  await h.app.populateFormatSelects({
-    streamStatus: "vod",
-    videoFormats: [video(248, 1920, 1080, WEBM, 4_000_000)],
-    audioFormats: [audio(251, OPUS, 160_000), audio(140, AAC, 128_000)],
-    bestItags: { bestWebmVideo: 248, bestMp4Video: null, bestOpusAudio: 251, bestAacAudio: 140, bestAudio: null },
-  });
-  assert.equal(h.el("audio-format-select").value, "251");
 });

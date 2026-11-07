@@ -30,6 +30,7 @@ export class ChapterImportDialog {
     this._seq = 0;
     this._previewOk = false;
     this._busy = false;
+    this._originalCount = 0;
   }
 
   _el(id) {
@@ -198,6 +199,7 @@ export class ChapterImportDialog {
     }
     const restore = this._el("chapter-import-restore");
     if (restore) restore.hidden = !view?.hasOriginal;
+    this._originalCount = Number(view?.originalCount) || 0;
   }
 
   async save() {
@@ -205,7 +207,16 @@ export class ChapterImportDialog {
     await this._commit(`/api/jobs/${this.jobId}/chapters`, this._body(), "Chapters imported");
   }
 
+  /**
+   * Restore asks once (owner decision PR-I1), as the TUI's A U confirms: it
+   * throws the imported list away, and the button sits beside Save.
+   */
   async restore() {
+    const n = this._originalCount || 0;
+    const msg = n > 0
+      ? `Replace the imported chapters with the original ${n}?`
+      : "Replace the imported chapters with the original? The archive had no chapters before the import.";
+    if (!await this.player.app.showConfirm(msg, { title: "Restore original chapters", okLabel: "Restore", okVariant: "warning" })) return;
     await this._commit(`/api/jobs/${this.jobId}/chapters/restore`, null, "Original chapters restored");
   }
 

@@ -13,7 +13,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -2299,8 +2299,23 @@ export class MoomboxApp {
       actionsHtml += `<sl-icon-button name="x-circle" label="Cancel" data-quick-action="cancel" data-job-id="${escId}"></sl-icon-button>`;
       overflowItems.push(`<sl-menu-item value="cancel" data-job-id="${escId}"><sl-icon slot="prefix" name="x-circle"></sl-icon>Cancel</sl-menu-item>`);
     }
+    // The row's restart icon is Resume where the job can continue its
+    // recording, and Reinitialize — which deletes it, and confirms first —
+    // only where it cannot (owner decision PR-M1): an arrow read as "retry"
+    // used to start a recoverable job over. Both stay in the overflow menu.
+    // A list row carries no hasStaging, so canResumeJob passes it through to
+    // the server, which answers "use Reinitialize" when there is none. Only
+    // the rows that offered Reinitialize change: a Finished row with an
+    // incomplete tail keeps its Resume in the details dialog, as before.
+    const canResumeRow = canReinit && canResumeJob(job);
+    if (canResumeRow) {
+      actionsHtml += `<sl-icon-button name="play-fill" label="Resume" data-quick-action="resume" data-job-id="${escId}"></sl-icon-button>`;
+      overflowItems.push(`<sl-menu-item value="resume" data-job-id="${escId}"><sl-icon slot="prefix" name="play-fill"></sl-icon>Resume</sl-menu-item>`);
+    }
     if (canReinit) {
-      actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Reinitialize" data-quick-action="reinitialize" data-job-id="${escId}"></sl-icon-button>`;
+      if (!canResumeRow) {
+        actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Reinitialize" data-quick-action="reinitialize" data-job-id="${escId}"></sl-icon-button>`;
+      }
       overflowItems.push(`<sl-menu-item value="reinitialize" data-job-id="${escId}"><sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>Reinitialize</sl-menu-item>`);
     }
     if (canDelete) {
@@ -2641,7 +2656,11 @@ export class MoomboxApp {
     }
     document.getElementById("add-dialog").hide();
     const skipped = data.skipped ? `, ${data.skipped} already queued` : "";
-    this.showToast(`Queued ${data.added} Twitch VOD${data.added === 1 ? "" : "s"}${skipped}`, "success");
+    // The VODs the server could not queue (owner decision PR-M9): the toast
+    // was a green "Queued N" while they were dropped, each named only in the
+    // log (QueueTwitchVideos). It warns now, and says how many.
+    const failed = data.failed ? `, ${data.failed} could not be queued` : "";
+    this.showToast(`Queued ${data.added} Twitch VOD${data.added === 1 ? "" : "s"}${skipped}${failed}`, data.failed ? "warning" : "success");
   }
 
   /**
@@ -2776,8 +2795,8 @@ export class MoomboxApp {
     // Segmented is noted only for a VOD or a finished stream (the owner's
     // decision): while the stream is live or upcoming every adaptive
     // rendition it lists is segmented, and the live path fetches exactly
-    // those, so the mark on every row said nothing. The preselection below
-    // still reads it, as the server's badges do. The TUI's Add Video reads
+    // those, so the mark on every row said nothing. The server's badges
+    // still pass a segmented rendition over. The TUI's Add Video reads
     // the same streamStatus the same way (notesSegmented,
     // internal/tui/add_video.go).
     const onAir = data.streamStatus === "live" || data.streamStatus === "upcoming";
@@ -2826,8 +2845,7 @@ export class MoomboxApp {
       // [Best] is the rendition automatic selection takes, of any codec
       // (bestItags.bestAudio, owner decision FE-10): a 5.1 E-AC-3 track the
       // shared rank puts above both codec picks carried no badge at all. The
-      // codec badges stay beside it; the preselection below follows [Best]
-      // (owner decision FQ-1).
+      // codec badges stay beside it.
       let badges = "";
       if (bestItags.bestAudio != null && fmt.itag === bestItags.bestAudio) badges += " [Best]";
       if (fmt.itag === bestItags.bestOpusAudio) badges += " [Best OPUS]";
@@ -2838,33 +2856,16 @@ export class MoomboxApp {
       audioSelect.appendChild(opt);
     }
 
-    // Wait for Shoelace to register the new options before setting values.
-    // Without this, the select's internal state may not recognize the options yet.
-    await Promise.all([
-      videoSelect.updateComplete?.catch(() => {}),
-      audioSelect.updateComplete?.catch(() => {}),
-    ]);
-
-    // Auto-select best formats: WEBM over MP4, as ever, but an intact badge
-    // first. The server badges the best adaptive rendition of each kind that
-    // is neither damaged nor segmented, falling back to a marked one only
-    // when every adaptive rendition of that kind is marked (and to a muxed
-    // file only when the kind has nothing else) — so a WEBM badge on a
-    // damaged rendition yields to an intact MP4 one. Audio opens on the
-    // [Best] rendition, the one automatic selection takes (youtube.AudioRank
-    // through bestPickerItag, cmd/moombox/adapters.go), so a submit with the
-    // defaults takes the track an automatic download would — a 5.1 E-AC-3
-    // track the rank puts first is no longer passed over for stereo Opus
-    // (owner decision FQ-1). The codec badges follow only for an answer
-    // with no bestAudio (a server from before it); bestAudio is itself
-    // intact-first across every codec, so it is marked only when every
-    // audio row is, and the codec badges can never be intact past it.
-    const intact = (list, itag) => (list || []).some((f) => f.itag === itag && !f.damaged && !f.segmented);
-    const preselect = (list, ...itags) => itags.find((i) => i && intact(list, i)) ?? itags.find((i) => i);
-    const video = preselect(data.videoFormats, bestItags.bestWebmVideo, bestItags.bestMp4Video);
-    if (video) videoSelect.value = String(video);
-    const audio = preselect(data.audioFormats, bestItags.bestAudio, bestItags.bestOpusAudio, bestItags.bestAacAudio);
-    if (audio) audioSelect.value = String(audio);
+    // Both selects start on Auto (owner decision PR-R8, superseding FQ-1's
+    // preselection): nothing is pinned unless the operator picks a
+    // rendition. The [Best] badges above show what Auto takes. A preselected
+    // video itag turned an untouched Advanced form into a pinned job — and a
+    // pinned video itag turns a live job's quality monitoring off — for a
+    // rendition the selector itself might not have picked. A select left on
+    // a previous video's rendition is cleared too: its itag is not this
+    // video's choice.
+    videoSelect.value = "";
+    audioSelect.value = "";
 
     // Update end time placeholder with video duration
     if (data.lengthSeconds && data.lengthSeconds > 0) {
@@ -3052,9 +3053,61 @@ export class MoomboxApp {
     }
   }
 
+  /**
+   * reinitializeDeletes asks the server what reinitializing ids would delete
+   * (GET /api/jobs/{id}/reinitialize/preview, owner decision PR-M1) and
+   * answers the confirm's clause for their totals as text — null when a
+   * preview could not be read, and the confirm then says so rather than
+   * nothing — and refused, the ids whose preview says the server would not
+   * reinitialize them now (allowed false: the POST's own status gate, which
+   * a row the WebSocket has not caught up with may still look past).
+   */
+  async reinitializeDeletes(ids) {
+    try {
+      const previews = await Promise.all(ids.map(async (id) => {
+        const res = await fetch(`/api/jobs/${encodeURIComponent(id)}/reinitialize/preview`);
+        if (!res.ok) throw new Error(res.statusText);
+        return res.json();
+      }));
+      return {
+        text: reinitializeDeletesText(sumReinitializePreviews(previews)),
+        refused: ids.filter((_, i) => previews[i]?.allowed === false),
+      };
+    } catch {
+      return { text: null, refused: [] };
+    }
+  }
+
   async reinitializeJob(jobId) {
     const id = jobId || this.selectedJobId;
     if (!id || this._jobActionsInFlight.has(id)) return;
+
+    // Reinitialize starts over and deletes what the job recorded: the
+    // set-asides, the recorded parts, the staging and an imported chapter
+    // list. The row icon and the details button both ask first, naming
+    // those from the server's preflight (owner decision PR-M1).
+    const { text: deletes, refused } = await this.reinitializeDeletes([id]);
+    if (refused.length > 0) {
+      // The server's gate already says no: no confirm for a reset the POST
+      // would refuse.
+      const status = this._currentJob(id)?.status;
+      this.showToast(`Not reinitialized — ${status ? `the job is ${status} now` : "the job can no longer be reinitialized"}`, "warning");
+      return;
+    }
+    const title = this._currentJob(id)?.title;
+    const what = deletes
+      ? `This ${deletes}.`
+      : "What it would delete could not be read: it deletes the job's set-aside recordings, recorded parts, staged data and imported chapters.";
+    const msg = `Reinitialize ${title ? `"${title}"` : "this job"} and download it again from the start? ${what} This cannot be undone.`;
+    if (!await this.showConfirm(msg, { title: "Reinitialize", okLabel: "Reinitialize", okVariant: "danger" })) return;
+    // Re-read after the confirm, as deleteJob does: a job a monitor retried
+    // while the dialog was open is not reset under its run.
+    const now = this._currentJob(id);
+    if (now && !REINIT_STATUSES.has(now.status)) {
+      this.showToast(`Not reinitialized — the job is ${now.status} now`, "warning");
+      return;
+    }
+    if (this._jobActionsInFlight.has(id)) return;
 
     this._jobActionsInFlight.add(id);
     try {
@@ -4023,6 +4076,14 @@ export class MoomboxApp {
         qualifies = j => REINIT_STATUSES.has(j.status);
         targets = eligibleJobs.filter(qualifies);
         confirmMsg = `Reinitialize ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
+        if (targets.length > 0) {
+          // Name the totals the reset deletes across them (owner decision
+          // PR-M1), as the single confirm does.
+          const { text: deletes } = await this.reinitializeDeletes(targets.map((j) => j.id));
+          confirmMsg += deletes
+            ? ` This ${deletes}. This cannot be undone.`
+            : " What it would delete could not be read: it deletes each job's set-aside recordings, recorded parts, staged data and imported chapters. This cannot be undone.";
+        }
         apiCall = (id) => fetch(`/api/jobs/${id}/reinitialize`, { method: "POST" });
         break;
       case "delete":
@@ -4058,7 +4119,7 @@ export class MoomboxApp {
     const confirmed = await this.showConfirm(confirmMsg, {
       title: "Batch " + action.charAt(0).toUpperCase() + action.slice(1),
       okLabel: action.charAt(0).toUpperCase() + action.slice(1),
-      okVariant: action === "delete" ? "danger" : action === "cancel" ? "warning" : "primary"
+      okVariant: action === "delete" || action === "reinitialize" ? "danger" : action === "cancel" ? "warning" : "primary"
     });
     if (!confirmed) return;
 

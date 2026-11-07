@@ -58,6 +58,10 @@ type ChapterImportView struct {
 	// HasOriginal: an import kept the archive's chapters from before it
 	// (owner decision CI-3), so "Restore original" is offered.
 	HasOriginal bool `json:"hasOriginal"`
+	// OriginalCount is how many chapters that original holds (0 when the
+	// archive had none), for the dashboard's Restore confirm: "Replace the
+	// imported chapters with the original N?" (owner decision PR-I1).
+	OriginalCount int `json:"originalCount"`
 	// OffsetSeconds is the offset the list was shifted by.
 	OffsetSeconds float64 `json:"offsetSeconds"`
 	// DefaultOffsetSeconds is what the offset field starts at (owner
@@ -298,8 +302,9 @@ func (s *ChapterService) view(ctx context.Context, job *database.Job, t *chapter
 	if v.Current == nil {
 		v.Current = []Chapter{}
 	}
-	if _, imported, err := utils.ReadImportedChaptersSidecar(t.sidecar); err == nil && imported {
+	if imp, imported, err := utils.ReadImportedChaptersSidecar(t.sidecar); err == nil && imported {
 		v.HasOriginal = true
+		v.OriginalCount = len(imp.Original)
 	}
 	return v
 }

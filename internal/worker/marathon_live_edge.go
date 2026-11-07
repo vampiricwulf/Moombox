@@ -110,7 +110,10 @@ func setupMarathonOr(ctx context.Context, job *JobContext, strategy DownloadStra
 		"jobID", job.Job.ID, "strategy", strategy.Kind(), "liveFor", age.Round(time.Minute).String(),
 		"streamStartTime", job.Job.StreamStartTime)
 	result, err := HlsStrategy.Download(ctx, job, info, deps)
-	if err == nil || ctx.Err() != nil {
+	if err == nil {
+		return withLiveEdge(result, liveEdgeMarathon), nil
+	}
+	if ctx.Err() != nil {
 		return result, err
 	}
 	job.Logger.Warn("[Live] the live HLS setup failed — trying the from-start capture anyway",
@@ -157,5 +160,6 @@ func (o *DownloadOrchestrator) evictedStartToLiveEdge(ctx context.Context, jobCt
 			"jobID", jobCtx.Job.ID, "err", err)
 		return nil, false
 	}
+	o.recordLiveEdgeStart(jobCtx, liveEdgeEvicted)
 	return hlsResult, true
 }

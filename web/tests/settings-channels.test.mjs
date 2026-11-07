@@ -294,6 +294,25 @@ test("the channel dialog fills and posts the Twitch-only options", { skip }, asy
   assert.equal(h.el("channel-twitch-options-row").style.display, "none", "hidden for YouTube");
 });
 
+// Owner decision PR-I3: the server refuses twitch_vod_backlog and
+// twitch_gap_fill_ad_breaks on a channel that is not Twitch, so editing a
+// YouTube channel a config from before PR-I3 still holds them on must clear
+// them, not carry them over from the stored entry into a 400.
+// Mutant killed: the non-Twitch arm spreading nothing (the post carries both
+// keys from the stored channel).
+test("saving a YouTube channel drops the Twitch-only options it still holds", { skip }, async () => {
+  const stored = { id: "UCabcdefghijklmnopqrstuv", platform: "youtube", twitch_vod_backlog: true, twitch_gap_fill_ad_breaks: true };
+  const h = await openWith([structuredClone(stored)]);
+  h.app.settings.editChannel(stored.id);
+  await h.app.settings.saveChannel();
+  await h.flush();
+  const post = h.http.matching("/api/config/channels", "POST").at(-1);
+  assert.ok(post, "the edit posted");
+  assert.equal(post.body.id, stored.id);
+  assert.equal("twitch_vod_backlog" in post.body, false, "twitch_vod_backlog left out");
+  assert.equal("twitch_gap_fill_ad_breaks" in post.body, false, "twitch_gap_fill_ad_breaks left out");
+});
+
 // twitch_archive_clips (owner decision D26 follow-up 2): the Edit dialog shows the
 // toggle for a Twitch channel only, filled from the stored channel, and posts
 // what it shows — set when checked, left out when not, never for YouTube.

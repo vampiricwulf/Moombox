@@ -236,6 +236,19 @@ type Job struct {
 	// column, a capture whose start was not recorded. The chapter import
 	// pre-fills its offset with it negated (defaultChapterOffset).
 	JoinOffsetSeconds *float64 `json:"joinOffsetSeconds,omitempty"`
+	// LiveEdgeReason says why a live YouTube capture recorded from the live
+	// edge instead of the broadcast's start (owner decision PR-R2): the
+	// stream was older than YouTube keeps its segments, its start was gone,
+	// every DASH format was DRM-protected, no GVS token could be minted, or
+	// the player's JS challenges could not be solved with no split pair
+	// left that needs none. Written once by the worker when the capture's
+	// first setup falls to the live HLS playlist
+	// (DownloadOrchestrator.recordLiveEdgeStart), cleared by a Reinitialize,
+	// "" (NULL) for every capture that recorded from the start. Both UIs'
+	// job details show it beside JoinOffsetSeconds as "Recorded from the
+	// live edge: <reason>, joined H:MM:SS in" — YouTube has no gap-fill, so
+	// the operator is the only one who can fetch the missing start.
+	LiveEdgeReason string `json:"liveEdgeReason,omitempty"`
 	// NotificationMsgs maps a notification target's stable key — the first 16
 	// hex digits of SHA-256 over the RESOLVED webhook URL, the same key
 	// notifications.buildTargets dedupes on — to the id of the one Discord

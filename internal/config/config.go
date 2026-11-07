@@ -1126,10 +1126,29 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 				ch.ArchiveSlots = nil
 			}
 		}
-		if ch.TwitchArchiveClips && ch.GetPlatform() != "twitch" {
-			fail("channels[%d].twitch_archive_clips applies to Twitch channels only", i)
-			if !reportOnly {
-				ch.TwitchArchiveClips = false
+		// The three Twitch-only switches (owner decision PR-I3): each acts
+		// only through the Twitch monitor or the Twitch gap-fill, so on any
+		// other channel it would sit in the file doing nothing while the
+		// settings list showed it on. The TUI's channel form already forces
+		// all three off off Twitch; the file and the API are refused alike.
+		if ch.GetPlatform() != "twitch" {
+			if ch.TwitchArchiveClips {
+				fail("channels[%d].twitch_archive_clips applies to Twitch channels only", i)
+				if !reportOnly {
+					ch.TwitchArchiveClips = false
+				}
+			}
+			if ch.TwitchVodBacklog {
+				fail("channels[%d].twitch_vod_backlog applies to Twitch channels only", i)
+				if !reportOnly {
+					ch.TwitchVodBacklog = false
+				}
+			}
+			if ch.TwitchGapFillAdBreaks {
+				fail("channels[%d].twitch_gap_fill_ad_breaks applies to Twitch channels only", i)
+				if !reportOnly {
+					ch.TwitchGapFillAdBreaks = false
+				}
 			}
 		}
 	}
@@ -1218,7 +1237,8 @@ func channelSlotsInRange(slots int) bool { return slots >= 1 && slots <= 100 }
 // ChannelOverrideErrors returns, keyed by JSON field name, each per-channel
 // override Validate refuses: an unknown quality_preference, an
 // archive_window_days / archive_slots outside 1..3650 / 1..100, or
-// twitch_archive_clips on a channel that is not Twitch. nil when the entry is
+// twitch_archive_clips, twitch_vod_backlog or twitch_gap_fill_ad_breaks on a
+// channel that is not Twitch (owner decision PR-I3). nil when the entry is
 // sound.
 //
 // For the web writers — PUT /api/config's channels[] and POST
@@ -1242,8 +1262,16 @@ func ChannelOverrideErrors(ch ChannelConfig) map[string]string {
 	if ch.ArchiveSlots != nil && !channelSlotsInRange(*ch.ArchiveSlots) {
 		add("archive_slots", "archive_slots must be between 1 and 100")
 	}
-	if ch.TwitchArchiveClips && ch.GetPlatform() != "twitch" {
-		add("twitch_archive_clips", "twitch_archive_clips applies to Twitch channels only")
+	if ch.GetPlatform() != "twitch" {
+		if ch.TwitchArchiveClips {
+			add("twitch_archive_clips", "twitch_archive_clips applies to Twitch channels only")
+		}
+		if ch.TwitchVodBacklog {
+			add("twitch_vod_backlog", "twitch_vod_backlog applies to Twitch channels only")
+		}
+		if ch.TwitchGapFillAdBreaks {
+			add("twitch_gap_fill_ad_breaks", "twitch_gap_fill_ad_breaks applies to Twitch channels only")
+		}
 	}
 	return errs
 }
