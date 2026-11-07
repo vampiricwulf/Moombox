@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,11 +118,13 @@ func (c *cancellingStrategy) Download(ctx context.Context, job *JobContext, info
 // PE-4: a second fall of the same recording (a Resume, a restart) rewrites
 // the reason and notifies again — it sent nothing once the row held a
 // reason, so the stretch a resumed capture lost to the live edge went
-// unannounced.
+// unannounced. The second notification says the stretch since the last
+// capture is lost, not the start: the earlier capture holds what it recorded.
 //
 // Mutants: ExecuteWithChat not calling recordLiveEdgeStart (no reason on the
 // row, no notification); the prior-reason check back (the second fall sends
-// nothing, one notification in all); the Reinitialize reset not clearing
+// nothing, one notification in all); the prior reason not read (the second
+// fall says the start is lost); the Reinitialize reset not clearing
 // live_edge_reason.
 func TestLiveEdgeStartIsRecordedAndNotifiedOnEveryFall(t *testing.T) {
 	w, db := testWorkerSetup(t)
@@ -160,11 +163,16 @@ func TestLiveEdgeStartIsRecordedAndNotifiedOnEveryFall(t *testing.T) {
 	}
 	if sent := rec.ByEvent("live_edge"); len(sent) != 1 {
 		t.Fatalf("sent %d live_edge notification(s), want 1", len(sent))
+	} else if !strings.HasPrefix(sent[0].Description, "The start of the stream cannot be recorded") {
+		t.Errorf("the first fall says %q, want the start lost", sent[0].Description)
 	}
 
 	run(missing) // the same recording falls back again, as after a Resume
 	if sent := rec.ByEvent("live_edge"); len(sent) != 2 {
 		t.Errorf("a second fall of the same recording: %d live_edge notification(s) in all, want 2", len(sent))
+	} else if d := sent[1].Description; !strings.HasPrefix(d, "Recording resumed from the live edge") ||
+		!strings.Contains(d, "the stretch since the last capture cannot be recorded") {
+		t.Errorf("the second fall says %q, want the stretch since the last capture lost, not the start", d)
 	}
 
 	db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusError})

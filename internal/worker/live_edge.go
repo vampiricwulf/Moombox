@@ -82,8 +82,13 @@ func drmLiveEdgeReason(isVod bool, info *youtube.VideoInfo) string {
 // back again is another stretch of the broadcast lost to the live edge — the
 // part a resumed from-start capture would have filled from its resume
 // position — and it is sent where it used to be suppressed, the row already
-// holding a reason from the first fall. A Reinitialize clears the reason
-// with the rest of the row. Only a capture's first setup in the job's first
+// holding a reason from the first fall. The two say different things: the
+// first fall loses the broadcast's start ("The start of the stream cannot be
+// recorded"), while a later one — the row already holding a reason, read
+// before it is rewritten — loses the stretch between the earlier capture and
+// the live edge, the earlier capture (set aside and kept, or itself from the
+// live edge) still holding what it recorded, so its text says that instead.
+// A Reinitialize clears the reason with the rest of the row. Only a capture's first setup in the job's first
 // part is recorded (ExecuteWithChat skips a resume into a later part) — a
 // mid-stream path switch (switchLivePath) keeps the earlier part, recorded
 // from the start, and is not a late start.
@@ -92,16 +97,23 @@ func (o *DownloadOrchestrator) recordLiveEdgeStart(jobCtx *JobContext, reason st
 		return
 	}
 	jobID := jobCtx.Job.ID
+	prior := ""
+	if j, err := o.db.GetJob(jobID); err == nil && j != nil {
+		prior = j.LiveEdgeReason
+	}
 	o.db.UpdateJobFields(jobID, map[string]any{"live_edge_reason": reason})
 	jobCtx.Job.LiveEdgeReason = reason
 	if o.notifier == nil {
 		return
 	}
 	f := NotifyFacts(jobCtx.Job)
+	msg := "The start of the stream cannot be recorded (%s); recording from the live edge instead: %s"
+	if prior != "" {
+		msg = "Recording resumed from the live edge (%s); the stretch since the last capture cannot be recorded: %s"
+	}
 	o.notifier.Send(
 		"Recording From the Live Edge",
-		fmt.Sprintf("The start of the stream cannot be recorded (%s); recording from the live edge instead: %s",
-			reason, notifications.EscapeMarkdown(jobCtx.Job.Title)),
+		fmt.Sprintf(msg, reason, notifications.EscapeMarkdown(jobCtx.Job.Title)),
 		notifications.TypeWarning,
 		[]notifications.Field{
 			{Name: "Channel", Value: notifications.EscapeMarkdown(jobCtx.Job.ChannelName), Inline: true},
