@@ -718,11 +718,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// so the caller can latch it. A part advance that cannot create its next
 	// staging dir must never let the job finalize Finished (sweep-2 R2).
 	advanceToNewPart := func(muxCurrent bool, segmentEndTime int64) error {
-		// A short span is set aside, never deleted (PR-R9, setAsideShortSpan);
-		// one that cannot be is closed and muxed as a part like any other.
-		if !muxCurrent && !o.setAsideShortSpan(curStagingDir, jobCtx.Job.ID) {
-			muxCurrent = true
-		}
+		// muxCurrent=false: the caller has already set the short span aside
+		// (PR-R9, setAsideShortSpan) — before its notification, which says
+		// what the span became — and passes true for one it could not.
 		nextIdx := segmentIndex
 		if muxCurrent {
 			nextIdx = segmentIndex + 1
@@ -1113,9 +1111,17 @@ sessionLoop:
 					"from", currentQuality.Label, "to", newQuality.Label,
 					"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
 
-				o.sendQualitySplitNotification(jobCtx, "Twitch", currentQuality, newQuality, segmentIndex, !shortSegment)
+				// A span too short to be a part is set aside, never deleted
+				// (setAsideShortSpan, PR-R9); one that cannot be is closed
+				// and muxed as a part like any other. Decided before the
+				// notification, which says which of the two the span
+				// became: sent first, it said "set aside" of a span then
+				// muxed as a part — and the successor's seed below replayed
+				// the playlist window onto a kept part.
+				setAside := shortSegment && o.setAsideShortSpan(curStagingDir, jobCtx.Job.ID)
+				o.sendQualitySplitNotification(jobCtx, "Twitch", currentQuality, newQuality, segmentIndex, !setAside)
 
-				if shortSegment {
+				if setAside {
 					o.logger.Debug("skipping short segment mux",
 						"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
 						"jobID", jobCtx.Job.ID)
@@ -1125,15 +1131,15 @@ sessionLoop:
 				// init-change splits — Twitch's variants share one sequence
 				// numbering. Seeding -1 replayed the playlist window, so the
 				// first seconds of the new part repeated the closed part's
-				// last ones. A discarded short part leaves nothing to
-				// repeat: the window replay keeps whatever it still holds of
-				// the dropped span, at the new quality.
+				// last ones. A short span set aside leaves nothing in the
+				// part to repeat: the window replay keeps whatever it still
+				// holds of that span, at the new quality.
 				nextSeq, forceSeq := -1, false
-				if !shortSegment {
+				if !setAside {
 					nextSeq = videoDl.CurrentSeq()
 					forceSeq = nextSeq > 0
 				}
-				if err := advanceToNewPart(!shortSegment, segmentEndTime); err != nil {
+				if err := advanceToNewPart(!setAside, segmentEndTime); err != nil {
 					latchPartFailure(err)
 					break
 				}

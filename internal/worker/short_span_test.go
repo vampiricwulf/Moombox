@@ -67,8 +67,9 @@ func TestShortSpanIsSetAsideNotDeleted(t *testing.T) {
 //
 // Mutants: either split back on its os.Remove discard, or not calling
 // setAsideShortSpan, or no longer falling back to muxing the span as a part
-// when the set-aside fails; YouTube's notification sent before the set-aside
-// or told the span was set aside when it was muxed as a part.
+// when the set-aside fails; either notification sent before the set-aside or
+// told the span was set aside when it was muxed as a part; Twitch seeding a
+// kept part's successor by window replay.
 func TestQualitySplitsSetTheShortSpanAside(t *testing.T) {
 	section := func(file, from, to string) string {
 		t.Helper()
@@ -99,10 +100,21 @@ func TestQualitySplitsSetTheShortSpanAside(t *testing.T) {
 		t.Error("splitPart's quality-split notification does not follow the set-aside and report its outcome")
 	}
 	tw := section("orchestrator_twitch.go", "advanceToNewPart := func(", "segmentIndex = nextIdx")
-	if !strings.Contains(tw, "if !muxCurrent && !o.setAsideShortSpan(curStagingDir, jobCtx.Job.ID) {\n\t\t\tmuxCurrent = true") {
-		t.Error("advanceToNewPart does not set a short span aside (or mux it when it cannot be)")
+	twSplit := section("orchestrator_twitch.go", `o.logger.Info("Twitch quality split",`, "drainQualityCh()")
+	twDecide := "setAside := shortSegment && o.setAsideShortSpan(curStagingDir, jobCtx.Job.ID)"
+	twNotify := `o.sendQualitySplitNotification(jobCtx, "Twitch", currentQuality, newQuality, segmentIndex, !setAside)`
+	if !strings.Contains(twSplit, twDecide) || !strings.Contains(twSplit, "advanceToNewPart(!setAside, segmentEndTime)") {
+		t.Error("Twitch's quality split does not set a short span aside (or mux it as a part when it cannot be)")
 	}
-	for name, body := range map[string]string{"splitPart": yt, "advanceToNewPart": tw} {
+	if d, n := strings.Index(twSplit, twDecide), strings.Index(twSplit, twNotify); d < 0 || n < 0 || n < d {
+		t.Error("Twitch's quality-split notification does not follow the set-aside and report its outcome")
+	}
+	// A span that could not be set aside is a kept part: its successor is
+	// seeded where its data stops, not by replaying the playlist window.
+	if !strings.Contains(twSplit, "if !setAside {\n\t\t\t\t\tnextSeq = videoDl.CurrentSeq()") {
+		t.Error("Twitch's quality split seeds the successor of a kept part by window replay")
+	}
+	for name, body := range map[string]string{"splitPart": yt, "advanceToNewPart": tw, "Twitch's quality split": twSplit} {
 		if strings.Contains(body, "os.Remove(") {
 			t.Errorf("%s removes a file itself — a quality split never deletes media", name)
 		}
