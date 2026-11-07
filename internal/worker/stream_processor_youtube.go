@@ -119,15 +119,15 @@ func fullFetchSaysGone(info *youtube.VideoInfo) bool {
 	return isTerminalPlayability(info.PlayabilityError) || fullFetchSaysRemoved(info)
 }
 
-// confirmationSaysPrivate reports whether a go-live confirmation found the
-// stream private with nothing to download. Since a private refusal reads private
-// rather than login_required, completeStreamTransition's credential check no
-// longer catches it on a session with nothing wrong, so a stream made private
-// between the probe and its confirmation wrote Live and failed with "no download
-// strategy available". A confirmation with formats is left to go on: those can
-// still be captured, whatever the verdict says.
-func confirmationSaysPrivate(info *youtube.VideoInfo) bool {
-	return info.PlayabilityError == youtube.PlayabilityPrivate && probeFormatCount(info) == 0
+// confirmationSaysGone reports whether a go-live confirmation found the stream
+// gone (fullFetchSaysGone) with nothing to download. completeStreamTransition's
+// credential check does not catch these verdicts on a session with nothing
+// wrong, so a stream made private or removed between the probe and its
+// confirmation wrote Live and failed with "no download strategy available". A
+// confirmation with formats is left to go on: those can still be captured,
+// whatever the verdict says.
+func confirmationSaysGone(info *youtube.VideoInfo) bool {
+	return fullFetchSaysGone(info) && probeFormatCount(info) == 0
 }
 
 // endGoneWait ends the wait on a full fetch that says the stream is gone
@@ -518,8 +518,13 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				}
 				sp.logger.Debug("periodic full fetch completed", "videoID", job.VideoID)
 				// It carries the schedule too, so the schedule probe below is
-				// not due again for a full interval.
-				lastScheduleProbe = time.Now()
+				// not due again for a full interval. A refused fetch carries nothing,
+				// and with the start hours away and the status probe blind, that
+				// probe may be the only call left that can say the stream has not
+				// begun, so it keeps its turn.
+				if !rateLimitedFetch(fullInfo) {
+					lastScheduleProbe = time.Now()
+				}
 				// On this tick the fetch is the WEB view the schedule probe
 				// would have been, so a stream it sees begun goes to the switch
 				// as the probe's answer would (scheduleProbeOvertakes, below).
@@ -582,6 +587,10 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 					probeInfo = sched
 					rateLimit.noteStatus(sched.StreamStatus)
 				} else {
+					// Its word counts as the status probe's would: a false go-live
+					// must not leave begun standing for a status probe that has
+					// since gone blind and can never take it back (loopRateLimit).
+					rateLimit.noteStatus(sched.StreamStatus)
 					sp.applyScheduleAnswer(job, sched, &scheduledStartTime)
 				}
 			}
@@ -652,7 +661,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				}
 				continue
 			}
-			if confirmationSaysPrivate(fullInfo) {
+			if confirmationSaysGone(fullInfo) {
 				return sp.endGoneWait(job, fullInfo, chatDl), nil
 			}
 			// Cross-check: if full WEB fetch says still upcoming, the probe was
@@ -698,7 +707,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				}
 				continue
 			}
-			if confirmationSaysPrivate(fullInfo) {
+			if confirmationSaysGone(fullInfo) {
 				return sp.endGoneWait(job, fullInfo, chatDl), nil
 			}
 			// Cross-check: if full WEB fetch says still upcoming, keep polling.

@@ -151,6 +151,12 @@ func (s *interruptionSignal) observe(info *youtube.VideoInfo) {
 	if isAuthWalledPlayability(info.PlayabilityError) {
 		return
 	}
+	// A private refusal is no interruption either: a stream made private does
+	// not come back by waiting. It stays out of isAuthWalledPlayability, which
+	// also decides who switches to the cookied probe.
+	if info.PlayabilityError == youtube.PlayabilityPrivate {
+		return
+	}
 	if info.StreamStatus == youtube.StreamLive && len(info.Formats) == 0 {
 		s.lastSeen.StoreNow()
 	}

@@ -247,6 +247,40 @@ func TestAConfirmingFetchThatSaysPrivateNeverWritesTheGoLive(t *testing.T) {
 	}
 }
 
+// The other verdicts that say a stream is gone end a live or VOD arm's
+// confirmation the same way, as they end the default arm's: with nothing to
+// download, none of them can do anything but fail after writing Live.
+//
+// Mutant: confirmationSaysGone reading the private verdict alone.
+func TestAConfirmingFetchThatSaysGoneNeverWritesTheGoLive(t *testing.T) {
+	for name, info := range map[string]youtube.VideoInfo{
+		"unavailable":    {StreamStatus: youtube.StreamNotAStream, PlayabilityStatus: "ERROR", PlayabilityError: youtube.PlayabilityUnavailable, PlayabilityReason: "Video unavailable"},
+		"region blocked": {StreamStatus: youtube.StreamNotAStream, PlayabilityStatus: "UNPLAYABLE", PlayabilityError: youtube.PlayabilityRegionBlocked, PlayabilityReason: "Not available in your country"},
+		"removed":        {StreamStatus: youtube.StreamNotAStream, PlayabilityStatus: "ERROR", PlayabilityError: youtube.PlayabilityUnknown, PlayabilityReason: "This video has been removed by the uploader"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := driveWaitForLive(t, 2*time.Minute, 30*time.Minute, func(start time.Time) waitFakes {
+				return waitFakes{
+					status: func(time.Duration) (*youtube.VideoInfo, error) { return liveAnswer(start), nil },
+					full: func(time.Duration) (*youtube.VideoInfo, error) {
+						answer := info
+						return &answer, nil
+					},
+				}
+			})
+			if run.result == nil || run.result.ShouldDownload {
+				t.Fatalf("the wait ended with %+v at %v, want it over with nothing to download:%s", run.result, run.returned, run)
+			}
+			if run.row.Status != database.StatusUpcoming || run.row.IsVod {
+				t.Errorf("row = %q, is_vod %v; want Upcoming with no go-live written", run.row.Status, run.row.IsVod)
+			}
+			if !errors.Is(run.result.ErrSentinel, ErrNonActionable) {
+				t.Errorf("sentinel = %v, want the plain give-up", run.result.ErrSentinel)
+			}
+		})
+	}
+}
+
 // A confirmation with formats goes on, whatever its verdict says: this is about
 // a fetch with nothing to download.
 //

@@ -451,6 +451,14 @@ func TestAGoLiveThatDidNotHoldCannotEndTheWaitADayLater(t *testing.T) {
 					return upcomingAnswer(start), nil
 				}}
 		}},
+		{name: "periodic fetch, the status probe gone blind, the WEB probe says upcoming", fakes: func(start time.Time) waitFakes {
+			return waitFakes{status: func(at time.Duration) (*youtube.VideoInfo, error) {
+				if at < falseGoLive {
+					return liveAnswer(start), nil
+				}
+				return nil, botWalledProbe(errEscalation400)
+			}}
+		}},
 		{name: "periodic fetch, the WEB probe says upcoming", fakes: func(start time.Time) waitFakes {
 			return waitFakes{status: statusLiveThenUpcoming(start)}
 		}},
