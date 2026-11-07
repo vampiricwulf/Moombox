@@ -212,6 +212,26 @@ func (sp *StreamProcessor) probeVideoSchedule(ctx context.Context, videoID strin
 	return sp.yt.ProbeVideoSchedule(ctx, videoID)
 }
 
+// applyFetchedMetadata writes what a waiting loop's full fetch says to the row
+// and takes its schedule, when it has one, for the loop's own cadence.
+func (sp *StreamProcessor) applyFetchedMetadata(job *database.Job, info *youtube.VideoInfo, scheduledStartTime *string) {
+	sp.updateJobMetadata(job, info, true)
+	if info.ScheduledStartTime != "" {
+		*scheduledStartTime = info.ScheduledStartTime
+	}
+}
+
+// applyScheduleAnswer takes a moved start from a schedule probe's answer that
+// still says upcoming: the schedule alone, the full fetch owning every other
+// field. A stream that has begun carries its actual start in the same field,
+// which is the go-live path's to write, and a probe that reports no schedule
+// changes nothing.
+func (sp *StreamProcessor) applyScheduleAnswer(job *database.Job, sched *youtube.VideoInfo, scheduledStartTime *string) {
+	if sched.IsUpcoming && !sched.IsLive && sched.ScheduledStartTime != "" {
+		sp.applyFetchedMetadata(job, &youtube.VideoInfo{ScheduledStartTime: sched.ScheduledStartTime, IsUpcoming: true}, scheduledStartTime)
+	}
+}
+
 func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, initialInfo *youtube.VideoInfo) (*StreamProcessResult, error) {
 	sp.logger.Info("waiting for stream to go live", "videoID", job.VideoID)
 
@@ -232,6 +252,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 	membersOnly := false
 	lastFullFetch := time.Now() // Initial full fetch just happened in Process()
 	lastScheduleProbe := lastFullFetch
+	unclearSpell := false       // the cookied probe's last answer could not read the stream (the switch's default arm)
 	var rateLimit loopRateLimit // a rate limit the full fetches met (rate_limit.go)
 	defer sp.endRateLimit(job, &rateLimit)
 
@@ -416,6 +437,11 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			// cap (loopRateLimit.noteStatus). The inconclusive stand-in above
 			// never gets here, so it leaves the last conclusive answer's.
 			rateLimit.noteStatus(probeInfo.StreamStatus)
+			// One that reads the stream also ends a spell of ones that could
+			// not, so the next that cannot is new, and worth a full fetch.
+			if probeInfo.StreamStatus == youtube.StreamUpcoming || scheduleProbeOvertakes(probeInfo) {
+				unclearSpell = false
+			}
 		}
 
 		// Update local scheduledStartTime for interval calculation
@@ -430,10 +456,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		if time.Since(lastFullFetch) >= fullFetchInterval && probeInfo.StreamStatus == youtube.StreamUpcoming {
 			fullInfo, err := sp.fetchVideoInfo(ctx, job.VideoID)
 			if err == nil {
-				sp.updateJobMetadata(job, fullInfo, true)
-				if fullInfo.ScheduledStartTime != "" {
-					scheduledStartTime = fullInfo.ScheduledStartTime
-				}
+				sp.applyFetchedMetadata(job, fullInfo, &scheduledStartTime)
 				// A scheduled stream can be made private / removed / region-blocked
 				// while still reporting StreamUpcoming (videoDetails.isUpcoming
 				// stays true even as playabilityStatus flips terminal). The
@@ -515,9 +538,8 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 						"videoID", job.VideoID, "status", sched.StreamStatus)
 					probeInfo = sched
 					rateLimit.noteStatus(sched.StreamStatus)
-				} else if sched.IsUpcoming && !sched.IsLive && sched.ScheduledStartTime != "" {
-					sp.updateJobMetadata(job, &youtube.VideoInfo{ScheduledStartTime: sched.ScheduledStartTime, IsUpcoming: true}, true)
-					scheduledStartTime = sched.ScheduledStartTime
+				} else {
+					sp.applyScheduleAnswer(job, sched, &scheduledStartTime)
 				}
 			}
 		}
@@ -648,24 +670,56 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			continue
 
 		default:
-			// Auth probe may return unclear status for members-only content.
-			// Do full fetch to determine actual state (matching TS auth probe unclear handling).
+			// Nothing above has seen this stream: the periodic full fetch and the
+			// schedule probe run only on an answer that says upcoming, and the
+			// status probe's says it cannot read it. Off the cookied probe this
+			// is the end of the job; on it, a full fetch is what can tell.
 			if membersOnly {
-				// This full fetch confirms a stream the cookied probe cannot
-				// read, on every probe, and a rate limit holds it off as it
-				// holds the live and VOD arms' (loopRateLimit): the arm was left
-				// out, so a refusal that read upcoming sent the whole cascade
-				// into the limit every 30 s for good, with no backlog hold, no
-				// line, no cap and — a captcha — no word to the operator, and
-				// one that read live wrote Live and went on to a download with
-				// nothing to download.
+				// That fetch is a watch page and six player calls, and it used to
+				// run on every poll, which a stream made private kept up for 31
+				// hours. It now runs when it can say something new: on the first
+				// answer of a spell, so a stream that has just gone gives up at
+				// once; every fullFetchInterval, which bounds what a refusal that
+				// never settles can cost; and when the one-call schedule probe,
+				// asked on the polls between, says the stream has begun. That
+				// probe is what sees a go-live here, but only the full fetch may
+				// act on it or give up (the periodic fetch's comment above).
+				//
+				// A rate limit holds this fetch off as it holds the live and VOD
+				// arms' (loopRateLimit): left out, a refusal that read live wrote
+				// Live and went on to a download with nothing to download. The
+				// schedule probe waits with it, since all it could do is ask for
+				// the fetch the hold forbids.
 				if rateLimit.confirmationHeld() {
 					sp.logger.Debug("auth probe unclear; its full fetch waits out a rate limit", "videoID", job.VideoID)
 					continue
 				}
+				due := !unclearSpell || time.Since(lastFullFetch) >= fullFetchInterval
+				unclearSpell = true
+				if !due {
+					lastScheduleProbe = time.Now()
+					sched, err := sp.probeVideoSchedule(ctx, job.VideoID)
+					if err != nil {
+						reportFetchOutcome(err, "probe/youtube")
+						sp.logger.Debug("schedule probe under an unclear auth probe failed; the next poll asks again", "videoID", job.VideoID, "err", err)
+						continue
+					}
+					if !scheduleProbeOvertakes(sched) {
+						sp.applyScheduleAnswer(job, sched, &scheduledStartTime)
+						continue
+					}
+					sp.logger.Info("schedule probe says the stream has begun ahead of the auth probe; confirming",
+						"videoID", job.VideoID, "status", sched.StreamStatus)
+					rateLimit.noteStatus(sched.StreamStatus)
+				}
 				sp.logger.Info("auth probe unclear, doing full fetch",
 					"status", probeInfo.StreamStatus, "videoID", job.VideoID)
 				fullInfo, err := sp.fetchVideoInfo(ctx, job.VideoID)
+				// Whatever it answered, failure included: a fetch that keeps
+				// failing waits its interval like one that answers. The schedule
+				// clock moves too, for the poll the probe can read the stream again.
+				lastFullFetch = time.Now()
+				lastScheduleProbe = lastFullFetch
 				if err != nil {
 					reportFetchOutcome(err, "probe/youtube")
 					if sp.noteFetchErr(job, &rateLimit, err, true) {
@@ -675,14 +729,12 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 						continue
 					}
 					sp.logger.Warn("full fetch after unclear auth probe failed", "err", err)
-					continue // Retry on next iteration
+					continue // The next one due tries again
 				}
-				// The same give-up as the periodic full fetch's: this arm runs a
-				// full fetch on every poll the cookied probe cannot read, and a
-				// stream made private or removed under it — a members-only one,
-				// or, since B1 switches on a TV escalation's answer too, a
-				// public one behind a bot wall — was polled here for good, a
-				// full fetch every 30 s.
+				// The same give-up as the periodic full fetch's. A stream made
+				// private or removed under this probe, a members-only one or, since
+				// B1 switches on a TV escalation's answer too, a public one behind
+				// a bot wall, reaches no other.
 				if fullFetchSaysGone(fullInfo) {
 					return sp.giveUpUnavailable(job, fullInfo, chatDl), nil
 				}
@@ -696,7 +748,9 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				case youtube.StreamLive, youtube.StreamVOD, youtube.StreamPostLive:
 					return sp.completeStreamTransition(job, fullInfo, chatDl), nil
 				default:
-					// Still upcoming per full fetch — continue polling
+					// Still waiting. The periodic fetch that would keep the row
+					// current cannot run on this path, so this one does it.
+					sp.applyFetchedMetadata(job, fullInfo, &scheduledStartTime)
 					continue
 				}
 			}

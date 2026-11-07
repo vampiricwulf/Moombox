@@ -346,9 +346,9 @@ func TestAnEscalatedStatusProbeAnswerIsReadForTheBroadcastAlone(t *testing.T) {
 // probe's TV escalation, and switches to the cookied probe for the rest of
 // the wait (B1), as ANDROID_VR's own login_required refusal made it switch
 // before G8 — one TV call a poll, not ANDROID_VR and TV both. When the stream
-// is then removed, the cookied probe's refusal goes to the default arm's full
-// fetch, which gives up on it as the periodic full fetch does: that arm
-// polled a gone stream for good, a full fetch every 30 s.
+// is then removed, the first answer of the cookied probe's refusal goes to the
+// default arm's full fetch, which gives up on it as the periodic full fetch
+// does: that arm polled a gone stream for good, a full fetch every 30 s.
 //
 // Mutants: waitingRoomAuthFlip without the tv_auth arm (every poll stays
 // cookieless, and the removal ends the job "unexpected status"); the default
@@ -384,5 +384,8 @@ func TestWaitingLoopSwitchesToTheCookiedProbeOnATVEscalation(t *testing.T) {
 	}
 	if want := "stream unavailable: " + tos; run.result.Error != want {
 		t.Errorf("Error = %q, want %q", run.result.Error, want)
+	}
+	if n := run.count("full"); n != 1 {
+		t.Errorf("%d full fetches, want the one that gave up:%s", n, run)
 	}
 }

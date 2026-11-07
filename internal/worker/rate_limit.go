@@ -283,8 +283,8 @@ func answeredFetch(info *youtube.VideoInfo) bool {
 //
 // What the loop holds off is the go-live confirmation, the full cascade the
 // live and VOD arms make when the status probe says the stream has begun,
-// and the one the default arm makes on every probe the cookied probe cannot
-// read (membersOnly), which confirms a stream it cannot see: once YouTube has
+// and the one the default arm makes while the cookied probe cannot read the
+// stream (membersOnly), which confirms a stream it cannot see: once YouTube has
 // refused one, the next is made at the taper's next instant counted from the
 // spell's first refused confirmation (confirmationHoldAfter), from two
 // minutes to rateLimitRetryInterval, under the wait's progress line, and the arms read the probe's answer as

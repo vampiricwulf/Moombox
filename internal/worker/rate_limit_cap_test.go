@@ -555,7 +555,9 @@ func TestPrunedRateLimitedBacklogLosesItsSpellAndHold(t *testing.T) {
 // too, on the first refused confirmation a day or more after the spell's
 // first, saying it gave up: in the live arm and the VOD arm, refused with
 // the verdict or a 429 on the whole cascade, and in the default arm, whose
-// full fetch confirms a stream the cookied probe cannot read. The error is
+// half-hourly full fetch stands in for a confirmation of a stream the cookied
+// probe cannot read, counted though the schedule probe has seen nothing begin.
+// The error is
 // the verdict as yt-dlp words it, or the 429, and the note; the waiting
 // room's chat stops with it (TestGivingUpOnARateLimitStopsTheChat).
 //
