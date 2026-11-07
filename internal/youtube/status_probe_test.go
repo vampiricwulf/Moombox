@@ -555,3 +555,81 @@ func TestStatusProbeInconclusiveErrorRateLimited(t *testing.T) {
 		})
 	}
 }
+
+// TestAPrivateVideoReadsPrivateThroughEveryCall: each answer YouTube gives for
+// a private video reads private out of both cascades, which is what the
+// waiting loop's give-up reads (fullFetchSaysGone, internal/worker), and out
+// of the status probe's parse, with no broadcast stated. The bot wall, on the
+// same calls, stays login_required, and a members-only refusal members_only,
+// so neither can end a wait.
+//
+// Mutant: the private arm dropped from parsePlayabilityStatus (the private
+// rows read login_required).
+func TestAPrivateVideoReadsPrivateThroughEveryCall(t *testing.T) {
+	const botWall = `{"status":"LOGIN_REQUIRED","reason":"Sign in to confirm you’re not a bot"}`
+	const members = `{"status":"LOGIN_REQUIRED","reason":"Join this channel to get access to members-only content"}`
+	for _, tc := range []struct {
+		name, status string
+		want         PlayabilityError
+	}{
+		{"android_vr's private video", privateVideoAndroidVR, PlayabilityPrivate},
+		{"web's private video", privateVideoWeb, PlayabilityPrivate},
+		{"the watch page's private video", privateVideoWatch, PlayabilityPrivate},
+		{"the bot wall", botWall, PlayabilityLoginRequired},
+		{"a membership", members, PlayabilityMembersOnly},
+	} {
+		for name, call := range map[string]func(*PlayerAPI) (*VideoInfo, error){
+			"public cascade": func(p *PlayerAPI) (*VideoInfo, error) {
+				return p.GetVideoInfoPublic(context.Background(), "test1234567")
+			},
+			"authenticated cascade": func(p *PlayerAPI) (*VideoInfo, error) {
+				return p.GetVideoInfoAuthenticated(context.Background(), "test1234567")
+			},
+			"status probe's parse": func(p *PlayerAPI) (*VideoInfo, error) {
+				return p.ProbeVideoStatus(context.Background(), "test1234567", "")
+			},
+		} {
+			t.Run(tc.name+" through the "+name, func(t *testing.T) {
+				body := `{"playabilityStatus":` + tc.status + `}`
+				stubWatchPageWithPlayerResponse(t, body)
+				orig := apiClient
+				apiClient = &http.Client{Transport: sameBodyTransport{body}}
+				t.Cleanup(func() { apiClient = orig })
+
+				info, err := call(newRetryTestAPI())
+				if err != nil {
+					t.Fatalf("extraction: %v", err)
+				}
+				if info.PlayabilityError != tc.want || info.StreamStatus != StreamNotAStream {
+					t.Errorf("answer = verdict %q, stream %q; want %q and not_a_stream", info.PlayabilityError, info.StreamStatus, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// TestAPrivateVideoLeavesTheStatusProbeInconclusive: signed out, ANDROID_VR's
+// refusal of a private video states no broadcast, so the probe escalates once
+// and, refused again, returns its inconclusive error, named private. The probe
+// still cannot end a wait or a feed row on it: only a full fetch gives up.
+//
+// Mutant: statusAnswerInconclusive made to accept a private verdict (a nil
+// error and not_a_stream, which ended the job on the next poll before G8).
+func TestAPrivateVideoLeavesTheStatusProbeInconclusive(t *testing.T) {
+	stubEmbedPage(t)
+	serveBodies(t, map[string]string{
+		clientAndroidVR:   `{"playabilityStatus":` + privateVideoAndroidVR + `}`,
+		clientWebEmbedded: `{"playabilityStatus":` + privateVideoWeb + `}`,
+	})
+	svc := NewService(cookies.NewCookieJar(), noopLogger{})
+
+	info, err := svc.ProbeVideoStatus(context.Background(), "test1234567")
+
+	inconclusive, ok := errors.AsType[*StatusProbeInconclusiveError](err)
+	if !ok {
+		t.Fatalf("ProbeVideoStatus = (%+v, %v), want a *StatusProbeInconclusiveError", info, err)
+	}
+	if inconclusive.Playability != PlayabilityPrivate {
+		t.Errorf("Playability = %q, want private", inconclusive.Playability)
+	}
+}

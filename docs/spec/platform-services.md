@@ -551,6 +551,7 @@ The `parsePlayabilityStatus` function classifies the video's accessibility. The 
 | any status but `OK`, reason not asking to "sign in" | "try again later" anywhere in the text | `rate_limited` |
 | `AGE_VERIFICATION_REQUIRED`, `AGE_CHECK_REQUIRED` | -- | `age_restricted` |
 | `LOGIN_REQUIRED` + "member"/"join" in reason | -- | `members_only` |
+| `LOGIN_REQUIRED` + "private" in reason or `messages` | -- | `private` (signed out, the answer every client gives a private video; what a signed-in session is told has not been captured) |
 | `LOGIN_REQUIRED` | -- | `login_required` |
 | `UNPLAYABLE` + "member" in reason | -- | `members_only` |
 | `UNPLAYABLE` + "private" in reason | -- | `private` |

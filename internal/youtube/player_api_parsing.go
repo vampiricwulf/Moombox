@@ -1144,6 +1144,16 @@ func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 		if strings.Contains(reasonLower, "member") || strings.Contains(reasonLower, "join") {
 			return PlayabilityMembersOnly, reason
 		}
+		// YouTube refuses a private video with this status, in words a sign-in
+		// wall never uses, and ANDROID_VR puts them only in messages[], which
+		// reasonLower reads. It has to read private here: no sign-in fixes it for
+		// a session the owner has not shared it with, and login_required kept the
+		// waiting loop fetching a stream made private for as long as it ran
+		// (isTerminalPlayability, internal/worker). Below the member check, as in
+		// the UNPLAYABLE arm.
+		if strings.Contains(reasonLower, "private") {
+			return PlayabilityPrivate, reason
+		}
 		return PlayabilityLoginRequired, reason
 	case "UNPLAYABLE":
 		if strings.Contains(reasonLower, "member") {
