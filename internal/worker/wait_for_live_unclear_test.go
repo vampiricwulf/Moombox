@@ -67,8 +67,7 @@ func TestUnclearProbeGivesUpOnAPrivateStreamAtOnce(t *testing.T) {
 // A cookied probe that stays unreadable, over a full fetch that never settles
 // anything, costs one full fetch per fullFetchInterval and one schedule probe
 // on every other poll: what the 31-hour wait should have cost. That holds for a
-// refusal without the word private, whose signed-in shape nobody has captured,
-// so the bound cannot lean on the give-up, and for a fetch that keeps failing,
+// refusal the give-up rules do not place, whichever words it uses, so the bound cannot lean on the give-up, and for a fetch that keeps failing,
 // which is not retried every poll.
 //
 // Mutants: the fetch made on every poll (some 650 of them); lastFullFetch not
