@@ -119,6 +119,17 @@ func fullFetchSaysGone(info *youtube.VideoInfo) bool {
 	return isTerminalPlayability(info.PlayabilityError) || fullFetchSaysRemoved(info)
 }
 
+// confirmationSaysPrivate reports whether a go-live confirmation found the
+// stream private with nothing to download. Since a private refusal reads private
+// rather than login_required, completeStreamTransition's credential check no
+// longer catches it on a session with nothing wrong, so a stream made private
+// between the probe and its confirmation wrote Live and failed with "no download
+// strategy available". A confirmation with formats is left to go on: those can
+// still be captured, whatever the verdict says.
+func confirmationSaysPrivate(info *youtube.VideoInfo) bool {
+	return info.PlayabilityError == youtube.PlayabilityPrivate && probeFormatCount(info) == 0
+}
+
 // endGoneWait ends the wait on a full fetch that says the stream is gone
 // (fullFetchSaysGone). One whose verdict is a credential failure (a private
 // stream to a session that reads signed out, playabilityVerdict) parks, since
@@ -641,6 +652,9 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				}
 				continue
 			}
+			if confirmationSaysPrivate(fullInfo) {
+				return sp.endGoneWait(job, fullInfo, chatDl), nil
+			}
 			// Cross-check: if full WEB fetch says still upcoming, the probe was
 			// fooled by YouTube's waiting room / offline slate. Keep polling.
 			if fullInfo.StreamStatus == youtube.StreamUpcoming {
@@ -683,6 +697,9 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 					return sp.giveUpRateLimited(job, &rateLimit, fullInfo, nil, chatDl), nil
 				}
 				continue
+			}
+			if confirmationSaysPrivate(fullInfo) {
+				return sp.endGoneWait(job, fullInfo, chatDl), nil
 			}
 			// Cross-check: if full WEB fetch says still upcoming, keep polling.
 			if fullInfo.StreamStatus == youtube.StreamUpcoming {

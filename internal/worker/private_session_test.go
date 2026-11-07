@@ -161,3 +161,116 @@ func TestWaitingLoopParksADeadSessionsPrivateStream(t *testing.T) {
 		}
 	}
 }
+
+// A stream made private between the probe that said it began and the full fetch
+// that confirms it never reads as begun: no Live and no is_vod written, and no
+// "no download strategy available" after them. It ends as any private verdict
+// does. The default arm's confirmation goes the same way, its fetch asked for by
+// the schedule probe after a first routine one that settled nothing.
+//
+// Mutants: the check dropped from the live arm, or from the VOD arm (those rows
+// write Live or is_vod and go on); the default arm's give-up dropped (its rows
+// wait on).
+func TestAConfirmingFetchThatSaysPrivateNeverWritesTheGoLive(t *testing.T) {
+	type answer func(*youtube.VideoInfo) func(time.Time) waitFakes
+	arm := func(probe func(time.Time) *youtube.VideoInfo) answer {
+		return func(info *youtube.VideoInfo) func(time.Time) waitFakes {
+			return func(start time.Time) waitFakes {
+				return waitFakes{
+					status: func(at time.Duration) (*youtube.VideoInfo, error) { return liveFrom3m(probe)(at, start) },
+					full:   func(time.Duration) (*youtube.VideoInfo, error) { return info, nil },
+				}
+			}
+		}
+	}
+	defaultArm := func(info *youtube.VideoInfo) func(time.Time) waitFakes {
+		return func(start time.Time) waitFakes {
+			fetched := false
+			return waitFakes{
+				signedIn: true,
+				status:   membersArmProbe,
+				schedule: func(time.Duration) (*youtube.VideoInfo, error) { return liveAnswer(start), nil },
+				full: func(time.Duration) (*youtube.VideoInfo, error) {
+					if !fetched {
+						fetched = true
+						return loginRequiredAnswer(), nil
+					}
+					return info, nil
+				},
+			}
+		}
+	}
+	readingUpcoming := func(info *youtube.VideoInfo) *youtube.VideoInfo {
+		info.StreamStatus, info.IsUpcoming = youtube.StreamUpcoming, true
+		return info
+	}
+	for _, a := range []struct {
+		name  string
+		fakes answer
+		fulls int
+	}{
+		{"the live arm", arm(liveAnswer), 1},
+		{"the VOD arm", arm(vodAnswer), 1},
+		{"the default arm", defaultArm, 2},
+	} {
+		for _, tc := range []struct {
+			name string
+			info func() *youtube.VideoInfo
+			park bool
+		}{
+			{"dead session", func() *youtube.VideoInfo { return privateTo(youtube.SessionAuthLoggedOut, true) }, true},
+			{"healthy session", func() *youtube.VideoInfo { return privateTo(youtube.SessionAuthLoggedIn, true) }, false},
+			{"no cookies", func() *youtube.VideoInfo { return privateTo(youtube.SessionAuthLoggedOut, false) }, false},
+			{"healthy session, still reading upcoming", func() *youtube.VideoInfo {
+				return readingUpcoming(privateTo(youtube.SessionAuthLoggedIn, true))
+			}, false},
+		} {
+			t.Run(a.name+", "+tc.name, func(t *testing.T) {
+				run := driveWaitForLive(t, 2*time.Minute, 30*time.Minute, a.fakes(tc.info()))
+				if run.result == nil || run.result.ShouldDownload {
+					t.Fatalf("the wait ended with %+v at %v, want it over with nothing to download:%s", run.result, run.returned, run)
+				}
+				if run.row.Status != database.StatusUpcoming || run.row.IsVod {
+					t.Errorf("row = %q, is_vod %v; want Upcoming with no go-live written", run.row.Status, run.row.IsVod)
+				}
+				if n := run.count("full"); n != a.fulls {
+					t.Errorf("%d full fetches, want polling to stop at the one that said private:%s", n, run)
+				}
+				if got := errors.Is(run.result.ErrSentinel, ErrCookiesRequired); got != tc.park {
+					t.Errorf("sentinel = %v, want park %v", run.result.ErrSentinel, tc.park)
+				}
+				if !tc.park && !errors.Is(run.result.ErrSentinel, ErrNonActionable) {
+					t.Errorf("sentinel = %v, want the plain give-up", run.result.ErrSentinel)
+				}
+			})
+		}
+	}
+}
+
+// A confirmation with formats goes on, whatever its verdict says: this is about
+// a fetch with nothing to download.
+//
+// Mutant: the check not reading the format count (the capture is given up on).
+func TestAConfirmingFetchThatSaysPrivateWithFormatsStillDownloads(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		info *youtube.VideoInfo
+	}{
+		{"healthy session", privateTo(youtube.SessionAuthLoggedIn, true)},
+		{"dead session", privateTo(youtube.SessionAuthLoggedOut, true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.info.StreamStatus, tc.info.IsLive = youtube.StreamLive, true
+			tc.info.Formats = []youtube.Format{{Itag: 299}}
+			run := driveWaitForLive(t, 2*time.Minute, 15*time.Minute, func(start time.Time) waitFakes {
+				return waitFakes{
+					status: func(at time.Duration) (*youtube.VideoInfo, error) { return liveFrom3m(liveAnswer)(at, start) },
+					full:   func(time.Duration) (*youtube.VideoInfo, error) { return tc.info, nil },
+				}
+			})
+			if run.result == nil || !run.result.ShouldDownload {
+				t.Fatalf("the wait ended with %+v at %v, want the download:%s", run.result, run.returned, run)
+			}
+		})
+	}
+}
