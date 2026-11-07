@@ -1230,7 +1230,7 @@ The tests that pin the behaviour above, by the section they pin. Each bullet nam
 
 **Status Bar**
 
-- pinned by `TestStatusBarTiersNarrowMonotonically`
+- `fitTiers` returning the richest pair that fits, because both ladders narrow monotonically: pinned by `TestStatusBarTiersNarrowMonotonically`.
 
 **Per-endpoint response bodies**
 
@@ -1238,12 +1238,12 @@ The tests that pin the behaviour above, by the section they pin. Each bullet nam
 
 **What the Web UI renders**
 
-- `fetch-errors.test.mjs`
+- The refresh toast branching on the `cause`, never the 409: `fetch-errors.test.mjs`.
 
 **What the TUI renders**
 
 - Both are pinned exactly, and their difference asserted, by `TestRungThreeSentencesDivergeByDesign`.
-- `E L` — Cookie Login: `TestSetupCookieVerdictOutlivesFeedbackLineExpiry`
+- `E L` — Cookie Login: the accepted verdict on the wizard's own line and on the App feedback line, cleared independently: `TestSetupCookieVerdictOutlivesFeedbackLineExpiry`.
 
 **Restart-required cookie settings**
 
