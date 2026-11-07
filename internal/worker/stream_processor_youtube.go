@@ -748,6 +748,15 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				// loses nothing while they are refused, so they place no hold, which
 				// would blind the schedule probe, and do not count toward the cap
 				// while nothing says the stream has begun.
+				//
+				// A hold past the taper is as long as fullFetchInterval, so the
+				// fetch is always due on the poll that hold ends. Made as a routine
+				// one, it placed no hold, and the schedule probe asked for a second
+				// cascade into the same limit 30 s later, past any Retry-After. So
+				// while confirmations are being refused the probe is asked first:
+				// if it says begun this fetch is the confirmation, and otherwise, or
+				// if it fails, a fetch that is due still goes out, because it is what
+				// can give up on a stream made private.
 				if rateLimit.confirmationHeld() {
 					sp.logger.Debug("auth probe unclear; its full fetch waits out a rate limit", "videoID", job.VideoID)
 					continue
@@ -755,24 +764,27 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				due := !unclearSpell || time.Since(lastFullFetch) >= fullFetchInterval
 				unclearSpell = true
 				confirmation := false
-				if !due {
+				if !due || rateLimit.confirmationsRefused() {
 					lastScheduleProbe = time.Now()
 					sched, err := sp.probeVideoSchedule(ctx, job.VideoID)
-					if err != nil {
+					switch {
+					case err != nil:
 						reportFetchOutcome(err, "probe/youtube")
 						sp.logger.Debug("schedule probe under an unclear auth probe failed; the next poll asks again", "videoID", job.VideoID, "err", err)
-						continue
-					}
-					// The only conclusive answer on this path, so an upcoming one
-					// takes back a begun an earlier poll's answer set.
-					rateLimit.noteStatus(sched.StreamStatus)
-					if !scheduleProbeOvertakes(sched) {
+					case scheduleProbeOvertakes(sched):
+						rateLimit.noteStatus(sched.StreamStatus)
+						sp.logger.Info("schedule probe says the stream has begun ahead of the auth probe; confirming",
+							"videoID", job.VideoID, "status", sched.StreamStatus)
+						confirmation = true
+					default:
+						// The only conclusive answer on this path, so an upcoming one
+						// takes back a begun an earlier poll's answer set.
+						rateLimit.noteStatus(sched.StreamStatus)
 						sp.applyScheduleAnswer(job, sched, &scheduledStartTime)
+					}
+					if !due && !confirmation {
 						continue
 					}
-					sp.logger.Info("schedule probe says the stream has begun ahead of the auth probe; confirming",
-						"videoID", job.VideoID, "status", sched.StreamStatus)
-					confirmation = true
 				}
 				sp.logger.Info("auth probe unclear, doing full fetch",
 					"status", probeInfo.StreamStatus, "videoID", job.VideoID)

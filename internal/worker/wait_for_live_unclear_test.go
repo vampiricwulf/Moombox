@@ -493,3 +493,54 @@ func TestAGoLiveThatDidNotHoldCannotEndTheWaitADayLater(t *testing.T) {
 		})
 	}
 }
+
+// At the end of a hold past the taper the schedule probe is asked before the fetch
+// that has come due, and a probe that does not say begun must not cost that fetch.
+// It is what can give up on a stream made private, and it runs on nothing else
+// here. Upcoming also takes begun back, so the arm's routine cadence resumes.
+//
+// Mutant: end the poll when the probe fails or says upcoming, as a poll with no
+// fetch due does (the "fails" row makes no full fetch for the rest of the run,
+// begun standing with nothing to clear it).
+func TestADueFetchStillGoesOutWhenTheScheduleProbeDoesNotConfirmAtAHoldsEnd(t *testing.T) {
+	const begunFor = 40 * time.Minute // past the taper's last step, into its first long hold
+	for _, tc := range []struct {
+		name  string
+		after func(start time.Time) (*youtube.VideoInfo, error)
+	}{
+		{name: "says upcoming", after: func(start time.Time) (*youtube.VideoInfo, error) { return upcomingAnswer(start), nil }},
+		{name: "fails", after: func(time.Time) (*youtube.VideoInfo, error) { return nil, errors.New("schedule probe failed") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := driveWaitForLive(t, 72*time.Hour, 4*time.Hour, func(start time.Time) waitFakes {
+				return waitFakes{signedIn: true, status: membersArmProbe,
+					schedule: func(at time.Duration) (*youtube.VideoInfo, error) {
+						if at < begunFor {
+							return liveAnswer(start), nil
+						}
+						return tc.after(start)
+					},
+					full: func(time.Duration) (*youtube.VideoInfo, error) {
+						return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedIn), nil
+					}}
+			})
+			if run.returned >= 0 {
+				t.Fatalf("the wait ended with %+v at %v, want it still waiting", run.result, run.returned)
+			}
+			var after []time.Duration
+			for _, at := range fullCalls(run) {
+				if at >= begunFor {
+					after = append(after, at)
+				}
+			}
+			if len(after) < 4 {
+				t.Fatalf("full fetches past the go-live at %v, want them going on every %v", after, fullFetchInterval)
+			}
+			for i := 1; i < len(after); i++ {
+				if gap := after[i] - after[i-1]; gap < fullFetchInterval || gap > fullFetchInterval+5*time.Minute {
+					t.Errorf("full fetches %d and %d came %v apart, want about %v", i, i+1, gap, fullFetchInterval)
+				}
+			}
+		})
+	}
+}

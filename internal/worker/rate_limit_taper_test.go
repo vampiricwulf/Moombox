@@ -222,7 +222,8 @@ func membersArmProbe(at time.Duration) (*youtube.VideoInfo, error) {
 // Retry-After floor — the floored row's gaps are 2, 3 and 5 minutes; drop noteFetch
 // from the default arm — its verdict rows confirm on every probe, the live
 // one downloads on the first refusal; drop its confirmationHeld gate — every
-// probe confirms.
+// probe confirms; let a fetch due on the interval go ahead of the schedule probe
+// at a hold's end — the past-the-taper rows make two full fetches per hold.
 func TestEveryConfirmationRefusalTapers(t *testing.T) {
 	m := time.Minute
 	for _, tc := range []struct {
@@ -259,6 +260,16 @@ func TestEveryConfirmationRefusalTapers(t *testing.T) {
 		{name: "default arm, a 429", signedIn: true, webLive: true, status: membersStatus,
 			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
 			answer:  liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m}},
+		// Past the taper a hold is as long as the fetch interval, so the fetch comes
+		// due on the very poll the hold ends. One cascade per hold, not two 30 s apart.
+		{name: "default arm, the verdict, past the taper", signedIn: true, webLive: true, status: membersStatus,
+			refusal: func() (*youtube.VideoInfo, error) {
+				return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedIn), nil
+			},
+			answer: liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m, 10 * m, 30 * m, 30 * m}},
+		{name: "default arm, a 429, past the taper", signedIn: true, webLive: true, status: membersStatus,
+			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
+			answer:  liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m, 10 * m, 30 * m, 30 * m}},
 		{name: "default arm, a captcha", signedIn: true, webLive: true, status: membersStatus,
 			refusal: func() (*youtube.VideoInfo, error) { return captchaInfo(), nil },
 			answer:  liveAnswer, gaps: []time.Duration{2 * m, 3 * m, 5 * m}, captcha: true},

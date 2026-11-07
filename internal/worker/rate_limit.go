@@ -372,6 +372,14 @@ func (l *loopRateLimit) noteStatus(status youtube.StreamStatus) {
 	}
 }
 
+// confirmationsRefused reports whether this spell has refused a go-live
+// confirmation and the stream still reads begun: what the next full fetch would
+// do is that confirmation's job, so the schedule probe is asked before one goes
+// out on the default arm's routine cadence.
+func (l *loopRateLimit) confirmationsRefused() bool {
+	return !l.firstConfirmation.IsZero() && l.begun
+}
+
 // counts reports whether a refusal counts toward the cap: every go-live
 // confirmation's, a probe having said on that poll that the stream began, and
 // any other full fetch's, the periodic one's or the default arm's routine one's,
