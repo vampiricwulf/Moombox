@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
 )
@@ -49,61 +50,65 @@ func (h *healthSidecar) SolveCipher(ctx context.Context, req sidecar.SolveCipher
 // Batch's sig failure left untyped (the in-flight Batch row); SidecarReady
 // ignoring readiness (the down rows).
 func TestCompositeSidecarReadyAndItsTypedSigFailure(t *testing.T) {
-	ctx := context.Background()
-	src := &fakePlayerSource{playerID: "p1", js: "JS"}
-	if NewCompositeSolver(nil, nil).SidecarReady() {
-		t.Error("SidecarReady with no sidecar = true, want false")
-	}
+	// In a bubble: a request meeting the down sidecar waits out its
+	// readiness grace (sidecarReadyGrace, PR-R3) on the bubble's clock.
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		src := &fakePlayerSource{playerID: "p1", js: "JS"}
+		if NewCompositeSolver(nil, nil).SidecarReady() {
+			t.Error("SidecarReady with no sidecar = true, want false")
+		}
 
-	up := &healthSidecar{fakeSidecar: fakeSidecar{respond: func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
-		return sidecar.SolveCipherResult{SigResults: map[string]string{"x": "SIG"}}, nil
-	}}}
-	up.healthy.Store(true)
-	c := NewCompositeSolver(NewSidecarSolver(up, src), nil)
-	if !c.SidecarReady() {
-		t.Error("SidecarReady with a sidecar that is up = false, want true")
-	}
-	if got, err := c.Sig(ctx, "p1", "x"); err != nil || got != "SIG" {
-		t.Errorf("Sig with the sidecar up = %q, %v; want SIG", got, err)
-	}
+		up := &healthSidecar{fakeSidecar: fakeSidecar{respond: func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+			return sidecar.SolveCipherResult{SigResults: map[string]string{"x": "SIG"}}, nil
+		}}}
+		up.healthy.Store(true)
+		c := NewCompositeSolver(NewSidecarSolver(up, src), nil)
+		if !c.SidecarReady() {
+			t.Error("SidecarReady with a sidecar that is up = false, want true")
+		}
+		if got, err := c.Sig(ctx, "p1", "x"); err != nil || got != "SIG" {
+			t.Errorf("Sig with the sidecar up = %q, %v; want SIG", got, err)
+		}
 
-	// Down: never asked, and the failure is typed.
-	up.healthy.Store(false)
-	asked := len(up.calls)
-	if c.SidecarReady() {
-		t.Error("SidecarReady with the sidecar down = true, want false")
-	}
-	if _, err := c.Sig(ctx, "p1", "x"); !errors.Is(err, ErrSidecarUnavailable) {
-		t.Errorf("Sig with the sidecar down = %v, want ErrSidecarUnavailable", err)
-	}
-	if len(up.calls) != asked {
-		t.Errorf("Sig with the sidecar down asked it %d time(s), want none", len(up.calls)-asked)
-	}
-	if _, _, err := c.Batch(ctx, "p1", []string{"x"}, nil); !errors.Is(err, ErrSidecarUnavailable) {
-		t.Errorf("Batch of a sig with the sidecar down = %v, want ErrSidecarUnavailable", err)
-	}
+		// Down: never asked, and the failure is typed.
+		up.healthy.Store(false)
+		asked := len(up.calls)
+		if c.SidecarReady() {
+			t.Error("SidecarReady with the sidecar down = true, want false")
+		}
+		if _, err := c.Sig(ctx, "p1", "x"); !errors.Is(err, ErrSidecarUnavailable) {
+			t.Errorf("Sig with the sidecar down = %v, want ErrSidecarUnavailable", err)
+		}
+		if len(up.calls) != asked {
+			t.Errorf("Sig with the sidecar down asked it %d time(s), want none", len(up.calls)-asked)
+		}
+		if _, _, err := c.Batch(ctx, "p1", []string{"x"}, nil); !errors.Is(err, ErrSidecarUnavailable) {
+			t.Errorf("Batch of a sig with the sidecar down = %v, want ErrSidecarUnavailable", err)
+		}
 
-	// Dies with the request in flight: typed, the child's error kept.
-	dying := &healthSidecar{dieOnCall: true}
-	dying.healthy.Store(true)
-	c = NewCompositeSolver(NewSidecarSolver(dying, src), nil)
-	_, err := c.Sig(ctx, "p1", "x")
-	if !errors.Is(err, ErrSidecarUnavailable) || !strings.Contains(err.Error(), "stdout EOF") {
-		t.Errorf("Sig whose sidecar died in flight = %v, want ErrSidecarUnavailable wrapping the child's error", err)
-	}
-	dying.healthy.Store(true)
-	c = NewCompositeSolver(NewSidecarSolver(dying, src), nil)
-	if _, _, err := c.Batch(ctx, "p1", []string{"x"}, nil); !errors.Is(err, ErrSidecarUnavailable) || !strings.Contains(err.Error(), "stdout EOF") {
-		t.Errorf("Batch of a sig whose sidecar died in flight = %v, want ErrSidecarUnavailable wrapping the child's error", err)
-	}
+		// Dies with the request in flight: typed, the child's error kept.
+		dying := &healthSidecar{dieOnCall: true}
+		dying.healthy.Store(true)
+		c = NewCompositeSolver(NewSidecarSolver(dying, src), nil)
+		_, err := c.Sig(ctx, "p1", "x")
+		if !errors.Is(err, ErrSidecarUnavailable) || !strings.Contains(err.Error(), "stdout EOF") {
+			t.Errorf("Sig whose sidecar died in flight = %v, want ErrSidecarUnavailable wrapping the child's error", err)
+		}
+		dying.healthy.Store(true)
+		c = NewCompositeSolver(NewSidecarSolver(dying, src), nil)
+		if _, _, err := c.Batch(ctx, "p1", []string{"x"}, nil); !errors.Is(err, ErrSidecarUnavailable) || !strings.Contains(err.Error(), "stdout EOF") {
+			t.Errorf("Batch of a sig whose sidecar died in flight = %v, want ErrSidecarUnavailable wrapping the child's error", err)
+		}
 
-	// A failure while the sidecar stays up is that request's own: untyped.
-	flaky := &healthSidecar{fakeSidecar: fakeSidecar{respond: func(sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
-		return sidecar.SolveCipherResult{}, errors.New("context deadline exceeded")
-	}}}
-	flaky.healthy.Store(true)
-	c = NewCompositeSolver(NewSidecarSolver(flaky, src), nil)
-	if _, err := c.Sig(ctx, "p1", "x"); err == nil || errors.Is(err, ErrSidecarUnavailable) {
-		t.Errorf("Sig failing with the sidecar up = %v, want its own error, not ErrSidecarUnavailable", err)
-	}
+		// A failure while the sidecar stays up is that request's own: untyped.
+		flaky := &healthSidecar{fakeSidecar: fakeSidecar{respond: func(sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+			return sidecar.SolveCipherResult{}, errors.New("context deadline exceeded")
+		}}}
+		flaky.healthy.Store(true)
+		c = NewCompositeSolver(NewSidecarSolver(flaky, src), nil)
+		if _, err := c.Sig(ctx, "p1", "x"); err == nil || errors.Is(err, ErrSidecarUnavailable) {
+			t.Errorf("Sig failing with the sidecar up = %v, want its own error, not ErrSidecarUnavailable", err)
+		}
+	})
 }

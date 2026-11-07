@@ -108,7 +108,9 @@ func TestBacklogRateLimitEndsInErrorAfterADay(t *testing.T) {
 // 429 whose Retry-After lengthens every wait to 45 minutes gives up at the
 // same instant, on its 33rd fetch: the day is the clock's, not 48 tries.
 // Before, the job fetched every half hour for as long as the limit lasted,
-// which nothing bounded.
+// which nothing bounded. The row is Live — a broadcast the monitor saw go
+// live — since one still Upcoming is spared the cap (owner decision PR-R4,
+// TestRateLimitCapSparesABroadcastThatHasNotAired).
 //
 // Mutants: drop the cap from outlastRateLimit — the job is still waiting at
 // 26 h; count 48 waits instead of the clock — the 429 row waits on past
@@ -139,6 +141,7 @@ func TestInPlaceRateLimitEndsInErrorAfterADay(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				w, db := testWorkerSetup(t)
 				backlogRetryJob(t, db, "cap_live", 0, false)
+				db.UpdateJobFields("cap_live", map[string]any{"status": database.StatusLive})
 				t0 := time.Now()
 				var mu sync.Mutex
 				var fetches []time.Duration
@@ -682,6 +685,84 @@ func TestLoopRateLimitCountsOnceTheStreamBegan(t *testing.T) {
 		}
 		if !l.counts(true) {
 			t.Errorf("after %v a refused confirmation does not count", tc.answers)
+		}
+	}
+}
+
+// TestRateLimitCapSparesABroadcastThatHasNotAired: the 24-hour cap never
+// counts the refusals of a broadcast that has not aired (owner decision
+// PR-R4, FA-2 on every path). FA-2 exempted the waiting loop alone; a
+// broadcast whose FIRST fetch was refused waits in processJob
+// (outlastRateLimit), which counted every refusal, so a stream scheduled
+// more than a day out ended in Error before it aired — what the rate-limit
+// rework exists to prevent. Two days of refusals later each row here still
+// waits, its status kept and no error written: one still Upcoming, and one
+// whose scheduled start (stream_start_time) is still ahead.
+//
+// Mutants: drop the Upcoming arm of rateLimitCountsFor — the Upcoming row
+// ends in Error at 24 h; drop the scheduled-start arm — the scheduled row
+// does; drop the rateLimitCountsFor call from outlastRateLimit — both do.
+func TestRateLimitCapSparesABroadcastThatHasNotAired(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fields func(t0 time.Time) map[string]any
+	}{
+		{"still Upcoming", func(time.Time) map[string]any { return map[string]any{} }},
+		{"scheduled start still ahead", func(t0 time.Time) map[string]any {
+			return map[string]any{
+				"status":            database.StatusLive,
+				"stream_start_time": t0.Add(3 * rateLimitCap).UTC().Format(time.RFC3339),
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				w, db := testWorkerSetup(t)
+				backlogRetryJob(t, db, "cap_upcoming", 0, false)
+				t0 := time.Now()
+				db.UpdateJobFields("cap_upcoming", tc.fields(t0))
+				w.processStreamFn = func(ctx context.Context, _ *database.Job) (*StreamProcessResult, error) {
+					if ctx.Err() != nil {
+						return cancelledResult(), nil
+					}
+					return rateLimitedResult(t), nil
+				}
+				if runInBubble(t, w, "cap_upcoming", 2*rateLimitCap) {
+					row, _ := db.GetJob("cap_upcoming")
+					t.Fatalf("the job's run ended within two days of refusals: status %s, error %q", row.Status, row.Error)
+				}
+				row, _ := db.GetJob("cap_upcoming")
+				if row.Status == database.StatusError || row.Error != "" {
+					t.Errorf("status = %s, error %q; want the broadcast still waiting", row.Status, row.Error)
+				}
+			})
+		})
+	}
+}
+
+// TestRateLimitCountsFor pins the rule's rows, the backlog VOD's above all:
+// its admission writes Upcoming, and it must still be capped.
+func TestRateLimitCountsFor(t *testing.T) {
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	ch := "UC_x"
+	for _, tc := range []struct {
+		name string
+		job  database.Job
+		want bool
+	}{
+		{"Upcoming broadcast", database.Job{Status: database.StatusUpcoming}, false},
+		// Owner decision PR-R4 exempts an Upcoming row whatever its start:
+		// one whose scheduled start passed days ago, still refused, waits.
+		{"Upcoming broadcast, start long passed", database.Job{Status: database.StatusUpcoming, StreamStartTime: "2026-10-28T11:00:00Z"}, false},
+		{"Upcoming backlog VOD", database.Job{Status: database.StatusUpcoming, QueuePriority: 1, ChannelID: &ch}, true},
+		{"Upcoming row known to be a VOD", database.Job{Status: database.StatusUpcoming, IsVod: true}, true},
+		{"Live", database.Job{Status: database.StatusLive}, true},
+		{"Live, scheduled ahead", database.Job{Status: database.StatusLive, StreamStartTime: "2026-10-31T13:00:00Z"}, false},
+		{"Live, start passed", database.Job{Status: database.StatusLive, StreamStartTime: "2026-10-31T11:00:00Z"}, true},
+		{"backlog VOD scheduled ahead", database.Job{Status: database.StatusUpcoming, QueuePriority: 1, ChannelID: &ch, StreamStartTime: "2026-11-02T00:00:00Z"}, false},
+	} {
+		if got := rateLimitCountsFor(&tc.job, now); got != tc.want {
+			t.Errorf("%s: rateLimitCountsFor = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

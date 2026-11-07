@@ -88,6 +88,12 @@ type ChapterImportView struct {
 	// beside the archive all the same, and the archive is as it was.
 	Embedded   bool   `json:"embedded"`
 	EmbedError string `json:"embedError,omitempty"`
+	// NoSpace: the re-mux was not attempted because the archive's volume has
+	// no room for its temporary copy, or the copy would take it past
+	// disk_critical (owner decision PR-I4, worker.ErrArchiveRemuxNoSpace).
+	// EmbedError says so, with the sizes; the list is saved beside the
+	// archive all the same.
+	NoSpace bool `json:"noSpace,omitempty"`
 }
 
 // ChapterService is the import behind both UIs.
@@ -474,6 +480,7 @@ func (s *ChapterService) apply(ctx context.Context, jobID string, list []utils.C
 		s.deps.Logger.Warn("Chapter import: the archive was not re-muxed with the chapters; it is left as it was, and the list is saved beside it",
 			"job", jobID, "error", rerr)
 		v.EmbedError = rerr.Error()
+		v.NoSpace = errors.Is(rerr, worker.ErrArchiveRemuxNoSpace)
 		return v, nil
 	}
 	v.Embedded = true

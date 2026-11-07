@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/childproc"
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/disk"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -32,6 +34,19 @@ const opChapterImport = "chapter import"
 // finished and cannot be rewritten (owner decision CI-1: only a job that is not
 // active can be imported). The REST layer maps it to 409.
 var ErrArchiveJobActive = errors.New("job is active; its archive cannot be rewritten while it records or muxes")
+
+// ErrArchiveRemuxNoSpace: the archive's volume has no room for the re-mux's
+// temporary copy (owner decision PR-I4), so the archive is left as it is and
+// the chapter list stays a sidecar only. The REST layer reports it on the
+// save's view (ChapterImportView.NoSpace) and in its embed error, which both
+// UIs show.
+var ErrArchiveRemuxNoSpace = errors.New("not enough free space to re-mux the archive")
+
+// remuxHeadroom is what the archive's volume must keep free beyond the
+// re-mux's full temporary copy of the archive: the FFMETADATA file, the
+// copy's own index growing past the original's, and room for whatever else
+// writes to the volume (a live capture) while the copy is written.
+const remuxHeadroom = 256 << 20
 
 // ClaimChapterImport takes the job's per-job claim for a chapter import and
 // returns its release, to be called once the import is done. The claim is
@@ -82,6 +97,53 @@ func (w *DownloadWorker) chapterImportRunning(jobID string) bool {
 	return w.stagingClaims[jobID] == opChapterImport
 }
 
+// ChapterImportRunning reports whether a chapter import holds jobID's claim:
+// the REST layer's question before Resume, Retry and Reinitialize, which it
+// refuses with 409 while one does (owner decision PR-M5). Each of them starts
+// what the import must not race — a run whose finalize writes the archive
+// the re-mux is about to rename its copy over, or a reset that deletes the
+// parts and staging beside it.
+func (w *DownloadWorker) ChapterImportRunning(jobID string) bool {
+	return w.chapterImportRunning(jobID)
+}
+
+// waitChapterImport returns once no chapter import holds jobID's claim, or
+// reports false when ctx ends first. What waits (what) is logged once, when
+// there is something to wait for. The finalize of a run (muxAndFinalize,
+// through the orchestrator's waitArchiveRewrite) and a deferred Resume or
+// Reinitialize (afterJobExit) wait here (owner decision PR-M5): the import
+// replaces the archive in place, and a finalize that wrote it meanwhile was
+// renamed over by the import's copy of the OLD archive.
+func (w *DownloadWorker) waitChapterImport(ctx context.Context, jobID, what string) bool {
+	logged := false
+	for {
+		w.stagingClaimMu.Lock()
+		if w.stagingClaims[jobID] != opChapterImport {
+			w.stagingClaimMu.Unlock()
+			return true
+		}
+		if w.stagingClaimFreed == nil {
+			w.stagingClaimFreed = map[string]chan struct{}{}
+		}
+		freed, ok := w.stagingClaimFreed[jobID]
+		if !ok {
+			freed = make(chan struct{})
+			w.stagingClaimFreed[jobID] = freed
+		}
+		w.stagingClaimMu.Unlock()
+		if !logged {
+			w.logger.Info("waiting for the chapter import rewriting the archive to finish before "+what, "jobID", jobID)
+			logged = true
+		}
+		select {
+		case <-freed:
+			// Asked again: the claim may have been taken anew since.
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
 // ArchiveRemuxResult is what RemuxArchiveChapters measured on the archive it
 // put in place.
 type ArchiveRemuxResult struct {
@@ -127,6 +189,10 @@ func (w *DownloadWorker) RemuxArchiveChapters(jobID string, expect database.JobS
 	})
 	defer unsubscribe()
 
+	if err := w.remuxRoom(path); err != nil {
+		return nil, err
+	}
+
 	muxer := w.orchestrator.mux()
 	ffprobePath := muxer.FFprobePath()
 	orig, err := probeArchiveShape(ctx, ffprobePath, path)
@@ -162,9 +228,18 @@ func (w *DownloadWorker) RemuxArchiveChapters(jobID string, expect database.JobS
 		if err := remuxCheck(orig, got, len(chapters)); err != nil {
 			return err
 		}
-		// Asked last, so a row deleted while FFmpeg wrote, or while the
-		// copy was being probed, puts nothing back in its archive's place.
-		return ctx.Err()
+		// Asked last, immediately before the rename, so a row deleted while
+		// FFmpeg wrote, or while the copy was being probed, puts nothing back
+		// in its archive's place — and nor does a row that moved on (owner
+		// decision PR-M5). The copy is of the archive as it was when the
+		// import read it: a row no longer in the status the caller read, or
+		// with a run in flight, may have a new archive at this name by now,
+		// or one about to be written, and the rename would put the old one
+		// back over it.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return w.archiveStillAsRead(jobID, expect)
 	}
 	if err := muxer.RemuxChapters(ctx, path, path, metaPath, check); err != nil {
 		return nil, err
@@ -186,6 +261,68 @@ func (w *DownloadWorker) RemuxArchiveChapters(jobID string, expect database.JobS
 		}
 	}
 	return res, nil
+}
+
+// remuxRoom is the re-mux's disk check, made before it writes anything (owner
+// decision PR-I4): the re-mux writes a full temporary copy of the archive
+// beside it, so the archive's volume needs the archive's size plus
+// remuxHeadroom free, and the copy must not take the volume to the
+// disk_critical threshold — the reading that closes backlog admission and
+// alerts the operator. Gap-fill (diskCritical) and the mux repair
+// (repairDiskSpace) guard their copies the same way; the import wrote one
+// with no check at all, which on a shared, nearly full volume starved a live
+// capture of the space it was writing into. A volume that cannot be read is
+// not refused: the copy's own write fails cleanly, leaving the archive.
+func (w *DownloadWorker) remuxRoom(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil // the probe after this reports the archive's own error
+	}
+	query := w.diskSpace
+	if query == nil {
+		query = disk.GetDiskSpace
+	}
+	ds, err := query(filepath.Dir(path))
+	if err != nil || ds == nil {
+		return nil
+	}
+	need := uint64(info.Size()) + remuxHeadroom
+	if ds.Free < need {
+		return fmt.Errorf("%w: the archive's re-mux needs %s free on its volume, which has %s; the file was not re-muxed",
+			ErrArchiveRemuxNoSpace, utils.FormatFileSize(int64(need)), utils.FormatFileSize(int64(ds.Free)))
+	}
+	var thresholds config.DiskConfig
+	w.readConfig(func(c *config.MoomboxConfig) { thresholds = c.Disk })
+	after := ds.UsedPct
+	if ds.Total > 0 {
+		after += float64(need) / float64(ds.Total) * 100
+	}
+	if thresholds.AtCritical(after) {
+		return fmt.Errorf("%w: the archive's re-mux would take its volume to %.1f%% used, past the disk_critical threshold (%d%%); the file was not re-muxed",
+			ErrArchiveRemuxNoSpace, after, thresholds.CriticalPercent)
+	}
+	return nil
+}
+
+// archiveStillAsRead is the re-mux's last question before its rename: is the
+// row still in expect, the status the import read under its claim, with no
+// run of the job in flight? An error says what moved, and the archive is
+// left as it is.
+func (w *DownloadWorker) archiveStillAsRead(jobID string, expect database.JobStatus) error {
+	if w.queue.IsProcessing(jobID) {
+		return fmt.Errorf("a run of the job started while the archive was re-muxed; the archive is left as it was")
+	}
+	fresh, err := w.db.GetJob(jobID)
+	if err != nil {
+		return fmt.Errorf("re-read the job before replacing the archive: %w", err)
+	}
+	if fresh == nil {
+		return fmt.Errorf("the job was deleted while the archive was re-muxed; the archive is left as it was")
+	}
+	if fresh.Status != expect {
+		return fmt.Errorf("the job's status moved from %s to %s while the archive was re-muxed; the archive is left as it was", expect, fresh.Status)
+	}
+	return nil
 }
 
 // archiveShape is what the re-mux check compares: the duration ffprobe gives
@@ -237,14 +374,42 @@ func probeArchiveShape(ctx context.Context, ffprobePath, path string) (*archiveS
 // variable so a test can refuse a copy FFmpeg made well.
 var remuxCheck = verifyArchiveRemux
 
+// Re-mux shortfall tolerance (owner decision PR-M7): how much shorter than
+// the archive it copies a re-mux's stream, or the file, may be. The larger of
+// remuxShortfallMinSec and remuxShortfallFraction of the original's length,
+// with no floor below which nothing is measured.
+//
+// Deliberately NOT the live capture's muxedOutputIsShort (a 20 s shortfall
+// allowed, nothing under 60 s judged): that tolerance is for a mux of raw
+// fragments whose container metadata is unreliable, and this is a stream copy
+// of one finished file into a copy that REPLACES it, the only copy there is.
+// A whole-file copy has no reason to lose anything, so a second (container
+// rounding of the last frame or audio packet) or half a percent (an edit list
+// or a stretched timebase measured a little differently, on a long archive)
+// is all it is allowed; a clip under a minute is now measured too.
+const (
+	remuxShortfallMinSec   = 1.0
+	remuxShortfallFraction = 0.005
+)
+
+// remuxIsShort reports whether a re-mux's duration, outSec, falls short of
+// the original's, origSec, by more than the re-mux tolerance. An original the
+// probe could not read (0) cannot be judged; an output LONGER than its
+// original never counts as short.
+func remuxIsShort(origSec, outSec float64) bool {
+	if origSec <= 0 {
+		return false
+	}
+	return origSec-outSec > max(remuxShortfallMinSec, remuxShortfallFraction*origSec)
+}
+
 // verifyArchiveRemux holds a re-mux to the archive it copies: the same media
 // streams, each kind as many as before, none of them — and not the file —
-// shorter than its original by more than the archive copy's own tolerance
-// (muxedOutputIsShort, ENGINE-9's check, which judges only an input long
-// enough to be measured), and exactly the chapters the list asked for. A
-// stream copy of a whole file has no reason to differ from it in anything
-// but its chapters, so any difference means the copy went wrong and the
-// archive must stay as it is.
+// shorter than its original by more than the re-mux's own tolerance
+// (remuxIsShort: about a second or 0.5%, measured however short the archive
+// is), and exactly the chapters the list asked for. A stream copy of a whole
+// file has no reason to differ from it in anything but its chapters, so any
+// difference means the copy went wrong and the archive must stay as it is.
 func verifyArchiveRemux(orig, out *archiveShape, wantChapters int) error {
 	for kind, durs := range orig.streams {
 		got := out.streams[kind]
@@ -252,8 +417,8 @@ func verifyArchiveRemux(orig, out *archiveShape, wantChapters int) error {
 			return fmt.Errorf("the re-mux has %d %s stream(s), the archive %d; the archive is left as it was", len(got), kind, len(durs))
 		}
 		for i := range durs {
-			if muxedOutputIsShort(durs[i], got[i]) {
-				return fmt.Errorf("the re-mux's %s stream is %.0fs, the archive's %.0fs; the archive is left as it was", kind, got[i], durs[i])
+			if remuxIsShort(durs[i], got[i]) {
+				return fmt.Errorf("the re-mux's %s stream is %.1fs, the archive's %.1fs; the archive is left as it was", kind, got[i], durs[i])
 			}
 		}
 	}
@@ -262,8 +427,8 @@ func verifyArchiveRemux(orig, out *archiveShape, wantChapters int) error {
 			return fmt.Errorf("the re-mux has a %s stream the archive does not; the archive is left as it was", kind)
 		}
 	}
-	if muxedOutputIsShort(orig.durationSec, out.durationSec) {
-		return fmt.Errorf("the re-mux is %.0fs, the archive %.0fs; the archive is left as it was", out.durationSec, orig.durationSec)
+	if remuxIsShort(orig.durationSec, out.durationSec) {
+		return fmt.Errorf("the re-mux is %.1fs, the archive %.1fs; the archive is left as it was", out.durationSec, orig.durationSec)
 	}
 	if out.chapters != wantChapters {
 		return fmt.Errorf("the re-mux carries %d chapter(s), %d were asked for; the archive is left as it was", out.chapters, wantChapters)
@@ -365,9 +530,29 @@ func (k *keptImport) write(path string, lg logger) {
 		lg.Warn("re-finalize: could not keep the archive's imported chapter list", "path", path, "err", err)
 		return
 	}
-	if k.from != path {
+	if !sameFilePath(k.from, path) {
 		if err := os.Remove(k.from); err != nil && !os.IsNotExist(err) {
 			lg.Warn("re-finalize: could not remove the imported chapter list under the archive's old name", "path", k.from, "err", err)
 		}
 	}
+}
+
+// sameFilePath reports whether a and b name the same file: the same path once
+// normalised (normalizePath, which folds case on Windows, as output_claims.go
+// compares stems), or two names the filesystem resolves to one file
+// (os.SameFile: a case-only difference on NTFS or a case-insensitive APFS
+// volume, a symlinked directory, a hard link).
+//
+// The question a re-finalize asks before it removes the sidecar it read from
+// once it has written the one beside the archive (owner decision PR-M8). A raw
+// string compare called "X.chapters.json" and "x.chapters.json" two files, and
+// on NTFS removing the first deletes the second, the file just written: the
+// import and the original it kept were gone, on Windows only.
+func sameFilePath(a, b string) bool {
+	if normalizePath(a) == normalizePath(b) {
+		return true
+	}
+	ai, aerr := os.Stat(a)
+	bi, berr := os.Stat(b)
+	return aerr == nil && berr == nil && os.SameFile(ai, bi)
 }

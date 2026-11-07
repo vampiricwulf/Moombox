@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -77,6 +78,10 @@ func useRealWorker(f *chapterFixture, imp *fakeChapterImporter, ffmpegPath strin
 	cfg.Paths.FfmpegPath = ffmpegPath
 	cfg.Paths.StagingDirectory = f.stagingDir
 	cfg.Paths.OutputDirectory = f.outputDir
+	// The re-mux's disk check (PR-I4) reads the real volume the test's temp
+	// dir is on; a host whose disk is past the default disk_critical would
+	// refuse every re-mux here. The check is the worker's to test.
+	cfg.Disk.CriticalPercent = 0
 	imp.real = worker.NewDownloadWorker(f.db, nil, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 }
 
@@ -274,6 +279,38 @@ func TestChapterImportFailedRemuxKeepsTheSidecar(t *testing.T) {
 	}
 	if got := titlesOf(f.get(t, "yt_vod")); strings.Join(got, "|") != "a|b" {
 		t.Errorf("GET = %q, want the saved list", got)
+	}
+}
+
+// TestChapterImportNoSpaceSavesTheSidecarOnly: a re-mux the archive's volume
+// has no room for (worker.ErrArchiveRemuxNoSpace, owner decision PR-I4) is a
+// save of the sidecar only, and the view says why — NoSpace, and the embed
+// error both UIs already show, with the sizes.
+//
+// Mutant: the save not setting NoSpace on that error.
+func TestChapterImportNoSpaceSavesTheSidecarOnly(t *testing.T) {
+	ffmpegPath := requireFFmpeg(t)
+	imp := &fakeChapterImporter{remuxErr: fmt.Errorf("%w: the archive's re-mux needs 4.3 GB free on its volume, which has 1.0 GB; the file was not re-muxed", worker.ErrArchiveRemuxNoSpace)}
+	f := newChapterImportFixture(t, imp)
+	archive := filepath.Join(f.outputDir, "vod.mp4")
+	makeChapteredMP4(t, ffmpegPath, archive, 4, []utils.Chapter{{StartMs: 0, Title: "embedded"}})
+	f.addJob(t, "yt_vod", func(j *database.Job) { j.Filename = "vod.mp4" })
+
+	code, v, body := f.postImport(t, "/api/jobs/yt_vod/chapters", map[string]any{"text": "0:00 a\n0:02 b"})
+	if code != http.StatusOK {
+		t.Fatalf("save: %d %s", code, body)
+	}
+	if v.Embedded || !v.NoSpace || !strings.Contains(v.EmbedError, "not re-muxed") {
+		t.Errorf("view = %+v, want NoSpace and the reason", v)
+	}
+	if got := titlesOf(f.get(t, "yt_vod")); strings.Join(got, "|") != "a|b" {
+		t.Errorf("GET = %q, want the saved list", got)
+	}
+
+	// Any other failure is not a lack of space.
+	imp.remuxErr = errors.New("the re-mux carries 0 chapter(s)")
+	if _, v, _ := f.postImport(t, "/api/jobs/yt_vod/chapters", map[string]any{"text": "0:00 a\n0:02 b"}); v.NoSpace {
+		t.Error("a failed re-mux read as a lack of space")
 	}
 }
 

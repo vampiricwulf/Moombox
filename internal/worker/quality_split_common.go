@@ -190,9 +190,10 @@ func (o *DownloadOrchestrator) sendGapSplitNotification(
 // sendQualitySplitNotification delivers the "Stream quality changed during
 // download" notification for the given platform. platformTitle is the
 // user-facing prefix ("YouTube" or "Twitch"). partCompleted reports whether
-// the closing span was actually muxed as a part — short spans are discarded
-// and their index reused, so claiming "Completed Part: N" for them would
-// name a file that never exists. No-op when the notifier is nil.
+// the closing span was actually muxed as a part — a short span is set aside
+// (muxed into its own file beside the archive at finalize, PR-R9) and its
+// index reused, so claiming "Completed Part: N" for it would name a part
+// that never exists. No-op when the notifier is nil.
 func (o *DownloadOrchestrator) sendQualitySplitNotification(
 	jobCtx *JobContext,
 	platformTitle string,
@@ -207,7 +208,7 @@ func (o *DownloadOrchestrator) sendQualitySplitNotification(
 	// Parts rows, and the "{name} - partN" filenames.
 	partField := notifications.Field{Name: "Completed Part", Value: fmt.Sprintf("%d", segmentIndex+1), Inline: true}
 	if !partCompleted {
-		partField = notifications.Field{Name: "Short Span", Value: "discarded (under 10s)", Inline: true}
+		partField = notifications.Field{Name: "Short Span", Value: "set aside (under 10s)", Inline: true}
 	}
 	// Same mapper, same reason as the gap split above: `quality_split` is a
 	// lifecycle event keyed on Opts.JobID.

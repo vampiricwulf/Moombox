@@ -324,3 +324,51 @@ func TestLiveLoopSplitsAtARefusedSegment(t *testing.T) {
 		t.Error("the refused-segment split adopts the look-refresh — the part would continue across the hole")
 	}
 }
+
+// fakeStopped is a stopped stream for noteStopped, standing in the engine's
+// readings directly.
+type fakeStopped struct {
+	behind, whole bool
+	seq           int
+}
+
+func (f fakeStopped) StoppedWellBehindHead() bool { return f.behind }
+func (f fakeStopped) WholeStreamRefused() bool    { return f.whole }
+func (f fakeStopped) CurrentSeq() int             { return f.seq }
+
+// TestWholeStreamRefusalNeverReachesTheCap: a rebuild whose downloader's
+// refused-segment rule declined the hole — nothing past it served, or the
+// head served segments report within two of it — ends the count instead of
+// adding to it (owner decision PR-M2). Every segment refused (a GVS, PO-token
+// or bot-detection outage) and a stall at the edge the stream has served
+// both raise the tracked head through refusals' X-Head-Seqnum and the head
+// probes, so StoppedWellBehindHead reads them as a refused segment; counted,
+// the fourth such rebuild passed the cap and the stream-end verify then
+// finalized a capture YouTube still called live after six still-live checks.
+// Reset, the loop rebuilds for as long as the stream is live, and arms the
+// rule again every third rebuild. A segment refused while later ones are
+// served still reaches the cap.
+//
+// Mutant: noteStopped not asking WholeStreamRefused — the fourth rebuild of
+// the outage counts 4, past the cap.
+func TestWholeStreamRefusalNeverReachesTheCap(t *testing.T) {
+	var r seqRun
+	for i := 1; i <= sameSeqRebuildCap; i++ {
+		if got := r.noteStopped(fakeStopped{behind: true, seq: 50}); got != i {
+			t.Fatalf("rebuild %d at a stuck segment: count = %d, want %d", i, got, i)
+		}
+	}
+	// The armed downloader probed past the hole: nothing served.
+	if got := r.noteStopped(fakeStopped{behind: true, whole: true, seq: 50}); got != 0 {
+		t.Fatalf("a declined hole counted %d, want the run ended (0)", got)
+	}
+	// The outage goes on: the count starts again and re-arms at the cap.
+	for i := 1; i <= sameSeqRebuildCap; i++ {
+		if got := r.noteStopped(fakeStopped{behind: true, seq: 50}); got != i {
+			t.Fatalf("rebuild %d after a decline: count = %d, want %d", i, got, i)
+		}
+	}
+	if got := r.noteStopped(fakeStopped{behind: true, whole: true, seq: 50}); got > sameSeqRebuildCap {
+		t.Errorf("the outage's rebuild counted %d, past the cap", got)
+	}
+}

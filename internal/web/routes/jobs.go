@@ -1108,6 +1108,9 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		if w != nil {
+			if refuseWhileChapterImport(rw, w, jobID) {
+				return
+			}
 			w.ResumeJob(jobID)
 		}
 
@@ -1133,6 +1136,9 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		if w != nil {
+			if refuseWhileChapterImport(rw, w, jobID) {
+				return
+			}
 			w.ReinitializeJob(jobID)
 		}
 
@@ -1507,6 +1513,20 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// refuseWhileChapterImport answers 409 and reports true when a chapter import
+// holds jobID's claim (owner decision PR-M5): Resume and Retry start a run
+// whose finalize writes the archive the import's re-mux is about to rename
+// its copy over, and Reinitialize deletes the parts and staging beside an
+// archive mid-replace. The operator tries again once the import is done; the
+// worker waits out one that starts after this check (afterJobExit).
+func refuseWhileChapterImport(rw http.ResponseWriter, w *worker.DownloadWorker, jobID string) bool {
+	if !w.ChapterImportRunning(jobID) {
+		return false
+	}
+	jsonError(rw, "A chapter import is rewriting this job's archive; try again once it is done", http.StatusConflict)
+	return true
 }
 
 // cancelJob is the cancel route's write: the worker's CancelJob, which also

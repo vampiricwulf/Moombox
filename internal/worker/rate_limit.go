@@ -79,7 +79,10 @@ import (
 //     counting starts once the probe, or the schedule probe, says it is live
 //     or over, when the go-live confirmation is what is waited on. A probe
 //     that could not tell (inconclusive) counts as begun only when the last
-//     one that could said so (loopRateLimit.begun);
+//     one that could said so (loopRateLimit.begun). The exemption holds on
+//     every path (owner decision PR-R4): a job waiting in place whose row is
+//     still Upcoming, or whose scheduled start is still ahead, counts none
+//     either (rateLimitCountsFor);
 //   - the waiting loop confirms a go-live YouTube refused again 2, 5, 10 and
 //     20 minutes after the spell's first refused confirmation, then every
 //     rateLimitRetryInterval (rateLimitConfirmTaper; the owner's reading of
@@ -635,7 +638,11 @@ func (w *DownloadWorker) outlastRateLimit(ctx context.Context, job *database.Job
 	if captcha {
 		w.captcha.raise(job)
 	}
-	if began, refusals := w.rateLimitSpells.note(job.ID, now); now.Sub(began) >= rateLimitCap && refusals >= rateLimitCapRefusals {
+	if !rateLimitCountsFor(job, now) {
+		// A broadcast that has not aired: its refusals are not counted toward
+		// the cap, and no spell is started for it, as the waiting loop counts
+		// none while the stream is upcoming (loopRateLimit.begun).
+	} else if began, refusals := w.rateLimitSpells.note(job.ID, now); now.Sub(began) >= rateLimitCap && refusals >= rateLimitCapRefusals {
 		w.logger.Warn("YouTube has refused this job's fetches for a day; giving up",
 			"jobID", job.ID, "since", began.UTC().Format(time.RFC3339), "refusals", refusals, "err", err)
 		w.setJobError(job, rateLimitGaveUp(err))
@@ -670,6 +677,36 @@ func (w *DownloadWorker) outlastRateLimit(ctx context.Context, job *database.Job
 		return nil
 	}
 	return cur
+}
+
+// rateLimitCountsFor reports whether a refusal outlastRateLimit meets for job
+// at now counts toward the cap (rateLimitCap, rateLimitCapRefusals). Not
+// while the stream has not aired (owner decision PR-R4, FA-2 on every path):
+// a row still Upcoming that is neither a backlog VOD (whose admission writes
+// Upcoming, CookieResumeStatus) nor known to be a VOD (is_vod, written by a
+// fetch that was answered), or one whose scheduled start (stream_start_time,
+// which an answered fetch of an upcoming broadcast writes) is still ahead.
+// Nothing it airs is lost to the wait, and the cap used to end a broadcast
+// scheduled more than a day out whose first fetch YouTube refused — the
+// Error the rework of the rate-limit verdict exists to prevent — while the
+// waiting loop, which the same broadcast reaches once a fetch is answered,
+// counted nothing (loopRateLimit.begun). Such a job waits in place, fetching
+// again every rateLimitRetryInterval, for as long as it is refused. The two
+// arms are the owner's words ("while the stream is Upcoming or its scheduled
+// start is in the future"), so neither bounds the other: a refused fetch
+// never moves a row, and an Upcoming row stays exempt while it is refused
+// even once its scheduled start has passed — a broadcast that aired, was
+// deleted or went private while YouTube kept refusing the session waits
+// rather than ending in Error after a day. The refusals count from the first
+// one after an answered fetch moves the row to Live (or marks it a VOD).
+func rateLimitCountsFor(job *database.Job, now time.Time) bool {
+	if start := parseRFC3339(job.StreamStartTime); !start.IsZero() && start.After(now) {
+		return false
+	}
+	if job.Status == database.StatusUpcoming && !job.IsVod && CookieResumeStatus(job) != database.StatusQueued {
+		return false
+	}
+	return true
 }
 
 // noteAnswered is what a pass whose fetch YouTube answered ends (processJob):

@@ -849,6 +849,7 @@ func (d *SegmentDownloader) refuseSegment(ctx context.Context, seq int) error {
 	if !served || head-2 <= int64(seq) {
 		d.logger.Warn("[Downloader] segment refused again on fresh credentials, but no later segment is served well past it — not giving it up",
 			"seq", seq, "probedSeq", later, "served", served, "servedHeadSeq", head)
+		d.wholeStreamRefusedAt.Store(int64(seq) + 1)
 		return errNotRefused
 	}
 	initOnly := d.holdsNoMedia()

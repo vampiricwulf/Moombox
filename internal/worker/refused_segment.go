@@ -25,10 +25,13 @@ import (
 // sequence back once more they apply the engine's refused-segment rule to it
 // instead — the rebuilds were the fresh credentials that rule waits for —
 // and the loop closes the part there (ErrSegmentRefused). A sequence the rule
-// cannot take yet — a 5xx that has not failed for long enough, or a refusal
-// with no later segment served either — comes back as ErrQualityLost once
-// more; past the cap the loop stops rebuilding at once and verifies the
-// stream on the still-live branch's five-minute cadence and budget instead.
+// cannot take yet — a 5xx that has not failed for long enough — comes back as
+// ErrQualityLost once more; past the cap the loop stops rebuilding at once
+// and verifies the stream on the still-live branch's five-minute cadence and
+// budget instead. A refusal with no later segment served either is the whole
+// stream's, not the segment's: the rule declines it, and the rebuild that
+// follows ends the count instead of passing the cap (noteStopped, owner
+// decision PR-M2), so a capture YouTube still calls live waits it out.
 //
 // Only a stall the rule could act on counts: a DASH stream stopped more than
 // two segments below its head (engine.SegmentDownloader.StoppedWellBehindHead).
@@ -56,11 +59,38 @@ func (r *seqRun) note(seq int) int {
 	return r.count
 }
 
+// stoppedStream is what noteStopped reads off a stopped downloader
+// (*engine.SegmentDownloader in production).
+type stoppedStream interface {
+	StoppedWellBehindHead() bool
+	WholeStreamRefused() bool
+	CurrentSeq() int
+}
+
 // noteStopped records a rebuild of the stream d stopped where it did: counted
 // when it stopped well behind its head, otherwise the run is over — a stream
 // at the edge is not stuck at a refused segment.
-func (r *seqRun) noteStopped(d *engine.SegmentDownloader) int {
-	if !d.StoppedWellBehindHead() {
+//
+// Nor is a stream whose refused-segment rule declined the hole
+// (engine.SegmentDownloader.WholeStreamRefused, owner decision PR-M2): it
+// probed past the hole and nothing was served, or the head SERVED segments
+// report (servedHeadSeq) stands within two of it. Every segment is refused —
+// a GVS, PO-token or bot-detection outage — or the stall is at the edge the
+// stream has served; the tracked head StoppedWellBehindHead reads cannot tell
+// either from a refused segment, because refusals' X-Head-Seqnum and the
+// head probes keep raising it. Such a rebuild ends the run: counted, it
+// reached the cap after three, and past the cap the stream-end verify
+// finalized a capture YouTube still called live after six still-live checks
+// (about 35 minutes). Reset, the loop rebuilds for as long as the stream is
+// live, as it did before the cap, and the rule asks again — with a fresh
+// probe past the hole — every third rebuild. The cap stays for one segment
+// refused while later ones are served: that rule takes it. moonarchive stops
+// the capture on this repeated near-edge 403 instead (its
+// RepeatedFragmentExpiryException when max_seq - 2 <= cur_seq,
+// src/moonarchive/downloaders/youtube/_dash.py:241-262); waiting it out goes
+// beyond it, by owner decision PR-M2.
+func (r *seqRun) noteStopped(d stoppedStream) int {
+	if d.WholeStreamRefused() || !d.StoppedWellBehindHead() {
 		*r = seqRun{}
 		return 0
 	}

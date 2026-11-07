@@ -273,17 +273,24 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			o.logger.Warn("YouTube kept refusing a segment its stream had moved well past — closing the part at it and continuing in a new one",
 				"seq", hole, "segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
 		}
+		// A span too short to be a part is set aside (setAsideShortSpan:
+		// muxed into its own file beside the archive at finalize, never
+		// deleted — PR-R9), and one that cannot be set aside is closed as a
+		// part like any other. Decided before the notification, which says
+		// which of the two the span became: sent first, it said "set aside"
+		// of a span then muxed as a part.
+		setAside := shortSegment && o.setAsideShortSpan(curCtx.StagingDir, jobCtx.Job.ID)
 		if hole < 0 || newQuality.Changed(currentQuality) {
 			o.logger.Info("quality split",
 				"from", currentQuality.Label, "to", newQuality.Label,
 				"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
 
-			o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex, !shortSegment)
+			o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex, !setAside)
 		}
 
-		// Mux the old segment in the background (unless too short).
+		// Mux the old segment in the background, unless it was set aside.
 		// No preMux: YouTube chat stays a single whole-job file.
-		if !shortSegment {
+		if !setAside {
 			// A resumed part's true start pre-dates this session — pass
 			// the sentinel so muxSegment derives it from the muxed
 			// duration instead of stamping it with the restart time.
@@ -294,36 +301,17 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
 				muxStart, segmentEndTime, currentQuality, result, "youtube", nil)
 			segmentIndex++
-		} else {
-			o.logger.Debug("skipping short segment mux",
-				"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
-				"jobID", jobCtx.Job.ID)
 		}
 
 		// Create downloaders in the NEW staging dir. The caller's refresh points
 		// at the old staging dir and was used only to check quality — it is
-		// discarded unrun.
+		// discarded unrun. A short span reuses the index, and its dir when
+		// that was the current one: setAsideShortSpan has cleared it of the
+		// span's media and resume state, so the engine starts the new quality
+		// fresh instead of resume-appending it onto the old.
 		segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
 		if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
 			return true, fmt.Errorf("create segment staging dir: %w", err)
-		}
-		if shortSegment && segStagingDir == curCtx.StagingDir {
-			// Short-span discard reusing the same index/dir: physically
-			// remove the span's media and resume sidecars, or the engine
-			// would resume-append the NEW quality onto the discarded
-			// old-quality data — a mixed-codec file under a stale init
-			// segment. Mirrors the Twitch discard in advanceToNewPart.
-			// video.ts is the YouTube HLS strategy's staging name;
-			// video_stream/audio_stream are the DASH family's.
-			for _, name := range []string{"video_stream", "audio_stream", "video.ts"} {
-				p := filepath.Join(segStagingDir, name)
-				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-					o.logger.Warn("failed to remove discarded short-span media", "file", p, "err", err)
-				}
-				if err := os.Remove(p + ".resume.json"); err != nil && !os.IsNotExist(err) {
-					o.logger.Warn("failed to remove discarded short-span resume state", "file", p, "err", err)
-				}
-			}
 		}
 
 		segJobCtx := *jobCtx
@@ -465,6 +453,105 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		o.logger.Info("live path switched", "path", path, "part", segmentIndex+1, "jobID", jobCtx.Job.ID)
 		curCtx = &segJobCtx
 		result = switched
+		currentQuality = o.extractQualityFromResult(result)
+		waitedForResume.resolved()
+		waitEpisode.reset()
+		verifyWalled = false
+		segmentStartTime = time.Now().Unix()
+		partResumed = false
+		if monitor != nil {
+			select {
+			case <-qualityChangeCh:
+			default:
+			}
+			monitor.UpdateBaseline(currentQuality)
+		}
+		attachProgress(result)
+		return true
+	}
+
+	// switchBack is the other direction (owner decision PR-R3): a capture a
+	// fallback put on the formats that need no player JS, or on the live HLS
+	// playlist, goes back to the from-start path that needs the JS once it
+	// can be solved again — at most once a run (runRecord.canSwitchBack). It
+	// is tried at the refreshes that would otherwise rebuild the fallback
+	// path (the quality-loss and still-live-verify branches): the from-start
+	// setup on the fresh extraction (manifest-free DASH, else the DASH
+	// manifest), which fails as it did while the challenges stay unsolvable,
+	// and then nothing changes and the fallback's own refresh runs. When it
+	// builds, the switch is made as switchPart makes one: in a NEW part from
+	// the position the stopped downloaders reached, the fallback part closed
+	// where it stands and muxed as its own file in the background — kept
+	// beside the archive, never written over, never deleted — and a current
+	// part that holds no media yet reused. yt-dlp has nothing to switch back
+	// from: it picks a path once per extraction. Beyond it, as the switches
+	// themselves are: a fallback the run took for a transient cause (a
+	// sidecar restart longer than its grace, a player CDN outage) no longer
+	// costs the rest of a broadcast its from-start, highest-quality path.
+	//
+	// A capture on the live HLS playlist has no audio downloader — its one
+	// stream is the muxed playlist — so oldAudioSeq is 0 there. Left at 0,
+	// the from-start pair's audio was not forced and fell back to the job's
+	// resume position, which nothing moved while HLS recorded: sq 0 for a
+	// setup fallback, a stale one otherwise, so the new part's audio covered
+	// another stretch of the broadcast than its video and re-downloaded all
+	// of it. Its audio starts where the playlist's video stopped instead —
+	// one timeline across shapes, as switchPart relies on.
+	switchBack := func(freshInfo *youtube.VideoInfo, oldVideoSeq, oldAudioSeq int) bool {
+		if !jobCtx.Run.canSwitchBack() || ctx.Err() != nil || freshInfo == nil {
+			return false
+		}
+		if result.IsHls && result.AudioDownloader == nil {
+			oldAudioSeq = oldVideoSeq
+		}
+		var strategy DownloadStrategy
+		switch {
+		case HasManifestlessDashFormats(freshInfo.Formats):
+			strategy = ManifestlessDashStrategy
+		case freshInfo.DashManifestURL != "":
+			strategy = DashStrategy
+		default:
+			return false
+		}
+		hasMedia := discoverStagingMedia(curCtx.StagingDir) != nil
+		nextIndex, segStagingDir := segmentIndex, curCtx.StagingDir
+		if hasMedia {
+			nextIndex = segmentIndex + 1
+			segStagingDir = filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", nextIndex))
+			if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
+				o.logger.Error("could not create the part a switch back records into", "err", err, "jobID", jobCtx.Job.ID)
+				return false
+			}
+		}
+		segJobCtx := *jobCtx
+		segJobCtx.StagingDir = segStagingDir
+		segJobCtx.VideoStartSeq, segJobCtx.AudioStartSeq = oldVideoSeq, oldAudioSeq
+		back, err := strategy.Download(ctx, &segJobCtx, freshInfo, o.strategyDeps())
+		if err == nil {
+			err = setAsideOtherLiveShape(&segJobCtx, back)
+		}
+		segJobCtx.VideoStartSeq, segJobCtx.AudioStartSeq = 0, 0
+		if err != nil {
+			o.logger.Debug("the from-start path still cannot be set up; the capture stays on its fallback path", "err", err, "jobID", jobCtx.Job.ID)
+			if hasMedia {
+				_ = os.Remove(segStagingDir) // only when empty
+			}
+			return false
+		}
+		jobCtx.Run.markSwitchedBack()
+		if hasMedia {
+			muxStart := segmentStartTime
+			if partResumed {
+				muxStart = 0
+			}
+			o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
+				muxStart, time.Now().Unix(), currentQuality, result, "youtube", nil)
+			segmentIndex = nextIndex
+		}
+		o.logger.Warn("[Cipher] live: the player's JS challenges can be solved again — switching back, in a new part, to recording from the start on the "+strategy.Kind()+" formats; the fallback recording so far is kept as its own file",
+			"part", segmentIndex+1, "videoItag", back.VideoItag, "audioItag", back.AudioItag, "jobID", jobCtx.Job.ID)
+		curCtx = &segJobCtx
+		result = back
 		currentQuality = o.extractQualityFromResult(result)
 		waitedForResume.resolved()
 		waitEpisode.reset()
@@ -634,6 +721,28 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			}
 			if result.AudioDownloader != nil {
 				oldAudioSeq = result.AudioDownloader.CurrentSeq()
+			}
+
+			// A capture on a fallback path goes back to the from-start
+			// path, in a new part, once the challenges can be solved again
+			// (switchBack, PR-R3). At a refused segment the switch is also
+			// the split at it (owner decision D8): the new part starts each
+			// stream stopped at the hole past it, and the stopped
+			// downloaders record the gap rows for it, exactly as the
+			// isRefused split below does. Built at the hole itself, the new
+			// downloaders asked for the refused segment again, no gap row
+			// was written, and the refusal loop restarted from its top.
+			backVideoSeq, backAudioSeq := oldVideoSeq, oldAudioSeq
+			var backVideoMoved, backAudioMoved bool
+			if isRefused {
+				backVideoSeq, backAudioSeq, backVideoMoved, backAudioMoved = pastRefusedSegment(refused.Seq, oldVideoSeq, oldAudioSeq)
+			}
+			stopped := result
+			if switchBack(freshInfo, backVideoSeq, backAudioSeq) {
+				if isRefused {
+					noteRefusedHole(stopped, refused.Seq, backVideoMoved, backAudioMoved)
+				}
+				continue
 			}
 
 			// Create fresh downloaders in the current staging dir to check quality.
@@ -948,6 +1057,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				curCtx.AudioStartSeq = result.AudioDownloader.CurrentSeq()
 			}
 			stoppedVideoSeq, stoppedAudioSeq := curCtx.VideoStartSeq, curCtx.AudioStartSeq
+			if switchBack(freshInfo, stoppedVideoSeq, stoppedAudioSeq) {
+				// curCtx is the new part's now: the stopped part's context,
+				// and the forced start on it, are not read again.
+				continue
+			}
 			refreshResult, refreshErr := o.refreshDownload(ctx, curCtx, freshInfo, result.IsHls)
 			curCtx.VideoStartSeq, curCtx.AudioStartSeq = 0, 0
 

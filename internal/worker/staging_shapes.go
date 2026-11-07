@@ -111,6 +111,41 @@ func setAsideStagedMedia(dir string, names []string) ([]string, error) {
 	return asides, nil
 }
 
+// setAsideShortSpan is what a quality split does with the span it closes too
+// short to be a part of its own (under minSegmentDuration): sets the span's
+// media in dir aside (setAsideStagedMedia), so the next part may reuse the
+// dir and index without the engine resume-appending the new quality onto
+// the old one, and the span is still muxed into its own file beside the
+// archive at finalize (muxStagedAsides) and recoverable by A S like any
+// other aside. Reports whether dir is clear of live-shape media, which is
+// what lets the caller reuse it.
+//
+// The span used to be os.Remove'd (owner decision PR-R9: "a quality split
+// never deletes the short stretch before it; it is set aside like any closed
+// part"). A span is short in WALL-CLOCK time, so a from-start capture
+// catching up through a backlog could gather far more than ten seconds of
+// footage in it, and the closed span can be the only copy of what it holds.
+// A span in the job's root (the first part, which the next part does not
+// share a dir with) was left in place, and the staging cleanup then deleted
+// it as "the short span the split skipped": set aside, it is recovered too.
+//
+// A set-aside that fails reports false (nothing is ever downgraded to a
+// delete), and the caller then closes the span as a regular part instead,
+// muxed in the background like any other.
+func (o *DownloadOrchestrator) setAsideShortSpan(dir, jobID string) bool {
+	asides, err := setAsideStagedMedia(dir, liveShapeStagingNames)
+	if err != nil {
+		o.logger.Error("could not set the short span before a quality split aside; it is kept as a part of its own",
+			"dir", dir, "err", err, "jobID", jobID)
+		return false
+	}
+	if len(asides) > 0 {
+		o.logger.Info("the short span before a quality split was set aside; it is muxed into its own file beside the archive at finalize",
+			"asides", asides, "jobID", jobID)
+	}
+	return true
+}
+
 // setAsideLiveShapesForVod clears a whole-file VOD download's staging dir of
 // any live-shape capture an earlier run of the same job left there, before
 // the download writes video.mp4 / audio.m4a beside it.

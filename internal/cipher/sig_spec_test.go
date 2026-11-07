@@ -643,29 +643,35 @@ func (r *reportingSidecar) ready() bool { return r.up.Load() }
 func TestALearnedSigSpecAnswersForASidecarThatReportsItselfDown(t *testing.T) {
 	side := &reportingSidecar{permutingSidecar: newPermutingSidecar()}
 	side.up.Store(true)
+	// Built outside the bubble: the goja resolver runs a goroutine of its
+	// own for the process's life.
 	c := newCompositeSolverWith(side, newSpecResolver(t, t.TempDir()))
-	ctx := context.Background()
+	// In a bubble: a request meeting the down sidecar waits out its
+	// readiness grace (sidecarReadyGrace, PR-R3) on the bubble's clock.
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
 
-	if got, err := c.Sig(ctx, specPlayer, sigA); err != nil || got != scramble(sigA) {
-		t.Fatalf("Sig(sigA) with the sidecar up = %q, %v; want %q", got, err, scramble(sigA))
-	}
-	side.up.Store(false)
-	batchesBefore, _ := side.counts()
+		if got, err := c.Sig(ctx, specPlayer, sigA); err != nil || got != scramble(sigA) {
+			t.Fatalf("Sig(sigA) with the sidecar up = %q, %v; want %q", got, err, scramble(sigA))
+		}
+		side.up.Store(false)
+		batchesBefore, _ := side.counts()
 
-	if got, err := c.Sig(ctx, specPlayer, sigB); err != nil || got != scramble(sigB) {
-		t.Fatalf("Sig(sigB) with the sidecar reporting down = %q, %v; want %q from the spec", got, err, scramble(sigB))
-	}
-	sr, _, err := c.Batch(ctx, specPlayer, []string{sigB}, nil)
-	if err != nil || sr[sigB] != scramble(sigB) {
-		t.Fatalf("Batch(sigB) with the sidecar reporting down = %v, %v; want the spec's answer", sr, err)
-	}
-	if _, err := c.Sig(ctx, specPlayer, sigB+"x"); !errors.Is(err, ErrSidecarUnavailable) {
-		t.Errorf("Sig of an unlearned length with the sidecar down: err = %v, want ErrSidecarUnavailable", err)
-	}
-	if _, _, err := c.Batch(ctx, specPlayer, []string{sigB + "x"}, nil); !errors.Is(err, ErrSidecarUnavailable) {
-		t.Errorf("Batch of an unlearned length with the sidecar down: err = %v, want ErrSidecarUnavailable", err)
-	}
-	if batches, _ := side.counts(); batches != batchesBefore {
-		t.Errorf("the down sidecar was asked %d more times, want none", batches-batchesBefore)
-	}
+		if got, err := c.Sig(ctx, specPlayer, sigB); err != nil || got != scramble(sigB) {
+			t.Fatalf("Sig(sigB) with the sidecar reporting down = %q, %v; want %q from the spec", got, err, scramble(sigB))
+		}
+		sr, _, err := c.Batch(ctx, specPlayer, []string{sigB}, nil)
+		if err != nil || sr[sigB] != scramble(sigB) {
+			t.Fatalf("Batch(sigB) with the sidecar reporting down = %v, %v; want the spec's answer", sr, err)
+		}
+		if _, err := c.Sig(ctx, specPlayer, sigB+"x"); !errors.Is(err, ErrSidecarUnavailable) {
+			t.Errorf("Sig of an unlearned length with the sidecar down: err = %v, want ErrSidecarUnavailable", err)
+		}
+		if _, _, err := c.Batch(ctx, specPlayer, []string{sigB + "x"}, nil); !errors.Is(err, ErrSidecarUnavailable) {
+			t.Errorf("Batch of an unlearned length with the sidecar down: err = %v, want ErrSidecarUnavailable", err)
+		}
+		if batches, _ := side.counts(); batches != batchesBefore {
+			t.Errorf("the down sidecar was asked %d more times, want none", batches-batchesBefore)
+		}
+	})
 }

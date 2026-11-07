@@ -708,15 +708,19 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// forward. The caller creates the next downloader against the new dir.
 	//
 	// muxCurrent=false reuses the same index for the next dir (the
-	// quality-split short-segment rule: the flapping span's media is
-	// dropped); gap splits always mux — that data is irreplaceable. When the
-	// reused dir IS the current dir, the chat deliberately keeps its file:
+	// quality-split short-segment rule: the flapping span's media is set
+	// aside, muxed into its own file at finalize — PR-R9); gap splits always
+	// mux — that data is irreplaceable. When the reused dir IS the current
+	// dir, the chat deliberately keeps its file:
 	// rolling onto the same path would rewrite it from scratch.
 	//
 	// Returns the reason the advance failed — os.MkdirAll is the only one —
 	// so the caller can latch it. A part advance that cannot create its next
 	// staging dir must never let the job finalize Finished (sweep-2 R2).
 	advanceToNewPart := func(muxCurrent bool, segmentEndTime int64) error {
+		// muxCurrent=false: the caller has already set the short span aside
+		// (PR-R9, setAsideShortSpan) — before its notification, which says
+		// what the span became — and passes true for one it could not.
 		nextIdx := segmentIndex
 		if muxCurrent {
 			nextIdx = segmentIndex + 1
@@ -752,19 +756,11 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
 				muxStart, segmentEndTime, currentQuality, muxResult, "twitch", enrich)
 		} else if nextDir == curStagingDir {
-			// Short-segment discard, reusing the same index/dir: the dropped
-			// span's media and its resume sidecar must actually be removed —
-			// the engine's resume path would otherwise trust the sidecar
-			// (same StreamID, opaque weaver URLs carry no identity) and
-			// APPEND the new quality's data onto the discarded old-quality
-			// span instead of starting the part fresh.
-			oldVideo := filepath.Join(curStagingDir, "video_stream")
-			if err := os.Remove(oldVideo); err != nil && !os.IsNotExist(err) {
-				o.logger.Warn("failed to remove discarded short-segment media", "err", err, "jobID", jobCtx.Job.ID)
-			}
-			if err := os.Remove(oldVideo + ".resume.json"); err != nil && !os.IsNotExist(err) {
-				o.logger.Warn("failed to remove discarded short-segment resume state", "err", err, "jobID", jobCtx.Job.ID)
-			}
+			// The short span reusing the same index/dir was set aside above,
+			// media and resume sidecar both: the engine's resume path would
+			// otherwise trust the sidecar (same StreamID, opaque weaver URLs
+			// carry no identity) and APPEND the new quality's data onto the
+			// closed old-quality span instead of starting the part fresh.
 			if !isVod {
 				coverageFor(curStagingDir).reset()
 			}
@@ -1115,9 +1111,17 @@ sessionLoop:
 					"from", currentQuality.Label, "to", newQuality.Label,
 					"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
 
-				o.sendQualitySplitNotification(jobCtx, "Twitch", currentQuality, newQuality, segmentIndex, !shortSegment)
+				// A span too short to be a part is set aside, never deleted
+				// (setAsideShortSpan, PR-R9); one that cannot be is closed
+				// and muxed as a part like any other. Decided before the
+				// notification, which says which of the two the span
+				// became: sent first, it said "set aside" of a span then
+				// muxed as a part — and the successor's seed below replayed
+				// the playlist window onto a kept part.
+				setAside := shortSegment && o.setAsideShortSpan(curStagingDir, jobCtx.Job.ID)
+				o.sendQualitySplitNotification(jobCtx, "Twitch", currentQuality, newQuality, segmentIndex, !setAside)
 
-				if shortSegment {
+				if setAside {
 					o.logger.Debug("skipping short segment mux",
 						"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
 						"jobID", jobCtx.Job.ID)
@@ -1127,15 +1131,15 @@ sessionLoop:
 				// init-change splits — Twitch's variants share one sequence
 				// numbering. Seeding -1 replayed the playlist window, so the
 				// first seconds of the new part repeated the closed part's
-				// last ones. A discarded short part leaves nothing to
-				// repeat: the window replay keeps whatever it still holds of
-				// the dropped span, at the new quality.
+				// last ones. A short span set aside leaves nothing in the
+				// part to repeat: the window replay keeps whatever it still
+				// holds of that span, at the new quality.
 				nextSeq, forceSeq := -1, false
-				if !shortSegment {
+				if !setAside {
 					nextSeq = videoDl.CurrentSeq()
 					forceSeq = nextSeq > 0
 				}
-				if err := advanceToNewPart(!shortSegment, segmentEndTime); err != nil {
+				if err := advanceToNewPart(!setAside, segmentEndTime); err != nil {
 					latchPartFailure(err)
 					break
 				}

@@ -66,3 +66,44 @@ func TestRetryContinuesWhileReinitializeStartsOver(t *testing.T) {
 		t.Errorf("/retry removed the staging it should continue from: %v", err)
 	}
 }
+
+// TestVerbsRefusedWhileAChapterImportRuns: Resume, Retry and Reinitialize
+// answer 409 while a chapter import holds the job's claim, and change
+// nothing (owner decision PR-M5): each starts what the import's re-mux must
+// not race — a run whose finalize writes the archive the re-mux is about to
+// rename its copy over, or a reset that deletes the parts and staging beside
+// it. Once the import is done they are accepted again.
+//
+// Mutant: either handler not calling refuseWhileChapterImport (200, and the
+// worker then holds the verb until the import ends).
+func TestVerbsRefusedWhileAChapterImportRuns(t *testing.T) {
+	f := newJobsFixture(t)
+	cfg := config.Defaults()
+	cfg.Paths.StagingDirectory = f.stagingDir
+	cfg.Paths.OutputDirectory = f.outputDir
+	w := worker.NewDownloadWorker(f.db, nil, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	t.Cleanup(w.Stop)
+	rl := web.NewRateLimiter(1000, time.Minute)
+	t.Cleanup(rl.Close)
+	r := chi.NewRouter()
+	JobRoutes(r, f.db, f.store, w, rl, f.tw, f.yt, f.notify)
+
+	f.addJob(t, "yt_importing", func(j *database.Job) { j.Status = database.StatusError })
+	f.seedStaging(t, "yt_importing")
+	release, err := w.ClaimChapterImport("yt_importing")
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	for _, verb := range []string{"resume", "retry", "reinitialize"} {
+		if rec := doRequest(t, r, "POST", "/api/jobs/yt_importing/"+verb, nil); rec.Code != http.StatusConflict {
+			t.Errorf("/%s during a chapter import = %d (%s), want 409", verb, rec.Code, rec.Body.String())
+		}
+	}
+	if j, _ := f.db.GetJob("yt_importing"); j.Status != database.StatusError {
+		t.Errorf("a refused verb changed the row: %s", j.Status)
+	}
+	release()
+	if rec := doRequest(t, r, "POST", "/api/jobs/yt_importing/resume", nil); rec.Code != http.StatusOK {
+		t.Errorf("/resume once the import is done = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+}

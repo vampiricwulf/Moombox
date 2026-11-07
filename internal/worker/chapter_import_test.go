@@ -59,6 +59,41 @@ func TestVerifyArchiveRemux(t *testing.T) {
 	}
 }
 
+// TestVerifyArchiveRemuxTolerance pins the re-mux's own shortfall tolerance
+// (owner decision PR-M7): about a second, or 0.5% on a long archive, per
+// stream and for the file, measured however short the archive is. The live
+// capture's tolerance (muxedOutputIsShort) let a re-mux that replaces the
+// only copy lose 20 s, and judged nothing under a minute.
+//
+// Mutants: verifyArchiveRemux back on muxedOutputIsShort (the 30 s clip and
+// the 5 s / 19 s shortfalls are accepted); the 1 s minimum dropped (the 10 s
+// clip's 0.3 s rounding is refused); the 0.5% fraction dropped (the 4 h
+// archive's 10 s is refused).
+func TestVerifyArchiveRemuxTolerance(t *testing.T) {
+	one := func(dur, video, audio float64) *archiveShape {
+		return &archiveShape{durationSec: dur, streams: map[string][]float64{"video": {video}, "audio": {audio}}}
+	}
+	for _, c := range []struct {
+		name      string
+		orig, out *archiveShape
+		ok        bool
+	}{
+		{"a 30 s clip's video 2 s short", one(30, 30, 30), one(30, 28, 30), false},
+		{"a 30 s clip's file 2 s short", one(30, 30, 30), one(28, 30, 30), false},
+		{"a 10 s clip's 0.3 s rounding", one(10, 10, 10), one(9.7, 9.7, 9.8), true},
+		{"an hour's audio 5 s short", one(3600, 3600, 3600), one(3600, 3600, 3595), true},
+		{"an hour's audio 19 s short", one(3600, 3600, 3600), one(3600, 3600, 3581), false},
+		{"four hours' video 10 s short (under 0.5%)", one(14400, 14400, 14400), one(14390, 14390, 14400), true},
+		{"four hours' video 90 s short", one(14400, 14400, 14400), one(14400, 14310, 14400), false},
+		{"longer than the original", one(60, 60, 60), one(61, 61, 61), true},
+	} {
+		err := verifyArchiveRemux(c.orig, c.out, 0)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: verifyArchiveRemux = %v, want ok=%v", c.name, err, c.ok)
+		}
+	}
+}
+
 // importRig is a worker over a real database with one Finished single-file
 // job whose archive is a real MP4, for the re-mux tests.
 type importRig struct {
@@ -129,10 +164,13 @@ func probeChapterTitles(t *testing.T, path string) []string {
 // TestRemuxArchiveChaptersEmbedsAndRecordsTheFile runs the real FFmpeg: the
 // archive comes back with the chapters, and the row's file_size and
 // length_seconds follow the replaced file — but only while the row still holds
-// the status the caller read (UpdateJobFieldsIf).
+// the status the caller read. A row that moved on before the re-mux finished
+// keeps its archive, and its row, as they are (archiveStillAsRead, PR-M5;
+// UpdateJobFieldsIf guards the write after the rename the same way).
 //
-// Mutants: the row write dropped (file_size stays 1); written unconditionally
-// (the Cancelled row's size moves).
+// Mutants: the row write dropped (file_size stays 1); the re-read before the
+// rename dropped, with the write unconditional (the Cancelled row's size
+// moves).
 func TestRemuxArchiveChaptersEmbedsAndRecordsTheFile(t *testing.T) {
 	r := newImportRig(t)
 	list := utils.SanitizeChapters([]utils.Chapter{{StartMs: 0, Title: "one"}, {StartMs: 2000, Title: "two"}}, 4000)
@@ -154,8 +192,11 @@ func TestRemuxArchiveChaptersEmbedsAndRecordsTheFile(t *testing.T) {
 
 	// The row moved on (an operator's action) since the caller read it.
 	r.db.UpdateJobFields(r.job.ID, map[string]any{"status": database.StatusCancelled, "file_size": int64(7)})
-	if _, err := r.w.RemuxArchiveChapters(r.job.ID, database.StatusFinished, r.archive, list[:1]); err != nil {
-		t.Fatal(err)
+	if _, err := r.w.RemuxArchiveChapters(r.job.ID, database.StatusFinished, r.archive, list[:1]); err == nil {
+		t.Fatal("the archive of a row that moved on was replaced")
+	}
+	if got := probeChapterTitles(t, r.archive); !reflect.DeepEqual(got, []string{"one", "two"}) {
+		t.Errorf("archive chapters = %v, want the first import's, untouched", got)
 	}
 	row, _ = r.db.GetJob(r.job.ID)
 	if row.Status != database.StatusCancelled || row.FileSize == nil || *row.FileSize != 7 {

@@ -25,12 +25,16 @@ var errChallengesUnsolvable = errors.New("the player's JS challenges cannot be s
 //
 //   - cipher.ErrSidecarUnavailable: no sidecar configured, or the one
 //     configured is down. Signatures are sidecar-only, so no signatureCipher
-//     format resolves until it is back.
+//     format resolves until it is back. A child that went down is waited for
+//     first, within a minute of the outage's start (the composite solver's
+//     sidecarReadyGrace, owner decision PR-R3), so a supervisor restart does
+//     not reach here.
 //   - cipher.ErrPlayerJSStale: ejs could not solve the player even after a
 //     fresh fetch of it — the case of a player rotation ejs does not handle
 //     yet.
 //   - cipher.ErrPlayerJSFetch: the player could not be fetched, with no
-//     cached copy to serve instead (PlayerCache.Fetch). Nothing solves a
+//     cached copy to serve instead, in three tries (PlayerCache.Fetch,
+//     playerFetchAttempts, owner decision PR-R3). Nothing solves a
 //     challenge against a player it does not have; yt-dlp's challenge
 //     director catches a provider that fails on a player it cannot load and
 //     leaves its challenges unanswered (jsc/_director.py:95-140), so every
@@ -494,9 +498,11 @@ var errNoLivePathLeft = errors.New("no live path is left to switch to this run")
 // a run (runRecord.first): a capture already on the no-JS path goes to HLS,
 // and one that has switched to both has nowhere left (errNoLivePathLeft,
 // cause wrapped) — the loop then handles the failure as it always has. Never
-// a loop: a path the run has left is not switched back to, so the budget is
-// not given back either; a later run (a restart, a Resume) starts on the
-// path its setup chooses, which is the JS path again once solving works.
+// a loop: a spent switch is not given back. The way back is the live loop's
+// own, once a run (switchBack, owner decision PR-R3): a capture on either
+// fallback returns to the from-start path that needs the JS, in a new part,
+// once that path can be set up again — and a later run (a restart, a Resume)
+// starts on the path its setup chooses, the JS path once solving works.
 // path names the one switched to, for the caller's log.
 func switchLivePath(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps, cause error) (result *DownloadResult, path string, err error) {
 	if !job.Run.noJS() && job.Run.first("live-switch:nojs") {
@@ -554,5 +560,7 @@ func liveHlsInstead(ctx context.Context, job *JobContext, hls DownloadStrategy, 
 	if err != nil {
 		return nil, fmt.Errorf("%w; the live HLS fallback failed too: %w", setupErr, err)
 	}
+	// What the live loop's switch back reads (runRecord.canSwitchBack).
+	job.Run.markHlsFallback()
 	return result, nil
 }

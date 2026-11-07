@@ -280,7 +280,9 @@ func refitSplitArchiveChapters(oldSegs, newSegs []database.Segment, recovered ma
 		lg.Warn("gap-fill: could not rewrite the split archive's chapter list for its recovered parts", "path", newPath, "err", err)
 		return
 	}
-	if oldPath != newPath {
+	// sameFilePath, not a string compare: a base that differs only in case
+	// names the file just written on NTFS (PR-M8, keptImport.write's guard).
+	if !sameFilePath(oldPath, newPath) {
 		if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
 			lg.Warn("gap-fill: could not remove the chapter list under the archive's old base", "path", oldPath, "err", err)
 		}

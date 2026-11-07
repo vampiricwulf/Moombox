@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,6 +34,24 @@ const (
 // playerHTTPClient fetches player.js. Backed by the shared httpx.Client
 // transport for keep-alive amortisation across cipher / youtube / etc.
 var playerHTTPClient = httpx.Client(30 * time.Second)
+
+// playerFetchAttempts is how many times a COLD player GET — one with no
+// cached copy to serve instead — is made before Fetch fails with
+// ErrPlayerJSFetch (owner decision PR-R3: "retry a cold player GET 3 times").
+// The failure is systemic to the worker (systemicResolveFailure): every
+// format needing the player JS is dropped for the run's setup and a live
+// capture switches path for good. The first fetch of a newly rotated player,
+// met by several streams going live at once, is exactly when a CDN blip
+// costs the most, and a single GET used to decide it. Beyond yt-dlp, whose
+// player fetch is one _download_webpage with no retry of its own
+// (_load_player, yt_dlp/extractor/youtube/_video.py:2197-2206 at b77c9304e):
+// one command, one video, and its operator runs it again; an archiver's
+// capture runs once, on whatever path the failure sent it to.
+const playerFetchAttempts = 3
+
+// playerFetchRetryDelay is the pause between cold player GETs: a variable so
+// a test can read it; production never writes it.
+var playerFetchRetryDelay = 2 * time.Second
 
 // fallbackLoggedURLs tracks URLs we've already warned about for the
 // extract-fallback case. Bounded by the set of unique URLs Moombox
@@ -409,14 +428,49 @@ type FetchResult struct {
 func (pc *PlayerCache) Fetch(ctx context.Context, playerURL string) (string, bool, error) {
 	playerURL = CanonicalPlayerURL(playerURL)
 	key := CacheKey(playerURL)
-	res, err, _ := pc.fetchSF.Do(key, func() (any, error) {
+	// DoChan, not Do: the leader runs detached from every caller (below), so
+	// with Do a caller whose job was cancelled, or a worker shutting down,
+	// stayed blocked until the leader's attempts were done — up to three
+	// 30s round-trips and the pauses between them while the player CDN is
+	// down. Each caller now leaves on its own context; the leader finishes
+	// in the background and its answer still fills the cache for the next.
+	ch := pc.fetchSF.DoChan(key, func() (res any, err error) {
+		// DoChan runs this on singleflight's own goroutine, where a panic is
+		// re-raised beyond any recover: turn it into this fetch's error.
+		defer func() {
+			if r := recover(); r != nil {
+				res, err = FetchResult{}, fmt.Errorf("%w: panic: %v", ErrPlayerJSFetch, r)
+			}
+		}()
 		// Detach from the leader's context: coalesced waiters arrive from
 		// independent jobs, and a leader cancelled mid-fetch would poison
 		// every waiter with context.Canceled even though their own contexts
-		// are live. playerHTTPClient's own 30s timeout still bounds the
-		// round-trip.
-		return pc.fetchInternal(context.WithoutCancel(ctx), playerURL)
+		// are live. playerHTTPClient's own 30s timeout bounds each
+		// round-trip; the attempts bound the whole to about 94s.
+		dctx := context.WithoutCancel(ctx)
+		for attempt := 1; ; attempt++ {
+			fr, err := pc.fetchInternal(dctx, playerURL)
+			if err == nil || !retryablePlayerFetch(err) || attempt >= playerFetchAttempts {
+				return fr, err
+			}
+			// Only a cold fetch fails this way: one with a cached copy
+			// serves it instead (fetchInternal).
+			if pc.logger != nil {
+				pc.logger.Debug("cipher: player JS fetch failed with nothing cached; trying again",
+					"attempt", attempt, "of", playerFetchAttempts, "err", err)
+			}
+			t := time.NewTimer(playerFetchRetryDelay)
+			<-t.C
+		}
 	})
+	var res any
+	var err error
+	select {
+	case r := <-ch:
+		res, err = r.Val, r.Err
+	case <-ctx.Done():
+		return "", false, ctx.Err()
+	}
 	if err != nil {
 		return "", false, err
 	}
@@ -536,8 +590,31 @@ func (pc *PlayerCache) fetchInternal(ctx context.Context, playerURL string) (Fet
 			}
 			return FetchResult{JS: cachedJS, Changed: false}, nil
 		}
-		return FetchResult{}, fmt.Errorf("%w: status %d", ErrPlayerJSFetch, resp.StatusCode)
+		return FetchResult{}, fmt.Errorf("%w: %w", ErrPlayerJSFetch, playerFetchStatus(resp.StatusCode))
 	}
+}
+
+// playerFetchStatus is the HTTP status of a cold player GET the CDN answered
+// with something other than the player, wrapped in ErrPlayerJSFetch.
+type playerFetchStatus int
+
+func (s playerFetchStatus) Error() string { return fmt.Sprintf("status %d", int(s)) }
+
+// retryablePlayerFetch reports whether a failed cold player GET is worth
+// another attempt (playerFetchAttempts): a transport failure, or an answer
+// that says the CDN is struggling — a 5xx, or a 429. A definite answer about
+// the player itself — a 404 for a player YouTube has pulled, a 403 — says
+// the same on every attempt, and retrying it only held stream setup, and a
+// live capture's switch back, for the pauses between.
+func retryablePlayerFetch(err error) bool {
+	if !errors.Is(err, ErrPlayerJSFetch) {
+		return false
+	}
+	var status playerFetchStatus
+	if errors.As(err, &status) {
+		return status >= 500 || status == http.StatusTooManyRequests
+	}
+	return true
 }
 
 // touchCacheGroup refreshes the mtime on the raw, preprocessed, and meta
