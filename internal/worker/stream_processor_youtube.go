@@ -689,17 +689,23 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				// Only the full fetch may act on the probe's answer or give up
 				// (the periodic fetch's comment above).
 				//
-				// A rate limit holds this fetch off as it holds the live and VOD
-				// arms' (loopRateLimit): left out, a refusal that read live wrote
-				// Live and went on to a download with nothing to download. The
-				// schedule probe waits with it, since all it could do is ask for
-				// the fetch the hold forbids.
+				// Only the fetch the schedule probe asked for is a go-live
+				// confirmation. It is the one a rate limit holds off, as it holds
+				// the live and VOD arms' (loopRateLimit): left out, a refusal that
+				// read live wrote Live and went on to a download with nothing to
+				// download. The schedule probe waits with it, since all it could do
+				// is ask for the fetch the hold forbids. The others are routine and
+				// are noted like the periodic fetch: a stream days from its start
+				// loses nothing while they are refused, so they place no hold, which
+				// would blind the schedule probe, and do not count toward the cap
+				// while nothing says the stream has begun.
 				if rateLimit.confirmationHeld() {
 					sp.logger.Debug("auth probe unclear; its full fetch waits out a rate limit", "videoID", job.VideoID)
 					continue
 				}
 				due := !unclearSpell || time.Since(lastFullFetch) >= fullFetchInterval
 				unclearSpell = true
+				confirmation := false
 				if !due {
 					lastScheduleProbe = time.Now()
 					sched, err := sp.probeVideoSchedule(ctx, job.VideoID)
@@ -708,13 +714,16 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 						sp.logger.Debug("schedule probe under an unclear auth probe failed; the next poll asks again", "videoID", job.VideoID, "err", err)
 						continue
 					}
+					// The only conclusive answer on this path, so an upcoming one
+					// takes back a begun an earlier poll's answer set.
+					rateLimit.noteStatus(sched.StreamStatus)
 					if !scheduleProbeOvertakes(sched) {
 						sp.applyScheduleAnswer(job, sched, &scheduledStartTime)
 						continue
 					}
 					sp.logger.Info("schedule probe says the stream has begun ahead of the auth probe; confirming",
 						"videoID", job.VideoID, "status", sched.StreamStatus)
-					rateLimit.noteStatus(sched.StreamStatus)
+					confirmation = true
 				}
 				sp.logger.Info("auth probe unclear, doing full fetch",
 					"status", probeInfo.StreamStatus, "videoID", job.VideoID)
@@ -726,7 +735,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				lastScheduleProbe = lastFullFetch
 				if err != nil {
 					reportFetchOutcome(err, "probe/youtube")
-					if sp.noteFetchErr(job, &rateLimit, err, true) {
+					if sp.noteFetchErr(job, &rateLimit, err, confirmation) {
 						if rateLimit.outlasted(time.Now()) {
 							return sp.giveUpRateLimited(job, &rateLimit, nil, err, chatDl), nil
 						}
@@ -742,7 +751,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				if fullFetchSaysGone(fullInfo) {
 					return sp.giveUpUnavailable(job, fullInfo, chatDl), nil
 				}
-				if sp.noteFetch(job, &rateLimit, fullInfo, true) {
+				if sp.noteFetch(job, &rateLimit, fullInfo, confirmation) {
 					if rateLimit.outlasted(time.Now()) {
 						return sp.giveUpRateLimited(job, &rateLimit, fullInfo, nil, chatDl), nil
 					}

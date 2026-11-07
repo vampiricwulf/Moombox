@@ -205,7 +205,8 @@ func membersArmProbe(at time.Duration) (*youtube.VideoInfo, error) {
 // Retry-After a floor on each hold, and the default arm's full fetch, which
 // confirms a stream the cookied probe cannot read once the schedule probe says
 // it has begun, refused with the verdict reading upcoming or live, with a 429,
-// or with a captcha. Each is made again
+// or with a captcha, after the routine fetch that opened its spell. Each is
+// made again
 // 2, 5 and 10 minutes after the first refusal of its spell — the one after
 // those answers and the stream downloads — with one backlog hold a spell, the
 // wait's line cleared at the answer, and a captcha told the operator once,
@@ -294,6 +295,11 @@ func TestEveryConfirmationRefusalTapers(t *testing.T) {
 				return f
 			})
 			fulls := fullCalls(run)
+			if tc.webLive && len(fulls) > 0 {
+				// The spell's first answer is routine: the schedule probe, which
+				// is what makes a fetch a confirmation, runs only after it.
+				fulls = fulls[1:]
+			}
 			if len(fulls) != len(tc.gaps)+1 {
 				t.Fatalf("full fetches at %v, want %d refused confirmations and the one that answered; calls:%s",
 					fulls, len(tc.gaps), run)

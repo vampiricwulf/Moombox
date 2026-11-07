@@ -282,18 +282,20 @@ func answeredFetch(info *youtube.VideoInfo) bool {
 // for as long as the wait lasted, however soon the limit cleared.
 //
 // What the loop holds off is the go-live confirmation, the full cascade the
-// live and VOD arms make when the status probe says the stream has begun,
-// and the one the default arm makes while the cookied probe cannot read the
-// stream (membersOnly), which confirms a stream it cannot see: once YouTube has
-// refused one, the next waits for the taper's next instant counted from the
-// spell's first refused confirmation (confirmationHoldAfter), from two
+// live and VOD arms make when the status probe says the stream has begun, and
+// the one the default arm makes when, the cookied probe unable to read the
+// stream (membersOnly), its schedule probe says so on that poll: once YouTube
+// has refused one, the next waits for the taper's next instant counted from
+// the spell's first refused confirmation (confirmationHoldAfter), from two
 // minutes to rateLimitRetryInterval, under the wait's progress line, and the
 // arms read the probe's answer as nothing until then. The loop's probe timer
-// wakes at the hold's end (heldFor), so the live and VOD arms confirm then, not
-// on the first probe past it. The default arm does so only while its schedule
-// probe says the stream has begun: otherwise nothing is due until its next
-// half-hourly fetch, and the hold is only a floor under that one.
-// The periodic full fetch keeps its own half-hourly cadence. A refusal is
+// wakes at the hold's end (heldFor), so the confirmation is made then, not on
+// the first probe past it, as long as the schedule probe still says begun in
+// the default arm.
+// The periodic full fetch keeps its own half-hourly cadence, and the default
+// arm's routine fetches, the first of a spell and each one due on that
+// interval, are noted as it is: they start a spell and its backlog hold, but
+// hold nothing off, so the schedule probe keeps running. A refusal is
 // the verdict (noteFetch) or a 429 on the whole cascade, the limit's HTTP
 // form (noteFetchErr). A spell whose counted refusals have lasted
 // rateLimitCap, rateLimitCapRefusals of them at least, ends the job
@@ -314,9 +316,10 @@ type loopRateLimit struct {
 	capSince    time.Time
 	capRefusals int
 	// begun: the status probe's last conclusive answer — or the schedule
-	// probe's, when it overtook it — said the stream is live or over
-	// (noteStatus). While it says upcoming, a refused periodic full fetch is
-	// not counted toward the cap. It outlives a spell (noteFetch's reset
+	// probe's, when it overtook it or the status probe cannot read the stream —
+	// said the stream is live or over (noteStatus). While it says upcoming, a
+	// refused full fetch that is no confirmation is not counted toward the cap.
+	// It outlives a spell (noteFetch's reset
 	// leaves it): it records the stream's state, not the refusals.
 	begun bool
 	// until: zero, or when a go-live confirmation may be made again.
@@ -362,11 +365,12 @@ func (l *loopRateLimit) noteStatus(status youtube.StreamStatus) {
 }
 
 // counts reports whether a refusal counts toward the cap: every go-live
-// confirmation's — the probe has said the stream began, or cannot read it at
-// all (the default arm) — and the periodic full fetch's once begun says so.
-// A broadcast still upcoming loses nothing it airs to the wait, and a
-// days-out premiere under a captcha nobody solved ended in Error before it
-// began (the owner's decision on FA's second follow-up).
+// confirmation's, a probe having said on that poll that the stream began, and
+// any other full fetch's, the periodic one's or the default arm's routine one's,
+// once begun says so. A broadcast still upcoming loses nothing it airs to the
+// wait, and a days-out premiere under a captcha nobody solved ended in Error
+// before it began (the owner's decisions on FA's second follow-up, and on a
+// stream the cookied probe cannot read).
 func (l *loopRateLimit) counts(confirmation bool) bool {
 	return confirmation || l.begun
 }
@@ -449,7 +453,7 @@ func (sp *StreamProcessor) noteRefusal(job *database.Job, l *loopRateLimit, conf
 		logRefusal = sp.logger.Warn
 	}
 	if !confirmation {
-		logRefusal("YouTube rate-limited the waiting loop's periodic full fetch",
+		logRefusal("YouTube rate-limited one of the waiting loop's routine full fetches",
 			"videoID", job.VideoID, "counted", l.counts(false), what, why)
 		return
 	}

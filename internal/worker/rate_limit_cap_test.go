@@ -554,9 +554,10 @@ func TestPrunedRateLimitedBacklogLosesItsSpellAndHold(t *testing.T) {
 // or ended — while YouTube refuses every go-live confirmation ends in Error
 // too, on the first refused confirmation a day or more after the spell's
 // first, saying it gave up: in the live arm and the VOD arm, refused with
-// the verdict or a 429 on the whole cascade, and in the default arm, whose
-// half-hourly full fetch stands in for a confirmation of a stream the cookied
-// probe cannot read, counted though the schedule probe has seen nothing begin.
+// the verdict or a 429 on the whole cascade, and in the default arm, which
+// confirms a stream the cookied probe cannot read once the schedule probe says
+// it has begun (one that says nothing of the kind waits on:
+// TestAStreamTheCookiedProbeCannotReadOutlastsADayOfRefusedRoutineFetches).
 // The error is
 // the verdict as yt-dlp words it, or the 429, and the note; the waiting
 // room's chat stops with it (TestGivingUpOnARateLimitStopsTheChat).
@@ -572,6 +573,9 @@ func TestRefusedConfirmationsEndInErrorAfterADay(t *testing.T) {
 		status   func(at time.Duration, start time.Time) (*youtube.VideoInfo, error)
 		refusal  func() (*youtube.VideoInfo, error)
 		want     string
+		// webLive: the schedule probe says the stream is live, which is what
+		// makes the default arm's fetches confirmations.
+		webLive bool
 	}{
 		{name: "live arm, the verdict", status: liveFrom3m(liveAnswer),
 			refusal: func() (*youtube.VideoInfo, error) {
@@ -589,22 +593,26 @@ func TestRefusedConfirmationsEndInErrorAfterADay(t *testing.T) {
 		{name: "VOD arm, a 429", status: liveFrom3m(vodAnswer),
 			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
 			want:    rateLimited429(0).Error() + rateLimitGaveUpNote},
-		{name: "default arm, the verdict", signedIn: true, status: membersStatus,
+		{name: "default arm, the verdict", signedIn: true, webLive: true, status: membersStatus,
 			refusal: func() (*youtube.VideoInfo, error) {
 				return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedOut), nil
 			},
 			want: verdict + rateLimitGaveUpNote},
-		{name: "default arm, a 429", signedIn: true, status: membersStatus,
+		{name: "default arm, a 429", signedIn: true, webLive: true, status: membersStatus,
 			refusal: func() (*youtube.VideoInfo, error) { return nil, rateLimited429(0) },
 			want:    rateLimited429(0).Error() + rateLimitGaveUpNote},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := driveWaitForLive(t, 2*time.Minute, rateLimitCap+2*time.Hour, func(start time.Time) waitFakes {
-				return waitFakes{
+				f := waitFakes{
 					signedIn: tc.signedIn,
 					status:   func(at time.Duration) (*youtube.VideoInfo, error) { return tc.status(at, start) },
 					full:     func(time.Duration) (*youtube.VideoInfo, error) { return tc.refusal() },
 				}
+				if tc.webLive {
+					f.schedule = func(time.Duration) (*youtube.VideoInfo, error) { return liveAnswer(start), nil }
+				}
+				return f
 			})
 			fulls := fullCalls(run)
 			if run.result == nil {

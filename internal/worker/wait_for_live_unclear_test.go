@@ -339,3 +339,78 @@ func TestUnclearProbeWritesAMovedStartToTheRow(t *testing.T) {
 		})
 	}
 }
+
+// A days-out stream the cookied probe cannot read, its full fetches refused for
+// over a day, is still waiting at the end of it: nothing has said it began, so
+// nothing it airs is being lost, and those fetches run on the arm's own cadence
+// rather than to confirm anything. They used to count, which ended such a job in
+// Error before it began, and to hold the WEB probe off behind each refusal. The
+// refusal still starts its spell, with the one backlog hold. A WEB probe that
+// said begun once and upcoming since counts only that one refusal.
+//
+// Mutants: every default-arm fetch noted as a confirmation (the wait gives up
+// after a day, and no schedule probe runs on a held poll); the arm's upcoming
+// answer not clearing begun (the third row counts every routine fetch and gives
+// up); no spell started by a routine refusal (no hold).
+func TestAStreamTheCookiedProbeCannotReadOutlastsADayOfRefusedRoutineFetches(t *testing.T) {
+	const budget = rateLimitCap + 6*time.Hour
+	verdict := func(time.Duration) (*youtube.VideoInfo, error) {
+		return rateLimitedInfo(youtube.StreamUpcoming, youtube.SessionAuthLoggedIn), nil
+	}
+	for _, tc := range []struct {
+		name     string
+		full     func(time.Duration) (*youtube.VideoInfo, error)
+		schedule func(start time.Time) func(time.Duration) (*youtube.VideoInfo, error)
+	}{
+		{name: "the verdict", full: verdict},
+		{name: "a 429", full: func(time.Duration) (*youtube.VideoInfo, error) { return nil, rateLimited429(0) }},
+		{name: "the verdict, after the WEB probe said begun once", full: verdict,
+			schedule: func(start time.Time) func(time.Duration) (*youtube.VideoInfo, error) {
+				said := false
+				return func(time.Duration) (*youtube.VideoInfo, error) {
+					if !said {
+						said = true
+						return liveAnswer(start), nil
+					}
+					return upcomingAnswer(start), nil
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := driveWaitForLive(t, 72*time.Hour, budget, func(start time.Time) waitFakes {
+				f := waitFakes{signedIn: true, status: membersArmProbe, full: tc.full}
+				if tc.schedule != nil {
+					f.schedule = tc.schedule(start)
+				}
+				return f
+			})
+			if run.returned >= 0 {
+				t.Fatalf("the wait ended with %+v at %v, want it still waiting at %v", run.result, run.returned, budget)
+			}
+			if run.row.Status != database.StatusUpcoming || run.row.Progress != "" {
+				t.Errorf("row = %q, progress %q; want Upcoming with no wait line", run.row.Status, run.row.Progress)
+			}
+			if n := run.count("hold"); n != 1 {
+				t.Errorf("%d backlog holds, want the spell's one", n)
+			}
+			late := 0
+			for _, c := range run.calls {
+				if c.kind == "schedule" && c.at > rateLimitCap {
+					late++
+				}
+			}
+			if late == 0 {
+				t.Error("no schedule probe past the day, want the WEB probe still polling")
+			}
+			fulls := fullCalls(run)
+			if tc.schedule != nil {
+				fulls = fulls[2:] // the spell's first, and the confirmation the begun answer asked for
+			}
+			for i := 1; i < len(fulls); i++ {
+				if gap := fulls[i] - fulls[i-1]; gap < fullFetchInterval {
+					t.Errorf("full fetches %d and %d came %v apart, want at least %v", i, i+1, gap, fullFetchInterval)
+				}
+			}
+		})
+	}
+}
