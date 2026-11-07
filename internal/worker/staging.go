@@ -44,7 +44,11 @@ func HasStagingFiles(stagingBase, jobID string) bool {
 // any other status — a live capture's staging is its own — which the
 // dashboard reads as unknown and keeps what it last held. The job's own
 // fields, and its JobVersion (the hub's frame ordering), come through the
-// embedded row unchanged.
+// embedded row unchanged. The flag is a snapshot taken when the row is sent:
+// a Finished row broadcast at its Muxing → Finished write can still say true
+// after cleanupStagingAfterMux empties staging, until its next update —
+// harmless, since a Finished row offers Resume only with incomplete_tail,
+// which keeps its staging.
 type ListedJob struct {
 	*database.Job
 	HasStaging *bool `json:"hasStaging,omitempty"`

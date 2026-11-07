@@ -547,9 +547,10 @@ func switchLivePath(ctx context.Context, job *JobContext, info *youtube.VideoInf
 //
 // Never for a refresh that failed for a reason a switch does not answer,
 // though its error may read like one, since each switch is spent once a run
-// and a switched capture never goes back: an extraction with no formats at
-// all — the interruption signature (live, zero formats; interruptionSignal),
-// which no path can record from and the resume wait is for, though a no-JS
+// (given back only by the run's one switch back, owner decision PE-3): an
+// extraction with no formats at all — the interruption signature (live,
+// zero formats; interruptionSignal), which no path can record from and the
+// resume wait is for, though a no-JS
 // refresh of it finds "no pair" — and a no-JS refresh whose cookieless
 // re-extract failed (errNoJSReExtractFailed), which the still-live retries
 // get past. Both are handled as any other failed refresh.
