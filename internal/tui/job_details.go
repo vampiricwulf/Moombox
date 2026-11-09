@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -39,6 +40,9 @@ type JobDetailsModel struct {
 	// gapFill is the selected job's archive-VOD gap-fill (owner decision
 	// PR-R5), pushed by the App from its JobGapFill callback; nil for none.
 	gapFill *GapFillView
+	// holds is the backlog scheduler's hold snapshot (AdmissionHoldsMsg),
+	// which a Queued job's "Queue" line reads.
+	holds jobstate.AdmissionHolds
 
 	// Marquee for scrolling the title value when it overflows.
 	marquee Marquee
@@ -381,6 +385,16 @@ type GapFillView struct {
 	Reason string
 }
 
+// SetAdmissionHolds stores the scheduler's hold snapshot and, when the job
+// shown is Queued, rebuilds its rows so its Queue line follows it.
+func (m *JobDetailsModel) SetAdmissionHolds(h jobstate.AdmissionHolds) {
+	m.holds = h
+	if m.job != nil && m.job.Status == database.StatusQueued {
+		m.buildRows()
+		m.updateViewportContent()
+	}
+}
+
 // SetGapFill gives the panel the selected job's gap-fill state. A no-op when
 // nothing changed.
 func (m *JobDetailsModel) SetGapFill(g *GapFillView) {
@@ -631,8 +645,21 @@ func (m *JobDetailsModel) buildRows() {
 			}
 		}
 
+		// An Upcoming VOD with no wait up has no stream to wait for: it
+		// reads "Awaiting processing", as the dashboard's row and dialog do
+		// (jobstate.AwaitingProcessing, owner ruling R-D1).
+		if j.Status == database.StatusUpcoming && !jobstate.IsWaitLine(progress) && jobstate.AwaitingProcessing(j) {
+			progress = jobstate.AwaitingProcessingText
+		}
 		if progress != "" {
 			m.addField("Progress", progress)
+		}
+		// A Queued row says why the scheduler is not admitting it — offline,
+		// the disk gate, the YouTube rate limit, its retry backoff — or that
+		// it waits its turn (owner ruling R-D3), in the dashboard's words
+		// (utils.js queuedHoldText).
+		if j.Status == database.StatusQueued {
+			m.addField("Queue", m.holds.For(j, time.Now()).Text())
 		}
 		if percent > 0 {
 			m.rows = append(m.rows, detailRow{
@@ -782,6 +809,20 @@ func (m *JobDetailsModel) buildRows() {
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: header})
 		for _, line := range wrapText(j.Error, m.blockWrapWidth()) {
 			m.rows = append(m.rows, detailRow{kind: rowField, value: line, color: color})
+		}
+	}
+
+	// === Automatic action pending (owner ruling R-D2) ===
+	// An Error row the Twitch monitor will act on by itself — a mux once the
+	// broadcast is confirmed over, a retry when it is live again — says so,
+	// so the operator does not race it with Reinitialize (whose A I I confirm
+	// names what it would cancel) or wait on nothing. The dashboard's job
+	// row and details show the same sentence (utils.js pendingAutoActionText).
+	if a := jobstate.PendingAutoAction(j); a != jobstate.AutoActionNone {
+		m.rows = append(m.rows, detailRow{kind: rowSeparator})
+		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Automatic"})
+		for _, line := range wrapText(a.Text(), m.blockWrapWidth()) {
+			m.rows = append(m.rows, detailRow{kind: rowField, value: line, color: ColorCyan})
 		}
 	}
 

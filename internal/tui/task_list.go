@@ -18,6 +18,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobfilter"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 )
 
 // Package-level styles for task list rendering (avoid alloc per render).
@@ -202,6 +203,10 @@ type TaskListModel struct {
 	// that key's summary field for the sweep's early-return path, which
 	// changes the header without rebuilding anything.
 	rebuildSeq uint64
+	// holds is the backlog scheduler's hold snapshot (AdmissionHoldsMsg) the
+	// Queued rows' tags read; holdsRev keys the render cache on it.
+	holds    jobstate.AdmissionHolds
+	holdsRev uint64
 	// renderCache / cacheKey memoise View(). bubbletea renders after every
 	// message (~120/s with one active download); most carry no list change.
 	renderCache string
@@ -685,7 +690,23 @@ func (m *TaskListModel) resetMarquee() {
 // tells renderJob to style the tag dim rather than in status color. Both
 // renderJob and titleWidth derive from this helper so the row layout and
 // the rendered cells can never disagree.
+//
+// An Error row the Twitch monitor will act on by itself shows a dim tag too —
+// "⟳ mux" or "⟳ retry" (jobstate.PendingAutoAction, owner ruling R-D2) — the
+// row hint for the sentence the details pane spells out.
 func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait bool) {
+	if job.Status == database.StatusQueued {
+		return queuedHoldTag(m.holds.For(job, time.Now())), true
+	}
+	if job.Status == database.StatusError {
+		switch jobstate.PendingAutoAction(job) {
+		case jobstate.AutoActionMux:
+			return "⟳ mux ", true
+		case jobstate.AutoActionRetry:
+			return "⟳ retry ", true
+		}
+		return "", false
+	}
 	if job.Status != database.StatusDownloading && job.Status != database.StatusMuxing {
 		return "", false
 	}
@@ -704,23 +725,39 @@ func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait
 	return "", false
 }
 
-// isWaitProgress reports whether a progress string is a downloader wait
-// message rather than a segment counter. Every activity message the worker
-// renders (worker.activityMessage), the line a job waiting out a
-// connectivity outage shows (worker.networkWaitLine), the line a YouTube
-// download waiting out its player response's pre-roll ad shows
-// (worker.playbackWaitLine), and the lines a job waiting out a YouTube rate
-// limit or captcha shows (worker.rateLimitWaitLine, worker.captchaWaitLine),
-// carries the "... (<time>)" tail — the time elapsed, or the time left — and
-// no counter format does. The contract is pinned on the worker side by
-// TestActivityMessagesCarryWaitMarker,
-// TestNetworkWaitLineCarriesTheWaitMarker,
-// TestPlaybackWaitLineCarriesTheWaitMarker,
-// TestRateLimitWaitLineCarriesTheWaitMarker and
-// TestCaptchaWaitLineCarriesTheWaitMarker.
-func isWaitProgress(s string) bool {
-	return strings.Contains(s, "... (")
+// queuedHoldTag is a Queued row's dim tag for why the scheduler is not
+// admitting it (jobstate.AdmissionHolds.For, owner ruling R-D3) — the row
+// hint for the line the details pane spells out — and "" for a row waiting
+// only its turn for an archive slot.
+func queuedHoldTag(q jobstate.QueuedHold) string {
+	switch q.Reason {
+	case jobstate.HoldOffline:
+		return "⏸ offline "
+	case jobstate.HoldDisk:
+		return "⏸ disk "
+	case jobstate.HoldRateLimit:
+		return "⏸ rate limit "
+	case jobstate.HoldRetry:
+		return fmt.Sprintf("⟳ %d/%d ", q.Attempt, q.Of)
+	}
+	return ""
 }
+
+// SetAdmissionHolds stores the scheduler's hold snapshot the Queued rows'
+// tags read (AdmissionHoldsMsg).
+func (m *TaskListModel) SetAdmissionHolds(h jobstate.AdmissionHolds) {
+	m.holds = h
+	m.holdsRev++
+	m.invalidate()
+}
+
+// isWaitProgress reports whether a progress string is a wait line rather
+// than a delivery counter: jobstate.IsWaitLine, the predicate shared with the
+// writer (every wait line is built by jobstate.WaitLine, worker's waitLine)
+// and with the dashboard (utils.js isWaitLine). It used to be a substring
+// copy of the marker here, which the download-slot wait's line did not
+// carry. Pinned on the worker side by TestEveryWaitLineCarriesTheMarker.
+func isWaitProgress(s string) bool { return jobstate.IsWaitLine(s) }
 
 // titleWidth computes the available title width for a job in the list.
 func (m *TaskListModel) titleWidth(job *database.Job) int {
@@ -1044,6 +1081,7 @@ func (m *TaskListModel) passes(j *database.Job) bool {
 //     one-== comparable-struct design this key is built on.
 type taskListKey struct {
 	rebuildSeq    uint64
+	holdsRev      uint64
 	progressRev   uint64
 	sec           int64
 	width         int
@@ -1068,6 +1106,7 @@ func (m *TaskListModel) taskListKey() taskListKey {
 		rev = m.progressStore.Rev()
 	}
 	return taskListKey{
+		holdsRev:      m.holdsRev,
 		rebuildSeq:    m.rebuildSeq,
 		progressRev:   rev,
 		sec:           time.Now().Unix(),

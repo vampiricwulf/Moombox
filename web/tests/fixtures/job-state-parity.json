@@ -1,0 +1,62 @@
+{
+  "_comment": "One table, two implementations: cmd/moombox/job_state_parity_test.go (TestPendingAutoActionParity, TestWaitLineParity, TestAwaitingProcessingParity, TestQueuedHoldParity) runs the Go side (internal/jobstate) and web/tests/job-substates.test.mjs the dashboard's (utils.js). Jobs are wire-shaped (the job JSON).",
+  "pendingAutoAction": [
+    { "name": "end unconfirmed is the mux's", "job": { "platform": "twitch", "status": "Error", "error": "twitch HLS: 500", "parkReason": "twitch_end_unconfirmed" }, "want": "auto_mux" },
+    { "name": "end unconfirmed with the flap's text", "job": { "platform": "twitch", "status": "Error", "error": "twitch channel is offline", "parkReason": "twitch_end_unconfirmed" }, "want": "auto_mux" },
+    { "name": "end unconfirmed on a YouTube row", "job": { "platform": "youtube", "status": "Error", "parkReason": "twitch_end_unconfirmed" }, "want": "" },
+    { "name": "end unconfirmed, Cancelled", "job": { "platform": "twitch", "status": "Cancelled", "parkReason": "twitch_end_unconfirmed" }, "want": "" },
+    { "name": "offline flap", "job": { "platform": "twitch", "status": "Error", "error": "twitch channel is offline" }, "want": "auto_retry" },
+    { "name": "offline flap, one retry used", "job": { "platform": "twitch", "status": "Error", "error": "twitch channel is offline", "autoRetryCount": 1 }, "want": "auto_retry" },
+    { "name": "offline flap, budget spent", "job": { "platform": "twitch", "status": "Error", "error": "twitch channel is offline", "autoRetryCount": 2 }, "want": "" },
+    { "name": "offline flap with a segment", "job": { "platform": "twitch", "status": "Error", "error": "twitch channel is offline", "lastVideoSeq": 0 }, "want": "" },
+    { "name": "unreachable", "job": { "platform": "twitch", "status": "Error", "error": "dial tcp: no such host", "parkReason": "twitch_unreachable" }, "want": "auto_retry" },
+    { "name": "manual add, unreachable: no history row, so no recovery", "job": { "id": "tw_manual_x_1", "platform": "twitch", "status": "Error", "error": "dial tcp", "parkReason": "twitch_unreachable", "manuallyAdded": true }, "want": "" },
+    { "name": "manual add live at add time, offline flap text", "job": { "id": "tw_4242", "platform": "twitch", "status": "Error", "error": "twitch channel is offline", "manuallyAdded": true }, "want": "" },
+    { "name": "manual add, end unconfirmed is still the mux's", "job": { "id": "tw_manual_x_1", "platform": "twitch", "status": "Error", "error": "twitch HLS: 500", "parkReason": "twitch_end_unconfirmed", "manuallyAdded": true }, "want": "auto_mux" },
+    { "name": "unreachable with a segment", "job": { "platform": "twitch", "status": "Error", "error": "dial tcp", "parkReason": "twitch_unreachable", "lastVideoSeq": 7 }, "want": "" },
+    { "name": "offline text on YouTube", "job": { "platform": "youtube", "status": "Error", "error": "twitch channel is offline" }, "want": "" },
+    { "name": "mux after cancel", "job": { "platform": "twitch", "status": "Error", "error": "mux: failed", "parkReason": "mux_after_cancel" }, "want": "" },
+    { "name": "ended while offline", "job": { "platform": "twitch", "status": "Error", "error": "stream ended while Moombox was offline — captured data can be muxed via the Mux action" }, "want": "" },
+    { "name": "COOKIES? auth", "job": { "platform": "twitch", "status": "COOKIES?", "error": "401", "parkReason": "auth" }, "want": "" },
+    { "name": "Upcoming", "job": { "platform": "twitch", "status": "Upcoming" }, "want": "" },
+    { "name": "Finished", "job": { "platform": "twitch", "status": "Finished" }, "want": "" }
+  ],
+  "waitLines": [
+    { "line": "Waiting for a download slot... (3m)", "want": true },
+    { "line": "Waiting for a download slot... (<1m)", "want": true },
+    { "line": "Waiting for network connectivity... (1m 20s)", "want": true },
+    { "line": "Rate-limited by YouTube; fetching again... (24m 0s left)", "want": true },
+    { "line": "YouTube asks for a captcha... (24m 0s left)", "want": true },
+    { "line": "Connection lost - reconnecting... (5s)", "want": true },
+    { "line": "Waiting for a download slot...", "want": false },
+    { "line": "Waiting for stream...", "want": false },
+    { "line": "(V: 1234/1300 A: 1234/1300 C: 5678)", "want": false },
+    { "line": "V: 12/40 A: 12/40 C: 3", "want": false },
+    { "line": "V:95.3% C: 2", "want": false },
+    { "line": "", "want": false }
+  ],
+  "awaitingProcessing": [
+    { "name": "a classified VOD", "job": { "platform": "youtube", "status": "Upcoming", "isVod": true }, "want": true },
+    { "name": "an admitted backlog row", "job": { "platform": "youtube", "status": "Upcoming", "queuePriority": 1, "channelId": "UCx" }, "want": true },
+    { "name": "an admitted Twitch backlog row", "job": { "platform": "twitch", "status": "Upcoming", "queuePriority": 1, "channelId": "chan" }, "want": true },
+    { "name": "priority 1 with no channel", "job": { "platform": "youtube", "status": "Upcoming", "queuePriority": 1 }, "want": false },
+    { "name": "priority 1 with an empty channel", "job": { "platform": "youtube", "status": "Upcoming", "queuePriority": 1, "channelId": "" }, "want": false },
+    { "name": "a live stream of a channel", "job": { "platform": "youtube", "status": "Upcoming", "channelId": "UCx" }, "want": false },
+    { "name": "another priority", "job": { "platform": "youtube", "status": "Upcoming", "queuePriority": 2, "channelId": "UCx" }, "want": false },
+    { "name": "a pasted stream", "job": { "platform": "youtube", "status": "Upcoming" }, "want": false }
+  ],
+  "queuedHolds": [
+    {"name": "nothing", "holds": {}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": ""}},
+    {"name": "offline", "holds": {"offline": true}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "offline"}},
+    {"name": "offline over everything", "holds": {"offline": true, "diskHeld": true, "rateLimitedUntil": "2026-11-09T14:30:00Z", "jobs": {"y": {"attempt": 2, "of": 3, "until": "2026-11-09T14:30:00Z"}, "t": {"attempt": 1, "of": 3, "until": "2026-11-09T14:30:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "offline"}},
+    {"name": "disk over rate limit and retry", "holds": {"diskHeld": true, "rateLimitedUntil": "2026-11-09T14:30:00Z", "jobs": {"y": {"attempt": 2, "of": 3, "until": "2026-11-09T14:30:00Z"}, "t": {"attempt": 1, "of": 3, "until": "2026-11-09T14:30:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "disk"}},
+    {"name": "disk holds Twitch", "holds": {"diskHeld": true}, "job": {"id": "t", "platform": "twitch", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "disk"}},
+    {"name": "rate limit over retry", "holds": {"rateLimitedUntil": "2026-11-09T14:30:00Z", "jobs": {"y": {"attempt": 2, "of": 3, "until": "2026-11-09T14:30:00Z"}, "t": {"attempt": 1, "of": 3, "until": "2026-11-09T14:30:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "rate_limit", "until": "2026-11-09T14:30:00Z"}},
+    {"name": "rate limit does not hold Twitch", "holds": {"rateLimitedUntil": "2026-11-09T14:30:00Z", "jobs": {"y": {"attempt": 2, "of": 3, "until": "2026-11-09T14:30:00Z"}, "t": {"attempt": 1, "of": 3, "until": "2026-11-09T14:30:00Z"}}}, "job": {"id": "t", "platform": "twitch", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "retry", "until": "2026-11-09T14:30:00Z", "attempt": 1, "of": 3}},
+    {"name": "rate limit run out", "holds": {"rateLimitedUntil": "2026-11-09T13:59:00Z"}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": ""}},
+    {"name": "own retry", "holds": {"jobs": {"y": {"attempt": 2, "of": 3, "until": "2026-11-09T14:30:00Z"}, "t": {"attempt": 1, "of": 3, "until": "2026-11-09T14:30:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "retry", "until": "2026-11-09T14:30:00Z", "attempt": 2, "of": 3}},
+    {"name": "own rate-limit requeue", "holds": {"jobs": {"y": {"attempt": 0, "of": 3, "until": "2026-11-09T14:30:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "rate_limit", "until": "2026-11-09T14:30:00Z"}},
+    {"name": "own hold run out", "holds": {"jobs": {"y": {"attempt": 1, "of": 3, "until": "2026-11-09T13:59:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": ""}},
+    {"name": "not Queued", "holds": {"offline": true}, "job": {"id": "y", "platform": "youtube", "status": "Upcoming"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": ""}}
+  ]
+}

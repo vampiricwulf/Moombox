@@ -123,7 +123,7 @@ func adStamped(info *youtube.VideoInfo, at time.Time) *youtube.VideoInfo {
 }
 
 // TestPlaybackWaitLineCarriesTheWaitMarker pins the TUI's contract for the
-// wait's progress line (internal/tui isWaitProgress): a Downloading row
+// wait's progress line (jobstate.IsWaitLine, which the TUI reads): a Downloading row
 // waiting out a pre-roll ad reads as a wait, not as its frozen percent.
 //
 // Mutant: playbackWaitLine returning playbackWaitProgress alone.

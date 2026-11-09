@@ -10,6 +10,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
@@ -569,7 +570,7 @@ func (tm *TwitchMonitor) processStreamInfo(ctx context.Context, ch *config.Chann
 			existing, getErr := tm.db.GetJob(jobID)
 			if getErr != nil {
 				tm.logger.Debug("recover check: GetJob failed", "jobID", jobID, "err", getErr)
-			} else if isRecoverableTwitchError(existing, worker.MaxTwitchAutoRetries) {
+			} else if jobstate.TwitchAutoRetryPending(existing) {
 				tm.logger.Debug("twitch recoverable error — offering recovery", // the callback logs acceptance once
 					"jobID", jobID,
 					"channel", info.ChannelDisplayName,

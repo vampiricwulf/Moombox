@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
@@ -142,11 +143,9 @@ func (w *DownloadWorker) twitchBroadcastConfirmedOver(ctx context.Context, job *
 }
 
 // endUnconfirmedRow is the automatic mux's precondition: an Error row the
-// unconfirmed-end latch marked.
-func endUnconfirmedRow(job *database.Job) bool {
-	return job.Platform == "twitch" && job.Status == database.StatusError &&
-		job.ParkReason == database.ParkReasonTwitchEndUnconfirmed
-}
+// unconfirmed-end latch marked (jobstate.AutoMuxPending, the predicate both
+// UIs read for their pending-action line).
+func endUnconfirmedRow(job *database.Job) bool { return jobstate.AutoMuxPending(job) }
 
 // autoMuxNow claims the row and muxes it. Under autoMuxMu so the re-check and
 // the claim are one step. The marker is cleared BEFORE the mux runs, which is

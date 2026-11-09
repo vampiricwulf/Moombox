@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -299,14 +301,14 @@ func TestVodSlotWaitSaysSoAndClearsAfter(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		row, _ := db.GetJob("j-wait")
-		if row.Progress == vodSlotWaitProgress {
+		if strings.HasPrefix(row.Progress, vodSlotWaitProgress) {
 			if row.Status == database.StatusDownloading {
 				t.Errorf("the queueing VOD reads Downloading")
 			}
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the queueing VOD's progress is %q, want %q", row.Progress, vodSlotWaitProgress)
+			t.Fatalf("the queueing VOD's progress is %q, want %q", row.Progress, vodSlotWaitLine(0))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -314,6 +316,57 @@ func TestVodSlotWaitSaysSoAndClearsAfter(t *testing.T) {
 	if !<-got {
 		t.Fatal("the slot was not acquired once it freed")
 	}
+	if row, _ := db.GetJob("j-wait"); row.Progress != "" {
+		t.Errorf("progress after the wait = %q, want it cleared", row.Progress)
+	}
+}
+
+// TestSlotWaitLineCountsTheWait: a VOD queueing for a download slot rewrites
+// its line with the time waited every vodSlotWaitRefresh, and the line is
+// cleared when the slot comes, after the refresher has stopped — no late
+// rewrite outlives the clear.
+//
+// Mutants: no refresher (the line never moves past "<1m"); the clear written
+// before the refresher stops (a stale line can land after it).
+func TestSlotWaitLineCountsTheWait(t *testing.T) {
+	old := vodSlotWaitRefresh
+	vodSlotWaitRefresh = 5 * time.Millisecond
+	t.Cleanup(func() { vodSlotWaitRefresh = old })
+	w, db := testWorkerSetup(t)
+	w.queue = NewJobQueue(1)
+	for _, id := range []string{"j-busy", "j-wait"} {
+		if _, err := db.AddJob(&database.Job{ID: id, VideoID: id, URL: "u", Platform: "youtube", Status: database.StatusUpcoming}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !w.queue.TryAcquireDownloadSlot("j-busy") {
+		t.Fatal("the free slot was not taken")
+	}
+	var writes atomic.Int32
+	unsubscribe := db.OnJobUpdate(func(j *database.Job) {
+		if j.ID == "j-wait" && strings.HasPrefix(j.Progress, vodSlotWaitProgress) {
+			writes.Add(1)
+		}
+	})
+	defer unsubscribe()
+	got := make(chan bool, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("acquireDownloadSlot panicked: %v", r)
+			}
+		}()
+		got <- w.acquireDownloadSlot(context.Background(), "j-wait", true)
+	}()
+	waitForCond(t, 5*time.Second, "the line to be rewritten", func() bool { return writes.Load() >= 3 })
+	if row, _ := db.GetJob("j-wait"); !jobstate.IsWaitLine(row.Progress) {
+		t.Errorf("the queueing VOD's line %q is not a wait line", row.Progress)
+	}
+	w.queue.ReleaseDownloadSlot("j-busy")
+	if !<-got {
+		t.Fatal("the slot was not acquired once it freed")
+	}
+	time.Sleep(30 * time.Millisecond) // a refresher still running would write in here
 	if row, _ := db.GetJob("j-wait"); row.Progress != "" {
 		t.Errorf("progress after the wait = %q, want it cleared", row.Progress)
 	}

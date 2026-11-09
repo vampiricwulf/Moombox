@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -31,6 +32,12 @@ import (
 //     or removeSplitArchiveChapters removes — a finalize's own list is
 //     rebuilt by the re-download and is not counted.
 //
+// And what it cancels (owner ruling R-D2): PendingAutoMux / PendingAutoRetry
+// count the jobs whose row is waiting on an automatic action
+// (jobstate.PendingAutoAction). A Reinitialize takes the row out of Error, so
+// the Twitch monitor no longer offers it — and for a pending mux it deletes
+// the very staging the mux would have archived.
+//
 // Nothing here is a lock: the job can still change between the preview and
 // the Reinitialize, which acts on what is there then. The counts are the
 // operator's information, not a contract.
@@ -41,6 +48,8 @@ type ReinitializePreview struct {
 	StagedFiles        int   `json:"stagedFiles"`
 	StagedBytes        int64 `json:"stagedBytes"`
 	ImportedChapters   int   `json:"importedChapters"`
+	PendingAutoMux     int   `json:"pendingAutoMux"`
+	PendingAutoRetry   int   `json:"pendingAutoRetry"`
 }
 
 // PreviewReinitialize builds job's ReinitializePreview. Takes (stagingBase,
@@ -51,6 +60,12 @@ func PreviewReinitialize(db *database.Database, stagingBase string, job *databas
 	var out ReinitializePreview
 	if job == nil {
 		return out
+	}
+	switch jobstate.PendingAutoAction(job) {
+	case jobstate.AutoActionMux:
+		out.PendingAutoMux = 1
+	case jobstate.AutoActionRetry:
+		out.PendingAutoRetry = 1
 	}
 	stagingDir := filepath.Join(stagingBase, job.ID)
 	out.SetAsideRecordings = len(ScanAsides(stagingBase, job.ID).Groups)
@@ -112,14 +127,21 @@ func (p *ReinitializePreview) Add(o ReinitializePreview) {
 	p.StagedFiles += o.StagedFiles
 	p.StagedBytes += o.StagedBytes
 	p.ImportedChapters += o.ImportedChapters
+	p.PendingAutoMux += o.PendingAutoMux
+	p.PendingAutoRetry += o.PendingAutoRetry
 }
 
 // Summary is the confirm's clause naming what the reset deletes, e.g.
 // "deletes 1 set-aside recording, 2 recorded parts (1.2GB), 40 staged files
 // (850.0MB) and 5 imported chapters", or "deletes nothing
-// recorded" when there is nothing to lose. The TUI's A I confirm line reads
-// it; the dashboard's twin is reinitializeDeletesText (web/public/modules/
-// utils.js), worded alike, sizes as utils.FormatFileSize writes them.
+// recorded" when there is nothing to lose — led, when a job's row waits on
+// an automatic action, by what the reset cancels: "cancels the pending
+// automatic mux, and deletes …" (a batch: "cancels 2 pending automatic muxes
+// and 1 pending automatic retry, and …"). The warning comes first because the
+// TUI's A I confirm line reads Summary ahead of the job's title and that line
+// is cut to the terminal's width, so its tail is what a narrow terminal
+// loses. The dashboard's twin is reinitializeDeletesText
+// (web/public/modules/utils.js), worded alike, sizes as utils.FormatFileSize writes them.
 func (p ReinitializePreview) Summary() string {
 	plural := func(n int, one, many string) string {
 		if n == 1 {
@@ -140,11 +162,39 @@ func (p ReinitializePreview) Summary() string {
 	if p.ImportedChapters > 0 {
 		parts = append(parts, plural(p.ImportedChapters, "imported chapter", "imported chapters"))
 	}
+	var deletes string
 	switch len(parts) {
 	case 0:
-		return "deletes nothing recorded"
+		deletes = "deletes nothing recorded"
 	case 1:
-		return "deletes " + parts[0]
+		deletes = "deletes " + parts[0]
+	default:
+		deletes = "deletes " + strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
 	}
-	return "deletes " + strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
+	if c := p.cancelsClause(); c != "" {
+		return c + ", and " + deletes
+	}
+	return deletes
+}
+
+// cancelsClause is Summary's head naming the automatic actions the reset
+// cancels, "" when there are none.
+func (p ReinitializePreview) cancelsClause() string {
+	pending := func(n int, one, many string) string {
+		if n == 1 {
+			return "the pending automatic " + one
+		}
+		return fmt.Sprintf("%d pending automatic %s", n, many)
+	}
+	var c []string
+	if p.PendingAutoMux > 0 {
+		c = append(c, pending(p.PendingAutoMux, "mux", "muxes"))
+	}
+	if p.PendingAutoRetry > 0 {
+		c = append(c, pending(p.PendingAutoRetry, "retry", "retries"))
+	}
+	if len(c) == 0 {
+		return ""
+	}
+	return "cancels " + strings.Join(c, " and ")
 }

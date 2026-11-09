@@ -112,14 +112,14 @@ func TestSchedulerSkipsHeldBacklogJob(t *testing.T) {
 	addSchedJob(t, db, &ch, "hold_old", database.StatusQueued, 1)
 	addFeedItemRow(t, db, ch, "hold_old", "2026-07-11T00:00:00Z")
 
-	s.holdUntil("hold_new", time.Now().Add(time.Hour))
+	s.holdUntil("hold_new", time.Now().Add(time.Hour), 0)
 	s.sweep()
 	if got := log.admitted(); len(got) != 1 || got[0] != "hold_old" {
 		t.Fatalf("admitted %v, want the next job past the held one", got)
 	}
 
 	db.UpdateJobFields("hold_old", map[string]any{"status": database.StatusFinished})
-	s.holdUntil("hold_new", time.Now().Add(-time.Second))
+	s.holdUntil("hold_new", time.Now().Add(-time.Second), 0)
 	s.sweep()
 	if got := log.admitted(); len(got) != 2 || got[1] != "hold_new" {
 		t.Errorf("admitted %v, want the held job once its hold ran out", got)

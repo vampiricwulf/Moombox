@@ -165,10 +165,9 @@ const rateLimitWaitRefresh = time.Minute
 const rateLimitWaitProgress = "Rate-limited by YouTube; fetching again"
 
 // rateLimitWaitLine is the progress line itself, "Rate-limited by YouTube;
-// fetching again... (24m 0s left)". The "... (" is the TUI's wait marker
-// (internal/tui isWaitProgress), which every wait line carries.
+// fetching again... (24m 0s left)", built by waitLine like every wait line.
 func rateLimitWaitLine(left time.Duration) string {
-	return rateLimitWaitProgress + "... (" + utils.FormatDurationHuman(left) + " left)"
+	return waitLine(rateLimitWaitProgress, utils.FormatDurationHuman(left)+" left")
 }
 
 // captchaWaitProgress opens the progress line a job waiting out a captcha
@@ -178,9 +177,9 @@ func rateLimitWaitLine(left time.Duration) string {
 const captchaWaitProgress = "YouTube asks for a captcha"
 
 // captchaWaitLine is that line with the time left, "YouTube asks for a
-// captcha... (24m 0s left)", in the same wait-marker shape.
+// captcha... (24m 0s left)", built by waitLine like every wait line.
 func captchaWaitLine(left time.Duration) string {
-	return captchaWaitProgress + "... (" + utils.FormatDurationHuman(left) + " left)"
+	return waitLine(captchaWaitProgress, utils.FormatDurationHuman(left)+" left")
 }
 
 // waitLineFor is the wait line a refusal shows: the captcha's or the rate
@@ -908,6 +907,7 @@ func (s *Scheduler) holdForRateLimit(now time.Time, d time.Duration) {
 	s.rateLimitedUntil, s.rateHeld = until, true
 	s.rateMu.Unlock()
 	s.reportRateLimitHold()
+	s.noteHoldsChanged()
 	if opening {
 		s.log.Warn("scheduler: YouTube rate-limited this session; backlog VODs wait in Queued until the hold runs out (live and manually added jobs are not held)",
 			"until", until.UTC().Format(time.RFC3339))
@@ -933,6 +933,7 @@ func (s *Scheduler) rateLimitGateClosed(now time.Time) bool {
 	s.rateHeld = false
 	s.rateMu.Unlock()
 	s.reportRateLimitHold()
+	s.noteHoldsChanged()
 	s.log.Info("scheduler: the YouTube rate-limit hold has run out; backlog admission resumes")
 	return false
 }
@@ -991,6 +992,7 @@ func (s *Scheduler) RestoreRateLimitHold(until time.Time) bool {
 	s.rateLimitedUntil, s.rateHeld = until, true
 	s.rateMu.Unlock()
 	s.reportRateLimitHold()
+	s.noteHoldsChanged()
 	s.log.Warn("scheduler: the last run stopped with a YouTube rate-limit hold standing; backlog VODs wait in Queued until it runs out (live and manually added jobs are not held)",
 		"until", until.UTC().Format(time.RFC3339))
 	return true

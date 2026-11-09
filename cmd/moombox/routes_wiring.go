@@ -87,6 +87,7 @@ func (s *runState) wireRoutes() func() {
 				"twitch":  s.twitchMon.Health(),
 			}
 		},
+		GetAdmissionHolds: s.dlWorker.AdmissionHolds,
 	})
 	routes.ConfigRoutes(s.r, s.configStore, &routes.ConfigRoutesCallbacks{
 		OnLogLevelChange: s.applyConfiguredLogLevel,

@@ -33,7 +33,7 @@ func TestSchedulerAdmissionLeavesACancelStanding(t *testing.T) {
 	addFeedItemRow(t, db, ch, "cas_old", "2026-07-11T00:00:00Z")
 	addSchedJob(t, db, &ch, "cas_held", database.StatusQueued, 1)
 	addFeedItemRow(t, db, ch, "cas_held", "2026-07-10T00:00:00Z")
-	s.holdUntil("cas_held", time.Now().Add(time.Hour))
+	s.holdUntil("cas_held", time.Now().Add(time.Hour), 0)
 
 	write := s.updateJob
 	s.updateJob = func(jobID string, fields map[string]any) bool {

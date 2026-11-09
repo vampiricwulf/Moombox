@@ -1,12 +1,22 @@
 /**
  * Stats Controller — Health/Stats dashboard
  */
-import { formatBytes, formatDurationSeconds } from "./utils.js";
+import { formatBytes, formatDurationSeconds, diskGaugeLevel } from "./utils.js";
 
 export class StatsController {
   constructor(app) {
     this.app = app;
     this._refreshInterval = null;
+    // The last readings drawn, so a change of the backlog's disk gate
+    // (onAdmissionHolds) redraws them without waiting for the next reading.
+    this._lastGaugeDisk = null;
+    this._lastIndicatorDisk = null;
+  }
+
+  /** The admission holds changed: redraw what reads the disk gate. */
+  onAdmissionHolds() {
+    if (this._lastGaugeDisk) this.renderDisk(this._lastGaugeDisk);
+    if (this._lastIndicatorDisk) this.updateDiskIndicator(this._lastIndicatorDisk);
   }
 
   /** Called when the Stats tab becomes visible. */
@@ -46,6 +56,7 @@ export class StatsController {
   renderDisk(disk) {
     const el = document.getElementById("stats-disk");
     if (!el) return;
+    this._lastGaugeDisk = disk;
 
     // No reading (the server sends zeros before its first successful disk
     // check, and for as long as the output directory's disk cannot be read):
@@ -60,7 +71,9 @@ export class StatsController {
     const freeStr = formatBytes(disk.free || 0);
     const totalStr = formatBytes(disk.total || 0);
     const usedStr = formatBytes((disk.total || 0) - (disk.free || 0));
-    const level = disk.warnLevel || "ok";
+    // "holding" while the backlog's disk gate holds below critical (owner
+    // ruling R-D3): the reading alone said "warn" while nothing was admitted.
+    const level = diskGaugeLevel(disk, this.app.admissionHolds);
 
     el.textContent = "";
 
@@ -70,7 +83,7 @@ export class StatsController {
     const bar = document.createElement("div");
     bar.className = "disk-bar";
     const fill = document.createElement("div");
-    fill.className = "disk-bar-fill" + (level === "critical" ? " disk-critical" : level === "warn" ? " disk-warn" : "");
+    fill.className = "disk-bar-fill" + (level === "critical" ? " disk-critical" : level === "holding" ? " disk-holding" : level === "warn" ? " disk-warn" : "");
     fill.style.width = `${Math.min(usedPct, 100)}%`;
     bar.appendChild(fill);
     container.appendChild(bar);
@@ -80,7 +93,7 @@ export class StatsController {
     const usedLabel = document.createElement("span");
     usedLabel.textContent = `${usedStr} used of ${totalStr}`;
     const freeLabel = document.createElement("span");
-    freeLabel.textContent = `${freeStr} free (${pct}% used)`;
+    freeLabel.textContent = `${freeStr} free (${pct}% used)${level === "holding" ? " · holding backlog" : ""}`;
     labels.appendChild(usedLabel);
     labels.appendChild(freeLabel);
     container.appendChild(labels);
@@ -149,8 +162,10 @@ export class StatsController {
   updateDiskIndicator(disk) {
     const el = document.getElementById("disk-indicator");
     if (!el) return;
+    this._lastIndicatorDisk = disk;
+    const level = diskGaugeLevel(disk, this.app.admissionHolds);
 
-    if (!disk || !disk.total || !disk.warnLevel || disk.warnLevel === "ok") {
+    if (!disk || !disk.total || level === "ok") {
       el.style.display = "none";
       return;
     }
@@ -161,10 +176,11 @@ export class StatsController {
     const hddIcon = document.createElement("sl-icon");
     hddIcon.name = "hdd";
     el.appendChild(hddIcon);
-    el.appendChild(document.createTextNode(` ${freeGB}G free`));
-    el.title = `Disk ${Math.round(isFinite(disk.usedPct) ? disk.usedPct : 0)}% used`;
+    el.appendChild(document.createTextNode(` ${freeGB}G free${level === "holding" ? " · holding" : ""}`));
+    el.title = `Disk ${Math.round(isFinite(disk.usedPct) ? disk.usedPct : 0)}% used`
+      + (level === "holding" ? " — backlog admission held until usage is back under the critical threshold's margin" : "");
 
-    el.className = disk.warnLevel === "critical" ? "disk-indicator-critical" : "disk-indicator-warn";
+    el.className = level === "critical" ? "disk-indicator-critical" : level === "holding" ? "disk-indicator-warn disk-indicator-holding" : "disk-indicator-warn";
   }
 
   /** Update status bar active download count. */

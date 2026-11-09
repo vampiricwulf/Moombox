@@ -18,6 +18,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/stats"
 	"github.com/vampiricwulf/Moombox/internal/tui"
@@ -1107,6 +1108,16 @@ func (s *runState) runTUI() {
 		default:
 		}
 	}
+
+	// The backlog scheduler's holds (owner ruling R-D3): every change through
+	// runAdmissionHoldsPush, seeded here with the holds that already stand.
+	holdsFn := func(h jobstate.AdmissionHolds) { app.Send(tui.AdmissionHoldsMsg{Holds: h}) }
+	s.admissionHoldsTUI.Store(&holdsFn)
+	defer s.admissionHoldsTUI.Store(nil)
+	app.SetAdmissionHolds(s.dlWorker.AdmissionHolds()) // Send is a no-op before Run
+	// A change between this seed and Run went through that no-op Send; the
+	// TUI's Init asks the push for the snapshot again once Send delivers.
+	app.OnAdmissionHoldsResync = s.resyncAdmissionHoldsTUI
 
 	// Wire connectivity state to TUI (uses program.Send, not a channel)
 	unsubConnTUI := s.connMon.OnStateChange(func(online bool) {

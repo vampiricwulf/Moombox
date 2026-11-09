@@ -8,6 +8,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
@@ -231,7 +232,7 @@ func (b *TwitchBacklog) capturedStarts() map[string][]capturedBroadcast {
 // first segment is moments away is not a capture that recorded nothing, and
 // queuing the VOD beside it would record the broadcast twice), or it is an
 // Error row the Twitch monitor will re-initialise when the same broadcast
-// is found live again (isRecoverableTwitchError at MaxTwitchAutoRetries —
+// is found live again (jobstate.TwitchAutoRetryPending —
 // a TwitchOfflineErrMsg or twitch_unreachable stop before the first
 // segment, retries left): that row is a capture that is about to resume,
 // and the VOD queued in the gap would record the broadcast a second time
@@ -250,7 +251,7 @@ func (b *TwitchBacklog) capturedLiveJob(j *database.Job, stagingBase string) boo
 		database.StatusDownloading, database.StatusMuxing:
 		return true
 	}
-	if isRecoverableTwitchError(j, worker.MaxTwitchAutoRetries) {
+	if jobstate.TwitchAutoRetryPending(j) {
 		return true
 	}
 	if j.OutputFile != "" {

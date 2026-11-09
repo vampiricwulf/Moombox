@@ -93,6 +93,11 @@ type StatusBarModel struct {
 	diskFree    uint64
 	diskUsedPct float64
 	diskWarn    string // "ok", "warn", "critical"
+	// diskHeld: the backlog's disk gate holds admission (AdmissionHoldsMsg).
+	// It holds until usage is config.DiskRecoveryMargin points under the
+	// critical threshold, so a reading back at "warn" still holds: the
+	// indicator says "holding" then, as the dashboard's gauge does.
+	diskHeld bool
 	// In-flight backfill scan (spec §11 progress surfacing). Scans are
 	// strictly serial, so one slot IS the whole "scanning" state; empty
 	// backfillChannel hides the indicator. Terminal states clear the slot —
@@ -178,6 +183,9 @@ func (m *StatusBarModel) SetJobs(jobs []*database.Job) {
 	m.counts = m.tallyJobs()
 }
 
+// SetDiskHeld records whether the backlog's disk gate holds admission.
+func (m *StatusBarModel) SetDiskHeld(held bool) { m.diskHeld = held }
+
 // SetDiskStatus updates the disk space display.
 func (m *StatusBarModel) SetDiskStatus(free uint64, usedPct float64, warn string) {
 	m.diskFree = free
@@ -234,6 +242,7 @@ type statusBarKey struct {
 	diskFree        uint64
 	diskUsedPct     float64
 	diskWarn        string
+	diskHeld        bool
 	backfillChannel string
 	backfillName    string
 	backfillTab     string
@@ -255,6 +264,7 @@ func (m *StatusBarModel) statusBarKey() statusBarKey {
 		diskFree:        m.diskFree,
 		diskUsedPct:     m.diskUsedPct,
 		diskWarn:        m.diskWarn,
+		diskHeld:        m.diskHeld,
 		backfillChannel: m.backfillChannel,
 		backfillName:    m.backfillName,
 		backfillTab:     m.backfillTab,
@@ -514,25 +524,36 @@ func (m *StatusBarModel) renderMetrics(t barTier, counts barJobCounts) string {
 	// Disk indicator (only shown once we have data). At tierEssential only a
 	// warning/critical reading is worth the columns — a healthy disk says
 	// nothing there.
-	warning := m.diskWarn == "warn" || m.diskWarn == "critical"
+	warning := m.diskWarn == "warn" || m.diskWarn == "critical" || m.diskHeld
 	if (m.diskFree > 0 || m.diskUsedPct > 0) && (t < tierEssential || warning) {
 		var style lipgloss.Style
-		switch m.diskWarn {
-		case "critical":
+		switch {
+		case m.diskWarn == "critical":
 			style = statusBarRedStyle
-		case "warn":
+		case m.diskWarn == "warn" || m.diskHeld:
 			style = statusBarWrnStyle
 		default:
 			style = statusBarGrnStyle
 		}
+		// "holding" only where the reading itself is below critical: at
+		// critical the red says it already.
+		holding := m.diskHeld && m.diskWarn != "critical"
 
 		freeGB := float64(m.diskFree) / (1024 * 1024 * 1024)
 		pct := int(m.diskUsedPct)
+		// The short forms mark a hold with ⏸ (the Queued rows' hold tag), so a
+		// narrow terminal still tells a held gate from an ordinary warn.
+		mark := ""
+		if holding {
+			mark = "⏸"
+		}
 		switch {
 		case t >= tierTight:
-			parts = append(parts, style.Render(fmt.Sprintf("D:%d%%", pct)))
+			parts = append(parts, style.Render(fmt.Sprintf("D:%d%%%s", pct, mark)))
 		case t >= tierCompact:
-			parts = append(parts, style.Render(fmt.Sprintf("D:%d%% %.0fG", pct, freeGB)))
+			parts = append(parts, style.Render(fmt.Sprintf("D:%d%% %.0fG%s", pct, freeGB, mark)))
+		case holding:
+			parts = append(parts, style.Render(fmt.Sprintf("Disk %d%% (%.0fG free, holding)", pct, freeGB)))
 		default:
 			parts = append(parts, style.Render(fmt.Sprintf("Disk %d%% (%.0fG free)", pct, freeGB)))
 		}
@@ -678,6 +699,57 @@ func (m *StatusBarModel) parkedCookieJobs() (yt, tw bool) {
 	return yt, tw
 }
 
+// The cookie badge's states, by name: the wire values of
+// CookieBadgePrecedence, which the dashboard's COOKIE_BADGE_PRECEDENCE
+// (web/public/modules/utils.js) must equal.
+const (
+	badgeRelogin        = "relogin"
+	badgeFileUnreadable = "fileUnreadable"
+	badgeParked         = "parked"
+	badgeRejected       = "rejected"
+	badgeUnknown        = "unknown"
+	badgeNone           = "none"
+	badgeOK             = "ok"
+)
+
+// CookieBadgePrecedence is the cookie badge's one written precedence (owner
+// ruling R-D4): Relogin > FileUnreadable > Parked/Rejected > Unknown > None >
+// OK. renderCookieStatus draws the first state on it that holds
+// (cookieBadgeState), and the dashboard's cookieIndicatorState walks the same
+// list (COOKIE_BADGE_PRECEDENCE, compared by cmd/moombox's parity test). The
+// check's own state comes from cmd/moombox cookieBadgeFor — authenticated
+// first, so FileUnreadable, None, Unknown and Rejected never hold beside OK.
+var CookieBadgePrecedence = []string{badgeRelogin, badgeFileUnreadable, badgeParked, badgeRejected, badgeUnknown, badgeNone, badgeOK}
+
+// cookieBadgeState is the first state of CookieBadgePrecedence that holds for
+// a platform whose check reads check and which has a job parked in COOKIES?
+// when parked; "" for a CookieStatus the list does not name.
+func cookieBadgeState(check CookieStatus, parked bool) string {
+	for _, s := range CookieBadgePrecedence {
+		var holds bool
+		switch s {
+		case badgeRelogin:
+			holds = check == CookieStatusRelogin
+		case badgeFileUnreadable:
+			holds = check == CookieStatusFileUnreadable
+		case badgeParked:
+			holds = parked
+		case badgeRejected:
+			holds = check == CookieStatusCookiesOnly
+		case badgeUnknown:
+			holds = check == CookieStatusUnknown
+		case badgeNone:
+			holds = check == CookieStatusNone
+		case badgeOK:
+			holds = check == CookieStatusOK
+		}
+		if holds {
+			return s
+		}
+	}
+	return ""
+}
+
 // renderCookieStatus renders auth indicators and warnings (B2) at tier t.
 //
 // A platform whose auth is HEALTHY is dropped at tierEssential — the green
@@ -735,16 +807,18 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 	// dropped once space is scarce (tierEssential).
 	healthy := t < tierEssential
 
-	// YouTube status (only if active)
+	// YouTube status (only if active). The arm is chosen by
+	// CookieBadgePrecedence (owner ruling R-D4), the one written order the
+	// dashboard's cookieIndicatorState follows too.
 	if m.ytActive {
-		switch {
-		case m.ytCookie == CookieStatusRelogin:
+		switch cookieBadgeState(m.ytCookie, ytRejected) {
+		case badgeRelogin:
 			if t >= tierTight {
 				parts = append(parts, statusBarRedStyle.Render("YT!"))
 			} else {
 				parts = append(parts, statusBarRedStyle.Render("YT: Re-login"))
 			}
-		case m.ytCookie == CookieStatusFileUnreadable:
+		case badgeFileUnreadable:
 			// Above the parked/CookiesOnly arm: a cookies.txt that cannot be
 			// read explains every symptom below it, and it is the one remedy
 			// the other arms would send the operator away from. Not gated on
@@ -753,20 +827,20 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 			// and below: the glyph is what separates it from the
 			// rejected-credentials badge beneath it once the colour is gone.
 			parts = append(parts, statusBarCookieStyle.Render(cookieFileErrorLabel("YT", t)))
-		case ytRejected || m.ytCookie == CookieStatusCookiesOnly:
-			// ytRejected stays ahead of the unknown arm on purpose: a job
-			// parked in COOKIES? is evidence from a real download attempt, and
-			// it outranks a check that could not reach the site.
+		case badgeParked, badgeRejected:
+			// A job parked in COOKIES? stays ahead of the unknown arm on
+			// purpose: it is evidence from a real download attempt, and it
+			// outranks a check that could not reach the site.
 			parts = append(parts, statusBarRedStyle.Render("YT"))
-		case m.ytCookie == CookieStatusUnknown:
+		case badgeUnknown:
 			if healthy {
 				parts = append(parts, statusBarWrnStyle.Render(cookieUnknownLabel("YT", t)))
 			}
-		case m.ytCookie == CookieStatusNone:
+		case badgeNone:
 			if healthy {
 				parts = append(parts, statusBarYelStyle.Render("YT"))
 			}
-		case m.ytCookie == CookieStatusOK:
+		case badgeOK:
 			if healthy {
 				parts = append(parts, statusBarGrnStyle.Render("YT"))
 			}
@@ -787,38 +861,40 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 	// by an arm of its own: Twitch without cookies is ordinary anonymous mode
 	// and gets the neutral dim indicator, unlike YouTube's yellow warning.
 	if m.twActive {
-		switch {
-		case m.twCookie == CookieStatusRelogin:
+		switch cookieBadgeState(m.twCookie, twRejected) {
+		case badgeRelogin:
 			if t >= tierTight {
 				parts = append(parts, statusBarRedStyle.Render("TW!"))
 			} else {
 				parts = append(parts, statusBarRedStyle.Render("TW: Re-login"))
 			}
-		case m.twCookie == CookieStatusFileUnreadable:
+		case badgeFileUnreadable:
 			// Same rank and the same reason as the YouTube arm above; the two
 			// ladders stay the same SHAPE so the next divergence is visible.
 			// One cookies.txt holds both platforms, so both badges can carry it.
 			parts = append(parts, statusBarCookieStyle.Render(cookieFileErrorLabel("TW", t)))
-		case twRejected || m.twCookie == CookieStatusCookiesOnly:
+		case badgeParked, badgeRejected:
 			// Same precedence as YouTube's, and for the same reason: a parked
 			// job is evidence from a real download attempt and outranks a check
 			// that could not reach the site.
 			//
-			// CookiesOnly here is reachable since AuthStatus gained
+			// CookiesOnly (rejected) here is reachable since AuthStatus gained
 			// HasTwitchCookies. It was dead code for as long as the TUI could
 			// only assign CookieStatusOK for Twitch, which meant a Twitch
 			// session whose auth-token had been pruned on expiry looked exactly
 			// like one that was never set up.
 			parts = append(parts, statusBarRedStyle.Render("TW"))
-		case m.twCookie == CookieStatusUnknown:
+		case badgeUnknown:
 			if healthy {
 				parts = append(parts, statusBarWrnStyle.Render(cookieUnknownLabel("TW", t)))
 			}
-		case m.twCookie == CookieStatusOK:
+		case badgeOK:
 			if healthy {
 				parts = append(parts, statusBarGrnStyle.Render("TW"))
 			}
 		default:
+			// badgeNone included: Twitch without cookies is ordinary
+			// anonymous mode, the neutral dim indicator.
 			if healthy {
 				parts = append(parts, DimStyle.Render("TW"))
 			}

@@ -559,77 +559,92 @@ export function parkedCookiePlatforms(jobs) {
  * not reintroduce it here or there — the TUI has never had one, and the two
  * surfaces are supposed to agree. See updateStatusBar in app.js.
  *
- * `parked` is the fourth state and the Web half of a divergence: a job stopped
- * in COOKIES? for want of usable credentials. It ranks SECOND, immediately
- * under re-login and above `authenticated`, which is exactly where the TUI
- * ranks it (renderCookieStatus, internal/tui/status_bar.go) and for the TUI's
- * stated reason — a park is evidence from a real download attempt that
- * something tried these credentials and could not proceed, and it therefore
- * outranks a check that merely asked. Ranking it below `authenticated` would
- * hide it behind a healthy check, which is the state it exists to contradict.
- * It comes from the caller because it is computed from the job list rather than
- * from the status payload; see parkedCookiePlatforms.
+ * `parked` (a job stopped in COOKIES? for want of usable credentials) comes
+ * from the caller because it is computed from the job list rather than from
+ * the status payload; see parkedCookiePlatforms. `status.fileError` means
+ * cookies.txt is PRESENT and could not be read, which the `!found` arm used to
+ * render as never-configured.
  *
- * `status.fileError` is the fifth state and ranks immediately under
- * `authenticated`: cookies.txt is PRESENT and could not be read, which the
- * `!found` arm below used to render as never-configured. See the arm itself for
- * why it sits under the green one rather than over it.
+ * ONE PRECEDENCE, THE TUI'S (owner ruling R-D4): COOKIE_BADGE_PRECEDENCE,
+ * compared with tui.CookieBadgePrecedence by cmd/moombox's parity test. The
+ * check alone decides one of fileUnreadable / rejected / unknown / none / ok —
+ * cmd/moombox cookieBadgeFor's ladder, `authenticated` first, so an unreadable
+ * file under a jar that still authenticates stays green — and relogin and
+ * parked are laid over it in the list's order. Relogin first; then an
+ * unreadable cookies.txt, ABOVE a parked job: it explains the park, and it is
+ * the one remedy the parked arm would send the operator away from. The
+ * dashboard used to rank parked above it, so the same state read "YT?" in
+ * the TUI and red "download stopped for want of credentials" here. Parked
+ * outranks a healthy check: a park is evidence from a real download attempt,
+ * and it outranks a check that merely asked.
  *
- * The reason line is `youtubeError` / `twitchError` off the same payload, and
- * it is appended to whichever arm has one. Until Arc 10 that was the
- * inconclusive arm alone, on the belief that a conclusive verdict never
- * carries a reason. TWO producers do. The server maps its
- * "auth check could not be attempted" sentinel — a jar that is configured and
- * can never be signed — to `failed` while still recording the error, so the
- * old rule silently dropped the one cause whose remedy is exactly "re-export
- * your cookies"; and since Arc 10 `NoteTwitchAuthLoss` writes `failed` with a
- * fixed sentence naming which of the four Twitch chat-downgrade routes broke,
- * which is the only thing distinguishing "no login cookie" from "Twitch
- * refused the login". An `ok` verdict still shows nothing, by construction:
- * the server derives that verdict from the same error the string carries, so
- * `ok` and a non-empty reason cannot co-occur. An older binary sends no such
  * key at all and both titles degrade to exactly today's sentence.
  */
 export function cookieIndicatorState(platform, status, reloginRequired, parked) {
   const meta = COOKIE_INDICATOR_PLATFORMS[platform];
-  if (reloginRequired) {
-    return { className: "indicator-error", title: `${meta.name}: Re-login required` };
-  }
-  if (parked) {
-    return {
-      className: "indicator-error",
-      title: `${meta.name}: A download stopped for want of usable credentials`,
-    };
-  }
-  if (status?.authenticated) {
-    return { className: "indicator-ok", title: `${meta.name}: Authenticated` };
-  }
-  // AFTER `authenticated` and BEFORE `!found`. A cookies.txt that cannot be
-  // read renders as never-configured on the `!found` arm — the container
-  // operator is told "no cookies" about a file sitting on the volume — but a
-  // jar that still authenticates is doing real work, and reddening that badge
-  // would report a stale-reload problem as a credential problem. `fileError`
-  // is path-and-cause only (see AuthStatus.CookieFileError); an older binary
-  // omits the key entirely and this arm never fires, which is the additive
-  // contract every other key here follows.
-  if (status?.fileError) {
-    return {
-      className: "indicator-error",
-      title: `${meta.name}: cookies.txt could not be read (${status.fileError})`,
-    };
-  }
-  if (!status?.found) {
-    return meta.absent;
-  }
+  const state = cookieBadgeState(cookieCheckState(status), !!reloginRequired, !!parked);
   const reason = status?.[meta.errorKey];
   const cause = reason ? ` (${reason})` : "";
-  if (status?.verification === "unknown") {
-    return {
-      className: "indicator-warn",
-      title: `${meta.name}: Cookies saved — Moombox could not establish whether they work${cause}`,
-    };
+  switch (state) {
+    case "relogin":
+      return { className: "indicator-error", title: `${meta.name}: Re-login required` };
+    case "fileUnreadable":
+      return { className: "indicator-error", title: `${meta.name}: cookies.txt could not be read (${status.fileError})` };
+    case "parked":
+      return { className: "indicator-error", title: `${meta.name}: A download stopped for want of usable credentials` };
+    case "rejected":
+      return { className: "indicator-error", title: `${meta.name}: Not authenticated${cause}` };
+    case "unknown":
+      return {
+        className: "indicator-warn",
+        title: `${meta.name}: Cookies saved — Moombox could not establish whether they work${cause}`,
+      };
+    case "none":
+      return meta.absent;
   }
-  return { className: "indicator-error", title: `${meta.name}: Not authenticated${cause}` };
+  return { className: "indicator-ok", title: `${meta.name}: Authenticated` };
+}
+
+/**
+ * COOKIE_BADGE_PRECEDENCE is the cookie badge's one written precedence (owner
+ * ruling R-D4), the TUI's: tui.CookieBadgePrecedence, which renderCookieStatus
+ * (internal/tui/status_bar.go) follows. Parked and rejected render alike in the
+ * TUI and sit side by side. cmd/moombox's parity test compares the two lists.
+ */
+export const COOKIE_BADGE_PRECEDENCE = ["relogin", "fileUnreadable", "parked", "rejected", "unknown", "none", "ok"];
+
+/**
+ * cookieCheckState is what the auth check alone says, the dashboard's twin of
+ * cmd/moombox cookieBadgeFor: "ok" when authenticated (first, so an older
+ * binary's Twitch payload, which has no `found`, still reads as signed in,
+ * and an unreadable file under a jar that still authenticates stays green),
+ * then "fileUnreadable", "none" (no cookies), "unknown" (inconclusive) and
+ * "rejected" (cookies the site refused). `fileError` and `verification` are
+ * additive keys an older binary omits; their arms then never fire.
+ * @param {object|null|undefined} status
+ * @returns {"ok"|"fileUnreadable"|"none"|"unknown"|"rejected"}
+ */
+export function cookieCheckState(status) {
+  if (status?.authenticated) return "ok";
+  if (status?.fileError) return "fileUnreadable";
+  if (!status?.found) return "none";
+  if (status?.verification === "unknown") return "unknown";
+  return "rejected";
+}
+
+/**
+ * cookieBadgeState lays relogin and parked over the check's state by
+ * COOKIE_BADGE_PRECEDENCE: the first state on the list that holds.
+ * @param {string} check cookieCheckState's answer
+ * @param {boolean} relogin
+ * @param {boolean} parked
+ * @returns {string}
+ */
+export function cookieBadgeState(check, relogin, parked) {
+  for (const s of COOKIE_BADGE_PRECEDENCE) {
+    if (s === "relogin" ? relogin : s === "parked" ? parked : check === s) return s;
+  }
+  return check;
 }
 
 /**
@@ -1069,13 +1084,178 @@ export function unplayableAudioText(info, canPlay) {
 }
 
 /**
+ * WAIT_MARKER is what marks a progress line as a wait ("<label>... (<tail>)")
+ * rather than a delivery counter: jobstate.WaitMarker, which every Go writer
+ * of a wait line builds through jobstate.WaitLine. cmd/moombox's job-state
+ * parity test compares the two.
+ */
+export const WAIT_MARKER = "... (";
+
+/**
+ * isWaitLine is jobstate.IsWaitLine: the line carries WAIT_MARKER and closes
+ * its tail. The TUI's task list reads the same predicate.
+ * @param {unknown} s
+ * @returns {boolean}
+ */
+export function isWaitLine(s) {
+  return typeof s === "string" && s.includes(WAIT_MARKER) && s.endsWith(")");
+}
+
+/**
+ * isAwaitingProcessing reports whether an Upcoming row is a VOD the scheduler
+ * or a creator handed to stream processing, not a broadcast being waited for:
+ * a row stream processing has called a VOD (isVod), or a backlog row
+ * (queue_priority 1 of a channel — worker.CookieResumeStatus's rule) the
+ * archive-slots scheduler admitted, whose isVod is written only once its
+ * processing starts. Such a row has no stream to wait for, and read
+ * "Waiting for stream..." (owner ruling R-D1). jobstate.AwaitingProcessing
+ * is the Go twin the TUI's details pane reads; cmd/moombox's job-state parity
+ * test runs both over the same table.
+ * @param {object} job
+ * @returns {boolean}
+ */
+export function isAwaitingProcessing(job) {
+  return !!job && (job.isVod === true || (job.queuePriority === 1 && !!job.channelId));
+}
+
+/**
+ * HOLD_PRECEDENCE is jobstate.HoldPrecedence: the order a Queued row's hold
+ * reason is chosen in, the order the scheduler's admission sweep returns
+ * early in (owner ruling R-D3). cmd/moombox's job-state parity test compares
+ * the two lists, and runs queuedHold's Go twin over the same table.
+ */
+export const HOLD_PRECEDENCE = ["offline", "disk", "rate_limit", "retry"];
+
+/**
+ * queuedHold is jobstate.AdmissionHolds.For: why the archive-slots scheduler
+ * is not admitting a Queued row at `now`, from the admissionHolds snapshot
+ * (GET /api/status, the initial_state and admission_holds frames). A row
+ * that is not Queued, or no snapshot, holds nothing; a hold whose time has
+ * passed holds nothing either.
+ * @param {{offline?: boolean, diskHeld?: boolean, rateLimitedUntil?: string,
+ *          jobs?: Object<string, {attempt: number, of: number, until: string}>}|null} holds
+ * @param {object} job
+ * @param {number} [now] epoch milliseconds
+ * @returns {{reason: string, until?: string, attempt?: number, of?: number}}
+ */
+export function queuedHold(holds, job, now = Date.now()) {
+  if (!holds || !job || job.status !== "Queued") return { reason: "" };
+  const before = (t) => !!t && now < Date.parse(t);
+  const own = holds.jobs?.[job.id];
+  const hasOwn = !!own && before(own.until);
+  for (const r of HOLD_PRECEDENCE) {
+    switch (r) {
+      case "offline":
+        if (holds.offline) return { reason: "offline" };
+        break;
+      case "disk":
+        if (holds.diskHeld) return { reason: "disk" };
+        break;
+      case "rate_limit":
+        if (job.platform !== "twitch" && before(holds.rateLimitedUntil)) return { reason: "rate_limit", until: holds.rateLimitedUntil };
+        if (hasOwn && !own.attempt) return { reason: "rate_limit", until: own.until };
+        break;
+      case "retry":
+        if (hasOwn && own.attempt > 0) return { reason: "retry", until: own.until, attempt: own.attempt, of: own.of };
+        break;
+    }
+  }
+  return { reason: "" };
+}
+
+/**
+ * queuedHoldText is jobstate.QueuedHold.Text: a Queued row's line, in the
+ * TUI's words. Times are the viewer's wall clock, HH:MM.
+ * @param {{reason: string, until?: string, attempt?: number, of?: number}} hold
+ * @returns {string}
+ */
+export function queuedHoldText(hold) {
+  const hhmm = (t) => {
+    const d = new Date(t);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+  switch (hold?.reason) {
+    case "offline": return "Held: offline";
+    case "disk": return "Held: disk full";
+    case "rate_limit": return `Held: YouTube rate limit until ${hhmm(hold.until)}`;
+    case "retry": return `Retry ${hold.attempt} of ${hold.of} at ${hhmm(hold.until)}`;
+  }
+  return "Waiting in queue...";
+}
+
+/**
+ * diskGaugeLevel is the level the disk gauge and the status-bar indicator
+ * draw: the reading's warnLevel, except "holding" while the backlog's disk
+ * gate holds and the reading is below critical — the gate holds until usage
+ * is 2 points under the threshold, so a reading back at "warn" (or even
+ * "ok") still holds admission, and said only "warn" (owner ruling R-D3).
+ * @param {{warnLevel?: string}|null} disk
+ * @param {{diskHeld?: boolean}|null} holds
+ * @returns {"ok"|"warn"|"holding"|"critical"}
+ */
+export function diskGaugeLevel(disk, holds) {
+  const level = disk?.warnLevel || "ok";
+  if (level !== "critical" && holds?.diskHeld) return "holding";
+  return level;
+}
+
+/**
+ * The Twitch monitor's automatic-recovery constants, as the Go side declares
+ * them (jobstate.TwitchOfflineErrMsg, jobstate.MaxTwitchAutoRetries); the
+ * job-state parity test (cmd/moombox) compares the two.
+ */
+export const TWITCH_OFFLINE_ERR_MSG = "twitch channel is offline";
+export const MAX_TWITCH_AUTO_RETRIES = 2;
+
+/**
+ * pendingAutoAction is the dashboard's twin of jobstate.PendingAutoAction
+ * (owner ruling R-D2): the automatic action the Twitch monitor will take for
+ * an Error row — "auto_mux" once its broadcast is confirmed over (a row the
+ * unconfirmed-end latch marked), "auto_retry" when it is live again (the
+ * offline flap or an unreachable probe, before any segment, retries left) —
+ * or "" for none. GET /api/jobs/{id} sends the Go answer as
+ * pendingAutoAction; the job list and the WebSocket send the row alone, so
+ * the rows derive it here. cmd/moombox's job-state parity test runs both
+ * against web/tests/fixtures/job-state-parity.json.
+ * @param {object|null} job
+ * @returns {"auto_mux"|"auto_retry"|""}
+ */
+export function pendingAutoAction(job) {
+  if (!job || job.platform !== "twitch" || job.status !== "Error") return "";
+  if (job.parkReason === "twitch_end_unconfirmed") return "auto_mux";
+  // A manual add writes no history row, so the monitor's recovery never
+  // reaches it (jobstate.PendingAutoAction); its end latch is still the mux's.
+  if (job.manuallyAdded) return "";
+  if (job.error !== TWITCH_OFFLINE_ERR_MSG && job.parkReason !== "twitch_unreachable") return "";
+  if (job.lastVideoSeq !== undefined && job.lastVideoSeq !== null) return "";
+  return (Number(job.autoRetryCount) || 0) < MAX_TWITCH_AUTO_RETRIES ? "auto_retry" : "";
+}
+
+/**
+ * pendingAutoActionText is the sentence both UIs show for a pending action
+ * (jobstate.AutoAction.Text): "" for none.
+ * @param {string} action
+ * @returns {string}
+ */
+export function pendingAutoActionText(action) {
+  if (action === "auto_mux") return "Muxes automatically once Twitch confirms the broadcast over, while the channel is monitored";
+  if (action === "auto_retry") return "Retries automatically if the broadcast is live again, while the channel is monitored";
+  return "";
+}
+
+/**
  * reinitializeDeletesText is the clause a Reinitialize confirm names what the
  * reset deletes with (owner decision PR-M1), from GET
  * /api/jobs/{id}/reinitialize/preview — or the sum of several, for a batch.
  * The Go twin is worker.ReinitializePreview.Summary, which the TUI's A I
  * confirm line reads: the same words, sizes as formatBytes writes them.
+ * A preview whose job waits on an automatic action (pendingAutoMux,
+ * pendingAutoRetry, owner ruling R-D2) leads with what the reset cancels:
+ * "cancels the pending automatic mux, and deletes …" (first, as the TUI line
+ * that is cut to the terminal's width puts it).
  * @param {{setAsideRecordings?: number, recordedParts?: number, recordedPartBytes?: number,
- *          stagedFiles?: number, stagedBytes?: number, importedChapters?: number}} p
+ *          stagedFiles?: number, stagedBytes?: number, importedChapters?: number,
+ *          pendingAutoMux?: number, pendingAutoRetry?: number}} p
  * @returns {string}
  */
 export function reinitializeDeletesText(p) {
@@ -1086,9 +1266,15 @@ export function reinitializeDeletesText(p) {
   if (n("recordedParts") > 0) parts.push(`${plural(n("recordedParts"), "recorded part", "recorded parts")} (${formatBytes(n("recordedPartBytes"))})`);
   if (n("stagedFiles") > 0) parts.push(`${plural(n("stagedFiles"), "staged file", "staged files")} (${formatBytes(n("stagedBytes"))})`);
   if (n("importedChapters") > 0) parts.push(plural(n("importedChapters"), "imported chapter", "imported chapters"));
-  if (parts.length === 0) return "deletes nothing recorded";
-  if (parts.length === 1) return `deletes ${parts[0]}`;
-  return `deletes ${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+  let deletes;
+  if (parts.length === 0) deletes = "deletes nothing recorded";
+  else if (parts.length === 1) deletes = `deletes ${parts[0]}`;
+  else deletes = `deletes ${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+  const pending = (count, one, many) => (count === 1 ? `the pending automatic ${one}` : `${count} pending automatic ${many}`);
+  const cancels = [];
+  if (n("pendingAutoMux") > 0) cancels.push(pending(n("pendingAutoMux"), "mux", "muxes"));
+  if (n("pendingAutoRetry") > 0) cancels.push(pending(n("pendingAutoRetry"), "retry", "retries"));
+  return cancels.length ? `cancels ${cancels.join(" and ")}, and ${deletes}` : deletes;
 }
 
 /**
@@ -1097,7 +1283,8 @@ export function reinitializeDeletesText(p) {
  * @returns {object}
  */
 export function sumReinitializePreviews(previews) {
-  const keys = ["setAsideRecordings", "recordedParts", "recordedPartBytes", "stagedFiles", "stagedBytes", "importedChapters"];
+  const keys = ["setAsideRecordings", "recordedParts", "recordedPartBytes", "stagedFiles", "stagedBytes", "importedChapters",
+    "pendingAutoMux", "pendingAutoRetry"];
   const out = Object.fromEntries(keys.map((k) => [k, 0]));
   for (const p of previews) for (const k of keys) out[k] += Number(p?.[k]) || 0;
   return out;

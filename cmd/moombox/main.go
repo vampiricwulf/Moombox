@@ -219,11 +219,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	defer cancel()
 
 	s := &runState{
-		ctx:              ctx,
-		cancel:           cancel,
-		configPath:       configPath,
-		useTUI:           useTUI,
-		stdoutIsTerminal: isatty.IsTerminal(os.Stdout.Fd()),
+		ctx:                  ctx,
+		cancel:               cancel,
+		configPath:           configPath,
+		useTUI:               useTUI,
+		stdoutIsTerminal:     isatty.IsTerminal(os.Stdout.Fd()),
+		admissionHoldsResync: make(chan struct{}, 1),
 	}
 	catchStopSignals(stopSignals(), s.stopOnSignal)
 
@@ -666,6 +667,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			}, updateCheckTiming{initialDelay: 5 * time.Second, period: 24 * time.Hour, poll: time.Minute})
 		}()
 	}
+
+	// The backlog scheduler's holds, pushed to both UIs as they change.
+	go s.runAdmissionHoldsPush(ctx, s.dlWorker.AdmissionHoldsChanged(), s.dlWorker.AdmissionHolds, wsHub)
 
 	// Periodic memory + disk usage logging (every 2 minutes) for diagnostics.
 	// Matches TS: process.memoryUsage() logging with heap delta tracking.

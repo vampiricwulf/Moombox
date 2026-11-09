@@ -26,6 +26,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobfilter"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
@@ -62,6 +63,13 @@ type jobWithStaging struct {
 	// filled or kept and why (worker.TwitchGapFillStateOf). Absent for a job
 	// that has none.
 	GapFill *worker.GapFillState `json:"gapFill,omitempty"`
+	// PendingAutoAction is the automatic action the Twitch monitor will take
+	// for this row (jobstate.PendingAutoAction, owner ruling R-D2):
+	// "auto_mux" once the broadcast is confirmed over, "auto_retry" when it
+	// is live again; absent when none. Derived from the row, never stored.
+	// The job list and the WebSocket carry the row alone, so the dashboard's
+	// rows derive it with utils.js pendingAutoAction, the same table.
+	PendingAutoAction jobstate.AutoAction `json:"pendingAutoAction,omitempty"`
 }
 
 // enrichJob adds computed staging fields to a job response.
@@ -76,6 +84,8 @@ func enrichJob(db *database.Database, job *database.Job, stagingBase string) job
 		UnmuxedParts:    jobverbs.MuxNeedsUnmuxedParts(job.Status) && worker.HasUnmuxedParts(db, stagingBase, job.ID),
 		MuxGaps:         worker.ScanMuxGaps(stagingBase, job.ID),
 		GapFill:         worker.TwitchGapFillStateOf(db, job),
+
+		PendingAutoAction: jobstate.PendingAutoAction(job),
 	}
 }
 
@@ -1843,6 +1853,12 @@ type StatusRouteDeps struct {
 	// GetChannelHealth returns per-channel monitor health (last check, last
 	// error, consecutive failures) keyed by platform ("youtube"/"twitch").
 	GetChannelHealth func() map[string]any
+	// GetAdmissionHolds is the backlog scheduler's hold snapshot
+	// (worker.DownloadWorker.AdmissionHolds, owner ruling R-D3), sent as the
+	// additive admissionHolds field: what the dashboard's Queued rows show in
+	// place of a bare "Waiting in queue...", and what turns its disk gauge
+	// to "holding". The WebSocket's admission_holds frame pushes each change.
+	GetAdmissionHolds func() jobstate.AdmissionHolds
 }
 
 // hostUTCOffsetMinutes is the host's zone offset from UTC right now, in
@@ -1922,6 +1938,9 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 		}
 		if deps.GetChannelHealth != nil {
 			resp["channelHealth"] = deps.GetChannelHealth()
+		}
+		if deps.GetAdmissionHolds != nil {
+			resp["admissionHolds"] = deps.GetAdmissionHolds()
 		}
 
 		// BotGuard sidecar liveness. ABSENT (not false) when nothing was ever

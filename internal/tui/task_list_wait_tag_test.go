@@ -32,6 +32,10 @@ func TestNetworkWaitRendersAsWait(t *testing.T) {
 		{"the engine's outage wait", "Connection lost - reconnecting... (5s)", "⋯ wait ", true},
 		{"processJob's network wait", "Waiting for network connectivity... (1m 20s)", "⋯ wait ", true},
 		{"the pre-roll ad wait", "Waiting out YouTube's pre-roll ad... (15s left)", "⋯ wait ", true},
+		// A Downloading row reset from an interrupted mux at boot can queue for
+		// a VOD slot; its line used to carry no marker and showed the 45%.
+		{"the download-slot wait", "Waiting for a download slot... (3m)", "⋯ wait ", true},
+		{"the slot wait's old bare line", "Waiting for a download slot...", "45% ", false},
 		{"a segment counter", "(V: 1234/1300 A: 1234/1300)", "45% ", false},
 	} {
 		job := &database.Job{ID: tc.name, Status: database.StatusDownloading, Percent: 45, Progress: tc.progress}

@@ -189,7 +189,7 @@ func TestInsertedRowStartsWithoutAStreak(t *testing.T) {
 	t.Cleanup(w.Stop)
 	const id = "streak_stale"
 	w.noteBacklogRetry(id)
-	w.scheduler.holdUntil(id, time.Now().Add(time.Hour))
+	w.scheduler.holdUntil(id, time.Now().Add(time.Hour), 0)
 
 	ch := "UC_retry"
 	addSchedJob(t, db, &ch, id, database.StatusQueued, 1)

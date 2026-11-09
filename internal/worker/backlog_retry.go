@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 )
 
 const (
@@ -101,7 +102,7 @@ func (w *DownloadWorker) requeueBacklog(job *database.Job, err error, what strin
 		return false, fmt.Errorf("%w (gave up after %d retries)", err, backlogRetryLimit)
 	}
 	delay := backlogRetryBackoff << (attempt - 1)
-	if !w.backToQueued(job, delay) {
+	if !w.backToQueued(job, delay, attempt) {
 		return false, err
 	}
 	w.logger.Warn(what,
@@ -123,7 +124,7 @@ func (w *DownloadWorker) requeueBacklogAfterRateLimit(job *database.Job, err err
 	if w.scheduler == nil || CookieResumeStatus(job) != database.StatusQueued {
 		return false, err
 	}
-	if !w.backToQueued(job, rateLimitBackoff) {
+	if !w.backToQueued(job, rateLimitBackoff, 0) {
 		return false, err
 	}
 	w.logger.Warn("YouTube rate-limited the backlog VOD's fetch; back to Queued, retried in about an hour (not counted against its retries)",
@@ -133,14 +134,15 @@ func (w *DownloadWorker) requeueBacklogAfterRateLimit(job *database.Job, err err
 
 // backToQueued is the requeue itself, once a caller has decided on it: the
 // job's slots released and its row back in Queued, held from re-admission
-// for delay. Reports whether it happened.
+// for delay. attempt is the retry attempt the hold is for, 0 for a
+// rate-limit requeue (Scheduler.ownHold). Reports whether it happened.
 //
 // The hold is placed BEFORE the status write, so no sweep can see the row
 // Queued and unheld; the slots are released before it, so the next download
 // does not wait for this run's exit.
-func (w *DownloadWorker) backToQueued(job *database.Job, delay time.Duration) bool {
+func (w *DownloadWorker) backToQueued(job *database.Job, delay time.Duration, attempt int) bool {
 	w.queue.ReleaseSlots(job.ID)
-	w.scheduler.holdUntil(job.ID, time.Now().Add(delay))
+	w.scheduler.holdUntil(job.ID, time.Now().Add(delay), attempt)
 	// Never over an operator's Cancel, which the scheduler would then have
 	// admitted again — the job downloading after all: not when one flagged
 	// this run before the requeue settled (JobQueue.settle), and not over a
@@ -155,6 +157,51 @@ func (w *DownloadWorker) backToQueued(job *database.Job, delay time.Duration) bo
 		return false
 	}
 	return true
+}
+
+// BacklogRetryState is jobID's place in its retry streak and its own hold:
+// the retry attempt its hold was placed for (0 for a hold a rate-limit
+// requeue placed, which the streak does not count, whatever the streak
+// stands at — Scheduler.ownHold), the budget, and when the scheduler may
+// admit it again. ok is false when no hold of its own stands at now.
+// Read-only, for both UIs' Queued-row line (owner ruling R-D3); the streak
+// itself lives in memory, so a restart forgets it, by design.
+func (w *DownloadWorker) BacklogRetryState(jobID string, now time.Time) (hold jobstate.BacklogHold, ok bool) {
+	if w.scheduler == nil {
+		return hold, false
+	}
+	own, held := w.scheduler.Holds(now).Jobs[jobID]
+	if !held {
+		return hold, false
+	}
+	return jobstate.BacklogHold{Attempt: own.Attempt, Of: backlogRetryLimit, Until: own.Until}, true
+}
+
+// AdmissionHolds is the snapshot both UIs show on Queued rows (owner ruling
+// R-D3): the scheduler's holds (Scheduler.Holds), each held row's attempt
+// the one its hold was placed for, with the retry budget filled in. The zero
+// value when the worker has no scheduler.
+func (w *DownloadWorker) AdmissionHolds() jobstate.AdmissionHolds {
+	if w.scheduler == nil {
+		return jobstate.AdmissionHolds{}
+	}
+	h := w.scheduler.Holds(time.Now())
+	for id, own := range h.Jobs {
+		own.Of = backlogRetryLimit
+		h.Jobs[id] = own
+	}
+	return h
+}
+
+// AdmissionHoldsChanged is signalled whenever AdmissionHolds may answer
+// differently (Scheduler.noteHoldsChanged); cmd/moombox drains it and pushes
+// the new snapshot to the dashboard (admission_holds) and the TUI. nil with
+// no scheduler.
+func (w *DownloadWorker) AdmissionHoldsChanged() <-chan struct{} {
+	if w.scheduler == nil {
+		return nil
+	}
+	return w.scheduler.holdsChanged
 }
 
 // noteBacklogRetry counts one more consecutive requeue for jobID and returns

@@ -363,7 +363,7 @@ func TestCaptchaAlertIsTheWorkersAndItsProcessors(t *testing.T) {
 }
 
 // TestCaptchaWaitLineCarriesTheWaitMarker pins the cross-layer contract the
-// TUI reads (internal/tui isWaitProgress) for the captcha's line, as
+// TUI reads (jobstate.IsWaitLine, which the TUI reads) for the captcha's line, as
 // TestRateLimitWaitLineCarriesTheWaitMarker does for the rate limit's.
 //
 // Mutant: drop the marker from captchaWaitLine — both checks fail.

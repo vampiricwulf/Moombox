@@ -13,6 +13,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/stats"
 	"github.com/vampiricwulf/Moombox/internal/ytdlpplugin"
 )
@@ -425,6 +426,14 @@ type (
 		Text string
 	}
 )
+
+// AdmissionHoldsMsg carries the backlog scheduler's hold snapshot
+// (worker.DownloadWorker.AdmissionHolds, owner ruling R-D3) each time it
+// changes: what Queued rows show in place of a bare wait, and what turns the
+// status bar's disk reading to "holding" while the disk gate holds.
+type AdmissionHoldsMsg struct {
+	Holds jobstate.AdmissionHolds
+}
 
 // ConnectivityMsg is sent when internet connectivity state changes.
 type ConnectivityMsg struct {
@@ -846,6 +855,14 @@ type App struct {
 	// /api/jobs/{id}/logs — for the O L overlay; nil deletes the chord.
 	OnGetJobLogs func(jobID string) []string
 
+	// OnAdmissionHoldsResync asks the holds push to send the TUI the current
+	// hold snapshot again. Init calls it (as a command, so once the program
+	// runs and Send delivers): a change between the pre-Run seed
+	// (SetAdmissionHolds) and Run went through Send while it was a no-op and
+	// was lost. The push goroutine sends it, so it stays in order with every
+	// later change. nil sends nothing.
+	OnAdmissionHoldsResync func()
+
 	// FFmpeg check callbacks
 	OnCheckFFmpeg    func(path string) (bool, string, string)                                   // check if ffmpeg path is valid → (valid, version, warning)
 	OnCheckPrereqs   func() (bool, bool)                                                        // returns (chocoAvail, wingetAvail)
@@ -948,6 +965,15 @@ func (a *App) SetInternalToken(token string) {
 // other pre-run Set* on this type.
 func (a *App) SetSidecarDown(down bool) {
 	a.statusBar.sidecarDown = down
+}
+
+// SetAdmissionHolds applies the backlog scheduler's hold snapshot to the
+// Queued rows, the details pane and the disk indicator: before Run as the
+// seed (Send is a no-op until then), and for every AdmissionHoldsMsg after.
+func (a *App) SetAdmissionHolds(h jobstate.AdmissionHolds) {
+	a.taskList.SetAdmissionHolds(h)
+	a.details.SetAdmissionHolds(h)
+	a.statusBar.SetDiskHeld(h.DiskHeld)
 }
 
 // SetOffline seeds the status bar's OFFLINE alert before Run.
@@ -1095,7 +1121,21 @@ func (a *App) Init() tea.Cmd {
 	// buffered, and statusMap is empty, so none of them has work to do; the
 	// first JobsUpdateMsg (initial snapshot) starts the progress loop if any
 	// job is live.
-	return tea.Batch(a.tick(), a.listenForUpdates(), tea.RequestBackgroundColor)
+	return tea.Batch(a.tick(), a.listenForUpdates(), tea.RequestBackgroundColor, a.admissionHoldsResyncCmd())
+}
+
+// admissionHoldsResyncCmd is Init's OnAdmissionHoldsResync call as a command:
+// commands run once the program's loop does, so the snapshot the push sends
+// back is delivered. nil without the hook.
+func (a *App) admissionHoldsResyncCmd() tea.Cmd {
+	fn := a.OnAdmissionHoldsResync
+	if fn == nil {
+		return nil
+	}
+	return safeCmd(func() tea.Msg {
+		fn()
+		return nil
+	})
 }
 
 // ensureMarqueeTicking starts the marquee animation loop when a visible title

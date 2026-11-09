@@ -13,7 +13,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -70,6 +70,12 @@ export class MoomboxApp {
     this.autoCookieReloginRequired = null;
     // Tri-state; see loadStatus. null = the server has no opinion.
     this.sidecarHealthy = null;
+    // The backlog scheduler's holds (owner ruling R-D3): /api/status, the
+    // initial_state snapshot and each admission_holds frame. null until read.
+    this.admissionHolds = null;
+    // One-shot timer for the earliest future hold end in admissionHolds: a
+    // row's own hold runs out with no frame to say so (setAdmissionHolds).
+    this._holdExpiryTimer = null;
     // The server's UTC offset in minutes, from /api/setup/status at boot and
     // /api/status after; null until read.
     this.serverUtcOffsetMinutes = null;
@@ -675,6 +681,7 @@ export class MoomboxApp {
           this._uptimeSeconds = status.uptime;
           this._uptimeCapturedAt = Date.now();
         }
+        if (status.admissionHolds) this.setAdmissionHolds(status.admissionHolds);
         if (status.disk) this.stats.updateDiskIndicator(status.disk);
         this.updates.updateVersionIndicator();
         this.updateStatusBar();
@@ -1266,6 +1273,10 @@ export class MoomboxApp {
         this.details._preserveStagingFields([...this.jobs, ...this.archivedJobs], p.jobs || []);
         this.jobs = p.jobs || [];
         this.logPanel.setSnapshot(p.logs || [], p.logSeq);
+        // Through setAdmissionHolds, not a bare assignment: the snapshot may
+        // close or open the disk gate a disconnect missed, and the gauge and
+        // indicator read it (stats.onAdmissionHolds).
+        if (p.admissionHolds) this.setAdmissionHolds(p.admissionHolds);
         this.nextFeedCheck = p.nextFeedCheck || 0;
         this.nextDecapiCheck = p.nextDecapiCheck || 0;
         this.nextTwitchCheck = p.nextTwitchCheck || 0;
@@ -1561,6 +1572,10 @@ export class MoomboxApp {
         this.stats.updateDiskIndicator(p);
         break;
 
+      case "admission_holds":
+        this.setAdmissionHolds(p);
+        break;
+
       case "backfill_status":
         this.handleBackfillStatus(p);
         break;
@@ -1589,6 +1604,69 @@ export class MoomboxApp {
         this._lastPong = Date.now();
         break;
     }
+  }
+
+  /**
+   * setAdmissionHolds stores the backlog scheduler's hold snapshot and
+   * redraws what reads it: each Queued row's line (formatProgress), an open
+   * job dialog's progress row when that job is Queued, and the disk gauge and
+   * indicator ("holding").
+   */
+  setAdmissionHolds(holds) {
+    this.admissionHolds = holds || null;
+    this._redrawQueuedHolds();
+    this.stats.onAdmissionHolds();
+  }
+
+  /**
+   * _redrawQueuedHolds rewrites each Queued row's line and an open Queued
+   * job's dialog from admissionHolds at the current time, then arms a
+   * one-shot timer for the earliest hold end still ahead. A row's own hold
+   * (its retry backoff, a rate-limit requeue) or the YouTube rate limit runs
+   * out with no admission_holds frame while the slots stay full; the timer
+   * is what turns "Retry 1 of 3 at 14:05" into "Waiting in queue..." then,
+   * as the TUI's per-second render does. Re-armed on every holds change.
+   */
+  _redrawQueuedHolds() {
+    for (const job of this.jobs) {
+      if (job.status !== "Queued") continue;
+      const cell = document.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"] .job-progress-text`);
+      if (!cell) continue;
+      const html = this.formatProgressHtml(job);
+      if (cell.dataset.progress !== html) {
+        cell.innerHTML = html;
+        cell.dataset.progress = html;
+      }
+      cell.title = this.formatProgress(job);
+    }
+    // An open dialog on a Queued job reads the holds too (its progress row),
+    // as the TUI's details pane does; its own job_update may be far off.
+    const open = this.selectedJobId ? this.jobs.find((j) => j.id === this.selectedJobId) : null;
+    if (open?.status === "Queued") this.details.updateJobDetails(open);
+    this._armHoldExpiry();
+  }
+
+  _armHoldExpiry() {
+    clearTimeout(this._holdExpiryTimer);
+    this._holdExpiryTimer = null;
+    const holds = this.admissionHolds;
+    if (!holds) return;
+    const now = Date.now();
+    let next = Infinity;
+    const consider = (t) => {
+      const ms = t ? Date.parse(t) : NaN;
+      if (ms > now && ms < next) next = ms;
+    };
+    consider(holds.rateLimitedUntil);
+    for (const h of Object.values(holds.jobs || {})) consider(h?.until);
+    if (next === Infinity) return;
+    // +1 ms: a hold holds while now < until, so the redraw lands just past
+    // it. Capped at setTimeout's 2^31-1 ms limit; an early fire re-arms.
+    const delay = Math.min(next - now + 1, 2 ** 31 - 1);
+    this._holdExpiryTimer = setTimeout(() => {
+      this._holdExpiryTimer = null;
+      this._redrawQueuedHolds();
+    }, delay);
   }
 
   handleConnectivityChange(payload) {
@@ -2470,7 +2548,7 @@ export class MoomboxApp {
           <sl-badge class="status ${this.escapeHtml(statusClass)}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
         </div>
         <div class="job-progress" role="cell">
-          <div class="job-progress-text" ${job.status === "Upcoming" && job.lastRecheckAt ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(this.formatProgressTooltip(job) || progress)}">${progressHtml}</div>
+          <div class="job-progress-text" ${this.upcomingShowsLastCheck(job) ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(this.formatProgressTooltip(job) || progress)}">${progressHtml}</div>
           ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${this.escapeHtml(percent)}"></sl-progress-bar>` : ""}
         </div>
         <div class="job-quick-actions" role="cell">${actionsHtml}</div>
@@ -2562,7 +2640,7 @@ export class MoomboxApp {
       if (progressText.title !== tooltip) {
         progressText.title = tooltip;
       }
-      if (job.status === "Upcoming" && job.lastRecheckAt) {
+      if (this.upcomingShowsLastCheck(job)) {
         progressText.dataset.timestamp = job.lastRecheckAt;
         progressText.dataset.timestampPrefix = "Last check: ";
       } else {
@@ -2595,8 +2673,25 @@ export class MoomboxApp {
     // recreating sl-icon-button shadow DOM elements on every progress update.
   }
 
+  /**
+   * upcomingShowsLastCheck: an Upcoming row's progress cell is the
+   * "Last check: <relative>" the timestamp refresher rewrites only when no
+   * wait line is up and the row is a broadcast being waited for (owner
+   * ruling R-D1). The card template and updateJobCard stamp data-timestamp
+   * on exactly these rows, so the refresher never writes over a wait line.
+   */
+  upcomingShowsLastCheck(job) {
+    return job.status === "Upcoming" && !!job.lastRecheckAt && !isWaitLine(job.progress) && !isAwaitingProcessing(job);
+  }
+
   formatProgress(job) {
     if (job.status === "Upcoming") {
+      // A wait the worker is in — a download slot, a rate limit or captcha,
+      // the network — names itself in job.progress (owner ruling R-D1), and
+      // used to be hidden behind "Last check". Twitch's "Waiting for
+      // stream..." carries no wait marker and keeps the last-check time.
+      if (isWaitLine(job.progress)) return job.progress;
+      if (isAwaitingProcessing(job)) return "Awaiting processing";
       if (job.lastRecheckAt) {
         return `Last check: ${this.formatRelativeTime(job.lastRecheckAt)}`;
       }
@@ -2604,7 +2699,10 @@ export class MoomboxApp {
     }
 
     if (job.status === "Queued") {
-      return "Waiting in queue...";
+      // Why the scheduler is not admitting it — offline, the disk gate, the
+      // YouTube rate limit, its retry backoff — or "Waiting in queue..."
+      // (owner ruling R-D3; the TUI's details pane says the same).
+      return queuedHoldText(queuedHold(this.admissionHolds, job));
     }
 
     if (job.status === "Live" || job.status === "Downloading") {
@@ -2647,7 +2745,13 @@ export class MoomboxApp {
     if (job.status === "Error") {
       const errorText = job.error || "Error";
       const truncated = errorText.length > 50 ? errorText.substring(0, 50) + "…" : errorText;
-      return `<span class="job-error-text" title="${this.escapeHtml(errorText)}" data-full="${this.escapeHtml(errorText)}" data-short="${this.escapeHtml(truncated)}">${this.escapeHtml(truncated)}</span>`;
+      // An Error row the Twitch monitor will mux or retry by itself says so
+      // ahead of its error (owner ruling R-D2; the TUI's "⟳ mux" tag).
+      const action = pendingAutoAction(job);
+      const auto = action
+        ? `<span class="job-auto-action" title="${this.escapeHtml(pendingAutoActionText(action))}">${action === "auto_mux" ? "⟳ Auto-mux pending" : "⟳ Auto-retry pending"}</span> `
+        : "";
+      return `${auto}<span class="job-error-text" title="${this.escapeHtml(errorText)}" data-full="${this.escapeHtml(errorText)}" data-short="${this.escapeHtml(truncated)}">${this.escapeHtml(truncated)}</span>`;
     }
     return this.escapeHtml(this.formatProgress(job));
   }

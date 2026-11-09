@@ -18,6 +18,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/disk"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/redact"
@@ -155,11 +156,10 @@ func (op jobOp) IsResetVerb() bool {
 const heartbeatInterval = 60 * time.Second
 
 // MaxTwitchAutoRetries caps how many times the Twitch monitor's auto-recovery
-// will re-enqueue an errored "twitch channel is offline" job before giving up.
-// 2 retries (3 total attempts including the original) handles transient GQL
-// flaps measured in seconds without looping indefinitely on a persistent
-// issue. User-driven Reinit always resets this counter (see ReinitializeJob).
-const MaxTwitchAutoRetries = 2
+// will re-enqueue an errored Twitch live job before giving up
+// (jobstate.MaxTwitchAutoRetries, which jobstate.TwitchAutoRetryPending
+// reads). User-driven Reinit always resets this counter (see ReinitializeJob).
+const MaxTwitchAutoRetries = jobstate.MaxTwitchAutoRetries
 
 // logger is the anonymous interface for logging — intentionally not exported.
 // Each struct repeats this inline per CLAUDE.md convention.
@@ -870,6 +870,19 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 			job.Status = database.StatusDownloading
 		}
 		if ShouldProcess(job) {
+			// A wait line left by a process that died mid-wait: its writer's
+			// deferred clear never ran, and YouTube's waitForLive writes no
+			// progress of its own, so an Upcoming row would show the frozen
+			// wait (both UIs show an Upcoming row's wait line, owner ruling
+			// R-D1) for the whole re-run wait. No run of this process has
+			// started yet, so any wait line here is stale. Upcoming only: it is
+			// the one re-enqueued status whose run writes no progress before
+			// the wait ends; a Live or Downloading run overwrites its line
+			// itself, and until then the line is the last thing it did.
+			// Conditional on the status read, like every write decided on it.
+			if job.Status == database.StatusUpcoming && jobstate.IsWaitLine(job.Progress) {
+				w.db.UpdateJobFieldsIf(job.ID, job.Status, map[string]any{"progress": ""})
+			}
 			w.queue.Enqueue(job.ID, job.Status)
 		}
 	}
@@ -948,9 +961,11 @@ func (w *DownloadWorker) pollForJobs(ctx context.Context) {
 // Returns false only when ctx was cancelled while waiting.
 //
 // A VOD that has to queue says so in its progress line for the length of the
-// wait (vodSlotWaitProgress), and the line is cleared however the wait ends —
-// left behind, a cancelled row would go on claiming it was queueing. One that
-// finds a slot free writes nothing.
+// wait (vodSlotWaitLine, rewritten every vodSlotWaitRefresh with the time
+// waited), and the line is cleared however the wait ends — left behind, a
+// cancelled row would go on claiming it was queueing. The refresher has
+// stopped before the clear is written, so no late rewrite outlives it. One
+// that finds a slot free writes nothing.
 func (w *DownloadWorker) acquireDownloadSlot(ctx context.Context, jobID string, isVod bool) bool {
 	if !isVod {
 		return true
@@ -958,10 +973,35 @@ func (w *DownloadWorker) acquireDownloadSlot(ctx context.Context, jobID string, 
 	if w.queue.TryAcquireDownloadSlot(jobID) {
 		return true
 	}
-	if w.db != nil { // nil only in a zero-value test worker
-		w.db.UpdateJobFields(jobID, map[string]any{"progress": vodSlotWaitProgress})
-		defer w.db.UpdateJobFields(jobID, map[string]any{"progress": ""})
+	if w.db == nil { // nil only in a zero-value test worker
+		return w.queue.AcquireDownloadSlot(ctx, jobID)
 	}
+	since := time.Now()
+	w.db.UpdateJobFields(jobID, map[string]any{"progress": vodSlotWaitLine(0)})
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		defer func() {
+			if r := recover(); r != nil {
+				w.logger.Error("download-slot wait refresher panicked", "jobID", jobID, "panic", fmt.Sprint(r))
+			}
+		}()
+		t := time.NewTicker(vodSlotWaitRefresh)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				w.db.UpdateJobFields(jobID, map[string]any{"progress": vodSlotWaitLine(time.Since(since))})
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-stopped
+		w.db.UpdateJobFields(jobID, map[string]any{"progress": ""})
+	}()
 	return w.queue.AcquireDownloadSlot(ctx, jobID)
 }
 
@@ -1995,7 +2035,7 @@ func cookieRefreshWorthAttempting(err error) bool {
 // (AutoMuxEndedBroadcast, D-T4); and a Twitch live job whose stream
 // processing never reached Twitch (twitchUnreachableError) as
 // ParkReasonTwitchUnreachable, a marker the Twitch monitor's recovery keys on
-// (isRecoverableTwitchError).
+// (jobstate.TwitchAutoRetryPending).
 func parkReasonForError(err error) database.ParkReason {
 	if !cookiesStatusError(err) {
 		if errors.Is(err, ErrTwitchEndUnconfirmed) {
@@ -2121,14 +2161,16 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// shape the recovery predicate rejects) DOES notify: previously any
 	// AutoRetryCount>0 was suppressed, so the operator couldn't distinguish
 	// "still retrying" from "gave up for good" — the exact moment that needs
-	// attention. retryLikely mirrors monitor.isRecoverableTwitchError
-	// (KEEP IN SYNC — the import would be cyclic): Error status, the exact
-	// offline-flap message or the unreachable marker, no delivered segments,
-	// budget remaining.
-	retryLikely := status == database.StatusError &&
-		(errMsg == TwitchOfflineErrMsg || reason == database.ParkReasonTwitchUnreachable) &&
-		job.LastVideoSeq == nil &&
-		job.AutoRetryCount < MaxTwitchAutoRetries
+	// attention. retryLikely is the monitor's own recovery predicate
+	// (jobstate.TwitchAutoRetryPending), asked of the row this failure just
+	// wrote: a copy of the job carrying the new status, error and park
+	// reason. Its end_unconfirmed exclusion changes no answer here — the
+	// latch's error is its cause's text, a download failure, never
+	// TwitchOfflineErrMsg — and is pinned with the rest by
+	// jobstate.TestBothRecoveryCallersKeepTheirAnswers.
+	written := *job
+	written.Status, written.Error, written.ParkReason = status, errMsg, reason
+	retryLikely := jobstate.TwitchAutoRetryPending(&written)
 	nonActionable := errors.Is(err, ErrNonActionable)
 	suppressNotification := nonActionable || (job.AutoRetryCount > 0 && retryLikely)
 
