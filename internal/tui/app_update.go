@@ -295,14 +295,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(a.listenForUpdates(), a.scheduleLogFlush())
 
 	case CheckTimersMsg:
-		if !msg.NextFeedCheck.IsZero() {
-			a.taskList.NextFeedCheck = msg.NextFeedCheck
-		}
-		if !msg.NextDecapiCheck.IsZero() {
-			a.taskList.NextDecapiCheck = msg.NextDecapiCheck
-		}
-		if !msg.NextTwitchCheck.IsZero() {
-			a.taskList.NextTwitchCheck = msg.NextTwitchCheck
+		// Unconditional: a zero Next is "no check scheduled" and blanks the
+		// timer, as the Web's "--" does.
+		switch msg.Monitor {
+		case MonitorFeed:
+			a.taskList.NextFeedCheck = msg.Next
+		case MonitorDecapi:
+			a.taskList.NextDecapiCheck = msg.Next
+		case MonitorTwitch:
+			a.taskList.NextTwitchCheck = msg.Next
 		}
 		return a, a.listenForUpdates()
 

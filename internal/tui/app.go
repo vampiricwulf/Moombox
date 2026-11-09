@@ -48,10 +48,11 @@ type (
 	TrimsChangedMsg struct{ Job *database.Job }
 	JobsUpdateMsg   struct{ Jobs []*database.Job }
 	LogBatchMsg     struct{ Lines []string }
-	CheckTimersMsg  struct {
-		NextFeedCheck   time.Time
-		NextDecapiCheck time.Time
-		NextTwitchCheck time.Time
+	// CheckTimersMsg sets one monitor's header countdown. A zero Next clears
+	// it (the monitor has no channels); see MonitorNextCheckTime.
+	CheckTimersMsg struct {
+		Monitor MonitorKind
+		Next    time.Time
 	}
 	CookieStatusMsg struct {
 		YT       CookieStatus

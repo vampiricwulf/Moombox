@@ -1037,54 +1037,30 @@ func (s *runState) runTUI() {
 	// Forward monitor schedule events to TUI via the atomic pointers installed
 	// by monitor_callbacks.wireMonitorCallbacks. Store() is race-free against
 	// the monitor goroutines' Load()s.
-	makeTUISchedule := func(makeMsg func(time.Time) tui.CheckTimersMsg) func(int64) {
+	// tui.MonitorNextCheckTime decodes the ms value: -1 = "checking now" (the
+	// header's "…"), 0 = no channels (a blank timer, the Web's "--"), else
+	// the scheduled instant. A zero Next clears the TUI's timer.
+	makeTUISchedule := func(kind tui.MonitorKind) func(int64) {
 		return func(nextCheckAt int64) {
-			// -1 = "checking now": forward the TUI's checking sentinel
-			// verbatim so the header can render "…" (a lossy time.Unix(-1)
-			// conversion would land near the epoch and read as "now").
-			var t time.Time
-			if nextCheckAt == tui.MonitorCheckingSentinelMs {
-				t = tui.MonitorCheckingTime()
-			} else {
-				t = time.Unix(nextCheckAt/1000, (nextCheckAt%1000)*int64(time.Millisecond))
-			}
 			select {
-			case checkTimersCh <- makeMsg(t):
+			case checkTimersCh <- tui.CheckTimersMsg{Monitor: kind, Next: tui.MonitorNextCheckTime(nextCheckAt)}:
 			default:
 			}
 		}
 	}
-	feedFn := makeTUISchedule(func(t time.Time) tui.CheckTimersMsg {
-		return tui.CheckTimersMsg{NextFeedCheck: t}
-	})
-	decapiFn := makeTUISchedule(func(t time.Time) tui.CheckTimersMsg {
-		return tui.CheckTimersMsg{NextDecapiCheck: t}
-	})
-	twitchFn := makeTUISchedule(func(t time.Time) tui.CheckTimersMsg {
-		return tui.CheckTimersMsg{NextTwitchCheck: t}
-	})
+	feedFn := makeTUISchedule(tui.MonitorFeed)
+	decapiFn := makeTUISchedule(tui.MonitorDecapi)
+	twitchFn := makeTUISchedule(tui.MonitorTwitch)
 	s.feedTUISchedule.Store(&feedFn)
 	s.decapiTUISchedule.Store(&decapiFn)
 	s.twitchTUISchedule.Store(&twitchFn)
 
 	// Send initial timer values — monitors fire OnSchedule during Start()
 	// before the TUI wrappers above are installed, so the TUI misses those.
-	for _, entry := range []struct {
-		getNext func() int64
-		makeMsg func(time.Time) tui.CheckTimersMsg
-	}{
-		{s.feedMon.GetNextCheckAt, func(t time.Time) tui.CheckTimersMsg { return tui.CheckTimersMsg{NextFeedCheck: t} }},
-		{s.decapiMon.GetNextCheckAt, func(t time.Time) tui.CheckTimersMsg { return tui.CheckTimersMsg{NextDecapiCheck: t} }},
-		{s.twitchMon.GetNextCheckAt, func(t time.Time) tui.CheckTimersMsg { return tui.CheckTimersMsg{NextTwitchCheck: t} }},
-	} {
-		if ms := entry.getNext(); ms > 0 {
-			t := time.Unix(ms/1000, (ms%1000)*int64(time.Millisecond))
-			select {
-			case checkTimersCh <- entry.makeMsg(t):
-			default:
-			}
-		}
-	}
+	// Through the same decode, so a check already running shows "…".
+	feedFn(s.feedMon.GetNextCheckAt())
+	decapiFn(s.decapiMon.GetNextCheckAt())
+	twitchFn(s.twitchMon.GetNextCheckAt())
 
 	// Wire cookie status to TUI. Parameter `auth` is the incoming status —
 	// named differently from `s` (receiver) to avoid the pre-refactor shadow.

@@ -20,3 +20,29 @@ func MonitorCheckingTime() time.Time { return monitorCheckingTime }
 // isMonitorChecking reports whether a check-time value is the checking
 // sentinel.
 func isMonitorChecking(t time.Time) bool { return t.Equal(monitorCheckingTime) }
+
+// MonitorNextCheckTime decodes a monitor's NextCheckAt (epoch ms) into the
+// TUI's time.Time model: MonitorCheckingSentinelMs becomes the checking
+// sentinel, 0 ("no channels", nothing scheduled) or any other non-positive
+// value the zero time — a blank timer, the Web's "--" — and anything else
+// the instant it names. time.UnixMilli(0) would be a real instant in the
+// past, which the header read as a green "now".
+func MonitorNextCheckTime(ms int64) time.Time {
+	switch {
+	case ms == MonitorCheckingSentinelMs:
+		return monitorCheckingTime
+	case ms <= 0:
+		return time.Time{}
+	default:
+		return time.UnixMilli(ms)
+	}
+}
+
+// MonitorKind names the monitor a CheckTimersMsg is about.
+type MonitorKind int
+
+const (
+	MonitorFeed MonitorKind = iota
+	MonitorDecapi
+	MonitorTwitch
+)

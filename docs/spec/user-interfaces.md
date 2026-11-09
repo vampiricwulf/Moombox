@@ -276,7 +276,7 @@ After a save the overlay re-reads the live config as a fresh `Open` would (`resy
 | `marquee.go` | Scrolling text animation for long strings that do not fit in available width. |
 | `text_input.go` | Custom text input component (extends bubbles). |
 | `progress_store.go` | Tracks download progress state for active jobs. |
-| `monitor_checking.go` | The "a check is running right now" sentinel (`MonitorCheckingSentinelMs`, rendered as `…`), kept distinct from "no channels" and from a real future timestamp. |
+| `monitor_checking.go` | The "a check is running right now" sentinel (`MonitorCheckingSentinelMs`, rendered as `…`), kept distinct from "no channels" and from a real future timestamp. `MonitorNextCheckTime` is the one decode of a monitor's epoch-ms `NextCheckAt`: `-1` → the checking sentinel, `0` (no channels) → the zero time, which blanks that header timer as the Web's `--` does, anything else → the instant. Each `CheckTimersMsg` names one `MonitorKind` and is applied unconditionally, so a zero `Next` clears a timer. |
 
 **Platform-specific pairs** — each is a build-tagged two-file pair, so exactly one of each compiles.
 
