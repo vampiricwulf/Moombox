@@ -2,7 +2,7 @@
 
 > **Last verified:** 2026-10-16
 >
-> The Package Scale table and the Totals were regenerated on 2026-10-16, after Wave 30 was integrated: the table with the script below, the Totals by the same count (`wc -l` per file) over the tracked files (`git ls-files`; `web/public/` less `vendor/`). Since the 2026-10-10 pass two packages were added — `internal/treeguard`, the test-only guard every tested package's `TestMain` runs through, and `internal/childproc`, which starts every FFmpeg and ffprobe tied to the process that runs it — and none removed. `internal/engine` (20 to 23), `internal/worker` (to 56), `internal/notifications` (to 13) and `internal/connectivity` (3 to 4) gained source files this round, and `cmd/moombox` 6 (26 to 32: the stop signals, the crash output capture, the daemon record, the outage alerts). The Runtime, Test Baseline (the package count and the two packages without tests) and Key Dependencies sections were checked against the tree the same day. On 2026-10-30 `internal/httpx/httpxtest` was added, with its row and its share of the Totals; the other rows are as of 2026-10-16.
+> The Package Scale table and the Totals were regenerated on 2026-10-16, after Wave 30 was integrated: the table with the script below, the Totals by the same count (`wc -l` per file) over the tracked files (`git ls-files`; `web/public/` less `vendor/`). Since the 2026-10-10 pass two packages were added — `internal/treeguard`, the test-only guard every tested package's `TestMain` runs through, and `internal/childproc`, which starts every FFmpeg and ffprobe tied to the process that runs it — and none removed. `internal/engine` (20 to 23), `internal/worker` (to 56), `internal/notifications` (to 13) and `internal/connectivity` (3 to 4) gained source files this round, and `cmd/moombox` 6 (26 to 32: the stop signals, the crash output capture, the daemon record, the outage alerts). The Runtime, Test Baseline (the package count and the two packages without tests) and Key Dependencies sections were checked against the tree the same day. On 2026-10-30 `internal/httpx/httpxtest` was added, and on 2026-11-09 `internal/jobverbs`, each with its row and its share of the Totals and of the Test Baseline's package count; the other rows are as of 2026-10-16.
 >
 > These metrics are volatile — they drift as development continues. Update this file periodically.
 >
@@ -27,7 +27,7 @@
 
 ## Test Baseline
 
-- **Packages:** 42 in `go list ./...`. `go test -count=1 ./...` reports **40 ok / 0 fail**; the other two have no test files (`tools/sidecar-sig-probe`, `web`).
+- **Packages:** 43 in `go list ./...`. `go test -count=1 ./...` reports **41 ok / 0 fail**; the other two have no test files (`tools/sidecar-sig-probe`, `web`).
 - **Browser detection table:** `knownBrowsers` (`internal/cookies/autocookies_detect.go`) has **10 entries** — four Gecko, six Chromium. The full table with type keys is in [data-and-storage.md](data-and-storage.md) § Cookies.
 
 ## Key Dependencies
@@ -75,6 +75,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | redact/ | ~540 | 4 | 4 | One redaction rule per kind of secret for error text, log lines and notifications — a media URL's credentials (a googlevideo URL's client IP, signatures and GVS PO token in both its URL forms; the playback session a Twitch weaver playlist's or edge segment's path spells), a credential inside a URL |
 | connectivity/ | ~540 | 4 | 4 | Reachability monitor; gates stream-end verdicts during outages |
 | jobfilter/ | ~500 | 2 | 5 | Dashboard filter language (Go twin of `filter-parser.js`/`filter-engine.js`), used by the TUI's `/` filter box |
+| jobverbs/ | ~120 | 1 | 1 | One status predicate per job verb (Cancel, Resume, Reinitialize, Mux, Delete, Watched, Trim, chapter import) — called by the REST routes, the TUI and the worker; imports only `database` |
 | constants/ | ~360 | 1 | 3 | Hardcoded values (client configs, UAs, URLs) |
 | childproc/ | ~380 | 4 | 4 | FFmpeg and ffprobe started tied to the process that runs them (Pdeathsig on a locked thread on Linux, a kill-on-close Job Object of the child's own on Windows) |
 | ytdlpplugin/ | ~350 | 1 | 2 | yt-dlp PO-token plugin status/install — shared by the dashboard's Integrations card and the TUI's E Y overlay |
@@ -91,8 +92,8 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 ### Totals
 
 - **cmd/:** ~12,210 lines across 33 source files (32 in `cmd/moombox` — entry/launcher/adapters/wiring — plus the sign tool), plus 105 test files (~16,980 lines)
-- **internal/ packages:** ~147,960 lines across 365 source files in 36 packages
-- **Test code:** ~220,900 lines across 870 test files under `internal/` (`internal/docs`'s three included)
+- **internal/ packages:** ~148,080 lines across 366 source files in 37 packages
+- **Test code:** ~220,990 lines across 871 test files under `internal/` (`internal/docs`'s three included)
 - **Frontend:** ~23,840 lines across 27 files (~1,000 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 20 ES modules under `web/public/modules/` (`chat-timeline.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
 
 ## Entry Points
