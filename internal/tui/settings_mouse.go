@@ -58,8 +58,13 @@ func (m *SettingsModel) HandleMouse(msg tea.MouseMsg) {
 		return
 	}
 
-	// Click on header tabs (relY == 0)
+	// Click on header tabs (relY == 0). Ignored while a sub-editor is open,
+	// as Tab is: the key path routes every key to the editor, so neither can
+	// leave it half-finished behind another section.
 	if relY == 0 {
+		if m.subEditorActive() {
+			return
+		}
 		m.handleMouseTabClick(relX)
 		return
 	}
@@ -68,6 +73,17 @@ func (m *SettingsModel) HandleMouse(msg tea.MouseMsg) {
 	if relY >= 2 {
 		m.handleMouseContentClick(relX, relY-2)
 	}
+}
+
+// subEditorActive reports whether a sub-editor owns the keyboard: the channel
+// editor or removal prompt, the notification editor or its delete confirm,
+// or the security set/remove prompt. HandleKey routes every key to it, so Tab
+// cannot switch section and Esc/Enter answer it rather than the overlay;
+// HandleMouse ignores header-tab and Save/Return clicks for the same reason.
+func (m *SettingsModel) subEditorActive() bool {
+	return m.channelMode == "edit" || m.channelDeleteConf ||
+		m.notifMode == "edit" || m.notifDeleteConf ||
+		m.secMode != securityStatus
 }
 
 // handleMouseScroll adjusts scroll offset or list index.
@@ -197,7 +213,12 @@ func (m *SettingsModel) handleMouseContentClick(relX, contentY int) {
 	// Check for button clicks — position recorded during View() rendering.
 	buttonY := m.lastButtonContentY
 	if contentY == buttonY {
-		m.handleMouseButtonClick(relX)
+		// Save/Return would close the overlay over an open sub-editor —
+		// saving or dropping a half-typed channel, webhook or password —
+		// where the key path makes Esc/Enter answer the editor first.
+		if !m.subEditorActive() {
+			m.handleMouseButtonClick(relX)
+		}
 		return
 	}
 
