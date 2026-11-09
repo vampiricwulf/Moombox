@@ -294,10 +294,10 @@ Dependencies flow strictly downward. Lower-level packages never import higher-le
 The lists below are the `internal/` imports of each package as `go list -f '{{join .Imports " "}}' ./internal/<pkg>` prints them (regenerate the same way):
 
 - `cmd/moombox` imports everything (orchestrator): `bgutils`, `bgutils/sidecar`, `childproc`, `cipher`, `config`, `connectivity`, `cookies`, `database`, `engine`, `jobfilter`, `jobstate`, `logger`, `monitor`, `notifications`, `stats`, `tui`, `twitch`, `updater`, `utils`, `web`, `internal/web/routes`, `worker`, `youtube`
-- `internal/worker` imports: `bgutils`, `chat`, `childproc`, `cipher`, `config`, `connectivity`, `constants`, `database`, `disk`, `engine`, `httpx`, `jobstate`, `jobverbs`, `notifications`, `redact`, `twitch`, `utils`, `youtube`
+- `internal/worker` imports: `bgutils`, `chat`, `childproc`, `cipher`, `config`, `connectivity`, `constants`, `database`, `disk`, `engine`, `httpx`, `jobfilter` (the clip predicate, `IsClipJob`), `jobstate`, `jobverbs`, `notifications`, `redact`, `twitch`, `utils`, `youtube`
 - `internal/web/routes` imports: `bgutils`, `bgutils/sidecar`, `childproc` (the FFmpeg check and the import's ffprobe), `config`, `cookies`, `database`, `disk`, `engine` (the import's ffprobe path), `jobfilter`, `jobstate`, `jobverbs`, `notifications`, `stats`, `twitch`, `updater`, `utils`, `web`, `worker`, `ytdlpplugin`
 - `internal/web` imports: `config` only — the hub's `Broadcast*` methods take `any`, so the server, hub, auth and middleware never import the job types; the route handlers live in `internal/web/routes`
-- `internal/tui` imports: `config`, `constants`, `cookies`, `database`, `httpx`, `jobfilter`, `jobstate`, `jobverbs`, `notifications`, `stats`, `utils`, `ytdlpplugin` — NOT `web`: the TUI's HTTP calls use a plain `net/http` client carrying the internal token, and its live updates come straight from the database subscriptions
+- `internal/tui` imports: `config`, `constants`, `cookies`, `database`, `httpx`, `jobfilter`, `jobstate`, `jobverbs`, `notifications`, `stats`, `twitch` (the job-ID prefixes, `ClipJobIDPrefix` and `VodJobIDPrefix`), `utils`, `ytdlpplugin` — NOT `web`: the TUI's HTTP calls use a plain `net/http` client carrying the internal token, and its live updates come straight from the database subscriptions
 - `internal/monitor` imports: `config`, `database`, `httpx`, `jobstate`, `twitch`, `worker`
 - `internal/youtube` imports: `cipher`, `constants`, `cookies`, `httpx`, `utils`
 - `internal/twitch` imports: `constants`, `cookies`, `httpx`, `utils`

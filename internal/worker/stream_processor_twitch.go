@@ -450,7 +450,7 @@ func (sp *StreamProcessor) processTwitch(ctx context.Context, job *database.Job)
 		return &StreamProcessResult{ShouldDownload: false, Error: "could not determine Twitch channel login"}, nil
 	}
 
-	isVodJob := strings.HasPrefix(job.VideoID, "tw_v")
+	isVodJob := strings.HasPrefix(job.VideoID, twitch.VodJobIDPrefix)
 
 	if isVodJob {
 		// No login: a VOD is addressed by its own ID, and the login above is
@@ -477,7 +477,7 @@ func twitchVodFetchError(ctx context.Context, what string, err error) error {
 }
 
 func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.Job) (*StreamProcessResult, error) {
-	vodID := strings.TrimPrefix(job.VideoID, "tw_v")
+	vodID := strings.TrimPrefix(job.VideoID, twitch.VodJobIDPrefix)
 
 	vodInfo, err := sp.tw.GetVodInfo(ctx, vodID)
 	if err != nil {
@@ -1059,7 +1059,7 @@ func extractTwitchLoginFromJob(job *database.Job) string {
 		}
 		return strings.ToLower(remainder)
 	}
-	if strings.HasPrefix(id, "tw_v") {
+	if strings.HasPrefix(id, twitch.VodJobIDPrefix) {
 		return "" // VOD ID, not a login
 	}
 	if after, ok := strings.CutPrefix(id, "tw_"); ok {

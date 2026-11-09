@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/httpx"
+	"github.com/vampiricwulf/Moombox/internal/twitch"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -126,10 +127,10 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		} else if platform == "twitch" {
 			body["platform"] = "twitch"
 			// Detect clip vs VOD vs channel
-			if slug, ok := strings.CutPrefix(input, "tw_clip_"); ok {
+			if slug, ok := strings.CutPrefix(input, twitch.ClipJobIDPrefix); ok {
 				body["twitchType"] = "clip"
 				body["videoId"] = slug
-			} else if vodID, ok := strings.CutPrefix(input, "tw_v"); ok {
+			} else if vodID, ok := strings.CutPrefix(input, twitch.VodJobIDPrefix); ok {
 				body["twitchType"] = "vod"
 				body["videoId"] = vodID
 			} else {
@@ -194,9 +195,9 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 				return addVideoResultMsg{VideoID: input, Feedback: label, Warn: true}
 			}
 		} else if platform == "twitch" {
-			if strings.HasPrefix(input, "tw_clip_") {
+			if strings.HasPrefix(input, twitch.ClipJobIDPrefix) {
 				label = "Added Twitch clip to queue"
-			} else if strings.HasPrefix(input, "tw_v") {
+			} else if strings.HasPrefix(input, twitch.VodJobIDPrefix) {
 				label = "Added Twitch VOD to queue"
 			} else {
 				label = "Added Twitch channel to queue"

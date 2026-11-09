@@ -14,6 +14,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/jobfilter"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
@@ -32,16 +33,6 @@ import (
 // the ordinary finalize (muxAndFinalize: stream copy, thumbnail, metadata,
 // Finished). No chat is captured: a clip has none.
 
-// IsTwitchClipJob reports whether job is a clip job (its video ID carries
-// twitch.ClipJobIDPrefix).
-func IsTwitchClipJob(job *database.Job) bool {
-	if job == nil || job.Platform != "twitch" {
-		return false
-	}
-	_, ok := twitch.ClipSlugFromJobID(job.VideoID)
-	return ok
-}
-
 // RecordPastedClip enters a clip row an add path just created (POST
 // /api/jobs, `moombox add`) in the processing history, as the monitor's
 // OnClipFound does for the clips its sweep finds. The sweep of a channel
@@ -52,7 +43,7 @@ func IsTwitchClipJob(job *database.Job) bool {
 // once held for the monitor's clips only. A row of any other kind is left
 // out of the history, as every other manual add is.
 func RecordPastedClip(db *database.Database, job *database.Job) error {
-	if !IsTwitchClipJob(job) {
+	if !jobfilter.IsClipJob(job) {
 		return nil
 	}
 	return db.AddToHistory(job.ID)

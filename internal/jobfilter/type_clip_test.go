@@ -55,13 +55,17 @@ func TestTypeClipMatchesTheDashboard(t *testing.T) {
 		{twitch.ClipJobID("FaintLightGullWholeWheat"), "twitch"},
 		{"tw_v123456", "twitch"},
 		{"dQw4w9WgXcQ", "youtube"},
+		// Shapes no path writes, where both twins agree with the predicate
+		// the worker kept (K16): no slug, and a clip ID on another platform.
+		{twitch.ClipJobIDPrefix, "twitch"},
+		{twitch.ClipJobID("Slug"), "youtube"},
 	}
 	for query, want := range map[string][]bool{
-		"type:clip":                  {true, false, false},
-		"TYPE:Clip":                  {true, false, false},
-		"-type:clip":                 {false, true, true},
-		"type:clip|platform:youtube": {true, false, true},
-		"type:vod":                   {false, false, false},
+		"type:clip":                  {true, false, false, false, false},
+		"TYPE:Clip":                  {true, false, false, false, false},
+		"-type:clip":                 {false, true, true, true, true},
+		"type:clip|platform:youtube": {true, false, true, false, true},
+		"type:vod":                   {false, false, false, false, false},
 	} {
 		for i, j := range jobs {
 			tui := Match(Parse(query), &database.Job{ID: j.id, VideoID: j.id, Status: database.StatusFinished, Platform: j.platform})

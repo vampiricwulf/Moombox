@@ -304,7 +304,7 @@ func (s *Service) ReloadAuth() {
 // BuildJobID generates a job ID for a Twitch stream or VOD.
 func BuildJobID(streamOrVodID string, isVod bool) string {
 	if isVod {
-		return "tw_v" + streamOrVodID
+		return VodJobID(streamOrVodID)
 	}
 	return "tw_" + streamOrVodID
 }

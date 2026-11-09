@@ -15,6 +15,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobverbs"
+	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
 // recheckCookiesCmd is the work behind the R C chord: the in-process Go cookie
@@ -750,7 +751,7 @@ func streamURL(j *database.Job) string {
 	}
 	if j.Platform == "twitch" {
 		if j.IsVod {
-			vodID := strings.TrimPrefix(j.VideoID, "tw_v")
+			vodID := strings.TrimPrefix(j.VideoID, twitch.VodJobIDPrefix)
 			return "https://www.twitch.tv/videos/" + vodID
 		}
 		return ""

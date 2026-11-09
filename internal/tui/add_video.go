@@ -14,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -1205,7 +1206,7 @@ func extractMediaID(input string) (string, string) {
 	// current VOD ids are 10 digits, so "v" + 10 digits is 11 chars and
 	// would otherwise match the generic 11-char YouTube id pattern.
 	if len(input) >= 2 && len(input) <= 13 && input[0] == 'v' && isNumeric(input[1:]) {
-		return "tw_v" + input[1:], "twitch"
+		return twitch.VodJobID(input[1:]), "twitch"
 	}
 
 	// Try YouTube
@@ -1277,9 +1278,9 @@ func extractTwitchTarget(input string) (string, string) {
 	case utils.TwitchChannel:
 		return target.Value, "twitch"
 	case utils.TwitchVOD:
-		return "tw_v" + target.Value, "twitch"
+		return twitch.VodJobID(target.Value), "twitch"
 	case utils.TwitchClip:
-		return "tw_clip_" + target.Value, "twitch"
+		return twitch.ClipJobID(target.Value), "twitch"
 	case utils.TwitchVideosListing, utils.TwitchCollection:
 		return strings.TrimSpace(input), "twitch_listing"
 	}
