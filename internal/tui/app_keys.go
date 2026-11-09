@@ -458,7 +458,10 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 		// "/" starts search (not in chord system, not during active search input)
+		// The search box swallows keys until Enter/Esc, so an armed chord
+		// would outlive it and fire on the first key after; disarm it.
 		if key == "/" && !a.logs.IsSearching() {
+			a.cancelChord()
 			return a, a.logs.StartSearch()
 		}
 	}
@@ -475,6 +478,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 		if key == "/" && !a.taskList.IsSearching() {
+			a.cancelChord() // as on the log panel
 			return a, a.taskList.StartSearch()
 		}
 	}
@@ -492,22 +496,21 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// Also disarm any pending chord — leaving a confirm chord armed
 			// would let the next keypress fire the destructive action
 			// against the cursor job without its own confirmation.
-			a.chord = chordState{}
+			a.disarmChord()
 			a.clearFeedback()
 			return a, nil // consume the Esc, don't propagate
 		}
 		// Clear an active task-list search (box closed, query applied). The
-		// box-open case is already consumed by HandleSearchKey above.
+		// box-open case is already consumed by HandleSearchKey above. Every
+		// Esc disarms: returning here with a confirm armed let a lone D
+		// within the window delete the cursor job.
 		if a.focusedPanel == PanelTasks && a.taskList.ClearSearch() {
+			a.cancelChord()
 			a.updateSelectedJob()
 			return a, nil
 		}
 		// Also clear any active chord prefix on Esc
-		if a.chord.prefix != "" {
-			a.chord = chordState{}
-			a.clearFeedback()
-			return a, nil
-		}
+		a.cancelChord()
 		return a, nil
 	}
 
@@ -636,17 +639,28 @@ func (a *App) handleFilter() {
 	}
 }
 
+// disarmChord returns the chord machine to Idle. It is the one reset every
+// path uses (timeout, confirm, invalid key, Esc, "/"); it leaves the feedback
+// line alone, since most callers write their own next.
+func (a *App) disarmChord() { a.chord = chordState{} }
+
+// cancelChord disarms an armed chord and clears the prompt it left on the
+// feedback line. A no-op while idle, so it never wipes unrelated feedback.
+func (a *App) cancelChord() {
+	if a.chord.prefix == "" {
+		return
+	}
+	a.disarmChord()
+	a.clearFeedback()
+}
+
 // handleChord processes the chord state machine. Returns (model, cmd, handled).
 func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 	now := time.Now()
 
 	// Check timeout on active chord
-	if a.chord.prefix != "" {
-		if a.chord.action != "" && now.After(a.chord.actionTime.Add(3*time.Second)) {
-			a.chord = chordState{}
-		} else if a.chord.action == "" && now.After(a.chord.prefixTime.Add(3*time.Second)) {
-			a.chord = chordState{}
-		}
+	if a.chord.expired(now) {
+		a.disarmChord()
 	}
 
 	// Confirm step: waiting for third key press
@@ -669,14 +683,14 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 					break
 				}
 			}
-			a.chord = chordState{}
+			a.disarmChord()
 			m, cmd := a.dispatchAction(chord, job)
 			return m, cmd, true
 		}
 		// Wrong key — show invalid chord and consume
 		typed := strings.ToUpper(a.chord.prefix) + " " + strings.ToUpper(a.chord.action) + " " + strings.ToUpper(key)
 		a.setFeedbackWithDuration("Invalid Chord: "+typed, time.Second)
-		a.chord = chordState{}
+		a.disarmChord()
 		return a, nil, true
 	}
 
@@ -689,7 +703,7 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 		// Not a valid second key — show invalid chord and consume
 		typed := strings.ToUpper(a.chord.prefix) + " " + strings.ToUpper(key)
 		a.setFeedbackWithDuration("Invalid Chord: "+typed, time.Second)
-		a.chord = chordState{}
+		a.disarmChord()
 		return a, nil, true
 	}
 
@@ -779,7 +793,7 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 	// dispatchAction) — only for chords that implement a batch path.
 	if item.NeedsJob {
 		if item.SupportsBatch && a.taskList.SelectedCount() > 0 {
-			a.chord = chordState{}
+			a.disarmChord()
 			m, cmd := a.dispatchAction(chord, nil)
 			return m, cmd, true
 		}
@@ -788,13 +802,13 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 			a.rejectChordForJob(item)
 			return a, nil, true
 		}
-		a.chord = chordState{}
+		a.disarmChord()
 		m, cmd := a.dispatchAction(chord, job)
 		return m, cmd, true
 	}
 
 	// Direct action (no job, no confirm)
-	a.chord = chordState{}
+	a.disarmChord()
 	m, cmd := a.dispatchAction(chord, nil)
 	return m, cmd, true
 }
@@ -823,7 +837,7 @@ func confirmDetail(item *ActionMenuItem, ids []string) string {
 // fallback scan reads as a warning, and it would otherwise render in the
 // success green.
 func (a *App) rejectChordForJob(item *ActionMenuItem) {
-	a.chord = chordState{}
+	a.disarmChord()
 	reason := item.DisabledReason
 	if reason == "" {
 		reason = "no eligible jobs"

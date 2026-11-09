@@ -297,7 +297,9 @@ The chord system is a three-state finite automaton:
 2. **Prefix active** — A prefix key has been pressed. Waiting for the action key. A feedback message shows the available actions for this prefix.
 3. **Confirm active** — A two-key chord was entered for a destructive action (`NeedsConfirm: true`). Waiting for the user to press the action key again to confirm.
 
-**Timeout:** All chord states expire after **3 seconds** of inactivity. If the user presses a prefix key and does nothing for 3 seconds, the chord resets to Idle. If a confirm prompt is pending and 3 seconds pass, it also resets.
+**Timeout:** All chord states expire after **3 seconds** of inactivity. If the user presses a prefix key and does nothing for 3 seconds, the chord resets to Idle. If a confirm prompt is pending and 3 seconds pass, it also resets. The window is `chordWindow` (`internal/tui/app.go`), and every return to Idle goes through `disarmChord`.
+
+**Esc and `/` always disarm:** every `Esc` on the main view returns an armed chord to Idle, whichever thing it also clears (selection, applied filter), and `/` disarms before it opens the Tasks or log-panel search box. Otherwise a confirm armed by `A D` outlived the Esc or the search and a lone `D` inside the window deleted the cursor job.
 
 **Invalid keys:** If the user presses a key that does not match any valid action for the current prefix, the chord resets to Idle, the feedback line shows `Invalid Chord: <prefix> <key>` for a second, and the key is consumed — it is not re-evaluated as a new prefix or single-key shortcut. A valid second key whose chord needs a job, pressed with no job selected or with a selected job that fails the item's `JobFilter`, resets the same way and shows the item's `DisabledReason` (the words the action menu uses beside a greyed entry) in the advisory colour.
 
@@ -419,7 +421,7 @@ Stats callback is configured. Shows the Web Stats tab's figures, in its strings 
 | `` ` `` | Open Settings dialog |
 | `?` | Open Help overlay |
 | `/` | Tasks panel: open the filter query box, which speaks the dashboard's filter language — free text plus `status:`/`channel:`/`platform:`/`type:clip` tokens, `-` negation, `a\|b` OR groups … |
-| `Esc` | Clear, in this order: the batch selection, then the active filter (Tasks panel) — the typed text and the `F`-set status token are one state, so this drops both together — then any armed chord. |
+| `Esc` | Clear, in this order: the batch selection, then the active filter (Tasks panel) — the typed text and the `F`-set status token are one state, so this drops both together. Every Esc also disarms an armed chord, whichever of these it cleared. |
 | `Space` | Tasks panel: toggle the focused row's batch selection. |
 | `PgUp` / `PgDn` | Page scroll: the Details and Logs viewports and the `O L` Job Log overlay, and the Tasks panel's list (a whole page of rows per press). |
 | `Home` / `End` | Tasks panel: jump to the first / last row. |

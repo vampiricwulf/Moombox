@@ -51,13 +51,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		// Chord timeout
-		if a.chord.prefix != "" {
-			now := time.Now()
-			if a.chord.action != "" && now.After(a.chord.actionTime.Add(3*time.Second)) {
-				a.chord = chordState{}
-			} else if a.chord.action == "" && now.After(a.chord.prefixTime.Add(3*time.Second)) {
-				a.chord = chordState{}
-			}
+		if a.chord.expired(time.Now()) {
+			a.disarmChord()
 		}
 		// Feedback message timeout
 		if !a.feedback.until.IsZero() && time.Now().After(a.feedback.until) {

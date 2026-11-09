@@ -438,7 +438,13 @@ type SidecarStatusMsg struct {
 	Healthy bool
 }
 
-// chordState tracks the two-key chord system state machine.
+// chordWindow is how long an armed chord waits for its next key: the second
+// key after a prefix, or the confirming third key after a confirm prompt.
+const chordWindow = 3 * time.Second
+
+// chordState tracks the two-key chord system state machine: Idle (prefix
+// ""), PrefixArmed (prefix set, action "") or ConfirmArmed (both set). Every
+// return to Idle goes through App.disarmChord.
 type chordState struct {
 	prefix     string    // "a", "r", "o", "e", "q" or ""
 	prefixTime time.Time // when prefix was pressed
@@ -450,6 +456,19 @@ type chordState struct {
 	// from the dashboard handing the cursor to a neighbour, can move it
 	// inside the window, and the prompt named the original.
 	jobID string
+}
+
+// expired reports whether an armed chord's window has run out at now. An idle
+// chord never expires.
+func (c chordState) expired(now time.Time) bool {
+	switch {
+	case c.prefix == "":
+		return false
+	case c.action != "":
+		return now.After(c.actionTime.Add(chordWindow))
+	default:
+		return now.After(c.prefixTime.Add(chordWindow))
+	}
 }
 
 // App is the root BubbleTea model.
