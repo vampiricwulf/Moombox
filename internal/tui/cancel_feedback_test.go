@@ -99,4 +99,26 @@ func TestCancelChordShowsAlreadyFinishingInRed(t *testing.T) {
 	if a.feedback.msg != want || feedbackColor(a.feedback.msg, a.feedback.sev) != ColorRed {
 		t.Errorf("batch: feedback = %q, want %q in red", a.feedback.msg, want)
 	}
+
+	// A refusal beside a job that had already ended: the line keeps both.
+	ended := a.OnCancelJob
+	a.OnCancelJob = func(id string) (bool, error) {
+		if id == "gone" {
+			return false, nil
+		}
+		return ended(id)
+	}
+	a.taskList.SetJobs([]*database.Job{
+		{ID: "fin", Title: "fin", Status: database.StatusMuxing},
+		{ID: "live", Title: "live", Status: database.StatusDownloading},
+		{ID: "gone", Title: "gone", Status: database.StatusDownloading},
+	})
+	for _, id := range []string{"fin", "live", "gone"} {
+		a.taskList.ToggleSelection(id)
+	}
+	a.dispatchAction("A X", nil)
+	want = "Cancelled 1 job; 1 job had already ended, 1 refused: " + refusal.Error()
+	if a.feedback.msg != want || feedbackColor(a.feedback.msg, a.feedback.sev) != ColorRed {
+		t.Errorf("mixed batch: feedback = %q, want %q in red", a.feedback.msg, want)
+	}
 }

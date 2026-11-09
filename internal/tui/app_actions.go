@@ -269,8 +269,13 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.taskList.ClearSelection()
 			switch {
 			case refused.n > 0:
-				// A refusal (a job already finishing) is the line's news, in red.
-				a.setBatchFeedback("Cancelled "+jobCount(count), refused)
+				// A refusal (a job already finishing) is the line's news, in
+				// red, after what became of the rest — the ended jobs too.
+				done := "Cancelled " + jobCount(count)
+				if ended > 0 {
+					done += "; " + jobCount(ended) + " had already ended"
+				}
+				a.setBatchFeedback(done, refused)
 			case ended > 0 && count > 0:
 				a.setFeedbackWithSeverity(fmt.Sprintf("Cancelled %s; %s had already ended", jobCount(count), jobCount(ended)), severityWarning)
 			case ended > 0:
