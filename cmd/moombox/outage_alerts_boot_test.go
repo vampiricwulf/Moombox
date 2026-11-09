@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -60,9 +61,22 @@ func TestOutageAtBootIsReportedOnRestore(t *testing.T) {
 	mu.Lock()
 	now = now.Add(5 * time.Minute)
 	mu.Unlock()
-	ln2, err := net.Listen("tcp", addr)
+	// The port was free a moment ago; another process may still take it, or
+	// the OS hold it briefly, so a few short retries before giving up. Only
+	// Windows, whose port reuse rules make a lost race plausible, may skip —
+	// and visibly; elsewhere a lost port is a failure.
+	var ln2 net.Listener
+	for attempt := range 5 {
+		if ln2, err = net.Listen("tcp", addr); err == nil {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+	}
 	if err != nil {
-		t.Skipf("could not re-listen on %s: %v", addr, err)
+		if runtime.GOOS == "windows" {
+			t.Skipf("SKIPPED K60 boot-outage test: could not re-listen on %s after 5 attempts: %v", addr, err)
+		}
+		t.Fatalf("could not re-listen on %s after 5 attempts: %v", addr, err)
 	}
 	defer ln2.Close()
 	go func() {

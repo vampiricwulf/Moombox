@@ -96,7 +96,9 @@ func newOutageAlerts(notify notifications.Sender, log interface {
 }
 
 // onState is the connectivity subscriber. It runs on the monitor's goroutine,
-// serialised with every other subscriber, and must not block: it arms or
+// or on the subscriber's for the replayed boot state (OnStateChangeWithCurrent),
+// always under the monitor's transitionMu — serialised with every transition
+// and every other subscriber — and must not block: it arms or
 // disarms a timer and, for an episode flapping for outageReportMaxWait since
 // its first restore, hands one send to the notification manager, whose Send
 // queues and returns.
