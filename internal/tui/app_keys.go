@@ -455,6 +455,11 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// case for N (shift+n) and before chord system to capture / and n/N.
 	if a.focusedPanel == PanelLogs {
 		if cmd, consumed := a.logs.HandleSearchKey(msg); consumed {
+			// Esc clearing an applied log search returns here, ahead of the
+			// Esc branch below; every Esc disarms, or A D, Esc, D deletes.
+			if key == keyEsc {
+				a.cancelChord()
+			}
 			return a, cmd
 		}
 		// "/" starts search (not in chord system, not during active search input)

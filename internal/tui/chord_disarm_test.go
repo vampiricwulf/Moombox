@@ -135,3 +135,27 @@ func TestEscWithASelectionDisarmsTheChord(t *testing.T) {
 		t.Errorf("D after Esc deleted %v", *deleted)
 	}
 }
+
+// TestEscClearingALogSearchDisarmsTheChord: on the Logs panel with a log
+// search applied (box closed, query live), Esc is consumed by the log
+// viewer's search handler, which returned before the Esc branch that
+// disarms — so A D, Esc, D still deleted the cursor job.
+//
+// Mutant: drop the disarm in the Logs intercept — "a" is deleted.
+func TestEscClearingALogSearchDisarmsTheChord(t *testing.T) {
+	a, deleted := chordDisarmApp(t)
+	a.focusedPanel = PanelLogs
+	a.logs.searchQuery = "alpha"
+	armDelete(t, a)
+	pressRun(a, keyMsg("esc"))
+	if a.logs.searchQuery != "" {
+		t.Fatalf("premise lost: Esc did not clear the log search (%q)", a.logs.searchQuery)
+	}
+	if a.chord.prefix != "" {
+		t.Errorf("chord still armed after Esc: %+v", a.chord)
+	}
+	pressRun(a, keyMsg("d"))
+	if len(*deleted) != 0 {
+		t.Errorf("a lone D after Esc deleted %v", *deleted)
+	}
+}
