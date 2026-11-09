@@ -124,3 +124,28 @@ test("a save that ends after the dialog was reopened leaves the new dialog open"
   assert.equal(h.el("chapter-import-dialog").open, true, "the old save closed the reopened dialog");
   assert.deepEqual(h.app.toasts.at(-1), { message: "Chapters imported", variant: "success" });
 });
+
+// A Save clicked while Restore's confirm is up: the guard ahead of the confirm
+// passed before the Save began, so the re-check after it is what keeps the
+// restore out. MUTANT: no re-check after the confirm — a restore is sent
+// during the Save.
+test("a Restore confirmed after a Save began is not sent", { skip }, async () => {
+  const { h, gate } = await readyToSave();
+  let restores = 0;
+  h.http.on("POST /api/jobs/:id/chapters/restore", () => { restores++; return view({ hasOriginal: false }); });
+  let answer;
+  h.app.showConfirm = () => new Promise((resolve) => { answer = resolve; });
+
+  h.el("chapter-import-restore").click();
+  await h.flush();
+  assert.ok(answer, "the Restore confirm did not open");
+  h.el("chapter-import-save").click();
+  await h.flush();
+  answer(true);
+  await h.flush(); await h.flush();
+  assert.equal(restores, 0, "a restore was sent during the Save");
+  assert.equal(h.el("chapter-import-status").textContent, "Saving…");
+
+  gate.release(view({ chapters: [{ start: 0, end: 600, title: "new" }], embedded: true, hasOriginal: true }));
+  await h.flush(); await h.flush();
+});

@@ -79,3 +79,37 @@ for (const c of cases) {
     assert.equal(h.el(c.btn).disabled, false, "the button stayed disabled after the delete ended");
   });
 }
+
+// Two Delete Alls whose confirms are both up at once (a double click opens the
+// second ahead of the first's answer): the guard ahead of the confirm cannot
+// see either, so the re-check after it is the one that keeps the second out.
+// MUTANT: no re-check after the confirm — both send a DELETE.
+for (const c of cases) {
+  test(`two ${c.name} Delete Alls confirmed together send one DELETE`, { skip }, async () => {
+    const gate = {};
+    const h = await harness.makeApp({
+      routes: {
+        [`GET ${c.list}`]: () => c.rows,
+        [`DELETE ${c.list}`]: ({ body }) => new Promise((resolve) => { gate.release = () => resolve(c.answer(body)); }),
+      },
+    });
+    const answers = [];
+    h.app.showConfirm = () => new Promise((resolve) => answers.push(resolve));
+    await c.fetch(h);
+    await h.flush();
+
+    const first = c.del(h);
+    const second = c.del(h);
+    await h.flush();
+    assert.equal(answers.length, 2, "both confirms should be up");
+    answers[0](true);
+    answers[1](true);
+    await h.flush();
+    assert.equal(h.http.matching(c.list, "DELETE").length, 1, "both confirmed Delete Alls sent a DELETE");
+
+    gate.release();
+    await Promise.all([first, second]);
+    await h.flush();
+    assert.equal(h.el(c.btn).disabled, false);
+  });
+}

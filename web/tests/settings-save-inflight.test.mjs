@@ -35,7 +35,7 @@ async function openWithPendingPut() {
     initialState: { config: structuredClone(CONFIG) },
     routes: {
       "GET /api/config": () => structuredClone(CONFIG),
-      "PUT /api/config": () => new Promise((resolve) => {
+      "PUT /api/config": () => gate.open ? { success: true, changed: true } : new Promise((resolve) => {
         gate.release = () => resolve({ success: true, changed: true });
       }),
     },
@@ -70,6 +70,20 @@ test("an edit made while a save is in flight stays dirty and survives loadConfig
   await h.app.loadConfig();
   await h.flush();
   assert.equal(String(h.el("cfg-port").value), "775", "loadConfig overwrote the unsent edit");
+
+  // And the next Save sends it: the first save advanced the baseline only
+  // for the keys it sent, so the port is still a change and the log level,
+  // already saved, is not. MUTANT: a success re-baselining the whole form —
+  // the page stays dirty, but this Save finds "No changes to save".
+  gate.open = true;
+  await h.app.settings.saveConfig();
+  await h.flush();
+  const puts = h.http.matching("/api/config", "PUT");
+  assert.equal(puts.length, 2, "the mid-save edit was never sent");
+  const body = puts[1].body;
+  assert.equal(body?.network?.port, 775, "the second PUT did not carry the port edit");
+  assert.equal(body?.logs?.log_level, undefined, "the second PUT re-sent the already-saved log level");
+  assert.equal(h.app.settings._dirty, false, "the page stayed dirty after the edit was saved");
 });
 
 // MUTANT: the _saving gate dropped — the banner's Save starts a second PUT.
