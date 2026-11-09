@@ -1773,6 +1773,13 @@ func (s *runState) wireMonitorCallbacks() {
 				if errors.Is(err, worker.ErrAlreadyPending) {
 					return // the resume an earlier detection started is still on its way
 				}
+				if errors.Is(err, worker.ErrNotAllowed) {
+					// The row moved since this callback read it — an operator's
+					// verb won — to a status Resume is not offered on.
+					s.log.Info("broadcast re-detected live — auto-resume not applied: the job moved on",
+						slog.String("videoID", videoID), slog.String("error", err.Error()))
+					return
+				}
 				if !errors.Is(err, worker.ErrResetPending) {
 					s.log.Warn("broadcast re-detected live — auto-resume failed",
 						slog.String("videoID", videoID), slog.String("error", err.Error()))
@@ -1917,6 +1924,14 @@ func (s *runState) wireMonitorCallbacks() {
 				// job's previous run unwinds or a staging claim holds it:
 				// the one accepted earlier is still on its way, and was
 				// logged then.
+				return
+			}
+			if errors.Is(err, worker.ErrNotAllowed) {
+				// The row moved since the monitor read it — an operator's verb
+				// won — to a status the recovery is not offered on; nothing was
+				// applied and no retry of the budget was spent.
+				s.log.Info("twitch auto-recovery not applied: the job moved on",
+					slog.String("jobID", jobID), slog.String("error", err.Error()))
 				return
 			}
 			if !errors.Is(err, worker.ErrResetPending) {
