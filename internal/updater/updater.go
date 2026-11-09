@@ -414,7 +414,7 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	)
 
 	// Download to .new
-	newPath := u.exePath + ".new"
+	newPath := u.exePath + NewSuffix
 	if err := u.downloadFile(ctx, release.DownloadURL, newPath); err != nil {
 		os.Remove(newPath)
 		return fmt.Errorf("download failed: %w", err)
@@ -425,7 +425,7 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 		os.Remove(newPath)
 		return fmt.Errorf("release has no signature URL — refusing to apply unsigned binary")
 	}
-	sigPath := newPath + ".sig"
+	sigPath := u.exePath + NewSigSuffix
 	if err := u.downloadFile(ctx, release.SignatureURL, sigPath); err != nil {
 		os.Remove(newPath)
 		os.Remove(sigPath) // a partially-written .sig may remain from the failed download
@@ -446,7 +446,7 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	}
 	u.logger.Info("[Updater] Signature and manifest verified", "version", release.Version)
 
-	oldPath := u.exePath + ".old"
+	oldPath := u.exePath + OldSuffix
 	os.Remove(oldPath) // remove stale .old if exists
 	if keepBackupByLink(u.exePath, oldPath) {
 		// .old is a second name for the running binary, so placing .new is
@@ -486,7 +486,7 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 				"placeError", err.Error(),
 				"rollbackError", rbErr.Error(),
 			)
-			markerPath := u.exePath + brokenUpdateSuffix
+			markerPath := u.exePath + UpdateBrokenMarkerSuffix
 			msg := fmt.Sprintf("Moombox update failed at %s\nplace error: %v\nrollback error: %v\nOriginal binary may be at %s and staged binary at %s — manual recovery required.\n",
 				time.Now().UTC().Format(time.RFC3339), err, rbErr, oldPath, newPath)
 			if mErr := os.WriteFile(markerPath, []byte(msg), 0o644); mErr != nil {
@@ -510,10 +510,6 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	return nil
 }
 
-// brokenUpdateSuffix names the marker a swap writes when both placing the new
-// binary and renaming the running one back failed.
-const brokenUpdateSuffix = ".update-broken"
-
 // swapLeftBroken refuses an apply over a swap that failed both ways. That
 // failure leaves the exe path empty and .old holding the running binary —
 // the only copy — with .new kept beside it, and reports an error, so nothing
@@ -522,8 +518,8 @@ const brokenUpdateSuffix = ".update-broken"
 // for want of an exe: no binary left anywhere. Recovery from that state is
 // by hand, as the marker says.
 func (u *Updater) swapLeftBroken() error {
-	if _, err := os.Stat(u.exePath + brokenUpdateSuffix); err == nil {
-		return fmt.Errorf("an earlier update left the install broken (%s) — recover by hand before updating", u.exePath+brokenUpdateSuffix)
+	if _, err := os.Stat(u.exePath + UpdateBrokenMarkerSuffix); err == nil {
+		return fmt.Errorf("an earlier update left the install broken (%s) — recover by hand before updating", u.exePath+UpdateBrokenMarkerSuffix)
 	}
 	if _, err := os.Stat(u.exePath); err != nil {
 		return fmt.Errorf("the running binary is missing from %s — recover by hand before updating", u.exePath)
@@ -710,15 +706,15 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) (manifest bool, er
 // intentionally NOT cleaned here — they are evidence for the user that
 // manual recovery may be needed and should be deleted explicitly.
 func (u *Updater) CleanupOldBinary() {
-	suffixes := []string{".old", ".new", ".new.sig", ".failed"}
+	suffixes := []string{OldSuffix, NewSuffix, NewSigSuffix, FailedBinarySuffix}
 	if runtime.GOOS == "windows" {
-		suffixes = append(suffixes, "~")
+		suffixes = append(suffixes, LauncherImageSuffix)
 	}
 	for _, suffix := range suffixes {
 		path := u.exePath + suffix
 		if _, err := os.Stat(path); err == nil {
 			if err := os.Remove(path); err != nil {
-				if suffix == "~" {
+				if suffix == LauncherImageSuffix {
 					// Expected right after a Windows self-update: the `~`
 					// file is the still-running LAUNCHER's mapped image
 					// (handleUpdateRestart renamed .old → ~ while executing

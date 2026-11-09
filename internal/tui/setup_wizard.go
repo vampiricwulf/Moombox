@@ -1332,7 +1332,7 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	// surface trims a password (config.PasswordHasOuterSpace), and this one
 	// hashed the trimmed form the login then refused as typed.
 	password := m.values["password"]
-	if networkAccess == "external" {
+	if config.IsExternalAccess(networkAccess) {
 		if len(password) < config.PasswordMinLen {
 			m.errorMsg = "A password (min 8 characters) is required for external access"
 			return ""
@@ -1409,7 +1409,7 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		cfg.Network.Port = port
 	}
 	cfg.Network.HTTPSEnabled = vBool("httpsEnabled", false)
-	if networkAccess == "external" && password != "" {
+	if config.IsExternalAccess(networkAccess) && password != "" {
 		// Hash password before saving (only relevant for external access)
 		if m.OnHashPassword != nil {
 			hash, err := m.OnHashPassword(password)

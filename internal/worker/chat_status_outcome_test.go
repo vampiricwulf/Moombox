@@ -32,7 +32,7 @@ func TestChatStatusForOutcome(t *testing.T) {
 		name    string
 		count   int
 		outcome error
-		want    string
+		want    database.ChatStatus
 	}{
 		{"clean run with messages", 5000, nil, "finished"},
 		{"clean run with no chat at all", 0, nil, "unavailable"},
@@ -82,7 +82,7 @@ func TestChatFileStatusDoesNotOverwriteAnIncompleteVerdict(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		jobCtx *JobContext
-		want   string
+		want   database.ChatStatus
 	}{
 		{"incomplete verdict survives the copy", &JobContext{ChatStatus: "incomplete"}, "incomplete"},
 		{"no verdict recorded", &JobContext{}, "finished"},
@@ -137,14 +137,14 @@ func TestChatFileStatusReadsTheKeptResumeSidecarAsTheVerdict(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		sidecars []string
-		verdict  string
-		want     string
+		verdict  database.ChatStatus
+		want     database.ChatStatus
 	}{
-		{"pager sidecar beside chat.json, no verdict", []string{"chat.json.resume.json"}, "", chatStatusIncomplete},
-		{"pager sidecar in a part dir, no verdict", []string{filepath.Join("seg_1", "chat.json.resume.json")}, "", chatStatusIncomplete},
+		{"pager sidecar beside chat.json, no verdict", []string{"chat.json.resume.json"}, "", database.ChatIncomplete},
+		{"pager sidecar in a part dir, no verdict", []string{filepath.Join("seg_1", "chat.json.resume.json")}, "", database.ChatIncomplete},
 		{"no sidecar, no verdict", nil, "", "finished"},
 		{"sidecar present but the run recorded its own verdict", []string{"chat.json.resume.json"}, "unavailable", "finished"},
-		{"sidecar present and the verdict is already incomplete", []string{"chat.json.resume.json"}, chatStatusIncomplete, chatStatusIncomplete},
+		{"sidecar present and the verdict is already incomplete", []string{"chat.json.resume.json"}, database.ChatIncomplete, database.ChatIncomplete},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			jobCtx := &JobContext{StagingDir: staged(t, tc.sidecars...), ChatStatus: tc.verdict}
@@ -389,8 +389,8 @@ func TestResolveChatOutcomeNeverReturnsNilOnceTheWaitTimedOut(t *testing.T) {
 		t.Errorf("resolveChatOutcome = %v, want errChatWaitTimedOut — the downloader recorded no "+
 			"error of its own, so the timeout is the only thing left to report", got)
 	}
-	if status := chatStatusForOutcome(dl.MessageCount(), got); status != chatStatusIncomplete {
-		t.Errorf("chatStatusForOutcome(%d, %v) = %q, want %q", dl.MessageCount(), got, status, chatStatusIncomplete)
+	if status := chatStatusForOutcome(dl.MessageCount(), got); status != database.ChatIncomplete {
+		t.Errorf("chatStatusForOutcome(%d, %v) = %q, want %q", dl.MessageCount(), got, status, database.ChatIncomplete)
 	}
 }
 
@@ -493,10 +493,10 @@ func TestExecuteTwitchWritesIncompleteForANonFinishedChatOutcome(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("GetJob: %v", err)
 	}
-	if got.ChatStatus != chatStatusIncomplete {
+	if got.ChatStatus != database.ChatIncomplete {
 		t.Errorf("job.ChatStatus = %q, want %q — ExecuteTwitch's write site must route the chat "+
 			"downloader's returned error through recordChatOutcome, not the count-only rule",
-			got.ChatStatus, chatStatusIncomplete)
+			got.ChatStatus, database.ChatIncomplete)
 	}
 	if got.TotalChatMessages == nil || *got.TotalChatMessages != 5000 {
 		t.Errorf("job.TotalChatMessages = %v, want 5000", got.TotalChatMessages)
@@ -538,7 +538,7 @@ func TestFinalizeMultiSegmentJobRoutesThePerPartChatWriteThroughChatFileStatus(t
 		OutputDir: outDir, Filename: "show.mp4", Logger: &discardLogger{},
 		// Set by a prior recordChatOutcome, as it would be in production —
 		// the VOD chat stalled during this job's download.
-		ChatStatus: chatStatusIncomplete,
+		ChatStatus: database.ChatIncomplete,
 	}
 	segments := []database.Segment{
 		{SegmentIndex: 0, FilePath: part1, Quality: "720p", ChatFile: filepath.Join(jobCtx.StagingDir, "seg_0", "chat.json")},
@@ -555,10 +555,10 @@ func TestFinalizeMultiSegmentJobRoutesThePerPartChatWriteThroughChatFileStatus(t
 	if err != nil || got == nil {
 		t.Fatalf("GetJob: %v", err)
 	}
-	if got.ChatStatus != chatStatusIncomplete {
+	if got.ChatStatus != database.ChatIncomplete {
 		t.Errorf("job.ChatStatus = %q, want %q — the per-part chat write must route through "+
 			"chatFileStatus, not overwrite an incomplete verdict with \"finished\"",
-			got.ChatStatus, chatStatusIncomplete)
+			got.ChatStatus, database.ChatIncomplete)
 	}
 }
 
@@ -591,16 +591,16 @@ func TestCopyAssetsRoutesTheWholeJobChatCopyThroughChatFileStatus(t *testing.T) 
 	jobCtx := &JobContext{
 		Job: job, DB: db, Config: &JobConfig{}, StagingDir: stagingDir,
 		OutputDir: outDir, Filename: "show.mp4", Logger: &discardLogger{},
-		ChatStatus: chatStatusIncomplete,
+		ChatStatus: database.ChatIncomplete,
 	}
 
 	updates := map[string]any{}
 	o.copyAssets(context.Background(), jobCtx, outDir, "show", "show", updates, false)
 
-	if updates["chat_status"] != chatStatusIncomplete {
+	if updates["chat_status"] != database.ChatIncomplete {
 		t.Errorf("copyAssets wrote chat_status = %v, want %q — the whole-job chat copy must route "+
 			"through chatFileStatus, not overwrite an incomplete verdict with \"finished\"",
-			updates["chat_status"], chatStatusIncomplete)
+			updates["chat_status"], database.ChatIncomplete)
 	}
 }
 

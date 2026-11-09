@@ -138,7 +138,7 @@ func jobNeedsStaging(db *database.Database, cfg *config.MoomboxConfig, job *data
 	// recording a repair left out of the archive (or a copy nothing could
 	// check), which are in no archive at all (stagedMuxGaps).
 	return (job.IncompleteTail && notExpired) ||
-		(job.ChatStatus == chatStatusIncomplete && notExpired) ||
+		(job.ChatStatus == database.ChatIncomplete && notExpired) ||
 		asideShield ||
 		hasUnmuxedSegmentParts(db, job.ID, jobStagingDir) ||
 		unusedRootRecording(db, job.ID, jobStagingDir) != "" ||

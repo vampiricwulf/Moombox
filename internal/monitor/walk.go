@@ -6,6 +6,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 // walkState is the WALK step's per-pass, in-memory bookkeeping (spec §8).
@@ -49,7 +50,7 @@ func recheckPending(row database.FeedItem, now string) bool {
 // whatever stored it — a strong end, a confirmed weak one, formats, the
 // recording itself — was not a guess the backoff is testing.
 func settledTerminal(row database.FeedItem) bool {
-	return (row.Status == "vod" || row.Status == "not_a_stream") && row.RecheckAt == ""
+	return isTerminalFeedStatus(row.Status) && row.RecheckAt == ""
 }
 
 // endCheckFor is the end check a probe of row may make (ProbeClassifyParams.
@@ -117,7 +118,7 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 		src := row.Source
 		due := recheckDue(row, nowStr)
 
-		if st.exhausted[src] && row.Status != "upcoming" && row.Status != "live" && row.DatePrecision != "assumed" && !due {
+		if st.exhausted[src] && row.Status != database.FeedStatusUpcoming && row.Status != database.FeedStatusLive && row.DatePrecision != "assumed" && !due {
 			// The exemptions are not optional: Q2 carries upcoming/live and
 			// assumed rows unconditionally, and their published is an insert
 			// or sighting instant, not a listing position — "everything
@@ -147,9 +148,9 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 		}
 
 		switch row.Status {
-		case "unknown", "upcoming", "live":
+		case database.FeedStatusUnknown, database.FeedStatusUpcoming, database.FeedStatusLive:
 			// probe below
-		case "vod":
+		case database.FeedStatusVOD:
 			if due {
 				// An unconfirmed end whose re-check is due. The other way
 				// back for a vod row: it was stored ended on weak signals
@@ -303,8 +304,7 @@ func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConf
 	if res.Outcome != OutcomeProbed || res.PublishedAt != "" {
 		return res, true
 	}
-	vodFamily := res.StreamStatus == "vod" || res.StreamStatus == "post_live" || res.StreamStatus == "not_a_stream"
-	if !vodFamily {
+	if !res.StreamStatus.IsVODFamily() {
 		return res, true // broadcasts are never windowed — no date needed (§12)
 	}
 	announcedEarly := row.Source == "rss" && row.Published < cutoff
@@ -414,7 +414,7 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 			Logger:     fm.logger,
 		})
 		fm.noteProbeOutcome(ctx, chID, row.VideoID, res, now)
-	} else if !signedIn && res.Outcome == OutcomeProbed && res.StreamStatus == "not_a_stream" {
+	} else if !signedIn && res.Outcome == OutcomeProbed && res.StreamStatus == youtube.StreamNotAStream {
 		// No authenticated probe answered the detail-less refusal: nothing
 		// is stored on it (see the doc above). One that did — a membership
 		// row's own signed-in probe, cookies stale or no membership — is
@@ -609,13 +609,10 @@ func (fm *FeedMonitor) pruneFailureSpells(chID string, scope []database.FeedItem
 // moment a probe settles the row: a confirmed end is a vod like any other,
 // and a broadcast found live or upcoming is carried by its status.
 func (fm *FeedMonitor) applyProbe(chID string, row database.FeedItem, r ProbeClassifyResult, now time.Time) {
-	status := r.StreamStatus
-	if status == "post_live" {
-		status = "vod"
-	}
-	if (status == "vod" || status == "not_a_stream") && r.PublishedAt == "" &&
+	status := feedStatusFor(r.StreamStatus)
+	if isTerminalFeedStatus(status) && r.PublishedAt == "" &&
 		(row.DatePrecision == "assumed" || row.DatePrecision == "") {
-		status = "unknown"
+		status = database.FeedStatusUnknown
 	}
 	var recheck database.FeedRecheck
 	switch {

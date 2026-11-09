@@ -701,7 +701,7 @@ func (m *JobDetailsModel) buildRows() {
 	// that one verdict reaches here: every other terminal job keeps exactly the
 	// rows it had.
 	terminalChatStatus, terminalChatCount := m.effectiveChat(j)
-	chatIncomplete := !isActiveState && terminalChatStatus == chatStatusIncomplete
+	chatIncomplete := !isActiveState && terminalChatStatus == database.ChatIncomplete
 	hasMediaContent := (hasVideo && hasHeight) || hasFps || hasFileSize || (isFinished && (hasSegs || hasChat || hasGaps)) || chatIncomplete
 	if hasMediaContent {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
@@ -994,21 +994,15 @@ func (m *JobDetailsModel) addSegmentRowsCommon(j *database.Job, lastVideoSeq, la
 	}
 }
 
-// chatStatusIncomplete is the chat_status a capture that stopped short carries.
-// Written as a literal here rather than imported: internal/tui does not import
-// internal/worker, so the value crosses between them through the database row,
-// not through Go. It must stay equal to the worker's chatStatusIncomplete.
-const chatStatusIncomplete = "incomplete"
-
 // effectiveChat returns the chat status and message count the details panel
 // shows: the live progress overlay's values where it has them, else the job
 // row's. One reader for the active Progress row and the terminal verdict row
 // alike, so the two can never disagree about which source won.
-func (m *JobDetailsModel) effectiveChat(j *database.Job) (string, *int) {
+func (m *JobDetailsModel) effectiveChat(j *database.Job) (database.ChatStatus, *int) {
 	status := j.ChatStatus
 	count := j.TotalChatMessages
 	if p := m.progressOverlay; p != nil {
-		if p.ChatStatus != "" {
+		if p.ChatStatus != database.ChatNone {
 			status = p.ChatStatus
 		}
 		if p.TotalChatMessages != nil {
@@ -1020,34 +1014,29 @@ func (m *JobDetailsModel) effectiveChat(j *database.Job) (string, *int) {
 
 // chatRowValue renders the Chat row's text — the status, then the count beside
 // it, matching the Web details badge and the "(N messages)" text after it.
-func chatRowValue(status string, count *int) string {
+func chatRowValue(status database.ChatStatus, count *int) string {
 	if count != nil && *count > 0 {
 		return fmt.Sprintf("%s (%d messages)", status, *count)
 	}
-	return status
+	return string(status)
 }
 
-// chatStatusColor returns appropriate color for chat status (J7).
-func (m *JobDetailsModel) chatStatusColor(status string) color.Color {
-	lower := strings.ToLower(status)
-	// BEFORE the "complete" test below, and that ordering is the whole point:
-	// the value a truncated capture carries is "incomplete", which CONTAINS
-	// "complete". Reversed, a short archive renders in exactly the cyan a
-	// complete one does. Warning rather than error: the capture stopped, the
-	// archive that did land is intact.
-	if strings.Contains(lower, chatStatusIncomplete) {
+// chatStatusColor returns appropriate color for chat status (J7): one arm per
+// database.ChatStatus value, the same set the dashboard's utils.js
+// CHAT_STATUS_VARIANTS (chatStatusVariant) colours. "incomplete" is Warning rather than error — the capture stopped, the archive
+// that did land is intact — and is its own arm: the substring match this
+// replaced had to test it before "complete", which it contains. Pending,
+// unavailable and anything unrecognised are gray, as before.
+func (m *JobDetailsModel) chatStatusColor(status database.ChatStatus) color.Color {
+	switch status {
+	case database.ChatIncomplete:
 		return ColorWarning
-	}
-	if strings.Contains(lower, "downloading") || strings.Contains(lower, "running") {
+	case database.ChatDownloading:
 		return ColorGreen
-	}
-	if strings.Contains(lower, "finished") || strings.Contains(lower, "complete") {
+	case database.ChatFinished:
 		return ColorFinished // cyan
 	}
-	if strings.Contains(lower, "error") || strings.Contains(lower, "failed") {
-		return ColorError
-	}
-	return ColorGray // match TS: gray for unrecognized chat status
+	return ColorGray
 }
 
 func (m *JobDetailsModel) addField(label, value string) {

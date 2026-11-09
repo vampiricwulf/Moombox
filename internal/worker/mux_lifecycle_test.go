@@ -446,10 +446,10 @@ func TestRestartMuxOutOfAChatWaitKeepsTheChatCapture(t *testing.T) {
 	if fresh == nil || fresh.Status != database.StatusFinished {
 		t.Fatalf("job after a restart mux = %v, want Finished (error=%q)", statusOf(fresh), errorOf(fresh))
 	}
-	if fresh.ChatStatus != chatStatusIncomplete {
+	if fresh.ChatStatus != database.ChatIncomplete {
 		t.Errorf("chat_status = %q after restart-muxing a job whose pager left its resume sidecar, "+
 			"want %q — the capture was cut short and the row is the only place that says so",
-			fresh.ChatStatus, chatStatusIncomplete)
+			fresh.ChatStatus, database.ChatIncomplete)
 	}
 	if _, err := os.Stat(sidecar); err != nil {
 		t.Errorf("the chat resume sidecar was deleted by the restart mux (stat err = %v) — it is "+

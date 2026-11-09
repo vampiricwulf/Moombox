@@ -200,7 +200,7 @@ type JobContext struct {
 	// JobContext in the download paths (segCtx := *jobCtx and friends) has been
 	// made, and only ever read through the pointer the orchestrator hands to
 	// muxAndFinalize.
-	ChatStatus string
+	ChatStatus database.ChatStatus
 	// CapturedMux marks the operator's Mux of a job that was not already
 	// muxing — an Error, Cancelled or parked row, set by MuxJob. What is
 	// staged may be all there is, so the muxing embed does not claim the
@@ -609,10 +609,7 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 				// Complete.
 				if r := recover(); r != nil {
 					w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
-					w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
-						"status": database.StatusError,
-						"error":  fmt.Sprintf("internal panic: %v", r),
-					})
+					w.writePanicError(jobID, nil, r)
 				}
 			}()
 			w.processJob(jobCtx, jobID)
@@ -1534,7 +1531,7 @@ func decideStagingCleanup(db *database.Database, fresh *database.Job, jobID, sta
 	// shape as the incomplete_tail preservation above it, and the orphan
 	// scanner mirrors it in jobNeedsStaging — but only the chat files are
 	// kept, not the muxed-away media (see keepOnlyChatCapture).
-	if fresh != nil && fresh.ChatStatus == chatStatusIncomplete {
+	if fresh != nil && fresh.ChatStatus == database.ChatIncomplete {
 		return stagingVerdict{keep: keepStagingChatOnly}
 	}
 	return stagingVerdict{keep: removeStaging}
@@ -1741,10 +1738,27 @@ func (w *DownloadWorker) recordRunPanic(jobID string, job *database.Job, r any) 
 			}
 		}
 	}
-	w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
+	w.writePanicError(jobID, job, r)
+}
+
+// writePanicError writes a panicked run's Error, guarded by the terminal
+// statuses, and settles the chat it leaves in flight as setJobError's Error
+// does (owner rulings R-E1, R-E1a): recordRunPanic and Start's recover both
+// write through it, so a YouTube run that panics mid-capture does not leave
+// "downloading" on its Error row. job may be nil (Start's recover has the ID
+// alone); settleErrorChat reads the row for its platform then. The settle
+// does not stop a
+// chat downloader the panic left running (the orchestrator's cleanup is an
+// explicit call, not a deferred one), and a downloader left running that way
+// can still write its own value (OnStart's "downloading") over the settle.
+func (w *DownloadWorker) writePanicError(jobID string, job *database.Job, r any) {
+	if !w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
 		"status": database.StatusError,
 		"error":  fmt.Sprintf("internal panic: %v", r),
-	})
+	}) {
+		return
+	}
+	w.settleErrorChat(jobID, job)
 }
 
 // handleCancellation handles a cancelled/shutdown job.
@@ -1778,7 +1792,7 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 		updates = map[string]any{"status": database.StatusCancelled}
 	}
 	if fresh, err := w.db.GetJob(job.ID); err == nil && fresh != nil && (userCancelled || fresh.Status == database.StatusCancelled) {
-		if cs, ok := cancelledChatStatus(fresh.ChatStatus); ok {
+		if cs, ok := stoppedChatStatus(fresh.ChatStatus); ok {
 			if updates == nil {
 				updates = map[string]any{}
 			}
@@ -1809,23 +1823,28 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 	}
 }
 
-// cancelledChatStatus settles the chat_status a user cancel leaves behind.
-// Neither orchestrator's cancel arm records a chat verdict — it stops the
+// stoppedChatStatus is the one rule for settling a chat capture its run
+// stopped without recording a verdict, written once for both settles: a user
+// cancel (handleCancellation) and a YouTube Error (settleErrorChat, owner
+// ruling R-E1a, which made the Error settle match this split). Neither
+// orchestrator's cancel or error arm records a chat verdict — it stops the
 // downloader and returns, and on a shutdown that is right, since the row keeps
-// its state and the capture resumes on the next start. A user cancel is
-// terminal, though, and both UIs render the value verbatim, so a Cancelled job
-// went on showing its chat as "downloading" (or "pending") indefinitely. A
-// capture that was running stopped short — "incomplete", the same verdict a
-// cut-off capture gets everywhere else; one that never started has nothing to
-// report. A settled verdict is left as it is (ok false).
-func cancelledChatStatus(current string) (string, bool) {
+// its state and the capture resumes on the next start. A user cancel and an
+// Error are where the run ends, though, and both UIs render the value
+// verbatim, so the row went on showing its chat as "downloading" (or
+// "pending") indefinitely. A capture that was running stopped short —
+// "incomplete", the same verdict a cut-off capture gets everywhere else; one
+// that never started has nothing to report (""). ok is true exactly for an
+// in-flight value (database.ChatStatus.InFlight); a settled verdict is left
+// as it is (ok false).
+func stoppedChatStatus(current database.ChatStatus) (database.ChatStatus, bool) {
 	switch current {
-	case "downloading":
-		return chatStatusIncomplete, true
-	case "pending":
-		return "", true
+	case database.ChatDownloading:
+		return database.ChatIncomplete, true
+	case database.ChatPending:
+		return database.ChatNone, true
 	}
-	return "", false
+	return database.ChatNone, false
 }
 
 // runJobContext is the JobContext processJob runs a job's download with:
@@ -2148,6 +2167,9 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 			"jobID", job.ID, "err", errMsg)
 		w.handleCancellation(job)
 		return
+	}
+	if status == database.StatusError {
+		w.settleErrorChat(job.ID, job)
 	}
 
 	// Suppress notifications for non-actionable errors (matches TS behavior):
@@ -3184,6 +3206,18 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 		}
 		return fields
 	}
+	// writeFailed makes that write, only over this Mux's own Muxing (an
+	// outcome that landed meanwhile stands), and settles an in-flight chat on
+	// the Error it applied as setJobError's Error does (settleErrorChat, owner
+	// ruling R-E1a): this Error is written here, not through setJobError, and
+	// a YouTube row can reach a Mux still showing one — an Error row from
+	// before the settle existed, or one a stray downloader's OnStart wrote
+	// over its settle.
+	writeFailed := func(msg string) {
+		if w.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, failed(msg)) {
+			w.settleErrorChat(jobID, prior)
+		}
+	}
 
 	w.wg.Go(func() {
 		defer release()
@@ -3197,7 +3231,7 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 				// The Muxing write above came before this goroutine, so
 				// whatever the row holds besides Muxing landed during this mux
 				// and stands.
-				w.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, failed(fmt.Sprintf("internal panic: %v", r)))
+				writeFailed(fmt.Sprintf("internal panic: %v", r))
 			}
 		}()
 
@@ -3231,7 +3265,7 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 		job, err := w.db.GetJob(jobID)
 		if err != nil {
 			w.logger.Error("MuxJob: get job failed", "jobID", jobID, "err", err)
-			w.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, failed(fmt.Sprintf("mux setup failed: %v", err)))
+			writeFailed(fmt.Sprintf("mux setup failed: %v", err))
 			return
 		}
 		if job == nil {
@@ -3300,7 +3334,7 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 			w.logger.Error("MuxJob failed", "jobID", jobID, "err", err)
 			// Only over this mux's own Muxing: an outcome that landed
 			// meanwhile stands.
-			w.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, failed(failure(err)))
+			writeFailed(failure(err))
 			return
 		}
 
@@ -3718,4 +3752,51 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 	})
 
 	return nil
+}
+
+// settleErrorChat settles the chat_status a failed YouTube download leaves
+// behind (owner rulings R-E1, R-E1a). The orchestrator's error arm stops the
+// chat downloader and returns without recording a verdict — recordChatOutcome
+// runs on the success path only — so an Error row went on reading
+// "downloading" (or "pending"), and the Web details badge, which renders any
+// non-empty value, showed a capture in progress on a failed job. The value
+// settles as a Cancel's does (stoppedChatStatus, R-E1a): a capture that was
+// running is "incomplete", the verdict a cut-off capture gets everywhere else,
+// and its resume sidecar stays in staging, which an Error row keeps for
+// Resume; one still pending has nothing to report and is cleared.
+//
+// Each in-flight value (database.ChatStatus.InFlight) is settled by its own
+// statement, conditional on both the status and that value
+// (database.SettleChatStatus): a verdict the run did record is left alone,
+// and a Resume that moved the row on before this write — whose run re-arms
+// the chat (setupChatDownloader writes "pending" whatever the row reads) —
+// wins. Pending is tried first, in ChatStatuses order, so a capture that
+// starts between the two statements is still settled as the running one it
+// became. YouTube only, as the ruling names it: the Twitch orchestrator
+// records a verdict on its unconfirmed-end arm (recordChatOutcome) and its
+// other error arms are left as they were. A Cancel is settled by
+// handleCancellation, and a COOKIES? park is not an Error. The Error writes
+// that come here: setJobError's, writePanicError's and a failed Mux's
+// (muxJob). job may be nil, and the row is read for its platform then.
+func (w *DownloadWorker) settleErrorChat(jobID string, job *database.Job) {
+	if job == nil {
+		row, err := w.db.GetJob(jobID)
+		if err != nil || row == nil {
+			return
+		}
+		job = row
+	}
+	if job.Platform != "youtube" {
+		return
+	}
+	for _, from := range database.ChatStatuses {
+		if !from.InFlight() {
+			continue
+		}
+		to, _ := stoppedChatStatus(from)
+		if w.db.SettleChatStatus(jobID, database.StatusError, []database.ChatStatus{from}, to) {
+			w.logger.Info("chat capture stopped with the failed download; settling it",
+				"jobID", jobID, "from", string(from), "to", string(to))
+		}
+	}
 }

@@ -465,7 +465,7 @@ When the crash file cannot be moved there (on Windows, a viewer, a scanner or th
 When that rename cannot happen, the surviving `.old` is the freshest previous binary and the `~` file is
 one version older still; `handleUpdateRestart` names `.old` as the update's artifact for exactly that
 reason, and the `~` file never stands in for it, even after the boot's milestone has swept it. The `~` file is
-swept by the next launcher start once neither failed-update marker (`.update-failed`, `.update-broken`)
+swept by the next launcher start once neither failed-update marker (`.update-failed`, `.update-broken`; `updater.FailureMarkers`, the one presence check the launcher, the rollback reader and the boot's announcement share, broken first for the announcement's dedupe stamp — the names are `internal/updater` constants, byte-identical across versions, `internal/updater/artifacts.go`)
 remains (`cleanupOrphans`, `cmd/moombox/launcher_windows.go`) — or by a healthy boot's `CleanupOldBinary`,
 whenever no running launcher still holds it. An `.update-failed` marker does not stand forever: once a
 LATER update has landed, its boot deletes the marker (`clearSupersededFailureMarker`, step 6 above), and
@@ -596,8 +596,8 @@ These are the event strings used for filtering. A target with no event filter re
 |-------|------------|
 | `found` | Monitor detects a new stream/video. |
 | `added` | Job manually added (API or CLI) |
-| `scheduled` | An UPCOMING stream's scheduled start time was confirmed (`IsUpcoming && !IsLive`) after its discovery was announced: a stream found with no schedule that gains one later, or a job owed no deferred discovery (a manual add, or a row from before schema v22). A schedule known at discovery rides on `found` as "Starts At" instead. Both render Starts At the same way, absolute and countdown (`notifications.StartsAtValue`). A stream first observed already live does not fire it — "Download Starting" carries the same time in its own "Scheduled For" field |
-| `rescheduled` | An UPCOMING stream's scheduled start time changed (`IsUpcoming && !IsLive`, as for `scheduled`). The actual start a stream that has begun or is already over (post_live, VOD) carries in the same field is written to the row and announced by neither event |
+| `scheduled` | An UPCOMING stream's scheduled start time was confirmed (`VideoInfo.NotYetLive`: `IsUpcoming && !IsLive`) after its discovery was announced: a stream found with no schedule that gains one later, or a job owed no deferred discovery (a manual add, or a row from before schema v22). A schedule known at discovery rides on `found` as "Starts At" instead. Both render Starts At the same way, absolute and countdown (`notifications.StartsAtValue`). A stream first observed already live does not fire it — "Download Starting" carries the same time in its own "Scheduled For" field |
+| `rescheduled` | An UPCOMING stream's scheduled start time changed (`VideoInfo.NotYetLive`, as for `scheduled`). The actual start a stream that has begun or is already over (post_live, VOD) carries in the same field is written to the row and announced by neither event |
 | `downloading` | Download begins or resumes |
 | `muxing` | FFmpeg mux step begins — for every mux, including a manual one (`A M` / `POST /api/jobs/{id}/mux`), and for both finalize shapes, single-file and multi-part (quality/gap-split). The multi-part path used to return before the send and silently skip it. A manual mux of a row that was not already Muxing (an Error, Cancelled or parked job) reads "Muxing the captured media" rather than "Download complete, muxing" (`JobContext.CapturedMux`, set by `MuxJob`): what is staged may stop short of the end. A boot re-mux of an interrupted Muxing row keeps "Download complete" |
 | `finished` | Job completed successfully. |

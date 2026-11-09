@@ -2,7 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES } from "./utils.js";
+import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES, chatStatusVariant } from "./utils.js";
 
 /** A running trim's progress as the whole percentage its bar shows. */
 function trimPercent(progress) {
@@ -352,10 +352,9 @@ export class JobDetailsController {
     // Update chat status
     const chatField = content.querySelector('[data-field="chat"]');
     if (chatField && job.chatStatus) {
-      const chatVariantMap = { downloading: "primary", finished: "success", incomplete: "warning", error: "danger", unavailable: "neutral", pending: "neutral" };
       const badge = chatField.querySelector("sl-badge");
       if (badge) {
-        const variant = chatVariantMap[job.chatStatus] || "neutral";
+        const variant = chatStatusVariant(job.chatStatus);
         if (badge.variant !== variant) badge.variant = variant;
         if (badge.textContent !== job.chatStatus) badge.textContent = job.chatStatus;
       }
@@ -740,8 +739,7 @@ export class JobDetailsController {
             </span>
           </div>` : ""}
           ${job.chatStatus ? (() => {
-            const chatVariantMap = { downloading: "primary", finished: "success", incomplete: "warning", error: "danger", unavailable: "neutral", pending: "neutral" };
-            const chatVariant = chatVariantMap[job.chatStatus] || "neutral";
+            const chatVariant = chatStatusVariant(job.chatStatus);
             return `
           <div class="details-row">
             <span class="details-label">Chat:</span>

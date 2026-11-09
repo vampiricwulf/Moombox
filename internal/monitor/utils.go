@@ -14,6 +14,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 const (
@@ -31,7 +32,7 @@ const (
 
 // VideoProbeResult holds the stream status returned by a video probe.
 type VideoProbeResult struct {
-	StreamStatus       string // "live", "upcoming", "vod", "post_live", "not_a_stream"
+	StreamStatus       youtube.StreamStatus
 	Title              string // metadata title (may be better than feed title)
 	PublishedAt        string // probe's authoritative publish date (RFC3339, may be empty)
 	PublishedPrecision string // "started" or "day", empty when PublishedAt is empty
@@ -366,7 +367,7 @@ type ProcessYouTubeVideoResult struct {
 	// errored or was suppressed by the cooldown. DECAPI reads it to pick a
 	// JobDisposition (spec §10's creator table) and, since T2-12, to memoize a
 	// terminal classification it must not pay for again next cycle.
-	StreamStatus string
+	StreamStatus youtube.StreamStatus
 	// PublishedAt is the probe's authoritative publish date (RFC3339); empty
 	// whenever StreamStatus is — and for broadcast probes, which supply no
 	// date at all (§12). DECAPI reads it for the archive-window check on
@@ -377,7 +378,7 @@ type ProcessYouTubeVideoResult struct {
 	// members_only, see deniedIsSettled. It is the LATCH flag, not the
 	// refusal flag: DECAPI writes it into its terminal memo and then stops
 	// probing that video, because the classification rides on "upcoming",
-	// which decapiTerminalStatus can never treat as terminal.
+	// which isTerminalFeedStatus can never treat as terminal.
 	//
 	// ShouldProcess is false for EVERY refusal, latched or not. A
 	// login_required refusal therefore returns ShouldProcess=false with
@@ -430,8 +431,8 @@ func nonLiveSkipReason(includeNonLive, isReprobe bool) (skip bool, reason string
 // Broader rules are rejected in the spec: "trust only ok" kills genuine
 // premieres; "any non-ok" refuses downloadable age-restricted VODs; "unknown"
 // is not a refusal (it is 'we could not read the answer').
-func isDenied(streamStatus, playabilityError string) bool {
-	return streamStatus == "upcoming" &&
+func isDenied(streamStatus youtube.StreamStatus, playabilityError string) bool {
+	return streamStatus == youtube.StreamUpcoming &&
 		(playabilityError == "members_only" || playabilityError == "login_required" || playabilityError == "private")
 }
 
@@ -512,7 +513,7 @@ type ProbeClassifyResult struct {
 	// are populated on OutcomeProbed and OutcomeDenied (a successful probe);
 	// zero-valued otherwise. PlayabilityError is always carried on those two
 	// outcomes — the escalation reads it even when Outcome == OutcomeDenied.
-	StreamStatus       string
+	StreamStatus       youtube.StreamStatus
 	Title              string
 	PublishedAt        string
 	PublishedPrecision string
@@ -652,11 +653,11 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 	// safety rests on answers nobody has captured, and the one that matters
 	// is a refused answer for an age-gated stream that is live NOW — read
 	// ended unconfirmed, that stream would never be recorded.
-	if meta.BroadcastEnded && result.StreamStatus == "upcoming" {
+	if meta.BroadcastEnded && result.StreamStatus == youtube.StreamUpcoming {
 		if meta.BroadcastEndWeak {
 			confirmEnd(ctx, p, &result)
 		} else {
-			result.StreamStatus = "post_live"
+			result.StreamStatus = youtube.StreamPostLive
 		}
 	}
 	return result
@@ -703,7 +704,7 @@ func confirmEnd(ctx context.Context, p ProbeClassifyParams, r *ProbeClassifyResu
 			return
 		}
 	}
-	r.StreamStatus = "post_live"
+	r.StreamStatus = youtube.StreamPostLive
 	if err == nil && chk.Ended {
 		return
 	}
@@ -805,21 +806,21 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 	}
 
 	switch cr.StreamStatus {
-	case "not_a_stream":
+	case youtube.StreamNotAStream:
 		if skip, reason := nonLiveSkipReason(includeNonLive, p.IsReprobe); skip {
 			logInfo(fmt.Sprintf("[Monitor] Skipping non-stream content (%s): %s (%s)", reason, p.Title, p.VideoID))
 			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title, StreamStatus: cr.StreamStatus}
 		}
 		logInfo(fmt.Sprintf("[Monitor] Including non-stream content (include_non_live_content=true): %s (%s)", p.Title, p.VideoID))
 
-	case "upcoming":
+	case youtube.StreamUpcoming:
 		logInfo(fmt.Sprintf("[Monitor] Found upcoming stream/premiere: %s (%s) - will monitor", p.Title, p.VideoID))
 
-	case "live":
+	case youtube.StreamLive:
 		// Always INFO for live — this is actionable even on re-probe
 		p.Logger.Info(fmt.Sprintf("[Monitor] Found LIVE stream/premiere: %s (%s) - queuing for download", p.Title, p.VideoID))
 
-	case "post_live", "vod":
+	case youtube.StreamPostLive, youtube.StreamVOD:
 		if cr.EndUnconfirmed {
 			// Ended for announcing and nothing else: a VOD job on an end
 			// nobody confirmed acts on the guess the re-check exists to test.

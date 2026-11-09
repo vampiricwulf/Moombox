@@ -285,9 +285,9 @@ func TestOutageFinalizeKeepsABoundarySpill(t *testing.T) {
 		t.Fatalf("the outage finalize ended as err=%v status=%s, want it Finished — this test is about its chat verdict",
 			err, fresh.Status)
 	}
-	if fresh.ChatStatus != chatStatusIncomplete {
+	if fresh.ChatStatus != database.ChatIncomplete {
 		t.Errorf("chat_status = %q after an outage finalize over a capture with 5 boundary messages spilled, want %q",
-			fresh.ChatStatus, chatStatusIncomplete)
+			fresh.ChatStatus, database.ChatIncomplete)
 	}
 
 	h.w.cleanupStagingAfterMux(h.job.ID, staging)
@@ -338,9 +338,9 @@ func TestOutageFinalizeSpillsAFailedFinalFlush(t *testing.T) {
 		t.Fatalf("the outage finalize ended as err=%v status=%s, want it Finished — this test is about its chat verdict",
 			err, fresh.Status)
 	}
-	if fresh.ChatStatus != chatStatusIncomplete {
+	if fresh.ChatStatus != database.ChatIncomplete {
 		t.Errorf("chat_status = %q after an outage finalize whose final flush could not write its messages, want %q",
-			fresh.ChatStatus, chatStatusIncomplete)
+			fresh.ChatStatus, database.ChatIncomplete)
 	}
 	if n := fresh.TotalChatMessages; n == nil {
 		t.Error("total_chat_messages unset, want 0: no part file holds a message")

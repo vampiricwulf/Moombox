@@ -247,7 +247,7 @@ func TestRecoverAsidesMuxesEveryGroupAndCarriesTheChatSidecar(t *testing.T) {
 	staging, outputDir := muxFixtureJob(t, w, db, "j-recover")
 	if db.UpdateJobFields("j-recover", map[string]any{
 		"status":      database.StatusFinished,
-		"chat_status": chatStatusIncomplete,
+		"chat_status": database.ChatIncomplete,
 	}) == nil {
 		t.Fatal("UpdateJobFields returned nil — the fixture row is not there")
 	}

@@ -97,6 +97,61 @@ const (
 	ParkReasonMuxAfterCancel ParkReason = "mux_after_cancel"
 )
 
+// ChatStatus is a job's chat_status: the lifecycle of its chat capture, the
+// one closed vocabulary both UIs render verbatim (the dashboard's
+// CHAT_STATUS_VARIANTS / chatStatusVariant in web/public/modules/utils.js
+// mirrors the set, pinned by
+// cmd/moombox TestChatStatusSetMatchesTheDashboard). The bytes on disk and on
+// the wire are the constants' values.
+//
+// The order a run moves through is "" → pending (a downloader is set up) →
+// downloading (it received its first batch) → one verdict: finished,
+// incomplete (the capture stopped short) or unavailable (the video has no
+// chat, or a capture that saw no messages). Reinitialize resets it to "".
+// Two writes settle a capture its run left mid-flight, by one rule (worker
+// stoppedChatStatus: downloading → incomplete, pending → ""): a user Cancel
+// and a YouTube download Error (owner rulings R-E1, R-E1a,
+// DownloadWorker.settleErrorChat), each conditional on the row.
+type ChatStatus string
+
+const (
+	// ChatNone is the zero value: no chat downloader has run for this job,
+	// or Reinitialize reset it.
+	ChatNone ChatStatus = ""
+	// ChatPending is a downloader that is set up and has not received a batch.
+	ChatPending ChatStatus = "pending"
+	// ChatDownloading is a downloader receiving messages.
+	ChatDownloading ChatStatus = "downloading"
+	// ChatUnavailable is a video with no chat, or a capture that ended with
+	// no messages.
+	ChatUnavailable ChatStatus = "unavailable"
+	// ChatFinished is a capture that completed.
+	ChatFinished ChatStatus = "finished"
+	// ChatIncomplete is a capture that ENDED WITHOUT COMPLETING — the
+	// downloader returned an error (a Twitch VOD paging stall, an IRC session
+	// that exhausted its reconnect budget, a panic) instead of running out of
+	// chat to fetch, a user Cancel cut it off, or a YouTube download Error
+	// stopped it (R-E1) — so messages can be missing. Its resume sidecar is
+	// kept in staging. The value is the label: both UIs render it verbatim
+	// (warning colour), and "error" was not reused for it — nothing writes
+	// that, and it reads as a hard failure rather than an archive that
+	// stopped short.
+	ChatIncomplete ChatStatus = "incomplete"
+)
+
+// ChatStatuses is every ChatStatus, in lifecycle order. The parity test reads
+// it against the dashboard's map.
+var ChatStatuses = []ChatStatus{ChatNone, ChatPending, ChatDownloading, ChatUnavailable, ChatFinished, ChatIncomplete}
+
+// InFlight reports whether s is a capture that has not reached a verdict:
+// pending or downloading. A run that ends without recording one leaves it on
+// the row until something settles it: these are the values the Cancel and
+// Error settles map (worker stoppedChatStatus), and settleErrorChat iterates
+// ChatStatuses through this predicate for its from-set.
+func (s ChatStatus) InFlight() bool {
+	return s == ChatPending || s == ChatDownloading
+}
+
 // Job is the primary data model for a download job.
 type Job struct {
 	// Version is the write that produced this copy of the row: a number
@@ -147,10 +202,10 @@ type Job struct {
 	VideoFps        *int   `json:"videoFps,omitempty"`
 	FileSize        *int64 `json:"fileSize,omitempty"`
 	// Chat
-	ChatStatus        string `json:"chatStatus,omitempty"`
-	TotalChatMessages *int   `json:"totalChatMessages,omitempty"`
-	ChatFilename      string `json:"chatFilename,omitempty"`
-	ChatFile          string `json:"chatFile,omitempty"`
+	ChatStatus        ChatStatus `json:"chatStatus,omitempty"`
+	TotalChatMessages *int       `json:"totalChatMessages,omitempty"`
+	ChatFilename      string     `json:"chatFilename,omitempty"`
+	ChatFile          string     `json:"chatFile,omitempty"`
 	// Saved asset files (absolute paths)
 	ThumbnailFile   string `json:"thumbnailFile,omitempty"`
 	DescriptionFile string `json:"descriptionFile,omitempty"`

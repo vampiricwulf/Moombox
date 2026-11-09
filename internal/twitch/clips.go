@@ -43,6 +43,26 @@ func ClipSlugFromJobID(id string) (string, bool) {
 	return slug, ok && slug != ""
 }
 
+// VodJobIDPrefix starts the job ID (and video ID) of a Twitch VOD job, the
+// VOD's numeric ID after it: "tw_v123456789". The VOD kind's mark, as
+// ClipJobIDPrefix is a clip's; a live capture's is "tw_" and the stream ID
+// ("tw_<digits>"), which no "v" can start.
+const VodJobIDPrefix = "tw_v"
+
+// VodJobID is the job ID of the Twitch VOD with this ID.
+func VodJobID(vodID string) string { return VodJobIDPrefix + vodID }
+
+// VodIDFromJobID is the VOD ID a VOD job's ID carries, and false for any
+// other ID. A clip ID ("tw_clip_…") is never read as one: "tw_c" is not
+// "tw_v". The ID it returns is strings.TrimPrefix's on every input — the
+// input unchanged when the prefix is missing, "" for a bare "tw_v" — so a
+// caller that reads a VOD row's ID and ignores ok gets what TrimPrefix gave
+// it, a legacy row whose video ID is the bare number included.
+func VodIDFromJobID(id string) (string, bool) {
+	vodID, ok := strings.CutPrefix(id, VodJobIDPrefix)
+	return vodID, ok && vodID != ""
+}
+
 // ClipAPIChangedError is a clip operation Twitch no longer knows by the hash
 // Moombox sends: PersistedQueryNotFound (ErrPersistedQueryNotFound). yt-dlp
 // re-hashed ShareClipRenderStatus three times in 14 months, and every clip

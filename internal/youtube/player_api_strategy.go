@@ -141,7 +141,7 @@ func (p *PlayerAPI) finishExtraction(ctx context.Context, info *VideoInfo, wp *W
 		if live, ok := extractionStateFrom(ctx).playbackLive(); ok {
 			info.PlaybackWaitExempt = live.exempt()
 			if info.StreamStatus == StreamVOD && live.postLive() {
-				info.StreamStatus, info.IsPostLiveDVR = StreamPostLive, true
+				info.SetStatus(StreamPostLive)
 			}
 		}
 	}
@@ -1246,10 +1246,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 func finalizeVideoInfo(ctx context.Context, result, wpParsed *VideoInfo, formatPool []Format) *VideoInfo {
 	if result.StreamStatus == StreamNotAStream && wpParsed != nil && wpParsed.StreamStatus != StreamNotAStream {
 		if hasAdequateFormats(result) {
-			result.StreamStatus = wpParsed.StreamStatus
-			result.IsLive = wpParsed.IsLive
-			result.IsUpcoming = wpParsed.IsUpcoming
-			result.IsPostLiveDVR = wpParsed.IsPostLiveDVR
+			result.SetStatus(wpParsed.StreamStatus)
 			mergeWatchPageMetadata(result, wpParsed)
 			result.Formats = deduplicateFormats(ctx, formatPool)
 			return result

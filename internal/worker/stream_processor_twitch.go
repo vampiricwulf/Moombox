@@ -13,6 +13,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobfilter"
 	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
@@ -437,8 +438,11 @@ func (sp *StreamProcessor) processTwitch(ctx context.Context, job *database.Job)
 
 	// A clip (owner decision D26) is addressed by its slug, as a VOD is by
 	// its ID, and is routed before the login below: a pasted
-	// clips.twitch.tv/<slug> names no channel at all.
-	if slug, ok := twitch.ClipSlugFromJobID(job.VideoID); ok {
+	// clips.twitch.tv/<slug> names no channel at all. The kind is the one clip
+	// predicate's (jobfilter.IsClipJob, read off the job ID; every clip row
+	// writes the same ID and video ID).
+	if jobfilter.IsClipJob(job) {
+		slug, _ := twitch.ClipSlugFromJobID(job.ID)
 		return sp.processTwitchClip(ctx, job, slug)
 	}
 	if sp.tw == nil {
@@ -450,7 +454,7 @@ func (sp *StreamProcessor) processTwitch(ctx context.Context, job *database.Job)
 		return &StreamProcessResult{ShouldDownload: false, Error: "could not determine Twitch channel login"}, nil
 	}
 
-	isVodJob := strings.HasPrefix(job.VideoID, "tw_v")
+	isVodJob := strings.HasPrefix(job.VideoID, twitch.VodJobIDPrefix)
 
 	if isVodJob {
 		// No login: a VOD is addressed by its own ID, and the login above is
@@ -477,7 +481,7 @@ func twitchVodFetchError(ctx context.Context, what string, err error) error {
 }
 
 func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.Job) (*StreamProcessResult, error) {
-	vodID := strings.TrimPrefix(job.VideoID, "tw_v")
+	vodID, _ := twitch.VodIDFromJobID(job.VideoID)
 
 	vodInfo, err := sp.tw.GetVodInfo(ctx, vodID)
 	if err != nil {
@@ -601,12 +605,12 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 			// "downloading"): a VOD still has the download-slot wait ahead of
 			// it, and the chat was shown downloading through all of it.
 			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"chat_status": "pending",
+				"chat_status": database.ChatPending,
 			})
 		}
 	} else {
 		sp.db.UpdateJobFields(job.ID, map[string]any{
-			"chat_status": "unavailable",
+			"chat_status": database.ChatUnavailable,
 		})
 	}
 
@@ -797,7 +801,7 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 
 			// "pending" until ExecuteTwitch starts it — see the VOD twin.
 			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"chat_status": "pending",
+				"chat_status": database.ChatPending,
 			})
 		}
 	}
@@ -1059,7 +1063,7 @@ func extractTwitchLoginFromJob(job *database.Job) string {
 		}
 		return strings.ToLower(remainder)
 	}
-	if strings.HasPrefix(id, "tw_v") {
+	if strings.HasPrefix(id, twitch.VodJobIDPrefix) {
 		return "" // VOD ID, not a login
 	}
 	if after, ok := strings.CutPrefix(id, "tw_"); ok {

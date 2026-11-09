@@ -141,7 +141,7 @@ func TestPlayabilityMatchKeepsTheTextTheRendererDisplaced(t *testing.T) {
 	if got, _ := parsePlayabilityStatus(ps); got != PlayabilityOK {
 		t.Errorf("verdict = %q, want ok (a waiting room)", got)
 	}
-	if status, _, upcoming, _ := classifyStream(map[string]any{}, ps, nil, false); status != StreamUpcoming || !upcoming {
+	if status, _, upcoming, _ := classified(classifyStream(map[string]any{}, ps, nil, false)); status != StreamUpcoming || !upcoming {
 		t.Errorf("classifyStream = %q (upcoming %v), want upcoming", status, upcoming)
 	}
 }

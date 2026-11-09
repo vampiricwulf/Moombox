@@ -283,7 +283,7 @@ func TestTwitchClipDownloadIsOneWholeFile(t *testing.T) {
 // the Twitch monitor's live recovery, which re-initialises a broadcast's job
 // when it finds the broadcast live again — a clip is no broadcast.
 //
-// Mutant: the IsTwitchClipJob guard dropped from markTwitchUnreachable.
+// Mutant: the jobfilter.IsClipJob guard dropped from markTwitchUnreachable.
 func TestTwitchClipIsNoLiveRecovery(t *testing.T) {
 	w, _ := testWorkerSetup(t)
 	job := &database.Job{ID: "tw_clip_X", VideoID: "tw_clip_X", Platform: "twitch"}
@@ -390,7 +390,7 @@ func TestTwitchClipKeepsAnOutcomeThatLandedFirst(t *testing.T) {
 // processing history (the twitch_archive_clips sweep's dedupe), and every other
 // manual add is left out of it, as it always was.
 //
-// Mutants: the IsTwitchClipJob check dropped (the live channel's row is
+// Mutants: the jobfilter.IsClipJob check dropped (the live channel's row is
 // entered); the AddToHistory call dropped (the clip is not).
 func TestRecordPastedClipEntersOnlyClips(t *testing.T) {
 	_, db := testWorkerSetup(t)

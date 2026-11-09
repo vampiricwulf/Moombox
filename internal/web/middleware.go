@@ -219,10 +219,10 @@ func ipAllowedByNetworkAccess(store *config.Store, r *http.Request) bool {
 		networkAccess = c.Network.NetworkAccess
 	})
 
-	switch networkAccess {
-	case "external", "public":
+	switch {
+	case config.IsExternalAccess(networkAccess):
 		return true
-	case "lan":
+	case networkAccess == config.NetworkAccessLAN:
 		return isLocalIPFor(ip, networkAccess)
 	default: // "localhost" or unset
 		return isLoopback(ip)
@@ -272,7 +272,7 @@ func HostGateMiddleware(store *config.Store) func(http.Handler) http.Handler {
 				networkAccess = c.Network.NetworkAccess
 			})
 			host := effectiveRequestHost(store, r)
-			if networkAccess != "external" && networkAccess != "public" && host != "" {
+			if !config.IsExternalAccess(networkAccess) && host != "" {
 				// The Host is compared with itself here, so the port rule in
 				// isAllowedOrigin always holds and public_url cannot matter.
 				scheme := effectiveRequestScheme(r)
@@ -316,7 +316,7 @@ func externalHostRefused(store *config.Store, r *http.Request) bool {
 		networkAccess = c.Network.NetworkAccess
 		publicURL = c.Network.PublicURL
 	})
-	if networkAccess != "external" && networkAccess != "public" {
+	if !config.IsExternalAccess(networkAccess) {
 		return false
 	}
 	if ip := EffectiveClientIP(store, r); !isLocalIPFor(ip, networkAccess) {
@@ -541,15 +541,15 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme, publ
 		return false
 	}
 
-	switch networkAccess {
-	case "localhost":
+	switch {
+	case networkAccess == config.NetworkAccessLocalhost:
 		return (isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)) &&
 			originPortServed(u, effectiveHost, effectiveScheme, publicURL, schemeUnknown)
-	case "lan":
+	case networkAccess == config.NetworkAccessLAN:
 		return (isLoopback(hostname) || hostname == "localhost" || isPrivateIPFor(hostname, networkAccess) ||
 			hostInSANs(hostname, identity, false)) &&
 			originPortServed(u, effectiveHost, effectiveScheme, publicURL, schemeUnknown)
-	case "external", "public":
+	case config.IsExternalAccess(networkAccess):
 		if !sameSiteOrigin(origin, effectiveHost, effectiveScheme) {
 			return false
 		}
@@ -978,7 +978,7 @@ func isPrivateIPFor(ipStr, networkAccess string) bool {
 	if isPrivateIP(ipStr) {
 		return true
 	}
-	if networkAccess != "lan" {
+	if networkAccess != config.NetworkAccessLAN {
 		return false
 	}
 	ip := parseIPLiteral(ipStr)

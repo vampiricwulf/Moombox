@@ -4,6 +4,8 @@ package main
 
 import (
 	"os"
+
+	"github.com/vampiricwulf/Moombox/internal/updater"
 )
 
 // cleanupOrphans is a no-op on Linux. Linux can delete a running
@@ -24,7 +26,7 @@ func cleanupOrphans(exePath string) {}
 // the post-milestone CleanupOldBinary sweep, so it is still present exactly
 // when the rollback and the recovery instructions need it.
 func handleUpdateRestart(exePath string) string {
-	oldPath := exePath + ".old"
+	oldPath := exePath + updater.OldSuffix
 	if _, statErr := os.Stat(oldPath); statErr != nil {
 		return ""
 	}

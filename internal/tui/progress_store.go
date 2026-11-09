@@ -1,5 +1,7 @@
 package tui
 
+import "github.com/vampiricwulf/Moombox/internal/database"
+
 // ProgressData stores high-frequency download progress without triggering
 // TUI re-sorts. Only status changes cause re-renders; progress reads are
 // zero-cost lookups from this store during View().
@@ -13,7 +15,7 @@ type ProgressData struct {
 	TotalVideoSeq     *int
 	TotalAudioSeq     *int
 	TotalChatMessages *int
-	ChatStatus        string
+	ChatStatus        database.ChatStatus
 }
 
 // ProgressStore is a map of job ID -> progress data.

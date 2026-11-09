@@ -600,6 +600,28 @@ func (db *Database) UpdateJobFieldsUnlessTerminal(id string, fields map[string]a
 	return applied
 }
 
+// SettleChatStatus writes to as the row's chat_status only while the row's
+// status is still status AND its chat_status is one of from, in one
+// statement, and reports whether it did. It is the chat-aware twin of
+// UpdateJobFieldsIf for a settle decided after the fact: the worker turning
+// an in-flight capture left on a YouTube Error row into its settled value
+// (owner rulings R-E1, R-E1a) must not land on a row a Resume has
+// already moved on, nor overwrite a verdict the run did record. An empty
+// from matches no row. Subscribers move only when it applied.
+func (db *Database) SettleChatStatus(id string, status JobStatus, from []ChatStatus, to ChatStatus) bool {
+	if len(from) == 0 {
+		return false
+	}
+	args := make([]any, 0, len(from)+1)
+	args = append(args, status)
+	for _, cs := range from {
+		args = append(args, cs)
+	}
+	cond := "status=? AND chat_status IN (?" + strings.Repeat(", ?", len(from)-1) + ")"
+	_, applied := db.updateJobFieldsWhere(id, map[string]any{"chat_status": to}, cond, args)
+	return applied
+}
+
 // updateJobFieldsWhere is the dynamic SET machinery behind UpdateJobFields
 // and its two conditional forms. cond, when not empty, is ANDed to the
 // statement's WHERE id=? with condArgs as its arguments, and a statement it

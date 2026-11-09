@@ -621,16 +621,6 @@ func classifyPostUpdateExit(code int) postUpdateVerdict {
 	return postUpdateRollback
 }
 
-// failedBinarySuffix names the binary a failed first-post-update boot leaves
-// behind. The rollback used to DELETE it on the grounds that it is
-// bit-identical to the published GitHub asset — but when the failure is a
-// refused DB downgrade, the older binary the rollback restores then prints
-// "restore the newer binary … if still present" about a file the rollback
-// had just removed, and the install is down until a manual re-download
-// (CORE-1). Keeping it costs ~90 MB until the next healthy boot sweeps it
-// (internal/updater.CleanupOldBinary).
-const failedBinarySuffix = ".failed"
-
 // attemptAutoRollback restores the previous binary after a failed first
 // post-update boot: the broken binary at exePath is KEPT, renamed to
 // <exe>.failed so the DB downgrade guard's "restore the newer binary"
@@ -678,7 +668,7 @@ func attemptAutoRollback(exePath, backup string, exitCode int) bool {
 	// preserveUpdateRollback's manual instructions cover. A pre-existing
 	// .failed from an earlier failed update is replaced, not an obstacle:
 	// MOVEFILE_REPLACE_EXISTING on Windows, replace semantics on POSIX.
-	failedPath := exePath + failedBinarySuffix
+	failedPath := exePath + updater.FailedBinarySuffix
 	if keepAsideByLink(exePath, failedPath) {
 		if err := rollbackRename(backup, exePath); err != nil {
 			os.Remove(failedPath) // the broken binary never left the plain name
@@ -744,7 +734,7 @@ func writeAutoRollbackMarker(exePath string, exitCode int, kept bool) {
 		"The failed release was KEPT at:\n  %s\n"+
 			"(If the restored binary refuses to start — a database the newer version\n"+
 			"already migrated is one such case — rename that file back over %s.)\n",
-		exePath+failedBinarySuffix, exePath)
+		exePath+updater.FailedBinarySuffix, exePath)
 	if !kept {
 		fate = fmt.Sprintf(
 			"The failed release could not be kept aside and was REMOVED.\n"+
@@ -761,7 +751,7 @@ func writeAutoRollbackMarker(exePath string, exitCode int, kept bool) {
 			"manual \"Check for updates\" to retry it deliberately.\n"+
 			"Delete this marker file once acknowledged.\n",
 		exitCode, time.Now().Format(time.RFC3339), fate)
-	markerPath := exePath + ".update-failed"
+	markerPath := exePath + updater.UpdateFailedMarkerSuffix
 	if err := os.WriteFile(markerPath, []byte(msg), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to write %s: %v\n", markerPath, err)
 	}
@@ -824,7 +814,7 @@ func preserveUpdateRollback(exePath, backup string, exitCode int) {
 			"instead.)\n"+
 			"Delete this marker file once resolved.\n",
 		exitCode, time.Now().Format(time.RFC3339), backup, exePath)
-	markerPath := exePath + ".update-failed"
+	markerPath := exePath + updater.UpdateFailedMarkerSuffix
 	if err := os.WriteFile(markerPath, []byte(msg), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to write %s: %v\n", markerPath, err)
 	}

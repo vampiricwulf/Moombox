@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
 // certWatcher holds an atomically-swappable *tls.Certificate so the TLS
@@ -291,7 +293,7 @@ func generateSelfSignedCert(certPath, keyPath, networkAccess string, logger inte
 	}
 
 	// Add LAN IPs when listening beyond localhost
-	if networkAccess == "lan" || networkAccess == "external" || networkAccess == "public" {
+	if config.ListensBeyondLoopback(networkAccess) {
 		tmpl.IPAddresses = append(tmpl.IPAddresses, getLANIPs()...)
 	}
 

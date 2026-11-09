@@ -917,18 +917,21 @@ func (s *runState) runTUI() {
 		}
 	}
 
-	// Seed the backfill progress snapshot (the disk seed's shape): a scan
-	// started before the TUI came up — mid-flight attach is the common case
-	// during a long scan (§11) — is visible immediately instead of after the
-	// next page event.
-	s.backfillMu.Lock()
-	for chID, p := range s.backfillProgress {
-		select {
-		case s.tuiBackfillCh <- tui.BackfillStatusMsg{Channel: chID, Tab: p.Tab, Pages: p.Pages, State: p.State}:
-		default:
-		}
-	}
-	s.backfillMu.Unlock()
+	// Backfill progress reaches the TUI through the mailbox, which has held
+	// every channel's latest state since the backfill worker's first
+	// emission: a scan started before the TUI came up — mid-flight attach is
+	// the common case during a long scan (§11) — and a failure still waiting
+	// for its retry are visible immediately, with no separate seed of the
+	// snapshot (the mailbox already carries it). Headless runs never start
+	// the forwarder; the mailbox then holds one entry per channel.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("[Main] Panic in TUI backfill forwarder", "panic", fmt.Sprint(r))
+			}
+		}()
+		s.backfillMailbox.run(s.ctx, s.tuiBackfillCh)
+	}()
 
 	// Forward DB events to TUI channels. OnJobChange (not OnJobUpdate)
 	// gives us the changed-columns list, which the TUI uses to gate

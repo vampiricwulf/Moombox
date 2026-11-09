@@ -14,13 +14,16 @@
 export const CLIP_JOB_ID_PREFIX = "tw_clip_";
 
 /**
- * Whether a job is a Twitch clip job (CLIP_JOB_ID_PREFIX): the job list's
- * CLIP badge and the filter language's type:clip both ask it.
- * @param {{id?: string}} job
+ * Whether a job is a Twitch clip job: a Twitch row whose ID carries
+ * CLIP_JOB_ID_PREFIX and a slug after it. The job list's CLIP badge and the
+ * filter language's type:clip both ask it. Go: jobfilter.IsClipJob, the one
+ * clip predicate the TUI and the worker ask too.
+ * @param {{id?: string, platform?: string}} job
  * @returns {boolean}
  */
 export function isClipJob(job) {
-  return typeof job?.id === "string" && job.id.startsWith(CLIP_JOB_ID_PREFIX);
+  return job?.platform === "twitch" && typeof job.id === "string" &&
+    job.id.startsWith(CLIP_JOB_ID_PREFIX) && job.id.length > CLIP_JOB_ID_PREFIX.length;
 }
 
 const STATUS_FILTER_MAP = {

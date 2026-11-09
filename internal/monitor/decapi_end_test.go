@@ -12,7 +12,7 @@ import (
 // R-05: DECAPI reports a channel's newest video, and when that is an ended
 // broadcast whose ANDROID_VR answer has no formats — age-gated, the
 // recording not available, formats withheld — the probe makes it post_live.
-// The terminal memo recorded post_live raw, which decapiTerminalStatus never
+// The terminal memo recorded post_live raw, which isTerminalFeedStatus never
 // calls terminal, so the same ended video was probed every 15 s for good;
 // on a channel that archives VODs, with the video outside the window, each
 // cycle paid the WEB date fetch as well. A settled end — strong, or weak and
@@ -20,7 +20,7 @@ import (
 // after one probe exactly as a vod newest video does, for every reason the
 // memo trusts a vod.
 //
-// Mutants: post_live recorded raw (decapiMemoStatus not applied in
+// Mutants: post_live recorded raw (feedStatusFor not applied in
 // recordTerminalMemo — 4 probes in every case); the include_non_live_content
 // note keyed on the raw status (the VODs-off cases probe 4 times); the date
 // fetch asked after the end check (the dateless confirmed case's date

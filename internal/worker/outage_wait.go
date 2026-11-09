@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobfilter"
+	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -351,7 +353,7 @@ func (e *twitchUnreachableError) Unwrap() error { return e.err }
 // (tw_v…) or a clip (tw_clip_…) is left as it is: the monitor's recovery is
 // for live broadcasts.
 func (w *DownloadWorker) markTwitchUnreachable(job *database.Job, err error) error {
-	if job.Platform != "twitch" || strings.HasPrefix(job.VideoID, "tw_v") || IsTwitchClipJob(job) || !isTransportFailure(err) {
+	if job.Platform != "twitch" || strings.HasPrefix(job.VideoID, twitch.VodJobIDPrefix) || jobfilter.IsClipJob(job) || !isTransportFailure(err) {
 		return err
 	}
 	return &twitchUnreachableError{err: err}

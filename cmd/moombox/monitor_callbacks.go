@@ -1407,7 +1407,7 @@ func monitorProbe(probe func(ctx context.Context, videoID string) (*youtube.Vide
 // read; monitorProbe is its only caller.
 func monitorProbeResult(meta *youtube.VideoInfo) *monitor.VideoProbeResult {
 	return &monitor.VideoProbeResult{
-		StreamStatus:       string(meta.StreamStatus),
+		StreamStatus:       meta.StreamStatus,
 		Title:              meta.Title,
 		PublishedAt:        meta.PublishedAt,
 		PublishedPrecision: meta.PublishedPrecision,
@@ -1972,7 +1972,7 @@ func (s *runState) wireMonitorCallbacks() {
 	// write InitialState and the TUI seed read (disk_status keeps its
 	// snapshot in routes.SharedDiskStatus; backfill's lives on runState).
 	// The worker never imports web/tui; this closure is the seam.
-	s.backfillWorker.OnProgress = func(chID, tab string, pages int, state string) {
+	s.backfillWorker.OnProgress = func(chID, tab string, pages int, state monitor.BackfillState) {
 		defer func() {
 			if r := recover(); r != nil {
 				s.log.Error("Panic in backfill OnProgress", slog.Any("panic", r))
@@ -1980,15 +1980,20 @@ func (s *runState) wireMonitorCallbacks() {
 		}()
 		// Snapshot first, broadcast second, so a client connecting between
 		// the two sees this state in InitialState rather than missing it.
-		// Active states are stored; "done" and "idle" clear the entry (see
+		// Retained states are stored; done and idle clear the entry (see
 		// the backfillProgress field doc).
 		s.backfillMu.Lock()
-		switch state {
-		case "scanning", "error":
+		if state.Retained() {
 			s.backfillProgress[chID] = backfillProgressState{Tab: tab, Pages: pages, State: state}
-		default: // "done", "idle"
+		} else {
 			delete(s.backfillProgress, chID)
 		}
+		// To the TUI through the mailbox, which keeps every channel's last
+		// state: the status bar's "BF: retry" is sticky (set by error,
+		// cleared only by that channel's next state), so no state may be
+		// dropped. Under the lock, so the mailbox's order per channel is
+		// the snapshot's.
+		s.backfillMailbox.put(tui.BackfillStatusMsg{Channel: chID, Tab: tab, Pages: pages, State: tui.BackfillState(state)})
 		s.backfillMu.Unlock()
 
 		// Broadcast to web clients — the exact Task 5 payload shape.
@@ -1998,13 +2003,6 @@ func (s *runState) wireMonitorCallbacks() {
 			"pages":   pages,
 			"state":   state,
 		})
-
-		// Push to TUI (drop-on-full like tuiDiskStatusCh — a dropped page
-		// tick is superseded by the next one within a second).
-		select {
-		case s.tuiBackfillCh <- tui.BackfillStatusMsg{Channel: chID, Tab: tab, Pages: pages, State: state}:
-		default:
-		}
 	}
 
 	// Monitor -> WebSocket: broadcast timer updates. TypeScript broadcasts

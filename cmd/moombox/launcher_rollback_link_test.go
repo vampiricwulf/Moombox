@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/updater"
 )
 
 func seedRollback(t *testing.T) string {
@@ -50,7 +52,7 @@ func TestAutoRollbackNeverEmptiesThePlainName(t *testing.T) {
 	if !bytesEqualFile(t, exePath, "PREVIOUS") {
 		t.Error("the previous binary must be back at the plain name")
 	}
-	if !bytesEqualFile(t, exePath+failedBinarySuffix, "BROKEN") {
+	if !bytesEqualFile(t, exePath+updater.FailedBinarySuffix, "BROKEN") {
 		t.Error("the broken binary must be kept at .failed")
 	}
 }
@@ -80,7 +82,7 @@ func TestAFailedRestoreLeavesTheBrokenBinaryInPlace(t *testing.T) {
 	if !bytesEqualFile(t, exePath+".old", "PREVIOUS") {
 		t.Error("the rollback artifact must survive for the manual instructions")
 	}
-	if _, err := os.Stat(exePath + failedBinarySuffix); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(exePath + updater.FailedBinarySuffix); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf(".failed left behind: %v", err)
 	}
 	if _, err := os.Stat(exePath + ".update-failed"); !errors.Is(err, os.ErrNotExist) {

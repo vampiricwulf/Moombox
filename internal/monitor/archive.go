@@ -95,7 +95,7 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 		}
 
 		switch row.Status {
-		case "upcoming", "live":
+		case database.FeedStatusUpcoming, database.FeedStatusLive:
 			// Job iff FRESH this cycle — never windowed, never M-gated, and
 			// NEVER HasProcessed-gated: history rows exist with no job row
 			// (a deleted job, rows DECAPI wrote before it stopped recording
@@ -111,7 +111,7 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 				retries++
 			}
 
-		case "vod", "not_a_stream":
+		case database.FeedStatusVOD, database.FeedStatusNotAStream:
 			// Past content: the archival gates, in table order (§10).
 			if done, err := fm.db.HasProcessed(row.VideoID); err != nil || done {
 				history++
@@ -213,8 +213,8 @@ func (fm *FeedMonitor) emitJob(ch *config.ChannelConfig, row database.FeedItem, 
 		return false
 	}
 	d := DispositionBacklogVOD
-	switch res.StreamStatus {
-	case "live", "upcoming":
+	switch {
+	case res.StreamStatus.IsBroadcast():
 		// live/upcoming → job, never throttled and never windowed: a
 		// broadcast probe supplies no date at all (§12), so the re-check
 		// below can never apply to it — a date must never block the

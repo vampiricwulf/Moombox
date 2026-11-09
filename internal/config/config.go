@@ -642,8 +642,7 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			cfg.Network.Port = defaults.Network.Port
 		}
 	}
-	if cfg.Network.NetworkAccess != "localhost" && cfg.Network.NetworkAccess != "lan" &&
-		cfg.Network.NetworkAccess != "external" && cfg.Network.NetworkAccess != "public" {
+	if !slices.Contains(SettableNetworkAccess, cfg.Network.NetworkAccess) && cfg.Network.NetworkAccess != NetworkAccessPublic {
 		fail("network.network_access %q must be one of localhost|lan|external|public", cfg.Network.NetworkAccess)
 		if !reportOnly {
 			cfg.Network.NetworkAccess = defaults.Network.NetworkAccess

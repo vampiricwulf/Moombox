@@ -825,7 +825,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 					}
 				}
 			} else if isVod {
-				jobID = "tw_v" + login
+				jobID = twitch.VodJobID(login)
 				url = "https://www.twitch.tv/videos/" + login
 				meta, err := twitchFetcher.FetchVodMetadata(req.Context(), login)
 				if err == nil && meta != nil {

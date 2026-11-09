@@ -224,7 +224,7 @@ func TestACancelBeforeTheOrchestratorWriteStands(t *testing.T) {
 // The same race, with the chat the stream processor left on the row — a
 // Twitch capture's "pending" (processTwitchLive writes it with Live), a
 // YouTube one's early "downloading". The Cancelled row's chat is settled as a
-// user cancel settles it (cancelledChatStatus) whichever of the run's end and
+// user cancel settles it (stoppedChatStatus) whichever of the run's end and
 // CancelJob's flag comes first: the run used to settle it only when the flag
 // was there, and a run that stopped on the row write alone kept the running
 // chat on a Cancelled row, which both UIs render verbatim.
@@ -272,7 +272,7 @@ func TestACancelledRowsChatIsSettledWhicheverComesFirst(t *testing.T) {
 				})
 				defer unsub()
 
-				chat, want := "downloading", chatStatusIncomplete
+				chat, want := "downloading", database.ChatIncomplete
 				if platform == "twitch" {
 					chat, want = "pending", ""
 				}

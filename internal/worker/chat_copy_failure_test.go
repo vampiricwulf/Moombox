@@ -48,8 +48,8 @@ func TestChatCopyFailureKeepsTheCapture(t *testing.T) {
 	if fresh.ChatFile != "" {
 		t.Fatalf("the fixture's copy did not fail: chat_file=%q", fresh.ChatFile)
 	}
-	if fresh.ChatStatus != chatStatusIncomplete {
-		t.Errorf("chat_status = %q after a failed chat copy, want %q", fresh.ChatStatus, chatStatusIncomplete)
+	if fresh.ChatStatus != database.ChatIncomplete {
+		t.Errorf("chat_status = %q after a failed chat copy, want %q", fresh.ChatStatus, database.ChatIncomplete)
 	}
 	if _, err := os.Stat(chat); err != nil {
 		t.Errorf("the only chat capture was deleted with staging: %v", err)
@@ -209,8 +209,8 @@ func TestRawChatCopyFailureKeepsTheCapture(t *testing.T) {
 	if fresh.ChatFile == "" {
 		t.Fatal("the chat itself was not copied: the fixture no longer isolates the raw sidecar's copy")
 	}
-	if fresh.ChatStatus != chatStatusIncomplete {
-		t.Errorf("chat_status = %q after a failed raw-sidecar copy, want %q", fresh.ChatStatus, chatStatusIncomplete)
+	if fresh.ChatStatus != database.ChatIncomplete {
+		t.Errorf("chat_status = %q after a failed raw-sidecar copy, want %q", fresh.ChatStatus, database.ChatIncomplete)
 	}
 	if _, err := os.Stat(raw); err != nil {
 		t.Errorf("the only copy of the raw chat sidecar was deleted with staging: %v", err)
@@ -256,8 +256,8 @@ func TestRecoveredRawChatCopyFailureKeepsTheCapture(t *testing.T) {
 		t.Fatalf("recovery produced %v, want the sibling", mp4sIn(t, outputDir))
 	}
 	fresh, _ := db.GetJob("j-raw-aside")
-	if fresh.ChatStatus != chatStatusIncomplete {
-		t.Errorf("chat_status = %q after a failed raw-sidecar copy, want %q", fresh.ChatStatus, chatStatusIncomplete)
+	if fresh.ChatStatus != database.ChatIncomplete {
+		t.Errorf("chat_status = %q after a failed raw-sidecar copy, want %q", fresh.ChatStatus, database.ChatIncomplete)
 	}
 	if _, err := os.Stat(raw); err != nil {
 		t.Errorf("the only copy of the raw chat sidecar was deleted with staging: %v", err)

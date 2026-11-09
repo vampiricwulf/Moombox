@@ -294,7 +294,7 @@ func newCLITwitchJob(channels []config.ChannelConfig, tw *utils.TwitchTarget, no
 	}
 	switch tw.Type {
 	case utils.TwitchVOD:
-		job.ID = "tw_v" + tw.Value
+		job.ID = twitch.VodJobID(tw.Value)
 		job.URL = "https://www.twitch.tv/videos/" + tw.Value
 		job.ChannelName = "Manual"
 	case utils.TwitchClip:

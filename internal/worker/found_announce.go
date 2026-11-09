@@ -111,7 +111,7 @@ func addFoundFacts(f *notifications.JobFacts, job *database.Job, info *youtube.V
 	f.Description = job.Description
 	f.Access = accessLabel(info.PlayabilityError)
 
-	if info.IsUpcoming && !info.IsLive {
+	if info.NotYetLive() {
 		f.StartsAt = parseRFC3339(job.StreamStartTime)
 	}
 	switch f.Kind {
@@ -150,9 +150,9 @@ func foundKind(info *youtube.VideoInfo) string {
 		return ""
 	}
 	switch {
-	case info.IsUpcoming && !info.IsLive && info.IsPremiere:
+	case info.NotYetLive() && info.IsPremiere:
 		return notifications.FoundUpcomingPremiere
-	case info.IsUpcoming && !info.IsLive:
+	case info.NotYetLive():
 		return notifications.FoundUpcoming
 	case info.IsLive && info.IsPremiere:
 		return notifications.FoundLivePremiere

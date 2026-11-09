@@ -19,6 +19,20 @@ const (
 	StreamNotAStream StreamStatus = "not_a_stream"
 )
 
+// IsBroadcast reports whether s is a broadcast that is on or still to come
+// (live or upcoming): what the monitors make a broadcast job of, never
+// windowed by a date.
+func (s StreamStatus) IsBroadcast() bool {
+	return s == StreamLive || s == StreamUpcoming
+}
+
+// IsVODFamily reports whether s is past content (vod, post_live or
+// not_a_stream): what the monitors archive under the channel's VOD rules. The
+// empty status (no probe ran) is neither a broadcast nor past content.
+func (s StreamStatus) IsVODFamily() bool {
+	return s == StreamVOD || s == StreamPostLive || s == StreamNotAStream
+}
+
 // PlayabilityError types from YouTube API.
 type PlayabilityError string
 
@@ -77,6 +91,15 @@ const (
 )
 
 // VideoInfo contains complete video information from YouTube.
+//
+// StreamStatus is the classification, and IsLive, IsUpcoming and
+// IsPostLiveDVR are derived from it, written together by SetStatus and
+// nowhere else: live sets IsLive, upcoming IsUpcoming, post_live
+// IsPostLiveDVR, anything else none. They stay fields for the JSON shape.
+// IsPostLiveDVR means "ended, with formats" — the microformat named an end
+// (classifyStream's endTimestampEnded) or the playback said post-live — NOT
+// the raw videoDetails.isPostLiveDvr flag, which is one of broadcastEnded's
+// end signals and reaches BroadcastEnded instead.
 type VideoInfo struct {
 	Title              string           `json:"title"`
 	ChannelName        string           `json:"channelName"`
@@ -900,3 +923,22 @@ const (
 	UnknownTitleSentinel   = "Unknown Title"
 	UnknownChannelSentinel = "Unknown Channel"
 )
+
+// SetStatus records s as the classification and sets the three bools derived
+// from it in the same place, so they cannot disagree with it: IsLive for
+// live, IsUpcoming for upcoming, IsPostLiveDVR for post_live, none otherwise.
+// Every writer of StreamStatus goes through it.
+func (v *VideoInfo) SetStatus(s StreamStatus) {
+	v.StreamStatus = s
+	v.IsLive = s == StreamLive
+	v.IsUpcoming = s == StreamUpcoming
+	v.IsPostLiveDVR = s == StreamPostLive
+}
+
+// NotYetLive reports whether the stream is still to begin: upcoming and not
+// live. The worker's one reading of "a schedule still stands" — the found
+// embed's start time and kind, a reschedule versus an actual start, the
+// confirmation of a first schedule, a schedule probe's answer.
+func (v *VideoInfo) NotYetLive() bool {
+	return v.IsUpcoming && !v.IsLive
+}

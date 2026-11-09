@@ -901,7 +901,7 @@ func (o *DownloadOrchestrator) recoverAsides(ctx context.Context, jobCtx *JobCon
 			// it there, pruned down to the capture, exactly as copyAssets
 			// keeps it after a failed chat copy at finalize (PR-M6). The log
 			// line said "it stays in staging" before this write made it true.
-			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"chat_status": chatStatusIncomplete})
+			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"chat_status": database.ChatIncomplete})
 			o.logger.Error("could not copy the kept chat capture beside a recovered recording; it is kept in staging",
 				"err", err, "jobID", jobCtx.Job.ID)
 		case dst != "":
@@ -1574,7 +1574,7 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 			// (a full output volume right after a multi-GB mux, an AV lock
 			// outlasting the copy's retries). cleanupStagingAfterMux now
 			// prunes staging down to the capture instead of deleting it.
-			updates["chat_status"] = chatStatusIncomplete
+			updates["chat_status"] = database.ChatIncomplete
 			o.logger.Error("could not copy the chat capture beside the archive; it is kept in staging",
 				"err", err, "chat", chatSrc, "jobID", jobCtx.Job.ID)
 		} else {
@@ -1593,7 +1593,7 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		rawSrc := filepath.Join(jobCtx.StagingDir, "chat.raw.jsonl")
 		if _, err := os.Stat(rawSrc); err == nil {
 			if err := copyFile(rawSrc, filepath.Join(outputDir, filenameBase+".chat.raw.jsonl")); err != nil {
-				updates["chat_status"] = chatStatusIncomplete
+				updates["chat_status"] = database.ChatIncomplete
 				o.logger.Error("could not copy the chat's raw sidecar beside the archive; the chat capture is kept in staging",
 					"err", err, "raw", rawSrc, "jobID", jobCtx.Job.ID)
 			}
@@ -1727,7 +1727,7 @@ func (o *DownloadOrchestrator) finishedFacts(jobCtx *JobContext, j *database.Job
 	f.TrimmedRange = trimmedRangeLabel(j)
 	f.Description = j.Description
 	f.IncompleteTail = j.IncompleteTail
-	f.ChatIncomplete = j.ChatStatus == chatStatusIncomplete
+	f.ChatIncomplete = j.ChatStatus == database.ChatIncomplete
 	if jobCtx != nil && jobCtx.StagingDir != "" {
 		f.AsideCount = len(asideReport(jobCtx.StagingDir).Groups)
 		f.MuxGaps, f.MuxGapDropped = muxGapSummary(jobCtx.StagingDir, jobArchiveOutputs(o.db, j))

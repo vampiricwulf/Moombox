@@ -179,8 +179,8 @@ func TestVodChatWaitStopsPromptlyOnCancel(t *testing.T) {
 			t.Fatal("resolveVodChatOutcome returned nil for a chat that was still paging when the " +
 				"job was stopped — chatStatusForOutcome would write \"finished\" over it")
 		}
-		if status := chatStatusForOutcome(dl.MessageCount(), got); status != chatStatusIncomplete {
-			t.Errorf("chatStatusForOutcome(%d, %v) = %q, want %q", dl.MessageCount(), got, status, chatStatusIncomplete)
+		if status := chatStatusForOutcome(dl.MessageCount(), got); status != database.ChatIncomplete {
+			t.Errorf("chatStatusForOutcome(%d, %v) = %q, want %q", dl.MessageCount(), got, status, database.ChatIncomplete)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("resolveVodChatOutcome did not return after its context was cancelled — a Stop() " +
@@ -282,8 +282,8 @@ func TestVodChatWaitStopsPromptlyWhenAlreadyCancelled(t *testing.T) {
 			t.Fatal("resolveVodChatOutcome returned nil for a chat that was still paging when " +
 				"the job was stopped")
 		}
-		if status := chatStatusForOutcome(dl.MessageCount(), got); status != chatStatusIncomplete {
-			t.Errorf("chatStatusForOutcome(%d, %v) = %q, want %q", dl.MessageCount(), got, status, chatStatusIncomplete)
+		if status := chatStatusForOutcome(dl.MessageCount(), got); status != database.ChatIncomplete {
+			t.Errorf("chatStatusForOutcome(%d, %v) = %q, want %q", dl.MessageCount(), got, status, database.ChatIncomplete)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("resolveVodChatOutcome did not return for a context that was already cancelled " +
@@ -356,7 +356,7 @@ func TestVodChatWaitDeadCtxReportsAStoppedPagerIncomplete(t *testing.T) {
 		<-dl.started
 
 		got := o.resolveVodChatOutcome(ctx, dl, &rec, done, &database.Job{ID: "vod_paging"})
-		if chatStatusForOutcome(dl.MessageCount(), got) == chatStatusIncomplete {
+		if chatStatusForOutcome(dl.MessageCount(), got) == database.ChatIncomplete {
 			incomplete++
 		}
 	}
@@ -502,7 +502,7 @@ func TestStagingKeptForIncompleteChat(t *testing.T) {
 		job  *database.Job
 		want bool
 	}{
-		{"incomplete chat keeps staging", &database.Job{ID: "a", Status: database.StatusFinished, ChatStatus: chatStatusIncomplete}, true},
+		{"incomplete chat keeps staging", &database.Job{ID: "a", Status: database.StatusFinished, ChatStatus: database.ChatIncomplete}, true},
 		{"finished chat does not", &database.Job{ID: "b", Status: database.StatusFinished, ChatStatus: "finished"}, false},
 		{"unavailable chat does not", &database.Job{ID: "c", Status: database.StatusFinished, ChatStatus: "unavailable"}, false},
 	} {
@@ -526,7 +526,7 @@ func TestStagingKeptForIncompleteChatExpires(t *testing.T) {
 		IncompleteStagingExpiryDays: config.FlexDuration{Value: 7},
 	}}
 	aged := &database.Job{
-		ID: "aged", Status: database.StatusFinished, ChatStatus: chatStatusIncomplete,
+		ID: "aged", Status: database.StatusFinished, ChatStatus: database.ChatIncomplete,
 		UpdatedAt: time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339),
 	}
 	if jobNeedsStaging(db, cfg, aged, t.TempDir()) {
@@ -639,7 +639,7 @@ func TestWorkerFinishKeepsStagingForAnIncompleteChat(t *testing.T) {
 	staging, _ := muxFixtureJob(t, w, db, "j-chatkeep")
 	db.UpdateJobFields("j-chatkeep", map[string]any{
 		"status":      database.StatusFinished,
-		"chat_status": chatStatusIncomplete,
+		"chat_status": database.ChatIncomplete,
 	})
 	for name, body := range map[string]string{
 		"chat.json":             `{"messages":[]}`,

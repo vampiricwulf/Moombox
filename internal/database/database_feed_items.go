@@ -31,6 +31,18 @@ type FeedRecheck struct {
 	Step int
 }
 
+// The feed_items.status values (FeedItem.Status). A listing inserts
+// FeedStatusUnknown; a probe writes the rest (ApplyProbeToFeedItem), a
+// post_live classification stored as FeedStatusVOD (monitor.feedStatusFor).
+// The SQL in this file spells the same values in its own text.
+const (
+	FeedStatusUnknown    = "unknown"
+	FeedStatusUpcoming   = "upcoming"
+	FeedStatusLive       = "live"
+	FeedStatusVOD        = "vod"
+	FeedStatusNotAStream = "not_a_stream"
+)
+
 // UpsertFeedItem is the §6 upsert. status is ALWAYS written 'unknown' on insert
 // and never touched on conflict — a listing supplies a date, never a
 // classification. source/catalog_pos are ALWAYS arms; published/date_precision
@@ -225,7 +237,7 @@ func (db *Database) FeedScope(channelID, cutoff, now string, includeMembership b
 		// jobbed, even once live. first_seen bounds it — a row whose probe keeps
 		// failing gets the window's worth of attempts, like an in-window row,
 		// and rows from before this arm existed do not all re-probe at once.
-		if it.Status == "unknown" && it.DatePrecision != "assumed" &&
+		if it.Status == FeedStatusUnknown && it.DatePrecision != "assumed" &&
 			(it.Source != "rss" || it.FirstSeen < cutoff) {
 			continue
 		}

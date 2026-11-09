@@ -130,7 +130,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	// per-format URLs stripped, so the response proves the media exists just
 	// as loudly, and nothing about "this client cannot fetch it" makes a
 	// finished broadcast upcoming.
-	streamStatus, isLive, isUpcoming, isPostLiveDVR := classifyStream(videoDetails, playabilityStatus, microformat,
+	streamStatus := classifyStream(videoDetails, playabilityStatus, microformat,
 		len(formats) > 0 || formatDiag.DRMSkipped > 0 || formatDiag.URLlessFormats > 0)
 
 	// Metadata
@@ -176,11 +176,11 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	// verdict, "unknown" included (an UNPLAYABLE or ERROR status whose reason
 	// matched nothing is still a refusal).
 	refused := playErr != PlayabilityOK
-	scheduledStartTime := extractScheduledStartTime(microformat, playabilityStatus, !isUpcoming && !refused)
+	scheduledStartTime := extractScheduledStartTime(microformat, playabilityStatus, streamStatus != StreamUpcoming && !refused)
 
 	// Published date (spec §12) — status-aware, deliberately independent of
 	// extractScheduledStartTime above (see extractPublishedAt doc comment).
-	publishedAt, publishedPrecision := extractPublishedAt(string(streamStatus), microformat)
+	publishedAt, publishedPrecision := extractPublishedAt(streamStatus, microformat)
 
 	// Length
 	var lengthSeconds *int
@@ -211,10 +211,6 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		ThumbnailURL:       thumbnailURL,
 		Formats:            formats,
 		PlayerURL:          playerURL,
-		StreamStatus:       streamStatus,
-		IsLive:             isLive,
-		IsUpcoming:         isUpcoming,
-		IsPostLiveDVR:      isPostLiveDVR,
 		BroadcastEnded:     ended,
 		BroadcastEndWeak:   endWeak,
 		BroadcastOnAir:     onAir,
@@ -234,6 +230,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		AudioLanguages:     langs,
 		StretchedRatio:     stretch,
 	}
+	info.SetStatus(streamStatus)
 	if info.DashManifestURL != "" {
 		info.DashManifestAvailableAt = availableAt
 	}
@@ -321,9 +318,9 @@ func microformatUploadDate(microformat map[string]any) string {
 // corrected (rank ties don't overwrite) — so normalization happens HERE, at
 // the one producer. An unparseable startTimestamp is treated as no-date
 // (fall through to the microformat date) rather than passed through.
-func extractPublishedAt(status string, microformat map[string]any) (ts, precision string) {
+func extractPublishedAt(status StreamStatus, microformat map[string]any) (ts, precision string) {
 	switch status {
-	case "vod", "post_live":
+	case StreamVOD, StreamPostLive:
 		if lbd, ok := getNestedMap(microformat, "liveBroadcastDetails"); ok {
 			if v := getStr(lbd, "startTimestamp"); v != "" {
 				if t, err := time.Parse(time.RFC3339, v); err == nil {
@@ -334,7 +331,7 @@ func extractPublishedAt(status string, microformat map[string]any) (ts, precisio
 		if v := microformatDate(microformat); v != "" {
 			return v, "day"
 		}
-	case "not_a_stream":
+	case StreamNotAStream:
 		if v := microformatDate(microformat); v != "" {
 			return v, "day"
 		}
@@ -1235,6 +1232,8 @@ func broadcastEnded(videoDetails, playabilityStatus, microformat map[string]any)
 	if getStr(lbd, "endTimestamp") != "" {
 		return true, false, false
 	}
+	// The raw flag, an end signal of its own — not VideoInfo.IsPostLiveDVR,
+	// which classifyStream derives from the microformat's end (see VideoInfo).
 	if postLive, _ := videoDetails["isPostLiveDvr"].(bool); postLive {
 		return true, false, false
 	}
@@ -1279,7 +1278,7 @@ func isPremiereForDisplay(videoDetails, playabilityStatus, microformat map[strin
 	return known || isPremiereResponse(videoDetails, playabilityStatus, microformat)
 }
 
-func classifyStream(videoDetails, playabilityStatus, microformat map[string]any, hasFormats bool) (StreamStatus, bool, bool, bool) {
+func classifyStream(videoDetails, playabilityStatus, microformat map[string]any, hasFormats bool) StreamStatus {
 	isLiveContent, _ := videoDetails["isLiveContent"].(bool)
 	isLiveNow, _ := videoDetails["isLive"].(bool)
 	isUpcomingVD, _ := videoDetails["isUpcoming"].(bool)
@@ -1295,7 +1294,12 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 		}
 	}
 
-	isPostLiveDVR := lbd != nil && getStr(lbd, "endTimestamp") != "" && !isLiveNow
+	// endTimestampEnded: the microformat's liveBroadcastDetails names an
+	// end and the broadcast is not live now — what makes a video with
+	// formats post_live here (VideoInfo.IsPostLiveDVR). Not the raw
+	// videoDetails.isPostLiveDvr flag, which broadcastEnded reads as one of
+	// its own end signals: the two share a name upstream and nothing else.
+	endTimestampEnded := lbd != nil && getStr(lbd, "endTimestamp") != "" && !isLiveNow
 
 	// Check playability for upcoming
 	status := getStr(playabilityStatus, "status")
@@ -1315,20 +1319,20 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	isUpcomingPremiere := isPremiere && !isLiveNow && !hasFormats
 
 	if isUpcomingPlayability {
-		return StreamUpcoming, false, true, false
+		return StreamUpcoming
 	}
 	if isUpcomingPremiere {
-		return StreamUpcoming, false, true, false
+		return StreamUpcoming
 	}
 	// videoDetails.isUpcoming overrides isLive for waiting room / offline slate.
 	// YouTube may set isLive=true when the scheduled time passes (serving the
 	// waiting room as a "live" feed), but isUpcoming=true means the creator
 	// hasn't actually started streaming yet.
 	if isUpcomingVD && !hasFormats {
-		return StreamUpcoming, false, true, false
+		return StreamUpcoming
 	}
 	if isLiveNow || isPremiereNow {
-		return StreamLive, true, false, false
+		return StreamLive
 	}
 	// From here, no formats reads upcoming — "wait" to the worker — even for
 	// a broadcast that has ended and whose formats this caller may not see
@@ -1341,18 +1345,18 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	// lbd==nil && !isLiveContent shortcut so premieres that only expose the
 	// renderer aren't mis-classified as not_a_stream.
 	if hasLiveStreamability && !hasFormats {
-		return StreamUpcoming, false, true, false
+		return StreamUpcoming
 	}
 	if lbd == nil && !isLiveContent && !isPremiere {
-		return StreamNotAStream, false, false, false
+		return StreamNotAStream
 	}
 	if !hasFormats && (lbd != nil || isLiveContent) {
-		return StreamUpcoming, false, true, false
+		return StreamUpcoming
 	}
-	if isPostLiveDVR {
-		return StreamPostLive, false, false, true
+	if endTimestampEnded {
+		return StreamPostLive
 	}
-	return StreamVOD, false, false, false
+	return StreamVOD
 }
 
 // collectFormats appends formats into pool with the given source label and

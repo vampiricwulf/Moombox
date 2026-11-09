@@ -35,10 +35,8 @@ func CurrentSchemaVersion() int {
 // The launcher's rollback artifact suffixes, MIRRORED here so the schema
 // downgrade refusal below can name real files.
 //
-// They cannot be shared: failedBinarySuffix is a constant in cmd/moombox's
-// package main, which no package can import, the ".update-failed" suffix is
-// an inline literal in writeAutoRollbackMarker there, and internal/database
-// imports nothing internal by design. The drift guard is
+// internal/updater owns them (FailedBinarySuffix, UpdateFailedMarkerSuffix),
+// and internal/database imports nothing internal by design. The drift guard is
 // TestDowngradeRefusalNamesTheLauncherArtifacts in cmd/moombox — the one
 // package that can see both sides — reached from here through
 // RollbackArtifactSuffixes.

@@ -391,14 +391,21 @@ func lowerRune(r rune) rune {
 	return unicode.ToLower(r)
 }
 
-// IsClipJob reports whether job is a Twitch clip job: its ID carries
-// twitch.ClipJobIDPrefix ("tw_clip_<slug>"). The one test behind type:clip
-// and the Tasks panel's [CLIP] tag (owner decision FE-28): a clip's platform
-// is "twitch" like any Twitch job's, and no column names the kind. The
-// dashboard's isClipJob (web/public/modules/filter-engine.js, where
-// the goja parity test can evaluate it) is its twin.
+// IsClipJob reports whether job is a Twitch clip job: a Twitch row whose ID
+// carries twitch.ClipJobIDPrefix and a slug ("tw_clip_<slug>",
+// twitch.ClipSlugFromJobID). The one clip predicate: type:clip, the Tasks
+// panel's [CLIP] tag (owner decision FE-28) and the worker's clip download
+// all ask it — a clip's platform is "twitch" like any Twitch job's, and no
+// column names the kind. Every path that creates a clip row writes the same
+// ID and video ID, on platform "twitch". The dashboard's isClipJob
+// (web/public/modules/filter-engine.js, where the goja parity test can
+// evaluate it) is its twin.
 func IsClipJob(job *database.Job) bool {
-	return job != nil && strings.HasPrefix(job.ID, twitch.ClipJobIDPrefix)
+	if job == nil || job.Platform != "twitch" {
+		return false
+	}
+	_, ok := twitch.ClipSlugFromJobID(job.ID)
+	return ok
 }
 
 // Match reports whether job passes every token (AND across tokens, OR within
