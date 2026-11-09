@@ -22,6 +22,21 @@ const TASK_STATUS_PRIORITY = {
   "Live": 4, "Upcoming": 5, "Queued": 6, "Cancelled": 7, "Finished": 8,
 };
 
+/**
+ * The dashboard WebSocket's states. _setConnState is the only writer of the
+ * status bar's #connection-status. CONNECTING: a socket was created and has
+ * not opened. OPEN: onopen ran. BACKOFF: it closed and a reconnect is
+ * queued. UNAUTHORIZED: it closed without opening and the session probe
+ * answered 401 — the fetch wrapper is reloading to the login page, and no
+ * reconnect is queued.
+ */
+export const ConnState = Object.freeze({
+  CONNECTING: "connecting",
+  OPEN: "open",
+  BACKOFF: "backoff",
+  UNAUTHORIZED: "unauthorized",
+});
+
 export class MoomboxApp {
   constructor() {
     this.ws = null;
@@ -45,6 +60,8 @@ export class MoomboxApp {
     this._selectedArchivedJobs = new Set();
     this._lastCheckedJobIds = { jobs: null, archived: null };
     this.reconnectAttempts = 0;
+    /** One of ConnState; written only by _setConnState. */
+    this._connState = ConnState.CONNECTING;
     this.autoCookieReloginRequired = null;
     // Tri-state; see loadStatus. null = the server has no opinion.
     this.sidecarHealthy = null;
@@ -1031,15 +1048,21 @@ export class MoomboxApp {
     const wsUrl = `${protocol}//${window.location.host}`;
 
     this.logPanel.newConnection();
-    this.ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(wsUrl);
+    this.ws = ws;
+    // Whether this socket ever opened: a close before it did is how a
+    // refused upgrade (an expired session's 401) looks to the page.
+    let opened = false;
+    this._setConnState(ConnState.CONNECTING, { attempt: this.reconnectAttempts });
 
     this.ws.onopen = () => {
       console.log("WebSocket connected");
+      opened = true;
       const isReconnect = this.reconnectAttempts > 0;
       this.reconnectAttempts = 0;
       this._lastPong = Date.now();
       this._lastPingSent = Date.now();
-      this.updateConnectionStatus(true);
+      this._setConnState(ConnState.OPEN);
       // Refresh status (cookie + Twitch auth) on reconnect
       this.loadStatus();
       // Reload config on reconnect so the form reflects any server-side changes
@@ -1085,8 +1108,18 @@ export class MoomboxApp {
     this.ws.onclose = () => {
       console.log("WebSocket disconnected");
       if (this._pingInterval) { clearInterval(this._pingInterval); this._pingInterval = null; }
-      this.updateConnectionStatus(false);
-      this.scheduleReconnect();
+      if (opened) {
+        this.scheduleReconnect();
+        return;
+      }
+      // Closed before it opened: one probe tells an expired session from a
+      // server that is down or restarting.
+      this._probeSession().then((unauthorized) => {
+        // A newer socket (a manual connect) owns the connection now.
+        if (this.ws !== ws) return;
+        if (unauthorized) this._setConnState(ConnState.UNAUTHORIZED);
+        else this.scheduleReconnect();
+      });
     };
 
     this.ws.onerror = (error) => {
@@ -1110,17 +1143,62 @@ export class MoomboxApp {
       this._reconnectTimer = null;
       this.connectWebSocket();
     }, delay);
+    this._setConnState(ConnState.BACKOFF, { attempt: this.reconnectAttempts, delay });
   }
 
-  updateConnectionStatus(connected) {
+  /**
+   * The session probe sent when a socket closes without having opened: the
+   * browser hides the upgrade's status, so a cheap GET /api/status — behind
+   * the same AuthMiddleware as the upgrade, so a local peer is waived exactly
+   * as it is — says whether the session is gone. It goes through the wrapped
+   * fetch, whose 401 handling reloads to the login page; there is no second
+   * 401 path here. Resolves true for a 401, false for anything else,
+   * including a server that cannot be reached (that is a plain backoff,
+   * never a reload).
+   * @returns {Promise<boolean>}
+   */
+  async _probeSession() {
+    try {
+      const response = await fetch("/api/status");
+      return response.status === 401;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The only writer of #connection-status. Keeps the class names the CSS
+   * styles (connected / disconnected) and adds the state's own name.
+   * @param {string} state one of ConnState
+   * @param {{attempt?: number, delay?: number}} [info]
+   */
+  _setConnState(state, { attempt = 0, delay = 0 } = {}) {
+    this._connState = state;
     const statusEl = document.getElementById("connection-status");
-    statusEl.className = connected ? "connected" : "disconnected";
+    if (!statusEl) return;
+    let cls, iconName, text;
+    switch (state) {
+      case ConnState.OPEN:
+        cls = "connected"; iconName = "wifi"; text = "Connected";
+        break;
+      case ConnState.BACKOFF:
+        cls = "disconnected backoff"; iconName = "wifi-off";
+        text = `Reconnecting in ${Math.max(1, Math.round(delay / 1000))}s (attempt ${attempt})`;
+        break;
+      case ConnState.UNAUTHORIZED:
+        cls = "disconnected unauthorized"; iconName = "lock"; text = "Session expired";
+        break;
+      default:
+        cls = "disconnected connecting"; iconName = "wifi-off";
+        text = attempt > 0 ? `Reconnecting… (attempt ${attempt})` : "Connecting...";
+    }
+    statusEl.className = cls;
     statusEl.textContent = "";
     const icon = document.createElement("sl-icon");
-    icon.name = connected ? "wifi" : "wifi-off";
+    icon.name = iconName;
     const label = document.createElement("span");
     label.className = "status-label";
-    label.textContent = connected ? " Connected" : " Disconnected";
+    label.textContent = ` ${text}`;
     statusEl.appendChild(icon);
     statusEl.appendChild(label);
   }
