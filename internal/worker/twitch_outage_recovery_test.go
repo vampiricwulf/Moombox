@@ -17,6 +17,8 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/notifications"
+	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
@@ -357,5 +359,64 @@ func TestOutageFinalizeSpillsAFailedFinalFlush(t *testing.T) {
 	}
 	if len(spilled) != 2 {
 		t.Errorf("the spill holds %d messages, want the 2 the IRC delivered", len(spilled))
+	}
+}
+
+// cancelOnMuxing records every notification and cancels the job as the
+// finalize announces its mux: past the finalize's own Muxing write, ahead of
+// the FFmpeg that writes the archive.
+type cancelOnMuxing struct {
+	*notificationtest.Recorder
+	cancel func()
+}
+
+func (c *cancelOnMuxing) Send(title, description string, ntype notifications.NotificationType,
+	fields []notifications.Field, opts notifications.SendOptions,
+) {
+	c.Recorder.Send(title, description, ntype, fields, opts)
+	if opts.Event == "muxing" {
+		c.cancel()
+	}
+}
+
+// TestACancelDuringAnOutageFinalizeStopsItsMux: the outage finalize muxes on a
+// context of its own, so a shutdown can still reach its FFmpeg after the job's
+// context has gone (owner decision O-E). That context was the bare mux root,
+// which an operator's Cancel never reached: FFmpeg ran on, the finish mark
+// then read the Cancelled row and stopped the finalize, and the archive it had
+// written was left at the output path on no row, staging kept beside it. The
+// Cancel now stops that FFmpeg as it stops the normal finalize's: nothing is
+// written, the row stays Cancelled, the staging is kept.
+//
+// Mutant: the outage finalize muxing on o.muxRoot() alone again — the archive
+// is written.
+func TestACancelDuringAnOutageFinalizeStopsItsMux(t *testing.T) {
+	srv, first := liveTwitchWindow(t)
+	h := newEndVerdictHarness(t, "tw_outage_cancel")
+	// The recovery finds the broadcast over: the outage finalize.
+	h.variant.RecheckStreamFn = func(context.Context) (*twitch.TwitchStreamInfo, error) {
+		return &twitch.TwitchStreamInfo{IsLive: false}, nil
+	}
+	var cancelErr error
+	h.o.notifier = &cancelOnMuxing{Recorder: notificationtest.New(), cancel: func() {
+		_, _, cancelErr = h.w.CancelJob(h.job.ID)
+	}}
+
+	fresh, err := outageThenRecover(t, h, srv, first)
+	if cancelErr != nil {
+		t.Fatalf("the Cancel during the finalize was refused: %v", cancelErr)
+	}
+	if err == nil {
+		t.Error("the outage finalize returned nil after a Cancel during its mux")
+	}
+	if fresh.Status != database.StatusCancelled {
+		t.Errorf("status = %s after a Cancel during the outage finalize, want Cancelled", fresh.Status)
+	}
+	archive := filepath.Join(h.jobCtx.OutputDir, "outage.mp4")
+	if _, statErr := os.Stat(archive); statErr == nil {
+		t.Errorf("the outage finalize wrote %s after the Cancel: its FFmpeg was not stopped", archive)
+	}
+	if !stagedVideoHasBytes(h.jobCtx.StagingDir) {
+		t.Error("the staged capture is gone after a Cancel during the outage finalize, want it kept")
 	}
 }

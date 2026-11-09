@@ -140,6 +140,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		cancelMu.Unlock()
 		return sctx, scancel
 	}
+	// cancelOnUserCancel is the outage finalize's mux cancel: a user's Cancel
+	// reaches it and nothing else does (set and read under cancelMu).
+	var cancelOnUserCancel context.CancelFunc
 	defer callCancel()
 
 	// DB listener for cancellation (B6)
@@ -152,6 +155,12 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		if updatedJob.ID == jobID && updatedJob.Status == database.StatusCancelled {
 			userCancelled.Store(true)
 			callCancel()
+			cancelMu.Lock()
+			u := cancelOnUserCancel
+			cancelMu.Unlock()
+			if u != nil {
+				u()
+			}
 		}
 	})
 	defer unsubscribe()
@@ -1491,11 +1500,6 @@ sessionLoop:
 		// IMPORTANT: Fall through to muxing logic below.
 	}
 
-	// After the fall-through from connectivity loss, use the mux root for
-	// muxing: the job's own context is cancelled, but a shutdown must still be
-	// able to reach this FFmpeg (owner decision O-E). context.Background()
-	// here used to survive the child's exit and keep writing into a staging
-	// dir the respawned child re-muxes with -y.
 	// The finalize runs on a session of its own: only a user cancel or the
 	// job's own context (shutdown, deletion) can end it, never an offline
 	// transition (finalizing, above) — it needs no network. The fresh
@@ -1508,7 +1512,27 @@ sessionLoop:
 	finalCtx, _ := newSession()
 	muxCtx := finalCtx
 	if outageFinalize {
-		muxCtx = o.muxRoot()
+		// After the fall-through from connectivity loss the mux runs under the
+		// mux root, which outlives the job's own context: a shutdown reaches
+		// this FFmpeg through Stop's cut of the root (owner decision O-E), not
+		// the instant the job's context goes. context.Background() here used
+		// to survive the child's exit and keep writing into a staging dir the
+		// respawned child re-muxes with -y.
+		//
+		// A user's Cancel stops it as it stops the normal finalize's: the bare
+		// root never heard one, so FFmpeg ran on, the finish mark read the
+		// Cancelled row, and the archive it wrote was left on no row. The
+		// listener sets the flag before it reads the holder, and this installs
+		// the holder before it reads the flag, so one of the two sees the other.
+		var muxCancel context.CancelFunc
+		muxCtx, muxCancel = context.WithCancel(o.muxRoot())
+		defer muxCancel()
+		cancelMu.Lock()
+		cancelOnUserCancel = muxCancel
+		cancelMu.Unlock()
+		if userCancelled.Load() {
+			muxCancel()
+		}
 	}
 
 	// A VOD that was still recording when the job was set up has ended now:
