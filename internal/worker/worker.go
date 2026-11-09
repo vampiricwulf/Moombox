@@ -3085,10 +3085,23 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 	// Muxing row, which said the same only while no other caller could reach
 	// one. prior is read before the Muxing write below overwrites it.
 	capturedMux := !bootRemux
-	prior, _ := w.db.GetJob(jobID)
+	prior, err := w.db.GetJob(jobID)
+	if err == nil && prior == nil {
+		release()
+		return fmt.Errorf("mux: %w", ErrJobNotFound)
+	}
 	sources := jobverbs.MuxableStatuses()
 	if bootRemux {
 		sources = append(sources, database.StatusMuxing)
+	}
+	// A Finished job is muxed only for a part its finalize could not mux
+	// (jobverbs.MuxNeedsUnmuxedParts → HasUnmuxedParts), the fact the route
+	// and the TUI check on their own earlier read. Checked here too, on this
+	// read, and Finished leaves the write's source set unless it holds: a row
+	// read as Error that Finishes before the write is not written over.
+	unmuxedParts := prior != nil && jobverbs.MuxNeedsUnmuxedParts(prior.Status) && HasUnmuxedParts(w.db, stagingBase, jobID)
+	if !unmuxedParts {
+		sources = slices.DeleteFunc(sources, jobverbs.MuxNeedsUnmuxedParts)
 	}
 	if prior != nil && !slices.Contains(sources, prior.Status) {
 		release()
@@ -3107,8 +3120,12 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 		"park_reason": database.ParkReasonNone,
 	}) {
 		release()
+		cur, err := w.db.GetJob(jobID)
+		if err == nil && cur == nil {
+			return fmt.Errorf("mux: %w", ErrJobNotFound)
+		}
 		now := database.JobStatus("")
-		if cur, err := w.db.GetJob(jobID); err == nil && cur != nil {
+		if cur != nil {
 			now = cur.Status
 		}
 		return &NotAllowedError{Verb: "muxed", Status: now}

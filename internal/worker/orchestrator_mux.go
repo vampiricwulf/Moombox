@@ -1357,7 +1357,12 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// muxAndFinalize. One that landed before stands, the parts on their rows.
 	release, ok := o.finishing(jobCtx.Job.ID)
 	if !ok {
-		o.logger.Info("the job was cancelled as its parts were muxed; the row stays Cancelled", "jobID", jobCtx.Job.ID)
+		parts := make([]string, 0, len(segments))
+		for _, s := range segments {
+			parts = append(parts, s.FilePath)
+		}
+		o.logger.Warn("the job was cancelled as its parts were muxed; the row stays Cancelled, the parts are left on their rows",
+			"jobID", jobCtx.Job.ID, "parts", parts)
 		return ErrCancelled
 	}
 	defer release()

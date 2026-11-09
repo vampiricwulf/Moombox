@@ -108,6 +108,9 @@ func TestReinitResetFieldsAreTheSameForBothPaths(t *testing.T) {
 	// Columns no reset touches.
 	auto.UpdatedAt, auto.Version = manual.UpdatedAt, manual.Version
 	auto.Segments = manual.Segments
+	// Stamped by AddJob at one-second resolution in two separate setups,
+	// which can fall on either side of a second boundary.
+	auto.CreatedAt = manual.CreatedAt
 	if a, m := jobColumns(auto), jobColumns(manual); a != m {
 		t.Errorf("the two reinitialize paths leave different rows:\n manual %s\n auto   %s", m, a)
 	}
@@ -268,6 +271,159 @@ func TestMuxRefusesARowAResumeMovedOn(t *testing.T) {
 	}
 	if _, held := w.StagingClaimHolder("j-mux-resume"); held {
 		t.Error("the refused Mux kept the staging claim")
+	}
+}
+
+// TestMuxOfAFinishedRowNeedsAnUnmuxedPart: Mux is offered on a Finished job
+// only while a part its finalize could not mux is still in staging
+// (HasUnmuxedParts). The REST route and the TUI checked that on their own
+// earlier read; the worker checked only the status, so a caller whose row was
+// stale (read as Error, since Resumed and Finished with its staging kept)
+// wrote Muxing over the archive and re-finalized it. Refused now, the row and
+// the staging as they were.
+//
+// Mutant: muxJob without the unmuxed-part check — Mux answers nil and the
+// row reads Muxing (then Finished again, re-finalized).
+func TestMuxOfAFinishedRowNeedsAnUnmuxedPart(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	staging, _ := muxFixtureJob(t, w, db, "j-mux-fin")
+	if err := os.WriteFile(filepath.Join(staging, "video.mp4"), []byte("media"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db.UpdateJobFields("j-mux-fin", map[string]any{"status": database.StatusFinished, "output_file": "kept.mp4"})
+
+	err := w.MuxJob("j-mux-fin")
+	if !errors.Is(err, ErrNotAllowed) || err.Error() != "Job cannot be muxed in current state (Finished)" {
+		t.Fatalf("Mux of a Finished row with no unmuxed part = %v, want ErrNotAllowed naming Finished", err)
+	}
+	w.wg.Wait()
+	if j, _ := db.GetJob("j-mux-fin"); j.Status != database.StatusFinished || j.OutputFile != "kept.mp4" {
+		t.Errorf("row after the refused Mux = %s (%q), want Finished with its archive", j.Status, j.OutputFile)
+	}
+	if !HasSegmentFiles(filepath.Dir(staging), "j-mux-fin") {
+		t.Error("the refused Mux touched the staging")
+	}
+	if _, held := w.StagingClaimHolder("j-mux-fin"); held {
+		t.Error("the refused Mux kept the staging claim")
+	}
+}
+
+// TestMuxOfAJobWithNoRowIsNotFound: a Mux whose job's row is gone (deleted
+// after the caller's read) answered ErrNotAllowed with an empty status — a
+// 409 "Job cannot be muxed in current state ()". It is ErrJobNotFound, as the
+// reset verbs answer, and the route's 404.
+//
+// Mutant: the NotAllowedError on a missing row — errors.Is(ErrJobNotFound)
+// is false.
+func TestMuxOfAJobWithNoRowIsNotFound(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	staging, _ := muxFixtureJob(t, w, db, "j-mux-gone")
+	if err := os.WriteFile(filepath.Join(staging, "video.mp4"), []byte("media"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteJob("j-mux-gone"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.MuxJob("j-mux-gone"); !errors.Is(err, ErrJobNotFound) || errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("Mux of a job with no row = %v, want ErrJobNotFound", err)
+	}
+	if _, held := w.StagingClaimHolder("j-mux-gone"); held {
+		t.Error("the refused Mux kept the staging claim")
+	}
+}
+
+// splitFinalizeFixture is a Muxing job with two recorded parts beside its
+// output, for driving finalizeMultiSegmentJob directly (the split shape of
+// the finalize, which muxAndFinalize's single-file tests do not reach).
+func splitFinalizeFixture(t *testing.T, w *DownloadWorker, db *database.Database, id string) (*JobContext, []database.Segment) {
+	t.Helper()
+	job := &database.Job{ID: id, VideoID: id, URL: "u", Platform: "twitch", Status: database.StatusMuxing}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	var segments []database.Segment
+	for i := range 2 {
+		name := "Show - part" + string(rune('1'+i)) + ".mp4"
+		p := filepath.Join(root, name)
+		if err := os.WriteFile(p, []byte("part"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		seg := database.Segment{JobID: id, SegmentIndex: i, Filename: name, FilePath: p,
+			UnixStart: 1_700_000_000 + int64(i)*600, DurationSeconds: 300}
+		if err := db.AddSegment(&seg); err != nil {
+			t.Fatal(err)
+		}
+		segments = append(segments, seg)
+	}
+	jobCtx := &JobContext{Job: job, DB: db, Config: &JobConfig{}, StagingDir: t.TempDir(),
+		OutputDir: root, Filename: "Show", Logger: &discardLogger{}}
+	return jobCtx, segments
+}
+
+// TestALateCancelOfASplitFinalizeLeavesItFinished is R-C1 in the split
+// shape: a Cancel after finalizeMultiSegmentJob has muxed its parts and
+// marked itself finishing is refused with ErrAlreadyFinishing, and the job
+// ends Finished.
+//
+// Mutant: no finishing() call in finalizeMultiSegmentJob — the Cancel lands
+// (Cancelled, answered success) and the finalize writes Finished over it.
+func TestALateCancelOfASplitFinalizeLeavesItFinished(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	jobCtx, segments := splitFinalizeFixture(t, w, db, "j-split-late")
+	var cancelled bool
+	var cancelErr error
+	w.orchestrator.logger = &onInfoLogger{prefix: "multi-segment download complete", hook: func() {
+		cancelled, _, cancelErr = w.CancelJob("j-split-late")
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // no network for copyAssets' thumbnail fallback
+	if err := w.orchestrator.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil); err != nil {
+		t.Fatalf("finalizeMultiSegmentJob: %v", err)
+	}
+	if cancelled || !errors.Is(cancelErr, ErrAlreadyFinishing) {
+		t.Errorf("late Cancel = %v, %v; want refused with ErrAlreadyFinishing", cancelled, cancelErr)
+	}
+	if j, _ := db.GetJob("j-split-late"); j.Status != database.StatusFinished {
+		t.Errorf("row = %s, want Finished", j.Status)
+	}
+}
+
+// TestACancelBeforeASplitFinalizeIsMarkedStands: the other side, split
+// shape. A Cancel acknowledged before the finalize marks itself finishing
+// stands: the finalize stops with ErrCancelled, the row stays Cancelled, and
+// the parts stay on their rows and on disk.
+//
+// Mutant: the !ok branch after finishing() dropped — the finalize writes
+// Finished over the acknowledged Cancel.
+func TestACancelBeforeASplitFinalizeIsMarkedStands(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	jobCtx, segments := splitFinalizeFixture(t, w, db, "j-split-early")
+	mark := w.orchestrator.beginFinishing
+	var cancelled bool
+	w.orchestrator.beginFinishing = func(id string) (func(), bool) {
+		cancelled, _, _ = w.CancelJob(id)
+		return mark(id)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := w.orchestrator.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil); !errors.Is(err, ErrCancelled) {
+		t.Fatalf("finalizeMultiSegmentJob = %v, want ErrCancelled", err)
+	}
+	if !cancelled {
+		t.Fatal("the Cancel ahead of the mark was refused")
+	}
+	if j, _ := db.GetJob("j-split-early"); j.Status != database.StatusCancelled {
+		t.Errorf("row = %s, want the acknowledged Cancel standing", j.Status)
+	}
+	rows, _ := db.GetSegments("j-split-early")
+	if len(rows) != 2 {
+		t.Errorf("segment rows = %d, want both parts kept", len(rows))
+	}
+	for _, s := range segments {
+		if _, err := os.Stat(s.FilePath); err != nil {
+			t.Errorf("part %s gone: %v", s.Filename, err)
+		}
 	}
 }
 

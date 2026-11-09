@@ -274,6 +274,7 @@ func TestMuxAnswersByTheWorkersReason(t *testing.T) {
 	}{
 		{"the row moved on", moved, http.StatusConflict},
 		{"the staging is busy", fmt.Errorf("%w (set-aside recovery in progress)", worker.ErrStagingBusy), http.StatusConflict},
+		{"the row is gone", fmt.Errorf("mux: %w", worker.ErrJobNotFound), http.StatusNotFound},
 		{"a fault", errors.New("boom"), http.StatusInternalServerError},
 	} {
 		muxJob = func(*worker.DownloadWorker, string) error { return tc.err }

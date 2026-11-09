@@ -1218,9 +1218,14 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 				// Mux is not offered on since the read above. Error→status mapping only —
 				// the status and HasSegmentFiles gates above decide what is
 				// muxable.
+				// ErrJobNotFound: the row was deleted since the read above,
+				// a 404 as refuseVerbError answers it for the reset verbs.
 				status := http.StatusInternalServerError
-				if errors.Is(err, worker.ErrStagingBusy) || errors.Is(err, worker.ErrNotAllowed) {
+				switch {
+				case errors.Is(err, worker.ErrStagingBusy), errors.Is(err, worker.ErrNotAllowed):
 					status = http.StatusConflict
+				case errors.Is(err, worker.ErrJobNotFound):
+					status = http.StatusNotFound
 				}
 				jsonError(rw, err.Error(), status)
 				return
