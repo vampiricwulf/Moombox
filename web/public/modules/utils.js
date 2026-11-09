@@ -559,77 +559,92 @@ export function parkedCookiePlatforms(jobs) {
  * not reintroduce it here or there — the TUI has never had one, and the two
  * surfaces are supposed to agree. See updateStatusBar in app.js.
  *
- * `parked` is the fourth state and the Web half of a divergence: a job stopped
- * in COOKIES? for want of usable credentials. It ranks SECOND, immediately
- * under re-login and above `authenticated`, which is exactly where the TUI
- * ranks it (renderCookieStatus, internal/tui/status_bar.go) and for the TUI's
- * stated reason — a park is evidence from a real download attempt that
- * something tried these credentials and could not proceed, and it therefore
- * outranks a check that merely asked. Ranking it below `authenticated` would
- * hide it behind a healthy check, which is the state it exists to contradict.
- * It comes from the caller because it is computed from the job list rather than
- * from the status payload; see parkedCookiePlatforms.
+ * `parked` (a job stopped in COOKIES? for want of usable credentials) comes
+ * from the caller because it is computed from the job list rather than from
+ * the status payload; see parkedCookiePlatforms. `status.fileError` means
+ * cookies.txt is PRESENT and could not be read, which the `!found` arm used to
+ * render as never-configured.
  *
- * `status.fileError` is the fifth state and ranks immediately under
- * `authenticated`: cookies.txt is PRESENT and could not be read, which the
- * `!found` arm below used to render as never-configured. See the arm itself for
- * why it sits under the green one rather than over it.
+ * ONE PRECEDENCE, THE TUI'S (owner ruling R-D4): COOKIE_BADGE_PRECEDENCE,
+ * compared with tui.CookieBadgePrecedence by cmd/moombox's parity test. The
+ * check alone decides one of fileUnreadable / rejected / unknown / none / ok —
+ * cmd/moombox cookieBadgeFor's ladder, `authenticated` first, so an unreadable
+ * file under a jar that still authenticates stays green — and relogin and
+ * parked are laid over it in the list's order. Relogin first; then an
+ * unreadable cookies.txt, ABOVE a parked job: it explains the park, and it is
+ * the one remedy the parked arm would send the operator away from. The
+ * dashboard used to rank parked above it, so the same state read "YT?" in
+ * the TUI and red "download stopped for want of credentials" here. Parked
+ * outranks a healthy check: a park is evidence from a real download attempt,
+ * and it outranks a check that merely asked.
  *
- * The reason line is `youtubeError` / `twitchError` off the same payload, and
- * it is appended to whichever arm has one. Until Arc 10 that was the
- * inconclusive arm alone, on the belief that a conclusive verdict never
- * carries a reason. TWO producers do. The server maps its
- * "auth check could not be attempted" sentinel — a jar that is configured and
- * can never be signed — to `failed` while still recording the error, so the
- * old rule silently dropped the one cause whose remedy is exactly "re-export
- * your cookies"; and since Arc 10 `NoteTwitchAuthLoss` writes `failed` with a
- * fixed sentence naming which of the four Twitch chat-downgrade routes broke,
- * which is the only thing distinguishing "no login cookie" from "Twitch
- * refused the login". An `ok` verdict still shows nothing, by construction:
- * the server derives that verdict from the same error the string carries, so
- * `ok` and a non-empty reason cannot co-occur. An older binary sends no such
  * key at all and both titles degrade to exactly today's sentence.
  */
 export function cookieIndicatorState(platform, status, reloginRequired, parked) {
   const meta = COOKIE_INDICATOR_PLATFORMS[platform];
-  if (reloginRequired) {
-    return { className: "indicator-error", title: `${meta.name}: Re-login required` };
-  }
-  if (parked) {
-    return {
-      className: "indicator-error",
-      title: `${meta.name}: A download stopped for want of usable credentials`,
-    };
-  }
-  if (status?.authenticated) {
-    return { className: "indicator-ok", title: `${meta.name}: Authenticated` };
-  }
-  // AFTER `authenticated` and BEFORE `!found`. A cookies.txt that cannot be
-  // read renders as never-configured on the `!found` arm — the container
-  // operator is told "no cookies" about a file sitting on the volume — but a
-  // jar that still authenticates is doing real work, and reddening that badge
-  // would report a stale-reload problem as a credential problem. `fileError`
-  // is path-and-cause only (see AuthStatus.CookieFileError); an older binary
-  // omits the key entirely and this arm never fires, which is the additive
-  // contract every other key here follows.
-  if (status?.fileError) {
-    return {
-      className: "indicator-error",
-      title: `${meta.name}: cookies.txt could not be read (${status.fileError})`,
-    };
-  }
-  if (!status?.found) {
-    return meta.absent;
-  }
+  const state = cookieBadgeState(cookieCheckState(status), !!reloginRequired, !!parked);
   const reason = status?.[meta.errorKey];
   const cause = reason ? ` (${reason})` : "";
-  if (status?.verification === "unknown") {
-    return {
-      className: "indicator-warn",
-      title: `${meta.name}: Cookies saved — Moombox could not establish whether they work${cause}`,
-    };
+  switch (state) {
+    case "relogin":
+      return { className: "indicator-error", title: `${meta.name}: Re-login required` };
+    case "fileUnreadable":
+      return { className: "indicator-error", title: `${meta.name}: cookies.txt could not be read (${status.fileError})` };
+    case "parked":
+      return { className: "indicator-error", title: `${meta.name}: A download stopped for want of usable credentials` };
+    case "rejected":
+      return { className: "indicator-error", title: `${meta.name}: Not authenticated${cause}` };
+    case "unknown":
+      return {
+        className: "indicator-warn",
+        title: `${meta.name}: Cookies saved — Moombox could not establish whether they work${cause}`,
+      };
+    case "none":
+      return meta.absent;
   }
-  return { className: "indicator-error", title: `${meta.name}: Not authenticated${cause}` };
+  return { className: "indicator-ok", title: `${meta.name}: Authenticated` };
+}
+
+/**
+ * COOKIE_BADGE_PRECEDENCE is the cookie badge's one written precedence (owner
+ * ruling R-D4), the TUI's: tui.CookieBadgePrecedence, which renderCookieStatus
+ * (internal/tui/status_bar.go) follows. Parked and rejected render alike in the
+ * TUI and sit side by side. cmd/moombox's parity test compares the two lists.
+ */
+export const COOKIE_BADGE_PRECEDENCE = ["relogin", "fileUnreadable", "parked", "rejected", "unknown", "none", "ok"];
+
+/**
+ * cookieCheckState is what the auth check alone says, the dashboard's twin of
+ * cmd/moombox cookieBadgeFor: "ok" when authenticated (first, so an older
+ * binary's Twitch payload, which has no `found`, still reads as signed in,
+ * and an unreadable file under a jar that still authenticates stays green),
+ * then "fileUnreadable", "none" (no cookies), "unknown" (inconclusive) and
+ * "rejected" (cookies the site refused). `fileError` and `verification` are
+ * additive keys an older binary omits; their arms then never fire.
+ * @param {object|null|undefined} status
+ * @returns {"ok"|"fileUnreadable"|"none"|"unknown"|"rejected"}
+ */
+export function cookieCheckState(status) {
+  if (status?.authenticated) return "ok";
+  if (status?.fileError) return "fileUnreadable";
+  if (!status?.found) return "none";
+  if (status?.verification === "unknown") return "unknown";
+  return "rejected";
+}
+
+/**
+ * cookieBadgeState lays relogin and parked over the check's state by
+ * COOKIE_BADGE_PRECEDENCE: the first state on the list that holds.
+ * @param {string} check cookieCheckState's answer
+ * @param {boolean} relogin
+ * @param {boolean} parked
+ * @returns {string}
+ */
+export function cookieBadgeState(check, relogin, parked) {
+  for (const s of COOKIE_BADGE_PRECEDENCE) {
+    if (s === "relogin" ? relogin : s === "parked" ? parked : check === s) return s;
+  }
+  return check;
 }
 
 /**

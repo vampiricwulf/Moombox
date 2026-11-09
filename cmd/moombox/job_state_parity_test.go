@@ -11,6 +11,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobstate"
+	"github.com/vampiricwulf/Moombox/internal/tui"
 )
 
 // jobStateParityFile is the table both implementations of the derived job
@@ -169,5 +170,28 @@ func TestQueuedHoldParity(t *testing.T) {
 	}
 	if strings.Join(js, ",") != strings.Join(goList, ",") {
 		t.Errorf("utils.js HOLD_PRECEDENCE = %v, jobstate.HoldPrecedence = %v", js, goList)
+	}
+}
+
+// TestCookieBadgePrecedenceMatchesTheDashboard pins owner ruling R-D4: the
+// dashboard's COOKIE_BADGE_PRECEDENCE (utils.js, walked by
+// cookieIndicatorState) is the TUI's tui.CookieBadgePrecedence, state for
+// state and in order. They ranked an unreadable cookies.txt and a parked job
+// in opposite orders, so one state read "YT?" in the TUI and red "a download
+// stopped" on the dashboard.
+//
+// Mutant: either list reordered or a state renamed.
+func TestCookieBadgePrecedenceMatchesTheDashboard(t *testing.T) {
+	m := regexp.MustCompile(`(?m)^export const COOKIE_BADGE_PRECEDENCE = \[([^\]]*)\];`).FindStringSubmatch(readUtilsJS(t))
+	if m == nil {
+		t.Fatal("utils.js: COOKIE_BADGE_PRECEDENCE not found")
+	}
+	var js []string
+	for _, lit := range regexp.MustCompile(`"[^"]*"`).FindAllString(m[1], -1) {
+		u, _ := strconv.Unquote(lit)
+		js = append(js, u)
+	}
+	if strings.Join(js, ",") != strings.Join(tui.CookieBadgePrecedence, ",") {
+		t.Errorf("utils.js COOKIE_BADGE_PRECEDENCE = %v, tui.CookieBadgePrecedence = %v", js, tui.CookieBadgePrecedence)
 	}
 }
