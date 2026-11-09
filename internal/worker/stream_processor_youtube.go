@@ -270,8 +270,12 @@ func (sp *StreamProcessor) applyFetchedMetadata(job *database.Job, info *youtube
 // which is the go-live path's to write, and a probe that reports no schedule
 // changes nothing.
 func (sp *StreamProcessor) applyScheduleAnswer(job *database.Job, sched *youtube.VideoInfo, scheduledStartTime *string) {
-	if sched.IsUpcoming && !sched.IsLive && sched.ScheduledStartTime != "" {
-		sp.applyFetchedMetadata(job, &youtube.VideoInfo{ScheduledStartTime: sched.ScheduledStartTime, IsUpcoming: true}, scheduledStartTime)
+	if sched.NotYetLive() && sched.ScheduledStartTime != "" {
+		// A stub carrying the schedule alone, classified upcoming through
+		// SetStatus so its status and IsUpcoming agree (K53).
+		stub := &youtube.VideoInfo{ScheduledStartTime: sched.ScheduledStartTime}
+		stub.SetStatus(youtube.StreamUpcoming)
+		sp.applyFetchedMetadata(job, stub, scheduledStartTime)
 	}
 }
 
@@ -469,7 +473,10 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			if _, blind := errors.AsType[*youtube.StatusProbeInconclusiveError](probeErr); !blind {
 				continue
 			}
-			probeInfo = &youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming}
+			// Through SetStatus, so the stand-in's IsUpcoming agrees with its
+			// status like any parsed answer's (K53).
+			probeInfo = &youtube.VideoInfo{}
+			probeInfo.SetStatus(youtube.StreamUpcoming)
 		} else {
 			consecutiveErrors = 0
 			// Successful probe (HTTP 200 reached the service) — feed the oracle so a

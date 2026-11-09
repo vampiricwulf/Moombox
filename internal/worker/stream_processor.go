@@ -839,7 +839,7 @@ func (sp *StreamProcessor) applyJobMetadata(job *database.Job, info *youtube.Vid
 			if !sameInstant(info.ScheduledStartTime, job.StreamStartTime) {
 				if job.StreamStartTime == "" {
 					notifyStartTimeConfirmed = true
-				} else if info.IsUpcoming && !info.IsLive {
+				} else if info.NotYetLive() {
 					// Only notify schedule change for genuine reschedules: a
 					// stream still upcoming, as the confirmation below asks.
 					// Once a stream has begun YouTube puts its ACTUAL start in
@@ -910,7 +910,7 @@ func (sp *StreamProcessor) applyJobMetadata(job *database.Job, info *youtube.Vid
 
 	// Notifications
 	//
-	// IsUpcoming && !IsLive, not ||: a stream first observed ALREADY LIVE
+	// NotYetLive (IsUpcoming && !IsLive), not ||: a stream first observed ALREADY LIVE
 	// produced a "Scheduled:" embed seconds before "YouTube Download
 	// Starting", which carries the same time in its own "Scheduled For"
 	// field. Two embeds for one moment, the first of them announcing a
@@ -922,7 +922,7 @@ func (sp *StreamProcessor) applyJobMetadata(job *database.Job, info *youtube.Vid
 	// on a LATER fetch, when the discovery is long announced.
 	if announceFound {
 		sp.sendStreamFound(job, info)
-	} else if notifyStartTimeConfirmed && info.IsUpcoming && !info.IsLive && sp.notifier != nil {
+	} else if notifyStartTimeConfirmed && info.NotYetLive() && sp.notifier != nil {
 		sp.notifier.Send(startTimeConfirmed(job))
 	}
 

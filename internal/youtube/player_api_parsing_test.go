@@ -136,7 +136,7 @@ func TestClassifyStream_UpcomingReasonInMessagesOnly(t *testing.T) {
 		"status":   "UNPLAYABLE",
 		"messages": []any{"This live event will begin in a few moments"},
 	}
-	status, _, isUpcoming, _ := classifyStream(vd, ps, nil, false)
+	status, _, isUpcoming, _ := classified(classifyStream(vd, ps, nil, false))
 	if status != StreamUpcoming {
 		t.Errorf("expected StreamUpcoming from messages[0], got %q", status)
 	}
@@ -195,7 +195,7 @@ func TestParsePlayabilityStatus_FallbackMessages(t *testing.T) {
 
 func TestClassifyStream_NotAStream(t *testing.T) {
 	vd := map[string]any{"isLiveContent": false}
-	status, isLive, isUpcoming, isPostLiveDVR := classifyStream(vd, nil, nil, true)
+	status, isLive, isUpcoming, isPostLiveDVR := classified(classifyStream(vd, nil, nil, true))
 	if status != StreamNotAStream {
 		t.Errorf("expected StreamNotAStream, got %q", status)
 	}
@@ -209,7 +209,7 @@ func TestClassifyStream_Live(t *testing.T) {
 		"isLiveContent": true,
 		"isLive":        true,
 	}
-	status, isLive, isUpcoming, _ := classifyStream(vd, nil, nil, true)
+	status, isLive, isUpcoming, _ := classified(classifyStream(vd, nil, nil, true))
 	if status != StreamLive {
 		t.Errorf("expected StreamLive, got %q", status)
 	}
@@ -224,7 +224,7 @@ func TestClassifyStream_Live(t *testing.T) {
 func TestClassifyStream_Upcoming(t *testing.T) {
 	vd := map[string]any{"isLiveContent": true}
 	ps := map[string]any{"status": "LIVE_STREAM_OFFLINE"}
-	status, _, isUpcoming, _ := classifyStream(vd, ps, nil, false)
+	status, _, isUpcoming, _ := classified(classifyStream(vd, ps, nil, false))
 	if status != StreamUpcoming {
 		t.Errorf("expected StreamUpcoming, got %q", status)
 	}
@@ -242,7 +242,7 @@ func TestClassifyStream_UpcomingVD_WaitingRoom(t *testing.T) {
 		"isLive":        true,
 		"isUpcoming":    true,
 	}
-	status, isLive, isUpcoming, _ := classifyStream(vd, nil, nil, false)
+	status, isLive, isUpcoming, _ := classified(classifyStream(vd, nil, nil, false))
 	if status != StreamUpcoming {
 		t.Errorf("expected StreamUpcoming for waiting room, got %q", status)
 	}
@@ -262,7 +262,7 @@ func TestClassifyStream_UpcomingVD_WithFormats(t *testing.T) {
 		"isLive":        true,
 		"isUpcoming":    true,
 	}
-	status, isLive, _, _ := classifyStream(vd, nil, nil, true)
+	status, isLive, _, _ := classified(classifyStream(vd, nil, nil, true))
 	if status == StreamUpcoming {
 		t.Error("should not classify as upcoming when formats are present")
 	}
@@ -278,7 +278,7 @@ func TestClassifyStream_UpcomingVD_Only(t *testing.T) {
 		"isLiveContent": true,
 		"isUpcoming":    true,
 	}
-	status, _, isUpcoming, _ := classifyStream(vd, nil, nil, false)
+	status, _, isUpcoming, _ := classified(classifyStream(vd, nil, nil, false))
 	if status != StreamUpcoming {
 		t.Errorf("expected StreamUpcoming, got %q", status)
 	}
@@ -294,7 +294,7 @@ func TestClassifyStream_VOD(t *testing.T) {
 			"startTimestamp": "2025-01-01T00:00:00Z",
 		},
 	}
-	status, _, _, _ := classifyStream(vd, nil, mf, true)
+	status, _, _, _ := classified(classifyStream(vd, nil, mf, true))
 	if status != StreamVOD {
 		t.Errorf("expected StreamVOD, got %q", status)
 	}
@@ -319,7 +319,7 @@ func TestClassifyStream_LiveStreamabilityFallback(t *testing.T) {
 		},
 	}
 
-	status, _, isUpcoming, _ := classifyStream(vd, ps, nil, false)
+	status, _, isUpcoming, _ := classified(classifyStream(vd, ps, nil, false))
 	if status != StreamUpcoming {
 		t.Errorf("expected StreamUpcoming from liveStreamability, got %q", status)
 	}
@@ -340,7 +340,7 @@ func TestClassifyStream_LiveStreamabilityDoesNotOverrideFormats(t *testing.T) {
 		},
 	}
 
-	status, isLive, _, _ := classifyStream(vd, ps, nil, true)
+	status, isLive, _, _ := classified(classifyStream(vd, ps, nil, true))
 	if status == StreamUpcoming {
 		t.Errorf("should not classify as upcoming when formats are present, got %q", status)
 	}
@@ -357,7 +357,7 @@ func TestClassifyStream_PostLiveDVR(t *testing.T) {
 			"endTimestamp":   "2025-01-01T02:00:00Z",
 		},
 	}
-	status, _, _, isPostLiveDVR := classifyStream(vd, nil, mf, true)
+	status, _, _, isPostLiveDVR := classified(classifyStream(vd, nil, mf, true))
 	if status != StreamPostLive {
 		t.Errorf("expected StreamPostLive, got %q", status)
 	}
