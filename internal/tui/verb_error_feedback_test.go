@@ -39,7 +39,7 @@ func TestVerbRefusalReachesTheFeedbackLine(t *testing.T) {
 			}
 			return nil
 		}
-		app.OnMuxJob = func(string) error { return errors.New("mux in progress") }
+		app.OnMuxJob = func(string) error { return RefusalError{Err: errors.New("mux in progress")} }
 		app.taskList.SetJobs([]*database.Job{
 			{ID: "a", Title: "Alpha", Status: database.StatusError, Platform: "youtube", CreatedAt: "2026-10-04T10:00:00Z"},
 			{ID: "b", Title: "Beta", Status: database.StatusCancelled, Platform: "youtube", CreatedAt: "2026-10-04T09:00:00Z"},
@@ -66,8 +66,18 @@ func TestVerbRefusalReachesTheFeedbackLine(t *testing.T) {
 	press(app, 'a')
 	press(app, 'm')
 	press(app, 'm')
-	if !strings.Contains(app.feedback.msg, "mux in progress") || app.feedback.sev != severityError {
+	if app.feedback.msg != "mux in progress" || app.feedback.sev != severityError {
 		t.Errorf("A M refused: line %q (sev %v), want exactly the worker's text (REST's 409) in red", app.feedback.msg, app.feedback.sev)
+	}
+
+	// A fault while the mux ran, not a refusal, keeps its prefix.
+	app = newApp()
+	app.OnMuxJob = func(string) error { return errors.New("ffmpeg exited 1") }
+	press(app, 'a')
+	press(app, 'm')
+	press(app, 'm')
+	if app.feedback.msg != "Mux failed: ffmpeg exited 1" || app.feedback.sev != severityError {
+		t.Errorf("A M failed: line %q (sev %v), want \"Mux failed: \" before the fault, in red", app.feedback.msg, app.feedback.sev)
 	}
 
 	// A batch: one refused, one resumed.

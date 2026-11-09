@@ -690,7 +690,11 @@ type App struct {
 	// PR-M1), for A I's confirm line. A disk probe: run when the confirm is
 	// armed, never when the menu opens. nil leaves the line as it was.
 	ReinitializeSummary func(jobIDs []string) string
-	OnMuxJob            func(jobID string) error
+	// OnMuxJob's error is shown after "Mux failed: " — unless it is a
+	// RefusalError, the worker declining the verb (the row moved, the staging
+	// is busy, the row is gone), which is shown as it is: the text REST puts
+	// in its 409 or 404.
+	OnMuxJob func(jobID string) error
 	// OnRecoverAsides muxes the recordings the engine set aside for a job into
 	// their own files beside the archive (the A S chord). Deliberately NOT
 	// OnMuxJob: /mux and A M mean "mux the recording", and an aside overlaps

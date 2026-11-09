@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -226,7 +227,12 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 	case "A M":
 		if job != nil && a.OnMuxJob != nil {
 			if err := a.OnMuxJob(job.ID); err != nil {
-				a.setFeedbackWithSeverity(fmt.Sprintf("Mux failed: %s", err), severityError)
+				var refusal RefusalError
+				if errors.As(err, &refusal) {
+					a.setFeedbackWithSeverity(err.Error(), severityError)
+				} else {
+					a.setFeedbackWithSeverity(fmt.Sprintf("Mux failed: %s", err), severityError)
+				}
 			} else {
 				a.setFeedback(fmt.Sprintf("Muxing: %s", job.Title))
 			}

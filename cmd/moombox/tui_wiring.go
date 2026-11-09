@@ -247,7 +247,7 @@ func (s *runState) runTUI() {
 		return total.Summary()
 	}
 	app.OnMuxJob = func(jobID string) error {
-		return s.dlWorker.MuxJob(jobID)
+		return muxRefusal(s.dlWorker.MuxJob(jobID))
 	}
 	app.HasStagingFiles = func(jobID string) bool {
 		var base string
@@ -1452,6 +1452,17 @@ func tuiChapterView(v *routes.ChapterImportView) tui.ChapterImportView {
 		Embedded:             v.Embedded,
 		EmbedError:           v.EmbedError,
 	}
+}
+
+// muxRefusal marks the worker's refusals of a Mux — ErrNotAllowed and
+// ErrStagingBusy (REST's 409), ErrJobNotFound (its 404) — as a
+// tui.RefusalError, so A M shows their text as REST answers it; any other
+// error is a fault, which A M reports as "Mux failed: ...".
+func muxRefusal(err error) error {
+	if errors.Is(err, worker.ErrNotAllowed) || errors.Is(err, worker.ErrStagingBusy) || errors.Is(err, worker.ErrJobNotFound) {
+		return tui.RefusalError{Err: err}
+	}
+	return err
 }
 
 // quietIfAlreadyPending answers the worker's ErrAlreadyPending — the same
