@@ -1116,10 +1116,12 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		if w != nil {
-			if refuseWhileChapterImport(rw, w, jobID) {
+			if refuseWhileStagingClaimed(rw, w, jobID) {
 				return
 			}
-			w.ResumeJob(jobID)
+			if refuseVerbError(rw, resumeJob(w, jobID)) {
+				return
+			}
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})
@@ -1141,10 +1143,12 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		if w != nil {
-			if refuseWhileChapterImport(rw, w, jobID) {
+			if refuseWhileStagingClaimed(rw, w, jobID) {
 				return
 			}
-			w.ReinitializeJob(jobID)
+			if refuseVerbError(rw, reinitializeJob(w, jobID)) {
+				return
+			}
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})
@@ -1545,19 +1549,52 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// refuseWhileChapterImport answers 409 and reports true when a chapter import
-// holds jobID's claim (owner decision PR-M5): Resume and Retry start a run
-// whose finalize writes the archive the import's re-mux is about to rename
-// its copy over, and Reinitialize deletes the parts and staging beside an
-// archive mid-replace. The operator tries again once the import is done; the
-// worker waits out one that starts after this check (afterJobExit).
-func refuseWhileChapterImport(rw http.ResponseWriter, w *worker.DownloadWorker, jobID string) bool {
-	if !w.ChapterImportRunning(jobID) {
+// refuseWhileStagingClaimed answers 409 naming the operation and reports true
+// when any operation holds jobID's staging claim (owner ruling R-A2, which
+// generalised owner decision PR-M5's chapter-import refusal). During a chapter
+// import, Resume and Retry start a run whose finalize writes the archive the
+// import's re-mux is about to rename its copy over, and Reinitialize deletes
+// the parts and staging beside an archive mid-replace; during a set-aside
+// recovery or a Mux, Reinitialize deletes the staging FFmpeg is reading and
+// Resume starts a run that writes it. The operator tries again once the
+// operation is done; the worker waits out one that starts after this check
+// (afterJobExit). The chapter import keeps its own wording.
+func refuseWhileStagingClaimed(rw http.ResponseWriter, w *worker.DownloadWorker, jobID string) bool {
+	op, held := w.StagingClaimHolder(jobID)
+	if !held {
 		return false
 	}
-	jsonError(rw, "A chapter import is rewriting this job's archive; try again once it is done", http.StatusConflict)
+	msg := fmt.Sprintf("This job's staging is busy (%s in progress); try again once it is done", op)
+	if w.ChapterImportRunning(jobID) {
+		msg = "A chapter import is rewriting this job's archive; try again once it is done"
+	}
+	jsonError(rw, msg, http.StatusConflict)
 	return true
 }
+
+// refuseVerbError answers a worker verb's refusal and reports true when there
+// was one: 409 with the worker's text for ErrResetPending (a different verb
+// already waits on the job, owner ruling R-A3 — "reinitialize already
+// pending"), 500 for anything else.
+func refuseVerbError(rw http.ResponseWriter, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, worker.ErrResetPending):
+		jsonError(rw, err.Error(), http.StatusConflict)
+	default:
+		jsonError(rw, err.Error(), http.StatusInternalServerError)
+	}
+	return true
+}
+
+// resumeJob and reinitializeJob are the routes' calls into the worker's
+// verbs; variables so a test can answer the refusals a real worker gives only
+// mid-wait.
+var (
+	resumeJob       = func(w *worker.DownloadWorker, jobID string) error { return w.ResumeJob(jobID) }
+	reinitializeJob = func(w *worker.DownloadWorker, jobID string) error { return w.ReinitializeJob(jobID) }
+)
 
 // cancelJob is the cancel route's write: the worker's CancelJob, which also
 // stops a run in flight, or with no worker the same conditional write alone.
