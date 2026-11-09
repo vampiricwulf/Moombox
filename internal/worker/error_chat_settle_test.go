@@ -97,3 +97,45 @@ func TestResumeAcceptsAnErrorRowWithAnIncompleteChat(t *testing.T) {
 		t.Errorf("after Resume row = %s, want Downloading", row.Status)
 	}
 }
+
+// TestAPanickedYouTubeRunSettlesItsChat: R-E1's settle on the panic Error
+// paths. A YouTube run that panics is written to Error by recordRunPanic (or
+// Start's recover, which has the job ID alone), not by setJobError, and so
+// left "downloading" on the Error row — the symptom R-E1 removes. Both write
+// through writePanicError, which settles an in-flight chat once its Error
+// write applies; a row whose Error write did not apply (a Finished row) keeps
+// its chat as it is.
+//
+// Mutant: writePanicError without the settle — the first two cases keep
+// "downloading"/"pending".
+func TestAPanickedYouTubeRunSettlesItsChat(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status database.JobStatus
+		chat   database.ChatStatus
+		viaID  bool // Start's recover: the job ID alone
+		want   database.ChatStatus
+	}{
+		{"recordRunPanic, downloading", database.StatusDownloading, database.ChatDownloading, false, database.ChatIncomplete},
+		{"Start's recover, pending", database.StatusDownloading, database.ChatPending, true, database.ChatIncomplete},
+		{"a row already Finished", database.StatusFinished, database.ChatDownloading, false, database.ChatDownloading},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			job := &database.Job{ID: "p", VideoID: "v", URL: "u", Platform: "youtube",
+				Status: tc.status, ChatStatus: tc.chat}
+			if _, err := db.AddJob(job); err != nil {
+				t.Fatal(err)
+			}
+			if tc.viaID {
+				w.writePanicError(job.ID, nil, "boom")
+			} else {
+				w.recordRunPanic(job.ID, job, "boom")
+			}
+			row, _ := db.GetJob(job.ID)
+			if row.ChatStatus != tc.want {
+				t.Errorf("chat_status = %q (status %s), want %q", row.ChatStatus, row.Status, tc.want)
+			}
+		})
+	}
+}

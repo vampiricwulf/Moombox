@@ -609,10 +609,7 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 				// Complete.
 				if r := recover(); r != nil {
 					w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
-					w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
-						"status": database.StatusError,
-						"error":  fmt.Sprintf("internal panic: %v", r),
-					})
+					w.writePanicError(jobID, nil, r)
 				}
 			}()
 			w.processJob(jobCtx, jobID)
@@ -1741,10 +1738,33 @@ func (w *DownloadWorker) recordRunPanic(jobID string, job *database.Job, r any) 
 			}
 		}
 	}
-	w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
+	w.writePanicError(jobID, job, r)
+}
+
+// writePanicError writes a panicked run's Error, guarded by the terminal
+// statuses, and settles the chat it leaves in flight as setJobError's Error
+// does (owner ruling R-E1): recordRunPanic and Start's recover both write
+// through it, so a YouTube run that panics mid-capture does not leave
+// "downloading" on its Error row. job may be nil (Start's recover has the ID
+// alone); the row is read for its platform then. The settle does not stop a
+// chat downloader the panic left running (the orchestrator's cleanup is an
+// explicit call, not a deferred one), and a downloader left running that way
+// can still write its own value (OnStart's "downloading") over the settle.
+func (w *DownloadWorker) writePanicError(jobID string, job *database.Job, r any) {
+	if !w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
 		"status": database.StatusError,
 		"error":  fmt.Sprintf("internal panic: %v", r),
-	})
+	}) {
+		return
+	}
+	if job == nil {
+		row, err := w.db.GetJob(jobID)
+		if err != nil || row == nil {
+			return
+		}
+		job = row
+	}
+	w.settleErrorChat(job)
 }
 
 // handleCancellation handles a cancelled/shutdown job.
