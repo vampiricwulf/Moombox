@@ -541,11 +541,17 @@ func (m *StatusBarModel) renderMetrics(t barTier, counts barJobCounts) string {
 
 		freeGB := float64(m.diskFree) / (1024 * 1024 * 1024)
 		pct := int(m.diskUsedPct)
+		// The short forms mark a hold with ⏸ (the Queued rows' hold tag), so a
+		// narrow terminal still tells a held gate from an ordinary warn.
+		mark := ""
+		if holding {
+			mark = "⏸"
+		}
 		switch {
 		case t >= tierTight:
-			parts = append(parts, style.Render(fmt.Sprintf("D:%d%%", pct)))
+			parts = append(parts, style.Render(fmt.Sprintf("D:%d%%%s", pct, mark)))
 		case t >= tierCompact:
-			parts = append(parts, style.Render(fmt.Sprintf("D:%d%% %.0fG", pct, freeGB)))
+			parts = append(parts, style.Render(fmt.Sprintf("D:%d%% %.0fG%s", pct, freeGB, mark)))
 		case holding:
 			parts = append(parts, style.Render(fmt.Sprintf("Disk %d%% (%.0fG free, holding)", pct, freeGB)))
 		default:

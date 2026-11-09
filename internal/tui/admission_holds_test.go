@@ -79,3 +79,41 @@ func TestDiskIndicatorSaysHoldingWhileTheGateHolds(t *testing.T) {
 		t.Errorf("critical already says it; holding added: %q", out)
 	}
 }
+
+// TestDiskIndicatorMarksHoldingAtEveryTier: the narrow tiers shorten the disk
+// reading, and a held gate at warn must still read differently from an
+// ordinary warn there — the dashboard's indicator always says it (owner
+// ruling R-D3). The short forms carry a ⏸ marker; critical carries none,
+// as the red says it already.
+//
+// Mutant: the compact or tight form without the marker.
+func TestDiskIndicatorMarksHoldingAtEveryTier(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tier barTier
+		held string
+		open string
+	}{
+		{"compact", tierCompact, "D:94% 12G⏸", "D:94% 12G"},
+		{"tight", tierTight, "D:94%⏸", "D:94%"},
+		{"essential", tierEssential, "D:94%⏸", "D:94%"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewStatusBarModel()
+			m.SetDiskStatus(12*1024*1024*1024, 94, "warn")
+			m.SetDiskHeld(true)
+			if out := stripANSI(m.renderMetrics(tc.tier, barJobCounts{})); !strings.Contains(out, tc.held) {
+				t.Errorf("held at warn: %q, want %q", out, tc.held)
+			}
+			m.SetDiskHeld(false)
+			if out := stripANSI(m.renderMetrics(tc.tier, barJobCounts{})); !strings.Contains(out, tc.open) || strings.Contains(out, "⏸") {
+				t.Errorf("open at warn: %q, want %q with no marker", out, tc.open)
+			}
+			m.SetDiskStatus(12*1024*1024*1024, 96, "critical")
+			m.SetDiskHeld(true)
+			if out := stripANSI(m.renderMetrics(tc.tier, barJobCounts{})); strings.Contains(out, "⏸") {
+				t.Errorf("critical already says it; marker added: %q", out)
+			}
+		})
+	}
+}

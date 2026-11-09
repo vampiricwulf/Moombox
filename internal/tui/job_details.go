@@ -385,8 +385,6 @@ type GapFillView struct {
 	Reason string
 }
 
-// SetGapFill gives the panel the selected job's gap-fill state. A no-op when
-// nothing changed.
 // SetAdmissionHolds stores the scheduler's hold snapshot and, when the job
 // shown is Queued, rebuilds its rows so its Queue line follows it.
 func (m *JobDetailsModel) SetAdmissionHolds(h jobstate.AdmissionHolds) {
@@ -397,6 +395,8 @@ func (m *JobDetailsModel) SetAdmissionHolds(h jobstate.AdmissionHolds) {
 	}
 }
 
+// SetGapFill gives the panel the selected job's gap-fill state. A no-op when
+// nothing changed.
 func (m *JobDetailsModel) SetGapFill(g *GapFillView) {
 	if (g == nil && m.gapFill == nil) || (g != nil && m.gapFill != nil && *g == *m.gapFill) {
 		return
