@@ -194,8 +194,7 @@ func (s *runState) runTUI() {
 			// Already gone; nothing to do.
 			return
 		}
-		switch job.Status {
-		case database.StatusDownloading, database.StatusLive, database.StatusUpcoming, database.StatusMuxing:
+		if worker.IsActiveJobStatus(job.Status) {
 			s.dlWorker.CancelJob(jobID)
 			if !s.dlWorker.WaitForJobExit(jobID, 5*time.Second) {
 				s.log.Warn("TUI delete: job did not exit within timeout; removing anyway", "jobID", jobID)

@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 )
 
 // WatchRoutes registers watch tracking API routes.
@@ -81,7 +82,7 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 		if !ok {
 			return
 		}
-		if job.Status != database.StatusFinished {
+		if !jobverbs.WatchableStatus(job.Status) {
 			jsonError(rw, "Only finished jobs can be marked watched or unwatched", http.StatusBadRequest)
 			return
 		}

@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -425,7 +426,7 @@ func chapterImportable(j *database.Job) bool {
 	// A complete Finished job only (the route's importableJob): an Error,
 	// Cancelled or incomplete-tail row can be resumed, and a resumed run
 	// rewrites the archive an import would be rewriting.
-	if j.Status != database.StatusFinished || j.IncompleteTail {
+	if !jobverbs.ChapterImportableStatus(j.Status, j.IncompleteTail) {
 		return false
 	}
 	return j.OutputFile != "" || j.Filename != "" || len(j.Segments) > 0

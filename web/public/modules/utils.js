@@ -856,9 +856,13 @@ export function applyChannelOverrides(channel, { outputDirectory, archiveWindowD
 }
 
 /**
- * Job-status action sets — single source of truth for which statuses each
+ * Job-status action sets — the dashboard's copy of which statuses each
  * quick action targets, read by the details dialog (job-details.js), the job
- * cards, and the batch action bar (app.js).
+ * cards, and the batch action bar (app.js). Each mirrors a Go predicate in
+ * internal/jobverbs (Cancellable, ReinitializableStatus, MuxableStatus less its
+ * Finished arm, DeletableStatus, ResumableStatus less its incomplete-tail arm),
+ * which the REST routes, the TUI and the worker verbs call; cmd/moombox's
+ * TestVerbStatusSetsMatchTheDashboard compares the two over every JobStatus.
  */
 export const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Queued", "Muxing", "COOKIES?"]);
 export const REINIT_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
