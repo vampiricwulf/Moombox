@@ -108,9 +108,10 @@ const (
 // downloading (it received its first batch) → one verdict: finished,
 // incomplete (the capture stopped short) or unavailable (the video has no
 // chat, or a capture that saw no messages). Reinitialize resets it to "".
-// Two writes settle a capture its run left mid-flight: a user Cancel
-// (worker cancelledChatStatus) and a YouTube download Error (owner ruling
-// R-E1, DownloadWorker.settleErrorChat), each conditional on the row.
+// Two writes settle a capture its run left mid-flight, by one rule (worker
+// stoppedChatStatus: downloading → incomplete, pending → ""): a user Cancel
+// and a YouTube download Error (owner rulings R-E1, R-E1a,
+// DownloadWorker.settleErrorChat), each conditional on the row.
 type ChatStatus string
 
 const (
@@ -144,7 +145,9 @@ var ChatStatuses = []ChatStatus{ChatNone, ChatPending, ChatDownloading, ChatUnav
 
 // InFlight reports whether s is a capture that has not reached a verdict:
 // pending or downloading. A run that ends without recording one leaves it on
-// the row until something settles it.
+// the row until something settles it: these are the values the Cancel and
+// Error settles map (worker stoppedChatStatus), and settleErrorChat iterates
+// ChatStatuses through this predicate for its from-set.
 func (s ChatStatus) InFlight() bool {
 	return s == ChatPending || s == ChatDownloading
 }
