@@ -176,7 +176,7 @@ func TestLiveEdgeStartIsRecordedAndNotifiedOnEveryFall(t *testing.T) {
 	}
 
 	db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusError})
-	w.reinitializeNow(job.ID)
+	w.reinitializeNow(job.ID, database.StatusError)
 	if row, _ := db.GetJob(job.ID); row.LiveEdgeReason != "" {
 		t.Errorf("after a Reinitialize live_edge_reason = %q, want it cleared", row.LiveEdgeReason)
 	}

@@ -111,7 +111,10 @@ func (w *DownloadWorker) AutoMuxEndedBroadcast(jobID string) {
 				"jobID", jobID)
 			return
 		}
-		w.afterJobExit(jobID, "automatic mux", func() { w.autoMuxNow(jobID) })
+		if err := w.afterJobExit(jobID, "automatic mux", false, func(database.JobStatus) { w.autoMuxNow(jobID) }); err != nil {
+			w.logger.Info("automatic Twitch mux deferred — another verb is waiting on the job; the next poll retries",
+				"jobID", jobID, "err", err)
+		}
 	})
 }
 

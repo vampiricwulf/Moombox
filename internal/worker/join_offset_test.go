@@ -142,7 +142,7 @@ func TestReinitializeClearsTheJoinOffset(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status database.JobStatus
-		reset  func(w *DownloadWorker, id string)
+		reset  func(w *DownloadWorker, id string) error
 	}{
 		{name: "Reinitialize", status: database.StatusFinished, reset: (*DownloadWorker).ReinitializeJob},
 		{name: "AutoReinitialize", status: database.StatusError, reset: (*DownloadWorker).AutoReinitializeJob},

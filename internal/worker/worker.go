@@ -288,17 +288,21 @@ type DownloadWorker struct {
 	// muxStagedAsides with its OWN asideOutputPath `used` map — so two of them
 	// running together both pick the plain <stem>.restart-<ts>.mp4 and write
 	// over each other. The value is the operation holding it, so the refusal
-	// can say which. Lazily allocated, so a zero-value worker (the tests build
-	// several) needs no constructor change.
+	// can say which. The chapter import and the boot cleanup take it too, and
+	// the reset verbs (Resume, Reinitialize, auto-reinitialize) hold it while
+	// they reset and queue the job (afterJobExit), so it is the job's one
+	// lease on its staging outside a queue run. Lazily allocated, so a
+	// zero-value worker (the tests build several) needs no constructor change.
 	stagingClaimMu sync.Mutex
 	stagingClaims  map[string]jobOp
 	// stagingClaimFreed holds, per job, a channel closed when that job's
-	// claim is released — what waitChapterImport waits on. Created by the
+	// claim is released — what awaitStagingClaim waits on. Created by the
 	// first waiter, under stagingClaimMu; lazily allocated like the claims.
 	stagingClaimFreed map[string]chan struct{}
 
-	// afterExitPending holds the jobs with an afterJobExit reset waiting on
-	// their previous run, so a second click does not queue a second reset.
+	// afterExitPending holds, per job, the name of the verb an afterJobExit
+	// is running or waiting to run, so the same verb again is a no-op and a
+	// different one is refused with ErrResetPending rather than dropped.
 	afterExitPending sync.Map
 
 	// autoMuxPending holds the jobs AutoMuxEndedBroadcast is confirming, so a
@@ -2287,7 +2291,9 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 		// registered: an Enqueue now would be dropped as a duplicate (and the
 		// job left for the heartbeat), so the hand-off waits for the run to
 		// exit.
-		w.afterJobExit(job.ID, "cookie-refresh resume", func() {
+		// An operator's verb already waiting on the job (ErrResetPending)
+		// is the one that runs; this hand-off steps aside for it.
+		if err := w.afterJobExit(job.ID, "cookie-refresh resume", true, func(database.JobStatus) {
 			if status == database.StatusQueued {
 				if w.scheduler != nil {
 					w.scheduler.Wake()
@@ -2295,7 +2301,9 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 			} else {
 				w.queue.Enqueue(job.ID, database.StatusUpcoming)
 			}
-		})
+		}); err != nil {
+			w.logger.Info("cookie-refresh resume left to the verb already waiting on the job", "jobID", job.ID, "err", err)
+		}
 		return
 	}
 
@@ -2497,11 +2505,15 @@ func (w *DownloadWorker) ReauthenticateTwitchChats() int {
 // Preserves staging files, progress, and seq numbers. Resets auto_retry_count
 // so any future error fires its notification — Resume is user-driven, so the
 // "suppress retry-failure notifications" guard in setJobError must not apply.
-func (w *DownloadWorker) ResumeJob(jobID string) {
-	w.afterJobExit(jobID, "resume", func() {
-		// A fresh backlog retry budget too, whatever ended the last run.
-		w.endBacklogStreak(jobID)
-		w.db.UpdateJobFields(jobID, map[string]any{
+//
+// Returns ErrResetPending when a different verb is already waiting to run on
+// the job (afterJobExit); nil when the resume ran or will run once the job's
+// staging is free. Applied only while the row still reads the status it read
+// when the verb was accepted, so an operator's Cancel landing during the wait
+// wins.
+func (w *DownloadWorker) ResumeJob(jobID string) error {
+	return w.afterJobExit(jobID, "resume", true, func(seen database.JobStatus) {
+		applied := w.db.UpdateJobFieldsIf(jobID, seen, map[string]any{
 			"status":           database.StatusDownloading,
 			"error":            "",
 			"park_reason":      database.ParkReasonNone,
@@ -2513,14 +2525,40 @@ func (w *DownloadWorker) ResumeJob(jobID string) {
 			// panic, a park) would announce a discovery long past.
 			"announce_found": false,
 		})
+		if !applied {
+			w.logVerbOverridden(jobID, "resume", seen)
+			return
+		}
+		// A fresh backlog retry budget too, whatever ended the last run.
+		w.endBacklogStreak(jobID)
 		w.EnqueueJob(jobID)
 	})
 }
 
+// ErrResetPending: a different verb is already waiting to run on this job
+// (afterJobExit) — a Resume clicked while a Reinitialize waits out a recovery,
+// say. Wrapped with the pending verb's name ("reinitialize already pending");
+// the REST layer answers 409 with it and the TUI shows it. The same verb
+// again is not refused: it is already on its way.
+var ErrResetPending = errors.New("already pending")
+
 // afterJobExitTimeout bounds how long a deferred Resume/Reinitialize waits for
 // the job's previous run to unwind (a chat capture's shutdown grace is the
-// long pole) before giving up rather than racing it.
+// long pole) before giving up rather than racing it. The wait for a staging
+// claim that follows has no cut-off (owner ruling R-A1).
 const afterJobExitTimeout = 60 * time.Second
+
+// logVerbOverridden records a deferred verb that found its row changed while
+// it waited — an operator's Cancel, another verb, a deletion — and so did
+// nothing.
+func (w *DownloadWorker) logVerbOverridden(jobID, what string, seen database.JobStatus) {
+	now := database.JobStatus("") // "" when the row is gone
+	if cur, err := w.db.GetJob(jobID); err == nil && cur != nil {
+		now = cur.Status
+	}
+	w.logger.Info(what+" not applied: the job changed while it waited", "jobID", jobID,
+		"was", seen, "now", now)
+}
 
 // afterJobExit runs fn now when jobID has no run in flight, or once the run
 // that is still unwinding has exited. The cancel route writes Cancelled
@@ -2539,14 +2577,53 @@ const afterJobExitTimeout = 60 * time.Second
 // with 409 first (ChapterImportRunning); this is the wait for the callers
 // that cannot be refused — the TUI's, the monitor's auto-resume. The import
 // is bounded by its own re-mux, which Stop cancels.
-func (w *DownloadWorker) afterJobExit(jobID, what string, fn func()) {
-	running, importing := w.queue.IsProcessing(jobID), w.ChapterImportRunning(jobID)
-	if !running && !importing {
-		fn()
-		return
+//
+// And for ANY other operation holding the job's staging claim (owner ruling
+// R-A1) — a set-aside recovery, a Mux, the boot cleanup: a Reinitialize let
+// through during a recovery ran os.RemoveAll under the FFmpeg reading the
+// asides, and a Resume started a run that took the recovery's download slot.
+// That wait has no cut-off, like the import's, and logs one line naming the
+// operation. The REST verbs refuse first (StagingClaimHolder).
+//
+// hold makes the verb take the claim itself (op = what) for the length of
+// fn, atomically with finding it free, so nothing that claims staging — a
+// recovery, a Mux, an import — can start between the wait and fn's reset,
+// and once it lets go the job is queued, which those refuse on
+// (queuedOrRunning). A verb whose fn takes the claim its own way (the
+// automatic mux, through muxJob) passes false and waits only for a chapter
+// import, as before: its fn treats any other holder as the deferral
+// ErrStagingBusy is, and the next poll tries again (autoMuxNow).
+//
+// fn gets the job's status as read when the verb was accepted (seen), the
+// status its write must still find (UpdateJobFieldsIf): an operator's Cancel
+// landing during the wait wins.
+//
+// One verb waits per job (afterExitPending, which names it). The same verb
+// again is a no-op success; a different one is refused with ErrResetPending,
+// so the caller can say so rather than report a click that was dropped.
+func (w *DownloadWorker) afterJobExit(jobID, what string, hold bool, fn func(seen database.JobStatus)) error {
+	if prev, waiting := w.afterExitPending.LoadOrStore(jobID, what); waiting {
+		if prev.(string) == what {
+			return nil // already on its way
+		}
+		return fmt.Errorf("%s %w", prev, ErrResetPending)
 	}
-	if _, waiting := w.afterExitPending.LoadOrStore(jobID, struct{}{}); waiting {
-		return // a reset is already waiting on this run
+	var seen database.JobStatus
+	if job, err := w.db.GetJob(jobID); err == nil && job != nil {
+		seen = job.Status
+	}
+	blocks := anyStagingClaim
+	if !hold {
+		blocks = isChapterImport
+	}
+	running := w.queue.IsProcessing(jobID)
+	if !running {
+		if release, ok := w.tryStagingClaim(jobID, what, blocks, hold); ok {
+			defer w.afterExitPending.Delete(jobID)
+			defer release()
+			fn(seen)
+			return nil
+		}
 	}
 	if running {
 		w.logger.Info("waiting for the job's previous run to stop before "+what, "jobID", jobID)
@@ -2563,9 +2640,11 @@ func (w *DownloadWorker) afterJobExit(jobID, what string, fn func()) {
 				"waited", afterJobExitTimeout)
 			return
 		}
-		w.waitChapterImport(context.Background(), jobID, what)
-		fn()
+		release, _ := w.awaitStagingClaim(context.Background(), jobID, what, blocks, hold)
+		defer release()
+		fn(seen)
 	})
+	return nil
 }
 
 // clearJobParts removes a job's persisted parts for a fresh restart: the
@@ -2597,11 +2676,28 @@ func (w *DownloadWorker) clearJobParts(jobID string) {
 // ReinitializeJob resets a job to a fresh state and re-enqueues it.
 // Clears all progress fields and deletes the staging directory — after the
 // job's previous run has stopped, when one is still unwinding (afterJobExit).
-func (w *DownloadWorker) ReinitializeJob(jobID string) {
-	w.afterJobExit(jobID, "reinitialize", func() { w.reinitializeNow(jobID) })
+//
+// Returns ErrResetPending when a different verb is already waiting on the job
+// (see ResumeJob); the reset applies only while the row still reads the
+// status it read when the verb was accepted.
+func (w *DownloadWorker) ReinitializeJob(jobID string) error {
+	return w.afterJobExit(jobID, "reinitialize", true, func(seen database.JobStatus) { w.reinitializeNow(jobID, seen) })
 }
 
-func (w *DownloadWorker) reinitializeNow(jobID string) {
+// stillReads reports whether jobID's row still has the status seen. The reset
+// verbs ask before they delete anything, under the staging claim they hold,
+// so a Cancel that landed while they waited keeps the staging as well as the
+// row; their conditional status write covers the instant after.
+func (w *DownloadWorker) stillReads(jobID string, seen database.JobStatus) bool {
+	cur, err := w.db.GetJob(jobID)
+	return err == nil && cur != nil && cur.Status == seen
+}
+
+func (w *DownloadWorker) reinitializeNow(jobID string, seen database.JobStatus) {
+	if !w.stillReads(jobID, seen) {
+		w.logVerbOverridden(jobID, "reinitialize", seen)
+		return
+	}
 	// Read config for staging path
 	var stagingBase string
 	w.readConfig(func(c *config.MoomboxConfig) {
@@ -2639,7 +2735,7 @@ func (w *DownloadWorker) reinitializeNow(jobID string) {
 	// uses AutoReinitializeJob (sibling method) which increments instead.
 	// KEEP IN SYNC with AutoReinitializeJob below — same reset map, the
 	// only difference is the auto_retry_count value (0 vs newCount).
-	w.db.UpdateJobFields(jobID, map[string]any{
+	applied := w.db.UpdateJobFieldsIf(jobID, seen, map[string]any{
 		"status":              database.StatusUpcoming,
 		"error":               "",
 		"park_reason":         database.ParkReasonNone,
@@ -2675,6 +2771,10 @@ func (w *DownloadWorker) reinitializeNow(jobID string) {
 		"auto_retry_count":    0,
 		"incomplete_tail":     false,
 	})
+	if !applied {
+		w.logVerbOverridden(jobID, "reinitialize", seen)
+		return
+	}
 	w.EnqueueJob(jobID)
 }
 
@@ -2694,18 +2794,24 @@ func (w *DownloadWorker) reinitializeNow(jobID string) {
 // footage from this broadcast and the recovered capture continues at part N+1
 // (discoverResumeSegment returns maxRecorded+1). Clearing here would throw away
 // captured footage of a live broadcast — the opposite of recovery.
-func (w *DownloadWorker) AutoReinitializeJob(jobID string) {
+func (w *DownloadWorker) AutoReinitializeJob(jobID string) error {
 	// The monitor reacts to the Error row the moment setJobError writes it,
 	// while that run is still finishing its tail: wait for it to exit, as a
 	// user's Reinitialize does, rather than reset the row and staging under
 	// it (and have the Enqueue dropped as a duplicate).
-	w.afterJobExit(jobID, "auto-reinitialize", func() { w.autoReinitializeNow(jobID) })
+	// An error (ErrResetPending) means nothing was applied, so no retry of
+	// the budget was spent.
+	return w.afterJobExit(jobID, "auto-reinitialize", true, func(seen database.JobStatus) { w.autoReinitializeNow(jobID, seen) })
 }
 
-func (w *DownloadWorker) autoReinitializeNow(jobID string) {
+func (w *DownloadWorker) autoReinitializeNow(jobID string, seen database.JobStatus) {
 	prev, err := w.db.GetJob(jobID)
 	if err != nil || prev == nil {
 		w.logger.Warn("AutoReinitializeJob: job not found", "jobID", jobID, "err", err)
+		return
+	}
+	if prev.Status != seen {
+		w.logVerbOverridden(jobID, "auto-reinitialize", seen)
 		return
 	}
 	newCount := prev.AutoRetryCount + 1
@@ -2724,7 +2830,7 @@ func (w *DownloadWorker) autoReinitializeNow(jobID string) {
 
 	// Same field reset as ReinitializeJob, but auto_retry_count INCREMENTS.
 	// KEEP IN SYNC with ReinitializeJob above if reset fields are added.
-	w.db.UpdateJobFields(jobID, map[string]any{
+	applied := w.db.UpdateJobFieldsIf(jobID, seen, map[string]any{
 		"status":              database.StatusUpcoming,
 		"error":               "",
 		"park_reason":         database.ParkReasonNone,
@@ -2760,6 +2866,10 @@ func (w *DownloadWorker) autoReinitializeNow(jobID string) {
 		"auto_retry_count":    newCount,
 		"incomplete_tail":     false,
 	})
+	if !applied {
+		w.logVerbOverridden(jobID, "auto-reinitialize", seen)
+		return
+	}
 	w.EnqueueJob(jobID)
 }
 
@@ -3015,10 +3125,22 @@ func (w *DownloadWorker) claimJobOperation(jobID string, op jobOp) (func(), erro
 	if held, busy := w.stagingClaims[jobID]; busy {
 		return nil, fmt.Errorf("%w (%s in progress)", ErrStagingBusy, held)
 	}
+	return w.takeStagingClaimLocked(jobID, op), nil
+}
+
+// takeStagingClaimLocked records op as jobID's claim holder and returns the
+// release. Caller holds stagingClaimMu and has seen the claim free.
+func (w *DownloadWorker) takeStagingClaimLocked(jobID string, op jobOp) func() {
 	if w.stagingClaims == nil {
 		w.stagingClaims = map[string]jobOp{}
 	}
 	w.stagingClaims[jobID] = op
+	return w.stagingClaimRelease(jobID)
+}
+
+// stagingClaimRelease is the release every claim hands back: it frees the
+// claim and wakes whoever waits on it (awaitStagingClaim).
+func (w *DownloadWorker) stagingClaimRelease(jobID string) func() {
 	return func() {
 		w.stagingClaimMu.Lock()
 		defer w.stagingClaimMu.Unlock()
@@ -3027,7 +3149,76 @@ func (w *DownloadWorker) claimJobOperation(jobID string, op jobOp) (func(), erro
 			close(freed)
 			delete(w.stagingClaimFreed, jobID)
 		}
-	}, nil
+	}
+}
+
+// anyStagingClaim is awaitStagingClaim's filter for the reset verbs: every
+// operation holding the claim is in their way.
+func anyStagingClaim(jobOp) bool { return true }
+
+// isChapterImport is the filter for what waits only on a chapter import: a
+// finalize (waitChapterImport) and the automatic mux (afterJobExit).
+func isChapterImport(op jobOp) bool { return op == opChapterImport }
+
+// tryStagingClaim is awaitStagingClaim without the wait: it reports whether
+// nothing that blocks holds jobID's claim right now and, when take, takes it
+// for what in the same step. The release is a no-op when nothing was taken.
+func (w *DownloadWorker) tryStagingClaim(jobID, what string, blocks func(jobOp) bool, take bool) (func(), bool) {
+	w.stagingClaimMu.Lock()
+	defer w.stagingClaimMu.Unlock()
+	if op, held := w.stagingClaims[jobID]; held && (take || blocks(op)) {
+		return nil, false
+	}
+	if !take {
+		return func() {}, true
+	}
+	return w.takeStagingClaimLocked(jobID, jobOp(what)), true
+}
+
+// awaitStagingClaim returns once no operation that blocks holds jobID's
+// staging claim — taking it for what in the same step when take — or reports
+// false when ctx ends first (the release is then a no-op). What waits (what)
+// and on which operation is logged once, when there is something to wait
+// for. No timeout: the operations that hold the claim are bounded by their
+// own FFmpeg, which Stop cancels through the mux root.
+func (w *DownloadWorker) awaitStagingClaim(ctx context.Context, jobID, what string, blocks func(jobOp) bool, take bool) (func(), bool) {
+	logged := false
+	for {
+		w.stagingClaimMu.Lock()
+		op, held := w.stagingClaims[jobID]
+		// Taking the claim waits for whoever holds it, whatever blocks says.
+		if !held || (!take && !blocks(op)) {
+			release := func() {}
+			if take {
+				release = w.takeStagingClaimLocked(jobID, jobOp(what))
+			}
+			w.stagingClaimMu.Unlock()
+			return release, true
+		}
+		if w.stagingClaimFreed == nil {
+			w.stagingClaimFreed = map[string]chan struct{}{}
+		}
+		freed, ok := w.stagingClaimFreed[jobID]
+		if !ok {
+			freed = make(chan struct{})
+			w.stagingClaimFreed[jobID] = freed
+		}
+		w.stagingClaimMu.Unlock()
+		if !logged {
+			if op == opChapterImport {
+				w.logger.Info("waiting for the chapter import rewriting the archive to finish before "+what, "jobID", jobID)
+			} else {
+				w.logger.Info("waiting for the "+string(op)+" holding the job's staging to finish before "+what, "jobID", jobID)
+			}
+			logged = true
+		}
+		select {
+		case <-freed:
+			// Asked again: the claim may have been taken anew since.
+		case <-ctx.Done():
+			return func() {}, false
+		}
+	}
 }
 
 // StagingClaimHolder reports which operation holds jobID's staging claim, if

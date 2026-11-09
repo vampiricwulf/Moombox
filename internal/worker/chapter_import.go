@@ -114,34 +114,12 @@ func (w *DownloadWorker) ChapterImportRunning(jobID string) bool {
 // Reinitialize (afterJobExit) wait here (owner decision PR-M5): the import
 // replaces the archive in place, and a finalize that wrote it meanwhile was
 // renamed over by the import's copy of the OLD archive.
+//
+// Only the import: the finalize runs inside a Mux that holds the claim
+// itself. afterJobExit waits for any claim (awaitStagingClaim).
 func (w *DownloadWorker) waitChapterImport(ctx context.Context, jobID, what string) bool {
-	logged := false
-	for {
-		w.stagingClaimMu.Lock()
-		if w.stagingClaims[jobID] != opChapterImport {
-			w.stagingClaimMu.Unlock()
-			return true
-		}
-		if w.stagingClaimFreed == nil {
-			w.stagingClaimFreed = map[string]chan struct{}{}
-		}
-		freed, ok := w.stagingClaimFreed[jobID]
-		if !ok {
-			freed = make(chan struct{})
-			w.stagingClaimFreed[jobID] = freed
-		}
-		w.stagingClaimMu.Unlock()
-		if !logged {
-			w.logger.Info("waiting for the chapter import rewriting the archive to finish before "+what, "jobID", jobID)
-			logged = true
-		}
-		select {
-		case <-freed:
-			// Asked again: the claim may have been taken anew since.
-		case <-ctx.Done():
-			return false
-		}
-	}
+	_, ok := w.awaitStagingClaim(ctx, jobID, what, isChapterImport, false)
+	return ok
 }
 
 // ArchiveRemuxResult is what RemuxArchiveChapters measured on the archive it

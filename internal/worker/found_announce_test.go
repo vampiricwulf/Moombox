@@ -739,7 +739,7 @@ func owe(t *testing.T, db *database.Database, job *database.Job) {
 func TestRerunsClearTheOwedFound(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		rerun func(w *DownloadWorker, id string)
+		rerun func(w *DownloadWorker, id string) error
 	}{
 		{"retry", (*DownloadWorker).ReinitializeJob},
 		{"auto-reinitialize", (*DownloadWorker).AutoReinitializeJob},
