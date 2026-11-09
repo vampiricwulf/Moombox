@@ -40,6 +40,9 @@ export class ChapterImportDialog {
     this._seq = 0;
     this._previewOk = false;
     this._busy = false;
+    /** Bumped by every open(): a commit that ends under a newer open must
+     *  not close the dialog that open drew. */
+    this._openGen = 0;
     this._originalCount = 0;
   }
 
@@ -60,6 +63,14 @@ export class ChapterImportDialog {
     this._el("chapter-import-save")?.addEventListener("click", () => this.save());
     this._el("chapter-import-restore")?.addEventListener("click", () => this.restore());
     this._el("chapter-import-cancel")?.addEventListener("click", () => this.close());
+    // Escape, the overlay and the header's X go through close() too, so the
+    // debounce timer and the preview sequence are settled as the Cancel
+    // button settles them (owner ruling R-B1: Esc during a save still
+    // closes; the save's outcome is then a toast).
+    const dialog = this._el("chapter-import-dialog");
+    dialog?.addEventListener("sl-request-close", (e) => {
+      if (e.target === dialog) this.close();
+    });
   }
 
   /**
@@ -71,6 +82,7 @@ export class ChapterImportDialog {
     clearTimeout(this._timer);
     this._timer = null;
     this.jobId = jobId;
+    this._openGen++;
     this._previewOk = false;
     this._el("chapter-import-text").value = "";
     this._el("chapter-import-offset").value = "";
@@ -170,6 +182,9 @@ export class ChapterImportDialog {
   _setSaveEnabled() {
     const save = this._el("chapter-import-save");
     if (save) save.disabled = this._busy || !this._previewOk;
+    // One commit at a time: Restore follows the committing state too.
+    const restore = this._el("chapter-import-restore");
+    if (restore) restore.disabled = this._busy;
   }
 
   /** Draw the preview table, the current chapters and the restore button. */
@@ -213,8 +228,8 @@ export class ChapterImportDialog {
   }
 
   async save() {
-    if (!this._previewOk) return;
-    await this._commit(`/api/jobs/${this.jobId}/chapters`, this._body(), "Chapters imported");
+    if (this._busy || !this._previewOk) return;
+    await this._commit(`/api/jobs/${this.jobId}/chapters`, this._body(), "Chapters imported", "Chapters not imported");
   }
 
   /**
@@ -222,12 +237,15 @@ export class ChapterImportDialog {
    * throws the imported list away, and the button sits beside Save.
    */
   async restore() {
+    if (this._busy) return;
     const n = this._originalCount || 0;
     const msg = n > 0
       ? `Replace the imported chapters with the original ${n}?`
       : "Replace the imported chapters with the original? The archive had no chapters before the import.";
     if (!await this.player.app.showConfirm(msg, { title: "Restore original chapters", okLabel: "Restore", okVariant: "warning" })) return;
-    await this._commit(`/api/jobs/${this.jobId}/chapters/restore`, null, "Original chapters restored");
+    // A Save may have started while the confirm was up.
+    if (this._busy) return;
+    await this._commit(`/api/jobs/${this.jobId}/chapters/restore`, null, "Original chapters restored", "Original chapters not restored");
   }
 
   /**
@@ -244,14 +262,15 @@ export class ChapterImportDialog {
    * cannot be replaced, so a save that left the source in place would fall
    * back to the sidecar.
    */
-  async _commit(url, body, done) {
+  async _commit(url, body, done, failed) {
     const jobId = this.jobId;
+    const gen = this._openGen;
     this._busy = true;
     this._setSaveEnabled();
     this._status("Saving…");
     const held = this._releaseSource(jobId);
     try {
-      await this._send(url, body, done, jobId);
+      await this._send(url, body, done, failed, jobId, gen);
     } finally {
       this._reattachSource(jobId, held);
     }
@@ -289,7 +308,23 @@ export class ChapterImportDialog {
     video.src = `/api/jobs/${jobId}/video`;
   }
 
-  async _send(url, body, done, jobId) {
+  /**
+   * Whether the dialog that started the commit (open generation gen) is
+   * still the one on screen: false once it was dismissed (Escape, Cancel)
+   * or reopened. A commit's failure is then a toast — the status line it
+   * would be written to is hidden, or belongs to the newer open — and its
+   * success does not close the newer dialog.
+   */
+  _commitShown(gen) {
+    return gen === this._openGen && !!this._el("chapter-import-dialog")?.open;
+  }
+
+  _commitFailed(failed, gen, msg) {
+    if (this._commitShown(gen)) this._status(msg);
+    else this.player.app?.showToast?.(`${failed}: ${msg}`, "danger");
+  }
+
+  async _send(url, body, done, failed, jobId, gen) {
     let res;
     try {
       res = await fetch(url, {
@@ -300,17 +335,18 @@ export class ChapterImportDialog {
     } catch {
       this._busy = false;
       this._setSaveEnabled();
-      this._status("Could not reach the server");
+      this._commitFailed(failed, gen, "Could not reach the server");
       return;
     }
     this._busy = false;
     if (!res.ok) {
       this._setSaveEnabled();
-      this._status(await serverErrorMessage(res));
+      this._commitFailed(failed, gen, await serverErrorMessage(res));
       return;
     }
     const view = await res.json();
-    this.close();
+    this._setSaveEnabled();
+    if (gen === this._openGen) this.close();
     const app = this.player.app;
     if (view.embedError) {
       app?.showToast?.(`${done}; the file could not be rewritten, so they are saved beside it: ${view.embedError}`, "warning");
