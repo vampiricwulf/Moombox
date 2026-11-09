@@ -1559,9 +1559,15 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 // Resume starts a run that writes it. The operator tries again once the
 // operation is done; the worker waits out one that starts after this check
 // (afterJobExit). The chapter import keeps its own wording.
+//
+// Not a reset verb's own claim (IsResetVerb): a Resume or Reinitialize holds
+// it while its reset runs, and is the job's pending verb all the while, so
+// the worker answers — a double-click or a resent request of the same verb
+// is a quiet success, a different verb a 409 "<verb> already pending"
+// (refuseVerbError) — rather than this calling the click's own reset "busy".
 func refuseWhileStagingClaimed(rw http.ResponseWriter, w *worker.DownloadWorker, jobID string) bool {
 	op, held := w.StagingClaimHolder(jobID)
-	if !held {
+	if !held || op.IsResetVerb() {
 		return false
 	}
 	msg := fmt.Sprintf("This job's staging is busy (%s in progress); try again once it is done", op)
