@@ -160,6 +160,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 	case "A R":
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnResumeJob != nil {
 			count := 0
+			var refused verbRefusals
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
 				if j == nil || j.Platform != "youtube" {
@@ -171,22 +172,29 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				if j.Status != database.StatusCancelled && j.Status != database.StatusError && j.Status != database.StatusCookies && !(j.Status == database.StatusFinished && j.IncompleteTail) {
 					continue
 				}
-				a.OnResumeJob(id)
+				if err := a.OnResumeJob(id); err != nil {
+					refused.add(err)
+					continue
+				}
 				count++
 			}
 			a.taskList.ClearSelection()
-			if count == 0 {
+			if count == 0 && refused.n == 0 {
 				a.setFeedbackWithSeverity("No resumable jobs in selection", severityWarning)
 				return a, nil
 			}
-			a.setFeedback("Resumed " + jobCount(count))
+			a.setBatchFeedback("Resumed "+jobCount(count), refused)
 		} else if job != nil && a.OnResumeJob != nil {
-			a.OnResumeJob(job.ID)
-			a.setFeedback(fmt.Sprintf("Resuming: %s", job.Title))
+			if err := a.OnResumeJob(job.ID); err != nil {
+				a.setFeedbackWithSeverity("Resume refused: "+err.Error(), severityError)
+			} else {
+				a.setFeedback(fmt.Sprintf("Resuming: %s", job.Title))
+			}
 		}
 	case "A I":
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnReinitializeJob != nil {
 			count := 0
+			var refused verbRefusals
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
 				if j == nil {
@@ -195,23 +203,29 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				if j.Status != database.StatusError && j.Status != database.StatusCancelled && j.Status != database.StatusCookies {
 					continue
 				}
-				a.OnReinitializeJob(id)
+				if err := a.OnReinitializeJob(id); err != nil {
+					refused.add(err)
+					continue
+				}
 				count++
 			}
 			a.taskList.ClearSelection()
-			if count == 0 {
+			if count == 0 && refused.n == 0 {
 				a.setFeedbackWithSeverity("No reinitializable jobs in selection", severityWarning)
 				return a, nil
 			}
-			a.setFeedback("Reinitialized " + jobCount(count))
+			a.setBatchFeedback("Reinitialized "+jobCount(count), refused)
 		} else if job != nil && a.OnReinitializeJob != nil {
-			a.OnReinitializeJob(job.ID)
-			a.setFeedback(fmt.Sprintf("Reinitializing: %s", job.Title))
+			if err := a.OnReinitializeJob(job.ID); err != nil {
+				a.setFeedbackWithSeverity("Reinitialize refused: "+err.Error(), severityError)
+			} else {
+				a.setFeedback(fmt.Sprintf("Reinitializing: %s", job.Title))
+			}
 		}
 	case "A M":
 		if job != nil && a.OnMuxJob != nil {
 			if err := a.OnMuxJob(job.ID); err != nil {
-				a.setFeedback(fmt.Sprintf("Mux failed: %s", err))
+				a.setFeedbackWithSeverity(fmt.Sprintf("Mux failed: %s", err), severityError)
 			} else {
 				a.setFeedback(fmt.Sprintf("Muxing: %s", job.Title))
 			}
@@ -854,6 +868,32 @@ func (a *App) invalidateAsides(jobID string) {
 }
 
 // jobCount spells a job count for a feedback line: "1 job", "3 jobs".
+// verbRefusals tallies the jobs a batch verb's callback refused, keeping the
+// first reason: the worker's ErrResetPending text, the same one REST puts in
+// its 409.
+type verbRefusals struct {
+	n     int
+	first error
+}
+
+func (r *verbRefusals) add(err error) {
+	if r.n == 0 {
+		r.first = err
+	}
+	r.n++
+}
+
+// setBatchFeedback reports a batch verb: done as the line, followed — in red —
+// by how many jobs the worker refused and the first reason, when it refused
+// any.
+func (a *App) setBatchFeedback(done string, refused verbRefusals) {
+	if refused.n == 0 {
+		a.setFeedback(done)
+		return
+	}
+	a.setFeedbackWithSeverity(fmt.Sprintf("%s, %d refused: %s", done, refused.n, refused.first), severityError)
+}
+
 func jobCount(n int) string {
 	if n == 1 {
 		return "1 job"

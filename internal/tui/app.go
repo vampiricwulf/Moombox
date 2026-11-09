@@ -657,9 +657,12 @@ type App struct {
 	OnDeleteJob func(jobID string)
 	// OnSetWatched marks jobs watched/unwatched (the A W chord); the Web's
 	// /watched routes are the twin.
-	OnSetWatched      func(ids []string, watched bool) error
-	OnResumeJob       func(jobID string)
-	OnReinitializeJob func(jobID string)
+	OnSetWatched func(ids []string, watched bool) error
+	// OnResumeJob and OnReinitializeJob run the worker's verbs and return
+	// its refusal (worker.ErrResetPending: a different verb already waits on
+	// the job), which the feedback line shows in red, as REST's 409 does.
+	OnResumeJob       func(jobID string) error
+	OnReinitializeJob func(jobID string) error
 	// ReinitializeSummary says what reinitializing jobIDs would delete
 	// (worker.ReinitializePreview.Summary over their totals, owner decision
 	// PR-M1), for A I's confirm line. A disk probe: run when the confirm is

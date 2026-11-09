@@ -30,7 +30,7 @@ func TestReinitializeIsConfirmGatedAndNamesWhatItDeletes(t *testing.T) {
 	app := NewApp()
 	var reinit []string
 	var asked [][]string
-	app.OnReinitializeJob = func(id string) { reinit = append(reinit, id) }
+	app.OnReinitializeJob = func(id string) error { reinit = append(reinit, id); return nil }
 	app.ReinitializeSummary = func(ids []string) string {
 		asked = append(asked, append([]string(nil), ids...))
 		return "deletes 2 set-aside recordings"

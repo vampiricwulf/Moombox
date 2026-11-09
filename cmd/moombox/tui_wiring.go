@@ -224,11 +224,11 @@ func (s *runState) runTUI() {
 		}
 		return s.db.BatchSetWatched(ids, watched)
 	}
-	app.OnResumeJob = func(jobID string) {
-		s.dlWorker.ResumeJob(jobID)
+	app.OnResumeJob = func(jobID string) error {
+		return s.dlWorker.ResumeJob(jobID)
 	}
-	app.OnReinitializeJob = func(jobID string) {
-		s.dlWorker.ReinitializeJob(jobID)
+	app.OnReinitializeJob = func(jobID string) error {
+		return s.dlWorker.ReinitializeJob(jobID)
 	}
 	app.ReinitializeSummary = func(jobIDs []string) string {
 		var base string
