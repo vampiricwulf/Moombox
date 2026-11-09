@@ -189,11 +189,13 @@ test("updateActiveIndicator writes nothing when the count has not changed", { sk
 // is mapped, and an unmapped value silently falls through to "neutral", which
 // reads as "nothing to see here" for the one status that asks for action.
 //
+// Both paths read the one table, utils.js CHAT_STATUS_VARIANTS
+// (chatStatusVariant), so they can no longer disagree with each other.
+//
 // Mutants this kills:
-//   - no `incomplete` entry in either chatVariantMap: the variant is "neutral".
-//   - adding it to only ONE of the two maps: the render path and the update
-//     path disagree, so the badge changes colour on the next 60 Hz tick — each
-//     half of this test covers one map.
+//   - no `incomplete` entry in CHAT_STATUS_VARIANTS: the variant is "neutral".
+//   - either path reading its own table again instead of chatStatusVariant
+//     and missing the entry: that half of the test fails.
 test("an incomplete chat capture renders a warning badge in both paths", { skip }, async () => {
   const h = await harness.makeApp();
   const job = { ...downloadingJob(), status: "Finished", chatStatus: "incomplete" };

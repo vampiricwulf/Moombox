@@ -22,8 +22,9 @@ import (
 //
 // Mutants (each run): "type" missing from either twin's namespaces (type:clip
 // becomes a text search and matches nothing in that twin); the type arm
-// ignoring the value (type:vod matches the clip); IsClipJob reading the
-// platform (the Twitch VOD matches); the dashboard's prefix drifted.
+// ignoring the value (type:vod matches the clip); IsClipJob dropping its
+// platform check (the clip ID on a youtube row matches); IsClipJob dropping
+// its slug check (the bare prefix matches); the dashboard's prefix drifted.
 func TestTypeClipMatchesTheDashboard(t *testing.T) {
 	var src strings.Builder
 	for _, name := range []string{"public/modules/filter-parser.js", "public/modules/filter-engine.js"} {

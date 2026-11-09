@@ -98,8 +98,9 @@ const (
 )
 
 // ChatStatus is a job's chat_status: the lifecycle of its chat capture, the
-// one closed vocabulary both UIs render verbatim (the Web chatVariantMap in
-// web/public/js/job-details.js mirrors the set, pinned by
+// one closed vocabulary both UIs render verbatim (the dashboard's
+// CHAT_STATUS_VARIANTS / chatStatusVariant in web/public/modules/utils.js
+// mirrors the set, pinned by
 // cmd/moombox TestChatStatusSetMatchesTheDashboard). The bytes on disk and on
 // the wire are the constants' values.
 //
@@ -126,8 +127,14 @@ const (
 	// ChatFinished is a capture that completed.
 	ChatFinished ChatStatus = "finished"
 	// ChatIncomplete is a capture that ENDED WITHOUT COMPLETING — the
-	// downloader gave up, was cut off, or its run failed — so messages can
-	// be missing. Its resume sidecar is kept in staging.
+	// downloader returned an error (a Twitch VOD paging stall, an IRC session
+	// that exhausted its reconnect budget, a panic) instead of running out of
+	// chat to fetch, a user Cancel cut it off, or a YouTube download Error
+	// stopped it (R-E1) — so messages can be missing. Its resume sidecar is
+	// kept in staging. The value is the label: both UIs render it verbatim
+	// (warning colour), and "error" was not reused for it — nothing writes
+	// that, and it reads as a hard failure rather than an archive that
+	// stopped short.
 	ChatIncomplete ChatStatus = "incomplete"
 )
 

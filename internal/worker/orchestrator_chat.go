@@ -289,18 +289,6 @@ func (o *DownloadOrchestrator) cleanup(chatDl *chat.ChatDownloader, chatDone cha
 	}
 }
 
-// database.ChatIncomplete is the chat_status of a capture that ENDED WITHOUT
-// COMPLETING: the downloader returned an error — a Twitch VOD paging stall, an
-// IRC session that exhausted its reconnect budget, a panic — instead of running
-// out of chat to fetch.
-//
-// One machine value, and the value IS the label: both UIs render chat_status
-// verbatim (the Web details badge maps it to `warning`, the TUI's
-// chatStatusColor to ColorWarning), exactly as they do for "finished",
-// "downloading", "pending" and "unavailable". No display-string field restates
-// it. "error" was not reused: nothing writes it, and it reads as a hard failure
-// rather than an archive that stopped short.
-
 const (
 	// vodChatWaitFloor and vodChatWaitCeiling bracket how long a finished VOD
 	// download waits for its chat source to finish paging (owner decision

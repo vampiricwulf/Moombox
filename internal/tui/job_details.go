@@ -1022,8 +1022,8 @@ func chatRowValue(status database.ChatStatus, count *int) string {
 }
 
 // chatStatusColor returns appropriate color for chat status (J7): one arm per
-// database.ChatStatus value, the same set the Web chatVariantMap colours.
-// "incomplete" is Warning rather than error — the capture stopped, the archive
+// database.ChatStatus value, the same set the dashboard's utils.js
+// CHAT_STATUS_VARIANTS (chatStatusVariant) colours. "incomplete" is Warning rather than error — the capture stopped, the archive
 // that did land is intact — and is its own arm: the substring match this
 // replaced had to test it before "complete", which it contains. Pending,
 // unavailable and anything unrecognised are gray, as before.
