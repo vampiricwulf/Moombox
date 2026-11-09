@@ -1040,27 +1040,21 @@ func (s *runState) runTUI() {
 	// tui.MonitorNextCheckTime decodes the ms value: -1 = "checking now" (the
 	// header's "…"), 0 = no channels (a blank timer, the Web's "--"), else
 	// the scheduled instant. A zero Next clears the TUI's timer.
-	makeTUISchedule := func(kind tui.MonitorKind) func(int64) {
-		return func(nextCheckAt int64) {
-			select {
-			case checkTimersCh <- tui.CheckTimersMsg{Monitor: kind, Next: tui.MonitorNextCheckTime(nextCheckAt)}:
-			default:
-			}
-		}
-	}
-	feedFn := makeTUISchedule(tui.MonitorFeed)
-	decapiFn := makeTUISchedule(tui.MonitorDecapi)
-	twitchFn := makeTUISchedule(tui.MonitorTwitch)
+	feedFwd := newTUIScheduleForwarder(checkTimersCh, tui.MonitorFeed)
+	decapiFwd := newTUIScheduleForwarder(checkTimersCh, tui.MonitorDecapi)
+	twitchFwd := newTUIScheduleForwarder(checkTimersCh, tui.MonitorTwitch)
+	feedFn, decapiFn, twitchFn := feedFwd.send, decapiFwd.send, twitchFwd.send
 	s.feedTUISchedule.Store(&feedFn)
 	s.decapiTUISchedule.Store(&decapiFn)
 	s.twitchTUISchedule.Store(&twitchFn)
 
-	// Send initial timer values — monitors fire OnSchedule during Start()
+	// Seed the initial timer values — monitors fire OnSchedule during Start()
 	// before the TUI wrappers above are installed, so the TUI misses those.
-	// Through the same decode, so a check already running shows "…".
-	feedFn(s.feedMon.GetNextCheckAt())
-	decapiFn(s.decapiMon.GetNextCheckAt())
-	twitchFn(s.twitchMon.GetNextCheckAt())
+	// A seed never lands after a schedule the wrapper already forwarded
+	// (tuiScheduleForwarder), so a stale "…" cannot outlive the countdown.
+	feedFwd.seed(s.feedMon.GetNextCheckAt)
+	decapiFwd.seed(s.decapiMon.GetNextCheckAt)
+	twitchFwd.seed(s.twitchMon.GetNextCheckAt)
 
 	// Wire cookie status to TUI. Parameter `auth` is the incoming status —
 	// named differently from `s` (receiver) to avoid the pre-refactor shadow.
