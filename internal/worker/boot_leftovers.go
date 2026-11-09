@@ -13,7 +13,7 @@ import (
 // opBootCleanup holds a job's staging claim while the boot sweep decides about
 // it, so a Mux or an aside recovery started at the same moment is refused
 // rather than read a directory being deleted under it.
-const opBootCleanup = "boot cleanup"
+const opBootCleanup jobOp = "boot cleanup"
 
 // bootSweepClaimed, when set, is called with each job ID whose staging claim
 // the boot sweep took. A test seam; nil in production.

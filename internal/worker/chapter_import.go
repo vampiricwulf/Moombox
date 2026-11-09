@@ -28,7 +28,7 @@ import (
 // opChapterImport is the chapter import's name in the per-job claim
 // (claimJobOperation), so the Mux action or a set-aside recovery refused while
 // it runs says what is in the way.
-const opChapterImport = "chapter import"
+const opChapterImport jobOp = "chapter import"
 
 // ErrArchiveJobActive: the job is downloading or muxing, so its archive is not
 // finished and cannot be rewritten (owner decision CI-1: only a job that is not

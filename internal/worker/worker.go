@@ -110,11 +110,18 @@ var (
 	ErrNoAsides = errors.New("no set-aside recordings in staging")
 )
 
+// jobOp names an operation holding a job's staging claim (claimJobOperation):
+// the per-job lease every verb that writes or deletes a job's staging outside
+// a queue run takes, so a refusal or a wait can say what is in the way. The
+// values are the words the operator reads in a 409 or a TUI feedback line.
+type jobOp string
+
 // The operations that can hold a job's staging claim. Named so a refusal can
-// say what is in the way.
+// say what is in the way. opChapterImport and opBootCleanup live beside their
+// operations (chapter_import.go, boot_leftovers.go).
 const (
-	opMux           = "mux"
-	opRecoverAsides = "set-aside recovery"
+	opMux           jobOp = "mux"
+	opRecoverAsides jobOp = "set-aside recovery"
 )
 
 // heartbeatInterval is the safety-net poll interval for catching missed jobs.
@@ -284,7 +291,7 @@ type DownloadWorker struct {
 	// can say which. Lazily allocated, so a zero-value worker (the tests build
 	// several) needs no constructor change.
 	stagingClaimMu sync.Mutex
-	stagingClaims  map[string]string
+	stagingClaims  map[string]jobOp
 	// stagingClaimFreed holds, per job, a channel closed when that job's
 	// claim is released — what waitChapterImport waits on. Created by the
 	// first waiter, under stagingClaimMu; lazily allocated like the claims.
@@ -3002,14 +3009,14 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 // is reported to the operator rather than discovered by two FFmpeg processes.
 // The release is always deferred by the goroutine that got it, so a panicking
 // run cannot leave a job stuck for the process's life.
-func (w *DownloadWorker) claimJobOperation(jobID, op string) (func(), error) {
+func (w *DownloadWorker) claimJobOperation(jobID string, op jobOp) (func(), error) {
 	w.stagingClaimMu.Lock()
 	defer w.stagingClaimMu.Unlock()
 	if held, busy := w.stagingClaims[jobID]; busy {
 		return nil, fmt.Errorf("%w (%s in progress)", ErrStagingBusy, held)
 	}
 	if w.stagingClaims == nil {
-		w.stagingClaims = map[string]string{}
+		w.stagingClaims = map[string]jobOp{}
 	}
 	w.stagingClaims[jobID] = op
 	return func() {
@@ -3021,6 +3028,33 @@ func (w *DownloadWorker) claimJobOperation(jobID, op string) (func(), error) {
 			delete(w.stagingClaimFreed, jobID)
 		}
 	}, nil
+}
+
+// StagingClaimHolder reports which operation holds jobID's staging claim, if
+// any: the REST layer's question before Resume, Retry and Reinitialize, which
+// it refuses with 409 naming the operation while one does. A Resume started a
+// run that writes the staging a recovery or a Mux is reading; a Reinitialize
+// deleted it under FFmpeg.
+func (w *DownloadWorker) StagingClaimHolder(jobID string) (jobOp, bool) {
+	w.stagingClaimMu.Lock()
+	defer w.stagingClaimMu.Unlock()
+	op, held := w.stagingClaims[jobID]
+	return op, held
+}
+
+// queuedOrRunning names why jobID's staging belongs to a queue run — its last
+// run still registered, or a run queued to start — or answers "" when neither.
+// The off-queue verbs refuse on it after taking their claim: a reset verb
+// enqueues while it holds the claim (afterJobExit), so once the claim is
+// theirs a queued run is visible here.
+func (w *DownloadWorker) queuedOrRunning(jobID string) string {
+	switch {
+	case w.queue.IsProcessing(jobID):
+		return "the job's last run is still stopping"
+	case w.queue.isPending(jobID):
+		return "the job is queued to run"
+	}
+	return ""
 }
 
 // restoreLogRouting puts a job's per-job log routing back where cmd/moombox's
@@ -3084,6 +3118,30 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 	if err != nil {
 		return err
 	}
+	// After the claim, so nothing can start a run between this look and the
+	// recovery: the reset verbs enqueue only while they hold the claim
+	// (afterJobExit). A run still unwinding (the cancel route writes
+	// Cancelled before it stops) or one queued to start writes the staging
+	// this would mux out of, and takes the job's download slot — MuxJob and
+	// ClaimChapterImport refuse here too. The row is re-read for the same
+	// reason: a reset that ran before the claim has made it active.
+	if why := w.queuedOrRunning(jobID); why != "" {
+		release()
+		return fmt.Errorf("%w (%s)", ErrStagingBusy, why)
+	}
+	fresh, err := w.db.GetJob(jobID)
+	if err != nil || fresh == nil {
+		release()
+		if err == nil {
+			err = fmt.Errorf("job %s not found", jobID)
+		}
+		return err
+	}
+	if IsActiveJobStatus(fresh.Status) {
+		release()
+		return fmt.Errorf("%w (status %s)", ErrRecoveryJobActive, fresh.Status)
+	}
+	job = fresh
 	// The recovery keeps the row's status, so a Cancelled or Error job's
 	// staging still reads as an orphan to the Files sweep — offered for
 	// deletion while FFmpeg reads the asides out of it. Claimed for the run.
