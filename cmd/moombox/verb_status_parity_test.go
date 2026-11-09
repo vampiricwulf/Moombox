@@ -70,6 +70,18 @@ func TestVerbStatusSetsMatchTheDashboard(t *testing.T) {
 			return jobverbs.MuxableStatus(s) && !jobverbs.MuxNeedsUnmuxedParts(s)
 		}},
 		{"DELETE_STATUSES", jobverbs.DeletableStatus},
+		// The arms beside the sets: the statuses Resume accepts only with an
+		// incomplete tail (canResumeJob), Mux only with an unmuxed part
+		// (job-details.js), and chapter import only without an incomplete tail
+		// (chapterImportAllowed, which refuses an incomplete tail on every
+		// status — pinned below).
+		{"RESUME_TAIL_STATUSES", func(s database.JobStatus) bool {
+			return jobverbs.ResumableStatus(s, true) && !jobverbs.ResumableStatus(s, false)
+		}},
+		{"MUX_PARTS_STATUSES", func(s database.JobStatus) bool {
+			return jobverbs.MuxableStatus(s) && jobverbs.MuxNeedsUnmuxedParts(s)
+		}},
+		{"CHAPTER_IMPORT_STATUSES", func(s database.JobStatus) bool { return jobverbs.ChapterImportableStatus(s, false) }},
 	}
 	for _, v := range verbs {
 		js, ok := sets[v.set]
@@ -90,6 +102,25 @@ func TestVerbStatusSetsMatchTheDashboard(t *testing.T) {
 		// loop above cannot see.
 		if accepted != len(js) {
 			t.Errorf("%s names %d statuses, %d of them declared JobStatus values: %v", v.set, len(js), accepted, js)
+		}
+	}
+	for _, s := range all {
+		if jobverbs.ChapterImportableStatus(s, true) {
+			t.Errorf("status %q: ChapterImportableStatus accepts an incomplete tail, which chapterImportAllowed refuses on every status", s)
+		}
+	}
+	// The arms are read through the sets, not spelled beside them again.
+	for file, use := range map[string]string{
+		"../../web/public/modules/utils.js":          "RESUME_TAIL_STATUSES.has(job.status) && !!job.incompleteTail",
+		"../../web/public/modules/job-details.js":    "MUX_PARTS_STATUSES.has(job.status) && job.unmuxedParts === true",
+		"../../web/public/modules/chapter-import.js": "CHAPTER_IMPORT_STATUSES.has(job.status) && !job.incompleteTail",
+	} {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(src), use) {
+			t.Errorf("%s does not read its arm as %q", file, use)
 		}
 	}
 }

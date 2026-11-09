@@ -2,7 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, DELETE_STATUSES } from "./utils.js";
+import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES } from "./utils.js";
 
 /** A running trim's progress as the whole percentage its bar shows. */
 function trimPercent(progress) {
@@ -592,7 +592,7 @@ export class JobDetailsController {
     // staging an Error-time hasSegments described.
     const factsCurrent = job.factsStatus === undefined || job.factsStatus === job.status;
     const canMux = factsCurrent && ((MUX_STATUSES.has(job.status) && job.hasSegments) ||
-      (job.status === "Finished" && job.unmuxedParts === true));
+      (MUX_PARTS_STATUSES.has(job.status) && job.unmuxedParts === true));
     const canDelete = DELETE_STATUSES.has(job.status);
     const hasFile = job.status === "Finished" && job.filename;
     const isActive = ["Upcoming", "Live", "Downloading", "Muxing"].includes(

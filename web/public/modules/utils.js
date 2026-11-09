@@ -873,6 +873,16 @@ export const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKI
 // preserves staging, reinitialize deletes it; keep them separately gated.
 export const RESUMABLE_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
 
+// The arms beside the sets: statuses a verb accepts only with a row fact.
+// Resume a Finished job only when its tail is incomplete (canResumeJob); Mux
+// one only while a part its finalize could not mux is staged (the server's
+// unmuxedParts, job-details.js); import chapters into one only when its tail
+// is complete (chapterImportAllowed). Go: jobverbs.ResumableStatus,
+// MuxNeedsUnmuxedParts, ChapterImportableStatus — compared by the same test.
+export const RESUME_TAIL_STATUSES = new Set(["Finished"]);
+export const MUX_PARTS_STATUSES = new Set(["Finished"]);
+export const CHAPTER_IMPORT_STATUSES = new Set(["Finished"]);
+
 // ── Channel removal ──────────────────────────────────────────────────────────
 // Removing a channel asks what to do with its jobs (W25-09, owner decision).
 // The confirmation counts them — GET /api/config/channels/{id}/removal — and
@@ -961,7 +971,7 @@ export function channelRemovedToast(choice, summary, data) {
  * reported. There, staging must be exactly `true`.
  */
 export function canResumeJob(job, { requireKnownStaging = false } = {}) {
-  const statusOk = RESUMABLE_STATUSES.has(job.status) || (job.status === "Finished" && !!job.incompleteTail);
+  const statusOk = RESUMABLE_STATUSES.has(job.status) || (RESUME_TAIL_STATUSES.has(job.status) && !!job.incompleteTail);
   const stagingOk = requireKnownStaging ? job.hasStaging === true : job.hasStaging !== false;
   return statusOk && job.platform === "youtube" && stagingOk;
 }

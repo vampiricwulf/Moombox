@@ -9,7 +9,7 @@
 // POST /api/jobs/{id}/chapters, Restore original
 // POST /api/jobs/{id}/chapters/restore; after either the player reloads its
 // chapters from GET /api/jobs/{id}/chapters.
-import { formatTimestamp, serverErrorMessage } from "./utils.js";
+import { formatTimestamp, serverErrorMessage, CHAPTER_IMPORT_STATUSES } from "./utils.js";
 
 /**
  * How long the preview waits after the last keystroke before it asks the
@@ -25,7 +25,7 @@ export const CHAPTER_PREVIEW_DEBOUNCE_MS = 300;
  * rewriting.
  */
 export function chapterImportAllowed(job) {
-  return !!job && job.status === "Finished" && !job.incompleteTail;
+  return !!job && CHAPTER_IMPORT_STATUSES.has(job.status) && !job.incompleteTail;
 }
 
 export class ChapterImportDialog {
