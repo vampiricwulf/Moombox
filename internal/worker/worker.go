@@ -2345,6 +2345,10 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 				w.queue.Enqueue(job.ID, database.StatusUpcoming)
 			}
 		}); err != nil && !errors.Is(err, ErrAlreadyPending) {
+			if !errors.Is(err, ErrResetPending) {
+				w.logger.Warn("cookie-refresh resume failed", "jobID", job.ID, "err", err)
+				return
+			}
 			w.logger.Info("cookie-refresh resume left to the verb already waiting on the job", "jobID", job.ID, "err", err)
 		}
 		return

@@ -1772,6 +1772,11 @@ func (s *runState) wireMonitorCallbacks() {
 				if errors.Is(err, worker.ErrAlreadyPending) {
 					return // the resume an earlier detection started is still on its way
 				}
+				if !errors.Is(err, worker.ErrResetPending) {
+					s.log.Warn("broadcast re-detected live — auto-resume failed",
+						slog.String("videoID", videoID), slog.String("error", err.Error()))
+					return
+				}
 				// Another verb already waits on the job (an operator's); it is
 				// the one that runs.
 				s.log.Info("broadcast re-detected live — auto-resume left to the verb already waiting on the job",
@@ -1911,6 +1916,11 @@ func (s *runState) wireMonitorCallbacks() {
 				// job's previous run unwinds or a staging claim holds it:
 				// the one accepted earlier is still on its way, and was
 				// logged then.
+				return
+			}
+			if !errors.Is(err, worker.ErrResetPending) {
+				s.log.Warn("twitch auto-recovery failed",
+					slog.String("jobID", jobID), slog.String("error", err.Error()))
 				return
 			}
 			// Another verb already waits on the job; nothing was applied and
