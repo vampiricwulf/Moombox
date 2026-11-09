@@ -628,11 +628,12 @@ func TestEnqueueExistingJobsIgnoresQueued(t *testing.T) {
 	}
 }
 
-// TestDownloadSlotIsOwnedPerJob: a job that already holds a download slot and
-// asks again — a resumed VOD run taking the slot a set-aside recovery of the
-// same job holds — is told it holds one, without a second count. Before, the
-// second acquire counted again while the job's releases (keyed by job) freed
-// only one, so activeDownloads stayed one high until restart.
+// TestDownloadSlotIsOwnedPerJob: a slot key that already holds a download slot
+// and asks again is told it holds one, without a second count — a repeated
+// acquire under one key (once, a resumed VOD run taking the slot a set-aside
+// recovery of the same job held, before the recovery took a key of its own,
+// acquireRecoverySlot) counted again while the key's releases freed only one,
+// so activeDownloads stayed one high until restart.
 func TestDownloadSlotIsOwnedPerJob(t *testing.T) {
 	q := NewJobQueue(1)
 	if !q.TryAcquireDownloadSlot("j") {
