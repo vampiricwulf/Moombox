@@ -1,10 +1,13 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 // TestYouTubeErrorSettlesAnInFlightChat (owner ruling R-E1): the
@@ -137,5 +140,76 @@ func TestAPanickedYouTubeRunSettlesItsChat(t *testing.T) {
 				t.Errorf("chat_status = %q (status %s), want %q", row.ChatStatus, row.Status, tc.want)
 			}
 		})
+	}
+}
+
+// TestAPendingChatSettledOnErrorReachesAMuxAsIncomplete pins a consequence
+// of R-E1 as written (pending → incomplete, not the Cancel path's pending →
+// ""): a YouTube download that failed before its chat received a batch reads
+// "incomplete", and an operator's Mux of that Error row carries it to
+// Finished — finalize writes chat_status only when staging holds a chat.json,
+// which a pending capture does not — so the Finished embed reports
+// "Chat: incomplete" and the staging cleanup keeps the dir chat-only (as the
+// orphan scan then does for the expiry window), where it used to remove it.
+// Accepted as the ruling's text in the Arc E fix round and raised with the
+// owner; flip this test if the owner splits the settle as the Cancel does.
+func TestAPendingChatSettledOnErrorReachesAMuxAsIncomplete(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	staging, _ := muxFixtureJob(t, w, db, "pm")
+	db.UpdateJobFields("pm", map[string]any{"status": database.StatusDownloading, "chat_status": database.ChatPending})
+	job, _ := db.GetJob("pm")
+	w.setJobError(job, errors.New("download: reset"))
+	if row, _ := db.GetJob("pm"); row.ChatStatus != database.ChatIncomplete {
+		t.Fatalf("after the failure chat_status = %q, want %q", row.ChatStatus, database.ChatIncomplete)
+	}
+	// The Mux's finalize, with no chat.json in staging: the status moves,
+	// chat_status is not written.
+	db.UpdateJobFields("pm", map[string]any{"status": database.StatusFinished})
+	fresh, _ := db.GetJob("pm")
+	if fresh.ChatStatus != database.ChatIncomplete {
+		t.Errorf("Finished chat_status = %q, want %q", fresh.ChatStatus, database.ChatIncomplete)
+	}
+	if v := decideStagingCleanup(db, fresh, "pm", staging); v.keep != keepStagingChatOnly {
+		t.Errorf("staging verdict = %v, want the chat-only keep", v.keep)
+	}
+}
+
+// TestAResumedRunReArmsAnIncompleteChat: R-E1's "a later Resume re-arms it",
+// past the Resume's own accept. After a failed YouTube download settled its
+// chat to "incomplete", Resume moves the row on, and the resumed run's chat
+// setup (setupChatDownloader — the call the orchestrator makes when
+// download_chat is on) writes "pending" over the settled value, from which the
+// capture's own writes go on to its verdict. With download_chat off no setup
+// runs and the value stays "incomplete" to Finished
+// (TestAPendingChatSettledOnErrorReachesAMuxAsIncomplete pins where that
+// leads).
+//
+// Mutant: setupChatDownloader not writing "pending" (or guarding the write
+// on the settled value) — the resumed row keeps "incomplete".
+func TestAResumedRunReArmsAnIncompleteChat(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	job := &database.Job{ID: "rearm", VideoID: "vid", URL: "u", Platform: "youtube",
+		Status: database.StatusDownloading, ChatStatus: database.ChatDownloading}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	w.setJobError(job, errors.New("download: reset"))
+	if err := w.ResumeJob(job.ID); err != nil {
+		t.Fatalf("ResumeJob = %v", err)
+	}
+	row, _ := db.GetJob(job.ID)
+	if row.ChatStatus != database.ChatIncomplete {
+		t.Fatalf("resumed row chat_status = %q before its run, want %q", row.ChatStatus, database.ChatIncomplete)
+	}
+
+	o := &DownloadOrchestrator{db: db, logger: discardLogger{}}
+	jobCtx := &JobContext{Job: row, StagingDir: t.TempDir()}
+	info := &youtube.VideoInfo{Chat: youtube.ChatSource{Continuation: "cont", FetchedAt: time.Now()}}
+	dl := o.setupChatDownloader(context.Background(), jobCtx, info)
+	if dl == nil {
+		t.Fatal("setupChatDownloader set up no downloader")
+	}
+	if row, _ := db.GetJob(job.ID); row.ChatStatus != database.ChatPending {
+		t.Errorf("after the resumed run's chat setup chat_status = %q, want %q", row.ChatStatus, database.ChatPending)
 	}
 }
