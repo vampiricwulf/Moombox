@@ -200,7 +200,7 @@ type JobContext struct {
 	// JobContext in the download paths (segCtx := *jobCtx and friends) has been
 	// made, and only ever read through the pointer the orchestrator hands to
 	// muxAndFinalize.
-	ChatStatus string
+	ChatStatus database.ChatStatus
 	// CapturedMux marks the operator's Mux of a job that was not already
 	// muxing — an Error, Cancelled or parked row, set by MuxJob. What is
 	// staged may be all there is, so the muxing embed does not claim the
@@ -1534,7 +1534,7 @@ func decideStagingCleanup(db *database.Database, fresh *database.Job, jobID, sta
 	// shape as the incomplete_tail preservation above it, and the orphan
 	// scanner mirrors it in jobNeedsStaging — but only the chat files are
 	// kept, not the muxed-away media (see keepOnlyChatCapture).
-	if fresh != nil && fresh.ChatStatus == chatStatusIncomplete {
+	if fresh != nil && fresh.ChatStatus == database.ChatIncomplete {
 		return stagingVerdict{keep: keepStagingChatOnly}
 	}
 	return stagingVerdict{keep: removeStaging}
@@ -1818,14 +1818,14 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 // capture that was running stopped short — "incomplete", the same verdict a
 // cut-off capture gets everywhere else; one that never started has nothing to
 // report. A settled verdict is left as it is (ok false).
-func cancelledChatStatus(current string) (string, bool) {
+func cancelledChatStatus(current database.ChatStatus) (database.ChatStatus, bool) {
 	switch current {
-	case "downloading":
-		return chatStatusIncomplete, true
-	case "pending":
-		return "", true
+	case database.ChatDownloading:
+		return database.ChatIncomplete, true
+	case database.ChatPending:
+		return database.ChatNone, true
 	}
-	return "", false
+	return database.ChatNone, false
 }
 
 // runJobContext is the JobContext processJob runs a job's download with:
@@ -2148,6 +2148,9 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 			"jobID", job.ID, "err", errMsg)
 		w.handleCancellation(job)
 		return
+	}
+	if status == database.StatusError {
+		w.settleErrorChat(job)
 	}
 
 	// Suppress notifications for non-actionable errors (matches TS behavior):
@@ -3718,4 +3721,33 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 	})
 
 	return nil
+}
+
+// settleErrorChat settles the chat_status a failed YouTube download leaves
+// behind (owner ruling R-E1). The orchestrator's error arm stops the chat
+// downloader and returns without recording a verdict — recordChatOutcome runs
+// on the success path only — so an Error row went on reading "downloading"
+// (or "pending"), and the Web details badge, which renders any non-empty
+// value, showed a capture in progress on a failed job. A capture that was
+// set up and stopped with its run is "incomplete", the verdict a cut-off
+// capture gets everywhere else; its resume sidecar stays in staging, which an
+// Error row keeps for Resume.
+//
+// Conditional on both the status and the chat value, in one statement
+// (database.SettleChatStatus): a verdict the run did record is left alone,
+// and a Resume that moved the row on before this write — whose run re-arms
+// the chat (setupChatDownloader writes "pending" whatever the row reads) —
+// wins. YouTube only, as the ruling names it: the Twitch orchestrator records
+// a verdict on its unconfirmed-end arm (recordChatOutcome) and its other
+// error arms are left as they were. A Cancel is settled by
+// handleCancellation (cancelledChatStatus), and a COOKIES? park is not an
+// Error.
+func (w *DownloadWorker) settleErrorChat(job *database.Job) {
+	if job.Platform != "youtube" {
+		return
+	}
+	if w.db.SettleChatStatus(job.ID, database.StatusError,
+		[]database.ChatStatus{database.ChatPending, database.ChatDownloading}, database.ChatIncomplete) {
+		w.logger.Info("chat capture stopped with the failed download; recording it as incomplete", "jobID", job.ID)
+	}
 }

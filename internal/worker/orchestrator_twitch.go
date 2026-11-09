@@ -652,7 +652,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		// The stream processor wrote "pending"; this is where the capture
 		// actually starts, as the YouTube downloader's OnStart marks it.
 		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-			"chat_status": "downloading",
+			"chat_status": database.ChatDownloading,
 		})
 		done := make(chan struct{})
 		chatDone = done

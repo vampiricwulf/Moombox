@@ -177,3 +177,59 @@ func TestUpdateJobFieldsIfInAppliesWithinASet(t *testing.T) {
 		t.Error("a write on a row that does not exist reported applied")
 	}
 }
+
+// TestSettleChatStatusNeedsTheStatusAndAnInFlightChat: the settle applies only
+// while the row's status is the expected one AND its chat_status is in the
+// from set, in one statement — so a verdict already recorded, and a row a
+// Resume moved on, are both left exactly as they were, with no notification.
+func TestSettleChatStatusNeedsTheStatusAndAnInFlightChat(t *testing.T) {
+	t.Parallel()
+	from := []ChatStatus{ChatPending, ChatDownloading}
+	for _, tc := range []struct {
+		status  JobStatus
+		chat    ChatStatus
+		applied bool
+	}{
+		{StatusError, ChatPending, true},
+		{StatusError, ChatDownloading, true},
+		{StatusError, ChatFinished, false},
+		{StatusError, ChatUnavailable, false},
+		{StatusError, ChatIncomplete, false},
+		{StatusError, ChatNone, false},
+		{StatusDownloading, ChatDownloading, false}, // a Resume moved the row on
+		{StatusUpcoming, ChatPending, false},
+	} {
+		db, notified := casFixture(t, "s", tc.status)
+		db.UpdateJobFields("s", map[string]any{"chat_status": tc.chat})
+		notified.Store(0)
+		got := db.SettleChatStatus("s", StatusError, from, ChatIncomplete)
+		if got != tc.applied {
+			t.Errorf("%s/%q: applied = %v, want %v", tc.status, tc.chat, got, tc.applied)
+		}
+		row, _ := db.GetJob("s")
+		want := tc.chat
+		if tc.applied {
+			want = ChatIncomplete
+		}
+		if row.ChatStatus != want || row.Status != tc.status {
+			t.Errorf("%s/%q: row = %s %q, want %s %q", tc.status, tc.chat, row.Status, row.ChatStatus, tc.status, want)
+		}
+		if n := notified.Load(); tc.applied != (n > 0) {
+			t.Errorf("%s/%q: %d notifications, applied %v", tc.status, tc.chat, n, tc.applied)
+		}
+	}
+	db, _ := casFixture(t, "empty", StatusError)
+	if db.SettleChatStatus("empty", StatusError, nil, ChatIncomplete) {
+		t.Error("an empty from set reported applied")
+	}
+}
+
+// TestChatStatusInFlight pins the two values a run can leave unsettled.
+func TestChatStatusInFlight(t *testing.T) {
+	for _, s := range ChatStatuses {
+		want := s == ChatPending || s == ChatDownloading
+		if s.InFlight() != want {
+			t.Errorf("%q.InFlight() = %v, want %v", s, s.InFlight(), want)
+		}
+	}
+}

@@ -601,12 +601,12 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 			// "downloading"): a VOD still has the download-slot wait ahead of
 			// it, and the chat was shown downloading through all of it.
 			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"chat_status": "pending",
+				"chat_status": database.ChatPending,
 			})
 		}
 	} else {
 		sp.db.UpdateJobFields(job.ID, map[string]any{
-			"chat_status": "unavailable",
+			"chat_status": database.ChatUnavailable,
 		})
 	}
 
@@ -797,7 +797,7 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 
 			// "pending" until ExecuteTwitch starts it — see the VOD twin.
 			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"chat_status": "pending",
+				"chat_status": database.ChatPending,
 			})
 		}
 	}

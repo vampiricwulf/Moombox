@@ -109,7 +109,7 @@ func TestBootSweepRemovesOnlyStagingTheCleanupWouldHave(t *testing.T) {
 		status       database.JobStatus
 		noRow        bool
 		tail         bool
-		chat         string
+		chat         database.ChatStatus
 		outputExists bool
 		part         string // "" none, "present" or "missing": a recorded part 0's file
 		root         []string
@@ -126,7 +126,7 @@ func TestBootSweepRemovesOnlyStagingTheCleanupWouldHave(t *testing.T) {
 		{"redundant: finished as parts, part 0's own capture left in the root",
 			fixture{status: database.StatusFinished, outputExists: true, part: "present", root: []string{"video_stream"}}, true},
 		{"incomplete tail", fixture{status: database.StatusFinished, outputExists: true, tail: true, root: []string{"video.mp4"}}, false},
-		{"chat incomplete", fixture{status: database.StatusFinished, outputExists: true, chat: chatStatusIncomplete, root: []string{"video.mp4"}}, false},
+		{"chat incomplete", fixture{status: database.StatusFinished, outputExists: true, chat: database.ChatIncomplete, root: []string{"video.mp4"}}, false},
 		{"a set-aside recording", fixture{status: database.StatusFinished, outputExists: true, root: []string{"video.mp4", "video.mp4.restart-1700000000"}}, false},
 		{"an unmuxed part", fixture{status: database.StatusFinished, outputExists: true, root: []string{"video_stream"}, seg1: true}, false},
 		{"an unused root recording", fixture{status: database.StatusFinished, outputExists: true, part: "present", root: []string{"video.mp4"}}, false},

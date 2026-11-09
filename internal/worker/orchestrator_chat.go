@@ -91,14 +91,14 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 	if err != nil {
 		o.logger.Warn("failed to fetch watch page for chat", "err", err, "videoID", jobCtx.Job.VideoID)
 		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-			"chat_status": "unavailable",
+			"chat_status": database.ChatUnavailable,
 		})
 		return nil
 	}
 	if src.Continuation == "" {
 		o.logger.Debug("no chat continuation available", "videoID", jobCtx.Job.VideoID, "err", src.Err)
 		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-			"chat_status": "unavailable",
+			"chat_status": database.ChatUnavailable,
 		})
 		return nil
 	}
@@ -152,13 +152,13 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 		o.logger.Warn("[Chat] Chat downloader error", "jobID", jobCtx.Job.ID, "err", err)
 	}
 	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-		"chat_status": "pending",
+		"chat_status": database.ChatPending,
 	})
 
 	// Transition from "pending" -> "downloading" when chat actually starts (matches TS "start" event)
 	dl.OnStart = func(messageCount int, resuming bool) {
 		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-			"chat_status": "downloading",
+			"chat_status": database.ChatDownloading,
 		})
 		if resuming {
 			o.logger.Info("[Chat] Resuming chat download", "jobID", jobCtx.Job.ID, "messages", messageCount)
@@ -289,7 +289,7 @@ func (o *DownloadOrchestrator) cleanup(chatDl *chat.ChatDownloader, chatDone cha
 	}
 }
 
-// chatStatusIncomplete is the chat_status of a capture that ENDED WITHOUT
+// database.ChatIncomplete is the chat_status of a capture that ENDED WITHOUT
 // COMPLETING: the downloader returned an error — a Twitch VOD paging stall, an
 // IRC session that exhausted its reconnect budget, a panic — instead of running
 // out of chat to fetch.
@@ -300,7 +300,6 @@ func (o *DownloadOrchestrator) cleanup(chatDl *chat.ChatDownloader, chatDone cha
 // "downloading", "pending" and "unavailable". No display-string field restates
 // it. "error" was not reused: nothing writes it, and it reads as a hard failure
 // rather than an archive that stopped short.
-const chatStatusIncomplete = "incomplete"
 
 const (
 	// vodChatWaitFloor and vodChatWaitCeiling bracket how long a finished VOD
@@ -458,14 +457,14 @@ func (c *chatOutcome) verdict() error {
 // error means the capture stopped, not that it ran out of chat — including when
 // it stopped before the first message, which is why "unavailable" (a genuinely
 // empty chat) is only reached on a clean exit.
-func chatStatusForOutcome(messageCount int, outcome error) string {
+func chatStatusForOutcome(messageCount int, outcome error) database.ChatStatus {
 	switch {
 	case outcome != nil:
-		return chatStatusIncomplete
+		return database.ChatIncomplete
 	case messageCount == 0:
-		return "unavailable"
+		return database.ChatUnavailable
 	default:
-		return "finished"
+		return database.ChatFinished
 	}
 }
 
@@ -509,17 +508,17 @@ func (o *DownloadOrchestrator) recordChatOutcome(jobCtx *JobContext, messageCoun
 // cleanupStagingAfterMux delete the pager's resume sidecar with the dir. The
 // sidecar IS the verdict in that case (chatResumeSidecarPresent). A nil
 // context is never passed today, so the nil guard is purely defensive.
-func chatFileStatus(jobCtx *JobContext) string {
+func chatFileStatus(jobCtx *JobContext) database.ChatStatus {
 	if jobCtx == nil {
-		return "finished"
+		return database.ChatFinished
 	}
-	if jobCtx.ChatStatus == chatStatusIncomplete {
-		return chatStatusIncomplete
+	if jobCtx.ChatStatus == database.ChatIncomplete {
+		return database.ChatIncomplete
 	}
-	if jobCtx.ChatStatus == "" && chatResumeSidecarPresent(jobCtx.StagingDir) {
-		return chatStatusIncomplete
+	if jobCtx.ChatStatus == database.ChatNone && chatResumeSidecarPresent(jobCtx.StagingDir) {
+		return database.ChatIncomplete
 	}
-	return "finished"
+	return database.ChatFinished
 }
 
 // chatResumeSidecarName is the file a chat pager writes beside chat.json to

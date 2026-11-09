@@ -906,6 +906,24 @@ export const WATCHED_STATUSES = new Set(["Finished"]);
 export const TRIM_STATUSES = new Set(["Finished"]);
 export const RESUME_PLATFORMS = new Set(["youtube"]);
 
+// ── Chat status ──────────────────────────────────────────────────────────────
+// The badge variant for each chat_status a job row can carry — Go's
+// database.ChatStatus, the closed set the worker writes ("" draws no badge).
+// cmd/moombox's TestChatStatusSetMatchesTheDashboard compares the keys with
+// database.ChatStatuses. "error" is not a value: nothing writes it.
+export const CHAT_STATUS_VARIANTS = Object.freeze({
+  pending: "neutral",
+  downloading: "primary",
+  unavailable: "neutral",
+  finished: "success",
+  incomplete: "warning",
+});
+
+/** The details badge variant for a chat_status; neutral for anything else. */
+export function chatStatusVariant(status) {
+  return Object.hasOwn(CHAT_STATUS_VARIANTS, status) ? CHAT_STATUS_VARIANTS[status] : "neutral";
+}
+
 // ── Channel removal ──────────────────────────────────────────────────────────
 // Removing a channel asks what to do with its jobs (W25-09, owner decision).
 // The confirmation counts them — GET /api/config/channels/{id}/removal — and

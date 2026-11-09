@@ -1018,7 +1018,7 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	// (per audit reports/worker.md Finding 22).
 	dl.OnStart = func(messageCount int, resuming bool) {
 		sp.db.UpdateJobFields(job.ID, map[string]any{
-			"chat_status": "downloading",
+			"chat_status": database.ChatDownloading,
 		})
 	}
 	// The processor-owned end-of-run flag behind earlyChatNeedsRestart, set by
@@ -1029,7 +1029,7 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	sp.trackChat(dl)
 
 	sp.db.UpdateJobFields(job.ID, map[string]any{
-		"chat_status": "pending",
+		"chat_status": database.ChatPending,
 	})
 
 	// Start in background

@@ -90,7 +90,7 @@ func reinitResetFields(autoRetryCount int) map[string]any {
 		"last_audio_seq":      nil,
 		"total_video_seq":     nil,
 		"total_audio_seq":     nil,
-		"chat_status":         "",
+		"chat_status":         database.ChatNone,
 		"total_chat_messages": nil,
 		"download_started_at": "",
 		"stream_end_time":     "",

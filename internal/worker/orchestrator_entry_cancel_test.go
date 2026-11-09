@@ -272,7 +272,7 @@ func TestACancelledRowsChatIsSettledWhicheverComesFirst(t *testing.T) {
 				})
 				defer unsub()
 
-				chat, want := "downloading", chatStatusIncomplete
+				chat, want := "downloading", database.ChatIncomplete
 				if platform == "twitch" {
 					chat, want = "pending", ""
 				}

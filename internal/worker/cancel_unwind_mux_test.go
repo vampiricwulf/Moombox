@@ -76,12 +76,12 @@ func TestACancelledRunsEndLeavesAnotherActorsOutcome(t *testing.T) {
 		name       string
 		then       map[string]any // written between the Cancel and the run's end
 		wantStatus database.JobStatus
-		wantChat   string
+		wantChat   database.ChatStatus
 	}{
 		{"a Finished archive stands", map[string]any{"status": database.StatusFinished, "chat_status": "finished"},
 			database.StatusFinished, "finished"},
 		{"a Cancelled row is settled", map[string]any{"chat_status": "downloading"},
-			database.StatusCancelled, chatStatusIncomplete},
+			database.StatusCancelled, database.ChatIncomplete},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, db := testWorkerSetup(t)

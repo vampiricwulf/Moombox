@@ -55,7 +55,7 @@ func TestChatStatusColorSeparatesIncompleteFromComplete(t *testing.T) {
 //   - formatting the value differently from the Web badge's text and count.
 func TestFinishedJobShowsAnIncompleteChatVerdict(t *testing.T) {
 	count := 4211
-	newModel := func(status string) *JobDetailsModel {
+	newModel := func(status database.ChatStatus) *JobDetailsModel {
 		m := NewJobDetailsModel()
 		m.SetSize(80, 24)
 		m.SetJob(&database.Job{

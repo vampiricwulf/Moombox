@@ -21,7 +21,7 @@ import (
 // live value; applying it on a shutdown too — the last row changes.
 func TestUserCancelSettlesARunningChatStatus(t *testing.T) {
 	w, db := testWorkerSetup(t)
-	run := func(id, chat string, userCancel bool) *database.Job {
+	run := func(id string, chat database.ChatStatus, userCancel bool) *database.Job {
 		t.Helper()
 		if _, err := db.AddJob(&database.Job{ID: id, VideoID: id, URL: "u", Platform: "youtube",
 			Status: database.StatusDownloading, ChatStatus: chat}); err != nil {
@@ -41,11 +41,12 @@ func TestUserCancelSettlesARunningChatStatus(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		id, chat   string
+		id         string
+		chat       database.ChatStatus
 		userCancel bool
-		want       string
+		want       database.ChatStatus
 	}{
-		{"running", "downloading", true, chatStatusIncomplete},
+		{"running", "downloading", true, database.ChatIncomplete},
 		{"never-started", "pending", true, ""},
 		{"settled", "finished", true, "finished"},
 		{"shutdown", "downloading", false, "downloading"},
@@ -85,7 +86,7 @@ func TestTwitchChatReadsPendingUntilItStarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	var mu sync.Mutex
-	var seen []string
+	var seen []database.ChatStatus
 	unsub := db.OnJobUpdate(func(j *database.Job) {
 		if j.ID != job.ID {
 			return

@@ -127,7 +127,7 @@ func TestFinishedEmbedReportsAnIncompleteChat(t *testing.T) {
 	rec := notificationtest.New()
 	o := &DownloadOrchestrator{logger: discardLogger{}, notifier: rec}
 	j := finishedJobRow()
-	j.ChatStatus = chatStatusIncomplete
+	j.ChatStatus = database.ChatIncomplete
 
 	o.sendDownloadFinished(&JobContext{Job: j}, j, []notifications.Part{{File: "out.mp4"}})
 
