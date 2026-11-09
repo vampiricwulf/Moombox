@@ -197,9 +197,10 @@ type Job struct {
 	// pre-v16 legacy rows and must never be relied on.
 	ChannelID     *string `json:"channelId,omitempty"`
 	QueuePriority int     `json:"queuePriority,omitempty"`
-	// ParkReason is why the job stopped at StatusCookies (see the ParkReason
-	// doc comment). Meaningful only while Status == StatusCookies; every path
-	// that parks a job rewrites it, and every path that un-parks one clears it.
+	// ParkReason is why the job stopped at StatusCookies, or — for the three
+	// Error-row values — in StatusError (see the ParkReason doc comment).
+	// Every path that parks or fails a job rewrites it, and every path that
+	// un-parks or restarts one clears it.
 	ParkReason ParkReason `json:"parkReason,omitempty"`
 	// ParkIdentity is an opaque fingerprint of WHICH platform account the job
 	// was refused under, recorded when ParkReason is ParkReasonMembership (see

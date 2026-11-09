@@ -13,7 +13,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -2647,7 +2647,13 @@ export class MoomboxApp {
     if (job.status === "Error") {
       const errorText = job.error || "Error";
       const truncated = errorText.length > 50 ? errorText.substring(0, 50) + "…" : errorText;
-      return `<span class="job-error-text" title="${this.escapeHtml(errorText)}" data-full="${this.escapeHtml(errorText)}" data-short="${this.escapeHtml(truncated)}">${this.escapeHtml(truncated)}</span>`;
+      // An Error row the Twitch monitor will mux or retry by itself says so
+      // ahead of its error (owner ruling R-D2; the TUI's "⟳ mux" tag).
+      const action = pendingAutoAction(job);
+      const auto = action
+        ? `<span class="job-auto-action" title="${this.escapeHtml(pendingAutoActionText(action))}">${action === "auto_mux" ? "⟳ Auto-mux pending" : "⟳ Auto-retry pending"}</span> `
+        : "";
+      return `${auto}<span class="job-error-text" title="${this.escapeHtml(errorText)}" data-full="${this.escapeHtml(errorText)}" data-short="${this.escapeHtml(truncated)}">${this.escapeHtml(truncated)}</span>`;
     }
     return this.escapeHtml(this.formatProgress(job));
   }

@@ -76,3 +76,43 @@ func TestReinitializePreviewAllowedMatchesThePost(t *testing.T) {
 		}
 	}
 }
+
+// TestPendingAutoActionReachesTheDetailsAndThePreview pins owner ruling
+// R-D2 on the wire: GET /api/jobs/{id} carries the row's pending automatic
+// action (jobstate.PendingAutoAction) as pendingAutoAction, absent when there
+// is none, and the Reinitialize preview counts it, so the dashboard's confirm
+// says the reset cancels it.
+//
+// Mutants: enrichJob not setting PendingAutoAction; PreviewReinitialize not
+// counting it.
+func TestPendingAutoActionReachesTheDetailsAndThePreview(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "tw_mux", func(j *database.Job) {
+		j.Platform, j.Status, j.Error = "twitch", database.StatusError, "twitch HLS: 500"
+	})
+	// AddJob does not write park_reason; the latch's failure write does.
+	f.db.UpdateJobFields("tw_mux", map[string]any{"park_reason": database.ParkReasonTwitchEndUnconfirmed})
+	f.addJob(t, "plain", func(j *database.Job) { j.Status, j.Error = database.StatusError, "boom" })
+
+	var details struct {
+		PendingAutoAction *string `json:"pendingAutoAction"`
+	}
+	body := f.getJSON(t, "/api/jobs/tw_mux", &details)
+	if details.PendingAutoAction == nil || *details.PendingAutoAction != "auto_mux" {
+		t.Errorf("details of an end-unconfirmed row = %s, want pendingAutoAction auto_mux", body)
+	}
+	details.PendingAutoAction = nil
+	body = f.getJSON(t, "/api/jobs/plain", &details)
+	if details.PendingAutoAction != nil || strings.Contains(body, "pendingAutoAction") {
+		t.Errorf("details of a plain Error row carry pendingAutoAction: %s", body)
+	}
+
+	var prev struct {
+		PendingAutoMux   int `json:"pendingAutoMux"`
+		PendingAutoRetry int `json:"pendingAutoRetry"`
+	}
+	body = f.getJSON(t, "/api/jobs/tw_mux/reinitialize/preview", &prev)
+	if prev.PendingAutoMux != 1 || prev.PendingAutoRetry != 0 {
+		t.Errorf("preview of an end-unconfirmed row = %s, want pendingAutoMux 1", body)
+	}
+}

@@ -1069,13 +1069,58 @@ export function unplayableAudioText(info, canPlay) {
 }
 
 /**
+ * The Twitch monitor's automatic-recovery constants, as the Go side declares
+ * them (jobstate.TwitchOfflineErrMsg, jobstate.MaxTwitchAutoRetries); the
+ * job-state parity test (cmd/moombox) compares the two.
+ */
+export const TWITCH_OFFLINE_ERR_MSG = "twitch channel is offline";
+export const MAX_TWITCH_AUTO_RETRIES = 2;
+
+/**
+ * pendingAutoAction is the dashboard's twin of jobstate.PendingAutoAction
+ * (owner ruling R-D2): the automatic action the Twitch monitor will take for
+ * an Error row — "auto_mux" once its broadcast is confirmed over (a row the
+ * unconfirmed-end latch marked), "auto_retry" when it is live again (the
+ * offline flap or an unreachable probe, before any segment, retries left) —
+ * or "" for none. GET /api/jobs/{id} sends the Go answer as
+ * pendingAutoAction; the job list and the WebSocket send the row alone, so
+ * the rows derive it here. cmd/moombox's job-state parity test runs both
+ * against web/tests/fixtures/job-state-parity.json.
+ * @param {object|null} job
+ * @returns {"auto_mux"|"auto_retry"|""}
+ */
+export function pendingAutoAction(job) {
+  if (!job || job.platform !== "twitch" || job.status !== "Error") return "";
+  if (job.parkReason === "twitch_end_unconfirmed") return "auto_mux";
+  if (job.error !== TWITCH_OFFLINE_ERR_MSG && job.parkReason !== "twitch_unreachable") return "";
+  if (job.lastVideoSeq !== undefined && job.lastVideoSeq !== null) return "";
+  return (Number(job.autoRetryCount) || 0) < MAX_TWITCH_AUTO_RETRIES ? "auto_retry" : "";
+}
+
+/**
+ * pendingAutoActionText is the sentence both UIs show for a pending action
+ * (jobstate.AutoAction.Text): "" for none.
+ * @param {string} action
+ * @returns {string}
+ */
+export function pendingAutoActionText(action) {
+  if (action === "auto_mux") return "Will mux automatically once Twitch confirms the broadcast over";
+  if (action === "auto_retry") return "Will retry automatically when the broadcast is live again";
+  return "";
+}
+
+/**
  * reinitializeDeletesText is the clause a Reinitialize confirm names what the
  * reset deletes with (owner decision PR-M1), from GET
  * /api/jobs/{id}/reinitialize/preview — or the sum of several, for a batch.
  * The Go twin is worker.ReinitializePreview.Summary, which the TUI's A I
  * confirm line reads: the same words, sizes as formatBytes writes them.
+ * A preview whose job waits on an automatic action (pendingAutoMux,
+ * pendingAutoRetry, owner ruling R-D2) adds what the reset cancels: "; it
+ * cancels the pending automatic mux".
  * @param {{setAsideRecordings?: number, recordedParts?: number, recordedPartBytes?: number,
- *          stagedFiles?: number, stagedBytes?: number, importedChapters?: number}} p
+ *          stagedFiles?: number, stagedBytes?: number, importedChapters?: number,
+ *          pendingAutoMux?: number, pendingAutoRetry?: number}} p
  * @returns {string}
  */
 export function reinitializeDeletesText(p) {
@@ -1086,9 +1131,15 @@ export function reinitializeDeletesText(p) {
   if (n("recordedParts") > 0) parts.push(`${plural(n("recordedParts"), "recorded part", "recorded parts")} (${formatBytes(n("recordedPartBytes"))})`);
   if (n("stagedFiles") > 0) parts.push(`${plural(n("stagedFiles"), "staged file", "staged files")} (${formatBytes(n("stagedBytes"))})`);
   if (n("importedChapters") > 0) parts.push(plural(n("importedChapters"), "imported chapter", "imported chapters"));
-  if (parts.length === 0) return "deletes nothing recorded";
-  if (parts.length === 1) return `deletes ${parts[0]}`;
-  return `deletes ${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+  let deletes;
+  if (parts.length === 0) deletes = "deletes nothing recorded";
+  else if (parts.length === 1) deletes = `deletes ${parts[0]}`;
+  else deletes = `deletes ${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+  const pending = (count, one, many) => (count === 1 ? `the pending automatic ${one}` : `${count} pending automatic ${many}`);
+  const cancels = [];
+  if (n("pendingAutoMux") > 0) cancels.push(pending(n("pendingAutoMux"), "mux", "muxes"));
+  if (n("pendingAutoRetry") > 0) cancels.push(pending(n("pendingAutoRetry"), "retry", "retries"));
+  return cancels.length ? `${deletes}; it cancels ${cancels.join(" and ")}` : deletes;
 }
 
 /**
@@ -1097,7 +1148,8 @@ export function reinitializeDeletesText(p) {
  * @returns {object}
  */
 export function sumReinitializePreviews(previews) {
-  const keys = ["setAsideRecordings", "recordedParts", "recordedPartBytes", "stagedFiles", "stagedBytes", "importedChapters"];
+  const keys = ["setAsideRecordings", "recordedParts", "recordedPartBytes", "stagedFiles", "stagedBytes", "importedChapters",
+    "pendingAutoMux", "pendingAutoRetry"];
   const out = Object.fromEntries(keys.map((k) => [k, 0]));
   for (const p of previews) for (const k of keys) out[k] += Number(p?.[k]) || 0;
   return out;

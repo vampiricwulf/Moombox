@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -782,6 +783,20 @@ func (m *JobDetailsModel) buildRows() {
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: header})
 		for _, line := range wrapText(j.Error, m.blockWrapWidth()) {
 			m.rows = append(m.rows, detailRow{kind: rowField, value: line, color: color})
+		}
+	}
+
+	// === Automatic action pending (owner ruling R-D2) ===
+	// An Error row the Twitch monitor will act on by itself — a mux once the
+	// broadcast is confirmed over, a retry when it is live again — says so,
+	// so the operator does not race it with Reinitialize (whose A I I confirm
+	// names what it would cancel) or wait on nothing. The dashboard's job
+	// row and details show the same sentence (utils.js pendingAutoActionText).
+	if a := jobstate.PendingAutoAction(j); a != jobstate.AutoActionNone {
+		m.rows = append(m.rows, detailRow{kind: rowSeparator})
+		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Automatic"})
+		for _, line := range wrapText(a.Text(), m.blockWrapWidth()) {
+			m.rows = append(m.rows, detailRow{kind: rowField, value: line, color: ColorCyan})
 		}
 	}
 

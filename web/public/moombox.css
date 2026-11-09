@@ -477,6 +477,13 @@ sl-badge.status.cookies::part(base) {
     text-underline-offset: 2px;
 }
 
+/* The automatic action an Error row waits on (owner ruling R-D2). */
+.job-auto-action {
+    color: var(--sl-color-primary-700);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
 .job-error-text.expanded {
     white-space: normal;
     word-break: break-word;
@@ -907,6 +914,18 @@ sl-badge.status.cookies::part(base) {
     padding: var(--sl-spacing-small);
     border-radius: var(--sl-border-radius-medium);
     word-break: break-word;
+}
+
+.details-auto-action {
+    color: var(--sl-color-primary-800);
+    background-color: var(--sl-color-primary-100);
+    padding: var(--sl-spacing-small);
+    border-radius: var(--sl-border-radius-medium);
+    margin-top: var(--sl-spacing-x-small);
+}
+
+.details-auto-action[hidden] {
+    display: none;
 }
 
 /* Logs panel */

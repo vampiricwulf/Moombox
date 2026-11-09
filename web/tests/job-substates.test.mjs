@@ -1,0 +1,112 @@
+// Derived job sub-states shown in the dashboard (audit rule 5, Arc D): the
+// automatic action an Error row waits on (owner ruling R-D2). The pure
+// function runs against the table cmd/moombox's Go parity test runs
+// internal/jobstate against; the DOM cases run under jsdom.
+import { test, after } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+import {
+  pendingAutoAction, pendingAutoActionText, reinitializeDeletesText, sumReinitializePreviews,
+} from "../public/modules/utils.js";
+
+let jsdomMissing = null;
+try {
+  await import("jsdom");
+} catch (e) {
+  if (e.code !== "ERR_MODULE_NOT_FOUND") throw e;
+  jsdomMissing = `jsdom not installed — run \`npm ci\` in web/tests (${e.code})`;
+}
+const harness = jsdomMissing ? null : await import("./helpers/app-dom.mjs");
+const skip = jsdomMissing || false;
+
+after(() => harness?.teardownAll());
+
+const PARITY = JSON.parse(readFileSync(new URL("./fixtures/job-state-parity.json", import.meta.url), "utf8"));
+
+// Mutant: any arm of pendingAutoAction dropped or reordered (the end-
+// unconfirmed row with the flap's text reads auto_retry).
+test("pendingAutoAction answers the shared table as jobstate does", () => {
+  assert.ok(PARITY.pendingAutoAction.length >= 10);
+  for (const c of PARITY.pendingAutoAction) {
+    assert.equal(pendingAutoAction(c.job), c.want, c.name);
+  }
+  assert.equal(pendingAutoAction(null), "");
+  assert.equal(pendingAutoActionText(""), "");
+  assert.match(pendingAutoActionText("auto_mux"), /Will mux automatically/);
+  assert.match(pendingAutoActionText("auto_retry"), /Will retry automatically/);
+});
+
+// The Go twin is worker TestReinitializePreviewSummary's cancels cases.
+//
+// Mutants: the cancels clause dropped; the pending counts left out of the sum.
+test("the Reinitialize clause names the automatic action it cancels", () => {
+  assert.equal(reinitializeDeletesText({ stagedFiles: 1, stagedBytes: 10, pendingAutoMux: 1 }),
+    "deletes 1 staged file (10B); it cancels the pending automatic mux");
+  assert.equal(reinitializeDeletesText({ pendingAutoRetry: 1 }),
+    "deletes nothing recorded; it cancels the pending automatic retry");
+  assert.equal(reinitializeDeletesText({ pendingAutoMux: 2, pendingAutoRetry: 3 }),
+    "deletes nothing recorded; it cancels 2 pending automatic muxes and 3 pending automatic retries");
+  const sum = sumReinitializePreviews([{ pendingAutoMux: 1 }, { pendingAutoRetry: 1, pendingAutoMux: 1 }]);
+  assert.equal(sum.pendingAutoMux, 2);
+  assert.equal(sum.pendingAutoRetry, 1);
+});
+
+const muxRow = (over = {}) => ({
+  id: "tw_m", videoId: "m", title: "Latched", channelName: "C", platform: "twitch", status: "Error",
+  error: "twitch HLS: 500", parkReason: "twitch_end_unconfirmed",
+  createdAt: "2026-11-09T11:00:00Z", updatedAt: "2026-11-09T11:00:00Z", ...over,
+});
+
+// Mutant: formatProgressHtml not adding the tag (the row shows the error alone).
+test("an Error row the monitor will mux says so in the job list", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.jobs = [muxRow(), muxRow({ id: "plain", parkReason: undefined, error: "boom" })];
+  h.app.renderJobs();
+  const cell = (id) => h.document.querySelector(`.video-item[data-job-id="${id}"] .job-progress-text`);
+  assert.match(cell("tw_m").textContent, /Auto-mux pending/);
+  assert.match(cell("tw_m").querySelector(".job-auto-action").title, /Will mux automatically/);
+  assert.equal(cell("plain").querySelector(".job-auto-action"), null);
+});
+
+// Mutants: the details block not rendered; the update path not hiding it
+// once the row leaves Error.
+test("the job details name the pending automatic action and drop it when the row moves on", { skip }, async () => {
+  const h = await harness.makeApp({
+    routes: {
+      "GET /api/jobs/:id": () => ({ ...muxRow(), hasStaging: true, hasSegments: true, asides: [], keptChatSidecar: false,
+        unmuxedParts: false, muxGaps: [], pendingAutoAction: "auto_mux" }),
+      "GET /api/jobs/:id/logs": () => [],
+    },
+  });
+  const dlg = h.el("details-dialog");
+  Object.defineProperty(dlg, "open", { get() { return !!this._open; } });
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [muxRow()] } });
+  await h.flush();
+  h.app.details.showJobDetails(h.app.jobs[0]);
+  await h.flush(); await h.flush();
+  const block = () => h.document.querySelector(".details-auto-action");
+  assert.ok(block() && !block().hidden, "the pending mux is shown");
+  assert.match(block().textContent, /Will mux automatically/);
+
+  h.app.handleMessage({ type: "job_update", payload: muxRow({ status: "Muxing", parkReason: undefined, error: undefined }) });
+  await h.flush(); await h.flush();
+  assert.ok(!block() || block().hidden, "a row that left Error shows no pending action");
+});
+
+// Mutant: reinitializeJob not passing the preview's pending counts through
+// (sumReinitializePreviews dropping them).
+test("the Reinitialize confirm warns that it cancels the pending mux", { skip }, async () => {
+  const h = await harness.makeApp({
+    routes: {
+      "GET /api/jobs/:id/reinitialize/preview": () => ({ allowed: true, stagedFiles: 2, stagedBytes: 2048, pendingAutoMux: 1 }),
+      "POST /api/jobs/:id/reinitialize": () => ({ success: true }),
+    },
+  });
+  h.app.jobs = [muxRow()];
+  let asked = null;
+  h.app.showConfirm = async (msg) => { asked = msg; return false; };
+  await h.app.reinitializeJob("tw_m");
+  await h.flush();
+  assert.match(asked ?? "", /This deletes 2 staged files \(2\.0KB\); it cancels the pending automatic mux\./);
+});

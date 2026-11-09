@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -109,15 +110,19 @@ func TestReinitializePreviewSummary(t *testing.T) {
 		{ReinitializePreview{SetAsideRecordings: 2, RecordedParts: 3, RecordedPartBytes: 1536, StagedFiles: 1, StagedBytes: 100, ImportedChapters: 5},
 			"deletes 2 set-aside recordings, 3 recorded parts (1.5KB), 1 staged file (100B) and 5 imported chapters"},
 		{ReinitializePreview{StagedFiles: 4, StagedBytes: 2048, ImportedChapters: 1}, "deletes 4 staged files (2.0KB) and 1 imported chapter"},
+		// What the reset cancels (owner ruling R-D2).
+		{ReinitializePreview{StagedFiles: 1, StagedBytes: 10, PendingAutoMux: 1}, "deletes 1 staged file (10B); it cancels the pending automatic mux"},
+		{ReinitializePreview{PendingAutoRetry: 1}, "deletes nothing recorded; it cancels the pending automatic retry"},
+		{ReinitializePreview{PendingAutoMux: 2, PendingAutoRetry: 3}, "deletes nothing recorded; it cancels 2 pending automatic muxes and 3 pending automatic retries"},
 	} {
 		if got := tc.p.Summary(); got != tc.want {
 			t.Errorf("Summary(%+v) = %q, want %q", tc.p, got, tc.want)
 		}
 	}
 	var sum ReinitializePreview
-	sum.Add(ReinitializePreview{1, 2, 3, 4, 5, 6})
-	sum.Add(ReinitializePreview{1, 1, 1, 1, 1, 1})
-	if sum != (ReinitializePreview{2, 3, 4, 5, 6, 7}) {
+	sum.Add(ReinitializePreview{1, 2, 3, 4, 5, 6, 7, 8})
+	sum.Add(ReinitializePreview{1, 1, 1, 1, 1, 1, 1, 1})
+	if sum != (ReinitializePreview{2, 3, 4, 5, 6, 7, 8, 9}) {
 		t.Errorf("Add = %+v", sum)
 	}
 }
@@ -182,4 +187,35 @@ func TestPreviewReinitializeFindsEachImportedList(t *testing.T) {
 			t.Errorf("split archive: ImportedChapters = %d, want 4", got)
 		}
 	})
+}
+
+// TestPreviewReinitializeNamesThePendingAutomaticAction: a row waiting on the
+// Twitch monitor's automatic mux or retry is counted, so both confirms say
+// the reset cancels it — for the mux, by deleting the staging it would
+// archive. A row with nothing pending counts neither.
+//
+// Mutant: PreviewReinitialize not reading jobstate.PendingAutoAction.
+func TestPreviewReinitializeNamesThePendingAutomaticAction(t *testing.T) {
+	base := t.TempDir()
+	mux := &database.Job{ID: "tw_m", Platform: "twitch", Status: database.StatusError, Error: "twitch HLS: 500",
+		ParkReason: database.ParkReasonTwitchEndUnconfirmed}
+	retry := &database.Job{ID: "tw_r", Platform: "twitch", Status: database.StatusError, Error: TwitchOfflineErrMsg}
+	plain := &database.Job{ID: "yt_p", Platform: "youtube", Status: database.StatusError, Error: "boom"}
+	if p := PreviewReinitialize(nil, base, mux); p.PendingAutoMux != 1 || p.PendingAutoRetry != 0 ||
+		!strings.HasSuffix(p.Summary(), "; it cancels the pending automatic mux") {
+		t.Errorf("mux row: %+v %q", p, p.Summary())
+	}
+	if p := PreviewReinitialize(nil, base, retry); p.PendingAutoRetry != 1 || p.PendingAutoMux != 0 {
+		t.Errorf("retry row: %+v", p)
+	}
+	if p := PreviewReinitialize(nil, base, plain); p.PendingAutoMux != 0 || p.PendingAutoRetry != 0 ||
+		strings.Contains(p.Summary(), "cancels") {
+		t.Errorf("plain row: %+v %q", p, p.Summary())
+	}
+	var total ReinitializePreview
+	total.Add(PreviewReinitialize(nil, base, mux))
+	total.Add(PreviewReinitialize(nil, base, retry))
+	if total.PendingAutoMux != 1 || total.PendingAutoRetry != 1 {
+		t.Errorf("Add dropped the pending counts: %+v", total)
+	}
 }

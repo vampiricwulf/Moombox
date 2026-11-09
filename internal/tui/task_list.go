@@ -18,6 +18,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobfilter"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 )
 
 // Package-level styles for task list rendering (avoid alloc per render).
@@ -685,7 +686,20 @@ func (m *TaskListModel) resetMarquee() {
 // tells renderJob to style the tag dim rather than in status color. Both
 // renderJob and titleWidth derive from this helper so the row layout and
 // the rendered cells can never disagree.
+//
+// An Error row the Twitch monitor will act on by itself shows a dim tag too —
+// "⟳ mux" or "⟳ retry" (jobstate.PendingAutoAction, owner ruling R-D2) — the
+// row hint for the sentence the details pane spells out.
 func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait bool) {
+	if job.Status == database.StatusError {
+		switch jobstate.PendingAutoAction(job) {
+		case jobstate.AutoActionMux:
+			return "⟳ mux ", true
+		case jobstate.AutoActionRetry:
+			return "⟳ retry ", true
+		}
+		return "", false
+	}
 	if job.Status != database.StatusDownloading && job.Status != database.StatusMuxing {
 		return "", false
 	}

@@ -38,7 +38,8 @@ test("reinitializeDeletesText words the preview as the TUI does", () => {
     "deletes 4 staged files (2.0KB) and 1 imported chapter");
   assert.deepEqual(
     sumReinitializePreviews([{ setAsideRecordings: 1, stagedBytes: 10 }, { setAsideRecordings: 2, importedChapters: 3, allowed: true }]),
-    { setAsideRecordings: 3, recordedParts: 0, recordedPartBytes: 0, stagedFiles: 0, stagedBytes: 10, importedChapters: 3 },
+    { setAsideRecordings: 3, recordedParts: 0, recordedPartBytes: 0, stagedFiles: 0, stagedBytes: 10, importedChapters: 3,
+      pendingAutoMux: 0, pendingAutoRetry: 0 },
   );
 });
 
