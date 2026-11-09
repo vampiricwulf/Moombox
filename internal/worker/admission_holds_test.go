@@ -63,7 +63,7 @@ func TestSchedulerHoldsReportsEachGate(t *testing.T) {
 		t.Errorf("a run-out rate-limit hold is reported until %v", got)
 	}
 
-	s.holdUntil("h_a", now.Add(10*time.Minute))
+	s.holdUntil("h_a", now.Add(10*time.Minute), 0)
 	if got := s.Holds(now).Jobs["h_a"]; !got.Until.Equal(now.Add(10*time.Minute)) || !drained(s) {
 		t.Errorf("own hold = %+v, want until +10m and a signal", got)
 	}
@@ -110,5 +110,43 @@ func TestBacklogRetryStateCountsTheStreak(t *testing.T) {
 	w.endBacklogStreak("r_a")
 	if _, ok := w.BacklogRetryState("r_a", now); ok {
 		t.Error("the streak's end left the row held")
+	}
+}
+
+// TestRateLimitRequeueReportsARateLimitHold: a backlog VOD a transient
+// failure sent back to Queued, and then a YouTube rate limit, is held for the
+// rate limit, not for a retry. The rate-limit requeue neither counts toward
+// the streak nor resets it, so the attempt both UIs show is the one recorded
+// with the hold, not the streak's count read when they ask.
+//
+// Mutant: Holds/AdmissionHolds reading the streak (w.backlogRetries) for the
+// attempt — the row reads "Retry 1 of 3" with the one-hour time.
+func TestRateLimitRequeueReportsARateLimitHold(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	ch := "UC_rl"
+	addSchedJob(t, db, &ch, "rl_a", database.StatusUpcoming, 1)
+	job, _ := db.GetJob("rl_a")
+	if ok, err := w.requeueBacklog(job, errors.New("dial tcp: connection refused"), "test requeue"); !ok {
+		t.Fatalf("transient requeue: %v", err)
+	}
+	if ok, err := w.requeueBacklogAfterRateLimit(job, ErrRateLimited); !ok {
+		t.Fatalf("rate-limit requeue: %v", err)
+	}
+	now := time.Now()
+	st, ok := w.BacklogRetryState("rl_a", now)
+	if !ok || st.Attempt != 0 || !st.Until.After(now.Add(rateLimitBackoff-time.Minute)) {
+		t.Fatalf("BacklogRetryState = %+v %v, want a held row with attempt 0 until about +%v", st, ok, rateLimitBackoff)
+	}
+	row, _ := db.GetJob("rl_a")
+	if q := w.AdmissionHolds().For(row, now); q.Reason != jobstate.HoldRateLimit || q.Attempt != 0 {
+		t.Errorf("the Queued row's hold = %+v, want rate_limit", q)
+	}
+	// The streak survives the rate-limit requeue: the next transient failure
+	// is attempt 2.
+	if ok, _ := w.requeueBacklog(job, errors.New("dial tcp: connection refused"), "test requeue"); !ok {
+		t.Fatal("second transient requeue refused")
+	}
+	if q := w.AdmissionHolds().For(row, time.Now()); q.Reason != jobstate.HoldRetry || q.Attempt != 2 {
+		t.Errorf("after a second transient requeue the hold = %+v, want retry 2", q)
 	}
 }

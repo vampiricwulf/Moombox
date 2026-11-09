@@ -102,7 +102,7 @@ func (w *DownloadWorker) requeueBacklog(job *database.Job, err error, what strin
 		return false, fmt.Errorf("%w (gave up after %d retries)", err, backlogRetryLimit)
 	}
 	delay := backlogRetryBackoff << (attempt - 1)
-	if !w.backToQueued(job, delay) {
+	if !w.backToQueued(job, delay, attempt) {
 		return false, err
 	}
 	w.logger.Warn(what,
@@ -124,7 +124,7 @@ func (w *DownloadWorker) requeueBacklogAfterRateLimit(job *database.Job, err err
 	if w.scheduler == nil || CookieResumeStatus(job) != database.StatusQueued {
 		return false, err
 	}
-	if !w.backToQueued(job, rateLimitBackoff) {
+	if !w.backToQueued(job, rateLimitBackoff, 0) {
 		return false, err
 	}
 	w.logger.Warn("YouTube rate-limited the backlog VOD's fetch; back to Queued, retried in about an hour (not counted against its retries)",
@@ -134,14 +134,15 @@ func (w *DownloadWorker) requeueBacklogAfterRateLimit(job *database.Job, err err
 
 // backToQueued is the requeue itself, once a caller has decided on it: the
 // job's slots released and its row back in Queued, held from re-admission
-// for delay. Reports whether it happened.
+// for delay. attempt is the retry attempt the hold is for, 0 for a
+// rate-limit requeue (Scheduler.ownHold). Reports whether it happened.
 //
 // The hold is placed BEFORE the status write, so no sweep can see the row
 // Queued and unheld; the slots are released before it, so the next download
 // does not wait for this run's exit.
-func (w *DownloadWorker) backToQueued(job *database.Job, delay time.Duration) bool {
+func (w *DownloadWorker) backToQueued(job *database.Job, delay time.Duration, attempt int) bool {
 	w.queue.ReleaseSlots(job.ID)
-	w.scheduler.holdUntil(job.ID, time.Now().Add(delay))
+	w.scheduler.holdUntil(job.ID, time.Now().Add(delay), attempt)
 	// Never over an operator's Cancel, which the scheduler would then have
 	// admitted again — the job downloading after all: not when one flagged
 	// this run before the requeue settled (JobQueue.settle), and not over a
@@ -159,11 +160,12 @@ func (w *DownloadWorker) backToQueued(job *database.Job, delay time.Duration) bo
 }
 
 // BacklogRetryState is jobID's place in its retry streak and its own hold:
-// how many requeues the streak has counted (0 for a row only a rate-limit
-// requeue holds, which the streak does not count), the budget, and when the
-// scheduler may admit it again. ok is false when no hold of its own stands at
-// now. Read-only, for both UIs' Queued-row line (owner ruling R-D3); the
-// streak itself lives in memory, so a restart forgets it, by design.
+// the retry attempt its hold was placed for (0 for a hold a rate-limit
+// requeue placed, which the streak does not count, whatever the streak
+// stands at — Scheduler.ownHold), the budget, and when the scheduler may
+// admit it again. ok is false when no hold of its own stands at now.
+// Read-only, for both UIs' Queued-row line (owner ruling R-D3); the streak
+// itself lives in memory, so a restart forgets it, by design.
 func (w *DownloadWorker) BacklogRetryState(jobID string, now time.Time) (hold jobstate.BacklogHold, ok bool) {
 	if w.scheduler == nil {
 		return hold, false
@@ -172,28 +174,21 @@ func (w *DownloadWorker) BacklogRetryState(jobID string, now time.Time) (hold jo
 	if !held {
 		return hold, false
 	}
-	w.backlogRetryMu.Lock()
-	attempt := w.backlogRetries[jobID]
-	w.backlogRetryMu.Unlock()
-	return jobstate.BacklogHold{Attempt: attempt, Of: backlogRetryLimit, Until: own.Until}, true
+	return jobstate.BacklogHold{Attempt: own.Attempt, Of: backlogRetryLimit, Until: own.Until}, true
 }
 
 // AdmissionHolds is the snapshot both UIs show on Queued rows (owner ruling
-// R-D3): the scheduler's holds (Scheduler.Holds) with each held row's retry
-// count filled in, as BacklogRetryState reads it. The zero value when the
-// worker has no scheduler.
+// R-D3): the scheduler's holds (Scheduler.Holds), each held row's attempt
+// the one its hold was placed for, with the retry budget filled in. The zero
+// value when the worker has no scheduler.
 func (w *DownloadWorker) AdmissionHolds() jobstate.AdmissionHolds {
 	if w.scheduler == nil {
 		return jobstate.AdmissionHolds{}
 	}
 	h := w.scheduler.Holds(time.Now())
-	if len(h.Jobs) > 0 {
-		w.backlogRetryMu.Lock()
-		for id, own := range h.Jobs {
-			own.Attempt, own.Of = w.backlogRetries[id], backlogRetryLimit
-			h.Jobs[id] = own
-		}
-		w.backlogRetryMu.Unlock()
+	for id, own := range h.Jobs {
+		own.Of = backlogRetryLimit
+		h.Jobs[id] = own
 	}
 	return h
 }

@@ -86,7 +86,7 @@ type Scheduler struct {
 	// a restart forgets the backoff, never the job. Lazily allocated, so a
 	// Scheduler literal (the tests build several) needs no constructor.
 	holdMu sync.Mutex
-	holds  map[string]time.Time
+	holds  map[string]ownHold
 
 	// rateLimitedUntil is when the hold a YouTube rate-limit verdict placed on
 	// every backlog admission runs out (holdForRateLimit, rate_limit.go), and
@@ -144,8 +144,9 @@ func (s *Scheduler) noteHoldsChanged() {
 // Holds is a read-only snapshot of what holds backlog admission at now: the
 // gate-wide holds sweep returns early on — offline, the disk gate, the
 // YouTube rate-limit hold (zero once run out) — and each row's own backoff
-// (Jobs, its Until only; DownloadWorker.AdmissionHolds adds the retry
-// streak's count). Safe from any goroutine. The order sweep tests them in is
+// (Jobs: its Until, and the retry attempt it was placed for — 0 for a
+// rate-limit requeue, which the streak does not count; DownloadWorker.
+// AdmissionHolds adds the budget). Safe from any goroutine. The order sweep tests them in is
 // jobstate.HoldPrecedence, which is how both UIs pick a Queued row's reason
 // (owner ruling R-D3).
 func (s *Scheduler) Holds(now time.Time) jobstate.AdmissionHolds {
@@ -159,26 +160,36 @@ func (s *Scheduler) Holds(now time.Time) jobstate.AdmissionHolds {
 	}
 	s.rateMu.Unlock()
 	s.holdMu.Lock()
-	for id, until := range s.holds {
-		if !now.Before(until) {
+	for id, own := range s.holds {
+		if !now.Before(own.until) {
 			continue
 		}
 		if h.Jobs == nil {
 			h.Jobs = map[string]jobstate.BacklogHold{}
 		}
-		h.Jobs[id] = jobstate.BacklogHold{Until: until}
+		h.Jobs[id] = jobstate.BacklogHold{Attempt: own.attempt, Until: own.until}
 	}
 	s.holdMu.Unlock()
 	return h
 }
 
-// holdUntil keeps sweep from admitting jobID before until.
-func (s *Scheduler) holdUntil(jobID string, until time.Time) {
+// ownHold is one row's own hold: when it runs out, and the retry attempt
+// that placed it (0: a rate-limit requeue, outside the retry budget). The
+// attempt is recorded with the hold, not read from the streak later, because
+// a rate-limit requeue neither counts toward the streak nor resets it.
+type ownHold struct {
+	until   time.Time
+	attempt int
+}
+
+// holdUntil keeps sweep from admitting jobID before until; attempt is the
+// retry attempt the hold is for, 0 for a rate-limit requeue (ownHold).
+func (s *Scheduler) holdUntil(jobID string, until time.Time, attempt int) {
 	s.holdMu.Lock()
 	if s.holds == nil {
-		s.holds = map[string]time.Time{}
+		s.holds = map[string]ownHold{}
 	}
-	s.holds[jobID] = until
+	s.holds[jobID] = ownHold{until: until, attempt: attempt}
 	s.holdMu.Unlock()
 	s.noteHoldsChanged()
 }
@@ -199,11 +210,11 @@ func (s *Scheduler) unhold(jobID string) {
 func (s *Scheduler) held(jobID string, now time.Time) bool {
 	s.holdMu.Lock()
 	defer s.holdMu.Unlock()
-	until, ok := s.holds[jobID]
+	own, ok := s.holds[jobID]
 	if !ok {
 		return false
 	}
-	if !now.Before(until) {
+	if !now.Before(own.until) {
 		delete(s.holds, jobID)
 		return false
 	}
