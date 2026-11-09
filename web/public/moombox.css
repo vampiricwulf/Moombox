@@ -1055,12 +1055,30 @@ body.batch-bar-active {
 }
 
 /* Each status section gets inline padding for breathing room */
+/* The bar is a fixed height, so the connection label must never wrap: it
+   stays on one line and, on a narrow phone, the left group shrinks and the
+   label ends in an ellipsis (the full detail is in the element's title). */
+#status-bar-left {
+    min-width: 0;
+}
+
 #connection-status {
     display: flex;
     align-items: center;
     gap: 5px;
+    min-width: 0;
+    white-space: nowrap;
     font-weight: 500;
     letter-spacing: 0.01em;
+}
+
+#connection-status sl-icon {
+    flex-shrink: 0;
+}
+
+#connection-status .status-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 #connection-status.connected {

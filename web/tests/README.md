@@ -57,9 +57,11 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `channel-removal.test.mjs` | removing a channel asks: keep its jobs (the default) or delete the pending ones, and the toast says what it did; its prompt-text tests are pure |
 | `dashboard-text.test.mjs` | small user-facing strings: a singular chat count, the Stats tab with no disk reading, a single-file recording's load error |
 | `details-mux-finished.test.mjs` | the details dialog's Mux button on a Finished job that still holds an unmuxed part |
+| `details-facts-status.test.mjs` | the details dialog's staging facts stamped with the status they were fetched under: a status change of the open job refetches once, so Upcoming→Error with segments offers Mux and a Reinitialize drops it |
 | `fetch-errors.test.mjs` | failed dashboard requests toast the server's reason |
 | `ffmpeg-path-check.test.mjs` | a checked FFmpeg path reaches the Settings form |
 | `files-panel.test.mjs` | the Files tab's rows: labelled delete controls, set-aside confirms, refusals |
+| `files-delete-all-inflight.test.mjs` | Delete All (files and history) stays disabled through a Refresh during its DELETE, and a second one is refused |
 | `filter-bar.test.mjs` | the filter bar under real typing: the debounce, chips, the caret |
 | `format-picker.test.mjs` | the Add dialog's format picker: the `damaged` / `segmented` marks after the Best badges, the `segmented` one left off while the stream is live or upcoming, and the preselection, an intact badge ahead of a marked one |
 | `import-placeholder.test.mjs` | an imported job's placeholder id draws no dead embed, Stream URL or Open URL; one pure helper test |
@@ -75,6 +77,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `password-forms.test.mjs` | the wizard's External Access Password and Settings' Set Password: the bounds the login enforces, checked before posting; the password sent as typed; the warning while it starts or ends with a space |
 | `player.test.mjs` | `player.js`: selection, the chat sidebar and offset, seeking, search, the overlay; a few pure helper tests |
 | `player-chapters.test.mjs` | `player.js`'s chapters: the marker strip under the video and the chapter list, laid out on the global timeline, seeking on click, the current chapter highlighted, nothing drawn for none or a failed fetch, and a slow fetch never holding up playback |
+| `chapter-import-busy.test.mjs` | the chapter-import dialog's committing state: Restore disabled and refused during a Save, Escape through `close()`, and (owner ruling R-B1) a failure of a save Escape dismissed reported as a toast |
 | `release-notes-toast.test.mjs` | a failed release-notes fetch toasts rather than blocking the tab |
 | `render-diff.test.mjs` | a repeated `job_update` makes no DOM write in the details dialog or the status bar |
 | `resolution-picker.test.mjs` | the Max Resolution picker in Settings and the setup wizard; its preset-mapping tests are pure |
@@ -84,6 +87,9 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `settings-notifications.test.mjs` | the notification card's auto-saving controls and the Public Dashboard URL row |
 | `settings-reorder-budget.test.mjs` | the two reorder ceilings: 0 sent, an empty field omitted |
 | `settings-save-merge.test.mjs` | a Settings save sends only the fields edited since load or the last save, so a TUI change survives it; the browser pair only once changed; a notification card's change sent as `notification_edits`, and the live list it answers with taken; Filter... opening the event chips without a save, against a fake PUT that answers as the server's merge does; the restart prompt judging only what the page's saves sent; `editedSettingsPayload` and `notificationIdentities` themselves are pure |
+| `settings-save-inflight.test.mjs` | an edit made during a Settings save stays unsaved and survives the next `loadConfig`; a second Save, from either button, is refused while one runs |
+| `ws-connection-state.test.mjs` | the WebSocket's `ConnState` on `#connection-status`; a close before open probes `GET /api/status` once, a 401 ends in unauthorized (no socket, a re-probe every 30 s that reconnects on the first non-401), anything else backs off; a probe answering after a newer socket changes nothing |
+| `ws-session-reload.test.mjs` | one test, so app.js's fetch wrapper is on the path: the probe's 401 reloads the page (seen through the harness's `navigations`, jsdom's refused navigations), once, and a later 200 reconnects |
 | `settings-text.test.mjs` | Settings and setup text that pointed the wrong way or dropped the server's reason |
 | `settings-channels.test.mjs` | both Add Channel dialogs: a URL or bare `@handle` resolved first, a configured ID switching to editing it, the edit mark, and a stale list's `409` |
 | `setup-wizard.test.mjs` | the first-run wizard's Finish: the address it redirects the tab to after the restart |

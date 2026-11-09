@@ -6,6 +6,25 @@ import { formatBytes, formatRelativeTime } from "./utils.js";
 export class FilesController {
   constructor(app) {
     this.app = app;
+    /** A Delete All is in flight for the files / history table: its button
+     *  stays disabled whatever a Refresh renders meanwhile (_syncDeleteAllBtn). */
+    this._deletingFiles = false;
+    this._deletingHistory = false;
+  }
+
+  /**
+   * The one writer of a Delete All button: disabled while its delete runs or
+   * its list is empty (or failed to load), loading while it runs.
+   * @param {"files"|"history"} kind
+   */
+  _syncDeleteAllBtn(kind) {
+    const files = kind === "files";
+    const btn = document.getElementById(files ? "files-delete-all-btn" : "history-delete-all-btn");
+    if (!btn) return;
+    const deleting = files ? this._deletingFiles : this._deletingHistory;
+    const list = files ? this._orphanedFiles : this._orphanedHistory;
+    btn.loading = deleting;
+    btn.disabled = deleting || !Array.isArray(list) || list.length === 0;
   }
 
   /** Wire up the Files tab's refresh/delete-all buttons. */
@@ -49,7 +68,8 @@ export class FilesController {
   renderOrphanedFiles(files) {
     const emptyEl = document.getElementById("files-empty");
     const tableWrapper = document.getElementById("files-table-wrapper");
-    const deleteAllBtn = document.getElementById("files-delete-all-btn");
+    // The list the Delete All button judges is the one drawn.
+    this._orphanedFiles = Array.isArray(files) ? files : [];
 
     if (files === null || (Array.isArray(files) && files.length === 0)) {
       if (emptyEl) {
@@ -60,13 +80,13 @@ export class FilesController {
           : "No orphaned files found.";
       }
       if (tableWrapper) tableWrapper.style.display = "none";
-      if (deleteAllBtn) deleteAllBtn.disabled = true;
+      this._syncDeleteAllBtn("files");
       return;
     }
 
     if (emptyEl) emptyEl.style.display = "none";
     if (tableWrapper) tableWrapper.style.display = "";
-    if (deleteAllBtn) deleteAllBtn.disabled = false;
+    this._syncDeleteAllBtn("files");
 
     const table = document.getElementById("files-table");
     // Remove existing rows (keep header)
@@ -154,6 +174,7 @@ export class FilesController {
   }
 
   async deleteAllOrphanedFiles() {
+    if (this._deletingFiles) return;
     if (!this._orphanedFiles || this._orphanedFiles.length === 0) return;
     const fileCount = this._orphanedFiles.length;
     const withAsides = this._orphanedFiles.filter((f) => f.asides?.length > 0).length;
@@ -162,8 +183,10 @@ export class FilesController {
       : "";
     if (!await this.app.showConfirm(`Delete ${fileCount === 1 ? "this" : `all ${fileCount}`} orphaned file${fileCount === 1 ? "" : "s"}?${asides}`, { okLabel: "Delete All", okVariant: "danger" })) return;
 
-    const deleteAllBtn = document.getElementById("files-delete-all-btn");
-    if (deleteAllBtn) { deleteAllBtn.loading = true; deleteAllBtn.disabled = true; }
+    // A second click may have come in while the confirm was up.
+    if (this._deletingFiles) return;
+    this._deletingFiles = true;
+    this._syncDeleteAllBtn("files");
 
     const paths = this._orphanedFiles.map((f) => f.path);
     try {
@@ -194,14 +217,8 @@ export class FilesController {
     } catch (err) {
       this.app.showToast("Failed to delete files", "danger");
     } finally {
-      if (deleteAllBtn) {
-        deleteAllBtn.loading = false;
-        // Let renderOrphanedFiles control disabled state — it disables the
-        // button when the list is empty. Only force-enable here if the
-        // fetch/render didn't run (e.g. DELETE request failed).
-        const hasFiles = this._orphanedFiles && this._orphanedFiles.length > 0;
-        deleteAllBtn.disabled = !hasFiles;
-      }
+      this._deletingFiles = false;
+      this._syncDeleteAllBtn("files");
     }
   }
 
@@ -226,7 +243,7 @@ export class FilesController {
   renderOrphanedHistory(entries) {
     const emptyEl = document.getElementById("history-empty");
     const tableWrapper = document.getElementById("history-table-wrapper");
-    const deleteAllBtn = document.getElementById("history-delete-all-btn");
+    this._orphanedHistory = Array.isArray(entries) ? entries : [];
 
     if (entries === null || (Array.isArray(entries) && entries.length === 0)) {
       if (emptyEl) {
@@ -237,13 +254,13 @@ export class FilesController {
           : "No orphaned history entries found.";
       }
       if (tableWrapper) tableWrapper.style.display = "none";
-      if (deleteAllBtn) deleteAllBtn.disabled = true;
+      this._syncDeleteAllBtn("history");
       return;
     }
 
     if (emptyEl) emptyEl.style.display = "none";
     if (tableWrapper) tableWrapper.style.display = "";
-    if (deleteAllBtn) deleteAllBtn.disabled = false;
+    this._syncDeleteAllBtn("history");
 
     const table = document.getElementById("history-table");
     table.querySelectorAll(".history-row").forEach((row) => row.remove());
@@ -290,12 +307,14 @@ export class FilesController {
   }
 
   async deleteAllOrphanedHistory() {
+    if (this._deletingHistory) return;
     if (!this._orphanedHistory || this._orphanedHistory.length === 0) return;
     const count = this._orphanedHistory.length;
     if (!await this.app.showConfirm(`Remove ${count === 1 ? "this" : `all ${count}`} orphaned history entr${count === 1 ? "y" : "ies"}?`, { okLabel: "Remove All", okVariant: "danger" })) return;
 
-    const deleteAllBtn = document.getElementById("history-delete-all-btn");
-    if (deleteAllBtn) { deleteAllBtn.loading = true; deleteAllBtn.disabled = true; }
+    if (this._deletingHistory) return;
+    this._deletingHistory = true;
+    this._syncDeleteAllBtn("history");
 
     const videoIds = this._orphanedHistory.map((e) => e.videoId);
     try {
@@ -312,11 +331,8 @@ export class FilesController {
     } catch (err) {
       this.app.showToast("Failed to remove history entries", "danger");
     } finally {
-      if (deleteAllBtn) {
-        deleteAllBtn.loading = false;
-        const has = this._orphanedHistory && this._orphanedHistory.length > 0;
-        deleteAllBtn.disabled = !has;
-      }
+      this._deletingHistory = false;
+      this._syncDeleteAllBtn("history");
     }
   }
 }

@@ -37,7 +37,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { JSDOM } from "jsdom";
+import { JSDOM, VirtualConsole } from "jsdom";
 // The fake-HTTP response tag is identical for both harnesses; the rest of
 // player-dom.mjs is player-shaped, so its route matcher and clock are
 // re-expressed below in the same style rather than exported across.
@@ -303,8 +303,19 @@ export async function makeApp({ routes = {}, initialState = {}, storage = {}, li
   // teardownAll. Each makeApp republishes its own globals.
   closeOpenWindows();
 
+  // Navigations jsdom refused (it implements none but hash changes): the
+  // fetch wrapper's 401 window.location.reload() lands here, and
+  // location.reload is unforgeable, so this is how a test sees one. Every
+  // other jsdom error goes to the console as the default console does.
+  const navigations = [];
+  const virtualConsole = new VirtualConsole().forwardTo(console, { jsdomErrors: "none" });
+  virtualConsole.on("jsdomError", (e) => {
+    if (e.type === "not-implemented" && /navigation/.test(e.message)) navigations.push(e.message);
+    else console.error(e.type === "unhandled-exception" ? e.cause?.stack : e.message);
+  });
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url,
+    virtualConsole,
     pretendToBeVisual: true, // document.hidden must be false; the 1 Hz tick early-returns otherwise
   });
   const { window } = dom;
@@ -407,6 +418,8 @@ export async function makeApp({ routes = {}, initialState = {}, storage = {}, li
   const el = (id) => document.getElementById(id);
   return {
     app, window, document, http, clock, sockets, clipboard,
+    /** Navigations jsdom refused, e.g. the fetch wrapper's window.location.reload(). */
+    navigations,
     fetchLog: http.calls,
     el,
     /** Advance the manual clock; fires setTimeout/setInterval callbacks. */
