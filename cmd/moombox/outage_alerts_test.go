@@ -397,3 +397,33 @@ func TestOutageAlertIsTheDebouncedOne(t *testing.T) {
 			fset.Position(stopAt), fset.Position(waitAt))
 	}
 }
+
+// TestBootOutageIsDatedFromTheLoss: the alerter subscribes some way into
+// startup, after connMon.Start went offline; the replayed offline dated the
+// outage from the subscription, understating it — a short boot outage could
+// drop under the minimum and never be reported. The alerter now dates a new
+// outage by the monitor's OfflineFor.
+//
+// Mutant: ignore offlineFor — the 90 s boot outage reads as 0 s and sends
+// nothing.
+func TestBootOutageIsDatedFromTheLoss(t *testing.T) {
+	h := newOutageHarness(t)
+	h.a.offlineFor = func() time.Duration { return 90 * time.Second }
+	h.a.onState(false) // the replay at subscription
+	start := h.now.Add(-90 * time.Second)
+	h.a.offlineFor = func() time.Duration { return 0 }
+	h.up(0)
+	h.clk.last(t).fire()
+	calls := h.rec.ByEvent("connectivity_restored")
+	if len(calls) != 1 {
+		t.Fatalf("%d Outage Alerts, want 1", len(calls))
+	}
+	for name, want := range map[string]string{
+		"Started":  "<t:" + strconv.FormatInt(start.Unix(), 10) + ":f>",
+		"Duration": "1m30s",
+	} {
+		if got, _ := calls[0].Field(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}

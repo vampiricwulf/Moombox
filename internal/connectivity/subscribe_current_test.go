@@ -75,3 +75,34 @@ func TestOnStateChangeWithCurrentNeverLosesOrDoublesATransition(t *testing.T) {
 		mu.Unlock()
 	}
 }
+
+// TestOfflineForCountsFromTheLoss: an outage begun at boot is delivered to a
+// late subscriber, which must not date it from its own subscription. The
+// monitor keeps when it went offline; OfflineFor is the time since, and zero
+// while online.
+//
+// Mutant: OfflineFor returning 0 — the boot outage is dated from the
+// subscription and the alert understates it.
+func TestOfflineForCountsFromTheLoss(t *testing.T) {
+	m := newTestMonitor(func() bool { return false })
+	if d := m.OfflineFor(); d != 0 {
+		t.Fatalf("OfflineFor = %v on a monitor that never went offline", d)
+	}
+	m.pollInterval = time.Hour
+	m.Start(t.Context())
+	defer m.Stop()
+	if m.IsOnline() {
+		t.Fatal("premise lost: Start did not seed offline")
+	}
+	time.Sleep(60 * time.Millisecond)
+	var seen time.Duration
+	unsub := m.OnStateChangeWithCurrent(func(bool) { seen = m.OfflineFor() })
+	defer unsub()
+	if seen < 50*time.Millisecond {
+		t.Errorf("OfflineFor in the replay = %v, want at least the 60ms since the loss", seen)
+	}
+	m.transition(true)
+	if d := m.OfflineFor(); d != 0 {
+		t.Errorf("OfflineFor = %v once back online, want 0", d)
+	}
+}
