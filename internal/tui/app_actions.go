@@ -751,7 +751,7 @@ func streamURL(j *database.Job) string {
 	}
 	if j.Platform == "twitch" {
 		if j.IsVod {
-			vodID := strings.TrimPrefix(j.VideoID, twitch.VodJobIDPrefix)
+			vodID, _ := twitch.VodIDFromJobID(j.VideoID)
 			return "https://www.twitch.tv/videos/" + vodID
 		}
 		return ""

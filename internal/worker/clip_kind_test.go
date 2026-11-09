@@ -84,6 +84,15 @@ func TestVodJobIDRoundTrips(t *testing.T) {
 			t.Errorf("VodIDFromJobID(%q) read a VOD", id)
 		}
 	}
+	// The three VOD sites (processTwitchVod, wireTwitchVodInfo, the TUI's
+	// streamURL) read the ID with ok ignored, where they spelt
+	// strings.TrimPrefix: the value is TrimPrefix's on every shape, a
+	// legacy bare-number video ID and a bare "tw_v" included.
+	for _, id := range []string{"tw_v42", "tw_v", "42", "tw_42", twitch.ClipJobID("s"), "", "tw_vv1"} {
+		if v, _ := twitch.VodIDFromJobID(id); v != strings.TrimPrefix(id, twitch.VodJobIDPrefix) {
+			t.Errorf("VodIDFromJobID(%q) = %q, TrimPrefix gave %q", id, v, strings.TrimPrefix(id, twitch.VodJobIDPrefix))
+		}
+	}
 }
 
 // TestTwitchDispatchAsksTheClipPredicate: processTwitch routes a row to the

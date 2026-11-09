@@ -54,7 +54,10 @@ func VodJobID(vodID string) string { return VodJobIDPrefix + vodID }
 
 // VodIDFromJobID is the VOD ID a VOD job's ID carries, and false for any
 // other ID. A clip ID ("tw_clip_…") is never read as one: "tw_c" is not
-// "tw_v".
+// "tw_v". The ID it returns is strings.TrimPrefix's on every input — the
+// input unchanged when the prefix is missing, "" for a bare "tw_v" — so a
+// caller that reads a VOD row's ID and ignores ok gets what TrimPrefix gave
+// it, a legacy row whose video ID is the bare number included.
 func VodIDFromJobID(id string) (string, bool) {
 	vodID, ok := strings.CutPrefix(id, VodJobIDPrefix)
 	return vodID, ok && vodID != ""

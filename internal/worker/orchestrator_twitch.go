@@ -1701,7 +1701,7 @@ func wireTwitchVodInfo(variant *TwitchVariantInfo, job *database.Job, result *St
 	if !result.IsVod || getVodInfo == nil {
 		return
 	}
-	vodID := strings.TrimPrefix(job.VideoID, twitch.VodJobIDPrefix)
+	vodID, _ := twitch.VodIDFromJobID(job.VideoID)
 	variant.VodInfoFn = func(ctx context.Context) (*twitch.TwitchVodInfo, error) {
 		return getVodInfo(ctx, vodID)
 	}

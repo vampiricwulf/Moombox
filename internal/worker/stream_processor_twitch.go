@@ -481,7 +481,7 @@ func twitchVodFetchError(ctx context.Context, what string, err error) error {
 }
 
 func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.Job) (*StreamProcessResult, error) {
-	vodID := strings.TrimPrefix(job.VideoID, twitch.VodJobIDPrefix)
+	vodID, _ := twitch.VodIDFromJobID(job.VideoID)
 
 	vodInfo, err := sp.tw.GetVodInfo(ctx, vodID)
 	if err != nil {
