@@ -1202,23 +1202,33 @@ export class MoomboxApp {
     this._connState = state;
     const statusEl = document.getElementById("connection-status");
     if (!statusEl) return;
-    let cls, iconName, text;
+    // The label sits in the fixed-height status bar beside the active
+    // indicator and the check countdown, so it stays short enough for a
+    // phone; the countdown and attempt detail go in the title.
+    let cls, iconName, text, detail;
     switch (state) {
       case ConnState.OPEN:
         cls = "connected"; iconName = "wifi"; text = "Connected";
         break;
       case ConnState.BACKOFF:
         cls = "disconnected backoff"; iconName = "wifi-off";
-        text = `Reconnecting in ${Math.max(1, Math.round(delay / 1000))}s (attempt ${attempt})`;
+        text = `Reconnecting (${attempt})`;
+        detail = `Reconnecting in ${Math.max(1, Math.round(delay / 1000))}s (attempt ${attempt})`;
         break;
       case ConnState.UNAUTHORIZED:
         cls = "disconnected unauthorized"; iconName = "lock"; text = "Session expired";
         break;
       default:
         cls = "disconnected connecting"; iconName = "wifi-off";
-        text = attempt > 0 ? `Reconnecting… (attempt ${attempt})` : "Connecting...";
+        if (attempt > 0) {
+          text = `Reconnecting (${attempt})`;
+          detail = `Reconnecting… (attempt ${attempt})`;
+        } else {
+          text = "Connecting...";
+        }
     }
     statusEl.className = cls;
+    statusEl.title = detail ?? text;
     statusEl.textContent = "";
     const icon = document.createElement("sl-icon");
     icon.name = iconName;

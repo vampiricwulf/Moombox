@@ -51,6 +51,37 @@ test("open, then a drop after open: Connected, then a backoff without a probe", 
   assert.equal(h.app._connState, "connecting");
 });
 
+// The status bar is a fixed 28 px strip and the label sits beside the active
+// indicator and the check countdown, so it stays short on a phone: the
+// visible label carries the attempt only, and the countdown and attempt
+// detail live in the element's title.
+test("a backoff's label is compact and its detail is in the title", { skip }, async () => {
+  const h = await harness.makeApp();
+  const ws = lastSocket(h);
+  ws.readyState = 1;
+  ws.onopen();
+  await h.flush();
+  h.app.reconnectAttempts = 11; // a long outage: the next close is attempt 12
+  ws.onclose();
+  await h.flush();
+  assert.equal(h.app._connState, "backoff");
+  const attempt = 12;
+  assert.equal(h.app.reconnectAttempts, attempt);
+  assert.equal(label(h), `Reconnecting (${attempt})`);
+  assert.ok(label(h).length <= 18, `label too long for a phone: ${label(h)}`);
+  assert.match(statusEl(h).title, new RegExp(`^Reconnecting in \\d+s \\(attempt ${attempt}\\)$`));
+
+  h.advance(60000);
+  assert.equal(h.app._connState, "connecting");
+  assert.equal(label(h), `Reconnecting (${attempt})`);
+  assert.equal(statusEl(h).title, `Reconnecting… (attempt ${attempt})`);
+
+  lastSocket(h).readyState = 1;
+  lastSocket(h).onopen();
+  await h.flush();
+  assert.equal(statusEl(h).title, "Connected");
+});
+
 // MUTANT: onclose without the probe — the state is backoff and a new socket
 // comes 1 s later, forever.
 test("a refused upgrade whose probe answers 401 ends in unauthorized and stops retrying", { skip }, async () => {
