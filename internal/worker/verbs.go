@@ -23,7 +23,9 @@ type NotAllowedError struct {
 	// Verb is the verb's past participle, as the routes' messages use it:
 	// "resumed", "reinitialized", "muxed".
 	Verb string
-	// Status is what the row read when the verb was refused.
+	// Status is what the row read when the verb was refused; "" only when
+	// Mux's re-read after a missed write failed (a gone row is
+	// ErrJobNotFound, never this).
 	Status database.JobStatus
 }
 
