@@ -324,6 +324,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.statusBar.offline = !msg.Online
 		return a, nil
 
+	case AdmissionHoldsMsg:
+		a.SetAdmissionHolds(msg.Holds)
+		return a, nil
+
 	case SidecarStatusMsg:
 		a.statusBar.sidecarDown = !msg.Healthy
 		return a, nil

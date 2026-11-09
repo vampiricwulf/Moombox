@@ -1102,6 +1102,87 @@ export function isAwaitingProcessing(job) {
 }
 
 /**
+ * HOLD_PRECEDENCE is jobstate.HoldPrecedence: the order a Queued row's hold
+ * reason is chosen in, the order the scheduler's admission sweep returns
+ * early in (owner ruling R-D3). cmd/moombox's job-state parity test compares
+ * the two lists, and runs queuedHold's Go twin over the same table.
+ */
+export const HOLD_PRECEDENCE = ["offline", "disk", "rate_limit", "retry"];
+
+/**
+ * queuedHold is jobstate.AdmissionHolds.For: why the archive-slots scheduler
+ * is not admitting a Queued row at `now`, from the admissionHolds snapshot
+ * (GET /api/status, the initial_state and admission_holds frames). A row
+ * that is not Queued, or no snapshot, holds nothing; a hold whose time has
+ * passed holds nothing either.
+ * @param {{offline?: boolean, diskHeld?: boolean, rateLimitedUntil?: string,
+ *          jobs?: Object<string, {attempt: number, of: number, until: string}>}|null} holds
+ * @param {object} job
+ * @param {number} [now] epoch milliseconds
+ * @returns {{reason: string, until?: string, attempt?: number, of?: number}}
+ */
+export function queuedHold(holds, job, now = Date.now()) {
+  if (!holds || !job || job.status !== "Queued") return { reason: "" };
+  const before = (t) => !!t && now < Date.parse(t);
+  const own = holds.jobs?.[job.id];
+  const hasOwn = !!own && before(own.until);
+  for (const r of HOLD_PRECEDENCE) {
+    switch (r) {
+      case "offline":
+        if (holds.offline) return { reason: "offline" };
+        break;
+      case "disk":
+        if (holds.diskHeld) return { reason: "disk" };
+        break;
+      case "rate_limit":
+        if (job.platform !== "twitch" && before(holds.rateLimitedUntil)) return { reason: "rate_limit", until: holds.rateLimitedUntil };
+        if (hasOwn && !own.attempt) return { reason: "rate_limit", until: own.until };
+        break;
+      case "retry":
+        if (hasOwn && own.attempt > 0) return { reason: "retry", until: own.until, attempt: own.attempt, of: own.of };
+        break;
+    }
+  }
+  return { reason: "" };
+}
+
+/**
+ * queuedHoldText is jobstate.QueuedHold.Text: a Queued row's line, in the
+ * TUI's words. Times are the viewer's wall clock, HH:MM.
+ * @param {{reason: string, until?: string, attempt?: number, of?: number}} hold
+ * @returns {string}
+ */
+export function queuedHoldText(hold) {
+  const hhmm = (t) => {
+    const d = new Date(t);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+  switch (hold?.reason) {
+    case "offline": return "Held: offline";
+    case "disk": return "Held: disk full";
+    case "rate_limit": return `Held: YouTube rate limit until ${hhmm(hold.until)}`;
+    case "retry": return `Retry ${hold.attempt} of ${hold.of} at ${hhmm(hold.until)}`;
+  }
+  return "Waiting in queue...";
+}
+
+/**
+ * diskGaugeLevel is the level the disk gauge and the status-bar indicator
+ * draw: the reading's warnLevel, except "holding" while the backlog's disk
+ * gate holds and the reading is below critical — the gate holds until usage
+ * is 2 points under the threshold, so a reading back at "warn" (or even
+ * "ok") still holds admission, and said only "warn" (owner ruling R-D3).
+ * @param {{warnLevel?: string}|null} disk
+ * @param {{diskHeld?: boolean}|null} holds
+ * @returns {"ok"|"warn"|"holding"|"critical"}
+ */
+export function diskGaugeLevel(disk, holds) {
+  const level = disk?.warnLevel || "ok";
+  if (level !== "critical" && holds?.diskHeld) return "holding";
+  return level;
+}
+
+/**
  * The Twitch monitor's automatic-recovery constants, as the Go side declares
  * them (jobstate.TwitchOfflineErrMsg, jobstate.MaxTwitchAutoRetries); the
  * job-state parity test (cmd/moombox) compares the two.

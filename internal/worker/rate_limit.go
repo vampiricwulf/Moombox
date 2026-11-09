@@ -907,6 +907,7 @@ func (s *Scheduler) holdForRateLimit(now time.Time, d time.Duration) {
 	s.rateLimitedUntil, s.rateHeld = until, true
 	s.rateMu.Unlock()
 	s.reportRateLimitHold()
+	s.noteHoldsChanged()
 	if opening {
 		s.log.Warn("scheduler: YouTube rate-limited this session; backlog VODs wait in Queued until the hold runs out (live and manually added jobs are not held)",
 			"until", until.UTC().Format(time.RFC3339))
@@ -932,6 +933,7 @@ func (s *Scheduler) rateLimitGateClosed(now time.Time) bool {
 	s.rateHeld = false
 	s.rateMu.Unlock()
 	s.reportRateLimitHold()
+	s.noteHoldsChanged()
 	s.log.Info("scheduler: the YouTube rate-limit hold has run out; backlog admission resumes")
 	return false
 }
@@ -990,6 +992,7 @@ func (s *Scheduler) RestoreRateLimitHold(until time.Time) bool {
 	s.rateLimitedUntil, s.rateHeld = until, true
 	s.rateMu.Unlock()
 	s.reportRateLimitHold()
+	s.noteHoldsChanged()
 	s.log.Warn("scheduler: the last run stopped with a YouTube rate-limit hold standing; backlog VODs wait in Queued until it runs out (live and manually added jobs are not held)",
 		"until", until.UTC().Format(time.RFC3339))
 	return true

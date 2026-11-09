@@ -203,6 +203,10 @@ type TaskListModel struct {
 	// that key's summary field for the sweep's early-return path, which
 	// changes the header without rebuilding anything.
 	rebuildSeq uint64
+	// holds is the backlog scheduler's hold snapshot (AdmissionHoldsMsg) the
+	// Queued rows' tags read; holdsRev keys the render cache on it.
+	holds    jobstate.AdmissionHolds
+	holdsRev uint64
 	// renderCache / cacheKey memoise View(). bubbletea renders after every
 	// message (~120/s with one active download); most carry no list change.
 	renderCache string
@@ -691,6 +695,9 @@ func (m *TaskListModel) resetMarquee() {
 // "⟳ mux" or "⟳ retry" (jobstate.PendingAutoAction, owner ruling R-D2) — the
 // row hint for the sentence the details pane spells out.
 func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait bool) {
+	if job.Status == database.StatusQueued {
+		return queuedHoldTag(m.holds.For(job, time.Now())), true
+	}
 	if job.Status == database.StatusError {
 		switch jobstate.PendingAutoAction(job) {
 		case jobstate.AutoActionMux:
@@ -716,6 +723,32 @@ func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait
 		return fmt.Sprintf("%.0f%% ", percent), false
 	}
 	return "", false
+}
+
+// queuedHoldTag is a Queued row's dim tag for why the scheduler is not
+// admitting it (jobstate.AdmissionHolds.For, owner ruling R-D3) — the row
+// hint for the line the details pane spells out — and "" for a row waiting
+// only its turn for an archive slot.
+func queuedHoldTag(q jobstate.QueuedHold) string {
+	switch q.Reason {
+	case jobstate.HoldOffline:
+		return "⏸ offline "
+	case jobstate.HoldDisk:
+		return "⏸ disk "
+	case jobstate.HoldRateLimit:
+		return "⏸ rate limit "
+	case jobstate.HoldRetry:
+		return fmt.Sprintf("⟳ %d/%d ", q.Attempt, q.Of)
+	}
+	return ""
+}
+
+// SetAdmissionHolds stores the scheduler's hold snapshot the Queued rows'
+// tags read (AdmissionHoldsMsg).
+func (m *TaskListModel) SetAdmissionHolds(h jobstate.AdmissionHolds) {
+	m.holds = h
+	m.holdsRev++
+	m.invalidate()
 }
 
 // isWaitProgress reports whether a progress string is a wait line rather
@@ -1048,6 +1081,7 @@ func (m *TaskListModel) passes(j *database.Job) bool {
 //     one-== comparable-struct design this key is built on.
 type taskListKey struct {
 	rebuildSeq    uint64
+	holdsRev      uint64
 	progressRev   uint64
 	sec           int64
 	width         int
@@ -1072,6 +1106,7 @@ func (m *TaskListModel) taskListKey() taskListKey {
 		rev = m.progressStore.Rev()
 	}
 	return taskListKey{
+		holdsRev:      m.holdsRev,
 		rebuildSeq:    m.rebuildSeq,
 		progressRev:   rev,
 		sec:           time.Now().Unix(),

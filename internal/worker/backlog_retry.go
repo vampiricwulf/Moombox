@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 )
 
 const (
@@ -155,6 +156,57 @@ func (w *DownloadWorker) backToQueued(job *database.Job, delay time.Duration) bo
 		return false
 	}
 	return true
+}
+
+// BacklogRetryState is jobID's place in its retry streak and its own hold:
+// how many requeues the streak has counted (0 for a row only a rate-limit
+// requeue holds, which the streak does not count), the budget, and when the
+// scheduler may admit it again. ok is false when no hold of its own stands at
+// now. Read-only, for both UIs' Queued-row line (owner ruling R-D3); the
+// streak itself lives in memory, so a restart forgets it, by design.
+func (w *DownloadWorker) BacklogRetryState(jobID string, now time.Time) (hold jobstate.BacklogHold, ok bool) {
+	if w.scheduler == nil {
+		return hold, false
+	}
+	own, held := w.scheduler.Holds(now).Jobs[jobID]
+	if !held {
+		return hold, false
+	}
+	w.backlogRetryMu.Lock()
+	attempt := w.backlogRetries[jobID]
+	w.backlogRetryMu.Unlock()
+	return jobstate.BacklogHold{Attempt: attempt, Of: backlogRetryLimit, Until: own.Until}, true
+}
+
+// AdmissionHolds is the snapshot both UIs show on Queued rows (owner ruling
+// R-D3): the scheduler's holds (Scheduler.Holds) with each held row's retry
+// count filled in, as BacklogRetryState reads it. The zero value when the
+// worker has no scheduler.
+func (w *DownloadWorker) AdmissionHolds() jobstate.AdmissionHolds {
+	if w.scheduler == nil {
+		return jobstate.AdmissionHolds{}
+	}
+	h := w.scheduler.Holds(time.Now())
+	if len(h.Jobs) > 0 {
+		w.backlogRetryMu.Lock()
+		for id, own := range h.Jobs {
+			own.Attempt, own.Of = w.backlogRetries[id], backlogRetryLimit
+			h.Jobs[id] = own
+		}
+		w.backlogRetryMu.Unlock()
+	}
+	return h
+}
+
+// AdmissionHoldsChanged is signalled whenever AdmissionHolds may answer
+// differently (Scheduler.noteHoldsChanged); cmd/moombox drains it and pushes
+// the new snapshot to the dashboard (admission_holds) and the TUI. nil with
+// no scheduler.
+func (w *DownloadWorker) AdmissionHoldsChanged() <-chan struct{} {
+	if w.scheduler == nil {
+		return nil
+	}
+	return w.scheduler.holdsChanged
 }
 
 // noteBacklogRetry counts one more consecutive requeue for jobID and returns

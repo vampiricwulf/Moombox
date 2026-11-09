@@ -13,6 +13,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/connectivity"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/monitor"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
@@ -168,6 +169,9 @@ type runState struct {
 	// atomic.Pointer.Load so the refresh goroutine never races on field
 	// reassignment.
 	authChangeTUI atomic.Pointer[func(cookies.AuthStatus)]
+	// admissionHoldsTUI receives each new backlog hold snapshot when the TUI
+	// runs (runAdmissionHoldsPush); nil without one.
+	admissionHoldsTUI atomic.Pointer[func(jobstate.AdmissionHolds)]
 
 	// Same pattern for monitor OnSchedule: each monitor's goroutine loads
 	// the atomic pointer on every schedule event; the TUI wiring later

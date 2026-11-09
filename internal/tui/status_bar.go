@@ -93,6 +93,11 @@ type StatusBarModel struct {
 	diskFree    uint64
 	diskUsedPct float64
 	diskWarn    string // "ok", "warn", "critical"
+	// diskHeld: the backlog's disk gate holds admission (AdmissionHoldsMsg).
+	// It holds until usage is config.DiskRecoveryMargin points under the
+	// critical threshold, so a reading back at "warn" still holds: the
+	// indicator says "holding" then, as the dashboard's gauge does.
+	diskHeld bool
 	// In-flight backfill scan (spec §11 progress surfacing). Scans are
 	// strictly serial, so one slot IS the whole "scanning" state; empty
 	// backfillChannel hides the indicator. Terminal states clear the slot —
@@ -178,6 +183,9 @@ func (m *StatusBarModel) SetJobs(jobs []*database.Job) {
 	m.counts = m.tallyJobs()
 }
 
+// SetDiskHeld records whether the backlog's disk gate holds admission.
+func (m *StatusBarModel) SetDiskHeld(held bool) { m.diskHeld = held }
+
 // SetDiskStatus updates the disk space display.
 func (m *StatusBarModel) SetDiskStatus(free uint64, usedPct float64, warn string) {
 	m.diskFree = free
@@ -234,6 +242,7 @@ type statusBarKey struct {
 	diskFree        uint64
 	diskUsedPct     float64
 	diskWarn        string
+	diskHeld        bool
 	backfillChannel string
 	backfillName    string
 	backfillTab     string
@@ -255,6 +264,7 @@ func (m *StatusBarModel) statusBarKey() statusBarKey {
 		diskFree:        m.diskFree,
 		diskUsedPct:     m.diskUsedPct,
 		diskWarn:        m.diskWarn,
+		diskHeld:        m.diskHeld,
 		backfillChannel: m.backfillChannel,
 		backfillName:    m.backfillName,
 		backfillTab:     m.backfillTab,
@@ -514,17 +524,20 @@ func (m *StatusBarModel) renderMetrics(t barTier, counts barJobCounts) string {
 	// Disk indicator (only shown once we have data). At tierEssential only a
 	// warning/critical reading is worth the columns — a healthy disk says
 	// nothing there.
-	warning := m.diskWarn == "warn" || m.diskWarn == "critical"
+	warning := m.diskWarn == "warn" || m.diskWarn == "critical" || m.diskHeld
 	if (m.diskFree > 0 || m.diskUsedPct > 0) && (t < tierEssential || warning) {
 		var style lipgloss.Style
-		switch m.diskWarn {
-		case "critical":
+		switch {
+		case m.diskWarn == "critical":
 			style = statusBarRedStyle
-		case "warn":
+		case m.diskWarn == "warn" || m.diskHeld:
 			style = statusBarWrnStyle
 		default:
 			style = statusBarGrnStyle
 		}
+		// "holding" only where the reading itself is below critical: at
+		// critical the red says it already.
+		holding := m.diskHeld && m.diskWarn != "critical"
 
 		freeGB := float64(m.diskFree) / (1024 * 1024 * 1024)
 		pct := int(m.diskUsedPct)
@@ -533,6 +546,8 @@ func (m *StatusBarModel) renderMetrics(t barTier, counts barJobCounts) string {
 			parts = append(parts, style.Render(fmt.Sprintf("D:%d%%", pct)))
 		case t >= tierCompact:
 			parts = append(parts, style.Render(fmt.Sprintf("D:%d%% %.0fG", pct, freeGB)))
+		case holding:
+			parts = append(parts, style.Render(fmt.Sprintf("Disk %d%% (%.0fG free, holding)", pct, freeGB)))
 		default:
 			parts = append(parts, style.Render(fmt.Sprintf("Disk %d%% (%.0fG free)", pct, freeGB)))
 		}

@@ -667,6 +667,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		}()
 	}
 
+	// The backlog scheduler's holds, pushed to both UIs as they change.
+	go s.runAdmissionHoldsPush(ctx, s.dlWorker.AdmissionHoldsChanged(), s.dlWorker.AdmissionHolds, wsHub)
+
 	// Periodic memory + disk usage logging (every 2 minutes) for diagnostics.
 	// Matches TS: process.memoryUsage() logging with heap delta tracking.
 	go func() {

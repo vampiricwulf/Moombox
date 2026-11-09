@@ -13,7 +13,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -70,6 +70,9 @@ export class MoomboxApp {
     this.autoCookieReloginRequired = null;
     // Tri-state; see loadStatus. null = the server has no opinion.
     this.sidecarHealthy = null;
+    // The backlog scheduler's holds (owner ruling R-D3): /api/status, the
+    // initial_state snapshot and each admission_holds frame. null until read.
+    this.admissionHolds = null;
     // The server's UTC offset in minutes, from /api/setup/status at boot and
     // /api/status after; null until read.
     this.serverUtcOffsetMinutes = null;
@@ -675,6 +678,7 @@ export class MoomboxApp {
           this._uptimeSeconds = status.uptime;
           this._uptimeCapturedAt = Date.now();
         }
+        if (status.admissionHolds) this.setAdmissionHolds(status.admissionHolds);
         if (status.disk) this.stats.updateDiskIndicator(status.disk);
         this.updates.updateVersionIndicator();
         this.updateStatusBar();
@@ -1266,6 +1270,7 @@ export class MoomboxApp {
         this.details._preserveStagingFields([...this.jobs, ...this.archivedJobs], p.jobs || []);
         this.jobs = p.jobs || [];
         this.logPanel.setSnapshot(p.logs || [], p.logSeq);
+        if (p.admissionHolds) this.admissionHolds = p.admissionHolds;
         this.nextFeedCheck = p.nextFeedCheck || 0;
         this.nextDecapiCheck = p.nextDecapiCheck || 0;
         this.nextTwitchCheck = p.nextTwitchCheck || 0;
@@ -1561,6 +1566,10 @@ export class MoomboxApp {
         this.stats.updateDiskIndicator(p);
         break;
 
+      case "admission_holds":
+        this.setAdmissionHolds(p);
+        break;
+
       case "backfill_status":
         this.handleBackfillStatus(p);
         break;
@@ -1589,6 +1598,27 @@ export class MoomboxApp {
         this._lastPong = Date.now();
         break;
     }
+  }
+
+  /**
+   * setAdmissionHolds stores the backlog scheduler's hold snapshot and
+   * redraws what reads it: each Queued row's line (formatProgress) and the
+   * disk gauge and indicator ("holding").
+   */
+  setAdmissionHolds(holds) {
+    this.admissionHolds = holds || null;
+    for (const job of this.jobs) {
+      if (job.status !== "Queued") continue;
+      const cell = document.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"] .job-progress-text`);
+      if (!cell) continue;
+      const html = this.formatProgressHtml(job);
+      if (cell.dataset.progress !== html) {
+        cell.innerHTML = html;
+        cell.dataset.progress = html;
+      }
+      cell.title = this.formatProgress(job);
+    }
+    this.stats.onAdmissionHolds();
   }
 
   handleConnectivityChange(payload) {
@@ -2621,7 +2651,10 @@ export class MoomboxApp {
     }
 
     if (job.status === "Queued") {
-      return "Waiting in queue...";
+      // Why the scheduler is not admitting it — offline, the disk gate, the
+      // YouTube rate limit, its retry backoff — or "Waiting in queue..."
+      // (owner ruling R-D3; the TUI's details pane says the same).
+      return queuedHoldText(queuedHold(this.admissionHolds, job));
     }
 
     if (job.status === "Live" || job.status === "Downloading") {

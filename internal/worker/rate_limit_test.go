@@ -824,8 +824,8 @@ func TestRateLimitHoldLeavesTheDiskGateItsReadings(t *testing.T) {
 
 	s.holdForRateLimit(time.Now(), time.Hour)
 	s.sweep()
-	if !s.diskHeld || len(recorded) != 1 || !recorded[0] {
-		t.Errorf("disk gate held %v (recorded %v) after a critical reading under the rate-limit hold, want closed and recorded", s.diskHeld, recorded)
+	if !s.diskHeld.Load() || len(recorded) != 1 || !recorded[0] {
+		t.Errorf("disk gate held %v (recorded %v) after a critical reading under the rate-limit hold, want closed and recorded", s.diskHeld.Load(), recorded)
 	}
 }
 

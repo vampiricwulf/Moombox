@@ -40,6 +40,9 @@ type JobDetailsModel struct {
 	// gapFill is the selected job's archive-VOD gap-fill (owner decision
 	// PR-R5), pushed by the App from its JobGapFill callback; nil for none.
 	gapFill *GapFillView
+	// holds is the backlog scheduler's hold snapshot (AdmissionHoldsMsg),
+	// which a Queued job's "Queue" line reads.
+	holds jobstate.AdmissionHolds
 
 	// Marquee for scrolling the title value when it overflows.
 	marquee Marquee
@@ -384,6 +387,16 @@ type GapFillView struct {
 
 // SetGapFill gives the panel the selected job's gap-fill state. A no-op when
 // nothing changed.
+// SetAdmissionHolds stores the scheduler's hold snapshot and, when the job
+// shown is Queued, rebuilds its rows so its Queue line follows it.
+func (m *JobDetailsModel) SetAdmissionHolds(h jobstate.AdmissionHolds) {
+	m.holds = h
+	if m.job != nil && m.job.Status == database.StatusQueued {
+		m.buildRows()
+		m.updateViewportContent()
+	}
+}
+
 func (m *JobDetailsModel) SetGapFill(g *GapFillView) {
 	if (g == nil && m.gapFill == nil) || (g != nil && m.gapFill != nil && *g == *m.gapFill) {
 		return
@@ -634,6 +647,13 @@ func (m *JobDetailsModel) buildRows() {
 
 		if progress != "" {
 			m.addField("Progress", progress)
+		}
+		// A Queued row says why the scheduler is not admitting it — offline,
+		// the disk gate, the YouTube rate limit, its retry backoff — or that
+		// it waits its turn (owner ruling R-D3), in the dashboard's words
+		// (utils.js queuedHoldText).
+		if j.Status == database.StatusQueued {
+			m.addField("Queue", m.holds.For(j, time.Now()).Text())
 		}
 		if percent > 0 {
 			m.rows = append(m.rows, detailRow{

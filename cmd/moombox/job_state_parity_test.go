@@ -5,7 +5,9 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobstate"
@@ -26,6 +28,18 @@ type jobStateParity struct {
 		Line string `json:"line"`
 		Want bool   `json:"want"`
 	} `json:"waitLines"`
+	QueuedHolds []struct {
+		Name  string                  `json:"name"`
+		Holds jobstate.AdmissionHolds `json:"holds"`
+		Job   database.Job            `json:"job"`
+		Now   time.Time               `json:"now"`
+		Want  struct {
+			Reason  string    `json:"reason"`
+			Until   time.Time `json:"until"`
+			Attempt int       `json:"attempt"`
+			Of      int       `json:"of"`
+		} `json:"want"`
+	} `json:"queuedHolds"`
 }
 
 func loadJobStateParity(t *testing.T) jobStateParity {
@@ -119,5 +133,41 @@ func TestWaitLineParity(t *testing.T) {
 	}
 	if s, _ := strconv.Unquote(m[1]); s != jobstate.WaitMarker {
 		t.Errorf("utils.js WAIT_MARKER = %q, jobstate.WaitMarker %q", s, jobstate.WaitMarker)
+	}
+}
+
+// TestQueuedHoldParity runs jobstate.AdmissionHolds.For over the table the
+// dashboard's queuedHold runs over (owner ruling R-D3), and pins utils.js
+// HOLD_PRECEDENCE to jobstate.HoldPrecedence: one precedence, written once in
+// each language and compared here.
+//
+// Mutants: HOLD_PRECEDENCE reordered in utils.js; a case's want edited.
+func TestQueuedHoldParity(t *testing.T) {
+	p := loadJobStateParity(t)
+	if len(p.QueuedHolds) < 10 {
+		t.Fatalf("parsed %d queuedHolds cases, want the table", len(p.QueuedHolds))
+	}
+	for _, c := range p.QueuedHolds {
+		got := c.Holds.For(&c.Job, c.Now)
+		w := c.Want
+		if string(got.Reason) != w.Reason || !got.Until.Equal(w.Until) || got.Attempt != w.Attempt || got.Of != w.Of {
+			t.Errorf("%s: For = %+v, want %+v", c.Name, got, w)
+		}
+	}
+	m := regexp.MustCompile(`(?m)^export const HOLD_PRECEDENCE = \[([^\]]*)\];`).FindStringSubmatch(readUtilsJS(t))
+	if m == nil {
+		t.Fatal("utils.js: HOLD_PRECEDENCE not found")
+	}
+	var js []string
+	for _, lit := range regexp.MustCompile(`"[^"]*"`).FindAllString(m[1], -1) {
+		u, _ := strconv.Unquote(lit)
+		js = append(js, u)
+	}
+	var goList []string
+	for _, r := range jobstate.HoldPrecedence {
+		goList = append(goList, string(r))
+	}
+	if strings.Join(js, ",") != strings.Join(goList, ",") {
+		t.Errorf("utils.js HOLD_PRECEDENCE = %v, jobstate.HoldPrecedence = %v", js, goList)
 	}
 }

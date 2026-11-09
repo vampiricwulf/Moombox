@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 
 import {
   pendingAutoAction, pendingAutoActionText, reinitializeDeletesText, sumReinitializePreviews, isWaitLine,
+  queuedHold, queuedHoldText, diskGaugeLevel,
 } from "../public/modules/utils.js";
 
 let jsdomMissing = null;
@@ -167,4 +168,70 @@ test("a wait line's cell carries no last-check timestamp to overwrite it", { ski
   await h.flush();
   assert.equal(cell("u2").dataset.timestamp, undefined);
   assert.equal(cell("u2").textContent, "Waiting for a download slot... (1m)");
+});
+
+// Mutants: a reordered precedence (disk ahead of offline); the platform
+// check on the rate limit dropped; a run-out hold still reported.
+test("queuedHold answers the shared table as jobstate does", () => {
+  assert.ok(PARITY.queuedHolds.length >= 10);
+  for (const c of PARITY.queuedHolds) {
+    const got = queuedHold(c.holds, c.job, Date.parse(c.now));
+    const want = { reason: c.want.reason };
+    if (c.want.until) want.until = c.want.until;
+    if (c.want.attempt) { want.attempt = c.want.attempt; want.of = c.want.of; }
+    assert.deepEqual(got, want, c.name);
+  }
+  assert.deepEqual(queuedHold(null, { status: "Queued" }), { reason: "" });
+});
+
+test("queuedHoldText words a hold as the TUI does", () => {
+  const at = new Date(2026, 10, 9, 14, 5).toISOString(); // 14:05 on this machine's clock
+  assert.equal(queuedHoldText({ reason: "" }), "Waiting in queue...");
+  assert.equal(queuedHoldText({ reason: "offline" }), "Held: offline");
+  assert.equal(queuedHoldText({ reason: "disk" }), "Held: disk full");
+  assert.equal(queuedHoldText({ reason: "rate_limit", until: at }), "Held: YouTube rate limit until 14:05");
+  assert.equal(queuedHoldText({ reason: "retry", until: at, attempt: 2, of: 3 }), "Retry 2 of 3 at 14:05");
+});
+
+// Mutant: diskGaugeLevel ignoring the gate (warn while it holds), or
+// reporting holding over critical.
+test("the disk gauge says holding while the gate holds below critical", () => {
+  assert.equal(diskGaugeLevel({ warnLevel: "warn" }, { diskHeld: true }), "holding");
+  assert.equal(diskGaugeLevel({ warnLevel: "ok" }, { diskHeld: true }), "holding");
+  assert.equal(diskGaugeLevel({ warnLevel: "critical" }, { diskHeld: true }), "critical");
+  assert.equal(diskGaugeLevel({ warnLevel: "warn" }, { diskHeld: false }), "warn");
+  assert.equal(diskGaugeLevel({ warnLevel: "warn" }, null), "warn");
+});
+
+const queued = (over = {}) => ({
+  id: "q1", videoId: "q1", title: "Backlog", channelName: "C", platform: "youtube", status: "Queued",
+  queuePriority: 1, channelId: "UCx", createdAt: "2026-11-09T11:00:00Z", updatedAt: "2026-11-09T11:00:00Z", ...over,
+});
+
+// Owner ruling R-D3 on the dashboard: Queued rows say why they are held, from
+// /api/status at boot and from each admission_holds frame after, and the
+// disk indicator says "holding" while the disk gate holds.
+//
+// Mutants: formatProgress keeping the constant "Waiting in queue..."; the
+// admission_holds frame not handled; updateDiskIndicator ignoring the holds.
+test("Queued rows and the disk indicator follow the admission holds", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.jobs = [queued()];
+  h.app.renderJobs();
+  const cell = () => h.document.querySelector('.video-item[data-job-id="q1"] .job-progress-text');
+  assert.equal(cell().textContent, "Waiting in queue...");
+
+  h.app.handleMessage({ type: "admission_holds", payload: { offline: false, diskHeld: true } });
+  assert.equal(cell().textContent, "Held: disk full");
+
+  h.app.stats.updateDiskIndicator({ free: 12 * 2 ** 30, total: 200 * 2 ** 30, usedPct: 94, warnLevel: "warn" });
+  const ind = h.document.getElementById("disk-indicator");
+  assert.match(ind.textContent, /holding/);
+  assert.match(ind.className, /disk-indicator-holding/);
+
+  const until = new Date(Date.now() + 20 * 60000).toISOString();
+  h.app.handleMessage({ type: "admission_holds", payload: { offline: false, diskHeld: false,
+    jobs: { q1: { attempt: 2, of: 3, until } } } });
+  assert.match(cell().textContent, /^Retry 2 of 3 at \d\d:\d\d$/);
+  assert.doesNotMatch(ind.textContent, /holding/, "the reopened gate redraws the indicator");
 });

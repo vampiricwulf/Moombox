@@ -1853,6 +1853,12 @@ type StatusRouteDeps struct {
 	// GetChannelHealth returns per-channel monitor health (last check, last
 	// error, consecutive failures) keyed by platform ("youtube"/"twitch").
 	GetChannelHealth func() map[string]any
+	// GetAdmissionHolds is the backlog scheduler's hold snapshot
+	// (worker.DownloadWorker.AdmissionHolds, owner ruling R-D3), sent as the
+	// additive admissionHolds field: what the dashboard's Queued rows show in
+	// place of a bare "Waiting in queue...", and what turns its disk gauge
+	// to "holding". The WebSocket's admission_holds frame pushes each change.
+	GetAdmissionHolds func() jobstate.AdmissionHolds
 }
 
 // hostUTCOffsetMinutes is the host's zone offset from UTC right now, in
@@ -1932,6 +1938,9 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 		}
 		if deps.GetChannelHealth != nil {
 			resp["channelHealth"] = deps.GetChannelHealth()
+		}
+		if deps.GetAdmissionHolds != nil {
+			resp["admissionHolds"] = deps.GetAdmissionHolds()
 		}
 
 		// BotGuard sidecar liveness. ABSENT (not false) when nothing was ever

@@ -137,6 +137,9 @@ func (s *runState) wireWebSocket() {
 			"hideFinishedAgeDays": hideAge,
 			"backfill":            backfill,
 			"runningTrims":        runningTrims,
+			// The backlog scheduler's holds (owner ruling R-D3), as
+			// /api/status and each admission_holds frame carry them.
+			"admissionHolds": s.dlWorker.AdmissionHolds(),
 		}
 	}
 

@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -70,8 +72,9 @@ type Scheduler struct {
 	// diskHeld is the gate's state as the last reading left it: what a
 	// reading inside the recovery margin keeps, and what logs the close and
 	// the reopen once each. Seeded before Start by RestoreDiskHold, and
-	// touched after that only by sweep, which only Run's goroutine calls.
-	diskHeld bool
+	// written after that only by sweep, which only Run's goroutine calls.
+	// Atomic so Holds can read it from any goroutine (both UIs' hold line).
+	diskHeld atomic.Bool
 	// recordDiskHold is told diskHeld each time it changes, and when
 	// RestoreDiskHold seeds it (RecordDiskHold; nil: memory only). Set
 	// before Start, like the seed.
@@ -99,6 +102,14 @@ type Scheduler struct {
 	// Start.
 	recordRateLimitHold func(until time.Time)
 	rateRecordMu        sync.Mutex
+
+	// holdsChanged is signalled (capacity 1, never blocking) whenever what
+	// Holds reports changes: the disk gate closing or reopening, a rate-limit
+	// hold placed, pushed on or run out, a row's own hold placed or dropped,
+	// connectivity going or coming back. cmd/moombox drains it and pushes the
+	// new snapshot to both UIs (DownloadWorker.AdmissionHoldsChanged). nil in
+	// a Scheduler literal, which then signals nothing.
+	holdsChanged chan struct{}
 }
 
 // newScheduler creates the worker-owned scheduler. resolveSlots stays nil
@@ -114,26 +125,73 @@ func newScheduler(db *database.Database, queue jobEnqueuer, log logger) *Schedul
 			return db.UpdateJobFieldsIf(jobID, database.StatusQueued, fields)
 		},
 		wake:         make(chan struct{}, 1),
+		holdsChanged: make(chan struct{}, 1),
 		log:          log,
 		restartPause: time.Second,
 	}
 }
 
+// noteHoldsChanged signals holdsChanged without blocking: a signal already
+// pending covers this one. Never called with holdMu or rateMu held — the
+// reader takes both.
+func (s *Scheduler) noteHoldsChanged() {
+	select {
+	case s.holdsChanged <- struct{}{}:
+	default:
+	}
+}
+
+// Holds is a read-only snapshot of what holds backlog admission at now: the
+// gate-wide holds sweep returns early on — offline, the disk gate, the
+// YouTube rate-limit hold (zero once run out) — and each row's own backoff
+// (Jobs, its Until only; DownloadWorker.AdmissionHolds adds the retry
+// streak's count). Safe from any goroutine. The order sweep tests them in is
+// jobstate.HoldPrecedence, which is how both UIs pick a Queued row's reason
+// (owner ruling R-D3).
+func (s *Scheduler) Holds(now time.Time) jobstate.AdmissionHolds {
+	h := jobstate.AdmissionHolds{
+		Offline:  s.conn != nil && !s.conn.IsOnline(),
+		DiskHeld: s.diskHeld.Load(),
+	}
+	s.rateMu.Lock()
+	if s.rateHeld && now.Before(s.rateLimitedUntil) {
+		h.RateLimitedUntil = s.rateLimitedUntil
+	}
+	s.rateMu.Unlock()
+	s.holdMu.Lock()
+	for id, until := range s.holds {
+		if !now.Before(until) {
+			continue
+		}
+		if h.Jobs == nil {
+			h.Jobs = map[string]jobstate.BacklogHold{}
+		}
+		h.Jobs[id] = jobstate.BacklogHold{Until: until}
+	}
+	s.holdMu.Unlock()
+	return h
+}
+
 // holdUntil keeps sweep from admitting jobID before until.
 func (s *Scheduler) holdUntil(jobID string, until time.Time) {
 	s.holdMu.Lock()
-	defer s.holdMu.Unlock()
 	if s.holds == nil {
 		s.holds = map[string]time.Time{}
 	}
 	s.holds[jobID] = until
+	s.holdMu.Unlock()
+	s.noteHoldsChanged()
 }
 
 // unhold drops jobID's hold: the requeue it was placed for did not happen.
 func (s *Scheduler) unhold(jobID string) {
 	s.holdMu.Lock()
-	defer s.holdMu.Unlock()
+	_, had := s.holds[jobID]
 	delete(s.holds, jobID)
+	s.holdMu.Unlock()
+	if had {
+		s.noteHoldsChanged()
+	}
 }
 
 // held reports whether jobID is still held at now, forgetting a hold that
@@ -180,19 +238,20 @@ func (s *Scheduler) diskGateClosed() bool {
 	r, err := s.readDisk()
 	if err != nil {
 		s.log.Debug("scheduler: disk space reading failed; the backlog disk gate stays as it was",
-			"dir", r.dir, "held", s.diskHeld, "err", err)
-		return s.diskHeld
+			"dir", r.dir, "held", s.diskHeld.Load(), "err", err)
+		return s.diskHeld.Load()
 	}
-	closed := s.diskHeld
+	closed := s.diskHeld.Load()
 	switch {
 	case r.critical:
 		closed = true
 	case r.clear:
 		closed = false
 	}
-	if closed != s.diskHeld {
-		s.diskHeld = closed
+	if closed != s.diskHeld.Load() {
+		s.diskHeld.Store(closed)
 		s.reportDiskHold()
+		s.noteHoldsChanged()
 		freeGB := fmt.Sprintf("%.1f", float64(r.free)/(1<<30))
 		usedPct := fmt.Sprintf("%.1f", r.usedPct)
 		if closed {
@@ -218,8 +277,9 @@ func (s *Scheduler) diskGateClosed() bool {
 // like any other (RecordDiskHold). Call it before the worker starts: Run's
 // goroutine owns the gate from then on.
 func (s *Scheduler) RestoreDiskHold() {
-	s.diskHeld = true
+	s.diskHeld.Store(true)
 	s.reportDiskHold()
+	s.noteHoldsChanged()
 	s.log.Warn("scheduler: the last run stopped with the backlog disk gate closed or a disk_critical alert open; backlog VODs wait in Queued until usage falls marginPoints below the critical threshold (live and manually added jobs are not held)",
 		"marginPoints", config.DiskRecoveryMargin)
 }
@@ -239,7 +299,7 @@ func (s *Scheduler) RecordDiskHold(record func(held bool)) {
 // reportDiskHold tells the recorder RecordDiskHold set what diskHeld is now.
 func (s *Scheduler) reportDiskHold() {
 	if s.recordDiskHold != nil {
-		s.recordDiskHold(s.diskHeld)
+		s.recordDiskHold(s.diskHeld.Load())
 	}
 }
 
@@ -267,6 +327,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	// backlog idle for up to a minute after the network came back.
 	if s.conn != nil {
 		unregister := s.conn.OnStateChange(func(online bool) {
+			s.noteHoldsChanged()
 			if online {
 				s.Wake()
 			}
@@ -357,7 +418,7 @@ func (s *Scheduler) sweep() {
 	// freed space, the alert closed, and the backlog a later scan queued at
 	// 94% waited on the close from before, inside the margin, with no
 	// critical reading since.
-	if (len(channels) > 0 || s.diskHeld) && s.diskGateClosed() {
+	if (len(channels) > 0 || s.diskHeld.Load()) && s.diskGateClosed() {
 		return
 	}
 	// Nor, for a YouTube channel, while YouTube rate-limits the session:

@@ -13,6 +13,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/stats"
 	"github.com/vampiricwulf/Moombox/internal/ytdlpplugin"
 )
@@ -425,6 +426,14 @@ type (
 		Text string
 	}
 )
+
+// AdmissionHoldsMsg carries the backlog scheduler's hold snapshot
+// (worker.DownloadWorker.AdmissionHolds, owner ruling R-D3) each time it
+// changes: what Queued rows show in place of a bare wait, and what turns the
+// status bar's disk reading to "holding" while the disk gate holds.
+type AdmissionHoldsMsg struct {
+	Holds jobstate.AdmissionHolds
+}
 
 // ConnectivityMsg is sent when internet connectivity state changes.
 type ConnectivityMsg struct {
@@ -948,6 +957,15 @@ func (a *App) SetInternalToken(token string) {
 // other pre-run Set* on this type.
 func (a *App) SetSidecarDown(down bool) {
 	a.statusBar.sidecarDown = down
+}
+
+// SetAdmissionHolds applies the backlog scheduler's hold snapshot to the
+// Queued rows, the details pane and the disk indicator: before Run as the
+// seed (Send is a no-op until then), and for every AdmissionHoldsMsg after.
+func (a *App) SetAdmissionHolds(h jobstate.AdmissionHolds) {
+	a.taskList.SetAdmissionHolds(h)
+	a.details.SetAdmissionHolds(h)
+	a.statusBar.SetDiskHeld(h.DiskHeld)
 }
 
 // SetOffline seeds the status bar's OFFLINE alert before Run.

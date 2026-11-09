@@ -31,5 +31,19 @@
     { "line": "V: 12/40 A: 12/40 C: 3", "want": false },
     { "line": "V:95.3% C: 2", "want": false },
     { "line": "", "want": false }
+  ],
+  "queuedHolds": [
+    {"name": "nothing", "holds": {}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": ""}},
+    {"name": "offline", "holds": {"offline": true}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "offline"}},
+    {"name": "offline over everything", "holds": {"offline": true, "diskHeld": true, "rateLimitedUntil": "2026-11-09T14:30:00Z", "jobs": {"y": {"attempt": 2, "of": 3, "until": "2026-11-09T14:30:00Z"}, "t": {"attempt": 1, "of": 3, "until": "2026-11-09T14:30:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "offline"}},
+    {"name": "disk over rate limit and retry", "holds": {"diskHeld": true, "rateLimitedUntil": "2026-11-09T14:30:00Z", "jobs": {"y": {"attempt": 2, "of": 3, "until": "2026-11-09T14:30:00Z"}, "t": {"attempt": 1, "of": 3, "until": "2026-11-09T14:30:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "disk"}},
+    {"name": "disk holds Twitch", "holds": {"diskHeld": true}, "job": {"id": "t", "platform": "twitch", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "disk"}},
+    {"name": "rate limit over retry", "holds": {"rateLimitedUntil": "2026-11-09T14:30:00Z", "jobs": {"y": {"attempt": 2, "of": 3, "until": "2026-11-09T14:30:00Z"}, "t": {"attempt": 1, "of": 3, "until": "2026-11-09T14:30:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "rate_limit", "until": "2026-11-09T14:30:00Z"}},
+    {"name": "rate limit does not hold Twitch", "holds": {"rateLimitedUntil": "2026-11-09T14:30:00Z", "jobs": {"y": {"attempt": 2, "of": 3, "until": "2026-11-09T14:30:00Z"}, "t": {"attempt": 1, "of": 3, "until": "2026-11-09T14:30:00Z"}}}, "job": {"id": "t", "platform": "twitch", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "retry", "until": "2026-11-09T14:30:00Z", "attempt": 1, "of": 3}},
+    {"name": "rate limit run out", "holds": {"rateLimitedUntil": "2026-11-09T13:59:00Z"}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": ""}},
+    {"name": "own retry", "holds": {"jobs": {"y": {"attempt": 2, "of": 3, "until": "2026-11-09T14:30:00Z"}, "t": {"attempt": 1, "of": 3, "until": "2026-11-09T14:30:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "retry", "until": "2026-11-09T14:30:00Z", "attempt": 2, "of": 3}},
+    {"name": "own rate-limit requeue", "holds": {"jobs": {"y": {"attempt": 0, "of": 3, "until": "2026-11-09T14:30:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "rate_limit", "until": "2026-11-09T14:30:00Z"}},
+    {"name": "own hold run out", "holds": {"jobs": {"y": {"attempt": 1, "of": 3, "until": "2026-11-09T13:59:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": ""}},
+    {"name": "not Queued", "holds": {"offline": true}, "job": {"id": "y", "platform": "youtube", "status": "Upcoming"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": ""}}
   ]
 }

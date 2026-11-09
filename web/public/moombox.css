@@ -3465,6 +3465,11 @@ html.sl-theme-light .log-debug {
     background: var(--sl-color-warning-600);
 }
 
+/* The disk gate holds backlog admission below critical (owner ruling R-D3). */
+.disk-bar-fill.disk-holding {
+    background: repeating-linear-gradient(135deg, var(--sl-color-warning-600) 0 8px, var(--sl-color-warning-500) 8px 16px);
+}
+
 .disk-bar-fill.disk-critical {
     background: var(--sl-color-danger-600);
 }
