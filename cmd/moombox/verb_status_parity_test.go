@@ -82,6 +82,10 @@ func TestVerbStatusSetsMatchTheDashboard(t *testing.T) {
 			return jobverbs.MuxableStatus(s) && jobverbs.MuxNeedsUnmuxedParts(s)
 		}},
 		{"CHAPTER_IMPORT_STATUSES", func(s database.JobStatus) bool { return jobverbs.ChapterImportableStatus(s, false) }},
+		{"WATCHED_STATUSES", jobverbs.WatchableStatus},
+		// Trim also needs the archive file, a fact job-details.js checks beside
+		// the set.
+		{"TRIM_STATUSES", jobverbs.TrimmableStatus},
 	}
 	for _, v := range verbs {
 		js, ok := sets[v.set]
@@ -114,6 +118,7 @@ func TestVerbStatusSetsMatchTheDashboard(t *testing.T) {
 		"../../web/public/modules/utils.js":          "RESUME_TAIL_STATUSES.has(job.status) && !!job.incompleteTail",
 		"../../web/public/modules/job-details.js":    "MUX_PARTS_STATUSES.has(job.status) && job.unmuxedParts === true",
 		"../../web/public/modules/chapter-import.js": "CHAPTER_IMPORT_STATUSES.has(job.status) && !job.incompleteTail",
+		"../../web/public/app.js":                    "WATCHED_STATUSES.has(j.status) && !j.watched",
 	} {
 		src, err := os.ReadFile(file)
 		if err != nil {
@@ -121,6 +126,69 @@ func TestVerbStatusSetsMatchTheDashboard(t *testing.T) {
 		}
 		if !strings.Contains(string(src), use) {
 			t.Errorf("%s does not read its arm as %q", file, use)
+		}
+	}
+}
+
+// TestDashboardVerbArmsReadTheirSets: the dashboard's Watched, Trim and
+// Resume gates read the sets the parity test compares, not a "Finished" or
+// "youtube" literal spelled beside them again, and RESUME_PLATFORMS is
+// jobverbs.ResumeSupported over every platform a job can carry.
+//
+// Mutant: a literal put back in any of those gates; "twitch" added to
+// RESUME_PLATFORMS.
+func TestDashboardVerbArmsReadTheirSets(t *testing.T) {
+	read := func(file string) string {
+		t.Helper()
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(src)
+	}
+	app := read("../../web/public/app.js")
+	details := read("../../web/public/modules/job-details.js")
+	utils := read("../../web/public/modules/utils.js")
+
+	if n := strings.Count(app, "WATCHED_STATUSES.has(j.status) && "); n != 4 {
+		t.Errorf("app.js reads WATCHED_STATUSES in %d of the batch bar's four watched gates", n)
+	}
+	if strings.Contains(app, `j.status === "Finished" && !j.watched`) ||
+		strings.Contains(app, `j.status === "Finished" && (j.watched`) {
+		t.Error(`app.js spells a watched gate as j.status === "Finished" again`)
+	}
+	for file, use := range map[string]struct{ src, want string }{
+		"job-details.js": {details, "TRIM_STATUSES.has(job.status) && job.filename"},
+		"utils.js":       {utils, "RESUME_PLATFORMS.has(job.platform)"},
+	} {
+		if !strings.Contains(use.src, use.want) {
+			t.Errorf("%s does not read its gate as %q", file, use.want)
+		}
+	}
+	if !strings.Contains(details, `setDisplay("details-trim-btn", canTrim)`) {
+		t.Error("job-details.js shows the Trim button off something other than canTrim")
+	}
+
+	m := regexp.MustCompile(`(?m)^export const RESUME_PLATFORMS = new Set\(\[([^\]]*)\]\);`).FindStringSubmatch(utils)
+	if m == nil {
+		t.Fatal("utils.js declares no RESUME_PLATFORMS")
+	}
+	js := map[string]bool{}
+	for _, lit := range regexp.MustCompile(`"(?:[^"\\]|\\.)*"`).FindAllString(m[1], -1) {
+		p, err := strconv.Unquote(lit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		js[p] = true
+	}
+	for _, p := range []string{"youtube", "twitch", ""} {
+		if g := jobverbs.ResumeSupported(p); g != js[p] {
+			t.Errorf("RESUME_PLATFORMS: platform %q: Go ResumeSupported = %v, utils.js = %v", p, g, js[p])
+		}
+	}
+	for p := range js {
+		if !jobverbs.ResumeSupported(p) {
+			t.Errorf("RESUME_PLATFORMS names %q, which jobverbs.ResumeSupported refuses", p)
 		}
 	}
 }

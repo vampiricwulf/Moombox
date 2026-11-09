@@ -60,7 +60,8 @@ func ResumableStatus(s database.JobStatus, incompleteTail bool) bool {
 }
 
 // ResumeSupported reports whether a job of platform can be resumed at all: a
-// YouTube capture only. A Twitch job starts over (Reinitialize).
+// YouTube capture only. A Twitch job starts over (Reinitialize). utils.js
+// RESUME_PLATFORMS.
 func ResumeSupported(platform string) bool { return platform == "youtube" }
 
 // ReinitializableStatus reports whether a job in status s can be reset and
@@ -104,10 +105,12 @@ func DeletableStatus(s database.JobStatus) bool {
 
 // WatchableStatus reports whether a job in status s can be marked watched or
 // unwatched: a Finished one, the only kind with an archive to have watched.
+// utils.js WATCHED_STATUSES.
 func WatchableStatus(s database.JobStatus) bool { return s == database.StatusFinished }
 
 // TrimmableStatus reports whether a job in status s can be trimmed: a
 // Finished one (with an archive file, a row fact its callers check).
+// utils.js TRIM_STATUSES.
 func TrimmableStatus(s database.JobStatus) bool { return s == database.StatusFinished }
 
 // ChapterImportableStatus reports whether a job in status s can have its

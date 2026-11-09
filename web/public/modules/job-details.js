@@ -2,7 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES } from "./utils.js";
+import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES } from "./utils.js";
 
 /** A running trim's progress as the whole percentage its bar shows. */
 function trimPercent(progress) {
@@ -595,6 +595,8 @@ export class JobDetailsController {
       (MUX_PARTS_STATUSES.has(job.status) && job.unmuxedParts === true));
     const canDelete = DELETE_STATUSES.has(job.status);
     const hasFile = job.status === "Finished" && job.filename;
+    // Trim needs the archive file as well (TrimmableStatus).
+    const canTrim = TRIM_STATUSES.has(job.status) && job.filename;
     const isActive = ["Upcoming", "Live", "Downloading", "Muxing"].includes(
       job.status,
     );
@@ -613,7 +615,7 @@ export class JobDetailsController {
     setDisplay("details-reinit-btn", canReinit);
     setDisplay("details-mux-btn", canMux);
     setDisplay("details-delete-btn", canDelete);
-    setDisplay("details-trim-btn", hasFile);
+    setDisplay("details-trim-btn", canTrim);
     const isLocalhost = ["localhost", "127.0.0.1", "::1"].includes(
       window.location.hostname,
     );

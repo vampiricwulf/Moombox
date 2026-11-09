@@ -883,6 +883,14 @@ export const RESUME_TAIL_STATUSES = new Set(["Finished"]);
 export const MUX_PARTS_STATUSES = new Set(["Finished"]);
 export const CHAPTER_IMPORT_STATUSES = new Set(["Finished"]);
 
+// Mark watched / unwatched (the batch bar, app.js) and Trim (the details
+// dialog, with an archive file) act on a Finished job only. Go:
+// jobverbs.WatchableStatus, TrimmableStatus. Resume is a YouTube verb
+// (canResumeJob); Go: jobverbs.ResumeSupported.
+export const WATCHED_STATUSES = new Set(["Finished"]);
+export const TRIM_STATUSES = new Set(["Finished"]);
+export const RESUME_PLATFORMS = new Set(["youtube"]);
+
 // ── Channel removal ──────────────────────────────────────────────────────────
 // Removing a channel asks what to do with its jobs (W25-09, owner decision).
 // The confirmation counts them — GET /api/config/channels/{id}/removal — and
@@ -973,7 +981,7 @@ export function channelRemovedToast(choice, summary, data) {
 export function canResumeJob(job, { requireKnownStaging = false } = {}) {
   const statusOk = RESUMABLE_STATUSES.has(job.status) || (RESUME_TAIL_STATUSES.has(job.status) && !!job.incompleteTail);
   const stagingOk = requireKnownStaging ? job.hasStaging === true : job.hasStaging !== false;
-  return statusOk && job.platform === "youtube" && stagingOk;
+  return statusOk && RESUME_PLATFORMS.has(job.platform) && stagingOk;
 }
 
 /**
