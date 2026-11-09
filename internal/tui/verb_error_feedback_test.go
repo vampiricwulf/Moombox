@@ -50,16 +50,16 @@ func TestVerbRefusalReachesTheFeedbackLine(t *testing.T) {
 	app := newApp()
 	press(app, 'a')
 	press(app, 'r')
-	if !strings.Contains(app.feedback.msg, "reinitialize already pending") || app.feedback.sev != severityError {
-		t.Errorf("A R refused: line %q (sev %v), want the worker's text in red", app.feedback.msg, app.feedback.sev)
+	if app.feedback.msg != "reinitialize already pending" || app.feedback.sev != severityError {
+		t.Errorf("A R refused: line %q (sev %v), want exactly the worker's text (REST's 409) in red", app.feedback.msg, app.feedback.sev)
 	}
 
 	app = newApp()
 	press(app, 'a')
 	press(app, 'i')
 	press(app, 'i')
-	if !strings.Contains(app.feedback.msg, "resume already pending") || app.feedback.sev != severityError {
-		t.Errorf("A I I refused: line %q (sev %v), want the worker's text in red", app.feedback.msg, app.feedback.sev)
+	if app.feedback.msg != "resume already pending" || app.feedback.sev != severityError {
+		t.Errorf("A I I refused: line %q (sev %v), want exactly the worker's text (REST's 409) in red", app.feedback.msg, app.feedback.sev)
 	}
 
 	app = newApp()
@@ -67,7 +67,7 @@ func TestVerbRefusalReachesTheFeedbackLine(t *testing.T) {
 	press(app, 'm')
 	press(app, 'm')
 	if !strings.Contains(app.feedback.msg, "mux in progress") || app.feedback.sev != severityError {
-		t.Errorf("A M refused: line %q (sev %v), want the worker's text in red", app.feedback.msg, app.feedback.sev)
+		t.Errorf("A M refused: line %q (sev %v), want exactly the worker's text (REST's 409) in red", app.feedback.msg, app.feedback.sev)
 	}
 
 	// A batch: one refused, one resumed.

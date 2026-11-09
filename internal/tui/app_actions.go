@@ -186,7 +186,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.setBatchFeedback("Resumed "+jobCount(count), refused)
 		} else if job != nil && a.OnResumeJob != nil {
 			if err := a.OnResumeJob(job.ID); err != nil {
-				a.setFeedbackWithSeverity("Resume refused: "+err.Error(), severityError)
+				a.setFeedbackWithSeverity(err.Error(), severityError)
 			} else {
 				a.setFeedback(fmt.Sprintf("Resuming: %s", job.Title))
 			}
@@ -217,7 +217,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.setBatchFeedback("Reinitialized "+jobCount(count), refused)
 		} else if job != nil && a.OnReinitializeJob != nil {
 			if err := a.OnReinitializeJob(job.ID); err != nil {
-				a.setFeedbackWithSeverity("Reinitialize refused: "+err.Error(), severityError)
+				a.setFeedbackWithSeverity(err.Error(), severityError)
 			} else {
 				a.setFeedback(fmt.Sprintf("Reinitializing: %s", job.Title))
 			}
@@ -867,7 +867,6 @@ func (a *App) invalidateAsides(jobID string) {
 	}
 }
 
-// jobCount spells a job count for a feedback line: "1 job", "3 jobs".
 // verbRefusals tallies the jobs a batch verb's callback refused, keeping the
 // first reason: the worker's ErrResetPending text, the same one REST puts in
 // its 409.
@@ -894,6 +893,7 @@ func (a *App) setBatchFeedback(done string, refused verbRefusals) {
 	a.setFeedbackWithSeverity(fmt.Sprintf("%s, %d refused: %s", done, refused.n, refused.first), severityError)
 }
 
+// jobCount spells a job count for a feedback line: "1 job", "3 jobs".
 func jobCount(n int) string {
 	if n == 1 {
 		return "1 job"
