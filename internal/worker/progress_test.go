@@ -1,12 +1,14 @@
 package worker
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 )
 
 // newTestProgressTracker constructs a ProgressTracker with no DB hooked
@@ -44,7 +46,7 @@ func TestActivityMessage(t *testing.T) {
 }
 
 // TestActivityMessagesCarryWaitMarker pins the cross-layer contract the
-// TUI's task rows rely on (internal/tui isWaitProgress): every rendered
+// TUI's task rows rely on (jobstate.IsWaitLine, which the TUI reads): every rendered
 // activity message carries the "... (" tail that distinguishes a wait from
 // a segment counter — and no counter format may carry it.
 func TestActivityMessagesCarryWaitMarker(t *testing.T) {
@@ -452,5 +454,49 @@ func TestCalculateETARefusesZeroRate(t *testing.T) {
 	got := pt.calculateETA()
 	if got != "" {
 		t.Errorf("ETA with zero progress: want empty, got %q", got)
+	}
+}
+
+// TestEveryWaitLineCarriesTheMarker is the one table for every writer of a
+// wait line (owner ruling R-D1): each is read as a wait by the predicate the
+// TUI's task list and the dashboard share (jobstate.IsWaitLine), the
+// download-slot wait included — the one line that used to lack the marker —
+// and no delivery counter is.
+//
+// Mutants: vodSlotWaitLine returning vodSlotWaitProgress alone (the old
+// line); any constructor bypassing waitLine without the tail.
+func TestEveryWaitLineCarriesTheMarker(t *testing.T) {
+	lines := map[string]string{
+		"slot (first minute)": vodSlotWaitLine(10 * time.Second),
+		"slot":                vodSlotWaitLine(3*time.Minute + 20*time.Second),
+		"slot (hours)":        vodSlotWaitLine(65 * time.Minute),
+		"network":             networkWaitLine(80 * time.Second),
+		"rate limit":          rateLimitWaitLine(24 * time.Minute),
+		"captcha":             captchaWaitLine(24 * time.Minute),
+		"pre-roll":            playbackWaitLine(12 * time.Second),
+	}
+	for _, a := range []engine.DownloadActivity{engine.ActivityVerifyingEnd, engine.ActivityReconnecting,
+		engine.ActivityRateLimited, engine.ActivityFindingFirstSegment, engine.ActivityWaitingForSegment,
+		engine.ActivityRetrying, engine.ActivityWaitingResume} {
+		lines[fmt.Sprint("activity ", a)] = activityMessage(a, time.Second)
+	}
+	for name, l := range lines {
+		if !jobstate.IsWaitLine(l) {
+			t.Errorf("%s: %q is not read as a wait line", name, l)
+		}
+	}
+	for got, want := range map[string]string{
+		vodSlotWaitLine(10 * time.Second):               "Waiting for a download slot... (<1m)",
+		vodSlotWaitLine(3*time.Minute + 20*time.Second): "Waiting for a download slot... (3m)",
+		vodSlotWaitLine(65 * time.Minute):               "Waiting for a download slot... (1h 5m)",
+	} {
+		if got != want {
+			t.Errorf("vodSlotWaitLine = %q, want %q", got, want)
+		}
+	}
+	pt := newTestProgressTracker()
+	pt.videoSeq, pt.videoTotal, pt.audioSeq, pt.audioTotal, pt.chatCount = 50, 200, 100, 200, 7
+	if s := pt.buildProgressString(); jobstate.IsWaitLine(s) {
+		t.Errorf("segment counter %q reads as a wait", s)
 	}
 }

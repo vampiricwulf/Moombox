@@ -22,6 +22,10 @@ type jobStateParity struct {
 		Job  json.RawMessage `json:"job"`
 		Want string          `json:"want"`
 	} `json:"pendingAutoAction"`
+	WaitLines []struct {
+		Line string `json:"line"`
+		Want bool   `json:"want"`
+	} `json:"waitLines"`
 }
 
 func loadJobStateParity(t *testing.T) jobStateParity {
@@ -91,4 +95,29 @@ func readUtilsJS(t *testing.T) string {
 		t.Fatalf("read %s: %v", utilsFile, err)
 	}
 	return string(src)
+}
+
+// TestWaitLineParity runs jobstate.IsWaitLine over the lines the dashboard's
+// isWaitLine runs over (owner ruling R-D1), and pins utils.js WAIT_MARKER to
+// jobstate.WaitMarker — the TUI's task list, the dashboard's Upcoming rows
+// and every Go writer of a wait line read one marker.
+//
+// Mutants: WAIT_MARKER edited in utils.js; a case's want edited.
+func TestWaitLineParity(t *testing.T) {
+	p := loadJobStateParity(t)
+	if len(p.WaitLines) < 8 {
+		t.Fatalf("parsed %d waitLines cases, want the table", len(p.WaitLines))
+	}
+	for _, c := range p.WaitLines {
+		if got := jobstate.IsWaitLine(c.Line); got != c.Want {
+			t.Errorf("IsWaitLine(%q) = %v, want %v", c.Line, got, c.Want)
+		}
+	}
+	m := regexp.MustCompile(`(?m)^export const WAIT_MARKER = ("[^"]*");`).FindStringSubmatch(readUtilsJS(t))
+	if m == nil {
+		t.Fatal("utils.js: WAIT_MARKER not found")
+	}
+	if s, _ := strconv.Unquote(m[1]); s != jobstate.WaitMarker {
+		t.Errorf("utils.js WAIT_MARKER = %q, jobstate.WaitMarker %q", s, jobstate.WaitMarker)
+	}
 }

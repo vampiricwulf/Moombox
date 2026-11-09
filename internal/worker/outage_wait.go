@@ -24,15 +24,14 @@ const networkWaitProgress = "Waiting for network connectivity..."
 var networkWaitRefresh = 10 * time.Second
 
 // networkWaitLine is the progress line itself, "Waiting for network
-// connectivity... (1m 20s)". The "... (<elapsed>)" tail is the TUI's wait
-// marker (internal/tui isWaitProgress), the one every engine wait line
-// carries (activityMessage); pinned by TestActivityMessagesCarryWaitMarker.
+// connectivity... (1m 20s)", built by waitLine like every wait line: its
+// tail is the marker (jobstate.IsWaitLine) the TUI's task list reads.
 // Without it a Downloading row waiting here — a VOD or a live capture
 // re-enqueued at an offline boot — showed its frozen percent in the TUI's
 // task list, the "hung" look the marker exists to prevent, while the engine's
 // own wait for the same outage read as a wait.
 func networkWaitLine(waited time.Duration) string {
-	return networkWaitProgress + " (" + networkWaitElapsed(waited) + ")"
+	return waitLine(networkWaitProgress, networkWaitElapsed(waited))
 }
 
 // networkWaitElapsed renders the line's elapsed: utils.FormatDurationHuman,

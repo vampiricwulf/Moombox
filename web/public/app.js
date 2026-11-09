@@ -13,7 +13,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -2470,7 +2470,7 @@ export class MoomboxApp {
           <sl-badge class="status ${this.escapeHtml(statusClass)}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
         </div>
         <div class="job-progress" role="cell">
-          <div class="job-progress-text" ${job.status === "Upcoming" && job.lastRecheckAt ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(this.formatProgressTooltip(job) || progress)}">${progressHtml}</div>
+          <div class="job-progress-text" ${this.upcomingShowsLastCheck(job) ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(this.formatProgressTooltip(job) || progress)}">${progressHtml}</div>
           ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${this.escapeHtml(percent)}"></sl-progress-bar>` : ""}
         </div>
         <div class="job-quick-actions" role="cell">${actionsHtml}</div>
@@ -2562,7 +2562,7 @@ export class MoomboxApp {
       if (progressText.title !== tooltip) {
         progressText.title = tooltip;
       }
-      if (job.status === "Upcoming" && job.lastRecheckAt) {
+      if (this.upcomingShowsLastCheck(job)) {
         progressText.dataset.timestamp = job.lastRecheckAt;
         progressText.dataset.timestampPrefix = "Last check: ";
       } else {
@@ -2595,8 +2595,25 @@ export class MoomboxApp {
     // recreating sl-icon-button shadow DOM elements on every progress update.
   }
 
+  /**
+   * upcomingShowsLastCheck: an Upcoming row's progress cell is the
+   * "Last check: <relative>" the timestamp refresher rewrites only when no
+   * wait line is up and the row is a broadcast being waited for (owner
+   * ruling R-D1). The card template and updateJobCard stamp data-timestamp
+   * on exactly these rows, so the refresher never writes over a wait line.
+   */
+  upcomingShowsLastCheck(job) {
+    return job.status === "Upcoming" && !!job.lastRecheckAt && !isWaitLine(job.progress) && !isAwaitingProcessing(job);
+  }
+
   formatProgress(job) {
     if (job.status === "Upcoming") {
+      // A wait the worker is in — a download slot, a rate limit or captcha,
+      // the network — names itself in job.progress (owner ruling R-D1), and
+      // used to be hidden behind "Last check". Twitch's "Waiting for
+      // stream..." carries no wait marker and keeps the last-check time.
+      if (isWaitLine(job.progress)) return job.progress;
+      if (isAwaitingProcessing(job)) return "Awaiting processing";
       if (job.lastRecheckAt) {
         return `Last check: ${this.formatRelativeTime(job.lastRecheckAt)}`;
       }

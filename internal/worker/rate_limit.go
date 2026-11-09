@@ -165,10 +165,9 @@ const rateLimitWaitRefresh = time.Minute
 const rateLimitWaitProgress = "Rate-limited by YouTube; fetching again"
 
 // rateLimitWaitLine is the progress line itself, "Rate-limited by YouTube;
-// fetching again... (24m 0s left)". The "... (" is the TUI's wait marker
-// (internal/tui isWaitProgress), which every wait line carries.
+// fetching again... (24m 0s left)", built by waitLine like every wait line.
 func rateLimitWaitLine(left time.Duration) string {
-	return rateLimitWaitProgress + "... (" + utils.FormatDurationHuman(left) + " left)"
+	return waitLine(rateLimitWaitProgress, utils.FormatDurationHuman(left)+" left")
 }
 
 // captchaWaitProgress opens the progress line a job waiting out a captcha
@@ -178,9 +177,9 @@ func rateLimitWaitLine(left time.Duration) string {
 const captchaWaitProgress = "YouTube asks for a captcha"
 
 // captchaWaitLine is that line with the time left, "YouTube asks for a
-// captcha... (24m 0s left)", in the same wait-marker shape.
+// captcha... (24m 0s left)", built by waitLine like every wait line.
 func captchaWaitLine(left time.Duration) string {
-	return captchaWaitProgress + "... (" + utils.FormatDurationHuman(left) + " left)"
+	return waitLine(captchaWaitProgress, utils.FormatDurationHuman(left)+" left")
 }
 
 // waitLineFor is the wait line a refusal shows: the captcha's or the rate

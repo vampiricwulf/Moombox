@@ -948,9 +948,11 @@ func (w *DownloadWorker) pollForJobs(ctx context.Context) {
 // Returns false only when ctx was cancelled while waiting.
 //
 // A VOD that has to queue says so in its progress line for the length of the
-// wait (vodSlotWaitProgress), and the line is cleared however the wait ends —
-// left behind, a cancelled row would go on claiming it was queueing. One that
-// finds a slot free writes nothing.
+// wait (vodSlotWaitLine, rewritten every vodSlotWaitRefresh with the time
+// waited), and the line is cleared however the wait ends — left behind, a
+// cancelled row would go on claiming it was queueing. The refresher has
+// stopped before the clear is written, so no late rewrite outlives it. One
+// that finds a slot free writes nothing.
 func (w *DownloadWorker) acquireDownloadSlot(ctx context.Context, jobID string, isVod bool) bool {
 	if !isVod {
 		return true
@@ -958,10 +960,35 @@ func (w *DownloadWorker) acquireDownloadSlot(ctx context.Context, jobID string, 
 	if w.queue.TryAcquireDownloadSlot(jobID) {
 		return true
 	}
-	if w.db != nil { // nil only in a zero-value test worker
-		w.db.UpdateJobFields(jobID, map[string]any{"progress": vodSlotWaitProgress})
-		defer w.db.UpdateJobFields(jobID, map[string]any{"progress": ""})
+	if w.db == nil { // nil only in a zero-value test worker
+		return w.queue.AcquireDownloadSlot(ctx, jobID)
 	}
+	since := time.Now()
+	w.db.UpdateJobFields(jobID, map[string]any{"progress": vodSlotWaitLine(0)})
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		defer func() {
+			if r := recover(); r != nil {
+				w.logger.Error("download-slot wait refresher panicked", "jobID", jobID, "panic", fmt.Sprint(r))
+			}
+		}()
+		t := time.NewTicker(vodSlotWaitRefresh)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				w.db.UpdateJobFields(jobID, map[string]any{"progress": vodSlotWaitLine(time.Since(since))})
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-stopped
+		w.db.UpdateJobFields(jobID, map[string]any{"progress": ""})
+	}()
 	return w.queue.AcquireDownloadSlot(ctx, jobID)
 }
 

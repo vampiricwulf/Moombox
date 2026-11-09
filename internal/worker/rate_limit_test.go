@@ -778,7 +778,7 @@ func TestRateLimitedFetchDefersTheFoundAnnouncement(t *testing.T) {
 }
 
 // TestRateLimitWaitLineCarriesTheWaitMarker pins the cross-layer contract
-// the TUI reads (internal/tui isWaitProgress): the line a job waiting out a
+// the TUI reads (jobstate.IsWaitLine, which the TUI reads): the line a job waiting out a
 // rate limit shows carries the "... (" every wait line does, so its row reads
 // as waiting, not hung, and says how long is left.
 //

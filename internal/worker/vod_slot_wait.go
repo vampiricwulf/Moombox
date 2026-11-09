@@ -12,12 +12,41 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
-// vodSlotWaitProgress is the progress line a VOD shows while it queues for a
-// download slot (acquireDownloadSlot). The row keeps the status it came in
-// with — Upcoming for a VOD stream processing just classified — because
-// nothing is downloading yet; ExecuteWithChat writes Downloading once the
-// slot is held.
+// vodSlotWaitProgress opens the progress line a VOD shows while it queues for
+// a download slot (acquireDownloadSlot); vodSlotWaitLine adds how long it has
+// waited. The row keeps the status it came in with — Upcoming for a VOD
+// stream processing just classified — because nothing is downloading yet;
+// ExecuteWithChat writes Downloading once the slot is held.
 const vodSlotWaitProgress = "Waiting for a download slot..."
+
+// vodSlotWaitRefresh is how often a queueing VOD's line is rewritten with the
+// time it has waited. Whole minutes, and as coarse as the rate-limit wait's:
+// a backlog behind a busy pool can hold many VODs here at once, and each
+// rewrite is a row write and a broadcast. A var so tests need not wait it out.
+var vodSlotWaitRefresh = time.Minute
+
+// vodSlotWaitLine is the line itself, "Waiting for a download slot... (3m)"
+// ("(<1m)" in its first minute), built by waitLine like every wait line. It
+// used to be the bare label: the one wait line without the marker, so a
+// Downloading row queueing here (an interrupted mux reset at boot) showed its
+// frozen percent in the TUI's task list, and the dashboard could not tell it
+// from any other progress text.
+func vodSlotWaitLine(waited time.Duration) string {
+	return waitLine(vodSlotWaitProgress, wholeMinutes(waited))
+}
+
+// wholeMinutes renders a wait in the minutes vodSlotWaitRefresh moves it by:
+// "<1m", "3m", "1h 5m".
+func wholeMinutes(d time.Duration) string {
+	m := int(d / time.Minute)
+	switch {
+	case m < 1:
+		return "<1m"
+	case m < 60:
+		return strconv.Itoa(m) + "m"
+	}
+	return strconv.Itoa(m/60) + "h " + strconv.Itoa(m%60) + "m"
+}
 
 // vodInfoMaxAge is how old a VOD's extraction may be when its download
 // starts. Stream processing extracts the format URLs BEFORE the download-slot

@@ -84,7 +84,7 @@ func TestTwitchVodQueueingKeepsItsStatus(t *testing.T) {
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		row, _ := db.GetJob("tw_v123")
-		if row != nil && row.Progress == vodSlotWaitProgress {
+		if row != nil && strings.HasPrefix(row.Progress, vodSlotWaitProgress) {
 			if row.Status != database.StatusUpcoming {
 				t.Errorf("the queueing Twitch VOD reads %s, want the Upcoming it came in with", row.Status)
 			}

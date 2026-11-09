@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
-  pendingAutoAction, pendingAutoActionText, reinitializeDeletesText, sumReinitializePreviews,
+  pendingAutoAction, pendingAutoActionText, reinitializeDeletesText, sumReinitializePreviews, isWaitLine,
 } from "../public/modules/utils.js";
 
 let jsdomMissing = null;
@@ -109,4 +109,62 @@ test("the Reinitialize confirm warns that it cancels the pending mux", { skip },
   await h.app.reinitializeJob("tw_m");
   await h.flush();
   assert.match(asked ?? "", /This deletes 2 staged files \(2\.0KB\); it cancels the pending automatic mux\./);
+});
+
+// Mutant: isWaitLine reading the marker alone (the closing paren unchecked),
+// or a different marker.
+test("isWaitLine answers the shared table as jobstate.IsWaitLine does", () => {
+  assert.ok(PARITY.waitLines.length >= 8);
+  for (const c of PARITY.waitLines) assert.equal(isWaitLine(c.line), c.want, JSON.stringify(c.line));
+  assert.equal(isWaitLine(undefined), false);
+});
+
+const upcoming = (over = {}) => ({
+  id: "u1", videoId: "u1", title: "Up", channelName: "C", platform: "youtube", status: "Upcoming",
+  createdAt: "2026-11-09T11:00:00Z", updatedAt: "2026-11-09T11:00:00Z", ...over,
+});
+
+// Owner ruling R-D1: an Upcoming row shows the wait it is in, an admitted
+// backlog VOD or a classified VOD reads "Awaiting processing", and Twitch's
+// "Waiting for stream..." keeps the last-check time.
+//
+// Mutants: formatProgress never reading job.progress for Upcoming (the
+// slot wait reads "Last check"); the awaiting-processing arm dropped (the
+// admitted backlog VOD reads "Waiting for stream..."); job.progress shown
+// for any non-empty text (Twitch's line hides its last check).
+test("an Upcoming row shows its wait line, a VOD awaits processing, Twitch keeps its last check", { skip }, async () => {
+  const h = await harness.makeApp();
+  const recheck = harness.agoISO(30);
+  const fp = (job) => h.app.formatProgress(job);
+  assert.equal(fp(upcoming({ progress: "Waiting for a download slot... (3m)", isVod: true, lastRecheckAt: recheck })),
+    "Waiting for a download slot... (3m)");
+  assert.equal(fp(upcoming({ progress: "Rate-limited by YouTube; fetching again... (24m 0s left)", lastRecheckAt: recheck })),
+    "Rate-limited by YouTube; fetching again... (24m 0s left)");
+  assert.equal(fp(upcoming({ progress: "Waiting for network connectivity... (10s)" })), "Waiting for network connectivity... (10s)");
+  assert.equal(fp(upcoming({ queuePriority: 1, channelId: "UCx" })), "Awaiting processing");
+  assert.equal(fp(upcoming({ isVod: true, lastRecheckAt: recheck })), "Awaiting processing");
+  assert.match(fp(upcoming({ platform: "twitch", progress: "Waiting for stream...", lastRecheckAt: recheck })), /^Last check: /);
+  assert.equal(fp(upcoming({ platform: "twitch", progress: "Waiting for stream..." })), "Waiting for stream...");
+  assert.equal(fp(upcoming()), "Waiting for stream...");
+});
+
+// The relative-time refresher rewrites a cell stamped with data-timestamp; a
+// wait line's cell must not be stamped, or the next tick writes "Last check"
+// over it — on the first render and on the no-rebuild update path alike.
+//
+// Mutant: the card template or updateJobCard stamping on lastRecheckAt alone.
+test("a wait line's cell carries no last-check timestamp to overwrite it", { skip }, async () => {
+  const h = await harness.makeApp();
+  const recheck = harness.agoISO(30);
+  h.app.jobs = [upcoming({ progress: "Waiting for a download slot... (<1m)", lastRecheckAt: recheck }), upcoming({ id: "u2", lastRecheckAt: recheck })];
+  h.app.renderJobs();
+  const cell = (id) => h.document.querySelector(`.video-item[data-job-id="${id}"] .job-progress-text`);
+  assert.equal(cell("u1").dataset.timestamp, undefined);
+  assert.equal(cell("u1").textContent, "Waiting for a download slot... (<1m)");
+  assert.equal(cell("u2").dataset.timestamp, recheck);
+
+  h.app.handleMessage({ type: "job_update", payload: { ...h.app.jobs[1], progress: "Waiting for a download slot... (1m)" } });
+  await h.flush();
+  assert.equal(cell("u2").dataset.timestamp, undefined);
+  assert.equal(cell("u2").textContent, "Waiting for a download slot... (1m)");
 });

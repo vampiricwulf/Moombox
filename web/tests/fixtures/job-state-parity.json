@@ -17,5 +17,19 @@
     { "name": "COOKIES? auth", "job": { "platform": "twitch", "status": "COOKIES?", "error": "401", "parkReason": "auth" }, "want": "" },
     { "name": "Upcoming", "job": { "platform": "twitch", "status": "Upcoming" }, "want": "" },
     { "name": "Finished", "job": { "platform": "twitch", "status": "Finished" }, "want": "" }
+  ],
+  "waitLines": [
+    { "line": "Waiting for a download slot... (3m)", "want": true },
+    { "line": "Waiting for a download slot... (<1m)", "want": true },
+    { "line": "Waiting for network connectivity... (1m 20s)", "want": true },
+    { "line": "Rate-limited by YouTube; fetching again... (24m 0s left)", "want": true },
+    { "line": "YouTube asks for a captcha... (24m 0s left)", "want": true },
+    { "line": "Connection lost - reconnecting... (5s)", "want": true },
+    { "line": "Waiting for a download slot...", "want": false },
+    { "line": "Waiting for stream...", "want": false },
+    { "line": "(V: 1234/1300 A: 1234/1300 C: 5678)", "want": false },
+    { "line": "V: 12/40 A: 12/40 C: 3", "want": false },
+    { "line": "V:95.3% C: 2", "want": false },
+    { "line": "", "want": false }
   ]
 }

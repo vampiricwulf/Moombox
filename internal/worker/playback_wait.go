@@ -20,10 +20,9 @@ const playbackWaitProgress = "Waiting out YouTube's pre-roll ad"
 const playbackWaitRefresh = 5 * time.Second
 
 // playbackWaitLine is the progress line itself, "Waiting out YouTube's
-// pre-roll ad... (12s left)". The "... (" is the TUI's wait marker
-// (internal/tui isWaitProgress), which every wait line carries.
+// pre-roll ad... (12s left)", built by waitLine like every wait line.
 func playbackWaitLine(left time.Duration) string {
-	return playbackWaitProgress + "... (" + utils.FormatDurationHuman(left) + " left)"
+	return waitLine(playbackWaitProgress, utils.FormatDurationHuman(left)+" left")
 }
 
 // latestPlayback returns the latest AvailableAt among the formats a download

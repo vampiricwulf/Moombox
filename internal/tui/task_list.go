@@ -718,23 +718,13 @@ func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait
 	return "", false
 }
 
-// isWaitProgress reports whether a progress string is a downloader wait
-// message rather than a segment counter. Every activity message the worker
-// renders (worker.activityMessage), the line a job waiting out a
-// connectivity outage shows (worker.networkWaitLine), the line a YouTube
-// download waiting out its player response's pre-roll ad shows
-// (worker.playbackWaitLine), and the lines a job waiting out a YouTube rate
-// limit or captcha shows (worker.rateLimitWaitLine, worker.captchaWaitLine),
-// carries the "... (<time>)" tail — the time elapsed, or the time left — and
-// no counter format does. The contract is pinned on the worker side by
-// TestActivityMessagesCarryWaitMarker,
-// TestNetworkWaitLineCarriesTheWaitMarker,
-// TestPlaybackWaitLineCarriesTheWaitMarker,
-// TestRateLimitWaitLineCarriesTheWaitMarker and
-// TestCaptchaWaitLineCarriesTheWaitMarker.
-func isWaitProgress(s string) bool {
-	return strings.Contains(s, "... (")
-}
+// isWaitProgress reports whether a progress string is a wait line rather
+// than a delivery counter: jobstate.IsWaitLine, the predicate shared with the
+// writer (every wait line is built by jobstate.WaitLine, worker's waitLine)
+// and with the dashboard (utils.js isWaitLine). It used to be a substring
+// copy of the marker here, which the download-slot wait's line did not
+// carry. Pinned on the worker side by TestEveryWaitLineCarriesTheMarker.
+func isWaitProgress(s string) bool { return jobstate.IsWaitLine(s) }
 
 // titleWidth computes the available title width for a job in the list.
 func (m *TaskListModel) titleWidth(job *database.Job) int {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -773,23 +774,31 @@ func activityMessage(a engine.DownloadActivity, elapsed time.Duration) string {
 	e := utils.FormatDurationHuman(elapsed)
 	switch a {
 	case engine.ActivityVerifyingEnd:
-		return fmt.Sprintf("Verifying stream ended... (%s)", e)
+		return waitLine("Verifying stream ended", e)
 	case engine.ActivityReconnecting:
-		return fmt.Sprintf("Connection lost - reconnecting... (%s)", e)
+		return waitLine("Connection lost - reconnecting", e)
 	case engine.ActivityRateLimited:
-		return fmt.Sprintf("Rate-limited - backing off... (%s)", e)
+		return waitLine("Rate-limited - backing off", e)
 	case engine.ActivityFindingFirstSegment:
-		return fmt.Sprintf("Waiting for first segment... (%s)", e)
+		return waitLine("Waiting for first segment", e)
 	case engine.ActivityWaitingForSegment:
-		return fmt.Sprintf("Waiting for next segment... (%s)", e)
+		return waitLine("Waiting for next segment", e)
 	case engine.ActivityRetrying:
-		return fmt.Sprintf("Segment fetch failing - retrying... (%s)", e)
+		return waitLine("Segment fetch failing - retrying", e)
 	case engine.ActivityWaitingResume:
-		return fmt.Sprintf("Stream interrupted - waiting for resume... (%s)", e)
+		return waitLine("Stream interrupted - waiting for resume", e)
 	default:
 		return ""
 	}
 }
+
+// waitLine is every wait's progress line, "<label>... (<tail>)":
+// jobstate.WaitLine, whose marker the TUI's task list and the dashboard read
+// (jobstate.IsWaitLine, utils.js isWaitLine). Every writer of a wait line —
+// the engine's activities above, the network, rate-limit, captcha, pre-roll
+// and download-slot waits — builds it here, so none can leave the marker out
+// (TestEveryWaitLineCarriesTheMarker).
+func waitLine(label, tail string) string { return jobstate.WaitLine(label, tail) }
 
 // calculateETA estimates time remaining based on segment or byte progress (B8).
 //

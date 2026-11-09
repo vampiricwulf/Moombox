@@ -1069,6 +1069,39 @@ export function unplayableAudioText(info, canPlay) {
 }
 
 /**
+ * WAIT_MARKER is what marks a progress line as a wait ("<label>... (<tail>)")
+ * rather than a delivery counter: jobstate.WaitMarker, which every Go writer
+ * of a wait line builds through jobstate.WaitLine. cmd/moombox's job-state
+ * parity test compares the two.
+ */
+export const WAIT_MARKER = "... (";
+
+/**
+ * isWaitLine is jobstate.IsWaitLine: the line carries WAIT_MARKER and closes
+ * its tail. The TUI's task list reads the same predicate.
+ * @param {unknown} s
+ * @returns {boolean}
+ */
+export function isWaitLine(s) {
+  return typeof s === "string" && s.includes(WAIT_MARKER) && s.endsWith(")");
+}
+
+/**
+ * isAwaitingProcessing reports whether an Upcoming row is a VOD the scheduler
+ * or a creator handed to stream processing, not a broadcast being waited for:
+ * a row stream processing has called a VOD (isVod), or a backlog row
+ * (queue_priority 1 of a channel — worker.CookieResumeStatus's rule) the
+ * archive-slots scheduler admitted, whose isVod is written only once its
+ * processing starts. Such a row has no stream to wait for, and read
+ * "Waiting for stream..." (owner ruling R-D1).
+ * @param {object} job
+ * @returns {boolean}
+ */
+export function isAwaitingProcessing(job) {
+  return !!job && (job.isVod === true || (job.queuePriority === 1 && !!job.channelId));
+}
+
+/**
  * The Twitch monitor's automatic-recovery constants, as the Go side declares
  * them (jobstate.TwitchOfflineErrMsg, jobstate.MaxTwitchAutoRetries); the
  * job-state parity test (cmd/moombox) compares the two.

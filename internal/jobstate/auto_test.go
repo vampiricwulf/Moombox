@@ -1,6 +1,7 @@
 package jobstate
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -224,5 +225,25 @@ func TestPendingAutoAction(t *testing.T) {
 	}
 	if AutoActionNone.Text() != "" || AutoActionMux.Text() == "" || AutoActionRetry.Text() == "" {
 		t.Error("Text: none must be empty and each action must have a sentence")
+	}
+}
+
+// TestWaitLineIsWhatIsWaitLineReads pins the writer and the reader of the
+// wait marker together, over the counters a progress line otherwise holds.
+func TestWaitLineIsWhatIsWaitLineReads(t *testing.T) {
+	for _, l := range []string{
+		WaitLine("Waiting for a download slot", "3m"),
+		WaitLine("Waiting for network connectivity...", "1m 20s"),
+		WaitLine("YouTube is rate-limiting this session; fetching again", "24m 0s left"),
+	} {
+		if !IsWaitLine(l) || strings.Count(l, "...") != 1 {
+			t.Errorf("WaitLine built %q, which IsWaitLine does not read as one wait line", l)
+		}
+	}
+	for _, c := range []string{"", "V: 12/40 A: 12/40 C: 3", "(V: 1234/1300 A: 1234/1300 C: 5678)", "V:95.3% C: 2",
+		"Seq: 42 C: 1", "Waiting for stream...", "Muxing..."} {
+		if IsWaitLine(c) {
+			t.Errorf("IsWaitLine(%q) = true for a line that is not a wait", c)
+		}
 	}
 }
