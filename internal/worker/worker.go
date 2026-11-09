@@ -870,6 +870,16 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 			job.Status = database.StatusDownloading
 		}
 		if ShouldProcess(job) {
+			// A wait line left by a process that died mid-wait: its writer's
+			// deferred clear never ran, and YouTube's waitForLive writes no
+			// progress of its own, so an Upcoming row would show the frozen
+			// wait (both UIs show an Upcoming row's wait line, owner ruling
+			// R-D1) for the whole re-run wait. No run of this process has
+			// started yet, so any wait line here is stale. Conditional on the
+			// status read, like every write decided on it.
+			if jobstate.IsWaitLine(job.Progress) {
+				w.db.UpdateJobFieldsIf(job.ID, job.Status, map[string]any{"progress": ""})
+			}
 			w.queue.Enqueue(job.ID, job.Status)
 		}
 	}
@@ -2154,7 +2164,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// reason. Its end_unconfirmed exclusion changes no answer here — the
 	// latch's error is its cause's text, a download failure, never
 	// TwitchOfflineErrMsg — and is pinned with the rest by
-	// TestRetryLikelyIsTheMonitorsPredicate.
+	// jobstate.TestBothRecoveryCallersKeepTheirAnswers.
 	written := *job
 	written.Status, written.Error, written.ParkReason = status, errMsg, reason
 	retryLikely := jobstate.TwitchAutoRetryPending(&written)
