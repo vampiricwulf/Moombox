@@ -38,7 +38,7 @@ func TestMuxJobRefusesWhileTheJobsRunIsRegistered(t *testing.T) {
 	if !ok || id != job.ID {
 		t.Fatalf("Dequeue = %q %v", id, ok)
 	}
-	if cancelled, _ := w.CancelJob(job.ID); !cancelled {
+	if cancelled, _, _ := w.CancelJob(job.ID); !cancelled {
 		t.Fatal("CancelJob did not cancel")
 	}
 
@@ -95,7 +95,7 @@ func TestACancelledRunsEndLeavesAnotherActorsOutcome(t *testing.T) {
 			if _, _, ok := w.queue.Dequeue(context.Background()); !ok {
 				t.Fatal("Dequeue returned no job")
 			}
-			if cancelled, flagged := w.CancelJob(job.ID); !cancelled || !flagged {
+			if cancelled, flagged, _ := w.CancelJob(job.ID); !cancelled || !flagged {
 				t.Fatalf("CancelJob = %v, %v, want the job cancelled and its run flagged", cancelled, flagged)
 			}
 			db.UpdateJobFields(job.ID, tc.then)

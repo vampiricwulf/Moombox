@@ -239,6 +239,7 @@ func TestARecoveryCountsItsOwnDownloadSlot(t *testing.T) {
 //
 // Mutant: enqueueRunnable without the claim check — the job is queued while
 // the recovery holds its staging.
+// Mutant (Arc C): EnqueueJob without its stagingClaimed check.
 func TestAutomaticStartsSkipAJobWhoseStagingIsClaimed(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	ownershipJob(t, w, db, "j-auto", database.StatusUpcoming)
@@ -250,6 +251,12 @@ func TestAutomaticStartsSkipAJobWhoseStagingIsClaimed(t *testing.T) {
 	w.enqueueRunnable([]*database.Job{job})
 	if w.queue.isPending("j-auto") {
 		t.Fatal("the heartbeat queued a job whose staging a recovery holds")
+	}
+	// Nor does EnqueueJob (a monitor finding the stream), which a reset
+	// verb's Upcoming written ahead of its RemoveAll would otherwise invite.
+	w.EnqueueJob("j-auto")
+	if w.queue.isPending("j-auto") {
+		t.Fatal("EnqueueJob queued a job whose staging a recovery holds")
 	}
 	if w.scheduler.stagingBusy == nil || !w.scheduler.stagingBusy("j-auto") {
 		t.Error("the scheduler is not told the job's staging is claimed")
@@ -328,7 +335,7 @@ func TestAPendingVerbAppliesOverTheCookieRefreshResume(t *testing.T) {
 			if !db.UpdateJobFieldsIf("j-ck", database.StatusCookies, map[string]any{"status": database.StatusUpcoming}) {
 				t.Fatal("the refresh's write")
 			}
-			err := w.afterJobExit("j-ck", "cookie-refresh resume", true, func(database.JobStatus) {
+			err := w.afterJobExit("j-ck", "cookie-refresh resume", true, nil, func(database.JobStatus) {
 				w.queue.Enqueue("j-ck", database.StatusUpcoming)
 			})
 			if !errors.Is(err, ErrResetPending) {
@@ -360,7 +367,7 @@ func TestAResetVerbHoldsTheClaimWhileItRuns(t *testing.T) {
 	ownershipJob(t, w, db, "j-hold", database.StatusError)
 	entered, block, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 	go func() {
-		done <- w.afterJobExit("j-hold", "reinitialize", true, func(database.JobStatus) {
+		done <- w.afterJobExit("j-hold", "reinitialize", true, nil, func(database.JobStatus) {
 			close(entered)
 			<-block
 		})
@@ -427,7 +434,9 @@ func TestASecondDifferentVerbIsRefusedWhileOneIsPending(t *testing.T) {
 		t.Errorf("after the wait: status %s, auto_retry_count %d; want the one Reinitialize applied (Upcoming, 0)",
 			row.Status, row.AutoRetryCount)
 	}
-	// Nothing pending any more: the next verb is accepted.
+	// Nothing pending any more: the next verb is accepted (on a row it is
+	// offered on).
+	db.UpdateJobFields("j-pend", map[string]any{"status": database.StatusError})
 	if err := w.ReinitializeJob("j-pend"); err != nil {
 		t.Errorf("Reinitialize once nothing is pending = %v", err)
 	}

@@ -13,7 +13,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -4141,8 +4141,8 @@ export class MoomboxApp {
     document.getElementById("batch-resume").style.display = canResume ? "" : "none";
     document.getElementById("batch-reinit").style.display = canReinit ? "" : "none";
     document.getElementById("batch-delete").style.display = canDelete ? "" : "none";
-    const canWatch = selectedJobs.some(j => j.status === "Finished" && !j.watched);
-    const canUnwatch = selectedJobs.some(j => j.status === "Finished" && (j.watched || j.resumePosition != null));
+    const canWatch = selectedJobs.some(j => WATCHED_STATUSES.has(j.status) && !j.watched);
+    const canUnwatch = selectedJobs.some(j => WATCHED_STATUSES.has(j.status) && (j.watched || j.resumePosition != null));
     document.getElementById("batch-watched").style.display = canWatch ? "" : "none";
     document.getElementById("batch-unwatched").style.display = canUnwatch ? "" : "none";
 
@@ -4214,7 +4214,7 @@ export class MoomboxApp {
         apiCall = (id) => fetch(`/api/jobs/${id}`, { method: "DELETE" });
         break;
       case "watched":
-        qualifies = j => j.status === "Finished" && !j.watched;
+        qualifies = j => WATCHED_STATUSES.has(j.status) && !j.watched;
         targets = selectedJobs.filter(qualifies);
         confirmMsg = `Mark ${targets.length} job${targets.length !== 1 ? "s" : ""} as watched?`;
         apiCall = () => fetch("/api/jobs/batch/watched", {
@@ -4224,7 +4224,7 @@ export class MoomboxApp {
         });
         break;
       case "unwatched":
-        qualifies = j => j.status === "Finished" && (j.watched || j.resumePosition != null);
+        qualifies = j => WATCHED_STATUSES.has(j.status) && (j.watched || j.resumePosition != null);
         targets = selectedJobs.filter(qualifies);
         confirmMsg = `Mark ${targets.length} job${targets.length !== 1 ? "s" : ""} as unwatched?`;
         apiCall = () => fetch("/api/jobs/batch/watched", {

@@ -99,6 +99,8 @@ func TestAutoReinitializeJobIncrementsCounter(t *testing.T) {
 		t.Errorf("Error: want cleared, got %q", got.Error)
 	}
 
+	// The monitor offers it on an Error row only (the run that failed again).
+	db.UpdateJobFields("tw_autoreinit", map[string]any{"status": database.StatusError})
 	// Second call: counter goes to 2
 	w.AutoReinitializeJob("tw_autoreinit")
 	got, err = db.GetJob("tw_autoreinit")

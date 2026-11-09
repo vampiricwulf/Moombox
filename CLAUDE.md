@@ -96,7 +96,7 @@ db.UpdateJobFields(jobID, map[string]any{
 ```
 Dynamically builds SET clauses. Auto-updates `updated_at`. Triggers `OnJobUpdate` subscribers. Returns `*Job`.
 
-A status transition decided on a status read earlier must not be written unconditionally — it overwrites whatever landed in between (an operator's Cancel). Use `db.UpdateJobFieldsIf(jobID, expected, fields)` (applies only while the status is still `expected`), `db.UpdateJobFieldsUnless(jobID, unwanted, fields)` (only while it is not `unwanted`), or `db.UpdateJobFieldsUnlessTerminal(jobID, fields)` (only while it is none of `Finished`, `Error`, `Cancelled`); each returns whether the write applied, and notifies subscribers only when it did.
+A status transition decided on a status read earlier must not be written unconditionally — it overwrites whatever landed in between (an operator's Cancel). Use `db.UpdateJobFieldsIf(jobID, expected, fields)` (applies only while the status is still `expected`), `db.UpdateJobFieldsIfIn(jobID, []JobStatus{...}, fields)` (only while it is one of the set), `db.UpdateJobFieldsUnless(jobID, unwanted, fields)` (only while it is not `unwanted`), or `db.UpdateJobFieldsUnlessTerminal(jobID, fields)` (only while it is none of `Finished`, `Error`, `Cancelled`); each returns whether the write applied, and notifies subscribers only when it did.
 
 ### Job status lifecycle
 `Upcoming` → `Live` → `Downloading` → `Muxing` → `Finished`

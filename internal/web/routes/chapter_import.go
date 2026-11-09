@@ -15,6 +15,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
@@ -124,7 +125,7 @@ type chapterTarget struct {
 // can resume the job removes that overlap. (The chapter-import claim still
 // fences the two as a safety net, PR-M5.)
 func importableJob(job *database.Job) bool {
-	return job.Status == database.StatusFinished && !job.IncompleteTail
+	return jobverbs.ChapterImportableStatus(job.Status, job.IncompleteTail)
 }
 
 // chapterTargetFor resolves job's archive and sidecar under the containment

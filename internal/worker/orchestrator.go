@@ -104,6 +104,13 @@ type DownloadOrchestrator struct {
 	// orchestrator a test builds by struct literal) never waits.
 	waitArchiveRewrite func(ctx context.Context, jobID, what string) bool
 
+	// beginFinishing marks a finalize whose archive is written, so a late
+	// Cancel is refused rather than land before the Finished write
+	// (DownloadWorker.beginFinishing, set by the worker; owner ruling R-C1).
+	// false: the row already holds an outcome, and the finalize stops. nil
+	// (an orchestrator a test builds by struct literal) always goes on.
+	beginFinishing func(jobID string) (release func(), ok bool)
+
 	// muxRootCtx parents every mux that must OUTLIVE its job's own context —
 	// the background part muxes, the connectivity-outage finalize and the
 	// off-queue restart mux, all of which used context.Background() and were
@@ -1145,4 +1152,13 @@ func streamIdentityChanged(old, fresh *DownloadResult) bool {
 	}
 	return (old.VideoItag != 0 && fresh.VideoItag != 0 && old.VideoItag != fresh.VideoItag) ||
 		(old.AudioItag != 0 && fresh.AudioItag != 0 && old.AudioItag != fresh.AudioItag)
+}
+
+// finishing is beginFinishing, or a no-op mark for an orchestrator built
+// without a worker.
+func (o *DownloadOrchestrator) finishing(jobID string) (func(), bool) {
+	if o.beginFinishing == nil {
+		return func() {}, true
+	}
+	return o.beginFinishing(jobID)
 }

@@ -137,6 +137,9 @@ func TestSplitArchiveFinalizeWritesItsChapterList(t *testing.T) {
 	if err := os.Remove(filepath.Join(staging, twitchTimelineFile)); err != nil {
 		t.Fatal(err)
 	}
+	// A re-finalize runs on a row its caller wrote Muxing (muxFromStaging), as
+	// every finalize does; a Finished one is an outcome it stops on.
+	db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusMuxing})
 	if err := o.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil); err != nil {
 		t.Fatalf("re-finalize: %v", err)
 	}

@@ -1152,6 +1152,17 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		}
 		return fmt.Errorf("mux: %w", err)
 	}
+	// The archive is written: from here the job ends Finished, and a Cancel
+	// is answered "already finishing" (owner ruling R-C1). One that landed
+	// while FFmpeg ran stands: the finalize stops with the staging kept, and
+	// the file it wrote is left where it is, named in the log.
+	release, ok := o.finishing(jobCtx.Job.ID)
+	if !ok {
+		o.logger.Warn("the job was cancelled as its archive was written; the row stays Cancelled, staging is kept, the file is left",
+			"jobID", jobCtx.Job.ID, "output", outputFile)
+		return ErrCancelled
+	}
+	defer release()
 	probeData := verdict.probe
 	// The archive at this name is a new file. A re-finalize of the same
 	// recording embedded the import it keeps, and saves it beside the new
@@ -1340,6 +1351,21 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// muxAndFinalize returns into this function before its own call, so a job
 	// muxes its asides exactly once whichever shape it finalizes in.
 	o.muxStagedAsides(ctx, jobCtx, outputDir, filenameBase)
+
+	// The parts are muxed (and merged): from here the job ends Finished, and
+	// a Cancel is answered "already finishing" (owner ruling R-C1), as in
+	// muxAndFinalize. One that landed before stands, the parts on their rows.
+	release, ok := o.finishing(jobCtx.Job.ID)
+	if !ok {
+		parts := make([]string, 0, len(segments))
+		for _, s := range segments {
+			parts = append(parts, s.FilePath)
+		}
+		o.logger.Warn("the job was cancelled as its parts were muxed; the row stays Cancelled, the parts are left on their rows",
+			"jobID", jobCtx.Job.ID, "parts", parts)
+		return ErrCancelled
+	}
+	defer release()
 
 	// A job that ends with exactly one part (e.g. an outage muxed part 1 and
 	// the stream never came back) shouldn't keep a " - part1" suffix — single

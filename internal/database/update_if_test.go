@@ -133,3 +133,47 @@ func TestUpdateJobFieldsUnlessTerminalSparesEveryOutcome(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdateJobFieldsIfInAppliesWithinASet: the write applies only while the
+// row's status is one of the set, says whether it did, and one that did not
+// apply leaves the row as it was and tells no subscriber anything. An empty
+// set matches nothing; a row that does not exist is not written.
+//
+// Mutants: NOT IN for IN — the write lands only outside the set; drop the
+// RowsAffected check — a missed write reports applied and notifies.
+func TestUpdateJobFieldsIfInAppliesWithinASet(t *testing.T) {
+	t.Parallel()
+	set := []JobStatus{StatusError, StatusCancelled}
+	for _, tc := range []struct {
+		status JobStatus
+		in     bool
+	}{
+		{StatusError, true}, {StatusCancelled, true},
+		{StatusUpcoming, false}, {StatusFinished, false}, {StatusMuxing, false},
+	} {
+		db, notified := casFixture(t, "in", tc.status)
+		applied := db.UpdateJobFieldsIfIn("in", set, map[string]any{"status": StatusUpcoming, "progress": "reset"})
+		if applied != tc.in {
+			t.Errorf("%s: applied = %v, want %v", tc.status, applied, tc.in)
+		}
+		row, _ := db.GetJob("in")
+		if tc.in {
+			if row.Status != StatusUpcoming || notified.Load() != 2 {
+				t.Errorf("%s: row = %s with %d notifications, want Upcoming and one per subscriber (2)", tc.status, row.Status, notified.Load())
+			}
+		} else if row.Status != tc.status || row.Progress != "" || notified.Load() != 0 {
+			t.Errorf("%s: row = %s %q with %d notifications, want it untouched", tc.status, row.Status, row.Progress, notified.Load())
+		}
+	}
+
+	db, notified := casFixture(t, "empty", StatusError)
+	if db.UpdateJobFieldsIfIn("empty", nil, map[string]any{"status": StatusUpcoming}) {
+		t.Error("an empty set reported applied")
+	}
+	if notified.Load() != 0 {
+		t.Error("an empty set notified")
+	}
+	if db.UpdateJobFieldsIfIn("missing", set, map[string]any{"status": StatusUpcoming}) {
+		t.Error("a write on a row that does not exist reported applied")
+	}
+}

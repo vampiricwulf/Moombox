@@ -112,7 +112,7 @@ func (w *DownloadWorker) AutoMuxEndedBroadcast(jobID string) {
 			return
 		}
 		// ErrAlreadyPending: this poll's mux is the one already waiting.
-		if err := w.afterJobExit(jobID, "automatic mux", false, func(database.JobStatus) { w.autoMuxNow(jobID) }); err != nil && !errors.Is(err, ErrAlreadyPending) {
+		if err := w.afterJobExit(jobID, "automatic mux", false, nil, func(database.JobStatus) { w.autoMuxNow(jobID) }); err != nil && !errors.Is(err, ErrAlreadyPending) {
 			w.logger.Info("automatic Twitch mux deferred — another verb is waiting on the job; the next poll retries",
 				"jobID", jobID, "err", err)
 		}
@@ -174,15 +174,24 @@ func (w *DownloadWorker) autoMuxNow(jobID string) {
 	}
 	w.logger.Info("Twitch broadcast confirmed over — muxing the capture its failed download kept in staging",
 		"jobID", jobID)
-	err = w.muxJob(jobID, autoMuxFailure)
+	err = w.muxJob(jobID, autoMuxFailure, false)
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrStagingBusy):
 		w.logger.Info("automatic Twitch mux deferred — another operation holds the job's staging; the next poll retries",
 			"jobID", jobID, "err", err)
+	case errors.Is(err, ErrNotAllowed):
+		// The row left Error between the re-read above and the mux — an
+		// operator's Reinitialize or Resume. It is theirs now.
+		w.logger.Info("automatic Twitch mux not started — the job changed meanwhile", "jobID", jobID, "err", err)
 	default:
 		w.logger.Warn("automatic Twitch mux could not start", "jobID", jobID, "err", err)
-		w.db.UpdateJobFields(jobID, map[string]any{
+		// Only while the row is still the Error this mux found: a
+		// Reinitialize that landed meanwhile — its reset deletes the staging,
+		// which is how muxJob came to find nothing staged — wrote Upcoming and
+		// queued the job, and an Error written over it stranded the queued run
+		// on a failed row.
+		w.db.UpdateJobFieldsIf(jobID, database.StatusError, map[string]any{
 			"status":      database.StatusError,
 			"park_reason": database.ParkReasonNone,
 			"error":       autoMuxFailure(err),

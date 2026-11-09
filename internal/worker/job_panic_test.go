@@ -182,7 +182,7 @@ func TestAPanicAfterAFlaggedCancelEndsTheRunCancelled(t *testing.T) {
 			}()
 			<-reached
 			done := w.queue.Done(id)
-			if cancelled, flagged := w.CancelJob(id); !cancelled || !flagged {
+			if cancelled, flagged, _ := w.CancelJob(id); !cancelled || !flagged {
 				t.Fatalf("CancelJob = (%v, %v), want the running job cancelled and its run flagged", cancelled, flagged)
 			}
 			if tc.deleted {
@@ -256,7 +256,7 @@ func TestMuxJobPanicLeavesAnOutcomeStanding(t *testing.T) {
 			staging, _ := muxFixtureJob(t, w, db, id)
 			writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 2)
 
-			if err := w.MuxJob(id); err != nil {
+			if err := w.restartMux(id); err != nil {
 				t.Fatalf("MuxJob: %v", err)
 			}
 			w.wg.Wait() // the mux's goroutine, recover included, has returned

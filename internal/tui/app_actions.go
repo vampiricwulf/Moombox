@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 )
 
 // recheckCookiesCmd is the work behind the R C chord: the in-process Go cookie
@@ -163,13 +165,13 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			var refused verbRefusals
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
-				if j == nil || j.Platform != "youtube" {
+				if j == nil || !jobverbs.ResumeSupported(j.Platform) {
 					continue
 				}
 				if a.HasStagingFiles != nil && !a.HasStagingFiles(id) {
 					continue
 				}
-				if j.Status != database.StatusCancelled && j.Status != database.StatusError && j.Status != database.StatusCookies && !(j.Status == database.StatusFinished && j.IncompleteTail) {
+				if !jobverbs.ResumableStatus(j.Status, j.IncompleteTail) {
 					continue
 				}
 				if err := a.OnResumeJob(id); err != nil {
@@ -200,7 +202,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				if j == nil {
 					continue
 				}
-				if j.Status != database.StatusError && j.Status != database.StatusCancelled && j.Status != database.StatusCookies {
+				if !jobverbs.ReinitializableStatus(j.Status) {
 					continue
 				}
 				if err := a.OnReinitializeJob(id); err != nil {
@@ -225,7 +227,12 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 	case "A M":
 		if job != nil && a.OnMuxJob != nil {
 			if err := a.OnMuxJob(job.ID); err != nil {
-				a.setFeedbackWithSeverity(fmt.Sprintf("Mux failed: %s", err), severityError)
+				var refusal RefusalError
+				if errors.As(err, &refusal) {
+					a.setFeedbackWithSeverity(err.Error(), severityError)
+				} else {
+					a.setFeedbackWithSeverity(fmt.Sprintf("Mux failed: %s", err), severityError)
+				}
 			} else {
 				a.setFeedback(fmt.Sprintf("Muxing: %s", job.Title))
 			}
@@ -247,26 +254,34 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			// finished, failed or been cancelled by the time the cancel
 			// reached them: OnCancelJob leaves those as they ended.
 			count, ended := 0, 0
+			var refused verbRefusals
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
 				if j == nil {
 					continue
 				}
-				// Filter by cancellable statuses (matches Web UI CANCEL_STATUSES)
-				switch j.Status {
-				case database.StatusDownloading, database.StatusLive, database.StatusUpcoming, database.StatusQueued, database.StatusMuxing, database.StatusCookies:
-					// OK
-				default:
+				if !jobverbs.Cancellable(j.Status) {
 					continue
 				}
-				if a.OnCancelJob(id) {
+				switch ok, err := a.OnCancelJob(id); {
+				case err != nil:
+					refused.add(err)
+				case ok:
 					count++
-				} else {
+				default:
 					ended++
 				}
 			}
 			a.taskList.ClearSelection()
 			switch {
+			case refused.n > 0:
+				// A refusal (a job already finishing) is the line's news, in
+				// red, after what became of the rest — the ended jobs too.
+				done := "Cancelled " + jobCount(count)
+				if ended > 0 {
+					done += "; " + jobCount(ended) + " had already ended"
+				}
+				a.setBatchFeedback(done, refused)
 			case ended > 0 && count > 0:
 				a.setFeedbackWithSeverity(fmt.Sprintf("Cancelled %s; %s had already ended", jobCount(count), jobCount(ended)), severityWarning)
 			case ended > 0:
@@ -277,7 +292,9 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				a.setFeedbackWithSeverity("No cancellable jobs in selection", severityWarning)
 			}
 		} else if job != nil && a.OnCancelJob != nil {
-			if a.OnCancelJob(job.ID) {
+			if ok, err := a.OnCancelJob(job.ID); err != nil {
+				a.setFeedbackWithSeverity(err.Error(), severityError)
+			} else if ok {
 				a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
 			} else {
 				a.setFeedbackWithSeverity(fmt.Sprintf("Not cancelled — %s had already ended", job.Title), severityWarning)
@@ -331,7 +348,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			allWatched := true
 			finished := ids[:0]
 			for _, id := range ids {
-				if j := a.taskList.GetJobByID(id); j != nil && j.Status == database.StatusFinished {
+				if j := a.taskList.GetJobByID(id); j != nil && jobverbs.WatchableStatus(j.Status) {
 					finished = append(finished, id)
 					if !j.Watched {
 						allWatched = false
@@ -347,7 +364,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			return a, safeCmd(func() tea.Msg {
 				return setWatchedResultMsg{Count: len(finished), Watched: watched, Err: setFn(finished, watched)}
 			})
-		} else if job != nil && job.Status == database.StatusFinished {
+		} else if job != nil && jobverbs.WatchableStatus(job.Status) {
 			watched := !job.Watched
 			id := job.ID
 			return a, safeCmd(func() tea.Msg {
@@ -743,7 +760,7 @@ func streamURL(j *database.Job) string {
 
 // openTrimForJob opens the trim dialog for a specific job.
 func (a *App) openTrimForJob(job *database.Job) {
-	if job.Status == database.StatusFinished && job.OutputFile != "" {
+	if jobverbs.TrimmableStatus(job.Status) && job.OutputFile != "" {
 		a.trimDlg.SetSize(a.width, a.height)
 		a.trimDlg.Open(job.ID, job.Title)
 		var lenSec float64
@@ -804,10 +821,7 @@ func (a *App) refreshTrimList(job *database.Job) {
 // still produce live progress". Keep them separate — never alias one to the
 // other or derive it from the other; the Web moving a status in or out of
 // DELETE_STATUSES must not silently change what the progress store holds.
-func isDeletableStatus(s database.JobStatus) bool {
-	return s == database.StatusFinished || s == database.StatusError ||
-		s == database.StatusCancelled || s == database.StatusCookies
-}
+func isDeletableStatus(s database.JobStatus) bool { return jobverbs.DeletableStatus(s) }
 
 // JobIsActive reports whether a job is actively writing its staging and output
 // paths.
@@ -910,8 +924,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		{Chord: "A R", Label: "Resume Job", HintLabel: "Resume", Category: "Action", NeedsJob: true, SupportsBatch: true,
 			DisabledReason: "no jobs to resume",
 			JobFilter: func(j *database.Job) bool {
-				canResume := (j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies || (j.Status == database.StatusFinished && j.IncompleteTail)) &&
-					j.Platform == "youtube"
+				canResume := jobverbs.ResumableStatus(j.Status, j.IncompleteTail) && jobverbs.ResumeSupported(j.Platform)
 				if canResume && a.HasStagingFiles != nil {
 					return a.HasStagingFiles(j.ID)
 				}
@@ -921,8 +934,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 			// the HasStagingFiles probe above runs when A R is chosen and
 			// its job selector is built (CORE-9).
 			StatusFilter: func(j *database.Job) bool {
-				return (j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies || (j.Status == database.StatusFinished && j.IncompleteTail)) &&
-					j.Platform == "youtube"
+				return jobverbs.ResumableStatus(j.Status, j.IncompleteTail) && jobverbs.ResumeSupported(j.Platform)
 			}},
 		// Confirm-gated (A I I within 3 s), and the confirm names what the
 		// reset deletes (owner decision PR-M1): the one verb that destroys
@@ -931,26 +943,27 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		{Chord: "A I", Label: "Reinitialize Job", HintLabel: "Reinit", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
 			DisabledReason: "no jobs to reinitialize",
 			JobFilter: func(j *database.Job) bool {
-				return j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies
+				return jobverbs.ReinitializableStatus(j.Status)
 			},
 			ConfirmDetail: a.ReinitializeSummary},
 		{Chord: "A M", Label: "Mux Job", HintLabel: "Mux", Category: "Action", NeedsJob: true, NeedsConfirm: true,
 			DisabledReason: "no muxable jobs",
 			JobFilter: func(j *database.Job) bool {
-				switch j.Status {
-				case database.StatusCancelled, database.StatusError:
+				switch {
+				case !jobverbs.MuxableStatus(j.Status):
+					return false
+				case !jobverbs.MuxNeedsUnmuxedParts(j.Status):
 					return a.HasSegmentFiles != nil && a.HasSegmentFiles(j.ID)
-				case database.StatusFinished:
+				default:
 					// A part its finalize could not mux is still in staging —
 					// the recovery the staging cleanup names when it keeps
 					// the dir (the same rule as POST /api/jobs/{id}/mux).
 					return a.HasUnmuxedParts != nil && a.HasUnmuxedParts(j.ID)
 				}
-				return false
 			},
 			// Status-only twin of the filter above — see A R (CORE-9).
 			StatusFilter: func(j *database.Job) bool {
-				return j.Status == database.StatusCancelled || j.Status == database.StatusError || j.Status == database.StatusFinished
+				return jobverbs.MuxableStatus(j.Status)
 			}},
 		{Chord: "A S", Label: "Recover Set-aside Recordings", HintLabel: "Recover", Category: "Action", NeedsJob: true, NeedsConfirm: true,
 			DisabledReason: "no jobs with set-aside recordings",
@@ -969,18 +982,18 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		{Chord: "A X", Label: "Cancel Job", HintLabel: "Cancel", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
 			DisabledReason: "no active jobs",
 			JobFilter: func(j *database.Job) bool {
-				return j.Status != database.StatusFinished && j.Status != database.StatusCancelled && j.Status != database.StatusError
+				return jobverbs.Cancellable(j.Status)
 			}},
 		{Chord: "A D", Label: "Delete Job", HintLabel: "Delete", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
 			DisabledReason: "no deletable jobs",
 			JobFilter:      func(j *database.Job) bool { return isDeletableStatus(j.Status) }},
 		{Chord: "A W", Label: "Toggle Watched", HintLabel: "Watched", Category: "Action", NeedsJob: true, SupportsBatch: true,
 			DisabledReason: "no finished jobs",
-			JobFilter:      func(j *database.Job) bool { return j.Status == database.StatusFinished }},
+			JobFilter:      func(j *database.Job) bool { return jobverbs.WatchableStatus(j.Status) }},
 		{Chord: "A T", Label: "Trim Video", HintLabel: "Trim", Category: "Action", NeedsJob: true,
 			DisabledReason: "no finished jobs with files",
 			JobFilter: func(j *database.Job) bool {
-				return j.Status == database.StatusFinished && j.OutputFile != ""
+				return jobverbs.TrimmableStatus(j.Status) && j.OutputFile != ""
 			}},
 		{Chord: "A O", Label: "Browse Orphaned Items", HintLabel: "Orphans", Category: "Action"},
 	}

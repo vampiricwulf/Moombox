@@ -282,7 +282,7 @@ func TestDamagedDashFragmentFinishesWithAGap(t *testing.T) {
 			media := filepath.Join(staging, "video_stream")
 			stageFragmented(t, media, src, 50, tc.how)
 
-			if err := w.MuxJob(id); err != nil {
+			if err := w.restartMux(id); err != nil {
 				t.Fatalf("MuxJob: %v", err)
 			}
 			w.Stop()
@@ -352,7 +352,7 @@ func TestDamagedDashTwoFilesChecksEachTrack(t *testing.T) {
 			stageFragmented(t, filepath.Join(staging, "video_stream"), video, tc.videoBad, damageZeroed)
 			stageFragmented(t, filepath.Join(staging, "audio_stream"), audio, tc.audioBad, damageZeroed)
 
-			if err := w.MuxJob(id); err != nil {
+			if err := w.restartMux(id); err != nil {
 				t.Fatalf("MuxJob: %v", err)
 			}
 			w.Stop()
@@ -446,7 +446,7 @@ func TestDamagedDashStartKeepsItsLead(t *testing.T) {
 			stageFragmented(t, filepath.Join(staging, "video_stream"), video, tc.videoBad, damageZeroed)
 			stageFragmented(t, filepath.Join(staging, "audio_stream"), audio, tc.audioBad, damageZeroed)
 
-			if err := w.MuxJob(id); err != nil {
+			if err := w.restartMux(id); err != nil {
 				t.Fatalf("MuxJob: %v", err)
 			}
 			w.Stop()
@@ -522,7 +522,7 @@ func TestDamagedTwitchFMP4FinishesWithAGap(t *testing.T) {
 	src := fragmentedFixture(t, ffmpegPath, "muxed", 300)
 	stageFragmented(t, media, src, len(src.frags)/3, damageZeroed)
 
-	if err := w.MuxJob(id); err != nil {
+	if err := w.restartMux(id); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()
@@ -566,7 +566,7 @@ func TestCleanDashMuxFinishesAndClearsStaging(t *testing.T) {
 	stageFragmented(t, filepath.Join(staging, "video_stream"), video, -1, damageNone)
 	stageFragmented(t, filepath.Join(staging, "audio_stream"), audio, -1, damageNone)
 
-	if err := w.MuxJob(id); err != nil {
+	if err := w.restartMux(id); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()
@@ -753,7 +753,7 @@ func TestRepairRefusedWithoutSpace(t *testing.T) {
 	stageFragmented(t, media, fragmentedFixture(t, ffmpegPath, "video", 300), 50, damageZeroed)
 	before, _ := os.ReadFile(media)
 
-	if err := w.MuxJob(id); err != nil {
+	if err := w.restartMux(id); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()
@@ -820,7 +820,7 @@ func TestLeftoverRepairedCopyDoesNotBlockTheRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := w.MuxJob(id); err != nil {
+	if err := w.restartMux(id); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()
@@ -856,7 +856,7 @@ func TestUnmeasurableFragmentedInputKeepsStaging(t *testing.T) {
 	media := filepath.Join(staging, "video_stream")
 	stageFragmented(t, media, twice, -1, damageNone)
 
-	if err := w.MuxJob(id); err != nil {
+	if err := w.restartMux(id); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()
@@ -1007,7 +1007,7 @@ func TestWholeArchiveBesideARepairedAsideIsNotAGap(t *testing.T) {
 	stageFragmented(t, filepath.Join(staging, "video_stream"), src, -1, damageNone)
 	stageFragmented(t, filepath.Join(staging, "video_stream"+engine.StagedRestartSuffix+"1700000000"), src, 50, damageZeroed)
 
-	if err := w.MuxJob(id); err != nil {
+	if err := w.restartMux(id); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()

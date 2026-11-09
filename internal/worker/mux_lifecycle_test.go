@@ -303,7 +303,7 @@ func TestRestartMuxFinishesAndClearsStaging(t *testing.T) {
 	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 90)
 	db.UpdateJobFields("j-clean", map[string]any{"title": "A Stream"})
 
-	if err := w.MuxJob("j-clean"); err != nil {
+	if err := w.restartMux("j-clean"); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()
@@ -337,7 +337,7 @@ func TestTruncatedMuxErrorsInsteadOfFinishing(t *testing.T) {
 	writeMuxFixture(t, ffmpegPath, media, 90)
 	truncateFixture(t, media, 120000)
 
-	if err := w.MuxJob("j-trunc"); err != nil {
+	if err := w.restartMux("j-trunc"); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()
@@ -437,7 +437,7 @@ func TestRestartMuxOutOfAChatWaitKeepsTheChatCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := w.MuxJob("j-chatwait"); err != nil {
+	if err := w.restartMux("j-chatwait"); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()
@@ -595,7 +595,7 @@ func TestRestartMuxWaitsForADownloadSlot(t *testing.T) {
 	if !w.queue.AcquireDownloadSlot(context.Background(), "holder") {
 		t.Fatal("could not take the only download slot")
 	}
-	if err := w.MuxJob("j-slot"); err != nil {
+	if err := w.restartMux("j-slot"); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	if reachedStatus(db, "j-slot", database.StatusFinished, 500*time.Millisecond) {
@@ -627,7 +627,7 @@ func TestRestartMuxCancelledByStopLeavesTheRowResumable(t *testing.T) {
 	// Stop's own cancellation, taken before the mux starts: the mux root is
 	// already cut, so the FFmpeg the goroutine would launch never runs.
 	w.orchestrator.CancelMuxes()
-	if err := w.MuxJob("j-cancel"); err != nil {
+	if err := w.restartMux("j-cancel"); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()
@@ -665,7 +665,7 @@ func TestOffQueueMuxHonoursTheOperatorsCancel(t *testing.T) {
 	if !w.queue.AcquireDownloadSlot(context.Background(), "holder") {
 		t.Fatal("could not take the only download slot")
 	}
-	if err := w.MuxJob("j-usercancel"); err != nil {
+	if err := w.restartMux("j-usercancel"); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	// What the cancel route writes for a Muxing row the queue does not know.
@@ -881,7 +881,7 @@ func TestFinalizeMuxesEachAsideToItsOwnFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := w.MuxJob("j-aside-mux"); err != nil {
+	if err := w.restartMux("j-aside-mux"); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()
@@ -931,7 +931,7 @@ func TestFinalizeMuxesEachAsideToItsOwnFile(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := w2.MuxJob("j-aside-bad"); err != nil {
+		if err := w2.restartMux("j-aside-bad"); err != nil {
 			t.Fatalf("MuxJob: %v", err)
 		}
 		w2.Stop()
@@ -1249,4 +1249,11 @@ func TestTruncatedAsideStaysInStaging(t *testing.T) {
 	if left := mp4sIn(t, outputDir); len(left) != 0 {
 		t.Errorf("the short sibling was left in the output dir: %v", left)
 	}
+}
+
+// restartMux is the boot's re-mux of a row a restart left Muxing
+// (enqueueExistingJobs): the muxJob these fixtures' Muxing rows go through.
+// The Mux action itself refuses a Muxing row (jobverbs.MuxableStatus).
+func (w *DownloadWorker) restartMux(jobID string) error {
+	return w.muxJob(jobID, muxActionFailure, true)
 }

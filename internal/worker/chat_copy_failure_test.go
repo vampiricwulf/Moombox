@@ -39,7 +39,7 @@ func TestChatCopyFailureKeepsTheCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := w.MuxJob("j-chat-kept"); err != nil {
+	if err := w.restartMux("j-chat-kept"); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()
@@ -200,7 +200,7 @@ func TestRawChatCopyFailureKeepsTheCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := w.MuxJob("j-raw-kept"); err != nil {
+	if err := w.restartMux("j-raw-kept"); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()

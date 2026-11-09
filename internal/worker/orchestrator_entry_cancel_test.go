@@ -282,7 +282,7 @@ func TestACancelledRowsChatIsSettledWhicheverComesFirst(t *testing.T) {
 					db.UpdateJobFieldsUnlessTerminal(id, map[string]any{"status": database.StatusLive, "chat_status": chat})
 					go func() {
 						defer close(cancelDone)
-						_, f := w.CancelJob(id)
+						_, f, _ := w.CancelJob(id)
 						flagged.Store(f)
 					}()
 					<-cancelWritten

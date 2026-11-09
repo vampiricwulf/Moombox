@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -223,6 +224,9 @@ func TestVerbAnswersByTheWorkersReason(t *testing.T) {
 	}{
 		{"the same verb already on its way", fmt.Errorf("resume %w", worker.ErrAlreadyPending), http.StatusOK},
 		{"the row gone", fmt.Errorf("resume: %w", worker.ErrJobNotFound), http.StatusNotFound},
+		// The row moved on between the route's read and the worker's (a
+		// monitor's resume, a finish): a conflict, not a fault.
+		{"the row moved on", &worker.NotAllowedError{Verb: "resumed", Status: database.StatusDownloading}, http.StatusConflict},
 	} {
 		resumeJob = func(*worker.DownloadWorker, string) error { return tc.err }
 		reinitializeJob = func(*worker.DownloadWorker, string) error { return tc.err }
@@ -230,6 +234,53 @@ func TestVerbAnswersByTheWorkersReason(t *testing.T) {
 			if rec := doRequest(t, r, "POST", "/api/jobs/yt_reason/"+verb, nil); rec.Code != tc.code {
 				t.Errorf("%s: /%s = %d (%s), want %d", tc.name, verb, rec.Code, rec.Body.String(), tc.code)
 			}
+		}
+	}
+}
+
+// TestMuxAnswersByTheWorkersReason: the Mux route maps the worker's
+// refusals — a staging another operation holds, a row that moved on since the
+// route read it (ErrNotAllowed) — to 409 with the worker's text, and anything
+// else to 500.
+//
+// Mutant: ErrNotAllowed left to the 500 default.
+func TestMuxAnswersByTheWorkersReason(t *testing.T) {
+	f := newJobsFixture(t)
+	cfg := config.Defaults()
+	cfg.Paths.StagingDirectory = f.stagingDir
+	cfg.Paths.OutputDirectory = f.outputDir
+	w := worker.NewDownloadWorker(f.db, nil, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	t.Cleanup(w.Stop)
+	rl := web.NewRateLimiter(1000, time.Minute)
+	t.Cleanup(rl.Close)
+	r := chi.NewRouter()
+	JobRoutes(r, f.db, f.store, w, rl, f.tw, f.yt, f.notify)
+	f.addJob(t, "yt_mux_reason", func(j *database.Job) { j.Status = database.StatusError })
+	stage := filepath.Join(f.stagingDir, "yt_mux_reason")
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "video.mp4"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := muxJob
+	t.Cleanup(func() { muxJob = orig })
+	moved := &worker.NotAllowedError{Verb: "muxed", Status: database.StatusDownloading}
+	for _, tc := range []struct {
+		name string
+		err  error
+		code int
+	}{
+		{"the row moved on", moved, http.StatusConflict},
+		{"the staging is busy", fmt.Errorf("%w (set-aside recovery in progress)", worker.ErrStagingBusy), http.StatusConflict},
+		{"the row is gone", fmt.Errorf("mux: %w", worker.ErrJobNotFound), http.StatusNotFound},
+		{"a fault", errors.New("boom"), http.StatusInternalServerError},
+	} {
+		muxJob = func(*worker.DownloadWorker, string) error { return tc.err }
+		rec := doRequest(t, r, "POST", "/api/jobs/yt_mux_reason/mux", nil)
+		if rec.Code != tc.code || !strings.Contains(rec.Body.String(), tc.err.Error()) {
+			t.Errorf("%s: /mux = %d (%s), want %d with the worker's text", tc.name, rec.Code, rec.Body.String(), tc.code)
 		}
 	}
 }

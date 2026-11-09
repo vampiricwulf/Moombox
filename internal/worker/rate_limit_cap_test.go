@@ -241,7 +241,7 @@ func TestRateLimitSpellEndsOnCancelAndRetry(t *testing.T) {
 				db.UpdateJobFields("cap_retry", map[string]any{"status": database.StatusUpcoming})
 			}
 		}
-		if cancelled, _ := w.CancelJob("cap_retry"); !cancelled {
+		if cancelled, _, _ := w.CancelJob("cap_retry"); !cancelled {
 			t.Fatal("the Cancel of the Queued row did not apply")
 		}
 		w.ReinitializeJob("cap_retry")

@@ -26,6 +26,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobfilter"
+	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -72,7 +73,7 @@ func enrichJob(db *database.Database, job *database.Job, stagingBase string) job
 		HasSegments:     worker.HasSegmentFiles(stagingBase, job.ID),
 		Asides:          report.Groups,
 		KeptChatSidecar: report.KeptChatSidecar,
-		UnmuxedParts:    job.Status == database.StatusFinished && worker.HasUnmuxedParts(db, stagingBase, job.ID),
+		UnmuxedParts:    jobverbs.MuxNeedsUnmuxedParts(job.Status) && worker.HasUnmuxedParts(db, stagingBase, job.ID),
 		MuxGaps:         worker.ScanMuxGaps(stagingBase, job.ID),
 		GapFill:         worker.TwitchGapFillStateOf(db, job),
 	}
@@ -1042,10 +1043,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		// Queued cancels like Upcoming: the job was never enqueued, so there is
 		// no process to stop — the status write to Cancelled IS the cancellation
 		// (queue.Cancel is a safe no-op for a never-enqueued job).
-		switch job.Status {
-		case database.StatusDownloading, database.StatusLive, database.StatusUpcoming, database.StatusQueued, database.StatusMuxing, database.StatusCookies:
-			// OK to cancel
-		default:
+		if !jobverbs.Cancellable(job.Status) {
 			jsonError(rw, "Job cannot be cancelled in current state", http.StatusBadRequest)
 			return
 		}
@@ -1053,7 +1051,14 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		// When the cancel flagged an actively-processing run, that run's
 		// handleCancellation emits the "cancelled" notification — sending
 		// here too produced two embeds per cancel of an in-flight job.
-		cancelled, workerWillNotify := cancelJob(db, w, jobID)
+		cancelled, workerWillNotify, err := cancelJob(db, w, jobID)
+		if err != nil {
+			// Its finalize has written the archive: the job ends Finished
+			// (owner ruling R-C1), and the reply says so rather than claim a
+			// cancel.
+			jsonError(rw, err.Error(), http.StatusConflict)
+			return
+		}
 		if !cancelled {
 			// The job ended — finished, failed, or was cancelled from the
 			// TUI — between the read above and the write, which does not
@@ -1088,19 +1093,12 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 
 		// A Finished job flagged IncompleteTail is recoverable via the
 		// preserved staging + resume sidecar.
-		allowed := false
-		switch job.Status {
-		case database.StatusError, database.StatusCancelled, database.StatusCookies:
-			allowed = true
-		case database.StatusFinished:
-			allowed = job.IncompleteTail
-		}
-		if !allowed {
+		if !jobverbs.ResumableStatus(job.Status, job.IncompleteTail) {
 			jsonError(rw, "Job cannot be resumed in current state", http.StatusBadRequest)
 			return
 		}
 
-		if job.Platform != "youtube" {
+		if !jobverbs.ResumeSupported(job.Platform) {
 			jsonError(rw, "Resume is only supported for YouTube jobs — use Reinitialize instead", http.StatusBadRequest)
 			return
 		}
@@ -1193,9 +1191,12 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		})
 
 		switch {
-		case job.Status == database.StatusError, job.Status == database.StatusCancelled:
+		case !jobverbs.MuxableStatus(job.Status):
+			jsonError(rw, "Job cannot be muxed in current state", http.StatusBadRequest)
+			return
+		case !jobverbs.MuxNeedsUnmuxedParts(job.Status):
 			// OK
-		case job.Status == database.StatusFinished && worker.HasUnmuxedParts(db, stagingBase, jobID):
+		case worker.HasUnmuxedParts(db, stagingBase, jobID):
 			// A part its finalize could not mux is still in staging — the
 			// recovery cleanupStagingAfterMux names when it keeps the dir.
 		default:
@@ -1209,16 +1210,22 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		if w != nil {
-			if err := w.MuxJob(jobID); err != nil {
+			if err := muxJob(w, jobID); err != nil {
 				// ErrStagingBusy is a conflict, not a fault: a set-aside
 				// recovery holds this job's staging, or the job's last run
 				// is still stopping, and the operator can simply try again
-				// in a moment. Error→status mapping only —
+				// in a moment. So is ErrNotAllowed: the row moved to a status
+				// Mux is not offered on since the read above. Error→status mapping only —
 				// the status and HasSegmentFiles gates above decide what is
 				// muxable.
+				// ErrJobNotFound: the row was deleted since the read above,
+				// a 404 as refuseVerbError answers it for the reset verbs.
 				status := http.StatusInternalServerError
-				if errors.Is(err, worker.ErrStagingBusy) {
+				switch {
+				case errors.Is(err, worker.ErrStagingBusy), errors.Is(err, worker.ErrNotAllowed):
 					status = http.StatusConflict
+				case errors.Is(err, worker.ErrJobNotFound):
+					status = http.StatusNotFound
 				}
 				jsonError(rw, err.Error(), status)
 				return
@@ -1363,13 +1370,10 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		// If the job is in an active state, auto-cancel and wait for the worker
 		// to drain before removing the row. Cancel-then-delete is a single
 		// user-facing action so the caller does not need to issue two requests.
-		switch job.Status {
-		case database.StatusDownloading, database.StatusLive, database.StatusUpcoming, database.StatusMuxing:
-			if w != nil {
-				w.CancelJob(jobID)
-				if !w.WaitForJobExit(jobID, 5*time.Second) {
-					slog.Warn("delete: job did not exit within timeout; removing row anyway", "jobID", jobID)
-				}
+		if worker.IsActiveJobStatus(job.Status) && w != nil {
+			w.CancelJob(jobID)
+			if !w.WaitForJobExit(jobID, 5*time.Second) {
+				slog.Warn("delete: job did not exit within timeout; removing row anyway", "jobID", jobID)
 			}
 		}
 
@@ -1581,14 +1585,15 @@ func refuseWhileStagingClaimed(rw http.ResponseWriter, w *worker.DownloadWorker,
 // refuseVerbError answers a worker verb's refusal and reports true when there
 // was one: 409 with the worker's text for ErrResetPending (a different verb
 // already waits on the job, owner ruling R-A3 — "reinitialize already
-// pending"), 404 for ErrJobNotFound (the row went between the route's read
+// pending") and for ErrNotAllowed (the row moved, between the route's read
+// and the worker's, to a status the verb is not offered on), 404 for ErrJobNotFound (the row went between the route's read
 // and the worker's), 500 for anything else. ErrAlreadyPending is no refusal:
 // the same verb is already on its way, and a repeat is a quiet success (R-A3).
 func refuseVerbError(rw http.ResponseWriter, err error) bool {
 	switch {
 	case err == nil, errors.Is(err, worker.ErrAlreadyPending):
 		return false
-	case errors.Is(err, worker.ErrResetPending):
+	case errors.Is(err, worker.ErrResetPending), errors.Is(err, worker.ErrNotAllowed):
 		jsonError(rw, err.Error(), http.StatusConflict)
 	case errors.Is(err, worker.ErrJobNotFound):
 		jsonError(rw, "job not found", http.StatusNotFound)
@@ -1598,12 +1603,13 @@ func refuseVerbError(rw http.ResponseWriter, err error) bool {
 	return true
 }
 
-// resumeJob and reinitializeJob are the routes' calls into the worker's
+// resumeJob, reinitializeJob and muxJob are the routes' calls into the worker's
 // verbs; variables so a test can answer the refusals a real worker gives only
 // mid-wait.
 var (
 	resumeJob       = func(w *worker.DownloadWorker, jobID string) error { return w.ResumeJob(jobID) }
 	reinitializeJob = func(w *worker.DownloadWorker, jobID string) error { return w.ReinitializeJob(jobID) }
+	muxJob          = func(w *worker.DownloadWorker, jobID string) error { return w.MuxJob(jobID) }
 )
 
 // cancelJob is the cancel route's write: the worker's CancelJob, which also
@@ -1611,15 +1617,16 @@ var (
 // Neither writes over a terminal status, and cancelled says whether the job
 // was cancelled; workerWillNotify, whether a run was flagged to announce it.
 // A variable so a test can land a status change between the route's read
-// and the write.
-var cancelJob = func(db *database.Database, w *worker.DownloadWorker, jobID string) (cancelled, workerWillNotify bool) {
+// and the write. err is the worker's refusal of a Cancel that came too late
+// (worker.ErrAlreadyFinishing).
+var cancelJob = func(db *database.Database, w *worker.DownloadWorker, jobID string) (cancelled, workerWillNotify bool, err error) {
 	if w != nil {
 		return w.CancelJob(jobID)
 	}
-	return db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
+	return db.UpdateJobFieldsIfIn(jobID, jobverbs.CancellableStatuses(), map[string]any{
 		"status":         database.StatusCancelled,
 		"announce_found": false, // as CancelJob clears it
-	}), false
+	}), false, nil
 }
 
 // loadJob fetches the job a handler acts on, and answers the request itself
@@ -1994,10 +2001,4 @@ func RestartRoute(r chi.Router, onRestart func()) {
 // the preview route's allowed: one list, so the two cannot disagree. A job
 // that is running, queued or Finished is not reset under its run or over its
 // archive.
-func reinitializable(status database.JobStatus) bool {
-	switch status {
-	case database.StatusError, database.StatusCancelled, database.StatusCookies:
-		return true
-	}
-	return false
-}
+func reinitializable(status database.JobStatus) bool { return jobverbs.ReinitializableStatus(status) }

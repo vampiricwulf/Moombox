@@ -144,7 +144,7 @@ func TestReinitializeClearsTheJoinOffset(t *testing.T) {
 		status database.JobStatus
 		reset  func(w *DownloadWorker, id string) error
 	}{
-		{name: "Reinitialize", status: database.StatusFinished, reset: (*DownloadWorker).ReinitializeJob},
+		{name: "Reinitialize", status: database.StatusError, reset: (*DownloadWorker).ReinitializeJob},
 		{name: "AutoReinitialize", status: database.StatusError, reset: (*DownloadWorker).AutoReinitializeJob},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

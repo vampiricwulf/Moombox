@@ -17,6 +17,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/childproc"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -400,7 +401,7 @@ func (ts *TrimService) emit(ev TrimEvent) {
 // planSingle checks a trim of a single-file recording.
 func (ts *TrimService) planSingle(job *database.Job, startTime, endTime float64) (*trimPlan, error) {
 	// Validate
-	if job.Status != database.StatusFinished {
+	if !jobverbs.TrimmableStatus(job.Status) {
 		return nil, refuseTrim("job must be finished to trim")
 	}
 	if job.OutputFile == "" {
@@ -732,7 +733,7 @@ func (ts *TrimService) DeleteTrim(jobID, trimID string) error {
 // each involved segment and concatenates them (with quality normalization
 // if needed).
 func (ts *TrimService) planSegments(job *database.Job, startTime, endTime float64) (*trimPlan, error) {
-	if job.Status != database.StatusFinished {
+	if !jobverbs.TrimmableStatus(job.Status) {
 		return nil, refuseTrim("job must be finished to trim")
 	}
 	if startTime < 0 {

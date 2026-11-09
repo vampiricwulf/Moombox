@@ -856,9 +856,13 @@ export function applyChannelOverrides(channel, { outputDirectory, archiveWindowD
 }
 
 /**
- * Job-status action sets — single source of truth for which statuses each
+ * Job-status action sets — the dashboard's copy of which statuses each
  * quick action targets, read by the details dialog (job-details.js), the job
- * cards, and the batch action bar (app.js).
+ * cards, and the batch action bar (app.js). Each mirrors a Go predicate in
+ * internal/jobverbs (Cancellable, ReinitializableStatus, MuxableStatus less its
+ * Finished arm, DeletableStatus, ResumableStatus less its incomplete-tail arm),
+ * which the REST routes, the TUI and the worker verbs call; cmd/moombox's
+ * TestVerbStatusSetsMatchTheDashboard compares the two over every JobStatus.
  */
 export const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Queued", "Muxing", "COOKIES?"]);
 export const REINIT_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
@@ -868,6 +872,24 @@ export const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKI
 // Equal to REINIT_STATUSES today by coincidence, not by contract — resume
 // preserves staging, reinitialize deletes it; keep them separately gated.
 export const RESUMABLE_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
+
+// The arms beside the sets: statuses a verb accepts only with a row fact.
+// Resume a Finished job only when its tail is incomplete (canResumeJob); Mux
+// one only while a part its finalize could not mux is staged (the server's
+// unmuxedParts, job-details.js); import chapters into one only when its tail
+// is complete (chapterImportAllowed). Go: jobverbs.ResumableStatus,
+// MuxNeedsUnmuxedParts, ChapterImportableStatus — compared by the same test.
+export const RESUME_TAIL_STATUSES = new Set(["Finished"]);
+export const MUX_PARTS_STATUSES = new Set(["Finished"]);
+export const CHAPTER_IMPORT_STATUSES = new Set(["Finished"]);
+
+// Mark watched / unwatched (the batch bar, app.js) and Trim (the details
+// dialog, with an archive file) act on a Finished job only. Go:
+// jobverbs.WatchableStatus, TrimmableStatus. Resume is a YouTube verb
+// (canResumeJob); Go: jobverbs.ResumeSupported.
+export const WATCHED_STATUSES = new Set(["Finished"]);
+export const TRIM_STATUSES = new Set(["Finished"]);
+export const RESUME_PLATFORMS = new Set(["youtube"]);
 
 // ── Channel removal ──────────────────────────────────────────────────────────
 // Removing a channel asks what to do with its jobs (W25-09, owner decision).
@@ -957,9 +979,9 @@ export function channelRemovedToast(choice, summary, data) {
  * reported. There, staging must be exactly `true`.
  */
 export function canResumeJob(job, { requireKnownStaging = false } = {}) {
-  const statusOk = RESUMABLE_STATUSES.has(job.status) || (job.status === "Finished" && !!job.incompleteTail);
+  const statusOk = RESUMABLE_STATUSES.has(job.status) || (RESUME_TAIL_STATUSES.has(job.status) && !!job.incompleteTail);
   const stagingOk = requireKnownStaging ? job.hasStaging === true : job.hasStaging !== false;
-  return statusOk && job.platform === "youtube" && stagingOk;
+  return statusOk && RESUME_PLATFORMS.has(job.platform) && stagingOk;
 }
 
 /**

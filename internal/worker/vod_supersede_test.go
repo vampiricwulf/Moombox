@@ -522,7 +522,7 @@ func TestVodClaimCarriesPartZeroMuxGapRecord(t *testing.T) {
 	if err := writeVodRootState(staging, vodRootComplete); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.MuxJob(id); err != nil {
+	if err := w.restartMux(id); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
 	w.Stop()

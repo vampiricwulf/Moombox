@@ -73,15 +73,20 @@ func notifyStreamFound(n notifications.Sender, job *database.Job, channelURL, ca
 // It reports whether the job was cancelled. The TUI decides on the row its
 // list last showed, and a job that finished, failed or was cancelled since is
 // not (CancelJob does not write over an outcome): the TUI says so rather than
-// "Cancelled", and nobody announces a cancel that did not happen.
-func (s *runState) cancelJobFromTUI(jobID string) bool {
+// "Cancelled", and nobody announces a cancel that did not happen. err is the
+// worker's refusal of a Cancel that reached a job already finishing
+// (worker.ErrAlreadyFinishing), REST's 409 text, which the TUI shows in red.
+func (s *runState) cancelJobFromTUI(jobID string) (bool, error) {
 	job, _ := s.db.GetJob(jobID)
-	cancelled, flagged := s.dlWorker.CancelJob(jobID)
+	cancelled, flagged, err := s.dlWorker.CancelJob(jobID)
+	if err != nil {
+		return false, err
+	}
 	if !cancelled || flagged || job == nil {
-		return cancelled
+		return cancelled, nil
 	}
 	if s.notifyMgr != nil && s.notifyMgr.HasTargets() {
 		s.notifyMgr.Send(notifications.JobCancelled(worker.NotifyFacts(job)))
 	}
-	return true
+	return true, nil
 }

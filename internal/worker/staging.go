@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 )
 
 // HasStagingFiles returns true if the staging directory for a job exists and
@@ -54,21 +55,17 @@ type ListedJob struct {
 	HasStaging *bool `json:"hasStaging,omitempty"`
 }
 
-// stagingFlagStatuses are the statuses ListedJob carries HasStaging for:
-// the dashboard's resumable ones (Error, Cancelled, COOKIES?) and Finished,
-// which a capture with an incomplete tail resumes from.
-var stagingFlagStatuses = map[database.JobStatus]bool{
-	database.StatusError:     true,
-	database.StatusCancelled: true,
-	database.StatusCookies:   true,
-	database.StatusFinished:  true,
-}
+// stagingFlag reports whether ListedJob carries HasStaging for a job in
+// status s: every status Resume can be offered from, whatever its row says of
+// the tail — Error, Cancelled, COOKIES? and Finished, which a capture with an
+// incomplete tail resumes from (jobverbs.ResumableStatus).
+func stagingFlag(s database.JobStatus) bool { return jobverbs.ResumableStatus(s, true) }
 
 // ListJob is job as the jobs list carries it (ListedJob), its staging read
-// from stagingBase when its status is one stagingFlagStatuses names.
+// from stagingBase when its status is one stagingFlag accepts.
 func ListJob(stagingBase string, job *database.Job) ListedJob {
 	row := ListedJob{Job: job}
-	if job != nil && stagingFlagStatuses[job.Status] {
+	if job != nil && stagingFlag(job.Status) {
 		has := HasStagingFiles(stagingBase, job.ID)
 		row.HasStaging = &has
 	}
