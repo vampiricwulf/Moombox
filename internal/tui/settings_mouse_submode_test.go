@@ -65,6 +65,17 @@ func TestSettingsClicksDoNotLeaveAnOpenSubEditor(t *testing.T) {
 			func(m *SettingsModel) bool { return m.secMode == securitySet }},
 		{"security remove prompt", "Network", func(m *SettingsModel) { m.secMode = securityRemove },
 			func(m *SettingsModel) bool { return m.secMode == securityRemove }},
+		// The outer-space warning and a long save error are wider than a
+		// narrow box: each must stay one row, as the hit-test counts.
+		{"security set prompt, long warning and error", "Network", func(m *SettingsModel) {
+			m.secMode = securitySet
+			m.secNewPw = " padded "
+			m.secMessage = "Save failed: " + strings.Repeat("the config file could not be written ", 4)
+		}, func(m *SettingsModel) bool { return m.secMode == securitySet }},
+		{"security remove prompt, long error", "Network", func(m *SettingsModel) {
+			m.secMode = securityRemove
+			m.secMessage = "Remove failed: " + strings.Repeat("the config file could not be written ", 4)
+		}, func(m *SettingsModel) bool { return m.secMode == securityRemove }},
 	}
 	// A wide terminal and a narrow one: at 60 columns a focused row's help
 	// alone outgrows the box. The narrow header has no room for the Logs tab,

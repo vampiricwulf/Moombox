@@ -1055,6 +1055,16 @@ func (m *SettingsModel) renderSecuritySet(w int) string {
 		lines = append(lines, "  "+lipgloss.NewStyle().Foreground(m.secMessageColor).Render(m.secMessage))
 	}
 
+	return joinBoxRows(lines, w)
+}
+
+// joinBoxRows cuts every row to the box width before joining: a row that
+// wrapped (the outer-space warning, a long save error) would draw the
+// buttons one row below the one the mouse hit-test counts.
+func joinBoxRows(lines []string, w int) string {
+	for i, line := range lines {
+		lines[i] = ansi.Truncate(line, w, "")
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -1087,7 +1097,7 @@ func (m *SettingsModel) renderSecurityRemove(w int) string {
 		lines = append(lines, "  "+lipgloss.NewStyle().Foreground(m.secMessageColor).Render(m.secMessage))
 	}
 
-	return strings.Join(lines, "\n")
+	return joinBoxRows(lines, w)
 }
 
 func (m *SettingsModel) renderRestartOverlay() string {
