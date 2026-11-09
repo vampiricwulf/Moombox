@@ -66,6 +66,10 @@ type outageAlerts struct {
 	}
 	after func(time.Duration, func()) stoppableTimer
 	now   func() time.Time
+	// offlineFor, when set, is how long the link has already been down at an
+	// offline delivery (connectivity.Monitor.OfflineFor): a new outage is
+	// dated back by it. Set once, before the alerter subscribes.
+	offlineFor func() time.Duration
 
 	mu sync.Mutex
 	// downAt is when the current outage began; zero while the link is up.
@@ -92,7 +96,9 @@ func newOutageAlerts(notify notifications.Sender, log interface {
 }
 
 // onState is the connectivity subscriber. It runs on the monitor's goroutine,
-// serialised with every other subscriber, and must not block: it arms or
+// or on the subscriber's for the replayed boot state (OnStateChangeWithCurrent),
+// always under the monitor's transitionMu — serialised with every transition
+// and every other subscriber — and must not block: it arms or
 // disarms a timer and, for an episode flapping for outageReportMaxWait since
 // its first restore, hands one send to the notification manager, whose Send
 // queues and returns.
@@ -105,10 +111,16 @@ func (a *outageAlerts) onState(online bool) {
 	now := a.now()
 	if !online {
 		if a.downAt.IsZero() {
-			a.downAt = now
+			// Dated from the loss, not from this delivery: the replay of an
+			// outage begun at boot arrives some way into startup.
+			at := now
+			if a.offlineFor != nil {
+				at = now.Add(-max(a.offlineFor(), 0))
+			}
+			a.downAt = at
 		}
 		if a.episode == nil {
-			a.episode = &outageEpisode{start: now}
+			a.episode = &outageEpisode{start: a.downAt}
 		}
 		// The link dropped again inside the window: the same episode goes on.
 		a.disarmLocked()
@@ -235,4 +247,12 @@ func outageAlert(start, end time.Time, offline time.Duration, outages int) (titl
 	return "Outage Alert",
 		fmt.Sprintf("Internet connectivity dropped %d times before it settled — channel monitoring paused and downloads waited each time, offline for the duration below in all; the monitors re-checked on every restore", outages),
 		fields
+}
+
+// setOfflineFor installs the source a new outage is dated back by
+// (offlineFor). Called once, before the alerter subscribes.
+func (a *outageAlerts) setOfflineFor(f func() time.Duration) {
+	a.mu.Lock()
+	a.offlineFor = f
+	a.mu.Unlock()
 }

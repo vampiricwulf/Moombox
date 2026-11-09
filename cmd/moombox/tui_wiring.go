@@ -1037,54 +1037,24 @@ func (s *runState) runTUI() {
 	// Forward monitor schedule events to TUI via the atomic pointers installed
 	// by monitor_callbacks.wireMonitorCallbacks. Store() is race-free against
 	// the monitor goroutines' Load()s.
-	makeTUISchedule := func(makeMsg func(time.Time) tui.CheckTimersMsg) func(int64) {
-		return func(nextCheckAt int64) {
-			// -1 = "checking now": forward the TUI's checking sentinel
-			// verbatim so the header can render "…" (a lossy time.Unix(-1)
-			// conversion would land near the epoch and read as "now").
-			var t time.Time
-			if nextCheckAt == tui.MonitorCheckingSentinelMs {
-				t = tui.MonitorCheckingTime()
-			} else {
-				t = time.Unix(nextCheckAt/1000, (nextCheckAt%1000)*int64(time.Millisecond))
-			}
-			select {
-			case checkTimersCh <- makeMsg(t):
-			default:
-			}
-		}
-	}
-	feedFn := makeTUISchedule(func(t time.Time) tui.CheckTimersMsg {
-		return tui.CheckTimersMsg{NextFeedCheck: t}
-	})
-	decapiFn := makeTUISchedule(func(t time.Time) tui.CheckTimersMsg {
-		return tui.CheckTimersMsg{NextDecapiCheck: t}
-	})
-	twitchFn := makeTUISchedule(func(t time.Time) tui.CheckTimersMsg {
-		return tui.CheckTimersMsg{NextTwitchCheck: t}
-	})
+	// tui.MonitorNextCheckTime decodes the ms value: -1 = "checking now" (the
+	// header's "…"), 0 = no channels (a blank timer, the Web's "--"), else
+	// the scheduled instant. A zero Next clears the TUI's timer.
+	feedFwd := newTUIScheduleForwarder(checkTimersCh, tui.MonitorFeed)
+	decapiFwd := newTUIScheduleForwarder(checkTimersCh, tui.MonitorDecapi)
+	twitchFwd := newTUIScheduleForwarder(checkTimersCh, tui.MonitorTwitch)
+	feedFn, decapiFn, twitchFn := feedFwd.send, decapiFwd.send, twitchFwd.send
 	s.feedTUISchedule.Store(&feedFn)
 	s.decapiTUISchedule.Store(&decapiFn)
 	s.twitchTUISchedule.Store(&twitchFn)
 
-	// Send initial timer values — monitors fire OnSchedule during Start()
+	// Seed the initial timer values — monitors fire OnSchedule during Start()
 	// before the TUI wrappers above are installed, so the TUI misses those.
-	for _, entry := range []struct {
-		getNext func() int64
-		makeMsg func(time.Time) tui.CheckTimersMsg
-	}{
-		{s.feedMon.GetNextCheckAt, func(t time.Time) tui.CheckTimersMsg { return tui.CheckTimersMsg{NextFeedCheck: t} }},
-		{s.decapiMon.GetNextCheckAt, func(t time.Time) tui.CheckTimersMsg { return tui.CheckTimersMsg{NextDecapiCheck: t} }},
-		{s.twitchMon.GetNextCheckAt, func(t time.Time) tui.CheckTimersMsg { return tui.CheckTimersMsg{NextTwitchCheck: t} }},
-	} {
-		if ms := entry.getNext(); ms > 0 {
-			t := time.Unix(ms/1000, (ms%1000)*int64(time.Millisecond))
-			select {
-			case checkTimersCh <- entry.makeMsg(t):
-			default:
-			}
-		}
-	}
+	// A seed never lands after a schedule the wrapper already forwarded
+	// (tuiScheduleForwarder), so a stale "…" cannot outlive the countdown.
+	feedFwd.seed(s.feedMon.GetNextCheckAt)
+	decapiFwd.seed(s.decapiMon.GetNextCheckAt)
+	twitchFwd.seed(s.twitchMon.GetNextCheckAt)
 
 	// Wire cookie status to TUI. Parameter `auth` is the incoming status —
 	// named differently from `s` (receiver) to avoid the pre-refactor shadow.

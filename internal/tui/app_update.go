@@ -51,13 +51,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		// Chord timeout
-		if a.chord.prefix != "" {
-			now := time.Now()
-			if a.chord.action != "" && now.After(a.chord.actionTime.Add(3*time.Second)) {
-				a.chord = chordState{}
-			} else if a.chord.action == "" && now.After(a.chord.prefixTime.Add(3*time.Second)) {
-				a.chord = chordState{}
-			}
+		if a.chord.expired(time.Now()) {
+			a.disarmChord()
 		}
 		// Feedback message timeout
 		if !a.feedback.until.IsZero() && time.Now().After(a.feedback.until) {
@@ -300,14 +295,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(a.listenForUpdates(), a.scheduleLogFlush())
 
 	case CheckTimersMsg:
-		if !msg.NextFeedCheck.IsZero() {
-			a.taskList.NextFeedCheck = msg.NextFeedCheck
-		}
-		if !msg.NextDecapiCheck.IsZero() {
-			a.taskList.NextDecapiCheck = msg.NextDecapiCheck
-		}
-		if !msg.NextTwitchCheck.IsZero() {
-			a.taskList.NextTwitchCheck = msg.NextTwitchCheck
+		// Unconditional: a zero Next is "no check scheduled" and blanks the
+		// timer, as the Web's "--" does.
+		switch msg.Monitor {
+		case MonitorFeed:
+			a.taskList.NextFeedCheck = msg.Next
+		case MonitorDecapi:
+			a.taskList.NextDecapiCheck = msg.Next
+		case MonitorTwitch:
+			a.taskList.NextTwitchCheck = msg.Next
 		}
 		return a, a.listenForUpdates()
 

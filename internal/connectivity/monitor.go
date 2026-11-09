@@ -26,6 +26,10 @@ type Monitor struct {
 	// earlier "offline" reached the same subscribers — who then kept
 	// "offline" while IsOnline() said true, until the next real flap.
 	transitionMu sync.Mutex
+	// offlineAt is when the monitor last went offline, nil while online (and
+	// before any loss). Written by transition under transitionMu; read by
+	// OfflineFor from anywhere, including a subscriber inside a fan-out.
+	offlineAt    atomic.Pointer[time.Time]
 	callbacks    map[uint64]func(online bool)
 	nextID       uint64
 	cancel       context.CancelFunc
@@ -164,6 +168,40 @@ func (m *Monitor) OnStateChange(fn func(online bool)) func() {
 	}
 }
 
+// OnStateChangeWithCurrent is OnStateChange that first delivers the state the
+// monitor is already in. Start probes synchronously and can go offline before
+// any subscriber exists, and OnStateChange replays nothing: a subscriber that
+// must see an outage begun at boot (the Outage Alert) subscribes here.
+//
+// The read, the registration and the delivery happen under transitionMu, the
+// lock that serialises a transition's flag swap with its fan-out, so no
+// transition falls between the read and the registration (lost) and none is
+// delivered both as the current state and by its own fan-out (doubled). m.mu
+// alone could not promise that: transition swaps the flag before it takes
+// m.mu to copy the callbacks. The same rules as OnStateChange apply to fn,
+// and it runs on the caller's goroutine for the first delivery.
+func (m *Monitor) OnStateChangeWithCurrent(fn func(online bool)) func() {
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
+	unsub := m.OnStateChange(fn)
+	fn(m.online.Load())
+	return unsub
+}
+
+// OfflineFor is how long the monitor has been offline, or 0 while it is
+// online. A subscriber that hears of an outage late — the replay of
+// OnStateChangeWithCurrent, delivered some way into startup after Start went
+// offline — dates the outage from the loss with it, not from its own
+// subscription. Inside a delivery it is consistent with the state delivered:
+// both are written under transitionMu.
+func (m *Monitor) OfflineFor() time.Duration {
+	at := m.offlineAt.Load()
+	if at == nil {
+		return 0
+	}
+	return time.Since(*at)
+}
+
 func (m *Monitor) ReportFailure(tag string) {
 	m.passive.ReportFailure(tag)
 	if m.online.Load() && m.passive.ShouldTriggerOffline() {
@@ -232,6 +270,10 @@ func (m *Monitor) transition(online bool) {
 	}
 	if online {
 		m.offlinePolls.Store(0)
+		m.offlineAt.Store(nil)
+	} else {
+		at := time.Now()
+		m.offlineAt.Store(&at)
 	}
 
 	if m.logger != nil {

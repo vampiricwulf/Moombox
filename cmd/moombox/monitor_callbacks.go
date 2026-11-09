@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/connectivity"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/monitor"
@@ -2185,8 +2186,26 @@ func (s *runState) wireMonitorCallbacks() {
 			s.twitchMon.CheckNow()
 		}
 		s.wsHub.BroadcastConnectivity(online)
-		alerts.onState(online)
 	})
+	subscribeOutageAlerts(s.connMon, alerts)
+}
+
+// subscribeOutageAlerts wires the outage alerter to connectivity, with the
+// state the monitor is already in delivered first. connMon.Start probes
+// synchronously inside initServices and goes offline there on a boot with no
+// network, before this subscriber exists; OnStateChange replays nothing, so
+// the alerter read the eventual restore as the startup state and an outage
+// that began at boot was never reported (K60). The monitor kicks and the
+// broadcasts above stay on OnStateChange: at boot there is nothing to re-check
+// and the UIs seed their own state.
+//
+// The replay comes some way into startup, so the alerter dates a new outage
+// by the monitor's OfflineFor rather than its own clock: dated from the
+// subscription, a boot outage was understated, and a short one fell under
+// connectivity.MinOutage and was never reported.
+func subscribeOutageAlerts(m *connectivity.Monitor, alerts *outageAlerts) func() {
+	alerts.setOfflineFor(m.OfflineFor)
+	return m.OnStateChangeWithCurrent(alerts.onState)
 }
 
 // wireLogForwarding sends every log line to the per-job buffers and to the

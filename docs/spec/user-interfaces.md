@@ -234,7 +234,7 @@ All 45 non-test files of `internal/tui/`, grouped by role. Four of them form two
 | `settings_notifications.go` | Notification sub-editor: webhook list (an edit-mode target's row carries a dim `· one message per job`), per-event toggles, test send, the per-target `enabled` mute, the `mention` text field, the `m` key, which toggles a highlighted event row in the mention (`@`) column, and the Delivery row (Separate messages / One message per job, Space toggles). The save's per-target merge is `notifications.MergeTargetEdits` (`internal/notifications/target_merge.go`), shared with the dashboard's target saves. |
 | `settings_security.go` | Security sub-editor: password set/remove, network access, and the external-access predicate `isExternalAccess`. |
 | `settings_components.go` | The overlay's `textinput` components, including the decimal-capable fields backed by `config.FlexDuration`. |
-| `settings_mouse.go` | Mouse support for the Settings overlay: click tabs, fields, toggles/cycles, and action buttons. |
+| `settings_mouse.go` | Mouse support for the Settings overlay: click tabs, fields, toggles/cycles, and action buttons. While a sub-editor owns the keyboard (`subEditorActive`: the channel editor or removal prompt, the notification editor or its delete confirm, the security set/remove prompt) header-tab and Save/Return clicks are ignored, as Tab is on the key path, so a click never leaves or closes a half-finished editor. Every sub-editor row is cut to the box width (a focused row's help takes its room from the input), so the button row the hit-test counts (`lastButtonContentY`) is the row drawn. |
 
 **The dashboard's twin of that notification sub-editor** is a card per target in the Settings page's Notifications section (`renderNotificationsList`, `web/public/modules/settings.js`). Its header carries the webhook URL, an Enabled `<sl-switch>` (the `enabled` mute — a muted card also shows a "Muted" badge and is dimmed by `.notification-card--disabled`, `web/public/moombox.css`), and the test-send and delete buttons. Below it a Mention `<sl-input>`, and — only while there is a mention to ping with — a row of mention-event chips drawn over the same vocabulary as the event filter and lit from the RESOLVED list (`DEFAULT_MENTION_EVENTS`, `web/public/modules/settings.js`), so an absent `mention_events` shows the defaults without ever writing them down, and a Delivery chip pair (Separate messages / One message per job, `set-mode`). A target with no event filter renders an "All events" chip beside a "Filter..." chip rather than an empty row. "Filter..." opens the target's event chips with every one lit and saves nothing — every event is what the target already receives — as page state kept by the target's identity (`_openEventFilters`, `notificationIdentities`), so another card's save leaves the row open; the first chip unticked saves every other event as the filter, and "Clear filter" on a row nothing was saved from just closes it.
 
@@ -276,7 +276,7 @@ After a save the overlay re-reads the live config as a fresh `Open` would (`resy
 | `marquee.go` | Scrolling text animation for long strings that do not fit in available width. |
 | `text_input.go` | Custom text input component (extends bubbles). |
 | `progress_store.go` | Tracks download progress state for active jobs. |
-| `monitor_checking.go` | The "a check is running right now" sentinel (`MonitorCheckingSentinelMs`, rendered as `…`), kept distinct from "no channels" and from a real future timestamp. |
+| `monitor_checking.go` | The "a check is running right now" sentinel (`MonitorCheckingSentinelMs`, rendered as `…`), kept distinct from "no channels" and from a real future timestamp. `MonitorNextCheckTime` is the one decode of a monitor's epoch-ms `NextCheckAt`: `-1` → the checking sentinel, `0` (no channels) → the zero time, which blanks that header timer as the Web's `--` does, anything else → the instant. Each `CheckTimersMsg` names one `MonitorKind` and is applied unconditionally, so a zero `Next` clears a timer. |
 
 **Platform-specific pairs** — each is a build-tagged two-file pair, so exactly one of each compiles.
 
@@ -297,7 +297,9 @@ The chord system is a three-state finite automaton:
 2. **Prefix active** — A prefix key has been pressed. Waiting for the action key. A feedback message shows the available actions for this prefix.
 3. **Confirm active** — A two-key chord was entered for a destructive action (`NeedsConfirm: true`). Waiting for the user to press the action key again to confirm.
 
-**Timeout:** All chord states expire after **3 seconds** of inactivity. If the user presses a prefix key and does nothing for 3 seconds, the chord resets to Idle. If a confirm prompt is pending and 3 seconds pass, it also resets.
+**Timeout:** All chord states expire after **3 seconds** of inactivity. If the user presses a prefix key and does nothing for 3 seconds, the chord resets to Idle. If a confirm prompt is pending and 3 seconds pass, it also resets. The window is `chordWindow` (`internal/tui/app.go`), and every return to Idle goes through `disarmChord`.
+
+**Esc and `/` always disarm:** every `Esc` on the main view returns an armed chord to Idle, whichever thing it also clears (selection, applied filter), and `/` disarms before it opens the Tasks or log-panel search box. Otherwise a confirm armed by `A D` outlived the Esc or the search and a lone `D` inside the window deleted the cursor job.
 
 **Invalid keys:** If the user presses a key that does not match any valid action for the current prefix, the chord resets to Idle, the feedback line shows `Invalid Chord: <prefix> <key>` for a second, and the key is consumed — it is not re-evaluated as a new prefix or single-key shortcut. A valid second key whose chord needs a job, pressed with no job selected or with a selected job that fails the item's `JobFilter`, resets the same way and shows the item's `DisabledReason` (the words the action menu uses beside a greyed entry) in the advisory colour.
 
@@ -419,7 +421,7 @@ Stats callback is configured. Shows the Web Stats tab's figures, in its strings 
 | `` ` `` | Open Settings dialog |
 | `?` | Open Help overlay |
 | `/` | Tasks panel: open the filter query box, which speaks the dashboard's filter language — free text plus `status:`/`channel:`/`platform:`/`type:clip` tokens, `-` negation, `a\|b` OR groups … |
-| `Esc` | Clear, in this order: the batch selection, then the active filter (Tasks panel) — the typed text and the `F`-set status token are one state, so this drops both together — then any armed chord. |
+| `Esc` | Clear, in this order: the batch selection, then the active filter (Tasks panel) — the typed text and the `F`-set status token are one state, so this drops both together. Every Esc also disarms an armed chord, whichever of these it cleared. |
 | `Space` | Tasks panel: toggle the focused row's batch selection. |
 | `PgUp` / `PgDn` | Page scroll: the Details and Logs viewports and the `O L` Job Log overlay, and the Tasks panel's list (a whole page of rows per press). |
 | `Home` / `End` | Tasks panel: jump to the first / last row. |

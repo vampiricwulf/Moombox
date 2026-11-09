@@ -323,14 +323,14 @@ func TestStopReportsAnOutageWaitingOutItsWindow(t *testing.T) {
 // notification drain, so the episode it reports rides it.
 //
 // Mutants killed: the closure sending the alert on the restore again; the
-// onState call removed; the shutdown stop removed, or moved after Wait.
+// onState subscription removed, or made through plain OnStateChange (K60); the shutdown stop removed, or moved after Wait.
 func TestOutageAlertIsTheDebouncedOne(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "monitor_callbacks.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	handsOver := false
+	handsOver, wired := false, false
 	ast.Inspect(f, func(n ast.Node) bool {
 		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING && lit.Value == `"connectivity_restored"` {
 			t.Errorf("monitor_callbacks.go sends connectivity_restored itself at %s — the Outage Alert is outageAlerts'", fset.Position(lit.Pos()))
@@ -339,22 +339,34 @@ func TestOutageAlertIsTheDebouncedOne(t *testing.T) {
 		if !ok {
 			return true
 		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "OnStateChange" && len(call.Args) == 1 {
-			if lit, ok := call.Args[0].(*ast.FuncLit); ok {
-				ast.Inspect(lit.Body, func(m ast.Node) bool {
-					if c, ok := m.(*ast.CallExpr); ok {
-						if s, ok := c.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "onState" {
-							handsOver = true
-						}
-					}
-					return true
-				})
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "subscribeOutageAlerts" {
+			wired = true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || len(call.Args) != 1 {
+			return true
+		}
+		// The alerter subscribes with the current state replayed (K60): a
+		// plain OnStateChange misses an outage that began at boot.
+		if sel.Sel.Name == "OnStateChangeWithCurrent" {
+			if s, ok := call.Args[0].(*ast.SelectorExpr); ok && s.Sel.Name == "onState" {
+				handsOver = true
 			}
+		}
+		if lit, ok := call.Args[0].(*ast.FuncLit); ok && sel.Sel.Name == "OnStateChange" {
+			ast.Inspect(lit.Body, func(m ast.Node) bool {
+				if c, ok := m.(*ast.CallExpr); ok {
+					if s, ok := c.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "onState" {
+						t.Errorf("an OnStateChange subscriber hands transitions to onState at %s — the alerter subscribes through subscribeOutageAlerts, which replays the boot state", fset.Position(s.Pos()))
+					}
+				}
+				return true
+			})
 		}
 		return true
 	})
-	if !handsOver {
-		t.Error("the connectivity subscriber in monitor_callbacks.go no longer hands its transitions to outageAlerts.onState")
+	if !handsOver || !wired {
+		t.Errorf("monitor_callbacks.go no longer subscribes outageAlerts.onState with OnStateChangeWithCurrent through subscribeOutageAlerts (subscribes=%v, wired=%v)", handsOver, wired)
 	}
 
 	sf, err := parser.ParseFile(fset, "shutdown.go", nil, 0)
@@ -383,5 +395,35 @@ func TestOutageAlertIsTheDebouncedOne(t *testing.T) {
 	if waitAt == token.NoPos || stopAt > waitAt {
 		t.Errorf("the outage alerter is stopped at %s, after the notification drain at %s — its report would be dropped",
 			fset.Position(stopAt), fset.Position(waitAt))
+	}
+}
+
+// TestBootOutageIsDatedFromTheLoss: the alerter subscribes some way into
+// startup, after connMon.Start went offline; the replayed offline dated the
+// outage from the subscription, understating it — a short boot outage could
+// drop under the minimum and never be reported. The alerter now dates a new
+// outage by the monitor's OfflineFor.
+//
+// Mutant: ignore offlineFor — the 90 s boot outage reads as 0 s and sends
+// nothing.
+func TestBootOutageIsDatedFromTheLoss(t *testing.T) {
+	h := newOutageHarness(t)
+	h.a.offlineFor = func() time.Duration { return 90 * time.Second }
+	h.a.onState(false) // the replay at subscription
+	start := h.now.Add(-90 * time.Second)
+	h.a.offlineFor = func() time.Duration { return 0 }
+	h.up(0)
+	h.clk.last(t).fire()
+	calls := h.rec.ByEvent("connectivity_restored")
+	if len(calls) != 1 {
+		t.Fatalf("%d Outage Alerts, want 1", len(calls))
+	}
+	for name, want := range map[string]string{
+		"Started":  "<t:" + strconv.FormatInt(start.Unix(), 10) + ":f>",
+		"Duration": "1m30s",
+	} {
+		if got, _ := calls[0].Field(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
 	}
 }
