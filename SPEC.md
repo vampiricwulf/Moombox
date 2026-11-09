@@ -354,6 +354,8 @@ Upcoming -> Live -> Downloading -> Muxing -> Finished
 
 A YouTube post-live download that still finalizes behind head after the VOD-branch refresh loop exhausts its retries does not become `Error` — it completes as `Finished` with `Job.IncompleteTail` set. The flag is not a status: staging directory and resume sidecar are preserved instead of being cleaned up, and Resume (only — not Retry, which gates the flagged job out because it deletes staging via ReinitializeJob) is permitted on the flagged job (normally gated to `Error`/`Cancelled`/`COOKIES?`); a clean re-run appends the missing tail and self-clears the flag via the same unconditional write that set it.
 
+Which statuses each job verb (Cancel, Resume, Reinitialize, Mux, Delete, Toggle Watched, Trim, chapter import) is offered and accepted on is one predicate per verb in `internal/jobverbs`, called by the REST routes, the TUI and the worker verbs, and mirrored by the dashboard's sets in `utils.js` (a Go test compares them over every `JobStatus`). The worker verbs refuse a status their predicate refuses (`worker.ErrNotAllowed`, 409 over REST, red in the TUI), and a transition decided on an earlier read is written conditionally (`UpdateJobFieldsIf`/`IfIn`) before anything irreversible: a Reinitialize claims the row before it deletes the staging. A Cancel that reaches a job whose finalize has already written its archive is refused (`worker.ErrAlreadyFinishing`), and the job ends `Finished` (owner ruling R-C1).
+
 ### Error Classification
 
 There is no typed error hierarchy and no errors package under `internal/`. Errors are plain Go errors built with `fmt.Errorf("...: %w", err)`, and the only classification is sentinel matching with `errors.Is`:
