@@ -40,7 +40,16 @@ func (e *NotAllowedError) Unwrap() error { return ErrNotAllowed }
 // written archive on no row or turn a finished recording into a Cancelled
 // one — and the Cancel answers this: 409 over REST, the same text in red in
 // the TUI. CancelJob returns it.
-var ErrAlreadyFinishing = errors.New("Not cancelled — the job is already finishing: its archive is written")
+//
+// A type rather than errors.New only so its text can start as the routes'
+// other cancel answers do ("Not cancelled — ...").
+var ErrAlreadyFinishing error = alreadyFinishingError{}
+
+type alreadyFinishingError struct{}
+
+func (alreadyFinishingError) Error() string {
+	return "Not cancelled — the job is already finishing: its archive is written"
+}
 
 // resumeGate, reinitGate are afterJobExit's acceptance checks for the reset
 // verbs: the status predicate each verb's route and TUI filter offer it on.
