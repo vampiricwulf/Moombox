@@ -224,11 +224,13 @@ func (s *runState) runTUI() {
 		}
 		return s.db.BatchSetWatched(ids, watched)
 	}
+	// The same verb already on its way (ErrAlreadyPending) is a quiet
+	// success, as REST answers it (owner ruling R-A3).
 	app.OnResumeJob = func(jobID string) error {
-		return s.dlWorker.ResumeJob(jobID)
+		return quietIfAlreadyPending(s.dlWorker.ResumeJob(jobID))
 	}
 	app.OnReinitializeJob = func(jobID string) error {
-		return s.dlWorker.ReinitializeJob(jobID)
+		return quietIfAlreadyPending(s.dlWorker.ReinitializeJob(jobID))
 	}
 	app.ReinitializeSummary = func(jobIDs []string) string {
 		var base string
@@ -1481,4 +1483,15 @@ func tuiChapterView(v *routes.ChapterImportView) tui.ChapterImportView {
 		Embedded:             v.Embedded,
 		EmbedError:           v.EmbedError,
 	}
+}
+
+// quietIfAlreadyPending answers the worker's ErrAlreadyPending — the same
+// verb is already waiting on the job, or running — as the success it is to
+// the operator (owner ruling R-A3), as the REST layer does (refuseVerbError);
+// every other error is the refusal the TUI shows in red.
+func quietIfAlreadyPending(err error) error {
+	if errors.Is(err, worker.ErrAlreadyPending) {
+		return nil
+	}
+	return err
 }

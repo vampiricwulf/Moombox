@@ -1581,13 +1581,17 @@ func refuseWhileStagingClaimed(rw http.ResponseWriter, w *worker.DownloadWorker,
 // refuseVerbError answers a worker verb's refusal and reports true when there
 // was one: 409 with the worker's text for ErrResetPending (a different verb
 // already waits on the job, owner ruling R-A3 — "reinitialize already
-// pending"), 500 for anything else.
+// pending"), 404 for ErrJobNotFound (the row went between the route's read
+// and the worker's), 500 for anything else. ErrAlreadyPending is no refusal:
+// the same verb is already on its way, and a repeat is a quiet success (R-A3).
 func refuseVerbError(rw http.ResponseWriter, err error) bool {
 	switch {
-	case err == nil:
+	case err == nil, errors.Is(err, worker.ErrAlreadyPending):
 		return false
 	case errors.Is(err, worker.ErrResetPending):
 		jsonError(rw, err.Error(), http.StatusConflict)
+	case errors.Is(err, worker.ErrJobNotFound):
+		jsonError(rw, "job not found", http.StatusNotFound)
 	default:
 		jsonError(rw, err.Error(), http.StatusInternalServerError)
 	}

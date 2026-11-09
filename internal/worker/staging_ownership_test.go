@@ -352,7 +352,7 @@ func TestAPendingVerbAppliesOverTheCookieRefreshResume(t *testing.T) {
 // TestAResetVerbHoldsTheClaimWhileItRuns: a reset verb holds the job's
 // claim (op = its name) for the length of its reset, so nothing that claims
 // staging starts under it; and while it does, the verb is still pending, so
-// a repeat is a quiet no-op and a different verb is ErrResetPending — which
+// a repeat is a no-op (ErrAlreadyPending) and a different verb is ErrResetPending — which
 // is also why the REST layer lets a reset verb's claim through to the worker
 // (IsResetVerb) rather than answering a double-click with "busy".
 func TestAResetVerbHoldsTheClaimWhileItRuns(t *testing.T) {
@@ -380,8 +380,8 @@ func TestAResetVerbHoldsTheClaimWhileItRuns(t *testing.T) {
 	if _, err := w.ClaimChapterImport("j-hold"); !errors.Is(err, ErrStagingBusy) || !strings.Contains(err.Error(), "reinitialize in progress") {
 		t.Errorf("ClaimChapterImport during the reset = %v, want ErrStagingBusy naming the reinitialize", err)
 	}
-	if err := w.ReinitializeJob("j-hold"); err != nil {
-		t.Errorf("the same verb during its own reset = %v, want a no-op success", err)
+	if err := w.ReinitializeJob("j-hold"); !errors.Is(err, ErrAlreadyPending) {
+		t.Errorf("the same verb during its own reset = %v, want ErrAlreadyPending (a no-op)", err)
 	}
 	if err := w.ResumeJob("j-hold"); !errors.Is(err, ErrResetPending) || err.Error() != "reinitialize already pending" {
 		t.Errorf("Resume during the reset = %v, want %q", err, "reinitialize already pending")
@@ -399,7 +399,7 @@ func TestAResetVerbHoldsTheClaimWhileItRuns(t *testing.T) {
 // TestASecondDifferentVerbIsRefusedWhileOneIsPending: afterExitPending held
 // no verb, so a Resume clicked while a Reinitialize waited was dropped while
 // the route answered success. A different verb now gets ErrResetPending
-// naming the pending one; the same verb again is a quiet no-op.
+// naming the pending one; the same verb again is a no-op (ErrAlreadyPending).
 func TestASecondDifferentVerbIsRefusedWhileOneIsPending(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	ownershipJob(t, w, db, "j-pend", database.StatusError)
@@ -417,8 +417,8 @@ func TestASecondDifferentVerbIsRefusedWhileOneIsPending(t *testing.T) {
 	if err := w.AutoReinitializeJob("j-pend"); !errors.Is(err, ErrResetPending) {
 		t.Errorf("auto-reinitialize while a Reinitialize is pending = %v, want ErrResetPending", err)
 	}
-	if err := w.ReinitializeJob("j-pend"); err != nil {
-		t.Errorf("the same verb again = %v, want a no-op success", err)
+	if err := w.ReinitializeJob("j-pend"); !errors.Is(err, ErrAlreadyPending) {
+		t.Errorf("the same verb again = %v, want ErrAlreadyPending (a no-op)", err)
 	}
 	release()
 	w.wg.Wait()
@@ -484,5 +484,161 @@ func waitUntil(t *testing.T, cond func() bool) {
 			t.Fatal("condition not met within 5s")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestTheSameVerbAgainIsAlreadyPending: a repeat of the verb already waiting
+// on the job was a nil — the success an acceptance is — so the Twitch
+// monitor, which offers its auto-recovery on every poll while the previous
+// run unwinds, logged "auto-recovered" each poll. A repeat now answers
+// ErrAlreadyPending, which is not ErrResetPending (no refusal: REST and the
+// TUI answer it as success) and leaves the pending verb in place.
+//
+// Mutant: afterJobExit returning nil for the same verb.
+func TestTheSameVerbAgainIsAlreadyPending(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	ownershipJob(t, w, db, "j-again", database.StatusError)
+	release, err := w.claimJobOperation("j-again", opRecoverAsides)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.AutoReinitializeJob("j-again"); err != nil {
+		t.Fatalf("the first auto-reinitialize = %v, want it accepted", err)
+	}
+	for range 3 {
+		err := w.AutoReinitializeJob("j-again")
+		if !errors.Is(err, ErrAlreadyPending) || errors.Is(err, ErrResetPending) {
+			t.Fatalf("a repeat while it waits = %v, want ErrAlreadyPending", err)
+		}
+	}
+	release()
+	w.wg.Wait()
+	row, _ := db.GetJob("j-again")
+	if row.Status != database.StatusUpcoming || row.AutoRetryCount != 1 {
+		t.Errorf("after the wait: status %s, auto_retry_count %d; want one auto-reinitialize applied (Upcoming, 1)",
+			row.Status, row.AutoRetryCount)
+	}
+}
+
+// TestAVerbWhoseRowCannotBeReadIsNotAccepted: afterJobExit read the row for
+// the status its write must find, and on a missing row or a failed read went
+// on with "" — accepted, success reported, and then dropped by the
+// conditional write no row could satisfy. It now refuses, ErrJobNotFound for
+// a missing row and the read's error otherwise, and leaves no verb pending.
+//
+// Mutant: seen = "" on a failed read (nil returned).
+func TestAVerbWhoseRowCannotBeReadIsNotAccepted(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	if err := w.ResumeJob("j-none"); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("Resume of a job with no row = %v, want ErrJobNotFound", err)
+	}
+	if _, pending := w.afterExitPending.Load("j-none"); pending {
+		t.Error("the refused verb was left pending")
+	}
+	// A different verb next is not refused as "already pending".
+	if err := w.ReinitializeJob("j-none"); !errors.Is(err, ErrJobNotFound) {
+		t.Errorf("Reinitialize after the refused Resume = %v, want ErrJobNotFound", err)
+	}
+
+	db.Close()
+	err := w.ResumeJob("j-none")
+	if err == nil || errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("Resume when the row cannot be read = %v, want the read's error", err)
+	}
+	if _, pending := w.afterExitPending.Load("j-none"); pending {
+		t.Error("the verb refused on a failed read was left pending")
+	}
+}
+
+// TestMuxAndChapterImportRefuseAQueuedRun: a reset verb queues the job while
+// it holds the staging claim and then lets go, so a run queued to start is
+// visible only after the claim is taken. RecoverAsides re-checked there;
+// MuxJob and ClaimChapterImport asked only whether a run was registered, and
+// before their claim, so a Mux or an import started under a queued run that
+// was about to write the same staging and archive.
+//
+// Mutant: either verb without the queuedOrRunning check after its claim.
+func TestMuxAndChapterImportRefuseAQueuedRun(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		verb func(w *DownloadWorker, id string) error
+	}{
+		{"mux", (*DownloadWorker).MuxJob},
+		{"chapter import", func(w *DownloadWorker, id string) error {
+			release, err := w.ClaimChapterImport(id)
+			if err == nil {
+				release()
+			}
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			t.Cleanup(w.Stop)
+			staging, _ := muxFixtureJob(t, w, db, "j-queued")
+			if err := os.WriteFile(filepath.Join(staging, "video.ts"), make([]byte, 64), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			db.UpdateJobFields("j-queued", map[string]any{"status": database.StatusCancelled})
+			w.queue.Enqueue("j-queued", database.StatusUpcoming)
+
+			err := tc.verb(w, "j-queued")
+			if !errors.Is(err, ErrStagingBusy) || !strings.Contains(err.Error(), "queued to run") {
+				t.Fatalf("%s while a run is queued = %v, want ErrStagingBusy naming the queued run", tc.name, err)
+			}
+			if op, held := w.StagingClaimHolder("j-queued"); held {
+				t.Errorf("the refusal left the staging claim held by %q", op)
+			}
+			if row, _ := db.GetJob("j-queued"); row.Status != database.StatusCancelled {
+				t.Errorf("the refusal changed the row: %s", row.Status)
+			}
+		})
+	}
+}
+
+// TestAStaleReleaseKeepsANewerClaim: a claim's release deleted the job's
+// entry whoever held it, so a release run twice — or late, after the claim
+// had been freed and taken anew — dropped the newer holder's claim and let a
+// second operation in under it.
+//
+// Mutant: stagingClaimRelease deleting without comparing generations.
+func TestAStaleReleaseKeepsANewerClaim(t *testing.T) {
+	w, _ := testWorkerSetup(t)
+	first, err := w.claimJobOperation("j-gen", opRecoverAsides)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first()
+	if _, err := w.claimJobOperation("j-gen", opMux); err != nil {
+		t.Fatal(err)
+	}
+	first() // stale: the claim it was handed is gone
+	if op, held := w.StagingClaimHolder("j-gen"); !held || op != opMux {
+		t.Fatalf("after a stale release the claim reads %q, %v; want the mux still holding it", op, held)
+	}
+	if _, err := w.claimJobOperation("j-gen", opChapterImport); !errors.Is(err, ErrStagingBusy) {
+		t.Errorf("a second operation under the newer claim = %v, want ErrStagingBusy", err)
+	}
+}
+
+// TestSchedulerAdmitsItsFullSharePastAClaimedRow: the sweep asked
+// NextQueuedJobs for the channel's free slots plus its held rows, so a
+// claimed row it skipped took a row of that allowance and the channel
+// admitted fewer than its share that sweep. The claimed rows now count into
+// the allowance as the held ones do.
+//
+// Mutant: NextQueuedJobs asked for admit+heldCount() alone.
+func TestSchedulerAdmitsItsFullSharePastAClaimedRow(t *testing.T) {
+	s, db, log := testSchedulerSetup(t, 1)
+	chID := "UC_share"
+	addSchedJob(t, db, &chID, "v_claimed", database.StatusQueued, 1)
+	addFeedItemRow(t, db, chID, "v_claimed", "2026-07-02T00:00:00Z") // newest: first in line
+	addSchedJob(t, db, &chID, "v_free", database.StatusQueued, 1)
+	addFeedItemRow(t, db, chID, "v_free", "2026-07-01T00:00:00Z")
+	s.stagingBusy = func(id string) bool { return id == "v_claimed" }
+	s.stagingClaimedCount = func() int { return 1 }
+	s.sweep()
+	if got := log.admitted(); len(got) != 1 || got[0] != "v_free" {
+		t.Fatalf("sweep admitted %v past the claimed row; want [v_free]", got)
 	}
 }

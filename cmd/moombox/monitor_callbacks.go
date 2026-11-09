@@ -1769,6 +1769,9 @@ func (s *runState) wireMonitorCallbacks() {
 				s.db.UpdateJobFields(videoID, map[string]any{"title": title})
 			}
 			if err := s.dlWorker.ResumeJob(videoID); err != nil {
+				if errors.Is(err, worker.ErrAlreadyPending) {
+					return // the resume an earlier detection started is still on its way
+				}
 				// Another verb already waits on the job (an operator's); it is
 				// the one that runs.
 				s.log.Info("broadcast re-detected live — auto-resume left to the verb already waiting on the job",
@@ -1903,6 +1906,13 @@ func (s *runState) wireMonitorCallbacks() {
 		// re-enqueues. The cap (worker.MaxTwitchAutoRetries) is enforced by
 		// the monitor's predicate before we even get here.
 		if err := s.dlWorker.AutoReinitializeJob(jobID); err != nil {
+			if errors.Is(err, worker.ErrAlreadyPending) {
+				// The monitor offers the recovery on every poll while the
+				// job's previous run unwinds or a staging claim holds it:
+				// the one accepted earlier is still on its way, and was
+				// logged then.
+				return
+			}
 			// Another verb already waits on the job; nothing was applied and
 			// no retry of the budget was spent.
 			s.log.Info("twitch auto-recovery left to the verb already waiting on the job",

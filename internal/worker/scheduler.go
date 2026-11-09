@@ -48,6 +48,11 @@ type Scheduler struct {
 	// run admission starts writes the staging FFmpeg is muxing out of. The
 	// claim's release wakes the scheduler.
 	stagingBusy func(jobID string) bool
+	// stagingClaimedCount is how many jobs' staging claims are held
+	// (DownloadWorker.stagingClaimCount; nil: none). sweep asks
+	// NextQueuedJobs for that many rows more, as it does for the held ones,
+	// so the claimed rows it skips do not cost the channel its share.
+	stagingClaimedCount func() int
 
 	// conn is the connectivity monitor (nil: always online). An admission
 	// made during an outage is a backlog VOD sent to fail its first fetch, so
@@ -383,10 +388,15 @@ func (s *Scheduler) sweep() {
 		if admit <= 0 {
 			continue
 		}
-		// Past the held jobs, which wait out their backoff without costing
-		// the rest of the channel its turn: ask for enough rows that every
-		// hold could be among them.
-		ids, err := s.db.NextQueuedJobs(ch, admit+s.heldCount())
+		// Past the held jobs, which wait out their backoff, and the claimed
+		// ones, which wait for their claim, without costing the rest of the
+		// channel its turn: ask for enough rows that every hold and every
+		// claim could be among them.
+		skippable := s.heldCount()
+		if s.stagingClaimedCount != nil {
+			skippable += s.stagingClaimedCount()
+		}
+		ids, err := s.db.NextQueuedJobs(ch, admit+skippable)
 		if err != nil {
 			s.log.Error("scheduler: NextQueuedJobs failed", "channel", ch, "err", err)
 			continue
