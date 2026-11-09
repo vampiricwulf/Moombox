@@ -586,7 +586,7 @@ export class MoomboxApp {
       const response = await fetch("/api/config");
       if (response.ok) {
         this.config = await response.json();
-        if (this.settings._dirty) {
+        if (this.settings.isDirty()) {
           // User has unsaved form changes — only update lists and status bar
           // without overwriting form fields (channel/notification operations
           // trigger loadConfig but shouldn't discard unsaved edits)
@@ -631,7 +631,7 @@ export class MoomboxApp {
             // a new backend; reload to pick up matching assets. Respect
             // unsaved settings edits: defer (retry on the next status load)
             // and tell the user instead of discarding their changes.
-            if (this.settings?._dirty) {
+            if (this.settings?.isDirty()) {
               this.showToast(`Moombox was updated to v${status.version} — reload the page after saving your settings`, "primary");
             } else {
               window.location.reload();
@@ -1045,7 +1045,7 @@ export class MoomboxApp {
       // Reload config on reconnect so the form reflects any server-side changes
       // (e.g., config saved via TUI, or restart-required settings that were applied).
       // Skip if user has unsaved changes to avoid silently overwriting their edits.
-      if (isReconnect && !this.settings._dirty) this.loadConfig();
+      if (isReconnect && !this.settings.isDirty()) this.loadConfig();
       // Start client-side heartbeat to detect half-open connections.
       // Track pings sent AND pongs received so a transient send() throw
       // (InvalidStateError during a tab/network blip) doesn't cause a false
@@ -3323,7 +3323,7 @@ export class MoomboxApp {
    * every other panel is while nothing on the Settings page is dirty.
    */
   _canLeaveSettings(panel) {
-    return panel === "settings" || !this.settings?._dirty;
+    return panel === "settings" || !this.settings?.isDirty();
   }
 
   /**
@@ -3340,9 +3340,7 @@ export class MoomboxApp {
       okVariant: "warning"
     }).then(confirmed => {
       if (!confirmed) return false;
-      this.settings._dirty = false;
-      this.settings._updateUnsavedIndicator();
-      document.getElementById("settings-unsaved-banner").style.display = "none";
+      this.settings._setClean();
       this.loadConfig();
       return true;
     });

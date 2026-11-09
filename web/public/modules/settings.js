@@ -239,7 +239,15 @@ export class SettingsController {
     /** The restart-required values this page's saves sent since then, by
      *  path: what the restart prompt judges (_checkRestartRequired). */
     this._sentRestartValues = {};
-    this._dirty = false;
+    /** The unsaved-edits flag behind the `_dirty` accessor. */
+    this._isDirty = false;
+    /** Bumped by every edit (_markDirty): a save that ends clears the
+     *  unsaved state only when no edit happened since it gathered its
+     *  payload, so an edit typed during the save is not marked clean. */
+    this._editGen = 0;
+    /** A save (validation + PUT) is in flight: both Save buttons are
+     *  disabled and saveConfig refuses to start another. */
+    this._saving = false;
     this._dirtyListenersAdded = false;
     /** True once populateBrowserSelector has filled the browser <sl-select> —
      *  saves must not touch browser_path/browser_type before then. */
@@ -310,18 +318,14 @@ export class SettingsController {
     const reloadBtn = document.getElementById("reload-config-btn");
     if (reloadBtn) {
       reloadBtn.addEventListener("click", () => {
-        this._dirty = false;
-        this._updateUnsavedIndicator();
-        document.getElementById("settings-unsaved-banner").style.display = "none";
+        this._setClean();
         this.app.loadConfig();
       });
     }
 
     // Unsaved changes banner buttons
     document.getElementById("settings-banner-discard")?.addEventListener("click", () => {
-      this._dirty = false;
-      this._updateUnsavedIndicator();
-      document.getElementById("settings-unsaved-banner").style.display = "none";
+      this._setClean();
       this.app.loadConfig();
     });
     document.getElementById("settings-banner-save")?.addEventListener("click", () => {
@@ -911,9 +915,7 @@ export class SettingsController {
     this._formBaseline = this._gatherFormFields();
 
     // Track dirty state
-    this._dirty = false;
-    this._updateUnsavedIndicator();
-    document.getElementById("settings-unsaved-banner")?.style.setProperty("display", "none");
+    this._setClean();
     if (!this._dirtyListenersAdded) {
       this._dirtyListenersAdded = true;
       const settingsContent = document.querySelector(".settings-content");
@@ -1159,9 +1161,31 @@ export class SettingsController {
    * (_saveNotificationEdits), so the targets are not part of this save.
    */
   async saveConfig() {
-    const saveBtn = document.getElementById("save-config-btn");
-    if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
+    // One save at a time: the banner's Save and the page's both land here,
+    // and a second save would rebuild the same payload from a baseline the
+    // first has not advanced yet.
+    if (this._saving) return;
+    this._setSaving(true);
+    try {
+      await this._saveConfig();
+    } finally {
+      this._setSaving(false);
+    }
+  }
 
+  /** Both Save buttons follow `_saving` (the page's also shows its spinner). */
+  _setSaving(saving) {
+    this._saving = saving;
+    const saveBtn = document.getElementById("save-config-btn");
+    if (saveBtn) { saveBtn.loading = saving; saveBtn.disabled = saving; }
+    const bannerSave = document.getElementById("settings-banner-save");
+    if (bannerSave) { bannerSave.loading = saving; bannerSave.disabled = saving; }
+  }
+
+  async _saveConfig() {
+    // The edit generation the payload is gathered at: an edit after this is
+    // not in what is sent, so the save's end must not mark it clean.
+    const gen = this._editGen;
     if (!this.app.config) {
       this.app.config = {};
     }
@@ -1207,10 +1231,7 @@ export class SettingsController {
           msgEl.textContent = outcome.message;
           msgEl.style.color = `var(--sl-color-${outcome.variant}-600)`;
         }
-        if (outcome.block) {
-          if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
-          return;
-        }
+        if (outcome.block) return;
         if (outcome.variant === "warning") {
           // The inline message sits in a section the user may have scrolled
           // past; the save is proceeding, so say so where it will be seen.
@@ -1222,10 +1243,11 @@ export class SettingsController {
       payload.cookies.browser_type = browser.type;
     }
 
+    // Clean only when nothing was edited since the payload was gathered: an
+    // edit typed during the validation or the PUT is still unsent, so it
+    // keeps the banner, the leave guards, and loadConfig's hands off the form.
     const settled = () => {
-      this._dirty = false;
-      this._updateUnsavedIndicator();
-      document.getElementById("settings-unsaved-banner").style.display = "none";
+      if (this._editGen === gen) this._setClean();
     };
 
     if (Object.keys(payload).length === 0) {
@@ -1234,7 +1256,6 @@ export class SettingsController {
       // the server holds is touched.
       settled();
       this.app.showToast("No changes to save", "primary");
-      if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
       return;
     }
 
@@ -1280,8 +1301,6 @@ export class SettingsController {
       }
     } catch (e) {
       this.app.showToast("Failed to save settings: " + e.message, "danger");
-    } finally {
-      if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
     }
   }
 
@@ -1419,11 +1438,30 @@ export class SettingsController {
     setTimeout(() => { resetButton(); setResult("", ""); }, 10000);
   }
 
+  /** True while the form holds edits no save has sent. A getter/setter over
+   *  `_isDirty` so app.js and the tests keep reading (and writing) `_dirty`;
+   *  setting it true is an edit, as _markDirty is. */
+  get _dirty() { return this._isDirty; }
+  set _dirty(v) {
+    this._isDirty = !!v;
+    if (this._isDirty) this._editGen++;
+  }
+
+  isDirty() { return this._isDirty; }
+
   _markDirty() {
     this._dirty = true;
     this._updateUnsavedIndicator();
     const banner = document.getElementById("settings-unsaved-banner");
     if (banner) banner.style.display = "";
+  }
+
+  /** The one clean transition: flag, indicator and banner together. */
+  _setClean() {
+    this._isDirty = false;
+    this._updateUnsavedIndicator();
+    const banner = document.getElementById("settings-unsaved-banner");
+    if (banner) banner.style.display = "none";
   }
 
   _updateUnsavedIndicator() {
