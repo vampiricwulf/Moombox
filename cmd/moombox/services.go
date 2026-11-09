@@ -1691,6 +1691,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.tuiDiskStatusCh = make(chan tui.DiskStatusMsg, 5)
 	s.diskRecheck = make(chan struct{}, 1)
 	s.tuiBackfillCh = make(chan tui.BackfillStatusMsg, 16)
+	s.backfillMailbox = newBackfillMailbox()
 	s.backfillProgress = make(map[string]backfillProgressState)
 
 	return nil

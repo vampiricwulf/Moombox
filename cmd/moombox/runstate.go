@@ -195,6 +195,9 @@ type runState struct {
 	tuiUpdateStatusCh chan tui.UpdateStatusMsg
 	tuiDiskStatusCh   chan tui.DiskStatusMsg
 	tuiBackfillCh     chan tui.BackfillStatusMsg
+	// backfillMailbox feeds tuiBackfillCh: each channel's latest backfill
+	// state, never dropped (see backfillMailbox).
+	backfillMailbox *backfillMailbox
 
 	// configuredLogLevel is the logs.log_level the running logger last had
 	// applied from config (see applyConfiguredLogLevel); guarded by its mutex.
@@ -208,15 +211,16 @@ type runState struct {
 	// --- Backfill progress snapshot ---
 	// backfillProgress holds the last backfill OnProgress emission per
 	// channel — the disk_status snapshot role (routes.SharedDiskStatus) for
-	// backfill_status: read by the ws InitialState provider and the TUI seed
-	// so a mid-flight connect (the common case during a long scan, §11) sees
+	// backfill_status: read by the ws InitialState provider so a mid-flight
+	// connect (the common case during a long scan, §11) sees
 	// the in-flight scan. Only retained states are kept
 	// (monitor.BackfillState.Retained: scanning, and error — the sweep will
 	// retry); done and idle delete the entry, so the map never leaks departed
 	// channels and completion state stays with the DB, not this ephemeral
 	// cache. Guarded by
 	// backfillMu: writes come from the worker's consumer goroutine and the
-	// sweep's prune path, reads from WS connects and TUI startup.
+	// sweep's prune path, reads from WS connects. (The TUI is fed by
+	// backfillMailbox, which already holds every channel's latest state.)
 	backfillMu       sync.Mutex
 	backfillProgress map[string]backfillProgressState
 

@@ -1988,6 +1988,12 @@ func (s *runState) wireMonitorCallbacks() {
 		} else {
 			delete(s.backfillProgress, chID)
 		}
+		// To the TUI through the mailbox, which keeps every channel's last
+		// state: the status bar's "BF: retry" is sticky (set by error,
+		// cleared only by that channel's next state), so no state may be
+		// dropped. Under the lock, so the mailbox's order per channel is
+		// the snapshot's.
+		s.backfillMailbox.put(tui.BackfillStatusMsg{Channel: chID, Tab: tab, Pages: pages, State: tui.BackfillState(state)})
 		s.backfillMu.Unlock()
 
 		// Broadcast to web clients — the exact Task 5 payload shape.
@@ -1997,13 +2003,6 @@ func (s *runState) wireMonitorCallbacks() {
 			"pages":   pages,
 			"state":   state,
 		})
-
-		// Push to TUI (drop-on-full like tuiDiskStatusCh — a dropped page
-		// tick is superseded by the next one within a second).
-		select {
-		case s.tuiBackfillCh <- tui.BackfillStatusMsg{Channel: chID, Tab: tab, Pages: pages, State: tui.BackfillState(state)}:
-		default:
-		}
 	}
 
 	// Monitor -> WebSocket: broadcast timer updates. TypeScript broadcasts
