@@ -2,7 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, pendingAutoAction, pendingAutoActionText, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES } from "./utils.js";
+import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES } from "./utils.js";
 
 /** A running trim's progress as the whole percentage its bar shows. */
 function trimPercent(progress) {
@@ -767,7 +767,12 @@ export class JobDetailsController {
             <span class="details-value" data-field="gap-fill">${this.app.escapeHtml(gapFillText(job))}</span>
           </div>` : ""}
           ${
-            job.isVod
+            // A VOD row, and a row that is not yet anything else: a Queued row
+            // (whose line is its admission hold) and an Awaiting-processing
+            // one. A YouTube backlog VOD is created without isVod — stream
+            // processing writes it — so isVod alone left those two rows with
+            // no progress row and "Type: Live" (R-D3 parity with the TUI).
+            job.isVod || job.status === "Queued" || isAwaitingProcessing(job)
               ? `
           <div class="details-row">
             <span class="details-label">Type:</span>

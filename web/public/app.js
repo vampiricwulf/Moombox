@@ -73,6 +73,9 @@ export class MoomboxApp {
     // The backlog scheduler's holds (owner ruling R-D3): /api/status, the
     // initial_state snapshot and each admission_holds frame. null until read.
     this.admissionHolds = null;
+    // One-shot timer for the earliest future hold end in admissionHolds: a
+    // row's own hold runs out with no frame to say so (setAdmissionHolds).
+    this._holdExpiryTimer = null;
     // The server's UTC offset in minutes, from /api/setup/status at boot and
     // /api/status after; null until read.
     this.serverUtcOffsetMinutes = null;
@@ -1611,6 +1614,20 @@ export class MoomboxApp {
    */
   setAdmissionHolds(holds) {
     this.admissionHolds = holds || null;
+    this._redrawQueuedHolds();
+    this.stats.onAdmissionHolds();
+  }
+
+  /**
+   * _redrawQueuedHolds rewrites each Queued row's line and an open Queued
+   * job's dialog from admissionHolds at the current time, then arms a
+   * one-shot timer for the earliest hold end still ahead. A row's own hold
+   * (its retry backoff, a rate-limit requeue) or the YouTube rate limit runs
+   * out with no admission_holds frame while the slots stay full; the timer
+   * is what turns "Retry 1 of 3 at 14:05" into "Waiting in queue..." then,
+   * as the TUI's per-second render does. Re-armed on every holds change.
+   */
+  _redrawQueuedHolds() {
     for (const job of this.jobs) {
       if (job.status !== "Queued") continue;
       const cell = document.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"] .job-progress-text`);
@@ -1626,7 +1643,30 @@ export class MoomboxApp {
     // as the TUI's details pane does; its own job_update may be far off.
     const open = this.selectedJobId ? this.jobs.find((j) => j.id === this.selectedJobId) : null;
     if (open?.status === "Queued") this.details.updateJobDetails(open);
-    this.stats.onAdmissionHolds();
+    this._armHoldExpiry();
+  }
+
+  _armHoldExpiry() {
+    clearTimeout(this._holdExpiryTimer);
+    this._holdExpiryTimer = null;
+    const holds = this.admissionHolds;
+    if (!holds) return;
+    const now = Date.now();
+    let next = Infinity;
+    const consider = (t) => {
+      const ms = t ? Date.parse(t) : NaN;
+      if (ms > now && ms < next) next = ms;
+    };
+    consider(holds.rateLimitedUntil);
+    for (const h of Object.values(holds.jobs || {})) consider(h?.until);
+    if (next === Infinity) return;
+    // +1 ms: a hold holds while now < until, so the redraw lands just past
+    // it. Capped at setTimeout's 2^31-1 ms limit; an early fire re-arms.
+    const delay = Math.min(next - now + 1, 2 ** 31 - 1);
+    this._holdExpiryTimer = setTimeout(() => {
+      this._holdExpiryTimer = null;
+      this._redrawQueuedHolds();
+    }, delay);
   }
 
   handleConnectivityChange(payload) {

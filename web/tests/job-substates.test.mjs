@@ -281,3 +281,67 @@ test("a reconnect's initial_state redraws the disk indicator from its holds", { 
   await h.flush();
   assert.doesNotMatch(ind.textContent, /holding/, "the snapshot's open gate redraws the indicator");
 });
+
+// A YouTube backlog VOD is created Queued without isVod (the backlog creator
+// never sets it; stream processing writes it once it starts), so the dialog
+// gates its progress row on the row's state, not on isVod alone: a Queued
+// row and an Awaiting-processing row show it, and neither says "Type: Live".
+//
+// Mutant: the progress row gated on job.isVod alone.
+test("a Queued backlog row's dialog shows its hold without isVod", { skip }, async () => {
+  const row = queued();
+  assert.equal(row.isVod, undefined, "premise: the backlog creator's row has no isVod");
+  const h = await harness.makeApp({
+    routes: {
+      "GET /api/jobs/:id": () => ({ ...queued(), hasStaging: false, hasSegments: false, asides: [], keptChatSidecar: false,
+        unmuxedParts: false, muxGaps: [] }),
+      "GET /api/jobs/:id/logs": () => [],
+    },
+  });
+  const dlg = h.el("details-dialog");
+  Object.defineProperty(dlg, "open", { get() { return !!this._open; } });
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [row], admissionHolds: { offline: false, diskHeld: true } } });
+  await h.flush();
+  h.app.details.showJobDetails(h.app.jobs[0]);
+  await h.flush(); await h.flush();
+  const content = h.document.getElementById("job-details-content");
+  const progress = () => content.querySelector('[data-field="progress"]');
+  assert.ok(progress(), "the dialog has a progress row");
+  assert.equal(progress().textContent, "Held: disk full");
+  assert.doesNotMatch(content.textContent, /Type:\s*Live/);
+
+  // Admitted: Upcoming, still no isVod — the dialog says Awaiting processing.
+  h.app.handleMessage({ type: "job_update", payload: { ...row, status: "Upcoming" } });
+  await h.flush(); await h.flush();
+  assert.equal(progress()?.textContent, "Awaiting processing");
+  assert.doesNotMatch(content.textContent, /Type:\s*Live/);
+});
+
+// A row's own hold (its retry backoff, a rate-limit requeue) runs out with no
+// frame to say so while the slots stay full: the dashboard arms a one-shot
+// timer for the earliest hold end and redraws the Queued cells then.
+//
+// Mutant: setAdmissionHolds without the expiry timer — the cell keeps
+// "Retry 1 of 3 at HH:MM" after that time has passed.
+test("a Queued row's own hold running out redraws its line", { skip }, async () => {
+  const h = await harness.makeApp();
+  const until = new Date(Date.now() + 5 * 60000).toISOString();
+  h.app.jobs = [queued()];
+  h.app.renderJobs();
+  h.app.handleMessage({ type: "admission_holds", payload: { offline: false, diskHeld: false,
+    jobs: { q1: { attempt: 1, of: 3, until } } } });
+  const cell = () => h.document.querySelector('.video-item[data-job-id="q1"] .job-progress-text');
+  assert.match(cell().textContent, /^Retry 1 of 3 at \d\d:\d\d$/);
+
+  const frozenNow = Date.now;
+  try {
+    Date.now = () => frozenNow() + 4 * 60000;
+    h.advance(4 * 60000);
+    assert.match(cell().textContent, /^Retry 1 of 3/, "not yet");
+    Date.now = () => frozenNow() + 5 * 60000 + 1000;
+    h.advance(60000 + 1000);
+    assert.equal(cell().textContent, "Waiting in queue...");
+  } finally {
+    Date.now = frozenNow;
+  }
+});
