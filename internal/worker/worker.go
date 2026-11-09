@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/disk"
+	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
@@ -609,7 +611,25 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 
 // EnqueueJob adds a job to the processing queue.
 // Looks up the job from DB to determine its priority.
+//
+// Not while the job's staging claim is held (a set-aside recovery, a Mux, a
+// chapter import, a reset verb mid-reset): a Reinitialize writes its reset
+// Upcoming before it deletes the staging (reinitializeNow), and a monitor
+// that queued that row meanwhile started a run writing the directory being
+// deleted. The claim's release wakes the heartbeat, which queues the job
+// then (enqueueRunnable). A verb that holds the claim queues its own job
+// through enqueueHeld.
 func (w *DownloadWorker) EnqueueJob(jobID string) {
+	if w.stagingClaimed(jobID) {
+		w.logger.Debug("enqueue deferred: the job's staging is claimed; its release wakes the heartbeat", "jobID", jobID)
+		return
+	}
+	w.enqueueHeld(jobID)
+}
+
+// enqueueHeld is EnqueueJob for the holder of the job's staging claim: the
+// reset verbs queue the job they reset while they still hold it.
+func (w *DownloadWorker) enqueueHeld(jobID string) {
 	job, err := w.db.GetJob(jobID)
 	if err != nil || job == nil {
 		w.queue.Enqueue(jobID, database.StatusUpcoming)
@@ -778,7 +798,7 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 				// The Mux action's path needs no network and no re-download.
 				w.logger.Info("resuming interrupted mux from staged media", "jobID", job.ID)
 				w.db.UpdateJobFields(job.ID, map[string]any{"error": ""})
-				if err := w.MuxJob(job.ID); err != nil {
+				if err := w.muxJob(job.ID, muxActionFailure, true); err != nil {
 					// Only reachable if staging vanished between the check and
 					// the call; fall back to the historical reset.
 					w.logger.Warn("re-mux from staging refused; falling back to re-processing",
@@ -2336,7 +2356,7 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 		// An operator's Resume or Reinitialize already waiting on the job
 		// (ErrResetPending) is the one that runs: it applies over the resume
 		// written above (acceptedStatus) and queues the job itself.
-		if err := w.afterJobExit(job.ID, string(opCookieRefreshResume), true, func(database.JobStatus) {
+		if err := w.afterJobExit(job.ID, string(opCookieRefreshResume), true, nil, func(database.JobStatus) {
 			if status == database.StatusQueued {
 				if w.scheduler != nil {
 					w.scheduler.Wake()
@@ -2562,7 +2582,7 @@ func (w *DownloadWorker) ReauthenticateTwitchChats() int {
 // wins (acceptedStatus, which also lets it apply over a cookie refresh's own
 // resume of the row).
 func (w *DownloadWorker) ResumeJob(jobID string) error {
-	return w.afterJobExit(jobID, string(opResume), true, func(seen database.JobStatus) {
+	return w.afterJobExit(jobID, string(opResume), true, resumeGate, func(seen database.JobStatus) {
 		from, ok := w.acceptedStatus(jobID, seen)
 		applied := ok && w.db.UpdateJobFieldsIf(jobID, from, map[string]any{
 			"status":           database.StatusDownloading,
@@ -2582,7 +2602,7 @@ func (w *DownloadWorker) ResumeJob(jobID string) error {
 		}
 		// A fresh backlog retry budget too, whatever ended the last run.
 		w.endBacklogStreak(jobID)
-		w.EnqueueJob(jobID)
+		w.enqueueHeld(jobID)
 	})
 }
 
@@ -2671,7 +2691,12 @@ func (w *DownloadWorker) logVerbOverridden(jobID, what string, seen database.Job
 // row ever reads, so fn's conditional write would drop it after the caller
 // had reported success. ErrJobNotFound when there is no row, the read's own
 // error otherwise.
-func (w *DownloadWorker) afterJobExit(jobID, what string, hold bool, fn func(seen database.JobStatus)) error {
+//
+// gate, when not nil, is the verb's status predicate (resumeGate,
+// reinitGate): a row it refuses is not accepted, and its *NotAllowedError is
+// the answer — the TUI calls these verbs on the row it last drew, and the
+// REST route on the row it read a moment before.
+func (w *DownloadWorker) afterJobExit(jobID, what string, hold bool, gate func(*database.Job) error, fn func(seen database.JobStatus)) error {
 	if prev, waiting := w.afterExitPending.LoadOrStore(jobID, what); waiting {
 		if prev.(string) == what {
 			return fmt.Errorf("%s %w", what, ErrAlreadyPending)
@@ -2685,6 +2710,12 @@ func (w *DownloadWorker) afterJobExit(jobID, what string, hold bool, fn func(see
 			return fmt.Errorf("%s: reading the job: %w", what, err)
 		}
 		return fmt.Errorf("%s: %w", what, ErrJobNotFound)
+	}
+	if gate != nil {
+		if err := gate(job); err != nil {
+			w.afterExitPending.Delete(jobID)
+			return err
+		}
 	}
 	seen := job.Status
 	blocks := anyStagingClaim
@@ -2756,7 +2787,7 @@ func (w *DownloadWorker) clearJobParts(jobID string) {
 // (see ResumeJob); the reset applies only while the row still reads the
 // status it read when the verb was accepted.
 func (w *DownloadWorker) ReinitializeJob(jobID string) error {
-	return w.afterJobExit(jobID, string(opReinitialize), true, func(seen database.JobStatus) { w.reinitializeNow(jobID, seen) })
+	return w.afterJobExit(jobID, string(opReinitialize), true, reinitGate, func(seen database.JobStatus) { w.reinitializeNow(jobID, seen) })
 }
 
 // acceptedStatus reports the status an operator's Resume or Reinitialize
@@ -2790,90 +2821,76 @@ func (w *DownloadWorker) acceptedStatus(jobID string, seen database.JobStatus) (
 	return "", false
 }
 
+// reinitializeNow is ReinitializeJob's reset, once the job is free. The row
+// is claimed first — the reset written Upcoming, conditionally on the status
+// the verb was accepted on (acceptedStatus) — and only once that write has
+// applied are the staging directory, the parts and an imported chapter list
+// deleted: the deletion cannot be undone, so it follows the one step that
+// can still be refused. Deleted first, a row that had moved on meanwhile (a
+// Cancel, a stale TUI read) lost its staging to a reset that was then not
+// applied. The job is invisible to everything that starts a run while the
+// verb holds its staging claim (the heartbeat, the scheduler, EnqueueJob), so
+// the Upcoming row is not picked up before its staging is gone; the verb
+// queues it itself once it is.
 func (w *DownloadWorker) reinitializeNow(jobID string, seen database.JobStatus) {
 	from, ok := w.acceptedStatus(jobID, seen)
 	if !ok {
 		w.logVerbOverridden(jobID, "reinitialize", seen)
 		return
 	}
-	// Read config for staging path
-	var stagingBase string
-	w.readConfig(func(c *config.MoomboxConfig) {
-		stagingBase = c.Paths.EffectiveStagingDir()
-	})
-
-	// Delete staging directory
-	stagingDir := filepath.Join(stagingBase, jobID)
-	if err := os.RemoveAll(stagingDir); err != nil {
-		w.logger.Warn("failed to remove staging directory on reinitialize", "path", stagingDir, "err", err)
+	// Read before the claim, which clears output_file: a single-file
+	// archive's imported chapter list (owner decision CJ-2) is beside it. The
+	// re-download is a new recording whose timeline can differ from the one
+	// the list was fitted to. Dropped here, as the reset clears output_file,
+	// and not only by the new archive's finalize (dropImportedArchiveChapters):
+	// a re-download Cancelled and then muxed by the Mux action is a
+	// re-finalize (JobContext.Refinalize), which would otherwise carry the old
+	// recording's list onto the new one.
+	var priorOutput string
+	if prior, err := w.db.GetJob(jobID); err == nil && prior != nil {
+		priorOutput = prior.OutputFile
 	}
 
+	// Clear all non-input fields. auto_retry_count resets here because
+	// user-driven reinit grants the job a fresh budget; auto-recovery uses
+	// AutoReinitializeJob, which spends one of it instead.
+	beforeResetClaim(jobID)
+	if !w.db.UpdateJobFieldsIf(jobID, from, reinitResetFields(0)) {
+		w.logVerbOverridden(jobID, "reinitialize", seen)
+		return
+	}
+
+	w.removeStaging(jobID, "reinitialize")
 	// Fresh start: discard any parts from a prior quality/gap-split attempt.
 	// Without this the stale segment rows survive the reset and muxAndFinalize
 	// would finalize the clean re-download as multi-part from the OLD part
 	// files, silently discarding the freshly-downloaded media. (AutoReinit
 	// deliberately does NOT do this — see that method.)
 	w.clearJobParts(jobID)
-	// And a single-file archive's imported chapter list (owner decision
-	// CJ-2): the re-download is a new recording whose timeline can differ
-	// from the one the list was fitted to. Dropped here, as the reset clears
-	// output_file below, and not only by the new archive's finalize
-	// (dropImportedArchiveChapters): a re-download Cancelled and then muxed
-	// by the Mux action is a re-finalize (JobContext.Refinalize), which
-	// would otherwise carry the old recording's list onto the new one.
-	if prior, err := w.db.GetJob(jobID); err == nil && prior != nil && prior.OutputFile != "" {
-		dropImportedArchiveChapters(prior.OutputFile, w.logger)
+	if priorOutput != "" {
+		dropImportedArchiveChapters(priorOutput, w.logger)
 	}
-
 	// The backlog retry budget is in memory, not a column: a fresh one too.
 	w.endBacklogStreak(jobID)
+	w.enqueueHeld(jobID)
+}
 
-	// Clear all non-input fields. auto_retry_count resets here because
-	// user-driven reinit grants the job a fresh budget; auto-recovery
-	// uses AutoReinitializeJob (sibling method) which increments instead.
-	// KEEP IN SYNC with AutoReinitializeJob below — same reset map, the
-	// only difference is the auto_retry_count value (0 vs newCount).
-	applied := w.db.UpdateJobFieldsIf(jobID, from, map[string]any{
-		"status":              database.StatusUpcoming,
-		"error":               "",
-		"park_reason":         database.ParkReasonNone,
-		"park_identity":       "",
-		"announce_found":      false, // see ResumeJob
-		"progress":            "",
-		"percent":             0,
-		"speed":               "",
-		"eta":                 "",
-		"last_video_seq":      nil,
-		"last_audio_seq":      nil,
-		"total_video_seq":     nil,
-		"total_audio_seq":     nil,
-		"chat_status":         "",
-		"total_chat_messages": nil,
-		"download_started_at": "",
-		"stream_end_time":     "",
-		"output_file":         "",
-		"filename":            "",
-		"file_size":           nil,
-		"chat_file":           "",
-		"chat_filename":       "",
-		"description_file":    "",
-		"thumbnail_file":      "",
-		"video_width":         nil,
-		"video_height":        nil,
-		"video_fps":           nil,
-		"length_seconds":      nil,
-		"join_offset_seconds": nil,
-		"live_edge_reason":    nil,
-		"selected_video_itag": nil,
-		"selected_audio_itag": nil,
-		"auto_retry_count":    0,
-		"incomplete_tail":     false,
+// beforeResetClaim runs just ahead of a reinitialize's conditional claim: a
+// test seam, to land a status change between the verb's last read and its
+// write. Production never assigns it.
+var beforeResetClaim = func(string) {}
+
+// removeStaging deletes a job's staging directory for a reset verb (what
+// names it in the warning a failure logs).
+func (w *DownloadWorker) removeStaging(jobID, what string) {
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) {
+		stagingBase = c.Paths.EffectiveStagingDir()
 	})
-	if !applied {
-		w.logVerbOverridden(jobID, "reinitialize", seen)
-		return
+	stagingDir := filepath.Join(stagingBase, jobID)
+	if err := os.RemoveAll(stagingDir); err != nil {
+		w.logger.Warn("failed to remove staging directory on "+what, "path", stagingDir, "err", err)
 	}
-	w.EnqueueJob(jobID)
 }
 
 // AutoReinitializeJob is the auto-recovery sibling of ReinitializeJob: same
@@ -2899,9 +2916,13 @@ func (w *DownloadWorker) AutoReinitializeJob(jobID string) error {
 	// it (and have the Enqueue dropped as a duplicate).
 	// An error (ErrResetPending) means nothing was applied, so no retry of
 	// the budget was spent.
-	return w.afterJobExit(jobID, string(opAutoReinitialize), true, func(seen database.JobStatus) { w.autoReinitializeNow(jobID, seen) })
+	return w.afterJobExit(jobID, string(opAutoReinitialize), true, reinitGate, func(seen database.JobStatus) { w.autoReinitializeNow(jobID, seen) })
 }
 
+// autoReinitializeNow is AutoReinitializeJob's reset: reinitializeNow's
+// order — the conditional claim first, the staging deleted only once it
+// applied — with the retry budget spent rather than renewed, and the job's
+// parts kept (see AutoReinitializeJob).
 func (w *DownloadWorker) autoReinitializeNow(jobID string, seen database.JobStatus) {
 	prev, err := w.db.GetJob(jobID)
 	if err != nil || prev == nil {
@@ -2912,63 +2933,13 @@ func (w *DownloadWorker) autoReinitializeNow(jobID string, seen database.JobStat
 		w.logVerbOverridden(jobID, "auto-reinitialize", seen)
 		return
 	}
-	newCount := prev.AutoRetryCount + 1
-
-	// Read config for staging path
-	var stagingBase string
-	w.readConfig(func(c *config.MoomboxConfig) {
-		stagingBase = c.Paths.EffectiveStagingDir()
-	})
-
-	// Delete staging directory
-	stagingDir := filepath.Join(stagingBase, jobID)
-	if err := os.RemoveAll(stagingDir); err != nil {
-		w.logger.Warn("AutoReinitializeJob: staging cleanup failed", "path", stagingDir, "err", err)
-	}
-
-	// Same field reset as ReinitializeJob, but auto_retry_count INCREMENTS.
-	// KEEP IN SYNC with ReinitializeJob above if reset fields are added.
-	applied := w.db.UpdateJobFieldsIf(jobID, seen, map[string]any{
-		"status":              database.StatusUpcoming,
-		"error":               "",
-		"park_reason":         database.ParkReasonNone,
-		"park_identity":       "",
-		"announce_found":      false, // see ResumeJob
-		"progress":            "",
-		"percent":             0,
-		"speed":               "",
-		"eta":                 "",
-		"last_video_seq":      nil,
-		"last_audio_seq":      nil,
-		"total_video_seq":     nil,
-		"total_audio_seq":     nil,
-		"chat_status":         "",
-		"total_chat_messages": nil,
-		"download_started_at": "",
-		"stream_end_time":     "",
-		"output_file":         "",
-		"filename":            "",
-		"file_size":           nil,
-		"chat_file":           "",
-		"chat_filename":       "",
-		"description_file":    "",
-		"thumbnail_file":      "",
-		"video_width":         nil,
-		"video_height":        nil,
-		"video_fps":           nil,
-		"length_seconds":      nil,
-		"join_offset_seconds": nil,
-		"live_edge_reason":    nil,
-		"selected_video_itag": nil,
-		"selected_audio_itag": nil,
-		"auto_retry_count":    newCount,
-		"incomplete_tail":     false,
-	})
-	if !applied {
+	beforeResetClaim(jobID)
+	if !w.db.UpdateJobFieldsIf(jobID, seen, reinitResetFields(prev.AutoRetryCount+1)) {
 		w.logVerbOverridden(jobID, "auto-reinitialize", seen)
 		return
 	}
-	w.EnqueueJob(jobID)
+	w.removeStaging(jobID, "auto-reinitialize")
+	w.enqueueHeld(jobID)
 }
 
 // Asides reports the set-aside recordings in a job's staging directory, and
@@ -2997,13 +2968,26 @@ func (w *DownloadWorker) Asides(jobID string) (AsideReport, error) {
 // MuxJob force-muxes a cancelled/errored job's staging files.
 // Bypasses the download queue — runs directly in a wg-tracked goroutine.
 func (w *DownloadWorker) MuxJob(jobID string) error {
-	return w.muxJob(jobID, func(err error) string { return err.Error() })
+	return w.muxJob(jobID, muxActionFailure, false)
 }
+
+// muxActionFailure is the error the Mux action's failure leaves on the row:
+// the mux error itself.
+func muxActionFailure(err error) string { return err.Error() }
 
 // muxJob is MuxJob with the error a failed mux leaves on the row chosen by
 // the caller: the Mux action's is the mux error itself, the automatic mux of
 // an ended Twitch broadcast says it was automatic (autoMuxFailure).
-func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error {
+//
+// bootRemux is the boot's re-mux of a row a restart interrupted while it was
+// Muxing (enqueueExistingJobs, muxOnRestart): a download that completed, not
+// the operator muxing whatever was captured (JobContext.CapturedMux), and the
+// one caller that muxes a row already Muxing. Every other caller muxes a row
+// the Mux action is offered on (jobverbs.MuxableStatus), and the Muxing write
+// applies only while the row still reads one of those — so a Mux decided on
+// a row a Resume or a Reinitialize has moved on since is refused with
+// ErrNotAllowed instead of written over it.
+func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRemux bool) error {
 	// Read config for staging check
 	var stagingBase string
 	w.readConfig(func(c *config.MoomboxConfig) {
@@ -3045,22 +3029,40 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 		return fmt.Errorf("%w (%s)", ErrStagingBusy, why)
 	}
 
-	// Read before the Muxing write below overwrites it: a row already Muxing
-	// is a boot re-mux of a download that completed; anything else is the
-	// operator muxing whatever was captured (JobContext.CapturedMux).
-	capturedMux := true
+	// A boot re-mux is of a download that completed; anything else is the
+	// operator (or the automatic Twitch mux) muxing whatever was captured
+	// (JobContext.CapturedMux). Passed by the caller rather than read off a
+	// Muxing row, which said the same only while no other caller could reach
+	// one. prior is read before the Muxing write below overwrites it.
+	capturedMux := !bootRemux
 	prior, _ := w.db.GetJob(jobID)
-	if prior != nil && prior.Status == database.StatusMuxing {
-		capturedMux = false
+	sources := jobverbs.MuxableStatuses()
+	if bootRemux {
+		sources = append(sources, database.StatusMuxing)
+	}
+	if prior != nil && !slices.Contains(sources, prior.Status) {
+		release()
+		return &NotAllowedError{Verb: "muxed", Status: prior.Status}
 	}
 	// A mux of the staging ends what an unconfirmed-end marker was waiting
 	// for, whoever started it: cleared here, an operator's Mux that fails
 	// is not followed by an automatic one when the channel next reads
 	// offline (D-T4). On every other row the value is already empty.
-	w.db.UpdateJobFields(jobID, map[string]any{
+	// Conditional on the sources: a Resume or a Reinitialize that moved the
+	// row on since it was read (its run queued, not yet registered) is not
+	// written over — refused here, before anything is spawned, the row and
+	// the staging are left as they are.
+	if !w.db.UpdateJobFieldsIfIn(jobID, sources, map[string]any{
 		"status":      database.StatusMuxing,
 		"park_reason": database.ParkReasonNone,
-	})
+	}) {
+		release()
+		now := database.JobStatus("")
+		if cur, err := w.db.GetJob(jobID); err == nil && cur != nil {
+			now = cur.Status
+		}
+		return &NotAllowedError{Verb: "muxed", Status: now}
+	}
 	// failed is the Error write this Mux's failure paths make. A Mux of a
 	// Cancelled row (or of one whose earlier Mux after a Cancel failed) puts
 	// ParkReasonMuxAfterCancel back with it: the Error status replaces the
@@ -3084,9 +3086,9 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 				// the staging cleanup) turned the archive into an Error, and
 				// so did an operator's Cancel that landed on the Muxing row.
 				// The Muxing write above came before this goroutine, so
-				// whichever terminal status the row holds landed during this
-				// mux and stands.
-				w.db.UpdateJobFieldsUnlessTerminal(jobID, failed(fmt.Sprintf("internal panic: %v", r)))
+				// whatever the row holds besides Muxing landed during this mux
+				// and stands.
+				w.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, failed(fmt.Sprintf("internal panic: %v", r)))
 			}
 		}()
 
@@ -3120,7 +3122,7 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 		job, err := w.db.GetJob(jobID)
 		if err != nil {
 			w.logger.Error("MuxJob: get job failed", "jobID", jobID, "err", err)
-			w.db.UpdateJobFields(jobID, failed(fmt.Sprintf("mux setup failed: %v", err)))
+			w.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, failed(fmt.Sprintf("mux setup failed: %v", err)))
 			return
 		}
 		if job == nil {
@@ -3187,7 +3189,9 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 				return
 			}
 			w.logger.Error("MuxJob failed", "jobID", jobID, "err", err)
-			w.db.UpdateJobFields(jobID, failed(failure(err)))
+			// Only over this mux's own Muxing: an outcome that landed
+			// meanwhile stands.
+			w.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, failed(failure(err)))
 			return
 		}
 

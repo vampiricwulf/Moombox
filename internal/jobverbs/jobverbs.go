@@ -16,21 +16,28 @@
 // (CORE-9). Each predicate here is the cheap half its probe narrows.
 package jobverbs
 
-import "github.com/vampiricwulf/Moombox/internal/database"
+import (
+	"slices"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
+)
 
 // Cancellable reports whether a job in status s can be cancelled: every
 // status a job is still on its way through — waiting (Queued, Upcoming),
 // recording (Live, Downloading), muxing, or parked for credentials. Never an
 // outcome (Finished, Error, Cancelled). A positive list, so a status added
 // later is not cancellable until it is named here (utils.js CANCEL_STATUSES).
-func Cancellable(s database.JobStatus) bool {
-	switch s {
-	case database.StatusDownloading, database.StatusLive, database.StatusUpcoming,
-		database.StatusQueued, database.StatusMuxing, database.StatusCookies:
-		return true
-	}
-	return false
+func Cancellable(s database.JobStatus) bool { return slices.Contains(cancellable, s) }
+
+var cancellable = []database.JobStatus{
+	database.StatusDownloading, database.StatusLive, database.StatusUpcoming,
+	database.StatusQueued, database.StatusMuxing, database.StatusCookies,
 }
+
+// CancellableStatuses is Cancellable as a list, for a conditional write
+// (database.UpdateJobFieldsIfIn) that must apply only while the job is still
+// cancellable. A fresh copy.
+func CancellableStatuses() []database.JobStatus { return slices.Clone(cancellable) }
 
 // ResumableStatus reports whether a job in status s can be resumed — its
 // recording continued from its staging: one that failed, was cancelled or was
@@ -60,13 +67,9 @@ func ResumeSupported(platform string) bool { return platform == "youtube" }
 // started over: one that failed, was cancelled or was parked. Never a job
 // that is running, queued or Finished — not reset under its run or over its
 // archive. utils.js REINIT_STATUSES.
-func ReinitializableStatus(s database.JobStatus) bool {
-	switch s {
-	case database.StatusError, database.StatusCancelled, database.StatusCookies:
-		return true
-	}
-	return false
-}
+func ReinitializableStatus(s database.JobStatus) bool { return slices.Contains(reinitializable, s) }
+
+var reinitializable = []database.JobStatus{database.StatusError, database.StatusCancelled, database.StatusCookies}
 
 // MuxableStatus reports whether the Mux action — mux what the job's staging
 // holds — is offered and accepted for a job in status s: a failed or
@@ -74,13 +77,13 @@ func ReinitializableStatus(s database.JobStatus) bool {
 // one whose finalize could not mux a part (MuxNeedsUnmuxedParts). utils.js
 // MUX_STATUSES holds the first two; job-details.js names Finished beside it
 // with the unmuxed-parts fact.
-func MuxableStatus(s database.JobStatus) bool {
-	switch s {
-	case database.StatusError, database.StatusCancelled, database.StatusFinished:
-		return true
-	}
-	return false
-}
+func MuxableStatus(s database.JobStatus) bool { return slices.Contains(muxable, s) }
+
+var muxable = []database.JobStatus{database.StatusError, database.StatusCancelled, database.StatusFinished}
+
+// MuxableStatuses is MuxableStatus as a list, for the Mux's conditional
+// Muxing write. A fresh copy.
+func MuxableStatuses() []database.JobStatus { return slices.Clone(muxable) }
 
 // MuxNeedsUnmuxedParts reports whether a Mux of a job in status s needs the
 // unmuxed-part fact (worker.HasUnmuxedParts) besides staged media: a Finished

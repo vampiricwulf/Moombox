@@ -256,7 +256,7 @@ func TestMuxJobPanicLeavesAnOutcomeStanding(t *testing.T) {
 			staging, _ := muxFixtureJob(t, w, db, id)
 			writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 2)
 
-			if err := w.MuxJob(id); err != nil {
+			if err := w.restartMux(id); err != nil {
 				t.Fatalf("MuxJob: %v", err)
 			}
 			w.wg.Wait() // the mux's goroutine, recover included, has returned

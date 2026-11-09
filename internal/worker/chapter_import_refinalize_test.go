@@ -113,7 +113,10 @@ func TestReinitializeDropsAnImportedChapterList(t *testing.T) {
 	if err := utils.WriteImportedChaptersSidecar(sidecar, []utils.Chapter{{StartMs: 0, EndMs: 5000, Title: "Intro"}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	db.UpdateJobFields("j-reinit", map[string]any{"status": database.StatusFinished, "output_file": archive})
+	// Error: a Reinitialize is offered on a failed row, never on a Finished
+	// one (jobverbs.ReinitializableStatus); one that failed after an archive
+	// was written still names it.
+	db.UpdateJobFields("j-reinit", map[string]any{"status": database.StatusError, "output_file": archive})
 
 	w.ReinitializeJob("j-reinit")
 

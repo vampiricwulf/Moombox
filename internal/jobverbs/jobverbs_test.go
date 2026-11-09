@@ -59,3 +59,28 @@ func TestVerbStatusTable(t *testing.T) {
 		t.Error("ResumeSupported: want youtube only")
 	}
 }
+
+// TestStatusListsAreThePredicates: the lists the conditional writes use hold
+// exactly the statuses their predicates accept, and a caller cannot change
+// them through the copy it is handed.
+func TestStatusListsAreThePredicates(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		list func() []database.JobStatus
+		pred func(database.JobStatus) bool
+	}{
+		{"cancellable", CancellableStatuses, Cancellable},
+		{"muxable", MuxableStatuses, MuxableStatus},
+	} {
+		l := tc.list()
+		for _, s := range l {
+			if !tc.pred(s) {
+				t.Errorf("%s list holds %s, which its predicate refuses", tc.name, s)
+			}
+		}
+		l[0] = "Bogus"
+		if tc.pred("Bogus") || tc.list()[0] == "Bogus" {
+			t.Errorf("%s: the list handed out is the predicate's own", tc.name)
+		}
+	}
+}

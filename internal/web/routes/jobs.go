@@ -1203,15 +1203,16 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		if w != nil {
-			if err := w.MuxJob(jobID); err != nil {
+			if err := muxJob(w, jobID); err != nil {
 				// ErrStagingBusy is a conflict, not a fault: a set-aside
 				// recovery holds this job's staging, or the job's last run
 				// is still stopping, and the operator can simply try again
-				// in a moment. Error→status mapping only —
+				// in a moment. So is ErrNotAllowed: the row moved to a status
+				// Mux is not offered on since the read above. Error→status mapping only —
 				// the status and HasSegmentFiles gates above decide what is
 				// muxable.
 				status := http.StatusInternalServerError
-				if errors.Is(err, worker.ErrStagingBusy) {
+				if errors.Is(err, worker.ErrStagingBusy) || errors.Is(err, worker.ErrNotAllowed) {
 					status = http.StatusConflict
 				}
 				jsonError(rw, err.Error(), status)
@@ -1572,14 +1573,15 @@ func refuseWhileStagingClaimed(rw http.ResponseWriter, w *worker.DownloadWorker,
 // refuseVerbError answers a worker verb's refusal and reports true when there
 // was one: 409 with the worker's text for ErrResetPending (a different verb
 // already waits on the job, owner ruling R-A3 — "reinitialize already
-// pending"), 404 for ErrJobNotFound (the row went between the route's read
+// pending") and for ErrNotAllowed (the row moved, between the route's read
+// and the worker's, to a status the verb is not offered on), 404 for ErrJobNotFound (the row went between the route's read
 // and the worker's), 500 for anything else. ErrAlreadyPending is no refusal:
 // the same verb is already on its way, and a repeat is a quiet success (R-A3).
 func refuseVerbError(rw http.ResponseWriter, err error) bool {
 	switch {
 	case err == nil, errors.Is(err, worker.ErrAlreadyPending):
 		return false
-	case errors.Is(err, worker.ErrResetPending):
+	case errors.Is(err, worker.ErrResetPending), errors.Is(err, worker.ErrNotAllowed):
 		jsonError(rw, err.Error(), http.StatusConflict)
 	case errors.Is(err, worker.ErrJobNotFound):
 		jsonError(rw, "job not found", http.StatusNotFound)
@@ -1589,12 +1591,13 @@ func refuseVerbError(rw http.ResponseWriter, err error) bool {
 	return true
 }
 
-// resumeJob and reinitializeJob are the routes' calls into the worker's
+// resumeJob, reinitializeJob and muxJob are the routes' calls into the worker's
 // verbs; variables so a test can answer the refusals a real worker gives only
 // mid-wait.
 var (
 	resumeJob       = func(w *worker.DownloadWorker, jobID string) error { return w.ResumeJob(jobID) }
 	reinitializeJob = func(w *worker.DownloadWorker, jobID string) error { return w.ReinitializeJob(jobID) }
+	muxJob          = func(w *worker.DownloadWorker, jobID string) error { return w.MuxJob(jobID) }
 )
 
 // cancelJob is the cancel route's write: the worker's CancelJob, which also
