@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"syscall"
 	"unsafe"
+
+	"github.com/vampiricwulf/Moombox/internal/updater"
 )
 
 // createNoWindow prevents a console window from appearing when spawning
@@ -135,12 +137,10 @@ var launcherWarnf = func(format string, args ...any) {
 // (clearSupersededFailureMarker), after which `~` is just the image that
 // update replaced and this sweep takes it again.
 func cleanupOrphans(exePath string) {
-	for _, marker := range []string{exePath + ".update-failed", exePath + ".update-broken"} {
-		if _, err := os.Stat(marker); err == nil {
-			return
-		}
+	if len(updater.FailureMarkers(exePath)) > 0 {
+		return
 	}
-	os.Remove(exePath + "~")
+	os.Remove(exePath + updater.LauncherImageSuffix)
 }
 
 // handleUpdateRestart runs after the child exits with exitCodeRestart.
@@ -168,11 +168,11 @@ func cleanupOrphans(exePath string) {
 // .old, the ~ file is still there, and it stands for nothing this update can
 // roll back to.
 func handleUpdateRestart(exePath string) string {
-	oldPath := exePath + ".old"
+	oldPath := exePath + updater.OldSuffix
 	if _, statErr := os.Stat(oldPath); statErr != nil {
 		return ""
 	}
-	if err := os.Rename(oldPath, exePath+"~"); err != nil {
+	if err := os.Rename(oldPath, exePath+updater.LauncherImageSuffix); err != nil {
 		// REPORTED, not discarded. A stale ~ file on its own does NOT fail
 		// this: Go's os.Rename on Windows is MoveFileEx with
 		// MOVEFILE_REPLACE_EXISTING, so an ordinary ~ file is silently
@@ -185,14 +185,14 @@ func handleUpdateRestart(exePath string) string {
 		// update's artifact for exactly that reason. This line is how the
 		// operator learns the name shuffle did not happen.
 		launcherWarnf("warning: could not rename %s to %s (%v) — the previous binary stays at .old and remains the rollback target\n",
-			oldPath, exePath+"~", err)
+			oldPath, exePath+updater.LauncherImageSuffix, err)
 		// Still an update: a .old existed, so the launcher's one-shot
 		// post-update failure window must arm (launcher.go postUpdateBoot).
 		// A failed rename changes which file is the artifact, never whether
 		// there was an update.
 		return oldPath
 	}
-	return exePath + "~"
+	return exePath + updater.LauncherImageSuffix
 }
 
 // keepAsideByLink always declines on Windows, where attemptAutoRollback moves
@@ -227,12 +227,10 @@ func deferDeleteOldLauncher(exePath string) {
 	// relaunch) must leave it alone, not just startup's cleanupOrphans.
 	// Without this, relaunching after a failed update deleted the backup
 	// on the way out while the marker still said "restore from it".
-	for _, marker := range []string{exePath + ".update-failed", exePath + ".update-broken"} {
-		if _, err := os.Stat(marker); err == nil {
-			return
-		}
+	if len(updater.FailureMarkers(exePath)) > 0 {
+		return
 	}
-	oldPath := exePath + "~"
+	oldPath := exePath + updater.LauncherImageSuffix
 	if _, err := os.Stat(oldPath); err != nil {
 		return // no .exe~ file to clean up
 	}

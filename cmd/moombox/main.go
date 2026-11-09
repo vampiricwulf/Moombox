@@ -17,6 +17,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
+	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 )
 
@@ -598,7 +599,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		// a single-marker stamp would alternate re-announcements forever
 		// when both markers exist (each boot sees the other as unseen).
 		var stamps []string
-		for _, marker := range []string{exeSelf + ".update-broken", exeSelf + ".update-failed"} {
+		// Broken, then failed: updater.FailureMarkers' order, which the
+		// stamp below depends on.
+		for _, marker := range updater.FailureMarkers(exeSelf) {
 			fi, statErr := os.Stat(marker)
 			if statErr != nil {
 				continue
@@ -612,7 +615,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			if len(content) > 600 {
 				content = content[:600] // markers are ASCII; plain byte cut is safe
 			}
-			details := string(content) + sweptFailedReleaseNote(string(content), exeSelf+failedBinarySuffix)
+			details := string(content) + sweptFailedReleaseNote(string(content), exeSelf+updater.FailedBinarySuffix)
 			log.Error("previous self-update failure marker present — manual attention needed",
 				slog.String("marker", marker), slog.String("details", details))
 			notifyMgr.Send("Previous Update Failed",

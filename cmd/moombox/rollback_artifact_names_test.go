@@ -6,24 +6,23 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/updater"
 )
 
 // TestDowngradeRefusalNamesTheLauncherArtifacts is C L17's drift guard.
 //
 // The schema-downgrade refusal in internal/database names the two files the
-// launcher's automatic rollback leaves behind. internal/database cannot
-// import them: the launcher lives in package main, which nothing can import,
-// and internal/database imports nothing internal by design. So the suffixes
-// are duplicated there, and this test — in the ONE package that can see both
-// sides — asserts they still agree.
+// launcher's automatic rollback leaves behind. internal/updater owns their
+// names (FailedBinarySuffix, UpdateFailedMarkerSuffix), but internal/database
+// imports nothing internal by design, so the suffixes are mirrored there, and
+// this test — in a package that can see both sides — asserts they agree.
 //
-// The .failed half is a constant comparison against the launcher's own
-// failedBinarySuffix. The marker half is BEHAVIOURAL rather than a second
-// literal: writeAutoRollbackMarker spells ".update-failed" inline and this arc
-// may not touch a launcher file, so the test makes the launcher write a real
-// marker into a temp directory and checks that the database's suffix names
-// the file that appeared. A literal-vs-literal comparison would have drifted
-// with the launcher; this cannot.
+// The .failed half is a constant comparison against
+// updater.FailedBinarySuffix, which attemptAutoRollback uses. The marker half
+// is BEHAVIOURAL rather than a second comparison: the test makes the launcher
+// write a real marker into a temp directory and checks that the database's
+// suffix names the file that appeared, and that it is
+// updater.UpdateFailedMarkerSuffix.
 //
 // MUTANT: change either constant in internal/database/migrations.go — say
 // ".failed" -> ".broken", or ".update-failed" -> ".update-broken" (the name of
@@ -37,10 +36,13 @@ import (
 func TestDowngradeRefusalNamesTheLauncherArtifacts(t *testing.T) {
 	failed, marker := database.RollbackArtifactSuffixes()
 
-	if failed != failedBinarySuffix {
+	if failed != updater.FailedBinarySuffix {
 		t.Errorf("internal/database names the kept binary %q, but attemptAutoRollback writes %q — "+
 			"the refusal message sends the operator to a file that is not there",
-			failed, failedBinarySuffix)
+			failed, updater.FailedBinarySuffix)
+	}
+	if marker != updater.UpdateFailedMarkerSuffix {
+		t.Errorf("internal/database names the rollback marker %q, updater %q", marker, updater.UpdateFailedMarkerSuffix)
 	}
 
 	// writeAutoRollbackMarker only writes beside exePath; the binary itself

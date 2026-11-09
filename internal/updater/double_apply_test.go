@@ -78,7 +78,7 @@ func TestAnApplyOverABrokenSwapIsRefused(t *testing.T) {
 	if err := os.WriteFile(exePath+".new", []byte("staged binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(exePath+brokenUpdateSuffix, []byte("manual recovery required"), 0o644); err != nil {
+	if err := os.WriteFile(exePath+UpdateBrokenMarkerSuffix, []byte("manual recovery required"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -93,7 +93,7 @@ func TestAnApplyOverABrokenSwapIsRefused(t *testing.T) {
 	}
 
 	// Without the marker, an empty exe path is refused all the same.
-	if err := os.Remove(exePath + brokenUpdateSuffix); err != nil {
+	if err := os.Remove(exePath + UpdateBrokenMarkerSuffix); err != nil {
 		t.Fatal(err)
 	}
 	if err := u.ApplyUpdate(context.Background(), swapRelease(srv)); err == nil {
@@ -111,17 +111,17 @@ func TestAnApplyOverABrokenSwapIsRefused(t *testing.T) {
 // marker and the empty exe path together, so the missing-exe check alone
 // satisfied it and deleting the marker check survived the whole package.
 //
-// Mutant: drop the os.Stat(u.exePath + brokenUpdateSuffix) refusal — the
+// Mutant: drop the os.Stat(u.exePath + UpdateBrokenMarkerSuffix) refusal — the
 // apply goes ahead and the exe holds the new binary.
 func TestABrokenSwapMarkerAloneRefusesAnApply(t *testing.T) {
 	srv := swapTestServer(t)
 	u, exePath := newTestUpdater(t, "1.0.0", srv, nil)
-	if err := os.WriteFile(exePath+brokenUpdateSuffix, []byte("manual recovery required"), 0o644); err != nil {
+	if err := os.WriteFile(exePath+UpdateBrokenMarkerSuffix, []byte("manual recovery required"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	err := u.ApplyUpdate(context.Background(), swapRelease(srv))
-	if err == nil || !strings.Contains(err.Error(), brokenUpdateSuffix) {
+	if err == nil || !strings.Contains(err.Error(), UpdateBrokenMarkerSuffix) {
 		t.Fatalf("ApplyUpdate = %v, want a refusal naming the marker", err)
 	}
 	if got, _ := os.ReadFile(exePath); string(got) != "current binary" {

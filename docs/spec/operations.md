@@ -465,7 +465,7 @@ When the crash file cannot be moved there (on Windows, a viewer, a scanner or th
 When that rename cannot happen, the surviving `.old` is the freshest previous binary and the `~` file is
 one version older still; `handleUpdateRestart` names `.old` as the update's artifact for exactly that
 reason, and the `~` file never stands in for it, even after the boot's milestone has swept it. The `~` file is
-swept by the next launcher start once neither failed-update marker (`.update-failed`, `.update-broken`)
+swept by the next launcher start once neither failed-update marker (`.update-failed`, `.update-broken`; `updater.FailureMarkers`, the one presence check the launcher, the rollback reader and the boot's announcement share, broken first for the announcement's dedupe stamp — the names are `internal/updater` constants, byte-identical across versions, `internal/updater/artifacts.go`)
 remains (`cleanupOrphans`, `cmd/moombox/launcher_windows.go`) — or by a healthy boot's `CleanupOldBinary`,
 whenever no running launcher still holds it. An `.update-failed` marker does not stand forever: once a
 LATER update has landed, its boot deletes the marker (`clearSupersededFailureMarker`, step 6 above), and

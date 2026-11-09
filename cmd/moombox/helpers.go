@@ -453,7 +453,7 @@ func clearSupersededFailureMarker(exePath, pendingPath, pendingTag, currentVersi
 	if pendingTag == "" || pendingTag != "v"+currentVersion {
 		return "", nil
 	}
-	marker := exePath + ".update-failed"
+	marker := exePath + updater.UpdateFailedMarkerSuffix
 	mi, err := os.Stat(marker)
 	if err != nil {
 		return "", nil
@@ -477,12 +477,7 @@ func rolledBackRelease(exePath, currentVersion string) string {
 	if err != nil {
 		return ""
 	}
-	marker := false
-	for _, m := range []string{exePath + ".update-broken", exePath + ".update-failed"} {
-		if _, err := os.Stat(m); err == nil {
-			marker = true
-		}
-	}
+	marker := len(updater.FailureMarkers(exePath)) > 0
 	tag := strings.TrimSpace(string(raw))
 	if !shouldSkipPendingVersion(tag, currentVersion, marker) {
 		return ""
@@ -543,7 +538,7 @@ func resolveUpdateBreadcrumb(store *config.Store, exePath, currentVersion, rolle
 	// landed came AFTER an earlier failure's marker.
 	if cleared, clrErr := clearSupersededFailureMarker(exePath, pendingPath, pendingTag, currentVersion); clrErr != nil {
 		log.Warn("failed to remove a failed-update marker a later update superseded",
-			slog.String("marker", exePath+".update-failed"), slog.String("error", clrErr.Error()))
+			slog.String("marker", exePath+updater.UpdateFailedMarkerSuffix), slog.String("error", clrErr.Error()))
 	} else if cleared != "" {
 		log.Info("removed a failed-update marker: a later update has applied successfully, so its rollback instructions are stale",
 			slog.String("marker", cleared), slog.String("version", pendingTag))

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/updater"
 )
 
 // TestAttemptAutoRollbackRestoresPreviousBinary pins the happy path: with a
@@ -104,18 +106,18 @@ func TestAutoRollbackKeepsTheFailedBinary(t *testing.T) {
 	if string(restored) != "PREVIOUS" {
 		t.Errorf("plain name holds %q, want the restored previous binary", restored)
 	}
-	failed, err := os.ReadFile(exePath + failedBinarySuffix)
+	failed, err := os.ReadFile(exePath + updater.FailedBinarySuffix)
 	if err != nil {
-		t.Fatalf("the broken binary must survive as %s: %v", failedBinarySuffix, err)
+		t.Fatalf("the broken binary must survive as %s: %v", updater.FailedBinarySuffix, err)
 	}
 	if string(failed) != "BROKEN" {
-		t.Errorf("%s holds %q, want the broken binary", failedBinarySuffix, failed)
+		t.Errorf("%s holds %q, want the broken binary", updater.FailedBinarySuffix, failed)
 	}
 	marker, err := os.ReadFile(exePath + ".update-failed")
 	if err != nil {
 		t.Fatalf("read marker: %v", err)
 	}
-	if !strings.Contains(string(marker), exePath+failedBinarySuffix) {
+	if !strings.Contains(string(marker), exePath+updater.FailedBinarySuffix) {
 		t.Errorf("the marker must name the kept binary by path, got:\n%s", marker)
 	}
 }
@@ -131,7 +133,7 @@ func TestAutoRollbackReplacesAnOlderFailedArtifact(t *testing.T) {
 	exePath := filepath.Join(dir, "moombox-test.exe")
 	for _, f := range []struct{ path, body string }{
 		{exePath, "BROKEN-2"},
-		{exePath + failedBinarySuffix, "BROKEN-1"},
+		{exePath + updater.FailedBinarySuffix, "BROKEN-1"},
 		{exePath + ".old", "PREVIOUS"},
 	} {
 		if err := os.WriteFile(f.path, []byte(f.body), 0o755); err != nil {
@@ -141,12 +143,12 @@ func TestAutoRollbackReplacesAnOlderFailedArtifact(t *testing.T) {
 	if !attemptAutoRollback(exePath, exePath+".old", 1) {
 		t.Fatal("attemptAutoRollback must succeed")
 	}
-	failed, err := os.ReadFile(exePath + failedBinarySuffix)
+	failed, err := os.ReadFile(exePath + updater.FailedBinarySuffix)
 	if err != nil {
-		t.Fatalf("read %s: %v", failedBinarySuffix, err)
+		t.Fatalf("read %s: %v", updater.FailedBinarySuffix, err)
 	}
 	if string(failed) != "BROKEN-2" {
-		t.Errorf("%s holds %q, want the newest broken binary", failedBinarySuffix, failed)
+		t.Errorf("%s holds %q, want the newest broken binary", updater.FailedBinarySuffix, failed)
 	}
 }
 
@@ -184,7 +186,7 @@ func TestAutoRollbackFallsBackToRemovingTheFailedBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	// An undeletable destination: a directory that is not empty.
-	blocked := exePath + failedBinarySuffix
+	blocked := exePath + updater.FailedBinarySuffix
 	if err := os.Mkdir(blocked, 0o755); err != nil {
 		t.Fatal(err)
 	}
