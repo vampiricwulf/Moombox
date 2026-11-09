@@ -157,3 +157,42 @@ func TestInitAsksForTheHoldsAgain(t *testing.T) {
 		t.Errorf("hook calls = %d, want 1", calls)
 	}
 }
+
+// TestUpcomingVODSaysAwaitingProcessing: an Upcoming row that is a VOD — an
+// admitted backlog row (no IsVod yet) or one stream processing classified —
+// has no stream to wait for, and the details pane says "Awaiting processing"
+// as the dashboard's row and dialog do (jobstate.AwaitingProcessing, owner
+// ruling R-D1); a wait line it is in wins, and a broadcast keeps its line.
+//
+// Mutants: the awaiting arm dropped (the backlog row shows no Progress line);
+// the wait-line check dropped (the slot wait is hidden).
+func TestUpcomingVODSaysAwaitingProcessing(t *testing.T) {
+	ch := "UCx"
+	slot := jobstate.WaitLine("Waiting for a download slot", "3m")
+	for _, tc := range []struct {
+		name string
+		job  *database.Job
+		want string
+	}{
+		{"admitted backlog row", &database.Job{ID: "b", Platform: "youtube", Status: database.StatusUpcoming, QueuePriority: 1, ChannelID: &ch}, "Awaiting processing"},
+		{"classified VOD", &database.Job{ID: "v", Platform: "youtube", Status: database.StatusUpcoming, IsVod: true}, "Awaiting processing"},
+		{"VOD in a slot wait", &database.Job{ID: "w", Platform: "youtube", Status: database.StatusUpcoming, IsVod: true, Progress: slot}, slot},
+		{"Twitch broadcast", &database.Job{ID: "t", Platform: "twitch", Status: database.StatusUpcoming, Progress: "Waiting for stream..."}, "Waiting for stream..."},
+		{"pasted stream", &database.Job{ID: "p", Platform: "youtube", Status: database.StatusUpcoming}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := NewApp()
+			a.details.SetSize(120, 40)
+			a.details.SetJob(tc.job)
+			var got string
+			for _, r := range a.details.rows {
+				if r.kind == rowField && r.label == "Progress" {
+					got = r.value
+				}
+			}
+			if got != tc.want {
+				t.Errorf("details Progress = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -29,6 +29,11 @@ type jobStateParity struct {
 		Line string `json:"line"`
 		Want bool   `json:"want"`
 	} `json:"waitLines"`
+	AwaitingProcessing []struct {
+		Name string          `json:"name"`
+		Job  json.RawMessage `json:"job"`
+		Want bool            `json:"want"`
+	} `json:"awaitingProcessing"`
 	QueuedHolds []struct {
 		Name  string                  `json:"name"`
 		Holds jobstate.AdmissionHolds `json:"holds"`
@@ -193,5 +198,39 @@ func TestCookieBadgePrecedenceMatchesTheDashboard(t *testing.T) {
 	}
 	if strings.Join(js, ",") != strings.Join(tui.CookieBadgePrecedence, ",") {
 		t.Errorf("utils.js COOKIE_BADGE_PRECEDENCE = %v, tui.CookieBadgePrecedence = %v", js, tui.CookieBadgePrecedence)
+	}
+}
+
+// TestAwaitingProcessingParity runs jobstate.AwaitingProcessing over the
+// rows the dashboard's isAwaitingProcessing runs over (owner ruling R-D1),
+// and pins the text the dashboard's formatProgress shows for such a row to
+// jobstate.AwaitingProcessingText, the TUI details pane's line.
+//
+// Mutants: a case's want edited; the text edited in app.js only.
+func TestAwaitingProcessingParity(t *testing.T) {
+	p := loadJobStateParity(t)
+	if len(p.AwaitingProcessing) < 6 {
+		t.Fatalf("parsed %d awaitingProcessing cases, want the table", len(p.AwaitingProcessing))
+	}
+	for _, c := range p.AwaitingProcessing {
+		var job database.Job
+		if err := json.Unmarshal(c.Job, &job); err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		if got := jobstate.AwaitingProcessing(&job); got != c.Want {
+			t.Errorf("%s: AwaitingProcessing = %v, want %v", c.Name, got, c.Want)
+		}
+	}
+	if jobstate.AwaitingProcessing(nil) {
+		t.Error("AwaitingProcessing(nil) = true")
+	}
+	const appFile = "../../web/public/app.js"
+	src, err := os.ReadFile(appFile)
+	if err != nil {
+		t.Fatalf("read %s: %v", appFile, err)
+	}
+	want := `if (isAwaitingProcessing(job)) return "` + jobstate.AwaitingProcessingText + `";`
+	if !strings.Contains(string(src), want) {
+		t.Errorf("app.js formatProgress does not say %q for an awaiting-processing row", jobstate.AwaitingProcessingText)
 	}
 }

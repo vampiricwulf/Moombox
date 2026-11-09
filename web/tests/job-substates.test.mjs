@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
-  pendingAutoAction, pendingAutoActionText, reinitializeDeletesText, sumReinitializePreviews, isWaitLine,
+  pendingAutoAction, pendingAutoActionText, reinitializeDeletesText, sumReinitializePreviews, isWaitLine, isAwaitingProcessing,
   queuedHold, queuedHoldText, diskGaugeLevel,
 } from "../public/modules/utils.js";
 
@@ -118,6 +118,18 @@ test("isWaitLine answers the shared table as jobstate.IsWaitLine does", () => {
   assert.ok(PARITY.waitLines.length >= 8);
   for (const c of PARITY.waitLines) assert.equal(isWaitLine(c.line), c.want, JSON.stringify(c.line));
   assert.equal(isWaitLine(undefined), false);
+});
+
+// The Go twin is jobstate.AwaitingProcessing (TestAwaitingProcessingParity),
+// which the TUI's details pane reads.
+//
+// Mutants: the channel check dropped (priority 1 alone); isVod ignored.
+test("isAwaitingProcessing answers the shared table as jobstate does", () => {
+  assert.ok(PARITY.awaitingProcessing.length >= 6);
+  for (const c of PARITY.awaitingProcessing) {
+    assert.equal(isAwaitingProcessing(c.job), c.want, c.name);
+  }
+  assert.equal(isAwaitingProcessing(null), false);
 });
 
 const upcoming = (over = {}) => ({

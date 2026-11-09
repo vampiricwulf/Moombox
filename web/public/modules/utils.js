@@ -1108,7 +1108,9 @@ export function isWaitLine(s) {
  * (queue_priority 1 of a channel — worker.CookieResumeStatus's rule) the
  * archive-slots scheduler admitted, whose isVod is written only once its
  * processing starts. Such a row has no stream to wait for, and read
- * "Waiting for stream..." (owner ruling R-D1).
+ * "Waiting for stream..." (owner ruling R-D1). jobstate.AwaitingProcessing
+ * is the Go twin the TUI's details pane reads; cmd/moombox's job-state parity
+ * test runs both over the same table.
  * @param {object} job
  * @returns {boolean}
  */

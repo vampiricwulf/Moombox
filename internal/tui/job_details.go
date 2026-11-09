@@ -645,6 +645,12 @@ func (m *JobDetailsModel) buildRows() {
 			}
 		}
 
+		// An Upcoming VOD with no wait up has no stream to wait for: it
+		// reads "Awaiting processing", as the dashboard's row and dialog do
+		// (jobstate.AwaitingProcessing, owner ruling R-D1).
+		if j.Status == database.StatusUpcoming && !jobstate.IsWaitLine(progress) && jobstate.AwaitingProcessing(j) {
+			progress = jobstate.AwaitingProcessingText
+		}
 		if progress != "" {
 			m.addField("Progress", progress)
 		}

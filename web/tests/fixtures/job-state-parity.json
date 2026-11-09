@@ -1,5 +1,5 @@
 {
-  "_comment": "One table, two implementations: cmd/moombox/job_state_parity_test.go (TestPendingAutoActionParity, TestWaitLineParity, TestQueuedHoldParity) runs the Go side (internal/jobstate) and web/tests/job-substates.test.mjs the dashboard's (utils.js). Jobs are wire-shaped (the job JSON).",
+  "_comment": "One table, two implementations: cmd/moombox/job_state_parity_test.go (TestPendingAutoActionParity, TestWaitLineParity, TestAwaitingProcessingParity, TestQueuedHoldParity) runs the Go side (internal/jobstate) and web/tests/job-substates.test.mjs the dashboard's (utils.js). Jobs are wire-shaped (the job JSON).",
   "pendingAutoAction": [
     { "name": "end unconfirmed is the mux's", "job": { "platform": "twitch", "status": "Error", "error": "twitch HLS: 500", "parkReason": "twitch_end_unconfirmed" }, "want": "auto_mux" },
     { "name": "end unconfirmed with the flap's text", "job": { "platform": "twitch", "status": "Error", "error": "twitch channel is offline", "parkReason": "twitch_end_unconfirmed" }, "want": "auto_mux" },
@@ -34,6 +34,16 @@
     { "line": "V: 12/40 A: 12/40 C: 3", "want": false },
     { "line": "V:95.3% C: 2", "want": false },
     { "line": "", "want": false }
+  ],
+  "awaitingProcessing": [
+    { "name": "a classified VOD", "job": { "platform": "youtube", "status": "Upcoming", "isVod": true }, "want": true },
+    { "name": "an admitted backlog row", "job": { "platform": "youtube", "status": "Upcoming", "queuePriority": 1, "channelId": "UCx" }, "want": true },
+    { "name": "an admitted Twitch backlog row", "job": { "platform": "twitch", "status": "Upcoming", "queuePriority": 1, "channelId": "chan" }, "want": true },
+    { "name": "priority 1 with no channel", "job": { "platform": "youtube", "status": "Upcoming", "queuePriority": 1 }, "want": false },
+    { "name": "priority 1 with an empty channel", "job": { "platform": "youtube", "status": "Upcoming", "queuePriority": 1, "channelId": "" }, "want": false },
+    { "name": "a live stream of a channel", "job": { "platform": "youtube", "status": "Upcoming", "channelId": "UCx" }, "want": false },
+    { "name": "another priority", "job": { "platform": "youtube", "status": "Upcoming", "queuePriority": 2, "channelId": "UCx" }, "want": false },
+    { "name": "a pasted stream", "job": { "platform": "youtube", "status": "Upcoming" }, "want": false }
   ],
   "queuedHolds": [
     {"name": "nothing", "holds": {}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": ""}},
