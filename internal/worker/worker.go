@@ -18,6 +18,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/disk"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/redact"
@@ -155,11 +156,10 @@ func (op jobOp) IsResetVerb() bool {
 const heartbeatInterval = 60 * time.Second
 
 // MaxTwitchAutoRetries caps how many times the Twitch monitor's auto-recovery
-// will re-enqueue an errored "twitch channel is offline" job before giving up.
-// 2 retries (3 total attempts including the original) handles transient GQL
-// flaps measured in seconds without looping indefinitely on a persistent
-// issue. User-driven Reinit always resets this counter (see ReinitializeJob).
-const MaxTwitchAutoRetries = 2
+// will re-enqueue an errored Twitch live job before giving up
+// (jobstate.MaxTwitchAutoRetries, which jobstate.TwitchAutoRetryPending
+// reads). User-driven Reinit always resets this counter (see ReinitializeJob).
+const MaxTwitchAutoRetries = jobstate.MaxTwitchAutoRetries
 
 // logger is the anonymous interface for logging — intentionally not exported.
 // Each struct repeats this inline per CLAUDE.md convention.
@@ -1995,7 +1995,7 @@ func cookieRefreshWorthAttempting(err error) bool {
 // (AutoMuxEndedBroadcast, D-T4); and a Twitch live job whose stream
 // processing never reached Twitch (twitchUnreachableError) as
 // ParkReasonTwitchUnreachable, a marker the Twitch monitor's recovery keys on
-// (isRecoverableTwitchError).
+// (jobstate.TwitchAutoRetryPending).
 func parkReasonForError(err error) database.ParkReason {
 	if !cookiesStatusError(err) {
 		if errors.Is(err, ErrTwitchEndUnconfirmed) {
@@ -2121,14 +2121,16 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// shape the recovery predicate rejects) DOES notify: previously any
 	// AutoRetryCount>0 was suppressed, so the operator couldn't distinguish
 	// "still retrying" from "gave up for good" — the exact moment that needs
-	// attention. retryLikely mirrors monitor.isRecoverableTwitchError
-	// (KEEP IN SYNC — the import would be cyclic): Error status, the exact
-	// offline-flap message or the unreachable marker, no delivered segments,
-	// budget remaining.
-	retryLikely := status == database.StatusError &&
-		(errMsg == TwitchOfflineErrMsg || reason == database.ParkReasonTwitchUnreachable) &&
-		job.LastVideoSeq == nil &&
-		job.AutoRetryCount < MaxTwitchAutoRetries
+	// attention. retryLikely is the monitor's own recovery predicate
+	// (jobstate.TwitchAutoRetryPending), asked of the row this failure just
+	// wrote: a copy of the job carrying the new status, error and park
+	// reason. Its end_unconfirmed exclusion changes no answer here — the
+	// latch's error is its cause's text, a download failure, never
+	// TwitchOfflineErrMsg — and is pinned with the rest by
+	// TestRetryLikelyIsTheMonitorsPredicate.
+	written := *job
+	written.Status, written.Error, written.ParkReason = status, errMsg, reason
+	retryLikely := jobstate.TwitchAutoRetryPending(&written)
 	nonActionable := errors.Is(err, ErrNonActionable)
 	suppressNotification := nonActionable || (job.AutoRetryCount > 0 && retryLikely)
 

@@ -21,15 +21,15 @@ const (
 	StatusCookies     JobStatus = "COOKIES?"
 )
 
-// ParkReason records WHY a job was parked at StatusCookies — and, for two
-// Twitch cases, why it stopped in StatusError (ParkReasonTwitchEndUnconfirmed,
-// ParkReasonTwitchUnreachable and ParkReasonMuxAfterCancel, the only values
-// an Error row carries). The
-// status alone
-// says "credentials are the fix", which is true for every value here — but it
-// does not say WHICH credentials, and the automatic recovery sweeps need that
-// distinction to avoid retrying a job that cannot possibly succeed against the
-// credentials currently on disk.
+// ParkReason records WHY a job was parked at StatusCookies (ParkReasonAuth,
+// ParkReasonMembership, or the legacy ParkReasonNone) — and, for three cases,
+// why it stopped in StatusError: ParkReasonTwitchEndUnconfirmed,
+// ParkReasonTwitchUnreachable and ParkReasonMuxAfterCancel are the only
+// values an Error row carries, and no COOKIES? row carries them. For the
+// COOKIES? values the status alone says "credentials are the fix", which is
+// true for each of them — but it does not say WHICH credentials, and the
+// automatic recovery sweeps need that distinction to avoid retrying a job that
+// cannot possibly succeed against the credentials currently on disk.
 //
 // It is deliberately a persisted column rather than a re-derivation from the
 // job's error text: the sweep runs minutes, days, or restarts after the park,
@@ -59,7 +59,7 @@ const (
 	// genuine change of account identity resumes them.
 	ParkReasonMembership ParkReason = "membership"
 
-	// ParkReasonTwitchEndUnconfirmed is the one reason an ERROR row carries
+	// ParkReasonTwitchEndUnconfirmed is the first of the three ERROR-row reasons
 	// (owner decision D-T4): a live Twitch download failed while nothing said
 	// its broadcast was over, so the job stopped in Error with its staging and
 	// resume sidecar kept (ExecuteTwitch's unconfirmed-end latch). It is what
@@ -72,19 +72,19 @@ const (
 	// it.
 	ParkReasonTwitchEndUnconfirmed ParkReason = "twitch_end_unconfirmed"
 
-	// ParkReasonTwitchUnreachable is the other reason an ERROR row carries: a
+	// ParkReasonTwitchUnreachable is the second ERROR-row reason: a
 	// Twitch live job's stream processing never reached Twitch — a transport
 	// failure, on a network the connectivity monitor says is up (one it calls
 	// an outage is waited out instead, and the job never stops). Like the
 	// offline flap's TwitchOfflineErrMsg, it is what lets the Twitch monitor
 	// re-initialise the job when it finds the same broadcast live again
-	// (isRecoverableTwitchError → AutoReinitializeJob), within the same retry
+	// (jobstate.TwitchAutoRetryPending → AutoReinitializeJob), within the same retry
 	// budget and only while no segment was downloaded. Written by setJobError
 	// from the error's type, never inferred from its text; the
 	// re-initialisation clears it.
 	ParkReasonTwitchUnreachable ParkReason = "twitch_unreachable"
 
-	// ParkReasonMuxAfterCancel is the third reason an ERROR row carries: the
+	// ParkReasonMuxAfterCancel is the third ERROR-row reason: the
 	// operator's Mux of a Cancelled row failed (MuxJob). The Cancel closed a
 	// live Twitch capture's gap-fill tail (owner decision FQ-2), and CancelJob
 	// writes nothing on the row but its status, which the failed Mux then

@@ -468,8 +468,8 @@ func TestTwitchTransportFailureIsMarkedRecoverable(t *testing.T) {
 	}
 }
 
-// TestTwitchUnreachableRetryIsNotNotified pins setJobError's retryLikely
-// mirror of monitor.isRecoverableTwitchError: a marked failure on a job the
+// TestTwitchUnreachableRetryIsNotNotified pins setJobError's retryLikely,
+// jobstate.TwitchAutoRetryPending on the written row: a marked failure on a job the
 // recovery has already retried, budget left, is the retry's to report — as a
 // TwitchOfflineErrMsg flap is — so no Job Failed goes out for it.
 //

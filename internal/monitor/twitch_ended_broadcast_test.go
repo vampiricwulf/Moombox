@@ -8,6 +8,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
@@ -86,17 +87,17 @@ func TestTwitch_EndedBroadcastOfALatchedCaptureIsHandedOn(t *testing.T) {
 	}
 }
 
-// TestIsRecoverableTwitchErrorRefusesTheLatchedRow: the automatic mux and the
+// TestAutoRetryRefusesTheLatchedRow: the automatic mux and the
 // auto re-initialisation must never both take a row. A latched row is the
 // mux's, so the recovery refuses it even if its error happened to read as the
 // offline flap's — re-initialising deletes the staging the mux would archive.
 //
 // Mutant: the ParkReasonTwitchEndUnconfirmed check dropped from
-// isRecoverableTwitchError.
-func TestIsRecoverableTwitchErrorRefusesTheLatchedRow(t *testing.T) {
+// jobstate.TwitchAutoRetryPending.
+func TestAutoRetryRefusesTheLatchedRow(t *testing.T) {
 	job := &database.Job{Status: database.StatusError, Error: "twitch channel is offline",
 		ParkReason: database.ParkReasonTwitchEndUnconfirmed}
-	if isRecoverableTwitchError(job, 2) {
+	if jobstate.TwitchAutoRetryPending(job) {
 		t.Error("a row the unconfirmed-end latch marked was offered to the auto re-initialisation")
 	}
 }

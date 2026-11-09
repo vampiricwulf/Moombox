@@ -13,16 +13,17 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
 // TwitchOfflineErrMsg is the literal error string emitted when a non-manual
-// Twitch job's GetStreamInfo returns nil/!IsLive. Exported so the monitor's
-// auto-recovery predicate can match on it without drifting from the producer.
-// Keep these two sites aligned — a regression test in internal/monitor checks
-// the predicate accepts exactly this string.
-const TwitchOfflineErrMsg = "twitch channel is offline"
+// Twitch job's GetStreamInfo returns nil/!IsLive. It is
+// jobstate.TwitchOfflineErrMsg, the text the auto-recovery predicate
+// (jobstate.TwitchAutoRetryPending) matches, so producer and consumer are one
+// constant.
+const TwitchOfflineErrMsg = jobstate.TwitchOfflineErrMsg
 
 // twitchEndedOfflineErrMsg is the error a Twitch job interrupted mid-capture
 // takes when its broadcast is over by the time Moombox is back: the staged
