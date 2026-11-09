@@ -541,15 +541,15 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme, publ
 		return false
 	}
 
-	switch networkAccess {
-	case "localhost":
+	switch {
+	case networkAccess == config.NetworkAccessLocalhost:
 		return (isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)) &&
 			originPortServed(u, effectiveHost, effectiveScheme, publicURL, schemeUnknown)
-	case "lan":
+	case networkAccess == config.NetworkAccessLAN:
 		return (isLoopback(hostname) || hostname == "localhost" || isPrivateIPFor(hostname, networkAccess) ||
 			hostInSANs(hostname, identity, false)) &&
 			originPortServed(u, effectiveHost, effectiveScheme, publicURL, schemeUnknown)
-	case "external", "public":
+	case config.IsExternalAccess(networkAccess):
 		if !sameSiteOrigin(origin, effectiveHost, effectiveScheme) {
 			return false
 		}
@@ -978,7 +978,7 @@ func isPrivateIPFor(ipStr, networkAccess string) bool {
 	if isPrivateIP(ipStr) {
 		return true
 	}
-	if networkAccess != "lan" {
+	if networkAccess != config.NetworkAccessLAN {
 		return false
 	}
 	ip := parseIPLiteral(ipStr)
