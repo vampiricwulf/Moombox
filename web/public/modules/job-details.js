@@ -153,6 +153,9 @@ export class JobDetailsController {
 
   showJobDetails(job) {
     this.app.selectedJobId = job.id;
+    // A fresh open asks for the facts itself; the per-status refetch
+    // (_refreshFactsOnStatusChange) starts over for it.
+    this._factsAskedFor = null;
     this.renderJobDetails(job);
     this.loadJobLogs(job.id);
     document.getElementById("details-dialog").show();
@@ -188,6 +191,9 @@ export class JobDetailsController {
       // null, not absent, for a job with none, so _preserveStagingFields
       // does not carry an earlier answer over it.
       job.gapFill = enriched.gapFill || null;
+      // The status the facts above were computed under (the server's, from
+      // the same answer): a status change after it makes them stale.
+      job.factsStatus = enriched.status;
       // Re-evaluate button visibility if the dialog is still on this job
       if (this.app.selectedJobId === jobId && document.getElementById("details-dialog").open) {
         const content = document.getElementById("job-details-content");
@@ -202,6 +208,7 @@ export class JobDetailsController {
         } else {
           this.updateDetailsButtons(job);
         }
+        this._refreshFactsOnStatusChange(job);
       }
     } catch { /* network blip — buttons stay hidden, same as before the fetch */ }
   }
@@ -244,6 +251,9 @@ export class JobDetailsController {
   updateJobDetails(job) {
     const content = document.getElementById("job-details-content");
     if (!content) return;
+    // A status change of the open job makes its staging facts stale: ask
+    // again (once per status), ahead of the status-change rebuild below.
+    this._refreshFactsOnStatusChange(job);
 
     // If status changed, rebuild the details to refresh structural elements
     // (segment rows, embed, buttons) that depend on status.
@@ -554,8 +564,12 @@ export class JobDetailsController {
     // A Finished job is muxable only while a split part its finalize could
     // not mux is still in staging (the server's unmuxedParts) — the same rule
     // POST /api/jobs/{id}/mux applies.
-    const canMux = (MUX_STATUSES.has(job.status) && job.hasSegments) ||
-      (job.status === "Finished" && job.unmuxedParts === true);
+    // Facts fetched under another status are stale until the refetch
+    // answers (_refreshFactsOnStatusChange): a Reinitialize deleted the
+    // staging an Error-time hasSegments described.
+    const factsCurrent = job.factsStatus === undefined || job.factsStatus === job.status;
+    const canMux = factsCurrent && ((MUX_STATUSES.has(job.status) && job.hasSegments) ||
+      (job.status === "Finished" && job.unmuxedParts === true));
     const canDelete = DELETE_STATUSES.has(job.status);
     const hasFile = job.status === "Finished" && job.filename;
     const isActive = ["Upcoming", "Live", "Downloading", "Muxing"].includes(
@@ -1072,7 +1086,26 @@ export class JobDetailsController {
   }
 
   /**
+   * Ask GET /api/jobs/{id} again when the open dialog's job has moved to a
+   * status other than the one its staging facts were fetched under
+   * (factsStatus): an Upcoming-time hasSegments=false says nothing about the
+   * Error the job failed into, and an Error-time true says nothing after a
+   * Reinitialize deleted the staging. Once per status of the open job — the
+   * ~60 Hz progress path never refetches — and never before the open's own
+   * fetch has stamped the facts.
+   */
+  _refreshFactsOnStatusChange(job) {
+    if (!job || this.app.selectedJobId !== job.id) return;
+    if (job.factsStatus === undefined || job.factsStatus === job.status) return;
+    const key = `${job.id}\u0000${job.status}`;
+    if (this._factsAskedFor === key) return;
+    this._factsAskedFor = key;
+    this._fetchStagingFields(job.id);
+  }
+
+  /**
    * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar/unmuxedParts/muxGaps
+   * (and factsStatus, the status they were fetched under)
    * fields from oldJobs onto newJobs.
    * WebSocket bulk updates deliver raw DB objects without these enriched fields;
    * carrying them forward avoids Resume/Mux buttons flickering out in the details dialog.
@@ -1103,6 +1136,9 @@ export class JobDetailsController {
       }
       if (job.gapFill === undefined && old.gapFill !== undefined) {
         job.gapFill = old.gapFill;
+      }
+      if (job.factsStatus === undefined && old.factsStatus !== undefined) {
+        job.factsStatus = old.factsStatus;
       }
     }
   }
