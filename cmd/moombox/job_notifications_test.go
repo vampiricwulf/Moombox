@@ -139,7 +139,7 @@ func TestATUICancelOfAJobNoRunHoldsIsAnnounced(t *testing.T) {
 		if ok, err := db.AddJob(&database.Job{ID: id, VideoID: id, Title: "t", ChannelName: "Chan", Platform: "youtube", Status: st}); err != nil || !ok {
 			t.Fatalf("AddJob: %v", err)
 		}
-		if !s.cancelJobFromTUI(id) {
+		if ok, err := s.cancelJobFromTUI(id); !ok || err != nil {
 			t.Errorf("%s: cancelJobFromTUI reported no cancel", st)
 		}
 		if j, _ := db.GetJob(id); j == nil || j.Status != database.StatusCancelled {
@@ -176,7 +176,7 @@ func TestATUICancelOfAnEndedJobIsNotACancel(t *testing.T) {
 		if ok, err := db.AddJob(&database.Job{ID: id, VideoID: id, Title: "t", ChannelName: "Chan", Platform: "youtube", Status: st}); err != nil || !ok {
 			t.Fatalf("AddJob: %v", err)
 		}
-		if s.cancelJobFromTUI(id) {
+		if ok, _ := s.cancelJobFromTUI(id); ok {
 			t.Errorf("%s: cancelJobFromTUI reported a cancel", st)
 		}
 		if j, _ := db.GetJob(id); j == nil || j.Status != st {

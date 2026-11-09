@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -18,7 +19,7 @@ import (
 func TestCancelChordReportsACancelThatDidNotHappen(t *testing.T) {
 	withCancel := func() *App {
 		a := NewApp()
-		a.OnCancelJob = func(id string) bool { return id != "gone" } // "gone" ended meanwhile
+		a.OnCancelJob = func(id string) (bool, error) { return id != "gone", nil } // "gone" ended meanwhile
 		return a
 	}
 	check := func(t *testing.T, a *App, want string, warning bool) {
@@ -65,4 +66,37 @@ func TestCancelChordReportsACancelThatDidNotHappen(t *testing.T) {
 	t.Run("batch, none ended", func(t *testing.T) {
 		check(t, batch("live", "live2"), "Cancelled 2 jobs", false)
 	})
+}
+
+// TestCancelChordShowsAlreadyFinishingInRed is owner ruling R-C1 in the TUI:
+// a Cancel the worker refuses because the job's finalize has written its
+// archive is REST's 409 text, in red, alone or in a batch.
+//
+// Mutant: the A X arms reading only OnCancelJob's bool — "had already ended",
+// in yellow.
+func TestCancelChordShowsAlreadyFinishingInRed(t *testing.T) {
+	refusal := errors.New("Not cancelled — the job is already finishing: its archive is written")
+	a := NewApp()
+	a.OnCancelJob = func(id string) (bool, error) {
+		if id == "fin" {
+			return false, refusal
+		}
+		return true, nil
+	}
+	a.dispatchAction("A X", &database.Job{ID: "fin", Title: "Finishing", Status: database.StatusMuxing})
+	if a.feedback.msg != refusal.Error() || feedbackColor(a.feedback.msg, a.feedback.sev) != ColorRed {
+		t.Errorf("single: feedback = %q (%v), want the refusal in red", a.feedback.msg, feedbackColor(a.feedback.msg, a.feedback.sev))
+	}
+
+	a.taskList.SetJobs([]*database.Job{
+		{ID: "fin", Title: "fin", Status: database.StatusMuxing},
+		{ID: "live", Title: "live", Status: database.StatusDownloading},
+	})
+	a.taskList.ToggleSelection("fin")
+	a.taskList.ToggleSelection("live")
+	a.dispatchAction("A X", nil)
+	want := "Cancelled 1 job, 1 refused: " + refusal.Error()
+	if a.feedback.msg != want || feedbackColor(a.feedback.msg, a.feedback.sev) != ColorRed {
+		t.Errorf("batch: feedback = %q, want %q in red", a.feedback.msg, want)
+	}
 }

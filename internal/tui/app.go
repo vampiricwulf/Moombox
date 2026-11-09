@@ -672,8 +672,10 @@ type App struct {
 	// Callbacks for actions
 	OnAddVideo func(url string)
 	// OnCancelJob cancels a job and reports whether it did: a job that
-	// ended since the list last showed it is left as it ended.
-	OnCancelJob func(jobID string) bool
+	// ended since the list last showed it is left as it ended. err is a
+	// refusal to report in red — a Cancel that reached a job whose finalize
+	// has written its archive (worker.ErrAlreadyFinishing, owner ruling R-C1).
+	OnCancelJob func(jobID string) (bool, error)
 	OnDeleteJob func(jobID string)
 	// OnSetWatched marks jobs watched/unwatched (the A W chord); the Web's
 	// /watched routes are the twin.

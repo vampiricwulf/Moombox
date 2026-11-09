@@ -317,6 +317,16 @@ type DownloadWorker struct {
 	// they reset and queue the job (afterJobExit), so it is the job's one
 	// lease on its staging outside a queue run. Lazily allocated, so a
 	// zero-value worker (the tests build several) needs no constructor change.
+	// finishing marks the jobs whose finalize has produced its archive and is
+	// recording it (beginFinishing): a Cancel then answers
+	// ErrAlreadyFinishing rather than land between the archive and its
+	// Finished write (owner ruling R-C1). finishMu serialises the mark with
+	// CancelJob's status write, so either the Cancel lands first and the
+	// finalize stops, or the mark does and the Cancel is refused. Lazily
+	// allocated, like stagingClaims.
+	finishMu  sync.Mutex
+	finishing map[string]bool
+
 	stagingClaimMu sync.Mutex
 	stagingClaims  map[string]stagingClaim
 	// stagingClaimGen numbers the claims taken, so a release frees only the
@@ -530,6 +540,7 @@ func NewDownloadWorker(
 	// archive the import's re-mux is about to rename its copy over.
 	if orchestrator != nil {
 		orchestrator.waitArchiveRewrite = w.waitChapterImport
+		orchestrator.beginFinishing = w.beginFinishing
 	}
 	// A deleted row takes its backlog retry streak with it. The id is the
 	// video id, so a backlog rescan can create the row again, and it would
@@ -721,7 +732,7 @@ func (w *DownloadWorker) TwitchHintStats() TwitchHintStats {
 //
 // A Cancel is decided on a status read earlier — the row a UI showed, the
 // cancel route's own read — and the write is never over a terminal one
-// (UpdateJobFieldsUnlessTerminal). Written unconditionally, it turned a job
+// (UpdateJobFieldsIfIn the cancellable statuses). Written unconditionally, it turned a job
 // that finished or failed in between into a Cancelled one: a Finished
 // archive or an Error the operator had yet to read, gone. A Cancel that finds
 // the job ended does nothing at all — no flag, no stopped run, no streak
@@ -732,19 +743,58 @@ func (w *DownloadWorker) TwitchHintStats() TwitchHintStats {
 // The write alone ends a run (its listeners cancel the download); one that
 // gets to WasCancelled before the flag is settled by it, and is the caller's
 // to report.
-func (w *DownloadWorker) CancelJob(jobID string) (cancelled, flagged bool) {
+//
+// The write applies only while the job is cancellable
+// (jobverbs.CancellableStatuses — every status short of an outcome). And not
+// once its finalize has produced the archive (owner ruling R-C1): the job
+// then ends Finished, and the Cancel answers ErrAlreadyFinishing, with
+// nothing written or flagged. A Cancel that lands before that mark wins as
+// before, and the finalize stops on it (beginFinishing).
+func (w *DownloadWorker) CancelJob(jobID string) (cancelled, flagged bool, err error) {
+	w.finishMu.Lock()
+	if w.finishing[jobID] {
+		w.finishMu.Unlock()
+		return false, false, ErrAlreadyFinishing
+	}
 	// announce_found goes with it: a job cancelled before its first fetch is
 	// owed no "Stream Found", and a later Retry must not announce a discovery
 	// long past.
-	if !w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
+	applied := w.db.UpdateJobFieldsIfIn(jobID, jobverbs.CancellableStatuses(), map[string]any{
 		"status":         database.StatusCancelled,
 		"announce_found": false,
-	}) {
-		return false, false
+	})
+	w.finishMu.Unlock()
+	if !applied {
+		return false, false, nil
 	}
 	flagged = w.queue.Cancel(jobID)
 	w.endBacklogStreak(jobID)
-	return true, flagged
+	return true, flagged, nil
+}
+
+// beginFinishing marks a job's finalize as past the point of no return —
+// its archive is written — and returns the release, or false when the row
+// already holds an outcome (an operator's Cancel that landed while FFmpeg
+// ran, its listener not yet heard) or is gone: the finalize then stops with
+// ErrCancelled, its staging kept, and the Cancel stands. Under finishMu with
+// the read, so no Cancel can land between the check and the mark; a Cancel
+// after it is refused (CancelJob). A row that cannot be read is not an
+// outcome (as writeUnlessOutcome reads one): the finalize goes on.
+func (w *DownloadWorker) beginFinishing(jobID string) (func(), bool) {
+	w.finishMu.Lock()
+	defer w.finishMu.Unlock()
+	if job, err := w.db.GetJob(jobID); err == nil && (job == nil || job.IsTerminal()) {
+		return nil, false
+	}
+	if w.finishing == nil {
+		w.finishing = map[string]bool{}
+	}
+	w.finishing[jobID] = true
+	return func() {
+		w.finishMu.Lock()
+		delete(w.finishing, jobID)
+		w.finishMu.Unlock()
+	}, true
 }
 
 // WaitForJobExit blocks until the job's orchestrator goroutine has returned,

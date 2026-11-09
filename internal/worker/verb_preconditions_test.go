@@ -270,3 +270,79 @@ func TestMuxRefusesARowAResumeMovedOn(t *testing.T) {
 		t.Error("the refused Mux kept the staging claim")
 	}
 }
+
+// TestALateCancelLeavesTheArchiveFinished is owner ruling R-C1: a Cancel that
+// reaches a job whose finalize has already written its archive — after
+// FFmpeg, before the Finished write — used to be written Cancelled and
+// answered success, and the finalize then wrote Finished over it and sent a
+// "Download Finished" after the "Job Cancelled". The job ends Finished now,
+// and the Cancel answers ErrAlreadyFinishing with nothing written.
+//
+// Mutant: CancelJob without its finishing check — the Cancel reports
+// success (and the row is written Cancelled under the finalize).
+func TestALateCancelLeavesTheArchiveFinished(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	staging, _ := muxFixtureJob(t, w, db, "j-late")
+	ffmpegPath, _ := requireFFmpegTools(t)
+	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 3)
+	db.UpdateJobFields("j-late", map[string]any{"status": database.StatusError})
+
+	var cancelled bool
+	var cancelErr error
+	w.orchestrator.logger = &onInfoLogger{prefix: "download complete", hook: func() {
+		cancelled, _, cancelErr = w.CancelJob("j-late")
+	}}
+	if err := w.MuxJob("j-late"); err != nil {
+		t.Fatal(err)
+	}
+	w.wg.Wait()
+
+	if cancelled || !errors.Is(cancelErr, ErrAlreadyFinishing) {
+		t.Errorf("late Cancel = %v, %v; want refused with ErrAlreadyFinishing", cancelled, cancelErr)
+	}
+	j, _ := db.GetJob("j-late")
+	if j.Status != database.StatusFinished || j.OutputFile == "" {
+		t.Errorf("row = %s (output %q), want Finished with its archive", j.Status, j.OutputFile)
+	}
+	// Once finished, the mark is gone: a Cancel is the ordinary "ended" answer.
+	if c, _, err := w.CancelJob("j-late"); c || err != nil {
+		t.Errorf("Cancel of the Finished row = %v, %v; want not cancelled, no error", c, err)
+	}
+}
+
+// TestACancelBeforeTheArchiveIsMarkedStands: the other side of R-C1. A
+// Cancel that lands while FFmpeg writes the archive, before the finalize
+// marks itself finishing, was acknowledged; the finalize then finds the row's
+// outcome when it tries to mark, stops, and the row stays Cancelled with its
+// staging kept. The file written is left where it is (logged).
+//
+// Mutant: beginFinishing marking without reading the row — the finalize
+// writes Finished over the acknowledged Cancel.
+func TestACancelBeforeTheArchiveIsMarkedStands(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	staging, _ := muxFixtureJob(t, w, db, "j-early")
+	ffmpegPath, _ := requireFFmpegTools(t)
+	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 3)
+	db.UpdateJobFields("j-early", map[string]any{"status": database.StatusError})
+
+	mark := w.orchestrator.beginFinishing
+	var cancelled bool
+	w.orchestrator.beginFinishing = func(id string) (func(), bool) {
+		cancelled, _, _ = w.CancelJob(id)
+		return mark(id)
+	}
+	if err := w.MuxJob("j-early"); err != nil {
+		t.Fatal(err)
+	}
+	w.wg.Wait()
+
+	if !cancelled {
+		t.Fatal("the Cancel ahead of the mark was refused")
+	}
+	if j, _ := db.GetJob("j-early"); j.Status != database.StatusCancelled {
+		t.Errorf("row = %s, want the acknowledged Cancel standing", j.Status)
+	}
+	if !HasSegmentFiles(filepath.Dir(staging), "j-early") {
+		t.Error("staging was reclaimed under a Cancelled row")
+	}
+}

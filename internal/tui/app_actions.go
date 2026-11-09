@@ -248,6 +248,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			// finished, failed or been cancelled by the time the cancel
 			// reached them: OnCancelJob leaves those as they ended.
 			count, ended := 0, 0
+			var refused verbRefusals
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
 				if j == nil {
@@ -256,14 +257,20 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				if !jobverbs.Cancellable(j.Status) {
 					continue
 				}
-				if a.OnCancelJob(id) {
+				switch ok, err := a.OnCancelJob(id); {
+				case err != nil:
+					refused.add(err)
+				case ok:
 					count++
-				} else {
+				default:
 					ended++
 				}
 			}
 			a.taskList.ClearSelection()
 			switch {
+			case refused.n > 0:
+				// A refusal (a job already finishing) is the line's news, in red.
+				a.setBatchFeedback("Cancelled "+jobCount(count), refused)
 			case ended > 0 && count > 0:
 				a.setFeedbackWithSeverity(fmt.Sprintf("Cancelled %s; %s had already ended", jobCount(count), jobCount(ended)), severityWarning)
 			case ended > 0:
@@ -274,7 +281,9 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				a.setFeedbackWithSeverity("No cancellable jobs in selection", severityWarning)
 			}
 		} else if job != nil && a.OnCancelJob != nil {
-			if a.OnCancelJob(job.ID) {
+			if ok, err := a.OnCancelJob(job.ID); err != nil {
+				a.setFeedbackWithSeverity(err.Error(), severityError)
+			} else if ok {
 				a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
 			} else {
 				a.setFeedbackWithSeverity(fmt.Sprintf("Not cancelled — %s had already ended", job.Title), severityWarning)

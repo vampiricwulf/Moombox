@@ -565,7 +565,7 @@ func TestCancelClearsTheOwedFound(t *testing.T) {
 	if _, err := db.AddJob(job); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	if cancelled, _ := w.CancelJob(job.ID); !cancelled {
+	if cancelled, _, _ := w.CancelJob(job.ID); !cancelled {
 		t.Fatal("CancelJob did not cancel the Upcoming row")
 	}
 	if db.TakeAnnounceFound(job.ID) {

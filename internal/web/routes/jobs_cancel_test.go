@@ -50,7 +50,7 @@ func TestCancelRouteReportsAJobThatEndedFirst(t *testing.T) {
 
 			orig := cancelJob
 			t.Cleanup(func() { cancelJob = orig })
-			cancelJob = func(db *database.Database, w *worker.DownloadWorker, id string) (bool, bool) {
+			cancelJob = func(db *database.Database, w *worker.DownloadWorker, id string) (bool, bool, error) {
 				// The download finishes as the operator clicks Cancel.
 				db.UpdateJobFields(id, map[string]any{"status": database.StatusFinished})
 				return orig(db, w, id)
@@ -90,5 +90,27 @@ func TestCancelRouteWithoutAWorkerClearsTheOwedFound(t *testing.T) {
 	}
 	if f.db.TakeAnnounceFound("owed") {
 		t.Error("the owed Stream Found survived the route's cancel")
+	}
+}
+
+// TestCancelRouteAnswersAlreadyFinishing is owner ruling R-C1 at the route: a
+// Cancel the worker refuses because the job's finalize has written its
+// archive is a 409 with the worker's text, and no "Job Cancelled" goes out.
+//
+// Mutant: the route ignoring cancelJob's error — it answers 200.
+func TestCancelRouteAnswersAlreadyFinishing(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "finishing", func(j *database.Job) { j.Status = database.StatusMuxing })
+	orig := cancelJob
+	t.Cleanup(func() { cancelJob = orig })
+	cancelJob = func(*database.Database, *worker.DownloadWorker, string) (bool, bool, error) {
+		return false, false, worker.ErrAlreadyFinishing
+	}
+	rec := doRequest(t, f.router, "POST", "/api/jobs/finishing/cancel", nil)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "already finishing") {
+		t.Errorf("POST cancel = %d (%s), want 409 naming it already finishing", rec.Code, rec.Body.String())
+	}
+	if j, _ := f.db.GetJob("finishing"); j.Status != database.StatusMuxing {
+		t.Errorf("row = %s, want it untouched", j.Status)
 	}
 }

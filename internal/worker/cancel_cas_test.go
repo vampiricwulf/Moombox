@@ -82,7 +82,7 @@ func TestSetJobErrorLeavesACancelStanding(t *testing.T) {
 	if _, _, ok := w.queue.Dequeue(context.Background()); !ok {
 		t.Fatal("Dequeue returned no job")
 	}
-	if cancelled, flagged := w.CancelJob(job.ID); !cancelled || !flagged {
+	if cancelled, flagged, _ := w.CancelJob(job.ID); !cancelled || !flagged {
 		t.Fatalf("CancelJob = %v, %v, want the job cancelled and its run flagged", cancelled, flagged)
 	}
 
@@ -261,7 +261,7 @@ func TestCancelInAFailuresTailIsTheCallersToReport(t *testing.T) {
 
 	cancelled, flagged := false, true
 	w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome {
-		cancelled, flagged = w.CancelJob(job.ID) // the operator cancels the COOKIES? row
+		cancelled, flagged, _ = w.CancelJob(job.ID) // the operator cancels the COOKIES? row
 		return CookieRefreshNotRestored
 	}
 	w.setJobError(job, fmt.Errorf("%w: sign in to confirm", ErrCookiesRequired))
@@ -325,7 +325,7 @@ func TestBacklogRequeueBetweenCancelsTwoHalvesEndsTheRunCancelled(t *testing.T) 
 	if ok, _ := w.requeueBacklogAfterTransientFailure(job2, dialRefused); !ok {
 		t.Fatal("the transient failure was not requeued")
 	}
-	if _, flagged := w.CancelJob(job2.ID); flagged {
+	if _, flagged, _ := w.CancelJob(job2.ID); flagged {
 		t.Error("CancelJob flagged a requeued run: its caller leaves Job Cancelled to a run that will not send it")
 	}
 }
@@ -451,7 +451,7 @@ func TestCancelJobLeavesAnEndedJobAlone(t *testing.T) {
 			}
 			db.UpdateJobFields(id, map[string]any{"status": st}) // the run's outcome lands
 
-			if cancelled, flagged := w.CancelJob(id); cancelled || flagged {
+			if cancelled, flagged, _ := w.CancelJob(id); cancelled || flagged {
 				t.Errorf("CancelJob = %v, %v on a %s job, want nothing cancelled", cancelled, flagged, st)
 			}
 			if row, _ := db.GetJob(id); row.Status != st || row.Error != "kept" {

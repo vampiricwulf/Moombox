@@ -1051,7 +1051,14 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		// When the cancel flagged an actively-processing run, that run's
 		// handleCancellation emits the "cancelled" notification — sending
 		// here too produced two embeds per cancel of an in-flight job.
-		cancelled, workerWillNotify := cancelJob(db, w, jobID)
+		cancelled, workerWillNotify, err := cancelJob(db, w, jobID)
+		if err != nil {
+			// Its finalize has written the archive: the job ends Finished
+			// (owner ruling R-C1), and the reply says so rather than claim a
+			// cancel.
+			jsonError(rw, err.Error(), http.StatusConflict)
+			return
+		}
 		if !cancelled {
 			// The job ended — finished, failed, or was cancelled from the
 			// TUI — between the read above and the write, which does not
@@ -1605,15 +1612,16 @@ var (
 // Neither writes over a terminal status, and cancelled says whether the job
 // was cancelled; workerWillNotify, whether a run was flagged to announce it.
 // A variable so a test can land a status change between the route's read
-// and the write.
-var cancelJob = func(db *database.Database, w *worker.DownloadWorker, jobID string) (cancelled, workerWillNotify bool) {
+// and the write. err is the worker's refusal of a Cancel that came too late
+// (worker.ErrAlreadyFinishing).
+var cancelJob = func(db *database.Database, w *worker.DownloadWorker, jobID string) (cancelled, workerWillNotify bool, err error) {
 	if w != nil {
 		return w.CancelJob(jobID)
 	}
-	return db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
+	return db.UpdateJobFieldsIfIn(jobID, jobverbs.CancellableStatuses(), map[string]any{
 		"status":         database.StatusCancelled,
 		"announce_found": false, // as CancelJob clears it
-	}), false
+	}), false, nil
 }
 
 // loadJob fetches the job a handler acts on, and answers the request itself

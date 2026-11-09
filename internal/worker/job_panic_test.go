@@ -182,7 +182,7 @@ func TestAPanicAfterAFlaggedCancelEndsTheRunCancelled(t *testing.T) {
 			}()
 			<-reached
 			done := w.queue.Done(id)
-			if cancelled, flagged := w.CancelJob(id); !cancelled || !flagged {
+			if cancelled, flagged, _ := w.CancelJob(id); !cancelled || !flagged {
 				t.Fatalf("CancelJob = (%v, %v), want the running job cancelled and its run flagged", cancelled, flagged)
 			}
 			if tc.deleted {
