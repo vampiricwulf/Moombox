@@ -627,3 +627,35 @@ func TestEnqueueExistingJobsIgnoresQueued(t *testing.T) {
 		t.Errorf("Queued job row mutated: updated_at changed %q -> %q", before.UpdatedAt, after.UpdatedAt)
 	}
 }
+
+// TestDownloadSlotIsOwnedPerJob: a job that already holds a download slot and
+// asks again — a resumed VOD run taking the slot a set-aside recovery of the
+// same job holds — is told it holds one, without a second count. Before, the
+// second acquire counted again while the job's releases (keyed by job) freed
+// only one, so activeDownloads stayed one high until restart.
+func TestDownloadSlotIsOwnedPerJob(t *testing.T) {
+	q := NewJobQueue(1)
+	if !q.TryAcquireDownloadSlot("j") {
+		t.Fatal("first acquire refused on an idle pool")
+	}
+	// The pool is full, but the slot is already this job's.
+	if !q.TryAcquireDownloadSlot("j") {
+		t.Error("a second acquire by the job holding the only slot was refused; want it reported held")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if !q.AcquireDownloadSlot(ctx, "j") {
+		t.Error("AcquireDownloadSlot by the holder blocked; want it reported held")
+	}
+	if got := q.ActiveCount(); got != 1 {
+		t.Errorf("ActiveCount after three acquires by one job = %d, want 1", got)
+	}
+	q.ReleaseDownloadSlot("j")
+	q.ReleaseDownloadSlot("j")
+	if got := q.ActiveCount(); got != 0 {
+		t.Errorf("ActiveCount after the job's releases = %d, want 0 (balanced)", got)
+	}
+	if !q.TryAcquireDownloadSlot("other") {
+		t.Error("the freed slot was not available to another job")
+	}
+}

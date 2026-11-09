@@ -289,8 +289,18 @@ func (q *JobQueue) AcquireDownloadSlot(ctx context.Context, jobID string) bool {
 // and reports whether it did, without waiting. AcquireDownloadSlot is this in
 // a loop; the worker calls it first so it can tell the operator a VOD is
 // queueing for a slot only when it actually is.
+//
+// The slot is the JOB's: a job that already holds one is told it does and
+// nothing is counted again. Two holders of one job — a set-aside recovery and
+// a resumed VOD run of the same job — used to count twice while the job's
+// releases, keyed by job and idempotent, freed one, so a slot leaked for the
+// life of the process. The first release by either holder frees it.
 func (q *JobQueue) TryAcquireDownloadSlot(jobID string) bool {
 	q.mu.Lock()
+	if q.holdingDlSlot[jobID] {
+		q.mu.Unlock()
+		return true
+	}
 	if q.activeDownloads >= q.maxDownloads {
 		q.mu.Unlock()
 		return false
