@@ -168,7 +168,8 @@ func TestBrowserPathValidationBlocksOnlyAConclusiveRejection(t *testing.T) {
 // validation fetch and the payload assignment it guards. saveConfig is long and
 // contains plenty of unrelated returns.
 func TestSaveConfigHasOneExitFromBrowserValidation(t *testing.T) {
-	body := jsMethodBody(t, readEmbeddedModule(t, "public/modules/settings.js"), "saveConfig")
+	// saveConfig is the one-save-at-a-time wrapper (K32); _saveConfig builds the payload.
+	body := jsMethodBody(t, readEmbeddedModule(t, "public/modules/settings.js"), "_saveConfig")
 
 	const (
 		startMark = "/api/auto-cookies/validate-browser-path"
