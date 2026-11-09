@@ -200,7 +200,7 @@ func TestReleaseNotesOwnSkipIsNotASkipElsewhere(t *testing.T) {
 // Notes withdrawn from beside a pending update are not the running version's
 // viewer, so a late answer to an earlier R N's fetch does not replace them.
 //
-// Mutant: releaseNotesFetchedMsg's guard without notice == "" — the notes
+// Mutant: releaseNotesFetchedMsg's guard without the epoch match — the notes
 // become v1.0.0's.
 func TestReleaseNotesLateFetchLeavesWithdrawnNotesAlone(t *testing.T) {
 	a := NewApp()

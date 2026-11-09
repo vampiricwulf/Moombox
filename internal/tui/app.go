@@ -113,6 +113,9 @@ type (
 	dismissUpdateResultMsg struct {
 		Tag string
 		Err error
+		// Epoch is the release-notes session the S was pressed in
+		// (releaseNotesOverlay.epoch); only that session is closed by the answer.
+		Epoch int
 	}
 	signatureVerifyResultMsg struct {
 		Err string // empty on success
@@ -127,6 +130,9 @@ type (
 		Tag   string
 		Notes string
 		Err   string
+		// Epoch is the release-notes session the fetch was for; an answer for
+		// any other session is dropped.
+		Epoch int
 	}
 
 	// Async results for AddVideo dialog

@@ -57,6 +57,33 @@ func (a *App) keyHelp(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// notesShowPending is THE rule for U and S in the release-notes overlay
+// (K27): the notes on screen are a pending update's (pending, set by R N)
+// and that release is still the one pending. The footer keys off pending
+// alone, which followPendingRelease keeps true to this: every write to
+// a.updateAvailable runs it, and it withdraws notes whose release stopped
+// being the pending one.
+//
+// Written once for both keys: in viewer mode U used to close the notes
+// being read to print "No update available", and an UpdateStatusMsg landing
+// while some other version's notes were open let U apply — or S
+// permanently skip — a release whose notes were not on screen.
+func (a *App) notesShowPending() bool {
+	o := a.releaseNotesPopup
+	return o != nil && o.isOpen() && o.pending &&
+		a.updateAvailable != nil && a.updateAvailable.TagName == o.tag
+}
+
+// canApplyFromNotes reports whether U applies the release on screen.
+func (a *App) canApplyFromNotes() bool { return a.notesShowPending() }
+
+// canSkipFromNotes reports whether S skips the release on screen — and
+// only once: a second S while the first is out would only be refused, the
+// release being skipped already.
+func (a *App) canSkipFromNotes() bool {
+	return a.notesShowPending() && a.releaseNotesPopup.skipping == "" && a.OnDismissUpdate != nil
+}
+
 // Release-notes overlay intercepts keys when open. Scroll is handled by
 // routeComponentMsg forwarding to the embedded viewport; here we only
 // handle the close/apply bindings.
@@ -66,13 +93,7 @@ func (a *App) keyReleaseNotes(msg tea.KeyPressMsg, key string) (tea.Model, tea.C
 		a.releaseNotesPopup.close()
 		return a, nil
 	case "u", "U":
-		// Offered, and handled, only beside a pending update's own notes
-		// — the same gate as S below. In viewer mode U used to close the
-		// notes being read to print "No update available"; and an
-		// UpdateStatusMsg landing while some other version's notes were
-		// open let U apply a release whose notes were not on screen.
-		if !a.releaseNotesPopup.pending || a.updateAvailable == nil ||
-			a.updateAvailable.TagName != a.releaseNotesPopup.tag {
+		if !a.canApplyFromNotes() {
 			return a, nil
 		}
 		// Shared apply flow (active-downloads confirm included). Close
@@ -83,25 +104,17 @@ func (a *App) keyReleaseNotes(msg tea.KeyPressMsg, key string) (tea.Model, tea.C
 		a.releaseNotesPopup.close()
 		return a, cmd
 	case "s", "S":
-		// S skips exactly the version whose notes are on screen. The footer
-		// offers it only while pending is set, and this keys off the same
-		// flag: an UpdateStatusMsg landing while an arbitrary version's
-		// notes are open would otherwise let S permanently skip a release
-		// the operator has never seen, with no key on screen saying so.
-		if !a.releaseNotesPopup.pending || a.updateAvailable == nil || a.OnDismissUpdate == nil {
-			return a, nil
-		}
-		// And once: a second S while the first is out would only be
-		// refused, the release being skipped already.
-		if a.updateAvailable.TagName != a.releaseNotesPopup.tag || a.releaseNotesPopup.skipping != "" {
+		if !a.canSkipFromNotes() {
 			return a, nil
 		}
 		tag := a.updateAvailable.TagName
 		fn := a.OnDismissUpdate
+		epoch := a.releaseNotesPopup.epoch
 		a.releaseNotesPopup.skipping = tag
 		a.setFeedback("Skipping " + tag + "...")
-		return a, safeCmd(func() tea.Msg { return dismissUpdateResultMsg{Tag: tag, Err: fn(tag)} })
+		return a, safeCmd(func() tea.Msg { return dismissUpdateResultMsg{Tag: tag, Err: fn(tag), Epoch: epoch} })
 	}
+
 	// All other keys (arrows, pgup/pgdn) are forwarded to the viewport via
 	// routeComponentMsg — nothing to do here.
 	return a, nil

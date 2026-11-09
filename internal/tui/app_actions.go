@@ -498,7 +498,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.releaseNotesPopup = newReleaseNotesOverlay()
 		}
 		if a.updateAvailable != nil {
-			a.releaseNotesPopup.open(
+			a.releaseNotesPopup.start(
 				a.updateAvailable.TagName,
 				a.updateAvailable.ReleaseNotes,
 				a.width, a.height,
@@ -511,16 +511,17 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			return a, nil
 		}
 		// No pending update — fetch current version's notes asynchronously.
-		a.releaseNotesPopup.open("v"+a.version, "Loading release notes…", a.width, a.height)
+		a.releaseNotesPopup.start("v"+a.version, "Loading release notes…", a.width, a.height)
 		a.releaseNotesPopup.setPending(false)
 		fetchFn := a.OnFetchReleaseNotes
 		ver := a.version
+		epoch := a.releaseNotesPopup.epoch
 		return a, safeCmd(func() tea.Msg {
 			tag, notes, err := fetchFn(ver)
 			if err != nil {
-				return releaseNotesFetchedMsg{Tag: tag, Err: err.Error()}
+				return releaseNotesFetchedMsg{Tag: tag, Err: err.Error(), Epoch: epoch}
 			}
-			return releaseNotesFetchedMsg{Tag: tag, Notes: notes}
+			return releaseNotesFetchedMsg{Tag: tag, Notes: notes, Epoch: epoch}
 		})
 	case "R U":
 		return a, a.applyUpdateAction()

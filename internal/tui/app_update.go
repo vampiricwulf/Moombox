@@ -400,7 +400,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case dismissUpdateResultMsg:
-		a.releaseNotesPopup.skipping = ""
+		// The answer belongs to the notes session its S was pressed in
+		// (K27). S, Esc, then R N again before the skip answers: the
+		// answer used to close the notes just reopened. Only that session's
+		// skipping and close are gated; the release's own state — the
+		// badge, the glyph, the feedback line — always follows the answer.
+		o := a.releaseNotesPopup
+		own := o != nil && o.isOpen() && o.epoch == msg.Epoch
+		if own {
+			o.skipping = ""
+		}
 		if msg.Err != nil {
 			// A skip refused because the release went elsewhere re-synced the
 			// pending release (resyncTUIUpdate) while the notes ignored it.
@@ -418,7 +427,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// still lit, while the Web dismiss above cleared both (review F2).
 			a.details.updateInfo = nil
 		}
-		a.releaseNotesPopup.close()
+		if own {
+			o.close()
+		} else {
+			// Notes reopened since on the release just skipped stop
+			// offering U and S, as for a skip from elsewhere.
+			a.followPendingRelease(pendingGoneSkipped)
+		}
 		a.setFeedback("Skipped " + msg.Tag + " — you'll be notified about the next release")
 		return a, nil
 
@@ -437,25 +452,26 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case releaseNotesFetchedMsg:
-		// Only the viewer this fetch was for: if the overlay was closed and
-		// R N re-opened it on a pending update meanwhile, the late answer
-		// put the running version's notes and tag under a footer still
-		// offering U and S — both of which then refused on the tag guard.
-		// Notes withdrawn from beside a pending update are not pending
-		// either, and are not that viewer.
-		if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() && !a.releaseNotesPopup.pending &&
-			a.releaseNotesPopup.notice == "" {
+		// Only the viewer session this fetch was for (K27: the epoch R N
+		// stamped on it). R N, Esc, R N again: the first fetch's late error
+		// used to replace the notes the second had loaded. And if R N
+		// re-opened the overlay on a pending update meanwhile, the late
+		// answer put the running version's notes and tag under a footer
+		// still offering U and S — a pending session, or notes withdrawn
+		// from beside one, is never a viewer session, so the epoch alone
+		// refuses both.
+		if o := a.releaseNotesPopup; o != nil && o.isOpen() && o.epoch == msg.Epoch {
 			// A failed fetch carries no tag (OnFetchReleaseNotes returns
 			// "", "", err), and reopening with it blanked the title to
 			// "Release Notes — ". Keep the tag R N opened the overlay with.
 			tag := msg.Tag
 			if tag == "" {
-				tag = a.releaseNotesPopup.tag
+				tag = o.tag
 			}
 			if msg.Err != "" {
-				a.releaseNotesPopup.open(tag, "Failed to fetch release notes: "+msg.Err, a.width, a.height)
+				o.open(tag, "Failed to fetch release notes: "+msg.Err, a.width, a.height)
 			} else {
-				a.releaseNotesPopup.open(tag, msg.Notes, a.width, a.height)
+				o.open(tag, msg.Notes, a.width, a.height)
 			}
 		}
 		return a, nil
@@ -1289,6 +1305,7 @@ const (
 	pendingGoneElsewhere = "skipped, applied or withdrawn elsewhere"
 	pendingGonePulled    = "a check found it withdrawn"
 	pendingGoneApplied   = "applied, restarting"
+	pendingGoneSkipped   = "skipped"
 )
 
 // followPendingRelease runs wherever a.updateAvailable is cleared or

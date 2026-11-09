@@ -8,7 +8,7 @@ import "testing"
 // replaced them with v1.0.0's, under a footer still offering U and S, both of
 // which then refused on the tag guard.
 //
-// Mutant: dropping the pending gate — the overlay shows v1.0.0.
+// Mutant: dropping the epoch match — the overlay shows v1.0.0.
 func TestReleaseNotesLateFetchLeavesPendingNotesAlone(t *testing.T) {
 	a := NewApp()
 	a.width, a.height = 100, 40
@@ -28,9 +28,9 @@ func TestReleaseNotesLateFetchLeavesPendingNotesAlone(t *testing.T) {
 	// The viewer it was meant for still gets its answer.
 	a.releaseNotesPopup.close()
 	a.updateAvailable = nil
-	a.dispatchAction("R N", nil)
-	a.Update(releaseNotesFetchedMsg{Tag: "v1.0.0", Notes: "old notes"})
-	if a.releaseNotesPopup.tag != "v1.0.0" {
-		t.Errorf("the viewer's own fetch was not applied: tag %q", a.releaseNotesPopup.tag)
+	_, cmd := a.dispatchAction("R N", nil)
+	a.Update(runCmd(t, cmd))
+	if a.releaseNotesPopup.tag != "v1.0.0" || a.releaseNotesPopup.rawNotes != "old notes" {
+		t.Errorf("the viewer's own fetch was not applied: tag %q notes %q", a.releaseNotesPopup.tag, a.releaseNotesPopup.rawNotes)
 	}
 }
