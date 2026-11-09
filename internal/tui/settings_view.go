@@ -659,7 +659,15 @@ func (m *SettingsModel) renderChannelEdit(w int) string {
 		case fieldCycle:
 			value = renderCycleOptions(field.options, val, isFocused, max(w-ansi.StringWidth(prefix)-padW-2, 5))
 		default:
-			valueMaxW := max(w-ansi.StringWidth(prefix)-padW-2, 5)
+			// The focused field's help follows the input on the same row; its
+			// room comes out of the input, or the row outgrows the box, wraps,
+			// and every row below it — the buttons' included — draws one lower
+			// than the mouse hit-test counts.
+			helpW := 0
+			if field.help != "" && isFocused {
+				helpW = ansi.StringWidth(" (" + field.help + ")")
+			}
+			valueMaxW := max(w-ansi.StringWidth(prefix)-padW-2-helpW, 5)
 			if isFocused {
 				m.textInput.SetWidth(valueMaxW)
 				value = m.textInput.View()
@@ -672,7 +680,8 @@ func (m *SettingsModel) renderChannelEdit(w int) string {
 		if field.help != "" && isFocused {
 			line += DimStyle.Render(" (" + field.help + ")")
 		}
-		lines = append(lines, line)
+		// One row each, as the hit-test counts, however narrow the box.
+		lines = append(lines, ansi.Truncate(line, w, ""))
 	}
 
 	return strings.Join(lines, "\n")

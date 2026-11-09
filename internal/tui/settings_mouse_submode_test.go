@@ -90,6 +90,13 @@ func TestSettingsClicksDoNotLeaveAnOpenSubEditor(t *testing.T) {
 						t.Skipf("no button drawn under the %s", tc.name)
 					}
 					x += 2
+					// The click must land on the row the hit-test treats as the
+					// buttons, or it never reaches the guard: a channel-editor
+					// row wider than the box wrapped and pushed the drawn
+					// buttons a row below lastButtonContentY.
+					if got := y - settingsBoxTop(m) - 1 - 2; got != m.lastButtonContentY {
+						t.Fatalf("buttons drawn at contentY %d, hit-test expects %d:\n%s", got, m.lastButtonContentY, view)
+					}
 				}
 				if y < 0 {
 					t.Fatalf("target %s not drawn:\n%s", target, view)
@@ -123,4 +130,10 @@ func TestSettingsClicksDoNotLeaveAnOpenSubEditor(t *testing.T) {
 	if sections[m.sectionIndex].name != "Logs" {
 		t.Errorf("with no sub-editor open, the tab click opened %q, want Logs", sections[m.sectionIndex].name)
 	}
+}
+
+// settingsBoxTop is the overlay box's top row, as HandleMouse computes it.
+func settingsBoxTop(m *SettingsModel) int {
+	h := max(m.height-2, 10)
+	return max((m.height-(h+2))/2, 0)
 }
