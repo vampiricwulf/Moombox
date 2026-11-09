@@ -1729,58 +1729,14 @@ func (a *App) gapFillFor(job *database.Job) *GapFillView {
 // (textinput, viewport). Called before handleKey so that text editing and
 // viewport scrolling are processed before structural navigation.
 func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
-	if a.settings.IsVisible() {
-		return a.settings.UpdateComponents(msg)
-	}
-	// Help overlay viewport (priority matches handleKey order)
-	if a.help.IsVisible() {
-		return a.help.UpdateViewport(msg)
-	}
-	// Release-notes overlay viewport
-	if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() {
-		return a.releaseNotesPopup.Update(msg)
-	}
-	if a.ffmpegCheck.IsVisible() {
-		return a.ffmpegCheck.UpdateComponents(msg)
-	}
-	if a.setupWiz.IsVisible() {
-		return a.setupWiz.UpdateComponents(msg)
-	}
-	// actionMenu has no embedded components, but it must still block the
-	// fallthrough — otherwise keys pressed while the menu is open also
-	// scroll the hidden logs/details viewport underneath.
-	if a.actionMenu.IsVisible() {
-		return nil
-	}
-	if a.importDlg.IsVisible() {
-		return a.importDlg.UpdateComponents(msg)
-	}
-	if a.cookieImportDlg.IsVisible() {
-		return a.cookieImportDlg.UpdateComponents(msg)
-	}
-	if a.chapterDlg.IsVisible() {
-		return a.chapterDlg.UpdateComponents(msg)
-	}
-	if a.addVideo.IsVisible() {
-		return a.addVideo.UpdateComponents(msg)
-	}
-	if a.trimDlg.IsVisible() {
-		return a.trimDlg.UpdateComponents(msg)
-	}
-	if a.filesDlg.IsVisible() {
-		return a.filesDlg.UpdateComponents(msg)
-	}
-	if a.clientTokensDlg.IsVisible() {
-		return a.clientTokensDlg.UpdateComponents(msg)
-	}
-	if a.ytdlpDlg.IsVisible() {
-		return a.ytdlpDlg.UpdateComponents(msg)
-	}
-	if a.statsDlg.IsVisible() {
-		return a.statsDlg.UpdateComponents(msg)
-	}
-	if a.jobLog.IsVisible() {
-		return a.jobLog.UpdateComponents(msg)
+	// The overlay on top owns the message (the registry order: overlays.go).
+	// One with no components still blocks the fallthrough, so keys pressed
+	// over it never scroll the hidden logs/details viewport underneath.
+	if o := a.activeOverlay(); o != nil {
+		if o.components == nil {
+			return nil
+		}
+		return o.components(a, msg)
 	}
 	// Panel viewports (when no dialog visible)
 	switch a.focusedPanel {

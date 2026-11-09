@@ -180,19 +180,21 @@ One accepted consequence: search runs `FindAllStringIndex` over the already-wrap
 
 ### Source Files
 
-All 45 non-test files of `internal/tui/`, grouped by role. Four of them form two build-tagged pairs (`openbrowser_*` and `clipboard_*`), so any single build compiles 43.
+All 49 non-test files of `internal/tui/`, grouped by role. Four of them form two build-tagged pairs (`openbrowser_*` and `clipboard_*`), so any single build compiles 47.
 
-**The application model** — `App` is split across seven files rather than one; `app.go` holds the struct and its wiring only.
+**The application model** — `App` is split across nine files rather than one; `app.go` holds the struct and its wiring only.
 
 | File | Purpose |
 |------|---------|
 | `app.go` | Application model and its wiring: fields, constructor, backend callbacks and channel plumbing, tick scheduling, `View` delegation. |
 | `app_update.go` | `Update`: the message switch over every backend, tick, overlay and async-result message, plus the feedback line and the job add/update/delete appliers. |
-| `app_keys.go` | Key dispatch: the `Ctrl+C` test that runs ahead of every overlay intercept, overlay routing, the per-panel handlers, and the chord state machine. |
+| `app_keys.go` | Key dispatch: the `Ctrl+C` test that runs ahead of every overlay intercept, the hand-off to the overlay on top (the registry), the per-panel handlers, and the chord state machine. |
 | `app_actions.go` | `buildMenuItems` — the single source of truth for chords, the action menu, the hints and the help overlay — and `dispatchAction`, the one handler every chord lands in. |
 | `app_commands.go` | The `tea.Cmd` layer: the internal-token HTTP client and every `/api/` call the TUI makes, plus `Run`. |
 | `app_layout.go` | Panel geometry, `View` composition, the minimum-terminal-size floor, the restart and security banners, feedback colouring. |
-| `app_mouse.go` | Top-level mouse routing: active overlay first, then the panels. |
+| `app_mouse.go` | Top-level mouse routing: the overlay on top (its registry entry's mouse handler, or swallowed), then the panels. |
+| `overlays.go` | The overlay registry (`overlayRegistry`): the one ordered table of the sixteen overlays — each one's visibility, view, component router, key handler and mouse handler. `handleKey`, `handleMouse`, `View`, `routeComponentMsg` and `hasActiveOverlay` all take its first visible entry (`activeOverlay`). |
+| `overlay_keys.go` | Each overlay's key handler (`keySettings` … `keyJobLog`), reached only through the registry. |
 
 **Panels**
 
@@ -447,7 +449,7 @@ Tasks panel: toggle the focused row's batch selection. The status bar shows the 
 
 ### Overlays (Modal Dialogs)
 
-Overlays are full-screen or near-full-screen modal views that take over keyboard input. When an overlay is active, the panel layout is hidden and all input routes to the overlay. Pressing `Escape` closes most overlays — the FFmpeg-not-found overlay is the exception and QUITS on `Escape`, because FFmpeg is required for the muxing half of the pipeline and an overlay that merely dismissed itself would leave a Moombox that cannot finish a download. `Ctrl+C` is checked ahead of every overlay and always quits (see the single-key table above).
+Overlays are full-screen or near-full-screen modal views that take over keyboard input. When an overlay is active, the panel layout is hidden and all input routes to the overlay. Pressing `Escape` closes most overlays — the FFmpeg-not-found overlay is the exception and QUITS on `Escape`, because FFmpeg is required for the muxing half of the pipeline and an overlay that merely dismissed itself would leave a Moombox that cannot finish a download. `Ctrl+C` is checked ahead of every overlay and always quits (see the single-key table above). Which overlay is on top is decided in one place, the ordered registry in `internal/tui/overlays.go` (settings, help, release notes, FFmpeg check, setup wizard, action menu, import, cookie import, chapter import, add video, trim, files, client tokens, yt-dlp plugin, stats, job log): the screen, every key, the mouse and the embedded components all go to its first visible entry. The overlays are exclusive in practice — every opener runs from the main screen or closes the overlay it came from — so the order decides only what would win if two were ever open (`internal/tui/overlay_order_test.go` pins it, and the `Ctrl+C` census iterates it).
 
 | Overlay | Trigger | Description |
 |---------|---------|-------------|
@@ -1411,7 +1413,7 @@ Some routes apply additional per-route middleware:
 
 - **`internal/web/`** — HTTP server, middleware, WebSocket hub, auth service.
 - **`internal/web/routes/`** — All REST API route handlers, organized by domain (auth, jobs, cookies, update, ffmpeg, stats, files, ytdlp).
-- **`internal/tui/`** — All TUI source files (45 non-test files, ~25,930 lines; see §Source Files).
+- **`internal/tui/`** — All TUI source files (49 non-test files, ~25,930 lines; see §Source Files).
 - **`web/public/`** — All static web assets (HTML, JS, CSS).
 - **`web/embed.go`** — `go:embed` directive for static assets.
 

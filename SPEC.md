@@ -156,7 +156,7 @@ internal/
   notifications/   <- Manager + Discord webhook sender
   web/             <- chi server, WebSocket hub, auth, middleware, rate limiter
   web/routes/      <- HTTP route handlers (jobs, auth, config, cookies, update, etc.)
-  tui/             <- 2-over-1 panel layout, 15 overlays, chord system, Charm ecosystem
+  tui/             <- 2-over-1 panel layout, 16 overlays (one ordered registry), chord system, Charm ecosystem
   goja/            <- JS runtime shims (minimal DOM, TextEncoder, timers)
   disk/            <- Disk space queries: kernel32 GetDiskFreeSpaceExW on Windows, statfs on Linux
   constants/       <- Hardcoded values (API keys, URLs, client configs, user agents)

@@ -1347,26 +1347,6 @@ func (a *App) listenForUpdates() tea.Cmd {
 	}
 }
 
-// hasActiveOverlay returns true if any overlay dialog is currently visible.
-func (a *App) hasActiveOverlay() bool {
-	return a.settings.IsVisible() ||
-		a.help.IsVisible() ||
-		(a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen()) ||
-		a.importDlg.IsVisible() ||
-		a.cookieImportDlg.IsVisible() ||
-		a.chapterDlg.IsVisible() ||
-		a.addVideo.IsVisible() ||
-		a.trimDlg.IsVisible() ||
-		a.filesDlg.IsVisible() ||
-		a.clientTokensDlg.IsVisible() ||
-		a.ytdlpDlg.IsVisible() ||
-		a.statsDlg.IsVisible() ||
-		a.jobLog.IsVisible() ||
-		a.setupWiz.IsVisible() ||
-		a.ffmpegCheck.IsVisible() ||
-		a.actionMenu.IsVisible()
-}
-
 // hasActiveDownloads returns true if any job has live progress to display.
 func (a *App) hasActiveDownloads() bool {
 	return a.activeDownloadCount() > 0

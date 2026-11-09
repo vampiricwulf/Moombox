@@ -124,54 +124,9 @@ func (a *App) View() tea.View {
 			a.width, a.height, minTermWidth, minTermHeight))
 	}
 
-	// Render overlays on top (priority matches handleKey order)
-	if a.settings.IsVisible() {
-		return a.viewWithMode(a.settings.View())
-	}
-	if a.help.IsVisible() {
-		return a.viewWithMode(a.help.View())
-	}
-	if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() {
-		return a.viewWithMode(a.releaseNotesPopup.View())
-	}
-	if a.ffmpegCheck.IsVisible() {
-		return a.viewWithMode(a.ffmpegCheck.View())
-	}
-	if a.setupWiz.IsVisible() {
-		return a.viewWithMode(a.setupWiz.View())
-	}
-	if a.actionMenu.IsVisible() {
-		return a.viewWithMode(a.actionMenu.View())
-	}
-	if a.importDlg.IsVisible() {
-		return a.viewWithMode(a.importDlg.View())
-	}
-	if a.cookieImportDlg.IsVisible() {
-		return a.viewWithMode(a.cookieImportDlg.View())
-	}
-	if a.chapterDlg.IsVisible() {
-		return a.viewWithMode(a.chapterDlg.View())
-	}
-	if a.addVideo.IsVisible() {
-		return a.viewWithMode(a.addVideo.View())
-	}
-	if a.trimDlg.IsVisible() {
-		return a.viewWithMode(a.trimDlg.View())
-	}
-	if a.filesDlg.IsVisible() {
-		return a.viewWithMode(a.filesDlg.View())
-	}
-	if a.clientTokensDlg.IsVisible() {
-		return a.viewWithMode(a.clientTokensDlg.View())
-	}
-	if a.ytdlpDlg.IsVisible() {
-		return a.viewWithMode(a.ytdlpDlg.View())
-	}
-	if a.statsDlg.IsVisible() {
-		return a.viewWithMode(a.statsDlg.View())
-	}
-	if a.jobLog.IsVisible() {
-		return a.viewWithMode(a.jobLog.View())
+	// The overlay on top, if any (the registry order: overlays.go).
+	if o := a.activeOverlay(); o != nil {
+		return a.viewWithMode(o.view(a))
 	}
 
 	// Sync status bar state before rendering

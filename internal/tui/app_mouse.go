@@ -2,40 +2,46 @@ package tui
 
 import tea "charm.land/bubbletea/v2"
 
+// mouseActionMenu routes the mouse to the action menu while it is on top.
+func (a *App) mouseActionMenu(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	a.actionMenu.HandleMouse(msg)
+	return a, nil
+}
+
+// mouseSettings routes the mouse to settings while it is on top.
+func (a *App) mouseSettings(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	a.settings.HandleMouse(msg)
+	// A click on [ Save & Return ] or [ Return ] closes the overlay
+	// without passing through handleKey's "close" action, and a save
+	// may have changed the archive threshold the task list applies.
+	if !a.settings.IsVisible() {
+		a.afterSettingsClose()
+	}
+	// [ Save & Return ] can be the save that removes a channel with "delete
+	// its pending jobs".
+	return a, a.channelPruneCmd()
+}
+
+// mouseJobLog: the O L overlay scrolls under the wheel as the log panel
+// does, three rows a notch; a click does nothing there.
+func (a *App) mouseJobLog(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if isScrollUp(msg) {
+		a.jobLog.Scroll(-3)
+	} else if isScrollDown(msg) {
+		a.jobLog.Scroll(3)
+	}
+	return a, nil
+}
+
 func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	// Route mouse to action menu when visible
-	if a.actionMenu.IsVisible() {
-		a.actionMenu.HandleMouse(msg)
-		return a, nil
-	}
-
-	// Route mouse to settings when visible
-	if a.settings.IsVisible() {
-		a.settings.HandleMouse(msg)
-		// A click on [ Save & Return ] or [ Return ] closes the overlay
-		// without passing through handleKey's "close" action, and a save
-		// may have changed the archive threshold the task list applies.
-		if !a.settings.IsVisible() {
-			a.afterSettingsClose()
+	// The overlay on top takes the mouse — the same one a key would reach
+	// (the registry order: overlays.go). One with no mouse handler
+	// swallows it.
+	if o := a.activeOverlay(); o != nil {
+		if o.mouse == nil {
+			return a, nil
 		}
-		// [ Save & Return ] can be the save that removes a channel with "delete
-		// its pending jobs".
-		return a, a.channelPruneCmd()
-	}
-
-	// The O L overlay scrolls under the wheel as the log panel does, three
-	// rows a notch; a click does nothing there.
-	if a.jobLog.IsVisible() {
-		if isScrollUp(msg) {
-			a.jobLog.Scroll(-3)
-		} else if isScrollDown(msg) {
-			a.jobLog.Scroll(3)
-		}
-		return a, nil
-	}
-
-	if a.hasActiveOverlay() {
-		return a, nil
+		return o.mouse(a, msg)
 	}
 
 	m := msg.Mouse()
