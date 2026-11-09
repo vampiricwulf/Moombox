@@ -10,6 +10,19 @@ function trimPercent(progress) {
   return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.floor(n))) : 0;
 }
 
+/**
+ * Stamp a GET /api/jobs/{id} answer with the status its staging facts were
+ * computed under (factsStatus), for a caller that caches the whole answer as
+ * the job. The facts and the status come from the same answer, so they agree
+ * here; a later status change makes them stale, and the open dialog asks
+ * again (_refreshFactsOnStatusChange). An unstamped answer would read as
+ * current for ever. Returns the job.
+ */
+export function stampFactsStatus(job) {
+  if (job && typeof job === "object") job.factsStatus = job.status;
+  return job;
+}
+
 export class JobDetailsController {
   constructor(app) {
     this.app = app;
@@ -170,17 +183,20 @@ export class JobDetailsController {
    * so the Resume/Mux buttons in the details dialog would never appear
    * without this. _preserveStagingFields keeps them alive across
    * subsequent WS updates. Failures are silent — buttons just stay hidden.
+   * Resolves false when no answer arrived (a non-ok status or a network
+   * error), so the per-status refetch can ask again.
+   * @returns {Promise<boolean>}
    */
   async _fetchStagingFields(jobId) {
     try {
       const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
-      if (!response.ok) return;
+      if (!response.ok) return false;
       const enriched = await response.json();
       // Look the job up again — a jobs_update may have replaced the array
       // (and the object) while the fetch was in flight.
       const job = this.app.jobs.find((j) => j.id === jobId) ||
         this.app.archivedJobs.find((j) => j.id === jobId);
-      if (!job) return;
+      if (!job) return true;
       job.hasStaging = enriched.hasStaging;
       job.hasSegments = enriched.hasSegments;
       job.asides = Array.isArray(enriched.asides) ? enriched.asides : [];
@@ -198,7 +214,10 @@ export class JobDetailsController {
       if (this.app.selectedJobId === jobId && document.getElementById("details-dialog").open) {
         const content = document.getElementById("job-details-content");
         if (content) this.syncTextRow(content, "gap-fill", "Gap-fill:", gapFillText(job));
-        if (job.asides.length > 0 || job.muxGaps.length > 0) {
+        // A drawn section the answer no longer supports (a Reinitialize
+        // deleted the asides) needs the rebuild as much as a new one does.
+        const shown = !!content?.querySelector("#details-asides-section, #details-mux-gaps-section");
+        if (job.asides.length > 0 || job.muxGaps.length > 0 || shown) {
           // The sections are part of the rendered body, not static elements,
           // so they can only appear on a rebuild. Rare by construction: only a
           // job that restarted mid-stream has asides at all, and only one
@@ -210,7 +229,11 @@ export class JobDetailsController {
         }
         this._refreshFactsOnStatusChange(job);
       }
-    } catch { /* network blip — buttons stay hidden, same as before the fetch */ }
+      return true;
+    } catch {
+      /* network blip — buttons stay hidden, same as before the fetch */
+      return false;
+    }
   }
 
   /**
@@ -1066,7 +1089,7 @@ export class JobDetailsController {
         cache: 'no-store',
       });
       if (jobResponse.ok) {
-        const updatedJob = await jobResponse.json();
+        const updatedJob = stampFactsStatus(await jobResponse.json());
         const jobIndex = this.app.jobs.findIndex(j => j.id === jobId);
         if (jobIndex !== -1) {
           this.app.jobs[jobIndex] = updatedJob;
@@ -1100,7 +1123,11 @@ export class JobDetailsController {
     const key = `${job.id}\u0000${job.status}`;
     if (this._factsAskedFor === key) return;
     this._factsAskedFor = key;
-    this._fetchStagingFields(job.id);
+    this._fetchStagingFields(job.id).then((answered) => {
+      // A failed ask does not use up this status's one ask: the next update
+      // of the open job asks again (the WS update cadence is the throttle).
+      if (!answered && this._factsAskedFor === key) this._factsAskedFor = null;
+    });
   }
 
   /**

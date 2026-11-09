@@ -12,7 +12,7 @@ import { LogPanelController } from "./modules/log-panel.js";
 import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
-import { JobDetailsController } from "./modules/job-details.js";
+import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
 import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
@@ -27,9 +27,14 @@ const TASK_STATUS_PRIORITY = {
  * status bar's #connection-status. CONNECTING: a socket was created and has
  * not opened. OPEN: onopen ran. BACKOFF: it closed and a reconnect is
  * queued. UNAUTHORIZED: it closed without opening and the session probe
- * answered 401 — the fetch wrapper is reloading to the login page, and no
- * reconnect is queued.
+ * answered 401 — the fetch wrapper is reloading to the login page. No socket
+ * is opened while it holds, but the probe is re-sent every
+ * SESSION_RECHECK_MS, and the first answer that is not a 401 reconnects: the
+ * reload can be cancelled (the unsaved-settings leave prompt) and is never
+ * re-tried, and the operator can log in again in another tab.
  */
+const SESSION_RECHECK_MS = 30000;
+
 export const ConnState = Object.freeze({
   CONNECTING: "connecting",
   OPEN: "open",
@@ -1117,7 +1122,7 @@ export class MoomboxApp {
       this._probeSession().then((unauthorized) => {
         // A newer socket (a manual connect) owns the connection now.
         if (this.ws !== ws) return;
-        if (unauthorized) this._setConnState(ConnState.UNAUTHORIZED);
+        if (unauthorized) this._holdUnauthorized(ws);
         else this.scheduleReconnect();
       });
     };
@@ -1144,6 +1149,27 @@ export class MoomboxApp {
       this.connectWebSocket();
     }, delay);
     this._setConnState(ConnState.BACKOFF, { attempt: this.reconnectAttempts, delay });
+  }
+
+  /**
+   * UNAUTHORIZED: show "Session expired" and re-probe every
+   * SESSION_RECHECK_MS on the reconnect timer (so a manual connect cancels
+   * it). A 401 holds the state; anything else reconnects, and a network error
+   * there lands in the plain backoff through the new socket's own probe. A
+   * probe that answers after a newer socket exists changes nothing.
+   * @param {WebSocket} ws the socket whose refusal began the hold
+   */
+  _holdUnauthorized(ws) {
+    this._setConnState(ConnState.UNAUTHORIZED);
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this._probeSession().then((unauthorized) => {
+        if (this.ws !== ws) return;
+        if (unauthorized) this._holdUnauthorized(ws);
+        else this.connectWebSocket();
+      });
+    }, SESSION_RECHECK_MS);
   }
 
   /**
@@ -1663,7 +1689,7 @@ export class MoomboxApp {
       const resp = await fetch(`/api/jobs/${jobId}`);
       if (this.selectedJobId !== jobId) return; // Selection changed during fetch
       if (resp.ok) {
-        const job = await resp.json();
+        const job = stampFactsStatus(await resp.json());
         // Cache in archivedJobs so subsequent jobs_update messages skip the API check
         const existingIdx = this.archivedJobs.findIndex(j => j.id === job.id);
         if (existingIdx !== -1) {
@@ -1743,7 +1769,7 @@ export class MoomboxApp {
       if (this._consumingJobId !== jobId) return; // a newer deep link took over
       status = resp.status;
       if (resp.ok) {
-        const fetched = await resp.json();
+        const fetched = stampFactsStatus(await resp.json());
         if (this._consumingJobId !== jobId) return; // superseded while the body was read
         const existingIdx = this.archivedJobs.findIndex((j) => j.id === fetched.id);
         if (existingIdx !== -1) this.archivedJobs[existingIdx] = fetched;

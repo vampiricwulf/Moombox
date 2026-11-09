@@ -85,3 +85,79 @@ test("a refused upgrade whose probe succeeds, or cannot reach the server, backs 
     assert.equal(h.sockets.length, sockets + 1, "the backoff did not reconnect");
   }
 });
+
+// UNAUTHORIZED is not a dead end: the fetch wrapper's reload can be cancelled
+// (the unsaved-settings leave prompt) and never retried, and the operator can
+// log in again in another tab. The probe is re-sent every 30 s while the
+// label stays "Session expired", and the first answer that is not a 401
+// reconnects.
+test("an unauthorized dashboard re-probes every 30 s and reconnects once the session is back", { skip }, async () => {
+  let expired = true;
+  const h = await harness.makeApp({
+    routes: { "GET /api/status": () => (expired ? harness.response({ status: 401 }) : {}) },
+  });
+  const sockets = h.sockets.length;
+  lastSocket(h).onclose();
+  await h.flush();
+  await h.flush();
+  assert.equal(h.app._connState, "unauthorized");
+  const before = probes(h);
+
+  h.advance(29999);
+  await h.flush();
+  assert.equal(probes(h), before, "re-probed before 30 s");
+  h.advance(1);
+  await h.flush();
+  await h.flush();
+  assert.equal(probes(h), before + 1, "no re-probe at 30 s");
+  assert.equal(h.app._connState, "unauthorized");
+  assert.match(label(h), /Session expired/);
+  assert.equal(h.sockets.length, sockets);
+
+  expired = false;
+  h.advance(30000);
+  await h.flush();
+  await h.flush();
+  assert.equal(h.sockets.length, sockets + 1, "a restored session did not reconnect");
+  assert.equal(h.app._connState, "connecting");
+});
+
+// A probe that answers after a newer socket exists (a manual connect while it
+// was in flight) belongs to a connection nobody holds any more: neither a 401
+// nor a success may touch the state or queue anything.
+test("a probe answering after a newer socket opened changes nothing", { skip }, async () => {
+  for (const answer of [() => harness.response({ status: 401 }), () => ({})]) {
+    let release;
+    let gated = false;
+    const h = await harness.makeApp({
+      routes: {
+        "GET /api/status": () => {
+          if (!gated) return {};
+          gated = false; // hold the probe only; later status GETs answer at once
+          return new Promise((r) => { release = () => r(answer()); });
+        },
+      },
+    });
+    gated = true;
+    lastSocket(h).onclose();
+    await h.flush();
+    assert.ok(release, "the probe was not sent");
+
+    h.app.connectWebSocket();
+    const ws = lastSocket(h);
+    ws.readyState = 1;
+    ws.onopen();
+    await h.flush();
+    assert.equal(h.app._connState, "open");
+    const sockets = h.sockets.length;
+
+    release();
+    await h.flush();
+    await h.flush();
+    assert.equal(h.app._connState, "open", "a stale probe rewrote a live connection's state");
+    assert.equal(statusEl(h).className, "connected");
+    h.advance(60000);
+    await h.flush();
+    assert.equal(h.sockets.length, sockets, "a stale probe queued a reconnect");
+  }
+});
