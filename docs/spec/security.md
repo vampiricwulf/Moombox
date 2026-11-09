@@ -429,7 +429,7 @@ Note the distinction inside `/api/auth/set-password`: the outer "session or loca
 | Config API (`PUT /api/config`) — the path the web dashboard's Settings page saves through | 400 "A password must be set before enabling external access." | `internal/web/routes/config_routes.go` |
 | Setup wizard (`POST /api/setup/complete`) | 400 "A password (min 8 characters) is required for external access." | `internal/web/routes/setup_routes.go` |
 
-The reverse direction is closed too: removing the dashboard password resets `network_access` in the same write. `POST /api/auth/remove-password` sets it to `localhost` unconditionally; the TUI's `handleRemovePassword` resets when `isExternalAccess` (which covers the `public` alias — see `internal/tui/settings_security.go`).
+The reverse direction is closed too: removing the dashboard password resets `network_access` in the same write. `POST /api/auth/remove-password` sets it to `localhost` unconditionally; the TUI's `handleRemovePassword` resets when `config.IsExternalAccess` (which covers the `public` alias — `internal/config/network_access.go`, the one alias check the web middleware, auth, the boot warnings, the config and setup API guards and the TUI share).
 
 Note also that the config API has no `password_hash` key at all (`applyConfigUpdates` does not read one, and `NetworkConfig.PasswordHash` is tagged `json:"-"`), so the hash can only be changed through the dedicated auth endpoints.
 

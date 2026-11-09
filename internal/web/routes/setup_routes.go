@@ -225,7 +225,7 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 
 		// Validate external access requires password (match TS)
 		if net, ok := updates["network"].(map[string]any); ok {
-			if v, ok := net["network_access"].(string); ok && v == "external" {
+			if v, ok := net["network_access"].(string); ok && config.IsExternalAccess(v) {
 				if cfgCopy.Network.PasswordHash == "" {
 					mu.Unlock()
 					jsonError(rw, "A password (min 8 characters) is required for external access.", http.StatusBadRequest)

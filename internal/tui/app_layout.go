@@ -251,7 +251,7 @@ func (a *App) securityBannerText() string {
 		access = c.Network.NetworkAccess
 		hash = c.Network.PasswordHash
 	})
-	if (access == "external" || access == "public") && hash == "" {
+	if config.IsExternalAccess(access) && hash == "" {
 		return "⚠ SECURITY: network_access is \"" + access + "\" with no dashboard password — every reachable IP has full control. Set a password (` → Network) or lower network_access."
 	}
 	return ""

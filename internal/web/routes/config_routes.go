@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -286,9 +287,7 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 			}
 		}
 		if v, ok := net["network_access"].(string); ok {
-			switch v {
-			case "localhost", "lan", "external":
-			default:
+			if !slices.Contains(config.SettableNetworkAccess, v) {
 				errs["network.network_access"] = "network_access must be localhost, lan, or external"
 			}
 		}
@@ -1253,7 +1252,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 
 		// Prevent enabling external access without a password
 		if net, ok := updates["network"].(map[string]any); ok {
-			if v, ok := net["network_access"].(string); ok && v == "external" {
+			if v, ok := net["network_access"].(string); ok && config.IsExternalAccess(v) {
 				if cfg.Network.PasswordHash == "" {
 					mu.Unlock()
 					jsonError(rw, "A password must be set before enabling external access. Set one in Settings \u2192 Network \u2192 Password.", http.StatusBadRequest)

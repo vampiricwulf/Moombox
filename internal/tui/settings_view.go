@@ -1078,7 +1078,7 @@ func (m *SettingsModel) renderSecurityRemove(w int) string {
 	isExternal := false
 	if m.configStore != nil {
 		m.configStore.Read(func(c *config.MoomboxConfig) {
-			isExternal = isExternalAccess(c.Network.NetworkAccess)
+			isExternal = config.IsExternalAccess(c.Network.NetworkAccess)
 		})
 	}
 	if isExternal {

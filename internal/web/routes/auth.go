@@ -60,7 +60,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 			// can reach the port. Drives the web UI's persistent security
 			// banner (block-set/warn-boot policy — the state can only come
 			// from a hand-edited config file).
-			"passwordlessExternal": (networkAccess == "external" || networkAccess == "public") && passwordHash == "",
+			"passwordlessExternal": config.IsExternalAccess(networkAccess) && passwordHash == "",
 		})
 	})
 

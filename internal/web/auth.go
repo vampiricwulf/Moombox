@@ -407,5 +407,5 @@ func IsScryptHash(s string) bool {
 // IsAuthRequired returns true if auth is required based on config.
 // Auth is required when network_access is "external" or "public" AND a password hash is set.
 func IsAuthRequired(networkAccess, passwordHash string) bool {
-	return (networkAccess == "external" || networkAccess == "public") && passwordHash != ""
+	return config.IsExternalAccess(networkAccess) && passwordHash != ""
 }

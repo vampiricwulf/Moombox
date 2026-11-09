@@ -481,8 +481,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// judged by network_access on their real address (parseIPLiteral and the
 	// classifiers in middleware.go); "127.0.0.1" is IPv4 loopback alone.
 	host := "127.0.0.1"
-	switch s.cfg.Network.NetworkAccess {
-	case "lan", "external", "public":
+	if config.ListensBeyondLoopback(s.cfg.Network.NetworkAccess) {
 		host = "0.0.0.0"
 	}
 
@@ -573,10 +572,10 @@ func (s *Server) Start(ctx context.Context) error {
 	url := fmt.Sprintf("%s://localhost:%d", scheme, actualPort)
 	s.logger.Info(fmt.Sprintf("[Moombox] Web dashboard available at %s", url))
 	// Mirrors the host switch above: all three of these bind 0.0.0.0.
-	if s.cfg.Network.NetworkAccess == "lan" || s.cfg.Network.NetworkAccess == "external" || s.cfg.Network.NetworkAccess == "public" {
+	if config.ListensBeyondLoopback(s.cfg.Network.NetworkAccess) {
 		s.logger.Info(fmt.Sprintf("[WebServer] LAN access enabled (listening on %s)", host))
 	}
-	if (s.cfg.Network.NetworkAccess == "external" || s.cfg.Network.NetworkAccess == "public") && s.cfg.Network.PasswordHash != "" && !s.cfg.Network.HTTPSEnabled {
+	if config.IsExternalAccess(s.cfg.Network.NetworkAccess) && s.cfg.Network.PasswordHash != "" && !s.cfg.Network.HTTPSEnabled {
 		s.logger.Warn("[WebServer] External access with authentication over plain HTTP — session cookies are not encrypted. Consider setting https_enabled = true or using a reverse proxy with HTTPS.")
 	}
 	// Warn-boot half of the passwordless-external policy. Every interactive
@@ -584,7 +583,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// combination, so reaching it means a hand-edited config file. Deliberately
 	// a warning and not a hard failure: an existing deployment fronted by an
 	// authenticating reverse proxy must keep booting.
-	if (s.cfg.Network.NetworkAccess == "external" || s.cfg.Network.NetworkAccess == "public") && s.cfg.Network.PasswordHash == "" {
+	if config.IsExternalAccess(s.cfg.Network.NetworkAccess) && s.cfg.Network.PasswordHash == "" {
 		s.logger.Warn("[WebServer] SECURITY: network_access is \"" + s.cfg.Network.NetworkAccess + "\" with NO dashboard password — the dashboard accepts every IP that can reach this port, unauthenticated. Set a dashboard password or lower network_access; only leave this if an authenticating reverse proxy is the ONLY route to the port.")
 	}
 
