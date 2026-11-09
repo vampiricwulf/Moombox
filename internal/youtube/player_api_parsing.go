@@ -180,7 +180,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 
 	// Published date (spec §12) — status-aware, deliberately independent of
 	// extractScheduledStartTime above (see extractPublishedAt doc comment).
-	publishedAt, publishedPrecision := extractPublishedAt(string(streamStatus), microformat)
+	publishedAt, publishedPrecision := extractPublishedAt(streamStatus, microformat)
 
 	// Length
 	var lengthSeconds *int
@@ -318,9 +318,9 @@ func microformatUploadDate(microformat map[string]any) string {
 // corrected (rank ties don't overwrite) — so normalization happens HERE, at
 // the one producer. An unparseable startTimestamp is treated as no-date
 // (fall through to the microformat date) rather than passed through.
-func extractPublishedAt(status string, microformat map[string]any) (ts, precision string) {
+func extractPublishedAt(status StreamStatus, microformat map[string]any) (ts, precision string) {
 	switch status {
-	case "vod", "post_live":
+	case StreamVOD, StreamPostLive:
 		if lbd, ok := getNestedMap(microformat, "liveBroadcastDetails"); ok {
 			if v := getStr(lbd, "startTimestamp"); v != "" {
 				if t, err := time.Parse(time.RFC3339, v); err == nil {
@@ -331,7 +331,7 @@ func extractPublishedAt(status string, microformat map[string]any) (ts, precisio
 		if v := microformatDate(microformat); v != "" {
 			return v, "day"
 		}
-	case "not_a_stream":
+	case StreamNotAStream:
 		if v := microformatDate(microformat); v != "" {
 			return v, "day"
 		}

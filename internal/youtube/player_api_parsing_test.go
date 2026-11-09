@@ -863,8 +863,10 @@ func TestUpcomingStreamTakesNoUploadDateAsItsStart(t *testing.T) {
 
 func TestExtractPublishedAt(t *testing.T) {
 	cases := []struct {
-		name, status, wantTS, wantPrec string
-		microformat                    map[string]any
+		name             string
+		status           StreamStatus
+		wantTS, wantPrec string
+		microformat      map[string]any
 	}{
 		// YouTube emits startTimestamp offset-bearing ("+00:00"); it MUST come
 		// back Z-normalized. Consumers compare PublishedAt LEXICOGRAPHICALLY
