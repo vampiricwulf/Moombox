@@ -89,8 +89,9 @@ func TestABotWalledStatusProbeReachesTheMonitorsAsAnErroredProbe(t *testing.T) {
 	const upcoming = `{"playabilityStatus":{"status":"LIVE_STREAM_OFFLINE","reason":"This live event will begin in a few moments."},` +
 		`"videoDetails":{"videoId":"test1234567","title":"Stream","author":"a","isLiveContent":true,"isUpcoming":true}}`
 	for _, tc := range []struct {
-		name, embedded, wantStatus string
-		wantProcess, wantFailure   bool
+		name, embedded           string
+		wantStatus               youtube.StreamStatus
+		wantProcess, wantFailure bool
 	}{
 		{"the escalation refuses too", botWall, "", false, true},
 		{"the escalation answers", upcoming, "upcoming", true, false},

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 func TestIsRegexPattern(t *testing.T) {
@@ -388,8 +389,9 @@ func TestIsDenied_CanonicalTable(t *testing.T) {
 	// Spec §9 table — all seven rows (plus the private rows and one extra not_a_stream row). Both
 	// conjuncts load-bearing.
 	cases := []struct {
-		status, playability string
-		want                bool
+		status      youtube.StreamStatus
+		playability string
+		want        bool
 	}{
 		{"upcoming", "members_only", true},
 		{"upcoming", "login_required", true},
@@ -880,7 +882,7 @@ func TestProbeAndClassify_AnEndedBroadcastIsPostLive(t *testing.T) {
 		name            string
 		probe           VideoProbeResult
 		wantOutcome     ProbeOutcome
-		wantStatus      string
+		wantStatus      youtube.StreamStatus
 		wantUnconfirmed bool
 	}{
 		{"age-gated ended", VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "age_restricted", BroadcastEnded: true, BroadcastEndWeak: true}, OutcomeProbed, "post_live", true},

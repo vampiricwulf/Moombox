@@ -19,6 +19,20 @@ const (
 	StreamNotAStream StreamStatus = "not_a_stream"
 )
 
+// IsBroadcast reports whether s is a broadcast that is on or still to come
+// (live or upcoming): what the monitors make a broadcast job of, never
+// windowed by a date.
+func (s StreamStatus) IsBroadcast() bool {
+	return s == StreamLive || s == StreamUpcoming
+}
+
+// IsVODFamily reports whether s is past content (vod, post_live or
+// not_a_stream): what the monitors archive under the channel's VOD rules. The
+// empty status (no probe ran) is neither a broadcast nor past content.
+func (s StreamStatus) IsVODFamily() bool {
+	return s == StreamVOD || s == StreamPostLive || s == StreamNotAStream
+}
+
 // PlayabilityError types from YouTube API.
 type PlayabilityError string
 

@@ -388,7 +388,7 @@ Capped at 10,000 entries; oldest pruned on insert.
 | date_precision | TEXT | `assumed` / `coarse` / `day` / `exact` / `started` — how trustworthy `published` is; upgrades are monotonic |
 | catalog_pos | INTEGER | Position within the source listing; ordering tiebreaker for equal dates |
 | source | TEXT | `rss` / `membership` / `videos` / `streams` — which discovery source last claimed the row |
-| status | TEXT | `unknown` / `upcoming` / `live` / `vod` / `not_a_stream` — last probe classification |
+| status | TEXT | `unknown` / `upcoming` / `live` / `vod` / `not_a_stream` — last probe classification (`database.FeedStatus*`, `internal/database/database_feed_items.go`); a probe's `youtube.StreamStatus` is stored through `feedStatusFor` (`post_live` → `vod`) |
 | first_seen | TEXT | RFC3339 — the cycle that first inserted the row (new-vs-backlog discriminator) |
 | recheck_at | TEXT | NOT NULL, `''`. Added v23: when the row is next probed after a broadcast end that rests on weak signals the monitor's end check could not confirm (RFC3339 UTC; `''` = none pending). Such a row is stored `vod` — ended for announcing. Until this instant it is in the scope read only where its date or status would put any row (the restart carve-out still probes it every cycle there, without the end check), and from it wherever its date is (`FeedScope`'s Q3; [platform-services.md](platform-services.md) § Stream Status Classification) |
 | recheck_step | INTEGER | NOT NULL, `0`. Added v23: re-checks scheduled so far, which picks the next wait (`endRecheckBackoff`, `internal/monitor/utils.go`: 1 h, 6 h, then daily) |

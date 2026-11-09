@@ -14,6 +14,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 // newTestDecapiMonitor builds a DecapiMonitor over a real (temp-file) db and
@@ -467,7 +468,7 @@ func TestDecapi_TerminalMemoCoversTheOutOfWindowArm(t *testing.T) {
 
 // TestDecapi_DeniedVerdictIsLatched is MON-1's second half. "Denied" is not a
 // terminal STATUS (it rides on "upcoming", which becomes live and then vod),
-// so decapiTerminalStatus cannot latch it — yet DECAPI reports the channel's
+// so isTerminalFeedStatus cannot latch it — yet DECAPI reports the channel's
 // NEWEST video every cycle, and at the 15 s interval floor an un-latched
 // refusal is ~240 anonymous player probes an hour for an answer only a cookie
 // change can alter (and the feed's membership path owns that answer).
@@ -840,7 +841,7 @@ func TestDecapi_ARepeatedWindowSkipLogsAtDebug(t *testing.T) {
 	)
 	cases := []struct {
 		name       string
-		status     string
+		status     youtube.StreamStatus
 		probeDate  func(context.Context, string) (string, string, error)
 		fetchFails bool
 	}{

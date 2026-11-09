@@ -10,6 +10,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 // weakEnd is how the monitors' ANDROID_VR probe answers the field case: an
@@ -87,7 +88,7 @@ func TestProbeAndClassify_AWeakEndIsConfirmedBeforeItIsTrusted(t *testing.T) {
 		chk             EndCheck
 		checkErr        error
 		wantOutcome     ProbeOutcome
-		wantStatus      string
+		wantStatus      youtube.StreamStatus
 		wantUnconfirmed bool
 		wantChecks      int
 		wantDate        string

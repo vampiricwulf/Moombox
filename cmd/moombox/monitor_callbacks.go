@@ -1407,7 +1407,7 @@ func monitorProbe(probe func(ctx context.Context, videoID string) (*youtube.Vide
 // read; monitorProbe is its only caller.
 func monitorProbeResult(meta *youtube.VideoInfo) *monitor.VideoProbeResult {
 	return &monitor.VideoProbeResult{
-		StreamStatus:       string(meta.StreamStatus),
+		StreamStatus:       meta.StreamStatus,
 		Title:              meta.Title,
 		PublishedAt:        meta.PublishedAt,
 		PublishedPrecision: meta.PublishedPrecision,

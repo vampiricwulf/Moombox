@@ -83,7 +83,7 @@ type decapiTerminalMemo struct {
 	// with — members_only only, never login_required (deniedIsSettled owns
 	// that split; ProcessYouTubeVideoResult.Denied already carries it
 	// narrowed). It is a separate fact from `status` because the status it
-	// rides on is "upcoming", which decapiTerminalStatus can never call
+	// rides on is "upcoming", which isTerminalFeedStatus can never call
 	// terminal — so without this a settled refusal is re-probed at the 15 s
 	// interval floor forever, ~240 anonymous player calls an hour for an
 	// answer DECAPI cannot change.
@@ -124,30 +124,14 @@ type decapiTerminalMemo struct {
 	recheckStep int
 }
 
-// decapiTerminalStatus reports whether a classification can no longer change.
-// Only "vod" and "not_a_stream" qualify: "upcoming" becomes "live" becomes
-// "vod". This is the same terminal set the feed walk refuses to re-probe
-// (walk.go, the status switch in walk). A post_live result is recorded as
-// the vod it is (decapiMemoStatus).
-func decapiTerminalStatus(status string) bool {
-	return status == "vod" || status == "not_a_stream"
-}
-
-// decapiMemoStatus is the status the memo keeps for a classification. A
-// post_live result is a broadcast the probe found over, so it is the vod the
-// feed stores it as (applyProbe's normalization), and every reason the memo
-// trusts a vod (history, a dated window verdict, the channel archiving no
-// VODs) holds for it as well. Recorded raw it was never terminal, and DECAPI
-// probed a channel's ended newest video every 15 s for good. An end the end
-// check could not confirm is post_live too; what keeps the memo from
-// settling it is recheckAt, which terminalMemoHit answers before any of
-// those reasons.
-func decapiMemoStatus(status string) string {
-	if status == "post_live" {
-		return "vod"
-	}
-	return status
-}
+// The memo's status is feedStatusFor's (feed_status.go): a post_live
+// result is a broadcast the probe found over, so it is the vod the feed
+// stores it as, and every reason the memo trusts a vod (history, a dated
+// window verdict, the channel archiving no VODs) holds for it as well. An
+// end the end check could not confirm is post_live too; what keeps the memo
+// from settling it is recheckAt, which terminalMemoHit answers before any of
+// those reasons. Terminal is isTerminalFeedStatus, the set the feed walk
+// refuses to re-probe (settledTerminal).
 
 // DecapiMonitor polls DECAPI for latest videos from YouTube channels.
 type DecapiMonitor struct {
@@ -896,7 +880,7 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	// job but is deliberately not remembered. A settled post_live is recorded
 	// as the vod it is; an unconfirmed end is held until its re-check.
 	dm.recordTerminalMemo(ch.ID, videoID, result)
-	if !result.ShouldProcess && !ch.IncludeNonLiveContent && decapiTerminalStatus(decapiMemoStatus(result.StreamStatus)) {
+	if !result.ShouldProcess && !ch.IncludeNonLiveContent && isTerminalFeedStatus(feedStatusFor(result.StreamStatus)) {
 		dm.noteTerminalMemoNonLiveOff(ch.ID, videoID)
 	}
 	// Window check (§13): "the newest video on the channel" is not the same
@@ -912,7 +896,7 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	// self-healing 'unknown' store row (DECAPI writes none, §13), so the
 	// first sighting's skip logs at Info, and its failed date fetch at Warn,
 	// to keep them visible.
-	if result.ShouldProcess && (result.StreamStatus == "vod" || result.StreamStatus == "post_live" || result.StreamStatus == "not_a_stream") {
+	if result.ShouldProcess && result.StreamStatus.IsVODFamily() {
 		// The end check (ConfirmEnd) is this same WEB call: when it ran, its
 		// date is the answer the fetch would get, and asking again would
 		// only repeat it. DECAPI has no stored date to protect — every
@@ -977,7 +961,7 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	// StreamStatus empty and lands on the VOD arm — matching its pre-Plan3
 	// "just create the job" behavior.
 	d := DispositionNewVOD
-	if result.StreamStatus == "live" || result.StreamStatus == "upcoming" {
+	if result.StreamStatus.IsBroadcast() {
 		d = DispositionBroadcast
 	}
 	if dm.OnVideoFound != nil {
@@ -1031,12 +1015,12 @@ func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string, reprobe bool
 	if m.denied {
 		// A settled refusal needs no second reason, and the arms below cannot
 		// supply one: the status it rides on ("upcoming") is not
-		// terminal, so decapiTerminalStatus returns false before `reprobe` or
+		// terminal, so isTerminalFeedStatus returns false before `reprobe` or
 		// the window verdict is ever consulted — for a verdict that is in
 		// fact settled until the channel publishes something new.
 		return true
 	}
-	if !decapiTerminalStatus(m.status) {
+	if !isTerminalFeedStatus(m.status) {
 		return false
 	}
 	return reprobe || (m.outsideWindow && m.windowDays == windowDays) || (m.nonLiveOff && !includeNonLive)
@@ -1046,7 +1030,7 @@ func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string, reprobe bool
 // replacing any previous one. An empty status (probe errored, cooldown
 // suppressed it, or no probe is wired) is recorded as-is and is not terminal,
 // so the next cycle probes again. A post_live is recorded as vod
-// (decapiMemoStatus).
+// (feedStatusFor).
 //
 // An unconfirmed end schedules its re-check: endRecheckDelay after now, the
 // step continuing from the last one for this same videoID — an hour, six,
@@ -1064,7 +1048,7 @@ func (dm *DecapiMonitor) recordTerminalMemo(channelID, videoID string, r Process
 	if prev, ok := dm.terminalMemo[channelID]; ok && prev.videoID == videoID {
 		step = prev.recheckStep
 	}
-	m := decapiTerminalMemo{videoID: videoID, status: decapiMemoStatus(r.StreamStatus), denied: r.Denied}
+	m := decapiTerminalMemo{videoID: videoID, status: feedStatusFor(r.StreamStatus), denied: r.Denied}
 	switch {
 	case r.EndUnconfirmed:
 		m.recheckAt = now.Add(endRecheckDelay(step))
