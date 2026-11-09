@@ -34,8 +34,8 @@ test("pendingAutoAction answers the shared table as jobstate does", () => {
   }
   assert.equal(pendingAutoAction(null), "");
   assert.equal(pendingAutoActionText(""), "");
-  assert.match(pendingAutoActionText("auto_mux"), /Will mux automatically/);
-  assert.match(pendingAutoActionText("auto_retry"), /Will retry automatically/);
+  assert.match(pendingAutoActionText("auto_mux"), /Muxes automatically once Twitch confirms the broadcast over, while the channel is monitored/);
+  assert.match(pendingAutoActionText("auto_retry"), /Retries automatically if the broadcast is live again, while the channel is monitored/);
 });
 
 // The Go twin is worker TestReinitializePreviewSummary's cancels cases.
@@ -43,11 +43,11 @@ test("pendingAutoAction answers the shared table as jobstate does", () => {
 // Mutants: the cancels clause dropped; the pending counts left out of the sum.
 test("the Reinitialize clause names the automatic action it cancels", () => {
   assert.equal(reinitializeDeletesText({ stagedFiles: 1, stagedBytes: 10, pendingAutoMux: 1 }),
-    "deletes 1 staged file (10B); it cancels the pending automatic mux");
+    "cancels the pending automatic mux, and deletes 1 staged file (10B)");
   assert.equal(reinitializeDeletesText({ pendingAutoRetry: 1 }),
-    "deletes nothing recorded; it cancels the pending automatic retry");
+    "cancels the pending automatic retry, and deletes nothing recorded");
   assert.equal(reinitializeDeletesText({ pendingAutoMux: 2, pendingAutoRetry: 3 }),
-    "deletes nothing recorded; it cancels 2 pending automatic muxes and 3 pending automatic retries");
+    "cancels 2 pending automatic muxes and 3 pending automatic retries, and deletes nothing recorded");
   const sum = sumReinitializePreviews([{ pendingAutoMux: 1 }, { pendingAutoRetry: 1, pendingAutoMux: 1 }]);
   assert.equal(sum.pendingAutoMux, 2);
   assert.equal(sum.pendingAutoRetry, 1);
@@ -66,7 +66,7 @@ test("an Error row the monitor will mux says so in the job list", { skip }, asyn
   h.app.renderJobs();
   const cell = (id) => h.document.querySelector(`.video-item[data-job-id="${id}"] .job-progress-text`);
   assert.match(cell("tw_m").textContent, /Auto-mux pending/);
-  assert.match(cell("tw_m").querySelector(".job-auto-action").title, /Will mux automatically/);
+  assert.match(cell("tw_m").querySelector(".job-auto-action").title, /Muxes automatically once Twitch confirms the broadcast over, while the channel is monitored/);
   assert.equal(cell("plain").querySelector(".job-auto-action"), null);
 });
 
@@ -88,7 +88,7 @@ test("the job details name the pending automatic action and drop it when the row
   await h.flush(); await h.flush();
   const block = () => h.document.querySelector(".details-auto-action");
   assert.ok(block() && !block().hidden, "the pending mux is shown");
-  assert.match(block().textContent, /Will mux automatically/);
+  assert.match(block().textContent, /Muxes automatically once Twitch confirms the broadcast over, while the channel is monitored/);
 
   h.app.handleMessage({ type: "job_update", payload: muxRow({ status: "Muxing", parkReason: undefined, error: undefined }) });
   await h.flush(); await h.flush();
@@ -109,7 +109,7 @@ test("the Reinitialize confirm warns that it cancels the pending mux", { skip },
   h.app.showConfirm = async (msg) => { asked = msg; return false; };
   await h.app.reinitializeJob("tw_m");
   await h.flush();
-  assert.match(asked ?? "", /This deletes 2 staged files \(2\.0KB\); it cancels the pending automatic mux\./);
+  assert.match(asked ?? "", /This cancels the pending automatic mux, and deletes 2 staged files \(2\.0KB\)\./);
 });
 
 // Mutant: isWaitLine reading the marker alone (the closing paren unchecked),
@@ -234,4 +234,50 @@ test("Queued rows and the disk indicator follow the admission holds", { skip }, 
     jobs: { q1: { attempt: 2, of: 3, until } } } });
   assert.match(cell().textContent, /^Retry 2 of 3 at \d\d:\d\d$/);
   assert.doesNotMatch(ind.textContent, /holding/, "the reopened gate redraws the indicator");
+});
+
+// The open job dialog of a Queued row follows the holds too, as the TUI's
+// details pane does (JobDetailsModel.SetAdmissionHolds): an admission_holds
+// frame rewrites its progress line without waiting for the job's next
+// job_update.
+//
+// Mutant: setAdmissionHolds redrawing only the job-list cells.
+test("an open Queued job's dialog follows the admission holds", { skip }, async () => {
+  const h = await harness.makeApp({
+    routes: {
+      "GET /api/jobs/:id": () => ({ ...queued({ isVod: true }), hasStaging: false, hasSegments: false, asides: [], keptChatSidecar: false,
+        unmuxedParts: false, muxGaps: [] }),
+      "GET /api/jobs/:id/logs": () => [],
+    },
+  });
+  const dlg = h.el("details-dialog");
+  Object.defineProperty(dlg, "open", { get() { return !!this._open; } });
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [queued({ isVod: true })] } });
+  await h.flush();
+  h.app.details.showJobDetails(h.app.jobs[0]);
+  await h.flush(); await h.flush();
+  const progress = () => h.document.querySelector('#job-details-content [data-field="progress"]');
+  assert.ok(progress(), "premise: the dialog has a progress row");
+  assert.equal(progress().textContent, "Waiting in queue...");
+
+  h.app.handleMessage({ type: "admission_holds", payload: { offline: false, diskHeld: true } });
+  assert.equal(progress().textContent, "Held: disk full");
+});
+
+// A reconnect's initial_state carries the holds snapshot; the disk indicator
+// redraws from it, as it does from an admission_holds frame or /api/status.
+//
+// Mutant: initial_state assigning admissionHolds without the redraw — the
+// indicator keeps "holding" from before the disconnect.
+test("a reconnect's initial_state redraws the disk indicator from its holds", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [], admissionHolds: { offline: false, diskHeld: true } } });
+  await h.flush();
+  h.app.stats.updateDiskIndicator({ free: 12 * 2 ** 30, total: 200 * 2 ** 30, usedPct: 94, warnLevel: "warn" });
+  const ind = h.document.getElementById("disk-indicator");
+  assert.match(ind.textContent, /holding/);
+
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [], admissionHolds: { offline: false, diskHeld: false } } });
+  await h.flush();
+  assert.doesNotMatch(ind.textContent, /holding/, "the snapshot's open gate redraws the indicator");
 });

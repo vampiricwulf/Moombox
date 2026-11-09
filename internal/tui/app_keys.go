@@ -779,8 +779,16 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 		a.chord.action = key
 		a.chord.actionTime = time.Now()
 		a.chord.jobID = job.ID
-		a.setFeedback(fmt.Sprintf("Press %s to confirm %s \"%s\"%s (3s)",
-			strings.ToUpper(key), strings.ToLower(item.HintLabel), job.Title, confirmDetail(item, []string{job.ID})))
+		// The clause leads the title: the line is one row cut to the
+		// terminal's width, and a long title must not push what the action
+		// deletes or cancels (owner ruling R-D2) off its end.
+		if d := confirmDetail(item, []string{job.ID}); d != "" {
+			a.setFeedback(fmt.Sprintf("Press %s to confirm %s%s — \"%s\" (3s)",
+				strings.ToUpper(key), strings.ToLower(item.HintLabel), d, job.Title))
+		} else {
+			a.setFeedback(fmt.Sprintf("Press %s to confirm %s \"%s\" (3s)",
+				strings.ToUpper(key), strings.ToLower(item.HintLabel), job.Title))
+		}
 		return a, nil, true
 	}
 

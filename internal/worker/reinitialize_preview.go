@@ -134,12 +134,14 @@ func (p *ReinitializePreview) Add(o ReinitializePreview) {
 // Summary is the confirm's clause naming what the reset deletes, e.g.
 // "deletes 1 set-aside recording, 2 recorded parts (1.2GB), 40 staged files
 // (850.0MB) and 5 imported chapters", or "deletes nothing
-// recorded" when there is nothing to lose — followed, when a job's row waits
-// on an automatic action, by what the reset cancels: "; it cancels the
-// pending automatic mux" (a batch: "2 pending automatic muxes and 1 pending
-// automatic retry"). The TUI's A I confirm line reads
-// it; the dashboard's twin is reinitializeDeletesText (web/public/modules/
-// utils.js), worded alike, sizes as utils.FormatFileSize writes them.
+// recorded" when there is nothing to lose — led, when a job's row waits on
+// an automatic action, by what the reset cancels: "cancels the pending
+// automatic mux, and deletes …" (a batch: "cancels 2 pending automatic muxes
+// and 1 pending automatic retry, and …"). The warning comes first because the
+// TUI's A I confirm line reads Summary ahead of the job's title and that line
+// is cut to the terminal's width, so its tail is what a narrow terminal
+// loses. The dashboard's twin is reinitializeDeletesText
+// (web/public/modules/utils.js), worded alike, sizes as utils.FormatFileSize writes them.
 func (p ReinitializePreview) Summary() string {
 	plural := func(n int, one, many string) string {
 		if n == 1 {
@@ -169,10 +171,13 @@ func (p ReinitializePreview) Summary() string {
 	default:
 		deletes = "deletes " + strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
 	}
-	return deletes + p.cancelsClause()
+	if c := p.cancelsClause(); c != "" {
+		return c + ", and " + deletes
+	}
+	return deletes
 }
 
-// cancelsClause is Summary's tail naming the automatic actions the reset
+// cancelsClause is Summary's head naming the automatic actions the reset
 // cancels, "" when there are none.
 func (p ReinitializePreview) cancelsClause() string {
 	pending := func(n int, one, many string) string {
@@ -191,5 +196,5 @@ func (p ReinitializePreview) cancelsClause() string {
 	if len(c) == 0 {
 		return ""
 	}
-	return "; it cancels " + strings.Join(c, " and ")
+	return "cancels " + strings.Join(c, " and ")
 }

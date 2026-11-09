@@ -1221,6 +1221,9 @@ export const MAX_TWITCH_AUTO_RETRIES = 2;
 export function pendingAutoAction(job) {
   if (!job || job.platform !== "twitch" || job.status !== "Error") return "";
   if (job.parkReason === "twitch_end_unconfirmed") return "auto_mux";
+  // A manual add writes no history row, so the monitor's recovery never
+  // reaches it (jobstate.PendingAutoAction); its end latch is still the mux's.
+  if (job.manuallyAdded) return "";
   if (job.error !== TWITCH_OFFLINE_ERR_MSG && job.parkReason !== "twitch_unreachable") return "";
   if (job.lastVideoSeq !== undefined && job.lastVideoSeq !== null) return "";
   return (Number(job.autoRetryCount) || 0) < MAX_TWITCH_AUTO_RETRIES ? "auto_retry" : "";
@@ -1233,8 +1236,8 @@ export function pendingAutoAction(job) {
  * @returns {string}
  */
 export function pendingAutoActionText(action) {
-  if (action === "auto_mux") return "Will mux automatically once Twitch confirms the broadcast over";
-  if (action === "auto_retry") return "Will retry automatically when the broadcast is live again";
+  if (action === "auto_mux") return "Muxes automatically once Twitch confirms the broadcast over, while the channel is monitored";
+  if (action === "auto_retry") return "Retries automatically if the broadcast is live again, while the channel is monitored";
   return "";
 }
 
@@ -1245,8 +1248,9 @@ export function pendingAutoActionText(action) {
  * The Go twin is worker.ReinitializePreview.Summary, which the TUI's A I
  * confirm line reads: the same words, sizes as formatBytes writes them.
  * A preview whose job waits on an automatic action (pendingAutoMux,
- * pendingAutoRetry, owner ruling R-D2) adds what the reset cancels: "; it
- * cancels the pending automatic mux".
+ * pendingAutoRetry, owner ruling R-D2) leads with what the reset cancels:
+ * "cancels the pending automatic mux, and deletes …" (first, as the TUI line
+ * that is cut to the terminal's width puts it).
  * @param {{setAsideRecordings?: number, recordedParts?: number, recordedPartBytes?: number,
  *          stagedFiles?: number, stagedBytes?: number, importedChapters?: number,
  *          pendingAutoMux?: number, pendingAutoRetry?: number}} p
@@ -1268,7 +1272,7 @@ export function reinitializeDeletesText(p) {
   const cancels = [];
   if (n("pendingAutoMux") > 0) cancels.push(pending(n("pendingAutoMux"), "mux", "muxes"));
   if (n("pendingAutoRetry") > 0) cancels.push(pending(n("pendingAutoRetry"), "retry", "retries"));
-  return cancels.length ? `${deletes}; it cancels ${cancels.join(" and ")}` : deletes;
+  return cancels.length ? `cancels ${cancels.join(" and ")}, and ${deletes}` : deletes;
 }
 
 /**

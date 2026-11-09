@@ -1270,7 +1270,10 @@ export class MoomboxApp {
         this.details._preserveStagingFields([...this.jobs, ...this.archivedJobs], p.jobs || []);
         this.jobs = p.jobs || [];
         this.logPanel.setSnapshot(p.logs || [], p.logSeq);
-        if (p.admissionHolds) this.admissionHolds = p.admissionHolds;
+        // Through setAdmissionHolds, not a bare assignment: the snapshot may
+        // close or open the disk gate a disconnect missed, and the gauge and
+        // indicator read it (stats.onAdmissionHolds).
+        if (p.admissionHolds) this.setAdmissionHolds(p.admissionHolds);
         this.nextFeedCheck = p.nextFeedCheck || 0;
         this.nextDecapiCheck = p.nextDecapiCheck || 0;
         this.nextTwitchCheck = p.nextTwitchCheck || 0;
@@ -1602,8 +1605,9 @@ export class MoomboxApp {
 
   /**
    * setAdmissionHolds stores the backlog scheduler's hold snapshot and
-   * redraws what reads it: each Queued row's line (formatProgress) and the
-   * disk gauge and indicator ("holding").
+   * redraws what reads it: each Queued row's line (formatProgress), an open
+   * job dialog's progress row when that job is Queued, and the disk gauge and
+   * indicator ("holding").
    */
   setAdmissionHolds(holds) {
     this.admissionHolds = holds || null;
@@ -1618,6 +1622,10 @@ export class MoomboxApp {
       }
       cell.title = this.formatProgress(job);
     }
+    // An open dialog on a Queued job reads the holds too (its progress row),
+    // as the TUI's details pane does; its own job_update may be far off.
+    const open = this.selectedJobId ? this.jobs.find((j) => j.id === this.selectedJobId) : null;
+    if (open?.status === "Queued") this.details.updateJobDetails(open);
     this.stats.onAdmissionHolds();
   }
 

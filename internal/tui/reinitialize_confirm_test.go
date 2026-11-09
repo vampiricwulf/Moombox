@@ -46,7 +46,7 @@ func TestReinitializeIsConfirmGatedAndNamesWhatItDeletes(t *testing.T) {
 	if len(reinit) != 0 {
 		t.Fatalf("A I reinitialized %v without a confirm", reinit)
 	}
-	if !strings.Contains(app.feedback.msg, `Press I to confirm reinit "Alpha": deletes 2 set-aside recordings (3s)`) {
+	if !strings.Contains(app.feedback.msg, `Press I to confirm reinit: deletes 2 set-aside recordings — "Alpha" (3s)`) {
 		t.Errorf("confirm line = %q, want it to name what the reset deletes", app.feedback.msg)
 	}
 	if len(asked) != 1 || len(asked[0]) != 1 || asked[0][0] != "a" {
@@ -105,5 +105,55 @@ func TestActionMenuReinitializeFooterNamesWhatItDeletes(t *testing.T) {
 	words := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(m.View()), "│", " ")), " ")
 	if v := words; !strings.Contains(v, "deletes 3 recorded parts (a)") {
 		t.Errorf("menu confirm footer lacks what the reset deletes:\n%s", v)
+	}
+}
+
+// TestReinitializeConfirmKeepsTheCancelWarningOnANarrowTerminal: the A I
+// confirm line is one row, cut to the terminal's width, so whatever sits at
+// its end is the first thing a narrow terminal drops. The warning that the
+// reset cancels a pending automatic mux (owner ruling R-D2) leads the clause
+// (ReinitializePreview.Summary), and the clause leads the job's title, so a
+// long title on an 80-column terminal still shows it.
+//
+// Mutant: the clause back after the title (or the warning back after the
+// deletes list) — "cancels" is cut off.
+func TestReinitializeConfirmKeepsTheCancelWarningOnANarrowTerminal(t *testing.T) {
+	app := NewApp()
+	app.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	app.ReinitializeSummary = func([]string) string {
+		return "cancels the pending automatic mux, and deletes 40 staged files (850.0MB)"
+	}
+	title := "StreamerX — " + strings.Repeat("a very long broadcast title ", 3)
+	app.taskList.SetJobs([]*database.Job{
+		{ID: "tw_m", Title: title, Platform: "twitch", Status: database.StatusError, CreatedAt: "2026-10-04T10:00:00Z"},
+	})
+	app.handleKey(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	app.handleKey(tea.KeyPressMsg{Code: 'i', Text: "i"})
+	if !strings.Contains(app.feedback.msg, "cancels the pending automatic mux") {
+		t.Fatalf("premise: confirm line = %q", app.feedback.msg)
+	}
+	if v := ansi.Strip(app.View().Content); !strings.Contains(v, "cancels the pending automatic mux") {
+		t.Errorf("the 80-column view lost the cancel warning; confirm line = %q", app.feedback.msg)
+	}
+}
+
+// TestActionMenuReinitializeFooterKeepsTheCancelWarning: the menu's confirm
+// footer at 80 columns still carries the R-D2 warning, which leads the
+// summary.
+func TestActionMenuReinitializeFooterKeepsTheCancelWarning(t *testing.T) {
+	m := NewActionMenuModel()
+	m.SetSize(80, 30)
+	job := &database.Job{ID: "tw_m", Title: strings.Repeat("a very long broadcast title ", 3), Platform: "twitch", Status: database.StatusError}
+	m.SetJobs([]*database.Job{job})
+	m.Open([]ActionMenuItem{{Chord: "A I", Label: "Reinitialize Job", Category: "Action", NeedsJob: true, NeedsConfirm: true,
+		ConfirmDetail: func([]string) string {
+			return "cancels the pending automatic mux, and deletes 2 set-aside recordings, 3 recorded parts (1.2GB) and 40 staged files (850.0MB)"
+		}}})
+	m.skipMainForward()
+	m.HandleKey(keyEnter)
+	m.HandleKey(keyEnter)
+	words := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(m.View()), "│", " ")), " ")
+	if !strings.Contains(words, "cancels the pending automatic mux") {
+		t.Errorf("menu confirm footer at 80 columns lost the cancel warning:\n%s", words)
 	}
 }

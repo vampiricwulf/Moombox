@@ -84,10 +84,23 @@ func AutoMuxPending(job *database.Job) bool {
 
 // PendingAutoAction is the automatic action the Twitch monitor will take for
 // job, if any: AutoActionMux for a row the unconfirmed-end latch marked,
-// AutoActionRetry for a Twitch row TwitchAutoRetryPending accepts, else
-// AutoActionNone. Derived from the row, never persisted. "Will" is the row's
-// side of it: the monitor acts only for a channel it still polls, and only
-// once the broadcast answers (live again for a retry, over for a mux).
+// AutoActionRetry for a Twitch row TwitchAutoRetryPending accepts that the
+// recovery can reach, else AutoActionNone. Derived from the row, never
+// persisted.
+//
+// Reach: the recovery (monitor.processStreamInfo) acts only on a row it finds
+// HasProcessed under twitch.BuildJobID's "tw_<stream id>", and a manual add
+// writes no history row (and a manual add of an offline channel is
+// "tw_manual_<login>_<n>"), so a ManuallyAdded row is never offered one —
+// TwitchAutoRetryPending, which the monitor and setJobError read, keeps
+// answering for it as before; only this derived answer drops it. The
+// automatic mux does reach a manual row: dispatchEndedBroadcasts reads the
+// login from either id shape.
+//
+// The row's side of it only: the monitor acts only for a channel it still
+// polls, and only once the broadcast answers (live again for a retry, over
+// for a mux). A row cannot tell whether its channel is still configured, so
+// Text states that condition rather than promising the action.
 //
 // Both UIs show it (the dashboard's job row and details, the TUI's details
 // pane and row tag), and both Reinitialize confirms warn that the reset
@@ -97,7 +110,7 @@ func PendingAutoAction(job *database.Job) AutoAction {
 	switch {
 	case AutoMuxPending(job):
 		return AutoActionMux
-	case job != nil && job.Platform == "twitch" && TwitchAutoRetryPending(job):
+	case job != nil && job.Platform == "twitch" && !job.ManuallyAdded && TwitchAutoRetryPending(job):
 		return AutoActionRetry
 	}
 	return AutoActionNone
@@ -108,9 +121,9 @@ func PendingAutoAction(job *database.Job) AutoAction {
 func (a AutoAction) Text() string {
 	switch a {
 	case AutoActionMux:
-		return "Will mux automatically once Twitch confirms the broadcast over"
+		return "Muxes automatically once Twitch confirms the broadcast over, while the channel is monitored"
 	case AutoActionRetry:
-		return "Will retry automatically when the broadcast is live again"
+		return "Retries automatically if the broadcast is live again, while the channel is monitored"
 	}
 	return ""
 }

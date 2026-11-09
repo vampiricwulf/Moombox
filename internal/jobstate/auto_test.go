@@ -207,6 +207,14 @@ func TestPendingAutoAction(t *testing.T) {
 		{"end unconfirmed but no longer Error", tw(database.StatusCancelled, "", database.ParkReasonTwitchEndUnconfirmed), AutoActionNone},
 		{"offline flap", tw(database.StatusError, TwitchOfflineErrMsg, database.ParkReasonNone), AutoActionRetry},
 		{"unreachable", tw(database.StatusError, "dial tcp: no such host", database.ParkReasonTwitchUnreachable), AutoActionRetry},
+		// A manual add never reaches the recovery: the add writes no history
+		// row, so processStreamInfo never finds it HasProcessed (and a
+		// tw_manual_ id is not the tw_<stream id> the monitor builds). Its end
+		// latch is still the mux's: dispatchEndedBroadcasts reads the login
+		// from either id shape.
+		{"manual add, unreachable: no monitor retries it", &database.Job{ID: "tw_manual_x_1", Platform: "twitch", Status: database.StatusError, Error: "dial tcp", ParkReason: database.ParkReasonTwitchUnreachable, ManuallyAdded: true}, AutoActionNone},
+		{"manual add live at add time, unreachable", &database.Job{ID: "tw_4242", Platform: "twitch", Status: database.StatusError, Error: "dial tcp", ParkReason: database.ParkReasonTwitchUnreachable, ManuallyAdded: true}, AutoActionNone},
+		{"manual add, end unconfirmed: still the mux's", &database.Job{ID: "tw_manual_x_1", Platform: "twitch", Status: database.StatusError, Error: "twitch HLS: 500", ParkReason: database.ParkReasonTwitchEndUnconfirmed, ManuallyAdded: true}, AutoActionMux},
 		{"offline flap with a segment", &database.Job{Platform: "twitch", Status: database.StatusError, Error: TwitchOfflineErrMsg, LastVideoSeq: &seq}, AutoActionNone},
 		{"offline flap, budget spent", &database.Job{Platform: "twitch", Status: database.StatusError, Error: TwitchOfflineErrMsg, AutoRetryCount: MaxTwitchAutoRetries}, AutoActionNone},
 		{"offline flap text on a YouTube row", &database.Job{Platform: "youtube", Status: database.StatusError, Error: TwitchOfflineErrMsg}, AutoActionNone},
@@ -225,6 +233,14 @@ func TestPendingAutoAction(t *testing.T) {
 	}
 	if AutoActionNone.Text() != "" || AutoActionMux.Text() == "" || AutoActionRetry.Text() == "" {
 		t.Error("Text: none must be empty and each action must have a sentence")
+	}
+	// The row alone cannot tell whether the monitor still polls the channel
+	// (a removed channel's row waits on nothing), so each sentence states
+	// that condition rather than promising the action.
+	for _, a := range []AutoAction{AutoActionMux, AutoActionRetry} {
+		if !strings.HasSuffix(a.Text(), ", while the channel is monitored") {
+			t.Errorf("%s: Text %q does not state the monitored-channel condition", a, a.Text())
+		}
 	}
 }
 

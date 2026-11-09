@@ -111,9 +111,9 @@ func TestReinitializePreviewSummary(t *testing.T) {
 			"deletes 2 set-aside recordings, 3 recorded parts (1.5KB), 1 staged file (100B) and 5 imported chapters"},
 		{ReinitializePreview{StagedFiles: 4, StagedBytes: 2048, ImportedChapters: 1}, "deletes 4 staged files (2.0KB) and 1 imported chapter"},
 		// What the reset cancels (owner ruling R-D2).
-		{ReinitializePreview{StagedFiles: 1, StagedBytes: 10, PendingAutoMux: 1}, "deletes 1 staged file (10B); it cancels the pending automatic mux"},
-		{ReinitializePreview{PendingAutoRetry: 1}, "deletes nothing recorded; it cancels the pending automatic retry"},
-		{ReinitializePreview{PendingAutoMux: 2, PendingAutoRetry: 3}, "deletes nothing recorded; it cancels 2 pending automatic muxes and 3 pending automatic retries"},
+		{ReinitializePreview{StagedFiles: 1, StagedBytes: 10, PendingAutoMux: 1}, "cancels the pending automatic mux, and deletes 1 staged file (10B)"},
+		{ReinitializePreview{PendingAutoRetry: 1}, "cancels the pending automatic retry, and deletes nothing recorded"},
+		{ReinitializePreview{PendingAutoMux: 2, PendingAutoRetry: 3}, "cancels 2 pending automatic muxes and 3 pending automatic retries, and deletes nothing recorded"},
 	} {
 		if got := tc.p.Summary(); got != tc.want {
 			t.Errorf("Summary(%+v) = %q, want %q", tc.p, got, tc.want)
@@ -202,7 +202,7 @@ func TestPreviewReinitializeNamesThePendingAutomaticAction(t *testing.T) {
 	retry := &database.Job{ID: "tw_r", Platform: "twitch", Status: database.StatusError, Error: TwitchOfflineErrMsg}
 	plain := &database.Job{ID: "yt_p", Platform: "youtube", Status: database.StatusError, Error: "boom"}
 	if p := PreviewReinitialize(nil, base, mux); p.PendingAutoMux != 1 || p.PendingAutoRetry != 0 ||
-		!strings.HasSuffix(p.Summary(), "; it cancels the pending automatic mux") {
+		!strings.HasPrefix(p.Summary(), "cancels the pending automatic mux, and ") {
 		t.Errorf("mux row: %+v %q", p, p.Summary())
 	}
 	if p := PreviewReinitialize(nil, base, retry); p.PendingAutoRetry != 1 || p.PendingAutoMux != 0 {
