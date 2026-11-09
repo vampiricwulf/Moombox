@@ -778,7 +778,11 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 
 	// The two text rows and the toggle between them share one label column.
 	const labelW = 16
-	textRow := func(focus int, label, value string) string {
+	// A focused text row's help follows its input on the same row, so the
+	// help's room comes out of the input — see renderChannelEdit: a row that
+	// outgrows the box wraps, and every row below it, the buttons' included,
+	// draws one lower than the mouse hit-test counts.
+	textRow := func(focus int, label, value, help string) string {
 		focused := m.notifEditFocus == focus
 		prefix := "  "
 		prefixColor := ColorWhite
@@ -788,7 +792,11 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 			prefixColor = ColorCyan
 			labelStyle = lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
 		}
-		maxW := max(w-ansi.StringWidth(prefix)-labelW-2, 10)
+		helpW := 0
+		if focused && help != "" {
+			helpW = ansi.StringWidth(" (" + help + ")")
+		}
+		maxW := max(w-ansi.StringWidth(prefix)-labelW-2-helpW, 10)
 		var rendered string
 		if focused {
 			m.textInput.SetWidth(maxW)
@@ -796,12 +804,16 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 		} else {
 			rendered = renderInactiveInput(value, maxW, ColorWhite)
 		}
-		return lipgloss.NewStyle().Foreground(prefixColor).Render(prefix) +
+		row := lipgloss.NewStyle().Foreground(prefixColor).Render(prefix) +
 			labelStyle.Render(padRight(label, labelW)) + rendered
+		if focused && help != "" {
+			row += DimStyle.Render(" (" + help + ")")
+		}
+		return row
 	}
 
 	// Webhook URL
-	lines = append(lines, textRow(notifEditURLRow, "Webhook URL", m.notifEditURL))
+	lines = append(lines, textRow(notifEditURLRow, "Webhook URL", m.notifEditURL, ""))
 
 	// Enabled — the mute. The target and its whole filter stay configured;
 	// only delivery stops, which is what an operator who wants silence needs
@@ -828,11 +840,8 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 	lines = append(lines, enabledLine)
 
 	// Mention
-	mentionLine := textRow(notifEditMentionRow, "Mention", m.notifEditMention)
-	if m.notifEditFocus == notifEditMentionRow {
-		mentionLine += DimStyle.Render(" (<@&ROLE_ID>, <@USER_ID>, @here, @everyone)")
-	}
-	lines = append(lines, mentionLine)
+	lines = append(lines, textRow(notifEditMentionRow, "Mention", m.notifEditMention,
+		"<@&ROLE_ID>, <@USER_ID>, @here, @everyone"))
 
 	// Delivery — the per-target mode. Rendered here, after Mention, because
 	// the head rows sit on lines 1..notifEditEventBase and a row's line has to
@@ -913,6 +922,12 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 				"  "+lipgloss.NewStyle().Foreground(mentionColor).Render("@"))
 			flatIdx++
 		}
+	}
+
+	// One row each, as the hit-test counts, however narrow the box: the
+	// "(Space to toggle)" rows and even the title outgrow a narrow one.
+	for i, line := range lines {
+		lines[i] = ansi.Truncate(line, w, "")
 	}
 
 	// Scroll window that follows keyboard focus: the event list outgrew

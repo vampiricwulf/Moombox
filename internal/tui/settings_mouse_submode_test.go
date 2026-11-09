@@ -49,6 +49,13 @@ func TestSettingsClicksDoNotLeaveAnOpenSubEditor(t *testing.T) {
 		}, func(m *SettingsModel) bool { return m.channelDeleteConf }},
 		{"notification editor", "Integrations", func(m *SettingsModel) { m.HandleKey("a") },
 			func(m *SettingsModel) bool { return m.notifMode == "edit" }},
+		// The focused Mention row carries its help on the same row as the
+		// input: it must still be one row, or every row below it — Delivery,
+		// the events, the buttons — draws one lower than the hit-test counts.
+		{"notification editor, Mention focused", "Integrations", func(m *SettingsModel) {
+			m.HandleKey("a")
+			m.notifEditFocus = notifEditMentionRow
+		}, func(m *SettingsModel) bool { return m.notifMode == "edit" }},
 		{"notification delete confirm", "Integrations", func(m *SettingsModel) {
 			m.notifications = append(m.notifications, config.NotificationConfig{URL: "https://example.invalid/hook"})
 			m.notifIndex = 0
@@ -59,60 +66,70 @@ func TestSettingsClicksDoNotLeaveAnOpenSubEditor(t *testing.T) {
 		{"security remove prompt", "Network", func(m *SettingsModel) { m.secMode = securityRemove },
 			func(m *SettingsModel) bool { return m.secMode == securityRemove }},
 	}
+	// A wide terminal and a narrow one: at 60 columns a focused row's help
+	// alone outgrows the box. The narrow header has no room for the Logs tab,
+	// so only the buttons are clicked there.
+	sizes := []struct {
+		name    string
+		w, h    int
+		targets []string
+	}{{"wide", 200, 50, []string{"tab", "button"}}, {"narrow", 60, 30, []string{"button"}}}
 	for _, tc := range cases {
-		for _, target := range []string{"tab", "button"} {
-			t.Run(tc.name+"/"+target, func(t *testing.T) {
-				cfg := config.Defaults()
-				m := NewSettingsModel()
-				m.configStore = config.NewStore(cfg, "")
-				m.cfg = cfg
-				m.SetSize(200, 50)
-				m.Open(cfg)
-				m.switchSection(sectionIndexByName(t, tc.section))
-				tc.open(m)
-				if !tc.still(m) {
-					t.Fatalf("premise lost: the %s did not open", tc.name)
-				}
-				m.dirty = true // Save & Return is the button drawn
-				view := stripANSI(m.View())
-				before := m.sectionIndex
+		for _, size := range sizes {
+			for _, target := range size.targets {
+				t.Run(tc.name+"/"+size.name+"/"+target, func(t *testing.T) {
+					cfg := config.Defaults()
+					m := NewSettingsModel()
+					m.configStore = config.NewStore(cfg, "")
+					m.cfg = cfg
+					m.SetSize(size.w, size.h)
+					m.Open(cfg)
+					m.switchSection(sectionIndexByName(t, tc.section))
+					tc.open(m)
+					if !tc.still(m) {
+						t.Fatalf("premise lost: the %s did not open", tc.name)
+					}
+					m.dirty = true // Save & Return is the button drawn
+					view := stripANSI(m.View())
+					before := m.sectionIndex
 
-				var x, y int
-				if target == "tab" {
-					other := "Logs"
-					x, y = findInView(view, other, 0)
-				} else {
-					x, y = findInView(view, "[ Save & Return ]", 0)
-					if y < 0 {
-						x, y = findInView(view, "[ Return ]", 0)
+					var x, y int
+					if target == "tab" {
+						other := "Logs"
+						x, y = findInView(view, other, 0)
+					} else {
+						x, y = findInView(view, "[ Save & Return ]", 0)
+						if y < 0 {
+							x, y = findInView(view, "[ Return ]", 0)
+						}
+						if y < 0 {
+							t.Skipf("no button drawn under the %s", tc.name)
+						}
+						x += 2
+						// The click must land on the row the hit-test treats as the
+						// buttons, or it never reaches the guard: a channel-editor
+						// row wider than the box wrapped and pushed the drawn
+						// buttons a row below lastButtonContentY.
+						if got := y - settingsBoxTop(m) - 1 - 2; got != m.lastButtonContentY {
+							t.Fatalf("buttons drawn at contentY %d, hit-test expects %d:\n%s", got, m.lastButtonContentY, view)
+						}
 					}
 					if y < 0 {
-						t.Skipf("no button drawn under the %s", tc.name)
+						t.Fatalf("target %s not drawn:\n%s", target, view)
 					}
-					x += 2
-					// The click must land on the row the hit-test treats as the
-					// buttons, or it never reaches the guard: a channel-editor
-					// row wider than the box wrapped and pushed the drawn
-					// buttons a row below lastButtonContentY.
-					if got := y - settingsBoxTop(m) - 1 - 2; got != m.lastButtonContentY {
-						t.Fatalf("buttons drawn at contentY %d, hit-test expects %d:\n%s", got, m.lastButtonContentY, view)
-					}
-				}
-				if y < 0 {
-					t.Fatalf("target %s not drawn:\n%s", target, view)
-				}
-				m.HandleMouse(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+					m.HandleMouse(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 
-				if !m.IsVisible() {
-					t.Fatalf("the %s click closed the overlay with the %s open", target, tc.name)
-				}
-				if m.sectionIndex != before {
-					t.Errorf("the %s click switched to %q with the %s open", target, sections[m.sectionIndex].name, tc.name)
-				}
-				if !tc.still(m) {
-					t.Errorf("the %s click dropped the %s", target, tc.name)
-				}
-			})
+					if !m.IsVisible() {
+						t.Fatalf("the %s click closed the overlay with the %s open", target, tc.name)
+					}
+					if m.sectionIndex != before {
+						t.Errorf("the %s click switched to %q with the %s open", target, sections[m.sectionIndex].name, tc.name)
+					}
+					if !tc.still(m) {
+						t.Errorf("the %s click dropped the %s", target, tc.name)
+					}
+				})
+			}
 		}
 	}
 
