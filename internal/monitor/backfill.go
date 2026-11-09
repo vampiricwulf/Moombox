@@ -200,7 +200,7 @@ type BackfillWorker struct {
 	// Scanning/done/error fire on the serial consumer goroutine; idle can
 	// also fire on Sweep's caller (a queued scan dropped by a pause) and on
 	// CancelAndPrune's.
-	OnProgress func(chID, tab string, pages int, state string)
+	OnProgress func(chID, tab string, pages int, state BackfillState)
 
 	// OnNewRows, when set, is called once after a scan that COMPLETED and
 	// INSERTED at least one feed_items row the store did not have — rows is
@@ -379,7 +379,7 @@ func (bw *BackfillWorker) runScan(item scanItem) {
 		// Cancelled while still queued (superseded by a widen, or pruned) —
 		// no scan ran, but the state change is still surfaced so a stale
 		// entry from an earlier session of this channel is cleared.
-		bw.emitProgress(chID, "", 0, "idle")
+		bw.emitProgress(chID, "", 0, BackfillIdle)
 		return
 	}
 	if bw.ChannelEnabled != nil && !bw.ChannelEnabled(chID) {
@@ -388,7 +388,7 @@ func (bw *BackfillWorker) runScan(item scanItem) {
 		// keeps the cursor, so re-enabling resumes rather than restarts.
 		// The next sweep pauses or prunes the channel for good.
 		bw.logger.Info("backfill scan skipped: channel disabled or removed since it was queued", "channel", chID)
-		bw.emitProgress(chID, "", 0, "idle")
+		bw.emitProgress(chID, "", 0, BackfillIdle)
 		return
 	}
 	bw.insertedThisScan = 0
@@ -397,21 +397,21 @@ func (bw *BackfillWorker) runScan(item scanItem) {
 	case err == nil:
 		// Completed — completeScan wrote backfilled_at; the sweep's first
 		// arm goes quiet for this channel.
-		bw.emitProgress(chID, "", 0, "done")
+		bw.emitProgress(chID, "", 0, BackfillDone)
 		if n := bw.insertedThisScan; n > 0 && bw.OnNewRows != nil {
 			bw.OnNewRows(chID, n)
 		}
 	case item.ctx.Err() != nil && bw.isPaused(item.fl):
 		bw.logger.Info("backfill scan paused: channel disabled", "channel", chID)
-		bw.emitProgress(chID, "", 0, "idle")
+		bw.emitProgress(chID, "", 0, BackfillIdle)
 	case item.ctx.Err() != nil:
 		bw.logger.Info("backfill scan cancelled", "channel", chID)
-		bw.emitProgress(chID, "", 0, "idle")
+		bw.emitProgress(chID, "", 0, BackfillIdle)
 	default:
 		// Incomplete: the cursor was saved per page; the sweep retries
 		// next cycle (backfilled_at is still NULL) and resumes from it.
 		bw.logger.Warn("backfill scan incomplete; sweep will retry", "channel", chID, "err", err)
-		bw.emitProgress(chID, "", 0, "error")
+		bw.emitProgress(chID, "", 0, BackfillError)
 	}
 }
 
@@ -424,7 +424,7 @@ func (bw *BackfillWorker) isPaused(fl *inFlight) bool {
 
 // emitProgress invokes OnProgress when wired — see the field doc for the
 // call contract.
-func (bw *BackfillWorker) emitProgress(chID, tab string, pages int, state string) {
+func (bw *BackfillWorker) emitProgress(chID, tab string, pages int, state BackfillState) {
 	if bw.OnProgress != nil {
 		bw.OnProgress(chID, tab, pages, state)
 	}
@@ -523,7 +523,7 @@ func (bw *BackfillWorker) Sweep(channels []ChannelRef, force bool) {
 	// A spliced scan never reaches runScan, so its idle is sent here —
 	// outside bw.mu, as CancelAndPrune sends its own.
 	for _, id := range pausedIDs {
-		bw.emitProgress(id, "", 0, "idle")
+		bw.emitProgress(id, "", 0, BackfillIdle)
 	}
 
 	// Half 2: channels with feed-history rows not in the config (§11
@@ -695,7 +695,7 @@ func (bw *BackfillWorker) CancelAndPrune(chID string) {
 	// it. Covers the spliced-queued prune and the no-in-flight boot prune,
 	// where no runScan exit ever fires — for a cancelled RUNNING scan this
 	// duplicates runScan's idle, which clears an already-clear entry.
-	bw.emitProgress(chID, "", 0, "idle")
+	bw.emitProgress(chID, "", 0, BackfillIdle)
 }
 
 // scanChannel runs one channel's backfill scan: each eligible tab, page by
@@ -996,7 +996,7 @@ func (bw *BackfillWorker) scanTab(ctx context.Context, chID, tab string, cur *ba
 		// a completed page and emits nothing (the scan-level "error" from
 		// runScan covers those endings).
 		pages++
-		bw.emitProgress(chID, tab, pages, "scanning")
+		bw.emitProgress(chID, tab, pages, BackfillScanning)
 		if tc.Done {
 			bw.logger.Debug("backfill tab complete",
 				"channel", chID, "tab", tab, "rows", tc.NextPos, "windowStop", allOlder)

@@ -22,6 +22,7 @@ import {
   serverErrorMessage,
   snapshotRestartValues,
   viewerIsAtTheHost,
+  BACKFILL_STATE,
 } from "./utils.js";
 
 const NOTIFICATION_EVENT_GROUPS = [
@@ -1580,10 +1581,10 @@ export class SettingsController {
   _backfillBadgeHtml(channelId) {
     const bf = this.app.backfillStatus?.[channelId];
     if (!bf) return "";
-    if (bf.state === "scanning") {
+    if (bf.state === BACKFILL_STATE.SCANNING) {
       return `<sl-badge variant="primary" pill>Backfill: ${this.app.escapeHtml(bf.tab || "")} p${Number(bf.pages) || 0}</sl-badge>`;
     }
-    if (bf.state === "error") {
+    if (bf.state === BACKFILL_STATE.ERROR) {
       return `<sl-badge variant="warning" pill>Backfill failed — will retry</sl-badge>`;
     }
     return "";

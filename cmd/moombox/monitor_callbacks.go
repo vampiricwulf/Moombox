@@ -1972,7 +1972,7 @@ func (s *runState) wireMonitorCallbacks() {
 	// write InitialState and the TUI seed read (disk_status keeps its
 	// snapshot in routes.SharedDiskStatus; backfill's lives on runState).
 	// The worker never imports web/tui; this closure is the seam.
-	s.backfillWorker.OnProgress = func(chID, tab string, pages int, state string) {
+	s.backfillWorker.OnProgress = func(chID, tab string, pages int, state monitor.BackfillState) {
 		defer func() {
 			if r := recover(); r != nil {
 				s.log.Error("Panic in backfill OnProgress", slog.Any("panic", r))
@@ -1980,13 +1980,12 @@ func (s *runState) wireMonitorCallbacks() {
 		}()
 		// Snapshot first, broadcast second, so a client connecting between
 		// the two sees this state in InitialState rather than missing it.
-		// Active states are stored; "done" and "idle" clear the entry (see
+		// Retained states are stored; done and idle clear the entry (see
 		// the backfillProgress field doc).
 		s.backfillMu.Lock()
-		switch state {
-		case "scanning", "error":
+		if state.Retained() {
 			s.backfillProgress[chID] = backfillProgressState{Tab: tab, Pages: pages, State: state}
-		default: // "done", "idle"
+		} else {
 			delete(s.backfillProgress, chID)
 		}
 		s.backfillMu.Unlock()
@@ -2002,7 +2001,7 @@ func (s *runState) wireMonitorCallbacks() {
 		// Push to TUI (drop-on-full like tuiDiskStatusCh — a dropped page
 		// tick is superseded by the next one within a second).
 		select {
-		case s.tuiBackfillCh <- tui.BackfillStatusMsg{Channel: chID, Tab: tab, Pages: pages, State: state}:
+		case s.tuiBackfillCh <- tui.BackfillStatusMsg{Channel: chID, Tab: tab, Pages: pages, State: tui.BackfillState(state)}:
 		default:
 		}
 	}

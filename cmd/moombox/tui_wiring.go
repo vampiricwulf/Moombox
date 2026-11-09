@@ -924,7 +924,7 @@ func (s *runState) runTUI() {
 	s.backfillMu.Lock()
 	for chID, p := range s.backfillProgress {
 		select {
-		case s.tuiBackfillCh <- tui.BackfillStatusMsg{Channel: chID, Tab: p.Tab, Pages: p.Pages, State: p.State}:
+		case s.tuiBackfillCh <- tui.BackfillStatusMsg{Channel: chID, Tab: p.Tab, Pages: p.Pages, State: tui.BackfillState(p.State)}:
 		default:
 		}
 	}

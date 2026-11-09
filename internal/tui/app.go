@@ -74,7 +74,7 @@ type (
 		Channel string // channel ID
 		Tab     string // "videos", "streams", "membership"
 		Pages   int    // pages completed for Tab this scan session
-		State   string // "scanning", "done", "error", "idle"
+		State   BackfillState
 	}
 	UpdateStatusMsg struct {
 		Version      string
@@ -1543,3 +1543,19 @@ func (a *App) getPort() int {
 	}
 	return 774
 }
+
+// BackfillState is the state of a BackfillStatusMsg: monitor.BackfillState's
+// values, mirrored here because tui does not import monitor (which imports
+// the worker). cmd/moombox TestBackfillStatesMatchAcrossLayers compares the
+// two and the dashboard's utils.js BACKFILL_STATE.
+type BackfillState string
+
+const (
+	BackfillScanning BackfillState = "scanning"
+	BackfillDone     BackfillState = "done"
+	BackfillError    BackfillState = "error"
+	BackfillIdle     BackfillState = "idle"
+)
+
+// BackfillStates is every BackfillState, in declaration order.
+var BackfillStates = []BackfillState{BackfillScanning, BackfillDone, BackfillError, BackfillIdle}

@@ -924,6 +924,25 @@ export function chatStatusVariant(status) {
   return Object.hasOwn(CHAT_STATUS_VARIANTS, status) ? CHAT_STATUS_VARIANTS[status] : "neutral";
 }
 
+// ── Backfill scan state ──────────────────────────────────────────────────────
+// The "state" of a backfill_status frame: Go's monitor.BackfillState (and the
+// TUI's mirror), compared by cmd/moombox's TestBackfillStatesMatchAcrossLayers.
+export const BACKFILL_STATE = Object.freeze({
+  SCANNING: "scanning",
+  DONE: "done",
+  ERROR: "error",
+  IDLE: "idle",
+});
+
+/**
+ * Whether a channel's backfill state is kept in app.backfillStatus: a scan in
+ * flight, or one that failed and the next sweep retries. Go:
+ * monitor.BackfillState.Retained, which decides the server's snapshot.
+ */
+export function isBackfillRetained(state) {
+  return state === BACKFILL_STATE.SCANNING || state === BACKFILL_STATE.ERROR;
+}
+
 // ── Channel removal ──────────────────────────────────────────────────────────
 // Removing a channel asks what to do with its jobs (W25-09, owner decision).
 // The confirmation counts them — GET /api/config/channels/{id}/removal — and

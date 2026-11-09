@@ -1201,13 +1201,13 @@ type progressEmission struct {
 	chID  string
 	tab   string
 	pages int
-	state string
+	state BackfillState
 }
 
 // recordProgress wires bw.OnProgress to a recorder channel.
 func recordProgress(bw *BackfillWorker) chan progressEmission {
 	emitted := make(chan progressEmission, 32)
-	bw.OnProgress = func(chID, tab string, pages int, state string) {
+	bw.OnProgress = func(chID, tab string, pages int, state BackfillState) {
 		emitted <- progressEmission{chID, tab, pages, state}
 	}
 	return emitted

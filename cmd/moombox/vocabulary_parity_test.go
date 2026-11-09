@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/monitor"
+	"github.com/vampiricwulf/Moombox/internal/tui"
 )
 
 // declaredStringConsts returns the values of every constant of type typeName
@@ -135,5 +137,55 @@ func TestChatStatusSetMatchesTheDashboard(t *testing.T) {
 	}
 	if strings.Contains(string(details), "chatVariantMap") || strings.Count(string(details), "chatStatusVariant(job.chatStatus)") != 2 {
 		t.Error("job-details.js must read both chat badges through utils.js chatStatusVariant, not a table of its own")
+	}
+}
+
+// TestBackfillStatesMatchAcrossLayers: the backfill scan states are one set in
+// the monitor (which emits them), the TUI (which mirrors them, not importing
+// the monitor) and the dashboard (utils.js BACKFILL_STATE), and the states
+// the server's snapshot and both clients retain are the same two. Before,
+// each layer spelled the four literals itself.
+//
+// Mutant: add a state on one side, or retain "done" — this names it.
+func TestBackfillStatesMatchAcrossLayers(t *testing.T) {
+	declared := declaredStringConsts(t, "../../internal/monitor/backfill_state.go", "BackfillState")
+	var mon, tu []string
+	for _, s := range monitor.BackfillStates {
+		mon = append(mon, string(s))
+	}
+	for _, s := range tui.BackfillStates {
+		tu = append(tu, string(s))
+	}
+	if !slices.Equal(mon, declared) {
+		t.Errorf("monitor.BackfillStates = %q, want every declared constant %q", mon, declared)
+	}
+	if tuiDeclared := declaredStringConsts(t, "../../internal/tui/app.go", "BackfillState"); !slices.Equal(tu, tuiDeclared) || !slices.Equal(tu, declared) {
+		t.Errorf("tui.BackfillStates = %q (declared %q), want the monitor's %q", tu, tuiDeclared, declared)
+	}
+	js := dashboardFrozenMap(t, "../../web/public/modules/utils.js", "BACKFILL_STATE")
+	var jsVals []string
+	for _, v := range js {
+		jsVals = append(jsVals, v)
+	}
+	slices.Sort(jsVals)
+	sorted := slices.Clone(declared)
+	slices.Sort(sorted)
+	if !slices.Equal(jsVals, sorted) {
+		t.Errorf("BACKFILL_STATE values = %q, want %q", jsVals, sorted)
+	}
+	for _, s := range monitor.BackfillStates {
+		want := s == monitor.BackfillScanning || s == monitor.BackfillError
+		if s.Retained() != want {
+			t.Errorf("%q.Retained() = %v, want %v (isBackfillRetained in utils.js keeps scanning and error)", s, s.Retained(), want)
+		}
+	}
+	for _, f := range []string{"../../web/public/app.js", "../../web/public/modules/settings.js"} {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if regexp.MustCompile(`state === "(scanning|error|done|idle)"`).Match(src) {
+			t.Errorf("%s compares a backfill state with a literal; read BACKFILL_STATE / isBackfillRetained", f)
+		}
 	}
 }

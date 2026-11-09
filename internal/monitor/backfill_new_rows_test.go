@@ -35,9 +35,9 @@ func TestScan_NewRowsNudgeOnceAndOnlyForInserts(t *testing.T) {
 	calls := make(chan newRowsCall, 4)
 	bw.OnNewRows = func(chID string, rows int) { calls <- newRowsCall{chID, rows} }
 	done := make(chan string, 4)
-	bw.OnProgress = func(_, _ string, _ int, state string) {
+	bw.OnProgress = func(_, _ string, _ int, state BackfillState) {
 		if state == "done" {
-			done <- state
+			done <- string(state)
 		}
 	}
 	startWorker(t, bw)
@@ -96,9 +96,9 @@ func TestScan_IncompleteScanDoesNotNudge(t *testing.T) {
 	calls := make(chan newRowsCall, 4)
 	bw.OnNewRows = func(chID string, rows int) { calls <- newRowsCall{chID, rows} }
 	ended := make(chan string, 4)
-	bw.OnProgress = func(_, _ string, _ int, state string) {
+	bw.OnProgress = func(_, _ string, _ int, state BackfillState) {
 		if state == "error" {
-			ended <- state
+			ended <- string(state)
 		}
 	}
 	startWorker(t, bw)

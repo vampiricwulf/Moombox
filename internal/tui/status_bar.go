@@ -36,6 +36,9 @@ var (
 	statusBarGrnStyle = lipgloss.NewStyle().Foreground(ColorGreen)
 	statusBarWrnStyle = lipgloss.NewStyle().Foreground(ColorWarning)
 	statusBarYelStyle = lipgloss.NewStyle().Foreground(ColorYellow)
+	// statusBarDimStyle is the backfill retry note (R-E2): a background fact,
+	// quieter than the green of a scan in flight.
+	statusBarDimStyle = lipgloss.NewStyle().Foreground(ColorGray)
 	// statusBarCookieStyle is the unreadable-cookie-file alert, and the only
 	// alert on this bar that is not red. It has to be distinguishable from the
 	// other two at the tight tiers, where a red "YT" already means "the
@@ -100,13 +103,20 @@ type StatusBarModel struct {
 	diskHeld bool
 	// In-flight backfill scan (spec §11 progress surfacing). Scans are
 	// strictly serial, so one slot IS the whole "scanning" state; empty
-	// backfillChannel hides the indicator. Terminal states clear the slot —
-	// done/idle are quiet by design and error is already loud in the log
-	// panel (the R B overlay owns detailed per-channel state).
+	// backfillChannel hides the indicator. Terminal states clear the slot;
+	// done and idle are quiet by design (the R B overlay owns detailed
+	// per-channel state).
 	backfillChannel string // channel ID of the in-flight scan ("" = none)
 	backfillName    string // display name resolved by the App handler
 	backfillTab     string
 	backfillPages   int
+	// backfillFailed holds the channels whose last backfill state is
+	// "error" — a scan that ended incomplete and that the next sweep
+	// retries. While it is not empty and no scan is in flight the bar shows a
+	// dim "BF: retry" (owner ruling R-E2), the dashboard's "Backfill failed —
+	// will retry" badge: the same condition, since the dashboard's map holds
+	// a channel's "error" until its next state replaces it.
+	backfillFailed map[string]bool
 	// ShowChordHint shows a newcomer hint instead of the full chord reference.
 	ShowChordHint bool
 	// SelectedCount tracks batch-selected jobs for status bar display.
@@ -197,8 +207,18 @@ func (m *StatusBarModel) SetDiskStatus(free uint64, usedPct float64, warn string
 // BackfillStatusMsg. "scanning" occupies the single slot; any other state
 // clears it — but only for the channel that owns it, so a seeded terminal
 // state for another channel can't blank an in-flight scan's display.
-func (m *StatusBarModel) SetBackfillStatus(chID, name, tab string, pages int, state string) {
-	if state == "scanning" {
+// Every state also sets or clears the channel's failure: "error" records it,
+// any other state of that channel replaces it (R-E2).
+func (m *StatusBarModel) SetBackfillStatus(chID, name, tab string, pages int, state BackfillState) {
+	if state == BackfillError {
+		if m.backfillFailed == nil {
+			m.backfillFailed = map[string]bool{}
+		}
+		m.backfillFailed[chID] = true
+	} else {
+		delete(m.backfillFailed, chID)
+	}
+	if state == BackfillScanning {
 		m.backfillChannel = chID
 		m.backfillName = name
 		m.backfillTab = tab
@@ -247,6 +267,7 @@ type statusBarKey struct {
 	backfillName    string
 	backfillTab     string
 	backfillPages   int
+	backfillFailed  int
 	showChordHint   bool
 	selectedCount   int
 	offline         bool
@@ -269,6 +290,7 @@ func (m *StatusBarModel) statusBarKey() statusBarKey {
 		backfillName:    m.backfillName,
 		backfillTab:     m.backfillTab,
 		backfillPages:   m.backfillPages,
+		backfillFailed:  len(m.backfillFailed),
 		showChordHint:   m.ShowChordHint,
 		selectedCount:   m.SelectedCount,
 		offline:         m.offline,
@@ -519,6 +541,11 @@ func (m *StatusBarModel) renderMetrics(t barTier, counts barJobCounts) string {
 			parts = append(parts, statusBarGrnStyle.Render(
 				fmt.Sprintf("Backfill %s: %s p%d", name, m.backfillTab, m.backfillPages)))
 		}
+	}
+	// A failed scan the next sweep retries (R-E2), while no scan is in
+	// flight: dim, on the scan indicator's tiers, so it is dropped as early.
+	if m.backfillChannel == "" && len(m.backfillFailed) > 0 && t <= tierCompact {
+		parts = append(parts, statusBarDimStyle.Render("BF: retry"))
 	}
 
 	// Disk indicator (only shown once we have data). At tierEssential only a
