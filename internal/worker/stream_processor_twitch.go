@@ -13,6 +13,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobfilter"
 	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
@@ -437,8 +438,11 @@ func (sp *StreamProcessor) processTwitch(ctx context.Context, job *database.Job)
 
 	// A clip (owner decision D26) is addressed by its slug, as a VOD is by
 	// its ID, and is routed before the login below: a pasted
-	// clips.twitch.tv/<slug> names no channel at all.
-	if slug, ok := twitch.ClipSlugFromJobID(job.VideoID); ok {
+	// clips.twitch.tv/<slug> names no channel at all. The kind is the one clip
+	// predicate's (jobfilter.IsClipJob, read off the job ID; every clip row
+	// writes the same ID and video ID).
+	if jobfilter.IsClipJob(job) {
+		slug, _ := twitch.ClipSlugFromJobID(job.ID)
 		return sp.processTwitchClip(ctx, job, slug)
 	}
 	if sp.tw == nil {

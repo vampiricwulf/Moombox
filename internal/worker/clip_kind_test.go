@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -11,7 +12,9 @@ import (
 
 // TestOneClipPredicateAnswersAsBothDid (K16): there were two clip
 // predicates — jobfilter.IsClipJob (the ID's prefix alone) and the worker's
-// IsTwitchClipJob (platform twitch and a slug in the video ID). The worker's
+// IsTwitchClipJob (platform twitch and a slug in the video ID). processTwitch's
+// clip dispatch was a third reader (a slug in the video ID); it asks
+// IsClipJob now. The worker's
 // was the stricter, and jobfilter.IsClipJob is now it, read off the ID; the
 // worker's is gone. Both old forms are re-stated verbatim here and compared
 // with it over every job-ID shape a creation path writes — ID and video ID
@@ -26,6 +29,12 @@ func TestOneClipPredicateAnswersAsBothDid(t *testing.T) {
 		if j == nil || j.Platform != "twitch" {
 			return false
 		}
+		_, ok := twitch.ClipSlugFromJobID(j.VideoID)
+		return ok
+	}
+	// processTwitch's dispatch read the video ID's slug, unconditioned on the
+	// platform (a Twitch row reaches it only), before it asked IsClipJob.
+	oldDispatch := func(j *database.Job) bool {
 		_, ok := twitch.ClipSlugFromJobID(j.VideoID)
 		return ok
 	}
@@ -45,9 +54,10 @@ func TestOneClipPredicateAnswersAsBothDid(t *testing.T) {
 	for _, s := range written {
 		j := &database.Job{ID: s.id, VideoID: s.id, Platform: s.platform}
 		got := jobfilter.IsClipJob(j)
-		if got != s.clip || oldFilter(j) != s.clip || oldWorker(j) != s.clip {
-			t.Errorf("%s (%s): IsClipJob %v, old jobfilter %v, old worker %v, want %v",
-				s.id, s.platform, got, oldFilter(j), oldWorker(j), s.clip)
+		if got != s.clip || oldFilter(j) != s.clip || oldWorker(j) != s.clip ||
+			(s.platform == "twitch" && oldDispatch(j) != s.clip) {
+			t.Errorf("%s (%s): IsClipJob %v, old jobfilter %v, old worker %v, old dispatch %v, want %v",
+				s.id, s.platform, got, oldFilter(j), oldWorker(j), oldDispatch(j), s.clip)
 		}
 	}
 	for _, j := range []*database.Job{
@@ -73,5 +83,29 @@ func TestVodJobIDRoundTrips(t *testing.T) {
 		if _, ok := twitch.VodIDFromJobID(id); ok {
 			t.Errorf("VodIDFromJobID(%q) read a VOD", id)
 		}
+	}
+}
+
+// TestTwitchDispatchAsksTheClipPredicate: processTwitch routes a row to the
+// clip download by jobfilter.IsClipJob (the job ID), not by a slug of its
+// own reading. A row whose video ID alone carries a clip ID — a shape no path
+// writes — is not a clip, and goes on to the live/VOD path (here: no Twitch
+// service, so its "not available" answer).
+//
+// Mutant: the dispatch reading twitch.ClipSlugFromJobID(job.VideoID) again —
+// the row is handed to the clip fetch.
+func TestTwitchDispatchAsksTheClipPredicate(t *testing.T) {
+	w, _ := testWorkerSetup(t)
+	sp := w.streamProc
+	sp.tw = nil
+	fetched := false
+	sp.clipFn = func(context.Context, string) (*twitch.TwitchClipInfo, error) {
+		fetched = true
+		return nil, twitch.ErrClipUnavailable
+	}
+	job := &database.Job{ID: "tw_123", VideoID: twitch.ClipJobID("Slug"), Platform: "twitch"}
+	res, err := sp.processTwitch(context.Background(), job)
+	if fetched || err != nil || res == nil || res.Error != "twitch service not available" {
+		t.Errorf("dispatch = %+v, %v (clip fetched %v), want the non-clip path", res, err, fetched)
 	}
 }
