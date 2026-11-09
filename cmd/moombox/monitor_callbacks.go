@@ -1768,7 +1768,21 @@ func (s *runState) wireMonitorCallbacks() {
 			if title != "" && title != existing.Title {
 				s.db.UpdateJobFields(videoID, map[string]any{"title": title})
 			}
-			s.dlWorker.ResumeJob(videoID)
+			if err := s.dlWorker.ResumeJob(videoID); err != nil {
+				if errors.Is(err, worker.ErrAlreadyPending) {
+					return // the resume an earlier detection started is still on its way
+				}
+				if !errors.Is(err, worker.ErrResetPending) {
+					s.log.Warn("broadcast re-detected live — auto-resume failed",
+						slog.String("videoID", videoID), slog.String("error", err.Error()))
+					return
+				}
+				// Another verb already waits on the job (an operator's); it is
+				// the one that runs.
+				s.log.Info("broadcast re-detected live — auto-resume left to the verb already waiting on the job",
+					slog.String("videoID", videoID), slog.String("error", err.Error()))
+				return
+			}
 			// No notification here: orchestrator.go sends "YouTube Download
 			// Starting" unconditionally on every ExecuteWithChat entry —
 			// including this resume — so a second send here would just be
@@ -1896,7 +1910,25 @@ func (s *runState) wireMonitorCallbacks() {
 		// AutoReinitializeJob increments auto_retry_count, clears state, and
 		// re-enqueues. The cap (worker.MaxTwitchAutoRetries) is enforced by
 		// the monitor's predicate before we even get here.
-		s.dlWorker.AutoReinitializeJob(jobID)
+		if err := s.dlWorker.AutoReinitializeJob(jobID); err != nil {
+			if errors.Is(err, worker.ErrAlreadyPending) {
+				// The monitor offers the recovery on every poll while the
+				// job's previous run unwinds or a staging claim holds it:
+				// the one accepted earlier is still on its way, and was
+				// logged then.
+				return
+			}
+			if !errors.Is(err, worker.ErrResetPending) {
+				s.log.Warn("twitch auto-recovery failed",
+					slog.String("jobID", jobID), slog.String("error", err.Error()))
+				return
+			}
+			// Another verb already waits on the job; nothing was applied and
+			// no retry of the budget was spent.
+			s.log.Info("twitch auto-recovery left to the verb already waiting on the job",
+				slog.String("jobID", jobID), slog.String("error", err.Error()))
+			return
+		}
 
 		s.log.Info("auto-recovered twitch job",
 			slog.String("jobID", jobID),

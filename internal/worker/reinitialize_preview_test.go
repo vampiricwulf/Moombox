@@ -84,7 +84,7 @@ func TestPreviewReinitializeCountsWhatTheResetDeletes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w.reinitializeNow("j-pre")
+	w.reinitializeNow("j-pre", database.StatusError)
 	job, _ = db.GetJob("j-pre")
 	if after := PreviewReinitialize(db, stagingBase, job); after != (ReinitializePreview{}) {
 		t.Errorf("preview after the reset = %+v, want nothing left to delete", after)

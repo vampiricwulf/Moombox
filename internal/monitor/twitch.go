@@ -570,7 +570,7 @@ func (tm *TwitchMonitor) processStreamInfo(ctx context.Context, ch *config.Chann
 			if getErr != nil {
 				tm.logger.Debug("recover check: GetJob failed", "jobID", jobID, "err", getErr)
 			} else if isRecoverableTwitchError(existing, worker.MaxTwitchAutoRetries) {
-				tm.logger.Info("twitch recoverable error — re-enqueueing job",
+				tm.logger.Debug("twitch recoverable error — offering recovery", // the callback logs acceptance once
 					"jobID", jobID,
 					"channel", info.ChannelDisplayName,
 					"streamID", info.StreamID,

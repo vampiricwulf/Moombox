@@ -49,7 +49,7 @@ func importClaimWorker(t *testing.T) (*DownloadWorker, *database.Database, strin
 func TestResumeAndReinitializeWaitForAChapterImport(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		verb func(w *DownloadWorker, id string)
+		verb func(w *DownloadWorker, id string) error
 		want database.JobStatus
 	}{
 		{"resume", (*DownloadWorker).ResumeJob, database.StatusDownloading},

@@ -42,6 +42,18 @@ type Scheduler struct {
 	// test can watch several restarts without sleeping seconds out.
 	restartPause time.Duration
 
+	// stagingBusy reports whether an off-queue operation holds the job's
+	// staging claim (DownloadWorker.stagingClaimed; nil: never). sweep
+	// admits no such row: a set-aside recovery accepts a Queued one, and the
+	// run admission starts writes the staging FFmpeg is muxing out of. The
+	// claim's release wakes the scheduler.
+	stagingBusy func(jobID string) bool
+	// stagingClaimedCount is how many jobs' staging claims are held
+	// (DownloadWorker.stagingClaimCount; nil: none). sweep asks
+	// NextQueuedJobs for that many rows more, as it does for the held ones,
+	// so the claimed rows it skips do not cost the channel its share.
+	stagingClaimedCount func() int
+
 	// conn is the connectivity monitor (nil: always online). An admission
 	// made during an outage is a backlog VOD sent to fail its first fetch, so
 	// sweep admits nothing while it reports offline, and Run sweeps again the
@@ -376,10 +388,15 @@ func (s *Scheduler) sweep() {
 		if admit <= 0 {
 			continue
 		}
-		// Past the held jobs, which wait out their backoff without costing
-		// the rest of the channel its turn: ask for enough rows that every
-		// hold could be among them.
-		ids, err := s.db.NextQueuedJobs(ch, admit+s.heldCount())
+		// Past the held jobs, which wait out their backoff, and the claimed
+		// ones, which wait for their claim, without costing the rest of the
+		// channel its turn: ask for enough rows that every hold and every
+		// claim could be among them.
+		skippable := s.heldCount()
+		if s.stagingClaimedCount != nil {
+			skippable += s.stagingClaimedCount()
+		}
+		ids, err := s.db.NextQueuedJobs(ch, admit+skippable)
 		if err != nil {
 			s.log.Error("scheduler: NextQueuedJobs failed", "channel", ch, "err", err)
 			continue
@@ -390,6 +407,10 @@ func (s *Scheduler) sweep() {
 				break
 			}
 			if s.held(id, now) {
+				continue
+			}
+			if s.stagingBusy != nil && s.stagingBusy(id) {
+				s.log.Debug("scheduler: backlog job's staging is claimed; admission waits for it", "jobID", id, "channel", ch)
 				continue
 			}
 			// 1. durable FIRST — this is what the M count observes; Enqueue

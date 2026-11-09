@@ -28,7 +28,7 @@ import (
 // opChapterImport is the chapter import's name in the per-job claim
 // (claimJobOperation), so the Mux action or a set-aside recovery refused while
 // it runs says what is in the way.
-const opChapterImport = "chapter import"
+const opChapterImport jobOp = "chapter import"
 
 // ErrArchiveJobActive: the job is downloading or muxing, so its archive is not
 // finished and cannot be rewritten (owner decision CI-1: only a job that is not
@@ -55,20 +55,25 @@ const remuxHeadroom = 256 << 20
 // runs; and the trim service asks for it before every trim (TrimService
 // archiveRewriting), so a trim never reads an archive mid-replace and an
 // import never replaces one a trim is reading. Refused, too, while the job's
-// last run is still registered (MuxJob's reason: a Cancelled row whose run
-// has not stopped is about to be written again) and while the row is active.
+// last run is still registered or a run is queued to start (MuxJob's reason:
+// a Cancelled row whose run has not stopped is about to be written again)
+// and while the row is active.
 //
 // The order against a trim is what makes the pair exclusive without one lock
 // around both: the import takes its claim and then looks for a trim, and a
 // trim takes its slot and then looks for the claim — so whichever looks
 // second sees the other, and at worst both refuse.
 func (w *DownloadWorker) ClaimChapterImport(jobID string) (release func(), err error) {
-	if w.queue.IsProcessing(jobID) {
-		return nil, fmt.Errorf("%w (the job's last run is still stopping)", ErrStagingBusy)
-	}
 	release, err = w.claimJobOperation(jobID, opChapterImport)
 	if err != nil {
 		return nil, err
+	}
+	// After the claim, as RecoverAsides and MuxJob: a reset verb queues the
+	// job while it holds the claim, so a run queued to start is visible only
+	// once the claim is the import's.
+	if why := w.queuedOrRunning(jobID); why != "" {
+		release()
+		return nil, fmt.Errorf("%w (%s)", ErrStagingBusy, why)
 	}
 	if ts := w.orchestrator.trims; ts != nil && ts.trimming(jobID) {
 		release()
@@ -94,15 +99,14 @@ func (w *DownloadWorker) ClaimChapterImport(jobID string) (release func(), err e
 func (w *DownloadWorker) chapterImportRunning(jobID string) bool {
 	w.stagingClaimMu.Lock()
 	defer w.stagingClaimMu.Unlock()
-	return w.stagingClaims[jobID] == opChapterImport
+	return w.stagingClaims[jobID].op == opChapterImport
 }
 
-// ChapterImportRunning reports whether a chapter import holds jobID's claim:
-// the REST layer's question before Resume, Retry and Reinitialize, which it
-// refuses with 409 while one does (owner decision PR-M5). Each of them starts
-// what the import must not race — a run whose finalize writes the archive
-// the re-mux is about to rename its copy over, or a reset that deletes the
-// parts and staging beside it.
+// ChapterImportRunning reports whether a chapter import holds jobID's claim.
+// The REST layer's question before Resume, Retry and Reinitialize is
+// StagingClaimHolder — any holder answers 409 (owner ruling R-A2, which
+// generalised decision PR-M5's import refusal); this only picks the import's
+// own wording for that 409 (refuseWhileStagingClaimed).
 func (w *DownloadWorker) ChapterImportRunning(jobID string) bool {
 	return w.chapterImportRunning(jobID)
 }
@@ -114,34 +118,12 @@ func (w *DownloadWorker) ChapterImportRunning(jobID string) bool {
 // Reinitialize (afterJobExit) wait here (owner decision PR-M5): the import
 // replaces the archive in place, and a finalize that wrote it meanwhile was
 // renamed over by the import's copy of the OLD archive.
+//
+// Only the import: the finalize runs inside a Mux that holds the claim
+// itself. afterJobExit waits for any claim (awaitStagingClaim).
 func (w *DownloadWorker) waitChapterImport(ctx context.Context, jobID, what string) bool {
-	logged := false
-	for {
-		w.stagingClaimMu.Lock()
-		if w.stagingClaims[jobID] != opChapterImport {
-			w.stagingClaimMu.Unlock()
-			return true
-		}
-		if w.stagingClaimFreed == nil {
-			w.stagingClaimFreed = map[string]chan struct{}{}
-		}
-		freed, ok := w.stagingClaimFreed[jobID]
-		if !ok {
-			freed = make(chan struct{})
-			w.stagingClaimFreed[jobID] = freed
-		}
-		w.stagingClaimMu.Unlock()
-		if !logged {
-			w.logger.Info("waiting for the chapter import rewriting the archive to finish before "+what, "jobID", jobID)
-			logged = true
-		}
-		select {
-		case <-freed:
-			// Asked again: the claim may have been taken anew since.
-		case <-ctx.Done():
-			return false
-		}
-	}
+	_, ok := w.awaitStagingClaim(ctx, jobID, what, isChapterImport, false)
+	return ok
 }
 
 // ArchiveRemuxResult is what RemuxArchiveChapters measured on the archive it

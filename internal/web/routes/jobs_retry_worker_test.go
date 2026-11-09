@@ -1,10 +1,13 @@
 package routes
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +15,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
@@ -74,7 +78,7 @@ func TestRetryContinuesWhileReinitializeStartsOver(t *testing.T) {
 // rename its copy over, or a reset that deletes the parts and staging beside
 // it. Once the import is done they are accepted again.
 //
-// Mutant: either handler not calling refuseWhileChapterImport (200, and the
+// Mutant: either handler not calling refuseWhileStagingClaimed (200, and the
 // worker then holds the verb until the import ends).
 func TestVerbsRefusedWhileAChapterImportRuns(t *testing.T) {
 	f := newJobsFixture(t)
@@ -105,5 +109,127 @@ func TestVerbsRefusedWhileAChapterImportRuns(t *testing.T) {
 	release()
 	if rec := doRequest(t, r, "POST", "/api/jobs/yt_importing/resume", nil); rec.Code != http.StatusOK {
 		t.Errorf("/resume once the import is done = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+}
+
+// TestVerbsRefusedWhileASetAsideRecoveryRuns: the same refusal for ANY
+// operation holding the job's staging claim (owner ruling R-A2), naming it.
+// /reinitialize during a recovery deleted the staging the recovery's FFmpeg
+// was reading; /resume started a run that took its download slot.
+//
+// The recovery is held in place by a download pool of zero: it takes its
+// claim and parks waiting for a slot, which is exactly the state a running
+// recovery leaves.
+//
+// Mutant: refuseWhileStagingClaimed asking only for a chapter import (200,
+// and the worker then holds the verb until the recovery ends).
+func TestVerbsRefusedWhileASetAsideRecoveryRuns(t *testing.T) {
+	f := newJobsFixture(t)
+	cfg := config.Defaults()
+	cfg.Paths.StagingDirectory = f.stagingDir
+	cfg.Paths.OutputDirectory = f.outputDir
+	w := worker.NewDownloadWorker(f.db, nil, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	t.Cleanup(w.Stop)
+	rl := web.NewRateLimiter(1000, time.Minute)
+	t.Cleanup(rl.Close)
+	r := chi.NewRouter()
+	JobRoutes(r, f.db, f.store, w, rl, f.tw, f.yt, f.notify)
+
+	f.addJob(t, "yt_recovering", func(j *database.Job) { j.Status = database.StatusError })
+	stage := f.seedStaging(t, "yt_recovering")
+	if err := os.WriteFile(filepath.Join(stage, "video.mp4"+engine.StagedRestartSuffix+"1700000000"), make([]byte, 64), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.SetParallelDownloads(0)
+	// Registered after w.Stop, so it runs first: the parked recovery gets its
+	// slot and ends, rather than Stop waiting its 10 s out on it.
+	t.Cleanup(func() { w.SetParallelDownloads(1) })
+	if err := w.RecoverAsides("yt_recovering"); err != nil {
+		t.Fatalf("RecoverAsides: %v", err)
+	}
+	for _, verb := range []string{"resume", "retry", "reinitialize"} {
+		rec := doRequest(t, r, "POST", "/api/jobs/yt_recovering/"+verb, nil)
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "set-aside recovery") {
+			t.Errorf("/%s during a set-aside recovery = %d (%s), want 409 naming the recovery", verb, rec.Code, rec.Body.String())
+		}
+	}
+	if j, _ := f.db.GetJob("yt_recovering"); j.Status != database.StatusError {
+		t.Errorf("a refused verb changed the row: %s", j.Status)
+	}
+	if _, err := os.Stat(stage); err != nil {
+		t.Errorf("DATA LOSS: staging removed during the recovery: %v", err)
+	}
+}
+
+// TestVerbAnswersConflictWhileAnotherIsPending: a verb the worker refuses
+// because a different one is already waiting on the job (ErrResetPending)
+// answers 409 with the worker's text, where it used to answer success for a
+// click the worker had dropped (owner ruling R-A3).
+func TestVerbAnswersConflictWhileAnotherIsPending(t *testing.T) {
+	f := newJobsFixture(t)
+	cfg := config.Defaults()
+	cfg.Paths.StagingDirectory = f.stagingDir
+	cfg.Paths.OutputDirectory = f.outputDir
+	w := worker.NewDownloadWorker(f.db, nil, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	t.Cleanup(w.Stop)
+	rl := web.NewRateLimiter(1000, time.Minute)
+	t.Cleanup(rl.Close)
+	r := chi.NewRouter()
+	JobRoutes(r, f.db, f.store, w, rl, f.tw, f.yt, f.notify)
+	f.addJob(t, "yt_pending", func(j *database.Job) { j.Status = database.StatusError })
+	f.seedStaging(t, "yt_pending")
+
+	pending := fmt.Errorf("auto-reinitialize %w", worker.ErrResetPending)
+	origResume, origReinit := resumeJob, reinitializeJob
+	t.Cleanup(func() { resumeJob, reinitializeJob = origResume, origReinit })
+	resumeJob = func(*worker.DownloadWorker, string) error { return pending }
+	reinitializeJob = func(*worker.DownloadWorker, string) error { return pending }
+
+	for _, verb := range []string{"resume", "retry", "reinitialize"} {
+		rec := doRequest(t, r, "POST", "/api/jobs/yt_pending/"+verb, nil)
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "auto-reinitialize already pending") {
+			t.Errorf("/%s while another verb is pending = %d (%s), want 409 with the worker's text", verb, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestVerbAnswersByTheWorkersReason: the worker answers a repeat of the verb
+// already on its way with ErrAlreadyPending, which is no refusal (owner
+// ruling R-A3: a double-click is a quiet success), and a verb whose row went
+// between the route's read and the worker's with ErrJobNotFound, which is
+// the 404 the route gives a missing row itself — not the 500 of a failure.
+//
+// Mutant: refuseVerbError without either case (500 for both).
+func TestVerbAnswersByTheWorkersReason(t *testing.T) {
+	f := newJobsFixture(t)
+	cfg := config.Defaults()
+	cfg.Paths.StagingDirectory = f.stagingDir
+	cfg.Paths.OutputDirectory = f.outputDir
+	w := worker.NewDownloadWorker(f.db, nil, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	t.Cleanup(w.Stop)
+	rl := web.NewRateLimiter(1000, time.Minute)
+	t.Cleanup(rl.Close)
+	r := chi.NewRouter()
+	JobRoutes(r, f.db, f.store, w, rl, f.tw, f.yt, f.notify)
+	f.addJob(t, "yt_reason", func(j *database.Job) { j.Status = database.StatusError })
+	f.seedStaging(t, "yt_reason")
+
+	origResume, origReinit := resumeJob, reinitializeJob
+	t.Cleanup(func() { resumeJob, reinitializeJob = origResume, origReinit })
+	for _, tc := range []struct {
+		name string
+		err  error
+		code int
+	}{
+		{"the same verb already on its way", fmt.Errorf("resume %w", worker.ErrAlreadyPending), http.StatusOK},
+		{"the row gone", fmt.Errorf("resume: %w", worker.ErrJobNotFound), http.StatusNotFound},
+	} {
+		resumeJob = func(*worker.DownloadWorker, string) error { return tc.err }
+		reinitializeJob = func(*worker.DownloadWorker, string) error { return tc.err }
+		for _, verb := range []string{"resume", "retry", "reinitialize"} {
+			if rec := doRequest(t, r, "POST", "/api/jobs/yt_reason/"+verb, nil); rec.Code != tc.code {
+				t.Errorf("%s: /%s = %d (%s), want %d", tc.name, verb, rec.Code, rec.Body.String(), tc.code)
+			}
+		}
 	}
 }

@@ -142,7 +142,7 @@ func TestBatchChordsCountWhatTheyWillActOn(t *testing.T) {
 	newApp := func() *App {
 		app := NewApp()
 		app.OnDeleteJob = func(string) {}
-		app.OnResumeJob = func(string) {}
+		app.OnResumeJob = func(string) error { return nil }
 		app.HasStagingFiles = func(string) bool { return true }
 		app.taskList.SetJobs([]*database.Job{
 			{ID: "live", Title: "Live one", Status: database.StatusDownloading, Platform: "youtube", CreatedAt: "2026-10-04T10:00:00Z"},
