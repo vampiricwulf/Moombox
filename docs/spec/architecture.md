@@ -787,7 +787,7 @@ There is one job writer and it is synchronous. `UpdateJobFields()` (`internal/da
 3. Releases `db.mu` BEFORE notifying, so a subscriber may call back into the database without deadlocking
 4. Notifies `OnJobUpdate` and `OnJobChange` subscribers synchronously on the caller's goroutine; if the row vanished between the write and the read-back, fires `OnJobDeleted` instead
 
-Its conditional forms, `UpdateJobFieldsIf`, `UpdateJobFieldsUnless` and `UpdateJobFieldsUnlessTerminal` (`internal/database/database.go`), are the same writer with a status condition ANDed into the `UPDATE`: a write the condition refuses stops after step 1 and reports false (see [data-and-storage.md](data-and-storage.md), Conditional writes).
+Its conditional forms, `UpdateJobFieldsIf`, `UpdateJobFieldsIfIn`, `UpdateJobFieldsUnless` and `UpdateJobFieldsUnlessTerminal` (`internal/database/database.go`), are the same writer with a status condition ANDed into the `UPDATE`: a write the condition refuses stops after step 1 and reports false (see [data-and-storage.md](data-and-storage.md), Conditional writes).
 
 The only goroutine the package ever starts is the `OnJobsChange` fan-out (`dispatchJobsChange`), used by the two bulk writers. Write amplification during a download is bounded upstream, not here: `ProgressTracker` (`internal/worker/progress.go`) reports at most once per job per configured progress interval (`downloader.progress_interval_ms`, 16 ms default) and flushes gap rows at most once a second, and every other `UpdateJobFields` caller is event-driven. When nothing is being written, nothing runs.
 

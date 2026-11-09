@@ -555,6 +555,25 @@ func (db *Database) UpdateJobFieldsIf(id string, expected JobStatus, fields map[
 	return applied
 }
 
+// UpdateJobFieldsIfIn is UpdateJobFieldsIf over a set of statuses: the write
+// applies only while the row's status is one of expected, in the same single
+// statement, and reports whether it did. For a transition whose caller
+// accepts more than one source status — a verb legal from any of a set
+// (worker.ReinitializableStatus), a mux whose sources depend on how it was
+// started. An empty set matches no row. Subscribers move only when it applied.
+func (db *Database) UpdateJobFieldsIfIn(id string, expected []JobStatus, fields map[string]any) bool {
+	if len(expected) == 0 {
+		return false
+	}
+	args := make([]any, len(expected))
+	for i, st := range expected {
+		args[i] = st
+	}
+	cond := "status IN (?" + strings.Repeat(", ?", len(args)-1) + ")"
+	_, applied := db.updateJobFieldsWhere(id, fields, cond, args)
+	return applied
+}
+
 // UpdateJobFieldsUnless is UpdateJobFieldsIf's complement: the write applies
 // only while the row's status is NOT unwanted. For a write whose caller knows
 // the one status it must not overwrite rather than the one it expects — the
