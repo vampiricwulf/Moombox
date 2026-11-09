@@ -290,11 +290,12 @@ func (q *JobQueue) AcquireDownloadSlot(ctx context.Context, jobID string) bool {
 // a loop; the worker calls it first so it can tell the operator a VOD is
 // queueing for a slot only when it actually is.
 //
-// The slot is the JOB's: a job that already holds one is told it does and
-// nothing is counted again. Two holders of one job — a set-aside recovery and
-// a resumed VOD run of the same job — used to count twice while the job's
-// releases, keyed by job and idempotent, freed one, so a slot leaked for the
-// life of the process. The first release by either holder frees it.
+// The slot is the key's: a key that already holds one is told it does and
+// nothing is counted again, matching the releases, which are keyed and
+// idempotent. A second acquire under one key used to count twice while the
+// releases freed one, so a slot leaked for the life of the process. A second
+// FFmpeg for one job takes a key of its own (a set-aside recovery:
+// DownloadWorker.acquireRecoverySlot), so each one counts.
 func (q *JobQueue) TryAcquireDownloadSlot(jobID string) bool {
 	q.mu.Lock()
 	if q.holdingDlSlot[jobID] {

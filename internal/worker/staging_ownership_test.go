@@ -144,6 +144,29 @@ func TestResetVerbsWaitOutASetAsideRecovery(t *testing.T) {
 				t.Fatalf("%s during a recovery = %v, want it accepted and deferred", tc.name, err)
 			}
 			waitUntil(t, func() bool { return strings.Contains(log.joined(), "set-aside recovery") })
+			// The claim changes hands while the verb waits (released and
+			// taken again by another recovery in one step, as the waiter
+			// sees it): the waiter wakes, finds it held, and waits on
+			// without a second line (R-A1: ONE line naming the op).
+			waitUntil(t, func() bool {
+				w.stagingClaimMu.Lock()
+				defer w.stagingClaimMu.Unlock()
+				_, ok := w.stagingClaimFreed["j-rec"]
+				return ok
+			})
+			w.stagingClaimMu.Lock()
+			close(w.stagingClaimFreed["j-rec"])
+			delete(w.stagingClaimFreed, "j-rec")
+			w.stagingClaimMu.Unlock()
+			waitUntil(t, func() bool { // the waiter is back asleep on a fresh channel
+				w.stagingClaimMu.Lock()
+				defer w.stagingClaimMu.Unlock()
+				_, ok := w.stagingClaimFreed["j-rec"]
+				return ok
+			})
+			if n := strings.Count(log.joined(), "set-aside recovery"); n != 1 {
+				t.Errorf("the wait logged %d lines naming the recovery, want exactly 1:\n%s", n, log.joined())
+			}
 			if _, err := os.Stat(dir); err != nil {
 				t.Fatalf("DATA LOSS: %s removed staging while the recovery held it: %v", tc.name, err)
 			}
@@ -169,37 +192,207 @@ func TestResetVerbsWaitOutASetAsideRecovery(t *testing.T) {
 	}
 }
 
-// TestResumeDuringARecoveryLeavesTheSlotsBalanced: the recovery holds the
-// job's download slot as well as its claim. A Resume waits the recovery out,
-// so the resumed VOD run takes the slot only after the recovery released it,
-// and activeDownloads returns to zero.
-func TestResumeDuringARecoveryLeavesTheSlotsBalanced(t *testing.T) {
+// TestARecoveryCountsItsOwnDownloadSlot: a set-aside recovery and a run of
+// the same job can overlap — the scheduler admitting a Queued row, the
+// heartbeat enqueueing one the credential sweep revived — and each starts an
+// FFmpeg. Keyed by the job, the second holder was told it already held the
+// slot and the first release freed it under the other (an under-count past
+// num_parallel_downloads); before that, it counted twice and leaked one. The
+// recovery's slot is its own: both count, each release frees its own.
+//
+// Mutant: acquireRecoverySlot keyed by jobID — the run's acquire succeeds on
+// a full pool and the count reads 1.
+func TestARecoveryCountsItsOwnDownloadSlot(t *testing.T) {
+	w, _ := testWorkerSetup(t)
+	w.SetParallelDownloads(1)
+	releaseRecovery, ok := w.acquireRecoverySlot(context.Background(), "j-slot")
+	if !ok {
+		t.Fatal("the recovery's slot")
+	}
+	if w.queue.TryAcquireDownloadSlot("j-slot") {
+		t.Fatal("the job's run took a slot from a full pool: the recovery's slot was handed to it")
+	}
+	w.SetParallelDownloads(2)
+	if !w.queue.TryAcquireDownloadSlot("j-slot") {
+		t.Fatal("the job's run found no slot in a pool with one free")
+	}
+	if got := w.queue.ActiveCount(); got != 2 {
+		t.Errorf("ActiveCount with the recovery and the run both downloading = %d, want 2", got)
+	}
+	w.queue.ReleaseDownloadSlot("j-slot") // the run's
+	if got := w.queue.ActiveCount(); got != 1 {
+		t.Errorf("ActiveCount once the run let go = %d, want 1 (the recovery still muxing)", got)
+	}
+	releaseRecovery()
+	releaseRecovery() // idempotent, as the queue's releases are
+	if got := w.queue.ActiveCount(); got != 0 {
+		t.Errorf("ActiveCount after both released = %d, want 0", got)
+	}
+}
+
+// TestAutomaticStartsSkipAJobWhoseStagingIsClaimed: a recovery accepts a
+// COOKIES? or Queued row (neither is active), and the credential sweep, the
+// heartbeat and the scheduler's admission start runs without the claim — so
+// a run could start writing the staging a recovery was muxing out of. The
+// heartbeat and the admission now skip a job whose claim is held, and a
+// claim's release wakes both so the job is not left for the next tick.
+//
+// Mutant: enqueueRunnable without the claim check — the job is queued while
+// the recovery holds its staging.
+func TestAutomaticStartsSkipAJobWhoseStagingIsClaimed(t *testing.T) {
 	w, db := testWorkerSetup(t)
-	ownershipJob(t, w, db, "j-slot", database.StatusError)
-	release, err := w.claimJobOperation("j-slot", opRecoverAsides)
+	ownershipJob(t, w, db, "j-auto", database.StatusUpcoming)
+	release, err := w.claimJobOperation("j-auto", opRecoverAsides)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !w.queue.AcquireDownloadSlot(context.Background(), "j-slot") {
-		t.Fatal("the recovery's slot")
+	job, _ := db.GetJob("j-auto")
+	w.enqueueRunnable([]*database.Job{job})
+	if w.queue.isPending("j-auto") {
+		t.Fatal("the heartbeat queued a job whose staging a recovery holds")
 	}
-	if err := w.ResumeJob("j-slot"); err != nil {
+	if w.scheduler.stagingBusy == nil || !w.scheduler.stagingBusy("j-auto") {
+		t.Error("the scheduler is not told the job's staging is claimed")
+	}
+	select { // drain
+	case <-w.notifyJob:
+	default:
+	}
+	release()
+	select {
+	case <-w.notifyJob:
+	default:
+		t.Error("the claim's release did not wake the heartbeat")
+	}
+	if w.scheduler.stagingBusy("j-auto") {
+		t.Error("the scheduler still reads the released claim as busy")
+	}
+	w.enqueueRunnable([]*database.Job{job})
+	if !w.queue.isPending("j-auto") {
+		t.Error("the heartbeat did not queue the job once the claim was released")
+	}
+}
+
+// TestSchedulerAdmitsNoJobWhoseStagingIsClaimed: the admission half of the
+// test above, on the scheduler alone.
+func TestSchedulerAdmitsNoJobWhoseStagingIsClaimed(t *testing.T) {
+	s, db, log := testSchedulerSetup(t, 1)
+	chID := "UC_busy"
+	addSchedJob(t, db, &chID, "v_busy", database.StatusQueued, 1)
+	addFeedItemRow(t, db, chID, "v_busy", "2026-07-01T00:00:00Z")
+	busy := true
+	s.stagingBusy = func(id string) bool { return busy && id == "v_busy" }
+	s.sweep()
+	if got := log.admitted(); len(got) != 0 {
+		t.Fatalf("sweep admitted %v while the job's staging was claimed; want none", got)
+	}
+	if row, _ := db.GetJob("v_busy"); row.Status != database.StatusQueued {
+		t.Fatalf("status = %s, want the row left Queued", row.Status)
+	}
+	busy = false
+	s.sweep()
+	if got := log.admitted(); len(got) != 1 || got[0] != "v_busy" {
+		t.Fatalf("sweep admitted %v once the claim was released; want [v_busy]", got)
+	}
+}
+
+// TestAPendingVerbAppliesOverTheCookieRefreshResume: a run parked in
+// COOKIES? refreshes its cookies in its own tail and, restored, writes
+// COOKIES? -> Upcoming (Queued for a backlog VOD) before it hands the
+// enqueue to afterJobExit. An operator's Resume or Reinitialize accepted
+// before that (seen = COOKIES?) refused the hand-off with ErrResetPending
+// and then found the row no longer COOKIES?, so neither enqueued: the job
+// sat for the heartbeat, and a Reinitialize became a resume. The refresh's
+// resume is now one the waiting verb applies over.
+func TestAPendingVerbAppliesOverTheCookieRefreshResume(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		verb func(w *DownloadWorker, id string) error
+		want database.JobStatus
+		gone bool
+	}{
+		{"resume", (*DownloadWorker).ResumeJob, database.StatusDownloading, false},
+		{"reinitialize", (*DownloadWorker).ReinitializeJob, database.StatusUpcoming, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			dir := ownershipJob(t, w, db, "j-ck", database.StatusCookies)
+			w.queue.Enqueue("j-ck", database.StatusDownloading)
+			if got, _, ok := w.queue.Dequeue(context.Background()); !ok || got != "j-ck" {
+				t.Fatalf("Dequeue = %q, %v", got, ok)
+			}
+			if err := tc.verb(w, "j-ck"); err != nil {
+				t.Fatal(err)
+			}
+			// The refresh's resume, as attemptCookieRefresh writes it.
+			if !db.UpdateJobFieldsIf("j-ck", database.StatusCookies, map[string]any{"status": database.StatusUpcoming}) {
+				t.Fatal("the refresh's write")
+			}
+			err := w.afterJobExit("j-ck", "cookie-refresh resume", true, func(database.JobStatus) {
+				w.queue.Enqueue("j-ck", database.StatusUpcoming)
+			})
+			if !errors.Is(err, ErrResetPending) {
+				t.Fatalf("the refresh's hand-off = %v, want ErrResetPending", err)
+			}
+			w.queue.Complete("j-ck") // the parked run exits
+			w.wg.Wait()
+			if row, _ := db.GetJob("j-ck"); row.Status != tc.want {
+				t.Errorf("status = %s, want %s: the operator's %s was dropped", row.Status, tc.want, tc.name)
+			}
+			if _, err := os.Stat(dir); tc.gone != os.IsNotExist(err) {
+				t.Errorf("staging stat = %v, want gone=%v", err, tc.gone)
+			}
+			if !w.queue.isPending("j-ck") {
+				t.Error("nothing queued the job: the refresh stepped aside and the verb did not run")
+			}
+		})
+	}
+}
+
+// TestAResetVerbHoldsTheClaimWhileItRuns: a reset verb holds the job's
+// claim (op = its name) for the length of its reset, so nothing that claims
+// staging starts under it; and while it does, the verb is still pending, so
+// a repeat is a quiet no-op and a different verb is ErrResetPending — which
+// is also why the REST layer lets a reset verb's claim through to the worker
+// (IsResetVerb) rather than answering a double-click with "busy".
+func TestAResetVerbHoldsTheClaimWhileItRuns(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	ownershipJob(t, w, db, "j-hold", database.StatusError)
+	entered, block, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- w.afterJobExit("j-hold", "reinitialize", true, func(database.JobStatus) {
+			close(entered)
+			<-block
+		})
+	}()
+	<-entered
+
+	op, held := w.StagingClaimHolder("j-hold")
+	if !held || op != "reinitialize" || !op.IsResetVerb() {
+		t.Errorf("StagingClaimHolder during the reset = %q, %v (reset verb %v); want \"reinitialize\", a reset verb", op, held, op.IsResetVerb())
+	}
+	if opRecoverAsides.IsResetVerb() || opMux.IsResetVerb() || opChapterImport.IsResetVerb() {
+		t.Error("an off-queue operation reads as a reset verb")
+	}
+	if err := w.RecoverAsides("j-hold"); !errors.Is(err, ErrStagingBusy) || !strings.Contains(err.Error(), "reinitialize in progress") {
+		t.Errorf("RecoverAsides during the reset = %v, want ErrStagingBusy naming the reinitialize", err)
+	}
+	if _, err := w.ClaimChapterImport("j-hold"); !errors.Is(err, ErrStagingBusy) || !strings.Contains(err.Error(), "reinitialize in progress") {
+		t.Errorf("ClaimChapterImport during the reset = %v, want ErrStagingBusy naming the reinitialize", err)
+	}
+	if err := w.ReinitializeJob("j-hold"); err != nil {
+		t.Errorf("the same verb during its own reset = %v, want a no-op success", err)
+	}
+	if err := w.ResumeJob("j-hold"); !errors.Is(err, ErrResetPending) || err.Error() != "reinitialize already pending" {
+		t.Errorf("Resume during the reset = %v, want %q", err, "reinitialize already pending")
+	}
+
+	close(block)
+	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if w.queue.isPending("j-slot") {
-		t.Fatal("Resume queued the run while the recovery held the job's staging and slot")
-	}
-	// The recovery ends: slot, then claim, as its defers run.
-	w.queue.ReleaseDownloadSlot("j-slot")
-	release()
-	w.wg.Wait()
-	// The resumed VOD run.
-	if !w.queue.TryAcquireDownloadSlot("j-slot") {
-		t.Fatal("the resumed run found no slot")
-	}
-	w.queue.ReleaseDownloadSlot("j-slot")
-	if got := w.queue.ActiveCount(); got != 0 {
-		t.Errorf("ActiveCount after the recovery and the resumed run = %d, want 0", got)
+	if _, held := w.StagingClaimHolder("j-hold"); held {
+		t.Error("the claim outlived the reset")
 	}
 }
 

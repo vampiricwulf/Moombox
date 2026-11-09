@@ -42,6 +42,13 @@ type Scheduler struct {
 	// test can watch several restarts without sleeping seconds out.
 	restartPause time.Duration
 
+	// stagingBusy reports whether an off-queue operation holds the job's
+	// staging claim (DownloadWorker.stagingClaimed; nil: never). sweep
+	// admits no such row: a set-aside recovery accepts a Queued one, and the
+	// run admission starts writes the staging FFmpeg is muxing out of. The
+	// claim's release wakes the scheduler.
+	stagingBusy func(jobID string) bool
+
 	// conn is the connectivity monitor (nil: always online). An admission
 	// made during an outage is a backlog VOD sent to fail its first fetch, so
 	// sweep admits nothing while it reports offline, and Run sweeps again the
@@ -390,6 +397,10 @@ func (s *Scheduler) sweep() {
 				break
 			}
 			if s.held(id, now) {
+				continue
+			}
+			if s.stagingBusy != nil && s.stagingBusy(id) {
+				s.log.Debug("scheduler: backlog job's staging is claimed; admission waits for it", "jobID", id, "channel", ch)
 				continue
 			}
 			// 1. durable FIRST — this is what the M count observes; Enqueue

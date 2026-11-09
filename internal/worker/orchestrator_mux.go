@@ -1004,7 +1004,7 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// read over whatever is at the name, so a finalize that wrote the new
 	// recording there meanwhile was replaced by the old, shorter one. The
 	// verbs that start a run refuse or wait while an import holds the claim
-	// (ChapterImportRunning, afterJobExit); this is for a run that was
+	// (StagingClaimHolder, afterJobExit); this is for a run that was
 	// already going, or started another way.
 	if o.waitArchiveRewrite != nil && !o.waitArchiveRewrite(ctx, jobCtx.Job.ID, "the finalize") {
 		return ctx.Err()
