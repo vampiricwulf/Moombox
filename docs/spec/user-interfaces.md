@@ -1284,7 +1284,7 @@ Both UIs display the same status information in a persistent status bar / footer
 | Element | Web UI | TUI |
 |---------|--------|-----|
 | Connection status | WebSocket connected/disconnected indicator | Backend reachability indicator |
-| Disk usage | Output drive usage with warning/critical thresholds; "holding" while the backlog's disk gate holds below critical (`diskGaugeLevel`) | Same, with color-coded thresholds; `Disk 94% (12G free, holding)` while the gate holds |
+| Disk usage | Output drive usage with warning/critical thresholds; "holding" while the backlog's disk gate holds below critical (`diskGaugeLevel`) | Same, with color-coded thresholds; `Disk 94% (12G free, holding)` while the gate holds, `D:94% 12G⏸` / `D:94%⏸` on the narrower tiers |
 | Monitor timers | Next check times for Feed, DECAPI, Twitch | Same, countdown format |
 | Cookie status | Per-platform badge, `cookieIndicatorState` | Per-platform indicator, `renderCookieStatus` |
 | Re-login required | `YT: Re-login` / `TW: Re-login` in the warnings area, clickable to start setup | Folded into the platform indicator as `YT: Re-login` / `YT!`, and at `tierFull` followed by `(E L)` — the chord that opens the same interactive setup the dashboard's click does |

@@ -199,8 +199,13 @@ type Job struct {
 	QueuePriority int     `json:"queuePriority,omitempty"`
 	// ParkReason is why the job stopped at StatusCookies, or — for the three
 	// Error-row values — in StatusError (see the ParkReason doc comment).
-	// Every path that parks or fails a job rewrites it, and every path that
-	// un-parks or restarts one clears it.
+	// setJobError and the park paths write it (ParkReasonNone for a failure
+	// with no reason to record), and the un-park and restart paths clear it.
+	// Not every Error write touches it: the processJob panic recoveries write
+	// only status and error, and a failed operator Mux of an Error row adds a
+	// reason only for a Cancelled or mux-after-cancel prior, so either leaves the
+	// reason the row already had (a twitch_unreachable or
+	// twitch_end_unconfirmed among them).
 	ParkReason ParkReason `json:"parkReason,omitempty"`
 	// ParkIdentity is an opaque fingerprint of WHICH platform account the job
 	// was refused under, recorded when ParkReason is ParkReasonMembership (see
