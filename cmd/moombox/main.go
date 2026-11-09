@@ -219,11 +219,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	defer cancel()
 
 	s := &runState{
-		ctx:              ctx,
-		cancel:           cancel,
-		configPath:       configPath,
-		useTUI:           useTUI,
-		stdoutIsTerminal: isatty.IsTerminal(os.Stdout.Fd()),
+		ctx:                  ctx,
+		cancel:               cancel,
+		configPath:           configPath,
+		useTUI:               useTUI,
+		stdoutIsTerminal:     isatty.IsTerminal(os.Stdout.Fd()),
+		admissionHoldsResync: make(chan struct{}, 1),
 	}
 	catchStopSignals(stopSignals(), s.stopOnSignal)
 

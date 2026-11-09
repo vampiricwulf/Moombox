@@ -172,6 +172,9 @@ type runState struct {
 	// admissionHoldsTUI receives each new backlog hold snapshot when the TUI
 	// runs (runAdmissionHoldsPush); nil without one.
 	admissionHoldsTUI atomic.Pointer[func(jobstate.AdmissionHolds)]
+	// admissionHoldsResync (capacity 1) asks runAdmissionHoldsPush to send the
+	// TUI the snapshot again (resyncAdmissionHoldsTUI); nil sends nothing.
+	admissionHoldsResync chan struct{}
 
 	// Same pattern for monitor OnSchedule: each monitor's goroutine loads
 	// the atomic pointer on every schedule event; the TUI wiring later

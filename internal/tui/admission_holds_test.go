@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobstate"
 )
@@ -115,5 +117,43 @@ func TestDiskIndicatorMarksHoldingAtEveryTier(t *testing.T) {
 				t.Errorf("critical already says it; marker added: %q", out)
 			}
 		})
+	}
+}
+
+// TestInitAsksForTheHoldsAgain: the TUI is seeded with the holds before Run,
+// and a change between that seed and Run went through Send while it was a
+// no-op. Init's commands run once the program does; one of them asks the
+// push for the snapshot again (OnAdmissionHoldsResync), and none is added
+// without the hook.
+//
+// Mutants: Init not batching the resync command; the command not calling
+// the hook.
+func TestInitAsksForTheHoldsAgain(t *testing.T) {
+	without := NewApp()
+	batchLen := func(a *App) int {
+		t.Helper()
+		msg := a.Init()()
+		b, ok := msg.(tea.BatchMsg)
+		if !ok {
+			t.Fatalf("Init returned %T, want a tea.BatchMsg", msg)
+		}
+		return len(b)
+	}
+	base := batchLen(without)
+	if without.admissionHoldsResyncCmd() != nil {
+		t.Fatal("no hook: want no resync command")
+	}
+
+	with := NewApp()
+	calls := 0
+	with.OnAdmissionHoldsResync = func() { calls++ }
+	if got := batchLen(with); got != base+1 {
+		t.Errorf("Init batch with the hook = %d commands, want %d", got, base+1)
+	}
+	if msg := with.admissionHoldsResyncCmd()(); msg != nil {
+		t.Errorf("resync command returned %T, want nil", msg)
+	}
+	if calls != 1 {
+		t.Errorf("hook calls = %d, want 1", calls)
 	}
 }

@@ -72,3 +72,46 @@ func TestAdmissionHoldsArePushedToBothUIs(t *testing.T) {
 		t.Errorf("TUI got %+v, want the snapshot once", tuiGot)
 	}
 }
+
+// TestAdmissionHoldsResyncReachesTheTUIAlone: the TUI's Init asks for the
+// holds again (a change between its pre-Run seed and Run was lost to a no-op
+// Send); the push sends the current snapshot to the TUI's hook, and no
+// dashboard frame, since nothing changed for it.
+//
+// Mutants: the resync channel not selected on; the resync broadcast to the
+// dashboard too.
+func TestAdmissionHoldsResyncReachesTheTUIAlone(t *testing.T) {
+	log, err := logger.New(filepath.Join(t.TempDir(), "holds.log"), "error", 4096, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { log.Close() })
+	s := &runState{log: log, admissionHoldsResync: make(chan struct{}, 1)}
+	got := make(chan jobstate.AdmissionHolds, 4)
+	fn := func(h jobstate.AdmissionHolds) { got <- h }
+	s.admissionHoldsTUI.Store(&fn)
+	hub := &holdsHubSpy{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.runAdmissionHoldsPush(ctx, make(chan struct{}, 1), func() jobstate.AdmissionHolds {
+			return jobstate.AdmissionHolds{Offline: true}
+		}, hub)
+	}()
+	s.resyncAdmissionHoldsTUI()
+	s.resyncAdmissionHoldsTUI() // coalesces; never blocks
+	select {
+	case h := <-got:
+		if !h.Offline {
+			t.Errorf("TUI got %+v, want the current snapshot", h)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the resync sent the TUI nothing")
+	}
+	cancel()
+	<-done
+	if n := hub.count(); n != 0 {
+		t.Errorf("admission_holds frames = %d after a TUI resync, want 0", n)
+	}
+}

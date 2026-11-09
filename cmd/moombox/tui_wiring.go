@@ -1115,6 +1115,9 @@ func (s *runState) runTUI() {
 	s.admissionHoldsTUI.Store(&holdsFn)
 	defer s.admissionHoldsTUI.Store(nil)
 	app.SetAdmissionHolds(s.dlWorker.AdmissionHolds()) // Send is a no-op before Run
+	// A change between this seed and Run went through that no-op Send; the
+	// TUI's Init asks the push for the snapshot again once Send delivers.
+	app.OnAdmissionHoldsResync = s.resyncAdmissionHoldsTUI
 
 	// Wire connectivity state to TUI (uses program.Send, not a channel)
 	unsubConnTUI := s.connMon.OnStateChange(func(online bool) {
