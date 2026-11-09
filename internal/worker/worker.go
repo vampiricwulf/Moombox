@@ -875,9 +875,12 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 			// progress of its own, so an Upcoming row would show the frozen
 			// wait (both UIs show an Upcoming row's wait line, owner ruling
 			// R-D1) for the whole re-run wait. No run of this process has
-			// started yet, so any wait line here is stale. Conditional on the
-			// status read, like every write decided on it.
-			if jobstate.IsWaitLine(job.Progress) {
+			// started yet, so any wait line here is stale. Upcoming only: it is
+			// the one re-enqueued status whose run writes no progress before
+			// the wait ends; a Live or Downloading run overwrites its line
+			// itself, and until then the line is the last thing it did.
+			// Conditional on the status read, like every write decided on it.
+			if job.Status == database.StatusUpcoming && jobstate.IsWaitLine(job.Progress) {
 				w.db.UpdateJobFieldsIf(job.ID, job.Status, map[string]any{"progress": ""})
 			}
 			w.queue.Enqueue(job.ID, job.Status)
