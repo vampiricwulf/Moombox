@@ -834,7 +834,7 @@ func (w *DownloadWorker) noteMuxRunCancel(jobID string) bool {
 // R-H2) reads Finished here, and its one notification is the finalize's
 // "Download Finished". A Cancel that applies after this is its caller's to
 // announce again.
-func (w *DownloadWorker) endMuxRun(jobID string) {
+func (w *DownloadWorker) endMuxRun(jobID string, prior *database.Job, finished bool) {
 	w.muxRunMu.Lock()
 	owed := w.muxRuns[jobID]
 	delete(w.muxRuns, jobID)
@@ -843,7 +843,20 @@ func (w *DownloadWorker) endMuxRun(jobID string) {
 		return
 	}
 	job, err := w.db.GetJob(jobID)
-	if err != nil || job == nil || job.Status != database.StatusCancelled {
+	if err != nil {
+		// CancelJob has told the Cancel's caller this run announces it, so
+		// nobody else will, and a row that cannot be read is no reason to
+		// send nothing. The run goes by what it knows: a mux that finished
+		// recorded its archive and sent "Download Finished" (the Cancel was
+		// superseded, or stopped nothing); one that did not left the Cancel
+		// standing, announced from prior — the row the Mux read as it
+		// started, nil when that read failed too.
+		if finished || prior == nil {
+			return
+		}
+		w.logger.Warn("could not read the row at the end of a cancelled mux; announcing the cancel from the row read at its start", "jobID", jobID, "err", err)
+		job = prior
+	} else if job == nil || job.Status != database.StatusCancelled {
 		return
 	}
 	w.logger.Info("job cancelled by user", "jobID", jobID)
@@ -1876,6 +1889,21 @@ func (w *DownloadWorker) recordRunPanic(jobID string, job *database.Job, r any) 
 	}
 	if flagged {
 		row, err := w.db.GetJob(jobID)
+		if err == nil && row != nil && row.Status == database.StatusMuxing {
+			// A flagged run's row reads Muxing only when its finish
+			// re-claimed it from the Cancel that flagged the run
+			// (beginFinishing, owner ruling R-H2): CancelJob wrote Cancelled
+			// ahead of the flag, and a Mux is refused while this run is
+			// registered. The job is not cancelled, so this is no cancel's
+			// end — handleCancellation's Cancelled write was refused there,
+			// "Job Cancelled" was sent, and the row stayed Muxing with
+			// nothing running. The finalize panicked between its mark and
+			// its Finished write: recorded as any other panicked finalize,
+			// an Error that Mux recovers.
+			w.logger.Info("panic in a finish that had re-claimed its row from a Cancel; recording the panic, not the cancel", "jobID", jobID)
+			w.writePanicError(jobID, r)
+			return
+		}
 		if err == nil && (row == nil || row.Status == database.StatusCancelled || !row.IsTerminal()) {
 			if job == nil {
 				job = row
@@ -3418,7 +3446,10 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 		// Deferred after the recover, so it runs under it: the "Job
 		// Cancelled" a Cancel left to this run, once the row's last word is
 		// in (a re-claimed finish has written Finished by now).
-		defer w.endMuxRun(jobID)
+		// finished — the mux returned with its archive recorded — is what it
+		// goes by when the row cannot be read then.
+		finished := false
+		defer func() { w.endMuxRun(jobID, prior, finished) }()
 
 		// Owner decision O-E: the orchestrator's mux root, never
 		// context.Background() — a Stop reaches this FFmpeg and cancels it.
@@ -3522,6 +3553,7 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 			writeFailed(failure(err))
 			return
 		}
+		finished = true
 
 		if gapPlan != nil {
 			w.orchestrator.keepTwitchGapFillPlan(gapPlan)

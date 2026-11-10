@@ -3,13 +3,17 @@ package worker
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
@@ -487,5 +491,253 @@ func TestAReclaimedFinishStillRunsTheTrimTheJobAskedFor(t *testing.T) {
 	}
 	if !jobCtx.FinishReclaimed {
 		t.Error("the finalize re-claimed its row and did not say so: the run's trim would be skipped")
+	}
+}
+
+// thumbnailStub points copyAssets' YouTube thumbnail fetch at a server that
+// answers every size with a JPEG-sized body, and counts the requests it got.
+func thumbnailStub(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = rw.Write(make([]byte, 2048))
+	}))
+	orig := ytThumbnailBase
+	ytThumbnailBase = srv.URL
+	t.Cleanup(func() {
+		ytThumbnailBase = orig
+		srv.Close()
+	})
+	return &hits
+}
+
+// TestAReclaimedFinishRunsItsTailOnALiveContext: the Cancel a re-claimed
+// finish superseded (R-H2) cancelled the finalize's own context. What the
+// finalize still does after the mark — the join offset's probe, the assets —
+// runs on the mux root instead; left on the cancelled context, the Finished
+// row lost its thumbnail (the fetch fails at once) and its join offset.
+// Pinned on the thumbnail, the one asset fetched over the context.
+//
+// Mutant: muxAndFinalize keeping its own context after a re-claim — the
+// Finished row has no thumbnail_file, and the stub is never asked.
+func TestAReclaimedFinishRunsItsTailOnALiveContext(t *testing.T) {
+	hits := thumbnailStub(t)
+	w, db := testWorkerSetup(t)
+	staging, _ := muxFixtureJob(t, w, db, "j-tail")
+	ffmpegPath, _ := requireFFmpegTools(t)
+	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 3)
+	db.UpdateJobFields("j-tail", map[string]any{"status": database.StatusError})
+
+	mark := w.orchestrator.beginFinishing
+	var cancelled bool
+	w.orchestrator.beginFinishing = func(id string, muxed bool) (func(), bool, bool) {
+		cancelled, _, _ = w.CancelJob(id) // its row write cancels the mux's context
+		return mark(id, muxed)
+	}
+	if err := w.MuxJob("j-tail"); err != nil {
+		t.Fatal(err)
+	}
+	w.wg.Wait()
+
+	if !cancelled {
+		t.Fatal("the Cancel ahead of the mark was refused")
+	}
+	j, _ := db.GetJob("j-tail")
+	if j.Status != database.StatusFinished {
+		t.Fatalf("row = %s, want Finished", j.Status)
+	}
+	if j.ThumbnailFile == "" {
+		t.Errorf("the re-claimed finish has no thumbnail (%d fetches reached the stub): its tail ran on the context the Cancel ended", hits.Load())
+	} else if _, err := os.Stat(j.ThumbnailFile); err != nil {
+		t.Errorf("the row's thumbnail: %v", err)
+	}
+}
+
+// TestAReclaimedSplitFinishRunsItsTailOnALiveContext: the same, in the split
+// shape.
+//
+// Mutant: finalizeMultiSegmentJob keeping its own context after a re-claim.
+func TestAReclaimedSplitFinishRunsItsTailOnALiveContext(t *testing.T) {
+	hits := thumbnailStub(t)
+	w, db := testWorkerSetup(t)
+	jobCtx, segments := splitFinalizeFixture(t, w, db, "j-split-tail")
+	mark := w.orchestrator.beginFinishing
+	var cancelled bool
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.orchestrator.beginFinishing = func(id string, muxed bool) (func(), bool, bool) {
+		cancelled, _, _ = w.CancelJob(id)
+		cancel() // as the Cancel's listener cancels the run
+		return mark(id, muxed)
+	}
+	if err := w.orchestrator.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil); err != nil {
+		t.Fatalf("finalizeMultiSegmentJob = %v, want the finish", err)
+	}
+	if !cancelled {
+		t.Fatal("the Cancel ahead of the mark was refused")
+	}
+	j, _ := db.GetJob("j-split-tail")
+	if j.Status != database.StatusFinished {
+		t.Fatalf("row = %s, want Finished", j.Status)
+	}
+	if j.ThumbnailFile == "" {
+		t.Errorf("the re-claimed split finish has no thumbnail (%d fetches reached the stub): its tail ran on the context the Cancel ended", hits.Load())
+	}
+}
+
+// TestACancelInAQueueRunsFinishWindowEndsFinished is R-H2 on the path most
+// captures take: a queue run (processJob) whose download ended and whose mux
+// completed, cancelled between the mux's return and the mark. CancelJob
+// flags the run and cancels its context; the mark re-claims the row, the
+// finalize returns nil, and the run takes its success tail — one "Download
+// Finished", no "Job Cancelled" (handleCancellation is not reached), and the
+// staging reclaimed as after any finish.
+//
+// Mutants: processJob reading its context ahead of the orchestrator's nil
+// (handleCancellation runs: a "Job Cancelled" beside the finish, the staging
+// kept); the re-claim refused — the row stays Cancelled.
+func TestACancelInAQueueRunsFinishWindowEndsFinished(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	w.orchestrator.SetFfmpegPath(ffmpegPath)
+	w.orchestrator.routedCipher = stubCipherSolver{}
+	rec := notificationtest.New()
+	w.notifier = rec
+	w.orchestrator.notifier = rec
+	const id = "j-queue-window"
+	diskFullVodJob(t, db, id, 0)
+	finished := finishedWrites(db, id)
+
+	srv, size := serveMuxFixture(t, ffmpegPath, 2)
+	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+		return &StreamProcessResult{ShouldDownload: true, IsVod: true,
+			VideoInfo: vodInfoAt(srv.URL, time.Now().Add(6*time.Hour).Unix(), size)}, nil
+	}
+	mark := w.orchestrator.beginFinishing
+	var cancelled, flagged bool
+	var cancelErr error
+	w.orchestrator.beginFinishing = func(jobID string, muxed bool) (func(), bool, bool) {
+		cancelled, flagged, cancelErr = w.CancelJob(jobID)
+		return mark(jobID, muxed)
+	}
+
+	w.queue.Enqueue(id, database.StatusUpcoming)
+	_, ctx, ok := w.queue.Dequeue(context.Background())
+	if !ok {
+		t.Fatal("Dequeue returned no job")
+	}
+	w.processJob(ctx, id)
+
+	if !cancelled || !flagged || cancelErr != nil {
+		t.Fatalf("the Cancel ahead of the mark = cancelled %v, flagged %v, %v; want it applied and left to the run", cancelled, flagged, cancelErr)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the Cancel did not cancel the run's context: the test is not in the window")
+	}
+	j, _ := db.GetJob(id)
+	if j.Status != database.StatusFinished || j.OutputFile == "" {
+		t.Fatalf("row = %s %q (output %q), want Finished with its archive", j.Status, j.Error, j.OutputFile)
+	}
+	if _, err := os.Stat(j.OutputFile); err != nil {
+		t.Errorf("the row's archive: %v", err)
+	}
+	if n := finished.Load(); n != 1 {
+		t.Errorf("the row was carried to Finished %d times, want once", n)
+	}
+	if n := len(rec.ByEvent("finished")); n != 1 {
+		t.Errorf("%d Download Finished sent, want 1", n)
+	}
+	if n := len(rec.ByEvent("cancelled")); n != 0 {
+		t.Errorf("%d Job Cancelled sent for a Cancel the finish superseded, want 0", n)
+	}
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+	if _, err := os.Stat(filepath.Join(stagingBase, id)); !os.IsNotExist(err) {
+		t.Errorf("staging was kept under the Finished row (stat: %v): the run did not take its success tail", err)
+	}
+}
+
+// TestAPanicInAReclaimedFinishesTailEndsInError: a queue run whose finish
+// re-claimed its row (R-H2) is still flagged by the Cancel the mark
+// superseded. A panic in what is left of the finalize — between the mark and
+// the Finished write — was recorded as that cancel's end: the Cancelled
+// write was refused (the row reads Muxing), "Job Cancelled" was sent, and the
+// row stayed Muxing with nothing running until a restart. A flagged run's
+// row reads Muxing only through that re-claim (CancelJob wrote Cancelled
+// ahead of the flag, and a Mux is refused while the run is registered), so
+// it is recorded as any other panicked finalize: Error, which Mux recovers.
+//
+// Mutant: recordRunPanic handing every flagged, non-terminal row to
+// handleCancellation — the row stays Muxing and Job Cancelled is sent.
+func TestAPanicInAReclaimedFinishesTailEndsInError(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+	rec := notificationtest.New()
+	w.notifier = rec
+	job := runningJob(t, w, db, "reclaim_panic")
+	if c, flagged, err := w.CancelJob(job.ID); !c || !flagged || err != nil {
+		t.Fatalf("CancelJob = %v, %v, %v; want the run cancelled and flagged", c, flagged, err)
+	}
+	release, reclaimed, ok := w.beginFinishing(job.ID, true)
+	if !ok || !reclaimed {
+		t.Fatalf("the mark = reclaimed %v, ok %v; want the Cancelled row re-claimed", reclaimed, ok)
+	}
+	release() // the finalize's deferred release, as the panic unwinds it
+
+	w.recordRunPanic(job.ID, job, "boom")
+
+	row, _ := db.GetJob(job.ID)
+	if row.Status != database.StatusError || !strings.Contains(row.Error, "internal panic") {
+		t.Errorf("row = %s %q, want Error naming the panic", row.Status, row.Error)
+	}
+	if n := len(rec.ByEvent("cancelled")); n != 0 {
+		t.Errorf("%d Job Cancelled sent for a job that is not cancelled", n)
+	}
+}
+
+// TestAMuxRunAnnouncesItsCancelWhenTheRowCannotBeRead: CancelJob told its
+// caller the off-queue mux would announce the Cancel (flagged), so nobody
+// else sends "Job Cancelled". When the row cannot be read at the mux run's
+// exit, the run goes by what it knows: a mux that did not finish left the
+// Cancel standing, and it is announced from the row the Mux read at its
+// start; one that finished announced itself ("Download Finished"), and a
+// Cancel nobody noted is not the run's.
+//
+// Mutant: endMuxRun returning on a read error, as it did — no Job Cancelled.
+func TestAMuxRunAnnouncesItsCancelWhenTheRowCannotBeRead(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		noted    bool
+		finished bool
+		want     int
+	}{
+		{"a cancelled mux", true, false, 1},
+		{"a mux that finished", true, true, 0},
+		{"no Cancel noted", false, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			rec := notificationtest.New()
+			w.notifier = rec
+			prior := &database.Job{ID: "j-unread", VideoID: "j-unread", URL: "u", Platform: "youtube", Title: "T", Status: database.StatusCancelled}
+			if _, err := db.AddJob(prior); err != nil {
+				t.Fatal(err)
+			}
+			w.beginMuxRun(prior.ID)
+			if tc.noted && !w.noteMuxRunCancel(prior.ID) {
+				t.Fatal("the Cancel was not noted on the running mux")
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.GetJob(prior.ID); err == nil {
+				t.Fatal("the closed database still reads: the test is not exercising the read error")
+			}
+			w.endMuxRun(prior.ID, prior, tc.finished)
+			if n := len(rec.ByEvent("cancelled")); n != tc.want {
+				t.Errorf("%d Job Cancelled sent, want %d", n, tc.want)
+			}
+		})
 	}
 }
