@@ -28,7 +28,7 @@ const row = (id) => ({
   createdAt: "2026-09-05T11:00:00Z", updatedAt: "2026-09-05T11:00:00Z",
 });
 
-const kept = { name: "video.mp4", path: "D:\staging\A\video.mp4", size: 3 * 1024 * 1024 * 1024 };
+const kept = { name: "video.mp4", path: String.raw`D:\staging\A\video.mp4`, size: 3 * 1024 * 1024 * 1024 };
 
 async function openDetails(unusedRootRecording) {
   let answer = unusedRootRecording;
@@ -64,7 +64,7 @@ test("the details dialog names the kept recording the archive was not made from"
   );
   assert.equal(
     section.querySelector('[data-field="unused-recording-path"]').textContent,
-    "D:\staging\A\video.mp4",
+    kept.path,
     "the path must be shown beneath the line",
   );
   assert.equal(section.querySelector("sl-button"), null, "the section offers no action (owner ruling R-E1)");
