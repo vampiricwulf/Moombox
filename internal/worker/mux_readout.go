@@ -124,3 +124,17 @@ func (r *muxReadout) restore() {
 	r.db.UpdateJobFieldsIfIn(r.jobID, []database.JobStatus{database.StatusMuxing, database.StatusCancelled},
 		map[string]any{"progress": r.saved})
 }
+
+// dropMuxReadoutLine clears a readout line left on a Muxing row by a copy
+// that succeeded, for a finalize that then fails: the row is about to read
+// Error, and no mux is running. A row carrying any other line, or one that is
+// no longer Muxing, is left alone.
+func (o *DownloadOrchestrator) dropMuxReadoutLine(jobID string) {
+	fresh, err := o.db.GetJob(jobID)
+	if err != nil || fresh == nil {
+		return
+	}
+	if _, _, ok := jobstate.MuxReadout(fresh.Progress); ok {
+		o.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, map[string]any{"progress": ""})
+	}
+}

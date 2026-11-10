@@ -1382,6 +1382,9 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 		}
 	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		// The final part's readout may still be on the row, which is
+		// about to read Error.
+		o.dropMuxReadoutLine(jobCtx.Job.ID)
 		return fmt.Errorf("create output dir: %w", err)
 	}
 
@@ -1863,6 +1866,37 @@ func (o *DownloadOrchestrator) muxSegment(
 	quality QualityInfo,
 	result *DownloadResult,
 ) (*database.Segment, error) {
+	return o.muxSegmentWith(ctx, jobCtx, segIdx, unixStart, unixEnd, quality, result, nil)
+}
+
+// muxFinalPart is muxSegment for the last part of a split recording, muxed
+// once the capture is over and the row reads Muxing: the row's progress line
+// follows this copy (muxReadout, owner ruling R-D1 of 2026-11-10), as it
+// follows a single-file archive's. The parts muxed in the background while
+// the capture runs get no readout; the row is Downloading then and its line
+// is the download's.
+func (o *DownloadOrchestrator) muxFinalPart(
+	ctx context.Context,
+	jobCtx *JobContext,
+	segIdx int,
+	unixStart, unixEnd int64,
+	quality QualityInfo,
+	result *DownloadResult,
+) (*database.Segment, error) {
+	return o.muxSegmentWith(ctx, jobCtx, segIdx, unixStart, unixEnd, quality, result, o.newMuxReadout(jobCtx))
+}
+
+// muxSegmentWith is muxSegment with the readout its copy reports to, nil for
+// none.
+func (o *DownloadOrchestrator) muxSegmentWith(
+	ctx context.Context,
+	jobCtx *JobContext,
+	segIdx int,
+	unixStart, unixEnd int64,
+	quality QualityInfo,
+	result *DownloadResult,
+	readout *muxReadout,
+) (*database.Segment, error) {
 	// Part files carry the job's resolved name plus a 1-based part number —
 	// "{name} - partN.mp4" — so they group and sort beside the job's other
 	// assets. segIdx is stable across restarts and recovery (derived from
@@ -1947,8 +1981,9 @@ func (o *DownloadOrchestrator) muxSegment(
 	// A damaged part is repaired and recorded like the archive (copyStaged);
 	// its seg_N dir keeps the record that shields it, which the part merge
 	// and the staging cleanup both read.
-	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputPath, "", nil)
+	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputPath, "", readout.callback())
 	if err != nil {
+		readout.restore()
 		return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
 	}
 	probeData := verdict.probe

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -301,5 +302,120 @@ func TestArchiveMuxShowsItsReadout(t *testing.T) {
 				t.Errorf("Finished row = %q, %v; want the line cleared and 100", final.Progress, final.Percent)
 			}
 		})
+	}
+}
+
+// TestFinalPartMuxShowsItsReadout: the last part of a split recording is
+// muxed after the row's Muxing write, so its copy drives the row's line as a
+// single-file archive's does (muxFinalPart), and a part that fails to mux
+// gives the row its line back. A part muxed through muxSegment (the
+// background muxes, the recovery) writes none.
+//
+// Mutant: muxFinalPart passing no readout (no readout line is seen). The
+// restore itself is TestMuxReadoutRestoreLeavesARowThatMovedOn's.
+func TestFinalPartMuxShowsItsReadout(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	const counters = "V:1300/1300 A:1300/1300"
+	run := func(t *testing.T, final, broken bool) (lines []string, after string, err error) {
+		w, db := testWorkerSetup(t)
+		t.Cleanup(w.Stop)
+		staging, _ := muxFixtureJob(t, w, db, "j-part")
+		segDir := filepath.Join(staging, "seg_1")
+		if mkErr := os.MkdirAll(segDir, 0o755); mkErr != nil {
+			t.Fatal(mkErr)
+		}
+		media := filepath.Join(segDir, "video.mp4")
+		writeMuxFixture(t, ffmpegPath, media, 4)
+		if broken {
+			// Not media at all: FFmpeg fails after the readout's first
+			// chance to write, or before it; either way no line may stay.
+			if wErr := os.WriteFile(media, []byte("not a recording"), 0o644); wErr != nil {
+				t.Fatal(wErr)
+			}
+		}
+		db.UpdateJobFields("j-part", map[string]any{"progress": counters, "percent": 100.0})
+		var mu sync.Mutex
+		stop := db.OnJobChange(func(c *database.JobChange) {
+			if c.Job == nil {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			lines = append(lines, c.Job.Progress)
+		})
+		defer stop()
+		job, _ := db.GetJob("j-part")
+		mux := w.orchestrator.muxSegment
+		if final {
+			mux = w.orchestrator.muxFinalPart
+		}
+		_, err = mux(context.Background(), w.buildJobContext(job), 1, 0, time.Now().Unix(),
+			QualityInfo{Label: "1080p"}, &DownloadResult{HasVideo: true, VideoPath: media})
+		after, _ = progressOf(t, db, "j-part")
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(lines), after, err
+	}
+	readouts := func(lines []string) (n int) {
+		for _, line := range lines {
+			if _, _, ok := jobstate.MuxReadout(line); ok {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("final part", func(t *testing.T) {
+		lines, after, err := run(t, true, false)
+		if err != nil {
+			t.Fatalf("muxFinalPart: %v", err)
+		}
+		if readouts(lines) == 0 {
+			t.Errorf("no readout line was written for the final part: %q", lines)
+		}
+		if _, _, ok := jobstate.MuxReadout(after); !ok {
+			t.Errorf("line after the part = %q, want the readout, kept for the finalize that follows", after)
+		}
+	})
+	t.Run("background part", func(t *testing.T) {
+		lines, after, err := run(t, false, false)
+		if err != nil {
+			t.Fatalf("muxSegment: %v", err)
+		}
+		if readouts(lines) != 0 || after != counters {
+			t.Errorf("a part muxed with no readout wrote %q, line after = %q", lines, after)
+		}
+	})
+	t.Run("final part that fails", func(t *testing.T) {
+		_, after, err := run(t, true, true)
+		if err == nil {
+			t.Fatal("a part that is not media muxed")
+		}
+		if after != counters {
+			t.Errorf("line after a failed part = %q, want the download's back", after)
+		}
+	})
+}
+
+// TestDropMuxReadoutLine: a readout line on a Muxing row is cleared; any
+// other line, and any other status, is left.
+func TestDropMuxReadoutLine(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	for _, tc := range []struct {
+		id, line string
+		status   database.JobStatus
+		want     string
+	}{
+		{"a", jobstate.MuxFinalizingLine, database.StatusMuxing, ""},
+		{"b", "Muxing 42%", database.StatusMuxing, ""},
+		{"c", "V:100% A:100% C: 7", database.StatusMuxing, "V:100% A:100% C: 7"},
+		{"d", "Muxing 42%", database.StatusCancelled, "Muxing 42%"},
+	} {
+		readoutJob(t, db, tc.id)
+		db.UpdateJobFields(tc.id, map[string]any{"progress": tc.line, "status": tc.status})
+		w.orchestrator.dropMuxReadoutLine(tc.id)
+		if line, _ := progressOf(t, db, tc.id); line != tc.want {
+			t.Errorf("%s: line = %q, want %q", tc.id, line, tc.want)
+		}
 	}
 }
