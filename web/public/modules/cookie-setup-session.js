@@ -402,7 +402,7 @@ export class CookieSetupSession {
 
   /** Cancel (the button, Escape, Skip): the user's abort, closing the setup browser. */
   async cancel() {
-    this._gen++;
+    const gen = ++this._gen;
     this.phase = PHASE.IDLE;
     this.platform = null;
     try {
@@ -410,6 +410,9 @@ export class CookieSetupSession {
     } catch {
       // Ignore
     }
+    // A setup begun or adopted inside the round trip owns the dialog now;
+    // this cancel's tail must not hide it or reset its finish.
+    if (gen !== this._gen) return;
     document.getElementById("auto-cookie-setup-dialog")?.hide();
     this._clearMessages();
   }

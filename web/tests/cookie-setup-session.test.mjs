@@ -426,3 +426,46 @@ test("a cancelled finish's countdown does not tick into the next setup", { skip 
   h.advance(1000);
   assert.equal(h.el("auto-cookie-countdown").textContent, "", "the cancelled finish's countdown drew on the next setup");
 });
+
+// cancel()'s tail after its /cancel POST (hide + _clearMessages) belongs to
+// the setup it cancelled: a begin + Done inside that round trip is a live
+// finish whose dialog, Done and countdown the late tail must leave alone.
+//
+// MUTANT: cancel() without the generation check after its POST.
+test("a setup begun inside a cancel's round trip survives the cancel's late tail", { skip }, async () => {
+  const cancelGates = [];
+  const finishGates = [];
+  const h = await harness.makeApp({ routes: {
+    "POST /api/cookies/auto-setup/start": () => ({ success: true }),
+    "POST /api/cookies/auto-setup/finish": () => new Promise((resolve) => { finishGates.push(resolve); }),
+    "POST /api/cookies/auto-setup/cancel": () => new Promise((resolve) => { cancelGates.push(resolve); }),
+  }});
+  h.window.navigator.sendBeacon = () => true;
+  const s = h.app.cookieSetup;
+
+  await h.app.settings.startAutoCookieSetup("twitch");
+  h.el("btn-auto-cookie-done").click();
+  await h.flush();
+  h.el("btn-auto-cookie-cancel").click();
+  await h.flush();
+  assert.equal(s.phase, session.PHASE.IDLE);
+  assert.equal(cancelGates.length, 1);
+
+  await h.app.settings.startAutoCookieSetup("youtube");
+  h.el("btn-auto-cookie-done").click();
+  await h.flush();
+  assert.equal(s.phase, session.PHASE.FINISHING);
+  assert.equal(finishGates.length, 2);
+
+  cancelGates[0]({ success: true });
+  await h.flush(); await h.flush();
+  assert.equal(s.phase, session.PHASE.FINISHING, "the cancel's tail changed the phase");
+  assert.equal(h.el("auto-cookie-setup-dialog")._open, true, "the old cancel hid the new setup's dialog");
+  assert.equal(h.el("btn-auto-cookie-done").loading, true, "the old cancel reset the live finish's Done");
+  assert.equal(h.el("btn-auto-cookie-done").disabled, true, "the old cancel enabled the live finish's Done");
+  assert.notEqual(h.el("auto-cookie-countdown").textContent, "", "the old cancel blanked the live countdown");
+
+  finishGates[1](rejectedFinish);
+  await h.flush(); await h.flush();
+  assert.equal(s.phase, session.PHASE.REJECTED);
+});
