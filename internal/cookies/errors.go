@@ -86,10 +86,11 @@ var (
 	ErrSetupCancelled = errors.New("cookie auto-setup was cancelled")
 
 	// ErrRefreshInProgress is returned by StartSetup AND by ImportCookies
-	// (owner decision O-D, 2026-09-17) when the refresh slot is already held —
-	// by a periodic or on-demand RefreshCookies pass, or by the other one of
-	// those two. HTTP consumers can map to 409 Conflict with "try again
-	// shortly" copy; both routes do.
+	// (owner decision O-D, 2026-09-17) while a refresh pass — periodic or
+	// on-demand RefreshCookies — holds the refresh slot. While an import
+	// holds it they return ErrImportInProgress instead, which matches this
+	// one under errors.Is (refreshSlot.inProgressError). HTTP consumers can
+	// map to 409 Conflict with "try again shortly" copy; both routes do.
 	ErrRefreshInProgress = errors.New("cookie refresh in progress")
 
 	// ErrImportInProgress is the same refusal when the slot's holder is a

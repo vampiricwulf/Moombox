@@ -613,12 +613,12 @@ func TestCookieImportRouteLeaksNoValueAnywhere(t *testing.T) {
 // sentinel.
 //
 // THE COLLISION IS REPRODUCED THROUGH THE REAL SLOT rather than by reaching
-// into the service: refreshCmd is an unexported field of internal/cookies, so
-// the only thing this package can do is run something that claims it. Since
-// O-D an import claims it too, and holding the first one inside its PRE-WRITE
-// verification — the blocking callback below, released after the second
-// request has been answered — puts the second request in exactly the
-// read -> verify -> write gap the finding is about, with nothing on disk
+// into the service: the refresh slot (refreshSlot,
+// internal/cookies/refresh_slot.go) is unexported, so the only thing this
+// package can do is run something that claims it. Since O-D an import claims
+// it too, and holding the first one inside its PRE-WRITE verification — the
+// blocking callback below, released after the second request has been
+// answered — puts the second request in exactly the read -> verify -> write gap the finding is about, with nothing on disk
 // changed yet.
 //
 // Mutants:
