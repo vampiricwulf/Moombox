@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
@@ -196,5 +198,39 @@ func TestChannelListHintNamesTheMoveKeys(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("at 80 columns the footer lost the move keys or D: Delete:\n%s", stripANSI(m.View()))
+	}
+}
+
+// The key a terminal sends for Shift+Down and Shift+Up reaches the channel
+// list through App.Update (R-C3): the tests above hand HandleKey the string,
+// which proves nothing about how the real key is spelled or routed.
+//
+// Mutants: matching "shift+down" under another spelling in handleChannelKey;
+// a keySettings that drops the modifier.
+func TestShiftArrowKeyPressesMoveAChannelThroughTheApp(t *testing.T) {
+	a := overlayTestApp(t)
+	store := config.NewStore(config.Defaults(), filepath.Join(t.TempDir(), "config.toml"))
+	if err := store.Update(func(c *config.MoomboxConfig) {
+		c.Channels = []config.ChannelConfig{{ID: mergeA, Name: "A"}, {ID: mergeB, Name: "B"}, {ID: mergeC, Name: "C"}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a.SetConfigStore(store)
+	a.settings.Open(store.Config())
+	a.settings.switchSection(sectionIndexByName(t, "Channels"))
+
+	_, _ = a.Update(tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModShift})
+	if got, want := channelIDs(a.settings.channels), []string{mergeB, mergeA, mergeC}; !slices.Equal(got, want) {
+		t.Fatalf("after the Shift+Down key: %v, want %v", got, want)
+	}
+	if a.settings.channelIndex != 1 {
+		t.Fatalf("the cursor is on row %d, not on the moved channel", a.settings.channelIndex)
+	}
+	_, _ = a.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
+	if got, want := channelIDs(a.settings.channels), []string{mergeA, mergeB, mergeC}; !slices.Equal(got, want) {
+		t.Fatalf("after the Shift+Up key: %v, want %v", got, want)
+	}
+	if a.settings.channelIndex != 0 || !a.settings.IsVisible() {
+		t.Fatalf("row %d, visible %v after the Shift+Up key", a.settings.channelIndex, a.settings.IsVisible())
 	}
 }
