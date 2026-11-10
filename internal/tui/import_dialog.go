@@ -115,7 +115,7 @@ func (m *ImportDialogModel) Open(startDir string) tea.Cmd {
 	m.errorMsg = ""
 	m.picker = newImportPicker()
 	m.picker.CurrentDirectory = startDir
-	m.picker.SetHeight(max(1, m.height-8))
+	m.picker.SetHeight(m.pickerRows())
 	return m.picker.Init()
 }
 
@@ -131,8 +131,13 @@ func (m *ImportDialogModel) IsVisible() bool {
 
 // SetSize updates the dialog dimensions.
 func (m *ImportDialogModel) SetSize(w, h int) {
+	wasBare := m.bare()
 	m.width = w
 	m.height = h
+	if wasBare || m.bare() {
+		m.bareSetSize()
+		return
+	}
 	m.picker.SetHeight(max(1, h-8))
 }
 
@@ -260,6 +265,9 @@ func importPickerHint(contentW int) string {
 func (m *ImportDialogModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView()
 	}
 
 	boxW := min(max(min(70, m.width-4), 40), m.width)

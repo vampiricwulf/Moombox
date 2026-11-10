@@ -195,15 +195,20 @@ func TestAnArmedPrefixHintFollowsTheLayout(t *testing.T) {
 		t.Fatalf("premise lost: the full-size hint is %q", a.feedback.msg)
 	}
 	until := a.feedback.until
-	a.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
-	if strings.Contains(a.feedback.msg, "A Add") || !strings.Contains(a.feedback.msg, "D Delete") {
+	if !strings.Contains(a.feedback.msg, "C Chapters") {
+		t.Fatalf("premise lost: the full-size hint is %q", a.feedback.msg)
+	}
+	// 40x9: Add Video draws bare there and stays; the chapter import needs
+	// 30x10 and goes.
+	a.Update(tea.WindowSizeMsg{Width: 40, Height: 9})
+	if strings.Contains(a.feedback.msg, "C Chapters") || !strings.Contains(a.feedback.msg, "A Add") || !strings.Contains(a.feedback.msg, "D Delete") {
 		t.Errorf("the hint was not rewritten for the compact layout: %q", a.feedback.msg)
 	}
 	if a.chord.prefix != "a" || !a.feedback.until.Equal(until) {
 		t.Error("the rewrite disarmed the prefix or restarted the line's hold")
 	}
 	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	if !strings.Contains(a.feedback.msg, "A Add") {
+	if !strings.Contains(a.feedback.msg, "C Chapters") {
 		t.Errorf("the hint was not rewritten on growing back: %q", a.feedback.msg)
 	}
 

@@ -509,10 +509,14 @@ func TestBareHelpListsOnlyTheKeysThatWork(t *testing.T) {
 		}
 		// Nothing of the panels the compact layout does not have, and no
 		// key whose overlay is refused here.
-		for _, gone := range []string{"Tab", "Details", "Logs", "focus panel", "Action menu", "Open settings"} {
+		for _, gone := range []string{"Tab", "Details", "Logs", "focus panel", "Open settings"} {
 			if strings.Contains(text, gone) {
 				t.Errorf("%v: the list still mentions %q", size, gone)
 			}
+		}
+		// The action menu draws bare at every compact size, so M is listed.
+		if !strings.Contains(text, "Action menu") {
+			t.Errorf("%v: the list lacks the M key:\n%s", size, text)
 		}
 		for _, kept := range []string{"\n?     Toggle help\n", "\nCtrl+C\n      Quit immediately\n", "\nQ Q   Quit program\n", "\nSpace Select task for batch\n      actions\n"} {
 			if w == 30 && !strings.Contains(text, kept) {
@@ -553,7 +557,7 @@ func TestBareHelpFrames(t *testing.T) {
 	frame := func(w, h int) string {
 		m := NewHelpModel()
 		m.SetMenuItems([]ActionMenuItem{
-			{Chord: "A A", Label: "Add Video", Category: "Action", Opens: "add video"},
+			{Chord: "A A", Label: "First-run Setup", Category: "Action", Opens: "setup wizard"},
 			{Chord: "A X", Label: "Cancel", Category: "Action", NeedsConfirm: true},
 			{Chord: "A M", Label: "Mux", Category: "Action"},
 			{Chord: "R N", Label: "View Release Notes (current version)", Category: "Request", Opens: "release notes"},
@@ -578,7 +582,7 @@ func TestBareHelpFrames(t *testing.T) {
 		"      version)",
 		"Quick Keys",
 		"F     Cycle status filter",
-		"Q Q   Quit program",
+		"M     Action menu",
 	}, "\n")
 	if got := frame(40, 10); got != want40 {
 		t.Errorf("40x10:\n%s\nwant:\n%s", got, want40)

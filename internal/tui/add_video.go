@@ -242,8 +242,12 @@ func (m *AddVideoModel) IsVisible() bool {
 
 // SetSize updates the dialog dimensions.
 func (m *AddVideoModel) SetSize(w, h int) {
+	wasBare := m.bare()
 	m.width = w
 	m.height = h
+	if wasBare && !m.bare() {
+		m.bareLeave()
+	}
 }
 
 func (m *AddVideoModel) reset() {
@@ -519,6 +523,10 @@ func (m *AddVideoModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	// Route table events during format selection. A table still on Auto
 	// spends the first navigation key showing its cursor (startPicking).
 	if !m.loading && m.formats != nil && (m.step == AddStepVideoFormat || m.step == AddStepAudioFormat) && m.startPicking(msg) {
+		return tea.Batch(cmds...)
+	}
+	// The bare form pages by the rows it draws (add_video_bare.go).
+	if m.barePage(msg) {
 		return tea.Batch(cmds...)
 	}
 	if !m.loading && m.formats != nil {
@@ -880,6 +888,9 @@ func (m *AddVideoModel) GetPlatform() string { return m.platform }
 func (m *AddVideoModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView()
 	}
 
 	boxW := max(min(80, m.width-4), 30) // match TS: min(width, 80)

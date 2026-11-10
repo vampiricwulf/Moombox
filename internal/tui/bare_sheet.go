@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -154,4 +155,52 @@ func (s *bareSheet) setError(msg string, w, h int) {
 	}
 	s.body = nil
 	s.msg, s.msgStyle = msg, ErrorStyle
+}
+
+// errorUnder puts an error or a notice on a sheet h rows tall that has a
+// keys row, under the body rows the sheet already holds, which it may never
+// cover: the inputs, the armed row. It is wrapped in the rows left above the
+// keys where it fits there. One row short of that, the title gives way and
+// the kept rows move up a row. Longer still, it is the sheet's message and
+// takes the keys row and then the header before any of it is cut.
+func (s *bareSheet) errorUnder(msg string, style lipgloss.Style, w, h int) {
+	if strings.TrimSpace(msg) == "" {
+		return
+	}
+	keep := len(s.body)
+	rows := bareWrap(msg, w, len(msg)+1)
+	switch room := h - 2 - keep; {
+	case len(rows) <= room:
+		s.body = append(s.body, bareStyled(rows, style)...)
+		return
+	case keep > 0 && len(rows) == room+1:
+		// One row short: the title gives way and the kept rows move up.
+		s.left, s.right = s.body[0], ""
+		s.body = append(s.body[1:len(s.body):len(s.body)], bareStyled(rows, style)...)
+		return
+	}
+	s.keep, s.msg, s.msgStyle = keep, msg, style
+}
+
+// bareInputWidth sets the width of a text input shared by the bare and the
+// normal form of an overlay and lays its value out again for it: the input
+// only does that itself on the next edit. An input draws width+1 cells, the
+// last one the cursor's; 0 is no limit, the normal form's.
+func bareInputWidth(ti *textinput.Model, width int) {
+	ti.SetWidth(max(width, 0))
+	ti.SetCursor(ti.Position())
+}
+
+// bareFocus draws s as the focused row's label.
+func bareFocus(s string) string {
+	return lipgloss.NewStyle().Foreground(ColorCyan).Render(s)
+}
+
+// noteUnder puts a hint under the body rows the sheet already holds, where
+// it fits whole in the rows left above the keys. A hint that does not fit is
+// left out: it never takes a row from anything else.
+func (s *bareSheet) noteUnder(msg string, style lipgloss.Style, w, h int) {
+	if rows := bareWrap(msg, w, len(msg)+1); len(rows) <= h-2-len(s.body) {
+		s.body = append(s.body, bareStyled(rows, style)...)
+	}
 }

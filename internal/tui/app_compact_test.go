@@ -498,7 +498,7 @@ func TestCompactStatusLineShowsTheWarnings(t *testing.T) {
 // "refused" (its overlay has no bare form and needs the normal layout,
 // 60x20). A chord added to buildMenuItems must be added here.
 var chordCompact = map[string]string{
-	"A A": "refused", "A Z": "refused", "A T": "refused", "A O": "bare 30x6", "A K": "bare 30x6", "A C": "refused",
+	"A A": "bare 30x6", "A Z": "bare 30x6", "A T": "bare 30x6", "A O": "bare 30x6", "A K": "bare 30x6", "A C": "bare 30x10",
 	"A R": "works", "A I": "works", "A M": "works", "A S": "works", "A X": "works", "A D": "works", "A W": "works", "A U": "works",
 	"R B": "works", "R C": "works", "R F": "works", "R V": "works", "R M": "works", "R U": "works", "R S": "works", "R P": "works",
 	"R N": "bare 30x6",
@@ -533,6 +533,7 @@ func chordKeys(chord string) []string {
 }
 
 func TestEveryChordIsClassifiedForCompact(t *testing.T) {
+	t.Chdir(t.TempDir()) // A Z makes its import folder in the working directory
 	items := newCompactRig(t, 40, 10).app.buildMenuItems()
 	if len(items) != len(chordCompact) {
 		t.Errorf("buildMenuItems lists %d chords, chordCompact classifies %d", len(items), len(chordCompact))
@@ -621,18 +622,15 @@ func TestEveryChordIsClassifiedForCompact(t *testing.T) {
 }
 
 // The M key opens the action menu, an overlay that is no entry of
-// buildMenuItems: refused like the rest.
-func TestCompactRefusesTheActionMenu(t *testing.T) {
-	r := newCompactRig(t, 40, 10)
-	r.press("m")
-	if r.app.hasActiveOverlay() || r.app.feedback.msg != compactRefusal(60, 20) {
-		t.Errorf("M: overlay open = %v, feedback %q", r.app.hasActiveOverlay(), r.app.feedback.msg)
-	}
-	// At the normal size it opens.
-	r = newCompactRig(t, 60, 20)
-	r.press("m")
-	if !r.app.actionMenu.IsVisible() {
-		t.Error("M did not open the action menu at 60x20")
+// buildMenuItems. It has a bare form that draws at every compact size.
+func TestTheActionMenuOpensInTheCompactLayout(t *testing.T) {
+	for _, size := range [][2]int{{30, 6}, {40, 10}, {200, 8}, {30, 50}} {
+		r := newCompactRig(t, size[0], size[1])
+		r.press("m")
+		if !r.app.actionMenu.IsVisible() || r.app.screenHeld() || r.app.feedback.msg != "" {
+			t.Errorf("%v: M: menu open = %v, held = %v, feedback %q", size, r.app.actionMenu.IsVisible(), r.app.screenHeld(), r.app.feedback.msg)
+		}
+		wantExact(t, fmt.Sprintf("the menu at %v", size), r.app.View().Content, size[0], size[1])
 	}
 }
 
@@ -873,15 +871,12 @@ func TestCrossingBelowTheFloorDisarmsAChord(t *testing.T) {
 func TestAnOverlayIsKeptAcrossAShrink(t *testing.T) {
 	r := newCompactRig(t, 120, 40)
 	a := r.app
-	r.press("a", "a")
-	if !a.addVideo.IsVisible() {
-		t.Fatal("premise lost: A A did not open Add Video")
+	// The cookie login (E L) is the setup wizard, which has no bare form.
+	r.press("e", "l")
+	if !a.setupWiz.IsVisible() {
+		t.Fatalf("premise lost: E L did not open the cookie login: %q", a.feedback.msg)
 	}
-	typeIntoApp(a, "https://example.com/watch")
-	before := a.addVideo.View()
-	if !strings.Contains(before, "example.com/watch") {
-		t.Fatalf("premise lost: the URL was not typed:\n%s", before)
-	}
+	before := a.setupWiz.View()
 
 	for _, size := range [][2]int{{59, 20}, {60, 19}, {30, 6}} {
 		a.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
@@ -900,24 +895,24 @@ func TestAnOverlayIsKeptAcrossAShrink(t *testing.T) {
 		a.Update(tea.PasteMsg{Content: "pasted"})
 		a.Update(tea.MouseWheelMsg{X: 1, Y: 1, Button: tea.MouseWheelDown})
 		a.Update(tea.MouseClickMsg{X: 1, Y: 1, Button: tea.MouseLeft})
-		if !a.addVideo.IsVisible() {
+		if !a.setupWiz.IsVisible() {
 			t.Fatalf("%v: a key closed the kept overlay", size)
 		}
 	}
 
 	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	if got := a.addVideo.View(); got != before {
+	if got := a.setupWiz.View(); got != before {
 		t.Errorf("the overlay did not come back as it was:\n%s\nwas:\n%s", got, before)
 	}
 	if got := a.View().Content; got != before {
 		t.Error("the screen is not the overlay again after the terminal grew back")
 	}
 
-	// Esc under the notice is the overlay's own Esc: Add Video closes, and
+	// Esc under the notice is the overlay's own Esc: the login closes, and
 	// the compact list is back.
 	a.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
 	r.press("esc")
-	if a.addVideo.IsVisible() {
+	if a.setupWiz.IsVisible() {
 		t.Fatal("Esc did not close the kept overlay")
 	}
 	if got := plainFrame(a); strings.Contains(got, heldOverlayNotice(60, 20)) || !strings.Contains(got, "ERR  A broken stream") {
@@ -925,10 +920,10 @@ func TestAnOverlayIsKeptAcrossAShrink(t *testing.T) {
 	}
 	// Ctrl+C quits from under the notice too.
 	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	r.press("a", "a")
+	r.press("e", "l")
 	a.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
-	if !a.addVideo.IsVisible() || !a.screenHeld() {
-		t.Fatal("premise lost: Add Video is not kept under the notice")
+	if !a.setupWiz.IsVisible() || !a.screenHeld() {
+		t.Fatal("premise lost: the cookie login is not kept under the notice")
 	}
 	if _, cmd := a.handleKey(ctrlCMsg()); !isQuit(cmd) {
 		t.Error("Ctrl+C did not quit from under the notice")
@@ -1007,10 +1002,10 @@ func TestProgressTickClassFollowsTheLayout(t *testing.T) {
 		t.Error("below the floor: the tick is still at the fast class")
 	}
 	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	r.press("a", "a")
+	r.press("e", "l") // the cookie login has no bare form
 	a.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
 	if !a.screenHeld() {
-		t.Fatal("premise lost: Add Video is not kept under the notice")
+		t.Fatal("premise lost: the cookie login is not kept under the notice")
 	}
 	if a.wantsFastProgress() {
 		t.Error("a kept overlay under the notice: the tick is still at the fast class")
@@ -1044,11 +1039,7 @@ var heldEscBase = map[string]heldEscKind{
 	"settings":       heldEscCloses,
 	"ffmpeg check":   heldEscOff, // its Esc quits Moombox
 	"setup wizard":   heldEscOff, // nothing to step back to on the mode choice
-	"action menu":    heldEscCloses,
-	"import":         heldEscCloses,
 	"chapter import": heldEscCloses,
-	"add video":      heldEscCloses,
-	"trim":           heldEscCloses,
 }
 
 // neverHeld reports whether o is drawn bare at every compact size, so no
@@ -1174,19 +1165,6 @@ func TestHeldEscFollowsTheOverlayState(t *testing.T) {
 	// And with that prompt already up, Esc would dismiss it unseen.
 	a.settings.closeConfirm = true
 	checkHeldEsc(t, "settings, save prompt", a, settingsOpen, heldEscOff)
-
-	// Add Video past its first step: Esc goes back a step.
-	a = overlayTestApp(t)
-	a.addVideo.Open()
-	a.addVideo.step = AddStepTimestamps
-	checkHeldEsc(t, "add video, timestamps step", a, func(a *App) bool { return a.addVideo.IsVisible() }, heldEscBack)
-
-	// The action menu's job picker: Esc goes back to the menu.
-	a = overlayTestApp(t)
-	a.actionMenu.Open(a.buildMenuItems())
-	a.actionMenu.mode = menuConfirm
-	a.actionMenu.confirmLabel = "Delete"
-	checkHeldEsc(t, "action menu, confirm", a, func(a *App) bool { return a.actionMenu.IsVisible() }, heldEscBack)
 
 	// The wizard's advanced form: two Escs abandon what was typed.
 	a = overlayTestApp(t)

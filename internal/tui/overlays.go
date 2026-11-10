@@ -115,7 +115,7 @@ func init() {
 		{
 			name:    "action menu",
 			title:   "Action Menu",
-			heldEsc: func(a *App) heldEscKind { return a.actionMenu.heldEsc() },
+			bare:    &overlayBare{openW: compactMinWidth, openH: compactMinHeight},
 			visible: func(a *App) bool { return a.actionMenu.IsVisible() },
 			view:    func(a *App) string { return a.actionMenu.View() },
 			key:     (*App).keyActionMenu,
@@ -124,7 +124,7 @@ func init() {
 		{
 			name:       "import",
 			title:      "Import Archive",
-			heldEsc:    func(a *App) heldEscKind { return a.importDlg.heldEsc() },
+			bare:       &overlayBare{openW: compactMinWidth, openH: compactMinHeight},
 			visible:    func(a *App) bool { return a.importDlg.IsVisible() },
 			view:       func(a *App) string { return a.importDlg.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.importDlg.UpdateComponents(msg) },
@@ -141,9 +141,12 @@ func init() {
 			key:        (*App).keyCookieImport,
 		},
 		{
-			name:       "chapter import",
-			title:      "Import Chapters",
-			heldEsc:    func(a *App) heldEscKind { return a.chapterDlg.heldEsc() },
+			name:  "chapter import",
+			title: "Import Chapters",
+			bare: &overlayBare{
+				openW: bareChapterEditW, openH: bareChapterEditH,
+				now: func(a *App) (int, int) { return a.chapterDlg.bareNeed() },
+			},
 			visible:    func(a *App) bool { return a.chapterDlg.IsVisible() },
 			view:       func(a *App) string { return a.chapterDlg.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.chapterDlg.UpdateComponents(msg) },
@@ -153,7 +156,7 @@ func init() {
 		{
 			name:       "add video",
 			title:      "Add Video",
-			heldEsc:    func(a *App) heldEscKind { return a.addVideo.heldEsc() },
+			bare:       &overlayBare{openW: compactMinWidth, openH: compactMinHeight},
 			visible:    func(a *App) bool { return a.addVideo.IsVisible() },
 			view:       func(a *App) string { return a.addVideo.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.addVideo.UpdateComponents(msg) },
@@ -163,7 +166,7 @@ func init() {
 		{
 			name:         "trim",
 			title:        "Trim Video",
-			heldEsc:      func(a *App) heldEscKind { return a.trimDlg.heldEsc() },
+			bare:         &overlayBare{openW: compactMinWidth, openH: compactMinHeight},
 			visible:      func(a *App) bool { return a.trimDlg.IsVisible() },
 			view:         func(a *App) string { return a.trimDlg.View() },
 			components:   func(a *App, msg tea.Msg) tea.Cmd { return a.trimDlg.UpdateComponents(msg) },
