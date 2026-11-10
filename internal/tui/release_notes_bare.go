@@ -31,14 +31,26 @@ func (o *releaseNotesOverlay) bare() bool {
 	return layoutModeFor(o.width, o.height) == layoutCompact
 }
 
-// bareBodyRows is how many rows the notes get in the bare form: every row
-// but the header and, while there is one, the notice.
-func (o *releaseNotesOverlay) bareBodyRows() int {
-	rows := o.height - 1
-	if o.notice != "" {
-		rows--
+// bareNoticeRows is the withdrawn notice wrapped for the bare form: up to
+// two rows (three from 10 rows up), so the instruction after "No longer
+// pending" is read on a narrow screen. It gives rows back, down to one,
+// while the notes would have fewer than three.
+func (o *releaseNotesOverlay) bareNoticeRows() []string {
+	if o.notice == "" {
+		return nil
 	}
-	return max(rows, 1)
+	limit := 2
+	if o.height >= 10 {
+		limit = 3
+	}
+	limit = max(min(limit, o.height-1-3), 1)
+	return bareWrap(o.notice, max(o.width, 1), limit)
+}
+
+// bareBodyRows is how many rows the notes get in the bare form: every row
+// but the header and the notice's.
+func (o *releaseNotesOverlay) bareBodyRows() int {
+	return max(o.height-1-len(o.bareNoticeRows()), 1)
 }
 
 // applyBareSize sizes the viewport for the bare form and renders the notes
@@ -92,12 +104,9 @@ func (o *releaseNotesOverlay) bareView() string {
 		keys = long
 	}
 
-	var body []string
-	if o.notice != "" {
-		// Truncated, as in the normal form: every notice leads with "No
-		// longer pending", the part a narrow screen keeps.
-		body = append(body, lipgloss.NewStyle().Foreground(ColorWarning).Render(truncateString(o.notice, o.width)))
-	}
+	// Wrapped, where the normal form's wider box shows it on one row:
+	// what to do next is in the notice's second half.
+	body := bareStyled(o.bareNoticeRows(), lipgloss.NewStyle().Foreground(ColorWarning))
 	body = append(body, strings.Split(o.vp.View(), "\n")...)
 	return bareSheet{
 		left:  tag,

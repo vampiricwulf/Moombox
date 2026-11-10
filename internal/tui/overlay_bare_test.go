@@ -688,11 +688,32 @@ func TestBareReleaseNotesNoticeHidesNoNotes(t *testing.T) {
 	if !strings.HasPrefix(lines[0], "v2.9.9") || strings.Contains(lines[0], "skip") || strings.Contains(lines[0], "update") {
 		t.Errorf("the header still offers U or S: %q", lines[0])
 	}
-	if strings.TrimRight(lines[1], " ") != "No longer pending: v2.9.9 was…" {
-		t.Errorf("the notice row = %q", lines[1])
+	// Wrapped, never cut to one row: the second half says what to do.
+	if strings.TrimRight(lines[1], " ") != "No longer pending: v2.9.9 was" || strings.TrimRight(lines[2], " ") != "skipped" {
+		t.Errorf("the notice rows = %q, %q", lines[1], lines[2])
 	}
-	if strings.TrimSpace(lines[2]) != "line 1" {
-		t.Errorf("the notes do not start under the notice: %q", lines[2])
+	if strings.TrimSpace(lines[3]) != "line 1" {
+		t.Errorf("the notes do not start under the notice: %q", lines[3])
+	}
+	// The longer notice keeps its instruction at the floor, and is whole
+	// from 10 rows.
+	const next = "No longer pending — v2.10.12 is; close and R N for its notes"
+	for _, s := range [][2]int{{30, 6}, {30, 10}, {59, 6}, {200, 8}} {
+		n := newReleaseNotesOverlay()
+		n.open("v2.9.9", sb.String(), s[0], s[1])
+		n.setPending(true)
+		n.withdraw(next)
+		wantExact(t, "the longer notice", n.View(), s[0], s[1])
+		got := strings.Join(strings.Fields(ansi.Strip(n.View())), " ")
+		if !strings.Contains(got, "close and R N") {
+			t.Errorf("%dx%d: the notice lost its instruction:\n%s", s[0], s[1], ansi.Strip(n.View()))
+		}
+		if s[1] >= 10 && !strings.Contains(got, next) {
+			t.Errorf("%dx%d: the notice is not whole:\n%s", s[0], s[1], ansi.Strip(n.View()))
+		}
+		if !strings.Contains(got, "line 1") {
+			t.Errorf("%dx%d: the notice left the notes no row:\n%s", s[0], s[1], ansi.Strip(n.View()))
+		}
 	}
 	o.vp.GotoBottom()
 	if view := ansi.Strip(o.View()); !strings.Contains(view, "line 12") {
