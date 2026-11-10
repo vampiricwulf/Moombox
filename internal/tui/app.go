@@ -1235,10 +1235,23 @@ const (
 )
 
 // wantsFastProgress reports whether the progress loop should run at the fast
-// class — one tick per frame at tuiTargetFPS: an actively-delivering
-// download, or a visible in-progress trim.
+// class — one tick per frame at tuiTargetFPS. That is only while the progress
+// it delivers is on screen: an actively-delivering download with the panels
+// showing, or an overlay on top that draws live progress itself (the trim
+// dialog while a trim runs; overlayEntry.liveProgress).
+//
+// Any other overlay hides the panels, and no overlay view is memoised, so a
+// fast tick under one redrew an identical Help or Settings screen ~120 times
+// a second. Nothing visible gets rarer: the loop keeps running at the idle
+// class, and the key or click that closes the overlay upshifts in the same
+// Update (ensureProgressTicking in the KeyPressMsg and MouseMsg cases). An
+// overlay closed by a message instead is back at the fast class on the next
+// idle tick, at most progressIdleInterval later.
 func (a *App) wantsFastProgress() bool {
-	return a.hasActiveDownloads() || (a.trimInProgress && a.trimDlg.IsVisible())
+	if o := a.activeOverlay(); o != nil {
+		return o.liveProgress != nil && o.liveProgress(a)
+	}
+	return a.hasActiveDownloads()
 }
 
 func (a *App) progressTick() tea.Cmd {

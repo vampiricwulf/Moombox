@@ -21,6 +21,12 @@ type overlayEntry struct {
 	// mouse handles a mouse event while the overlay is on top. nil: the
 	// overlay swallows the mouse.
 	mouse func(*App, tea.MouseMsg) (tea.Model, tea.Cmd)
+	// liveProgress reports whether the overlay is, right now, drawing progress
+	// the progress tick delivers, so the tick must stay at the fast class
+	// while it is on top (wantsFastProgress). nil: the overlay draws none,
+	// and the tick idles under it. Only the trim dialog sets it; the census
+	// in overlay_order_test.go states the answer for every overlay.
+	liveProgress func(*App) bool
 }
 
 // overlayRegistry is THE overlay order (K23): handleKey, handleMouse, View,
@@ -109,11 +115,12 @@ func init() {
 			key:        (*App).keyAddVideo,
 		},
 		{
-			name:       "trim",
-			visible:    func(a *App) bool { return a.trimDlg.IsVisible() },
-			view:       func(a *App) string { return a.trimDlg.View() },
-			components: func(a *App, msg tea.Msg) tea.Cmd { return a.trimDlg.UpdateComponents(msg) },
-			key:        (*App).keyTrim,
+			name:         "trim",
+			visible:      func(a *App) bool { return a.trimDlg.IsVisible() },
+			view:         func(a *App) string { return a.trimDlg.View() },
+			components:   func(a *App, msg tea.Msg) tea.Cmd { return a.trimDlg.UpdateComponents(msg) },
+			key:          (*App).keyTrim,
+			liveProgress: func(a *App) bool { return a.trimInProgress },
 		},
 		{
 			name:       "files",

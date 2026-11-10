@@ -158,3 +158,65 @@ func TestOverlayMouseFollowsKeyOrder(t *testing.T) {
 		t.Fatalf("a wheel notch reached the action menu under settings")
 	}
 }
+
+// overlayLiveProgress is the census of which overlays draw progress the
+// progress tick delivers. While such an overlay is on top the tick stays at
+// the fast class (wantsFastProgress); under every other overlay it idles,
+// because the panels the tick feeds are hidden. Every overlay states its
+// answer here, so a new one has to decide.
+//
+// Only the trim dialog says yes: its bar is fed by progressTickMsg
+// (trimDlg.SetProgress). The others either draw nothing that moves or are
+// driven by their own messages (spinners, log batches, the stats refresh).
+var overlayLiveProgress = map[string]bool{
+	"settings":       false,
+	"help":           false,
+	"release notes":  false,
+	"ffmpeg check":   false,
+	"setup wizard":   false,
+	"action menu":    false,
+	"import":         false,
+	"cookie import":  false,
+	"chapter import": false,
+	"add video":      false,
+	"trim":           true,
+	"files":          false,
+	"client tokens":  false,
+	"ytdlp plugin":   false,
+	"stats":          false,
+	"job log":        false,
+}
+
+func TestOverlayLiveProgressCensus(t *testing.T) {
+	for _, e := range overlayRegistry {
+		want, stated := overlayLiveProgress[e.name]
+		if !stated {
+			t.Errorf("overlay %q is not in overlayLiveProgress: state whether it draws tick-fed progress", e.name)
+			continue
+		}
+		if got := e.liveProgress != nil; got != want {
+			t.Errorf("overlay %q: liveProgress set = %v, census says %v", e.name, got, want)
+		}
+	}
+	if len(overlayLiveProgress) != len(overlayRegistry) {
+		t.Errorf("overlayLiveProgress has %d rows, the registry %d", len(overlayLiveProgress), len(overlayRegistry))
+	}
+
+	// With a download running, each overlay on top gives the class the
+	// census states: idle, or fast only while its own progress is live.
+	for _, c := range overlayCases(t) {
+		a := overlayTestApp(t)
+		a.statusMap["d"] = database.StatusDownloading
+		c.open(a)
+		if !c.visible(a) {
+			t.Fatalf("%s did not open", c.name)
+		}
+		if a.wantsFastProgress() {
+			t.Errorf("%s on top, nothing of its own running: the progress tick should idle", c.name)
+		}
+		a.trimInProgress = true
+		if got := a.wantsFastProgress(); got != overlayLiveProgress[c.name] {
+			t.Errorf("%s on top with a trim running: fast = %v, census says %v", c.name, got, overlayLiveProgress[c.name])
+		}
+	}
+}

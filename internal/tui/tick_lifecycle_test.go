@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -238,5 +240,92 @@ func TestTerminalTitleIsEventDrivenNotPolled(t *testing.T) {
 	app.Update(tickMsg{})
 	if app.windowTitle != "sentinel" {
 		t.Fatalf("tickMsg must not recompute the title; got %q", app.windowTitle)
+	}
+}
+
+// An overlay hides the panels, so a download's fast progress tick has
+// nothing to deliver under it: the loop drops to the idle class, and the key
+// that closes the overlay puts it back at the fast class in the same Update.
+//
+// Mutant: dropping the overlay check from wantsFastProgress — the idle
+// assertion fires. Mutant: dropping ensureProgressTicking from the
+// KeyPressMsg case — the loop stays at the idle class after Esc.
+func TestProgressTickIdlesUnderAnOverlay(t *testing.T) {
+	app := overlayTestApp(t)
+	app.statusMap["d"] = database.StatusDownloading
+	if cmd := app.ensureProgressTicking(); cmd == nil {
+		t.Fatal("expected the loop to start for a Downloading job")
+	}
+	if app.progressInterval != progressFastInterval {
+		t.Fatalf("panels showing: want the fast class, got %v", app.progressInterval)
+	}
+
+	// Help opens. The pending fast tick arrives and re-arms at the idle
+	// class: the loop is still running, only slower.
+	app.help.Toggle()
+	if !app.hasActiveOverlay() {
+		t.Fatal("help did not open")
+	}
+	if _, c := app.Update(progressTickMsg{gen: app.progressGen}); c == nil {
+		t.Fatal("the loop must keep running under an overlay (the idle class), not stop")
+	}
+	if app.progressInterval != progressIdleInterval {
+		t.Fatalf("overlay open + Downloading job: want the idle class, got %v", app.progressInterval)
+	}
+	if !app.progressTicking {
+		t.Fatal("progressTicking must stay set under an overlay")
+	}
+
+	// Esc closes Help: the same Update supersedes the pending idle tick.
+	prevGen := app.progressGen
+	app.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if app.hasActiveOverlay() {
+		t.Fatal("Esc did not close help")
+	}
+	if app.progressInterval != progressFastInterval {
+		t.Fatalf("after the closing key: want the fast class in the same Update, got %v", app.progressInterval)
+	}
+	if app.progressGen == prevGen {
+		t.Fatal("the upshift must bump the generation so the pending idle tick is dropped")
+	}
+}
+
+// A click can close an overlay too: the Settings [ Return ] button. The
+// MouseMsg case upshifts as the key case does.
+func TestProgressTickUpshiftsWhenAClickClosesAnOverlay(t *testing.T) {
+	app := overlayTestApp(t)
+	app.statusMap["d"] = database.StatusDownloading
+	app.ensureProgressTicking()
+	app.settings.Open(app.cfg)
+	app.Update(progressTickMsg{gen: app.progressGen})
+	if app.progressInterval != progressIdleInterval {
+		t.Fatalf("settings open: want the idle class, got %v", app.progressInterval)
+	}
+	// Any mouse message runs the hook; close the overlay first, as the
+	// button's handler would, so the test does not depend on its position.
+	app.settings.Close()
+	app.Update(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
+	if app.progressInterval != progressFastInterval {
+		t.Fatalf("after a mouse message with the overlay gone: want the fast class, got %v", app.progressInterval)
+	}
+}
+
+// The trim dialog draws the one progress an overlay shows, and only while a
+// trim runs: the fast class holds for exactly that.
+func TestProgressTickStaysFastForARunningTrim(t *testing.T) {
+	app := overlayTestApp(t)
+	app.trimDlg.Open("j1", "a job")
+	if app.wantsFastProgress() {
+		t.Fatal("a trim dialog with no trim running draws no progress: want the idle class")
+	}
+	app.trimInProgress = true
+	if !app.wantsFastProgress() {
+		t.Fatal("a running trim's dialog draws live progress: want the fast class")
+	}
+	// A download changes nothing while the dialog is idle on top.
+	app.trimInProgress = false
+	app.statusMap["d"] = database.StatusDownloading
+	if app.wantsFastProgress() {
+		t.Fatal("an idle trim dialog hides the panels: a download must not keep the fast class")
 	}
 }

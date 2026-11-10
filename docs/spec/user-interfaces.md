@@ -539,7 +539,7 @@ Online/offline transition (`Online bool`). The state that already exists when th
 | Message Type | Interval | Purpose |
 |--------------|----------|---------|
 | `tickMsg` | 1 second | Main tick. Updates clocks, checks chord timeouts, refreshes dynamic content. Once a minute it also runs the archive sweep, which re-reads `hide_finished_age_days` from the config store (`syncHideFinishedAge` in `internal/tui/app.go`) before re-bucketing aged rows — a threshold changed from the dashboard reaches the TUI through no event at all, so this sweep is the whole Web → TUI direction and bounds its latency at 60 s. A change made in the TUI travels the other way immediately, through the shared `broadcastHideFinishedAge`. |
-| `progressTickMsg` | 8ms (active) / 500ms (idle) | Progress bar animation. |
+| `progressTickMsg` | 8ms (a download active and its progress on screen) / 500ms (otherwise) | Progress bar animation. |
 | `logFlushMsg` | 250ms | Triggers flushing accumulated log lines from the buffer to the viewport. |
 | `marqueeTickMsg` | 150ms | Advances scrolling marquee text for overflowed labels. |
 | `cookieCountdownTickMsg` | 1 second, while the setup wizard's cookie step is counting down | Decrements the cookie-capture countdown; ticks from a superseded chain (`gen`) are ignored so a stacked chain cannot drain the countdown faster than one per second. |
@@ -549,6 +549,8 @@ Online/offline transition (`Online bool`). The state that already exists when th
 #### `progressTickMsg`
 
 Progress bar animation. One tick per frame at the 120 fps renderer during active downloads (`tea.WithFPS(tuiTargetFPS)` at the package's one `tea.NewProgram` site), dropping to 2fps when idle to save CPU. A tick that finds nothing new costs no rebuild (`SetProgress` skips an unchanged pointer inside one wall-clock second) and no repaint (the renderer diffs and skips an unchanged frame) — only the memoised `View()` bubbletea runs after every message (the 30-alloc frame the FrameCost pins hold; ~0.25-0.6 ms on a desktop at 20-1,000 jobs), so the extra ticks buy latency for about +2-4% of one core while a download is active.
+
+The fast class runs only while the progress it delivers is on screen (`wantsFastProgress`, `internal/tui/app.go`). An overlay hides the panels and no overlay view is memoised, so under one the loop drops to the 500 ms class; the exception is an overlay that draws tick-fed progress itself, which says so with `liveProgress` on its `overlayRegistry` entry (only the trim dialog, while a trim runs). The key or click that closes the overlay upshifts in the same `Update` (`ensureProgressTicking` in the `KeyPressMsg` and `MouseMsg` cases); an overlay closed by a message is back at the fast class on the next idle tick, at most 500 ms later. `TestOverlayLiveProgressCensus` (`internal/tui/overlay_order_test.go`) states the answer for every overlay.
 
 **Async operation result messages:**
 

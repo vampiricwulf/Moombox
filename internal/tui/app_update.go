@@ -1148,6 +1148,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := a.ensureMarqueeTicking(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		// A key that closed an overlay puts the panels back on screen: go
+		// back to the fast progress class now, not on the next idle tick.
+		if cmd := a.ensureProgressTicking(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		return a, tea.Batch(cmds...)
 
 	case tea.MouseMsg:
@@ -1155,6 +1160,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A click can move the selection onto a long title.
 		if mCmd := a.ensureMarqueeTicking(); mCmd != nil {
 			cmd = tea.Batch(cmd, mCmd)
+		}
+		// A click can close an overlay too (the Settings buttons, the action
+		// menu): same upshift as the key case above.
+		if pCmd := a.ensureProgressTicking(); pCmd != nil {
+			cmd = tea.Batch(cmd, pCmd)
 		}
 		return model, cmd
 
