@@ -572,6 +572,11 @@ type App struct {
 	// makes structural.
 	feedback appFeedback
 
+	// frame memoises the composed panel frame View returns, and the line
+	// measurements it is joined from (frame_compose.go). Written only by
+	// View.
+	frame frameComposer
+
 	// Log batching buffer (250ms flush cycle like TypeScript)
 	logBuffer []string
 
@@ -1227,9 +1232,10 @@ const (
 	// rather than sitting through one. A no-change tick costs no rebuild
 	// (JobDetailsModel.SetProgress skips an unchanged pointer inside one
 	// wall-clock second) and no repaint (the renderer's viewEquals) — only
-	// the memoised View() bubbletea calls after every message, the 30-alloc
-	// frame TestFrameCostAtLogCap pins (~0.25-0.6 ms at 20-1,000 jobs), so
-	// doubling the tick count doubles that and nothing else.
+	// the memoised View() bubbletea calls after every message: four panel
+	// key comparisons and the frame memo's (frame_compose.go), which
+	// allocate nothing (TestFrameCostAtLogCap pins it; well under a
+	// microsecond at 1,000 jobs).
 	progressFastInterval = 8 * time.Millisecond   // ~120fps during active downloads
 	progressIdleInterval = 500 * time.Millisecond // Upcoming countdown / chat-count cadence
 )

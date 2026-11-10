@@ -139,7 +139,8 @@ The task list, job details, log viewer and status bar memoise `View()`: each ret
 When you add state a panel draws (a header badge, a row tag, a new status-bar segment):
 1. Add it to the key struct, or route its writer through the funnel.
 2. Add a row to the matching table in `internal/tui/render_cache_test.go` — `TestTaskListCachedFramesMatchFreshFrames`, `TestJobDetailsCachedFramesMatchFreshFrames`, or `TestStatusBarCacheKeyCoversEveryInput` (one row per key field). Each compares the cached frame with a fresh one after the mutation.
-3. Run `go test -run 'Cache|FrameCost' ./internal/tui/`. `TestFrameCostAtLogCap` (`internal/tui/frame_cost_test.go`) pins the allocations of an unchanged frame; `go test -run '^$' -bench 'AtLogCap' -benchmem ./internal/tui/` shows the timings.
+3. State that `App.View` itself reads on its panel path (not inside a panel: a banner, the feedback line) goes in `frameKey` (`internal/tui/frame_compose.go`), which memoises the whole composed screen, with a row in `TestFrameMemoFollowsEveryInput` (`internal/tui/frame_compose_test.go`). The composer's output must stay byte-identical to the lipgloss joins; the tests in that file compare them.
+4. Run `go test -run 'Cache|FrameCost|Compose|FrameMemo' ./internal/tui/`. `TestFrameCostAtLogCap` (`internal/tui/frame_cost_test.go`) pins the allocations and bytes of an unchanged frame; `go test -run '^$' -bench 'AtLogCap' -benchmem ./internal/tui/` shows the timings.
 
 Details: `docs/spec/user-interfaces.md` § Panel Render Caches.
 

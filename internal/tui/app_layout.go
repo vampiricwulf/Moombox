@@ -133,22 +133,37 @@ func (a *App) View() tea.View {
 	a.statusBar.ShowChordHint = !a.seenChordHint
 	a.statusBar.SelectedCount = a.taskList.SelectedCount()
 
-	// Top row: task list + details
-	topRow := lipgloss.JoinHorizontal(lipgloss.Top,
-		a.taskList.View(),
-		a.details.View(),
-	)
+	// The four panels return their own memoised frames. When those, and
+	// everything else the screen is built from, are what the last frame was
+	// built from, the screen is the last frame (frame_compose.go).
+	warn := a.securityBannerText()
+	key := frameKey{
+		task:     a.taskList.View(),
+		details:  a.details.View(),
+		logs:     a.logs.View(),
+		status:   a.statusBar.View(),
+		restart:  a.restartPending,
+		security: warn,
+		width:    a.width,
+		height:   a.height,
+		fbMsg:    a.feedback.msg,
+		fbSev:    a.feedback.sev,
+		fbWrap:   a.feedback.wrap,
+	}
+	if a.frame.valid && a.frame.key == key {
+		return a.viewWithMode(a.frame.content)
+	}
 
-	// Main content
-	mainParts := []string{}
+	// Banners on top, then the task list beside the details, the log panel
+	// and the status bar.
+	var restart, security string
 	if a.restartPending {
-		mainParts = append(mainParts, restartBanner(a.width))
+		restart = restartBanner(a.width)
 	}
-	if warn := a.securityBannerText(); warn != "" {
-		mainParts = append(mainParts, securityBanner(a.width, warn))
+	if warn != "" {
+		security = securityBanner(a.width, warn)
 	}
-	mainParts = append(mainParts, topRow, a.logs.View(), a.statusBar.View())
-	content := lipgloss.JoinVertical(lipgloss.Left, mainParts...)
+	content := a.frame.compose(restart, security, key.task, key.details, key.logs, key.status)
 
 	// Feedback / confirmation messages. Coloured row by row, after the
 	// wrap: a row is styled whole, never cut through its escapes.
@@ -164,6 +179,7 @@ func (a *App) View() tea.View {
 		content = addOverlayMessage(content, a.width, rows...)
 	}
 
+	a.frame.valid, a.frame.key, a.frame.content = true, key, content
 	return a.viewWithMode(content)
 }
 
