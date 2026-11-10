@@ -80,6 +80,9 @@ Define your custom `tea.Msg` type in `internal/tui/app.go`, send via non-blockin
 ### 5. Initial State
 If new clients need the current value on connect, include it in the `InitialState` provider function `wireWebSocket` sets in `cmd/moombox/ws_wiring.go`. This sends the value to clients immediately on WebSocket connect.
 
+## Frame Compression
+The hub negotiates permessage-deflate with a client that offers it (`HandleUpgrade`, `internal/web/websocket.go`). It changes the bytes on the wire only: never rely on it to make a large frame acceptable, and never trim a frame's fields because of it. A frame under `WSCompressionThreshold` (1024 bytes) is sent uncompressed, which is what keeps the ~60 Hz `job_progress` frame out of the compressor — a new high-rate frame must stay under it too (`TestProgressFramesStayUnderTheCompressionThreshold`, `cmd/moombox/ws_initial_state_size_test.go`).
+
 ## Message Format
 ```go
 type WSMessage struct {
