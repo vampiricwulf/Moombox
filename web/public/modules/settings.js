@@ -497,44 +497,9 @@ export class SettingsController {
             return;
           }
           const data = await resp.json();
-          // Reuse the existing update-dialog to display the notes
-          const dlg = document.getElementById("update-dialog");
-          const notes = document.getElementById("update-release-notes");
-          if (dlg && notes) {
-            dlg.label = "Release Notes — " + data.tagName;
-            if (data.releaseNotesHtml) {
-              // SECURITY CONTRACT: raw-HTML sink safe ONLY because the server
-              // sanitizes via bluemonday.UGCPolicy() (internal/updater) — see
-              // the matching comment in update-indicator.js's
-              // UpdateController.showUpdateDialog before changing either side.
-              notes.innerHTML = data.releaseNotesHtml;
-            } else {
-              notes.textContent = data.releaseNotes || "No release notes available.";
-            }
-            // Viewer mode: this is just a notes viewer, not the update prompt.
-            // Hide "Update Now", relabel the dismiss button to "Close", and
-            // flag the dialog so update-indicator.js's
-            // UpdateController.dismissUpdate() plain-hides instead
-            // of POSTing /api/update/dismiss (which errors "no update pending"
-            // here, and would wrongly SKIP a version if one were pending).
-            const updateBtn = document.getElementById("update-now-btn");
-            const dismissBtn = document.getElementById("update-dismiss-btn");
-            if (updateBtn) updateBtn.style.display = "none";
-            if (dismissBtn) dismissBtn.textContent = "Close";
-            // Nothing installs from here, so where updates install from is
-            // not this dialog's to say (showUpdateDialog sets it afresh).
-            const remoteNote = document.getElementById("update-remote-note");
-            if (remoteNote) remoteNote.style.display = "none";
-            dlg.dataset.viewerMode = "true";
-            dlg.show();
-            // Restore the update-prompt state when the dialog closes. Text must
-            // match index.html's dismiss button ("Skip this version").
-            dlg.addEventListener("sl-after-hide", () => {
-              if (updateBtn) updateBtn.style.display = "";
-              if (dismissBtn) dismissBtn.textContent = "Skip this version";
-              delete dlg.dataset.viewerMode;
-            }, { once: true });
-          }
+          // The update dialog, as a viewer (UpdateController.showNotesViewer):
+          // it waits for an update prompt open meanwhile to close.
+          this.app.updates.showNotesViewer(data);
         } finally {
           viewNotesBtn.loading = false;
         }

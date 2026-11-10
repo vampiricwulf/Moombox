@@ -101,9 +101,99 @@ export class UpdateController {
   }
 
   showUpdateDialog() {
+    this._drawUpdateDialog("prompt", (dlg) => this._renderPrompt(dlg));
+  }
+
+  // The update dialog is two things: the update prompt (showUpdateDialog)
+  // and, reused, the release-notes viewer (Settings > View Release Notes,
+  // showNotesViewer). One owner at a time, as the confirm dialog has (K34):
+  // a request for the other mode while the dialog is open — or still
+  // closing — waits, and is drawn on the dialog's sl-after-hide, never
+  // turning the open dialog into the other under its reader (a notes fetch
+  // answering after the operator opened the update prompt used to). The same
+  // mode redraws in place: a 409 shows the pending release's notes in the
+  // prompt it came from (_showPendingInstead). draw returns false when it
+  // had nothing to show.
+  _drawUpdateDialog(mode, draw) {
     const dlg = document.getElementById("update-dialog");
+    if (!dlg) return;
+    this._bindUpdateDialog(dlg);
+    if (this._dialogMode && this._dialogMode !== mode) {
+      this._dialogWaiting.push({ mode, draw });
+      return;
+    }
+    if (draw(dlg) === false) {
+      if (!this._dialogMode) this._drawNextUpdateDialog();
+      return;
+    }
+    this._dialogMode = mode;
+  }
+
+  _drawNextUpdateDialog() {
+    const next = this._dialogWaiting.shift();
+    if (next) this._drawUpdateDialog(next.mode, next.draw);
+  }
+
+  // Bound once: the dialog's own sl-after-hide (not a child's, which
+  // bubbles) ends its owner — restoring the prompt's controls after the
+  // viewer — and draws the next request waiting.
+  _bindUpdateDialog(dlg) {
+    if (this._dialogBound === dlg) return;
+    this._dialogBound = dlg;
+    this._dialogMode = null;
+    this._dialogWaiting = [];
+    dlg.addEventListener("sl-after-hide", (e) => {
+      if (e.target !== dlg) return;
+      if (this._dialogMode === "viewer") {
+        // Text must match index.html's dismiss button ("Skip this version").
+        const updateBtn = document.getElementById("update-now-btn");
+        const dismissBtn = document.getElementById("update-dismiss-btn");
+        if (updateBtn) updateBtn.style.display = "";
+        if (dismissBtn) dismissBtn.textContent = "Skip this version";
+        delete dlg.dataset.viewerMode;
+      }
+      this._dialogMode = null;
+      this._drawNextUpdateDialog();
+    });
+  }
+
+  // Settings > View Release Notes: the running version's notes (data is
+  // GET /api/update/release-notes's answer) in the update dialog, as a
+  // viewer. Viewer mode hides "Update Now", relabels the dismiss button
+  // "Close", and flags the dialog so dismissUpdate() plain-hides instead of
+  // POSTing /api/update/dismiss (which errors "no update pending" here, and
+  // would wrongly SKIP a version if one were pending). The dialog's
+  // sl-after-hide restores the prompt.
+  showNotesViewer(data) {
+    this._drawUpdateDialog("viewer", (dlg) => {
+      const notes = document.getElementById("update-release-notes");
+      if (!notes) return false;
+      dlg.label = "Release Notes — " + data.tagName;
+      if (data.releaseNotesHtml) {
+        // SECURITY CONTRACT: raw-HTML sink safe ONLY because the server
+        // sanitizes via bluemonday.UGCPolicy() (internal/updater) — see the
+        // matching comment in _renderPrompt before changing either side.
+        notes.innerHTML = data.releaseNotesHtml;
+      } else {
+        notes.textContent = data.releaseNotes || "No release notes available.";
+      }
+      const updateBtn = document.getElementById("update-now-btn");
+      const dismissBtn = document.getElementById("update-dismiss-btn");
+      if (updateBtn) updateBtn.style.display = "none";
+      if (dismissBtn) dismissBtn.textContent = "Close";
+      // Nothing installs from here, so where updates install from is not
+      // this dialog's to say (_renderPrompt sets it afresh).
+      const remoteNote = document.getElementById("update-remote-note");
+      if (remoteNote) remoteNote.style.display = "none";
+      dlg.dataset.viewerMode = "true";
+      dlg.show();
+      return true;
+    });
+  }
+
+  _renderPrompt(dlg) {
     const notes = document.getElementById("update-release-notes");
-    if (!dlg || !this.available) return;
+    if (!notes || !this.available) return false;
     // The release whose notes go on screen. Update Now and Skip name it, and
     // the server refuses them (409) once a check has replaced it — an
     // update_available landing while the dialog is open changes
@@ -140,6 +230,7 @@ export class UpdateController {
     const remoteNote = document.getElementById("update-remote-note");
     if (remoteNote) remoteNote.style.display = remote ? "" : "none";
     dlg.show();
+    return true;
   }
 
   // The release tagged tag is no longer pending: skipped elsewhere (the TUI's

@@ -78,6 +78,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `player.test.mjs` | `player.js`: selection, the chat sidebar and offset, seeking, search, the overlay; a few pure helper tests |
 | `player-chapters.test.mjs` | `player.js`'s chapters: the marker strip under the video and the chapter list, laid out on the global timeline, seeking on click, the current chapter highlighted, nothing drawn for none or a failed fetch, and a slow fetch never holding up playback |
 | `chapter-import-busy.test.mjs` | the chapter-import dialog's committing state: Restore disabled and refused during a Save, Escape through `close()`, and (owner ruling R-B1) a failure of a save Escape dismissed reported as a toast |
+| `confirm-fifo.test.mjs` | one owner per shared dialog (K34): a second `showConfirm` waits for the first to be answered and hidden instead of replacing it; the update dialog's notes viewer and update prompt each wait for the other to close |
 | `release-notes-toast.test.mjs` | a failed release-notes fetch toasts rather than blocking the tab |
 | `render-diff.test.mjs` | a repeated `job_update` makes no DOM write in the details dialog or the status bar |
 | `resolution-picker.test.mjs` | the Max Resolution picker in Settings and the setup wizard; its preset-mapping tests are pure |
@@ -195,7 +196,7 @@ h.flush();                  // let promises settle
 Beyond the player harness's stubs it adds: a `WebSocket` that never connects
 (a live socket would replay `initial_state` into the renderers under test; a
 test feeds frames through `h.app.handleMessage`), `sl-alert.toast()` /
-`sl-dialog.show()` and friends, `navigator.clipboard` and `scrollIntoView` —
+`sl-dialog.show()` and friends (an `sl-dialog`'s `hide()` of an open dialog fires `sl-after-hide` a microtask later, as Shoelace's does once its animation ends — the confirm dialog's queue draws its next prompt on it), `navigator.clipboard` and `scrollIntoView` —
 and, unlike the player harness, a **frozen wall clock** (`NOW`) plus an
 en-US/UTC pin on `toLocaleString`, so relative timestamps render the same
 string on every machine.

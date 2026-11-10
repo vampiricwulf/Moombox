@@ -244,6 +244,18 @@ function defineShoelaceStubs(window) {
     show() { (this._calls ??= []).push("show"); this._open = true; }
     hide() { (this._calls ??= []).push("hide"); this._open = false; }
   }
+  // An sl-dialog also ends its hide as Shoelace's does: sl-after-hide, once
+  // the (here instant) animation is over — after the hide() call returns,
+  // never for a dialog that was not open. The confirm dialog's queue draws
+  // its next prompt on it (K34).
+  class SlDialog extends SlOverlay {
+    hide() {
+      const wasOpen = this._open === true;
+      super.hide();
+      if (!wasOpen) return Promise.resolve();
+      return Promise.resolve().then(() => this.dispatchEvent(new window.Event("sl-after-hide")));
+    }
+  }
   // sl-alert.toast() appends the alert to Shoelace's toast stack; showToast
   // calls it on every toast, so it must exist or every toast throws.
   class SlAlert extends SlOverlay {
@@ -268,7 +280,7 @@ function defineShoelaceStubs(window) {
     "sl-menu-item": SlValue,
     "sl-checkbox": SlChecked, "sl-switch": SlChecked, "sl-radio-button": SlChecked,
     "sl-button": SlDisableable, "sl-icon-button": SlDisableable,
-    "sl-dialog": SlOverlay, "sl-drawer": SlOverlay, "sl-dropdown": SlOverlay,
+    "sl-dialog": SlDialog, "sl-drawer": SlOverlay, "sl-dropdown": SlOverlay,
     "sl-tooltip": SlOverlay, "sl-details": SlOverlay, "sl-alert": SlAlert,
     "sl-tab-group": SlTabGroup, "sl-tab": SlTab,
     "sl-tag": Passive, "sl-badge": Passive, "sl-icon": Passive, "sl-spinner": Passive,
