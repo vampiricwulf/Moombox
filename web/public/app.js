@@ -1471,7 +1471,8 @@ export class MoomboxApp {
       }
 
       case "job_update": {
-        // Single job update - update in place, or full re-render if status changed
+        // Single job update - update in place; a status change re-places the
+        // one card (_moveJobCard), with renderJobs as the fallback
         const updatedJob = p;
         if (!updatedJob?.id) break;
         const jobIndex = this.jobs.findIndex((j) => j.id === updatedJob.id);
@@ -2627,7 +2628,11 @@ export class MoomboxApp {
     if (gen !== this._archivedGen) return;
     this._archivedAnsweredGen = gen;
     if (rows) {
-      this.archivedJobs = rows.filter(j => !this._archivedGoneInFlight.has(j.id));
+      // The answer was built when the request was made. A row that has since
+      // been deleted, or that a job_update has since moved back to Tasks, is
+      // not put back: it would show as a ghost, or in both panels.
+      const activeIds = new Set(this.jobs.map(j => j.id));
+      this.archivedJobs = rows.filter(j => !this._archivedGoneInFlight.has(j.id) && !activeIds.has(j.id));
       this._archivedLoaded = true;
       this._archivedFetchFailed = false;
     } else {

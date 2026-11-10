@@ -119,6 +119,22 @@ test("a row deleted while a fetch is out does not come back with the answer", { 
   assert.deepEqual(h.app.archivedJobs.map((j) => j.id), ["a0", "a2"], "the deleted row is back as a ghost");
 });
 
+// Mutant: _pruneArchivedAgainstActive forgets the ids it drops while a fetch is out.
+test("a row that moves back to Tasks while a fetch is out does not come back with the answer", { skip }, async () => {
+  const g = gate();
+  const h = await open({ "GET /api/jobs/archived": () => g.p.then(() => rows(3)) });
+  h.app.archivedJobs = rows(3);
+  h.app.renderArchivedJobs();
+  const done = h.app.fetchArchivedJobs();
+  // The server re-sends the row as an active one (Mark Watched bumped updatedAt).
+  h.app.handleMessage({ type: "job_update", payload: row(1, { updatedAt: harness.agoISO(5) }) });
+  assert.deepEqual(h.app.archivedJobs.map((j) => j.id), ["a0", "a2"]);
+  g.release();
+  await done;
+  assert.deepEqual(h.app.archivedJobs.map((j) => j.id), ["a0", "a2"], "the row is in both Tasks and Archived");
+  assert.ok(h.app.jobs.some((j) => j.id === "a1"));
+});
+
 test("the newest 200 cards are drawn and Show more draws the next 200", { skip }, async () => {
   const h = await open({ "GET /api/jobs/archived": () => rows(450) });
   await h.app.fetchArchivedJobs();
