@@ -42,11 +42,6 @@ func (s *Solvers) MarkDead() {
 	}
 }
 
-// IsDead reports whether the solver has been marked poisoned. Exposed for
-// external diagnostics; DecryptN/DecryptSig already return ErrSolverDead
-// when this is true.
-func (s *Solvers) IsDead() bool { return s != nil && s.dead.Load() }
-
 // DecryptN calls the N solver with mutex protection.
 //
 // When s.N is nil the input passes through unchanged. Callers that need to

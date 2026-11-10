@@ -282,18 +282,6 @@ func (s *Service) GetAuthToken() string {
 	return s.Auth.GetAuthToken()
 }
 
-// ResolveEmotes fetches third-party emotes for a channel.
-func (s *Service) ResolveEmotes(ctx context.Context, channelID string, channelLogin ...string) *TwitchEmoteData {
-	return s.Emotes.Resolve(ctx, channelID, channelLogin...)
-}
-
-// ReloadAuth reloads auth cookies from disk.
-func (s *Service) ReloadAuth() {
-	if err := s.Auth.Reload(); err != nil {
-		s.logger.Warn("failed to reload twitch auth", "err", err)
-	}
-}
-
 // BuildJobID generates a job ID for a Twitch stream or VOD.
 func BuildJobID(streamOrVodID string, isVod bool) string {
 	if isVod {
