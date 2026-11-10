@@ -912,15 +912,17 @@ func (m *JobDetailsModel) buildRows() {
 	// download beside a job that finalized as parts, or a second recording
 	// beside the one a single-file finalize muxed. It keeps the staging dir
 	// with no age rule and can be the longer copy. The same line the
-	// dashboard's dialog shows, with the path wrapped beneath it.
+	// dashboard's dialog shows, with the path beneath it: dimmed as the
+	// dashboard dims it, and broken by width alone (breakWidth), because a
+	// path wrapped at its spaces no longer reads as the path on disk.
 	if u := m.asides.UnusedRoot; u != nil {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Kept Recording"})
 		for _, line := range wrapText(unusedRecordingLine(u.Name, u.Size), m.blockWrapWidth()) {
 			m.rows = append(m.rows, detailRow{kind: rowField, value: line})
 		}
-		for _, line := range wrapText(u.Path, m.blockWrapWidth()) {
-			m.rows = append(m.rows, detailRow{kind: rowField, value: line})
+		for _, line := range breakWidth(u.Path, m.blockWrapWidth()) {
+			m.rows = append(m.rows, detailRow{kind: rowField, value: line, color: ColorGray})
 		}
 	}
 
@@ -1364,6 +1366,36 @@ func formatRelativeDuration(d time.Duration) string {
 }
 
 var formatFileSize = utils.FormatFileSize
+
+// breakWidth cuts s into lines no wider than maxW, in whole graphemes and at
+// nothing else: every character of s, spaces included, is in exactly one
+// line, so the lines joined with nothing between them are s again. For a
+// file path, where wrapText's break at a space (and its collapse of a run of
+// them) would show a path that is not the one on disk.
+func breakWidth(s string, maxW int) []string {
+	if maxW <= 0 || s == "" {
+		return []string{s}
+	}
+	var lines []string
+	for ansi.StringWidth(s) > maxW {
+		prefix := truncateWidth(s, maxW, "")
+		if prefix == "" {
+			// The first grapheme is wider than maxW on its own.
+			prefix = truncateWidth(s, 2, "")
+		}
+		if prefix == "" || !strings.HasPrefix(s, prefix) {
+			// Not a clean prefix (never for plain text): emit the rest as
+			// one line rather than loop.
+			prefix = s
+		}
+		lines = append(lines, prefix)
+		s = s[len(prefix):]
+	}
+	if s != "" {
+		lines = append(lines, s)
+	}
+	return lines
+}
 
 func wrapText(text string, maxW int) []string {
 	if maxW <= 0 {

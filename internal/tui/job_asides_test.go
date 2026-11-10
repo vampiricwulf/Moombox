@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -469,6 +471,8 @@ func keptRecordingRows(m *JobDetailsModel) []detailRow {
 // Mutants this kills:
 //   - no section: keptRecordingRows is empty.
 //   - the path truncated or left out: it does not join back from the rows.
+//   - the path wrapped at its spaces (wrapText): a run of spaces collapses
+//     and the rows no longer join back to the path on disk.
 //   - sameAs ignoring UnusedRoot: the changed and the cleared summary are
 //     never rebuilt.
 func TestDetailsPanelNamesTheKeptRecordingNotInTheArchive(t *testing.T) {
@@ -478,7 +482,7 @@ func TestDetailsPanelNamesTheKeptRecordingNotInTheArchive(t *testing.T) {
 	if rows := keptRecordingRows(m); len(rows) != 0 {
 		t.Fatalf("a job with no kept recording grew a %d-row section", len(rows))
 	}
-	path := "/a/long/staging/directory/that/does/not/fit/on/one/line/of/the/panel/j1/video.mp4"
+	path := `C:\Users\First  Last\a long staging directory\that does not fit on one line of the panel\j1\video.mp4`
 	m.SetAsides(AsideSummary{UnusedRoot: &UnusedRecordingEntry{Name: "video.mp4", Path: path, Size: 3 << 30}})
 
 	rows := keptRecordingRows(m)
@@ -496,6 +500,21 @@ func TestDetailsPanelNamesTheKeptRecordingNotInTheArchive(t *testing.T) {
 	}
 	if !strings.Contains(joined, path) {
 		t.Errorf("the path is not shown whole beneath the line; rows were: %q", spaced)
+	}
+	// The path's own rows are the dimmed ones: joined with nothing between
+	// them they are the path exactly, spaces and all, and each fits the pane.
+	var pathRows string
+	for _, r := range rows[1:] {
+		if r.color == nil {
+			continue
+		}
+		pathRows += r.value
+		if w := ansi.StringWidth(r.value); w > m.blockWrapWidth() {
+			t.Errorf("path row %q is %d cells wide, over the pane's %d", r.value, w, m.blockWrapWidth())
+		}
+	}
+	if pathRows != path {
+		t.Errorf("the path rows join to %q, want the path on disk %q", pathRows, path)
 	}
 
 	m.SetAsides(AsideSummary{UnusedRoot: &UnusedRecordingEntry{Name: "audio.m4a", Path: "/s/j1/audio.m4a", Size: 5}})
