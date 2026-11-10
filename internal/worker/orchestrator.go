@@ -89,6 +89,10 @@ type DownloadOrchestrator struct {
 	// ONE registry to both). ExecuteTwitch registers into it; cmd/moombox
 	// broadcasts through the worker's accessor. nil is inert.
 	twitchChats *twitchChatRegistry
+	// runChats is the worker's run-chat registry (runChatRegistry): every chat
+	// downloader this orchestrator builds is registered with its job's run.
+	// Nil on an orchestrator built on its own, which registers nothing.
+	runChats *runChatRegistry
 	// trims is the trim service both UIs use (DownloadWorkerDeps.TrimService),
 	// which the post-download trim runs through. It built a TrimService of its
 	// own, whose one-trim-per-job slot the shared one could not see: a
@@ -107,9 +111,11 @@ type DownloadOrchestrator struct {
 	// beginFinishing marks a finalize whose archive is written, so a late
 	// Cancel is refused rather than land before the Finished write
 	// (DownloadWorker.beginFinishing, set by the worker; owner ruling R-C1).
-	// false: the row already holds an outcome, and the finalize stops. nil
+	// muxed says the finalize's mux work completed; with it, a row a Cancel
+	// reached just before the mark is re-claimed (reclaimed true; owner ruling
+	// R-H2). ok false: the row is no longer the finalize's, and it stops. nil
 	// (an orchestrator a test builds by struct literal) always goes on.
-	beginFinishing func(jobID string) (release func(), ok bool)
+	beginFinishing func(jobID string, muxed bool) (release func(), reclaimed, ok bool)
 
 	// muxRootCtx parents every mux that must OUTLIVE its job's own context —
 	// the background part muxes, the connectivity-outage finalize and the
@@ -764,12 +770,30 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		return err
 	}
 
-	// Post-download trim: if job has startTime/endTime, create a trimmed version
-	if (jobCtx.Job.StartTime != nil || jobCtx.Job.EndTime != nil) && ctx.Err() == nil {
-		o.postDownloadTrim(ctx, jobCtx.Job)
-	}
-
+	o.trimAfterFinalize(ctx, jobCtx)
 	return nil
+}
+
+// trimAfterFinalize runs the post-download trim a job asked for when it was
+// added (StartTime/EndTime), once its recording is finalized, unless the run
+// was cancelled or stopped meanwhile.
+//
+// A finalize that re-claimed its row from a Cancel (JobContext.FinishReclaimed,
+// owner ruling R-H2) ran on with the run's context ended by that Cancel: the
+// job is Finished, and the trim it asked for runs on the mux root, which only
+// a shutdown cuts. Read off the run's context, the trim was skipped there
+// with nothing said.
+func (o *DownloadOrchestrator) trimAfterFinalize(ctx context.Context, jobCtx *JobContext) {
+	if jobCtx.Job.StartTime == nil && jobCtx.Job.EndTime == nil {
+		return
+	}
+	if jobCtx.FinishReclaimed {
+		ctx = o.muxRoot()
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	o.postDownloadTrim(ctx, jobCtx.Job)
 }
 
 // postDownloadTrim creates the trim a job asked for when it was added
@@ -1156,9 +1180,9 @@ func streamIdentityChanged(old, fresh *DownloadResult) bool {
 
 // finishing is beginFinishing, or a no-op mark for an orchestrator built
 // without a worker.
-func (o *DownloadOrchestrator) finishing(jobID string) (func(), bool) {
+func (o *DownloadOrchestrator) finishing(jobID string, muxed bool) (release func(), reclaimed, ok bool) {
 	if o.beginFinishing == nil {
-		return func() {}, true
+		return func() {}, false, true
 	}
-	return o.beginFinishing(jobID)
+	return o.beginFinishing(jobID, muxed)
 }

@@ -207,6 +207,12 @@ type JobContext struct {
 	// download completed. A boot re-mux of an interrupted Muxing row leaves
 	// it false: that download did complete.
 	CapturedMux bool
+	// FinishReclaimed is set by a finalize whose finishing mark re-claimed
+	// the row from a Cancel that landed after its mux had completed (owner
+	// ruling R-H2, beginFinishing). That Cancel ended the run's context, and
+	// the job finished all the same: what its run still does after the
+	// finalize — the post-download trim — runs on the mux root instead.
+	FinishReclaimed bool
 	// Refinalize marks a finalize of the recording the job's archive already
 	// holds: MuxJob's, which re-muxes the staging the archive was (or was to
 	// be) made from — the Mux action over an Error or Cancelled row, the
@@ -296,9 +302,12 @@ type DownloadWorker struct {
 	// cmd/moombox has an exported path to it without reaching through the
 	// orchestrator, which is otherwise entirely internal to this package.
 	twitchChats *twitchChatRegistry
-	streamProc  *StreamProcessor
-	notifier    notifications.Sender
-	logger      logger
+	// runChats is each running job's chat downloaders (runChatRegistry), the
+	// same registry the orchestrator and the stream processor register into.
+	runChats   *runChatRegistry
+	streamProc *StreamProcessor
+	notifier   notifications.Sender
+	logger     logger
 	// conn is the connectivity monitor (nil: always online), the one the
 	// scheduler and the orchestrator hold. processJob waits an outage out
 	// on it rather than failing a job whose fetch met one (outage_wait.go).
@@ -322,10 +331,18 @@ type DownloadWorker struct {
 	// ErrAlreadyFinishing rather than land between the archive and its
 	// Finished write (owner ruling R-C1). finishMu serialises the mark with
 	// CancelJob's status write, so either the Cancel lands first and the
-	// finalize stops, or the mark does and the Cancel is refused. Lazily
+	// mark finds it (and re-claims the row when the mux had completed, owner
+	// ruling R-H2), or the mark does and the Cancel is refused. Lazily
 	// allocated, like stagingClaims.
 	finishMu  sync.Mutex
 	finishing map[string]bool
+	// muxRuns is the off-queue mux runs in flight (muxJob's goroutine: the
+	// Mux action, a boot re-mux, the automatic Twitch mux), and for each
+	// whether a Cancel that applied during it left its "Job Cancelled" to the
+	// run (noteMuxRunCancel, endMuxRun). The queue knows none of these runs,
+	// so it flags nothing for them. Lazily allocated, like finishing.
+	muxRunMu sync.Mutex
+	muxRuns  map[string]bool
 
 	stagingClaimMu sync.Mutex
 	stagingClaims  map[string]stagingClaim
@@ -503,6 +520,12 @@ func NewDownloadWorker(
 	twitchChats := newTwitchChatRegistry()
 	orchestrator := NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, routedCs, pp, nm, conn)
 	orchestrator.twitchChats = twitchChats
+	// One registry again, three holders: the stream processor and the
+	// orchestrator register the chat downloaders a run builds, and the worker
+	// stops them where a run ends without their own teardown (stopRunChats).
+	runChats := newRunChatRegistry()
+	orchestrator.runChats = runChats
+	sp.runChats = runChats
 	orchestrator.trims = trims
 
 	w := &DownloadWorker{
@@ -514,6 +537,7 @@ func NewDownloadWorker(
 		scheduler:    sched,
 		orchestrator: orchestrator,
 		twitchChats:  twitchChats,
+		runChats:     runChats,
 		streamProc:   sp,
 		notifier:     nm,
 		logger:       logger,
@@ -609,7 +633,7 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 				// Complete.
 				if r := recover(); r != nil {
 					w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
-					w.writePanicError(jobID, nil, r)
+					w.writePanicError(jobID, r)
 				}
 			}()
 			w.processJob(jobCtx, jobID)
@@ -745,8 +769,18 @@ func (w *DownloadWorker) TwitchHintStats() TwitchHintStats {
 // (jobverbs.CancellableStatuses — every status short of an outcome). And not
 // once its finalize has produced the archive (owner ruling R-C1): the job
 // then ends Finished, and the Cancel answers ErrAlreadyFinishing, with
-// nothing written or flagged. A Cancel that lands before that mark wins as
-// before, and the finalize stops on it (beginFinishing).
+// nothing written or flagged. A Cancel that lands before that mark while
+// the mux still runs stops it and stands; one that lands in the instants
+// between the mux's return and the mark is applied and answered, and the
+// mark then re-claims the row for the archive that is already written
+// (beginFinishing, owner ruling R-H2).
+//
+// A Cancel applied while an off-queue mux of the job runs (muxJob) is
+// flagged too, and announced by that run at its exit — only if the row still
+// reads Cancelled then (endMuxRun). The queue does not know such a run, so
+// the caller used to announce the Cancel at once, and a finish that
+// re-claimed the row sent "Download Finished" after it. Noted under finishMu
+// with the write, so the mark that re-claims the row always finds it noted.
 func (w *DownloadWorker) CancelJob(jobID string) (cancelled, flagged bool, err error) {
 	w.finishMu.Lock()
 	if w.finishing[jobID] {
@@ -760,28 +794,127 @@ func (w *DownloadWorker) CancelJob(jobID string) (cancelled, flagged bool, err e
 		"status":         database.StatusCancelled,
 		"announce_found": false,
 	})
+	muxRunWillNotify := applied && w.noteMuxRunCancel(jobID)
 	w.finishMu.Unlock()
 	if !applied {
 		return false, false, nil
 	}
 	flagged = w.queue.Cancel(jobID)
 	w.endBacklogStreak(jobID)
-	return true, flagged, nil
+	return true, flagged || muxRunWillNotify, nil
+}
+
+// beginMuxRun registers an off-queue mux run of the job, before its goroutine
+// starts: a Cancel applied from here until endMuxRun is the run's to announce.
+func (w *DownloadWorker) beginMuxRun(jobID string) {
+	w.muxRunMu.Lock()
+	defer w.muxRunMu.Unlock()
+	if w.muxRuns == nil {
+		w.muxRuns = map[string]bool{}
+	}
+	w.muxRuns[jobID] = false
+}
+
+// noteMuxRunCancel records that a Cancel applied while an off-queue mux of
+// the job runs, and reports whether one does: its announcement is then that
+// run's (endMuxRun), not the Cancel's caller's.
+func (w *DownloadWorker) noteMuxRunCancel(jobID string) bool {
+	w.muxRunMu.Lock()
+	defer w.muxRunMu.Unlock()
+	if _, running := w.muxRuns[jobID]; !running {
+		return false
+	}
+	w.muxRuns[jobID] = true
+	return true
+}
+
+// endMuxRun ends an off-queue mux run's registration, at its goroutine's
+// exit, and sends the "Job Cancelled" a Cancel left to it — when the row
+// still reads Cancelled. A Cancel the finishing mark superseded (owner ruling
+// R-H2) reads Finished here, and its one notification is the finalize's
+// "Download Finished". A Cancel that applies after this is its caller's to
+// announce again.
+func (w *DownloadWorker) endMuxRun(jobID string, prior *database.Job, finished bool) {
+	w.muxRunMu.Lock()
+	owed := w.muxRuns[jobID]
+	delete(w.muxRuns, jobID)
+	w.muxRunMu.Unlock()
+	if !owed {
+		return
+	}
+	job, err := w.db.GetJob(jobID)
+	if err != nil {
+		// CancelJob has told the Cancel's caller this run announces it, so
+		// nobody else will, and a row that cannot be read is no reason to
+		// send nothing. The run goes by what it knows: a mux that finished
+		// recorded its archive and sent "Download Finished" (the Cancel was
+		// superseded, or stopped nothing); one that did not left the Cancel
+		// standing, announced from prior — the row the Mux read as it
+		// started, nil when that read failed too.
+		if finished || prior == nil {
+			return
+		}
+		w.logger.Warn("could not read the row at the end of a cancelled mux; announcing the cancel from the row read at its start", "jobID", jobID, "err", err)
+		job = prior
+	} else if job == nil || job.Status != database.StatusCancelled {
+		return
+	}
+	w.logger.Info("job cancelled by user", "jobID", jobID)
+	if w.notifier != nil {
+		w.notifier.Send(notifications.JobCancelled(NotifyFacts(job)))
+	}
 }
 
 // beginFinishing marks a job's finalize as past the point of no return —
-// its archive is written — and returns the release, or false when the row
-// already holds an outcome (an operator's Cancel that landed while FFmpeg
-// ran, its listener not yet heard) or is gone: the finalize then stops with
-// ErrCancelled, its staging kept, and the Cancel stands. Under finishMu with
-// the read, so no Cancel can land between the check and the mark; a Cancel
-// after it is refused (CancelJob). A row that cannot be read is not an
-// outcome (as writeUnlessOutcome reads one): the finalize goes on.
-func (w *DownloadWorker) beginFinishing(jobID string) (func(), bool) {
+// its archive is written — and returns the release, or ok false when the
+// finalize must stop: with ErrCancelled, its staging kept, and the row left
+// as it is. Under finishMu with the read, so no Cancel can land between the
+// check and the mark; a Cancel after it is refused (CancelJob).
+//
+// The row decides, read here:
+//   - Muxing, the status every finalize writes before it muxes (or Live or
+//     Downloading, which one whose Muxing write failed on the database still
+//     reads): marked.
+//   - Cancelled, with the mux complete (muxed): an operator's Cancel landed
+//     between FFmpeg's return and this mark, and was acknowledged. Finished
+//     wins (owner ruling R-H2): the archive is whole, and a row left
+//     Cancelled beside it named no file while the file sat at the output
+//     path on no row. The row is re-claimed for the finalize — Cancelled to
+//     Muxing, conditional on its still reading Cancelled — and marked;
+//     reclaimed is true, and the finalize runs its tail on a context the
+//     Cancel did not end. The Cancel had answered success, so the flip is
+//     the job update both UIs get, and the one Info line below names it.
+//   - Cancelled, the mux not complete: the Cancel stopped the mux (a split
+//     finalize's merge or set-aside recovery, whose failures are swallowed),
+//     and stands.
+//   - anything else — another outcome, a reset verb's Upcoming, a requeue,
+//     a park, the row gone: the finalize stops and writes nothing over it.
+//
+// A row that cannot be read is not an outcome (as writeUnlessOutcome reads
+// one): the finalize goes on.
+func (w *DownloadWorker) beginFinishing(jobID string, muxed bool) (release func(), reclaimed, ok bool) {
 	w.finishMu.Lock()
 	defer w.finishMu.Unlock()
-	if job, err := w.db.GetJob(jobID); err == nil && (job == nil || job.IsTerminal()) {
-		return nil, false
+	if job, err := w.db.GetJob(jobID); err == nil {
+		switch {
+		case job == nil:
+			return nil, false, false
+		case job.Status == database.StatusMuxing, job.Status == database.StatusDownloading, job.Status == database.StatusLive:
+		case job.Status == database.StatusCancelled && muxed:
+			// Conditional, though finishMu keeps a Cancel out: a reset verb
+			// takes no such lock, and one that claimed the Cancelled row
+			// since the read keeps it.
+			if !w.db.UpdateJobFieldsIf(jobID, database.StatusCancelled, map[string]any{
+				"status": database.StatusMuxing,
+			}) {
+				return nil, false, false
+			}
+			reclaimed = true
+			w.logger.Info("a Cancel landed after the mux completed and before it was recorded; the archive is written, so the job finishes (the Cancel is superseded)",
+				"jobID", jobID)
+		default:
+			return nil, false, false
+		}
 	}
 	if w.finishing == nil {
 		w.finishing = map[string]bool{}
@@ -791,7 +924,7 @@ func (w *DownloadWorker) beginFinishing(jobID string) (func(), bool) {
 		w.finishMu.Lock()
 		delete(w.finishing, jobID)
 		w.finishMu.Unlock()
-	}, true
+	}, reclaimed, true
 }
 
 // WaitForJobExit blocks until the job's orchestrator goroutine has returned,
@@ -1046,6 +1179,8 @@ func (w *DownloadWorker) confirmTwitchStreamInfo(ctx context.Context, login stri
 
 func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	defer func() {
+		// The run's chat entry ends with the run (runChatRegistry.release).
+		w.runChats.release(jobID)
 		w.queue.Complete(jobID)
 		// Every job exit funnels through here — Finished, Error, Cancelled,
 		// COOKIES? — and all of those drop out of the scheduler's M
@@ -1064,6 +1199,10 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	var job *database.Job
 	defer func() {
 		if r := recover(); r != nil {
+			// The chat first: the panic unwound past the orchestrator's own
+			// teardown, and a downloader left running would write
+			// "downloading" over the settle the record makes.
+			w.stopRunChats(jobID)
 			w.recordRunPanic(jobID, job, r)
 		}
 	}()
@@ -1129,6 +1268,9 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	// YouTube rate-limited, run again once it has waited (outlastRateLimit).
 	var setupOutageSince, rateLimitSince time.Time
 	for {
+		// What an earlier pass registered is not this pass's: stopped by its
+		// own teardown already, and let go of here (runChatRegistry.nextPass).
+		w.runChats.nextPass(jobID)
 		// Process stream (probe, wait for live, etc.) — waiting a connectivity
 		// outage out rather than failing on it (outage_wait.go).
 		result, err := w.processStreamThroughOutages(ctx, job)
@@ -1747,6 +1889,21 @@ func (w *DownloadWorker) recordRunPanic(jobID string, job *database.Job, r any) 
 	}
 	if flagged {
 		row, err := w.db.GetJob(jobID)
+		if err == nil && row != nil && row.Status == database.StatusMuxing {
+			// A flagged run's row reads Muxing only when its finish
+			// re-claimed it from the Cancel that flagged the run
+			// (beginFinishing, owner ruling R-H2): CancelJob wrote Cancelled
+			// ahead of the flag, and a Mux is refused while this run is
+			// registered. The job is not cancelled, so this is no cancel's
+			// end — handleCancellation's Cancelled write was refused there,
+			// "Job Cancelled" was sent, and the row stayed Muxing with
+			// nothing running. The finalize panicked between its mark and
+			// its Finished write: recorded as any other panicked finalize,
+			// an Error that Mux recovers.
+			w.logger.Info("panic in a finish that had re-claimed its row from a Cancel; recording the panic, not the cancel", "jobID", jobID)
+			w.writePanicError(jobID, r)
+			return
+		}
 		if err == nil && (row == nil || row.Status == database.StatusCancelled || !row.IsTerminal()) {
 			if job == nil {
 				job = row
@@ -1757,27 +1914,50 @@ func (w *DownloadWorker) recordRunPanic(jobID string, job *database.Job, r any) 
 			}
 		}
 	}
-	w.writePanicError(jobID, job, r)
+	w.writePanicError(jobID, r)
 }
 
 // writePanicError writes a panicked run's Error, guarded by the terminal
 // statuses, and settles the chat it leaves in flight as setJobError's Error
-// does (owner rulings R-E1, R-E1a): recordRunPanic and Start's recover both
-// write through it, so a YouTube run that panics mid-capture does not leave
-// "downloading" on its Error row. job may be nil (Start's recover has the ID
-// alone); settleErrorChat reads the row for its platform then. The settle
-// does not stop a
-// chat downloader the panic left running (the orchestrator's cleanup is an
-// explicit call, not a deferred one), and a downloader left running that way
-// can still write its own value (OnStart's "downloading") over the settle.
-func (w *DownloadWorker) writePanicError(jobID string, job *database.Job, r any) {
+// does (owner rulings R-E1, R-E1a, R-H1): recordRunPanic and Start's recover
+// both write through it, so a run that panics mid-capture does not leave
+// "downloading" on its Error row. The settle
+// stops no chat downloader itself: processJob's recover stops the run's
+// (stopRunChats) before the record that comes here, since the orchestrator's
+// cleanup is an explicit call a panic unwinds past, and a downloader left
+// running wrote its own value (OnStart's "downloading") over the settle.
+// Start's recover reaches this with no stop: it catches only a panic in
+// processJob's own deferred handlers, and by then processJob has released
+// the run's entry (runChatRegistry.release), which closes the "downloading"
+// gate — nothing can write over the settle, though a downloader may be left
+// running in that double fault.
+func (w *DownloadWorker) writePanicError(jobID string, r any) {
 	if !w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
 		"status": database.StatusError,
 		"error":  fmt.Sprintf("internal panic: %v", r),
 	}) {
 		return
 	}
-	w.settleErrorChat(jobID, job)
+	w.settleErrorChat(jobID)
+}
+
+// stopRunChats stops the chat downloaders the job's current run built
+// (runChatRegistry.stop) and closes their "downloading" write, for the two
+// exits that end a run without an orchestrator's chat teardown having
+// necessarily run: a panic (processJob's recover — the teardown is explicit
+// calls a panic unwinds past) and a failure (setJobError). Ahead of the
+// Error write and settleErrorChat, so the settle is the last word. Guarded:
+// it runs inside a recover, and a downloader's Stop that panicked there
+// would lose the panic's own record.
+func (w *DownloadWorker) stopRunChats(jobID string) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.logger.Error("panic stopping a run's chat downloaders", "jobID", jobID, "panic", fmt.Sprint(r))
+		}
+	}()
+	if n := w.runChats.stop(jobID); n > 0 {
+		w.logger.Debug("stopped the run's chat downloaders", "jobID", jobID, "count", n)
+	}
 }
 
 // handleCancellation handles a cancelled/shutdown job.
@@ -1844,8 +2024,9 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 
 // stoppedChatStatus is the one rule for settling a chat capture its run
 // stopped without recording a verdict, written once for both settles: a user
-// cancel (handleCancellation) and a YouTube Error (settleErrorChat, owner
-// ruling R-E1a, which made the Error settle match this split). Neither
+// cancel (handleCancellation) and an Error on either platform
+// (settleErrorChat, owner rulings R-E1a, which made the Error settle match
+// this split, and R-H1, which extended it to Twitch). Neither
 // orchestrator's cancel or error arm records a chat verdict — it stops the
 // downloader and returns, and on a shutdown that is right, since the row keeps
 // its state and the capture resumes on the next start. A user cancel and an
@@ -2125,6 +2306,12 @@ func errorStage(errMsg string) string {
 }
 
 func (w *DownloadWorker) setJobError(job *database.Job, err error) {
+	// The run is over whichever way this failure is recorded: its chat
+	// downloaders are stopped first, ahead of the Error write and its
+	// settle, so none of them writes "downloading" back onto the row
+	// (stopRunChats). Most were stopped by the orchestrator's error arm
+	// already, and a second Stop is a no-op.
+	w.stopRunChats(job.ID)
 	// Give the slots back before the tail below (notifications, and an
 	// automatic cookie refresh that can take minutes), so the next download
 	// does not wait on it. Only the slots: the run stays registered until
@@ -2188,7 +2375,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 		return
 	}
 	if status == database.StatusError {
-		w.settleErrorChat(job.ID, job)
+		w.settleErrorChat(job.ID)
 	}
 
 	// Suppress notifications for non-actionable errors (matches TS behavior):
@@ -3228,16 +3415,19 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 	// writeFailed makes that write, only over this Mux's own Muxing (an
 	// outcome that landed meanwhile stands), and settles an in-flight chat on
 	// the Error it applied as setJobError's Error does (settleErrorChat, owner
-	// ruling R-E1a): this Error is written here, not through setJobError, and
-	// a YouTube row can reach a Mux still showing one — an Error row from
+	// rulings R-E1a, R-H1): this Error is written here, not through
+	// setJobError, and a row can reach a Mux still showing one — an Error row from
 	// before the settle existed, or one a stray downloader's OnStart wrote
 	// over its settle.
 	writeFailed := func(msg string) {
 		if w.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, failed(msg)) {
-			w.settleErrorChat(jobID, prior)
+			w.settleErrorChat(jobID)
 		}
 	}
 
+	// From here a Cancel that applies is this run's to announce
+	// (CancelJob, endMuxRun).
+	w.beginMuxRun(jobID)
 	w.wg.Go(func() {
 		defer release()
 		defer func() {
@@ -3253,6 +3443,13 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 				writeFailed(fmt.Sprintf("internal panic: %v", r))
 			}
 		}()
+		// Deferred after the recover, so it runs under it: the "Job
+		// Cancelled" a Cancel left to this run, once the row's last word is
+		// in (a re-claimed finish has written Finished by now).
+		// finished — the mux returned with its archive recorded — is what it
+		// goes by when the row cannot be read then.
+		finished := false
+		defer func() { w.endMuxRun(jobID, prior, finished) }()
 
 		// Owner decision O-E: the orchestrator's mux root, never
 		// context.Background() — a Stop reaches this FFmpeg and cancels it.
@@ -3356,6 +3553,7 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 			writeFailed(failure(err))
 			return
 		}
+		finished = true
 
 		if gapPlan != nil {
 			w.orchestrator.keepTwitchGapFillPlan(gapPlan)
@@ -3773,10 +3971,11 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 	return nil
 }
 
-// settleErrorChat settles the chat_status a failed YouTube download leaves
-// behind (owner rulings R-E1, R-E1a). The orchestrator's error arm stops the
-// chat downloader and returns without recording a verdict — recordChatOutcome
-// runs on the success path only — so an Error row went on reading
+// settleErrorChat settles the chat_status a failed job leaves behind, on
+// either platform (owner rulings R-E1, R-E1a, R-H1). An orchestrator's error
+// arm stops the chat downloader and returns without recording a verdict —
+// recordChatOutcome runs on the success path, and on ExecuteTwitch's
+// unconfirmed-end arm — so an Error row went on reading
 // "downloading" (or "pending"), and the Web details badge, which renders any
 // non-empty value, showed a capture in progress on a failed job. The value
 // settles as a Cancel's does (stoppedChatStatus, R-E1a): a capture that was
@@ -3791,23 +3990,17 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 // the chat (setupChatDownloader writes "pending" whatever the row reads) —
 // wins. Pending is tried first, in ChatStatuses order, so a capture that
 // starts between the two statements is still settled as the running one it
-// became. YouTube only, as the ruling names it: the Twitch orchestrator
-// records a verdict on its unconfirmed-end arm (recordChatOutcome) and its
-// other error arms are left as they were. A Cancel is settled by
+// became. Every platform (R-H1; R-E1 first named YouTube alone): a Twitch
+// failure that is not the unconfirmed-end arm's — a staging directory that
+// could not be made, a stream-processing failure after the capture was
+// armed, a panic, a failed Mux — left "pending" or "downloading" on its
+// Error row as a YouTube one did. The verdict the unconfirmed-end arm
+// records is not in flight and stands. A Cancel is settled by
 // handleCancellation, and a COOKIES? park is not an Error. The Error writes
-// that come here: setJobError's, writePanicError's and a failed Mux's
-// (muxJob). job may be nil, and the row is read for its platform then.
-func (w *DownloadWorker) settleErrorChat(jobID string, job *database.Job) {
-	if job == nil {
-		row, err := w.db.GetJob(jobID)
-		if err != nil || row == nil {
-			return
-		}
-		job = row
-	}
-	if job.Platform != "youtube" {
-		return
-	}
+// that come here are all there are: setJobError's, writePanicError's, a
+// failed Mux's (muxJob) and the automatic mux that could not start
+// (autoMuxNow).
+func (w *DownloadWorker) settleErrorChat(jobID string) {
 	for _, from := range database.ChatStatuses {
 		if !from.InFlight() {
 			continue

@@ -193,13 +193,30 @@ type muxVerdict struct {
 // short copy is removed before it can take the archive's name
 // (engine.Muxer.writeOutput). It records what it found in v; a copy ffprobe
 // cannot read passes, as it did when the check ran after the mux.
+//
+// Unless ctx ended under the check. Every probe here runs on ctx, so a
+// Cancel (or a Stop) that lands after FFmpeg has returned kills them: the
+// copy's probe comes back nil, or the inputs' do and nothing reads as short —
+// "could not be read" where the truth is "was not checked". Such a copy
+// fails with the context's error, as one whose FFmpeg was cancelled does, and
+// never takes the archive's name. It matters since owner ruling R-H2: the
+// finishing mark re-claims a row cancelled after a copy that returned nil,
+// writes it Finished and lets its staging go, so nil must mean the copy was
+// compared with what was staged.
 func (o *DownloadOrchestrator) verifiedCopy(jobID string, v *muxVerdict, ins *stagedInputs) engine.OutputCheck {
 	return func(ctx context.Context, path string) error {
+		o.logger.Debug("checking the muxed copy against its staged inputs", "jobID", jobID)
 		v.probe = o.runFFprobe(ctx, path)
 		if v.probe != nil {
 			v.short = o.verifyAgainstStaging(ctx, jobID, v.probe, ins)
 		}
-		return v.short
+		if v.short != nil {
+			return v.short
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("the copy's check was cut short: %w", err)
+		}
+		return nil
 	}
 }
 
@@ -1154,15 +1171,31 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	}
 	// The archive is written: from here the job ends Finished, and a Cancel
 	// is answered "already finishing" (owner ruling R-C1). One that landed
-	// while FFmpeg ran stands: the finalize stops with the staging kept, and
-	// the file it wrote is left where it is, named in the log.
-	release, ok := o.finishing(jobCtx.Job.ID)
+	// while FFmpeg ran, or while the copy was being checked against the
+	// staged inputs (verifiedCopy), stopped it, and the copy above returned
+	// its error. One that landed since — the copy checked and under the
+	// archive's name, the mark not yet taken — was acknowledged, and the
+	// mark re-claims its row: the mux completed, so the job finishes with
+	// this file (owner ruling R-H2). Only a row something
+	// else moved on meanwhile (a reset verb, the row deleted) stops the
+	// finalize here, with the staging kept and the file left, named in the
+	// log.
+	release, reclaimed, ok := o.finishing(jobCtx.Job.ID, true)
 	if !ok {
-		o.logger.Warn("the job was cancelled as its archive was written; the row stays Cancelled, staging is kept, the file is left",
+		o.logger.Warn("the job's row moved on as its archive was written; the row is left as it is, staging is kept, the file is left",
 			"jobID", jobCtx.Job.ID, "output", outputFile)
 		return ErrCancelled
 	}
 	defer release()
+	if reclaimed {
+		// The Cancel the mark superseded cancelled this finalize's context
+		// (its listener, queue.Cancel). The tail below — the join offset's
+		// probe, the assets — runs on the mux root instead, which only a
+		// shutdown cuts. So does what the run does after this finalize
+		// (trimAfterFinalize).
+		ctx = o.muxRoot()
+		jobCtx.FinishReclaimed = true
+	}
 	probeData := verdict.probe
 	// The archive at this name is a new file. A re-finalize of the same
 	// recording embedded the import it keeps, and saves it beside the new
@@ -1354,14 +1387,24 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 
 	// The parts are muxed (and merged): from here the job ends Finished, and
 	// a Cancel is answered "already finishing" (owner ruling R-C1), as in
-	// muxAndFinalize. One that landed before stands, the parts on their rows.
-	release, ok := o.finishing(jobCtx.Job.ID)
+	// muxAndFinalize. This shape's mux work — the merge, the set-aside
+	// recovery — swallows its failures, so what says a Cancel stopped it is
+	// the context it ran on, read as it returns: alive, the work completed,
+	// and a Cancel acknowledged since is re-claimed by the mark (owner ruling
+	// R-H2); cancelled, it may have been cut short, and the Cancel stands,
+	// the parts on their rows.
+	muxed := ctx.Err() == nil
+	release, reclaimed, ok := o.finishing(jobCtx.Job.ID, muxed)
+	if reclaimed {
+		ctx = o.muxRoot() // as muxAndFinalize's tail
+		jobCtx.FinishReclaimed = true
+	}
 	if !ok {
 		parts := make([]string, 0, len(segments))
 		for _, s := range segments {
 			parts = append(parts, s.FilePath)
 		}
-		o.logger.Warn("the job was cancelled as its parts were muxed; the row stays Cancelled, the parts are left on their rows",
+		o.logger.Warn("the job was cancelled, or its row moved on, as its parts were muxed; the row is left as it is, the parts are left on their rows",
 			"jobID", jobCtx.Job.ID, "parts", parts)
 		return ErrCancelled
 	}

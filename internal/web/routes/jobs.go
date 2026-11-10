@@ -1060,7 +1060,11 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 
 		// When the cancel flagged an actively-processing run, that run's
 		// handleCancellation emits the "cancelled" notification — sending
-		// here too produced two embeds per cancel of an in-flight job.
+		// here too produced two embeds per cancel of an in-flight job. A
+		// cancel applied while an off-queue mux of the job runs is flagged
+		// the same way, and that mux announces it at its exit if the row
+		// still reads Cancelled (worker.endMuxRun; a finish that re-claimed
+		// the row sends "Download Finished" alone, owner ruling R-H2).
 		cancelled, workerWillNotify, err := cancelJob(db, w, jobID)
 		if err != nil {
 			// Its finalize has written the archive: the job ends Finished

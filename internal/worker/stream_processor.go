@@ -203,6 +203,10 @@ type StreamProcessor struct {
 
 	mu          sync.Mutex
 	activeChats []*chat.ChatDownloader // Track active chat downloaders for cleanup
+
+	// runChats is the worker's run-chat registry (runChatRegistry); nil on a
+	// processor built on its own.
+	runChats *runChatRegistry
 }
 
 // NewStreamProcessor creates a new stream processor.

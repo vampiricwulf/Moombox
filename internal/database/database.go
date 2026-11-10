@@ -604,8 +604,8 @@ func (db *Database) UpdateJobFieldsUnlessTerminal(id string, fields map[string]a
 // status is still status AND its chat_status is one of from, in one
 // statement, and reports whether it did. It is the chat-aware twin of
 // UpdateJobFieldsIf for a settle decided after the fact: the worker turning
-// an in-flight capture left on a YouTube Error row into its settled value
-// (owner rulings R-E1, R-E1a) must not land on a row a Resume has
+// an in-flight capture left on an Error row into its settled value
+// (owner rulings R-E1, R-E1a, R-H1) must not land on a row a Resume has
 // already moved on, nor overwrite a verdict the run did record. An empty
 // from matches no row. Subscribers move only when it applied.
 func (db *Database) SettleChatStatus(id string, status JobStatus, from []ChatStatus, to ChatStatus) bool {

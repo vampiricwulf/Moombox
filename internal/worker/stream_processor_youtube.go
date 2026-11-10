@@ -622,6 +622,9 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				sp.logger.Info("restarting early chat download after its run ended",
 					"videoID", job.VideoID, "messages", chatDl.MessageCount())
 				sp.untrackChat(chatDl)
+				// Its run ended; the one started below registers in its
+				// place (runChatRegistry.forget).
+				sp.runChats.forget(chatDl)
 			}
 			// onProgress wired inside tryStartEarlyChat — see F16.
 			chatDl, chatFinished = sp.tryStartEarlyChat(ctx, job, probeInfo, chatProgressFn)
@@ -1004,6 +1007,8 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	opts.StreamStartTime = earlyChatEpoch(info)
 
 	dl := chat.NewChatDownloader(opts)
+	// Registered with the run (runChatRegistry), as setupChatDownloader's.
+	run := sp.runChats.add(job.ID, dl)
 	// Same as setupChatDownloader: without this the downloader's own
 	// diagnostics (the mode rule's refusal, the file-epoch adoption, API
 	// drift) never reach the log (Arc J D6).
@@ -1028,8 +1033,10 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	// that failed immediately would leave the UI stuck at "downloading"
 	// (per audit reports/worker.md Finding 22).
 	dl.OnStart = func(messageCount int, resuming bool) {
-		sp.db.UpdateJobFields(job.ID, map[string]any{
-			"chat_status": database.ChatDownloading,
+		run.whileRunning(func() {
+			sp.db.UpdateJobFields(job.ID, map[string]any{
+				"chat_status": database.ChatDownloading,
+			})
 		})
 	}
 	// The processor-owned end-of-run flag behind earlyChatNeedsRestart, set by
@@ -1056,5 +1063,7 @@ func (sp *StreamProcessor) stopEarlyChat(chatDl *chat.ChatDownloader) {
 	if chatDl != nil {
 		chatDl.Stop()
 		sp.untrackChat(chatDl)
+		// Stopped and dropped: the run's entry lets go of it too.
+		sp.runChats.forget(chatDl)
 	}
 }

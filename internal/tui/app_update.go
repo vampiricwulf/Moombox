@@ -383,6 +383,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case updateApplyResultMsg:
+		if msg.Refused {
+			// The updater declined: an apply is already running (the
+			// dashboard's, an earlier R U) or one is placed and waiting for
+			// the restart. The update is happening, so the line is its own
+			// sentence, stated as a warning and not a failure — the
+			// dashboard's neutral toast (owner ruling R-H3).
+			a.setFeedbackWithSeverity(msg.Err, severityWarning)
+			return a, nil
+		}
 		if msg.Err != "" {
 			a.setFeedback("Update failed: " + msg.Err)
 			return a, nil

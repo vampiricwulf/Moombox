@@ -110,7 +110,7 @@ const (
 // chat, or a capture that saw no messages). Reinitialize resets it to "".
 // Two writes settle a capture its run left mid-flight, by one rule (worker
 // stoppedChatStatus: downloading → incomplete, pending → ""): a user Cancel
-// and a YouTube download Error (owner rulings R-E1, R-E1a,
+// and a download Error on either platform (owner rulings R-E1, R-E1a, R-H1,
 // DownloadWorker.settleErrorChat), each conditional on the row.
 type ChatStatus string
 
@@ -130,8 +130,8 @@ const (
 	// ChatIncomplete is a capture that ENDED WITHOUT COMPLETING — the
 	// downloader returned an error (a Twitch VOD paging stall, an IRC session
 	// that exhausted its reconnect budget, a panic) instead of running out of
-	// chat to fetch, a user Cancel cut it off, or a YouTube download Error
-	// stopped it (R-E1) — so messages can be missing. Its resume sidecar is
+	// chat to fetch, a user Cancel cut it off, or a download Error
+	// stopped it (R-E1, R-H1) — so messages can be missing. Its resume sidecar is
 	// kept in staging. The value is the label: both UIs render it verbatim
 	// (warning colour), and "error" was not reused for it — nothing writes
 	// that, and it reads as a hard failure rather than an archive that

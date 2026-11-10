@@ -350,6 +350,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	}
 
 	if err := os.MkdirAll(jobCtx.StagingDir, 0o755); err != nil {
+		// The chat was armed ("pending") and never started. This run's Error
+		// stops it with the run's other downloaders (setJobError's
+		// stopRunChats) before it settles the chat (settleErrorChat, R-H1).
 		return fmt.Errorf("create staging dir: %w", err)
 	}
 	// The category the broadcast is in as the capture starts: the first

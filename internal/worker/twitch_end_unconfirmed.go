@@ -190,11 +190,18 @@ func (w *DownloadWorker) autoMuxNow(jobID string) {
 		// which is how muxJob came to find nothing staged — wrote Upcoming and
 		// queued the job, and an Error written over it stranded the queued run
 		// on a failed row.
-		w.db.UpdateJobFieldsIf(jobID, database.StatusError, map[string]any{
+		//
+		// The row was an Error already, and the capture's own verdict is
+		// what the unconfirmed-end arm recorded; a row that still reads a
+		// chat in flight (one from before the Error settle existed) is
+		// settled as every other Error write settles it (R-H1).
+		if w.db.UpdateJobFieldsIf(jobID, database.StatusError, map[string]any{
 			"status":      database.StatusError,
 			"park_reason": database.ParkReasonNone,
 			"error":       autoMuxFailure(err),
-		})
+		}) {
+			w.settleErrorChat(jobID)
+		}
 	}
 }
 
