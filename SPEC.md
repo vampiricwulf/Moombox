@@ -53,7 +53,7 @@ Moombox follows a strict priority hierarchy for all design decisions. When two c
 
 2. **Reliability** — The application must not crash, must not silently lose data, and must recover from transient failures automatically. Every goroutine has inline `defer/recover`. Network errors trigger exponential backoff with jitter. Stream-end detection uses a verification loop (up to 6 checks at 5-minute intervals) rather than trusting a single API response. Cookie auth loss triggers automatic refresh attempts.
 
-3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database has no background writer — `UpdateJobFields` runs synchronously under `db.mu` when a caller has something to write — so idle periods produce zero database I/O. The BotGuard sidecar runs as a single long-lived Node subprocess (one V8 heap, not per-request); the goja cipher VMs auto-evict when idle (10-VM LRU cap). WebSocket broadcasts rely on upstream rate-limiting (ProgressTracker's per-job gate caps progress writes at the configured progress interval — `downloader.progress_interval_ms`, 16 ms by default, so ~60 Hz/job) — no extra hub-level throttle. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
+3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database has no background writer — `UpdateJobFields` runs synchronously under `db.mu` when a caller has something to write — so idle periods produce zero database I/O. The BotGuard sidecar runs as a single long-lived Node subprocess (one V8 heap, not per-request); the goja cipher VMs are bounded by a 10-VM LRU cap (`solverCacheSize`; there is no idle eviction). WebSocket broadcasts rely on upstream rate-limiting (ProgressTracker's per-job gate caps progress writes at the configured progress interval — `downloader.progress_interval_ms`, 16 ms by default, so ~60 Hz/job) — no extra hub-level throttle. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
 
 4. **Simple Deployment & UX** — Single binary, no containers, no service managers. FFmpeg is the only runtime dependency. A first-run wizard handles initial setup. Sensible defaults mean the app works out of the box for the common case. Configuration changes that require restart are handled via exit code 42 and the launcher respawns automatically.
 
@@ -427,7 +427,7 @@ Parses IRC messages into structured chat events, handling PRIVMSG (chat messages
 
 **VOD chat:** Paginated GQL queries using `VideoCommentsByOffsetOrCursor`. Each page returns comments and a cursor for the next page. Comments are fetched in chronological order by content offset (seconds into the VOD). The pagination continues until no more comments are returned or the VOD end is reached.
 
-**Emote resolution:** Fetches third-party emotes from three providers: BTTV (`https://api.betterttv.net/3/cached/users/twitch/{id}`), FFZ (`https://api.frankerfacez.com/v1/room/id/{id}`), and 7TV (`https://7tv.io/v3/users/twitch/{id}`). Each provider returns channel-specific and global emotes. Results are merged into a unified emote map. The resolver uses a 200-channel LRU cache to avoid redundant API calls for channels that appear in multiple concurrent streams.
+**Emote resolution:** Fetches third-party emotes from three providers: BTTV (`https://api.betterttv.net/3/cached/users/twitch/{id}`), FFZ (`https://api.frankerfacez.com/v1/room/id/{id}`), and 7TV (`https://7tv.io/v3/users/twitch/{id}`). Only these three per-channel endpoints are called: the providers' global emote sets are not fetched, so a global BTTV/FFZ/7TV emote replays as plain text. The result is three separate lists (`bttv`, `ffz`, `seventv` in `TwitchEmoteData`), written into the chat file as they are; the player merges them into one map when it loads the file. The resolver caches up to 200 channels, keyed by the lowercased channel login (the channel ID when no login is given), for 24 hours (`emoteCacheTTL`, `internal/twitch/emotes.go`). A resolve in which no provider answered is not cached, and when the refetch of an expired entry fails outright the stale set is served and kept.
 
 ### Goja Runtime Shims
 
@@ -485,7 +485,7 @@ Polls YouTube's `live_chat/get_live_chat` endpoint using continuation tokens. Th
 | PO token minters | In-memory map | Dynamic (from VM) | Request key |
 | Cipher VMs | In-memory LRU | 10 VMs max (`solverCacheSize`) | Player.js URL |
 | Cipher JS | Disk files | 24 hours (`playerCacheTTL`), revalidated by conditional GET | Player.js URL hash |
-| Twitch emotes | In-memory LRU | 200 channels | Channel ID |
+| Twitch emotes | In-memory LRU + TTL | 200 channels, 24 hours (`emoteCacheTTL`); a total failure is not cached | Lowercased channel login (channel ID as fallback) |
 | YouTube visitor data | In-memory | Process lifetime | Singleton |
 | Chat dedup IDs | In-memory set | 5000 IDs max | Message ID |
 
@@ -556,25 +556,7 @@ The TUI uses a chord-based keybinding system with a single source of truth:
 
 The WebSocket connects on any path (upgrade handler intercepts before static file serving). Message format: `{"type": string, "payload": any}`.
 
-**Server-to-client message types:**
-- `job_update` — A job changed in a way a progress tick does not (status transition, error, chat status, mux output, new job, trim edit)
-- `job_progress` — Progress-only tick of an active download, one per configured progress interval per job (~60 Hz at the 16 ms default) (payload: `{id, status, progress, percent, speed, eta, lastVideoSeq, lastAudioSeq, totalVideoSeq, totalAudioSeq, totalChatMessages, updatedAt}`, merged client-side)
-- `jobs_update` — Full job list refresh (payload: array of all visible jobs)
-- `job_deleted` — A job row was removed (payload: `{id}`)
-- `config_update` — A config setting that affects client-side rendering changed (payload: partial config; currently `{hideFinishedAgeDays}`)
-- `log` — Log line (payload: string; beside it, `seq` — the line's number in the logger's ring, which the dashboard compares with `initial_state`'s `logSeq` to skip a line the snapshot already holds)
-- `check_timers` — Monitor schedule update (payload: `{nextFeedCheck, nextDecapiCheck, nextTwitchCheck}`)
-- `initial_state` — Sent on connect (payload: `{jobs, logs, logSeq, nextFeedCheck, nextDecapiCheck, nextTwitchCheck, connectivity, hideFinishedAgeDays, backfill, runningTrims, admissionHolds}`; `logSeq` numbers the newest line of `logs`)
-- `update_available` — New version found (payload: release info)
-- `update_cleared` — The pending release was withdrawn: skipped, or a check found nothing newer, so it was pulled (payload: `{tagName}`; a dashboard drops its badge only when the tag names the release it shows, and closes an update dialog still offering that release)
-- `disk_status` — Disk space update (payload: `{free, total, usedPct, warnLevel}`)
-- `connectivity` — Network reachability changed (payload: `{online}`)
-- `admission_holds` — The backlog scheduler's holds changed (payload: `jobstate.AdmissionHolds`, `{offline, diskHeld, rateLimitedUntil?, jobs?: {<id>: {attempt, of, until}}}`, the same object `/api/status` carries as `admissionHolds`); what Queued rows show and what turns the disk gauge to "holding"
-- `backfill_status` — Per-channel backfill scan progress (payload: `{channel, tab, pages, state}`)
-- `trim_status` — A trim the trim service runs, from either UI or a finished job's post-download trim (payload: `{id, jobId, startTime, endTime, progress, state, trim?, error?}`; `state`: running — as it starts, then with FFmpeg's percentage at most every 250 ms — then finished with the stored `trim` record or failed with an `error` written for the user). Running trims are also seeded via `initial_state`, so a reload mid-trim still shows its progress bar
-- `pong` — Reply to the client's `ping` (payload: none)
-
-That list is the whole wire protocol: the hub's own `Broadcast` helpers in `internal/web/websocket.go` (`job_update`, `job_progress`, `jobs_update`, `job_deleted`, `check_timers`, `connectivity`, `log`), the `cmd/moombox` callers (`update_available`, `update_cleared` via `announceUpdateCleared`, `disk_status`, `admission_holds` via `runAdmissionHoldsPush`, `backfill_status`, `config_update`, and `trim_status` via `trimStatusFrames`), the `initial_state` snapshot the hub marshals on connect, and the `pong` reply.
+**Server-to-client message types:** each frame type is a `case` in the dashboard's `handleMessage` (`web/public/app.js`). The one list of them, with payloads and senders, is the table in `docs/spec/user-interfaces.md` § Server-to-Client Message Types; a test keeps that table equal to the handler's labels. In short: `initial_state` is the snapshot sent on connect and after a dropped frame; `job_update`, `job_progress`, `jobs_update` and `job_deleted` carry job rows (a whole row, the slim ~60 Hz progress tick merged client-side, the full list, a removal); `config_update`, `check_timers`, `disk_status`, `admission_holds`, `connectivity` and `backfill_status` carry status the header and rows draw; `log` carries one log line with its `seq`; `trim_status`, `update_available` and `update_cleared` carry trim and release events; `pong` answers the client's `ping`.
 
 The `hideFinishedAgeDays` field in `initial_state` and `config_update` drives the Web UI's client-side archive re-evaluation: on every `job_update`/`jobs_update` and on a 60-second idle sweep, the Web UI moves Finished jobs that have aged past the threshold from the active panel into the Archived panel. The TUI's `isJobArchived` reclassification (`internal/tui/task_list.go`) does the same, and the active panel stays in sync with wall-clock time without a page refresh. Every Go classifier — that TUI bucket, the REST `/api/jobs` split, the `job_update` broadcast gate and the `cmd/moombox` list filter — runs the one predicate in `internal/jobfilter/archive.go` (`ArchiveCutoff`, `IsArchived`), which scales the fractional day threshold exactly and treats the boundary as exclusive: a Finished job whose `updated_at` sits exactly on the cutoff stays active, as does one whose timestamp is missing or unparseable.
 
@@ -902,4 +884,6 @@ Dispatch is queued, not fire-and-forget: `Manager.Send()` returns immediately af
 
 ## Appendix
 
-For volatile numbers that change frequently (line counts per package, current version, schema version, dependency versions), see [docs/spec/appendix-metrics.md](docs/spec/appendix-metrics.md). These are maintained separately so SPEC.md does not need updates for every line count change.
+For volatile numbers that change frequently (line counts per package, schema version, dependency versions; the app version is `version` in `cmd/moombox/main.go`), see [docs/spec/appendix-metrics.md](docs/spec/appendix-metrics.md). These are maintained separately so SPEC.md does not need updates for every line count change.
+
+Code comments cite owner rulings by short ids (`O-M`, `R3`, `Q5`). The ones whose design specs are no longer in the tree are listed, with what each decided, in [docs/spec/appendix-owner-rulings.md](docs/spec/appendix-owner-rulings.md).

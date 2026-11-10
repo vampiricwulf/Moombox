@@ -37,7 +37,7 @@ go build -o Moombox.exe ./cmd/moombox
 
 With version info (release builds):
 ```bash
-go build -ldflags "-s -w -X main.version=2.7.0 -X main.commit=$(git rev-parse --short HEAD)" -o Moombox.exe ./cmd/moombox
+go build -ldflags "-s -w -X main.version=X.Y.Z -X main.commit=$(git rev-parse --short HEAD)" -o Moombox.exe ./cmd/moombox
 ```
 
 ### Linux x64 (cross-compile or native)
@@ -103,6 +103,8 @@ go test -v ./internal/engine/...                    # one package, verbose
 go test -v -run TestParseDash ./internal/engine/... # one test
 go vet ./...                                        # static analysis
 ```
+
+`bash .github/scripts/local-gate.sh` runs the checks of CI's lint job on the tree you are in (`--full` adds the node suites, the whole Go suite and a race run), and `bash .github/scripts/new-worktree.sh <branch>` makes a git worktree that already holds the embed blobs. On Windows, go test needs `GOTMPDIR` set to a directory outside `%TEMP%`, spelled with backslashes; both scripts set it when it is unset, and the header of `local-gate.sh` says why.
 
 go test runs each package's tests in the package's own directory, so a test that writes to a relative path (a config built from `config.Defaults()`, whose `./output` and `./staging` a handler then creates; a file named without a directory; `C:\Moombox\staging`, which is only a relative name on Linux) writes beside the source. Every tested package's `TestMain` runs its tests through `treeguard.Run` (`internal/treeguard/treeguard.go`), which fails the run and names what it left when anything new is in the package directory afterwards; write such files under `t.TempDir()`. The leftovers are kept for inspection, so it is the first run after a leak appears that fails. `TestEveryTestedPackageRunsTheGuard` fails a tested package that has no such `TestMain`, so a new package needs one too: `func TestMain(m *testing.M) { os.Exit(treeguard.Run(m)) }`.
 

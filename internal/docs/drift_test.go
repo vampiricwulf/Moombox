@@ -226,3 +226,107 @@ func TestSpecDocKeyMethodsExist(t *testing.T) {
 		t.Error("no database.Database method list was checked -- the section moved or was reworded; re-aim this check")
 	}
 }
+
+// wsHandlerStart finds the dashboard's frame dispatcher in web/public/app.js;
+// wsMethodStart finds the next class method after it, where the dispatcher
+// ends; wsCaseLabel matches one of its `case` labels. The labels are matched
+// at the switch's own indentation, so a nested switch inside a case would not
+// be counted.
+var (
+	wsHandlerStart = regexp.MustCompile(`(?m)^  handleMessage\(message\) \{$`)
+	wsMethodStart  = regexp.MustCompile(`(?m)^  [A-Za-z_]\w*\([^)]*\) \{$`)
+	wsCaseLabel    = regexp.MustCompile(`(?m)^      case "([a-z_]+)":`)
+	// wsTableRow matches one row of the frame table: "| `type` | ...".
+	wsTableRow = regexp.MustCompile("^[|] `([a-z_]+)` [|]")
+)
+
+// clientFrameTypes returns the `case` labels of handleMessage, in order.
+func clientFrameTypes(t *testing.T, root string) []string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "web", "public", "app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := strings.ReplaceAll(string(b), "\r\n", "\n")
+	loc := wsHandlerStart.FindStringIndex(src)
+	if loc == nil {
+		t.Fatal("web/public/app.js has no handleMessage(message) method -- re-aim this check")
+	}
+	body := src[loc[1]:]
+	if end := wsMethodStart.FindStringIndex(body); end != nil {
+		body = body[:end[0]]
+	}
+	var out []string
+	for _, m := range wsCaseLabel.FindAllStringSubmatch(body, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+// TestWebSocketFrameTableMatchesTheClient holds the one list of WebSocket
+// frame types -- the table under user-interfaces.md's "Server-to-Client
+// Message Types" -- to the `case` labels of the dashboard's handleMessage, in
+// both directions, and requires SPEC.md's one-paragraph summary to name every
+// type. Four documents each kept a list and none matched the sixteen labels:
+// the spec table had no row for disk_status, admission_holds or connectivity,
+// one skill listed thirteen types, the other said "fifteen", and README.md
+// listed seven. The skills and the README now point at the table.
+//
+// MUTANT: delete the table's `admission_holds` row, or add a `case "x":` to
+// handleMessage -- the check fails, naming the type.
+func TestWebSocketFrameTableMatchesTheClient(t *testing.T) {
+	root := repoRoot(t)
+	labels := clientFrameTypes(t, root)
+	// A vacuity floor: the handler had sixteen labels when this was written.
+	if len(labels) < 12 {
+		t.Fatalf("only %d case labels found in handleMessage (%v) -- the scan is broken", len(labels), labels)
+	}
+
+	const heading = "### Server-to-Client Message Types"
+	rows := map[string]bool{}
+	in := false
+	for _, line := range docLines(t, root, "user-interfaces.md") {
+		if strings.HasPrefix(line, "#") {
+			in = line == heading
+			continue
+		}
+		if !in {
+			continue
+		}
+		if m := wsTableRow.FindStringSubmatch(line); m != nil {
+			rows[m[1]] = true
+		}
+	}
+	if len(rows) == 0 {
+		t.Fatalf("user-interfaces.md has no frame table under %q -- the heading moved or was reworded; re-aim this check", heading)
+	}
+
+	handled := map[string]bool{}
+	for _, l := range labels {
+		handled[l] = true
+		if !rows[l] {
+			t.Errorf("handleMessage handles %q, but user-interfaces.md's frame table has no row for it", l)
+		}
+	}
+	for r := range rows {
+		if !handled[r] {
+			t.Errorf("user-interfaces.md's frame table lists %q, but handleMessage in web/public/app.js has no case for it", r)
+		}
+	}
+
+	var summary string
+	for _, line := range docLines(t, root, "SPEC.md") {
+		if strings.HasPrefix(line, "**Server-to-client message types:**") {
+			summary = line
+			break
+		}
+	}
+	if summary == "" {
+		t.Fatal("SPEC.md no longer has its \"**Server-to-client message types:**\" paragraph -- re-aim this check")
+	}
+	for _, l := range labels {
+		if !strings.Contains(summary, "`"+l+"`") {
+			t.Errorf("SPEC.md's frame-type summary does not name `%s`", l)
+		}
+	}
+}

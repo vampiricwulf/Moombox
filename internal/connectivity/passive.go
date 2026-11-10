@@ -95,8 +95,8 @@ func (pt *PassiveTracker) ReportSuccessAndCleared(tag string) bool {
 	pt.failures = filtered
 
 	// Clear the latch once the surviving failures can no longer meet the
-	// trigger threshold so consumers polling IsTriggered() don't see stale
-	// positives. meetsThresholdLocked checks BOTH minFails and minTags.
+	// trigger threshold so a later read of the latch does not see a stale
+	// positive. meetsThresholdLocked checks BOTH minFails and minTags.
 	if pt.triggered && !pt.meetsThresholdLocked() {
 		pt.triggered = false
 	}
@@ -108,7 +108,7 @@ func (pt *PassiveTracker) ReportSuccessAndCleared(tag string) bool {
 // enough distinct subsystems to declare the network offline.
 //
 // **Side effect**: when this returns true, the tracker latches the
-// `triggered` flag so subsequent IsTriggered() polls report offline until
+// `triggered` flag, which then reads as offline until
 // a ReportSuccess clears the failures below threshold. The name reads as
 // a predicate but the latch is intentional — Monitor.ReportFailure relies
 // on the latched state. Audit reports/small-packages.md.
@@ -140,10 +140,11 @@ func (pt *PassiveTracker) Clear() (wasTriggered bool) {
 }
 
 // isTriggered reads the cached latch state without pruning — the raw latch
-// the tests pin. Production reads IsTriggeredPruned(): this may see a stale
+// the tests pin. Test-only: no production code calls it. It may see a stale
 // `true` for some time after the failure window has aged out, since pruneOld
 // is the only path that clears the latch on idle and it runs only from
-// ShouldTriggerOffline(), ReportFailure() and ReportSuccess().
+// ShouldTriggerOffline(), ReportFailure(), ReportSuccess() and
+// IsTriggeredPruned().
 func (pt *PassiveTracker) isTriggered() bool {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
@@ -152,13 +153,13 @@ func (pt *PassiveTracker) isTriggered() bool {
 
 // IsTriggeredPruned prunes aged-out failures — which clears the latch when
 // the survivors no longer meet the trigger threshold — and then returns the
-// latch state. This is the correct read for a background poller that does
-// not otherwise feed the tracker: IsTriggered() reads the cached latch
-// WITHOUT pruning, so a latch set during an outage would never clear once
-// every subsystem gates off its network I/O (no ReportSuccess /
-// ReportFailure / ShouldTriggerOffline fires). Monitor.poll no longer reads
-// the latch at all — a passing active probe clears it (Clear), and a failing
-// one is offline whatever it says.
+// latch state. Test-only today: no production code reads the latch.
+// Monitor.poll used to, and stopped — a passing active probe clears the
+// latch (Clear), and a failing one is offline whatever the latch says. It
+// stays as the correct read for a poller that does not otherwise feed the
+// tracker: a read that does not prune would never see a latch set during an
+// outage clear once every subsystem gates off its network I/O (no
+// ReportSuccess / ReportFailure / ShouldTriggerOffline fires).
 func (pt *PassiveTracker) IsTriggeredPruned() bool {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
@@ -178,7 +179,7 @@ func (pt *PassiveTracker) pruneOld() {
 	// Clear the latch when pruning has dropped the surviving failures back
 	// below the trigger threshold — checking BOTH minFails and minTags via
 	// meetsThresholdLocked. Without this, an idle Moombox that goes quiet
-	// after a brief failure burst keeps reporting IsTriggered()=true forever
+	// after a brief failure burst stays latched forever
 	// (no ReportSuccess fires because no HTTP request runs to clear it), and
 	// a set that aged down to a single tag would stay latched even though
 	// ShouldTriggerOffline would no longer trigger.

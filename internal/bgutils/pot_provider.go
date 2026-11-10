@@ -113,13 +113,15 @@ type PotProvider struct {
 	// sidecar, when non-nil and healthy, is the preferred PO-token mint
 	// path: a real Node + V8 + JSDOM subprocess runs BotGuard end-to-end
 	// and returns real integrity tokens (not the websafe fallback the
-	// goja path is limited to). On any sidecar error we fall through to
-	// the goja minterCache flow so PO-token generation never goes
-	// completely dark.
+	// goja path is limited to). While a sidecar is attached its answer is
+	// the answer: a failed mint, or a sidecar that is down, returns the
+	// error and never falls through to goja (see errSidecarDown). The
+	// goja minterCache flow runs only with no sidecar attached.
 	//
-	// Set via SetSidecar (cmd/moombox wires it up after Start). Nil in
-	// unit tests so existing PotProvider* tests keep exercising the
-	// goja path without dragging in subprocess/embed dependencies.
+	// Set via SetSidecar (cmd/moombox wires it up after Start). Nil with
+	// [bgutils] use_sidecar = false, and in unit tests so existing
+	// PotProvider* tests keep exercising the goja path without dragging
+	// in subprocess/embed dependencies.
 	sidecar         *sidecar.Sidecar
 	sidecarMintsHit atomic.Uint64
 	sidecarMintsErr atomic.Uint64
@@ -136,14 +138,16 @@ type PotProvider struct {
 // CachedMinters field is the live cache size, not a counter.
 //
 // Observability surfaces overlap deliberately:
-//   - SidecarMintsHit / SidecarMintsErr count *attempts* through the
-//     sidecar path. A sidecar failure increments SidecarMintsErr AND
-//     causes a fall-through to the goja path; if THAT path also fails
-//     GenerateErrors increments too. So a single end-user request that
-//     fails via both paths produces +1 SidecarMintsErr and +1
-//     GenerateErrors. Read SidecarMintsErr as "how often did the
-//     preferred path fail and we fell back" and GenerateErrors as
-//     "how often did the user-facing call ultimately error".
+//   - SidecarMintsHit / SidecarMintsErr count mints the sidecar answered
+//     and mints it failed. There is no goja fall-through in sidecar mode
+//     (see errSidecarDown), so a failed sidecar mint IS the user-facing
+//     failure. A mint refused because the sidecar is down counts in
+//     neither of the two: it never reached the sidecar.
+//   - GenerateErrors counts calls through the cached entry point that
+//     ended in an error, on either path, a down sidecar included. A
+//     failed sidecar mint there adds +1 SidecarMintsErr and +1
+//     GenerateErrors. GenerateGvsPoToken counts a sidecar failure in
+//     SidecarMintsErr only, and a goja failure in GenerateErrors.
 type PotStats struct {
 	SessionHits        uint64 `json:"session_hits"`
 	MinterHits         uint64 `json:"minter_hits"`

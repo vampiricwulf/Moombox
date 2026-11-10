@@ -64,7 +64,10 @@ func TestDiscoverResumeSegment(t *testing.T) {
 			}
 			jobCtx := &JobContext{Job: &database.Job{ID: "j1"}, StagingDir: staging}
 			idx, dir := o.discoverResumeSegment(jobCtx)
-			if want := filepath.Join(staging, tc.wantDir); idx != tc.wantIdx || dir != want {
+			// Cleaned on both sides: the root cases return StagingDir as it was
+			// given, and a temp root spelled with forward slashes on Windows is
+			// the same directory as its cleaned form.
+			if want := filepath.Join(staging, tc.wantDir); idx != tc.wantIdx || filepath.Clean(dir) != want {
 				t.Errorf("got (%d, %q), want (%d, %q)", idx, dir, tc.wantIdx, want)
 			}
 		})

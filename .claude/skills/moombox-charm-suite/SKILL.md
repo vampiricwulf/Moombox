@@ -25,7 +25,7 @@ Components currently used in the codebase are marked with *.
 | `filepicker` * | `charm.land/bubbles/v2/filepicker` | File/directory selection (used in files dialog) |
 | `cursor` | `charm.land/bubbles/v2/cursor` | Cursor rendering modes (used internally by textinput/textarea) |
 | `key` * | `charm.land/bubbles/v2/key` | Key binding definitions |
-| `textarea` | `charm.land/bubbles/v2/textarea` | Multi-line text entry — the `A C` chapter import's paste box (`chapter_import_dialog.go`); its own keys (Tab, Ctrl+S, Esc) are kept from it in `UpdateComponents` |
+| `textarea` | `charm.land/bubbles/v2/textarea` | Multi-line text entry — the `A C` chapter import's paste box (`internal/tui/chapter_import_dialog.go`); its own keys (Tab, Ctrl+S, Esc) are kept from it in `UpdateComponents` |
 | `paginator` | `charm.land/bubbles/v2/paginator` | Page navigation (available, not currently used) |
 | `stopwatch` | `charm.land/bubbles/v2/stopwatch` | Elapsed time tracking (available, not currently used) |
 | `timer` | `charm.land/bubbles/v2/timer` | Countdown timer (available, not currently used) |
@@ -80,7 +80,7 @@ func (m *SomeOverlay) View() string       { if !m.visible { return "" }; ... }
 3. A row in `overlayCases` (`internal/tui/overlay_order_test.go`) at the same position, which opens the overlay; the order, view/key and mouse-parity tests and the Ctrl+C census iterate it.
 
 ### Chord System
-Single source of truth: `buildMenuItems()` in `app_actions.go` returns `[]ActionMenuItem`:
+Single source of truth: `buildMenuItems()` in `internal/tui/app_actions.go` returns `[]ActionMenuItem`:
 ```go
 type ActionMenuItem struct {
     Chord        string                   // e.g. "A A", "R C", "F"
@@ -112,11 +112,11 @@ case "R V":
 Never call blocking operations directly in `Update()`.
 
 ### Non-Blocking Channel Sends
-TUI receives events via channels from `main.go`. Sends are non-blocking — messages are silently dropped if the channel is full (no counters):
+TUI receives events via channels made in `cmd/moombox/tui_wiring.go`. Sends are non-blocking. The four job forwarders go through `forwardOrDrop` (`cmd/moombox/tui_wiring.go`), which counts a drop, warns once per streak and replays a full snapshot on the next send that gets through; a new channel that carries job state must use it. Other channels drop without replay (log lines are counted and reported at exit):
 ```go
 select {
 case ch <- msg:
-default: // silently dropped if TUI event loop is busy
+default: // dropped while the TUI event loop is busy; no replay, so never for job state
 }
 ```
 
@@ -130,6 +130,18 @@ default: // silently dropped if TUI event loop is busy
 Three-panel layout with dynamic sizing based on `FocusPanel` (Tasks, Details, Logs):
 - Focused panel gets more space (70/25 height split, 45/55 or 35/65 width split)
 - `PanelRegion` provides mouse hit-testing with `Contains()` and `ContentY()` for click detection
+
+### Panel Render Caches
+The task list, job details, log viewer and status bar memoise `View()`: each returns its stored `renderCache` while a freshly built key struct (`taskListKey`, `jobDetailsKey`, `logViewerKey`, `statusBarKey`) equals the one the frame was drawn for. The frame is asked for ~120 times a second and most messages change nothing a panel draws.
+
+**The rule:** anything `View()` reads must be a field of that panel's key struct, or change only through the panel's content funnel — `rebuildVirtualList` (task list, bumps `rebuildSeq`) or `updateViewportContent` (details and log viewer, bumps `contentSeq`). The status bar has no funnel: every input is a key field. `invalidate()` on the task list and log viewer is for the rare change that moves neither. Miss this and the panel shows a stale frame, and a test of the new feature that renders once will not notice.
+
+When you add state a panel draws (a header badge, a row tag, a new status-bar segment):
+1. Add it to the key struct, or route its writer through the funnel.
+2. Add a row to the matching table in `internal/tui/render_cache_test.go` — `TestTaskListCachedFramesMatchFreshFrames`, `TestJobDetailsCachedFramesMatchFreshFrames`, or `TestStatusBarCacheKeyCoversEveryInput` (one row per key field). Each compares the cached frame with a fresh one after the mutation.
+3. Run `go test -run 'Cache|FrameCost' ./internal/tui/`. `TestFrameCostAtLogCap` (`internal/tui/frame_cost_test.go`) pins the allocations of an unchanged frame; `go test -run '^$' -bench 'AtLogCap' -benchmem ./internal/tui/` shows the timings.
+
+Details: `docs/spec/user-interfaces.md` § Panel Render Caches.
 
 ### Custom Components
 - **Marquee**: Bouncing text scroller for long job titles (resets on timer, pauses at ends)
@@ -163,7 +175,7 @@ Request background color in `Init()` via `tea.RequestBackgroundColor`. The runti
 Functional options constructor: `viewport.New(viewport.WithWidth(w), viewport.WithHeight(h))`.
 
 Key features used in Moombox:
-- `StyleLineFunc` — per-line styling callback (used in `log_viewer.go` to color log lines without embedding ANSI in content, which would break search highlight byte offsets)
+- `StyleLineFunc` — per-line styling callback (used in `internal/tui/log_viewer.go` to color log lines without embedding ANSI in content, which would break search highlight byte offsets)
 - `LeftGutterFunc` — callback for rendering line numbers in the gutter
 - `SetHighlights([]viewport.Highlight)` — search result highlighting with byte offsets
 - `SetContentLines([]string)` — set content from a string slice directly (avoids joining/splitting)

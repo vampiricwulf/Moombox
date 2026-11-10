@@ -27,20 +27,20 @@ func FooRoutes(r chi.Router, deps *FooRouteDeps) {
 ```
 
 ### 3. Middleware
-Global middleware is applied automatically via `r.Use()` in `server.go` — recovery, CORS, security headers, CSRF, IP gate, max body size, compression, and auth. You do **not** add these per-route.
+Global middleware is applied automatically via `r.Use()` in `internal/web/server.go` — recovery, CORS, security headers, CSRF, IP gate, max body size, compression, and auth. You do **not** add these per-route.
 
 Per-route middleware via `r.With()` is only for **additional** constraints:
 - Rate limiting: `r.With(deps.RateLimiter.Middleware).Post(...)`
 - Loopback-only: `r.With(web.LoopbackOnly).Post(...)`
 
-### 4. Wire in Main
-`cmd/moombox/main.go` — Construct deps struct and call registration function alongside the other route registrations.
+### 4. Wire the Route
+`cmd/moombox/routes_wiring.go` — in `wireRoutes`, construct the deps struct and call the registration function beside the other route registrations. Every `routes.*Routes(` call is there; `cmd/moombox/main.go` holds none.
 
 ### 5. Frontend Fetch
 `web/public/` — Add fetch call in the appropriate module. Use relative `/api/` paths. Send `Content-Type: application/json`.
 
 ### 6. TUI HTTP Call
-If TUI needs this endpoint — use the internal HTTP client which injects `X-Internal-Token` header automatically via custom `RoundTripper` (`internalTokenTransport` in `app.go`). This bypasses CSRF validation via constant-time comparison in middleware.
+If TUI needs this endpoint — use the internal HTTP client which injects `X-Internal-Token` header automatically via custom `RoundTripper` (`internalTokenTransport` in `internal/tui/app_commands.go`). This bypasses CSRF validation via constant-time comparison in middleware.
 
 ### 7. WebSocket Broadcast (if real-time)
 If this endpoint triggers state changes that clients need to see in real-time, add a WebSocket broadcast (see below).
@@ -58,7 +58,7 @@ If this endpoint triggers state changes that clients need to see in real-time, a
 - `BroadcastJobDeleted(jobID)` — targeted row removal; clients drop the row immediately
 - `BroadcastCheckTimers(data)` — next monitor check times
 - `BroadcastConnectivity(online)` — `{online}` when reachability flips
-- `BroadcastLog(line, seq)` — one log line, clipped to 4096 bytes on a rune boundary (`clipLogLine`), with its number in the logger's ring as `seq` beside the payload. The hub keeps NO ring of its own (WEB-14): the logger owns the only one, and `ws_wiring.go` puts `logger.RecentLines` — the lines and the newest one's number, `logSeq` — into every `initial_state`; the dashboard skips a frame at or below `logSeq`, a line the snapshot already holds.
+- `BroadcastLog(line, seq)` — one log line, clipped to 4096 bytes on a rune boundary (`clipLogLine`), with its number in the logger's ring as `seq` beside the payload. The hub keeps NO ring of its own (WEB-14): the logger owns the only one, and `cmd/moombox/ws_wiring.go` puts `logger.RecentLines` — the lines and the newest one's number, `logSeq` — into every `initial_state`; the dashboard skips a frame at or below `logSeq`, a line the snapshot already holds.
 
 ### 2. Wire the Source
 Connect the event source to the broadcast in `cmd/moombox/monitor_callbacks.go`. Common patterns:
@@ -67,18 +67,18 @@ Connect the event source to the broadcast in `cmd/moombox/monitor_callbacks.go`.
 - **Log subscriber**: `log.SubscribeLines()` channel → `BroadcastLog(line.Text, line.Seq)` (`wireLogForwarding`)
 
 ### 3. Frontend Handler
-`web/public/app.js` — Add case in WebSocket message handler switch on `msg.type`. Existing types, in the switch's own order: `initial_state`, `jobs_update`, `job_update`, `job_progress`, `config_update`, `job_deleted`, `log`, `check_timers`, `disk_status`, `backfill_status`, `update_available`, `connectivity`, `pong`.
+`web/public/app.js` — add a `case` to the `switch (message.type)` in `handleMessage`, and a row for the new type to the table in `docs/spec/user-interfaces.md` § Server-to-Client Message Types. That table is the one list of existing types; `TestWebSocketFrameTableMatchesTheClient` (`internal/docs/drift_test.go`) fails while the handler and the table differ.
 
 ### 4. TUI Handler
 TUI does **not** receive WebSocket messages. Instead, it gets data via:
 - Database callbacks: `db.OnJobUpdate()`, `db.OnJobsChange()` → sends custom `tea.Msg` types (e.g., `JobUpdateMsg`, `JobsUpdateMsg`)
 - Log subscription: `log.SubscribeLines()` channel → `LogBatchMsg`, skipping the lines the `RecentLines` backfill already holds (`forwardTUILogs`)
-- Service callbacks: wired in `main.go` → sends typed messages via non-blocking channel
+- Service callbacks: wired in `cmd/moombox/tui_wiring.go` (the monitor's own in `cmd/moombox/monitor_callbacks.go`) → typed messages through a non-blocking channel, or `app.Send` for the ones that need no channel
 
-Define your custom `tea.Msg` type in `app.go`, send via non-blocking channel select, handle in `Update()`.
+Define your custom `tea.Msg` type in `internal/tui/app.go`, send via non-blocking channel select, handle in `Update()` (`internal/tui/app_update.go`).
 
 ### 5. Initial State
-If new clients need the current value on connect, include it in the `InitialState` provider function set in `main.go`. This sends the value to clients immediately on WebSocket connect.
+If new clients need the current value on connect, include it in the `InitialState` provider function `wireWebSocket` sets in `cmd/moombox/ws_wiring.go`. This sends the value to clients immediately on WebSocket connect.
 
 ## Message Format
 ```go
@@ -90,7 +90,7 @@ type WSMessage struct {
 
 ## Common Mistakes
 
-- Forgetting to wire deps in `main.go` — route registers but deps are nil
+- Forgetting to wire deps in `cmd/moombox/routes_wiring.go` — route registers but deps are nil
 - Adding per-route auth/CSRF when it's already applied globally
 - Calling `BroadcastJobUpdate` after `BroadcastJobDeleted` for the same ID — the late update will re-add the row via the client's upsert handler
 - Not including new event in initial state — clients that connect after the event miss it

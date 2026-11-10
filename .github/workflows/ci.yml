@@ -107,23 +107,14 @@ jobs:
       - name: Stand in for the embed blobs
         # vet, staticcheck and the builds load every package, and a package
         # does not load without the files its go:embed directives name. They
-        # read code, never the embedded bytes, so an empty file replaces each
-        # named file the checkout lacks that git ignores (a build output): the
-        # sidecar tarball and the three Node binaries, found from the
-        # directives rather than listed here, so a blob added for another
-        # platform is covered too. A tracked file missing from a commit gets
-        # no stand-in, so vet and the builds still fail on it.
-        run: |
-          git grep -l -e '^//go:embed ' -- '*.go' | while read -r file; do
-            dir=$(dirname "$file")
-            sed -n 's|^//go:embed ||p' "$file" | tr ' ' '\n' | while read -r name; do
-              case $name in '' | *[*?[]*) continue ;; esac
-              if [ ! -e "$dir/$name" ] && git check-ignore -q "$dir/$name"; then
-                : > "$dir/$name"
-                echo "empty stand-in: $dir/$name"
-              fi
-            done
-          done
+        # read code, never the embedded bytes, so the script puts an empty
+        # file in place of each named file the checkout lacks that git
+        # ignores (a build output): the sidecar tarball and the three Node
+        # binaries, found from the directives rather than listed, so a blob
+        # added for another platform is covered too. A tracked file missing
+        # from a commit gets no stand-in, so vet and the builds still fail on
+        # it. local-gate.sh --quick runs the same script.
+        run: bash .github/scripts/embed-standins.sh
 
       - uses: actions/setup-go@v7
         id: setup-go
@@ -271,6 +262,14 @@ jobs:
           GOOS: linux
           GOARCH: arm64
         run: go build ./...
+
+      - name: The scripts parse
+        # local-gate.sh and new-worktree.sh are run by people, not by this
+        # workflow, so a syntax error in one would otherwise reach main.
+        run: |
+          for f in .github/scripts/*.sh; do
+            bash -n "$f"
+          done
 
       - name: Test shards cover every package exactly once
         # The test job's matrix and test-shard.sh's layout must agree, and
