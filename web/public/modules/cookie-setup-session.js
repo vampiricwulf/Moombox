@@ -195,13 +195,20 @@ export class CookieSetupSession {
     // Rejected is as free as idle: the finish's answer released the slot, so
     // a setup the server now reports is someone else's (another tab, the
     // TUI) and takes its own platform — never the earlier setup's.
-    if (this.phase !== PHASE.IDLE && this.phase !== PHASE.REJECTED) {
+    const p = status.setupPlatform;
+    const known = p === "twitch" || p === "youtube" ? p : null;
+    // An adopted setup is the server's, so it follows the server: a known
+    // platform other than the one adopted means that setup ended and another
+    // began (another tab, the TUI) between two status loads, and it is
+    // adopted afresh. A setup this page started (active, finishing, aborted)
+    // keeps its own platform.
+    const replaced = this.phase === PHASE.ADOPTED && known !== null && known !== this.platform;
+    if (this.phase !== PHASE.IDLE && this.phase !== PHASE.REJECTED && !replaced) {
       // Ours already: just make sure it is on screen.
       if (dialog && !dialog.open) dialog.show();
       return;
     }
-    const p = status.setupPlatform;
-    this.platform = p === "twitch" || p === "youtube" ? p : null;
+    this.platform = known;
     this.owner = owner;
     this._startedHere = false;
     this._gen++;
@@ -381,8 +388,12 @@ export class CookieSetupSession {
     } finally {
       clearInterval(countdownInterval);
       clearTimeout(timeoutId);
-      if (countdownEl) countdownEl.textContent = "";
-      if (doneBtn) { doneBtn.loading = false; doneBtn.disabled = false; }
+      // A stale finish leaves the dialog to the setup that replaced it: that
+      // setup's own finish may be running, with its button and countdown up.
+      if (!stale()) {
+        if (countdownEl) countdownEl.textContent = "";
+        if (doneBtn) { doneBtn.loading = false; doneBtn.disabled = false; }
+      }
     }
   }
 

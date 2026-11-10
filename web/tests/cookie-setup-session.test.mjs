@@ -271,3 +271,89 @@ test("a rejected session adopts the next setup with the server's platform", { sk
   assert.equal(s.holdsSlot(), false);
   assert.equal(result(h), "", "the earlier setup's rejection stayed on the adopted setup");
 });
+
+// ── close round ────────────────────────────────────────────────────────
+//
+// A finish cancelled while out, then a new setup whose own finish is running:
+// the old finish's finally reset the Done button and blanked the countdown
+// under the new FINISHING, so Done could be clicked again mid-finish.
+//
+// MUTANT: finally writing the button and countdown without the stale check.
+test("a stale finish settling leaves the next setup's finish UI alone", { skip }, async () => {
+  const gates = [];
+  const h = await app({
+    "POST /api/cookies/auto-setup/finish": () => new Promise((resolve) => { gates.push(resolve); }),
+  });
+  const s = h.app.cookieSetup;
+  await h.app.settings.startAutoCookieSetup("twitch");
+  h.el("btn-auto-cookie-done").click();
+  await h.flush();
+  h.el("btn-auto-cookie-cancel").click();
+  await h.flush();
+  assert.equal(s.phase, session.PHASE.IDLE);
+
+  await h.app.settings.startAutoCookieSetup("youtube");
+  h.el("btn-auto-cookie-done").click();
+  await h.flush();
+  assert.equal(s.phase, session.PHASE.FINISHING);
+  assert.equal(gates.length, 2);
+  const countdown = h.el("auto-cookie-countdown").textContent;
+  assert.notEqual(countdown, "");
+
+  gates[0](rejectedFinish);
+  await h.flush();
+  await h.flush();
+  assert.equal(s.phase, session.PHASE.FINISHING);
+  assert.equal(h.el("btn-auto-cookie-done").loading, true, "the stale finish reset the running finish's Done button");
+  assert.equal(h.el("btn-auto-cookie-done").disabled, true);
+  assert.equal(h.el("auto-cookie-countdown").textContent, countdown, "the stale finish blanked the running finish's countdown");
+
+  gates[1](rejectedFinish);
+  await h.flush();
+  await h.flush();
+  assert.equal(s.phase, session.PHASE.REJECTED);
+  assert.equal(h.el("btn-auto-cookie-done").loading, false);
+  assert.equal(h.el("auto-cookie-countdown").textContent, "");
+});
+
+// An adopted setup follows the server: if the setup the server reports now
+// runs on another platform (it ended and another tab or the TUI started a new
+// one between two status loads), the session re-adopts it rather than
+// finishing it as the old platform's.
+//
+// MUTANT: adopt() keeping "ours already" for an ADOPTED session.
+test("an adopted setup takes the platform the server changed under it", { skip }, async () => {
+  let status = youtubeStatus();
+  const h = await app({ "GET /api/cookies/auto-status": () => status });
+  await h.app.settings.loadAutoCookieStatus();
+  const s = h.app.cookieSetup;
+  assert.equal(s.phase, session.PHASE.ADOPTED);
+  assert.equal(s.platform, "youtube");
+  h.el("auto-cookie-setup-result").textContent = "left over";
+
+  status = { ...youtubeStatus(), setupPlatform: "twitch" };
+  await h.app.settings.loadAutoCookieStatus();
+  assert.equal(s.phase, session.PHASE.ADOPTED);
+  assert.equal(s.platform, "twitch", "the adopted setup kept the platform the server changed");
+  assert.equal(h.el("auto-cookie-setup-dialog").label, "Setup: Twitch");
+  assert.equal(result(h), "", "the old setup's messages stayed");
+
+  // An unnamed platform is no change.
+  status = { setupInProgress: true, availableBrowsers: [], needsManualRelogin: {} };
+  await h.app.settings.loadAutoCookieStatus();
+  assert.equal(s.platform, "twitch");
+});
+
+// Only an ADOPTED session re-adopts: one this page started keeps its own
+// platform whatever the status says.
+test("a setup this page started keeps its platform on a status load", { skip }, async () => {
+  let status = { setupInProgress: false, availableBrowsers: [], needsManualRelogin: {} };
+  const h = await app({ "GET /api/cookies/auto-status": () => status });
+  await h.app.settings.startAutoCookieSetup("youtube");
+  status = { ...youtubeStatus(), setupPlatform: "twitch" };
+  await h.app.settings.loadAutoCookieStatus();
+  const s = h.app.cookieSetup;
+  assert.equal(s.phase, session.PHASE.ACTIVE);
+  assert.equal(s.platform, "youtube");
+  assert.ok(s.holdsSlot());
+});
