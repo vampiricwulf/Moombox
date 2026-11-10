@@ -15,13 +15,25 @@
 #
 # It ends with `go build ./...` as proof. Run it from anywhere inside the
 # repository. It deletes nothing and refuses a branch or directory that
-# exists. When the main checkout has no blobs to copy, it says so: fetch them
+# exists. When the main checkout has no blobs to copy, or one it copies is an
+# empty stand-in, it says so: fetch them
 # there first (CLAUDE.md, "BotGuard sidecar embed prerequisites"), or run
 # embed-standins.sh in the worktree for compile-only work.
 #
 # The sidecar's own `npm test` needs `npm ci && node build.mjs` in the
 # worktree's bgutil-sidecar/; this script leaves that to whoever needs it.
 set -euo pipefail
+
+case ${1:-} in
+-h | --help)
+	sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p;}' "$0" >&2
+	exit 2
+	;;
+-*)
+	echo "new-worktree.sh: a branch name cannot start with -" >&2
+	exit 2
+	;;
+esac
 
 [ "$#" -ge 1 ] && [ "$#" -le 2 ] || {
 	echo "usage: new-worktree.sh <branch> [<start-point>]" >&2
@@ -47,6 +59,11 @@ while read -r f; do
 	[ -n "$f" ] || continue
 	mkdir -p "$wt/$(dirname "$f")"
 	cp -- "$f" "$wt/$f"
+	case $f in
+	internal/bgutils/embed/*)
+		[ -s "$f" ] || echo "new-worktree.sh: $f is an empty stand-in in the main checkout; replace it there and here before building anything to run" >&2
+		;;
+	esac
 	copied=$((copied + 1))
 done <<<"$(git ls-files --others --ignored --exclude-standard -- internal/bgutils/embed/ internal/cipher/testdata/)"
 echo "copied $copied ignored files (embed blobs, cipher fixtures)"
