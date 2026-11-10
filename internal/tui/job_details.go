@@ -345,6 +345,15 @@ type MuxGapEntry struct {
 	Reason string
 }
 
+// UnusedRecordingEntry is a kept recording the archive was not made from, as
+// the TUI shows it: internal/worker's UnusedRecording re-declared, as
+// AsideEntry is.
+type UnusedRecordingEntry struct {
+	Name string
+	Path string
+	Size int64
+}
+
 // AsideSummary is one job's staging directory as the details panel reads it.
 type AsideSummary struct {
 	Asides          []AsideEntry
@@ -353,6 +362,10 @@ type AsideSummary struct {
 	// (worker.ScanMuxGaps) — the only account of it once the job's in-memory
 	// log is gone.
 	MuxGaps []MuxGapEntry
+	// UnusedRoot is the recording a Finished job's staging root still holds
+	// that the archive was not made from (worker.ScanUnusedRoot, owner ruling
+	// R-E1); nil when there is none.
+	UnusedRoot *UnusedRecordingEntry
 }
 
 // sameAs reports whether two summaries would render identically, so SetAsides
@@ -360,6 +373,9 @@ type AsideSummary struct {
 // also runs on every JobsUpdateMsg.
 func (s AsideSummary) sameAs(other AsideSummary) bool {
 	if s.KeptChatSidecar != other.KeptChatSidecar || len(s.Asides) != len(other.Asides) || len(s.MuxGaps) != len(other.MuxGaps) {
+		return false
+	}
+	if (s.UnusedRoot == nil) != (other.UnusedRoot == nil) || (s.UnusedRoot != nil && *s.UnusedRoot != *other.UnusedRoot) {
 		return false
 	}
 	for i := range s.Asides {
@@ -890,6 +906,24 @@ func (m *JobDetailsModel) buildRows() {
 		}
 	}
 
+	// === Kept Recording ===
+	// A recording the staging root still holds that the archive was not made
+	// from (worker.ScanUnusedRoot, owner ruling R-E1): the from-the-start
+	// download beside a job that finalized as parts, or a second recording
+	// beside the one a single-file finalize muxed. It keeps the staging dir
+	// with no age rule and can be the longer copy. The same line the
+	// dashboard's dialog shows, with the path wrapped beneath it.
+	if u := m.asides.UnusedRoot; u != nil {
+		m.rows = append(m.rows, detailRow{kind: rowSeparator})
+		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Kept Recording"})
+		for _, line := range wrapText(unusedRecordingLine(u.Name, u.Size), m.blockWrapWidth()) {
+			m.rows = append(m.rows, detailRow{kind: rowField, value: line})
+		}
+		for _, line := range wrapText(u.Path, m.blockWrapWidth()) {
+			m.rows = append(m.rows, detailRow{kind: rowField, value: line})
+		}
+	}
+
 	// === Description ===
 	if j.Description != "" && !m.hideDescription {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
@@ -1383,4 +1417,11 @@ func wrapText(text string, maxW int) []string {
 		}
 	}
 	return lines
+}
+
+// unusedRecordingLine is the one line both details views show for a kept
+// recording the archive was not made from (owner ruling R-E1). The
+// dashboard's copy is unusedRecordingText in web/public/modules/utils.js.
+func unusedRecordingLine(name string, size int64) string {
+	return fmt.Sprintf("Kept recording not in the archive: %s (%s)", name, formatFileSize(size))
 }

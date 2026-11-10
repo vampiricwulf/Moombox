@@ -331,3 +331,42 @@ func unusedRootRecording(db *database.Database, jobID, stagingDir string) string
 	}
 	return wholeFile
 }
+
+// UnusedRecording is a recording a Finished job's staging root still holds
+// that its archive was not made from, as GET /api/jobs/{id} and the TUI's
+// details panel show it (owner ruling R-E1). It keeps the job's staging with
+// no age rule (keepStagingForUnusedRoot) and can be the longer copy, so both
+// UIs name it; the finalize's Warn line, the only other account, lives in the
+// in-memory job log and is gone after a restart.
+type UnusedRecording struct {
+	// Name is the file's base name.
+	Name string `json:"name"`
+	// Path is the file in staging.
+	Path string `json:"path"`
+	// Size is that one file's size in bytes. A separate audio file beside a
+	// video (audio_stream, audio.m4a) is not counted.
+	Size int64 `json:"size"`
+}
+
+// ScanUnusedRoot reports the recording in a Finished job's staging root that
+// its finalize did not use (unusedRootRecording), or nil when there is none.
+// Takes the staging base as ScanAsides does.
+//
+// Finished rows only. On any other row the answer would be false: an active
+// job's root recording is the one in use, and a job that ended in Error or
+// Cancelled has no archive for the recording to be missing from. A file that
+// is gone by the time it is sized answers nil.
+func ScanUnusedRoot(db *database.Database, stagingBase string, job *database.Job) *UnusedRecording {
+	if db == nil || job == nil || job.Status != database.StatusFinished {
+		return nil
+	}
+	path := unusedRootRecording(db, job.ID, filepath.Join(stagingBase, job.ID))
+	if path == "" {
+		return nil
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return nil
+	}
+	return &UnusedRecording{Name: filepath.Base(path), Path: path, Size: fi.Size()}
+}

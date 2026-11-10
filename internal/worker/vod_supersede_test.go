@@ -534,3 +534,60 @@ func TestVodClaimCarriesPartZeroMuxGapRecord(t *testing.T) {
 		t.Errorf("part 0's staged original, muxed with a gap, is gone or unshielded after the VOD finalize (exists %v)", fileExists(moved))
 	}
 }
+
+// TestScanUnusedRootNamesTheKeptRecording: the recording a Finished job's
+// staging root holds beside the one its finalize muxed is reported with its
+// name, path and size — what both details views show (owner ruling R-E1).
+// A job that is not Finished, or has no such recording, answers nil.
+//
+// Mutants this kills:
+//   - dropping the Finished gate: the Downloading row reports its own
+//     in-use download as unused.
+//   - reporting the staging dir, or a zero size: the path and size checks.
+func TestScanUnusedRootNamesTheKeptRecording(t *testing.T) {
+	db := openTestDB(t)
+	base := t.TempDir()
+	add := func(id string, status database.JobStatus, files map[string]int) *database.Job {
+		t.Helper()
+		if _, err := db.AddJob(&database.Job{ID: id, VideoID: id, Title: id, Platform: "youtube", Status: status}); err != nil {
+			t.Fatalf("AddJob(%s): %v", id, err)
+		}
+		dir := filepath.Join(base, id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, size := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), make([]byte, size), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		j, err := db.GetJob(id)
+		if err != nil || j == nil {
+			t.Fatalf("GetJob(%s): %v", id, err)
+		}
+		return j
+	}
+	both := map[string]int{"video_stream": 16, "audio_stream": 4, "video.mp4": 96, "audio.m4a": 8}
+
+	got := ScanUnusedRoot(db, base, add("kept", database.StatusFinished, both))
+	want := filepath.Join(base, "kept", "video.mp4")
+	if got == nil {
+		t.Fatal("ScanUnusedRoot = nil for a Finished job whose root holds a whole-file download beside the capture it muxed")
+	}
+	if got.Name != "video.mp4" || got.Path != want || got.Size != 96 {
+		t.Errorf("ScanUnusedRoot = %+v, want video.mp4 at %s, 96 bytes", *got, want)
+	}
+
+	if got := ScanUnusedRoot(db, base, add("active", database.StatusDownloading, both)); got != nil {
+		t.Errorf("a Downloading job reports %+v; its root recording is the one in use", *got)
+	}
+	if got := ScanUnusedRoot(db, base, add("failed", database.StatusError, both)); got != nil {
+		t.Errorf("an Error job reports %+v; it has no archive for the recording to be missing from", *got)
+	}
+	if got := ScanUnusedRoot(db, base, add("plain", database.StatusFinished, map[string]int{"video.mp4": 96, "audio.m4a": 8})); got != nil {
+		t.Errorf("a Finished job with one recording reports %+v", *got)
+	}
+	if got := ScanUnusedRoot(db, base, nil); got != nil {
+		t.Errorf("a nil job reports %+v", *got)
+	}
+}
