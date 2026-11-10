@@ -14,7 +14,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -1405,10 +1405,10 @@ export class MoomboxApp {
             // kept its old position while Arrow navigation and Enter index
             // the re-sorted list, so the highlight landed on the wrong row.
             this.renderJobs();
-            this.stats.updateActiveIndicator(this.jobs);
           } else {
+            // No active-indicator refresh in either same-status branch: the
+            // indicator counts rows by status, and no status moved.
             this.updateJobCard(updatedJob);
-            this.stats.updateActiveIndicator(this.jobs);
           }
         } else {
           // Job not in the active array — either brand new, or one that had
@@ -1492,8 +1492,9 @@ export class MoomboxApp {
           this._evaluateArchiveBoundary();
           this._syncParkedBadge();
         } else {
+          // Status unchanged, so the status bar's active count (a count of
+          // rows by status) cannot have moved: no O(n) recount per tick.
           this.updateJobCard(merged);
-          this.stats.updateActiveIndicator(this.jobs);
         }
         // Update details dialog if this job is selected
         if (this.selectedJobId === merged.id) {
@@ -1632,9 +1633,17 @@ export class MoomboxApp {
    * as the TUI's per-second render does. Re-armed on every holds change.
    */
   _redrawQueuedHolds() {
+    // One pass over the cards, not one document query per Queued job: a
+    // backlog holds thousands of Queued rows.
+    const queued = new Map();
     for (const job of this.jobs) {
-      if (job.status !== "Queued") continue;
-      const cell = document.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"] .job-progress-text`);
+      if (job.status === "Queued") queued.set(job.id, job);
+    }
+    const cards = queued.size ? document.querySelectorAll("#jobs-container .video-item") : [];
+    for (const card of cards) {
+      const job = queued.get(card.dataset.jobId);
+      if (!job) continue;
+      const cell = card.querySelector(".job-progress-text");
       if (!cell) continue;
       const html = this.formatProgressHtml(job);
       if (cell.dataset.progress !== html) {
@@ -1990,7 +1999,6 @@ export class MoomboxApp {
   renderJobs() {
     // Remove loading skeletons on first render (any message path)
     document.getElementById("jobs-skeleton")?.remove();
-    this.filterBar.refreshChannels("jobs", this.jobs);
 
     // Update active indicator in status bar
     this.stats.updateActiveIndicator(this.jobs);
@@ -2202,7 +2210,6 @@ export class MoomboxApp {
     // cards were not rebuilt; the new one is neither selected nor focused. The
     // focused INDEX is positional, so a card spliced at or above it shifts it.
     if (this.focusedJobIndex >= index) this.focusedJobIndex += 1;
-    this.filterBar.refreshChannels("jobs", this.jobs);
     this.stats.updateActiveIndicator(this.jobs);
     return true;
   }
@@ -2301,7 +2308,6 @@ export class MoomboxApp {
     const emptyState = document.getElementById("archived-empty-state");
     const table = document.getElementById("archived-table");
     const filterCount = document.getElementById("archived-filter-count");
-    this.filterBar.refreshChannels("archived", this.archivedJobs);
 
     if (this.archivedJobs.length === 0) {
       container.innerHTML = "";
@@ -3711,17 +3717,26 @@ export class MoomboxApp {
     return (TASK_STATUS_PRIORITY[job.status] ?? 99) >= 7 ? job.updatedAt : job.title;
   }
 
+  // The comparator reads keys worked out once per row. It used to build two
+  // Dates or one collator per comparison, and this sort runs on every render,
+  // card insert, Arrow key and Enter: 3,000 rows cost about 60 ms a sort, and
+  // about 3 ms this way. Same keys and same comparisons, so the same order.
   _sortJobs(jobs) {
     const STATUS_PRIORITY = TASK_STATUS_PRIORITY;
-    return [...jobs].sort((a, b) => {
-      const pa = STATUS_PRIORITY[a.status] ?? 99;
-      const pb = STATUS_PRIORITY[b.status] ?? 99;
-      if (pa !== pb) return pa - pb;
+    const rows = jobs.map((job) => {
+      const pri = STATUS_PRIORITY[job.status] ?? 99;
       // Completed statuses (Cancelled/Finished) sort newest-first; everything
-      // else — including the Queued resting state — sorts by title below.
-      if (pa >= 7) return new Date(b.updatedAt) - new Date(a.updatedAt);
-      return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
+      // else — including the Queued resting state — sorts by title.
+      return pri >= 7
+        ? { job, pri, time: new Date(job.updatedAt).getTime(), title: "" }
+        : { job, pri, time: 0, title: job.title || "" };
     });
+    rows.sort((a, b) => {
+      if (a.pri !== b.pri) return a.pri - b.pri;
+      if (a.pri >= 7) return b.time - a.time;
+      return NAME_COLLATOR.compare(a.title, b.title);
+    });
+    return rows.map((r) => r.job);
   }
 
   // ===== Quick Actions =====

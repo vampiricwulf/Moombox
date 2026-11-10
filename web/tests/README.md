@@ -97,6 +97,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `setup-wizard.test.mjs` | the first-run wizard's Finish: the address it redirects the tab to after the restart |
 | `sidecar-warning.test.mjs` | the header warning while the BotGuard sidecar is down |
 | `stats-storage.test.mjs` | the Stats tab's storage breakdown, Cancelled included |
+| `tasks-incremental.test.mjs` | the Tasks list's cheap paths against a full rebuild: the sort's precomputed keys, the channel list, one-card removal and re-placement, and the hidden-tab repaint |
 | `trimmer.test.mjs` | the trim dialog's failure states and keyboard reach |
 | `twitch-urls.test.mjs` | `extractTwitchTarget` against the shared Twitch URL table (`internal/utils/testdata/twitch_urls.json`), and the Add dialog refusing clips and lists |
 | `update-check-debounce.test.mjs` | a debounced update check reports the wait, not "Up to date" |
