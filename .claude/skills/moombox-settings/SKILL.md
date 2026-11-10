@@ -49,6 +49,7 @@ SomeSetting string `toml:"some_setting" json:"some_setting"`
 - Add `fieldDef` to the appropriate section with type (`fieldText`, `fieldNumber`, `fieldToggle`, or `fieldCycle`)
 - Add loading logic in `loadSettingsValues()` — for FlexDuration use `.Minutes()` or `.Days()`, for pointers default to sensible value when nil
 - Add the field's check to `validateSettingsValues()` (a FlexDuration goes in its float table, whose parsed value lands in `settingsParsed`) and its case to `writeSettingsField()` — for FlexDuration wrap back: `FlexDuration{Value: p.flex[key]}`, for booleans check `== "Yes"`. A save writes only the fields the operator edited, over the live config (`applyValues()`), so a field with no write case is silently never saved; `TestEverySettingsFieldIsWritable` fails for one
+- The field is drawn below 60x20 too, by the bare form (`internal/tui/settings_bare.go`), from the same `fieldDef`: nothing to add there, but keep its label distinct from its section's other labels in their first twenty cells (`TestBareSettingsLabelsStayDistinct`), and write its `help` so the first 30 cells say what matters, since that is all a 30x6 terminal shows of it
 
 ### 8. Hot-Reload (if runtime-changeable)
 Nine callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go`) support hot-reload; everything else requires restart:
