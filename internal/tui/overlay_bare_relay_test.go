@@ -26,7 +26,7 @@ var relayLong = "https://www.youtube.com/watch?v=" + strings.Repeat("abcdefghij"
 // relayCursorCell reports whether the focused input's cursor cell (the one
 // reverse-video cell of the frame) is on screen.
 func relayCursorCell(frame string) bool {
-	return strings.Contains(frame, "\x1b[7m") || strings.Contains(frame, "[7;")
+	return strings.Contains(frame, "\x1b[7m") || strings.Contains(frame, "\x1b[7;")
 }
 
 // relayTo sends the sizes one after the other, drawing a frame at each as the
