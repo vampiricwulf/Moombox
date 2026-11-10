@@ -221,6 +221,18 @@
                     <div id="jobs-container" role="rowgroup">
                         <!-- Jobs will be rendered here -->
                     </div>
+                    <!-- Shown in place of the skeleton when the page loads over HTTP
+                         but its WebSocket is refused (app.js _syncWsNotice). -->
+                    <div id="jobs-ws-notice" role="status" hidden>
+                        <sl-alert variant="warning" open>
+                            <sl-icon slot="icon" name="wifi-off"></sl-icon>
+                            <strong>Live updates cannot connect.</strong>
+                            This page loaded, but the WebSocket connection that carries the job list is being refused.
+                            If Moombox is behind a reverse proxy, the proxy is probably not forwarding WebSocket upgrades:
+                            see "Reverse proxy with HTTPS" in the README for the lines nginx needs.
+                            Moombox keeps retrying, and the list appears as soon as it connects.
+                        </sl-alert>
+                    </div>
                     <div id="jobs-skeleton">
                         <div class="skeleton-row">
                             <div><sl-skeleton effect="sheen" style="width:100%;height:4.5rem;border-radius:var(--sl-border-radius-medium)"></sl-skeleton></div>

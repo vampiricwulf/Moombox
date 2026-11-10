@@ -35,6 +35,11 @@ const TASK_STATUS_PRIORITY = {
  * re-tried, and the operator can log in again in another tab.
  */
 const SESSION_RECHECK_MS = 30000;
+// How many upgrades in a row must be refused, each with the server answering
+// over HTTP, before a page that has never connected says so in the Tasks
+// panel (owner ruling R-B3). One or two is what a restart behind a healthy
+// proxy looks like; three is about four seconds of backoff.
+const WS_REFUSED_NOTICE_AFTER = 3;
 // How many Archived cards one draw adds. The whole archived list is held in
 // memory (the filter, Select All and the details lookup read all of it); only
 // the cards are bounded, because each one is a dozen Shoelace elements and a
@@ -73,6 +78,12 @@ export class MoomboxApp {
     this.reconnectAttempts = 0;
     /** One of ConnState; written only by _setConnState. */
     this._connState = ConnState.CONNECTING;
+    // What the Tasks panel's "live updates cannot connect" notice is derived
+    // from: whether any socket of this page has opened, and how many upgrades
+    // in a row were refused while HTTP answered. _syncWsNotice is the only
+    // writer of the notice itself.
+    this._wsEverOpened = false;
+    this._wsRefusedReachable = 0;
     this.autoCookieReloginRequired = null;
     // Tri-state; see loadStatus. null = the server has no opinion.
     this.sidecarHealthy = null;
@@ -1100,6 +1111,9 @@ export class MoomboxApp {
     this.ws.onopen = () => {
       console.log("WebSocket connected");
       opened = true;
+      this._wsEverOpened = true;
+      this._wsRefusedReachable = 0;
+      this._syncWsNotice();
       const isReconnect = this.reconnectAttempts > 0;
       this.reconnectAttempts = 0;
       this._lastPong = Date.now();
@@ -1155,11 +1169,16 @@ export class MoomboxApp {
         return;
       }
       // Closed before it opened: one probe tells an expired session from a
-      // server that is down or restarting.
-      this._probeSession().then((unauthorized) => {
+      // server that is down or restarting, and both from a server that
+      // answers HTTP and refuses only the upgrade.
+      this._probeSession().then((answer) => {
         // A newer socket (a manual connect) owns the connection now.
         if (this.ws !== ws) return;
-        if (unauthorized) this._holdUnauthorized(ws);
+        // Refusals count only in a row: an answer that is not "reachable"
+        // starts again, so a restart is never added to a proxy fault.
+        this._wsRefusedReachable = answer === "reachable" ? this._wsRefusedReachable + 1 : 0;
+        this._syncWsNotice();
+        if (answer === "unauthorized") this._holdUnauthorized(ws);
         else this.scheduleReconnect();
       });
     };
@@ -1201,9 +1220,9 @@ export class MoomboxApp {
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
-      this._probeSession().then((unauthorized) => {
+      this._probeSession().then((answer) => {
         if (this.ws !== ws) return;
-        if (unauthorized) this._holdUnauthorized(ws);
+        if (answer === "unauthorized") this._holdUnauthorized(ws);
         else this.connectWebSocket();
       });
     }, SESSION_RECHECK_MS);
@@ -1215,18 +1234,44 @@ export class MoomboxApp {
    * the same AuthMiddleware as the upgrade, so a local peer is waived exactly
    * as it is — says whether the session is gone. It goes through the wrapped
    * fetch, whose 401 handling reloads to the login page; there is no second
-   * 401 path here. Resolves true for a 401, false for anything else,
-   * including a server that cannot be reached (that is a plain backoff,
-   * never a reload).
-   * @returns {Promise<boolean>}
+   * 401 path here. Resolves "unauthorized" for a 401, "reachable" for a
+   * success, and "unreachable" for anything else: a server that cannot be
+   * reached, or a proxy answering for one that is down (a 502). Only
+   * "unauthorized" stops the retries; the other two are a plain backoff,
+   * never a reload, and differ only in what _syncWsNotice makes of them.
+   * @returns {Promise<"unauthorized"|"reachable"|"unreachable">}
    */
   async _probeSession() {
     try {
       const response = await fetch("/api/status");
-      return response.status === 401;
+      if (response.status === 401) return "unauthorized";
+      return response.ok ? "reachable" : "unreachable";
     } catch {
-      return false;
+      return "unreachable";
     }
+  }
+
+  /**
+   * The only writer of the Tasks panel's #jobs-ws-notice, which stands in
+   * for the loading skeleton when live updates cannot connect (owner ruling
+   * R-B3). The job list arrives only over the WebSocket, so a page whose
+   * HTTP works and whose upgrade is refused — usually a reverse proxy that
+   * does not forward WebSocket upgrades — showed the skeleton for ever under
+   * a small "Reconnecting (n)" label.
+   *
+   * Derived, never stored: shown while no socket of this page has opened
+   * and WS_REFUSED_NOTICE_AFTER upgrades in a row were refused with the
+   * server answering over HTTP. The first open clears it and puts the
+   * skeleton back for the moment before initial_state draws the list. A
+   * page that has connected before keeps its list and the status bar's
+   * label instead. The retries go on underneath; no job list is loaded
+   * over HTTP, which would read as live.
+   */
+  _syncWsNotice() {
+    const show = !this._wsEverOpened && this._wsRefusedReachable >= WS_REFUSED_NOTICE_AFTER;
+    const notice = document.getElementById("jobs-ws-notice");
+    if (notice) notice.hidden = !show;
+    document.getElementById("jobs-skeleton")?.classList.toggle("ws-refused", show);
   }
 
   /**

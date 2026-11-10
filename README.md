@@ -338,6 +338,20 @@ Either append style works — extending the existing header line or adding
 a second `X-Forwarded-For` line (HAProxy's `option forwardfor`) — since
 Moombox reads every line of the header, not just the first.
 
+The proxy must also **forward WebSocket upgrades**: the dashboard's job
+list, progress and logs arrive over a WebSocket on the same address as the
+page. Caddy and Traefik forward upgrades by default. nginx does not; add
+these lines to the `location` block that proxies to Moombox:
+
+```nginx
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+```
+
+Without them the page loads but stays empty, and after a few attempts the
+Tasks tab says "Live updates cannot connect".
+
 The address to declare is the one **Moombox actually sees**, which is not
 always the proxy's own IP:
 

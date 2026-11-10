@@ -1188,6 +1188,18 @@ sl-dialog::part(footer) {
     display: contents;
 }
 
+/* The "live updates cannot connect" notice takes the skeleton's place while
+   it shows (app.js _syncWsNotice); the id+class also outranks the phone
+   layout's #jobs-skeleton rule below. */
+#jobs-skeleton.ws-refused {
+    display: none;
+}
+
+#jobs-ws-notice {
+    grid-column: 1 / -1;
+    margin: var(--sl-spacing-small) 0;
+}
+
 .skeleton-row {
     display: grid;
     grid-template-columns: subgrid;
