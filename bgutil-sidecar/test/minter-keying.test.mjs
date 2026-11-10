@@ -1,7 +1,7 @@
 // Minter keying / dedup tests for the BotGuard sidecar.
 //
 // Run with:  cd bgutil-sidecar && npm test
-// (equivalently: node --test --test-force-exit test/)
+// (every test/*.test.mjs file runs; a new one needs no entry anywhere)
 //
 // --test-force-exit is required: importing server.js starts its stdin loop,
 // and the resumed stdin handle below keeps the event loop alive after the
