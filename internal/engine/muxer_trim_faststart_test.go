@@ -96,17 +96,4 @@ func TestMultiSegmentTrimOutputIsFaststart(t *testing.T) {
 			t.Errorf("ffprobe output lacks %q:\n%s", want, text)
 		}
 	}
-
-	// MOOMBOX_TRIM_HASH_OUT names a file to write the clip's per-stream
-	// packet hashes to, for comparing two builds by hand.
-	if dst := os.Getenv("MOOMBOX_TRIM_HASH_OUT"); dst != "" {
-		hash, err := exec.Command(ffmpegPath, "-v", "error", "-i", out, "-map", "0", "-c", "copy",
-			"-f", "streamhash", "-hash", "md5", "-").Output()
-		if err != nil {
-			t.Fatalf("streamhash: %v", err)
-		}
-		if err := os.WriteFile(dst, append(hash, probe...), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
 }
