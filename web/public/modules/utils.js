@@ -7,8 +7,19 @@
  * sort and the filter bar's channel list. String.localeCompare(b, undefined,
  * { sensitivity: "base" }) gives the same order but builds a collator on
  * every call, which made a 3,000-row sort cost about twenty times this one.
+ *
+ * Built on the first comparison, not when the module loads: the Go tests
+ * that run this file (utilsVM, internal/web/routes) use a runtime with no
+ * Intl, and a load-time `new Intl.Collator` failed every one of them.
+ * `compare` reads no `this`, so it can be passed straight to Array.sort.
  */
-export const NAME_COLLATOR = new Intl.Collator(undefined, { sensitivity: "base" });
+let nameCollator = null;
+export const NAME_COLLATOR = {
+  compare(a, b) {
+    if (!nameCollator) nameCollator = new Intl.Collator(undefined, { sensitivity: "base" });
+    return nameCollator.compare(a, b);
+  },
+};
 
 /**
  * Format seconds into H:MM:SS or M:SS timestamp.

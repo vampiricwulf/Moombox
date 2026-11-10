@@ -126,6 +126,16 @@ globalThis.__makeApp = function (jobs, parkedBaseline) {
     // A same-status job_update re-renders when the row's sort key moved; the
     // title is the key for every status these rows use.
     _sortKey(job) { return job.title; },
+    // The single-card paths (web-2): each answers false, "no card drawn", so
+    // handleMessage falls back to the whole-list render it used before; the
+    // card shape is constant, so no update asks for a redraw.
+    _cardShape() { return "--"; },
+    _insertJobCard() { return false; },
+    _moveJobCard() { return false; },
+    _removeJobCard() { return false; },
+    // The Archived tab drops one row from its held list (web-1); nothing is
+    // archived here.
+    _removeArchivedJob() { return false; },
     settings: { refreshBackfillBadges() {} },
     stats: { updateActiveIndicator() {}, updateDiskIndicator() {} },
     // The Arc I controllers handleMessage reaches: the log panel, the details
