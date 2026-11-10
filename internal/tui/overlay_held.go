@@ -1,11 +1,14 @@
 package tui
 
-// An overlay kept open below the normal layout is covered by a notice
-// (heldOverlayView, owner ruling R-C6) and nothing it draws is on screen. Esc
-// is the one key that may still reach it, and only where it does nothing the
-// operator cannot foresee from the notice: where the overlay's own Esc would
-// quit Moombox, or answer a prompt that is not on screen, it is not
-// delivered, and the notice says so. The notice's Esc line and the handleKey
+// An overlay open in a terminal smaller than it needs (overlayDrawFor says
+// drawHeld: it has no bare form, or its current state needs more room) is
+// covered by a notice (heldOverlayView, owner ruling R-C6 as amended) and
+// nothing it draws is on screen. An overlay drawn bare is on screen, takes
+// every key itself and is not this file's business. Under the notice, Esc
+// is the one key that may still reach the overlay, and only where it does
+// nothing the operator cannot foresee from the notice: where the overlay's
+// own Esc would quit Moombox, or answer a prompt that is not on screen, it
+// is not delivered, and the notice says so. The notice's Esc line and the handleKey
 // size guard both ask heldEscFor, so what the screen says is what Esc does.
 
 // heldEscKind is what Esc does to an overlay kept under the notice.

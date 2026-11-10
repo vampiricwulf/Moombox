@@ -107,13 +107,17 @@ func TestCompactPrefixHintsShowEveryKey(t *testing.T) {
 	for _, size := range [][2]int{{30, 6}, {40, 10}, {59, 19}} {
 		for _, job := range compactJobs() {
 			for _, prefix := range []string{"a", "r", "o"} {
-				// The keys a full-size terminal offers that open no overlay.
+				// The keys a full-size terminal offers that are not
+				// refused at this size (chordCompact).
 				full := newCompactRig(t, 120, 40)
 				full.selectJob(t, job.ID)
 				fullHint := full.app.chordFeedback(prefix)
 				var want []string
 				for _, item := range full.app.buildMenuItems() {
-					if !strings.HasPrefix(item.Chord, strings.ToUpper(prefix)+" ") || item.Opens != "" {
+					if !strings.HasPrefix(item.Chord, strings.ToUpper(prefix)+" ") {
+						continue
+					}
+					if refused, _, _ := chordRefusedAt(item.Chord, size[0], size[1]); refused {
 						continue
 					}
 					if strings.Contains(fullHint, " "+item.Chord[2:]+" "+item.HintLabel) {
@@ -150,7 +154,7 @@ func TestCompactPrefixHintsShowEveryKey(t *testing.T) {
 	// At the floor the Request hint is too long with its labels.
 	r := newCompactRig(t, 30, 6)
 	r.press("r")
-	if got := r.app.feedback.msg; got != "Request: B C F V M U S P (3s)" {
+	if got := r.app.feedback.msg; got != "Request: B C F V M N U S P (3s)" {
 		t.Errorf("the Request hint at 30x6 = %q", got)
 	}
 	// With room for them the labels stay, and no key is parted from its
@@ -170,11 +174,11 @@ func TestCompactPrefixHintsShowEveryKey(t *testing.T) {
 	// and so does its second key.
 	r = newCompactRig(t, 40, 10)
 	r.press("e")
-	if r.app.feedback.msg != compactRefusal || r.app.chord.prefix != "e" {
+	if r.app.feedback.msg != compactRefusal(60, 20) || r.app.chord.prefix != "e" {
 		t.Errorf("E in the compact layout: feedback %q, armed prefix %q", r.app.feedback.msg, r.app.chord.prefix)
 	}
 	r.press("t")
-	if r.app.feedback.msg != compactRefusal || r.app.chord.prefix != "" || r.app.hasActiveOverlay() {
+	if r.app.feedback.msg != compactRefusal(60, 20) || r.app.chord.prefix != "" || r.app.hasActiveOverlay() {
 		t.Errorf("E T in the compact layout: feedback %q, armed prefix %q", r.app.feedback.msg, r.app.chord.prefix)
 	}
 }
@@ -217,7 +221,7 @@ func TestAnArmedPrefixHintFollowsTheLayout(t *testing.T) {
 		t.Fatal("premise lost: E did not arm")
 	}
 	r.app.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
-	if r.app.feedback.msg != compactRefusal || r.app.chord.prefix != "e" {
+	if r.app.feedback.msg != compactRefusal(60, 20) || r.app.chord.prefix != "e" {
 		t.Errorf("E across a shrink: feedback %q, armed prefix %q", r.app.feedback.msg, r.app.chord.prefix)
 	}
 	r.app.Update(tea.WindowSizeMsg{Width: 120, Height: 40})

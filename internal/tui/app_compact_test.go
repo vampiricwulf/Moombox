@@ -493,18 +493,39 @@ func TestCompactStatusLineShowsTheWarnings(t *testing.T) {
 }
 
 // chordCompact classifies every chord for the compact layout (owner ruling
-// R-C5): it works, or it is refused because it opens an overlay. A chord
-// added to buildMenuItems must be added here.
+// R-C5 as amended): "works" (it opens no overlay), "bare WxH" (it opens an
+// overlay that is drawn bare from W x H up, and is refused below that), or
+// "refused" (its overlay has no bare form and needs the normal layout,
+// 60x20). A chord added to buildMenuItems must be added here.
 var chordCompact = map[string]string{
 	"A A": "refused", "A Z": "refused", "A T": "refused", "A O": "refused", "A K": "refused", "A C": "refused",
 	"A R": "works", "A I": "works", "A M": "works", "A S": "works", "A X": "works", "A D": "works", "A W": "works", "A U": "works",
 	"R B": "works", "R C": "works", "R F": "works", "R V": "works", "R M": "works", "R U": "works", "R S": "works", "R P": "works",
-	"R N": "refused",
+	"R N": "bare 30x6",
 	"O F": "works", "O S": "works", "O W": "works", "O C": "works", "O G": "works",
 	"O L": "refused",
 	"E Y": "refused", "E L": "refused", "E I": "refused", "E T": "refused",
 	"F": "works", "Q Q": "works",
-	"`": "refused", "?": "refused",
+	"`": "refused", "?": "bare 30x6",
+}
+
+// chordBare reads a chordCompact class: the minimum of a "bare WxH" one.
+func chordBare(class string) (w, h int, ok bool) {
+	n, _ := fmt.Sscanf(class, "bare %dx%d", &w, &h)
+	return w, h, n == 2
+}
+
+// chordRefusedAt reports whether chordCompact says chord is refused in a
+// compact terminal of w x h, and the size its refusal names.
+func chordRefusedAt(chord string, w, h int) (refused bool, needW, needH int) {
+	class := chordCompact[chord]
+	if class == "works" {
+		return false, 0, 0
+	}
+	if bw, bh, ok := chordBare(class); ok {
+		return w < bw || h < bh, bw, bh
+	}
+	return true, minTermWidth, minTermHeight
 }
 
 func chordKeys(chord string) []string {
@@ -526,14 +547,47 @@ func TestEveryChordIsClassifiedForCompact(t *testing.T) {
 			// The one rule, asked directly: also the only check for the
 			// chords a test must not run (O S, O W and O G launch a browser).
 			r := newCompactRig(t, 40, 10)
-			if got := r.app.refusedForSize(item.Chord); got != (want == "refused") {
+			refused, needW, needH := chordRefusedAt(item.Chord, 40, 10)
+			if got := r.app.refusedForSize(item.Chord); got != refused {
 				t.Fatalf("refusedForSize(%q) = %v, classified %q", item.Chord, got, want)
 			}
-			if (item.Opens != "") != (want == "refused") {
+			if (item.Opens != "") != (want != "works") {
 				t.Fatalf("Opens = %q, classified %q", item.Opens, want)
 			}
+			if want == "works" {
+				return
+			}
+			// The class is the registry's bare answer for the overlay.
+			entry := overlayEntryNamed(item.Opens)
+			if entry == nil {
+				t.Fatalf("Opens %q is no overlayRegistry entry", item.Opens)
+			}
+			if w, h := entry.openNeed(); w != needW || h != needH {
+				t.Fatalf("classified %q, and overlay %q opens from %dx%d", want, item.Opens, w, h)
+			}
 
-			if want != "refused" {
+			if !refused {
+				// Typed: it opens, drawn bare, filling the terminal.
+				r = newCompactRig(t, 40, 10)
+				r.selectJob(t, "done")
+				r.press(chordKeys(item.Chord)...)
+				a := r.app
+				o := a.activeOverlay()
+				if o == nil || o.name != item.Opens {
+					t.Fatalf("did not open %q: feedback %q", item.Opens, a.feedback.msg)
+				}
+				if a.overlayDrawFor(o) != drawBare || a.screenHeld() {
+					t.Errorf("overlay %q is not drawn bare at 40x10", o.name)
+				}
+				lines := frameLines(a)
+				if len(lines) != 10 {
+					t.Errorf("the bare frame is %d rows, want 10", len(lines))
+				}
+				for i, line := range lines {
+					if w := ansi.StringWidth(line); w != 40 {
+						t.Errorf("row %d of the bare frame is %d cells, want 40", i, w)
+					}
+				}
 				return
 			}
 			// Typed: refused on the feedback line whatever is selected,
@@ -543,8 +597,8 @@ func TestEveryChordIsClassifiedForCompact(t *testing.T) {
 				r.selectJob(t, jobID)
 				r.press(chordKeys(item.Chord)...)
 				a := r.app
-				if a.feedback.msg != compactRefusal {
-					t.Errorf("on %s: feedback %q, want %q", jobID, a.feedback.msg, compactRefusal)
+				if a.feedback.msg != compactRefusal(needW, needH) {
+					t.Errorf("on %s: feedback %q, want %q", jobID, a.feedback.msg, compactRefusal(needW, needH))
 				}
 				if a.hasActiveOverlay() {
 					t.Errorf("on %s: overlay %q opened", jobID, a.activeOverlay().name)
@@ -552,14 +606,14 @@ func TestEveryChordIsClassifiedForCompact(t *testing.T) {
 				if a.chord.prefix != "" {
 					t.Errorf("on %s: the chord is still armed", jobID)
 				}
-				if last := ansi.Strip(frameLines(a)[a.height-1]); !strings.HasPrefix(last, compactRefusal) {
+				if last := ansi.Strip(frameLines(a)[a.height-1]); !strings.HasPrefix(last, compactRefusal(needW, needH)) {
 					t.Errorf("on %s: the refusal is not on the feedback line: %q", jobID, last)
 				}
 			}
 			// And by the route the action menu takes.
 			r = newCompactRig(t, 40, 10)
 			r.app.dispatchAction(item.Chord, r.app.taskList.GetJobByID("done"))
-			if r.app.hasActiveOverlay() || r.app.feedback.msg != compactRefusal {
+			if r.app.hasActiveOverlay() || r.app.feedback.msg != compactRefusal(needW, needH) {
 				t.Errorf("dispatchAction opened %v, feedback %q", r.app.hasActiveOverlay(), r.app.feedback.msg)
 			}
 		})
@@ -571,7 +625,7 @@ func TestEveryChordIsClassifiedForCompact(t *testing.T) {
 func TestCompactRefusesTheActionMenu(t *testing.T) {
 	r := newCompactRig(t, 40, 10)
 	r.press("m")
-	if r.app.hasActiveOverlay() || r.app.feedback.msg != compactRefusal {
+	if r.app.hasActiveOverlay() || r.app.feedback.msg != compactRefusal(60, 20) {
 		t.Errorf("M: overlay open = %v, feedback %q", r.app.hasActiveOverlay(), r.app.feedback.msg)
 	}
 	// At the normal size it opens.
@@ -832,7 +886,7 @@ func TestAnOverlayIsKeptAcrossAShrink(t *testing.T) {
 	for _, size := range [][2]int{{59, 20}, {60, 19}, {30, 6}} {
 		a.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
 		plain := plainFrame(a)
-		if !strings.HasPrefix(plain, heldOverlayNotice) {
+		if !strings.HasPrefix(plain, heldOverlayNotice(60, 20)) {
 			t.Fatalf("%v: no notice over the kept overlay:\n%s", size, plain)
 		}
 		for i, line := range frameLines(a) {
@@ -866,15 +920,15 @@ func TestAnOverlayIsKeptAcrossAShrink(t *testing.T) {
 	if a.addVideo.IsVisible() {
 		t.Fatal("Esc did not close the kept overlay")
 	}
-	if got := plainFrame(a); strings.Contains(got, heldOverlayNotice) || !strings.Contains(got, "ERR  A broken stream") {
+	if got := plainFrame(a); strings.Contains(got, heldOverlayNotice(60, 20)) || !strings.Contains(got, "ERR  A broken stream") {
 		t.Errorf("the compact list is not back:\n%s", got)
 	}
 	// Ctrl+C quits from under the notice too.
 	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	r.press("?")
+	r.press("a", "a")
 	a.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
-	if !a.help.IsVisible() {
-		t.Fatal("premise lost: help is not open")
+	if !a.addVideo.IsVisible() || !a.screenHeld() {
+		t.Fatal("premise lost: Add Video is not kept under the notice")
 	}
 	if _, cmd := a.handleKey(ctrlCMsg()); !isQuit(cmd) {
 		t.Error("Ctrl+C did not quit from under the notice")
@@ -953,8 +1007,11 @@ func TestProgressTickClassFollowsTheLayout(t *testing.T) {
 		t.Error("below the floor: the tick is still at the fast class")
 	}
 	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	r.press("?")
+	r.press("a", "a")
 	a.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	if !a.screenHeld() {
+		t.Fatal("premise lost: Add Video is not kept under the notice")
+	}
 	if a.wantsFastProgress() {
 		t.Error("a kept overlay under the notice: the tick is still at the fast class")
 	}
@@ -980,11 +1037,11 @@ func TestProgressTickClassFollowsTheLayout(t *testing.T) {
 }
 
 // heldEscBase is what Esc does to each overlay, as overlayCases opens it,
-// while it is kept under the notice. A new overlay must state its answer.
+// while it is kept under the notice. A new overlay must state its answer,
+// unless it is never held: one whose bare form draws at every compact size
+// (Help, Release Notes) has no row.
 var heldEscBase = map[string]heldEscKind{
 	"settings":       heldEscCloses,
-	"help":           heldEscCloses,
-	"release notes":  heldEscCloses,
 	"ffmpeg check":   heldEscOff, // its Esc quits Moombox
 	"setup wizard":   heldEscOff, // nothing to step back to on the mode choice
 	"action menu":    heldEscCloses,
@@ -1000,23 +1057,53 @@ var heldEscBase = map[string]heldEscKind{
 	"job log":        heldEscCloses,
 }
 
-// checkHeldEsc shrinks a to 40x10 over its open overlay and checks that the
-// notice's Esc line is want's, and that Esc then does what that line says
-// and never quits.
+// neverHeld reports whether o is drawn bare at every compact size, so no
+// notice ever covers it.
+func neverHeld(o *overlayEntry) bool {
+	return o.bare != nil && o.bare.now == nil &&
+		o.bare.openW <= compactMinWidth && o.bare.openH <= compactMinHeight
+}
+
+// heldSizeFor is a compact size at which o, in its current state, is kept
+// under the notice: 40x10 where that is too small for it, else one row (or
+// one column) less than it needs.
+func heldSizeFor(t *testing.T, a *App, o *overlayEntry) tea.WindowSizeMsg {
+	t.Helper()
+	w, h := a.overlayNeed(o)
+	switch {
+	case w > 40 || h > 10:
+		return tea.WindowSizeMsg{Width: 40, Height: 10}
+	case h > compactMinHeight:
+		return tea.WindowSizeMsg{Width: max(w, compactMinWidth), Height: h - 1}
+	case w > compactMinWidth:
+		return tea.WindowSizeMsg{Width: w - 1, Height: max(h, compactMinHeight)}
+	}
+	t.Fatalf("overlay %q needs %dx%d: no compact size holds it", o.name, w, h)
+	return tea.WindowSizeMsg{}
+}
+
+// checkHeldEsc shrinks a, over its open overlay, to a size that overlay is
+// held at (heldSizeFor) and checks that the notice names the size the
+// overlay needs, that its Esc line is want's, and that Esc then does what
+// that line says and never quits.
 func checkHeldEsc(t *testing.T, name string, a *App, visible func(*App) bool, want heldEscKind) {
 	t.Helper()
-	a.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
 	o := a.activeOverlay()
 	if o == nil || !visible(a) {
 		t.Fatalf("%s: premise lost: the overlay is not open", name)
 	}
+	held := heldSizeFor(t, a, o)
+	a.Update(held)
 	plain := plainFrame(a)
 	if !strings.Contains(plain, heldEscLine(want)) || !strings.Contains(plain, "Open: "+o.title) {
 		t.Errorf("%s: the notice does not say %q under its title:\n%s", name, heldEscLine(want), plain)
 	}
+	if !strings.HasPrefix(plain, heldOverlayNotice(a.overlayNeed(o))) {
+		t.Errorf("%s: the notice does not name the size the overlay needs:\n%s", name, plain)
+	}
 	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	before := a.View().Content
-	a.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	a.Update(held)
 
 	_, cmd := a.Update(namedKey("esc"))
 	if isQuit(cmd) {
@@ -1047,21 +1134,32 @@ func checkHeldEsc(t *testing.T, name string, a *App, visible func(*App) bool, wa
 // delivered (owner ruling R-C6).
 func TestHeldEscCensus(t *testing.T) {
 	cases := overlayCases(t)
-	if len(heldEscBase) != len(cases) {
-		t.Errorf("heldEscBase has %d overlays, overlayCases %d", len(heldEscBase), len(cases))
-	}
+	rows := 0
 	for i, c := range cases {
 		want, ok := heldEscBase[c.name]
+		if overlayRegistry[i].title == "" {
+			t.Errorf("overlay %q has no title for the notice", c.name)
+		}
+		if neverHeld(&overlayRegistry[i]) {
+			if ok {
+				t.Errorf("overlay %q is drawn bare at every compact size: it is never held, remove its heldEscBase row", c.name)
+			}
+			if overlayRegistry[i].heldEsc != nil {
+				t.Errorf("overlay %q is never held and still has a heldEsc func", c.name)
+			}
+			continue
+		}
+		rows++
 		if !ok {
 			t.Errorf("overlay %q: say in heldEscBase what Esc does to it under the notice", c.name)
 			continue
 		}
-		if overlayRegistry[i].title == "" {
-			t.Errorf("overlay %q has no title for the notice", c.name)
-		}
 		a := overlayTestApp(t)
 		c.open(a)
 		checkHeldEsc(t, c.name, a, c.visible, want)
+	}
+	if len(heldEscBase) != rows {
+		t.Errorf("heldEscBase has %d overlays, %d can be held", len(heldEscBase), rows)
 	}
 }
 

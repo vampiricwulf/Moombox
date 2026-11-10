@@ -8,8 +8,15 @@ import tea "charm.land/bubbletea/v2"
 type overlayEntry struct {
 	name string
 	// title is the overlay's name as the operator reads it, on the notice
-	// that covers it below the normal layout.
-	title   string
+	// that covers it in a terminal smaller than it needs.
+	title string
+	// bare is the overlay's bare form, drawn below the normal layout
+	// (overlay_bare.go): the smallest terminal it opens in, and what its
+	// current state needs when that is more. nil: it has none and needs the
+	// normal layout (60x20). The overlay's own View draws the bare form.
+	// Every overlay states its answer in overlayCases
+	// (overlay_order_test.go).
+	bare    *overlayBare
 	visible func(*App) bool
 	// view renders the overlay; the App wraps it in viewWithMode.
 	view func(*App) string
@@ -35,9 +42,9 @@ type overlayEntry struct {
 	// in overlay_order_test.go states the answer for every overlay.
 	liveProgress func(*App) bool
 	// heldEsc reports what Esc does to the overlay, right now, while it is
-	// kept under the notice below the normal layout (overlay_held.go). nil:
-	// its Esc closes it from every state. The census is
-	// TestHeldEscCensus (app_compact_test.go).
+	// kept under the notice in a terminal smaller than it needs
+	// (overlay_held.go). nil: its Esc closes it from every state. The census
+	// is TestHeldEscCensus (app_compact_test.go).
 	heldEsc func(*App) heldEscKind
 }
 
@@ -68,6 +75,7 @@ func init() {
 		{
 			name:       "help",
 			title:      "Help",
+			bare:       &overlayBare{openW: compactMinWidth, openH: compactMinHeight},
 			visible:    func(a *App) bool { return a.help.IsVisible() },
 			view:       func(a *App) string { return a.help.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.help.UpdateViewport(msg) },
@@ -77,6 +85,7 @@ func init() {
 		{
 			name:       "release notes",
 			title:      "Release Notes",
+			bare:       &overlayBare{openW: compactMinWidth, openH: compactMinHeight},
 			visible:    func(a *App) bool { return a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() },
 			view:       func(a *App) string { return a.releaseNotesPopup.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.releaseNotesPopup.Update(msg) },

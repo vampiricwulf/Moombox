@@ -147,19 +147,21 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if a.screenHeld() {
 		return a, nil
 	}
-	if a.layoutMode() == layoutCompact {
-		return a.handleCompactMouse(msg)
-	}
 
 	// The overlay on top takes the mouse — the same one a key would reach
 	// (the registry order: overlays.go). One with no mouse handler
 	// swallows it; the handlers above scroll or move a cursor on the wheel
-	// and leave a click alone.
+	// and leave a click alone. Ahead of the compact layout's own mouse: an
+	// overlay drawn bare covers the task list, and a wheel notch over it
+	// must not move the list underneath.
 	if o := a.activeOverlay(); o != nil {
 		if o.mouse == nil {
 			return a, nil
 		}
 		return o.mouse(a, msg)
+	}
+	if a.layoutMode() == layoutCompact {
+		return a.handleCompactMouse(msg)
 	}
 
 	m := msg.Mouse()
