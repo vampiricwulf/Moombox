@@ -29,17 +29,9 @@ bash .github/scripts/local-gate.sh --full     # adds the node suites, go test ./
 bash .github/scripts/new-worktree.sh <branch> # .worktrees/<branch> with the embed blobs, cipher fixtures and web/tests deps
 ```
 
-`local-gate.sh` runs on the tree you are in, prints one PASS/FAIL line per gate and exits non-zero on a failure. Run one `--full` (or one `go test ./...`) at a time on a machine. On Windows every `go test` needs a `GOTMPDIR` outside `%TEMP%` (Defender quarantines test binaries built there) spelled with backslashes (tests that compare paths fail on a forward-slash temp root): from Git Bash, `export GOTMPDIR="$(cygpath -w <main checkout>/.superpowers/gotmp)"`. Both scripts set it when it is unset; nothing there is deleted unless you run `local-gate.sh --prune-gotmp`. Node suites: `NO_COLOR=1`, and `npm test` in `web/tests` or `bgutil-sidecar`.
+`local-gate.sh` runs on the tree you are in, prints one PASS/FAIL line per gate and exits non-zero on a failure. Run one `--full` (or one `go test ./...`) at a time on a machine. On Windows every `go test` needs a `GOTMPDIR` outside `%TEMP%` (Defender quarantines test binaries built there) spelled with backslashes (tests that compare paths fail on a forward-slash temp root): from Git Bash, `export GOTMPDIR="$(cygpath -w <main checkout>/.superpowers/gotmp)"`. Both scripts set it when it is unset; nothing there is deleted unless you run `local-gate.sh --prune-gotmp`. Node suites: `NO_COLOR=1`, and `npm test` in `web/tests` or `bgutil-sidecar`. A worktree without the embed blobs compiles over empty stand-ins (`.github/scripts/embed-standins.sh`); see "BotGuard sidecar embed prerequisites" for what a stand-in must never be used for.
 
 Runtime requires FFmpeg on PATH.
-
-### Local runs
-
-- **GOTMPDIR (Windows).** Before any `go test`, set `GOTMPDIR` to a directory outside `%TEMP%`, spelled with backslashes. From Git Bash: `export GOTMPDIR="$(cygpath -w <main checkout>/.superpowers/gotmp)"` (gitignored, shared by every worktree). Defender quarantines test binaries built under `%TEMP%`, and tests that compare paths fail when the temp root is spelled with forward slashes. The two scripts below set it themselves when it is unset.
-- **Gate.** `bash .github/scripts/local-gate.sh` runs what CI's `lint` job checks on the tree you are in, and no tests (`--quick`, the default). `--full` adds the node suites, `go test -count=1 ./...` and a race run. Run one `--full`, or one `go test ./...`, at a time on a machine: two full suites side by side time each other out.
-- **Worktree.** `bash .github/scripts/new-worktree.sh <branch> [<start-point>]` creates `.worktrees/<branch>` from main and copies in what git does not carry — the embed blobs and the cipher fixtures — runs `npm ci` in `web/tests`, and ends with `go build ./...`.
-- **Embed stand-ins vs real blobs.** `bash .github/scripts/embed-standins.sh` writes an empty file for each missing embed blob so every package loads. Stand-ins are for compiling, vetting and tests that never start the sidecar; never build a binary to run from them, and `internal/bgutils/embed`'s own tests fail on them. The real blobs come from the two steps under "BotGuard sidecar embed prerequisites", or from another checkout.
-- **Node suites.** In `web/tests`: `NO_COLOR=1 node --test --test-timeout=120000 ./*.test.mjs`.
 
 ### CI
 
