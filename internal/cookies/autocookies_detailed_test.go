@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -88,7 +87,7 @@ func TestRefreshDeclinePathsReportUnknown(t *testing.T) {
 		},
 		{
 			name:  "a refresh is already running",
-			setup: func(s *AutoCookieService) { s.refreshCmd = &exec.Cmd{} },
+			setup: func(s *AutoCookieService) { s.refresh.claim(refreshHolderRefresh) },
 		},
 		{
 			// A browser IS installed (so this is the browser path, not an

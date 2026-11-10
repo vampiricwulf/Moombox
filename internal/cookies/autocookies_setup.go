@@ -56,12 +56,13 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 		s.mu.Unlock()
 		return ErrSetupInProgress
 	}
-	if s.refreshCmd != nil {
+	if s.refresh.held() {
+		inProgress := s.refresh.inProgressError()
 		s.mu.Unlock()
-		return fmt.Errorf("please try again shortly: %w", ErrRefreshInProgress)
+		return fmt.Errorf("please try again shortly: %w", inProgress)
 	}
 	// Claim the slot inside this critical section (mirrors RefreshCookies'
-	// refreshCmd sentinel): browser detection, MkdirAll, and the icacls
+	// refresh-slot claim): browser detection, MkdirAll, and the icacls
 	// shell-out below take tens of milliseconds, and a second StartSetup
 	// passing the gate in that window would launch a second browser against
 	// the same profile and leak the first Job Object. The claim drops when

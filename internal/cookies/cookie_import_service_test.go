@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -525,7 +524,7 @@ func TestFlagManualReloginTouchesOnlyTheNamedPlatform(t *testing.T) {
 // not a new mutex over cookies.txt.
 //
 // Mutants:
-//   - drop the refreshCmd check -> err is nil, Wrote is true, and the file on
+//   - drop the refresh-slot check -> err is nil, Wrote is true, and the file on
 //     disk carries the paste that the pass is about to overwrite.
 //   - claim the slot but never release it -> the second half fails: every
 //     later import (and every refresh, and StartSetup) is refused forever.
@@ -536,7 +535,7 @@ func TestImportCookiesIsRefusedWhileARefreshHoldsTheSlot(t *testing.T) {
 
 	// The slot as RefreshCookiesDetailed claims it: a sentinel with no process.
 	s.mu.Lock()
-	s.refreshCmd = &exec.Cmd{}
+	s.refresh.claim(refreshHolderRefresh)
 	s.mu.Unlock()
 
 	res, err := s.ImportCookies(context.Background(), netscapeHeader+fakeYouTubeRows)
@@ -553,7 +552,7 @@ func TestImportCookiesIsRefusedWhileARefreshHoldsTheSlot(t *testing.T) {
 	// Releasing the slot lets the retry through, and the import releases the
 	// slot it claims.
 	s.mu.Lock()
-	s.refreshCmd = nil
+	s.refresh.release()
 	s.mu.Unlock()
 
 	res, err = s.ImportCookies(context.Background(), netscapeHeader+fakeYouTubeRows)
@@ -561,9 +560,9 @@ func TestImportCookiesIsRefusedWhileARefreshHoldsTheSlot(t *testing.T) {
 		t.Fatalf("the retry after the pass finished must succeed: res=%+v err=%v", res, err)
 	}
 	s.mu.Lock()
-	held := s.refreshCmd
+	held := s.refresh.held()
 	s.mu.Unlock()
-	if held != nil {
+	if held {
 		t.Error("ImportCookies did not release the refresh slot — every later refresh, setup and import would be refused for the life of the process")
 	}
 }
@@ -584,10 +583,8 @@ func TestImportCookiesIsRefusedWhileARefreshHoldsTheSlot(t *testing.T) {
 // another pass is the pre-existing single-flight and costs nothing, while a
 // pass declining behind an IMPORT is the new trade O-D bought.
 //
-// The holder is identified by the sentinel VALUE, not a new field:
-// importSlotSentinel is a package-level *exec.Cmd ImportCookies assigns in
-// place of a fresh literal, and killRefreshProcess only ever reads .Process,
-// which is nil for either one.
+// The holder is the refresh slot's own field (refreshSlot.holder), which
+// ImportCookies claims as refreshHolderImport.
 //
 // Driven through the REAL slot: the import is held inside its own pre-write
 // verification while the refresh runs, exactly as driveImportDuringRefresh does
@@ -596,7 +593,7 @@ func TestImportCookiesIsRefusedWhileARefreshHoldsTheSlot(t *testing.T) {
 // Mutants:
 //   - keep the decline at Debug -> no Info line is captured.
 //   - name "refresh pass" unconditionally -> the holder assertion fails.
-//   - claim a fresh &exec.Cmd{} in ImportCookies instead of the sentinel ->
+//   - claim the slot as refreshHolderRefresh in ImportCookies ->
 //     the holder reads "refresh pass" for an import, same failure.
 func TestADeclinedRefreshNamesTheHolderAtInfo(t *testing.T) {
 	const declineMsg = "skipping cookie refresh — the refresh slot is held"
@@ -684,10 +681,9 @@ func TestADeclinedRefreshNamesTheHolderAtInfo(t *testing.T) {
 		log := &captureLogger{}
 		s := NewAutoCookieService(dir, filepath.Join(dir, "cookies.txt"), NewCookieJar(), log)
 
-		// The slot as RefreshCookiesDetailed claims it: a fresh sentinel, not
-		// the import's package-level one.
+		// The slot as RefreshCookiesDetailed claims it.
 		s.mu.Lock()
-		s.refreshCmd = &exec.Cmd{}
+		s.refresh.claim(refreshHolderRefresh)
 		s.mu.Unlock()
 
 		if _, err := s.RefreshCookiesDetailed(context.Background()); err != nil {

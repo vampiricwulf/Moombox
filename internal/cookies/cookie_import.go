@@ -6,27 +6,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
-
-// importSlotSentinel is the value ImportCookies parks in AutoCookieService's
-// refreshCmd while it holds the refresh slot (owner decision O-D).
-//
-// It exists so a DECLINING refresh pass can name what is holding the slot in
-// one Info line without a second field to keep in step with the first: the
-// slot is claimed by exactly two kinds of caller, and pointer identity against
-// this one separates them. It is deliberately a bare *exec.Cmd, because the
-// only thing any reader of refreshCmd touches is .Process — nil here, nil in
-// the refresh path's own `&exec.Cmd{}`, so killRefreshProcess behaves
-// identically for both.
-//
-// SHARED, and it must be: a per-call value would be a different pointer and
-// the comparison would never hold. Nothing writes through it, and concurrent
-// imports cannot both hold the slot anyway — the second is refused before it
-// gets here.
-var importSlotSentinel = &exec.Cmd{}
 
 // prepareCookieImport validates an operator-supplied Netscape cookie file and
 // returns the exact text that must be written to cookies.txt.
@@ -340,7 +322,7 @@ type ImportResult struct {
 // read -> verify -> write gap is destroyed by that pass's merge of the
 // PRE-paste file, and the import answers "imported" while it happens; on the
 // recovery path the rows that replace it are the dead ones that raised the
-// alarm. Claiming the same refreshCmd sentinel RefreshCookiesDetailed and
+// alarm. Claiming the same refresh slot RefreshCookiesDetailed and
 // StartSetup already use makes the two mutually exclusive without introducing
 // a lock over cookies.txt — the no-lock property the Arc 8 ruling protects is
 // kept, and the answer is the one StartSetup already gives: "please try again
@@ -360,16 +342,10 @@ type ImportResult struct {
 // O-D was scoped to the refresh collision, which is the one that was
 // reproduced.
 //
-// A claim held here makes Stop()'s killRefreshProcess poll for
-// launchWindowKillBudget before giving up, exactly as it already does for a
-// refresh caught inside its launch window — a bounded shutdown delay, not a
-// new one.
-//
-// The sentinel it claims is importSlotSentinel rather than a fresh &exec.Cmd{},
-// and that is the whole of how a declining pass can say WHO holds the slot
-// (autocookies_refresh.go). No new field, and nothing else changes: the only
-// thing any reader of refreshCmd ever touches is .Process, which is nil on a
-// bare *exec.Cmd whichever one it is.
+// It claims the slot as refreshHolderImport, which is how a declining pass
+// names WHO holds it (autocookies_refresh.go), how a refused import or setup
+// says "cookie import in progress" (ErrImportInProgress), and why Stop()'s
+// killRefreshProcess does not wait on it: an import never launches a browser.
 //
 // The caller runs the auth re-check. Every gesture that can write cookies.txt
 // must end in one (Arc 10 R4) and this one has TWO callers: the Web import
@@ -384,17 +360,19 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 	// defer registered in the same breath, which is what makes that true for
 	// the panic exits as well as the returns.
 	s.mu.Lock()
-	if s.refreshCmd != nil {
+	if s.refresh.held() {
+		inProgress := s.refresh.inProgressError()
 		s.mu.Unlock()
-		// The same sentence StartSetup answers with for the same sentinel, so
-		// the two surfaces cannot drift; the Web route maps it to 409.
-		return ImportResult{}, fmt.Errorf("please try again shortly: %w", ErrRefreshInProgress)
+		// The same sentence StartSetup answers with for the same holder, so
+		// the two surfaces cannot drift; the Web route maps it to 409
+		// (ErrImportInProgress matches ErrRefreshInProgress).
+		return ImportResult{}, fmt.Errorf("please try again shortly: %w", inProgress)
 	}
-	s.refreshCmd = importSlotSentinel // claims the slot (see RefreshCookiesDetailed)
+	s.refresh.claim(refreshHolderImport) // see RefreshCookiesDetailed
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		s.refreshCmd = nil
+		s.refresh.release()
 		s.mu.Unlock()
 	}()
 

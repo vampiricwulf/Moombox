@@ -691,7 +691,10 @@ func TestCookieImportAnswers409WhileARefreshRuns(t *testing.T) {
 			"answered as a server fault or accepted into a file the pass is about to overwrite: %s",
 			rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "cookie refresh in progress") {
+	// The holder here is the first IMPORT, and since K43 the refusal names
+	// it (cookies.ErrImportInProgress, which still matches
+	// ErrRefreshInProgress and so still maps to 409).
+	if !strings.Contains(rec.Body.String(), "please try again shortly: cookie import in progress") {
 		t.Errorf("the refusal does not carry the sentinel's own sentence, so nothing tells the "+
 			"operator to retry: %s", rec.Body.String())
 	}

@@ -169,9 +169,8 @@ func (s *AutoCookieService) killSetupProcess() {
 var launchWindowPollSleep = time.Sleep
 
 func (s *AutoCookieService) killRefreshProcess() {
-	// RefreshCookies claims the slot with `s.refreshCmd = &exec.Cmd{}`
-	// (a sentinel with nil Process) before refreshFirefox/refreshChromium
-	// assigns the real cmd. A naive `Process == nil → bail` lets a Stop()
+	// RefreshCookies claims the slot (refreshHolderRefresh, no process)
+	// before refreshFirefox/refreshChromium publishes the real browser. A naive `Process == nil → bail` lets a Stop()
 	// during that window leak the real browser when it lands a moment later
 	// (audit reports/cookies.md #22). Poll briefly so the kill catches the
 	// real process once the launcher publishes it, but cap the wait so Stop()
@@ -179,18 +178,22 @@ func (s *AutoCookieService) killRefreshProcess() {
 	deadline := time.Now().Add(launchWindowKillBudget)
 	for {
 		s.mu.Lock()
-		cmd := s.refreshCmd
+		slot := s.refresh
 		s.mu.Unlock()
 
-		if cmd == nil {
+		switch {
+		case !slot.held():
 			return // launcher cleared the slot — nothing to kill
-		}
-		if cmd.Process != nil {
-			killProcessTree(cmd.Process)
+		case slot.holder == refreshHolderImport:
+			// An import launches no browser, so there is nothing to catch:
+			// waiting out the launch window on it only delayed shutdown.
+			return
+		case slot.proc != nil:
+			killProcessTree(slot.proc)
 			return
 		}
 		if !time.Now().Before(deadline) {
-			return // sentinel still in place — give up rather than block Stop()
+			return // claimed, no process yet — give up rather than block Stop()
 		}
 		launchWindowPollSleep(killProcessTreePollDelay)
 	}

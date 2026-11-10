@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"testing"
 )
 
@@ -27,7 +26,7 @@ func TestStartSetupReturnsSetupInProgressSentinel(t *testing.T) {
 // the user-facing message is still useful.
 func TestStartSetupReturnsRefreshInProgressSentinel(t *testing.T) {
 	s := NewAutoCookieService("", "", nil, nopAutoCookieLogger{})
-	s.refreshCmd = &exec.Cmd{} // simulate active refresh
+	s.refresh.claim(refreshHolderRefresh) // simulate active refresh
 
 	err := s.StartSetup("youtube")
 	if !errors.Is(err, ErrRefreshInProgress) {
@@ -46,14 +45,13 @@ func TestStartSetupReturnsRefreshInProgressSentinel(t *testing.T) {
 // own outer defer releases it.
 func TestRefreshCookiesRefusesWhileSlotHeld(t *testing.T) {
 	s := NewAutoCookieService("", "", nil, nopAutoCookieLogger{})
-	sentinel := &exec.Cmd{}
-	s.refreshCmd = sentinel // simulate an in-flight refresh (claim or tail)
+	s.refresh.claim(refreshHolderRefresh) // simulate an in-flight refresh (claim or tail)
 
 	ok, err := s.RefreshCookies(context.Background())
 	if ok || err != nil {
 		t.Fatalf("RefreshCookies while slot held = (%v, %v), want (false, nil) no-op", ok, err)
 	}
-	if s.refreshCmd != sentinel {
+	if s.refresh.holder != refreshHolderRefresh {
 		t.Error("second RefreshCookies must not clear the first refresh's slot claim")
 	}
 }

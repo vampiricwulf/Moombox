@@ -248,11 +248,8 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 		s.logger.Info("launching Firefox for cookie refresh", "platform", platform, "url", url)
 		cmd := exec.Command(browser.Path, "--new-instance", "--screenshot", tempScreenshot, "--profile", s.profileDir, url)
 		configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG + Setpgid (the group the reap counts); Windows: no-op (Job Object in runWithTimeout)
-		s.mu.Lock()
-		s.refreshCmd = cmd
-		s.mu.Unlock()
 		startTime := time.Now()
-		err := runWithTimeout(ctx, cmd, processTimeout, s.restoreRefreshSlot, s.logger)
+		err := runWithTimeout(ctx, cmd, processTimeout, s.publishRefreshProc, s.restoreRefreshSlot, s.logger)
 		elapsed := time.Since(startTime).Round(time.Millisecond)
 
 		rendered := browserRendered(tempScreenshot)
@@ -403,18 +400,26 @@ func refreshLooksImplausiblyFast(elapsed time.Duration, acted bool) bool {
 	return acted && elapsed < minPlausibleBrowserRefresh
 }
 
-// restoreRefreshSlot puts the claim SENTINEL back once the launched browser
-// process has been reaped.
+// publishRefreshProc names the launched Firefox (runWithTimeout's onStarted,
+// right after cmd.Start) as the process Stop may kill.
+func (s *AutoCookieService) publishRefreshProc(p *os.Process) {
+	s.mu.Lock()
+	s.refresh.publish(p)
+	s.mu.Unlock()
+}
+
+// restoreRefreshSlot withdraws the published process once the launched
+// browser process has been reaped, keeping the claim.
 //
 // Not nil: RefreshCookies still has its critical tail to run (merge → atomic
 // write → jar reload → auth verify → meta save), and clearing the slot here
 // would let a concurrent RefreshCookies or StartSetup launch a second browser
 // against the same profile mid-write. The outer defer in RefreshCookies
-// releases the slot for real. Identical reasoning, and identical three lines,
-// to refreshChromium's restore (autocookies_chromium.go).
+// releases the slot for real. Identical reasoning to refreshChromium's
+// restore (autocookies_chromium.go).
 //
-// The restore matters MORE than it looks: while the real cmd sits in the slot
-// with a reaped Process, killRefreshProcess would taskkill /F /T a PID
+// The restore matters MORE than it looks: while a reaped process stays
+// published, killRefreshProcess would taskkill /F /T a PID
 // Windows may already have recycled onto something else. Before the
 // drain-wait that window was ~200ms; the drain stretches it to the whole
 // launch budget.
@@ -424,7 +429,7 @@ func refreshLooksImplausiblyFast(elapsed time.Duration, acted bool) bool {
 // leaves the PID published.
 func (s *AutoCookieService) restoreRefreshSlot() {
 	s.mu.Lock()
-	s.refreshCmd = &exec.Cmd{}
+	s.refresh.unpublish()
 	s.mu.Unlock()
 }
 
@@ -1003,7 +1008,7 @@ func closeLaunchJob(job *processJob, logger interface {
 // timeout path once the post-kill wait sees cmd.Wait() return. It does NOT
 // fire when that wait times out in turn, because then the process may still be
 // alive and the published PID is the only handle on it.
-func runWithTimeout(ctx context.Context, cmd *exec.Cmd, timeout time.Duration, onLauncherReaped func(), logger interface {
+func runWithTimeout(ctx context.Context, cmd *exec.Cmd, timeout time.Duration, onStarted func(*os.Process), onLauncherReaped func(), logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
@@ -1028,6 +1033,11 @@ func runWithTimeout(ctx context.Context, cmd *exec.Cmd, timeout time.Duration, o
 		return err
 	}
 	logger.Debug("process started", "pid", cmd.Process.Pid)
+	// Published once the process exists — Stop's killRefreshProcess polls a
+	// held slot for it through the launch window.
+	if onStarted != nil {
+		onStarted(cmd.Process)
+	}
 
 	// Assign immediately after start so children are tracked from the beginning
 	if job != nil {
