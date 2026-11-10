@@ -89,6 +89,10 @@ type DownloadOrchestrator struct {
 	// ONE registry to both). ExecuteTwitch registers into it; cmd/moombox
 	// broadcasts through the worker's accessor. nil is inert.
 	twitchChats *twitchChatRegistry
+	// runChats is the worker's run-chat registry (runChatRegistry): every chat
+	// downloader this orchestrator builds is registered with its job's run.
+	// Nil on an orchestrator built on its own, which registers nothing.
+	runChats *runChatRegistry
 	// trims is the trim service both UIs use (DownloadWorkerDeps.TrimService),
 	// which the post-download trim runs through. It built a TrimService of its
 	// own, whose one-trim-per-job slot the shared one could not see: a

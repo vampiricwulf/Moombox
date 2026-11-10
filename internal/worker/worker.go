@@ -296,9 +296,12 @@ type DownloadWorker struct {
 	// cmd/moombox has an exported path to it without reaching through the
 	// orchestrator, which is otherwise entirely internal to this package.
 	twitchChats *twitchChatRegistry
-	streamProc  *StreamProcessor
-	notifier    notifications.Sender
-	logger      logger
+	// runChats is each running job's chat downloaders (runChatRegistry), the
+	// same registry the orchestrator and the stream processor register into.
+	runChats   *runChatRegistry
+	streamProc *StreamProcessor
+	notifier   notifications.Sender
+	logger     logger
 	// conn is the connectivity monitor (nil: always online), the one the
 	// scheduler and the orchestrator hold. processJob waits an outage out
 	// on it rather than failing a job whose fetch met one (outage_wait.go).
@@ -503,6 +506,12 @@ func NewDownloadWorker(
 	twitchChats := newTwitchChatRegistry()
 	orchestrator := NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, routedCs, pp, nm, conn)
 	orchestrator.twitchChats = twitchChats
+	// One registry again, three holders: the stream processor and the
+	// orchestrator register the chat downloaders a run builds, and the worker
+	// stops them where a run ends without their own teardown (stopRunChats).
+	runChats := newRunChatRegistry()
+	orchestrator.runChats = runChats
+	sp.runChats = runChats
 	orchestrator.trims = trims
 
 	w := &DownloadWorker{
@@ -514,6 +523,7 @@ func NewDownloadWorker(
 		scheduler:    sched,
 		orchestrator: orchestrator,
 		twitchChats:  twitchChats,
+		runChats:     runChats,
 		streamProc:   sp,
 		notifier:     nm,
 		logger:       logger,
@@ -1046,6 +1056,8 @@ func (w *DownloadWorker) confirmTwitchStreamInfo(ctx context.Context, login stri
 
 func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	defer func() {
+		// The run's chat entry ends with the run (runChatRegistry.release).
+		w.runChats.release(jobID)
 		w.queue.Complete(jobID)
 		// Every job exit funnels through here — Finished, Error, Cancelled,
 		// COOKIES? — and all of those drop out of the scheduler's M
@@ -1064,6 +1076,10 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	var job *database.Job
 	defer func() {
 		if r := recover(); r != nil {
+			// The chat first: the panic unwound past the orchestrator's own
+			// teardown, and a downloader left running would write
+			// "downloading" over the settle the record makes.
+			w.stopRunChats(jobID)
 			w.recordRunPanic(jobID, job, r)
 		}
 	}()
@@ -1765,10 +1781,10 @@ func (w *DownloadWorker) recordRunPanic(jobID string, job *database.Job, r any) 
 // does (owner rulings R-E1, R-E1a, R-H1): recordRunPanic and Start's recover
 // both write through it, so a run that panics mid-capture does not leave
 // "downloading" on its Error row. The settle
-// does not stop a
-// chat downloader the panic left running (the orchestrator's cleanup is an
-// explicit call, not a deferred one), and a downloader left running that way
-// can still write its own value (OnStart's "downloading") over the settle.
+// stops no chat downloader itself: processJob's recover stops the run's
+// (stopRunChats) before the record that comes here, since the orchestrator's
+// cleanup is an explicit call a panic unwinds past, and a downloader left
+// running wrote its own value (OnStart's "downloading") over the settle.
 func (w *DownloadWorker) writePanicError(jobID string, r any) {
 	if !w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
 		"status": database.StatusError,
@@ -1777,6 +1793,25 @@ func (w *DownloadWorker) writePanicError(jobID string, r any) {
 		return
 	}
 	w.settleErrorChat(jobID)
+}
+
+// stopRunChats stops the chat downloaders the job's current run built
+// (runChatRegistry.stop) and closes their "downloading" write, for the two
+// exits that end a run without an orchestrator's chat teardown having
+// necessarily run: a panic (processJob's recover — the teardown is explicit
+// calls a panic unwinds past) and a failure (setJobError). Ahead of the
+// Error write and settleErrorChat, so the settle is the last word. Guarded:
+// it runs inside a recover, and a downloader's Stop that panicked there
+// would lose the panic's own record.
+func (w *DownloadWorker) stopRunChats(jobID string) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.logger.Error("panic stopping a run's chat downloaders", "jobID", jobID, "panic", fmt.Sprint(r))
+		}
+	}()
+	if n := w.runChats.stop(jobID); n > 0 {
+		w.logger.Debug("stopped the run's chat downloaders", "jobID", jobID, "count", n)
+	}
 }
 
 // handleCancellation handles a cancelled/shutdown job.
@@ -2125,6 +2160,12 @@ func errorStage(errMsg string) string {
 }
 
 func (w *DownloadWorker) setJobError(job *database.Job, err error) {
+	// The run is over whichever way this failure is recorded: its chat
+	// downloaders are stopped first, ahead of the Error write and its
+	// settle, so none of them writes "downloading" back onto the row
+	// (stopRunChats). Most were stopped by the orchestrator's error arm
+	// already, and a second Stop is a no-op.
+	w.stopRunChats(job.ID)
 	// Give the slots back before the tail below (notifications, and an
 	// automatic cookie refresh that can take minutes), so the next download
 	// does not wait on it. Only the slots: the run stays registered until

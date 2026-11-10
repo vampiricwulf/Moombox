@@ -142,6 +142,9 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 	}
 
 	dl := chat.NewChatDownloader(opts)
+	// Registered with the run, so a panic or a failure stops it and closes
+	// its "downloading" write (runChatRegistry).
+	run := o.runChats.add(jobCtx.Job.ID, dl)
 	// The downloader's own diagnostics — the mode rule's sidecar refusal, the
 	// file-epoch adoption, API drift — are dropped on the floor unless a
 	// logger is assigned here (Arc J D6).
@@ -157,8 +160,12 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 
 	// Transition from "pending" -> "downloading" when chat actually starts (matches TS "start" event)
 	dl.OnStart = func(messageCount int, resuming bool) {
-		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-			"chat_status": database.ChatDownloading,
+		// Not once the run has stopped its chat: this is the downloader's
+		// goroutine, and the row may already hold the run's settle.
+		run.whileRunning(func() {
+			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+				"chat_status": database.ChatDownloading,
+			})
 		})
 		if resuming {
 			o.logger.Info("[Chat] Resuming chat download", "jobID", jobCtx.Job.ID, "messages", messageCount)

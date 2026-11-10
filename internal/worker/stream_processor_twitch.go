@@ -600,6 +600,10 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 				EmoteResolver: sp.tw.Emotes,
 			}, sp.logger)
 			result.TwitchVodChatDl = vodChatDl
+			// Registered with the run: a panic or a failure stops it
+			// (runChatRegistry). Its "downloading" write is ExecuteTwitch's own
+			// (startChat), on the run's goroutine, so it needs no gate.
+			sp.runChats.add(job.ID, vodChatDl)
 
 			// "pending" until ExecuteTwitch starts it (startChat writes
 			// "downloading"): a VOD still has the download-slot wait ahead of
@@ -798,6 +802,7 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 					sp.notifierSend, sp.twitchAuthLossReporter, job, chatChannel),
 				EmoteResolver: sp.tw.Emotes,
 			}, sp.logger)
+			sp.runChats.add(job.ID, twitchChatDl) // as the VOD twin's
 
 			// "pending" until ExecuteTwitch starts it — see the VOD twin.
 			sp.db.UpdateJobFields(job.ID, map[string]any{
