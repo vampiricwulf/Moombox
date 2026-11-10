@@ -295,7 +295,7 @@ func TestCookieSetupAbortReportNeverClaimsAnUnknownSave(t *testing.T) {
 // TestCookieSetupProbeNeverRejects pins the licence the unawaited baseline
 // probe rests on.
 //
-// finishAutoCookieSetup dispatches the baseline WITHOUT awaiting it, so a
+// CookieSetupSession.finish (cookie-setup-session.js) dispatches the baseline WITHOUT awaiting it, so a
 // rejection would surface as an unhandled rejection — and the abort arm awaits
 // it later, where a rejection would throw straight past the alert, the recovery
 // buttons and the countdown clear. That is F2's stranding, reintroduced.

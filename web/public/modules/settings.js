@@ -2212,7 +2212,7 @@ export class SettingsController {
     const testBtn = document.getElementById("webhook-test-btn");
     input.value = "";
 
-    // Replace to avoid stacking listeners (consistent with showConfirm/removePassword)
+    // Replace to avoid stacking listeners (as removePassword does)
     const newConfirm = confirmBtn.cloneNode(true);
     confirmBtn.replaceWith(newConfirm);
     // Test button: exercises the UNSAVED dialog value so a bad paste fails
