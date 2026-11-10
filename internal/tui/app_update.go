@@ -1060,10 +1060,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Result.TwitchAccepted {
 			a.setupWiz.cookieTWDone = true
 		}
-		a.setupWiz.cookieActive = false
-		a.setupWiz.cookieFinishing = false
-		a.setupWiz.cookiePlatform = ""
-		a.setupWiz.cookieCountdown = 0
+		a.setupWiz.resetCookieFlow()
 		// Four arms where there were three, because acceptance and verification
 		// are different facts and the wizard was rendering only the first.
 		//
@@ -1128,9 +1125,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.setupWiz.IsVisible() && (a.setupWiz.saving || a.setupWiz.cookieFinishing) {
 			a.setupWiz.saving = false
 			a.setupWiz.pendingConfig = nil
-			a.setupWiz.cookieActive = false
-			a.setupWiz.cookieFinishing = false
-			a.setupWiz.cookiePlatform = ""
+			a.setupWiz.resetCookieFlow()
 			a.setupWiz.errorMsg = msg.Text
 		} else {
 			a.setFeedback(msg.Text)

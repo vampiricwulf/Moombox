@@ -197,7 +197,7 @@ type SetupWizardModel struct {
 	isDark  bool // mirrors App.isDark for theme construction
 
 	mode       setupMode
-	modeChoice int // 0=Quick, 1=Advanced on mode selection screen
+	modeChoice int // mode selection screen: 0=Quick, 1=Advanced, 2=Use Defaults
 	values     map[string]string
 	errorMsg   string
 	// successMsg is the ACCEPTED verdict of a cookie step, rendered where
@@ -321,14 +321,9 @@ func (m *SetupWizardModel) Open() {
 	m.simpleStage = setupSimpleCookies
 	m.cookieOnly = false
 	m.cookieFocus = 0
-	m.cookieActive = false
-	m.cookieFinishing = false
-	m.cookiePlatform = ""
+	m.resetCookieFlow()
 	m.cookieYTDone = false
 	m.cookieTWDone = false
-	m.cookieCountdown = 0
-	m.cookieTimedOut = false
-	m.cookieTickActive = false // any in-flight chain is stale-gen'd by the next arm
 	m.channels = nil
 	m.channelIndex = 0
 	m.channelMode = "list"
@@ -529,14 +524,30 @@ func (m *SetupWizardModel) OpenCookieLogin(platform string) {
 	if platform == "twitch" {
 		m.cookieFocus = 1
 	}
+	m.resetCookieFlow()
+	m.cookieYTDone = false
+	m.cookieTWDone = false
+}
+
+// resetCookieFlow returns the cookie step to its platform list: no browser
+// open, no extraction running, no countdown, no timeout (K25). It is the
+// one copy of that reset — Open, OpenCookieLogin, closeCookieLogin and the
+// App's finish and panic arms all call it.
+//
+// It never touches cookieTickGen: an in-flight countdown tick is told from
+// the next chain by its generation, and resetting it would let a stale tick
+// of an earlier flow drain the next one's countdown. Clearing
+// cookieTickActive is safe for the same reason — the next arm bumps the
+// generation, so the old chain dies on its next tick. Nor does it touch
+// cookieYTDone/cookieTWDone, the platform ticks a finish earns, which only
+// the two entrances clear. A cancel, where one is owed, is the caller's.
+func (m *SetupWizardModel) resetCookieFlow() {
 	m.cookieActive = false
 	m.cookieFinishing = false
 	m.cookiePlatform = ""
-	m.cookieYTDone = false
-	m.cookieTWDone = false
 	m.cookieCountdown = 0
 	m.cookieTimedOut = false
-	m.cookieTickActive = false // any in-flight chain is stale-gen'd by the next arm
+	m.cookieTickActive = false
 }
 
 // closeCookieLogin ends a cookie-login overlay, cancelling an in-flight setup
@@ -551,10 +562,7 @@ func (m *SetupWizardModel) closeCookieLogin() {
 	if m.cookieActive && m.OnCancelAutoCookie != nil {
 		m.OnCancelAutoCookie()
 	}
-	m.cookieActive = false
-	m.cookieFinishing = false
-	m.cookiePlatform = ""
-	m.cookieTimedOut = false
+	m.resetCookieFlow()
 	m.cookieOnly = false
 	m.Close()
 }
@@ -777,7 +785,40 @@ func (m *SetupWizardModel) handleSimpleKey(key string) string {
 	return ""
 }
 
+// handleSimpleCookieKey is the cookie step of the quick flow, and the whole
+// of the E L cookie-login overlay: Esc goes back to the mode choice — or
+// closes the overlay — and the third row walks on to the channels, or
+// closes the overlay.
 func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
+	return m.handleCookieStepKey(key,
+		func() string {
+			if m.cookieOnly {
+				m.closeCookieLogin()
+				return ""
+			}
+			m.mode = setupModeSelect
+			return ""
+		},
+		func() string { // Skip / Next — "Close" in the cookie-login overlay
+			if m.cookieOnly {
+				m.closeCookieLogin()
+				return ""
+			}
+			m.simpleStage = setupSimpleChannels
+			m.channelIndex = 0
+			m.channelMode = "list"
+			return ""
+		},
+	)
+}
+
+// handleCookieStepKey is the cookie step both flows share (K25), in the
+// shape handleChannelListKey already has: the step itself is identical in
+// the quick and the advanced flow, and only its two ways out differ. onBack
+// runs for Esc on the platform list, onNext for the third row (Skip / Next).
+// A browser open, its extraction running and its timeout are handled here
+// alike for both.
+func (m *SetupWizardModel) handleCookieStepKey(key string, onBack, onNext func() string) string {
 	if m.cookieActive {
 		if m.cookieFinishing {
 			return "" // extraction in progress, ignore keys
@@ -821,11 +862,7 @@ func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 
 	switch key {
 	case keyEsc:
-		if m.cookieOnly {
-			m.closeCookieLogin()
-			return ""
-		}
-		m.mode = setupModeSelect
+		return onBack()
 	case keyUp:
 		if m.cookieFocus > 0 {
 			m.cookieFocus--
@@ -836,41 +873,32 @@ func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 		}
 	case keyEnter, keyTab:
 		switch m.cookieFocus {
-		case 0: // YouTube
-			if m.OnStartAutoCookie != nil {
-				if err := m.OnStartAutoCookie("youtube"); err != nil {
-					m.errorMsg = fmt.Sprintf("YouTube cookies: %v", err)
-				} else {
-					m.cookieActive = true
-					m.cookiePlatform = "youtube"
-					m.cookieCountdown = cookieSetupCountdownSeconds
-					m.cookieTimedOut = false
-					m.spinner = newSpinner()
-				}
-			}
-		case 1: // Twitch
-			if m.OnStartAutoCookie != nil {
-				if err := m.OnStartAutoCookie("twitch"); err != nil {
-					m.errorMsg = fmt.Sprintf("Twitch cookies: %v", err)
-				} else {
-					m.cookieActive = true
-					m.cookiePlatform = "twitch"
-					m.cookieCountdown = cookieSetupCountdownSeconds
-					m.cookieTimedOut = false
-					m.spinner = newSpinner()
-				}
-			}
-		case 2: // Skip / Next — "Close" in the cookie-login overlay
-			if m.cookieOnly {
-				m.closeCookieLogin()
-				return ""
-			}
-			m.simpleStage = setupSimpleChannels
-			m.channelIndex = 0
-			m.channelMode = "list"
+		case 0:
+			m.startCookieFlow("youtube", "YouTube")
+		case 1:
+			m.startCookieFlow("twitch", "Twitch")
+		case 2:
+			return onNext()
 		}
 	}
 	return ""
+}
+
+// startCookieFlow opens the browser login for platform; label names it in
+// the error line when the start is refused.
+func (m *SetupWizardModel) startCookieFlow(platform, label string) {
+	if m.OnStartAutoCookie == nil {
+		return
+	}
+	if err := m.OnStartAutoCookie(platform); err != nil {
+		m.errorMsg = fmt.Sprintf("%s cookies: %v", label, err)
+		return
+	}
+	m.cookieActive = true
+	m.cookiePlatform = platform
+	m.cookieCountdown = cookieSetupCountdownSeconds
+	m.cookieTimedOut = false
+	m.spinner = newSpinner()
 }
 
 func (m *SetupWizardModel) handleSimpleChannelKey(key string) string {
@@ -1173,98 +1201,26 @@ func (m *SetupWizardModel) handleAdvancedKey(key string) string {
 	return ""
 }
 
+// handleAdvancedCookieKey is the cookie step of the advanced flow: Esc goes
+// back to the form — on its LAST group, the one the form was completed
+// from (a fresh form starts on its first, so "Esc: Back" used to land on
+// Network) — and the third row walks on to the channels.
 func (m *SetupWizardModel) handleAdvancedCookieKey(key string) string {
-	// Reuse the simple cookie key handler with custom Esc/Next behavior
-	if m.cookieActive {
-		if m.cookieFinishing {
-			return "" // extraction in progress, ignore keys
-		}
-		switch key {
-		case keyEnter:
-			m.cookieFinishing = true
-			return "finish_cookie"
-		case keyEsc:
-			if m.OnCancelAutoCookie != nil {
-				m.OnCancelAutoCookie()
-			}
-			m.cookieActive = false
-			m.cookiePlatform = ""
-		}
-		return ""
-	}
-
-	if m.cookieTimedOut {
-		switch key {
-		case "r", "R":
-			m.cookieTimedOut = false
-			if m.OnStartAutoCookie != nil {
-				if err := m.OnStartAutoCookie(m.cookiePlatform); err != nil {
-					m.errorMsg = fmt.Sprintf("Cookie retry: %v", err)
-					return ""
-				}
-				m.cookieActive = true
-				m.cookieCountdown = cookieSetupCountdownSeconds
-				m.spinner = newSpinner()
-			}
+	return m.handleCookieStepKey(key,
+		func() string {
+			// Rebuild with current values preserved.
+			m.advancedFormDone = false
+			m.buildAdvancedForm()
+			m.advancedFormToLastGroup()
 			return ""
-		case "s", "S":
-			m.cookieTimedOut = false
-			m.cookiePlatform = ""
-			return ""
-		}
-		return ""
-	}
-
-	switch key {
-	case keyEsc:
-		// Go back to the form (rebuild with current values preserved) — on
-		// its LAST group, the one the form was completed from. A fresh form
-		// starts on its first, so "Esc: Back" used to land on Network.
-		m.advancedFormDone = false
-		m.buildAdvancedForm()
-		m.advancedFormToLastGroup()
-		return ""
-	case keyUp:
-		if m.cookieFocus > 0 {
-			m.cookieFocus--
-		}
-	case keyDown:
-		if m.cookieFocus < 2 {
-			m.cookieFocus++
-		}
-	case keyEnter, keyTab:
-		switch m.cookieFocus {
-		case 0: // YouTube
-			if m.OnStartAutoCookie != nil {
-				if err := m.OnStartAutoCookie("youtube"); err != nil {
-					m.errorMsg = fmt.Sprintf("YouTube cookies: %v", err)
-				} else {
-					m.cookieActive = true
-					m.cookiePlatform = "youtube"
-					m.cookieCountdown = cookieSetupCountdownSeconds
-					m.cookieTimedOut = false
-					m.spinner = newSpinner()
-				}
-			}
-		case 1: // Twitch
-			if m.OnStartAutoCookie != nil {
-				if err := m.OnStartAutoCookie("twitch"); err != nil {
-					m.errorMsg = fmt.Sprintf("Twitch cookies: %v", err)
-				} else {
-					m.cookieActive = true
-					m.cookiePlatform = "twitch"
-					m.cookieCountdown = cookieSetupCountdownSeconds
-					m.cookieTimedOut = false
-					m.spinner = newSpinner()
-				}
-			}
-		case 2: // Skip / Next → advance to channels
+		},
+		func() string { // Skip / Next → advance to channels
 			m.advancedCookieDone = true
 			m.channelMode = "list"
 			// Don't reset m.channels — preserve channels if user went back from channels to cookies
-		}
-	}
-	return ""
+			return ""
+		},
+	)
 }
 
 func (m *SetupWizardModel) handleAdvancedChannelKey(key string) string {
