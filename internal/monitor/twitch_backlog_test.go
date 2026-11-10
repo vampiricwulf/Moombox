@@ -195,10 +195,15 @@ func TestTwitchBacklogCountsOnlyRealCaptures(t *testing.T) {
 	// An outage-blip stop before the first segment, retries left: the
 	// monitor re-initialises it when the broadcast is live again, so it is
 	// still this broadcast's capture.
-	live("tw_err_recoverable", 12, database.StatusError, func(j *database.Job) { j.Error = worker.TwitchOfflineErrMsg })
+	// The stop is the row's park reason (R-I1), whatever its error reads.
+	live("tw_err_recoverable", 12, database.StatusError, func(j *database.Job) { j.Error = "the channel went away" })
+	if db.UpdateJobFields("tw_err_recoverable", map[string]any{"park_reason": database.ParkReasonTwitchOffline}) == nil {
+		t.Fatal("tw_err_recoverable: park_reason not written")
+	}
 	// The same stop with no retry left is a capture that recorded nothing.
 	live("tw_err_exhausted", 9, database.StatusError, func(j *database.Job) { j.Error = worker.TwitchOfflineErrMsg })
-	if db.UpdateJobFields("tw_err_exhausted", map[string]any{"auto_retry_count": worker.MaxTwitchAutoRetries}) == nil {
+	if db.UpdateJobFields("tw_err_exhausted", map[string]any{"auto_retry_count": worker.MaxTwitchAutoRetries,
+		"park_reason": database.ParkReasonTwitchOffline}) == nil {
 		t.Fatal("tw_err_exhausted: auto_retry_count not written")
 	}
 	live("tw_err_staged", 13, database.StatusError, nil)

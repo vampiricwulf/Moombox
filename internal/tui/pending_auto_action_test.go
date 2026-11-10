@@ -25,7 +25,8 @@ func TestPendingAutoActionShowsInTheDetailsAndTheRow(t *testing.T) {
 	}{
 		{"auto mux", &database.Job{ID: "a", Platform: "twitch", Status: database.StatusError, Error: "twitch HLS: 500",
 			ParkReason: database.ParkReasonTwitchEndUnconfirmed}, "⟳ mux ", jobstate.AutoActionMux.Text()},
-		{"auto retry", &database.Job{ID: "b", Platform: "twitch", Status: database.StatusError, Error: jobstate.TwitchOfflineErrMsg},
+		{"auto retry", &database.Job{ID: "b", Platform: "twitch", Status: database.StatusError, Error: jobstate.TwitchOfflineErrMsg,
+			ParkReason: database.ParkReasonTwitchOffline},
 			"⟳ retry ", jobstate.AutoActionRetry.Text()},
 		{"nothing pending", &database.Job{ID: "c", Platform: "twitch", Status: database.StatusError, Error: "boom"}, "", ""},
 	} {

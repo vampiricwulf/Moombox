@@ -276,8 +276,8 @@ func stagedPartCoverages(stagingDir string) []stagedPartCoverage {
 // whose parts' coverage records survive in staging plans a fill, from an
 // Error row and from a Cancelled one alike —
 //
-//   - one whose broadcast ended while Moombox was down (prior's error
-//     twitchEndedOfflineErrMsg), muxed by the operator's Mux action;
+//   - one whose broadcast ended while Moombox was down (park_reason
+//     twitch_ended_offline), muxed by the operator's Mux action;
 //   - one that stopped with its broadcast's end unconfirmed (park_reason
 //     twitch_end_unconfirmed), muxed by AutoMuxEndedBroadcast once the
 //     monitor confirms the broadcast over (owner decision D-T4), or by the
@@ -366,13 +366,17 @@ func twitchMuxEndKnown(prior *database.Job, tailOpen bool) bool {
 // Retry or a Reinitialize ends it: each writes another status and clears
 // park_reason, and a row that then fails again is read by the rules below
 // as any other. Both are checked ahead of the markers, which a Cancel
-// leaves on the row (it writes no error and no park_reason): a Mux of an
-// ended-offline Error row cancelled while Muxing keeps
-// twitchEndedOfflineErrMsg, and its tail is closed too.
+// leaves on the row (it writes no error and no park_reason): an
+// ended-offline Error row cancelled as it stood keeps its marker, and one
+// cancelled while its Mux ran keeps the error text, and each tail is closed
+// too.
 //
-// Otherwise the two markers say so outright: twitchEndedOfflineErrMsg (the
-// broadcast ended while Moombox was down) and park_reason
-// twitch_end_unconfirmed. Any other Error row is read by stream_end_time,
+// Otherwise the two markers say so outright, each a park reason:
+// twitch_ended_offline (the broadcast ended while Moombox was down, owner
+// ruling R-I1 — for one release also a row from before that reason existed,
+// read by its text: legacyEndedOfflineRow) and twitch_end_unconfirmed. A row
+// holds one park reason, so neither is ever read on a row
+// ParkReasonMuxAfterCancel closed. Any other Error row is read by stream_end_time,
 // which a live Twitch capture writes in ExecuteTwitch's finalize just before
 // muxAndFinalize and nowhere earlier (a retry or re-initialisation clears
 // it): set, the capture reached its end and only its mux failed, and the
@@ -388,8 +392,26 @@ func twitchMuxTailOpen(prior *database.Job) bool {
 	if prior.Status == database.StatusCancelled || prior.ParkReason == database.ParkReasonMuxAfterCancel {
 		return false
 	}
-	if prior.Error == twitchEndedOfflineErrMsg || prior.ParkReason == database.ParkReasonTwitchEndUnconfirmed {
+	switch prior.ParkReason {
+	case database.ParkReasonTwitchEndedOffline, database.ParkReasonTwitchEndUnconfirmed:
+		return true
+	}
+	if legacyEndedOfflineRow(prior) {
 		return true
 	}
 	return prior.StreamEndTime == ""
+}
+
+// legacyEndedOfflineRow reports whether prior is an "ended while offline" row
+// as releases before database.ParkReasonTwitchEndedOffline wrote it: the
+// frozen error text and no park reason at all. database.Open backfills the
+// reason onto such rows, so this is read only for one a boot has not
+// converted — written by an older binary still running against this
+// database, or one whose backfill failed.
+//
+// ONE-RELEASE FALLBACK (owner ruling R-I1): delete this function and its one
+// call, in twitchMuxTailOpen, in the release after the one that introduces
+// ParkReasonTwitchEndedOffline.
+func legacyEndedOfflineRow(prior *database.Job) bool {
+	return prior.ParkReason == database.ParkReasonNone && prior.Error == database.LegacyTwitchEndedOfflineError
 }

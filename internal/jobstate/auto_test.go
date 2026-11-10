@@ -118,6 +118,57 @@ func TestTwitchAutoRetryPending(t *testing.T) {
 			},
 			want: false,
 		},
+		// R-I1: the offline flap is a park reason, and its text routes
+		// nothing. Mutants killed: the predicate still keyed on the text (the
+		// reworded rows are refused); the reason accepted without the
+		// segment or budget terms; the ended-offline reason read as a flap.
+		{
+			name: "offline reason is recoverable whatever the error text",
+			job:  &database.Job{Status: database.StatusError, Error: "the channel went away", ParkReason: database.ParkReasonTwitchOffline},
+			want: true,
+		},
+		{
+			name: "offline reason with no error text at all",
+			job:  &database.Job{Status: database.StatusError, ParkReason: database.ParkReasonTwitchOffline, AutoRetryCount: 1},
+			want: true,
+		},
+		{
+			name: "offline reason with segments downloaded is not recoverable",
+			job:  &database.Job{Status: database.StatusError, Error: TwitchOfflineErrMsg, ParkReason: database.ParkReasonTwitchOffline, LastVideoSeq: intPtr(1)},
+			want: false,
+		},
+		{
+			name: "offline reason with the budget spent is not recoverable",
+			job:  &database.Job{Status: database.StatusError, Error: TwitchOfflineErrMsg, ParkReason: database.ParkReasonTwitchOffline, AutoRetryCount: 2},
+			want: false,
+		},
+		{
+			name: "offline reason on a row no longer in Error",
+			job:  &database.Job{Status: database.StatusCancelled, Error: TwitchOfflineErrMsg, ParkReason: database.ParkReasonTwitchOffline},
+			want: false,
+		},
+		{
+			name: "ended-offline reason is the operator's Mux, never a retry",
+			job:  &database.Job{Status: database.StatusError, Error: "ended", ParkReason: database.ParkReasonTwitchEndedOffline},
+			want: false,
+		},
+		{
+			name: "ended-offline reason is not a retry even under the flap's text",
+			job:  &database.Job{Status: database.StatusError, Error: database.LegacyTwitchOfflineError, ParkReason: database.ParkReasonTwitchEndedOffline},
+			want: false,
+		},
+		// The one-release fallback (legacyOfflineFlapRow): a row an earlier
+		// release wrote, the frozen text and no reason.
+		{
+			name: "legacy row: the frozen text with no reason is recoverable",
+			job:  &database.Job{Status: database.StatusError, Error: database.LegacyTwitchOfflineError},
+			want: true,
+		},
+		{
+			name: "the frozen text under another reason is that reason's row",
+			job:  &database.Job{Status: database.StatusError, Error: database.LegacyTwitchOfflineError, ParkReason: database.ParkReasonMuxAfterCancel},
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -136,12 +187,12 @@ func TestTwitchAutoRetryPending(t *testing.T) {
 // asked of the values the failure writes (its status, its error text, its
 // park reason) and the job's LastVideoSeq and AutoRetryCount.
 //
-// Over every combination the two copies could see, the monitor's answers are
-// unchanged everywhere. retryLikely's differ on exactly one shape — a row
-// marked ParkReasonTwitchEndUnconfirmed whose error is the offline flap's
-// text — which no producer writes: the latch keeps its cause's text, a
-// download failure (worker endUnconfirmedError), so setJobError's answer is
-// unchanged for every failure it can be handed.
+// Over every combination a writer of that time could produce
+// (writtenBeforeOfflineParkReasons), both copies' answers are unchanged. The
+// one shape retryLikely differed on — a row marked
+// ParkReasonTwitchEndUnconfirmed whose error is the offline flap's text — is
+// not among them: the latch keeps its cause's text, a download failure
+// (worker endUnconfirmedError).
 func TestBothRecoveryCallersKeepTheirAnswers(t *testing.T) {
 	oldMonitor := func(job *database.Job) bool {
 		if job.Status != database.StatusError {
@@ -172,12 +223,19 @@ func TestBothRecoveryCallersKeepTheirAnswers(t *testing.T) {
 				for _, last := range []*int{nil, &seq} {
 					for _, n := range []int{0, 1, 2, 3} {
 						job := &database.Job{Status: st, Error: e, ParkReason: r, LastVideoSeq: last, AutoRetryCount: n}
+						// Since the offline park reasons (R-I1) the flap's
+						// text routes only a row no reason claimed, so the
+						// table is the rows a writer could produce — which
+						// leaves out the one shape the two copies differed
+						// on as well.
+						if !writtenBeforeOfflineParkReasons(job) {
+							continue
+						}
 						got := TwitchAutoRetryPending(job)
 						if want := oldMonitor(job); got != want {
 							t.Errorf("monitor caller changed on %+v: %v, was %v", job, got, want)
 						}
-						unreachable := r == database.ParkReasonTwitchEndUnconfirmed && e == TwitchOfflineErrMsg
-						if want := oldRetryLikely(job); got != want && !unreachable {
+						if want := oldRetryLikely(job); got != want {
 							t.Errorf("setJobError caller changed on %+v: %v, was %v", job, got, want)
 						}
 					}
@@ -205,7 +263,12 @@ func TestPendingAutoAction(t *testing.T) {
 		{"end unconfirmed with the flap's text is still the mux's", tw(database.StatusError, TwitchOfflineErrMsg, database.ParkReasonTwitchEndUnconfirmed), AutoActionMux},
 		{"end unconfirmed on YouTube: no monitor takes it", &database.Job{Platform: "youtube", Status: database.StatusError, ParkReason: database.ParkReasonTwitchEndUnconfirmed}, AutoActionNone},
 		{"end unconfirmed but no longer Error", tw(database.StatusCancelled, "", database.ParkReasonTwitchEndUnconfirmed), AutoActionNone},
-		{"offline flap", tw(database.StatusError, TwitchOfflineErrMsg, database.ParkReasonNone), AutoActionRetry},
+		{"offline flap, a legacy row: the text and no reason", tw(database.StatusError, database.LegacyTwitchOfflineError, database.ParkReasonNone), AutoActionRetry},
+		{"offline flap", tw(database.StatusError, TwitchOfflineErrMsg, database.ParkReasonTwitchOffline), AutoActionRetry},
+		{"offline flap, by its reason under a reworded text", tw(database.StatusError, "the channel went away", database.ParkReasonTwitchOffline), AutoActionRetry},
+		{"manual add, offline reason: no monitor retries it", &database.Job{ID: "tw_4242", Platform: "twitch", Status: database.StatusError, Error: TwitchOfflineErrMsg, ParkReason: database.ParkReasonTwitchOffline, ManuallyAdded: true}, AutoActionNone},
+		{"offline reason on a YouTube row", &database.Job{Platform: "youtube", Status: database.StatusError, ParkReason: database.ParkReasonTwitchOffline}, AutoActionNone},
+		{"ended while offline, by its reason", tw(database.StatusError, "ended", database.ParkReasonTwitchEndedOffline), AutoActionNone},
 		{"unreachable", tw(database.StatusError, "dial tcp: no such host", database.ParkReasonTwitchUnreachable), AutoActionRetry},
 		// A manual add never reaches the recovery: the add writes no history
 		// row, so processStreamInfo never finds it HasProcessed (and a
@@ -358,5 +421,52 @@ func TestOfflineParkReasonsKeepTheRecoveryTruthTable(t *testing.T) {
 	}
 	if rows == 0 {
 		t.Fatal("no row was checked")
+	}
+
+	// The rows today's writers produce: the reason beside the text. Each
+	// answers as the bare text it replaces did — and does so under any
+	// wording, the text routing nothing any more.
+	for _, shape := range []struct {
+		reason database.ParkReason
+		was    string
+	}{
+		{database.ParkReasonTwitchOffline, preParkReasonOfflineText},
+		{database.ParkReasonTwitchEndedOffline, preParkReasonEndedOfflineText},
+	} {
+		for _, st := range statuses {
+			for _, e := range append([]string{"reworded"}, errs...) {
+				for _, last := range []*int{nil, &seq} {
+					for _, n := range []int{0, 1, 2, 3} {
+						for _, manual := range []bool{false, true} {
+							job := &database.Job{Platform: "twitch", Status: st, Error: e, ParkReason: shape.reason,
+								LastVideoSeq: last, AutoRetryCount: n, ManuallyAdded: manual}
+							was := *job
+							was.Error, was.ParkReason = shape.was, database.ParkReasonNone
+							if got, want := TwitchAutoRetryPending(job), preParkReasonRetryPending(&was); got != want {
+								t.Errorf("TwitchAutoRetryPending on %+v: %v, the text-keyed row answered %v", job, got, want)
+							}
+							if got, want := PendingAutoAction(job), preParkReasonPendingAutoAction(&was); got != want {
+								t.Errorf("PendingAutoAction on %+v: %q, the text-keyed row answered %q", job, got, want)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestLegacyOfflineTextIsTheWritersText holds the frozen text the fallback
+// and the boot backfill match (database.LegacyTwitchOfflineError) to the text
+// the worker writes, for as long as an older binary may run on this database
+// and key on it. Once the fallback is removed (the release after the one
+// that introduced the park reason) the text routes nothing and this test goes
+// with it.
+func TestLegacyOfflineTextIsTheWritersText(t *testing.T) {
+	if TwitchOfflineErrMsg != database.LegacyTwitchOfflineError || preParkReasonOfflineText != database.LegacyTwitchOfflineError {
+		t.Errorf("TwitchOfflineErrMsg = %q, the frozen legacy text is %q", TwitchOfflineErrMsg, database.LegacyTwitchOfflineError)
+	}
+	if preParkReasonEndedOfflineText != database.LegacyTwitchEndedOfflineError {
+		t.Errorf("the ended-offline text pinned here is %q, the frozen legacy text is %q", preParkReasonEndedOfflineText, database.LegacyTwitchEndedOfflineError)
 	}
 }

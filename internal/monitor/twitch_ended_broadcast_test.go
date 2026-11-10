@@ -101,3 +101,75 @@ func TestAutoRetryRefusesTheLatchedRow(t *testing.T) {
 		t.Error("a row the unconfirmed-end latch marked was offered to the auto re-initialisation")
 	}
 }
+
+// TestTwitch_OfflineFlapIsOfferedRecoveryByItsParkReason is the offline
+// flap's monitor half (owner ruling R-I1): a poll that finds the same
+// broadcast live offers OnStreamRecover the Error row its park reason marks —
+// under a reworded error, the text routing nothing — and offers neither the
+// row whose budget is spent, the row that downloaded a segment, the
+// ended-offline row (the operator's Mux), nor a row with no reason under
+// that same reworded text. A row from before the reason existed, the frozen
+// text alone, is still offered for one release.
+//
+// Mutants: TwitchAutoRetryPending keyed on the error text (the reworded
+// twitch_offline row is not offered); the reason read without the budget or
+// the segment term; the legacy fallback dropped (the legacy row is not
+// offered) or widened to any text (the unmarked row is).
+func TestTwitch_OfflineFlapIsOfferedRecoveryByItsParkReason(t *testing.T) {
+	rows := []struct {
+		login, stream string
+		errText       string
+		reason        database.ParkReason
+		retries       int
+		seq           bool
+	}{
+		{"flap", "100", "Twitch says the channel is not live", database.ParkReasonTwitchOffline, 1, false},
+		{"spent", "200", "Twitch says the channel is not live", database.ParkReasonTwitchOffline, jobstate.MaxTwitchAutoRetries, false},
+		{"started", "300", "Twitch says the channel is not live", database.ParkReasonTwitchOffline, 0, true},
+		{"ended", "400", "Twitch says the channel is not live", database.ParkReasonTwitchEndedOffline, 0, false},
+		{"unmarked", "500", "Twitch says the channel is not live", database.ParkReasonNone, 0, false},
+		{"legacy", "600", database.LegacyTwitchOfflineError, database.ParkReasonNone, 0, false},
+	}
+	var chans []config.ChannelConfig
+	streams := map[string]string{}
+	for _, r := range rows {
+		chans = append(chans, config.ChannelConfig{ID: r.login, Name: r.login, Platform: "twitch"})
+		streams[r.login] = r.stream
+	}
+	tm := newTestTwitchMonitor(t, func(ctx context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
+		infos := make([]*twitch.TwitchStreamInfo, len(logins))
+		for i, login := range logins {
+			infos[i] = &twitch.TwitchStreamInfo{StreamID: streams[login], ChannelLogin: login, IsLive: true}
+		}
+		return infos, make([]error, len(logins)), nil
+	}, chans...)
+	for _, r := range rows {
+		id := "tw_" + r.stream
+		if _, err := tm.db.AddJob(&database.Job{ID: id, VideoID: r.stream, URL: "https://twitch.tv/" + r.login,
+			Platform: "twitch", Status: database.StatusError}); err != nil {
+			t.Fatal(err)
+		}
+		tm.db.AddToHistory(id)
+		fields := map[string]any{"park_reason": r.reason, "error": r.errText, "auto_retry_count": r.retries}
+		if r.seq {
+			fields["last_video_seq"] = 3
+		}
+		if tm.db.UpdateJobFields(id, fields) == nil {
+			t.Fatalf("%s: row not written", id)
+		}
+	}
+
+	var offered []string
+	tm.OnStreamRecover = func(_ *twitch.TwitchStreamInfo, _ *config.ChannelConfig, jobID string) {
+		offered = append(offered, jobID)
+	}
+	tm.OnStreamFound = func(info *twitch.TwitchStreamInfo, _ *config.ChannelConfig) {
+		t.Errorf("a known broadcast (%s) was announced as new", info.StreamID)
+	}
+	tm.doCheck(context.Background())
+
+	slices.Sort(offered)
+	if !slices.Equal(offered, []string{"tw_100", "tw_600"}) {
+		t.Errorf("OnStreamRecover got %v, want [tw_100 tw_600] — the marked flap and the legacy row", offered)
+	}
+}

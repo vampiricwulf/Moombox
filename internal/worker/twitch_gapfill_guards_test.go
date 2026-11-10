@@ -343,27 +343,35 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 		vod       bool
 		ended     bool // stream_end_time set: the capture reached its finalize
 		wantKinds string
+		park      database.ParkReason
 	}{
-		{"end unconfirmed, auto-muxed", true, "", true, false, false, false, "late_start,tail"},
-		{"ended while offline, Mux action", false, twitchEndedOfflineErrMsg, false, false, false, false, "late_start,tail"},
-		{"another error, Mux action", false, "", false, false, false, false, "late_start,tail"},
-		{"cancelled while downloading, Mux action", false, "", false, true, false, false, "late_start"},
-		{"cancelled while muxing an ended-offline row, Mux action", false, twitchEndedOfflineErrMsg, false, true, false, false, "late_start"},
-		{"a VOD-style row, Mux action", false, "", false, false, true, false, ""},
+		{"end unconfirmed, auto-muxed", true, "", true, false, false, false, "late_start,tail", ""},
+		{"ended while offline, Mux action", false, twitchEndedOfflineErrMsg, false, false, false, false, "late_start,tail", ""},
+		{"another error, Mux action", false, "", false, false, false, false, "late_start,tail", ""},
+		{"cancelled while downloading, Mux action", false, "", false, true, false, false, "late_start", ""},
+		{"cancelled while muxing an ended-offline row, Mux action", false, twitchEndedOfflineErrMsg, false, true, false, false, "late_start", ""},
+		{"a VOD-style row, Mux action", false, "", false, false, true, false, "", ""},
 		// The capture reached its finalize after a normal end and only its
 		// mux failed, or the operator cancelled it while Muxing: it holds
 		// the broadcast to its end, so the Mux fills the late start alone —
 		// an open tail would cut the VOD's last segments again as a
 		// duplicate "recovered" part.
-		{"mux failed after a normal end, Mux action", false, "ffmpeg mux failed", false, false, false, true, "late_start"},
-		{"cancelled while muxing after a normal end, Mux action", false, "", false, true, false, true, "late_start"},
+		{"mux failed after a normal end, Mux action", false, "ffmpeg mux failed", false, false, false, true, "late_start", ""},
+		{"cancelled while muxing after a normal end, Mux action", false, "", false, true, false, true, "late_start", ""},
 		// The markers keep the tail open whatever else the row carries.
-		{"ended while offline with an end time, Mux action", false, twitchEndedOfflineErrMsg, false, false, false, true, "late_start,tail"},
+		{"ended while offline with an end time, Mux action", false, twitchEndedOfflineErrMsg, false, false, false, true, "late_start,tail", ""},
+		// R-I1: the marker is the park reason. Under a reworded text, and
+		// with an end time that would otherwise close the tail, the reason
+		// alone keeps it open; the same reworded text without the reason is
+		// read by the end time like any other error.
+		{"ended while offline by its park reason, reworded text, Mux action", false, "the broadcast finished while Moombox was down", false, false, false, true, "late_start,tail", database.ParkReasonTwitchEndedOffline},
+		{"the reworded text without the reason, Mux action", false, "the broadcast finished while Moombox was down", false, false, false, true, "late_start", ""},
+		{"cancelled with the ended-offline reason left on it, Mux action", false, "x", false, true, false, false, "late_start", database.ParkReasonTwitchEndedOffline},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w, db := testWorkerSetup(t)
-			id := "tw_3" + string(rune('0'+i))
+			id := "tw_3" + string(rune('a'+i)) // a letter each: the id is a directory name
 			latchedJob(t, w, db, id, 10, tc.marked)
 			fields := map[string]any{"stream_start_time": gapStart.Format(time.RFC3339), "twitch_quality": "chunked"}
 			if tc.errMsg != "" {
@@ -377,6 +385,9 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 			}
 			if tc.ended {
 				fields["stream_end_time"] = gapStart.Add(6 * time.Minute).Format(time.RFC3339)
+			}
+			if tc.park != "" {
+				fields["park_reason"] = tc.park
 			}
 			db.UpdateJobFields(id, fields)
 			var stagingBase string
@@ -396,6 +407,8 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 
 			if j, _ := db.GetJob(id); j == nil || j.Status != database.StatusFinished {
 				t.Fatalf("muxed row = %v (error %q), want Finished", statusOf(j), errorOf(j))
+			} else if j.ParkReason != database.ParkReasonNone {
+				t.Errorf("the muxed row still carries park_reason %q: the Mux clears every marker once it has read it", j.ParkReason)
 			}
 			g, _ := db.GetGapFill(id)
 			if tc.wantKinds == "" {
@@ -658,5 +671,62 @@ func TestOfflineParkReasonsKeepTheMuxTailTruthTable(t *testing.T) {
 	}
 	if rows == 0 {
 		t.Fatal("no row was checked")
+	}
+
+	// The rows today's writer produces: the reason beside the text. Each
+	// reads as the bare text it replaces did, under any wording — the
+	// ended-offline reason as the ended-offline text, and the offline flap's
+	// reason (a row with nothing staged, which no Mux gets far with) as the
+	// flap's text: by stream_end_time, like any other error.
+	for _, shape := range []struct {
+		reason database.ParkReason
+		was    string
+	}{
+		{database.ParkReasonTwitchEndedOffline, preParkReasonEndedOfflineText},
+		{database.ParkReasonTwitchOffline, preParkReasonOfflineText},
+	} {
+		for _, st := range []database.JobStatus{database.StatusError, database.StatusCancelled} {
+			for _, e := range []string{"reworded", preParkReasonEndedOfflineText, preParkReasonOfflineText, ""} {
+				for _, endTime := range []string{"", end} {
+					row := &database.Job{Platform: "twitch", Status: st, Error: e, ParkReason: shape.reason, StreamEndTime: endTime}
+					was := &database.Job{Platform: "twitch", Status: st, Error: shape.was, StreamEndTime: endTime}
+					want := preParkReasonMuxTailOpen(was)
+					got := twitchMuxTailOpen(row)
+					if got != want {
+						t.Errorf("twitchMuxTailOpen on %+v: %v, the text-keyed row answered %v", row, got, want)
+					}
+					if gotKnown, wantKnown := twitchMuxEndKnown(row, got), !want && st == database.StatusError; gotKnown != wantKnown {
+						t.Errorf("twitchMuxEndKnown on %+v: %v, the text-keyed row answered %v", row, gotKnown, wantKnown)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestLegacyEndedOfflineRowIsReadForOneRelease pins the fallback's shape
+// (R-I1): the frozen text routes only a row no park reason claimed.
+//
+// Mutants: the fallback dropped (the legacy row with an end time reads
+// closed); the empty-reason term dropped (the row its failed Mux after a
+// Cancel marked reads as a legacy one — harmless there, the Cancel is read
+// first, but the helper is the shape the backfill converts).
+func TestLegacyEndedOfflineRowIsReadForOneRelease(t *testing.T) {
+	end := gapStart.Add(6 * time.Minute).Format(time.RFC3339)
+	legacy := &database.Job{Status: database.StatusError, Error: database.LegacyTwitchEndedOfflineError, StreamEndTime: end}
+	if !legacyEndedOfflineRow(legacy) || !twitchMuxTailOpen(legacy) {
+		t.Error("a row from before the park reason — the frozen text, no reason — is no longer read as ended-offline")
+	}
+	for _, r := range []database.ParkReason{database.ParkReasonMuxAfterCancel, database.ParkReasonTwitchUnreachable,
+		database.ParkReasonTwitchOffline, database.ParkReasonTwitchEndedOffline} {
+		row := *legacy
+		row.ParkReason = r
+		if legacyEndedOfflineRow(&row) {
+			t.Errorf("the frozen text under park_reason %q was read as a legacy row", r)
+		}
+	}
+	reworded := &database.Job{Status: database.StatusError, Error: "ended while offline", StreamEndTime: end}
+	if legacyEndedOfflineRow(reworded) || twitchMuxTailOpen(reworded) {
+		t.Error("another wording with no reason was read as ended-offline")
 	}
 }
