@@ -244,3 +244,31 @@ func TestBareCookieImportFailureIsWhole(t *testing.T) {
 		t.Errorf("a failure longer than the screen:\n%s", strings.Join(rows, "\n"))
 	}
 }
+
+// The refusal of a confirm that does not fit names the size for the terminal
+// as it is now, not as it was when Enter was pressed, and is gone once the
+// summary fits.
+func TestBareMenuRefusalFollowsTheSize(t *testing.T) {
+	r := bareMenuApp(t, 30, 6)
+	a := r.app
+	menuTo(t, r, "A I")
+	r.press("enter", "enter")
+	if a.actionMenu.jobConfirm || !strings.Contains(plainFrame(a), "Enlarge the terminal to 30x9") {
+		t.Fatalf("premise lost: no refusal at 30x6:\n%s", plainFrame(a))
+	}
+	// Wider, the summary wraps to fewer rows: the size named follows.
+	a.Update(tea.WindowSizeMsg{Width: 40, Height: 6})
+	wantExact(t, "the refusal at 40x6", a.View().Content, 40, 6)
+	got := plainFrame(a)
+	if strings.Contains(got, "30x9") {
+		t.Errorf("the refusal still names the size for 30 columns:\n%s", got)
+	}
+	if want := a.actionMenu.bareConfirmRefusal(); a.actionMenu.bareConfirmFits() || !strings.Contains(strings.Join(strings.Fields(got), " "), want) {
+		t.Errorf("the refusal at 40x6 is not %q:\n%s", want, got)
+	}
+	// Tall enough for the summary: nothing is refused any more.
+	a.Update(tea.WindowSizeMsg{Width: 59, Height: 12})
+	if got := plainFrame(a); strings.Contains(got, "Enlarge") {
+		t.Errorf("a refusal for a summary that now fits:\n%s", got)
+	}
+}

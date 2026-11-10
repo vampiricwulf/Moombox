@@ -167,14 +167,25 @@ func (m *ActionMenuModel) bareConfirmRefusal() string {
 	return compactRefusal(minTermWidth, minTermHeight)
 }
 
+// bareRefusal is the foot of the job page after a confirm was refused: the
+// size that shows it, worked out for the terminal as it is now, and nothing
+// once the terminal has grown enough to show it.
+func (m *ActionMenuModel) bareRefusal() string {
+	if !m.bareRefused || m.bareConfirmFits() {
+		return ""
+	}
+	return m.bareConfirmRefusal()
+}
+
 // bareRefuseConfirm is the first Enter on a job in the bare form, after the
-// confirm was armed: a confirm that does not fit whole is disarmed and its
-// refusal kept for the foot of the page. It reports whether it refused.
+// confirm was armed: a confirm that does not fit whole is disarmed and the
+// refusal noted for the foot of the page (bareRefusal). It reports whether it
+// refused.
 func (m *ActionMenuModel) bareRefuseConfirm() bool {
 	if !m.bare() || m.bareConfirmFits() {
 		return false
 	}
-	m.bareRefusal = m.bareConfirmRefusal()
+	m.bareRefused = true
 	m.jobConfirm = false
 	return true
 }
@@ -183,7 +194,7 @@ func (m *ActionMenuModel) bareRefuseConfirm() bool {
 // row, a click on a list row selects it. Nothing runs without Enter.
 func (m *ActionMenuModel) bareMouse(msg tea.MouseMsg) {
 	if isScrollUp(msg) || isScrollDown(msg) {
-		m.bareRefusal = ""
+		m.bareRefused = false
 		switch m.mode {
 		case menuMain:
 			if isScrollUp(msg) {
@@ -222,11 +233,11 @@ func (m *ActionMenuModel) bareMouse(msg tea.MouseMsg) {
 		if m.jobConfirm {
 			return
 		}
-		foot := m.bareFoot(m.bareRefusal)
+		foot := m.bareFoot(m.bareRefusal())
 		covered := max(len(foot)-1, 0)
 		if at := m.bareWindow(m.jobList.Index(), covered) + row; at < len(m.jobList.Items()) && row < m.bareRows()-covered {
 			if at != m.jobList.Index() {
-				m.bareRefusal = ""
+				m.bareRefused = false
 			}
 			m.jobList.Select(at)
 		}
@@ -294,7 +305,7 @@ func (m *ActionMenuModel) bareView() string {
 			}
 			return lipgloss.NewStyle().Foreground(StatusColor(string(ji.job.Status))).Render(icon) + " " + title
 		}
-		return m.barePage(sheet, len(items), row, sel, m.bareFoot(m.bareRefusal), YellowStyle, "Enter: Select  Esc: Back")
+		return m.barePage(sheet, len(items), row, sel, m.bareFoot(m.bareRefusal()), YellowStyle, "Enter: Select  Esc: Back")
 	}
 
 	acts, _, sel := m.bareActions()

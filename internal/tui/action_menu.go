@@ -176,10 +176,11 @@ type ActionMenuModel struct {
 	// Confirm prompt (for R P etc.)
 	confirmLabel string
 
-	// bareRefusal is the bare form's answer to a confirm it did not arm,
-	// because what the action deletes does not fit the page whole
-	// (action_menu_bare.go). The next key clears it.
-	bareRefusal string
+	// bareRefused says the bare form did not arm a confirm, because what the
+	// action deletes does not fit the page whole (action_menu_bare.go). Only
+	// that it was refused is kept: the line shown, and the size it names,
+	// are worked out on every draw (bareRefusal). The next key clears it.
+	bareRefused bool
 }
 
 // NewActionMenuModel creates a new action menu.
@@ -222,7 +223,7 @@ func (m *ActionMenuModel) Open(items []ActionMenuItem) {
 	m.filtered = nil
 	m.jobConfirm = false
 	m.confirmLabel = ""
-	m.bareRefusal = ""
+	m.bareRefused = false
 
 	// Build list items with category headers
 	var listItems []list.Item
@@ -390,7 +391,7 @@ func (m *ActionMenuModel) selectedAction() *ActionMenuItem {
 // Returns "" for internal navigation, "close" to dismiss, or an action chord
 // like "A A" or "A D:jobID123".
 func (m *ActionMenuModel) HandleKey(key string) string {
-	m.bareRefusal = ""
+	m.bareRefused = false
 	switch m.mode {
 	case menuMain:
 		return m.handleMainKey(key)
