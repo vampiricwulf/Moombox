@@ -440,6 +440,56 @@ func TestCompactStatusLineShowsTheWarnings(t *testing.T) {
 	if got := line(); !strings.Contains(got, "/stream") {
 		t.Errorf("no filter mark: %q", got)
 	}
+
+	// With every warning showing, the left half gives up whole segments,
+	// the counts first: the batch selection count is never cut.
+	for _, w := range []int{59, 40, 30} {
+		r := newCompactRig(t, w, 12)
+		a := r.app
+		a.statusBar.offline = true
+		a.statusBar.SetActivePlatforms(true, true)
+		a.statusBar.SetCookieStatus(CookieStatusRelogin, CookieStatusRelogin)
+		a.restartPending = true
+		a.taskList.ToggleSelection("down")
+		a.taskList.ToggleSelection("err")
+		got := ansi.Strip(frameLines(a)[a.height-2])
+		if ansi.StringWidth(got) != w {
+			t.Errorf("%d columns: the status line is %d cells: %q", w, ansi.StringWidth(got), got)
+		}
+		for _, mark := range []string{"OFF", "YT!", "TW!", "RESTART", "UPD"} {
+			if !strings.Contains(got, mark) {
+				t.Errorf("%d columns: no %s: %q", w, mark, got)
+			}
+		}
+		left, _, _ := strings.Cut(got, "OFF")
+		fields := strings.Fields(left)
+		if w >= 40 && !strings.HasPrefix(strings.TrimSpace(left), "2 sel") {
+			t.Errorf("%d columns: the selection count is not first and whole: %q", w, got)
+		}
+		// Every count shown is a whole one of the full line's, and a
+		// dropped one leaves an ellipsis of its own, never a cut token.
+		full := strings.Fields(ansi.Strip(a.taskList.statusSummary))
+		for _, f := range fields {
+			if f == "2" || f == "sel" || f == "…" {
+				continue
+			}
+			whole := false
+			for _, c := range full {
+				whole = whole || f == c
+			}
+			if !whole {
+				t.Errorf("%d columns: %q is not a whole segment: %q", w, f, got)
+			}
+		}
+	}
+	// A long filter is shortened; the selection count before it is not.
+	r = newCompactRig(t, 30, 12)
+	r.app.taskList.applyQuery("stream stream stream stream stream stream")
+	r.app.taskList.ToggleSelection("down")
+	got := ansi.Strip(frameLines(r.app)[r.app.height-2])
+	if !strings.Contains(got, " 1 sel /stream stream") || !strings.Contains(got, "…") || !strings.Contains(got, "UPD") || ansi.StringWidth(got) != 30 {
+		t.Errorf("a long filter: %q", got)
+	}
 }
 
 // chordCompact classifies every chord for the compact layout (owner ruling

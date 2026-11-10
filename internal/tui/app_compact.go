@@ -209,7 +209,7 @@ type compactFrameKey struct {
 // active filter, and the warnings on the right: offline, sidecar down, a
 // disk warning, the cookie alerts, a pending update, a pending restart and
 // the passwordless-access warning. The warnings are kept whole; the left
-// half is cut to what is left.
+// half is what fits beside them (compactStatusLeft).
 func (a *App) compactStatusLine() string {
 	key := compactBarKey{
 		width:    a.width,
@@ -223,19 +223,6 @@ func (a *App) compactStatusLine() string {
 	}
 	if a.compact.bar != "" && a.compact.barKey == key {
 		return a.compact.bar
-	}
-
-	var left []string
-	if key.summary != "" {
-		left = append(left, key.summary)
-	} else {
-		left = append(left, DimStyle.Render("No jobs"))
-	}
-	if key.selected > 0 {
-		left = append(left, statusBarYelStyle.Render(fmt.Sprintf("%d sel", key.selected)))
-	}
-	if key.query != "" {
-		left = append(left, DimStyle.Render("/"+key.query))
 	}
 
 	var right []string
@@ -258,7 +245,7 @@ func (a *App) compactStatusLine() string {
 	if rw > 0 {
 		room -= rw + 2 // a gap, and the trailing space
 	}
-	l := truncateWidth(strings.Join(left, " "), max(room, 0), "…")
+	l := compactStatusLeft(key.selected, key.query, key.summary, max(room, 0))
 
 	var sb strings.Builder
 	sb.WriteByte(' ')
@@ -274,6 +261,61 @@ func (a *App) compactStatusLine() string {
 	bar := statusBarBgStyle.MaxWidth(a.width).Render(sb.String())
 	a.compact.barKey, a.compact.bar = key, bar
 	return bar
+}
+
+// compactStatusLeft is the left half of the compact status line in room
+// cells, built in order of what the operator acts on and never cut through
+// a segment: the batch selection count first (the batch chords act on it),
+// then the active filter (a long query is the one thing shortened), then as
+// many of the per-status counts as fit, whole, with an ellipsis when some
+// did not.
+func compactStatusLeft(selected int, query, summary string, room int) string {
+	var sb strings.Builder
+	used := 0
+	add := func(seg string) bool {
+		w := ansi.StringWidth(seg)
+		gap := 0
+		if used > 0 {
+			gap = 1
+		}
+		if w == 0 || used+gap+w > room {
+			return false
+		}
+		if gap == 1 {
+			sb.WriteByte(' ')
+		}
+		sb.WriteString(seg)
+		used += gap + w
+		return true
+	}
+	if selected > 0 {
+		add(statusBarYelStyle.Render(fmt.Sprintf("%d sel", selected)))
+	}
+	if query != "" {
+		gap := min(used, 1)
+		// "/" and at least two cells of the query, or nothing.
+		if avail := room - used - gap; avail >= 3 {
+			add(DimStyle.Render(truncateWidth("/"+query, avail, "…")))
+		}
+	}
+	if summary == "" {
+		add(DimStyle.Render("No jobs"))
+		return sb.String()
+	}
+	counts := strings.Split(summary, " ")
+	for i, seg := range counts {
+		// Keep a cell for the ellipsis unless this is the last count.
+		need := ansi.StringWidth(seg) + min(used, 1)
+		if i < len(counts)-1 {
+			need += 2
+		}
+		if used+need > room {
+			add(DimStyle.Render("…"))
+			break
+		}
+		add(seg)
+	}
+	return sb.String()
 }
 
 // compactFeedbackRows lays the feedback line out for the compact layout. A
