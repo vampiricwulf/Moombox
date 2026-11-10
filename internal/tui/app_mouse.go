@@ -108,10 +108,14 @@ func (a *App) mouseImport(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return a.wheelAsArrow(msg, func(int) bool { return a.importDlg.step == importStepPick })
 }
 
-// mouseChapterImport: the wheel moves the paste box's cursor a line, which
-// scrolls a paste longer than the box. The preview under it is a fixed
-// summary with nothing to scroll.
+// mouseChapterImport: with the pointer below the paste box, the wheel
+// scrolls a preview that has more chapters than fit, one row a notch.
+// Otherwise it moves the paste box's cursor a line, which scrolls a paste
+// longer than the box.
 func (a *App) mouseChapterImport(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if dir := wheelDir(msg); dir != 0 && a.chapterDlg.WheelPreview(msg.Mouse().Y, dir) {
+		return a, nil
+	}
 	return a.wheelAsArrow(msg, func(int) bool { return a.chapterDlg.wheelMovesPaste() })
 }
 

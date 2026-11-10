@@ -244,7 +244,7 @@ var overlayWheel = map[string]string{
 	"action menu":    wheelScrolls, // the menu's cursor
 	"import":         wheelScrolls, // the file picker's cursor
 	"cookie import":  wheelInert,
-	"chapter import": wheelScrolls, // the paste box's cursor
+	"chapter import": wheelScrolls, // a long preview under the pointer, else the paste box's cursor
 	"add video":      wheelScrolls, // the format table's cursor
 	"trim":           wheelScrolls, // the delete list's cursor
 	"files":          wheelScrolls, // the list's cursor
