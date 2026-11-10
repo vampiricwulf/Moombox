@@ -276,9 +276,69 @@ func (a *App) compactStatusLine() string {
 	return bar
 }
 
+// compactFeedbackRows lays the feedback line out for the compact layout. A
+// line that fits is its one row. A longer one is wrapped at spaces, whether
+// or not its writer asked for wrapping, and its rows climb from the bottom
+// row over the status line, the rule and then the list, at most half the
+// terminal (feedbackRowCap): a chord hint is the only list of the working
+// keys there is in this layout, and a confirm names what it will delete
+// (owner rulings PR-M1, R-D2), so neither may lose its tail to a cut. At the
+// 30x6 floor that is three rows, and the three list rows stay.
+//
+// A line of " | " segments that each fit a row (a chord hint) is broken
+// between segments, so no key is parted from its label.
+func compactFeedbackRows(msg string, width, height int) []string {
+	rows := compactFeedbackWrap(msg, width)
+	if maxRows := feedbackRowCap(height); len(rows) > maxRows {
+		rest := strings.Join(rows[maxRows-1:], " ")
+		rows = append(rows[:maxRows-1], truncateWidth(rest, width, "…"))
+	}
+	return rows
+}
+
+// compactFeedbackFits reports whether compactFeedbackRows shows all of msg.
+func compactFeedbackFits(msg string, width, height int) bool {
+	return len(compactFeedbackWrap(msg, width)) <= feedbackRowCap(height)
+}
+
+// compactFeedbackWrap is compactFeedbackRows before the row cap.
+func compactFeedbackWrap(msg string, width int) []string {
+	if ansi.StringWidth(msg) <= width {
+		return []string{msg}
+	}
+	const sep = " | "
+	if segs := strings.Split(msg, sep); len(segs) > 1 {
+		var rows []string
+		line := ""
+		for _, seg := range segs {
+			switch {
+			case ansi.StringWidth(seg) > width:
+				rows, line = nil, ""
+			case line == "":
+				line = seg
+				continue
+			case ansi.StringWidth(line)+len(sep)+ansi.StringWidth(seg) <= width:
+				line += sep + seg
+				continue
+			default:
+				rows = append(rows, line)
+				line = seg
+				continue
+			}
+			break // a segment wider than a row: wrap at spaces instead
+		}
+		if line != "" {
+			return append(rows, line)
+		}
+	}
+	// wrapFeedback leaves room for the normal layout's indent; there is
+	// none here.
+	return wrapFeedback(msg, width+feedbackIndent, len(msg)+1)
+}
+
 // compactView draws the compact layout: the task list, a rule, the status
-// line and the feedback line. Exactly a.height rows of at most a.width
-// cells.
+// line and the feedback line, which takes more rows while its message needs
+// them. Exactly a.height rows of at most a.width cells.
 func (a *App) compactView() tea.View {
 	key := compactFrameKey{
 		task:   a.taskList.View(),
@@ -292,17 +352,20 @@ func (a *App) compactView() tea.View {
 		return a.viewWithMode(a.compact.content)
 	}
 
-	// One row, cut with an ellipsis: a confirm prompt leads with the key to
-	// press and what it does, so the cut takes the title's tail.
-	feedback := ""
+	lines := append(strings.Split(key.task, "\n"),
+		DimStyle.Render(strings.Repeat("─", a.width)),
+		key.bar,
+		fitBlock("", a.width, 1))
 	if key.fbMsg != "" {
-		feedback = lipgloss.NewStyle().Foreground(feedbackColor(key.fbMsg, key.fbSev)).
-			Render(truncateWidth(key.fbMsg, a.width, "…"))
+		style := lipgloss.NewStyle().Foreground(feedbackColor(key.fbMsg, key.fbSev))
+		rows := compactFeedbackRows(key.fbMsg, a.width, a.height)
+		rows = rows[:min(len(rows), len(lines))]
+		top := len(lines) - len(rows)
+		for i, row := range rows {
+			lines[top+i] = fitBlock(style.Render(row), a.width, 1)
+		}
 	}
-	content := key.task + "\n" +
-		DimStyle.Render(strings.Repeat("─", a.width)) + "\n" +
-		key.bar + "\n" +
-		fitBlock(feedback, a.width, 1)
+	content := strings.Join(lines, "\n")
 
 	a.compact.valid, a.compact.key, a.compact.content = true, key, content
 	return a.viewWithMode(content)

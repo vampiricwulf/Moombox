@@ -296,6 +296,18 @@ func (a *App) cancelChord() {
 	a.clearFeedback()
 }
 
+// setPrefixHint writes the hint of a prefix that has just been armed. Where
+// everything under the prefix opens an overlay the layout cannot draw, the
+// hint is the size refusal, in the refusal's colour.
+func (a *App) setPrefixHint(prefix string) {
+	hint, refused := a.chordHint(prefix)
+	if refused {
+		a.setFeedbackWithSeverity(hint, severityWarning)
+		return
+	}
+	a.setFeedback(hint)
+}
+
 // handleChord processes the chord state machine. Returns (model, cmd, handled).
 func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 	now := time.Now()
@@ -354,7 +366,7 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 	case "a", "r", "o", "e", "q":
 		a.seenChordHint = true
 		a.chord = chordState{prefix: key, prefixTime: now}
-		a.setFeedback(a.chordFeedback(key))
+		a.setPrefixHint(key)
 		return a, nil, true
 	}
 

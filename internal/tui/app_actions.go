@@ -655,16 +655,33 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 
 // chordFeedback builds contextual feedback for a chord prefix.
 // It derives available options from buildMenuItems() using HintLabel.
+//
+// In the compact layout a hint too long for the feedback rows there
+// (compactFeedbackRows) is given as its keys alone, "Request: B C F V M U S
+// P (3s)": Help and the action menu are refused in that layout, so the hint
+// is the one list of the working keys, and all of them must be on screen.
 func (a *App) chordFeedback(prefix string) string {
+	hint, _ := a.chordHint(prefix)
+	return hint
+}
+
+// chordHint is chordFeedback, and whether the prefix has nothing to offer
+// only because of the terminal's size: every chord under it that would
+// otherwise be listed opens an overlay, which the layout refuses. The hint
+// is then the size refusal, not "(none available)", which reads as if
+// nothing were configured. The prefix still arms, so its second key is
+// taken as the chord it is and refused the same way.
+func (a *App) chordHint(prefix string) (hint string, refused bool) {
 	if prefix == "q" {
-		return "Quit: Q Confirm (3s)"
+		return "Quit: Q Confirm (3s)", false
 	}
 
 	upperPrefix := strings.ToUpper(prefix)
 	items := a.buildMenuItems()
 	job := a.taskList.SelectedJob()
 
-	var parts []string
+	var parts, keys []string
+	droppedForSize := false
 	for i := range items {
 		item := &items[i]
 		// Match items whose chord starts with this prefix (e.g. "A " for prefix "a")
@@ -674,6 +691,7 @@ func (a *App) chordFeedback(prefix string) string {
 		// Below the normal layout the chords that open an overlay are
 		// refused (refusedForSize), so the hint does not offer them.
 		if item.Opens != "" && a.layoutMode() != layoutNormal {
+			droppedForSize = true
 			continue
 		}
 		// For NeedsJob items, check if selected job passes the filter — unless
@@ -688,6 +706,7 @@ func (a *App) chordFeedback(prefix string) string {
 		// Extract the second key character from the chord (e.g. "A K" → "K")
 		secondKey := item.Chord[len(upperPrefix)+1:]
 		parts = append(parts, secondKey+" "+item.HintLabel)
+		keys = append(keys, secondKey)
 	}
 
 	// Category label from prefix
@@ -706,9 +725,16 @@ func (a *App) chordFeedback(prefix string) string {
 	}
 
 	if len(parts) == 0 {
-		return label + ": (none available) (3s)"
+		if droppedForSize {
+			return compactRefusal, true
+		}
+		return label + ": (none available) (3s)", false
 	}
-	return label + ": " + strings.Join(parts, " | ") + " (3s)"
+	full := label + ": " + strings.Join(parts, " | ") + " (3s)"
+	if a.layoutMode() == layoutCompact && !compactFeedbackFits(full, a.width, a.height) {
+		return label + ": " + strings.Join(keys, " ") + " (3s)", false
+	}
+	return full, false
 }
 
 // canOpenFolder returns true if the job's folder can be opened.

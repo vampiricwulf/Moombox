@@ -215,7 +215,16 @@ func TestLayoutBySize(t *testing.T) {
 				if strings.Contains(plain, "Details") || strings.Contains(plain, "Logs") || strings.Contains(plain, "╭") {
 					t.Errorf("the compact frame draws a panel:\n%s", plain)
 				}
-				if !strings.Contains(lines[tt.h-1], "Press D to confirm") {
+				// The long confirm wraps upward from the last row, at most
+				// half the terminal; a short line is the last row alone,
+				// under the status line and the rule.
+				first := tt.h - tt.h/2
+				if !strings.HasPrefix(ansi.Strip(lines[first]), "Press D to confirm") && !frameShows(a, a.feedback.msg) {
+					t.Errorf("the confirm does not fill the bottom rows:\n%s", plain)
+				}
+				a.setFeedback("Press D to confirm (3s)")
+				lines = frameLines(a)
+				if !strings.HasPrefix(ansi.Strip(lines[tt.h-1]), "Press D to confirm") {
 					t.Errorf("the feedback line is not the last row: %q", ansi.Strip(lines[tt.h-1]))
 				}
 				if !strings.Contains(ansi.Strip(lines[tt.h-3]), strings.Repeat("─", tt.w)) {
@@ -580,9 +589,8 @@ func TestCompactDestructiveChordsConfirmOnTheFeedbackLine(t *testing.T) {
 			r.selectJob(t, tt.job)
 			keys := chordKeys(tt.chord)
 			r.press(keys...)
-			last := ansi.Strip(frameLines(r.app)[r.app.height-1])
-			if !strings.HasPrefix(last, tt.prompt) {
-				t.Fatalf("the feedback line does not show the confirm: %q", last)
+			if !strings.HasPrefix(r.app.feedback.msg, tt.prompt) || !frameShows(r.app, r.app.feedback.msg) {
+				t.Fatalf("the screen does not show the whole confirm %q:\n%s", r.app.feedback.msg, plainFrame(r.app))
 			}
 			if tt.done(r) {
 				t.Fatal("the action ran before its confirm")

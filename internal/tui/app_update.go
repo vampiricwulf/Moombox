@@ -25,6 +25,14 @@ const maxOverlayReasonRunes = 80
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		// A prefix hint still on the feedback line was written for the old
+		// size: it lists the overlay chords a smaller layout refuses, or
+		// only the keys where the labels now fit.
+		hintShown := false
+		if a.chord.prefix != "" && a.chord.action == "" {
+			old, _ := a.chordHint(a.chord.prefix)
+			hintShown = a.feedback.msg == old
+		}
 		a.width = msg.Width
 		a.height = msg.Height
 		a.recalcLayout()
@@ -33,6 +41,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// act with no prompt on screen (owner ruling R-C6).
 		if a.layoutMode() == layoutTooSmall {
 			a.cancelChord()
+		} else if hintShown {
+			// Rewritten in place: the line's hold and the chord's own
+			// three seconds are not restarted.
+			until := a.feedback.until
+			a.setPrefixHint(a.chord.prefix)
+			a.feedback.until = until
 		}
 		// A narrower title column can push a previously-fitting title into
 		// overflow — (re)start the marquee if so. A terminal grown back out
