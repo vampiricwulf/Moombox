@@ -112,11 +112,11 @@ case "R V":
 Never call blocking operations directly in `Update()`.
 
 ### Non-Blocking Channel Sends
-TUI receives events via channels made in `cmd/moombox/tui_wiring.go`. Sends are non-blocking — messages are silently dropped if the channel is full (no counters):
+TUI receives events via channels made in `cmd/moombox/tui_wiring.go`. Sends are non-blocking. The four job forwarders go through `forwardOrDrop` (`cmd/moombox/tui_wiring.go`), which counts a drop, warns once per streak and replays a full snapshot on the next send that gets through; a new channel that carries job state must use it. Other channels drop without replay (log lines are counted and reported at exit):
 ```go
 select {
 case ch <- msg:
-default: // silently dropped if TUI event loop is busy
+default: // dropped while the TUI event loop is busy; no replay, so never for job state
 }
 ```
 
