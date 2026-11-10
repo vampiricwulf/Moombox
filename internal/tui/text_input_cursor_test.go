@@ -51,7 +51,7 @@ func TestFieldReloadParksTheCursorAtTheEnd(t *testing.T) {
 	t.Run("import dialog Tab", func(t *testing.T) {
 		d := NewImportDialogModel()
 		d.Open(t.TempDir())
-		d.step = 1
+		d.step = importStepMeta
 		d.title = "abc"
 		d.channel = "xyzw"
 		d.syncToTextInput()

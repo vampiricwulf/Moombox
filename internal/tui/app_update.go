@@ -637,13 +637,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case fetchFormatsAutoAdvanceMsg:
-		if a.addVideo.AutoAdvanceApplies(msg.VideoID) {
-			// Skip to confirmation with auto settings
-			a.addVideo.step = AddStepConfirm
-			a.addVideo.advancedMode = false
-			a.addVideo.loading = false
-			a.addVideo.fetchFailed = false
-		}
+		a.addVideo.AutoAdvanceToConfirm(msg.VideoID) // skip to confirmation with auto settings
 		return a, nil
 
 	case importResultMsg:

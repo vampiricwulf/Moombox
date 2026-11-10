@@ -173,3 +173,34 @@ func TestAddVideoSubmitsTwitchListings(t *testing.T) {
 		}
 	}
 }
+
+// TestAddVideoAutoAdvanceOwnsItsStep: the jump to Confirm after a failed
+// fetch is the dialog's own transition (K28, as trimDlg.FailCreate) — the
+// App no longer writes the dialog's step and flags itself. It applies only
+// for the video the fetch failed for, and leaves auto settings and no
+// loading or failure flag behind.
+func TestAddVideoAutoAdvanceOwnsItsStep(t *testing.T) {
+	a := NewApp()
+	a.width, a.height = 100, 40
+	a.addVideo.Open()
+	a.addVideo.HandleKey(keyTab)
+	a.addVideo.urlInput = "dQw4w9WgXcQ"
+	a.addVideo.HandleKey(keyEnter)
+	a.Update(fetchFormatsResultMsg{VideoID: "dQw4w9WgXcQ", Err: "Failed to fetch formats. Proceeding with auto selection."})
+	a.addVideo.advancedMode = true
+
+	if a.addVideo.AutoAdvanceToConfirm("other-video") {
+		t.Fatal("auto-advance applied for a video the fetch was not for")
+	}
+	if a.addVideo.step != AddStepVideoFormat {
+		t.Fatalf("step %v after a refused auto-advance", a.addVideo.step)
+	}
+	if !a.addVideo.AutoAdvanceToConfirm("dQw4w9WgXcQ") {
+		t.Fatal("auto-advance refused for the failed video")
+	}
+	m := a.addVideo
+	if m.step != AddStepConfirm || m.advancedMode || m.loading || m.fetchFailed {
+		t.Errorf("after auto-advance: step %v advanced %v loading %v fetchFailed %v; want Confirm, all false",
+			m.step, m.advancedMode, m.loading, m.fetchFailed)
+	}
+}
