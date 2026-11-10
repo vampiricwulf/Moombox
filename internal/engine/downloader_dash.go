@@ -60,6 +60,12 @@ const (
 	// transientFailureRetryDelay is used when behind head but not stuck on
 	// a single segment — treated as a quick transient.
 	transientFailureRetryDelay = 1 * time.Second
+
+	// segmentRetryUnitDelay is the step of fetchSegmentWithRetry's linear
+	// ladder: a transient failure (5xx, timeout, empty body) on attempt n
+	// waits n+1 of these before the next try — 5, 10, 15, 20 s at the
+	// default MaxSegmentRetries.
+	segmentRetryUnitDelay = 5 * time.Second
 	// interruptionStallRetryDelay paces the retry loop while
 	// stallForPossibleResume is deferring a budget-expired finalize. A
 	// resume-detection latency of 5s is negligible against the multi-minute

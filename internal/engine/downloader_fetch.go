@@ -423,9 +423,9 @@ var errSegmentGone = fmt.Errorf("%w", ErrSegmentPermanent)
 // different backoff ramps, neither of them exponential across the whole
 // function: the 403-with-refresh path doubles (singleGoneRetry << attempt —
 // 500ms/1s/2s/4s, sized to outlive credentialRefreshCooldown), while every
-// other transient failure waits a LINEAR 5s x (attempt+1) — 5s, 10s, 15s, 20s
-// over the default MaxSegmentRetries=5, with the final attempt's sleep
-// skipped because no fetch follows it.
+// other transient failure waits a LINEAR segmentRetryUnit x (attempt+1) — 5s,
+// 10s, 15s, 20s over the default MaxSegmentRetries=5, with the final
+// attempt's sleep skipped because no fetch follows it.
 // A 403 or 410 while no head is known is asked again headlessRefusalAttempts
 // times in all before it is permanent; with a head known it is permanent at
 // once, unless a 403 below the head gets the refresh path above.
@@ -597,7 +597,7 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 		// (up to ~25s at the default MaxRetries=5), keeping a catch-up worker
 		// and its un-flushable buffer entry alive that much longer.
 		if attempt < d.opts.MaxRetries-1 {
-			utils.Sleep(ctx, time.Duration(5*(attempt+1))*time.Second)
+			utils.Sleep(ctx, time.Duration(attempt+1)*d.delays.segmentRetryUnit)
 		}
 	}
 	// A cancel that landed during the final attempt is still a cancel, not
