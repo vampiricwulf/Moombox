@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -161,6 +162,56 @@ func TestPumpCopyProgressReportsBlocksThenTheStall(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("pumpCopyProgress did not return at the end of the stream")
+	}
+}
+
+// TestPumpCopyProgressSurvivesAPanickingCallback: a callback that panics is
+// dropped after its first call, and the pump still reads the stream to its
+// end and returns, so the caller's Wait runs and FFmpeg is never left blocked
+// on a full pipe.
+//
+// Mutant: calling fn with no recover (the panic leaves the pump, and the
+// writer below blocks once the pipe is no longer read).
+func TestPumpCopyProgressSurvivesAPanickingCallback(t *testing.T) {
+	m := NewMuxer("ffmpeg", &testLogger{})
+	pr, pw := io.Pipe()
+	calls := 0
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		m.pumpCopyProgress(pr, 1000, time.Hour, func(CopyProgress) {
+			calls++
+			panic("callback broke")
+		})
+	}()
+	wrote := make(chan error, 1)
+	go func() {
+		var err error
+		// Far more blocks than the report buffer holds.
+		for i := 1; i <= 200 && err == nil; i++ {
+			_, err = fmt.Fprintf(pw, "total_size=%d\nprogress=continue\n", i)
+		}
+		pw.Close()
+		wrote <- err
+	}()
+	select {
+	case err := <-wrote:
+		if err != nil {
+			t.Fatalf("the stream was not read to its end: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the pump stopped reading after the callback panicked")
+	}
+	select {
+	case rec := <-done:
+		if rec != nil {
+			t.Fatalf("the callback's panic left the pump: %v", rec)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("pumpCopyProgress did not return at the end of the stream")
+	}
+	if calls != 1 {
+		t.Errorf("the callback ran %d times, want once", calls)
 	}
 }
 

@@ -124,7 +124,8 @@ func (m *Muxer) runFFmpegCopyProgress(ctx context.Context, args []string, total 
 // The read itself runs on a helper goroutine, so that a quiet pipe can be
 // timed. It always drains r to the end — a full pipe would block FFmpeg — and
 // a line it cannot parse is skipped: the readout is a courtesy, and nothing
-// about the copy's outcome is decided here.
+// about the copy's outcome is decided here. A panic in fn is recovered and
+// logged once, and fn is not called again.
 func (m *Muxer) pumpCopyProgress(r io.Reader, total int64, stallAfter time.Duration, fn func(CopyProgress)) {
 	type report struct {
 		size int64
@@ -165,6 +166,23 @@ func (m *Muxer) pumpCopyProgress(r io.Reader, total int64, stallAfter time.Durat
 		}
 	}()
 
+	// A callback that panics is dropped, and the pipe is still read to its
+	// end: the unwind must not pass the caller's Wait, which would leave
+	// FFmpeg running, blocked on a full pipe.
+	dead := false
+	call := func(p CopyProgress) {
+		if dead {
+			return
+		}
+		defer func() {
+			if rec := recover(); rec != nil {
+				dead = true
+				m.logger.Error("panic in the copy progress callback; the copy goes on without it", "panic", rec)
+			}
+		}()
+		fn(p)
+	}
+
 	last := CopyProgress{InputBytes: total}
 	seen := false
 	stall := time.NewTimer(stallAfter)
@@ -177,12 +195,12 @@ func (m *Muxer) pumpCopyProgress(r io.Reader, total int64, stallAfter time.Durat
 			}
 			seen = true
 			last.OutputBytes, last.Finalizing = rep.size, rep.end
-			fn(last)
+			call(last)
 			stall.Reset(stallAfter)
 		case <-stall.C:
 			if seen {
 				last.Finalizing = true
-				fn(last)
+				call(last)
 			}
 			stall.Reset(stallAfter)
 		}
