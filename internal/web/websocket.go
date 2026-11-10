@@ -46,7 +46,6 @@ const (
 	wsWriteQueueSize = 16
 )
 
-
 // WSMessage is a WebSocket message sent to clients.
 // Uses "payload" field to match the TypeScript frontend protocol.
 type WSMessage struct {

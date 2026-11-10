@@ -211,4 +211,3 @@ func TestInitialStateSnapshotSize(t *testing.T) {
 		}
 	}
 }
-
