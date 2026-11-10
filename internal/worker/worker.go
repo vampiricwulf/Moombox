@@ -2339,11 +2339,13 @@ func parkReasonForError(err error) database.ParkReason {
 // errorStage answers "which button fixes this" from the only signal the error
 // carries: the prefix the orchestrator writes.
 //
-// Four finalize shapes exist in orchestrator_mux.go and all four are the mux
+// Six finalize shapes exist in orchestrator_mux.go and all six are the mux
 // stage: muxAndFinalize's fmt.Errorf("mux: %w", err), verifyMuxedDuration's
-// short-output refusal "mux produced …", "no media files to mux…" and
-// "create output dir: %w". The "mux" prefix also keeps "mux segment N:" on the
-// mux side. All of them reach setJobError unwrapped — ExecuteWithChat returns
+// short-output refusal "mux produced …", "no media files to mux…",
+// "create output dir: %w", and the split finalize's two, "create segment
+// output dir: %w" and "no segment files found in staging directory". The
+// "mux" prefix also keeps "mux segment N:" on the mux side, whatever that
+// wraps. The first four reach setJobError unwrapped — ExecuteWithChat returns
 // the finalize error straight through — so the prefix survives. Everything
 // else is the download stage.
 //
@@ -2355,14 +2357,15 @@ func parkReasonForError(err error) database.ParkReason {
 // The prefixes are anchored deliberately: an ffmpeg stderr tail from a
 // DOWNLOAD failure can mention muxing anywhere in its 500 characters, and a
 // substring match would flip the answer for the case that matters most.
-//
-// Known limit: two finalize returns in the same file still read as "download"
-// — "create segment output dir: …" and "no segment files found in staging
-// directory". Naming them would mean teaching every producer a stage argument;
-// the prefixes below are what exists today.
 func errorStage(errMsg string) string {
 	// "mux" alone covers "mux: …", "mux produced …" and "mux segment N: …".
-	for _, p := range []string{"mux", "no media files to mux", "create output dir"} {
+	for _, p := range []string{
+		"mux",
+		"no media files to mux",
+		"create output dir",
+		"create segment output dir",
+		"no segment files found in staging directory",
+	} {
 		if strings.HasPrefix(errMsg, p) {
 			return "mux"
 		}
