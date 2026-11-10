@@ -407,7 +407,11 @@ func twitchMuxTailOpen(prior *database.Job) bool {
 // frozen error text and no park reason at all. database.Open backfills the
 // reason onto such rows, so this is read only for one a boot has not
 // converted — written by an older binary still running against this
-// database, or one whose backfill failed.
+// database, or one whose backfill failed. A Mux a crash interrupted is not
+// such a row: its claim cleared the reason and left the text, but it is
+// Muxing, and the boot re-mux of a Muxing row plans no gap-fill at all
+// (twitchMuxGapFillPlan's status gate) — pinned by
+// TestBootRemuxOfAnEndedOfflineRowReadsNeitherMarker.
 //
 // ONE-RELEASE FALLBACK (owner ruling R-I1): delete this function and its one
 // call, in twitchMuxTailOpen, in the release after the one that introduces

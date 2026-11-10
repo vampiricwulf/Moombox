@@ -441,6 +441,57 @@ func TestMuxedTwitchCaptureKeepsAGapFillPlan(t *testing.T) {
 	}
 }
 
+// TestBootRemuxOfAnEndedOfflineRowReadsNeitherMarker: a Mux of an
+// ended-while-offline row that a crash interrupted leaves the row Muxing,
+// with the claim's cleared park_reason and the error text still on it, and
+// the next boot re-muxes it. That re-mux plans no gap-fill at all — a Muxing
+// prior is refused by twitchMuxGapFillPlan's status gate, ahead of
+// twitchMuxTailOpen — so neither the text nor legacyEndedOfflineRow routes
+// it, whatever stream_end_time says, and deleting the one-release fallback
+// changes nothing on this path (R-I1). The same row muxed as an Error, by its
+// park reason, is the contrast: there the plan and its tail are kept
+// (TestMuxedTwitchCaptureKeepsAGapFillPlan).
+//
+// Mutant: the status gate letting a Muxing prior through (the frozen-text
+// row keeps a plan with a tail through the legacy helper, the reworded one a
+// plan without — the text would route the boot re-mux).
+func TestBootRemuxOfAnEndedOfflineRowReadsNeitherMarker(t *testing.T) {
+	for i, errMsg := range []string{twitchEndedOfflineErrMsg, "the broadcast finished while Moombox was down"} {
+		for j, ended := range []bool{false, true} {
+			w, db := testWorkerSetup(t)
+			id := "tw_4" + string(rune('a'+i*2+j))
+			latchedJob(t, w, db, id, 10, false)
+			fields := map[string]any{
+				"stream_start_time": gapStart.Format(time.RFC3339), "twitch_quality": "chunked",
+				// What muxJob's claim leaves when the process dies mid-mux.
+				"status": database.StatusMuxing, "park_reason": database.ParkReasonNone, "error": errMsg,
+			}
+			if ended {
+				fields["stream_end_time"] = gapStart.Add(6 * time.Minute).Format(time.RFC3339)
+			}
+			db.UpdateJobFields(id, fields)
+			var stagingBase string
+			w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+			cov, _ := json.Marshal(partCoverage{StartMs: ms(5 * time.Minute), EndMs: ms(5*time.Minute + 10*time.Second)})
+			if err := os.WriteFile(filepath.Join(stagingBase, id, twitchCoverageFile), cov, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			w.twitchLiveness = func(context.Context, string) (*twitch.TwitchStreamInfo, error) { return nil, nil }
+
+			if err := w.muxJob(id, muxActionFailure, true); err != nil {
+				t.Fatalf("%q, ended %v: boot re-mux: %v", errMsg, ended, err)
+			}
+			w.wg.Wait()
+			if row, _ := db.GetJob(id); row == nil || row.Status != database.StatusFinished {
+				t.Fatalf("%q, ended %v: re-muxed row = %v (error %q), want Finished", errMsg, ended, statusOf(row), errorOf(row))
+			}
+			if g, _ := db.GetGapFill(id); g != nil {
+				t.Errorf("%q, ended %v: the boot re-mux kept a gap-fill plan: %s", errMsg, ended, g.Plan)
+			}
+		}
+	}
+}
+
 // TestMuxedTwitchCaptureThatLacksNothingDropsAStaleGapFillRow is the Mux
 // path's half of TestTwitchCaptureThatLacksNothingDropsAStaleGapFillRow
 // (owner decision PR-R5): a job whose earlier archive left a settled
