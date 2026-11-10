@@ -325,7 +325,8 @@ type DownloadWorker struct {
 	// ErrAlreadyFinishing rather than land between the archive and its
 	// Finished write (owner ruling R-C1). finishMu serialises the mark with
 	// CancelJob's status write, so either the Cancel lands first and the
-	// finalize stops, or the mark does and the Cancel is refused. Lazily
+	// mark finds it (and re-claims the row when the mux had completed, owner
+	// ruling R-H2), or the mark does and the Cancel is refused. Lazily
 	// allocated, like stagingClaims.
 	finishMu  sync.Mutex
 	finishing map[string]bool
@@ -755,8 +756,11 @@ func (w *DownloadWorker) TwitchHintStats() TwitchHintStats {
 // (jobverbs.CancellableStatuses — every status short of an outcome). And not
 // once its finalize has produced the archive (owner ruling R-C1): the job
 // then ends Finished, and the Cancel answers ErrAlreadyFinishing, with
-// nothing written or flagged. A Cancel that lands before that mark wins as
-// before, and the finalize stops on it (beginFinishing).
+// nothing written or flagged. A Cancel that lands before that mark while
+// the mux still runs stops it and stands; one that lands in the instants
+// between the mux's return and the mark is applied and answered, and the
+// mark then re-claims the row for the archive that is already written
+// (beginFinishing, owner ruling R-H2).
 func (w *DownloadWorker) CancelJob(jobID string) (cancelled, flagged bool, err error) {
 	w.finishMu.Lock()
 	if w.finishing[jobID] {
@@ -780,18 +784,55 @@ func (w *DownloadWorker) CancelJob(jobID string) (cancelled, flagged bool, err e
 }
 
 // beginFinishing marks a job's finalize as past the point of no return —
-// its archive is written — and returns the release, or false when the row
-// already holds an outcome (an operator's Cancel that landed while FFmpeg
-// ran, its listener not yet heard) or is gone: the finalize then stops with
-// ErrCancelled, its staging kept, and the Cancel stands. Under finishMu with
-// the read, so no Cancel can land between the check and the mark; a Cancel
-// after it is refused (CancelJob). A row that cannot be read is not an
-// outcome (as writeUnlessOutcome reads one): the finalize goes on.
-func (w *DownloadWorker) beginFinishing(jobID string) (func(), bool) {
+// its archive is written — and returns the release, or ok false when the
+// finalize must stop: with ErrCancelled, its staging kept, and the row left
+// as it is. Under finishMu with the read, so no Cancel can land between the
+// check and the mark; a Cancel after it is refused (CancelJob).
+//
+// The row decides, read here:
+//   - Muxing, the status every finalize writes before it muxes (or Live or
+//     Downloading, which one whose Muxing write failed on the database still
+//     reads): marked.
+//   - Cancelled, with the mux complete (muxed): an operator's Cancel landed
+//     between FFmpeg's return and this mark, and was acknowledged. Finished
+//     wins (owner ruling R-H2): the archive is whole, and a row left
+//     Cancelled beside it named no file while the file sat at the output
+//     path on no row. The row is re-claimed for the finalize — Cancelled to
+//     Muxing, conditional on its still reading Cancelled — and marked;
+//     reclaimed is true, and the finalize runs its tail on a context the
+//     Cancel did not end. The Cancel had answered success, so the flip is
+//     the job update both UIs get, and the one Info line below names it.
+//   - Cancelled, the mux not complete: the Cancel stopped the mux (a split
+//     finalize's merge or set-aside recovery, whose failures are swallowed),
+//     and stands.
+//   - anything else — another outcome, a reset verb's Upcoming, a requeue,
+//     a park, the row gone: the finalize stops and writes nothing over it.
+//
+// A row that cannot be read is not an outcome (as writeUnlessOutcome reads
+// one): the finalize goes on.
+func (w *DownloadWorker) beginFinishing(jobID string, muxed bool) (release func(), reclaimed, ok bool) {
 	w.finishMu.Lock()
 	defer w.finishMu.Unlock()
-	if job, err := w.db.GetJob(jobID); err == nil && (job == nil || job.IsTerminal()) {
-		return nil, false
+	if job, err := w.db.GetJob(jobID); err == nil {
+		switch {
+		case job == nil:
+			return nil, false, false
+		case job.Status == database.StatusMuxing, job.Status == database.StatusDownloading, job.Status == database.StatusLive:
+		case job.Status == database.StatusCancelled && muxed:
+			// Conditional, though finishMu keeps a Cancel out: a reset verb
+			// takes no such lock, and one that claimed the Cancelled row
+			// since the read keeps it.
+			if !w.db.UpdateJobFieldsIf(jobID, database.StatusCancelled, map[string]any{
+				"status": database.StatusMuxing,
+			}) {
+				return nil, false, false
+			}
+			reclaimed = true
+			w.logger.Info("a Cancel landed after the mux completed and before it was recorded; the archive is written, so the job finishes (the Cancel is superseded)",
+				"jobID", jobID)
+		default:
+			return nil, false, false
+		}
 	}
 	if w.finishing == nil {
 		w.finishing = map[string]bool{}
@@ -801,7 +842,7 @@ func (w *DownloadWorker) beginFinishing(jobID string) (func(), bool) {
 		w.finishMu.Lock()
 		delete(w.finishing, jobID)
 		w.finishMu.Unlock()
-	}, true
+	}, reclaimed, true
 }
 
 // WaitForJobExit blocks until the job's orchestrator goroutine has returned,

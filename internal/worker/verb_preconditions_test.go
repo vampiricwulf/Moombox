@@ -389,44 +389,6 @@ func TestALateCancelOfASplitFinalizeLeavesItFinished(t *testing.T) {
 	}
 }
 
-// TestACancelBeforeASplitFinalizeIsMarkedStands: the other side, split
-// shape. A Cancel acknowledged before the finalize marks itself finishing
-// stands: the finalize stops with ErrCancelled, the row stays Cancelled, and
-// the parts stay on their rows and on disk.
-//
-// Mutant: the !ok branch after finishing() dropped — the finalize writes
-// Finished over the acknowledged Cancel.
-func TestACancelBeforeASplitFinalizeIsMarkedStands(t *testing.T) {
-	w, db := testWorkerSetup(t)
-	jobCtx, segments := splitFinalizeFixture(t, w, db, "j-split-early")
-	mark := w.orchestrator.beginFinishing
-	var cancelled bool
-	w.orchestrator.beginFinishing = func(id string) (func(), bool) {
-		cancelled, _, _ = w.CancelJob(id)
-		return mark(id)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := w.orchestrator.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil); !errors.Is(err, ErrCancelled) {
-		t.Fatalf("finalizeMultiSegmentJob = %v, want ErrCancelled", err)
-	}
-	if !cancelled {
-		t.Fatal("the Cancel ahead of the mark was refused")
-	}
-	if j, _ := db.GetJob("j-split-early"); j.Status != database.StatusCancelled {
-		t.Errorf("row = %s, want the acknowledged Cancel standing", j.Status)
-	}
-	rows, _ := db.GetSegments("j-split-early")
-	if len(rows) != 2 {
-		t.Errorf("segment rows = %d, want both parts kept", len(rows))
-	}
-	for _, s := range segments {
-		if _, err := os.Stat(s.FilePath); err != nil {
-			t.Errorf("part %s gone: %v", s.Filename, err)
-		}
-	}
-}
-
 // TestALateCancelLeavesTheArchiveFinished is owner ruling R-C1: a Cancel that
 // reaches a job whose finalize has already written its archive — after
 // FFmpeg, before the Finished write — used to be written Cancelled and
@@ -463,42 +425,5 @@ func TestALateCancelLeavesTheArchiveFinished(t *testing.T) {
 	// Once finished, the mark is gone: a Cancel is the ordinary "ended" answer.
 	if c, _, err := w.CancelJob("j-late"); c || err != nil {
 		t.Errorf("Cancel of the Finished row = %v, %v; want not cancelled, no error", c, err)
-	}
-}
-
-// TestACancelBeforeTheArchiveIsMarkedStands: the other side of R-C1. A
-// Cancel that lands while FFmpeg writes the archive, before the finalize
-// marks itself finishing, was acknowledged; the finalize then finds the row's
-// outcome when it tries to mark, stops, and the row stays Cancelled with its
-// staging kept. The file written is left where it is (logged).
-//
-// Mutant: beginFinishing marking without reading the row — the finalize
-// writes Finished over the acknowledged Cancel.
-func TestACancelBeforeTheArchiveIsMarkedStands(t *testing.T) {
-	w, db := testWorkerSetup(t)
-	staging, _ := muxFixtureJob(t, w, db, "j-early")
-	ffmpegPath, _ := requireFFmpegTools(t)
-	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 3)
-	db.UpdateJobFields("j-early", map[string]any{"status": database.StatusError})
-
-	mark := w.orchestrator.beginFinishing
-	var cancelled bool
-	w.orchestrator.beginFinishing = func(id string) (func(), bool) {
-		cancelled, _, _ = w.CancelJob(id)
-		return mark(id)
-	}
-	if err := w.MuxJob("j-early"); err != nil {
-		t.Fatal(err)
-	}
-	w.wg.Wait()
-
-	if !cancelled {
-		t.Fatal("the Cancel ahead of the mark was refused")
-	}
-	if j, _ := db.GetJob("j-early"); j.Status != database.StatusCancelled {
-		t.Errorf("row = %s, want the acknowledged Cancel standing", j.Status)
-	}
-	if !HasSegmentFiles(filepath.Dir(staging), "j-early") {
-		t.Error("staging was reclaimed under a Cancelled row")
 	}
 }

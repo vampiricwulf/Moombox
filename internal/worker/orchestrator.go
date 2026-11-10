@@ -111,9 +111,11 @@ type DownloadOrchestrator struct {
 	// beginFinishing marks a finalize whose archive is written, so a late
 	// Cancel is refused rather than land before the Finished write
 	// (DownloadWorker.beginFinishing, set by the worker; owner ruling R-C1).
-	// false: the row already holds an outcome, and the finalize stops. nil
+	// muxed says the finalize's mux work completed; with it, a row a Cancel
+	// reached just before the mark is re-claimed (reclaimed true; owner ruling
+	// R-H2). ok false: the row is no longer the finalize's, and it stops. nil
 	// (an orchestrator a test builds by struct literal) always goes on.
-	beginFinishing func(jobID string) (release func(), ok bool)
+	beginFinishing func(jobID string, muxed bool) (release func(), reclaimed, ok bool)
 
 	// muxRootCtx parents every mux that must OUTLIVE its job's own context —
 	// the background part muxes, the connectivity-outage finalize and the
@@ -1160,9 +1162,9 @@ func streamIdentityChanged(old, fresh *DownloadResult) bool {
 
 // finishing is beginFinishing, or a no-op mark for an orchestrator built
 // without a worker.
-func (o *DownloadOrchestrator) finishing(jobID string) (func(), bool) {
+func (o *DownloadOrchestrator) finishing(jobID string, muxed bool) (release func(), reclaimed, ok bool) {
 	if o.beginFinishing == nil {
-		return func() {}, true
+		return func() {}, false, true
 	}
-	return o.beginFinishing(jobID)
+	return o.beginFinishing(jobID, muxed)
 }
