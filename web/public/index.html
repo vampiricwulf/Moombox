@@ -246,6 +246,29 @@
                     </div>
                 </div>
 
+                <!-- Shown in place of the skeleton when the page loads over HTTP
+                     but its WebSocket is refused (app.js _syncWsNotice). The
+                     status region is always rendered and only its content is
+                     shown or hidden, so a screen reader announces the notice
+                     when it appears. A plain div, not sl-alert: that carries
+                     its own role="alert". -->
+                <div role="status">
+                    <div id="jobs-ws-notice" hidden>
+                        <sl-icon name="wifi-off" aria-hidden="true"></sl-icon>
+                        <div>
+                            <strong>Live updates cannot connect.</strong>
+                            This page loaded, but the WebSocket connection that carries the job list is being refused.
+                            If Moombox is behind a reverse proxy, the proxy is probably not forwarding WebSocket upgrades:
+                            see "Reverse proxy with HTTPS" in the README for the lines nginx needs.
+                            If the proxy already forwards upgrades, look in the Moombox log for
+                            "websocket upgrade rejected": the line names the reason, for example an
+                            Origin that does not match the host Moombox sees, which setting
+                            <code>public_url</code> or forwarding the Host header fixes.
+                            Moombox keeps retrying, and the list appears as soon as it connects.
+                        </div>
+                    </div>
+                </div>
+
                 <div id="empty-state" style="display: none">
                     <sl-icon name="inbox" aria-hidden="true"></sl-icon>
                     <p>No jobs yet</p>
@@ -273,6 +296,23 @@
                     <span id="archived-filter-count" style="display:none"></span>
                 </div>
 
+                <!-- The two live regions are always rendered and only their
+                     content is shown or hidden: a region that is itself
+                     revealed is not reliably announced. -->
+                <div role="alert">
+                    <div id="archived-fetch-error" class="archived-notice" style="display: none">
+                        <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
+                        <span id="archived-fetch-error-text"></span>
+                        <sl-button id="archived-retry" size="small">Retry</sl-button>
+                    </div>
+                </div>
+                <div role="status">
+                    <div id="archived-loading" class="archived-notice" style="display: none">
+                        <sl-spinner aria-hidden="true"></sl-spinner>
+                        <span>Loading archived jobs…</span>
+                    </div>
+                </div>
+
                 <div id="archived-table" class="archived-table" role="table" aria-label="Archived jobs">
                     <div id="archived-table-header" role="row">
                         <div role="columnheader">Thumbnail</div>
@@ -284,6 +324,11 @@
                     <div id="archived-container" role="rowgroup">
                         <!-- Archived jobs will be rendered here -->
                     </div>
+                </div>
+
+                <div id="archived-more" class="archived-notice" style="display: none">
+                    <span id="archived-more-count" aria-live="polite"></span>
+                    <sl-button id="archived-show-more" size="small">Show more</sl-button>
                 </div>
 
                 <div id="archived-empty-state" style="display: none">
@@ -2150,8 +2195,8 @@
                 <dt><kbd>Esc</kbd></dt><dd>Close dialog</dd>
                 <dt><kbd>1</kbd>-<kbd>8</kbd></dt><dd>Switch tabs</dd>
                 <dt><kbd>F</kbd></dt><dd>Focus search</dd>
-                <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Navigate job list</dd>
-                <dt><kbd>Enter</kbd></dt><dd>Open selected job details</dd>
+                <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Navigate job list (Tasks and Archived)</dd>
+                <dt><kbd>Enter</kbd> / <kbd>Space</kbd></dt><dd>Open the focused job's details</dd>
             </dl>
             <sl-divider></sl-divider>
             <h3>Player Tab</h3>
@@ -2202,7 +2247,7 @@
 
         <!-- Batch Action Bar (fixed, panel-aware) -->
         <div id="batch-action-bar" role="status" aria-live="polite" style="display: none;">
-            <span id="batch-count" aria-label="Selection count"></span>
+            <span id="batch-count"></span>
             <sl-button id="batch-select-all" variant="text" size="small">Select All</sl-button>
             <div class="batch-actions">
                 <sl-button id="batch-cancel" variant="warning" size="small">

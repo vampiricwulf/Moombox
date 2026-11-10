@@ -35,15 +35,19 @@ func HasStagingFiles(stagingBase, jobID string) bool {
 
 // ListedJob is a job row as the jobs list carries it — GET /api/jobs and
 // /api/jobs/archived, and the dashboard's WebSocket rows (initial_state,
-// jobs_update, job_update) — with HasStaging (HasStagingFiles) for a row in a
-// status Resume can be offered from (owner decision PE-5): the dashboard's
-// row icon is Resume only where the job is resumable and has staging to
-// resume, else Reinitialize, and with no flag on the list's rows it offered
-// Resume on every resumable row and let the server answer "use
-// Reinitialize". One directory read per such row, computed server-side, so
-// the dashboard makes no extra request per row. Absent (nil) for a row in
-// any other status — a live capture's staging is its own — which the
-// dashboard reads as unknown and keeps what it last held. The job's own
+// jobs_update, job_update) — with HasStaging (HasStagingFiles) for a row
+// Resume can be offered on (owner ruling R-B2, which narrows the earlier
+// PE-5 for list rows): the dashboard's row icon is Resume only where the job
+// is resumable and has staging to resume, else Reinitialize, and with no
+// flag on the list's rows it offered Resume on every resumable row and let
+// the server answer "use Reinitialize". One directory read per such row,
+// computed server-side, so the dashboard makes no extra request per row.
+// Absent (nil) for every other row — a live capture's staging is its own,
+// and a Twitch row or a Finished row without an incomplete tail can never
+// offer Resume, so nothing reads the answer and the directory is not read —
+// which the dashboard reads as unknown and keeps what it last held. The
+// details dialog does not depend on it: GET /api/jobs/{id} reports
+// hasStaging for every job. The job's own
 // fields, and its JobVersion (the hub's frame ordering), come through the
 // embedded row unchanged. The flag is a snapshot taken when the row is sent:
 // a Finished row broadcast at its Muxing → Finished write can still say true
@@ -55,17 +59,21 @@ type ListedJob struct {
 	HasStaging *bool `json:"hasStaging,omitempty"`
 }
 
-// stagingFlag reports whether ListedJob carries HasStaging for a job in
-// status s: every status Resume can be offered from, whatever its row says of
-// the tail — Error, Cancelled, COOKIES? and Finished, which a capture with an
-// incomplete tail resumes from (jobverbs.ResumableStatus).
-func stagingFlag(s database.JobStatus) bool { return jobverbs.ResumableStatus(s, true) }
+// stagingFlag reports whether ListedJob carries HasStaging for job: exactly
+// the rows Resume can be offered on — a resumable status (Error, Cancelled,
+// COOKIES?, or Finished with an incomplete tail, jobverbs.ResumableStatus) on
+// a platform that resumes at all (jobverbs.ResumeSupported). The same two
+// predicates the /resume route and the dashboard's canResumeJob apply before
+// they look at staging, so no row that could offer Resume loses the flag.
+func stagingFlag(job *database.Job) bool {
+	return jobverbs.ResumableStatus(job.Status, job.IncompleteTail) && jobverbs.ResumeSupported(job.Platform)
+}
 
 // ListJob is job as the jobs list carries it (ListedJob), its staging read
-// from stagingBase when its status is one stagingFlag accepts.
+// from stagingBase when the row is one stagingFlag accepts.
 func ListJob(stagingBase string, job *database.Job) ListedJob {
 	row := ListedJob{Job: job}
-	if job != nil && stagingFlag(job.Status) {
+	if job != nil && stagingFlag(job) {
 		has := HasStagingFiles(stagingBase, job.ID)
 		row.HasStaging = &has
 	}

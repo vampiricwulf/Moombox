@@ -53,6 +53,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `app.test.mjs` | rendering pins: job cards, Files rows and the details dialog against `fixtures/app-job-items.json` (see [The app harness](#the-app-harness)) |
 | `app-resync.test.mjs` | a mid-session `initial_state` replaces the job list and the log buffer, and keeps the details dialog |
 | `archive-boundary.test.mjs` | the dashboard's archive cutoff, the JS twin of `internal/jobfilter` |
+| `archived-panel.test.mjs` | the Archived panel: a failed fetch keeps the list and selection and offers Retry, late answers are dropped, the newest 200 cards with Show more, filter and Select All over every row, and Arrow/Enter on its rows; the fetch notices follow the newest fetch only, Retry shows busy, the failure line is not rewritten on a redraw; one row is a tab stop, Arrow moves real focus, a focused row is the highlighted row, Enter and Space open it |
 | `boot-and-login.test.mjs` | `boot-theme.js` and `login.js` evaluated against the real `index.html` and `login.html` |
 | `channel-removal.test.mjs` | removing a channel asks: keep its jobs (the default) or delete the pending ones, and the toast says what it did; its prompt-text tests are pure |
 | `dashboard-text.test.mjs` | small user-facing strings: a singular chat count, the Stats tab with no disk reading, a single-file recording's load error |
@@ -97,6 +98,8 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `setup-wizard.test.mjs` | the first-run wizard's Finish: the address it redirects the tab to after the restart |
 | `sidecar-warning.test.mjs` | the header warning while the BotGuard sidecar is down |
 | `stats-storage.test.mjs` | the Stats tab's storage breakdown, Cancelled included |
+| `ws-refused-notice.test.mjs` | the Tasks notice after three refused upgrades with HTTP reachable on a page that never connected: the count restarts on an unreachable answer, a stale probe is not counted, the first open clears it, a page that connected before never shows it; its text names both causes, it is content of an always-rendered status region, and a render while it shows draws no empty state |
+| `tasks-incremental.test.mjs` | the Tasks list's cheap paths against a full rebuild: the sort's precomputed keys, the channel list, one-card removal and re-placement, and the hidden-tab repaint; a thumbnail that arrives in a same-status update, archive-at-once without a rebuild, a status-changing progress frame reaching the open dialog, and the one-row tab stop through inserts, moves and deletes |
 | `trimmer.test.mjs` | the trim dialog's failure states and keyboard reach |
 | `twitch-urls.test.mjs` | `extractTwitchTarget` against the shared Twitch URL table (`internal/utils/testdata/twitch_urls.json`), and the Add dialog refusing clips and lists |
 | `update-check-debounce.test.mjs` | a debounced update check reports the wait, not "Up to date" |

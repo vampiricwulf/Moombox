@@ -154,7 +154,7 @@ test("the batch Reinitialize confirm names the totals", { skip }, async () => {
 // The row's restart icon is Resume where the job can continue, and
 // Reinitialize only where it cannot; both stay in the overflow menu. Owner
 // decision PE-5: "can continue" needs the server's hasStaging, which every
-// terminal list row carries — a resumable row with nothing staged, or one
+// list row Resume can be offered on carries — a resumable row with nothing staged, or one
 // without the flag, gets Reinitialize.
 //
 // Mutants: the row keeping the arrow-clockwise Reinitialize icon for a

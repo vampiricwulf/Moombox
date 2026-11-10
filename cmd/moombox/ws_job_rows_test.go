@@ -16,7 +16,8 @@ import (
 // WebSocket side: the dashboard's job list is built from initial_state,
 // jobs_update and job_update, not GET /api/jobs, so each of them sends its
 // rows through listedJob(s), which reads the configured staging base and
-// flags a terminal row's hasStaging — the row icon's Resume needs it. The
+// flags hasStaging on a row Resume can be offered on (owner ruling R-B2
+// narrowed the flag to those) — the row icon's Resume needs it. The
 // rows keep the hub's frame ordering: a listed row still answers
 // JobVersion, so a stale job_update is still dropped behind a later one.
 //
@@ -26,7 +27,8 @@ import (
 //
 // Mutants (each run): any one job_update, jobs_update or initial_state site
 // sending the bare row (its pin fails); listedJob reading another staging
-// base (the staged row reads false).
+// base (the staged row reads false); listedJob flagging every terminal row
+// (the Finished and Twitch rows carry one).
 func TestDashboardJobRowsCarryHasStaging(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Defaults()
@@ -39,9 +41,12 @@ func TestDashboardJobRowsCarryHasStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 	jobs := []*database.Job{
-		{ID: "staged", Status: database.StatusError, Version: 7},
-		{ID: "bare", Status: database.StatusCancelled},
-		{ID: "live", Status: database.StatusDownloading},
+		{ID: "staged", Status: database.StatusError, Platform: "youtube", Version: 7},
+		{ID: "bare", Status: database.StatusCancelled, Platform: "youtube"},
+		{ID: "live", Status: database.StatusDownloading, Platform: "youtube"},
+		{ID: "staged", Status: database.StatusFinished, Platform: "youtube"},
+		{ID: "staged", Status: database.StatusFinished, Platform: "youtube", IncompleteTail: true},
+		{ID: "staged", Status: database.StatusError, Platform: "twitch"},
 	}
 	raw, err := json.Marshal(listedJobs(store, jobs))
 	if err != nil {
@@ -51,7 +56,7 @@ func TestDashboardJobRowsCarryHasStaging(t *testing.T) {
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		t.Fatal(err)
 	}
-	for i, want := range []any{true, false, nil} {
+	for i, want := range []any{true, false, nil, nil, true, nil} {
 		got, present := rows[i]["hasStaging"]
 		if want == nil && present || want != nil && got != want {
 			t.Errorf("%s: hasStaging = %v (present %v), want %v", jobs[i].ID, got, present, want)

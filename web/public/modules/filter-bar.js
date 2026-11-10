@@ -3,14 +3,13 @@
  */
 import { openToken, parseFilterQuery, serializeToken } from "./filter-parser.js";
 import { applyFilterTokens } from "./filter-engine.js";
+import { NAME_COLLATOR } from "./utils.js";
 
 export class FilterBarController {
   constructor(app) {
     this.app = app;
     this.tasksFilterTokens = [];
     this.archivedFilterTokens = [];
-    this._tasksChannels = [];
-    this._archivedChannels = [];
   }
 
   /** Wire up both filter bars (Tasks and Archived tabs). */
@@ -18,13 +17,13 @@ export class FilterBarController {
     this._setupUnifiedFilter("tasks-filter", {
       getTokens: () => this.tasksFilterTokens,
       setTokens: (tokens) => { this.tasksFilterTokens = tokens; this.app.renderJobs(); },
-      getChannels: () => this._tasksChannels,
+      getChannels: () => this.channels("jobs"),
     });
 
     this._setupUnifiedFilter("archived-filter", {
       getTokens: () => this.archivedFilterTokens,
       setTokens: (tokens) => { this.archivedFilterTokens = tokens; this.app.renderArchivedJobs(); },
-      getChannels: () => this._archivedChannels,
+      getChannels: () => this.channels("archived"),
     });
   }
 
@@ -33,13 +32,14 @@ export class FilterBarController {
     return containerKey === "archived" ? this.archivedFilterTokens : this.tasksFilterTokens;
   }
 
-  /** Recompute the channel dropdown list for a container key, from its current job set. */
-  refreshChannels(containerKey, jobs) {
-    const list = [...new Set(jobs.map(j => j.channelName).filter(Boolean))].sort(
-      (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })
-    );
-    if (containerKey === "archived") this._archivedChannels = list;
-    else this._tasksChannels = list;
+  /**
+   * The channel dropdown list for a container key ("jobs" or "archived"),
+   * from the jobs held right now. Computed when asked for: only the open
+   * dropdown reads it, so no render pays for the dedup and sort.
+   */
+  channels(containerKey) {
+    const jobs = containerKey === "archived" ? this.app.archivedJobs : this.app.jobs;
+    return [...new Set((jobs || []).map(j => j.channelName).filter(Boolean))].sort(NAME_COLLATOR.compare);
   }
 
   getFilteredJobs() {

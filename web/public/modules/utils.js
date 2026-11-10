@@ -3,6 +3,25 @@
  */
 
 /**
+ * The one collator for case-insensitive name order: the Tasks list's title
+ * sort and the filter bar's channel list. String.localeCompare(b, undefined,
+ * { sensitivity: "base" }) gives the same order but builds a collator on
+ * every call, which made a 3,000-row sort cost about twenty times this one.
+ *
+ * Built on the first comparison, not when the module loads: the Go tests
+ * that run this file (utilsVM, internal/web/routes) use a runtime with no
+ * Intl, and a load-time `new Intl.Collator` failed every one of them.
+ * `compare` reads no `this`, so it can be passed straight to Array.sort.
+ */
+let nameCollator = null;
+export const NAME_COLLATOR = {
+  compare(a, b) {
+    if (!nameCollator) nameCollator = new Intl.Collator(undefined, { sensitivity: "base" });
+    return nameCollator.compare(a, b);
+  },
+};
+
+/**
  * Format seconds into H:MM:SS or M:SS timestamp.
  */
 export function formatTimestamp(seconds) {
@@ -1019,8 +1038,10 @@ export function channelRemovedToast(choice, summary, data) {
  * three conditions (jobs.go resume route); this keeps the UI from offering
  * what the server will refuse.
  *
- * `hasStaging` is on every terminal list row (the server's worker.ListJob,
- * owner decision PE-5) and on the details view's fetched job; a row without
+ * `hasStaging` is on every list row that passes the status and platform
+ * arms below (the server's worker.ListJob applies the same two, owner
+ * decision PE-5 as ruling R-B2 narrowed it) and on the details view's
+ * fetched job, whatever its status; a row without
  * it (`undefined`) is unknown, and by default passes through to the server's
  * check — only a known `false` excludes.
  *

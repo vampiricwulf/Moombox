@@ -14,7 +14,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -35,6 +35,16 @@ const TASK_STATUS_PRIORITY = {
  * re-tried, and the operator can log in again in another tab.
  */
 const SESSION_RECHECK_MS = 30000;
+// How many upgrades in a row must be refused, each with the server answering
+// over HTTP, before a page that has never connected says so in the Tasks
+// panel (owner ruling R-B3). One or two is what a restart behind a healthy
+// proxy looks like; three is about four seconds of backoff.
+const WS_REFUSED_NOTICE_AFTER = 3;
+// How many Archived cards one draw adds. The whole archived list is held in
+// memory (the filter, Select All and the details lookup read all of it); only
+// the cards are bounded, because each one is a dozen Shoelace elements and a
+// 24/7 recorder's archive only grows (owner ruling R-B1).
+const ARCHIVED_PAGE = 200;
 
 export const ConnState = Object.freeze({
   CONNECTING: "connecting",
@@ -68,6 +78,12 @@ export class MoomboxApp {
     this.reconnectAttempts = 0;
     /** One of ConnState; written only by _setConnState. */
     this._connState = ConnState.CONNECTING;
+    // What the Tasks panel's "live updates cannot connect" notice is derived
+    // from: whether any socket of this page has opened, and how many upgrades
+    // in a row were refused while HTTP answered. _syncWsNotice is the only
+    // writer of the notice itself.
+    this._wsEverOpened = false;
+    this._wsRefusedReachable = 0;
     this.autoCookieReloginRequired = null;
     // Tri-state; see loadStatus. null = the server has no opinion.
     this.sidecarHealthy = null;
@@ -90,6 +106,24 @@ export class MoomboxApp {
     this._countdownInterval = null;
     this._archiveSweepInterval = null;
     this.focusedJobIndex = -1;
+    // The Archived panel's own keyboard focus, an index into its drawn rows.
+    this.focusedArchivedIndex = -1;
+    // The Archived fetch. fetchArchivedJobs is the only writer of these five.
+    this._archivedGen = 0;            // the newest fetch; an older answer is dropped
+    this._archivedAnsweredGen = 0;    // the newest fetch whose answer (or failure) was taken
+    this._archivedInFlight = 0;       // fetches not yet answered, of any generation
+    this._archivedLoaded = false;     // an answer has been applied
+    this._archivedFetchFailed = false; // the newest answered fetch failed
+    // Ids that left the archive while a fetch was out. The answer was built
+    // before they left, so it is filtered against them. _removeArchivedJob
+    // adds to it; fetchArchivedJobs clears it.
+    this._archivedGoneInFlight = new Set();
+    // Progress frames were merged while the tab was hidden and the list has
+    // not been drawn since. Set by the job_progress case's hidden branch,
+    // cleared by _repaintAfterHidden.
+    this._repaintOnVisible = false;
+    // How many Archived cards are drawn at most; Show more raises it.
+    this._archivedRenderLimit = ARCHIVED_PAGE;
     // Active tab-panel name, maintained by the sl-tab-show handler. Used to
     // defer Archived-panel DOM work while that panel isn't visible (tracked
     // as state rather than queried from the DOM so the guard can't race
@@ -182,9 +216,10 @@ export class MoomboxApp {
     this.checkSecurityBanner();
     // 1 Hz UI tick. Skipped entirely while the tab is hidden — the
     // visibilitychange handler at the bottom of this file re-fires both
-    // updates on return so stale strings never show. This is the app's only
-    // always-on DOM work; keeping it silent in the background matters for a
-    // dashboard left open 24/7.
+    // updates on return so stale strings never show. Keeping it silent in
+    // the background matters for a dashboard left open 24/7. The other
+    // always-on DOM work is the job_progress frame's card and dialog update,
+    // which a hidden tab skips the same way (_repaintAfterHidden).
     this._countdownInterval = setInterval(() => {
       if (document.hidden) return;
       this.updateCheckCountdown();
@@ -312,8 +347,14 @@ export class MoomboxApp {
         this._activePanel = e.detail.name;
         if (e.detail.name === "archived") {
           // Render any changes deferred while the panel was hidden for
-          // instant feedback, then refresh from the server.
-          if (this._archivedRenderDirty) this.renderArchivedJobs();
+          // instant feedback, then refresh from the server. Each visit
+          // starts from the newest page again, so the cards drawn by Show
+          // more do not pile up across visits. A limit that shrank is drawn
+          // now: the fetch below can take seconds, and until it answers
+          // Arrow and Enter would walk 200 rows of a list showing more.
+          const shrank = this._archivedRenderLimit !== ARCHIVED_PAGE;
+          this._archivedRenderLimit = ARCHIVED_PAGE;
+          if (this._archivedRenderDirty || shrank) this.renderArchivedJobs();
           this.fetchArchivedJobs();
         } else if (e.detail.name === "player") {
           if (!this.player.playerInitialized) {
@@ -507,6 +548,15 @@ export class MoomboxApp {
     // Shared click handler for job containers (active + archived)
     const setupJobContainer = (container, containerKey, jobSource) => {
       if (!container) return;
+      // A row that takes DOM focus (Tab, a click, Arrow) is the highlighted
+      // row: the highlight and the focus are one thing, so Enter and Space
+      // act on the row a screen reader just announced.
+      container.addEventListener("focusin", (e) => {
+        const card = e.target;
+        if (!(card instanceof Element) || !card.classList.contains("video-item")) return;
+        if (card.hasAttribute("data-focused")) return;
+        this._highlightRow(container, card);
+      });
       container.addEventListener("click", (e) => {
         // Batch selection checkbox
         const checkbox = e.target.closest(".job-checkbox");
@@ -611,6 +661,17 @@ export class MoomboxApp {
       this.updateBatchActionBar();
     });
     document.getElementById("batch-clear")?.addEventListener("click", () => this._clearSelectionUI());
+    document.getElementById("archived-retry")?.addEventListener("click", () => this.fetchArchivedJobs());
+    document.getElementById("archived-show-more")?.addEventListener("click", (e) => {
+      const before = this._archivedRenderLimit;
+      this._archivedRenderLimit += ARCHIVED_PAGE;
+      this.renderArchivedJobs();
+      // The last page hides the button: keyboard focus would fall to the
+      // page, so it goes to the first row the click drew.
+      if (e.currentTarget.closest("#archived-more")?.style.display === "none") {
+        document.getElementById("archived-container")?.querySelectorAll(".video-item")[before]?.focus();
+      }
+    });
   }
 
   async loadConfig() {
@@ -1074,6 +1135,9 @@ export class MoomboxApp {
     this.ws.onopen = () => {
       console.log("WebSocket connected");
       opened = true;
+      this._wsEverOpened = true;
+      this._wsRefusedReachable = 0;
+      this._syncWsNotice();
       const isReconnect = this.reconnectAttempts > 0;
       this.reconnectAttempts = 0;
       this._lastPong = Date.now();
@@ -1129,11 +1193,16 @@ export class MoomboxApp {
         return;
       }
       // Closed before it opened: one probe tells an expired session from a
-      // server that is down or restarting.
-      this._probeSession().then((unauthorized) => {
+      // server that is down or restarting, and both from a server that
+      // answers HTTP and refuses only the upgrade.
+      this._probeSession().then((answer) => {
         // A newer socket (a manual connect) owns the connection now.
         if (this.ws !== ws) return;
-        if (unauthorized) this._holdUnauthorized(ws);
+        // Refusals count only in a row: an answer that is not "reachable"
+        // starts again, so a restart is never added to a proxy fault.
+        this._wsRefusedReachable = answer === "reachable" ? this._wsRefusedReachable + 1 : 0;
+        this._syncWsNotice();
+        if (answer === "unauthorized") this._holdUnauthorized(ws);
         else this.scheduleReconnect();
       });
     };
@@ -1175,9 +1244,9 @@ export class MoomboxApp {
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
-      this._probeSession().then((unauthorized) => {
+      this._probeSession().then((answer) => {
         if (this.ws !== ws) return;
-        if (unauthorized) this._holdUnauthorized(ws);
+        if (answer === "unauthorized") this._holdUnauthorized(ws);
         else this.connectWebSocket();
       });
     }, SESSION_RECHECK_MS);
@@ -1189,18 +1258,49 @@ export class MoomboxApp {
    * the same AuthMiddleware as the upgrade, so a local peer is waived exactly
    * as it is — says whether the session is gone. It goes through the wrapped
    * fetch, whose 401 handling reloads to the login page; there is no second
-   * 401 path here. Resolves true for a 401, false for anything else,
-   * including a server that cannot be reached (that is a plain backoff,
-   * never a reload).
-   * @returns {Promise<boolean>}
+   * 401 path here. Resolves "unauthorized" for a 401, "reachable" for a
+   * success, and "unreachable" for anything else: a server that cannot be
+   * reached, or a proxy answering for one that is down (a 502). Only
+   * "unauthorized" stops the retries; the other two are a plain backoff,
+   * never a reload, and differ only in what _syncWsNotice makes of them.
+   * @returns {Promise<"unauthorized"|"reachable"|"unreachable">}
    */
   async _probeSession() {
     try {
       const response = await fetch("/api/status");
-      return response.status === 401;
+      if (response.status === 401) return "unauthorized";
+      return response.ok ? "reachable" : "unreachable";
     } catch {
-      return false;
+      return "unreachable";
     }
+  }
+
+  /**
+   * The only writer of the Tasks panel's #jobs-ws-notice, which stands in
+   * for the loading skeleton when live updates cannot connect (owner ruling
+   * R-B3). The job list arrives only over the WebSocket, so a page whose
+   * HTTP works and whose upgrade is refused — usually a reverse proxy that
+   * does not forward WebSocket upgrades — showed the skeleton for ever under
+   * a small "Reconnecting (n)" label.
+   *
+   * Derived, never stored: shown while no socket of this page has opened
+   * and WS_REFUSED_NOTICE_AFTER upgrades in a row were refused with the
+   * server answering over HTTP. The first open clears it and puts the
+   * skeleton back for the moment before initial_state draws the list. A
+   * page that has connected before keeps its list and the status bar's
+   * label instead. The retries go on underneath; no job list is loaded
+   * over HTTP, which would read as live.
+   */
+  _syncWsNotice() {
+    const show = this._wsNoticeShows();
+    const notice = document.getElementById("jobs-ws-notice");
+    if (notice) notice.hidden = !show;
+    document.getElementById("jobs-skeleton")?.classList.toggle("ws-refused", show);
+  }
+
+  /** Whether the "live updates cannot connect" notice is due (see _syncWsNotice). */
+  _wsNoticeShows() {
+    return !this._wsEverOpened && this._wsRefusedReachable >= WS_REFUSED_NOTICE_AFTER;
   }
 
   /**
@@ -1371,7 +1471,8 @@ export class MoomboxApp {
       }
 
       case "job_update": {
-        // Single job update - update in place, or full re-render if status changed
+        // Single job update - update in place; a status change re-places the
+        // one card (_moveJobCard), with renderJobs as the fallback
         const updatedJob = p;
         if (!updatedJob?.id) break;
         const jobIndex = this.jobs.findIndex((j) => j.id === updatedJob.id);
@@ -1387,9 +1488,11 @@ export class MoomboxApp {
           // status change that first makes Recover offerable.
           this.details._preserveStagingFields([oldJob], [updatedJob]);
           this.jobs[jobIndex] = updatedJob;
-          // Status change affects sort order — do full re-render
+          // A status change moves the row to another group: its card is taken
+          // out and drawn again at its new place. The whole list is rebuilt
+          // only when that cannot be proven equal to a rebuild.
           if (oldStatus !== updatedJob.status) {
-            this.renderJobs();
+            if (!this._moveJobCard(updatedJob)) this.renderJobs();
             // The picker lists Finished recordings: one that just finished
             // muxing (or left Finished) changes what it should offer.
             if (oldStatus === "Finished" || updatedJob.status === "Finished") this._refreshPlayerPicker();
@@ -1404,11 +1507,18 @@ export class MoomboxApp {
             // completed row's newer updatedAt. Patched in place, the card
             // kept its old position while Arrow navigation and Enter index
             // the re-sorted list, so the highlight landed on the wrong row.
-            this.renderJobs();
-            this.stats.updateActiveIndicator(this.jobs);
+            if (!this._moveJobCard(updatedJob)) this.renderJobs();
+          } else if (this._cardShape(oldJob) !== this._cardShape(updatedJob)) {
+            // Same status and place, but a part of the card updateJobCard
+            // does not patch has changed (the Resume icon, the missing-tail
+            // mark): this one card is drawn again where it is. It used to
+            // wait for the next rebuild of the whole list, which another
+            // row's status change no longer causes.
+            if (!this._moveJobCard(updatedJob)) this.renderJobs();
           } else {
+            // No active-indicator refresh in either same-status branch: the
+            // indicator counts rows by status, and no status moved.
             this.updateJobCard(updatedJob);
-            this.stats.updateActiveIndicator(this.jobs);
           }
         } else {
           // Job not in the active array — either brand new, or one that had
@@ -1488,16 +1598,24 @@ export class MoomboxApp {
         // and can cross the archive threshold, so it takes the same path
         // job_update gives it.
         if (merged.status !== oldStatus) {
-          this.renderJobs();
+          if (!this._moveJobCard(merged)) this.renderJobs();
           this._evaluateArchiveBoundary();
           this._syncParkedBadge();
+          if (this.selectedJobId === merged.id) this.details.updateJobDetails(merged);
+        } else if (document.hidden) {
+          // Nobody can see the card or the dialog, and WebSocket frames are
+          // not throttled in a background tab: the row above is merged on
+          // every frame as always, and the drawing waits for the tab to show
+          // again (_repaintAfterHidden). Only this branch: a status change
+          // re-sorts the list and can cross the archive boundary, so it is
+          // handled when it arrives.
+          this._repaintOnVisible = true;
         } else {
+          // Status unchanged, so the status bar's active count (a count of
+          // rows by status) cannot have moved: no O(n) recount per tick.
           this.updateJobCard(merged);
-          this.stats.updateActiveIndicator(this.jobs);
-        }
-        // Update details dialog if this job is selected
-        if (this.selectedJobId === merged.id) {
-          this.details.updateJobDetails(merged);
+          // Update details dialog if this job is selected
+          if (this.selectedJobId === merged.id) this.details.updateJobDetails(merged);
         }
         // Nothing else on the fast path: a park is a status change, so
         // _syncParkedBadge() belongs to the branch above, and jobs age by TIME,
@@ -1538,7 +1656,9 @@ export class MoomboxApp {
         const deletedIdx = this.jobs.findIndex(j => j.id === deletedId);
         if (deletedIdx !== -1) {
           this.jobs.splice(deletedIdx, 1);
-          this.renderJobs();
+          // One card out, not a rebuild of every card: a batch delete of K
+          // rows sends K of these frames.
+          if (!this._removeJobCard(deletedId)) this.renderJobs();
           // Deleting the last parked job is the one gesture that CLEARS this
           // escalation. Without it the badge stays red over an empty list.
           this._syncParkedBadge();
@@ -1546,11 +1666,7 @@ export class MoomboxApp {
         // A Finished job may have aged into the archived list (client-side
         // sweep or a prior fetch); drop it there too, or a server-side delete
         // leaves a stale, still-clickable row in the Archived panel.
-        const deletedArchivedIdx = this.archivedJobs.findIndex(j => j.id === deletedId);
-        if (deletedArchivedIdx !== -1) {
-          this.archivedJobs.splice(deletedArchivedIdx, 1);
-          this.renderArchivedJobs();
-        }
+        this._removeArchivedJob(deletedId);
         // Close the details dialog if the deleted job is currently selected.
         if (this.selectedJobId === deletedId) {
           const dlg = document.getElementById("details-dialog");
@@ -1632,9 +1748,17 @@ export class MoomboxApp {
    * as the TUI's per-second render does. Re-armed on every holds change.
    */
   _redrawQueuedHolds() {
+    // One pass over the cards, not one document query per Queued job: a
+    // backlog holds thousands of Queued rows.
+    const queued = new Map();
     for (const job of this.jobs) {
-      if (job.status !== "Queued") continue;
-      const cell = document.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"] .job-progress-text`);
+      if (job.status === "Queued") queued.set(job.id, job);
+    }
+    const cards = queued.size ? document.querySelectorAll("#jobs-container .video-item") : [];
+    for (const card of cards) {
+      const job = queued.get(card.dataset.jobId);
+      if (!job) continue;
+      const cell = card.querySelector(".job-progress-text");
       if (!cell) continue;
       const html = this.formatProgressHtml(job);
       if (cell.dataset.progress !== html) {
@@ -1988,9 +2112,14 @@ export class MoomboxApp {
   // ===== Job Rendering =====
 
   renderJobs() {
+    // While the "live updates cannot connect" notice stands in for the
+    // skeleton no frame has ever arrived, so there is no list to draw. A
+    // render asked for by something else (typing in the filter) would put
+    // "No jobs yet" beside the notice, which the page does not know.
+    if (this._wsNoticeShows()) return;
+
     // Remove loading skeletons on first render (any message path)
     document.getElementById("jobs-skeleton")?.remove();
-    this.filterBar.refreshChannels("jobs", this.jobs);
 
     // Update active indicator in status bar
     this.stats.updateActiveIndicator(this.jobs);
@@ -2111,6 +2240,7 @@ export class MoomboxApp {
     // Preserve focused job across re-renders
     const focusedCard = container.querySelector(".video-item[data-focused]");
     const focusedJobId = focusedCard?.dataset.jobId;
+    const hadDomFocus = !!focusedCard && document.activeElement === focusedCard;
 
     container.innerHTML = sortedJobs
       .map((job) => this.renderJobItem(job))
@@ -2127,6 +2257,7 @@ export class MoomboxApp {
     } else {
       this.focusedJobIndex = -1;
     }
+    this._syncRowTabStop(container, hadDomFocus);
 
     // Re-apply selection state and sync the batch bar
     this._selectedTaskJobs.forEach(id => {
@@ -2141,6 +2272,22 @@ export class MoomboxApp {
   }
 
   /**
+   * The tab is visible again: draw what the progress frames that arrived
+   * while it was hidden changed, once. The rows were merged as the frames
+   * came, so this is one render of the list from this.jobs and one update of
+   * an open details dialog. A no-op when no frame was skipped.
+   */
+  _repaintAfterHidden() {
+    if (!this._repaintOnVisible) return;
+    this._repaintOnVisible = false;
+    this.renderJobs();
+    if (this.selectedJobId) {
+      const job = this.jobs.find((j) => j.id === this.selectedJobId);
+      if (job) this.details.updateJobDetails(job);
+    }
+  }
+
+  /**
    * Splice ONE new row into the already-rendered list instead of rebuilding
    * every card (and every Shoelace shadow root) in it.
    *
@@ -2148,7 +2295,8 @@ export class MoomboxApp {
    * backfill page that finds K jobs used to run K consecutive full renders.
    *
    * Returns false — and the caller must fall back to renderJobs() — whenever
-   * the fast path cannot be trusted:
+   * the fast path cannot be trusted (_detachJobCard keeps the same contract
+   * for taking a card out):
    *   - the container is absent,
    *   - a filter is active (the match set and the "N of M" count both have to
    *     be recomputed),
@@ -2202,9 +2350,168 @@ export class MoomboxApp {
     // cards were not rebuilt; the new one is neither selected nor focused. The
     // focused INDEX is positional, so a card spliced at or above it shifts it.
     if (this.focusedJobIndex >= index) this.focusedJobIndex += 1;
-    this.filterBar.refreshChannels("jobs", this.jobs);
+    this._syncRowTabStop(container);
     this.stats.updateActiveIndicator(this.jobs);
     return true;
+  }
+
+  /**
+   * Take ONE card out of the rendered list instead of rebuilding every card.
+   * The twin of _insertJobCard, with the same contract: it returns null, and
+   * the caller must fall back to renderJobs(), unless the result is provably
+   * what a rebuild would draw. It declines when:
+   *   - the container is absent,
+   *   - a filter is active (the match set and the "N of M" count change),
+   *   - no other job is left (the empty state is renderJobs()'s to draw),
+   *   - the rendered cards are not exactly this card plus the sorted
+   *     this.jobs without this job, in order.
+   * this.jobs may still hold the job (a move) or not (a delete).
+   * @param {string} jobId
+   * @returns {{wasFocused: boolean, hadDomFocus: boolean}|null} wasFocused:
+   *   the card was the highlighted row; hadDomFocus: it also held DOM focus
+   */
+  _detachJobCard(jobId) {
+    const container = document.getElementById("jobs-container");
+    if (!container) return null;
+    if (this.filterBar.tokens("jobs").length > 0) return null;
+
+    const rest = this._sortJobs(this.jobs).filter((j) => j.id !== jobId);
+    if (rest.length === 0) return null;
+    const cards = [...container.querySelectorAll(".video-item")];
+    if (cards.length !== rest.length + 1) return null;
+    let at = -1;
+    for (let i = 0, k = 0; i < cards.length; i++) {
+      const id = cards[i].dataset.jobId;
+      if (at < 0 && id === jobId) { at = i; continue; }
+      if (k >= rest.length || id !== rest[k++].id) return null;
+    }
+    if (at < 0) return null;
+
+    // The whitespace goes with the card, so the list stays byte-identical to
+    // a rebuild: between two cards sits one card's trailing indentation and
+    // the next one's leading indentation. The run AFTER the card is dropped,
+    // or the run BEFORE it when it is the last card, which leaves the list's
+    // own leading and trailing runs in place. A run can be more than one
+    // text node (an appended card's lead is a node of its own).
+    const card = cards[at];
+    const side = at === cards.length - 1 ? "previousSibling" : "nextSibling";
+    for (let n = card[side]; n && n.nodeType === Node.TEXT_NODE;) {
+      const next = n[side];
+      n.remove();
+      n = next;
+    }
+    const wasFocused = card.hasAttribute("data-focused");
+    const hadDomFocus = document.activeElement === card;
+    card.remove();
+    this._syncFocusedIndex(container);
+    this._syncRowTabStop(container);
+    return { wasFocused, hadDomFocus };
+  }
+
+  /** focusedJobIndex from the card that carries data-focused, as renderJobs() derives it. */
+  _syncFocusedIndex(container) {
+    const cards = container.querySelectorAll(".video-item");
+    this.focusedJobIndex = -1;
+    for (let i = 0; i < cards.length; i++) {
+      if (cards[i].hasAttribute("data-focused")) { this.focusedJobIndex = i; break; }
+    }
+  }
+
+  /**
+   * The roving tab stop of a job list: exactly one row is in the Tab order
+   * (tabindex 0), the highlighted row, or the first row when none is
+   * highlighted; every other row is focusable by script only (tabindex -1,
+   * as renderJobItem draws it). Called by everything that draws, inserts,
+   * removes or highlights a row, so it is a function of the cards alone and
+   * a single-card path leaves what a rebuild leaves.
+   * @param {Element} container - #jobs-container or #archived-container
+   * @param {boolean} [refocus] - the highlighted row held DOM focus before
+   *   its card was drawn again: give it back
+   */
+  _syncRowTabStop(container, refocus = false) {
+    if (!container) return;
+    const stop = container.querySelector(".video-item[data-focused]") || container.querySelector(".video-item");
+    for (const el of container.querySelectorAll('.video-item[tabindex="0"]')) {
+      if (el !== stop) el.setAttribute("tabindex", "-1");
+    }
+    if (!stop) return;
+    if (stop.getAttribute("tabindex") !== "0") stop.setAttribute("tabindex", "0");
+    if (refocus && stop.hasAttribute("data-focused")) stop.focus({ preventScroll: true });
+  }
+
+  /**
+   * Make `card` its list's highlighted row: the one Arrow moves from, Enter
+   * and Space open, and Tab lands on.
+   */
+  _highlightRow(container, card) {
+    container.querySelectorAll(".video-item[data-focused]").forEach((el) => el.removeAttribute("data-focused"));
+    card.setAttribute("data-focused", "");
+    if (container.id === "jobs-container") this._syncFocusedIndex(container);
+    this._syncRowTabStop(container);
+  }
+
+  /**
+   * Remove a deleted job's card (the job is already out of this.jobs) and
+   * refresh what renderJobs() would have beside it: its selection, the batch
+   * bar, the focused index and the active count. False: the caller must
+   * fall back to renderJobs().
+   * @param {string} jobId
+   * @returns {boolean}
+   */
+  _removeJobCard(jobId) {
+    if (!this._detachJobCard(jobId)) return false;
+    this._selectedTaskJobs.delete(jobId);
+    this.updateBatchActionBar();
+    this.stats.updateActiveIndicator(this.jobs);
+    return true;
+  }
+
+  /**
+   * Draw ONE job's card again at the place the sort now gives it: after a
+   * status change, a new sort key, or a change to a part of the card
+   * updateJobCard does not patch. The card is taken out and put back through
+   * _insertJobCard, so both halves check the list against this.jobs; focus
+   * and selection follow the job as they do across a rebuild. False: the
+   * caller must fall back to renderJobs(), which also repairs a list this
+   * left without the card.
+   * @param {object} job - the row as this.jobs now holds it
+   * @returns {boolean}
+   */
+  _moveJobCard(job) {
+    const detached = this._detachJobCard(job.id);
+    if (!detached) return false;
+    if (!this._insertJobCard(job)) return false;
+    if (detached.wasFocused) {
+      const container = document.getElementById("jobs-container");
+      container.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"]`)?.setAttribute("data-focused", "");
+      this._syncFocusedIndex(container);
+      this._syncRowTabStop(container, detached.hadDomFocus);
+    }
+    // The batch bar's buttons depend on the selected rows' statuses.
+    this.updateBatchActionBar();
+    return true;
+  }
+
+  /**
+   * What of a card depends on more than the status and the fields
+   * updateJobCard patches: whether the row offers Resume, and the
+   * missing-tail mark. A same-status update that changes this draws the
+   * card again (_moveJobCard).
+   */
+  _cardShape(job) {
+    const thumb = this._thumbSources(job);
+    return (canResumeJob(job, { requireKnownStaging: true }) ? "R" : "-")
+      + (this.incompleteIndicatorHtml(job) ? "T" : "-")
+      + (thumb.thumbnailUrl || thumb.fallbackThumb ? "I" : "-");
+  }
+
+  /**
+   * Draw an active job's card again when its shape is no longer oldShape.
+   * For a writer that changed the row in place, outside the job_update path.
+   */
+  _reshapeJobCard(job, oldShape) {
+    if (this._cardShape(job) === oldShape || !this.jobs.includes(job)) return;
+    if (!this._moveJobCard(job)) this.renderJobs();
   }
 
   /**
@@ -2227,7 +2534,7 @@ export class MoomboxApp {
     if (ageDays < 0 || !this.jobs.length) return false;
     const cutoffMs = ageDays * 86400 * 1000;
     const nowMs = Date.now();
-    let moved = 0;
+    const moved = [];
     for (let i = this.jobs.length - 1; i >= 0; i--) {
       const j = this.jobs[i];
       if (j.status !== "Finished" || !j.updatedAt) continue;
@@ -2245,14 +2552,21 @@ export class MoomboxApp {
         } else {
           this.archivedJobs.push(j);
         }
-        moved++;
+        moved.push(j.id);
       }
     }
-    if (moved && !silent) {
-      this.renderJobs();
+    if (moved.length && !silent) {
+      // One card out per moved row, and the whole list only when a removal
+      // cannot be proven equal to a rebuild. With hide_finished_age_days = 0
+      // every job that finishes lands here.
+      for (const id of moved) {
+        if (this._removeJobCard(id)) continue;
+        this.renderJobs();
+        break;
+      }
       this.renderArchivedJobs();
     }
-    return moved > 0;
+    return moved.length > 0;
   }
 
   /**
@@ -2270,26 +2584,115 @@ export class MoomboxApp {
     return this.archivedJobs.length !== before;
   }
 
+  /**
+   * Take a row out of the archived list: deleted, or back in Tasks after a
+   * Resume or Reinitialize. The id is remembered while a fetch is out, so an
+   * answer built before the row left cannot bring it back.
+   * @returns {boolean} whether the list held it
+   */
+  _removeArchivedJob(id) {
+    if (this._archivedInFlight > 0) this._archivedGoneInFlight.add(id);
+    const idx = this.archivedJobs.findIndex(j => j.id === id);
+    if (idx === -1) return false;
+    this.archivedJobs.splice(idx, 1);
+    this.renderArchivedJobs();
+    return true;
+  }
+
+  /**
+   * Replace the archived list with the server's. A failure keeps the list
+   * and the selection already held and shows a Retry notice: an empty list
+   * here would read as "No archived jobs", which a failed request does not
+   * mean. Only the newest fetch's answer is applied (house rule 6).
+   */
   async fetchArchivedJobs() {
+    const gen = ++this._archivedGen;
+    if (this._archivedInFlight === 0) this._archivedGoneInFlight.clear();
+    this._archivedInFlight++;
+    // Nothing to show yet: draw the loading state. Otherwise only the
+    // notices change: Retry shows that it is busy.
+    if (!this._archivedLoaded && this.archivedJobs.length === 0) this.renderArchivedJobs();
+    else this._syncArchivedNotices();
+    let rows = null;
     try {
       const response = await fetch("/api/jobs/archived");
       if (response.ok) {
-        this.archivedJobs = await response.json();
-      } else {
-        this.archivedJobs = [];
+        const body = await response.json();
+        if (Array.isArray(body)) rows = body;
       }
     } catch (e) {
       console.error("Failed to fetch archived jobs:", e);
-      this.archivedJobs = [];
+    } finally {
+      this._archivedInFlight--;
+    }
+    if (gen !== this._archivedGen) return;
+    this._archivedAnsweredGen = gen;
+    if (rows) {
+      // The answer was built when the request was made. A row that has since
+      // been deleted, or that a job_update has since moved back to Tasks, is
+      // not put back: it would show as a ghost, or in both panels.
+      const activeIds = new Set(this.jobs.map(j => j.id));
+      this.archivedJobs = rows.filter(j => !this._archivedGoneInFlight.has(j.id) && !activeIds.has(j.id));
+      this._archivedLoaded = true;
+      this._archivedFetchFailed = false;
+    } else {
+      this._archivedFetchFailed = true;
     }
     this.renderArchivedJobs();
+  }
+
+  // Archived rows newest first, by updatedAt. Keys are read once per row.
+  _sortArchived(jobs) {
+    return jobs
+      .map((job) => ({ job, time: new Date(job.updatedAt).getTime() }))
+      .sort((a, b) => b.time - a.time)
+      .map((r) => r.job);
+  }
+
+  // The Archived rows that are drawn, in drawn order: what Arrow and Enter walk.
+  _archivedDrawnJobs() {
+    return this._sortArchived(this.filterBar.getFilteredArchivedJobs()).slice(0, this._archivedRenderLimit);
+  }
+
+  /**
+   * The only writer of the Archived fetch notices: the loading line and the
+   * failure line with its Retry button. Both are derived from the fetch
+   * fields and the held list. Loading shows only before the first answer,
+   * and only while the NEWEST fetch is unanswered: an older fetch still out
+   * says nothing about the newest one, whose failure must show. A failure
+   * never hides the held list, and with nothing held it takes the empty
+   * state's place rather than sitting beside "No archived jobs". Retry
+   * shows busy while a newer fetch than the failed one is out.
+   * @returns {{isLoading: boolean, failed: boolean}}
+   */
+  _syncArchivedNotices() {
+    const nothingHeld = this.archivedJobs.length === 0;
+    const pending = this._archivedAnsweredGen !== this._archivedGen;
+    const isLoading = nothingHeld && !this._archivedLoaded && pending;
+    const failed = this._archivedFetchFailed && !isLoading;
+    const loadingEl = document.getElementById("archived-loading");
+    if (loadingEl) loadingEl.style.display = isLoading ? "" : "none";
+    const errorEl = document.getElementById("archived-fetch-error");
+    if (errorEl) {
+      errorEl.style.display = failed ? "" : "none";
+      // Written only when it changes: the line sits in an alert region, and
+      // a rewrite is announced again on every redraw.
+      const text = document.getElementById("archived-fetch-error-text");
+      const message = nothingHeld
+        ? "Could not load the archived jobs."
+        : "Could not refresh the archived jobs. The list below is from the last successful load.";
+      if (text && text.textContent !== message) text.textContent = message;
+      const retry = document.getElementById("archived-retry");
+      if (retry) retry.loading = failed && pending;
+    }
+    return { isLoading, failed };
   }
 
   renderArchivedJobs() {
     // Defer DOM work while the Archived panel isn't visible. On a 24/7
     // recorder the archive grows continuously (60s sweep + job updates), and
-    // this method rebuilds EVERY archived card via innerHTML — destroying and
-    // recreating Shoelace shadow DOM for a hidden panel is pure waste. The
+    // this method rebuilds every drawn archived card via innerHTML — destroying
+    // and recreating Shoelace shadow DOM for a hidden panel is pure waste. The
     // sl-tab-show handler re-renders on activation when this flag is set.
     if (this._activePanel !== "archived") {
       this._archivedRenderDirty = true;
@@ -2301,12 +2704,17 @@ export class MoomboxApp {
     const emptyState = document.getElementById("archived-empty-state");
     const table = document.getElementById("archived-table");
     const filterCount = document.getElementById("archived-filter-count");
-    this.filterBar.refreshChannels("archived", this.archivedJobs);
+    const more = document.getElementById("archived-more");
 
-    if (this.archivedJobs.length === 0) {
+    const nothingHeld = this.archivedJobs.length === 0;
+    const { isLoading, failed } = this._syncArchivedNotices();
+
+    if (nothingHeld) {
       container.innerHTML = "";
+      this.focusedArchivedIndex = -1;
       table.style.display = "none";
-      emptyState.style.display = "flex";
+      if (more) more.style.display = "none";
+      emptyState.style.display = (isLoading || failed) ? "none" : "flex";
       const icon = emptyState.querySelector("sl-icon");
       if (icon) icon.name = "archive";
       const msg = emptyState.querySelector("p");
@@ -2328,7 +2736,9 @@ export class MoomboxApp {
 
     const filtered = this.filterBar.getFilteredArchivedJobs();
     const isFiltered = this.filterBar.tokens("archived").length > 0;
-    // And the ones the filter hides — see renderJobs.
+    // And the ones the filter hides — see renderJobs. A row that matches but
+    // is not drawn yet (below Show more) keeps its tick: Select All means
+    // every matching row, and the batch bar counts the ones not shown.
     const visibleArchivedIds = new Set(filtered.map(j => j.id));
     this._selectedArchivedJobs.forEach(id => {
       if (!visibleArchivedIds.has(id)) this._selectedArchivedJobs.delete(id);
@@ -2346,7 +2756,9 @@ export class MoomboxApp {
 
     if (filtered.length === 0 && isFiltered) {
       container.innerHTML = "";
+      this.focusedArchivedIndex = -1;
       table.style.display = "none";
+      if (more) more.style.display = "none";
       emptyState.style.display = "flex";
       const icon = emptyState.querySelector("sl-icon");
       if (icon) icon.name = "search";
@@ -2362,24 +2774,38 @@ export class MoomboxApp {
     table.style.display = "";
     emptyState.style.display = "none";
 
-    // Sort archived jobs by updatedAt descending (most recent first)
-    const sorted = [...filtered].sort(
-      (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
-    );
+    // Newest first, and only the first _archivedRenderLimit cards.
+    const sorted = this._sortArchived(filtered);
+    const drawn = sorted.slice(0, this._archivedRenderLimit);
 
-    container.innerHTML = sorted
+    // Preserve the focused row across the rebuild, as renderJobs does.
+    const focusedCard = container.querySelector(".video-item[data-focused]");
+    const focusedJobId = focusedCard?.dataset.jobId;
+    const hadDomFocus = !!focusedCard && document.activeElement === focusedCard;
+
+    container.innerHTML = drawn
       .map((job) => this.renderJobItem(job))
       .join("");
 
-    // Re-apply archived selection state
-    this._selectedArchivedJobs.forEach(id => {
-      const card = container.querySelector(`[data-job-id="${CSS.escape(id)}"]`);
-      if (card) {
-        card.classList.add("selected");
-        const cb = card.querySelector(".job-checkbox");
-        if (cb) cb.checked = true;
-      }
+    this.focusedArchivedIndex = focusedJobId ? drawn.findIndex(j => j.id === focusedJobId) : -1;
+
+    // Re-apply the focus and selection marks to the drawn cards.
+    const cards = container.querySelectorAll(".video-item");
+    if (this.focusedArchivedIndex >= 0) cards[this.focusedArchivedIndex]?.setAttribute("data-focused", "");
+    this._syncRowTabStop(container, hadDomFocus);
+    cards.forEach((card) => {
+      if (!this._selectedArchivedJobs.has(card.dataset.jobId)) return;
+      card.classList.add("selected");
+      const cb = card.querySelector(".job-checkbox");
+      if (cb) cb.checked = true;
     });
+
+    if (more) {
+      const rest = sorted.length - drawn.length;
+      more.style.display = rest > 0 ? "" : "none";
+      const count = document.getElementById("archived-more-count");
+      if (count) count.textContent = `Showing ${drawn.length} of ${sorted.length}`;
+    }
     this.updateBatchActionBar();
   }
 
@@ -2443,8 +2869,13 @@ export class MoomboxApp {
     return `<span class="incomplete-indicator" title="Recording is missing its tail — Resume to fetch it"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5m.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2"/></svg></span>`;
   }
 
-  renderJobItem(job) {
-    const statusClass = job.status.toLowerCase().replace("?", "");
+  /**
+   * Where a card's thumbnail comes from: thumbnailUrl is what the <img>
+   * loads, fallbackThumb what its error handler swaps in. A row with neither
+   * draws no <img> at all, and updateJobCard cannot add one, so _cardShape
+   * reads this too.
+   */
+  _thumbSources(job) {
     const isTwitch = job.platform === "twitch";
     const rawVideoId = job.videoId || job.id;
     // An import's placeholder id names no video, so it has no remote
@@ -2462,6 +2893,13 @@ export class MoomboxApp {
     const remoteThumb = (placeholder ? "" : job.thumbnailUrl) || (isTwitch ? twitchAvatarFallback : ytThumb);
     const thumbnailUrl = localThumb || remoteThumb;
     const fallbackThumb = localThumb ? remoteThumb : (isTwitch ? twitchAvatarFallback : ytThumb);
+    return { localThumb, twitchAvatarFallback, thumbnailUrl, fallbackThumb };
+  }
+
+  renderJobItem(job) {
+    const statusClass = job.status.toLowerCase().replace("?", "");
+    const isTwitch = job.platform === "twitch";
+    const { localThumb, twitchAvatarFallback, thumbnailUrl, fallbackThumb } = this._thumbSources(job);
     // The Twitch channel-avatar fallback is a square image; render it in
     // a 1:1 box (.thumb-avatar). All other paths -- local file, YouTube
     // CDN, Twitch live-preview -- are 16:9 and should fill the standard
@@ -2500,8 +2938,9 @@ export class MoomboxApp {
     // only where it cannot (owner decision PR-M1): an arrow read as "retry"
     // used to start a recoverable job over. Both stay in the overflow menu.
     // Resume only where there is staging to resume (owner decision PE-5): a
-    // terminal list row carries the server's hasStaging (worker.ListJob, on
-    // every jobs frame and GET /api/jobs), so a resumable row with nothing
+    // list row Resume can be offered on carries the server's hasStaging
+    // (worker.ListJob, on every jobs frame and GET /api/jobs; ruling R-B2
+    // narrowed it to those rows), so a resumable row with nothing
     // staged offers Reinitialize, where it offered a Resume the server
     // answered with "use Reinitialize". A row without the flag is not
     // offered Resume. Only the rows that offered Reinitialize change: a
@@ -2533,8 +2972,11 @@ export class MoomboxApp {
     // columnheader row, and a table's rows must be rows — without them the
     // checkbox, status and buttons sat directly inside the rowgroup, which
     // assistive technology cannot read as a table.
+    // tabindex="-1": a row takes focus (Arrow moves it there, Enter and
+    // Space open its details); _syncRowTabStop puts one row of the list in
+    // the Tab order.
     return `
-      <div class="video-item${isSelected ? " selected" : ""}" role="row" data-job-id="${escId}" data-status="${this.escapeHtml(statusClass)}">
+      <div class="video-item${isSelected ? " selected" : ""}" role="row" tabindex="-1" data-job-id="${escId}" data-status="${this.escapeHtml(statusClass)}">
         <div class="thumb" role="cell">
           <input type="checkbox" class="job-checkbox" data-job-id="${escId}" ${isSelected ? "checked" : ""} aria-label="Select ${this.escapeHtml(job.title)}">
           ${(thumbnailUrl || fallbackThumb) ? `<img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
@@ -2625,6 +3067,7 @@ export class MoomboxApp {
 
     // Status badge and data-status are NOT updated here — updateJobCard is
     // only called when status hasn't changed, so these are already correct.
+    // A status change draws the card again (_moveJobCard, or renderJobs).
 
     // Update progress text
     const progressText = card.querySelector(".job-progress-text");
@@ -2672,8 +3115,9 @@ export class MoomboxApp {
     }
 
     // Quick actions are NOT rebuilt here — updateJobCard is only called when
-    // status hasn't changed (status changes trigger full renderJobs instead),
-    // so the available actions are identical. Skipping avoids destroying and
+    // status and _cardShape haven't changed (a change to either draws the
+    // card again: _moveJobCard, or the full renderJobs), so the available
+    // actions are identical. Skipping avoids destroying and
     // recreating sl-icon-button shadow DOM elements on every progress update.
   }
 
@@ -3268,11 +3712,7 @@ export class MoomboxApp {
           if (dlg?.open) dlg.hide();
           this.selectedJobId = null;
         }
-        const archivedIdx = this.archivedJobs.findIndex(j => j.id === id);
-        if (archivedIdx !== -1) {
-          this.archivedJobs.splice(archivedIdx, 1);
-          this.renderArchivedJobs();
-        }
+        this._removeArchivedJob(id);
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.showToast(data.error || "Failed to resume job", "danger");
@@ -3352,11 +3792,7 @@ export class MoomboxApp {
           if (dlg?.open) dlg.hide();
           this.selectedJobId = null;
         }
-        const archivedIdx = this.archivedJobs.findIndex(j => j.id === id);
-        if (archivedIdx !== -1) {
-          this.archivedJobs.splice(archivedIdx, 1);
-          this.renderArchivedJobs();
-        }
+        this._removeArchivedJob(id);
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.showToast(data.error || "Failed to reinitialize job", "danger");
@@ -3450,14 +3886,10 @@ export class MoomboxApp {
         const activeIdx = this.jobs.findIndex(j => j.id === id);
         if (activeIdx !== -1) {
           this.jobs.splice(activeIdx, 1);
-          this.renderJobs();
+          if (!this._removeJobCard(id)) this.renderJobs();
         }
         // Remove from archived jobs if present (no WebSocket update for archived jobs)
-        const archivedIdx = this.archivedJobs.findIndex(j => j.id === id);
-        if (archivedIdx !== -1) {
-          this.archivedJobs.splice(archivedIdx, 1);
-          this.renderArchivedJobs();
-        }
+        this._removeArchivedJob(id);
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.showToast(data.error || "Failed to delete job", "danger");
@@ -3619,7 +4051,8 @@ export class MoomboxApp {
       const activePanel = this._activePanel;
       const isPlayerActive = activePanel === "player";
 
-      const isTasksActive = activePanel === "tasks";
+      // The two panels with a job list. Each keeps its own focused row.
+      const isJobListActive = activePanel === "tasks" || activePanel === "archived";
 
       switch (e.key) {
         case "Escape":
@@ -3647,7 +4080,7 @@ export class MoomboxApp {
           break;
         case "ArrowUp":
         case "ArrowDown":
-          if (isTasksActive) {
+          if (isJobListActive) {
             this.navigateJobList(e.key === "ArrowUp" ? -1 : 1);
             e.preventDefault();
           }
@@ -3657,13 +4090,23 @@ export class MoomboxApp {
           // button does not preventDefault it, so Enter on Add Video, a
           // card's Delete icon or the theme toggle ALSO opened the
           // keyboard-focused job's details (over the control's own dialog).
-          if (isTasksActive && this.focusedJobIndex >= 0 && !this._enterFromControl(e)) {
-            const filtered = this.filterBar.getFilteredJobs();
-            const sorted = this._sortJobs(filtered);
-            const job = sorted[this.focusedJobIndex];
+          if (isJobListActive && !this._enterFromControl(e)) {
+            const nav = this._jobListNav();
+            const job = nav.index >= 0 ? nav.rows[nav.index] : null;
             if (job) this.details.showJobDetails(job);
           }
           break;
+        case " ": {
+          // Space on a focused row opens it, as Enter does. Only on the row
+          // itself: Space on a checkbox or a button inside it is theirs.
+          const row = e.target instanceof Element && e.target.classList.contains("video-item") ? e.target : null;
+          if (isJobListActive && row) {
+            const job = this._jobListNav().rows.find((j) => j.id === row.dataset.jobId);
+            if (job) this.details.showJobDetails(job);
+            e.preventDefault();
+          }
+          break;
+        }
         case "f": {
           // The player tab binds its own "f" (fullscreen); the tasks/archived
           // filter focus would be a no-op there anyway (the filter input lives
@@ -3681,23 +4124,49 @@ export class MoomboxApp {
     });
   }
 
+  /**
+   * The active panel's job list as the keyboard walks it: the rows in drawn
+   * order, the container that holds their cards, and the focused index.
+   * Tasks keeps its index up to date on every card it inserts or removes.
+   * Archived re-reads its index from the highlighted card, because a few
+   * writers change that list without drawing it.
+   */
+  _jobListNav() {
+    if (this._activePanel === "archived") {
+      const container = document.getElementById("archived-container");
+      const rows = this._archivedDrawnJobs();
+      const focusedId = container?.querySelector(".video-item[data-focused]")?.dataset.jobId;
+      this.focusedArchivedIndex = focusedId ? rows.findIndex(j => j.id === focusedId) : -1;
+      return { rows, container, key: "focusedArchivedIndex", index: this.focusedArchivedIndex };
+    }
+    return {
+      rows: this._sortJobs(this.filterBar.getFilteredJobs()),
+      container: document.getElementById("jobs-container"),
+      key: "focusedJobIndex",
+      index: this.focusedJobIndex,
+    };
+  }
+
   navigateJobList(direction) {
-    const filtered = this.filterBar.getFilteredJobs();
-    const sorted = this._sortJobs(filtered);
-    if (sorted.length === 0) return;
+    const { rows, container, key } = this._jobListNav();
+    if (rows.length === 0 || !container) return;
 
-    // Remove previous focus
-    document.querySelectorAll(".video-item[data-focused]").forEach((el) => el.removeAttribute("data-focused"));
+    // Remove previous focus (this panel's only: the other keeps its own)
+    container.querySelectorAll(".video-item[data-focused]").forEach((el) => el.removeAttribute("data-focused"));
 
-    this.focusedJobIndex += direction;
-    if (this.focusedJobIndex < 0) this.focusedJobIndex = sorted.length - 1;
-    if (this.focusedJobIndex >= sorted.length) this.focusedJobIndex = 0;
+    this[key] += direction;
+    if (this[key] < 0) this[key] = rows.length - 1;
+    if (this[key] >= rows.length) this[key] = 0;
 
-    const job = sorted[this.focusedJobIndex];
+    const job = rows[this[key]];
     if (job) {
-      const card = document.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"]`);
+      const card = container.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"]`);
       if (card) {
         card.setAttribute("data-focused", "");
+        this._syncRowTabStop(container);
+        // Real focus, so a screen reader announces the row Arrow moved to
+        // and Tab goes on from it.
+        card.focus({ preventScroll: true });
         card.scrollIntoView({ block: "nearest" });
       }
     }
@@ -3711,17 +4180,26 @@ export class MoomboxApp {
     return (TASK_STATUS_PRIORITY[job.status] ?? 99) >= 7 ? job.updatedAt : job.title;
   }
 
+  // The comparator reads keys worked out once per row. It used to build two
+  // Dates or one collator per comparison, and this sort runs on every render,
+  // card insert, Arrow key and Enter: 3,000 rows cost about 60 ms a sort, and
+  // about 3 ms this way. Same keys and same comparisons, so the same order.
   _sortJobs(jobs) {
     const STATUS_PRIORITY = TASK_STATUS_PRIORITY;
-    return [...jobs].sort((a, b) => {
-      const pa = STATUS_PRIORITY[a.status] ?? 99;
-      const pb = STATUS_PRIORITY[b.status] ?? 99;
-      if (pa !== pb) return pa - pb;
+    const rows = jobs.map((job) => {
+      const pri = STATUS_PRIORITY[job.status] ?? 99;
       // Completed statuses (Cancelled/Finished) sort newest-first; everything
-      // else — including the Queued resting state — sorts by title below.
-      if (pa >= 7) return new Date(b.updatedAt) - new Date(a.updatedAt);
-      return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
+      // else — including the Queued resting state — sorts by title.
+      return pri >= 7
+        ? { job, pri, time: new Date(job.updatedAt).getTime(), title: "" }
+        : { job, pri, time: 0, title: job.title || "" };
     });
+    rows.sort((a, b) => {
+      if (a.pri !== b.pri) return a.pri - b.pri;
+      if (a.pri >= 7) return b.time - a.time;
+      return NAME_COLLATOR.compare(a.title, b.title);
+    });
+    return rows.map((r) => r.job);
   }
 
   // ===== Quick Actions =====
@@ -4260,18 +4738,31 @@ export class MoomboxApp {
     bar.style.display = "";
     bar.classList.add("visible");
     document.body.classList.add("batch-bar-active");
-    document.getElementById("batch-count").textContent = `${count} selected`;
+    // Archived draws only its newest cards, and Select All ticks every
+    // matching row: say how many of the selected ones are not on screen, so
+    // a batch Delete is never larger than the bar admits.
+    let notShown = 0;
+    if (this._activePanel === "archived") {
+      const drawnSelected = document.getElementById("archived-container")
+        ?.querySelectorAll(".video-item.selected").length ?? count;
+      notShown = Math.max(0, count - drawnSelected);
+    }
+    document.getElementById("batch-count").textContent = notShown > 0
+      ? `${count} selected (${notShown} not shown yet)`
+      : `${count} selected`;
 
-    // Update Select All label with count when filters are active
+    // Update Select All label with count when filters are active, and on
+    // Archived whenever it would select rows that are not drawn.
     const selectAllBtn = document.getElementById("batch-select-all");
     if (selectAllBtn) {
       const panel = this._activePanel;
       const isFiltered = panel === "archived"
         ? this.filterBar.tokens("archived").length > 0
         : this.filterBar.tokens("jobs").length > 0;
-      if (isFiltered) {
+      const archivedTotal = panel === "archived" ? this.filterBar.getFilteredArchivedJobs().length : 0;
+      if (isFiltered || archivedTotal > this._archivedRenderLimit) {
         const totalVisible = panel === "archived"
-          ? this.filterBar.getFilteredArchivedJobs().length
+          ? archivedTotal
           : this.filterBar.getFilteredJobs().length;
         selectAllBtn.textContent = `Select All (${totalVisible})`;
       } else {
@@ -4537,6 +5028,9 @@ document.addEventListener("visibilitychange", () => {
   // The 1 Hz UI tick early-returns while hidden; refresh immediately on
   // return so relative timestamps / countdowns never show stale strings.
   if (!document.hidden && window.app?._initialized) {
+    // First: the cards the skipped progress frames changed, so the
+    // timestamp refresh below runs over the cards that stay.
+    window.app._repaintAfterHidden();
     window.app.updateCheckCountdown();
     window.app.refreshRelativeTimestamps();
   }

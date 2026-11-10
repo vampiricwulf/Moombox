@@ -193,8 +193,9 @@ func effectiveStagingDir(store *config.Store) string {
 // sendPaginated applies optional offset/limit pagination and writes the response.
 // Matches TypeScript validateOffsetPagination: returns 400 for invalid values.
 // Each row of the page is sent as worker.ListJob makes it, with hasStaging
-// read from stagingBase for a terminal row (owner decision PE-5) — one
-// directory read per row of the page, not of the whole list.
+// read from stagingBase for a row Resume can be offered on (owner decision
+// PE-5, narrowed by owner ruling R-B2) — one directory read per such row of
+// the page, not of the whole list.
 func sendPaginated(rw http.ResponseWriter, req *http.Request, items []*database.Job, stagingBase string) {
 	offsetStr := req.URL.Query().Get("offset")
 	limitStr := req.URL.Query().Get("limit")

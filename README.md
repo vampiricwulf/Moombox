@@ -338,6 +338,28 @@ Either append style works — extending the existing header line or adding
 a second `X-Forwarded-For` line (HAProxy's `option forwardfor`) — since
 Moombox reads every line of the header, not just the first.
 
+The proxy must also **forward WebSocket upgrades**: the dashboard's job
+list, progress and logs arrive over a WebSocket on the same address as the
+page. Caddy and Traefik forward upgrades by default. nginx does not; add
+these lines to the `location` block that proxies to Moombox:
+
+```nginx
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+```
+
+Without them the page loads but stays empty, and after a few attempts the
+Tasks tab says "Live updates cannot connect".
+
+If the proxy already forwards upgrades and the notice still shows, look in
+the Moombox log for `websocket upgrade rejected: origin refused`. Moombox
+refuses a WebSocket whose `Origin` (the address in the browser) does not
+match the host it sees. Set `public_url` to the address browsers type, or
+have the proxy pass the original `Host` (nginx: `proxy_set_header Host $http_host;`),
+or send `X-Forwarded-Host`, which Moombox reads only from a proxy listed in
+`trusted_proxies`.
+
 The address to declare is the one **Moombox actually sees**, which is not
 always the proxy's own IP:
 
@@ -603,7 +625,7 @@ Available at `http://localhost:774` (auto-upgrades to HTTPS for external access)
 
 - **Tasks tab** — Real-time job list with progress bars, add/cancel/retry/delete actions, and job details with embedded YouTube player
 - **Advanced Options** — Format selection (video/audio dropdowns with codec badges) and timestamp range when adding videos
-- **Archived tab** — Browse finished jobs older than `hide_finished_age_days`
+- **Archived tab** — Browse finished jobs older than `hide_finished_age_days`. The newest 200 are drawn, with a Show more button; the filter and Select All cover the whole archive
 - **Player tab** — Replay archived videos with synchronized chat:
   - Niconico-style flying chat overlay (togglable)
   - Sidebar chat panel with auto-scroll and search (togglable); click a timestamp to jump the video to 3 s before that message

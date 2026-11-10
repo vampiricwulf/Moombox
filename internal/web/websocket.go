@@ -246,6 +246,15 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		// The check above IS the origin policy; skipping the library's leaves
 		// exactly one (sweep chain-close F6).
 		InsecureSkipVerify: true,
+		// No CompressionMode: permessage-deflate stays off. The initial_state
+		// snapshot is megabytes of mostly text on a busy instance
+		// (TestInitialStateSnapshotSize, cmd/moombox), and deflate would
+		// shrink it well, but owner ruling R-B4 allows compression only once
+		// it is shown safe with every browser the dashboard is used from, and
+		// it has been tried against Chromium and Node only, not Safari or
+		// Firefox. TestWebSocketDoesNotNegotiateCompression holds this; turn
+		// it on (CompressionNoContextTakeover, with a threshold above the
+		// ~300-byte job_progress frame) together with that check.
 	})
 	if err != nil {
 		hub.logger.Error("websocket upgrade failed", "err", err)

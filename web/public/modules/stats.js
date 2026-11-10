@@ -194,10 +194,9 @@ export class StatsController {
       j.status === "Downloading" || j.status === "Live" || j.status === "Muxing"
     ).length;
 
-    // The ~60 Hz path is the job_progress frame, whose case in app.js calls
-    // this DIRECTLY — once per tick per active job; renderJobs calls it on
-    // job_update and on every full render.
-    // Diff before writing (sweep T2-21).
+    // Called where a status can have moved: every full render, a card
+    // insert, move or removal. Not on a progress tick, which leaves every
+    // status as it was. Diff before writing (sweep T2-21).
     if (active > 0) {
       if (el.style.display !== "") el.style.display = "";
       const text = `\u25B6 ${active}`;

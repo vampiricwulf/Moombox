@@ -582,6 +582,22 @@ sl-badge.status.cookies::part(base) {
     display: contents;
 }
 
+/* The Archived panel's one-line notices: a failed load with Retry, the
+   first load, and "Showing N of M" with Show more. */
+.archived-notice {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sl-spacing-small);
+    padding: var(--sl-spacing-medium);
+    color: var(--sl-color-neutral-700);
+    font-size: var(--sl-font-size-small);
+}
+
+#archived-fetch-error sl-icon {
+    color: var(--sl-color-danger-600);
+}
+
 #archived-empty-state {
     display: flex;
     flex-direction: column;
@@ -1170,6 +1186,38 @@ sl-dialog::part(footer) {
 /* Loading skeletons */
 #jobs-skeleton {
     display: contents;
+}
+
+/* The "live updates cannot connect" notice takes the skeleton's place while
+   it shows (app.js _syncWsNotice); the id+class also outranks the phone
+   layout's #jobs-skeleton rule below. */
+#jobs-skeleton.ws-refused {
+    display: none;
+}
+
+#jobs-ws-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--sl-spacing-small);
+    margin: var(--sl-spacing-small) 0;
+    padding: var(--sl-spacing-medium);
+    border: 1px solid var(--sl-color-neutral-300);
+    border-top: 3px solid var(--sl-color-warning-600);
+    border-radius: var(--sl-border-radius-medium);
+    background: var(--sl-panel-background-color);
+    color: var(--sl-color-neutral-800);
+    font-size: var(--sl-font-size-small);
+    line-height: var(--sl-line-height-normal);
+}
+
+#jobs-ws-notice[hidden] {
+    display: none;
+}
+
+#jobs-ws-notice > sl-icon {
+    flex: none;
+    font-size: var(--sl-font-size-large);
+    color: var(--sl-color-warning-600);
 }
 
 .skeleton-row {
@@ -3037,7 +3085,9 @@ sl-progress-bar {
 .job-quick-actions sl-icon-button[data-quick-action="reinitialize"]:active,
 .job-quick-actions sl-icon-button[data-quick-action="reinitialize"]:focus-visible { color: var(--sl-color-success-600); }
 
-/* Keyboard focus indicator */
+/* Keyboard focus indicator. A focused row is the highlighted row (app.js
+   _highlightRow), so the two selectors draw one outline. */
+.video-item:focus-visible,
 .video-item[data-focused] {
     outline: 2px solid var(--sl-color-primary-500);
     outline-offset: -2px;
