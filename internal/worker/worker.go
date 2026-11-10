@@ -958,6 +958,45 @@ func muxOnRestart(job *database.Job, stagingBase string) bool {
 	return HasSegmentFiles(stagingBase, job.ID)
 }
 
+// bootEnqueueOrder is the order the boot pass offers its rows to the queue:
+// captures that were running when the process stopped first, waiters last.
+// The queue's backlog cap is checked before priority, so offered in row
+// order a Live or Downloading row behind a hundred fresher Upcoming ones was
+// dropped until the first heartbeat; in this order the cap can only ever
+// delay an Upcoming waiter.
+var bootEnqueueOrder = [...]database.JobStatus{
+	database.StatusLive,
+	database.StatusDownloading,
+	database.StatusUpcoming,
+}
+
+// stillMuxingAfter applies fields to a row the boot pass read as Muxing, only
+// while it still is (the read is one GetAllJobs for every row, and a re-mux
+// of an earlier row can take a while; an operator's Cancel or Delete in
+// between stands). It reports whether the row is still the boot pass's to
+// handle. A write that did not apply is not by itself a no: the conditional
+// writers also answer false when the statement fails, and nothing but the
+// next boot picks a Muxing row up again, so the row is read once more and
+// given up only when it is gone or no longer Muxing.
+func (w *DownloadWorker) stillMuxingAfter(jobID string, fields map[string]any) bool {
+	if w.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, fields) {
+		return true
+	}
+	cur, err := w.db.GetJob(jobID)
+	if err != nil {
+		return true
+	}
+	if cur == nil || cur.Status != database.StatusMuxing {
+		status := database.JobStatus("")
+		if cur != nil {
+			status = cur.Status
+		}
+		w.logger.Debug("interrupted mux job changed since boot read it; leaving it", "jobID", jobID, "status", status)
+		return false
+	}
+	return true
+}
+
 func (w *DownloadWorker) enqueueExistingJobs() {
 	jobs, err := w.db.GetAllJobs()
 	if err != nil {
@@ -968,6 +1007,7 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 	var stagingBase string
 	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
 
+	var runnable []*database.Job
 	for _, job := range jobs {
 		if job.Status == database.StatusMuxing {
 			if muxOnRestart(job, stagingBase) {
@@ -976,8 +1016,13 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 				// it to the manifest-free strategy whose dbResumeSeq seeds 0,
 				// and truncated the complete recording (sweep-2 ENGINE-1).
 				// The Mux action's path needs no network and no re-download.
+				// A row cancelled or deleted since the read is left alone: the
+				// re-mux accepts a Cancelled row as the Mux action does, and
+				// would archive what the operator just cancelled.
+				if !w.stillMuxingAfter(job.ID, map[string]any{"error": ""}) {
+					continue
+				}
 				w.logger.Info("resuming interrupted mux from staged media", "jobID", job.ID)
-				w.db.UpdateJobFields(job.ID, map[string]any{"error": ""})
 				if err := w.muxJob(job.ID, muxActionFailure, true); err != nil {
 					// Only reachable if staging vanished between the check and
 					// the call; fall back to the historical reset.
@@ -991,12 +1036,15 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 			// the post-live VOD-refresh loop still has a tail to fetch. Reset
 			// to Downloading and clear any stale error string so the UI does
 			// not show a prior error alongside the fresh state (per audit
-			// reports/worker.md Finding 24).
-			w.logger.Info("resetting interrupted mux job", "jobID", job.ID)
-			w.db.UpdateJobFields(job.ID, map[string]any{
+			// reports/worker.md Finding 24). Only while the row is still
+			// Muxing, like every write decided on an earlier status read.
+			if !w.stillMuxingAfter(job.ID, map[string]any{
 				"status": database.StatusDownloading,
 				"error":  "",
-			})
+			}) {
+				continue
+			}
+			w.logger.Info("resetting interrupted mux job", "jobID", job.ID)
 			job.Status = database.StatusDownloading
 		}
 		if ShouldProcess(job) {
@@ -1013,7 +1061,17 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 			if job.Status == database.StatusUpcoming && jobstate.IsWaitLine(job.Progress) {
 				w.db.UpdateJobFieldsIf(job.ID, job.Status, map[string]any{"progress": ""})
 			}
-			w.queue.Enqueue(job.ID, job.Status)
+			runnable = append(runnable, job)
+		}
+	}
+
+	// Offered only now, after every interrupted mux above has been started
+	// or reset, and still before Start's heartbeat and Dequeue loop begin.
+	for _, status := range bootEnqueueOrder {
+		for _, job := range runnable {
+			if job.Status == status {
+				w.queue.Enqueue(job.ID, job.Status)
+			}
 		}
 	}
 }
@@ -2281,13 +2339,19 @@ func parkReasonForError(err error) database.ParkReason {
 // errorStage answers "which button fixes this" from the only signal the error
 // carries: the prefix the orchestrator writes.
 //
-// Four finalize shapes exist in orchestrator_mux.go and all four are the mux
+// Six finalize shapes exist in orchestrator_mux.go and all six are the mux
 // stage: muxAndFinalize's fmt.Errorf("mux: %w", err), verifyMuxedDuration's
-// short-output refusal "mux produced …", "no media files to mux…" and
-// "create output dir: %w". The "mux" prefix also keeps "mux segment N:" on the
-// mux side. All of them reach setJobError unwrapped — ExecuteWithChat returns
-// the finalize error straight through — so the prefix survives. Everything
-// else is the download stage.
+// short-output refusal "mux produced …", "no media files to mux…",
+// "create output dir: %w", and the split finalize's two, "create segment
+// output dir: %w" and "no segment files found in staging directory". The
+// "mux" prefix also keeps "mux segment N:" on the mux side, whatever that
+// wraps. The first four reach setJobError unwrapped — ExecuteWithChat returns
+// the finalize error straight through — so the prefix survives. The split
+// finalize's two are listed so the answer is right if one ever arrives; today
+// neither does. Every caller of muxSegment logs "create segment output dir"
+// and carries on, and the staging-directory message is written by the Mux
+// verb's own failure write, which sends no Job Failed embed. Everything else
+// is the download stage.
 //
 // No line numbers here on purpose: an earlier draft carried them and every one
 // had already drifted by the end of the arc. The citation gate does not read
@@ -2297,14 +2361,15 @@ func parkReasonForError(err error) database.ParkReason {
 // The prefixes are anchored deliberately: an ffmpeg stderr tail from a
 // DOWNLOAD failure can mention muxing anywhere in its 500 characters, and a
 // substring match would flip the answer for the case that matters most.
-//
-// Known limit: two finalize returns in the same file still read as "download"
-// — "create segment output dir: …" and "no segment files found in staging
-// directory". Naming them would mean teaching every producer a stage argument;
-// the prefixes below are what exists today.
 func errorStage(errMsg string) string {
 	// "mux" alone covers "mux: …", "mux produced …" and "mux segment N: …".
-	for _, p := range []string{"mux", "no media files to mux", "create output dir"} {
+	for _, p := range []string{
+		"mux",
+		"no media files to mux",
+		"create output dir",
+		"create segment output dir",
+		"no segment files found in staging directory",
+	} {
 		if strings.HasPrefix(errMsg, p) {
 			return "mux"
 		}
@@ -3309,11 +3374,13 @@ func muxActionFailure(err error) string { return err.Error() }
 // bootRemux is the boot's re-mux of a row a restart interrupted while it was
 // Muxing (enqueueExistingJobs, muxOnRestart): a download that completed, not
 // the operator muxing whatever was captured (JobContext.CapturedMux), and the
-// one caller that muxes a row already Muxing. Every other caller muxes a row
-// the Mux action is offered on (jobverbs.MuxableStatus), and the Muxing write
-// applies only while the row still reads one of those — so a Mux decided on
-// a row a Resume or a Reinitialize has moved on since is refused with
-// ErrNotAllowed instead of written over it.
+// one caller that muxes a row already Muxing — and only one still Muxing: a
+// row cancelled since the boot pass read it is refused with ErrNotAllowed,
+// not muxed as the Mux action would mux a Cancelled row. Every other caller
+// muxes a row the Mux action is offered on (jobverbs.MuxableStatus), and the
+// Muxing write applies only while the row still reads one of those — so a
+// Mux decided on a row a Resume or a Reinitialize has moved on since is
+// refused with ErrNotAllowed instead of written over it.
 func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRemux bool) error {
 	// Read config for staging check
 	var stagingBase string
@@ -3367,9 +3434,12 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 		release()
 		return fmt.Errorf("mux: %w", ErrJobNotFound)
 	}
+	// The boot re-mux was decided on a row read as Muxing, so Muxing is its
+	// only source: a row an operator cancelled since is refused here, where
+	// the Mux action's set would accept the Cancelled row and archive it.
 	sources := jobverbs.MuxableStatuses()
 	if bootRemux {
-		sources = append(sources, database.StatusMuxing)
+		sources = []database.JobStatus{database.StatusMuxing}
 	}
 	// A Finished job is muxed only for a part its finalize could not mux
 	// (jobverbs.MuxNeedsUnmuxedParts → HasUnmuxedParts), the fact the route

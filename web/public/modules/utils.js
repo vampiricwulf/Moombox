@@ -1079,6 +1079,19 @@ export function liveEdgeText(job) {
 }
 
 /**
+ * unusedRecordingText is the job-details line for a recording a Finished
+ * job's staging still holds that the archive was not made from (owner ruling
+ * R-E1), from the job API's unusedRootRecording field
+ * (worker.UnusedRecording). The TUI's twin is unusedRecordingLine
+ * (internal/tui/job_details.go).
+ * @param {{name?: string, size?: number}} kept
+ * @returns {string}
+ */
+export function unusedRecordingText(kept) {
+  return `Kept recording not in the archive: ${kept.name || ""} (${formatBytes(kept.size)})`;
+}
+
+/**
  * gapFillText is the job-details line for a Finished live Twitch job's
  * archive-VOD gap-fill (owner decision PR-R5), from the job API's gapFill
  * field (worker.GapFillState): "Gap-fill pending: 2 spans, until <time>"

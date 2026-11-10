@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -203,5 +204,184 @@ func TestYouTubeLiveFlipsToMuxingBeforeItsChatWait(t *testing.T) {
 	if wait := strings.Index(string(src), "chatDl.MarkStreamEnded()"); wait < 0 ||
 		wait < fset.Position(liveBranch.End()).Offset {
 		t.Error("the live chat wait no longer follows the live branch's Muxing write")
+	}
+}
+
+// TestBootLeavesAMuxingRowCancelledSinceItsRead pins State machines rule 3 on
+// the boot pass: it reads every row once, and an earlier row's re-mux can
+// take a while, so a later Muxing row may have been cancelled by the time its
+// turn comes. Both of the pass's writes on a Muxing row (the reset to
+// Downloading, and the error clear ahead of a re-mux) apply only while the
+// row is still Muxing, and a row that is not is neither enqueued nor muxed.
+//
+// The cancel lands from a database subscriber: the pass's first write to
+// either row of the pair cancels the other one, whichever order the rows
+// come in, which is exactly "after the read, before the write".
+//
+// Mutants: a plain UpdateJobFields for the reset — the cancelled row reads
+// Downloading and sits in the queue; skipping the check ahead of muxJob — the
+// cancelled row is written Muxing (the re-mux accepts a Cancelled row, as the
+// Mux action does) and archived.
+func TestBootLeavesAMuxingRowCancelledSinceItsRead(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		staged bool
+	}{
+		{"reset to Downloading", false},
+		{"re-mux from staging", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			t.Cleanup(w.Stop)
+
+			var stagingBase string
+			w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+			outDir := t.TempDir()
+			pair := []string{"j-one", "j-two"}
+			for _, id := range pair {
+				if _, err := db.AddJob(&database.Job{ID: id, VideoID: id, Platform: "twitch", Status: database.StatusMuxing, OutputDirectory: outDir}); err != nil {
+					t.Fatalf("AddJob %s: %v", id, err)
+				}
+				if tc.staged {
+					stageMediaFor(t, stagingBase, id)
+				}
+			}
+
+			var mu sync.Mutex
+			victim := ""
+			var victimWrites []database.JobStatus
+			unsubscribe := db.OnJobUpdate(func(j *database.Job) {
+				mu.Lock()
+				if victim == "" {
+					for _, id := range pair {
+						if id != j.ID {
+							victim = id
+						}
+					}
+					mu.Unlock()
+					db.UpdateJobFields(victim, map[string]any{"status": database.StatusCancelled})
+					return
+				}
+				if j.ID == victim {
+					victimWrites = append(victimWrites, j.Status)
+				}
+				mu.Unlock()
+			})
+			defer unsubscribe()
+
+			w.enqueueExistingJobs()
+
+			mu.Lock()
+			defer mu.Unlock()
+			if victim == "" {
+				t.Fatal("the boot pass wrote neither row; the test never cancelled one")
+			}
+			for _, st := range victimWrites {
+				if st != database.StatusCancelled {
+					t.Errorf("the cancelled row was written %s by the boot pass (writes seen: %v)", st, victimWrites)
+					break
+				}
+			}
+			if fresh, _ := db.GetJob(victim); fresh == nil || fresh.Status != database.StatusCancelled {
+				t.Errorf("cancelled row = %v, want it left Cancelled", fresh)
+			}
+			if w.queue.isPending(victim) {
+				t.Error("the cancelled row was enqueued")
+			}
+		})
+	}
+}
+
+// TestBootReMuxRefusesARowCancelledAfterItsErrorClear: the boot pass confirms
+// a row is still Muxing with its error-clear write and then calls muxJob,
+// which reads the row again. A Cancel landing between the two must stand: the
+// boot re-mux takes a row from Muxing only, where the Mux action's source set
+// holds Cancelled and would archive what the operator just cancelled.
+//
+// The cancel lands from a database subscriber on the error-clear write of the
+// same row, which is exactly that window.
+//
+// Mutant: appending Muxing to jobverbs.MuxableStatuses() for the boot re-mux
+// — the cancelled row is written Muxing and muxed.
+func TestBootReMuxRefusesARowCancelledAfterItsErrorClear(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+	if _, err := db.AddJob(&database.Job{ID: "j", VideoID: "j", Platform: "twitch", Status: database.StatusMuxing, OutputDirectory: t.TempDir()}); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	stageMediaFor(t, stagingBase, "j")
+
+	var mu sync.Mutex
+	cancelled := false
+	var later []database.JobStatus
+	unsubscribe := db.OnJobUpdate(func(j *database.Job) {
+		mu.Lock()
+		if !cancelled {
+			cancelled = true
+			mu.Unlock()
+			db.UpdateJobFields("j", map[string]any{"status": database.StatusCancelled})
+			return
+		}
+		later = append(later, j.Status)
+		mu.Unlock()
+	})
+	defer unsubscribe()
+
+	w.enqueueExistingJobs()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !cancelled {
+		t.Fatal("the boot pass never wrote the row; the test never cancelled it")
+	}
+	for _, st := range later {
+		if st != database.StatusCancelled {
+			t.Errorf("the cancelled row was written %s by the boot pass (writes seen: %v)", st, later)
+			break
+		}
+	}
+	if fresh, _ := db.GetJob("j"); fresh == nil || fresh.Status != database.StatusCancelled {
+		t.Errorf("cancelled row = %v, want it left Cancelled", fresh)
+	}
+	if w.queue.isPending("j") {
+		t.Error("the cancelled row was enqueued")
+	}
+	if !HasSegmentFiles(stagingBase, "j") {
+		t.Error("the cancelled row's staging is gone")
+	}
+}
+
+// TestBootKeepsAMuxingRowWhoseConditionalWriteFailed: the conditional writers
+// answer false for a statement that failed as well as for a row that moved
+// on, and nothing but the next boot picks a Muxing row up again. So a write
+// that did not apply gives the row up only when a second read shows it gone
+// or no longer Muxing.
+//
+// Mutant: treating every false as "moved on" — a row whose reset failed stays
+// Muxing, unqueued, until the next start.
+func TestBootKeepsAMuxingRowWhoseConditionalWriteFailed(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+	if _, err := db.AddJob(&database.Job{ID: "j", VideoID: "v", Platform: "youtube", Status: database.StatusMuxing}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A field map the database ignores entirely writes nothing and answers
+	// false, with the row still Muxing: the shape of a failed statement.
+	if !w.stillMuxingAfter("j", map[string]any{"no_such_field": 1}) {
+		t.Error("stillMuxingAfter = false for a row that is still Muxing after a write that did not apply")
+	}
+	db.UpdateJobFields("j", map[string]any{"status": database.StatusCancelled})
+	if w.stillMuxingAfter("j", map[string]any{"error": ""}) {
+		t.Error("stillMuxingAfter = true for a row cancelled since it was read")
+	}
+	if w.stillMuxingAfter("gone", map[string]any{"error": ""}) {
+		t.Error("stillMuxingAfter = true for a row that no longer exists")
+	}
+	if fresh, _ := db.GetJob("j"); fresh.Status != database.StatusCancelled {
+		t.Errorf("status = %s, want Cancelled left alone", fresh.Status)
 	}
 }

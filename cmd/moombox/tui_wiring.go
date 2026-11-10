@@ -305,6 +305,11 @@ func (s *runState) runTUI() {
 		for _, g := range worker.ScanMuxGaps(base, jobID) {
 			out.MuxGaps = append(out.MuxGaps, tui.MuxGapEntry{Path: g.Path, Reason: g.Reason})
 		}
+		if job, err := s.db.GetJob(jobID); err == nil && job != nil {
+			if u := worker.ScanUnusedRoot(s.db, base, job); u != nil {
+				out.UnusedRoot = &tui.UnusedRecordingEntry{Name: u.Name, Path: u.Path, Size: u.Size}
+			}
+		}
 		return out
 	}
 	// The chapter import (A C, A U): the routes' ChapterService in
