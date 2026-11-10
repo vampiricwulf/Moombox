@@ -419,3 +419,125 @@ func TestDropMuxReadoutLine(t *testing.T) {
 		}
 	}
 }
+
+// TestLiveFinalPartMuxOwnsTheLine: the last part of a split YouTube capture
+// is muxed inside the live loop, before the caller finalizes the tracker and
+// before it writes the incomplete-tail flag (muxLiveFinalPart). So the
+// tracker is closed first, and a capture that ended missing its tail gets no
+// readout, worked out from the download and not from the row.
+//
+// Mutants: muxLiveFinalPart without `tracker.Close()` (the chat tick after
+// the copy puts the download's line back, and download lines land between
+// readout lines); muxLiveFinalPart ignoring resultIncompleteTail (the
+// behind-head half sees a readout line and the row loses its own).
+func TestLiveFinalPartMuxOwnsTheLine(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	const counters = "(V: 1290/1300 A: 1290/1300 C: 5)"
+	setup := func(t *testing.T) (*DownloadWorker, *database.Database, *ProgressTracker, string, func() []string) {
+		w, db := testWorkerSetup(t)
+		t.Cleanup(w.Stop)
+		staging, _ := muxFixtureJob(t, w, db, "j-live")
+		segDir := filepath.Join(staging, "seg_1")
+		if err := os.MkdirAll(segDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		media := filepath.Join(segDir, "video.mp4")
+		writeMuxFixture(t, ffmpegPath, media, 4)
+		db.UpdateJobFields("j-live", map[string]any{"progress": counters, "percent": 99.0})
+		tracker := NewProgressTracker(db, "j-live", discardLogger{}, time.Millisecond)
+		t.Cleanup(tracker.Close)
+		var mu sync.Mutex
+		var lines []string
+		stop := db.OnJobChange(func(c *database.JobChange) {
+			if c.Job == nil {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			lines = append(lines, c.Job.Progress)
+		})
+		t.Cleanup(stop)
+		return w, db, tracker, media, func() []string {
+			mu.Lock()
+			defer mu.Unlock()
+			return slices.Clone(lines)
+		}
+	}
+
+	t.Run("complete capture", func(t *testing.T) {
+		w, db, tracker, media, seen := setup(t)
+		// The end verification's wait is still set, and live chat is still
+		// polling: both write the line through an open tracker.
+		tracker.SetWaitActivity(engine.ActivityVerifyingEnd)
+		done := make(chan struct{})
+		var ticks sync.WaitGroup
+		ticks.Add(1)
+		go func() {
+			defer ticks.Done()
+			for n := 1; ; n++ {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				tracker.SetChatCount(n)
+				time.Sleep(time.Millisecond)
+			}
+		}()
+		job, _ := db.GetJob("j-live")
+		_, err := w.orchestrator.muxLiveFinalPart(context.Background(), w.buildJobContext(job), tracker, false,
+			1, 0, time.Now().Unix(), QualityInfo{Label: "1080p"}, &DownloadResult{HasVideo: true, VideoPath: media})
+		close(done)
+		ticks.Wait()
+		if err != nil {
+			t.Fatalf("muxLiveFinalPart: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond) // past the tracker's write gate
+		tracker.SetChatCount(4242)
+
+		fresh, _ := db.GetJob("j-live")
+		if _, _, ok := jobstate.MuxReadout(fresh.Progress); !ok {
+			t.Errorf("line after the part and a chat tick = %q, want the readout", fresh.Progress)
+		}
+		if fresh.TotalChatMessages == nil || *fresh.TotalChatMessages != 4242 {
+			t.Errorf("chat count = %v, want 4242: a closed tracker still persists it", fresh.TotalChatMessages)
+		}
+		inReadout := false
+		for i, line := range seen() {
+			_, _, ok := jobstate.MuxReadout(line)
+			if ok {
+				inReadout = true
+			} else if inReadout {
+				t.Fatalf("line %d = %q landed after the readout began: %q", i, line, seen())
+			}
+		}
+		if !inReadout {
+			t.Errorf("no readout line was written: %q", seen())
+		}
+	})
+
+	t.Run("capture missing its tail", func(t *testing.T) {
+		w, db, tracker, media, seen := setup(t)
+		job, _ := db.GetJob("j-live")
+		if job.IncompleteTail {
+			t.Fatal("the row already carries the flag; the test must not depend on it")
+		}
+		// waitedForResume is the live loop's own evidence of a missing tail;
+		// the flag is written by the caller only after the loop returns.
+		_, err := w.orchestrator.muxLiveFinalPart(context.Background(), w.buildJobContext(job), tracker, true,
+			1, 0, time.Now().Unix(), QualityInfo{Label: "1080p"}, &DownloadResult{HasVideo: true, VideoPath: media})
+		if err != nil {
+			t.Fatalf("muxLiveFinalPart: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+		tracker.SetChatCount(7)
+		for _, line := range seen() {
+			if line != counters {
+				t.Fatalf("the row's line changed to %q, want it left as the download wrote it", line)
+			}
+		}
+		if after, _ := progressOf(t, db, "j-live"); after != counters {
+			t.Errorf("line after the part = %q, want %q", after, counters)
+		}
+	})
+}
