@@ -247,12 +247,15 @@ function defineShoelaceStubs(window) {
   // An sl-dialog also ends its hide as Shoelace's does: sl-after-hide, once
   // the (here instant) animation is over — after the hide() call returns,
   // never for a dialog that was not open. The confirm dialog's queue draws
-  // its next prompt on it (K34).
+  // its next prompt on it (K34). Its hide starts, as Shoelace's does, with
+  // sl-hide, at once — so between the two events the dialog is closing, the
+  // window in which a show() would cancel the hide.
   class SlDialog extends SlOverlay {
     hide() {
       const wasOpen = this._open === true;
       super.hide();
       if (!wasOpen) return Promise.resolve();
+      this.dispatchEvent(new window.Event("sl-hide"));
       return Promise.resolve().then(() => this.dispatchEvent(new window.Event("sl-after-hide")));
     }
   }

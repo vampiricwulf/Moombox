@@ -191,3 +191,60 @@ test("an update prompt waits for an open notes viewer to close", { skip }, async
   assert.equal(h.el("update-dismiss-btn").textContent, "Skip this version");
   assert.notEqual(h.el("update-now-btn").style.display, "none");
 });
+
+// ── repeats and the closing window (fix round) ─────────────────────────
+//
+// Update requests have no caller waiting on each one, so repeats of a mode
+// merge into one waiting entry: two badge clicks under the viewer used to
+// queue two prompts, and the prompt reopened after the operator closed it.
+
+// MUTANT: _drawUpdateDialog pushing every request — the prompt reopens.
+test("repeated prompt requests under the viewer draw one prompt", { skip }, async () => {
+  const h = await promptOpen();
+  const dlg = h.el("update-dialog");
+  h.el("btn-view-release-notes").click();
+  await h.flush();
+  await h.flush();
+  assert.equal(dlg.dataset.viewerMode, "true");
+
+  h.app.updates.showUpdateDialog();
+  h.app.updates.showUpdateDialog();
+  dlg.hide();
+  await h.flush();
+  assert.equal(dlg.label, "Update to v9.9.1");
+  assert.ok(isOpen(h, "update-dialog"));
+
+  dlg.hide(); // Escape, the X or the overlay — not Skip
+  await h.flush();
+  await h.flush();
+  assert.equal(isOpen(h, "update-dialog"), false, "a repeated request reopened the closed prompt");
+});
+
+// A request while the dialog is closing — even of the mode closing — waits
+// for sl-after-hide: a show() in the hide animation cancels it and Shoelace
+// fires a spurious sl-after-hide, which ended the owner under an open
+// dialog and let the other mode draw straight over it.
+//
+// MUTANT: same-mode requests drawing at once while closing.
+test("a request while the dialog is closing waits for the hide to end", { skip }, async () => {
+  const h = await promptOpen();
+  const dlg = h.el("update-dialog");
+  h.el("version-indicator").click();
+  assert.ok(isOpen(h, "update-dialog"));
+
+  dlg.hide();
+  h.el("version-indicator").click(); // within the hide animation
+  assert.equal(isOpen(h, "update-dialog"), false, "the prompt was shown inside its own hide");
+  await h.flush();
+  assert.ok(isOpen(h, "update-dialog"), "the waiting prompt was not drawn after the hide");
+  assert.equal(dlg.label, "Update to v9.9.1");
+
+  // The prompt owns the dialog again: the viewer waits for it.
+  h.app.updates.showNotesViewer(currentNotes);
+  assert.equal(dlg.label, "Update to v9.9.1", "the viewer drew over the redrawn prompt");
+  assert.equal(dlg.dataset.viewerMode, undefined);
+  dlg.hide();
+  await h.flush();
+  assert.equal(dlg.label, "Release Notes — v2.8.10");
+  assert.equal(h.el("update-dismiss-btn").textContent, "Close");
+});

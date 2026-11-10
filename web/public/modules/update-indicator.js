@@ -112,14 +112,22 @@ export class UpdateController {
   // turning the open dialog into the other under its reader (a notes fetch
   // answering after the operator opened the update prompt used to). The same
   // mode redraws in place: a 409 shows the pending release's notes in the
-  // prompt it came from (_showPendingInstead). draw returns false when it
-  // had nothing to show.
+  // prompt it came from (_showPendingInstead) — but only while the dialog is
+  // open and not closing: a request in the hide animation, of either mode,
+  // waits too, since show() there cancels the hide and Shoelace fires a
+  // spurious sl-after-hide that would end the owner under an open dialog
+  // (the confirm queue's _answerConfirm notes the same). Unlike confirms,
+  // no caller waits on each request, so repeats merge: at most one entry
+  // waits per mode, the latest. draw returns false when it had nothing to
+  // show.
   _drawUpdateDialog(mode, draw) {
     const dlg = document.getElementById("update-dialog");
     if (!dlg) return;
     this._bindUpdateDialog(dlg);
-    if (this._dialogMode && this._dialogMode !== mode) {
-      this._dialogWaiting.push({ mode, draw });
+    if (this._dialogClosing || (this._dialogMode && this._dialogMode !== mode)) {
+      const i = this._dialogWaiting.findIndex((w) => w.mode === mode);
+      if (i >= 0) this._dialogWaiting[i] = { mode, draw };
+      else this._dialogWaiting.push({ mode, draw });
       return;
     }
     if (draw(dlg) === false) {
@@ -127,6 +135,8 @@ export class UpdateController {
       return;
     }
     this._dialogMode = mode;
+    // What is on screen now answers any request of its mode still waiting.
+    this._dialogWaiting = this._dialogWaiting.filter((w) => w.mode !== mode);
   }
 
   _drawNextUpdateDialog() {
@@ -142,8 +152,14 @@ export class UpdateController {
     this._dialogBound = dlg;
     this._dialogMode = null;
     this._dialogWaiting = [];
+    this._dialogClosing = false;
+    dlg.addEventListener("sl-hide", (e) => {
+      if (e.target !== dlg) return;
+      this._dialogClosing = true;
+    });
     dlg.addEventListener("sl-after-hide", (e) => {
       if (e.target !== dlg) return;
+      this._dialogClosing = false;
       if (this._dialogMode === "viewer") {
         // Text must match index.html's dismiss button ("Skip this version").
         const updateBtn = document.getElementById("update-now-btn");
@@ -389,7 +405,7 @@ export class UpdateController {
   async dismissUpdate() {
     // Viewer mode: the shared update dialog is being reused by Settings >
     // View Release Notes, with this same button relabeled "Close" (see
-    // settings.js). In that mode there may be no pending update at all, and
+    // showNotesViewer). In that mode there may be no pending update at all, and
     // even if there is, "Close" must NOT skip it — just hide the dialog.
     const dlg = document.getElementById("update-dialog");
     if (dlg?.dataset.viewerMode === "true") {
