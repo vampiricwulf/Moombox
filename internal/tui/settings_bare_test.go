@@ -362,7 +362,7 @@ func TestBareSettingsFrames(t *testing.T) {
 			"  774",
 			"  Network access  [localhost]",
 			"web dashboard port, 1-65535 (…",
-			"pw:none (keys: toggle row)",
+			"Tab:section Esc:close ↑↓:field",
 		}},
 		{"network, a toggle row", []string{"right"}, []string{
 			"Settings 1/13 Network        *",
@@ -394,7 +394,7 @@ func TestBareSettingsFrames(t *testing.T) {
 			"> New      ********",
 			"  Confirm",
 			"Passwords do not match",
-			"Enter:save  Esc:cancel",
+			"↑↓  Enter:save  Esc:cancel",
 		}},
 		{"password, remove", nil, []string{
 			"Remove password",
@@ -408,8 +408,8 @@ func TestBareSettingsFrames(t *testing.T) {
 			"Settings 2/13 Paths",
 			"> FFmpeg path",
 			"",
-			"empty = system PATH",
-			"Installer needs 60x20",
+			"Enlarge the terminal to 60x20",
+			"for this",
 			"Tab:section Esc:close ↑↓:field",
 		}},
 		{"channels", []string{"down"}, []string{
@@ -687,11 +687,11 @@ func TestBareSettingsRefusesTheInstaller(t *testing.T) {
 	if !m.dirty || m.values["ffmpeg_path"] != edited {
 		t.Errorf("Ctrl+O changed the field: %q", m.values["ffmpeg_path"])
 	}
-	if frame := plainFrame(a); !strings.Contains(frame, bareInstallerRefusal) {
+	if frame := plainFrame(a); !strings.Contains(strings.Join(strings.Fields(frame), " "), compactRefusal(minTermWidth, minTermHeight)) {
 		t.Errorf("the refusal is not on screen:\n%s", frame)
 	}
 	r.press("up")
-	if frame := plainFrame(a); strings.Contains(frame, bareInstallerRefusal) {
+	if frame := plainFrame(a); strings.Contains(strings.Join(strings.Fields(frame), " "), compactRefusal(minTermWidth, minTermHeight)) {
 		t.Errorf("the refusal outlived the next key:\n%s", frame)
 	}
 
@@ -802,6 +802,28 @@ func TestBareSettingsEscStillAsks(t *testing.T) {
 	r.press("esc")
 	if !m.IsVisible() || !m.closeConfirm || last(a) != bareSavePrompt {
 		t.Errorf("Esc after a failed save: open %v, prompt %v, last row %q", m.IsVisible(), m.closeConfirm, last(a))
+	}
+
+	// The prompt is never covered: a long message that arrives while it is
+	// up (a webhook test's late result) is cut to the rows above it, and
+	// at the floor the prompt still names its keys.
+	for _, s := range [][2]int{{30, 6}, {40, 10}, {59, 19}} {
+		r = bareSettingsRig(t, s[0], s[1])
+		a, m = r.app, r.app.settings
+		toField(t, m, "https_enabled")
+		r.press("right", "esc")
+		m.SetNotifTestResult("webhook returned 404 Not Found: {\"message\": \"Unknown Webhook\", \"code\": 10015} after three attempts, the last one timed out waiting for Discord to answer the request")
+		wantExact(t, "the prompt under a long message", a.View().Content, s[0], s[1])
+		if !m.closeConfirm || last(a) != bareSavePrompt {
+			t.Errorf("%dx%d: a long message covers the save prompt:\n%s", s[0], s[1], plainFrame(a))
+		}
+		if frame := plainFrame(a); !strings.Contains(frame, "HTTPS enabled") {
+			t.Errorf("%dx%d: the message covers the focused field:\n%s", s[0], s[1], frame)
+		}
+		r.press("n")
+		if m.IsVisible() {
+			t.Errorf("%dx%d: N did not answer the prompt", s[0], s[1])
+		}
 	}
 
 	// A restart-required save: the prompt, then Enter restarts.

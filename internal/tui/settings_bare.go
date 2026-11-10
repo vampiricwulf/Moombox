@@ -47,12 +47,9 @@ import (
 // Keys are the normal form's, with three differences (bareKey): Shift+Down
 // does nothing on a field page, since the buttons it reaches are not drawn;
 // button focus held from the normal form is dropped; and Ctrl+O on the
-// FFmpeg path is refused, since the installer needs the normal layout
-// (owner ruling R-C10).
-
-// bareInstallerRefusal answers Ctrl+O on the FFmpeg path below the normal
-// layout. 21 cells: whole at the compact floor.
-const bareInstallerRefusal = "Installer needs 60x20"
+// FFmpeg path is refused in the words and with the size every refused
+// action gets (overlayOpensAt), since the installer has no bare form (owner
+// ruling R-C10).
 
 // bareSavePrompt is "Save changes?" on the keys row. 27 cells.
 const bareSavePrompt = "Save changes? Y/N  Esc:back"
@@ -85,8 +82,12 @@ func (m *SettingsModel) bareKey(key string) string {
 			if sec.name == "Paths" && sec.fields[m.fieldIndex].key == "ffmpeg_path" {
 				// Before the save prompt: answering it would save, close and
 				// only then find the installer cannot be drawn.
-				m.bareNote, m.bareNoteStyle = bareInstallerRefusal, YellowStyle
-				return ""
+				// The size comes from the one predicate, in the words every
+				// refused action gets.
+				if ok, needW, needH := overlayOpensAt("ffmpeg check", m.width, m.height); !ok {
+					m.bareNote, m.bareNoteStyle = compactRefusal(needW, needH), YellowStyle
+					return ""
+				}
 			}
 		}
 	}
@@ -220,8 +221,9 @@ func bareHelpRows(helps []string, w, limit int) int {
 // and the message leave. A message that needs more makes the tail and then
 // the window give way, down to the focused item; past that it is
 // bareSheet.errorUnder's: the title, the keys and the header give way before
-// any of it is cut. focus < 0: no item is focused and items are drawn from
-// the first.
+// any of it is cut. While "Save changes?" is on the keys row the message
+// never takes that row: it is cut instead. focus < 0: no item is focused and
+// items are drawn from the first.
 func (m *SettingsModel) barePage(sheet bareSheet, items [][]string, focus int, tail []string, msg string, style lipgloss.Style) string {
 	w, h := m.width, m.height
 	avail := max(h-2, 1)
@@ -256,6 +258,15 @@ func (m *SettingsModel) barePage(sheet bareSheet, items [][]string, focus int, t
 		rows = append(rows, items[i]...)
 	}
 	sheet.body = append(bareRows(rows, win), tail...)
+	if m.closeConfirm && need > avail-len(sheet.body) {
+		// "Save changes?" is on the keys row and Y and N answer it: a
+		// message may not take that row. It is cut to the rows under the
+		// focused item, and left out where there is none.
+		if room := avail - len(sheet.body); room > 0 {
+			sheet.body = append(sheet.body, bareStyled(bareWrap(msg, w, room), style)...)
+		}
+		return sheet.render(w, h)
+	}
 	sheet.errorUnder(msg, style, w, h)
 	return sheet.render(w, h)
 }
@@ -415,18 +426,28 @@ func bareFieldMark(selected, changed, restart bool) string {
 	return "  "
 }
 
+// barePasswordKeysWork reports whether the keys that open the password
+// editor work on field: on a text or number row they type themselves.
+func barePasswordKeysWork(field fieldDef) bool {
+	return field.ftype != fieldText && field.ftype != fieldNumber
+}
+
 // barePasswordLine is the Network page's password row: whether one is set
-// and the keys that open its editor. They work from a toggle row only: on a
-// text or number row they type themselves.
+// and the keys that open its editor, or, on a row where those keys type
+// themselves, which rows they work from. Every form fits the compact floor.
 func (m *SettingsModel) barePasswordLine(field fieldDef) string {
-	state, keys := "pw:none", " `:set"
-	if m.hasPassword() {
-		state, keys = "pw:set", " `:change ~:remove"
+	var line string
+	switch works := barePasswordKeysWork(field); {
+	case m.hasPassword() && works:
+		line = "pw:set  `:change ~:remove"
+	case m.hasPassword():
+		line = "pw:set  `/~ on a Yes/No row"
+	case works:
+		line = "pw:none  `:set"
+	default:
+		line = "pw:none  `:set on a Yes/No row"
 	}
-	if field.ftype == fieldText || field.ftype == fieldNumber {
-		keys = "(keys: toggle row)"
-	}
-	return DimStyle.Render(truncateString(state+" "+keys, m.width))
+	return DimStyle.Render(truncateString(line, m.width))
 }
 
 // bareFields draws a field section.
@@ -471,12 +492,14 @@ func (m *SettingsModel) bareFields(sec settingsSection) string {
 	sheet := m.bareShell(keys...)
 
 	// The password row of the Network page: a row of its own where the
-	// terminal has one to give, the keys row where it has not.
+	// terminal has one to give. Where it has not, it takes the keys row,
+	// and only on a row its keys work from: on a text or number row the
+	// keys row stays, so Tab, Esc and the arrows are always named.
 	var tail []string
 	if sec.name == "Network" {
 		if line := m.barePasswordLine(focused); h >= 8 {
 			tail = []string{line}
-		} else if !m.closeConfirm {
+		} else if !m.closeConfirm && barePasswordKeysWork(focused) {
 			sheet.keys = line
 		}
 	}
@@ -550,7 +573,9 @@ func (m *SettingsModel) bareSecurity() string {
 		}
 		fields = append(fields, pwField{"New", m.secNewPw}, pwField{"Confirm", m.secConfirmPw})
 		sheet.left = TitleStyle.Render(title)
-		sheet.keys = bareKeyRow(w, "Enter:save", "Esc:cancel")
+		// More than one input: the keys row names the key that moves
+		// between them.
+		sheet.keys = bareKeyRow(w, "↑↓", "Enter:save", "Esc:cancel")
 		for i, f := range fields {
 			if i == m.secFieldIndex {
 				sheet.body = append(sheet.body, focusedRow(f.label))

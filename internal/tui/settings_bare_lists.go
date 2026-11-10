@@ -259,7 +259,7 @@ func (m *SettingsModel) bareNotifEdit() string {
 	if m.notifIndex >= len(m.notifications) {
 		title = "Add webhook"
 	}
-	keys := bareKeyRow(w, "Spc", "m:@", "Enter:save", "Esc:back")
+	keys := bareKeyRow(w, "Spc:toggle", "m:mention", "Enter", "Esc")
 	if w >= 41 { // the four in words are 41 cells
 		keys = bareKeyRow(w, "Space:event", "m:mention", "Enter:save", "Esc:back")
 	}
