@@ -151,17 +151,9 @@ type FeedMonitor struct {
 	mu          sync.Mutex
 	configStore *config.Store
 	db          *database.Database
-	checking    bool
-	// pendingKick latches a CheckNow that landed while a cycle was in
-	// flight — previously silently dropped. Consumed in runCycle's defer.
-	pendingKick bool
-	// warnedSlow rate-limits the oversubscribed warning; atomic because
-	// scheduleNext touches it outside the monitor mutex.
-	warnedSlow  atomic.Bool
-	timer       *time.Timer
-	ctx         context.Context
-	cancel      context.CancelFunc
-	NextCheckAt int64 // epoch ms; -1 = check in progress, 0 = no channels
+	// loop is the poll-cycle lifecycle (pollloop.go): Start/Stop, CheckNow,
+	// the timer chain and the next-check countdown.
+	loop pollLoop
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -368,91 +360,48 @@ func NewFeedMonitor(store *config.Store, db *database.Database, logger interface
 	}
 }
 
-// Start begins the feed monitoring loop.
-func (fm *FeedMonitor) Start(ctx context.Context) {
-	fm.mu.Lock()
-	if fm.cancel != nil {
-		fm.mu.Unlock()
-		return // Already running
+// pollSpec hands the feed monitor's interval, cycle, logger and countdown
+// hook to its pollLoop.
+func (fm *FeedMonitor) pollSpec() pollSpec {
+	return pollSpec{
+		name:     "feed",
+		logger:   fm.logger,
+		cycle:    fm.runCycle,
+		next:     fm.nextInterval,
+		slowWarn: "feed check cycle takes far longer than the configured interval — effective cadence degraded",
+		onSchedule: func(v int64) {
+			if fm.OnSchedule != nil {
+				fm.OnSchedule(v)
+			}
+		},
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	fm.ctx = ctx
-	fm.cancel = cancel
-	fm.mu.Unlock()
-
-	fm.logger.Info("feed monitor started")
-
-	// Immediate first check on startup (runCycle schedules next in its defer)
-	go fm.runCycle(ctx)
 }
+
+// Start begins the feed monitoring loop.
+func (fm *FeedMonitor) Start(ctx context.Context) { fm.loop.start(ctx, fm.pollSpec()) }
 
 // Stop stops the feed monitor.
-func (fm *FeedMonitor) Stop() {
-	fm.mu.Lock()
-	defer fm.mu.Unlock()
-
-	if fm.cancel != nil {
-		fm.cancel()
-		fm.ctx = nil
-		fm.cancel = nil
-	}
-	if fm.timer != nil {
-		fm.timer.Stop()
-		fm.timer = nil
-	}
-	fm.NextCheckAt = 0
-	fm.logger.Info("feed monitor stopped")
-}
+func (fm *FeedMonitor) Stop() { fm.loop.stop(fm.pollSpec()) }
 
 // GetNextCheckAt returns the next scheduled check time in epoch ms.
-func (fm *FeedMonitor) GetNextCheckAt() int64 {
-	fm.mu.Lock()
-	defer fm.mu.Unlock()
-	return fm.NextCheckAt
-}
+func (fm *FeedMonitor) GetNextCheckAt() int64 { return fm.loop.next() }
 
 // CheckNow triggers an immediate feed check if the monitor is running.
-func (fm *FeedMonitor) CheckNow() {
-	fm.mu.Lock()
-	if fm.cancel == nil {
-		fm.mu.Unlock()
-		return // Not running
-	}
-	ctx := fm.ctx
-	fm.mu.Unlock()
-	go fm.runCycle(ctx)
+func (fm *FeedMonitor) CheckNow() { fm.loop.checkNow(fm.pollSpec()) }
+
+// scheduleNext arms the next cycle (pollLoop.scheduleNext): fixed-RATE from
+// cycleStart, with feed checks' configured interval. Inline probes can make
+// a feed cycle legitimately long, so only a >2× overshoot warns.
+func (fm *FeedMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
+	fm.loop.scheduleNext(ctx, cycleStart, fm.pollSpec())
 }
 
-// scheduleNext arms the next cycle. cycleStart anchors fixed-RATE
-// scheduling: the delay is interval minus the elapsed cycle time, so the
-// configured interval is a true period — previously it was a GAP after
-// each cycle (which can stretch by minutes when inline probes run).
-// Zero-value cycleStart behaves as a plain interval.
-func (fm *FeedMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
-	// Same rule as runCycle's guard, for the path that arms the timer: a
-	// cancelled context means this chain was retired by Stop(), and a retired
-	// chain must arm nothing and publish nothing. Checked FIRST, above the
-	// channel-count read, because the "no channels" arm below writes
-	// NextCheckAt and publishes OnSchedule too — the two things this guard
-	// exists to prevent — so a guard placed after it covers only half the
-	// function. Deliberately WITHOUT touching NextCheckAt: the countdown
-	// belongs to whichever chain is live now, and a dead chain zeroing it
-	// would blank the UI's next-check time for no reason. A twin of this check
-	// sits inside the locked section below and covers what this one cannot —
-	// a Stop()+Start() landing after it; both are wanted.
-	if ctx.Err() != nil {
-		return
-	}
-
+// nextInterval is the jittered feed check interval, or ok=false with no
+// YouTube channel configured.
+func (fm *FeedMonitor) nextInterval() (time.Duration, bool) {
 	channels := fm.getYouTubeChannels()
 	if len(channels) == 0 {
-		fm.mu.Lock()
-		fm.NextCheckAt = 0
-		fm.mu.Unlock()
-		if fm.OnSchedule != nil {
-			fm.OnSchedule(0)
-		}
-		return
+		return 0, false
 	}
 
 	var interval time.Duration
@@ -468,59 +417,7 @@ func (fm *FeedMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
 	if tenPercent > 0 {
 		interval = interval - time.Duration(tenPercent) + time.Duration(rand.Int63n(2*tenPercent))
 	}
-
-	delay := interval
-	if !cycleStart.IsZero() {
-		elapsed := time.Since(cycleStart)
-		delay = interval - elapsed
-		if delay < time.Second {
-			// Warn only when the cycle ran WELL past the interval (>2×) —
-			// feed cycles run inline probes that can legitimately take a
-			// while; once, via the atomic guard.
-			if elapsed >= 2*interval && fm.warnedSlow.CompareAndSwap(false, true) {
-				fm.logger.Warn("feed check cycle takes far longer than the configured interval — effective cadence degraded",
-					"cycle", elapsed.Round(time.Second), "interval", interval.Round(time.Second))
-			}
-			delay = time.Second
-		}
-	}
-
-	fm.mu.Lock()
-	// Unreachable since the leading ctx.Err() guard — Stop() cancels the ctx
-	// and nils cancel together, and Stop() itself writes NextCheckAt = 0 — so
-	// this no longer clears the -1 sentinel for a cycle racing Stop(). Kept as
-	// defence for a future cancel-without-cancel path: a monitor that nils
-	// cancel without cancelling its context would otherwise arm a timer and
-	// publish a countdown for a chain nothing owns.
-	if fm.cancel == nil {
-		fm.NextCheckAt = 0
-		fm.mu.Unlock()
-		return
-	}
-	// Kept beside the leading guard, not redundant with it: this closes the
-	// window between that check and this lock, in which a Stop()+Start() would
-	// install a NEW non-nil cancel — so `cancel == nil` above passes and this
-	// dead chain would write the LIVE chain's NextCheckAt and publish its
-	// OnSchedule. Re-reading ctx.Err() costs nothing; do not "simplify" it away.
-	if ctx.Err() != nil {
-		fm.mu.Unlock()
-		return
-	}
-	fm.NextCheckAt = time.Now().Add(delay).UnixMilli()
-	if fm.timer != nil {
-		fm.timer.Stop()
-	}
-	fm.timer = time.AfterFunc(delay, func() {
-		fm.runCycle(ctx)
-	})
-	next := fm.NextCheckAt
-	fm.mu.Unlock()
-
-	if fm.OnSchedule != nil {
-		fm.OnSchedule(next)
-	}
-
-	fm.logger.Debug("feed check scheduled", "in", delay.Round(time.Second))
+	return interval, true
 }
 
 func (fm *FeedMonitor) runCycle(ctx context.Context) {
@@ -529,54 +426,10 @@ func (fm *FeedMonitor) runCycle(ctx context.Context) {
 			fm.logger.Error("feed monitor runCycle panic", "panic", r)
 		}
 	}()
-
-	// A cancelled context means this cycle belongs to a STOPPED chain. Stop()
-	// cancels the context but leaves the AfterFunc armed, and a later Start()
-	// installs a new cancel — so the dead chain's cycle used to pass every
-	// guard, run a full doCheck, and then re-arm the SHARED timer field,
-	// cancelling the live chain's pending cycle every interval. Returning here,
-	// before the `checking` latch and before the scheduleNext defer is
-	// installed, is what stops that. Latent today (Stop runs only at shutdown).
-	if ctx.Err() != nil {
-		return
-	}
-
-	cycleStart := time.Now()
-	fm.mu.Lock()
-	if fm.checking {
-		// A kick landed mid-cycle: latch it so the defer re-runs
-		// immediately instead of silently dropping it (the new channel
-		// would otherwise wait a full interval).
-		fm.pendingKick = true
-		fm.mu.Unlock()
-		return
-	}
-	fm.checking = true
-	// -1 sentinel = "checking now" for the UI countdowns (0 keeps its
-	// existing meaning of "no channels"). Restored by scheduleNext.
-	fm.NextCheckAt = -1
-	fm.mu.Unlock()
-	if fm.OnSchedule != nil {
-		fm.OnSchedule(-1)
-	}
-
-	defer func() {
-		fm.mu.Lock()
-		fm.checking = false
-		rerun := fm.pendingKick
-		fm.pendingKick = false
-		fm.mu.Unlock()
-		if rerun {
-			// Re-enter via goroutine so the stop-check and offline gate
-			// run naturally; that cycle does its own scheduleNext.
-			go fm.runCycle(ctx)
-			return
-		}
-		fm.scheduleNext(ctx, cycleStart)
-	}()
-
-	fm.refreshProbeCooldown()
-	fm.doCheck(ctx)
+	fm.loop.runCycle(ctx, fm.pollSpec(), func(ctx context.Context) {
+		fm.refreshProbeCooldown()
+		fm.doCheck(ctx)
+	})
 }
 
 // refreshProbeCooldown hot-reloads the per-video probe cooldown window from

@@ -1119,22 +1119,22 @@ func TestMonitors_ACancelledChainNeverReArms(t *testing.T) {
 			OnSchedule:    p.onSchedule,
 			IsOnline:      p.offline,
 		}
-		fm.cancel = func() {} // a LIVE chain owns the monitor now
-		fm.NextCheckAt = 4242
-		stopTimer(t, &fm.mu, &fm.timer)
+		fm.loop.cancel = func() {} // a LIVE chain owns the monitor now
+		fm.loop.nextCheckAt = 4242
+		stopTimer(t, &fm.loop.mu, &fm.loop.timer)
 
 		fm.scheduleNext(dead, time.Time{})
 		assertNoReArm(t, "feed scheduleNext", p, func() (bool, int64) {
-			fm.mu.Lock()
-			defer fm.mu.Unlock()
-			return fm.timer != nil, fm.NextCheckAt
+			fm.loop.mu.Lock()
+			defer fm.loop.mu.Unlock()
+			return fm.loop.timer != nil, fm.loop.nextCheckAt
 		})
 
 		fm.runCycle(dead)
 		assertNoReArm(t, "feed runCycle", p, func() (bool, int64) {
-			fm.mu.Lock()
-			defer fm.mu.Unlock()
-			return fm.timer != nil, fm.NextCheckAt
+			fm.loop.mu.Lock()
+			defer fm.loop.mu.Unlock()
+			return fm.loop.timer != nil, fm.loop.nextCheckAt
 		})
 	})
 
@@ -1152,15 +1152,15 @@ func TestMonitors_ACancelledChainNeverReArms(t *testing.T) {
 			OnSchedule:    p.onSchedule,
 			IsOnline:      p.offline,
 		}
-		fm.cancel = func() {}
-		fm.NextCheckAt = 4242
-		stopTimer(t, &fm.mu, &fm.timer)
+		fm.loop.cancel = func() {}
+		fm.loop.nextCheckAt = 4242
+		stopTimer(t, &fm.loop.mu, &fm.loop.timer)
 
 		fm.scheduleNext(dead, time.Time{})
 		assertNoReArm(t, "feed scheduleNext (no channels)", p, func() (bool, int64) {
-			fm.mu.Lock()
-			defer fm.mu.Unlock()
-			return fm.timer != nil, fm.NextCheckAt
+			fm.loop.mu.Lock()
+			defer fm.loop.mu.Unlock()
+			return fm.loop.timer != nil, fm.loop.nextCheckAt
 		})
 	})
 
@@ -1174,22 +1174,22 @@ func TestMonitors_ACancelledChainNeverReArms(t *testing.T) {
 			OnSchedule:    p.onSchedule,
 			IsOnline:      p.offline,
 		}
-		dm.cancel = func() {}
-		dm.NextCheckAt = 4242
-		stopTimer(t, &dm.mu, &dm.timer)
+		dm.loop.cancel = func() {}
+		dm.loop.nextCheckAt = 4242
+		stopTimer(t, &dm.loop.mu, &dm.loop.timer)
 
 		dm.scheduleNext(dead, time.Time{})
 		assertNoReArm(t, "decapi scheduleNext", p, func() (bool, int64) {
-			dm.mu.Lock()
-			defer dm.mu.Unlock()
-			return dm.timer != nil, dm.NextCheckAt
+			dm.loop.mu.Lock()
+			defer dm.loop.mu.Unlock()
+			return dm.loop.timer != nil, dm.loop.nextCheckAt
 		})
 
 		dm.runCycle(dead)
 		assertNoReArm(t, "decapi runCycle", p, func() (bool, int64) {
-			dm.mu.Lock()
-			defer dm.mu.Unlock()
-			return dm.timer != nil, dm.NextCheckAt
+			dm.loop.mu.Lock()
+			defer dm.loop.mu.Unlock()
+			return dm.loop.timer != nil, dm.loop.nextCheckAt
 		})
 	})
 
@@ -1202,22 +1202,22 @@ func TestMonitors_ACancelledChainNeverReArms(t *testing.T) {
 			OnSchedule:  p.onSchedule,
 			IsOnline:    p.offline,
 		}
-		tm.cancel = func() {}
-		tm.NextCheckAt = 4242
-		stopTimer(t, &tm.mu, &tm.timer)
+		tm.loop.cancel = func() {}
+		tm.loop.nextCheckAt = 4242
+		stopTimer(t, &tm.loop.mu, &tm.loop.timer)
 
 		tm.scheduleNext(dead, time.Time{})
 		assertNoReArm(t, "twitch scheduleNext", p, func() (bool, int64) {
-			tm.mu.Lock()
-			defer tm.mu.Unlock()
-			return tm.timer != nil, tm.NextCheckAt
+			tm.loop.mu.Lock()
+			defer tm.loop.mu.Unlock()
+			return tm.loop.timer != nil, tm.loop.nextCheckAt
 		})
 
 		tm.runCycle(dead)
 		assertNoReArm(t, "twitch runCycle", p, func() (bool, int64) {
-			tm.mu.Lock()
-			defer tm.mu.Unlock()
-			return tm.timer != nil, tm.NextCheckAt
+			tm.loop.mu.Lock()
+			defer tm.loop.mu.Unlock()
+			return tm.loop.timer != nil, tm.loop.nextCheckAt
 		})
 	})
 }

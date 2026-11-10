@@ -1150,7 +1150,7 @@ Callback fields:
 
 ### monitor.FeedMonitor / DecapiMonitor / TwitchMonitor
 
-All three monitors share a similar interface:
+All three monitors share one poll-cycle lifecycle, `pollLoop` (`internal/monitor/pollloop.go`): Start/Stop, CheckNow, the fixed-rate timer chain with its two retired-chain `ctx.Err()` guards, the latched mid-cycle kick (`pendingKick`) and the int64 countdown (a time, `-1` while a cycle runs, `0` with nothing to poll or stopped). Each monitor supplies its own interval, check, logger and panic recovery in a `pollSpec`, and keeps this interface:
 - `Start(ctx)`: Begin monitoring loop.
 - `Stop()`: Cancel and clean up.
 - `CheckNow()`: Trigger an immediate check (used when channels change).

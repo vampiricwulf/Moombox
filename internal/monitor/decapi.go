@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -138,22 +137,13 @@ type DecapiMonitor struct {
 	mu          sync.Mutex
 	configStore *config.Store
 	db          *database.Database
-	checking    bool
-	// pendingKick latches a CheckNow that landed while a cycle was in
-	// flight — previously silently dropped. Consumed in runCycle's defer.
-	pendingKick bool
-	// warnedSlow rate-limits the oversubscribed warning; atomic because
-	// scheduleNext touches it outside the monitor mutex.
-	warnedSlow atomic.Bool
-	timer      *time.Timer
-	ctx        context.Context
-	cancel     context.CancelFunc
-	rateLimit  rateLimitState
+	// loop is the poll-cycle lifecycle (pollloop.go).
+	loop      pollLoop
+	rateLimit rateLimitState
 	// terminalMemo remembers, per channel, the newest video ID DECAPI reported
 	// and what the probe made of it. Guarded by mu; keyed by channel ID, so it
 	// is bounded by the configured channel list and pruned by PruneHealth.
 	terminalMemo map[string]decapiTerminalMemo
-	NextCheckAt  int64 // epoch ms; -1 = check in progress, 0 = no channels
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -269,153 +259,54 @@ func NewDecapiMonitor(store *config.Store, db *database.Database, logger interfa
 	}
 }
 
-// Start begins the DECAPI monitoring loop.
-func (dm *DecapiMonitor) Start(ctx context.Context) {
-	dm.mu.Lock()
-	if dm.cancel != nil {
-		dm.mu.Unlock()
-		return // Already running
+// pollSpec hands the DECAPI monitor's interval, cycle, logger and countdown
+// hook to its pollLoop.
+func (dm *DecapiMonitor) pollSpec() pollSpec {
+	return pollSpec{
+		name:   "decapi",
+		logger: dm.logger,
+		cycle:  dm.runCycle,
+		next: func() (time.Duration, bool) {
+			channels := dm.getYouTubeChannels()
+			if len(channels) == 0 {
+				return 0, false
+			}
+			return dm.calculateInterval(len(channels)), true
+		},
+		// DECAPI's rate-derived interval is structurally smaller than the
+		// mandatory per-request stagger floor once channel count approaches
+		// the per-minute limit, so a normal full-channel cycle exceeds the
+		// interval by design — waitForRateLimit still bounds the actual
+		// request rate. Only a >2× overshoot warns (pollLoop.scheduleNext).
+		slowWarn: "decapi check cycle takes far longer than the rate-derived interval — effective cadence degraded",
+		onSchedule: func(v int64) {
+			if dm.OnSchedule != nil {
+				dm.OnSchedule(v)
+			}
+		},
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	dm.ctx = ctx
-	dm.cancel = cancel
-	dm.mu.Unlock()
-
-	dm.logger.Info("decapi monitor started")
-
-	// Immediate first check on startup (runCycle schedules next in its defer)
-	go dm.runCycle(ctx)
 }
+
+// Start begins the DECAPI monitoring loop.
+func (dm *DecapiMonitor) Start(ctx context.Context) { dm.loop.start(ctx, dm.pollSpec()) }
 
 // Stop stops the DECAPI monitor.
-func (dm *DecapiMonitor) Stop() {
-	dm.mu.Lock()
-	defer dm.mu.Unlock()
-
-	if dm.cancel != nil {
-		dm.cancel()
-		dm.ctx = nil
-		dm.cancel = nil
-	}
-	if dm.timer != nil {
-		dm.timer.Stop()
-		dm.timer = nil
-	}
-	dm.NextCheckAt = 0
-	dm.logger.Info("decapi monitor stopped")
-}
+func (dm *DecapiMonitor) Stop() { dm.loop.stop(dm.pollSpec()) }
 
 // GetNextCheckAt returns the next scheduled check time in epoch ms.
-func (dm *DecapiMonitor) GetNextCheckAt() int64 {
-	dm.mu.Lock()
-	defer dm.mu.Unlock()
-	return dm.NextCheckAt
-}
+func (dm *DecapiMonitor) GetNextCheckAt() int64 { return dm.loop.next() }
 
 // CheckNow triggers an immediate check cycle if the monitor is running.
 // Used to wake the monitor when channels are added while it was idle.
-func (dm *DecapiMonitor) CheckNow() {
-	dm.mu.Lock()
-	if dm.cancel == nil {
-		dm.mu.Unlock()
-		return // Not running
-	}
-	ctx := dm.ctx
-	dm.mu.Unlock()
-	go dm.runCycle(ctx)
-}
+func (dm *DecapiMonitor) CheckNow() { dm.loop.checkNow(dm.pollSpec()) }
 
-// scheduleNext arms the next cycle. cycleStart anchors fixed-RATE
-// scheduling: the delay is interval minus the elapsed cycle time, so the
-// rate-derived interval is a true period. The per-request stagger and
+// scheduleNext arms the next cycle (pollLoop.scheduleNext): fixed-RATE from
+// cycleStart with the rate-derived interval. The per-request stagger and
 // waitForRateLimit inside doCheck still bound instantaneous request rate,
 // so this cannot exceed the DECAPI budget — calculateInterval already
-// targets it and the previous gap-scheduling ran BELOW the budget.
-// Zero-value cycleStart behaves as a plain interval.
+// targets it.
 func (dm *DecapiMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
-	// Same rule as runCycle's guard, for the path that arms the timer: a
-	// cancelled context means this chain was retired by Stop(), and a retired
-	// chain must arm nothing and publish nothing. Checked FIRST, above the
-	// channel-count read, because the "no channels" arm below writes
-	// NextCheckAt and publishes OnSchedule too — the two things this guard
-	// exists to prevent — so a guard placed after it covers only half the
-	// function. Deliberately WITHOUT touching NextCheckAt: the countdown
-	// belongs to whichever chain is live now, and a dead chain zeroing it
-	// would blank the UI's next-check time for no reason. A twin of this check
-	// sits inside the locked section below and covers what this one cannot —
-	// a Stop()+Start() landing after it; both are wanted.
-	if ctx.Err() != nil {
-		return
-	}
-
-	channels := dm.getYouTubeChannels()
-	if len(channels) == 0 {
-		dm.mu.Lock()
-		dm.NextCheckAt = 0
-		dm.mu.Unlock()
-		if dm.OnSchedule != nil {
-			dm.OnSchedule(0)
-		}
-		return
-	}
-
-	interval := dm.calculateInterval(len(channels))
-
-	delay := interval
-	if !cycleStart.IsZero() {
-		elapsed := time.Since(cycleStart)
-		delay = interval - elapsed
-		if delay < time.Second {
-			// DECAPI's rate-derived interval is structurally smaller than
-			// the mandatory per-request stagger floor once channel count
-			// approaches the per-minute limit, so a normal full-channel
-			// cycle exceeds `interval` by design — waitForRateLimit still
-			// bounds the actual request rate. Warn only on a >2× overshoot
-			// (something genuinely slow), once, via the atomic guard.
-			if elapsed >= 2*interval && dm.warnedSlow.CompareAndSwap(false, true) {
-				dm.logger.Warn("decapi check cycle takes far longer than the rate-derived interval — effective cadence degraded",
-					"cycle", elapsed.Round(time.Second), "interval", interval.Round(time.Second))
-			}
-			delay = time.Second
-		}
-	}
-
-	dm.mu.Lock()
-	// Unreachable since the leading ctx.Err() guard — Stop() cancels the ctx
-	// and nils cancel together, and Stop() itself writes NextCheckAt = 0 — so
-	// this no longer clears the -1 sentinel for a cycle racing Stop(). Kept as
-	// defence for a future cancel-without-cancel path: a monitor that nils
-	// cancel without cancelling its context would otherwise arm a timer and
-	// publish a countdown for a chain nothing owns.
-	if dm.cancel == nil {
-		dm.NextCheckAt = 0
-		dm.mu.Unlock()
-		return
-	}
-	// Kept beside the leading guard, not redundant with it: this closes the
-	// window between that check and this lock, in which a Stop()+Start() would
-	// install a NEW non-nil cancel — so `cancel == nil` above passes and this
-	// dead chain would write the LIVE chain's NextCheckAt and publish its
-	// OnSchedule. Re-reading ctx.Err() costs nothing; do not "simplify" it away.
-	if ctx.Err() != nil {
-		dm.mu.Unlock()
-		return
-	}
-	dm.NextCheckAt = time.Now().Add(delay).UnixMilli()
-	if dm.timer != nil {
-		dm.timer.Stop()
-	}
-	dm.timer = time.AfterFunc(delay, func() {
-		dm.runCycle(ctx)
-	})
-	next := dm.NextCheckAt
-	dm.mu.Unlock()
-
-	if dm.OnSchedule != nil {
-		dm.OnSchedule(next)
-	}
-
-	dm.logger.Debug("decapi check scheduled", "in", delay.Round(time.Second))
+	dm.loop.scheduleNext(ctx, cycleStart, dm.pollSpec())
 }
 
 func (dm *DecapiMonitor) calculateInterval(channelCount int) time.Duration {
@@ -459,54 +350,10 @@ func (dm *DecapiMonitor) runCycle(ctx context.Context) {
 			dm.logger.Error("decapi monitor runCycle panic", "panic", r)
 		}
 	}()
-
-	// A cancelled context means this cycle belongs to a STOPPED chain. Stop()
-	// cancels the context but leaves the AfterFunc armed, and a later Start()
-	// installs a new cancel — so the dead chain's cycle used to pass every
-	// guard, run a full doCheck, and then re-arm the SHARED timer field,
-	// cancelling the live chain's pending cycle every interval. Returning here,
-	// before the `checking` latch and before the scheduleNext defer is
-	// installed, is what stops that. Latent today (Stop runs only at shutdown).
-	if ctx.Err() != nil {
-		return
-	}
-
-	cycleStart := time.Now()
-	dm.mu.Lock()
-	if dm.checking {
-		// A kick landed mid-cycle: latch it so the defer re-runs
-		// immediately instead of silently dropping it (the new channel
-		// would otherwise wait a full interval).
-		dm.pendingKick = true
-		dm.mu.Unlock()
-		return
-	}
-	dm.checking = true
-	// -1 sentinel = "checking now" for the UI countdowns (0 keeps its
-	// existing meaning of "no channels"). Restored by scheduleNext.
-	dm.NextCheckAt = -1
-	dm.mu.Unlock()
-	if dm.OnSchedule != nil {
-		dm.OnSchedule(-1)
-	}
-
-	defer func() {
-		dm.mu.Lock()
-		dm.checking = false
-		rerun := dm.pendingKick
-		dm.pendingKick = false
-		dm.mu.Unlock()
-		if rerun {
-			// Re-enter via goroutine so the stop-check and offline gate
-			// run naturally; that cycle does its own scheduleNext.
-			go dm.runCycle(ctx)
-			return
-		}
-		dm.scheduleNext(ctx, cycleStart)
-	}()
-
-	dm.refreshProbeCooldown()
-	dm.doCheck(ctx)
+	dm.loop.runCycle(ctx, dm.pollSpec(), func(ctx context.Context) {
+		dm.refreshProbeCooldown()
+		dm.doCheck(ctx)
+	})
 }
 
 // refreshProbeCooldown hot-reloads the per-video probe cooldown window from
