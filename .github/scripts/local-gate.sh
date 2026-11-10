@@ -15,7 +15,8 @@
 # --full adds the frontend node suite, the sidecar's `npm test` (skipped when
 # bgutil-sidecar/node_modules is absent), `go test -count=1 ./...` and a race
 # run over the packages with the most goroutines. It writes no stand-ins: the
-# suite needs the real blobs (new-worktree.sh copies them). Run one --full at
+# suite needs the real blobs (new-worktree.sh copies them), and it stops
+# before the tests when one is an empty stand-in. Run one --full at
 # a time on a machine; two full suites side by side time each other out.
 #
 # Each gate prints one PASS, FAIL or SKIP line; everything the commands print
@@ -66,10 +67,10 @@ if [ "$mode" = prune ]; then
 	}
 	dir=$GOTMPDIR
 	if command -v cygpath >/dev/null 2>&1; then dir=$(cygpath -u "$dir"); fi
-	# Only what the go command itself leaves at the top level: build work
-	# directories and the temp directories of tests that were killed.
+	# Only what the go command itself leaves at the top level: its build work
+	# directories. A test's own temp directories are under TMP, not here.
 	n=0
-	for entry in "$dir"/go-build* "$dir"/Test*; do
+	for entry in "$dir"/go-build*; do
 		[ -e "$entry" ] || continue
 		rm -rf -- "$entry"
 		n=$((n + 1))
@@ -153,6 +154,28 @@ scripts_parse() {
 	return $status
 }
 
+# real_blobs: no file a go:embed directive names is an empty stand-in. (A
+# missing one stops the build at once and says so itself.)
+# A stand-in that --quick or embed-standins.sh left compiles, and then fails
+# tests a long way into the suite.
+real_blobs() {
+	local file dir name status=0
+	while read -r file; do
+		dir=$(dirname "$file")
+		while read -r name; do
+			case $name in '' | *[*?[]*) continue ;; esac
+			if [ -e "$dir/$name" ] && [ ! -s "$dir/$name" ]; then
+				echo "empty stand-in: $dir/$name"
+				status=1
+			fi
+		done <<<"$(sed -n 's|^//go:embed ||p' "$file" | tr ' ' '\n')"
+	done <<<"$(git grep -l -e '^/[/]go:embed ' -- '*.go')"
+	if [ "$status" -ne 0 ]; then
+		echo "the full suite needs the real embed blobs: copy them from the main checkout (new-worktree.sh does), or run \`go run ./tools/fetch-node\` and \`node build.mjs\` in bgutil-sidecar/"
+	fi
+	return $status
+}
+
 node_frontend() (
 	cd web/tests || exit 1
 	node --test --test-timeout=120000 ./*.test.mjs
@@ -187,6 +210,14 @@ gate "test shards cover every package" bash .github/scripts/test-shard.sh --chec
 gate "bash -n .github/scripts" scripts_parse
 
 if [ "$mode" = full ]; then
+	echo "== embed blobs are real" >>"$log"
+	if ! real_blobs >>"$log" 2>&1; then
+		echo "FAIL  embed blobs are real"
+		real_blobs
+		echo "FAILED: see $log"
+		exit 1
+	fi
+	echo "PASS  embed blobs are real"
 	gate "frontend node suite" node_frontend
 	if [ -d bgutil-sidecar/node_modules ]; then
 		gate "sidecar npm test" node_sidecar
