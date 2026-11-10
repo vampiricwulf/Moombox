@@ -225,8 +225,8 @@ func TestRecoveryDeclineSaysNothingAndRanUnknownStaysNonCommittal(t *testing.T) 
 //
 // Both platforms losing auth in one pass is all it takes. refresh.go fires
 // OnRecoveryNeeded twice; handleRecoveryNeeded puts each on its own goroutine;
-// AutoCookieService.RefreshCookiesDetailed single-flights on its refreshCmd
-// sentinel, so whichever arrives second is handed refreshDeclined() —
+// AutoCookieService.RefreshCookiesDetailed single-flights on its refresh slot
+// (refreshSlot, internal/cookies/refresh_slot.go), so whichever arrives second is handed refreshDeclined() —
 // RefreshResult{} — immediately. Its verdict is the zero value, RefreshUnknown.
 //
 // Sending "Cookie Auto-Refresh Ineffective" for that decline stamps the
