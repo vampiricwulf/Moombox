@@ -247,6 +247,9 @@ export class CookieSetupSession {
       countdownEl.style.color = "";
     }
     const countdownInterval = setInterval(() => {
+      // A cancelled finish's ticks would draw over the next setup's dialog;
+      // its interval stops here rather than when the request settles.
+      if (stale()) { clearInterval(countdownInterval); return; }
       remaining--;
       if (countdownEl) {
         countdownEl.textContent = `${remaining}s remaining`;
@@ -419,6 +422,11 @@ export class CookieSetupSession {
     }
     const countdownEl = document.getElementById("auto-cookie-countdown");
     if (countdownEl) countdownEl.textContent = "";
+    // A finish cancelled while out left Done loading and disabled, and its
+    // finally, stale by then, leaves the button alone. Every caller (begin,
+    // adopt afresh, cancel) has ended that setup, so the button is reset here.
+    const doneBtn = document.getElementById("btn-auto-cookie-done");
+    if (doneBtn) { doneBtn.loading = false; doneBtn.disabled = false; }
     const timeoutResultEl = document.getElementById("auto-cookie-result");
     if (timeoutResultEl) timeoutResultEl.innerHTML = "";
   }

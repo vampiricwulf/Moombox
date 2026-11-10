@@ -357,3 +357,72 @@ test("a setup this page started keeps its platform on a status load", { skip }, 
   assert.equal(s.platform, "youtube");
   assert.ok(s.holdsSlot());
 });
+
+// ── close round 2 ──────────────────────────────────────────────────────
+//
+// A finish cancelled while out leaves the Done button loading and disabled;
+// the stale check above keeps that finish's finally off it, so whatever ends
+// a setup and starts the next (begin, adopt, cancel — each through
+// _clearMessages) resets it. Without that, the next setup opened with a dead
+// "I'm Logged In" until a reload, whichever of the two came first: the old
+// finish settling or the next setup beginning.
+//
+// MUTANT: _clearMessages leaving the Done button alone.
+async function finishCancelledWhileOut() {
+  const gates = [];
+  const h = await app({
+    "POST /api/cookies/auto-setup/finish": () => new Promise((resolve) => { gates.push(resolve); }),
+  });
+  await h.app.settings.startAutoCookieSetup("twitch");
+  h.el("btn-auto-cookie-done").click();
+  await h.flush();
+  assert.equal(h.app.cookieSetup.phase, session.PHASE.FINISHING);
+  h.el("btn-auto-cookie-cancel").click();
+  await h.flush();
+  return { h, gates };
+}
+
+function assertDoneUsable(h) {
+  const done = h.el("btn-auto-cookie-done");
+  assert.equal(done.loading, false, "Done still loading from the cancelled finish");
+  assert.equal(done.disabled, false, "Done still disabled from the cancelled finish");
+}
+
+test("the next setup's Done works when the cancelled finish settles first", { skip }, async () => {
+  const { h, gates } = await finishCancelledWhileOut();
+  gates[0](rejectedFinish);
+  await h.flush();
+  await h.flush();
+  await h.app.settings.startAutoCookieSetup("youtube");
+  assert.equal(h.app.cookieSetup.phase, session.PHASE.ACTIVE);
+  assertDoneUsable(h);
+  h.el("btn-auto-cookie-done").click();
+  await h.flush();
+  assert.equal(finishes(h), 2, "Done on the next setup sent no finish");
+});
+
+test("the next setup's Done works when it begins before the cancelled finish settles", { skip }, async () => {
+  const { h, gates } = await finishCancelledWhileOut();
+  await h.app.settings.startAutoCookieSetup("youtube");
+  gates[0](rejectedFinish);
+  await h.flush();
+  await h.flush();
+  assert.equal(h.app.cookieSetup.phase, session.PHASE.ACTIVE);
+  assertDoneUsable(h);
+  h.el("btn-auto-cookie-done").click();
+  await h.flush();
+  assert.equal(finishes(h), 2, "Done on the next setup sent no finish");
+});
+
+// The cancelled finish's countdown interval keeps running until that finish
+// settles; its ticks must not draw over the next setup's dialog.
+//
+// MUTANT: the interval callback writing the countdown without the stale check.
+test("a cancelled finish's countdown does not tick into the next setup", { skip }, async () => {
+  const { h } = await finishCancelledWhileOut();
+  await h.app.settings.startAutoCookieSetup("youtube");
+  assert.equal(h.app.cookieSetup.phase, session.PHASE.ACTIVE);
+  assert.equal(h.el("auto-cookie-countdown").textContent, "");
+  h.advance(1000);
+  assert.equal(h.el("auto-cookie-countdown").textContent, "", "the cancelled finish's countdown drew on the next setup");
+});
