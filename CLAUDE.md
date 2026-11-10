@@ -21,6 +21,16 @@ go test -v -run TestParseDash ./internal/engine/... # Single test
 go vet ./...                                        # Static analysis
 ```
 
+### Local verification
+
+```bash
+bash .github/scripts/local-gate.sh            # --quick: what CI's lint job checks, no tests (about a minute)
+bash .github/scripts/local-gate.sh --full     # adds the node suites, go test ./... and a race run
+bash .github/scripts/new-worktree.sh <branch> # .worktrees/<branch> with the embed blobs, cipher fixtures and web/tests deps
+```
+
+`local-gate.sh` runs on the tree you are in, prints one PASS/FAIL line per gate and exits non-zero on a failure. Run one `--full` (or one `go test ./...`) at a time on a machine. On Windows every `go test` needs a `GOTMPDIR` outside `%TEMP%` (Defender quarantines test binaries built there) spelled with backslashes (tests that compare paths fail on a forward-slash temp root): from Git Bash, `export GOTMPDIR="$(cygpath -w <main checkout>/.superpowers/gotmp)"`. Both scripts set it when it is unset; nothing there is deleted unless you run `local-gate.sh --prune-gotmp`. Node suites: `NO_COLOR=1`, and `npm test` in `web/tests` or `bgutil-sidecar`.
+
 Runtime requires FFmpeg on PATH. CI: `.github/workflows/ci.yml` runs on every push to main and every PR as parallel jobs: `lint` (gofmt / `go mod tidy -diff` / vet for linux/amd64, windows/amd64 and linux/arm64 / the `modernc.org/libc` pin check / the Dockerfile Go-version check / staticcheck for linux and windows / build and the windows/amd64 and linux/arm64 cross-builds, against empty stand-ins for the embed blobs), `js` (`bgutil-sidecar`'s `npm test`, and `node --test ./*.test.mjs` in `web/tests` after its own `npm ci`, so the jsdom suites run too), and `go test -count=1` in three flavours — linux, race (`-race` over the whole module) and windows — each split by package into shards that run side by side. `bash .github/scripts/test-shard.sh <flavour>/<shard>` (e.g. `race/worker`) prints the packages one shard runs; a package no shard names runs in its flavour's catch-all `rest`, and `lint` runs `test-shard.sh --check`, which fails unless each flavour's shards are `go list ./...` exactly once each and match the workflow's matrix. `.github/workflows/release.yml` runs on tag push: it calls `ci.yml` as a `test` job on the tagged commit that runs beside the release and gates nothing (its result shows in the same run; a red suite does not hold a release), and it cross-compiles all 3 platform binaries (Windows x64, Linux x64, Linux arm64) from a single ubuntu-latest job, signs each and writes and signs the release manifest that binds them to the release (`moombox-manifest.json`, by `cmd/sign/main.go -manifest`; the self-update refuses a release without one), reads `RELEASE_NOTES.md` for the GitHub release body, and calls `.github/workflows/docker-publish.yml` for the image. Running release.yml by hand ("Run workflow") is a dry run — every job, nothing published — and is the only way to exercise that pipeline before a tag.
 
 ### Profiling (pprof)
@@ -65,6 +75,8 @@ go build -o moombox.exe ./cmd/moombox
 ```
 
 CI runs steps 1+2 automatically (see `.github/workflows/release.yml`). For local builds, run them once after fresh checkout; subsequent `go build` calls reuse the embedded blobs. Re-run step 1 when the Node pin in `version.txt` moves, and step 2 whenever anything under `bgutil-sidecar/` changes — `version.txt` records the Node pin only. A stale `sidecar.tar.gz` is caught by `internal/bgutils/embed/embed_test.go`, which fails when the tarball's `src/`, manifests or ejs pin differ from the tree.
+
+A new worktree has none of the blobs (they are gitignored). Copy them from the main checkout's `internal/bgutils/embed/` first — every test then works and nothing is downloaded; `.github/scripts/new-worktree.sh` does this. Where there is no checkout to copy from, `bash .github/scripts/embed-standins.sh` writes an empty file for each missing blob (the script CI's lint job runs): enough for `go build`, `go vet` and tests that never start the sidecar, but `internal/bgutils/embed`'s own tests fail on them, and a binary built over them has an empty sidecar that fails only when it runs. Never build a binary to run from a tree that holds stand-ins.
 
 To run without the sidecar, set `[bgutils] use_sidecar = false` in `config.toml`: only the goja path remains, which BotGuard's timing check rejects, so no PO tokens are minted and current players' signatures cannot be solved. The embed blobs are still required at build time though — they're either present or the binary doesn't compile.
 

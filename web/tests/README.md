@@ -8,7 +8,7 @@ inside a jsdom document. jsdom is the only dev dependency, and it is
 
 ## Running
 
-From the repo root:
+Here, `npm test` runs every file with a two-minute limit per test. From the repo root:
 
 ```bash
 # Run every test file (the DOM suites skip if jsdom is not installed)

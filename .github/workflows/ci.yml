@@ -263,6 +263,14 @@ jobs:
           GOARCH: arm64
         run: go build ./...
 
+      - name: The scripts parse
+        # local-gate.sh and new-worktree.sh are run by people, not by this
+        # workflow, so a syntax error in one would otherwise reach main.
+        run: |
+          for f in .github/scripts/*.sh; do
+            bash -n "$f"
+          done
+
       - name: Test shards cover every package exactly once
         # The test job's matrix and test-shard.sh's layout must agree, and
         # each flavour's shards must be `go list ./...` for that flavour's
