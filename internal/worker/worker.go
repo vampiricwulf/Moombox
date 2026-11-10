@@ -958,6 +958,18 @@ func muxOnRestart(job *database.Job, stagingBase string) bool {
 	return HasSegmentFiles(stagingBase, job.ID)
 }
 
+// bootEnqueueOrder is the order the boot pass offers its rows to the queue:
+// captures that were running when the process stopped first, waiters last.
+// The queue's backlog cap is checked before priority, so offered in row
+// order a Live or Downloading row behind a hundred fresher Upcoming ones was
+// dropped until the first heartbeat; in this order the cap can only ever
+// delay an Upcoming waiter.
+var bootEnqueueOrder = [...]database.JobStatus{
+	database.StatusLive,
+	database.StatusDownloading,
+	database.StatusUpcoming,
+}
+
 func (w *DownloadWorker) enqueueExistingJobs() {
 	jobs, err := w.db.GetAllJobs()
 	if err != nil {
@@ -968,6 +980,7 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 	var stagingBase string
 	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
 
+	var runnable []*database.Job
 	for _, job := range jobs {
 		if job.Status == database.StatusMuxing {
 			if muxOnRestart(job, stagingBase) {
@@ -1013,7 +1026,17 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 			if job.Status == database.StatusUpcoming && jobstate.IsWaitLine(job.Progress) {
 				w.db.UpdateJobFieldsIf(job.ID, job.Status, map[string]any{"progress": ""})
 			}
-			w.queue.Enqueue(job.ID, job.Status)
+			runnable = append(runnable, job)
+		}
+	}
+
+	// Offered only now, after every interrupted mux above has been started
+	// or reset, and still before Start's heartbeat and Dequeue loop begin.
+	for _, status := range bootEnqueueOrder {
+		for _, job := range runnable {
+			if job.Status == status {
+				w.queue.Enqueue(job.ID, job.Status)
+			}
 		}
 	}
 }

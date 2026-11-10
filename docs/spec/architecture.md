@@ -707,7 +707,7 @@ The `JobQueue` implements a two-tier concurrency model:
 - FIFO among jobs with equal priority
 
 **Queue operations:**
-- `Enqueue(jobID, status)`: Adds to pending queue. O(1) duplicate detection via `pendingSet`. Backlog limit of 100 pending jobs; drops with warning if full.
+- `Enqueue(jobID, status)`: Adds to pending queue. O(1) duplicate detection via `pendingSet`. Backlog limit of 100 pending jobs; drops with warning if full, and the 60 s heartbeat offers the job again. The limit is checked before priority, so the boot pass (`enqueueExistingJobs`, `internal/worker/worker.go`) offers its rows `Live` first, then `Downloading`, then `Upcoming` (`bootEnqueueOrder`), after it has started or reset every interrupted mux: a capture the restart interrupted is never the row the limit holds back for a heartbeat.
 - `Dequeue(ctx) -> (jobID, jobCtx, ok)`: Blocks until a pending job exists — there is no lifecycle gate here. Returns a per-job cancellable context.
 - `AcquireLifecycleSlot(ctx, jobID) -> bool`: Blocks until one of the 100 lifecycle slots is free, then claims it for the job. Returns false if context cancelled. Warns once per wait past 30 s.
 - `AcquireDownloadSlot(ctx, jobID) -> bool`: Blocks until a download slot is free. Returns false if context cancelled.
