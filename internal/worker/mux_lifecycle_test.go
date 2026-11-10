@@ -733,7 +733,9 @@ func TestOffQueueMuxCancelRestoresOnlyAStrandedMuxing(t *testing.T) {
 			})
 			defer unsubscribe()
 
-			if err := w.MuxJob(id); err != nil {
+			// The fixture row is Muxing, which only the boot's re-mux runs
+			// on (the Mux action refuses it, ErrNotAllowed).
+			if err := w.restartMux(id); err != nil {
 				t.Fatalf("MuxJob: %v", err)
 			}
 			waitForFile(t, started)

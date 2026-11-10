@@ -101,7 +101,8 @@ func TestOrphanSweepLeavesAnInProgressMuxAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	release := runBlocked(t, w.orchestrator.SetFfmpegPath, func() error {
-		err := w.MuxJob("j-inflight")
+		// The fixture row is Muxing, which only the boot's re-mux runs on.
+		err := w.restartMux("j-inflight")
 		w.Stop()
 		return err
 	})
