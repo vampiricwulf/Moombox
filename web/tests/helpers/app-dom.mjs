@@ -247,9 +247,11 @@ function defineShoelaceStubs(window) {
   // An sl-dialog also ends its hide as Shoelace's does: sl-after-hide, once
   // the (here instant) animation is over — after the hide() call returns,
   // never for a dialog that was not open. The confirm dialog's queue draws
-  // its next prompt on it (K34). Its hide starts, as Shoelace's does, with
-  // sl-hide, at once — so between the two events the dialog is closing, the
-  // window in which a show() would cancel the hide.
+  // its next prompt on it (K34). Its hide starts with sl-hide, fired
+  // synchronously here, standing in for the Lit update in which Shoelace
+  // emits it (a microtask after hide()) — so between the two events the
+  // dialog is closing, and the stub models a request landing inside the
+  // animation, the window in which a show() would cancel the hide.
   class SlDialog extends SlOverlay {
     hide() {
       const wasOpen = this._open === true;
