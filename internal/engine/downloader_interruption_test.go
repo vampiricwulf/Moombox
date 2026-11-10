@@ -211,7 +211,7 @@ func TestBackstopCeilingExpires(t *testing.T) {
 	if mayResumeCalls.Load() == 0 {
 		t.Error("MayResume was never consulted -- stallForPossibleResume not reached")
 	}
-	if d.streamEnded.Load() {
+	if d.streamEnded() {
 		t.Error("streamEnded = true, want false -- Tier 2 finalize must not clear the resume sidecar")
 	}
 	if _, err := os.Stat(out + ".resume.json"); err != nil {
@@ -332,7 +332,7 @@ func TestConfirmedEndedIgnoresMayResume(t *testing.T) {
 	if d.FinalizedDuringInterruption() {
 		t.Error("FinalizedDuringInterruption() = true, want false (confirmed end must bypass the stall entirely)")
 	}
-	if !d.streamEnded.Load() {
+	if !d.streamEnded() {
 		t.Error("streamEnded not set on clean confirmed-end finalize")
 	}
 	wantSegments(t, out, 0, head)
@@ -597,7 +597,7 @@ func TestInterruptionNoStallPromptFinalize(t *testing.T) {
 	// Tier 2: the resume sidecar must survive exactly like a genuine
 	// ceiling-expiry finalize (TestBackstopCeilingExpires) -- latched
 	// evidence means preserved staging even though there was no stall.
-	if d.streamEnded.Load() {
+	if d.streamEnded() {
 		t.Error("streamEnded = true, want false -- a finalizedDuringInterruption exit must not clear the resume sidecar")
 	}
 	if _, err := os.Stat(out + ".resume.json"); err != nil {

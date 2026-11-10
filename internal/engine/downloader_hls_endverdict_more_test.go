@@ -110,7 +110,7 @@ func TestHlsEndVerdict_StuckSkipExit(t *testing.T) {
 			if err := d.Start(ctx); err != nil {
 				t.Fatalf("Start() = %v, want nil", err)
 			}
-			if !d.streamEnded.Load() {
+			if !d.streamEnded() {
 				t.Error("streamEnded = false, want true (stuck-skip end or ENDLIST)")
 			}
 			if got := calls.Load(); got != tc.wantChecks {
@@ -200,7 +200,7 @@ func TestHlsEndVerdict_InitExhaustion(t *testing.T) {
 					t.Fatalf("Start() = %v, want a terminal error containing %q", err, tc.wantErrContains)
 				}
 			}
-			if got := d.streamEnded.Load(); got != tc.wantEnded {
+			if got := d.streamEnded(); got != tc.wantEnded {
 				t.Errorf("streamEnded = %v, want %v", got, tc.wantEnded)
 			}
 			if got := calls.Load(); got != tc.wantChecks {
@@ -282,7 +282,7 @@ func TestHlsEndVerdict_StaleWindow(t *testing.T) {
 			} else if err == nil {
 				t.Fatalf("Start() = nil, want the cancel error (nothing can end a stale window)")
 			}
-			if got := d.streamEnded.Load(); got != tc.wantEnded {
+			if got := d.streamEnded(); got != tc.wantEnded {
 				t.Errorf("streamEnded = %v, want %v", got, tc.wantEnded)
 			}
 			if got := calls.Load(); got != tc.wantChecks {

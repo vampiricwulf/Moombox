@@ -567,7 +567,7 @@ type SegmentDownloader struct {
 	mu                    sync.Mutex
 	running               bool
 	cancelled             atomic.Bool
-	streamEnded           atomic.Bool
+	finishedAs            atomic.Uint32 // finishReason; see downloader_finish.go
 	outputFile            *os.File
 	bytesWritten          atomic.Int64
 	bytesFetched          atomic.Int64 // media bytes ARRIVED off the network — see noteFetch
@@ -645,7 +645,7 @@ type SegmentDownloader struct {
 	// finalizedBehindHead latches when a finalize fired the
 	// unfetched-tail warning (currentSeq < headSeq at errStreamDone) —
 	// the precise "known-incomplete recording" signal the worker
-	// persists as the job's incomplete_tail flag. streamEnded alone is
+	// persists as the job's incomplete_tail flag. streamEnded() alone is
 	// too broad: cancels and live-edge MaxTimeout stalls also leave it
 	// unset without implying a missing tail.
 	finalizedBehindHead atomic.Bool
@@ -771,7 +771,7 @@ type SegmentDownloader struct {
 	// catchUpBufferBytesOverride: production code never sets it. When
 	// non-nil, saveResume calls it with the LastSeq it just persisted, after
 	// the sidecar rename succeeded. It is the only way a test can count
-	// sidecar WRITES — a clean end sets streamEnded and the loop's defer
+	// sidecar WRITES — a clean end records finishConfirmed and the loop's defer
 	// then ClearResume()s the file out from under any on-disk assertion.
 	onResumeSaved func(lastSeq int)
 

@@ -99,9 +99,11 @@ const (
 
 // runDashLoop is the main DASH download loop.
 func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
-	// Save resume state on exit; only clear on clean stream completion.
-	// On shutdown (context cancel) or user cancel, keep the resume file
-	// so the download can continue where it left off on restart.
+	// Save resume state on exit; only clear on clean stream completion
+	// (the recorded finishReason's clearsSidecar — downloader_finish.go
+	// lists every exit and what it does to the sidecar). On shutdown
+	// (context cancel) or user cancel, keep the resume file so the
+	// download can continue where it left off on restart.
 	defer func() {
 		// Atomic loads — no mutex needed for currentSeq/headSeq.
 		seq := int(d.currentSeq.Load())
@@ -119,7 +121,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 			})
 		}
 		d.saveResume()
-		if d.streamEnded.Load() {
+		if d.streamEnded() {
 			d.ClearResume()
 		}
 	}()
@@ -172,6 +174,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		// Check end sequence
 		curSeq := int(d.currentSeq.Load())
 		if d.opts.EndSeq >= 0 && curSeq > d.opts.EndSeq {
+			d.record(finishEndSeq)
 			return nil
 		}
 
@@ -267,12 +270,11 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				stuckSeq, stuckRenewals = failedSeq, d.credentialRenewals.Load()
 			} else if statusCode == 403 && d.credentialRenewals.Load() > stuckRenewals && d.refusable(failedSeq) {
 				herr := d.refuseSegment(ctx, failedSeq)
-				if herr == errSegmentSkipped {
-					afterSkip()
+				if !errors.Is(herr, errNotRefused) {
+					if cont, ret := dispatch(herr, afterSkip); !cont {
+						return ret
+					}
 					continue
-				}
-				if herr != errNotRefused {
-					return herr
 				}
 				// Not one segment's refusal: handled as before, and asked
 				// again only after the next fresh credentials.
@@ -280,17 +282,10 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 			}
 			herr := d.handleDashError(ctx, statusCode, err, &consecutiveGoneErrors, hasStartedDownloading,
 				&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, delayCap)
-			if herr == errSegmentSkipped {
-				afterSkip() // refuseSegment moved past the hole
-				continue
+			if cont, ret := dispatch(herr, afterSkip); !cont {
+				return ret
 			}
-			if herr == errStreamDone {
-				return nil // Clean exit
-			}
-			if herr != nil {
-				return herr // Real error (ErrQualityLost, etc.)
-			}
-			continue // nil means retry
+			continue
 		}
 
 		// A 2xx that carried no body is not a segment. Written as one, it
@@ -317,15 +312,8 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				"seq", d.currentSeq.Load(), "status", statusCode, "headSeq", d.headSeq.Load())
 			herr := d.handleHTTPError(ctx, hasStartedDownloading, &sameSegRetries, &lastRetrySeq,
 				&sameHeadRetryDelay, &lastConfirmedHead, delayCap)
-			if herr == errSegmentSkipped {
-				afterSkip() // refuseSegment moved past the hole
-				continue
-			}
-			if herr == errStreamDone {
-				return nil
-			}
-			if herr != nil {
-				return herr
+			if cont, ret := dispatch(herr, afterSkip); !cont {
+				return ret
 			}
 			continue
 		}
@@ -609,27 +597,25 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 			return nil // Continue loop — the refresh path revives in place on resume
 		}
 		if d.finalizeBehindHead() {
-			// Known-incomplete finalize: leave streamEnded unset so the
-			// runDashLoop defer keeps the resume sidecar — a later retry
-			// appends the missing tail instead of truncating the recording
-			// and starting over. (handleHTTPError's errStreamDone exits
-			// never set streamEnded either; only a confirmed-complete end
-			// clears resume.)
-			return errStreamDone
+			// Known-incomplete finalize: finishBehindHead keeps the resume
+			// sidecar — a later retry appends the missing tail instead of
+			// truncating the recording and starting over.
+			return d.finish(finishBehindHead)
 		}
 		if d.finalizedDuringInterruption.Load() {
 			// Tier 2: this finalize was reached after stallForPossibleResume
 			// deferred at least once above (MayResume was true, then either
 			// flipped false or the InterruptionTimeout ceiling expired). The
 			// worker needs the resume sidecar intact to give the broadcast a
-			// chance to resume, so — mirroring finalizeBehindHead's
-			// keep-sidecar contract just above — leave streamEnded unset
-			// rather than letting the runDashLoop defer's ClearResume()
-			// destroy the exact evidence this latch exists to preserve.
-			return errStreamDone
+			// chance to resume, so finishInterrupted keeps it rather than
+			// letting the runDashLoop defer's ClearResume() destroy the exact
+			// evidence this latch exists to preserve.
+			return d.finish(finishInterrupted)
 		}
-		d.streamEnded.Store(true)
-		return errStreamDone
+		// The one DASH exit that clears the sidecar. handleHTTPError's
+		// confirmed end (finishConfirmedViaHTTP) keeps it — owner ruling
+		// R-G1, see downloader_finish.go.
+		return d.finish(finishConfirmed)
 	}
 	if !hasStartedDownloading && *consecutiveGoneErrors <= goneRetryBeforeFirstSegment {
 		d.emitActivity(ActivityFindingFirstSegment)
@@ -669,7 +655,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 		return nil // Continue loop
 	}
 	if !hasStartedDownloading && *consecutiveGoneErrors > goneRetryBeforeFirstSegment {
-		return errStreamDone // Failed to find valid starting segment
+		return d.finish(finishNoFirstSegment) // Failed to find valid starting segment
 	}
 	// Single GONE while downloading -- the next segment isn't there yet. Surface
 	// the wait (the tracker's 2s segment grace suppresses it for a healthy
@@ -960,7 +946,7 @@ func (d *SegmentDownloader) handBackForRebuild(ctx context.Context, refused bool
 	if !refused && time.Since(d.rebuildsExhaustedSince) < unservedSegmentPersistence {
 		return ErrQualityLost
 	}
-	if err := d.refuseSegment(ctx, seq); err != errNotRefused {
+	if err := d.refuseSegment(ctx, seq); !errors.Is(err, errNotRefused) {
 		return err
 	}
 	return ErrQualityLost
@@ -1081,8 +1067,14 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 			// Fall through to the backoff below until MaxTimeout expires (the
 			// backstop further down owns the eventual force-finalize).
 			if !d.behindHeadTailPending() {
-				d.finalizeBehindHead()
-				return errStreamDone
+				if d.finalizeBehindHead() {
+					return d.finish(finishBehindHead)
+				}
+				// Confirmed over, yet the sidecar is KEPT — unlike the gone
+				// path's confirmed end (finishConfirmed), which clears it.
+				// Owner ruling R-G1 (Q10) kept this exit as it always was;
+				// staging is wiped after a successful finish anyway.
+				return d.finish(finishConfirmedViaHTTP)
 			}
 		} else if behindHead && hasStartedDownloading {
 			// Still live, but a segment we KNOW exists (curSeq < head) won't
@@ -1133,12 +1125,14 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		}
 		d.logger.Info("[Downloader] maximum timeout reached while waiting for segment; finalizing",
 			"maxTimeout", d.opts.MaxTimeout, "gap", d.lastSegTime.Since().Round(time.Second))
-		// Note: unlike handleGoneError's confirmed-end fallthrough, this path
-		// never sets streamEnded, so the resume sidecar always survives here
-		// (including a Tier 2 / finalizedDuringInterruption exit) without
-		// needing an equivalent guard.
-		d.finalizeBehindHead()
-		return errStreamDone
+		// Note: unlike handleGoneError's confirmed-end fallthrough, neither
+		// reason here clears the sidecar, so it always survives (including a
+		// Tier 2 / finalizedDuringInterruption exit) without needing an
+		// equivalent guard.
+		if d.finalizeBehindHead() {
+			return d.finish(finishBehindHead)
+		}
+		return d.finish(finishMaxTimeout)
 	}
 
 	utils.Sleep(ctx, time.Duration(*sameHeadRetryDelay)*d.delays.atEdgeBackoffUnit)

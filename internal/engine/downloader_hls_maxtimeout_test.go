@@ -71,7 +71,7 @@ func TestHlsLoop_EnforceMaxTimeoutForcesFinalize(t *testing.T) {
 	// worker's still-live refresh resumes from it. Clearing it (a streamEnded
 	// latch here) made that refresh refuse to start over the staged media.
 	// Mutant: the backstop setting streamEnded — the sidecar is gone.
-	if d.streamEnded.Load() {
+	if d.streamEnded() {
 		t.Error("streamEnded set — the backstop is not a confirmed end and must keep the resume sidecar")
 	}
 	if _, err := os.Stat(d.opts.OutputFile + resumeFileSuffix); err != nil {
@@ -242,7 +242,7 @@ func TestHlsLoop_EnforceMaxTimeoutPausesForOfflineOutage(t *testing.T) {
 	if !postReconnectServed.Load() {
 		t.Error("recording force-finalized on reconnect — offline outage counted toward MaxTimeout (lastSegTime not paused)")
 	}
-	if !d.streamEnded.Load() {
+	if !d.streamEnded() {
 		t.Error("streamEnded not set — expected a clean EXT-X-ENDLIST finish after reconnect")
 	}
 }

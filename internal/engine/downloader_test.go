@@ -659,13 +659,13 @@ func TestStreamEnded_AtomicAccess(t *testing.T) {
 		OutputFile: "test.mp4",
 	})
 
-	if d.streamEnded.Load() {
+	if d.streamEnded() {
 		t.Error("should not be ended initially")
 	}
 
-	d.streamEnded.Store(true)
-	if !d.streamEnded.Load() {
-		t.Error("should be ended after Store(true)")
+	d.record(finishConfirmed)
+	if !d.streamEnded() {
+		t.Error("should be ended after record(finishConfirmed)")
 	}
 }
 

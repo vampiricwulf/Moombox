@@ -203,7 +203,7 @@ func hlsReloadDelay(lastSegDur, targetDur float64, hadNewSegments bool, elapsed,
 // it is wired; "seq check" is the media-sequence regression test that
 // follows, after which the stale window starts over.
 //
-// Only a CONFIRMED end ever latches streamEnded; an error is never a
+// Only a CONFIRMED end ever records finishConfirmed; an error is never a
 // verdict (sweep T1-2). Pinned by TestHlsEndVerdictSites (A-C) and
 // TestHlsEndVerdict_StuckSkipExit / _InitExhaustion / _StaleWindow (D-F).
 type endVerdict int
@@ -255,7 +255,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// Only clear the resume file when the stream ends naturally.
 	defer func() {
 		d.saveResume()
-		if d.streamEnded.Load() {
+		if d.streamEnded() {
 			d.ClearResume()
 		}
 	}()
@@ -334,13 +334,14 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			}
 			d.logger.Info("[Downloader] maximum timeout reached while waiting for segment; finalizing",
 				"maxTimeout", d.opts.MaxTimeout, "gap", d.lastSegTime.Since().Round(time.Second))
-			// Not a confirmed end, so streamEnded stays unset and the loop's
-			// exit keeps the resume sidecar — the DASH backstop's rule
-			// (downloader_dash.go). The worker re-verifies after this return,
-			// and when YouTube still says live it refreshes the capture, which
-			// must resume from the sidecar: cleared here, the fresh downloader
-			// met the staged media with no sidecar, refused to start over it
-			// (ErrStagedMediaPresent), and the job ended in Error.
+			// Not a confirmed end: finishMaxTimeout keeps the resume sidecar —
+			// the DASH backstop's rule (downloader_dash.go). The worker
+			// re-verifies after this return, and when YouTube still says live
+			// it refreshes the capture, which must resume from the sidecar:
+			// cleared here, the fresh downloader met the staged media with no
+			// sidecar, refused to start over it (ErrStagedMediaPresent), and
+			// the job ended in Error.
+			d.record(finishMaxTimeout)
 			return nil
 		}
 
@@ -372,7 +373,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				// variant is gone and nothing is wired to contradict that.
 				switch d.consultStreamEnd(ctx) {
 				case verdictEnded, verdictNoCheck:
-					d.streamEnded.Store(true)
+					d.record(finishConfirmed)
 					return nil
 				case verdictLive:
 					return ErrQualityLost
@@ -414,7 +415,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				// finalize cleanly on the round the loop gives up.
 				switch d.consultStreamEnd(ctx) {
 				case verdictEnded:
-					d.streamEnded.Store(true)
+					d.record(finishConfirmed)
 					return nil
 				case verdictLive:
 					return ErrQualityLost
@@ -463,7 +464,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				// See site B.
 				switch d.consultStreamEnd(ctx) {
 				case verdictEnded:
-					d.streamEnded.Store(true)
+					d.record(finishConfirmed)
 					return nil
 				case verdictLive:
 					return ErrQualityLost
@@ -708,7 +709,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 						case verdictEnded:
 							d.logger.Warn("[Downloader] Stream ended and segments are unfetchable; stopping",
 								"consecutiveSkips", consecutiveStuckSkips)
-							d.streamEnded.Store(true)
+							d.record(finishConfirmed)
 							return nil
 						case verdictLive, verdictUnknown, verdictNoCheck:
 						}
@@ -757,7 +758,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					// init fetch is not evidence the variant is gone.
 					switch d.consultStreamEnd(ctx) {
 					case verdictEnded:
-						d.streamEnded.Store(true)
+						d.record(finishConfirmed)
 						return nil
 					case verdictLive, verdictUnknown:
 						return ErrQualityLost
@@ -836,7 +837,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				// through to the seq-regression check.
 				switch d.consultEnd(ctx, checkEnd) {
 				case verdictEnded:
-					d.streamEnded.Store(true)
+					d.record(finishConfirmed)
 					return nil
 				case verdictLive, verdictUnknown, verdictNoCheck:
 				}
@@ -856,7 +857,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				if curSeq > pl.MediaSequence+len(pl.Segments)+seqRegressionMargin {
 					d.logger.Warn("[Downloader] HLS media sequence regressed far below resume position, ending recording",
 						"curSeq", curSeq, "playlistEnd", pl.MediaSequence+len(pl.Segments))
-					d.streamEnded.Store(true)
+					d.record(finishSeqRestart)
 					return nil
 				}
 				// Reset so the next status probe waits another full stale
@@ -896,7 +897,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			// false, the defer re-saves a fresh sidecar, and ClearResume is
 			// skipped — leaving an orphaned .resume.json (masked today only
 			// because the worker wipes staging, but a contract violation).
-			d.streamEnded.Store(true)
+			d.record(finishConfirmed)
 			return nil
 		}
 
@@ -1217,7 +1218,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	// The whole VOD playlist has been consumed — natural end. Mark ended so
 	// runHlsLoop's deferred ClearResume removes the sidecar (see the ENDLIST
 	// path above).
-	d.streamEnded.Store(true)
+	d.record(finishConfirmed)
 	d.saveResume()
 	return nil
 }
