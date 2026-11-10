@@ -197,6 +197,7 @@ export class JobDetailsController {
       const job = this.app.jobs.find((j) => j.id === jobId) ||
         this.app.archivedJobs.find((j) => j.id === jobId);
       if (!job) return true;
+      const cardShape = this.app._cardShape(job);
       job.hasStaging = enriched.hasStaging;
       job.hasSegments = enriched.hasSegments;
       job.asides = Array.isArray(enriched.asides) ? enriched.asides : [];
@@ -210,6 +211,9 @@ export class JobDetailsController {
       // The status the facts above were computed under (the server's, from
       // the same answer): a status change after it makes them stale.
       job.factsStatus = enriched.status;
+      // The row shows Resume only over known staging: redraw the card if the
+      // answer changed that, instead of leaving it to the next list rebuild.
+      this.app._reshapeJobCard(job, cardShape);
       // Re-evaluate button visibility if the dialog is still on this job
       if (this.app.selectedJobId === jobId && document.getElementById("details-dialog").open) {
         const content = document.getElementById("job-details-content");

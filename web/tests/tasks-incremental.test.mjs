@@ -58,7 +58,7 @@ test("_sortJobs orders exactly as the per-comparison Date and localeCompare sort
   const titles = ["apple", "Zebra", "Äpfel", "apple", "APPLE 2", "éclair", "eclair", "", undefined, "10 things", "9 things", "ゲーム", "zebra"];
   // A fixed pseudo-random walk, so a failure reproduces.
   let seed = 12345;
-  const next = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+  const next = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed >>> 8) % n; };
   const jobs = [];
   for (let i = 0; i < 400; i++) {
     jobs.push({
@@ -140,4 +140,326 @@ test("a holds change redraws every Queued row in one pass over the cards", { ski
   }
   assert.equal(h.document.querySelector('.video-item[data-job-id="a"] .job-progress-text').textContent, "V:1 A:1 C:1",
     "a row that is not Queued is left alone");
+});
+
+// ── One card out, one card moved ────────────────────────────────────────────
+
+/** An app whose single-card paths all decline: every event takes the full rebuild. */
+async function rebuildOnlyApp() {
+  const h = await harness.makeApp();
+  h.app._insertJobCard = () => false;
+  h.app._moveJobCard = () => false;
+  h.app._removeJobCard = () => false;
+  return h;
+}
+
+/**
+ * Everything the operator can see or act on in the Tasks list. `data-progress`
+ * is left out of the markup: it is updateJobCard's per-card write cache, set
+ * on a card's first tick and absent from a freshly drawn one, never content.
+ * So is a checkbox's `checked` ATTRIBUTE: a card drawn while selected carries
+ * it, a card ticked after it was drawn holds only the property. The property
+ * is what shows, and `ticked` compares it.
+ */
+function tasksSnapshot(h) {
+  const container = h.el("jobs-container");
+  const clone = container.cloneNode(true);
+  for (const el of clone.querySelectorAll("[data-progress]")) el.removeAttribute("data-progress");
+  // updateJobCard notes on the thumbnail whether the row had a local file.
+  for (const el of clone.querySelectorAll("[data-had-thumb-file]")) el.removeAttribute("data-had-thumb-file");
+  for (const el of clone.querySelectorAll(".job-checkbox[checked]")) el.removeAttribute("checked");
+  const cards = [...container.querySelectorAll(".video-item")];
+  const bar = h.el("batch-action-bar");
+  return {
+    html: clone.innerHTML,
+    order: cards.map((c) => c.dataset.jobId),
+    focusedJobIndex: h.app.focusedJobIndex,
+    focusedCards: cards.filter((c) => c.hasAttribute("data-focused")).map((c) => c.dataset.jobId),
+    selected: [...h.app._selectedTaskJobs].sort(),
+    ticked: cards.filter((c) => c.querySelector(".job-checkbox").checked).map((c) => c.dataset.jobId),
+    highlighted: cards.filter((c) => c.classList.contains("selected")).map((c) => c.dataset.jobId),
+    batchBar: bar ? `${bar.className}|${bar.textContent.replace(/\s+/g, " ").trim()}` : "",
+    batchButtons: bar ? [...bar.querySelectorAll("sl-button")].map((b) => `${b.id}:${b.style.display}:${b.disabled ? "off" : "on"}`) : [],
+    activeIndicator: `${h.el("active-indicator").style.display}|${h.el("active-indicator").textContent}`,
+    emptyState: h.el("empty-state").style.display,
+    filterCount: h.el("tasks-filter-count")?.style.display,
+    channels: h.app.filterBar.channels("jobs"),
+    held: h.app.jobs.map((j) => `${j.id}:${j.status}`).sort(),
+  };
+}
+
+const STATUSES = ["Queued", "Upcoming", "Live", "Downloading", "Muxing", "Finished", "Error", "Cancelled", "COOKIES?"];
+
+/**
+ * A reproducible stream of the events the Tasks list takes: discoveries,
+ * status changes (through job_update and through a status-carrying
+ * job_progress), renames, ticks, shape-only changes, deletes, and the
+ * operator moving the focus and ticking rows in between.
+ */
+function eventStream(steps, seedValue) {
+  let seed = seedValue;
+  const next = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed >>> 8) % n; };
+  const rows = new Map();
+  let made = 0;
+  let clock = 5000;
+  const stamp = () => harness.agoISO(clock--); // every write is newer than the last
+  const fresh = () => {
+    const id = `j${made++}`;
+    const row = job(id, `Title ${String.fromCharCode(65 + next(26))}${next(50)}`, STATUSES[next(STATUSES.length)], {
+      channelName: `Chan ${next(4)}`, platform: next(3) === 0 ? "twitch" : "youtube", updatedAt: stamp(),
+    });
+    rows.set(id, row);
+    return row;
+  };
+  const initial = [];
+  for (let i = 0; i < 14; i++) initial.push({ ...fresh() });
+  const pick = () => { const ids = [...rows.keys()]; return rows.get(ids[next(ids.length)]); };
+
+  const events = [];
+  for (let i = 0; i < steps; i++) {
+    const kind = next(100);
+    if (rows.size < 4 || kind < 12) {
+      events.push({ frame: { type: "job_update", payload: { ...fresh() } } });
+    } else if (kind < 40) {
+      const row = pick();
+      row.status = STATUSES[next(STATUSES.length)];
+      row.progress = row.status === "Downloading" ? "V:1 A:1 C:1" : "";
+      row.updatedAt = stamp();
+      if (row.status === "Finished") row.incompleteTail = next(3) === 0;
+      events.push({ frame: { type: "job_update", payload: { ...row } } });
+    } else if (kind < 48) {
+      const row = pick();
+      row.status = STATUSES[next(STATUSES.length)];
+      row.updatedAt = stamp();
+      events.push({ frame: { type: "job_progress", payload: { id: row.id, status: row.status, progress: row.progress, updatedAt: row.updatedAt } } });
+    } else if (kind < 56) {
+      const row = pick();
+      row.title = `Renamed ${String.fromCharCode(65 + next(26))}${next(50)}`;
+      row.updatedAt = stamp();
+      events.push({ frame: { type: "job_update", payload: { ...row } } });
+    } else if (kind < 70) {
+      const row = pick();
+      row.progress = `V:${i} A:${i} C:${i}`;
+      events.push({ frame: { type: "job_progress", payload: { id: row.id, status: row.status, progress: row.progress } } });
+    } else if (kind < 76) {
+      // Shape only: same status, title and updatedAt, a new hasStaging.
+      const row = pick();
+      row.hasStaging = !row.hasStaging;
+      events.push({ frame: { type: "job_update", payload: { ...row } } });
+    } else if (kind < 88) {
+      const row = pick();
+      rows.delete(row.id);
+      events.push({ frame: { type: "job_deleted", payload: { id: row.id } } });
+    } else if (kind < 94) {
+      events.push({ focus: next(2) ? 1 : -1 });
+    } else {
+      events.push({ tick: pick().id });
+    }
+  }
+  return { initial, events };
+}
+
+function applyEvent(h, ev) {
+  if (ev.frame) {
+    // A fresh copy each: the handler keeps the payload object as the row.
+    h.app.handleMessage({ type: ev.frame.type, payload: { ...ev.frame.payload } });
+  } else if (ev.focus) {
+    h.app.navigateJobList(ev.focus);
+  } else if (ev.tick) {
+    h.document.querySelector(`.video-item[data-job-id="${ev.tick}"] .job-checkbox`)?.click();
+  }
+}
+
+// THE pin for web-2 (b) and (c): for the same events, the single-card paths
+// leave exactly what a full rebuild leaves, after every event.
+//
+// MUTANT: _detachJobCard drops the text run on the wrong side, or none — the
+// markup differs from the rebuild by an indentation run.
+// MUTANT: _moveJobCard does not put data-focused back — the highlight is lost
+// when the focused row changes status.
+// MUTANT: _removeJobCard keeps the deleted id in _selectedTaskJobs — the batch
+// bar counts a row that is gone.
+// MUTANT: _moveJobCard skips updateBatchActionBar — the bar keeps offering
+// Cancel for a selected row that just finished.
+// MUTANT: the status-change branch patches the card in place — the row keeps
+// its old badge, actions and place.
+// MUTANT: the same-status branch ignores _cardShape — a row keeps Reinitialize
+// where a rebuild draws Resume.
+test("the single-card paths leave what a full rebuild leaves, event by event", { skip }, async () => {
+  for (const seedValue of [7, 20261110, 424242]) {
+    const { initial, events } = eventStream(260, seedValue);
+    // One app at a time: the harness publishes the newest window as the
+    // globals app.js reads, so two apps cannot be driven side by side.
+    const run = async (h) => {
+      h.app.jobs = initial.map((j) => ({ ...j }));
+      h.app.renderJobs();
+      let rebuilds = 0;
+      const realRender = h.app.renderJobs.bind(h.app);
+      h.app.renderJobs = (...a) => { rebuilds++; return realRender(...a); };
+      const shots = events.map((ev) => { applyEvent(h, ev); return tasksSnapshot(h); });
+      return { shots, rebuilds };
+    };
+    const fast = await run(await harness.makeApp());
+    const full = await run(await rebuildOnlyApp());
+    const rebuilds = fast.rebuilds;
+    assert.ok(full.rebuilds > 100, "the reference run must be the one that rebuilds");
+
+    events.forEach((ev, i) => {
+      assert.deepEqual(fast.shots[i], full.shots[i],
+        `seed ${seedValue}, event ${i} (${JSON.stringify(ev)}): the list must be what a rebuild draws`);
+    });
+    assert.equal(rebuilds, 0,
+      `seed ${seedValue}: with no filter and a list that never empties, no event needs the full rebuild ` +
+      "— a fallback here means the comparison above proved nothing about the fast path");
+  }
+});
+
+// MUTANT: the delete or status-change branch calls renderJobs() again — one
+// renderJobItem per row in the list instead of none, or one.
+test("a delete draws no card and a status change draws one", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.jobs = [job("a", "AAA"), job("b", "BBB"), job("c", "CCC"), job("d", "DDD", "Queued")];
+  h.app.renderJobs();
+  const untouched = h.document.querySelector('.video-item[data-job-id="c"]');
+
+  let items = 0;
+  const realItem = h.app.renderJobItem.bind(h.app);
+  h.app.renderJobItem = (...a) => { items++; return realItem(...a); };
+
+  h.app.handleMessage({ type: "job_deleted", payload: { id: "b" } });
+  assert.equal(items, 0, "a deleted row costs no card render");
+
+  h.app.handleMessage({ type: "job_update", payload: job("d", "DDD", "Downloading") });
+  assert.equal(items, 1, "a status change renders the one card that moved");
+  assert.deepEqual([...h.document.querySelectorAll(".video-item")].map((e) => e.dataset.jobId), ["a", "c", "d"],
+    "the moved card lands where _sortJobs puts it");
+  assert.equal(h.document.querySelector('.video-item[data-job-id="c"]'), untouched,
+    "a row that did not change keeps its element: its shadow roots, scroll and open menu survive");
+  assert.equal(h.el("active-indicator").textContent, "▶ 3", "the active count follows");
+});
+
+// The fast paths are only safe while the rendered list and this.jobs are the
+// same set. Each of these must take the rebuild.
+test("removal and move fall back to a full render when they cannot be proven", { skip }, async () => {
+  const start = () => [job("a", "AAA"), job("b", "BBB"), job("c", "CCC")];
+  const counted = async () => {
+    const h = await harness.makeApp();
+    h.app.jobs = start();
+    h.app.renderJobs();
+    const c = { renders: 0 };
+    const real = h.app.renderJobs.bind(h.app);
+    h.app.renderJobs = (...a) => { c.renders++; return real(...a); };
+    return { h, c };
+  };
+
+  // A filter is active: the match set and the "N of M" count change.
+  {
+    const { h, c } = await counted();
+    h.app.filterBar.tasksFilterTokens = [{ type: "status", value: "Downloading", negated: false }];
+    h.app.renderJobs();
+    c.renders = 0;
+    h.app.handleMessage({ type: "job_deleted", payload: { id: "b" } });
+    assert.equal(c.renders, 1, "a delete under a filter rebuilds");
+    assert.equal(h.el("tasks-filter-count").textContent, "2 of 2", "and the count is recomputed");
+    h.app.handleMessage({ type: "job_update", payload: job("a", "AAA", "Muxing") });
+    assert.equal(c.renders, 2, "a status change under a filter rebuilds");
+    assert.deepEqual([...h.document.querySelectorAll(".video-item")].map((e) => e.dataset.jobId), ["c"],
+      "the row that left the filter is gone from the list");
+  }
+
+  // The list empties: the empty state is the rebuild's to draw.
+  {
+    const { h, c } = await counted();
+    h.app.handleMessage({ type: "job_deleted", payload: { id: "a" } });
+    h.app.handleMessage({ type: "job_deleted", payload: { id: "b" } });
+    assert.equal(c.renders, 0);
+    h.app.handleMessage({ type: "job_deleted", payload: { id: "c" } });
+    assert.equal(c.renders, 1, "the last delete rebuilds");
+    assert.equal(h.el("empty-state").style.display, "flex", "and the empty state shows");
+    assert.equal(h.el("jobs-container").innerHTML, "");
+  }
+
+  // The rendered list has drifted from this.jobs.
+  {
+    const { h, c } = await counted();
+    h.document.querySelector('.video-item[data-job-id="c"]').remove();
+    h.app.handleMessage({ type: "job_update", payload: job("a", "AAA", "Muxing") });
+    assert.equal(c.renders, 1, "a drifted list rebuilds on a move");
+    assert.deepEqual([...h.document.querySelectorAll(".video-item")].map((e) => e.dataset.jobId), ["b", "c", "a"],
+      "and the rebuild reconciles it");
+  }
+  {
+    const { h, c } = await counted();
+    h.document.querySelector('.video-item[data-job-id="b"]').remove();
+    h.app.handleMessage({ type: "job_deleted", payload: { id: "b" } }); // its card is already gone
+    assert.equal(c.renders, 1, "a delete whose card is missing rebuilds");
+  }
+});
+
+// MUTANT: _moveJobCard forgets the focus — Arrow and Enter then act on
+// nothing, or (with a stale index) on the wrong row.
+test("focus and selection follow a row that moves, and leave with one that is deleted", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.jobs = [job("a", "AAA"), job("b", "BBB"), job("c", "CCC"), job("q", "QQQ", "Queued")];
+  h.app.renderJobs();
+  h.app.navigateJobList(1);
+  h.app.navigateJobList(1); // focus on "b"
+  h.document.querySelector('.video-item[data-job-id="b"] .job-checkbox').click();
+  h.document.querySelector('.video-item[data-job-id="c"] .job-checkbox').click();
+  assert.equal(h.app.focusedJobIndex, 1);
+
+  h.app.handleMessage({ type: "job_update", payload: job("b", "BBB", "Queued") });
+  const moved = h.document.querySelector('.video-item[data-job-id="b"]');
+  assert.deepEqual([...h.document.querySelectorAll(".video-item")].map((e) => e.dataset.jobId), ["a", "c", "b", "q"]);
+  assert.ok(moved.hasAttribute("data-focused"), "the highlight moves with the row");
+  assert.equal(h.app.focusedJobIndex, 2, "and so does the index Arrow and Enter read");
+  assert.ok(moved.classList.contains("selected") && moved.querySelector(".job-checkbox").checked, "the row stays ticked");
+
+  h.app.handleMessage({ type: "job_deleted", payload: { id: "b" } });
+  assert.equal(h.app.focusedJobIndex, -1, "a deleted focused row leaves no focus");
+  assert.deepEqual([...h.app._selectedTaskJobs], ["c"], "and leaves the selection");
+
+  h.app.navigateJobList(1); // "a"
+  h.app.navigateJobList(1); // "c"
+  h.app.handleMessage({ type: "job_deleted", payload: { id: "a" } });
+  assert.equal(h.app.focusedJobIndex, 0, "a delete above the focused row shifts its index");
+  assert.ok(h.document.querySelector('.video-item[data-job-id="c"]').hasAttribute("data-focused"));
+});
+
+// A part of the card updateJobCard does not patch used to be put right by the
+// next rebuild of the whole list, which any row's status change caused. With
+// those rebuilds gone, the one card is drawn again when that part changes.
+//
+// MUTANT: drop the _cardShape branch — the row keeps Reinitialize until the
+// list is next rebuilt.
+test("a same-status update that changes the row's actions draws that one card again", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.jobs = [job("a", "AAA"), job("e", "EEE", "Error", { hasStaging: false })];
+  h.app.renderJobs();
+  const actions = () => [...h.document.querySelectorAll('.video-item[data-job-id="e"] .job-quick-actions sl-icon-button')]
+    .map((b) => b.dataset.quickAction);
+  assert.deepEqual(actions(), ["reinitialize", "delete"]);
+
+  let items = 0;
+  const realItem = h.app.renderJobItem.bind(h.app);
+  h.app.renderJobItem = (...a) => { items++; return realItem(...a); };
+  h.app.handleMessage({ type: "job_update", payload: job("e", "EEE", "Error", { hasStaging: true }) });
+
+  assert.deepEqual(actions(), ["resume", "delete"], "the row now offers Resume");
+  assert.equal(items, 1, "for the cost of one card");
+});
+
+// MUTANT: drop _reshapeJobCard from _fetchStagingFields — opening the details
+// corrects the dialog's buttons and leaves the row's icon as it was.
+test("the details fetch redraws the row when its answer changes the row's actions", { skip }, async () => {
+  const h = await harness.makeApp({
+    routes: { "GET /api/jobs/:id": ({ params }) => ({ ...job(params.id, "EEE", "Error"), hasStaging: true }) },
+  });
+  h.app.jobs = [job("a", "AAA"), job("e", "EEE", "Error", { hasStaging: false })];
+  h.app.renderJobs();
+
+  await h.app.details._fetchStagingFields("e");
+
+  assert.deepEqual([...h.document.querySelectorAll('.video-item[data-job-id="e"] .job-quick-actions sl-icon-button')]
+    .map((b) => b.dataset.quickAction), ["resume", "delete"]);
 });

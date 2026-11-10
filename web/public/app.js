@@ -1387,9 +1387,11 @@ export class MoomboxApp {
           // status change that first makes Recover offerable.
           this.details._preserveStagingFields([oldJob], [updatedJob]);
           this.jobs[jobIndex] = updatedJob;
-          // Status change affects sort order — do full re-render
+          // A status change moves the row to another group: its card is taken
+          // out and drawn again at its new place. The whole list is rebuilt
+          // only when that cannot be proven equal to a rebuild.
           if (oldStatus !== updatedJob.status) {
-            this.renderJobs();
+            if (!this._moveJobCard(updatedJob)) this.renderJobs();
             // The picker lists Finished recordings: one that just finished
             // muxing (or left Finished) changes what it should offer.
             if (oldStatus === "Finished" || updatedJob.status === "Finished") this._refreshPlayerPicker();
@@ -1404,7 +1406,14 @@ export class MoomboxApp {
             // completed row's newer updatedAt. Patched in place, the card
             // kept its old position while Arrow navigation and Enter index
             // the re-sorted list, so the highlight landed on the wrong row.
-            this.renderJobs();
+            if (!this._moveJobCard(updatedJob)) this.renderJobs();
+          } else if (this._cardShape(oldJob) !== this._cardShape(updatedJob)) {
+            // Same status and place, but a part of the card updateJobCard
+            // does not patch has changed (the Resume icon, the missing-tail
+            // mark): this one card is drawn again where it is. It used to
+            // wait for the next rebuild of the whole list, which another
+            // row's status change no longer causes.
+            if (!this._moveJobCard(updatedJob)) this.renderJobs();
           } else {
             // No active-indicator refresh in either same-status branch: the
             // indicator counts rows by status, and no status moved.
@@ -1488,7 +1497,7 @@ export class MoomboxApp {
         // and can cross the archive threshold, so it takes the same path
         // job_update gives it.
         if (merged.status !== oldStatus) {
-          this.renderJobs();
+          if (!this._moveJobCard(merged)) this.renderJobs();
           this._evaluateArchiveBoundary();
           this._syncParkedBadge();
         } else {
@@ -1539,7 +1548,9 @@ export class MoomboxApp {
         const deletedIdx = this.jobs.findIndex(j => j.id === deletedId);
         if (deletedIdx !== -1) {
           this.jobs.splice(deletedIdx, 1);
-          this.renderJobs();
+          // One card out, not a rebuild of every card: a batch delete of K
+          // rows sends K of these frames.
+          if (!this._removeJobCard(deletedId)) this.renderJobs();
           // Deleting the last parked job is the one gesture that CLEARS this
           // escalation. Without it the badge stays red over an empty list.
           this._syncParkedBadge();
@@ -2156,7 +2167,8 @@ export class MoomboxApp {
    * backfill page that finds K jobs used to run K consecutive full renders.
    *
    * Returns false — and the caller must fall back to renderJobs() — whenever
-   * the fast path cannot be trusted:
+   * the fast path cannot be trusted (_detachJobCard keeps the same contract
+   * for taking a card out):
    *   - the container is absent,
    *   - a filter is active (the match set and the "N of M" count both have to
    *     be recomputed),
@@ -2212,6 +2224,125 @@ export class MoomboxApp {
     if (this.focusedJobIndex >= index) this.focusedJobIndex += 1;
     this.stats.updateActiveIndicator(this.jobs);
     return true;
+  }
+
+  /**
+   * Take ONE card out of the rendered list instead of rebuilding every card.
+   * The twin of _insertJobCard, with the same contract: it returns null, and
+   * the caller must fall back to renderJobs(), unless the result is provably
+   * what a rebuild would draw. It declines when:
+   *   - the container is absent,
+   *   - a filter is active (the match set and the "N of M" count change),
+   *   - no other job is left (the empty state is renderJobs()'s to draw),
+   *   - the rendered cards are not exactly this card plus the sorted
+   *     this.jobs without this job, in order.
+   * this.jobs may still hold the job (a move) or not (a delete).
+   * @param {string} jobId
+   * @returns {{wasFocused: boolean}|null}
+   */
+  _detachJobCard(jobId) {
+    const container = document.getElementById("jobs-container");
+    if (!container) return null;
+    if (this.filterBar.tokens("jobs").length > 0) return null;
+
+    const rest = this._sortJobs(this.jobs).filter((j) => j.id !== jobId);
+    if (rest.length === 0) return null;
+    const cards = [...container.querySelectorAll(".video-item")];
+    if (cards.length !== rest.length + 1) return null;
+    let at = -1;
+    for (let i = 0, k = 0; i < cards.length; i++) {
+      const id = cards[i].dataset.jobId;
+      if (at < 0 && id === jobId) { at = i; continue; }
+      if (k >= rest.length || id !== rest[k++].id) return null;
+    }
+    if (at < 0) return null;
+
+    // The whitespace goes with the card, so the list stays byte-identical to
+    // a rebuild: between two cards sits one card's trailing indentation and
+    // the next one's leading indentation. The run AFTER the card is dropped,
+    // or the run BEFORE it when it is the last card, which leaves the list's
+    // own leading and trailing runs in place. A run can be more than one
+    // text node (an appended card's lead is a node of its own).
+    const card = cards[at];
+    const side = at === cards.length - 1 ? "previousSibling" : "nextSibling";
+    for (let n = card[side]; n && n.nodeType === Node.TEXT_NODE;) {
+      const next = n[side];
+      n.remove();
+      n = next;
+    }
+    const wasFocused = card.hasAttribute("data-focused");
+    card.remove();
+    this._syncFocusedIndex(container);
+    return { wasFocused };
+  }
+
+  /** focusedJobIndex from the card that carries data-focused, as renderJobs() derives it. */
+  _syncFocusedIndex(container) {
+    const cards = container.querySelectorAll(".video-item");
+    this.focusedJobIndex = -1;
+    for (let i = 0; i < cards.length; i++) {
+      if (cards[i].hasAttribute("data-focused")) { this.focusedJobIndex = i; break; }
+    }
+  }
+
+  /**
+   * Remove a deleted job's card (the job is already out of this.jobs) and
+   * refresh what renderJobs() would have beside it: its selection, the batch
+   * bar, the focused index and the active count. False: the caller must
+   * fall back to renderJobs().
+   * @param {string} jobId
+   * @returns {boolean}
+   */
+  _removeJobCard(jobId) {
+    if (!this._detachJobCard(jobId)) return false;
+    this._selectedTaskJobs.delete(jobId);
+    this.updateBatchActionBar();
+    this.stats.updateActiveIndicator(this.jobs);
+    return true;
+  }
+
+  /**
+   * Draw ONE job's card again at the place the sort now gives it: after a
+   * status change, a new sort key, or a change to a part of the card
+   * updateJobCard does not patch. The card is taken out and put back through
+   * _insertJobCard, so both halves check the list against this.jobs; focus
+   * and selection follow the job as they do across a rebuild. False: the
+   * caller must fall back to renderJobs(), which also repairs a list this
+   * left without the card.
+   * @param {object} job - the row as this.jobs now holds it
+   * @returns {boolean}
+   */
+  _moveJobCard(job) {
+    const detached = this._detachJobCard(job.id);
+    if (!detached) return false;
+    if (!this._insertJobCard(job)) return false;
+    if (detached.wasFocused) {
+      const container = document.getElementById("jobs-container");
+      container.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"]`)?.setAttribute("data-focused", "");
+      this._syncFocusedIndex(container);
+    }
+    // The batch bar's buttons depend on the selected rows' statuses.
+    this.updateBatchActionBar();
+    return true;
+  }
+
+  /**
+   * What of a card depends on more than the status and the fields
+   * updateJobCard patches: whether the row offers Resume, and the
+   * missing-tail mark. A same-status update that changes this draws the
+   * card again (_moveJobCard).
+   */
+  _cardShape(job) {
+    return (canResumeJob(job, { requireKnownStaging: true }) ? "R" : "-") + (this.incompleteIndicatorHtml(job) ? "T" : "-");
+  }
+
+  /**
+   * Draw an active job's card again when its shape is no longer oldShape.
+   * For a writer that changed the row in place, outside the job_update path.
+   */
+  _reshapeJobCard(job, oldShape) {
+    if (this._cardShape(job) === oldShape || !this.jobs.includes(job)) return;
+    if (!this._moveJobCard(job)) this.renderJobs();
   }
 
   /**
@@ -2631,6 +2762,7 @@ export class MoomboxApp {
 
     // Status badge and data-status are NOT updated here — updateJobCard is
     // only called when status hasn't changed, so these are already correct.
+    // A status change draws the card again (_moveJobCard, or renderJobs).
 
     // Update progress text
     const progressText = card.querySelector(".job-progress-text");
@@ -2678,8 +2810,9 @@ export class MoomboxApp {
     }
 
     // Quick actions are NOT rebuilt here — updateJobCard is only called when
-    // status hasn't changed (status changes trigger full renderJobs instead),
-    // so the available actions are identical. Skipping avoids destroying and
+    // status and _cardShape haven't changed (a change to either draws the
+    // card again: _moveJobCard, or the full renderJobs), so the available
+    // actions are identical. Skipping avoids destroying and
     // recreating sl-icon-button shadow DOM elements on every progress update.
   }
 
@@ -3456,7 +3589,7 @@ export class MoomboxApp {
         const activeIdx = this.jobs.findIndex(j => j.id === id);
         if (activeIdx !== -1) {
           this.jobs.splice(activeIdx, 1);
-          this.renderJobs();
+          if (!this._removeJobCard(id)) this.renderJobs();
         }
         // Remove from archived jobs if present (no WebSocket update for archived jobs)
         const archivedIdx = this.archivedJobs.findIndex(j => j.id === id);
