@@ -1401,6 +1401,9 @@ func TestLastLoadErrorStaysBoundedAndPathOnly(t *testing.T) {
 		})
 	}
 
+	// The path is under t.TempDir(), whose length nobody fixes: a long temp
+	// root (a deep GOTMPDIR, a CI workspace) once pushed the cause past the
+	// bound here. The next subtest pins that it cannot.
 	t.Run("an errno keeps the OS's own wording", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "cookies.txt")
 		sentinel := loadThroughFailingRead(t, path,
@@ -1415,6 +1418,32 @@ func TestLastLoadErrorStaysBoundedAndPathOnly(t *testing.T) {
 				"could have named", sentinel)
 		}
 	})
+
+	// Mutant: bound the whole sentence from the end, as before -> the cause
+	// and the file name are cut off and only the head of the path is left.
+	// Mutant: slice the path at a byte offset -> one of the three paddings
+	// starts the kept tail inside a rune.
+	for pad := range 3 {
+		t.Run(fmt.Sprintf("a long path gives way from the front, never the cause (pad %d)", pad), func(t *testing.T) {
+			path := "/mnt/" + strings.Repeat("x", pad) + strings.Repeat("私", 300) + "/data/cookies.txt"
+			sentinel := loadThroughFailingRead(t, path,
+				&fs.PathError{Op: "open", Path: path, Err: syscall.EACCES})
+
+			if want := "/data/cookies.txt: " + syscall.EACCES.Error(); !strings.HasSuffix(sentinel, want) {
+				t.Errorf("LastLoadError() = %q, want it to end %q — the file name and the cause "+
+					"are what the operator acts on", sentinel, want)
+			}
+			if want := "open " + cookieLoadErrorEllipsis; !strings.HasPrefix(sentinel, want) {
+				t.Errorf("LastLoadError() = %q, want it to start %q — the cut must be marked", sentinel, want)
+			}
+			if len(sentinel) > cookieLoadErrorMaxLen {
+				t.Errorf("LastLoadError() is %d bytes, want at most %d", len(sentinel), cookieLoadErrorMaxLen)
+			}
+			if !utf8.ValidString(sentinel) {
+				t.Errorf("LastLoadError() = %q — the cut split a rune", sentinel)
+			}
+		})
+	}
 
 	t.Run("a PathError whose cause carries a cookie row is not echoed", func(t *testing.T) {
 		row := cookieRow(".youtube.com", "0", "SAPISID", "synthetic-secret-value")
@@ -1485,6 +1514,43 @@ func TestBoundStringSurvivesATinyBound(t *testing.T) {
 		}
 		if !utf8.ValidString(got) {
 			t.Errorf("boundString(%q, %d) = %q — the cut split a rune", tc.s, tc.n, got)
+		}
+	}
+}
+
+// TestBoundStringTailKeepsTheEnd pins boundStringTail, boundString's twin for
+// the one part of the load-error sentence that is cut from the front.
+//
+// Mutant: drop the keep < 0 arm -> a bound under the ellipsis's width slices
+// past the end of s and panics.
+func TestBoundStringTailKeepsTheEnd(t *testing.T) {
+	for _, tc := range []struct {
+		s    string
+		n    int
+		want string
+	}{
+		{"/data/cookies.txt", 0, ""},
+		{"/data/cookies.txt", -1, ""},
+		{"/data/cookies.txt", 2, "xt"},
+		{"/data/cookies.txt", 3, "..."},
+		{"/data/cookies.txt", 14, "...cookies.txt"},
+		{"/data/cookies.txt", 17, "/data/cookies.txt"}, // exactly n: returned whole
+		{"私の-cookies", 9, "...ookies"},
+		{"cookies-私の", 2, ""},      // no room for even one rune
+		{"cookies-私の", 5, "..."},   // the marker fits; its two spare bytes cannot hold a rune
+		{"cookies-私の", 6, "...の"},  // the marker plus exactly one rune
+		{"cookies-私の", 8, "...の"},  // two more bytes are still not a second rune
+		{"cookies-私の", 9, "...私の"}, // now they are
+	} {
+		got := boundStringTail(tc.s, tc.n)
+		if got != tc.want {
+			t.Errorf("boundStringTail(%q, %d) = %q, want %q", tc.s, tc.n, got, tc.want)
+		}
+		if tc.n >= 0 && len(got) > tc.n {
+			t.Errorf("boundStringTail(%q, %d) is %d bytes — the bound is the whole contract", tc.s, tc.n, len(got))
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("boundStringTail(%q, %d) = %q — the cut split a rune", tc.s, tc.n, got)
 		}
 	}
 }
