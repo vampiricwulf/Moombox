@@ -487,8 +487,9 @@ func TestCookieSetupClientsTellTheServerWhenTheUserGivesUp(t *testing.T) {
 		path     string
 		cancelFn string
 	}{
-		{"public/modules/settings.js", "this.cancelAutoCookieSetup()"},
-		{"public/modules/setup.js", "this.cancelCookieSetup()"},
+		// The one module that owns the dialog for both the wizard and Settings
+		// (K33); its beacon, its Skip and its cancel were two copies before.
+		{cookieSetupSessionModule, "this.cancel()"},
 	} {
 		raw, err := webassets.PublicFS.ReadFile(mod.path)
 		if err != nil {
@@ -593,19 +594,19 @@ const beaconEndpoint = `navigator.sendBeacon("/api/cookies/auto-setup/abandon")`
 func TestTheUnloadBeaconPostsToARouteThatExists(t *testing.T) {
 	// Re-derive the path from the JS rather than restating it, so this cannot
 	// keep passing against a URL the client no longer sends.
-	raw, err := webassets.PublicFS.ReadFile("public/modules/settings.js")
+	raw, err := webassets.PublicFS.ReadFile(cookieSetupSessionModule)
 	if err != nil {
-		t.Fatalf("read embedded settings.js: %v", err)
+		t.Fatalf("read embedded %s: %v", cookieSetupSessionModule, err)
 	}
 	const prefix = `navigator.sendBeacon("`
 	at := strings.Index(string(raw), prefix)
 	if at < 0 {
-		t.Fatal("settings.js sends no beacon at all")
+		t.Fatal("cookie-setup-session.js sends no beacon at all")
 	}
 	rest := string(raw)[at+len(prefix):]
 	end := strings.Index(rest, `"`)
 	if end < 0 {
-		t.Fatal("could not read the beacon's URL out of settings.js")
+		t.Fatal("could not read the beacon's URL out of cookie-setup-session.js")
 	}
 	path := rest[:end]
 
@@ -1446,7 +1447,7 @@ var autoSetupGatedPaths = []string{
 // cleanupLocked, SetupInProgress goes false, and the host's own finish then
 // answers 404 with the browser left orphaned. One unauthenticated LAN POST.
 // Gating costs nothing: the beacon fires only from a tab whose
-// _cookieSetupActive is set, and only a SUCCESSFUL /start sets it — so since
+// CookieSetupSession.holdsSlot() is true, and only a SUCCESSFUL /start makes it so — so since
 // this gate exists, a page with a setup to abandon is by construction a
 // loopback page. A LAN beacon has nothing of its own to release; the only slot
 // it can reach is someone else's.

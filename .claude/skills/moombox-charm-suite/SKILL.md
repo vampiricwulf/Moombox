@@ -74,6 +74,11 @@ func (m *SomeOverlay) View() string       { if !m.visible { return "" }; ... }
 
 **Critical: `UpdateComponents(msg tea.Msg) tea.Cmd`** — Overlays with interactive sub-components (textinput, table, viewport, spinner) implement this method. App calls it from `routeComponentMsg()` to delegate focus, key handling, and ticks to embedded Charm components.
 
+**Adding an overlay — the registry is the only place it is routed from (K23).** `handleKey`, `handleMouse`, `View`, `routeComponentMsg` and `hasActiveOverlay` all take the first visible entry of `overlayRegistry` (`internal/tui/overlays.go`); an overlay missing from it never receives a key, a click or a frame. Three steps:
+1. An `overlayEntry` in `overlayRegistry` at the priority it should have (`visible`, `view`, `components`, `key`, and `mouse` or nil to swallow the mouse).
+2. Its key handler (`func (a *App) keyX(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cmd)`) in `internal/tui/overlay_keys.go` — Ctrl+C is checked ahead of every overlay in `handleKey`, so the handler never sees it.
+3. A row in `overlayCases` (`internal/tui/overlay_order_test.go`) at the same position, which opens the overlay; the order, view/key and mouse-parity tests and the Ctrl+C census iterate it.
+
 ### Chord System
 Single source of truth: `buildMenuItems()` in `app_actions.go` returns `[]ActionMenuItem`:
 ```go

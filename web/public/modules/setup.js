@@ -4,10 +4,6 @@
 import { renderTemplatePreview } from "./settings.js";
 import {
   bindPasswordSpaceWarning,
-  cookieSetupAbortReport,
-  cookieSetupAcceptedToast,
-  cookieSetupProbe,
-  cookieSetupRejectedMessage,
   needsChannelResolve,
   NOT_A_CHANNEL_URL,
   PASSWORD_TOO_SHORT,
@@ -41,9 +37,6 @@ export class SetupController {
     this.advStep = 1;
     this.cookieYTDone = false;
     this.cookieTWDone = false;
-    // True while the SERVER is holding a setup slot this controller opened —
-    // not while the dialog is merely visible. The pagehide beacon reads it.
-    this._cookieSetupActive = false;
     this._redirectUrl = null; // Set when port/HTTPS changes require redirect after restart
   }
 
@@ -112,34 +105,10 @@ export class SetupController {
     if (this._listenersAttached) return;
     this._listenersAttached = true;
 
-    // Prevent Escape/overlay-click from closing the cookie dialog without
-    // properly cancelling the setup (which would orphan the browser process).
-    // Only handle during setup wizard — SettingsController registers its own
-    // handler for the same dialog, so skip when setup is complete to avoid
-    // double cancel API calls.
-    const autoCookieDialog = document.getElementById("auto-cookie-setup-dialog");
-    if (autoCookieDialog) {
-      autoCookieDialog.addEventListener("sl-request-close", (e) => {
-        if (document.getElementById("setup-overlay").style.display === "none") return;
-        e.preventDefault();
-        this.cancelCookieSetup();
-      });
-    }
-
-    // Tell the server when the tab goes away mid-setup — the wizard half of the
-    // same fix settings.js carries; see the comment there for why this posts
-    // /abandon rather than /cancel (a tab unload is not consent to close the
-    // browser the user is signing into), why this is pagehide rather than
-    // beforeunload, why the e.persisted bail-out is not optional, and why a
-    // beacon rather than a fetch. Only the controller that STARTED a setup has
-    // the flag set, so the two controllers sharing this dialog cannot both fire
-    // one.
-    window.addEventListener("pagehide", (e) => {
-      if (e.persisted) return; // bfcache: this page is coming back
-      if (!this._cookieSetupActive) return;
-      this._cookieSetupActive = false;
-      navigator.sendBeacon("/api/cookies/auto-setup/abandon");
-    });
+    // The cookie-setup dialog's own handlers — Done, Cancel, Escape and the
+    // unload beacon — belong to the shared session (cookie-setup-session.js),
+    // bound once for both controllers.
+    this.app.cookieSetup.bind();
 
     // Mode selection
     document.getElementById("setup-mode-quick")?.addEventListener("click", () => {
@@ -372,32 +341,9 @@ export class SetupController {
       if (!response.ok) throw new Error(await serverErrorMessage(response));
       const data = await response.json();
       if (data.success) {
-        // The server is now holding the setup slot; an unload must cancel it.
-        this._cookieSetupActive = true;
-        const dialog = document.getElementById("auto-cookie-setup-dialog");
-        const instructions = document.getElementById("auto-cookie-instructions");
-        if (instructions) {
-          instructions.textContent = platform === "twitch"
-            ? "A browser window has opened to Twitch. Please sign in, then click \"I'm Logged In\"."
-            : "A browser window has opened to Google. Please sign in to YouTube, then click \"I'm Logged In\".";
-        }
-        if (dialog) {
-          dialog.label = platform === "twitch" ? "Setup: Twitch" : "Setup: YouTube";
-          // Override done button to use our handler
-          const doneBtn = document.getElementById("btn-auto-cookie-done");
-          const cancelBtn = document.getElementById("btn-auto-cookie-cancel");
-          if (doneBtn) {
-            const newDone = doneBtn.cloneNode(true);
-            doneBtn.replaceWith(newDone);
-            newDone.addEventListener("click", () => this.finishCookieSetup(platform));
-          }
-          if (cancelBtn) {
-            const newCancel = cancelBtn.cloneNode(true);
-            cancelBtn.replaceWith(newCancel);
-            newCancel.addEventListener("click", () => this.cancelCookieSetup());
-          }
-          dialog.show();
-        }
+        // The server is now holding the setup slot; the session owns it and
+        // its dialog from here.
+        this.app.cookieSetup.begin(platform, this._cookieSetupOwner());
       } else {
         this.app.showToast(data.error || "Failed to start setup", "danger");
       }
@@ -406,65 +352,15 @@ export class SetupController {
     }
   }
 
-  async finishCookieSetup(platform) {
-    const doneBtn = document.getElementById("btn-auto-cookie-done");
-    const resultEl = document.getElementById("auto-cookie-setup-result");
-    const countdownEl = document.getElementById("auto-cookie-countdown");
-    const timeoutResultEl = document.getElementById("auto-cookie-result");
-    if (doneBtn) { doneBtn.loading = true; doneBtn.disabled = true; }
-    if (resultEl) {
-      resultEl.textContent = "Extracting cookies...";
-      resultEl.style.color = "";
-    }
-    if (timeoutResultEl) timeoutResultEl.innerHTML = "";
-
-    let remaining = 60;
-    if (countdownEl) {
-      countdownEl.textContent = `${remaining}s remaining`;
-      countdownEl.style.color = "";
-    }
-    const countdownInterval = setInterval(() => {
-      remaining--;
-      if (countdownEl) {
-        countdownEl.textContent = `${remaining}s remaining`;
-        if (remaining <= 10) {
-          countdownEl.style.color = "var(--text-warning)";
-        }
-      }
-      if (remaining <= 0) clearInterval(countdownInterval);
-    }, 1000);
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
-
-    // Baseline for the abort path, dispatched BEFORE the finish so the
-    // lastRefresh comparison there is server clock against server clock and no
-    // browser/server skew can turn an old stamp into a fresh one.
-    //
-    // Deliberately not awaited: it must not add a round trip to the finish, and
-    // only the abort branch ever reads it. cookieSetupProbe never rejects, so
-    // an unread promise cannot surface as an unhandled rejection.
-    const abortBaseline = cookieSetupProbe();
-
-    try {
-      const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST", signal: controller.signal });
-      // Any answer means the slot was released; only the abort path below skips
-      // this line, because an abort says nothing about whether the setup is
-      // still live. That path clears the flag itself, but only once the server
-      // has confirmed the slot is free.
-      this._cookieSetupActive = false;
-      // The finish handler's discriminated errors — 422 for an unreadable
-      // cookies.txt or a broken profile, 409 for a locked cookie DB — used to
-      // reach the user as `HTTP <n>`, which points at none of them.
-      if (!response.ok) throw new Error(await serverErrorMessage(response));
-      const data = await response.json();
-      const ytOk = data.authenticated;
-      const twOk = data.twitchAuthenticated;
-
-      if (ytOk || twOk) {
-        if (resultEl) resultEl.textContent = "";
-        document.getElementById("auto-cookie-setup-dialog")?.hide();
-        // Track completion in state and update badges (both simple and advanced)
+  // The wizard's side of the shared cookie-setup session: its badges (and
+  // the cookieYTDone/cookieTWDone flags behind the active_platforms it
+  // writes), the abort report's wizard variant, and its own start for Try
+  // Again. The finish, the abort probe and the cancel are the session's.
+  _cookieSetupOwner() {
+    return {
+      wizard: true,
+      retry: (platform) => this.startCookieSetup(platform),
+      onAccepted: (data, ytOk, twOk) => {
         if (ytOk) {
           this.cookieYTDone = true;
           for (const id of ["setup-yt-badge", "setup-adv-yt-badge"]) {
@@ -479,101 +375,8 @@ export class SetupController {
             if (badge) { badge.style.display = ""; badge.variant = "success"; }
           }
         }
-        // Accepted is not verified — see cookieSetupAcceptedToast. A sign-in
-        // Moombox could not reach the site to confirm was reported here as an
-        // unqualified success, so a user whose network blipped mid-check was
-        // told their cookies were configured with nothing having checked them.
-        if (ytOk) {
-          const toast = cookieSetupAcceptedToast("YouTube", data.youtubeVerification);
-          this.app.showToast(toast.message, toast.variant);
-        }
-        if (twOk) {
-          const toast = cookieSetupAcceptedToast("Twitch", data.twitchVerification);
-          this.app.showToast(toast.message, toast.variant);
-        }
-      } else {
-        if (resultEl) {
-          // Speaks from the verification fields, not from `data.error`: that
-          // never exists on a 200, so the fallback was the only thing this
-          // branch ever rendered.
-          resultEl.textContent = cookieSetupRejectedMessage(
-            platform === "twitch" ? data.twitchVerification : data.youtubeVerification,
-          );
-          resultEl.style.color = "var(--text-danger)";
-        }
-      }
-    } catch (e) {
-      if (e.name === "AbortError") {
-        if (resultEl) resultEl.textContent = "";
-        // Report what actually happened rather than asserting a timeout. The
-        // server writes the merged cookies.txt and reloads the jar BEFORE it
-        // verifies, so this abort can fire over work that already committed.
-        // The 60 s cap stays as it is — the server-side setup grace window is
-        // priced against that exact number.
-        const probe = await cookieSetupProbe();
-        // Only a definite "no setup here" releases the flag. An unanswered
-        // probe keeps it raised, which is the safe direction: the Skip button
-        // and the unload beacon then still have something to tell the server
-        // about.
-        if (probe.ok && !probe.inProgress) this._cookieSetupActive = false;
-        if (timeoutResultEl) {
-          // wizard: this path cannot light setup-yt-badge / setup-tw-badge,
-          // and those flags are the sole source of the active_platforms the
-          // wizard is about to write. The alert says so rather than letting
-          // "saved" imply a platform was recorded.
-          const report = cookieSetupAbortReport(probe, await abortBaseline, { wizard: true });
-          timeoutResultEl.innerHTML = `
-            <sl-alert variant="${report.variant}" open>
-              <sl-icon slot="icon" name="${report.icon}"></sl-icon>
-              ${this.app.escapeHtml(report.message)}
-            </sl-alert>
-            <div style="display: flex; gap: 0.5em; margin-top: 0.75em;">
-              <sl-button variant="primary" size="small" id="cookie-retry-btn">Try Again</sl-button>
-              <sl-button variant="default" size="small" id="cookie-skip-btn">Skip</sl-button>
-            </div>`;
-          document.getElementById("cookie-retry-btn")?.addEventListener("click", () => {
-            timeoutResultEl.innerHTML = "";
-            if (countdownEl) countdownEl.textContent = "";
-            this.startCookieSetup(platform);
-          });
-          // Skip goes through the cancel path — hide() alone does not fire
-          // sl-request-close, so the server was never told the user gave up.
-          // cancelCookieSetup hides the dialog and clears these elements itself.
-          document.getElementById("cookie-skip-btn")?.addEventListener("click", () => {
-            this.cancelCookieSetup();
-          });
-        }
-        // The finish may well have committed while we stopped waiting, so the
-        // dashboard's cookie status is potentially stale. The wizard's own
-        // badges stay unlit — see the `wizard` note above — and the alert says
-        // so rather than guessing at which platform to mark.
-        this.app.loadStatus();
-        return;
-      }
-      if (resultEl) {
-        resultEl.textContent = "Error: " + e.message;
-        resultEl.style.color = "var(--text-danger)";
-      }
-    } finally {
-      clearInterval(countdownInterval);
-      clearTimeout(timeoutId);
-      if (countdownEl) countdownEl.textContent = "";
-      if (doneBtn) { doneBtn.loading = false; doneBtn.disabled = false; }
-    }
-  }
-
-  async cancelCookieSetup() {
-    this._cookieSetupActive = false;
-    try {
-      await fetch("/api/cookies/auto-setup/cancel", { method: "POST" });
-    } catch { /* ignore */ }
-    document.getElementById("auto-cookie-setup-dialog")?.hide();
-    const resultEl = document.getElementById("auto-cookie-setup-result");
-    if (resultEl) { resultEl.textContent = ""; resultEl.style.color = ""; }
-    const countdownEl = document.getElementById("auto-cookie-countdown");
-    if (countdownEl) countdownEl.textContent = "";
-    const timeoutResultEl = document.getElementById("auto-cookie-result");
-    if (timeoutResultEl) timeoutResultEl.innerHTML = "";
+      },
+    };
   }
 
   /** Show/hide YouTube-only fields in the channel dialog based on platform. */

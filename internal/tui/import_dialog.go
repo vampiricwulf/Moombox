@@ -13,6 +13,15 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+// importStep is where the A Z dialog stands (K28).
+type importStep int
+
+const (
+	importStepPick      importStep = iota // the file picker
+	importStepMeta                        // optional title/channel overrides
+	importStepImporting                   // the import is in flight
+)
+
 // ImportDialogModel wraps bubbles/filepicker for browsing and selecting .zip
 // archive files, then shows a metadata step for optional title/channel before
 // importing.
@@ -20,7 +29,7 @@ type ImportDialogModel struct {
 	visible bool
 	width   int
 	height  int
-	step    int // 0=filepicker, 1=metadata, 2=importing
+	step    importStep
 
 	// File picker
 	picker filepicker.Model
@@ -98,7 +107,7 @@ func caseVariants(s string) []string {
 // Open opens the dialog at the given starting directory.
 func (m *ImportDialogModel) Open(startDir string) tea.Cmd {
 	m.visible = true
-	m.step = 0
+	m.step = importStepPick
 	m.filePath = ""
 	m.title = ""
 	m.channel = ""
@@ -130,7 +139,7 @@ func (m *ImportDialogModel) SetSize(w, h int) {
 // SetError sets the error and goes back to metadata step.
 func (m *ImportDialogModel) SetError(err string) {
 	m.errorMsg = err
-	m.step = 1
+	m.step = importStepMeta
 }
 
 // UpdateComponents routes tea.Msg to the active component.
@@ -139,19 +148,19 @@ func (m *ImportDialogModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 		return nil
 	}
 	switch m.step {
-	case 0:
+	case importStepPick:
 		// Filepicker
 		var cmd tea.Cmd
 		m.picker, cmd = m.picker.Update(msg)
 		// Check if a file was selected
 		if didSelect, path := m.picker.DidSelectFile(msg); didSelect {
 			m.filePath = path
-			m.step = 1
+			m.step = importStepMeta
 			m.metaFocus = 0
 			configureTextInput(&m.textInput, "", nil, textinput.EchoNormal)
 		}
 		return cmd
-	case 1:
+	case importStepMeta:
 		// Metadata text input
 		if !m.textInput.Focused() {
 			return nil
@@ -163,7 +172,7 @@ func (m *ImportDialogModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 			m.syncFromTextInput()
 		}
 		return cmd
-	case 2:
+	case importStepImporting:
 		// Importing — route spinner
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -194,17 +203,17 @@ func (m *ImportDialogModel) syncToTextInput() {
 // action="import" with data=filePath when the user confirms import.
 func (m *ImportDialogModel) HandleKey(key string) (string, string) {
 	switch m.step {
-	case 0:
+	case importStepPick:
 		// File picker handles most keys via UpdateComponents
 		if key == keyEsc {
 			m.Close()
 		}
 		return "", ""
-	case 1:
+	case importStepMeta:
 		// Metadata step
 		switch key {
 		case keyEsc:
-			m.step = 0 // Back to file picker
+			m.step = importStepPick // Back to file picker
 			m.textInput.Blur()
 			return "", ""
 		case keyTab:
@@ -214,7 +223,7 @@ func (m *ImportDialogModel) HandleKey(key string) (string, string) {
 			return "", ""
 		case keyEnter:
 			m.syncFromTextInput()
-			m.step = 2
+			m.step = importStepImporting
 			m.spinner = newSpinner()
 			m.textInput.Blur()
 			return "import", m.filePath
@@ -260,7 +269,7 @@ func (m *ImportDialogModel) View() string {
 	var content strings.Builder
 
 	switch m.step {
-	case 0:
+	case importStepPick:
 		content.WriteString(TitleStyle.Render("Import Archive"))
 		content.WriteString("\n")
 		// The import's rule in one line that fits the 60-column floor: one
@@ -271,7 +280,7 @@ func (m *ImportDialogModel) View() string {
 		content.WriteString("\n")
 		content.WriteString(DimStyle.Render(importPickerHint(contentW)))
 
-	case 1:
+	case importStepMeta:
 		content.WriteString(TitleStyle.Render("Import Archive — Metadata"))
 		content.WriteString("\n")
 		content.WriteString(DimStyle.Render("Optional: override title and channel"))
@@ -313,7 +322,7 @@ func (m *ImportDialogModel) View() string {
 		content.WriteString("\n")
 		content.WriteString(DimStyle.Render("Tab: Switch field  Enter: Import  Esc: Back"))
 
-	case 2:
+	case importStepImporting:
 		content.WriteString(TitleStyle.Render("Importing..."))
 		content.WriteString("\n\n")
 		content.WriteString(m.spinner.View())

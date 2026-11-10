@@ -48,11 +48,14 @@ type ChapterImportView struct {
 	EmbedError        string
 }
 
+// chapterImportStep is where the A C overlay stands (K28).
+type chapterImportStep int
+
 // The steps of the A C overlay.
 const (
-	chapterImportStepEdit    = iota // pasting / editing, the preview following
-	chapterImportStepConfirm        // Ctrl+S pressed: y saves, anything else goes back
-	chapterImportStepSaving         // App.OnSaveChapters is in flight
+	chapterImportStepEdit    chapterImportStep = iota // pasting / editing, the preview following
+	chapterImportStepConfirm                          // Ctrl+S pressed: y saves, anything else goes back
+	chapterImportStepSaving                           // App.OnSaveChapters is in flight
 )
 
 // chapterPreviewDebounce is how long the preview waits after the last edit
@@ -80,7 +83,7 @@ type ChapterImportDialogModel struct {
 	text          textarea.Model
 	offset        textinput.Model
 	focusOffset   bool
-	step          int
+	step          chapterImportStep
 	// seq numbers the edits; a preview answers for the edit it was asked
 	// for, and only the newest one is drawn.
 	seq  int

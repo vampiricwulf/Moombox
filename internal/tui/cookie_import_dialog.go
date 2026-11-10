@@ -15,11 +15,14 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
+// cookieImportStep is where the E I overlay stands (K28).
+type cookieImportStep int
+
 // The three steps of the E I overlay.
 const (
-	cookieImportStepPath    = iota // typing the path
-	cookieImportStepRunning        // App.OnImportCookieFile is in flight
-	cookieImportStepResult         // the per-platform outcome is on screen
+	cookieImportStepPath    cookieImportStep = iota // typing the path
+	cookieImportStepRunning                         // App.OnImportCookieFile is in flight
+	cookieImportStepResult                          // the per-platform outcome is on screen
 )
 
 // CookieImportDialogModel is the E I overlay: a path prompt, then the import
@@ -40,7 +43,7 @@ const (
 type CookieImportDialogModel struct {
 	visible       bool
 	width, height int
-	step          int
+	step          cookieImportStep
 	input         textinput.Model
 	errorMsg      string
 	spinner       spinner.Model

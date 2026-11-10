@@ -9,13 +9,21 @@ import (
 	webassets "github.com/vampiricwulf/Moombox/web"
 )
 
-// setupDialogModules are the two frontends that drive the cookie setup dialog.
-// Both call the same endpoints and both had the same three defects, so every
-// assertion below runs against both — a fix landed in one file only is exactly
-// how these two drifted apart before.
+// cookieSetupSessionModule owns the cookie setup dialog's finish, abort
+// report and cancel for both frontends (K33). They were two near-copies in
+// settings.js and setup.js, with the same three defects each, and every
+// assertion below ran against both because a fix landed in one file only is
+// exactly how the two drifted apart. One module now, so the finish
+// assertions read it alone.
+const cookieSetupSessionModule = "public/modules/cookie-setup-session.js"
+
+// setupDialogModules are the two frontends that START a setup (each keeps
+// its own POST /start, and Settings its remote-viewer guard), plus the
+// session that finishes it.
 var setupDialogModules = []string{
 	"public/modules/settings.js",
 	"public/modules/setup.js",
+	cookieSetupSessionModule,
 }
 
 // readEmbeddedModule returns the asset the binary actually serves, with line
@@ -244,7 +252,7 @@ func TestSetupDialogsReadTheVerificationFieldsTheHandlerEmits(t *testing.T) {
 		}
 	}
 
-	for _, path := range setupDialogModules {
+	for _, path := range []string{cookieSetupSessionModule} {
 		js := readEmbeddedModule(t, path)
 		for _, expr := range []string{"data.youtubeVerification", "data.twitchVerification"} {
 			if !strings.Contains(js, expr) {
@@ -355,7 +363,7 @@ func TestSetupDialogsSurfaceTheServersOwnMessage(t *testing.T) {
 // relationship no other test spans: the server-side setup grace window is
 // priced against this exact constant.
 func TestSetupAbortReportsRealStatusInsteadOfAssertingATimeout(t *testing.T) {
-	for _, path := range setupDialogModules {
+	for _, path := range []string{cookieSetupSessionModule} {
 		js := readEmbeddedModule(t, path)
 
 		if strings.Contains(js, "Cookie extraction timed out") {
@@ -414,25 +422,33 @@ func TestSetupAbortReportsRealStatusInsteadOfAssertingATimeout(t *testing.T) {
 		// the bracket. jsCallArgs parses to the matching paren, so only a real
 		// argument counts.
 		//
-		// Only the wizard has badges to disclaim, so the option is required in
-		// one module and prohibited in the other. What it DOES to the copy is
-		// executed, not matched — see
+		// Only the wizard has badges to disclaim, so the option comes from
+		// the owner of the setup: the session passes the owner's flag, the
+		// wizard's owner sets it and Settings' does not. What it DOES to the
+		// copy is executed, not matched — see
 		// TestCookieSetupAbortReportNeverClaimsAnUnknownSave, which renders both.
 		args := jsCallArgs(body, "cookieSetupAbortReport")
 		if len(args) < 2 {
 			t.Errorf("%s's abort arm does not call cookieSetupAbortReport(probe, baseline): %v", path, args)
 			continue
 		}
-		wantsWizard := path == "public/modules/setup.js"
-		hasWizard := len(args) >= 3 && strings.Contains(args[2], "wizard")
-		switch {
-		case wantsWizard && !hasWizard:
-			t.Errorf("%s's abort arm passes no wizard option, so its save arm claims a save "+
-				"without saying it cannot record WHICH platform — cookieYTDone/cookieTWDone are "+
-				"the sole source of the active_platforms the wizard then writes, and this path "+
-				"lights neither. Args: %v", path, args)
-		case !wantsWizard && hasWizard:
-			t.Errorf("%s is not the wizard and has no badges to disclaim. Args: %v", path, args)
+		if len(args) < 3 || !strings.Contains(args[2], "wizard: owner.wizard") {
+			t.Errorf("%s's abort arm does not pass the owner's wizard option, so the wizard's "+
+				"save arm claims a save without saying it cannot record WHICH platform — "+
+				"cookieYTDone/cookieTWDone are the sole source of the active_platforms the wizard "+
+				"then writes, and this path lights neither. Args: %v", path, args)
+		}
+	}
+	for _, owner := range []struct {
+		path, want string
+	}{
+		{"public/modules/setup.js", "wizard: true"},
+		{"public/modules/settings.js", "wizard: false"},
+	} {
+		body := jsMethodBody(t, readEmbeddedModule(t, owner.path), "_cookieSetupOwner")
+		if !strings.Contains(body, owner.want) {
+			t.Errorf("%s's cookie-setup owner does not say %q — only the wizard has badges to "+
+				"disclaim: %s", owner.path, owner.want, body)
 		}
 	}
 

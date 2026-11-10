@@ -482,6 +482,21 @@ func (m *AddVideoModel) AutoAdvanceApplies(videoID string) bool {
 	return m.visible && m.fetchFailed && m.step == AddStepVideoFormat && m.videoID == videoID
 }
 
+// AutoAdvanceToConfirm takes the failed-fetch auto-advance for videoID when it
+// still applies (AutoAdvanceApplies): to Confirm, with auto settings and the
+// fetch flags cleared. The dialog's own transition (K28) — the App only
+// delivers the message, as trimDlg.FailCreate. Reports whether it moved.
+func (m *AddVideoModel) AutoAdvanceToConfirm(videoID string) bool {
+	if !m.AutoAdvanceApplies(videoID) {
+		return false
+	}
+	m.step = AddStepConfirm
+	m.advancedMode = false
+	m.loading = false
+	m.fetchFailed = false
+	return true
+}
+
 // Submitting reports whether this dialog has a POST in flight for videoID.
 func (m *AddVideoModel) Submitting(videoID string) bool {
 	return m.visible && m.submitting && m.videoID == videoID

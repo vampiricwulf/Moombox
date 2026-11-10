@@ -113,6 +113,9 @@ type (
 	dismissUpdateResultMsg struct {
 		Tag string
 		Err error
+		// Epoch is the release-notes session the S was pressed in
+		// (releaseNotesOverlay.epoch); only that session is closed by the answer.
+		Epoch int
 	}
 	signatureVerifyResultMsg struct {
 		Err string // empty on success
@@ -127,6 +130,9 @@ type (
 		Tag   string
 		Notes string
 		Err   string
+		// Epoch is the release-notes session the fetch was for; an answer for
+		// any other session is dropped.
+		Epoch int
 	}
 
 	// Async results for AddVideo dialog
@@ -1345,26 +1351,6 @@ func (a *App) listenForUpdates() tea.Cmd {
 			return us
 		}
 	}
-}
-
-// hasActiveOverlay returns true if any overlay dialog is currently visible.
-func (a *App) hasActiveOverlay() bool {
-	return a.settings.IsVisible() ||
-		a.help.IsVisible() ||
-		(a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen()) ||
-		a.importDlg.IsVisible() ||
-		a.cookieImportDlg.IsVisible() ||
-		a.chapterDlg.IsVisible() ||
-		a.addVideo.IsVisible() ||
-		a.trimDlg.IsVisible() ||
-		a.filesDlg.IsVisible() ||
-		a.clientTokensDlg.IsVisible() ||
-		a.ytdlpDlg.IsVisible() ||
-		a.statsDlg.IsVisible() ||
-		a.jobLog.IsVisible() ||
-		a.setupWiz.IsVisible() ||
-		a.ffmpegCheck.IsVisible() ||
-		a.actionMenu.IsVisible()
 }
 
 // hasActiveDownloads returns true if any job has live progress to display.

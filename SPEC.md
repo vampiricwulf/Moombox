@@ -156,7 +156,7 @@ internal/
   notifications/   <- Manager + Discord webhook sender
   web/             <- chi server, WebSocket hub, auth, middleware, rate limiter
   web/routes/      <- HTTP route handlers (jobs, auth, config, cookies, update, etc.)
-  tui/             <- 2-over-1 panel layout, 15 overlays, chord system, Charm ecosystem
+  tui/             <- 2-over-1 panel layout, 16 overlays (one ordered registry), chord system, Charm ecosystem
   goja/            <- JS runtime shims (minimal DOM, TextEncoder, timers)
   disk/            <- Disk space queries: kernel32 GetDiskFreeSpaceExW on Windows, statfs on Linux
   constants/       <- Hardcoded values (API keys, URLs, client configs, user agents)
@@ -507,6 +507,7 @@ The web UI is a vanilla JavaScript SPA using Shoelace v2.16 (loaded from CDN). S
 | `modules/files.js` | `FilesController` — the Files tab: orphaned output files and orphaned feed-history entries, their refresh/delete-all actions |
 | `modules/log-panel.js` | `LogPanelController` — the log viewer: level filter buttons, debounced text search with match highlighting, auto-scroll with the resume pill, clear |
 | `modules/update-indicator.js` | `UpdateController` — the header version indicator and the update-available dialog (apply/skip) |
+| `modules/cookie-setup-session.js` | `CookieSetupSession` — the cookie-setup dialog the setup wizard and Settings share: handlers bound once, the platform stored, one phase; a finish answering after a Cancel is dropped |
 | `modules/filter-bar.js` | `FilterBarController` — the unified filter bar shared by the Tasks and Archived tabs: token parsing/rendering, chip removal, channel/platform pickers |
 | `modules/job-details.js` | `JobDetailsController` — the job details dialog: render, live updates, action buttons, per-job logs |
 | `modules/player.js` | Video player with per-job chat replay: niconico-style media-time scrolling overlay, chat sidebar with pre-show/post-end dividers, chat search, per-job chat offset, resume/watched tracking, per-part Twitch chat merge, multi-segment seeking, the archive's chapters as a marker strip under the video, each marker named in an `sl-tooltip` (FE-37), and a collapsible list that remembers its open state per browser (FE-36) (`GET /api/jobs/{id}/chapters`, read from the file(s) by ffprobe on request, owner decision CH), with an Import chapters dialog for a pasted timestamp comment (`modules/chapter-import.js`, owner decision CI-4), and W22's chat markers — a deleted message struck through with a "deleted" tag whose tooltip is YouTube's `deletedState` wording, a replaced one with an "edited" tag over the original (FE-13, FQ-5); the overlay hides a deleted message and flies a replaced one as its replacement (FQ-5). The sidebar also renders Super Chat / Super Sticker tier cards, membership cards, Twitch sub/resub/gift/raid notice blocks and the cheer chip — sidebar only; the overlay keeps plain scrolling text |

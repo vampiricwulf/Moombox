@@ -19,9 +19,9 @@ func TestDialogCommandPanicsAnswerTheirDialog(t *testing.T) {
 
 	a.OnImportFile = func(string, string, string) (string, error) { panic("zip reader exploded") }
 	a.importDlg.SetSize(100, 40)
-	a.importDlg.visible, a.importDlg.step = true, 2
+	a.importDlg.visible, a.importDlg.step = true, importStepImporting
 	a.Update(a.importFileCmd("/x.zip")())
-	if a.importDlg.step == 2 || !strings.Contains(a.importDlg.errorMsg, "zip reader exploded") {
+	if a.importDlg.step == importStepImporting || !strings.Contains(a.importDlg.errorMsg, "zip reader exploded") {
 		t.Errorf("import dialog after a panic: step %d, error %q — want it back on its form with the error", a.importDlg.step, a.importDlg.errorMsg)
 	}
 

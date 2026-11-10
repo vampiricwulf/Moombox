@@ -37,6 +37,13 @@ type releaseNotesOverlay struct {
 	// is out, so the clear that skip announces is not read as one from
 	// elsewhere (followPendingRelease). Reset by the answer and by close.
 	skipping string
+	// epoch is the notesEpoch: it names one session of the overlay, from an R N
+	// open (start) to the close that ends it, and is bumped by both. The
+	// viewer fetch and the S skip carry the epoch they started under, and
+	// their answers act on the overlay only while it still matches (K27): a
+	// late skip answer once closed notes reopened since, and a late fetch
+	// error replaced notes a later fetch had loaded. Never reset.
+	epoch int
 	// isDark mirrors App.isDark (terminal background detection) so the
 	// markdown renderer matches the terminal, exactly as the huh themes
 	// already do. Defaults true: dark is Moombox's historical assumption
@@ -69,6 +76,13 @@ func (o *releaseNotesOverlay) open(tag, rawNotes string, width, height int) {
 	o.rawNotes = rawNotes
 	o.applySize(width, height)
 	o.vp.GotoTop()
+}
+
+// start opens a new session of the overlay (R N): a fresh epoch, so any
+// answer still out for an earlier session is dropped when it lands.
+func (o *releaseNotesOverlay) start(tag, rawNotes string, width, height int) {
+	o.epoch++
+	o.open(tag, rawNotes, width, height)
 }
 
 // withdraw is for notes open beside a pending update whose release is no
@@ -122,6 +136,7 @@ func (o *releaseNotesOverlay) setSize(width, height int) {
 // close hides the overlay and clears its state.
 func (o *releaseNotesOverlay) close() {
 	o.open_ = false
+	o.epoch++
 	o.tag = ""
 	o.rawNotes = ""
 	o.pending = false

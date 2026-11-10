@@ -41,7 +41,7 @@ func TestImportPickerTakesAZipInAnyCase(t *testing.T) {
 			t.Errorf("%s is not drawn as stream.zip is:\n%s", name, m.View())
 		}
 		m.UpdateComponents(tea.KeyPressMsg{Code: tea.KeyEnter})
-		if m.step != 1 || filepath.Base(m.filePath) != name {
+		if m.step != importStepMeta || filepath.Base(m.filePath) != name {
 			t.Errorf("Enter on %s: step %d, selected %q — want the metadata step for it", name, m.step, m.filePath)
 		}
 	}
@@ -49,7 +49,7 @@ func TestImportPickerTakesAZipInAnyCase(t *testing.T) {
 	for _, name := range []string{"notes.txt", "stream.zip.part"} {
 		m := open(name)
 		m.UpdateComponents(tea.KeyPressMsg{Code: tea.KeyEnter})
-		if m.step != 0 || m.filePath != "" {
+		if m.step != importStepPick || m.filePath != "" {
 			t.Errorf("Enter on %s selected %q (step %d) — only a zip is pickable", name, m.filePath, m.step)
 		}
 	}

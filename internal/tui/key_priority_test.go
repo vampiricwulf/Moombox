@@ -8,14 +8,13 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 // ctrlCMsg is the message bubbletea v2 actually delivers for Ctrl+C: an
 // ORDINARY key press carrying the ctrl modifier. tea.InterruptMsg arrives
 // only from a real SIGINT, so the app's own handler is the only thing
-// standing between Ctrl+C and the fifteen overlays that intercept every key
+// standing between Ctrl+C and the overlays that intercept every key
 // before it (CORE-5, O-M).
 func ctrlCMsg() tea.KeyPressMsg { return tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl} }
 
@@ -41,61 +40,41 @@ func isQuit(cmd tea.Cmd) bool {
 }
 
 // help.go promises "Ctrl+C  Quit immediately", but bubbletea v2 delivers
-// Ctrl+C as a plain key and fifteen overlays intercept every key before the
-// app's handler — twelve of the fourteen there were then swallowed it, and
-// the two that did not carried a hand-written copy of the quit apiece. The check is hoisted above
-// every overlay intercept (O-M) (CORE-5).
+// Ctrl+C as a plain key and every overlay intercepts every key before the
+// app's handler — twelve of the fourteen there once swallowed it, and the
+// two that did not carried a hand-written copy of the quit apiece. The
+// check is hoisted above the overlay registry (O-M) (CORE-5).
 //
-// Every overlay handleKey tests for is a row here, opened through its own
-// production entry point and asserted VISIBLE before the key is pressed: a
-// row whose overlay silently failed to open would assert nothing more than
-// that the main view quits.
+// The census iterates overlayCases, which TestOverlayRegistryOrder holds to
+// the registry entry for entry, so a new overlay is a row here by
+// construction (K23: chapter import was the row the hand list had missed).
+// Each overlay is opened through its own production entry point and
+// asserted VISIBLE before the key is pressed: a row whose overlay silently
+// failed to open would assert nothing more than that the main view quits.
+// The job log's search box is the one extra row.
 //
-// Mutant: moving the keyCtrlC check back below the overlay intercepts —
+// Mutant: moving the keyCtrlC check back below the overlay dispatch —
 // every row except the ffmpeg and setup-wizard ones fails.
 func TestCtrlCQuitsThroughEveryOverlay(t *testing.T) {
-	newApp := func() *App {
-		a := NewApp()
-		a.SetConfigStore(config.NewStore(config.Defaults(), ""))
-		a.width, a.height = 120, 40
-		a.recalcLayout()
-		a.taskList.SetJobs([]*database.Job{
-			{ID: "j1", Title: "a job", Status: database.StatusFinished, Platform: "youtube", VideoID: "aaaaaaaaaaa"},
-		})
-		return a
-	}
-
-	rows := []struct {
+	type row struct {
 		name    string
 		show    func(*App)
 		visible func(*App) bool
-	}{
-		{"settings", func(a *App) { a.settings.Open(a.cfg) }, func(a *App) bool { return a.settings.IsVisible() }},
-		{"help", func(a *App) { a.help.Toggle() }, func(a *App) bool { return a.help.IsVisible() }},
-		{"release notes", func(a *App) { a.releaseNotesPopup.open("v9.9.9", "# notes", a.width, a.height) },
-			func(a *App) bool { return a.releaseNotesPopup.isOpen() }},
-		{"ffmpeg check", func(a *App) { a.ffmpegCheck.Open() }, func(a *App) bool { return a.ffmpegCheck.IsVisible() }},
-		{"setup wizard", func(a *App) { a.setupWiz.Open() }, func(a *App) bool { return a.setupWiz.IsVisible() }},
-		{"action menu", func(a *App) { a.actionMenu.Open(a.buildMenuItems()) }, func(a *App) bool { return a.actionMenu.IsVisible() }},
-		{"import", func(a *App) { a.importDlg.Open(t.TempDir()) }, func(a *App) bool { return a.importDlg.IsVisible() }},
-		{"cookie import", func(a *App) { a.cookieImportDlg.Open() }, func(a *App) bool { return a.cookieImportDlg.IsVisible() }},
-		{"add video", func(a *App) { a.addVideo.Open() }, func(a *App) bool { return a.addVideo.IsVisible() }},
-		{"trim", func(a *App) { a.trimDlg.Open("j1", "a job") }, func(a *App) bool { return a.trimDlg.IsVisible() }},
-		{"files", func(a *App) { a.filesDlg.Open() }, func(a *App) bool { return a.filesDlg.IsVisible() }},
-		{"client tokens", func(a *App) { a.clientTokensDlg.Open() }, func(a *App) bool { return a.clientTokensDlg.IsVisible() }},
-		{"ytdlp plugin", func(a *App) { a.ytdlpDlg.Open() }, func(a *App) bool { return a.ytdlpDlg.IsVisible() }},
-		{"stats", func(a *App) { a.statsDlg.Open() }, func(a *App) bool { return a.statsDlg.IsVisible() }},
-		{"job log", func(a *App) { a.jobLog.Open(a.taskList.GetJobByID("j1")) }, func(a *App) bool { return a.jobLog.IsVisible() }},
-		{"job log search box", func(a *App) { a.jobLog.Open(a.taskList.GetJobByID("j1")); a.jobLog.log.StartSearch() },
-			func(a *App) bool { return a.jobLog.IsVisible() && a.jobLog.log.IsSearching() }},
 	}
+	var rows []row
+	for _, c := range overlayCases(t) {
+		rows = append(rows, row{c.name, c.open, c.visible})
+	}
+	rows = append(rows, row{"job log search box",
+		func(a *App) { a.jobLog.Open(a.taskList.GetJobByID("j1")); a.jobLog.log.StartSearch() },
+		func(a *App) bool { return a.jobLog.IsVisible() && a.jobLog.log.IsSearching() }})
 
-	if len(rows) != 16 {
-		t.Fatalf("the census covers %d rows, but handleKey intercepts 15 overlays (and the job log's search box)", len(rows))
+	if len(rows) != len(overlayRegistry)+1 {
+		t.Fatalf("the census covers %d rows, but the registry holds %d overlays (and the job log's search box)", len(rows), len(overlayRegistry))
 	}
 
 	for _, row := range rows {
-		a := newApp()
+		a := overlayTestApp(t)
 		row.show(a)
 		if !row.visible(a) {
 			t.Errorf("%s overlay: did not open, so the row proves nothing", row.name)

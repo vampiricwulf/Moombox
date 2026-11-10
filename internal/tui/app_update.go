@@ -400,7 +400,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case dismissUpdateResultMsg:
-		a.releaseNotesPopup.skipping = ""
+		// The answer belongs to the notes session its S was pressed in
+		// (K27). S, Esc, then R N again before the skip answers: the
+		// answer used to close the notes just reopened. Only that session's
+		// skipping and close are gated; the release's own state — the
+		// badge, the glyph, the feedback line — always follows the answer.
+		o := a.releaseNotesPopup
+		own := o != nil && o.isOpen() && o.epoch == msg.Epoch
+		if own {
+			o.skipping = ""
+		}
 		if msg.Err != nil {
 			// A skip refused because the release went elsewhere re-synced the
 			// pending release (resyncTUIUpdate) while the notes ignored it.
@@ -418,7 +427,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// still lit, while the Web dismiss above cleared both (review F2).
 			a.details.updateInfo = nil
 		}
-		a.releaseNotesPopup.close()
+		if own {
+			o.close()
+		} else {
+			// Notes reopened since on the release just skipped stop
+			// offering U and S, as for a skip from elsewhere.
+			a.followPendingRelease(pendingGoneSkipped)
+		}
 		a.setFeedback("Skipped " + msg.Tag + " — you'll be notified about the next release")
 		return a, nil
 
@@ -437,25 +452,26 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case releaseNotesFetchedMsg:
-		// Only the viewer this fetch was for: if the overlay was closed and
-		// R N re-opened it on a pending update meanwhile, the late answer
-		// put the running version's notes and tag under a footer still
-		// offering U and S — both of which then refused on the tag guard.
-		// Notes withdrawn from beside a pending update are not pending
-		// either, and are not that viewer.
-		if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() && !a.releaseNotesPopup.pending &&
-			a.releaseNotesPopup.notice == "" {
+		// Only the viewer session this fetch was for (K27: the epoch R N
+		// stamped on it). R N, Esc, R N again: the first fetch's late error
+		// used to replace the notes the second had loaded. And if R N
+		// re-opened the overlay on a pending update meanwhile, the late
+		// answer put the running version's notes and tag under a footer
+		// still offering U and S — a pending session, or notes withdrawn
+		// from beside one, is never a viewer session, so the epoch alone
+		// refuses both.
+		if o := a.releaseNotesPopup; o != nil && o.isOpen() && o.epoch == msg.Epoch {
 			// A failed fetch carries no tag (OnFetchReleaseNotes returns
 			// "", "", err), and reopening with it blanked the title to
 			// "Release Notes — ". Keep the tag R N opened the overlay with.
 			tag := msg.Tag
 			if tag == "" {
-				tag = a.releaseNotesPopup.tag
+				tag = o.tag
 			}
 			if msg.Err != "" {
-				a.releaseNotesPopup.open(tag, "Failed to fetch release notes: "+msg.Err, a.width, a.height)
+				o.open(tag, "Failed to fetch release notes: "+msg.Err, a.width, a.height)
 			} else {
-				a.releaseNotesPopup.open(tag, msg.Notes, a.width, a.height)
+				o.open(tag, msg.Notes, a.width, a.height)
 			}
 		}
 		return a, nil
@@ -621,13 +637,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case fetchFormatsAutoAdvanceMsg:
-		if a.addVideo.AutoAdvanceApplies(msg.VideoID) {
-			// Skip to confirmation with auto settings
-			a.addVideo.step = AddStepConfirm
-			a.addVideo.advancedMode = false
-			a.addVideo.loading = false
-			a.addVideo.fetchFailed = false
-		}
+		a.addVideo.AutoAdvanceToConfirm(msg.VideoID) // skip to confirmation with auto settings
 		return a, nil
 
 	case importResultMsg:
@@ -688,9 +698,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.trimDlg.IsVisible() {
 			// Dialog still open — show result or error inline
 			if msg.Err != "" {
-				a.trimDlg.SetLoading(false)
-				a.trimDlg.createStep = 1 // back to confirmation so user can retry or Esc
-				a.trimDlg.SetError(msg.Err)
+				a.trimDlg.FailCreate(msg.Err)
 			} else {
 				a.trimDlg.Close()
 				a.setFeedback(fmt.Sprintf("Trim created: %s", msg.Filename))
@@ -1046,10 +1054,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Result.TwitchAccepted {
 			a.setupWiz.cookieTWDone = true
 		}
-		a.setupWiz.cookieActive = false
-		a.setupWiz.cookieFinishing = false
-		a.setupWiz.cookiePlatform = ""
-		a.setupWiz.cookieCountdown = 0
+		a.setupWiz.resetCookieFlow()
 		// Four arms where there were three, because acceptance and verification
 		// are different facts and the wizard was rendering only the first.
 		//
@@ -1114,9 +1119,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.setupWiz.IsVisible() && (a.setupWiz.saving || a.setupWiz.cookieFinishing) {
 			a.setupWiz.saving = false
 			a.setupWiz.pendingConfig = nil
-			a.setupWiz.cookieActive = false
-			a.setupWiz.cookieFinishing = false
-			a.setupWiz.cookiePlatform = ""
+			a.setupWiz.resetCookieFlow()
 			a.setupWiz.errorMsg = msg.Text
 		} else {
 			a.setFeedback(msg.Text)
@@ -1289,6 +1292,7 @@ const (
 	pendingGoneElsewhere = "skipped, applied or withdrawn elsewhere"
 	pendingGonePulled    = "a check found it withdrawn"
 	pendingGoneApplied   = "applied, restarting"
+	pendingGoneSkipped   = "skipped"
 )
 
 // followPendingRelease runs wherever a.updateAvailable is cleared or
@@ -1729,58 +1733,14 @@ func (a *App) gapFillFor(job *database.Job) *GapFillView {
 // (textinput, viewport). Called before handleKey so that text editing and
 // viewport scrolling are processed before structural navigation.
 func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
-	if a.settings.IsVisible() {
-		return a.settings.UpdateComponents(msg)
-	}
-	// Help overlay viewport (priority matches handleKey order)
-	if a.help.IsVisible() {
-		return a.help.UpdateViewport(msg)
-	}
-	// Release-notes overlay viewport
-	if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() {
-		return a.releaseNotesPopup.Update(msg)
-	}
-	if a.ffmpegCheck.IsVisible() {
-		return a.ffmpegCheck.UpdateComponents(msg)
-	}
-	if a.setupWiz.IsVisible() {
-		return a.setupWiz.UpdateComponents(msg)
-	}
-	// actionMenu has no embedded components, but it must still block the
-	// fallthrough — otherwise keys pressed while the menu is open also
-	// scroll the hidden logs/details viewport underneath.
-	if a.actionMenu.IsVisible() {
-		return nil
-	}
-	if a.importDlg.IsVisible() {
-		return a.importDlg.UpdateComponents(msg)
-	}
-	if a.cookieImportDlg.IsVisible() {
-		return a.cookieImportDlg.UpdateComponents(msg)
-	}
-	if a.chapterDlg.IsVisible() {
-		return a.chapterDlg.UpdateComponents(msg)
-	}
-	if a.addVideo.IsVisible() {
-		return a.addVideo.UpdateComponents(msg)
-	}
-	if a.trimDlg.IsVisible() {
-		return a.trimDlg.UpdateComponents(msg)
-	}
-	if a.filesDlg.IsVisible() {
-		return a.filesDlg.UpdateComponents(msg)
-	}
-	if a.clientTokensDlg.IsVisible() {
-		return a.clientTokensDlg.UpdateComponents(msg)
-	}
-	if a.ytdlpDlg.IsVisible() {
-		return a.ytdlpDlg.UpdateComponents(msg)
-	}
-	if a.statsDlg.IsVisible() {
-		return a.statsDlg.UpdateComponents(msg)
-	}
-	if a.jobLog.IsVisible() {
-		return a.jobLog.UpdateComponents(msg)
+	// The overlay on top owns the message (the registry order: overlays.go).
+	// One with no components still blocks the fallthrough, so keys pressed
+	// over it never scroll the hidden logs/details viewport underneath.
+	if o := a.activeOverlay(); o != nil {
+		if o.components == nil {
+			return nil
+		}
+		return o.components(a, msg)
 	}
 	// Panel viewports (when no dialog visible)
 	switch a.focusedPanel {

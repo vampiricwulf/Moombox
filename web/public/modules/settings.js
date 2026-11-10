@@ -9,9 +9,7 @@ import {
   channelRemovedToast,
   channelTermsForSave,
   cookieImportRolledBackToast,
-  cookieSetupAbortReport,
   cookieSetupAcceptedToast,
-  cookieSetupProbe,
   cookieSetupRejectedMessage,
   formatRelativeTime,
   needsChannelResolve,
@@ -268,9 +266,6 @@ export class SettingsController {
     /** True when the yt-dlp plugin button reads "Reinstall" (installed,
      *  matching port) — the install call must then force a rewrite. */
     this._ytdlpReinstall = false;
-    /** True while the SERVER is holding a setup slot this controller opened —
-     *  not while the dialog is merely visible. The pagehide beacon reads it. */
-    this._cookieSetupActive = false;
   }
 
   setupListeners() {
@@ -497,44 +492,9 @@ export class SettingsController {
             return;
           }
           const data = await resp.json();
-          // Reuse the existing update-dialog to display the notes
-          const dlg = document.getElementById("update-dialog");
-          const notes = document.getElementById("update-release-notes");
-          if (dlg && notes) {
-            dlg.label = "Release Notes — " + data.tagName;
-            if (data.releaseNotesHtml) {
-              // SECURITY CONTRACT: raw-HTML sink safe ONLY because the server
-              // sanitizes via bluemonday.UGCPolicy() (internal/updater) — see
-              // the matching comment in update-indicator.js's
-              // UpdateController.showUpdateDialog before changing either side.
-              notes.innerHTML = data.releaseNotesHtml;
-            } else {
-              notes.textContent = data.releaseNotes || "No release notes available.";
-            }
-            // Viewer mode: this is just a notes viewer, not the update prompt.
-            // Hide "Update Now", relabel the dismiss button to "Close", and
-            // flag the dialog so update-indicator.js's
-            // UpdateController.dismissUpdate() plain-hides instead
-            // of POSTing /api/update/dismiss (which errors "no update pending"
-            // here, and would wrongly SKIP a version if one were pending).
-            const updateBtn = document.getElementById("update-now-btn");
-            const dismissBtn = document.getElementById("update-dismiss-btn");
-            if (updateBtn) updateBtn.style.display = "none";
-            if (dismissBtn) dismissBtn.textContent = "Close";
-            // Nothing installs from here, so where updates install from is
-            // not this dialog's to say (showUpdateDialog sets it afresh).
-            const remoteNote = document.getElementById("update-remote-note");
-            if (remoteNote) remoteNote.style.display = "none";
-            dlg.dataset.viewerMode = "true";
-            dlg.show();
-            // Restore the update-prompt state when the dialog closes. Text must
-            // match index.html's dismiss button ("Skip this version").
-            dlg.addEventListener("sl-after-hide", () => {
-              if (updateBtn) updateBtn.style.display = "";
-              if (dismissBtn) dismissBtn.textContent = "Skip this version";
-              delete dlg.dataset.viewerMode;
-            }, { once: true });
-          }
+          // The update dialog, as a viewer (UpdateController.showNotesViewer):
+          // it waits for an update prompt open meanwhile to close.
+          this.app.updates.showNotesViewer(data);
         } finally {
           viewNotesBtn.loading = false;
         }
@@ -616,15 +576,10 @@ export class SettingsController {
       setupTwBtn.addEventListener("click", () => this.startAutoCookieSetup("twitch"));
     }
 
-    // Auto-cookie dialog buttons
-    const autoCookieDoneBtn = document.getElementById("btn-auto-cookie-done");
-    if (autoCookieDoneBtn) {
-      autoCookieDoneBtn.addEventListener("click", () => this.finishAutoCookieSetup());
-    }
-    const autoCookieCancelBtn = document.getElementById("btn-auto-cookie-cancel");
-    if (autoCookieCancelBtn) {
-      autoCookieCancelBtn.addEventListener("click", () => this.cancelAutoCookieSetup());
-    }
+    // The cookie-setup dialog's own handlers — Done, Cancel, Escape and the
+    // unload beacon — belong to the shared session (cookie-setup-session.js),
+    // bound once for both controllers, so neither clones the other's away.
+    this.app.cookieSetup.bind();
 
     // Active platform toggles. They only show/hide their platform's setup
     // button — not the full updateAutoCookieUI, whose status reload rebuilds
@@ -648,60 +603,6 @@ export class SettingsController {
       }
     });
 
-    // Tell the server when the tab goes away mid-setup. Nothing did, so closing
-    // the tab left a browser registered server-side and every later setup and
-    // periodic refresh refused ("setup in progress") until something released
-    // the slot. On Windows the server-side reap does that on its own, keyed on
-    // the browser actually being gone; where there is no Job Object to ask —
-    // Linux, Docker — this beacon is the only release there is.
-    //
-    // IT POSTS /abandon, NOT /cancel, AND THE DIFFERENCE IS A BROWSER WINDOW.
-    // Cancel is the user's abort and closes the setup browser; once the Firefox
-    // setup gained a Job Object, that became true on the default Windows path
-    // too. But this flow's own instructions send the user AWAY from this tab —
-    // "a browser window has opened… please sign in" — so closing the now-idle
-    // dashboard tab is an entirely natural thing to do MID-LOGIN, and pointing
-    // this beacon at /cancel made that a remote kill of the window they were
-    // typing their password into. /abandon releases the slot without touching
-    // the browser, and declines even to do that where releasing would itself
-    // close a Job Object. A click is consent; a tab unload is not.
-    //
-    // pagehide, NOT beforeunload, and the difference is not cosmetic: the
-    // beforeunload above can put a "Leave site?" confirm in front of the user,
-    // and a beacon fired from there cancels the setup even when they choose to
-    // stay. pagehide only fires once the page really is going. sendBeacon
-    // survives the unload where fetch does not (player.js does the same for the
-    // resume position); its POST carries an Origin, so it passes CSRF.
-    //
-    // e.persisted is the other half of picking pagehide. It also fires when the
-    // page goes into the back/forward cache — a back navigation, or a phone
-    // backgrounding the tab — and that page is coming BACK. Releasing there
-    // tears down a live setup (on the server host, which in a LAN or Docker
-    // deployment is not even the same machine) and, because the flag is cleared
-    // on the way out, leaves the restored page unable to cancel it: the dialog
-    // is still up, "I'm Logged In" 404s, and nothing can clean up. Skipping the
-    // bfcache case needs no pageshow re-arm precisely because the flag is left
-    // alone.
-    //
-    // visibilitychange, the event usually paired with pagehide for unload
-    // reliability, must NOT be added here for the same reason only louder: the
-    // one thing this flow asks of the user is to switch to the browser window
-    // Moombox just opened, which hides this tab.
-    window.addEventListener("pagehide", (e) => {
-      if (e.persisted) return;
-      if (!this._cookieSetupActive) return;
-      this._cookieSetupActive = false;
-      navigator.sendBeacon("/api/cookies/auto-setup/abandon");
-    });
-
-    // Handle sl-dialog close (Escape/overlay click)
-    const autoCookieDialog = document.getElementById("auto-cookie-setup-dialog");
-    if (autoCookieDialog) {
-      autoCookieDialog.addEventListener("sl-request-close", (e) => {
-        e.preventDefault();
-        this.cancelAutoCookieSetup();
-      });
-    }
   }
 
   showSettingsSection(section) {
@@ -2311,7 +2212,7 @@ export class SettingsController {
     const testBtn = document.getElementById("webhook-test-btn");
     input.value = "";
 
-    // Replace to avoid stacking listeners (consistent with showConfirm/removePassword)
+    // Replace to avoid stacking listeners (as removePassword does)
     const newConfirm = confirmBtn.cloneNode(true);
     confirmBtn.replaceWith(newConfirm);
     // Test button: exercises the UNSAVED dialog value so a bad paste fails
@@ -3200,11 +3101,10 @@ export class SettingsController {
           lastErrorEl.style.display = lastError ? "" : "none";
         }
 
-        // If setup is in progress, show the dialog
-        if (status.setupInProgress) {
-          const dialog = document.getElementById("auto-cookie-setup-dialog");
-          if (dialog && !dialog.open) dialog.show();
-        }
+        // A setup in progress on the server with no owner in this page (a
+        // reload mid-setup, another tab's): the session adopts it, on the
+        // platform the server names, so it can be finished or cancelled.
+        if (status.setupInProgress) this.app.cookieSetup.adopt(status, this._cookieSetupOwner());
       }
     } catch (e) {
       console.error("Failed to load auto-cookie status:", e);
@@ -3260,39 +3160,9 @@ export class SettingsController {
       const data = await response.json();
 
       if (data.success) {
-        // A browser is now open and the server is holding the setup slot. Until
-        // this is cleared, an unload cancels it (see the pagehide beacon).
-        this._cookieSetupActive = true;
-        const dialog = document.getElementById("auto-cookie-setup-dialog");
-        const instructions = document.getElementById("auto-cookie-instructions");
-
-        if (instructions) {
-          if (platform === "twitch") {
-            instructions.textContent = "A browser window has opened to Twitch. Please sign in, then click \"I'm Logged In\".";
-          } else {
-            instructions.textContent = "A browser window has opened to Google. Please sign in to YouTube, then click \"I'm Logged In\".";
-          }
-        }
-
-        if (dialog) {
-          dialog.label = platform === "twitch" ? "Setup: Twitch" : "Setup: YouTube";
-          // Clone done/cancel buttons to clear any stale handlers (e.g., from
-          // setup wizard's startCookieSetup which clones with its own handlers —
-          // without re-cloning here, both setup and settings handlers would fire)
-          const doneBtn = document.getElementById("btn-auto-cookie-done");
-          if (doneBtn) {
-            const newDone = doneBtn.cloneNode(true);
-            doneBtn.replaceWith(newDone);
-            newDone.addEventListener("click", () => this.finishAutoCookieSetup());
-          }
-          const cancelBtn = document.getElementById("btn-auto-cookie-cancel");
-          if (cancelBtn) {
-            const newCancel = cancelBtn.cloneNode(true);
-            cancelBtn.replaceWith(newCancel);
-            newCancel.addEventListener("click", () => this.cancelAutoCookieSetup());
-          }
-          dialog.show();
-        }
+        // A browser is now open and the server is holding the setup slot; the
+        // session owns it and its dialog from here.
+        this.app.cookieSetup.begin(platform, this._cookieSetupOwner());
       } else {
         this.app.showToast(data.error || "Failed to start setup", "danger");
       }
@@ -3303,174 +3173,18 @@ export class SettingsController {
     }
   }
 
-  async finishAutoCookieSetup() {
-    const resultEl = document.getElementById("auto-cookie-setup-result");
-    const doneBtn = document.getElementById("btn-auto-cookie-done");
-    const countdownEl = document.getElementById("auto-cookie-countdown");
-    const timeoutResultEl = document.getElementById("auto-cookie-result");
-    // Which platform this dialog belongs to, from the label
-    // startAutoCookieSetup set. Hoisted out of the abort path, which used to be
-    // the only branch that needed it: the rejected-outcome copy below now
-    // speaks for the platform the user just signed in to.
-    const dialogLabel = document.getElementById("auto-cookie-setup-dialog")?.label || "";
-    const platform = dialogLabel.includes("Twitch") ? "twitch" : "youtube";
-    if (doneBtn) { doneBtn.loading = true; doneBtn.disabled = true; }
-    if (resultEl) {
-      resultEl.textContent = "Extracting cookies...";
-      resultEl.style.color = "";
-    }
-    if (timeoutResultEl) timeoutResultEl.innerHTML = "";
-
-    let remaining = 60;
-    if (countdownEl) {
-      countdownEl.textContent = `${remaining}s remaining`;
-      countdownEl.style.color = "";
-    }
-    const countdownInterval = setInterval(() => {
-      remaining--;
-      if (countdownEl) {
-        countdownEl.textContent = `${remaining}s remaining`;
-        if (remaining <= 10) {
-          countdownEl.style.color = "var(--text-warning)";
-        }
-      }
-      if (remaining <= 0) clearInterval(countdownInterval);
-    }, 1000);
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
-
-    // Baseline for the abort path, dispatched BEFORE the finish so the
-    // lastRefresh comparison there is server clock against server clock and no
-    // browser/server skew can turn an old stamp into a fresh one.
-    //
-    // Deliberately not awaited: it must not add a round trip to the finish, and
-    // only the abort branch ever reads it. cookieSetupProbe never rejects, so
-    // an unread promise cannot surface as an unhandled rejection.
-    const abortBaseline = cookieSetupProbe();
-
-    try {
-      const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST", signal: controller.signal });
-      // Set before the ok check: any ANSWER means FinishSetup reached a
-      // conclusion and released the slot, success or not. Only the abort path
-      // below skips this line, and it must — an abort says nothing about
-      // whether the setup is still live, which is exactly when the Skip button
-      // and the unload beacon still have something to cancel. That path clears
-      // the flag itself, but only once the server has confirmed the slot is
-      // free.
-      this._cookieSetupActive = false;
-      // The finish handler's discriminated errors — 422 for an unreadable
-      // cookies.txt or a broken profile, 409 for a locked cookie DB — used to
-      // reach the user as `HTTP <n>`, which points at none of them.
-      if (!response.ok) throw new Error(await serverErrorMessage(response));
-      const data = await response.json();
-
-      const ytOk = data.authenticated;
-      const twOk = data.twitchAuthenticated;
-
-      if (ytOk || twOk) {
-        if (resultEl) resultEl.textContent = "";
-        const dialog = document.getElementById("auto-cookie-setup-dialog");
-        if (dialog) dialog.hide();
-        // Accepted is not verified — see cookieSetupAcceptedToast. A sign-in
-        // Moombox could not reach the site to confirm was reported here as an
-        // unqualified success, so a user whose network blipped mid-check was
-        // told their cookies were configured with nothing having checked them.
-        if (ytOk) {
-          const toast = cookieSetupAcceptedToast("YouTube", data.youtubeVerification);
-          this.app.showToast(toast.message, toast.variant);
-        }
-        if (twOk) {
-          const toast = cookieSetupAcceptedToast("Twitch", data.twitchVerification);
-          this.app.showToast(toast.message, toast.variant);
-        }
-        this.app.loadStatus();
-      } else {
-        if (resultEl) {
-          // Speaks from the verification fields, not from `data.error`: that
-          // never exists on a 200, so the fallback was the only thing this
-          // branch ever rendered.
-          resultEl.textContent = cookieSetupRejectedMessage(
-            platform === "twitch" ? data.twitchVerification : data.youtubeVerification,
-          );
-          resultEl.style.color = "var(--text-danger)";
-        }
-      }
-    } catch (e) {
-      if (e.name === "AbortError") {
-        if (resultEl) resultEl.textContent = "";
-        // Report what actually happened rather than asserting a timeout. The
-        // server writes the merged cookies.txt and reloads the jar BEFORE it
-        // verifies, so this abort can fire over work that already committed.
-        // The 60 s cap stays as it is — the server-side setup grace window is
-        // priced against that exact number.
-        const probe = await cookieSetupProbe();
-        // Only a definite "no setup here" releases the flag. An unanswered
-        // probe keeps it raised, which is the safe direction: the Skip button
-        // and the unload beacon then still have something to tell the server
-        // about.
-        if (probe.ok && !probe.inProgress) this._cookieSetupActive = false;
-        if (timeoutResultEl) {
-          const report = cookieSetupAbortReport(probe, await abortBaseline);
-          timeoutResultEl.innerHTML = `
-            <sl-alert variant="${report.variant}" open>
-              <sl-icon slot="icon" name="${report.icon}"></sl-icon>
-              ${this.app.escapeHtml(report.message)}
-            </sl-alert>
-            <div style="display: flex; gap: 0.5em; margin-top: 0.75em;">
-              <sl-button variant="primary" size="small" id="cookie-retry-btn">Try Again</sl-button>
-              <sl-button variant="default" size="small" id="cookie-skip-btn">Skip</sl-button>
-            </div>`;
-          document.getElementById("cookie-retry-btn")?.addEventListener("click", () => {
-            timeoutResultEl.innerHTML = "";
-            if (countdownEl) countdownEl.textContent = "";
-            this.startAutoCookieSetup(platform);
-          });
-          // Skip goes through the cancel path. It used to hide() the dialog and
-          // nothing else, which does not fire sl-request-close, so the server
-          // was never told — the setup it is still holding then blocked every
-          // later setup and refresh. cancelAutoCookieSetup hides the dialog and
-          // clears these same two elements itself.
-          document.getElementById("cookie-skip-btn")?.addEventListener("click", () => {
-            this.cancelAutoCookieSetup();
-          });
-        }
-        // The finish may well have committed while we stopped waiting, so the
-        // badges and the panel's own status are both potentially stale.
-        this.app.loadStatus();
-        this.loadAutoCookieStatus();
-        return;
-      }
-      if (resultEl) {
-        resultEl.textContent = "Error: " + e.message;
-        resultEl.style.color = "var(--text-danger)";
-      }
-    } finally {
-      clearInterval(countdownInterval);
-      clearTimeout(timeoutId);
-      if (countdownEl) countdownEl.textContent = "";
-      if (doneBtn) { doneBtn.loading = false; doneBtn.disabled = false; }
-    }
-  }
-
-  async cancelAutoCookieSetup() {
-    this._cookieSetupActive = false;
-    try {
-      await fetch("/api/cookies/auto-setup/cancel", { method: "POST" });
-    } catch {
-      // Ignore
-    }
-    const dialog = document.getElementById("auto-cookie-setup-dialog");
-    if (dialog) dialog.hide();
-    const resultEl = document.getElementById("auto-cookie-setup-result");
-    if (resultEl) {
-      resultEl.textContent = "";
-      resultEl.style.color = "";
-    }
-    const countdownEl = document.getElementById("auto-cookie-countdown");
-    if (countdownEl) countdownEl.textContent = "";
-    const timeoutResultEl = document.getElementById("auto-cookie-result");
-    if (timeoutResultEl) timeoutResultEl.innerHTML = "";
+  // Settings' side of the shared cookie-setup session: an accepted setup
+  // reloads the dashboard's status; an abort, which may have committed,
+  // reloads it and this panel's own; Try Again goes back through this
+  // controller's start (and its remote-viewer guard). The finish, the abort
+  // probe and the cancel are the session's.
+  _cookieSetupOwner() {
+    return {
+      wizard: false,
+      retry: (platform) => this.startAutoCookieSetup(platform),
+      afterAccepted: () => this.app.loadStatus(),
+      afterAbort: () => this.loadAutoCookieStatus(),
+    };
   }
 
   // POST /api/cookies/import — the browser-free re-authentication path.

@@ -2,6 +2,7 @@
  * Moombox Dashboard Application
  */
 import { SetupController } from "./modules/setup.js";
+import { CookieSetupSession } from "./modules/cookie-setup-session.js";
 import { ImportController } from "./modules/imports.js";
 import { PlayerController, focusPlayerSurface } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
@@ -109,6 +110,9 @@ export class MoomboxApp {
     this.theme = storedTheme || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
 
     // Module controllers
+    // The cookie-setup dialog the wizard and Settings share (K33): one
+    // session, bound once, owned by whichever started the setup.
+    this.cookieSetup = new CookieSetupSession(this);
     this.setup = new SetupController(this);
     this.imports = new ImportController(this);
     this.player = new PlayerController(this);
@@ -4075,47 +4079,87 @@ export class MoomboxApp {
   }
 
   /**
-   * Show a themed confirmation dialog. Returns a Promise<boolean>.
+   * Show a themed confirmation dialog. Returns a Promise<boolean> that never
+   * rejects: true for OK, false for Cancel or any other close.
+   *
+   * One dialog, one owner at a time (K34): a call made while a confirm is
+   * open — or still closing — waits its turn and is shown once that one has
+   * been answered and fully hidden (sl-after-hide). It used to replace the
+   * open confirm's text and buttons under the operator's cursor and resolve
+   * the first caller false, silently: a Delete confirm opened during the
+   * Reinitialize preview fetch, or the restart prompt landing over a
+   * leave-settings confirm after a save. Callers re-read their state after
+   * the answer, so one shown late still acts on the job as it stands then.
    * @param {string} message — text to display
    * @param {object} [opts] — { okLabel, okVariant, title }
    */
   showConfirm(message, opts = {}) {
     return new Promise((resolve) => {
-      const dlg = document.getElementById("confirm-dialog");
-      const msg = document.getElementById("confirm-dialog-message");
-      const okBtn = document.getElementById("confirm-dialog-ok");
-      const cancelBtn = document.getElementById("confirm-dialog-cancel");
-
-      dlg.label = opts.title || "Confirm";
-      msg.textContent = message;
-
-      const cleanup = (result) => {
-        dlg.removeEventListener("sl-after-hide", onHide);
-        resolve(result);
-      };
-
-      const onOk = () => { cleanup(true); dlg.hide(); };
-      const onCancel = () => { cleanup(false); dlg.hide(); };
-      const onHide = () => { cleanup(false); };
-
-      // Replace listeners to avoid stacking.
-      // Set properties on the CLONE (not the original) — Lit reactive properties
-      // like `variant` aren't reflected to DOM attributes until the next render
-      // cycle, so cloneNode would copy the stale attribute from the original.
-      const newOk = okBtn.cloneNode(true);
-      okBtn.replaceWith(newOk);
-      newOk.textContent = opts.okLabel || "OK";
-      newOk.variant = opts.okVariant || "primary";
-      newOk.addEventListener("click", onOk);
-
-      const newCancel = cancelBtn.cloneNode(true);
-      cancelBtn.replaceWith(newCancel);
-      newCancel.addEventListener("click", onCancel);
-
-      dlg.addEventListener("sl-after-hide", onHide, { once: true });
-      dlg.show();
+      this._confirmQueue ??= [];
+      this._confirmQueue.push({ message, opts, resolve, answered: false });
+      if (this._confirmQueue.length === 1) this._drawConfirm();
     });
   }
+
+  // Draws the head of the confirm queue. Its buttons and the dialog's hide
+  // are bound once (_bindConfirmDialog) and act on whichever entry is the
+  // head, so nothing is cloned and no listener stacks.
+  _drawConfirm() {
+    const head = this._confirmQueue?.[0];
+    if (!head) return;
+    const dlg = document.getElementById("confirm-dialog");
+    const msg = document.getElementById("confirm-dialog-message");
+    const okBtn = document.getElementById("confirm-dialog-ok");
+    if (!dlg || !msg || !okBtn) {
+      // No dialog to ask in: declined, as a close would be.
+      this._confirmQueue.shift();
+      head.resolve(false);
+      this._drawConfirm();
+      return;
+    }
+    this._bindConfirmDialog(dlg);
+    dlg.label = head.opts.title || "Confirm";
+    msg.textContent = head.message;
+    okBtn.textContent = head.opts.okLabel || "OK";
+    okBtn.variant = head.opts.okVariant || "primary";
+    dlg.show();
+  }
+
+  // The answer for the head, once: OK or Cancel resolve it at once (the
+  // caller goes on while the dialog animates out), any other close resolves
+  // it false on sl-after-hide. The next entry is drawn only on
+  // sl-after-hide — showing during the hide animation would cancel it and
+  // fire a spurious sl-after-hide.
+  _answerConfirm(result) {
+    const head = this._confirmQueue?.[0];
+    if (!head || head.answered) return;
+    head.answered = true;
+    head.resolve(result);
+  }
+
+  _bindConfirmDialog(dlg) {
+    if (this._confirmBound === dlg) return;
+    this._confirmBound = dlg;
+    document.getElementById("confirm-dialog-ok")?.addEventListener("click", () => {
+      if (!this._confirmQueue?.[0] || this._confirmQueue[0].answered) return;
+      this._answerConfirm(true);
+      dlg.hide();
+    });
+    document.getElementById("confirm-dialog-cancel")?.addEventListener("click", () => {
+      if (!this._confirmQueue?.[0] || this._confirmQueue[0].answered) return;
+      this._answerConfirm(false);
+      dlg.hide();
+    });
+    dlg.addEventListener("sl-after-hide", (e) => {
+      // Shoelace's own children bubble their sl-after-hide up through the
+      // dialog; only the dialog's own ends a confirm.
+      if (e.target !== dlg) return;
+      this._answerConfirm(false);
+      this._confirmQueue?.shift();
+      this._drawConfirm();
+    });
+  }
+
 
   showToast(message, variant = "primary") {
     const alert = document.createElement("sl-alert");

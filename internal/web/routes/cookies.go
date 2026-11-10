@@ -1073,8 +1073,8 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 	// all — the same family as the row the trio's gate closes.
 	//
 	// It costs the beacon nothing. sendBeacon fires only from a tab whose
-	// _cookieSetupActive is set (settings.js, setup.js), and only a SUCCESSFUL
-	// /auto-setup/start sets it — so a page with a setup to abandon is, since
+	// CookieSetupSession.holdsSlot() is true (cookie-setup-session.js), and only
+	// a SUCCESSFUL /auto-setup/start makes it so — so a page with a setup to abandon is, since
 	// that endpoint was gated, a loopback page by construction, on Linux and in
 	// Docker as much as on Windows. A LAN beacon has nothing of its own to
 	// release; the only slot it can reach is someone else's.

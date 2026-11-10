@@ -91,7 +91,7 @@ func TestImportRefusalReasonReachesTheDialog(t *testing.T) {
 	a := NewApp()
 	a.width, a.height = 100, 40
 	a.importDlg.SetSize(100, 40)
-	a.importDlg.visible, a.importDlg.step = true, 2
+	a.importDlg.visible, a.importDlg.step = true, importStepImporting
 	reason := "the zip holds more than one recording: A.mp4, B.mp4 — import one recording per zip"
 	a.Update(importAnsweredWith(t, a, http.StatusBadRequest, `{"error":"`+reason+`"}`))
 	if a.importDlg.errorMsg != reason {
