@@ -1,22 +1,104 @@
 package worker
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobstate"
+	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
+
+// offlineResult is processTwitchLive's own answer for a monitor-created job
+// whose channel reads offline: the real offline branch, run against the real
+// Twitch Service with GQL pointed at a local server that answers "no stream"
+// to both liveness samples. The staging the branch reads for footage is
+// stagingBase.
+func offlineResult(t *testing.T, job *database.Job, stagingBase string) *StreamProcessResult {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[{"data":{"user":{"id":"1","login":"streamer","stream":null}}},{"data":{"user":{"stream":null}}}]`)
+	}))
+	defer srv.Close()
+	prevURL, prevDelay := constants.TwitchURLs.GQL, twitchEndConfirmDelay
+	constants.TwitchURLs.GQL, twitchEndConfirmDelay = srv.URL, time.Millisecond
+	defer func() { constants.TwitchURLs.GQL, twitchEndConfirmDelay = prevURL, prevDelay }()
+
+	cfg := config.Defaults()
+	cfg.Paths.StagingDirectory = stagingBase
+	sp := &StreamProcessor{tw: twitch.NewService(cookies.NewCookieJar(), discardLogger{}), cfg: cfg,
+		twitchHints: newTwitchHintCache(), logger: discardLogger{}}
+	res, err := sp.processTwitchLive(context.Background(), job, "streamer")
+	if err != nil {
+		t.Fatalf("processTwitchLive(%s): %v", job.ID, err)
+	}
+	if res == nil || res.ShouldDownload {
+		t.Fatalf("processTwitchLive(%s) = %+v, want the offline refusal", job.ID, res)
+	}
+	return res
+}
 
 // offlineRefusal is the error processJob hands setJobError for a Twitch job
 // whose channel was offline at stream processing: the stream processor's
-// refusal (processTwitchLive's offline branch) through AsError, as the run
-// builds it.
-func offlineRefusal(job *database.Job, stagingBase string) error {
-	msg, reason := twitchOfflineError(job, stagingBase)
-	return (&StreamProcessResult{Error: msg, ParkReason: reason}).AsError()
+// refusal (offlineResult — processTwitchLive's offline branch itself, not a
+// copy of it) through AsError, as the run builds it.
+func offlineRefusal(t *testing.T, job *database.Job, stagingBase string) error {
+	t.Helper()
+	return offlineResult(t, job, stagingBase).AsError()
+}
+
+// TestProcessTwitchLiveOfflineBranchNamesItsParkReason pins the one
+// production writer of the two Twitch-offline park reasons (R-I1):
+// processTwitchLive's offline branch puts the reason on its result beside the
+// frozen text, and through AsError and setJobError the row holds both. With
+// the reason dropped there, every new row would be routed only by the
+// one-release text fallback and lose its recovery, or its open Mux tail, when
+// that fallback goes.
+//
+// Mutants: the branch's result built without ParkReason (both rows read no
+// reason); the reason taken from a constant rather than twitchOfflineError
+// (the staged Downloading row reads twitch_offline).
+func TestProcessTwitchLiveOfflineBranchNamesItsParkReason(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	base := t.TempDir()
+	stageMediaFor(t, base, "tw_staged")
+	for _, tc := range []struct {
+		id     string
+		status database.JobStatus
+		text   string
+		reason database.ParkReason
+	}{
+		{"tw_live", database.StatusLive, database.LegacyTwitchOfflineError, database.ParkReasonTwitchOffline},
+		{"tw_upcoming", database.StatusUpcoming, database.LegacyTwitchOfflineError, database.ParkReasonTwitchOffline},
+		{"tw_staged", database.StatusDownloading, database.LegacyTwitchEndedOfflineError, database.ParkReasonTwitchEndedOffline},
+	} {
+		job := &database.Job{ID: tc.id, VideoID: tc.id[3:], URL: "https://twitch.tv/streamer", Platform: "twitch", Status: tc.status}
+		if _, err := db.AddJob(job); err != nil {
+			t.Fatal(err)
+		}
+		res := offlineResult(t, job, base)
+		if res.Error != tc.text || res.ParkReason != tc.reason {
+			t.Errorf("%s: result = %q / %q, want %q / %q", tc.id, res.Error, res.ParkReason, tc.text, tc.reason)
+		}
+		w.setJobError(job, res.AsError())
+		got, err := db.GetJob(tc.id)
+		if err != nil || got == nil {
+			t.Fatalf("%s: GetJob: %v", tc.id, err)
+		}
+		if got.Status != database.StatusError || got.Error != tc.text || got.ParkReason != tc.reason {
+			t.Errorf("%s: row = %s / %q / %q, want Error / %q / %q", tc.id, got.Status, got.Error, got.ParkReason, tc.text, tc.reason)
+		}
+	}
 }
 
 // TestOfflineRefusalCarriesItsParkReasonAndItsExactText pins the writer's
@@ -42,7 +124,7 @@ func TestOfflineRefusalCarriesItsParkReasonAndItsExactText(t *testing.T) {
 		{"the broadcast ended while offline", &database.Job{ID: "staged", Status: database.StatusDownloading},
 			database.LegacyTwitchEndedOfflineError, database.ParkReasonTwitchEndedOffline},
 	} {
-		err := offlineRefusal(tc.job, base)
+		err := offlineRefusal(t, tc.job, base)
 		if err == nil || err.Error() != tc.text {
 			t.Errorf("%s: error = %v, want exactly %q", tc.name, err, tc.text)
 		}
@@ -108,7 +190,7 @@ func TestSetJobErrorRecordsTheOfflineParkReasonInTheErrorWrite(t *testing.T) {
 		if _, err := db.AddJob(job); err != nil {
 			t.Fatal(err)
 		}
-		w.setJobError(job, offlineRefusal(job, base))
+		w.setJobError(job, offlineRefusal(t, job, base))
 
 		got, err := db.GetJob(tc.id)
 		if err != nil || got == nil {
@@ -158,7 +240,7 @@ func TestOfflineFlapRowIsReinitialisedByItsParkReasonAlone(t *testing.T) {
 	}
 	for attempt := 0; attempt <= jobstate.MaxTwitchAutoRetries; attempt++ {
 		row, _ := db.GetJob(id)
-		w.setJobError(row, offlineRefusal(row, t.TempDir()))
+		w.setJobError(row, offlineRefusal(t, row, t.TempDir()))
 		// The wording changes under the row; the reason is what routes.
 		if db.UpdateJobFields(id, map[string]any{"error": "Twitch says the channel is not live"}) == nil {
 			t.Fatal("the reworded error was not written")
