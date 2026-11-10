@@ -463,3 +463,120 @@ test("the details fetch redraws the row when its answer changes the row's action
   assert.deepEqual([...h.document.querySelectorAll('.video-item[data-job-id="e"] .job-quick-actions sl-icon-button')]
     .map((b) => b.dataset.quickAction), ["resume", "delete"]);
 });
+
+// ── The hidden tab (web-4) ──────────────────────────────────────────────────
+
+/** Make this window's document report hidden or visible. */
+function setHidden(h, hidden) {
+  Object.defineProperty(h.document, "hidden", { configurable: true, get: () => hidden });
+}
+
+/** Count every node added, removed or rewritten under `root`, and attribute writes. */
+function watchDom(h, root) {
+  const records = [];
+  const obs = new h.window.MutationObserver((list) => records.push(...list));
+  obs.observe(root, { subtree: true, childList: true, characterData: true, attributes: true });
+  return { stop() { records.push(...obs.takeRecords()); obs.disconnect(); return records.length; } };
+}
+
+const tickFrame = (id, n, extra = {}) => ({
+  type: "job_progress",
+  payload: { id, status: "Downloading", progress: `V:${n} A:${n} C:${n}`, percent: n, lastVideoSeq: n, ...extra },
+});
+
+// A dashboard left open in a background tab takes ~60 frames a second per
+// active download, and WebSocket messages are not throttled there. The data
+// path must not change: every frame is still merged into the row.
+//
+// MUTANT: no document.hidden branch — the card and the dialog are rewritten
+// for nobody on every frame.
+// MUTANT: `if (document.hidden) break;` ahead of the merge — the rows freeze
+// while hidden, and everything that reads this.jobs goes stale.
+// MUTANT: _repaintAfterHidden never called, or the flag never set — the tab
+// comes back showing the progress it had when it was hidden.
+test("progress frames in a hidden tab update the rows and draw nothing until it shows", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.jobs = [job("a", "AAA", "Downloading", { isVod: true }), job("b", "BBB")];
+  h.app.renderJobs();
+  h.app.selectedJobId = "a";
+  h.app.details.renderJobDetails(h.app.jobs[0]);
+  h.app.handleMessage(tickFrame("a", 1));
+  h.app.handleMessage(tickFrame("b", 1));
+  await h.flush();
+  const cell = (id) => h.document.querySelector(`.video-item[data-job-id="${id}"] .job-progress-text`).textContent;
+  const dialog = () => h.el("job-details-content").querySelector('[data-field="progress"]').textContent;
+  assert.equal(cell("a"), "V:1 A:1 C:1", "visible: a frame reaches the card as it arrives");
+
+  setHidden(h, true);
+  let renders = 0;
+  const realRender = h.app.renderJobs.bind(h.app);
+  h.app.renderJobs = (...a) => { renders++; return realRender(...a); };
+  const watch = watchDom(h, h.document.body);
+  for (let n = 2; n <= 40; n++) {
+    h.app.handleMessage(tickFrame("a", n));
+    h.app.handleMessage(tickFrame("b", n));
+  }
+  assert.equal(watch.stop(), 0, "hidden: 78 frames write nothing to the document");
+  assert.equal(renders, 0);
+  assert.equal(h.app.jobs.find((j) => j.id === "a").progress, "V:40 A:40 C:40", "the row took every frame");
+  assert.equal(h.app.jobs.find((j) => j.id === "b").lastVideoSeq, 40);
+  assert.equal(cell("a"), "V:1 A:1 C:1", "the card waits");
+
+  setHidden(h, false);
+  h.app._repaintAfterHidden();
+  assert.equal(renders, 1, "one repaint when the tab shows");
+  assert.equal(cell("a"), "V:40 A:40 C:40");
+  assert.equal(cell("b"), "V:40 A:40 C:40");
+  assert.match(dialog(), /V:40/, "the open dialog catches up too");
+
+  h.app._repaintAfterHidden();
+  assert.equal(renders, 1, "and only one: nothing was skipped since");
+
+  h.app.handleMessage(tickFrame("a", 41));
+  assert.equal(cell("a"), "V:41 A:41 C:41", "visible again: frames reach the card as they arrive");
+  assert.equal(renders, 1);
+});
+
+// The repaint must leave exactly what the frames would have drawn had the tab
+// been visible throughout.
+test("the list after a hidden spell is the list a visible tab would show", { skip }, async () => {
+  const frames = [];
+  for (let n = 2; n <= 12; n++) frames.push(tickFrame("a", n), tickFrame("b", n * 2));
+  const run = async (hide) => {
+    const h = await harness.makeApp();
+    h.app.jobs = [job("a", "AAA"), job("b", "BBB"), job("q", "QQQ", "Queued")];
+    h.app.renderJobs();
+    h.app.navigateJobList(1);
+    h.document.querySelector('.video-item[data-job-id="b"] .job-checkbox').click();
+    if (hide) setHidden(h, true);
+    for (const f of frames) h.app.handleMessage({ type: f.type, payload: { ...f.payload } });
+    if (hide) { setHidden(h, false); h.app._repaintAfterHidden(); }
+    const snap = tasksSnapshot(h);
+    // The progress bar is compared by its number: updateJobCard creates it
+    // and sets the value property, a render writes it as markup with the
+    // template indentation around it.
+    snap.bars = [...h.document.querySelectorAll(".video-item")].map((c) => {
+      const bar = c.querySelector(".job-progress-bar");
+      return bar ? String(bar.value ?? bar.getAttribute("value")) : "";
+    });
+    snap.html = snap.html.replace(/<sl-progress-bar[^>]*><[/]sl-progress-bar>/g, "");
+    return snap;
+  };
+  assert.deepEqual(await run(true), await run(false));
+});
+
+// MUTANT: the hidden check ahead of the status comparison — a job that
+// finishes while the tab is hidden keeps its old place, and the parked badge
+// and archive boundary wait for the operator to come back.
+test("a status-changing progress frame is handled at once in a hidden tab", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.jobs = [job("a", "AAA"), job("b", "BBB")];
+  h.app.renderJobs();
+  setHidden(h, true);
+
+  h.app.handleMessage({ type: "job_progress", payload: { id: "a", status: "Muxing", progress: "" } });
+
+  assert.deepEqual([...h.document.querySelectorAll(".video-item")].map((e) => e.dataset.jobId), ["b", "a"],
+    "the row moves to its new group");
+  assert.equal(h.document.querySelector('.video-item[data-job-id="a"]').dataset.status, "muxing");
+});

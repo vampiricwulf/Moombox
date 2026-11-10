@@ -182,9 +182,10 @@ export class MoomboxApp {
     this.checkSecurityBanner();
     // 1 Hz UI tick. Skipped entirely while the tab is hidden — the
     // visibilitychange handler at the bottom of this file re-fires both
-    // updates on return so stale strings never show. This is the app's only
-    // always-on DOM work; keeping it silent in the background matters for a
-    // dashboard left open 24/7.
+    // updates on return so stale strings never show. Keeping it silent in
+    // the background matters for a dashboard left open 24/7. The other
+    // always-on DOM work is the job_progress frame's card and dialog update,
+    // which a hidden tab skips the same way (_repaintAfterHidden).
     this._countdownInterval = setInterval(() => {
       if (document.hidden) return;
       this.updateCheckCountdown();
@@ -1500,14 +1501,21 @@ export class MoomboxApp {
           if (!this._moveJobCard(merged)) this.renderJobs();
           this._evaluateArchiveBoundary();
           this._syncParkedBadge();
+          if (this.selectedJobId === merged.id) this.details.updateJobDetails(merged);
+        } else if (document.hidden) {
+          // Nobody can see the card or the dialog, and WebSocket frames are
+          // not throttled in a background tab: the row above is merged on
+          // every frame as always, and the drawing waits for the tab to show
+          // again (_repaintAfterHidden). Only this branch: a status change
+          // re-sorts the list and can cross the archive boundary, so it is
+          // handled when it arrives.
+          this._repaintOnVisible = true;
         } else {
           // Status unchanged, so the status bar's active count (a count of
           // rows by status) cannot have moved: no O(n) recount per tick.
           this.updateJobCard(merged);
-        }
-        // Update details dialog if this job is selected
-        if (this.selectedJobId === merged.id) {
-          this.details.updateJobDetails(merged);
+          // Update details dialog if this job is selected
+          if (this.selectedJobId === merged.id) this.details.updateJobDetails(merged);
         }
         // Nothing else on the fast path: a park is a status change, so
         // _syncParkedBadge() belongs to the branch above, and jobs age by TIME,
@@ -2157,6 +2165,22 @@ export class MoomboxApp {
       }
     });
     this.updateBatchActionBar();
+  }
+
+  /**
+   * The tab is visible again: draw what the progress frames that arrived
+   * while it was hidden changed, once. The rows were merged as the frames
+   * came, so this is one render of the list from this.jobs and one update of
+   * an open details dialog. A no-op when no frame was skipped.
+   */
+  _repaintAfterHidden() {
+    if (!this._repaintOnVisible) return;
+    this._repaintOnVisible = false;
+    this.renderJobs();
+    if (this.selectedJobId) {
+      const job = this.jobs.find((j) => j.id === this.selectedJobId);
+      if (job) this.details.updateJobDetails(job);
+    }
   }
 
   /**
@@ -4685,6 +4709,9 @@ document.addEventListener("visibilitychange", () => {
   // The 1 Hz UI tick early-returns while hidden; refresh immediately on
   // return so relative timestamps / countdowns never show stale strings.
   if (!document.hidden && window.app?._initialized) {
+    // First: the cards the skipped progress frames changed, so the
+    // timestamp refresh below runs over the cards that stay.
+    window.app._repaintAfterHidden();
     window.app.updateCheckCountdown();
     window.app.refreshRelativeTimestamps();
   }
