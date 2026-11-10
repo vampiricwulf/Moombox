@@ -792,6 +792,18 @@ export class JobDetailsController {
             <span class="details-value">Live</span>
           </div>
           ${segmentInfo}
+          ${
+            // A live capture being muxed: its line is the mux readout
+            // ("Muxing 42%", owner ruling R-D1), which the VOD arm above
+            // shows and the TUI's details pane shows for every Muxing row.
+            // A status change rebuilds the dialog, so the row comes and goes
+            // with Muxing; updateJobDetails patches its text.
+            job.status === "Muxing" ? `
+          <div class="details-row">
+            <span class="details-label">Progress:</span>
+            <span class="details-value" data-field="progress">${this.app.escapeHtml(this.app.formatProgress(job))}</span>
+          </div>` : ""
+          }
           `
           }
           <div class="details-row" id="speed-row" style="${job.speed ? "" : "display:none"}">
