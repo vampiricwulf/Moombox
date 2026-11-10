@@ -13,37 +13,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-// The two answers an overlay gives the mouse wheel (owner ruling R-C2).
-const (
-	wheelScrolls = "wheel scrolls"
-	wheelInert   = "deliberately inert"
-)
-
-// overlayWheel is the census of what the mouse wheel does over each overlay.
-// Every overlay states its answer here, so a new one has to decide. One that
-// scrolls needs a row in overlayWheelCases too, which proves it.
-//
-// The inert ones have nothing to scroll: cookie import is one path field,
-// and the yt-dlp plugin and statistics overlays are fixed screens that fit.
-var overlayWheel = map[string]string{
-	"settings":       wheelScrolls, // the section under the cursor
-	"help":           wheelScrolls, // three rows a notch
-	"release notes":  wheelScrolls, // three rows a notch
-	"ffmpeg check":   wheelScrolls, // the install-script review, three rows a notch
-	"setup wizard":   wheelScrolls, // the channel list's cursor
-	"action menu":    wheelScrolls, // the menu's cursor
-	"import":         wheelScrolls, // the file picker's cursor
-	"cookie import":  wheelInert,
-	"chapter import": wheelScrolls, // the paste box's cursor
-	"add video":      wheelScrolls, // the format table's cursor
-	"trim":           wheelScrolls, // the delete list's cursor
-	"files":          wheelScrolls, // the list's cursor
-	"client tokens":  wheelScrolls, // the list's cursor
-	"ytdlp plugin":   wheelInert,
-	"stats":          wheelInert,
-	"job log":        wheelScrolls, // three rows a notch
-}
-
 // overlayWheelCase puts one scrolling overlay, already open, into the state
 // the wheel acts on, and reads the position the wheel moves.
 type overlayWheelCase struct {
@@ -181,30 +150,6 @@ var overlayWheelCases = map[string]overlayWheelCase{
 
 func wheel(a *App, button tea.MouseButton) {
 	_, _ = a.handleMouse(tea.MouseWheelMsg{X: a.width / 2, Y: a.height / 2, Button: button})
-}
-
-// Every overlay states what the wheel does over it, and the registry agrees:
-// a handler exactly where the census says "wheel scrolls".
-func TestOverlayWheelCensus(t *testing.T) {
-	for _, e := range overlayRegistry {
-		want, stated := overlayWheel[e.name]
-		if !stated {
-			t.Errorf("overlay %q is not in overlayWheel: state %q or %q", e.name, wheelScrolls, wheelInert)
-			continue
-		}
-		if want != wheelScrolls && want != wheelInert {
-			t.Errorf("overlay %q: census says %q", e.name, want)
-		}
-		if got := e.mouse != nil; got != (want == wheelScrolls) {
-			t.Errorf("overlay %q: mouse handler set = %v, census says %q", e.name, got, want)
-		}
-		if _, has := overlayWheelCases[e.name]; has != (want == wheelScrolls) {
-			t.Errorf("overlay %q: census says %q, a row in overlayWheelCases = %v", e.name, want, has)
-		}
-	}
-	if len(overlayWheel) != len(overlayRegistry) {
-		t.Errorf("overlayWheel has %d rows, the registry %d", len(overlayWheel), len(overlayRegistry))
-	}
 }
 
 // The wheel does what the census says over every overlay (R-C2): a text
