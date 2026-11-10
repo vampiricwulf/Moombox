@@ -37,7 +37,7 @@ go build -o Moombox.exe ./cmd/moombox
 
 With version info (release builds):
 ```bash
-go build -ldflags "-s -w -X main.version=2.7.0 -X main.commit=$(git rev-parse --short HEAD)" -o Moombox.exe ./cmd/moombox
+go build -ldflags "-s -w -X main.version=X.Y.Z -X main.commit=$(git rev-parse --short HEAD)" -o Moombox.exe ./cmd/moombox
 ```
 
 ### Linux x64 (cross-compile or native)
