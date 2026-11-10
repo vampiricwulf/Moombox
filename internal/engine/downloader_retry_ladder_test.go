@@ -75,11 +75,19 @@ func TestFetchSegmentWithRetryClimbsTheWholeLadder(t *testing.T) {
 // Five failures end in ErrSegmentRetriesExhausted, and no wait follows the
 // last attempt: the ladder sleeps 1+2+3+4 units, never the fifth rung's 5.
 //
-// Mutant: the `attempt < MaxRetries-1` guard removed — the call takes 15
-// units and the ceiling fails.
+// The one interval measured is from the fifth request's arrival to the
+// call's return: nothing but the answer without a trailing sleep, at least 5
+// units with one. The ladder's own length is the test above's.
+//
+// Mutant: the `attempt < MaxRetries-1` guard removed — the call returns 5
+// units after its last request and the ceiling fails.
 func TestFetchSegmentWithRetryExhaustedWithoutATrailingSleep(t *testing.T) {
-	const unit = 150 * time.Millisecond
-	srv, n := countingServer(t, func(_ int32, w http.ResponseWriter) {
+	const unit = 100 * time.Millisecond
+	var lastRequest atomic.Int64 // UnixNano of the fifth request's arrival
+	srv, n := countingServer(t, func(n int32, w http.ResponseWriter) {
+		if n == 5 {
+			lastRequest.Store(time.Now().UnixNano())
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 	d := ladderDownloader(t, unit)
@@ -90,9 +98,8 @@ func TestFetchSegmentWithRetryExhaustedWithoutATrailingSleep(t *testing.T) {
 		}
 	}
 
-	start := time.Now()
 	_, err := d.fetchSegmentWithRetry(t.Context(), srv.URL+"/seg", nil)
-	elapsed := time.Since(start)
+	returned := time.Now()
 
 	if !errors.Is(err, ErrSegmentRetriesExhausted) {
 		t.Fatalf("err = %v, want ErrSegmentRetriesExhausted", err)
@@ -103,11 +110,8 @@ func TestFetchSegmentWithRetryExhaustedWithoutATrailingSleep(t *testing.T) {
 	if retrying != 5 {
 		t.Errorf("ActivityRetrying emitted %d times, want once per failed attempt (5)", retrying)
 	}
-	if elapsed < 10*unit {
-		t.Errorf("returned after %v, want at least 10 units (%v)", elapsed, 10*unit)
-	}
-	if elapsed >= 14*unit {
-		t.Errorf("returned after %v: a sleep followed the final attempt (10 units = %v without it, 15 with)", elapsed, 10*unit)
+	if after := returned.Sub(time.Unix(0, lastRequest.Load())); after >= 4*unit {
+		t.Errorf("returned %v after the final attempt's request: a sleep followed it (%v with one)", after, 5*unit)
 	}
 }
 
