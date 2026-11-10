@@ -175,6 +175,8 @@ function tasksSnapshot(h) {
     order: cards.map((c) => c.dataset.jobId),
     focusedJobIndex: h.app.focusedJobIndex,
     focusedCards: cards.filter((c) => c.hasAttribute("data-focused")).map((c) => c.dataset.jobId),
+    tabStops: cards.filter((c) => c.getAttribute("tabindex") === "0").map((c) => c.dataset.jobId),
+    domFocus: h.document.activeElement?.classList?.contains("video-item") ? h.document.activeElement.dataset.jobId : null,
     selected: [...h.app._selectedTaskJobs].sort(),
     ticked: cards.filter((c) => c.querySelector(".job-checkbox").checked).map((c) => c.dataset.jobId),
     highlighted: cards.filter((c) => c.classList.contains("selected")).map((c) => c.dataset.jobId),
@@ -579,4 +581,158 @@ test("a status-changing progress frame is handled at once in a hidden tab", { sk
   assert.deepEqual([...h.document.querySelectorAll(".video-item")].map((e) => e.dataset.jobId), ["b", "a"],
     "the row moves to its new group");
   assert.equal(h.document.querySelector('.video-item[data-job-id="a"]').dataset.status, "muxing");
+});
+
+// ── Fix round ───────────────────────────────────────────────────────────────
+
+// A row with no thumbnail source draws no <img>, and updateJobCard cannot
+// add one. A full rebuild used to repair that on any row's status change.
+//
+// MUTANT: _cardShape without the thumbnail part — the row stays without a
+// picture until its own status or sort key changes.
+test("a same-status update that brings a thumbnail draws the card with its picture", { skip }, async () => {
+  const h = await harness.makeApp();
+  const bare = { platform: "twitch", channelAvatarUrl: "", thumbnailUrl: "" };
+  h.app.jobs = [job("a", "AAA"), job("t", "TTT", "Live", bare)];
+  h.app.renderJobs();
+  const img = () => h.document.querySelector('.video-item[data-job-id="t"] .thumb img');
+  assert.equal(img(), null, "precondition: a Twitch row with no avatar and no thumbnail draws no <img>");
+
+  h.app.handleMessage({ type: "job_update", payload: job("t", "TTT", "Live", { ...bare, thumbnailUrl: "https://example.test/live.jpg" }) });
+  assert.ok(img(), "the card never gained its picture");
+  assert.match(img().getAttribute("src"), /live\.jpg$/);
+
+  // And the other way: a picture that is already there is patched in place.
+  let items = 0;
+  const realItem = h.app.renderJobItem.bind(h.app);
+  h.app.renderJobItem = (...a) => { items++; return realItem(...a); };
+  h.app.handleMessage({ type: "job_update", payload: job("t", "TTT", "Live", { ...bare, thumbnailUrl: "https://example.test/live2.jpg" }) });
+  assert.equal(items, 0, "a new URL for an existing picture does not need the card drawn again");
+  assert.match(img().getAttribute("src"), /live2\.jpg$/);
+});
+
+// hide_finished_age_days = 0: every job that finishes is moved to the
+// archive at once. That used to cost a rebuild of the whole Tasks list per
+// finished job, which is what a backlog drain is made of.
+//
+// MUTANT: _evaluateArchiveBoundary calls renderJobs() again.
+test("with archive-at-once, a job that finishes costs one card and no rebuild", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.hideFinishedAgeDays = 0;
+  h.app.jobs = [job("a", "AAA"), job("b", "BBB"), job("c", "CCC")];
+  h.app.renderJobs();
+  h.app.navigateJobList(1);
+  h.app.navigateJobList(1); // "b"
+  h.document.querySelector('.video-item[data-job-id="b"] .job-checkbox').click();
+  h.document.querySelector('.video-item[data-job-id="c"] .job-checkbox').click();
+  const untouched = h.document.querySelector('.video-item[data-job-id="c"]');
+  let renders = 0;
+  const realRender = h.app.renderJobs.bind(h.app);
+  h.app.renderJobs = (...a) => { renders++; return realRender(...a); };
+
+  h.app.handleMessage({ type: "job_update", payload: job("b", "BBB", "Finished") });
+
+  assert.equal(renders, 0, "a finished job rebuilt the whole list");
+  assert.deepEqual([...h.document.querySelectorAll("#jobs-container .video-item")].map((e) => e.dataset.jobId), ["a", "c"]);
+  assert.equal(h.document.querySelector('.video-item[data-job-id="c"]'), untouched);
+  assert.deepEqual(h.app.archivedJobs.map((j) => j.id), ["b"]);
+  assert.deepEqual([...h.app._selectedTaskJobs], ["c"], "the archived row stayed in the Tasks selection");
+  assert.equal(h.app.focusedJobIndex, -1, "the focus stayed on a row that left");
+  assert.equal(h.el("active-indicator").textContent, "▶ 2");
+});
+
+// The same differential as above, with every Finished row leaving for the
+// archive as it finishes.
+test("with archive-at-once the single-card paths still leave what a rebuild leaves", { skip }, async () => {
+  const { initial, events } = eventStream(260, 99);
+  const run = async (h) => {
+    h.app.hideFinishedAgeDays = 0;
+    h.app.jobs = initial.map((j) => ({ ...j }));
+    h.app._evaluateArchiveBoundary({ silent: true });
+    h.app.renderJobs();
+    let rebuilds = 0;
+    const realRender = h.app.renderJobs.bind(h.app);
+    h.app.renderJobs = (...a) => { rebuilds++; return realRender(...a); };
+    const shots = events.map((ev) => {
+      applyEvent(h, ev);
+      return { ...tasksSnapshot(h), archived: h.app.archivedJobs.map((j) => j.id).sort() };
+    });
+    return { shots, rebuilds };
+  };
+  const fast = await run(await harness.makeApp());
+  const full = await run(await rebuildOnlyApp());
+  assert.ok(fast.shots.some((s) => s.archived.length > 0), "the stream never archived a row");
+  events.forEach((ev, i) => {
+    assert.deepEqual(fast.shots[i], full.shots[i], `event ${i} (${JSON.stringify(ev)}): the list must be what a rebuild draws`);
+  });
+  assert.equal(fast.rebuilds, 0, "an archived row cost a rebuild of the list");
+});
+
+// MUTANT: the status-changing job_progress branch loses its
+// updateJobDetails — the open dialog keeps the old status and buttons until
+// the job_update that follows (which, having seen no change, may patch less).
+test("a status-changing progress frame reaches the open details dialog, visible or hidden", { skip }, async () => {
+  for (const hidden of [false, true]) {
+    const h = await harness.makeApp();
+    h.app.jobs = [job("a", "AAA"), job("b", "BBB")];
+    h.app.renderJobs();
+    h.app.selectedJobId = "a";
+    const seen = [];
+    h.app.details.updateJobDetails = (row) => seen.push(row);
+    setHidden(h, hidden);
+
+    h.app.handleMessage({ type: "job_progress", payload: { id: "a", status: "Muxing", progress: "Muxing 10%" } });
+
+    assert.equal(seen.length, 1, `hidden=${hidden}: the dialog was not told`);
+    assert.equal(seen[0], h.app.jobs.find((j) => j.id === "a"), "the dialog must get the merged row");
+    assert.equal(seen[0].status, "Muxing");
+    assert.equal(seen[0].title, "AAA", "the merged row keeps what the frame does not carry");
+
+    h.app.handleMessage({ type: "job_progress", payload: { id: "b", status: "Muxing", progress: "" } });
+    assert.equal(seen.length, 1, "another job's frame is not the dialog's");
+    setHidden(h, false);
+  }
+});
+
+// ── Rows take real focus (web-7, step two) ──────────────────────────────────
+
+const taskCards = (h) => [...h.el("jobs-container").querySelectorAll(".video-item")];
+const taskTabStops = (h) => taskCards(h).filter((c) => c.getAttribute("tabindex") === "0").map((c) => c.dataset.jobId);
+
+// MUTANT: _insertJobCard, _detachJobCard or _moveJobCard skips
+// _syncRowTabStop — two tab stops, or none, until the next rebuild.
+// MUTANT: _moveJobCard does not give the focus back — a status change on
+// the focused row drops the keyboard to the page.
+test("one Tasks row is a tab stop through inserts, moves and deletes, and focus follows a moved row", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.jobs = [job("b", "BBB"), job("c", "CCC"), job("q", "QQQ", "Queued")];
+  h.app.renderJobs();
+  assert.deepEqual(taskTabStops(h), ["b"], "with no highlight the first row is the tab stop");
+  assert.ok(taskCards(h).every((c) => c.hasAttribute("tabindex")));
+
+  h.app.handleMessage({ type: "job_update", payload: job("a", "AAA") });
+  assert.deepEqual(taskTabStops(h), ["a"], "a row inserted above took over as the first row");
+
+  h.app.navigateJobList(1);
+  h.app.navigateJobList(1); // "b"
+  assert.deepEqual(taskTabStops(h), ["b"]);
+  assert.equal(h.document.activeElement?.dataset.jobId, "b", "Arrow did not move the focus");
+
+  h.app.handleMessage({ type: "job_update", payload: job("b", "BBB", "Queued") });
+  assert.deepEqual(taskCards(h).map((c) => c.dataset.jobId), ["a", "c", "b", "q"]);
+  assert.deepEqual(taskTabStops(h), ["b"]);
+  assert.equal(h.document.activeElement?.dataset.jobId, "b", "the focus did not follow the row that moved");
+
+  h.app.handleMessage({ type: "job_deleted", payload: { id: "b" } });
+  assert.deepEqual(taskTabStops(h), ["a"], "the highlighted row left: the first row is the tab stop");
+
+  // Tab (or a click) onto a row makes it the highlighted row.
+  taskCards(h)[1].focus();
+  assert.equal(h.app.focusedJobIndex, 1);
+  assert.deepEqual(taskTabStops(h), ["c"]);
+  const opened = [];
+  h.app.details.showJobDetails = (row) => opened.push(row.id);
+  taskCards(h)[1].dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, composed: true }));
+  taskCards(h)[1].dispatchEvent(new h.window.KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true, composed: true }));
+  assert.deepEqual(opened, ["c", "c"], "Enter and Space on the row each open it once");
 });

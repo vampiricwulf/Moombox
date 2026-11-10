@@ -352,6 +352,14 @@ proxy_set_header Connection "upgrade";
 Without them the page loads but stays empty, and after a few attempts the
 Tasks tab says "Live updates cannot connect".
 
+If the proxy already forwards upgrades and the notice still shows, look in
+the Moombox log for `websocket upgrade rejected: origin refused`. Moombox
+refuses a WebSocket whose `Origin` (the address in the browser) does not
+match the host it sees. Set `public_url` to the address browsers type, or
+have the proxy pass the original `Host` (nginx: `proxy_set_header Host $http_host;`),
+or send `X-Forwarded-Host`, which Moombox reads only from a proxy listed in
+`trusted_proxies`.
+
 The address to declare is the one **Moombox actually sees**, which is not
 always the proxy's own IP:
 

@@ -160,3 +160,50 @@ test("a stale probe does not count as a refusal", { skip }, async () => {
   await refuse(h);
   assert.equal(noticeShown(h), true, "the third counted refusal did not show the notice");
 });
+
+// The hub also refuses an upgrade whose Origin does not match the host it
+// sees (a proxy that rewrites Host with no public_url): the same symptom, and
+// the upgrade lines do not fix it. The notice gives that next step.
+test("the notice names the second cause and where to look", { skip }, async () => {
+  const h = await harness.makeApp();
+  for (let i = 0; i < 3; i++) await refuse(h);
+  const text = notice(h).textContent.replace(/\s+/g, " ");
+  assert.match(text, /websocket upgrade rejected/, "the log line to look for");
+  assert.match(text, /public_url/);
+  assert.match(text, /Origin/);
+});
+
+// The notice is the content of a status region that is always rendered: a
+// region that is itself revealed is not reliably announced, and an sl-alert
+// inside one is a second live region.
+test("the notice is content of an always-rendered status region", { skip }, async () => {
+  const h = await harness.makeApp();
+  const region = notice(h).parentElement;
+  assert.equal(region.getAttribute("role"), "status");
+  assert.equal(region.hidden, false);
+  assert.equal(notice(h).getAttribute("role"), null);
+  assert.equal(notice(h).querySelector("sl-alert"), null);
+  assert.equal(notice(h).closest("[role=table]"), null, "a notice inside the jobs table is not a row of it");
+});
+
+// Typing in the filter renders the list. With no frame ever received there
+// is no list: the page must not say "No jobs yet" beside "cannot connect".
+// MUTANT: renderJobs without the notice check.
+test("a render while the notice shows draws no empty state and keeps the skeleton for the first open", { skip }, async () => {
+  const h = await harness.makeApp();
+  for (let i = 0; i < 3; i++) await refuse(h);
+  assert.equal(noticeShown(h), true);
+
+  h.app.renderJobs();
+  assert.equal(h.el("empty-state").style.display, "none", "the page says both that it cannot connect and that there are no jobs");
+  assert.ok(h.el("jobs-skeleton"), "the skeleton is gone before any frame");
+
+  const ws = lastSocket(h);
+  ws.readyState = 1;
+  ws.onopen();
+  ws.onmessage({ data: JSON.stringify({ type: "initial_state", payload: { jobs: [] } }) });
+  await h.flush();
+  assert.equal(noticeShown(h), false);
+  assert.equal(h.el("jobs-skeleton"), null);
+  assert.equal(h.el("empty-state").style.display, "flex", "an empty list must say so once a frame has arrived");
+});

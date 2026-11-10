@@ -246,3 +246,180 @@ test("Arrow keys on Archived leave the Tasks focus alone", { skip }, async () =>
   assert.equal(h.app.focusedJobIndex, 0);
   assert.ok(h.el("jobs-container").querySelector(".video-item[data-focused]"), "the Tasks highlight was cleared");
 });
+
+// ── Fix round: the fetch notices ────────────────────────────────────────────
+
+// Loading is the NEWEST fetch being unanswered, not any fetch being out.
+// MUTANT: isLoading from _archivedInFlight > 0 — the newer fetch fails while
+// the older is still out, the loading line hides the failure, and the older
+// answer is dropped without a redraw: "Loading…" for ever, with no Retry.
+test("overlapping first fetches: the newer one's failure shows, whatever the older one does later", { skip }, async () => {
+  const first = gate();
+  let n = 0;
+  const h = await open({
+    "GET /api/jobs/archived": () => (++n === 1 ? first.p.then(() => rows(2)) : harness.response({ status: 500 })),
+  });
+  const slow = h.app.fetchArchivedJobs();
+  await h.app.fetchArchivedJobs();
+  assert.ok(shown(h.el("archived-fetch-error")), "the newest fetch failed and nothing says so");
+  assert.ok(!shown(h.el("archived-loading")), "the loading line hides the failure");
+  first.release();
+  await slow;
+  assert.ok(shown(h.el("archived-fetch-error")), "a dropped older answer changed the notices");
+  assert.ok(!shown(h.el("archived-loading")));
+  assert.ok(!shown(h.el("archived-empty-state")));
+});
+
+// MUTANT: no notice sync when a fetch starts — Retry looks dead until the
+// answer lands.
+test("Retry shows busy while its fetch is out, with the held list still drawn", { skip }, async () => {
+  let mode = "ok";
+  const g = gate();
+  const h = await open({
+    "GET /api/jobs/archived": () => {
+      if (mode === "ok") return rows(3);
+      if (mode === "fail") return harness.response({ status: 500 });
+      return g.p.then(() => harness.response({ status: 500 }));
+    },
+  });
+  await h.app.fetchArchivedJobs();
+  mode = "fail";
+  await h.app.fetchArchivedJobs();
+  const retry = h.el("archived-retry");
+  assert.ok(shown(h.el("archived-fetch-error")));
+  assert.ok(!retry.loading, "Retry is busy with no fetch out");
+
+  mode = "slow";
+  retry.click();
+  await h.flush();
+  assert.equal(retry.loading, true, "Retry gives no sign that it is working");
+  assert.ok(shown(h.el("archived-fetch-error")), "the notice left before the answer");
+  assert.equal(cards(h).length, 3);
+  g.release();
+  await h.flush(); await h.flush(); await h.flush();
+  assert.ok(!retry.loading, "Retry stayed busy after a second failure");
+  assert.ok(shown(h.el("archived-fetch-error")));
+});
+
+// The failure line sits in an alert region: writing the same text again is
+// announced again.
+// MUTANT: textContent assigned on every render.
+test("a redraw does not rewrite the failure line", { skip }, async () => {
+  let fail = false;
+  const h = await open({
+    "GET /api/jobs/archived": () => (fail ? harness.response({ status: 500 }) : rows(3)),
+  });
+  await h.app.fetchArchivedJobs();
+  fail = true;
+  await h.app.fetchArchivedJobs();
+  const text = h.el("archived-fetch-error-text");
+  const node = text.firstChild;
+  assert.match(text.textContent, /Could not refresh/);
+  h.app.renderArchivedJobs();
+  h.app.handleMessage({ type: "job_deleted", payload: { id: "a2" } });
+  assert.equal(text.firstChild, node, "the alert text was written again");
+});
+
+test("the fetch notices are content of live regions that are always rendered", { skip }, async () => {
+  const h = await open();
+  for (const [id, role] of [["archived-fetch-error", "alert"], ["archived-loading", "status"]]) {
+    const el = h.el(id);
+    assert.equal(el.getAttribute("role"), null, `#${id} is itself the live region`);
+    const region = el.parentElement;
+    assert.equal(region.getAttribute("role"), role);
+    assert.equal(region.style.display, "", `the ${role} region is hidden with its content`);
+    assert.equal(region.hidden, false);
+  }
+  assert.equal(h.el("archived-more-count").getAttribute("aria-live"), "polite");
+  assert.equal(h.el("batch-count").getAttribute("aria-label"), null, "a label hides the count's own text");
+});
+
+// MUTANT: redraw only when _archivedRenderDirty — 400 cards stay on screen
+// while Arrow and Enter already walk the first 200.
+test("opening the tab again draws the newest 200 before the fetch answers", { skip }, async () => {
+  const g = gate();
+  let n = 0;
+  const h = await open({ "GET /api/jobs/archived": () => (++n === 1 ? rows(450) : g.p.then(() => rows(450))) });
+  await h.app.fetchArchivedJobs();
+  h.el("archived-show-more").click();
+  assert.equal(cards(h).length, 400);
+  const tabs = h.document.querySelector("sl-tab-group");
+  tabs.dispatchEvent(new h.window.CustomEvent("sl-tab-show", { detail: { name: "tasks" } }));
+  tabs.dispatchEvent(new h.window.CustomEvent("sl-tab-show", { detail: { name: "archived" } }));
+  assert.equal(n, 2, "the visit did not refetch");
+  assert.equal(cards(h).length, 200, "the cards wait for the fetch while the keys walk 200 rows");
+  assert.match(h.el("archived-more-count").textContent, /Showing 200 of 450/);
+  g.release();
+  await h.flush(); await h.flush(); await h.flush();
+  assert.equal(cards(h).length, 200);
+});
+
+// ── Fix round: rows take real focus (web-7, step two) ───────────────────────
+
+const tabStops = (h) => cards(h).filter((c) => c.getAttribute("tabindex") === "0").map((c) => c.dataset.jobId);
+
+// MUTANT: no tabindex on the row — Tab never reaches "open details".
+// MUTANT: every row tabindex 0 — Tab walks 200 rows to leave the list.
+test("one Archived row is a tab stop: the first, then the highlighted one", { skip }, async () => {
+  const h = await open({ "GET /api/jobs/archived": () => rows(4) });
+  await h.app.fetchArchivedJobs();
+  assert.deepEqual(tabStops(h), ["a0"]);
+  assert.ok(cards(h).every((c) => c.hasAttribute("tabindex")), "a row that cannot take focus");
+
+  key(h, "ArrowDown");
+  key(h, "ArrowDown");
+  assert.deepEqual(tabStops(h), ["a1"]);
+  assert.equal(h.document.activeElement, cards(h)[1], "Arrow moved the highlight and left the focus behind");
+
+  // A redraw keeps the tab stop and the focus on the row.
+  h.app.renderArchivedJobs();
+  assert.deepEqual(tabStops(h), ["a1"]);
+  assert.equal(h.document.activeElement?.dataset.jobId, "a1", "a redraw dropped the focus to the page");
+
+  // The highlighted row leaves: the first row is the tab stop again.
+  h.app.handleMessage({ type: "job_deleted", payload: { id: "a1" } });
+  assert.deepEqual(tabStops(h), ["a0"]);
+});
+
+// MUTANT: no focusin handler — Tab lands on a row, the highlight stays on
+// another, and Enter opens the wrong one.
+test("a row that takes focus is the highlighted row; Enter and Space open it once", { skip }, async () => {
+  const h = await open({ "GET /api/jobs/archived": () => rows(3) });
+  await h.app.fetchArchivedJobs();
+  const opened = [];
+  h.app.details.showJobDetails = (job) => opened.push(job.id);
+  key(h, "ArrowDown"); // a0
+
+  cards(h)[2].focus();
+  assert.deepEqual(cards(h).filter((c) => c.hasAttribute("data-focused")).map((c) => c.dataset.jobId), ["a2"]);
+  assert.deepEqual(tabStops(h), ["a2"]);
+
+  key(h, "Enter", cards(h)[2]);
+  assert.deepEqual(opened, ["a2"], "Enter on the row must open it exactly once");
+  const space = new h.window.KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true, composed: true });
+  cards(h)[2].dispatchEvent(space);
+  assert.deepEqual(opened, ["a2", "a2"], "Space on the row opens it");
+  assert.equal(space.defaultPrevented, true, "Space on the row also scrolled the page");
+
+  // Space on a control inside the row is the control's.
+  key(h, " ", cards(h)[2].querySelector(".job-checkbox"));
+  key(h, " ");
+  assert.deepEqual(opened, ["a2", "a2"]);
+
+  key(h, "ArrowUp");
+  assert.equal(h.app.focusedArchivedIndex, 1, "Arrow did not go on from the row that took focus");
+});
+
+// MUTANT: no focus move when Show more hides — the keyboard is left on the page.
+test("Show more that draws the last page moves focus to the first new row", { skip }, async () => {
+  const h = await open({ "GET /api/jobs/archived": () => rows(450) });
+  await h.app.fetchArchivedJobs();
+  const more = h.el("archived-show-more");
+  more.click();
+  assert.ok(shown(h.el("archived-more")), "200 more of 450 leaves a page to show");
+  assert.notEqual(h.document.activeElement?.dataset?.jobId, "a200", "focus moved while the button is still there");
+  more.click();
+  assert.ok(!shown(h.el("archived-more")));
+  assert.equal(h.document.activeElement?.dataset.jobId, "a400");
+  assert.match(h.el("archived-more-count").textContent, /Showing 450 of 450/);
+});

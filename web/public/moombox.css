@@ -1196,8 +1196,28 @@ sl-dialog::part(footer) {
 }
 
 #jobs-ws-notice {
-    grid-column: 1 / -1;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--sl-spacing-small);
     margin: var(--sl-spacing-small) 0;
+    padding: var(--sl-spacing-medium);
+    border: 1px solid var(--sl-color-neutral-300);
+    border-top: 3px solid var(--sl-color-warning-600);
+    border-radius: var(--sl-border-radius-medium);
+    background: var(--sl-panel-background-color);
+    color: var(--sl-color-neutral-800);
+    font-size: var(--sl-font-size-small);
+    line-height: var(--sl-line-height-normal);
+}
+
+#jobs-ws-notice[hidden] {
+    display: none;
+}
+
+#jobs-ws-notice > sl-icon {
+    flex: none;
+    font-size: var(--sl-font-size-large);
+    color: var(--sl-color-warning-600);
 }
 
 .skeleton-row {
@@ -3065,7 +3085,9 @@ sl-progress-bar {
 .job-quick-actions sl-icon-button[data-quick-action="reinitialize"]:active,
 .job-quick-actions sl-icon-button[data-quick-action="reinitialize"]:focus-visible { color: var(--sl-color-success-600); }
 
-/* Keyboard focus indicator */
+/* Keyboard focus indicator. A focused row is the highlighted row (app.js
+   _highlightRow), so the two selectors draw one outline. */
+.video-item:focus-visible,
 .video-item[data-focused] {
     outline: 2px solid var(--sl-color-primary-500);
     outline-offset: -2px;
