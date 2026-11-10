@@ -2346,8 +2346,12 @@ func parkReasonForError(err error) database.ParkReason {
 // output dir: %w" and "no segment files found in staging directory". The
 // "mux" prefix also keeps "mux segment N:" on the mux side, whatever that
 // wraps. The first four reach setJobError unwrapped — ExecuteWithChat returns
-// the finalize error straight through — so the prefix survives. Everything
-// else is the download stage.
+// the finalize error straight through — so the prefix survives. The split
+// finalize's two are listed so the answer is right if one ever arrives; today
+// neither does. Every caller of muxSegment logs "create segment output dir"
+// and carries on, and the staging-directory message is written by the Mux
+// verb's own failure write, which sends no Job Failed embed. Everything else
+// is the download stage.
 //
 // No line numbers here on purpose: an earlier draft carried them and every one
 // had already drifted by the end of the arc. The citation gate does not read
