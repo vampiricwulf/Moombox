@@ -1,0 +1,86 @@
+package database
+
+import (
+	"path/filepath"
+	"testing"
+)
+
+// TestOpenBackfillsTwitchOfflineParkReasons pins the boot backfill (owner
+// ruling R-I1): an Error row an earlier release wrote with one of the two
+// Twitch-offline error texts and no park_reason is given the matching reason
+// when the database is opened, at the same schema version, and nothing else
+// on any row moves.
+//
+// Mutants: the backfill not run on Open (the two legacy rows stay unmarked); the
+// status filter dropped (the Cancelled and Muxing rows that still carry the
+// text are marked); the empty-park_reason filter dropped (the row another
+// reason claimed is rewritten); a LIKE in place of the exact match (the
+// reworded row is marked); the two reasons crossed.
+func TestOpenBackfillsTwitchOfflineParkReasons(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	rows := []struct {
+		id     string
+		status JobStatus
+		errMsg string
+		reason ParkReason
+		want   ParkReason
+	}{
+		{"flap", StatusError, LegacyTwitchOfflineError, ParkReasonNone, ParkReasonTwitchOffline},
+		{"ended", StatusError, LegacyTwitchEndedOfflineError, ParkReasonNone, ParkReasonTwitchEndedOffline},
+		{"other", StatusError, "twitch HLS: 500", ParkReasonNone, ParkReasonNone},
+		{"reworded", StatusError, LegacyTwitchOfflineError + " (again)", ParkReasonNone, ParkReasonNone},
+		{"claimed", StatusError, LegacyTwitchEndedOfflineError, ParkReasonMuxAfterCancel, ParkReasonMuxAfterCancel},
+		{"unconfirmed", StatusError, "twitch HLS: 500", ParkReasonTwitchEndUnconfirmed, ParkReasonTwitchEndUnconfirmed},
+		{"cancelled", StatusCancelled, LegacyTwitchEndedOfflineError, ParkReasonNone, ParkReasonNone},
+		{"muxing", StatusMuxing, LegacyTwitchEndedOfflineError, ParkReasonNone, ParkReasonNone},
+		{"parked", StatusCookies, LegacyTwitchOfflineError, ParkReasonNone, ParkReasonNone},
+		{"already", StatusError, LegacyTwitchOfflineError, ParkReasonTwitchOffline, ParkReasonTwitchOffline},
+	}
+	updated := map[string]string{}
+	for _, r := range rows {
+		if _, err := db.AddJob(&Job{ID: r.id, VideoID: r.id, Platform: "twitch", Status: StatusUpcoming}); err != nil {
+			t.Fatalf("AddJob %s: %v", r.id, err)
+		}
+		// Written as an earlier release's rows are on disk: raw, so the
+		// row's updated_at is known not to move with the backfill.
+		if _, err := db.db.Exec(`UPDATE jobs SET status = ?, error = ?, park_reason = ?, updated_at = ? WHERE id = ?`,
+			r.status, r.errMsg, r.reason, "2026-01-02T03:04:05Z", r.id); err != nil {
+			t.Fatalf("seed %s: %v", r.id, err)
+		}
+		updated[r.id] = "2026-01-02T03:04:05Z"
+	}
+	db.Close()
+
+	for pass := 1; pass <= 2; pass++ { // idempotent: every boot runs it
+		db, err = Open(dbPath)
+		if err != nil {
+			t.Fatalf("reopen %d: %v", pass, err)
+		}
+		if v, err := db.readUserVersion(); err != nil || v != schemaVersion {
+			t.Fatalf("pass %d: user_version = %d (%v), want %d: the backfill carries no schema bump", pass, v, err, schemaVersion)
+		}
+		for _, r := range rows {
+			job, err := db.GetJob(r.id)
+			if err != nil || job == nil {
+				t.Fatalf("pass %d: GetJob %s: %v", pass, r.id, err)
+			}
+			if job.ParkReason != r.want {
+				t.Errorf("pass %d: %s: park_reason = %q, want %q", pass, r.id, job.ParkReason, r.want)
+			}
+			if job.Status != r.status || job.Error != r.errMsg || job.UpdatedAt != updated[r.id] {
+				t.Errorf("pass %d: %s: the backfill moved more than park_reason: status %q error %q updated_at %q",
+					pass, r.id, job.Status, job.Error, job.UpdatedAt)
+			}
+		}
+		// The end-unconfirmed sweep selects by its own reason alone.
+		jobs, err := db.TwitchEndUnconfirmedJobs()
+		if err != nil || len(jobs) != 1 || jobs[0].ID != "unconfirmed" {
+			t.Errorf("pass %d: TwitchEndUnconfirmedJobs = %v (%v), want the one end-unconfirmed row", pass, jobs, err)
+		}
+		db.Close()
+	}
+}

@@ -801,6 +801,9 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	// Data only, no version: see the function for why it runs on every Open.
+	db.backfillTwitchOfflineParkReasons()
+
 	return nil
 }
 

@@ -22,9 +22,10 @@ const (
 )
 
 // ParkReason records WHY a job was parked at StatusCookies (ParkReasonAuth,
-// ParkReasonMembership, or the legacy ParkReasonNone) — and, for three cases,
+// ParkReasonMembership, or the legacy ParkReasonNone) — and, for five cases,
 // why it stopped in StatusError: ParkReasonTwitchEndUnconfirmed,
-// ParkReasonTwitchUnreachable and ParkReasonMuxAfterCancel are the only
+// ParkReasonTwitchUnreachable, ParkReasonMuxAfterCancel,
+// ParkReasonTwitchOffline and ParkReasonTwitchEndedOffline are the only
 // values an Error row carries, and no COOKIES? row carries them. For the
 // COOKIES? values the status alone says "credentials are the fix", which is
 // true for each of them — but it does not say WHICH credentials, and the
@@ -59,7 +60,7 @@ const (
 	// genuine change of account identity resumes them.
 	ParkReasonMembership ParkReason = "membership"
 
-	// ParkReasonTwitchEndUnconfirmed is the first of the three ERROR-row reasons
+	// ParkReasonTwitchEndUnconfirmed is the first of the five ERROR-row reasons
 	// (owner decision D-T4): a live Twitch download failed while nothing said
 	// its broadcast was over, so the job stopped in Error with its staging and
 	// resume sidecar kept (ExecuteTwitch's unconfirmed-end latch). It is what
@@ -76,7 +77,7 @@ const (
 	// Twitch live job's stream processing never reached Twitch — a transport
 	// failure, on a network the connectivity monitor says is up (one it calls
 	// an outage is waited out instead, and the job never stops). Like the
-	// offline flap's TwitchOfflineErrMsg, it is what lets the Twitch monitor
+	// offline flap's ParkReasonTwitchOffline, it is what lets the Twitch monitor
 	// re-initialise the job when it finds the same broadcast live again
 	// (jobstate.TwitchAutoRetryPending → AutoReinitializeJob), within the same retry
 	// budget and only while no segment was downloaded. Written by setJobError
@@ -95,6 +96,47 @@ const (
 	// Reinitialize clears it with every other park_reason, which is what ends
 	// the Cancel's close. Read by twitchMuxTailOpen alone.
 	ParkReasonMuxAfterCancel ParkReason = "mux_after_cancel"
+
+	// ParkReasonTwitchOffline is the fourth ERROR-row reason (owner ruling
+	// R-I1): a monitor-created Twitch live job found its channel offline at
+	// stream processing — the offline flap, Twitch's stream info answering
+	// "not live" for a broadcast the monitor had just seen. Like
+	// ParkReasonTwitchUnreachable, it is what lets the Twitch monitor
+	// re-initialise the job when it finds the same broadcast live again
+	// (jobstate.TwitchAutoRetryPending → AutoReinitializeJob), within the
+	// same retry budget and only while no segment was downloaded. Written by
+	// setJobError from the reason the stream processor names beside the
+	// error (worker twitchOfflineError), never inferred from the text; the
+	// re-initialisation clears it. Rows from before the reason existed
+	// carried the text alone (LegacyTwitchOfflineError): Open backfills
+	// them, and the reader accepts the bare text for one release.
+	ParkReasonTwitchOffline ParkReason = "twitch_offline"
+
+	// ParkReasonTwitchEndedOffline is the fifth ERROR-row reason (owner
+	// ruling R-I1): a Twitch capture interrupted mid-broadcast (a Downloading
+	// row with footage in staging, re-enqueued at boot) found its channel
+	// offline — the broadcast ended while Moombox was down. Nothing automatic
+	// follows: the operator's Mux turns the staged footage into the archive,
+	// and the marker is what keeps that Mux's gap-fill tail open
+	// (worker twitchMuxTailOpen), since the capture never saw the broadcast's
+	// end. Written and backfilled as ParkReasonTwitchOffline is
+	// (LegacyTwitchEndedOfflineError); the Mux clears it with every other
+	// park_reason once it has read it.
+	ParkReasonTwitchEndedOffline ParkReason = "twitch_ended_offline"
+)
+
+// The two Twitch-offline errors as rows carried them before their park
+// reasons existed (owner ruling R-I1), when the text alone routed the
+// monitor's recovery and the Mux's gap-fill tail. Frozen: these are the bytes
+// on disk in rows an earlier release wrote, which the boot backfill
+// (backfillTwitchOfflineParkReasons) and the one-release reader fallbacks
+// (jobstate legacyOfflineFlapRow, worker legacyEndedOfflineRow) match — they
+// do not follow a later rewording of the text the worker writes today
+// (jobstate.TwitchOfflineErrMsg, worker twitchEndedOfflineErrMsg), which
+// routes nothing any more.
+const (
+	LegacyTwitchOfflineError      = "twitch channel is offline"
+	LegacyTwitchEndedOfflineError = "stream ended while Moombox was offline — captured data can be muxed via the Mux action"
 )
 
 // ChatStatus is a job's chat_status: the lifecycle of its chat capture, the
@@ -252,7 +294,7 @@ type Job struct {
 	// pre-v16 legacy rows and must never be relied on.
 	ChannelID     *string `json:"channelId,omitempty"`
 	QueuePriority int     `json:"queuePriority,omitempty"`
-	// ParkReason is why the job stopped at StatusCookies, or — for the three
+	// ParkReason is why the job stopped at StatusCookies, or — for the five
 	// Error-row values — in StatusError (see the ParkReason doc comment).
 	// setJobError and the park paths write it (ParkReasonNone for a failure
 	// with no reason to record), and the un-park and restart paths clear it.
