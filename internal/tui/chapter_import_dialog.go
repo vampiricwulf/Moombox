@@ -95,6 +95,9 @@ type ChapterImportDialogModel struct {
 	prefill    bool
 	previewErr string
 	saveErr    string
+	// previewTop is the first preview row drawn: the wheel moves it when the
+	// preview has more rows than fit (WheelPreview). Clamped where it is read.
+	previewTop int
 	// saves numbers the saves this overlay started, so a save's result is
 	// matched to the save the overlay waits for and to no other: one closed
 	// with Esc keeps running, and its late answer must not close, or show
@@ -147,6 +150,7 @@ func (m *ChapterImportDialogModel) Open(job *database.Job) tea.Cmd {
 	m.jobID, m.title = job.ID, job.Title
 	m.step = chapterImportStepEdit
 	m.view, m.previewErr, m.saveErr = nil, "", ""
+	m.previewTop = 0
 	m.text.SetValue("")
 	m.offset.SetValue("")
 	m.focusOffset = false
@@ -326,19 +330,7 @@ func (m *ChapterImportDialogModel) View() string {
 	}
 	b.WriteString("\n")
 
-	// The rows the preview may take: what is left of the box below the
-	// fields, its own headings and the key line — shared with the current
-	// chapters' list below when both are drawn.
-	rowsLeft := max(boxH-m.text.Height()-12, 3)
-	previewDrawn := m.previewErr == "" && m.view != nil && m.text.Value() != "" && m.view.Error == ""
-	currentRows := 0
-	if m.view != nil && len(m.view.Current) > 0 {
-		currentRows = rowsLeft
-		if previewDrawn {
-			currentRows = max(rowsLeft/2, 3)
-			rowsLeft = max(rowsLeft-currentRows, 3)
-		}
-	}
+	rowsLeft, currentRows := m.listRows()
 	switch {
 	case m.previewErr != "":
 		b.WriteString(ErrorStyle.Render(m.previewErr))
@@ -360,8 +352,12 @@ func (m *ChapterImportDialogModel) View() string {
 			// "offset -1:23:45", where it read "-5025s".
 			b.WriteString(DimStyle.Render("  (offset " + utils.FormatChapterOffset(int64(math.Round(m.view.OffsetSeconds*1000))) + ")"))
 		}
+		top := min(m.previewTop, m.previewMaxTop())
+		if top > 0 {
+			b.WriteString(DimStyle.Render(fmt.Sprintf("  ↑ %d earlier", top)))
+		}
 		b.WriteString("\n")
-		b.WriteString(m.renderRows(m.view.Chapters, rowsLeft, contentW))
+		b.WriteString(m.renderRows(m.view.Chapters[top:], rowsLeft, contentW))
 	}
 	if m.view != nil {
 		b.WriteString(DimStyle.Render(fmt.Sprintf("Current: %d chapters — replaced on save", len(m.view.Current))))
@@ -402,6 +398,68 @@ func (m *ChapterImportDialogModel) View() string {
 		Height(boxH).
 		Render(b.String())
 	return centerBox(box, m.width, m.height)
+}
+
+// previewDrawn reports whether the parsed preview's rows are on screen.
+func (m *ChapterImportDialogModel) previewDrawn() bool {
+	return m.previewErr == "" && m.view != nil && m.text.Value() != "" && m.view.Error == ""
+}
+
+// listRows is how many rows the preview and the current chapters' list may
+// take: what is left of the box below the fields, its own headings and the
+// key line, shared between the two when both are drawn.
+func (m *ChapterImportDialogModel) listRows() (preview, current int) {
+	preview = max(max(m.height-4, 16)-m.text.Height()-12, 3)
+	if m.view != nil && len(m.view.Current) > 0 {
+		current = preview
+		if m.previewDrawn() {
+			current = max(preview/2, 3)
+			preview = max(preview-current, 3)
+		}
+	}
+	return preview, current
+}
+
+// previewMaxTop is the furthest the preview scrolls: its last rows fill the
+// space. 0 when the preview is not drawn or fits.
+func (m *ChapterImportDialogModel) previewMaxTop() int {
+	if !m.previewDrawn() {
+		return 0
+	}
+	rows, _ := m.listRows()
+	return max(len(m.view.Chapters)-rows, 0)
+}
+
+// pasteBottom is the screen row of the paste box's last line. The box's top
+// border is the first row of the drawn overlay that is not blank (the box
+// grows past its set height when its content needs it, so the row is read
+// from the frame); under it come the title, the job's title and a blank line.
+func (m *ChapterImportDialogModel) pasteBottom() int {
+	top := 0
+	for i, l := range strings.Split(m.View(), "\n") {
+		if strings.TrimSpace(l) != "" {
+			top = i
+			break
+		}
+	}
+	return top + 3 + m.text.Height()
+}
+
+// WheelPreview is a wheel notch with the pointer at screen row y: below the
+// paste box, while the preview has more rows than fit, it scrolls the
+// preview one row (owner ruling R-C2) and reports true. Anywhere else, and
+// while the preview fits, it reports false and the notch is the paste
+// box's. The arrow keys stay the paste box's either way.
+func (m *ChapterImportDialogModel) WheelPreview(y, dir int) bool {
+	if !m.visible || m.step == chapterImportStepSaving || y <= m.pasteBottom() {
+		return false
+	}
+	maxTop := m.previewMaxTop()
+	if maxTop == 0 {
+		return false
+	}
+	m.previewTop = min(max(min(m.previewTop, maxTop)+dir, 0), maxTop)
+	return true
 }
 
 // renderRows lists chapters "start  title", at most limit rows (the rest
@@ -510,4 +568,10 @@ func (a *App) handleChapterSaveResult(msg chapterSaveResultMsg) (tea.Model, tea.
 		a.setFeedback(line)
 	}
 	return a, nil
+}
+
+// wheelMovesPaste reports whether a wheel notch moves through the paste box:
+// the dialog is being edited and the paste box, not the offset, has focus.
+func (m *ChapterImportDialogModel) wheelMovesPaste() bool {
+	return m.visible && m.step == chapterImportStepEdit && !m.focusOffset
 }

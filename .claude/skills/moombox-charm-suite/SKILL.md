@@ -75,7 +75,7 @@ func (m *SomeOverlay) View() string       { if !m.visible { return "" }; ... }
 **Critical: `UpdateComponents(msg tea.Msg) tea.Cmd`** — Overlays with interactive sub-components (textinput, table, viewport, spinner) implement this method. App calls it from `routeComponentMsg()` to delegate focus, key handling, and ticks to embedded Charm components.
 
 **Adding an overlay — the registry is the only place it is routed from (K23).** `handleKey`, `handleMouse`, `View`, `routeComponentMsg` and `hasActiveOverlay` all take the first visible entry of `overlayRegistry` (`internal/tui/overlays.go`); an overlay missing from it never receives a key, a click or a frame. Three steps:
-1. An `overlayEntry` in `overlayRegistry` at the priority it should have (`visible`, `view`, `components`, `key`, and `mouse` or nil to swallow the mouse).
+1. An `overlayEntry` in `overlayRegistry` at the priority it should have (`visible`, `view`, `components`, `key`, and `mouse` or nil to swallow the mouse). An overlay with anything to scroll takes the wheel (owner ruling R-C2): three rows a notch for text (`mouseHelp`), one cursor row for a list or table (`wheelAsArrow` in `internal/tui/app_mouse.go`, which delivers the notch as the Up or Down key and takes a predicate saying a list is on screen); clicks stay inert unless the overlay already handles them. State the answer in `overlayWheel` (`internal/tui/overlay_order_test.go`), with a row in `overlayWheelCases` (`internal/tui/overlay_wheel_test.go`) when it scrolls. The 8 ms progress tick idles at 500 ms under an overlay; set `liveProgress` only if the overlay draws progress that tick delivers (the trim dialog), and add its row to `overlayLiveProgress` in `internal/tui/overlay_order_test.go` either way. Give it a `title` (the name the operator reads on the notice that covers it below 60x20) and, unless its Esc closes it from every state, a `heldEsc` func (`internal/tui/overlay_held.go`) saying what Esc does under that notice right now: closes, steps back, or off (never delivered: an Esc that would quit, or raise or answer a prompt nobody can see). State its answer in `heldEscBase` (`internal/tui/app_compact_test.go`).
 2. Its key handler (`func (a *App) keyX(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cmd)`) in `internal/tui/overlay_keys.go` — Ctrl+C is checked ahead of every overlay in `handleKey`, so the handler never sees it.
 3. A row in `overlayCases` (`internal/tui/overlay_order_test.go`) at the same position, which opens the overlay; the order, view/key and mouse-parity tests and the Ctrl+C census iterate it.
 
@@ -90,11 +90,13 @@ type ActionMenuItem struct {
     NeedsJob     bool                     // if true, opens job selector first
     NeedsConfirm bool                     // if true, requires 3rd keypress within 3s
     JobFilter    func(*database.Job) bool // conditional visibility based on job state
+    Opens        string                   // overlayRegistry name of the overlay it opens, "" for none
 }
 ```
 Adding a new chord:
-1. Add `ActionMenuItem` entry in `buildMenuItems()`
+1. Add `ActionMenuItem` entry in `buildMenuItems()`. If the action opens an overlay, name it in `Opens`: below 60x20 the action is then refused instead of opening something that cannot be drawn.
 2. Add case in `dispatchAction(chord, job)`
+3. Classify it in `chordCompact` (`internal/tui/app_compact_test.go`): "works" or "refused" in the compact layout.
 
 That's it. Hints, help screen, action menu, and chord feedback all derive from `buildMenuItems()` automatically.
 
@@ -131,6 +133,17 @@ Three-panel layout with dynamic sizing based on `FocusPanel` (Tasks, Details, Lo
 - Focused panel gets more space (70/25 height split, 45/55 or 35/65 width split)
 - `PanelRegion` provides mouse hit-testing with `Contains()` and `ContentY()` for click detection
 
+### Layouts by Terminal Size
+The size alone picks one of three layouts, through one predicate: `layoutModeFor(width, height)` / `App.layoutMode()` in `internal/tui/app_compact.go`. It is derived on every call. Never store the answer, and never write a second size comparison: `View`, `handleKey`, `handleMouse` and the tick gating all ask it.
+
+- **Normal** (60x20 and up): the three panels and every overlay.
+- **Compact** (below that, down to 30x6): the task list filling the screen, one line a job (`internal/tui/task_list_compact.go`: status tag, title, figure), then a rule, a one-line status bar (`compactStatusLine`) and the feedback line, which wraps upward over them while its message needs more than one row (`compactFeedbackRows`). It is a second drawing of the same models, with no state of its own. Navigation, selection, the `/` filter and the chords that open no overlay work; an action whose `ActionMenuItem.Opens` is set, and the `M` key, are refused on the feedback line (`refuseOverlay`, `refusedForSize`).
+- **Too small** (below 30x6): a notice; only Ctrl+C works.
+
+An overlay already open below 60x20 is kept under a notice, which names it and says what Esc does; it gets its own Esc only where `App.heldEscFor` says that Esc closes it or steps back. `App.screenHeld()` says a notice has replaced the screen: check it before delivering any new kind of input (keys, mouse and paste already do).
+
+When you add something the task list draws, draw it (or decide to leave it out) in `renderCompactJob` too. When you add a warning to the status bar, check it reaches `StatusBarModel.alerts()`, which the compact status line shows. `internal/tui/app_compact_test.go` has the size table, the golden frames at 40x10 and 30x6, and the cached-against-fresh frame comparison.
+
 ### Panel Render Caches
 The task list, job details, log viewer and status bar memoise `View()`: each returns its stored `renderCache` while a freshly built key struct (`taskListKey`, `jobDetailsKey`, `logViewerKey`, `statusBarKey`) equals the one the frame was drawn for. The frame is asked for ~120 times a second and most messages change nothing a panel draws.
 
@@ -139,7 +152,8 @@ The task list, job details, log viewer and status bar memoise `View()`: each ret
 When you add state a panel draws (a header badge, a row tag, a new status-bar segment):
 1. Add it to the key struct, or route its writer through the funnel.
 2. Add a row to the matching table in `internal/tui/render_cache_test.go` — `TestTaskListCachedFramesMatchFreshFrames`, `TestJobDetailsCachedFramesMatchFreshFrames`, or `TestStatusBarCacheKeyCoversEveryInput` (one row per key field). Each compares the cached frame with a fresh one after the mutation.
-3. Run `go test -run 'Cache|FrameCost' ./internal/tui/`. `TestFrameCostAtLogCap` (`internal/tui/frame_cost_test.go`) pins the allocations of an unchanged frame; `go test -run '^$' -bench 'AtLogCap' -benchmem ./internal/tui/` shows the timings.
+3. State that `App.View` itself reads on its panel path (not inside a panel: a banner, the feedback line) goes in `frameKey` (`internal/tui/frame_compose.go`), which memoises the whole composed screen, with a row in `TestFrameMemoFollowsEveryInput` (`internal/tui/frame_compose_test.go`). The composer's output must stay byte-identical to the lipgloss joins; the tests in that file compare them.
+4. Run `go test -run 'Cache|FrameCost|Compose|FrameMemo' ./internal/tui/`. `TestFrameCostAtLogCap` (`internal/tui/frame_cost_test.go`) pins the allocations and bytes of an unchanged frame; `go test -run '^$' -bench 'AtLogCap' -benchmem ./internal/tui/` shows the timings.
 
 Details: `docs/spec/user-interfaces.md` § Panel Render Caches.
 

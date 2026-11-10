@@ -541,6 +541,8 @@ The TUI uses Charmbracelet's full suite: bubbletea for the Elm architecture, bub
 - **JobDetails** (top right) — Selected job's metadata, progress, segment counts, file info.
 - **Logs** (bottom, full width) — Real-time log output, 250ms batched flush, scrollable viewport.
 
+**Terminal size:** the panels and the overlays need 60 columns × 20 rows. Below that, down to 30 × 6, the TUI draws a compact layout of the same models: the task list filling the screen, one line a job (a four-letter status tag, the title, and a percent, elapsed time or countdown), then a rule, a one-line status bar and the feedback line (which wraps upward, to at most half the terminal, when a message needs more rows). Navigation, selection, the `/` filter and the chords that open no overlay work there, confirms included; an action that opens an overlay is refused on the feedback line, and an overlay already open is kept under a notice until the terminal grows back. Below 30 × 6 the screen is a "Terminal too small" notice and only `Ctrl+C` works. One predicate, `layoutModeFor` (`internal/tui/app_compact.go`), decides the layout from the size for the view, the keys and the mouse alike.
+
 **Overlays (14):** Action Menu, Help, Add Video, Import, Cookie Import, Trim, Orphaned Files & History, Client Tokens, yt-dlp Plugin, Statistics, Settings, Setup Wizard, FFmpeg Check, Release Notes.
 
 ### Chord System

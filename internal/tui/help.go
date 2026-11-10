@@ -67,7 +67,7 @@ var mouseKeys = helpSection{
 	title: "Mouse",
 	keys: []helpKey{
 		{"Click", "Select task / focus panel"},
-		{"Scroll", "Scroll the panel under the cursor"},
+		{"Scroll", "Scroll the panel under the cursor, or the overlay on top"},
 	},
 }
 
@@ -284,4 +284,17 @@ func (m *HelpModel) orderedSections() []helpSection {
 	// Static sections
 	sections = append(sections, quickKeys, navigationKeys, mouseKeys)
 	return sections
+}
+
+// Scroll moves the help text n rows (negative is up): the mouse wheel's
+// route, three rows a notch (mouseHelp).
+func (m *HelpModel) Scroll(n int) {
+	if !m.visible {
+		return
+	}
+	if n < 0 {
+		m.viewport.ScrollUp(-n)
+	} else {
+		m.viewport.ScrollDown(n)
+	}
 }

@@ -537,7 +537,7 @@ See [BUILDING.md](BUILDING.md) for prerequisites and build commands for Windows,
 
 ## Terminal UI
 
-The TUI displays a three-panel layout: task list + job details (top) and live log viewer (bottom). Tab switches focus between panels — the focused panel expands to take more space. A terminal narrower than 60 columns or shorter than 20 rows shows a "Terminal too small" message instead of the panels.
+The TUI displays a three-panel layout: task list + job details (top) and live log viewer (bottom). Tab switches focus between panels — the focused panel expands to take more space. A terminal narrower than 60 columns or shorter than 20 rows shows a compact layout instead of the panels: the task list filling the screen, one line per job (a status tag such as `DOWN`, `LIVE` or `DONE`, the title, and a percent, elapsed time or countdown), with a one-line status bar and the feedback line under it (a long message wraps upward over the list). Navigation, selection, the `/` filter and the job chords (with their confirms) work there; anything that opens a dialog (Help, Settings, Add Video, the action menu, ...) answers "Enlarge the terminal to 60x20 for this". A dialog that is open when the terminal shrinks is kept and comes back when it grows. Below 30 columns or 6 rows the screen shows "Terminal too small" and only Ctrl+C works.
 
 ### Keyboard Controls
 
@@ -609,7 +609,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | ? | Toggle help overlay |
 | c | Clear log view (log panel focused) |
 
-**Navigation**: Up/Down to select/scroll, PgUp/PgDn to page (Tasks, Details, Logs, Job Log), Home/End to jump to the first/last task (End also resumes auto-scroll in Logs and the Job Log), Ctrl+U/Ctrl+D for a half page (Details, Logs, Job Log), Space to select a task for batch actions, Enter to expand/collapse archives. Mouse support: click to select tasks, scroll wheel to navigate.
+**Navigation**: Up/Down to select/scroll, PgUp/PgDn to page (Tasks, Details, Logs, Job Log), Home/End to jump to the first/last task (End also resumes auto-scroll in Logs and the Job Log), Ctrl+U/Ctrl+D for a half page (Details, Logs, Job Log), Space to select a task for batch actions, Enter to expand/collapse archives. Mouse support: click to select tasks, scroll wheel to navigate — in the panels and in every overlay with something to scroll (Help, release notes, lists and tables).
 
 ### Add Video Dialog
 
@@ -634,7 +634,7 @@ Available at `http://localhost:774` (auto-upgrades to HTTPS for external access)
 - **Imports tab** — Upload `.zip` archives holding one recording each (a video, or a split recording's `<name> - partN` parts) + optional chat JSON named after it, for playback in the Player tab. YouTube and Moombox Twitch archives are both recognised; re-importing an archive whose files are still in `output/imports/` re-adopts identical files and never overwrites a different one
 - **Stats tab** — Disk usage, archive size, platform breakdown, job counts, and recent activity
 - **Logs tab** — Live log viewer
-- **Settings** — General config, downloader settings, channel management (YouTube + Twitch), webhook notifications, password security, yt-dlp plugin installation, and auto-cookie setup
+- **Settings** — General config, downloader settings, channel management (YouTube + Twitch; drag a channel to reorder it on the dashboard, Shift+Up/Down in the TUI), webhook notifications, password security, yt-dlp plugin installation, and auto-cookie setup
 
 ### API
 

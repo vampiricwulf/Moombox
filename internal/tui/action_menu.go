@@ -49,6 +49,14 @@ type ActionMenuItem struct {
 	// read the disk: it runs once, when the confirm is armed, never when
 	// the menu opens (CORE-9).
 	ConfirmDetail func(jobIDs []string) string
+
+	// Opens names the overlay this action puts on screen, by its
+	// overlayRegistry name ("" for an action that opens none). It is the one
+	// statement of "does this action open an overlay": below the normal
+	// layout such an action is refused (App.refusedForSize, owner ruling
+	// R-C5). TestEveryChordOpensWhatItSaysItOpens runs every chord and
+	// compares the overlay that opened with this field.
+	Opens string
 }
 
 // menuActionItem is a list.Item for the main action menu.

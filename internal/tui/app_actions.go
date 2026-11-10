@@ -146,6 +146,12 @@ func clipboardFeedback(url string, sentViaOSC52 bool) string {
 // dispatchAction executes a chord action. For job-specific actions, job comes from
 // the selected task (keyboard chords) or from the menu's job picker (menu flow).
 func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cmd) {
+	// Below the normal layout an action that opens an overlay is refused on
+	// the feedback line (owner ruling R-C5). Every way to an action passes
+	// here: the chords, the single keys and the action menu.
+	if a.refusedForSize(chord) {
+		return a, nil
+	}
 	switch chord {
 	case "A A":
 		a.clearFeedback()
@@ -649,20 +655,43 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 
 // chordFeedback builds contextual feedback for a chord prefix.
 // It derives available options from buildMenuItems() using HintLabel.
+//
+// In the compact layout a hint too long for the feedback rows there
+// (compactFeedbackRows) is given as its keys alone, "Request: B C F V M U S
+// P (3s)": Help and the action menu are refused in that layout, so the hint
+// is the one list of the working keys, and all of them must be on screen.
 func (a *App) chordFeedback(prefix string) string {
+	hint, _ := a.chordHint(prefix)
+	return hint
+}
+
+// chordHint is chordFeedback, and whether the prefix has nothing to offer
+// only because of the terminal's size: every chord under it that would
+// otherwise be listed opens an overlay, which the layout refuses. The hint
+// is then the size refusal, not "(none available)", which reads as if
+// nothing were configured. The prefix still arms, so its second key is
+// taken as the chord it is and refused the same way.
+func (a *App) chordHint(prefix string) (hint string, refused bool) {
 	if prefix == "q" {
-		return "Quit: Q Confirm (3s)"
+		return "Quit: Q Confirm (3s)", false
 	}
 
 	upperPrefix := strings.ToUpper(prefix)
 	items := a.buildMenuItems()
 	job := a.taskList.SelectedJob()
 
-	var parts []string
+	var parts, keys []string
+	droppedForSize := false
 	for i := range items {
 		item := &items[i]
 		// Match items whose chord starts with this prefix (e.g. "A " for prefix "a")
 		if !strings.HasPrefix(item.Chord, upperPrefix+" ") {
+			continue
+		}
+		// Below the normal layout the chords that open an overlay are
+		// refused (refusedForSize), so the hint does not offer them.
+		if item.Opens != "" && a.layoutMode() != layoutNormal {
+			droppedForSize = true
 			continue
 		}
 		// For NeedsJob items, check if selected job passes the filter — unless
@@ -677,6 +706,7 @@ func (a *App) chordFeedback(prefix string) string {
 		// Extract the second key character from the chord (e.g. "A K" → "K")
 		secondKey := item.Chord[len(upperPrefix)+1:]
 		parts = append(parts, secondKey+" "+item.HintLabel)
+		keys = append(keys, secondKey)
 	}
 
 	// Category label from prefix
@@ -695,9 +725,16 @@ func (a *App) chordFeedback(prefix string) string {
 	}
 
 	if len(parts) == 0 {
-		return label + ": (none available) (3s)"
+		if droppedForSize {
+			return compactRefusal, true
+		}
+		return label + ": (none available) (3s)", false
 	}
-	return label + ": " + strings.Join(parts, " | ") + " (3s)"
+	full := label + ": " + strings.Join(parts, " | ") + " (3s)"
+	if a.layoutMode() == layoutCompact && !compactFeedbackFits(full, a.width, a.height) {
+		return label + ": " + strings.Join(keys, " ") + " (3s)", false
+	}
+	return full, false
 }
 
 // canOpenFolder returns true if the job's folder can be opened.
@@ -921,8 +958,8 @@ func jobCount(n int) string {
 // This is the single source of truth for all chords, menu entries, feedback hints, and help text.
 func (a *App) buildMenuItems() []ActionMenuItem {
 	items := []ActionMenuItem{
-		{Chord: "A A", Label: "Add Video", HintLabel: "Add", Category: "Action"},
-		{Chord: "A Z", Label: "Import Archive", HintLabel: "Import", Category: "Action"},
+		{Chord: "A A", Label: "Add Video", HintLabel: "Add", Category: "Action", Opens: "add video"},
+		{Chord: "A Z", Label: "Import Archive", HintLabel: "Import", Category: "Action", Opens: "import"},
 		{Chord: "A R", Label: "Resume Job", HintLabel: "Resume", Category: "Action", NeedsJob: true, SupportsBatch: true,
 			DisabledReason: "no jobs to resume",
 			JobFilter: func(j *database.Job) bool {
@@ -992,16 +1029,16 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		{Chord: "A W", Label: "Toggle Watched", HintLabel: "Watched", Category: "Action", NeedsJob: true, SupportsBatch: true,
 			DisabledReason: "no finished jobs",
 			JobFilter:      func(j *database.Job) bool { return jobverbs.WatchableStatus(j.Status) }},
-		{Chord: "A T", Label: "Trim Video", HintLabel: "Trim", Category: "Action", NeedsJob: true,
+		{Chord: "A T", Label: "Trim Video", HintLabel: "Trim", Category: "Action", Opens: "trim", NeedsJob: true,
 			DisabledReason: "no finished jobs with files",
 			JobFilter: func(j *database.Job) bool {
 				return jobverbs.TrimmableStatus(j.Status) && j.OutputFile != ""
 			}},
-		{Chord: "A O", Label: "Browse Orphaned Items", HintLabel: "Orphans", Category: "Action"},
+		{Chord: "A O", Label: "Browse Orphaned Items", HintLabel: "Orphans", Category: "Action", Opens: "files"},
 	}
 
 	if a.OnListClientTokens != nil {
-		items = append(items, ActionMenuItem{Chord: "A K", Label: "Manage Client Tokens", HintLabel: "Tokens", Category: "Action"})
+		items = append(items, ActionMenuItem{Chord: "A K", Label: "Manage Client Tokens", HintLabel: "Tokens", Category: "Action", Opens: "client tokens"})
 	}
 	// The chapter import (owner decision CI-4): A C pastes a timestamp
 	// comment as the job's chapters, A U brings back the chapters an import
@@ -1010,7 +1047,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// reads the disk, so it runs when A U is chosen and its job selector is
 	// built; the menu's "no jobs" answer is the status alone (CORE-9).
 	if a.OnPreviewChapters != nil && a.OnSaveChapters != nil {
-		items = append(items, ActionMenuItem{Chord: "A C", Label: "Import Chapters", HintLabel: "Chapters", Category: "Action", NeedsJob: true,
+		items = append(items, ActionMenuItem{Chord: "A C", Label: "Import Chapters", HintLabel: "Chapters", Category: "Action", Opens: "chapter import", NeedsJob: true,
 			DisabledReason: "no finished jobs with an archive",
 			JobFilter:      chapterImportable})
 	}
@@ -1044,9 +1081,9 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// from GitHub. Registered whenever we have either source available
 	// so the chord parser doesn't reject it as invalid.
 	if a.updateAvailable != nil {
-		items = append(items, ActionMenuItem{Chord: "R N", Label: "View Release Notes " + a.updateAvailable.TagName, HintLabel: "Notes", Category: "Request"})
+		items = append(items, ActionMenuItem{Chord: "R N", Label: "View Release Notes " + a.updateAvailable.TagName, HintLabel: "Notes", Category: "Request", Opens: "release notes"})
 	} else if a.OnFetchReleaseNotes != nil {
-		items = append(items, ActionMenuItem{Chord: "R N", Label: "View Release Notes (current version)", HintLabel: "Notes", Category: "Request"})
+		items = append(items, ActionMenuItem{Chord: "R N", Label: "View Release Notes (current version)", HintLabel: "Notes", Category: "Request", Opens: "release notes"})
 	}
 	if a.updateAvailable != nil && a.OnApplyUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R U", Label: "Apply Update " + a.updateAvailable.TagName, HintLabel: "Update", Category: "Request"})
@@ -1083,7 +1120,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// the callback like the E chords, since without it there is nothing to
 	// read.
 	if a.OnGetJobLogs != nil {
-		items = append(items, ActionMenuItem{Chord: "O L", Label: "Open Job Log", HintLabel: "Log", Category: "Open", NeedsJob: true,
+		items = append(items, ActionMenuItem{Chord: "O L", Label: "Open Job Log", HintLabel: "Log", Category: "Open", Opens: "job log", NeedsJob: true,
 			DisabledReason: "no jobs"})
 	}
 	items = append(items,
@@ -1102,24 +1139,24 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// the STATUS callback alone — the overlay is worth reading on a host where
 	// the install would fail, and I explains itself there.
 	if a.OnYtdlpPluginStatus != nil {
-		items = append(items, ActionMenuItem{Chord: "E Y", Label: "yt-dlp Plugin", HintLabel: "yt-dlp", Category: "Extras"})
+		items = append(items, ActionMenuItem{Chord: "E Y", Label: "yt-dlp Plugin", HintLabel: "yt-dlp", Category: "Extras", Opens: "ytdlp plugin"})
 	}
 	// E L: open the setup wizard's cookie step alone, so an interactive login
 	// is reachable after first run. Gated on the callback for the same reason
 	// R F is, and cmd/moombox binds it unconditionally: StartSetup is
 	// acquisition and is never gated on cookies.auto_enabled.
 	if a.setupWiz.OnStartAutoCookie != nil {
-		items = append(items, ActionMenuItem{Chord: "E L", Label: "Cookie Login", HintLabel: "Login", Category: "Extras"})
+		items = append(items, ActionMenuItem{Chord: "E L", Label: "Cookie Login", HintLabel: "Login", Category: "Extras", Opens: "setup wizard"})
 	}
 	// E I: the browser-free half of the same answer E L gives. It imports a
 	// Netscape cookies.txt the operator exported elsewhere, through the same
 	// verify-and-roll-back path as the Web dashboard's import panel — the one
 	// re-authentication route that works on a headless host.
 	if a.OnImportCookieFile != nil {
-		items = append(items, ActionMenuItem{Chord: "E I", Label: "Import Cookie File", HintLabel: "Import Cookies", Category: "Extras"})
+		items = append(items, ActionMenuItem{Chord: "E I", Label: "Import Cookie File", HintLabel: "Import Cookies", Category: "Extras", Opens: "cookie import"})
 	}
 	if a.OnGetStats != nil {
-		items = append(items, ActionMenuItem{Chord: "E T", Label: "Statistics", HintLabel: "Stats", Category: "Extras"})
+		items = append(items, ActionMenuItem{Chord: "E T", Label: "Statistics", HintLabel: "Stats", Category: "Extras", Opens: "stats"})
 	}
 
 	// Filter + Other. F does what handleFilter does for the focused panel,
@@ -1134,8 +1171,8 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	}
 	items = append(items,
 		ActionMenuItem{Chord: "F", Label: filterLabel, HintLabel: "Filter", Category: "Filter"},
-		ActionMenuItem{Chord: "`", Label: "Settings", HintLabel: "Settings", Category: "Other"},
-		ActionMenuItem{Chord: "?", Label: "Help", HintLabel: "Help", Category: "Other"},
+		ActionMenuItem{Chord: "`", Label: "Settings", HintLabel: "Settings", Category: "Other", Opens: "settings"},
+		ActionMenuItem{Chord: "?", Label: "Help", HintLabel: "Help", Category: "Other", Opens: "help"},
 		ActionMenuItem{Chord: "Q Q", Label: "Quit", HintLabel: "Quit", Category: "Other"},
 	)
 	return items

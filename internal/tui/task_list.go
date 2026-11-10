@@ -114,9 +114,12 @@ func (d taskDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	}
 	selected := index == m.Index()
 	contentW := m.Width()
-	if ti.divider {
+	switch {
+	case ti.divider:
 		fmt.Fprint(w, d.panel.renderDivider(ti.count, selected, contentW))
-	} else {
+	case d.panel.compact:
+		fmt.Fprint(w, d.panel.renderCompactJob(ti.job, selected, ti.archived, contentW, time.Now()))
+	default:
 		fmt.Fprint(w, d.panel.renderJob(ti.job, selected, ti.archived))
 	}
 }
@@ -149,7 +152,11 @@ type TaskListModel struct {
 	archivedSet map[string]bool
 	list        list.Model
 
-	width, height       int
+	width, height int
+	// compact: the panel is drawn in its compact form (task_list_compact.go),
+	// with no border and no header, so the list has every row and column of
+	// the panel's size. Written only by setCompact.
+	compact             bool
 	focused             bool
 	archiveExpanded     bool
 	hideFinishedAgeDays float64 // from config, default 30
@@ -578,6 +585,9 @@ func (m *TaskListModel) SetSize(w, h int) {
 // resize and whenever the search box opens/closes.
 func (m *TaskListModel) applyListSize() {
 	contentW := max(m.width-2, 1)
+	if m.compact {
+		contentW = max(m.width, 1)
+	}
 	contentH := m.contentHeight()
 	if m.searching {
 		contentH = max(contentH-1, 1)
@@ -671,7 +681,8 @@ func (m *TaskListModel) SelectAtOffset(y int) bool {
 
 // resetMarquee resets the marquee animation for the currently selected job title.
 func (m *TaskListModel) resetMarquee() {
-	if job := m.SelectedJob(); job != nil {
+	// A compact row cuts its title with an ellipsis and never scrolls it.
+	if job := m.SelectedJob(); job != nil && !m.compact {
 		title := job.Title
 		if title == "" {
 			title = job.VideoID
@@ -695,8 +706,16 @@ func (m *TaskListModel) resetMarquee() {
 // "⟳ mux" or "⟳ retry" (jobstate.PendingAutoAction, owner ruling R-D2) — the
 // row hint for the sentence the details pane spells out.
 func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait bool) {
+	return m.progressCell(job, time.Now())
+}
+
+// progressCell is progressCellText at a given time: THE rule for a row's
+// progress slot. The compact row's figure (compactFigure) reformats what it
+// returns and decides nothing of its own for these statuses, so a tag added
+// here shows in both drawings.
+func (m *TaskListModel) progressCell(job *database.Job, now time.Time) (text string, isWait bool) {
 	if job.Status == database.StatusQueued {
-		return queuedHoldTag(m.holds.For(job, time.Now())), true
+		return queuedHoldTag(m.holds.For(job, now)), true
 	}
 	if job.Status == database.StatusError {
 		switch jobstate.PendingAutoAction(job) {
@@ -842,6 +861,9 @@ func (m *TaskListModel) ToggleArchive() {
 }
 
 func (m *TaskListModel) contentHeight() int {
+	if m.compact {
+		return max(m.height, 1)
+	}
 	return max(m.height-3, 1)
 }
 
@@ -1086,6 +1108,7 @@ type taskListKey struct {
 	sec           int64
 	width         int
 	height        int
+	compact       bool
 	focused       bool
 	cursor        int
 	page          int
@@ -1112,6 +1135,7 @@ func (m *TaskListModel) taskListKey() taskListKey {
 		sec:           time.Now().Unix(),
 		width:         m.width,
 		height:        m.height,
+		compact:       m.compact,
 		focused:       m.focused,
 		cursor:        m.list.Index(),
 		page:          m.list.Paginator.Page,
@@ -1140,6 +1164,16 @@ func (m *TaskListModel) View() string {
 		if k := m.taskListKey(); m.renderCache != "" && k == m.cacheKey {
 			return m.renderCache
 		}
+	}
+	if m.compact {
+		out := m.compactView()
+		if !m.searching {
+			m.renderCache = out
+			m.cacheKey = m.taskListKey()
+		} else {
+			m.renderCache = ""
+		}
+		return out
 	}
 	contentW := max(m.width-2, 1)
 
@@ -1427,19 +1461,7 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 	}
 
 	// Status icon (retains status color even when selected, per TS)
-	iconStyle := lipgloss.NewStyle().Foreground(color)
-	switch {
-	case job.Status == database.StatusError:
-		iconStyle = iconStyle.UnderlineStyle(lipgloss.UnderlineCurly).UnderlineColor(ColorError)
-	case job.Status == database.StatusCookies:
-		iconStyle = iconStyle.UnderlineStyle(lipgloss.UnderlineCurly).UnderlineColor(ColorCookies)
-	case job.Status == database.StatusFinished && job.IncompleteTail:
-		iconStyle = iconStyle.UnderlineStyle(lipgloss.UnderlineCurly).UnderlineColor(ColorWarning)
-	}
-	if dimmed {
-		iconStyle = iconStyle.Faint(true)
-	}
-	parts = append(parts, iconStyle.Render(icon)+" ")
+	parts = append(parts, statusMarkStyle(job, dimmed).Render(icon)+" ")
 
 	// Progress (before platform tag, matching TS order; uses status color not always green)
 	if showProgress {
@@ -1491,6 +1513,26 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 	}
 
 	return strings.Join(parts, "")
+}
+
+// statusMarkStyle is the style of a row's status mark, the icon of a normal
+// row and the tag of a compact one: the status colour, with a curly underline
+// on an Error, a COOKIES? and an incomplete Finished row, faint when the row
+// is dimmed.
+func statusMarkStyle(job *database.Job, dimmed bool) lipgloss.Style {
+	style := lipgloss.NewStyle().Foreground(StatusColor(string(job.Status)))
+	switch {
+	case job.Status == database.StatusError:
+		style = style.UnderlineStyle(lipgloss.UnderlineCurly).UnderlineColor(ColorError)
+	case job.Status == database.StatusCookies:
+		style = style.UnderlineStyle(lipgloss.UnderlineCurly).UnderlineColor(ColorCookies)
+	case job.Status == database.StatusFinished && job.IncompleteTail:
+		style = style.UnderlineStyle(lipgloss.UnderlineCurly).UnderlineColor(ColorWarning)
+	}
+	if dimmed {
+		style = style.Faint(true)
+	}
+	return style
 }
 
 // formatCountdown formats a duration for display (T3).

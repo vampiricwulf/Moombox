@@ -396,6 +396,25 @@ func TestTaskListCachedFramesMatchFreshFrames(t *testing.T) {
 		// flag inside that branch alone, which is why this step follows
 		// "empty" and "query cleared" rather than preceding them.
 		{"setup flag", "justSetup", func(m *TaskListModel) { m.JustCompletedSetup = true }},
+		// The compact form (task_list_compact.go) is a second drawing of the
+		// same model, behind the same cache: the switch itself, then the
+		// traffic a compact row draws.
+		{"compact", "compact", func(m *TaskListModel) { m.setCompact(true) }},
+		{"compact rows", "", func(m *TaskListModel) {
+			m.SetJobs([]*database.Job{
+				{ID: "a", Title: strings.Repeat("aaa compact title ", 6), Status: database.StatusQueued},
+				{ID: "b", Title: strings.Repeat("bbb compact title ", 6), Status: database.StatusDownloading, Percent: 12},
+				{ID: "c", Title: strings.Repeat("ccc compact title ", 6), Status: database.StatusFinished, UpdatedAt: "2000-01-02T03:04:05Z"},
+			})
+		}},
+		{"compact progress", "progressRev", func(m *TaskListModel) {
+			m.progressStore.Set("b", &ProgressData{Progress: "V:9 A:9", Percent: 88})
+		}},
+		{"compact cursor", "cursor", func(m *TaskListModel) { m.MoveDown() }},
+		{"compact batch select", "selectedCount", func(m *TaskListModel) { m.ToggleSelection("a") }},
+		{"compact resize", "", func(m *TaskListModel) { m.SetSize(34, 5) }},
+		{"compact query", "", func(m *TaskListModel) { m.applyQuery("zzz") }},
+		{"normal again", "compact", func(m *TaskListModel) { m.setCompact(false) }},
 	}
 
 	runSteps(t, m, steps, m.View, func() { m.renderCache = "" })

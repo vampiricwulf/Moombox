@@ -276,7 +276,7 @@ func (m *SettingsModel) renderHintText() string {
 	if m.channelRemovalPromptUp() {
 		return m.channelRemovalHint()
 	}
-	return "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate  A: Add  Enter: Edit  D: Delete"
+	return "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate  A: Add  Enter: Edit  D: Delete  Shift+↑/↓: Move"
 }
 
 // renderActionButtons renders action buttons at the bottom of the settings panel.
@@ -534,7 +534,7 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 		lines = append(lines, prompt...)
 		maxH = max(maxH-(len(prompt)-1), 1)
 	} else {
-		lines = append(lines, DimStyle.Render("A: Add  Enter: Edit  D: Delete"))
+		lines = append(lines, DimStyle.Render("A: Add  Enter: Edit  D: Delete  Shift+↑/↓: Move"))
 	}
 
 	if len(m.channels) == 0 {

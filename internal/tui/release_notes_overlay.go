@@ -491,3 +491,16 @@ func hangingWrap(line string, hang, limit int) []string {
 	}
 	return rows
 }
+
+// scroll moves the notes n rows (negative is up): the mouse wheel's route,
+// three rows a notch (mouseReleaseNotes).
+func (o *releaseNotesOverlay) scroll(n int) {
+	if !o.open_ {
+		return
+	}
+	if n < 0 {
+		o.vp.ScrollUp(-n)
+	} else {
+		o.vp.ScrollDown(n)
+	}
+}

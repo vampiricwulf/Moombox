@@ -25,12 +25,41 @@ const maxOverlayReasonRunes = 80
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		// A prefix hint still on the feedback line was written for the old
+		// size: it lists the overlay chords a smaller layout refuses, or
+		// only the keys where the labels now fit.
+		hintShown := false
+		if a.chord.prefix != "" && a.chord.action == "" {
+			old, _ := a.chordHint(a.chord.prefix)
+			hintShown = a.feedback.msg == old
+		}
 		a.width = msg.Width
 		a.height = msg.Height
 		a.recalcLayout()
+		// Below the compact floor nothing is drawn but the notice, so a
+		// chord armed above it must not stay armed: its confirm key would
+		// act with no prompt on screen (owner ruling R-C6).
+		if a.layoutMode() == layoutTooSmall {
+			a.cancelChord()
+		} else if hintShown {
+			// Rewritten in place: the line's hold and the chord's own
+			// three seconds are not restarted.
+			until := a.feedback.until
+			a.setPrefixHint(a.chord.prefix)
+			a.feedback.until = until
+		}
 		// A narrower title column can push a previously-fitting title into
-		// overflow — (re)start the marquee if so.
-		return a, a.ensureMarqueeTicking()
+		// overflow — (re)start the marquee if so. A terminal grown back out
+		// of a notice puts live progress on screen again: back to the fast
+		// progress class now, not on the next idle tick.
+		return a, tea.Batch(a.ensureMarqueeTicking(), a.ensureProgressTicking())
+
+	case tea.PasteMsg:
+		// A paste is typing: none of it reaches what a notice hides.
+		if a.screenHeld() {
+			return a, nil
+		}
+		return a, a.routeComponentMsg(msg)
 
 	case tea.BackgroundColorMsg:
 		a.isDark = msg.IsDark()
@@ -148,7 +177,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the task list. Either way it restarts via ensureMarqueeTicking when
 		// the condition clears. Checked before Tick() so a covered marquee
 		// doesn't advance its offset while hidden.
-		if a.hasActiveOverlay() ||
+		if a.hasActiveOverlay() || a.layoutMode() != layoutNormal ||
 			(!a.taskList.marquee.NeedsScroll() && !a.details.marquee.NeedsScroll()) {
 			a.marqueeTicking = false
 			return a, nil
@@ -1137,8 +1166,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		var cmds []tea.Cmd
-		if cmd := a.routeComponentMsg(msg); cmd != nil {
-			cmds = append(cmds, cmd)
+		// Not while a notice has replaced the screen: a key must not type
+		// into, or scroll, what is hidden (keyReachesComponents).
+		if a.keyReachesComponents(msg) {
+			if cmd := a.routeComponentMsg(msg); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 		_, cmd := a.handleKey(msg)
 		if cmd != nil {
@@ -1148,6 +1181,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := a.ensureMarqueeTicking(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		// A key that closed an overlay puts the panels back on screen: go
+		// back to the fast progress class now, not on the next idle tick.
+		if cmd := a.ensureProgressTicking(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		return a, tea.Batch(cmds...)
 
 	case tea.MouseMsg:
@@ -1155,6 +1193,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A click can move the selection onto a long title.
 		if mCmd := a.ensureMarqueeTicking(); mCmd != nil {
 			cmd = tea.Batch(cmd, mCmd)
+		}
+		// A click can close an overlay too (the Settings buttons, the action
+		// menu): same upshift as the key case above.
+		if pCmd := a.ensureProgressTicking(); pCmd != nil {
+			cmd = tea.Batch(cmd, pCmd)
 		}
 		return model, cmd
 

@@ -572,6 +572,14 @@ type App struct {
 	// makes structural.
 	feedback appFeedback
 
+	// frame memoises the composed panel frame View returns, and the line
+	// measurements it is joined from (frame_compose.go). Written only by
+	// View.
+	frame frameComposer
+	// compact is the same memo for the compact layout's frame
+	// (app_compact.go). Written only by View.
+	compact compactFrame
+
 	// Log batching buffer (250ms flush cycle like TypeScript)
 	logBuffer []string
 
@@ -1164,7 +1172,7 @@ func (a *App) ensureMarqueeTicking() tea.Cmd {
 	// replaces the whole view, hiding the task list and detail titles — no
 	// point animating a marquee nobody can see. It restarts when the overlay
 	// closes (the closing keypress hook, or the 1s backstop within <=1s).
-	if a.hasActiveOverlay() {
+	if a.hasActiveOverlay() || a.layoutMode() != layoutNormal {
 		return nil
 	}
 	if a.taskList.marquee.NeedsScroll() || a.details.marquee.NeedsScroll() {
@@ -1227,18 +1235,36 @@ const (
 	// rather than sitting through one. A no-change tick costs no rebuild
 	// (JobDetailsModel.SetProgress skips an unchanged pointer inside one
 	// wall-clock second) and no repaint (the renderer's viewEquals) — only
-	// the memoised View() bubbletea calls after every message, the 30-alloc
-	// frame TestFrameCostAtLogCap pins (~0.25-0.6 ms at 20-1,000 jobs), so
-	// doubling the tick count doubles that and nothing else.
+	// the memoised View() bubbletea calls after every message: four panel
+	// key comparisons and the frame memo's (frame_compose.go), which
+	// allocate nothing (TestFrameCostAtLogCap pins it; well under a
+	// microsecond at 1,000 jobs).
 	progressFastInterval = 8 * time.Millisecond   // ~120fps during active downloads
 	progressIdleInterval = 500 * time.Millisecond // Upcoming countdown / chat-count cadence
 )
 
 // wantsFastProgress reports whether the progress loop should run at the fast
-// class — one tick per frame at tuiTargetFPS: an actively-delivering
-// download, or a visible in-progress trim.
+// class — one tick per frame at tuiTargetFPS. That is only while the progress
+// it delivers is on screen: an actively-delivering download with the panels
+// showing, or an overlay on top that draws live progress itself (the trim
+// dialog while a trim runs; overlayEntry.liveProgress).
+//
+// Any other overlay hides the panels, and no overlay view is memoised, so a
+// fast tick under one redrew an identical Help or Settings screen ~120 times
+// a second. Nothing visible gets rarer: the loop keeps running at the idle
+// class, and the key or click that closes the overlay upshifts in the same
+// Update (ensureProgressTicking in the KeyPressMsg and MouseMsg cases). An
+// overlay closed by a message instead is back at the fast class on the next
+// idle tick, at most progressIdleInterval later.
 func (a *App) wantsFastProgress() bool {
-	return a.hasActiveDownloads() || (a.trimInProgress && a.trimDlg.IsVisible())
+	// A notice has replaced the screen (app_compact.go): no progress is on it.
+	if a.screenHeld() {
+		return false
+	}
+	if o := a.activeOverlay(); o != nil {
+		return o.liveProgress != nil && o.liveProgress(a)
+	}
+	return a.hasActiveDownloads()
 }
 
 func (a *App) progressTick() tea.Cmd {

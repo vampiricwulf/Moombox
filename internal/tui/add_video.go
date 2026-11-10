@@ -1387,3 +1387,10 @@ func parseTimeToSeconds(s string) (float64, error) {
 	}
 	return 0, fmt.Errorf("invalid time format")
 }
+
+// wheelMovesFormat reports whether the dialog is on a format table the wheel
+// can move through: one of the two format steps, with the formats loaded.
+func (m *AddVideoModel) wheelMovesFormat() bool {
+	return m.visible && !m.loading && !m.submitting && m.formats != nil &&
+		(m.step == AddStepVideoFormat || m.step == AddStepAudioFormat)
+}
