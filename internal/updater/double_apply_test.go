@@ -2,6 +2,7 @@ package updater
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -129,5 +130,33 @@ func TestABrokenSwapMarkerAloneRefusesAnApply(t *testing.T) {
 	}
 	if _, err := os.Stat(exePath + ".old"); !os.IsNotExist(err) {
 		t.Errorf("the refused apply still moved the running binary aside (stat .old: %v)", err)
+	}
+}
+
+// ApplyUpdate's two refusals are typed (K41), so the Web route can answer a
+// refusal 409 instead of the 500 "Update failed" a plain error got: an
+// apply already running on this Updater (the TUI's, during a Web apply),
+// and an update already placed.
+//
+// Mutant: either refusal returned as a fresh fmt.Errorf — errors.Is fails.
+func TestApplyRefusalsAreSentinels(t *testing.T) {
+	srv := swapTestServer(t)
+	u, _ := newTestUpdater(t, "1.0.0", srv, nil)
+
+	u.applying.Store(true) // another surface's apply is running
+	err := u.ApplyUpdate(context.Background(), swapRelease(srv))
+	if !errors.Is(err, ErrApplyInProgress) || err.Error() != "update already in progress" {
+		t.Fatalf("apply during an apply = %v, want ErrApplyInProgress", err)
+	}
+	if !u.applying.Load() {
+		t.Fatal("a refused apply released the running apply's single-flight")
+	}
+	u.applying.Store(false)
+
+	if err := u.ApplyUpdate(context.Background(), swapRelease(srv)); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	if err := u.ApplyUpdate(context.Background(), swapRelease(srv)); !errors.Is(err, ErrRestartPending) {
+		t.Fatalf("apply after a placed update = %v, want ErrRestartPending", err)
 	}
 }

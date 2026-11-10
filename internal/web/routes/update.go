@@ -93,9 +93,6 @@ func updateApplyOriginAllowed(r *http.Request) bool {
 // available update info. Set by main.go, read by status route and update routes.
 var SharedUpdateInfo atomic.Pointer[updater.ReleaseInfo]
 
-// updateInProgress prevents concurrent apply requests from racing on binary swap.
-var updateInProgress atomic.Bool
-
 // UpdateRouteDeps holds dependencies for the update routes.
 type UpdateRouteDeps struct {
 	Updater   *updater.Updater
@@ -357,15 +354,9 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			return
 		}
 
-		if !updateInProgress.CompareAndSwap(false, true) {
-			jsonError(w, "update already in progress", http.StatusConflict)
-			return
-		}
-
 		// The release whose notes the dialog showed, and no other.
 		release, err := PendingUpdate(tag)
 		if err != nil {
-			updateInProgress.Store(false)
 			writePendingRefusal(w, err, "no update available")
 			return
 		}
@@ -376,8 +367,17 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 		// stall timer exists to let finish. The updater's stall timeout and
 		// two-hour backstop bound it instead; on success the restart below
 		// still runs, whether or not anyone is still listening.
+		// The Updater is the single-flight (it is shared with the TUI): an
+		// apply already running, or one already placed and restart-pending,
+		// is refused before anything is touched and answers 409 — whichever
+		// surface started it. The route kept a CAS flag of its own until K41;
+		// it covered only Web-vs-Web, so a Web apply during a TUI one fell
+		// through to a 500 "Update failed".
 		if err := applyUpdate(deps.Updater, context.WithoutCancel(r.Context()), release); err != nil {
-			updateInProgress.Store(false)
+			if errors.Is(err, updater.ErrApplyInProgress) || errors.Is(err, updater.ErrRestartPending) {
+				jsonError(w, updater.ErrApplyInProgress.Error(), http.StatusConflict)
+				return
+			}
 			// The toast reads "Update failed: <this>"; it used to read
 			// "Update failed: update failed".
 			deps.logUpdateFailure("Update", err)

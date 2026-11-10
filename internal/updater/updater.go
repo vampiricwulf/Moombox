@@ -117,9 +117,10 @@ type Updater struct {
 	client         *http.Client
 
 	// applying single-flights ApplyUpdate across ALL surfaces (web route,
-	// TUI chord, future callers). The web route has its own CAS guard, but
-	// the TUI path bypasses it — two concurrent applies share exePath+".new"
-	// and race verify-then-rename into a corrupted live binary.
+	// TUI chord, future callers): it is the ONLY in-progress guard — the web
+	// route kept a CAS flag of its own until K41 and now relies on this one,
+	// mapping ErrApplyInProgress to 409. Two concurrent applies would share
+	// exePath+".new" and race verify-then-rename into a corrupted live binary.
 	applying atomic.Bool
 
 	// applied latches once an update has been placed: from then on the exe
@@ -371,6 +372,17 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 	}, nil
 }
 
+// ErrApplyInProgress and ErrRestartPending are ApplyUpdate's two refusals,
+// before it touches anything: another apply is running on this Updater (the
+// Web route and the TUI share one), or one has already placed an update and
+// the process is restart-pending. Typed so a caller can tell a refusal from a
+// failed apply — POST /api/update/apply answers both 409, not 500. The text
+// is what the plain errors used to say.
+var (
+	ErrApplyInProgress = errors.New("update already in progress")
+	ErrRestartPending  = errors.New("an update is already applied — restart pending")
+)
+
 // ApplyUpdate downloads the new binary and replaces the running executable,
 // keeping the running one at .old (on every platform).
 //
@@ -390,11 +402,11 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 // process exits cleanly. Audit reports/small-packages.md.
 func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	if !u.applying.CompareAndSwap(false, true) {
-		return fmt.Errorf("update already in progress")
+		return ErrApplyInProgress
 	}
 	defer u.applying.Store(false)
 	if u.applied.Load() {
-		return fmt.Errorf("an update is already applied — restart pending")
+		return ErrRestartPending
 	}
 	if err := u.swapLeftBroken(); err != nil {
 		return err
