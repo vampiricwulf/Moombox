@@ -30,7 +30,7 @@ type overlayCase struct {
 // failure and not a silent change of which overlay a key reaches.
 func overlayCases(t *testing.T) []overlayCase {
 	return []overlayCase{
-		{"settings", 0, 0, func(a *App) { a.settings.Open(a.cfg) },
+		{"settings", 30, 6, func(a *App) { a.settings.Open(a.cfg) },
 			func(a *App) bool { return a.settings.IsVisible() }, func(a *App) string { return a.settings.View() }},
 		{"help", 30, 6, func(a *App) { a.help.Toggle() },
 			func(a *App) bool { return a.help.IsVisible() }, func(a *App) string { return a.help.View() }},

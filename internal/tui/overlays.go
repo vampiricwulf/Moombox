@@ -65,7 +65,7 @@ func init() {
 		{
 			name:       "settings",
 			title:      "Settings",
-			heldEsc:    func(a *App) heldEscKind { return a.settings.heldEsc() },
+			bare:       &overlayBare{openW: compactMinWidth, openH: compactMinHeight},
 			visible:    func(a *App) bool { return a.settings.IsVisible() },
 			view:       func(a *App) string { return a.settings.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.settings.UpdateComponents(msg) },

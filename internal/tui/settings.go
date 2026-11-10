@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
+	"charm.land/lipgloss/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
@@ -519,6 +520,12 @@ type SettingsModel struct {
 	// -1 = fields focused, 0 = Save button, 1 = Return button
 	buttonFocus int
 
+	// bareNote is a refusal or the password editor's result on the bare
+	// form (settings_bare.go), in bareNoteStyle. bareKey is its one writer and
+	// clears it on the next key.
+	bareNote      string
+	bareNoteStyle lipgloss.Style
+
 	// Shared text input component (holds the currently-active text field)
 	textInput textinput.Model
 }
@@ -548,6 +555,7 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.showRestartOverlay = false
 	m.closeConfirm = false
 	m.afterClose = ""
+	m.bareNote = ""
 	m.buttonFocus = -1
 	m.resetChannelRemoval()
 
@@ -650,6 +658,12 @@ func (m *SettingsModel) IsVisible() bool {
 func (m *SettingsModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+	if m.bare() {
+		// The bare form derives its window from the focus on every draw and
+		// leaves the scroll offset as the normal form had it.
+		return
+	}
+	m.bareNote = ""
 	m.ensureFieldVisible()
 }
 

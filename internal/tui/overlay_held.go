@@ -46,33 +46,6 @@ func (a *App) heldEscFor(o *overlayEntry) heldEscKind {
 	return o.heldEsc(a)
 }
 
-// heldEsc for Settings. With unsaved edits Esc raises the "Save changes?"
-// prompt, and a second Esc dismisses it, so under the notice it would only
-// toggle a prompt nobody sees and never close.
-func (m *SettingsModel) heldEsc() heldEscKind {
-	switch {
-	case m.showRestartOverlay:
-		return heldEscCloses
-	case m.closeConfirm, m.dirty && m.status != saveError:
-		return heldEscOff
-	}
-	switch sections[m.sectionIndex].name {
-	case "Channels":
-		if m.channelMode == "edit" || m.channelDeleteConf {
-			return heldEscBack
-		}
-	case "Integrations":
-		if m.notifMode == "edit" || m.notifDeleteConf {
-			return heldEscBack
-		}
-	case "Network":
-		if m.secMode != securityStatus {
-			return heldEscBack
-		}
-	}
-	return heldEscCloses
-}
-
 // heldEsc for the FFmpeg check. On its main menu Esc quits Moombox
 // (TestEscOnTheFFmpegOverlayStillQuits); under the notice only Ctrl+C may.
 func (m *FFmpegCheckModel) heldEsc() heldEscKind {

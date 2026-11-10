@@ -303,9 +303,11 @@ func TestTheRefusalNamesTheOverlaysSize(t *testing.T) {
 		{"stats", 200, 8, false, 30, 10},
 		{"stats", 60, 20, true, 30, 10},
 		{"stats", 29, 10, false, 30, 10}, // below the compact floor nothing opens
-		{"settings", 59, 19, false, 60, 20},
-		{"settings", 200, 19, false, 60, 20},
-		{"settings", 60, 20, true, 60, 20},
+		{"setup wizard", 59, 19, false, 60, 20},
+		{"setup wizard", 200, 19, false, 60, 20},
+		{"setup wizard", 60, 20, true, 60, 20},
+		{"settings", 30, 6, true, 30, 6},
+		{"settings", 200, 6, true, 30, 6},
 		{"help", 30, 6, true, 30, 6},
 		{"no such overlay", 40, 10, false, 60, 20},
 	} {
@@ -323,10 +325,6 @@ func TestTheRefusalNamesTheOverlaysSize(t *testing.T) {
 	r.press("m")
 	if got, want := r.app.feedback.msg, "Enlarge the terminal to 44x6 for this"; got != want || r.app.hasActiveOverlay() {
 		t.Errorf("M at 40x9: feedback %q, want %q", got, want)
-	}
-	r.press("`")
-	if got, want := r.app.feedback.msg, "Enlarge the terminal to 60x20 for this"; got != want || r.app.hasActiveOverlay() {
-		t.Errorf("` at 40x9: feedback %q, want %q", got, want)
 	}
 	// E with every chord refused: the hint names the largest size among
 	// them, the one that makes them all work.
@@ -509,13 +507,14 @@ func TestBareHelpListsOnlyTheKeysThatWork(t *testing.T) {
 		}
 		// Nothing of the panels the compact layout does not have, and no
 		// key whose overlay is refused here.
-		for _, gone := range []string{"Tab", "Details", "Logs", "focus panel", "Open settings"} {
+		for _, gone := range []string{"Tab", "Details", "Logs", "focus panel"} {
 			if strings.Contains(text, gone) {
 				t.Errorf("%v: the list still mentions %q", size, gone)
 			}
 		}
-		// The action menu draws bare at every compact size, so M is listed.
-		if !strings.Contains(text, "Action menu") {
+		// The action menu and Settings draw bare at every compact size, so M
+		// and ` are listed.
+		if !strings.Contains(text, "Action menu") || !strings.Contains(text, "Open settings") {
 			t.Errorf("%v: the list lacks the M key:\n%s", size, text)
 		}
 		for _, kept := range []string{"\n?     Toggle help\n", "\nCtrl+C\n      Quit immediately\n", "\nQ Q   Quit program\n", "\nSpace Select task for batch\n      actions\n"} {

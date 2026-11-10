@@ -11,6 +11,10 @@ func (m *SettingsModel) HandleMouse(msg tea.MouseMsg) {
 	if !m.visible {
 		return
 	}
+	if m.bare() {
+		m.bareMouse(msg)
+		return
+	}
 
 	// Restart overlay ignores mouse
 	if m.showRestartOverlay {

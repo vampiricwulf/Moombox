@@ -438,7 +438,7 @@ func TestBareMenuFrames(t *testing.T) {
 func TestBareMenuDimsWhatNeedsALargerTerminal(t *testing.T) {
 	r := bareMenuApp(t, 40, 9)
 	a := r.app
-	for chord, need := range map[string]string{"`": "needs 60x20", "E L": "needs 60x20", "A C": "needs 30x10"} {
+	for chord, need := range map[string]string{"E L": "needs 60x20", "A C": "needs 30x10"} {
 		menuTo(t, r, chord)
 		rows := plainRows(a.View().Content)
 		if rows[len(rows)-1] != need {

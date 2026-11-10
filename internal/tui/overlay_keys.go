@@ -41,6 +41,12 @@ func (a *App) keySettings(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cmd) 
 	case "open_ffmpeg":
 		a.settings.Close()
 		a.afterSettingsClose() // a prompted close may have just saved
+		// Below the normal layout Settings refuses Ctrl+O itself (bareKey).
+		// This is the prompt raised at the normal size and answered after a
+		// shrink: the installer cannot be drawn, so it is not opened.
+		if a.refuseOverlay("ffmpeg check") {
+			break
+		}
 		a.ffmpegCheck.OnCheckPrereqs = a.OnCheckPrereqs
 		a.ffmpegCheck.Open()
 		a.ffmpegCheck.SetSize(a.width, a.height)

@@ -25,6 +25,10 @@ type compactRig struct {
 	cancelled []string
 	reinit    []string
 	restarted int
+	// saves counts OnSaveConfig calls where a test sets that callback, and
+	// saveErr is what it answers.
+	saves   int
+	saveErr error
 }
 
 // compactJobs is one job of every status. No row shows a figure that moves
@@ -123,6 +127,12 @@ func namedKey(name string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyTab}
 	case "space":
 		return tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
+	case "left":
+		return tea.KeyPressMsg{Code: tea.KeyLeft}
+	case "right":
+		return tea.KeyPressMsg{Code: tea.KeyRight}
+	case "ctrl+o":
+		return tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl}
 	}
 	return keyMsg(name)
 }
@@ -506,7 +516,7 @@ var chordCompact = map[string]string{
 	"O L": "bare 30x6",
 	"E Y": "bare 30x6", "E L": "refused", "E I": "bare 30x6", "E T": "bare 30x6",
 	"F": "works", "Q Q": "works",
-	"`": "refused", "?": "bare 30x6",
+	"`": "bare 30x6", "?": "bare 30x6",
 }
 
 // chordBare reads a chordCompact class: the minimum of a "bare WxH" one.
@@ -1034,9 +1044,8 @@ func TestProgressTickClassFollowsTheLayout(t *testing.T) {
 // heldEscBase is what Esc does to each overlay, as overlayCases opens it,
 // while it is kept under the notice. A new overlay must state its answer,
 // unless it is never held: one whose bare form draws at every compact size
-// (Help, Release Notes) has no row.
+// (Help, Settings) has no row.
 var heldEscBase = map[string]heldEscKind{
-	"settings":       heldEscCloses,
 	"ffmpeg check":   heldEscOff, // its Esc quits Moombox
 	"setup wizard":   heldEscOff, // nothing to step back to on the mode choice
 	"chapter import": heldEscCloses,
@@ -1151,23 +1160,8 @@ func TestHeldEscCensus(t *testing.T) {
 // The states in which an overlay's own Esc does something other than close
 // it: the notice says which, and nothing happens unseen.
 func TestHeldEscFollowsTheOverlayState(t *testing.T) {
-	settingsOpen := func(a *App) bool { return a.settings.IsVisible() }
-
-	// Settings with unsaved edits: Esc would only raise the hidden
-	// "Save changes?" prompt.
-	a := overlayTestApp(t)
-	a.settings.Open(a.cfg)
-	a.settings.dirty = true
-	checkHeldEsc(t, "settings, unsaved edits", a, settingsOpen, heldEscOff)
-	if a.settings.closeConfirm {
-		t.Error("Esc under the notice raised the Save changes prompt")
-	}
-	// And with that prompt already up, Esc would dismiss it unseen.
-	a.settings.closeConfirm = true
-	checkHeldEsc(t, "settings, save prompt", a, settingsOpen, heldEscOff)
-
 	// The wizard's advanced form: two Escs abandon what was typed.
-	a = overlayTestApp(t)
+	a := overlayTestApp(t)
 	a.setupWiz.Open()
 	a.setupWiz.mode = setupModeAdvanced
 	a.setupWiz.buildAdvancedForm()
