@@ -19,7 +19,7 @@ git clone --filter=blob:none https://github.com/yt-dlp/yt-dlp.git /tmp/yt-dlp
 git -C /tmp/yt-dlp log --oneline 412e7f0a4b0588fe884a02b344ac66a06538475b..HEAD -- yt_dlp/extractor/youtube yt_dlp/extractor/twitch.py yt_dlp/downloader yt_dlp/networking yt_dlp/cookies.py
 ```
 
-Locally, `bash references/update-all.sh` pulls all seven, but its "new commits" are only those since the local clone's previous pull. The SHAs below are the durable record: compare against them, not against the script's summary.
+Locally, `bash references/update-all.sh` pulls all seven and prints two things per repo: the "new commits" of that pull, which are only those since the local clone's previous pull, and a "since last review" line counting the commits after the SHA below, which it reads from this table. The SHAs below are the durable record and the review range. If the script cannot read a row (it reports that) or the table's layout changes, compare against the SHAs by hand. A clone, fetch or pull that fails is reported as FAILED and the script exits 1.
 
 | Repo | Clone URL | Last reviewed | Commit date | Notes |
 |---|---|---|---|---|

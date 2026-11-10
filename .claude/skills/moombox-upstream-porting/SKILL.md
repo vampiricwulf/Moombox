@@ -79,11 +79,13 @@ bash references/update-all.sh        # Summary of new commits per repo
 bash references/update-all.sh --diff  # File-level diffs (limited to 500 lines per repo)
 ```
 
-The script's "new commits" are only those since the local clone's last pull. If a run pulled without reviewing, they will not match the ledger's range, so always list from the ledger SHA:
+The script's "new commits" are only those since the local clone's last pull; if a run pulled without reviewing, they will not match the ledger's range. Its "since last review" line counts the commits after the ledger SHA and prints the command that lists them. Review that range, and run the command yourself when the line says the SHA was not found:
 
 ```bash
 git -C references/yt-dlp log --oneline <last-reviewed-sha>..HEAD
 ```
+
+A repo the script marks FETCH FAILED or PULL FAILED was not updated (offline, a diverged clone, a dirty tree); fix that before reading its range.
 
 **No `references/` (cloud session, fresh machine):** clone the repos you need with `git clone --filter=blob:none <url>` from the ledger's table into a scratch directory (never into the repo), then run the same `log <sha>..HEAD`.
 
@@ -134,7 +136,7 @@ Commit the ledger in the same commit as the port when there is one, or in a `doc
 
 ## Common Mistakes
 
-- Trusting `update-all.sh`'s "new commits" as the review range instead of the ledger's *Last reviewed* SHA
+- Trusting `update-all.sh`'s "new commits" (the pull delta) as the review range instead of the range from the ledger's *Last reviewed* SHA, which its "since last review" line reports
 - Finishing a review without updating `docs/spec/upstream-ports.md`, or moving a SHA past a relevant commit without listing it under *Open upstream items*
 
 - Porting yt-dlp cipher changes without checking ejs — ejs is often more current for cipher/n-challenge
