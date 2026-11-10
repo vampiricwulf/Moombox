@@ -234,7 +234,9 @@ func TestLiveRefreshFailingOnTheChallengesSwitchesPathInANewPart(t *testing.T) {
 
 				newPart := filepath.Join(root, "seg_1")
 				if !tc.staged {
-					newPart = root
+					// Cleaned, as filepath.Dir cleans what it is compared with: a temp
+					// root spelled with forward slashes on Windows is the same directory.
+					newPart = filepath.Clean(root)
 				}
 				// A split row's first look at the new quality built tv's
 				// pair in the current part, discarded unrun; the switch's

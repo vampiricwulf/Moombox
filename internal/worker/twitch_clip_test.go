@@ -131,7 +131,7 @@ func TestTwitchClipJobDownloadsTheBestRenditionAndFinalizes(t *testing.T) {
 		t.Errorf("row = title %q channel %q thumb %q start %q category %q isVod %v quality %q",
 			got.Title, got.ChannelName, got.ThumbnailURL, got.StreamStartTime, got.TwitchCategory, got.IsVod, got.TwitchQuality)
 	}
-	if !strings.Contains(got.OutputFile, "[tw_clip_FaintLightGullWholeWheat].mp4") || !strings.HasPrefix(got.OutputFile, outDir) {
+	if !strings.Contains(got.OutputFile, "[tw_clip_FaintLightGullWholeWheat].mp4") || !strings.HasPrefix(got.OutputFile, filepath.Clean(outDir)) {
 		t.Errorf("output_file = %q, want the template's name under %s", got.OutputFile, outDir)
 	}
 	if _, err := os.Stat(got.OutputFile); err != nil {
