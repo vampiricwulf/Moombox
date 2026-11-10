@@ -885,3 +885,5 @@ Dispatch is queued, not fire-and-forget: `Manager.Send()` returns immediately af
 ## Appendix
 
 For volatile numbers that change frequently (line counts per package, current version, schema version, dependency versions), see [docs/spec/appendix-metrics.md](docs/spec/appendix-metrics.md). These are maintained separately so SPEC.md does not need updates for every line count change.
+
+Code comments cite owner rulings by short ids (`O-M`, `R3`, `Q5`). The ones whose design specs are no longer in the tree are listed, with what each decided, in [docs/spec/appendix-owner-rulings.md](docs/spec/appendix-owner-rulings.md).

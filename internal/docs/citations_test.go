@@ -29,7 +29,8 @@ import (
 // since before v2.8.8) in a range that EDITED one of them. README.md is the
 // first thing a human reads and was carrying a resolution rule two arcs old.
 //
-// appendix-metrics.md (volatile numbers), design-philosophy.md and
+// appendix-metrics.md (volatile numbers), appendix-owner-rulings.md (an index
+// of rulings, which names removed files on purpose), design-philosophy.md and
 // vision-and-purpose.md (prose) are still out on purpose. A name containing a
 // slash is repo-relative; everything else resolves through docPath.
 var specDocs = []string{

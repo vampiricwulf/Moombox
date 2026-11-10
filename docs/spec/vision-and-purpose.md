@@ -125,7 +125,7 @@ Moombox was originally written in TypeScript/Node.js. The Go rewrite began in ea
 - The original TypeScript codebase is preserved on the `abandoned-nodejs` branch (last version: v1.5.16).
 - The Go rewrite incorporated all lessons learned from the TypeScript era: authentication handling, CSP headers, rate limiting, batch database updates, chat bounding, gap detection, and more.
 - The Go rewrite is not a line-for-line port. It is a reimplementation that takes advantage of Go's concurrency model, static typing, and single-binary deployment.
-- `REWRITE_GUIDE.md` in the repository documents the porting strategy for historical reference.
+- The porting strategy was written down in `REWRITE_GUIDE.md`. The file describes the TypeScript codebase and is no longer in the tree; read it from history with `git show d9bbbc83:REWRITE_GUIDE.md` (v2.9.8, the last release that held it).
 
 There is no ongoing relationship between the TypeScript codebase and the current Go code. The TypeScript branch exists purely for historical reference.
 
