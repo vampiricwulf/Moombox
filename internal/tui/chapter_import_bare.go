@@ -42,6 +42,11 @@ const (
 const (
 	chapterPastePlaceholder     = "Paste a timestamp comment: 0:00 Intro, 12:34 First song, …"
 	bareChapterPastePlaceholder = "Paste a timestamp comment"
+	// The offset input's placeholder: the normal form's, and the one that
+	// fits beside "Offset: " below bareOffsetShortBelow columns.
+	chapterOffsetPlaceholder     = "0 (seconds or ±H:MM:SS)"
+	bareChapterOffsetPlaceholder = "0 (s or ±H:MM:SS)"
+	bareOffsetShortBelow         = 34
 )
 
 // bare reports whether the dialog draws its bare form: its own size is below
@@ -73,6 +78,10 @@ func (m *ChapterImportDialogModel) bareSetSize() {
 	m.text.Placeholder = bareChapterPastePlaceholder
 	m.text.SetWidth(m.width)
 	m.text.SetHeight(barePasteRows(m.height))
+	m.offset.Placeholder = chapterOffsetPlaceholder
+	if m.width < bareOffsetShortBelow {
+		m.offset.Placeholder = bareChapterOffsetPlaceholder
+	}
 	bareInputWidth(&m.offset, m.width-9)
 }
 
@@ -80,7 +89,8 @@ func (m *ChapterImportDialogModel) bareSetSize() {
 // components the two forms share.
 func (m *ChapterImportDialogModel) bareLeave() {
 	m.text.Placeholder = chapterPastePlaceholder
-	m.offset.SetCursor(m.offset.Position())
+	m.offset.Placeholder = chapterOffsetPlaceholder
+	bareInputWidth(&m.offset, m.offset.Width())
 }
 
 // bareTitle is the header of every step.
@@ -155,6 +165,11 @@ func (m *ChapterImportDialogModel) bareEdit() (sheet bareSheet, previewRows int)
 		room -= len(rows)
 	}
 	if !m.previewDrawn() {
+		return sheet, 0
+	}
+	if room < 2 && len(m.view.Chapters) > room {
+		// One row for several chapters would be the "and n more" row with
+		// no chapter above it.
 		return sheet, 0
 	}
 	return sheet, max(room, 0)

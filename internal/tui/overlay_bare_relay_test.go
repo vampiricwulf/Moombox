@@ -335,3 +335,34 @@ func TestBareImportPickerRowsKeepTheirEnd(t *testing.T) {
 		}
 	}
 }
+
+// The chapter import's editing step: a single row left for several chapters
+// is not spent on "and n more" with no chapter above it, and the offset's
+// placeholder is whole at the floor.
+func TestBareChapterEditWording(t *testing.T) {
+	if got := NewChapterImportDialogModel().offset.Placeholder; got != chapterOffsetPlaceholder {
+		t.Fatalf("the normal offset placeholder is %q, the bare form restores %q", got, chapterOffsetPlaceholder)
+	}
+	compactSizes(func(w, h int) {
+		if h < 10 {
+			return
+		}
+		for _, state := range []string{"edit", "worst"} {
+			m := bareChapters(w, h, 12, state)
+			rows := plainRows(m.View())
+			for i, row := range rows {
+				if strings.Contains(row, "more") && strings.Contains(row, "…") && i > 0 && !strings.Contains(rows[i-1], ":") {
+					t.Errorf("%dx%d, %s: a \"more\" row with no chapter above it:\n%s", w, h, state, strings.Join(rows, "\n"))
+				}
+			}
+		}
+	})
+	m := bareChapters(30, 10, 12, "reading")
+	if got := ansi.Strip(m.View()); !strings.Contains(got, "Offset: "+bareChapterOffsetPlaceholder) {
+		t.Errorf("the offset placeholder at 30 columns:\n%s", got)
+	}
+	m.SetSize(60, 20)
+	if m.offset.Placeholder != chapterOffsetPlaceholder {
+		t.Errorf("the normal form got the placeholder %q back", m.offset.Placeholder)
+	}
+}
