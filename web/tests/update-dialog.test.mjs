@@ -383,3 +383,48 @@ test("Update Now while Skip is out is refused, and the slot is free once Skip is
   assert.equal(confirms, 1);
   assert.equal(h.http.matching("/api/update/apply", "POST").length, 1, "the slot stayed taken after Skip was answered");
 });
+
+// ── An apply the updater refuses (owner ruling R-H3) ────────────────────────
+//
+// POST /api/update/apply answers 409 with no `pending` when the updater itself
+// refuses: an apply is already running (the TUI's, another dashboard's), or
+// one is already placed and waiting for the restart. Neither is a failure of
+// this click — the update is happening — and the toast read "Update failed:
+// update already in progress" in red. It is a neutral notice now, in the
+// server's own words; every other failure keeps its red "Update failed: …".
+//
+// MUTANTS: the bare-409 arm dropped (both notices read "Update failed: …" in
+// danger); the arm placed ahead of the `pending` one (covered by the
+// replaced-release tests above); the arm matching any non-2xx (the 500 below
+// turns neutral).
+for (const text of ["update already in progress", "an update is already applied — restart pending"]) {
+  test(`an apply answered 409 "${text}" is a neutral notice in the server's words`, { skip }, async () => {
+    const h = await dialogOpenOn911({
+      "POST /api/update/apply": () => ({ __response: true, status: 409, body: { error: text } }),
+    });
+    h.el("update-now-btn").click();
+    await h.flush();
+    await h.flush();
+
+    assert.equal(h.http.matching("/api/update/apply", "POST").length, 1);
+    const toasts = toastsOf(h);
+    assert.ok(toasts.some((t) => t.text === text && t.variant === "primary"), `toasts were ${JSON.stringify(toasts)}`);
+    assert.ok(!toasts.some((t) => t.variant === "danger" || /Update failed/.test(t.text)), `toasts were ${JSON.stringify(toasts)}`);
+    assert.notEqual(h.el("update-now-btn").loading, true, "the button must not be left spinning");
+  });
+}
+
+test("an apply answered 500 is still a red Update failed", { skip }, async () => {
+  const h = await dialogOpenOn911({
+    "POST /api/update/apply": () => ({ __response: true, status: 500, body: { error: "download stalled" } }),
+  });
+  h.el("update-now-btn").click();
+  await h.flush();
+  await h.flush();
+
+  const toasts = toastsOf(h);
+  assert.ok(
+    toasts.some((t) => t.text === "Update failed: download stalled" && t.variant === "danger"),
+    `toasts were ${JSON.stringify(toasts)}`,
+  );
+});

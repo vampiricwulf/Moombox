@@ -150,7 +150,8 @@ func TestTheTUIActsOnlyOnTheReleaseItShows(t *testing.T) {
 
 				var refused bool
 				if key == "U" {
-					refused = s.applyUpdateFromTUI("v9.9.1") != ""
+					text, _ := s.applyUpdateFromTUI("v9.9.1")
+					refused = text != ""
 				} else {
 					refused = s.dismissUpdateFromTUI("v9.9.1") != nil
 				}

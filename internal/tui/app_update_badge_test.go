@@ -192,3 +192,55 @@ func TestAnUpToDateCheckKeepsAReleaseFoundDuringIt(t *testing.T) {
 		}
 	}
 }
+
+// TestAnApplyTheUpdaterRefusedIsNotAFailureLine (owner ruling R-H3, the TUI
+// half): R U answered "update already in progress" (the dashboard's apply, or
+// an earlier R U, is running) or "an update is already applied — restart
+// pending" was shown as "Update failed: …" in red. Neither is a failure — the
+// update is happening — so the line is the updater's own sentence, stated as a
+// warning (yellow, the colour that asks for nothing), as the dashboard's
+// neutral toast is. A real failure keeps its red "Update failed: …", and the
+// pending release stays offered either way.
+//
+// Mutants: the Refused arm dropped (red "Update failed: …" for both); the arm
+// taken for every error (the download failure turns yellow).
+func TestAnApplyTheUpdaterRefusedIsNotAFailureLine(t *testing.T) {
+	for _, text := range []string{"update already in progress", "an update is already applied — restart pending"} {
+		app := newBadgeApp(t)
+		lightBadge(t, app, "v9.9.9")
+		app.Update(updateApplyResultMsg{Err: text, Refused: true})
+		if app.feedback.msg != text {
+			t.Errorf("feedback = %q, want the updater's own %q", app.feedback.msg, text)
+		}
+		if c := feedbackColor(app.feedback.msg, app.feedback.sev); c == ColorRed || c != ColorYellow {
+			t.Errorf("%q rendered %v, want the warning yellow", text, c)
+		}
+		if app.updateAvailable == nil {
+			t.Errorf("%q dropped the pending release", text)
+		}
+	}
+
+	app := newBadgeApp(t)
+	lightBadge(t, app, "v9.9.9")
+	app.Update(updateApplyResultMsg{Err: "download failed: boom"})
+	if app.feedback.msg != "Update failed: download failed: boom" || feedbackColor(app.feedback.msg, app.feedback.sev) != ColorRed {
+		t.Errorf("a failed apply = %q (%v), want the red Update failed line",
+			app.feedback.msg, feedbackColor(app.feedback.msg, app.feedback.sev))
+	}
+}
+
+// TestApplyUpdateActionCarriesTheRefusal: the callback's refused flag reaches
+// the result message, so the line above is what R U shows.
+func TestApplyUpdateActionCarriesTheRefusal(t *testing.T) {
+	app := newBadgeApp(t)
+	lightBadge(t, app, "v9.9.9")
+	app.OnApplyUpdate = func(string) (string, bool) { return "update already in progress", true }
+	cmd := app.applyUpdateAction()
+	if cmd == nil {
+		t.Fatal("R U returned no command")
+	}
+	msg, ok := cmd().(updateApplyResultMsg)
+	if !ok || !msg.Refused || msg.Err != "update already in progress" {
+		t.Errorf("R U's result = %#v, want the refusal carried", msg)
+	}
+}

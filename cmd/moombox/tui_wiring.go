@@ -22,6 +22,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/stats"
 	"github.com/vampiricwulf/Moombox/internal/tui"
+	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/worker"
@@ -1354,19 +1355,44 @@ func (s *runState) checkUpdateFromTUI() (*tui.UpdateStatusMsg, error) {
 // POST /api/update/apply holds the dashboard's dialog to. It used to install
 // whatever was pending, so a TUI whose copy of the pending release was stale
 // applied a release whose notes were never on screen.
-func (s *runState) applyUpdateFromTUI(tag string) string {
+//
+// The bool is updateApplyAnswer's: true when the updater declined because an
+// apply is already running or placed, which R U shows as a notice and not as
+// "Update failed" (owner ruling R-H3).
+func (s *runState) applyUpdateFromTUI(tag string) (string, bool) {
 	release, err := routes.PendingUpdate(tag)
 	if err != nil {
 		s.resyncTUIUpdate(tag, err)
-		return err.Error()
+		return err.Error(), false
 	}
 	s.log.Info("Update requested from TUI", slog.String("version", release.TagName))
 	if err := s.upd.ApplyUpdate(context.Background(), release); err != nil {
-		s.log.Error("[Updater] Update failed", slog.String("error", err.Error()))
-		return err.Error()
+		text, refused := updateApplyAnswer(err)
+		if refused {
+			s.log.Info("[Updater] Update not started from the TUI", slog.String("reason", text))
+		} else {
+			s.log.Error("[Updater] Update failed", slog.String("error", text))
+		}
+		return text, refused
 	}
 	s.triggerRestart("TUI update")
-	return ""
+	return "", false
+}
+
+// updateApplyAnswer is what the TUI is told about an ApplyUpdate error: its
+// text, and whether it is one of the updater's two refusals
+// (updater.ErrApplyInProgress, updater.ErrRestartPending) — then in the
+// refusal's own words, the ones POST /api/update/apply answers with its 409.
+func updateApplyAnswer(err error) (text string, refused bool) {
+	if err == nil {
+		return "", false
+	}
+	for _, refusal := range []error{updater.ErrApplyInProgress, updater.ErrRestartPending} {
+		if errors.Is(err, refusal) {
+			return refusal.Error(), true
+		}
+	}
+	return err.Error(), false
 }
 
 // dismissUpdateFromTUI is the TUI's S beside a pending update's notes: it

@@ -107,6 +107,9 @@ type (
 	}
 	updateApplyResultMsg struct {
 		Err string // empty on success (process exits before this is seen)
+		// Refused: Err is the updater declining (an apply already running, or
+		// one placed and restart-pending), not a failure (owner ruling R-H3).
+		Refused bool
 	}
 	// dismissUpdateResultMsg is the async result of OnDismissUpdate, dispatched
 	// by the S key in the release-notes overlay.
@@ -788,7 +791,7 @@ type App struct {
 	OnCheckUpdate     func() (*UpdateStatusMsg, error)  // manual check — the release pending after it, nil when none (up to date)
 	OnForceCheck      func()                            // force an immediate monitor poll of all sources
 	OnBackfillRescan  func()                            // force a feed-history backfill re-scan of all channels (R B)
-	OnApplyUpdate     func(tag string) string           // installs the release tagged tag, the one shown; returns error string (empty on success, process exits)
+	OnApplyUpdate     func(tag string) (string, bool)   // installs the release tagged tag, the one shown; returns the error text (empty on success, process exits) and whether it is the updater declining — an apply already running or placed — and not a failure
 	OnVerifySignature func() (manifest bool, err error) // verify current binary's signature, and its release's manifest when it has one
 	// OnDismissUpdate skips a pending version (the S key in the
 	// release-notes overlay); nil hides the key.
@@ -1397,7 +1400,8 @@ func (a *App) applyUpdateAction() tea.Cmd {
 	tag := a.updateAvailable.TagName
 	applyFn := a.OnApplyUpdate
 	return safeCmd(func() tea.Msg {
-		return updateApplyResultMsg{Err: applyFn(tag)}
+		text, refused := applyFn(tag)
+		return updateApplyResultMsg{Err: text, Refused: refused}
 	})
 }
 

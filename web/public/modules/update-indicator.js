@@ -352,6 +352,12 @@ export class UpdateController {
           // Refused because it was skipped or withdrawn elsewhere while the
           // request was out.
           this._closeWithdrawn();
+        } else if (resp.status === 409) {
+          // The updater's own refusal (owner ruling R-H3): an apply is already
+          // running — the TUI's, another dashboard's — or one is placed and
+          // waiting for the restart. The update is happening, so this is a
+          // notice in the server's words, not a failure of this click.
+          this.app.showToast(data.error || "update already in progress", "primary");
         } else if (resp.status === 403) {
           // Not a loopback peer after all, though the page is on a loopback
           // name: a browser on a Docker host at http://localhost reaches the

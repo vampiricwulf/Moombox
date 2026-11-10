@@ -75,7 +75,7 @@ func TestReleaseNotesSkipKey(t *testing.T) {
 func TestReleaseNotesApplyKeyOnlyBesideAPendingUpdate(t *testing.T) {
 	app := NewApp()
 	applied := false
-	app.OnApplyUpdate = func(string) string { applied = true; return "" }
+	app.OnApplyUpdate = func(string) (string, bool) { applied = true; return "", false }
 
 	app.releaseNotesPopup.open("v1.0.0", "current notes", 80, 24)
 	app.releaseNotesPopup.setPending(false)
@@ -115,7 +115,7 @@ func TestReleaseNotesApplyKeyOnlyBesideAPendingUpdate(t *testing.T) {
 func TestApplyNamesTheReleaseShownByItsTag(t *testing.T) {
 	app := NewApp()
 	var got []string
-	app.OnApplyUpdate = func(tag string) string { got = append(got, tag); return "" }
+	app.OnApplyUpdate = func(tag string) (string, bool) { got = append(got, tag); return "", false }
 	app.updateAvailable = &UpdateStatusMsg{Version: "2.0.0", TagName: "v2.0.0", ReleaseNotes: "notes"}
 	app.releaseNotesPopup.open("v2.0.0", "notes", 80, 24)
 	app.releaseNotesPopup.setPending(true)

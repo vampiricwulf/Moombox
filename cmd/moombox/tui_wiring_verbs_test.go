@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/tui"
+	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
@@ -50,5 +51,27 @@ func TestMuxRefusalIsMarkedForTheTUI(t *testing.T) {
 	}
 	if err := muxRefusal(nil); err != nil {
 		t.Errorf("muxRefusal(nil) = %v", err)
+	}
+}
+
+// TestUpdateApplyRefusalIsMarkedForTheTUI (owner ruling R-H3): the updater's
+// two refusals — an apply already running, one already placed and waiting for
+// the restart — reach the TUI marked as refusals, in the updater's own words
+// (the same text POST /api/update/apply answers with its 409), so R U does
+// not show them as "Update failed". Any other error is a failure.
+//
+// Mutant: either sentinel left unmarked.
+func TestUpdateApplyRefusalIsMarkedForTheTUI(t *testing.T) {
+	for _, sentinel := range []error{updater.ErrApplyInProgress, updater.ErrRestartPending} {
+		text, refused := updateApplyAnswer(fmt.Errorf("apply: %w", sentinel))
+		if !refused || text != sentinel.Error() {
+			t.Errorf("updateApplyAnswer(%v) = %q, %v; want its own text, refused", sentinel, text, refused)
+		}
+	}
+	if text, refused := updateApplyAnswer(errors.New("download stalled")); refused || text != "download stalled" {
+		t.Errorf("updateApplyAnswer(a fault) = %q, %v; want the fault, not refused", text, refused)
+	}
+	if text, refused := updateApplyAnswer(nil); refused || text != "" {
+		t.Errorf("updateApplyAnswer(nil) = %q, %v", text, refused)
 	}
 }
