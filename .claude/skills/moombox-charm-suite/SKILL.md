@@ -131,6 +131,18 @@ Three-panel layout with dynamic sizing based on `FocusPanel` (Tasks, Details, Lo
 - Focused panel gets more space (70/25 height split, 45/55 or 35/65 width split)
 - `PanelRegion` provides mouse hit-testing with `Contains()` and `ContentY()` for click detection
 
+### Panel Render Caches
+The task list, job details, log viewer and status bar memoise `View()`: each returns its stored `renderCache` while a freshly built key struct (`taskListKey`, `jobDetailsKey`, `logViewerKey`, `statusBarKey`) equals the one the frame was drawn for. The frame is asked for ~120 times a second and most messages change nothing a panel draws.
+
+**The rule:** anything `View()` reads must be a field of that panel's key struct, or change only through the panel's content funnel — `rebuildVirtualList` (task list, bumps `rebuildSeq`) or `updateViewportContent` (details and log viewer, bumps `contentSeq`). The status bar has no funnel: every input is a key field. `invalidate()` on the task list and log viewer is for the rare change that moves neither. Miss this and the panel shows a stale frame, and a test of the new feature that renders once will not notice.
+
+When you add state a panel draws (a header badge, a row tag, a new status-bar segment):
+1. Add it to the key struct, or route its writer through the funnel.
+2. Add a row to the matching table in `internal/tui/render_cache_test.go` — `TestTaskListCachedFramesMatchFreshFrames`, `TestJobDetailsCachedFramesMatchFreshFrames`, or `TestStatusBarCacheKeyCoversEveryInput` (one row per key field). Each compares the cached frame with a fresh one after the mutation.
+3. Run `go test -run 'Cache|FrameCost' ./internal/tui/`. `TestFrameCostAtLogCap` (`internal/tui/frame_cost_test.go`) pins the allocations of an unchanged frame; `go test -run '^$' -bench 'AtLogCap' -benchmem ./internal/tui/` shows the timings.
+
+Details: `docs/spec/user-interfaces.md` § Panel Render Caches.
+
 ### Custom Components
 - **Marquee**: Bouncing text scroller for long job titles (resets on timer, pauses at ends)
 - **ProgressStore**: Thread-safe map for progress ticks — prevents re-sorting task list on every 100ms update

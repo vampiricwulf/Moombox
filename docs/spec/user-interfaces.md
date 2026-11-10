@@ -289,6 +289,14 @@ After a save the overlay re-reads the live config as a fresh `Open` would (`resy
 | `openbrowser_windows.go` / `openbrowser_other.go` | Builds the browser-open command. Windows uses `explorer.exe` (not `cmd /c start`) so a cold-started browser is re-parented outside the launcher's kill-on-close Job Object. |
 | `clipboard_windows.go` / `clipboard_other.go` | The `O C` system-clipboard backup. Windows spawns `clip.exe` on a local console only; everywhere else there is no dependency-free equivalent and the function reports false, leaving OSC 52 as the sole mechanism. |
 
+### Panel Render Caches
+
+Bubble Tea renders after every message, about 120 times a second with one download active, and most messages change nothing a given panel draws. Four panels therefore memoise `View()`: the task list (`taskListKey`, `internal/tui/task_list.go`), the job details (`jobDetailsKey`, `internal/tui/job_details.go`), the log viewer (`logViewerKey`, `internal/tui/log_viewer.go`) and the status bar (`statusBarKey`, `internal/tui/status_bar.go`). Each keeps the last frame in `renderCache` beside the key it was drawn for, and returns it while a freshly built key compares equal.
+
+The rule: every input `View()` reads is either a field of the panel's key struct or changes only through the panel's content funnel, which bumps a counter that is in the key. The funnels are `rebuildVirtualList` for the task list (`rebuildSeq`) and each panel's own `updateViewportContent` for the details and the log viewer (`contentSeq`); the status bar has no funnel, so every input is a key field. The task list and the log viewer also have `invalidate()`, for the few changes that move neither a key field nor the funnel. A new piece of state that `View()` reads and that is in neither place leaves the panel showing a stale frame until something else moves the key. The log viewer skips the cache while its search box is open, and each key carries what its panel needs of the wall clock (`sec` on the task list and the details), so a countdown still moves on an idle panel.
+
+`internal/tui/render_cache_test.go` holds the pins: `TestTaskListCachedFramesMatchFreshFrames` and `TestJobDetailsCachedFramesMatchFreshFrames` run a table of mutations and compare each cached frame with one rendered fresh, and `TestStatusBarCacheKeyCoversEveryInput` has one row per key field. A new input gets a row in the matching table. `TestFrameCostAtLogCap` (`internal/tui/frame_cost_test.go`) pins what an unchanged frame may allocate at 1,000 jobs and 1,000 log lines, for the whole frame and for the log panel and status bar alone; `go test -run '^$' -bench 'AtLogCap' -benchmem ./internal/tui/` prints the timings, which are recorded and never asserted.
+
 ### The Chord System
 
 The chord system is the TUI's keyboard shortcut mechanism. It uses a prefix-key pattern where the user presses a prefix key followed by an action key, with an optional third confirmation key for destructive actions.
