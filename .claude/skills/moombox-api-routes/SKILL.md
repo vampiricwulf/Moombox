@@ -67,7 +67,7 @@ Connect the event source to the broadcast in `cmd/moombox/monitor_callbacks.go`.
 - **Log subscriber**: `log.SubscribeLines()` channel → `BroadcastLog(line.Text, line.Seq)` (`wireLogForwarding`)
 
 ### 3. Frontend Handler
-`web/public/app.js` — Add case in WebSocket message handler switch on `msg.type`. Existing types, in the switch's own order: `initial_state`, `jobs_update`, `job_update`, `job_progress`, `config_update`, `job_deleted`, `log`, `check_timers`, `disk_status`, `backfill_status`, `update_available`, `connectivity`, `pong`.
+`web/public/app.js` — add a `case` to the `switch (message.type)` in `handleMessage`, and a row for the new type to the table in `docs/spec/user-interfaces.md` § Server-to-Client Message Types. That table is the one list of existing types; `TestWebSocketFrameTableMatchesTheClient` (`internal/docs/drift_test.go`) fails while the handler and the table differ.
 
 ### 4. TUI Handler
 TUI does **not** receive WebSocket messages. Instead, it gets data via:

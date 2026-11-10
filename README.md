@@ -650,7 +650,7 @@ All endpoints are available under `/api/`. Real-time updates are delivered via W
 | GET | `/api/stats` | Get download statistics |
 | GET | `/api/logs` | Get recent log lines (from the in-memory ring buffer) |
 
-WebSocket messages: `initial_state`, `jobs_update`, `job_update`, `check_timers`, `log`, `trim_status`, `pong`
+WebSocket messages: `{"type": ..., "payload": ...}` frames. The types and their payloads are listed in [docs/spec/user-interfaces.md](docs/spec/user-interfaces.md) under "Server-to-Client Message Types".
 
 ## yt-dlp Integration
 

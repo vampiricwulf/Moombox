@@ -556,25 +556,7 @@ The TUI uses a chord-based keybinding system with a single source of truth:
 
 The WebSocket connects on any path (upgrade handler intercepts before static file serving). Message format: `{"type": string, "payload": any}`.
 
-**Server-to-client message types:**
-- `job_update` — A job changed in a way a progress tick does not (status transition, error, chat status, mux output, new job, trim edit)
-- `job_progress` — Progress-only tick of an active download, one per configured progress interval per job (~60 Hz at the 16 ms default) (payload: `{id, status, progress, percent, speed, eta, lastVideoSeq, lastAudioSeq, totalVideoSeq, totalAudioSeq, totalChatMessages, updatedAt}`, merged client-side)
-- `jobs_update` — Full job list refresh (payload: array of all visible jobs)
-- `job_deleted` — A job row was removed (payload: `{id}`)
-- `config_update` — A config setting that affects client-side rendering changed (payload: partial config; currently `{hideFinishedAgeDays}`)
-- `log` — Log line (payload: string; beside it, `seq` — the line's number in the logger's ring, which the dashboard compares with `initial_state`'s `logSeq` to skip a line the snapshot already holds)
-- `check_timers` — Monitor schedule update (payload: `{nextFeedCheck, nextDecapiCheck, nextTwitchCheck}`)
-- `initial_state` — Sent on connect (payload: `{jobs, logs, logSeq, nextFeedCheck, nextDecapiCheck, nextTwitchCheck, connectivity, hideFinishedAgeDays, backfill, runningTrims, admissionHolds}`; `logSeq` numbers the newest line of `logs`)
-- `update_available` — New version found (payload: release info)
-- `update_cleared` — The pending release was withdrawn: skipped, or a check found nothing newer, so it was pulled (payload: `{tagName}`; a dashboard drops its badge only when the tag names the release it shows, and closes an update dialog still offering that release)
-- `disk_status` — Disk space update (payload: `{free, total, usedPct, warnLevel}`)
-- `connectivity` — Network reachability changed (payload: `{online}`)
-- `admission_holds` — The backlog scheduler's holds changed (payload: `jobstate.AdmissionHolds`, `{offline, diskHeld, rateLimitedUntil?, jobs?: {<id>: {attempt, of, until}}}`, the same object `/api/status` carries as `admissionHolds`); what Queued rows show and what turns the disk gauge to "holding"
-- `backfill_status` — Per-channel backfill scan progress (payload: `{channel, tab, pages, state}`)
-- `trim_status` — A trim the trim service runs, from either UI or a finished job's post-download trim (payload: `{id, jobId, startTime, endTime, progress, state, trim?, error?}`; `state`: running — as it starts, then with FFmpeg's percentage at most every 250 ms — then finished with the stored `trim` record or failed with an `error` written for the user). Running trims are also seeded via `initial_state`, so a reload mid-trim still shows its progress bar
-- `pong` — Reply to the client's `ping` (payload: none)
-
-That list is the whole wire protocol: the hub's own `Broadcast` helpers in `internal/web/websocket.go` (`job_update`, `job_progress`, `jobs_update`, `job_deleted`, `check_timers`, `connectivity`, `log`), the `cmd/moombox` callers (`update_available`, `update_cleared` via `announceUpdateCleared`, `disk_status`, `admission_holds` via `runAdmissionHoldsPush`, `backfill_status`, `config_update`, and `trim_status` via `trimStatusFrames`), the `initial_state` snapshot the hub marshals on connect, and the `pong` reply.
+**Server-to-client message types:** each frame type is a `case` in the dashboard's `handleMessage` (`web/public/app.js`). The one list of them, with payloads and senders, is the table in `docs/spec/user-interfaces.md` § Server-to-Client Message Types; a test keeps that table equal to the handler's labels. In short: `initial_state` is the snapshot sent on connect and after a dropped frame; `job_update`, `job_progress`, `jobs_update` and `job_deleted` carry job rows (a whole row, the slim ~60 Hz progress tick merged client-side, the full list, a removal); `config_update`, `check_timers`, `disk_status`, `admission_holds`, `connectivity` and `backfill_status` carry status the header and rows draw; `log` carries one log line with its `seq`; `trim_status`, `update_available` and `update_cleared` carry trim and release events; `pong` answers the client's `ping`.
 
 The `hideFinishedAgeDays` field in `initial_state` and `config_update` drives the Web UI's client-side archive re-evaluation: on every `job_update`/`jobs_update` and on a 60-second idle sweep, the Web UI moves Finished jobs that have aged past the threshold from the active panel into the Archived panel. The TUI's `isJobArchived` reclassification (`internal/tui/task_list.go`) does the same, and the active panel stays in sync with wall-clock time without a page refresh. Every Go classifier — that TUI bucket, the REST `/api/jobs` split, the `job_update` broadcast gate and the `cmd/moombox` list filter — runs the one predicate in `internal/jobfilter/archive.go` (`ArchiveCutoff`, `IsArchived`), which scales the fractional day threshold exactly and treats the boundary as exclusive: a Finished job whose `updated_at` sits exactly on the cutoff stays active, as does one whose timestamp is missing or unparseable.
 

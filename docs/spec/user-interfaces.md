@@ -702,21 +702,28 @@ The `type` field is a string discriminator. The `payload` field varies by type.
 
 ### Server-to-Client Message Types
 
+This table is the one list of frame types. SPEC.md, README.md and the two skills that mention the protocol point here instead of keeping their own copy, and `TestWebSocketFrameTableMatchesTheClient` (`internal/docs/drift_test.go`) fails when its rows and the `case` labels of `handleMessage` (`web/public/app.js`) differ in either direction.
+
 | Type | Payload | When Sent |
 |------|---------|-----------|
-| `initial_state` | `{ jobs, logs, logSeq, nextFeedCheck, nextDecapiCheck, nextTwitchCheck, connectivity, hideFinishedAgeDays, backfill, runningTrims }` | Once, immediately after WebSocket connection is accepted; terminal `jobs` rows carry `hasStaging`. `logs` and `logSeq` are one read of the logger's ring (`Logger.RecentLines`): its lines and the number of the newest. `runningTrims` is `TrimService.RunningTrims()` — every trim the service is encoding, with its latest progress — which the client rebuilds its running-trim map from, so a page reloaded mid-trim still draws the trim's bar |
+| `initial_state` | `{ jobs, logs, logSeq, nextFeedCheck, nextDecapiCheck, nextTwitchCheck, connectivity, hideFinishedAgeDays, backfill, runningTrims, admissionHolds }` | Once, immediately after WebSocket connection is accepted; terminal `jobs` rows carry `hasStaging`. `logs` and `logSeq` are one read of the logger's ring (`Logger.RecentLines`): its lines and the number of the newest. `runningTrims` is `TrimService.RunningTrims()` — every trim the service is encoding, with its latest progress — which the client rebuilds its running-trim map from, so a page reloaded mid-trim still draws the trim's bar |
 | `job_update` | Single job object (a terminal row carries `hasStaging`, as on `GET /api/jobs`) | When a job changes in any way a progress tick does not: a status transition, an error, a chat-status change, the mux naming its output, a new job, a trim edit. Progress-only ticks take `job_progress` instead. Sent for every row, archived ones included: the client archives a Finished row itself (`_evaluateArchiveBoundary`). A server-side archive gate used to drop it, which at `hide_finished_age_days = 0` swallowed the Muxing → Finished transition. |
 | `job_progress` | `{ id, status, progress, percent, speed, eta, lastVideoSeq, lastAudioSeq, totalVideoSeq, totalAudioSeq, totalChatMessages, updatedAt }` | Every progress report of an active download — one per configured progress interval per job, ~60 Hz at the 16 ms default. |
 | `jobs_update` | Full job array (terminal rows carry `hasStaging`, as on `GET /api/jobs`) | When a job is added or deleted (full list, not incremental) |
 | `job_deleted` | `{ id }` | When a job row is removed from the database |
 | `config_update` | Partial config (currently `{ hideFinishedAgeDays }`) | When a config setting that affects client-side rendering changes — from the dashboard's own `PUT /api/config` or from a TUI settings save, both through one `broadcastHideFinishedAge` in `cmd/moombox/routes_wiring.go`, which gates on the value actually having moved since the last broadcast, sends this first, and then sends a `jobs_update` re-filtered with the same captured threshold (skipped, with a warning, if the jobs read fails — an empty list would blank every dashboard) |
 | `log` | Log line string, with the line's number in the logger's ring as `seq` beside the payload (`{"type":"log","payload":"…","seq":N}`) | When a new log line is emitted. |
-| `check_timers` | `{ feed, decapi, twitch }` timestamps | When monitor check schedules change |
+| `check_timers` | `{ nextFeedCheck, nextDecapiCheck, nextTwitchCheck }` timestamps | When monitor check schedules change |
+| `disk_status` | `{ free, total, usedPct, warnLevel }` | Each disk check of the output volume (`cmd/moombox/main.go`); drives the disk indicator and gauge |
+| `admission_holds` | `jobstate.AdmissionHolds`: `{ offline, diskHeld, rateLimitedUntil?, jobs?: { <id>: { attempt, of, until } } }`, the object `/api/status` carries as `admissionHolds` | When the backlog scheduler's holds change (`runAdmissionHoldsPush`, `cmd/moombox/admission_holds_push.go`); what Queued rows show and what turns the disk gauge to "holding" |
+| `connectivity` | `{ online }` | When network reachability flips (`BroadcastConnectivity`, `internal/web/websocket.go`) |
 | `backfill_status` | `{ channel, tab, pages, state }` | Feed-history backfill scan progress per channel (`state`: scanning / error / done / idle — `monitor.BackfillState`, mirrored by `tui.BackfillState` and utils.js `BACKFILL_STATE`, pinned by `TestBackfillStatesMatchAcrossLayers`). The retained states (`BackfillState.Retained`: scanning and error) are also seeded via `initial_state`. |
 | `trim_status` | `{ id, jobId, startTime, endTime, progress, state, trim?, error? }` (`worker.TrimEvent`) | A trim the trim service runs — the dashboard's detached ones, the TUI's in-process ones and a finished job's post-download one alike, through the hook `trimStatusFrames` … |
 | `update_available` | Release info (`version`, `tagName`, `releaseNotes`, `releaseNotesHtml`, `publishedAt`, …) | A check found a release newer than the running version |
 | `update_cleared` | `{ tagName }` | The pending release was withdrawn: skipped (`POST /api/update/dismiss`, or the TUI's `S` beside a pending update's notes), or a check found nothing newer than the running version … |
 | `pong` | Empty | Response to client `ping` messages |
+
+Who sends what: the hub's own `Broadcast` helpers in `internal/web/websocket.go` (`job_update`, `job_progress`, `jobs_update`, `job_deleted`, `check_timers`, `connectivity`, `log`), the `cmd/moombox` callers (`update_available`, `update_cleared` via `announceUpdateCleared`, `disk_status`, `admission_holds`, `backfill_status`, `config_update`, and `trim_status` via `trimStatusFrames`), the `initial_state` snapshot the hub marshals on connect, and the `pong` reply.
 
 #### `job_progress`
 
