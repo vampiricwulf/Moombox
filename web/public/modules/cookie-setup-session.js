@@ -76,6 +76,13 @@ export class CookieSetupSession {
     // setup to abandon (routes/cookies.go, the /abandon gate).
     this._startedHere = false;
     this._boundDialog = null;
+    // Which setup this is: bumped by begin, adopt and cancel. A finish acts
+    // on its answer only while the generation it started in is still
+    // current — a Cancel (or Escape) during the finish ends that setup, and
+    // the late answer must neither move the phase out of idle (re-arming the
+    // unload beacon, or making adopt() take the next setup for this one) nor
+    // draw its verdict over whatever came after.
+    this._gen = 0;
   }
 
   /** True while this page holds the server's setup slot. */
@@ -158,6 +165,7 @@ export class CookieSetupSession {
     this.platform = platform === "twitch" ? "twitch" : "youtube";
     this.owner = owner;
     this._startedHere = true;
+    this._gen++;
     this.phase = PHASE.ACTIVE;
     this._clearMessages();
     const instructions = document.getElementById("auto-cookie-instructions");
@@ -184,7 +192,10 @@ export class CookieSetupSession {
     if (!status?.setupInProgress) return;
     this.bind();
     const dialog = document.getElementById("auto-cookie-setup-dialog");
-    if (this.phase !== PHASE.IDLE) {
+    // Rejected is as free as idle: the finish's answer released the slot, so
+    // a setup the server now reports is someone else's (another tab, the
+    // TUI) and takes its own platform — never the earlier setup's.
+    if (this.phase !== PHASE.IDLE && this.phase !== PHASE.REJECTED) {
       // Ours already: just make sure it is on screen.
       if (dialog && !dialog.open) dialog.show();
       return;
@@ -193,7 +204,9 @@ export class CookieSetupSession {
     this.platform = p === "twitch" || p === "youtube" ? p : null;
     this.owner = owner;
     this._startedHere = false;
+    this._gen++;
     this.phase = PHASE.ADOPTED;
+    this._clearMessages();
     if (dialog) {
       dialog.label = this.platform ? `Setup: ${platformName(this.platform)}` : "Cookie Login";
       if (!dialog.open) dialog.show();
@@ -209,6 +222,10 @@ export class CookieSetupSession {
     const doneBtn = document.getElementById("btn-auto-cookie-done");
     const countdownEl = document.getElementById("auto-cookie-countdown");
     const timeoutResultEl = document.getElementById("auto-cookie-result");
+    const gen = this._gen;
+    // True once the setup this finish was for has ended under it (a Cancel,
+    // Escape, or a begin/adopt after that): its answer is then dropped.
+    const stale = () => gen !== this._gen;
     this.phase = PHASE.FINISHING;
     if (doneBtn) { doneBtn.loading = true; doneBtn.disabled = true; }
     if (resultEl) {
@@ -247,6 +264,10 @@ export class CookieSetupSession {
 
     try {
       const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST", signal: controller.signal });
+      // Cancelled while out: the cookie status may still have changed (the
+      // finish can commit before the cancel lands), so it is reloaded, and
+      // nothing else is touched.
+      if (stale()) { this.app.loadStatus(); return; }
       // Any ANSWER means FinishSetup reached a conclusion and released the
       // slot, success or not. Only the abort path below skips this, and it
       // must — an abort says nothing about whether the setup is still live,
@@ -257,8 +278,13 @@ export class CookieSetupSession {
       // The finish handler's discriminated errors — 422 for an unreadable
       // cookies.txt or a broken profile, 409 for a locked cookie DB — used to
       // reach the user as `HTTP <n>`, which points at none of them.
-      if (!response.ok) throw new Error(await serverErrorMessage(response));
+      if (!response.ok) {
+        const message = await serverErrorMessage(response);
+        if (stale()) return;
+        throw new Error(message);
+      }
       const data = await response.json();
+      if (stale()) return;
       const ytOk = data.authenticated;
       const twOk = data.twitchAuthenticated;
 
@@ -292,6 +318,10 @@ export class CookieSetupSession {
         resultEl.style.color = "var(--text-danger)";
       }
     } catch (e) {
+      if (stale()) {
+        if (e.name === "AbortError") this.app.loadStatus();
+        return;
+      }
       if (e.name === "AbortError") {
         this.phase = PHASE.ABORTED;
         if (resultEl) resultEl.textContent = "";
@@ -301,6 +331,10 @@ export class CookieSetupSession {
         // The 60 s cap stays as it is — the server-side setup grace window is
         // priced against that exact number.
         const probe = await cookieSetupProbe();
+        const baseline = await abortBaseline;
+        // Cancelled while the probe was out: Skip has nothing left to do and
+        // the report would sit over a hidden (or the next) setup.
+        if (stale()) { this.app.loadStatus(); return; }
         // Only a definite "no setup here" releases the slot. An unanswered
         // probe keeps it held, which is the safe direction: Skip and the
         // unload beacon then still have something to tell the server about.
@@ -310,7 +344,7 @@ export class CookieSetupSession {
           // the sole source of the active_platforms it is about to write, so
           // its report says so rather than letting "saved" imply a platform
           // was recorded.
-          const report = cookieSetupAbortReport(probe, await abortBaseline, { wizard: owner.wizard === true });
+          const report = cookieSetupAbortReport(probe, baseline, { wizard: owner.wizard === true });
           timeoutResultEl.innerHTML = `
             <sl-alert variant="${report.variant}" open>
               <sl-icon slot="icon" name="${report.icon}"></sl-icon>
@@ -354,6 +388,7 @@ export class CookieSetupSession {
 
   /** Cancel (the button, Escape, Skip): the user's abort, closing the setup browser. */
   async cancel() {
+    this._gen++;
     this.phase = PHASE.IDLE;
     this.platform = null;
     try {

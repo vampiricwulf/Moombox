@@ -184,3 +184,90 @@ test("pagehide abandons only a setup this page started", { skip }, async () => {
   pagehide(false);
   assert.deepEqual(h.beacons, ["/api/cookies/auto-setup/abandon"]);
 });
+
+// ── a Cancel while the finish is out (fix round) ───────────────────────
+//
+// Cancel (or Escape) during a finish set the phase idle, and the finish's
+// late answer then moved it out again — to rejected, or to aborted with the
+// page still "holding" the slot — so a tab close later abandoned a setup the
+// user had cancelled, and adopt() took another tab's setup for this one and
+// kept the cancelled setup's platform. A finish now acts only for the setup
+// it was started in.
+
+const youtubeStatus = () => ({
+  setupInProgress: true, setupPlatform: "youtube", availableBrowsers: [],
+  lastRefresh: null, lastError: null, needsManualRelogin: {},
+});
+
+async function cancelledDuringFinish(settle) {
+  const gate = {};
+  let status = { setupInProgress: false, availableBrowsers: [], needsManualRelogin: {} };
+  const h = await app({
+    "POST /api/cookies/auto-setup/finish": () => new Promise((resolve, reject) => { gate.resolve = resolve; gate.reject = reject; }),
+    "GET /api/cookies/auto-status": () => status,
+  });
+  await h.app.settings.startAutoCookieSetup("twitch");
+  h.el("btn-auto-cookie-done").click();
+  await h.flush();
+  assert.equal(h.app.cookieSetup.phase, session.PHASE.FINISHING);
+  h.el("btn-auto-cookie-cancel").click();
+  await h.flush();
+  settle(gate);
+  await h.flush();
+  await h.flush();
+  h.setStatus = (s) => { status = s; };
+  return h;
+}
+
+// MUTANT: finish() writing REJECTED after its await without checking the
+// setup it was started for — the phase leaves idle and adopt() keeps Twitch.
+test("a finish answering after a Cancel leaves the session idle", { skip }, async () => {
+  const h = await cancelledDuringFinish((g) => g.resolve(rejectedFinish));
+  const s = h.app.cookieSetup;
+  assert.equal(s.phase, session.PHASE.IDLE, "the late finish moved a cancelled session out of idle");
+  assert.equal(s.holdsSlot(), false);
+  assert.equal(result(h), "", "the cancelled setup's rejection was drawn");
+  assert.equal(h.el("auto-cookie-setup-dialog")._open, false);
+
+  h.setStatus(youtubeStatus());
+  await h.app.settings.loadAutoCookieStatus();
+  assert.equal(s.phase, session.PHASE.ADOPTED);
+  assert.equal(s.platform, "youtube", "another tab's setup took the cancelled setup's platform");
+  assert.equal(h.el("auto-cookie-setup-dialog").label, "Setup: YouTube");
+});
+
+// MUTANT: the abort branch writing ABORTED without the check — holdsSlot()
+// turns true again and a tab close abandons the cancelled setup.
+test("a finish aborting after a Cancel neither holds the slot nor draws Try Again", { skip }, async () => {
+  const h = await cancelledDuringFinish((g) => g.reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+  const s = h.app.cookieSetup;
+  assert.equal(s.phase, session.PHASE.IDLE);
+  assert.equal(s.holdsSlot(), false, "a cancelled setup holds the slot again");
+  assert.equal(h.el("cookie-retry-btn"), null, "the cancelled setup's abort report was drawn");
+  const e = new h.window.Event("pagehide");
+  e.persisted = false;
+  h.window.dispatchEvent(e);
+  assert.deepEqual(h.beacons, [], "a tab close abandoned a setup the user cancelled");
+});
+
+// REJECTED frees the slot, so a setup the server reports later is someone
+// else's (another tab, the TUI) and is adopted with its own platform.
+//
+// MUTANT: adopt() treating REJECTED as "ours already".
+test("a rejected session adopts the next setup with the server's platform", { skip }, async () => {
+  let status = { setupInProgress: false, availableBrowsers: [], needsManualRelogin: {} };
+  const h = await app({ "GET /api/cookies/auto-status": () => status });
+  await h.app.settings.startAutoCookieSetup("youtube");
+  h.el("btn-auto-cookie-done").click();
+  await h.flush();
+  const s = h.app.cookieSetup;
+  assert.equal(s.phase, session.PHASE.REJECTED);
+
+  status = { ...youtubeStatus(), setupPlatform: "twitch" };
+  await h.app.settings.loadAutoCookieStatus();
+  assert.equal(s.phase, session.PHASE.ADOPTED);
+  assert.equal(s.platform, "twitch");
+  assert.equal(h.el("auto-cookie-setup-dialog").label, "Setup: Twitch");
+  assert.equal(s.holdsSlot(), false);
+  assert.equal(result(h), "", "the earlier setup's rejection stayed on the adopted setup");
+});
