@@ -341,7 +341,9 @@ func unusedRootRecording(db *database.Database, jobID, stagingDir string) string
 type UnusedRecording struct {
 	// Name is the file's base name.
 	Name string `json:"name"`
-	// Path is the file in staging.
+	// Path is the file in staging, absolute: the staging directory setting
+	// defaults to "./staging", and a path relative to the process's working
+	// directory does not lead an operator to the file.
 	Path string `json:"path"`
 	// Size is that one file's size in bytes. A separate audio file beside a
 	// video (audio_stream, audio.m4a) is not counted.
@@ -367,6 +369,9 @@ func ScanUnusedRoot(db *database.Database, stagingBase string, job *database.Job
 	fi, err := os.Stat(path)
 	if err != nil || fi.IsDir() {
 		return nil
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
 	}
 	return &UnusedRecording{Name: filepath.Base(path), Path: path, Size: fi.Size()}
 }

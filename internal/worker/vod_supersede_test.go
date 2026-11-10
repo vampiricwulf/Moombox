@@ -544,6 +544,8 @@ func TestVodClaimCarriesPartZeroMuxGapRecord(t *testing.T) {
 //   - dropping the Finished gate: the Downloading row reports its own
 //     in-use download as unused.
 //   - reporting the staging dir, or a zero size: the path and size checks.
+//   - reporting the path as joined: under the default "./staging" it reads
+//     relative to the working directory, which finds nothing for a service.
 func TestScanUnusedRootNamesTheKeptRecording(t *testing.T) {
 	db := openTestDB(t)
 	base := t.TempDir()
@@ -589,5 +591,18 @@ func TestScanUnusedRootNamesTheKeptRecording(t *testing.T) {
 	}
 	if got := ScanUnusedRoot(db, base, nil); got != nil {
 		t.Errorf("a nil job reports %+v", *got)
+	}
+
+	// The default staging directory is relative ("./staging").
+	t.Chdir(filepath.Dir(base))
+	rel := ScanUnusedRoot(db, "."+string(filepath.Separator)+filepath.Base(base), add("kept-rel", database.StatusFinished, both))
+	if rel == nil {
+		t.Fatal("ScanUnusedRoot = nil under a relative staging base")
+	}
+	if !filepath.IsAbs(rel.Path) || rel.Name != "video.mp4" {
+		t.Errorf("under a relative staging base ScanUnusedRoot = %+v, want an absolute path to video.mp4", *rel)
+	}
+	if fi, err := os.Stat(rel.Path); err != nil || fi.Size() != 96 {
+		t.Errorf("the reported path %s does not lead to the 96-byte recording (err %v)", rel.Path, err)
 	}
 }
