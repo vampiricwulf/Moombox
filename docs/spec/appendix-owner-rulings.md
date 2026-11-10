@@ -16,6 +16,8 @@ Several ids are reused between chains (`R1`, `R3`, `Q5`, `Q6`). A citation in co
 
 Ids of the form `WEB-6`, `CORE-2`, `MON-4`, `TOOL-18` or `T2-18` are not rulings. They name rows of the sweep reports, which were never tracked, and a comment that cites one states its reason itself. Rulings from later chains (`R-D2`, `R-I1`, `PR-M1`, `CI-4` and the like) are explained where the behaviour is documented, in the other spec documents and in CLAUDE.md.
 
+Three more series look like the ids here and are not on this page. `Q1` to `Q13` cited in `internal/cookies` and in the cookie code of `cmd/moombox` are the cookie remediation's rulings of 2026-08-29, summarised in `docs/superpowers/plans/2026-08-29-cookie-remediation-field-test-plan.md`. `reports/<pkg>.md Qn` names a row of an audit report, and `Arc 10 R4` or `R5` names a row of that arc's ledger; neither is a ruling, and neither file was ever tracked.
+
 ## Improvement chain, 2026-09-04
 
 `2026-09-04-improvement-chain-design.md`. The owner answered thirteen questions, Q1 to Q13. Four are cited:
