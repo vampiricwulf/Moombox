@@ -613,12 +613,12 @@ func TestCookieImportRouteLeaksNoValueAnywhere(t *testing.T) {
 // sentinel.
 //
 // THE COLLISION IS REPRODUCED THROUGH THE REAL SLOT rather than by reaching
-// into the service: refreshCmd is an unexported field of internal/cookies, so
-// the only thing this package can do is run something that claims it. Since
-// O-D an import claims it too, and holding the first one inside its PRE-WRITE
-// verification — the blocking callback below, released after the second
-// request has been answered — puts the second request in exactly the
-// read -> verify -> write gap the finding is about, with nothing on disk
+// into the service: the refresh slot (refreshSlot,
+// internal/cookies/refresh_slot.go) is unexported, so the only thing this
+// package can do is run something that claims it. Since O-D an import claims
+// it too, and holding the first one inside its PRE-WRITE verification — the
+// blocking callback below, released after the second request has been
+// answered — puts the second request in exactly the read -> verify -> write gap the finding is about, with nothing on disk
 // changed yet.
 //
 // Mutants:
@@ -691,7 +691,10 @@ func TestCookieImportAnswers409WhileARefreshRuns(t *testing.T) {
 			"answered as a server fault or accepted into a file the pass is about to overwrite: %s",
 			rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "cookie refresh in progress") {
+	// The holder here is the first IMPORT, and since K43 the refusal names
+	// it (cookies.ErrImportInProgress, which still matches
+	// ErrRefreshInProgress and so still maps to 409).
+	if !strings.Contains(rec.Body.String(), "please try again shortly: cookie import in progress") {
 		t.Errorf("the refusal does not carry the sentinel's own sentence, so nothing tells the "+
 			"operator to retry: %s", rec.Body.String())
 	}

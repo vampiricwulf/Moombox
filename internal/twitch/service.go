@@ -282,13 +282,6 @@ func (s *Service) GetAuthToken() string {
 	return s.Auth.GetAuthToken()
 }
 
-// GetAuthState returns the current authentication state.
-func (s *Service) GetAuthState() map[string]any {
-	return map[string]any{
-		"isAuthenticated": s.Auth.HasAuthToken(),
-	}
-}
-
 // ResolveEmotes fetches third-party emotes for a channel.
 func (s *Service) ResolveEmotes(ctx context.Context, channelID string, channelLogin ...string) *TwitchEmoteData {
 	return s.Emotes.Resolve(ctx, channelID, channelLogin...)

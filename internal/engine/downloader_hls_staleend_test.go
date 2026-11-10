@@ -84,7 +84,7 @@ func TestCheckStaleEndAnswersOnlyTheStaleWindow(t *testing.T) {
 	if n := staleAsks.Load(); n != 1 {
 		t.Errorf("CheckStaleEnd asked %d times, want once (the one stale window)", n)
 	}
-	if !d.streamEnded.Load() {
+	if !d.streamEnded() {
 		t.Error("streamEnded not latched by the stale-window end")
 	}
 }

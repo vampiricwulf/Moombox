@@ -841,9 +841,10 @@ func driveImportRejected(t *testing.T) *httptest.ResponseRecorder {
 }
 
 // driveImportDuringRefresh answers 409 through Task 3's ErrRefreshInProgress
-// arm. The collision is reproduced through the REAL slot — refreshCmd is an
-// unexported field of internal/cookies — by holding the first import inside its
-// pre-write verification until the second has been answered.
+// arm. The collision is reproduced through the REAL slot — the refresh slot
+// (refreshSlot, internal/cookies/refresh_slot.go) is unexported — by holding
+// the first import inside its pre-write verification until the second has
+// been answered.
 func driveImportDuringRefresh(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
 	r, _, _, svc := importRouter(t, importHeader+importYouTube+importTwitch, nil)

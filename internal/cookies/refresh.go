@@ -43,7 +43,7 @@ const (
 	//
 	// What N un-deduped verdicts cost within ONE cycle is not N headless
 	// browsers. AutoCookieService.RefreshCookiesDetailed single-flights on its
-	// refreshCmd sentinel, so the first call claims the slot and every call
+	// refresh slot, so the first call claims the slot and every call
 	// that arrives while it runs returns refreshDeclined() immediately.
 	//
 	// This comment used to say the damage was that each of those declines sent

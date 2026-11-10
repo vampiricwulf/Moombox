@@ -18,13 +18,12 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/updater"
 )
 
-// resetUpdateGlobals clears the package-level SharedUpdateInfo and the
-// updateInProgress flag between tests. /api/update/* routes mutate both,
-// so leaving residue would make tests order-dependent.
+// resetUpdateGlobals clears the package-level SharedUpdateInfo between
+// tests. /api/update/* routes mutate it, so leaving residue would make tests
+// order-dependent.
 func resetUpdateGlobals(t *testing.T) {
 	t.Helper()
 	SharedUpdateInfo.Store(nil)
-	updateInProgress.Store(false)
 }
 
 func newUpdateFixture(t *testing.T, deps *UpdateRouteDeps) (chi.Router, *config.Store) {
@@ -138,30 +137,43 @@ func TestUpdateVerifyNoUpdater(t *testing.T) {
 
 // --- /api/update/apply concurrency + missing-release guards ---
 
-func TestUpdateApplyAlreadyInProgress(t *testing.T) {
-	// updater.New must succeed before the CAS check happens; we don't
-	// actually invoke its methods here — we trip the in-progress flag
-	// first, so the route returns 409 before reaching ApplyUpdate.
+// TestUpdateApplyRefusedByTheUpdaterAnswers409: the Updater is the one
+// single-flight for an apply (the Web route and the TUI share it), so an
+// apply it refuses — one already running (a TUI apply during this Web one),
+// or one already placed — answers 409, not the 500 "Update failed: …" a
+// plain error got (K41), and in the refusal's own words: "update already in
+// progress" for a running apply, "an update is already applied — restart
+// pending" for a placed one (the text the 500 carried before K41). The
+// refusal is not logged as a failed update.
+//
+// Mutants: the route without its errors.Is mapping — 500; the route sending
+// one sentinel's text for both refusals — the restart-pending row reads "in
+// progress".
+func TestUpdateApplyRefusedByTheUpdaterAnswers409(t *testing.T) {
+	origApply := applyUpdate
+	t.Cleanup(func() { applyUpdate = origApply })
 	upd, err := updater.New("2.6.0-test", silentLogger{})
 	if err != nil {
 		t.Fatalf("updater.New: %v", err)
 	}
-	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test", Updater: upd})
+	for _, refusal := range []error{updater.ErrApplyInProgress, updater.ErrRestartPending} {
+		t.Run(refusal.Error(), func(t *testing.T) {
+			r, _ := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test", Updater: upd})
+			SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.1", TagName: "v9.9.1"})
+			applyUpdate = func(*updater.Updater, context.Context, *updater.ReleaseInfo) error { return refusal }
 
-	updateInProgress.Store(true)
+			req := httptest.NewRequest("POST", "/api/update/apply", nil)
+			req.RemoteAddr = "127.0.0.1:50000" // a local caller: the route is loopback-only
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
 
-	req := httptest.NewRequest("POST", "/api/update/apply", nil)
-	req.RemoteAddr = "127.0.0.1:50000" // a local caller: the route is loopback-only
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusConflict {
-		t.Errorf("apply when in-progress: want 409, got %d", rec.Code)
-	}
-	// The CAS must NOT have flipped — we acquired the slot before the
-	// route saw it; the route must surface conflict, not steal.
-	if !updateInProgress.Load() {
-		t.Error("updateInProgress should still be true after 409")
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("apply the Updater refused: want 409, got %d (%s)", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), refusal.Error()) {
+				t.Errorf("body = %s, want %q", rec.Body.String(), refusal.Error())
+			}
+		})
 	}
 }
 
@@ -180,12 +192,6 @@ func TestUpdateApplyNoReleaseAvailable(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("apply with no release: want 400, got %d", rec.Code)
-	}
-	// Critical: the CAS reservation must roll back so future /check
-	// + /apply cycles can proceed. If updateInProgress stayed true, we'd
-	// be stuck until the next process restart.
-	if updateInProgress.Load() {
-		t.Error("updateInProgress should be reset after 400 / no release")
 	}
 }
 
@@ -450,9 +456,6 @@ func TestUpdateApplyAndDismissActOnlyOnTheReleaseShown(t *testing.T) {
 			}
 			if SharedUpdateInfo.Load() != newer {
 				t.Error("the pending release must survive a refused request")
-			}
-			if updateInProgress.Load() {
-				t.Error("a refused apply left the in-progress flag set")
 			}
 		})
 		for _, body := range []string{`{"tagName":"v9.9.1"}`, ""} {

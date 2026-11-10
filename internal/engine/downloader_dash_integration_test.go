@@ -125,7 +125,7 @@ func TestDashLoopCleanPostLiveEnd(t *testing.T) {
 		t.Fatalf("Start = %v, want nil (clean finalize)", err)
 	}
 	wantSegments(t, out, 0, head)
-	if !d.streamEnded.Load() {
+	if !d.streamEnded() {
 		t.Error("streamEnded not set on clean end")
 	}
 	if got := d.headSeq.Load(); got != head {
@@ -212,7 +212,7 @@ func TestDashLoopBehindHeadBudgetExhaustionWarns(t *testing.T) {
 	if !strings.Contains(warns.joined(), "unfetched tail") {
 		t.Errorf("no unfetched-tail warning on truncated finalize; warns:\n%s", warns.joined())
 	}
-	if d.streamEnded.Load() {
+	if d.streamEnded() {
 		t.Error("streamEnded latched on a known-incomplete finalize")
 	}
 	// The resume sidecar must survive an incomplete finalize: it is the ONLY

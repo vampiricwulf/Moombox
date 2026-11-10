@@ -86,11 +86,18 @@ var (
 	ErrSetupCancelled = errors.New("cookie auto-setup was cancelled")
 
 	// ErrRefreshInProgress is returned by StartSetup AND by ImportCookies
-	// (owner decision O-D, 2026-09-17) when the refresh slot is already held —
-	// by a periodic or on-demand RefreshCookies pass, or by the other one of
-	// those two. HTTP consumers can map to 409 Conflict with "try again
-	// shortly" copy; both routes do.
+	// (owner decision O-D, 2026-09-17) while a refresh pass — periodic or
+	// on-demand RefreshCookies — holds the refresh slot. While an import
+	// holds it they return ErrImportInProgress instead, which matches this
+	// one under errors.Is (refreshSlot.inProgressError). HTTP consumers can
+	// map to 409 Conflict with "try again shortly" copy; both routes do.
 	ErrRefreshInProgress = errors.New("cookie refresh in progress")
+
+	// ErrImportInProgress is the same refusal when the slot's holder is a
+	// cookie IMPORT rather than a refresh pass (refreshSlot). It matches
+	// ErrRefreshInProgress under errors.Is, so every consumer that maps that
+	// one to 409 maps this one too; only the noun is accurate now.
+	ErrImportInProgress error = importInProgressError{}
 
 	// ErrProfileNotFound is returned by RefreshCookies when the configured
 	// profile directory does not exist (typically: refresh attempted before
@@ -357,3 +364,10 @@ var (
 func IsNoBrowserProfile(err error) bool {
 	return errors.Is(err, ErrProfileNotFound) || errors.Is(err, ErrNoBrowserFound)
 }
+
+// importInProgressError is ErrImportInProgress: its own sentence, and
+// ErrRefreshInProgress underneath for errors.Is.
+type importInProgressError struct{}
+
+func (importInProgressError) Error() string { return "cookie import in progress" }
+func (importInProgressError) Unwrap() error { return ErrRefreshInProgress }

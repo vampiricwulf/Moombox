@@ -1486,6 +1486,21 @@ const (
 	keepStagingChatOnly
 )
 
+// expires reports whether the orphan sweep's age rule
+// (incompleteStagingExpired) lifts this keep: only the tail and chat keeps
+// expire; the four media keeps hold captured media that exists nowhere else
+// and never do (jobNeedsStaging).
+func (k stagingKeep) expires() bool {
+	switch k {
+	case keepStagingForTail, keepStagingChatOnly:
+		return true
+	case removeStaging, keepStagingForAsides, keepStagingForUnmuxedPart,
+		keepStagingForUnusedRoot, keepStagingForMuxGaps:
+		return false
+	}
+	return false
+}
+
 // stagingVerdict is decideStagingCleanup's answer, with what the Warn that
 // keeps the directory names: the set-aside recordings, the root recording the
 // finalize did not use, or the recordings a mux could not carry whole.
@@ -1503,6 +1518,9 @@ type stagingVerdict struct {
 // cleanup has always checked them, so the Warn an operator reads names the
 // first that holds. fresh may be nil (the row read failed or the row is
 // gone): the tail and chat shields then do not apply, as they never did.
+// The orphan sweep derives its shield from this verdict (jobNeedsStaging),
+// lifting the expiring keeps on its age rule — so those two must stay LAST
+// here: a keep added after them could be hidden behind an expired one.
 func decideStagingCleanup(db *database.Database, fresh *database.Job, jobID, stagingDir string) stagingVerdict {
 	if asides := stagedAsideRecordings(stagingDir); len(asides) > 0 {
 		return stagingVerdict{keep: keepStagingForAsides, asides: asides}
@@ -1642,16 +1660,14 @@ func hasUnmuxedPartsForJob(db *database.Database, jobID, stagingDir string) bool
 	// "nothing unmuxed here" and the staging cleanup deletes it along with
 	// the dir.
 	//
-	// The orphan scanner deliberately does NOT go through this door: it
-	// consults hasUnmuxedSegmentParts and applies its own aside shield
-	// (internal/worker/orphans.go, jobNeedsStaging). That shield is
-	// UNCONDITIONAL — no age rule, unlike the tail and chat shields beside it
-	// — because finalize muxes every READABLE aside into its own sibling
-	// file, so one still in staging is one FFmpeg could not read: the only
-	// copy of footage that exists nowhere else, not something that goes stale
-	// after a week. The split exists so the sweep can name the asides it
-	// found (OrphanedEntry.Asides) while the two expiring shields keep their
-	// own rule.
+	// The orphan sweep reaches this function too, through
+	// decideStagingCleanup's verdict (internal/worker/orphans.go,
+	// jobNeedsStaging) — after that verdict's own aside check, which answers
+	// first. The sweep lifts only the expiring keeps (stagingKeep.expires:
+	// tail and chat); the aside and unmuxed-part keeps never expire, because
+	// finalize muxes every READABLE aside into its own sibling file, so one
+	// still in staging is one FFmpeg could not read: the only copy of footage
+	// that exists nowhere else, not something that goes stale after a week.
 	if len(stagedAsideRecordings(stagingDir)) > 0 {
 		return true
 	}
@@ -1660,8 +1676,11 @@ func hasUnmuxedPartsForJob(db *database.Database, jobID, stagingDir string) bool
 
 // hasUnmuxedSegmentParts is hasUnmuxedPartsForJob without the aside term: a
 // quality/gap-split part whose staging dir still holds recognized media that
-// has no segment row. Split out so the orphan scanner can apply its own rule
-// to asides without losing this one (sweep-2 Task 11, extra item b).
+// has no segment row. Split out for the orphan scanner (sweep-2 Task 11,
+// extra item b), which now reads decideStagingCleanup's verdict instead (K17);
+// its callers are hasUnmuxedPartsForJob and HasUnmuxedParts (staging.go),
+// the predicate that offers the Mux verb, which leaves asides to their own
+// verb.
 func hasUnmuxedSegmentParts(db *database.Database, jobID, stagingDir string) bool {
 	segDirs := stagedSegDirs(stagingDir)
 	if len(segDirs) == 0 {

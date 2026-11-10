@@ -455,7 +455,7 @@ type DownloaderOptions struct {
 type DownloadActivity int
 
 const (
-	ActivityNone                DownloadActivity = iota // actively downloading
+	ActivityNone                DownloadActivity = iota // actively downloading: the consumer's state after OnProgress; the engine never emits it
 	ActivityVerifyingEnd                                // segments stopped; confirming the stream ended
 	ActivityReconnecting                                // connectivity lost; waiting for the network
 	ActivityRateLimited                                 // 429 backoff
@@ -567,7 +567,7 @@ type SegmentDownloader struct {
 	mu                    sync.Mutex
 	running               bool
 	cancelled             atomic.Bool
-	streamEnded           atomic.Bool
+	finishedAs            atomic.Uint32 // finishReason; see downloader_finish.go
 	outputFile            *os.File
 	bytesWritten          atomic.Int64
 	bytesFetched          atomic.Int64 // media bytes ARRIVED off the network — see noteFetch
@@ -645,7 +645,7 @@ type SegmentDownloader struct {
 	// finalizedBehindHead latches when a finalize fired the
 	// unfetched-tail warning (currentSeq < headSeq at errStreamDone) —
 	// the precise "known-incomplete recording" signal the worker
-	// persists as the job's incomplete_tail flag. streamEnded alone is
+	// persists as the job's incomplete_tail flag. streamEnded() alone is
 	// too broad: cancels and live-edge MaxTimeout stalls also leave it
 	// unset without implying a missing tail.
 	finalizedBehindHead atomic.Bool
@@ -771,7 +771,7 @@ type SegmentDownloader struct {
 	// catchUpBufferBytesOverride: production code never sets it. When
 	// non-nil, saveResume calls it with the LastSeq it just persisted, after
 	// the sidecar rename succeeded. It is the only way a test can count
-	// sidecar WRITES — a clean end sets streamEnded and the loop's defer
+	// sidecar WRITES — a clean end records finishConfirmed and the loop's defer
 	// then ClearResume()s the file out from under any on-disk assertion.
 	onResumeSaved func(lastSeq int)
 
@@ -803,8 +803,10 @@ type SegmentDownloader struct {
 	// continues fetching segments. Returning "" preserves the
 	// legacy fall-through to ErrQualityLost.
 	OnCipherFailure func() string
-	// OnActivity reports the downloader's current wait reason (or
-	// ActivityNone when it resumes downloading). Optional; nil to opt out.
+	// OnActivity reports the downloader's current wait reason. The engine
+	// reports wait reasons only and never emits ActivityNone: the consumer
+	// treats OnProgress (every landed segment, catch-up flushes included) as
+	// the return to downloading (worker/progress.go). Optional; nil to opt out.
 	OnActivity func(a DownloadActivity)
 	// MayResume reports whether the broadcast may resume — stall evidence.
 	// Called only from the download-loop goroutine. nil = feature off.

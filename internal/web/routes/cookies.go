@@ -567,9 +567,10 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 	})
 
 	// Sub-router for endpoints that spawn or steer a headless browser. The
-	// underlying AutoCookieService already serialises with refreshCmd so
-	// concurrent calls fast-fail, but rate-limiting the request flow stops
-	// a caller from burning CPU on the fast-fail path.
+	// underlying AutoCookieService already serialises on its refresh slot
+	// (refreshSlot, internal/cookies/refresh_slot.go) so concurrent calls
+	// fast-fail, but rate-limiting the request flow stops a caller from
+	// burning CPU on the fast-fail path.
 	heavy := r.With(func(h http.Handler) http.Handler {
 		if rl == nil {
 			return h

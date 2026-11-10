@@ -4,7 +4,6 @@ import (
 	"context"
 	"math/rand"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,27 +29,16 @@ type StreamInfoBatchFunc func(ctx context.Context, logins []string) (infos []*tw
 
 // TwitchMonitor polls Twitch GQL for live streams from monitored channels.
 type TwitchMonitor struct {
-	mu          sync.Mutex
 	configStore *config.Store
 	db          *database.Database
 	tw          *twitch.Service
-	checking    bool
-	// pendingKick latches a CheckNow that landed while a cycle was in
-	// flight — previously silently dropped, leaving a just-added channel
-	// unpolled for a full interval. Consumed in runCycle's defer.
-	pendingKick bool
-	// warnedSlow rate-limits the oversubscribed warning; atomic because
-	// scheduleNext touches it outside the monitor mutex.
-	warnedSlow atomic.Bool
+	// loop is the poll-cycle lifecycle (pollloop.go).
+	loop pollLoop
 	// batchFailStreak counts consecutive whole-batch GQL failures. They are
 	// deliberately kept off every channel's health streak (see checkChunk),
 	// which left a persistent one — Twitch refusing the client — visible only
 	// at Debug while no Twitch channel was being checked at all.
 	batchFailStreak atomic.Int32
-	timer           *time.Timer
-	ctx             context.Context
-	cancel          context.CancelFunc
-	NextCheckAt     int64
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -139,150 +127,47 @@ func NewTwitchMonitor(store *config.Store, db *database.Database, tw *twitch.Ser
 	}
 }
 
-// Start begins the Twitch monitoring loop.
-func (tm *TwitchMonitor) Start(ctx context.Context) {
-	tm.mu.Lock()
-	if tm.cancel != nil {
-		tm.mu.Unlock()
-		return // Already running
+// pollSpec hands the Twitch monitor's interval, cycle, logger and countdown
+// hook to its pollLoop.
+func (tm *TwitchMonitor) pollSpec() pollSpec {
+	return pollSpec{
+		name:   "twitch",
+		logger: tm.logger,
+		cycle:  tm.runCycle,
+		next: func() (time.Duration, bool) {
+			if len(tm.getTwitchChannels()) == 0 {
+				return 0, false
+			}
+			return tm.calculateInterval(), true
+		},
+		slowWarn: "twitch check cycle takes far longer than the configured interval — effective cadence degraded",
+		onSchedule: func(v int64) {
+			if tm.OnSchedule != nil {
+				tm.OnSchedule(v)
+			}
+		},
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	tm.ctx = ctx
-	tm.cancel = cancel
-	tm.mu.Unlock()
-
-	tm.logger.Info("twitch monitor started")
-
-	// Immediate first check on startup (runCycle schedules next in its defer)
-	go tm.runCycle(ctx)
 }
+
+// Start begins the Twitch monitoring loop.
+func (tm *TwitchMonitor) Start(ctx context.Context) { tm.loop.start(ctx, tm.pollSpec()) }
 
 // Stop stops the Twitch monitor.
-func (tm *TwitchMonitor) Stop() {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-
-	if tm.cancel != nil {
-		tm.cancel()
-		tm.ctx = nil
-		tm.cancel = nil
-	}
-	if tm.timer != nil {
-		tm.timer.Stop()
-		tm.timer = nil
-	}
-	tm.NextCheckAt = 0
-	tm.logger.Info("twitch monitor stopped")
-}
+func (tm *TwitchMonitor) Stop() { tm.loop.stop(tm.pollSpec()) }
 
 // GetNextCheckAt returns the next scheduled check time in epoch ms.
-func (tm *TwitchMonitor) GetNextCheckAt() int64 {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	return tm.NextCheckAt
-}
+func (tm *TwitchMonitor) GetNextCheckAt() int64 { return tm.loop.next() }
 
 // CheckNow triggers an immediate check cycle if the monitor is running.
 // Used to wake the monitor when channels are added while it was idle.
-func (tm *TwitchMonitor) CheckNow() {
-	tm.mu.Lock()
-	if tm.cancel == nil {
-		tm.mu.Unlock()
-		return // Not running
-	}
-	ctx := tm.ctx
-	tm.mu.Unlock()
-	go tm.runCycle(ctx)
-}
+func (tm *TwitchMonitor) CheckNow() { tm.loop.checkNow(tm.pollSpec()) }
 
-// scheduleNext arms the next cycle. cycleStart anchors fixed-RATE
-// scheduling: the delay is interval minus the elapsed cycle time, so the
-// configured interval is a true period — previously it was a GAP after
-// each cycle, silently inflating detection latency by the cycle duration
-// (~0.5s×N channels every cycle, permanently). A zero-value cycleStart
-// behaves as a plain interval.
+// scheduleNext arms the next cycle (pollLoop.scheduleNext): fixed-RATE from
+// cycleStart, so the configured interval is a true period — previously it
+// was a GAP after each cycle, silently inflating detection latency by the
+// cycle duration (~0.5s×N channels every cycle, permanently).
 func (tm *TwitchMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
-	// Same rule as runCycle's guard, for the path that arms the timer: a
-	// cancelled context means this chain was retired by Stop(), and a retired
-	// chain must arm nothing and publish nothing. Checked FIRST, above the
-	// channel-count read, because the "no channels" arm below writes
-	// NextCheckAt and publishes OnSchedule too — the two things this guard
-	// exists to prevent — so a guard placed after it covers only half the
-	// function. Deliberately WITHOUT touching NextCheckAt: the countdown
-	// belongs to whichever chain is live now, and a dead chain zeroing it
-	// would blank the UI's next-check time for no reason. A twin of this check
-	// sits inside the locked section below and covers what this one cannot —
-	// a Stop()+Start() landing after it; both are wanted.
-	if ctx.Err() != nil {
-		return
-	}
-
-	channels := tm.getTwitchChannels()
-	if len(channels) == 0 {
-		tm.mu.Lock()
-		tm.NextCheckAt = 0
-		tm.mu.Unlock()
-		if tm.OnSchedule != nil {
-			tm.OnSchedule(0)
-		}
-		return
-	}
-
-	interval := tm.calculateInterval()
-	delay := interval
-	if !cycleStart.IsZero() {
-		elapsed := time.Since(cycleStart)
-		delay = interval - elapsed
-		if delay < time.Second {
-			// Keep a 1s idle floor — the per-request stagger already bounds
-			// instantaneous rate. Warn only when the cycle ran WELL past the
-			// interval (>2×), so an inherently-staggered full-channel cycle
-			// (whose stagger floor structurally exceeds the interval) doesn't
-			// read as a degradation. Once, via the atomic guard.
-			if elapsed >= 2*interval && tm.warnedSlow.CompareAndSwap(false, true) {
-				tm.logger.Warn("twitch check cycle takes far longer than the configured interval — effective cadence degraded",
-					"cycle", elapsed.Round(time.Second), "interval", interval.Round(time.Second))
-			}
-			delay = time.Second
-		}
-	}
-
-	tm.mu.Lock()
-	// Unreachable since the leading ctx.Err() guard — Stop() cancels the ctx
-	// and nils cancel together, and Stop() itself writes NextCheckAt = 0 — so
-	// this no longer clears the -1 sentinel for a late cycle racing Stop().
-	// Kept as defence for a future cancel-without-cancel path: a monitor that
-	// nils cancel without cancelling its context would otherwise arm a timer
-	// and publish a countdown for a chain nothing owns.
-	if tm.cancel == nil {
-		tm.NextCheckAt = 0
-		tm.mu.Unlock()
-		return
-	}
-	// Kept beside the leading guard, not redundant with it: this closes the
-	// window between that check and this lock, in which a Stop()+Start() would
-	// install a NEW non-nil cancel — so `cancel == nil` above passes and this
-	// dead chain would write the LIVE chain's NextCheckAt and publish its
-	// OnSchedule. Re-reading ctx.Err() costs nothing; do not "simplify" it away.
-	if ctx.Err() != nil {
-		tm.mu.Unlock()
-		return
-	}
-	tm.NextCheckAt = time.Now().Add(delay).UnixMilli()
-	if tm.timer != nil {
-		tm.timer.Stop()
-	}
-	tm.timer = time.AfterFunc(delay, func() {
-		tm.runCycle(ctx)
-	})
-	next := tm.NextCheckAt
-	tm.mu.Unlock()
-
-	if tm.OnSchedule != nil {
-		tm.OnSchedule(next)
-	}
-
-	tm.logger.Debug("twitch check scheduled", "in", delay.Round(time.Second))
+	tm.loop.scheduleNext(ctx, cycleStart, tm.pollSpec())
 }
 
 func (tm *TwitchMonitor) calculateInterval() time.Duration {
@@ -311,54 +196,7 @@ func (tm *TwitchMonitor) runCycle(ctx context.Context) {
 			tm.logger.Error("twitch monitor runCycle panic", "panic", r)
 		}
 	}()
-
-	// A cancelled context means this cycle belongs to a STOPPED chain. Stop()
-	// cancels the context but leaves the AfterFunc armed, and a later Start()
-	// installs a new cancel — so the dead chain's cycle used to pass every
-	// guard, run a full doCheck, and then re-arm the SHARED timer field,
-	// cancelling the live chain's pending cycle every interval. Returning here,
-	// before the `checking` latch and before the scheduleNext defer is
-	// installed, is what stops that. Latent today (Stop runs only at shutdown).
-	if ctx.Err() != nil {
-		return
-	}
-
-	cycleStart := time.Now()
-	tm.mu.Lock()
-	if tm.checking {
-		// A kick (channel add, reconnect, operator force-check) landed
-		// mid-cycle: latch it so the defer re-runs immediately instead of
-		// silently dropping it (the new channel would otherwise wait a
-		// full interval).
-		tm.pendingKick = true
-		tm.mu.Unlock()
-		return
-	}
-	tm.checking = true
-	// -1 sentinel = "checking now" for the UI countdowns (0 keeps its
-	// existing meaning of "no channels"). Restored by scheduleNext.
-	tm.NextCheckAt = -1
-	tm.mu.Unlock()
-	if tm.OnSchedule != nil {
-		tm.OnSchedule(-1)
-	}
-
-	defer func() {
-		tm.mu.Lock()
-		tm.checking = false
-		rerun := tm.pendingKick
-		tm.pendingKick = false
-		tm.mu.Unlock()
-		if rerun {
-			// Re-enter via goroutine so the stop-check and offline gate
-			// run naturally; that cycle does its own scheduleNext.
-			go tm.runCycle(ctx)
-			return
-		}
-		tm.scheduleNext(ctx, cycleStart)
-	}()
-
-	tm.doCheck(ctx)
+	tm.loop.runCycle(ctx, tm.pollSpec(), tm.doCheck)
 }
 
 // twitchBatchChunk bounds how many channels ride in one GQL request (2 ops

@@ -3,7 +3,6 @@ package cookies
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -170,7 +169,7 @@ const (
 
 // launchWindowKillBudget caps how long a kill will wait for a launcher to
 // publish the process it is about to start. Both slots have the same
-// window — the claim is taken (setupClaimed / the refreshCmd sentinel)
+// window — the claim is taken (setupClaimed / the refresh slot)
 // before the real process exists — so both killers poll for it, and both
 // give up rather than let Stop() block on a launcher that errored before
 // it ever assigned. See killSetupProcess and killRefreshProcess.
@@ -259,7 +258,7 @@ type AutoCookieService struct {
 	setupProcess  *os.Process
 	setupClaimed  bool        // StartSetup slot claim — held from the gate check until the browser process is registered (or the attempt fails)
 	setupJob      *processJob // Windows: a Job Object. Linux: the browser's process group. nil elsewhere
-	refreshCmd    *exec.Cmd   // tracks in-flight headless refresh browser
+	refresh       refreshSlot // the refresh single-flight and its browser (refresh_slot.go)
 	setupBrowser  *DetectedBrowser
 	browserExited bool
 	// setupRetainedSince is the last moment the setup in the slot was known to

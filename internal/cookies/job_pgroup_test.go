@@ -489,8 +489,7 @@ func TestKillProcessTreeUnixWillNotSignalAGroupThePidNoLongerLeads(t *testing.T)
 
 // TestKillProcessTreeUnixRefusesANonPositivePid is the pid <= 0 guard as seen
 // from this arm. A zero-valued os.Process is not hypothetical: the refresh
-// slot is claimed with `&exec.Cmd{}` whose Process is nil until the launcher
-// publishes one, and a future caller reaching this with a zero pid must fall
+// slot is claimed with no process until the launcher publishes one, and a future caller reaching this with a zero pid must fall
 // back rather than signal. The refusal is adopt's; this pins that the arm
 // cannot route around it. The table deliberately contains a 0 → 0 row so
 // that a dropped guard would "succeed" and the recorder would show it.

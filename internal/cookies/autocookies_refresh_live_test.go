@@ -181,7 +181,7 @@ func TestLiveFirefoxRefreshWritesTheProfile(t *testing.T) {
 		defer cancel()
 
 		start := time.Now()
-		runErr := runWithTimeout(ctx, cmd, processTimeout, nil, tLogger{t})
+		runErr := runWithTimeout(ctx, cmd, processTimeout, nil, nil, tLogger{t})
 		elapsed := time.Since(start).Round(time.Millisecond)
 		t.Logf("runWithTimeout returned after %s (err=%v)", elapsed, runErr)
 		if runErr != nil {

@@ -190,7 +190,7 @@ func TestCancelDuringAHeldConfirmationWins(t *testing.T) {
 // membersArmProbe is the status probe of a signed-in wait whose cookied
 // probe cannot read the stream: a TV escalation's answer in the first minute
 // switches the loop to the cookied probe (B1), and every probe after it reads
-// not_a_stream, so the switch's default arm is what decides (membersOnly).
+// not_a_stream, so the switch's default arm is what decides (probeAuthenticated).
 func membersArmProbe(at time.Duration) (*youtube.VideoInfo, error) {
 	if at < time.Minute {
 		return &youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming, IsUpcoming: true, PlayabilityError: youtube.PlayabilityOK,

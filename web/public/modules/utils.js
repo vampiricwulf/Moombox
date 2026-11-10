@@ -318,10 +318,10 @@ const COOKIE_SETUP_PROBE_TIMEOUT_MS = 5000;
  * finish; a refresh pass that actually renewed (:1910); and the sidecar restore
  * at construction (:368). What makes the comparison safe is not exclusivity of
  * the field but MUTUAL EXCLUSION OF THE WRITERS — StartSetup refuses to start
- * while `refreshCmd != nil` (:695) and RefreshCookiesDetailed declines while
- * `setupInProgressLocked()` (:1469) — so no refresh can stamp between the
- * baseline and the probe for as long as the setup holds the slot. The residual
- * window is between the finish's own cleanup and this probe, which is the same
+ * while `s.refresh.held()` (autocookies_setup.go:59) and RefreshCookiesDetailed
+ * declines while `setupInProgressLocked()` (autocookies_refresh.go:119) — so no
+ * refresh can stamp between the baseline and the probe for as long as the
+ * setup holds the slot. The residual window is between the finish's own cleanup and this probe, which is the same
  * window the lastError arm hedges its attribution for.
  *
  * Never throws, so a caller may hold the promise unawaited. That licence is

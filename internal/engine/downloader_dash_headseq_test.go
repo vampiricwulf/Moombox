@@ -107,7 +107,7 @@ func TestHandleGoneErrorBehindHeadDefersEnd(t *testing.T) {
 			t.Fatalf("iteration %d: handleGoneError = %v, want nil (defer while tail exists)", i, err)
 		}
 	}
-	if d.streamEnded.Load() {
+	if d.streamEnded() {
 		t.Error("streamEnded latched despite unfetched tail")
 	}
 	if checks != 1 {
@@ -249,7 +249,7 @@ func TestHandleGoneErrorPastHeadFinalizes(t *testing.T) {
 	if err := d.handleGoneError(t.Context(), 403, &n, true); err != errStreamDone {
 		t.Fatalf("handleGoneError = %v, want errStreamDone (past head, ended)", err)
 	}
-	if !d.streamEnded.Load() {
+	if !d.streamEnded() {
 		t.Error("streamEnded not latched on clean finalize")
 	}
 }
@@ -272,7 +272,7 @@ func TestHandleGoneErrorBehindHeadTimeoutFinalizes(t *testing.T) {
 	if err := d.handleGoneError(t.Context(), 403, &n, true); err != errStreamDone {
 		t.Fatalf("handleGoneError = %v, want errStreamDone (MaxTimeout exhausted)", err)
 	}
-	if d.streamEnded.Load() {
+	if d.streamEnded() {
 		t.Error("streamEnded latched on a known-incomplete finalize — resume sidecar would be cleared, destroying the retry path")
 	}
 }

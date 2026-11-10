@@ -1585,10 +1585,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.wsHub = webServer.WebSocket()
 	s.r = webServer.Router()
 
-	// Rate limiters and auth service. Each Close / Stop is non-idempotent
-	// (close(done) panics on second call), so wrap them all in a single
-	// sync.Once-guarded closeLimiters helper that both the normal deferred
-	// shutdown AND the force-exit timer below can safely invoke.
+	// Rate limiters and auth service. Both are idempotent to stop today
+	// (RateLimiter.Close has its own sync.Once; AuthService.Stop swaps done to
+	// nil under its mutex), and the single sync.Once-guarded closeLimiters
+	// helper below is still the one call both the normal deferred shutdown
+	// AND the force-exit timer make.
 	apiRL := web.NewRateLimiter(rateLimitAPIPerMinute, time.Minute)
 	potRL := web.NewRateLimiter(rateLimitPOTPerMinute, time.Minute)
 	authSvc := web.NewAuthService()

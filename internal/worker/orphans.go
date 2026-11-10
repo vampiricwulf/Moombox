@@ -83,29 +83,30 @@ var activeJobStatuses = map[database.JobStatus]bool{
 // here, beside the deletion refusal that has always used it.
 func IsActiveJobStatus(s database.JobStatus) bool { return activeJobStatuses[s] }
 
-// jobNeedsStaging reports whether a Finished job's staging directory was
-// deliberately preserved rather than cleaned up, and so must NOT be offered
-// (or allowed) as a deletable orphan. Mirrors the exact carve-out applied at
-// job-finish time (see (*DownloadWorker).cleanupStagingAfterMux in
-// worker.go): a Finished job's staging only survives cleanup for six
-// reasons — it's flagged IncompleteTail (tail is Resume-able), its chat
-// capture ended incomplete (no verb re-pages from the capture kept in
-// staging — Retry refuses a Finished job and Reinitialize starts over — but
-// it can be the only copy of those comments when the archive's chat copy
-// failed, an aside recovery carries it beside the recovered recording, and
-// the operator can take it by hand), it still holds a recording the engine set
-// aside rather than truncated (engine.StagedRestartSuffix), it still has
-// an unmuxed captured part (recoverable via the Mux action), or its root
-// holds a recording the finalize did not use (unusedRootRecording — the
-// from-the-start download beside a job that finalized as parts, or a second
-// recording beside the one a single-file finalize muxed), or a staged
+// jobNeedsStaging reports whether a Finished job's staging directory
+// was deliberately preserved rather than cleaned up, and so must NOT
+// be offered (or allowed) as a deletable orphan. Reads the verdict of
+// the carve-out applied at job-finish time (decideStagingCleanup, which
+// (*DownloadWorker).cleanupStagingAfterMux in worker.go also reads): a
+// Finished job's staging only survives cleanup for six reasons — it's
+// flagged IncompleteTail (tail is Resume-able), its chat capture ended
+// incomplete (no verb re-pages from the capture kept in staging — Retry
+// refuses a Finished job and Reinitialize starts over — but it can be
+// the only copy of those comments when the archive's chat copy failed,
+// an aside recovery carries it beside the recovered recording, and the
+// operator can take it by hand), it still holds a recording the engine
+// set aside rather than truncated (engine.StagedRestartSuffix), it still
+// has an unmuxed captured part (recoverable via the Mux action), or its
+// root holds a recording the finalize did not use (unusedRootRecording —
+// the from-the-start download beside a job that finalized as parts, or a
+// second recording beside the one a single-file finalize muxed), or a staged
 // recording a mux could not carry whole (stagedMuxGaps — its damaged bytes
 // left out of a repaired copy, or a copy nothing could check). The tail and
 // chat shields expire on one age rule — which is ON by default: the option
 // behind it, downloader.incomplete_staging_expiry_days, ships at 7 days ("0 =
 // preserve forever" describes the VALUE 0, not the default). The set-aside,
-// unmuxed-part, unused-root and mux-gap shields have no age rule at all: each
-// holds captured media that can exist nowhere else.
+// unmuxed-part, unused-root and mux-gap shields have no age rule at all:
+// each holds captured media that can exist nowhere else.
 //
 // This predicate must stay precise: any OTHER Finished job's staging is a
 // genuine orphan (e.g. a stale dir left by an old/removed job) and must
@@ -114,35 +115,29 @@ func jobNeedsStaging(db *database.Database, cfg *config.MoomboxConfig, job *data
 	if job == nil || job.Status != database.StatusFinished {
 		return false
 	}
-	// One age rule, read once, so that the doc's claim above — the two
-	// expiring shields expire together — is visible in the expression.
-	notExpired := !incompleteStagingExpired(cfg, job)
-	// The aside shield is NOT on that rule (fix round 1, Important 2).
-	// Finalize muxes every READABLE set-aside recording into its own sibling
-	// file and deletes it, so one still sitting in staging is one FFmpeg could
-	// not read — the only copy of footage that exists nowhere else, which is
-	// the whole point of preserving rather than truncating it. An age rule
-	// here would offer it for deletion seven days later on a stock install,
-	// because incomplete_staging_expiry_days DEFAULTS TO 7; it is shielded
-	// until it is muxed or the job is deleted. The unmuxed-PART shield below
-	// is unconditional for the same reason.
-	asideShield := len(stagedAsideRecordings(jobStagingDir)) > 0
-	// The unused-root shield is cleanupStagingAfterMux's, read by the same
-	// function, and off the age rule for the aside shield's reason: the
-	// recording it keeps can be the longer copy (a complete VOD download the
-	// parts did not take), and the cleanup kept the dir precisely so it would
-	// not be lost. Without it the sweep offered that dir as an ordinary
-	// orphan — one click from deleting what the cleanup had preserved.
-	// The mux-gap shield is cleanupStagingAfterMux's too, and off the age
-	// rule for the same reason: what it keeps is the bytes of a staged
-	// recording a repair left out of the archive (or a copy nothing could
-	// check), which are in no archive at all (stagedMuxGaps).
-	return (job.IncompleteTail && notExpired) ||
-		(job.ChatStatus == database.ChatIncomplete && notExpired) ||
-		asideShield ||
-		hasUnmuxedSegmentParts(db, job.ID, jobStagingDir) ||
-		unusedRootRecording(db, job.ID, jobStagingDir) != "" ||
-		len(stagedMuxGaps(jobStagingDir)) > 0
+	// The shields are cleanupStagingAfterMux's own (decideStagingCleanup), so
+	// a new one is added once. What this sweep adds is the age rule: the tail
+	// and chat keeps expire together on it (stagingKeep.expires), read once
+	// here. The four media keeps never expire. The aside keep is off the rule
+	// (fix round 1, Important 2): finalize muxes every READABLE set-aside
+	// recording into its own sibling file and deletes it, so one still in
+	// staging is one FFmpeg could not read — the only copy of that footage —
+	// and an age rule would offer it for deletion seven days later on a stock
+	// install, because incomplete_staging_expiry_days DEFAULTS TO 7. The
+	// unmuxed-part keep is unconditional for the same reason; the unused-root
+	// keep because the recording it keeps can be the longer copy (a complete
+	// VOD download the parts did not take); the mux-gap keep because the bytes
+	// a repair left out of the archive are in no archive at all.
+	//
+	// decideStagingCleanup answers with the FIRST keep that holds, and the
+	// two expiring keeps come last in it, so an expired verdict here can never
+	// hide a media keep behind it. TestJobNeedsStagingMatchesTheCleanupVerdict
+	// pins the two together over every subset of the six.
+	v := decideStagingCleanup(db, job, job.ID, jobStagingDir)
+	if v.keep == removeStaging {
+		return false
+	}
+	return !v.keep.expires() || !incompleteStagingExpired(cfg, job)
 }
 
 // incompleteStagingExpired reports whether an incomplete_tail job's staging
@@ -438,7 +433,7 @@ func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orp
 			if jobNeedsStaging(db, cfg, job, absPath) {
 				// Finished but deliberately preserved (IncompleteTail, an
 				// incomplete chat capture, a set-aside recording, an unmuxed
-				// part, or a root recording the finalize did not use) — not
+				// part, a root recording the finalize did not use, or a mux gap) — not
 				// a genuine orphan, skip.
 				continue
 			}

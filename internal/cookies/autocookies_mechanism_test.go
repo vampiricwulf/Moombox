@@ -2,7 +2,6 @@ package cookies
 
 import (
 	"context"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,7 +27,7 @@ import (
 // 0`) is a decline that sits BELOW the decision, so it carries "browser" — the
 // branch was chosen and then declined, and the mode fallback would have said
 // the same. The decline that is genuinely above the decision, and cheap to
-// drive, is the single-flight slot: refreshCmd non-nil means "already
+// drive, is the single-flight slot: a held refresh slot means "already
 // refreshing", and the pass returns before it looks at anything.
 //
 // The fixture is TestAcquisitionModeSelectsTheRefreshPath's, deliberately: same
@@ -71,7 +70,7 @@ func TestRefreshResultCarriesTheMechanismThatRan(t *testing.T) {
 		// is claimed.
 		s := newService(t, AcquisitionProfile, NewCookieJar())
 		s.mu.Lock()
-		s.refreshCmd = &exec.Cmd{}
+		s.refresh.claim(refreshHolderRefresh)
 		s.mu.Unlock()
 		result, err := s.RefreshCookiesDetailed(context.Background())
 		if err != nil {

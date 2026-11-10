@@ -1439,11 +1439,18 @@ func (cd *ChatDownloader) clearResumeState() {
 // Start connects to Twitch IRC and begins recording chat messages.
 // C1: Includes reconnect logic with exponential backoff on error limit.
 //
-// Start is safe to call once per ChatDownloader instance. Calling Start
-// concurrently (or after a previous Start returns) returns an error rather
-// than racing on the dedup/resume state — the struct retains its dedup set
-// across calls, and re-initialising it while a previous session is still
-// draining would drop messages.
+// A second Start while one is running — neither returned nor asked to stop
+// (Stop and MarkStreamEnded clear running) — returns an error rather than
+// racing on the dedup/resume state. A Start AFTER a previous one returned
+// runs again on the same instance and keeps what the instance holds: the
+// dedup set, the counts and the stream-end mark (MarkStreamEnded is not
+// undone) — and it does not reload the resume file when the instance already
+// holds messages or dedup IDs (alreadyInitialized below); one whose earlier
+// run recorded nothing reloads it, as a first Start does. Production
+// starts each instance once — the orchestrator builds a fresh downloader per
+// attempt — and the damage tests re-Start one to drive an exit. (This doc
+// used to promise an error on a re-Start after return; the code never gave
+// one, and the tests rely on it not doing so — K52.)
 func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	cd.mu.Lock()
 	if cd.running {
@@ -1732,9 +1739,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 			// here and is not meant to be: at the verdict the code cannot know
 			// a reset is coming, and the sticky platform mark is where a stale
 			// one is reconciled.
-			cd.authRefused.Store(false)
-			cd.downgradeReported.Store(false)
-			cd.warnedNoLogin.Store(false)
+			cd.resetCredentialLatches()
 
 			// A session WE ended after it had been healthy for a long time is
 			// still a healthy session, so it must clear the counter exactly as
@@ -1896,6 +1901,22 @@ func (cd *ChatDownloader) interruptSession() {
 	}
 }
 
+// resetCredentialLatches clears the three per-credential-pair latches:
+// authRefused (the behaviour switch that makes sessionCredentials return an
+// empty pair), downgradeReported (one onAuthDowngrade report per pair) and
+// warnedNoLogin (noteMissingLogin returns on it before reportAuthDowngrade,
+// so it gates a report too). A latch added per pair later belongs here.
+//
+// Called twice per re-authentication, for two different orderings (see
+// Reauthenticate): inside cd.mu in Reauthenticate itself, and in Start's
+// reauth branch after the interrupted session has fully unwound. reauthPending
+// is not one of them: it has its own arm and consume rules.
+func (cd *ChatDownloader) resetCredentialLatches() {
+	cd.authRefused.Store(false)
+	cd.downgradeReported.Store(false)
+	cd.warnedNoLogin.Store(false)
+}
+
 // Reauthenticate tells a running downloader to drop its IRC session and open a
 // new one with whatever credentials the cookie jar holds NOW.
 //
@@ -1949,9 +1970,7 @@ func (cd *ChatDownloader) Reauthenticate() {
 	// the unlock, which is also the one thing in this function that could
 	// deadlock if it were not.
 	cd.mu.Lock()
-	cd.authRefused.Store(false)
-	cd.downgradeReported.Store(false)
-	cd.warnedNoLogin.Store(false)
+	cd.resetCredentialLatches()
 	cancel := cd.sessionCancel
 	if cancel != nil {
 		cd.reauthPending.Store(true)

@@ -292,7 +292,7 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 	}
 
 	s.mu.Lock()
-	s.refreshCmd = cmd
+	s.refresh.publish(cmd.Process)
 	s.mu.Unlock()
 	defer func() {
 		if cmd.Process != nil {
@@ -300,7 +300,7 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 			cmd.Wait()
 		}
 		s.mu.Lock()
-		// Restore the claim SENTINEL, not nil: RefreshCookies still has its
+		// Withdraw the process but keep the claim, not release it: RefreshCookies still has its
 		// critical tail to run after this returns (merge → atomic write → jar
 		// reload → auth verify → meta save, up to ~12s — one authVerifyTimeout,
 		// which covers BOTH platforms because checkPlatformAuth runs them
@@ -308,10 +308,10 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 		// here opened that window to a concurrent RefreshCookies or a
 		// StartSetup — a second browser launched against the same profile
 		// mid-write. The outer defer in RefreshCookies releases the slot when
-		// the whole refresh is done; killRefreshProcess tolerates the
-		// nil-Process sentinel (its poll loop caps at 2s). The Firefox path
+		// the whole refresh is done; killRefreshProcess tolerates a held slot
+		// with no process (its poll loop caps at 2s). The Firefox path
 		// already holds the slot this way.
-		s.refreshCmd = &exec.Cmd{}
+		s.refresh.unpublish()
 		s.mu.Unlock()
 	}()
 

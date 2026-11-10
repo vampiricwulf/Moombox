@@ -262,7 +262,7 @@ func TestHlsEndVerdictSites(t *testing.T) {
 			if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
 				t.Errorf("Start() = %v, want an error containing %q — mutant: %s", err, tc.wantErrContains, tc.mutant)
 			}
-			if got := d.streamEnded.Load(); got != tc.wantEnded {
+			if got := d.streamEnded(); got != tc.wantEnded {
 				t.Errorf("streamEnded = %v, want %v — when true the deferred ClearResume removes the sidecar; when false it must survive for a later Resume. Mutant: %s",
 					got, tc.wantEnded, tc.mutant)
 			}
