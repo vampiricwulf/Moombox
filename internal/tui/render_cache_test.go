@@ -650,10 +650,19 @@ func TestStatusBarCacheKeyCoversEveryInput(t *testing.T) {
 		{"selected count", func(m *StatusBarModel) { m.SelectedCount = 3 }},
 		{"offline", func(m *StatusBarModel) { m.offline = true }},
 		{"sidecar down", func(m *StatusBarModel) { m.sidecarDown = true }},
+		{"disk held", func(m *StatusBarModel) { m.SetDiskHeld(true) }},
+		{"backfill failed", func(m *StatusBarModel) {
+			m.SetBackfillStatus("UC456", "Another Channel", "videos", 0, BackfillError)
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := busyStatusBar()
 			m.SetWidth(200)
+			if tc.name == "backfill failed" {
+				// The retry note is drawn only while no scan is in flight, so
+				// the scan the busy bar starts with ends before the first frame.
+				m.SetBackfillStatus(m.backfillChannel, m.backfillName, m.backfillTab, m.backfillPages, BackfillDone)
+			}
 			before := m.View()
 			tc.mutate(m)
 			if after := m.View(); after == before {
