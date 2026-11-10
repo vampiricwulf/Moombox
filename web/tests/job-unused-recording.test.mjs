@@ -99,3 +99,14 @@ test("an answer without the recording removes the section", { skip }, async () =
   await h.flush();
   assert.equal(h.el("details-unused-recording-section"), null, "the section outlived the recording");
 });
+
+// MUTANT: drop the status check from the section's render — a row that left
+// Finished (a reinitialize) still says its old recording is "not in the
+// archive" until the next fetch answers.
+test("a row that is no longer Finished renders no section from a carried-over answer", { skip }, async () => {
+  const h = await openDetails(kept);
+  h.app.handleMessage({ type: "job_update", payload: { ...row("A"), status: "Upcoming" } });
+  h.app.details.renderJobDetails(h.app.jobs[0]);
+  assert.equal(h.app.jobs[0].status, "Upcoming");
+  assert.equal(h.el("details-unused-recording-section"), null, "a stale kept recording was drawn on a row that is not Finished");
+});

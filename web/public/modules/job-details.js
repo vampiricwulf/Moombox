@@ -983,7 +983,10 @@ export class JobDetailsController {
         // so the operator can take or delete it knowingly. No whitespace of
         // its own, as the section above.
         const kept = job.unusedRootRecording;
-        if (!kept || !kept.path) return "";
+        // The server answers for Finished rows only, so a value carried over
+        // from before the row left Finished (a reinitialize) is stale until
+        // the next fetch replaces it.
+        if (!kept || !kept.path || job.status !== "Finished") return "";
         return `<div class="details-section" id="details-unused-recording-section">
           <strong>Kept Recording:</strong>
           <div class="details-row"><span class="details-label"></span><span class="details-value" data-field="unused-recording">${this.app.escapeHtml(unusedRecordingText(kept))}</span></div>
