@@ -51,7 +51,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 
 | Package | Source Lines | Src Files | Test Files | Description |
 |---------|-------------|-----------|------------|-------------|
-| worker/ | ~37,370 | 79 | 215 | Download orchestration, strategies, queue, quality monitor, disk-full gate, channel removal |
+| worker/ | ~37,400 | 79 | 215 | Download orchestration, strategies, queue, quality monitor, disk-full gate, channel removal |
 | tui/ | ~27,580 | 49 | 153 | 2-over-1 panel layout, overlays, chord system |
 | cookies/ | ~17,240 | 39 | 97 | Cookie jar, refresh, auto-cookie (Firefox/Chromium), Job Object |
 | engine/ | ~12,270 | 27 | 78 | Segment downloader (DASH/HLS/VOD), manifest, resume, eviction probe, reorder budget |
@@ -93,8 +93,8 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 ### Totals
 
 - **cmd/:** ~13,150 lines across 37 source files (36 in `cmd/moombox` — entry/launcher/adapters/wiring — plus the sign tool), plus 125 test files (~19,750 lines)
-- **internal/ packages:** ~178,040 lines across 431 source files in 38 packages
-- **Test code:** ~275,850 lines across 1,072 test files under `internal/` (`internal/docs`'s three included)
+- **internal/ packages:** ~178,070 lines across 431 source files in 38 packages
+- **Test code:** ~276,100 lines across 1,072 test files under `internal/` (`internal/docs`'s three included)
 - **Frontend:** ~26,190 lines across 29 files (~1,100 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 22 ES modules under `web/public/modules/` (`chapter-import.js`, `chat-timeline.js`, `cookie-setup-session.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
 
 ## Entry Points
