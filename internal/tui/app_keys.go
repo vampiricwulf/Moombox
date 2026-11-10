@@ -61,13 +61,15 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// release above still runs (owner ruling R-C6). Below the compact floor
 	// the screen is a notice and every other key is ignored: a chord typed
 	// blind once cancelled a recording. Below the normal layout an overlay
-	// that was already open is kept under a notice, and only Esc reaches it.
+	// that was already open is kept under a notice, and only Esc reaches it,
+	// where the notice says it does (heldEscFor): never an Esc that would
+	// quit, or raise or answer a prompt that is not on screen.
 	switch a.layoutMode() {
 	case layoutTooSmall:
 		return a, nil
 	case layoutCompact:
 		if o := a.activeOverlay(); o != nil {
-			if key != keyEsc {
+			if key != keyEsc || a.heldEscFor(o) == heldEscOff {
 				return a, nil
 			}
 			return o.key(a, msg, key)

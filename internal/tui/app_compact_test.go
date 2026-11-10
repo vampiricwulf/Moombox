@@ -920,3 +920,143 @@ func TestProgressTickClassFollowsTheLayout(t *testing.T) {
 		t.Error("the marquee runs in the compact layout")
 	}
 }
+
+// heldEscBase is what Esc does to each overlay, as overlayCases opens it,
+// while it is kept under the notice. A new overlay must state its answer.
+var heldEscBase = map[string]heldEscKind{
+	"settings":       heldEscCloses,
+	"help":           heldEscCloses,
+	"release notes":  heldEscCloses,
+	"ffmpeg check":   heldEscOff, // its Esc quits Moombox
+	"setup wizard":   heldEscOff, // nothing to step back to on the mode choice
+	"action menu":    heldEscCloses,
+	"import":         heldEscCloses,
+	"cookie import":  heldEscCloses,
+	"chapter import": heldEscCloses,
+	"add video":      heldEscCloses,
+	"trim":           heldEscCloses,
+	"files":          heldEscCloses,
+	"client tokens":  heldEscCloses,
+	"ytdlp plugin":   heldEscCloses,
+	"stats":          heldEscCloses,
+	"job log":        heldEscCloses,
+}
+
+// checkHeldEsc shrinks a to 40x10 over its open overlay and checks that the
+// notice's Esc line is want's, and that Esc then does what that line says
+// and never quits.
+func checkHeldEsc(t *testing.T, name string, a *App, visible func(*App) bool, want heldEscKind) {
+	t.Helper()
+	a.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	o := a.activeOverlay()
+	if o == nil || !visible(a) {
+		t.Fatalf("%s: premise lost: the overlay is not open", name)
+	}
+	plain := plainFrame(a)
+	if !strings.Contains(plain, heldEscLine(want)) || !strings.Contains(plain, "Open: "+o.title) {
+		t.Errorf("%s: the notice does not say %q under its title:\n%s", name, heldEscLine(want), plain)
+	}
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	before := a.View().Content
+	a.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+
+	_, cmd := a.Update(namedKey("esc"))
+	if isQuit(cmd) {
+		t.Errorf("%s: Esc under the notice quit Moombox", name)
+	}
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	switch want {
+	case heldEscCloses:
+		if visible(a) {
+			t.Errorf("%s: the notice said Esc closes it, and it is still open", name)
+		}
+	case heldEscBack:
+		if !visible(a) {
+			t.Errorf("%s: the notice said Esc steps back, and the overlay closed", name)
+		}
+		if a.View().Content == before {
+			t.Errorf("%s: the notice said Esc steps back, and nothing changed", name)
+		}
+	case heldEscOff:
+		if !visible(a) || a.View().Content != before {
+			t.Errorf("%s: the notice said Esc is off, and Esc changed the overlay", name)
+		}
+	}
+}
+
+// Under the notice Esc does what the notice says for every overlay, and
+// never leaves the program: the FFmpeg check's own Esc quits, so it is not
+// delivered (owner ruling R-C6).
+func TestHeldEscCensus(t *testing.T) {
+	cases := overlayCases(t)
+	if len(heldEscBase) != len(cases) {
+		t.Errorf("heldEscBase has %d overlays, overlayCases %d", len(heldEscBase), len(cases))
+	}
+	for i, c := range cases {
+		want, ok := heldEscBase[c.name]
+		if !ok {
+			t.Errorf("overlay %q: say in heldEscBase what Esc does to it under the notice", c.name)
+			continue
+		}
+		if overlayRegistry[i].title == "" {
+			t.Errorf("overlay %q has no title for the notice", c.name)
+		}
+		a := overlayTestApp(t)
+		c.open(a)
+		checkHeldEsc(t, c.name, a, c.visible, want)
+	}
+}
+
+// The states in which an overlay's own Esc does something other than close
+// it: the notice says which, and nothing happens unseen.
+func TestHeldEscFollowsTheOverlayState(t *testing.T) {
+	settingsOpen := func(a *App) bool { return a.settings.IsVisible() }
+
+	// Settings with unsaved edits: Esc would only raise the hidden
+	// "Save changes?" prompt.
+	a := overlayTestApp(t)
+	a.settings.Open(a.cfg)
+	a.settings.dirty = true
+	checkHeldEsc(t, "settings, unsaved edits", a, settingsOpen, heldEscOff)
+	if a.settings.closeConfirm {
+		t.Error("Esc under the notice raised the Save changes prompt")
+	}
+	// And with that prompt already up, Esc would dismiss it unseen.
+	a.settings.closeConfirm = true
+	checkHeldEsc(t, "settings, save prompt", a, settingsOpen, heldEscOff)
+
+	// Add Video past its first step: Esc goes back a step.
+	a = overlayTestApp(t)
+	a.addVideo.Open()
+	a.addVideo.step = AddStepTimestamps
+	checkHeldEsc(t, "add video, timestamps step", a, func(a *App) bool { return a.addVideo.IsVisible() }, heldEscBack)
+
+	// The action menu's job picker: Esc goes back to the menu.
+	a = overlayTestApp(t)
+	a.actionMenu.Open(a.buildMenuItems())
+	a.actionMenu.mode = menuConfirm
+	a.actionMenu.confirmLabel = "Delete"
+	checkHeldEsc(t, "action menu, confirm", a, func(a *App) bool { return a.actionMenu.IsVisible() }, heldEscBack)
+
+	// The wizard's advanced form: two Escs abandon what was typed.
+	a = overlayTestApp(t)
+	a.setupWiz.Open()
+	a.setupWiz.mode = setupModeAdvanced
+	a.setupWiz.buildAdvancedForm()
+	if a.setupWiz.advancedForm == nil {
+		t.Fatal("premise lost: no advanced form")
+	}
+	checkHeldEsc(t, "setup wizard, advanced form", a, func(a *App) bool { return a.setupWiz.IsVisible() }, heldEscOff)
+	if a.setupWiz.escConfirm {
+		t.Error("Esc under the notice armed the wizard's abandon prompt")
+	}
+
+	// The FFmpeg check off its main menu: Esc goes back to it, and from
+	// there it is off, so no run of Escs quits.
+	a = overlayTestApp(t)
+	a.ffmpegCheck.Open()
+	a.ffmpegCheck.ShowManual()
+	ffOpen := func(a *App) bool { return a.ffmpegCheck.IsVisible() }
+	checkHeldEsc(t, "ffmpeg check, manual", a, ffOpen, heldEscBack)
+	checkHeldEsc(t, "ffmpeg check, main", a, ffOpen, heldEscOff)
+}

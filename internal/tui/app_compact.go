@@ -23,7 +23,7 @@ import (
 //
 // An overlay already open when the terminal leaves the normal layout is kept
 // with its state and covered by a notice; until the terminal grows back only
-// Esc and Ctrl+C work.
+// Ctrl+C works, and Esc where the notice says what it does (overlay_held.go).
 //
 // The decision is layoutMode, derived from the size on every call and never
 // stored: View, handleKey, handleMouse and the tick gating all ask it.
@@ -91,12 +91,17 @@ func (a *App) screenHeld() bool {
 
 // keyReachesComponents reports whether a key press is fed to the embedded
 // components (text inputs, viewports) before handleKey decides on it. Not
-// while the screen is held, except the Esc a kept overlay still answers.
+// while the screen is held, except the Esc a kept overlay still answers
+// (heldEscFor).
 func (a *App) keyReachesComponents(msg tea.KeyPressMsg) bool {
 	if !a.screenHeld() {
 		return true
 	}
-	return a.layoutMode() == layoutCompact && msg.String() == keyEsc
+	if a.layoutMode() != layoutCompact || msg.String() != keyEsc {
+		return false
+	}
+	o := a.activeOverlay()
+	return o != nil && a.heldEscFor(o) != heldEscOff
 }
 
 // refuseOverlay answers an action that would open an overlay. In the normal
@@ -154,15 +159,14 @@ func (a *App) tooSmallView() tea.View {
 	)
 }
 
-// heldOverlayView covers an overlay kept open below the normal layout. Esc
-// is the overlay's own Esc, which closes most of them and steps back out of
-// a form or a confirmation in the others.
+// heldOverlayView covers an overlay kept open below the normal layout. Its
+// Esc line is heldEscFor, the rule the handleKey size guard delivers Esc by.
 func (a *App) heldOverlayView(o *overlayEntry) tea.View {
 	return a.noticeView(
 		heldOverlayNotice,
 		"",
-		"Open: "+o.name,
-		"Esc backs out of it.",
+		"Open: "+o.title,
+		heldEscLine(a.heldEscFor(o)),
 		"Ctrl+C quits.",
 	)
 }
