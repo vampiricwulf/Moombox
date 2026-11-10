@@ -82,7 +82,7 @@ func TestTheArchiveCopyAppliesTheRecordedAspect(t *testing.T) {
 	}
 
 	plain := filepath.Join(out, "plain.mp4")
-	if _, err := w.orchestrator.copyStaged(context.Background(), "j", video, "", plain, ""); err != nil {
+	if _, err := w.orchestrator.copyStaged(context.Background(), "j", video, "", plain, "", nil); err != nil {
 		t.Fatalf("copyStaged: %v", err)
 	}
 	if got := dar(plain); got != "1:1" {
@@ -92,7 +92,7 @@ func TestTheArchiveCopyAppliesTheRecordedAspect(t *testing.T) {
 		t.Fatal(err)
 	}
 	stretched := filepath.Join(out, "stretched.mp4")
-	if _, err := w.orchestrator.copyStaged(context.Background(), "j", video, "", stretched, ""); err != nil {
+	if _, err := w.orchestrator.copyStaged(context.Background(), "j", video, "", stretched, "", nil); err != nil {
 		t.Fatalf("copyStaged: %v", err)
 	}
 	if got := dar(stretched); got != "16:9" {

@@ -358,6 +358,8 @@ Which statuses each job verb (Cancel, Resume, Reinitialize, Mux, Delete, Toggle 
 
 Sub-states that change what the operator should do are derived, never persisted, and shown in both UIs, each from one function in `internal/jobstate` that the dashboard mirrors against a shared table (architecture.md § Derived Sub-States): the automatic action an Error row waits on (`PendingAutoAction` — the Twitch monitor's mux once the broadcast is confirmed over, or its retry when it is live again; both Reinitialize confirms say the reset cancels it), the wait an Upcoming row is in (every wait line built by `jobstate.WaitLine` and read by `IsWaitLine`), and why a Queued row is not admitted (`AdmissionHolds.For` by `HoldPrecedence`, the scheduler's own order: offline, disk gate, YouTube rate limit, the row's retry backoff).
 
+While the single-file archive of a `Muxing` job is copied, its progress line is the mux readout — `Muxing 42%`, then `Muxing: finalizing` for the faststart pass — written by the worker from FFmpeg's own progress reports; the percent bar keeps the download's value, and a recording missing its tail keeps its honest line instead (architecture.md § ProgressTracker).
+
 ### Error Classification
 
 There is no typed error hierarchy and no errors package under `internal/`. Errors are plain Go errors built with `fmt.Errorf("...: %w", err)`, and the only classification is sentinel matching with `errors.Is`:

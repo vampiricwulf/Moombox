@@ -64,3 +64,15 @@ test("a single-file recording's load error does not blame a segment", { skip }, 
   h.video.dispatchEvent(new h.window.Event("error"));
   assert.deepEqual(h.app.toasts.map((t) => t.message), ["Video failed to load"]);
 });
+
+// Owner ruling R-D1 of 2026-11-10: a Muxing row's progress line is the worker's mux readout
+// ("Muxing 42%", then "Muxing: finalizing"), and the dashboard shows the line
+// as it is, on the card and in the details dialog (both call formatProgress).
+// The percent bar is not the readout's. Mutant: formatProgress answering the
+// fixed "Muxing..." for every Muxing row.
+test("a Muxing row shows the mux readout the worker wrote", { skip }, async () => {
+  const h = await harness.makeApp();
+  assert.equal(h.app.formatProgress({ status: "Muxing", progress: "Muxing 42%", percent: 100 }), "Muxing 42%");
+  assert.equal(h.app.formatProgress({ status: "Muxing", progress: "Muxing: finalizing", percent: 100 }), "Muxing: finalizing");
+  assert.equal(h.app.formatProgress({ status: "Muxing", progress: "" }), "Muxing...");
+});
