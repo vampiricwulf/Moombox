@@ -259,6 +259,9 @@ type idleBody struct {
 	timer *time.Timer
 	idle  time.Duration
 	read  int64
+	// onBytes, when set, is told of every delivery as it lands. Only
+	// fetchChunk sets it, around its 206 body read (see arrivalMeter).
+	onBytes func(n int)
 }
 
 func (b *idleBody) Read(p []byte) (int, error) {
@@ -269,8 +272,51 @@ func (b *idleBody) Read(p []byte) (int, error) {
 		// again; if it has fired the context is already cancelled and this
 		// Read's error path takes over, so there is nothing to undo.
 		b.timer.Reset(b.idle)
+		if b.onBytes != nil {
+			b.onBytes(n)
+		}
 	}
 	return n, err
+}
+
+// arrivalFlushBytes and arrivalFlushInterval bound how long a whole-file
+// chunk's delivered bytes wait before they reach noteFetch: whichever comes
+// first. 64 KB is the streaming fallback's read size, which reports every
+// read; 16 ms is the worker's default progress gate, so a slow link is
+// reported as often as the progress line can show it.
+const (
+	arrivalFlushBytes    = 64 * 1024
+	arrivalFlushInterval = 16 * time.Millisecond
+)
+
+// arrivalMeter feeds one chunk fetch's body reads to noteFetch while the
+// chunk is still arriving. fetchChunk buffers a whole chunk (up to 5 MB)
+// before the caller can write it, and reporting the arrival once, after the
+// last byte, moved the arrival counter in 5 MB steps: on a link at or below
+// about 1 MB/s the worker's 5 s speed window held one or two samples and
+// the readout swung between zero and a spike. Reads are coalesced so a fast
+// link does not pay a callback per read. One goroutine uses it: the one
+// reading the body.
+type arrivalMeter struct {
+	d       *SegmentDownloader
+	pending int
+	last    time.Time
+}
+
+func (m *arrivalMeter) add(n int) {
+	m.pending += n
+	if m.pending >= arrivalFlushBytes || time.Since(m.last) >= arrivalFlushInterval {
+		m.flush()
+	}
+}
+
+// flush reports what has arrived since the last report, if anything.
+func (m *arrivalMeter) flush() {
+	if m.pending > 0 {
+		m.d.noteFetch(m.pending)
+		m.pending = 0
+	}
+	m.last = time.Now()
 }
 
 // received reports how many bytes this body has delivered, for the ceiling
@@ -1183,7 +1229,17 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 	// Bound the 206 read to the requested range size — a correct server sends
 	// exactly end-start+1 bytes, and a broken one must not be able to balloon
 	// memory past it (mirrors the maxIgnoredRangeBodyBytes cap on the 200 path).
+	//
+	// The bytes are reported to noteFetch as they land (arrivalMeter), and
+	// whatever is still unreported when the read ends, complete or broken
+	// off, is reported then: every byte readBody returns or drops was
+	// received, and the caller must not count the chunk again. The meter
+	// comes off before the drain below, whose bytes are not payload.
+	meter := arrivalMeter{d: d, last: time.Now()}
+	body.onBytes = meter.add
 	data, err := readBody(resp, end-start+1)
+	body.onBytes = nil
+	meter.flush()
 	if err == nil {
 		// A correct server declares Content-Length == end-start+1, so
 		// readBody takes its sized path and observes the body's own io.EOF
