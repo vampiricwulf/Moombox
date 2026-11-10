@@ -105,6 +105,15 @@ Error paths: any → `Error`, `Cancelled`, or `COOKIES?`. Two automatic ways out
 
 `JobStatus` is `type JobStatus string`. Timestamps are ISO 8601 strings. Optional numerics use pointers.
 
+### State machines
+Moombox has no FSM framework, and none should be added. Its states stay explicit by following six rules:
+1. **Closed vocabularies are named string types with constants.** Define each in the lowest package that owns it, and keep its DB and wire bytes unchanged (`database.ChatStatus`, `monitor.BackfillState`, `youtube.StreamStatus`).
+2. **Each rule has exactly one Go predicate.** "Is verb V legal for this job" lives in `internal/jobverbs`. Derived job facts (pending auto-action, wait line, admission holds, awaiting processing) live in `internal/jobstate`. Routes, the TUI and the worker all call these predicates. The JS mirrors each one, and a test checks the JS against `web/tests/fixtures/job-state-parity.json`. Keep status-only predicates separate from disk-fact probes.
+3. **A decision based on an earlier read is written conditionally, with the `UpdateJobFieldsIf*` family.** Irreversible side effects run only after that write has applied: claim the status first, then `RemoveAll`. A refused write returns a typed error (`worker.ErrNotAllowed`, `ErrStagingBusy`, `ErrResetPending`). Routes map it to 409, and the TUI shows it on its feedback line.
+4. **Per-job exclusive work on staging goes through the one staging-claim registry** (`DownloadWorker.stagingClaims`), which names the op holding it. Slots are owned by a holder identity, never by a bare jobID bool.
+5. **A sub-state that changes what the operator should do is derived, never persisted, and shown in both UIs.** Examples: a pending auto-action, a wait reason, an admission hold, retry n of 3.
+6. **Each in-flight UI flow has one phase or busy field with a single writer.** Late answers are dropped by an epoch or generation check: the TUI release-notes `Epoch`, `_gen` in `cookie-setup-session.js`.
+
 ### TUI chord system
 `buildMenuItems()` in `internal/tui/app_actions.go` = single source of truth for chords, action menu, hints, and help. `dispatchAction(chord, job)` = unified handler. Adding a chord: one entry in `buildMenuItems()` + one case in `dispatchAction()`. Adding a PREFIX touches six closed lists as well: the prefix `case` in `app_keys.go`, `chordFeedback`'s label switch and `feedbackColor`'s chord-yellow prefixes (`app_actions.go`, `app_layout.go`), `categoryHelpTitles`/`categoryOrder` in `help.go`, the `named`/`bare` hint lists in `status_bar.go`, and the `Category` comment in `action_menu.go`. Adding an OVERLAY touches three places: an `overlayRegistry` entry (`internal/tui/overlays.go`), its key handler (`overlay_keys.go`), and a row in `overlayCases` (`overlay_order_test.go`).
 
