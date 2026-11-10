@@ -574,3 +574,24 @@ func TestReauthenticateSkipsTheBackoffAfterAGenuineError(t *testing.T) {
 			"repaired credential asked for waited out a network backoff it did not cause", got)
 	}
 }
+
+// TestReauthenticateResetsEveryPerPairLatch (K51): a Reauthenticate clears
+// all three per-credential-pair latches — authRefused, downgradeReported and
+// warnedNoLogin — through the one reset both sites share. Pinned on an idle
+// downloader, where nothing else could clear them.
+//
+// Mutant: any of the three dropped from resetCredentialLatches.
+func TestReauthenticateResetsEveryPerPairLatch(t *testing.T) {
+	cd := newAuthTestChatDownloaderWithLogger(t,
+		staticCredentials("test-token-aaaa", "archiveraccount"), &recordingLogger{})
+	cd.authRefused.Store(true)
+	cd.downgradeReported.Store(true)
+	cd.warnedNoLogin.Store(true)
+
+	cd.Reauthenticate()
+
+	if cd.authRefused.Load() || cd.downgradeReported.Load() || cd.warnedNoLogin.Load() {
+		t.Errorf("after Reauthenticate: authRefused=%v downgradeReported=%v warnedNoLogin=%v, want all false",
+			cd.authRefused.Load(), cd.downgradeReported.Load(), cd.warnedNoLogin.Load())
+	}
+}
