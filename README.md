@@ -609,7 +609,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | ? | Toggle help overlay |
 | c | Clear log view (log panel focused) |
 
-**Navigation**: Up/Down to select/scroll, PgUp/PgDn to page (Tasks, Details, Logs, Job Log), Home/End to jump to the first/last task (End also resumes auto-scroll in Logs and the Job Log), Ctrl+U/Ctrl+D for a half page (Details, Logs, Job Log), Space to select a task for batch actions, Enter to expand/collapse archives. Mouse support: click to select tasks, scroll wheel to navigate.
+**Navigation**: Up/Down to select/scroll, PgUp/PgDn to page (Tasks, Details, Logs, Job Log), Home/End to jump to the first/last task (End also resumes auto-scroll in Logs and the Job Log), Ctrl+U/Ctrl+D for a half page (Details, Logs, Job Log), Space to select a task for batch actions, Enter to expand/collapse archives. Mouse support: click to select tasks, scroll wheel to navigate — in the panels and in every overlay with something to scroll (Help, release notes, lists and tables).
 
 ### Add Video Dialog
 

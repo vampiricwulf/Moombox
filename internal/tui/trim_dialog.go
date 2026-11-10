@@ -617,3 +617,14 @@ func (m *TrimDialogModel) renderDeleteMode(w, _ int) string {
 
 	return strings.Join(lines, "\n")
 }
+
+// wheelMovesTrim reports whether a wheel notch in direction dir (-1 up, 1
+// down) has a row to move the delete list's cursor to. The arrow keys wrap
+// at the ends of that list; the wheel stops there.
+func (m *TrimDialogModel) wheelMovesTrim(dir int) bool {
+	if !m.visible || m.mode != TrimModeDelete || m.loading {
+		return false
+	}
+	next := m.selectedTrimIdx + dir
+	return next >= 0 && next < len(m.trims)
+}

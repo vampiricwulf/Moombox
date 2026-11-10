@@ -19,7 +19,10 @@ type overlayEntry struct {
 	// key: nothing reaches the chord system underneath.
 	key func(*App, tea.KeyPressMsg, string) (tea.Model, tea.Cmd)
 	// mouse handles a mouse event while the overlay is on top. nil: the
-	// overlay swallows the mouse.
+	// overlay swallows the mouse. Every overlay with something to scroll
+	// has one (owner ruling R-C2): a text overlay scrolls three rows a
+	// wheel notch, a list or table overlay moves its cursor one row. The
+	// census in overlay_order_test.go states the answer for every overlay.
 	mouse func(*App, tea.MouseMsg) (tea.Model, tea.Cmd)
 	// liveProgress reports whether the overlay is, right now, drawing progress
 	// the progress tick delivers, so the tick must stay at the fast class
@@ -57,6 +60,7 @@ func init() {
 			view:       func(a *App) string { return a.help.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.help.UpdateViewport(msg) },
 			key:        (*App).keyHelp,
+			mouse:      (*App).mouseHelp,
 		},
 		{
 			name:       "release notes",
@@ -64,6 +68,7 @@ func init() {
 			view:       func(a *App) string { return a.releaseNotesPopup.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.releaseNotesPopup.Update(msg) },
 			key:        (*App).keyReleaseNotes,
+			mouse:      (*App).mouseReleaseNotes,
 		},
 		{
 			name:       "ffmpeg check",
@@ -71,6 +76,7 @@ func init() {
 			view:       func(a *App) string { return a.ffmpegCheck.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.ffmpegCheck.UpdateComponents(msg) },
 			key:        (*App).keyFFmpegCheck,
+			mouse:      (*App).mouseFFmpegCheck,
 		},
 		{
 			name:       "setup wizard",
@@ -78,6 +84,7 @@ func init() {
 			view:       func(a *App) string { return a.setupWiz.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.setupWiz.UpdateComponents(msg) },
 			key:        (*App).keySetupWizard,
+			mouse:      (*App).mouseSetupWizard,
 		},
 		{
 			name:    "action menu",
@@ -92,6 +99,7 @@ func init() {
 			view:       func(a *App) string { return a.importDlg.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.importDlg.UpdateComponents(msg) },
 			key:        (*App).keyImport,
+			mouse:      (*App).mouseImport,
 		},
 		{
 			name:       "cookie import",
@@ -106,6 +114,7 @@ func init() {
 			view:       func(a *App) string { return a.chapterDlg.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.chapterDlg.UpdateComponents(msg) },
 			key:        (*App).keyChapterImport,
+			mouse:      (*App).mouseChapterImport,
 		},
 		{
 			name:       "add video",
@@ -113,6 +122,7 @@ func init() {
 			view:       func(a *App) string { return a.addVideo.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.addVideo.UpdateComponents(msg) },
 			key:        (*App).keyAddVideo,
+			mouse:      (*App).mouseAddVideo,
 		},
 		{
 			name:         "trim",
@@ -120,6 +130,7 @@ func init() {
 			view:         func(a *App) string { return a.trimDlg.View() },
 			components:   func(a *App, msg tea.Msg) tea.Cmd { return a.trimDlg.UpdateComponents(msg) },
 			key:          (*App).keyTrim,
+			mouse:        (*App).mouseTrim,
 			liveProgress: func(a *App) bool { return a.trimInProgress },
 		},
 		{
@@ -128,6 +139,7 @@ func init() {
 			view:       func(a *App) string { return a.filesDlg.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.filesDlg.UpdateComponents(msg) },
 			key:        (*App).keyFiles,
+			mouse:      (*App).mouseFiles,
 		},
 		{
 			name:       "client tokens",
@@ -135,6 +147,7 @@ func init() {
 			view:       func(a *App) string { return a.clientTokensDlg.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.clientTokensDlg.UpdateComponents(msg) },
 			key:        (*App).keyClientTokens,
+			mouse:      (*App).mouseClientTokens,
 		},
 		{
 			name:       "ytdlp plugin",

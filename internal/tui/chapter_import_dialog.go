@@ -511,3 +511,9 @@ func (a *App) handleChapterSaveResult(msg chapterSaveResultMsg) (tea.Model, tea.
 	}
 	return a, nil
 }
+
+// wheelMovesPaste reports whether a wheel notch moves through the paste box:
+// the dialog is being edited and the paste box, not the offset, has focus.
+func (m *ChapterImportDialogModel) wheelMovesPaste() bool {
+	return m.visible && m.step == chapterImportStepEdit && !m.focusOffset
+}

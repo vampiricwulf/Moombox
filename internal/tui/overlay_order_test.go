@@ -107,7 +107,8 @@ func TestOverlayPriorityViewAndKey(t *testing.T) {
 // The registry is the one place the order lives: it must be exactly the
 // order the five hand-written chains had, every entry needs the three
 // required handlers, and every entry needs a case above — so a new overlay
-// cannot skip the census below or the Ctrl+C census.
+// cannot skip the censuses (live progress below, the mouse wheel in
+// overlay_wheel_test.go) or the Ctrl+C census.
 func TestOverlayRegistryOrder(t *testing.T) {
 	cases := overlayCases(t)
 	if len(overlayRegistry) != len(cases) {

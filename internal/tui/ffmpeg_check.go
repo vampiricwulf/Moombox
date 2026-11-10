@@ -835,3 +835,17 @@ func dropSpacersToFit(lines []string, maxRows int) []string {
 	}
 	return lines
 }
+
+// ScrollReview moves the install script under review n rows (negative is
+// up): the mouse wheel's route, three rows a notch (mouseFFmpegCheck). It
+// does nothing outside the review, where the overlay is a menu or a field.
+func (m *FFmpegCheckModel) ScrollReview(n int) {
+	if !m.visible || m.mode != ffmpegReview {
+		return
+	}
+	if n < 0 {
+		m.reviewViewport.ScrollUp(-n)
+	} else {
+		m.reviewViewport.ScrollDown(n)
+	}
+}
