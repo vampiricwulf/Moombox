@@ -19,7 +19,8 @@ import (
 // its Error row and the Web badge showed a capture in progress. setJobError
 // now settles an in-flight value as a Cancel does (owner ruling R-E1a): a
 // running capture becomes "incomplete", a pending one is cleared; a recorded
-// verdict, a Twitch row and a COOKIES? park are left as they were.
+// verdict and a COOKIES? park are left as they were. A Twitch row settles the
+// same way (owner ruling R-H1; TestNoErrorWriteLeavesATwitchChatInFlight).
 //
 // Mutant: dropping the settleErrorChat call — the first two rows keep their
 // in-flight value; settling pending to "incomplete" (R-E1 as first written)
@@ -37,7 +38,7 @@ func TestYouTubeErrorSettlesAnInFlightChat(t *testing.T) {
 		{"finished verdict", "youtube", database.ChatFinished, errors.New("mux: failed"), database.ChatFinished},
 		{"unavailable verdict", "youtube", database.ChatUnavailable, errors.New("download: reset"), database.ChatUnavailable},
 		{"no chat", "youtube", database.ChatNone, errors.New("download: reset"), database.ChatNone},
-		{"twitch is not in scope", "twitch", database.ChatDownloading, errors.New("download: reset"), database.ChatDownloading},
+		{"twitch settles as youtube does (R-H1)", "twitch", database.ChatDownloading, errors.New("download: reset"), database.ChatIncomplete},
 		{"a COOKIES? park is not an Error", "youtube", database.ChatDownloading, ErrCookiesRequired, database.ChatDownloading},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -136,7 +137,7 @@ func TestAPanickedYouTubeRunSettlesItsChat(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.viaID {
-				w.writePanicError(job.ID, nil, "boom")
+				w.writePanicError(job.ID, "boom")
 			} else {
 				w.recordRunPanic(job.ID, job, "boom")
 			}
@@ -228,7 +229,7 @@ func TestAResumedRunReArmsAnIncompleteChat(t *testing.T) {
 // in ChatDownloader.Start) — went on showing it on the Error row a failed Mux
 // leaves. The Mux's failure write settles it by the same rule (R-E1a): a
 // running capture becomes "incomplete", a pending one is cleared. A Twitch
-// row is left as it was, as setJobError leaves it.
+// row settles the same way (owner ruling R-H1).
 //
 // Mutant: the Mux's failure write without the settle — the first two cases
 // keep their in-flight value.
@@ -242,7 +243,7 @@ func TestAFailedMuxSettlesAnInFlightChat(t *testing.T) {
 		{"downloading", "youtube", database.ChatDownloading, database.ChatIncomplete},
 		{"pending", "youtube", database.ChatPending, database.ChatNone},
 		{"a recorded verdict", "youtube", database.ChatFinished, database.ChatFinished},
-		{"twitch is not in scope", "twitch", database.ChatDownloading, database.ChatDownloading},
+		{"twitch settles as youtube does (R-H1)", "twitch", database.ChatDownloading, database.ChatIncomplete},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, db := testWorkerSetup(t)

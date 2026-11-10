@@ -609,7 +609,7 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 				// Complete.
 				if r := recover(); r != nil {
 					w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
-					w.writePanicError(jobID, nil, r)
+					w.writePanicError(jobID, r)
 				}
 			}()
 			w.processJob(jobCtx, jobID)
@@ -1757,27 +1757,26 @@ func (w *DownloadWorker) recordRunPanic(jobID string, job *database.Job, r any) 
 			}
 		}
 	}
-	w.writePanicError(jobID, job, r)
+	w.writePanicError(jobID, r)
 }
 
 // writePanicError writes a panicked run's Error, guarded by the terminal
 // statuses, and settles the chat it leaves in flight as setJobError's Error
-// does (owner rulings R-E1, R-E1a): recordRunPanic and Start's recover both
-// write through it, so a YouTube run that panics mid-capture does not leave
-// "downloading" on its Error row. job may be nil (Start's recover has the ID
-// alone); settleErrorChat reads the row for its platform then. The settle
+// does (owner rulings R-E1, R-E1a, R-H1): recordRunPanic and Start's recover
+// both write through it, so a run that panics mid-capture does not leave
+// "downloading" on its Error row. The settle
 // does not stop a
 // chat downloader the panic left running (the orchestrator's cleanup is an
 // explicit call, not a deferred one), and a downloader left running that way
 // can still write its own value (OnStart's "downloading") over the settle.
-func (w *DownloadWorker) writePanicError(jobID string, job *database.Job, r any) {
+func (w *DownloadWorker) writePanicError(jobID string, r any) {
 	if !w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
 		"status": database.StatusError,
 		"error":  fmt.Sprintf("internal panic: %v", r),
 	}) {
 		return
 	}
-	w.settleErrorChat(jobID, job)
+	w.settleErrorChat(jobID)
 }
 
 // handleCancellation handles a cancelled/shutdown job.
@@ -1844,8 +1843,9 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 
 // stoppedChatStatus is the one rule for settling a chat capture its run
 // stopped without recording a verdict, written once for both settles: a user
-// cancel (handleCancellation) and a YouTube Error (settleErrorChat, owner
-// ruling R-E1a, which made the Error settle match this split). Neither
+// cancel (handleCancellation) and an Error on either platform
+// (settleErrorChat, owner rulings R-E1a, which made the Error settle match
+// this split, and R-H1, which extended it to Twitch). Neither
 // orchestrator's cancel or error arm records a chat verdict — it stops the
 // downloader and returns, and on a shutdown that is right, since the row keeps
 // its state and the capture resumes on the next start. A user cancel and an
@@ -2188,7 +2188,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 		return
 	}
 	if status == database.StatusError {
-		w.settleErrorChat(job.ID, job)
+		w.settleErrorChat(job.ID)
 	}
 
 	// Suppress notifications for non-actionable errors (matches TS behavior):
@@ -3228,13 +3228,13 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 	// writeFailed makes that write, only over this Mux's own Muxing (an
 	// outcome that landed meanwhile stands), and settles an in-flight chat on
 	// the Error it applied as setJobError's Error does (settleErrorChat, owner
-	// ruling R-E1a): this Error is written here, not through setJobError, and
-	// a YouTube row can reach a Mux still showing one — an Error row from
+	// rulings R-E1a, R-H1): this Error is written here, not through
+	// setJobError, and a row can reach a Mux still showing one — an Error row from
 	// before the settle existed, or one a stray downloader's OnStart wrote
 	// over its settle.
 	writeFailed := func(msg string) {
 		if w.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, failed(msg)) {
-			w.settleErrorChat(jobID, prior)
+			w.settleErrorChat(jobID)
 		}
 	}
 
@@ -3773,10 +3773,11 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 	return nil
 }
 
-// settleErrorChat settles the chat_status a failed YouTube download leaves
-// behind (owner rulings R-E1, R-E1a). The orchestrator's error arm stops the
-// chat downloader and returns without recording a verdict — recordChatOutcome
-// runs on the success path only — so an Error row went on reading
+// settleErrorChat settles the chat_status a failed job leaves behind, on
+// either platform (owner rulings R-E1, R-E1a, R-H1). An orchestrator's error
+// arm stops the chat downloader and returns without recording a verdict —
+// recordChatOutcome runs on the success path, and on ExecuteTwitch's
+// unconfirmed-end arm — so an Error row went on reading
 // "downloading" (or "pending"), and the Web details badge, which renders any
 // non-empty value, showed a capture in progress on a failed job. The value
 // settles as a Cancel's does (stoppedChatStatus, R-E1a): a capture that was
@@ -3791,23 +3792,17 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 // the chat (setupChatDownloader writes "pending" whatever the row reads) —
 // wins. Pending is tried first, in ChatStatuses order, so a capture that
 // starts between the two statements is still settled as the running one it
-// became. YouTube only, as the ruling names it: the Twitch orchestrator
-// records a verdict on its unconfirmed-end arm (recordChatOutcome) and its
-// other error arms are left as they were. A Cancel is settled by
+// became. Every platform (R-H1; R-E1 first named YouTube alone): a Twitch
+// failure that is not the unconfirmed-end arm's — a staging directory that
+// could not be made, a stream-processing failure after the capture was
+// armed, a panic, a failed Mux — left "pending" or "downloading" on its
+// Error row as a YouTube one did. The verdict the unconfirmed-end arm
+// records is not in flight and stands. A Cancel is settled by
 // handleCancellation, and a COOKIES? park is not an Error. The Error writes
-// that come here: setJobError's, writePanicError's and a failed Mux's
-// (muxJob). job may be nil, and the row is read for its platform then.
-func (w *DownloadWorker) settleErrorChat(jobID string, job *database.Job) {
-	if job == nil {
-		row, err := w.db.GetJob(jobID)
-		if err != nil || row == nil {
-			return
-		}
-		job = row
-	}
-	if job.Platform != "youtube" {
-		return
-	}
+// that come here are all there are: setJobError's, writePanicError's, a
+// failed Mux's (muxJob) and the automatic mux that could not start
+// (autoMuxNow).
+func (w *DownloadWorker) settleErrorChat(jobID string) {
 	for _, from := range database.ChatStatuses {
 		if !from.InFlight() {
 			continue

@@ -350,6 +350,12 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	}
 
 	if err := os.MkdirAll(jobCtx.StagingDir, 0o755); err != nil {
+		// The chat was armed ("pending") and never started. Stopped all the
+		// same, so nothing can start it after this run's Error settles it
+		// (settleErrorChat, R-H1).
+		if twitchChatDl != nil {
+			twitchChatDl.Stop()
+		}
 		return fmt.Errorf("create staging dir: %w", err)
 	}
 	// The category the broadcast is in as the capture starts: the first
@@ -574,6 +580,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		segmentIndex, curStagingDir = o.discoverResumeSegment(jobCtx)
 		if curStagingDir != jobCtx.StagingDir {
 			if err := os.MkdirAll(curStagingDir, 0o755); err != nil {
+				if twitchChatDl != nil {
+					twitchChatDl.Stop() // never started; as the staging-dir exit above
+				}
 				return fmt.Errorf("create resume part staging dir: %w", err)
 			}
 			o.logger.Info("resuming Twitch job in part staging",
