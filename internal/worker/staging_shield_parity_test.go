@@ -19,8 +19,10 @@ import (
 // subset of the six shields, fresh and aged, on disk as the cleanup would
 // meet it.
 //
-// Mutants: dropping any shield from jobNeedsStaging, adding one there that
-// decideStagingCleanup lacks, or putting a media shield under the age rule.
+// Mutants: putting a media keep under the age rule (stagingKeep.expires), or
+// moving the tail or chat keep ahead of a media keep in decideStagingCleanup
+// — jobNeedsStaging reads only the first keep, so an aged expiring one would
+// hide the media behind it (the shield-set oracle below).
 func TestJobNeedsStagingMatchesTheCleanupVerdict(t *testing.T) {
 	const (
 		shAside = 1 << iota
@@ -91,8 +93,26 @@ func TestJobNeedsStagingMatchesTheCleanupVerdict(t *testing.T) {
 				v := decideStagingCleanup(db, job, jobID, dir)
 				expiring := v.keep == keepStagingForTail || v.keep == keepStagingChatOnly
 				want := v.keep != removeStaging && !(expiring && incompleteStagingExpired(cfg, job))
-				if got := jobNeedsStaging(db, cfg, job, dir); got != want {
+				got := jobNeedsStaging(db, cfg, job, dir)
+				if got != want {
 					t.Errorf("jobNeedsStaging = %v, cleanup verdict %d (aged %v) wants %v", got, v.keep, ageName == "aged", want)
+				}
+				// The same answer from the shield SET alone, with no reading
+				// of the verdict: any media shield holds for good, the tail
+				// and chat shields only until they age. jobNeedsStaging reads
+				// only the verdict's FIRST keep and lifts it when it expires,
+				// so it agrees with this only while every never-expiring keep
+				// is checked ahead of the two expiring ones in
+				// decideStagingCleanup. A new shield gets its bit here, on the
+				// side of this rule it belongs to.
+				//
+				// Mutant: decideStagingCleanup checking the tail (or chat)
+				// keep ahead of a media keep — the aged rows with both read
+				// false here.
+				const mediaShields = shAside | shUnmuxedPart | shUnusedRoot | shMuxGap
+				oracle := set&mediaShields != 0 || (set&(shTail|shChat) != 0 && ageName == "fresh")
+				if got != oracle {
+					t.Errorf("jobNeedsStaging = %v, the shield set %06b (aged %v) wants %v — a never-expiring keep is checked after an expiring one", got, set, ageName == "aged", oracle)
 				}
 				// Each shield on its own must actually shield (fresh), so the
 				// parity above cannot pass on two functions that both see
