@@ -16,7 +16,9 @@ import "database/sql"
 //     on the error text, which the backfill leaves as it is (and reads the
 //     ended-offline text nowhere), and compares park_reason only for
 //     equality with the values it knows, so a value it has never seen reads
-//     as "none of mine".
+//     as "none of mine". The binaries a bump would newly refuse are the
+//     schema-27 builds of main from before this change; the last release
+//     (schema 23) is already refused this database by v24-v27.
 //   - A version block runs once. A row written afterwards by an older binary
 //     on this database (a rollback that ran for a while, then the update
 //     again) would keep the bare text, and once the readers' one-release

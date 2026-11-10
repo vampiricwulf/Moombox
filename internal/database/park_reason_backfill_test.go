@@ -153,3 +153,64 @@ func TestOpenWithNothingToBackfillTakesNoWriteLock(t *testing.T) {
 		t.Errorf("Open warned %q with nothing to backfill", rec.warns)
 	}
 }
+
+// TestOpenSurvivesABackfillThatCannotWrite: the backfill's failure is logged,
+// not fatal. A legacy row is waiting and another connection holds the write
+// lock for the whole Open (the running daemon mid-transaction under a
+// `moombox add`), so the UPDATE gives up at busy_timeout: the Open still
+// succeeds, warns once, and leaves the row exactly as it was — the bare text
+// with no park_reason, the shape a later Open converts.
+//
+// The test waits out one busy_timeout (5 s).
+//
+// Mutants: the failure returned from migrate (Open fails); the Warn dropped
+// (no warning); the failure retried in a loop (more than one warning, or the
+// Open never returns).
+func TestOpenSurvivesABackfillThatCannotWrite(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := db.AddJob(&Job{ID: "tw_1", VideoID: "1", Platform: "twitch", Status: StatusUpcoming}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.Exec(`UPDATE jobs SET status = ?, error = ?, park_reason = '', updated_at = ? WHERE id = ?`,
+		StatusError, LegacyTwitchOfflineError, "2026-01-02T03:04:05Z", "tw_1"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	writer, err := sql.Open("sqlite", openDSN(dbPath, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	conn, err := writer.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("take the write lock: %v", err)
+	}
+	defer conn.ExecContext(context.Background(), "ROLLBACK")
+
+	rec := &warnRecorder{}
+	db, err = Open(dbPath, rec)
+	if err != nil {
+		t.Fatalf("Open with the backfill locked out: %v", err)
+	}
+	defer db.Close()
+	if len(rec.warns) != 1 {
+		t.Fatalf("Open warned %d times (%q), want the one backfill warning", len(rec.warns), rec.warns)
+	}
+	job, err := db.GetJob("tw_1")
+	if err != nil || job == nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if job.Status != StatusError || job.Error != LegacyTwitchOfflineError || job.ParkReason != ParkReasonNone || job.UpdatedAt != "2026-01-02T03:04:05Z" {
+		t.Errorf("the row moved under a failed backfill: status %q error %q park_reason %q updated_at %q",
+			job.Status, job.Error, job.ParkReason, job.UpdatedAt)
+	}
+}
