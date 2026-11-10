@@ -83,16 +83,23 @@ func TestPendingAutoActionParity(t *testing.T) {
 }
 
 // TestDashboardAutoRetryConstantsMatch pins utils.js's copies of the two
-// recovery constants its pendingAutoAction reads to the Go ones, and the two
-// action sentences to AutoAction.Text.
+// recovery constants its pendingAutoAction reads to the Go ones — the retry
+// budget, and the frozen legacy flap text its one-release fallback matches
+// (owner ruling R-I1; the park reasons themselves are pinned by the shared
+// table) — and the two action sentences to AutoAction.Text.
 //
 // Mutant: either constant or sentence edited on one side only.
 func TestDashboardAutoRetryConstantsMatch(t *testing.T) {
 	src := readUtilsJS(t)
-	if m := regexp.MustCompile(`(?m)^export const TWITCH_OFFLINE_ERR_MSG = ("[^"]*");`).FindStringSubmatch(src); m == nil {
-		t.Error("utils.js: TWITCH_OFFLINE_ERR_MSG not found")
-	} else if s, _ := strconv.Unquote(m[1]); s != jobstate.TwitchOfflineErrMsg {
-		t.Errorf("utils.js TWITCH_OFFLINE_ERR_MSG = %q, Go %q", s, jobstate.TwitchOfflineErrMsg)
+	if m := regexp.MustCompile(`(?m)^export const LEGACY_TWITCH_OFFLINE_ERROR = ("[^"]*");`).FindStringSubmatch(src); m == nil {
+		t.Error("utils.js: LEGACY_TWITCH_OFFLINE_ERROR not found")
+	} else if s, _ := strconv.Unquote(m[1]); s != database.LegacyTwitchOfflineError {
+		t.Errorf("utils.js LEGACY_TWITCH_OFFLINE_ERROR = %q, Go %q", s, database.LegacyTwitchOfflineError)
+	}
+	for _, r := range []database.ParkReason{database.ParkReasonTwitchOffline, database.ParkReasonTwitchUnreachable, database.ParkReasonTwitchEndUnconfirmed} {
+		if !strings.Contains(src, `job.parkReason === "`+string(r)+`"`) && !strings.Contains(src, `job.parkReason !== "`+string(r)+`"`) {
+			t.Errorf("utils.js pendingAutoAction does not read park reason %q", r)
+		}
 	}
 	if m := regexp.MustCompile(`(?m)^export const MAX_TWITCH_AUTO_RETRIES = (\d+);`).FindStringSubmatch(src); m == nil {
 		t.Error("utils.js: MAX_TWITCH_AUTO_RETRIES not found")

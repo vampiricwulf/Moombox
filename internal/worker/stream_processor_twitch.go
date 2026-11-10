@@ -21,9 +21,10 @@ import (
 
 // TwitchOfflineErrMsg is the literal error string emitted when a non-manual
 // Twitch job's GetStreamInfo returns nil/!IsLive. It is
-// jobstate.TwitchOfflineErrMsg, the text the auto-recovery predicate
-// (jobstate.TwitchAutoRetryPending) matches, so producer and consumer are one
-// constant.
+// jobstate.TwitchOfflineErrMsg, written beside
+// database.ParkReasonTwitchOffline — the reason, not this text, is what the
+// auto-recovery predicate (jobstate.TwitchAutoRetryPending) keys on (owner
+// ruling R-I1).
 const TwitchOfflineErrMsg = jobstate.TwitchOfflineErrMsg
 
 // twitchEndedOfflineErrMsg is the error a Twitch job interrupted mid-capture
@@ -31,7 +32,11 @@ const TwitchOfflineErrMsg = jobstate.TwitchOfflineErrMsg
 // footage is complete as far as the live edge will ever give it (the live
 // playlist has no DVR to fetch the gap from), and the Mux action turns it into
 // the archive. Such a muxed job keeps a gap-fill plan, its tail open
-// (twitchMuxGapFillPlan, owner decision D17).
+// (twitchMuxGapFillPlan, owner decision D17) — by the park reason written
+// beside this text, database.ParkReasonTwitchEndedOffline, not by the text
+// (owner ruling R-I1). It is still database.LegacyTwitchEndedOfflineError
+// byte for byte, which the release before the park reason keys on: reword it
+// only once no such binary can run on a database this one wrote.
 const twitchEndedOfflineErrMsg = "stream ended while Moombox was offline — captured data can be muxed via the Mux action"
 
 // twitchOfflineError picks the error a non-manual Twitch job takes when its
@@ -41,12 +46,19 @@ const twitchEndedOfflineErrMsg = "stream ended while Moombox was offline — cap
 // staging — the auto-recovery never takes it (LastVideoSeq is set), so the
 // only way forward is the Mux action, which the message now names, as the
 // changed-broadcast branch in processTwitchLive already does. Every other
-// offline job keeps TwitchOfflineErrMsg, the exact string that recovery keys on.
-func twitchOfflineError(job *database.Job, stagingBase string) string {
+// offline job keeps TwitchOfflineErrMsg.
+//
+// Each comes with the park reason setJobError records in the same write
+// (StreamProcessResult.ParkReason → parkReasonForError), the one thing its
+// readers key on: ParkReasonTwitchOffline is the monitor's recovery's
+// (jobstate.TwitchAutoRetryPending), ParkReasonTwitchEndedOffline keeps the
+// Mux's gap-fill tail open (twitchMuxTailOpen). This is the only writer of
+// either text or either reason.
+func twitchOfflineError(job *database.Job, stagingBase string) (string, database.ParkReason) {
 	if job.Status == database.StatusDownloading && HasSegmentFiles(stagingBase, job.ID) {
-		return twitchEndedOfflineErrMsg
+		return twitchEndedOfflineErrMsg, database.ParkReasonTwitchEndedOffline
 	}
-	return TwitchOfflineErrMsg
+	return TwitchOfflineErrMsg, database.ParkReasonTwitchOffline
 }
 
 // sameBroadcastStart is THE broadcast-identity rule for Twitch jobs:
@@ -646,7 +658,7 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		// Two samples, same rule as the download closures (owner decision
 		// O-C): a transient StreamMetadata slot failure now reaches us as an
 		// error, and erroring the job on one of those would strand a row the
-		// Twitch recovery only picks up when it carries TwitchOfflineErrMsg.
+		// Twitch recovery only picks up as an offline flap (twitchOfflineError).
 		fetched, err := confirmTwitchLiveness(ctx, func() (*twitch.TwitchStreamInfo, error) {
 			return sp.tw.GetStreamInfo(ctx, login)
 		})
@@ -671,9 +683,9 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		} else {
 			var stagingBase string
 			sp.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
-			msg := twitchOfflineError(job, stagingBase)
+			msg, reason := twitchOfflineError(job, stagingBase)
 			sp.logger.Info(msg, "channel", login, "jobID", job.ID)
-			return &StreamProcessResult{ShouldDownload: false, Error: msg}, nil
+			return &StreamProcessResult{ShouldDownload: false, Error: msg, ParkReason: reason}, nil
 		}
 	}
 

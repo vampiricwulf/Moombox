@@ -1237,20 +1237,43 @@ export function diskGaugeLevel(disk, holds) {
 }
 
 /**
- * The Twitch monitor's automatic-recovery constants, as the Go side declares
- * them (jobstate.TwitchOfflineErrMsg, jobstate.MaxTwitchAutoRetries); the
- * job-state parity test (cmd/moombox) compares the two.
+ * The Twitch monitor's automatic-recovery budget, as the Go side declares it
+ * (jobstate.MaxTwitchAutoRetries); the job-state parity test (cmd/moombox)
+ * compares the two.
  */
-export const TWITCH_OFFLINE_ERR_MSG = "twitch channel is offline";
 export const MAX_TWITCH_AUTO_RETRIES = 2;
+
+/**
+ * The offline flap's error as rows carried it before its park reason existed
+ * (database.LegacyTwitchOfflineError, frozen; the same parity test compares
+ * the two). Read by legacyOfflineFlapRow alone.
+ */
+export const LEGACY_TWITCH_OFFLINE_ERROR = "twitch channel is offline";
+
+/**
+ * legacyOfflineFlapRow is the dashboard's twin of jobstate's
+ * legacyOfflineFlapRow: an offline-flap row as releases before the
+ * "twitch_offline" park reason wrote it — the frozen text and no park reason
+ * at all. Boot backfills the reason onto such rows, so this is read only for
+ * one a boot has not converted.
+ *
+ * ONE-RELEASE FALLBACK (owner ruling R-I1): delete this function, its one
+ * call in pendingAutoAction and LEGACY_TWITCH_OFFLINE_ERROR in the release
+ * after the one that introduces the park reason, with the Go twin.
+ * @param {object} job
+ * @returns {boolean}
+ */
+function legacyOfflineFlapRow(job) {
+  return !job.parkReason && job.error === LEGACY_TWITCH_OFFLINE_ERROR;
+}
 
 /**
  * pendingAutoAction is the dashboard's twin of jobstate.PendingAutoAction
  * (owner ruling R-D2): the automatic action the Twitch monitor will take for
  * an Error row — "auto_mux" once its broadcast is confirmed over (a row the
  * unconfirmed-end latch marked), "auto_retry" when it is live again (the
- * offline flap or an unreachable probe, before any segment, retries left) —
- * or "" for none. GET /api/jobs/{id} sends the Go answer as
+ * offline flap or an unreachable probe, each by its park reason, before any
+ * segment, retries left) — or "" for none. The error text routes nothing. GET /api/jobs/{id} sends the Go answer as
  * pendingAutoAction; the job list and the WebSocket send the row alone, so
  * the rows derive it here. cmd/moombox's job-state parity test runs both
  * against web/tests/fixtures/job-state-parity.json.
@@ -1263,7 +1286,7 @@ export function pendingAutoAction(job) {
   // A manual add writes no history row, so the monitor's recovery never
   // reaches it (jobstate.PendingAutoAction); its end latch is still the mux's.
   if (job.manuallyAdded) return "";
-  if (job.error !== TWITCH_OFFLINE_ERR_MSG && job.parkReason !== "twitch_unreachable") return "";
+  if (job.parkReason !== "twitch_offline" && job.parkReason !== "twitch_unreachable" && !legacyOfflineFlapRow(job)) return "";
   if (job.lastVideoSeq !== undefined && job.lastVideoSeq !== null) return "";
   return (Number(job.autoRetryCount) || 0) < MAX_TWITCH_AUTO_RETRIES ? "auto_retry" : "";
 }

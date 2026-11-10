@@ -199,7 +199,8 @@ func TestPreviewReinitializeNamesThePendingAutomaticAction(t *testing.T) {
 	base := t.TempDir()
 	mux := &database.Job{ID: "tw_m", Platform: "twitch", Status: database.StatusError, Error: "twitch HLS: 500",
 		ParkReason: database.ParkReasonTwitchEndUnconfirmed}
-	retry := &database.Job{ID: "tw_r", Platform: "twitch", Status: database.StatusError, Error: TwitchOfflineErrMsg}
+	retry := &database.Job{ID: "tw_r", Platform: "twitch", Status: database.StatusError, Error: TwitchOfflineErrMsg,
+		ParkReason: database.ParkReasonTwitchOffline}
 	plain := &database.Job{ID: "yt_p", Platform: "youtube", Status: database.StatusError, Error: "boom"}
 	if p := PreviewReinitialize(nil, base, mux); p.PendingAutoMux != 1 || p.PendingAutoRetry != 0 ||
 		!strings.HasPrefix(p.Summary(), "cancels the pending automatic mux, and ") {

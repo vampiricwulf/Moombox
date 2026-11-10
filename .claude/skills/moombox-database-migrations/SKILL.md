@@ -41,6 +41,8 @@ Fresh databases never run migrations — they execute the full `createSchema` co
 ### 4. Data Backfill (if needed)
 Derive new column values from existing data within the same block. **Collect-then-update is mandatory**: the pool runs `SetMaxOpenConns(1)`, so an `UPDATE` issued while a `SELECT` cursor is still open waits forever for the pool's only connection. Read all rows into a slice, `rows.Close()`, THEN loop the updates (see the v2 `chat_file` backfill). Log-and-continue on per-row failures; don't fail the migration.
 
+A backfill that changes **data only** — no table, column or index — may instead run version-free on every `Open`, at the end of `migrate()`, when a `schemaVersion` bump would raise the downgrade guard against binaries that read the backfilled rows correctly. Precedent: `backfillTwitchOfflineParkReasons` (`internal/database/park_reason_backfill.go`). Its rules: read first and send the `UPDATE` only when a row is pending (an `UPDATE` that matches nothing still takes the write lock, and `moombox add` opens a running daemon's live database); an exact, idempotent `WHERE`; a failure is logged, not fatal; `updated_at` and `user_version` are left alone.
+
 ### 5. Update Field Maps (jobs columns only)
 `internal/database/database.go` — `fieldToColumn` maps `UpdateJobFields()` keys to **`jobs` table** columns; it does not cover other tables (they have their own dedicated query functions, e.g. `database_feed_items.go`). `TestFieldToColumnCoverage` (database_test.go) enforces that every JSON-tagged `Job` field has an entry — when a new jobs column legitimately shouldn't go through `UpdateJobFields` (set once at insert, like `channel_id`), add it to the test's `excluded` set with a comment instead of skipping the map silently.
 

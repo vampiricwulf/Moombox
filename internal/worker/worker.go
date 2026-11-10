@@ -2248,13 +2248,17 @@ func cookieRefreshWorthAttempting(err error) bool {
 // Returns ParkReasonNone for anything that does not park at StatusCookies, so
 // callers can write the field unconditionally and never leave a stale
 // classification behind on a job that failed for an unrelated reason — with
-// two Error-row exceptions: a live Twitch capture that stopped on its
-// unconfirmed-end latch (ErrTwitchEndUnconfirmed) is recorded as
-// ParkReasonTwitchEndUnconfirmed, the marker the automatic mux keys on
-// (AutoMuxEndedBroadcast, D-T4); and a Twitch live job whose stream
-// processing never reached Twitch (twitchUnreachableError) as
-// ParkReasonTwitchUnreachable, a marker the Twitch monitor's recovery keys on
-// (jobstate.TwitchAutoRetryPending).
+// the Error-row exceptions, each read off the error's type and never its
+// text: a live Twitch capture that stopped on its unconfirmed-end latch
+// (ErrTwitchEndUnconfirmed) is recorded as ParkReasonTwitchEndUnconfirmed,
+// the marker the automatic mux keys on (AutoMuxEndedBroadcast, D-T4); a
+// Twitch live job whose stream processing never reached Twitch
+// (twitchUnreachableError) as ParkReasonTwitchUnreachable, a marker the
+// Twitch monitor's recovery keys on (jobstate.TwitchAutoRetryPending); and a
+// stream-processing refusal that names its own reason (parkReasonError —
+// the Twitch offline branch's ParkReasonTwitchOffline, the recovery's other
+// marker, and ParkReasonTwitchEndedOffline, the Mux tail's, owner ruling
+// R-I1) as that reason.
 func parkReasonForError(err error) database.ParkReason {
 	if !cookiesStatusError(err) {
 		if errors.Is(err, ErrTwitchEndUnconfirmed) {
@@ -2262,6 +2266,9 @@ func parkReasonForError(err error) database.ParkReason {
 		}
 		if _, ok := errors.AsType[*twitchUnreachableError](err); ok {
 			return database.ParkReasonTwitchUnreachable
+		}
+		if named, ok := errors.AsType[*parkReasonError](err); ok {
+			return named.reason
 		}
 		return database.ParkReasonNone
 	}
@@ -2392,10 +2399,10 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// attention. retryLikely is the monitor's own recovery predicate
 	// (jobstate.TwitchAutoRetryPending), asked of the row this failure just
 	// wrote: a copy of the job carrying the new status, error and park
-	// reason. Its end_unconfirmed exclusion changes no answer here — the
-	// latch's error is its cause's text, a download failure, never
-	// TwitchOfflineErrMsg — and is pinned with the rest by
-	// jobstate.TestBothRecoveryCallersKeepTheirAnswers.
+	// reason — the reason is what it reads (twitch_offline,
+	// twitch_unreachable), so a latched row, which carries its own, is
+	// never one; pinned by jobstate.TestBothRecoveryCallersKeepTheirAnswers
+	// and TestOfflineParkReasonsKeepTheRecoveryTruthTable.
 	written := *job
 	written.Status, written.Error, written.ParkReason = status, errMsg, reason
 	retryLikely := jobstate.TwitchAutoRetryPending(&written)

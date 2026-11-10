@@ -55,7 +55,12 @@ type StreamProcessResult struct {
 	// downstream consumer can errors.Is the category without parsing
 	// the display string. Producers set this when the failure category
 	// is known; consumers fall back to plain Error otherwise.
-	ErrSentinel    error
+	ErrSentinel error
+	// ParkReason is the Error-row park reason a refusal names for itself
+	// (the Twitch offline branch, twitchOfflineError): setJobError records
+	// it in the write that records Error (AsError → parkReasonForError).
+	// Unlike ErrSentinel it adds nothing to the text.
+	ParkReason     database.ParkReason
 	ChatDownloader *chat.ChatDownloader // Pre-started chat downloader from upcoming phase (B2)
 
 	// Twitch-specific fields
@@ -78,20 +83,39 @@ type StreamProcessResult struct {
 // AsError converts the result's failure into an error, preserving the
 // display string and (when ErrSentinel is set) the categorisation that
 // errors.Is can match against. Returns nil when there's no error to
-// surface (Error == "").
+// surface (Error == ""). A ParkReason the result names rides on the error
+// as a parkReasonError, which reads exactly as the error it wraps.
 func (r *StreamProcessResult) AsError() error {
 	if r.Error == "" {
 		return nil
 	}
+	err := errors.New(r.Error)
 	if r.ErrSentinel != nil {
 		// Multi-%w form: errors.Is matches both the display-only inner
 		// error AND the sentinel. The display string is "<message>
 		// (<sentinel>)" — slightly longer than just the message but the
 		// sentinel suffix is reasonably descriptive.
-		return fmt.Errorf("%w (%w)", errors.New(r.Error), r.ErrSentinel)
+		err = fmt.Errorf("%w (%w)", err, r.ErrSentinel)
 	}
-	return errors.New(r.Error)
+	if r.ParkReason != database.ParkReasonNone {
+		return &parkReasonError{err: err, reason: r.ParkReason}
+	}
+	return err
 }
+
+// parkReasonError carries the Error-row park reason a stream-processing
+// refusal named (StreamProcessResult.ParkReason) to setJobError, which
+// records it with the Error (parkReasonForError). It reads as the error it
+// wraps, byte for byte: the reason is the routing, the text is what the
+// operator sees (owner ruling R-I1), as twitchUnreachableError does for a
+// transport failure.
+type parkReasonError struct {
+	err    error
+	reason database.ParkReason
+}
+
+func (e *parkReasonError) Error() string { return e.err.Error() }
+func (e *parkReasonError) Unwrap() error { return e.err }
 
 // cancelledResult is what a wait returns when it is cancelled — its ctx done,
 // or its row cancelled or deleted. processJob routes it to handleCancellation

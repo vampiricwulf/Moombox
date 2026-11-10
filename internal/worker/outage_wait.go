@@ -233,7 +233,7 @@ func (w *DownloadWorker) waitOutSetupOutage(ctx context.Context, job *database.J
 // job's Error: an offline boot (the PC back before the router) re-enqueued
 // every Upcoming, Live and Downloading row and failed every one of them for
 // good. Nothing brought them back — a YouTube Error has no automatic way out,
-// and the Twitch recovery wants TwitchOfflineErrMsg — so a scheduled stream
+// and the Twitch recovery wants the offline flap's reason — so a scheduled stream
 // went unrecorded and the rest of an interrupted Twitch capture (no DVR) was
 // lost.
 //
@@ -339,7 +339,7 @@ func (w *DownloadWorker) refreshStaleVodInfoThroughOutages(ctx context.Context, 
 // says is up. It reads as the error it wraps; what it adds is the park
 // reason setJobError records for it (parkReasonForError →
 // ParkReasonTwitchUnreachable), the marker the Twitch monitor's recovery
-// keys on alongside TwitchOfflineErrMsg — when the monitor next finds the
+// keys on alongside ParkReasonTwitchOffline — when the monitor next finds the
 // same broadcast live it re-initialises the job, where an Error carrying the
 // transport failure's own text stayed in Error for good and the rest of the
 // broadcast (Twitch has no DVR) was never captured.

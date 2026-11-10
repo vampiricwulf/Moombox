@@ -51,7 +51,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 
 | Package | Source Lines | Src Files | Test Files | Description |
 |---------|-------------|-----------|------------|-------------|
-| worker/ | ~37,400 | 79 | 215 | Download orchestration, strategies, queue, quality monitor, disk-full gate, channel removal |
+| worker/ | ~37,470 | 79 | 216 | Download orchestration, strategies, queue, quality monitor, disk-full gate, channel removal |
 | tui/ | ~27,580 | 49 | 153 | 2-over-1 panel layout, overlays, chord system |
 | cookies/ | ~17,240 | 39 | 97 | Cookie jar, refresh, auto-cookie (Firefox/Chromium), Job Object |
 | engine/ | ~12,270 | 27 | 78 | Segment downloader (DASH/HLS/VOD), manifest, resume, eviction probe, reorder budget |
@@ -60,7 +60,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | twitch/ | ~9,310 | 15 | 52 | Twitch GQL API, auth, HLS, IRC chat, VOD chat, emotes |
 | monitor/ | ~6,560 | 13 | 27 | Feed (RSS), DECAPI, Twitch monitors, archive scheduling, backfill |
 | notifications/ | ~5,810 | 13 | 31 | Manager + Discord webhook, batching, edit-mode message ids |
-| database/ | ~5,390 | 9 | 27 | SQLite/WAL, migrations, synchronous writes, pub/sub |
+| database/ | ~5,510 | 10 | 28 | SQLite/WAL, migrations, synchronous writes, pub/sub |
 | web/ | ~4,670 | 9 | 26 | chi router, WebSocket, auth, middleware, embed, folder-open composer |
 | chat/ | ~4,280 | 4 | 29 | YouTube live chat downloader (polling + batching) |
 | cipher/ | ~4,100 | 15 | 21 | YouTube signature cipher: sidecar-routed + goja fallback |
@@ -78,7 +78,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | constants/ | ~460 | 1 | 3 | Hardcoded values (client configs, UAs, URLs) |
 | childproc/ | ~380 | 4 | 4 | FFmpeg and ffprobe started tied to the process that runs them (Pdeathsig on a locked thread on Linux, a kill-on-close Job Object of the child's own on Windows) |
 | ytdlpplugin/ | ~350 | 1 | 2 | yt-dlp PO-token plugin status/install — shared by the dashboard's Integrations card and the TUI's E Y overlay |
-| jobstate/ | ~330 | 5 | 4 | Derived job sub-states both UIs show — the pending automatic action (the one Twitch auto-retry predicate), the wait-line marker, a Queued row's admission hold by the scheduler's precedence; imports only `database`, mirrored by utils.js against a shared table |
+| jobstate/ | ~350 | 5 | 4 | Derived job sub-states both UIs show — the pending automatic action (the one Twitch auto-retry predicate), the wait-line marker, a Queued row's admission hold by the scheduler's precedence; imports only `database`, mirrored by utils.js against a shared table |
 | treeguard/ | ~200 | 1 | 1 | Test-only: every tested package's `TestMain` runs through `Run`, which fails a run that leaves files in the package directory |
 | disk/ | ~200 | 5 | 5 | Disk space queries: kernel32 on Windows, statfs on Linux |
 | notifications/notificationtest/ | ~180 | 1 | 2 | Shared fakes for the notification manager's tests |
@@ -93,9 +93,9 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 ### Totals
 
 - **cmd/:** ~13,150 lines across 37 source files (36 in `cmd/moombox` — entry/launcher/adapters/wiring — plus the sign tool), plus 125 test files (~19,750 lines)
-- **internal/ packages:** ~178,070 lines across 431 source files in 38 packages
-- **Test code:** ~276,100 lines across 1,072 test files under `internal/` (`internal/docs`'s three included)
-- **Frontend:** ~26,190 lines across 29 files (~1,100 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 22 ES modules under `web/public/modules/` (`chapter-import.js`, `chat-timeline.js`, `cookie-setup-session.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
+- **internal/ packages:** ~178,280 lines across 432 source files in 38 packages
+- **Test code:** ~277,110 lines across 1,074 test files under `internal/` (`internal/docs`'s three included)
+- **Frontend:** ~26,210 lines across 29 files (~1,100 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 22 ES modules under `web/public/modules/` (`chapter-import.js`, `chat-timeline.js`, `cookie-setup-session.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
 
 ## Entry Points
 

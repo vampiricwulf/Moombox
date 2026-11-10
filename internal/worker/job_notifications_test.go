@@ -572,7 +572,7 @@ func TestJobFailedNamesTheStageAndTheStaging(t *testing.T) {
 		if _, err := db.AddJob(retrying); err != nil {
 			t.Fatal(err)
 		}
-		w.setJobError(retrying, errors.New(TwitchOfflineErrMsg))
+		w.setJobError(retrying, (&StreamProcessResult{Error: TwitchOfflineErrMsg, ParkReason: database.ParkReasonTwitchOffline}).AsError())
 		if calls := rec.ByEvent("error"); len(calls) != 0 {
 			t.Errorf("a retry-suppressed failure sent %+v, want nothing", calls)
 		}

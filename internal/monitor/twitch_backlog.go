@@ -233,7 +233,7 @@ func (b *TwitchBacklog) capturedStarts() map[string][]capturedBroadcast {
 // queuing the VOD beside it would record the broadcast twice), or it is an
 // Error row the Twitch monitor will re-initialise when the same broadcast
 // is found live again (jobstate.TwitchAutoRetryPending —
-// a TwitchOfflineErrMsg or twitch_unreachable stop before the first
+// a twitch_offline or twitch_unreachable stop before the first
 // segment, retries left): that row is a capture that is about to resume,
 // and the VOD queued in the gap would record the broadcast a second time
 // beside it. Its VOD is queued only once no automatic restart is left.
