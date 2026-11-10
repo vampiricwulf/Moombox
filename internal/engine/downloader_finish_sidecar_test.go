@@ -169,6 +169,17 @@ func TestRunExitSidecarOutcome(t *testing.T) {
 			reason:  finishConfirmed,
 		},
 		{
+			// The live window restarts its numbering under us: three
+			// segments written at 200..202, then every refresh serves 0..2.
+			// The stale window's status check answers live, and our position
+			// sits far past the window — the recording ends and the sidecar
+			// (written while 200..202 landed) is cleared.
+			name:    "HLS media-sequence restart",
+			run:     hlsSeqRestartRun(live),
+			sidecar: "cleared",
+			reason:  finishSeqRestart,
+		},
+		{
 			name:    "HLS playlist failure exit",
 			run:     hlsExitRun("", true, func(n int32) bool { return n > 1 }),
 			wantErr: true,
@@ -266,6 +277,44 @@ func TestDispatchMatchesWrappedSentinels(t *testing.T) {
 // path. failAfter, when non-nil, fails every playlist fetch whose 1-based
 // number it answers true for, with a 500, and no status check is wired, so
 // the run exits with the consecutive-failure error.
+// hlsSeqRestartRun runs a live HLS download whose first playlist is
+// 200..202 and every later one 0..2 — a media-sequence numbering restart —
+// with CheckStaleEnd answering what checkEnd says.
+func hlsSeqRestartRun(checkEnd func(context.Context) (bool, error)) func(t *testing.T, out string) (*SegmentDownloader, error) {
+	return func(t *testing.T, out string) (*SegmentDownloader, error) {
+		var fetches atomic.Int32
+		mux := http.NewServeMux()
+		mux.HandleFunc("/playlist.m3u8", func(w http.ResponseWriter, _ *http.Request) {
+			first := 0
+			if fetches.Add(1) == 1 {
+				first = 200
+			}
+			var b strings.Builder
+			fmt.Fprintf(&b, "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:%d\n", first)
+			for i := range 3 {
+				fmt.Fprintf(&b, "#EXTINF:1.0,\nseg%d.ts\n", first+i)
+			}
+			fmt.Fprint(w, b.String())
+		})
+		mux.HandleFunc("/", echoSegment)
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+		d := NewSegmentDownloader(DownloaderOptions{
+			BaseURL:       srv.URL + "/playlist.m3u8",
+			OutputFile:    out,
+			StartSeq:      -1,
+			IsHls:         true,
+			CheckStaleEnd: checkEnd,
+		})
+		d.delays = fastDelays()
+		d.delays.hlsPlaylistRetry = time.Millisecond
+		d.delays.hlsResumeSave = 0
+		ctx, cancel := context.WithTimeout(t.Context(), safetyNet)
+		defer cancel()
+		return d, d.Start(ctx)
+	}
+}
+
 func hlsExitRun(tail string, stopOnGap bool, failAfter func(n int32) bool) func(t *testing.T, out string) (*SegmentDownloader, error) {
 	return func(t *testing.T, out string) (*SegmentDownloader, error) {
 		var fetches atomic.Int32
