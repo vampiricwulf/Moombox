@@ -2,6 +2,7 @@
  * Moombox Dashboard Application
  */
 import { SetupController } from "./modules/setup.js";
+import { CookieSetupSession } from "./modules/cookie-setup-session.js";
 import { ImportController } from "./modules/imports.js";
 import { PlayerController, focusPlayerSurface } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
@@ -109,6 +110,9 @@ export class MoomboxApp {
     this.theme = storedTheme || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
 
     // Module controllers
+    // The cookie-setup dialog the wizard and Settings share (K33): one
+    // session, bound once, owned by whichever started the setup.
+    this.cookieSetup = new CookieSetupSession(this);
     this.setup = new SetupController(this);
     this.imports = new ImportController(this);
     this.player = new PlayerController(this);

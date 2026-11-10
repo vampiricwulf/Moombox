@@ -19,7 +19,15 @@ import (
 // believes it. Whether auto-cookies were ever set up is answered honestly by
 // lastRefresh and needsManualRelogin, which describe what actually happened.
 type AutoCookieStatus struct {
-	SetupInProgress       bool                      `json:"setupInProgress"`
+	SetupInProgress bool `json:"setupInProgress"`
+	// SetupPlatform is the platform the setup in progress signs in to
+	// ("youtube" or "twitch"), empty when none is (or before StartSetup has
+	// named it). The dashboard's cookie-setup dialog adopts a setup it did not
+	// start — a reload mid-setup — and used to guess the platform from the
+	// dialog's label, which after a reload is the default "Cookie Login", so a
+	// Twitch setup was finished and reported as YouTube's (K33). Additive and
+	// omitempty: an older dashboard ignores it.
+	SetupPlatform         string                    `json:"setupPlatform,omitempty"`
 	Browser               *DetectedBrowser          `json:"browser"`
 	AvailableBrowsers     []DetectedBrowser         `json:"availableBrowsers"`
 	ConfiguredBrowserPath string                    `json:"configuredBrowserPath,omitempty"`
@@ -54,8 +62,15 @@ func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 		lastRefreshStr = &v
 	}
 
+	inProgress := s.setupInProgressLocked()
+	var setupPlatform string
+	if inProgress {
+		setupPlatform = s.targetPlatform
+	}
+
 	return AutoCookieStatus{
-		SetupInProgress:       s.setupInProgressLocked(),
+		SetupInProgress:       inProgress,
+		SetupPlatform:         setupPlatform,
 		Browser:               browser,
 		AvailableBrowsers:     available,
 		ConfiguredBrowserPath: cfgPath,

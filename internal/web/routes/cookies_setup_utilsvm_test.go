@@ -24,8 +24,8 @@ import (
 // WHAT STAYS A STRING MATCH, and why — these assert SOURCE SHAPE, which is the
 // actual requirement, and no execution could show them:
 //
-//   - settings.js / setup.js calling these helpers at all. Both modules are
-//     DOM-coupled (document, sl-alert, this.app) and are not loadable here;
+//   - cookie-setup-session.js calling these helpers at all. It is
+//     DOM-coupled (document, sl-alert, this.app) and is not loadable here;
 //     what matters is that the call sites exist, in the right branch, with the
 //     right arguments. Those assertions stay in cookies_setup_threestate_test
 //     and are bracketed to the branch.
