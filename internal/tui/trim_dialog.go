@@ -20,6 +20,15 @@ const (
 	TrimModeDelete
 )
 
+// trimCreateStep is where the create mode stands (K28).
+type trimCreateStep int
+
+const (
+	trimStepTimes    trimCreateStep = iota // start/end being typed
+	trimStepConfirm                        // Enter pressed: Enter again creates, Esc goes back
+	trimStepProgress                       // the encode is running (OnCreateTrim in flight)
+)
+
 // TrimInfo represents an existing trim for delete mode.
 type TrimInfo struct {
 	ID        string
@@ -41,7 +50,7 @@ type TrimDialogModel struct {
 	mode     TrimMode
 
 	// Create mode state
-	createStep     int // 0=time input, 1=confirmation, 2=progress
+	createStep     trimCreateStep
 	startTimeInput string
 	endTimeInput   string
 	activeField    int // 0=start, 1=end
@@ -90,7 +99,7 @@ func (m *TrimDialogModel) Open(jobID, jobTitle string) {
 	m.jobID = jobID
 	m.jobTitle = jobTitle
 	m.mode = TrimModeCreate
-	m.createStep = 0
+	m.createStep = trimStepTimes
 	m.startTimeInput = ""
 	m.endTimeInput = ""
 	m.activeField = 0
@@ -140,9 +149,9 @@ func (m *TrimDialogModel) SetLoading(loading bool) {
 	m.loading = loading
 }
 
-// StartProgress transitions to the progress step (createStep 2).
+// StartProgress transitions to the progress step (trimStepProgress).
 func (m *TrimDialogModel) StartProgress() {
-	m.createStep = 2
+	m.createStep = trimStepProgress
 	m.loading = true
 	m.spinner = newSpinner()
 	m.progressPercent = 0
@@ -159,6 +168,15 @@ func (m *TrimDialogModel) SetProgress(percent float64, elapsed time.Duration) {
 // SetError sets an error message on the dialog.
 func (m *TrimDialogModel) SetError(msg string) {
 	m.errorMsg = msg
+}
+
+// FailCreate is a create that failed while the dialog was still open: back
+// to the confirmation, the spinner stopped and the error shown, so the
+// operator can retry with Enter or go back with Esc.
+func (m *TrimDialogModel) FailCreate(err string) {
+	m.SetLoading(false)
+	m.createStep = trimStepConfirm
+	m.SetError(err)
 }
 
 // RemoveTrim removes a trim by ID from the dialog's list after successful deletion.
@@ -201,7 +219,7 @@ func (m *TrimDialogModel) HandleKey(key string) string {
 
 	// Block mode toggle during progress
 	if key == "m" || key == "M" {
-		if m.mode == TrimModeCreate && m.createStep == 2 {
+		if m.mode == TrimModeCreate && m.createStep == trimStepProgress {
 			return ""
 		}
 		m.toggleMode()
@@ -215,15 +233,15 @@ func (m *TrimDialogModel) HandleKey(key string) string {
 }
 
 func (m *TrimDialogModel) handleEscape() string {
-	if m.mode == TrimModeCreate && m.createStep == 2 {
+	if m.mode == TrimModeCreate && m.createStep == trimStepProgress {
 		// During progress: dismiss overlay, continue in background
 		m.Close()
 		return "background"
 	}
-	if m.mode == TrimModeCreate && m.createStep > 0 {
+	if m.mode == TrimModeCreate && m.createStep > trimStepTimes {
 		m.createStep--
 		m.errorMsg = ""
-		if m.createStep == 0 {
+		if m.createStep == trimStepTimes {
 			m.textInput.Focus()
 		}
 		return ""
@@ -235,7 +253,7 @@ func (m *TrimDialogModel) handleEscape() string {
 			return ""
 		}
 		m.mode = TrimModeCreate
-		m.createStep = 0
+		m.createStep = trimStepTimes
 		m.errorMsg = ""
 		if m.activeField == 0 {
 			loadTextInput(&m.textInput, m.startTimeInput)
@@ -257,7 +275,7 @@ func (m *TrimDialogModel) toggleMode() {
 		m.deleteConfirmID = ""
 	} else {
 		m.mode = TrimModeCreate
-		m.createStep = 0
+		m.createStep = trimStepTimes
 		m.startTimeInput = ""
 		m.endTimeInput = ""
 		m.parsedStart = 0
@@ -272,7 +290,7 @@ func (m *TrimDialogModel) toggleMode() {
 
 func (m *TrimDialogModel) handleCreateKey(key string) string {
 	switch m.createStep {
-	case 0: // Time input
+	case trimStepTimes: // Time input
 		switch key {
 		case keyTab:
 			m.activeField = 1 - m.activeField
@@ -285,12 +303,12 @@ func (m *TrimDialogModel) handleCreateKey(key string) string {
 			return m.validateAndAdvance()
 		}
 
-	case 1: // Confirmation
+	case trimStepConfirm: // Confirmation
 		if key == keyEnter {
 			return "submit"
 		}
 
-	case 2: // Progress — only Esc works (handled in HandleKey before this)
+	case trimStepProgress: // Progress — only Esc works (handled in HandleKey before this)
 		return ""
 	}
 	return ""
@@ -339,7 +357,7 @@ func (m *TrimDialogModel) validateAndAdvance() string {
 
 	m.parsedStart = start
 	m.parsedEnd = end
-	m.createStep = 1
+	m.createStep = trimStepConfirm
 	m.errorMsg = ""
 	return ""
 }
@@ -400,7 +418,7 @@ func (m *TrimDialogModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 		m.spinner, cmd = m.spinner.Update(msg)
 		return cmd
 	}
-	if m.mode != TrimModeCreate || m.createStep != 0 {
+	if m.mode != TrimModeCreate || m.createStep != trimStepTimes {
 		return nil
 	}
 	if !m.textInput.Focused() {
@@ -456,7 +474,7 @@ func (m *TrimDialogModel) renderCreateMode(w, _ int) string {
 	var lines []string
 
 	switch m.createStep {
-	case 0: // Time input (R6)
+	case trimStepTimes: // Time input (R6)
 		stepStr := "Step 1/3"
 		lines = append(lines, TitleStyle.Render("Create Trim")+" "+DimStyle.Render("("+stepStr+")"))
 		lines = append(lines, "")
@@ -473,7 +491,7 @@ func (m *TrimDialogModel) renderCreateMode(w, _ int) string {
 		lines = append(lines, "")
 		lines = append(lines, DimStyle.Render("Format: HH:MM:SS, MM:SS, or seconds"))
 
-	case 1: // Confirmation (R3)
+	case trimStepConfirm: // Confirmation (R3)
 		stepStr := "Step 2/3"
 		lines = append(lines, TitleStyle.Render("Confirm Trim")+" "+DimStyle.Render("("+stepStr+")"))
 		lines = append(lines, "")
@@ -525,11 +543,11 @@ func (m *TrimDialogModel) renderCreateMode(w, _ int) string {
 
 	lines = append(lines, "")
 	switch m.createStep {
-	case 0:
+	case trimStepTimes:
 		lines = append(lines, DimStyle.Render("Tab: Switch field | Enter: Continue | M: Delete mode | Esc: Cancel"))
-	case 1:
+	case trimStepConfirm:
 		lines = append(lines, DimStyle.Render("Enter: Create Trim | M: Delete mode | Esc: Back"))
-	case 2:
+	case trimStepProgress:
 		lines = append(lines, DimStyle.Render("Esc: Continue In Background"))
 	}
 

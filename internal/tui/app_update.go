@@ -704,9 +704,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.trimDlg.IsVisible() {
 			// Dialog still open — show result or error inline
 			if msg.Err != "" {
-				a.trimDlg.SetLoading(false)
-				a.trimDlg.createStep = 1 // back to confirmation so user can retry or Esc
-				a.trimDlg.SetError(msg.Err)
+				a.trimDlg.FailCreate(msg.Err)
 			} else {
 				a.trimDlg.Close()
 				a.setFeedback(fmt.Sprintf("Trim created: %s", msg.Filename))
