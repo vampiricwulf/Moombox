@@ -1486,6 +1486,21 @@ const (
 	keepStagingChatOnly
 )
 
+// expires reports whether the orphan sweep's age rule
+// (incompleteStagingExpired) lifts this keep: only the tail and chat keeps
+// expire; the four media keeps hold captured media that exists nowhere else
+// and never do (jobNeedsStaging).
+func (k stagingKeep) expires() bool {
+	switch k {
+	case keepStagingForTail, keepStagingChatOnly:
+		return true
+	case removeStaging, keepStagingForAsides, keepStagingForUnmuxedPart,
+		keepStagingForUnusedRoot, keepStagingForMuxGaps:
+		return false
+	}
+	return false
+}
+
 // stagingVerdict is decideStagingCleanup's answer, with what the Warn that
 // keeps the directory names: the set-aside recordings, the root recording the
 // finalize did not use, or the recordings a mux could not carry whole.
@@ -1503,6 +1518,9 @@ type stagingVerdict struct {
 // cleanup has always checked them, so the Warn an operator reads names the
 // first that holds. fresh may be nil (the row read failed or the row is
 // gone): the tail and chat shields then do not apply, as they never did.
+// The orphan sweep derives its shield from this verdict (jobNeedsStaging),
+// lifting the expiring keeps on its age rule — so those two must stay LAST
+// here: a keep added after them could be hidden behind an expired one.
 func decideStagingCleanup(db *database.Database, fresh *database.Job, jobID, stagingDir string) stagingVerdict {
 	if asides := stagedAsideRecordings(stagingDir); len(asides) > 0 {
 		return stagingVerdict{keep: keepStagingForAsides, asides: asides}

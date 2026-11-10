@@ -114,35 +114,29 @@ func jobNeedsStaging(db *database.Database, cfg *config.MoomboxConfig, job *data
 	if job == nil || job.Status != database.StatusFinished {
 		return false
 	}
-	// One age rule, read once, so that the doc's claim above — the two
-	// expiring shields expire together — is visible in the expression.
-	notExpired := !incompleteStagingExpired(cfg, job)
-	// The aside shield is NOT on that rule (fix round 1, Important 2).
-	// Finalize muxes every READABLE set-aside recording into its own sibling
-	// file and deletes it, so one still sitting in staging is one FFmpeg could
-	// not read — the only copy of footage that exists nowhere else, which is
-	// the whole point of preserving rather than truncating it. An age rule
-	// here would offer it for deletion seven days later on a stock install,
-	// because incomplete_staging_expiry_days DEFAULTS TO 7; it is shielded
-	// until it is muxed or the job is deleted. The unmuxed-PART shield below
-	// is unconditional for the same reason.
-	asideShield := len(stagedAsideRecordings(jobStagingDir)) > 0
-	// The unused-root shield is cleanupStagingAfterMux's, read by the same
-	// function, and off the age rule for the aside shield's reason: the
-	// recording it keeps can be the longer copy (a complete VOD download the
-	// parts did not take), and the cleanup kept the dir precisely so it would
-	// not be lost. Without it the sweep offered that dir as an ordinary
-	// orphan — one click from deleting what the cleanup had preserved.
-	// The mux-gap shield is cleanupStagingAfterMux's too, and off the age
-	// rule for the same reason: what it keeps is the bytes of a staged
-	// recording a repair left out of the archive (or a copy nothing could
-	// check), which are in no archive at all (stagedMuxGaps).
-	return (job.IncompleteTail && notExpired) ||
-		(job.ChatStatus == database.ChatIncomplete && notExpired) ||
-		asideShield ||
-		hasUnmuxedSegmentParts(db, job.ID, jobStagingDir) ||
-		unusedRootRecording(db, job.ID, jobStagingDir) != "" ||
-		len(stagedMuxGaps(jobStagingDir)) > 0
+	// The shields are cleanupStagingAfterMux's own (decideStagingCleanup), so
+	// a new one is added once. What this sweep adds is the age rule: the tail
+	// and chat keeps expire together on it (stagingKeep.expires), read once
+	// here. The four media keeps never expire. The aside keep is off the rule
+	// (fix round 1, Important 2): finalize muxes every READABLE set-aside
+	// recording into its own sibling file and deletes it, so one still in
+	// staging is one FFmpeg could not read — the only copy of that footage —
+	// and an age rule would offer it for deletion seven days later on a stock
+	// install, because incomplete_staging_expiry_days DEFAULTS TO 7. The
+	// unmuxed-part keep is unconditional for the same reason; the unused-root
+	// keep because the recording it keeps can be the longer copy (a complete
+	// VOD download the parts did not take); the mux-gap keep because the bytes
+	// a repair left out of the archive are in no archive at all.
+	//
+	// decideStagingCleanup answers with the FIRST keep that holds, and the
+	// two expiring keeps come last in it, so an expired verdict here can never
+	// hide a media keep behind it. TestJobNeedsStagingMatchesTheCleanupVerdict
+	// pins the two together over every subset of the six.
+	v := decideStagingCleanup(db, job, job.ID, jobStagingDir)
+	if v.keep == removeStaging {
+		return false
+	}
+	return !v.keep.expires() || !incompleteStagingExpired(cfg, job)
 }
 
 // incompleteStagingExpired reports whether an incomplete_tail job's staging
