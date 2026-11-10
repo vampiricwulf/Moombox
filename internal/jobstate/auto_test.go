@@ -263,3 +263,100 @@ func TestWaitLineIsWhatIsWaitLineReads(t *testing.T) {
 		}
 	}
 }
+
+// The rule as it stood before the Twitch-offline park reasons (owner ruling
+// R-I1), re-stated verbatim: the offline flap was the row's error text.
+// TestOfflineParkReasonsKeepTheRecoveryTruthTable holds the predicates to it.
+const preParkReasonOfflineText = "twitch channel is offline"
+const preParkReasonEndedOfflineText = "stream ended while Moombox was offline — captured data can be muxed via the Mux action"
+
+func preParkReasonRetryPending(job *database.Job) bool {
+	if job == nil || job.Status != database.StatusError {
+		return false
+	}
+	if job.Error != preParkReasonOfflineText && job.ParkReason != database.ParkReasonTwitchUnreachable {
+		return false
+	}
+	if job.ParkReason == database.ParkReasonTwitchEndUnconfirmed {
+		return false
+	}
+	return job.LastVideoSeq == nil && job.AutoRetryCount < MaxTwitchAutoRetries
+}
+
+func preParkReasonPendingAutoAction(job *database.Job) AutoAction {
+	switch {
+	case job != nil && job.Platform == "twitch" && job.Status == database.StatusError &&
+		job.ParkReason == database.ParkReasonTwitchEndUnconfirmed:
+		return AutoActionMux
+	case job != nil && job.Platform == "twitch" && !job.ManuallyAdded && preParkReasonRetryPending(job):
+		return AutoActionRetry
+	}
+	return AutoActionNone
+}
+
+// writtenBeforeOfflineParkReasons reports whether a writer from before the
+// Twitch-offline park reasons could have produced the row's status, park
+// reason and error text together:
+//   - an Error row never carries a COOKIES? reason (setJobError writes the
+//     reason and the status from the same error);
+//   - a reason an Error row does carry was never written with either offline
+//     text — twitch_unreachable keeps the transport failure's text,
+//     twitch_end_unconfirmed its cause's (a download failure), and
+//     mux_after_cancel the failed Mux's.
+//
+// A row that is not in Error is answered by its status alone, so every
+// combination is kept.
+func writtenBeforeOfflineParkReasons(job *database.Job) bool {
+	if job.Status != database.StatusError {
+		return true
+	}
+	switch job.ParkReason {
+	case database.ParkReasonNone:
+		return true
+	case database.ParkReasonAuth, database.ParkReasonMembership:
+		return false
+	}
+	return job.Error != preParkReasonOfflineText && job.Error != preParkReasonEndedOfflineText
+}
+
+// TestOfflineParkReasonsKeepTheRecoveryTruthTable is the recovery's truth
+// table — status × park reason × error text × LastVideoSeq × AutoRetryCount ×
+// manual — pinned ahead of the Twitch-offline park reasons (R-I1): for every
+// row a writer could produce before them, TwitchAutoRetryPending and
+// PendingAutoAction answer as the text-keyed rule did.
+func TestOfflineParkReasonsKeepTheRecoveryTruthTable(t *testing.T) {
+	seq := 3
+	statuses := []database.JobStatus{database.StatusError, database.StatusCookies, database.StatusCancelled,
+		database.StatusFinished, database.StatusUpcoming, database.StatusMuxing, database.StatusDownloading}
+	errs := []string{preParkReasonOfflineText, preParkReasonEndedOfflineText, "twitch HLS: dial tcp: connection refused", ""}
+	reasons := []database.ParkReason{database.ParkReasonNone, database.ParkReasonAuth, database.ParkReasonMembership,
+		database.ParkReasonTwitchEndUnconfirmed, database.ParkReasonTwitchUnreachable, database.ParkReasonMuxAfterCancel}
+	rows := 0
+	for _, st := range statuses {
+		for _, e := range errs {
+			for _, r := range reasons {
+				for _, last := range []*int{nil, &seq} {
+					for _, n := range []int{0, 1, 2, 3} {
+						for _, manual := range []bool{false, true} {
+							job := &database.Job{Platform: "twitch", Status: st, Error: e, ParkReason: r,
+								LastVideoSeq: last, AutoRetryCount: n, ManuallyAdded: manual}
+							if !writtenBeforeOfflineParkReasons(job) {
+								continue
+							}
+							rows++
+							if got, want := TwitchAutoRetryPending(job), preParkReasonRetryPending(job); got != want {
+								t.Errorf("TwitchAutoRetryPending changed on %+v: %v, was %v", job, got, want)
+							}
+							if got, want := PendingAutoAction(job), preParkReasonPendingAutoAction(job); got != want {
+								t.Errorf("PendingAutoAction changed on %+v: %q, was %q", job, got, want)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if rows == 0 {
+		t.Fatal("no row was checked")
+	}
+}

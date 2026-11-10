@@ -603,3 +603,60 @@ func parkOf(j *database.Job) database.ParkReason {
 	}
 	return j.ParkReason
 }
+
+// The tail rule as it stood before the Twitch-offline park reasons (owner
+// ruling R-I1), re-stated verbatim: "ended while offline" was the row's error
+// text. TestOfflineParkReasonsKeepTheMuxTailTruthTable holds
+// twitchMuxTailOpen and twitchMuxEndKnown to it.
+const preParkReasonEndedOfflineText = "stream ended while Moombox was offline — captured data can be muxed via the Mux action"
+const preParkReasonOfflineText = "twitch channel is offline"
+
+func preParkReasonMuxTailOpen(prior *database.Job) bool {
+	if prior.Status == database.StatusCancelled || prior.ParkReason == database.ParkReasonMuxAfterCancel {
+		return false
+	}
+	if prior.Error == preParkReasonEndedOfflineText || prior.ParkReason == database.ParkReasonTwitchEndUnconfirmed {
+		return true
+	}
+	return prior.StreamEndTime == ""
+}
+
+// TestOfflineParkReasonsKeepTheMuxTailTruthTable is the Mux tail's truth
+// table — status × park reason × error text × stream_end_time — pinned ahead
+// of the Twitch-offline park reasons: for every row a writer could produce
+// before them (an Error row's reason was never written with either offline
+// text, and never a COOKIES? one), the tail and the known end read as the
+// text-keyed rule read them.
+func TestOfflineParkReasonsKeepTheMuxTailTruthTable(t *testing.T) {
+	end := gapStart.Add(6 * time.Minute).Format(time.RFC3339)
+	rows := 0
+	for _, st := range []database.JobStatus{database.StatusError, database.StatusCancelled} {
+		for _, e := range []string{preParkReasonEndedOfflineText, preParkReasonOfflineText, "ffmpeg mux failed", ""} {
+			for _, r := range []database.ParkReason{database.ParkReasonNone, database.ParkReasonTwitchEndUnconfirmed,
+				database.ParkReasonTwitchUnreachable, database.ParkReasonMuxAfterCancel} {
+				for _, endTime := range []string{"", end} {
+					offlineText := e == preParkReasonEndedOfflineText || e == preParkReasonOfflineText
+					// A Cancel leaves the row's error and reason as they were,
+					// so a Cancelled row is held to the same shapes.
+					if r != database.ParkReasonNone && offlineText {
+						continue
+					}
+					rows++
+					row := &database.Job{Platform: "twitch", Status: st, Error: e, ParkReason: r, StreamEndTime: endTime}
+					want := preParkReasonMuxTailOpen(row)
+					got := twitchMuxTailOpen(row)
+					if got != want {
+						t.Errorf("twitchMuxTailOpen changed on %+v: %v, was %v", row, got, want)
+					}
+					wantKnown := !want && st == database.StatusError && r != database.ParkReasonMuxAfterCancel
+					if gotKnown := twitchMuxEndKnown(row, got); gotKnown != wantKnown {
+						t.Errorf("twitchMuxEndKnown changed on %+v: %v, was %v", row, gotKnown, wantKnown)
+					}
+				}
+			}
+		}
+	}
+	if rows == 0 {
+		t.Fatal("no row was checked")
+	}
+}
