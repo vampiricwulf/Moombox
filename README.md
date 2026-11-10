@@ -634,7 +634,7 @@ Available at `http://localhost:774` (auto-upgrades to HTTPS for external access)
 - **Imports tab** — Upload `.zip` archives holding one recording each (a video, or a split recording's `<name> - partN` parts) + optional chat JSON named after it, for playback in the Player tab. YouTube and Moombox Twitch archives are both recognised; re-importing an archive whose files are still in `output/imports/` re-adopts identical files and never overwrites a different one
 - **Stats tab** — Disk usage, archive size, platform breakdown, job counts, and recent activity
 - **Logs tab** — Live log viewer
-- **Settings** — General config, downloader settings, channel management (YouTube + Twitch), webhook notifications, password security, yt-dlp plugin installation, and auto-cookie setup
+- **Settings** — General config, downloader settings, channel management (YouTube + Twitch; drag a channel to reorder it on the dashboard, Shift+Up/Down in the TUI), webhook notifications, password security, yt-dlp plugin installation, and auto-cookie setup
 
 ### API
 

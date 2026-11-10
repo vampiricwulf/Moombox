@@ -423,6 +423,11 @@ type SettingsModel struct {
 	// so a channel the dashboard added, disabled or removed while the
 	// overlay was open is not reverted by a save of something else.
 	channelsAtOpen []config.ChannelConfig
+	// channelsReordered is set once Shift+Up/Down has moved a channel since
+	// Open or the last save. Only then does a save carry the editor's
+	// order into the live list (applyChannelOrder); otherwise the live
+	// order, which the dashboard may have changed by drag, is left alone.
+	channelsReordered bool
 
 	// The channel-removal prompt and the choices it took
 	// (settings_channel_removal.go).
@@ -559,6 +564,7 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 		m.channels = make([]config.ChannelConfig, len(c.Channels))
 		copy(m.channels, c.Channels)
 		m.channelsAtOpen = slices.Clone(c.Channels)
+		m.channelsReordered = false
 
 		// Notification editor
 		m.notifIndex = 0
@@ -608,6 +614,7 @@ func (m *SettingsModel) resyncFromLive() {
 		m.loadValues(c)
 		m.channels = slices.Clone(c.Channels)
 		m.channelsAtOpen = slices.Clone(c.Channels)
+		m.channelsReordered = false
 		m.notifications = slices.Clone(c.Notifications)
 		m.notificationsAtOpen = slices.Clone(c.Notifications)
 		m.notifFrom = openOrigins(len(c.Notifications))
@@ -837,6 +844,13 @@ func (m *SettingsModel) applyValues() (settingsWrite, bool) {
 	// departed. Untouched, the live list is left exactly as it is.
 	if chs, changed := mergeChannelEdits(m.channelsAtOpen, m.channels, m.cfg.Channels); changed {
 		m.cfg.Channels = chs
+	}
+	// The order, when Shift+Up/Down moved a channel: the editor's order for
+	// the channels it holds, in the places they have in the list now.
+	if m.channelsReordered {
+		if chs, changed := applyChannelOrder(m.cfg.Channels, m.channels); changed {
+			m.cfg.Channels = chs
+		}
 	}
 	// Notification targets: the same rule, by each target's identity.
 	if ns, changed := notifications.MergeTargetEdits(m.notificationsAtOpen, m.notifications, m.notifFrom, m.cfg.Notifications); changed {
