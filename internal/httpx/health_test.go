@@ -18,10 +18,15 @@ import (
 // a connect timeout: the shared one behind Client() and each NewTransport
 // build, the engine's among them.
 //
-// Mutant: the HTTP2 or DialContext line dropped from newDefaultTransport.
+// Mutants: the HTTP2 or DialContext line dropped from newDefaultTransport;
+// newDialer building a dialer with no Timeout, or with a KeepAlive of its own
+// (30 s would halve the keep-alive probe rate in use before).
 func TestTransportsCarryTheHealthCheckAndDialTimeout(t *testing.T) {
 	if dialTimeout != 30*time.Second || http2SendPingTimeout != 30*time.Second || http2PingTimeout != 15*time.Second {
 		t.Errorf("dial %v, send-ping %v, ping %v; want 30 s, 30 s, 15 s", dialTimeout, http2SendPingTimeout, http2PingTimeout)
+	}
+	if d := newDialer(dialTimeout); d.Timeout != 30*time.Second || d.KeepAlive != 0 {
+		t.Errorf("dialer: Timeout %v, KeepAlive %v; want 30 s and the default keep-alive (0)", d.Timeout, d.KeepAlive)
 	}
 	shared, ok := Client(0).Transport.(*http.Transport)
 	if !ok {
@@ -158,7 +163,9 @@ func TestASilentlyDeadHTTP2ConnectionIsReplaced(t *testing.T) {
 			t.Cleanup(srv.Close)
 			proxy := newBlackHoleProxy(t, srv.Listener.Addr().String())
 
-			const ping = 50 * time.Millisecond
+			// Long enough that a slow runner does not go a whole interval
+			// silent, and miss a ping, while the connection is still good.
+			const ping = 250 * time.Millisecond
 			tr := NewTransport(TransportOptions{HTTP2SendPingTimeout: ping, HTTP2PingTimeout: ping})
 			if !tc.healthCheck {
 				tr.HTTP2 = nil
@@ -197,7 +204,7 @@ func TestASilentlyDeadHTTP2ConnectionIsReplaced(t *testing.T) {
 			// This request is lost with the connection either way. It only
 			// has to outlast the health check: one silent ping interval and
 			// one unanswered ping.
-			if _, err := get(20 * ping); err == nil {
+			if _, err := get(8 * ping); err == nil {
 				t.Fatal("a request on the black-holed connection succeeded")
 			}
 
@@ -211,7 +218,7 @@ func TestASilentlyDeadHTTP2ConnectionIsReplaced(t *testing.T) {
 				}
 				return
 			}
-			if _, err := get(10 * ping); err == nil {
+			if _, err := get(4 * ping); err == nil {
 				t.Fatal("without the health check the next request succeeded: this row no longer shows what the check is for")
 			}
 			if n := proxy.accepted.Load(); n != 1 {

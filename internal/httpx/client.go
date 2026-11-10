@@ -58,10 +58,17 @@ const (
 	http2PingTimeout     = 15 * time.Second
 )
 
+// newDialer is the dialer every transport here connects with: a connect
+// timeout and nothing else. KeepAlive stays zero, the dialer's default 15 s
+// TCP keep-alive (see defaultTransport).
+func newDialer(timeout time.Duration) *net.Dialer {
+	return &net.Dialer{Timeout: timeout}
+}
+
 func newDefaultTransport() *http.Transport {
 	return &http.Transport{
 		Proxy:       http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{Timeout: dialTimeout}).DialContext,
+		DialContext: newDialer(dialTimeout).DialContext,
 		HTTP2: &http.HTTP2Config{
 			SendPingTimeout: http2SendPingTimeout,
 			PingTimeout:     http2PingTimeout,
@@ -144,7 +151,7 @@ func NewTransport(opts TransportOptions) *http.Transport {
 		t.HTTP2.PingTimeout = opts.HTTP2PingTimeout
 	}
 	if opts.DialTimeout > 0 {
-		t.DialContext = (&net.Dialer{Timeout: opts.DialTimeout}).DialContext
+		t.DialContext = newDialer(opts.DialTimeout).DialContext
 	}
 	if opts.DisableHTTP2 {
 		// Both are set. ForceAttemptHTTP2=false alone disables HTTP/2 only
