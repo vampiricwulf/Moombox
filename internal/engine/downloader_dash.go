@@ -179,6 +179,9 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 
 	// Per-segment retry state: see dashRetryState.
 	rs := newDashRetryState()
+	// Measurement only: see dashEdgeStats. Logged once, at Debug, on exit.
+	edge := &dashEdgeStats{}
+	defer func() { edge.logOnExit(d.logger) }()
 	// "Started" means bytes are in the output file — including bytes restored
 	// by resume. The first-segment hunt in handleGoneError must stay disabled
 	// once data exists (it advances currentSeq past 403s, which would skip
@@ -301,7 +304,18 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 
 		// Download single segment
 		segURL := d.buildSegmentURL(int(d.currentSeq.Load()))
+		fetchStart := time.Now()
 		data, statusCode, err := d.fetchSegment(ctx, segURL)
+
+		// Count a failed fetch at or past the known head (dashEdgeStats). The
+		// head is read after the fetch, as the handlers read it: the failed
+		// answer itself may have carried a newer one. A fetch the loop's own
+		// cancellation cut short is not an answer and is left out.
+		if (err != nil || statusCode >= 400 || len(data) == 0) && ctx.Err() == nil {
+			if head := int(d.headSeq.Load()); head > 0 && int(d.currentSeq.Load()) >= head {
+				edge.noteFailure(statusCode, time.Since(fetchStart))
+			}
+		}
 
 		if err != nil || statusCode >= 400 {
 			// moonarchive's rule for a segment YouTube keeps refusing
@@ -379,6 +393,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		d.lastSegTime.StoreNow()
 		d.firstMediaWritten(writeSeq)
 		rs.onSegmentWritten()
+		edge.segmentsWritten++
 		hasStartedDownloading = true
 		// Re-arm end verification: a landed segment proves the burst that
 		// latched the verdict (if any) was transient.
