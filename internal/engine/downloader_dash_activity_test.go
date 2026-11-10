@@ -93,16 +93,16 @@ func TestHandleDashErrorGenericEmitsRetrying(t *testing.T) {
 	d, got := newActivityDownloader(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // cancelled so the fixed-delay retry sleep returns immediately
-	n, segRetries, retrySeq, headDelay, head := 3, 0, 0, 0, 0
+	rs := &dashRetryState{consecutiveGoneErrors: 3}
 	err := d.handleDashError(ctx, 0, errors.New("read tcp: i/o timeout"),
-		&n, true, &segRetries, &retrySeq, &headDelay, &head, 60)
+		rs, true, 60)
 	if err != nil {
 		t.Fatalf("handleDashError returned %v, want nil (continue)", err)
 	}
 	if *got != ActivityRetrying {
 		t.Errorf("activity = %v, want ActivityRetrying", *got)
 	}
-	if n != 0 {
+	if n := rs.consecutiveGoneErrors; n != 0 {
 		t.Errorf("consecutiveGoneErrors = %d, want 0 (a non-gone error resets the gone streak)", n)
 	}
 }
@@ -126,9 +126,9 @@ func TestHandleDashErrorGenericOfflineReconnects(t *testing.T) {
 	d.OnActivity = func(a DownloadActivity) { got = a }
 	d.lastSegTime.Store(time.Now().Add(-2 * time.Minute)) // aged past MaxTimeout during the outage
 
-	n, segRetries, retrySeq, headDelay, head := 3, 0, 0, 0, 0
+	rs := &dashRetryState{consecutiveGoneErrors: 3}
 	err := d.handleDashError(t.Context(), 0, errors.New("dial tcp: network is unreachable"),
-		&n, true, &segRetries, &retrySeq, &headDelay, &head, 60)
+		rs, true, 60)
 	if err != nil {
 		t.Fatalf("offline generic error = %v, want nil (reconnect continues)", err)
 	}
@@ -138,7 +138,7 @@ func TestHandleDashErrorGenericOfflineReconnects(t *testing.T) {
 	if d.lastSegTime.Since() > time.Second {
 		t.Error("lastSegTime not reset on reconnect — MaxTimeout budget not refreshed")
 	}
-	if n != 0 {
+	if n := rs.consecutiveGoneErrors; n != 0 {
 		t.Errorf("consecutiveGoneErrors = %d, want 0 after reconnect", n)
 	}
 }
@@ -172,8 +172,8 @@ func TestBehindHeadFetchFailuresEmitRetrying(t *testing.T) {
 		d.headSeq.Store(10)
 		d.currentSeq.Store(5)
 		d.lastHeadProbeTime.StoreNow() // no head probe: there is no server
-		sameSeg, lastSeq, sameHead, lastHead := 0, -1, 0, 0
-		if err := d.handleHTTPError(ctx, true, &sameSeg, &lastSeq, &sameHead, &lastHead, 60); err != nil {
+		rs := &dashRetryState{lastRetrySeq: -1}
+		if err := d.handleHTTPError(ctx, true, rs, 60); err != nil {
 			t.Fatalf("handleHTTPError returned %v, want nil (continue)", err)
 		}
 		if *got != ActivityRetrying {
