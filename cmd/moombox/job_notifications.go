@@ -62,7 +62,9 @@ func notifyStreamFound(n notifications.Sender, job *database.Job, channelURL, ca
 }
 
 // cancelJobFromTUI is the TUI's cancel. A cancel that flags an actively
-// processing run leaves "Job Cancelled" to that run's handleCancellation; a
+// processing run leaves "Job Cancelled" to that run's handleCancellation,
+// and one applied while an off-queue mux of the job runs leaves it to that
+// mux's exit (worker.endMuxRun, sent only if the row still reads Cancelled); a
 // job no run holds — parked in COOKIES?, Queued for an archive slot, waiting
 // to be picked up — or whose run has already settled its outcome (a failure
 // recorded, a requeue) has nobody to send it, and the TUI sent nothing where
