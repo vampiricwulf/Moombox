@@ -16,7 +16,8 @@ import (
 //	            what the file is
 //	running     the spinner, and that Esc closes without cancelling
 //	result      one row per platform with both facts (platformOutcomePhrase),
-//	            or the import's error wrapped
+//	            or the import's error wrapped, which takes the keys row
+//	            and the title before it is cut
 //
 // As in the normal form the model holds the path only: nothing of the file
 // is ever read here or drawn.
@@ -102,8 +103,15 @@ func (m *CookieImportDialogModel) bareView() string {
 		sheet.left = TitleStyle.Render("Cookie import")
 		sheet.keys = DimStyle.Render("Enter/Esc close")
 		if m.resultErr != nil {
-			sheet.body = []string{ErrorStyle.Render("Import failed")}
-			sheet.body = append(sheet.body, bareWrap(m.resultErr.Error(), w, max(rows-1, 1))...)
+			// No row is held back for a heading: the error is in the body
+			// where it fits there, and takes the keys row and the title
+			// before any of it is cut (owner ruling R-C11). "Import failed"
+			// leads it while the whole still fits the screen.
+			msg := "Import failed: " + m.resultErr.Error()
+			if len(bareWrap(msg, w, len(msg)+1)) > m.height {
+				msg = m.resultErr.Error()
+			}
+			sheet.setError(msg, w, m.height)
 			break
 		}
 		r := m.result

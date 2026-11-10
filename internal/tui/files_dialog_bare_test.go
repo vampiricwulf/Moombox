@@ -62,9 +62,9 @@ func TestBareCookieImportFrames(t *testing.T) {
 	m.SetResult(cookies.ImportResult{}, errors.New("the file holds no cookies for youtube.com or twitch.tv"))
 	wantFrame(t, "a failed import at 30x6", m.View(), 30, 6, []string{
 		"Cookie import",
-		"Import failed",
-		"the file holds no cookies for",
-		"youtube.com or twitch.tv",
+		"Import failed: the file holds",
+		"no cookies for youtube.com or",
+		"twitch.tv",
 		"",
 		"Enter/Esc close",
 	})

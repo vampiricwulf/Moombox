@@ -1,12 +1,15 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 // A text input shared by the bare and the normal form of an overlay is laid
@@ -198,5 +201,46 @@ func TestBareOrphansErrorDoesNotHideBehindAnArmedConfirm(t *testing.T) {
 	rows := plainRows(m.View())
 	if !strings.Contains(strings.Join(rows, "\n"), "Delete failed: access denied") || !strings.HasPrefix(rows[9], "D again: delete") {
 		t.Errorf("armed with an error:\n%s", strings.Join(rows, "\n"))
+	}
+}
+
+// The cookie import's failure is whole wherever the screen has the cells
+// for it: no row is held back for a heading, and the keys row and the title
+// give way before any of it is cut (owner ruling R-C11).
+func TestBareCookieImportFailureIsWhole(t *testing.T) {
+	flat := func(m *CookieImportDialogModel) string {
+		return strings.Join(strings.Fields(ansi.Strip(m.View())), " ")
+	}
+	for _, c := range []struct {
+		err  error
+		w, h int
+	}{
+		{cookies.ErrImportNoCredential, 30, 6},
+		{cookies.ErrImportNotNetscape, 59, 6},
+		{cookies.ErrImportNotNetscape, 40, 8},
+		{cookies.ErrImportNoCredential, 40, 10},
+	} {
+		m := bareCookie(c.w, c.h)
+		m.SetResult(cookies.ImportResult{}, c.err)
+		wantExact(t, fmt.Sprintf("the failure at %dx%d", c.w, c.h), m.View(), c.w, c.h)
+		if got := flat(m); !strings.Contains(got, c.err.Error()) {
+			t.Errorf("%dx%d: the failure is not whole:\n%s", c.w, c.h, ansi.Strip(m.View()))
+		}
+	}
+	// With room to spare the title and the keys stay.
+	m := bareCookie(40, 10)
+	m.SetResult(cookies.ImportResult{}, cookies.ErrImportNoCredential)
+	rows := plainRows(m.View())
+	if rows[0] != "Cookie import" || rows[9] != "Enter/Esc close" || !strings.HasPrefix(rows[1], "Import failed: ") {
+		t.Errorf("the failure at 40x10:\n%s", strings.Join(rows, "\n"))
+	}
+	// Longer than the screen: every row is the error's, and it ends in an
+	// ellipsis.
+	m = bareCookie(30, 6)
+	m.SetResult(cookies.ImportResult{}, errors.New(strings.Repeat("open /home/name/cookies.txt failed ", 6)))
+	wantExact(t, "a failure longer than the screen", m.View(), 30, 6)
+	rows = plainRows(m.View())
+	if !strings.HasPrefix(rows[0], "open /home") || !strings.HasSuffix(rows[5], "…") {
+		t.Errorf("a failure longer than the screen:\n%s", strings.Join(rows, "\n"))
 	}
 }
