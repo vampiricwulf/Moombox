@@ -25,7 +25,7 @@ Components currently used in the codebase are marked with *.
 | `filepicker` * | `charm.land/bubbles/v2/filepicker` | File/directory selection (used in files dialog) |
 | `cursor` | `charm.land/bubbles/v2/cursor` | Cursor rendering modes (used internally by textinput/textarea) |
 | `key` * | `charm.land/bubbles/v2/key` | Key binding definitions |
-| `textarea` | `charm.land/bubbles/v2/textarea` | Multi-line text entry — the `A C` chapter import's paste box (`chapter_import_dialog.go`); its own keys (Tab, Ctrl+S, Esc) are kept from it in `UpdateComponents` |
+| `textarea` | `charm.land/bubbles/v2/textarea` | Multi-line text entry — the `A C` chapter import's paste box (`internal/tui/chapter_import_dialog.go`); its own keys (Tab, Ctrl+S, Esc) are kept from it in `UpdateComponents` |
 | `paginator` | `charm.land/bubbles/v2/paginator` | Page navigation (available, not currently used) |
 | `stopwatch` | `charm.land/bubbles/v2/stopwatch` | Elapsed time tracking (available, not currently used) |
 | `timer` | `charm.land/bubbles/v2/timer` | Countdown timer (available, not currently used) |
@@ -80,7 +80,7 @@ func (m *SomeOverlay) View() string       { if !m.visible { return "" }; ... }
 3. A row in `overlayCases` (`internal/tui/overlay_order_test.go`) at the same position, which opens the overlay; the order, view/key and mouse-parity tests and the Ctrl+C census iterate it.
 
 ### Chord System
-Single source of truth: `buildMenuItems()` in `app_actions.go` returns `[]ActionMenuItem`:
+Single source of truth: `buildMenuItems()` in `internal/tui/app_actions.go` returns `[]ActionMenuItem`:
 ```go
 type ActionMenuItem struct {
     Chord        string                   // e.g. "A A", "R C", "F"
@@ -112,7 +112,7 @@ case "R V":
 Never call blocking operations directly in `Update()`.
 
 ### Non-Blocking Channel Sends
-TUI receives events via channels from `main.go`. Sends are non-blocking — messages are silently dropped if the channel is full (no counters):
+TUI receives events via channels made in `cmd/moombox/tui_wiring.go`. Sends are non-blocking — messages are silently dropped if the channel is full (no counters):
 ```go
 select {
 case ch <- msg:
@@ -163,7 +163,7 @@ Request background color in `Init()` via `tea.RequestBackgroundColor`. The runti
 Functional options constructor: `viewport.New(viewport.WithWidth(w), viewport.WithHeight(h))`.
 
 Key features used in Moombox:
-- `StyleLineFunc` — per-line styling callback (used in `log_viewer.go` to color log lines without embedding ANSI in content, which would break search highlight byte offsets)
+- `StyleLineFunc` — per-line styling callback (used in `internal/tui/log_viewer.go` to color log lines without embedding ANSI in content, which would break search highlight byte offsets)
 - `LeftGutterFunc` — callback for rendering line numbers in the gutter
 - `SetHighlights([]viewport.Highlight)` — search result highlighting with byte offsets
 - `SetContentLines([]string)` — set content from a string slice directly (avoids joining/splitting)

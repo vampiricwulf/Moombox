@@ -44,10 +44,10 @@ Derive new column values from existing data within the same block. **Collect-the
 A backfill that changes **data only** — no table, column or index — may instead run version-free on every `Open`, at the end of `migrate()`, when a `schemaVersion` bump would raise the downgrade guard against binaries that read the backfilled rows correctly. Precedent: `backfillTwitchOfflineParkReasons` (`internal/database/park_reason_backfill.go`). Its rules: read first and send the `UPDATE` only when a row is pending (an `UPDATE` that matches nothing still takes the write lock, and `moombox add` opens a running daemon's live database); an exact, idempotent `WHERE`; a failure is logged, not fatal; `updated_at` and `user_version` are left alone.
 
 ### 5. Update Field Maps (jobs columns only)
-`internal/database/database.go` — `fieldToColumn` maps `UpdateJobFields()` keys to **`jobs` table** columns; it does not cover other tables (they have their own dedicated query functions, e.g. `database_feed_items.go`). `TestFieldToColumnCoverage` (database_test.go) enforces that every JSON-tagged `Job` field has an entry — when a new jobs column legitimately shouldn't go through `UpdateJobFields` (set once at insert, like `channel_id`), add it to the test's `excluded` set with a comment instead of skipping the map silently.
+`internal/database/database.go` — `fieldToColumn` maps `UpdateJobFields()` keys to **`jobs` table** columns; it does not cover other tables (they have their own dedicated query functions, e.g. `internal/database/database_feed_items.go`). `TestFieldToColumnCoverage` (`internal/database/database_test.go`) enforces that every JSON-tagged `Job` field has an entry — when a new jobs column legitimately shouldn't go through `UpdateJobFields` (set once at insert, like `channel_id`), add it to the test's `excluded` set with a comment instead of skipping the map silently.
 
 ### 6. Update Queries
-Add the new column to the relevant `SELECT` statements, `INSERT` (`AddJob`), and struct scan targets. Column order must match between INSERT and SELECT/scan. New tables get their own query file (pattern: `database_feed_items.go`).
+Add the new column to the relevant `SELECT` statements, `INSERT` (`AddJob`), and struct scan targets. Column order must match between INSERT and SELECT/scan. New tables get their own query file (pattern: `internal/database/database_feed_items.go`).
 
 ## Key Constraints
 
