@@ -960,7 +960,7 @@ The worker verbs enforce their predicate themselves, on the row as it reads when
 
 And a transition decided on an earlier read is written conditionally, with what cannot be undone after it:
 - **Reinitialize and auto-reinitialize** write their reset (one map, `reinitResetFields`; only `auto_retry_count` differs) with `UpdateJobFieldsIf` on the accepted status FIRST, and delete the staging, the parts and an imported chapter list only once it applied (`reinitializeNow`, `autoReinitializeNow`). A Cancel landing between the verb's last read and its write keeps the staging as well as the row. While the verb still holds the job's staging claim, `EnqueueJob` skips the job (the claim's release wakes the heartbeat), so a monitor cannot start a run on the reset `Upcoming` row while its staging is deleted; the verb queues the job itself (`enqueueHeld`).
-- **Mux** writes `Muxing` with `UpdateJobFieldsIfIn` over `jobverbs.MuxableStatuses` — plus `Muxing` for the boot's re-mux of an interrupted row, which its caller says (`muxJob`'s `bootRemux`, also what decides `JobContext.CapturedMux`) rather than one read off the row — so a Mux decided on a row a Resume or a Reinitialize moved on since is refused, not written over it. `Finished` stays in that set only when `muxJob`'s own read finds the row Finished with a part its finalize could not mux (`jobverbs.MuxNeedsUnmuxedParts`, `HasUnmuxedParts`) — the check the route and the TUI make on their earlier read — so a stale caller cannot re-finalize a complete archive. A row gone by then answers `ErrJobNotFound` (the mux route's 404), not `ErrNotAllowed`. Its failure writes are `UpdateJobFieldsIf(..., Muxing, ...)`.
+- **Mux** writes `Muxing` with `UpdateJobFieldsIfIn` over `jobverbs.MuxableStatuses` — or over `Muxing` alone for the boot's re-mux of an interrupted row, which its caller says (`muxJob`'s `bootRemux`, also what decides `JobContext.CapturedMux`) rather than one read off the row — so a Mux decided on a row a Resume or a Reinitialize moved on since is refused, not written over it, and the boot's re-mux of a row cancelled since its read is refused too, where the Mux action would take the Cancelled row. `Finished` stays in that set only when `muxJob`'s own read finds the row Finished with a part its finalize could not mux (`jobverbs.MuxNeedsUnmuxedParts`, `HasUnmuxedParts`) — the check the route and the TUI make on their earlier read — so a stale caller cannot re-finalize a complete archive. A row gone by then answers `ErrJobNotFound` (the mux route's 404), not `ErrNotAllowed`. Its failure writes are `UpdateJobFieldsIf(..., Muxing, ...)`.
 - **The automatic Twitch mux**'s failure write is `UpdateJobFieldsIf(..., Error, ...)`: a Reinitialize landing after its re-read, whose reset deleted the staging the mux then found empty, keeps its `Upcoming`.
 
 
@@ -1012,7 +1012,9 @@ The boot pass reads every row once and a re-mux of an earlier row can take a
 while, so both of its writes on a `Muxing` row (the error clear ahead of a
 re-mux, and the reset to `Downloading`) apply only while the row is still
 `Muxing` (`stillMuxingAfter`, `internal/worker/worker.go`): a row an operator
-cancelled or deleted since the read is neither muxed nor enqueued. A write that
+cancelled or deleted since the read is neither muxed nor enqueued. The re-mux's
+own `Muxing` write takes the row from `Muxing` only, so a Cancel that lands
+after the error clear stands as well. A write that
 did not apply while the row still reads `Muxing` (a failed statement) is
 treated as before, because nothing but the next start picks a `Muxing` row up.
 

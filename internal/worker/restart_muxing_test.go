@@ -292,6 +292,68 @@ func TestBootLeavesAMuxingRowCancelledSinceItsRead(t *testing.T) {
 	}
 }
 
+// TestBootReMuxRefusesARowCancelledAfterItsErrorClear: the boot pass confirms
+// a row is still Muxing with its error-clear write and then calls muxJob,
+// which reads the row again. A Cancel landing between the two must stand: the
+// boot re-mux takes a row from Muxing only, where the Mux action's source set
+// holds Cancelled and would archive what the operator just cancelled.
+//
+// The cancel lands from a database subscriber on the error-clear write of the
+// same row, which is exactly that window.
+//
+// Mutant: appending Muxing to jobverbs.MuxableStatuses() for the boot re-mux
+// — the cancelled row is written Muxing and muxed.
+func TestBootReMuxRefusesARowCancelledAfterItsErrorClear(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+	if _, err := db.AddJob(&database.Job{ID: "j", VideoID: "j", Platform: "twitch", Status: database.StatusMuxing, OutputDirectory: t.TempDir()}); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	stageMediaFor(t, stagingBase, "j")
+
+	var mu sync.Mutex
+	cancelled := false
+	var later []database.JobStatus
+	unsubscribe := db.OnJobUpdate(func(j *database.Job) {
+		mu.Lock()
+		if !cancelled {
+			cancelled = true
+			mu.Unlock()
+			db.UpdateJobFields("j", map[string]any{"status": database.StatusCancelled})
+			return
+		}
+		later = append(later, j.Status)
+		mu.Unlock()
+	})
+	defer unsubscribe()
+
+	w.enqueueExistingJobs()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !cancelled {
+		t.Fatal("the boot pass never wrote the row; the test never cancelled it")
+	}
+	for _, st := range later {
+		if st != database.StatusCancelled {
+			t.Errorf("the cancelled row was written %s by the boot pass (writes seen: %v)", st, later)
+			break
+		}
+	}
+	if fresh, _ := db.GetJob("j"); fresh == nil || fresh.Status != database.StatusCancelled {
+		t.Errorf("cancelled row = %v, want it left Cancelled", fresh)
+	}
+	if w.queue.isPending("j") {
+		t.Error("the cancelled row was enqueued")
+	}
+	if !HasSegmentFiles(stagingBase, "j") {
+		t.Error("the cancelled row's staging is gone")
+	}
+}
+
 // TestBootKeepsAMuxingRowWhoseConditionalWriteFailed: the conditional writers
 // answer false for a statement that failed as well as for a row that moved
 // on, and nothing but the next boot picks a Muxing row up again. So a write

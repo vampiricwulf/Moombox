@@ -3370,11 +3370,13 @@ func muxActionFailure(err error) string { return err.Error() }
 // bootRemux is the boot's re-mux of a row a restart interrupted while it was
 // Muxing (enqueueExistingJobs, muxOnRestart): a download that completed, not
 // the operator muxing whatever was captured (JobContext.CapturedMux), and the
-// one caller that muxes a row already Muxing. Every other caller muxes a row
-// the Mux action is offered on (jobverbs.MuxableStatus), and the Muxing write
-// applies only while the row still reads one of those — so a Mux decided on
-// a row a Resume or a Reinitialize has moved on since is refused with
-// ErrNotAllowed instead of written over it.
+// one caller that muxes a row already Muxing — and only one still Muxing: a
+// row cancelled since the boot pass read it is refused with ErrNotAllowed,
+// not muxed as the Mux action would mux a Cancelled row. Every other caller
+// muxes a row the Mux action is offered on (jobverbs.MuxableStatus), and the
+// Muxing write applies only while the row still reads one of those — so a
+// Mux decided on a row a Resume or a Reinitialize has moved on since is
+// refused with ErrNotAllowed instead of written over it.
 func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRemux bool) error {
 	// Read config for staging check
 	var stagingBase string
@@ -3428,9 +3430,12 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 		release()
 		return fmt.Errorf("mux: %w", ErrJobNotFound)
 	}
+	// The boot re-mux was decided on a row read as Muxing, so Muxing is its
+	// only source: a row an operator cancelled since is refused here, where
+	// the Mux action's set would accept the Cancelled row and archive it.
 	sources := jobverbs.MuxableStatuses()
 	if bootRemux {
-		sources = append(sources, database.StatusMuxing)
+		sources = []database.JobStatus{database.StatusMuxing}
 	}
 	// A Finished job is muxed only for a part its finalize could not mux
 	// (jobverbs.MuxNeedsUnmuxedParts → HasUnmuxedParts), the fact the route
