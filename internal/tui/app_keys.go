@@ -57,6 +57,23 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	}
 
+	// The size guard, after the Ctrl+C hoist so the wizard's cookie-slot
+	// release above still runs (owner ruling R-C6). Below the compact floor
+	// the screen is a notice and every other key is ignored: a chord typed
+	// blind once cancelled a recording. Below the normal layout an overlay
+	// that was already open is kept under a notice, and only Esc reaches it.
+	switch a.layoutMode() {
+	case layoutTooSmall:
+		return a, nil
+	case layoutCompact:
+		if o := a.activeOverlay(); o != nil {
+			if key != keyEsc {
+				return a, nil
+			}
+			return o.key(a, msg, key)
+		}
+	}
+
 	if o := a.activeOverlay(); o != nil {
 		return o.key(a, msg, key)
 	}
@@ -141,6 +158,10 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "m":
 		a.seenChordHint = true
+		// The action menu is an overlay itself.
+		if a.refuseOverlay() {
+			return a, nil
+		}
 		a.actionMenu.SetSize(a.width, a.height)
 		a.actionMenu.Open(a.buildMenuItems())
 		return a, nil
@@ -150,11 +171,15 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "`":
 		a.seenChordHint = true
 		return a.dispatchAction("`", nil)
-	case keyTab:
-		a.cycleFocus(1)
-		return a, nil
-	case keyShiftTab:
-		a.cycleFocus(-1)
+	case keyTab, keyShiftTab:
+		// The compact layout has the one panel: no focus to move.
+		if a.layoutMode() == layoutNormal {
+			delta := 1
+			if key == keyShiftTab {
+				delta = -1
+			}
+			a.cycleFocus(delta)
+		}
 		return a, nil
 	case keySpace:
 		// Space: toggle batch selection on focused task (only when task panel focused)
@@ -351,6 +376,13 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 	}
 	if item == nil {
 		return a, nil, false
+	}
+
+	// Refused before any job check or confirm: below the normal layout the
+	// answer to a chord that opens an overlay is the same whatever is
+	// selected (dispatchAction holds the same guard for every other route).
+	if item.Opens != "" && a.refuseOverlay() {
+		return a, nil, true
 	}
 
 	// NeedsConfirm + NeedsJob: check job first, then enter confirm step

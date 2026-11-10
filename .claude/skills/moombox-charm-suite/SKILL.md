@@ -90,11 +90,13 @@ type ActionMenuItem struct {
     NeedsJob     bool                     // if true, opens job selector first
     NeedsConfirm bool                     // if true, requires 3rd keypress within 3s
     JobFilter    func(*database.Job) bool // conditional visibility based on job state
+    Opens        string                   // overlayRegistry name of the overlay it opens, "" for none
 }
 ```
 Adding a new chord:
-1. Add `ActionMenuItem` entry in `buildMenuItems()`
+1. Add `ActionMenuItem` entry in `buildMenuItems()`. If the action opens an overlay, name it in `Opens`: below 60x20 the action is then refused instead of opening something that cannot be drawn.
 2. Add case in `dispatchAction(chord, job)`
+3. Classify it in `chordCompact` (`internal/tui/app_compact_test.go`): "works" or "refused" in the compact layout.
 
 That's it. Hints, help screen, action menu, and chord feedback all derive from `buildMenuItems()` automatically.
 
@@ -130,6 +132,17 @@ default: // dropped while the TUI event loop is busy; no replay, so never for jo
 Three-panel layout with dynamic sizing based on `FocusPanel` (Tasks, Details, Logs):
 - Focused panel gets more space (70/25 height split, 45/55 or 35/65 width split)
 - `PanelRegion` provides mouse hit-testing with `Contains()` and `ContentY()` for click detection
+
+### Layouts by Terminal Size
+The size alone picks one of three layouts, through one predicate: `layoutModeFor(width, height)` / `App.layoutMode()` in `internal/tui/app_compact.go`. It is derived on every call. Never store the answer, and never write a second size comparison: `View`, `handleKey`, `handleMouse` and the tick gating all ask it.
+
+- **Normal** (60x20 and up): the three panels and every overlay.
+- **Compact** (below that, down to 30x6): the task list filling the screen, one line a job (`internal/tui/task_list_compact.go`: status tag, title, figure), then a rule, a one-line status bar (`compactStatusLine`) and the feedback line. It is a second drawing of the same models, with no state of its own. Navigation, selection, the `/` filter and the chords that open no overlay work; an action whose `ActionMenuItem.Opens` is set, and the `M` key, are refused on the feedback line (`refuseOverlay`, `refusedForSize`).
+- **Too small** (below 30x6): a notice; only Ctrl+C works.
+
+An overlay already open below 60x20 is kept under a notice and gets only its own Esc. `App.screenHeld()` says a notice has replaced the screen: check it before delivering any new kind of input (keys, mouse and paste already do).
+
+When you add something the task list draws, draw it (or decide to leave it out) in `renderCompactJob` too. When you add a warning to the status bar, check it reaches `StatusBarModel.alerts()`, which the compact status line shows. `internal/tui/app_compact_test.go` has the size table, the golden frames at 40x10 and 30x6, and the cached-against-fresh frame comparison.
 
 ### Panel Render Caches
 The task list, job details, log viewer and status bar memoise `View()`: each returns its stored `renderCache` while a freshly built key struct (`taskListKey`, `jobDetailsKey`, `logViewerKey`, `statusBarKey`) equals the one the frame was drawn for. The frame is asked for ~120 times a second and most messages change nothing a panel draws.

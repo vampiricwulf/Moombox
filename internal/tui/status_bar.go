@@ -948,3 +948,11 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 	}
 	return strings.Join(parts, " ") + " "
 }
+
+// alerts is the bar's warnings alone, in their shortest form: offline, the
+// sidecar down, a disk warning or hold, and the cookie badges that ask for
+// something. "" while everything is healthy. The compact layout's status
+// line shows these (App.compactStatusLine).
+func (m *StatusBarModel) alerts() string {
+	return m.renderMetrics(tierEssential, m.counts) + m.renderCookieStatus(tierEssential, m.counts)
+}

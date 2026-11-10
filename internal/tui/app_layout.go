@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"image/color"
 	"strings"
 	"unicode/utf8"
@@ -13,11 +12,11 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
-// minTermWidth and minTermHeight are the smallest terminal a rendered frame
-// can be trusted at. Below this every panel/overlay computes negative or
-// near-zero content widths (task list, details, the box dialogs' own
-// min-40/min-10 floors), so View() shows one warning line instead of the
-// garbage that would otherwise reach the screen.
+// minTermWidth and minTermHeight are the smallest terminal the three panels
+// and the overlays can be trusted at. Below this every panel/overlay computes
+// negative or near-zero content widths (task list, details, the box dialogs'
+// own min-40/min-10 floors), so View() draws the compact layout instead, and
+// below that layout's own floor a notice (app_compact.go).
 const (
 	minTermWidth  = 60
 	minTermHeight = 20
@@ -29,6 +28,27 @@ const (
 const minPanelH = 4
 
 func (a *App) recalcLayout() {
+	// The compact layout is the task list over a rule, a status line and the
+	// feedback line (app_compact.go). It has the one panel, so the focus is
+	// on it: every key then takes the Tasks route it takes in the normal
+	// layout.
+	compact := a.layoutMode() == layoutCompact
+	if compact && a.focusedPanel != PanelTasks {
+		a.setFocus(PanelTasks) // ends in recalcLayout
+		return
+	}
+	a.taskList.setCompact(compact)
+	if compact {
+		rows := a.height - compactChromeRows
+		a.taskList.SetSize(a.width, rows)
+		a.statusBar.SetWidth(a.width)
+		a.sizeOverlays()
+		a.taskRegion = PanelRegion{X: 0, Y: 0, Width: a.width, Height: rows}
+		a.detailRegion = PanelRegion{}
+		a.logRegion = PanelRegion{}
+		return
+	}
+
 	// Status bar is 1 row at the bottom
 	contentH := a.height - 1
 
@@ -77,6 +97,16 @@ func (a *App) recalcLayout() {
 	a.details.SetSize(detailW, topH)
 	a.logs.SetSize(a.width, logH)
 	a.statusBar.SetWidth(a.width)
+	a.sizeOverlays()
+
+	// Store regions for mouse (offset by the restart banner when shown)
+	a.taskRegion = PanelRegion{X: 0, Y: bannerH, Width: taskW, Height: topH}
+	a.detailRegion = PanelRegion{X: taskW, Y: bannerH, Width: detailW, Height: topH}
+	a.logRegion = PanelRegion{X: 0, Y: bannerH + topH, Width: a.width, Height: logH}
+}
+
+// sizeOverlays gives every overlay the terminal's size.
+func (a *App) sizeOverlays() {
 	a.help.SetSize(a.width, a.height)
 	a.addVideo.SetSize(a.width, a.height)
 	a.importDlg.SetSize(a.width, a.height)
@@ -95,11 +125,6 @@ func (a *App) recalcLayout() {
 	if a.releaseNotesPopup != nil {
 		a.releaseNotesPopup.setSize(a.width, a.height)
 	}
-
-	// Store regions for mouse (offset by the restart banner when shown)
-	a.taskRegion = PanelRegion{X: 0, Y: bannerH, Width: taskW, Height: topH}
-	a.detailRegion = PanelRegion{X: taskW, Y: bannerH, Width: detailW, Height: topH}
-	a.logRegion = PanelRegion{X: 0, Y: bannerH + topH, Width: a.width, Height: logH}
 }
 
 // viewWithMode wraps content in a tea.View with standard terminal mode settings.
@@ -116,17 +141,32 @@ func (a *App) View() tea.View {
 	if a.width == 0 || a.height == 0 {
 		return a.viewWithMode("Initializing...")
 	}
-	if a.width < minTermWidth || a.height < minTermHeight {
-		// Two short lines, not one: the one-line form ran to 67 columns, so
-		// in the narrow terminals it is shown in the required size — the
-		// half that says what to do — was cut off the right edge.
-		return a.viewWithMode(fmt.Sprintf("Terminal too small: %d×%d\nMoombox needs at least %d×%d",
-			a.width, a.height, minTermWidth, minTermHeight))
+	// The size decides the layout (app_compact.go): the panels, the compact
+	// list, or a notice.
+	mode := a.layoutMode()
+	if mode == layoutTooSmall {
+		return a.tooSmallView()
 	}
 
-	// The overlay on top, if any (the registry order: overlays.go).
+	// The overlay on top, if any (the registry order: overlays.go). Below
+	// the normal layout it is kept with its state, under a notice.
 	if o := a.activeOverlay(); o != nil {
+		if mode != layoutNormal {
+			return a.heldOverlayView(o)
+		}
 		return a.viewWithMode(o.view(a))
+	}
+
+	// The task list is told which form to draw by recalcLayout. A size set
+	// without it (only tests do that) is laid out here, so the form drawn is
+	// always the one the size selects.
+	compact := mode == layoutCompact
+	if a.taskList.compact != compact ||
+		(compact && (a.taskList.width != a.width || a.taskList.height != a.height-compactChromeRows)) {
+		a.recalcLayout()
+	}
+	if mode == layoutCompact {
+		return a.compactView()
 	}
 
 	// Sync status bar state before rendering

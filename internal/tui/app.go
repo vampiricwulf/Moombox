@@ -576,6 +576,9 @@ type App struct {
 	// measurements it is joined from (frame_compose.go). Written only by
 	// View.
 	frame frameComposer
+	// compact is the same memo for the compact layout's frame
+	// (app_compact.go). Written only by View.
+	compact compactFrame
 
 	// Log batching buffer (250ms flush cycle like TypeScript)
 	logBuffer []string
@@ -1169,7 +1172,7 @@ func (a *App) ensureMarqueeTicking() tea.Cmd {
 	// replaces the whole view, hiding the task list and detail titles — no
 	// point animating a marquee nobody can see. It restarts when the overlay
 	// closes (the closing keypress hook, or the 1s backstop within <=1s).
-	if a.hasActiveOverlay() {
+	if a.hasActiveOverlay() || a.layoutMode() != layoutNormal {
 		return nil
 	}
 	if a.taskList.marquee.NeedsScroll() || a.details.marquee.NeedsScroll() {
@@ -1254,6 +1257,10 @@ const (
 // overlay closed by a message instead is back at the fast class on the next
 // idle tick, at most progressIdleInterval later.
 func (a *App) wantsFastProgress() bool {
+	// A notice has replaced the screen (app_compact.go): no progress is on it.
+	if a.screenHeld() {
+		return false
+	}
 	if o := a.activeOverlay(); o != nil {
 		return o.liveProgress != nil && o.liveProgress(a)
 	}

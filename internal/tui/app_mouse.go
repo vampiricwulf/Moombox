@@ -138,6 +138,15 @@ func (a *App) mouseClientTokens(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// A notice has replaced the screen (app_compact.go): there is nothing
+	// under the pointer to click or scroll.
+	if a.screenHeld() {
+		return a, nil
+	}
+	if a.layoutMode() == layoutCompact {
+		return a.handleCompactMouse(msg)
+	}
+
 	// The overlay on top takes the mouse — the same one a key would reach
 	// (the registry order: overlays.go). One with no mouse handler
 	// swallows it; the handlers above scroll or move a cursor on the wheel

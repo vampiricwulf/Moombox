@@ -181,13 +181,38 @@ One accepted consequence: search runs `FindAllStringIndex` over the already-wrap
 
 **Focus navigation:** `Tab` / `Shift-Tab` cycles focus between panels. Mouse click on a panel changes focus. The focused panel receives keyboard input and has a visually distinct border.
 
-**Minimum terminal size:** below 60 columns × 20 rows, `App.View` skips the panel layout entirely and renders a single "Terminal too small" line naming the current and required dimensions, since every panel/overlay computes negative or near-zero content widths under that floor.
+**Terminal size: three layouts** (owner rulings R-C4 to R-C7). The size alone decides which one is drawn, through one predicate, `layoutModeFor` (`internal/tui/app_compact.go`). It is derived on every call and never stored; `View`, `handleKey`, `handleMouse` and the tick gating all ask it.
+
+| Size | Layout |
+|------|--------|
+| 60 columns × 20 rows or more | Normal: the three panels and every overlay, as described above. |
+| Below that, and at least 30 × 6 | Compact: the task list filling the screen, one row a job, then a rule, a one-line status bar and the feedback line. Details and Logs are hidden. |
+| Below 30 × 6 | A "Terminal too small" notice naming the current size and the 30×6 floor. Only `Ctrl+C` works. |
+
+**The compact layout** is a second drawing of the same models (`task_list_compact.go`): the same job list, cursor, batch selection, filter and `dispatchAction`, with no state of its own. A compact row is one line: a status tag of up to four letters in the status colour (`DOWN`, `LIVE`, `WAIT` for Upcoming, `MUX`, `ERR`, `DONE`, `QUE`, `CANC`, `AUTH` for `COOKIES?`; `compactStatusTag`), the title cut with an ellipsis, and a short figure at the right edge (`compactFigure`): the percent while downloading or muxing (`wait` while the downloader waits, the elapsed time for a capture with no percent), the elapsed time while live, `in 3h` while waiting for a scheduled start, the hold or pending-action tag of a Queued or Error row, and the watched dot of a Finished one. The cursor's row has the normal list's highlight; a batch-selected row has a `✓` in the cell after its tag. Titles are never scrolled, so no marquee runs.
+
+```
+DOWN Some stream title that is lo…  42%
+LIVE Another channel live now     1:12:05
+WAIT Scheduled premiere tomorrow    in 3h
+DONE Yesterday's archive                •
+```
+
+The status line (`compactStatusLine`) shows the Tasks header's job counts, the batch selection count and the active filter on the left, and the warnings on the right, kept whole: `OFF` (offline), `POT` (sidecar down), a disk warning, the cookie alerts (`StatusBarModel.alerts`, the bar's own `tierEssential` rendering), `NO PW` and `RESTART` for the two banners the layout has no rows for, and `UPD` for a pending update. The feedback line is one row, cut with an ellipsis.
+
+What works in the compact layout: the arrow, paging and `Home`/`End` keys, `Space`, `Enter` on the archive divider, `F`, the `/` filter (its box takes the list's last row), and every chord that opens no overlay, with its confirm on the feedback line (`A D D`, `A X X`, `A I I`, `R P P`, `Q Q`). An action that opens an overlay is refused on the feedback line with `Enlarge the terminal to 60x20 for this`: Help, Settings, the action menu, and the chords whose `ActionMenuItem` names an overlay in `Opens`. `Tab` does nothing, since there is one panel; entering the layout puts the focus on Tasks. The wheel moves through the list and a click selects a row; nothing else is clickable.
+
+**An overlay already open when the terminal drops below 60×20 is kept with its state** and covered by a notice, `Enlarge to 60x20 to continue`. Until the terminal grows back only `Esc` and `Ctrl+C` work: `Esc` is the overlay's own `Esc`, which closes most overlays and steps back out of a form or a confirmation in the others (and quits from the FFmpeg overlay, as it does at full size). Nothing typed, pasted, clicked or scrolled reaches the hidden overlay; messages that are not input (spinner ticks, async results) still do, so it is current when it comes back.
+
+**Below 30×6** every key but `Ctrl+C` is ignored and so is the mouse: keys typed blind once reached the chord system and could cancel a recording with nothing on screen. The guard sits after the `Ctrl+C` hoist in `handleKey`, so the wizard's cookie-slot release still runs. A chord armed above the floor is disarmed when the size crosses below it (the `WindowSizeMsg` case), so its confirm key cannot act when the terminal grows back.
+
+The fast progress tick follows what is on screen: it runs in the compact layout while a download is active (its row shows the percent) and idles under either notice (`screenHeld`). The compact frame is memoised like the panel frame (`compactFrame`).
 
 ### Source Files
 
-All 49 non-test files of `internal/tui/`, grouped by role. Four of them form two build-tagged pairs (`openbrowser_*` and `clipboard_*`), so any single build compiles 47.
+All 51 non-test files of `internal/tui/`, grouped by role. Four of them form two build-tagged pairs (`openbrowser_*` and `clipboard_*`), so any single build compiles 49.
 
-**The application model** — `App` is split across nine files rather than one; `app.go` holds the struct and its wiring only.
+**The application model** — `App` is split across ten files rather than one; `app.go` holds the struct and its wiring only.
 
 | File | Purpose |
 |------|---------|
@@ -196,7 +221,8 @@ All 49 non-test files of `internal/tui/`, grouped by role. Four of them form two
 | `app_keys.go` | Key dispatch: the `Ctrl+C` test that runs ahead of every overlay intercept, the hand-off to the overlay on top (the registry), the per-panel handlers, and the chord state machine. |
 | `app_actions.go` | `buildMenuItems` — the single source of truth for chords, the action menu, the hints and the help overlay — and `dispatchAction`, the one handler every chord lands in. |
 | `app_commands.go` | The `tea.Cmd` layer: the internal-token HTTP client and every `/api/` call the TUI makes, plus `Run`. |
-| `app_layout.go` | Panel geometry, `View` composition, the minimum-terminal-size floor, the restart and security banners, feedback colouring. |
+| `app_layout.go` | Panel geometry, `View` composition, the restart and security banners, feedback colouring. |
+| `app_compact.go` | The size rule (`layoutModeFor`: normal, compact, too small), the compact layout's frame, status line and mouse, the two notices, and the refusal of an action that opens an overlay below the normal layout. |
 | `app_mouse.go` | Top-level mouse routing: the overlay on top (its registry entry's mouse handler, or swallowed), then the panels. Holds the overlays' wheel handlers: three rows a notch in a text overlay, and `wheelAsArrow` for a list or table overlay, which delivers the notch as the Up or Down key the overlay already handles. |
 | `overlays.go` | The overlay registry (`overlayRegistry`): the one ordered table of the sixteen overlays — each one's visibility, view, component router, key handler and mouse handler. `handleKey`, `handleMouse`, `View`, `routeComponentMsg` and `hasActiveOverlay` all take its first visible entry (`activeOverlay`). |
 | `overlay_keys.go` | Each overlay's key handler (`keySettings` … `keyJobLog`), reached only through the registry. |
@@ -206,6 +232,7 @@ All 49 non-test files of `internal/tui/`, grouped by role. Four of them form two
 | File | Purpose |
 |------|---------|
 | `task_list.go` | Task list panel (top left). Job list rendering, selection, filtering, paging, archive toggle, status icons. |
+| `task_list_compact.go` | The task list's compact drawing: one line a job (status tag, title, figure), no border and no header. The same model and embedded list. |
 | `job_details.go` | Job details panel (top right). Metadata display, description toggle, progress rendering. |
 | `log_viewer.go` | Log viewer panel (bottom). Log line buffering, level filtering, insertion-time word wrapping, literal search, auto-scroll logic, the `View` render cache. |
 | `status_bar.go` | Bottom bar. Chord hints (left), disk usage, active download count, cookie status (right), and the `barTier` width ladder both halves descend. |
@@ -334,6 +361,7 @@ The chord system is a three-state finite automaton:
 - `NeedsJob` — whether the action requires a selected job
 - `NeedsConfirm` — whether the action requires a third confirmation keypress
 - `JobFilter` — optional predicate that filters which jobs the action applies to
+- `Opens` — the `overlayRegistry` name of the overlay the action puts on screen, empty for an action that opens none. It is the one statement of "does this action open an overlay": below 60×20 such an action is refused (`refusedForSize`, checked at the top of `dispatchAction`). `TestEveryChordOpensWhatItSaysItOpens` runs every chord and compares the overlay that opened with this field, and `chordCompact` (`internal/tui/app_compact_test.go`) classifies every chord as working or refused in the compact layout.
 
 `dispatchAction(chord, job)` in `internal/tui/app_actions.go` is the **unified handler** that executes the action for any chord. Adding a new chord requires exactly two changes: one entry in `buildMenuItems()` and one case in `dispatchAction()`.
 
@@ -470,7 +498,7 @@ Tasks panel: toggle the focused row's batch selection. The status bar shows the 
 
 ### Overlays (Modal Dialogs)
 
-Overlays are full-screen or near-full-screen modal views that take over keyboard input. When an overlay is active, the panel layout is hidden and all input routes to the overlay. Pressing `Escape` closes most overlays — the FFmpeg-not-found overlay is the exception and QUITS on `Escape`, because FFmpeg is required for the muxing half of the pipeline and an overlay that merely dismissed itself would leave a Moombox that cannot finish a download. `Ctrl+C` is checked ahead of every overlay and always quits (see the single-key table above). Which overlay is on top is decided in one place, the ordered registry in `internal/tui/overlays.go` (settings, help, release notes, FFmpeg check, setup wizard, action menu, import, cookie import, chapter import, add video, trim, files, client tokens, yt-dlp plugin, stats, job log): the screen, every key, the mouse and the embedded components all go to its first visible entry. The overlays are exclusive in practice — every opener runs from the main screen or closes the overlay it came from — so the order decides only what would win if two were ever open (`internal/tui/overlay_order_test.go` pins it, and the `Ctrl+C` census iterates it).
+Overlays are full-screen or near-full-screen modal views that take over keyboard input. When an overlay is active, the panel layout is hidden and all input routes to the overlay. Pressing `Escape` closes most overlays — the FFmpeg-not-found overlay is the exception and QUITS on `Escape`, because FFmpeg is required for the muxing half of the pipeline and an overlay that merely dismissed itself would leave a Moombox that cannot finish a download. `Ctrl+C` is checked ahead of every overlay and always quits (see the single-key table above). Which overlay is on top is decided in one place, the ordered registry in `internal/tui/overlays.go` (settings, help, release notes, FFmpeg check, setup wizard, action menu, import, cookie import, chapter import, add video, trim, files, client tokens, yt-dlp plugin, stats, job log): the screen, every key, the mouse and the embedded components all go to its first visible entry. The overlays are exclusive in practice — every opener runs from the main screen or closes the overlay it came from — so the order decides only what would win if two were ever open (`internal/tui/overlay_order_test.go` pins it, and the `Ctrl+C` census iterates it). Overlays need the normal layout: below 60×20 none can be opened, and one already open is kept under a notice (see "Terminal size: three layouts" above).
 
 The mouse wheel works in every overlay that has something to scroll (owner ruling R-C2). Text scrolls three rows a notch, as the panels do: Help, the release notes, the FFmpeg install-script review and the Job Log. A list or table moves its cursor one row a notch: the files browser, the client tokens list, the Add Video format tables (the first notch on a table still on Auto shows its cursor, as the first arrow key does), the import file picker, the trim delete list (the wheel stops at its ends, where the arrow keys wrap), the setup wizard's channel list and the chapter import's paste box. Settings and the action menu keep their own handlers. Outside those lists the wheel does nothing — it never moves between a form's fields or changes a value — and a click does only what it did before: Settings and the action menu take clicks, every other overlay ignores them. Cookie import, the yt-dlp plugin overlay and Statistics have nothing to scroll and ignore the mouse. `overlayWheel` (`internal/tui/overlay_wheel_test.go`) states "wheel scrolls" or "deliberately inert" for every overlay, and `TestOverlayWheel` proves each answer.
 
