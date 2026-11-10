@@ -183,12 +183,17 @@ func (s *bareSheet) errorUnder(msg string, style lipgloss.Style, w, h int) {
 }
 
 // bareInputWidth sets the width of a text input shared by the bare and the
-// normal form of an overlay and lays its value out again for it: the input
-// only does that itself on the next edit. An input draws width+1 cells, the
-// last one the cursor's; 0 is no limit, the normal form's.
+// normal form of an overlay and lays its value out again for it, keeping the
+// value and the cursor. The input only does that itself on an edit, and then
+// only when the cursor has left the window it drew before, so SetWidth alone
+// leaves the old width's window behind. An input draws width+1 cells, the
+// last one the cursor's; 0 is no limit.
 func bareInputWidth(ti *textinput.Model, width int) {
+	value, pos := ti.Value(), ti.Position()
 	ti.SetWidth(max(width, 0))
-	ti.SetCursor(ti.Position())
+	ti.Reset() // forget the window the other width scrolled to
+	ti.SetValue(value)
+	ti.SetCursor(pos)
 }
 
 // bareFocus draws s as the focused row's label.

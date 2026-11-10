@@ -37,8 +37,10 @@ import (
 // item; past that the title and then the keys give way before any of the
 // message is cut (bareSheet.errorUnder). "Save changes?" takes the keys row.
 //
-// Nothing here is stored but bareNote. The window of rows is derived from
-// the focus on every draw, and the shared text input is drawn from a copy
+// Nothing here is stored but bareNote and bareWrote (whether the shared
+// input was written while bare, for bareLeave). The window of rows is
+// derived from the focus on every draw, and the shared text input is drawn
+// from a copy
 // (bareInput), so the normal form finds its scroll offset and its input as
 // it left them.
 //
@@ -156,11 +158,7 @@ func (m *SettingsModel) bareView() string {
 // normal form sets its width on every draw and would find a narrow layout
 // left behind.
 func bareInput(ti textinput.Model, width int) string {
-	value, pos := ti.Value(), ti.Position()
-	ti.SetWidth(max(width, 1))
-	ti.Reset() // forget the window the wider form scrolled to
-	ti.SetValue(value)
-	ti.SetCursor(pos)
+	bareInputWidth(&ti, max(width, 1))
 	return ti.View()
 }
 
@@ -568,4 +566,22 @@ func (m *SettingsModel) bareSecurity() string {
 	}
 	sheet.errorUnder(msg, style, w, h)
 	return sheet.render(w, h)
+}
+
+// bareLeave lays the shared text input out for the normal form after the
+// bare one. The bare form draws the input from a copy and never gives the
+// real one a width, so a value loaded or edited there (bareWrote) is laid
+// out for whatever width the input had before (none, when Settings was
+// opened bare), and the normal renderers only set a width: the whole value
+// was then drawn, wrapped over the rows below. The width is the one the
+// normal page now on screen gives the input when it draws. An input the bare
+// form never wrote is left exactly as the normal form had it.
+func (m *SettingsModel) bareLeave() {
+	wrote := m.bareWrote
+	m.bareWrote = false
+	if !wrote || !m.visible {
+		return
+	}
+	_ = m.View()
+	bareInputWidth(&m.textInput, m.textInput.Width())
 }

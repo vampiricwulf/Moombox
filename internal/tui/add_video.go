@@ -242,10 +242,13 @@ func (m *AddVideoModel) IsVisible() bool {
 
 // SetSize updates the dialog dimensions.
 func (m *AddVideoModel) SetSize(w, h int) {
-	wasBare := m.bare()
+	was := layoutModeFor(m.width, m.height)
 	m.width = w
 	m.height = h
-	if wasBare && !m.bare() {
+	// Back in the normal layout from anything else: the input may hold the
+	// bare form's window (directly, or from before a size too small to draw
+	// anything), and the normal form only sets a width.
+	if was != layoutNormal && layoutModeFor(w, h) == layoutNormal {
 		m.bareLeave()
 	}
 }

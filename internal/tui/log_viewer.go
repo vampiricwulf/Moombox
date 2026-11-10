@@ -94,10 +94,12 @@ type LogViewerModel struct {
 	title     string
 	emptyText string
 
-	// bare draws the viewer in its bare form (log_viewer_bare.go): no border,
-	// the full width, a header row over the lines and nothing else. Only the
-	// O L overlay sets it, in its SetSize, from the size of the terminal; the
-	// log panel never does.
+	// bare draws the viewer in its bare form (job_log_bare.go): no border,
+	// the full width, a header row over the lines and nothing else. It is a
+	// copy of the layout answer, kept true by its single writer:
+	// JobLogModel.SetSize sets it from the size of the terminal on every
+	// resize, before any View, and nothing else writes it. The log panel
+	// never sets it.
 	bare bool
 
 	// renderCache / cacheKey memoise View(). bubbletea calls View() after

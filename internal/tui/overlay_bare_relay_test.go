@@ -1,0 +1,139 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+)
+
+// A text input shared by the bare and the normal form of an overlay is laid
+// out again whenever the form changes, and whenever the bare width does. The
+// input itself only does that on the next edit, and only when the cursor has
+// left its window, so a value entered at one width used to keep that width's
+// window at the next.
+
+// relayLong is a value longer than any normal input draws.
+var relayLong = "https://www.youtube.com/watch?v=" + strings.Repeat("abcdefghij", 10)
+
+// relayCursorCell reports whether the focused input's cursor cell (the one
+// reverse-video cell of the frame) is on screen.
+func relayCursorCell(frame string) bool {
+	return strings.Contains(frame, "\x1b[7m") || strings.Contains(frame, "[7;")
+}
+
+// relayTo sends the sizes one after the other, drawing a frame at each as the
+// program would.
+func relayTo(a *App, sizes ...[2]int) {
+	for _, s := range sizes {
+		a.Update(tea.WindowSizeMsg{Width: s[0], Height: s[1]})
+		_ = a.View()
+	}
+}
+
+// relayCase is one overlay with a shared input: how it is opened, and how
+// the long value gets into the input.
+type relayCase struct {
+	name string
+	open func(t *testing.T, r *compactRig)
+}
+
+var relayCases = []relayCase{
+	{"add video", func(t *testing.T, r *compactRig) { r.press("a", "a") }},
+	{"cookie import", func(t *testing.T, r *compactRig) { r.press("e", "i") }},
+	{"job log search", func(t *testing.T, r *compactRig) {
+		r.press("o", "l")
+		if !r.app.jobLog.IsVisible() {
+			t.Fatalf("O L did not open the Job Log: %q", r.app.feedback.msg)
+		}
+		r.press("/")
+	}},
+	{"settings field", func(t *testing.T, r *compactRig) {
+		r.press("`")
+		toSection(t, r.app.settings, "Downloader")
+		toField(t, r.app.settings, "output_template")
+	}},
+}
+
+// TestSharedInputIsLaidOutAgainAcrossForms: a long value entered at any
+// size, with the cursor at its end or back inside it, draws at 60x20 and at
+// 120x40 exactly as it does in a terminal that was never any other size.
+func TestSharedInputIsLaidOutAgainAcrossForms(t *testing.T) {
+	for _, c := range relayCases {
+		for _, back := range []int{0, 5, 40} {
+			for _, normal := range [][2]int{{60, 20}, {120, 40}} {
+				enter := func(r *compactRig) {
+					c.open(t, r)
+					_ = r.app.View() // the program draws before the first key arrives
+					typeIntoApp(r.app, relayLong)
+					for range back {
+						r.press("left")
+					}
+					_ = r.app.View()
+				}
+				never := newRelayRig(t, normal[0], normal[1])
+				enter(never)
+				want := never.app.View().Content
+				if rows := strings.Count(want, "\n") + 1; rows != normal[1] {
+					t.Fatalf("%s: the never-compact frame is %d rows", c.name, rows)
+				}
+				for _, start := range [][2]int{{40, 10}, {200, 8}, {30, 6}, {30, 50}} {
+					what := fmt.Sprintf("%s, cursor back %d, entered at %dx%d, grown to %dx%d", c.name, back, start[0], start[1], normal[0], normal[1])
+					r := newRelayRig(t, start[0], start[1])
+					enter(r)
+					wantExact(t, what+" (before growing)", r.app.View().Content, start[0], start[1])
+					if !relayCursorCell(r.app.View().Content) {
+						t.Errorf("%s: no cursor cell in the bare frame:\n%s", what, plainFrame(r.app))
+					}
+					relayTo(r.app, normal)
+					if got := r.app.View().Content; got != want {
+						t.Errorf("%s:\n%s\nnever compact:\n%s", what, ansi.Strip(got), ansi.Strip(want))
+					}
+					// Through a bare size, a size too small for anything, and back.
+					relayTo(r.app, [2]int{40, 10}, [2]int{20, 5}, normal)
+					if got := r.app.View().Content; got != want {
+						t.Errorf("%s, then through 20x5:\n%s\nnever compact:\n%s", what, ansi.Strip(got), ansi.Strip(want))
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestSharedInputKeepsItsCursorOnScreenAfterAShrink: a long value entered at
+// a normal size, the terminal then shrunk: the bare frame is whole and its
+// cursor cell is on screen, wherever in the value the cursor is.
+func TestSharedInputKeepsItsCursorOnScreenAfterAShrink(t *testing.T) {
+	for _, c := range relayCases {
+		for _, back := range []int{0, 20, 60} {
+			r := newRelayRig(t, 120, 40)
+			c.open(t, r)
+			_ = r.app.View() // the program draws before the first key arrives
+			typeIntoApp(r.app, relayLong)
+			for range back {
+				r.press("left")
+			}
+			_ = r.app.View()
+			for _, s := range [][2]int{{59, 19}, {200, 8}, {30, 6}, {40, 10}, {30, 50}} {
+				relayTo(r.app, s)
+				what := fmt.Sprintf("%s, cursor back %d, shrunk to %dx%d", c.name, back, s[0], s[1])
+				frame := r.app.View().Content
+				wantExact(t, what, frame, s[0], s[1])
+				if !relayCursorCell(frame) {
+					t.Errorf("%s: the cursor cell is off screen:\n%s", what, ansi.Strip(frame))
+				}
+			}
+		}
+	}
+}
+
+// newRelayRig is a compact rig with a job selected, so O L opens.
+func newRelayRig(t *testing.T, w, h int) *compactRig {
+	t.Helper()
+	r := newCompactRig(t, w, h)
+	r.app.OnGetJobLogs = func(string) []string { return bareLogLines(57) }
+	r.selectJob(t, "done")
+	return r
+}

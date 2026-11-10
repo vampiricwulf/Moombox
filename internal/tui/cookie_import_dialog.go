@@ -74,15 +74,24 @@ func (m *CookieImportDialogModel) IsImporting() bool {
 
 // SetSize updates the dialog dimensions.
 func (m *CookieImportDialogModel) SetSize(w, h int) {
+	was, wasW := layoutModeFor(m.width, m.height), m.width
 	m.width, m.height = w, h
 	if m.bare() {
 		// The prompt is two cells and the input draws a cursor cell after
-		// its text.
-		m.input.SetWidth(max(w-3, 1))
+		// its text. Laid out again on entering the bare form and on a new
+		// width, so the cursor stays on the row.
+		if was != layoutCompact || wasW != w {
+			bareInputWidth(&m.input, max(w-3, 1))
+		}
 		return
 	}
 	if _, contentW := dialogBox(70, w); contentW > 0 {
 		m.input.SetWidth(max(contentW-4, 10))
+		// Back in the normal layout from anything else: the input may hold
+		// the bare form's window, and SetWidth alone leaves it there.
+		if was != layoutNormal && layoutModeFor(w, h) == layoutNormal {
+			bareInputWidth(&m.input, max(contentW-4, 10))
+		}
 	}
 }
 

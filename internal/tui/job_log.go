@@ -77,13 +77,25 @@ func (m *JobLogModel) Close() {
 
 // SetSize gives the viewer the whole terminal but the footer's row.
 func (m *JobLogModel) SetSize(w, h int) {
+	was, wasW := layoutModeFor(m.width, m.height), m.width
 	m.width, m.height = w, h
 	if m.log.bare = m.bare(); m.log.bare {
 		// The bare form: no border to keep whole, so no floor on the height.
 		m.log.SetSize(w, max(h-1, 1))
+		// The search box draws its "/" prompt, the text and a cursor cell.
+		// Laid out again on entering the bare form and on a new width.
+		if was != layoutCompact || wasW != w {
+			bareInputWidth(&m.log.searchInput, max(w-2, 1))
+		}
 		return
 	}
 	m.log.SetSize(w, max(h-1, minPanelH))
+	// Back in the normal layout from anything else: the search box may hold
+	// the bare form's window, and the viewer only sets a width when it draws
+	// (LogViewerModel.View: the content width less the "/" prompt).
+	if was != layoutNormal && layoutModeFor(w, h) == layoutNormal {
+		bareInputWidth(&m.log.searchInput, max(w-2, 1)-1)
+	}
 }
 
 // SetLines applies a fresh read of the job's log buffer.
