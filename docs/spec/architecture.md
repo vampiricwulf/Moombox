@@ -1008,6 +1008,14 @@ muxable, and one flagged `incomplete_tail`, whose recording is known to be
 short and still needs the post-live VOD-refresh loop that only the download
 path runs.
 
+The boot pass reads every row once and a re-mux of an earlier row can take a
+while, so both of its writes on a `Muxing` row (the error clear ahead of a
+re-mux, and the reset to `Downloading`) apply only while the row is still
+`Muxing` (`stillMuxingAfter`, `internal/worker/worker.go`): a row an operator
+cancelled or deleted since the read is neither muxed nor enqueued. A write that
+did not apply while the row still reads `Muxing` (a failed statement) is
+treated as before, because nothing but the next start picks a `Muxing` row up.
+
 Muxing is NOT idempotent against the recording itself, which is what the previous reset assumed: re-processing re-probed the stream as post-live, the manifest-free strategy seeded sequence 0, and the engine truncated the complete staged file. The engine refuses that outright — `ErrStagedMediaPresent` in `internal/engine/downloader.go` — so no path truncates non-empty staged media unless the caller explicitly asked to discard it, and the one caller that does (the manifest-free restart's `DiscardStaged`) preserves the recording aside instead. A whole-file VOD download (`IsDirectURL`) is outside the guard by design: its partial is re-fetchable from the same static URL, so a restart costs bandwidth, not footage.
 
 ## Error Classification

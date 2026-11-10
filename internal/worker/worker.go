@@ -970,6 +970,33 @@ var bootEnqueueOrder = [...]database.JobStatus{
 	database.StatusUpcoming,
 }
 
+// stillMuxingAfter applies fields to a row the boot pass read as Muxing, only
+// while it still is (the read is one GetAllJobs for every row, and a re-mux
+// of an earlier row can take a while; an operator's Cancel or Delete in
+// between stands). It reports whether the row is still the boot pass's to
+// handle. A write that did not apply is not by itself a no: the conditional
+// writers also answer false when the statement fails, and nothing but the
+// next boot picks a Muxing row up again, so the row is read once more and
+// given up only when it is gone or no longer Muxing.
+func (w *DownloadWorker) stillMuxingAfter(jobID string, fields map[string]any) bool {
+	if w.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, fields) {
+		return true
+	}
+	cur, err := w.db.GetJob(jobID)
+	if err != nil {
+		return true
+	}
+	if cur == nil || cur.Status != database.StatusMuxing {
+		status := database.JobStatus("")
+		if cur != nil {
+			status = cur.Status
+		}
+		w.logger.Debug("interrupted mux job changed since boot read it; leaving it", "jobID", jobID, "status", status)
+		return false
+	}
+	return true
+}
+
 func (w *DownloadWorker) enqueueExistingJobs() {
 	jobs, err := w.db.GetAllJobs()
 	if err != nil {
@@ -989,8 +1016,13 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 				// it to the manifest-free strategy whose dbResumeSeq seeds 0,
 				// and truncated the complete recording (sweep-2 ENGINE-1).
 				// The Mux action's path needs no network and no re-download.
+				// A row cancelled or deleted since the read is left alone: the
+				// re-mux accepts a Cancelled row as the Mux action does, and
+				// would archive what the operator just cancelled.
+				if !w.stillMuxingAfter(job.ID, map[string]any{"error": ""}) {
+					continue
+				}
 				w.logger.Info("resuming interrupted mux from staged media", "jobID", job.ID)
-				w.db.UpdateJobFields(job.ID, map[string]any{"error": ""})
 				if err := w.muxJob(job.ID, muxActionFailure, true); err != nil {
 					// Only reachable if staging vanished between the check and
 					// the call; fall back to the historical reset.
@@ -1004,12 +1036,15 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 			// the post-live VOD-refresh loop still has a tail to fetch. Reset
 			// to Downloading and clear any stale error string so the UI does
 			// not show a prior error alongside the fresh state (per audit
-			// reports/worker.md Finding 24).
-			w.logger.Info("resetting interrupted mux job", "jobID", job.ID)
-			w.db.UpdateJobFields(job.ID, map[string]any{
+			// reports/worker.md Finding 24). Only while the row is still
+			// Muxing, like every write decided on an earlier status read.
+			if !w.stillMuxingAfter(job.ID, map[string]any{
 				"status": database.StatusDownloading,
 				"error":  "",
-			})
+			}) {
+				continue
+			}
+			w.logger.Info("resetting interrupted mux job", "jobID", job.ID)
 			job.Status = database.StatusDownloading
 		}
 		if ShouldProcess(job) {
