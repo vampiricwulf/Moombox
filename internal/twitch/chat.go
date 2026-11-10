@@ -1444,7 +1444,9 @@ func (cd *ChatDownloader) clearResumeState() {
 // racing on the dedup/resume state. A Start AFTER a previous one returned
 // runs again on the same instance and keeps what the instance holds: the
 // dedup set, the counts and the stream-end mark (MarkStreamEnded is not
-// undone), with no resume-file reload (alreadyInitialized below). Production
+// undone) — and it does not reload the resume file when the instance already
+// holds messages or dedup IDs (alreadyInitialized below); one whose earlier
+// run recorded nothing reloads it, as a first Start does. Production
 // starts each instance once — the orchestrator builds a fresh downloader per
 // attempt — and the damage tests re-Start one to drive an exit. (This doc
 // used to promise an error on a re-Start after return; the code never gave
