@@ -1,6 +1,9 @@
 package worker
 
-import "sync"
+import (
+	"slices"
+	"sync"
+)
 
 // chatStopper is the part of a chat downloader the run-chat registry needs:
 // *chat.ChatDownloader, *twitch.ChatDownloader and *twitch.VodChatDownloader
@@ -26,6 +29,10 @@ type chatStopper interface {
 // Keyed by job ID because the question asked is "this run's downloaders".
 // One run per job at a time (the queue's registration), and processJob
 // releases the entry on its way out, so the next run starts from none.
+//
+// An entry holds what its run still owns, not everything it ever built: the
+// owner that drops a downloader has it forgotten (forget), and a run that
+// goes round again in place starts its new pass from none (nextPass).
 type runChatRegistry struct {
 	mu   sync.Mutex
 	runs map[string]*runChats
@@ -132,4 +139,55 @@ func (r *runChatRegistry) release(jobID string) {
 	rc.mu.Lock()
 	rc.stopped = true
 	rc.mu.Unlock()
+}
+
+// forget lets go of a downloader its owner has stopped or seen finish and is
+// dropping: the waiting-room chat the upcoming wait replaces each time
+// YouTube ends it, or stops at its exits. Without it a run's entry held every
+// downloader the run ever built until the run ended — over a multi-day wait,
+// each with its options, closures and buffered messages. The run is not
+// named: the owners that drop one (stopEarlyChat) hold only the instance, and
+// the entries are as few as the running jobs.
+func (r *runChatRegistry) forget(s chatStopper) {
+	if r == nil || s == nil {
+		return
+	}
+	r.mu.Lock()
+	entries := make([]*runChats, 0, len(r.runs))
+	for _, rc := range r.runs {
+		entries = append(entries, rc)
+	}
+	r.mu.Unlock()
+	for _, rc := range entries {
+		rc.mu.Lock()
+		rc.sources = slices.DeleteFunc(rc.sources, func(held chatStopper) bool { return held == s })
+		rc.mu.Unlock()
+	}
+}
+
+// nextPass ends a pass of the job's run that is about to run again in place
+// (processJob's loop: a rate limit or a setup outage waited out): what the
+// earlier pass registered is stopped — its own teardown has run, and each
+// Stop is safe to repeat; this is the net under it — and let go, and the next
+// pass's downloaders register into the same entry, its gate still open. It
+// reports how many it let go.
+func (r *runChatRegistry) nextPass(jobID string) int {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	rc := r.runs[jobID]
+	r.mu.Unlock()
+	if rc == nil {
+		return 0
+	}
+	rc.mu.Lock()
+	sources := rc.sources
+	rc.sources = nil
+	rc.mu.Unlock()
+	// Outside the entry's lock, as stop's.
+	for _, s := range sources {
+		s.Stop()
+	}
+	return len(sources)
 }

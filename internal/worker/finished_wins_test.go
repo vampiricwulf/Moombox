@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 )
 
 // infoLines records the Info lines whose message starts with prefix.
@@ -118,13 +120,32 @@ func TestACancelBetweenTheMuxAndItsMarkEndsFinished(t *testing.T) {
 	}
 }
 
+// onDebugLogger runs hook once, on the first Debug line whose message is
+// msg.
+type onDebugLogger struct {
+	discardLogger
+	msg  string
+	once sync.Once
+	hook func()
+}
+
+func (l *onDebugLogger) Debug(msg string, _ ...any) {
+	if msg == l.msg {
+		l.once.Do(l.hook)
+	}
+}
+
 // TestACancelWhileFFmpegRunsStaysCancelled: the other side of R-H2. A Cancel
-// that reaches the mux while it runs stops it — here from the "muxing"
-// announcement, ahead of the copy — so no archive is completed, and the
-// Cancel stands: the row stays Cancelled, nothing is at the output path, the
-// staging is kept for a later Mux.
+// that reaches the mux inside the copy — here as the muxer hands FFmpeg its
+// arguments, after the finalize's Muxing write and its staged-input walk —
+// stops it through MuxJob's own listener (the queue does not know an
+// off-queue Mux), so no archive is completed, and the Cancel stands: the row
+// stays Cancelled, nothing is at the output path, the staging is kept for a
+// later Mux.
 //
-// Mutant: the finalize going on after a failed copy — the row ends Finished.
+// Mutants: MuxJob's cancel listener not cancelling the mux — FFmpeg runs to
+// its end, the mark re-claims the row and it ends Finished; the finalize
+// going on after a failed copy — the same.
 func TestACancelWhileFFmpegRunsStaysCancelled(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	staging, outputDir := muxFixtureJob(t, w, db, "j-during")
@@ -133,14 +154,21 @@ func TestACancelWhileFFmpegRunsStaysCancelled(t *testing.T) {
 	db.UpdateJobFields("j-during", map[string]any{"status": database.StatusError})
 
 	var cancelled bool
-	w.orchestrator.logger = &onInfoLogger{prefix: "muxing", hook: func() {
+	var before database.JobStatus
+	w.orchestrator.muxer = engine.NewMuxer(ffmpegPath, &onDebugLogger{msg: "ffmpeg", hook: func() {
+		if j, _ := db.GetJob("j-during"); j != nil {
+			before = j.Status
+		}
 		cancelled, _, _ = w.CancelJob("j-during")
-	}}
+	}})
 	if err := w.MuxJob("j-during"); err != nil {
 		t.Fatal(err)
 	}
 	w.wg.Wait()
 
+	if before != database.StatusMuxing {
+		t.Fatalf("the row read %q as FFmpeg was started, want Muxing: the Cancel did not land inside the copy", before)
+	}
 	if !cancelled {
 		t.Fatal("the Cancel during the mux was refused")
 	}
@@ -153,6 +181,50 @@ func TestACancelWhileFFmpegRunsStaysCancelled(t *testing.T) {
 	}
 	if mp4s, _ := filepath.Glob(filepath.Join(outputDir, "*.mp4")); len(mp4s) != 0 {
 		t.Errorf("an archive was written for the cancelled mux: %v", mp4s)
+	}
+}
+
+// TestACancelDuringTheOutputCheckStaysCancelled: the window R-H2 re-claims
+// opens only once the copy is VERIFIED. Between FFmpeg's return and the mark
+// the muxer still runs ENGINE-9's check on the copy (verifiedCopy: ffprobe
+// of it and of the staged inputs), on the finalize's context. A Cancel that
+// lands there ends that context, so the probes fail — and a copy ffprobe
+// could not read used to pass: it was renamed into place, the mark re-claimed
+// the Cancelled row, the row was written Finished and its staging deleted,
+// with nothing having compared the copy to what was staged. The check now
+// fails a copy whose context ended under it, so the Cancel stands: Cancelled,
+// nothing at the output path, staging kept.
+//
+// Mutant: verifiedCopy passing a copy whose context ended — the row ends
+// Finished and its staging is reclaimed.
+func TestACancelDuringTheOutputCheckStaysCancelled(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	staging, outputDir := muxFixtureJob(t, w, db, "j-check")
+	ffmpegPath, _ := requireFFmpegTools(t)
+	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 3)
+	db.UpdateJobFields("j-check", map[string]any{"status": database.StatusError})
+
+	var cancelled bool
+	w.orchestrator.logger = &onDebugLogger{msg: "checking the muxed copy against its staged inputs", hook: func() {
+		cancelled, _, _ = w.CancelJob("j-check")
+	}}
+	if err := w.MuxJob("j-check"); err != nil {
+		t.Fatal(err)
+	}
+	w.wg.Wait()
+
+	if !cancelled {
+		t.Fatal("the Cancel during the output check was refused (or the check never ran)")
+	}
+	j, _ := db.GetJob("j-check")
+	if j.Status != database.StatusCancelled || j.OutputFile != "" {
+		t.Errorf("row = %s (output %q), want the Cancel standing with no archive", j.Status, j.OutputFile)
+	}
+	if !HasSegmentFiles(filepath.Dir(staging), "j-check") {
+		t.Error("staging was reclaimed though the copy was never checked against it")
+	}
+	if mp4s, _ := filepath.Glob(filepath.Join(outputDir, "*.mp4")); len(mp4s) != 0 {
+		t.Errorf("an unchecked copy took the archive's name: %v", mp4s)
 	}
 }
 
@@ -259,5 +331,161 @@ func TestACancelDuringASplitFinalizesMuxStands(t *testing.T) {
 		if _, err := os.Stat(s.FilePath); err != nil {
 			t.Errorf("part %s: %v", s.Filename, err)
 		}
+	}
+}
+
+// TestASupersededCancelOfAnOffQueueMuxIsNotAnnounced: a Mux action, a boot
+// re-mux and the automatic Twitch mux run off the queue, which therefore
+// flags nothing for a Cancel of one, and the Cancel's caller (the cancel
+// route, the TUI) sent "Job Cancelled" itself. When the finishing mark then
+// re-claimed the row (R-H2) a "Download Finished" followed it — two terminal
+// notifications, and in webhook edit mode a second message. A Cancel applied
+// while an off-queue mux runs is the mux's to announce now (flagged true, as
+// for a queue run), and it announces it at its exit only if the row still
+// reads Cancelled: superseded, the one notification is "Download Finished".
+//
+// Mutant: CancelJob not handing the announcement to the mux run — flagged
+// is false and the caller sends "Job Cancelled" ahead of the finish.
+func TestASupersededCancelOfAnOffQueueMuxIsNotAnnounced(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	staging, _ := muxFixtureJob(t, w, db, "j-notify")
+	ffmpegPath, _ := requireFFmpegTools(t)
+	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 3)
+	db.UpdateJobFields("j-notify", map[string]any{"status": database.StatusError})
+	rec := notificationtest.New()
+	w.notifier = rec
+	w.orchestrator.notifier = rec
+
+	mark := w.orchestrator.beginFinishing
+	var cancelled, flagged bool
+	w.orchestrator.beginFinishing = func(id string, muxed bool) (func(), bool, bool) {
+		cancelled, flagged, _ = w.CancelJob(id)
+		return mark(id, muxed)
+	}
+	if err := w.MuxJob("j-notify"); err != nil {
+		t.Fatal(err)
+	}
+	w.wg.Wait()
+
+	if !cancelled {
+		t.Fatal("the Cancel ahead of the mark was refused")
+	}
+	if !flagged {
+		t.Error("the Cancel of a running off-queue mux left its announcement to the caller, who sends it ahead of the finish")
+	}
+	if j, _ := db.GetJob("j-notify"); j.Status != database.StatusFinished {
+		t.Fatalf("row = %s, want Finished", j.Status)
+	}
+	if n := len(rec.ByEvent("cancelled")); n != 0 {
+		t.Errorf("%d Job Cancelled sent for a Cancel the finish superseded, want 0", n)
+	}
+	if n := len(rec.ByEvent("finished")); n != 1 {
+		t.Errorf("%d Download Finished sent, want 1", n)
+	}
+	// With the mux gone, a Cancel is its caller's to announce again.
+	db.UpdateJobFields("j-notify", map[string]any{"status": database.StatusUpcoming})
+	if c, f, err := w.CancelJob("j-notify"); !c || f || err != nil {
+		t.Errorf("Cancel after the mux = cancelled %v, flagged %v, %v; want cancelled, not flagged", c, f, err)
+	}
+}
+
+// TestACancelThatStopsAnOffQueueMuxIsAnnouncedByTheMux: the other half. The
+// Cancel stopped FFmpeg, the row stays Cancelled, and the mux run, which
+// took the announcement over, sends the one "Job Cancelled" at its exit.
+//
+// Mutant: the mux run's exit not sending what it took over — no Job
+// Cancelled at all.
+func TestACancelThatStopsAnOffQueueMuxIsAnnouncedByTheMux(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	staging, _ := muxFixtureJob(t, w, db, "j-notify-stop")
+	ffmpegPath, _ := requireFFmpegTools(t)
+	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 3)
+	db.UpdateJobFields("j-notify-stop", map[string]any{"status": database.StatusError})
+	rec := notificationtest.New()
+	w.notifier = rec
+	w.orchestrator.notifier = rec
+
+	var cancelled, flagged bool
+	w.orchestrator.muxer = engine.NewMuxer(ffmpegPath, &onDebugLogger{msg: "ffmpeg", hook: func() {
+		cancelled, flagged, _ = w.CancelJob("j-notify-stop")
+	}})
+	if err := w.MuxJob("j-notify-stop"); err != nil {
+		t.Fatal(err)
+	}
+	w.wg.Wait()
+
+	if !cancelled || !flagged {
+		t.Fatalf("Cancel during the mux = cancelled %v, flagged %v; want both", cancelled, flagged)
+	}
+	if j, _ := db.GetJob("j-notify-stop"); j.Status != database.StatusCancelled {
+		t.Fatalf("row = %s, want Cancelled", j.Status)
+	}
+	if n := len(rec.ByEvent("cancelled")); n != 1 {
+		t.Errorf("%d Job Cancelled sent, want the mux run's one", n)
+	}
+	if n := len(rec.ByEvent("finished")); n != 0 {
+		t.Errorf("%d Download Finished sent for a cancelled mux, want 0", n)
+	}
+}
+
+// TestAReclaimedFinishStillRunsTheTrimTheJobAskedFor: the post-download trim
+// (StartTime/EndTime) runs at the end of ExecuteWithChat, on the run's
+// context — which the superseded Cancel of a re-claimed finish (R-H2) had
+// ended, so the row ended Finished with no trim and no "Trim Failed" either.
+// A finalize that re-claimed its row says so on the JobContext, and the trim
+// then runs on the mux root. (No trim service here, so the attempt shows as
+// the "Trim Failed" postDownloadTrim sends for one.)
+//
+// Mutants: trimAfterFinalize reading the run's context whatever the finalize
+// re-claimed — no trim is attempted; muxAndFinalize not recording the
+// re-claim — the second half fails.
+func TestAReclaimedFinishStillRunsTheTrimTheJobAskedFor(t *testing.T) {
+	start := 1.0
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name      string
+		reclaimed bool
+		want      int
+	}{
+		{"a cancelled run's trim is skipped", false, 0},
+		{"a re-claimed finish's trim runs", true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := notificationtest.New()
+			w, db := testWorkerSetup(t)
+			o := w.orchestrator
+			o.notifier, o.trims = rec, nil
+			job := &database.Job{ID: "j-trim", VideoID: "j-trim", URL: "u", Platform: "youtube", Title: "T", Status: database.StatusFinished, StartTime: &start}
+			if _, err := db.AddJob(job); err != nil {
+				t.Fatal(err)
+			}
+			jobCtx := &JobContext{Job: job, FinishReclaimed: tc.reclaimed}
+			o.trimAfterFinalize(ended, jobCtx)
+			if n := len(rec.Calls()); n != tc.want {
+				t.Errorf("%d trim attempts reported, want %d", n, tc.want)
+			}
+		})
+	}
+
+	// And the single-file finalize records its re-claim.
+	w, db := testWorkerSetup(t)
+	staging, _ := muxFixtureJob(t, w, db, "j-trim-mark")
+	ffmpegPath, _ := requireFFmpegTools(t)
+	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 3)
+	job, _ := db.GetJob("j-trim-mark")
+	jobCtx := w.buildJobContext(job)
+	mark := w.orchestrator.beginFinishing
+	w.orchestrator.beginFinishing = func(id string, muxed bool) (func(), bool, bool) {
+		if c, _, err := w.CancelJob(id); !c || err != nil {
+			t.Errorf("the Cancel ahead of the mark = %v, %v", c, err)
+		}
+		return mark(id, muxed)
+	}
+	if err := w.orchestrator.muxAndFinalize(context.Background(), jobCtx, &DownloadResult{HasVideo: true, VideoPath: filepath.Join(staging, "video.mp4")}); err != nil {
+		t.Fatal(err)
+	}
+	if !jobCtx.FinishReclaimed {
+		t.Error("the finalize re-claimed its row and did not say so: the run's trim would be skipped")
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/chat"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -239,6 +240,101 @@ func TestEveryChatDownloaderIsRegisteredWithItsRun(t *testing.T) {
 		}
 		if n := strings.Count(s, ".whileRunning("); n != tc.gatedOnStarts {
 			t.Errorf("%s: %d whileRunning calls, want %d", tc.file, n, tc.gatedOnStarts)
+		}
+	}
+}
+
+// registered is how many downloaders the job's run entry holds.
+func (r *runChatRegistry) registered(jobID string) int {
+	r.mu.Lock()
+	rc := r.runs[jobID]
+	r.mu.Unlock()
+	if rc == nil {
+		return 0
+	}
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return len(rc.sources)
+}
+
+// TestRunChatRegistryLetsGoOfWhatItsRunDropped: a run's entry only ever
+// grew. The upcoming wait restarts its waiting-room chat every time
+// YouTube ends it (a multi-day wait builds dozens), and processJob runs a job
+// again in place after a rate limit or a setup outage, each pass building its
+// own downloaders — and the entry kept every one of them, with its options,
+// closures and buffered messages, until the run ended. The owner that drops
+// an instance now has the registry forget it, and a new pass starts from an
+// entry holding none: what the earlier pass left is stopped (its own teardown
+// has run; the stop is the registry's safety net) and let go, with the run's
+// gate left open.
+//
+// Mutants: forget a no-op — the dropped downloader is still held, and
+// stopped again by a later stop; nextPass not stopping — the earlier pass's
+// downloader is never stopped; nextPass closing the gate — the next pass's
+// "downloading" write is refused.
+func TestRunChatRegistryLetsGoOfWhatItsRunDropped(t *testing.T) {
+	var nilReg *runChatRegistry
+	nilReg.forget(&stoppableChat{})
+	nilReg.nextPass("a")
+
+	r := newRunChatRegistry()
+	old, cur, other := &stoppableChat{}, &stoppableChat{}, &stoppableChat{}
+	run := r.add("a", old)
+	r.add("a", cur)
+	r.add("b", other)
+	r.forget(old)
+	r.forget(&stoppableChat{}) // one it never held
+	if n := r.registered("a"); n != 1 {
+		t.Fatalf("the run holds %d downloaders after its owner dropped one of two, want 1", n)
+	}
+	if n := r.nextPass("a"); n != 1 || cur.stops.Load() != 1 || old.stops.Load() != 0 || other.stops.Load() != 0 {
+		t.Errorf("nextPass(a) = %d, stops cur=%d old=%d other=%d; want 1 and 1,0,0", n, cur.stops.Load(), old.stops.Load(), other.stops.Load())
+	}
+	if n := r.registered("a"); n != 0 {
+		t.Errorf("the run holds %d downloaders into its next pass, want 0", n)
+	}
+	if r.registered("b") != 1 {
+		t.Errorf("another job's entry changed")
+	}
+	next := &stoppableChat{}
+	if r.add("a", next) != run || next.stops.Load() != 0 || !run.whileRunning(func() {}) {
+		t.Errorf("the next pass did not go on in the run's open entry")
+	}
+	if n := r.stop("a"); n != 1 || next.stops.Load() != 1 || cur.stops.Load() != 1 || old.stops.Load() != 0 {
+		t.Errorf("stop(a) = %d, stops next=%d cur=%d old=%d; want 1 and 1,1,0", n, next.stops.Load(), cur.stops.Load(), old.stops.Load())
+	}
+}
+
+// TestADroppedEarlyChatLeavesItsRunsEntry drives the owner's side: the
+// waiting-room chat the stream processor stops (stopEarlyChat) leaves the
+// run's entry with it, and the two other places a pass's downloaders are let
+// go are pinned in the source — the early chat's restart, and processJob's
+// pass loop.
+func TestADroppedEarlyChatLeavesItsRunsEntry(t *testing.T) {
+	sp := &StreamProcessor{runChats: newRunChatRegistry()}
+	dl := chat.NewChatDownloader(chat.ChatDownloaderOptions{})
+	sp.runChats.add("j-early", dl)
+	sp.trackChat(dl)
+	sp.stopEarlyChat(dl)
+	if n := sp.runChats.registered("j-early"); n != 0 {
+		t.Errorf("the run holds %d downloaders after its early chat was stopped, want 0", n)
+	}
+
+	for _, tc := range []struct{ file, after, want string }{
+		{"stream_processor_youtube.go", "restarting early chat download after its run ended", "sp.runChats.forget(chatDl)"},
+		{"worker.go", "var setupOutageSince, rateLimitSince time.Time", "w.runChats.nextPass(jobID)"},
+	} {
+		src, err := os.ReadFile(tc.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(src)
+		i := strings.Index(s, tc.after)
+		if i < 0 {
+			t.Fatalf("%s: %q not found", tc.file, tc.after)
+		}
+		if j := strings.Index(s[i:], tc.want); j < 0 || j > 600 {
+			t.Errorf("%s: no %s after %q", tc.file, tc.want, tc.after)
 		}
 	}
 }

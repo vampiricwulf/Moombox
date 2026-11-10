@@ -770,12 +770,30 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		return err
 	}
 
-	// Post-download trim: if job has startTime/endTime, create a trimmed version
-	if (jobCtx.Job.StartTime != nil || jobCtx.Job.EndTime != nil) && ctx.Err() == nil {
-		o.postDownloadTrim(ctx, jobCtx.Job)
-	}
-
+	o.trimAfterFinalize(ctx, jobCtx)
 	return nil
+}
+
+// trimAfterFinalize runs the post-download trim a job asked for when it was
+// added (StartTime/EndTime), once its recording is finalized, unless the run
+// was cancelled or stopped meanwhile.
+//
+// A finalize that re-claimed its row from a Cancel (JobContext.FinishReclaimed,
+// owner ruling R-H2) ran on with the run's context ended by that Cancel: the
+// job is Finished, and the trim it asked for runs on the mux root, which only
+// a shutdown cuts. Read off the run's context, the trim was skipped there
+// with nothing said.
+func (o *DownloadOrchestrator) trimAfterFinalize(ctx context.Context, jobCtx *JobContext) {
+	if jobCtx.Job.StartTime == nil && jobCtx.Job.EndTime == nil {
+		return
+	}
+	if jobCtx.FinishReclaimed {
+		ctx = o.muxRoot()
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	o.postDownloadTrim(ctx, jobCtx.Job)
 }
 
 // postDownloadTrim creates the trim a job asked for when it was added

@@ -622,6 +622,9 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				sp.logger.Info("restarting early chat download after its run ended",
 					"videoID", job.VideoID, "messages", chatDl.MessageCount())
 				sp.untrackChat(chatDl)
+				// Its run ended; the one started below registers in its
+				// place (runChatRegistry.forget).
+				sp.runChats.forget(chatDl)
 			}
 			// onProgress wired inside tryStartEarlyChat — see F16.
 			chatDl, chatFinished = sp.tryStartEarlyChat(ctx, job, probeInfo, chatProgressFn)
@@ -1060,5 +1063,7 @@ func (sp *StreamProcessor) stopEarlyChat(chatDl *chat.ChatDownloader) {
 	if chatDl != nil {
 		chatDl.Stop()
 		sp.untrackChat(chatDl)
+		// Stopped and dropped: the run's entry lets go of it too.
+		sp.runChats.forget(chatDl)
 	}
 }

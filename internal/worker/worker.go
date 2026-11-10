@@ -207,6 +207,12 @@ type JobContext struct {
 	// download completed. A boot re-mux of an interrupted Muxing row leaves
 	// it false: that download did complete.
 	CapturedMux bool
+	// FinishReclaimed is set by a finalize whose finishing mark re-claimed
+	// the row from a Cancel that landed after its mux had completed (owner
+	// ruling R-H2, beginFinishing). That Cancel ended the run's context, and
+	// the job finished all the same: what its run still does after the
+	// finalize — the post-download trim — runs on the mux root instead.
+	FinishReclaimed bool
 	// Refinalize marks a finalize of the recording the job's archive already
 	// holds: MuxJob's, which re-muxes the staging the archive was (or was to
 	// be) made from — the Mux action over an Error or Cancelled row, the
@@ -330,6 +336,13 @@ type DownloadWorker struct {
 	// allocated, like stagingClaims.
 	finishMu  sync.Mutex
 	finishing map[string]bool
+	// muxRuns is the off-queue mux runs in flight (muxJob's goroutine: the
+	// Mux action, a boot re-mux, the automatic Twitch mux), and for each
+	// whether a Cancel that applied during it left its "Job Cancelled" to the
+	// run (noteMuxRunCancel, endMuxRun). The queue knows none of these runs,
+	// so it flags nothing for them. Lazily allocated, like finishing.
+	muxRunMu sync.Mutex
+	muxRuns  map[string]bool
 
 	stagingClaimMu sync.Mutex
 	stagingClaims  map[string]stagingClaim
@@ -761,6 +774,13 @@ func (w *DownloadWorker) TwitchHintStats() TwitchHintStats {
 // between the mux's return and the mark is applied and answered, and the
 // mark then re-claims the row for the archive that is already written
 // (beginFinishing, owner ruling R-H2).
+//
+// A Cancel applied while an off-queue mux of the job runs (muxJob) is
+// flagged too, and announced by that run at its exit — only if the row still
+// reads Cancelled then (endMuxRun). The queue does not know such a run, so
+// the caller used to announce the Cancel at once, and a finish that
+// re-claimed the row sent "Download Finished" after it. Noted under finishMu
+// with the write, so the mark that re-claims the row always finds it noted.
 func (w *DownloadWorker) CancelJob(jobID string) (cancelled, flagged bool, err error) {
 	w.finishMu.Lock()
 	if w.finishing[jobID] {
@@ -774,13 +794,62 @@ func (w *DownloadWorker) CancelJob(jobID string) (cancelled, flagged bool, err e
 		"status":         database.StatusCancelled,
 		"announce_found": false,
 	})
+	muxRunWillNotify := applied && w.noteMuxRunCancel(jobID)
 	w.finishMu.Unlock()
 	if !applied {
 		return false, false, nil
 	}
 	flagged = w.queue.Cancel(jobID)
 	w.endBacklogStreak(jobID)
-	return true, flagged, nil
+	return true, flagged || muxRunWillNotify, nil
+}
+
+// beginMuxRun registers an off-queue mux run of the job, before its goroutine
+// starts: a Cancel applied from here until endMuxRun is the run's to announce.
+func (w *DownloadWorker) beginMuxRun(jobID string) {
+	w.muxRunMu.Lock()
+	defer w.muxRunMu.Unlock()
+	if w.muxRuns == nil {
+		w.muxRuns = map[string]bool{}
+	}
+	w.muxRuns[jobID] = false
+}
+
+// noteMuxRunCancel records that a Cancel applied while an off-queue mux of
+// the job runs, and reports whether one does: its announcement is then that
+// run's (endMuxRun), not the Cancel's caller's.
+func (w *DownloadWorker) noteMuxRunCancel(jobID string) bool {
+	w.muxRunMu.Lock()
+	defer w.muxRunMu.Unlock()
+	if _, running := w.muxRuns[jobID]; !running {
+		return false
+	}
+	w.muxRuns[jobID] = true
+	return true
+}
+
+// endMuxRun ends an off-queue mux run's registration, at its goroutine's
+// exit, and sends the "Job Cancelled" a Cancel left to it — when the row
+// still reads Cancelled. A Cancel the finishing mark superseded (owner ruling
+// R-H2) reads Finished here, and its one notification is the finalize's
+// "Download Finished". A Cancel that applies after this is its caller's to
+// announce again.
+func (w *DownloadWorker) endMuxRun(jobID string) {
+	w.muxRunMu.Lock()
+	owed := w.muxRuns[jobID]
+	delete(w.muxRuns, jobID)
+	w.muxRunMu.Unlock()
+	if !owed {
+		return
+	}
+	job, err := w.db.GetJob(jobID)
+	if err != nil || job == nil || job.Status != database.StatusCancelled {
+		return
+	}
+	w.logger.Info("job cancelled by user", "jobID", jobID)
+	if w.notifier != nil {
+		w.notifier.Send(notifications.JobCancelled(NotifyFacts(job)))
+	}
 }
 
 // beginFinishing marks a job's finalize as past the point of no return —
@@ -1186,6 +1255,9 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	// YouTube rate-limited, run again once it has waited (outlastRateLimit).
 	var setupOutageSince, rateLimitSince time.Time
 	for {
+		// What an earlier pass registered is not this pass's: stopped by its
+		// own teardown already, and let go of here (runChatRegistry.nextPass).
+		w.runChats.nextPass(jobID)
 		// Process stream (probe, wait for live, etc.) — waiting a connectivity
 		// outage out rather than failing on it (outage_wait.go).
 		result, err := w.processStreamThroughOutages(ctx, job)
@@ -1826,6 +1898,11 @@ func (w *DownloadWorker) recordRunPanic(jobID string, job *database.Job, r any) 
 // (stopRunChats) before the record that comes here, since the orchestrator's
 // cleanup is an explicit call a panic unwinds past, and a downloader left
 // running wrote its own value (OnStart's "downloading") over the settle.
+// Start's recover reaches this with no stop: it catches only a panic in
+// processJob's own deferred handlers, and by then processJob has released
+// the run's entry (runChatRegistry.release), which closes the "downloading"
+// gate — nothing can write over the settle, though a downloader may be left
+// running in that double fault.
 func (w *DownloadWorker) writePanicError(jobID string, r any) {
 	if !w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
 		"status": database.StatusError,
@@ -3320,6 +3397,9 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 		}
 	}
 
+	// From here a Cancel that applies is this run's to announce
+	// (CancelJob, endMuxRun).
+	w.beginMuxRun(jobID)
 	w.wg.Go(func() {
 		defer release()
 		defer func() {
@@ -3335,6 +3415,10 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 				writeFailed(fmt.Sprintf("internal panic: %v", r))
 			}
 		}()
+		// Deferred after the recover, so it runs under it: the "Job
+		// Cancelled" a Cancel left to this run, once the row's last word is
+		// in (a re-claimed finish has written Finished by now).
+		defer w.endMuxRun(jobID)
 
 		// Owner decision O-E: the orchestrator's mux root, never
 		// context.Background() — a Stop reaches this FFmpeg and cancels it.
