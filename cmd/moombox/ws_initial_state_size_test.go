@@ -160,9 +160,12 @@ func deflated(t *testing.T, raw []byte) int {
 // rows are generated, not read from a real database, and their text is
 // drawn from a few hundred words, so real descriptions will deflate less
 // well than that — expect a third rather than a sixth. Either way the frame
-// is large and mostly text, and the hub negotiates permessage-deflate
-// (web.WebSocketHub.HandleUpgrade). The wire shape is unchanged: every
-// field, description included, is still in the frame.
+// is large and mostly text. The measurement is all that landed: the ruling
+// allows per-message compression only where it is clearly safe with the
+// existing clients, it was not tried against Safari or Firefox, and so the
+// hub does not negotiate it (TestWebSocketDoesNotNegotiateCompression,
+// internal/web). The wire shape is unchanged: every field, description
+// included, is still in the frame.
 //
 // The assertions are loose bounds on those figures, so that a change which
 // makes the snapshot much heavier per row, or a row shape that no longer
@@ -209,20 +212,3 @@ func TestInitialStateSnapshotSize(t *testing.T) {
 	}
 }
 
-// TestProgressFramesStayUnderTheCompressionThreshold keeps the ~60 Hz
-// job_progress frame out of the compressor: the hub deflates only a message
-// of web.WSCompressionThreshold bytes or more, so a progress tick still costs
-// one small write and no flate pass per dashboard. A frame that grows past
-// the threshold would be compressed sixty times a second per active job per
-// client.
-func TestProgressFramesStayUnderTheCompressionThreshold(t *testing.T) {
-	raw, err := json.Marshal(web.WSMessage{Type: "job_progress", Payload: newJobProgressFrame(realisticProgressJob())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("job_progress frame: %d bytes, compression threshold %d", len(raw), web.WSCompressionThreshold)
-	if len(raw)*2 > web.WSCompressionThreshold {
-		t.Errorf("a job_progress frame is %d bytes, want at most half the %d-byte compression threshold",
-			len(raw), web.WSCompressionThreshold)
-	}
-}

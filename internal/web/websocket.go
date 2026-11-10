@@ -46,15 +46,6 @@ const (
 	wsWriteQueueSize = 16
 )
 
-// WSCompressionThreshold is the smallest server frame the hub deflates when a
-// client negotiated permessage-deflate (HandleUpgrade): a frame shorter than
-// this goes out as it always did. Set explicitly, above the library's 512,
-// so the ~60 Hz job_progress frame (about 300 bytes) and most log lines are
-// never compressed, and only the frames worth it are: the initial_state
-// snapshot, jobs_update and a whole-row job_update. Exported for the test
-// that holds the progress frame under it
-// (TestProgressFramesStayUnderTheCompressionThreshold, cmd/moombox).
-const WSCompressionThreshold = 1024
 
 // WSMessage is a WebSocket message sent to clients.
 // Uses "payload" field to match the TypeScript frontend protocol.
@@ -256,17 +247,15 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		// The check above IS the origin policy; skipping the library's leaves
 		// exactly one (sweep chain-close F6).
 		InsecureSkipVerify: true,
-		// permessage-deflate, for a client that offers it (finding web-9,
-		// owner ruling R-B4): the initial_state snapshot is megabytes of
-		// mostly text on a busy instance (TestInitialStateSnapshotSize,
-		// cmd/moombox), sent on every connect and every resync, and went out
-		// raw while HTTP responses were gzipped. What a frame contains is
-		// unchanged; a client that does not offer the extension, or offers
-		// parameters the library cannot honour, is served uncompressed as
-		// before. No context takeover: each message is deflated on its own
-		// with a pooled writer, so an idle dashboard holds no compressor.
-		CompressionMode:      websocket.CompressionNoContextTakeover,
-		CompressionThreshold: WSCompressionThreshold,
+		// No CompressionMode: permessage-deflate stays off. The initial_state
+		// snapshot is megabytes of mostly text on a busy instance
+		// (TestInitialStateSnapshotSize, cmd/moombox), and deflate would
+		// shrink it well, but owner ruling R-B4 allows compression only once
+		// it is shown safe with every browser the dashboard is used from, and
+		// it has been tried against Chromium and Node only, not Safari or
+		// Firefox. TestWebSocketDoesNotNegotiateCompression holds this; turn
+		// it on (CompressionNoContextTakeover, with a threshold above the
+		// ~300-byte job_progress frame) together with that check.
 	})
 	if err != nil {
 		hub.logger.Error("websocket upgrade failed", "err", err)
