@@ -53,6 +53,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `app.test.mjs` | rendering pins: job cards, Files rows and the details dialog against `fixtures/app-job-items.json` (see [The app harness](#the-app-harness)) |
 | `app-resync.test.mjs` | a mid-session `initial_state` replaces the job list and the log buffer, and keeps the details dialog |
 | `archive-boundary.test.mjs` | the dashboard's archive cutoff, the JS twin of `internal/jobfilter` |
+| `archived-panel.test.mjs` | the Archived panel: a failed fetch keeps the list and selection and offers Retry, late answers are dropped, the newest 200 cards with Show more, filter and Select All over every row, and Arrow/Enter on its rows |
 | `boot-and-login.test.mjs` | `boot-theme.js` and `login.js` evaluated against the real `index.html` and `login.html` |
 | `channel-removal.test.mjs` | removing a channel asks: keep its jobs (the default) or delete the pending ones, and the toast says what it did; its prompt-text tests are pure |
 | `dashboard-text.test.mjs` | small user-facing strings: a singular chat count, the Stats tab with no disk reading, a single-file recording's load error |

@@ -603,7 +603,7 @@ Available at `http://localhost:774` (auto-upgrades to HTTPS for external access)
 
 - **Tasks tab** — Real-time job list with progress bars, add/cancel/retry/delete actions, and job details with embedded YouTube player
 - **Advanced Options** — Format selection (video/audio dropdowns with codec badges) and timestamp range when adding videos
-- **Archived tab** — Browse finished jobs older than `hide_finished_age_days`
+- **Archived tab** — Browse finished jobs older than `hide_finished_age_days`. The newest 200 are drawn, with a Show more button; the filter and Select All cover the whole archive
 - **Player tab** — Replay archived videos with synchronized chat:
   - Niconico-style flying chat overlay (togglable)
   - Sidebar chat panel with auto-scroll and search (togglable); click a timestamp to jump the video to 3 s before that message

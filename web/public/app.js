@@ -35,6 +35,11 @@ const TASK_STATUS_PRIORITY = {
  * re-tried, and the operator can log in again in another tab.
  */
 const SESSION_RECHECK_MS = 30000;
+// How many Archived cards one draw adds. The whole archived list is held in
+// memory (the filter, Select All and the details lookup read all of it); only
+// the cards are bounded, because each one is a dozen Shoelace elements and a
+// 24/7 recorder's archive only grows (owner ruling R-B1).
+const ARCHIVED_PAGE = 200;
 
 export const ConnState = Object.freeze({
   CONNECTING: "connecting",
@@ -90,6 +95,18 @@ export class MoomboxApp {
     this._countdownInterval = null;
     this._archiveSweepInterval = null;
     this.focusedJobIndex = -1;
+    // The Archived panel's own keyboard focus, an index into its drawn rows.
+    this.focusedArchivedIndex = -1;
+    // The Archived fetch. fetchArchivedJobs is the only writer of all five.
+    this._archivedGen = 0;            // the newest fetch; an older answer is dropped
+    this._archivedInFlight = 0;       // fetches not yet answered
+    this._archivedLoaded = false;     // an answer has been applied
+    this._archivedFetchFailed = false; // the newest fetch failed
+    // Ids that left the archive while a fetch was out. The answer was built
+    // before they left, so it is filtered against them.
+    this._archivedGoneInFlight = new Set();
+    // How many Archived cards are drawn at most; Show more raises it.
+    this._archivedRenderLimit = ARCHIVED_PAGE;
     // Active tab-panel name, maintained by the sl-tab-show handler. Used to
     // defer Archived-panel DOM work while that panel isn't visible (tracked
     // as state rather than queried from the DOM so the guard can't race
@@ -313,7 +330,10 @@ export class MoomboxApp {
         this._activePanel = e.detail.name;
         if (e.detail.name === "archived") {
           // Render any changes deferred while the panel was hidden for
-          // instant feedback, then refresh from the server.
+          // instant feedback, then refresh from the server. Each visit
+          // starts from the newest page again, so the cards drawn by Show
+          // more do not pile up across visits.
+          this._archivedRenderLimit = ARCHIVED_PAGE;
           if (this._archivedRenderDirty) this.renderArchivedJobs();
           this.fetchArchivedJobs();
         } else if (e.detail.name === "player") {
@@ -612,6 +632,11 @@ export class MoomboxApp {
       this.updateBatchActionBar();
     });
     document.getElementById("batch-clear")?.addEventListener("click", () => this._clearSelectionUI());
+    document.getElementById("archived-retry")?.addEventListener("click", () => this.fetchArchivedJobs());
+    document.getElementById("archived-show-more")?.addEventListener("click", () => {
+      this._archivedRenderLimit += ARCHIVED_PAGE;
+      this.renderArchivedJobs();
+    });
   }
 
   async loadConfig() {
@@ -1566,11 +1591,7 @@ export class MoomboxApp {
         // A Finished job may have aged into the archived list (client-side
         // sweep or a prior fetch); drop it there too, or a server-side delete
         // leaves a stale, still-clickable row in the Archived panel.
-        const deletedArchivedIdx = this.archivedJobs.findIndex(j => j.id === deletedId);
-        if (deletedArchivedIdx !== -1) {
-          this.archivedJobs.splice(deletedArchivedIdx, 1);
-          this.renderArchivedJobs();
-        }
+        this._removeArchivedJob(deletedId);
         // Close the details dialog if the deleted job is currently selected.
         if (this.selectedJobId === deletedId) {
           const dlg = document.getElementById("details-dialog");
@@ -2432,26 +2453,74 @@ export class MoomboxApp {
     return this.archivedJobs.length !== before;
   }
 
+  /**
+   * Take a row out of the archived list: deleted, or back in Tasks after a
+   * Resume or Reinitialize. The id is remembered while a fetch is out, so an
+   * answer built before the row left cannot bring it back.
+   * @returns {boolean} whether the list held it
+   */
+  _removeArchivedJob(id) {
+    if (this._archivedInFlight > 0) this._archivedGoneInFlight.add(id);
+    const idx = this.archivedJobs.findIndex(j => j.id === id);
+    if (idx === -1) return false;
+    this.archivedJobs.splice(idx, 1);
+    this.renderArchivedJobs();
+    return true;
+  }
+
+  /**
+   * Replace the archived list with the server's. A failure keeps the list
+   * and the selection already held and shows a Retry notice: an empty list
+   * here would read as "No archived jobs", which a failed request does not
+   * mean. Only the newest fetch's answer is applied (house rule 6).
+   */
   async fetchArchivedJobs() {
+    const gen = ++this._archivedGen;
+    if (this._archivedInFlight === 0) this._archivedGoneInFlight.clear();
+    this._archivedInFlight++;
+    // Nothing to show yet: draw the loading state.
+    if (!this._archivedLoaded && this.archivedJobs.length === 0) this.renderArchivedJobs();
+    let rows = null;
     try {
       const response = await fetch("/api/jobs/archived");
       if (response.ok) {
-        this.archivedJobs = await response.json();
-      } else {
-        this.archivedJobs = [];
+        const body = await response.json();
+        if (Array.isArray(body)) rows = body;
       }
     } catch (e) {
       console.error("Failed to fetch archived jobs:", e);
-      this.archivedJobs = [];
+    } finally {
+      this._archivedInFlight--;
+    }
+    if (gen !== this._archivedGen) return;
+    if (rows) {
+      this.archivedJobs = rows.filter(j => !this._archivedGoneInFlight.has(j.id));
+      this._archivedLoaded = true;
+      this._archivedFetchFailed = false;
+    } else {
+      this._archivedFetchFailed = true;
     }
     this.renderArchivedJobs();
+  }
+
+  // Archived rows newest first, by updatedAt. Keys are read once per row.
+  _sortArchived(jobs) {
+    return jobs
+      .map((job) => ({ job, time: new Date(job.updatedAt).getTime() }))
+      .sort((a, b) => b.time - a.time)
+      .map((r) => r.job);
+  }
+
+  // The Archived rows that are drawn, in drawn order: what Arrow and Enter walk.
+  _archivedDrawnJobs() {
+    return this._sortArchived(this.filterBar.getFilteredArchivedJobs()).slice(0, this._archivedRenderLimit);
   }
 
   renderArchivedJobs() {
     // Defer DOM work while the Archived panel isn't visible. On a 24/7
     // recorder the archive grows continuously (60s sweep + job updates), and
-    // this method rebuilds EVERY archived card via innerHTML — destroying and
-    // recreating Shoelace shadow DOM for a hidden panel is pure waste. The
+    // this method rebuilds every drawn archived card via innerHTML — destroying
+    // and recreating Shoelace shadow DOM for a hidden panel is pure waste. The
     // sl-tab-show handler re-renders on activation when this flag is set.
     if (this._activePanel !== "archived") {
       this._archivedRenderDirty = true;
@@ -2463,11 +2532,34 @@ export class MoomboxApp {
     const emptyState = document.getElementById("archived-empty-state");
     const table = document.getElementById("archived-table");
     const filterCount = document.getElementById("archived-filter-count");
+    const more = document.getElementById("archived-more");
 
-    if (this.archivedJobs.length === 0) {
+    // The fetch's state, beside whatever list is held. Loading shows only
+    // before the first answer; a failure never hides the held list, and with
+    // nothing held it takes the empty state's place rather than sitting
+    // beside "No archived jobs".
+    const nothingHeld = this.archivedJobs.length === 0;
+    const isLoading = nothingHeld && !this._archivedLoaded && this._archivedInFlight > 0;
+    const failed = this._archivedFetchFailed && !isLoading;
+    const loadingEl = document.getElementById("archived-loading");
+    if (loadingEl) loadingEl.style.display = isLoading ? "" : "none";
+    const errorEl = document.getElementById("archived-fetch-error");
+    if (errorEl) {
+      errorEl.style.display = failed ? "" : "none";
+      const text = document.getElementById("archived-fetch-error-text");
+      if (text) {
+        text.textContent = nothingHeld
+          ? "Could not load the archived jobs."
+          : "Could not refresh the archived jobs. The list below is from the last successful load.";
+      }
+    }
+
+    if (nothingHeld) {
       container.innerHTML = "";
+      this.focusedArchivedIndex = -1;
       table.style.display = "none";
-      emptyState.style.display = "flex";
+      if (more) more.style.display = "none";
+      emptyState.style.display = (isLoading || failed) ? "none" : "flex";
       const icon = emptyState.querySelector("sl-icon");
       if (icon) icon.name = "archive";
       const msg = emptyState.querySelector("p");
@@ -2489,7 +2581,9 @@ export class MoomboxApp {
 
     const filtered = this.filterBar.getFilteredArchivedJobs();
     const isFiltered = this.filterBar.tokens("archived").length > 0;
-    // And the ones the filter hides — see renderJobs.
+    // And the ones the filter hides — see renderJobs. A row that matches but
+    // is not drawn yet (below Show more) keeps its tick: Select All means
+    // every matching row, and the batch bar counts the ones not shown.
     const visibleArchivedIds = new Set(filtered.map(j => j.id));
     this._selectedArchivedJobs.forEach(id => {
       if (!visibleArchivedIds.has(id)) this._selectedArchivedJobs.delete(id);
@@ -2507,7 +2601,9 @@ export class MoomboxApp {
 
     if (filtered.length === 0 && isFiltered) {
       container.innerHTML = "";
+      this.focusedArchivedIndex = -1;
       table.style.display = "none";
+      if (more) more.style.display = "none";
       emptyState.style.display = "flex";
       const icon = emptyState.querySelector("sl-icon");
       if (icon) icon.name = "search";
@@ -2523,24 +2619,35 @@ export class MoomboxApp {
     table.style.display = "";
     emptyState.style.display = "none";
 
-    // Sort archived jobs by updatedAt descending (most recent first)
-    const sorted = [...filtered].sort(
-      (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
-    );
+    // Newest first, and only the first _archivedRenderLimit cards.
+    const sorted = this._sortArchived(filtered);
+    const drawn = sorted.slice(0, this._archivedRenderLimit);
 
-    container.innerHTML = sorted
+    // Preserve the focused row across the rebuild, as renderJobs does.
+    const focusedJobId = container.querySelector(".video-item[data-focused]")?.dataset.jobId;
+
+    container.innerHTML = drawn
       .map((job) => this.renderJobItem(job))
       .join("");
 
-    // Re-apply archived selection state
-    this._selectedArchivedJobs.forEach(id => {
-      const card = container.querySelector(`[data-job-id="${CSS.escape(id)}"]`);
-      if (card) {
-        card.classList.add("selected");
-        const cb = card.querySelector(".job-checkbox");
-        if (cb) cb.checked = true;
-      }
+    this.focusedArchivedIndex = focusedJobId ? drawn.findIndex(j => j.id === focusedJobId) : -1;
+
+    // Re-apply the focus and selection marks to the drawn cards.
+    const cards = container.querySelectorAll(".video-item");
+    if (this.focusedArchivedIndex >= 0) cards[this.focusedArchivedIndex]?.setAttribute("data-focused", "");
+    cards.forEach((card) => {
+      if (!this._selectedArchivedJobs.has(card.dataset.jobId)) return;
+      card.classList.add("selected");
+      const cb = card.querySelector(".job-checkbox");
+      if (cb) cb.checked = true;
     });
+
+    if (more) {
+      const rest = sorted.length - drawn.length;
+      more.style.display = rest > 0 ? "" : "none";
+      const count = document.getElementById("archived-more-count");
+      if (count) count.textContent = `Showing ${drawn.length} of ${sorted.length}`;
+    }
     this.updateBatchActionBar();
   }
 
@@ -3431,11 +3538,7 @@ export class MoomboxApp {
           if (dlg?.open) dlg.hide();
           this.selectedJobId = null;
         }
-        const archivedIdx = this.archivedJobs.findIndex(j => j.id === id);
-        if (archivedIdx !== -1) {
-          this.archivedJobs.splice(archivedIdx, 1);
-          this.renderArchivedJobs();
-        }
+        this._removeArchivedJob(id);
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.showToast(data.error || "Failed to resume job", "danger");
@@ -3515,11 +3618,7 @@ export class MoomboxApp {
           if (dlg?.open) dlg.hide();
           this.selectedJobId = null;
         }
-        const archivedIdx = this.archivedJobs.findIndex(j => j.id === id);
-        if (archivedIdx !== -1) {
-          this.archivedJobs.splice(archivedIdx, 1);
-          this.renderArchivedJobs();
-        }
+        this._removeArchivedJob(id);
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.showToast(data.error || "Failed to reinitialize job", "danger");
@@ -3616,11 +3715,7 @@ export class MoomboxApp {
           if (!this._removeJobCard(id)) this.renderJobs();
         }
         // Remove from archived jobs if present (no WebSocket update for archived jobs)
-        const archivedIdx = this.archivedJobs.findIndex(j => j.id === id);
-        if (archivedIdx !== -1) {
-          this.archivedJobs.splice(archivedIdx, 1);
-          this.renderArchivedJobs();
-        }
+        this._removeArchivedJob(id);
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.showToast(data.error || "Failed to delete job", "danger");
@@ -3782,7 +3877,8 @@ export class MoomboxApp {
       const activePanel = this._activePanel;
       const isPlayerActive = activePanel === "player";
 
-      const isTasksActive = activePanel === "tasks";
+      // The two panels with a job list. Each keeps its own focused row.
+      const isJobListActive = activePanel === "tasks" || activePanel === "archived";
 
       switch (e.key) {
         case "Escape":
@@ -3810,7 +3906,7 @@ export class MoomboxApp {
           break;
         case "ArrowUp":
         case "ArrowDown":
-          if (isTasksActive) {
+          if (isJobListActive) {
             this.navigateJobList(e.key === "ArrowUp" ? -1 : 1);
             e.preventDefault();
           }
@@ -3820,10 +3916,9 @@ export class MoomboxApp {
           // button does not preventDefault it, so Enter on Add Video, a
           // card's Delete icon or the theme toggle ALSO opened the
           // keyboard-focused job's details (over the control's own dialog).
-          if (isTasksActive && this.focusedJobIndex >= 0 && !this._enterFromControl(e)) {
-            const filtered = this.filterBar.getFilteredJobs();
-            const sorted = this._sortJobs(filtered);
-            const job = sorted[this.focusedJobIndex];
+          if (isJobListActive && !this._enterFromControl(e)) {
+            const nav = this._jobListNav();
+            const job = nav.index >= 0 ? nav.rows[nav.index] : null;
             if (job) this.details.showJobDetails(job);
           }
           break;
@@ -3844,21 +3939,43 @@ export class MoomboxApp {
     });
   }
 
+  /**
+   * The active panel's job list as the keyboard walks it: the rows in drawn
+   * order, the container that holds their cards, and the focused index.
+   * Tasks keeps its index up to date on every card it inserts or removes.
+   * Archived re-reads its index from the highlighted card, because a few
+   * writers change that list without drawing it.
+   */
+  _jobListNav() {
+    if (this._activePanel === "archived") {
+      const container = document.getElementById("archived-container");
+      const rows = this._archivedDrawnJobs();
+      const focusedId = container?.querySelector(".video-item[data-focused]")?.dataset.jobId;
+      this.focusedArchivedIndex = focusedId ? rows.findIndex(j => j.id === focusedId) : -1;
+      return { rows, container, key: "focusedArchivedIndex", index: this.focusedArchivedIndex };
+    }
+    return {
+      rows: this._sortJobs(this.filterBar.getFilteredJobs()),
+      container: document.getElementById("jobs-container"),
+      key: "focusedJobIndex",
+      index: this.focusedJobIndex,
+    };
+  }
+
   navigateJobList(direction) {
-    const filtered = this.filterBar.getFilteredJobs();
-    const sorted = this._sortJobs(filtered);
-    if (sorted.length === 0) return;
+    const { rows, container, key } = this._jobListNav();
+    if (rows.length === 0 || !container) return;
 
-    // Remove previous focus
-    document.querySelectorAll(".video-item[data-focused]").forEach((el) => el.removeAttribute("data-focused"));
+    // Remove previous focus (this panel's only: the other keeps its own)
+    container.querySelectorAll(".video-item[data-focused]").forEach((el) => el.removeAttribute("data-focused"));
 
-    this.focusedJobIndex += direction;
-    if (this.focusedJobIndex < 0) this.focusedJobIndex = sorted.length - 1;
-    if (this.focusedJobIndex >= sorted.length) this.focusedJobIndex = 0;
+    this[key] += direction;
+    if (this[key] < 0) this[key] = rows.length - 1;
+    if (this[key] >= rows.length) this[key] = 0;
 
-    const job = sorted[this.focusedJobIndex];
+    const job = rows[this[key]];
     if (job) {
-      const card = document.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"]`);
+      const card = container.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"]`);
       if (card) {
         card.setAttribute("data-focused", "");
         card.scrollIntoView({ block: "nearest" });
@@ -4432,18 +4549,31 @@ export class MoomboxApp {
     bar.style.display = "";
     bar.classList.add("visible");
     document.body.classList.add("batch-bar-active");
-    document.getElementById("batch-count").textContent = `${count} selected`;
+    // Archived draws only its newest cards, and Select All ticks every
+    // matching row: say how many of the selected ones are not on screen, so
+    // a batch Delete is never larger than the bar admits.
+    let notShown = 0;
+    if (this._activePanel === "archived") {
+      const drawnSelected = document.getElementById("archived-container")
+        ?.querySelectorAll(".video-item.selected").length ?? count;
+      notShown = Math.max(0, count - drawnSelected);
+    }
+    document.getElementById("batch-count").textContent = notShown > 0
+      ? `${count} selected (${notShown} not shown yet)`
+      : `${count} selected`;
 
-    // Update Select All label with count when filters are active
+    // Update Select All label with count when filters are active, and on
+    // Archived whenever it would select rows that are not drawn.
     const selectAllBtn = document.getElementById("batch-select-all");
     if (selectAllBtn) {
       const panel = this._activePanel;
       const isFiltered = panel === "archived"
         ? this.filterBar.tokens("archived").length > 0
         : this.filterBar.tokens("jobs").length > 0;
-      if (isFiltered) {
+      const archivedTotal = panel === "archived" ? this.filterBar.getFilteredArchivedJobs().length : 0;
+      if (isFiltered || archivedTotal > this._archivedRenderLimit) {
         const totalVisible = panel === "archived"
-          ? this.filterBar.getFilteredArchivedJobs().length
+          ? archivedTotal
           : this.filterBar.getFilteredJobs().length;
         selectAllBtn.textContent = `Select All (${totalVisible})`;
       } else {

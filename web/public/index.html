@@ -273,6 +273,16 @@
                     <span id="archived-filter-count" style="display:none"></span>
                 </div>
 
+                <div id="archived-fetch-error" class="archived-notice" role="alert" style="display: none">
+                    <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
+                    <span id="archived-fetch-error-text"></span>
+                    <sl-button id="archived-retry" size="small">Retry</sl-button>
+                </div>
+                <div id="archived-loading" class="archived-notice" role="status" style="display: none">
+                    <sl-spinner aria-hidden="true"></sl-spinner>
+                    <span>Loading archived jobs…</span>
+                </div>
+
                 <div id="archived-table" class="archived-table" role="table" aria-label="Archived jobs">
                     <div id="archived-table-header" role="row">
                         <div role="columnheader">Thumbnail</div>
@@ -284,6 +294,11 @@
                     <div id="archived-container" role="rowgroup">
                         <!-- Archived jobs will be rendered here -->
                     </div>
+                </div>
+
+                <div id="archived-more" class="archived-notice" style="display: none">
+                    <span id="archived-more-count"></span>
+                    <sl-button id="archived-show-more" size="small">Show more</sl-button>
                 </div>
 
                 <div id="archived-empty-state" style="display: none">
@@ -2150,7 +2165,7 @@
                 <dt><kbd>Esc</kbd></dt><dd>Close dialog</dd>
                 <dt><kbd>1</kbd>-<kbd>8</kbd></dt><dd>Switch tabs</dd>
                 <dt><kbd>F</kbd></dt><dd>Focus search</dd>
-                <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Navigate job list</dd>
+                <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Navigate job list (Tasks and Archived)</dd>
                 <dt><kbd>Enter</kbd></dt><dd>Open selected job details</dd>
             </dl>
             <sl-divider></sl-divider>
