@@ -142,17 +142,32 @@ func (m *FilesDialogModel) bareConfirm() string {
 	return ""
 }
 
+// bareError is the error on screen: a failed delete's, or a failed load's.
+// "" when there is none.
+func (m *FilesDialogModel) bareError() string {
+	switch {
+	case m.loading:
+	case m.actionErr != "":
+		return m.actionErr
+	default:
+		return m.loadErrorText()
+	}
+	return ""
+}
+
 // bareMessage is the message under the list as rows of at most w cells, at
 // most maxRows of them: one row for everything but an error, which wraps.
+// An armed confirm is the message only while there is no action error to
+// show; with one, the error is the message and the confirm takes the keys
+// row (bareView), so neither hides the other.
 func (m *FilesDialogModel) bareMessage(w, maxRows int, listed bool) []string {
 	loadErr := ""
 	if listed {
-		// With nothing listed the load error is the body itself.
 		loadErr = m.loadErrorText()
 	}
 	switch {
 	case m.loading:
-	case m.bareConfirm() != "":
+	case m.bareConfirm() != "" && m.actionErr == "":
 		return []string{YellowStyle.Render(truncateString(m.bareConfirm(), w))}
 	case m.actionErr != "":
 		return bareStyled(bareWrap(m.actionErr, w, maxRows), ErrorStyle)
@@ -188,6 +203,23 @@ func (m *FilesDialogModel) bareView() string {
 	sheet := bareSheet{left: TitleStyle.Render(title), keys: DimStyle.Render(keys)}
 
 	listed := !m.loading && total > 0
+	if confirm := m.bareConfirm(); confirm != "" && m.actionErr != "" && !m.loading {
+		sheet.keys = YellowStyle.Render(truncateString(confirm, w))
+	}
+	// An error too long for the rows under the cursor's row takes the keys
+	// row and then the title before any of it is cut (owner ruling R-C11).
+	if msg := m.bareError(); msg != "" && len(bareWrap(msg, w, len(msg)+1)) > body-1 {
+		if !listed {
+			sheet.msg, sheet.msgStyle = msg, ErrorStyle
+			return sheet.render(w, m.height)
+		}
+		if m.list.Height() != 1 {
+			m.list.SetHeight(1)
+		}
+		sheet.body = []string{m.list.View()}
+		sheet.keep, sheet.msg, sheet.msgStyle = 1, msg, ErrorStyle
+		return sheet.render(w, m.height)
+	}
 	msg := m.bareMessage(w, max(body-1, 1), listed)
 	top := max(body-len(msg), 1)
 	var rows []string

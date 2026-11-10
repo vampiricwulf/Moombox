@@ -137,3 +137,66 @@ func newRelayRig(t *testing.T, w, h int) *compactRig {
 	r.selectJob(t, "done")
 	return r
 }
+
+// An error too long for the rows under a list's cursor row takes the keys
+// row and then the title before any of it is cut (owner ruling R-C11), and
+// stays in one block under the cursor's row.
+func TestBareListErrorsTakeTheKeysAndTheTitle(t *testing.T) {
+	// 113 cells: four rows at 30 columns, one more than the body has under
+	// the cursor's row at 30x6, so it needs the keys row and nothing else.
+	const failure = "Delete failed: remove title.mkv: the file is in use by another process, close the player and try once more"
+	whole := func(what string, rows []string, from int) {
+		t.Helper()
+		if got := strings.Join(strings.Fields(strings.Join(rows[from:], " ")), " "); got != failure {
+			t.Errorf("%s: the error on screen is %q, want it whole:\n%s", what, got, strings.Join(rows, "\n"))
+		}
+	}
+
+	files := bareFiles(30, 6)
+	files.HandleKey(namedKey("down"))
+	files.SetActionError(failure)
+	wantExact(t, "orphans, an error at 30x6", files.View(), 30, 6)
+	rows := plainRows(files.View())
+	if rows[0] != "Orphans: 3 files, 2 history" || !strings.HasPrefix(rows[1], ">") {
+		t.Errorf("orphans: the title or the cursor's row moved:\n%s", strings.Join(rows, "\n"))
+	}
+	whole("orphans", rows, 2)
+
+	trim := bareTrim(30, 6, "delete error")
+	trim.SetError(failure)
+	wantExact(t, "trim delete, an error at 30x6", trim.View(), 30, 6)
+	rows = plainRows(trim.View())
+	if !strings.HasPrefix(rows[0], "Delete trim") || !strings.HasPrefix(rows[1], "> 1:05:00-2:06:00") {
+		t.Errorf("trim: the title or the selected trim moved:\n%s", strings.Join(rows, "\n"))
+	}
+	whole("trim", rows, 2)
+
+	// Nothing listed and a load error longer than the body: it takes the
+	// keys row and the title too.
+	empty := NewFilesDialogModel()
+	empty.SetSize(30, 6)
+	empty.Open()
+	empty.SetFiles(nil)
+	empty.SetHistory(nil)
+	empty.SetFilesError(strings.Repeat("the scan failed and failed ", 3) + "end")
+	wantExact(t, "orphans, a load error at 30x6", empty.View(), 30, 6)
+	if got := ansi.Strip(empty.View()); !strings.Contains(got, "end") {
+		t.Errorf("the load error is cut while rows are left:\n%s", got)
+	}
+}
+
+// An action error that arrives while a delete is armed is shown, and the
+// armed confirm moves to the keys row: neither hides the other.
+func TestBareOrphansErrorDoesNotHideBehindAnArmedConfirm(t *testing.T) {
+	m := bareFiles(40, 10)
+	m.HandleKey(keyMsg("d"))
+	if m.bareConfirm() == "" {
+		t.Fatal("premise lost: D did not arm")
+	}
+	m.SetActionError("Delete failed: access denied")
+	wantExact(t, "armed with an error", m.View(), 40, 10)
+	rows := plainRows(m.View())
+	if !strings.Contains(strings.Join(rows, "\n"), "Delete failed: access denied") || !strings.HasPrefix(rows[9], "D again: delete") {
+		t.Errorf("armed with an error:\n%s", strings.Join(rows, "\n"))
+	}
+}

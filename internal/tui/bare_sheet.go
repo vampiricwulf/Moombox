@@ -22,8 +22,9 @@ type bareSheet struct {
 	body []string
 	// msg is an error, a confirm or a notice, in plain text. It is wrapped
 	// at spaces and takes rows from the bottom up: the keys row, then body
-	// rows, then the header. A message too long even for those ends in an
-	// ellipsis.
+	// rows, then the header (the kept rows then move up a row, so the message
+	// stays in one piece under them). A message too long even for those ends
+	// in an ellipsis.
 	msg string
 	// msgStyle colours each row of msg.
 	msgStyle lipgloss.Style
@@ -67,6 +68,13 @@ func (s bareSheet) render(w, h int) string {
 			lines = append(lines[:len(slots)-1], truncateWidth(rest, w, "…"))
 		}
 		slots = slots[:len(lines)]
+		if keep := min(max(s.keep, 0), bodyEnd-bodyTop); keep > 0 && slots[len(slots)-1] == 0 {
+			// The message reaches the header: the kept rows move up over
+			// it, so the message is one block under them and not a first
+			// row above them with the rest below.
+			copy(rows[:keep], rows[bodyTop:bodyTop+keep])
+			slots[len(slots)-1] = keep
+		}
 		sort.Ints(slots)
 		for i, at := range slots {
 			rows[at] = s.msgStyle.Render(truncateWidth(lines[i], w, "…"))

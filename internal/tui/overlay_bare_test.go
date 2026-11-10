@@ -432,10 +432,11 @@ func TestBareSheet(t *testing.T) {
 	if words := strings.Fields(strings.Join(got[2:], " ")); strings.Join(words, " ") != long {
 		t.Errorf("the message lost words: %q", got)
 	}
-	// Longer still: the header goes too, the kept row stays where it is,
-	// and what does not fit ends in an ellipsis.
+	// Longer still: the header goes too, the kept row moves up to its place
+	// so the message stays in one block under it, and what does not fit
+	// ends in an ellipsis.
 	got = plain(bareSheet{left: "T", body: body(9), keys: "keys", msg: long + " " + long + " " + long, keep: 1}.render(30, 6))
-	if got[1] != "row 0" || !strings.HasPrefix(got[0], "one two") || !strings.HasSuffix(got[5], "…") {
+	if got[0] != "row 0" || !strings.HasPrefix(got[1], "one two") || !strings.HasSuffix(got[5], "…") {
 		t.Errorf("a message longer than the sheet: %q", got)
 	}
 	// The style colours the message rows only.

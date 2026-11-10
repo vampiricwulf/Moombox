@@ -856,7 +856,7 @@ func TestBareTrimFrames(t *testing.T) {
 		"> Start:",
 		"  End:",
 		"H:MM:SS, MM:SS or seconds",
-		"Tab Enter M:Delete Esc",
+		"Tab Enter M:Del mode Esc",
 	})
 	// The 58-cell format error is two rows: the job's title gives way, the
 	// length (the range errors refer to it) and both fields stay.
@@ -866,7 +866,7 @@ func TestBareTrimFrames(t *testing.T) {
 		"  End:",
 		"Invalid start time format (use",
 		"HH:MM:SS, MM:SS, or seconds)",
-		"Tab Enter M:Delete Esc",
+		"Tab Enter M:Del mode Esc",
 	})
 	wantFrame(t, "confirm", bareTrim(30, 6, "confirm").View(), 30, 6, []string{
 		"Create trim?",
@@ -874,7 +874,7 @@ func TestBareTrimFrames(t *testing.T) {
 		"About 10.3MB",
 		"Re-encodes into a new file.",
 		"",
-		"Enter:Create M:Delete Esc:Back",
+		"Enter:Create M:Del mode Esc",
 	})
 	// Under the title row, which holds the spinner's frame.
 	wantFrame(t, "progress", belowTitle(bareTrim(30, 6, "progress").View()), 30, 5, []string{
@@ -901,7 +901,8 @@ func TestBareTrimFrames(t *testing.T) {
 }
 
 // The trim's two confirms are whole at every compact size (owner ruling
-// R-C11), a failed create's error never covers the range or the warning,
+// R-C11), a failed create's error never covers the range and is whole in
+// one block (the warning gives way to it where both do not fit),
 // and the selected trim is always in the delete list's window.
 //
 // Mutant: a window that pages instead of following the cursor past a
@@ -909,8 +910,16 @@ func TestBareTrimFrames(t *testing.T) {
 func TestBareTrimConfirmsAreWhole(t *testing.T) {
 	compactSizes(func(w, h int) {
 		for _, state := range []string{"confirm", "failed"} {
-			got := ansi.Strip(bareTrim(w, h, state).View())
-			for _, want := range []string{"1:30 - 2:45  (1m 15s)", "Re-encodes into a new file."} {
+			m := bareTrim(w, h, state)
+			got := ansi.Strip(m.View())
+			wants := []string{"1:30 - 2:45  (1m 15s)", "Re-encodes into a new file."}
+			if state == "failed" {
+				wants = wants[:1]
+				if flat := strings.Join(strings.Fields(got), " "); !strings.Contains(flat, m.errorMsg) {
+					t.Errorf("%dx%d: the failure is not whole in one block:\n%s", w, h, got)
+				}
+			}
+			for _, want := range wants {
 				if !strings.Contains(got, want) {
 					t.Errorf("%dx%d, %s: %q is not on screen:\n%s", w, h, state, want, got)
 				}

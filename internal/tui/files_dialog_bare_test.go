@@ -309,11 +309,12 @@ func TestBareOrphansErrorWrapsUpwardOverTheList(t *testing.T) {
 		t.Errorf("the cursor's row is not on screen above the error:\n%s", strings.Join(rows, "\n"))
 	}
 
-	// At the floor a long error leaves the list one row: the cursor's.
+	// At the floor a long error leaves the list one row, the cursor's, and
+	// takes the keys row and the title before it is cut (R-C11).
 	m.SetSize(30, 6)
 	m.SetActionError(longError)
 	rows = plainRows(m.View())
-	if !strings.HasPrefix(rows[1], ">out ") || !strings.HasPrefix(rows[2], "the database is locked") || !strings.HasSuffix(rows[4], "…") || rows[5] != "D del  A all  R refresh  Esc" {
+	if !strings.HasPrefix(rows[0], ">out ") || !strings.HasPrefix(rows[1], "the database is locked") || !strings.HasSuffix(rows[5], "…") {
 		t.Errorf("a long error at 30x6:\n%s", strings.Join(rows, "\n"))
 	}
 

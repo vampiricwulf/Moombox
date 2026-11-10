@@ -85,7 +85,7 @@ func (m *TrimDialogModel) bareView() string {
 		if m.jobTitle != "" {
 			sheet.left = TitleStyle.Render("Trim: ") + truncateString(m.jobTitle, max(w-6, 1))
 		}
-		keys("Tab Enter:Next M:Delete mode Esc:Cancel", "Tab Enter M:Delete Esc")
+		keys("Tab Enter:Next M:Delete mode Esc:Cancel", "Tab Enter M:Del mode Esc")
 		if m.lengthSeconds > 0 {
 			sheet.body = append(sheet.body, DimStyle.Render("Length "+formatTimeSeconds(m.lengthSeconds)))
 		}
@@ -98,16 +98,23 @@ func (m *TrimDialogModel) bareView() string {
 
 	case trimStepConfirm:
 		sheet.left = TitleStyle.Render("Create trim?")
-		keys("Enter: Create  M: Delete mode  Esc: Back", "Enter:Create M:Delete Esc:Back")
+		keys("Enter: Create  M: Delete mode  Esc: Back", "Enter:Create M:Del mode Esc")
 		length := m.parsedEnd - m.parsedStart
 		sheet.body = append(sheet.body, lipgloss.NewStyle().Foreground(ColorGreen).Render(truncateString(fmt.Sprintf("%s - %s  (%s)",
 			formatTimeSeconds(m.parsedStart), formatTimeSeconds(m.parsedEnd),
 			formatDuration(time.Duration(length*float64(time.Second)))), w)))
+		var facts []string
 		if m.fileSize > 0 && m.lengthSeconds > 0 {
 			est := int64(float64(m.fileSize) / m.lengthSeconds * length)
-			sheet.body = append(sheet.body, "About "+formatFileSize(est))
+			facts = append(facts, "About "+formatFileSize(est))
 		}
-		sheet.body = append(sheet.body, YellowStyle.Render("Re-encodes into a new file."))
+		facts = append(facts, YellowStyle.Render("Re-encodes into a new file."))
+		// An error too long to sit under the facts (errorUnder lets the title
+		// give way for one row) takes their rows: only the range is kept, so
+		// the error is one block with room to wrap.
+		if m.errorMsg == "" || len(bareWrap(m.errorMsg, w, len(m.errorMsg)+1)) <= h-2-len(facts) {
+			sheet.body = append(sheet.body, facts...)
+		}
 		sheet.errorUnder(m.errorMsg, ErrorStyle, w, h)
 
 	case trimStepProgress:
@@ -142,8 +149,15 @@ func (m *TrimDialogModel) bareDeleteView() string {
 	sheet.keys = DimStyle.Render("↑↓ Enter:Delete M/Esc:New")
 
 	// The one message under the list. An error wraps, and leaves the list
-	// at least the cursor's row.
+	// at least the cursor's row; one too long for the rows under that row
+	// takes the keys row and then the header before any of it is cut.
 	body := max(h-2, 1)
+	if m.errorMsg != "" && len(bareWrap(m.errorMsg, w, len(m.errorMsg)+1)) > body-1 {
+		tr := m.trims[sel]
+		sheet.body = []string{magenta.Render("> " + bareTrimRow(tr, max(w-2, 1)))}
+		sheet.keep, sheet.msg, sheet.msgStyle = 1, m.errorMsg, ErrorStyle
+		return sheet.render(w, h)
+	}
 	var msg []string
 	switch {
 	case m.errorMsg != "":
