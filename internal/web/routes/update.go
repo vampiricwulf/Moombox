@@ -374,9 +374,13 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 		// it covered only Web-vs-Web, so a Web apply during a TUI one fell
 		// through to a 500 "Update failed".
 		if err := applyUpdate(deps.Updater, context.WithoutCancel(r.Context()), release); err != nil {
-			if errors.Is(err, updater.ErrApplyInProgress) || errors.Is(err, updater.ErrRestartPending) {
-				jsonError(w, updater.ErrApplyInProgress.Error(), http.StatusConflict)
-				return
+			// Each refusal in its own words: one placed and waiting for a
+			// restart is not "in progress".
+			for _, refusal := range []error{updater.ErrApplyInProgress, updater.ErrRestartPending} {
+				if errors.Is(err, refusal) {
+					jsonError(w, refusal.Error(), http.StatusConflict)
+					return
+				}
 			}
 			// The toast reads "Update failed: <this>"; it used to read
 			// "Update failed: update failed".

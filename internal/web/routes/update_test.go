@@ -140,11 +140,15 @@ func TestUpdateVerifyNoUpdater(t *testing.T) {
 // TestUpdateApplyRefusedByTheUpdaterAnswers409: the Updater is the one
 // single-flight for an apply (the Web route and the TUI share it), so an
 // apply it refuses — one already running (a TUI apply during this Web one),
-// or one already placed — answers 409 "update already in progress", not the
-// 500 "Update failed: …" a plain error got (K41). The refusal is not logged
-// as a failed update.
+// or one already placed — answers 409, not the 500 "Update failed: …" a
+// plain error got (K41), and in the refusal's own words: "update already in
+// progress" for a running apply, "an update is already applied — restart
+// pending" for a placed one (the text the 500 carried before K41). The
+// refusal is not logged as a failed update.
 //
-// Mutant: the route without its errors.Is mapping — 500.
+// Mutants: the route without its errors.Is mapping — 500; the route sending
+// one sentinel's text for both refusals — the restart-pending row reads "in
+// progress".
 func TestUpdateApplyRefusedByTheUpdaterAnswers409(t *testing.T) {
 	origApply := applyUpdate
 	t.Cleanup(func() { applyUpdate = origApply })
@@ -166,8 +170,8 @@ func TestUpdateApplyRefusedByTheUpdaterAnswers409(t *testing.T) {
 			if rec.Code != http.StatusConflict {
 				t.Fatalf("apply the Updater refused: want 409, got %d (%s)", rec.Code, rec.Body.String())
 			}
-			if !strings.Contains(rec.Body.String(), "update already in progress") {
-				t.Errorf("body = %s, want \"update already in progress\"", rec.Body.String())
+			if !strings.Contains(rec.Body.String(), refusal.Error()) {
+				t.Errorf("body = %s, want %q", rec.Body.String(), refusal.Error())
 			}
 		})
 	}
