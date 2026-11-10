@@ -142,7 +142,7 @@ func TestChannelOrderIsWrittenOnlyAfterAMove(t *testing.T) {
 	}
 
 	// Moved down and back up: the editor's order is the live order again.
-	m, store = orderSettings(t)
+	m, _ = orderSettings(t)
 	saves := 0
 	save := m.OnSave
 	m.OnSave = func(c *config.MoomboxConfig) error { saves++; return save(c) }
