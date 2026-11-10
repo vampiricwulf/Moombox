@@ -1439,11 +1439,16 @@ func (cd *ChatDownloader) clearResumeState() {
 // Start connects to Twitch IRC and begins recording chat messages.
 // C1: Includes reconnect logic with exponential backoff on error limit.
 //
-// Start is safe to call once per ChatDownloader instance. Calling Start
-// concurrently (or after a previous Start returns) returns an error rather
-// than racing on the dedup/resume state — the struct retains its dedup set
-// across calls, and re-initialising it while a previous session is still
-// draining would drop messages.
+// A second Start while one is running — neither returned nor asked to stop
+// (Stop and MarkStreamEnded clear running) — returns an error rather than
+// racing on the dedup/resume state. A Start AFTER a previous one returned
+// runs again on the same instance and keeps what the instance holds: the
+// dedup set, the counts and the stream-end mark (MarkStreamEnded is not
+// undone), with no resume-file reload (alreadyInitialized below). Production
+// starts each instance once — the orchestrator builds a fresh downloader per
+// attempt — and the damage tests re-Start one to drive an exit. (This doc
+// used to promise an error on a re-Start after return; the code never gave
+// one, and the tests rely on it not doing so — K52.)
 func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	cd.mu.Lock()
 	if cd.running {

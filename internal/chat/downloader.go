@@ -138,12 +138,17 @@ type ChatDownloaderOptions struct {
 	SessionHeaders func() map[string]string
 }
 
-// ChatDownloader downloads YouTube live chat messages.
-type ChatDownloader struct {
-	opts                 ChatDownloaderOptions
-	api                  *ChatAPI
-	mu                   sync.Mutex
-	running              bool
+// chatRun is one Start's own state: everything a run sets for itself and a
+// later run on the same instance must not inherit. Start replaces it whole
+// (one assignment under mu), so a field added here is re-armed for every
+// run without a hand-written reset — the early-chat handoff re-Starts the
+// same instance, which used to depend on Start resetting each of these by
+// name. Embedded, so the fields read as cd.cancelFlag and friends.
+//
+// What is NOT here, on purpose, outlives a run: the continuation (a re-Start
+// keeps the token the last run used), the message count, the dedup window,
+// flushedToDisk and the paths — resume and the handoff depend on them.
+type chatRun struct {
 	cancelFlag           bool
 	streamEnded          bool
 	liveContinuationOpen bool
@@ -153,37 +158,7 @@ type ChatDownloader struct {
 	// Initialized to construction/run-start time so "no message yet" reads
 	// as idle-since-this-run, not idle-since-1970. Guarded by mu.
 	lastMessageAt time.Time
-	messages      []ChatMessage // Unwritten messages in memory
-	messageCount  int
-	dedup         *utils.OrderedDedup[string]
-	continuation  string
-	streamStartMs int64
-	flushedToDisk bool
-
-	// pendingMarkers are the deletion and replacement markers that may name
-	// a message already on disk, applied by one rewrite at the end of the run
-	// (applyPendingMarkers); rawPending the raw sidecar lines not yet
-	// appended (flushRawActions). Loop-goroutine state, like messages.
-	pendingMarkers []pendingChatMarker
-	rawPending     []json.RawMessage
-	// liveRawOffsetMs / hasLiveRawOffset: the offset of the newest live
-	// message seen, which a live raw line is stamped with (yt-dlp's
-	// live_offset, carried across batches the same way).
-	liveRawOffsetMs  int64
-	hasLiveRawOffset bool
-	// resumeFileAuto is true when ResumeFile was synthesized from OutputFile in
-	// NewChatDownloader (caller did not pass an explicit ResumeFile). Used by
-	// SetOutputFile to know whether it's safe to re-derive ResumeFile from the
-	// new path — prevents clobbering a caller-provided literal ".resume.json"
-	// (audit chat.md C7).
-	resumeFileAuto bool
-	// ioErrorOccurred is set whenever a disk-IO failure routes through OnError
-	// inside writeFullChatFile / incrementalAppend / updateChatFileHeader.
-	// Inspected by Start() before clearResume() so the resume file is
-	// preserved if the final flush failed (audit chat.md C8).
-	ioErrorOccurred bool
-	cancelCtx       context.CancelFunc // for aborting sleep on stop/markStreamEnded
-	done            chan struct{}      // closed when Start() completes; nil if never started
+	done          chan struct{} // closed when Start() completes; nil if never started
 	// terminalErr is the running loop's GIVE-UP verdict — the stale-recovery
 	// cap (errStaleRecoveryExhausted) or the consecutive-error budget
 	// (errChatFetchExhausted) — and nil for every exit that is not one. Both
@@ -221,6 +196,52 @@ type ChatDownloader struct {
 	// Loop-goroutine state, updated inside processBatch's commit.
 	replayHighWaterUsec int64
 	hasReplayHighWater  bool
+}
+
+// ChatDownloader downloads YouTube live chat messages.
+type ChatDownloader struct {
+	opts    ChatDownloaderOptions
+	api     *ChatAPI
+	mu      sync.Mutex
+	running bool
+	// stopBeforeRun latches a Stop() that landed while no run was in flight
+	// (done == nil): the next Start returns at once instead of running. A
+	// Stop racing the goroutine about to call Start (stopEarlyChat against
+	// runEarlyChat) used to be lost — Start reset cancelFlag, and the run's
+	// OnStart wrote chat_status "downloading" over the caller's settle.
+	// Consumed by that one Start. Guarded by mu.
+	stopBeforeRun bool
+	chatRun
+	messages      []ChatMessage // Unwritten messages in memory
+	messageCount  int
+	dedup         *utils.OrderedDedup[string]
+	continuation  string
+	streamStartMs int64
+	flushedToDisk bool
+
+	// pendingMarkers are the deletion and replacement markers that may name
+	// a message already on disk, applied by one rewrite at the end of the run
+	// (applyPendingMarkers); rawPending the raw sidecar lines not yet
+	// appended (flushRawActions). Loop-goroutine state, like messages.
+	pendingMarkers []pendingChatMarker
+	rawPending     []json.RawMessage
+	// liveRawOffsetMs / hasLiveRawOffset: the offset of the newest live
+	// message seen, which a live raw line is stamped with (yt-dlp's
+	// live_offset, carried across batches the same way).
+	liveRawOffsetMs  int64
+	hasLiveRawOffset bool
+	// resumeFileAuto is true when ResumeFile was synthesized from OutputFile in
+	// NewChatDownloader (caller did not pass an explicit ResumeFile). Used by
+	// SetOutputFile to know whether it's safe to re-derive ResumeFile from the
+	// new path — prevents clobbering a caller-provided literal ".resume.json"
+	// (audit chat.md C7).
+	resumeFileAuto bool
+	// ioErrorOccurred is set whenever a disk-IO failure routes through OnError
+	// inside writeFullChatFile / incrementalAppend / updateChatFileHeader.
+	// Inspected by Start() before clearResume() so the resume file is
+	// preserved if the final flush failed (audit chat.md C8).
+	ioErrorOccurred bool
+	cancelCtx       context.CancelFunc // for aborting sleep on stop/markStreamEnded
 	// replay is the LIVE-vs-REPLAY endpoint choice. It starts at
 	// opts.IsReplay but is mutable, because a broadcast that ends mid-run
 	// flips its watch page to isReplay:true and starts serving replay tokens;
@@ -429,7 +450,7 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 		continuation:   opts.InitialContinuation,
 		streamStartMs:  streamStartMs,
 		resumeFileAuto: resumeFileAuto,
-		lastMessageAt:  time.Now(),
+		chatRun:        chatRun{lastMessageAt: time.Now()},
 	}
 	cd.replay.Store(opts.IsReplay)
 	return cd
@@ -573,30 +594,29 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 		// the floor and write chat_status "finished" over it.
 		return cd.terminalError()
 	}
+	if cd.stopBeforeRun {
+		// A Stop() landed before this run began (stopBeforeRun's doc): this
+		// is the run it stopped. Nothing is loaded, written or reported —
+		// no OnStart, so no chat_status "downloading" over the settle the
+		// Stop's caller wrote — and the latch is spent.
+		cd.stopBeforeRun = false
+		cd.mu.Unlock()
+		cd.logDebug("chat: stopped before it started", "videoID", cd.opts.VideoID)
+		return nil
+	}
 	cd.running = true
-	cd.cancelFlag = false
-	cd.streamEnded = false
-	// A fresh run carries no give-up verdict from a prior run on this same
-	// instance, for the same reason liveContinuationOpen is re-armed below.
-	cd.terminalErr = nil
-	// And no replay high-water mark from a previous run on this instance: the
-	// mark is "the highest absolute timestamp committed to the file", and
-	// only what this Start loads — the sidecar, or the adopted file — says
-	// what that is now. Re-armed here, beside terminalErr, and set again by
-	// the resume or the adoption below.
-	cd.replayHighWaterUsec, cd.hasReplayHighWater = 0, false
-	// A fresh run starts with no resume signal, not whatever a PRIOR run on
-	// this same instance last left behind (e.g. a completed run that ended
-	// with the signal open, then this same *ChatDownloader gets Start()
-	// called again). Closed = no information by design (see
-	// LiveContinuationOpen's doc comment) — a run that hasn't polled yet
-	// has none, same as a run that just died.
-	cd.liveContinuationOpen = false
-	// Re-arm the message-idle clock at run start for the same reason: a
-	// fresh run's "no new messages yet" is measured from THIS run's start,
-	// not from whenever a prior run on this instance last saw one.
-	cd.lastMessageAt = time.Now()
-	cd.done = make(chan struct{})
+	// A fresh run's state, whole (chatRun's doc): not stopped and the stream
+	// not ended; no give-up verdict from a prior run on this same instance;
+	// no replay high-water mark (only what this Start loads — the sidecar,
+	// or the adopted file — says what that is now; set again by the resume
+	// or the adoption below); no resume signal (closed = no information by
+	// design, see LiveContinuationOpen's doc comment — a run that hasn't
+	// polled yet has none, same as a run that just died); and the
+	// message-idle clock measured from THIS run's start.
+	cd.chatRun = chatRun{
+		lastMessageAt: time.Now(),
+		done:          make(chan struct{}),
+	}
 	// Propagate Logger to the API so parse-level drift diagnostics are captured.
 	if cd.api != nil {
 		cd.api.Logger = cd.Logger
@@ -975,8 +995,17 @@ func (cd *ChatDownloader) MarkStreamEnded() {
 // is still live) — a stopped downloader carries no information any more,
 // and closed is what "no information" means by design (see
 // LiveContinuationOpen's doc comment).
+//
+// A Stop with no run in flight — before the first Start, or between runs —
+// stops the NEXT Start instead (stopBeforeRun): no caller re-Starts an
+// instance it stopped (a restart builds a new downloader), and the one that
+// races a Start it has just launched must not lose its Stop.
 func (cd *ChatDownloader) Stop() {
 	cd.mu.Lock()
+	if cd.done == nil {
+		// No run in flight: stop the next one (stopBeforeRun).
+		cd.stopBeforeRun = true
+	}
 	cd.running = false
 	cd.cancelFlag = true
 	cd.liveContinuationOpen = false
