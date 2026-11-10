@@ -94,6 +94,12 @@ type LogViewerModel struct {
 	title     string
 	emptyText string
 
+	// bare draws the viewer in its bare form (log_viewer_bare.go): no border,
+	// the full width, a header row over the lines and nothing else. Only the
+	// O L overlay sets it, in its SetSize, from the size of the terminal; the
+	// log panel never does.
+	bare bool
+
 	// renderCache / cacheKey memoise View(). bubbletea calls View() after
 	// EVERY message (~180/s with one active download at the defaults: 60
 	// progress updates plus the 120 Hz tick), and the vast majority of those
@@ -329,7 +335,11 @@ func (m *LogViewerModel) Clear() {
 func (m *LogViewerModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	m.viewport.SetWidth(w - 2) // account for borders
+	if m.bare {
+		m.viewport.SetWidth(max(w, 1)) // no border
+	} else {
+		m.viewport.SetWidth(w - 2) // account for borders
+	}
 	m.resizeViewport()
 	// A width change invalidates the WRAP, not just the layout: filtered
 	// holds lines already cut to the old content width, so a re-render alone
@@ -479,6 +489,9 @@ func (m *LogViewerModel) rebuildFiltered() {
 func (m *LogViewerModel) contentWidth() int {
 	if m.width <= 0 {
 		return 0
+	}
+	if m.bare {
+		return m.width
 	}
 	return max(m.width-2, 1)
 }
@@ -791,6 +804,10 @@ func (m *LogViewerModel) searchStep(forward bool) {
 // resizeViewport recalculates viewport height accounting for the search bar
 // and the auto-scroll pause hint.
 func (m *LogViewerModel) resizeViewport() {
+	if m.bare {
+		m.resizeBareViewport()
+		return
+	}
 	contentH := max(m.height-3, 1)
 	if m.searching {
 		contentH = max(contentH-1, 1) // search bar takes 1 line
@@ -855,6 +872,7 @@ type logViewerKey struct {
 	displayed   int
 	yOffset     int
 	vpHeight    int
+	bare        bool
 }
 
 func (m *LogViewerModel) key() logViewerKey {
@@ -871,6 +889,7 @@ func (m *LogViewerModel) key() logViewerKey {
 		displayed:   len(m.filtered),
 		yOffset:     m.viewport.YOffset(),
 		vpHeight:    m.viewport.Height(),
+		bare:        m.bare,
 	}
 }
 
@@ -884,6 +903,9 @@ func (m *LogViewerModel) invalidate() {
 
 // View renders the log viewer panel.
 func (m *LogViewerModel) View() string {
+	if m.bare {
+		return m.bareView()
+	}
 	// The search box renders a blinking textinput cursor whose state is not
 	// in the key, so while it is open the panel is rendered every frame.
 	if !m.searching {

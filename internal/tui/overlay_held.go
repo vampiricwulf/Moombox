@@ -139,12 +139,3 @@ func (m *TrimDialogModel) heldEsc() heldEscKind {
 	}
 	return heldEscCloses
 }
-
-// heldEsc for the job log: Esc leaves the search box, then clears an applied
-// search, then closes.
-func (m *JobLogModel) heldEsc() heldEscKind {
-	if m.log.IsSearching() || m.log.searchQuery != "" {
-		return heldEscBack
-	}
-	return heldEscCloses
-}

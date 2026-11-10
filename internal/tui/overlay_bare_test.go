@@ -285,6 +285,10 @@ func TestTheRefusalNamesTheOverlaysSize(t *testing.T) {
 			overlayRegistry[i].bare = &overlayBare{openW: 30, openH: 10}
 		case "action menu":
 			overlayRegistry[i].bare = &overlayBare{openW: 44, openH: 6}
+		case "ytdlp plugin", "cookie import":
+			// As an overlay with no bare form, so that every E chord but
+			// E T is refused at any compact size.
+			overlayRegistry[i].bare = nil
 		}
 	}
 
@@ -505,7 +509,7 @@ func TestBareHelpListsOnlyTheKeysThatWork(t *testing.T) {
 		}
 		// Nothing of the panels the compact layout does not have, and no
 		// key whose overlay is refused here.
-		for _, gone := range []string{"Tab", "Details", "Logs", "focus panel", "Action menu", "Open settings", "Job Log"} {
+		for _, gone := range []string{"Tab", "Details", "Logs", "focus panel", "Action menu", "Open settings"} {
 			if strings.Contains(text, gone) {
 				t.Errorf("%v: the list still mentions %q", size, gone)
 			}

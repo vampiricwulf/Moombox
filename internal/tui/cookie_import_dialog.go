@@ -75,6 +75,12 @@ func (m *CookieImportDialogModel) IsImporting() bool {
 // SetSize updates the dialog dimensions.
 func (m *CookieImportDialogModel) SetSize(w, h int) {
 	m.width, m.height = w, h
+	if m.bare() {
+		// The prompt is two cells and the input draws a cursor cell after
+		// its text.
+		m.input.SetWidth(max(w-3, 1))
+		return
+	}
 	if _, contentW := dialogBox(70, w); contentW > 0 {
 		m.input.SetWidth(max(contentW-4, 10))
 	}
@@ -213,6 +219,9 @@ func (m *CookieImportDialogModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 func (m *CookieImportDialogModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView()
 	}
 
 	boxW, _ := dialogBox(70, m.width)

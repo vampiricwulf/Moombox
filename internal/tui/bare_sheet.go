@@ -92,3 +92,66 @@ func bareHeader(left, right string, w int) string {
 	sb.WriteString(right)
 	return sb.String()
 }
+
+// bareWrap wraps plain text for a bare view: rows of at most w cells, broken
+// at spaces (a word wider than a row is broken where the row ends), at most
+// maxRows of them. Text that does not fit ends in an ellipsis.
+func bareWrap(msg string, w, maxRows int) []string {
+	return wrapFeedback(msg, w+feedbackIndent, maxRows)
+}
+
+// bareStyled renders each row in style.
+func bareStyled(rows []string, style lipgloss.Style) []string {
+	out := make([]string, len(rows))
+	for i, row := range rows {
+		out[i] = style.Render(row)
+	}
+	return out
+}
+
+// bareRows is rows as exactly n rows: the ones past n dropped, blank ones
+// added.
+func bareRows(rows []string, n int) []string {
+	out := make([]string, max(n, 0))
+	copy(out, rows)
+	return out
+}
+
+// bareHeadCut cuts s to w cells from its head, keeping its end: a path's
+// file name, an address's last group.
+func bareHeadCut(s string, w int) string {
+	sw := ansi.StringWidth(s)
+	if sw <= w {
+		return s
+	}
+	if w <= 1 {
+		return truncateWidth("…", w, "")
+	}
+	return "…" + cutWidth(s, sw-(w-1), sw)
+}
+
+// bareMiddleCut cuts s to w cells from its middle, keeping both ends.
+func bareMiddleCut(s string, w int) string {
+	sw := ansi.StringWidth(s)
+	if sw <= w {
+		return s
+	}
+	if w <= 2 {
+		return truncateWidth(s, w, "")
+	}
+	tail := (w - 1) / 2
+	return truncateWidth(s, w-1-tail, "") + "…" + cutWidth(s, sw-tail, sw)
+}
+
+// setError puts an error on a sheet h rows tall that has a keys row: wrapped
+// in the body where it fits there, so the title and the keys stay, and as
+// the sheet's message where it does not, so that it takes the keys row and
+// the header before any of it is cut.
+func (s *bareSheet) setError(msg string, w, h int) {
+	if rows := bareWrap(msg, w, h); len(rows) <= h-2 {
+		s.body = bareStyled(rows, ErrorStyle)
+		return
+	}
+	s.body = nil
+	s.msg, s.msgStyle = msg, ErrorStyle
+}

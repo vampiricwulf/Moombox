@@ -78,6 +78,11 @@ func (m *JobLogModel) Close() {
 // SetSize gives the viewer the whole terminal but the footer's row.
 func (m *JobLogModel) SetSize(w, h int) {
 	m.width, m.height = w, h
+	if m.log.bare = m.bare(); m.log.bare {
+		// The bare form: no border to keep whole, so no floor on the height.
+		m.log.SetSize(w, max(h-1, 1))
+		return
+	}
 	m.log.SetSize(w, max(h-1, minPanelH))
 }
 
@@ -175,6 +180,9 @@ func (m *JobLogModel) footerHint() string {
 func (m *JobLogModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView()
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, m.log.View(), m.footerHint())
 }

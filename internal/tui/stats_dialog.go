@@ -6,6 +6,7 @@ import (
 
 	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -51,6 +52,9 @@ type StatsDialogModel struct {
 	errorMsg      string
 	spinner       spinner.Model
 	bar           progress.Model
+	// bareVP is the list of the bare form (stats_dialog_bare.go). The normal
+	// form does not use it.
+	bareVP viewport.Model
 }
 
 // NewStatsDialogModel creates the statistics overlay.
@@ -59,7 +63,7 @@ func NewStatsDialogModel() *StatsDialogModel {
 	pb.Full = '█'
 	pb.Empty = '░'
 	pb.EmptyColor = ColorGray
-	return &StatsDialogModel{spinner: newSpinner(), bar: pb}
+	return &StatsDialogModel{spinner: newSpinner(), bar: pb, bareVP: newBareStatsViewport()}
 }
 
 // IsVisible returns true if the dialog is shown.
@@ -68,6 +72,10 @@ func (m *StatsDialogModel) IsVisible() bool { return m.visible }
 // SetSize updates the dialog dimensions and the disk bar's width to match.
 func (m *StatsDialogModel) SetSize(w, h int) {
 	m.width, m.height = w, h
+	if m.bare() {
+		m.syncBare()
+		return
+	}
 	boxW, _ := dialogBox(statsDialogMaxWidth, w)
 	m.bar.SetWidth(max(min(boxW-8, 50), 10))
 }
@@ -91,17 +99,27 @@ func (m *StatsDialogModel) SetSnapshot(s stats.Snapshot) {
 	m.snap, m.haveSnap = s, true
 	m.loading = false
 	m.errorMsg = ""
+	if m.bare() {
+		m.syncBare()
+	}
 }
 
 // SetError renders a message in place of the body and ends the loading wait.
 func (m *StatsDialogModel) SetError(msg string) {
 	m.loading = false
 	m.errorMsg = msg
+	if m.bare() {
+		m.syncBare()
+	}
 }
 
-// UpdateComponents ticks the spinner while loading. Keys never come here —
-// HandleKey decides on the key string alone (see the type comment).
+// UpdateComponents ticks the spinner while loading. In the normal form keys
+// do nothing here: HandleKey decides on the key string alone (see the type
+// comment). In the bare form the scroll keys move its list.
 func (m *StatsDialogModel) UpdateComponents(msg tea.Msg) tea.Cmd {
+	if m.bare() {
+		m.bareUpdate(msg)
+	}
 	if !m.loading {
 		return nil
 	}
@@ -126,6 +144,9 @@ func (m *StatsDialogModel) HandleKey(key string) string {
 func (m *StatsDialogModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView()
 	}
 
 	boxW, _ := dialogBox(statsDialogMaxWidth, m.width)

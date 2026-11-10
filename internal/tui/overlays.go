@@ -134,6 +134,7 @@ func init() {
 		{
 			name:       "cookie import",
 			title:      "Import Cookie File",
+			bare:       &overlayBare{openW: compactMinWidth, openH: compactMinHeight},
 			visible:    func(a *App) bool { return a.cookieImportDlg.IsVisible() },
 			view:       func(a *App) string { return a.cookieImportDlg.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.cookieImportDlg.UpdateComponents(msg) },
@@ -173,6 +174,7 @@ func init() {
 		{
 			name:       "files",
 			title:      "Orphaned Items",
+			bare:       &overlayBare{openW: compactMinWidth, openH: compactMinHeight},
 			visible:    func(a *App) bool { return a.filesDlg.IsVisible() },
 			view:       func(a *App) string { return a.filesDlg.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.filesDlg.UpdateComponents(msg) },
@@ -182,6 +184,7 @@ func init() {
 		{
 			name:       "client tokens",
 			title:      "Client Tokens",
+			bare:       &overlayBare{openW: compactMinWidth, openH: compactMinHeight},
 			visible:    func(a *App) bool { return a.clientTokensDlg.IsVisible() },
 			view:       func(a *App) string { return a.clientTokensDlg.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.clientTokensDlg.UpdateComponents(msg) },
@@ -191,6 +194,7 @@ func init() {
 		{
 			name:       "ytdlp plugin",
 			title:      "yt-dlp Plugin",
+			bare:       &overlayBare{openW: compactMinWidth, openH: compactMinHeight},
 			visible:    func(a *App) bool { return a.ytdlpDlg.IsVisible() },
 			view:       func(a *App) string { return a.ytdlpDlg.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.ytdlpDlg.UpdateComponents(msg) },
@@ -199,15 +203,17 @@ func init() {
 		{
 			name:       "stats",
 			title:      "Statistics",
+			bare:       &overlayBare{openW: compactMinWidth, openH: compactMinHeight},
 			visible:    func(a *App) bool { return a.statsDlg.IsVisible() },
 			view:       func(a *App) string { return a.statsDlg.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.statsDlg.UpdateComponents(msg) },
 			key:        (*App).keyStats,
+			mouse:      (*App).mouseStats,
 		},
 		{
 			name:       "job log",
 			title:      "Job Log",
-			heldEsc:    func(a *App) heldEscKind { return a.jobLog.heldEsc() },
+			bare:       &overlayBare{openW: compactMinWidth, openH: compactMinHeight},
 			visible:    func(a *App) bool { return a.jobLog.IsVisible() },
 			view:       func(a *App) string { return a.jobLog.View() },
 			components: func(a *App, msg tea.Msg) tea.Cmd { return a.jobLog.UpdateComponents(msg) },

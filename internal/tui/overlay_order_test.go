@@ -44,7 +44,7 @@ func overlayCases(t *testing.T) []overlayCase {
 			func(a *App) bool { return a.actionMenu.IsVisible() }, func(a *App) string { return a.actionMenu.View() }},
 		{"import", 0, 0, func(a *App) { a.importDlg.Open(t.TempDir()) },
 			func(a *App) bool { return a.importDlg.IsVisible() }, func(a *App) string { return a.importDlg.View() }},
-		{"cookie import", 0, 0, func(a *App) { a.cookieImportDlg.Open() },
+		{"cookie import", 30, 6, func(a *App) { a.cookieImportDlg.Open() },
 			func(a *App) bool { return a.cookieImportDlg.IsVisible() }, func(a *App) string { return a.cookieImportDlg.View() }},
 		{"chapter import", 0, 0, func(a *App) { a.chapterDlg.Open(a.taskList.GetJobByID("j1")) },
 			func(a *App) bool { return a.chapterDlg.IsVisible() }, func(a *App) string { return a.chapterDlg.View() }},
@@ -52,15 +52,15 @@ func overlayCases(t *testing.T) []overlayCase {
 			func(a *App) bool { return a.addVideo.IsVisible() }, func(a *App) string { return a.addVideo.View() }},
 		{"trim", 0, 0, func(a *App) { a.trimDlg.Open("j1", "a job") },
 			func(a *App) bool { return a.trimDlg.IsVisible() }, func(a *App) string { return a.trimDlg.View() }},
-		{"files", 0, 0, func(a *App) { a.filesDlg.Open() },
+		{"files", 30, 6, func(a *App) { a.filesDlg.Open() },
 			func(a *App) bool { return a.filesDlg.IsVisible() }, func(a *App) string { return a.filesDlg.View() }},
-		{"client tokens", 0, 0, func(a *App) { a.clientTokensDlg.Open() },
+		{"client tokens", 30, 6, func(a *App) { a.clientTokensDlg.Open() },
 			func(a *App) bool { return a.clientTokensDlg.IsVisible() }, func(a *App) string { return a.clientTokensDlg.View() }},
-		{"ytdlp plugin", 0, 0, func(a *App) { a.ytdlpDlg.Open() },
+		{"ytdlp plugin", 30, 6, func(a *App) { a.ytdlpDlg.Open() },
 			func(a *App) bool { return a.ytdlpDlg.IsVisible() }, func(a *App) string { return a.ytdlpDlg.View() }},
-		{"stats", 0, 0, func(a *App) { a.statsDlg.Open() },
+		{"stats", 30, 6, func(a *App) { a.statsDlg.Open() },
 			func(a *App) bool { return a.statsDlg.IsVisible() }, func(a *App) string { return a.statsDlg.View() }},
-		{"job log", 0, 0, func(a *App) { a.jobLog.Open(a.taskList.GetJobByID("j1")) },
+		{"job log", 30, 6, func(a *App) { a.jobLog.Open(a.taskList.GetJobByID("j1")) },
 			func(a *App) bool { return a.jobLog.IsVisible() }, func(a *App) string { return a.jobLog.View() }},
 	}
 }
@@ -250,8 +250,9 @@ const (
 // scrolls needs a row in overlayWheelCases (overlay_wheel_test.go) too, which
 // proves it.
 //
-// The inert ones have nothing to scroll: cookie import is one path field,
-// and the yt-dlp plugin and statistics overlays are fixed screens that fit.
+// The inert ones have nothing to scroll: cookie import is one path field
+// and the yt-dlp plugin overlay is a fixed screen that fits. Statistics
+// scrolls in its bare form only; its normal form is a fixed screen too.
 var overlayWheel = map[string]string{
 	"settings":       wheelScrolls, // the section under the cursor
 	"help":           wheelScrolls, // three rows a notch
@@ -267,7 +268,7 @@ var overlayWheel = map[string]string{
 	"files":          wheelScrolls, // the list's cursor
 	"client tokens":  wheelScrolls, // the list's cursor
 	"ytdlp plugin":   wheelInert,
-	"stats":          wheelInert,
+	"stats":          wheelScrolls, // its bare form, three rows a notch; the normal form shows everything
 	"job log":        wheelScrolls, // three rows a notch
 }
 

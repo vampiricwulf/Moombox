@@ -498,13 +498,13 @@ func TestCompactStatusLineShowsTheWarnings(t *testing.T) {
 // "refused" (its overlay has no bare form and needs the normal layout,
 // 60x20). A chord added to buildMenuItems must be added here.
 var chordCompact = map[string]string{
-	"A A": "refused", "A Z": "refused", "A T": "refused", "A O": "refused", "A K": "refused", "A C": "refused",
+	"A A": "refused", "A Z": "refused", "A T": "refused", "A O": "bare 30x6", "A K": "bare 30x6", "A C": "refused",
 	"A R": "works", "A I": "works", "A M": "works", "A S": "works", "A X": "works", "A D": "works", "A W": "works", "A U": "works",
 	"R B": "works", "R C": "works", "R F": "works", "R V": "works", "R M": "works", "R U": "works", "R S": "works", "R P": "works",
 	"R N": "bare 30x6",
 	"O F": "works", "O S": "works", "O W": "works", "O C": "works", "O G": "works",
-	"O L": "refused",
-	"E Y": "refused", "E L": "refused", "E I": "refused", "E T": "refused",
+	"O L": "bare 30x6",
+	"E Y": "bare 30x6", "E L": "refused", "E I": "bare 30x6", "E T": "bare 30x6",
 	"F": "works", "Q Q": "works",
 	"`": "refused", "?": "bare 30x6",
 }
@@ -1046,15 +1046,9 @@ var heldEscBase = map[string]heldEscKind{
 	"setup wizard":   heldEscOff, // nothing to step back to on the mode choice
 	"action menu":    heldEscCloses,
 	"import":         heldEscCloses,
-	"cookie import":  heldEscCloses,
 	"chapter import": heldEscCloses,
 	"add video":      heldEscCloses,
 	"trim":           heldEscCloses,
-	"files":          heldEscCloses,
-	"client tokens":  heldEscCloses,
-	"ytdlp plugin":   heldEscCloses,
-	"stats":          heldEscCloses,
-	"job log":        heldEscCloses,
 }
 
 // neverHeld reports whether o is drawn bare at every compact size, so no

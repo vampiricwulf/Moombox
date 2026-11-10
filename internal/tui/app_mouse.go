@@ -267,3 +267,11 @@ func (a *App) setFocus(panel FocusPanel) {
 	}
 	a.recalcLayout()
 }
+
+// mouseStats: the statistics scroll under the wheel in their bare form,
+// three rows a notch. The normal form shows every figure at once and has
+// nothing to scroll.
+func (a *App) mouseStats(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	a.statsDlg.bareScroll(wheelDir(msg) * overlayWheelRows)
+	return a, nil
+}

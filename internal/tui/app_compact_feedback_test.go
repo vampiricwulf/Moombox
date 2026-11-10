@@ -170,16 +170,16 @@ func TestCompactPrefixHintsShowEveryKey(t *testing.T) {
 		}
 	}
 
-	// Every E chord opens an overlay: the prefix answers with the refusal,
-	// and so does its second key.
+	// E offers the chords whose overlays draw bare, and not E L: the setup
+	// wizard it opens needs the normal layout, and the key is refused.
 	r = newCompactRig(t, 40, 10)
 	r.press("e")
-	if r.app.feedback.msg != compactRefusal(60, 20) || r.app.chord.prefix != "e" {
+	if r.app.feedback.msg != "Extras: Y yt-dlp | I Import Cookies | T Stats (3s)" || r.app.chord.prefix != "e" {
 		t.Errorf("E in the compact layout: feedback %q, armed prefix %q", r.app.feedback.msg, r.app.chord.prefix)
 	}
-	r.press("t")
+	r.press("l")
 	if r.app.feedback.msg != compactRefusal(60, 20) || r.app.chord.prefix != "" || r.app.hasActiveOverlay() {
-		t.Errorf("E T in the compact layout: feedback %q, armed prefix %q", r.app.feedback.msg, r.app.chord.prefix)
+		t.Errorf("E L in the compact layout: feedback %q, armed prefix %q", r.app.feedback.msg, r.app.chord.prefix)
 	}
 }
 
@@ -214,14 +214,14 @@ func TestAnArmedPrefixHintFollowsTheLayout(t *testing.T) {
 		t.Errorf("a resize overwrote unrelated feedback: %q", a.feedback.msg)
 	}
 
-	// E armed at full size has nothing left below it.
+	// E armed at full size loses E L, whose overlay has no bare form.
 	r = newCompactRig(t, 120, 40)
 	r.press("e")
 	if r.app.chord.prefix != "e" {
 		t.Fatal("premise lost: E did not arm")
 	}
 	r.app.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
-	if r.app.feedback.msg != compactRefusal(60, 20) || r.app.chord.prefix != "e" {
+	if r.app.feedback.msg != "Extras: Y yt-dlp | I Import Cookies | T Stats (3s)" || r.app.chord.prefix != "e" {
 		t.Errorf("E across a shrink: feedback %q, armed prefix %q", r.app.feedback.msg, r.app.chord.prefix)
 	}
 	r.app.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
