@@ -122,6 +122,9 @@ type Sidecar struct {
 
 	// Health.
 	healthy atomic.Bool
+	// everUp latches the first successful start. Until then there is no child
+	// a caller could wait to see come back (see Recoverable).
+	everUp atomic.Bool
 
 	// Startup handshake. The sidecar emits {"event":"ready"} on stdout once
 	// server.js finishes its synchronous init (jsdom + bgutils-js module
@@ -306,7 +309,8 @@ func childEnv(parent []string, proxy *httpproxy.Config) (env []string, note stri
 // finished its synchronous init (jsdom module load + JSDOM construction).
 // Returns an error if extraction, launch, or the ready handshake fails.
 // A failed start is an outage like a crash: PotProvider answers mints with
-// errSidecarDown and the Supervisor retries on its ladder.
+// errSidecarDown and the Supervisor retries on its ladder. Until a start has
+// succeeded once, a mint does not wait for the child (Recoverable).
 func (s *Sidecar) Start(ctx context.Context) error {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
@@ -462,6 +466,7 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 		return fmt.Errorf("ready: %w%s", readyCtx.Err(), s.stderrTailSuffix())
 	}
 
+	s.everUp.Store(true)
 	s.healthy.Store(true)
 	s.cfg.Logger.Info("sidecar started", "cacheDir", cacheDir, "pid", cmd.Process.Pid)
 	return nil
@@ -695,6 +700,13 @@ func (s *Sidecar) Restart(ctx context.Context) error {
 // child died), or after a stdin write stalled past RequestTimeout (the child
 // stopped reading — see writeRequest).
 func (s *Sidecar) IsHealthy() bool { return s.healthy.Load() }
+
+// Recoverable reports whether a handle that is down now is one a caller may
+// wait for: its child has come up at least once and Stop has not been called,
+// so the supervisor's restart is what brings it back. False for a handle whose
+// first start has not succeeded (there has been no child yet, and the start
+// may be failing for good), and after Stop, which is terminal.
+func (s *Sidecar) Recoverable() bool { return s.everUp.Load() && !s.isStopped() }
 
 // CacheDir returns the directory where the sidecar's Node binary and JS
 // source live, or empty string if Start has not been called. Useful for
