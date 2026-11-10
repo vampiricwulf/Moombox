@@ -719,9 +719,14 @@ func (a *App) resolveChannelCmd(input string) tea.Cmd {
 	}, func(text string) tea.Msg { return channelResolvedMsg{Input: input, Err: errors.New(text)} })
 }
 
-// openBrowser launches the default browser for the given URL using the
+// openBrowser is how the TUI opens a URL in the operator's browser. It is a
+// variable so the package's tests replace it (openbrowser_stub_test.go): a
+// test that presses O W, O S or O G must never open a real browser window.
+var openBrowser = launchBrowser
+
+// launchBrowser launches the default browser for the given URL using the
 // platform-appropriate opener (mirrors OnOpenFolder in cmd/moombox/tui_wiring.go).
-func openBrowser(url string) {
+func launchBrowser(url string) {
 	// Platform-split (openbrowser_windows.go / openbrowser_other.go):
 	// Windows needs explorer.exe with a forced-quoted command line so the
 	// browser escapes the launcher's Job Object AND query-string URLs
