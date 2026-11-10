@@ -89,7 +89,9 @@ func (d *SegmentDownloader) checkpointDirect(staged int64) {
 // runDirectDownload downloads a complete file from a direct URL (for VODs).
 // Uses chunked Range requests of 95-100% of 5 MB each (directChunkSize) with
 // per-chunk retry and percentage progress. Falls back to streaming download
-// if the server doesn't support Range requests.
+// if the server doesn't support Range requests, or — mid-download — when a
+// ranged request is answered 200 with the whole file (the Range ignored);
+// either hand-off is one-way (runDirectDownloadFallback).
 func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	// The checkpoint cadence counts from where this run starts: the offset
 	// Start restored from the sidecar, or 0.

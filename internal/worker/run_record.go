@@ -17,8 +17,12 @@ type runRecord struct {
 	done map[string]bool
 	// onNoJS: the capture records on the formats that need no player JS
 	// (noJSFromStart) — the challenge-free setup fallback put it there, or
-	// a mid-stream path switch did (switchLivePath) — so its refreshes stay
-	// there (refreshDownload).
+	// a mid-stream path switch did (switchLivePath) — so its non-HLS
+	// refreshes stay there (refreshDownload). It STAYS set after a no-JS
+	// capture falls on to the HLS playlist (both flags true is a recognised
+	// state; markSwitchedBack clears the two together): refreshDownload checks
+	// isHls first, so the flag only steers a non-HLS refresh, and
+	// switchLivePath reads it as "no-JS was already tried".
 	onNoJS bool
 	// onHlsFallback: a fallback put the capture on the live HLS playlist
 	// (liveHlsInstead: a from-start setup or refresh that failed for want of
@@ -144,7 +148,8 @@ func (r *runRecord) markNoJS() {
 }
 
 // noJS reports whether the capture records on the formats that need no
-// player JS.
+// player JS — or did, before a fall on to HLS (see onNoJS): a caller that
+// can be on HLS checks that first, as refreshDownload does.
 func (r *runRecord) noJS() bool {
 	if r == nil {
 		return false

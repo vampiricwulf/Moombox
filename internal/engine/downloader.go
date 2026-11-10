@@ -455,7 +455,7 @@ type DownloaderOptions struct {
 type DownloadActivity int
 
 const (
-	ActivityNone                DownloadActivity = iota // actively downloading
+	ActivityNone                DownloadActivity = iota // actively downloading: the consumer's state after OnProgress; the engine never emits it
 	ActivityVerifyingEnd                                // segments stopped; confirming the stream ended
 	ActivityReconnecting                                // connectivity lost; waiting for the network
 	ActivityRateLimited                                 // 429 backoff
@@ -803,8 +803,10 @@ type SegmentDownloader struct {
 	// continues fetching segments. Returning "" preserves the
 	// legacy fall-through to ErrQualityLost.
 	OnCipherFailure func() string
-	// OnActivity reports the downloader's current wait reason (or
-	// ActivityNone when it resumes downloading). Optional; nil to opt out.
+	// OnActivity reports the downloader's current wait reason. The engine
+	// reports wait reasons only and never emits ActivityNone: the consumer
+	// treats OnProgress (every landed segment, catch-up flushes included) as
+	// the return to downloading (worker/progress.go). Optional; nil to opt out.
 	OnActivity func(a DownloadActivity)
 	// MayResume reports whether the broadcast may resume — stall evidence.
 	// Called only from the download-loop goroutine. nil = feature off.
