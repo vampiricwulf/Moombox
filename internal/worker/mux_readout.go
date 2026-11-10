@@ -60,10 +60,17 @@ func (o *DownloadOrchestrator) newMuxReadout(jobCtx *JobContext) *muxReadout {
 	if jobCtx.Config != nil && jobCtx.Config.ProgressInterval > 0 {
 		interval = jobCtx.Config.ProgressInterval
 	}
-	if fresh.Progress != "" {
-		o.logger.Info("muxing the archive: the progress line follows the copy from here", "jobID", fresh.ID, "downloadProgress", fresh.Progress)
+	// A line the readout itself wrote is not a download's line: a mux that
+	// was killed mid-copy leaves one on the row, and the re-mux after the
+	// restart must not put it back on a row that then reads Error.
+	saved := fresh.Progress
+	if _, _, ok := jobstate.MuxReadout(saved); ok {
+		saved = ""
 	}
-	return &muxReadout{db: o.db, jobID: fresh.ID, interval: interval, now: time.Now, saved: fresh.Progress}
+	if saved != "" {
+		o.logger.Info("muxing the archive: the progress line follows the copy from here", "jobID", fresh.ID, "downloadProgress", saved)
+	}
+	return &muxReadout{db: o.db, jobID: fresh.ID, interval: interval, now: time.Now, saved: saved}
 }
 
 // callback is the engine's progress callback, nil for a job with no readout:
@@ -76,7 +83,7 @@ func (r *muxReadout) callback() func(engine.CopyProgress) {
 }
 
 // report writes the line for one of FFmpeg's reports, when it differs from
-// the one on the row and the gate allows.
+// the one on the row and, for a percent, the gate allows.
 func (r *muxReadout) report(p engine.CopyProgress) {
 	if r.stopped {
 		return
@@ -89,9 +96,11 @@ func (r *muxReadout) report(p engine.CopyProgress) {
 		return
 	}
 	now := r.now()
-	if r.wrote && now.Sub(r.lastWrite) < r.interval {
-		// The engine repeats a finalizing report while FFmpeg stays quiet,
-		// and a percent is followed by the next, so a gated line is not lost.
+	if r.wrote && !p.Finalizing && now.Sub(r.lastWrite) < r.interval {
+		// A gated percent is followed by the next one. The finalizing line
+		// is not gated: FFmpeg's last report comes once, and a line dropped
+		// there would leave the row on a percent until the Finished write.
+		// It is written once per change of text, like every line.
 		return
 	}
 	if !r.db.UpdateJobFieldsIf(r.jobID, database.StatusMuxing, map[string]any{"progress": line}) {

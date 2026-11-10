@@ -164,6 +164,70 @@ func TestMuxReadoutRestoreLeavesARowThatMovedOn(t *testing.T) {
 	none.restore()
 }
 
+// TestMuxReadoutDoesNotSaveAReadoutLine: a mux killed mid-copy leaves its
+// readout line on the Muxing row, and the re-mux after the restart starts
+// from that row. The line is not a download's, so a copy that then fails
+// leaves the row with no line, not a percent for a mux that is not running.
+//
+// Mutant: newMuxReadout saving fresh.Progress as it is (the Error row reads
+// "Muxing 42%").
+func TestMuxReadoutDoesNotSaveAReadoutLine(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	for _, stale := range []string{"Muxing 42%", jobstate.MuxFinalizingLine} {
+		id := "stale-" + stale
+		readoutJob(t, db, id)
+		db.UpdateJobFields(id, map[string]any{"progress": stale})
+		job, _ := db.GetJob(id)
+		r := w.orchestrator.newMuxReadout(w.buildJobContext(job))
+		if r == nil {
+			t.Fatalf("%q: no readout", stale)
+		}
+		r.report(engine.CopyProgress{OutputBytes: 10, InputBytes: 100})
+		if line, _ := progressOf(t, db, id); line != "Muxing 10%" {
+			t.Fatalf("%q: line = %q", stale, line)
+		}
+		r.restore()
+		if line, _ := progressOf(t, db, id); line != "" {
+			t.Errorf("%q: line after a failed re-mux = %q, want none", stale, line)
+		}
+	}
+}
+
+// TestMuxReadoutFinalizingLineIsNotGated: FFmpeg's last report comes once,
+// just before its pipe closes. With a long progress interval it lands inside
+// the gate of the percent before it, and nothing repeats it, so the phase
+// change is written at once; a percent in the same gate still waits.
+//
+// Mutant: report gating every line (the row stays on "Muxing 97%").
+func TestMuxReadoutFinalizingLineIsNotGated(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	readoutJob(t, db, "j")
+	job, _ := db.GetJob("j")
+	r := w.orchestrator.newMuxReadout(w.buildJobContext(job))
+	clock := time.Unix(1_700_000_000, 0)
+	r.now = func() time.Time { return clock }
+	r.interval = time.Hour
+
+	r.report(engine.CopyProgress{OutputBytes: 970, InputBytes: 1000})
+	clock = clock.Add(time.Millisecond)
+	r.report(engine.CopyProgress{OutputBytes: 980, InputBytes: 1000})
+	if line, _ := progressOf(t, db, "j"); line != "Muxing 97%" {
+		t.Fatalf("a percent inside the gate was written: %q", line)
+	}
+	clock = clock.Add(time.Millisecond)
+	r.report(engine.CopyProgress{OutputBytes: 1000, InputBytes: 1000, Finalizing: true})
+	if line, _ := progressOf(t, db, "j"); line != jobstate.MuxFinalizingLine {
+		t.Fatalf("line after the last report = %q, want %q", line, jobstate.MuxFinalizingLine)
+	}
+	writes := 0
+	stop := db.OnJobChange(func(*database.JobChange) { writes++ })
+	r.report(engine.CopyProgress{OutputBytes: 1000, InputBytes: 1000, Finalizing: true})
+	stop()
+	if writes != 0 {
+		t.Errorf("a repeated finalizing report wrote %d times", writes)
+	}
+}
+
 // TestArchiveMuxShowsItsReadout runs the real FFmpeg through muxAndFinalize
 // and watches the row: while it is Muxing its progress line becomes the mux
 // readout, the percent stays the download's, and the Finished write clears
