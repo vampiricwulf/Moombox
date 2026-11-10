@@ -296,7 +296,11 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 	consecutiveErrors := 0
 	var lastOfflineProbe time.Time // zero ⇒ first offline encounter probes immediately
 	scheduledStartTime := initialInfo.ScheduledStartTime
-	membersOnly := false
+	// probeAuthenticated: the wait has switched to the cookied status probe
+	// (B1, waitingRoomAuthFlip) — on ANY auth wall (members_only,
+	// age_restricted, login_required) or a TV-auth escalation answer, not only
+	// a members-only stream, which is what its old name, membersOnly, said.
+	probeAuthenticated := false
 	lastFullFetch := time.Now() // Initial full fetch just happened in Process()
 	lastScheduleProbe := lastFullFetch
 	unclearSpell := false       // the cookied probe's last answer could not read the stream (the switch's default arm)
@@ -426,8 +430,8 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			lastOfflineProbe = time.Now()
 		}
 
-		// Probe — use lightweight authenticated probe if members-only was detected
-		probeInfo, probeErr := sp.probeVideoStatus(ctx, job.VideoID, membersOnly)
+		// Probe — the cookied probe once B1 (below) has switched to it
+		probeInfo, probeErr := sp.probeVideoStatus(ctx, job.VideoID, probeAuthenticated)
 		if probeErr != nil {
 			newCount, giveUp, report, cancelled := applyProbeError(probeErr, consecutiveErrors)
 			switch report {
@@ -625,10 +629,10 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		}
 
 		// B1: the wall went up mid-wait — switch to the cookied probe.
-		if !membersOnly && waitingRoomAuthFlip(probeInfo, sp.yt.Auth.HasAuthCookies()) {
+		if !probeAuthenticated && waitingRoomAuthFlip(probeInfo, sp.yt.Auth.HasAuthCookies()) {
 			sp.logger.Info("stream is auth-walled, switching to the authenticated probe",
 				"videoID", job.VideoID, "playability", string(probeInfo.PlayabilityError))
-			membersOnly = true
+			probeAuthenticated = true
 		}
 
 		sp.tickRateLimit(job, &rateLimit, time.Now())
@@ -739,7 +743,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			// schedule probe run only on an answer that says upcoming, and the
 			// status probe's says it cannot read it. Off the cookied probe this
 			// is the end of the job; on it, a full fetch is what can tell.
-			if membersOnly {
+			if probeAuthenticated {
 				// That fetch is a watch page and six player calls, and it used to
 				// run on every poll, which a stream made private kept up for 31
 				// hours. It now runs when it can say something new: on the first
