@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
-	"github.com/vampiricwulf/Moombox/internal/jobstate"
 )
 
 // The compact task list (owner rulings R-C4, R-C7) is the same model drawn a
@@ -72,40 +72,34 @@ func (m *TaskListModel) setCompact(compact bool) {
 }
 
 // compactFigure is the short figure at the right edge of a compact row and
-// whether it is dim: the percent while downloading or muxing (a wait tag
-// while the downloader waits, the elapsed time for a capture with no
-// percent), the elapsed time while live, the countdown while waiting, the
-// hold or pending-action tag of a Queued or Error row, and the watched dot of
-// a Finished one. "" when the row has none.
+// whether it is dim. For a Downloading, Muxing, Queued or Error row it is the
+// normal row's progress cell (progressCell): the percent, the wait tag while
+// the downloader waits, the hold tag, the pending mux or retry; a capture
+// with no percent shows its elapsed time. Its own are the elapsed time while
+// live, the countdown while waiting, and the watched dot of a Finished row.
+// "" when the row has none.
 func (m *TaskListModel) compactFigure(job *database.Job, now time.Time) (text string, dim bool) {
 	switch job.Status {
-	case database.StatusDownloading, database.StatusMuxing:
-		percent, progress := job.Percent, job.Progress
-		if p := m.progressStore.Get(job.ID); p != nil {
-			percent, progress = p.Percent, p.Progress
-		}
+	case database.StatusDownloading, database.StatusMuxing, database.StatusQueued, database.StatusError:
+		// The normal row's progress cell (progressCell owns the rule),
+		// without its trailing space.
+		cell, dim := m.progressCell(job, now)
+		cell = strings.TrimSpace(cell)
 		switch {
-		case isWaitProgress(progress):
-			return "wait", true
-		case percent > 0:
-			// Always four cells, so the title does not shift at 10 and 100.
-			return fmt.Sprintf("%3.0f%%", percent), false
+		case cell != "" && !dim:
+			// A percent: always four cells, so the title does not shift
+			// at 10 and 100.
+			return fmt.Sprintf("%4s", cell), false
+		case cell != "":
+			return cell, true
+		case job.Status == database.StatusDownloading || job.Status == database.StatusMuxing:
+			return compactElapsed(job, now), false
 		}
-		return compactElapsed(job, now), false
 	case database.StatusLive:
 		return compactElapsed(job, now), false
 	case database.StatusUpcoming:
 		if start := parseJobTime(job.StreamStartTime); start.After(now) {
 			return "in " + compactSpan(start.Sub(now)), false
-		}
-	case database.StatusQueued:
-		return strings.TrimSpace(queuedHoldTag(m.holds.For(job, now))), true
-	case database.StatusError:
-		switch jobstate.PendingAutoAction(job) {
-		case jobstate.AutoActionMux:
-			return "⟳ mux", true
-		case jobstate.AutoActionRetry:
-			return "⟳ retry", true
 		}
 	case database.StatusFinished:
 		if job.Watched {
@@ -164,7 +158,7 @@ func (m *TaskListModel) renderCompactJob(job *database.Job, selected, archived b
 	dimmed := archived && !selected
 
 	tag := compactStatusTag(job.Status)
-	tag += strings.Repeat(" ", max(compactTagWidth-ansi.StringWidth(tag), 0))
+	tagPad := strings.Repeat(" ", max(compactTagWidth-ansi.StringWidth(tag), 0))
 
 	figure, figureDim := m.compactFigure(job, now)
 	room := max(w-compactTagWidth-compactTagGap, 0)
@@ -183,11 +177,23 @@ func (m *TaskListModel) renderCompactJob(job *database.Job, selected, archived b
 	if title == "" {
 		title = job.VideoID
 	}
+	// A tab measures as no cells and is drawn as several, and any other
+	// control character has no business on the row: each is one space, so
+	// the title is measured as it is drawn.
+	title = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, title)
 	title = truncateString(title, titleW)
 	title += strings.Repeat(" ", max(titleW-ansi.StringWidth(title), 0))
 
+	// The padding is written outside the tag's style: a status style that
+	// underlines (Error) would underline the blank cell too.
 	var sb strings.Builder
 	sb.WriteString(statusMarkStyle(job, dimmed).Render(tag))
+	sb.WriteString(tagPad)
 
 	batch := m.selected[job.ID]
 	gap := " "

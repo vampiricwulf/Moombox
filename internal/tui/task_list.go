@@ -706,8 +706,16 @@ func (m *TaskListModel) resetMarquee() {
 // "⟳ mux" or "⟳ retry" (jobstate.PendingAutoAction, owner ruling R-D2) — the
 // row hint for the sentence the details pane spells out.
 func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait bool) {
+	return m.progressCell(job, time.Now())
+}
+
+// progressCell is progressCellText at a given time: THE rule for a row's
+// progress slot. The compact row's figure (compactFigure) reformats what it
+// returns and decides nothing of its own for these statuses, so a tag added
+// here shows in both drawings.
+func (m *TaskListModel) progressCell(job *database.Job, now time.Time) (text string, isWait bool) {
 	if job.Status == database.StatusQueued {
-		return queuedHoldTag(m.holds.For(job, time.Now())), true
+		return queuedHoldTag(m.holds.For(job, now)), true
 	}
 	if job.Status == database.StatusError {
 		switch jobstate.PendingAutoAction(job) {
