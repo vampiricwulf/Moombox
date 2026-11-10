@@ -274,7 +274,7 @@ internal/web/routes          -- REST handlers
 internal/tui                 -- 2-over-1 panel layout, overlays, chord system
 internal/goja                -- JS runtime shims (minimal DOM, TextEncoder, timers)
 internal/connectivity        -- reachability monitor (plain TCP dial); gates stream-end verdicts during outages
-internal/httpx               -- shared keep-alive-tuned http.Client/Transport shapes
+internal/httpx               -- shared keep-alive-tuned http.Client/Transport shapes (HTTP/2 health check, 30 s connect timeout)
 internal/httpx/httpxtest      -- test-only: an http.Client that serves a handler in the test's own process, so a request can run inside a testing/synctest bubble
 internal/sqliteuri           -- the "file:" URI every SQLite open goes through (job database, browser cookie databases)
 internal/redact              -- one redaction rule per kind of secret, for error text, log lines and notifications (a googlevideo or Twitch media URL's credentials, the GVS PO token, a credential inside a URL)
@@ -648,6 +648,8 @@ The `SegmentDownloader` in `internal/engine/downloader.go` handles the actual by
 | `DefaultRetryDelayCap` | 60s | Max retry delay (exponential backoff cap) |
 
 Every retry and backoff wait the live loops and the whole-file direct path sleep on is a field of the unexported `delays` struct (`internal/engine/delays.go`), defaulting to the named constants (the first-segment hunt and the eviction probe keep their own constants; `fetchSegmentWithRetry`'s linear ladder counts in `segmentRetryUnit`, 5 s); the engine tests poke `fastDelays()` (÷20), and the direct path's tests `directDelays()` (its size-probe backoff, chunk and fallback ladders and connectivity poll a further ÷5, together), so `go test ./internal/engine/` runs in seconds while production timing is untouched.
+
+Every outbound client, the engine's included, is built on `internal/httpx`'s transport shape (`newDefaultTransport`, `internal/httpx/client.go`). It carries an HTTP/2 health check: a connection that has delivered no frame for 30 s is pinged and, when the ping goes unanswered for 15 s, closed, so the next request dials a new one. Without it a connection whose peer vanished without a reset (a NAT or firewall that dropped the flow, a VPN flap) stayed in the pool, because a request cancelled on it only resets its stream, and every fetch to that host waited out its idle deadline on the dead connection until the kernel gave up. The dialer has a 30 s connect timeout and keeps Go's default 15 s TCP keep-alive. Pinned by `internal/httpx/health_test.go`, which black-holes a live HTTP/2 connection with and without the check.
 
 #### Catch-up: rolling window and byte-bounded buffer
 

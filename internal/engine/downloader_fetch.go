@@ -26,10 +26,13 @@ import (
 // comfortably exceeds config.SegmentWorkersWarnThreshold (16, the point
 // past which the config layer already warns operators about resource
 // tradeoffs) with headroom for HEAD probes and playlist fetches sharing the
-// same host. A downloader configured with more workers than this still
-// downloads correctly — connections beyond the idle pool's capacity simply
-// aren't kept alive, so those workers degrade to paying a fresh TCP+TLS
-// handshake per segment rather than failing outright.
+// same host. The pool only matters on an HTTP/1.1 origin: over HTTP/2,
+// which googlevideo and Twitch's CDN speak, every worker's requests
+// multiplex over one connection per host and the idle pool holds that one.
+// On an HTTP/1.1 origin a downloader configured with more workers than
+// this still downloads correctly — connections beyond the idle pool's
+// capacity simply aren't kept alive, so those workers degrade to paying a
+// fresh TCP+TLS handshake per segment rather than failing outright.
 const engineMaxIdleConnsPerHost = 64
 
 // engineHTTPClient is a shared HTTP client for segment and chunk downloads.
@@ -39,6 +42,10 @@ const engineMaxIdleConnsPerHost = 64
 // idle-per-host to engineMaxIdleConnsPerHost (see its doc) so workers reuse
 // sockets, and keep them alive for 90 s (matches http.DefaultTransport's
 // value).
+// The shared shape also brings the HTTP/2 health check and the connect
+// timeout (see httpx's defaultTransport): a connection that went silently
+// dead is closed after 45 s instead of taking every fetch to that host down
+// with it until the kernel gives up.
 //
 // Timeout: none. Every call site carries its own deadline — fetchSegment and
 // fetchChunk a read-progress (idle) deadline under a segmentHardCeiling
