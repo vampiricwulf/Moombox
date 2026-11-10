@@ -654,7 +654,7 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 		// (engine.RestartSiblingStem) and so never offered for deletion, while
 		// asideOutputPath's counter wrote the successful retry to "-2" beside
 		// it.
-		verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, g.video, g.audio, out, "")
+		verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, g.video, g.audio, out, "", nil)
 		if err != nil {
 			if verdict.short != nil {
 				o.logger.Error("a set-aside recording's copy came out short; it stays in staging and the dir is kept",
@@ -1162,8 +1162,13 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	}
 	kept := keptImportFor(jobCtx, o.logger, priorArchive)
 	chaptersPath := o.prepareArchiveChapters(ctx, jobCtx, videoPath, audioPath, kept)
-	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputFile, chaptersPath)
+	// While FFmpeg copies, the row's progress line says how far it has got
+	// (muxReadout, owner ruling R-D1 of 2026-11-10); a copy that makes no archive gets the
+	// line it had back.
+	readout := o.newMuxReadout(jobCtx)
+	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputFile, chaptersPath, readout.callback())
 	if err != nil {
+		readout.restore()
 		if verdict.short != nil {
 			return verdict.short
 		}
@@ -1377,6 +1382,9 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 		}
 	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		// The final part's readout may still be on the row, which is
+		// about to read Error.
+		o.dropMuxReadoutLine(jobCtx.Job.ID)
 		return fmt.Errorf("create output dir: %w", err)
 	}
 
@@ -1858,6 +1866,37 @@ func (o *DownloadOrchestrator) muxSegment(
 	quality QualityInfo,
 	result *DownloadResult,
 ) (*database.Segment, error) {
+	return o.muxSegmentWith(ctx, jobCtx, segIdx, unixStart, unixEnd, quality, result, nil)
+}
+
+// muxFinalPart is muxSegment for the last part of a split recording, muxed
+// once the capture is over and the row reads Muxing: the row's progress line
+// follows this copy (muxReadout, owner ruling R-D1 of 2026-11-10), as it
+// follows a single-file archive's. The parts muxed in the background while
+// the capture runs get no readout; the row is Downloading then and its line
+// is the download's.
+func (o *DownloadOrchestrator) muxFinalPart(
+	ctx context.Context,
+	jobCtx *JobContext,
+	segIdx int,
+	unixStart, unixEnd int64,
+	quality QualityInfo,
+	result *DownloadResult,
+) (*database.Segment, error) {
+	return o.muxSegmentWith(ctx, jobCtx, segIdx, unixStart, unixEnd, quality, result, o.newMuxReadout(jobCtx))
+}
+
+// muxSegmentWith is muxSegment with the readout its copy reports to, nil for
+// none.
+func (o *DownloadOrchestrator) muxSegmentWith(
+	ctx context.Context,
+	jobCtx *JobContext,
+	segIdx int,
+	unixStart, unixEnd int64,
+	quality QualityInfo,
+	result *DownloadResult,
+	readout *muxReadout,
+) (*database.Segment, error) {
 	// Part files carry the job's resolved name plus a 1-based part number —
 	// "{name} - partN.mp4" — so they group and sort beside the job's other
 	// assets. segIdx is stable across restarts and recovery (derived from
@@ -1942,8 +1981,9 @@ func (o *DownloadOrchestrator) muxSegment(
 	// A damaged part is repaired and recorded like the archive (copyStaged);
 	// its seg_N dir keeps the record that shields it, which the part merge
 	// and the staging cleanup both read.
-	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputPath, "")
+	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputPath, "", readout.callback())
 	if err != nil {
+		readout.restore()
 		return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
 	}
 	probeData := verdict.probe

@@ -194,7 +194,8 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 			}
 			return directShortFileError("an empty 206", offset, totalSize)
 		}
-		d.noteFetch(len(data))
+		// No noteFetch here: fetchChunk reported the chunk's bytes as they
+		// arrived (arrivalMeter).
 
 		n, writeErr := d.outputFile.Write(data)
 		if writeErr != nil {

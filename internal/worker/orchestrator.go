@@ -1032,6 +1032,14 @@ func computeIncompleteTail(videoBehind, audioBehind, interrupted bool) bool {
 	return videoBehind || audioBehind || interrupted
 }
 
+// resultIncompleteTail is the incomplete-tail verdict for a finished
+// download, with nothing written: what finalizeIncompleteTail persists, for
+// a caller that needs the answer before that write (muxLiveFinalPart).
+func resultIncompleteTail(result *DownloadResult, workerWaitedForResume bool) bool {
+	interrupted := downloaderInterrupted(result.VideoDownloader) || downloaderInterrupted(result.AudioDownloader) || workerWaitedForResume
+	return computeIncompleteTail(downloaderBehindHead(result.VideoDownloader), downloaderBehindHead(result.AudioDownloader), interrupted)
+}
+
 // finalizeIncompleteTail computes and unconditionally persists the
 // incomplete_tail flag once a download (VOD or live) has returned with
 // err == nil. Shared by both branches of ExecuteWithChat's isVod switch — a
@@ -1078,7 +1086,7 @@ func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *Down
 	videoBehind := downloaderBehindHead(result.VideoDownloader)
 	audioBehind := downloaderBehindHead(result.AudioDownloader)
 	interrupted := downloaderInterrupted(result.VideoDownloader) || downloaderInterrupted(result.AudioDownloader) || workerWaitedForResume
-	incomplete = computeIncompleteTail(videoBehind, audioBehind, interrupted)
+	incomplete = resultIncompleteTail(result, workerWaitedForResume)
 	// Unconditional write: a retry that completes cleanly clears the flag by
 	// writing false through the same path.
 	o.db.UpdateJobFields(jobID, map[string]any{"incomplete_tail": incomplete})

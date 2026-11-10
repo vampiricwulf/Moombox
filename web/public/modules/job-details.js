@@ -669,6 +669,18 @@ export class JobDetailsController {
         </div>`;
     }
 
+    // A live capture being muxed: its line is the mux readout ("Muxing 42%",
+    // owner ruling R-D1), which the VOD arm below shows in its own Progress
+    // row and the TUI's details pane shows for every Muxing row. A status
+    // change rebuilds the dialog, so the row comes and goes with Muxing;
+    // updateJobDetails patches its text. Empty outside Muxing, so no other
+    // row's markup changes.
+    const muxProgressRow = job.status === "Muxing" ? `
+          <div class="details-row">
+            <span class="details-label">Progress:</span>
+            <span class="details-value" data-field="progress">${this.app.escapeHtml(this.app.formatProgress(job))}</span>
+          </div>` : "";
+
     const isTwitch = job.platform === "twitch";
     // The Twitch login for the embed, from the url alone: a row with no url
     // is an imported live capture, whose channelName is no login — "Import",
@@ -791,7 +803,7 @@ export class JobDetailsController {
             <span class="details-label">Type:</span>
             <span class="details-value">Live</span>
           </div>
-          ${segmentInfo}
+          ${segmentInfo}${muxProgressRow}
           `
           }
           <div class="details-row" id="speed-row" style="${job.speed ? "" : "display:none"}">

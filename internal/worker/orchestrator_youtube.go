@@ -1190,7 +1190,7 @@ streamEnded:
 		if partResumed {
 			muxStart = 0
 		}
-		seg, muxErr := o.muxSegment(ctx, jobCtx, segmentIndex, muxStart, segmentEndTime, currentQuality, result)
+		seg, muxErr := o.muxLiveFinalPart(ctx, jobCtx, tracker, waitedForResume.value(), segmentIndex, muxStart, segmentEndTime, currentQuality, result)
 		if muxErr != nil {
 			o.logger.Error("failed to mux final quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
 		} else if seg != nil {
@@ -1201,6 +1201,41 @@ streamEnded:
 	}
 
 	return result, waitedForResume.value(), nil
+}
+
+// muxLiveFinalPart muxes the last part of a split YouTube capture at the
+// stream's end, with the row's mux readout (muxFinalPart) when the row's line
+// is free for one. Two things have to be settled first, because the caller
+// only finalizes the tracker and writes the incomplete-tail flag after
+// runLiveStreamDownload returns:
+//
+//   - The download's tracker is closed, so nothing of it writes the progress
+//     line during the copy: live chat is still polling, and every chat tick
+//     (or a wait activity left set by the end verification) would otherwise
+//     put the download's line back between two readout lines. A closed
+//     tracker still persists the chat count, and the caller's Finalize still
+//     flushes the gaps; Close is idempotent.
+//   - A capture that ended missing its tail gets no readout (owner ruling
+//     R-D1: such a job keeps its honest saved line). The flag is not on the
+//     row yet, so it is worked out here from the same evidence
+//     finalizeIncompleteTail writes it from.
+func (o *DownloadOrchestrator) muxLiveFinalPart(
+	ctx context.Context,
+	jobCtx *JobContext,
+	tracker *ProgressTracker,
+	waitedForResume bool,
+	segIdx int,
+	unixStart, unixEnd int64,
+	quality QualityInfo,
+	result *DownloadResult,
+) (*database.Segment, error) {
+	if tracker != nil {
+		tracker.Close()
+	}
+	if resultIncompleteTail(result, waitedForResume) {
+		return o.muxSegment(ctx, jobCtx, segIdx, unixStart, unixEnd, quality, result)
+	}
+	return o.muxFinalPart(ctx, jobCtx, segIdx, unixStart, unixEnd, quality, result)
 }
 
 // unreadableStatusEndsCapture reports whether the live loop's stream-end
