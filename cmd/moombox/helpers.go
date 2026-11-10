@@ -324,9 +324,10 @@ func checkAndBroadcastUpdate(
 // around filterJobsByAgeThreshold for callers that don't already hold the value.
 // listedJobs and listedJob are the dashboard's WebSocket job rows
 // (initial_state, jobs_update, job_update) as the REST jobs list sends them
-// (worker.ListJob): a terminal row carries hasStaging, read from the
+// (worker.ListJob): a row Resume can be offered on carries hasStaging, read from the
 // configured staging base, so the row's inline button can be Resume only
-// where there is staging to resume (owner decision PE-5).
+// where there is staging to resume (owner decision PE-5, narrowed to those
+// rows by owner ruling R-B2).
 func listedJobs(store *config.Store, jobs []*database.Job) []worker.ListedJob {
 	return worker.ListJobs(stagingBaseOf(store), jobs)
 }

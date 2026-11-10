@@ -1027,8 +1027,10 @@ export function channelRemovedToast(choice, summary, data) {
  * three conditions (jobs.go resume route); this keeps the UI from offering
  * what the server will refuse.
  *
- * `hasStaging` is on every terminal list row (the server's worker.ListJob,
- * owner decision PE-5) and on the details view's fetched job; a row without
+ * `hasStaging` is on every list row that passes the status and platform
+ * arms below (the server's worker.ListJob applies the same two, owner
+ * decision PE-5 as ruling R-B2 narrowed it) and on the details view's
+ * fetched job, whatever its status; a row without
  * it (`undefined`) is unknown, and by default passes through to the server's
  * check — only a known `false` excludes.
  *

@@ -2768,8 +2768,9 @@ export class MoomboxApp {
     // only where it cannot (owner decision PR-M1): an arrow read as "retry"
     // used to start a recoverable job over. Both stay in the overflow menu.
     // Resume only where there is staging to resume (owner decision PE-5): a
-    // terminal list row carries the server's hasStaging (worker.ListJob, on
-    // every jobs frame and GET /api/jobs), so a resumable row with nothing
+    // list row Resume can be offered on carries the server's hasStaging
+    // (worker.ListJob, on every jobs frame and GET /api/jobs; ruling R-B2
+    // narrowed it to those rows), so a resumable row with nothing
     // staged offers Reinitialize, where it offered a Resume the server
     // answered with "use Reinitialize". A row without the flag is not
     // offered Resume. Only the rows that offered Reinitialize change: a

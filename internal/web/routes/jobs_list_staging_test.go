@@ -12,31 +12,41 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-// TestJobsListReportsHasStagingForTerminalRows is owner decision PE-5: the
-// jobs list (GET /api/jobs, plain and paginated) carries hasStaging for a
-// terminal row — Error, Cancelled, COOKIES?, Finished — read from the
-// staging directory server-side, so the dashboard's row icon can be Resume
-// only where there is staging to resume. A row in any other status carries
-// no flag. The list carried none at all, so the row offered Resume on every
+// TestJobsListReportsHasStagingForResumableRows is owner decision PE-5 as
+// owner ruling R-B2 narrowed it: the jobs list (GET /api/jobs, plain and
+// paginated) carries hasStaging for a row Resume can be offered on — a
+// YouTube row in Error, Cancelled or COOKIES?, or Finished with an
+// incomplete tail — read from the staging directory server-side, so the
+// dashboard's row icon can be Resume only where there is staging to resume.
+// Every other row carries no flag: a row in another status, a Finished row
+// without an incomplete tail, and a Twitch row, which starts over and never
+// resumes. The list carried none at all, so the row offered Resume on every
 // resumable row and the server answered "use Reinitialize".
 //
 // Mutants (each run): sendPaginated sending the bare rows (no hasStaging
-// anywhere); ListJob flagging no status (likewise); ListJob flagging every
-// status (the Downloading row carries one); HasStaging always true (the
-// Cancelled row with nothing staged reads true).
-func TestJobsListReportsHasStagingForTerminalRows(t *testing.T) {
+// anywhere); ListJob flagging no row (likewise); ListJob flagging every
+// status (the Downloading row carries one); ListJob flagging every terminal
+// row, as before R-B2 (the plain Finished and the Twitch rows carry one);
+// HasStaging always true (the Cancelled row with nothing staged reads true).
+func TestJobsListReportsHasStagingForResumableRows(t *testing.T) {
 	f := newJobsFixture(t)
-	statuses := map[string]database.JobStatus{
-		"err_staged":   database.StatusError,
-		"cancel_empty": database.StatusCancelled,
-		"cookies_stg":  database.StatusCookies,
-		"fin_staged":   database.StatusFinished,
-		"downloading":  database.StatusDownloading,
+	seed := map[string]func(*database.Job){
+		"err_staged":   func(j *database.Job) { j.Status = database.StatusError },
+		"cancel_empty": func(j *database.Job) { j.Status = database.StatusCancelled },
+		"cookies_stg":  func(j *database.Job) { j.Status = database.StatusCookies },
+		"tail_staged":  func(j *database.Job) { j.Status = database.StatusFinished },
+		"fin_staged":   func(j *database.Job) { j.Status = database.StatusFinished },
+		"twitch_err":   func(j *database.Job) { j.Status = database.StatusError; j.Platform = "twitch" },
+		"downloading":  func(j *database.Job) { j.Status = database.StatusDownloading },
 	}
-	for id, st := range statuses {
-		f.addJob(t, id, func(j *database.Job) { j.Status = st })
+	for id, mutate := range seed {
+		f.addJob(t, id, mutate)
 	}
-	for _, id := range []string{"err_staged", "cookies_stg", "fin_staged", "downloading"} {
+	// AddJob does not write the tail flag; the worker sets it with an update.
+	if f.db.UpdateJobFields("tail_staged", map[string]any{"incomplete_tail": true}) == nil {
+		t.Fatal("could not flag tail_staged's incomplete tail")
+	}
+	for _, id := range []string{"err_staged", "cookies_stg", "tail_staged", "fin_staged", "twitch_err", "downloading"} {
 		dir := filepath.Join(f.stagingDir, id)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
@@ -45,7 +55,10 @@ func TestJobsListReportsHasStagingForTerminalRows(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	want := map[string]any{"err_staged": true, "cancel_empty": false, "cookies_stg": true, "fin_staged": true, "downloading": nil}
+	want := map[string]any{
+		"err_staged": true, "cancel_empty": false, "cookies_stg": true, "tail_staged": true,
+		"fin_staged": nil, "twitch_err": nil, "downloading": nil,
+	}
 
 	check := func(t *testing.T, rows []map[string]any) {
 		t.Helper()
@@ -57,7 +70,7 @@ func TestJobsListReportsHasStagingForTerminalRows(t *testing.T) {
 			got, present := row["hasStaging"]
 			if w := want[id]; w == nil {
 				if present {
-					t.Errorf("%s: hasStaging = %v, want none for a non-terminal row", id, got)
+					t.Errorf("%s: hasStaging = %v, want none for a row Resume is never offered on", id, got)
 				}
 			} else if got != w {
 				t.Errorf("%s: hasStaging = %v (present %v), want %v", id, got, present, w)
@@ -92,37 +105,50 @@ func TestJobsListReportsHasStagingForTerminalRows(t *testing.T) {
 }
 
 // TestArchivedJobsListReportsHasStaging is the archived half of owner
-// decision PE-5: the dashboard's archived panel (Finished rows older than
-// hide_finished_age_days) is built from GET /api/jobs/archived, which sends
-// its page through the same sendPaginated as /api/jobs, so an archived row
-// carries hasStaging read from the configured staging base too — true over a
-// staged file, false over none. The rows are aged by writing updated_at
-// straight into the database (AddJob stamps "now"), so the 30-day default
-// threshold archives them without a clock.
+// decision PE-5, as owner ruling R-B2 narrowed it: the dashboard's archived
+// panel (Finished rows older than hide_finished_age_days) is built from GET
+// /api/jobs/archived, which sends its page through the same sendPaginated as
+// /api/jobs, so an archived row Resume can be offered on — one with an
+// incomplete tail — carries hasStaging read from the configured staging base
+// too: true over a staged file, false over none. A plain archived row, which
+// is nearly every one, carries no flag and costs no directory read, staged
+// or not. The rows are aged by writing updated_at straight into the database
+// (AddJob stamps "now"), so the 30-day default threshold archives them
+// without a clock.
 //
-// Mutant (run): the archived route reading staging from "" — every
-// archived row reads false, and the staged one is caught.
+// Mutants (run): the archived route reading staging from "" — every flagged
+// archived row reads false, and the staged one is caught; ListJob flagging
+// every Finished row — the plain rows carry a flag.
 func TestArchivedJobsListReportsHasStaging(t *testing.T) {
 	f := newJobsFixture(t)
-	f.addJob(t, "old_staged", nil)
-	f.addJob(t, "old_empty", nil)
+	for _, id := range []string{"old_staged", "old_empty", "plain_staged", "plain_empty"} {
+		f.addJob(t, id, nil)
+	}
+	// AddJob does not write the tail flag; the worker sets it with an update.
+	for _, id := range []string{"old_staged", "old_empty"} {
+		if f.db.UpdateJobFields(id, map[string]any{"incomplete_tail": true}) == nil {
+			t.Fatalf("could not flag %s's incomplete tail", id)
+		}
+	}
 	raw, err := sql.Open("sqlite", filepath.Join(filepath.Dir(f.outputDir), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer raw.Close()
 	aged := time.Now().UTC().Add(-40 * 24 * time.Hour).Format(time.RFC3339)
-	if _, err := raw.Exec(`UPDATE jobs SET updated_at = ? WHERE id IN ('old_staged', 'old_empty')`, aged); err != nil {
+	if _, err := raw.Exec(`UPDATE jobs SET updated_at = ?`, aged); err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(f.stagingDir, "old_staged")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
+	for _, id := range []string{"old_staged", "plain_staged"} {
+		dir := filepath.Join(f.stagingDir, id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "video_stream"), []byte("media"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "video_stream"), []byte("media"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]any{"old_staged": true, "old_empty": false}
+	want := map[string]any{"old_staged": true, "old_empty": false, "plain_staged": nil, "plain_empty": nil}
 
 	for _, path := range []string{"/api/jobs/archived", "/api/jobs/archived?limit=100"} {
 		rec := doRequest(t, f.router, "GET", path, nil)
@@ -148,7 +174,7 @@ func TestArchivedJobsListReportsHasStaging(t *testing.T) {
 		}
 		for _, row := range rows {
 			id, _ := row["id"].(string)
-			if got, present := row["hasStaging"]; got != want[id] {
+			if got, present := row["hasStaging"]; got != want[id] || present != (want[id] != nil) {
 				t.Errorf("%s %s: hasStaging = %v (present %v), want %v", path, id, got, present, want[id])
 			}
 		}

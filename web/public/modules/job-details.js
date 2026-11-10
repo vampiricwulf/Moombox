@@ -179,7 +179,8 @@ export class JobDetailsController {
    * Fetch the enriched job (GET /api/jobs/{id}) to seed hasStaging/hasSegments.
    * Every payload that populates this.app.jobs (WS initial_state/jobs_update/
    * job_update, /api/jobs/archived) is a DB row WITHOUT these computed
-   * fields — but hasStaging, which a terminal row carries (worker.ListJob) —
+   * fields — but hasStaging, which a row Resume can be offered on carries
+   * (worker.ListJob) —
    * so the Resume/Mux buttons in the details dialog would never appear
    * without this. _preserveStagingFields keeps them alive across
    * subsequent WS updates. Failures are silent — buttons just stay hidden.
