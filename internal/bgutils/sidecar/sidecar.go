@@ -75,9 +75,10 @@ type Config struct {
 	ExposeGC       bool
 	// OnUnhealthy, when non-nil, is called ONCE each time the sidecar goes
 	// from healthy to unhealthy for a reason other than Stop — stdout EOF
-	// after a crash or a V8 OOM-abort, a readPump panic, or a stdin write the
-	// child has not drained within RequestTimeout. It runs ON THE GOROUTINE
-	// THAT NOTICED (readPump, or the stall watchdog's timer) with the health
+	// after a crash or a V8 OOM-abort, a readPump panic, a stdin write the
+	// child has not drained within RequestTimeout, or a wedge probe's ping
+	// left unanswered. It runs ON THE GOROUTINE THAT NOTICED (readPump, the
+	// stall watchdog's timer, or the wedge probe) with the health
 	// flag already flipped and the pending requests already drained, so it
 	// MUST NOT block: the Supervisor wired to it does a non-blocking channel
 	// send and nothing else. A panic in the callback is recovered and logged
@@ -114,6 +115,12 @@ type Sidecar struct {
 	// other: a callback delayed across a restart must not mark the
 	// replacement child unhealthy for the old child's wedge.
 	childGen atomic.Uint64
+	// wedgeProbing is set while a wedge probe is in flight (see probeWedge):
+	// one probe at a time, however many calls time out together.
+	wedgeProbing atomic.Bool
+	// wedgeProbeTimeout is how long a wedge probe's ping may go unanswered
+	// before the child is condemned. A field so tests can shrink it.
+	wedgeProbeTimeout time.Duration
 
 	// Request multiplexing.
 	nextReqID atomic.Uint64
@@ -198,6 +205,13 @@ type rpcResponse struct {
 	Error  string          `json:"error,omitempty"`
 }
 
+// wedgeProbeTimeout is the default deadline of a wedge probe's ping. A live
+// event loop answers a ping at once, even with mints awaiting the network,
+// so the figure only has to outlast the longest SYNCHRONOUS stretch a healthy
+// child runs: an ejs player preprocess or a BotGuard interpreter pass on a
+// slow arm64 board. Thirty seconds leaves that a wide margin.
+const wedgeProbeTimeout = 30 * time.Second
+
 // ErrStopped is returned by Restart once Stop has been called. Stop is
 // terminal — cmd/moombox only calls it from the shutdown path — so a
 // supervisor restart that races shutdown must not bring the child back.
@@ -223,6 +237,7 @@ func New(cfg Config) *Sidecar {
 		writeSem:           make(chan struct{}, 1),
 		shutdownRPCTimeout: 1 * time.Second,
 		exitGrace:          2 * time.Second,
+		wedgeProbeTimeout:  wedgeProbeTimeout,
 	}
 	s.start = s.startLocked
 	return s
@@ -697,8 +712,9 @@ func (s *Sidecar) Restart(ctx context.Context) error {
 
 // IsHealthy reports whether the sidecar is currently usable. False after
 // Start fails, after Stop is called, after readPump observes stdout EOF (the
-// child died), or after a stdin write stalled past RequestTimeout (the child
-// stopped reading — see writeRequest).
+// child died), after a stdin write stalled past RequestTimeout (the child
+// stopped reading — see writeRequest), or after a wedge probe's ping went
+// unanswered (the child's event loop is stuck — see probeWedge).
 func (s *Sidecar) IsHealthy() bool { return s.healthy.Load() }
 
 // Recoverable reports whether a handle that is down now is one a caller may
@@ -957,9 +973,9 @@ func (s *Sidecar) SolveCipher(ctx context.Context, req SolveCipherRequest) (Solv
 	return result, nil
 }
 
-// ping exercises the JSON-RPC round-trip. Kept as an unexported method
-// for tests after Start switched to the ready-event handshake; production
-// code does not call ping directly anymore.
+// ping exercises the JSON-RPC round-trip. Tests call it; production sends
+// its only ping from probeWedge, which needs its own deadline and so goes
+// through roundTrip directly.
 func (s *Sidecar) ping(ctx context.Context) error {
 	var result string
 	if err := s.call(ctx, "ping", nil, &result); err != nil {
@@ -983,12 +999,70 @@ func (s *Sidecar) call(ctx context.Context, method string, params map[string]any
 	// is single-threaded — one request wedged inside V8 would otherwise
 	// hang its caller indefinitely while the process still looks healthy
 	// (stdout stays open, so readPump never EOFs).
+	//
+	// The timeout by itself only frees the caller. A request that was
+	// written and then went unanswered for the whole of RequestTimeout,
+	// with the caller's own context still live, is followed by one wedge
+	// probe (probeWedge), and only that probe can condemn the child.
+	parent := ctx
 	if s.cfg.RequestTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.cfg.RequestTimeout)
 		defer cancel()
 	}
+	gen := s.childGen.Load()
 
+	written, err := s.roundTrip(ctx, method, params, into)
+	if written && s.cfg.RequestTimeout > 0 && parent.Err() == nil &&
+		errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		s.probeWedge(gen)
+	}
+	return err
+}
+
+// probeWedge asks whether the child's event loop is still turning, after a
+// request went unanswered for the whole of RequestTimeout. The child runs
+// each request on its own promise and answers a ping at once, so a slow mint
+// awaiting the network does not delay the answer; only a loop stuck in
+// synchronous code (ejs running player JS, the BotGuard interpreter) leaves a
+// ping unanswered. A ping still unanswered after wedgeProbeTimeout marks the
+// sidecar unhealthy, and the supervisor replaces the child.
+//
+// One probe runs at a time. Like the stall watchdog it condemns only the
+// child the timed-out request was sent to (gen), and none that a teardown is
+// already taking down. Any other end to the ping — an answer, the sidecar
+// going unhealthy by another route, a failed write — is no verdict.
+func (s *Sidecar) probeWedge(gen uint64) {
+	if !s.wedgeProbing.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer s.wedgeProbing.Store(false)
+		defer func() {
+			if r := recover(); r != nil {
+				s.cfg.Logger.Error("sidecar: wedge probe panic", "panic", fmt.Sprint(r))
+			}
+		}()
+		if s.childGen.Load() != gen || s.stopping.Load() || !s.healthy.Load() {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), s.wedgeProbeTimeout)
+		defer cancel()
+		_, err := s.roundTrip(ctx, "ping", nil, nil)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
+		if s.childGen.Load() != gen || s.stopping.Load() {
+			return
+		}
+		s.markUnhealthy("event loop unresponsive: no ping answer in " + s.wedgeProbeTimeout.String())
+	}()
+}
+
+// roundTrip writes one request and waits for its response under ctx alone:
+// call adds RequestTimeout on top, the wedge probe brings its own deadline.
+// written reports whether the request line reached the child's stdin.
+func (s *Sidecar) roundTrip(ctx context.Context, method string, params map[string]any, into any) (written bool, err error) {
 	id := s.nextReqID.Add(1)
 	ch := make(chan rpcResponse, 1)
 	s.pendingMu.Lock()
@@ -1001,22 +1075,22 @@ func (s *Sidecar) call(ctx context.Context, method string, params map[string]any
 	}()
 
 	if err := s.writeRequest(ctx, rpcRequest{ID: id, Method: method, Params: params}); err != nil {
-		return err
+		return false, err
 	}
 
 	select {
 	case resp := <-ch:
 		if resp.Error != "" {
-			return fmt.Errorf("sidecar: %s", resp.Error)
+			return true, fmt.Errorf("sidecar: %s", resp.Error)
 		}
 		if into != nil && len(resp.Result) > 0 {
 			if err := json.Unmarshal(resp.Result, into); err != nil {
-				return fmt.Errorf("decode response: %w", err)
+				return true, fmt.Errorf("decode response: %w", err)
 			}
 		}
-		return nil
+		return true, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return true, ctx.Err()
 	}
 }
 
@@ -1051,10 +1125,12 @@ func (s *Sidecar) unlockWrite() { <-s.writeSem }
 // is free to leave at ctx.Done(). Leaving does not cancel the line: it still
 // lands whole, and the next writer still waits behind it.
 //
-// A Write that outlasts RequestTimeout is the same failure as a request
-// wedged inside V8 and is handled the same way: the sidecar is marked
-// unhealthy so the supervisor replaces the child, and killing the child is
-// what frees the stranded writer. (Closing our end is not enough everywhere:
+// A Write that outlasts RequestTimeout means the child has stopped reading:
+// the sidecar is marked unhealthy so the supervisor replaces the child, and
+// killing the child is what frees the stranded writer. The read side is
+// different: a request that was written and never answered is only bounded
+// by RequestTimeout in call(), which does not condemn the child by itself;
+// the wedge probe that follows it does, when its ping goes unanswered too. (Closing our end is not enough everywhere:
 // on Windows an anonymous pipe's WriteFile in progress outlives CloseHandle
 // on the parent's side and returns only once the child's end is gone.)
 func (s *Sidecar) writeRequest(ctx context.Context, req rpcRequest) error {
