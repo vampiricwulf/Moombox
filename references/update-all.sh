@@ -107,22 +107,23 @@ for name in "${!REPOS[@]}"; do
     # Save current HEAD before pulling
     old_head=$(git -C "$dir" rev-parse HEAD 2>/dev/null)
 
-    # Fetch and pull
-    if ! fetch_err=$(git -C "$dir" fetch --all --prune -q 2>&1); then
-        echo "=== $name === FETCH FAILED"
-        echo "    $(echo "$fetch_err" | head -1)"
-        report_since_review "$name" "$dir" "$(git -C "$dir" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@')"
-        echo
-        ANY_FAILED=true
-        continue
-    fi
-
-    # Get default branch name
+    # Get default branch name, from what the last fetch left, so a failed
+    # fetch can still report against it
     default_branch=$(git -C "$dir" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
     if [ -z "$default_branch" ]; then
         default_branch=$(git -C "$dir" branch -r 2>/dev/null | grep -oP 'origin/\K(main|master)' | head -1)
     fi
     [ -z "$default_branch" ] && default_branch="main"
+
+    # Fetch and pull
+    if ! fetch_err=$(git -C "$dir" fetch --all --prune -q 2>&1); then
+        echo "=== $name === FETCH FAILED"
+        echo "    $(echo "$fetch_err" | head -1)"
+        report_since_review "$name" "$dir" "$default_branch"
+        echo
+        ANY_FAILED=true
+        continue
+    fi
 
     if ! pull_err=$(git -C "$dir" pull -q 2>&1); then
         echo "=== $name === PULL FAILED (diverged or dirty)"
