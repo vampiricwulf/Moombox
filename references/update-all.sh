@@ -70,7 +70,9 @@ ledger_sha() {
     [ -f "$LEDGER" ] || return 0
     awk -F'|' -v repo="$1" '
         { cell = $2; gsub(/^[ \t]+|[ \t]+$/, "", cell); split(cell, word, " ") }
-        word[1] == repo && match($4, /[0-9a-f]{40}/) { print substr($4, RSTART, RLENGTH); exit }
+        word[1] != repo { next }
+        # No {40} interval: older mawk builds do not support it.
+        match($4, /[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]+/) && RLENGTH == 40 { print substr($4, RSTART, RLENGTH); exit }
     ' "$LEDGER"
 }
 
