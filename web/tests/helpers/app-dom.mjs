@@ -233,10 +233,13 @@ function defineShoelaceStubs(window) {
     get checked() { return this._checked ?? this.hasAttribute("checked"); }
     set checked(v) { this._checked = !!v; }
   }
-  // `disabled` is read back by the Files/History tabs after a render.
+  // `disabled` is read back by the Files/History tabs after a render. A
+  // disabled button ignores click(), as Shoelace's does (it swallows the
+  // click while disabled), so a test cannot press what a user cannot.
   class SlDisableable extends HTMLElement {
     get disabled() { return this._disabled ?? this.hasAttribute("disabled"); }
     set disabled(v) { this._disabled = !!v; }
+    click() { if (!this.disabled) super.click(); }
   }
   // show()/hide() are Shoelace's imperative open/close; app.js calls them on
   // dialogs, dropdowns and tooltips. Recorded so a test can assert on them.

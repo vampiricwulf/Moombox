@@ -62,8 +62,9 @@ const shown = (el) => el.style.display !== "none";
 
 // MUTANTS: drop showUpdateDialog's `updateBtn.disabled = remote` (Update Now
 // is enabled); drop the note's display toggle (it stays hidden); drop
-// applyUpdate's viewerIsAtTheHost guard (a click on the disabled button —
-// which jsdom's stand-in still dispatches — POSTs apply).
+// applyUpdate's viewerIsAtTheHost guard (reaching applyUpdate past the
+// disabled button — the stand-in, like Shoelace, ignores a click on it — POSTs
+// apply).
 for (const url of ["http://192.168.1.50:774/", "http://172.17.0.1:774/"]) {
   test(`a viewer at ${url} is told where updates install from, and keeps the notes and Skip`, { skip }, async () => {
     const h = await openDialog(url);
@@ -80,6 +81,10 @@ for (const url of ["http://192.168.1.50:774/", "http://172.17.0.1:774/"]) {
     btn.click();
     await h.flush(); await h.flush();
     assert.equal(h.http.matching("/api/update/apply", "POST").length, 0, "a disabled Update Now still asked the server");
+    // The guard behind the button: applyUpdate reached anyway asks for nothing.
+    await h.app.updates.applyUpdate();
+    await h.flush(); await h.flush();
+    assert.equal(h.http.matching("/api/update/apply", "POST").length, 0, "applyUpdate asked the server for a remote viewer");
     assert.ok(h.toasts().some((t) => /pull the new image/.test(t.textContent)), "the refusal does not say what would work");
 
     h.el("update-dismiss-btn").click();
