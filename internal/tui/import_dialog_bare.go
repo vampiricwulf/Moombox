@@ -12,7 +12,8 @@ import (
 // (overlay_bare.go): a title row, the body, the keys.
 //
 //	pick       "Import .zip" and the end of the folder's path; the picker's
-//	           rows without the size column, each cut to the width
+//	           rows without the size column, a long name cut in its middle
+//	           so that its end shows
 //	meta       the file's name in the title, cut in its middle so that its
 //	           start and its ".zip" both show; the two fields on the first
 //	           two body rows, always; under them the server's refusal
@@ -142,11 +143,16 @@ func (m *ImportDialogModel) bareView() string {
 			break
 		}
 		// A copy without the size column: the name is what tells two
-		// archives apart, and a row is cut at its end.
+		// archives apart, so a row too long is cut in its middle, after
+		// the two cells of the cursor, and keeps its end: the date, the
+		// id, the ".zip".
 		picker := m.picker
 		picker.ShowSize = false
 		for _, row := range strings.Split(picker.View(), "\n") {
-			sheet.body = append(sheet.body, truncateWidth(row, w, ""))
+			if rw := ansi.StringWidth(row); rw > w {
+				row = cutWidth(row, 0, 2) + bareMiddleCut(cutWidth(row, 2, rw), max(w-2, 1))
+			}
+			sheet.body = append(sheet.body, row)
 		}
 
 	case importStepMeta:
@@ -174,4 +180,26 @@ func (m *ImportDialogModel) bareView() string {
 		sheet.body = []string{spin + bareMiddleCut(filepath.Base(m.filePath), max(w-ansi.StringWidth(spin), 1))}
 	}
 	return sheet.render(w, h)
+}
+
+// pickerAnchor lays the picker's window out from the top of the folder
+// again, with the cursor where it is: the window a terminal that was never
+// smaller shows after as many Downs. The bare form's shorter window moved
+// its top to keep the cursor in, and a taller window otherwise grows from
+// that top and not from the folder's. The picker's cursor and window are
+// private, so the cursor is found again by the path it is on.
+func (m *ImportDialogModel) pickerAnchor() {
+	target := m.picker.HighlightedPath()
+	if target == "" {
+		return
+	}
+	m.picker, _ = m.picker.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
+	for at := m.picker.HighlightedPath(); at != target; {
+		m.picker, _ = m.picker.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		next := m.picker.HighlightedPath()
+		if next == at {
+			return // the last entry: the path is gone from the folder
+		}
+		at = next
+	}
 }

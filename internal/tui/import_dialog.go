@@ -131,14 +131,19 @@ func (m *ImportDialogModel) IsVisible() bool {
 
 // SetSize updates the dialog dimensions.
 func (m *ImportDialogModel) SetSize(w, h int) {
-	wasBare := m.bare()
+	was := layoutModeFor(m.width, m.height)
 	m.width = w
 	m.height = h
-	if wasBare || m.bare() {
+	if was == layoutCompact || m.bare() {
 		m.bareSetSize()
-		return
+	} else {
+		m.picker.SetHeight(max(1, h-8))
 	}
-	m.picker.SetHeight(max(1, h-8))
+	// Back in the normal layout from anything else: the picker's window
+	// may have the top the bare form's shorter one moved to.
+	if was != layoutNormal && layoutModeFor(w, h) == layoutNormal && m.visible && m.step == importStepPick {
+		m.pickerAnchor()
+	}
 }
 
 // SetError sets the error and goes back to metadata step.

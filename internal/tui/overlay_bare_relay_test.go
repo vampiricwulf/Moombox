@@ -3,6 +3,8 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -270,5 +272,66 @@ func TestBareMenuRefusalFollowsTheSize(t *testing.T) {
 	a.Update(tea.WindowSizeMsg{Width: 59, Height: 12})
 	if got := plainFrame(a); strings.Contains(got, "Enlarge") {
 		t.Errorf("a refusal for a summary that now fits:\n%s", got)
+	}
+}
+
+// relayLongFolder is a folder of n archives whose names share a long prefix
+// and differ in their last cells.
+func relayLongFolder(t *testing.T, n int) string {
+	t.Helper()
+	dir := t.TempDir()
+	for i := range n {
+		name := fmt.Sprintf("hololive-karaoke-with-a-long-shared-prefix-2026-11-%02d.zip", i+1)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("PK"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// The archive picker after a shrink and back is the picker of a terminal
+// that was never smaller, with the cursor low in a folder longer than the
+// picker: the window is laid out from the top of the folder again.
+func TestBareImportPickerRoundTripInALongFolder(t *testing.T) {
+	dir := relayLongFolder(t, 40)
+	for _, downs := range []int{0, 5, 25, 39} {
+		open := func() *ImportDialogModel {
+			m := bareImport(t, 60, 20, dir, "pick")
+			for range downs {
+				m.UpdateComponents(namedKey("down"))
+			}
+			return m
+		}
+		want := open().View()
+		m := open()
+		for _, s := range [][2]int{{30, 6}, {200, 8}, {30, 50}, {40, 10}} {
+			m.SetSize(s[0], s[1])
+			wantExact(t, fmt.Sprintf("%d down, shrunk to %dx%d", downs, s[0], s[1]), m.View(), s[0], s[1])
+		}
+		m.SetSize(60, 20)
+		if got := m.View(); got != want {
+			t.Errorf("%d down: the 60x20 picker changed across a shrink:\n%s\nnever shrunk:\n%s", downs, ansi.Strip(got), ansi.Strip(want))
+		}
+		// Through a size too small to draw anything, too.
+		m.SetSize(30, 6)
+		m.SetSize(20, 5)
+		m.SetSize(60, 20)
+		if got := m.View(); got != want {
+			t.Errorf("%d down: the 60x20 picker changed across 20x5:\n%s\nnever shrunk:\n%s", downs, ansi.Strip(got), ansi.Strip(want))
+		}
+	}
+}
+
+// Two archives whose names differ only at their end are different rows of
+// the bare picker: a long name is cut in its middle, never at its end.
+func TestBareImportPickerRowsKeepTheirEnd(t *testing.T) {
+	dir := relayLongFolder(t, 3)
+	for _, s := range [][2]int{{30, 6}, {40, 10}} {
+		m := bareImport(t, s[0], s[1], dir, "pick")
+		wantExact(t, fmt.Sprintf("the picker at %dx%d", s[0], s[1]), m.View(), s[0], s[1])
+		rows := plainRows(m.View())
+		if rows[1] == rows[2] || !strings.HasSuffix(rows[1], "-01.zip") || !strings.HasSuffix(rows[2], "-02.zip") || !strings.HasPrefix(rows[1], "> holo") {
+			t.Errorf("%dx%d: two archives look the same:\n%s", s[0], s[1], strings.Join(rows, "\n"))
+		}
 	}
 }

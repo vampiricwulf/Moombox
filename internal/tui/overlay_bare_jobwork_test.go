@@ -1010,7 +1010,7 @@ func TestBareImportFrames(t *testing.T) {
 		"  c.zip",
 		"  d.zip",
 		"  e.zip",
-		"  hololive-karaoke-2026-11-01-with-a-lon",
+		"  hololive-karaoke-20…th-a-long-name.zip",
 		"  notes.txt",
 		"↑↓  ←:Up  →/Enter:Open  Esc:Cancel",
 	}
