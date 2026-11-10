@@ -88,6 +88,11 @@ func (m *StatsDialogModel) Open() tea.Cmd {
 	m.loading = true
 	m.errorMsg = ""
 	m.spinner = newSpinner()
+	if m.bare() {
+		// The bare list is filled when its inputs change: without this it
+		// keeps the rows of the error just cleared.
+		m.syncBare()
+	}
 	return spinnerTickCmd(m.spinner)
 }
 

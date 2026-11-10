@@ -162,3 +162,23 @@ func TestBareStatsThroughTheApp(t *testing.T) {
 		t.Error("Esc did not close the statistics")
 	}
 }
+
+// A refresh after a failed one clears the error from the bare list at once:
+// the earlier snapshot is shown while the fetch runs, as in the normal form.
+func TestBareStatsRefreshClearsTheError(t *testing.T) {
+	m := bareStats(40, 10)
+	before := ansi.Strip(m.View())
+	m.SetError("stats: the database is locked")
+	if got := ansi.Strip(m.View()); !strings.Contains(got, "database is locked") {
+		t.Fatalf("premise lost: the error is not shown:\n%s", got)
+	}
+	m.Open() // R
+	got := ansi.Strip(m.View())
+	wantExact(t, "a refresh after an error", m.View(), 40, 10)
+	if strings.Contains(got, "database is locked") {
+		t.Errorf("the cleared error is still on screen:\n%s", got)
+	}
+	if rows, was := plainRows(m.View()), strings.Split(before, "\n"); len(rows) < 3 || strings.TrimRight(was[2], " ") != rows[2] {
+		t.Errorf("the earlier snapshot is not shown while the fetch runs:\n%s\nwas:\n%s", got, before)
+	}
+}
