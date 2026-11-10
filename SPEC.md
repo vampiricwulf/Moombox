@@ -53,7 +53,7 @@ Moombox follows a strict priority hierarchy for all design decisions. When two c
 
 2. **Reliability** — The application must not crash, must not silently lose data, and must recover from transient failures automatically. Every goroutine has inline `defer/recover`. Network errors trigger exponential backoff with jitter. Stream-end detection uses a verification loop (up to 6 checks at 5-minute intervals) rather than trusting a single API response. Cookie auth loss triggers automatic refresh attempts.
 
-3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database has no background writer — `UpdateJobFields` runs synchronously under `db.mu` when a caller has something to write — so idle periods produce zero database I/O. The BotGuard sidecar runs as a single long-lived Node subprocess (one V8 heap, not per-request); the goja cipher VMs auto-evict when idle (10-VM LRU cap). WebSocket broadcasts rely on upstream rate-limiting (ProgressTracker's per-job gate caps progress writes at the configured progress interval — `downloader.progress_interval_ms`, 16 ms by default, so ~60 Hz/job) — no extra hub-level throttle. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
+3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database has no background writer — `UpdateJobFields` runs synchronously under `db.mu` when a caller has something to write — so idle periods produce zero database I/O. The BotGuard sidecar runs as a single long-lived Node subprocess (one V8 heap, not per-request); the goja cipher VMs are bounded by a 10-VM LRU cap (`solverCacheSize`; there is no idle eviction). WebSocket broadcasts rely on upstream rate-limiting (ProgressTracker's per-job gate caps progress writes at the configured progress interval — `downloader.progress_interval_ms`, 16 ms by default, so ~60 Hz/job) — no extra hub-level throttle. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
 
 4. **Simple Deployment & UX** — Single binary, no containers, no service managers. FFmpeg is the only runtime dependency. A first-run wizard handles initial setup. Sensible defaults mean the app works out of the box for the common case. Configuration changes that require restart are handled via exit code 42 and the launcher respawns automatically.
 
@@ -427,7 +427,7 @@ Parses IRC messages into structured chat events, handling PRIVMSG (chat messages
 
 **VOD chat:** Paginated GQL queries using `VideoCommentsByOffsetOrCursor`. Each page returns comments and a cursor for the next page. Comments are fetched in chronological order by content offset (seconds into the VOD). The pagination continues until no more comments are returned or the VOD end is reached.
 
-**Emote resolution:** Fetches third-party emotes from three providers: BTTV (`https://api.betterttv.net/3/cached/users/twitch/{id}`), FFZ (`https://api.frankerfacez.com/v1/room/id/{id}`), and 7TV (`https://7tv.io/v3/users/twitch/{id}`). Each provider returns channel-specific and global emotes. Results are merged into a unified emote map. The resolver uses a 200-channel LRU cache to avoid redundant API calls for channels that appear in multiple concurrent streams.
+**Emote resolution:** Fetches third-party emotes from three providers: BTTV (`https://api.betterttv.net/3/cached/users/twitch/{id}`), FFZ (`https://api.frankerfacez.com/v1/room/id/{id}`), and 7TV (`https://7tv.io/v3/users/twitch/{id}`). Only these three per-channel endpoints are called: the providers' global emote sets are not fetched, so a global BTTV/FFZ/7TV emote replays as plain text. The result is three separate lists (`bttv`, `ffz`, `seventv` in `TwitchEmoteData`), written into the chat file as they are; the player merges them into one map when it loads the file. The resolver caches up to 200 channels, keyed by the lowercased channel login (the channel ID when no login is given), for 24 hours (`emoteCacheTTL`, `internal/twitch/emotes.go`). A resolve in which no provider answered is not cached, and when the refetch of an expired entry fails outright the stale set is served and kept.
 
 ### Goja Runtime Shims
 
@@ -485,7 +485,7 @@ Polls YouTube's `live_chat/get_live_chat` endpoint using continuation tokens. Th
 | PO token minters | In-memory map | Dynamic (from VM) | Request key |
 | Cipher VMs | In-memory LRU | 10 VMs max (`solverCacheSize`) | Player.js URL |
 | Cipher JS | Disk files | 24 hours (`playerCacheTTL`), revalidated by conditional GET | Player.js URL hash |
-| Twitch emotes | In-memory LRU | 200 channels | Channel ID |
+| Twitch emotes | In-memory LRU + TTL | 200 channels, 24 hours (`emoteCacheTTL`); a total failure is not cached | Lowercased channel login (channel ID as fallback) |
 | YouTube visitor data | In-memory | Process lifetime | Singleton |
 | Chat dedup IDs | In-memory set | 5000 IDs max | Message ID |
 
