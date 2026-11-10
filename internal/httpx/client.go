@@ -98,6 +98,26 @@ func Client(timeout time.Duration) *http.Client {
 	return &http.Client{Timeout: timeout, Transport: defaultTransport}
 }
 
+// unprobedTransport is the transport shape Moombox shipped through v2.9.8:
+// the shared tuning with no HTTP/2 health check and the zero-value dialer.
+// Only the self-update uses it (owner ruling of 2026-11-10: the update path's
+// network behaviour stays as released; the health check and connect timeout
+// are for everything else).
+var unprobedTransport = newUnprobedTransport()
+
+func newUnprobedTransport() *http.Transport {
+	t := newDefaultTransport()
+	t.DialContext = nil
+	t.HTTP2 = nil
+	return t
+}
+
+// UnprobedClient returns a client on the pre-health-check transport. It is
+// for internal/updater alone; every other caller uses Client.
+func UnprobedClient(timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, Transport: unprobedTransport}
+}
+
 // ClientWithTransport returns a new *http.Client with the given
 // timeout and a caller-supplied transport. Useful when a package
 // needs MaxIdleConnsPerHost-style tuning beyond the default.

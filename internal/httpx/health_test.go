@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// Every transport this package hands out carries the HTTP/2 health check and
+// Every transport this package hands out, bar UnprobedClient's, carries the HTTP/2 health check and
 // a connect timeout: the shared one behind Client() and each NewTransport
 // build, the engine's among them.
 //
@@ -225,5 +225,31 @@ func TestASilentlyDeadHTTP2ConnectionIsReplaced(t *testing.T) {
 				t.Errorf("%d connections, want 1: the request went back onto the dead connection", n)
 			}
 		})
+	}
+}
+
+// The self-update's clients keep the transport shape released in v2.9.8: no
+// HTTP/2 health check, no custom dialer, everything else as the shared one
+// (owner ruling of 2026-11-10).
+func TestUnprobedClientKeepsTheReleasedTransportShape(t *testing.T) {
+	c := UnprobedClient(7 * time.Second)
+	if c.Timeout != 7*time.Second {
+		t.Errorf("Timeout = %v, want 7s", c.Timeout)
+	}
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport is %T, want *http.Transport", c.Transport)
+	}
+	if tr.HTTP2 != nil || tr.DialContext != nil {
+		t.Errorf("HTTP2 = %+v, DialContext set = %v; want neither", tr.HTTP2, tr.DialContext != nil)
+	}
+	d := newDefaultTransport()
+	if !tr.ForceAttemptHTTP2 || tr.MaxIdleConns != d.MaxIdleConns || tr.MaxIdleConnsPerHost != d.MaxIdleConnsPerHost ||
+		tr.IdleConnTimeout != d.IdleConnTimeout || tr.TLSHandshakeTimeout != d.TLSHandshakeTimeout ||
+		tr.ExpectContinueTimeout != d.ExpectContinueTimeout || tr.Proxy == nil {
+		t.Error("the unprobed transport's tuning differs from the shared transport's")
+	}
+	if shared := Client(0).Transport.(*http.Transport); tr == shared || shared.HTTP2 == nil || shared.DialContext == nil {
+		t.Error("the unprobed transport is, or has altered, the shared transport")
 	}
 }
