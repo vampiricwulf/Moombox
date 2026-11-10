@@ -210,7 +210,7 @@ The fast progress tick follows what is on screen: it runs in the compact layout 
 
 ### Source Files
 
-All 51 non-test files of `internal/tui/`, grouped by role. Four of them form two build-tagged pairs (`openbrowser_*` and `clipboard_*`), so any single build compiles 49.
+All 53 non-test files of `internal/tui/`, grouped by role. Four of them form two build-tagged pairs (`openbrowser_*` and `clipboard_*`), so any single build compiles 51.
 
 **The application model** — `App` is split across ten files rather than one; `app.go` holds the struct and its wiring only.
 
@@ -226,6 +226,10 @@ All 51 non-test files of `internal/tui/`, grouped by role. Four of them form two
 | `app_mouse.go` | Top-level mouse routing: the overlay on top (its registry entry's mouse handler, or swallowed), then the panels. Holds the overlays' wheel handlers: three rows a notch in a text overlay, and `wheelAsArrow` for a list or table overlay, which delivers the notch as the Up or Down key the overlay already handles. |
 | `overlays.go` | The overlay registry (`overlayRegistry`): the one ordered table of the sixteen overlays — each one's visibility, view, component router, key handler and mouse handler. `handleKey`, `handleMouse`, `View`, `routeComponentMsg` and `hasActiveOverlay` all take its first visible entry (`activeOverlay`). |
 | `overlay_keys.go` | Each overlay's key handler (`keySettings` … `keyJobLog`), reached only through the registry. |
+| `overlay_held.go` | What `Esc` does to an overlay kept under the notice below 60×20 (`heldEscKind`: closes, steps back, off), `App.heldEscFor`, and each stateful overlay's `heldEsc`. |
+| `frame_compose.go` | The memo of the composed panel screen (`frameComposer`, `frameKey`) and the composer that joins the panels from remembered measurements (`measuredBlock`, `lineIsAdditive`), byte-identical to the lipgloss joins. |
+| `chapter_import_dialog.go` | The `A C` Import Chapters overlay: the paste box, the offset field, the preview and the save confirm. |
+| `verb_refusal.go` | `RefusalError`: marks a verb callback's error as the worker declining the verb, so the feedback line shows its text as it is. |
 
 **Panels**
 
@@ -1479,7 +1483,7 @@ Some routes apply additional per-route middleware:
 
 - **`internal/web/`** — HTTP server, middleware, WebSocket hub, auth service.
 - **`internal/web/routes/`** — All REST API route handlers, organized by domain (auth, jobs, cookies, update, ffmpeg, stats, files, ytdlp).
-- **`internal/tui/`** — All TUI source files (49 non-test files, ~27,570 lines; see §Source Files).
+- **`internal/tui/`** — All TUI source files (53 non-test files, ~29,300 lines; see §Source Files).
 - **`web/public/`** — All static web assets (HTML, JS, CSS).
 - **`web/embed.go`** — `go:embed` directive for static assets.
 
