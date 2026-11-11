@@ -464,6 +464,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// cookies" in place of the no-cookies and re-login indicators. Downloads
 	// and monitors started above, as before; the profile seed and the refresh
 	// timer still follow this check, in the same order.
+	// One exception: a dashboard recheck (CheckNow) landing between the bind and
+	// this call wins the single-flight, Start's own pass is turned away and
+	// returns at once, and the seed and timer then start while that pass (the
+	// same pass, allowFallback=false) is still running. The seed decides on
+	// the cookie file, not on the status, so nothing is decided differently.
 	if startCookies.HasFile {
 		cookieRefresh.Start(ctx)
 	}

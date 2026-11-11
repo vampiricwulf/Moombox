@@ -131,7 +131,8 @@ func (rs *RefreshService) NoteTwitchAuthLoss(reason string) {
 // doRefresh is the TICKER refresh, and the only path allowed to pay for the
 // FallbackLiveness probe. Both of the other entry points run synchronously on
 // a goroutine somebody is waiting on — CheckNow on an HTTP handler, Start's
-// initial check ahead of the web server binding — and both pass
+// initial check ahead of the TUI starting (the web server is already bound,
+// R-H2) — and both pass
 // allowFallback=false for that reason.
 //
 // Subject to the same single-flight as the other two, and in this direction it

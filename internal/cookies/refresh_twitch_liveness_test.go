@@ -214,7 +214,8 @@ func TestTwitchInconclusiveFallbackIsReportedOncePerRun(t *testing.T) {
 }
 
 // TestTwitchFallbackIsPeriodicOnly: CheckNow runs synchronously on an HTTP
-// handler and Start's initial check runs before the web server binds; neither
+// handler and Start's initial check runs before the TUI starts (the web server
+// is already bound, R-H2); neither
 // may buy a GQL round trip. The doRefresh half is not decoration — without it
 // `called == 0` is equally well explained by a block that was never written.
 //
@@ -239,8 +240,9 @@ func TestTwitchFallbackIsPeriodicOnly(t *testing.T) {
 
 // TestTwitchFallbackSkipsTheStartupCheck: Start runs its initial check
 // SYNCHRONOUSLY on the caller's goroutine, and cmd/moombox's run() blocks on
-// it before the web server binds. A GQL round trip — up to the closure's 20 s
-// timeout — in front of the dashboard on every start is the trade the YouTube
+// it before the TUI starts (the web server is already bound, R-H2). A GQL round
+// trip — up to the closure's 20 s timeout — in front of the TUI, and of the
+// dashboard leaving "checking cookies", on every start is the trade the YouTube
 // twin refused (TestStartupRefreshSkipsFallbackProbe), and it was missed there
 // first, which is why the mirror carries it separately from the CheckNow arm.
 //
