@@ -93,13 +93,15 @@ func (h *healthTracker) state(id string) *channelState {
 }
 
 // recordSuccess clears a channel's failure streak, and fires onHealthy once
-// when the streak it clears had crossed the threshold.
-func (h *healthTracker) recordSuccess(id string) {
+// when the streak it clears had crossed the threshold. It returns the length
+// of the streak it cleared, 0 when the channel was not failing.
+func (h *healthTracker) recordSuccess(id string) int {
 	h.mu.Lock()
 	s := h.state(id)
 	h.takeRestored(id, s)
 	s.lastCheckedAt = time.Now()
 	s.lastError = ""
+	cleared := s.consecutiveErrors
 	s.consecutiveErrors = 0
 	fire := s.notified
 	s.notified = false
@@ -109,12 +111,14 @@ func (h *healthTracker) recordSuccess(id string) {
 	if fire && cb != nil {
 		cb(id)
 	}
+	return cleared
 }
 
 // recordError bumps a channel's failure streak and fires onUnhealthy once
 // when it crosses the threshold; the streak then stays silent until
-// recordSuccess resets it.
-func (h *healthTracker) recordError(id string, err error) {
+// recordSuccess resets it. It returns the streak's new length: 1 for the first
+// failure after a success.
+func (h *healthTracker) recordError(id string, err error) int {
 	h.mu.Lock()
 	s := h.state(id)
 	h.takeRestored(id, s)
@@ -133,6 +137,7 @@ func (h *healthTracker) recordError(id string, err error) {
 	if fire && cb != nil {
 		cb(id, count, lastErr)
 	}
+	return count
 }
 
 // snapshot returns the health of every tracked channel (unordered).

@@ -473,10 +473,19 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 
 		ch := &channels[i]
 		if err := fm.checkChannel(ctx, ch); err != nil {
-			fm.health.recordError(ch.ID, err)
-			fm.logger.Warn("feed check failed", "channel", ch.Name, "err", err)
-		} else {
-			fm.health.recordSuccess(ch.ID)
+			// One Warn when a channel starts failing, Debug for each repeat
+			// (the level the other two monitors log a failing channel at), one
+			// Info when it answers again. A dead channel, or the RSS errors
+			// YouTube serves at peak hours, would otherwise put a Warn in the
+			// log every cycle. The streak is the health tracker's, so the alert
+			// threshold and /api/status count the same failures.
+			if n := fm.health.recordError(ch.ID, err); n == 1 {
+				fm.logger.Warn("feed check failed", "channel", ch.Name, "err", err)
+			} else {
+				fm.logger.Debug("feed check still failing", "channel", ch.Name, "failures", n, "err", err)
+			}
+		} else if n := fm.health.recordSuccess(ch.ID); n > 0 {
+			fm.logger.Info("feed check recovered", "channel", ch.Name, "failures", n)
 		}
 
 		// Stagger between requests to avoid looking like a scraper and to
