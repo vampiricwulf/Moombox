@@ -42,6 +42,7 @@ Pure — no DOM, nothing to install:
 | `nico-lanes.test.mjs` | `nico-lanes.js`: lane allocation for the scrolling chat overlay |
 | `nico-scheduler.test.mjs` | `nico-scheduler.js`: the overlay's cursor, anchor, pending list and drop count |
 | `template-preview.test.mjs` | the Settings page's output-template example, formatted as `config.ResolveTemplate` writes a name |
+| `channel-failing.test.mjs` | `channelFailing`, `failingChannels` and `failingChannel` in `utils.js` against Go over `fixtures/channel-failing-parity.json` (owner ruling R-H1) |
 | `utils.test.mjs` | `utils.js`: the formatters (`formatBytes`, timestamps, durations) and the small helpers beside them |
 
 DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-dom.mjs`
@@ -95,6 +96,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `ws-connection-state.test.mjs` | the WebSocket's `ConnState` on `#connection-status`; a close before open probes `GET /api/status` once, a 401 ends in unauthorized (no socket, a re-probe every 30 s that reconnects on the first non-401), anything else backs off; a probe answering after a newer socket changes nothing |
 | `ws-session-reload.test.mjs` | one test, so app.js's fetch wrapper is on the path: the probe's 401 reloads the page (seen through the harness's `navigations`, jsdom's refused navigations), once, and a later 200 reconnects |
 | `settings-text.test.mjs` | Settings and setup text that pointed the wrong way or dropped the server's reason |
+| `settings-channel-health.test.mjs` | the "Checks failing" flag on the Settings channel cards (owner ruling R-H1): set and cleared by `channel_monitors` frames, seeded by `initial_state`, never on a disabled channel, the error escaped |
 | `settings-channels.test.mjs` | both Add Channel dialogs: a URL or bare `@handle` resolved first, a configured ID switching to editing it, the edit mark, and a stale list's `409` |
 | `setup-wizard.test.mjs` | the first-run wizard's Finish: the address it redirects the tab to after the restart |
 | `sidecar-warning.test.mjs` | the header warning while the BotGuard sidecar is down |

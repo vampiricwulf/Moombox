@@ -95,7 +95,11 @@ type runState struct {
 
 	// --- Cookie refresh ---
 	cookieRefresh *cookies.RefreshService
-	autoCookieSvc *cookies.AutoCookieService
+	// cookieStartupDone is closed when the cookie startup goroutine
+	// (startCookieSequence) has returned. Written once by run() before runTUI;
+	// nil until then, and shutdown skips its wait on nil.
+	cookieStartupDone <-chan struct{}
+	autoCookieSvc     *cookies.AutoCookieService
 
 	// --- Web server core (section 16) ---
 	webServer  *web.Server
@@ -164,7 +168,7 @@ type runState struct {
 	backfillRescan func()
 
 	// --- Atomic callback slots ---
-	// Set before cookieRefresh.Start(); TUI section Store()s a concrete func
+	// Set before the cookie startup sequence; TUI section Store()s a concrete func
 	// into authChangeTUI. cookieRefresh.OnAuthChange dispatches through
 	// atomic.Pointer.Load so the refresh goroutine never races on field
 	// reassignment.
@@ -175,6 +179,10 @@ type runState struct {
 	// admissionHoldsResync (capacity 1) asks runAdmissionHoldsPush to send the
 	// TUI the snapshot again (resyncAdmissionHoldsTUI); nil sends nothing.
 	admissionHoldsResync chan struct{}
+	// channelMonitorsPush tells both UIs when the set of failing channels
+	// changes (owner ruling R-H1). Set in wireMonitorCallbacks; checked after
+	// every monitor cycle.
+	channelMonitorsPush *channelMonitorsPush
 
 	// Same pattern for monitor OnSchedule: each monitor's goroutine loads
 	// the atomic pointer on every schedule event; the TUI wiring later

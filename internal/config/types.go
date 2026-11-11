@@ -47,6 +47,12 @@ type MoomboxConfig struct {
 	// carries. Nothing reads them; boot logs each one, and the next save
 	// leaves them out of the file.
 	IgnoredOnLoad []string `toml:"-" json:"-"`
+	// UnknownOnLoad lists the keys the file holds that nothing reads and that
+	// are neither legacy nor retired (unknownKeysIn): a misspelt key or
+	// section, or a key under the wrong section. Boot logs each one; the
+	// setting it was meant for kept its default, and the next save leaves
+	// the key out of the file.
+	UnknownOnLoad []string `toml:"-" json:"-"`
 }
 
 // NetworkConfig holds server and network access settings.

@@ -74,6 +74,8 @@ Some keys are deliberately `config.toml`-only: no Settings row in either UI, abs
 
 ### 9. Config Migration (if renaming/moving)
 `internal/config/config.go` → `migrateOldFormat()` — Non-destructive: only applies when new section doesn't exist. Converts legacy field to current location.
+- Add every key the migration reads from the raw map to `legacyKeys` (same file). A key in the file that the struct does not decode and `legacyKeys` does not name is logged at boot as not recognised (`UnknownOnLoad`); `TestLegacyKeysAreNotReportedUnknown` holds every entry.
+- Removing a released key without a migration: add it to `legacyKeys` too (silent), or to `retiredKeys` when the operator should be told it is no longer used.
 
 ## Restart-Required Fields
 

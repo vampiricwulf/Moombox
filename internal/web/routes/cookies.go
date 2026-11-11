@@ -174,8 +174,17 @@ func cookieSetupOutcome(result cookies.SetupResult) map[string]any {
 //
 // The vocabulary is RefreshVerdict's, deliberately shared rather than
 // re-invented — same reason as cookieSetupOutcome above.
+//
+//   - checked — false until the first auth check of this process has finished
+//     (cookies.AuthStatus.Checked; owner ruling R-H2). The dashboard is served
+//     before that check answers, and while this is false every other key here
+//     is a zero value that says nothing: the frontend shows "checking cookies"
+//     and neither the no-cookies nor the re-login indicator. ADDITIVE on the
+//     same terms as the keys above: the frontend tests `checked === false`, so
+//     against an older binary that omits the key it behaves as it always did.
 func CookieStatusPayload(status cookies.AuthStatus) map[string]any {
 	return map[string]any{
+		"checked":       status.Checked,
 		"found":         status.HasYouTubeCookies,
 		"authenticated": status.YouTubeAuthenticated,
 		"verification":  status.YouTubeVerification.String(),
@@ -190,6 +199,7 @@ func CookieStatusPayload(status cookies.AuthStatus) map[string]any {
 // AuthStatus had no HasTwitchCookies to project until this arc.
 func TwitchAuthStatusPayload(status cookies.AuthStatus) map[string]any {
 	return map[string]any{
+		"checked":       status.Checked,
 		"found":         status.HasTwitchCookies,
 		"authenticated": status.TwitchAuthenticated,
 		"verification":  status.TwitchVerification.String(),

@@ -5,13 +5,14 @@
 // internal/tui TestCookieBadgePrecedence and cmd/moombox cookie_badge_test.go.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
-import { cookieIndicatorState, cookieCheckState, cookieBadgeState, COOKIE_BADGE_PRECEDENCE } from "../public/modules/utils.js";
+import { cookieIndicatorState, cookieIndicatorText, cookieCheckState, cookieBadgeState, cookieCheckPending, COOKIE_BADGE_PRECEDENCE } from "../public/modules/utils.js";
 
 const yt = (status, relogin = false, parked = false) => cookieIndicatorState("youtube", status, relogin, parked);
 
 test("the precedence is the TUI's", () => {
-  assert.deepEqual(COOKIE_BADGE_PRECEDENCE, ["relogin", "fileUnreadable", "parked", "rejected", "unknown", "none", "ok"]);
+  assert.deepEqual(COOKIE_BADGE_PRECEDENCE, ["checking", "relogin", "fileUnreadable", "parked", "rejected", "unknown", "none", "ok"]);
 });
 
 // The contested state: cookies.txt unreadable, not authenticated, a job
@@ -48,4 +49,42 @@ test("cookieCheckState and cookieBadgeState are the two halves", () => {
   assert.equal(cookieBadgeState("ok", false, true), "parked");
   assert.equal(cookieBadgeState("fileUnreadable", false, true), "fileUnreadable");
   assert.equal(cookieBadgeState("unknown", true, true), "relogin");
+});
+
+// Owner ruling R-H2: the dashboard is served before the server's first cookie
+// auth check answers. One predicate, two languages; the Go half of this
+// fixture is cmd/moombox TestCookieCheckPendingParity.
+const CHECK_PARITY = JSON.parse(readFileSync(new URL("./fixtures/cookie-check-parity.json", import.meta.url), "utf8"));
+
+test("cookieCheckPending and the check state match Go over the fixture", () => {
+  assert.ok(CHECK_PARITY.cases.length >= 6);
+  for (const c of CHECK_PARITY.cases) {
+    assert.equal(cookieCheckPending(c.status), c.pending, c.name);
+    assert.equal(cookieCheckState(c.status), c.badge, c.name);
+  }
+});
+
+test("cookieCheckPending is positive on checked === false", () => {
+  assert.equal(cookieCheckPending(), false);
+  assert.equal(cookieCheckPending(null, undefined), false);
+  assert.equal(cookieCheckPending({}, { checked: true }), false);
+  assert.equal(cookieCheckPending({ checked: true }, { checked: false }), true);
+});
+
+// Mutant: "checking" moved below "relogin" in COOKIE_BADGE_PRECEDENCE, or the
+// pending arm dropped from cookieCheckState (the badge reads "No cookies").
+test("an unchecked status shows checking, never no-cookies or re-login", () => {
+  const unchecked = { checked: false, found: false, authenticated: false, verification: "unknown" };
+  assert.deepEqual(yt(unchecked), { className: "indicator-checking", title: "YouTube: Checking cookies…" });
+  assert.deepEqual(cookieIndicatorState("twitch", unchecked, false, false), { className: "indicator-checking", title: "Twitch: Checking cookies…" });
+  // The pill's own text says so too, and reads as the bare code otherwise.
+  assert.equal(cookieIndicatorText("youtube", unchecked), "YT…");
+  assert.equal(cookieIndicatorText("twitch", unchecked), "TW…");
+  assert.equal(cookieIndicatorText("youtube", { ...unchecked, checked: true }), "YT");
+  assert.equal(cookieIndicatorText("twitch", undefined), "TW");
+  // Whatever else holds: a relogin flag, a parked job.
+  assert.equal(yt(unchecked, true, true).className, "indicator-checking");
+  // Once checked, the same payload reads as it always did.
+  assert.deepEqual(yt({ ...unchecked, checked: true, verification: "failed" }), { className: "indicator-warn", title: "YouTube: No cookies" });
+  assert.match(yt({ ...unchecked, checked: true }, true).title, /Re-login required/);
 });

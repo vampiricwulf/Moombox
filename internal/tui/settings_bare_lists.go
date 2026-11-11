@@ -15,8 +15,9 @@ import (
 // ---- Channels ----
 
 // bareChannels draws the channel list: the platform, the name and
-// "(disabled)", which is never cut; the name gives way to it. The ID and
-// the filter are left to the editor.
+// "(disabled)" or "(failing)" (owner ruling R-H1), which are never cut; the
+// name gives way to them. The ID and the filter are left to the editor, and
+// a failing channel's error to the normal list and the log.
 func (m *SettingsModel) bareChannels() string {
 	w := m.width
 	msg, style := m.bareMessage()
@@ -48,8 +49,12 @@ func (m *SettingsModel) bareChannels() string {
 			tag = " (disabled)"
 			nameStyle = nameStyle.Faint(true)
 		}
+		tagStyle := YellowFaintStyle
+		if _, failing := m.channelFailing(ch); failing {
+			tag, tagStyle = channelFailingTag, ErrorStyle
+		}
 		items[i] = []string{mark + lipgloss.NewStyle().Foreground(platformColor).Render(platform) + " " +
-			nameStyle.Render(truncateString(name, max(w-5-len(tag), 1))) + YellowFaintStyle.Render(tag)}
+			nameStyle.Render(truncateString(name, max(w-5-len(tag), 1))) + tagStyle.Render(tag)}
 	}
 	// Where the list is longer than the screen, its last row says how far
 	// down the cursor is.

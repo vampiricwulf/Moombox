@@ -141,6 +141,18 @@ func (s *runState) shutdown() bool {
 	// is logged and left running, and can still write after them.
 	stopService("CookieRefresh", s.cookieRefresh.Stop)
 	stopService("AutoCookies", s.autoCookieSvc.Stop)
+	// 4b. The cookie startup goroutine (startCookieSequence), if it has not
+	// finished: a quit during the first cookie check. Both services are
+	// stopped above, so it can start nothing more; the Stop cut the check's
+	// round trips short and it returns promptly. Waited for, so its last
+	// callbacks land before the steps below, but only up to
+	// cookieShutdownWait: a check that ignores the cancel must not hold the
+	// shutdown, and is left to the same fate as a ticker pass in flight.
+	stopService("CookieStartup", func() {
+		if !awaitCookieStartup(s.cookieStartupDone, cookieShutdownWait) {
+			s.log.Warn("cookie startup sequence still running after stop", "waited", cookieShutdownWait.String())
+		}
+	})
 
 	// 5. Cleanup PO token provider
 	stopService("PotProvider", s.potProvider.Cleanup)

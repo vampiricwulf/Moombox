@@ -1874,6 +1874,12 @@ type StatusRouteDeps struct {
 	// place of a bare "Waiting in queue...", and what turns its disk gauge
 	// to "holding". The WebSocket's admission_holds frame pushes each change.
 	GetAdmissionHolds func() jobstate.AdmissionHolds
+	// GetChannelMonitors is each monitor's health list by platform
+	// (monitor.ChannelMonitors), sent as the additive channelMonitors field:
+	// what the dashboard's channel list derives its "checks failing" flag
+	// from (owner ruling R-H1). channelHealth, the merged list, is unchanged.
+	// The WebSocket's channel_monitors frame pushes each change of the flag.
+	GetChannelMonitors func() any
 }
 
 // hostUTCOffsetMinutes is the host's zone offset from UTC right now, in
@@ -1956,6 +1962,9 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 		}
 		if deps.GetAdmissionHolds != nil {
 			resp["admissionHolds"] = deps.GetAdmissionHolds()
+		}
+		if deps.GetChannelMonitors != nil {
+			resp["channelMonitors"] = deps.GetChannelMonitors()
 		}
 
 		// BotGuard sidecar liveness. ABSENT (not false) when nothing was ever

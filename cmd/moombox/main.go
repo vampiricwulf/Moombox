@@ -342,8 +342,25 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		dlWorker.Start(ctx)
 	}()
 
-	// Start cookie refresh (only if a cookie file is configured, like TS)
-	if cfg.Cookies.CookieFile != "" {
+	// Seed the cookie refresh service (only if a cookie file is configured,
+	// like TS). Its first check runs on the cookie startup goroutine, started
+	// further down after the web server is bound; the seeds stay here, ahead
+	// of the bind, so nothing the dashboard can ask for (a recheck) observes
+	// before them.
+	//
+	// The three cookie settings this function still needs after the bind are
+	// read ONCE, here, under the store lock. The dashboard is serving from the
+	// bind on, and a PUT /api/config replaces the struct under that lock, so a
+	// direct cfg read further down would race it; and a cookie file read twice
+	// (to choose SkipStartupCheck here, and the first check below) could disagree with
+	// itself and leave the status unchecked for good.
+	var startCookies cookieStartup
+	s.configStore.Read(func(c *config.MoomboxConfig) {
+		startCookies.HasFile = c.Cookies.CookieFile != ""
+		startCookies.AutoEnabled = c.Cookies.AutoEnabled
+		startCookies.RefreshInterval = c.Cookies.RefreshInterval.AsDuration(time.Minute)
+	})
+	if startCookies.HasFile {
 		// Seed expected auth from persisted platforms so auth loss is detected
 		// on restart.
 		//
@@ -375,43 +392,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		// first check that finds the platform working sends its
 		// auth_recovered (withPersistedAuthFailureCooldown holds the stamp).
 		cookieRefresh.SetUnrecoveredPlatforms(s.openAlerts.authPlatforms())
-		cookieRefresh.Start(ctx)
 	} else {
 		log.Debug("[CookieRefresh] No cookie file configured, skipping refresh service")
-	}
-
-	// One browser-free import out of the configured browser profile, at most
-	// once per boot, on an install that has no cookies to lose.
-	//
-	// UNCONDITIONAL, and deliberately not under the flag below. This used to
-	// live inside the periodic goroutine, which coupled it to
-	// cookies.auto_enabled for no reason it could justify: the flag exists to
-	// govern a REPEATING read of a profile that nothing changes between ticks,
-	// and a boot is the one moment a mounted profile plausibly did change —
-	// something replaced it while the process was down. Its real safety
-	// condition is the cookie file, not the flag, and that condition lives in
-	// AutoCookieService.decideStartupSeed so there is exactly one site deciding
-	// it: no browser, an importable profile, and no cookies.txt worth
-	// protecting. An install that already has cookies is never touched here.
-	autoCookieSvc.StartProfileSeed(ctx)
-
-	// Start the headless-browser refresh timer. cookies.auto_enabled IS this
-	// timer — it governs nothing else automatic — so the flag is the whole
-	// start condition, along with an interval that means something.
-	//
-	// It deliberately no longer os.Stat's browserProfileDir first. That probe
-	// froze at boot the one thing that changes at runtime: completing setup is
-	// what CREATES the profile directory, so an operator who turned the setting
-	// on and then ran setup — the exact sequence an "auth lost" notification
-	// asks for — got no timer until the next restart, and nothing told them. No
-	// setting had changed by then, so the restart-required labelling could not
-	// fire either. The question is asked per tick now, quietly, by
-	// periodicRefreshHasSource.
-	if cfg.Cookies.AutoEnabled {
-		interval := cfg.Cookies.RefreshInterval.AsDuration(time.Minute)
-		if interval > 0 {
-			autoCookieSvc.StartPeriodicRefresh(ctx, interval)
-		}
+		// No startup check will run, so the status must not read "checking".
+		cookieRefresh.SkipStartupCheck()
 	}
 
 	// Start web server — wait for initial binding result before continuing.
@@ -434,11 +418,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		webErrCh <- webServer.Start(ctx)
 	}()
 
-	// Give the server a moment to bind (port binding is synchronous in Start).
-	// If it fails quickly, exit; otherwise proceed.
+	// Wait for the bind to resolve: Start's error, or the server's Bound
+	// signal (awaitWebBind). A failure exits or falls back to TUI-only below;
+	// a bound server, or one that has said nothing by the backstop, proceeds.
 	webBindFailed := false
-	select {
-	case err := <-webErrCh:
+	switch outcome, err := awaitWebBind(webErrCh, webServer.Bound(), webBindBackstop); outcome {
+	case webStartReturned:
 		if err != nil {
 			if !useTUI {
 				log.Error("Web server failed to start", slog.String("error", err.Error()))
@@ -453,8 +438,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			log.Warn("Web server failed, continuing in TUI-only mode", slog.String("error", err.Error()))
 			webBindFailed = true
 		}
-	case <-time.After(500 * time.Millisecond):
-		// Server is binding/listening successfully, drain errors in background
+	default:
+		// The server is bound (or still starting at the backstop): log a
+		// later error from Start in the background.
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -466,6 +452,18 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			}
 		}()
 	}
+
+	// The cookie startup sequence: the first auth check, then the profile
+	// seed, then the browser refresh timer, in that order on one background
+	// goroutine (startCookieSequence, which states the order's reasons).
+	// Neither UI waits for it (owner ruling R-H2 and its amendment): the web
+	// server is bound above, runTUI starts below, and until the check answers
+	// the status is unchecked (cookies.AuthStatus.Unchecked) and both UIs show
+	// "checking cookies" in place of the no-cookies and re-login indicators.
+	// Each of the check's two round trips can take up to 15 s on a bad link,
+	// and both UIs used to stay down for all of it. Nothing below this line in
+	// run() reads cookie state. shutdown waits for the goroutine, boundedly.
+	s.cookieStartupDone = startCookieSequence(ctx, startCookies, cookieRefresh, autoCookieSvc, log)
 
 	// The port the listener actually bound is not always the configured one:
 	// Start probes the next ten ports when the preferred one is in use
@@ -528,9 +526,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			// a failed web bind logs-and-continues above, and "restarted
 			// successfully" on the operator's phone while the dashboard is
 			// dead would be a lie. FAILED only on a CONFIRMED bind error —
-			// a slow bind (>500ms select timeout, e.g. AV-scanned first
-			// boot) leaves ActualPort briefly 0, and claiming failure then
-			// would be a false alarm on exactly the boots that matter.
+			// a bind still unanswered at webBindBackstop leaves ActualPort
+			// 0, and claiming failure then would be a false alarm; the
+			// notice then says nothing about the dashboard.
 			fields := []notifications.Field{
 				{Name: "Previous Version", Value: "v" + lastRunVersion, Inline: true},
 				{Name: "Current Version", Value: "v" + version, Inline: true},

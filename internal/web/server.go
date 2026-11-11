@@ -57,7 +57,9 @@ type Server struct {
 	OpenBrowser bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
 	actualPort  atomic.Int32     // Actual bound port after Start (may differ from cfg if probed)
 	tlsActive   atomic.Bool      // whether Start's listener serves HTTPS (set with actualPort)
-	draining    atomic.Bool      // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
+	bound       chan struct{}    // closed once Start's listener is bound; see Bound
+	boundOnce   sync.Once
+	draining    atomic.Bool // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
 
 	// ClientTokenCheck validates a persistent client token and returns a fresh session token.
 	// Called by AuthMiddleware when the session cookie is missing/invalid.
@@ -94,6 +96,7 @@ func NewServer(store *config.Store, logger interface {
 		router:        r,
 		ws:            NewWebSocketHub(logger),
 		internalToken: token,
+		bound:         make(chan struct{}),
 		logger:        logger,
 	}
 
@@ -149,10 +152,10 @@ func (s *Server) SetCommit(c string) {
 
 // ActualPort returns the port the listener actually bound, or 0 when the bind
 // has not completed. 0 is the PENDING sentinel, not a port: every caller
-// (cmd/moombox/main.go's startup banner and its 500 ms readiness select,
+// (cmd/moombox/main.go's startup banner and its Update Applied notice,
 // routes_wiring.go's plugin-port lookup) tests `> 0` and falls back to the
 // configured port until it turns positive. Start writes it from its own
-// goroutine while main.go reads it across that select window, so it is atomic
+// goroutine while main.go reads it from another, so it is atomic
 // rather than a plain int (sweep T4-35). int32 is deliberate: a TCP port never
 // exceeds 65535.
 func (s *Server) ActualPort() int { return int(s.actualPort.Load()) }
@@ -166,6 +169,22 @@ func (s *Server) TLSActive() bool { return s.tlsActive.Load() }
 
 // setActualPort records the bound port. Called once, by Start.
 func (s *Server) setActualPort(port int) { s.actualPort.Store(int32(port)) }
+
+// Bound is closed once Start's listener is bound and ActualPort and TLSActive
+// are set. It is never closed when Start returns an error before binding, so
+// a caller waiting for the bind selects on this and on Start's result: one of
+// the two always answers. A Server not made by NewServer has a nil channel,
+// which never answers.
+func (s *Server) Bound() <-chan struct{} { return s.bound }
+
+// markBound closes Bound. Called by Start, after setActualPort.
+func (s *Server) markBound() {
+	s.boundOnce.Do(func() {
+		if s.bound != nil {
+			close(s.bound)
+		}
+	})
+}
 
 // SetAuth sets the auth service for authentication middleware.
 func (s *Server) SetAuth(auth *AuthService) {
@@ -569,6 +588,7 @@ func (s *Server) Start(ctx context.Context) error {
 	actualPort := ln.Addr().(*net.TCPAddr).Port
 	s.tlsActive.Store(tlsConfig != nil)
 	s.setActualPort(actualPort)
+	s.markBound()
 	url := fmt.Sprintf("%s://localhost:%d", scheme, actualPort)
 	s.logger.Info(fmt.Sprintf("[Moombox] Web dashboard available at %s", url))
 	// Mirrors the host switch above: all three of these bind 0.0.0.0.

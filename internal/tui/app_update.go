@@ -337,8 +337,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.listenForUpdates()
 
 	case CookieStatusMsg:
-		a.statusBar.SetCookieStatus(msg.YT, msg.TW)
-		a.statusBar.SetActivePlatforms(msg.YTActive, msg.TWActive)
+		a.SetCookieStatus(msg.YT, msg.TW, msg.YTActive, msg.TWActive)
 		return a, a.listenForUpdates()
 
 	case DiskStatusMsg:
@@ -355,6 +354,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case AdmissionHoldsMsg:
 		a.SetAdmissionHolds(msg.Holds)
+		return a, nil
+
+	case ChannelFailingMsg:
+		a.settings.SetFailingChannels(msg.Failing)
 		return a, nil
 
 	case SidecarStatusMsg:

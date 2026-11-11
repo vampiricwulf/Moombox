@@ -16,6 +16,25 @@ import (
 
 // --- Channel sub-editor ---
 
+// SetFailingChannels replaces the failing-channel set the channel list tags
+// its rows from.
+func (m *SettingsModel) SetFailingChannels(f FailingChannels) { m.failing = f }
+
+// channelFailingTag is the channel list's tag for a failing channel.
+const channelFailingTag = " (failing)"
+
+// channelFailing reports whether the list flags this channel, and its newest
+// check error. The rule is monitor.ChannelFailing, applied in cmd/moombox;
+// this only looks the channel up. A disabled channel is not monitored, so a
+// row the editor has just disabled is not flagged.
+func (m *SettingsModel) channelFailing(ch config.ChannelConfig) (lastErr string, failing bool) {
+	if !ch.IsEnabled() {
+		return "", false
+	}
+	lastErr, failing = m.failing[FailingChannelKey(ch.GetPlatform(), ch.ID)]
+	return lastErr, failing
+}
+
 func (m *SettingsModel) visibleChannelFields() []channelFieldDef {
 	return filterChannelFieldsByPlatform(channelFields, m.channelEditValues)
 }

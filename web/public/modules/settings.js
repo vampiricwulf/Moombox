@@ -21,6 +21,7 @@ import {
   snapshotRestartValues,
   viewerIsAtTheHost,
   BACKFILL_STATE,
+  failingChannel,
 } from "./utils.js";
 
 const NOTIFICATION_EVENT_GROUPS = [
@@ -1445,6 +1446,7 @@ export class SettingsController {
         ${ch.twitch_archive_clips ? '<sl-badge variant="neutral">Archive clips</sl-badge>' : ""}
         ${ch.quality_preference ? `<sl-badge variant="neutral">Quality: ${this.app.escapeHtml(ch.quality_preference)}</sl-badge>` : ""}
         <span class="channel-backfill" data-backfill-for="${this.app.escapeHtml(ch.id)}">${this._backfillBadgeHtml(ch.id)}</span>
+        <div class="channel-health" data-health-for="${this.app.escapeHtml(ch.id)}">${this._channelHealthHtml(ch)}</div>
       </div>
     `;
         },
@@ -1489,6 +1491,29 @@ export class SettingsController {
       return `<sl-badge variant="warning" pill>Backfill failed — will retry</sl-badge>`;
     }
     return "";
+  }
+
+  /**
+   * Flag markup for a channel no monitor reaches ("" otherwise): owner
+   * ruling R-H1, failingChannel in utils.js over app.channelMonitors. A
+   * disabled channel is not monitored, so it is never flagged.
+   */
+  _channelHealthHtml(ch) {
+    if (!ch || ch.enabled === false) return "";
+    const failing = failingChannel(this.app.channelMonitors, ch.platform, ch.id);
+    if (!failing) return "";
+    const error = failing.lastError
+      ? ` <span class="channel-health-error">${this.app.escapeHtml(failing.lastError)}</span>`
+      : "";
+    return `<sl-badge variant="danger" pill>Checks failing</sl-badge>${error}`;
+  }
+
+  /** Redraw every rendered card's failing flag (a new channelMonitors snapshot). */
+  refreshChannelHealthBadges() {
+    const byId = new Map((this.app.config?.channels || []).map((c) => [c.id, c]));
+    document.querySelectorAll("#channels-list [data-health-for]").forEach((slot) => {
+      slot.innerHTML = this._channelHealthHtml(byId.get(slot.dataset.healthFor));
+    });
   }
 
   /** Patch one channel card's backfill badge in place (no-op when the card isn't rendered). */

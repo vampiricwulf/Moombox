@@ -97,7 +97,8 @@ func firstCall(calls []wiringCall, recv, name string) token.Pos {
 // from it, and each is seeded before its first observation — the disk
 // alerter before the boot reading, the sidecar alerter before it subscribes
 // (SubscribeHealth delivers the current snapshot at once), the cookie
-// refresh before its synchronous first check, and every monitor covering a
+// refresh before the cookie startup sequence that runs its first check, and
+// every monitor covering a
 // platform before the monitors start. A seed placed after its observer's
 // first look misses exactly the healthy observation that should have sent the
 // close.
@@ -105,7 +106,7 @@ func firstCall(calls []wiringCall, recv, name string) token.Pos {
 // Mutants: drop any one seeding call, or hand one nil instead of
 // s.openAlerts, or move the state load below
 // s.wireMonitorCallbacks(), or SetUnrecoveredPlatforms below
-// cookieRefresh.Start, or the disk alerter's restoreFrom below its boot
+// startCookieSequence, or the disk alerter's restoreFrom below its boot
 // onReading, or the sidecar's below SubscribeHealth.
 func TestEveryAlerterIsSeededBeforeItCanObserve(t *testing.T) {
 	run, fset := callsInFunc(t, "main.go", "run")
@@ -125,7 +126,7 @@ func TestEveryAlerterIsSeededBeforeItCanObserve(t *testing.T) {
 	before(run, "drop unmonitored", "s.openAlerts", "dropUnmonitored", "s", "wireMonitorCallbacks")
 	before(run, "state load before the sidecar", "", "loadOpenAlerts", "s", "wireSidecarAlerts")
 	before(run, "monitors seeded before they start", "s", "wireMonitorCallbacks", "feedMon", "Start")
-	before(run, "auth", "cookieRefresh", "SetUnrecoveredPlatforms", "cookieRefresh", "Start")
+	before(run, "auth", "cookieRefresh", "SetUnrecoveredPlatforms", "", "startCookieSequence")
 	before(run, "disk", "diskAlerter", "restoreFrom", "diskAlerter", "onReading")
 	if !seededFromState(run, "restoreFrom") {
 		t.Error("run(): the disk alerter is not seeded from s.openAlerts")

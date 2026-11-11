@@ -564,6 +564,13 @@ another (CORE-17).
 3. `~/.config/moombox/config.toml`
 4. If none found: use `Defaults()` with no file loaded (`ConfigLoaded = false`)
 
+**Only "does not exist" means "no config here".** A named `-config` path whose `os.Stat` fails any other
+way (access denied, an I/O error, a device that is not ready) makes `Load` return an error, and the
+process ends through the startup-error path (exit code 3) instead of booting a first-run install over a
+config it could not reach. In the search, a candidate that fails that way is skipped with a
+`warning: skipping config <path>: <error>` line on stderr, so an unreadable `~/.config` cannot stop an
+install in the working directory from booting.
+
 **Saves go back to the file that answered.** The location that was read is recorded in `LoadedFrom` (`internal/config/types.go`), and `cmd/moombox/services.go` points the run's config path at it before building the store — so a config found in `./config/` is written back to `./config/` rather than forked into a fresh `./config.toml` that would shadow it on the next boot (the first write is often the boot-time `NeedsAutoPersist` flush, so the fork would happen without anyone touching a setting). When NOTHING is found, the path that was asked for stays the target and the file is created there — `storePathFor` in `cmd/moombox/helpers.go` is that rule (with no `-config`, `<cwd>/config.toml`).
 
 **Out-of-range values are replaced, and said so.** `loadFromFile` runs `Normalize`, which puts each
@@ -576,6 +583,14 @@ older file may still hold that nothing reads — today `downloader.po_token` and
 which were saved as a "manual PO token override" no code path ever consulted (PO tokens are minted per
 session through `[bgutils]`). `loadFromFile` records the ones present in `IgnoredOnLoad`, boot logs one
 Warn per key, and the next save leaves them out of the file.
+
+**Unknown keys are ignored, and said so.** A key the file holds that nothing reads (a misspelt key or
+section, or a key under the wrong section) leaves its setting on the default. `loadFromFile` keeps the
+struct decode's list of undecoded keys, `unknownKeysIn` (`internal/config/config.go`) drops the ones in
+`legacyKeys` (what `migrateOldFormat` reads, keys dropped from the struct without a migration, and the
+retired keys above), and the rest go in `UnknownOnLoad` (`internal/config/types.go`). Boot logs one Warn
+per key; an unknown section is named once, without its keys. Nothing else changes: the file still loads,
+and the next save leaves the key out.
 
 ### Configuration Sections
 
@@ -984,7 +999,7 @@ A file holding SAPISID with LOGIN_INFO cleared is a CONFIGURED platform with BRO
 
 **Lifecycle and the single-flight.** Three entry points share one body, `refresh(ctx, allowFallback)` (`internal/cookies/refresh_pass.go`); `allowFallback` is the only thing that separates them.
 
-- `Start(ctx)` runs the initial pass **synchronously on the caller's goroutine** with `allowFallback=false`, wrapped in its own inline `recover` — `cmd/moombox`'s `run()` blocks on it before the web server binds, so an unrecovered panic there takes the process down at boot with no dashboard, no TUI and no log surface. It then launches the ticker goroutine, which carries the same recover.
+- `Start(ctx)` runs the initial pass **synchronously on the caller's goroutine** with `allowFallback=false`, wrapped in its own inline `recover`, and returns when the first check of the process has finished. The caller is the cookie startup goroutine (`startCookieSequence`, `cmd/moombox/cookie_startup.go`), not `run()` itself: by owner ruling R-H2 and its amendment neither UI waits for the check. `run()` starts the web server and waits for its bind between the refresh service's seeds and that goroutine, and starts the TUI right after it; each of the pass's two round trips can take 15 s on a bad link, and both UIs used to stay down for all of it. Until the pass publishes its status, `AuthStatus.Checked` is false: `Unchecked()` is the one predicate for that, both UIs show "checking cookies" instead of the no-cookies and re-login indicators, and nothing decides anything on such a status. A finished pass sets `Checked` (a pass that panicked sets it too, in the single-flight's release), it is part of `authStatusChanged` so the first pass always fires `OnAuthChange`, and an install with no cookie file, whose `Start` is never called, is marked by `SkipStartupCheck` before the bind. Downloads and monitors start before the bind, as they did. The goroutine keeps the order `run()` had in line: the first check, then the profile seed (`StartProfileSeed`), then the browser refresh timer (`StartPeriodicRefresh`), one after the other, under its own inline `recover` and one more around each step. The seed and the timer follow a finished check in every case: when a dashboard recheck (`CheckNow`) lands between the bind and `Start` and wins the single-flight, `Start`'s own pass is turned away and `Start` waits for the pass in flight (`AwaitPass`, under `ctx`) before it returns. After the first check `Start` launches the ticker goroutine, which carries the same recover. Shutdown: `Stop` latches the service stopped, so a `Start` that comes after it starts nothing, and a `Stop` during the first check cancels it and `Start` returns without a ticker; the goroutine skips the steps it has not reached once the run context has ended, and the shutdown waits for it for at most 2 seconds (`cookieShutdownWait`) after stopping both cookie services.
 - `CheckNow(ctx)` is `POST /api/cookies/recheck` and the TUI's `R C`, also `allowFallback=false`: it runs on a handler goroutine and must not buy a full page fetch.
 - `doRefresh(ctx)` is the ticker, and the only path allowed `allowFallback=true`.
 
@@ -1130,7 +1145,7 @@ Recovery rides the existing `shouldFireRecovery` dedupe and advances the same tw
 - `authCheckTimeout` = 15 seconds per platform.
 - `livenessRefireWindow` = 30 minutes — the BASE of the per-platform tier-2 back-off, doubling per alarm (`livenessRefireFactor` = 2) to a `livenessRefireCap` of 24 hours. Its own constant on purpose: it is neither the notification cooldown in `wireMonitorCallbacks` nor `defaultRefreshInterval`, however the three numbers line up today.
 - `livenessFreshWindow` = 25 minutes.
-- Initial check runs synchronously on `Start()`; tier-2 coverage therefore begins one cadence in.
+- Initial check runs synchronously inside `Start()` (on `cmd/moombox`'s cookie startup goroutine) with `allowFallback=false`; tier-2 coverage therefore begins one cadence in.
 
 ### Auto-Cookie Service
 
@@ -1182,7 +1197,7 @@ The guard is **not for the manual triggers**: `R F`, shift+click and the Setting
 
 The MOUNTED-PROFILE import path uses `platformsToRestore` (`internal/cookies/autocookies_profile.go`), which hands back the rows of any platform that either verified before and failed after (a regression) or had credentials before and could not be checked after (inconclusive — committing a set nobody could evaluate over one that may be fine is a bet with no upside). The BROWSER path uses `platformsToRestoreOnRegression`, the **regression arm only**: a browser refresh has just re-fetched from the live site, so a check that then could not reach the network is evidence about the network, and restoring on it would discard a fresher set on every DNS blip — on the path a desktop install runs every thirty minutes. The operator's pasted import shares that second policy for the same reason plus one of its own (see § Auto-Cookie Service). Both share `regressedAfterWrite`, so the arm they agree on cannot drift. A platform that was already dead is deliberately not restored on any path. The regression arm applies to the browser path too: that its cookies "cannot be staler than what was on disk" is true of their age and says nothing about whether they authenticate.
 
-**`StartProfileSeed(ctx)`** (`internal/cookies/autocookies_periodic.go`) runs AT MOST ONE browser-free import shortly after start, and `main.go` calls it **unconditionally** — it is not under the flag. The flag owns a *repeating* read of a profile nothing changes between ticks; a boot is the one moment a mounted profile plausibly did change, because something replaced it while the process was down. Its safety condition is the cookie file, not the flag, and lives in `decideStartupSeed`. It returns immediately; the import runs on its own goroutine after `profileImportStartupDelay` (15 s) and **re-asks** `decideStartupSeed` after the wait, because an interactive setup finishing or a hand-dropped `cookies.txt` both write the file the first decision was made about. `shouldSeedFromProfileAtStartup` is deleted.
+**`StartProfileSeed(ctx)`** (`internal/cookies/autocookies_periodic.go`) runs AT MOST ONE browser-free import shortly after start, and `startCookieSequence` (`cmd/moombox/cookie_startup.go`) calls it **unconditionally**, after the first auth check has finished — it is not under the flag. The flag owns a *repeating* read of a profile nothing changes between ticks; a boot is the one moment a mounted profile plausibly did change, because something replaced it while the process was down. Its safety condition is the cookie file, not the flag, and lives in `decideStartupSeed`. It returns immediately; the import runs on its own goroutine after `profileImportStartupDelay` (15 s) and **re-asks** `decideStartupSeed` after the wait, because an interactive setup finishing or a hand-dropped `cookies.txt` both write the file the first decision was made about. `shouldSeedFromProfileAtStartup` is deleted.
 
 **The timer and the seed are the service's own goroutines, and `Stop` joins them.** `StartPeriodicRefresh` and `StartProfileSeed` both register through `startBackground` (`internal/cookies/autocookies_periodic.go`): each goroutine runs under its caller's context narrowed to the service's lifetime, and `Stop` ends that lifetime — cancelling a pass in flight — and then waits up to `AutoCookieStopWait` (2 s) for both to return, logging `auto-cookie refresh pass still running after stop` if one does not. Before, `Stop` latched and killed browsers but waited for neither, so a pass in flight went on writing `cookies.txt` and `cookies.txt.meta.json` after shutdown — which stops the refresh service just ahead of this one — had moved on to the PO token provider, the web server and the database; a test that stopped at the same point had testing remove its TempDir under the meta write, which Windows refuses (`The directory is not empty`). The pass includes its post-pass re-check: `OnPassCompleted` takes the goroutine's context (`notePassCompleted` hands it on) and `cmd/moombox` runs `recheckAfterCookieWrite` under it — the one re-check site that does not use `context.Background()` — so the cancel that ends the loop ends the re-check's guide and validate round trips too, and the join covers it.
 

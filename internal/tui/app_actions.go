@@ -642,6 +642,9 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			}
 			a.settings.OnHashPassword = a.OnHashPassword
 			a.settings.OnVerifyPassword = a.OnVerifyPassword
+			if a.OnFailingChannels != nil {
+				a.settings.SetFailingChannels(a.OnFailingChannels())
+			}
 			a.settings.Open(a.cfg)
 		}
 	case "?":

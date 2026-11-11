@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -84,6 +85,34 @@ func cookieBadgeFor(authenticated, hasCookies, fileUnreadable bool, verdict cook
 	default:
 		return tui.CookieStatusUnknown
 	}
+}
+
+// cookieBadgesFor is both platforms' status-bar badges for one auth status
+// and the auto-cookie relogin flags (keyed by lowercase platform name).
+//
+// An UNCHECKED status comes first (owner ruling R-H2): the first cookie auth
+// check of the process has not answered, every other field is a zero value
+// that says nothing, and both badges read Checking. Not None (no cookies),
+// and not Relogin either, whatever the flags say: nothing has been concluded
+// yet. The dashboard's twin is cookieCheckPending in utils.js.
+//
+// Otherwise each platform's check is projected by cookieBadgeFor and a relogin
+// flag is laid over it. One cookies.txt holds both platforms' rows, so the
+// unreadable-file sentinel is platform-independent and both badges read it.
+func cookieBadgesFor(auth cookies.AuthStatus, relogin map[string]bool) (yt, tw tui.CookieStatus) {
+	if auth.Unchecked() {
+		return tui.CookieStatusChecking, tui.CookieStatusChecking
+	}
+	unreadable := auth.CookieFileError != ""
+	yt = cookieBadgeFor(auth.YouTubeAuthenticated, auth.HasYouTubeCookies, unreadable, auth.YouTubeVerification)
+	tw = cookieBadgeFor(auth.TwitchAuthenticated, auth.HasTwitchCookies, unreadable, auth.TwitchVerification)
+	if relogin["youtube"] {
+		yt = tui.CookieStatusRelogin
+	}
+	if relogin["twitch"] {
+		tw = tui.CookieStatusRelogin
+	}
+	return yt, tw
 }
 
 // newTUIResync builds the replay for a dropped TUI job update. The forwarders
@@ -561,40 +590,7 @@ func (s *runState) runTUI() {
 	}
 	app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict, string, string) {
 		s.log.Info("Cookie recheck requested from TUI")
-		// The bool is deliberately ignored, and the feedback line is deliberately
-		// unchanged when it is false.
-		//
-		// R C asks "what is the state of my cookies", and GetStatus answers that
-		// whether or not THIS keypress is the pass that produced the answer — a
-		// pass colliding with the 30-minute ticker returns the in-flight pass's
-		// verdicts, at worst one snapshot old, and every one of them is still a
-		// true statement about the credentials. The alternative would be to tell
-		// the operator "a refresh was already running", and there is no vocabulary
-		// for that here: cookies.RecheckReport renders per-platform VERDICTS and
-		// nothing else, and cookies.RefreshDeclinedCauses is the browser
-		// refresher's exhaustive, three-consumer-pinned set — not this one's.
-		// Adding a cause is a separate change; see CheckNow's own doc.
-		s.cookieRefresh.CheckNow(context.Background())
-		status := s.cookieRefresh.GetStatus()
-		// The verdicts, not the booleans. Both booleans are false for a check
-		// that could not reach the site, and the feedback line built on them
-		// reported "not authenticated" — a conclusion the check never drew.
-		//
-		// And the two error strings beside them, which is what the verdict on
-		// its own cannot say: RefreshUnknown means "this check learned nothing"
-		// and every cause produces the same three words. These fields had no
-		// reader anywhere in the tree until Arc 8 Task 12a — the same status
-		// object is projected onto the wire by CookieStatusPayload, which now
-		// carries them too, so both surfaces answer R C's question with the same
-		// two facts.
-		//
-		// Passed through untouched, and safely: every producer of these strings
-		// is status-and-cause only and none interpolates a response body (the
-		// rule is stated in full at CookieStatusPayload). The TUI clamps the
-		// rendered line to the panel width — see fitFeedback — so length is the
-		// renderer's problem, not this closure's.
-		return status.YouTubeVerification, status.TwitchVerification,
-			status.YouTubeError, status.TwitchError
+		return recheckCookiesForTUI(s.cookieRefresh, firstCheckRecheckWait)
 	}
 	// The other half of R C's answer, and it comes off a DIFFERENT SERVICE.
 	// AutoCookieStatus.LastError records what the last browser refresh or
@@ -1065,50 +1061,39 @@ func (s *runState) runTUI() {
 	decapiFwd.seed(s.decapiMon.GetNextCheckAt)
 	twitchFwd.seed(s.twitchMon.GetNextCheckAt)
 
-	// Wire cookie status to TUI. Parameter `auth` is the incoming status —
-	// named differently from `s` (receiver) to avoid the pre-refactor shadow.
-	authStatusToTUI := func(auth cookies.AuthStatus) {
-		// One cookies.txt holds both platforms' rows, so the sentinel is
-		// platform-independent and both badges read the same one.
-		unreadable := auth.CookieFileError != ""
-		yt := cookieBadgeFor(auth.YouTubeAuthenticated, auth.HasYouTubeCookies, unreadable, auth.YouTubeVerification)
-		tw := cookieBadgeFor(auth.TwitchAuthenticated, auth.HasTwitchCookies, unreadable, auth.TwitchVerification)
-		// Check auto-cookie relogin state. As of test.36 the relogin map
-		// is keyed by lowercase platform name (audit cookies.md #44).
-		//
-		// Applied unconditionally, and NOT gated on cookies.auto_enabled: the
-		// flag means a human has to sign in again, which a manual-cookie
-		// install must do by hand. The Web dashboard used to gate its copy of
-		// this and now does not — see updateStatusBar in web/public/app.js.
+	// Wire cookie status to TUI (newTUICookieStatusSender has the rules).
+	cookieSend := newTUICookieStatusSender(
+		s.cookieRefresh.GetStatus,
 		// ReloginStatus, not GetStatus: this reads nothing but the relogin
 		// map, and GetStatus's browser/registry detection scan would run on
-		// every auth-change dispatch — including the TUI's, which fires with
+		// every auth-change dispatch, including the TUI's, which fires with
 		// no cookie dialog open at all.
-		relogin := s.autoCookieSvc.ReloginStatus()
-		if relogin["youtube"] {
-			yt = tui.CookieStatusRelogin
-		}
-		if relogin["twitch"] {
-			tw = tui.CookieStatusRelogin
-		}
-		var ytActive, twActive bool
-		s.configStore.Read(func(c *config.MoomboxConfig) {
-			ytActive, twActive = config.GetActivePlatforms(c)
-		})
-		select {
-		case cookieStatusCh <- tui.CookieStatusMsg{YT: yt, TW: tw, YTActive: ytActive, TWActive: twActive}:
-		default:
-		}
-	}
+		func() map[string]bool { return s.autoCookieSvc.ReloginStatus() },
+		func() (ytActive, twActive bool) {
+			s.configStore.Read(func(c *config.MoomboxConfig) {
+				ytActive, twActive = config.GetActivePlatforms(c)
+			})
+			return ytActive, twActive
+		},
+		cookieStatusCh,
+	)
 	// Store TUI-side callback in the atomic slot; the dispatcher wired to
-	// cookieRefresh.OnAuthChange (set before cookieRefresh.Start()) loads it
-	// lock-free on each auth change.
+	// cookieRefresh.OnAuthChange (set in initServices, before
+	// startCookieSequence) loads it lock-free on each auth change. The first
+	// check may still be running on the cookie startup goroutine: its answer
+	// arrives through this slot, and one that landed before the Store is
+	// picked up by the initial send below, which reads the status after it.
 	tuiAuthFn := func(auth cookies.AuthStatus) {
-		authStatusToTUI(auth)
+		cookieSend(auth)
 	}
 	s.authChangeTUI.Store(&tuiAuthFn)
-	// Send initial cookie status
-	authStatusToTUI(s.cookieRefresh.GetStatus())
+	// The initial cookie status, twice: queued like every later one, and
+	// seeded into the model, because the queue is drained only after the
+	// first frame is drawn and that frame would show no cookie badge at all.
+	// The seed cannot go stale: it is applied before Run, and whatever a
+	// check sends from here on is applied after it.
+	initial := cookieSend(s.cookieRefresh.GetStatus())
+	app.SetCookieStatus(initial.YT, initial.TW, initial.YTActive, initial.TWActive)
 
 	// Send initial job list
 	if jobs, err := s.db.GetAllJobs(); err == nil {
@@ -1127,6 +1112,14 @@ func (s *runState) runTUI() {
 	// A change between this seed and Run went through that no-op Send; the
 	// TUI's Init asks the push for the snapshot again once Send delivers.
 	app.OnAdmissionHoldsResync = s.resyncAdmissionHoldsTUI
+
+	// The failing-channel flag (owner ruling R-H1): each change through
+	// channelMonitorsPush. No seed is needed: Settings, the only place that
+	// draws the flag, derives the set again each time it opens.
+	failingFn := func(f tui.FailingChannels) { app.Send(tui.ChannelFailingMsg{Failing: f}) }
+	s.channelMonitorsPush.tui.Store(&failingFn)
+	defer s.channelMonitorsPush.tui.Store(nil)
+	app.OnFailingChannels = s.channelMonitorsPush.failing
 
 	// Wire connectivity state to TUI (uses program.Send, not a channel)
 	unsubConnTUI := s.connMon.OnStateChange(func(online bool) {
@@ -1231,6 +1224,131 @@ func (s *runState) requestDiskRecheck() {
 	case s.diskRecheck <- struct{}{}:
 	default:
 	}
+}
+
+// firstCheckRecheckWait bounds R C's wait for the first cookie check of the
+// process: a little over the check itself, which is two 15 s round trips.
+const firstCheckRecheckWait = 35 * time.Second
+
+// recheckCookiesForTUI is R C: run a cookie check now and answer with both
+// platforms' verdicts and error strings.
+//
+// CheckNow's bool changes no wording of the feedback line. It is read for
+// one thing only, the wait in the second paragraph below.
+//
+// R C asks "what is the state of my cookies", and GetStatus answers that
+// whether or not THIS keypress is the pass that produced the answer: a pass
+// colliding with the 30-minute ticker returns the in-flight pass's verdicts,
+// at worst one snapshot old, and every one of them is still a true statement
+// about the credentials. The alternative would be to tell the operator "a
+// refresh was already running", and there is no vocabulary for that here:
+// cookies.RecheckReport renders per-platform VERDICTS and nothing else, and
+// cookies.RefreshDeclinedCauses is the browser refresher's exhaustive,
+// three-consumer-pinned set, not this one's. Adding a cause is a separate
+// change; see CheckNow's own doc.
+//
+// The one case where the pass in flight is waited for: the first check of
+// the process. The TUI is up while it runs, so R C can land in it, and the
+// status then holds no verdict at all, only "unchecked"; reporting that
+// would read as "unknown" for cookies nothing has looked at yet. The wait is
+// bounded by `wait`, and the TUI calls this off its UI goroutine.
+//
+// The verdicts, not the booleans. Both booleans are false for a check that
+// could not reach the site, and the feedback line built on them reported
+// "not authenticated", a conclusion the check never drew.
+//
+// And the two error strings beside them, which is what the verdict on its
+// own cannot say: RefreshUnknown means "this check learned nothing" and
+// every cause produces the same three words. The same status object is
+// projected onto the wire by CookieStatusPayload, which carries them too, so
+// both surfaces answer R C's question with the same two facts.
+//
+// Passed through untouched, and safely: every producer of these strings is
+// status-and-cause only and none interpolates a response body (the rule is
+// stated in full at CookieStatusPayload). The TUI clamps the rendered line
+// to the panel width (fitFeedback), so length is the renderer's problem.
+func recheckCookiesForTUI(rs interface {
+	CheckNow(context.Context) bool
+	GetStatus() cookies.AuthStatus
+	AwaitPass(context.Context) bool
+}, wait time.Duration) (yt, tw cookies.RefreshVerdict, ytErr, twErr string) {
+	ran := rs.CheckNow(context.Background())
+	if !ran && rs.GetStatus().Unchecked() {
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), wait)
+		rs.AwaitPass(waitCtx)
+		cancelWait()
+	}
+	status := rs.GetStatus()
+	return status.YouTubeVerification, status.TwitchVerification,
+		status.YouTubeError, status.TwitchError
+}
+
+// newTUICookieStatusSender builds the one sender of cookie status to the
+// TUI's status bar. The returned func queues the badges for auth on ch,
+// without blocking, and returns the message it built.
+//
+// The TUI is up before the first cookie check answers (owner ruling amending
+// R-H2), so three callers can overlap around that answer: runTUI's initial
+// send, resendTUICookieStatus, and the check's own OnAuthChange. Each reads a
+// status and then sends it, and an unchecked status read just before the
+// check ended could be sent just after the checked one and leave the badges
+// on "checking…" until the next transition. The latch serialises the sends,
+// and an unchecked status that comes after a checked one went out is
+// replaced by a fresh read from getStatus (checkedLatch), so a re-send asked
+// for another reason (the active platforms) still goes out.
+//
+// relogin is the auto-cookie relogin map, keyed by lowercase platform name
+// (audit cookies.md #44). It is applied unconditionally, and NOT gated on
+// cookies.auto_enabled: the flag means a human has to sign in again, which a
+// manual-cookie install must do by hand. The Web dashboard used to gate its
+// copy of this and now does not; see updateStatusBar in web/public/app.js.
+func newTUICookieStatusSender(
+	getStatus func() cookies.AuthStatus,
+	relogin func() map[string]bool,
+	active func() (yt, tw bool),
+	ch chan<- tui.CookieStatusMsg,
+) func(cookies.AuthStatus) tui.CookieStatusMsg {
+	var latch checkedLatch
+	return func(auth cookies.AuthStatus) tui.CookieStatusMsg {
+		defer latch.enter()()
+		if !latch.admit(auth) {
+			// Stale: send what the service holds now instead.
+			auth = getStatus()
+		}
+		var msg tui.CookieStatusMsg
+		msg.YT, msg.TW = cookieBadgesFor(auth, relogin())
+		msg.YTActive, msg.TWActive = active()
+		select {
+		case ch <- msg:
+		default:
+		}
+		return msg
+	}
+}
+
+// checkedLatch orders the cookie statuses sent to the TUI. AuthStatus.Checked
+// only ever goes from false to true, so an unchecked status that arrives
+// after a checked one is stale by definition, and admit refuses it. enter holds the
+// lock for one whole send, so two senders cannot interleave either.
+type checkedLatch struct {
+	mu      sync.Mutex
+	checked bool
+}
+
+// enter takes the latch for one send and returns the release.
+func (l *checkedLatch) enter() func() {
+	l.mu.Lock()
+	return l.mu.Unlock
+}
+
+// admit reports whether auth may be sent; call it between enter and its
+// release.
+func (l *checkedLatch) admit(auth cookies.AuthStatus) bool {
+	if auth.Unchecked() {
+		return !l.checked
+	}
+	l.checked = true
+	return true
 }
 
 // resendTUICookieStatus re-sends the TUI's cookie status line, whose

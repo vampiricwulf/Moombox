@@ -107,8 +107,8 @@ func TestDockerSeedLoadsAsDocumented(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	assertDockerSeedValues(t, cfg)
-	if len(cfg.NormalizedOnLoad) != 0 || len(cfg.IgnoredOnLoad) != 0 {
-		t.Errorf("the seed is normalised or ignored on load: normalised %v, ignored %v", cfg.NormalizedOnLoad, cfg.IgnoredOnLoad)
+	if len(cfg.NormalizedOnLoad) != 0 || len(cfg.IgnoredOnLoad) != 0 || len(cfg.UnknownOnLoad) != 0 {
+		t.Errorf("the seed is normalised or ignored on load: normalised %v, ignored %v, unknown %v", cfg.NormalizedOnLoad, cfg.IgnoredOnLoad, cfg.UnknownOnLoad)
 	}
 	if cfg.NeedsAutoPersist {
 		t.Error("the seed lacks a section the binary auto-persists: its first boot rewrites config.toml to add it")

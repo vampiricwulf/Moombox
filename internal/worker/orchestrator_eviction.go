@@ -193,8 +193,11 @@ func selectedVideoTargetDuration(jobCtx *JobContext, videoInfo *youtube.VideoInf
 // gated future work that would let from-start archiving of a marathon
 // stream survive this instead of failing outright.
 func evictionError(oldest int, evictedHours float64) error {
+	// Two sentences shown to the operator as the job's error, so the second
+	// keeps its full stop (improvement sweep dx-ax-2).
+	//lint:ignore ST1005 operator-facing two-sentence job error
 	return fmt.Errorf(
 		"stream exceeds YouTube's ~120h retention window: segments 0..%d are evicted (~%.0fh of the broadcast). "+
-			"From-start archiving of marathon streams requires init recovery — see docs/plans/2026-08-05-incomplete-tail-and-marathon-streams.md Phase D",
+			"Moombox cannot yet archive a stream this long from its start.",
 		oldest-1, evictedHours)
 }
