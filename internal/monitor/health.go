@@ -200,9 +200,12 @@ type ChannelMonitors struct {
 // operator" (owner ruling R-H1): covering holds one entry per monitor that
 // tracks the channel, and the channel is failing when there is at least one
 // and every one of them has FailingStreak or more consecutive failed checks.
-// A monitor that still reaches the channel vouches for it, as it does for the
-// Discord alert, so a lone RSS 404 beside a working DECAPI stays quiet; a
-// monitor that has not checked the channel has no entry and says nothing.
+// A monitor with fewer than FailingStreak consecutive failures vouches for the
+// channel, so a lone RSS 404 beside a working DECAPI stays quiet. That is a
+// looser test than the Discord alert's (cmd/moombox's siblingReachable wants zero
+// errors and a success within crossMonitorVouchWindow): no freshness is asked
+// here. A monitor that has not checked the channel has no entry and says
+// nothing.
 // The flag is derived on every read and never stored: one success on any
 // monitor resets that monitor's streak and so clears it.
 //
