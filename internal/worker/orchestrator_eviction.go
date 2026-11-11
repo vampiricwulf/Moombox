@@ -195,6 +195,6 @@ func selectedVideoTargetDuration(jobCtx *JobContext, videoInfo *youtube.VideoInf
 func evictionError(oldest int, evictedHours float64) error {
 	return fmt.Errorf(
 		"stream exceeds YouTube's ~120h retention window: segments 0..%d are evicted (~%.0fh of the broadcast). "+
-			"Moombox cannot yet archive a stream this long from its start.",
+			"Moombox cannot yet archive a stream this long from its start",
 		oldest-1, evictedHours)
 }

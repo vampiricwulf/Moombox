@@ -85,7 +85,7 @@ func TestSelectedVideoTargetDuration(t *testing.T) {
 func TestEvictionError(t *testing.T) {
 	err := evictionError(437123, 121.0)
 	want := "stream exceeds YouTube's ~120h retention window: segments 0..437122 are evicted (~121h of the broadcast). " +
-		"Moombox cannot yet archive a stream this long from its start."
+		"Moombox cannot yet archive a stream this long from its start"
 	if got := err.Error(); got != want {
 		t.Errorf("evictionError() = %q, want %q", got, want)
 	}
@@ -229,7 +229,7 @@ func TestDiagnoseEvictedStart_ConfirmedEviction(t *testing.T) {
 	wantHours := float64(front) * float64(targetDuration) / 3600
 	wantMsg := fmt.Sprintf(
 		"stream exceeds YouTube's ~120h retention window: segments 0..%d are evicted (~%.0fh of the broadcast). "+
-			"Moombox cannot yet archive a stream this long from its start.",
+			"Moombox cannot yet archive a stream this long from its start",
 		front-1, wantHours)
 	if got := err.Error(); got != wantMsg {
 		t.Errorf("error = %q, want %q", got, wantMsg)
