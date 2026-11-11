@@ -5,6 +5,12 @@ import (
 	"fmt"
 )
 
+// The one staging-claim registry (CLAUDE.md, State machines, rule 4): a
+// job's lease on its staging outside a queue run, held under the name of the
+// operation that took it. The names (jobOp, its constants and IsResetVerb)
+// are in worker.go, with opChapterImport and opBootCleanup beside their
+// operations.
+
 // claimJobOperation takes one job's staging claim for op and returns the
 // release. It refuses with ErrStagingBusy, naming the operation in the way,
 // when somebody already holds it.

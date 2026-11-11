@@ -13,6 +13,11 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
+// How a run's failure is recorded: which errors park a job in COOKIES? and
+// under which park reason, setJobError, the "Job Failed" notice, the
+// cookie refresh a credential failure attempts first, and the settling of a
+// chat the failed run left in flight.
+
 // cookiesStatusError reports whether err's chain warrants StatusCookies
 // rather than StatusError — i.e. the user acting on cookie auth is the fix:
 // worker.ErrCookiesRequired (player-API member/login flags),

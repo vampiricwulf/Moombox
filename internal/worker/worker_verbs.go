@@ -14,6 +14,12 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 )
 
+// The operator verbs, as DownloadWorker methods: Resume, Reinitialize,
+// auto-reinitialize, Asides, Mux and Recover Asides, with afterJobExit, the
+// wait a reset verb makes for the job's run and staging claim. Their status
+// gates and the refusal ErrNotAllowed are in verbs.go; the staging claim they
+// take is in worker_staging_claims.go.
+
 // ResumeJob resumes a cancelled/errored YouTube job from its saved state.
 // Preserves staging files, progress, and seq numbers. Resets auto_retry_count
 // so any future error fires its notification — Resume is user-driven, so the
