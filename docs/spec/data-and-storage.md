@@ -583,6 +583,14 @@ which were saved as a "manual PO token override" no code path ever consulted (PO
 session through `[bgutils]`). `loadFromFile` records the ones present in `IgnoredOnLoad`, boot logs one
 Warn per key, and the next save leaves them out of the file.
 
+**Unknown keys are ignored, and said so.** A key the file holds that nothing reads (a misspelt key or
+section, or a key under the wrong section) leaves its setting on the default. `loadFromFile` keeps the
+struct decode's list of undecoded keys, `unknownKeysIn` (`internal/config/config.go`) drops the ones in
+`legacyKeys` (what `migrateOldFormat` reads, keys dropped from the struct without a migration, and the
+retired keys above), and the rest go in `UnknownOnLoad` (`internal/config/types.go`). Boot logs one Warn
+per key; an unknown section is named once, without its keys. Nothing else changes: the file still loads,
+and the next save leaves the key out.
+
 ### Configuration Sections
 
 #### [network]

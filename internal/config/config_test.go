@@ -368,6 +368,9 @@ name = "Test Channel"
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(cfg.UnknownOnLoad) != 0 {
+		t.Errorf("UnknownOnLoad = %q, want none: these are legacy keys", cfg.UnknownOnLoad)
+	}
 
 	// Verify top-level fields migrated to Network
 	if cfg.Network.Port != 8080 {
@@ -475,6 +478,9 @@ network_access = "external"
 			cfg, err := Load(configPath)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if len(cfg.UnknownOnLoad) != 0 {
+				t.Errorf("UnknownOnLoad = %q, want none: these are legacy keys", cfg.UnknownOnLoad)
 			}
 			if cfg.Network.NetworkAccess != tt.want {
 				t.Errorf("NetworkAccess = %q, want %q", cfg.Network.NetworkAccess, tt.want)
@@ -668,6 +674,9 @@ auto_enabled = true
 	cfg, err := Load(configPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(cfg.UnknownOnLoad) != 0 {
+		t.Errorf("UnknownOnLoad = %q, want none: these are legacy keys", cfg.UnknownOnLoad)
 	}
 
 	// database_path from [paths] should be kept
@@ -1024,6 +1033,9 @@ func TestMaxFeedItemsIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("legacy key must not error: %v", err)
 	}
+	if len(cfg.UnknownOnLoad) != 0 {
+		t.Errorf("UnknownOnLoad = %q, want none: these are legacy keys", cfg.UnknownOnLoad)
+	}
 	if cfg.Monitors.ArchiveWindowDays != 3 {
 		t.Fatal("defaults must apply")
 	}
@@ -1282,6 +1294,9 @@ max_video_resolution = 720
 	cfg, err := Load(configPath)
 	if err != nil {
 		t.Fatalf("Load with the retired key: %v", err)
+	}
+	if len(cfg.UnknownOnLoad) != 0 {
+		t.Errorf("UnknownOnLoad = %q, want none: these are legacy keys", cfg.UnknownOnLoad)
 	}
 	if cfg.Downloader.MaxVideoResolution != 720 {
 		t.Errorf("MaxVideoResolution = %d, want 720 (the section around the retired key must still decode)", cfg.Downloader.MaxVideoResolution)

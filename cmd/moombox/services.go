@@ -624,6 +624,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	for _, key := range cfg.IgnoredOnLoad {
 		log.Warn("Config key is no longer used and is ignored — the next save removes it from the file", slog.String("key", key))
 	}
+	for _, key := range cfg.UnknownOnLoad {
+		log.Warn("Config key is not recognised and was ignored (misspelt, or under the wrong section?) — the next save removes it from the file", slog.String("key", key))
+	}
 
 	s.warnSegmentWorkers(cfg.Downloader.SegmentWorkers)
 
