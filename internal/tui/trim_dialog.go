@@ -126,8 +126,12 @@ func (m *TrimDialogModel) IsVisible() bool {
 
 // SetSize updates the dialog dimensions.
 func (m *TrimDialogModel) SetSize(w, h int) {
+	wasBare := m.bare()
 	m.width = w
 	m.height = h
+	if wasBare || m.bare() {
+		m.bareSetSize()
+	}
 }
 
 // SetJobMetadata provides job metadata for display.
@@ -441,6 +445,9 @@ func (m *TrimDialogModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 func (m *TrimDialogModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView()
 	}
 
 	boxW := max(min(60, m.width-4), 30)

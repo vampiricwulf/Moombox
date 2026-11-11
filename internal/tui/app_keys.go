@@ -60,20 +60,19 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// The size guard, after the Ctrl+C hoist so the wizard's cookie-slot
 	// release above still runs (owner ruling R-C6). Below the compact floor
 	// the screen is a notice and every other key is ignored: a chord typed
-	// blind once cancelled a recording. Below the normal layout an overlay
-	// that was already open is kept under a notice, and only Esc reaches it,
-	// where the notice says it does (heldEscFor): never an Esc that would
-	// quit, or raise or answer a prompt that is not on screen.
-	switch a.layoutMode() {
-	case layoutTooSmall:
+	// blind once cancelled a recording. An overlay open in a terminal smaller
+	// than it needs is kept under a notice (overlayDrawFor), and only Esc
+	// reaches it, where the notice says it does (heldEscFor): never an Esc
+	// that would quit, or raise or answer a prompt that is not on screen. An
+	// overlay drawn bare is on screen and takes its keys as usual, below.
+	if a.layoutMode() == layoutTooSmall {
 		return a, nil
-	case layoutCompact:
-		if o := a.activeOverlay(); o != nil {
-			if key != keyEsc || a.heldEscFor(o) == heldEscOff {
-				return a, nil
-			}
-			return o.key(a, msg, key)
+	}
+	if o := a.activeOverlay(); o != nil && a.overlayDrawFor(o) == drawHeld {
+		if key != keyEsc || a.heldEscFor(o) == heldEscOff {
+			return a, nil
 		}
+		return o.key(a, msg, key)
 	}
 
 	if o := a.activeOverlay(); o != nil {
@@ -161,7 +160,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "m":
 		a.seenChordHint = true
 		// The action menu is an overlay itself.
-		if a.refuseOverlay() {
+		if a.refuseOverlay("action menu") {
 			return a, nil
 		}
 		a.actionMenu.SetSize(a.width, a.height)
@@ -392,10 +391,11 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 		return a, nil, false
 	}
 
-	// Refused before any job check or confirm: below the normal layout the
-	// answer to a chord that opens an overlay is the same whatever is
-	// selected (dispatchAction holds the same guard for every other route).
-	if item.Opens != "" && a.refuseOverlay() {
+	// Refused before any job check or confirm: in a terminal smaller than
+	// its overlay needs, the answer to a chord that opens one is the same
+	// whatever is selected (dispatchAction holds the same guard for every
+	// other route).
+	if item.Opens != "" && a.refuseOverlay(item.Opens) {
 		return a, nil, true
 	}
 

@@ -115,7 +115,7 @@ func (m *ImportDialogModel) Open(startDir string) tea.Cmd {
 	m.errorMsg = ""
 	m.picker = newImportPicker()
 	m.picker.CurrentDirectory = startDir
-	m.picker.SetHeight(max(1, m.height-8))
+	m.picker.SetHeight(m.pickerRows())
 	return m.picker.Init()
 }
 
@@ -131,9 +131,19 @@ func (m *ImportDialogModel) IsVisible() bool {
 
 // SetSize updates the dialog dimensions.
 func (m *ImportDialogModel) SetSize(w, h int) {
+	was := layoutModeFor(m.width, m.height)
 	m.width = w
 	m.height = h
-	m.picker.SetHeight(max(1, h-8))
+	if was == layoutCompact || m.bare() {
+		m.bareSetSize()
+	} else {
+		m.picker.SetHeight(max(1, h-8))
+	}
+	// Back in the normal layout from anything else: the picker's window
+	// may have the top the bare form's shorter one moved to.
+	if was != layoutNormal && layoutModeFor(w, h) == layoutNormal && m.visible && m.step == importStepPick {
+		m.pickerAnchor()
+	}
 }
 
 // SetError sets the error and goes back to metadata step.
@@ -260,6 +270,9 @@ func importPickerHint(contentW int) string {
 func (m *ImportDialogModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView()
 	}
 
 	boxW := min(max(min(70, m.width-4), 40), m.width)

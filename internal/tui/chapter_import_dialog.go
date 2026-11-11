@@ -81,9 +81,12 @@ type ChapterImportDialogModel struct {
 	width, height int
 	jobID, title  string
 	text          textarea.Model
-	offset        textinput.Model
-	focusOffset   bool
-	step          chapterImportStep
+	// heldPaste is the paste box as it was when the terminal left the normal
+	// layout (barePaste). SetSize is its one writer and reader.
+	heldPaste   barePaste
+	offset      textinput.Model
+	focusOffset bool
+	step        chapterImportStep
 	// seq numbers the edits; a preview answers for the edit it was asked
 	// for, and only the newest one is drawn.
 	seq  int
@@ -108,7 +111,7 @@ type ChapterImportDialogModel struct {
 // NewChapterImportDialogModel creates the chapter import overlay.
 func NewChapterImportDialogModel() *ChapterImportDialogModel {
 	ta := textarea.New()
-	ta.Placeholder = "Paste a timestamp comment: 0:00 Intro, 12:34 First song, …"
+	ta.Placeholder = chapterPastePlaceholder
 	ta.ShowLineNumbers = false
 	ta.SetHeight(8)
 	ti := newTextInput()
@@ -134,7 +137,23 @@ func (m *ChapterImportDialogModel) IsSavingFor(n int) bool {
 
 // SetSize updates the dialog dimensions.
 func (m *ChapterImportDialogModel) SetSize(w, h int) {
+	wasBare, was := m.bare(), layoutModeFor(m.width, m.height)
 	m.width, m.height = w, h
+	now := layoutModeFor(w, h)
+	if was == layoutNormal && now != layoutNormal {
+		m.heldPaste = m.holdPaste()
+	}
+	if m.bare() {
+		m.bareSetSize()
+		return
+	}
+	if wasBare {
+		defer m.bareLeave()
+	}
+	if was != layoutNormal && now == layoutNormal {
+		// After the normal width and height below, and after bareLeave.
+		defer func() { m.reseatPaste(m.heldPaste) }()
+	}
 	if _, contentW := dialogBox(90, w); contentW > 0 {
 		m.text.SetWidth(max(contentW-2, 10))
 		m.offset.SetWidth(max(contentW-12, 10))
@@ -312,6 +331,9 @@ func (m *ChapterImportDialogModel) View() string {
 	if !m.visible {
 		return ""
 	}
+	if m.bare() {
+		return m.bareView()
+	}
 	boxW, contentW := dialogBox(90, m.width)
 	boxH := max(m.height-4, 16)
 
@@ -423,6 +445,9 @@ func (m *ChapterImportDialogModel) listRows() (preview, current int) {
 // previewMaxTop is the furthest the preview scrolls: its last rows fill the
 // space. 0 when the preview is not drawn or fits.
 func (m *ChapterImportDialogModel) previewMaxTop() int {
+	if m.bare() {
+		return m.barePreviewMaxTop()
+	}
 	if !m.previewDrawn() {
 		return 0
 	}
@@ -435,6 +460,9 @@ func (m *ChapterImportDialogModel) previewMaxTop() int {
 // grows past its set height when its content needs it, so the row is read
 // from the frame); under it come the title, the job's title and a blank line.
 func (m *ChapterImportDialogModel) pasteBottom() int {
+	if m.bare() {
+		return m.text.Height() // under the one-row header
+	}
 	top := 0
 	for i, l := range strings.Split(m.View(), "\n") {
 		if strings.TrimSpace(l) != "" {

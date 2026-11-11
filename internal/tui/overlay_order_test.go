@@ -13,10 +13,15 @@ import (
 // the registry: opened through its own production entry point, its
 // visibility and its own view read straight off the model.
 type overlayCase struct {
-	name    string
-	open    func(*App)
-	visible func(*App) bool
-	view    func(*App) string
+	name string
+	// bareW and bareH are the smallest terminal the overlay opens bare in
+	// below the normal layout (overlay_bare.go). 0, 0: it has no bare form
+	// and needs the normal layout. Every overlay states its answer here;
+	// TestOverlayRegistryOrder holds the registry to it.
+	bareW, bareH int
+	open         func(*App)
+	visible      func(*App) bool
+	view         func(*App) string
 }
 
 // overlayCases lists every overlay in the order handleKey, View and
@@ -25,37 +30,37 @@ type overlayCase struct {
 // failure and not a silent change of which overlay a key reaches.
 func overlayCases(t *testing.T) []overlayCase {
 	return []overlayCase{
-		{"settings", func(a *App) { a.settings.Open(a.cfg) },
+		{"settings", 30, 6, func(a *App) { a.settings.Open(a.cfg) },
 			func(a *App) bool { return a.settings.IsVisible() }, func(a *App) string { return a.settings.View() }},
-		{"help", func(a *App) { a.help.Toggle() },
+		{"help", 30, 6, func(a *App) { a.help.Toggle() },
 			func(a *App) bool { return a.help.IsVisible() }, func(a *App) string { return a.help.View() }},
-		{"release notes", func(a *App) { a.releaseNotesPopup.open("v9.9.9", "# notes", a.width, a.height) },
+		{"release notes", 30, 6, func(a *App) { a.releaseNotesPopup.open("v9.9.9", "# notes", a.width, a.height) },
 			func(a *App) bool { return a.releaseNotesPopup.isOpen() }, func(a *App) string { return a.releaseNotesPopup.View() }},
-		{"ffmpeg check", func(a *App) { a.ffmpegCheck.Open() },
+		{"ffmpeg check", 0, 0, func(a *App) { a.ffmpegCheck.Open() },
 			func(a *App) bool { return a.ffmpegCheck.IsVisible() }, func(a *App) string { return a.ffmpegCheck.View() }},
-		{"setup wizard", func(a *App) { a.setupWiz.Open() },
+		{"setup wizard", 0, 0, func(a *App) { a.setupWiz.Open() },
 			func(a *App) bool { return a.setupWiz.IsVisible() }, func(a *App) string { return a.setupWiz.View() }},
-		{"action menu", func(a *App) { a.actionMenu.Open(a.buildMenuItems()) },
+		{"action menu", 30, 6, func(a *App) { a.actionMenu.Open(a.buildMenuItems()) },
 			func(a *App) bool { return a.actionMenu.IsVisible() }, func(a *App) string { return a.actionMenu.View() }},
-		{"import", func(a *App) { a.importDlg.Open(t.TempDir()) },
+		{"import", 30, 6, func(a *App) { a.importDlg.Open(t.TempDir()) },
 			func(a *App) bool { return a.importDlg.IsVisible() }, func(a *App) string { return a.importDlg.View() }},
-		{"cookie import", func(a *App) { a.cookieImportDlg.Open() },
+		{"cookie import", 30, 6, func(a *App) { a.cookieImportDlg.Open() },
 			func(a *App) bool { return a.cookieImportDlg.IsVisible() }, func(a *App) string { return a.cookieImportDlg.View() }},
-		{"chapter import", func(a *App) { a.chapterDlg.Open(a.taskList.GetJobByID("j1")) },
+		{"chapter import", 30, 10, func(a *App) { a.chapterDlg.Open(a.taskList.GetJobByID("j1")) },
 			func(a *App) bool { return a.chapterDlg.IsVisible() }, func(a *App) string { return a.chapterDlg.View() }},
-		{"add video", func(a *App) { a.addVideo.Open() },
+		{"add video", 30, 6, func(a *App) { a.addVideo.Open() },
 			func(a *App) bool { return a.addVideo.IsVisible() }, func(a *App) string { return a.addVideo.View() }},
-		{"trim", func(a *App) { a.trimDlg.Open("j1", "a job") },
+		{"trim", 30, 6, func(a *App) { a.trimDlg.Open("j1", "a job") },
 			func(a *App) bool { return a.trimDlg.IsVisible() }, func(a *App) string { return a.trimDlg.View() }},
-		{"files", func(a *App) { a.filesDlg.Open() },
+		{"files", 30, 6, func(a *App) { a.filesDlg.Open() },
 			func(a *App) bool { return a.filesDlg.IsVisible() }, func(a *App) string { return a.filesDlg.View() }},
-		{"client tokens", func(a *App) { a.clientTokensDlg.Open() },
+		{"client tokens", 30, 6, func(a *App) { a.clientTokensDlg.Open() },
 			func(a *App) bool { return a.clientTokensDlg.IsVisible() }, func(a *App) string { return a.clientTokensDlg.View() }},
-		{"ytdlp plugin", func(a *App) { a.ytdlpDlg.Open() },
+		{"ytdlp plugin", 30, 6, func(a *App) { a.ytdlpDlg.Open() },
 			func(a *App) bool { return a.ytdlpDlg.IsVisible() }, func(a *App) string { return a.ytdlpDlg.View() }},
-		{"stats", func(a *App) { a.statsDlg.Open() },
+		{"stats", 30, 6, func(a *App) { a.statsDlg.Open() },
 			func(a *App) bool { return a.statsDlg.IsVisible() }, func(a *App) string { return a.statsDlg.View() }},
-		{"job log", func(a *App) { a.jobLog.Open(a.taskList.GetJobByID("j1")) },
+		{"job log", 30, 6, func(a *App) { a.jobLog.Open(a.taskList.GetJobByID("j1")) },
 			func(a *App) bool { return a.jobLog.IsVisible() }, func(a *App) string { return a.jobLog.View() }},
 	}
 }
@@ -120,6 +125,18 @@ func TestOverlayRegistryOrder(t *testing.T) {
 		}
 		if o.visible == nil || o.view == nil || o.key == nil {
 			t.Errorf("overlay %q: visible, view and key are all required", o.name)
+		}
+		switch c := cases[i]; {
+		case c.bareW == 0 && c.bareH == 0:
+			if o.bare != nil {
+				t.Errorf("overlay %q has a bare form, overlayCases says none", o.name)
+			}
+		case o.bare == nil:
+			t.Errorf("overlay %q has no bare form, overlayCases says %dx%d", o.name, c.bareW, c.bareH)
+		case o.bare.openW != c.bareW || o.bare.openH != c.bareH:
+			t.Errorf("overlay %q opens bare at %dx%d, overlayCases says %dx%d", o.name, o.bare.openW, o.bare.openH, c.bareW, c.bareH)
+		case c.bareW < compactMinWidth || c.bareH < compactMinHeight || (c.bareW >= minTermWidth && c.bareH >= minTermHeight):
+			t.Errorf("overlay %q: a bare minimum of %dx%d is outside the compact layout", o.name, c.bareW, c.bareH)
 		}
 	}
 }
@@ -233,8 +250,9 @@ const (
 // scrolls needs a row in overlayWheelCases (overlay_wheel_test.go) too, which
 // proves it.
 //
-// The inert ones have nothing to scroll: cookie import is one path field,
-// and the yt-dlp plugin and statistics overlays are fixed screens that fit.
+// The inert ones have nothing to scroll: cookie import is one path field
+// and the yt-dlp plugin overlay is a fixed screen that fits. Statistics
+// scrolls in its bare form only; its normal form is a fixed screen too.
 var overlayWheel = map[string]string{
 	"settings":       wheelScrolls, // the section under the cursor
 	"help":           wheelScrolls, // three rows a notch
@@ -250,7 +268,7 @@ var overlayWheel = map[string]string{
 	"files":          wheelScrolls, // the list's cursor
 	"client tokens":  wheelScrolls, // the list's cursor
 	"ytdlp plugin":   wheelInert,
-	"stats":          wheelInert,
+	"stats":          wheelScrolls, // its bare form, three rows a notch; the normal form shows everything
 	"job log":        wheelScrolls, // three rows a notch
 }
 
