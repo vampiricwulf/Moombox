@@ -3,6 +3,7 @@ package cookies
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -14,53 +15,76 @@ import (
 //
 // Mutant: delete the AwaitPass call in Start (Start returns while the recheck
 // is still in flight).
+//
+// In a synctest bubble: Wait returns once the recheck is parked in its pass
+// and Start is parked wherever it is going to park, so "Start has not
+// returned" is read at a settled point, not after a real-time window that a
+// loaded runner could outlast with the mutant in place.
+//
+// The jar is empty on purpose. A bubble cannot settle around real sockets,
+// and a pass over a jar with no auth cookie makes no request; the single
+// flight, the release and Checked behave the same. The seams are still
+// pointed at stubs, outside the bubble, so a pass that did make a request
+// could not reach the real sites.
 func TestStartWaitsForARecheckThatWonTheFirstPass(t *testing.T) {
 	healthyRefreshSeams(t)
-	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
-	t.Cleanup(rs.Stop)
+	synctest.Test(t, func(t *testing.T) {
+		rs := NewRefreshService(NewCookieJar(), 0, nopLogger{})
+		// Ends the ticker goroutine before the bubble closes.
+		defer rs.Stop()
 
-	passes, entered, release := blockingPass(rs)
-	recheckDone := make(chan struct{})
-	go func() {
-		defer close(recheckDone)
-		rs.CheckNow(context.Background())
-	}()
-	<-entered
+		passes, entered, release := blockingPass(rs)
+		recheckDone := make(chan struct{})
+		go func() {
+			defer close(recheckDone)
+			rs.CheckNow(context.Background())
+		}()
+		<-entered
 
-	startDone := make(chan struct{})
-	go func() {
-		defer close(startDone)
-		rs.Start(context.Background())
-	}()
-	select {
-	case <-startDone:
-		t.Fatal("Start returned while the recheck that won the first pass was still running")
-	case <-time.After(150 * time.Millisecond):
-	}
-	if rs.GetStatus().Checked {
-		t.Fatal("Checked is set while the first pass is still running")
-	}
+		startDone := make(chan struct{})
+		go func() {
+			defer close(startDone)
+			rs.Start(context.Background())
+		}()
+		synctest.Wait()
+		select {
+		case <-startDone:
+			close(release) // let the recheck end, so the bubble can close
+			t.Fatal("Start returned while the recheck that won the first pass was still running")
+		default:
+		}
+		if rs.GetStatus().Checked {
+			close(release)
+			t.Fatal("Checked is set while the first pass is still running")
+		}
 
-	close(release)
-	select {
-	case <-startDone:
-	case <-time.After(30 * time.Second):
-		t.Fatal("Start did not return after the recheck finished")
-	}
-	<-recheckDone
-	if !rs.GetStatus().Checked {
-		t.Error("Start returned with the status still unchecked")
-	}
-	if got := passes.Load(); got != 1 {
-		t.Errorf("passes = %d, want 1 (Start must wait for the pass in flight, not run a second)", got)
-	}
+		close(release)
+		synctest.Wait()
+		select {
+		case <-startDone:
+		default:
+			t.Fatal("Start did not return after the recheck finished")
+		}
+		<-recheckDone
+		if !rs.GetStatus().Checked {
+			t.Error("Start returned with the status still unchecked")
+		}
+		if got := passes.Load(); got != 1 {
+			t.Errorf("passes = %d, want 1 (Start must wait for the pass in flight, not run a second)", got)
+		}
+	})
 }
 
 // The wait is under ctx: a run that ends while the pass in flight is stuck
 // releases Start, and Start then starts no ticker.
+//
+// Mutant: drop the ctx.Err() check after the wait in Start (the "started"
+// line is logged and the ticker goroutine is spawned).
 func TestStartStopsWaitingWhenTheRunEnds(t *testing.T) {
 	healthyRefreshSeams(t)
-	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	logs := &recordingCookieLogger{}
+	rs := NewRefreshService(jarWithAuth(t), 0, logs)
+	t.Cleanup(rs.Stop)
 
 	_, entered, release := blockingPass(rs)
 	recheckDone := make(chan struct{})
@@ -81,6 +105,9 @@ func TestStartStopsWaitingWhenTheRunEnds(t *testing.T) {
 	case <-startDone:
 	case <-time.After(30 * time.Second):
 		t.Fatal("Start kept waiting for the pass in flight after its context ended")
+	}
+	if logs.count("cookie refresh service started") != 0 {
+		t.Error("the refresh loop started after the run ended")
 	}
 	close(release)
 	<-recheckDone
