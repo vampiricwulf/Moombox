@@ -57,6 +57,7 @@ If this endpoint triggers state changes that clients need to see in real-time, a
 - `BroadcastJobsUpdate(data)` — full job list (add/delete, threshold changes)
 - `BroadcastJobDeleted(jobID)` — targeted row removal; clients drop the row immediately
 - `BroadcastCheckTimers(data)` — next monitor check times
+- `Broadcast("channel_monitors", monitor.ChannelMonitors)` — every monitor's health list, sent by `channelMonitorsPush.check` (`cmd/moombox/channel_monitors_push.go`) only when the set of failing channels or a failing channel's newest error changes; the dashboard derives the flag itself with its mirror of `monitor.ChannelFailing`, so never send the derived answer in its place
 - `BroadcastConnectivity(online)` — `{online}` when reachability flips
 - `BroadcastLog(line, seq)` — one log line, clipped to 4096 bytes on a rune boundary (`clipLogLine`), with its number in the logger's ring as `seq` beside the payload. The hub keeps NO ring of its own (WEB-14): the logger owns the only one, and `cmd/moombox/ws_wiring.go` puts `logger.RecentLines` — the lines and the newest one's number, `logSeq` — into every `initial_state`; the dashboard skips a frame at or below `logSeq`, a line the snapshot already holds.
 

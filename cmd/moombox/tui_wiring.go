@@ -1145,6 +1145,14 @@ func (s *runState) runTUI() {
 	// TUI's Init asks the push for the snapshot again once Send delivers.
 	app.OnAdmissionHoldsResync = s.resyncAdmissionHoldsTUI
 
+	// The failing-channel flag (owner ruling R-H1): each change through
+	// channelMonitorsPush. No seed is needed: Settings, the only place that
+	// draws the flag, derives the set again each time it opens.
+	failingFn := func(f tui.FailingChannels) { app.Send(tui.ChannelFailingMsg{Failing: f}) }
+	s.channelMonitorsPush.tui.Store(&failingFn)
+	defer s.channelMonitorsPush.tui.Store(nil)
+	app.OnFailingChannels = s.channelMonitorsPush.failing
+
 	// Wire connectivity state to TUI (uses program.Send, not a channel)
 	unsubConnTUI := s.connMon.OnStateChange(func(online bool) {
 		app.Send(tui.ConnectivityMsg{Online: online})

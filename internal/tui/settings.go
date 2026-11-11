@@ -419,6 +419,11 @@ type SettingsModel struct {
 	channelDeleteConf bool
 	channelResolving  bool // true while async URL resolution is in progress
 	channels          []config.ChannelConfig
+	// failing is the set of channels the monitors cannot reach (owner ruling
+	// R-H1), as last derived by cmd/moombox: read when Settings opens and
+	// replaced by every ChannelFailingMsg. The channel list tags its rows
+	// from it (channelFailing).
+	failing FailingChannels
 	// channelsAtOpen is the channel list as Open copied it. A save writes
 	// back only what the editor changed relative to it (mergeChannelEdits),
 	// so a channel the dashboard added, disabled or removed while the

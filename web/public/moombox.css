@@ -1362,6 +1362,19 @@ sl-progress-bar {
     margin-top: var(--sl-spacing-x-small);
 }
 
+/* A failing channel's flag and its newest check error (owner ruling R-H1).
+   Empty for a healthy channel, and then takes no room. */
+.channel-health:empty {
+    display: none;
+}
+
+.channel-health {
+    margin-top: var(--sl-spacing-x-small);
+    font-size: var(--sl-font-size-small);
+    color: var(--sl-color-danger-700);
+    overflow-wrap: anywhere;
+}
+
 /* The channel switch's label is screen-reader-only text (it names the
    channel the switch monitors), so the label part's gap would only push the
    icon buttons over. */

@@ -2016,6 +2016,11 @@ func (s *runState) wireMonitorCallbacks() {
 		})
 	}
 
+	// The failing-channel flag (owner ruling R-H1): every schedule event is
+	// the start or the end of a monitor cycle, so the push re-derives the
+	// failing set there and sends it to both UIs only when it changed.
+	s.channelMonitorsPush = &channelMonitorsPush{snapshot: s.channelMonitors, hub: s.wsHub}
+
 	// OnSchedule subscriber slots live on runState (atomic.Pointer fields).
 	// Set the dispatchers once before monitor.Start(); the TUI wiring later
 	// Store()s concrete funcs into the atomic slots. Reassigning the
@@ -2024,18 +2029,21 @@ func (s *runState) wireMonitorCallbacks() {
 	// lock-free and the write-side safe.
 	s.feedMon.OnSchedule = func(next int64) {
 		broadcastAllTimers()
+		s.channelMonitorsPush.check()
 		if fn := s.feedTUISchedule.Load(); fn != nil {
 			(*fn)(next)
 		}
 	}
 	s.decapiMon.OnSchedule = func(next int64) {
 		broadcastAllTimers()
+		s.channelMonitorsPush.check()
 		if fn := s.decapiTUISchedule.Load(); fn != nil {
 			(*fn)(next)
 		}
 	}
 	s.twitchMon.OnSchedule = func(next int64) {
 		broadcastAllTimers()
+		s.channelMonitorsPush.check()
 		if fn := s.twitchTUISchedule.Load(); fn != nil {
 			(*fn)(next)
 		}

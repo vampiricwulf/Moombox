@@ -88,6 +88,9 @@ func (s *runState) wireRoutes() func() {
 			}
 		},
 		GetAdmissionHolds: s.dlWorker.AdmissionHolds,
+		// Every monitor's own list, unmerged: the failing flag needs each
+		// monitor's streak, which the merged channelHealth above drops.
+		GetChannelMonitors: func() any { return s.channelMonitors() },
 	})
 	routes.ConfigRoutes(s.r, s.configStore, &routes.ConfigRoutesCallbacks{
 		OnLogLevelChange: s.applyConfiguredLogLevel,

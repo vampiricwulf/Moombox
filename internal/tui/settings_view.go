@@ -592,7 +592,15 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 			disabledTag = " (disabled)"
 		}
 		// The last -1 keeps the cell the cut's "…" takes when a filter follows.
-		idW := min(24, w-len(prefix)-len("[YT] ")-ansi.StringWidth(nameStr)-1-len(disabledTag)-1)
+		// A failing channel (owner ruling R-H1) is tagged after its name, and
+		// the tag is kept as "(disabled)" is: the ID gives way to it. The
+		// check's error follows inside the brackets and is cut at the edge.
+		failErr, failing := m.channelFailing(ch)
+		failTag := ""
+		if failing {
+			failTag = channelFailingTag
+		}
+		idW := min(24, w-len(prefix)-len("[YT] ")-ansi.StringWidth(nameStr)-1-len(disabledTag)-len(failTag)-1)
 
 		line := prefix + platStr + " " + nameStyle.Render(nameStr)
 		if idW >= 6 {
@@ -600,6 +608,12 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 		}
 		if disabledTag != "" {
 			line += YellowFaintStyle.Render(disabledTag)
+		}
+		if failing {
+			if failErr != "" {
+				failTag = strings.TrimSuffix(failTag, ")") + ": " + truncateString(strings.Join(strings.Fields(failErr), " "), 48) + ")"
+			}
+			line += ErrorStyle.Render(failTag)
 		}
 		terms := ch.Terms.Simple
 		if terms != "" {

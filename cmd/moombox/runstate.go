@@ -175,6 +175,10 @@ type runState struct {
 	// admissionHoldsResync (capacity 1) asks runAdmissionHoldsPush to send the
 	// TUI the snapshot again (resyncAdmissionHoldsTUI); nil sends nothing.
 	admissionHoldsResync chan struct{}
+	// channelMonitorsPush tells both UIs when the set of failing channels
+	// changes (owner ruling R-H1). Set in wireMonitorCallbacks; checked after
+	// every monitor cycle.
+	channelMonitorsPush *channelMonitorsPush
 
 	// Same pattern for monitor OnSchedule: each monitor's goroutine loads
 	// the atomic pointer on every schedule event; the TUI wiring later

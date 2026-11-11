@@ -176,3 +176,85 @@ func (h *healthTracker) prune(activeIDs map[string]struct{}) {
 		}
 	}
 }
+
+// FailingStreak is how many consecutive failed checks EVERY monitor covering
+// a channel must have before both UIs flag the channel in their channel
+// lists (owner ruling R-H1). It is far below unhealthyThreshold on purpose:
+// the Discord alert waits 20 checks, which is over three hours at the feed
+// monitor's default cadence, and until then a renamed, banned or mistyped
+// channel looked healthy. The alert and its threshold are separate and
+// unchanged.
+const FailingStreak = 3
+
+// ChannelMonitors is each monitor's health list, grouped by platform: the
+// input of the "channel is failing" flag. It is the additive channelMonitors
+// field of GET /api/status and of the initial_state frame, and the payload of
+// the channel_monitors frame. YouTube holds the feed monitor's list and then
+// DECAPI's; Twitch holds its one monitor's.
+type ChannelMonitors struct {
+	YouTube [][]ChannelHealth `json:"youtube"`
+	Twitch  [][]ChannelHealth `json:"twitch"`
+}
+
+// ChannelFailing is the one rule for "this channel is failing for the
+// operator" (owner ruling R-H1): covering holds one entry per monitor that
+// tracks the channel, and the channel is failing when there is at least one
+// and every one of them has FailingStreak or more consecutive failed checks.
+// A monitor that still reaches the channel vouches for it, as it does for the
+// Discord alert, so a lone RSS 404 beside a working DECAPI stays quiet; a
+// monitor that has not checked the channel has no entry and says nothing.
+// The flag is derived on every read and never stored: one success on any
+// monitor resets that monitor's streak and so clears it.
+//
+// utils.js channelFailing is its mirror; the two are compared over
+// web/tests/fixtures/channel-failing-parity.json.
+func ChannelFailing(covering []ChannelHealth) bool {
+	if len(covering) == 0 {
+		return false
+	}
+	for _, h := range covering {
+		if h.ConsecutiveErrors < FailingStreak {
+			return false
+		}
+	}
+	return true
+}
+
+// FailingChannels applies ChannelFailing to every channel in one platform's
+// monitor lists and returns the failing ones by channel ID. The entry kept
+// for a channel is the most recently checked one (a later list wins a tie),
+// so the error shown is the newest.
+func FailingChannels(monitors [][]ChannelHealth) map[string]ChannelHealth {
+	covering := make(map[string][]ChannelHealth)
+	for _, list := range monitors {
+		for _, h := range list {
+			covering[h.ChannelID] = append(covering[h.ChannelID], h)
+		}
+	}
+	out := make(map[string]ChannelHealth)
+	for id, entries := range covering {
+		if !ChannelFailing(entries) {
+			continue
+		}
+		shown := entries[0]
+		for _, h := range entries[1:] {
+			if h.LastCheckedAt >= shown.LastCheckedAt {
+				shown = h
+			}
+		}
+		out[id] = shown
+	}
+	return out
+}
+
+// Failing reports whether the channel is failing (ChannelFailing) and, when
+// it is, the entry to show for it. An unknown platform reads as YouTube, as
+// config.ChannelConfig.GetPlatform does.
+func (c ChannelMonitors) Failing(platform, channelID string) (ChannelHealth, bool) {
+	lists := c.YouTube
+	if platform == "twitch" {
+		lists = c.Twitch
+	}
+	h, ok := FailingChannels(lists)[channelID]
+	return h, ok
+}

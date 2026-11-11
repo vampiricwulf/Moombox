@@ -436,6 +436,28 @@ type (
 	}
 )
 
+// FailingChannels is the set of channels both UIs flag as failing (owner
+// ruling R-H1, monitor.ChannelFailing): each one's newest check error, by
+// FailingChannelKey. It is derived from the monitors' health in cmd/moombox
+// and never stored anywhere but the Settings model that draws it.
+type FailingChannels map[string]string
+
+// FailingChannelKey is a channel's key in FailingChannels. A channel ID is
+// only unique within its platform; any platform but "twitch" is YouTube, as
+// config.ChannelConfig.GetPlatform reads it.
+func FailingChannelKey(platform, channelID string) string {
+	if platform != "twitch" {
+		platform = "youtube"
+	}
+	return platform + "\x00" + channelID
+}
+
+// ChannelFailingMsg carries the failing set each time it changes: a channel
+// started or stopped failing, or its newest error changed.
+type ChannelFailingMsg struct {
+	Failing FailingChannels
+}
+
 // AdmissionHoldsMsg carries the backlog scheduler's hold snapshot
 // (worker.DownloadWorker.AdmissionHolds, owner ruling R-D3) each time it
 // changes: what Queued rows show in place of a bare wait, and what turns the
@@ -879,6 +901,12 @@ type App struct {
 	// was lost. The push goroutine sends it, so it stays in order with every
 	// later change. nil sends nothing.
 	OnAdmissionHoldsResync func()
+
+	// OnFailingChannels derives the failing-channel set now (owner ruling
+	// R-H1). Settings reads it each time it opens; ChannelFailingMsg carries
+	// every change after that. It takes only the monitors' health mutexes and
+	// does no I/O. nil flags nothing.
+	OnFailingChannels func() FailingChannels
 
 	// FFmpeg check callbacks
 	OnCheckFFmpeg    func(path string) (bool, string, string)                                   // check if ffmpeg path is valid → (valid, version, warning)

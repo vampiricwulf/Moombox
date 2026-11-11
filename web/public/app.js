@@ -90,6 +90,11 @@ export class MoomboxApp {
     // The backlog scheduler's holds (owner ruling R-D3): /api/status, the
     // initial_state snapshot and each admission_holds frame. null until read.
     this.admissionHolds = null;
+    // Every monitor's health list by platform (owner ruling R-H1):
+    // /api/status, the initial_state snapshot and each channel_monitors
+    // frame. The Settings channel list derives its "Checks failing" flag
+    // from it (failingChannel in utils.js). null until read.
+    this.channelMonitors = null;
     // One-shot timer for the earliest future hold end in admissionHolds: a
     // row's own hold runs out with no frame to say so (setAdmissionHolds).
     this._holdExpiryTimer = null;
@@ -747,6 +752,7 @@ export class MoomboxApp {
           this._uptimeCapturedAt = Date.now();
         }
         if (status.admissionHolds) this.setAdmissionHolds(status.admissionHolds);
+        if (status.channelMonitors) this.setChannelMonitors(status.channelMonitors);
         if (status.disk) this.stats.updateDiskIndicator(status.disk);
         this.updates.updateVersionIndicator();
         this.updateStatusBar();
@@ -1421,6 +1427,7 @@ export class MoomboxApp {
         // close or open the disk gate a disconnect missed, and the gauge and
         // indicator read it (stats.onAdmissionHolds).
         if (p.admissionHolds) this.setAdmissionHolds(p.admissionHolds);
+        if (p.channelMonitors) this.setChannelMonitors(p.channelMonitors);
         this.nextFeedCheck = p.nextFeedCheck || 0;
         this.nextDecapiCheck = p.nextDecapiCheck || 0;
         this.nextTwitchCheck = p.nextTwitchCheck || 0;
@@ -1736,6 +1743,10 @@ export class MoomboxApp {
         this.setAdmissionHolds(p);
         break;
 
+      case "channel_monitors":
+        this.setChannelMonitors(p);
+        break;
+
       case "backfill_status":
         this.handleBackfillStatus(p);
         break;
@@ -1764,6 +1775,16 @@ export class MoomboxApp {
         this._lastPong = Date.now();
         break;
     }
+  }
+
+  /**
+   * setChannelMonitors stores every monitor's health list (owner ruling
+   * R-H1) and redraws the Settings channel cards' "Checks failing" flags,
+   * the only thing that reads it.
+   */
+  setChannelMonitors(monitors) {
+    this.channelMonitors = monitors || null;
+    this.settings.refreshChannelHealthBadges();
   }
 
   /**

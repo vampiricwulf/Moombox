@@ -140,6 +140,9 @@ func (s *runState) wireWebSocket() {
 			// The backlog scheduler's holds (owner ruling R-D3), as
 			// /api/status and each admission_holds frame carry them.
 			"admissionHolds": s.dlWorker.AdmissionHolds(),
+			// Every monitor's health list (owner ruling R-H1), as /api/status
+			// and each channel_monitors frame carry them.
+			"channelMonitors": s.channelMonitors(),
 		}
 	}
 

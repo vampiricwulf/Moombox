@@ -357,6 +357,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.SetAdmissionHolds(msg.Holds)
 		return a, nil
 
+	case ChannelFailingMsg:
+		a.settings.SetFailingChannels(msg.Failing)
+		return a, nil
+
 	case SidecarStatusMsg:
 		a.statusBar.sidecarDown = !msg.Healthy
 		return a, nil

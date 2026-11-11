@@ -995,6 +995,76 @@ export function isBackfillRetained(state) {
   return state === BACKFILL_STATE.SCANNING || state === BACKFILL_STATE.ERROR;
 }
 
+// ── Failing channels ─────────────────────────────────────────────────────────
+// Owner ruling R-H1: a channel is flagged in the Settings channel list once
+// EVERY monitor covering it has failed CHANNEL_FAILING_STREAK or more checks
+// in a row, and the flag clears on the next success. The Discord alert (20
+// checks) is separate. Derived on every read from the `channelMonitors`
+// object (GET /api/status, the initial_state and channel_monitors frames),
+// never stored.
+
+/** Go: monitor.FailingStreak. */
+export const CHANNEL_FAILING_STREAK = 3;
+
+/**
+ * channelFailing is Go's monitor.ChannelFailing: `covering` holds one health
+ * entry per monitor that tracks the channel, and the channel is failing when
+ * there is at least one and each has CHANNEL_FAILING_STREAK or more
+ * consecutive failed checks. A monitor that still reaches the channel vouches
+ * for it; one that has not checked it has no entry and says nothing. The two
+ * are compared over web/tests/fixtures/channel-failing-parity.json.
+ * @param {Array<{consecutiveErrors?: number}>|null|undefined} covering
+ * @returns {boolean}
+ */
+export function channelFailing(covering) {
+  if (!Array.isArray(covering) || covering.length === 0) return false;
+  return covering.every((h) => (Number(h?.consecutiveErrors) || 0) >= CHANNEL_FAILING_STREAK);
+}
+
+/**
+ * failingChannels is Go's monitor.FailingChannels: one platform's monitor
+ * lists in, the failing channels out by ID. The entry kept for a channel is
+ * its most recently checked one (a later list wins a tie), so the error shown
+ * is the newest.
+ * @param {Array<Array<object>>|null|undefined} monitors
+ * @returns {Object<string, object>}
+ */
+export function failingChannels(monitors) {
+  const covering = new Map();
+  for (const list of Array.isArray(monitors) ? monitors : []) {
+    for (const h of Array.isArray(list) ? list : []) {
+      if (!h || typeof h.channelId !== "string") continue;
+      if (!covering.has(h.channelId)) covering.set(h.channelId, []);
+      covering.get(h.channelId).push(h);
+    }
+  }
+  const out = {};
+  for (const [id, entries] of covering) {
+    if (!channelFailing(entries)) continue;
+    let shown = entries[0];
+    for (const h of entries.slice(1)) {
+      if ((h.lastCheckedAt || 0) >= (shown.lastCheckedAt || 0)) shown = h;
+    }
+    out[id] = shown;
+  }
+  return out;
+}
+
+/**
+ * failingChannel is Go's monitor.ChannelMonitors.Failing: the entry to show
+ * for a failing channel, or null. Any platform but "twitch" is YouTube. An
+ * older binary sends no channelMonitors, and nothing is then flagged.
+ * @param {{youtube?: Array, twitch?: Array}|null|undefined} channelMonitors
+ * @param {string|undefined} platform
+ * @param {string} channelId
+ * @returns {object|null}
+ */
+export function failingChannel(channelMonitors, platform, channelId) {
+  const lists = platform === "twitch" ? channelMonitors?.twitch : channelMonitors?.youtube;
+  const found = failingChannels(lists);
+  return Object.hasOwn(found, channelId) ? found[channelId] : null;
+}
+
 // ── Channel removal ──────────────────────────────────────────────────────────
 // Removing a channel asks what to do with its jobs (W25-09, owner decision).
 // The confirmation counts them — GET /api/config/channels/{id}/removal — and
