@@ -201,7 +201,7 @@ func TestAttachingTheSidecarAgainEndsTheOutage(t *testing.T) {
 }
 
 // "Don't wait when time is short" (owner ruling): a caller whose deadline is
-// nearer than the grace still left does not wait for a restarting sidecar.
+// nearer than the mint grace does not wait for a restarting sidecar.
 // It is told the sidecar is down at once, as every mint was before the grace
 // existed, with its context live and the whole of its budget left for the
 // work after the mint under the same deadline (the 403 recovery's player
@@ -250,8 +250,8 @@ func TestAMintWithAShortDeadlineDoesNotWait(t *testing.T) {
 	})
 }
 
-// A caller with the time waits: a deadline at least as far away as the grace
-// still left is treated as none. A 5 min caller is answered by the child
+// A caller with the time waits: a deadline at least a whole grace away is
+// treated as none. A 5 min caller is answered by the child
 // when it comes back, a caller whose deadline is exactly the grace waits,
 // and a 10 min caller waits out the whole grace and gets errSidecarDown, not
 // a context error.
@@ -296,19 +296,25 @@ func TestAMintWithALongDeadlineWaitsLikeOneWithNone(t *testing.T) {
 	})
 }
 
-// The comparison is with the grace still left on the outage's clock, not
-// with the whole grace: 50 s into an outage 10 s are left, so a 20 s caller
-// has the time and waits those 10 s, and a 5 s caller does not wait. The
-// 20 s caller is then told the sidecar is down with its context live.
+// The comparison is with the whole grace, not with what is left of it on
+// the outage's clock. In a real outage a job's mint with no deadline starts
+// that clock almost at once, and a 403 recovery that arrives later must
+// still not wait: 16 s in, 44 s are left, and a 45 s recovery that waited
+// them would leave 1 s for its URL re-fetch; 51 s in, a 10 s recovery would
+// wait 9 of its 10. Both are told at once, with the whole budget left, as on
+// main, whether they would lead a mint or join the one in flight. A caller
+// with the time (5 min) that arrives late waits only what the outage has
+// left.
 //
-// Mutants: awaitSidecar comparing the deadline with sidecarMintGrace (the
-// 20 s caller fails at once); the 5 s caller waiting (it is held 5 s and
-// gets a context error).
-func TestAMintComparesItsDeadlineWithTheGraceStillLeft(t *testing.T) {
+// Mutants: mintWait comparing the deadline with the grace still left (the
+// 45 s caller waits 44 s, the 10 s caller 9 s); refusing every caller that
+// has a deadline once the clock is running (the 5 min caller does not wait).
+func TestAMintComparesItsDeadlineWithTheWholeGrace(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		side := &graceSidecar{}
 		pp := newGraceProvider(side)
 
+		outage := time.Now()
 		first := make(chan error, 1)
 		go func() {
 			defer func() {
@@ -316,31 +322,40 @@ func TestAMintComparesItsDeadlineWithTheGraceStillLeft(t *testing.T) {
 					t.Errorf("panic: %v", r)
 				}
 			}()
-			_, err := pp.GenerateGvsPoToken(context.Background(), "A", "")
+			_, err := pp.GeneratePoToken(context.Background(), "A", false)
 			first <- err
 		}()
-		time.Sleep(50 * time.Second)
 
-		short, cancelShort := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancelShort()
+		for _, c := range []struct{ at, budget time.Duration }{
+			{16 * time.Second, 45 * time.Second},
+			{51 * time.Second, 10 * time.Second},
+		} {
+			time.Sleep(time.Until(outage.Add(c.at)))
+			ctx, cancel := context.WithTimeout(context.Background(), c.budget)
+			start := time.Now()
+			if _, err := pp.GenerateGvsPoToken(ctx, "B", ""); !errors.Is(err, errSidecarDown) {
+				t.Errorf("a %v caller's GVS mint %v into the outage = %v, want errSidecarDown", c.budget, c.at, err)
+			}
+			if _, err := pp.GeneratePoToken(ctx, "A", false); !errors.Is(err, errSidecarDown) {
+				t.Errorf("a %v caller joining the mint in flight %v into the outage = %v, want errSidecarDown", c.budget, c.at, err)
+			}
+			if waited := time.Since(start); waited != 0 {
+				t.Errorf("a %v caller %v into the outage waited %v, want none", c.budget, c.at, waited)
+			}
+			if dl, _ := ctx.Deadline(); time.Until(dl) != c.budget {
+				t.Errorf("a %v caller has %v of its budget left after its mints, want all of it", c.budget, time.Until(dl))
+			}
+			cancel()
+		}
+
+		long, cancelLong := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancelLong()
 		start := time.Now()
-		if _, err := pp.GenerateGvsPoToken(short, "B", ""); !errors.Is(err, errSidecarDown) {
-			t.Fatalf("a 5 s caller with 10 s of grace left = %v, want errSidecarDown", err)
+		if _, err := pp.GenerateGvsPoToken(long, "C", ""); !errors.Is(err, errSidecarDown) {
+			t.Errorf("a 5 min caller 51 s into the outage = %v, want errSidecarDown once the grace is spent", err)
 		}
-		if waited := time.Since(start); waited != 0 {
-			t.Errorf("the 5 s caller waited %v, want none", waited)
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if _, err := pp.GenerateGvsPoToken(ctx, "C", ""); !errors.Is(err, errSidecarDown) {
-			t.Fatalf("a 20 s caller with 10 s of grace left = %v, want errSidecarDown once the grace is spent", err)
-		}
-		if waited := time.Since(start); waited != 10*time.Second {
-			t.Errorf("the 20 s caller waited %v, want the 10 s of grace left", waited)
-		}
-		if err := ctx.Err(); err != nil {
-			t.Errorf("the 20 s caller's context ended in the mint: %v", err)
+		if waited := time.Since(start); waited != 9*time.Second {
+			t.Errorf("the 5 min caller waited %v, want the 9 s the outage had left", waited)
 		}
 		if err := <-first; !errors.Is(err, errSidecarDown) {
 			t.Errorf("the mint that started the outage's clock = %v, want errSidecarDown", err)

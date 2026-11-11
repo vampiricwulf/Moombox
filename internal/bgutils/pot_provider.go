@@ -290,15 +290,17 @@ func (pp *PotProvider) SetSidecar(s *sidecar.Sidecar) {
 // errSidecarDown, at once for every mint after the one that waited it out.
 //
 // Only a caller with the time waits (owner ruling: "don't wait when time is
-// short"): one with no deadline, or with a deadline at least as far away as
-// the grace still left. That is decided once, on entry. A caller whose
-// deadline is nearer gets errSidecarDown at once, as every mint did before
-// the grace existed, so the work it has after the mint under the same
-// deadline keeps the whole of it: the 403 recovery mints first and then
-// re-fetches the player response and resolves the URL under one 10-45 s
-// budget. Such a caller does not start the outage's clock either: it
-// changes nothing, as on main, and the first mint that does wait still has
-// a full grace.
+// short"): one with no deadline, or with a deadline at least a whole grace
+// away. That is decided once, on entry. A caller whose deadline is nearer
+// gets errSidecarDown at once, as every mint did before the grace existed,
+// so the work it has after the mint under the same deadline keeps the whole
+// of it: the 403 recovery mints first and then re-fetches the player
+// response and resolves the URL under one 10-45 s budget. The deadline is
+// compared with the whole grace, not with what this outage has left of it:
+// late in an outage only seconds of grace are left, and a 10 s caller
+// measured against those would wait away nearly all of its budget. Such a
+// caller does not start the outage's clock either: it changes nothing, as
+// on main, and the first mint that does wait still has a full grace.
 //
 // A caller whose ctx ends while it waits (a cancel) gets its ctx's error. A
 // handle that cannot come back by a restart — its first start has not
@@ -341,8 +343,9 @@ func (pp *PotProvider) awaitSidecar(ctx context.Context, sc potSidecar) error {
 // mintWait is awaitSidecar's decision for a caller that has found a
 // recoverable child down: how long it may wait for it, or the error it gets
 // at once. That is errSidecarDown when the outage's grace is spent or the
-// caller's deadline is nearer than the grace still left, and the ctx's error
-// when the ctx has already ended. start is whether a caller that may wait
+// caller's deadline is nearer than a whole grace (sidecarMintGrace, however
+// much of it this outage has left), and the ctx's error when the ctx has
+// already ended. The wait it returns is what the outage has left. start is whether a caller that may wait
 // starts the outage's clock: true for the mint that is about to wait, false
 // for a caller only asking whether it would (see generatePoTokenChallenge).
 func (pp *PotProvider) mintWait(ctx context.Context, start bool) (time.Duration, error) {
@@ -358,7 +361,7 @@ func (pp *PotProvider) mintWait(ctx context.Context, start bool) (time.Duration,
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < left {
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < sidecarMintGrace {
 		return 0, errSidecarDown
 	}
 	if start && pp.downSince.IsZero() {
