@@ -11,7 +11,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
-// versionChangeNotifier records what announceVersionChange sends. The rest of
+// versionChangeNotifier records what recordVersionChange sends. The rest of
 // notifications.Notifier is the owner surface run() uses elsewhere.
 type versionChangeNotifier struct {
 	sent []versionChangeSend
@@ -85,7 +85,7 @@ func TestAnnounceVersionChange(t *testing.T) {
 			notifier := &versionChangeNotifier{}
 			s := &runState{log: log, configStore: store, notifyMgr: notifier, webServer: web.NewServer(store, log)}
 
-			s.announceVersionChange(tc.lastRun, tc.configLoaded, tc.rolledBackFrom, tc.webBindFailed)
+			s.recordVersionChange(tc.lastRun, tc.configLoaded, tc.rolledBackFrom, tc.webBindFailed)
 
 			if got := len(notifier.sent) == 1; got != tc.wantSend || len(notifier.sent) > 1 {
 				t.Fatalf("sent %d notices (%+v), want one: %v", len(notifier.sent), notifier.sent, tc.wantSend)

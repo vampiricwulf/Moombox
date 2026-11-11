@@ -502,7 +502,7 @@ func announcesVersionChange(lastRunVersion, currentVersion, rolledBackFrom strin
 	return lastRunVersion != "" && lastRunVersion != currentVersion && rolledBackFrom == ""
 }
 
-// announceVersionChange is run()'s update-applied step, taken once the web
+// recordVersionChange is run()'s update-applied step, taken once the web
 // bind has resolved. When a config file exists and the version the previous
 // run recorded (lastRunVersion) is not this one, it sends "Update Applied"
 // if announcesVersionChange says this boot announces it, and then records
@@ -510,7 +510,7 @@ func announcesVersionChange(lastRunVersion, currentVersion, rolledBackFrom strin
 // config's ConfigLoaded and rolledBackFrom is rolledBackRelease's answer,
 // both as run() read them; webBindFailed is resolveWebBind's. run() states
 // why the step is gated on ConfigLoaded.
-func (s *runState) announceVersionChange(lastRunVersion string, configLoaded bool, rolledBackFrom string, webBindFailed bool) {
+func (s *runState) recordVersionChange(lastRunVersion string, configLoaded bool, rolledBackFrom string, webBindFailed bool) {
 	log, notifyMgr, webServer := s.log, s.notifyMgr, s.webServer
 	if configLoaded && lastRunVersion != version {
 		if announcesVersionChange(lastRunVersion, version, rolledBackFrom) {

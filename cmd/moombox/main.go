@@ -491,7 +491,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	if exeErr == nil {
 		rolledBackFrom = rolledBackRelease(exeSelf, version)
 	}
-	s.announceVersionChange(lastRunVersion, configLoaded, rolledBackFrom, webBindFailed)
+	s.recordVersionChange(lastRunVersion, configLoaded, rolledBackFrom, webBindFailed)
 
 	// Launcher-staleness note: an in-place update replaces the binary on
 	// disk, but the supervisor PROCESS keeps running the code it started

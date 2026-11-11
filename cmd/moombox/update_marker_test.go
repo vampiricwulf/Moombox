@@ -232,7 +232,7 @@ func TestARollbackIsNotAnnouncedAsAnUpdate(t *testing.T) {
 }
 
 // run() reads the rollback once (rolledBackRelease) and hands that reading to
-// both of its consumers: the "Update Applied" decision (announceVersionChange,
+// both of its consumers: the "Update Applied" decision (recordVersionChange,
 // which passes it on to announcesVersionChange) and the breadcrumb's
 // resolution, which marks the release skipped. The resolution also takes the
 // config's own ConfigLoaded, which gates the skip write
@@ -256,7 +256,7 @@ func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 	var readAt, loadedAt token.Pos
 	argOf := map[string]ast.Expr{} // callee → the argument that must be rolledBackFrom
 	var loadedArg ast.Expr         // resolveUpdateBreadcrumb's, which must be configLoaded
-	var announceLoadedArg ast.Expr // announceVersionChange's, which must be configLoaded too
+	var announceLoadedArg ast.Expr // recordVersionChange's, which must be configLoaded too
 	ast.Inspect(f, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
 		if !ok || fn.Name.Name != "run" {
@@ -282,7 +282,7 @@ func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 					}
 				}
 			case *ast.CallExpr:
-				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "announceVersionChange" && len(n.Args) == 4 {
+				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "recordVersionChange" && len(n.Args) == 4 {
 					argOf[sel.Sel.Name] = n.Args[2]
 					announceLoadedArg = n.Args[1]
 				}
@@ -317,12 +317,12 @@ func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 	}
 	if announceLoadedArg != nil {
 		if id, ok := announceLoadedArg.(*ast.Ident); !ok || id.Name != "configLoaded" {
-			t.Errorf("run() calls announceVersionChange at %s without configLoaded: a first run would write a config file and skip the setup wizard", fset.Position(announceLoadedArg.Pos()))
+			t.Errorf("run() calls recordVersionChange at %s without configLoaded: a first run would write a config file and skip the setup wizard", fset.Position(announceLoadedArg.Pos()))
 		} else if id.Pos() < loadedAt {
-			t.Errorf("run() calls announceVersionChange at %s before reading configLoaded", fset.Position(id.Pos()))
+			t.Errorf("run() calls recordVersionChange at %s before reading configLoaded", fset.Position(id.Pos()))
 		}
 	}
-	for _, callee := range []string{"announceVersionChange", "resolveUpdateBreadcrumb"} {
+	for _, callee := range []string{"recordVersionChange", "resolveUpdateBreadcrumb"} {
 		arg, ok := argOf[callee]
 		if !ok {
 			t.Errorf("run() never calls %s", callee)
@@ -335,18 +335,18 @@ func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 		}
 	}
 
-	// And announceVersionChange hands its own rolledBackFrom parameter on.
-	inner, ifset := callsInFunc(t, "helpers.go", "announceVersionChange")
+	// And recordVersionChange hands its own rolledBackFrom parameter on.
+	inner, ifset := callsInFunc(t, "helpers.go", "recordVersionChange")
 	decided := false
 	for _, c := range inner {
 		if c.recv == "" && c.name == "announcesVersionChange" {
 			decided = true
 			if got := strings.Join(c.args, ", "); got != "lastRunVersion, version, rolledBackFrom" {
-				t.Errorf("announceVersionChange at %s calls announcesVersionChange(%s), want (lastRunVersion, version, rolledBackFrom)", ifset.Position(c.pos), got)
+				t.Errorf("recordVersionChange at %s calls announcesVersionChange(%s), want (lastRunVersion, version, rolledBackFrom)", ifset.Position(c.pos), got)
 			}
 		}
 	}
 	if !decided {
-		t.Error("announceVersionChange never calls announcesVersionChange")
+		t.Error("recordVersionChange never calls announcesVersionChange")
 	}
 }
