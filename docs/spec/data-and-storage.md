@@ -563,6 +563,13 @@ another (CORE-17).
 3. `~/.config/moombox/config.toml`
 4. If none found: use `Defaults()` with no file loaded (`ConfigLoaded = false`)
 
+**Only "does not exist" means "no config here".** A named `-config` path whose `os.Stat` fails any other
+way (access denied, an I/O error, a device that is not ready) makes `Load` return an error, and the
+process ends through the startup-error path (exit code 3) instead of booting a first-run install over a
+config it could not reach. In the search, a candidate that fails that way is skipped with a
+`warning: skipping config <path>: <error>` line on stderr, so an unreadable `~/.config` cannot stop an
+install in the working directory from booting.
+
 **Saves go back to the file that answered.** The location that was read is recorded in `LoadedFrom` (`internal/config/types.go`), and `cmd/moombox/services.go` points the run's config path at it before building the store — so a config found in `./config/` is written back to `./config/` rather than forked into a fresh `./config.toml` that would shadow it on the next boot (the first write is often the boot-time `NeedsAutoPersist` flush, so the fork would happen without anyone touching a setting). When NOTHING is found, the path that was asked for stays the target and the file is created there — `storePathFor` in `cmd/moombox/helpers.go` is that rule (with no `-config`, `<cwd>/config.toml`).
 
 **Out-of-range values are replaced, and said so.** `loadFromFile` runs `Normalize`, which puts each

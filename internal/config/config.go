@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"math"
@@ -257,6 +259,14 @@ func Defaults() *MoomboxConfig {
 	}
 }
 
+// statConfig is os.Stat; a test replaces it to produce a Stat failure the host
+// cannot be made to give portably. configWarnings is where the search reports
+// a candidate it skipped.
+var (
+	statConfig               = os.Stat
+	configWarnings io.Writer = os.Stderr
+)
+
 // Load reads configuration from a TOML file.
 //
 // An explicit customPath (the -config flag) is AUTHORITATIVE: it is the only
@@ -272,10 +282,21 @@ func Defaults() *MoomboxConfig {
 // The file that answers is recorded in cfg.LoadedFrom — callers must save back
 // to it rather than to the path they asked for (see the field's doc). When no
 // file is found, LoadedFrom is "" and the caller's own path stays the target.
+//
+// "Does not exist" is the only Stat failure read as "no config here". A named
+// path that fails any other way (access denied, an I/O error, a device that
+// is not ready) is an error: booting on defaults there would show a first-run
+// install over an existing one. In the search, such a candidate is skipped
+// with a warning on stderr, so an unreadable ~/.config cannot stop an install
+// in the working directory from booting.
 func Load(customPath string) (*MoomboxConfig, error) {
 	if customPath != "" {
-		if _, err := os.Stat(customPath); err == nil {
+		_, err := statConfig(customPath)
+		if err == nil {
 			return loadFromFile(customPath)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("config %s cannot be read: %w", customPath, err)
 		}
 		// Named but absent — the caller's path stays the save target
 		// (storePathFor in cmd/moombox/helpers.go keeps it when LoadedFrom
@@ -303,8 +324,12 @@ func Load(customPath string) (*MoomboxConfig, error) {
 	}
 
 	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
+		_, err := statConfig(p)
+		if err == nil {
 			return loadFromFile(p)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(configWarnings, "warning: skipping config %s: %v\n", p, err)
 		}
 	}
 
