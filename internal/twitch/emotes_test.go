@@ -34,6 +34,9 @@ func seedEmoteCache(er *EmoteResolver, key string, data *TwitchEmoteData) {
 // installEmoteFetchStub points the package HTTP client at one canned reply for
 // every provider. status 0 means "the transport itself fails", i.e. all three
 // providers are down. It returns the request counter.
+// The counter counts the per-channel requests only: a Resolve also fetches the
+// providers' global sets (emotes_global.go), which the tests in
+// emotes_global_test.go count for themselves.
 //
 // The swap is why no test in this file may call t.Parallel: twitchHTTPClient is
 // shared with every other test in the package.
@@ -43,7 +46,9 @@ func installEmoteFetchStub(t *testing.T, status int, body string) *atomic.Int64 
 	prev := twitchHTTPClient
 	t.Cleanup(func() { twitchHTTPClient = prev })
 	twitchHTTPClient = &http.Client{Transport: probeRoundTripper(func(req *http.Request) (*http.Response, error) {
-		calls.Add(1)
+		if !isGlobalEmoteURL(req.URL.String()) {
+			calls.Add(1)
+		}
 		if status == 0 {
 			return nil, fmt.Errorf("emote provider unreachable")
 		}
@@ -64,9 +69,13 @@ func TestEmoteResolverCacheHit(t *testing.T) {
 	seedEmoteCache(er, "testchannel", &TwitchEmoteData{
 		BTTV: []EmoteInfo{{ID: "1", Code: "test", URL: "https://example.com"}},
 	})
-	// No HTTP stub installed: a fetch here would hit the real network, which is
-	// itself the assertion that the cache was used.
+	// Every request fails, so only the cache can answer; the global sets, which
+	// a Resolve also asks for, fail too and add nothing.
+	calls := installEmoteFetchStub(t, 0, "")
 	result := er.Resolve(context.Background(), "ignored", "TestChannel")
+	if n := calls.Load(); n != 0 {
+		t.Errorf("a cached channel made %d per-channel requests, want 0", n)
+	}
 	if result == nil {
 		t.Fatal("expected cached result")
 	}
@@ -209,7 +218,12 @@ func TestEmoteResolverCachesWhenOnlyOneProviderAnswers(t *testing.T) {
 	prev := twitchHTTPClient
 	t.Cleanup(func() { twitchHTTPClient = prev })
 	twitchHTTPClient = &http.Client{Transport: probeRoundTripper(func(req *http.Request) (*http.Response, error) {
-		calls.Add(1)
+		if !isGlobalEmoteURL(req.URL.String()) {
+			calls.Add(1)
+		}
+		if isGlobalEmoteURL(req.URL.String()) {
+			return nil, fmt.Errorf("emote provider unreachable")
+		}
 		if !strings.HasPrefix(req.URL.String(), constants.TwitchEmoteAPIs.BTTVChannel) {
 			// FFZ and 7TV: the transport itself fails, which is the one thing
 			// fetchFFZ/fetch7TV report as "did not answer" (a 200 with no

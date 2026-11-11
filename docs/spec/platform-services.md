@@ -1058,7 +1058,7 @@ A VOD downloader the orchestrator re-Starts on the same instance after a connect
 
 ### Emote Resolution
 
-`EmoteResolver` in `emotes.go` fetches and caches third-party emotes from BTTV, FFZ, and 7TV.
+`EmoteResolver` in `emotes.go` fetches and caches third-party emotes from BTTV, FFZ, and 7TV: each channel's own sets, and the three providers' global sets (§ Global Emote Sets below). The sections up to there describe the per-channel sets.
 
 #### Fetch Strategy
 
@@ -1082,6 +1082,20 @@ All three providers are fetched in parallel using a `sync.WaitGroup`. Each has a
 - Response: `emote_set.emotes` array with `data.host.url` and `data.host.files` array.
 - File selection: prefer `2x.webp`, fall back to `1x.webp`, fall back to first file.
 - Protocol-relative URL fix: prepend `https:` if host URL starts with `//`.
+
+#### Global Emote Sets
+
+Beside the channel's own sets, `Resolve` fetches each provider's global set, the emotes every Twitch channel gets from that provider (`globalEmotes`, `internal/twitch/emotes_global.go`, owner ruling R-G2). The two fetches run side by side.
+
+- **BTTV**: `https://api.betterttv.net/3/cached/emotes/global`, a bare array of `id` + `code`; same CDN URL as the channel emotes.
+- **FFZ**: `https://api.frankerfacez.com/v1/set/global`; only the sets the response names in `default_sets` are used (the endpoint also lists sets that are not on for everyone), as chatterino7 does (`references/chatterino7/src/providers/ffz/FfzEmotes.cpp` `parseGlobalEmotes`).
+- **7TV**: `https://7tv.io/v3/emote-sets/global`, a top-level `emotes` array in the same shape as a channel's `emote_set.emotes`.
+
+**Cache.** One entry per provider for the whole process, since the set does not depend on the channel. Each provider stands alone: its set is kept for `emoteCacheTTL` (24 hours), a fetch that fails is not an answer and is not cached (a 404 included: unlike a channel lookup, a global set exists), and a failed refresh keeps serving the set it had. A provider whose fetch failed is not asked again for `globalEmoteRetryFloor` (5 minutes), so a provider that is down does not cost every chat end and part roll a request and up to 8 seconds. Concurrent resolves share one fetch.
+
+**A global failure never fails or blocks a chat download.** The global sets only add: when none can be fetched, `Resolve` returns the channel's sets alone, after at most the same 8-second `emoteTimeout` the channel fetch already has. When the channel's own sets cannot be resolved the result is nil whatever the globals hold, so the per-job cache retries later.
+
+**Merging** (`withGlobalEmotes`). Each provider's global emotes are appended to that provider's own list in `TwitchEmoteData` (`bttv`, `ffz`, `seventv`), so the chat file's `emotes` block keeps its shape and a player from before this change renders them too. A global emote whose code any of the channel's three lists already has is left out: a channel emote wins over a global one of the same name whichever provider either came from, as in chatterino7 (`references/chatterino7/src/messages/MessageBuilder.cpp` checks the FFZ, BTTV and 7TV channel emotes before any global set). The player then merges the three lists into one map with FFZ over BTTV over 7TV, chatterino7's order within each tier. The cached channel entry is never modified by the merge.
 
 #### Caching
 
@@ -1759,6 +1773,7 @@ The epoch also holds across the live→replay flip inside ONE live/upcoming run 
 | YouTube Visitor Data | Memory (single value) | None | 1 entry | Overwrite | N/A |
 | YouTube STS | Memory map | None | 150 entries | Random eviction when full | SHA256(playerURL) |
 | Twitch Emotes | Memory LRU + TTL | 24 h (`emoteCacheTTL`, `internal/twitch/emotes.go`) | 200 channels | Oldest by insertion order | lowercased channelLogin |
+| Twitch global emote sets | Memory, one entry per provider | 24 h (`emoteCacheTTL`); a failed fetch is retried after 5 min (`globalEmoteRetryFloor`, `internal/twitch/emotes_global.go`) | 3 (BTTV, FFZ, 7TV) | Never; a failed refresh keeps the old set | provider |
 | Cipher (Disk) | Disk files | 24 h (`playerCacheTTL`), revalidated by conditional GET on every fetch | Unbounded | File age check on read; startup sweep | SHA256(playerURL) |
 | Cipher (Memory) | Memory LRU | Unbounded (no expiry) | 10 solvers | Oldest by insertion order | SHA256(playerURL) |
 | BotGuard Session | Memory map | 6 hours | Unbounded | TTL check at start of each generation | contentBinding |
