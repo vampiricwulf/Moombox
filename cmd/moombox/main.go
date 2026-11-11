@@ -434,11 +434,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		webErrCh <- webServer.Start(ctx)
 	}()
 
-	// Give the server a moment to bind (port binding is synchronous in Start).
-	// If it fails quickly, exit; otherwise proceed.
+	// Wait for the bind to resolve: Start's error, or the server's Bound
+	// signal (awaitWebBind). A failure exits or falls back to TUI-only below;
+	// a bound server, or one that has said nothing by the backstop, proceeds.
 	webBindFailed := false
-	select {
-	case err := <-webErrCh:
+	switch outcome, err := awaitWebBind(webErrCh, webServer.Bound(), webBindBackstop); outcome {
+	case webStartReturned:
 		if err != nil {
 			if !useTUI {
 				log.Error("Web server failed to start", slog.String("error", err.Error()))
@@ -453,8 +454,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			log.Warn("Web server failed, continuing in TUI-only mode", slog.String("error", err.Error()))
 			webBindFailed = true
 		}
-	case <-time.After(500 * time.Millisecond):
-		// Server is binding/listening successfully, drain errors in background
+	default:
+		// The server is bound (or still starting at the backstop): log a
+		// later error from Start in the background.
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -528,9 +530,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			// a failed web bind logs-and-continues above, and "restarted
 			// successfully" on the operator's phone while the dashboard is
 			// dead would be a lie. FAILED only on a CONFIRMED bind error —
-			// a slow bind (>500ms select timeout, e.g. AV-scanned first
-			// boot) leaves ActualPort briefly 0, and claiming failure then
-			// would be a false alarm on exactly the boots that matter.
+			// a bind still unanswered at webBindBackstop leaves ActualPort
+			// 0, and claiming failure then would be a false alarm; the
+			// notice then says nothing about the dashboard.
 			fields := []notifications.Field{
 				{Name: "Previous Version", Value: "v" + lastRunVersion, Inline: true},
 				{Name: "Current Version", Value: "v" + version, Inline: true},
