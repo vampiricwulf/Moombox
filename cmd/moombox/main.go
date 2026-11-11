@@ -419,39 +419,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	}()
 
 	// Wait for the bind to resolve: Start's error, or the server's Bound
-	// signal (awaitWebBind). A failure exits or falls back to TUI-only below;
-	// a bound server, or one that has said nothing by the backstop, proceeds.
-	webBindFailed := false
-	switch outcome, err := awaitWebBind(webErrCh, webServer.Bound(), webBindBackstop); outcome {
-	case webStartReturned:
-		if err != nil {
-			if !useTUI {
-				log.Error("Web server failed to start", slog.String("error", err.Error()))
-				fmt.Fprintf(os.Stderr, "\nError: %s\n", err.Error())
-				fmt.Fprintln(os.Stderr, "Web dashboard is unavailable.")
-				// Deterministic: the port is taken or the bind address is
-				// unusable on this host. Never "the update is broken". And
-				// no keypress wait: this arm is headless, and a headless run
-				// never holds its exit (awaitKeypress).
-				os.Exit(exitCodeStartupError)
-			}
-			log.Warn("Web server failed, continuing in TUI-only mode", slog.String("error", err.Error()))
-			webBindFailed = true
-		}
-	default:
-		// The server is bound (or still starting at the backstop): log a
-		// later error from Start in the background.
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Error("web error drainer panic", "panic", r)
-				}
-			}()
-			if err := <-webErrCh; err != nil {
-				log.Error("Web server error", slog.String("error", err.Error()))
-			}
-		}()
-	}
+	// signal (resolveWebBind, on awaitWebBind). A failure exits or falls back
+	// to TUI-only there; a bound server, or one that has said nothing by the
+	// backstop, proceeds.
+	webBindFailed := s.resolveWebBind(webErrCh, webServer.Bound())
 
 	// The cookie startup sequence: the first auth check, then the profile
 	// seed, then the browser refresh timer, in that order on one background
