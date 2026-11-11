@@ -1649,6 +1649,28 @@ func (d *SegmentDownloader) FinalizedDuringInterruption() bool {
 // HeadSeq returns the last known head sequence (-1 if never learned).
 func (d *SegmentDownloader) HeadSeq() int { return int(d.headSeq.Load()) }
 
+// EndOfStreamHeadMargin is how far past the last segment YouTube serves the
+// head it reports (X-Head-Seqnum) can stand once a broadcast is over: 2.
+// moonarchive documents it (_dash.py: "YouTube will increment the max
+// sequence number by 2 without any fragments being present there"), and
+// every live capture on the owner's install from 2026-11-07 on ended with its
+// last written segment exactly 2 below the head, after the full retry
+// budget, with the published video as long as the recording.
+//
+// It counts from the LAST WRITTEN segment (LastSeq), not from currentSeq, the
+// next one to fetch: a recording whose last segment is head-2 has
+// currentSeq == head-1. Owner ruling R-T1: a constant, not a setting.
+const EndOfStreamHeadMargin = 2
+
+// WithinEndOfStreamMargin reports whether a download whose last written
+// segment is lastSeq stands no more than EndOfStreamHeadMargin below head.
+// It is true at and past the head too. The one place the margin is compared:
+// the engine's finalize line, the worker's incomplete-tail verdict and its
+// boot pass over rows flagged before the rule all call it.
+func WithinEndOfStreamMargin(lastSeq, head int) bool {
+	return head-lastSeq <= EndOfStreamHeadMargin
+}
+
 // StoppedWellBehindHead reports whether the download stands more than two
 // segments below its tracked head — the only position the refused-segment
 // rule can act on (refusable's head bound). The live loop counts a same-seq

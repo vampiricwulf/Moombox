@@ -97,7 +97,10 @@ var (
 // drift between "what the verify branch considers segment activity" and
 // "what the chat gate considers segment activity".
 //
-// The second return value, waitedForResume, is worker-level Tier 2
+// The second return value is the loop's liveEnd. Its confirmedOver is true
+// only when the loop's own end verification heard YouTube say the stream is
+// over (the incomplete-tail verdict reads it, tail_tolerance.go). Its
+// waitedForResume is worker-level Tier 2
 // evidence — FINALIZE-scoped, not history-scoped: true only when the loop
 // is CURRENTLY in (or gives up directly out of) an unresolved
 // noteRefreshFailure evidence-latch — which fires whenever resume evidence
@@ -134,7 +137,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	tracker *ProgressTracker,
 	mayResume func() bool,
 	lastSegTime *atomicTimeValue,
-) (*DownloadResult, bool, error) {
+) (*DownloadResult, liveEnd, error) {
 	lastSegTime.StoreNow()
 	var consecutiveLiveChecks atomic.Int32
 	// waitedForResume latches true when shouldWaitForResume's branch fires
@@ -142,6 +145,14 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// doc comment above and resumeWaitLatch's own doc comment for the full
 	// finalize-scoped rationale.
 	var waitedForResume resumeWaitLatch
+	// confirmedOver is set at the one place the loop's own end verification
+	// hears YouTube say the stream is over. The forced ends (still "live"
+	// too many times, a status that stayed unreadable, an unexpected status)
+	// leave it false: those are this loop giving up, not YouTube's answer.
+	confirmedOver := false
+	end := func() liveEnd {
+		return liveEnd{waitedForResume: waitedForResume.value(), confirmedOver: confirmedOver}
+	}
 	// waitEpisode bounds the wait branch below to the job's
 	// InterruptionTimeout (I3 fix) — see waitDeadline's doc comment. Reset
 	// alongside every waitedForResume.resolved() call so a later,
@@ -575,7 +586,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 	for {
 		if ctx.Err() != nil {
-			return result, waitedForResume.value(), ctx.Err()
+			return result, end(), ctx.Err()
 		}
 
 		// Run segment downloaders in a goroutine so we can also listen for quality changes.
@@ -607,7 +618,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		)
 
 		if ctx.Err() != nil {
-			return result, waitedForResume.value(), ctx.Err()
+			return result, end(), ctx.Err()
 		}
 
 		// A refusal that left the staged recording intact can never make
@@ -617,7 +628,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		if stagingPreservedRefusal(downloadErr) {
 			o.logger.Error("download refused to start over staged media — staging and resume state kept",
 				"err", downloadErr, "jobID", jobCtx.Job.ID)
-			return result, waitedForResume.value(), downloadErr
+			return result, end(), downloadErr
 		}
 		// Nor can one that cannot write its staging (a full disk, a
 		// permission): every refresh would fail on its first write. Read as a
@@ -627,7 +638,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		if errors.Is(downloadErr, engine.ErrLocalWrite) {
 			o.logger.Error("the capture cannot be written to staging — stopping with staging and resume state kept",
 				"err", downloadErr, "jobID", jobCtx.Job.ID)
-			return result, waitedForResume.value(), downloadErr
+			return result, end(), downloadErr
 		}
 		// Nor can one whose playlist the engine refused as encrypted (the HLS
 		// the DRM fallback fell to, drmHlsFallback, or one that turned
@@ -638,7 +649,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		if errors.Is(downloadErr, engine.ErrDRMProtected) {
 			o.logger.Error("the stream is DRM-protected — stopping",
 				"err", downloadErr, "jobID", jobCtx.Job.ID)
-			return result, waitedForResume.value(), drmUnrecordable(downloadErr)
+			return result, end(), drmUnrecordable(downloadErr)
 		}
 
 		// Check for reactive quality loss (download loop returned ErrQualityLost)
@@ -687,11 +698,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				},
 			)
 			if ctx.Err() != nil {
-				return result, waitedForResume.value(), ctx.Err()
+				return result, end(), ctx.Err()
 			}
 			if err != nil {
 				o.logger.Error("failed to refresh video info after quality change", "err", err, "jobID", jobCtx.Job.ID)
-				return result, waitedForResume.value(), fmt.Errorf("refresh after quality change: %w", err)
+				return result, end(), fmt.Errorf("refresh after quality change: %w", err)
 			}
 			// Interruption spec Tier 1 evidence: a 403-family interruption
 			// (handleGoneError) exits the downloader via ErrQualityLost into
@@ -851,13 +862,13 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				if cookiesStatusError(refreshErr) {
 					o.logger.Error("the capture's credentials stopped working — stopping with staging kept",
 						"err", refreshErr, "jobID", jobCtx.Job.ID)
-					return result, waitedForResume.value(), refreshErr
+					return result, end(), refreshErr
 				}
 				if refreshErr != nil {
 					o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
 					// Return nil to exit the live loop; muxAndFinalize will process
 					// whatever video/audio data was captured before the refresh failed.
-					return result, waitedForResume.value(), nil
+					return result, end(), nil
 				}
 			}
 
@@ -877,7 +888,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				oldVideoSeq, oldAudioSeq, videoMoved, audioMoved = pastRefusedSegment(hole, oldVideoSeq, oldAudioSeq)
 				noteRefusedHole(result, hole, videoMoved, audioMoved)
 				if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, false, segmentEndTime, hole); exit {
-					return result, waitedForResume.value(), err
+					return result, end(), err
 				}
 				continue
 			}
@@ -916,7 +927,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			// Quality actually changed — split into a new segment.
 			if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, shortSegment, segmentEndTime, -1); exit {
-				return result, waitedForResume.value(), err
+				return result, end(), err
 			}
 			continue
 		}
@@ -976,6 +987,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		case youtube.StreamPostLive, youtube.StreamVOD, youtube.StreamNotAStream:
 			// Stream confirmed ended
 			o.logger.Info("stream confirmed ended", "status", freshInfo.StreamStatus, "jobID", jobCtx.Job.ID)
+			confirmedOver = true
 			goto streamEnded
 
 		case youtube.StreamLive:
@@ -1033,7 +1045,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			utils.Sleep(ctx, streamEndVerifyInterval)
 
 			if ctx.Err() != nil {
-				return result, waitedForResume.value(), ctx.Err()
+				return result, end(), ctx.Err()
 			}
 
 			// Cancel old downloaders before refreshing
@@ -1080,7 +1092,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				if credErr != nil && verifyWalled {
 					o.logger.Error("the capture's credentials stopped working — stopping with staging kept",
 						"err", credErr, "jobID", jobCtx.Job.ID)
-					return result, waitedForResume.value(), credErr
+					return result, end(), credErr
 				}
 				verifyWalled = credErr != nil
 				if verifyWalled {
@@ -1126,7 +1138,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				}
 				shortSegment := !partResumed && time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
 				if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, shortSegment, time.Now().Unix(), -1); exit {
-					return result, waitedForResume.value(), err
+					return result, end(), err
 				}
 				continue
 			}
@@ -1169,7 +1181,7 @@ streamEnded:
 	if writeUnlessOutcome(o.db, jobCtx.Job.ID, map[string]any{
 		"status": database.StatusMuxing,
 	}) {
-		return result, waitedForResume.value(), ErrCancelled
+		return result, end(), ErrCancelled
 	}
 
 	// Wait for background segment muxes to finish before final mux —
@@ -1190,7 +1202,7 @@ streamEnded:
 		if partResumed {
 			muxStart = 0
 		}
-		seg, muxErr := o.muxLiveFinalPart(ctx, jobCtx, tracker, waitedForResume.value(), segmentIndex, muxStart, segmentEndTime, currentQuality, result)
+		seg, muxErr := o.muxLiveFinalPart(ctx, jobCtx, tracker, end(), segmentIndex, muxStart, segmentEndTime, currentQuality, result)
 		if muxErr != nil {
 			o.logger.Error("failed to mux final quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
 		} else if seg != nil {
@@ -1200,7 +1212,7 @@ streamEnded:
 		}
 	}
 
-	return result, waitedForResume.value(), nil
+	return result, end(), nil
 }
 
 // muxLiveFinalPart muxes the last part of a split YouTube capture at the
@@ -1223,7 +1235,7 @@ func (o *DownloadOrchestrator) muxLiveFinalPart(
 	ctx context.Context,
 	jobCtx *JobContext,
 	tracker *ProgressTracker,
-	waitedForResume bool,
+	end liveEnd,
 	segIdx int,
 	unixStart, unixEnd int64,
 	quality QualityInfo,
@@ -1232,7 +1244,7 @@ func (o *DownloadOrchestrator) muxLiveFinalPart(
 	if tracker != nil {
 		tracker.Close()
 	}
-	if resultIncompleteTail(result, waitedForResume) {
+	if resultIncompleteTail(result, end) {
 		return o.muxSegment(ctx, jobCtx, segIdx, unixStart, unixEnd, quality, result)
 	}
 	return o.muxFinalPart(ctx, jobCtx, segIdx, unixStart, unixEnd, quality, result)

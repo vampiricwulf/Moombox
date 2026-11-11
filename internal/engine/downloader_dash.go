@@ -784,12 +784,28 @@ func (d *SegmentDownloader) behindHeadTailPending() bool {
 // manifest-free restart that sets DiscardStaged, sets the recording aside
 // as <file>.restart-<ts> and starts over from sq=0 — correct, but a whole
 // re-download instead of a tail.
+//
+// The line says which of two things it saw. A stop within
+// EndOfStreamHeadMargin of the head is the shape an ended broadcast has (the
+// reported head runs past the last segment YouTube serves), and is logged at
+// Info: whether that recording is complete is the worker's verdict, which
+// also knows whether the stream is confirmed over and whether anything
+// interrupted the capture (worker.incompleteTail, owner ruling R-T1). The
+// engine decides nothing by it: the latch and the kept sidecar are the same
+// either way. A stop further back is the Warn it always was.
 func (d *SegmentDownloader) warnIfFinalizingBehindHead() bool {
 	head := int(d.headSeq.Load())
 	cur := int(d.currentSeq.Load())
 	if head > 0 && cur < head {
+		last := cur - 1
+		if WithinEndOfStreamMargin(last, head) {
+			d.logger.Info("[Downloader] finalizing short of the reported head, within the end-of-stream margin — the segments past the last one written stayed unavailable for the whole retry budget; the worker decides whether the recording is complete",
+				"lastSeq", last, "currentSeq", cur, "headSeq", head, "shortOfHead", head-last, "margin", EndOfStreamHeadMargin,
+				"gapSinceLastSegment", d.lastSegTime.Since().Round(time.Second))
+			return true
+		}
 		d.logger.Warn("[Downloader] finalizing with unfetched tail — segments below head stayed unavailable",
-			"currentSeq", cur, "headSeq", head, "missing", head-cur,
+			"lastSeq", last, "currentSeq", cur, "headSeq", head, "missing", head-cur,
 			"gapSinceLastSegment", d.lastSegTime.Since().Round(time.Second))
 		return true
 	}

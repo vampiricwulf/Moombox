@@ -9,18 +9,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
-func TestComputeIncompleteTail(t *testing.T) {
-	if !computeIncompleteTail(true, false, false) || !computeIncompleteTail(false, true, false) {
-		t.Error("either downloader behind head must flag the job")
-	}
-	if !computeIncompleteTail(false, false, true) {
-		t.Error("an interrupted finalize must flag the job even with both behind-head false")
-	}
-	if computeIncompleteTail(false, false, false) {
-		t.Error("clean finish must not flag")
-	}
-}
-
 // TestFinalizeIncompleteTailWritesAndSelfClears locks in the shared helper
 // FIX 3 introduces for both the VOD and live branches of ExecuteWithChat: a
 // clean finish (both downloaders nil, i.e. neither ever behind head) must
@@ -53,7 +41,7 @@ func TestFinalizeIncompleteTailWritesAndSelfClears(t *testing.T) {
 
 	o := &DownloadOrchestrator{db: db, logger: &discardLogger{}}
 
-	incomplete, vSeq, vHead, aSeq, aHead := o.finalizeIncompleteTail(jobID, &DownloadResult{}, false)
+	incomplete, vSeq, vHead, aSeq, aHead := o.finalizeIncompleteTail(jobID, &DownloadResult{}, liveEnd{})
 	if incomplete {
 		t.Error("both downloaders nil must never be reported incomplete")
 	}

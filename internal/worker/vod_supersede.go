@@ -170,7 +170,7 @@ func (o *DownloadOrchestrator) markVodRootComplete(jobCtx *JobContext) {
 // replace the parts as the archive. One function, so the flag and the
 // marker are read off the same verdict.
 func (o *DownloadOrchestrator) settleVodDownload(jobCtx *JobContext, result *DownloadResult) (incomplete bool, vSeq, vHead, aSeq, aHead int) {
-	incomplete, vSeq, vHead, aSeq, aHead = o.finalizeIncompleteTail(jobCtx.Job.ID, result, false)
+	incomplete, vSeq, vHead, aSeq, aHead = o.finalizeIncompleteTail(jobCtx.Job.ID, result, liveEnd{})
 	if !incomplete {
 		o.markVodRootComplete(jobCtx)
 	}

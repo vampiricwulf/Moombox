@@ -356,7 +356,9 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	// Select download strategy (A1: pass cipher/pot to strategies)
 	var result *DownloadResult
-	// waitedForResume is worker-level Tier 2 evidence, finalize-scoped: true
+	// liveEnded is what the live loop reports about its capture's end
+	// (liveEnd): whether YouTube confirmed the stream over, and
+	// waitedForResume, which is worker-level Tier 2 evidence, finalize-scoped: true
 	// when the live loop's noteRefreshFailure evidence-latch is CURRENTLY
 	// armed (or gave up directly out of an unresolved one) — this fires
 	// whenever resume evidence held on a failed refresh, whether or not
@@ -364,9 +366,9 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	// interruption_timeout=0 disables the WAIT, not this latch) — cleared
 	// again by runLiveStreamDownload at every later successful refresh, so
 	// a broadcast that actually resumed doesn't permanently taint a clean
-	// finish. Set by runLiveStreamDownload below; always false on the VOD
-	// branch.
-	var waitedForResume bool
+	// finish. Set by runLiveStreamDownload below; always the zero value on
+	// the VOD branch.
+	var liveEnded liveEnd
 
 	// The yt:stretch display aspect, recorded in the staging root for the
 	// archive mux (recordDisplayAspect) — or cleared, for a video that no
@@ -628,7 +630,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// reassigns result locally on every quality refresh/split, so the
 		// pre-call `result` variable would otherwise go stale the moment a
 		// single refresh happens.
-		result, waitedForResume, err = o.runLiveStreamDownload(ctx, jobCtx, strategyCtx, startSegmentIndex, startPartResumed, videoInfo, result, tracker, mayResume, &lastSegmentTime)
+		result, liveEnded, err = o.runLiveStreamDownload(ctx, jobCtx, strategyCtx, startSegmentIndex, startPartResumed, videoInfo, result, tracker, mayResume, &lastSegmentTime)
 
 		if err == nil {
 			// Same eviction guard as the VOD branch (see its call site
@@ -653,7 +655,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// diagnoseEvictedStart) so an eviction error still takes precedence
 		// and is never overwritten by a flag write.
 		if err == nil {
-			o.finalizeIncompleteTail(jobCtx.Job.ID, result, waitedForResume)
+			o.finalizeIncompleteTail(jobCtx.Job.ID, result, liveEnded)
 			// Muxing now, as the VOD branch does and for the same reason: the
 			// engine cleared the resume sidecar the moment it saw the stream
 			// end, and the chat wait below can hold this row for minutes. A
@@ -1021,23 +1023,13 @@ func downloaderInterrupted(d *engine.SegmentDownloader) bool {
 	return d != nil && d.FinalizedDuringInterruption()
 }
 
-// computeIncompleteTail: the job is incomplete if EITHER stream finalized
-// behind head — video and audio are independent downloaders with
-// independent head tracking, and a missing tail on one truncates the mux —
-// OR either stream finalized during an interruption (Tier 2): the resume
-// sidecar was deliberately preserved for that case, and treating the job as
-// complete would let ordinary cleanup discard it before the broadcast gets
-// a chance to resume.
-func computeIncompleteTail(videoBehind, audioBehind, interrupted bool) bool {
-	return videoBehind || audioBehind || interrupted
-}
-
 // resultIncompleteTail is the incomplete-tail verdict for a finished
 // download, with nothing written: what finalizeIncompleteTail persists, for
-// a caller that needs the answer before that write (muxLiveFinalPart).
-func resultIncompleteTail(result *DownloadResult, workerWaitedForResume bool) bool {
-	interrupted := downloaderInterrupted(result.VideoDownloader) || downloaderInterrupted(result.AudioDownloader) || workerWaitedForResume
-	return computeIncompleteTail(downloaderBehindHead(result.VideoDownloader), downloaderBehindHead(result.AudioDownloader), interrupted)
+// a caller that needs the answer before that write (muxLiveFinalPart). The
+// rule itself is incompleteTail (tail_tolerance.go); this reads its facts
+// off the downloaders.
+func resultIncompleteTail(result *DownloadResult, end liveEnd) bool {
+	return incompleteTail(resultTailFacts(result, end))
 }
 
 // finalizeIncompleteTail computes and unconditionally persists the
@@ -1078,7 +1070,14 @@ func resultIncompleteTail(result *DownloadResult, workerWaitedForResume bool) bo
 // this in, that case would self-clear incomplete_tail and let ordinary
 // cleanup discard staging + the resume sidecar right after deliberately
 // waiting for exactly the resume that data was preserved for.
-func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *DownloadResult, workerWaitedForResume bool) (incomplete bool, vSeq, vHead, aSeq, aHead int) {
+//
+// end.confirmedOver is the other thing only the live loop knows: YouTube
+// answered its own end verification with the stream over. It is what lets a
+// stop within the end-of-stream margin count as complete (incompleteTail,
+// owner ruling R-T1); the VOD branch passes the zero liveEnd and is judged
+// exactly as before.
+func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *DownloadResult, end liveEnd) (incomplete bool, vSeq, vHead, aSeq, aHead int) {
+	workerWaitedForResume := end.waitedForResume
 	vSeq = downloaderSeq(result.VideoDownloader)
 	vHead = downloaderHead(result.VideoDownloader)
 	aSeq = downloaderSeq(result.AudioDownloader)
@@ -1086,7 +1085,8 @@ func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *Down
 	videoBehind := downloaderBehindHead(result.VideoDownloader)
 	audioBehind := downloaderBehindHead(result.AudioDownloader)
 	interrupted := downloaderInterrupted(result.VideoDownloader) || downloaderInterrupted(result.AudioDownloader) || workerWaitedForResume
-	incomplete = resultIncompleteTail(result, workerWaitedForResume)
+	facts := resultTailFacts(result, end)
+	incomplete = incompleteTail(facts)
 	// Unconditional write: a retry that completes cleanly clears the flag by
 	// writing false through the same path.
 	o.db.UpdateJobFields(jobID, map[string]any{"incomplete_tail": incomplete})
@@ -1096,7 +1096,15 @@ func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *Down
 			"videoSeq", vSeq, "videoHead", vHead,
 			"audioSeq", aSeq, "audioHead", aHead,
 			"videoBehindHead", videoBehind, "audioBehindHead", audioBehind,
-			"interrupted", interrupted, "workerWaitedForResume", workerWaitedForResume)
+			"interrupted", interrupted, "workerWaitedForResume", workerWaitedForResume,
+			"streamConfirmedOver", end.confirmedOver)
+	} else if videoBehind || audioBehind {
+		// Not a warning: this is how every ended broadcast looks.
+		o.logger.Info("recording stopped short of the reported head, within the end-of-stream margin, with the stream confirmed over and nothing interrupted — complete",
+			"jobID", jobID,
+			"videoLastSeq", facts.video.lastSeq, "videoHead", vHead,
+			"audioLastSeq", facts.audio.lastSeq, "audioHead", aHead,
+			"margin", engine.EndOfStreamHeadMargin)
 	}
 	return incomplete, vSeq, vHead, aSeq, aHead
 }
