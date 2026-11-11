@@ -1095,7 +1095,7 @@ All three providers are fetched in parallel using a `sync.WaitGroup`. Each has a
 
 #### Emote Injection
 
-After chat download completes, `EnrichWithEmotes` reads the chat JSON file, adds the resolved `TwitchEmoteData` to the `emotes` field, and rewrites the file atomically. This uses a fresh `context.Background()` context with a 30-second timeout, ensuring emote resolution completes even after the parent context is cancelled.
+After chat download completes, `EnrichWithEmotes` sets the chat file's `emotes` field to the resolved `TwitchEmoteData`. It is a streamed rewrite (`utils.SetChatFileHeaderField`, `internal/utils/chatfile.go`): the file is walked once, the other header fields are carried over as raw JSON in their own order, `emotes` is written directly before the `messages` array, and each message is copied as the raw bytes it already is (an appended compact line stays one compact line). No message is decoded into a struct, so peak memory is the header plus one message, never the file. The result goes to a temp file beside the chat file, is fsynced and swapped in with `ReplaceFile`; it keeps the padded `messageCount` and ends with the messages array, so it still takes appends. On any error (a file that does not parse, a field other than `emotes` after the messages array, an IO failure) the temp is removed and the file stays as it was, without emotes. Emote resolution uses a fresh `context.Background()` context with a 30-second timeout, ensuring emote resolution completes even after the parent context is cancelled.
 
 #### Per-Part Chat Rolling (live IRC)
 

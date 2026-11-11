@@ -2,7 +2,6 @@ package twitch
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -877,23 +876,17 @@ func (vcd *VodChatDownloader) MarkStreamEnded() {
 	// No-op for VOD — download completes when all pages are fetched.
 }
 
-// EnrichWithEmotes adds resolved emote data to the chat output. The rewrite
-// goes through WriteChatFileAtomic (tmp + fsync + rename) — this rewrites the
-// ENTIRE chat archive, and a rename journaled before the data pages hit disk
-// (power loss) would otherwise replace hours of archived chat with a
-// truncated file. Same threat model the periodic flush writers defend
-// against.
+// EnrichWithEmotes sets the chat file's "emotes" block to emoteData. It is a
+// streamed rewrite (utils.SetChatFileHeaderField): the header fields and every
+// message are carried over as the raw JSON they already are, the emotes block
+// goes directly before the messages array, and the result is swapped in
+// through a temp file that is fsynced first, so a power loss cannot replace
+// hours of archived chat with a truncated file. Peak memory is the header and
+// one message, never the file: a long VOD's chat runs to 50-100 MB, and this
+// used to hold it several times over (the bytes, every message as a struct,
+// and the indented re-encoding).
+//
+// On any error the file is left as it was, without emotes.
 func EnrichWithEmotes(chatPath string, emoteData *TwitchEmoteData) error {
-	data, err := os.ReadFile(chatPath)
-	if err != nil {
-		return err
-	}
-
-	var chatData TwitchChatData
-	if err := json.Unmarshal(data, &chatData); err != nil {
-		return err
-	}
-
-	chatData.Emotes = emoteData
-	return utils.WriteChatFileAtomic(chatPath, &chatData)
+	return utils.SetChatFileHeaderField(chatPath, "emotes", emoteData)
 }
