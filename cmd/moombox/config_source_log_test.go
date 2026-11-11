@@ -82,12 +82,13 @@ func TestLogConfigSourceNamesThePath(t *testing.T) {
 }
 
 // The unit test above pins what logConfigSource says; this pins that boot
-// still calls it. Structural for the reason tui_wiring_ffmpeg_callsite_test.go
-// is: initServices opens the database, the web server and every platform
-// service, so this package cannot drive it, and the seam is a call's presence.
+// still calls it, from initConfigAndLogger (initServices' first step;
+// TestInitServicesStartsWithTheConfigAndLogger pins that call, and
+// TestBootKeepsTheLogLevelOverrideOutOfTheConfigFile runs the function and
+// reads the line in the log).
 //
 // Mutant: deleting the logConfigSource(log, cfg, s.configPath) line from
-// initServices — the fatal below fires and says what the operator loses.
+// initConfigAndLogger — the fatal below fires and says what the operator loses.
 func TestInitServicesLogsTheConfigSource(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "services.go", nil, 0)
@@ -98,12 +99,12 @@ func TestInitServicesLogsTheConfigSource(t *testing.T) {
 	var body *ast.BlockStmt
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if ok && fn.Name.Name == "initServices" && fn.Body != nil {
+		if ok && fn.Name.Name == "initConfigAndLogger" && fn.Body != nil {
 			body = fn.Body
 		}
 	}
 	if body == nil {
-		t.Fatal("services.go has no initServices with a body — re-anchor this test rather than deleting it")
+		t.Fatal("services.go has no initConfigAndLogger with a body — re-anchor this test rather than deleting it")
 	}
 
 	called := false
@@ -118,7 +119,7 @@ func TestInitServicesLogsTheConfigSource(t *testing.T) {
 		return true
 	})
 	if !called {
-		t.Fatal("initServices does not call logConfigSource — a typo'd -config path then starts on defaults " +
+		t.Fatal("initConfigAndLogger does not call logConfigSource — a typo'd -config path then starts on defaults " +
 			"and the first save creates a second config file, with no line in the log naming either path")
 	}
 }

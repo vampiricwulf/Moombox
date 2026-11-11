@@ -56,16 +56,19 @@ func TestLogLevelOverrideNeverReachesDisk(t *testing.T) {
 	}
 }
 
-// The helper only holds the rule if the boot path actually uses it that way,
-// and initServices is not callable from a test (it opens the database, binds
-// the web server and starts the monitors). So the call site is pinned where
-// it lives: this package writes the boot log level into the LOGGER and never
+// The helper only holds the rule if the boot path actually uses it that way.
+// TestBootKeepsTheLogLevelOverrideOutOfTheConfigFile runs the boot's config
+// and logger step (initConfigAndLogger) and reads the file back; this scan
+// covers the rest of the package, which a test cannot run (initServices goes
+// on to open the database, bind the web server and start the monitors): this
+// package writes the boot log level into the LOGGER and never
 // into the config struct, which is what keeps the override out of the boot
 // auto-persist, the password auto-hash Store.Update and every later UI save
 // — all three of which encode whatever cfg.Logs.LogLevel holds.
 //
 // Mutant: putting `cfg.Logs.LogLevel = logLevelOverride` back into
-// initServices — the assignment scan names the file and line. Mutant:
+// initConfigAndLogger, or anywhere else in package main — the assignment
+// scan names the file and line. Mutant:
 // passing cfg.Logs.LogLevel straight to logger.New — the -log-level flag
 // stops working and the effectiveLogLevel argument check fails.
 func TestLogLevelOverrideReachesTheLoggerAndNothingElse(t *testing.T) {

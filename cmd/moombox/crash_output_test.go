@@ -494,8 +494,9 @@ func TestCrashOutputThatCannotBeMovedAside(t *testing.T) {
 	}
 }
 
-// TestCrashOutputIsWired pins the two call sites: initServices captures the
-// crash output as soon as the logger is open, and run()'s crash-respawn notice
+// TestCrashOutputIsWired pins the two call sites: initConfigAndLogger
+// (initServices' first step) captures the crash output as soon as the logger
+// is open, and run()'s crash-respawn notice
 // is crashRecoveredNotice's.
 //
 // Mutants: the captureCrashOutput call deleted; the old fixed notice text back
@@ -528,8 +529,8 @@ func TestCrashOutputIsWired(t *testing.T) {
 		}
 		return false
 	}
-	if !contains(callsIn("services.go", "initServices"), "s.captureCrashOutput") {
-		t.Error("initServices does not capture the crash output")
+	if !contains(callsIn("services.go", "initConfigAndLogger"), "s.captureCrashOutput") {
+		t.Error("initConfigAndLogger does not capture the crash output")
 	}
 	if !contains(callsIn("main.go", "run"), "crashRecoveredNotice") {
 		t.Error("run() does not build the Recovered From Crash notice with crashRecoveredNotice")

@@ -547,26 +547,18 @@ func archiveSlotsResolver(store *config.Store) func(channelID string) int {
 	}
 }
 
-// initServices runs the 16 numbered construction sections from the original
-// run() — config load, logger, updater, database, connectivity, cookies,
-// platform services, worker, trim, monitors, cookie-refresh / auto-cookie,
-// web server + rate limiters + auth + core shared closures (triggerRestart,
-// kickMonitors, getActivePlatforms). On return, all runState fields for
-// those phases are populated and the close-once helpers (closeLog, closeDB,
-// closeLimiters) are ready for run() to defer.
+// initConfigAndLogger is initServices' sections 1 and 2: it loads the config
+// and builds its store, opens the logger at the level effectiveLogLevel
+// picks, arms the crash output, applies the soft memory limit, auto-persists
+// new config sections, creates the updater and hashes a plaintext password.
+// It is its own function so that a test can run the boot's three config
+// writers with a -log-level override and read the file back
+// (TestBootKeepsTheLogLevelOverrideOutOfTheConfigFile). The order inside is
+// the boot's order; nothing here may be reordered.
 //
-// Returns a wrapped error from the three fatal-exit points (config.Load,
-// logger.New, database.Open). The caller prints the error and exits with
-// exitCodeStartupError (3), which both preserves the pre-refactor behaviour
-// where deferred cleanup is skipped on a fatal startup failure AND tells the
-// launcher this is the environment failing deterministically, so a
-// first-post-update boot that lands here is never rolled back as a broken
-// release (CORE-23).
-func (s *runState) initServices(logLevelOverride string) error {
-	if !s.useTUI {
-		fmt.Println("Loading configuration...")
-	}
-
+// Returns the wrapped error of its two fatal exits (config.Load, logger.New),
+// which initServices returns as is.
+func (s *runState) initConfigAndLogger(logLevelOverride string) error {
 	// =========================================================================
 	// 1. Load config
 	// =========================================================================
@@ -665,6 +657,34 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	// Auto-convert plaintext password to scrypt hash (matches TS ConfigManager.load)
 	hashPlaintextPassword(log, s.configStore)
+	return nil
+}
+
+// initServices runs the 16 numbered construction sections from the original
+// run() — config load, logger, updater, database, connectivity, cookies,
+// platform services, worker, trim, monitors, cookie-refresh / auto-cookie,
+// web server + rate limiters + auth + core shared closures (triggerRestart,
+// kickMonitors, getActivePlatforms). On return, all runState fields for
+// those phases are populated and the close-once helpers (closeLog, closeDB,
+// closeLimiters) are ready for run() to defer.
+//
+// Returns a wrapped error from the three fatal-exit points (config.Load,
+// logger.New, database.Open). The caller prints the error and exits with
+// exitCodeStartupError (3), which both preserves the pre-refactor behaviour
+// where deferred cleanup is skipped on a fatal startup failure AND tells the
+// launcher this is the environment failing deterministically, so a
+// first-post-update boot that lands here is never rolled back as a broken
+// release (CORE-23).
+func (s *runState) initServices(logLevelOverride string) error {
+	if !s.useTUI {
+		fmt.Println("Loading configuration...")
+	}
+
+	// Sections 1 (load config) and 2 (initialize logger): initConfigAndLogger.
+	if err := s.initConfigAndLogger(logLevelOverride); err != nil {
+		return err
+	}
+	cfg, log := s.cfg, s.log
 
 	// =========================================================================
 	// 3. Open database
