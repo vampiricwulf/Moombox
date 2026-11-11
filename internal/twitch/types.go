@@ -115,7 +115,7 @@ type TwitchChatMessage struct {
 	// marks its targets deleted when it loads the file
 	// (applyTwitchModeration, web/public/modules/chat-timeline.js).
 	//
-	// Moderation is one of the Moderation constants. TargetMsgID names the
+	// Moderation is one of the ModerationKind constants. TargetMsgID names the
 	// one message a ModerationDeleted row removed; TargetUserID the user
 	// whose earlier messages a ModerationAuthorDeleted row removed, with
 	// BanDurationSec the timeout's length (0 = a permanent ban). TargetLogin
@@ -125,23 +125,29 @@ type TwitchChatMessage struct {
 	// On such a row Message and AuthorID are empty and SystemMsg is the
 	// event as a sentence. All five are omitempty, so no other row and no
 	// file written before them changes.
-	Moderation     string `json:"moderation,omitempty"`
-	TargetMsgID    string `json:"targetMsgId,omitempty"`
-	TargetUserID   string `json:"targetUserId,omitempty"`
-	TargetLogin    string `json:"targetLogin,omitempty"`
-	BanDurationSec int    `json:"banDurationSec,omitempty"`
+	Moderation     ModerationKind `json:"moderation,omitempty"`
+	TargetMsgID    string         `json:"targetMsgId,omitempty"`
+	TargetUserID   string         `json:"targetUserId,omitempty"`
+	TargetLogin    string         `json:"targetLogin,omitempty"`
+	BanDurationSec int            `json:"banDurationSec,omitempty"`
 }
 
 // MessageTypeModeration is the MessageType of a stored CLEARCHAT or CLEARMSG.
 const MessageTypeModeration = "moderation"
 
-// TwitchChatMessage.Moderation's values. The first two are the YouTube
-// markers' own words (internal/chat MarkerDeleted, MarkerAuthorDeleted) for
-// the same two events; Twitch adds the full clear.
+// ModerationKind is what a moderation row did: TwitchChatMessage.Moderation's
+// closed vocabulary. The player reads the same three words
+// (applyTwitchModeration, web/public/modules/chat-timeline.js), and
+// web/tests/fixtures/twitch-moderation-parity.json holds both sides to them.
+type ModerationKind string
+
+// The first two are the YouTube markers' own words (internal/chat
+// MarkerDeleted, MarkerAuthorDeleted) for the same two events; Twitch adds
+// the full clear.
 const (
-	ModerationDeleted       = "deleted"        // CLEARMSG: one message, by id
-	ModerationAuthorDeleted = "author_deleted" // CLEARCHAT naming a user: a timeout or a ban
-	ModerationChatCleared   = "chat_cleared"   // CLEARCHAT naming nobody: the whole chat
+	ModerationDeleted       ModerationKind = "deleted"        // CLEARMSG: one message, by id
+	ModerationAuthorDeleted ModerationKind = "author_deleted" // CLEARCHAT naming a user: a timeout or a ban
+	ModerationChatCleared   ModerationKind = "chat_cleared"   // CLEARCHAT naming nobody: the whole chat
 )
 
 // moderationAuthorName is the AuthorName of a moderation row: what a player

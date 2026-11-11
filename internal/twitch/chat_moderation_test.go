@@ -57,7 +57,7 @@ func TestClearchatRows(t *testing.T) {
 	cd := newSidecarTestChatDownloader(t)
 	cases := []struct {
 		name, line    string
-		kind          string
+		kind          ModerationKind
 		userID, login string
 		dur           int
 		id, sentence  string
