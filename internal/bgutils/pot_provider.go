@@ -77,6 +77,14 @@ var sidecarMintGrace = 60 * time.Second
 // the player request), and before the grace existed a down sidecar failed
 // the mint at once and that work ran. Waiting out the whole deadline would
 // hand it a dead context.
+//
+// The share is taken of what is left each time, so mints that follow one
+// another under one deadline while the child stays down each halve the
+// remainder: under a 20 s budget the first waits 10 s and the second 5 s,
+// and a 403 recovery at its 10 s floor that mints a GVS token and then a
+// player token inside its re-extraction leaves the player request 2.5 s.
+// That only lasts for the outage's grace: once it is spent every mint fails
+// at once and the work after it has the whole remainder again.
 const mintWaitShare = 2
 
 // sidecarMintPoll is how often a mint waiting out the grace asks the handle
