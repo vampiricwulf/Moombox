@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -247,6 +249,15 @@ func TestARollbackIsNotAnnouncedAsAnUpdate(t *testing.T) {
 // or reading configLoaded from anything but c.ConfigLoaded — no rollback
 // ever writes SkippedVersion, and the daily check offers the failed release
 // again.
+//
+// The update-applied step takes four readings from run(), and all four are
+// pinned: the last-run version, configLoaded, the rollback, and the web
+// bind's answer, which must be resolveWebBind's own result. Mutants:
+// `s.recordVersionChange(lastRunVersion, configLoaded, rolledBackFrom, false)`
+// with webBindFailed read anywhere else, so that it still compiles (Update
+// Applied says "restarted successfully" over a dashboard that failed to
+// bind); `webBindFailed := false` beside a discarded resolveWebBind call;
+// a second assignment to webBindFailed after the wait.
 func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "main.go", nil, 0)
@@ -257,6 +268,10 @@ func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 	argOf := map[string]ast.Expr{} // callee → the argument that must be rolledBackFrom
 	var loadedArg ast.Expr         // resolveUpdateBreadcrumb's, which must be configLoaded
 	var announceLoadedArg ast.Expr // recordVersionChange's, which must be configLoaded too
+	var recordArgs []string        // recordVersionChange's whole argument list
+	var recordAt token.Pos
+	bindAssigns := 0 // assignments to webBindFailed in run()
+	var bindAt token.Pos
 	ast.Inspect(f, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
 		if !ok || fn.Name.Name != "run" {
@@ -265,6 +280,25 @@ func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.AssignStmt:
+				for _, lhs := range n.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && id.Name == "webBindFailed" {
+						bindAssigns++
+						fromWait := false
+						if len(n.Lhs) == 1 && len(n.Rhs) == 1 {
+							if call, ok := n.Rhs[0].(*ast.CallExpr); ok {
+								if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "resolveWebBind" {
+									if recv, ok := sel.X.(*ast.Ident); ok && recv.Name == "s" {
+										fromWait = true
+										bindAt = n.Pos()
+									}
+								}
+							}
+						}
+						if !fromWait {
+							t.Errorf("run() sets webBindFailed at %s from something other than s.resolveWebBind's result", fset.Position(n.Pos()))
+						}
+					}
+				}
 				if len(n.Lhs) == 1 && len(n.Rhs) == 1 {
 					if id, ok := n.Lhs[0].(*ast.Ident); ok && id.Name == "rolledBackFrom" {
 						if call, ok := n.Rhs[0].(*ast.CallExpr); ok {
@@ -285,6 +319,12 @@ func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "recordVersionChange" && len(n.Args) == 4 {
 					argOf[sel.Sel.Name] = n.Args[2]
 					announceLoadedArg = n.Args[1]
+					recordAt = n.Pos()
+					for _, a := range n.Args {
+						var buf bytes.Buffer
+						_ = printer.Fprint(&buf, fset, a)
+						recordArgs = append(recordArgs, buf.String())
+					}
 				}
 				fun, ok := n.Fun.(*ast.Ident)
 				if !ok {
@@ -333,6 +373,16 @@ func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 		} else if id.Pos() < readAt {
 			t.Errorf("run() calls %s at %s before reading the rollback", callee, fset.Position(id.Pos()))
 		}
+	}
+
+	if got := strings.Join(recordArgs, ", "); recordAt != token.NoPos && got != "lastRunVersion, configLoaded, rolledBackFrom, webBindFailed" {
+		t.Errorf("run() at %s calls s.recordVersionChange(%s), want (lastRunVersion, configLoaded, rolledBackFrom, webBindFailed)", fset.Position(recordAt), got)
+	}
+	switch {
+	case bindAssigns != 1 || bindAt == token.NoPos:
+		t.Errorf("run() assigns webBindFailed %d times, want once, from s.resolveWebBind", bindAssigns)
+	case recordAt != token.NoPos && recordAt < bindAt:
+		t.Errorf("run() calls recordVersionChange at %s before the web bind resolved", fset.Position(recordAt))
 	}
 
 	// And recordVersionChange hands its own rolledBackFrom parameter on.

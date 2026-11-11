@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/logger"
@@ -35,24 +38,27 @@ func (n *versionChangeNotifier) ForgetJob(string)             {}
 func (n *versionChangeNotifier) RetainJobs(map[string]struct{}) {
 }
 
-// TestAnnounceVersionChange runs run()'s update-applied step: what a boot on
-// a new version sends, and that it records its version as the last run. The
-// web server is built and never started, so its ActualPort is 0: the notice
-// then says nothing about the dashboard unless the bind is known to have
-// failed.
+// TestRecordVersionChange runs run()'s update-applied step: what a boot on
+// a new version sends, and that it records its version as the last run. In
+// every row but one the web server is built and never started, so its
+// ActualPort is 0: the notice then says nothing about the dashboard unless
+// the bind is known to have failed. The bound row starts the server on a free
+// loopback port, and the notice then reports the dashboard OK.
 //
 // Mutants: drop the configLoaded gate (the first-run row writes a config
 // file, and the next boot skips the setup wizard); stamp only when announced
 // (the rollback and first-stamp rows leave the stamp stale, and the rollback
 // would be re-examined every boot); ignore webBindFailed (a dead dashboard is
-// reported as a clean restart); send on the rollback row.
-func TestAnnounceVersionChange(t *testing.T) {
+// reported as a clean restart); send on the rollback row; drop the
+// `webServer.ActualPort() > 0` arm (the bound row loses its OK field).
+func TestRecordVersionChange(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		lastRun        string
 		configLoaded   bool
 		rolledBackFrom string
 		webBindFailed  bool
+		bound          bool // the web server is started and bound before the step runs
 
 		wantSend  bool
 		wantType  notifications.NotificationType
@@ -61,6 +67,8 @@ func TestAnnounceVersionChange(t *testing.T) {
 	}{
 		{name: "an update landed", lastRun: "1.0.0", configLoaded: true,
 			wantSend: true, wantType: notifications.TypeSuccess, wantStamp: true},
+		{name: "an update landed and the dashboard is bound", lastRun: "1.0.0", configLoaded: true, bound: true,
+			wantSend: true, wantType: notifications.TypeSuccess, wantDash: "OK", wantStamp: true},
 		{name: "an update landed but the dashboard did not bind", lastRun: "1.0.0", configLoaded: true, webBindFailed: true,
 			wantSend: true, wantType: notifications.TypeWarning, wantDash: "FAILED — check logs", wantStamp: true},
 		{name: "the launcher rolled back to this version", lastRun: "9.9.9", configLoaded: true, rolledBackFrom: "9.9.9",
@@ -76,6 +84,14 @@ func TestAnnounceVersionChange(t *testing.T) {
 			configPath := filepath.Join(dir, "config.toml")
 			cfg := config.Defaults()
 			cfg.Updates.LastRunVersion = tc.lastRun
+			if tc.bound {
+				ln, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg.Network.Port = ln.Addr().(*net.TCPAddr).Port
+				_ = ln.Close()
+			}
 			store := config.NewStore(cfg, configPath)
 			log, err := logger.New(filepath.Join(dir, "moombox.log"), "INFO", 1<<20, 1)
 			if err != nil {
@@ -84,6 +100,27 @@ func TestAnnounceVersionChange(t *testing.T) {
 			t.Cleanup(func() { log.Close() })
 			notifier := &versionChangeNotifier{}
 			s := &runState{log: log, configStore: store, notifyMgr: notifier, webServer: web.NewServer(store, log)}
+			if tc.bound {
+				ctx, cancel := context.WithCancel(context.Background())
+				done := make(chan error, 1)
+				go func() { done <- s.webServer.Start(ctx) }()
+				t.Cleanup(func() {
+					cancel()
+					select {
+					case <-done:
+					case <-time.After(15 * time.Second):
+						t.Error("the web server did not stop")
+					}
+				})
+				select {
+				case <-s.webServer.Bound():
+				case err := <-done:
+					done <- err
+					t.Fatalf("the web server returned before binding: %v", err)
+				case <-time.After(10 * time.Second):
+					t.Fatal("the web server never bound")
+				}
+			}
 
 			s.recordVersionChange(tc.lastRun, tc.configLoaded, tc.rolledBackFrom, tc.webBindFailed)
 
