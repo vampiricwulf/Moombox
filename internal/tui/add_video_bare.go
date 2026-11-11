@@ -53,8 +53,8 @@ func (m *AddVideoModel) bare() bool {
 	return layoutModeFor(m.width, m.height) == layoutCompact
 }
 
-// bareLeave gives the text input back the width the normal URL step draws
-// it with, and lays its value out for it.
+// bareLeave lays the text input out for the width the normal URL step draws
+// it with, after a value written while the terminal was small.
 func (m *AddVideoModel) bareLeave() {
 	bareInputWidth(&m.textInput, max(min(80, m.width-4), 30)-4)
 }
@@ -223,10 +223,7 @@ func (m *AddVideoModel) bareURLView() string {
 	st.Blurred.Text = lipgloss.NewStyle().Foreground(accent)
 	st.Cursor.Color = accent
 	m.textInput.SetStyles(st)
-	if want := max(w-3, 1); m.textInput.Width() != want {
-		bareInputWidth(&m.textInput, want)
-	}
-	input := lipgloss.NewStyle().Foreground(accent).Render("> ") + m.textInput.View()
+	input := lipgloss.NewStyle().Foreground(accent).Render("> ") + bareInput(m.textInput, w-3)
 
 	title := TitleStyle.Render("Add Video")
 	prompt := "URL, video ID or Twitch channel:"

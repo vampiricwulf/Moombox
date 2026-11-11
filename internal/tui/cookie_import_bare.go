@@ -81,7 +81,9 @@ func (m *CookieImportDialogModel) bareView() string {
 	case cookieImportStepPath:
 		sheet.left = TitleStyle.Render("Import cookies.txt")
 		sheet.keys = DimStyle.Render("Enter import  Esc cancel")
-		sheet.body = []string{m.input.View()}
+		// The prompt is two cells and the input draws a cursor cell after
+		// its text.
+		sheet.body = []string{bareInput(m.input, w-3)}
 		if m.errorMsg != "" {
 			sheet.body = append(sheet.body, bareStyled(barePathError(m.errorMsg, w, rows-1), ErrorStyle)...)
 		} else if rows > 1 {

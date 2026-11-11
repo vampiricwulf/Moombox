@@ -211,6 +211,9 @@ type AddVideoModel struct {
 
 	// Shared text input component (holds the currently-active text field)
 	textInput textinput.Model
+	// heldInput is the input as it was when the terminal left the normal
+	// layout (bareHeldInput). SetSize is its one writer and reader.
+	heldInput bareHeldInput
 
 	// Loading spinner
 	spinner spinner.Model
@@ -245,10 +248,10 @@ func (m *AddVideoModel) SetSize(w, h int) {
 	was := layoutModeFor(m.width, m.height)
 	m.width = w
 	m.height = h
-	// Back in the normal layout from anything else: the input may hold the
-	// bare form's window (directly, or from before a size too small to draw
-	// anything), and the normal form only sets a width.
-	if was != layoutNormal && layoutModeFor(w, h) == layoutNormal {
+	// The bare form draws the input from a copy. Only a value written while
+	// the terminal was small is laid out again for the normal form, which
+	// itself only sets a width.
+	if m.heldInput.resized(&m.textInput, was, layoutModeFor(w, h)) {
 		m.bareLeave()
 	}
 }

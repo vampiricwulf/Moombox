@@ -45,10 +45,13 @@ type CookieImportDialogModel struct {
 	width, height int
 	step          cookieImportStep
 	input         textinput.Model
-	errorMsg      string
-	spinner       spinner.Model
-	result        cookies.ImportResult
-	resultErr     error
+	// heldInput is the input as it was when the terminal left the normal
+	// layout (bareHeldInput). SetSize is its one writer and reader.
+	heldInput bareHeldInput
+	errorMsg  string
+	spinner   spinner.Model
+	result    cookies.ImportResult
+	resultErr error
 }
 
 // NewCookieImportDialogModel creates the import-cookie-file overlay.
@@ -74,22 +77,19 @@ func (m *CookieImportDialogModel) IsImporting() bool {
 
 // SetSize updates the dialog dimensions.
 func (m *CookieImportDialogModel) SetSize(w, h int) {
-	was, wasW := layoutModeFor(m.width, m.height), m.width
+	was := layoutModeFor(m.width, m.height)
 	m.width, m.height = w, h
+	// The bare form draws the input from a copy (bareView), so the input
+	// keeps the width set here.
+	relay := m.heldInput.resized(&m.input, was, layoutModeFor(w, h))
 	if m.bare() {
-		// The prompt is two cells and the input draws a cursor cell after
-		// its text. Laid out again on entering the bare form and on a new
-		// width, so the cursor stays on the row.
-		if was != layoutCompact || wasW != w {
-			bareInputWidth(&m.input, max(w-3, 1))
-		}
 		return
 	}
 	if _, contentW := dialogBox(70, w); contentW > 0 {
 		m.input.SetWidth(max(contentW-4, 10))
-		// Back in the normal layout from anything else: the input may hold
-		// the bare form's window, and SetWidth alone leaves it there.
-		if was != layoutNormal && layoutModeFor(w, h) == layoutNormal {
+		// A path written while the terminal was small is laid out for this
+		// width: SetWidth alone leaves the window it had.
+		if relay {
 			bareInputWidth(&m.input, max(contentW-4, 10))
 		}
 	}

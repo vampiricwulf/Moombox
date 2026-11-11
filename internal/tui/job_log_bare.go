@@ -72,8 +72,8 @@ func (m *JobLogModel) bareFooter() string {
 func (m *JobLogModel) bareView() string {
 	last := m.bareFooter()
 	if m.log.IsSearching() {
-		// The box is sized for the bare form in SetSize.
-		last = m.log.searchInput.View()
+		// The box draws its "/" prompt, the text and a cursor cell.
+		last = bareInput(m.log.searchInput, m.width-2)
 	}
 	return m.log.View() + "\n" + fitBlock(last, m.width, 1)
 }

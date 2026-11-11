@@ -107,27 +107,94 @@ func TestSharedInputIsLaidOutAgainAcrossForms(t *testing.T) {
 	}
 }
 
+// TestSharedInputIsUntouchedByAShrinkAndBack: a long value typed at a normal
+// size, the cursor moved anywhere in it, the terminal shrunk and grown back
+// with nothing typed while it was small: the normal frame is the frame of a
+// terminal that was never any other size. A window the input scrolled to at
+// the normal width is not a window a fresh layout gives, so the bare form
+// must leave the input alone.
+func TestSharedInputIsUntouchedByAShrinkAndBack(t *testing.T) {
+	moves := map[string][]string{
+		"at the end":       nil,
+		"home, two right":  {"home", "right", "right"},
+		"forty back":       repeatKey("left", 40),
+		"a hundred back":   repeatKey("left", 100),
+		"home, then ahead": append([]string{"home"}, repeatKey("right", 70)...),
+	}
+	for _, c := range relayCases {
+		for name, keys := range moves {
+			for _, normal := range [][2]int{{60, 20}, {80, 24}, {120, 40}} {
+				r := newRelayRig(t, normal[0], normal[1])
+				c.open(t, r)
+				_ = r.app.View()
+				typeIntoApp(r.app, relayLong)
+				r.press(keys...)
+				want := r.app.View().Content
+				for _, small := range [][][2]int{{{40, 10}}, {{30, 6}}, {{200, 8}}, {{20, 5}}, {{40, 10}, {20, 5}, {30, 50}}} {
+					relayTo(r.app, small...)
+					relayTo(r.app, normal)
+					if got := r.app.View().Content; got != want {
+						t.Errorf("%s, cursor %s, %dx%d through %v and back:\n%s\nnever shrunk:\n%s", c.name, name, normal[0], normal[1], small, ansi.Strip(got), ansi.Strip(want))
+					}
+				}
+			}
+		}
+	}
+}
+
+// repeatKey is key, n times.
+func repeatKey(key string, n int) []string {
+	keys := make([]string, n)
+	for i := range keys {
+		keys[i] = key
+	}
+	return keys
+}
+
+// relayDistinct is a long value in which every run of ten characters is
+// found once, so a frame that shows the ten before the cursor shows that
+// place in the value and no other.
+var relayDistinct = func() string {
+	var b strings.Builder
+	for i := 100; b.Len() < 132; i++ {
+		fmt.Fprintf(&b, "%d", i)
+	}
+	return b.String()
+}()
+
 // TestSharedInputKeepsItsCursorOnScreenAfterAShrink: a long value entered at
-// a normal size, the terminal then shrunk: the bare frame is whole and its
-// cursor cell is on screen, wherever in the value the cursor is.
+// a normal size, the terminal then shrunk: the bare frame is whole, its
+// cursor cell is on screen wherever in the value the cursor is, and the row
+// of the cursor shows the ten characters typed before it.
 func TestSharedInputKeepsItsCursorOnScreenAfterAShrink(t *testing.T) {
 	for _, c := range relayCases {
-		for _, back := range []int{0, 20, 60} {
+		for _, back := range []int{0, 20, 60, 100} {
 			r := newRelayRig(t, 120, 40)
 			c.open(t, r)
 			_ = r.app.View() // the program draws before the first key arrives
-			typeIntoApp(r.app, relayLong)
+			typeIntoApp(r.app, relayDistinct)
 			for range back {
 				r.press("left")
 			}
 			_ = r.app.View()
+			end := len(relayDistinct) - back
+			before := relayDistinct[end-10 : end]
+			if strings.Count(relayDistinct, before) != 1 {
+				t.Fatalf("premise lost: %q is not found once in the value", before)
+			}
 			for _, s := range [][2]int{{59, 19}, {200, 8}, {30, 6}, {40, 10}, {30, 50}} {
 				relayTo(r.app, s)
 				what := fmt.Sprintf("%s, cursor back %d, shrunk to %dx%d", c.name, back, s[0], s[1])
 				frame := r.app.View().Content
 				wantExact(t, what, frame, s[0], s[1])
-				if !relayCursorCell(frame) {
-					t.Errorf("%s: the cursor cell is off screen:\n%s", what, ansi.Strip(frame))
+				row := ""
+				for _, line := range strings.Split(frame, "\n") {
+					if relayCursorCell(line) {
+						row = ansi.Strip(line)
+					}
+				}
+				if !strings.Contains(row, before) {
+					t.Errorf("%s: the cursor's row %q does not show %q, the ten characters before the cursor:\n%s", what, row, before, ansi.Strip(frame))
 				}
 			}
 		}

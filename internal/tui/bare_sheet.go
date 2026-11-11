@@ -204,6 +204,48 @@ func bareInputWidth(ti *textinput.Model, width int) {
 	ti.SetCursor(pos)
 }
 
+// bareInput draws a copy of a text input in width+1 cells, the last one the
+// cursor's. The input itself is not touched, so the normal form finds its
+// width and its window as it left them. The copy is laid out on every draw:
+// the end of the value when the cursor is in its last half-width, otherwise
+// a window with the cursor at its middle, so what is typed inside a long
+// value is seen on both sides of the cursor.
+func bareInput(ti textinput.Model, width int) string {
+	width = max(width, 1)
+	pos := ti.Position()
+	bareInputWidth(&ti, width)
+	if n := len([]rune(ti.Value())); pos < n-width/2 {
+		ti.SetCursor(max(pos-width/2, 0)) // the window starts here
+		ti.SetCursor(pos)
+	}
+	return ti.View()
+}
+
+// bareHeldInput remembers the value and the cursor of a text input the bare
+// and the normal form of an overlay share, as they were when the terminal
+// left the normal layout. The bare form draws the input from a copy
+// (bareInput) and keys reach the real one at the width the normal form gave
+// it, or at none when the overlay was opened bare. Back in the normal
+// layout, an input that was written since is laid out for the normal width;
+// one that was not is left exactly as the normal form had it, so a shrink
+// and a regrow with nothing typed changes no cell.
+type bareHeldInput struct {
+	value string
+	pos   int
+}
+
+// resized is called from SetSize with the layout before and after. It
+// reports whether the normal form must lay the input out again.
+func (h *bareHeldInput) resized(ti *textinput.Model, was, now layoutMode) bool {
+	switch {
+	case was == layoutNormal && now != layoutNormal:
+		h.value, h.pos = ti.Value(), ti.Position()
+	case was != layoutNormal && now == layoutNormal:
+		return ti.Value() != h.value || ti.Position() != h.pos
+	}
+	return false
+}
+
 // bareFocus draws s as the focused row's label.
 func bareFocus(s string) string {
 	return lipgloss.NewStyle().Foreground(ColorCyan).Render(s)

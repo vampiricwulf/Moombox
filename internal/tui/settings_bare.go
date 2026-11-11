@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -153,15 +152,6 @@ func (m *SettingsModel) bareView() string {
 }
 
 // ---- shared pieces ----
-
-// bareInput draws a copy of a text input in width+1 cells, the last one the
-// cursor's, with the cursor on screen. The input itself is not touched: the
-// normal form sets its width on every draw and would find a narrow layout
-// left behind.
-func bareInput(ti textinput.Model, width int) string {
-	bareInputWidth(&ti, max(width, 1))
-	return ti.View()
-}
 
 // bareKeyRow is a keys row of the parts that fit w cells, two spaces apart
 // where that fits and one where it does not. Parts are dropped from the
