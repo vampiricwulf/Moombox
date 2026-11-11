@@ -763,6 +763,10 @@ Twitch GQL returns HTTP 200 even for application-level errors. The `gqlRequest` 
 2. Checks if the response is a batch array -- checks each element for errors.
 3. Size-limits all response reads to 5 MB.
 
+#### Rate Limit
+
+Every GQL request takes a token first (`acquireToken`, called by `doGQLOnce` in `internal/twitch/api.go`): one process-wide bucket of 10 requests a second (`twitchGQLRatePerSec`) with a burst of 10. The bucket is refilled from elapsed time when a request asks, so an idle process runs no timer and no goroutine for it. A request that finds it empty waits exactly until its token is earned, behind the requests already waiting; one whose context ends while it waits returns the context's error and gives its place back. Pinned by `internal/twitch/api_ratelimit_test.go`.
+
 #### Stream Type Normalization
 
 After parsing stream info, the `StreamType` field is normalized: anything that is not `"rerun"` is set to `"live"`.
@@ -920,7 +924,7 @@ The verdict is anonymous-vs-signed-in, never entitlement — a signed-in token t
 
 #### Message Processing
 
-The IRC parser handles two message types:
+The IRC parser turns four commands into rows of the chat file: two kinds of message, and two moderation events.
 
 **PRIVMSG** (regular chat and bits):
 - Tag fields extracted: `id`, `tmi-sent-ts` (epoch ms), `bits`, `display-name`, `login`, `user-id`, `badges`, `color`, `emotes`.
@@ -932,6 +936,14 @@ The IRC parser handles two message types:
 **USERNOTICE** (subs, raids, memberships):
 - Tag fields extracted: same as PRIVMSG plus `msg-id`, `system-msg`, `msg-param-sub-plan`, `msg-param-recipient-display-name`, `msg-param-viewerCount`.
 - Message type normalization: `sub` -> `"sub"`, `resub` -> `"resub"`, `subgift`/`submysterygift` -> `"subgift"`, `raid` -> `"raid"`, everything else -> `"system"`.
+
+**CLEARCHAT and CLEARMSG** (moderation, owner ruling R-G1). Twitch IRC has no replay, so a deletion Moombox does not write down when it arrives cannot be recovered later. `parseClearchat` and `parseClearmsg` (`internal/twitch/chat_irc.go`) store each as a row of its own with `messageType` `"moderation"` (`MessageTypeModeration`, `internal/twitch/types.go`), added through `addMessage` like any message: it is counted in the running total and in `messageCount`, deduplicated by its `id`, flushed, appended and resumed with no path of its own. The messages the event removed are never rewritten; the file stays append-only.
+- `CLEARMSG` (one message deleted): `moderation` `"deleted"`, `targetMsgId` from `target-msg-id`, `targetLogin` from `login`. A line with no `target-msg-id` is dropped.
+- `CLEARCHAT` naming a user: `moderation` `"author_deleted"`, `targetUserId` from `target-user-id`, `targetLogin` from the trailing parameter, and `banDurationSec` from `ban-duration` for a timeout; no `ban-duration` is a permanent ban. A line with no `target-user-id` (Twitch sends it today) keeps the login alone, with an empty `targetUserId`; the player then finds the user by display name (`applyTwitchModeration`).
+- `CLEARCHAT` naming nobody (the whole chat cleared): `moderation` `"chat_cleared"`. The field's Go type is `ModerationKind` (`internal/twitch/types.go`), a named string with these three constants. The three shapes are told apart as chatterino does (`references/chatterino7` IrcMessageHandler.cpp `parseClearChatMessage`).
+- `deleted` and `author_deleted` are the YouTube markers' own words (`MarkerDeleted`, `MarkerAuthorDeleted`, `internal/chat/types.go`).
+- Every such row has an empty `message` and `authorId`, `authorName` `"Moderation"`, the event as a sentence in `systemMsg` ("ronni was timed out for 10m.", "ronni was banned.", "A message from ronni was deleted by a moderator.", and for a full clear "Chat was cleared by a moderator", the line the player shows, without a full stop), the verbatim line in `raw`, and `timestampMs`/`offsetMs` from `tmi-sent-ts` like any row. Neither command carries an `id` tag, so the row's `id` is derived: `clearmsg-<target-msg-id>`, `clearchat-<tmi-sent-ts>-<target-user-id>` or `clearchat-<tmi-sent-ts>-all`.
+- The Web player applies the rows when it loads the file: a timeout, a ban and a deletion strike through their targets and show no row of their own, and a full clear marks nothing and shows one sidebar line at that moment, "Chat was cleared by a moderator" (owner ruling "show a marker only"); see data-and-storage.md § Chat Files. VOD chat (GQL comments) has no such rows: Twitch does not return a deleted comment at all. Pinned by `internal/twitch/chat_moderation_test.go` and `web/tests/twitch-moderation.test.mjs`, and held to each other by the shared fixture `web/tests/fixtures/twitch-moderation-parity.json`.
 
 IRCv3 tag values are decoded through `unescapeIRCTag` (`internal/twitch/chat_irc.go`) — `\:` to `;`, `\s` to a space, `\\`, `\r` and `\n`, with an unknown escape yielding its character and a lone trailing backslash dropped. It is applied to `system-msg`, `display-name` and `msg-param-recipient-display-name`, the same three chatterino decodes (`references/chatterino7` IrcHelpers.hpp). The reachable case is a system message that quotes a semicolon: `;` separates tags on the wire, so Twitch must escape it.
 
@@ -1006,6 +1018,8 @@ Spilling the batch at the stream's end and keeping it too would let the job's ch
 
 `VodChatDownloader` in `vod_chat.go` downloads chat from completed VODs using the GQL `VideoCommentsByOffsetOrCursor` persisted query.
 
+Progress reaches the job row on every comment page (`callOnProgress`). The log gets less: a "VOD chat progress" Info line with the `vodID`, the message count and the percentage at most once per 30 s (`vodChatProgressLogInterval`), and only when the VOD's length is known, then "VOD chat download complete" with the final count. A line per page, several a second, filled the log and pushed everything else out of the job's own 200-line log. Pinned by `internal/twitch/vod_chat_progress_log_test.go`.
+
 The Twitch credential here is a GETTER, not a value: the downloader holds `AuthToken func() string` and calls `currentAuthToken()` on every page, so a VOD download running for hours picks up a re-imported token instead of carrying the one it started with to the end. A nil getter is an anonymous comment fetch, exactly as an empty token behaved. `doGQLOnce` (`api.go`) sets `Authorization: OAuth {token}` only when the token is non-empty; the `Client-ID` header is unconditional.
 
 #### Pagination
@@ -1052,7 +1066,7 @@ A VOD downloader the orchestrator re-Starts on the same instance after a connect
 
 ### Emote Resolution
 
-`EmoteResolver` in `emotes.go` fetches and caches third-party emotes from BTTV, FFZ, and 7TV.
+`EmoteResolver` in `emotes.go` fetches and caches third-party emotes from BTTV, FFZ, and 7TV: each channel's own sets, and the three providers' global sets (§ Global Emote Sets below). The sections up to there describe the per-channel sets.
 
 #### Fetch Strategy
 
@@ -1077,19 +1091,34 @@ All three providers are fetched in parallel using a `sync.WaitGroup`. Each has a
 - File selection: prefer `2x.webp`, fall back to `1x.webp`, fall back to first file.
 - Protocol-relative URL fix: prepend `https:` if host URL starts with `//`.
 
+#### Global Emote Sets
+
+Beside the channel's own sets, `Resolve` fetches each provider's global set, the emotes every Twitch channel gets from that provider (`globalEmotes`, `internal/twitch/emotes_global.go`, owner ruling R-G2). The two fetches run side by side.
+
+- **BTTV**: `https://api.betterttv.net/3/cached/emotes/global`, a bare array of `id` + `code`; same CDN URL as the channel emotes.
+- **FFZ**: `https://api.frankerfacez.com/v1/set/global`; only the sets the response names in `default_sets` are used (the endpoint also lists sets that are not on for everyone), as chatterino7 does (`references/chatterino7/src/providers/ffz/FfzEmotes.cpp` `parseGlobalEmotes`).
+- **7TV**: `https://7tv.io/v3/emote-sets/global`, a top-level `emotes` array in the same shape as a channel's `emote_set.emotes`.
+
+**Cache.** One entry per provider for the whole process, since the set does not depend on the channel. Each provider stands alone: its set is kept for `emoteCacheTTL` (24 hours), a fetch that fails is not an answer and is not cached (a 404 included: unlike a channel lookup, a global set exists), and a failed refresh keeps serving the set it had. A provider whose fetch failed is not asked again for `globalEmoteRetryFloor` (5 minutes), so a provider that is down does not cost every chat end and part roll a request and up to 8 seconds. Concurrent resolves share one fetch, which runs on the first caller's context. When that context is cancelled or expires before a provider answers (a part roll's enrichment is cancelled with its job), the attempt is taken back: it is not a provider failure, the 5-minute floor does not start, no warning is logged, and the next resolve fetches at once.
+
+**A global failure never fails or blocks a chat download.** The global sets only add: when none can be fetched, `Resolve` returns the channel's sets alone, after at most the same 8-second `emoteTimeout` the channel fetch already has. When the channel's own sets cannot be resolved the result is nil whatever the globals hold, so the chat file gets no `emotes` block from that resolve and the job's next one tries again.
+
+**Merging** (`withGlobalEmotes`). Each provider's global emotes are appended to that provider's own list in `TwitchEmoteData` (`bttv`, `ffz`, `seventv`), so the chat file's `emotes` block keeps its shape and a player from before this change renders them too. A global emote whose code any of the channel's three lists already has is left out: a channel emote wins over a global one of the same name whichever provider either came from, as in chatterino7 (`references/chatterino7/src/messages/MessageBuilder.cpp` checks the FFZ, BTTV and 7TV channel emotes before any global set). The player then merges the three lists into one map with FFZ over BTTV over 7TV, chatterino7's order within each tier. The cached channel entry is never modified by the merge.
+
 #### Caching
 
 - **Type**: LRU (Least Recently Used) with a time-to-live.
 - **Max size**: 200 channels.
 - **Key**: lowercased `channelLogin` (preferred) or `channelID` (fallback).
 - **Eviction**: When full, the oldest entry (by insertion order) is removed.
-- **A failure is not a result**: the set is cached only when at least one provider answered. Cached, three providers failing together — one outage, one flaky minute — would be served for the rest of the process lifetime, and the per-downloader cache one layer up (`resolveEmotesCached`, `internal/twitch/chat_recording.go`) would latch the same empty set for the life of the job. A resolve in which nothing answered returns nil, and both layers retry.
+- **A failure is not a result**: the set is cached only when at least one provider answered. Cached, three providers failing together — one outage, one flaky minute — would be served for the rest of the process lifetime. A resolve in which nothing answered returns nil, and the next one fetches again.
+- **A job keeps no copy**: a live chat asks the resolver at every part roll and at the stream's end (`resolveEmotes`, `internal/twitch/chat_recording.go`). A part enriched while a global provider was down carries the channel's sets alone; the next part, once the provider is back and its retry floor has passed, carries the globals again.
 - **An answer goes stale**: an entry older than `emoteCacheTTL` (`internal/twitch/emotes.go` — 24 hours) is refetched on the next resolve. Moombox runs for weeks and 7TV/BTTV/FFZ sets change daily. If that refetch fails outright the STALE set is served and kept — yesterday's emotes beat none.
 - **Inflight dedup**: If a request for the same cache key is already in-flight, subsequent callers block on a channel until the first completes, then read from cache.
 
 #### Emote Injection
 
-After chat download completes, `EnrichWithEmotes` reads the chat JSON file, adds the resolved `TwitchEmoteData` to the `emotes` field, and rewrites the file atomically. This uses a fresh `context.Background()` context with a 30-second timeout, ensuring emote resolution completes even after the parent context is cancelled.
+After chat download completes, `EnrichWithEmotes` sets the chat file's `emotes` field to the resolved `TwitchEmoteData`. It is a streamed rewrite (`utils.SetChatFileHeaderField`, `internal/utils/chatfile.go`): the file is walked once, the other header fields are carried over as raw JSON in their own order, `emotes` is written directly before the `messages` array, and each message is copied as the raw bytes it already is (an appended compact line stays one compact line). No message is decoded into a struct, so peak memory is the header plus one message, never the file. The result goes to a temp file beside the chat file, is fsynced and swapped in with `ReplaceFile`; it keeps the padded `messageCount` and ends with the messages array, so it still takes appends. On any error (a file that does not parse, a field other than `emotes` after the messages array, an IO failure) the temp is removed and the file stays as it was, without emotes. Emote resolution uses a fresh `context.Background()` context with a 30-second timeout, ensuring emote resolution completes even after the parent context is cancelled.
 
 #### Per-Part Chat Rolling (live IRC)
 
@@ -1097,7 +1126,7 @@ Multi-part Twitch live recordings (gap/quality splits) roll the chat file at eve
 
 A boundary batch the roll could not write — spilled for an unread part, or after a drain whose write failed — leaves the job total, which follows what the part files hold, and is counted in `rollUnwritten` (carried in the sidecar as `rollUnwritten`, like `totalCount`, so a restart keeps it; a batch any exit's failed final flush spilled — the stream's end, an interrupted exit, a panic — is counted there too, see **Write failures** above); `Start` then reports the capture incomplete (it returns an error naming the count) at the stream's end and on an interrupted exit alike — `ExecuteTwitch`'s connectivity-outage finalize ends chat with `Stop()` rather than `MarkStreamEnded` and records that exit's verdict, and a shutdown discards it — so the staging cleanup keeps the spill (`keepOnlyChatCapture` keeps every `chat.json.*` at any depth). Saying nothing, the stream would end "finished" and the cleanup would delete the spill with the part's dir; the interrupted exit, for a broadcast that ended during an outage, reports it too.
 
-The mux checks that it can open the part's chat before ffmpeg runs (`muxSegment`, `internal/worker/orchestrator_mux.go`), so a file that is still locked fails the part without throwing a finished mux away — rather than finding out at the copy, after the mux, on every attempt — and a directory in the file's place counts as no chat, as the finalize's `muxUnrecordedSegments` already read it. The dedup set and the cumulative message total survive the roll (`ChatResumeState` carries both the per-file `messageCount` and the job-wide `totalCount`; legacy single-file states fall back to `messageCount`). Closed parts are emote-enriched from the background part-mux goroutine using a cached resolve (`resolveEmotesCached` — the emote APIs are hit once per job, not once per part); the final part is enriched by the stream-end drain.
+The mux checks that it can open the part's chat before ffmpeg runs (`muxSegment`, `internal/worker/orchestrator_mux.go`), so a file that is still locked fails the part without throwing a finished mux away — rather than finding out at the copy, after the mux, on every attempt — and a directory in the file's place counts as no chat, as the finalize's `muxUnrecordedSegments` already read it. The dedup set and the cumulative message total survive the roll (`ChatResumeState` carries both the per-file `messageCount` and the job-wide `totalCount`; legacy single-file states fall back to `messageCount`). Closed parts are emote-enriched from the background part-mux goroutine through the resolver's cache (`resolveEmotes` — the emote APIs are hit once per 24 hours, not once per part); the final part is enriched by the stream-end drain.
 
 **A part's chat base is its video's first frame** (owner decision D-T8). The orchestrator hands each part the local clock at its start, but the part's video starts at the first segment of the live window the downloader joined — up to a window's length earlier — so on the local clock every message would replay late by that much. Now the local clock is only provisional: a part whose video starts a fresh file waits for that file's first segment, and the base it settles on is that segment's program date-time. The engine reports it once per downloader (`DownloaderOptions.OnFirstSegment`, `internal/engine/downloader.go`) when it writes the first media segment into an output file it started empty — never on a resume or an append, and stitched-ad segments are skipped rather than written, so it is the first CONTENT segment — with the date from `HlsSegment.ProgramDateTime` (`internal/engine/manifest.go`: the segment's own tag, or the last one advanced by the durations in between). `createDownloader` (`internal/worker/orchestrator_twitch.go`) routes the report to `ChatDownloader.SettlePartBase` for the chat file of the SAME part directory, so a late report from a replaced downloader cannot reach another part.
 
@@ -1754,6 +1783,7 @@ The epoch also holds across the live→replay flip inside ONE live/upcoming run 
 | YouTube Visitor Data | Memory (single value) | None | 1 entry | Overwrite | N/A |
 | YouTube STS | Memory map | None | 150 entries | Random eviction when full | SHA256(playerURL) |
 | Twitch Emotes | Memory LRU + TTL | 24 h (`emoteCacheTTL`, `internal/twitch/emotes.go`) | 200 channels | Oldest by insertion order | lowercased channelLogin |
+| Twitch global emote sets | Memory, one entry per provider | 24 h (`emoteCacheTTL`); a failed fetch is retried after 5 min (`globalEmoteRetryFloor`, `internal/twitch/emotes_global.go`) | 3 (BTTV, FFZ, 7TV) | Never; a failed refresh keeps the old set | provider |
 | Cipher (Disk) | Disk files | 24 h (`playerCacheTTL`), revalidated by conditional GET on every fetch | Unbounded | File age check on read; startup sweep | SHA256(playerURL) |
 | Cipher (Memory) | Memory LRU | Unbounded (no expiry) | 10 solvers | Oldest by insertion order | SHA256(playerURL) |
 | BotGuard Session | Memory map | 6 hours | Unbounded | TTL check at start of each generation | contentBinding |

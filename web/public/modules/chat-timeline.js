@@ -173,6 +173,114 @@ export function mergePartChats(parts) {
   return merged;
 }
 
+/** The `messageType` of a stored Twitch CLEARCHAT or CLEARMSG (Go: twitch.MessageTypeModeration). */
+export const TWITCH_MODERATION_TYPE = "moderation";
+
+/**
+ * What a marked message's "deleted" tooltip says when its row carries no sentence.
+ *
+ * The keys are the row's `moderation` words, Go's twitch.ModerationKind
+ * (internal/twitch/types.go). Those words and the row's `targetMsgId`,
+ * `targetUserId` and `targetLogin` keys, read below, are held to the
+ * recorder's by web/tests/fixtures/twitch-moderation-parity.json.
+ */
+const TWITCH_MODERATION_FALLBACK = {
+  deleted: "Deleted by a moderator.",
+  author_deleted: "The user was timed out or banned.",
+};
+
+/**
+ * The one line the sidebar shows where a moderator cleared the whole chat
+ * (owner ruling "show a marker only"). The recorder writes the same sentence
+ * in the row's `systemMsg` (internal/twitch/chat_irc.go parseClearchat); the
+ * player prints this one whatever the row carries.
+ */
+export const TWITCH_CHAT_CLEARED_TEXT = "Chat was cleared by a moderator";
+
+/**
+ * Apply a Twitch chat file's moderation rows (owner ruling R-G1): mark the
+ * messages a timeout, a ban or a deletion removed and take those rows out of
+ * the list; turn a full clear into a marker row and mark nothing for it.
+ *
+ * The live IRC recorder stores each CLEARCHAT and CLEARMSG as a row of its
+ * own, `messageType: "moderation"`, in arrival order, and never rewrites the
+ * messages the event removed (internal/twitch/types.go). This is the one pass
+ * that turns the rows into the marks the player already draws for YouTube
+ * (`deleted`, `deletedState`: _markChatChange, the overlay's skip, the
+ * dropped-count rule):
+ *
+ * - `moderation: "deleted"` marks the one message whose `id` is `targetMsgId`;
+ * - `"author_deleted"` (a timeout or a ban) marks every EARLIER message whose
+ *   `authorId` is `targetUserId` — the user may post again once a timeout ends.
+ *   A row with no `targetUserId` (a CLEARCHAT without the target-user-id tag,
+ *   which Twitch sends today) is matched by `targetLogin` against the
+ *   author's display name, case-insensitively: a display name differs from the
+ *   login in case only, unless it is a localized one, which such a row cannot
+ *   reach;
+ * - `"chat_cleared"` (a moderator's /clear) marks NOTHING (owner ruling
+ *   "show a marker only"): every earlier message stays as it was, still
+ *   flying on the overlay. The row stays in the list, at its own place and
+ *   offset, as a copy retyped `messageType: "system"` with
+ *   TWITCH_CHAT_CLEARED_TEXT as its `systemMsg`, an empty `message` and
+ *   `sidebarOnly: true`. The sidebar draws it as it draws any `system`
+ *   notice (isDimTwitchNotice, player.js) and counts it in its header as it
+ *   counts those; `sidebarOnly` keeps it off the video (_buildNicoEl) and
+ *   out of the "+N not shown" count (NicoScheduler.countDrop).
+ *
+ * "Earlier" is the array's order, which is the order the rows were written
+ * in, so call this BEFORE the sort by offset; for a multi-part job, on the
+ * merged list, so a ban in part 2 reaches the user's messages in part 1. A
+ * marked message's `deletedState` is the sentence of the first event that
+ * removed it. A row of a kind this build does not know marks nothing and is
+ * hidden.
+ *
+ * A list with no moderation row — every YouTube file, every VOD chat, every
+ * file written before the rows existed — is returned as it is, the same
+ * array, untouched. Otherwise the kept messages are marked in place and a new
+ * array is returned, without the rows except a full clear's marker.
+ * @param {Array<object>} messages in file order
+ * @returns {Array<object>}
+ */
+export function applyTwitchModeration(messages) {
+  if (!Array.isArray(messages)) return messages;
+  if (!messages.some((m) => m && m.messageType === TWITCH_MODERATION_TYPE)) return messages;
+  // Walked BACKWARDS, so each lookup already holds the earliest event after
+  // the message in hand: a later event of the same kind is overwritten by an
+  // earlier one as the walk reaches it.
+  const byMsgId = new Map();
+  const byUserId = new Map();
+  const byLogin = new Map();
+  const kept = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m) continue;
+    if (m.messageType === TWITCH_MODERATION_TYPE) {
+      const event = { index: i, row: m };
+      if (m.moderation === "deleted" && m.targetMsgId) byMsgId.set(m.targetMsgId, event);
+      else if (m.moderation === "author_deleted" && m.targetUserId) byUserId.set(m.targetUserId, event);
+      else if (m.moderation === "author_deleted" && typeof m.targetLogin === "string" && m.targetLogin) {
+        byLogin.set(m.targetLogin.toLowerCase(), event);
+      }
+      else if (m.moderation === "chat_cleared") {
+        kept.push({ ...m, messageType: "system", systemMsg: TWITCH_CHAT_CLEARED_TEXT, message: "", sidebarOnly: true });
+      }
+      continue;
+    }
+    kept.push(m);
+    let first;
+    const candidates = [m.id ? byMsgId.get(m.id) : undefined, m.authorId ? byUserId.get(m.authorId) : undefined];
+    if (byLogin.size > 0 && typeof m.authorName === "string") candidates.push(byLogin.get(m.authorName.toLowerCase()));
+    for (const e of candidates) {
+      if (e && (!first || e.index < first.index)) first = e;
+    }
+    if (!first || m.deleted === true) continue;
+    m.deleted = true;
+    const sentence = typeof first.row.systemMsg === "string" ? first.row.systemMsg.trim() : "";
+    m.deletedState = sentence || TWITCH_MODERATION_FALLBACK[first.row.moderation];
+  }
+  return kept.reverse();
+}
+
 /** The CTCP wrapper Twitch sends a /me message in: \x01ACTION <text>\x01. */
 const TWITCH_ACTION_PREFIX = "\u0001ACTION ";
 const TWITCH_SOH = "\u0001";

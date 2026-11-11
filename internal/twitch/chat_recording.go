@@ -704,28 +704,22 @@ func (cd *ChatDownloader) rollUnwrittenErr() error {
 	return fmt.Errorf("twitch chat: %d messages could not be written to their part file, at a part boundary or the end of a run; see the part's chat.json.lostbatch.json", unwritten)
 }
 
-// resolveEmotesCached resolves third-party emotes (7TV/BTTV/FFZ) once per
-// downloader and caches the result, so multi-part jobs don't re-hit the
-// emote APIs for every part. emoteMu is held across the resolve to
-// single-flight concurrent callers.
+// resolveEmotes returns the third-party emotes (7TV/BTTV/FFZ, channel and
+// global) for this job's channel, or nil when the channel's sets cannot be
+// resolved. It asks the resolver every time and keeps nothing itself: the
+// resolver caches the channel's sets and the global sets (24 h each) and
+// shares one fetch between concurrent callers, so a multi-part job still
+// hits the emote APIs once, not once per part.
 //
-// A resolve in which NO provider answered returns nil (EmoteResolver.Resolve),
-// which this leaves uncached so a later part retries. That sentence was here
-// before the resolver could produce it: until 2026-09-15 a total failure came
-// back as a non-nil empty set, which latched here for the life of the job AND
-// in the resolver for the life of the process (T1-11). Both layers now turn on
-// the same fact.
-func (cd *ChatDownloader) resolveEmotesCached(ctx context.Context) *TwitchEmoteData {
+// There was a per-job copy of the first result here. Once a result could be
+// the channel's sets without the globals (a global provider down at the first
+// part roll), that copy kept every later part and the final file without them
+// after the provider was back.
+func (cd *ChatDownloader) resolveEmotes(ctx context.Context) *TwitchEmoteData {
 	if cd.emoteResolver == nil || cd.channelID == "" {
 		return nil
 	}
-	cd.emoteMu.Lock()
-	defer cd.emoteMu.Unlock()
-	if cd.emoteData != nil {
-		return cd.emoteData
-	}
-	cd.emoteData = cd.emoteResolver.Resolve(ctx, cd.channelID, cd.channelLogin)
-	return cd.emoteData
+	return cd.emoteResolver.Resolve(ctx, cd.channelID, cd.channelLogin)
 }
 
 // EnrichFile injects third-party emotes into a closed part's chat file.
@@ -737,7 +731,7 @@ func (cd *ChatDownloader) EnrichFile(ctx context.Context, path string) {
 	if path == "" {
 		return
 	}
-	emoteData := cd.resolveEmotesCached(ctx)
+	emoteData := cd.resolveEmotes(ctx)
 	if emoteData == nil {
 		return
 	}

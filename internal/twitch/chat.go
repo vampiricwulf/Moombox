@@ -370,13 +370,9 @@ type ChatDownloader struct {
 	// in a struct field keeps its monotonic reading, so the comparison below
 	// is immune to a wall-clock step (ruling R7b, sweep 1).
 	lastResumeSave time.Time
-	emoteResolver  *EmoteResolver
-	// emoteData caches the third-party emote resolve so multi-part jobs hit
-	// the 7TV/BTTV/FFZ APIs once, not once per part. Guarded by emoteMu,
-	// which is held across the resolve itself to single-flight concurrent
-	// callers (background part mux + stream-end drain).
-	emoteMu   sync.Mutex
-	emoteData *TwitchEmoteData
+	// emoteResolver caches the emote sets itself, so a multi-part job hits
+	// the 7TV/BTTV/FFZ APIs once, not once per part (resolveEmotes).
+	emoteResolver *EmoteResolver
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -1624,8 +1620,8 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 
 		// Inject third-party emotes (7TV, BTTV, FFZ) after final flush.
 		// Use a fresh context -- the original ctx may already be cancelled.
-		// Cached resolve: parts rolled earlier in the job already resolved
-		// the emote set, so the final part reuses it. flushedToDisk gates
+		// The resolver's cache: parts rolled earlier in the job already
+		// resolved the emote set, so the final part reuses it. flushedToDisk gates
 		// the case where every message landed in earlier parts and the
 		// final part's file was never created.
 		cd.mu.Lock()
@@ -1635,7 +1631,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 		if total > 0 && finalFileExists && cd.emoteResolver != nil && cd.channelID != "" {
 			cd.logger.Info("resolving emotes for Twitch chat", "channelID", cd.channelID)
 			emoteCtx, emoteCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			emoteData := cd.resolveEmotesCached(emoteCtx)
+			emoteData := cd.resolveEmotes(emoteCtx)
 			emoteCancel()
 			if emoteData != nil {
 				if err := EnrichWithEmotes(cd.currentOutputPath(), emoteData); err != nil {

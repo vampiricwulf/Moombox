@@ -242,7 +242,7 @@ JavaScript runtimes are the most expensive objects in the application. Two subsy
 All in-memory buffers have explicit bounds:
 - Log ring buffer: 200 lines maximum.
 - Chat message deduplication: 5,000 recent IDs with deterministic eviction.
-- Twitch emote cache: 200 channels (LRU).
+- Twitch emote cache: 200 channels (LRU), plus one global set per provider (3).
 - Rate limiter entries: 10,000 maximum per-IP entries.
 - Per-job log buffers: in-memory string arrays (bounded by job lifetime).
 
