@@ -49,7 +49,7 @@ type streamTail struct {
 	interrupted bool // engine.SegmentDownloader.FinalizedDuringInterruption
 	lastSeq     int  // the last segment written
 	head        int  // the head the downloader tracked (-1 when never learned)
-	headCurrent bool // engine.SegmentDownloader.HeadReadSinceLastSegment
+	headCurrent bool // engine.SegmentDownloader.HeadCurrentAtFinalize
 }
 
 // tailFacts is everything the incomplete-tail verdict reads.
@@ -68,7 +68,7 @@ func downloaderTail(d *engine.SegmentDownloader) streamTail {
 		interrupted: d.FinalizedDuringInterruption(),
 		lastSeq:     d.LastSeq(),
 		head:        d.HeadSeq(),
-		headCurrent: d.HeadReadSinceLastSegment(),
+		headCurrent: d.HeadCurrentAtFinalize(),
 	}
 }
 

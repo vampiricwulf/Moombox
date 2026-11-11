@@ -574,7 +574,7 @@ type SegmentDownloader struct {
 	currentSeq            atomic.Int64
 	headSeq               atomic.Int64
 	lastSegTime           atomicTime
-	lastHeadRead          atomicTime // a response last carried a readable X-Head-Seqnum; see HeadReadSinceLastSegment
+	lastHeadRead          atomicTime // a response last carried a readable X-Head-Seqnum; see HeadCurrentAtFinalize
 	lastHeadProbeTime     atomicTime
 	lastStreamStatusCheck atomicTime
 	logger                DownloaderLogger
@@ -650,6 +650,11 @@ type SegmentDownloader struct {
 	// too broad: cancels and live-edge MaxTimeout stalls also leave it
 	// unset without implying a missing tail.
 	finalizedBehindHead atomic.Bool
+
+	// headCurrentAtFinalize latches, in the same step as finalizedBehindHead,
+	// whether the head was read within headFreshWindow of that finalize; see
+	// HeadCurrentAtFinalize.
+	headCurrentAtFinalize atomic.Bool
 
 	// finalizedDuringInterruption latches when a budget-expired finalize was
 	// deferred at least once by stallForPossibleResume (Tier 1: MayResume
@@ -1650,18 +1655,28 @@ func (d *SegmentDownloader) FinalizedDuringInterruption() bool {
 // HeadSeq returns the last known head sequence (-1 if never learned).
 func (d *SegmentDownloader) HeadSeq() int { return int(d.headSeq.Load()) }
 
-// HeadReadSinceLastSegment reports whether YouTube has told this downloader
-// its head since the last segment landed: a response with a readable
-// X-Head-Seqnum arrived after lastSegTime. The head only moves on such a
-// response, so when every fetch and probe failed outright for the whole
-// retry (an expired URL nothing could refresh, a googlevideo outage) HeadSeq
-// is the value from before the stall and says nothing about how far the
-// broadcast ran on. The worker's end-of-stream verdict refuses a head it
-// cannot call current (worker.endOfStreamTail). An ended broadcast keeps
-// answering the retries with the header, so its head is current.
-func (d *SegmentDownloader) HeadReadSinceLastSegment() bool {
-	read := d.lastHeadRead.Load()
-	return !read.IsZero() && read.After(d.lastSegTime.Load())
+// headFreshWindow is how recent the last head read must be, at a finalize
+// behind the head, for the head to count as current: twice
+// streamStatusCheckInterval. While anything answers, a retry or a probe
+// reads the head every few seconds, so a broadcast that is over is far
+// inside it.
+const headFreshWindow = 2 * streamStatusCheckInterval
+
+// HeadCurrentAtFinalize reports whether the head this downloader finalized
+// behind was current: a response with a readable X-Head-Seqnum arrived after
+// the last segment landed AND within headFreshWindow of the finalize. The
+// head only moves on such a response, so when fetches and probes failed
+// outright for the retry (an expired URL nothing could refresh, a
+// googlevideo outage) HeadSeq is the value from before the stall and says
+// nothing about how far the broadcast ran on. One read right after the last
+// segment is not enough: at the live edge the fetch of the next, unpublished
+// segment answers with the header a moment before any stall could begin. The
+// worker's end-of-stream verdict refuses a head it cannot call current
+// (worker.endOfStreamTail). An ended broadcast keeps answering the retries
+// with the header until the budget is spent, so its head is current. False
+// when the downloader never finalized behind its head.
+func (d *SegmentDownloader) HeadCurrentAtFinalize() bool {
+	return d.headCurrentAtFinalize.Load()
 }
 
 // EndOfStreamHeadMargin is how far past the last segment YouTube serves the

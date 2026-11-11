@@ -819,6 +819,8 @@ func (d *SegmentDownloader) warnIfFinalizingBehindHead() bool {
 // warning and the worker-visible flag can never drift apart.
 func (d *SegmentDownloader) finalizeBehindHead() bool {
 	if d.warnIfFinalizingBehindHead() {
+		read := d.lastHeadRead.Load()
+		d.headCurrentAtFinalize.Store(!read.IsZero() && read.After(d.lastSegTime.Load()) && time.Since(read) <= d.delays.headFreshWindow)
 		d.finalizedBehindHead.Store(true)
 		return true
 	}

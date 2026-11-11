@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -95,7 +96,7 @@ func TestFinalizeBehindHeadLatchesWhateverTheMargin(t *testing.T) {
 	}
 }
 
-// TestHeadReadSinceLastSegment pins the freshness the worker's end-of-stream
+// TestHeadCurrentAtFinalize pins the freshness the worker's end-of-stream
 // verdict asks of the head. A broadcast that is over keeps answering the
 // retries past its last segment with X-Head-Seqnum, so its head is current. A
 // stall in which nothing past the last segment answers with the header leaves
@@ -105,17 +106,18 @@ func TestFinalizeBehindHeadLatchesWhateverTheMargin(t *testing.T) {
 // Mutants: drop the stamp in noteHeadSeqFromResponse (the ended row reads
 // stale); stamp on lastSegTime's side, or compare the other way round (the
 // stalled row reads current); report true when no head was ever read.
-func TestHeadReadSinceLastSegment(t *testing.T) {
+func TestHeadCurrentAtFinalize(t *testing.T) {
 	const head, lastServed = 8, 6
 	for _, tc := range []struct {
 		name            string
-		headerPastTail  bool
+		headersPastTail int // how many answers past the last segment carry the head; -1 = all
 		wantHeadCurrent bool
 	}{
-		{"an ended broadcast: the retries still carry the head", true, true},
-		{"a stall: nothing past the last segment carries the head", false, false},
+		{"an ended broadcast: the retries still carry the head", -1, true},
+		{"a stall: nothing past the last segment carries the head", 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var pastTail atomic.Int64
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				sq, err := strconv.Atoi(r.URL.Query().Get("sq"))
 				if err == nil && sq <= lastServed {
@@ -123,7 +125,7 @@ func TestHeadReadSinceLastSegment(t *testing.T) {
 					fmt.Fprintf(w, "seg-%05d;", sq)
 					return
 				}
-				if tc.headerPastTail {
+				if n := pastTail.Add(1); tc.headersPastTail < 0 || n <= int64(tc.headersPastTail) {
 					w.Header().Set("X-Head-Seqnum", strconv.Itoa(head))
 				}
 				w.WriteHeader(http.StatusForbidden)
@@ -150,14 +152,53 @@ func TestHeadReadSinceLastSegment(t *testing.T) {
 			if d.LastSeq() != lastServed || d.HeadSeq() != head {
 				t.Fatalf("test setup invalid: LastSeq = %d, HeadSeq = %d, want %d and %d", d.LastSeq(), d.HeadSeq(), lastServed, head)
 			}
-			if got := d.HeadReadSinceLastSegment(); got != tc.wantHeadCurrent {
-				t.Errorf("HeadReadSinceLastSegment = %v, want %v", got, tc.wantHeadCurrent)
+			if got := d.HeadCurrentAtFinalize(); got != tc.wantHeadCurrent {
+				t.Errorf("HeadCurrentAtFinalize = %v, want %v", got, tc.wantHeadCurrent)
 			}
 		})
 	}
 
 	fresh := NewSegmentDownloader(DownloaderOptions{BaseURL: "http://127.0.0.1:1/videoplayback?itag=140", OutputFile: filepath.Join(t.TempDir(), "v")})
-	if fresh.HeadReadSinceLastSegment() {
+	if fresh.HeadCurrentAtFinalize() {
 		t.Error("a downloader that never read a head reports it current")
+	}
+}
+
+// TestHeadCurrentAtFinalizeNeedsARecentRead pins the second half of the
+// freshness: a head read after the last segment but long before the finalize
+// is not current. At the live edge the fetch of the next, unpublished segment
+// answers with the header moments after the last one lands, so "read since
+// the last segment" alone is true just before any stall begins.
+//
+// Mutants: drop the headFreshWindow bound (the old-read row reads current);
+// drop the after-the-last-segment bound (the read-before row reads current).
+func TestHeadCurrentAtFinalizeNeedsARecentRead(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name     string
+		lastSeg  time.Time
+		headRead time.Time
+		want     bool
+	}{
+		{"read moments before the finalize", now.Add(-10 * time.Minute), now.Add(-5 * time.Second), true},
+		{"read right after the last segment, then nothing for the whole retry", now.Add(-10 * time.Minute), now.Add(-10*time.Minute + time.Second), false},
+		{"read before the last segment", now.Add(-time.Second), now.Add(-2 * time.Second), false},
+		{"never read", now.Add(-10 * time.Minute), time.Time{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := NewSegmentDownloader(DownloaderOptions{BaseURL: "http://127.0.0.1:1/videoplayback?itag=140", OutputFile: filepath.Join(t.TempDir(), "v")})
+			d.headSeq.Store(8)
+			d.currentSeq.Store(7)
+			d.lastSegTime.Store(tc.lastSeg)
+			if !tc.headRead.IsZero() {
+				d.lastHeadRead.Store(tc.headRead)
+			}
+			if !d.finalizeBehindHead() {
+				t.Fatal("test setup invalid: the finalize was not behind the head")
+			}
+			if got := d.HeadCurrentAtFinalize(); got != tc.want {
+				t.Errorf("HeadCurrentAtFinalize = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
