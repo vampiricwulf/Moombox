@@ -129,6 +129,12 @@ type Sidecar struct {
 
 	// Health.
 	healthy atomic.Bool
+	// healthMu orders startLocked's "this child is healthy" against a
+	// verdict armed for one particular child (markUnhealthyGen): the
+	// generation check and the flip happen under it, and so does the store
+	// that makes a new child healthy. It guards nothing else; healthy and
+	// childGen stay atomics for their lock-free readers.
+	healthMu sync.Mutex
 	// everUp latches the first successful start. Until then there is no child
 	// a caller could wait to see come back (see Recoverable).
 	everUp atomic.Bool
@@ -482,7 +488,11 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 	}
 
 	s.everUp.Store(true)
+	// Under healthMu, so a verdict about the child before this one cannot
+	// land on this one (markUnhealthyGen).
+	s.healthMu.Lock()
 	s.healthy.Store(true)
+	s.healthMu.Unlock()
 	s.cfg.Logger.Info("sidecar started", "cacheDir", cacheDir, "pid", cmd.Process.Pid)
 	return nil
 }
@@ -1030,8 +1040,11 @@ func (s *Sidecar) call(ctx context.Context, method string, params map[string]any
 //
 // One probe runs at a time. Like the stall watchdog it condemns only the
 // child the timed-out request was sent to (gen), and none that a teardown is
-// already taking down. Any other end to the ping — an answer, the sidecar
-// going unhealthy by another route, a failed write — is no verdict.
+// already taking down (markUnhealthyGen). Any other end to the ping is no
+// verdict: an answer, the sidecar going unhealthy by another route, or a
+// ping that never reached the child's stdin because the write slot was held
+// or its own write did not return. A child that has stopped draining stdin
+// is the stall watchdog's to condemn, at RequestTimeout (writeRequest).
 func (s *Sidecar) probeWedge(gen uint64) {
 	if !s.wedgeProbing.CompareAndSwap(false, true) {
 		return
@@ -1048,14 +1061,11 @@ func (s *Sidecar) probeWedge(gen uint64) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), s.wedgeProbeTimeout)
 		defer cancel()
-		_, err := s.roundTrip(ctx, "ping", nil, nil)
-		if !errors.Is(err, context.DeadlineExceeded) {
+		written, err := s.roundTrip(ctx, "ping", nil, nil)
+		if !written || !errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
-		if s.childGen.Load() != gen || s.stopping.Load() {
-			return
-		}
-		s.markUnhealthy("event loop unresponsive: no ping answer in " + s.wedgeProbeTimeout.String())
+		s.markUnhealthyGen(gen, "event loop unresponsive: no ping answer in "+s.wedgeProbeTimeout.String())
 	}()
 }
 
@@ -1127,12 +1137,15 @@ func (s *Sidecar) unlockWrite() { <-s.writeSem }
 //
 // A Write that outlasts RequestTimeout means the child has stopped reading:
 // the sidecar is marked unhealthy so the supervisor replaces the child, and
-// killing the child is what frees the stranded writer. The read side is
-// different: a request that was written and never answered is only bounded
-// by RequestTimeout in call(), which does not condemn the child by itself;
-// the wedge probe that follows it does, when its ping goes unanswered too. (Closing our end is not enough everywhere:
-// on Windows an anonymous pipe's WriteFile in progress outlives CloseHandle
-// on the parent's side and returns only once the child's end is gone.)
+// killing the child is what frees the stranded writer. (Closing our end is
+// not enough everywhere: on Windows an anonymous pipe's WriteFile in
+// progress outlives CloseHandle on the parent's side and returns only once
+// the child's end is gone.)
+//
+// The read side is different: a request that was written and never answered
+// is only bounded by RequestTimeout in call(), which does not condemn the
+// child by itself; the wedge probe that follows it does, when its ping goes
+// unanswered too.
 func (s *Sidecar) writeRequest(ctx context.Context, req rpcRequest) error {
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -1172,10 +1185,7 @@ func (s *Sidecar) writeRequest(ctx context.Context, req rpcRequest) error {
 				}()
 				// Only the child this write was armed against, and not one
 				// a teardown is already taking down.
-				if s.childGen.Load() != gen || s.stopping.Load() {
-					return
-				}
-				s.markUnhealthy("stdin write stalled for " + s.cfg.RequestTimeout.String())
+				s.markUnhealthyGen(gen, "stdin write stalled for "+s.cfg.RequestTimeout.String())
 			})
 			defer stall.Stop()
 		}
@@ -1421,6 +1431,30 @@ func (s *Sidecar) markUnhealthy(reason string) {
 	if !s.healthy.CompareAndSwap(true, false) {
 		return
 	}
+	s.reportUnhealthy(reason)
+}
+
+// markUnhealthyGen is markUnhealthy for a verdict about one particular
+// child: the one that was running when childGen read gen. It does nothing
+// when a later child has been spawned since, or while a teardown is taking
+// the child down. The check and the flip are one step under healthMu, which
+// startLocked holds to make a new child healthy: a Restart that finishes
+// between the two used to let the old child's wedge mark its replacement
+// unhealthy, costing one more restart and the new child's minter.
+// startLocked bumps childGen before it gets there, so a verdict that passes
+// the check here flips the flag before the next child can be made healthy.
+func (s *Sidecar) markUnhealthyGen(gen uint64, reason string) {
+	s.healthMu.Lock()
+	flipped := s.childGen.Load() == gen && !s.stopping.Load() && s.healthy.CompareAndSwap(true, false)
+	s.healthMu.Unlock()
+	if flipped {
+		s.reportUnhealthy(reason)
+	}
+}
+
+// reportUnhealthy is what follows the healthy flag going false: the log
+// line, the pending requests failed, and OnUnhealthy.
+func (s *Sidecar) reportUnhealthy(reason string) {
 	s.cfg.Logger.Warn("sidecar marked unhealthy", "reason", reason)
 	s.drainPending(reason)
 	if s.cfg.OnUnhealthy != nil {
