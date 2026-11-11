@@ -1463,6 +1463,49 @@ test("an unmarked legacy IRC message is re-indexed before it is rendered", { ski
   assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]", "!"]);
 });
 
+test("loaded chat rows keep no raw IRC line, and the legacy repair that reads it still ran", { skip }, async () => {
+  // `raw` has one reader, correctLegacyTwitchEmotes, which runs before the
+  // rows are normalized. Mutants: keeping raw (the first assertion); dropping
+  // it before the repair (the row renders "🎉" + [ Kapp] + "a!").
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: {
+      platform: "twitch",
+      messages: [ircChatMsg(EMOTE_TEXT, [{ id: "25", name: " Kapp", start: 2, end: 6 }])],
+    },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  assert.equal(h.player.playerChatMessages.length, 1);
+  assert.ok(h.player.playerChatMessages.every((m) => !("raw" in m)), "no loaded row carries raw");
+  assert.equal(h.player.playerChatMessages[0].message, EMOTE_TEXT, "the rest of the row is kept");
+  assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]", "!"]);
+});
+
+test("a multi-part job's loaded chat rows keep no raw IRC line either", { skip }, async () => {
+  const job = finished("j1", {
+    segments: [
+      { segmentIndex: 0, durationSeconds: 60, quality: "720p", chatFile: "p0.chat.json" },
+      { segmentIndex: 1, durationSeconds: 60, quality: "720p", chatFile: "p1.chat.json" },
+    ],
+  });
+  const h = harness.makePlayer({
+    jobs: [job],
+    watchState: {},
+    segmentChatById: {
+      "j1/0": { platform: "twitch", messages: [ircChatMsg(EMOTE_TEXT, [{ id: "25", name: " Kapp", start: 2, end: 6 }])] },
+      "j1/1": { platform: "twitch", emoteOffsets: "utf16", messages: [ircChatMsg(EMOTE_TEXT, [{ id: "25", name: "Kappa", start: 3, end: 7 }])] },
+    },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  assert.equal(h.player.playerChatMessages.length, 2);
+  assert.ok(h.player.playerChatMessages.every((m) => !("raw" in m)), "no merged row carries raw");
+  assert.deepEqual(h.player.playerChatMessages.map((m) => m.emotes[0].start), [3, 3],
+    "the unmarked part was repaired from its raw line before raw was dropped");
+});
+
 test("an unmarked VOD comment (no raw line) is rendered untouched", { skip }, async () => {
   const h = harness.makePlayer({
     jobs: [finished("j1", { chatFilename: "chat.json" })],

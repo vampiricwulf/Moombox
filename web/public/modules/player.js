@@ -1535,8 +1535,13 @@ export class PlayerController {
             chatStreamStartTime: chatData.streamStartTime,
             jobStreamStartTime: this.playerJob.streamStartTime,
           });
+          // `raw` (a live Twitch message's whole tagged IRC line, usually
+          // larger than the rest of the message) is left behind here: its one
+          // reader, correctLegacyTwitchEmotes, already ran in _fetchChatData,
+          // and kept it would stay in memory for as long as the job is open.
+          // This map sees the single-file and the merged multi-part result.
           this.playerChatMessages = (chatData.messages || [])
-            .map((m) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
+            .map(({ raw: _raw, ...m }) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
             .sort((a, b) => a.offsetMs - b.offsetMs);
 
           // Build 3rd-party emote lookup map for Twitch chat
