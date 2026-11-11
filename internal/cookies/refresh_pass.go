@@ -214,13 +214,28 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 	// no log line. Lock and defer-unlock together, or scope the section into a
 	// func literal that does.
 	defer func() {
-		rs.mu.Lock()
-		rs.refreshInFlight = false
 		// A pass that ended without publishing a status (a panic in it) still
 		// ends the "checking" state: the UIs then show what they showed before
 		// that state existed, instead of "checking cookies" until the next tick.
-		rs.status.Checked = true
-		rs.mu.Unlock()
+		// That flip is pushed like any other status change, or a TUI already
+		// showing "checking" would keep it: the next pass finds Checked set
+		// and may have nothing else to report. Outside rs.mu, as every
+		// OnAuthChange call is. A pass that published its status has set
+		// Checked already, so this fires nothing after it.
+		var ended bool
+		var statusCopy AuthStatus
+		func() {
+			rs.mu.Lock()
+			defer rs.mu.Unlock()
+			rs.refreshInFlight = false
+			if !rs.status.Checked {
+				rs.status.Checked = true
+				ended, statusCopy = true, rs.status
+			}
+		}()
+		if ended && rs.OnAuthChange != nil {
+			rs.OnAuthChange(statusCopy)
+		}
 	}()
 	if hook != nil {
 		hook()

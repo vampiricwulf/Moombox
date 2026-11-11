@@ -103,10 +103,20 @@ func TestSkipStartupCheckMarksTheStatusChecked(t *testing.T) {
 
 // A pass that panics before it publishes a status still ends the checking
 // state, so the UIs fall back to what they showed before that state existed.
+// The flip is pushed through OnAuthChange once, or a TUI already showing
+// "checking" would keep it until some later pass changed another field.
+//
+// Mutant: drop the OnAuthChange call from refresh's release defer.
 func TestAPanickedPassStillEndsTheCheckingState(t *testing.T) {
 	healthyRefreshSeams(t)
 	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
 	setPassHook(rs, func() { panic("boom") })
+	var fires atomic.Int64
+	var last atomic.Value
+	rs.OnAuthChange = func(s AuthStatus) {
+		fires.Add(1)
+		last.Store(s)
+	}
 
 	awaitOrFail(t, 10*time.Second, "Start", func() {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -116,6 +126,12 @@ func TestAPanickedPassStillEndsTheCheckingState(t *testing.T) {
 	})
 	if !rs.GetStatus().Checked {
 		t.Error("Checked is false after a pass that panicked")
+	}
+	if fires.Load() != 1 {
+		t.Errorf("OnAuthChange fired %d times for the panicked first pass, want 1", fires.Load())
+	}
+	if got, ok := last.Load().(AuthStatus); !ok || !got.Checked {
+		t.Errorf("the pushed status is not Checked: %+v", last.Load())
 	}
 }
 
