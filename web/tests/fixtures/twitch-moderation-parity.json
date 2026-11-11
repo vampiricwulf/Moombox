@@ -1,0 +1,220 @@
+{
+  "comment": "Shared by internal/twitch/chat_moderation_parity_test.go (parseLine must marshal each case's lines to exactly its messages) and web/tests/twitch-moderation.test.mjs (applyTwitchModeration over messages must give want: the kept rows in order, each deleted or not, with its sentence).",
+  "cases": [
+    {
+      "name": "timeout",
+      "lines": [
+        "@badges=;color=;display-name=Ronni;emotes=;id=m1;tmi-sent-ts=1700000000000;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :spam one",
+        "@badges=;color=;display-name=Bystander;emotes=;id=m2;tmi-sent-ts=1700000000500;user-id=7 :bystander!bystander@bystander.tmi.twitch.tv PRIVMSG #testchan :hello",
+        "@ban-duration=600;room-id=1;target-user-id=42;tmi-sent-ts=1700000001000 :tmi.twitch.tv CLEARCHAT #testchan :ronni",
+        "@badges=;color=;display-name=Ronni;emotes=;id=m3;tmi-sent-ts=1700000700000;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :back again"
+      ],
+      "messages": [
+        {
+          "id": "m1",
+          "timestampMs": 1700000000000,
+          "offsetMs": 0,
+          "authorName": "Ronni",
+          "authorId": "42",
+          "message": "spam one",
+          "messageType": "chat",
+          "raw": "@badges=;color=;display-name=Ronni;emotes=;id=m1;tmi-sent-ts=1700000000000;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :spam one"
+        },
+        {
+          "id": "m2",
+          "timestampMs": 1700000000500,
+          "offsetMs": 0,
+          "authorName": "Bystander",
+          "authorId": "7",
+          "message": "hello",
+          "messageType": "chat",
+          "raw": "@badges=;color=;display-name=Bystander;emotes=;id=m2;tmi-sent-ts=1700000000500;user-id=7 :bystander!bystander@bystander.tmi.twitch.tv PRIVMSG #testchan :hello"
+        },
+        {
+          "id": "clearchat-1700000001000-42",
+          "timestampMs": 1700000001000,
+          "offsetMs": 0,
+          "authorName": "Moderation",
+          "authorId": "",
+          "message": "",
+          "messageType": "moderation",
+          "systemMsg": "ronni was timed out for 10m.",
+          "raw": "@ban-duration=600;room-id=1;target-user-id=42;tmi-sent-ts=1700000001000 :tmi.twitch.tv CLEARCHAT #testchan :ronni",
+          "moderation": "author_deleted",
+          "targetUserId": "42",
+          "targetLogin": "ronni",
+          "banDurationSec": 600
+        },
+        {
+          "id": "m3",
+          "timestampMs": 1700000700000,
+          "offsetMs": 0,
+          "authorName": "Ronni",
+          "authorId": "42",
+          "message": "back again",
+          "messageType": "chat",
+          "raw": "@badges=;color=;display-name=Ronni;emotes=;id=m3;tmi-sent-ts=1700000700000;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :back again"
+        }
+      ],
+      "want": [
+        { "id": "m1", "deleted": true, "deletedState": "ronni was timed out for 10m." },
+        { "id": "m2", "deleted": false },
+        { "id": "m3", "deleted": false }
+      ]
+    },
+    {
+      "name": "ban",
+      "lines": [
+        "@badges=;color=;display-name=Ronni;emotes=;id=m1;tmi-sent-ts=1700000000000;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :spam one",
+        "@badges=;color=;display-name=Bystander;emotes=;id=m2;tmi-sent-ts=1700000000500;user-id=7 :bystander!bystander@bystander.tmi.twitch.tv PRIVMSG #testchan :hello",
+        "@room-id=1;target-user-id=42;tmi-sent-ts=1700000002000 :tmi.twitch.tv CLEARCHAT #testchan :ronni"
+      ],
+      "messages": [
+        {
+          "id": "m1",
+          "timestampMs": 1700000000000,
+          "offsetMs": 0,
+          "authorName": "Ronni",
+          "authorId": "42",
+          "message": "spam one",
+          "messageType": "chat",
+          "raw": "@badges=;color=;display-name=Ronni;emotes=;id=m1;tmi-sent-ts=1700000000000;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :spam one"
+        },
+        {
+          "id": "m2",
+          "timestampMs": 1700000000500,
+          "offsetMs": 0,
+          "authorName": "Bystander",
+          "authorId": "7",
+          "message": "hello",
+          "messageType": "chat",
+          "raw": "@badges=;color=;display-name=Bystander;emotes=;id=m2;tmi-sent-ts=1700000000500;user-id=7 :bystander!bystander@bystander.tmi.twitch.tv PRIVMSG #testchan :hello"
+        },
+        {
+          "id": "clearchat-1700000002000-42",
+          "timestampMs": 1700000002000,
+          "offsetMs": 0,
+          "authorName": "Moderation",
+          "authorId": "",
+          "message": "",
+          "messageType": "moderation",
+          "systemMsg": "ronni was banned.",
+          "raw": "@room-id=1;target-user-id=42;tmi-sent-ts=1700000002000 :tmi.twitch.tv CLEARCHAT #testchan :ronni",
+          "moderation": "author_deleted",
+          "targetUserId": "42",
+          "targetLogin": "ronni"
+        }
+      ],
+      "want": [
+        { "id": "m1", "deleted": true, "deletedState": "ronni was banned." },
+        { "id": "m2", "deleted": false }
+      ]
+    },
+    {
+      "name": "full clear",
+      "lines": [
+        "@badges=;color=;display-name=Ronni;emotes=;id=m1;tmi-sent-ts=1700000000000;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :one",
+        "@badges=;color=;display-name=Bystander;emotes=;id=m2;tmi-sent-ts=1700000000500;user-id=7 :bystander!bystander@bystander.tmi.twitch.tv PRIVMSG #testchan :two",
+        "@room-id=1;tmi-sent-ts=1700000003000 :tmi.twitch.tv CLEARCHAT #testchan",
+        "@badges=;color=;display-name=Ronni;emotes=;id=m3;tmi-sent-ts=1700000004000;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :three"
+      ],
+      "messages": [
+        {
+          "id": "m1",
+          "timestampMs": 1700000000000,
+          "offsetMs": 0,
+          "authorName": "Ronni",
+          "authorId": "42",
+          "message": "one",
+          "messageType": "chat",
+          "raw": "@badges=;color=;display-name=Ronni;emotes=;id=m1;tmi-sent-ts=1700000000000;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :one"
+        },
+        {
+          "id": "m2",
+          "timestampMs": 1700000000500,
+          "offsetMs": 0,
+          "authorName": "Bystander",
+          "authorId": "7",
+          "message": "two",
+          "messageType": "chat",
+          "raw": "@badges=;color=;display-name=Bystander;emotes=;id=m2;tmi-sent-ts=1700000000500;user-id=7 :bystander!bystander@bystander.tmi.twitch.tv PRIVMSG #testchan :two"
+        },
+        {
+          "id": "clearchat-1700000003000-all",
+          "timestampMs": 1700000003000,
+          "offsetMs": 0,
+          "authorName": "Moderation",
+          "authorId": "",
+          "message": "",
+          "messageType": "moderation",
+          "systemMsg": "Chat was cleared by a moderator.",
+          "raw": "@room-id=1;tmi-sent-ts=1700000003000 :tmi.twitch.tv CLEARCHAT #testchan",
+          "moderation": "chat_cleared"
+        },
+        {
+          "id": "m3",
+          "timestampMs": 1700000004000,
+          "offsetMs": 0,
+          "authorName": "Ronni",
+          "authorId": "42",
+          "message": "three",
+          "messageType": "chat",
+          "raw": "@badges=;color=;display-name=Ronni;emotes=;id=m3;tmi-sent-ts=1700000004000;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :three"
+        }
+      ],
+      "want": [
+        { "id": "m1", "deleted": true, "deletedState": "Chat was cleared by a moderator." },
+        { "id": "m2", "deleted": true, "deletedState": "Chat was cleared by a moderator." },
+        { "id": "m3", "deleted": false }
+      ]
+    },
+    {
+      "name": "one deleted message",
+      "lines": [
+        "@badges=;color=;display-name=Ronni;emotes=;id=m1;tmi-sent-ts=1700000000000;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :keep",
+        "@badges=;color=;display-name=Ronni;emotes=;id=m2;tmi-sent-ts=1700000000500;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :delete me",
+        "@login=ronni;room-id=1;target-msg-id=m2;tmi-sent-ts=1700000005000 :tmi.twitch.tv CLEARMSG #testchan :delete me"
+      ],
+      "messages": [
+        {
+          "id": "m1",
+          "timestampMs": 1700000000000,
+          "offsetMs": 0,
+          "authorName": "Ronni",
+          "authorId": "42",
+          "message": "keep",
+          "messageType": "chat",
+          "raw": "@badges=;color=;display-name=Ronni;emotes=;id=m1;tmi-sent-ts=1700000000000;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :keep"
+        },
+        {
+          "id": "m2",
+          "timestampMs": 1700000000500,
+          "offsetMs": 0,
+          "authorName": "Ronni",
+          "authorId": "42",
+          "message": "delete me",
+          "messageType": "chat",
+          "raw": "@badges=;color=;display-name=Ronni;emotes=;id=m2;tmi-sent-ts=1700000000500;user-id=42 :ronni!ronni@ronni.tmi.twitch.tv PRIVMSG #testchan :delete me"
+        },
+        {
+          "id": "clearmsg-m2",
+          "timestampMs": 1700000005000,
+          "offsetMs": 0,
+          "authorName": "Moderation",
+          "authorId": "",
+          "message": "",
+          "messageType": "moderation",
+          "systemMsg": "A message from ronni was deleted by a moderator.",
+          "raw": "@login=ronni;room-id=1;target-msg-id=m2;tmi-sent-ts=1700000005000 :tmi.twitch.tv CLEARMSG #testchan :delete me",
+          "moderation": "deleted",
+          "targetMsgId": "m2",
+          "targetLogin": "ronni"
+        }
+      ],
+      "want": [
+        { "id": "m1", "deleted": false },
+        { "id": "m2", "deleted": true, "deletedState": "A message from ronni was deleted by a moderator." }
+      ]
+    }
+  ]
+}

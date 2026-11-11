@@ -14,7 +14,34 @@
 // copied or changed.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { applyTwitchModeration, mergePartChats } from "../public/modules/chat-timeline.js";
+
+// The rows the Go recorder really writes, for the four events. The Go side
+// (internal/twitch/chat_moderation_parity_test.go) fails when parseLine no
+// longer marshals a case's IRC lines to exactly its `messages`; this side
+// runs the load pass over those same rows. The tests further down build
+// their rows by hand, which is how a key or a word renamed in Go alone
+// would go unnoticed.
+const PARITY = JSON.parse(readFileSync(new URL("./fixtures/twitch-moderation-parity.json", import.meta.url), "utf8"));
+
+for (const c of PARITY.cases) {
+  test(`the recorder's rows for a ${c.name} are marked as the fixture says`, () => {
+    assert.ok(c.messages.some((m) => m.messageType === "moderation"), "the case holds an event row");
+    const out = applyTwitchModeration(structuredClone(c.messages));
+    const got = out.map((m) => (m.deleted === true
+      ? { id: m.id, deleted: true, deletedState: m.deletedState }
+      : { id: m.id, deleted: false }));
+    assert.deepEqual(got, c.want);
+  });
+}
+
+test("the fixture covers a timeout, a ban, a full clear and one deleted message", () => {
+  const rows = PARITY.cases.flatMap((c) => c.messages).filter((m) => m.messageType === "moderation");
+  assert.deepEqual([...new Set(rows.map((m) => m.moderation))].sort(), ["author_deleted", "chat_cleared", "deleted"]);
+  assert.ok(rows.some((m) => m.moderation === "author_deleted" && m.banDurationSec > 0), "a timeout");
+  assert.ok(rows.some((m) => m.moderation === "author_deleted" && !m.banDurationSec), "a ban");
+});
 
 const msg = (id, authorId, text, extra = {}) =>
   ({ id, timestampMs: 0, offsetMs: 0, authorName: `user${authorId}`, authorId, message: text, messageType: "chat", ...extra });
