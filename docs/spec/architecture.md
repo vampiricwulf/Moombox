@@ -1195,6 +1195,7 @@ Callback fields:
 
 - `cmd/moombox/main.go` -- Launcher and `run()` (~800 lines); service initialization is `services.go`, event wiring `monitor_callbacks.go` / `tui_wiring.go` / `ws_wiring.go`, shutdown `shutdown.go`
 - `internal/worker/worker.go` -- DownloadWorker, processJob loop
+- `internal/worker/worker_verbs.go`, `internal/worker/worker_failure.go`, `internal/worker/worker_staging_claims.go` -- the operator verbs (Resume, Reinitialize, Mux, Recover Asides), failure classification and `setJobError`, the staging-claim registry
 - `internal/worker/queue.go` -- JobQueue with two-tier concurrency
 - `internal/worker/stream_processor.go` -- StreamProcessor, waitForLive, Twitch processing
 - `internal/worker/orchestrator.go` -- DownloadOrchestrator, `ExecuteWithChat` (the YouTube pipeline), VOD refresh loop
