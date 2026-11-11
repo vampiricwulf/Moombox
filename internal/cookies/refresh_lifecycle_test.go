@@ -98,9 +98,10 @@ func blockingPass(rs *RefreshService) (passes *atomic.Int64, entered <-chan stru
 // TestStartupRefreshPanicDoesNotEscapeStart is S3(a).
 //
 // Start's initial check runs SYNCHRONOUSLY on the caller's goroutine —
-// cmd/moombox's run(), before the TUI starts (the web server is already bound,
-// R-H2) — so an unrecovered panic in the first pass does not lose a refresh, it
-// kills the process at boot with no TUI and no log surface up to say why. The ticker goroutine has
+// cmd/moombox's cookie startup goroutine, with both UIs already up (R-H2 and
+// its amendment) — so a panic that escaped the first pass would skip the ticker
+// below it, and Start's caller would have to recover it to reach the profile
+// seed and the refresh timer at all. The ticker goroutine has
 // carried a recover forever; this call did not.
 //
 // The pass counter is not decoration. Without it, "Start returned normally" is

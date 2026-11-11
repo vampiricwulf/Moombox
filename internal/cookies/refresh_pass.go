@@ -130,10 +130,10 @@ func (rs *RefreshService) NoteTwitchAuthLoss(reason string) {
 
 // doRefresh is the TICKER refresh, and the only path allowed to pay for the
 // FallbackLiveness probe. Both of the other entry points run synchronously on
-// a goroutine somebody is waiting on — CheckNow on an HTTP handler, Start's
-// initial check ahead of the TUI starting (the web server is already bound,
-// R-H2) — and both pass
-// allowFallback=false for that reason.
+// a goroutine something is waiting on — CheckNow on an HTTP handler, Start's
+// initial check with both UIs showing "checking cookies" and the profile seed
+// and the browser refresh timer queued behind it (cmd/moombox's cookie startup
+// goroutine) — and both pass allowFallback=false for that reason.
 //
 // Subject to the same single-flight as the other two, and in this direction it
 // is a tick that gets dropped: a tick arriving while a manual recheck is in
@@ -181,6 +181,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 			return false
 		}
 		rs.refreshInFlight = true
+		rs.passDone = make(chan struct{})
 		hook, lockedHook = rs.refreshPassHook, rs.refreshLockedHook
 		return true
 	}()
@@ -229,6 +230,13 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 			rs.mu.Lock()
 			defer rs.mu.Unlock()
 			rs.refreshInFlight = false
+			// Closed once this section has set Checked (or found it set), so
+			// an AwaitPass caller that wakes reads a checked status.
+			done := rs.passDone
+			rs.passDone = nil
+			if done != nil {
+				defer close(done)
+			}
 			if !rs.status.Checked {
 				rs.status.Checked = true
 				ended, statusCopy = true, rs.status

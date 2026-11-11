@@ -286,9 +286,8 @@ func twitchAuthLossHook(mark func(reason string), log interface {
 // surface than the loop was written against.
 //
 // The precedent is refresh.go's own Start, which wraps its synchronous first
-// pass in exactly this shape and explains why wrapping the CALL is right where
-// spawning a goroutine would not be: there is nothing to run concurrently here,
-// only something to survive.
+// pass in exactly this shape: there is nothing to run concurrently here, only
+// something to survive.
 //
 // recheck is the caller's whole body rather than a CheckNow func, so the guard
 // covers everything the hook does — the accessor lookup and the logging
@@ -1360,8 +1359,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	autoCookieSvc.LogProfileDirVerdict()
 	s.autoCookieSvc = autoCookieSvc
 
-	// OnAuthChange is fired from the cookie-refresh goroutine; set its plain
-	// func field exactly once (before cookieRefresh.Start()) to a dispatcher
+	// OnAuthChange is fired from whichever goroutine ran the pass (the cookie
+	// startup goroutine for the first check, the ticker, a recheck); set its
+	// plain func field exactly once (before startCookieSequence) to a dispatcher
 	// that atomically loads the TUI-side slot. The TUI branch stores a
 	// callback later — Store is race-free against the refresh goroutine's
 	// Load, unlike field reassignment.

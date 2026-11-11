@@ -53,8 +53,9 @@ type AuthStatus struct {
 	// Checked is false until a check has finished in this process (or
 	// SkipStartupCheck said none will run at startup), and true from then on.
 	// While it is false every other field is a zero value that says NOTHING:
-	// not "no cookies", not "not authenticated". The dashboard is up before
-	// the first check answers (owner ruling R-H2), so both UIs show "checking
+	// not "no cookies", not "not authenticated". The dashboard and the TUI are
+	// both up before the first check answers (owner ruling R-H2 and its
+	// amendment), so both UIs show "checking
 	// cookies" for an unchecked status and neither the no-cookies nor the
 	// re-login indicator, and nothing may decide anything on one.
 	//

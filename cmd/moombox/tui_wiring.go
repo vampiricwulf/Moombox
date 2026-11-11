@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -602,7 +603,18 @@ func (s *runState) runTUI() {
 		// nothing else, and cookies.RefreshDeclinedCauses is the browser
 		// refresher's exhaustive, three-consumer-pinned set — not this one's.
 		// Adding a cause is a separate change; see CheckNow's own doc.
-		s.cookieRefresh.CheckNow(context.Background())
+		ran := s.cookieRefresh.CheckNow(context.Background())
+		// The one case where the pass in flight is waited for: the first
+		// check of the process. The TUI is up while it runs, so R C can land
+		// in it, and the status then holds no verdict at all, only
+		// "unchecked"; reporting that would read as "unknown" for cookies
+		// nothing has looked at yet. Bounded like the check itself (two 15 s
+		// round trips), and this closure already runs off the UI goroutine.
+		if !ran && s.cookieRefresh.GetStatus().Unchecked() {
+			waitCtx, cancelWait := context.WithTimeout(context.Background(), 35*time.Second)
+			s.cookieRefresh.AwaitPass(waitCtx)
+			cancelWait()
+		}
 		status := s.cookieRefresh.GetStatus()
 		// The verdicts, not the booleans. Both booleans are false for a check
 		// that could not reach the site, and the feedback line built on them
@@ -1095,7 +1107,24 @@ func (s *runState) runTUI() {
 
 	// Wire cookie status to TUI. Parameter `auth` is the incoming status —
 	// named differently from `s` (receiver) to avoid the pre-refactor shadow.
+	//
+	// The TUI is up before the first cookie check answers (owner ruling
+	// amending R-H2), so three senders can now overlap around that answer:
+	// the initial send below, resendTUICookieStatus, and the check's own
+	// OnAuthChange. Each reads a status and then sends it, and an unchecked
+	// status read just before the check ended could be sent just after the
+	// checked one and leave the badges on "checking…" until the next
+	// transition. authSend serialises the sends, and an unchecked status that
+	// comes after a checked one went out is replaced by a fresh read
+	// (checkedLatch).
+	var authSend checkedLatch
 	authStatusToTUI := func(auth cookies.AuthStatus) {
+		defer authSend.enter()()
+		if !authSend.admit(auth) {
+			// Stale: send what the service holds now instead, so a re-send
+			// asked for another reason (the active platforms) still goes out.
+			auth = s.cookieRefresh.GetStatus()
+		}
 		// Check auto-cookie relogin state. As of test.36 the relogin map
 		// is keyed by lowercase platform name (audit cookies.md #44).
 		//
@@ -1119,7 +1148,10 @@ func (s *runState) runTUI() {
 	}
 	// Store TUI-side callback in the atomic slot; the dispatcher wired to
 	// cookieRefresh.OnAuthChange (set before cookieRefresh.Start()) loads it
-	// lock-free on each auth change.
+	// lock-free on each auth change. The first check may still be running on
+	// the cookie startup goroutine: its answer arrives through this slot, and
+	// one that landed before the Store is picked up by the initial send below,
+	// which reads the status after it.
 	tuiAuthFn := func(auth cookies.AuthStatus) {
 		authStatusToTUI(auth)
 	}
@@ -1256,6 +1288,31 @@ func (s *runState) requestDiskRecheck() {
 	case s.diskRecheck <- struct{}{}:
 	default:
 	}
+}
+
+// checkedLatch orders the cookie statuses sent to the TUI. AuthStatus.Checked
+// only ever goes from false to true, so an unchecked status that arrives
+// after a checked one is stale by definition, and admit refuses it. enter holds the
+// lock for one whole send, so two senders cannot interleave either.
+type checkedLatch struct {
+	mu      sync.Mutex
+	checked bool
+}
+
+// enter takes the latch for one send and returns the release.
+func (l *checkedLatch) enter() func() {
+	l.mu.Lock()
+	return l.mu.Unlock
+}
+
+// admit reports whether auth may be sent; call it between enter and its
+// release.
+func (l *checkedLatch) admit(auth cookies.AuthStatus) bool {
+	if auth.Unchecked() {
+		return !l.checked
+	}
+	l.checked = true
+	return true
 }
 
 // resendTUICookieStatus re-sends the TUI's cookie status line, whose

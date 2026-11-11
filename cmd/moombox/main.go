@@ -343,21 +343,18 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	}()
 
 	// Seed the cookie refresh service (only if a cookie file is configured,
-	// like TS). Its first check runs further down, after the web server is
-	// bound; the seeds stay here, ahead of the bind, so nothing the dashboard
-	// can ask for (a recheck) observes before them.
+	// like TS). Its first check runs on the cookie startup goroutine, started
+	// further down after the web server is bound; the seeds stay here, ahead
+	// of the bind, so nothing the dashboard can ask for (a recheck) observes
+	// before them.
 	//
 	// The three cookie settings this function still needs after the bind are
 	// read ONCE, here, under the store lock. The dashboard is serving from the
 	// bind on, and a PUT /api/config replaces the struct under that lock, so a
 	// direct cfg read further down would race it; and a cookie file read twice
-	// (to choose SkipStartupCheck here, and Start below) could disagree with
+	// (to choose SkipStartupCheck here, and the first check below) could disagree with
 	// itself and leave the status unchecked for good.
-	var startCookies struct {
-		HasFile         bool
-		AutoEnabled     bool
-		RefreshInterval time.Duration
-	}
+	var startCookies cookieStartup
 	s.configStore.Read(func(c *config.MoomboxConfig) {
 		startCookies.HasFile = c.Cookies.CookieFile != ""
 		startCookies.AutoEnabled = c.Cookies.AutoEnabled
@@ -456,53 +453,17 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		}()
 	}
 
-	// The first cookie auth check, synchronous on this goroutine as it always
-	// was. It now runs with the web server already bound (owner ruling R-H2):
-	// each of its two round trips can take up to 15 s on a bad link, and the
-	// dashboard used to stay down for all of it. Until it answers, the status
-	// is unchecked (cookies.AuthStatus.Unchecked) and both UIs show "checking
-	// cookies" in place of the no-cookies and re-login indicators. Downloads
-	// and monitors started above, as before; the profile seed and the refresh
-	// timer still follow this check, in the same order.
-	// One exception: a dashboard recheck (CheckNow) landing between the bind and
-	// this call wins the single-flight, Start's own pass is turned away and
-	// returns at once, and the seed and timer then start while that pass (the
-	// same pass, allowFallback=false) is still running. The seed decides on
-	// the cookie file, not on the status, so nothing is decided differently.
-	if startCookies.HasFile {
-		cookieRefresh.Start(ctx)
-	}
-
-	// One browser-free import out of the configured browser profile, at most
-	// once per boot, on an install that has no cookies to lose.
-	//
-	// UNCONDITIONAL, and deliberately not under the flag below. This used to
-	// live inside the periodic goroutine, which coupled it to
-	// cookies.auto_enabled for no reason it could justify: the flag exists to
-	// govern a REPEATING read of a profile that nothing changes between ticks,
-	// and a boot is the one moment a mounted profile plausibly did change —
-	// something replaced it while the process was down. Its real safety
-	// condition is the cookie file, not the flag, and that condition lives in
-	// AutoCookieService.decideStartupSeed so there is exactly one site deciding
-	// it: no browser, an importable profile, and no cookies.txt worth
-	// protecting. An install that already has cookies is never touched here.
-	autoCookieSvc.StartProfileSeed(ctx)
-
-	// Start the headless-browser refresh timer. cookies.auto_enabled IS this
-	// timer — it governs nothing else automatic — so the flag is the whole
-	// start condition, along with an interval that means something.
-	//
-	// It deliberately no longer os.Stat's browserProfileDir first. That probe
-	// froze at boot the one thing that changes at runtime: completing setup is
-	// what CREATES the profile directory, so an operator who turned the setting
-	// on and then ran setup — the exact sequence an "auth lost" notification
-	// asks for — got no timer until the next restart, and nothing told them. No
-	// setting had changed by then, so the restart-required labelling could not
-	// fire either. The question is asked per tick now, quietly, by
-	// periodicRefreshHasSource.
-	if startCookies.AutoEnabled && startCookies.RefreshInterval > 0 {
-		autoCookieSvc.StartPeriodicRefresh(ctx, startCookies.RefreshInterval)
-	}
+	// The cookie startup sequence: the first auth check, then the profile
+	// seed, then the browser refresh timer, in that order on one background
+	// goroutine (startCookieSequence, which states the order's reasons).
+	// Neither UI waits for it (owner ruling R-H2 and its amendment): the web
+	// server is bound above, runTUI starts below, and until the check answers
+	// the status is unchecked (cookies.AuthStatus.Unchecked) and both UIs show
+	// "checking cookies" in place of the no-cookies and re-login indicators.
+	// Each of the check's two round trips can take up to 15 s on a bad link,
+	// and both UIs used to stay down for all of it. Nothing below this line in
+	// run() reads cookie state. shutdown waits for the goroutine, boundedly.
+	s.cookieStartupDone = startCookieSequence(ctx, startCookies, cookieRefresh, autoCookieSvc, log)
 
 	// The port the listener actually bound is not always the configured one:
 	// Start probes the next ten ports when the preferred one is in use

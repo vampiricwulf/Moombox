@@ -129,14 +129,17 @@ func TestUncheckedStatusShowsNeitherNoCookiesNorRelogin(t *testing.T) {
 }
 
 // TestDashboardBindsBeforeTheFirstCookieCheck pins run()'s order (owner
-// ruling R-H2): the web server is started before the synchronous first
-// cookie check, so the dashboard is not held behind two auth round trips;
-// the seeds and the no-cookie-file mark come before the bind, so nothing a
-// dashboard request can trigger observes ahead of them; and the profile seed
-// and the refresh timer still follow the check.
+// ruling R-H2 and its amendment): the web server is started, and its bind
+// waited for, before the cookie startup sequence, so the dashboard is not
+// held behind two auth round trips; the seeds and the no-cookie-file mark
+// come before the bind, so nothing a dashboard request can trigger observes
+// ahead of them; and the sequence is started before runTUI, which no longer
+// waits for it either. That the sequence is one goroutine holding the first
+// check, the profile seed and the refresh timer in that order is
+// TestCookieStartupIsOneGoroutine's.
 //
-// Mutants: move cookieRefresh.Start back above the web block; move
-// SetUnrecoveredPlatforms or SkipStartupCheck below it.
+// Mutants: move startCookieSequence back above the web block, or below
+// s.runTUI(); move SetUnrecoveredPlatforms or SkipStartupCheck below it.
 func TestDashboardBindsBeforeTheFirstCookieCheck(t *testing.T) {
 	run, fset := callsInFunc(t, "main.go", "run")
 	order := []struct{ recv, name string }{
@@ -145,10 +148,10 @@ func TestDashboardBindsBeforeTheFirstCookieCheck(t *testing.T) {
 		{"cookieRefresh", "SkipStartupCheck"},
 		{"webServer", "Start"},
 		{"", "awaitWebBind"},
-		{"cookieRefresh", "Start"},
-		{"autoCookieSvc", "StartProfileSeed"},
-		{"autoCookieSvc", "StartPeriodicRefresh"},
+		{"", "startCookieSequence"},
 		{"upd", "CleanupOldBinary"},
+		{"s", "runTUI"},
+		{"s", "shutdown"},
 	}
 	prev := token.NoPos
 	for i, c := range order {

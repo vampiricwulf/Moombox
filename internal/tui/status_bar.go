@@ -82,7 +82,8 @@ const (
 	// again instead of to the permission that is actually broken.
 	CookieStatusFileUnreadable
 	// CookieStatusChecking: the first cookie auth check of the process has not
-	// answered yet (cookies.AuthStatus.Unchecked; owner ruling R-H2). Nothing
+	// answered yet (cookies.AuthStatus.Unchecked; owner ruling R-H2). The TUI
+	// starts while that check runs, so this is the badge's first state. Nothing
 	// is known, so the badge shows neither the no-cookies colour nor the
 	// re-login prompt. Appended like the two above: CookieStatusNone stays
 	// the zero value.
