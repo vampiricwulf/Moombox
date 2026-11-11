@@ -216,7 +216,10 @@ string on every machine.
 dashboard draws so the controller extractions can be proved to change nothing.
 The snapshot lives in `fixtures/app-job-items.json` and its inputs in
 `fixtures/app-render-inputs.mjs`. When a rendering change is *intended*,
-regenerate it deliberately — from `web/tests/`:
+regenerate it deliberately — from `web/tests/`. The rows are serialised HTML, so
+the snapshot also follows the serialiser: since jsdom 31 (parse5 8.1) `<` and
+`>` inside attribute values are written `&lt;` and `&gt;`, as the HTML spec's
+fragment serialisation now has it; the attribute values themselves are the same:
 
 ```bash
 node --input-type=module -e '
