@@ -17,16 +17,23 @@ import (
 //   - compact, below that and at or above compactMinWidth x compactMinHeight:
 //     the task list filling the screen, one row a job, then a rule, a
 //     one-line status bar and the feedback line. Navigation, batch selection,
-//     the "/" filter and the chords that open no overlay work; an action that
-//     opens an overlay is refused on the feedback line.
+//     the "/" filter and the chords that open no overlay work. An overlay
+//     with a bare form is drawn bare, filling the screen; an action whose
+//     overlay has none, or needs more room than there is, is refused on the
+//     feedback line, which names the size it needs (overlay_bare.go).
 //   - too small, below the compact floor: a notice, and only Ctrl+C works.
 //
-// An overlay already open when the terminal leaves the normal layout is kept
-// with its state and covered by a notice; until the terminal grows back only
-// Ctrl+C works, and Esc where the notice says what it does (overlay_held.go).
+// An overlay open in a terminal smaller than it needs is kept with its state
+// and covered by a notice naming that size; until the terminal grows back
+// only Ctrl+C works, and Esc where the notice says what it does
+// (overlay_held.go).
 //
 // The decision is layoutMode, derived from the size on every call and never
-// stored: View, handleKey, handleMouse and the tick gating all ask it.
+// stored: View, handleKey, handleMouse and the tick gating all ask it. What
+// an overlay does below the normal layout is the one predicate in
+// overlay_bare.go (overlayDrawFor, overlayOpensHere), derived the same way.
+// A new overlay states its bare answer there: the bare field of its
+// overlayRegistry entry, nil when it needs the normal layout.
 
 // layoutMode is which of the three layouts the terminal size selects.
 type layoutMode int
@@ -49,14 +56,6 @@ const (
 // the compact task list.
 const compactChromeRows = 3
 
-// compactRefusal is the feedback line an action that opens an overlay gets
-// below the normal layout (owner ruling R-C5).
-const compactRefusal = "Enlarge the terminal to 60x20 for this"
-
-// heldOverlayNotice covers an overlay kept open below the normal layout
-// (owner ruling R-C6).
-const heldOverlayNotice = "Enlarge to 60x20 to continue"
-
 // layoutModeFor is THE size rule. A terminal that has not reported a size yet
 // (0x0, before the first WindowSizeMsg) is the normal layout: View shows
 // "Initializing..." for it and nothing is refused.
@@ -76,17 +75,15 @@ func layoutModeFor(width, height int) layoutMode {
 func (a *App) layoutMode() layoutMode { return layoutModeFor(a.width, a.height) }
 
 // screenHeld reports whether a notice has replaced the screen: the terminal
-// is below the compact floor, or it is below the normal layout with an
-// overlay open underneath. While it is held the mouse is ignored, nothing is
-// typed into what is hidden, and the progress tick idles.
+// is below the compact floor, or an overlay is open in a terminal smaller
+// than it needs (overlayDrawFor). While it is held the mouse is ignored,
+// nothing is typed into what is hidden, and the progress tick idles.
 func (a *App) screenHeld() bool {
-	switch a.layoutMode() {
-	case layoutTooSmall:
+	if a.layoutMode() == layoutTooSmall {
 		return true
-	case layoutCompact:
-		return a.hasActiveOverlay()
 	}
-	return false
+	o := a.activeOverlay()
+	return o != nil && a.overlayDrawFor(o) == drawHeld
 }
 
 // keyReachesComponents reports whether a key press is fed to the embedded
@@ -104,16 +101,18 @@ func (a *App) keyReachesComponents(msg tea.KeyPressMsg) bool {
 	return o != nil && a.heldEscFor(o) != heldEscOff
 }
 
-// refuseOverlay answers an action that would open an overlay. In the normal
-// layout it does nothing and reports false. Below it, it disarms the chord,
-// writes the refusal on the feedback line and reports true, and the caller
-// opens nothing.
-func (a *App) refuseOverlay() bool {
-	if a.layoutMode() == layoutNormal {
+// refuseOverlay answers an action that would open the overlay called name.
+// Where that overlay opens (overlayOpensHere) it does nothing and reports
+// false. Where the terminal is smaller than the overlay needs, it disarms
+// the chord, writes the refusal naming that size on the feedback line and
+// reports true, and the caller opens nothing.
+func (a *App) refuseOverlay(name string) bool {
+	ok, w, h := a.overlayOpensHere(name)
+	if ok {
 		return false
 	}
 	a.disarmChord()
-	a.setFeedbackWithSeverity(compactRefusal, severityWarning)
+	a.setFeedbackWithSeverity(compactRefusal(w, h), severityWarning)
 	return true
 }
 
@@ -128,15 +127,15 @@ func (a *App) menuItem(chord string) *ActionMenuItem {
 	return nil
 }
 
-// refusedForSize reports whether chord is an action the current layout
-// refuses, and refuses it: one that opens an overlay (ActionMenuItem.Opens)
-// below the normal layout.
+// refusedForSize reports whether chord is an action the current size
+// refuses, and refuses it: one whose overlay (ActionMenuItem.Opens) needs a
+// larger terminal than this one.
 func (a *App) refusedForSize(chord string) bool {
 	if a.layoutMode() == layoutNormal {
 		return false
 	}
 	item := a.menuItem(chord)
-	return item != nil && item.Opens != "" && a.refuseOverlay()
+	return item != nil && item.Opens != "" && a.refuseOverlay(item.Opens)
 }
 
 // noticeView is a notice that replaces the screen, cut to the terminal: no
@@ -159,11 +158,12 @@ func (a *App) tooSmallView() tea.View {
 	)
 }
 
-// heldOverlayView covers an overlay kept open below the normal layout. Its
-// Esc line is heldEscFor, the rule the handleKey size guard delivers Esc by.
+// heldOverlayView covers an overlay kept open in a terminal smaller than its
+// current state needs, and names that size. Its Esc line is heldEscFor, the
+// rule the handleKey size guard delivers Esc by.
 func (a *App) heldOverlayView(o *overlayEntry) tea.View {
 	return a.noticeView(
-		heldOverlayNotice,
+		heldOverlayNotice(a.overlayNeed(o)),
 		"",
 		"Open: "+o.title,
 		heldEscLine(a.heldEscFor(o)),

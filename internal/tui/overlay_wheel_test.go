@@ -11,6 +11,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/stats"
 )
 
 // overlayWheelCase puts one scrolling overlay, already open, into the state
@@ -138,6 +139,15 @@ var overlayWheelCases = map[string]overlayWheelCase{
 		},
 		pos:  func(a *App) string { return fmt.Sprint(a.clientTokensDlg.list.Index()) },
 		rows: 1,
+	},
+	"stats": {
+		// Only the bare form scrolls: the normal one shows every figure.
+		prepare: func(t *testing.T, a *App) {
+			a.Update(tea.WindowSizeMsg{Width: 30, Height: 8})
+			a.statsDlg.SetSnapshot(stats.Snapshot{})
+		},
+		pos:  func(a *App) string { return fmt.Sprint(a.statsDlg.bareVP.YOffset()) },
+		rows: 3,
 	},
 	"job log": {
 		prepare: func(t *testing.T, a *App) {

@@ -19,6 +19,9 @@ func (m *SettingsModel) View() string {
 	if !m.visible {
 		return ""
 	}
+	if m.bare() {
+		return m.bareView()
+	}
 
 	// Restart overlay
 	if m.showRestartOverlay {

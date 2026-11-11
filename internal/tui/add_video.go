@@ -211,6 +211,9 @@ type AddVideoModel struct {
 
 	// Shared text input component (holds the currently-active text field)
 	textInput textinput.Model
+	// heldInput is the input as it was when the terminal left the normal
+	// layout (bareHeldInput). SetSize is its one writer and reader.
+	heldInput bareHeldInput
 
 	// Loading spinner
 	spinner spinner.Model
@@ -242,8 +245,15 @@ func (m *AddVideoModel) IsVisible() bool {
 
 // SetSize updates the dialog dimensions.
 func (m *AddVideoModel) SetSize(w, h int) {
+	was := layoutModeFor(m.width, m.height)
 	m.width = w
 	m.height = h
+	// The bare form draws the input from a copy. Only a value written while
+	// the terminal was small is laid out again for the normal form, which
+	// itself only sets a width.
+	if m.heldInput.resized(&m.textInput, was, layoutModeFor(w, h)) {
+		m.bareLeave()
+	}
 }
 
 func (m *AddVideoModel) reset() {
@@ -519,6 +529,10 @@ func (m *AddVideoModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	// Route table events during format selection. A table still on Auto
 	// spends the first navigation key showing its cursor (startPicking).
 	if !m.loading && m.formats != nil && (m.step == AddStepVideoFormat || m.step == AddStepAudioFormat) && m.startPicking(msg) {
+		return tea.Batch(cmds...)
+	}
+	// The bare form pages by the rows it draws (add_video_bare.go).
+	if m.barePage(msg) {
 		return tea.Batch(cmds...)
 	}
 	if !m.loading && m.formats != nil {
@@ -880,6 +894,9 @@ func (m *AddVideoModel) GetPlatform() string { return m.platform }
 func (m *AddVideoModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView()
 	}
 
 	boxW := max(min(80, m.width-4), 30) // match TS: min(width, 80)

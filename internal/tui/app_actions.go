@@ -146,9 +146,9 @@ func clipboardFeedback(url string, sentViaOSC52 bool) string {
 // dispatchAction executes a chord action. For job-specific actions, job comes from
 // the selected task (keyboard chords) or from the menu's job picker (menu flow).
 func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cmd) {
-	// Below the normal layout an action that opens an overlay is refused on
-	// the feedback line (owner ruling R-C5). Every way to an action passes
-	// here: the chords, the single keys and the action menu.
+	// An action whose overlay needs a larger terminal than this one is
+	// refused on the feedback line (owner ruling R-C5). Every way to an
+	// action passes here: the chords, the single keys and the action menu.
 	if a.refusedForSize(chord) {
 		return a, nil
 	}
@@ -682,17 +682,22 @@ func (a *App) chordHint(prefix string) (hint string, refused bool) {
 
 	var parts, keys []string
 	droppedForSize := false
+	needW, needH := 0, 0 // the largest size a dropped chord's overlay needs
 	for i := range items {
 		item := &items[i]
 		// Match items whose chord starts with this prefix (e.g. "A " for prefix "a")
 		if !strings.HasPrefix(item.Chord, upperPrefix+" ") {
 			continue
 		}
-		// Below the normal layout the chords that open an overlay are
-		// refused (refusedForSize), so the hint does not offer them.
-		if item.Opens != "" && a.layoutMode() != layoutNormal {
-			droppedForSize = true
-			continue
+		// A chord whose overlay needs a larger terminal than this one is
+		// refused (refusedForSize), so the hint does not offer it. Help's
+		// compact list drops the same chords by the same predicate.
+		if item.Opens != "" {
+			if ok, w, h := a.overlayOpensHere(item.Opens); !ok {
+				droppedForSize = true
+				needW, needH = max(needW, w), max(needH, h)
+				continue
+			}
 		}
 		// For NeedsJob items, check if selected job passes the filter — unless
 		// the chord will act on the batch selection instead, which is what
@@ -726,7 +731,7 @@ func (a *App) chordHint(prefix string) (hint string, refused bool) {
 
 	if len(parts) == 0 {
 		if droppedForSize {
-			return compactRefusal, true
+			return compactRefusal(needW, needH), true
 		}
 		return label + ": (none available) (3s)", false
 	}

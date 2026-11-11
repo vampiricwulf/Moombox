@@ -149,10 +149,16 @@ func (a *App) View() tea.View {
 	}
 
 	// The overlay on top, if any (the registry order: overlays.go). Below
-	// the normal layout it is kept with its state, under a notice.
+	// the normal layout it is drawn bare where it has a bare form that fits,
+	// and is otherwise kept with its state, under a notice (overlay_bare.go).
+	// A bare view is already the size of the terminal; fitBlock only makes
+	// sure of it.
 	if o := a.activeOverlay(); o != nil {
-		if mode != layoutNormal {
+		switch a.overlayDrawFor(o) {
+		case drawHeld:
 			return a.heldOverlayView(o)
+		case drawBare:
+			return a.viewWithMode(fitBlock(o.view(a), a.width, a.height))
 		}
 		return a.viewWithMode(o.view(a))
 	}

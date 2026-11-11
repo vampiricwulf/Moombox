@@ -20,7 +20,8 @@ type Health struct {
 	// restart succeeds.
 	Healthy bool
 	// Reason is why it last went down ("stdout EOF", "readPump panic",
-	// "stdin write stalled for 1m30s", a failed initial start). Empty while
+	// "stdin write stalled for 1m30s", "event loop unresponsive: no ping
+	// answer in 30s", a failed initial start). Empty while
 	// healthy.
 	Reason string
 	// Restarts counts SUCCESSFUL supervisor restarts this process.

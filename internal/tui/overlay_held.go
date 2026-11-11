@@ -1,11 +1,14 @@
 package tui
 
-// An overlay kept open below the normal layout is covered by a notice
-// (heldOverlayView, owner ruling R-C6) and nothing it draws is on screen. Esc
-// is the one key that may still reach it, and only where it does nothing the
-// operator cannot foresee from the notice: where the overlay's own Esc would
-// quit Moombox, or answer a prompt that is not on screen, it is not
-// delivered, and the notice says so. The notice's Esc line and the handleKey
+// An overlay open in a terminal smaller than it needs (overlayDrawFor says
+// drawHeld: it has no bare form, or its current state needs more room) is
+// covered by a notice (heldOverlayView, owner ruling R-C6 as amended) and
+// nothing it draws is on screen. An overlay drawn bare is on screen, takes
+// every key itself and is not this file's business. Under the notice, Esc
+// is the one key that may still reach the overlay, and only where it does
+// nothing the operator cannot foresee from the notice: where the overlay's
+// own Esc would quit Moombox, or answer a prompt that is not on screen, it
+// is not delivered, and the notice says so. The notice's Esc line and the handleKey
 // size guard both ask heldEscFor, so what the screen says is what Esc does.
 
 // heldEscKind is what Esc does to an overlay kept under the notice.
@@ -43,33 +46,6 @@ func (a *App) heldEscFor(o *overlayEntry) heldEscKind {
 	return o.heldEsc(a)
 }
 
-// heldEsc for Settings. With unsaved edits Esc raises the "Save changes?"
-// prompt, and a second Esc dismisses it, so under the notice it would only
-// toggle a prompt nobody sees and never close.
-func (m *SettingsModel) heldEsc() heldEscKind {
-	switch {
-	case m.showRestartOverlay:
-		return heldEscCloses
-	case m.closeConfirm, m.dirty && m.status != saveError:
-		return heldEscOff
-	}
-	switch sections[m.sectionIndex].name {
-	case "Channels":
-		if m.channelMode == "edit" || m.channelDeleteConf {
-			return heldEscBack
-		}
-	case "Integrations":
-		if m.notifMode == "edit" || m.notifDeleteConf {
-			return heldEscBack
-		}
-	case "Network":
-		if m.secMode != securityStatus {
-			return heldEscBack
-		}
-	}
-	return heldEscCloses
-}
-
 // heldEsc for the FFmpeg check. On its main menu Esc quits Moombox
 // (TestEscOnTheFFmpegOverlayStillQuits); under the notice only Ctrl+C may.
 func (m *FFmpegCheckModel) heldEsc() heldEscKind {
@@ -93,55 +69,4 @@ func (m *SetupWizardModel) heldEsc() heldEscKind {
 		return heldEscCloses // the E L login overlay, on its platform list
 	}
 	return heldEscBack
-}
-
-func (m *ActionMenuModel) heldEsc() heldEscKind {
-	if m.mode == menuMain {
-		return heldEscCloses
-	}
-	return heldEscBack
-}
-
-func (m *ImportDialogModel) heldEsc() heldEscKind {
-	switch m.step {
-	case importStepPick:
-		return heldEscCloses
-	case importStepMeta:
-		return heldEscBack
-	}
-	return heldEscOff // importing: its Esc does nothing
-}
-
-func (m *ChapterImportDialogModel) heldEsc() heldEscKind {
-	if m.step == chapterImportStepConfirm {
-		return heldEscBack
-	}
-	return heldEscCloses
-}
-
-func (m *AddVideoModel) heldEsc() heldEscKind {
-	if m.submitting || m.step == AddStepURL {
-		return heldEscCloses
-	}
-	return heldEscBack
-}
-
-// heldEsc for the trim dialog, in the order of its handleEscape.
-func (m *TrimDialogModel) heldEsc() heldEscKind {
-	switch {
-	case m.mode == TrimModeCreate && m.createStep == trimStepProgress:
-		return heldEscCloses // the encode carries on in the background
-	case m.mode == TrimModeCreate && m.createStep > trimStepTimes, m.mode == TrimModeDelete:
-		return heldEscBack
-	}
-	return heldEscCloses
-}
-
-// heldEsc for the job log: Esc leaves the search box, then clears an applied
-// search, then closes.
-func (m *JobLogModel) heldEsc() heldEscKind {
-	if m.log.IsSearching() || m.log.searchQuery != "" {
-		return heldEscBack
-	}
-	return heldEscCloses
 }
