@@ -77,6 +77,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `log-panel.test.mjs` | the Logs panel: batched appends, the 500-line window, the snapshot and frame numbers (`logSeq`/`seq`) across connects and resyncs |
 | `open-folder.test.mjs` | Open Folder surfaces a refusal |
 | `password-forms.test.mjs` | the wizard's External Access Password and Settings' Set Password: the bounds the login enforces, checked before posting; the password sent as typed; the warning while it starts or ends with a space |
+| `twitch-moderation.test.mjs` | `chat-timeline.js` `applyTwitchModeration` and the player: a Twitch chat's stored timeouts, bans, clears and deletions mark their messages and show no row of their own |
 | `player.test.mjs` | `player.js`: selection, the chat sidebar and offset, seeking, search, the overlay; a few pure helper tests |
 | `player-chapters.test.mjs` | `player.js`'s chapters: the marker strip under the video and the chapter list, laid out on the global timeline, seeking on click, the current chapter highlighted, nothing drawn for none or a failed fetch, and a slow fetch never holding up playback |
 | `chapter-import-busy.test.mjs` | the chapter-import dialog's committing state: Restore disabled and refused during a Save, Escape through `close()`, and (owner ruling R-B1) a failure of a save Escape dismissed reported as a toast |

@@ -36,12 +36,47 @@ func isContextErr(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// errSidecarDown answers a mint while the configured sidecar is down. There
-// is no goja fallback in sidecar mode: BotGuard's timing check rejects the
+// errSidecarDown answers a mint while the configured sidecar is down and is
+// not coming back in time: its first start never succeeded, or it has been
+// down for sidecarMintGrace of the outage (awaitSidecar). There is no goja
+// fallback in sidecar mode: BotGuard's timing check rejects the
 // in-process path, so it mints no PO token in practice, and running it cost
 // every request during an outage seconds to minutes of doomed work and three
 // Google round trips, serialised behind one lock.
 var errSidecarDown = errors.New("BotGuard sidecar unavailable — no PO token until it is back up")
+
+// sidecarMintGrace is how long the sidecar may be down before a mint that
+// meets it fails with errSidecarDown (owner ruling R-F1): within it a mint
+// whose caller has the time (awaitSidecar) waits for the child, as a
+// signature solve does for the same 60 s (cipher's sidecarReadyGrace, owner
+// decision PR-R3). The supervisor restarts a crashed child in seconds, and a
+// GVS mint that fails drops its capture to the token-free pick or to HLS, so
+// a burst of streams going live that restarts the child no longer sends each
+// of them there. Measured per outage, not per request, from the first mint
+// that waits for the child (the provider is not told when it went down, and
+// the cipher composite's grace is measured from its first request the same
+// way): once that long has passed, every mint fails at once, as before,
+// until the child is back. A child that has been down for longer, with no
+// mint waiting for it, still gives the first mint that does one full grace.
+// A variable so a test can shorten it; production never writes it.
+var sidecarMintGrace = 60 * time.Second
+
+// sidecarMintPoll is how often a mint waiting out the grace asks the handle
+// whether its child is back.
+var sidecarMintPoll = time.Second
+
+// potSidecar is what PotProvider uses of the sidecar handle.
+// *sidecar.Sidecar is the production one; the interface is here so a test
+// can put a child that goes down and comes back behind the provider without
+// spawning Node.
+type potSidecar interface {
+	IsHealthy() bool
+	Recoverable() bool
+	GeneratePlayerPoToken(ctx context.Context, binding, challenge string) (string, error)
+	GenerateGvsPoToken(ctx context.Context, binding, challenge string) (sidecar.GvsMintResult, error)
+	InvalidateCaches(ctx context.Context) error
+	InvalidateIT(ctx context.Context) error
+}
 
 // bypassInflightSuffix keys a bypassCache mint apart from an ordinary one
 // for the same binding: a caller that must not get the cached minter's token
@@ -114,15 +149,16 @@ type PotProvider struct {
 	// path: a real Node + V8 + JSDOM subprocess runs BotGuard end-to-end
 	// and returns real integrity tokens (not the websafe fallback the
 	// goja path is limited to). While a sidecar is attached its answer is
-	// the answer: a failed mint, or a sidecar that is down, returns the
-	// error and never falls through to goja (see errSidecarDown). The
-	// goja minterCache flow runs only with no sidecar attached.
+	// the answer: a failed mint, or a sidecar that is down past the mint
+	// grace (awaitSidecar), returns the error and never falls through to
+	// goja (see errSidecarDown). The goja minterCache flow runs only with
+	// no sidecar attached.
 	//
 	// Set via SetSidecar (cmd/moombox wires it up after Start). Nil with
 	// [bgutils] use_sidecar = false, and in unit tests so existing
 	// PotProvider* tests keep exercising the goja path without dragging
 	// in subprocess/embed dependencies.
-	sidecar         *sidecar.Sidecar
+	sidecar         potSidecar
 	sidecarMintsHit atomic.Uint64
 	sidecarMintsErr atomic.Uint64
 
@@ -131,6 +167,14 @@ type PotProvider struct {
 	// non-empty watch-page challenge, respectively. Spec §4.3.
 	gvsMints          atomic.Uint64
 	gvsMintsChallenge atomic.Uint64
+
+	// downMu guards downSince: when a mint first began to wait for the
+	// attached sidecar in the outage now running (not when the child went
+	// down), zero while it is up or no mint has waited. What the mint
+	// grace (sidecarMintGrace) is measured from. It is the provider's own
+	// clock, beside the cipher composite's: bgutils does not import cipher.
+	downMu    sync.Mutex
+	downSince time.Time
 }
 
 // PotStats is a snapshot of PotProvider counters. The numeric fields are
@@ -221,14 +265,117 @@ func (pp *PotProvider) lockMinterCreation(ctx context.Context) (func(), error) {
 
 // SetSidecar attaches the BotGuard sidecar to the provider, which puts it in
 // sidecar mode: every mint goes to the sidecar, and while it is down a mint
-// fails at once (errSidecarDown) instead of falling to goja. cmd/moombox
-// attaches the handle whenever [bgutils] use_sidecar is on, started or not —
-// the supervisor brings a failed first start up later. Passing nil reverts to
-// the goja-only path ([bgutils] use_sidecar = false, and tests).
+// waits for it within the mint grace and then fails (awaitSidecar,
+// errSidecarDown) instead of falling to goja. cmd/moombox attaches the handle
+// whenever [bgutils] use_sidecar is on, started or not — the supervisor
+// brings a failed first start up later — and attaches it again each time the
+// supervisor brings the child back, which ends the outage the grace is
+// measured over. Passing nil reverts to the goja-only path ([bgutils]
+// use_sidecar = false, and tests).
 func (pp *PotProvider) SetSidecar(s *sidecar.Sidecar) {
 	pp.mu.Lock()
-	pp.sidecar = s
+	if s == nil {
+		pp.sidecar = nil // not a typed nil: "no sidecar" is the nil interface
+	} else {
+		pp.sidecar = s
+	}
 	pp.mu.Unlock()
+	pp.markSidecarUp()
+}
+
+// awaitSidecar answers whether a sidecar-mode mint may go to sc now: nil
+// when its child is up, waiting for it first when it is down inside the mint
+// grace (sidecarMintGrace) of the outage now running, which starts at the
+// first mint that waits for the child. Once the grace is spent it returns
+// errSidecarDown, at once for every mint after the one that waited it out.
+//
+// Only a caller with the time waits (owner ruling: "don't wait when time is
+// short"): one with no deadline, or with a deadline at least a whole grace
+// away. That is decided once, on entry. A caller whose deadline is nearer
+// gets errSidecarDown at once, as every mint did before the grace existed,
+// so the work it has after the mint under the same deadline keeps the whole
+// of it: the 403 recovery mints first and then re-fetches the player
+// response and resolves the URL under one 10-45 s budget. The deadline is
+// compared with the whole grace, not with what this outage has left of it:
+// late in an outage only seconds of grace are left, and a 10 s caller
+// measured against those would wait away nearly all of its budget. Such a
+// caller does not start the outage's clock either: it changes nothing, as
+// on main, and the first mint that does wait still has a full grace.
+//
+// A caller whose ctx ends while it waits (a cancel) gets its ctx's error. A
+// handle that cannot come back by a restart — its first start has not
+// succeeded, or it was stopped (Sidecar.Recoverable) — is not waited for.
+func (pp *PotProvider) awaitSidecar(ctx context.Context, sc potSidecar) error {
+	if sc.IsHealthy() {
+		pp.markSidecarUp()
+		return nil
+	}
+	if !sc.Recoverable() {
+		return errSidecarDown
+	}
+	left, err := pp.mintWait(ctx, true)
+	if err != nil {
+		return err
+	}
+	pp.logger.Info("[PotProvider] BotGuard sidecar is restarting; the mint waits for it", "upTo", left.Round(time.Second).String())
+	deadline := time.NewTimer(left)
+	defer deadline.Stop()
+	poll := time.NewTicker(sidecarMintPoll)
+	defer poll.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return errSidecarDown
+		case <-poll.C:
+		}
+		if sc.IsHealthy() {
+			pp.markSidecarUp()
+			return nil
+		}
+		if !sc.Recoverable() { // stopped while we waited
+			return errSidecarDown
+		}
+	}
+}
+
+// mintWait is awaitSidecar's decision for a caller that has found a
+// recoverable child down: how long it may wait for it, or the error it gets
+// at once. That is errSidecarDown when the outage's grace is spent or the
+// caller's deadline is nearer than a whole grace (sidecarMintGrace, however
+// much of it this outage has left), and the ctx's error when the ctx has
+// already ended. The wait it returns is what the outage has left. start is whether a caller that may wait
+// starts the outage's clock: true for the mint that is about to wait, false
+// for a caller only asking whether it would (see generatePoTokenChallenge).
+func (pp *PotProvider) mintWait(ctx context.Context, start bool) (time.Duration, error) {
+	pp.downMu.Lock()
+	defer pp.downMu.Unlock()
+	left := sidecarMintGrace
+	if !pp.downSince.IsZero() {
+		left -= time.Since(pp.downSince)
+	}
+	if left <= 0 {
+		return 0, errSidecarDown
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < sidecarMintGrace {
+		return 0, errSidecarDown
+	}
+	if start && pp.downSince.IsZero() {
+		pp.downSince = time.Now()
+	}
+	return left, nil
+}
+
+// markSidecarUp ends the outage the mint grace is measured over: the next
+// time the child is found down starts a new one.
+func (pp *PotProvider) markSidecarUp() {
+	pp.downMu.Lock()
+	pp.downSince = time.Time{}
+	pp.downMu.Unlock()
 }
 
 // GeneratePoToken generates or retrieves a cached PO token for the given content binding.
@@ -298,7 +445,17 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 	}
 	for _, key := range joinable {
 		if entry, ok := pp.inflight[key]; ok {
+			sc := pp.sidecar
 			pp.mu.Unlock()
+			// The mint in flight may be waiting for a restarting sidecar,
+			// and joining it would be waiting too. A caller without the
+			// time for that is told at once, as it would be leading the
+			// mint itself (awaitSidecar).
+			if sc != nil && !sc.IsHealthy() && sc.Recoverable() {
+				if _, err := pp.mintWait(ctx, false); err != nil {
+					return nil, err
+				}
+			}
 			pp.inflightWaits.Add(1)
 			pp.logger.Debug("[PotProvider] waiting for inflight request", "binding", bindingPrefix)
 			select {
@@ -309,8 +466,12 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 				// same video, which went on without a token and 403'd. Ask
 				// again; the leader's entry is gone by now. Any other
 				// failure, a timeout inside the mint included, is the
-				// answer (see leaderGone).
-				if entry.leaderGone && isContextErr(entry.err) && ctx.Err() == nil {
+				// answer (see leaderGone), but for one: errSidecarDown may
+				// be the leader's alone, because a leader whose deadline is
+				// too near does not wait for a restarting sidecar
+				// (awaitSidecar). So a waiter asks that question for itself:
+				// it waits if it may, and is otherwise told the same at once.
+				if ((entry.leaderGone && isContextErr(entry.err)) || errors.Is(entry.err, errSidecarDown)) && ctx.Err() == nil {
 					return pp.generatePoTokenChallenge(ctx, contentBinding, bypassCache, challenge)
 				}
 				return entry.session, entry.err
@@ -525,18 +686,19 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 	// BotGuard's timing fingerprint and returns real integrity tokens.
 	// Bypasses the goja minterCache entirely (the sidecar maintains its
 	// own internal minter cache, ~6h TTL). A sidecar that is attached but
-	// down, or a sidecar mint that fails, is the answer: see errSidecarDown
-	// for why there is no goja fallback in sidecar mode.
+	// down past the mint grace (awaitSidecar), or a sidecar mint that fails,
+	// is the answer: see errSidecarDown for why there is no goja fallback in
+	// sidecar mode.
 	// challenge (non-fresh: no freshMinter flag) is only consulted by the
 	// sidecar when IT has no valid cached minter of its own — see
 	// Sidecar.GeneratePlayerPoToken.
 	pp.mu.Lock()
 	sc := pp.sidecar
 	pp.mu.Unlock()
-	if sc != nil && !sc.IsHealthy() {
-		return nil, errSidecarDown
-	}
 	if sc != nil {
+		if err := pp.awaitSidecar(ctx, sc); err != nil {
+			return nil, err
+		}
 		bindingPrefix := contentBinding[:min(len(contentBinding), 20)]
 		pp.logger.Debug("[PotProvider] minting via sidecar", "binding", bindingPrefix, "bypassCache", bypassCache)
 		// bypassCache must reach the sidecar too, or the caller's explicit
@@ -759,9 +921,10 @@ func (pp *PotProvider) GenerateGvsPoToken(ctx context.Context, contentBinding, c
 	sc := pp.sidecar
 	pp.mu.Unlock()
 	if sc != nil {
-		// Sidecar mode: no goja fallback (see errSidecarDown).
-		if !sc.IsHealthy() {
-			return GvsMint{}, errSidecarDown
+		// Sidecar mode: no goja fallback (see errSidecarDown). A child
+		// that is restarting is waited for within the mint grace.
+		if err := pp.awaitSidecar(ctx, sc); err != nil {
+			return GvsMint{}, err
 		}
 		res, err := sc.GenerateGvsPoToken(ctx, contentBinding, challenge)
 		if err == nil {
