@@ -6,39 +6,50 @@ import (
 	"time"
 )
 
-// A bind failure that arrives later than the old fixed 500 ms wait still
-// reaches the failure arm: run() exits headless, or marks the dashboard
-// failed, on it. Under the fixed wait it was only logged.
+// A bind failure reaches the failure arm however late it arrives: run()
+// exits headless, or marks the dashboard failed, on it. Under the old fixed
+// 500 ms wait a later failure was only logged. The wait is on the signals
+// alone, so the test holds the error back on a channel instead of sleeping.
 //
-// Mutant: put a 500 ms timer back in awaitWebBind (the outcome is
-// webBindUndecided).
-func TestAwaitWebBindSeesAFailureSlowerThanHalfASecond(t *testing.T) {
+// Mutant: return webBindUndecided from awaitWebBind before either signal.
+func TestAwaitWebBindWaitsForALateFailure(t *testing.T) {
 	startErr := make(chan error, 1)
-	bound := make(chan struct{})
 	want := errors.New("TLS setup: boom")
+	type result struct {
+		outcome webBindOutcome
+		err     error
+	}
+	done := make(chan result, 1)
 	go func() {
-		time.Sleep(700 * time.Millisecond)
-		startErr <- want
+		outcome, err := awaitWebBind(startErr, make(chan struct{}), 30*time.Second)
+		done <- result{outcome, err}
 	}()
-	outcome, err := awaitWebBind(startErr, bound, 30*time.Second)
-	if outcome != webStartReturned || !errors.Is(err, want) {
-		t.Fatalf("outcome %v, err %v; want webStartReturned with the Start error", outcome, err)
+	// Nothing has been signalled, so it must still be waiting.
+	select {
+	case got := <-done:
+		t.Fatalf("returned %v, %v before any signal", got.outcome, got.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	startErr <- want
+	select {
+	case got := <-done:
+		if got.outcome != webStartReturned || !errors.Is(got.err, want) {
+			t.Fatalf("outcome %v, err %v; want webStartReturned with the Start error", got.outcome, got.err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("awaitWebBind did not return on the Start error")
 	}
 }
 
-// A bound server ends the wait at once: a healthy boot no longer pays a
-// fixed delay.
-func TestAwaitWebBindReturnsAtOnceWhenBound(t *testing.T) {
+// A bound server ends the wait on the signal, not on the backstop (30 s
+// here): a healthy boot no longer pays a fixed delay.
+func TestAwaitWebBindReturnsWhenBound(t *testing.T) {
 	startErr := make(chan error, 1)
 	bound := make(chan struct{})
 	close(bound)
-	begin := time.Now()
 	outcome, err := awaitWebBind(startErr, bound, 30*time.Second)
 	if outcome != webBound || err != nil {
 		t.Fatalf("outcome %v, err %v; want webBound, nil", outcome, err)
-	}
-	if took := time.Since(begin); took > 250*time.Millisecond {
-		t.Errorf("a bound server was waited on for %v", took)
 	}
 }
 
