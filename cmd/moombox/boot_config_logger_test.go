@@ -151,8 +151,9 @@ func TestBootWithoutAnOverrideLogsAtTheConfiguredLevel(t *testing.T) {
 // first: ahead of the database, which opens at the path the config names and
 // logs to the logger it built.
 //
-// Mutants: drop the s.initConfigAndLogger call from initServices, or move it
-// below database.Open.
+// Mutants: drop the s.initConfigAndLogger call from initServices, move it
+// below database.Open, or pass it "" in place of logLevelOverride (the
+// -log-level flag then reaches nothing).
 func TestInitServicesStartsWithTheConfigAndLogger(t *testing.T) {
 	calls, fset := callsInFunc(t, "services.go", "initServices")
 	boot := firstCall(calls, "s", "initConfigAndLogger")
@@ -165,6 +166,14 @@ func TestInitServicesStartsWithTheConfigAndLogger(t *testing.T) {
 	}
 	if open < boot {
 		t.Errorf("initServices opens the database (%s) before the config and logger exist (%s)", fset.Position(open), fset.Position(boot))
+	}
+	for _, c := range calls {
+		if c.recv != "s" || c.name != "initConfigAndLogger" {
+			continue
+		}
+		if got := strings.Join(c.args, ", "); got != "logLevelOverride" {
+			t.Errorf("initServices calls s.initConfigAndLogger(%s) at %s; want its own logLevelOverride, the -log-level flag", got, fset.Position(c.pos))
+		}
 	}
 	for _, c := range calls {
 		if c.pos < boot && c.name != "Println" {
