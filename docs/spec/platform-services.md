@@ -924,7 +924,7 @@ The verdict is anonymous-vs-signed-in, never entitlement — a signed-in token t
 
 #### Message Processing
 
-The IRC parser handles two message types:
+The IRC parser turns four commands into rows of the chat file: two kinds of message, and two moderation events.
 
 **PRIVMSG** (regular chat and bits):
 - Tag fields extracted: `id`, `tmi-sent-ts` (epoch ms), `bits`, `display-name`, `login`, `user-id`, `badges`, `color`, `emotes`.
@@ -936,6 +936,14 @@ The IRC parser handles two message types:
 **USERNOTICE** (subs, raids, memberships):
 - Tag fields extracted: same as PRIVMSG plus `msg-id`, `system-msg`, `msg-param-sub-plan`, `msg-param-recipient-display-name`, `msg-param-viewerCount`.
 - Message type normalization: `sub` -> `"sub"`, `resub` -> `"resub"`, `subgift`/`submysterygift` -> `"subgift"`, `raid` -> `"raid"`, everything else -> `"system"`.
+
+**CLEARCHAT and CLEARMSG** (moderation, owner ruling R-G1). Twitch IRC has no replay, so a deletion Moombox does not write down when it arrives cannot be recovered later. `parseClearchat` and `parseClearmsg` (`internal/twitch/chat_irc.go`) store each as a row of its own with `messageType` `"moderation"` (`MessageTypeModeration`, `internal/twitch/types.go`), added through `addMessage` like any message: it is counted in the running total and in `messageCount`, deduplicated by its `id`, flushed, appended and resumed with no path of its own. The messages the event removed are never rewritten; the file stays append-only.
+- `CLEARMSG` (one message deleted): `moderation` `"deleted"`, `targetMsgId` from `target-msg-id`, `targetLogin` from `login`. A line with no `target-msg-id` is dropped.
+- `CLEARCHAT` naming a user: `moderation` `"author_deleted"`, `targetUserId` from `target-user-id`, `targetLogin` from the trailing parameter, and `banDurationSec` from `ban-duration` for a timeout; no `ban-duration` is a permanent ban.
+- `CLEARCHAT` naming nobody (the whole chat cleared): `moderation` `"chat_cleared"`. The three shapes are told apart as chatterino does (`references/chatterino7` IrcMessageHandler.cpp `parseClearChatMessage`).
+- `deleted` and `author_deleted` are the YouTube markers' own words (`MarkerDeleted`, `MarkerAuthorDeleted`, `internal/chat/types.go`).
+- Every such row has an empty `message` and `authorId`, `authorName` `"Moderation"`, the event as a sentence in `systemMsg` ("ronni was timed out for 10m.", "ronni was banned.", "A message from ronni was deleted by a moderator.", "Chat was cleared by a moderator."), the verbatim line in `raw`, and `timestampMs`/`offsetMs` from `tmi-sent-ts` like any row. Neither command carries an `id` tag, so the row's `id` is derived: `clearmsg-<target-msg-id>`, `clearchat-<tmi-sent-ts>-<target-user-id>` or `clearchat-<tmi-sent-ts>-all`.
+- The Web player applies the rows when it loads the file and shows none of them; see data-and-storage.md § Chat Files. VOD chat (GQL comments) has no such rows: Twitch does not return a deleted comment at all. Pinned by `internal/twitch/chat_moderation_test.go` and `web/tests/twitch-moderation.test.mjs`.
 
 IRCv3 tag values are decoded through `unescapeIRCTag` (`internal/twitch/chat_irc.go`) — `\:` to `;`, `\s` to a space, `\\`, `\r` and `\n`, with an unknown escape yielding its character and a lone trailing backslash dropped. It is applied to `system-msg`, `display-name` and `msg-param-recipient-display-name`, the same three chatterino decodes (`references/chatterino7` IrcHelpers.hpp). The reachable case is a system message that quotes a semicolon: `;` separates tags on the wire, so Twitch must escape it.
 

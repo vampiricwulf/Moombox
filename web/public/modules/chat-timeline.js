@@ -173,6 +173,79 @@ export function mergePartChats(parts) {
   return merged;
 }
 
+/** The `messageType` of a stored Twitch CLEARCHAT or CLEARMSG (Go: twitch.MessageTypeModeration). */
+export const TWITCH_MODERATION_TYPE = "moderation";
+
+/** What a marked message's "deleted" tooltip says when its row carries no sentence. */
+const TWITCH_MODERATION_FALLBACK = {
+  deleted: "Deleted by a moderator.",
+  author_deleted: "The user was timed out or banned.",
+  chat_cleared: "Chat was cleared by a moderator.",
+};
+
+/**
+ * Apply a Twitch chat file's moderation rows and take them out of the list
+ * (owner ruling R-G1).
+ *
+ * The live IRC recorder stores each CLEARCHAT and CLEARMSG as a row of its
+ * own, `messageType: "moderation"`, in arrival order, and never rewrites the
+ * messages the event removed (internal/twitch/types.go). This is the one pass
+ * that turns the rows into the marks the player already draws for YouTube
+ * (`deleted`, `deletedState`: _markChatChange, the overlay's skip, the
+ * dropped-count rule):
+ *
+ * - `moderation: "deleted"` marks the one message whose `id` is `targetMsgId`;
+ * - `"author_deleted"` (a timeout or a ban) marks every EARLIER message whose
+ *   `authorId` is `targetUserId` — the user may post again once a timeout ends;
+ * - `"chat_cleared"` marks every earlier message.
+ *
+ * "Earlier" is the array's order, which is the order the rows were written
+ * in, so call this BEFORE the sort by offset; for a multi-part job, on the
+ * merged list, so a ban in part 2 reaches the user's messages in part 1. A
+ * marked message's `deletedState` is the sentence of the first event that
+ * removed it. A row of a kind this build does not know marks nothing and is
+ * still hidden.
+ *
+ * A list with no moderation row — every YouTube file, every VOD chat, every
+ * file written before the rows existed — is returned as it is, the same
+ * array, untouched. Otherwise the kept messages are marked in place and a new
+ * array without the rows is returned.
+ * @param {Array<object>} messages in file order
+ * @returns {Array<object>}
+ */
+export function applyTwitchModeration(messages) {
+  if (!Array.isArray(messages)) return messages;
+  if (!messages.some((m) => m && m.messageType === TWITCH_MODERATION_TYPE)) return messages;
+  // Walked BACKWARDS, so each lookup already holds the earliest event after
+  // the message in hand: a later event of the same kind is overwritten by an
+  // earlier one as the walk reaches it.
+  const byMsgId = new Map();
+  const byUserId = new Map();
+  let clearAll = null;
+  const kept = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m) continue;
+    if (m.messageType === TWITCH_MODERATION_TYPE) {
+      const event = { index: i, row: m };
+      if (m.moderation === "deleted" && m.targetMsgId) byMsgId.set(m.targetMsgId, event);
+      else if (m.moderation === "author_deleted" && m.targetUserId) byUserId.set(m.targetUserId, event);
+      else if (m.moderation === "chat_cleared") clearAll = event;
+      continue;
+    }
+    kept.push(m);
+    let first = clearAll;
+    for (const e of [m.id ? byMsgId.get(m.id) : undefined, m.authorId ? byUserId.get(m.authorId) : undefined]) {
+      if (e && (!first || e.index < first.index)) first = e;
+    }
+    if (!first || m.deleted === true) continue;
+    m.deleted = true;
+    const sentence = typeof first.row.systemMsg === "string" ? first.row.systemMsg.trim() : "";
+    m.deletedState = sentence || TWITCH_MODERATION_FALLBACK[first.row.moderation];
+  }
+  return kept.reverse();
+}
+
 /** The CTCP wrapper Twitch sends a /me message in: \x01ACTION <text>\x01. */
 const TWITCH_ACTION_PREFIX = "\u0001ACTION ";
 const TWITCH_SOH = "\u0001";

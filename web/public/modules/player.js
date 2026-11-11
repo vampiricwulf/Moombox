@@ -13,6 +13,7 @@ import {
   formatChatHeader,
   dividerLabelFor,
   correctLegacyTwitchEmotes,
+  applyTwitchModeration,
 } from "./chat-timeline.js";
 import { LaneAllocator, seedCursorIndex } from "./nico-lanes.js";
 import { letterboxStage, rowsFor, sameStage, nextGeometry, NICO_GEO_SETTLE_MS } from "./nico-geometry.js";
@@ -1540,7 +1541,14 @@ export class PlayerController {
           // reader, correctLegacyTwitchEmotes, already ran in _fetchChatData,
           // and kept it would stay in memory for as long as the job is open.
           // This map sees the single-file and the merged multi-part result.
-          this.playerChatMessages = (chatData.messages || [])
+          //
+          // First, while the list is still in file order: a Twitch file's
+          // moderation rows (a stored CLEARCHAT or CLEARMSG, owner ruling
+          // R-G1) mark the messages they removed `deleted` and leave the
+          // list, so nothing below — the sidebar's rows, the overlay's
+          // cursor, the counts — ever holds one. A file with none comes back
+          // as the same array.
+          this.playerChatMessages = applyTwitchModeration(chatData.messages || [])
             .map(({ raw: _raw, ...m }) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
             .sort((a, b) => a.offsetMs - b.offsetMs);
 
