@@ -491,39 +491,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	if exeErr == nil {
 		rolledBackFrom = rolledBackRelease(exeSelf, version)
 	}
-	if configLoaded && lastRunVersion != version {
-		if announcesVersionChange(lastRunVersion, version, rolledBackFrom) {
-			// Reflect whether the dashboard actually came back: in TUI mode
-			// a failed web bind logs-and-continues above, and "restarted
-			// successfully" on the operator's phone while the dashboard is
-			// dead would be a lie. FAILED only on a CONFIRMED bind error —
-			// a bind still unanswered at webBindBackstop leaves ActualPort
-			// 0, and claiming failure then would be a false alarm; the
-			// notice then says nothing about the dashboard.
-			fields := []notifications.Field{
-				{Name: "Previous Version", Value: "v" + lastRunVersion, Inline: true},
-				{Name: "Current Version", Value: "v" + version, Inline: true},
-			}
-			ntype := notifications.TypeSuccess
-			desc := fmt.Sprintf("Moombox updated from v%s to v%s and restarted successfully", lastRunVersion, version)
-			switch {
-			case webBindFailed:
-				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "FAILED — check logs", Inline: true})
-				ntype = notifications.TypeWarning
-				desc = fmt.Sprintf("Moombox updated from v%s to v%s and restarted — but the web dashboard failed to start", lastRunVersion, version)
-			case webServer.ActualPort() > 0:
-				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "OK", Inline: true})
-			}
-			notifyMgr.Send("Update Applied", desc, ntype, fields,
-				notifications.SendOptions{Event: "update_applied"},
-			)
-		}
-		if err := s.configStore.Update(func(c *config.MoomboxConfig) {
-			c.Updates.LastRunVersion = version
-		}); err != nil {
-			log.Warn("failed to persist last-run version", slog.String("error", err.Error()))
-		}
-	}
+	s.announceVersionChange(lastRunVersion, configLoaded, rolledBackFrom, webBindFailed)
 
 	// Launcher-staleness note: an in-place update replaces the binary on
 	// disk, but the supervisor PROCESS keeps running the code it started

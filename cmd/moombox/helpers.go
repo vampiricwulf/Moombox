@@ -502,6 +502,51 @@ func announcesVersionChange(lastRunVersion, currentVersion, rolledBackFrom strin
 	return lastRunVersion != "" && lastRunVersion != currentVersion && rolledBackFrom == ""
 }
 
+// announceVersionChange is run()'s update-applied step, taken once the web
+// bind has resolved. When a config file exists and the version the previous
+// run recorded (lastRunVersion) is not this one, it sends "Update Applied"
+// if announcesVersionChange says this boot announces it, and then records
+// this version as the last run, announced or not. configLoaded is the
+// config's ConfigLoaded and rolledBackFrom is rolledBackRelease's answer,
+// both as run() read them; webBindFailed is resolveWebBind's. run() states
+// why the step is gated on ConfigLoaded.
+func (s *runState) announceVersionChange(lastRunVersion string, configLoaded bool, rolledBackFrom string, webBindFailed bool) {
+	log, notifyMgr, webServer := s.log, s.notifyMgr, s.webServer
+	if configLoaded && lastRunVersion != version {
+		if announcesVersionChange(lastRunVersion, version, rolledBackFrom) {
+			// Reflect whether the dashboard actually came back: in TUI mode
+			// a failed web bind logs-and-continues (resolveWebBind), and "restarted
+			// successfully" on the operator's phone while the dashboard is
+			// dead would be a lie. FAILED only on a CONFIRMED bind error —
+			// a bind still unanswered at webBindBackstop leaves ActualPort
+			// 0, and claiming failure then would be a false alarm; the
+			// notice then says nothing about the dashboard.
+			fields := []notifications.Field{
+				{Name: "Previous Version", Value: "v" + lastRunVersion, Inline: true},
+				{Name: "Current Version", Value: "v" + version, Inline: true},
+			}
+			ntype := notifications.TypeSuccess
+			desc := fmt.Sprintf("Moombox updated from v%s to v%s and restarted successfully", lastRunVersion, version)
+			switch {
+			case webBindFailed:
+				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "FAILED — check logs", Inline: true})
+				ntype = notifications.TypeWarning
+				desc = fmt.Sprintf("Moombox updated from v%s to v%s and restarted — but the web dashboard failed to start", lastRunVersion, version)
+			case webServer.ActualPort() > 0:
+				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "OK", Inline: true})
+			}
+			notifyMgr.Send("Update Applied", desc, ntype, fields,
+				notifications.SendOptions{Event: "update_applied"},
+			)
+		}
+		if err := s.configStore.Update(func(c *config.MoomboxConfig) {
+			c.Updates.LastRunVersion = version
+		}); err != nil {
+			log.Warn("failed to persist last-run version", slog.String("error", err.Error()))
+		}
+	}
+}
+
 // resolveUpdateBreadcrumb consumes the .update-pending breadcrumb beside
 // exePath: the tag ApplyUpdate updated TO, written right before its restart.
 // Our own version means the update landed — just remove it. A rollback
