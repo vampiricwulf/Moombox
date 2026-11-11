@@ -34,7 +34,7 @@ import (
 // nothing muxed and staging kept.
 
 // orchestratorMuxingWrites are the Muxing writes each orchestrator file
-// makes, by file. MuxJob's own Muxing write (worker.go) is the operator's Mux
+// makes, by file. MuxJob's own Muxing write (worker_verbs.go) is the operator's Mux
 // action, decided on the row they chose, and is not one of them.
 var orchestratorMuxingWrites = map[string]int{
 	"orchestrator.go":         2, // ExecuteWithChat: the VOD branch, the live branch

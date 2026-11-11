@@ -695,7 +695,7 @@ func cookieFileErrorLabel(code string, t barTier) string {
 // stays binary, matching them, rather than inventing a third answer here.
 //
 // One site deliberately decides the empty case the OTHER way and is not a
-// counter-example to the above: worker.go:1072 is choosing which platform to
+// counter-example to the above: attemptCookieRefresh (worker_failure.go) is choosing which platform to
 // drive a refresh AGAINST, where guessing wrong does work on the wrong
 // credentials. Attributing a badge and dispatching a refresh carry different
 // costs for the same unknown, so they are allowed to differ — but a survey
@@ -708,7 +708,7 @@ func cookieFileErrorLabel(code string, t barTier) string {
 // dead credentials or membership", and that is a tidier split than the code:
 //
 //   - ParkReasonMembership: the request WAS signed in and YouTube refused
-//     anyway. worker.go:1058 logs "the credentials are alive and the account
+//     anyway. attemptCookieRefresh (worker_failure.go) logs "the credentials are alive and the account
 //     simply lacks access". The remedy is cookies from a DIFFERENT account.
 //   - ParkReasonAuth: usually dead credentials — but not only. The worker
 //     (parkReasonForError) files twitch.ErrSubscriberOnly here ON PURPOSE: it is
