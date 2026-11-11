@@ -433,3 +433,79 @@ func TestBareChapterEditWording(t *testing.T) {
 		t.Errorf("the normal form got the placeholder %q back", m.offset.Placeholder)
 	}
 }
+
+// relayChapterLines is n chapter lines, one a row of the paste box.
+func relayChapterLines(n int) string {
+	lines := make([]string, n)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("%d:00 Chapter %d", i, i+1)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// The Import Chapters paste box after a shrink and back, with nothing typed
+// while the terminal was small, is the box of a terminal that was never
+// smaller: the bare form's two rows (and the three of a size too small for
+// anything) scroll the box to its cursor, and the taller box used to keep
+// that scroll, its first lines hidden above blank rows.
+func TestChapterPasteBoxIsUntouchedByAShrinkAndBack(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		lines int
+		keys  []string
+	}{
+		{"four lines, cursor at the end", 4, nil},
+		{"four lines, cursor on the first", 4, repeatKey("up", 3)},
+		{"twenty lines, cursor at the end", 20, nil},
+		{"twenty lines, three up", 20, repeatKey("up", 3)},
+		{"twenty lines, fifteen up", 20, repeatKey("up", 15)},
+		{"twenty lines, up to the top and six down", 20, append(repeatKey("up", 19), repeatKey("down", 6)...)},
+	} {
+		for _, normal := range [][2]int{{80, 24}, {60, 20}, {120, 40}} {
+			r := newRelayRig(t, normal[0], normal[1])
+			r.press("a", "c")
+			if !r.app.chapterDlg.IsVisible() {
+				t.Fatalf("A C did not open the chapter import: %q", r.app.feedback.msg)
+			}
+			_ = r.app.View()
+			typeIntoApp(r.app, relayChapterLines(c.lines))
+			r.press(c.keys...)
+			want := r.app.View().Content
+			if c.lines == 4 && !strings.Contains(ansi.Strip(want), "0:00 Chapter 1") {
+				t.Fatalf("premise lost: the first line is not in the never-shrunk box:\n%s", ansi.Strip(want))
+			}
+			for _, small := range [][][2]int{{{40, 12}}, {{30, 6}}, {{200, 8}}, {{20, 5}}, {{40, 12}, {20, 5}, {30, 50}}} {
+				relayTo(r.app, small...)
+				relayTo(r.app, normal)
+				if got := r.app.View().Content; got != want {
+					t.Errorf("%s, %dx%d through %v and back:\n%s\nnever shrunk:\n%s", c.name, normal[0], normal[1], small, ansi.Strip(got), ansi.Strip(want))
+				}
+			}
+		}
+	}
+}
+
+// A paste box written while the terminal was small is laid out from its top
+// when the terminal grows: every line of a paste that fits the box is shown.
+func TestChapterPasteBoxWrittenWhileSmallStartsAtItsTop(t *testing.T) {
+	for _, start := range [][2]int{{40, 12}, {30, 10}, {200, 10}} {
+		r := newRelayRig(t, start[0], start[1])
+		r.press("a", "c")
+		if !r.app.chapterDlg.IsVisible() {
+			t.Fatalf("A C did not open the chapter import at %dx%d: %q", start[0], start[1], r.app.feedback.msg)
+		}
+		_ = r.app.View()
+		typeIntoApp(r.app, relayChapterLines(4))
+		wantExact(t, fmt.Sprintf("typed at %dx%d", start[0], start[1]), r.app.View().Content, start[0], start[1])
+		relayTo(r.app, [2]int{80, 24})
+		got := ansi.Strip(r.app.View().Content)
+		for i := range 4 {
+			if line := fmt.Sprintf("%d:00 Chapter %d", i, i+1); !strings.Contains(got, line) {
+				t.Errorf("typed at %dx%d, grown to 80x24: %q is not in the box:\n%s", start[0], start[1], line, got)
+			}
+		}
+		if r.app.chapterDlg.text.Line() != 3 {
+			t.Errorf("the cursor moved to line %d", r.app.chapterDlg.text.Line())
+		}
+	}
+}

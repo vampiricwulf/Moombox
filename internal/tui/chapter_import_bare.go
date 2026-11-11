@@ -219,3 +219,56 @@ func (m *ChapterImportDialogModel) bareView() string {
 	}
 	return sheet.render(w, h)
 }
+
+// barePaste is the paste box as the normal form last had it: its text, the
+// cursor, and the first row its window showed.
+type barePaste struct {
+	value    string
+	row, col int
+	top      int
+}
+
+// holdPaste reads the paste box as it is now. SetSize calls it when the
+// terminal leaves the normal layout.
+func (m *ChapterImportDialogModel) holdPaste() barePaste {
+	return barePaste{m.text.Value(), m.text.Line(), m.text.Column(), m.text.ScrollYOffset()}
+}
+
+// reseatPaste puts the paste box's window where the normal form had it, once
+// the terminal is back in the normal layout. A smaller box (the bare form's
+// two rows, or the three of a size too small to draw anything) scrolls to
+// keep the cursor in it, and a taller one never scrolls back: the first
+// lines stayed hidden above blank rows until the next key. With the text and
+// the cursor as they were held, the window is the held one, so the frame is
+// the frame of a terminal that was never smaller; with anything written
+// since, the window starts at the top and goes only as far down as the
+// cursor needs.
+//
+// The textarea has no call that sets its window, so the cursor is walked: to
+// the top (the window follows), down to the row that is to be the window's
+// last, and back to its own place, which is inside that window.
+func (m *ChapterImportDialogModel) reseatPaste(held barePaste) {
+	row, col := m.text.Line(), m.text.Column()
+	top := 0
+	if m.text.Value() == held.value && row == held.row && col == held.col {
+		top = held.top
+	}
+	m.text.MoveToBegin()
+	if top > 0 {
+		for range top + m.text.Height() - 1 {
+			m.text.CursorDown()
+		}
+	}
+	// One step is one row on screen, and a wrapped line is several: no more
+	// steps than the text has characters and lines.
+	for range m.text.Length() + m.text.LineCount() {
+		switch line := m.text.Line(); {
+		case line > row:
+			m.text.CursorUp()
+		case line < row:
+			m.text.CursorDown()
+		}
+	}
+	m.text.SetCursorColumn(col)
+	m.text.SetHeight(m.text.Height()) // the window follows a cursor on a wrapped row
+}

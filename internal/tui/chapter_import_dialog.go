@@ -81,9 +81,12 @@ type ChapterImportDialogModel struct {
 	width, height int
 	jobID, title  string
 	text          textarea.Model
-	offset        textinput.Model
-	focusOffset   bool
-	step          chapterImportStep
+	// heldPaste is the paste box as it was when the terminal left the normal
+	// layout (barePaste). SetSize is its one writer and reader.
+	heldPaste   barePaste
+	offset      textinput.Model
+	focusOffset bool
+	step        chapterImportStep
 	// seq numbers the edits; a preview answers for the edit it was asked
 	// for, and only the newest one is drawn.
 	seq  int
@@ -134,14 +137,22 @@ func (m *ChapterImportDialogModel) IsSavingFor(n int) bool {
 
 // SetSize updates the dialog dimensions.
 func (m *ChapterImportDialogModel) SetSize(w, h int) {
-	wasBare := m.bare()
+	wasBare, was := m.bare(), layoutModeFor(m.width, m.height)
 	m.width, m.height = w, h
+	now := layoutModeFor(w, h)
+	if was == layoutNormal && now != layoutNormal {
+		m.heldPaste = m.holdPaste()
+	}
 	if m.bare() {
 		m.bareSetSize()
 		return
 	}
 	if wasBare {
 		defer m.bareLeave()
+	}
+	if was != layoutNormal && now == layoutNormal {
+		// After the normal width and height below, and after bareLeave.
+		defer func() { m.reseatPaste(m.heldPaste) }()
 	}
 	if _, contentW := dialogBox(90, w); contentW > 0 {
 		m.text.SetWidth(max(contentW-2, 10))
