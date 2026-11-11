@@ -184,9 +184,13 @@ with `h.flushRaf()`.
 
 `helpers/app-dom.mjs` exports `makeApp(opts)`, the same shape one level up: it
 builds a jsdom document from the **whole `<body>` of `web/public/index.html`**
-(the dashboard touches every panel), publishes the globals, answers the boot
-fetches, imports `app.js` **dynamically** — it has module-level side effects,
-so every global has to exist first — and constructs a real `MoomboxApp`:
+(the dashboard touches every panel), waits for the window's `load`, publishes
+the globals, answers the boot fetches, imports `app.js` **dynamically** — it
+has module-level side effects, so every global has to exist first — and
+constructs a real `MoomboxApp`. The wait for `load` is what keeps that app the
+only one: `app.js` also builds one on `DOMContentLoaded`, which jsdom 31 fires
+in a task after the constructor returns, so the event has to be over before the
+import registers the listener:
 
 ```js
 const h = await harness.makeApp({
@@ -212,7 +216,10 @@ string on every machine.
 dashboard draws so the controller extractions can be proved to change nothing.
 The snapshot lives in `fixtures/app-job-items.json` and its inputs in
 `fixtures/app-render-inputs.mjs`. When a rendering change is *intended*,
-regenerate it deliberately — from `web/tests/`:
+regenerate it deliberately — from `web/tests/`. The rows are serialised HTML, so
+the snapshot also follows the serialiser: since jsdom 31 (parse5 8.1) `<` and
+`>` inside attribute values are written `&lt;` and `&gt;`, as the HTML spec's
+fragment serialisation now has it; the attribute values themselves are the same:
 
 ```bash
 node --input-type=module -e '

@@ -22,9 +22,13 @@
  * The one thing this harness does that player-dom.mjs does not: app.js is a
  * TOP-LEVEL module with side effects (it wraps window.fetch and registers
  * DOMContentLoaded / visibilitychange listeners at import time). So it is
- * imported DYNAMICALLY, after the jsdom globals are published — and because
- * the document is already "complete" by then, DOMContentLoaded never fires
- * again and the harness constructs `new MoomboxApp()` itself.
+ * imported DYNAMICALLY, after the jsdom globals are published — and makeApp
+ * first WAITS for the window's `load`, so the document is "complete" by then,
+ * DOMContentLoaded never fires again and the harness constructs
+ * `new MoomboxApp()` itself. The wait is load-bearing: jsdom 31 fires
+ * DOMContentLoaded in a task after the constructor returns (jsdom 30 fired it
+ * in a microtask, ahead of the import), and a listener registered before it
+ * would build a second MoomboxApp on the same document.
  *
  * Those side effects run ONCE PER PROCESS, not once per test: the ES module
  * cache keeps the first evaluation, so app.js's `window.fetch = …` wrapper and
@@ -341,6 +345,15 @@ export async function makeApp({ routes = {}, initialState = {}, storage = {}, li
   const { window } = dom;
   const { document } = window;
   openWindows.push(window);
+
+  // app.js registers `DOMContentLoaded -> new MoomboxApp()` when it is imported
+  // below, and this harness constructs the app itself. In a browser app.js is
+  // a module script, which runs before that event; here it is imported after
+  // the parser has finished, so the event must already be behind us or two
+  // apps share the document. Real timers: the fake clock is not installed yet.
+  if (document.readyState !== "complete") {
+    await new Promise((r) => window.addEventListener("load", r, { once: true }));
+  }
 
   defineShoelaceStubs(window);
   document.body.innerHTML = indexBodyMarkup();
