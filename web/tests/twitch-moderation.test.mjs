@@ -80,6 +80,42 @@ test("a timeout or ban marks that user's earlier messages only", () => {
   assert.equal("deletedState" in out[1], false);
 });
 
+// A CLEARCHAT that names its user by login only (no target-user-id tag) is
+// stored with an empty targetUserId. Twitch sends the tag today; a row
+// without it still has to find its user.
+// MUTANT: the login fallback removed (the row is hidden and marks nothing);
+// the login compared case-sensitively; the fallback used when the row DOES
+// carry a user id (a renamed user's old display name would be struck).
+test("a timeout that names its user by login only marks that user's earlier messages", () => {
+  const byLogin = (id, login) =>
+    mod(id, { moderation: "author_deleted", targetLogin: login, systemMsg: `${login} was banned.` });
+  const out = applyTwitchModeration([
+    msg("a", "1", "spam", { authorName: "Ronni" }),
+    msg("b", "2", "innocent", { authorName: "Ronnie" }),
+    msg("c", "3", "localized name", { authorName: "ロニ" }),
+    byLogin("t1", "ronni"),
+    msg("d", "1", "back again", { authorName: "Ronni" }),
+  ]);
+  assert.deepEqual(out.map((m) => m.id), ["a", "b", "c", "d"]);
+  assert.deepEqual(out.map((m) => m.deleted === true), [true, false, false, false]);
+  assert.equal(out[0].deletedState, "ronni was banned.");
+});
+
+test("a row that carries a user id is never matched by login", () => {
+  const out = applyTwitchModeration([
+    msg("a", "1", "same name, another account", { authorName: "Ronni" }),
+    msg("b", "42", "the target", { authorName: "RonniRenamed" }),
+    mod("t1", { moderation: "author_deleted", targetUserId: "42", targetLogin: "ronni", systemMsg: "ronni was banned." }),
+  ]);
+  assert.deepEqual(out.map((m) => m.deleted === true), [false, true]);
+});
+
+test("a timeout row that names nobody is hidden and marks nothing", () => {
+  const out = applyTwitchModeration([msg("a", "1", "hello"), mod("t1", { moderation: "author_deleted" })]);
+  assert.deepEqual(out.map((m) => m.id), ["a"]);
+  assert.equal(out[0].deleted === true, false);
+});
+
 test("a CLEARMSG marks the one message with that id", () => {
   const out = applyTwitchModeration([
     msg("a", "1", "keep"),

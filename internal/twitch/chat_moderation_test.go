@@ -79,6 +79,16 @@ func TestClearchatRows(t *testing.T) {
 			sentence: "ronni was banned.",
 		},
 		{
+			// Twitch sends target-user-id today. Without it the row keeps the
+			// login alone, and the player matches it against the author's name.
+			name:     "ban naming its user by login only",
+			line:     `@room-id=1;tmi-sent-ts=1700000002500 :tmi.twitch.tv CLEARCHAT #testchan :ronni`,
+			kind:     ModerationAuthorDeleted,
+			login:    "ronni",
+			id:       "clearchat-1700000002500-ronni",
+			sentence: "ronni was banned.",
+		},
+		{
 			name:     "full clear",
 			line:     `@room-id=1;tmi-sent-ts=1700000003000 :tmi.twitch.tv CLEARCHAT #testchan`,
 			kind:     ModerationChatCleared,

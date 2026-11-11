@@ -176,7 +176,14 @@ export function mergePartChats(parts) {
 /** The `messageType` of a stored Twitch CLEARCHAT or CLEARMSG (Go: twitch.MessageTypeModeration). */
 export const TWITCH_MODERATION_TYPE = "moderation";
 
-/** What a marked message's "deleted" tooltip says when its row carries no sentence. */
+/**
+ * What a marked message's "deleted" tooltip says when its row carries no sentence.
+ *
+ * The keys are the row's `moderation` words, Go's twitch.ModerationKind
+ * (internal/twitch/types.go). Those words and the row's `targetMsgId`,
+ * `targetUserId` and `targetLogin` keys, read below, are held to the
+ * recorder's by web/tests/fixtures/twitch-moderation-parity.json.
+ */
 const TWITCH_MODERATION_FALLBACK = {
   deleted: "Deleted by a moderator.",
   author_deleted: "The user was timed out or banned.",
@@ -196,7 +203,12 @@ const TWITCH_MODERATION_FALLBACK = {
  *
  * - `moderation: "deleted"` marks the one message whose `id` is `targetMsgId`;
  * - `"author_deleted"` (a timeout or a ban) marks every EARLIER message whose
- *   `authorId` is `targetUserId` — the user may post again once a timeout ends;
+ *   `authorId` is `targetUserId` — the user may post again once a timeout ends.
+ *   A row with no `targetUserId` (a CLEARCHAT without the target-user-id tag,
+ *   which Twitch sends today) is matched by `targetLogin` against the
+ *   author's display name, case-insensitively: a display name differs from the
+ *   login in case only, unless it is a localized one, which such a row cannot
+ *   reach;
  * - `"chat_cleared"` marks every earlier message.
  *
  * "Earlier" is the array's order, which is the order the rows were written
@@ -221,6 +233,7 @@ export function applyTwitchModeration(messages) {
   // earlier one as the walk reaches it.
   const byMsgId = new Map();
   const byUserId = new Map();
+  const byLogin = new Map();
   let clearAll = null;
   const kept = [];
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -230,12 +243,17 @@ export function applyTwitchModeration(messages) {
       const event = { index: i, row: m };
       if (m.moderation === "deleted" && m.targetMsgId) byMsgId.set(m.targetMsgId, event);
       else if (m.moderation === "author_deleted" && m.targetUserId) byUserId.set(m.targetUserId, event);
+      else if (m.moderation === "author_deleted" && typeof m.targetLogin === "string" && m.targetLogin) {
+        byLogin.set(m.targetLogin.toLowerCase(), event);
+      }
       else if (m.moderation === "chat_cleared") clearAll = event;
       continue;
     }
     kept.push(m);
     let first = clearAll;
-    for (const e of [m.id ? byMsgId.get(m.id) : undefined, m.authorId ? byUserId.get(m.authorId) : undefined]) {
+    const candidates = [m.id ? byMsgId.get(m.id) : undefined, m.authorId ? byUserId.get(m.authorId) : undefined];
+    if (byLogin.size > 0 && typeof m.authorName === "string") candidates.push(byLogin.get(m.authorName.toLowerCase()));
+    for (const e of candidates) {
       if (e && (!first || e.index < first.index)) first = e;
     }
     if (!first || m.deleted === true) continue;
