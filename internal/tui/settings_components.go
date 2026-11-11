@@ -20,6 +20,7 @@ var decimalValueFields = map[string]bool{
 
 // updateTextInputForField configures the textInput based on the current state.
 func (m *SettingsModel) updateTextInputForField() {
+	m.bareWrote = m.bareWrote || m.bare()
 	sec := sections[m.sectionIndex]
 
 	// Security sub-editor
@@ -137,6 +138,7 @@ func (m *SettingsModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 			}
 		}
 	}
+	m.bareWrote = m.bareWrote || m.bare()
 	prev := m.textInput.Value()
 	var cmd tea.Cmd
 	m.textInput, cmd = m.textInput.Update(msg)

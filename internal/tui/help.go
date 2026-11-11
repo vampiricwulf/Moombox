@@ -168,6 +168,10 @@ func (m *HelpModel) UpdateViewport(msg tea.Msg) tea.Cmd {
 
 // buildContent constructs the help text and sets it into the viewport.
 func (m *HelpModel) buildContent() {
+	if m.bare() {
+		m.buildBareContent() // below the normal layout: help_bare.go
+		return
+	}
 	sections := m.orderedSections()
 
 	w := max(m.width-4, 20)
@@ -209,6 +213,9 @@ func (m *HelpModel) buildContent() {
 func (m *HelpModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView() // below the normal layout: help_bare.go
 	}
 
 	w := max(m.width-4, 20)

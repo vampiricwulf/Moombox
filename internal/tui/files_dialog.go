@@ -72,6 +72,10 @@ func (d fileDelegate) Spacing() int                            { return 0 }
 func (d fileDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
 
 func (d fileDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	if d.dialog != nil && d.dialog.bare() {
+		d.dialog.bareRenderItem(w, m, index, item)
+		return
+	}
 	switch it := item.(type) {
 	case sectionHeaderItem:
 		fmt.Fprint(w, DimStyle.Render("  "+it.label))
@@ -288,6 +292,10 @@ func filesBoxDims(w, h int) (boxW, boxH, listH int) {
 func (m *FilesDialogModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+	if m.bare() {
+		m.list.SetSize(w, max(h-3, 1))
+		return
+	}
 	boxW, _, listH := filesBoxDims(w, h)
 	m.list.SetSize(boxW-2, listH)
 }
@@ -673,6 +681,9 @@ func (m *FilesDialogModel) footerHint(contentW, total int) string {
 func (m *FilesDialogModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView()
 	}
 
 	boxW, boxH, _ := filesBoxDims(m.width, m.height)
