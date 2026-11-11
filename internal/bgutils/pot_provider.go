@@ -45,47 +45,21 @@ func isContextErr(err error) bool {
 // Google round trips, serialised behind one lock.
 var errSidecarDown = errors.New("BotGuard sidecar unavailable — no PO token until it is back up")
 
-// errSidecarDownForCaller is errSidecarDown for one caller only: its wait for
-// a restarting child was cut at the share of its own deadline a mint may
-// spend (awaitSidecar), with the outage's grace not yet over. errors.Is
-// reads it as errSidecarDown. It is not the answer for a caller with more
-// time: a waiter that joined the mint asks again, as it does after a leader
-// whose context ended.
-var errSidecarDownForCaller = fmt.Errorf("%w (this request had no more time to wait for its restart)", errSidecarDown)
-
 // sidecarMintGrace is how long the sidecar may be down before a mint that
 // meets it fails with errSidecarDown (owner ruling R-F1): within it a mint
-// waits for the child, as a signature solve does for the same 60 s
-// (cipher's sidecarReadyGrace, owner decision PR-R3). The supervisor restarts
-// a crashed child in seconds, and a GVS mint that fails drops its capture to
-// the token-free pick or to HLS, so a burst of streams going live that
-// restarts the child no longer sends each of them there. Measured per
-// outage, not per request, from the first mint that finds the child down
-// (the provider is not told when it went down, and the cipher composite's
-// grace is measured the same way): once that long has passed, every mint
-// fails at once, as before, until the child is back. A child that has been
-// down for longer, unseen by any mint, still gives the first mint that meets
-// it one full grace. A variable so a test can shorten it;
-// production never writes it.
+// whose caller has the time (awaitSidecar) waits for the child, as a
+// signature solve does for the same 60 s (cipher's sidecarReadyGrace, owner
+// decision PR-R3). The supervisor restarts a crashed child in seconds, and a
+// GVS mint that fails drops its capture to the token-free pick or to HLS, so
+// a burst of streams going live that restarts the child no longer sends each
+// of them there. Measured per outage, not per request, from the first mint
+// that waits for the child (the provider is not told when it went down, and
+// the cipher composite's grace is measured from its first request the same
+// way): once that long has passed, every mint fails at once, as before,
+// until the child is back. A child that has been down for longer, with no
+// mint waiting for it, still gives the first mint that does one full grace.
+// A variable so a test can shorten it; production never writes it.
 var sidecarMintGrace = 60 * time.Second
-
-// mintWaitShare is the share of a caller's remaining deadline that a mint
-// may spend waiting for a restarting child: one half. The callers that bring
-// a deadline have work after the mint under the same one (the 403 recovery
-// mints first and then re-fetches the player response and resolves the URL
-// under one 10-45 s budget; an extraction mints a player token and then sends
-// the player request), and before the grace existed a down sidecar failed
-// the mint at once and that work ran. Waiting out the whole deadline would
-// hand it a dead context.
-//
-// The share is taken of what is left each time, so mints that follow one
-// another under one deadline while the child stays down each halve the
-// remainder: under a 20 s budget the first waits 10 s and the second 5 s,
-// and a 403 recovery at its 10 s floor that mints a GVS token and then a
-// player token inside its re-extraction leaves the player request 2.5 s.
-// That only lasts for the outage's grace: once it is spent every mint fails
-// at once and the work after it has the whole remainder again.
-const mintWaitShare = 2
 
 // sidecarMintPoll is how often a mint waiting out the grace asks the handle
 // whether its child is back.
@@ -194,9 +168,9 @@ type PotProvider struct {
 	gvsMints          atomic.Uint64
 	gvsMintsChallenge atomic.Uint64
 
-	// downMu guards downSince: when a mint first found the attached sidecar
-	// down in the outage now running (not when the child went down), zero
-	// while it is up. What the mint
+	// downMu guards downSince: when a mint first began to wait for the
+	// attached sidecar in the outage now running (not when the child went
+	// down), zero while it is up or no mint has waited. What the mint
 	// grace (sidecarMintGrace) is measured from. It is the provider's own
 	// clock, beside the cipher composite's: bgutils does not import cipher.
 	downMu    sync.Mutex
@@ -312,18 +286,23 @@ func (pp *PotProvider) SetSidecar(s *sidecar.Sidecar) {
 // awaitSidecar answers whether a sidecar-mode mint may go to sc now: nil
 // when its child is up, waiting for it first when it is down inside the mint
 // grace (sidecarMintGrace) of the outage now running, which starts at the
-// first mint that finds the child down. Once the grace is spent it returns
+// first mint that waits for the child. Once the grace is spent it returns
 // errSidecarDown, at once for every mint after the one that waited it out.
 //
-// A caller with a deadline waits for at most half of what is left of it
-// (mintWaitShare) and then gets errSidecarDownForCaller with its context
-// still live, so the work it has after the mint under the same deadline
-// runs, as it did when a down sidecar failed the mint at once. A caller
-// whose ctx ends first (a cancel) gets its ctx's error. Either way the mint
-// it leads is then asked again by a waiter with more time (see
-// generatePoTokenChallenge). A handle that
-// cannot come back by a restart — its first start has not succeeded, or it
-// was stopped (Sidecar.Recoverable) — is not waited for.
+// Only a caller with the time waits (owner ruling: "don't wait when time is
+// short"): one with no deadline, or with a deadline at least as far away as
+// the grace still left. That is decided once, on entry. A caller whose
+// deadline is nearer gets errSidecarDown at once, as every mint did before
+// the grace existed, so the work it has after the mint under the same
+// deadline keeps the whole of it: the 403 recovery mints first and then
+// re-fetches the player response and resolves the URL under one 10-45 s
+// budget. Such a caller does not start the outage's clock either: it
+// changes nothing, as on main, and the first mint that does wait still has
+// a full grace.
+//
+// A caller whose ctx ends while it waits (a cancel) gets its ctx's error. A
+// handle that cannot come back by a restart — its first start has not
+// succeeded, or it was stopped (Sidecar.Recoverable) — is not waited for.
 func (pp *PotProvider) awaitSidecar(ctx context.Context, sc potSidecar) error {
 	if sc.IsHealthy() {
 		pp.markSidecarUp()
@@ -332,23 +311,9 @@ func (pp *PotProvider) awaitSidecar(ctx context.Context, sc potSidecar) error {
 	if !sc.Recoverable() {
 		return errSidecarDown
 	}
-	pp.downMu.Lock()
-	if pp.downSince.IsZero() {
-		pp.downSince = time.Now()
-	}
-	left := sidecarMintGrace - time.Since(pp.downSince)
-	pp.downMu.Unlock()
-	if left <= 0 {
-		return errSidecarDown
-	}
-	if err := ctx.Err(); err != nil {
+	left, err := pp.mintWait(ctx, true)
+	if err != nil {
 		return err
-	}
-	spent := errSidecarDown
-	if dl, ok := ctx.Deadline(); ok {
-		if share := time.Until(dl) / mintWaitShare; share < left {
-			left, spent = share, errSidecarDownForCaller
-		}
 	}
 	pp.logger.Info("[PotProvider] BotGuard sidecar is restarting; the mint waits for it", "upTo", left.Round(time.Second).String())
 	deadline := time.NewTimer(left)
@@ -360,7 +325,7 @@ func (pp *PotProvider) awaitSidecar(ctx context.Context, sc potSidecar) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return spent
+			return errSidecarDown
 		case <-poll.C:
 		}
 		if sc.IsHealthy() {
@@ -371,6 +336,35 @@ func (pp *PotProvider) awaitSidecar(ctx context.Context, sc potSidecar) error {
 			return errSidecarDown
 		}
 	}
+}
+
+// mintWait is awaitSidecar's decision for a caller that has found a
+// recoverable child down: how long it may wait for it, or the error it gets
+// at once. That is errSidecarDown when the outage's grace is spent or the
+// caller's deadline is nearer than the grace still left, and the ctx's error
+// when the ctx has already ended. start is whether a caller that may wait
+// starts the outage's clock: true for the mint that is about to wait, false
+// for a caller only asking whether it would (see generatePoTokenChallenge).
+func (pp *PotProvider) mintWait(ctx context.Context, start bool) (time.Duration, error) {
+	pp.downMu.Lock()
+	defer pp.downMu.Unlock()
+	left := sidecarMintGrace
+	if !pp.downSince.IsZero() {
+		left -= time.Since(pp.downSince)
+	}
+	if left <= 0 {
+		return 0, errSidecarDown
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < left {
+		return 0, errSidecarDown
+	}
+	if start && pp.downSince.IsZero() {
+		pp.downSince = time.Now()
+	}
+	return left, nil
 }
 
 // markSidecarUp ends the outage the mint grace is measured over: the next
@@ -448,7 +442,17 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 	}
 	for _, key := range joinable {
 		if entry, ok := pp.inflight[key]; ok {
+			sc := pp.sidecar
 			pp.mu.Unlock()
+			// The mint in flight may be waiting for a restarting sidecar,
+			// and joining it would be waiting too. A caller without the
+			// time for that is told at once, as it would be leading the
+			// mint itself (awaitSidecar).
+			if sc != nil && !sc.IsHealthy() && sc.Recoverable() {
+				if _, err := pp.mintWait(ctx, false); err != nil {
+					return nil, err
+				}
+			}
 			pp.inflightWaits.Add(1)
 			pp.logger.Debug("[PotProvider] waiting for inflight request", "binding", bindingPrefix)
 			select {
@@ -459,10 +463,12 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 				// same video, which went on without a token and 403'd. Ask
 				// again; the leader's entry is gone by now. Any other
 				// failure, a timeout inside the mint included, is the
-				// answer (see leaderGone). A leader that stopped waiting
-				// for a restarting sidecar because of its own deadline
-				// (errSidecarDownForCaller) is the same case.
-				if ((entry.leaderGone && isContextErr(entry.err)) || errors.Is(entry.err, errSidecarDownForCaller)) && ctx.Err() == nil {
+				// answer (see leaderGone), but for one: errSidecarDown may
+				// be the leader's alone, because a leader whose deadline is
+				// too near does not wait for a restarting sidecar
+				// (awaitSidecar). So a waiter asks that question for itself:
+				// it waits if it may, and is otherwise told the same at once.
+				if ((entry.leaderGone && isContextErr(entry.err)) || errors.Is(entry.err, errSidecarDown)) && ctx.Err() == nil {
 					return pp.generatePoTokenChallenge(ctx, contentBinding, bypassCache, challenge)
 				}
 				return entry.session, entry.err

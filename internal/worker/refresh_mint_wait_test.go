@@ -10,32 +10,34 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
-// TestRefreshGvsCredentialsRunsTheURLHalfAfterAMintThatWaited pins the call
-// site's half of the mint grace (owner ruling R-F1): a mint that meets a
-// restarting sidecar waits for at most half of what the refresh's context has
-// left and then fails with the context still live
-// (bgutils.PotProvider.awaitSidecar), and the 403 recovery then re-fetches
-// the player response under that same context and installs the fresh URL.
-// The minter here is a fake that behaves that way; the wait itself is pinned
-// in internal/bgutils/pot_sidecar_grace_test.go.
+// TestRefreshGvsCredentialsRunsTheURLHalfAfterAMintThatFailed pins the call
+// site's half of the mint grace's short-deadline rule (owner ruling: "don't
+// wait when time is short"). The 403 recovery's mint runs under the
+// refresh's own deadline, which is at most 45 s
+// (credentialRefreshTimeoutFor) and so nearer than the 60 s mint grace: a
+// mint that meets a restarting sidecar fails at once
+// (bgutils.PotProvider.awaitSidecar), and the recovery then re-fetches the
+// player response under that same context and installs the fresh URL. The
+// minter here is a fake that fails at once; that the real one does so under
+// such a deadline is pinned in internal/bgutils/pot_sidecar_grace_test.go.
 //
-// Mutants: a mint given a context of its own that the URL half does not
-// share, or a refresh that gives up when the mint fails (the re-fetch never
-// runs); a re-fetch under a context the mint has used up (it sees a dead
-// context).
-func TestRefreshGvsCredentialsRunsTheURLHalfAfterAMintThatWaited(t *testing.T) {
+// Mutants: a mint given no deadline, or one past the mint grace (it would
+// wait for the sidecar); a mint given a context of its own that the URL half
+// does not share, or a refresh that gives up when the mint fails (the
+// re-fetch never runs).
+func TestRefreshGvsCredentialsRunsTheURLHalfAfterAMintThatFailed(t *testing.T) {
+	const mintGrace = 60 * time.Second // bgutils' sidecarMintGrace
 	var mintDeadline time.Time
 	fake := &fakePotProvider{generate: func(ctx context.Context, _ string, _ bool) (string, error) {
 		dl, ok := ctx.Deadline()
 		if !ok {
-			t.Error("the mint got a context with no deadline; the refresh bounds it")
+			t.Error("the mint got a context with no deadline; it would wait for a restarting sidecar")
 			return "", errors.New("sidecar down")
 		}
-		mintDeadline = dl
-		select {
-		case <-time.After(time.Until(dl) / 2):
-		case <-ctx.Done():
+		if left := time.Until(dl); left >= mintGrace {
+			t.Errorf("the mint's deadline is %v away, not nearer than the %v mint grace; it would wait for a restarting sidecar", left, mintGrace)
 		}
+		mintDeadline = dl
 		return "", errors.New("sidecar down")
 	}}
 
@@ -44,7 +46,7 @@ func TestRefreshGvsCredentialsRunsTheURLHalfAfterAMintThatWaited(t *testing.T) {
 	refreshVideoInfo = func(_ *youtube.Service, ctx context.Context, _ string) (*youtube.VideoInfo, error) {
 		refetched = true
 		if err := ctx.Err(); err != nil {
-			t.Errorf("the player response re-fetch got a dead context (%v) after the mint waited", err)
+			t.Errorf("the player response re-fetch got a dead context (%v) after the mint failed", err)
 		}
 		if dl, ok := ctx.Deadline(); !ok || !dl.Equal(mintDeadline) {
 			t.Errorf("the re-fetch's deadline = %v (set: %v), want the mint's own %v: the two share one budget", dl, ok, mintDeadline)
@@ -65,11 +67,8 @@ func TestRefreshGvsCredentialsRunsTheURLHalfAfterAMintThatWaited(t *testing.T) {
 		Formats:   []youtube.Format{{Itag: 140, URL: "https://setup.invalid/videoplayback?id=1&n=abc123", Source: "web_creator"}},
 	}
 
-	// The parent's deadline is far shorter than the refresh's own 10 s floor,
-	// so the fake's half-wait is a fraction of a second.
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-	defer cancel()
-	baseURL, token := refreshGvsCredentials(ctx, job, videoInfo, 140, solver, nil, fake, "vd-123", "test")
+	// A parent with no deadline: the mint's deadline is the refresh's own.
+	baseURL, token := refreshGvsCredentials(context.Background(), job, videoInfo, 140, solver, nil, fake, "vd-123", "test")
 
 	if !refetched {
 		t.Fatal("the player response was not re-fetched after the mint failed; the URL half must still run")

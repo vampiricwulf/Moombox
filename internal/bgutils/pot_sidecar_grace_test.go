@@ -17,9 +17,18 @@ type graceSidecar struct {
 	up          atomic.Bool
 	unrecovered atomic.Bool // true: no child has ever come up, or Stop was called
 	mints       atomic.Int64
+	// hold, when set, blocks the first IsHealthy call until it is closed:
+	// a test holds a leader inside its mint while other callers join it.
+	hold chan struct{}
+	held atomic.Bool
 }
 
-func (g *graceSidecar) IsHealthy() bool   { return g.up.Load() }
+func (g *graceSidecar) IsHealthy() bool {
+	if g.hold != nil && g.held.CompareAndSwap(false, true) {
+		<-g.hold
+	}
+	return g.up.Load()
+}
 func (g *graceSidecar) Recoverable() bool { return !g.unrecovered.Load() }
 
 func (g *graceSidecar) GeneratePlayerPoToken(_ context.Context, binding, _ string) (string, error) {
@@ -191,74 +200,150 @@ func TestAttachingTheSidecarAgainEndsTheOutage(t *testing.T) {
 	})
 }
 
-// A caller with a deadline shorter than the grace spends at most half of
-// what is left of it waiting, and is then told the sidecar is down with its
-// context still live: the work it has after the mint under the same deadline
-// (the 403 recovery's player re-fetch and URL resolve, an extraction's
-// player request) still runs, as it did when a down sidecar failed the mint
-// at once. The outage's clock goes on for the callers after it.
+// "Don't wait when time is short" (owner ruling): a caller whose deadline is
+// nearer than the grace still left does not wait for a restarting sidecar.
+// It is told the sidecar is down at once, as every mint was before the grace
+// existed, with its context live and the whole of its budget left for the
+// work after the mint under the same deadline (the 403 recovery's player
+// re-fetch and URL resolve under 10-45 s, an extraction's player request).
+// Such a caller does not start the outage's clock: the first mint that does
+// wait, long after, still has a full grace.
 //
-// Mutants: awaitSidecar waiting out the caller's whole deadline (the caller
-// gets DeadlineExceeded at 20 s and a dead context); returning the plain
-// errSidecarDown at the cut; the caller's leaving restarting the clock (the
-// last mint below waits a further minute instead of what is left).
-func TestAMintWaitLeavesHalfTheCallersDeadline(t *testing.T) {
+// Mutants: awaitSidecar waiting for a share of a short deadline, or for all
+// of it (waited != 0, a spent or dead context); the short caller starting
+// the outage's clock (the last mint below has 10 s of grace left and fails
+// 45 s before the child is back).
+func TestAMintWithAShortDeadlineDoesNotWait(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		side := &graceSidecar{}
 		pp := newGraceProvider(side)
-
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
 		start := time.Now()
-		_, err := pp.GenerateGvsPoToken(ctx, "A", "")
-		if !errors.Is(err, errSidecarDown) || !errors.Is(err, errSidecarDownForCaller) {
-			t.Fatalf("a 20 s caller = %v, want errSidecarDown for this caller", err)
+
+		for _, budget := range []time.Duration{20 * time.Second, 45 * time.Second, sidecarMintGrace - time.Millisecond} {
+			ctx, cancel := context.WithTimeout(context.Background(), budget)
+			if _, err := pp.GenerateGvsPoToken(ctx, "A", ""); !errors.Is(err, errSidecarDown) {
+				t.Errorf("a %v caller's GVS mint = %v, want errSidecarDown", budget, err)
+			}
+			if _, err := pp.GeneratePoToken(ctx, "A", false); !errors.Is(err, errSidecarDown) {
+				t.Errorf("a %v caller's mint = %v, want errSidecarDown", budget, err)
+			}
+			if _, err := pp.GeneratePoToken(ctx, "A", true); !errors.Is(err, errSidecarDown) {
+				t.Errorf("a %v caller's bypassCache mint = %v, want errSidecarDown", budget, err)
+			}
+			if err := ctx.Err(); err != nil {
+				t.Errorf("a %v caller's context ended in the mint: %v", budget, err)
+			}
+			if dl, _ := ctx.Deadline(); time.Until(dl) != budget {
+				t.Errorf("a %v caller has %v of its budget left after three mints, want all of it", budget, time.Until(dl))
+			}
+			cancel()
 		}
-		if waited := time.Since(start); waited != 10*time.Second {
-			t.Errorf("the 20 s caller waited %v, want half its deadline (10 s)", waited)
-		}
-		if ctx.Err() != nil {
-			t.Fatalf("the caller's context ended during the mint wait: %v", ctx.Err())
-		}
-		// The same budget's next mint (an extraction's player token) takes
-		// half of what is left again, and still leaves a live context.
-		if _, err := pp.GeneratePoToken(ctx, "A", false); !errors.Is(err, errSidecarDownForCaller) {
-			t.Fatalf("the same caller's second mint = %v, want errSidecarDown for this caller", err)
-		}
-		if waited := time.Since(start); waited != 15*time.Second {
-			t.Errorf("two mints had spent %v of the 20 s deadline, want 15 s", waited)
-		}
-		if ctx.Err() != nil {
-			t.Fatalf("the caller's context ended during the second mint wait: %v", ctx.Err())
+		if waited := time.Since(start); waited != 0 {
+			t.Fatalf("the short-deadline callers waited %v, want none", waited)
 		}
 
-		_, err = pp.GenerateGvsPoToken(context.Background(), "B", "")
-		if !errors.Is(err, errSidecarDown) || errors.Is(err, errSidecarDownForCaller) {
-			t.Fatalf("the next mint = %v, want the plain errSidecarDown at the outage's minute", err)
-		}
-		if waited := time.Since(start); waited != sidecarMintGrace {
-			t.Errorf("the outage's grace ended %v after it began, want %v", waited, sidecarMintGrace)
+		time.Sleep(50 * time.Second)
+		side.upAfter(t, 55*time.Second)
+		if _, err := pp.GenerateGvsPoToken(context.Background(), "B", ""); err != nil {
+			t.Errorf("the first mint that waits, 50 s after callers that did not = %v; want the child's token within a full grace", err)
 		}
 	})
 }
 
-// A deadline longer than twice what is left of the grace changes nothing:
-// the mint waits out the grace and gets the plain errSidecarDown.
+// A caller with the time waits: a deadline at least as far away as the grace
+// still left is treated as none. A 5 min caller is answered by the child
+// when it comes back, a caller whose deadline is exactly the grace waits,
+// and a 10 min caller waits out the whole grace and gets errSidecarDown, not
+// a context error.
 //
-// Mutant: awaitSidecar marking every deadline caller's failure as the
-// caller's own (a waiter would then ask again after the grace is spent).
-func TestALongDeadlineWaitsOutTheWholeGrace(t *testing.T) {
+// Mutants: awaitSidecar refusing every caller that has a deadline (no wait,
+// errSidecarDown at once); comparing with > instead of >= (the caller at
+// exactly the grace fails at once).
+func TestAMintWithALongDeadlineWaitsLikeOneWithNone(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		pp := newGraceProvider(&graceSidecar{})
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		side := &graceSidecar{}
+		pp := newGraceProvider(side)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
+		side.upAfter(t, 10*time.Second)
 		start := time.Now()
-		_, err := pp.GenerateGvsPoToken(ctx, "A", "")
-		if !errors.Is(err, errSidecarDown) || errors.Is(err, errSidecarDownForCaller) {
-			t.Fatalf("a 10 min caller = %v, want the plain errSidecarDown", err)
+		if g, err := pp.GenerateGvsPoToken(ctx, "A", ""); err != nil || g.PoToken != "gvs-A" {
+			t.Fatalf("a 5 min caller across a 10 s restart = %+v, %v; want the child's token", g, err)
+		}
+		if waited := time.Since(start); waited < 10*time.Second || waited > 11*time.Second {
+			t.Errorf("the 5 min caller waited %v, want about the restart's 10 s", waited)
+		}
+
+		side.up.Store(false)
+		side.upAfter(t, 10*time.Second)
+		exact, cancelExact := context.WithTimeout(context.Background(), sidecarMintGrace)
+		defer cancelExact()
+		if s, err := pp.GeneratePoToken(exact, "B", false); err != nil || s.PoToken != "player-B" {
+			t.Fatalf("a caller whose deadline is the grace = %+v, %v; want the child's token", s, err)
+		}
+
+		side.up.Store(false)
+		long, cancelLong := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancelLong()
+		start = time.Now()
+		if _, err := pp.GenerateGvsPoToken(long, "C", ""); !errors.Is(err, errSidecarDown) {
+			t.Fatalf("a 10 min caller with the child down past the grace = %v, want errSidecarDown", err)
 		}
 		if waited := time.Since(start); waited != sidecarMintGrace {
-			t.Errorf("a 10 min caller waited %v, want the grace (%v)", waited, sidecarMintGrace)
+			t.Errorf("the 10 min caller waited %v, want the grace (%v)", waited, sidecarMintGrace)
+		}
+	})
+}
+
+// The comparison is with the grace still left on the outage's clock, not
+// with the whole grace: 50 s into an outage 10 s are left, so a 20 s caller
+// has the time and waits those 10 s, and a 5 s caller does not wait. The
+// 20 s caller is then told the sidecar is down with its context live.
+//
+// Mutants: awaitSidecar comparing the deadline with sidecarMintGrace (the
+// 20 s caller fails at once); the 5 s caller waiting (it is held 5 s and
+// gets a context error).
+func TestAMintComparesItsDeadlineWithTheGraceStillLeft(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		side := &graceSidecar{}
+		pp := newGraceProvider(side)
+
+		first := make(chan error, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("panic: %v", r)
+				}
+			}()
+			_, err := pp.GenerateGvsPoToken(context.Background(), "A", "")
+			first <- err
+		}()
+		time.Sleep(50 * time.Second)
+
+		short, cancelShort := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelShort()
+		start := time.Now()
+		if _, err := pp.GenerateGvsPoToken(short, "B", ""); !errors.Is(err, errSidecarDown) {
+			t.Fatalf("a 5 s caller with 10 s of grace left = %v, want errSidecarDown", err)
+		}
+		if waited := time.Since(start); waited != 0 {
+			t.Errorf("the 5 s caller waited %v, want none", waited)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if _, err := pp.GenerateGvsPoToken(ctx, "C", ""); !errors.Is(err, errSidecarDown) {
+			t.Fatalf("a 20 s caller with 10 s of grace left = %v, want errSidecarDown once the grace is spent", err)
+		}
+		if waited := time.Since(start); waited != 10*time.Second {
+			t.Errorf("the 20 s caller waited %v, want the 10 s of grace left", waited)
+		}
+		if err := ctx.Err(); err != nil {
+			t.Errorf("the 20 s caller's context ended in the mint: %v", err)
+		}
+		if err := <-first; !errors.Is(err, errSidecarDown) {
+			t.Errorf("the mint that started the outage's clock = %v, want errSidecarDown", err)
 		}
 	})
 }
@@ -289,19 +374,23 @@ func TestACancelledMintWaitLeavesWithItsContextsError(t *testing.T) {
 	})
 }
 
-// A waiter that joined a mint whose leader stopped waiting because of its
-// own deadline asks again, and is answered by the child once it is back:
-// the leader's budget is not the waiter's answer.
+// A leader that did not wait because its own deadline was short is not the
+// answer for a waiter that has the time: the waiter asks for itself, waits
+// for the child and is answered by it. A caller with a short deadline that
+// arrives while that waiter leads the mint does not join its wait: it is
+// told at once, as it would be leading the mint itself.
 //
-// Mutant: the waiter taking the leader's errSidecarDownForCaller as its own
-// answer (it fails 2.5 s in, 27 s before the child is back).
-func TestAWaiterOutlivesALeaderThatLeftDuringTheGrace(t *testing.T) {
+// Mutants: the waiter taking the leader's errSidecarDown as its own answer
+// (it fails at once, 30 s before the child is back); a short-deadline caller
+// joining the mint in flight (it is held until its deadline and gets
+// DeadlineExceeded).
+func TestAWaiterWithTheTimeOutlivesALeaderWithout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		side := &graceSidecar{}
+		side := &graceSidecar{hold: make(chan struct{})}
 		pp := newGraceProvider(side)
-		side.upAfter(t, 30*time.Second)
+		start := time.Now()
 
-		leaderCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		leaderCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		leaderErr := make(chan error, 1)
 		go func() {
@@ -313,13 +402,53 @@ func TestAWaiterOutlivesALeaderThatLeftDuringTheGrace(t *testing.T) {
 			_, err := pp.GeneratePoToken(leaderCtx, "VIDEOID", false)
 			leaderErr <- err
 		}()
-		synctest.Wait() // the leader is waiting out the grace
-		s, err := pp.GeneratePoToken(context.Background(), "VIDEOID", false)
-		if err != nil || s.PoToken != "player-VIDEOID" {
-			t.Fatalf("the waiter = %+v, %v; want the child's token", s, err)
+		synctest.Wait() // the leader is inside its mint, held at the health read
+
+		type answer struct {
+			s   *SessionData
+			err error
+			at  time.Duration
 		}
-		if err := <-leaderErr; !errors.Is(err, errSidecarDownForCaller) {
-			t.Errorf("the leader = %v, want errSidecarDown for its own deadline", err)
+		waiter := make(chan answer, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("panic: %v", r)
+				}
+			}()
+			s, err := pp.GeneratePoToken(context.Background(), "VIDEOID", false)
+			waiter <- answer{s, err, time.Since(start)}
+		}()
+		synctest.Wait() // the waiter has joined the leader's mint
+		if got := pp.Stats().InflightWaits; got != 1 {
+			t.Fatalf("InflightWaits = %d, want 1: the waiter did not join the leader's mint", got)
+		}
+
+		side.upAfter(t, 30*time.Second)
+		close(side.hold)
+		if err := <-leaderErr; !errors.Is(err, errSidecarDown) {
+			t.Errorf("the 20 s leader = %v, want errSidecarDown", err)
+		}
+		if waited := time.Since(start); waited != 0 {
+			t.Errorf("the 20 s leader waited %v, want none", waited)
+		}
+		synctest.Wait() // the waiter leads the mint now and waits for the child
+
+		lateCtx, cancelLate := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancelLate()
+		if _, err := pp.GeneratePoToken(lateCtx, "VIDEOID", false); !errors.Is(err, errSidecarDown) {
+			t.Errorf("a 20 s caller arriving during the waiter's mint = %v, want errSidecarDown", err)
+		}
+		if waited := time.Since(start); waited != 0 {
+			t.Errorf("the 20 s caller waited %v behind the mint in flight, want none", waited)
+		}
+
+		got := <-waiter
+		if got.err != nil || got.s.PoToken != "player-VIDEOID" {
+			t.Fatalf("the waiter = %+v, %v; want the child's token", got.s, got.err)
+		}
+		if got.at < 30*time.Second || got.at > 31*time.Second {
+			t.Errorf("the waiter was answered after %v, want about the restart's 30 s", got.at)
 		}
 	})
 }
