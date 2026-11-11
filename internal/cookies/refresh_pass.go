@@ -216,6 +216,10 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 	defer func() {
 		rs.mu.Lock()
 		rs.refreshInFlight = false
+		// A pass that ended without publishing a status (a panic in it) still
+		// ends the "checking" state: the UIs then show what they showed before
+		// that state existed, instead of "checking cookies" until the next tick.
+		rs.status.Checked = true
 		rs.mu.Unlock()
 	}()
 	if hook != nil {
@@ -375,6 +379,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		}
 
 		rs.status = AuthStatus{
+			Checked:              true,
 			YouTubeAuthenticated: ytAuth,
 			TwitchAuthenticated:  twEffective,
 			// Now "YouTube auth is configured" rather than "the cookie set is

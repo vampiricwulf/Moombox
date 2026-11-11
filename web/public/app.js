@@ -14,7 +14,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieCheckPending, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -973,9 +973,13 @@ export class MoomboxApp {
     const warningsEl = document.getElementById("status-warnings");
     const warningsIcon = document.getElementById("status-warnings-icon");
     const warningItems = [];
-    if (ytActive && this.autoCookieReloginRequired?.youtube)
+    // Held back while the first cookie check of the server process has not
+    // answered (cookieCheckPending): the badges read "checking" then, and a
+    // re-login prompt beside them would be a conclusion nothing has drawn yet.
+    const checkPending = cookieCheckPending(this.cookieStatus, this.twitchAuthStatus);
+    if (!checkPending && ytActive && this.autoCookieReloginRequired?.youtube)
       warningItems.push({ action: "yt-relogin", label: "YT: Re-login" });
-    if (twActive && this.autoCookieReloginRequired?.twitch)
+    if (!checkPending && twActive && this.autoCookieReloginRequired?.twitch)
       warningItems.push({ action: "tw-relogin", label: "TW: Re-login" });
     // The BotGuard sidecar is an ALERT, not a status: while it is down,
     // signature-ciphered formats cannot be resolved at all (sig has no
@@ -1076,11 +1080,47 @@ export class MoomboxApp {
       el.title = title;
     }
 
+    // The first cookie check has not answered: ask again shortly, until it has.
+    this._pollCookieCheck(checkPending);
+
     // 4. Hide refresh button if neither platform is active
     const refreshBtn = document.getElementById("btn-refresh-cookies");
     if (refreshBtn) {
       refreshBtn.style.display = (ytActive || twActive) ? "" : "none";
     }
+  }
+
+  /**
+   * While the server's first cookie auth check is still running, the status
+   * payload says `checked: false` and the badges read "checking". Nothing
+   * pushes the answer, so ask /api/status again every 2 s until it arrives.
+   * One timer at most; it is not re-armed once the status is checked.
+   */
+  _pollCookieCheck(pending) {
+    if (!pending) {
+      clearTimeout(this._cookieCheckTimer);
+      this._cookieCheckTimer = null;
+      return;
+    }
+    if (this._cookieCheckTimer) return;
+    this._cookieCheckTimer = setTimeout(async () => {
+      this._cookieCheckTimer = null;
+      // Only the cookie keys are taken: loadStatus also acts on the version
+      // and the zone, which this poll has no business repeating.
+      try {
+        const response = await fetch("/api/status");
+        if (response.ok) {
+          const status = await response.json();
+          this.autoCookieReloginRequired = status.autoCookieReloginRequired || null;
+          this.cookieStatus = status.cookieStatus;
+          this.twitchAuthStatus = status.twitchAuthStatus;
+        }
+      } catch (e) {
+        // The server is restarting or unreachable; the next round asks again.
+      }
+      // Redraws, and arms the next round while the check is still pending.
+      this.updateStatusBar();
+    }, 2000);
   }
 
   // ===== Version / Update Indicator =====

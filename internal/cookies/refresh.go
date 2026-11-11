@@ -517,21 +517,24 @@ func (rs *RefreshService) Start(ctx context.Context) {
 
 	// Initial check. allowFallback is false, for exactly the reason CheckNow's
 	// is: this call runs SYNCHRONOUSLY on the caller's goroutine, and
-	// cmd/moombox's run() blocks on it before the web server binds. At startup
-	// nothing has observed liveness yet, so the freshness skip cannot help —
-	// every install with a YouTube auth cookie would pay a full page fetch (up
-	// to livenessFetchTimeout, 20s in internal/youtube) ahead of the dashboard
-	// coming up, on every start. Config changes restart the process, so that
-	// would be one delayed startup per settings tweak.
+	// cmd/moombox's run() blocks on it before the TUI starts. The web server
+	// is already bound by then (owner ruling R-H2) and the dashboard shows
+	// "checking cookies" until this pass publishes a status with Checked set.
+	// At startup nothing has observed liveness yet, so the freshness skip
+	// cannot help — every install with a YouTube auth cookie would pay a full
+	// page fetch (up to livenessFetchTimeout, 20s in internal/youtube) ahead
+	// of the TUI coming up and of the dashboard's first answer, on every
+	// start. Config changes restart the process, so that would be one delayed
+	// startup per settings tweak.
 	//
 	// The cost of skipping it is that tier-2 coverage begins one cadence in
 	// rather than immediately, which is the cheaper of the two.
 	//
 	// Wrapped in the same recover the ticker goroutine below carries, and for
 	// a sharper reason. This call runs on the CALLER's goroutine — cmd/moombox's
-	// run(), before the web server binds — so an unrecovered panic in the first
+	// run(), before the TUI starts — so an unrecovered panic in the first
 	// pass does not lose a refresh, it takes the whole process down at boot,
-	// with no dashboard, no TUI and no log surface up to say why. The ticker's
+	// with no TUI up to say why. The ticker's
 	// identical panic one cadence later is survivable purely because something
 	// recovers it.
 	//
@@ -595,6 +598,17 @@ func (rs *RefreshService) Stop() {
 		cancel()
 	}
 	rs.logger.Info("cookie refresh service stopped")
+}
+
+// SkipStartupCheck marks the status checked without a check. cmd/moombox
+// calls it instead of Start on an install with no cookie file configured,
+// before the web server binds: no startup check will ever answer there, and
+// the status must read as it always has (nothing configured), not as
+// "checking cookies" forever.
+func (rs *RefreshService) SkipStartupCheck() {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.status.Checked = true
 }
 
 // GetStatus returns the current auth status.

@@ -342,7 +342,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		dlWorker.Start(ctx)
 	}()
 
-	// Start cookie refresh (only if a cookie file is configured, like TS)
+	// Seed the cookie refresh service (only if a cookie file is configured,
+	// like TS). Its first check runs further down, after the web server is
+	// bound; the seeds stay here, ahead of the bind, so nothing the dashboard
+	// can ask for (a recheck) observes before them.
 	if cfg.Cookies.CookieFile != "" {
 		// Seed expected auth from persisted platforms so auth loss is detected
 		// on restart.
@@ -375,43 +378,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		// first check that finds the platform working sends its
 		// auth_recovered (withPersistedAuthFailureCooldown holds the stamp).
 		cookieRefresh.SetUnrecoveredPlatforms(s.openAlerts.authPlatforms())
-		cookieRefresh.Start(ctx)
 	} else {
 		log.Debug("[CookieRefresh] No cookie file configured, skipping refresh service")
-	}
-
-	// One browser-free import out of the configured browser profile, at most
-	// once per boot, on an install that has no cookies to lose.
-	//
-	// UNCONDITIONAL, and deliberately not under the flag below. This used to
-	// live inside the periodic goroutine, which coupled it to
-	// cookies.auto_enabled for no reason it could justify: the flag exists to
-	// govern a REPEATING read of a profile that nothing changes between ticks,
-	// and a boot is the one moment a mounted profile plausibly did change —
-	// something replaced it while the process was down. Its real safety
-	// condition is the cookie file, not the flag, and that condition lives in
-	// AutoCookieService.decideStartupSeed so there is exactly one site deciding
-	// it: no browser, an importable profile, and no cookies.txt worth
-	// protecting. An install that already has cookies is never touched here.
-	autoCookieSvc.StartProfileSeed(ctx)
-
-	// Start the headless-browser refresh timer. cookies.auto_enabled IS this
-	// timer — it governs nothing else automatic — so the flag is the whole
-	// start condition, along with an interval that means something.
-	//
-	// It deliberately no longer os.Stat's browserProfileDir first. That probe
-	// froze at boot the one thing that changes at runtime: completing setup is
-	// what CREATES the profile directory, so an operator who turned the setting
-	// on and then ran setup — the exact sequence an "auth lost" notification
-	// asks for — got no timer until the next restart, and nothing told them. No
-	// setting had changed by then, so the restart-required labelling could not
-	// fire either. The question is asked per tick now, quietly, by
-	// periodicRefreshHasSource.
-	if cfg.Cookies.AutoEnabled {
-		interval := cfg.Cookies.RefreshInterval.AsDuration(time.Minute)
-		if interval > 0 {
-			autoCookieSvc.StartPeriodicRefresh(ctx, interval)
-		}
+		// No startup check will run, so the status must not read "checking".
+		cookieRefresh.SkipStartupCheck()
 	}
 
 	// Start web server — wait for initial binding result before continuing.
@@ -467,6 +437,52 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				log.Error("Web server error", slog.String("error", err.Error()))
 			}
 		}()
+	}
+
+	// The first cookie auth check, synchronous on this goroutine as it always
+	// was. It now runs with the web server already bound (owner ruling R-H2):
+	// each of its two round trips can take up to 15 s on a bad link, and the
+	// dashboard used to stay down for all of it. Until it answers, the status
+	// is unchecked (cookies.AuthStatus.Unchecked) and both UIs show "checking
+	// cookies" in place of the no-cookies and re-login indicators. Downloads
+	// and monitors started above, as before; the profile seed and the refresh
+	// timer still follow this check, in the same order.
+	if cfg.Cookies.CookieFile != "" {
+		cookieRefresh.Start(ctx)
+	}
+
+	// One browser-free import out of the configured browser profile, at most
+	// once per boot, on an install that has no cookies to lose.
+	//
+	// UNCONDITIONAL, and deliberately not under the flag below. This used to
+	// live inside the periodic goroutine, which coupled it to
+	// cookies.auto_enabled for no reason it could justify: the flag exists to
+	// govern a REPEATING read of a profile that nothing changes between ticks,
+	// and a boot is the one moment a mounted profile plausibly did change —
+	// something replaced it while the process was down. Its real safety
+	// condition is the cookie file, not the flag, and that condition lives in
+	// AutoCookieService.decideStartupSeed so there is exactly one site deciding
+	// it: no browser, an importable profile, and no cookies.txt worth
+	// protecting. An install that already has cookies is never touched here.
+	autoCookieSvc.StartProfileSeed(ctx)
+
+	// Start the headless-browser refresh timer. cookies.auto_enabled IS this
+	// timer — it governs nothing else automatic — so the flag is the whole
+	// start condition, along with an interval that means something.
+	//
+	// It deliberately no longer os.Stat's browserProfileDir first. That probe
+	// froze at boot the one thing that changes at runtime: completing setup is
+	// what CREATES the profile directory, so an operator who turned the setting
+	// on and then ran setup — the exact sequence an "auth lost" notification
+	// asks for — got no timer until the next restart, and nothing told them. No
+	// setting had changed by then, so the restart-required labelling could not
+	// fire either. The question is asked per tick now, quietly, by
+	// periodicRefreshHasSource.
+	if cfg.Cookies.AutoEnabled {
+		interval := cfg.Cookies.RefreshInterval.AsDuration(time.Minute)
+		if interval > 0 {
+			autoCookieSvc.StartPeriodicRefresh(ctx, interval)
+		}
 	}
 
 	// The port the listener actually bound is not always the configured one:

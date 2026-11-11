@@ -1,0 +1,11 @@
+{
+  "comment": "One predicate, two languages: Go cookies.AuthStatus.Unchecked and utils.js cookieCheckPending. `checked` is the wire key of the cookieStatus / twitchAuthStatus payloads; a row without it is an older binary's payload, which Go cannot produce and JS must read as checked. `badge` is the cookie badge's check state for the row (cookieCheckState in JS; cmd/moombox cookieBadgesFor's tui.CookieStatus in Go, by the names of tui.CookieBadgePrecedence).",
+  "cases": [
+    { "name": "first check still running", "status": { "checked": false, "found": false, "authenticated": false, "verification": "unknown" }, "pending": true, "badge": "checking" },
+    { "name": "checked, nothing configured", "status": { "checked": true, "found": false, "authenticated": false, "verification": "failed" }, "pending": false, "badge": "none" },
+    { "name": "checked, signed in", "status": { "checked": true, "found": true, "authenticated": true, "verification": "ok" }, "pending": false, "badge": "ok" },
+    { "name": "checked, rejected", "status": { "checked": true, "found": true, "authenticated": false, "verification": "failed" }, "pending": false, "badge": "rejected" },
+    { "name": "checked, inconclusive", "status": { "checked": true, "found": true, "authenticated": false, "verification": "unknown" }, "pending": false, "badge": "unknown" },
+    { "name": "older binary, no checked key", "status": { "found": false, "authenticated": false }, "pending": false, "badge": "none", "jsOnly": true }
+  ]
+}

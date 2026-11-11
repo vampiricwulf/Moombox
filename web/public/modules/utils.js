@@ -605,6 +605,8 @@ export function cookieIndicatorState(platform, status, reloginRequired, parked) 
   const reason = status?.[meta.errorKey];
   const cause = reason ? ` (${reason})` : "";
   switch (state) {
+    case "checking":
+      return { className: "indicator-checking", title: `${meta.name}: Checking cookies…` };
     case "relogin":
       return { className: "indicator-error", title: `${meta.name}: Re-login required` };
     case "fileUnreadable":
@@ -629,8 +631,12 @@ export function cookieIndicatorState(platform, status, reloginRequired, parked) 
  * ruling R-D4), the TUI's: tui.CookieBadgePrecedence, which renderCookieStatus
  * (internal/tui/status_bar.go) follows. Parked and rejected render alike in the
  * TUI and sit side by side. cmd/moombox's parity test compares the two lists.
+ *
+ * "checking" is first (owner ruling R-H2): until the first auth check of the
+ * server process has answered, the status says nothing, so the badge shows
+ * neither the no-cookies nor the re-login state, whatever else holds.
  */
-export const COOKIE_BADGE_PRECEDENCE = ["relogin", "fileUnreadable", "parked", "rejected", "unknown", "none", "ok"];
+export const COOKIE_BADGE_PRECEDENCE = ["checking", "relogin","fileUnreadable", "parked", "rejected", "unknown", "none", "ok"];
 
 /**
  * cookieCheckState is what the auth check alone says, the dashboard's twin of
@@ -640,15 +646,42 @@ export const COOKIE_BADGE_PRECEDENCE = ["relogin", "fileUnreadable", "parked", "
  * then "fileUnreadable", "none" (no cookies), "unknown" (inconclusive) and
  * "rejected" (cookies the site refused). `fileError` and `verification` are
  * additive keys an older binary omits; their arms then never fire.
+ *
+ * "checking" comes before all of them (cookieCheckPending): the first auth
+ * check of the server process has not answered, and every other key is then
+ * a zero value that says nothing.
  * @param {object|null|undefined} status
- * @returns {"ok"|"fileUnreadable"|"none"|"unknown"|"rejected"}
+ * @returns {"checking"|"ok"|"fileUnreadable"|"none"|"unknown"|"rejected"}
  */
 export function cookieCheckState(status) {
+  if (cookieCheckPending(status)) return "checking";
   if (status?.authenticated) return "ok";
   if (status?.fileError) return "fileUnreadable";
   if (!status?.found) return "none";
   if (status?.verification === "unknown") return "unknown";
   return "rejected";
+}
+
+/**
+ * cookieCheckPending says the first cookie auth check of the server process
+ * has not finished, for any of the status payloads given (`cookieStatus`,
+ * `twitchAuthStatus`). The dashboard is served before that check answers
+ * (owner ruling R-H2). It is the twin of Go's cookies.AuthStatus.Unchecked,
+ * which cmd/moombox cookieBadgesFor reads for the TUI; the two are compared
+ * over web/tests/fixtures/cookie-check-parity.json.
+ *
+ * POSITIVE on `checked === false`: an older binary sends no `checked` key, and
+ * a missing status is not a pending one, so both read as checked and the
+ * dashboard behaves as it always did.
+ *
+ * While it holds, nothing may be shown or decided as "no cookies" or
+ * "re-login required": the badge reads "checking" (cookieCheckState), the
+ * re-login warnings are held back, and app.js asks /api/status again shortly.
+ * @param {...(object|null|undefined)} statuses
+ * @returns {boolean}
+ */
+export function cookieCheckPending(...statuses) {
+  return statuses.some((s) => s?.checked === false);
 }
 
 /**

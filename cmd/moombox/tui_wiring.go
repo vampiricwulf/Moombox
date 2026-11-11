@@ -86,6 +86,34 @@ func cookieBadgeFor(authenticated, hasCookies, fileUnreadable bool, verdict cook
 	}
 }
 
+// cookieBadgesFor is both platforms' status-bar badges for one auth status
+// and the auto-cookie relogin flags (keyed by lowercase platform name).
+//
+// An UNCHECKED status comes first (owner ruling R-H2): the first cookie auth
+// check of the process has not answered, every other field is a zero value
+// that says nothing, and both badges read Checking. Not None (no cookies),
+// and not Relogin either, whatever the flags say: nothing has been concluded
+// yet. The dashboard's twin is cookieCheckPending in utils.js.
+//
+// Otherwise each platform's check is projected by cookieBadgeFor and a relogin
+// flag is laid over it. One cookies.txt holds both platforms' rows, so the
+// unreadable-file sentinel is platform-independent and both badges read it.
+func cookieBadgesFor(auth cookies.AuthStatus, relogin map[string]bool) (yt, tw tui.CookieStatus) {
+	if auth.Unchecked() {
+		return tui.CookieStatusChecking, tui.CookieStatusChecking
+	}
+	unreadable := auth.CookieFileError != ""
+	yt = cookieBadgeFor(auth.YouTubeAuthenticated, auth.HasYouTubeCookies, unreadable, auth.YouTubeVerification)
+	tw = cookieBadgeFor(auth.TwitchAuthenticated, auth.HasTwitchCookies, unreadable, auth.TwitchVerification)
+	if relogin["youtube"] {
+		yt = tui.CookieStatusRelogin
+	}
+	if relogin["twitch"] {
+		tw = tui.CookieStatusRelogin
+	}
+	return yt, tw
+}
+
 // newTUIResync builds the replay for a dropped TUI job update. The forwarders
 // in runTUI send non-blocking on their 100-slot channels and count the drop;
 // nothing ever replayed it, so a dropped Downloading->Finished left a stale
@@ -1068,11 +1096,6 @@ func (s *runState) runTUI() {
 	// Wire cookie status to TUI. Parameter `auth` is the incoming status —
 	// named differently from `s` (receiver) to avoid the pre-refactor shadow.
 	authStatusToTUI := func(auth cookies.AuthStatus) {
-		// One cookies.txt holds both platforms' rows, so the sentinel is
-		// platform-independent and both badges read the same one.
-		unreadable := auth.CookieFileError != ""
-		yt := cookieBadgeFor(auth.YouTubeAuthenticated, auth.HasYouTubeCookies, unreadable, auth.YouTubeVerification)
-		tw := cookieBadgeFor(auth.TwitchAuthenticated, auth.HasTwitchCookies, unreadable, auth.TwitchVerification)
 		// Check auto-cookie relogin state. As of test.36 the relogin map
 		// is keyed by lowercase platform name (audit cookies.md #44).
 		//
@@ -1084,13 +1107,7 @@ func (s *runState) runTUI() {
 		// map, and GetStatus's browser/registry detection scan would run on
 		// every auth-change dispatch — including the TUI's, which fires with
 		// no cookie dialog open at all.
-		relogin := s.autoCookieSvc.ReloginStatus()
-		if relogin["youtube"] {
-			yt = tui.CookieStatusRelogin
-		}
-		if relogin["twitch"] {
-			tw = tui.CookieStatusRelogin
-		}
+		yt, tw := cookieBadgesFor(auth, s.autoCookieSvc.ReloginStatus())
 		var ytActive, twActive bool
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			ytActive, twActive = config.GetActivePlatforms(c)

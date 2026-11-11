@@ -81,6 +81,12 @@ const (
 	// render as "never configured", which sends the operator to set cookies up
 	// again instead of to the permission that is actually broken.
 	CookieStatusFileUnreadable
+	// CookieStatusChecking: the first cookie auth check of the process has not
+	// answered yet (cookies.AuthStatus.Unchecked; owner ruling R-H2). Nothing
+	// is known, so the badge shows neither the no-cookies colour nor the
+	// re-login prompt. Appended like the two above: CookieStatusNone stays
+	// the zero value.
+	CookieStatusChecking
 )
 
 // StatusBarModel renders the bottom status bar.
@@ -620,6 +626,16 @@ func cookieUnknownLabel(code string, t barTier) string {
 	return code + ": Unknown"
 }
 
+// cookieCheckingLabel words the badge of a platform whose first cookie check
+// has not answered yet. Abbreviates at tierTight like its siblings, to the
+// code plus an ellipsis, which no other badge carries.
+func cookieCheckingLabel(code string, t barTier) string {
+	if t >= tierTight {
+		return code + "…"
+	}
+	return code + ": checking…"
+}
+
 // cookieFileErrorLabel is cookieUnknownLabel's sibling for the unreadable-file
 // state. Abbreviates at tierTight like the others, to the code plus a "?" —
 // not to "YT!", which belongs to the re-login prompt whose remedy is a browser
@@ -730,6 +746,7 @@ func (m *StatusBarModel) parkedCookieJobs() (yt, tw bool) {
 // CookieBadgePrecedence, which the dashboard's COOKIE_BADGE_PRECEDENCE
 // (web/public/modules/utils.js) must equal.
 const (
+	badgeChecking       = "checking"
 	badgeRelogin        = "relogin"
 	badgeFileUnreadable = "fileUnreadable"
 	badgeParked         = "parked"
@@ -741,12 +758,13 @@ const (
 
 // CookieBadgePrecedence is the cookie badge's one written precedence (owner
 // ruling R-D4): Relogin > FileUnreadable > Parked/Rejected > Unknown > None >
-// OK. renderCookieStatus draws the first state on it that holds
+// OK, with Checking ahead of them all (owner ruling R-H2: until the first
+// check of the process answers, nothing else is shown). renderCookieStatus draws the first state on it that holds
 // (cookieBadgeState), and the dashboard's cookieIndicatorState walks the same
 // list (COOKIE_BADGE_PRECEDENCE, compared by cmd/moombox's parity test). The
 // check's own state comes from cmd/moombox cookieBadgeFor — authenticated
 // first, so FileUnreadable, None, Unknown and Rejected never hold beside OK.
-var CookieBadgePrecedence = []string{badgeRelogin, badgeFileUnreadable, badgeParked, badgeRejected, badgeUnknown, badgeNone, badgeOK}
+var CookieBadgePrecedence = []string{badgeChecking, badgeRelogin, badgeFileUnreadable, badgeParked, badgeRejected, badgeUnknown, badgeNone, badgeOK}
 
 // cookieBadgeState is the first state of CookieBadgePrecedence that holds for
 // a platform whose check reads check and which has a job parked in COOKIES?
@@ -755,6 +773,8 @@ func cookieBadgeState(check CookieStatus, parked bool) string {
 	for _, s := range CookieBadgePrecedence {
 		var holds bool
 		switch s {
+		case badgeChecking:
+			holds = check == CookieStatusChecking
 		case badgeRelogin:
 			holds = check == CookieStatusRelogin
 		case badgeFileUnreadable:
@@ -839,6 +859,12 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 	// dashboard's cookieIndicatorState follows too.
 	if m.ytActive {
 		switch cookieBadgeState(m.ytCookie, ytRejected) {
+		case badgeChecking:
+			// Not actionable, so it goes with the healthy states at
+			// tierEssential. Dim: no colour may suggest a verdict.
+			if healthy {
+				parts = append(parts, DimStyle.Render(cookieCheckingLabel("YT", t)))
+			}
 		case badgeRelogin:
 			if t >= tierTight {
 				parts = append(parts, statusBarRedStyle.Render("YT!"))
@@ -889,6 +915,11 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 	// and gets the neutral dim indicator, unlike YouTube's yellow warning.
 	if m.twActive {
 		switch cookieBadgeState(m.twCookie, twRejected) {
+		case badgeChecking:
+			// Same arm as YouTube's; the two ladders stay the same shape.
+			if healthy {
+				parts = append(parts, DimStyle.Render(cookieCheckingLabel("TW", t)))
+			}
 		case badgeRelogin:
 			if t >= tierTight {
 				parts = append(parts, statusBarRedStyle.Render("TW!"))
