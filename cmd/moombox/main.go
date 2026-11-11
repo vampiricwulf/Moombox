@@ -346,7 +346,24 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// like TS). Its first check runs further down, after the web server is
 	// bound; the seeds stay here, ahead of the bind, so nothing the dashboard
 	// can ask for (a recheck) observes before them.
-	if cfg.Cookies.CookieFile != "" {
+	//
+	// The three cookie settings this function still needs after the bind are
+	// read ONCE, here, under the store lock. The dashboard is serving from the
+	// bind on, and a PUT /api/config replaces the struct under that lock, so a
+	// direct cfg read further down would race it; and a cookie file read twice
+	// (to choose SkipStartupCheck here, and Start below) could disagree with
+	// itself and leave the status unchecked for good.
+	var startCookies struct {
+		HasFile         bool
+		AutoEnabled     bool
+		RefreshInterval time.Duration
+	}
+	s.configStore.Read(func(c *config.MoomboxConfig) {
+		startCookies.HasFile = c.Cookies.CookieFile != ""
+		startCookies.AutoEnabled = c.Cookies.AutoEnabled
+		startCookies.RefreshInterval = c.Cookies.RefreshInterval.AsDuration(time.Minute)
+	})
+	if startCookies.HasFile {
 		// Seed expected auth from persisted platforms so auth loss is detected
 		// on restart.
 		//
@@ -447,7 +464,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// cookies" in place of the no-cookies and re-login indicators. Downloads
 	// and monitors started above, as before; the profile seed and the refresh
 	// timer still follow this check, in the same order.
-	if cfg.Cookies.CookieFile != "" {
+	if startCookies.HasFile {
 		cookieRefresh.Start(ctx)
 	}
 
@@ -478,11 +495,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// setting had changed by then, so the restart-required labelling could not
 	// fire either. The question is asked per tick now, quietly, by
 	// periodicRefreshHasSource.
-	if cfg.Cookies.AutoEnabled {
-		interval := cfg.Cookies.RefreshInterval.AsDuration(time.Minute)
-		if interval > 0 {
-			autoCookieSvc.StartPeriodicRefresh(ctx, interval)
-		}
+	if startCookies.AutoEnabled && startCookies.RefreshInterval > 0 {
+		autoCookieSvc.StartPeriodicRefresh(ctx, startCookies.RefreshInterval)
 	}
 
 	// The port the listener actually bound is not always the configured one:
