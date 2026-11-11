@@ -24,6 +24,7 @@ type delays struct {
 	singleGoneRetry        time.Duration // singleGoneRetryDelay — one 410/404 while behind head
 	interruptionStallRetry time.Duration // interruptionStallRetryDelay — the may-resume stall arm
 	transientFailureRetry  time.Duration // transientFailureRetryDelay — 5xx/timeouts at the edge
+	segmentRetryUnit       time.Duration // segmentRetryUnitDelay — fetchSegmentWithRetry's linear ladder counts in it (5, 10, 15, 20 s)
 	genericRetry           time.Duration // genericRetryDelay — manifest / unknown-status retries
 	hlsPlaylistRetry       time.Duration // hlsPlaylistRetryDelay — playlist fetch or parse failed
 	hlsStuckRetry          time.Duration // hlsStuckRetryDelay — a segment or the init keeps failing
@@ -60,6 +61,7 @@ func (d *SegmentDownloader) SetFastDelaysForTests(scale int) {
 		singleGoneRetry:        p.singleGoneRetry / n,
 		interruptionStallRetry: p.interruptionStallRetry / n,
 		transientFailureRetry:  p.transientFailureRetry / n,
+		segmentRetryUnit:       p.segmentRetryUnit / n,
 		genericRetry:           p.genericRetry / n,
 		hlsPlaylistRetry:       p.hlsPlaylistRetry / n,
 		hlsStuckRetry:          p.hlsStuckRetry / n,
@@ -77,6 +79,7 @@ func defaultDelays() delays {
 		singleGoneRetry:        singleGoneRetryDelay,
 		interruptionStallRetry: interruptionStallRetryDelay,
 		transientFailureRetry:  transientFailureRetryDelay,
+		segmentRetryUnit:       segmentRetryUnitDelay,
 		genericRetry:           genericRetryDelay,
 		hlsPlaylistRetry:       hlsPlaylistRetryDelay,
 		hlsStuckRetry:          hlsStuckRetryDelay,

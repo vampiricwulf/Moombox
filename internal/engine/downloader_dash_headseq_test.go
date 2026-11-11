@@ -430,9 +430,8 @@ func TestHandleHTTPErrorEndedBehindHeadDefers(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // trailing backoff sleep returns immediately
 
-	sameSegRetries, lastRetrySeq, sameHeadRetryDelay, lastConfirmedHead := 0, -1, 0, -1
-	err := d.handleHTTPError(ctx, true,
-		&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, 60)
+	rs := newDashRetryState()
+	err := d.handleHTTPError(ctx, true, rs, 60)
 	if err != nil {
 		t.Fatalf("handleHTTPError = %v, want nil (defer while tail exists)", err)
 	}

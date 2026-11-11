@@ -201,3 +201,60 @@ func TestJobPayloadCarriesTheMuxGaps(t *testing.T) {
 		t.Errorf("a job with no mux gap reports muxGaps = %s, want []", raw["muxGaps"])
 	}
 }
+
+// TestJobPayloadNamesTheKeptRecordingNotInTheArchive: a Finished job whose
+// staging root still holds a recording its archive was not made from says so
+// in GET /api/jobs/{id} — name, path and size (owner ruling R-E1). The field
+// is absent for a job with none and for a job that is not Finished, whose
+// root recording is the one in use, and it is never on a list row.
+//
+// Mutants this kills:
+//   - dropping UnusedRootRecording from enrichJob: absent for j1.
+//   - dropping omitempty, or the Finished gate: present for j2 or j3.
+//   - adding it to worker.ListJob: present on the list rows.
+func TestJobPayloadNamesTheKeptRecordingNotInTheArchive(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "j1", func(j *database.Job) { j.Status = database.StatusFinished })
+	f.addJob(t, "j2", func(j *database.Job) { j.Status = database.StatusFinished })
+	f.addJob(t, "j3", func(j *database.Job) { j.Status = database.StatusDownloading })
+	// A live-shape capture beside a whole-file download: a single-file
+	// finalize muxed the capture and did not use the download.
+	for _, id := range []string{"j1", "j3"} {
+		dir := filepath.Join(f.stagingDir, id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, size := range map[string]int{"video_stream": 16, "video.mp4": 96} {
+			if err := os.WriteFile(filepath.Join(dir, name), make([]byte, size), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	var got struct {
+		Kept *struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+			Size int64  `json:"size"`
+		} `json:"unusedRootRecording"`
+	}
+	body := f.getJSON(t, "/api/jobs/j1", &got)
+	want := filepath.Join(f.stagingDir, "j1", "video.mp4")
+	if got.Kept == nil || got.Kept.Name != "video.mp4" || got.Kept.Path != want || got.Kept.Size != 96 {
+		t.Fatalf("unusedRootRecording = %+v, want video.mp4 at %s, 96 bytes; body = %s", got.Kept, want, body)
+	}
+
+	for _, id := range []string{"j2", "j3"} {
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(f.getJSON(t, "/api/jobs/"+id, nil)), &raw); err != nil {
+			t.Fatalf("unmarshal %s: %v", id, err)
+		}
+		if v, ok := raw["unusedRootRecording"]; ok {
+			t.Errorf("%s carries unusedRootRecording = %s, want the field absent", id, v)
+		}
+	}
+
+	if list := f.getJSON(t, "/api/jobs", nil); strings.Contains(list, "unusedRootRecording") {
+		t.Errorf("the job list carries unusedRootRecording; it belongs to GET /api/jobs/{id} only: %s", list)
+	}
+}

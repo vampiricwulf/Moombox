@@ -705,6 +705,9 @@ func (m *TaskListModel) resetMarquee() {
 // An Error row the Twitch monitor will act on by itself shows a dim tag too —
 // "⟳ mux" or "⟳ retry" (jobstate.PendingAutoAction, owner ruling R-D2) — the
 // row hint for the sentence the details pane spells out.
+//
+// A Muxing row whose line is the mux readout shows the copy's percent, then a
+// dim "⋯ final" (jobstate.MuxReadout, owner ruling R-D1 of 2026-11-10).
 func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait bool) {
 	return m.progressCell(job, time.Now())
 }
@@ -738,11 +741,28 @@ func (m *TaskListModel) progressCell(job *database.Job, now time.Time) (text str
 	if isWaitProgress(progress) {
 		return "⋯ wait ", true
 	}
+	// A mux's own readout (owner ruling R-D1 of 2026-11-10) is the row's figure while it is
+	// up: the copy's percent, or a dim tag for the faststart pass. The
+	// percent column still holds the download's, which would read "100%"
+	// through the whole mux.
+	if job.Status == database.StatusMuxing {
+		if pct, finalizing, ok := jobstate.MuxReadout(progress); ok {
+			if finalizing {
+				return muxFinalizingTag, true
+			}
+			return fmt.Sprintf("%d%% ", pct), false
+		}
+	}
 	if percent > 0 {
 		return fmt.Sprintf("%.0f%% ", percent), false
 	}
 	return "", false
 }
+
+// muxFinalizingTag is a Muxing row's dim tag while its archive is being
+// finalized (jobstate.MuxFinalizingLine); the details pane spells the line
+// out.
+const muxFinalizingTag = "⋯ final "
 
 // queuedHoldTag is a Queued row's dim tag for why the scheduler is not
 // admitting it (jobstate.AdmissionHolds.For, owner ruling R-D3) — the row

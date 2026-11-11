@@ -63,6 +63,14 @@ type jobWithStaging struct {
 	// filled or kept and why (worker.TwitchGapFillStateOf). Absent for a job
 	// that has none.
 	GapFill *worker.GapFillState `json:"gapFill,omitempty"`
+	// UnusedRootRecording names the recording a Finished job's staging root
+	// still holds that the archive was not made from (worker.ScanUnusedRoot,
+	// owner ruling R-E1): file name, path and size. It keeps the staging with
+	// no age rule, and the details views are the only place that says so once
+	// the job's in-memory log is gone. Absent for a job that has none and for
+	// every row that is not Finished. On this route only: list rows and
+	// WebSocket frames never carry it.
+	UnusedRootRecording *worker.UnusedRecording `json:"unusedRootRecording,omitempty"`
 	// PendingAutoAction is the automatic action the Twitch monitor will take
 	// for this row (jobstate.PendingAutoAction, owner ruling R-D2):
 	// "auto_mux" once the broadcast is confirmed over, "auto_retry" when it
@@ -84,6 +92,8 @@ func enrichJob(db *database.Database, job *database.Job, stagingBase string) job
 		UnmuxedParts:    jobverbs.MuxNeedsUnmuxedParts(job.Status) && worker.HasUnmuxedParts(db, stagingBase, job.ID),
 		MuxGaps:         worker.ScanMuxGaps(stagingBase, job.ID),
 		GapFill:         worker.TwitchGapFillStateOf(db, job),
+
+		UnusedRootRecording: worker.ScanUnusedRoot(db, stagingBase, job),
 
 		PendingAutoAction: jobstate.PendingAutoAction(job),
 	}

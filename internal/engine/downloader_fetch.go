@@ -26,10 +26,13 @@ import (
 // comfortably exceeds config.SegmentWorkersWarnThreshold (16, the point
 // past which the config layer already warns operators about resource
 // tradeoffs) with headroom for HEAD probes and playlist fetches sharing the
-// same host. A downloader configured with more workers than this still
-// downloads correctly — connections beyond the idle pool's capacity simply
-// aren't kept alive, so those workers degrade to paying a fresh TCP+TLS
-// handshake per segment rather than failing outright.
+// same host. The pool only matters on an HTTP/1.1 origin: over HTTP/2,
+// which googlevideo and Twitch's CDN speak, every worker's requests
+// multiplex over one connection per host and the idle pool holds that one.
+// On an HTTP/1.1 origin a downloader configured with more workers than
+// this still downloads correctly — connections beyond the idle pool's
+// capacity simply aren't kept alive, so those workers degrade to paying a
+// fresh TCP+TLS handshake per segment rather than failing outright.
 const engineMaxIdleConnsPerHost = 64
 
 // engineHTTPClient is a shared HTTP client for segment and chunk downloads.
@@ -39,6 +42,10 @@ const engineMaxIdleConnsPerHost = 64
 // idle-per-host to engineMaxIdleConnsPerHost (see its doc) so workers reuse
 // sockets, and keep them alive for 90 s (matches http.DefaultTransport's
 // value).
+// The shared shape also brings the HTTP/2 health check and the connect
+// timeout (see httpx's defaultTransport): a connection that went silently
+// dead is closed after 45 s instead of taking every fetch to that host down
+// with it until the kernel gives up.
 //
 // Timeout: none. Every call site carries its own deadline — fetchSegment and
 // fetchChunk a read-progress (idle) deadline under a segmentHardCeiling
@@ -259,6 +266,9 @@ type idleBody struct {
 	timer *time.Timer
 	idle  time.Duration
 	read  int64
+	// onBytes, when set, is told of every delivery as it lands. Only
+	// fetchChunk sets it, around its 206 body read (see arrivalMeter).
+	onBytes func(n int)
 }
 
 func (b *idleBody) Read(p []byte) (int, error) {
@@ -269,8 +279,51 @@ func (b *idleBody) Read(p []byte) (int, error) {
 		// again; if it has fired the context is already cancelled and this
 		// Read's error path takes over, so there is nothing to undo.
 		b.timer.Reset(b.idle)
+		if b.onBytes != nil {
+			b.onBytes(n)
+		}
 	}
 	return n, err
+}
+
+// arrivalFlushBytes and arrivalFlushInterval bound how long a whole-file
+// chunk's delivered bytes wait before they reach noteFetch: whichever comes
+// first. 64 KB is the streaming fallback's read size, which reports every
+// read; 16 ms is the worker's default progress gate, so a slow link is
+// reported as often as the progress line can show it.
+const (
+	arrivalFlushBytes    = 64 * 1024
+	arrivalFlushInterval = 16 * time.Millisecond
+)
+
+// arrivalMeter feeds one chunk fetch's body reads to noteFetch while the
+// chunk is still arriving. fetchChunk buffers a whole chunk (up to 5 MB)
+// before the caller can write it, and reporting the arrival once, after the
+// last byte, moved the arrival counter in 5 MB steps: on a link at or below
+// about 1 MB/s the worker's 5 s speed window held one or two samples and
+// the readout swung between zero and a spike. Reads are coalesced so a fast
+// link does not pay a callback per read. One goroutine uses it: the one
+// reading the body.
+type arrivalMeter struct {
+	d       *SegmentDownloader
+	pending int
+	last    time.Time
+}
+
+func (m *arrivalMeter) add(n int) {
+	m.pending += n
+	if m.pending >= arrivalFlushBytes || time.Since(m.last) >= arrivalFlushInterval {
+		m.flush()
+	}
+}
+
+// flush reports what has arrived since the last report, if anything.
+func (m *arrivalMeter) flush() {
+	if m.pending > 0 {
+		m.d.noteFetch(m.pending)
+		m.pending = 0
+	}
+	m.last = time.Now()
 }
 
 // received reports how many bytes this body has delivered, for the ceiling
@@ -423,9 +476,9 @@ var errSegmentGone = fmt.Errorf("%w", ErrSegmentPermanent)
 // different backoff ramps, neither of them exponential across the whole
 // function: the 403-with-refresh path doubles (singleGoneRetry << attempt —
 // 500ms/1s/2s/4s, sized to outlive credentialRefreshCooldown), while every
-// other transient failure waits a LINEAR 5s x (attempt+1) — 5s, 10s, 15s, 20s
-// over the default MaxSegmentRetries=5, with the final attempt's sleep
-// skipped because no fetch follows it.
+// other transient failure waits a LINEAR segmentRetryUnit x (attempt+1) — 5s,
+// 10s, 15s, 20s over the default MaxSegmentRetries=5, with the final
+// attempt's sleep skipped because no fetch follows it.
 // A 403 or 410 while no head is known is asked again headlessRefusalAttempts
 // times in all before it is permanent; with a head known it is permanent at
 // once, unless a 403 below the head gets the refresh path above.
@@ -597,7 +650,7 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 		// (up to ~25s at the default MaxRetries=5), keeping a catch-up worker
 		// and its un-flushable buffer entry alive that much longer.
 		if attempt < d.opts.MaxRetries-1 {
-			utils.Sleep(ctx, time.Duration(5*(attempt+1))*time.Second)
+			utils.Sleep(ctx, time.Duration(attempt+1)*d.delays.segmentRetryUnit)
 		}
 	}
 	// A cancel that landed during the final attempt is still a cancel, not
@@ -1183,7 +1236,17 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 	// Bound the 206 read to the requested range size — a correct server sends
 	// exactly end-start+1 bytes, and a broken one must not be able to balloon
 	// memory past it (mirrors the maxIgnoredRangeBodyBytes cap on the 200 path).
+	//
+	// The bytes are reported to noteFetch as they land (arrivalMeter), and
+	// whatever is still unreported when the read ends, complete or broken
+	// off, is reported then: every byte readBody returns or drops was
+	// received, and the caller must not count the chunk again. The meter
+	// comes off before the drain below, whose bytes are not payload.
+	meter := arrivalMeter{d: d, last: time.Now()}
+	body.onBytes = meter.add
 	data, err := readBody(resp, end-start+1)
+	body.onBytes = nil
+	meter.flush()
 	if err == nil {
 		// A correct server declares Content-Length == end-start+1, so
 		// readBody takes its sized path and observes the body's own io.EOF

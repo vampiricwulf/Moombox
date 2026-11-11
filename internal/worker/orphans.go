@@ -154,15 +154,19 @@ func incompleteStagingExpired(cfg *config.MoomboxConfig, job *database.Job) bool
 	if cfg == nil {
 		return false
 	}
-	days := cfg.Downloader.IncompleteStagingExpiryDays.Days()
-	if days <= 0 {
+	// AsDuration scales the fractional day count whole: converting the float
+	// to whole hours first turned any setting under an hour into a zero
+	// window, which expired every shield at once. A window that is zero or
+	// negative (the 0 setting, or a NaN or overflowing value) never expires.
+	window := cfg.Downloader.IncompleteStagingExpiryDays.AsDuration(24 * time.Hour)
+	if window <= 0 {
 		return false
 	}
 	updated, err := time.Parse(time.RFC3339, job.UpdatedAt)
 	if err != nil {
 		return false
 	}
-	return time.Since(updated) >= time.Duration(days*24)*time.Hour
+	return time.Since(updated) >= window
 }
 
 // NotOrphanError is DeleteOrphanedFile's refusal of a path that is no longer

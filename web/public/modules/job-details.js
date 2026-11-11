@@ -2,7 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES, chatStatusVariant } from "./utils.js";
+import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, unusedRecordingText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES, chatStatusVariant } from "./utils.js";
 
 /** A running trim's progress as the whole percentage its bar shows. */
 function trimPercent(progress) {
@@ -209,6 +209,9 @@ export class JobDetailsController {
       // null, not absent, for a job with none, so _preserveStagingFields
       // does not carry an earlier answer over it.
       job.gapFill = enriched.gapFill || null;
+      // The kept recording the archive was not made from
+      // (worker.ScanUnusedRoot): null, not absent, for the same reason.
+      job.unusedRootRecording = enriched.unusedRootRecording || null;
       // The status the facts above were computed under (the server's, from
       // the same answer): a status change after it makes them stale.
       job.factsStatus = enriched.status;
@@ -221,8 +224,8 @@ export class JobDetailsController {
         if (content) this.syncTextRow(content, "gap-fill", "Gap-fill:", gapFillText(job));
         // A drawn section the answer no longer supports (a Reinitialize
         // deleted the asides) needs the rebuild as much as a new one does.
-        const shown = !!content?.querySelector("#details-asides-section, #details-mux-gaps-section");
-        if (job.asides.length > 0 || job.muxGaps.length > 0 || shown) {
+        const shown = !!content?.querySelector("#details-asides-section, #details-mux-gaps-section, #details-unused-recording-section");
+        if (job.asides.length > 0 || job.muxGaps.length > 0 || job.unusedRootRecording || shown) {
           // The sections are part of the rendered body, not static elements,
           // so they can only appear on a rebuild. Rare by construction: only a
           // job that restarted mid-stream has asides at all, and only one
@@ -669,6 +672,18 @@ export class JobDetailsController {
         </div>`;
     }
 
+    // A live capture being muxed: its line is the mux readout ("Muxing 42%",
+    // owner ruling R-D1), which the VOD arm below shows in its own Progress
+    // row and the TUI's details pane shows for every Muxing row. A status
+    // change rebuilds the dialog, so the row comes and goes with Muxing;
+    // updateJobDetails patches its text. Empty outside Muxing, so no other
+    // row's markup changes.
+    const muxProgressRow = job.status === "Muxing" ? `
+          <div class="details-row">
+            <span class="details-label">Progress:</span>
+            <span class="details-value" data-field="progress">${this.app.escapeHtml(this.app.formatProgress(job))}</span>
+          </div>` : "";
+
     const isTwitch = job.platform === "twitch";
     // The Twitch login for the embed, from the url alone: a row with no url
     // is an imported live capture, whose channelName is no login — "Import",
@@ -791,7 +806,7 @@ export class JobDetailsController {
             <span class="details-label">Type:</span>
             <span class="details-value">Live</span>
           </div>
-          ${segmentInfo}
+          ${segmentInfo}${muxProgressRow}
           `
           }
           <div class="details-row" id="speed-row" style="${job.speed ? "" : "display:none"}">
@@ -959,6 +974,23 @@ export class JobDetailsController {
           <strong>Kept for a Mux Gap (${gaps.length}):</strong>
           <div class="details-row"><span class="details-label"></span><span class="details-value" style="color: var(--sl-color-neutral-600); font-size: 0.9em;">A mux could not carry these staged recordings whole — it left a damaged fragment's unreadable bytes out of a repaired copy, or could not check the copy against the recording's own fragments — so staging keeps the originals, with no age limit, until the job is deleted.</span></div>
           ${rows}
+        </div>`;
+      })()}${(() => {
+        // A recording the staging root still holds that the archive was not
+        // made from (worker.ScanUnusedRoot, GET /api/jobs/{id}'s
+        // unusedRootRecording, owner ruling R-E1). It keeps the job's staging
+        // with no age limit and can be the longer copy; this names the file
+        // so the operator can take or delete it knowingly. No whitespace of
+        // its own, as the section above.
+        const kept = job.unusedRootRecording;
+        // The server answers for Finished rows only, so a value carried over
+        // from before the row left Finished (a reinitialize) is stale until
+        // the next fetch replaces it.
+        if (!kept || !kept.path || job.status !== "Finished") return "";
+        return `<div class="details-section" id="details-unused-recording-section">
+          <strong>Kept Recording:</strong>
+          <div class="details-row"><span class="details-label"></span><span class="details-value" data-field="unused-recording">${this.app.escapeHtml(unusedRecordingText(kept))}</span></div>
+          <div class="details-row"><span class="details-label"></span><span class="details-value" data-field="unused-recording-path" style="color: var(--sl-color-neutral-600); font-size: 0.9em; word-break: break-all;">${this.app.escapeHtml(kept.path)}</span></div>
         </div>`;
       })()}
 
@@ -1152,7 +1184,7 @@ export class JobDetailsController {
   }
 
   /**
-   * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar/unmuxedParts/muxGaps
+   * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar/unmuxedParts/muxGaps/unusedRootRecording
    * (and factsStatus, the status they were fetched under)
    * fields from oldJobs onto newJobs.
    * WebSocket bulk updates deliver raw DB objects without these enriched fields;
@@ -1184,6 +1216,9 @@ export class JobDetailsController {
       }
       if (job.gapFill === undefined && old.gapFill !== undefined) {
         job.gapFill = old.gapFill;
+      }
+      if (job.unusedRootRecording === undefined && old.unusedRootRecording !== undefined) {
+        job.unusedRootRecording = old.unusedRootRecording;
       }
       if (job.factsStatus === undefined && old.factsStatus !== undefined) {
         job.factsStatus = old.factsStatus;
