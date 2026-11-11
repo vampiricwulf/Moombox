@@ -678,6 +678,7 @@ func (d *SegmentDownloader) noteHeadSeqFromResponse(resp *http.Response) {
 	if err != nil || n < 0 {
 		return
 	}
+	d.lastHeadRead.StoreNow()
 	if resp.StatusCode < 300 {
 		d.noteServedHeadSeq(n)
 	}
@@ -831,6 +832,7 @@ func (d *SegmentDownloader) probeHeadAt(parent context.Context, probeSeq int) (i
 	if err != nil {
 		return -1, fmt.Errorf("%w: parse %q: %v", errNoHeadSeqUsable, headSeqStr, err)
 	}
+	d.lastHeadRead.StoreNow()
 
 	return headSeq, nil
 }

@@ -1,9 +1,15 @@
 package engine
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestEndOfStreamMargin pins the margin and what it counts from: the LAST
@@ -86,5 +92,72 @@ func TestFinalizeBehindHeadLatchesWhateverTheMargin(t *testing.T) {
 				t.Errorf("end-of-stream margin Info logged = %v, want %v; lines:\n%s", got, wantInfo, lines)
 			}
 		})
+	}
+}
+
+// TestHeadReadSinceLastSegment pins the freshness the worker's end-of-stream
+// verdict asks of the head. A broadcast that is over keeps answering the
+// retries past its last segment with X-Head-Seqnum, so its head is current. A
+// stall in which nothing past the last segment answers with the header leaves
+// the head at its value from before the stall, and it must not read as
+// current: the broadcast may have run on.
+//
+// Mutants: drop the stamp in noteHeadSeqFromResponse (the ended row reads
+// stale); stamp on lastSegTime's side, or compare the other way round (the
+// stalled row reads current); report true when no head was ever read.
+func TestHeadReadSinceLastSegment(t *testing.T) {
+	const head, lastServed = 8, 6
+	for _, tc := range []struct {
+		name            string
+		headerPastTail  bool
+		wantHeadCurrent bool
+	}{
+		{"an ended broadcast: the retries still carry the head", true, true},
+		{"a stall: nothing past the last segment carries the head", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				sq, err := strconv.Atoi(r.URL.Query().Get("sq"))
+				if err == nil && sq <= lastServed {
+					w.Header().Set("X-Head-Seqnum", strconv.Itoa(head))
+					fmt.Fprintf(w, "seg-%05d;", sq)
+					return
+				}
+				if tc.headerPastTail {
+					w.Header().Set("X-Head-Seqnum", strconv.Itoa(head))
+				}
+				w.WriteHeader(http.StatusForbidden)
+			}))
+			defer srv.Close()
+
+			d := NewSegmentDownloader(DownloaderOptions{
+				BaseURL:           srv.URL + "/videoplayback?itag=140",
+				OutputFile:        filepath.Join(t.TempDir(), "v"),
+				MaxTimeout:        300 * time.Millisecond,
+				CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
+			})
+			d.SetFastDelaysForTests(20)
+			done := make(chan error, 1)
+			go func() { done <- d.Start(context.Background()) }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("Start = %v, want nil", err)
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatal("the downloader did not finalize")
+			}
+			if d.LastSeq() != lastServed || d.HeadSeq() != head {
+				t.Fatalf("test setup invalid: LastSeq = %d, HeadSeq = %d, want %d and %d", d.LastSeq(), d.HeadSeq(), lastServed, head)
+			}
+			if got := d.HeadReadSinceLastSegment(); got != tc.wantHeadCurrent {
+				t.Errorf("HeadReadSinceLastSegment = %v, want %v", got, tc.wantHeadCurrent)
+			}
+		})
+	}
+
+	fresh := NewSegmentDownloader(DownloaderOptions{BaseURL: "http://127.0.0.1:1/videoplayback?itag=140", OutputFile: filepath.Join(t.TempDir(), "v")})
+	if fresh.HeadReadSinceLastSegment() {
+		t.Error("a downloader that never read a head reports it current")
 	}
 }
