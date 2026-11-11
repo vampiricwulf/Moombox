@@ -109,7 +109,9 @@ export class NicoScheduler {
    * and the sidebar's rows share stays aligned.
    */
   countDrop(msg) {
-    if (msg.deleted === true) return;
+    // Neither is a sidebar-only row (a Twitch "chat was cleared" marker,
+    // chat-timeline.js applyTwitchModeration): it never flies either.
+    if (msg.deleted === true || msg.sidebarOnly === true) return;
     if (msg.offsetMs - this.leadMs > this.anchorMs) this.dropped++;
   }
 

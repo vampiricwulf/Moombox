@@ -187,12 +187,20 @@ export const TWITCH_MODERATION_TYPE = "moderation";
 const TWITCH_MODERATION_FALLBACK = {
   deleted: "Deleted by a moderator.",
   author_deleted: "The user was timed out or banned.",
-  chat_cleared: "Chat was cleared by a moderator.",
 };
 
 /**
- * Apply a Twitch chat file's moderation rows and take them out of the list
- * (owner ruling R-G1).
+ * The one line the sidebar shows where a moderator cleared the whole chat
+ * (owner ruling "show a marker only"). The recorder writes the same sentence
+ * in the row's `systemMsg` (internal/twitch/chat_irc.go parseClearchat); the
+ * player prints this one whatever the row carries.
+ */
+export const TWITCH_CHAT_CLEARED_TEXT = "Chat was cleared by a moderator";
+
+/**
+ * Apply a Twitch chat file's moderation rows (owner ruling R-G1): mark the
+ * messages a timeout, a ban or a deletion removed and take those rows out of
+ * the list; turn a full clear into a marker row and mark nothing for it.
  *
  * The live IRC recorder stores each CLEARCHAT and CLEARMSG as a row of its
  * own, `messageType: "moderation"`, in arrival order, and never rewrites the
@@ -209,19 +217,27 @@ const TWITCH_MODERATION_FALLBACK = {
  *   author's display name, case-insensitively: a display name differs from the
  *   login in case only, unless it is a localized one, which such a row cannot
  *   reach;
- * - `"chat_cleared"` marks every earlier message.
+ * - `"chat_cleared"` (a moderator's /clear) marks NOTHING (owner ruling
+ *   "show a marker only"): every earlier message stays as it was, still
+ *   flying on the overlay. The row stays in the list, at its own place and
+ *   offset, as a copy retyped `messageType: "system"` with
+ *   TWITCH_CHAT_CLEARED_TEXT as its `systemMsg`, an empty `message` and
+ *   `sidebarOnly: true`. The sidebar draws it as it draws any `system`
+ *   notice (isDimTwitchNotice, player.js) and counts it in its header as it
+ *   counts those; `sidebarOnly` keeps it off the video (_buildNicoEl) and
+ *   out of the "+N not shown" count (NicoScheduler.countDrop).
  *
  * "Earlier" is the array's order, which is the order the rows were written
  * in, so call this BEFORE the sort by offset; for a multi-part job, on the
  * merged list, so a ban in part 2 reaches the user's messages in part 1. A
  * marked message's `deletedState` is the sentence of the first event that
  * removed it. A row of a kind this build does not know marks nothing and is
- * still hidden.
+ * hidden.
  *
  * A list with no moderation row — every YouTube file, every VOD chat, every
  * file written before the rows existed — is returned as it is, the same
  * array, untouched. Otherwise the kept messages are marked in place and a new
- * array without the rows is returned.
+ * array is returned, without the rows except a full clear's marker.
  * @param {Array<object>} messages in file order
  * @returns {Array<object>}
  */
@@ -234,7 +250,6 @@ export function applyTwitchModeration(messages) {
   const byMsgId = new Map();
   const byUserId = new Map();
   const byLogin = new Map();
-  let clearAll = null;
   const kept = [];
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
@@ -246,11 +261,13 @@ export function applyTwitchModeration(messages) {
       else if (m.moderation === "author_deleted" && typeof m.targetLogin === "string" && m.targetLogin) {
         byLogin.set(m.targetLogin.toLowerCase(), event);
       }
-      else if (m.moderation === "chat_cleared") clearAll = event;
+      else if (m.moderation === "chat_cleared") {
+        kept.push({ ...m, messageType: "system", systemMsg: TWITCH_CHAT_CLEARED_TEXT, message: "", sidebarOnly: true });
+      }
       continue;
     }
     kept.push(m);
-    let first = clearAll;
+    let first;
     const candidates = [m.id ? byMsgId.get(m.id) : undefined, m.authorId ? byUserId.get(m.authorId) : undefined];
     if (byLogin.size > 0 && typeof m.authorName === "string") candidates.push(byLogin.get(m.authorName.toLowerCase()));
     for (const e of candidates) {

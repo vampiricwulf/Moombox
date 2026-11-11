@@ -93,7 +93,7 @@ func TestClearchatRows(t *testing.T) {
 			line:     `@room-id=1;tmi-sent-ts=1700000003000 :tmi.twitch.tv CLEARCHAT #testchan`,
 			kind:     ModerationChatCleared,
 			id:       "clearchat-1700000003000-all",
-			sentence: "Chat was cleared by a moderator.",
+			sentence: "Chat was cleared by a moderator",
 		},
 	}
 	for _, tc := range cases {

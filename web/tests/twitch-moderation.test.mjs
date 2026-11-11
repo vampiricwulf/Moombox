@@ -5,17 +5,21 @@
 // `messageType: "moderation"`, and never rewrites the messages the event
 // removed. applyTwitchModeration (chat-timeline.js) is the one load pass that
 // marks the targets `deleted` and takes the rows out of the list; the player
-// then draws them exactly as it draws a YouTube deletion.
+// then draws them exactly as it draws a YouTube deletion. A full clear is the
+// exception (owner ruling "show a marker only"): it marks nothing and stays
+// in the list as one sidebar line, "Chat was cleared by a moderator".
 //
 // MUTANT: the pass not called by the player (the rows show as chat, nothing
 // is struck); an author sweep reaching messages AFTER the event; a full clear
-// reaching later messages; CLEARMSG matched by author instead of id; the
-// first event's sentence overwritten by a later one; a file with no rows
-// copied or changed.
+// marking any message, dropped from the list, moved from its place, flying on
+// the overlay or printing the row's own sentence; CLEARMSG matched by author
+// instead of id; the first event's sentence overwritten by a later one; a
+// file with no rows copied or changed.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { applyTwitchModeration, mergePartChats } from "../public/modules/chat-timeline.js";
+import { applyTwitchModeration, mergePartChats, TWITCH_CHAT_CLEARED_TEXT } from "../public/modules/chat-timeline.js";
+import { NicoScheduler } from "../public/modules/nico-scheduler.js";
 
 // The rows the Go recorder really writes, for the four events. The Go side
 // (internal/twitch/chat_moderation_parity_test.go) fails when parseLine no
@@ -29,12 +33,23 @@ for (const c of PARITY.cases) {
   test(`the recorder's rows for a ${c.name} are marked as the fixture says`, () => {
     assert.ok(c.messages.some((m) => m.messageType === "moderation"), "the case holds an event row");
     const out = applyTwitchModeration(structuredClone(c.messages));
-    const got = out.map((m) => (m.deleted === true
-      ? { id: m.id, deleted: true, deletedState: m.deletedState }
-      : { id: m.id, deleted: false }));
+    const got = out.map((m) => {
+      if (m.deleted === true) return { id: m.id, deleted: true, deletedState: m.deletedState };
+      // A full clear's marker: a `system` row, its line in systemMsg.
+      if (m.moderation) return { id: m.id, deleted: false, marker: m.messageType === "system" ? m.systemMsg : null };
+      return { id: m.id, deleted: false };
+    });
     assert.deepEqual(got, c.want);
+    assert.ok(out.every((m) => m.messageType !== "moderation"), "no row is left typed as moderation");
   });
 }
+
+test("the recorder writes the sentence the player shows for a full clear", () => {
+  const rows = PARITY.cases.flatMap((c) => c.messages).filter((m) => m.moderation === "chat_cleared");
+  assert.ok(rows.length > 0);
+  for (const r of rows) assert.equal(r.systemMsg, TWITCH_CHAT_CLEARED_TEXT);
+  assert.equal(TWITCH_CHAT_CLEARED_TEXT, "Chat was cleared by a moderator");
+});
 
 test("the fixture covers a timeout, a ban, a full clear and one deleted message", () => {
   const rows = PARITY.cases.flatMap((c) => c.messages).filter((m) => m.messageType === "moderation");
@@ -51,7 +66,7 @@ const timeout = (id, userId, sentence = `user${userId} was timed out for 10m.`) 
   mod(id, { moderation: "author_deleted", targetUserId: userId, targetLogin: `user${userId}`, banDurationSec: 600, systemMsg: sentence });
 const clearmsg = (id, targetMsgId) =>
   mod(id, { moderation: "deleted", targetMsgId, systemMsg: "A message from someone was deleted by a moderator." });
-const clearAll = (id) => mod(id, { moderation: "chat_cleared", systemMsg: "Chat was cleared by a moderator." });
+const clearAll = (id, sentence = "Chat was cleared by a moderator") => mod(id, { moderation: "chat_cleared", systemMsg: sentence });
 
 test("a file with no moderation rows comes back as the same array, untouched", () => {
   const messages = [msg("a", "1", "hello"), msg("b", "2", "there", { messageType: "sub", systemMsg: "x" })];
@@ -127,15 +142,49 @@ test("a CLEARMSG marks the one message with that id", () => {
   assert.equal(out[1].deletedState, "A message from someone was deleted by a moderator.");
 });
 
-test("a full clear marks everything before it and nothing after", () => {
+// Owner ruling "show a marker only": a moderator's /clear marks nothing.
+test("a full clear marks nothing and stays as a marker row at its own place and offset", () => {
+  const sub = msg("b", "2", "two", { messageType: "sub", systemMsg: "user2 subscribed" });
+  const row = { ...clearAll("x"), offsetMs: 7000, raw: "@room-id=1 :tmi.twitch.tv CLEARCHAT #c" };
+  const input = [msg("a", "1", "one"), sub, row, msg("c", "3", "three")];
+  const before = JSON.stringify(input);
+  const out = applyTwitchModeration(input);
+  assert.deepEqual(out.map((m) => m.id), ["a", "b", "x", "c"], "the marker keeps its place in file order");
+  assert.ok(out.every((m) => m.deleted !== true), "nothing is marked deleted");
+  assert.ok(out.every((m) => !("deletedState" in m)));
+  const marker = out[2];
+  assert.equal(marker.messageType, "system", "drawn as the sidebar draws a system notice");
+  assert.equal(marker.systemMsg, "Chat was cleared by a moderator");
+  assert.equal(marker.message, "");
+  assert.equal(marker.offsetMs, 7000);
+  assert.equal(marker.sidebarOnly, true);
+  assert.equal(marker.moderation, "chat_cleared");
+  assert.equal(JSON.stringify(input), before, "the file's rows are not rewritten: the marker is a copy");
+});
+
+test("the marker reads the ruled text whatever sentence the row carries", () => {
+  for (const sentence of ["Chat was cleared by a moderator.", "", "something else"]) {
+    const out = applyTwitchModeration([msg("a", "1", "one"), clearAll("x", sentence)]);
+    assert.equal(out[1].systemMsg, "Chat was cleared by a moderator");
+    assert.equal(out[0].deleted, undefined);
+  }
+});
+
+test("a full clear between other events changes none of their marks", () => {
   const out = applyTwitchModeration([
-    msg("a", "1", "one"),
-    msg("b", "2", "two", { messageType: "sub", systemMsg: "user2 subscribed" }),
+    msg("a", "1", "spam"),
+    clearmsg("c1", "a"),
+    timeout("t1", "1", "user1 was banned."),
+    msg("n", "9", "untouched by the clear"),
     clearAll("x"),
-    msg("c", "3", "three"),
+    msg("b", "1", "later"),
+    timeout("t2", "1", "user1 was timed out for 1m."),
   ]);
-  assert.deepEqual(out.map((m) => m.deleted === true), [true, true, false]);
-  assert.equal(out[1].deletedState, "Chat was cleared by a moderator.");
+  assert.deepEqual(out.map((m) => m.id), ["a", "n", "x", "b"]);
+  assert.equal(out[0].deletedState, "A message from someone was deleted by a moderator.");
+  assert.equal(out[1].deleted, undefined, "a full clear marks nothing");
+  assert.equal(out[2].deleted, undefined, "the marker is never a target");
+  assert.equal(out[3].deletedState, "user1 was timed out for 1m.", "a later timeout reaches back across the clear");
 });
 
 test("a message removed twice carries the first event's sentence", () => {
@@ -143,7 +192,6 @@ test("a message removed twice carries the first event's sentence", () => {
     msg("a", "1", "spam"),
     clearmsg("c1", "a"),
     timeout("t1", "1", "user1 was banned."),
-    clearAll("x"),
     msg("b", "1", "later"),
     timeout("t2", "1", "user1 was timed out for 1m."),
   ]);
@@ -173,8 +221,27 @@ test("a ban in a later part reaches the user's messages in an earlier part", () 
   assert.deepEqual(out.map((m) => [m.id, m.deleted === true]), [["a", true], ["b", false]]);
 });
 
-// The player end to end: the row never reaches the sidebar or the overlay,
-// and its target is drawn as a YouTube deletion is.
+test("a full clear in a later part marks nothing in an earlier part and keeps its shifted offset", () => {
+  const merged = mergePartChats([
+    { startOffsetSec: 0, data: { platform: "twitch", messages: [msg("a", "1", "part one", { offsetMs: 5000 })] } },
+    { startOffsetSec: 100, data: { platform: "twitch", messages: [{ ...clearAll("x"), offsetMs: 2000 }, msg("b", "1", "after", { offsetMs: 9000 })] } },
+  ]);
+  const out = applyTwitchModeration(merged.messages);
+  assert.deepEqual(out.map((m) => [m.id, m.deleted === true, m.offsetMs]), [["a", false, 5000], ["x", false, 102000], ["b", false, 109000]]);
+  assert.equal(out[1].systemMsg, "Chat was cleared by a moderator");
+});
+
+test("a marker that ages out unseen is not counted as a message the overlay dropped", () => {
+  const s = new NicoScheduler({});
+  s.anchorMs = 0;
+  s.countDrop({ offsetMs: 50000, sidebarOnly: true });
+  assert.equal(s.dropped, 0);
+  s.countDrop({ offsetMs: 50000 });
+  assert.equal(s.dropped, 1, "an ordinary message at the same time is");
+});
+
+// The player end to end: a timeout's row never reaches the sidebar or the
+// overlay, and its target is drawn as a YouTube deletion is.
 let jsdomMissing = null;
 try {
   await import("jsdom");
@@ -222,4 +289,47 @@ test("the player hides moderation rows and marks their targets deleted", { skip 
   // The overlay flies no deleted message (FQ-5), so the marked one is off the video too.
   assert.equal(h.player._buildNicoEl(h.player.playerChatMessages[1]), null);
   assert.ok(h.player._buildNicoEl(h.player.playerChatMessages[0]));
+});
+
+// Owner ruling "show a marker only". MUTANT: the marker flying on the video;
+// an earlier message struck or kept off the video; the marker left out of the
+// sidebar or its header count; the row's own sentence printed.
+test("the player shows a full clear as one sidebar line and leaves earlier chat alone", { skip }, async () => {
+  const messages = [
+    msg("a", "1", "before the clear", { offsetMs: 1000 }),
+    { ...clearAll("x", "Chat was cleared by a moderator."), offsetMs: 2000 },
+    msg("b", "2", "after the clear", { offsetMs: 3000 }),
+  ];
+  const h = harness.makePlayer({
+    jobs: [{
+      id: "j1", status: "Finished", filename: "j1.mp4", title: "T", channelName: "Chan",
+      updatedAt: "2026-09-01T00:00:00Z", chatFilename: "chat.json",
+    }],
+    watchState: {},
+    chat: { platform: "twitch", emoteOffsets: "utf16", messages },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+
+  assert.deepEqual(h.player.playerChatMessages.map((m) => m.id), ["a", "x", "b"]);
+  const rows = [...h.sidebar().children];
+  assert.equal(rows.length, 3, "one sidebar row per message and one for the marker");
+  const [before, marker, after_] = rows;
+  for (const row of [before, after_]) {
+    assert.ok(!row.classList.contains("chat-msg-deleted"));
+    assert.equal(row.querySelector(".chat-msg-struck"), null);
+    assert.equal(row.querySelector(".chat-msg-tag-deleted"), null);
+  }
+  // Drawn as every other `system` notice is: the dim notice block.
+  assert.ok(marker.classList.contains("chat-msg"));
+  assert.ok(marker.classList.contains("chat-notice") && marker.classList.contains("dim"));
+  assert.equal(marker.querySelector(".chat-notice-line")?.textContent, "Chat was cleared by a moderator");
+  assert.ok(!marker.textContent.includes("Moderation"), "no author is printed for it");
+  // It counts in the header as other system rows do.
+  assert.match(document.getElementById("player-sidebar-msg-count").textContent, /\b3\b/);
+  // On the video: earlier chat still flies, the marker never does.
+  assert.ok(h.player._buildNicoEl(h.player.playerChatMessages[0]), "a message before the clear still flies");
+  assert.equal(h.player._buildNicoEl(h.player.playerChatMessages[1]), null, "the marker stays off the video");
+  // Even a marker that somehow carried text would not fly.
+  assert.equal(h.player._buildNicoEl({ ...h.player.playerChatMessages[1], message: "text" }), null);
 });

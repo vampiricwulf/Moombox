@@ -1546,8 +1546,10 @@ export class PlayerController {
           // moderation rows (a stored CLEARCHAT or CLEARMSG, owner ruling
           // R-G1) mark the messages they removed `deleted` and leave the
           // list, so nothing below — the sidebar's rows, the overlay's
-          // cursor, the counts — ever holds one. A file with none comes back
-          // as the same array.
+          // cursor, the counts — ever holds one. The one exception is a
+          // full chat clear, which marks nothing and stays as a `system`
+          // marker row for the sidebar. A file with none comes back as the
+          // same array.
           this.playerChatMessages = applyTwitchModeration(chatData.messages || [])
             .map(({ raw: _raw, ...m }) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
             .sort((a, b) => a.offsetMs - b.offsetMs);
@@ -2640,6 +2642,9 @@ export class PlayerController {
     // its replacement, the text the sidebar row shows. The archived message
     // is not touched.
     if (msg.deleted === true) return null;
+    // A sidebar-only row (the "chat was cleared" marker applyTwitchModeration
+    // leaves for a moderator's /clear) is a line of the replay, not chat.
+    if (msg.sidebarOnly === true) return null;
     const el = document.createElement("div");
     el.className = "nico-message";
     if (msg.messageType === "announcement") {

@@ -112,7 +112,8 @@ type TwitchChatMessage struct {
 	// stored as a row of its own, in arrival order, counted like any other
 	// row. The row is the EVENT; the messages it took off the screen are kept
 	// exactly as sent and are never rewritten. The player hides the row and
-	// marks its targets deleted when it loads the file
+	// marks its targets deleted when it loads the file; a full chat clear
+	// marks nothing and is shown as one line in the sidebar instead
 	// (applyTwitchModeration, web/public/modules/chat-timeline.js).
 	//
 	// Moderation is one of the ModerationKind constants. TargetMsgID names the
@@ -120,7 +121,7 @@ type TwitchChatMessage struct {
 	// whose earlier messages a ModerationAuthorDeleted row removed, with
 	// BanDurationSec the timeout's length (0 = a permanent ban). TargetLogin
 	// is the user's login as the wire gave it. A ModerationChatCleared row
-	// names nobody: it removed everything before it.
+	// names nobody: a moderator cleared the whole chat at that moment.
 	//
 	// On such a row Message and AuthorID are empty and SystemMsg is the
 	// event as a sentence. All five are omitempty, so no other row and no

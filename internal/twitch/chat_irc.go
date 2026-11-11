@@ -837,7 +837,7 @@ func parseClearchat(tags map[string]string, parts []string, rawLine string) *Twi
 	if login == "" && userID == "" {
 		msg.ID = "clearchat-" + ts + "-all"
 		msg.Moderation = ModerationChatCleared
-		msg.SystemMsg = "Chat was cleared by a moderator."
+		msg.SystemMsg = "Chat was cleared by a moderator"
 		return msg
 	}
 	target := userID

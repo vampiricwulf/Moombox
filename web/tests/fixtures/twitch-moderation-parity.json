@@ -1,5 +1,5 @@
 {
-  "comment": "Shared by internal/twitch/chat_moderation_parity_test.go (parseLine must marshal each case's lines to exactly its messages) and web/tests/twitch-moderation.test.mjs (applyTwitchModeration over messages must give want: the kept rows in order, each deleted or not, with its sentence).",
+  "comment": "Shared by internal/twitch/chat_moderation_parity_test.go (parseLine must marshal each case's lines to exactly its messages) and web/tests/twitch-moderation.test.mjs (applyTwitchModeration over messages must give want: the kept rows in order, each deleted or not, with its sentence; a full clear marks nothing and stays as a marker row, whose sidebar line is marker).",
   "cases": [
     {
       "name": "timeout",
@@ -147,7 +147,7 @@
           "authorId": "",
           "message": "",
           "messageType": "moderation",
-          "systemMsg": "Chat was cleared by a moderator.",
+          "systemMsg": "Chat was cleared by a moderator",
           "raw": "@room-id=1;tmi-sent-ts=1700000003000 :tmi.twitch.tv CLEARCHAT #testchan",
           "moderation": "chat_cleared"
         },
@@ -163,8 +163,9 @@
         }
       ],
       "want": [
-        { "id": "m1", "deleted": true, "deletedState": "Chat was cleared by a moderator." },
-        { "id": "m2", "deleted": true, "deletedState": "Chat was cleared by a moderator." },
+        { "id": "m1", "deleted": false },
+        { "id": "m2", "deleted": false },
+        { "id": "clearchat-1700000003000-all", "deleted": false, "marker": "Chat was cleared by a moderator" },
         { "id": "m3", "deleted": false }
       ]
     },
