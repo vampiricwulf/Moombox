@@ -556,6 +556,10 @@ func renewGvsCredentials(
 	// little as ~10s, a cold mint can need tens of seconds, and the token is
 	// the credential that actually went stale.
 	//
+	// A sidecar that is restarting is waited for inside the mint, for at most
+	// half of what refreshCtx has left (bgutils.PotProvider.awaitSidecar), so
+	// the URL half below keeps a live context when the child stays down.
+	//
 	// Gated by the refreshed stream's own client, read from the same setup
 	// format the strategy chose (formatSourceByItag), by the rule every
 	// strategy uses (youtube.GvsTokenRequired): a tv, web_embedded, visionos

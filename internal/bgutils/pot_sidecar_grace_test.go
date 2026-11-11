@@ -191,14 +191,18 @@ func TestAttachingTheSidecarAgainEndsTheOutage(t *testing.T) {
 	})
 }
 
-// A caller with less time than the grace keeps its own budget: it leaves on
-// its deadline with its context's error, and the outage's clock goes on for
-// the callers after it.
+// A caller with a deadline shorter than the grace spends at most half of
+// what is left of it waiting, and is then told the sidecar is down with its
+// context still live: the work it has after the mint under the same deadline
+// (the 403 recovery's player re-fetch and URL resolve, an extraction's
+// player request) still runs, as it did when a down sidecar failed the mint
+// at once. The outage's clock goes on for the callers after it.
 //
-// Mutants: awaitSidecar not selecting on ctx (the caller is held the whole
-// minute); the caller's leaving restarting the clock (the last mint below
-// waits a further minute instead of the 40 s left).
-func TestAMintWithAShorterBudgetThanTheGraceKeepsIt(t *testing.T) {
+// Mutants: awaitSidecar waiting out the caller's whole deadline (the caller
+// gets DeadlineExceeded at 20 s and a dead context); returning the plain
+// errSidecarDown at the cut; the caller's leaving restarting the clock (the
+// last mint below waits a further minute instead of what is left).
+func TestAMintWaitLeavesHalfTheCallersDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		side := &graceSidecar{}
 		pp := newGraceProvider(side)
@@ -206,18 +210,31 @@ func TestAMintWithAShorterBudgetThanTheGraceKeepsIt(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		start := time.Now()
-		if _, err := pp.GenerateGvsPoToken(ctx, "A", ""); !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("a 20 s caller = %v, want its own deadline", err)
+		_, err := pp.GenerateGvsPoToken(ctx, "A", "")
+		if !errors.Is(err, errSidecarDown) || !errors.Is(err, errSidecarDownForCaller) {
+			t.Fatalf("a 20 s caller = %v, want errSidecarDown for this caller", err)
 		}
-		if _, err := pp.GeneratePoToken(ctx, "A", false); !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("a caller whose context has ended = %v, want its context's error", err)
+		if waited := time.Since(start); waited != 10*time.Second {
+			t.Errorf("the 20 s caller waited %v, want half its deadline (10 s)", waited)
 		}
-		if waited := time.Since(start); waited != 20*time.Second {
-			t.Errorf("the 20 s caller waited %v", waited)
+		if ctx.Err() != nil {
+			t.Fatalf("the caller's context ended during the mint wait: %v", ctx.Err())
+		}
+		// The same budget's next mint (an extraction's player token) takes
+		// half of what is left again, and still leaves a live context.
+		if _, err := pp.GeneratePoToken(ctx, "A", false); !errors.Is(err, errSidecarDownForCaller) {
+			t.Fatalf("the same caller's second mint = %v, want errSidecarDown for this caller", err)
+		}
+		if waited := time.Since(start); waited != 15*time.Second {
+			t.Errorf("two mints had spent %v of the 20 s deadline, want 15 s", waited)
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("the caller's context ended during the second mint wait: %v", ctx.Err())
 		}
 
-		if _, err := pp.GenerateGvsPoToken(context.Background(), "B", ""); !errors.Is(err, errSidecarDown) {
-			t.Fatalf("the next mint = %v, want errSidecarDown at the outage's minute", err)
+		_, err = pp.GenerateGvsPoToken(context.Background(), "B", "")
+		if !errors.Is(err, errSidecarDown) || errors.Is(err, errSidecarDownForCaller) {
+			t.Fatalf("the next mint = %v, want the plain errSidecarDown at the outage's minute", err)
 		}
 		if waited := time.Since(start); waited != sidecarMintGrace {
 			t.Errorf("the outage's grace ended %v after it began, want %v", waited, sidecarMintGrace)
@@ -225,9 +242,59 @@ func TestAMintWithAShorterBudgetThanTheGraceKeepsIt(t *testing.T) {
 	})
 }
 
-// A waiter that joined a mint whose leader left on its own deadline inside
-// the grace asks again, and is answered by the child once it is back: the
-// leader's context is not the waiter's answer.
+// A deadline longer than twice what is left of the grace changes nothing:
+// the mint waits out the grace and gets the plain errSidecarDown.
+//
+// Mutant: awaitSidecar marking every deadline caller's failure as the
+// caller's own (a waiter would then ask again after the grace is spent).
+func TestALongDeadlineWaitsOutTheWholeGrace(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pp := newGraceProvider(&graceSidecar{})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		start := time.Now()
+		_, err := pp.GenerateGvsPoToken(ctx, "A", "")
+		if !errors.Is(err, errSidecarDown) || errors.Is(err, errSidecarDownForCaller) {
+			t.Fatalf("a 10 min caller = %v, want the plain errSidecarDown", err)
+		}
+		if waited := time.Since(start); waited != sidecarMintGrace {
+			t.Errorf("a 10 min caller waited %v, want the grace (%v)", waited, sidecarMintGrace)
+		}
+	})
+}
+
+// A caller that is cancelled while it waits leaves at once with its
+// context's error, and one whose context has already ended does not wait.
+//
+// Mutant: awaitSidecar not selecting on ctx (the caller is held the whole
+// minute).
+func TestACancelledMintWaitLeavesWithItsContextsError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pp := newGraceProvider(&graceSidecar{})
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(7*time.Second, cancel)
+		start := time.Now()
+		if _, err := pp.GenerateGvsPoToken(ctx, "A", ""); !errors.Is(err, context.Canceled) {
+			t.Fatalf("a cancelled caller = %v, want context.Canceled", err)
+		}
+		if waited := time.Since(start); waited != 7*time.Second {
+			t.Errorf("the cancelled caller waited %v, want 7 s", waited)
+		}
+		if _, err := pp.GeneratePoToken(ctx, "A", false); !errors.Is(err, context.Canceled) {
+			t.Fatalf("a caller whose context has ended = %v, want its context's error", err)
+		}
+		if waited := time.Since(start); waited != 7*time.Second {
+			t.Errorf("a caller whose context had ended waited: %v since the start", waited)
+		}
+	})
+}
+
+// A waiter that joined a mint whose leader stopped waiting because of its
+// own deadline asks again, and is answered by the child once it is back:
+// the leader's budget is not the waiter's answer.
+//
+// Mutant: the waiter taking the leader's errSidecarDownForCaller as its own
+// answer (it fails 2.5 s in, 27 s before the child is back).
 func TestAWaiterOutlivesALeaderThatLeftDuringTheGrace(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		side := &graceSidecar{}
@@ -251,8 +318,39 @@ func TestAWaiterOutlivesALeaderThatLeftDuringTheGrace(t *testing.T) {
 		if err != nil || s.PoToken != "player-VIDEOID" {
 			t.Fatalf("the waiter = %+v, %v; want the child's token", s, err)
 		}
-		if err := <-leaderErr; !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("the leader = %v, want its own deadline", err)
+		if err := <-leaderErr; !errors.Is(err, errSidecarDownForCaller) {
+			t.Errorf("the leader = %v, want errSidecarDown for its own deadline", err)
+		}
+	})
+}
+
+// A waiter that joined a mint whose leader was cancelled during the grace
+// asks again too (inflightEntry.leaderGone).
+func TestAWaiterOutlivesALeaderCancelledDuringTheGrace(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		side := &graceSidecar{}
+		pp := newGraceProvider(side)
+		side.upAfter(t, 30*time.Second)
+
+		leaderCtx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(5*time.Second, cancel)
+		leaderErr := make(chan error, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("panic: %v", r)
+				}
+			}()
+			_, err := pp.GeneratePoToken(leaderCtx, "VIDEOID", false)
+			leaderErr <- err
+		}()
+		synctest.Wait()
+		s, err := pp.GeneratePoToken(context.Background(), "VIDEOID", false)
+		if err != nil || s.PoToken != "player-VIDEOID" {
+			t.Fatalf("the waiter = %+v, %v; want the child's token", s, err)
+		}
+		if err := <-leaderErr; !errors.Is(err, context.Canceled) {
+			t.Errorf("the leader = %v, want context.Canceled", err)
 		}
 	})
 }
