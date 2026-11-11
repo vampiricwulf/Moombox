@@ -130,8 +130,9 @@ func TestUncheckedStatusShowsNeitherNoCookiesNorRelogin(t *testing.T) {
 
 // TestDashboardBindsBeforeTheFirstCookieCheck pins run()'s order (owner
 // ruling R-H2 and its amendment): the web server is started, and its bind
-// waited for, before the cookie startup sequence, so the dashboard is not
-// held behind two auth round trips; the seeds and the no-cookie-file mark
+// waited for (resolveWebBind, which waits with awaitWebBind), before the
+// cookie startup sequence, so the dashboard is not held behind two auth
+// round trips; the seeds and the no-cookie-file mark
 // come before the bind, so nothing a dashboard request can trigger observes
 // ahead of them; and the sequence is started before runTUI, which no longer
 // waits for it either. That the sequence is one goroutine holding the first
@@ -147,7 +148,7 @@ func TestDashboardBindsBeforeTheFirstCookieCheck(t *testing.T) {
 		{"cookieRefresh", "SetUnrecoveredPlatforms"},
 		{"cookieRefresh", "SkipStartupCheck"},
 		{"webServer", "Start"},
-		{"", "awaitWebBind"},
+		{"s", "resolveWebBind"},
 		{"", "startCookieSequence"},
 		{"upd", "CleanupOldBinary"},
 		{"s", "runTUI"},

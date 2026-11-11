@@ -1,6 +1,11 @@
 package main
 
-import "time"
+import (
+	"fmt"
+	"log/slog"
+	"os"
+	"time"
+)
 
 // webBindBackstop is how long run() waits for the web server to either bind
 // or fail before it goes on without an answer. A bind normally answers in
@@ -39,4 +44,47 @@ func awaitWebBind(startErr <-chan error, bound <-chan struct{}, backstop time.Du
 	case <-timer.C:
 		return webBindUndecided, nil
 	}
+}
+
+// resolveWebBind is run()'s wait for the web server's bind (awaitWebBind) and
+// what each answer means for the boot. webErrCh carries web.Server.Start's
+// result and bound is the server's Bound signal. A bind failure in a headless
+// run exits with exitCodeStartupError; with a TUI it is logged and reported
+// as true, and the boot goes on without the dashboard. A bound server, or
+// one that has said nothing by webBindBackstop, reports false, and a later
+// error from Start is logged in the background.
+func (s *runState) resolveWebBind(webErrCh <-chan error, bound <-chan struct{}) bool {
+	log, useTUI := s.log, s.useTUI
+	webBindFailed := false
+	switch outcome, err := awaitWebBind(webErrCh, bound, webBindBackstop); outcome {
+	case webStartReturned:
+		if err != nil {
+			if !useTUI {
+				log.Error("Web server failed to start", slog.String("error", err.Error()))
+				fmt.Fprintf(os.Stderr, "\nError: %s\n", err.Error())
+				fmt.Fprintln(os.Stderr, "Web dashboard is unavailable.")
+				// Deterministic: the port is taken or the bind address is
+				// unusable on this host. Never "the update is broken". And
+				// no keypress wait: this arm is headless, and a headless run
+				// never holds its exit (awaitKeypress).
+				os.Exit(exitCodeStartupError)
+			}
+			log.Warn("Web server failed, continuing in TUI-only mode", slog.String("error", err.Error()))
+			webBindFailed = true
+		}
+	default:
+		// The server is bound (or still starting at the backstop): log a
+		// later error from Start in the background.
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("web error drainer panic", "panic", r)
+				}
+			}()
+			if err := <-webErrCh; err != nil {
+				log.Error("Web server error", slog.String("error", err.Error()))
+			}
+		}()
+	}
+	return webBindFailed
 }

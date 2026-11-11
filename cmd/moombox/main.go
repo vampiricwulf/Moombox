@@ -419,39 +419,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	}()
 
 	// Wait for the bind to resolve: Start's error, or the server's Bound
-	// signal (awaitWebBind). A failure exits or falls back to TUI-only below;
-	// a bound server, or one that has said nothing by the backstop, proceeds.
-	webBindFailed := false
-	switch outcome, err := awaitWebBind(webErrCh, webServer.Bound(), webBindBackstop); outcome {
-	case webStartReturned:
-		if err != nil {
-			if !useTUI {
-				log.Error("Web server failed to start", slog.String("error", err.Error()))
-				fmt.Fprintf(os.Stderr, "\nError: %s\n", err.Error())
-				fmt.Fprintln(os.Stderr, "Web dashboard is unavailable.")
-				// Deterministic: the port is taken or the bind address is
-				// unusable on this host. Never "the update is broken". And
-				// no keypress wait: this arm is headless, and a headless run
-				// never holds its exit (awaitKeypress).
-				os.Exit(exitCodeStartupError)
-			}
-			log.Warn("Web server failed, continuing in TUI-only mode", slog.String("error", err.Error()))
-			webBindFailed = true
-		}
-	default:
-		// The server is bound (or still starting at the backstop): log a
-		// later error from Start in the background.
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Error("web error drainer panic", "panic", r)
-				}
-			}()
-			if err := <-webErrCh; err != nil {
-				log.Error("Web server error", slog.String("error", err.Error()))
-			}
-		}()
-	}
+	// signal (resolveWebBind, on awaitWebBind). A failure exits or falls back
+	// to TUI-only there; a bound server, or one that has said nothing by the
+	// backstop, proceeds.
+	webBindFailed := s.resolveWebBind(webErrCh, webServer.Bound())
 
 	// The cookie startup sequence: the first auth check, then the profile
 	// seed, then the browser refresh timer, in that order on one background
@@ -520,39 +491,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	if exeErr == nil {
 		rolledBackFrom = rolledBackRelease(exeSelf, version)
 	}
-	if configLoaded && lastRunVersion != version {
-		if announcesVersionChange(lastRunVersion, version, rolledBackFrom) {
-			// Reflect whether the dashboard actually came back: in TUI mode
-			// a failed web bind logs-and-continues above, and "restarted
-			// successfully" on the operator's phone while the dashboard is
-			// dead would be a lie. FAILED only on a CONFIRMED bind error —
-			// a bind still unanswered at webBindBackstop leaves ActualPort
-			// 0, and claiming failure then would be a false alarm; the
-			// notice then says nothing about the dashboard.
-			fields := []notifications.Field{
-				{Name: "Previous Version", Value: "v" + lastRunVersion, Inline: true},
-				{Name: "Current Version", Value: "v" + version, Inline: true},
-			}
-			ntype := notifications.TypeSuccess
-			desc := fmt.Sprintf("Moombox updated from v%s to v%s and restarted successfully", lastRunVersion, version)
-			switch {
-			case webBindFailed:
-				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "FAILED — check logs", Inline: true})
-				ntype = notifications.TypeWarning
-				desc = fmt.Sprintf("Moombox updated from v%s to v%s and restarted — but the web dashboard failed to start", lastRunVersion, version)
-			case webServer.ActualPort() > 0:
-				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "OK", Inline: true})
-			}
-			notifyMgr.Send("Update Applied", desc, ntype, fields,
-				notifications.SendOptions{Event: "update_applied"},
-			)
-		}
-		if err := s.configStore.Update(func(c *config.MoomboxConfig) {
-			c.Updates.LastRunVersion = version
-		}); err != nil {
-			log.Warn("failed to persist last-run version", slog.String("error", err.Error()))
-		}
-	}
+	s.recordVersionChange(lastRunVersion, configLoaded, rolledBackFrom, webBindFailed)
 
 	// Launcher-staleness note: an in-place update replaces the binary on
 	// disk, but the supervisor PROCESS keeps running the code it started

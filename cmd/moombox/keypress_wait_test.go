@@ -106,11 +106,13 @@ func TestAnInteractiveStartupErrorWaitsForEnter(t *testing.T) {
 // run() is where the two rules reach production, and only a failing boot
 // reaches it there: so its call site is read from source. The one wait is
 // the initServices failure's, handed the signal context and useTUI; the
-// headless web-bind failure has none, since a headless run never waits.
+// headless web-bind failure (resolveWebBind, web_bind.go) has none, since a
+// headless run never waits.
 //
 // Mutants: `waitForKeypress(context.Background(), useTUI)` — SIGTERM no
 // longer ends the wait; `waitForKeypress(ctx, true)` — a headless container
-// with a TTY waits again; restoring a wait to the web-bind arm — two calls;
+// with a TTY waits again; restoring a wait to the web-bind arm — a call in
+// resolveWebBind;
 // run's ctx from context.Background() — not the one a stop signal ends.
 func TestRunWaitsForAKeypressOnlyWithItsSignalContextAndUseTUI(t *testing.T) {
 	const want = "waitForKeypress(ctx, useTUI)"
@@ -133,6 +135,15 @@ func TestRunWaitsForAKeypressOnlyWithItsSignalContextAndUseTUI(t *testing.T) {
 	if len(found) != 1 {
 		t.Fatalf("run() calls waitForKeypress %d times (%v), want once — the initServices failure", len(found), found)
 	}
+	bindFset, bindBody := funcBody(t, "web_bind.go", "resolveWebBind")
+	ast.Inspect(bindBody, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "waitForKeypress" {
+				t.Errorf("resolveWebBind at %s waits for a keypress: its failure arm is headless and never holds its exit", bindFset.Position(call.Pos()))
+			}
+		}
+		return true
+	})
 	// And ctx is the one a stop signal ends: run's ctx comes from
 	// context.WithCancel, its cancel is the runState's, and run arms
 	// catchStopSignals with s.stopOnSignal, which calls that cancel
