@@ -74,6 +74,11 @@ type VodChatDownloader struct {
 	onProgressMu sync.RWMutex
 	onProgress   func(count int)
 
+	// lastProgressLog is when the "VOD chat progress" line was last written
+	// (Start sets it to the download's start). Single-writer: the Start
+	// goroutine only.
+	lastProgressLog time.Time
+
 	// sessionCancel aborts the page fetch in flight. Stop() fires it so a
 	// goroutine parked in a GQL round trip unwinds inside the orchestrator's
 	// 2 s grace instead of outliving the job's staging removal (TWITCH-11).
@@ -211,6 +216,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) (retErr error) {
 	vcd.sessionCancelMu.Unlock()
 
 	vcd.logger.Info("starting VOD chat download", "vodID", vcd.vodID)
+	vcd.lastProgressLog = time.Now()
 
 	var contentOffset float64
 	// cursor is empty for the FIRST request of a run (a fresh start or a
@@ -377,9 +383,9 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) (retErr error) {
 			newCount++
 		}
 
-		// Once per page, not per message — reportProgress logs an Info line,
-		// and per-message it floods the log with thousands of identical
-		// entries on comment-heavy VODs.
+		// Once per page, not per message: the progress callback writes the
+		// job row. The Info line reportProgress logs is rarer still (see
+		// vodChatProgressLogInterval).
 		if newCount > 0 {
 			vcd.reportProgress(contentOffset)
 		}
@@ -388,7 +394,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) (retErr error) {
 		if len(edges) == 0 {
 			if !hasNext {
 				// Genuine end of VOD comments.
-				vcd.logger.Info("[TwitchVodChat] Reached end of VOD comments")
+				vcd.logger.Info("[TwitchVodChat] Reached end of VOD comments", "vodID", vcd.vodID)
 				break
 			}
 			// Twitch claims more pages exist (hasNextPage=true) yet sent none
@@ -762,13 +768,27 @@ func (vcd *VodChatDownloader) writeFullFileCount(msgs []TwitchChatMessage, count
 	return utils.WriteChatFileAtomic(vcd.outputPath, &chatData)
 }
 
-// reportProgress calls OnProgress and logs percentage if vodDuration is known.
+// vodChatProgressLogInterval is the least time between two "VOD chat
+// progress" log lines. Pages arrive several a second, and a line for each
+// filled the log and pushed every other line out of the job's own 200-line
+// log.
+const vodChatProgressLogInterval = 30 * time.Second
+
+// reportProgress calls OnProgress, on every page, and logs the percentage
+// when vodDuration is known, at most once per vodChatProgressLogInterval.
+// The completion line in Start reports the final count.
 func (vcd *VodChatDownloader) reportProgress(contentOffset float64) {
 	count := int(vcd.totalCount.Load())
 	vcd.callOnProgress(count)
 	if vcd.vodDuration > 0 {
+		now := time.Now()
+		if now.Sub(vcd.lastProgressLog) < vodChatProgressLogInterval {
+			return
+		}
+		vcd.lastProgressLog = now
 		pct := min(contentOffset/float64(vcd.vodDuration)*100, 100)
 		vcd.logger.Info("VOD chat progress",
+			"vodID", vcd.vodID,
 			"messages", count,
 			"percent", fmt.Sprintf("%.1f%%", pct),
 			"offsetSeconds", fmt.Sprintf("%.0f", contentOffset),
