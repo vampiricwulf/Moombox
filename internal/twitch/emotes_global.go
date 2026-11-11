@@ -53,7 +53,10 @@ func (g *globalEmoteSet) due(now time.Time) bool {
 //
 // It never fails: a provider that has never answered contributes no emotes.
 // Concurrent callers share one fetch; a caller whose ctx ends while waiting
-// gets what is cached.
+// gets what is cached. The fetch runs on the first caller's ctx: when that
+// ctx ends before a provider answers, the attempt is not counted as a failure
+// of the provider (no retry floor, no warning), and the callers that waited
+// on it fetch for themselves.
 func (er *EmoteResolver) globalEmotes(ctx context.Context) *TwitchEmoteData {
 	er.mu.Lock()
 	for er.globalInflight != nil {
@@ -70,11 +73,13 @@ func (er *EmoteResolver) globalEmotes(ctx context.Context) *TwitchEmoteData {
 	}
 	now := er.now()
 	var due [globalProviderCount]bool
+	var prevTried [globalProviderCount]time.Time
 	anyDue := false
 	for i := range er.globals {
 		if er.globals[i].due(now) {
 			due[i] = true
 			anyDue = true
+			prevTried[i] = er.globals[i].triedAt
 			er.globals[i].triedAt = now
 		}
 	}
@@ -113,10 +118,18 @@ func (er *EmoteResolver) globalEmotes(ctx context.Context) *TwitchEmoteData {
 
 	er.mu.Lock()
 	stamp := er.now()
+	// A fetch that ended with the caller's own ctx cancelled or expired says
+	// nothing about the provider: the attempt is taken back, so the retry
+	// floor does not start and the next caller (a waiter on this very fetch
+	// included) fetches at once.
+	callerGone := ctx.Err() != nil
 	for i := range er.globals {
-		if answered[i] {
+		switch {
+		case answered[i]:
 			er.globals[i].emotes = results[i]
 			er.globals[i].fetchedAt = stamp
+		case due[i] && callerGone:
+			er.globals[i].triedAt = prevTried[i]
 		}
 	}
 	snapshot := er.globalSnapshotLocked()
@@ -182,10 +195,14 @@ func withGlobalEmotes(channel, global *TwitchEmoteData) *TwitchEmoteData {
 // fetchGlobalJSON fetches one global-set endpoint. Unlike a per-channel
 // lookup, a 404 here is a failure like any other: the global sets exist.
 func (er *EmoteResolver) fetchGlobalJSON(ctx context.Context, provider, url string) ([]byte, bool) {
-	ctx, cancel := context.WithTimeout(ctx, emoteTimeout)
+	fetchCtx, cancel := context.WithTimeout(ctx, emoteTimeout)
 	defer cancel()
-	data, err := fetchJSON(ctx, url)
+	data, err := fetchJSON(fetchCtx, url)
 	if err != nil {
+		if ctx.Err() != nil {
+			// The caller gave up; the provider did not fail.
+			return nil, false
+		}
 		er.logger.Warn("global emote set unavailable", "provider", provider, "err", err)
 		return nil, false
 	}

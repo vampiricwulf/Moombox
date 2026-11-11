@@ -35,6 +35,11 @@ func installEmoteRoutes(t *testing.T, bodies map[string]string) *emoteRoutes {
 	prev := twitchHTTPClient
 	t.Cleanup(func() { twitchHTTPClient = prev })
 	twitchHTTPClient = &http.Client{Transport: probeRoundTripper(func(req *http.Request) (*http.Response, error) {
+		// As the real transport does: a request whose context has ended
+		// fails with that context's error and reaches no provider.
+		if err := req.Context().Err(); err != nil {
+			return nil, err
+		}
 		url := req.URL.String()
 		r.mu.Lock()
 		defer r.mu.Unlock()
