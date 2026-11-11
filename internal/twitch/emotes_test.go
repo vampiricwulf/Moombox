@@ -147,8 +147,7 @@ func TestEmoteResolverClear(t *testing.T) {
 //
 // Mutants: caching unconditionally (the second Resolve makes no requests and
 // returns non-nil); returning a non-nil empty set on total failure (the
-// per-downloader cache in resolveEmotesCached latches THAT instead, which is
-// the same bug one layer up).
+// chat file is then given an empty emotes block as if it were an answer).
 func TestEmoteResolverDoesNotCacheATotalFailure(t *testing.T) {
 	er := NewEmoteResolver(&testLogger{})
 	calls := installEmoteFetchStub(t, 0, "")

@@ -95,8 +95,9 @@ func (er *EmoteResolver) evictIfFullLocked() {
 //
 // The global sets only ever add: when they cannot be fetched the channel's
 // sets are returned alone, and when the channel's sets cannot be resolved the
-// result is nil whatever the globals hold, so the caller's own cache
-// (resolveEmotesCached, chat_recording.go) retries later.
+// result is nil whatever the globals hold, so nothing is written to the chat file
+// and the next resolve (the job's next part, resolveEmotes in
+// chat_recording.go) tries again.
 func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelLogin ...string) *TwitchEmoteData {
 	var global *TwitchEmoteData
 	done := make(chan struct{})
@@ -130,7 +131,7 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 //     and kept: an emote set from yesterday beats none.
 //
 // Returns nil only when nothing is cached and no provider answered, so the
-// caller's own cache (resolveEmotesCached, chat_recording.go) can retry later.
+// caller (resolveEmotes, chat_recording.go) can retry later.
 func (er *EmoteResolver) resolveChannel(ctx context.Context, channelID string, channelLogin ...string) *TwitchEmoteData {
 	// Determine cache key: prefer channelLogin, fall back to channelID
 	cacheKey := channelID
