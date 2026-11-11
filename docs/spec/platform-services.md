@@ -763,6 +763,10 @@ Twitch GQL returns HTTP 200 even for application-level errors. The `gqlRequest` 
 2. Checks if the response is a batch array -- checks each element for errors.
 3. Size-limits all response reads to 5 MB.
 
+#### Rate Limit
+
+Every GQL request takes a token first (`acquireToken`, called by `doGQLOnce` in `internal/twitch/api.go`): one process-wide bucket of 10 requests a second (`twitchGQLRatePerSec`) with a burst of 10. The bucket is refilled from elapsed time when a request asks, so an idle process runs no timer and no goroutine for it. A request that finds it empty waits exactly until its token is earned, behind the requests already waiting; one whose context ends while it waits returns the context's error and gives its place back. Pinned by `internal/twitch/api_ratelimit_test.go`.
+
 #### Stream Type Normalization
 
 After parsing stream info, the `StreamType` field is normalized: anything that is not `"rerun"` is set to `"live"`.
@@ -1005,6 +1009,8 @@ Spilling the batch at the stream's end and keeping it too would let the job's ch
 ### VOD Chat
 
 `VodChatDownloader` in `vod_chat.go` downloads chat from completed VODs using the GQL `VideoCommentsByOffsetOrCursor` persisted query.
+
+Progress reaches the job row on every comment page (`callOnProgress`). The log gets less: a "VOD chat progress" Info line with the `vodID`, the message count and the percentage at most once per 30 s (`vodChatProgressLogInterval`), and only when the VOD's length is known, then "VOD chat download complete" with the final count. A line per page, several a second, filled the log and pushed everything else out of the job's own 200-line log. Pinned by `internal/twitch/vod_chat_progress_log_test.go`.
 
 The Twitch credential here is a GETTER, not a value: the downloader holds `AuthToken func() string` and calls `currentAuthToken()` on every page, so a VOD download running for hours picks up a re-imported token instead of carrying the one it started with to the end. A nil getter is an anonymous comment fetch, exactly as an empty token behaved. `doGQLOnce` (`api.go`) sets `Authorization: OAuth {token}` only when the token is non-empty; the `Client-ID` header is unconditional.
 
