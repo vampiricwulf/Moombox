@@ -99,7 +99,8 @@ var (
 //
 // The second return value is the loop's liveEnd. Its confirmedOver is true
 // only when the loop's own end verification heard YouTube say the stream is
-// over (the incomplete-tail verdict reads it, tail_tolerance.go). Its
+// over, on a response it did not refuse (confirmsStreamOver; the
+// incomplete-tail verdict reads it, tail_tolerance.go). Its
 // waitedForResume is worker-level Tier 2
 // evidence — FINALIZE-scoped, not history-scoped: true only when the loop
 // is CURRENTLY in (or gives up directly out of) an unresolved
@@ -146,9 +147,10 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// finalize-scoped rationale.
 	var waitedForResume resumeWaitLatch
 	// confirmedOver is set at the one place the loop's own end verification
-	// hears YouTube say the stream is over. The forced ends (still "live"
-	// too many times, a status that stayed unreadable, an unexpected status)
-	// leave it false: those are this loop giving up, not YouTube's answer.
+	// hears YouTube say the stream is over (confirmsStreamOver). The forced
+	// ends (still "live" too many times, a status that stayed unreadable, an
+	// unexpected status) leave it false: those are this loop giving up, not
+	// YouTube's answer.
 	confirmedOver := false
 	end := func() liveEnd {
 		return liveEnd{waitedForResume: waitedForResume.value(), confirmedOver: confirmedOver}
@@ -987,7 +989,10 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		case youtube.StreamPostLive, youtube.StreamVOD, youtube.StreamNotAStream:
 			// Stream confirmed ended
 			o.logger.Info("stream confirmed ended", "status", freshInfo.StreamStatus, "jobID", jobCtx.Job.ID)
-			confirmedOver = true
+			// The loop ends on all three statuses, as it always has; only a
+			// positive answer counts as YouTube's word that the stream is
+			// over (confirmsStreamOver).
+			confirmedOver = confirmsStreamOver(freshInfo)
 			goto streamEnded
 
 		case youtube.StreamLive:

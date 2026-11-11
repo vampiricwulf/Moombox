@@ -33,8 +33,19 @@ import (
 // when the verb was accepted, so an operator's Cancel landing during the wait
 // wins (acceptedStatus, which also lets it apply over a cookie refresh's own
 // resume of the row).
+//
+// The gate is read again then too. A Finished row is resumable by its
+// incomplete_tail flag alone, and the boot pass that clears such a flag
+// (clearToleratedTail) holds the staging claim this verb waits on while it
+// clears the flag and deletes the staging: the status is unchanged, and a
+// resume applied after it would re-capture a complete, cleaned job from
+// nothing.
 func (w *DownloadWorker) ResumeJob(jobID string) error {
 	return w.afterJobExit(jobID, string(opResume), true, resumeGate, func(seen database.JobStatus) {
+		if cur, err := w.db.GetJob(jobID); err == nil && cur != nil && cur.Status == seen && resumeGate(cur) != nil {
+			w.logger.Info("resume not applied: the job stopped being resumable while it waited", "jobID", jobID, "status", cur.Status)
+			return
+		}
 		from, ok := w.acceptedStatus(jobID, seen)
 		applied := ok && w.db.UpdateJobFieldsIf(jobID, from, map[string]any{
 			"status":           database.StatusDownloading,
