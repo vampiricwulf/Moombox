@@ -1542,9 +1542,13 @@ sl-progress-bar {
 .indicator-warn  { color: var(--sl-color-warning-600); background: color-mix(in srgb, var(--sl-color-warning-600) 18%, transparent); }
 .indicator-error { color: var(--sl-color-danger-700); background: color-mix(in srgb, var(--sl-color-danger-600) 10%, transparent); }
 .indicator-off   { color: var(--sl-color-neutral-700); background: color-mix(in srgb, var(--sl-color-neutral-500) 10%, transparent); }
-/* The first cookie check of the server process has not answered yet. */
-.indicator-checking { color: var(--sl-color-neutral-700); background: color-mix(in srgb, var(--sl-color-neutral-500) 10%, transparent); animation: indicator-checking-pulse 1.2s ease-in-out infinite; }
-@keyframes indicator-checking-pulse { 50% { opacity: 0.45; } }
+/* The first cookie check of the server process has not answered yet. The
+   dashed outline is what tells this pill from .indicator-off (Twitch's
+   "Anonymous") without motion; the pill's text also reads "YT…" / "TW…".
+   The pulse moves the tint only, never the text, so the text keeps its
+   contrast, and it stops under prefers-reduced-motion. */
+.indicator-checking { color: var(--sl-color-neutral-700); background: color-mix(in srgb, var(--sl-color-neutral-500) 10%, transparent); outline: 1px dashed currentColor; outline-offset: -1px; animation: indicator-checking-pulse 1.2s ease-in-out infinite; }
+@keyframes indicator-checking-pulse { 50% { background-color: color-mix(in srgb, var(--sl-color-neutral-500) 24%, transparent); } }
 @media (prefers-reduced-motion: reduce) { .indicator-checking { animation: none; } }
 
 #btn-refresh-cookies { font-size: 0.85rem; color: var(--sl-color-neutral-500); margin: 0 -4px; }

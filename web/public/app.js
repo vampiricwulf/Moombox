@@ -14,7 +14,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieCheckPending, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieIndicatorText, cookieCheckPending, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -775,6 +775,14 @@ export class MoomboxApp {
         this.twitchAuthStatus = data.twitchAuthStatus;
         if (data.activePlatforms) this.activePlatforms = data.activePlatforms;
         this.updateStatusBar();
+        // The server's first check is still running: this recheck was turned
+        // away by it and brought back an unchecked status, which has no
+        // verdict to word. The badges read "checking" and the poll
+        // (_pollCookieCheck) delivers the answer.
+        if (cookieCheckPending(data.cookieStatus, data.twitchAuthStatus)) {
+          this.showToast("Cookies: still checking…", "primary");
+          return;
+        }
         // Worded from the verdicts, in cookieRecheckToast, where it can be
         // executed. The two-arm toast this replaces was keyed on
         // `data.success` — false for a check that never reached the site —
@@ -1084,6 +1092,11 @@ export class MoomboxApp {
       const { className, title } = cookieIndicatorState(platform, status, relogin, parked[platform]);
       el.className = className;
       el.title = title;
+      // The sentence is also the pill's accessible name: a title alone is out
+      // of reach on a phone. The pill's own text says when the first check is
+      // pending (cookieIndicatorText).
+      el.setAttribute("aria-label", title);
+      el.textContent = cookieIndicatorText(platform, status);
     }
 
     // The first cookie check has not answered: ask again shortly, until it has.

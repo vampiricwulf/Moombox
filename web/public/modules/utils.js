@@ -490,6 +490,7 @@ export function cookieSetupAbortReport(probe, baseline, { wizard = false } = {})
 const COOKIE_INDICATOR_PLATFORMS = {
   youtube: {
     name: "YouTube",
+    code: "YT",
     absent: { className: "indicator-warn", title: "YouTube: No cookies" },
     // Which key of the platform's status payload carries WHY an inconclusive
     // check could not conclude. See CookieStatusPayload / TwitchAuthStatus-
@@ -499,6 +500,7 @@ const COOKIE_INDICATOR_PLATFORMS = {
   },
   twitch: {
     name: "Twitch",
+    code: "TW",
     absent: { className: "indicator-off", title: "Twitch: Anonymous" },
     errorKey: "twitchError",
   },
@@ -636,7 +638,7 @@ export function cookieIndicatorState(platform, status, reloginRequired, parked) 
  * server process has answered, the status says nothing, so the badge shows
  * neither the no-cookies nor the re-login state, whatever else holds.
  */
-export const COOKIE_BADGE_PRECEDENCE = ["checking", "relogin","fileUnreadable", "parked", "rejected", "unknown", "none", "ok"];
+export const COOKIE_BADGE_PRECEDENCE = ["checking", "relogin", "fileUnreadable", "parked", "rejected", "unknown", "none", "ok"];
 
 /**
  * cookieCheckState is what the auth check alone says, the dashboard's twin of
@@ -682,6 +684,22 @@ export function cookieCheckState(status) {
  */
 export function cookieCheckPending(...statuses) {
   return statuses.some((s) => s?.checked === false);
+}
+
+/**
+ * cookieIndicatorText is the text inside a platform's pill: its code ("YT",
+ * "TW"), with an ellipsis while the first cookie check is pending ("YT…", the
+ * TUI's short form of the same state). The pending state must not depend on
+ * a tooltip, a colour or a pulse: a phone has no hover, and the pulse is off
+ * under prefers-reduced-motion. "checking" is first in
+ * COOKIE_BADGE_PRECEDENCE, so the check's state alone decides it.
+ * @param {"youtube"|"twitch"} platform
+ * @param {object|null|undefined} status
+ * @returns {string}
+ */
+export function cookieIndicatorText(platform, status) {
+  const code = COOKIE_INDICATOR_PLATFORMS[platform].code;
+  return cookieCheckState(status) === "checking" ? `${code}…` : code;
 }
 
 /**

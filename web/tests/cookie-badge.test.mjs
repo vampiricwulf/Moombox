@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { cookieIndicatorState, cookieCheckState, cookieBadgeState, cookieCheckPending, COOKIE_BADGE_PRECEDENCE } from "../public/modules/utils.js";
+import { cookieIndicatorState, cookieIndicatorText, cookieCheckState, cookieBadgeState, cookieCheckPending, COOKIE_BADGE_PRECEDENCE } from "../public/modules/utils.js";
 
 const yt = (status, relogin = false, parked = false) => cookieIndicatorState("youtube", status, relogin, parked);
 
@@ -77,6 +77,11 @@ test("an unchecked status shows checking, never no-cookies or re-login", () => {
   const unchecked = { checked: false, found: false, authenticated: false, verification: "unknown" };
   assert.deepEqual(yt(unchecked), { className: "indicator-checking", title: "YouTube: Checking cookies…" });
   assert.deepEqual(cookieIndicatorState("twitch", unchecked, false, false), { className: "indicator-checking", title: "Twitch: Checking cookies…" });
+  // The pill's own text says so too, and reads as the bare code otherwise.
+  assert.equal(cookieIndicatorText("youtube", unchecked), "YT…");
+  assert.equal(cookieIndicatorText("twitch", unchecked), "TW…");
+  assert.equal(cookieIndicatorText("youtube", { ...unchecked, checked: true }), "YT");
+  assert.equal(cookieIndicatorText("twitch", undefined), "TW");
   // Whatever else holds: a relogin flag, a parked job.
   assert.equal(yt(unchecked, true, true).className, "indicator-checking");
   // Once checked, the same payload reads as it always did.
