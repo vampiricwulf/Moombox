@@ -126,7 +126,7 @@ type StatusBarModel struct {
 	// sidecarDown indicates that the BotGuard sidecar is not running. An
 	// alert, not a status: while it is down, signature-ciphered formats
 	// cannot be resolved at all (sig has no goja fallback) and a PO token
-	// mint fails at once.
+	// mint fails, once the restart grace is spent.
 	sidecarDown bool
 	// counts is the job tally, recomputed once per SetJobs instead of once
 	// per frame. metricTiers used to call tallyJobs() on every render — one
