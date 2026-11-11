@@ -206,6 +206,15 @@ type ChannelMonitors struct {
 // The flag is derived on every read and never stored: one success on any
 // monitor resets that monitor's streak and so clears it.
 //
+// KNOWN LIMIT, YouTube with DECAPI on: DecAPI answers a channel ID it does not
+// know with HTTP 200 and a sentence (`The specified identifier "..." as type
+// "id" is invalid.`, seen 2026-11-10), and DecapiMonitor.processResponse
+// counts a 200 with no video ID as a successful check. So DECAPI vouches for
+// a mistyped or removed channel, and neither this flag nor the 20-check
+// Discord alert fires for it while DECAPI covers it. Counting that body as a
+// failed check would also change when the alert fires, which is the owner's
+// call; it is not done here.
+//
 // utils.js channelFailing is its mirror; the two are compared over
 // web/tests/fixtures/channel-failing-parity.json.
 func ChannelFailing(covering []ChannelHealth) bool {
