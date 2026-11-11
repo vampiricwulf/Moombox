@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/tui"
 )
 
 // fakeCookieServices records the cookie startup sequence's calls, in order.
@@ -330,5 +331,171 @@ func TestCookieStartupIsOneGoroutine(t *testing.T) {
 		if pos := firstCall(run, c.recv, c.name); pos != token.NoPos {
 			t.Errorf("run() calls %s.%s in line: it belongs to startCookieSequence", c.recv, c.name)
 		}
+	}
+}
+
+// newTUICookieStatusSender is where the latch is used: an unchecked status
+// goes out as "checking", the check's answer as its badge, and an unchecked
+// status sent after that answer (read before the check ended, sent late) goes
+// out as what the service holds now, never as "checking" again.
+//
+// Mutants: drop the admit block from the sender (the last message reads
+// Checking), or drop the fresh read in it (same).
+func TestTUICookieStatusSenderNeverGoesBackToChecking(t *testing.T) {
+	checked := cookies.AuthStatus{
+		Checked:              true,
+		YouTubeAuthenticated: true, HasYouTubeCookies: true,
+		YouTubeVerification: cookies.RefreshOK,
+	}
+	var reads int
+	ch := make(chan tui.CookieStatusMsg, 5)
+	send := newTUICookieStatusSender(
+		func() cookies.AuthStatus { reads++; return checked },
+		func() map[string]bool { return nil },
+		func() (bool, bool) { return true, false },
+		ch,
+	)
+	next := func(what string) tui.CookieStatusMsg {
+		t.Helper()
+		select {
+		case m := <-ch:
+			return m
+		default:
+			t.Fatalf("%s: nothing was sent to the TUI", what)
+			return tui.CookieStatusMsg{}
+		}
+	}
+
+	returned := send(cookies.AuthStatus{})
+	first := next("unchecked")
+	if first.YT != tui.CookieStatusChecking || first.TW != tui.CookieStatusChecking {
+		t.Errorf("unchecked status sent as YT=%v TW=%v, want Checking for both", first.YT, first.TW)
+	}
+	if !first.YTActive || first.TWActive {
+		t.Errorf("active platforms = %v/%v, want true/false", first.YTActive, first.TWActive)
+	}
+	if returned != first {
+		t.Errorf("send returned %+v and queued %+v: the seed and the first message would differ", returned, first)
+	}
+	if reads != 0 {
+		t.Errorf("an admitted status was replaced by a fresh read (%d reads)", reads)
+	}
+
+	send(checked)
+	answer := next("checked")
+	if answer.YT == tui.CookieStatusChecking {
+		t.Fatal("the check's answer was sent as Checking")
+	}
+
+	send(cookies.AuthStatus{}) // read before the check ended, sent after its answer
+	late := next("stale unchecked")
+	if late.YT == tui.CookieStatusChecking || late.TW == tui.CookieStatusChecking {
+		t.Errorf("a stale unchecked status put the badges back on checking: YT=%v TW=%v", late.YT, late.TW)
+	}
+	if late != answer {
+		t.Errorf("the stale send went out as %+v, want the service's current status %+v", late, answer)
+	}
+	if reads != 1 {
+		t.Errorf("the stale status cost %d fresh reads, want 1", reads)
+	}
+}
+
+// fakeRecheck is the refresh service as R C sees it. The status stays
+// unchecked until AwaitPass returns, like a first check still in flight.
+type fakeRecheck struct {
+	ran       bool
+	status    cookies.AuthStatus
+	afterWait cookies.AuthStatus
+	awaited   int
+}
+
+func (f *fakeRecheck) CheckNow(context.Context) bool { return f.ran }
+func (f *fakeRecheck) GetStatus() cookies.AuthStatus { return f.status }
+func (f *fakeRecheck) AwaitPass(context.Context) bool {
+	f.awaited++
+	f.status = f.afterWait
+	return true
+}
+
+// R C pressed during the first check of the process is turned away by that
+// check and waits for it: the answer is the check's verdicts, not the empty
+// ones of a status nothing has filled in. In every other case nothing is
+// waited for.
+//
+// Mutants: drop the AwaitPass block from recheckCookiesForTUI (the first case
+// answers with empty verdicts), or wait whenever CheckNow was turned away
+// (the second case waits on the ticker's pass).
+func TestRecheckCookiesForTUIWaitsOnlyForTheFirstCheck(t *testing.T) {
+	answered := cookies.AuthStatus{
+		Checked:             true,
+		YouTubeVerification: cookies.RefreshOK,
+		TwitchVerification:  cookies.RefreshFailed,
+		YouTubeError:        "yt cause",
+		TwitchError:         "tw cause",
+	}
+
+	first := &fakeRecheck{afterWait: answered}
+	yt, tw, ytErr, twErr := recheckCookiesForTUI(first, time.Minute)
+	if first.awaited != 1 {
+		t.Errorf("AwaitPass calls = %d during the first check, want 1", first.awaited)
+	}
+	if yt != cookies.RefreshOK || tw != cookies.RefreshFailed || ytErr != "yt cause" || twErr != "tw cause" {
+		t.Errorf("answer = %v %v %q %q, want the first check's verdicts", yt, tw, ytErr, twErr)
+	}
+
+	// Turned away by a later pass (the ticker's): the status already holds
+	// verdicts, and they are the answer as they stand.
+	later := &fakeRecheck{status: answered}
+	if yt, _, _, _ := recheckCookiesForTUI(later, time.Minute); yt != cookies.RefreshOK {
+		t.Errorf("YouTube verdict = %v, want the standing one", yt)
+	}
+	if later.awaited != 0 {
+		t.Errorf("AwaitPass calls = %d with the status already checked, want 0", later.awaited)
+	}
+
+	// This keypress's own pass ran: nothing to wait for.
+	own := &fakeRecheck{ran: true, status: answered}
+	recheckCookiesForTUI(own, time.Minute)
+	if own.awaited != 0 {
+		t.Errorf("AwaitPass calls = %d after a pass that ran, want 0", own.awaited)
+	}
+}
+
+// runTUI uses the two tested functions and seeds the first frame: R C goes
+// through recheckCookiesForTUI, every cookie status goes through the sender
+// newTUICookieStatusSender builds, and the model is seeded from the initial
+// send, after the OnAuthChange slot is stored (so an answer that lands in
+// between is not lost) and before the TUI runs.
+//
+// Mutants: put the recheck or the send back in line in runTUI, drop
+// app.SetCookieStatus, or move it below tui.Run.
+func TestRunTUIWiresTheCookieStatusThroughTheTestedFunctions(t *testing.T) {
+	calls, fset := callsInFunc(t, "tui_wiring.go", "runTUI")
+	order := []struct{ recv, name string }{
+		{"", "recheckCookiesForTUI"},
+		{"", "newTUICookieStatusSender"},
+		{"s.authChangeTUI", "Store"},
+		{"app", "SetCookieStatus"},
+		{"tui", "Run"},
+	}
+	prev := token.NoPos
+	for i, c := range order {
+		pos := firstCall(calls, c.recv, c.name)
+		if pos == token.NoPos {
+			t.Fatalf("runTUI: no call to %s.%s", c.recv, c.name)
+		}
+		if i > 0 && pos < prev {
+			t.Errorf("runTUI: %s.%s (%s) comes before %s.%s", c.recv, c.name, fset.Position(pos), order[i-1].recv, order[i-1].name)
+		}
+		prev = pos
+	}
+	// Nothing in runTUI talks to the refresh service about a pass itself.
+	for _, name := range []string{"CheckNow", "AwaitPass"} {
+		if pos := firstCall(calls, "s.cookieRefresh", name); pos != token.NoPos {
+			t.Errorf("runTUI calls s.cookieRefresh.%s in line (%s): it belongs to recheckCookiesForTUI", name, fset.Position(pos))
+		}
+	}
+	if pos := firstCall(calls, "", "cookieBadgesFor"); pos != token.NoPos {
+		t.Errorf("runTUI builds cookie badges in line (%s): they belong to the sender", fset.Position(pos))
 	}
 }

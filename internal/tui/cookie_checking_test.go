@@ -100,3 +100,34 @@ func TestStatusBarLeavesCheckingWhenTheStatusArrives(t *testing.T) {
 		t.Errorf("bar after the check answered still says checking: %q", after)
 	}
 }
+
+// The cookie badges are seeded into the model before Run, so the first frame
+// already says "checking": the status channel is read only after that frame,
+// and an unseeded bar has both platforms inactive and draws no badge at all.
+// The CookieStatusMsg that follows goes through the same setter.
+//
+// Mutants: SetCookieStatus without its SetActivePlatforms call (no badge is
+// drawn), or without its badge call (the bar shows the zero value's bare
+// "YT" for a check that has not answered).
+func TestSetCookieStatusSeedsTheBarBeforeRun(t *testing.T) {
+	a := NewApp()
+	a.statusBar.SetWidth(200)
+	if got := stripANSI(a.statusBar.View()); strings.Contains(got, "YT") || strings.Contains(got, "TW") {
+		t.Fatalf("an unseeded bar already draws a cookie badge: %q (the seed would be unnecessary)", got)
+	}
+
+	a.SetCookieStatus(CookieStatusChecking, CookieStatusChecking, true, true)
+	got := stripANSI(a.statusBar.View())
+	if !strings.Contains(got, "YT: checking…") || !strings.Contains(got, "TW: checking…") {
+		t.Errorf("a checking status seeded before Run is not in the first frame: %q", got)
+	}
+
+	a.Update(CookieStatusMsg{YT: CookieStatusOK, TW: CookieStatusOK, YTActive: true, TWActive: false})
+	got = stripANSI(a.statusBar.View())
+	if strings.Contains(got, "checking") {
+		t.Errorf("the check's answer left the seeded badge in place: %q", got)
+	}
+	if !strings.Contains(got, "YT") || strings.Contains(got, "TW") {
+		t.Errorf("the message's active platforms were not applied: %q", got)
+	}
+}

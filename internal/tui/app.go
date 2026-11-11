@@ -1012,6 +1012,19 @@ func (a *App) SetSidecarDown(down bool) {
 	a.statusBar.sidecarDown = down
 }
 
+// SetCookieStatus applies both platforms' cookie badges and which platforms
+// are active to the status bar: before Run as the seed, and for every
+// CookieStatusMsg after.
+//
+// The seed is what puts "checking…" in the first frame. The TUI starts while
+// the first cookie check of the process is still running, and the status
+// channel is drained only after that frame is drawn; without the seed it
+// would show no cookie badge at all (both platforms inactive).
+func (a *App) SetCookieStatus(yt, tw CookieStatus, ytActive, twActive bool) {
+	a.statusBar.SetCookieStatus(yt, tw)
+	a.statusBar.SetActivePlatforms(ytActive, twActive)
+}
+
 // SetAdmissionHolds applies the backlog scheduler's hold snapshot to the
 // Queued rows, the details pane and the disk indicator: before Run as the
 // seed (Send is a no-op until then), and for every AdmissionHoldsMsg after.
