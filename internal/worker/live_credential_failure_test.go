@@ -131,8 +131,8 @@ func TestLiveLoopReturnsACredentialWall(t *testing.T) {
 		check, ret string
 	}{
 		{"if cookiesStatusError(refreshErr) {", "return true, refreshErr"},
-		{"if cookiesStatusError(refreshErr) {", "return result, waitedForResume.value(), refreshErr"},
-		{"if credErr != nil && verifyWalled {", "return result, waitedForResume.value(), credErr"},
+		{"if cookiesStatusError(refreshErr) {", "return result, end(), refreshErr"},
+		{"if credErr != nil && verifyWalled {", "return result, end(), credErr"},
 		{"credErr := liveCredentialFailure(freshInfo)", "verifyWalled = credErr != nil"},
 		{"waitedForResume.resolved()\n\t\t\twaitEpisode.reset()", "verifyWalled = false"},
 	} {

@@ -485,7 +485,7 @@ func TestLiveFinalPartMuxOwnsTheLine(t *testing.T) {
 			}
 		}()
 		job, _ := db.GetJob("j-live")
-		_, err := w.orchestrator.muxLiveFinalPart(context.Background(), w.buildJobContext(job), tracker, false,
+		_, err := w.orchestrator.muxLiveFinalPart(context.Background(), w.buildJobContext(job), tracker, liveEnd{},
 			1, 0, time.Now().Unix(), QualityInfo{Label: "1080p"}, &DownloadResult{HasVideo: true, VideoPath: media})
 		close(done)
 		ticks.Wait()
@@ -524,7 +524,7 @@ func TestLiveFinalPartMuxOwnsTheLine(t *testing.T) {
 		}
 		// waitedForResume is the live loop's own evidence of a missing tail;
 		// the flag is written by the caller only after the loop returns.
-		_, err := w.orchestrator.muxLiveFinalPart(context.Background(), w.buildJobContext(job), tracker, true,
+		_, err := w.orchestrator.muxLiveFinalPart(context.Background(), w.buildJobContext(job), tracker, liveEnd{waitedForResume: true},
 			1, 0, time.Now().Unix(), QualityInfo{Label: "1080p"}, &DownloadResult{HasVideo: true, VideoPath: media})
 		if err != nil {
 			t.Fatalf("muxLiveFinalPart: %v", err)

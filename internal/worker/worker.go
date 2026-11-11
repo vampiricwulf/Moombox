@@ -589,8 +589,9 @@ func NewDownloadWorker(
 func (w *DownloadWorker) Start(ctx context.Context) {
 	w.logger.Info("download worker started")
 
-	// Staging leftovers a previous run left behind that are provably
-	// redundant (reclaimBootLeftovers). Off the queue's path: a slow delete
+	// Incomplete-tail flags from before the end-of-stream margin
+	// (clearToleratedTails), then the staging leftovers a previous run left
+	// behind that are provably redundant (reclaimBootLeftovers). Off the queue's path: a slow delete
 	// must not hold up a live capture waiting to start.
 	w.wg.Go(func() {
 		defer func() {
@@ -598,6 +599,9 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 				w.logger.Error("panic in the boot staging cleanup", "panic", fmt.Sprint(r))
 			}
 		}()
+		// Before the leftovers sweep: a row this clears no longer shields
+		// its staging.
+		w.clearToleratedTails()
 		w.reclaimBootLeftovers()
 	})
 

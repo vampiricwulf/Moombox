@@ -355,7 +355,7 @@ func newInterruptedTestDownloader(t *testing.T) *engine.SegmentDownloader {
 	return d
 }
 
-// TestFinalizeIncompleteTail pins the computeIncompleteTail inputs besides
+// TestFinalizeIncompleteTail pins the incompleteTail inputs besides
 // behind-head: each row leaves NEITHER downloader finalized behind head, and
 // finalizeIncompleteTail must still report incomplete_tail=true and persist it.
 func TestFinalizeIncompleteTail(t *testing.T) {
@@ -375,10 +375,10 @@ func TestFinalizeIncompleteTail(t *testing.T) {
 		why    string // what flags the row, for the failure messages
 	}{
 		{
-			// The third computeIncompleteTail input: a DownloadResult whose
+			// The interruption input: a DownloadResult whose
 			// downloader latched a Tier-2 interruption finalize
 			// (FinalizedDuringInterruption()==true). Would catch:
-			// computeIncompleteTail or finalizeIncompleteTail never consulting
+			// incompleteTail or finalizeIncompleteTail never consulting
 			// FinalizedDuringInterruption at all (the flag would stay false,
 			// silently discarding staging on cleanup even though the resume
 			// sidecar was deliberately preserved for exactly this case).
@@ -416,7 +416,7 @@ func TestFinalizeIncompleteTail(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			incomplete, _, _, _, _ := o.finalizeIncompleteTail(jobID, tc.result(t), tc.waited)
+			incomplete, _, _, _, _ := o.finalizeIncompleteTail(jobID, tc.result(t), liveEnd{waitedForResume: tc.waited})
 			if !incomplete {
 				t.Fatalf("%s must flag incomplete_tail even with both behind-head false", tc.why)
 			}
