@@ -131,6 +131,17 @@ type WebSocketHub struct {
 	}
 }
 
+// wsFrame is one marshalled frame in a client's write queue, with what the
+// queue needs to know about it when it has to drop one.
+type wsFrame struct {
+	data []byte
+	// restated is set for a job_progress frame only: the job's next tick
+	// carries every column it does, so a client that never saw this one is
+	// one tick stale and then whole again. Losing any other frame loses
+	// state nothing later repeats, and arms a resync (see enqueue).
+	restated bool
+}
+
 type wsClient struct {
 	conn   *websocket.Conn
 	ctx    context.Context
@@ -139,7 +150,7 @@ type wsClient struct {
 	// closed `writes` (set by removeClient) signals the writePump to exit
 	// without depending on ctx cancellation timing. Audit reports/web.md
 	// C-7.
-	writes chan []byte
+	writes chan wsFrame
 
 	// drops counts frames this client will never receive. Incremented on
 	// every queue-overflow drop; see noteLag for why the LINE is rate
@@ -274,7 +285,7 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		conn:   conn,
 		ctx:    ctx,
 		cancel: cancel,
-		writes: make(chan []byte, wsWriteQueueSize),
+		writes: make(chan wsFrame, wsWriteQueueSize),
 	}
 	// Start the resync rate-limit clock BEFORE the client joins hub.clients:
 	// the snapshot sendInitialState is about to write IS a resync, and from the
@@ -340,7 +351,7 @@ func (hub *WebSocketHub) writePump(client *wsClient) {
 				return
 			}
 			writeCtx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
-			err := client.conn.Write(writeCtx, websocket.MessageText, msg)
+			err := client.conn.Write(writeCtx, websocket.MessageText, msg.data)
 			cancel()
 			if err != nil {
 				hub.removeClient(client, "write failed")
@@ -355,7 +366,8 @@ const wsLagLogInterval = 30 * time.Second
 
 // wsResyncMinInterval bounds how often ONE client may be handed a full
 // initial-state snapshot in place of an incremental frame. A client that
-// never drains drops — and so re-arms — on EVERY frame, and a snapshot costs
+// never drains drops — and so re-arms — on every frame that is not a
+// job_progress tick (see enqueue), and a snapshot costs
 // a GetAllJobs plus a whole-state marshal; without this bound a single slow
 // tab would provoke one of those per broadcast, i.e. tens per second while a
 // download is running. One second is far below any human-visible ghost-row
@@ -436,7 +448,8 @@ func (hub *WebSocketHub) logDropTotal(client *wsClient) {
 //
 // Not re-arming breaks the PER-FRAME loop; it does not bound that Error line on
 // its own. A client that is permanently behind re-arms from the other
-// direction — enqueue's eviction sets needsResync on every drop, independently
+// direction — enqueue's eviction sets needsResync on every drop of a frame
+// nothing restates (every one but job_progress), independently
 // of anything decided here — so the flag comes straight back and the next
 // frame tries the build again. wsResyncMinInterval is what turns that into at
 // most one failed build, and so one Error line, per second per client. The two
@@ -480,7 +493,7 @@ func (hub *WebSocketHub) resyncSnapshot(client *wsClient) (snap []byte) {
 // wsPingInterval.
 func (hub *WebSocketHub) flushResync(client *wsClient) {
 	if snap := hub.resyncSnapshot(client); snap != nil {
-		hub.enqueue(client, snap, true)
+		hub.enqueue(client, wsFrame{data: snap}, true)
 	}
 }
 
@@ -495,10 +508,10 @@ func (hub *WebSocketHub) flushResync(client *wsClient) {
 //
 // Returns false when the client is gone (channel closed by removeClient).
 // Audit reports/web.md C-7.
-func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg []byte) bool {
+func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg wsFrame) bool {
 	resync := false
 	if snap := hub.resyncSnapshot(client); snap != nil {
-		msg = snap
+		msg = wsFrame{data: snap}
 		resync = true
 	}
 	return hub.enqueue(client, msg, resync)
@@ -510,11 +523,21 @@ func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg []byte) bool {
 // being pushed is a full-state snapshot, which changes what an eviction
 // means — see the comment on the drop.
 //
+// A lost frame arms a resync only when nothing restates it. A job_progress
+// frame (wsFrame.restated) is restated by the job's next tick, so evicting or
+// refusing one is counted as a drop and nothing more. It used to arm like any
+// other: progress frames arrive ~60 times a second per active job, the write
+// loop sends one frame at a time, and so any client whose snapshot took longer
+// to write than 16 ticks take to arrive (about a quarter of a second)
+// overflowed during the snapshot's own write, armed the next snapshot, and
+// was sent megabytes back to back for as long as a download ran. The frames
+// themselves are queued exactly as often as before.
+//
 // The recover here is narrow BY DESIGN: it exists for exactly one thing, the
 // send-on-closed-channel race with removeClient, and stays silent because
 // that race is expected. Nothing that can fail in an interesting way — the
 // snapshot build above, in particular — belongs underneath it.
-func (hub *WebSocketHub) enqueue(client *wsClient, msg []byte, resync bool) bool {
+func (hub *WebSocketHub) enqueue(client *wsClient, msg wsFrame, resync bool) bool {
 	defer func() {
 		// Recover from a send-on-closed-channel race with removeClient.
 		if r := recover(); r != nil {
@@ -531,9 +554,9 @@ func (hub *WebSocketHub) enqueue(client *wsClient, msg []byte, resync bool) bool
 	// Drop oldest, then push the new frame. If we lose another race,
 	// the new frame is dropped silently (caller sees true).
 	select {
-	case <-client.writes:
+	case evicted := <-client.writes:
 		client.drops.Add(1)
-		if !resync {
+		if !resync && !evicted.restated {
 			// A frame the client never saw is gone and nothing queued after it
 			// restates it. When we ARE carrying a snapshot, the frame we just
 			// evicted is almost always older than that snapshot (a whole queue
@@ -549,7 +572,9 @@ func (hub *WebSocketHub) enqueue(client *wsClient, msg []byte, resync bool) bool
 		return true
 	default:
 		client.drops.Add(1)
-		client.needsResync.Store(true)
+		if !msg.restated {
+			client.needsResync.Store(true)
+		}
 		hub.noteLag(client)
 		return true
 	}
@@ -757,6 +782,13 @@ func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
 // broadcastMessage is Broadcast for a message already built — the one way a
 // frame carrying more than a type and a payload (a log line's Seq) goes out.
 func (hub *WebSocketHub) broadcastMessage(msg WSMessage) {
+	hub.broadcastFrame(msg, msg.Type == "job_progress")
+}
+
+// broadcastFrame marshals a message once and queues it for every client.
+// restated says the frame is one a later frame is certain to repeat in full
+// (wsFrame.restated).
+func (hub *WebSocketHub) broadcastFrame(msg WSMessage, restated bool) {
 	hub.mu.RLock()
 	n := len(hub.clients)
 	hub.mu.RUnlock()
@@ -777,7 +809,7 @@ func (hub *WebSocketHub) broadcastMessage(msg WSMessage) {
 	hub.mu.RUnlock()
 
 	for _, client := range clients {
-		hub.queueOrDrop(client, msgBytes)
+		hub.queueOrDrop(client, wsFrame{data: msgBytes, restated: restated})
 	}
 }
 
@@ -860,7 +892,11 @@ func (hub *WebSocketHub) broadcastJobFrame(msgType string, data any) {
 		hub.jobVersions[id] = version
 		delete(hub.jobLastTick, id)
 	} else if tick, ok := hub.jobLastTick[id]; ok {
-		hub.Broadcast("job_progress", tick)
+		// Not marked restated: this is not the job's stream of ticks but the
+		// one frame that puts back the columns the older row just took away,
+		// and a job that is stalled or waiting may not tick again for
+		// minutes. A client that loses it is resynced like any other loss.
+		hub.broadcastFrame(WSMessage{Type: "job_progress", Payload: tick}, false)
 	}
 }
 
