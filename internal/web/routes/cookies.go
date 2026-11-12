@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -796,7 +795,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			if f, ok := rw.(http.Flusher); ok {
 				f.Flush()
 			}
-			recheckCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			recheckCtx, cancel := context.WithTimeout(context.Background(), cookies.RecheckAfterWriteBudget)
 			defer cancel()
 			refreshSvc.CheckNowAfterWrite(recheckCtx)
 			cookiesVerified(result.YouTube, result.Twitch, "a cookie file import")
@@ -997,7 +996,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			if f, ok := rw.(http.Flusher); ok {
 				f.Flush()
 			}
-			recheckCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			recheckCtx, cancel := context.WithTimeout(context.Background(), cookies.RecheckAfterWriteBudget)
 			defer cancel()
 			refreshSvc.CheckNowAfterWrite(recheckCtx)
 			cookiesVerified(result.YouTube, result.Twitch, "the cookie setup")

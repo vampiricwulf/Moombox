@@ -708,6 +708,13 @@ func (rs *RefreshService) CheckNow(ctx context.Context) bool {
 // its fallback probes.
 const recheckCollisionWait = 45 * time.Second
 
+// RecheckAfterWriteBudget is the context a detached caller gives
+// CheckNowAfterWrite: the collision wait and then one whole pass. A context
+// of the wait's own length left the pending re-check whatever the wait had
+// not used, less than its two auth round trips need after a slow pass, so it
+// ended cut short and the write went unobserved until the next tick.
+const RecheckAfterWriteBudget = recheckCollisionWait + 45*time.Second
+
 // CheckNowAfterWrite is CheckNow for a caller that has just rewritten
 // cookies.txt, and reports whether a pass ran AFTER that write.
 //
@@ -724,6 +731,9 @@ const recheckCollisionWait = 45 * time.Second
 // after the write, so it read the new file. False then means only that this
 // caller ran no pass itself, or that the wait ran out.
 //
+// ctx covers the wait AND the pass after it, so a caller with a deadline
+// budgets for both (RecheckAfterWriteBudget).
+//
 // The wait runs on the caller's goroutine. Never call this from inside a
 // pass (an OnAuthChange, OnAuthRecovered or OnCredentialsChanged callback):
 // it would wait for itself until the bound.
@@ -734,6 +744,11 @@ func (rs *RefreshService) CheckNowAfterWrite(ctx context.Context) bool {
 	waitCtx, cancel := context.WithTimeout(ctx, recheckCollisionWait)
 	defer cancel()
 	if !rs.AwaitPass(waitCtx) {
+		return false
+	}
+	if ctx.Err() != nil {
+		// Nothing left to run a pass under: one started now could only come
+		// back inconclusive, and would be reported as the re-check having run.
 		return false
 	}
 	return rs.CheckNow(ctx)
