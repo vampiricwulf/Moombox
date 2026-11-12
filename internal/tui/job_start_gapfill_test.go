@@ -45,6 +45,24 @@ func TestLiveEdgeLine(t *testing.T) {
 	}
 }
 
+// TestPriorArchiveLine pins the details line for the archive a Reinitialize
+// kept (owner ruling R2-W1), the dashboard's priorArchiveText on the same
+// paths: the file's name, whichever separator the row's path uses.
+//
+// Mutants: the whole path shown; filepath.Base used (on Linux a Windows row
+// shows its whole path).
+func TestPriorArchiveLine(t *testing.T) {
+	for _, tc := range []struct{ path, want string }{
+		{"", ""},
+		{`D:\out\Chan\Show.restart-1700000000.mp4`, "Show.restart-1700000000.mp4 (kept, not replaced)"},
+		{"/out/Chan/Show.mp4", "Show.mp4 (kept, not replaced)"},
+	} {
+		if got := priorArchiveLine(&database.Job{PriorOutputFile: tc.path}); got != tc.want {
+			t.Errorf("priorArchiveLine(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
 // TestGapFillLine pins the TUI's wording of a gap-fill (owner decision
 // PR-R5), the dashboard's gapFillText.
 //

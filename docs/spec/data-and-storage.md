@@ -17,7 +17,7 @@ These are hard rules. An AI assisting with Moombox development must follow them 
 - **Job writes are synchronous; there is no batching.** `UpdateJobFields` executes its `UPDATE` immediately under `db.mu`, re-reads the row in the same critical section, releases the lock and then notifies subscribers. There is no update channel, writer goroutine or coalescing window — the only goroutine the package starts is the `OnJobsChange` fan-out — so when nothing is being written, nothing runs and the database performs zero IO.
 - **Config migrations are non-destructive.** `migrateOldFormat()` only applies a migration when the target section does not already exist in the TOML file. It never overwrites user-configured values in existing sections.
 - **FlexDuration parses config values in each field's own unit.** A bare integer in `feed_check_interval` means minutes; in `hide_finished_age_days` days; in `probe_cooldown` seconds. Duration strings like `"10m"`, `"7d"` are parsed via regex and converted to the field's unit.
-- **Schema migrations are versioned, idempotent, and forward-only.** Currently at v27 (`schemaVersion` in `internal/database/migrations.go`; `appendix-metrics.md` mirrors it). Each migration checks the current version before applying. Migrations run at startup in `Database.migrate()`, called from `Open()`. There is no rollback mechanism.
+- **Schema migrations are versioned, idempotent, and forward-only.** Currently at v28 (`schemaVersion` in `internal/database/migrations.go`; `appendix-metrics.md` mirrors it). Each migration checks the current version before applying. Migrations run at startup in `Database.migrate()`, called from `Open()`. There is no rollback mechanism.
 - **Cookie file format is Netscape.** The jar only loads cookies matching YouTube/Google domains or Twitch domains. Cookies are filtered to essential authentication cookies only.
 - **Log file rotation uses numbered suffixes.** The current file is renamed to `.1`, existing `.N` files shift to `.N+1`, and excess files beyond `log_max_files` are deleted.
 - **Resume state files are JSON sidecars.** Named `<output_file>.resume.json`, they store the last successful segment sequence number, bytes written, timestamp, base URL, stream ID and, for a whole-file download, the probed total size. Validated on load by IDENTITY (`resumeIdentityMismatch`: explicit StreamID first, then YouTube URL fingerprinting; opaque URLs with no identity — Twitch weaver — are deliberately TRUSTED) plus a file-size check, and cleared only on clean stream completion. Raw URL equality must NOT be used as the identity check: Twitch weaver URLs rotate every fetch, and URL-equality validation would truncate hours of recording on every daemon restart.
@@ -180,7 +180,7 @@ Every registration method returns an unsubscribe function. Each subscriber slice
 
 ### Schema
 
-**Current version: 27** (`schemaVersion`, `internal/database/migrations.go`)
+**Current version: 28** (`schemaVersion`, `internal/database/migrations.go`)
 
 #### Tables
 
@@ -250,6 +250,7 @@ Every registration method returns an unsubscribe function. Each subscriber slice
 | announce_found | INTEGER | NOT NULL, `0` | Added v22: the job's "Stream Found" is still owed. |
 | join_offset_seconds | REAL | NULL | Added v26 (owner decision CJ-3): where in the broadcast a live YouTube capture's recording began, in seconds of the broadcast's (the video's) timeline. |
 | live_edge_reason | TEXT | NULL | Added v27 (owner decision PR-R2): why a live YouTube capture recorded from the live edge instead of the broadcast's start — the stream was older than YouTube keeps its segments, its start was gone … |
+| prior_output_file | TEXT | NOT NULL, `''` | Added v28 (owner ruling R2-W1): the archive an earlier recording of the job left, kept by a Reinitialize. |
 
 ##### filename
 
@@ -286,6 +287,10 @@ Added v26 (owner decision CJ-3): where in the broadcast a live YouTube capture's
 ##### live_edge_reason
 
 Added v27 (owner decision PR-R2): why a live YouTube capture recorded from the live edge instead of the broadcast's start — the stream was older than YouTube keeps its segments, its start was gone, every DASH format was DRM-protected (also on a post-live stream, whose HLS holds only its last ~2 h), no GVS token could be minted, or the player's JS challenges could not be solved with no no-JS pair left. Written by the worker when the first setup of the job's first part falls to the live HLS playlist (a restart that resumes into a later part writes nothing: part 1 holds the start) (`recordLiveEdgeStart`, `internal/worker/live_edge.go`), with a `live_edge` notification on every fall (owner decision PE-4); cleared by a Reinitialize. Both UIs' job details show it beside `join_offset_seconds` as "Recorded from the live edge: <reason>, joined H:MM:SS in" (not when the join is 0)
+
+##### prior_output_file
+
+Added v28. The archive an earlier recording of the job left, which a Reinitialize keeps (owner ruling R2-W1). A reset clears `output_file`; when the row named a single-file archive that is on disk (no part rows: a part is deleted by the reset), the same write moves the path here (`resetFieldsKeepingArchive`, `internal/worker/prior_archive.go`), so the row still owns the file and the Files sweep does not offer it (`jobFileLocations`). The next finalize renames it aside before it writes anything (`setAsidePriorArchive`), to `<stem>.restart-<unix ts>.mp4` beside it, the name a recovered set-aside recording takes, and stores that name here. Moombox never replaces or deletes the file. Both UIs' job details show it as "Earlier file: <name> (kept, not replaced)"; the Reinitialize confirm names it first (`existingArchives` in the preview).
 
 **Indexes on jobs:** `idx_jobs_status(status)`, `idx_jobs_updated_at(updated_at)`, `idx_jobs_video_id(video_id)` (added v4).
 
@@ -453,6 +458,7 @@ Migrations are forward-only and run at startup in `Database.migrate()`. `PRAGMA 
 | v25 | Created `twitch_gap_fills(job_id TEXT PRIMARY KEY, plan TEXT NOT NULL, next_check_at TEXT NOT NULL)`: one row per finished live Twitch job owed a gap-fill from its broadcast's archive VOD (owner decision D17, architecture.md § Twitch Archive-VOD Gap-Fill). Nothing to backfill: a capture finished before it has no coverage to plan from. Pinned by `TestGapFillRows` (`internal/database/database_gapfill_test.go`) |
 | v26 | Added `join_offset_seconds REAL` (nullable, no default) to `jobs`: where in the broadcast a live YouTube capture's recording began (owner decision CJ-3), written at finalize. No backfill — existing rows stay NULL, the import's offset then starting at 0 as before. Pinned by `TestMigrationV26` (`internal/database/migrations_v26_test.go`) |
 | v27 | Added `live_edge_reason TEXT` (nullable, no default) to `jobs`: why a live YouTube capture recorded from the live edge (owner decision PR-R2). No backfill — a row from before it never said why. Pinned by `TestMigrationV27` (`internal/database/migrations_v27_test.go`) |
+| v28 | Added `prior_output_file TEXT NOT NULL DEFAULT ''` to `jobs`: the archive a Reinitialize keeps (owner ruling R2-W1). No backfill: a reset from before the column left no record of the archive it disowned. Pinned by `TestMigrationV28` (`internal/database/migrations_v28_test.go`) |
 
 #### Twitch offline park reasons (data backfill, no version)
 

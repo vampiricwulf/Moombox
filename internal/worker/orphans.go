@@ -740,7 +740,8 @@ func rowAbsoluteLocations(job *database.Job, p, absOutputDir string) []string {
 }
 
 // jobFileLocations returns the absolute paths a job row names: its absolute
-// columns — the output, the chat, the thumbnail and the description, and each
+// columns — the output, the archive an earlier recording left
+// (prior_output_file, owner ruling R2-W1), the chat, the thumbnail and the description, and each
 // part's video and chat (a quality or gap split) — as rowAbsoluteLocations
 // resolves them, and its relative ones (filename, chat_filename) as
 // rowRelativeLocations resolves them. The relative ones must count too:
@@ -748,7 +749,7 @@ func rowAbsoluteLocations(job *database.Job, p, absOutputDir string) []string {
 // files were offered as orphans — deleting them left a broken Finished job.
 func jobFileLocations(job *database.Job, absOutputDir string) []string {
 	var paths []string
-	for _, p := range []string{job.OutputFile, job.ChatFile, job.ThumbnailFile, job.DescriptionFile} {
+	for _, p := range []string{job.OutputFile, job.PriorOutputFile, job.ChatFile, job.ThumbnailFile, job.DescriptionFile} {
 		paths = append(paths, rowAbsoluteLocations(job, p, absOutputDir)...)
 	}
 	for _, rel := range []string{job.Filename, job.ChatFilename} {

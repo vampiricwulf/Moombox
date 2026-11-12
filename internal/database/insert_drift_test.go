@@ -25,6 +25,9 @@ var runtimeOnlyJobFields = []string{
 	// LiveEdgeReason is the worker's, written when a capture falls to the
 	// live edge (owner decision PR-R2): never a creation field.
 	"LiveEdgeReason",
+	// PriorOutputFile is the worker's, written by a Reinitialize of a job
+	// that already has an archive (R2-W1): a new job has none.
+	"PriorOutputFile",
 }
 
 // AddJob's INSERT names a fixed column list, so a Job field outside it takes

@@ -39,7 +39,15 @@ test("reinitializeDeletesText words the preview as the TUI does", () => {
   assert.deepEqual(
     sumReinitializePreviews([{ setAsideRecordings: 1, stagedBytes: 10 }, { setAsideRecordings: 2, importedChapters: 3, allowed: true }]),
     { setAsideRecordings: 3, recordedParts: 0, recordedPartBytes: 0, stagedFiles: 0, stagedBytes: 10, importedChapters: 3,
-      pendingAutoMux: 0, pendingAutoRetry: 0 },
+      pendingAutoMux: 0, pendingAutoRetry: 0, existingArchives: 0, existingArchiveBytes: 0 },
+  );
+  // The archive the reset keeps (owner ruling R2-W1), after what it cancels:
+  // the same two cases as TestReinitializePreviewSummary.
+  assert.equal(reinitializeDeletesText({ existingArchives: 1, existingArchiveBytes: 2048 }),
+    "sets the existing archive (2.0KB) aside, and deletes nothing recorded");
+  assert.equal(
+    reinitializeDeletesText({ existingArchives: 2, existingArchiveBytes: 4096, stagedFiles: 1, stagedBytes: 10, pendingAutoMux: 1 }),
+    "cancels the pending automatic mux, sets 2 existing archives (4.0KB) aside, and deletes 1 staged file (10B)",
   );
 });
 

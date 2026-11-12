@@ -422,6 +422,22 @@ func (m *JobDetailsModel) SetGapFill(g *GapFillView) {
 	m.updateViewportContent()
 }
 
+// priorArchiveLine is the details line for the archive an earlier recording
+// of the job left (prior_output_file, owner ruling R2-W1), the dashboard's
+// priorArchiveText (web/public/modules/utils.js): the file's name, and that
+// it is kept. "" for a job with none. The name is cut at either separator:
+// the row stores the path as the machine that wrote it spelled it.
+func priorArchiveLine(j *database.Job) string {
+	if j == nil || j.PriorOutputFile == "" {
+		return ""
+	}
+	name := j.PriorOutputFile
+	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
+		name = name[i+1:]
+	}
+	return name + " (kept, not replaced)"
+}
+
 // liveEdgeLine is the details line for a live YouTube capture that recorded
 // from the live edge (owner decision PR-R2), the dashboard's liveEdgeText
 // (web/public/modules/utils.js): the stored reason and, once the finalize
@@ -537,6 +553,11 @@ func (m *JobDetailsModel) buildRows() {
 	}
 	if line := gapFillLine(m.gapFill, time.Now()); line != "" {
 		m.addField("Gap-fill", line)
+	}
+	// The archive an earlier recording left, which a Reinitialize keeps
+	// (owner ruling R2-W1).
+	if line := priorArchiveLine(j); line != "" {
+		m.addField("Earlier file", line)
 	}
 	if isTwitch {
 		m.addFieldColor("Platform", "Twitch", ColorTwitch)

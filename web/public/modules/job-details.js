@@ -2,7 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, unusedRecordingText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES, chatStatusVariant } from "./utils.js";
+import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, priorArchiveText, unusedRecordingText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES, chatStatusVariant } from "./utils.js";
 
 /** A running trim's progress as the whole percentage its bar shows. */
 function trimPercent(progress) {
@@ -419,6 +419,7 @@ export class JobDetailsController {
     // a job_update for the open job (the fill's re-finalize writes one) asks
     // again and the row moves on to filled or kept.
     this.syncTextRow(content, "live-edge", "Start:", liveEdgeText(job));
+    this.syncTextRow(content, "prior-archive", "Earlier file:", priorArchiveText(job));
     this.syncTextRow(content, "gap-fill", "Gap-fill:", gapFillText(job));
     if (job.gapFill?.state === "pending" && this.app.selectedJobId === job.id) {
       this._fetchStagingFields(job.id);
@@ -783,6 +784,10 @@ export class JobDetailsController {
           <div class="details-row">
             <span class="details-label">Gap-fill:</span>
             <span class="details-value" data-field="gap-fill">${this.app.escapeHtml(gapFillText(job))}</span>
+          </div>` : ""}${priorArchiveText(job) ? `
+          <div class="details-row">
+            <span class="details-label">Earlier file:</span>
+            <span class="details-value" data-field="prior-archive">${this.app.escapeHtml(priorArchiveText(job))}</span>
           </div>` : ""}
           ${
             // A VOD row, and a row that is not yet anything else: a Queued row

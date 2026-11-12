@@ -9,7 +9,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 
-import { liveEdgeText, gapFillText } from "../public/modules/utils.js";
+import { liveEdgeText, gapFillText, priorArchiveText } from "../public/modules/utils.js";
 
 let jsdomMissing = null;
 try {
@@ -35,6 +35,18 @@ test("liveEdgeText names the reason and the join point", () => {
   assert.equal(liveEdgeText({ liveEdgeReason: REASON, joinOffsetSeconds: 5025 }),
     `Recorded from the live edge: ${REASON}, joined 1:23:45 in`);
   assert.equal(liveEdgeText({ liveEdgeReason: REASON, joinOffsetSeconds: 0 }), "");
+});
+
+// The archive a Reinitialize kept (owner ruling R2-W1): the file's name,
+// whichever separator the row's path uses. The TUI's twin is
+// priorArchiveLine, pinned on the same paths (TestPriorArchiveLine).
+//
+// Mutants: the whole path shown; only "/" cut (a Windows row shows its path).
+test("priorArchiveText names the kept file", () => {
+  assert.equal(priorArchiveText({}), "");
+  assert.equal(priorArchiveText({ priorOutputFile: "D:\\out\\Chan\\Show.restart-1700000000.mp4" }),
+    "Show.restart-1700000000.mp4 (kept, not replaced)");
+  assert.equal(priorArchiveText({ priorOutputFile: "/out/Chan/Show.mp4" }), "Show.mp4 (kept, not replaced)");
 });
 
 // Mutants: the pending state without its spans or deadline; the kept state

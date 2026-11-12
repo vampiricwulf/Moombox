@@ -32,6 +32,12 @@ import (
 //     or removeSplitArchiveChapters removes — a finalize's own list is
 //     rebuilt by the re-download and is not counted.
 //
+// And what it keeps (owner ruling R2-W1): ExistingArchives / ExistingArchiveBytes
+// count the single-file archive the row already has (archiveKeptByReset), which
+// the reset disowns by clearing output_file. It is not deleted: the row keeps
+// naming it (prior_output_file) and the new recording's finalize renames it
+// aside instead of writing over it (setAsidePriorArchive).
+//
 // And what it cancels (owner ruling R-D2): PendingAutoMux / PendingAutoRetry
 // count the jobs whose row is waiting on an automatic action
 // (jobstate.PendingAutoAction). A Reinitialize takes the row out of Error, so
@@ -42,14 +48,16 @@ import (
 // the Reinitialize, which acts on what is there then. The counts are the
 // operator's information, not a contract.
 type ReinitializePreview struct {
-	SetAsideRecordings int   `json:"setAsideRecordings"`
-	RecordedParts      int   `json:"recordedParts"`
-	RecordedPartBytes  int64 `json:"recordedPartBytes"`
-	StagedFiles        int   `json:"stagedFiles"`
-	StagedBytes        int64 `json:"stagedBytes"`
-	ImportedChapters   int   `json:"importedChapters"`
-	PendingAutoMux     int   `json:"pendingAutoMux"`
-	PendingAutoRetry   int   `json:"pendingAutoRetry"`
+	SetAsideRecordings   int   `json:"setAsideRecordings"`
+	RecordedParts        int   `json:"recordedParts"`
+	RecordedPartBytes    int64 `json:"recordedPartBytes"`
+	StagedFiles          int   `json:"stagedFiles"`
+	StagedBytes          int64 `json:"stagedBytes"`
+	ImportedChapters     int   `json:"importedChapters"`
+	PendingAutoMux       int   `json:"pendingAutoMux"`
+	PendingAutoRetry     int   `json:"pendingAutoRetry"`
+	ExistingArchives     int   `json:"existingArchives"`
+	ExistingArchiveBytes int64 `json:"existingArchiveBytes"`
 }
 
 // PreviewReinitialize builds job's ReinitializePreview. Takes (stagingBase,
@@ -90,8 +98,13 @@ func PreviewReinitialize(db *database.Database, stagingBase string, job *databas
 	// (dropImportedArchiveChapters) — the same file for a split row whose
 	// output_file names part 1.
 	lists := map[string]bool{}
+	hasParts := false
 	if db != nil {
-		if segs, err := db.GetSegments(job.ID); err == nil {
+		segs, err := db.GetSegments(job.ID)
+		// A failed read keeps nothing, as the reset reads it
+		// (resetFieldsKeepingArchive).
+		hasParts = err != nil || len(segs) > 0
+		if err == nil {
 			for _, s := range segs {
 				if s.FilePath == "" {
 					continue
@@ -111,6 +124,12 @@ func PreviewReinitialize(db *database.Database, stagingBase string, job *databas
 	if p := ArchiveSidecarPath(job.OutputFile, utils.ChaptersSidecarSuffix); p != "" {
 		lists[p] = true
 	}
+	if p := archiveKeptByReset(job, hasParts); p != "" {
+		if info, err := os.Stat(p); err == nil {
+			out.ExistingArchives = 1
+			out.ExistingArchiveBytes = info.Size()
+		}
+	}
 	for p := range lists {
 		if ic, ok, _ := utils.ReadImportedChaptersSidecar(p); ok && ic != nil {
 			out.ImportedChapters += len(ic.Chapters)
@@ -129,6 +148,8 @@ func (p *ReinitializePreview) Add(o ReinitializePreview) {
 	p.ImportedChapters += o.ImportedChapters
 	p.PendingAutoMux += o.PendingAutoMux
 	p.PendingAutoRetry += o.PendingAutoRetry
+	p.ExistingArchives += o.ExistingArchives
+	p.ExistingArchiveBytes += o.ExistingArchiveBytes
 }
 
 // Summary is the confirm's clause naming what the reset deletes, e.g.
@@ -137,7 +158,9 @@ func (p *ReinitializePreview) Add(o ReinitializePreview) {
 // recorded" when there is nothing to lose — led, when a job's row waits on
 // an automatic action, by what the reset cancels: "cancels the pending
 // automatic mux, and deletes …" (a batch: "cancels 2 pending automatic muxes
-// and 1 pending automatic retry, and …"). The warning comes first because the
+// and 1 pending automatic retry, and …"). A job that already has a single-file archive names it
+// next, since the reset does not delete it: "sets the existing archive (3.2GB)
+// aside, and deletes …" (owner ruling R2-W1). The warning comes first because the
 // TUI's A I confirm line reads Summary ahead of the job's title and that line
 // is cut to the terminal's width, so its tail is what a narrow terminal
 // loses. The dashboard's twin is reinitializeDeletesText
@@ -171,10 +194,30 @@ func (p ReinitializePreview) Summary() string {
 	default:
 		deletes = "deletes " + strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
 	}
+	var lead []string
 	if c := p.cancelsClause(); c != "" {
-		return c + ", and " + deletes
+		lead = append(lead, c)
 	}
-	return deletes
+	if k := p.keepsClause(); k != "" {
+		lead = append(lead, k)
+	}
+	if len(lead) == 0 {
+		return deletes
+	}
+	return strings.Join(lead, ", ") + ", and " + deletes
+}
+
+// keepsClause is Summary's clause naming the archive the job already has,
+// which the reset keeps and the new recording sets aside (owner ruling
+// R2-W1), "" when there is none.
+func (p ReinitializePreview) keepsClause() string {
+	switch {
+	case p.ExistingArchives <= 0:
+		return ""
+	case p.ExistingArchives == 1:
+		return "sets the existing archive (" + utils.FormatFileSize(p.ExistingArchiveBytes) + ") aside"
+	}
+	return fmt.Sprintf("sets %d existing archives (%s) aside", p.ExistingArchives, utils.FormatFileSize(p.ExistingArchiveBytes))
 }
 
 // cancelsClause is Summary's head naming the automatic actions the reset

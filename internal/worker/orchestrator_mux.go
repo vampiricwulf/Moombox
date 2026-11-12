@@ -1054,6 +1054,13 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// on no row: keep the orphan sweep and its deletes off them.
 	defer claimOutputStem(jobCtx.Job.ID, filepath.Join(jobCtx.OutputDir, jobCtx.Filename))()
 
+	// The archive an earlier recording of this job left is renamed aside before
+	// anything is written (owner ruling R2-W1): this finalize can resolve to
+	// its name, and would replace it.
+	if err := o.setAsidePriorArchive(jobCtx); err != nil {
+		return err
+	}
+
 	// Recover parts whose mux never persisted a segment row — a daemon
 	// restart killed the background FFmpeg before AddSegment, or an
 	// in-process part mux failed and was only logged. This must run BEFORE

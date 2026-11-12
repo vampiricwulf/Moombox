@@ -310,15 +310,19 @@ func (w *DownloadWorker) reinitializeNow(jobID string, seen database.JobStatus) 
 	// re-finalize (JobContext.Refinalize), which would otherwise carry the old
 	// recording's list onto the new one.
 	var priorOutput string
-	if prior, err := w.db.GetJob(jobID); err == nil && prior != nil {
+	prior, err := w.db.GetJob(jobID)
+	if err == nil && prior != nil {
 		priorOutput = prior.OutputFile
 	}
 
 	// Clear all non-input fields. auto_retry_count resets here because
 	// user-driven reinit grants the job a fresh budget; auto-recovery uses
 	// AutoReinitializeJob, which spends one of it instead.
+	// A single-file archive the row already has stays the row's (owner ruling
+	// R2-W1): the reset clears output_file, and the path moves to
+	// prior_output_file in the same write.
 	beforeResetClaim(jobID)
-	if !w.db.UpdateJobFieldsIf(jobID, from, reinitResetFields(0)) {
+	if !w.db.UpdateJobFieldsIf(jobID, from, w.resetFieldsKeepingArchive(reinitResetFields(0), prior)) {
 		w.logVerbOverridden(jobID, "reinitialize", seen)
 		return
 	}
@@ -397,7 +401,7 @@ func (w *DownloadWorker) autoReinitializeNow(jobID string, seen database.JobStat
 		return
 	}
 	beforeResetClaim(jobID)
-	if !w.db.UpdateJobFieldsIf(jobID, seen, reinitResetFields(prev.AutoRetryCount+1)) {
+	if !w.db.UpdateJobFieldsIf(jobID, seen, w.resetFieldsKeepingArchive(reinitResetFields(prev.AutoRetryCount+1), prev)) {
 		w.logVerbOverridden(jobID, "auto-reinitialize", seen)
 		return
 	}

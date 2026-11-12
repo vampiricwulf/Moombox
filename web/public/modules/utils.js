@@ -1201,6 +1201,22 @@ export function liveEdgeText(job) {
 }
 
 /**
+ * priorArchiveText is the job-details line for the archive an earlier
+ * recording of the job left (priorOutputFile, owner ruling R2-W1): a
+ * Reinitialize keeps it, and the new recording's finalize renames it aside
+ * instead of writing over it. The file's name and that it is kept; "" for a
+ * job with none. The TUI's twin is priorArchiveLine
+ * (internal/tui/job_details.go).
+ * @param {{priorOutputFile?: string}} job
+ * @returns {string}
+ */
+export function priorArchiveText(job) {
+  const path = job?.priorOutputFile;
+  if (!path) return "";
+  return `${path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1)} (kept, not replaced)`;
+}
+
+/**
  * unusedRecordingText is the job-details line for a recording a Finished
  * job's staging still holds that the archive was not made from (owner ruling
  * R-E1), from the job API's unusedRootRecording field
@@ -1469,9 +1485,13 @@ export function pendingAutoActionText(action) {
  * pendingAutoRetry, owner ruling R-D2) leads with what the reset cancels:
  * "cancels the pending automatic mux, and deletes …" (first, as the TUI line
  * that is cut to the terminal's width puts it).
+ * A job that already has a single-file archive names it next (existingArchives,
+ * owner ruling R2-W1): the reset keeps it and the new recording sets it aside,
+ * "sets the existing archive (3.2GB) aside, and deletes …".
  * @param {{setAsideRecordings?: number, recordedParts?: number, recordedPartBytes?: number,
  *          stagedFiles?: number, stagedBytes?: number, importedChapters?: number,
- *          pendingAutoMux?: number, pendingAutoRetry?: number}} p
+ *          pendingAutoMux?: number, pendingAutoRetry?: number,
+ *          existingArchives?: number, existingArchiveBytes?: number}} p
  * @returns {string}
  */
 export function reinitializeDeletesText(p) {
@@ -1490,7 +1510,12 @@ export function reinitializeDeletesText(p) {
   const cancels = [];
   if (n("pendingAutoMux") > 0) cancels.push(pending(n("pendingAutoMux"), "mux", "muxes"));
   if (n("pendingAutoRetry") > 0) cancels.push(pending(n("pendingAutoRetry"), "retry", "retries"));
-  return cancels.length ? `cancels ${cancels.join(" and ")}, and ${deletes}` : deletes;
+  const lead = [];
+  if (cancels.length) lead.push(`cancels ${cancels.join(" and ")}`);
+  const archives = n("existingArchives");
+  if (archives === 1) lead.push(`sets the existing archive (${formatBytes(n("existingArchiveBytes"))}) aside`);
+  else if (archives > 1) lead.push(`sets ${archives} existing archives (${formatBytes(n("existingArchiveBytes"))}) aside`);
+  return lead.length ? `${lead.join(", ")}, and ${deletes}` : deletes;
 }
 
 /**
@@ -1500,7 +1525,7 @@ export function reinitializeDeletesText(p) {
  */
 export function sumReinitializePreviews(previews) {
   const keys = ["setAsideRecordings", "recordedParts", "recordedPartBytes", "stagedFiles", "stagedBytes", "importedChapters",
-    "pendingAutoMux", "pendingAutoRetry"];
+    "pendingAutoMux", "pendingAutoRetry", "existingArchives", "existingArchiveBytes"];
   const out = Object.fromEntries(keys.map((k) => [k, 0]));
   for (const p of previews) for (const k of keys) out[k] += Number(p?.[k]) || 0;
   return out;

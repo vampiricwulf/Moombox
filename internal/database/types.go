@@ -352,6 +352,18 @@ type Job struct {
 	// live edge: <reason>, joined H:MM:SS in" — YouTube has no gap-fill, so
 	// the operator is the only one who can fetch the missing start.
 	LiveEdgeReason string `json:"liveEdgeReason,omitempty"`
+	// PriorOutputFile names the archive an earlier recording of this job left,
+	// which a Reinitialize keeps (owner ruling R2-W1). A reset clears
+	// output_file, so the row would otherwise stop naming a single-file archive
+	// it already has: the file would read as an orphan in Files and the new
+	// recording's finalize would write over it. The reset moves the path here
+	// instead (the worker's resetFieldsKeepingArchive), which keeps the file
+	// owned by the row, and the new recording's finalize renames it aside
+	// beside itself under the set-aside name "<stem>.restart-<unix ts>.mp4"
+	// (setAsidePriorArchive) and stores that name here. Never replaced, never
+	// deleted by Moombox. Both UIs' job details show it as "Earlier recording
+	// kept: <file>". "" for a job with no such archive.
+	PriorOutputFile string `json:"priorOutputFile,omitempty"`
 	// NotificationMsgs maps a notification target's stable key — the first 16
 	// hex digits of SHA-256 over the RESOLVED webhook URL, the same key
 	// notifications.buildTargets dedupes on — to the id of the one Discord
