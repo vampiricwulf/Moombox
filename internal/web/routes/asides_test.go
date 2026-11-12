@@ -258,3 +258,58 @@ func TestJobPayloadNamesTheKeptRecordingNotInTheArchive(t *testing.T) {
 		t.Errorf("the job list carries unusedRootRecording; it belongs to GET /api/jobs/{id} only: %s", list)
 	}
 }
+
+// TestJobPayloadListsTheArchivesAReinitializeSetAside: GET /api/jobs/{id}
+// lists the archives a Reinitialize of the job set aside (owner ruling
+// R2-W1b) — the set-aside files whose marker names it, in the directory the
+// output settings resolve its next archive to, since a job that was just
+// reset names no file — and [] for a job with none. A recovered set-aside recording, which has no
+// marker, is not one, and the list rows never carry the field.
+//
+// Mutants this kills:
+//   - dropping SetAsideArchives from enrichJob: null for j1.
+//   - the route not passing the output settings: nothing found for j1.
+//   - adding it to worker.ListJob: present on the list rows.
+func TestJobPayloadListsTheArchivesAReinitializeSetAside(t *testing.T) {
+	f := newJobsFixture(t)
+	// The default template writes under a directory named for the channel.
+	dir := filepath.Join(f.outputDir, "Chan")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.addJob(t, "j1", func(j *database.Job) { j.Status, j.ChannelName = database.StatusUpcoming, "Chan" })
+	f.addJob(t, "j2", func(j *database.Job) { j.ChannelName = "Chan" })
+	for name, body := range map[string]string{
+		"Show.restart-1700000000.mp4":   "earlier",
+		"Show.restart-1700000000.owner": "j1\n",
+		"Show.restart-1600000000.mp4":   "recovered",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var got struct {
+		Archives []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+			Size int64  `json:"size"`
+		} `json:"setAsideArchives"`
+	}
+	body := f.getJSON(t, "/api/jobs/j1", &got)
+	want := filepath.Join(dir, "Show.restart-1700000000.mp4")
+	if len(got.Archives) != 1 || got.Archives[0].Name != "Show.restart-1700000000.mp4" || got.Archives[0].Path != want || got.Archives[0].Size != 7 {
+		t.Fatalf("setAsideArchives = %+v, want the one archive at %s, 7 bytes; body = %s", got.Archives, want, body)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(f.getJSON(t, "/api/jobs/j2", nil)), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["setAsideArchives"]) != "[]" {
+		t.Errorf("a job with none reports setAsideArchives = %s, want []", raw["setAsideArchives"])
+	}
+	if list := f.getJSON(t, "/api/jobs", nil); strings.Contains(list, "setAsideArchives") {
+		t.Errorf("the job list carries setAsideArchives; it belongs to GET /api/jobs/{id} only: %s", list)
+	}
+}

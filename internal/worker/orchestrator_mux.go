@@ -1054,12 +1054,6 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// on no row: keep the orphan sweep and its deletes off them.
 	defer claimOutputStem(jobCtx.Job.ID, filepath.Join(jobCtx.OutputDir, jobCtx.Filename))()
 
-	// The archive an earlier recording of this job left is renamed aside before
-	// anything is written (owner ruling R2-W1): this finalize can resolve to
-	// its name, and would replace it. One that cannot be renamed stops only
-	// the write that would land on it (blockedByPriorArchive).
-	o.setAsidePriorArchive(jobCtx)
-
 	// Recover parts whose mux never persisted a segment row — a daemon
 	// restart killed the background FFmpeg before AddSegment, or an
 	// in-process part mux failed and was only logged. This must run BEFORE
@@ -1103,10 +1097,11 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
-	// The earlier archive is still at this name (its rename aside failed):
-	// stop before anything is muxed, with the staging kept, so a Mux tries
-	// again.
-	if err := jobCtx.blockedByPriorArchive(outputFile); err != nil {
+	// A file this job did not write is at this name — the archive a
+	// Reinitialize could not set aside (owner ruling R2-W1b), another
+	// recording's: stop before anything is muxed, with the staging kept, so a
+	// Mux tries again once the operator has moved it.
+	if err := o.foreignArchiveAt(jobCtx.Job.ID, outputFile); err != nil {
 		return err
 	}
 	// relBase preserves the full relative path (including channel subdir) for DB
@@ -1433,10 +1428,10 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// A job that ends with exactly one part (e.g. an outage muxed part 1 and
 	// the stream never came back) shouldn't keep a " - part1" suffix — single
 	// outputs use the plain template name, exactly like jobs that never split.
-	// Not onto an earlier archive that could not be set aside: the part then
+	// Not onto a file this job did not write (foreignArchiveAt): the part then
 	// keeps its suffixed name, as it does when the rename itself fails.
 	if len(segments) == 1 {
-		if err := jobCtx.blockedByPriorArchive(filepath.Join(outputDir, filenameBase+".mp4")); err != nil {
+		if err := o.foreignArchiveAt(jobCtx.Job.ID, filepath.Join(outputDir, filenameBase+".mp4")); err != nil {
 			o.logger.Warn("the job's only part keeps its part name", "err", err, "jobID", jobCtx.Job.ID)
 		} else {
 			segments[0] = o.renameSinglePartToPlain(segments[0], outputDir, filenameBase)
@@ -2118,8 +2113,6 @@ func (o *DownloadOrchestrator) muxFromStaging(ctx context.Context, jobCtx *JobCo
 			// so it needs its own announcement, after the Muxing write
 			// above. A manual mux is a mux.
 			o.sendMuxingStarting(jobCtx)
-			// As muxAndFinalize does ahead of either shape (R2-W1).
-			o.setAsidePriorArchive(jobCtx)
 			return o.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil)
 		}
 		return fmt.Errorf("no segment files found in staging directory")

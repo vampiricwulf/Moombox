@@ -45,29 +45,6 @@ func TestLiveEdgeLine(t *testing.T) {
 	}
 }
 
-// TestPriorArchiveLine pins the details line for the archive a Reinitialize
-// kept (owner ruling R2-W1), the dashboard's priorArchiveText on the same
-// paths: the file's name when it is beside the row's archive, whichever
-// separator the row's path uses, and its whole path when it is in another
-// directory or the row names no archive.
-//
-// Mutants: the whole path always shown; the name always shown (a kept file in
-// the old output directory cannot be found); filepath.Dir used (on Linux a
-// Windows row always shows its whole path).
-func TestPriorArchiveLine(t *testing.T) {
-	for _, tc := range []struct{ path, output, want string }{
-		{"", "", ""},
-		{`D:\out\Chan\Show.restart-1700000000.mp4`, `D:\out\Chan\Show.mp4`, "Show.restart-1700000000.mp4 (kept, not replaced)"},
-		{"/out/Chan/Show.restart-1700000000.mp4", "/out/Chan/Show.mp4", "Show.restart-1700000000.mp4 (kept, not replaced)"},
-		{`D:\out\Chan\Show.restart-1700000000.mp4`, `E:\new\Chan\Show.mp4`, `D:\out\Chan\Show.restart-1700000000.mp4 (kept, not replaced)`},
-		{"/out/Chan/Show.mp4", "", "/out/Chan/Show.mp4 (kept, not replaced)"},
-	} {
-		if got := priorArchiveLine(&database.Job{PriorOutputFile: tc.path, OutputFile: tc.output}); got != tc.want {
-			t.Errorf("priorArchiveLine(%q beside %q) = %q, want %q", tc.path, tc.output, got, tc.want)
-		}
-	}
-}
-
 // TestGapFillLine pins the TUI's wording of a gap-fill (owner decision
 // PR-R5), the dashboard's gapFillText.
 //

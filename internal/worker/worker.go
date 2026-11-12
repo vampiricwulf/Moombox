@@ -172,27 +172,16 @@ type logger = interface {
 
 // JobContext holds the context needed to process a single job.
 type JobContext struct {
-	Job        *database.Job
-	Config     *JobConfig
-	YT         *youtube.Service
-	DB         *database.Database
-	StagingDir string
-	OutputDir  string
-	// GlobalOutputDir is paths.output_directory as it stood when the context
-	// was built, whatever directory the job itself writes to (OutputDir): the
-	// second place an archive the row names can be once the archive tree was
-	// moved (priorArchiveLocations). "" on a context built by hand.
-	GlobalOutputDir string
-	Filename        string
-	VideoStartSeq   int // Orchestrator-set: exact next video seq to download (0 = use DB fallback)
-	AudioStartSeq   int // Orchestrator-set: exact next audio seq to download (0 = use DB fallback)
-	Logger          logger
-	// priorArchiveStuck is the archive an earlier recording of the job left
-	// (prior_output_file) when this finalize could not rename it aside, and
-	// priorArchiveStuckErr why: the finalize writes nothing at that path
-	// (setAsidePriorArchive, blockedByPriorArchive). Set anew by each finalize.
-	priorArchiveStuck    string
-	priorArchiveStuckErr error
+	Job           *database.Job
+	Config        *JobConfig
+	YT            *youtube.Service
+	DB            *database.Database
+	StagingDir    string
+	OutputDir     string
+	Filename      string
+	VideoStartSeq int // Orchestrator-set: exact next video seq to download (0 = use DB fallback)
+	AudioStartSeq int // Orchestrator-set: exact next audio seq to download (0 = use DB fallback)
+	Logger        logger
 	// Interruption tracks the broadcast-interrupted signature (interruption
 	// spec Tier 1) observed across every player-response fetch for this
 	// job. Shared by POINTER — strategyCtx/segCtx/segJobCtx value-copies
@@ -2217,43 +2206,15 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 	// output_dir.go).
 	w.settleOutputDirectory(job, hasParts, cfgOutputDir, channelOutputDir, channelConfigured)
 
-	outputDir := cfgOutputDir
-	if job.OutputDirectory != "" {
-		outputDir = job.OutputDirectory
-	}
-	if outputDir == "" {
-		outputDir = "./output"
-	}
-
 	// Use config staging directory (defaults to ./staging)
 	stagingBase := cfgStagingDir
 	stagingDir := filepath.Join(stagingBase, job.ID)
 
-	// Resolve filename from output_template config
 	template := cfgTemplate
 	if template == "" {
-		template = "${title} [${id}]"
+		template = defaultOutputTemplate
 	}
-	var dateStr *string
-	if job.StreamStartTime != "" {
-		dateStr = &job.StreamStartTime
-	} else if job.CreatedAt != "" {
-		dateStr = &job.CreatedAt
-	}
-	// Use job.ID for Twitch (VideoID is "tw_{login}", not the stream ID). Matches TS.
-	templateID := job.VideoID
-	if job.Platform == "twitch" {
-		templateID = job.ID
-	}
-	filename := config.ResolveTemplate(template, config.TemplateVariables{
-		Title:   job.Title,
-		ID:      templateID,
-		Channel: job.ChannelName,
-		Date:    dateStr,
-	})
-	if filename == "" {
-		filename = job.VideoID
-	}
+	outputDir, filename := outputTargetOf(job, cfgOutputDir, template)
 	return &JobContext{
 		Job: job,
 		DB:  w.db,
@@ -2270,17 +2231,60 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 			InterruptionTimeout: cfgInterruptionTimeout.AsDuration(time.Minute),
 			ProgressInterval:    time.Duration(cfgProgressMS) * time.Millisecond,
 		},
-		YT:              w.yt,
-		StagingDir:      stagingDir,
-		OutputDir:       outputDir,
-		GlobalOutputDir: cfgOutputDir,
-		Filename:        filename,
-		Logger:          w.logger,
-		Interruption:    &interruptionSignal{},
-		Run:             &runRecord{},
+		YT:           w.yt,
+		StagingDir:   stagingDir,
+		OutputDir:    outputDir,
+		Filename:     filename,
+		Logger:       w.logger,
+		Interruption: &interruptionSignal{},
+		Run:          &runRecord{},
 
 		RecordedFirstPart: firstPart,
 	}
+}
+
+// defaultOutputTemplate names a job's files when downloader.output_template
+// is empty.
+const defaultOutputTemplate = "${title} [${id}]"
+
+// outputTargetOf returns where a job's finalize writes as the row and the
+// settings stand: the directory (the row's own, else globalOutputDir) and the
+// file name the output template resolves to, without its extension and with
+// any subdirectory the template names. buildJobContext's rule, and what the
+// details views read to find the files a Reinitialize set aside
+// (ScanSetAsideArchives).
+func outputTargetOf(job *database.Job, globalOutputDir, template string) (outputDir, filename string) {
+	outputDir = globalOutputDir
+	if job.OutputDirectory != "" {
+		outputDir = job.OutputDirectory
+	}
+	if outputDir == "" {
+		outputDir = "./output"
+	}
+	if template == "" {
+		template = defaultOutputTemplate
+	}
+	var dateStr *string
+	if job.StreamStartTime != "" {
+		dateStr = &job.StreamStartTime
+	} else if job.CreatedAt != "" {
+		dateStr = &job.CreatedAt
+	}
+	// Use job.ID for Twitch (VideoID is "tw_{login}", not the stream ID). Matches TS.
+	templateID := job.VideoID
+	if job.Platform == "twitch" {
+		templateID = job.ID
+	}
+	filename = config.ResolveTemplate(template, config.TemplateVariables{
+		Title:   job.Title,
+		ID:      templateID,
+		Channel: job.ChannelName,
+		Date:    dateStr,
+	})
+	if filename == "" {
+		filename = job.VideoID
+	}
+	return outputDir, filename
 }
 
 // fetchURL is a helper to download a URL's body.

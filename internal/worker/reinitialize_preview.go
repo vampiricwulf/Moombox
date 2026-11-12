@@ -32,11 +32,11 @@ import (
 //     or removeSplitArchiveChapters removes — a finalize's own list is
 //     rebuilt by the re-download and is not counted.
 //
-// And what it keeps (owner ruling R2-W1): ExistingArchives / ExistingArchiveBytes
-// count the single-file archive the row already has (archiveKeptByReset), which
-// the reset disowns by clearing output_file. It is not deleted: the row keeps
-// naming it (prior_output_file) and the new recording's finalize renames it
-// aside instead of writing over it (setAsidePriorArchive).
+// And what it keeps (owner ruling R2-W1b): ExistingArchives / ExistingArchiveBytes
+// count the single-file archive the row already has (archiveSetAsideByReset),
+// which the reset disowns by clearing output_file. It is not deleted: the
+// reset renames it aside where it is (setArchiveAside), so the new recording
+// cannot write over it.
 //
 // And what it cancels (owner ruling R-D2): PendingAutoMux / PendingAutoRetry
 // count the jobs whose row is waiting on an automatic action
@@ -101,8 +101,8 @@ func PreviewReinitialize(db *database.Database, stagingBase string, job *databas
 	hasParts := false
 	if db != nil {
 		segs, err := db.GetSegments(job.ID)
-		// A failed read keeps nothing, as the reset reads it
-		// (resetFieldsKeepingArchive).
+		// A failed read sets nothing aside, as the reset reads it
+		// (archiveOfReset).
 		hasParts = err != nil || len(segs) > 0
 		if err == nil {
 			for _, s := range segs {
@@ -124,9 +124,9 @@ func PreviewReinitialize(db *database.Database, stagingBase string, job *databas
 	if p := ArchiveSidecarPath(job.OutputFile, utils.ChaptersSidecarSuffix); p != "" {
 		lists[p] = true
 	}
-	if p := archiveKeptByReset(job, hasParts); p != "" {
-		// One that cannot be reached now (its drive is unplugged) is kept
-		// too, and named without a size.
+	if p := archiveSetAsideByReset(job, hasParts); p != "" {
+		// One that cannot be reached now (its drive is unplugged) is named
+		// without a size.
 		out.ExistingArchives = 1
 		if info, err := os.Stat(p); err == nil {
 			out.ExistingArchiveBytes = info.Size()
@@ -162,7 +162,7 @@ func (p *ReinitializePreview) Add(o ReinitializePreview) {
 // automatic mux, and deletes …" (a batch: "cancels 2 pending automatic muxes
 // and 1 pending automatic retry, and …"). A job that already has a single-file archive names it
 // next, since the reset does not delete it: "sets the existing archive (3.2GB)
-// aside, and deletes …" (owner ruling R2-W1). The warning comes first because the
+// aside, and deletes …" (owner ruling R2-W1b). The warning comes first because the
 // TUI's A I confirm line reads Summary ahead of the job's title and that line
 // is cut to the terminal's width, so its tail is what a narrow terminal
 // loses. The dashboard's twin is reinitializeDeletesText
@@ -210,8 +210,8 @@ func (p ReinitializePreview) Summary() string {
 }
 
 // keepsClause is Summary's clause naming the archive the job already has,
-// which the reset keeps and the new recording sets aside (owner ruling
-// R2-W1), "" when there is none. No size is named when none could be read:
+// which the reset renames aside where it is (owner ruling
+// R2-W1b), "" when there is none. No size is named when none could be read:
 // the archive is on a drive that cannot be reached now.
 func (p ReinitializePreview) keepsClause() string {
 	size := ""

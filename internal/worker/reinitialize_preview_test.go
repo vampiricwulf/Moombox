@@ -114,7 +114,7 @@ func TestReinitializePreviewSummary(t *testing.T) {
 		{ReinitializePreview{StagedFiles: 1, StagedBytes: 10, PendingAutoMux: 1}, "cancels the pending automatic mux, and deletes 1 staged file (10B)"},
 		{ReinitializePreview{PendingAutoRetry: 1}, "cancels the pending automatic retry, and deletes nothing recorded"},
 		{ReinitializePreview{PendingAutoMux: 2, PendingAutoRetry: 3}, "cancels 2 pending automatic muxes and 3 pending automatic retries, and deletes nothing recorded"},
-		// The archive the reset keeps (owner ruling R2-W1), after what it cancels.
+		// The archive the reset sets aside (owner ruling R2-W1b), after what it cancels.
 		{ReinitializePreview{ExistingArchives: 1, ExistingArchiveBytes: 2048}, "sets the existing archive (2.0KB) aside, and deletes nothing recorded"},
 		// One whose size could not be read (its drive cannot be reached).
 		{ReinitializePreview{ExistingArchives: 1}, "sets the existing archive aside, and deletes nothing recorded"},

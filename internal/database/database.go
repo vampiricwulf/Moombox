@@ -79,7 +79,6 @@ var fieldToColumn = map[string]string{
 	"announce_found":      "announce_found",
 	"join_offset_seconds": "join_offset_seconds",
 	"live_edge_reason":    "live_edge_reason",
-	"prior_output_file":   "prior_output_file",
 }
 
 // dbLogger is the interface for database error logging.
@@ -444,7 +443,7 @@ func (db *Database) prepareStatements() error {
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at, quality_preference, watched, resume_position, chat_offset,
 		auto_retry_count, channel_id, queue_priority, incomplete_tail, park_reason, park_identity,
-		notification_msgs, announce_found, join_offset_seconds, live_edge_reason, prior_output_file
+		notification_msgs, announce_found, join_offset_seconds, live_edge_reason
 		FROM jobs WHERE id = ?`)
 	if err != nil {
 		return err
@@ -914,7 +913,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
 		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition, &j.ChatOffset,
 		&j.AutoRetryCount, &j.ChannelID, &j.QueuePriority, &incompleteTail, &j.ParkReason, &j.ParkIdentity,
-		&notifMsgs, &announceFound, &j.JoinOffsetSeconds, &liveEdgeReason, &j.PriorOutputFile,
+		&notifMsgs, &announceFound, &j.JoinOffsetSeconds, &liveEdgeReason,
 	)
 	if err != nil {
 		return nil, err

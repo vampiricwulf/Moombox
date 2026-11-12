@@ -546,9 +546,6 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 	if err != nil {
 		return nil, err
 	}
-	// A set-aside earlier archive the operator has removed by hand comes off
-	// its row here, where every row is read anyway (owner ruling R2-W1).
-	forgetMissingPriorArchives(db, jobs, absOutputDir)
 	owners := newOutputOwners(jobs, trims, absOutputDir)
 
 	var entries, trimEntries []OrphanedEntry
@@ -598,6 +595,12 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		// FE-16): owned while the archive they derive from is
 		// (archiveDerivedStem), listed once it is gone, as its chat is.
 		_, isDerived := archiveDerivedStem(path)
+		// The marker of an archive a Reinitialize set aside (owner ruling
+		// R2-W1b): owned with the aside while its job exists, listed with it
+		// once the job is gone.
+		if ext == asideOwnerSuffix {
+			_, isDerived = asideSiblingStem(absPath)
+		}
 		if !inTrimDir && !isMedia && !isThumbnail && !isChat && !isDescription && !isDerived {
 			return nil
 		}
@@ -770,8 +773,7 @@ func rowAbsoluteLocations(job *database.Job, p, absOutputDir string) []string {
 }
 
 // jobFileLocations returns the absolute paths a job row names: its absolute
-// columns — the output, the archive an earlier recording left
-// (prior_output_file, owner ruling R2-W1), the chat, the thumbnail and the description, and each
+// columns — the output, the chat, the thumbnail and the description, and each
 // part's video and chat (a quality or gap split) — as rowAbsoluteLocations
 // resolves them, and its relative ones (filename, chat_filename) as
 // rowRelativeLocations resolves them. The relative ones must count too:
@@ -779,12 +781,7 @@ func rowAbsoluteLocations(job *database.Job, p, absOutputDir string) []string {
 // files were offered as orphans — deleting them left a broken Finished job.
 func jobFileLocations(job *database.Job, absOutputDir string) []string {
 	var paths []string
-	for _, p := range []string{job.OutputFile, job.PriorOutputFile, job.ChatFile, job.ThumbnailFile, job.DescriptionFile} {
-		paths = append(paths, rowAbsoluteLocations(job, p, absOutputDir)...)
-	}
-	// The earlier archive's chat, thumbnail and description: the reset that
-	// kept the archive cleared their columns, and they stay with it.
-	for _, p := range priorArchiveSidecars(job.PriorOutputFile) {
+	for _, p := range []string{job.OutputFile, job.ChatFile, job.ThumbnailFile, job.DescriptionFile} {
 		paths = append(paths, rowAbsoluteLocations(job, p, absOutputDir)...)
 	}
 	for _, rel := range []string{job.Filename, job.ChatFilename} {
@@ -828,6 +825,11 @@ type outputOwners struct {
 	// canon caches canonicalDir by normalised directory, so each distinct
 	// directory is resolved once however many rows and walked files sit in it.
 	canon map[string]string
+	// jobIDs is every job row, and asideOwners caches asideOwner by marker
+	// path: an archive a Reinitialize set aside is owned through the marker
+	// beside it, which names its job (owner ruling R2-W1b, reset_archive.go).
+	jobIDs      map[string]bool
+	asideOwners map[string]string
 }
 
 // newOutputOwners builds outputOwners from rows already read: every job with
@@ -849,6 +851,7 @@ func newOutputOwners(jobs []*database.Job, trims []database.TrimRecord, absOutpu
 	o := &outputOwners{
 		files: map[string]string{}, stems: map[string]string{}, dirs: map[string]string{},
 		trimDirs: map[string]bool{}, canon: map[string]string{},
+		jobIDs: map[string]bool{}, asideOwners: map[string]string{},
 	}
 	first := func(m map[string]string, k, owner string) {
 		if _, ok := m[k]; !ok {
@@ -885,20 +888,10 @@ func newOutputOwners(jobs []*database.Job, trims []database.TrimRecord, absOutpu
 	jobsByID := make(map[string]*database.Job, len(jobs))
 	for _, job := range jobs {
 		jobsByID[job.ID] = job
+		o.jobIDs[job.ID] = true
 		owner := "job " + job.ID
 		for _, p := range jobFileLocations(job, absOutputDir) {
 			own(p, owner)
-		}
-		// An earlier archive that was set aside (prior_output_file,
-		// "<stem>.restart-<ts>.mp4") owns the stem it was set aside from as
-		// well: an archive older still, set aside under the same stem by a
-		// later reset (setOlderArchiveAside), is on no column of its own.
-		for _, p := range rowAbsoluteLocations(job, job.PriorOutputFile, absOutputDir) {
-			for _, n := range o.spellings(p) {
-				if stem, ok := asideSiblingStem(n); ok {
-					first(o.stems, stem, owner)
-				}
-			}
 		}
 		for _, seg := range job.Segments {
 			for _, p := range rowAbsoluteLocations(job, seg.FilePath, absOutputDir) {
@@ -960,6 +953,8 @@ func (o *outputOwners) isTrimDir(dir string) bool {
 //
 //   - a row names the file;
 //   - it is a recovered set-aside recording named after a file a row names;
+//   - it is a file of an archive a Reinitialize set aside, whose marker names
+//     a job that still exists (asideOwner), or a directory holding one;
 //   - it is a directory holding a file a row names, which deleting it would
 //     take along. The sweep never lists a directory under the output tree, so
 //     only a request built by hand can name one.
@@ -987,7 +982,54 @@ func (o *outputOwners) ownerOf(absPath string) (owner, how string) {
 			return row, "names a file in it"
 		}
 	}
+	if _, ok := asideSiblingStem(absPath); ok {
+		if row := o.asideOwner(absPath); row != "" {
+			return row, "set it aside at a Reinitialize"
+		}
+	}
+	if row := o.asideOwnerUnder(absPath); row != "" {
+		return row, "set a file in it aside at a Reinitialize"
+	}
 	return "", ""
+}
+
+// asideOwner returns the row that owns the set-aside recording path is a file
+// of through its marker ("<stem>.restart-<ts>.owner", asideOwnerID), "" when
+// it has no marker or the job the marker names is gone.
+func (o *outputOwners) asideOwner(path string) string {
+	marker := normalizePath(asideBase(path) + asideOwnerSuffix)
+	row, ok := o.asideOwners[marker]
+	if !ok {
+		if id := asideOwnerID(path); o.jobIDs[id] {
+			row = "job " + id
+		}
+		o.asideOwners[marker] = row
+	}
+	return row
+}
+
+// asideOwnerUnder returns the row that owns a set-aside archive somewhere
+// under dir (asideOwner), "" when dir is not a directory or holds none:
+// deleting the directory would take that archive along. Only a delete request
+// built by hand names a directory under the output tree.
+func (o *outputOwners) asideOwnerUnder(dir string) string {
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return ""
+	}
+	found := ""
+	filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(p), asideOwnerSuffix) {
+			return nil
+		}
+		if _, ok := asideSiblingStem(p); !ok {
+			return nil
+		}
+		if found = o.asideOwner(p); found != "" {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // Derived sidecars (owner decision FE-16): files the finalize writes beside an

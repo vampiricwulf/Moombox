@@ -1773,6 +1773,23 @@ func (a *App) updateSelectedJob() {
 	// SetAsides is a no-op when nothing changed.
 	a.details.SetAsides(a.asidesFor(job))
 	a.details.SetGapFill(a.gapFillFor(job))
+	a.details.SetSetAsideArchives(a.setAsideArchivesFor(job))
+}
+
+// setAsideArchivesFor is the archives a Reinitialize of job set aside, for
+// the details panel: asked of JobSetAsideArchives once per job and status
+// (see setAsideJobID). An active job is asked too: the files are in the
+// output tree, not its staging, and the new recording is when the operator
+// looks for them.
+func (a *App) setAsideArchivesFor(job *database.Job) []SetAsideArchiveEntry {
+	if job == nil || a.JobSetAsideArchives == nil {
+		return nil
+	}
+	if a.setAsideJobID != job.ID || a.setAsideStatus != job.Status {
+		a.setAsideJobID, a.setAsideStatus = job.ID, job.Status
+		a.setAsideCache = a.JobSetAsideArchives(job.ID)
+	}
+	return a.setAsideCache
 }
 
 // gapFillFor is job's gap-fill for the details panel: asked of JobGapFill

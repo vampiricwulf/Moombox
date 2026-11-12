@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 28
+const schemaVersion = 27
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -150,8 +150,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     notification_msgs TEXT,
     announce_found INTEGER NOT NULL DEFAULT 0,
     join_offset_seconds REAL,
-    live_edge_reason TEXT,
-    prior_output_file TEXT NOT NULL DEFAULT ''
+    live_edge_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -801,14 +800,6 @@ func (db *Database) migrate() error {
 			return err
 		}
 	}
-	if version < 28 {
-		if err := db.migrateV28(); err != nil {
-			return err
-		}
-		if err := db.writeUserVersion(28); err != nil {
-			return err
-		}
-	}
 
 	// Data only, no version: see the function for why it runs on every Open.
 	db.backfillTwitchOfflineParkReasons()
@@ -1090,18 +1081,6 @@ func (db *Database) migrateV26() error {
 func (db *Database) migrateV27() error {
 	if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN live_edge_reason TEXT`); err != nil && !isDuplicateColumnErr(err) {
 		return fmt.Errorf("v27 alter: %w", err)
-	}
-	return nil
-}
-
-// migrateV28 adds prior_output_file to jobs: the archive an earlier recording
-// of the job left, which a Reinitialize keeps (owner ruling R2-W1; see the
-// Job.PriorOutputFile doc comment in types.go). Empty for every existing row:
-// a reset from before the column left no record of the archive it disowned.
-// Guarded ALTER, like v27's.
-func (db *Database) migrateV28() error {
-	if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN prior_output_file TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumnErr(err) {
-		return fmt.Errorf("v28 alter: %w", err)
 	}
 	return nil
 }

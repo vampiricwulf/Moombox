@@ -363,16 +363,16 @@ func (w *DownloadWorker) reinitializeNow(jobID string, seen database.JobStatus) 
 	// Clear all non-input fields. auto_retry_count resets here because
 	// user-driven reinit grants the job a fresh budget; auto-recovery uses
 	// AutoReinitializeJob, which spends one of it instead.
-	// A single-file archive the row already has stays the row's (owner ruling
-	// R2-W1): the reset clears output_file, and the path moves to
-	// prior_output_file in the same write.
+	// A single-file archive the row already has is renamed aside once the
+	// claim has applied (owner ruling R2-W1b, reset_archive.go): the reset
+	// clears output_file, and the new recording can resolve to the same name.
+	archive := w.archiveOfReset(prior)
 	beforeResetClaim(jobID)
-	fields, olderArchive, keptArchive := w.resetFieldsKeepingArchive(reinitResetFields(0), prior)
-	if !w.db.UpdateJobFieldsIf(jobID, from, fields) {
+	if !w.db.UpdateJobFieldsIf(jobID, from, reinitResetFields(0)) {
 		w.logVerbOverridden(jobID, "reinitialize", seen)
 		return
 	}
-	w.setOlderArchiveAside(jobID, olderArchive, keptArchive)
+	w.setArchiveAside(jobID, archive)
 
 	w.removeStaging(jobID, "reinitialize")
 	// Fresh start: discard any parts from a prior quality/gap-split attempt.
@@ -447,13 +447,13 @@ func (w *DownloadWorker) autoReinitializeNow(jobID string, seen database.JobStat
 		w.logVerbOverridden(jobID, "auto-reinitialize", seen)
 		return
 	}
+	archive := w.archiveOfReset(prev)
 	beforeResetClaim(jobID)
-	fields, olderArchive, keptArchive := w.resetFieldsKeepingArchive(reinitResetFields(prev.AutoRetryCount+1), prev)
-	if !w.db.UpdateJobFieldsIf(jobID, seen, fields) {
+	if !w.db.UpdateJobFieldsIf(jobID, seen, reinitResetFields(prev.AutoRetryCount+1)) {
 		w.logVerbOverridden(jobID, "auto-reinitialize", seen)
 		return
 	}
-	w.setOlderArchiveAside(jobID, olderArchive, keptArchive)
+	w.setArchiveAside(jobID, archive)
 	w.removeStaging(jobID, "auto-reinitialize")
 	w.enqueueHeld(jobID)
 }

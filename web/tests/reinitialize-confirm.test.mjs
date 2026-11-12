@@ -41,7 +41,7 @@ test("reinitializeDeletesText words the preview as the TUI does", () => {
     { setAsideRecordings: 3, recordedParts: 0, recordedPartBytes: 0, stagedFiles: 0, stagedBytes: 10, importedChapters: 3,
       pendingAutoMux: 0, pendingAutoRetry: 0, existingArchives: 0, existingArchiveBytes: 0 },
   );
-  // The archive the reset keeps (owner ruling R2-W1), after what it cancels:
+  // The archive the reset sets aside (owner ruling R2-W1b), after what it cancels:
   // the same two cases as TestReinitializePreviewSummary.
   assert.equal(reinitializeDeletesText({ existingArchives: 1, existingArchiveBytes: 2048 }),
     "sets the existing archive (2.0KB) aside, and deletes nothing recorded");

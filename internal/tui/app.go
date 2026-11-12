@@ -716,6 +716,13 @@ type App struct {
 	asidesJobID     string
 	asidesUpdatedAt string // the row version the memo was probed for
 	asidesCache     AsideSummary
+	// setAsideJobID / setAsideStatus / setAsideCache memoise the selected
+	// job's JobSetAsideArchives answer, for the same reason. Keyed on the
+	// status: an archive is set aside only by a Reinitialize, which changes
+	// it.
+	setAsideJobID  string
+	setAsideStatus database.JobStatus
+	setAsideCache  []SetAsideArchiveEntry
 
 	// Callbacks for actions
 	OnAddVideo func(url string)
@@ -777,10 +784,14 @@ type App struct {
 	// (worker.TwitchGapFillStateOf, the job API's gapFill; owner decision
 	// PR-R5), nil for none. One row read; asked on selection, and only for
 	// a Finished live Twitch job, the only kind that has one.
-	JobGapFill   func(jobID string) *GapFillView
-	OnCreateTrim func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
-	OnDeleteTrim func(jobID, trimID string) error
-	OnOpenFolder func(jobID string)
+	JobGapFill func(jobID string) *GapFillView
+	// JobSetAsideArchives reports the archives a Reinitialize of a job set
+	// aside (worker.ScanSetAsideArchives, the job API's setAsideArchives;
+	// owner ruling R2-W1b). A disk probe, run on selection only.
+	JobSetAsideArchives func(jobID string) []SetAsideArchiveEntry
+	OnCreateTrim        func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
+	OnDeleteTrim        func(jobID, trimID string) error
+	OnOpenFolder        func(jobID string)
 	// OnSaveConfig persists the settings model's config. It returns the save
 	// error so the overlay can report a failure instead of showing "Saved"
 	// over a write that never landed (CORE-4).

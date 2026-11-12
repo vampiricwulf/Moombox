@@ -312,6 +312,22 @@ func (s *runState) runTUI() {
 		}
 		return &tui.GapFillView{State: g.State, Spans: g.Spans, Until: g.Until, Reason: g.Reason}
 	}
+	app.JobSetAsideArchives = func(jobID string) []tui.SetAsideArchiveEntry {
+		job, err := s.db.GetJob(jobID)
+		if err != nil || job == nil {
+			return nil
+		}
+		var outputDir, template string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			outputDir = c.Paths.OutputDirectory
+			template = c.Downloader.OutputTemplate
+		})
+		var out []tui.SetAsideArchiveEntry
+		for _, a := range worker.ScanSetAsideArchives(job, outputDir, template) {
+			out = append(out, tui.SetAsideArchiveEntry{Name: a.Name, Size: a.Size})
+		}
+		return out
+	}
 	app.JobAsides = func(jobID string) tui.AsideSummary {
 		report, err := s.dlWorker.Asides(jobID)
 		if err != nil {

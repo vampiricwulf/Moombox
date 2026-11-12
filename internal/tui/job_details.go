@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -40,6 +41,10 @@ type JobDetailsModel struct {
 	// gapFill is the selected job's archive-VOD gap-fill (owner decision
 	// PR-R5), pushed by the App from its JobGapFill callback; nil for none.
 	gapFill *GapFillView
+	// setAsideArchives is the archives a Reinitialize of the selected job set
+	// aside (owner ruling R2-W1b), pushed by the App from its
+	// JobSetAsideArchives callback.
+	setAsideArchives []SetAsideArchiveEntry
 	// holds is the backlog scheduler's hold snapshot (AdmissionHoldsMsg),
 	// which a Queued job's "Queue" line reads.
 	holds jobstate.AdmissionHolds
@@ -147,6 +152,7 @@ func (m *JobDetailsModel) SetJob(job *database.Job) {
 		// nothing rather than something false.
 		m.asides = AsideSummary{}
 		m.gapFill = nil
+		m.setAsideArchives = nil
 	}
 
 	// Transient view state (progress overlay, scroll position, marquee
@@ -422,25 +428,29 @@ func (m *JobDetailsModel) SetGapFill(g *GapFillView) {
 	m.updateViewportContent()
 }
 
-// priorArchiveLine is the details line for the archive an earlier recording
-// of the job left (prior_output_file, owner ruling R2-W1), the dashboard's
-// priorArchiveText (web/public/modules/utils.js): the file, and that it is
-// kept. "" for a job with none. Its name alone when it sits in the directory
-// of the archive the row names (output_file); its whole path when it is
-// somewhere else — a reinitialized row can follow a changed output directory
-// (owner ruling R2-X1) — or the row names no archive to be beside. The path
-// is cut at either separator: the row stores it as the machine that wrote it
-// spelled it.
-func priorArchiveLine(j *database.Job) string {
-	if j == nil || j.PriorOutputFile == "" {
-		return ""
+// SetAsideArchiveEntry is one archive a Reinitialize of the job set aside, as
+// the details panel reads it (worker.SetAsideArchive).
+type SetAsideArchiveEntry struct {
+	Name string
+	Size int64
+}
+
+// SetSetAsideArchives gives the panel the archives a Reinitialize of the
+// selected job set aside (owner ruling R2-W1b). A no-op when nothing changed.
+func (m *JobDetailsModel) SetSetAsideArchives(list []SetAsideArchiveEntry) {
+	if slices.Equal(list, m.setAsideArchives) {
+		return
 	}
-	shown := j.PriorOutputFile
-	cut := strings.LastIndexAny(shown, `/\`)
-	if out := j.OutputFile; cut >= 0 && out != "" && strings.LastIndexAny(out, `/\`) == cut && out[:cut] == shown[:cut] {
-		shown = shown[cut+1:]
-	}
-	return shown + " (kept, not replaced)"
+	m.setAsideArchives = list
+	m.buildRows()
+	m.updateViewportContent()
+}
+
+// setAsideArchiveLine is the one line both details views show for an archive
+// a Reinitialize set aside. The dashboard's copy is setAsideArchiveText in
+// web/public/modules/utils.js.
+func setAsideArchiveLine(name string, size int64) string {
+	return fmt.Sprintf("%s (%s, kept, never replaced)", name, formatFileSize(size))
 }
 
 // liveEdgeLine is the details line for a live YouTube capture that recorded
@@ -558,11 +568,6 @@ func (m *JobDetailsModel) buildRows() {
 	}
 	if line := gapFillLine(m.gapFill, time.Now()); line != "" {
 		m.addField("Gap-fill", line)
-	}
-	// The archive an earlier recording left, which a Reinitialize keeps
-	// (owner ruling R2-W1).
-	if line := priorArchiveLine(j); line != "" {
-		m.addField("Earlier file", line)
 	}
 	if isTwitch {
 		m.addFieldColor("Platform", "Twitch", ColorTwitch)
@@ -911,6 +916,22 @@ func (m *JobDetailsModel) buildRows() {
 			chat = "kept in staging"
 		}
 		m.addField("Chat Capture", chat)
+	}
+
+	// === Set Aside by Reinitialize ===
+	// The single-file archives a Reinitialize of this job renamed aside
+	// (worker.ScanSetAsideArchives, owner ruling R2-W1b). Moombox never
+	// replaces or deletes them and Files does not offer them while the job
+	// exists, so this is where the operator learns their names. Nothing to
+	// recover: each is a whole file.
+	if n := len(m.setAsideArchives); n > 0 {
+		m.rows = append(m.rows, detailRow{kind: rowSeparator})
+		m.rows = append(m.rows, detailRow{kind: rowHeader, label: fmt.Sprintf("Set Aside by Reinitialize (%d)", n)})
+		for _, a := range m.setAsideArchives {
+			for _, line := range breakWidth(setAsideArchiveLine(a.Name, a.Size), m.blockWrapWidth()) {
+				m.rows = append(m.rows, detailRow{kind: rowField, value: line})
+			}
+		}
 	}
 
 	// === Kept for a Mux Gap ===
