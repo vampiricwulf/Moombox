@@ -125,6 +125,9 @@ var bareSettingsStates = map[string]func(t *testing.T, r *compactRig){
 		r.app.settings.status, r.app.settings.errorMsg = saveError, bareLongError
 	},
 	"restart prompt": func(t *testing.T, r *compactRig) {
+		// With nothing active: the prompt as it always was. The warning it
+		// gives about active downloads is in restart_warning_test.go.
+		clear(r.app.statusMap)
 		r.app.settings.showRestartOverlay = true
 	},
 	"password, set": func(t *testing.T, r *compactRig) {

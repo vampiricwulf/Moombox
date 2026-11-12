@@ -546,6 +546,24 @@ func (m *TaskListModel) ToggleSelection(jobID string) {
 	}
 }
 
+// SelectAllShown adds every row the list shows to the batch selection and
+// returns how many rows that is: the jobs the filter passes, archived ones
+// only while the archive is expanded. Those are the rows rebuildVirtualList
+// keeps, so the list's own items are read rather than the rule written twice.
+// It only ever adds; Esc (ClearSelection) is the one way to clear.
+func (m *TaskListModel) SelectAllShown() int {
+	n := 0
+	for _, it := range m.list.Items() {
+		ti, ok := it.(taskItem)
+		if !ok || ti.divider || ti.job == nil {
+			continue
+		}
+		m.selected[ti.job.ID] = true
+		n++
+	}
+	return n
+}
+
 // ClearSelection clears all batch selections.
 func (m *TaskListModel) ClearSelection() {
 	m.selected = make(map[string]bool)
@@ -1109,7 +1127,8 @@ func (m *TaskListModel) passes(j *database.Job) bool {
 //     (spec §5 ruling).
 //   - marqueeOffset covers the scrolling selected title.
 //   - selectedCount is faithful because ToggleSelection always moves the
-//     count by one.
+//     count by one, and SelectAllShown only adds: the same count after it
+//     means the same set.
 //   - summary covers ResweepArchive's once-a-minute header refresh, which
 //     changes the counts WITHOUT rebuilding: the header counts every job,
 //     while the sweep's dirty check only looks at rows the filter passes, so

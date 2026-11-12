@@ -513,6 +513,14 @@ type SettingsModel struct {
 
 	// Restart overlay
 	showRestartOverlay bool
+	// activeDownloads is the App's count of the jobs a restart interrupts
+	// (App.activeDownloadCount), read each time the restart prompt is
+	// drawn. nil means none are known.
+	activeDownloads func() int
+	// runningNote is the App's note that a Resume or Reinitialize is still
+	// running (App.jobVerbRunningNote), read each time the restart prompt is
+	// drawn. nil, or "", means none is.
+	runningNote func() string
 
 	// Close confirmation
 	closeConfirm bool

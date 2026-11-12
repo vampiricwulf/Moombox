@@ -278,6 +278,9 @@ func (m *ActionMenuModel) bareView() string {
 		question := bareWrap(m.confirmLabel+"?", w, max(h-1, 1))
 		sheet.left = YellowBoldStyle.Render(question[0])
 		sheet.body = bareStyled(question[1:], YellowBoldStyle)
+		if m.confirmDetail != "" {
+			sheet.body = append(sheet.body, bareStyled(bareWrap(m.confirmDetail, w, len(m.confirmDetail)+1), YellowStyle)...)
+		}
 		return sheet.render(w, h)
 
 	case menuJobSelect:

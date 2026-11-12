@@ -190,6 +190,19 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return a, nil
+	case keyCtrlA:
+		// Ctrl+A: select every row the Tasks list shows (owner ruling R2-T1).
+		// It never clears: Esc is the one way out of a selection. An armed
+		// chord never gets here (handleChord answers any other key as an
+		// invalid chord), so a confirm that named its count cannot grow.
+		if a.focusedPanel == PanelTasks {
+			if n := a.taskList.SelectAllShown(); n > 0 {
+				a.setFeedback("Selected " + jobCount(n) + " · Esc clears")
+			} else {
+				a.setFeedback("No tasks to select")
+			}
+		}
+		return a, nil
 	}
 
 	// "c" clears the log view (history, filtered lines, and any active
@@ -300,7 +313,7 @@ func (a *App) cancelChord() {
 // hint is the size refusal, in the refusal's colour.
 func (a *App) setPrefixHint(prefix string) {
 	hint, refused := a.chordHint(prefix)
-	if refused {
+	if refused || (prefix == "q" && a.jobVerb.busy) {
 		a.setFeedbackWithSeverity(hint, severityWarning)
 		return
 	}
@@ -399,6 +412,15 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 		return a, nil, true
 	}
 
+	// A Reinitialize is refused while a Resume or Reinitialize is running
+	// (dispatchAction). Said here, before the confirm is armed: the confirm
+	// line walks the staging directory to say what the reset deletes, and
+	// answering it would only earn the refusal.
+	if chord == "A I" && a.jobVerbBusy() {
+		a.disarmChord()
+		return a, nil, true
+	}
+
 	// NeedsConfirm + NeedsJob: check job first, then enter confirm step
 	if item.NeedsConfirm && item.NeedsJob {
 		// Batch mode: if jobs are selected, confirm with count instead of
@@ -452,8 +474,8 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 	if item.NeedsConfirm {
 		a.chord.action = key
 		a.chord.actionTime = time.Now()
-		a.setFeedback(fmt.Sprintf("Press %s to confirm %s (3s)",
-			strings.ToUpper(key), strings.ToLower(item.HintLabel)))
+		a.setFeedback(fmt.Sprintf("Press %s to confirm %s%s (3s)",
+			strings.ToUpper(key), strings.ToLower(item.HintLabel), confirmDetail(item, nil)))
 		return a, nil, true
 	}
 

@@ -46,6 +46,7 @@ var bareNavigationKeys = []bareHelpKey{
 	{"Home/End", "Jump to first / last task", ""},
 	{"Enter", "Expand/collapse archives", ""},
 	{"Space", "Select task for batch actions", ""},
+	{"Ctrl+A", "Select every task shown", ""},
 	{"Esc", "Clear batch selection · filter · armed chord", ""},
 	{"/", "Filter query", ""},
 	{"", "status:live type:clip", ""},

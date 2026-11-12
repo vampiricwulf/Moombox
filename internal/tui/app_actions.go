@@ -167,9 +167,15 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		_ = os.MkdirAll(startDir, 0o755)
 		return a, a.importDlg.Open(startDir)
 	case "A R":
+		// The worker's Resume and Reinitialize do their work on the caller's
+		// goroutine when the job is idle (a reinitialize deletes the staging
+		// directory there), so both run as a command, off the update loop:
+		// see runJobVerb. Which jobs are eligible is still decided here.
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnResumeJob != nil {
-			count := 0
-			var refused verbRefusals
+			if a.jobVerbBusy() {
+				return a, nil
+			}
+			var ids []string
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
 				if j == nil || !jobverbs.ResumeSupported(j.Platform) {
@@ -181,29 +187,26 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				if !jobverbs.ResumableStatus(j.Status, j.IncompleteTail) {
 					continue
 				}
-				if err := a.OnResumeJob(id); err != nil {
-					refused.add(err)
-					continue
-				}
-				count++
+				ids = append(ids, id)
 			}
 			a.taskList.ClearSelection()
-			if count == 0 && refused.n == 0 {
+			if len(ids) == 0 {
 				a.setFeedbackWithSeverity("No resumable jobs in selection", severityWarning)
 				return a, nil
 			}
-			a.setBatchFeedback("Resumed "+jobCount(count), refused)
+			return a, a.runJobVerb(chord, a.OnResumeJob, ids, "")
 		} else if job != nil && a.OnResumeJob != nil {
-			if err := a.OnResumeJob(job.ID); err != nil {
-				a.setFeedbackWithSeverity(err.Error(), severityError)
-			} else {
-				a.setFeedback(fmt.Sprintf("Resuming: %s", job.Title))
+			if a.jobVerbBusy() {
+				return a, nil
 			}
+			return a, a.runJobVerb(chord, a.OnResumeJob, []string{job.ID}, job.Title)
 		}
 	case "A I":
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnReinitializeJob != nil {
-			count := 0
-			var refused verbRefusals
+			if a.jobVerbBusy() {
+				return a, nil
+			}
+			var ids []string
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
 				if j == nil {
@@ -212,24 +215,19 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				if !jobverbs.ReinitializableStatus(j.Status) {
 					continue
 				}
-				if err := a.OnReinitializeJob(id); err != nil {
-					refused.add(err)
-					continue
-				}
-				count++
+				ids = append(ids, id)
 			}
 			a.taskList.ClearSelection()
-			if count == 0 && refused.n == 0 {
+			if len(ids) == 0 {
 				a.setFeedbackWithSeverity("No reinitializable jobs in selection", severityWarning)
 				return a, nil
 			}
-			a.setBatchFeedback("Reinitialized "+jobCount(count), refused)
+			return a, a.runJobVerb(chord, a.OnReinitializeJob, ids, "")
 		} else if job != nil && a.OnReinitializeJob != nil {
-			if err := a.OnReinitializeJob(job.ID); err != nil {
-				a.setFeedbackWithSeverity(err.Error(), severityError)
-			} else {
-				a.setFeedback(fmt.Sprintf("Reinitializing: %s", job.Title))
+			if a.jobVerbBusy() {
+				return a, nil
 			}
+			return a, a.runJobVerb(chord, a.OnReinitializeJob, []string{job.ID}, job.Title)
 		}
 	case "A M":
 		if job != nil && a.OnMuxJob != nil {
@@ -336,6 +334,14 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				return deleteJobsResultMsg{Count: len(ids)}
 			})
 		} else if job != nil && a.OnDeleteJob != nil {
+			// The last check before the row is cancelled and deleted: every
+			// caller has already run the A D filter, but the server accepts a
+			// delete in any state, so nothing after this line would stop one
+			// aimed at a job that is recording.
+			if !isDeletableStatus(job.Status) {
+				a.setFeedbackWithSeverity(fmt.Sprintf("Delete Job not done: %s is now %s", job.Title, job.Status), severityWarning)
+				return a, nil
+			}
 			a.setFeedback(fmt.Sprintf("Deleting: %s", job.Title))
 			deleteFn := a.OnDeleteJob
 			id, title := job.ID, job.Title
@@ -440,7 +446,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		// operator's Enter and are rendered inline by the wizard, which is
 		// where the web panel puts them too.
 		if a.setupWiz.OnStartAutoCookie == nil {
-			a.setFeedback("Cookie login is unavailable — no auto-cookie service is configured")
+			a.setFeedbackWithSeverity("Cookie login is unavailable — no auto-cookie service is configured", severityWarning)
 			return a, nil
 		}
 		a.setupWiz.SetSize(a.width, a.height)
@@ -453,7 +459,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		// processSecondKey never reaches this case. The guard keeps a direct
 		// caller from opening an overlay whose Enter dead-ends.
 		if a.OnImportCookieFile == nil {
-			a.setFeedback("Cookie import is unavailable — no auto-cookie service is configured")
+			a.setFeedbackWithSeverity("Cookie import is unavailable — no auto-cookie service is configured", severityWarning)
 			return a, nil
 		}
 		a.clearFeedback()
@@ -679,6 +685,11 @@ func (a *App) chordFeedback(prefix string) string {
 // taken as the chord it is and refused the same way.
 func (a *App) chordHint(prefix string) (hint string, refused bool) {
 	if prefix == "q" {
+		// Quitting in the middle of a reset can leave it half done, so the
+		// prompt says one is running.
+		if note := a.jobVerbRunningNote(); note != "" {
+			return "Quit: Q Confirm (3s) — " + note, false
+		}
 		return "Quit: Q Confirm (3s)", false
 	}
 
@@ -1103,7 +1114,12 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		items = append(items, ActionMenuItem{Chord: "R S", Label: "Verify Signature", HintLabel: "Signature", Category: "Request"})
 	}
 	if a.OnRestart != nil {
-		items = append(items, ActionMenuItem{Chord: "R P", Label: "Restart Program", HintLabel: "Restart", Category: "Request", NeedsConfirm: true})
+		items = append(items, ActionMenuItem{Chord: "R P", Label: "Restart Program", HintLabel: "Restart", Category: "Request", NeedsConfirm: true,
+			// The warning the update restart gives, on the confirm line and
+			// the menu's confirm (restart_warning.go).
+			ConfirmDetail: func([]string) string {
+				return joinRestartNotes(activeRestartClause(a.activeDownloadCount(), "restart"), a.jobVerbRunningNote())
+			}})
 	}
 
 	// Open

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -256,6 +257,7 @@ func (a *App) keySetupWizard(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cm
 
 // Action menu intercepts
 func (a *App) keyActionMenu(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cmd) {
+	picked := a.actionMenu.pickerJob() // the row as the picker holds it, before the key closes the menu
 	action := a.actionMenu.HandleKey(key)
 	if action == "close" {
 		return a, nil
@@ -266,16 +268,55 @@ func (a *App) keyActionMenu(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cmd
 		chord, jobID, hasJob := strings.Cut(action, ":")
 		var job *database.Job
 		if hasJob {
-			for _, j := range a.actionMenu.jobs {
-				if j.ID == jobID {
-					job = j
-					break
-				}
+			// The picker was built when the action was chosen and waits for
+			// Enter with no time limit, so the job is judged again here as it
+			// is NOW, by the same JobFilter the chord path re-runs on its
+			// confirm key. Without this a row that went active while the
+			// picker sat open (an auto-retry, a Resume from the dashboard)
+			// was still deleted. A job that has gone is refused too: a nil
+			// job would send a batch verb down its selection arm.
+			job = a.taskList.GetJobByID(jobID)
+			item := a.menuItem(chord)
+			switch {
+			case job == nil:
+				a.setFeedbackWithSeverity(menuActionLabel(item, chord)+" not done: the job is gone", severityWarning)
+				return a, nil
+			case item != nil && item.JobFilter != nil && !item.JobFilter(job):
+				a.setFeedbackWithSeverity(menuRefusal(item, chord, picked, job), severityWarning)
+				return a, nil
 			}
 		}
 		return a.dispatchAction(chord, job)
 	}
 	return a, nil
+}
+
+// menuRefusal words the refusal of a menu action whose job no longer passes
+// the action's filter. The status is named as the cause only when it is what
+// changed since the picker listed the job (picked is that row; nil when not
+// known). A filter can also fail on a fact that is not the status (A R: the
+// staging files are gone; A M, A S, A U: a disk or service probe), and the
+// line then gives the entry's own reason, the words the menu shows beside it
+// when greyed.
+func menuRefusal(item *ActionMenuItem, chord string, picked, job *database.Job) string {
+	label := menuActionLabel(item, chord)
+	if picked == nil || picked.ID != job.ID || picked.Status != job.Status {
+		return fmt.Sprintf("%s not done: %s is now %s", label, job.Title, job.Status)
+	}
+	reason := item.DisabledReason
+	if reason == "" {
+		reason = "no eligible jobs"
+	}
+	return fmt.Sprintf("%s not done for %s: %s", label, job.Title, reason)
+}
+
+// menuActionLabel names a menu action on a refusal line: the item's label, or
+// the chord when the item is not registered.
+func menuActionLabel(item *ActionMenuItem, chord string) string {
+	if item != nil && item.Label != "" {
+		return item.Label
+	}
+	return chord
 }
 
 func (a *App) keyImport(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cmd) {
