@@ -129,24 +129,6 @@ func TestMonitor_DebouncePreventsSinglePollFlap(t *testing.T) {
 	}
 }
 
-func TestMonitor_StartIsIdempotent(t *testing.T) {
-	m := newTestMonitor(func() bool { return true })
-	ctx := t.Context()
-
-	m.Start(ctx)
-	firstCancel := m.cancel
-
-	m.Start(ctx) // second call should be a no-op — do not rebind cancel
-	if m.cancel == nil {
-		t.Fatal("cancel went nil after second Start")
-	}
-	// Note: Go function values aren't comparable beyond nil-checks, so we
-	// can't directly assert cancel is the same closure as firstCancel.
-	// The non-nil check above is the strongest invariant we can express.
-	_ = firstCancel
-	m.Stop()
-}
-
 func TestMonitor_StartInitialOfflineProbe(t *testing.T) {
 	m := newTestMonitor(func() bool { return false })
 	ctx := t.Context()

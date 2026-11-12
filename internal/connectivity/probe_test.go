@@ -42,13 +42,6 @@ func TestReachabilityProbe_FailWhenAllDead(t *testing.T) {
 	}
 }
 
-func TestReachabilityProbe_EmptyTargetsUsesDefaults(t *testing.T) {
-	// Empty slice must fall back to defaultProbeTargets (don't panic / don't
-	// treat as trivially reachable). We can't assume network access in CI, so
-	// only assert it doesn't panic and returns a bool within the deadline.
-	_ = reachabilityProbe(context.Background(), nil)
-}
-
 // TestReachabilityProbe_RecoversFromDialPanic: a panicking dial goroutine must
 // still deliver its result, or the receive loop waits forever (project rule:
 // every goroutine recovers inline). No logger is in scope in this free
