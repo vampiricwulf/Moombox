@@ -1,4 +1,4 @@
-// The details dialog's "Set Aside by Reinitialize" section: the archives a
+// The details dialog's "Set-aside Archives" section: the archives a
 // Reinitialize of the job renamed aside, from GET /api/jobs/{id}'s
 // setAsideArchives (worker.ScanSetAsideArchives, owner ruling R2-W1b).
 // Moombox never replaces or deletes them and Files does not offer them while

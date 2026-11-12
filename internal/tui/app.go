@@ -384,6 +384,12 @@ type (
 	setAsideReaskMsg struct {
 		Gen int
 	}
+	// setAsideSelectMsg fires once, setAsideSelectDelay after the cursor
+	// came to a job, to ask for its set-aside archives. Dropped when the
+	// cursor has moved on, so only the job it rests on is asked about.
+	setAsideSelectMsg struct {
+		Gen int
+	}
 
 	// statsSnapshotMsg is the async result of OnGetStats — the E T overlay's
 	// open, its r key, and the 60 s refresh tick all go through it. Epoch is
@@ -738,7 +744,8 @@ type App struct {
 	// (setAsideCmds, flushed by Update) when the job or its status changes,
 	// and the answer comes back as a setAsideArchivesMsg. setAsideGen is
 	// the ask the panel is waiting on; an answer under another is dropped.
-	// Single writer: setAsideArchivesFor and the two message arms in Update.
+	// Single writer: setAsideArchivesFor and the three message arms in
+	// Update.
 	setAsideJobID  string
 	setAsideStatus database.JobStatus
 	setAsideCache  []SetAsideArchiveEntry
@@ -806,11 +813,12 @@ type App struct {
 	// PR-R5), nil for none. One row read; asked on selection, and only for
 	// a Finished live Twitch job, the only kind that has one.
 	JobGapFill func(jobID string) *GapFillView
-	// JobSetAsideArchives reports the archives a Reinitialize of a job set
-	// aside (worker.ScanSetAsideArchives, the job API's setAsideArchives;
-	// owner ruling R2-W1b). A disk probe: called from a command's goroutine,
-	// never the update goroutine, once per selection or status change and
-	// once more shortly after a status change (setAsideReaskDelay).
+	// JobSetAsideArchives reports the archives set aside for a job
+	// (worker.ScanSetAsideArchives, the job API's setAsideArchives; owner
+	// ruling R2-W1b). A disk probe: called from a command's goroutine, never
+	// the update goroutine, once for the job the cursor rests on
+	// (setAsideSelectDelay), once per status change and once more shortly
+	// after a status change (setAsideReaskDelay).
 	JobSetAsideArchives func(jobID string) []SetAsideArchiveEntry
 	OnCreateTrim        func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
 	OnDeleteTrim        func(jobID, trimID string) error

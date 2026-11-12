@@ -995,8 +995,9 @@ export class JobDetailsController {
           <div class="details-row"><span class="details-label"></span><span class="details-value" data-field="unused-recording-path" style="color: var(--sl-color-neutral-600); font-size: 0.9em; word-break: break-all;">${this.app.escapeHtml(kept.path)}</span></div>
         </div>`;
       })()}${(() => {
-        // The archives a Reinitialize of this job set aside, still beside
-        // where the job writes (worker.ScanSetAsideArchives, GET
+        // The files set aside for this job (the archive a Reinitialize
+        // renamed aside, a file a finalize found at the name it writes),
+        // still beside where the job writes (worker.ScanSetAsideArchives, GET
         // /api/jobs/{id}'s setAsideArchives, owner ruling R2-W1b). Moombox
         // never replaces or deletes them and Files does not offer them while
         // the job exists, so this is where the operator learns their names.
@@ -1005,7 +1006,7 @@ export class JobDetailsController {
         if (archives.length === 0) return "";
         const rows = archives.map((a) => `<div class="details-row"><span class="details-label"></span><span class="details-value" data-field="set-aside-archive" title="${this.app.escapeHtml(a.path || "")}">${this.app.escapeHtml(setAsideArchiveText(a))}</span></div>`).join("");
         return `<div class="details-section" id="details-set-aside-archives-section">
-          <strong>Set Aside by Reinitialize (${archives.length}):</strong>
+          <strong>Set-aside Archives (${archives.length}):</strong>
           ${rows}
         </div>`;
       })()}

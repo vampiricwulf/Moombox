@@ -10,11 +10,11 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-// setAsideArchiveRows is the details panel's "Set Aside by Reinitialize"
+// setAsideArchiveRows is the details panel's "Set-aside Archives"
 // block: its header row and the rows under it.
 func setAsideArchiveRows(m *JobDetailsModel) []detailRow {
 	for i, r := range m.rows {
-		if r.kind != rowHeader || !strings.HasPrefix(r.label, "Set Aside by Reinitialize") {
+		if r.kind != rowHeader || !strings.HasPrefix(r.label, "Set-aside Archives") {
 			continue
 		}
 		end := i + 1
@@ -44,7 +44,7 @@ func TestDetailsPanelListsTheArchivesAReinitializeSetAside(t *testing.T) {
 
 	m.SetSetAsideArchives([]SetAsideArchiveEntry{{Name: "Show.restart-1700000000.mp4", Size: 3 << 30}})
 	rows := setAsideArchiveRows(m)
-	if len(rows) < 2 || rows[0].label != "Set Aside by Reinitialize (1)" {
+	if len(rows) < 2 || rows[0].label != "Set-aside Archives (1)" {
 		t.Fatalf("rows = %+v, want the block with its count", rows)
 	}
 	var joined string
@@ -81,7 +81,7 @@ func setAsideSend(a *App, msg tea.Msg, inUpdate *bool) []tea.Msg {
 			for _, sub := range m {
 				run(sub)
 			}
-		case setAsideArchivesMsg, setAsideReaskMsg:
+		case setAsideArchivesMsg, setAsideReaskMsg, setAsideSelectMsg:
 			out = append(out, m)
 		}
 	}
@@ -92,8 +92,9 @@ func setAsideSend(a *App, msg tea.Msg, inUpdate *bool) []tea.Msg {
 // The probe behind the block reads the output directory, which can be a slow
 // or unreachable volume, and updateSelectedJob runs on the update goroutine
 // on every cursor move and every job write. So the probe runs only inside a
-// command: once when a job is selected, once when its status changes and once
-// more a moment after that change (a Reinitialize writes the status before it
+// command: once for the job the cursor comes to rest on (a row the cursor
+// only passes is never read), once when its status changes and once more a
+// moment after that change (a Reinitialize writes the status before it
 // renames the archive aside), and never periodically. An answer for a job the
 // cursor has left, or for an older ask, is dropped.
 //
@@ -103,11 +104,12 @@ func setAsideSend(a *App, msg tea.Msg, inUpdate *bool) []tea.Msg {
 // change (an archive renamed just after the first read is never shown); a
 // delayed ask after a plain selection; a repeating delayed ask; the
 // generation check dropped (the answer for the job the cursor left is shown
-// on the next one).
+// on the next one); a selection asked about at once, or its settle tick not
+// checked against the generation (every row the cursor passes is probed).
 func TestSetAsideArchivesAreProbedOffTheUpdateLoop(t *testing.T) {
-	old := setAsideReaskDelay
-	setAsideReaskDelay = time.Millisecond
-	t.Cleanup(func() { setAsideReaskDelay = old })
+	old, oldSelect := setAsideReaskDelay, setAsideSelectDelay
+	setAsideReaskDelay, setAsideSelectDelay = time.Millisecond, time.Millisecond
+	t.Cleanup(func() { setAsideReaskDelay, setAsideSelectDelay = old, oldSelect })
 
 	a := NewApp()
 	inUpdate := true
@@ -132,10 +134,17 @@ func TestSetAsideArchivesAreProbedOffTheUpdateLoop(t *testing.T) {
 	step := func() (asks, reasks int) {
 		msgs := append(pending, setAsideSend(a, nop{}, &inUpdate)...)
 		pending = nil
-		for _, m := range msgs {
-			if _, ok := m.(setAsideReaskMsg); ok {
+		for len(msgs) > 0 {
+			m := msgs[0]
+			msgs = msgs[1:]
+			switch m.(type) {
+			case setAsideSelectMsg:
+				// The cursor rested: the ask it starts is this step's.
+				msgs = append(msgs, setAsideSend(a, m, &inUpdate)...)
+				continue
+			case setAsideReaskMsg:
 				reasks++
-			} else {
+			default:
 				asks++
 			}
 			pending = append(pending, setAsideSend(a, m, &inUpdate)...)
@@ -186,21 +195,46 @@ func TestSetAsideArchivesAreProbedOffTheUpdateLoop(t *testing.T) {
 		t.Fatalf("after the delayed ask: %d asks, %d delayed asks, %d probes in all; want none and 3", asks, reasks, probes)
 	}
 
-	// A late answer: j2 is asked, the cursor returns to j1 before j2's
-	// answer lands. It is dropped, and j1's own answer is shown.
+	// The cursor passes j2 and comes back before it has rested there: j2 is
+	// never read, and j1 is read once.
 	answers["j2"] = []SetAsideArchiveEntry{{Name: "Other.restart-1700000001.mp4", Size: 1}}
 	a.taskList.MoveUp() // the list draws j2 above j1
 	a.updateSelectedJob()
-	late := setAsideSend(a, nop{}, &inUpdate)
-	if len(late) != 1 {
-		t.Fatalf("moving to j2 queued %d asks, want 1", len(late))
-	}
+	passed := setAsideSend(a, nop{}, &inUpdate)
 	a.taskList.MoveDown()
 	a.updateSelectedJob()
 	if shown() != 0 {
 		t.Errorf("back on j1 before its answer: %d rows shown, want none until it is read again", shown())
 	}
-	own := setAsideSend(a, nop{}, &inUpdate)
+	rested := setAsideSend(a, nop{}, &inUpdate)
+	if len(passed) != 1 || len(rested) != 1 || probes != 3 {
+		t.Fatalf("two cursor moves queued %d and %d messages with %d probes in all; want one settle tick each and no probe yet", len(passed), len(rested), probes)
+	}
+	if got := setAsideSend(a, passed[0], &inUpdate); len(got) != 0 || probes != 3 {
+		t.Fatalf("the tick of a row the cursor left started %d asks (%d probes in all), want none", len(got), probes)
+	}
+	pending = rested
+	if asks, _ := step(); asks != 1 || probes != 4 || shown() == 0 {
+		t.Fatalf("the row the cursor rests on: %d asks, %d probes in all, %d rows shown; want 1, 4 and the archive", asks, probes, shown())
+	}
+
+	// A late answer: j2 is asked, the cursor returns to j1 before j2's
+	// answer lands. It is dropped, and j1's own answer is shown.
+	a.taskList.MoveUp()
+	a.updateSelectedJob()
+	var late []tea.Msg
+	for _, tick := range setAsideSend(a, nop{}, &inUpdate) {
+		late = append(late, setAsideSend(a, tick, &inUpdate)...)
+	}
+	if len(late) != 1 {
+		t.Fatalf("resting on j2 queued %d asks, want 1", len(late))
+	}
+	a.taskList.MoveDown()
+	a.updateSelectedJob()
+	var own []tea.Msg
+	for _, tick := range setAsideSend(a, nop{}, &inUpdate) {
+		own = append(own, setAsideSend(a, tick, &inUpdate)...)
+	}
 	for _, m := range append(own, late...) { // j2's answer lands last
 		setAsideSend(a, m, &inUpdate)
 	}

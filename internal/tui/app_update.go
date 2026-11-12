@@ -31,6 +31,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.handleSetAsideArchives(msg)
 	case setAsideReaskMsg:
 		a.handleSetAsideReask(msg)
+	case setAsideSelectMsg:
+		a.handleSetAsideSelect(msg)
 	default:
 		_, cmd = a.update(msg)
 	}
@@ -1795,14 +1797,17 @@ func (a *App) updateSelectedJob() {
 	a.details.SetSetAsideArchives(a.setAsideArchivesFor(job))
 }
 
-// setAsideArchivesFor is the archives a Reinitialize of job set aside, for
-// the details panel: the last answer for this job, and never a disk read.
-// The probe (JobSetAsideArchives: a row read and one or two directory reads
-// of the output tree, which can be a slow or unreachable volume) runs in a
-// command. One is queued when the selected job or its status changes, and one
-// more setAsideReaskDelay after a status change; nothing asks periodically.
-// An active job is asked too: the files are in the output tree, not its
-// staging, and the new recording is when the operator looks for them.
+// setAsideArchivesFor is the archives set aside for job, for the details
+// panel: the last answer for this job, and never a disk read. The probe
+// (JobSetAsideArchives: a row read and one or two directory reads of the
+// output tree, which can be a slow or unreachable volume) runs in a command.
+// A job the cursor comes to is asked about once the cursor has rested on it
+// for setAsideSelectDelay, so holding an arrow key down a long list starts
+// one probe, not one per row. A status change of the selected job is asked
+// about at once, and once more setAsideReaskDelay later; nothing asks
+// periodically. An active job is asked too: the files are in the output
+// tree, not its staging, and the new recording is when the operator looks
+// for them.
 //
 // The same job in a new status keeps showing its last answer until the new
 // one arrives; another job shows none.
@@ -1818,20 +1823,27 @@ func (a *App) setAsideArchivesFor(job *database.Job) []SetAsideArchiveEntry {
 		return a.setAsideCache
 	}
 	statusChange := a.setAsideJobID == job.ID
-	if !statusChange {
-		a.setAsideCache = nil
-	}
 	a.setAsideJobID, a.setAsideStatus = job.ID, job.Status
 	a.setAsideGen++
-	a.setAsideCmds = append(a.setAsideCmds, a.setAsideProbeCmd(job.ID, a.setAsideGen))
-	if statusChange {
-		gen := a.setAsideGen
-		a.setAsideCmds = append(a.setAsideCmds, tea.Tick(setAsideReaskDelay, func(time.Time) tea.Msg {
+	gen := a.setAsideGen
+	if !statusChange {
+		a.setAsideCache = nil
+		a.setAsideCmds = append(a.setAsideCmds, tea.Tick(setAsideSelectDelay, func(time.Time) tea.Msg {
+			return setAsideSelectMsg{Gen: gen}
+		}))
+		return nil
+	}
+	a.setAsideCmds = append(a.setAsideCmds, a.setAsideProbeCmd(job.ID, gen),
+		tea.Tick(setAsideReaskDelay, func(time.Time) tea.Msg {
 			return setAsideReaskMsg{Gen: gen}
 		}))
-	}
 	return a.setAsideCache
 }
+
+// setAsideSelectDelay is how long the cursor rests on a job before its
+// set-aside archives are asked for. A variable so a test need not wait for
+// it; production never assigns it.
+var setAsideSelectDelay = 120 * time.Millisecond
 
 // setAsideReaskDelay is how long after a status change of the selected job
 // its set-aside archives are asked for once more. A Reinitialize writes the
@@ -1871,6 +1883,16 @@ func (a *App) handleSetAsideReask(msg setAsideReaskMsg) {
 		return
 	}
 	a.setAsideGen++
+	a.setAsideCmds = append(a.setAsideCmds, a.setAsideProbeCmd(a.setAsideJobID, a.setAsideGen))
+}
+
+// handleSetAsideSelect starts the ask for the job the cursor came to, when
+// the cursor is still on it and its status has not changed since: either
+// took a new generation, and a status change has asked already.
+func (a *App) handleSetAsideSelect(msg setAsideSelectMsg) {
+	if msg.Gen != a.setAsideGen || a.JobSetAsideArchives == nil {
+		return
+	}
 	a.setAsideCmds = append(a.setAsideCmds, a.setAsideProbeCmd(a.setAsideJobID, a.setAsideGen))
 }
 

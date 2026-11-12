@@ -918,15 +918,16 @@ func (m *JobDetailsModel) buildRows() {
 		m.addField("Chat Capture", chat)
 	}
 
-	// === Set Aside by Reinitialize ===
-	// The single-file archives a Reinitialize of this job renamed aside
-	// (worker.ScanSetAsideArchives, owner ruling R2-W1b). Moombox never
+	// === Set-aside Archives ===
+	// The files set aside for this job: the single-file archive a
+	// Reinitialize renamed aside, and a file a finalize found at the name
+	// it writes (worker.ScanSetAsideArchives, owner ruling R2-W1b). Moombox never
 	// replaces or deletes them and Files does not offer them while the job
 	// exists, so this is where the operator learns their names. Nothing to
 	// recover: each is a whole file.
 	if n := len(m.setAsideArchives); n > 0 {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
-		m.rows = append(m.rows, detailRow{kind: rowHeader, label: fmt.Sprintf("Set Aside by Reinitialize (%d)", n)})
+		m.rows = append(m.rows, detailRow{kind: rowHeader, label: fmt.Sprintf("Set-aside Archives (%d)", n)})
 		for _, a := range m.setAsideArchives {
 			for _, line := range breakWidth(setAsideArchiveLine(a.Name, a.Size), m.blockWrapWidth()) {
 				m.rows = append(m.rows, detailRow{kind: rowField, value: line})
