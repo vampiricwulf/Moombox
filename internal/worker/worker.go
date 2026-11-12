@@ -2171,9 +2171,10 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		cfgPrefer60, cfgChat, cfgPreferHDR       bool
 		cfgInterruptionTimeout                   config.FlexDuration
 		channelOutputDir                         string
+		channelConfigured                        bool
 	)
 	w.readConfig(func(c *config.MoomboxConfig) {
-		channelOutputDir = channelOutputOverride(c.Channels, job)
+		channelOutputDir, channelConfigured = channelOutputOverride(c.Channels, job)
 		cfgOutputDir = c.Paths.OutputDirectory
 		cfgStagingDir = c.Paths.EffectiveStagingDir()
 		cfgTemplate = c.Downloader.OutputTemplate
@@ -2201,7 +2202,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 	// A monitor-detected row that has not started takes the directory the
 	// settings name now, and keeps it from here on (owner ruling R2-X1,
 	// output_dir.go).
-	w.settleOutputDirectory(job, hasParts, cfgOutputDir, channelOutputDir)
+	w.settleOutputDirectory(job, hasParts, cfgOutputDir, channelOutputDir, channelConfigured)
 
 	outputDir := cfgOutputDir
 	if job.OutputDirectory != "" {

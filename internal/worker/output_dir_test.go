@@ -13,14 +13,17 @@ import (
 // settings name when its download starts (the channel's override, else the
 // global one), and the row is rewritten to say so; a row that has started,
 // or has an archive or a part, keeps the directory it has, and a manually
-// added row is left as it was.
+// added row is left as it was. A row whose channel is no longer configured
+// keeps the directory it stores, and a row that stores none is pinned to the
+// one it starts under.
 //
 // Mutants: buildJobContext not settling (every waiting row keeps the old
 // directory); followsOutputSetting ignoring the status, output_file, the
-// parts or manually_added (the matching "keeps" row moves); the channel
-// override not read, or matched without the Twitch login (the override rows
-// take the global directory); settledOutputDirectory stamping a blank row
-// (the blank rows stop reading the setting).
+// parts, download_started_at or manually_added (the matching "keeps" row
+// moves); the channel override not read, or matched without the Twitch login
+// (the override rows take the global directory); channelConfigured ignored
+// (a removed channel's row moves to the global directory);
+// settledOutputDirectory leaving a blank row blank (it is never pinned).
 func TestAWaitingMonitorRowFollowsTheOutputSetting(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	base := t.TempDir()
@@ -45,15 +48,18 @@ func TestAWaitingMonitorRowFollowsTheOutputSetting(t *testing.T) {
 		{"upcoming", database.Job{Status: database.StatusUpcoming, ChannelID: &plain, OutputDirectory: oldDir}, false, newDir, newDir},
 		{"queued", database.Job{Status: database.StatusQueued, ChannelID: &plain, OutputDirectory: oldDir}, false, newDir, newDir},
 		{"live", database.Job{Status: database.StatusLive, ChannelID: &plain, OutputDirectory: oldDir}, false, newDir, newDir},
-		{"removed channel", database.Job{Status: database.StatusQueued, ChannelID: &gone, OutputDirectory: oldDir}, false, newDir, newDir},
+		{"removed channel keeps", database.Job{Status: database.StatusQueued, ChannelID: &gone, OutputDirectory: oldDir}, false, oldDir, oldDir},
+		{"no channel keeps", database.Job{Status: database.StatusQueued, OutputDirectory: oldDir}, false, oldDir, oldDir},
+		{"removed channel, blank", database.Job{Status: database.StatusQueued, ChannelID: &gone}, false, newDir, newDir},
 		{"channel override", database.Job{Status: database.StatusUpcoming, ChannelID: &override, OutputDirectory: oldDir}, false, ytDir, ytDir},
 		{"twitch live by login", database.Job{Status: database.StatusLive, Platform: "twitch", URL: "https://twitch.tv/somestreamer", OutputDirectory: oldDir}, false, twDir, twDir},
-		{"blank stays blank", database.Job{Status: database.StatusQueued, ChannelID: &plain}, false, newDir, ""},
+		{"blank is pinned", database.Job{Status: database.StatusQueued, ChannelID: &plain}, false, newDir, newDir},
 		{"blank takes an override", database.Job{Status: database.StatusQueued, ChannelID: &override}, false, ytDir, ytDir},
 
 		{"downloading keeps", database.Job{Status: database.StatusDownloading, ChannelID: &plain, OutputDirectory: oldDir}, false, oldDir, oldDir},
 		{"error keeps", database.Job{Status: database.StatusError, ChannelID: &plain, OutputDirectory: oldDir}, false, oldDir, oldDir},
 		{"finished keeps", database.Job{Status: database.StatusFinished, ChannelID: &plain, OutputDirectory: oldDir}, false, oldDir, oldDir},
+		{"resumed after it started keeps", database.Job{Status: database.StatusUpcoming, ChannelID: &plain, OutputDirectory: oldDir, DownloadStartedAt: "2026-11-01T00:00:00Z"}, false, oldDir, oldDir},
 		{"archive keeps", database.Job{Status: database.StatusUpcoming, ChannelID: &plain, OutputDirectory: oldDir, OutputFile: filepath.Join(oldDir, "a.mp4")}, false, oldDir, oldDir},
 		{"part keeps", database.Job{Status: database.StatusQueued, ChannelID: &plain, OutputDirectory: oldDir}, true, oldDir, oldDir},
 		{"manual own keeps", database.Job{Status: database.StatusUpcoming, ChannelID: &override, ManuallyAdded: true, OutputDirectory: own}, false, own, own},
@@ -109,6 +115,7 @@ func TestASettledOutputDirectoryStaysWithTheJob(t *testing.T) {
 	if _, err := db.AddJob(job); err != nil {
 		t.Fatal(err)
 	}
+	w.cfg.Channels = []config.ChannelConfig{{ID: "UC_plain"}}
 	w.cfg.Paths.OutputDirectory = first
 	row, _ := db.GetJob(job.ID)
 	if got := w.buildJobContext(row).OutputDir; got != first {
@@ -133,6 +140,7 @@ func TestSettleOutputDirectoryLeavesARowThatMovedOn(t *testing.T) {
 	base := t.TempDir()
 	oldDir := filepath.Join(base, "old")
 	w.cfg.Paths.OutputDirectory = filepath.Join(base, "new")
+	w.cfg.Channels = []config.ChannelConfig{{ID: "UC_plain"}}
 	ch := "UC_plain"
 	job := &database.Job{ID: "odir_moved", VideoID: "odir_moved", Title: "t", Platform: "youtube",
 		Status: database.StatusUpcoming, ChannelID: &ch, OutputDirectory: oldDir}
