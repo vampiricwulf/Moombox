@@ -179,3 +179,15 @@ func (p *PlayerAPI) APIKey() string {
 	defer p.apiKeyMu.RUnlock()
 	return p.apiKey
 }
+
+// innertubeURL is an Innertube endpoint with the query string yt-dlp's
+// _call_api sends (_base.py:862-866): the key when there is one, then
+// prettyPrint=false, which has YouTube answer without indentation. The
+// /player and /browse calls use it. Chat's get_live_chat calls do not: upstream
+// builds that URL itself with the key alone (downloader/youtube_live_chat.py).
+func innertubeURL(endpoint, key string) string {
+	if key == "" {
+		return endpoint + "?prettyPrint=false"
+	}
+	return endpoint + "?key=" + key + "&prettyPrint=false"
+}

@@ -2052,6 +2052,11 @@ sl-progress-bar {
     outline-offset: 1px;
 }
 
+/* A Twitch /me message: the text in italics, after the name with no colon. */
+.chat-msg-action {
+    font-style: italic;
+}
+
 .chat-msg-author {
     font-weight: var(--sl-font-weight-semibold);
     margin-right: var(--sl-spacing-2x-small);

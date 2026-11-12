@@ -201,3 +201,22 @@ func TestPrivmsgUnescapesTheDisplayName(t *testing.T) {
 		t.Errorf("AuthorName = %q, want %q", msg.AuthorName, "Ann B")
 	}
 }
+
+// A PRIVMSG whose display-name tag is empty is attributed to the login in the
+// line's prefix, not to "Anonymous"; a prefix that names no user still is.
+func TestPrivmsgFallsBackToThePrefixNick(t *testing.T) {
+	cd := newSidecarTestChatDownloader(t)
+	for prefix, want := range map[string]string{
+		":ann_b!ann_b@ann_b.tmi.twitch.tv": "ann_b",
+		":tmi.twitch.tv":                   "Anonymous",
+	} {
+		msg := cd.parseLine(`@id=pm-1;display-name=;tmi-sent-ts=1700000000000 ` +
+			prefix + ` PRIVMSG #testchan :hello`)
+		if msg == nil {
+			t.Fatalf("parseLine returned nil for a PRIVMSG from %q", prefix)
+		}
+		if msg.AuthorName != want {
+			t.Errorf("AuthorName for prefix %q = %q, want %q", prefix, msg.AuthorName, want)
+		}
+	}
+}

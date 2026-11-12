@@ -86,15 +86,18 @@ func TestHandleRateLimitErrorEmitsRateLimited(t *testing.T) {
 }
 
 // TestHandleDashErrorGenericEmitsRetrying pins the generic (non-HTTP: a
-// transport error or an idle stall, status 0) branch of handleDashError: it
-// must say so on the progress line, as the HLS loop's playlist retry does,
-// instead of sleeping genericRetry behind a frozen segment counter.
+// transport error or an idle stall, status 0) branch of handleDashError
+// below the head: it is handleHTTPError's transient retry, which says so on
+// the progress line, and it ends the gone streak. What bounds the branch is
+// pinned in downloader_dash_transport_test.go.
 func TestHandleDashErrorGenericEmitsRetrying(t *testing.T) {
 	d, got := newActivityDownloader(t)
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel() // cancelled so the fixed-delay retry sleep returns immediately
+	d.headSeq.Store(10)
+	d.currentSeq.Store(5)
+	d.lastHeadProbeTime.StoreNow() // no head probe: there is no server
+	d.delays = fastDelays()        // a live context: a cancelled one is not a failure to retry
 	rs := &dashRetryState{consecutiveGoneErrors: 3}
-	err := d.handleDashError(ctx, 0, errors.New("read tcp: i/o timeout"),
+	err := d.handleDashError(t.Context(), 0, errors.New("read tcp: i/o timeout"),
 		rs, true, 60)
 	if err != nil {
 		t.Fatalf("handleDashError returned %v, want nil (continue)", err)
@@ -151,7 +154,7 @@ func TestHandleDashErrorGenericOfflineReconnects(t *testing.T) {
 // Mutant: emit ActivityWaitingForSegment at either site again.
 func TestBehindHeadFetchFailuresEmitRetrying(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
-	cancel() // the retry sleeps return immediately
+	cancel() // the gone handler's retry sleep returns immediately
 
 	t.Run("sustained gone below head", func(t *testing.T) {
 		d, got := newActivityDownloader(t)
@@ -172,8 +175,9 @@ func TestBehindHeadFetchFailuresEmitRetrying(t *testing.T) {
 		d.headSeq.Store(10)
 		d.currentSeq.Store(5)
 		d.lastHeadProbeTime.StoreNow() // no head probe: there is no server
+		d.delays = fastDelays()        // a live context: the handler leaves a cancelled one to the loop
 		rs := &dashRetryState{lastRetrySeq: -1}
-		if err := d.handleHTTPError(ctx, true, rs, 60); err != nil {
+		if err := d.handleHTTPError(t.Context(), true, rs, 60); err != nil {
 			t.Fatalf("handleHTTPError returned %v, want nil (continue)", err)
 		}
 		if *got != ActivityRetrying {
