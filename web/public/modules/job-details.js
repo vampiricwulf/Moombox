@@ -25,12 +25,16 @@ export function stampFactsStatus(job) {
 
 /** How often the open details dialog re-reads its Job Log, as the TUI's O L overlay does. */
 const JOB_LOG_POLL_MS = 1000;
+// How long one poll may stay unanswered before it is given up.
+const JOB_LOG_POLL_DEADLINE_MS = 10000;
 
 export class JobDetailsController {
   constructor(app) {
     this.app = app;
     // The Job Log's re-read timer; set only while the dialog is open.
     this._jobLogsTimer = null;
+    // The job whose lines the Job Log box holds (null: none, "Loading logs...").
+    this._logsShownFor = null;
   }
 
   /** Wire up the details dialog: action buttons, dismissal cleanup, delegated clicks. */
@@ -77,6 +81,7 @@ export class JobDetailsController {
       const dlg = document.getElementById("details-dialog");
       if (dlg.open) return;
       this._stopJobLogPolling();
+      this._logsShownFor = null;
       this.app.selectedJobId = null;
       // Clear content to stop YouTube/Twitch iframe embeds from running in background
       const content = document.getElementById("job-details-content");
@@ -175,6 +180,8 @@ export class JobDetailsController {
     // A fresh open asks for the facts itself; the per-status refetch
     // (_refreshFactsOnStatusChange) starts over for it.
     this._factsAskedFor = null;
+    // A fresh open starts its Job Log over, on the newest line.
+    this._logsShownFor = null;
     this.renderJobDetails(job);
     this.loadJobLogs(job.id);
     this._startJobLogPolling();
@@ -652,6 +659,10 @@ export class JobDetailsController {
 
   renderJobDetails(job) {
     const content = document.getElementById("job-details-content");
+    // A rebuild of the job already shown (a status change, the watch pill, a
+    // new section) replaces the Job Log box: its lines and scroll position
+    // are carried into the new one.
+    const keptLog = this._keptJobLog(job.id);
     const statusClass = job.status.toLowerCase().replace("?", "");
 
     // Show segment counts for Live/Downloading/Muxing/Finished status.
@@ -1104,6 +1115,7 @@ export class JobDetailsController {
         <div class="details-logs" id="job-logs-content">Loading logs...</div>
       </div>
     `;
+    this._restoreJobLog(keptLog);
 
     // Update button visibility
     this.updateDetailsButtons(job);
@@ -1138,7 +1150,28 @@ export class JobDetailsController {
   }
 
   /**
-   * Write a poll's answer into the Job Log. Nothing is written when the text
+   * The Job Log as it is on screen, when it shows this job's lines: what a
+   * rebuild of the dialog body must put back (_restoreJobLog). Null when the
+   * box holds another job's lines or none yet.
+   */
+  _keptJobLog(jobId) {
+    if (this._logsShownFor !== jobId) return null;
+    const el = document.getElementById("job-logs-content");
+    if (!el) return null;
+    const top = el.scrollTop;
+    return { text: el.textContent, top, atBottom: top + el.clientHeight >= el.scrollHeight - 4 };
+  }
+
+  _restoreJobLog(kept) {
+    if (!kept) return;
+    const el = document.getElementById("job-logs-content");
+    if (!el) return;
+    el.textContent = kept.text;
+    el.scrollTop = kept.atBottom ? el.scrollHeight : kept.top;
+  }
+
+  /**
+   * Write a re-read's answer into the Job Log. Nothing is written when the text
    * is unchanged, or while the operator has text selected in it (replacing
    * the text would drop the selection; the next poll writes). The view
    * follows the newest line only when it was already at the bottom, and
@@ -1155,15 +1188,24 @@ export class JobDetailsController {
   }
 
   /**
-   * Read the job's log into the dialog. `poll` marks the every-second
-   * re-read: it goes through _writePolledJobLogs and, when it fails, leaves
-   * the lines already shown.
+   * Read the job's log into the dialog. The first answer for a job opens the
+   * view on the newest line, as the TUI's O L overlay does; every later one
+   * (the every-second `poll`, or the read after a rebuild) goes through
+   * _writePolledJobLogs, which keeps the operator's place. A failed read
+   * leaves lines already shown. A poll is given up after JOB_LOG_POLL_DEADLINE_MS
+   * so that one request that never answers cannot stop the re-read.
    */
   async loadJobLogs(jobId, { poll = false } = {}) {
     // Abort any in-flight log fetch (e.g. user switched to a different job)
     if (this._jobLogsAbort) this._jobLogsAbort.abort();
     const abort = new AbortController();
     this._jobLogsAbort = abort;
+    // The interval skips its tick while a read is in flight, and fetch has no
+    // timeout of its own: free the slot here, so the next tick asks again.
+    const deadline = poll ? setTimeout(() => {
+      abort.abort();
+      if (this._jobLogsAbort === abort) this._jobLogsAbort = null;
+    }, JOB_LOG_POLL_DEADLINE_MS) : null;
 
     try {
       const response = await fetch(`/api/jobs/${jobId}/logs`, { signal: abort.signal });
@@ -1180,17 +1222,24 @@ export class JobDetailsController {
       const logsEl = document.getElementById("job-logs-content");
       if (logsEl) {
         const text = Array.isArray(logs) && logs.length > 0 ? logs.join("\n") : "No logs for this job yet.";
-        if (poll) this._writePolledJobLogs(logsEl, text);
-        else logsEl.textContent = text;
+        if (this._logsShownFor === jobId) {
+          this._writePolledJobLogs(logsEl, text);
+        } else {
+          logsEl.textContent = text;
+          logsEl.scrollTop = logsEl.scrollHeight;
+          this._logsShownFor = jobId;
+        }
       }
     } catch (e) {
       if (e.name === "AbortError") return; // Superseded by a new fetch
       if (poll) return; // the lines already shown stay; the next poll asks again
       console.error("Failed to load job logs:", e);
       if (this.app.selectedJobId !== jobId) return;
+      if (this._logsShownFor === jobId) return; // a rebuild's read: the carried lines stay
       const logsEl = document.getElementById("job-logs-content");
       if (logsEl) logsEl.textContent = "Failed to load logs.";
     } finally {
+      if (deadline !== null) clearTimeout(deadline);
       // Not in flight any more, unless a newer read has taken its place.
       if (this._jobLogsAbort === abort) this._jobLogsAbort = null;
     }

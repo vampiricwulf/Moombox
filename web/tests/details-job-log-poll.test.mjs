@@ -94,6 +94,26 @@ test("a slow answer is waited for, not replaced by the next second's read", { sk
   assert.equal(logText(h), "line 1\nslow line");
 });
 
+// Mutant: no deadline on a poll — one request that never answers (a stalled
+// proxy, a laptop back from sleep) stops the re-read for as long as the
+// dialog stays open.
+test("a poll that never answers is given up, and the next second reads again", { skip }, async () => {
+  let release;
+  const server = { logs: ["line 1"] };
+  const h = await openDetails(server);
+  server.logs = () => new Promise((r) => { release = () => r(["line 1", "from the dead read"]); });
+  await tick(h);
+  assert.equal(reads(h), 2);
+  server.logs = ["line 1", "line 2"];
+  h.advance(10000); // the deadline
+  await tick(h);
+  assert.equal(reads(h), 3, "the read after the deadline did not start");
+  assert.equal(logText(h), "line 1\nline 2");
+  release();
+  await h.flush(); await h.flush();
+  assert.equal(logText(h), "line 1\nline 2", "the given-up read's late answer was written");
+});
+
 /** Give the log box a layout: jsdom has none. */
 function layout(el, { scrollHeight, clientHeight, scrollTop }) {
   let top = scrollTop;
@@ -150,4 +170,47 @@ test("a failed re-read leaves the lines already shown", { skip }, async () => {
   server.logs = () => harness.response({ status: 500, body: { error: "boom" } });
   await tick(h);
   assert.equal(logText(h), "line 1");
+});
+
+/** Give every log box a size, so one made by a rebuild has it too. */
+function layoutAll(h, { scrollHeight, clientHeight }) {
+  const proto = h.window.HTMLElement.prototype;
+  Object.defineProperty(proto, "scrollHeight", { configurable: true, get() { return this.id === "job-logs-content" ? scrollHeight : 0; } });
+  Object.defineProperty(proto, "clientHeight", { configurable: true, get() { return this.id === "job-logs-content" ? clientHeight : 0; } });
+}
+
+// Mutant: the first load leaving the box at the oldest line — new lines land
+// below the fold until the operator scrolls down by hand.
+test("the dialog opens on the newest line", { skip }, async () => {
+  const h = await openDetails({ logs: ["line 1", "line 2"] });
+  layoutAll(h, { scrollHeight: 1000, clientHeight: 200 });
+  h.app.details.showJobDetails(h.app.jobs[0]);
+  await h.flush(); await h.flush();
+  assert.equal(h.el("job-logs-content").scrollTop, 1000);
+});
+
+// A status change rebuilds the dialog body, the log box with it. Mutants: the
+// new box left at "Loading logs..." and the top (an operator following the
+// tail is thrown to the oldest line on Live -> Downloading -> Muxing); the
+// new box pinned to the bottom whatever the old position was.
+test("a status-change rebuild keeps the lines and the scroll position", { skip }, async () => {
+  const server = { logs: ["line 1", "line 2"] };
+  const h = await openDetails(server);
+  layoutAll(h, { scrollHeight: 1000, clientHeight: 200 });
+  const change = (status) => {
+    const before = h.el("job-logs-content");
+    h.app.handleMessage({ type: "job_update", payload: { ...row, status } });
+    assert.notEqual(h.el("job-logs-content"), before, "the status change did not rebuild the body");
+    assert.equal(logText(h), "line 1" + String.fromCharCode(10) + "line 2", "the rebuilt box lost the lines");
+  };
+
+  h.el("job-logs-content").scrollTop = 300; // reading older lines
+  change("Muxing");
+  assert.equal(h.el("job-logs-content").scrollTop, 300, "the operator's position was lost in the rebuild");
+  await h.flush(); await h.flush();
+  assert.equal(h.el("job-logs-content").scrollTop, 300, "the read after the rebuild moved the view");
+
+  h.el("job-logs-content").scrollTop = 800; // at the bottom
+  change("Finished");
+  assert.equal(h.el("job-logs-content").scrollTop, 1000, "a view at the bottom did not stay there");
 });
