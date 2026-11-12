@@ -14,7 +14,26 @@ name: Build and Publish Docker Image
 #                      release dry run calls it with push: false.
 #   workflow_dispatch  builds and pushes an `edge` tag from main — useful
 #                      for testing image changes without cutting a release.
-#                      Untick "push" to only build both architectures.
+#                      Untick "push" to only build both architectures. On
+#                      any other ref it only builds, whatever "push" says.
+#
+# What may push (owner ruling R2-O2). The `push` input asks; the job's PUBLISH
+# value decides, and it is true only for
+#
+#   - a tag PUSH, which reaches this file through release.yml (under
+#     workflow_call github.event_name is the caller's event), or
+#   - a run on refs/heads/main, which the tag rules below give `edge` alone.
+#
+# So `latest` and the version tags move only on a real tag push. A manual run
+# with a tag selected builds both architectures and stops: before this gate
+# it rebuilt that tag and pushed it as X.Y.Z, X.Y and `latest`, which moved
+# `latest` back to an old version for everyone who pulls it. To publish the
+# image for an existing tag again, use "Re-run failed jobs" on that tag's
+# release run, which is still a push.
+#
+# The gate covers only tags created from the commit that added it on. A manual
+# run on a tag executes THAT TAG'S copy of this file, so for v2.9.9 and older
+# the copy has no gate and still pushes: never "Run workflow" on one of those.
 
 on:
   workflow_call:
@@ -37,7 +56,26 @@ permissions:
 jobs:
   docker:
     runs-on: ubuntu-latest
+    env:
+      # The one place that decides whether this run pushes; see the header.
+      PUBLISH: ${{ inputs.push && (github.event_name == 'push' || github.ref == 'refs/heads/main') }}
     steps:
+      - name: Say whether this run publishes
+        env:
+          ASKED: ${{ inputs.push }}
+        run: |
+          if [ "$PUBLISH" = "true" ]; then
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              echo "Tag push of $GITHUB_REF_NAME: the image is built and pushed under the release's tags."
+            else
+              echo "Run on main: the image is built and pushed as edge."
+            fi
+          elif [ "$ASKED" = "true" ]; then
+            echo "::notice::Build only. A $GITHUB_EVENT_NAME run on $GITHUB_REF does not push: only a tag push or a run on main does."
+          else
+            echo "Build only: push was not asked for."
+          fi
+
       - uses: actions/checkout@v7
 
       - uses: docker/setup-qemu-action@v4
@@ -56,7 +94,9 @@ jobs:
           images: ghcr.io/vampiricwulf/moombox
           # Release tag vX.Y.Z → X.Y.Z, X.Y, and latest (latest=auto skips
           # pre-release tags like v2.9.0-test.1, matching release.yml's
-          # prerelease handling). workflow_dispatch on a branch → edge.
+          # prerelease handling). A run on main → edge. The semver rules
+          # also match a manual run on a tag, which is why PUBLISH, not
+          # these rules, is what keeps such a run from pushing.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -80,7 +120,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ inputs.push }}
+          push: ${{ env.PUBLISH }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
