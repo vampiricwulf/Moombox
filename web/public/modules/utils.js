@@ -942,6 +942,30 @@ export function applyChannelOverrides(channel, { outputDirectory, archiveWindowD
 }
 
 /**
+ * How many jobs a process restart interrupts: the ones downloading, live or
+ * muxing. "Queued" and "Upcoming" are absent: nothing of theirs is running
+ * yet. The dashboard's one copy of the rule the TUI holds as
+ * activeDownloadCount (internal/tui/app.go); the status bar's active count
+ * and every restart warning read it.
+ */
+export function activeDownloadCount(jobs) {
+  return (jobs || []).filter(
+    (j) => j.status === "Downloading" || j.status === "Live" || j.status === "Muxing",
+  ).length;
+}
+
+/**
+ * The sentence every restart prompt shows while downloads are active, or ""
+ * when none are. `restart` names what restarts ("update restart" from the
+ * update dialog, "restart" from Settings), so the wording has one home.
+ */
+export function activeDownloadsRestartWarning(count, restart = "restart") {
+  if (!(count > 0)) return "";
+  const noun = count === 1 ? "download is" : "downloads are";
+  return `${count} ${noun} active — the ${restart} interrupts them, and live segments during the ~30s gap may be lost (Twitch especially).`;
+}
+
+/**
  * Job-status action sets — the dashboard's copy of which statuses each
  * quick action targets, read by the details dialog (job-details.js), the job
  * cards, and the batch action bar (app.js). Each mirrors a Go predicate in

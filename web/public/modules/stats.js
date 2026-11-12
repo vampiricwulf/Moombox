@@ -1,7 +1,7 @@
 /**
  * Stats Controller — Health/Stats dashboard
  */
-import { formatBytes, formatDurationSeconds, diskGaugeLevel } from "./utils.js";
+import { activeDownloadCount, formatBytes, formatDurationSeconds, diskGaugeLevel } from "./utils.js";
 
 export class StatsController {
   constructor(app) {
@@ -236,9 +236,7 @@ export class StatsController {
 
     // "Queued" is deliberately absent — a queued job is waiting for an
     // archive slot, not an active download.
-    const active = (jobs || []).filter(j =>
-      j.status === "Downloading" || j.status === "Live" || j.status === "Muxing"
-    ).length;
+    const active = activeDownloadCount(jobs);
 
     // Called where a status can have moved: every full render, a card
     // insert, move or removal. Not on a progress tick, which leaves every
