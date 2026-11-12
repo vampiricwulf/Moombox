@@ -635,7 +635,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// `importedFromProfile || browserActed`, so an import that reaches
 			// a verdict always renewed and this arm is unreachable for one.
 			// TestRefreshResultCarriesTheMechanismThatRan pins that upstream.
-			a.setFeedback("Cookies still work, but this pass could not confirm the browser refreshed them")
+			a.setFeedbackWithSeverity("Cookies still work, but this pass could not confirm the browser refreshed them", severityWarning)
 		default:
 			a.setFeedback(mechanismLabel + " successful")
 		}
@@ -815,7 +815,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.Watched {
 			verb = "Unmarked"
 		}
-		a.setFeedback(fmt.Sprintf("%s %d job(s) watched", verb, msg.Count))
+		a.setFeedback(verb + " " + jobCount(msg.Count) + " watched")
 		return a, nil
 
 	case fetchOrphansResultMsg:
@@ -1178,7 +1178,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setupWiz.resetCookieFlow()
 			a.setupWiz.errorMsg = msg.Text
 		} else {
-			a.setFeedback(msg.Text)
+			// A recovered panic is an error whatever its text says; unstated,
+			// "unexpected error: ..." matched nothing and drew in success green.
+			a.setFeedbackWithSeverity(msg.Text, severityError)
 		}
 		return a, nil
 

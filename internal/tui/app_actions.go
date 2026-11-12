@@ -446,7 +446,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		// operator's Enter and are rendered inline by the wizard, which is
 		// where the web panel puts them too.
 		if a.setupWiz.OnStartAutoCookie == nil {
-			a.setFeedback("Cookie login is unavailable — no auto-cookie service is configured")
+			a.setFeedbackWithSeverity("Cookie login is unavailable — no auto-cookie service is configured", severityWarning)
 			return a, nil
 		}
 		a.setupWiz.SetSize(a.width, a.height)
@@ -459,7 +459,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		// processSecondKey never reaches this case. The guard keeps a direct
 		// caller from opening an overlay whose Enter dead-ends.
 		if a.OnImportCookieFile == nil {
-			a.setFeedback("Cookie import is unavailable — no auto-cookie service is configured")
+			a.setFeedbackWithSeverity("Cookie import is unavailable — no auto-cookie service is configured", severityWarning)
 			return a, nil
 		}
 		a.clearFeedback()

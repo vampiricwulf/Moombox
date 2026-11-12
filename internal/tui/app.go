@@ -1503,7 +1503,9 @@ func (a *App) applyUpdateAction() tea.Cmd {
 	}
 	if n := a.activeDownloadCount(); n > 0 && time.Since(a.updateConfirmAt) > 5*time.Second {
 		a.updateConfirmAt = time.Now()
-		a.setFeedback(activeRestartClause(n, "update restart") + "; press R U again within 5s to confirm")
+		// A confirm prompt, in the yellow every other confirm has: it starts
+		// with a count, so the "Press " scan never saw it.
+		a.setFeedbackWithSeverity(activeRestartClause(n, "update restart")+"; press R U again within 5s to confirm", severityWarning)
 		return nil
 	}
 	a.updateConfirmAt = time.Time{}
