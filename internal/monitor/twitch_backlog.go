@@ -58,6 +58,13 @@ type TwitchBacklog struct {
 	// the first did not. Touched only by RunCycle, on the backlog's one
 	// goroutine.
 	deferLogged map[string]bool
+
+	// wake carries CheckNow's kicks to the loop; one slot, so kicks coalesce.
+	// nil on a TwitchBacklog built without NewTwitchBacklog: CheckNow is then
+	// a no-op.
+	wake chan struct{}
+	// Zero means the constant of the same name; a test shortens them.
+	interval, firstDelay, kickGap time.Duration
 }
 
 // twitchBacklogInterval is the backlog's cadence: Twitch keeps a past
@@ -68,6 +75,13 @@ const twitchBacklogInterval = time.Hour
 // twitchBacklogFirstDelay is how long after start the first cycle runs: past
 // the boot's own burst of monitor and worker requests.
 const twitchBacklogFirstDelay = 2 * time.Minute
+
+// twitchBacklogKickGap is the least time between a cycle and a kicked one.
+// Every channel save kicks the backlog (a reorder too), and each cycle costs
+// one GQL request per opted-in channel: a burst of saves is one cycle now and
+// one more when the gap has passed, never a burst of requests. A kick inside
+// the gap is kept and run at its end.
+const twitchBacklogKickGap = 5 * time.Minute
 
 // twitchBacklogCapturedWindow is how far a video's publishedAt may sit from a
 // live job's stream_start_time and still be that broadcast's archive. Twitch
@@ -85,7 +99,7 @@ func NewTwitchBacklog(store *config.Store, db *database.Database, tw *twitch.Ser
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }) *TwitchBacklog {
-	b := &TwitchBacklog{configStore: store, db: db, logger: logger}
+	b := &TwitchBacklog{configStore: store, db: db, logger: logger, wake: make(chan struct{}, 1)}
 	if tw != nil {
 		b.ListVideos = func(ctx context.Context, login string) ([]twitch.TwitchVideo, error) {
 			return tw.API.ListChannelVideos(ctx, login, "", "time", 1, tw.Auth.GetAuthToken())
@@ -94,9 +108,36 @@ func NewTwitchBacklog(store *config.Store, db *database.Database, tw *twitch.Ser
 	return b
 }
 
+// CheckNow asks for a cycle now rather than at the next hourly tick: a channel
+// was saved (twitch_vod_backlog may just have been turned on) or connectivity
+// came back. It never blocks and never runs the cycle on the caller's
+// goroutine. Kicks coalesce, and the loop spaces kicked cycles by
+// twitchBacklogKickGap.
+func (b *TwitchBacklog) CheckNow() {
+	select {
+	case b.wake <- struct{}{}:
+	default:
+	}
+}
+
+func orDuration(d, def time.Duration) time.Duration {
+	if d > 0 {
+		return d
+	}
+	return def
+}
+
 // Start runs the backlog's cycles on its own goroutine until ctx ends: the
 // first twitchBacklogFirstDelay after start, then every
 // twitchBacklogInterval. A cycle with no opted-in channel sends nothing.
+//
+// CheckNow adds a cycle between ticks without moving the hourly tick. A kick
+// before the first cycle is dropped (that cycle is at most two minutes away,
+// and the boot's own saves should not pull it into the boot burst); one
+// inside twitchBacklogKickGap of the last cycle runs when the gap has passed.
+// A cycle that falls due while offline, by tick or by kick, is owed: the
+// connectivity handler's kick on the way back runs it at once, gap or not,
+// rather than an hour later.
 func (b *TwitchBacklog) Start(ctx context.Context) {
 	go func() {
 		defer func() {
@@ -104,16 +145,53 @@ func (b *TwitchBacklog) Start(ctx context.Context) {
 				b.logger.Error("panic in the Twitch VOD backlog", "panic", fmt.Sprint(r))
 			}
 		}()
-		t := time.NewTimer(twitchBacklogFirstDelay)
+		interval := orDuration(b.interval, twitchBacklogInterval)
+		gap := orDuration(b.kickGap, twitchBacklogKickGap)
+		t := time.NewTimer(orDuration(b.firstDelay, twitchBacklogFirstDelay))
 		defer t.Stop()
+		var (
+			started bool             // the first scheduled cycle has come due
+			owed    bool             // a cycle came due while offline
+			last    time.Time        // when the last cycle ran
+			gapT    *time.Timer      // armed while a kick waits out the gap
+			gapC    <-chan time.Time // gapT.C, nil while not armed
+		)
+		defer func() {
+			if gapT != nil {
+				gapT.Stop()
+			}
+		}()
+		run := func() {
+			if b.IsOnline != nil && !b.IsOnline() {
+				owed = true
+				return
+			}
+			owed = false
+			last = time.Now()
+			b.RunCycle(ctx, last)
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				started = true
+				run()
+				t.Reset(interval)
+			case <-b.wake:
+				if !started {
+					continue
+				}
+				if wait := gap - time.Since(last); owed || wait <= 0 {
+					run()
+				} else if gapC == nil {
+					gapT = time.NewTimer(wait)
+					gapC = gapT.C
+				}
+			case <-gapC:
+				gapC = nil
+				run()
 			}
-			b.RunCycle(ctx, time.Now())
-			t.Reset(twitchBacklogInterval)
 		}
 	}()
 }

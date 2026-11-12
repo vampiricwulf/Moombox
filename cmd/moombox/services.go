@@ -1685,6 +1685,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 		feedMon.CheckNow()
 		decapiMon.CheckNow()
 		twitchMon.CheckNow()
+		// The Twitch VOD backlog too: a save that turns twitch_vod_backlog on
+		// is listed now, not at the next hourly tick. It spaces kicked cycles
+		// itself (twitchBacklogKickGap).
+		if s.twitchBacklog != nil {
+			s.twitchBacklog.CheckNow()
+		}
 	}
 
 	// Restart dispatcher — used by setup/update/API/TUI to unwind the run()
