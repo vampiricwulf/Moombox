@@ -22,31 +22,16 @@ func (db *Database) HasProcessed(videoID string) (bool, error) {
 	return true, nil
 }
 
-// AddToHistory adds a video ID to the processing history.
+// AddToHistory adds a video ID to the processing history. History is never
+// pruned: a row is the only record that keeps a video whose job was deleted
+// from being archived again, however old it is. Re-recording a present ID
+// leaves its date alone.
 func (db *Database) AddToHistory(videoID string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := db.db.ExecContext(db.getCtx(), "INSERT OR IGNORE INTO history (video_id, added_at) VALUES (?, ?)", videoID, now)
-	if err != nil {
-		return err
-	}
-
-	// Prune if over limit
-	return db.pruneHistory()
-}
-
-// historyCap is how many rows history keeps. pruneHistory evicts the oldest
-// (by added_at) beyond it, never the row just recorded: that row is what keeps
-// the archive pass from re-creating the job it was recorded for.
-const historyCap = 10000
-
-func (db *Database) pruneHistory() error {
-	_, err := db.db.ExecContext(db.getCtx(), `DELETE FROM history WHERE video_id IN (
-		SELECT video_id FROM history ORDER BY added_at ASC
-		LIMIT MAX(0, (SELECT COUNT(*) FROM history) - ?)
-	)`, historyCap)
 	return err
 }
 
