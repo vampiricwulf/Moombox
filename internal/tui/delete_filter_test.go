@@ -108,17 +108,24 @@ func TestDeleteBatchSkipsActiveJobs(t *testing.T) {
 // walks it to the Delete Job picker, armed on that job (first Enter pressed).
 func openDeletePicker(t *testing.T, app *App) {
 	t.Helper()
+	openMenuPicker(t, app, "A D", &database.Job{ID: "e1", Title: "Failed one", Status: database.StatusError, Version: 1})
+}
+
+// openMenuPicker opens the action menu on an app holding jobs and walks it to
+// chord's job picker, armed on the first job it lists (first Enter pressed).
+func openMenuPicker(t *testing.T, app *App, chord string, jobs ...*database.Job) {
+	t.Helper()
 	app.width, app.height = 120, 40
-	app.taskList.SetJobs([]*database.Job{{ID: "e1", Title: "Failed one", Status: database.StatusError, Version: 1}})
+	app.taskList.SetJobs(jobs)
 	app.actionMenu.SetJobs(app.taskList.Jobs())
 	app.actionMenu.SetSize(120, 40)
 	app.actionMenu.Open(app.buildMenuItems())
 	for i, it := range app.actionMenu.mainList.Items() {
-		if mi, ok := it.(menuActionItem); ok && mi.action != nil && mi.action.Chord == "A D" {
+		if mi, ok := it.(menuActionItem); ok && mi.action != nil && mi.action.Chord == chord {
 			app.actionMenu.mainList.Select(i)
 		}
 	}
-	app.keyActionMenu(tea.KeyPressMsg{}, keyEnter) // choose Delete Job: the picker
+	app.keyActionMenu(tea.KeyPressMsg{}, keyEnter) // choose the action: the picker
 	if app.actionMenu.mode != menuJobSelect {
 		t.Fatalf("menu mode = %v, want the job picker", app.actionMenu.mode)
 	}
@@ -178,6 +185,85 @@ func TestDeleteSingleArmRefusesAnActiveJob(t *testing.T) {
 		t.Fatal("A D deleted a live job")
 	}
 	if !strings.Contains(app.feedback.msg, "Delete Job not done") {
+		t.Errorf("feedback = %q", app.feedback.msg)
+	}
+}
+
+// The re-check is the menu's, for every job-bound entry, not Delete's alone:
+// Delete has a second guard in its dispatch arm that words the same line, so
+// only another verb shows the menu's own check. A download that finished
+// while the Cancel picker sat open is not cancelled.
+// Mutant: the JobFilter refusal in keyActionMenu removed.
+func TestMenuRefusesAnyActionWhoseJobNoLongerPassesItsFilter(t *testing.T) {
+	app := NewApp()
+	var cancelled []string
+	app.OnCancelJob = func(id string) (bool, error) { cancelled = append(cancelled, id); return true, nil }
+	openMenuPicker(t, app, "A X", &database.Job{ID: "d1", Title: "Running one", Status: database.StatusDownloading, Version: 1})
+
+	app.Update(JobUpdateMsg{Change: &database.JobChange{Changes: []string{"status"},
+		Job: &database.Job{ID: "d1", Title: "Running one", Status: database.StatusFinished, Version: 2}}})
+
+	if _, cmd := app.keyActionMenu(tea.KeyPressMsg{}, keyEnter); cmd != nil {
+		cmd()
+	}
+	if len(cancelled) != 0 {
+		t.Fatalf("the menu cancelled %v, a job that had finished", cancelled)
+	}
+	if app.feedback.msg != "Cancel Job not done: Running one is now Finished" || app.feedback.sev != severityWarning {
+		t.Errorf("feedback = %q (severity %v)", app.feedback.msg, app.feedback.sev)
+	}
+}
+
+// A job deleted while its picker sat open is refused by name. Handed on as a
+// nil job, a batch verb would take its selection arm and delete the ticked
+// rows instead. Mutant: the "job is gone" refusal removed.
+func TestMenuRefusesAJobThatVanishedInThePicker(t *testing.T) {
+	app := NewApp()
+	var deleted []string
+	app.OnDeleteJob = func(id string) { deleted = append(deleted, id) }
+	openMenuPicker(t, app, "A D",
+		&database.Job{ID: "e1", Title: "Failed one", Status: database.StatusError, Version: 1},
+		&database.Job{ID: "f2", Title: "Done one", Status: database.StatusFinished, Version: 1})
+	if j := app.actionMenu.pickerJob(); j == nil || j.ID != "e1" {
+		t.Fatalf("the picker is on %+v, want e1", j)
+	}
+	app.taskList.ToggleSelection("f2")
+
+	app.Update(JobDeletedMsg{Deleted: &database.JobDeleted{JobID: "e1"}})
+
+	if _, cmd := app.keyActionMenu(tea.KeyPressMsg{}, keyEnter); cmd != nil {
+		cmd()
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("the menu deleted %v after its job vanished", deleted)
+	}
+	if app.feedback.msg != "Delete Job not done: the job is gone" {
+		t.Errorf("feedback = %q", app.feedback.msg)
+	}
+	if app.taskList.SelectedCount() != 1 {
+		t.Error("the selection must be left as it was")
+	}
+}
+
+// A filter can fail on a fact that is not the status. The line must not name
+// an unchanged status as the cause: it gives the entry's own reason.
+// Mutant: the status wording used for every refusal.
+func TestMenuRefusalNamesTheStatusOnlyWhenItChanged(t *testing.T) {
+	app := NewApp()
+	staging := true
+	app.HasStagingFiles = func(string) bool { return staging }
+	resumed := 0
+	app.OnResumeJob = func(string) error { resumed++; return nil }
+	openMenuPicker(t, app, "A R", &database.Job{ID: "e1", Title: "Failed one", Status: database.StatusError, Platform: "youtube", Version: 1})
+
+	staging = false // the staging directory was removed meanwhile
+	if _, cmd := app.keyActionMenu(tea.KeyPressMsg{}, keyEnter); cmd != nil {
+		cmd()
+	}
+	if resumed != 0 {
+		t.Fatal("the menu resumed a job with no staging files")
+	}
+	if app.feedback.msg != "Resume Job not done for Failed one: no jobs to resume" {
 		t.Errorf("feedback = %q", app.feedback.msg)
 	}
 }

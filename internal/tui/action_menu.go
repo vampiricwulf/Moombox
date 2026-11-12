@@ -391,6 +391,18 @@ func (m *ActionMenuModel) selectedAction() *ActionMenuItem {
 // HandleKey processes a key press and returns an action string.
 // Returns "" for internal navigation, "close" to dismiss, or an action chord
 // like "A A" or "A D:jobID123".
+// pickerJob is the job under the job picker's cursor, as the picker holds it
+// (the row from when the action was chosen), or nil outside the picker.
+func (m *ActionMenuModel) pickerJob() *database.Job {
+	if !m.visible || m.mode != menuJobSelect {
+		return nil
+	}
+	if ji, ok := m.jobList.SelectedItem().(menuJobItem); ok {
+		return ji.job
+	}
+	return nil
+}
+
 func (m *ActionMenuModel) HandleKey(key string) string {
 	m.bareRefused = false
 	switch m.mode {
