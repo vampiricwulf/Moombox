@@ -85,34 +85,6 @@ var activeJobStatuses = map[database.JobStatus]bool{
 // here, beside the deletion refusal that has always used it.
 func IsActiveJobStatus(s database.JobStatus) bool { return activeJobStatuses[s] }
 
-// jobNeedsStaging reports whether a Finished job's staging directory
-// was deliberately preserved rather than cleaned up, and so must NOT
-// be offered (or allowed) as a deletable orphan. Reads the verdict of
-// the carve-out applied at job-finish time (decideStagingCleanup, which
-// (*DownloadWorker).cleanupStagingAfterMux in worker.go also reads): a
-// Finished job's staging only survives cleanup for six reasons — it's
-// flagged IncompleteTail (tail is Resume-able), its chat capture ended
-// incomplete (no verb re-pages from the capture kept in staging — Retry
-// refuses a Finished job and Reinitialize starts over — but it can be
-// the only copy of those comments when the archive's chat copy failed,
-// an aside recovery carries it beside the recovered recording, and the
-// operator can take it by hand), it still holds a recording the engine
-// set aside rather than truncated (engine.StagedRestartSuffix), it still
-// has an unmuxed captured part (recoverable via the Mux action), or its
-// root holds a recording the finalize did not use (unusedRootRecording —
-// the from-the-start download beside a job that finalized as parts, or a
-// second recording beside the one a single-file finalize muxed), or a staged
-// recording a mux could not carry whole (stagedMuxGaps — its damaged bytes
-// left out of a repaired copy, or a copy nothing could check). The tail and
-// chat shields expire on one age rule — which is ON by default: the option
-// behind it, downloader.incomplete_staging_expiry_days, ships at 7 days ("0 =
-// preserve forever" describes the VALUE 0, not the default). The set-aside,
-// unmuxed-part, unused-root and mux-gap shields have no age rule at all:
-// each holds captured media that can exist nowhere else.
-//
-// This predicate must stay precise: any OTHER Finished job's staging is a
-// genuine orphan (e.g. a stale dir left by an old/removed job) and must
-// remain cleanable, so this does NOT protect Finished jobs unconditionally.
 // jobHoldsStaging is the one rule for "this job's staging is not an orphan",
 // read by the sweep that lists staging orphans (scanStagingOrphans) and by
 // the recheck a delete runs (findActiveJobUnder), so a directory the list
@@ -143,6 +115,34 @@ func jobHoldsStaging(db *database.Database, cfg *config.MoomboxConfig, job *data
 	return jobNeedsStaging(db, cfg, job, jobStagingDir)
 }
 
+// jobNeedsStaging reports whether a Finished job's staging directory
+// was deliberately preserved rather than cleaned up, and so must NOT
+// be offered (or allowed) as a deletable orphan. Reads the verdict of
+// the carve-out applied at job-finish time (decideStagingCleanup, which
+// (*DownloadWorker).cleanupStagingAfterMux in worker.go also reads): a
+// Finished job's staging only survives cleanup for six reasons — it's
+// flagged IncompleteTail (tail is Resume-able), its chat capture ended
+// incomplete (no verb re-pages from the capture kept in staging — Retry
+// refuses a Finished job and Reinitialize starts over — but it can be
+// the only copy of those comments when the archive's chat copy failed,
+// an aside recovery carries it beside the recovered recording, and the
+// operator can take it by hand), it still holds a recording the engine
+// set aside rather than truncated (engine.StagedRestartSuffix), it still
+// has an unmuxed captured part (recoverable via the Mux action), or its
+// root holds a recording the finalize did not use (unusedRootRecording —
+// the from-the-start download beside a job that finalized as parts, or a
+// second recording beside the one a single-file finalize muxed), or a staged
+// recording a mux could not carry whole (stagedMuxGaps — its damaged bytes
+// left out of a repaired copy, or a copy nothing could check). The tail and
+// chat shields expire on one age rule — which is ON by default: the option
+// behind it, downloader.incomplete_staging_expiry_days, ships at 7 days ("0 =
+// preserve forever" describes the VALUE 0, not the default). The set-aside,
+// unmuxed-part, unused-root and mux-gap shields have no age rule at all:
+// each holds captured media that can exist nowhere else.
+//
+// This predicate must stay precise: any OTHER Finished job's staging is a
+// genuine orphan (e.g. a stale dir left by an old/removed job) and must
+// remain cleanable, so this does NOT protect Finished jobs unconditionally.
 func jobNeedsStaging(db *database.Database, cfg *config.MoomboxConfig, job *database.Job, jobStagingDir string) bool {
 	if job == nil || job.Status != database.StatusFinished {
 		return false
