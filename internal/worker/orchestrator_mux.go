@@ -1099,9 +1099,11 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	}
 	// A file this job did not write is at this name — the archive a
 	// Reinitialize could not set aside (owner ruling R2-W1b), another
-	// recording's: stop before anything is muxed, with the staging kept, so a
-	// Mux tries again once the operator has moved it.
-	if err := o.foreignFileAt(jobCtx.Job.ID, outputFile); err != nil {
+	// recording's under a reused name: it is set aside with its sidecars,
+	// and the finalize goes on to write its own. Only when it cannot be
+	// renamed does the finalize stop, before anything is muxed and with the
+	// staging kept, so a Mux tries again once the operator has moved it.
+	if err := o.setForeignFileAside(jobCtx.Job.ID, outputFile, archiveSidecarExts); err != nil {
 		return err
 	}
 	// relBase preserves the full relative path (including channel subdir) for DB
@@ -1428,10 +1430,11 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// A job that ends with exactly one part (e.g. an outage muxed part 1 and
 	// the stream never came back) shouldn't keep a " - part1" suffix — single
 	// outputs use the plain template name, exactly like jobs that never split.
-	// Not onto a file this job did not write (foreignFileAt): the part then
-	// keeps its suffixed name, as it does when the rename itself fails.
+	// A file this job did not write at that name is set aside first
+	// (setForeignFileAside); when it cannot be, the part keeps its suffixed
+	// name, as it does when the rename itself fails.
 	if len(segments) == 1 {
-		if err := o.foreignFileAt(jobCtx.Job.ID, filepath.Join(outputDir, filenameBase+".mp4")); err != nil {
+		if err := o.setForeignFileAside(jobCtx.Job.ID, filepath.Join(outputDir, filenameBase+".mp4"), archiveSidecarExts); err != nil {
 			o.logger.Warn("the job's only part keeps its part name", "err", err, "jobID", jobCtx.Job.ID)
 		} else {
 			segments[0] = o.renameSinglePartToPlain(segments[0], outputDir, filenameBase)
@@ -1631,9 +1634,11 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		chatBaseName := filenameBase + ".chat.json"
 		chatDst := filepath.Join(outputDir, chatBaseName)
 		// Not over a chat this job did not write (foreignFileAt): the one a
-		// Reinitialize could not set aside. Refused like a failed copy, so
-		// the capture is kept in staging.
-		foreign := o.foreignFileAt(jobCtx.Job.ID, chatDst)
+		// Reinitialize could not set aside. It is set aside under the
+		// archive's set-aside name, with its raw sidecar; when it cannot be
+		// renamed the copy is refused like a failed one, so the capture is
+		// kept in staging.
+		foreign := o.setForeignFileAside(jobCtx.Job.ID, chatDst, []string{chatRawSidecarSuffix})
 		err := foreign
 		if err == nil {
 			err = copyFile(chatSrc, chatDst)

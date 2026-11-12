@@ -53,6 +53,11 @@ import (
 // tree was moved since (rowAbsoluteLocations) is not found, so it is not
 // renamed and gets no marker; nothing writes over it there, and Files lists
 // it once the reset has cleared the row.
+//
+// A window: the reset writes its claim, then renames. A process that dies in
+// between leaves the archive at its name, on no row and with no marker. The
+// next finalize does not write over it (setForeignFileAside sets it aside),
+// but until then Files lists it, and its Delete All would take it.
 
 // asideOwnerSuffix is the extension of the marker that names the job its
 // files were kept for at a Reinitialize.
@@ -77,8 +82,8 @@ var archiveSidecarExts = []string{".chat.json", chatRawSidecarSuffix, ".descript
 //
 // A file that is definitely gone (archiveGone) is not one. A file that
 // cannot be reached — its drive is unplugged — is: the confirm names it
-// without a size, the rename fails and is logged, and the next finalize does
-// not write over it (foreignFileAt).
+// without a size, the rename fails and is logged, and the next finalize sets
+// it aside itself, or stops when it cannot (setForeignFileAside).
 //
 // The one rule PreviewReinitialize names the archive by and the reset sets it
 // aside by.
@@ -171,53 +176,48 @@ func freeAsideName(dir, stem, ext, stamp string) (string, bool) {
 	}
 }
 
-// setArchiveAside renames the archive a reset found on the row
-// (archiveOfReset) to a free set-aside name beside it, with its marker and
-// its sidecars. Called only after the reset's conditional claim applied: a
-// refused reset leaves the file, and the row that names it, as they were.
+// asideMove is what renameAside did with one file and its sidecars.
+type asideMove struct {
+	// dst is where the file went, "" when it was not renamed; err is why not.
+	dst string
+	err error
+	// markerErr is why the aside has no marker. The files moved all the same.
+	markerErr error
+	// left is each sidecar that could not follow, with the reason; it stays
+	// where it was.
+	left []asideLeft
+}
+
+type asideLeft struct {
+	path string
+	err  error
+}
+
+// renameAside renames file to a free set-aside name beside it,
+// "<stem>.restart-<unix ts>[-N]<ext>", under a marker that names jobID, and
+// then each file that shares its stem under one of sidecars to the same
+// name. The one rename both a Reinitialize (setArchiveAside) and a finalize
+// that finds a file it did not write at its name (setForeignFileAside) make.
 //
 // The marker is written first and taken back when the rename fails, so an
 // aside is never on disk without it; a crash between the two leaves a marker
-// alone, which nothing lists until its job is deleted. A rename that fails
-// does not undo the reset: the file stays exactly where it is, on no row, one
-// Warn names it, it gets a marker under its own name so Files does not offer
-// it, and the next finalize does not write over it (foreignFileAt). A sidecar
-// that cannot follow stays where it is under the same in-place marker, and is
-// logged.
-func (w *DownloadWorker) setArchiveAside(jobID, archive string) {
-	if archive == "" {
-		return
-	}
-	ext := filepath.Ext(archive)
-	from := strings.TrimSuffix(archive, ext)
-	w.adoptStemAsides(jobID, from)
-	// keepInPlace marks what stays under the archive's own name as the job's.
-	keepInPlace := func() string {
-		if err := writeAsideOwner(from, jobID); err != nil {
-			return "; it could not be marked as this job's either, so the Files tab lists it"
-		}
-		return ""
-	}
-	dst, ok := freeAsideName(filepath.Dir(archive), filepath.Base(from), ext, strconv.FormatInt(time.Now().Unix(), 10))
-	err := fmt.Errorf("no free set-aside name beside it")
-	var markerErr error
-	if ok {
-		markerErr = writeAsideOwner(asideBase(dst), jobID)
-		if err = renameArchive(archive, dst); err != nil && markerErr == nil {
-			os.Remove(asideBase(dst) + asideOwnerSuffix)
-		}
-	}
-	if err != nil {
-		w.logger.Warn("reinitialize: the job's existing archive could not be set aside; it stays where it is, on no row, and a new recording will not be written over it"+keepInPlace(),
-			"path", archive, "err", err, "jobID", jobID)
-		return
-	}
-	if markerErr != nil {
-		w.logger.Warn("reinitialize: the set-aside archive could not be marked as this job's; it is kept, and the Files tab lists it until a new recording of the same name finishes",
-			"path", dst, "err", markerErr, "jobID", jobID)
+// alone, which nothing lists until its job is deleted. Nothing is ever
+// renamed onto a name that is taken.
+func renameAside(jobID, file string, sidecars []string) asideMove {
+	from := asideBase(file)
+	dst, ok := freeAsideName(filepath.Dir(file), filepath.Base(from), file[len(from):], strconv.FormatInt(time.Now().Unix(), 10))
+	if !ok {
+		return asideMove{err: fmt.Errorf("no free set-aside name beside it")}
 	}
 	to := asideBase(dst)
-	for _, sidecar := range archiveSidecarExts {
+	mv := asideMove{dst: dst, markerErr: writeAsideOwner(to, jobID)}
+	if err := renameArchive(file, dst); err != nil {
+		if mv.markerErr == nil {
+			os.Remove(to + asideOwnerSuffix)
+		}
+		return asideMove{err: err}
+	}
+	for _, sidecar := range sidecars {
 		src, target := from+sidecar, to+sidecar
 		if !fileExists(src) {
 			continue
@@ -227,12 +227,52 @@ func (w *DownloadWorker) setArchiveAside(jobID, archive string) {
 			err = utils.ReplaceFile(src, target)
 		}
 		if err != nil {
-			w.logger.Warn("reinitialize: a file of the existing archive could not be set aside with it; it stays where it is, and a new chat is not written over an old one"+keepInPlace(),
-				"path", src, "err", err, "jobID", jobID)
+			mv.left = append(mv.left, asideLeft{path: src, err: err})
 		}
 	}
+	return mv
+}
+
+// setArchiveAside renames the archive a reset found on the row
+// (archiveOfReset) to a free set-aside name beside it, with its marker and
+// its sidecars (renameAside). Called only after the reset's conditional claim
+// applied: a refused reset leaves the file, and the row that names it, as
+// they were.
+//
+// A rename that fails does not undo the reset: the file stays exactly where
+// it is, on no row, one Warn names it, it gets a marker under its own name so
+// Files does not offer it, and the next finalize sets it aside before it
+// writes its own archive (setForeignFileAside). A sidecar that cannot follow
+// stays where it is under the same in-place marker, and is logged.
+func (w *DownloadWorker) setArchiveAside(jobID, archive string) {
+	if archive == "" {
+		return
+	}
+	from := asideBase(archive)
+	w.adoptStemAsides(jobID, from)
+	// keepInPlace marks what stays under the archive's own name as the job's.
+	keepInPlace := func() string {
+		if err := writeAsideOwner(from, jobID); err != nil {
+			return "; it could not be marked as this job's either, so the Files tab lists it"
+		}
+		return ""
+	}
+	mv := renameAside(jobID, archive, archiveSidecarExts)
+	if mv.err != nil {
+		w.logger.Warn("reinitialize: the job's existing archive could not be set aside; it stays where it is, on no row, and the next recording's finalize sets it aside before it writes its own"+keepInPlace(),
+			"path", archive, "err", mv.err, "jobID", jobID)
+		return
+	}
+	if mv.markerErr != nil {
+		w.logger.Warn("reinitialize: the set-aside archive could not be marked as this job's; it is kept, and the Files tab lists it until a new recording of the same name finishes",
+			"path", mv.dst, "err", mv.markerErr, "jobID", jobID)
+	}
+	for _, l := range mv.left {
+		w.logger.Warn("reinitialize: a file of the existing archive could not be set aside with it; it stays where it is, and a new chat is not written over an old one"+keepInPlace(),
+			"path", l.path, "err", l.err, "jobID", jobID)
+	}
 	w.logger.Info("reinitialize: the job's existing archive was set aside; it is kept, never replaced",
-		"from", archive, "to", dst, "jobID", jobID)
+		"from", archive, "to", mv.dst, "jobID", jobID)
 }
 
 // adoptStemAsides marks the recovered set-aside recordings already beside
@@ -259,43 +299,89 @@ func (w *DownloadWorker) adoptStemAsides(jobID, stem string) {
 	}
 }
 
-// foreignFileAt returns an error when a finalize of jobID must not write
-// path because a file it did not create is already there, nil otherwise. A
-// finalize renames its copy onto the archive's name (copyStaged) and copies
-// the chat capture onto the chat's (copyAssets), which replaces whatever
-// holds them: right for the job's own files, and how the archive or the chat
-// a reset could not set aside (setArchiveAside) would be lost. A description
+// foreignFileAt reports whether path holds a file a finalize of jobID did not
+// create. A finalize renames its copy onto the archive's name (copyStaged)
+// and copies the chat capture onto the chat's (copyAssets), which replaces
+// whatever holds them: right for the job's own files, and how another
+// recording under the same name would be lost — the archive a reset could
+// not set aside (setArchiveAside), or the file of a row that was deleted
+// with its files kept before the same video was added again. A description
 // and a thumbnail are written as before: the new ones are the same video's.
 //
 // The file is the job's own when the row names it (a re-finalize), or when it
 // is no older than the run that is finalizing (download_started_at): a
 // finalize that was interrupted after its copy and before its Finished write
 // left its archive on no row, and the boot's re-mux lands on it. A file
-// older than the run is from before this recording: an archive a reset left,
-// another recording's under a reused name.
+// older than the run is from before this recording.
 //
 // A row with no run start to compare against is written as before. A reset
 // clears the stamp and the next run writes it before it downloads anything
 // (ExecuteWithChat, ExecuteTwitch, the clip download), so a finalize after a
 // reset always has one.
-func (o *DownloadOrchestrator) foreignFileAt(jobID, path string) error {
+func (o *DownloadOrchestrator) foreignFileAt(jobID, path string) bool {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil
+		return false
 	}
 	job, err := o.db.GetJob(jobID)
 	if err != nil || job == nil {
-		return nil
+		return false
 	}
-	for _, own := range []string{job.OutputFile, job.ChatFile} {
-		if own != "" && normalizePath(own) == normalizePath(path) {
-			return nil
+	owned := []string{job.OutputFile, job.ChatFile}
+	// A part row's file is the job's too: a job's only part sits at the
+	// archive's own name once a finalize has renamed it there
+	// (renameSinglePartToPlain). Parts that cannot be read name nothing
+	// here; the age rule below still stands.
+	if segs, err := o.db.GetSegments(jobID); err == nil {
+		for _, s := range segs {
+			owned = append(owned, s.FilePath, s.ChatFile)
 		}
 	}
-	if started, err := time.Parse(time.RFC3339, job.DownloadStartedAt); err != nil || !info.ModTime().Before(started) {
+	for _, own := range owned {
+		if own != "" && normalizePath(own) == normalizePath(path) {
+			return false
+		}
+	}
+	started, err := time.Parse(time.RFC3339, job.DownloadStartedAt)
+	return err == nil && info.ModTime().Before(started)
+}
+
+// setForeignFileAside makes path free for a finalize of jobID to write. A
+// file the job did not create that is there (foreignFileAt) is set aside the
+// way a Reinitialize sets an archive aside (renameAside): renamed to
+// "<stem>.restart-<unix ts>[-N]<ext>" beside it, with those of sidecars that
+// share its stem and are not the job's own either, under a marker naming
+// jobID, so Files does not offer it while the job exists. One Warn names the
+// old and the new path. Moombox never replaces or deletes it afterwards.
+//
+// An error only when the rename fails: the file is then still at path, and
+// the caller must not write there.
+func (o *DownloadOrchestrator) setForeignFileAside(jobID, path string, sidecars []string) error {
+	if !o.foreignFileAt(jobID, path) {
 		return nil
 	}
-	return fmt.Errorf("%s already exists and is not this job's: it is kept, not replaced; move or rename it, then use Mux", filepath.Base(path))
+	stem := asideBase(path)
+	var foreign []string
+	for _, ext := range sidecars {
+		if o.foreignFileAt(jobID, stem+ext) {
+			foreign = append(foreign, ext)
+		}
+	}
+	mv := renameAside(jobID, path, foreign)
+	if mv.err != nil {
+		o.logger.Warn("finalize: a file that is not this job's holds the name it writes, and could not be set aside",
+			"path", path, "err", mv.err, "jobID", jobID)
+		return fmt.Errorf("%s already exists and is not this job's: it is kept, not replaced; move or rename it, then use Mux", filepath.Base(path))
+	}
+	args := []any{"from", path, "to", mv.dst, "jobID", jobID}
+	if mv.markerErr != nil {
+		args = append(args, "markerErr", mv.markerErr)
+	}
+	for _, l := range mv.left {
+		args = append(args, "notMoved", l.path, "notMovedErr", l.err)
+	}
+	o.logger.Warn("finalize: a file from before this recording held the name it writes, and was set aside; it is kept, never replaced", args...)
+	return nil
 }
 
 // SetAsideArchive is one archive a Reinitialize of a job set aside
