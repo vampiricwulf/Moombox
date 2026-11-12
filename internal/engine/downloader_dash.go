@@ -198,6 +198,19 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 	// that count moved on is the "failed again after fresh credentials" the
 	// rule waits for.
 	stuckSeq, stuckRenewals := -1, int64(0)
+	// catchUpStuckSeq is the sequence a catch-up round stopped at without
+	// writing anything, once the file holds data; -1 when there is none.
+	// Catch-up is not entered again while currentSeq is still that sequence:
+	// the sequential path below owns the segment, with its own retries,
+	// credential refresh, status check, rebuild and refused-segment rule, and
+	// catch-up resumes at the first sequence past it. Re-entered on every
+	// iteration, each round ran the stuck segment's whole retry ladder again
+	// while the other workers fetched the segments after it, which could not
+	// be written past the hole and were dropped when the round returned: with
+	// the default 12 workers, tens of segments downloaded and discarded per
+	// round, for as long as the segment kept failing. It also slowed the
+	// handlers: they count one failure per sequential fetch, so one per round.
+	catchUpStuckSeq := -1
 	// afterSkip runs once refuseSegment has skipped a sequence in place. The
 	// next sequence starts with fresh per-segment retry state, and — as
 	// moonarchive sets `last_seq_auth_expiry = cur_seq` after a skip, "to
@@ -248,7 +261,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		head := int(d.headSeq.Load())
 		if head > 0 {
 			segsBehind := head - curSeq
-			if segsBehind >= stayBehindSegments+CatchupThreshold {
+			if segsBehind >= stayBehindSegments+CatchupThreshold && curSeq != catchUpStuckSeq {
 				preCatchupSeq := curSeq
 				nextSeq, err := d.runParallelCatchUp(ctx)
 				if err != nil {
@@ -301,6 +314,14 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				}
 				// Still far behind AND zero progress -- fall through to
 				// sequential download to break the stuck head segment.
+				// With data in the file the sequential path keeps the segment
+				// until it moves on (catchUpStuckSeq). Before the first byte
+				// the old alternation stands: the first-segment hunt's budget
+				// is a count of sequential tries, and catch-up's behind-head
+				// refresh between them is part of how a refused start recovers.
+				if hasStartedDownloading {
+					catchUpStuckSeq = curSeqNow
+				}
 			}
 		}
 
