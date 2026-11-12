@@ -218,3 +218,41 @@ test("a running batch delete shows its progress and turns the batch buttons off"
   assert.equal(h.el("batch-delete").disabled, false, "the batch ended and Delete stayed off");
   assert.equal(h.app._selectedTaskJobs.size, 0);
 });
+
+// The batch bar is a live region, and the button that starts a batch is
+// disabled while it runs, which drops keyboard focus to the page.
+//
+// MUTANTS: no aria-busy while the batch runs (a screen reader is handed every
+// "Deleting n of N…"); aria-busy left on after it; focus left on the page
+// when the batch ends.
+test("a running batch marks the bar busy, and focus goes back to the list when it ends", { skip }, async () => {
+  const held = new Map();
+  const h = await boot({
+    "DELETE /api/jobs/:id": ({ params }) => new Promise((answer) => {
+      held.set(params.id, () => answer({ success: true }));
+    }),
+  });
+  h.app.jobs = ["e1", "e2", "e3"].map((id) => fin({ id, videoId: id, status: "Error" }));
+  h.app.renderJobs();
+  h.app._selectedTaskJobs.add("e1");
+  h.app._selectedTaskJobs.add("e2");
+  h.app.updateBatchActionBar();
+  h.app.showConfirm = async () => true;
+  const bar = h.el("batch-action-bar");
+  const button = h.el("batch-delete");
+  button.setAttribute("tabindex", "0"); // the stub is not focusable by itself
+  button.focus();
+  assert.equal(h.document.activeElement, button);
+
+  const done = h.app.batchAction("delete");
+  await h.flush();
+  assert.equal(bar.getAttribute("aria-busy"), "true");
+  button.blur(); // what disabling the focused button does in a browser
+  for (const id of ["e1", "e2"]) {
+    held.get(id)();
+    h.app.handleMessage({ type: "job_deleted", payload: { id } });
+  }
+  await done;
+  assert.equal(bar.hasAttribute("aria-busy"), false, "the bar stayed busy after the batch");
+  assert.equal(h.document.activeElement?.dataset.jobId, "e3", "focus was left on the page");
+});

@@ -5048,6 +5048,12 @@ export class MoomboxApp {
       const btn = document.getElementById(id);
       if (btn && btn.disabled !== !!busy) btn.disabled = !!busy;
     }
+    // The bar is a live region and the progress line is rewritten once per
+    // answered request: busy for the length of the batch, so a screen reader
+    // is not handed "Deleting 1 of 2,000…" two thousand times. The closing
+    // toast says how it ended.
+    if (busy) bar.setAttribute("aria-busy", "true");
+    else bar.removeAttribute("aria-busy");
 
     const count = this._activeSelectionSet().size;
     // The bar stays up for a running batch even once its rows have left the
@@ -5126,6 +5132,26 @@ export class MoomboxApp {
     }
   }
 
+  /**
+   * Put keyboard focus back after a batch started from a batch button
+   * (`from`, null when it was not): on that button when the bar still shows
+   * it, otherwise on the list's row. Nothing moves when the operator has
+   * put focus somewhere else meanwhile, or changed tab.
+   */
+  _returnBatchFocus(from) {
+    if (!from || from.panel !== this._activePanel) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== from.button) return;
+    const bar = document.getElementById("batch-action-bar");
+    if (bar?.classList.contains("visible") && from.button.style.display !== "none" && !from.button.disabled) {
+      from.button.focus();
+      return;
+    }
+    const container = document.getElementById(from.panel === "archived" ? "archived-container" : "jobs-container");
+    const row = container?.querySelector('.video-item[tabindex="0"]') ?? container?.querySelector(".video-item");
+    row?.focus({ preventScroll: true });
+  }
+
   /** Write the running batch's progress ("Deleting 120 of 2,000…") in the
    *  batch bar. Only the text: it runs once per answered request. */
   _drawBatchProgress() {
@@ -5151,6 +5177,11 @@ export class MoomboxApp {
   }
 
   async batchAction(action) {
+    // The batch button pressed, read before the confirm dialog takes focus.
+    // The batch disables it or hides the bar, which drops keyboard focus to
+    // the page; _returnBatchFocus puts it back when the batch ends.
+    const pressed = document.activeElement;
+    const focusFrom = pressed && BATCH_ACTION_BUTTON_IDS.includes(pressed.id) ? { button: pressed, panel: this._activePanel } : null;
     // One batch at a time: the bar's buttons are disabled while one runs.
     if (this._batchProgress) return;
     const selectedJobs = this._getSelectedJobs();
@@ -5293,6 +5324,7 @@ export class MoomboxApp {
     // row's status change re-renders the list — so both kept a ticked box
     // and the .selected highlight with nothing behind them.
     this._clearSelectionUI();
+    this._returnBatchFocus(focusFrom);
     // The per-job actions are redrawn by the job_update each one provokes;
     // the watched pair is redrawn here, from the rows patched above, on the
     // panel the selection was made on.
