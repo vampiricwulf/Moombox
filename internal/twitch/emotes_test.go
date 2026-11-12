@@ -364,3 +364,103 @@ func TestEmoteResolverKeepsA5xxANonAnswer(t *testing.T) {
 			"failure must not be cached", n)
 	}
 }
+
+// A provider that fails while the others answer is not cached as "no emotes"
+// for the TTL: the answers are served, and once the retry floor has passed the
+// channel is fetched again and the provider's emotes arrive.
+func TestEmoteResolverRetriesAFailedProviderAfterTheFloor(t *testing.T) {
+	er := NewEmoteResolver(&testLogger{})
+	now := time.Now()
+	er.now = func() time.Time { return now }
+	api := constants.TwitchEmoteAPIs
+	bodies := allEmoteBodies()
+	delete(bodies, api.SevenTVUser)
+	routes := installEmoteRoutes(t, bodies)
+
+	got := er.Resolve(context.Background(), "chan-1", "chan-1")
+	if got == nil || emoteCodes(got.BTTV) == "" {
+		t.Fatalf("Resolve with 7TV down = %+v, want the providers that answered", got)
+	}
+
+	routes.set(api.SevenTVUser, `{"emote_set":{"emotes":[{"id":"c7","name":"chan7TV","data":{"host":{"url":"//cdn.7tv.app/emote/c7","files":[{"name":"2x.webp"}]}}}]}}`)
+	now = now.Add(globalEmoteRetryFloor - time.Second)
+	er.Resolve(context.Background(), "chan-1", "chan-1")
+	if n := routes.count(api.SevenTVUser); n != 0 {
+		t.Fatalf("inside the retry floor 7TV was asked %d more times, want 0", n)
+	}
+
+	now = now.Add(time.Minute)
+	got = er.Resolve(context.Background(), "chan-1", "chan-1")
+	if got == nil || !strings.Contains(emoteCodes(got.SevenTV), "chan7TV") {
+		t.Errorf("after the retry floor Resolve = %+v, want 7TV's channel emote", got)
+	}
+	// All three answered, so the entry is back on the full TTL.
+	now = now.Add(globalEmoteRetryFloor + time.Minute)
+	er.Resolve(context.Background(), "chan-1", "chan-1")
+	if n := routes.count(api.SevenTVUser); n != 1 {
+		t.Errorf("a complete entry was refetched after the floor: 7TV asked %d times, want 1", n)
+	}
+}
+
+// A refresh in which one provider fails keeps that provider's cached list
+// beside the other providers' new answers.
+func TestEmoteResolverRefreshKeepsAFailedProvidersList(t *testing.T) {
+	er := NewEmoteResolver(&testLogger{})
+	now := time.Now()
+	er.now = func() time.Time { return now }
+	api := constants.TwitchEmoteAPIs
+	seedEmoteCache(er, "chan-1", &TwitchEmoteData{
+		BTTV:    []EmoteInfo{{ID: "old", Code: "oldBTTV"}},
+		SevenTV: []EmoteInfo{{ID: "k7", Code: "kept7TV"}},
+	})
+	bodies := allEmoteBodies()
+	delete(bodies, api.SevenTVUser)
+	installEmoteRoutes(t, bodies)
+
+	now = now.Add(emoteCacheTTL + time.Minute)
+	got := er.Resolve(context.Background(), "chan-1", "chan-1")
+	if got == nil || !strings.HasPrefix(emoteCodes(got.SevenTV), "kept7TV") {
+		t.Errorf("SevenTV after a refresh 7TV failed = %+v, want the cached list kept", got)
+	}
+	if got == nil || !strings.HasPrefix(emoteCodes(got.BTTV), "catJAM") {
+		t.Errorf("BTTV after the refresh = %+v, want BTTV's new answer", got)
+	}
+}
+
+// A fetch cut short by the caller's own ctx starts no retry floor: the next
+// resolve asks the providers again at once.
+func TestEmoteResolverCallerGoneStartsNoRetryFloor(t *testing.T) {
+	er := NewEmoteResolver(&testLogger{})
+	now := time.Now()
+	er.now = func() time.Time { return now }
+	api := constants.TwitchEmoteAPIs
+	ctx, cancel := context.WithCancel(context.Background())
+	prev := twitchHTTPClient
+	t.Cleanup(func() { twitchHTTPClient = prev })
+	var sevenTVCalls atomic.Int64
+	twitchHTTPClient = &http.Client{Transport: probeRoundTripper(func(req *http.Request) (*http.Response, error) {
+		url := req.URL.String()
+		switch {
+		case isGlobalEmoteURL(url):
+			return nil, fmt.Errorf("emote provider unreachable")
+		case strings.HasPrefix(url, api.SevenTVUser):
+			// The caller goes away while 7TV is still being asked.
+			sevenTVCalls.Add(1)
+			cancel()
+			return nil, req.Context().Err()
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Request:    req,
+		}, nil
+	})}
+
+	er.Resolve(ctx, "chan-1", "chan-1")
+	er.Resolve(context.Background(), "chan-1", "chan-1")
+	if n := sevenTVCalls.Load(); n != 2 {
+		t.Errorf("7TV was asked %d times over two resolves, want 2: the first ended with "+
+			"the caller's ctx, which is not a provider failure", n)
+	}
+}

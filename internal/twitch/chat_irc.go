@@ -102,7 +102,7 @@ func ircHandshakeLines(token, login string) (pass, nick string, authenticated bo
 // prefix. Both are "" for a line with no command.
 //
 // Deliberately minimal. It exists for the two facts noteHandshakeOutcome needs
-// and nothing else; the message parser proper is parseLine.
+// and the RECONNECT check in runIRCSession, and nothing else; the message parser proper is parseLine.
 func ircCommandOf(line string) (cmd, params string) {
 	if after, ok := strings.CutPrefix(line, "@"); ok {
 		_, rest, found := strings.Cut(after, " ")
@@ -598,7 +598,11 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 			// value, so returning it ended chat capture for the rest of the
 			// job. Logged at the loop rather than here, so one directive still
 			// writes exactly one line — see errServerReconnect.
-			if strings.HasPrefix(line, "RECONNECT") {
+			//
+			// Matched on the parsed command, not the line start: Twitch sends
+			// it with a server prefix (":tmi.twitch.tv RECONNECT"), and a
+			// bare "RECONNECT" is accepted too.
+			if cmd, _ := ircCommandOf(line); cmd == "RECONNECT" {
 				// Read by the noteHandshakeOutcome defer above: a directive
 				// that arrives before the 001 must not read as a refused
 				// login, because Twitch ruled on an edge, not on us.
@@ -662,6 +666,21 @@ func (cd *ChatDownloader) parseLine(line string) *TwitchChatMessage {
 	}
 }
 
+// ircPrefixNick returns the nick of an IRC sender prefix
+// (":nick!user@host" gives "nick"), or "" when the prefix names no user: a
+// server prefix such as ":tmi.twitch.tv" has no '!'.
+func ircPrefixNick(prefix string) string {
+	rest, ok := strings.CutPrefix(prefix, ":")
+	if !ok {
+		return ""
+	}
+	nick, _, ok := strings.Cut(rest, "!")
+	if !ok {
+		return ""
+	}
+	return nick
+}
+
 func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, rawLine string) *TwitchChatMessage {
 	id := tags["id"]
 	if id == "" {
@@ -692,10 +711,13 @@ func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, r
 	// renders the word "ACTION" as part of the message.
 	messageText, isAction := stripActionWrapper(messageText)
 
-	// Author name fallback chain
+	// Author name fallback chain. display-name can be empty (an account that
+	// never set one), and a PRIVMSG has no login tag: the login is the nick in
+	// the line's prefix, which is what chatterino7 falls back to
+	// (MessageBuilder.cpp, displayName = loginName).
 	authorName := unescapeIRCTag(tags["display-name"])
 	if authorName == "" {
-		authorName = tags["login"]
+		authorName = ircPrefixNick(parts[0])
 	}
 	if authorName == "" {
 		authorName = "Anonymous"
