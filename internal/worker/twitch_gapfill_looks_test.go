@@ -310,3 +310,66 @@ func TestGapFillLastLookDoesNotWaitWhenTwitchAnswered(t *testing.T) {
 		t.Fatalf("outcome %+v after %d waits, want it kept with no wait", out, waited)
 	}
 }
+
+// TestGapFillLastLookIsNotSettledByAMuxThatBeganDuringIt: the look past the
+// deadline settles the plan for good, but not when what failed it is a mux
+// that began on the job while it downloaded (the operator's Mux of a
+// Finished archive, which refuses the look's commit). The row is then that
+// mux's to keep or drop, as it is for a look that finds the job Muxing: the
+// plan stays due and uncounted, and the look after the mux is the last one.
+//
+// Mutant: the re-read before the settle removed (the plan is kept as
+// recorded because of the Mux).
+func TestGapFillLastLookIsNotSettledByAMuxThatBeganDuringIt(t *testing.T) {
+	f := newGapFillFixture(t)
+	lateStartPlan(t, f, gapStart.Add(25*time.Hour))
+	mux := f.filler.mux
+	f.filler.mux = func(ctx context.Context, ts, out string) error {
+		f.db.UpdateJobFields("tw_1", map[string]any{"status": database.StatusMuxing})
+		return mux(ctx, ts, out)
+	}
+	row, _ := f.db.GetGapFill("tw_1")
+	f.filler.step(context.Background(), *row, gapStart.Add(26*time.Hour))
+	after, _ := f.db.GetGapFill("tw_1")
+	if p := f.row(t); p == nil || p.Outcome != nil || p.CutFailures != 0 || after.NextCheckAt != row.NextCheckAt {
+		t.Fatalf("plan %+v, want it still due, unsettled and uncounted while the job is Muxing", p)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(f.dir, "*recovered*")); len(matches) != 0 {
+		t.Errorf("the refused look left %v", matches)
+	}
+
+	// The mux over and the job Finished again, the next look is the last.
+	f.filler.mux = mux
+	f.db.UpdateJobFields("tw_1", map[string]any{"status": database.StatusFinished})
+	f.filler.step(context.Background(), *after, gapStart.Add(26*time.Hour))
+	if out := f.outcome(t); out == nil || out.State != GapFillFilled {
+		t.Fatalf("outcome %+v, want the fill done by the look after the mux", out)
+	}
+}
+
+// TestGapFillLastLookHeldOfflineSaysSo: a last look that waits for the device
+// to come back online records why, once, with its next look where it was —
+// the job's details would otherwise show a pending fill "until" a time
+// already past beside a reason from hours earlier. Inside the window an
+// offline sweep still leaves the plan untouched.
+//
+// Mutants: the reason not saved; the save moving the next look.
+func TestGapFillLastLookHeldOfflineSaysSo(t *testing.T) {
+	f := newGapFillFixture(t)
+	lateStartPlan(t, f, gapStart.Add(25*time.Hour))
+	f.filler.online = func() bool { return false }
+	row, _ := f.db.GetGapFill("tw_1")
+	f.filler.step(context.Background(), *row, gapStart.Add(70*time.Minute))
+	if p := f.row(t); p == nil || p.LastReason == gapFillOfflineReason {
+		t.Fatalf("plan %+v, want a look inside the window left untouched while offline", p)
+	}
+	f.filler.step(context.Background(), *row, gapStart.Add(26*time.Hour))
+	after, _ := f.db.GetGapFill("tw_1")
+	p := f.row(t)
+	if p == nil || p.Outcome != nil || p.Attempts != 0 || p.LastReason != gapFillOfflineReason || after.NextCheckAt != row.NextCheckAt {
+		t.Fatalf("plan %+v, next look %s; want it due at %s, uncounted, with the offline reason", p, after.NextCheckAt, row.NextCheckAt)
+	}
+	if f.fetched != 0 {
+		t.Errorf("%d fetches while offline, want none", f.fetched)
+	}
+}

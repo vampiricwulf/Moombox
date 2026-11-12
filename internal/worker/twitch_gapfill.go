@@ -164,9 +164,8 @@ func gapFillBackoff(attempts int) time.Duration {
 // gapFillCutBackoff is the wait before the next look after the n-th (1-based)
 // look in which the VOD was complete and a span could not be downloaded or
 // muxed from it, or the parts not recorded: 10 min doubling, capped at one
-// hour. Such a failure is the
-// network's or the disk's, not the VOD's, so it does not climb gapFillBackoff
-// toward its three hours.
+// hour. Such a failure is the network's or the disk's, not the VOD's, so it
+// does not climb gapFillBackoff toward its three hours.
 func gapFillCutBackoff(failures int) time.Duration {
 	d := gapFillFirstCheck
 	for i := 1; i < failures && d < time.Hour; i++ {
@@ -186,10 +185,10 @@ const gapFillPad = time.Second
 const gapFillSegmentAttempts = 3
 
 // gapFillRetryPauses are the waits between the tries of one fetch of the
-// VOD's media playlist, an init map or a segment that failed in passing (a transport error, a 5xx): a try for
-// each, so four tries over about 14 seconds. Tried back to back, a two-second
-// network blip spent every try at once, and the look threw away every span
-// it had already cut.
+// VOD's media playlist, an init map or a segment that failed in passing (a
+// transport error, a 5xx): a try for each, so four tries over about 14
+// seconds. Tried back to back, a two-second network blip spent every try at
+// once, and the look threw away every span it had already cut.
 var gapFillRetryPauses = []time.Duration{time.Second, 3 * time.Second, 10 * time.Second}
 
 // gapFillDriftLimit is how far the archive VOD's length may differ from the
@@ -449,9 +448,6 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 		f.logger.Info("gap-fill: a chapter import is rewriting the archive; looking again at the next sweep", "jobID", plan.JobID)
 		return
 	}
-	f.db.TrackJobForLogs(job.ID)
-	defer restoreJobLogRouting(f.db, job.ID)
-
 	// Past the deadline the plan gets one last look (owner ruling R2-F1)
 	// before it is settled: a plan that never managed to look inside its
 	// window (Moombox not running, offline, the volume full), or whose last
@@ -460,11 +456,19 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 	// After it the window is final.
 	deadline, _ := time.Parse(time.RFC3339, plan.Deadline)
 	lastLook := !deadline.IsZero() && now.After(deadline)
+	// The two waits below come before the job is tracked for logs: they
+	// repeat at every sweep for as long as an outage or a full volume lasts,
+	// and would fill the job's own log with one sentence.
 	if f.offline() {
 		// Every request of a look would fail, and the look would count
 		// toward the backoff: the plan is left as it is, due, and the next
 		// sweep looks again, as the backlog scheduler admits nothing offline.
+		// A last look held this way says why in the job's details, whose
+		// "until" is by then past.
 		f.logger.Debug("gap-fill: the device is offline; looking again at the next sweep", "jobID", plan.JobID)
+		if lastLook {
+			f.holdLastLook(&plan, row, gapFillOfflineReason)
+		}
 		return
 	}
 	if lastLook && f.diskCritical != nil && f.diskCritical() {
@@ -473,14 +477,12 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 		// it waits, uncounted, for the volume to recover. The job's details
 		// say why meanwhile.
 		f.logger.Debug("gap-fill: the output volume is critically full; the last look waits for it", "jobID", plan.JobID)
-		if plan.LastReason != gapFillDiskFullReason {
-			plan.LastReason = gapFillDiskFullReason
-			if next, err := time.Parse(time.RFC3339, row.NextCheckAt); err == nil {
-				_ = saveTwitchGapFillPlan(f.db, &plan, next)
-			}
-		}
+		f.holdLastLook(&plan, row, gapFillDiskFullReason)
 		return
 	}
+	f.db.TrackJobForLogs(job.ID)
+	defer restoreJobLogRouting(f.db, job.ID)
+
 	plan.cutFailed, plan.unreached = false, false
 	out, reason := f.fill(ctx, &plan, job)
 	if out != nil {
@@ -525,6 +527,15 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 		}
 	}
 	if lastLook {
+		if fresh, err := f.db.GetJob(plan.JobID); err == nil && fresh != nil && fresh.Status == database.StatusMuxing {
+			// A mux began on the job while this look ran (it is what refused
+			// the look's commit): the row is that mux's to keep or drop, as
+			// at the top of step, not this look's to settle for good. It is
+			// left due, and the look after the mux is the last one.
+			f.logger.Debug("gap-fill: the job began muxing during the last look; looking again at the next sweep",
+				"jobID", plan.JobID, "reason", reason)
+			return
+		}
 		if reason == "" {
 			reason = "no complete archive VOD was found"
 		}
@@ -557,6 +568,23 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 // gapFillDiskFullReason is why a look asked nothing of Twitch: the output
 // volume is at disk_critical.
 const gapFillDiskFullReason = "the output volume is critically full"
+
+// gapFillOfflineReason is why a last look is waiting: the connectivity
+// monitor reads the device offline.
+const gapFillOfflineReason = "the device is offline"
+
+// holdLastLook records why the look past the deadline is waiting, once, with
+// the plan's next look where it was: the plan stays due and nothing is
+// counted.
+func (f *twitchGapFiller) holdLastLook(plan *twitchGapFillPlan, row database.GapFill, reason string) {
+	if plan.LastReason == reason {
+		return
+	}
+	plan.LastReason = reason
+	if next, err := time.Parse(time.RFC3339, row.NextCheckAt); err == nil {
+		_ = saveTwitchGapFillPlan(f.db, plan, next)
+	}
+}
 
 // offline reports the device offline by the filler's connectivity seam.
 func (f *twitchGapFiller) offline() bool { return f.online != nil && !f.online() }
