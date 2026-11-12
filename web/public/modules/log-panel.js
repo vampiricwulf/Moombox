@@ -136,8 +136,10 @@ export class LogPanelController {
       if (this._frames.length > 500) this._frames.shift();
     }
     this.logs.push(log);
-    const dropped = this.logs.length > 500;
-    if (dropped) {
+    // The line the 500-line cap pushes out, if any: a full buffer drops one
+    // per line added, for the rest of the tab's life.
+    const evicted = this.logs.length > 500 ? this.logs[0] : null;
+    if (evicted !== null) {
       this.logs = this.logs.slice(-500);
     }
 
@@ -163,8 +165,8 @@ export class LogPanelController {
     }
 
     // A filter or a search is on. A line it hides changes nothing drawn,
-    // unless the 500-line cap just dropped a line that may have been shown.
-    if (!dropped && !this._lineShown(log)) return;
+    // unless the line the cap just dropped was one it showed.
+    if (!this._lineShown(log) && !(evicted !== null && this._lineShown(evicted))) return;
 
     // Rebuild at most every 100 ms. The timer is never restarted: one that
     // restarted on every line did not fire at all while lines kept arriving

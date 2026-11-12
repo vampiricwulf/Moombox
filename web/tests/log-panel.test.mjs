@@ -333,3 +333,19 @@ test("a hidden line that pushes one out of the window still redraws the filtered
   assert.doesNotMatch(viewer.textContent, /WARN oldest/, "the dropped line must leave the view");
   assert.equal(h.el("log-count").textContent, "0 log entries (WARN+)");
 });
+
+// Once the buffer is full every line added drops one, so "a line was dropped"
+// is always true. Mutant: rebuilding whenever a line was dropped, whatever it
+// was — every hidden INFO line rebuilds a WARN+ view again after 500 lines.
+test("in a full buffer, a hidden line that pushes a hidden line out rebuilds nothing", { skip }, async () => {
+  const h = await harness.makeApp();
+  const panel = h.app.logPanel;
+  panel.setSnapshot(Array.from({ length: 500 }, (_, i) => `INFO fill ${i}`));
+  panel.logFilter = "WARN";
+  panel.renderLogs();
+  const spy = countRenders(panel);
+  for (let i = 0; i < 20; i++) panel.addLog(`INFO more ${i}`);
+  h.advance(1000);
+  assert.equal(spy.renders, 0);
+  assert.equal(panel.logs.length, 500);
+});
