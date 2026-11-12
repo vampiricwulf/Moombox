@@ -20,7 +20,7 @@ import (
 // directory holding nothing recoverable. It is metadata about a recording,
 // never a recording.
 //
-// Nor does a YouTube capture.s start thumbnail (startThumbnailFile), for the
+// Nor does a YouTube capture's start thumbnail (startThumbnailFile), for the
 // same reason: it is fetched as the capture starts, ahead of any media. The
 // one rule for both is isStagingMetadataFile.
 func HasStagingFiles(stagingBase, jobID string) bool {

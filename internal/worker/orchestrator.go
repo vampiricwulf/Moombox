@@ -389,7 +389,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			"jobID", jobCtx.Job.ID, "ratio", videoInfo.StretchedRatio)
 	}
 
-	// A live capture.s thumbnail, staged now in case it cannot be fetched at
+	// A live capture's thumbnail, staged now in case it cannot be fetched at
 	// the finalize (stageStartThumbnail, owner ruling R2-X2). In the
 	// background; the deferred stop cancels a fetch still running and waits
 	// for it, so nothing is written into staging after this returns.
