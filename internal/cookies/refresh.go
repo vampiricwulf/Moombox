@@ -697,8 +697,44 @@ func (rs *RefreshService) GetStatus() AuthStatus {
 // running publishes its own result through OnAuthChange and GetStatus, one
 // pass later at worst. A caller that has just REWRITTEN cookies.txt and wants
 // this specific file re-verified cannot be given that guarantee here — the
-// in-flight pass may have read the old file — and should say so in its log.
-// Nothing today blocks or queues on this; a skipped pass is skipped.
+// in-flight pass may have read the old file — and calls CheckNowAfterWrite
+// instead. CheckNow itself never blocks or queues; a skipped pass is skipped.
 func (rs *RefreshService) CheckNow(ctx context.Context) bool {
 	return rs.refresh(ctx, false)
+}
+
+// recheckCollisionWait bounds how long CheckNowAfterWrite waits for the pass
+// it collided with: a little over that pass's two 15 s auth round trips and
+// its fallback probes.
+const recheckCollisionWait = 45 * time.Second
+
+// CheckNowAfterWrite is CheckNow for a caller that has just rewritten
+// cookies.txt, and reports whether a pass ran AFTER that write.
+//
+// A plain CheckNow turned away by the single-flight leaves the new file
+// unread: the pass in flight may have loaded the old one, and its status block
+// is the only place the Twitch fingerprint is compared, the auth mark cleared
+// and the recovered and credentials-changed edges fired. The write then went
+// unobserved until the next tick, 30 minutes by default. So a turned-away
+// call here waits for that pass to end (AwaitPass, at most
+// recheckCollisionWait and never past ctx) and runs CheckNow once more.
+//
+// One pending re-check, not a queue: the second call is not retried. It can
+// be turned away too, by a pass that started in the gap, and that pass began
+// after the write, so it read the new file. False then means only that this
+// caller ran no pass itself, or that the wait ran out.
+//
+// The wait runs on the caller's goroutine. Never call this from inside a
+// pass (an OnAuthChange, OnAuthRecovered or OnCredentialsChanged callback):
+// it would wait for itself until the bound.
+func (rs *RefreshService) CheckNowAfterWrite(ctx context.Context) bool {
+	if rs.CheckNow(ctx) {
+		return true
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, recheckCollisionWait)
+	defer cancel()
+	if !rs.AwaitPass(waitCtx) {
+		return false
+	}
+	return rs.CheckNow(ctx)
 }

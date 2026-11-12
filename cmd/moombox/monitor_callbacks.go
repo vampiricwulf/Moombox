@@ -267,8 +267,10 @@ func (s *runState) schedulerWake() func() {
 // The skipped case is Info, not the service's own Debug, and that split
 // predates Arc 10: the caller has just rewritten the file, the in-flight pass
 // read the OLD one, so the badge stays stale until the next tick and this is
-// the only line that explains it. Nothing here retries or waits — the guard's
-// contract is that a second caller does nothing.
+// the only line that explains it. The waiting is the func's, not this helper's:
+// production passes RefreshService.CheckNowAfterWrite (see checkNowFn), which
+// waits for the pass it collided with and runs one more, so this line now
+// means that retry was turned away as well or the wait ran out.
 //
 // checkNow is the re-check as a func — runState.checkNowFn in production —
 // taken as a func rather than as a *RefreshService so the polarity, the Info
@@ -295,7 +297,7 @@ func recheckAfterCookieWrite(ctx context.Context, checkNow func(context.Context)
 	if checkNow(ctx) {
 		return true
 	}
-	log.Info("auth re-check after "+gesture+" was skipped, a cookie refresh was already in flight — status may lag until the next refresh", args...)
+	log.Info("auth re-check after "+gesture+" was skipped: a cookie refresh was in flight, and the one retry after it was turned away or timed out — status may lag until the next refresh", args...)
 	return false
 }
 
@@ -315,6 +317,11 @@ func recheckAfterCookieWrite(ctx context.Context, checkNow func(context.Context)
 // all asserted with a fake CheckNow, and none of that survives a parameter that
 // can only be a live RefreshService.
 //
+// CheckNowAfterWrite, not CheckNow: every site that takes this func has just
+// written cookies.txt, and a re-check dropped by a pass in flight left that
+// write unobserved for a whole refresh interval. It bounds its own wait, so
+// the sites that pass context.Background() need no bound of their own.
+//
 // Nil is not reachable in production at any of the six sites: initServices
 // constructs and assigns cookieRefresh in §15, before the auto-cookie wiring,
 // the worker callbacks and runTUI all of which follow it.
@@ -322,7 +329,7 @@ func (s *runState) checkNowFn() func(context.Context) bool {
 	if s.cookieRefresh == nil {
 		return nil
 	}
-	return s.cookieRefresh.CheckNow
+	return s.cookieRefresh.CheckNowAfterWrite
 }
 
 // reauthenticateTwitchChats broadcasts a credential change to every live

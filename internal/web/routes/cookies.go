@@ -706,16 +706,19 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 
 		// Re-check auth status after browser refresh.
 		//
-		// This is the dashboard twin of the TUI's R F, which logs when CheckNow
-		// reports that a refresh was already in flight (the pass already running
-		// read the cookie file BEFORE this browser pass rewrote it, so the status
-		// below can be pre-refresh and stays that way until the next tick). The
+		// CheckNowAfterWrite: a re-check that collides with a pass in flight waits
+		// for it (bounded, and never past the request) and runs once more, because
+		// that pass read the cookie file BEFORE this browser pass rewrote it.
+		//
+		// This is the dashboard twin of the TUI's R F, which logs when even that
+		// retry did not run (the status below can then be pre-refresh and stays
+		// that way until the next tick). The
 		// routes package has no operational logger — SetPanicLogger installs an
 		// Error-only sink for recovered panics and is not one — so this side
 		// records the same fact in a comment rather than borrowing that. The
 		// refresh's OWN outcome comes from `result` via cookieRefreshOutcome and
 		// is unaffected; only cookieStatus/twitchAuthStatus can lag.
-		refreshSvc.CheckNow(req.Context())
+		refreshSvc.CheckNowAfterWrite(req.Context())
 		if result.Ran {
 			cookiesVerified(result.YouTube, result.Twitch, "the browser refresh")
 		}
@@ -795,7 +798,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			}
 			recheckCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
-			refreshSvc.CheckNow(recheckCtx)
+			refreshSvc.CheckNowAfterWrite(recheckCtx)
 			cookiesVerified(result.YouTube, result.Twitch, "a cookie file import")
 		}()
 
@@ -996,7 +999,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			}
 			recheckCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
-			refreshSvc.CheckNow(recheckCtx)
+			refreshSvc.CheckNowAfterWrite(recheckCtx)
 			cookiesVerified(result.YouTube, result.Twitch, "the cookie setup")
 		}()
 
