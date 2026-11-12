@@ -258,6 +258,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Structural change: clear and rebuild progress store + status map (match TS onJobsChange)
 		a.progressStore.Clear()
 		a.statusMap = make(map[string]database.JobStatus)
+		a.raiseJobVersionFloor(msg)
 		for _, j := range msg.Jobs {
 			a.statusMap[j.ID] = j.Status
 			// Terminal rows get no entry: handleJobUpdate would delete one on
@@ -1540,15 +1541,50 @@ type appliedJobVersions struct {
 // about the title, quality or anything else a tick does not write, so it
 // never makes a write stale. A row with no version (0: read rather than
 // written) makes no claim and is never stale.
+//
+// A write at or below the snapshot floor is stale for both stores, and for a
+// job the snapshot did not hold as well (it was deleted before the snapshot
+// was read): see raiseJobVersionFloor.
 func (a *App) staleJobUpdate(job *database.Job, tick bool) bool {
 	if job.Version == 0 {
 		return false
+	}
+	if job.Version <= a.snapshotFloor {
+		return true
 	}
 	applied := a.jobVersions[job.ID]
 	if tick {
 		return job.Version <= applied.progress
 	}
 	return job.Version <= applied.row
+}
+
+// raiseJobVersionFloor records what a full snapshot covers. msg.Floor is a
+// write version the snapshot is at least as new as (JobsUpdateMsg), so every
+// job in it has that version applied to both of its stores, and every event
+// still queued from before the snapshot was read is dropped by staleJobUpdate
+// instead of being put back over it. Without this, the events a stalled TUI
+// had not yet read were applied after the catch-up snapshot: a tick queued
+// before a dropped Finished write counted the job active again for good, and
+// a queued Muxing write put the row itself back.
+//
+// Entries of jobs the snapshot does not hold are dropped: those jobs are
+// gone. A Floor of 0 claims nothing and changes nothing.
+func (a *App) raiseJobVersionFloor(msg JobsUpdateMsg) {
+	if msg.Floor == 0 {
+		return
+	}
+	if msg.Floor > a.snapshotFloor {
+		a.snapshotFloor = msg.Floor
+	}
+	versions := make(map[string]appliedJobVersions, len(msg.Jobs))
+	for _, j := range msg.Jobs {
+		applied := a.jobVersions[j.ID]
+		applied.row = max(applied.row, msg.Floor)
+		applied.progress = max(applied.progress, msg.Floor)
+		versions[j.ID] = applied
+	}
+	a.jobVersions = versions
 }
 
 // noteJobVersion records job's version as applied: to the progress store
@@ -1668,8 +1704,15 @@ func (a *App) handleJobAdded(ev *database.JobAdded) {
 		return
 	}
 	job := ev.Job
-	// Never dropped, however old: the row has to exist. An update that
-	// overtook it found no row to apply to, so nothing newer is lost.
+	// An add from before a full snapshot was read is in that snapshot, or
+	// its job was deleted before it: either way the snapshot has the last
+	// word, and applying the add would put the job's first status back in
+	// the status map and the progress store (see raiseJobVersionFloor).
+	if job.Version != 0 && job.Version <= a.snapshotFloor {
+		return
+	}
+	// Otherwise never dropped, however old: the row has to exist. An update
+	// that overtook it found no row to apply to, so nothing newer is lost.
 	a.noteJobVersion(job, false)
 
 	// Existing app already has data → user has used the app before; the

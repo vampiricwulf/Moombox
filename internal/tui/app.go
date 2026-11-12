@@ -47,8 +47,21 @@ type (
 	// the new trim list to the cached row + (if selected) the detail
 	// panel. DECISIONS #21 lifecycle event.
 	TrimsChangedMsg struct{ Job *database.Job }
-	JobsUpdateMsg   struct{ Jobs []*database.Job }
-	LogBatchMsg     struct{ Lines []string }
+	// JobsUpdateMsg is a full job list. It is also the element of the
+	// full-list channel, so the wiring states Floor where it can.
+	//
+	// Floor is a database.Job.Version the list is at least as new as: every
+	// write with that version or a lower one was committed before the list
+	// was read. The wiring reads it (the highest version its forwarders have
+	// seen) BEFORE reading the list, so every job event queued ahead of the
+	// snapshot is at or below it and is dropped as stale once the snapshot is
+	// applied. 0 makes no claim: the bulk-write snapshots are read inside
+	// their write, and a later write's event may already have been seen.
+	JobsUpdateMsg struct {
+		Jobs  []*database.Job
+		Floor uint64
+	}
+	LogBatchMsg struct{ Lines []string }
 	// CheckTimersMsg sets one monitor's header countdown. A zero Next clears
 	// it (the monitor has no channels); see MonitorNextCheckTime.
 	CheckTimersMsg struct {
@@ -575,6 +588,10 @@ type App struct {
 	// order to their writes; the older is dropped (see staleJobUpdate) rather
 	// than put back over the newer.
 	jobVersions map[string]appliedJobVersions
+	// snapshotFloor is the highest JobsUpdateMsg.Floor applied: every write
+	// at or below it is already in a snapshot the lists were rebuilt from.
+	// Written only by raiseJobVersionFloor.
+	snapshotFloor uint64
 
 	// Layout
 	focusedPanel FocusPanel
@@ -663,7 +680,7 @@ type App struct {
 	jobAddedCh        <-chan *database.JobAdded
 	jobDeletedCh      <-chan *database.JobDeleted
 	jobTrimsChangedCh <-chan *database.Job
-	jobsUpdateCh      <-chan []*database.Job
+	jobsUpdateCh      <-chan JobsUpdateMsg
 	logCh             <-chan string
 	checkTimersCh     <-chan CheckTimersMsg
 	cookieStatusCh    <-chan CookieStatusMsg
@@ -1161,7 +1178,7 @@ func (a *App) SetUpdateChannels(
 	jobAdded <-chan *database.JobAdded,
 	jobDeleted <-chan *database.JobDeleted,
 	jobTrimsChanged <-chan *database.Job,
-	jobsUpdate <-chan []*database.Job,
+	jobsUpdate <-chan JobsUpdateMsg,
 	logCh <-chan string,
 	checkTimers <-chan CheckTimersMsg,
 	cookieStatus <-chan CookieStatusMsg,
@@ -1400,11 +1417,11 @@ func (a *App) listenForUpdates() tea.Cmd {
 				return channelClosedMsg{Name: "jobTrimsChanged"}
 			}
 			return TrimsChangedMsg{Job: job}
-		case jobs, ok := <-a.jobsUpdateCh:
+		case snap, ok := <-a.jobsUpdateCh:
 			if !ok {
 				return channelClosedMsg{Name: "jobsUpdate"}
 			}
-			return JobsUpdateMsg{Jobs: jobs}
+			return snap
 		case line, ok := <-a.logCh:
 			if !ok {
 				return channelClosedMsg{Name: "log"}

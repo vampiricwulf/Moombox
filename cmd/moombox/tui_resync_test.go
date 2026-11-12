@@ -12,6 +12,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/logger"
+	"github.com/vampiricwulf/Moombox/internal/tui"
 )
 
 // A TUI job update dropped on a full channel must be replayed: the flag is
@@ -24,10 +25,10 @@ import (
 // CompareAndSwap so it never fires) — no snapshot arrives.
 func TestDroppedJobUpdateSchedulesAResync(t *testing.T) {
 	var needed atomic.Bool
-	jobsCh := make(chan []*database.Job, 1)
+	jobsCh := make(chan tui.JobsUpdateMsg, 1)
 	snapshot := []*database.Job{{ID: "a"}, {ID: "b"}}
 
-	resync := newTUIResync(&needed, jobsCh, func() ([]*database.Job, error) {
+	resync := newTUIResync(&needed, new(atomic.Uint64), jobsCh, func() ([]*database.Job, error) {
 		return snapshot, nil
 	})
 
@@ -35,7 +36,7 @@ func TestDroppedJobUpdateSchedulesAResync(t *testing.T) {
 	resync()
 	select {
 	case got := <-jobsCh:
-		t.Fatalf("no drop happened; nothing must be pushed, got %d jobs", len(got))
+		t.Fatalf("no drop happened; nothing must be pushed, got %d jobs", len(got.Jobs))
 	default:
 	}
 
@@ -43,8 +44,8 @@ func TestDroppedJobUpdateSchedulesAResync(t *testing.T) {
 	resync()
 	select {
 	case got := <-jobsCh:
-		if len(got) != len(snapshot) {
-			t.Errorf("resync pushed %d jobs, want %d", len(got), len(snapshot))
+		if len(got.Jobs) != len(snapshot) {
+			t.Errorf("resync pushed %d jobs, want %d", len(got.Jobs), len(snapshot))
 		}
 	default:
 		t.Fatal("a pending drop must push a full snapshot")
@@ -61,8 +62,8 @@ func TestDroppedJobUpdateSchedulesAResync(t *testing.T) {
 // Mutant: clearing the flag unconditionally instead of re-arming on failure.
 func TestResyncStaysArmedWhenItCannotDeliver(t *testing.T) {
 	var needed atomic.Bool
-	full := make(chan []*database.Job) // unbuffered, nobody reading
-	resync := newTUIResync(&needed, full, func() ([]*database.Job, error) {
+	full := make(chan tui.JobsUpdateMsg) // unbuffered, nobody reading
+	resync := newTUIResync(&needed, new(atomic.Uint64), full, func() ([]*database.Job, error) {
 		return []*database.Job{{ID: "a"}}, nil
 	})
 
@@ -73,8 +74,8 @@ func TestResyncStaysArmedWhenItCannotDeliver(t *testing.T) {
 	}
 
 	var needed2 atomic.Bool
-	ok := make(chan []*database.Job, 1)
-	failing := newTUIResync(&needed2, ok, func() ([]*database.Job, error) {
+	ok := make(chan tui.JobsUpdateMsg, 1)
+	failing := newTUIResync(&needed2, new(atomic.Uint64), ok, func() ([]*database.Job, error) {
 		return nil, errResyncTest
 	})
 	needed2.Store(true)
@@ -94,9 +95,10 @@ type resyncRig struct {
 	log         *logger.Logger
 	lines       chan string
 	jobUpdateCh chan *database.JobChange
-	jobsCh      chan []*database.Job
+	jobsCh      chan tui.JobsUpdateMsg
 	dropped     atomic.Int64
 	needed      atomic.Bool
+	seen        atomic.Uint64
 	fetches     int
 }
 
@@ -124,13 +126,13 @@ func newResyncRig(t *testing.T) *resyncRig {
 		log:         log,
 		lines:       log.Subscribe(),
 		jobUpdateCh: make(chan *database.JobChange, 1),
-		jobsCh:      make(chan []*database.Job, 10),
+		jobsCh:      make(chan tui.JobsUpdateMsg, 10),
 	}
 }
 
 // resync is the rig's counting wrapper around the production replay.
 func (r *resyncRig) resync() func() {
-	return newTUIResync(&r.needed, r.jobsCh, func() ([]*database.Job, error) {
+	return newTUIResync(&r.needed, &r.seen, r.jobsCh, func() ([]*database.Job, error) {
 		r.fetches++
 		return r.db.GetAllJobs()
 	})
@@ -217,7 +219,7 @@ func TestNDroppedUpdatesProduceExactlyOneRefresh(t *testing.T) {
 			var status database.JobStatus
 			select {
 			case snap := <-r.jobsCh:
-				for _, j := range snap {
+				for _, j := range snap.Jobs {
 					if j.ID == "a" {
 						status = j.Status
 					}
@@ -312,7 +314,7 @@ func TestADeliveredBulkListDoesNotClearAPendingReplay(t *testing.T) {
 	}
 	stale := []*database.Job{{ID: "a", Status: database.StatusDownloading}}
 	select {
-	case r.jobsCh <- stale:
+	case r.jobsCh <- tui.JobsUpdateMsg{Jobs: stale}:
 	default:
 		t.Fatal("the bulk list must fit")
 	}
@@ -330,7 +332,7 @@ func TestADeliveredBulkListDoesNotClearAPendingReplay(t *testing.T) {
 	<-r.jobsCh // the stale bulk list
 	select {
 	case snap := <-r.jobsCh:
-		for _, j := range snap {
+		for _, j := range snap.Jobs {
 			if j.ID == "a" && j.Status != database.StatusFinished {
 				t.Errorf("the replayed snapshot carries status %q, want %q", j.Status, database.StatusFinished)
 			}
