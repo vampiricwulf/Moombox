@@ -116,6 +116,36 @@ jobs:
           fi
           echo "MOOMBOX_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
+      # Build-and-start check (owner ruling R2-O3). Until this step nothing
+      # ever ran the image: the multi-arch build below only proves it
+      # builds, and a break in docker/entrypoint.sh or in the binary's start
+      # inside the image was left for a user to find. The amd64 image is
+      # built into the runner's own Docker (load), with the same build args,
+      # and started once. The multi-arch build then reuses these layers from
+      # the same builder, so the cost is the load and one short run. It runs
+      # in every use of this workflow, so in a release, a release dry run
+      # and a manual run, and in no pull request.
+      - name: Build the amd64 image for the start check
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          # Never pushed, so it needs no attestation, and an image with one
+          # cannot be loaded into the runner's Docker.
+          provenance: false
+          tags: moombox:start-check
+          build-args: |
+            VERSION=${{ env.MOOMBOX_VERSION }}
+            COMMIT=${{ env.MOOMBOX_COMMIT }}
+
+      - name: Start the image once
+        # `--version` through the entrypoint on an empty /data: the
+        # entrypoint seeds config.toml and README-docker.txt, then the
+        # binary answers before it reads the config or opens a database.
+        timeout-minutes: 5
+        run: bash .github/scripts/image-smoke.sh moombox:start-check "$MOOMBOX_COMMIT" "$MOOMBOX_VERSION"
+
       - uses: docker/build-push-action@v7
         with:
           context: .
