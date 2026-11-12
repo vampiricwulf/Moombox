@@ -508,6 +508,13 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 	// No complete HTTP answer: a dial, TLS or DNS failure, a reset, a stalled
 	// or cut-off body.
 	rs.consecutiveGoneErrors = 0
+	// A fetch the loop's own cancel cut short (operator Cancel, shutdown) is
+	// also a status-0 error, and it is not an edge failure: no retry count, no
+	// head probe, no stream-status check on a dead context and no finalize.
+	// The loop top returns the cancel.
+	if ctx.Err() != nil || d.isCancelled() {
+		return nil
+	}
 	if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 		// Same shape as the HTTP siblings above (handleGoneError,
 		// handleHTTPError): a transport error during an outage used to sit
@@ -536,8 +543,8 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 	// all three. A failed fetch reads no X-Head-Seqnum, so a finalize behind
 	// the head after such a spell does not call that head current
 	// (HeadCurrentAtFinalize).
-	d.logger.Debug("[Downloader] segment fetch failed without an HTTP answer — handled like a server error",
-		"seq", d.currentSeq.Load(), "status", statusCode, "error", fetchErr)
+	d.logger.Debug("[Downloader] segment fetch got no complete answer — handled like a server error",
+		"seq", d.currentSeq.Load(), "status", statusCode, "headSeq", d.headSeq.Load(), "error", fetchErr)
 	return d.handleHTTPError(ctx, hasStartedDownloading, rs, delayCap)
 }
 
@@ -1022,7 +1029,7 @@ func (d *SegmentDownloader) newPartInitEvicted(ctx context.Context) bool {
 }
 
 // unservedSegmentPersistence is how long a segment that only FAILS — a 5xx,
-// an empty body — must have kept failing since the live loop's first rebuild
+// an empty body, a fetch with no HTTP answer — must have kept failing since the live loop's first rebuild
 // at it before a rebuild-exhausted downloader gives it up
 // (handBackForRebuild). A 403 or a 410 is a refusal and is given up at the
 // cap; a server error says the server failed, not that the segment is
@@ -1038,8 +1045,8 @@ const unservedSegmentPersistence = 10 * time.Minute
 // sequence the caller has already rebuilt at as many times as it will
 // (NoteRebuildsExhausted), the refused-segment rule takes the segment
 // instead: each of those rebuilds was a credential refresh, and the segment
-// failed again after every one. That is the path for a 410 or a 5xx, which
-// no in-loop refresh answers (the 403 rule in runDashLoop never sees them).
+// failed again after every one. That is the path for a 410, a 5xx, an empty body or a fetch with
+// no HTTP answer, which no in-loop refresh answers (the 403 rule in runDashLoop never sees them).
 // refused is the handler's verdict on the answer: a 403 or a 410 is taken
 // at once, anything else only once it has persisted for
 // unservedSegmentPersistence.

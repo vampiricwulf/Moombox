@@ -172,3 +172,150 @@ func TestDashTransportFailureLeavesTheHeadStaleAtFinalize(t *testing.T) {
 		wantFile(t, out, gvsRecording(0, lastServed))
 	})
 }
+
+// A fetch the loop's own cancel cut short (operator Cancel, shutdown) is also
+// a status-0 error, and it is not an edge failure. The handler leaves it to
+// the loop top: no retry counted, no stream-status check on a dead context and
+// no finalize, even with the no-segment gap already past MaxTimeout.
+//
+// Mutant: handleDashError without its cancel check — CheckStreamStatus runs on
+// the dead context and the download is recorded as finished at MaxTimeout.
+func TestHandleDashErrorLeavesACancelledFetchToTheLoop(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cancel func(d *SegmentDownloader, cancelCtx context.CancelFunc)
+	}{
+		{"context cancelled", func(_ *SegmentDownloader, cancelCtx context.CancelFunc) { cancelCtx() }},
+		{"cancel flag set", func(d *SegmentDownloader, _ context.CancelFunc) { d.cancelled.Store(true) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checks := 0
+			d := NewSegmentDownloader(DownloaderOptions{
+				OutputFile: filepath.Join(t.TempDir(), "v"),
+				MaxTimeout: time.Minute,
+				IsOnline:   func() bool { return true },
+				CheckStreamStatus: func(context.Context) (bool, error) {
+					checks++
+					return false, nil
+				},
+			})
+			d.delays = fastDelays()
+			activity := ActivityNone
+			d.OnActivity = func(a DownloadActivity) { activity = a }
+			d.headSeq.Store(10)
+			d.currentSeq.Store(5)
+			d.lastHeadProbeTime.StoreNow()                        // no head probe: there is no server
+			d.lastSegTime.Store(time.Now().Add(-2 * time.Minute)) // past MaxTimeout
+			ctx, cancelCtx := context.WithCancel(t.Context())
+			defer cancelCtx()
+			tc.cancel(d, cancelCtx)
+
+			rs := &dashRetryState{sameSegRetries: MaxSegmentRetries, lastRetrySeq: 5}
+			if err := d.handleDashError(ctx, 0, context.Canceled, rs, true, 60); err != nil {
+				t.Fatalf("handleDashError = %v, want nil (the loop top returns the cancel)", err)
+			}
+			if checks != 0 {
+				t.Errorf("CheckStreamStatus ran %d times for a cancelled fetch", checks)
+			}
+			if got := d.finishedWith(); got != finishNone {
+				t.Errorf("finished as %v, want finishNone: a cancel is not a finalize", got)
+			}
+			if d.FinalizedBehindHead() {
+				t.Error("FinalizedBehindHead latched by a cancelled fetch")
+			}
+			if rs.sameSegRetries != MaxSegmentRetries {
+				t.Errorf("sameSegRetries = %d, want %d: a cancelled fetch is not a retry", rs.sameSegRetries, MaxSegmentRetries)
+			}
+			if activity != ActivityNone {
+				t.Errorf("activity = %v, want none", activity)
+			}
+		})
+	}
+}
+
+// hangAfter passes requests to next until the segment lastServed has been
+// answered, then holds every request until its context ends: an edge that
+// accepts the connection and never answers.
+type hangAfter struct {
+	next       http.RoundTripper
+	lastServed int
+	dead       atomic.Bool
+	hanging    atomic.Int32
+}
+
+func (t *hangAfter) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.dead.Load() {
+		// Count the held fetch of the next segment only, not the head
+		// probes held beside it.
+		if seq, convErr := strconv.Atoi(req.URL.Query().Get("sq")); convErr == nil && seq == t.lastServed+1 {
+			t.hanging.Add(1)
+			defer t.hanging.Add(-1)
+		}
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	}
+	resp, err := t.next.RoundTrip(req)
+	if seq, convErr := strconv.Atoi(req.URL.Query().Get("sq")); convErr == nil && seq == t.lastServed {
+		t.dead.Store(true)
+	}
+	return resp, err
+}
+
+// The same through the loop: the context is cancelled while a fetch hangs,
+// with the no-segment gap and the time since the last status check both past
+// streamStatusCheckInterval, so the failed fetch would be due a check. Start
+// returns the cancel and CheckStreamStatus is never called on the dead context.
+func TestDashCancelDuringAHangingFetchReturnsTheCancel(t *testing.T) {
+	const head = 5
+	serveGVS(t, constHead(head), func(*http.Request, int, int) gvsAnswer { return gvsServe })
+	ht := &hangAfter{next: engineHTTPClient.Transport, lastServed: head}
+	engineHTTPClient = &http.Client{Transport: ht} // serveGVS's cleanup restores the original
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		var lastCheck, lastSeg atomic.Int64
+		var deadChecks atomic.Int32
+		d := NewSegmentDownloader(DownloaderOptions{
+			BaseURL:           gvsBase("cancel"),
+			OutputFile:        filepath.Join(t.TempDir(), "video_stream"),
+			InitInlineAtStart: true,
+			MaxTimeout:        time.Hour,
+			IsOnline:          func() bool { return true },
+			CheckStreamStatus: func(c context.Context) (bool, error) {
+				if c.Err() != nil {
+					deadChecks.Add(1)
+				}
+				lastCheck.Store(time.Now().UnixNano())
+				return false, nil // still live
+			},
+		})
+		d.OnProgress = func(DownloadProgress) { lastSeg.Store(time.Now().UnixNano()) }
+
+		done := make(chan error, 1)
+		go func() { done <- d.Start(ctx) }()
+
+		since := func(v *atomic.Int64) time.Duration { return time.Since(time.Unix(0, v.Load())) }
+		deadline := time.Now().Add(10 * time.Minute)
+		for {
+			time.Sleep(100 * time.Millisecond)
+			if time.Now().After(deadline) {
+				t.Fatal("never saw a hanging fetch that was due a status check")
+			}
+			if ht.hanging.Load() > 0 && lastSeg.Load() != 0 &&
+				since(&lastSeg) > streamStatusCheckInterval && since(&lastCheck) > streamStatusCheckInterval {
+				break
+			}
+		}
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("Start = %v, want context.Canceled", err)
+		}
+		if n := deadChecks.Load(); n != 0 {
+			t.Errorf("CheckStreamStatus ran %d times on the cancelled context", n)
+		}
+		if got := d.finishedWith(); got != finishNone {
+			t.Errorf("finished as %v, want finishNone", got)
+		}
+	})
+}

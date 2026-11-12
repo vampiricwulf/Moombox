@@ -95,10 +95,9 @@ func TestHandleDashErrorGenericEmitsRetrying(t *testing.T) {
 	d.headSeq.Store(10)
 	d.currentSeq.Store(5)
 	d.lastHeadProbeTime.StoreNow() // no head probe: there is no server
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel() // cancelled so the retry sleep returns immediately
+	d.delays = fastDelays()        // a live context: a cancelled one is not a failure to retry
 	rs := &dashRetryState{consecutiveGoneErrors: 3}
-	err := d.handleDashError(ctx, 0, errors.New("read tcp: i/o timeout"),
+	err := d.handleDashError(t.Context(), 0, errors.New("read tcp: i/o timeout"),
 		rs, true, 60)
 	if err != nil {
 		t.Fatalf("handleDashError returned %v, want nil (continue)", err)
