@@ -40,6 +40,15 @@ const SESSION_RECHECK_MS = 30000;
 // panel (owner ruling R-B3). One or two is what a restart behind a healthy
 // proxy looks like; three is about four seconds of backoff.
 const WS_REFUSED_NOTICE_AFTER = 3;
+// How long a socket may go without a pong before it is taken for dead, and
+// the longer limit that holds until its first frame has arrived. That first
+// frame is the initial_state snapshot, megabytes on a busy instance, and the
+// server gives its write up to two minutes on a slow link
+// (snapshotWriteTimeout, internal/web/websocket.go). A pong cannot overtake
+// it, so at 45 s a phone on a weak signal closed the socket that was still
+// delivering its job list, and started the download again.
+const WS_PONG_TIMEOUT_MS = 45000;
+const WS_FIRST_FRAME_TIMEOUT_MS = 150000;
 // How many Archived cards one draw adds. The whole archived list is held in
 // memory (the filter, Select All and the details lookup read all of it); only
 // the cards are bounded, because each one is a dozen Shoelace elements and a
@@ -83,6 +92,9 @@ export class MoomboxApp {
     // in a row were refused while HTTP answered. _syncWsNotice is the only
     // writer of the notice itself.
     this._wsEverOpened = false;
+    // Whether the current socket has delivered a frame yet (the heartbeat
+    // waits longer for the first one, WS_FIRST_FRAME_TIMEOUT_MS).
+    this._wsGotFrame = false;
     this._wsRefusedReachable = 0;
     this.autoCookieReloginRequired = null;
     // Tri-state; see loadStatus. null = the server has no opinion.
@@ -1201,6 +1213,7 @@ export class MoomboxApp {
       this.reconnectAttempts = 0;
       this._lastPong = Date.now();
       this._lastPingSent = Date.now();
+      this._wsGotFrame = false;
       this._setConnState(ConnState.OPEN);
       // Refresh status (cookie + Twitch auth) on reconnect
       this.loadStatus();
@@ -1218,10 +1231,13 @@ export class MoomboxApp {
         if (this.ws?.readyState !== WebSocket.OPEN) return;
         const now = Date.now();
         // Dead-socket check: a ping went out and no pong has come back for
-        // 45s. Measured against _lastPong — _lastPingSent refreshes every
-        // tick (send() buffers without throwing on dead sockets), so a
-        // staleness check against it would never fire.
-        if (this._lastPingSent > this._lastPong && now - this._lastPong > 45000) {
+        // 45s (longer while the first frame is still arriving, see
+        // WS_FIRST_FRAME_TIMEOUT_MS). Measured against _lastPong —
+        // _lastPingSent refreshes every tick (send() buffers without
+        // throwing on dead sockets), so a staleness check against it would
+        // never fire.
+        const pongTimeout = this._wsGotFrame ? WS_PONG_TIMEOUT_MS : WS_FIRST_FRAME_TIMEOUT_MS;
+        if (this._lastPingSent > this._lastPong && now - this._lastPong > pongTimeout) {
           console.log("WebSocket heartbeat timeout — reconnecting");
           this.ws.close();
           return;
@@ -1236,6 +1252,7 @@ export class MoomboxApp {
     };
 
     this.ws.onmessage = (event) => {
+      this._wsGotFrame = true;
       try {
         const message = JSON.parse(event.data);
         this.handleMessage(message);

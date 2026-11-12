@@ -13,7 +13,15 @@ import (
 )
 
 const (
+	// wsWriteTimeout bounds the write of every frame but an initial_state
+	// snapshot, and is the base of a snapshot's own bound (see
+	// snapshotWriteTimeout).
 	wsWriteTimeout = 10 * time.Second
+	// wsSnapshotFloorRate is the slowest link, in bytes a second, a snapshot
+	// is still delivered over, and wsSnapshotWriteCap the longest one write
+	// may take whatever its size.
+	wsSnapshotFloorRate = 32 << 10
+	wsSnapshotWriteCap  = 2 * time.Minute
 	// wsPingInterval is also the worst-case latency of a pending resync: the
 	// ping tick is the only place a snapshot can be flushed without a
 	// broadcast to ride on (see flushResync), so on a completely quiet hub a
@@ -45,6 +53,26 @@ const (
 	// stale state. Audit reports/web.md C-7.
 	wsWriteQueueSize = 16
 )
+
+// snapshotWriteTimeout is how long the write of an initial_state snapshot of
+// n bytes may take: wsWriteTimeout plus the time n bytes need at
+// wsSnapshotFloorRate, capped at wsSnapshotWriteCap.
+//
+// The snapshot is megabytes on a busy instance (1.7 MB at 500 Tasks rows, 7 MB
+// at 2,000: TestInitialStateSnapshotSize, cmd/moombox) and is not compressed.
+// Under the flat 10 s every frame used to get, a link below about 1.4 Mbit/s
+// could never finish the first write at 500 rows: the connection was closed,
+// the dashboard reconnected, and each attempt cost another GetAllJobs and
+// marshal for a job list that never arrived. Only snapshots are scaled; every
+// other frame is small and keeps wsWriteTimeout exactly.
+//
+// The cost is a stalled peer holding its goroutines for up to the cap rather
+// than 10 s when the frame it stalls on is a snapshot. The 16-slot queue
+// still bounds what is buffered for it meanwhile.
+func snapshotWriteTimeout(n int) time.Duration {
+	d := wsWriteTimeout + time.Duration(n)*time.Second/wsSnapshotFloorRate
+	return min(d, wsSnapshotWriteCap)
+}
 
 // WSMessage is a WebSocket message sent to clients.
 // Uses "payload" field to match the TypeScript frontend protocol.
@@ -140,6 +168,10 @@ type wsFrame struct {
 	// one tick stale and then whole again. Losing any other frame loses
 	// state nothing later repeats, and arms a resync (see enqueue).
 	restated bool
+	// snapshot is set for a full initial_state frame queued as a resync:
+	// it restates the frames it displaces (see enqueue) and its write gets
+	// snapshotWriteTimeout.
+	snapshot bool
 }
 
 type wsClient struct {
@@ -174,6 +206,12 @@ type wsClient struct {
 	// or gets evicted still costs the interval. Seeded at connect from the
 	// initial state the client is handed there.
 	lastResync atomic.Int64
+	// slowWriteUntil is the UnixNano deadline of the snapshot writePump is
+	// writing right now, 0 when it is writing none. A ping or a pong has to
+	// wait for that write to release the connection (one frame is written
+	// at a time), so its own timeout is extended by what is left of it:
+	// see controlTimeout.
+	slowWriteUntil atomic.Int64
 }
 
 // NewWebSocketHub creates a new WebSocket hub.
@@ -359,15 +397,37 @@ func (hub *WebSocketHub) writePump(client *wsClient) {
 			if !ok {
 				return
 			}
-			writeCtx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
+			timeout := wsWriteTimeout
+			if msg.snapshot {
+				timeout = snapshotWriteTimeout(len(msg.data))
+				client.slowWriteUntil.Store(time.Now().Add(timeout).UnixNano())
+			}
+			writeCtx, cancel := context.WithTimeout(client.ctx, timeout)
 			err := client.conn.Write(writeCtx, websocket.MessageText, msg.data)
 			cancel()
+			if msg.snapshot {
+				client.slowWriteUntil.Store(0)
+			}
 			if err != nil {
 				hub.removeClient(client, "write failed")
 				return
 			}
 		}
 	}
+}
+
+// controlTimeout is the timeout for a ping, or for the pong that answers the
+// dashboard's {"type":"ping"}: wsWriteTimeout, plus whatever is left of a
+// snapshot write in progress. The library writes one frame at a time, so
+// either waits behind that write, and at a flat 10 s the first one to come
+// due during a longer snapshot write closed a connection that was doing
+// exactly what it should.
+func (hub *WebSocketHub) controlTimeout(client *wsClient) time.Duration {
+	left := time.Duration(client.slowWriteUntil.Load() - time.Now().UnixNano())
+	if left <= 0 {
+		return wsWriteTimeout
+	}
+	return wsWriteTimeout + left
 }
 
 // wsLagLogInterval bounds how often ONE client's drops may produce a log line.
@@ -502,7 +562,7 @@ func (hub *WebSocketHub) resyncSnapshot(client *wsClient) (snap []byte) {
 // wsPingInterval.
 func (hub *WebSocketHub) flushResync(client *wsClient) {
 	if snap := hub.resyncSnapshot(client); snap != nil {
-		hub.enqueue(client, wsFrame{data: snap}, true)
+		hub.enqueue(client, wsFrame{data: snap, snapshot: true})
 	}
 }
 
@@ -518,19 +578,17 @@ func (hub *WebSocketHub) flushResync(client *wsClient) {
 // Returns false when the client is gone (channel closed by removeClient).
 // Audit reports/web.md C-7.
 func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg wsFrame) bool {
-	resync := false
 	if snap := hub.resyncSnapshot(client); snap != nil {
-		msg = wsFrame{data: snap}
-		resync = true
+		msg = wsFrame{data: snap, snapshot: true}
 	}
-	return hub.enqueue(client, msg, resync)
+	return hub.enqueue(client, msg)
 }
 
 // enqueue pushes one frame into a client's write queue. On a full queue the
 // OLDEST queued frame is dropped (it's stale state for a client that's
-// already behind) and the new frame replaces it. `resync` says the frame
-// being pushed is a full-state snapshot, which changes what an eviction
-// means — see the comment on the drop.
+// already behind) and the new frame replaces it. A frame that is a
+// full-state snapshot (wsFrame.snapshot) changes what an eviction means:
+// see the comment on the drop.
 //
 // A lost frame arms a resync only when nothing restates it. A job_progress
 // frame (wsFrame.restated) is restated by the job's next tick, so evicting or
@@ -546,7 +604,7 @@ func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg wsFrame) bool {
 // send-on-closed-channel race with removeClient, and stays silent because
 // that race is expected. Nothing that can fail in an interesting way — the
 // snapshot build above, in particular — belongs underneath it.
-func (hub *WebSocketHub) enqueue(client *wsClient, msg wsFrame, resync bool) bool {
+func (hub *WebSocketHub) enqueue(client *wsClient, msg wsFrame) bool {
 	defer func() {
 		// Recover from a send-on-closed-channel race with removeClient.
 		if r := recover(); r != nil {
@@ -565,7 +623,7 @@ func (hub *WebSocketHub) enqueue(client *wsClient, msg wsFrame, resync bool) boo
 	select {
 	case evicted := <-client.writes:
 		client.drops.Add(1)
-		if !resync && !evicted.restated {
+		if !msg.snapshot && !evicted.restated {
 			// A frame the client never saw is gone and nothing queued after it
 			// restates it. When we ARE carrying a snapshot, the frame we just
 			// evicted is almost always older than that snapshot (a whole queue
@@ -706,7 +764,9 @@ func (hub *WebSocketHub) sendInitialState(client *wsClient) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
+	// Nothing else writes to this connection yet (the pumps start after this
+	// returns), so no ping or pong waits behind it.
+	ctx, cancel := context.WithTimeout(client.ctx, snapshotWriteTimeout(len(msgBytes)))
 	defer cancel()
 	if err := client.conn.Write(ctx, websocket.MessageText, msgBytes); err != nil {
 		// Client failed to receive initial state — remove and close
@@ -738,7 +798,7 @@ func (hub *WebSocketHub) pingPump(client *wsClient) {
 			// hub.closed check under hub.mu was a TOCTOU (closed could
 			// flip between the unlock and the Ping) that the cancelled
 			// ctx + Ping error already cover.
-			ctx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
+			ctx, cancel := context.WithTimeout(client.ctx, hub.controlTimeout(client))
 			err := client.conn.Ping(ctx)
 			cancel()
 			if err != nil {
@@ -830,7 +890,7 @@ func (hub *WebSocketHub) readPump(client *wsClient) {
 		case "ping":
 			pong := WSMessage{Type: "pong"}
 			pongBytes, _ := json.Marshal(pong)
-			ctx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
+			ctx, cancel := context.WithTimeout(client.ctx, hub.controlTimeout(client))
 			err := client.conn.Write(ctx, websocket.MessageText, pongBytes)
 			cancel()
 			if err != nil {
