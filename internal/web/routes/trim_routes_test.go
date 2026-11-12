@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -191,20 +190,6 @@ func TestTrimCreateDurationUnderOneSecond(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("duration < 1s: want 400, got %d", rec.Code)
-	}
-}
-
-// TestTrimValidationGuardsCoverInfNaN is a unit-style test of the in-route
-// math.IsInf / math.IsNaN guards. Because encoding/json rejects NaN/Inf
-// at decode time, the only way to verify these guards fire is to call
-// the underlying math.IsInf/IsNaN directly with values the route would
-// have rejected — locking down that those guards exist (not stripped).
-func TestTrimValidationGuardsCoverInfNaN(t *testing.T) {
-	cases := []float64{math.NaN(), math.Inf(1), math.Inf(-1)}
-	for _, v := range cases {
-		if !(math.IsNaN(v) || math.IsInf(v, 0)) {
-			t.Errorf("expected %v to be rejected by IsNaN/IsInf guards", v)
-		}
 	}
 }
 

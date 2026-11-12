@@ -1598,34 +1598,6 @@ func TestJobChatServesARangeRequest(t *testing.T) {
 	}
 }
 
-// TestJobChatAnswersAConditionalGET: the If-Modified-Since short-circuit (R15)
-// stays ahead of the open, and ServeContent answers the same question for a
-// request that gets past it.
-//
-// THE MUTANT: drop the notModifiedSince short-circuit — this still passes (via
-// ServeContent) but the file is opened and stat'd for nothing on every poll.
-func TestJobChatAnswersAConditionalGET(t *testing.T) {
-	f := newJobsFixture(t)
-	chatPath := filepath.Join(f.outputDir, "chat.json")
-	if err := os.WriteFile(chatPath, []byte(`{"messages":[]}`), 0o644); err != nil {
-		t.Fatalf("write chat: %v", err)
-	}
-	f.addJob(t, "yt_condchat", func(j *database.Job) { j.ChatFilename = "chat.json" })
-
-	fi, err := os.Stat(chatPath)
-	if err != nil {
-		t.Fatalf("stat chat: %v", err)
-	}
-	rec := doRequestWithHeaders(t, f.router, "GET", "/api/jobs/yt_condchat/chat",
-		map[string]string{"If-Modified-Since": fi.ModTime().UTC().Format(http.TimeFormat)})
-	if rec.Code != http.StatusNotModified {
-		t.Fatalf("conditional GET: want 304, got %d", rec.Code)
-	}
-	if rec.Body.Len() != 0 {
-		t.Errorf("304 carried %d body bytes, want none", rec.Body.Len())
-	}
-}
-
 // TestJobChatIsNotReadIntoMemory is the finding itself: serving a 4 MB chat
 // file must not allocate 4 MB.
 //

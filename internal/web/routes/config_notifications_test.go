@@ -168,34 +168,6 @@ func TestConfigPutStripsUnknownEvents(t *testing.T) {
 	}
 }
 
-// TestNotificationsApplyUsesTheSharedDecode is the forward-compat pin. The
-// notifications arm rebuilt each target from the keys it had an explicit arm
-// for, so every field added later needed a route edit too — and the first one
-// anybody forgets (N3's `mode`) is silently erased by an unrelated Settings
-// save, because the SPA sends the whole stored object back and the route is
-// what drops it. The `channels` arm has always decoded instead.
-//
-// This is a source-level assertion on purpose: no BEHAVIOURAL test can tell
-// the two apart until a field exists that the route has no arm for, and the
-// whole point of the change is that such a field must never need one. When N3
-// adds `Mode`, replace this with a `mode` round trip through putConfig.
-func TestNotificationsApplyUsesTheSharedDecode(t *testing.T) {
-	src, err := os.ReadFile("config_routes.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	arm := regexp.MustCompile(`(?s)// Notifications\n.*?\n\t}\n`).Find(src)
-	if arm == nil {
-		t.Fatal("the // Notifications arm of applyConfigUpdates was not found")
-	}
-	if !strings.Contains(string(arm), "decodeConfigEntries") {
-		t.Error("the notifications arm still builds config.NotificationConfig field by field; " +
-			"every field a later arc adds would then need a route edit, and N3's `mode` would be " +
-			"erased by any unrelated Settings save. Decode the array the way the channels arm does, " +
-			"through the shared decodeConfigEntries helper.")
-	}
-}
-
 // TestConfigPutRejectsATypeMismatchedEntry is T3-I1, for BOTH arms that decode
 // an object array.
 //

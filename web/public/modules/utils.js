@@ -509,7 +509,8 @@ const COOKIE_INDICATOR_PLATFORMS = {
 /**
  * The job status a park lands on. database.StatusCookies in Go
  * (internal/database/types.go); app.js carries its own copies for the action
- * sets. Pinned against the Go constant by TestWebParkedStatusMatchesGo.
+ * sets. Pinned against the Go constant by
+ * TestParkedCookiePlatformsAttributesToTheRightPlatform.
  */
 const PARKED_JOB_STATUS = "COOKIES?";
 

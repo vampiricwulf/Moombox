@@ -289,67 +289,17 @@ func TestCookieImportRouteRefusesTheThreeShapesWithTheirOwnMessage(t *testing.T)
 	}
 }
 
-// TestCookieImportRouteRefusesTheWrongRequestShapes. Each of these is a distinct
-// operator mistake with a distinct answer, and each has its own mutant: drop
-// the cap and a 50 MB paste is merged into memory and onto disk; drop the
-// content-type switch and a JSON body posted by a well-meaning client is read
-// as cookie text and rejected with the wrong sentence; drop the empty-body
-// check and a mis-click reports "that cookie file has no cookie rows" about a
-// file the operator never sent.
+// TestCookieImportRouteRefusesTheWrongRequestShapes. A JSON body posted by a
+// well-meaning client is its own operator mistake with its own answer. Mutant:
+// drop the content-type switch and it is read as cookie text and rejected with
+// the wrong sentence. The over-the-cap refusals (pasted and uploaded) and the
+// empty-body refusal are asserted in TestCookieImportRouteLeaksNoValueAnywhere.
 func TestCookieImportRouteRefusesTheWrongRequestShapes(t *testing.T) {
-	t.Run("over the cap, pasted", func(t *testing.T) {
-		r, _, _, _ := importRouter(t, "", nil)
-		oversize := importPaste() + strings.Repeat("# padding\n", 60000)
-		rec := postImport(t, r, "text/plain", oversize)
-		if rec.Code != http.StatusRequestEntityTooLarge {
-			t.Fatalf("status %d, want 413: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	// The two shapes reach the cap through DIFFERENT code, so one subtest does
-	// not cover both: the paste gets the *http.MaxBytesError straight back from
-	// io.ReadAll, while the upload gets whatever ParseMultipartForm returns for a
-	// body whose reader refused. errors.As has to find the sentinel through
-	// that, or an oversize upload answers 400 "no `cookies` file part" — a
-	// sentence about the wrong mistake, on the shape a phone uses.
-	t.Run("over the cap, uploaded", func(t *testing.T) {
-		r, _, _, _ := importRouter(t, "", nil)
-		var buf bytes.Buffer
-		w := multipart.NewWriter(&buf)
-		part, err := w.CreateFormFile("cookies", "cookies.txt")
-		if err != nil {
-			t.Fatalf("CreateFormFile: %v", err)
-		}
-		if _, err := part.Write([]byte(importPaste() + strings.Repeat("# padding\n", 60000))); err != nil {
-			t.Fatalf("write part: %v", err)
-		}
-		if err := w.Close(); err != nil {
-			t.Fatalf("close multipart: %v", err)
-		}
-		req := httptest.NewRequest(http.MethodPost, "/api/cookies/import", &buf)
-		req.Header.Set("Content-Type", w.FormDataContentType())
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
-		if rec.Code != http.StatusRequestEntityTooLarge {
-			t.Fatalf("status %d, want 413 — a 400 here means ParseMultipartForm wrapped the cap error "+
-				"somewhere errors.As cannot reach, and the reader needs its own check: %s",
-				rec.Code, rec.Body.String())
-		}
-	})
-
 	t.Run("an unsupported content type", func(t *testing.T) {
 		r, _, _, _ := importRouter(t, "", nil)
 		rec := postImport(t, r, "application/json", `{"cookies":"..."}`)
 		if rec.Code != http.StatusUnsupportedMediaType {
 			t.Fatalf("status %d, want 415: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	t.Run("an empty body", func(t *testing.T) {
-		r, _, _, _ := importRouter(t, "", nil)
-		rec := postImport(t, r, "text/plain", "   \n\n")
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status %d, want 400: %s", rec.Code, rec.Body.String())
 		}
 	})
 }

@@ -399,25 +399,3 @@ func TestParkedCookiePlatformsAttributesToTheRightPlatform(t *testing.T) {
 		}
 	}
 }
-
-// TestWebParkedStatusMatchesGo is the third literal in the chain.
-//
-// utils.js has to spell the parked status itself; it cannot import Go. If
-// database.StatusCookies is ever renamed, every Go call site moves with it and
-// this one does not — parkedCookiePlatforms would then match nothing, the badge
-// would stop escalating, and no Go test would notice.
-//
-// Asserted by EXECUTION, not by grepping the literal out of the module: a job
-// carrying the Go constant's value must be seen as parked.
-func TestWebParkedStatusMatchesGo(t *testing.T) {
-	vm := utilsVM(t)
-	raw := jsCall(t, vm, "parkedCookiePlatforms", []map[string]any{
-		{"status": string(database.StatusCookies), "platform": "youtube"},
-	})
-	got, _ := raw.(map[string]any)
-	if got["youtube"] != true {
-		t.Errorf("a job whose status is database.StatusCookies (%q) is not seen as parked by "+
-			"utils.js. The status literal in the module has drifted from the Go constant, and the "+
-			"badge would silently stop escalating", database.StatusCookies)
-	}
-}

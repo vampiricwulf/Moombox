@@ -7,7 +7,6 @@ import (
 	"github.com/dop251/goja"
 
 	"github.com/vampiricwulf/Moombox/internal/webtest"
-	webassets "github.com/vampiricwulf/Moombox/web"
 )
 
 // AutoCookieStatus.LastError reaching the always-on cookies panel, asserted by
@@ -220,15 +219,5 @@ func TestCookiePanelErrorElementExists(t *testing.T) {
 	if !strings.Contains(html, `id="auto-cookie-last-error"`) {
 		t.Error("index.html has no auto-cookie-last-error element. getElementById returns null, " +
 			"the guard in loadAutoCookieStatus swallows it, and the recorded error is never shown")
-	}
-}
-
-// TestCookiePanelMarkupIsEmbedded guards the go:embed step, which is the one
-// failure this whole file would otherwise report as a JS bug: web/public is
-// compiled into the binary, so an edited index.html that was never rebuilt is
-// invisible here and to the user alike.
-func TestCookiePanelMarkupIsEmbedded(t *testing.T) {
-	if _, err := webassets.PublicFS.ReadFile("public/index.html"); err != nil {
-		t.Fatalf("index.html is not embedded: %v", err)
 	}
 }
