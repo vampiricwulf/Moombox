@@ -249,7 +249,12 @@ func (d *SegmentDownloader) consultStreamEnd(ctx context.Context) endVerdict {
 	return d.consultEnd(ctx, d.opts.CheckStreamStatus)
 }
 
+// errEmptySegmentBody is the live HLS loop's name for a 2xx answer with no
+// body, which it treats as a failed fetch of that segment.
+var errEmptySegmentBody = errors.New("segment answered with an empty body")
+
 // runHlsLoop is the main HLS download loop.
+
 func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// Save resume state on exit so interrupted downloads can continue on restart.
 	// Only clear the resume file when the stream ends naturally.
@@ -613,6 +618,17 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			}
 
 			segData, segStatus, segErr := d.fetchSegment(ctx, seg.URL)
+			// A 2xx that carried no body is not a segment: it is a failed fetch
+			// of this sequence and takes the same branch as one (retried after a
+			// playlist refresh, then the stuck-segment split or skip). Written
+			// as a segment it advanced currentSeq with nothing in the file — no
+			// gap row, no part split, and a coverage entry for footage the part
+			// does not hold. Tested here, ahead of ensureHlsInit, so an empty
+			// body never counts as a media fetch. The DASH loop and
+			// fetchSegmentWithRetry read it the same way.
+			if segErr == nil && len(segData) == 0 {
+				segErr = errEmptySegmentBody
+			}
 			if segErr != nil {
 				// HLS 403s commonly indicate cipher rotation or POT expiry.
 				// Fire OnCipherFailure once per downloader so the strategy can
