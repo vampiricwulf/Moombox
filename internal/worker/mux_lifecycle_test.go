@@ -1040,8 +1040,15 @@ func TestAsideOutputPathBoundsItsCollisionCounter(t *testing.T) {
 // tree and returns its (created) staging dir and output dir.
 func muxFixtureJob(t *testing.T, w *DownloadWorker, db *database.Database, jobID string) (stagingDir, outputDir string) {
 	t.Helper()
+	return muxFixtureJobOn(t, w, db, jobID, "youtube")
+}
+
+// muxFixtureJobOn is muxFixtureJob for a row of the given platform. The
+// platform is set at insert: UpdateJobFields does not write it.
+func muxFixtureJobOn(t *testing.T, w *DownloadWorker, db *database.Database, jobID, platform string) (stagingDir, outputDir string) {
+	t.Helper()
 	outputDir = t.TempDir()
-	job := &database.Job{ID: jobID, VideoID: jobID, URL: "u", Platform: "youtube", Status: database.StatusMuxing, OutputDirectory: outputDir}
+	job := &database.Job{ID: jobID, VideoID: jobID, URL: "u", Platform: platform, Status: database.StatusMuxing, OutputDirectory: outputDir}
 	if _, err := db.AddJob(job); err != nil {
 		t.Fatalf("AddJob %s: %v", jobID, err)
 	}

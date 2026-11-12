@@ -226,13 +226,20 @@ func TestWriteDescriptionAtomicReplacesTheTargetRatherThanRewritingIt(t *testing
 // type would be four lines of duplication for nothing.
 func muxTestOrchestrator(t *testing.T, rec *notificationtest.Recorder, segments int) (*DownloadOrchestrator, *JobContext) {
 	t.Helper()
+	return muxTestOrchestratorOn(t, rec, segments, "youtube")
+}
+
+// muxTestOrchestratorOn is muxTestOrchestrator for a row of the given
+// platform. The platform is set at insert: UpdateJobFields does not write it.
+func muxTestOrchestratorOn(t *testing.T, rec *notificationtest.Recorder, segments int, platform string) (*DownloadOrchestrator, *JobContext) {
+	t.Helper()
 	db := openTestDB(t)
 
 	job := &database.Job{
 		ID:       "yt_mux",
 		VideoID:  "mux",
 		Title:    "A Job",
-		Platform: "youtube",
+		Platform: platform,
 		Status:   database.StatusDownloading,
 	}
 	if _, err := db.AddJob(job); err != nil {
@@ -315,9 +322,7 @@ func TestMuxAndFinalizeAnnouncesTheMuxBeforeChoosingAShape(t *testing.T) {
 // finalizeMultiSegmentJob return.
 func TestMuxFromStagingAnnouncesTheMux(t *testing.T) {
 	rec := notificationtest.New()
-	o, jobCtx := muxTestOrchestrator(t, rec, 2)
-	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"platform": "twitch"})
-	jobCtx.Job.Platform = "twitch"
+	o, jobCtx := muxTestOrchestratorOn(t, rec, 2, "twitch")
 	jobCtx.StagingDir = t.TempDir() // no root media -> the direct-finalize arm
 	jobCtx.OutputDir = t.TempDir()
 	jobCtx.Filename = "a-job"

@@ -80,10 +80,10 @@ func TestMuxAndFinalizeEmbedsTheChapters(t *testing.T) {
 			}
 			t.Cleanup(func() { youtubeChapters = orig })
 
-			o, jobCtx := muxTestOrchestrator(t, notificationtest.New(), 0)
+			o, jobCtx := muxTestOrchestratorOn(t, notificationtest.New(), 0, tc.platform)
 			o.muxer = engine.NewMuxer(ffmpegPath, discardLogger{})
-			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"platform": tc.platform, "is_vod": tc.isVod})
-			jobCtx.Job.Platform, jobCtx.Job.IsVod = tc.platform, tc.isVod
+			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"is_vod": tc.isVod})
+			jobCtx.Job.IsVod = tc.isVod
 			jobCtx.Config = &JobConfig{}
 			jobCtx.YT = &youtube.Service{}
 			jobCtx.StagingDir = t.TempDir()
