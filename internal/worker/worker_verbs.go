@@ -373,10 +373,17 @@ func (w *DownloadWorker) reinitializeNow(jobID string, seen database.JobStatus) 
 	// claim has applied (owner ruling R2-W1b, reset_archive.go): the reset
 	// clears output_file, and the new recording can resolve to the same name.
 	archive := w.archiveOfReset(prior, false)
+	stems := w.stemsOfReset(prior)
 	beforeResetClaim(jobID)
 	if !w.db.UpdateJobFieldsIf(jobID, from, reinitResetFields(0)) {
 		w.logVerbOverridden(jobID, "reinitialize", seen)
 		return
+	}
+	// The recovered set-aside recordings the row owned by stem, archive to
+	// set aside or none: the claim cleared the paths, and clearJobParts below
+	// removes the part rows.
+	for _, stem := range stems {
+		w.adoptStemAsides(jobID, stem)
 	}
 	w.setArchiveAside(jobID, archive)
 
@@ -454,10 +461,14 @@ func (w *DownloadWorker) autoReinitializeNow(jobID string, seen database.JobStat
 		return
 	}
 	archive := w.archiveOfReset(prev, true)
+	stems := w.stemsOfReset(prev)
 	beforeResetClaim(jobID)
 	if !w.db.UpdateJobFieldsIf(jobID, seen, reinitResetFields(prev.AutoRetryCount+1)) {
 		w.logVerbOverridden(jobID, "auto-reinitialize", seen)
 		return
+	}
+	for _, stem := range stems {
+		w.adoptStemAsides(jobID, stem)
 	}
 	w.setArchiveAside(jobID, archive)
 	w.removeStaging(jobID, "auto-reinitialize")

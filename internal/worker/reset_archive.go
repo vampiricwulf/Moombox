@@ -45,8 +45,9 @@ import (
 // gone.
 //
 // The same marker covers what the stem rule stops covering at that moment:
-// the recovered set-aside recordings already beside the archive each get one
-// (adoptStemAsides), and an archive whose rename failed gets "<stem>.owner"
+// the recovered set-aside recordings the row owned by stem each get one,
+// archive to set aside or none (stemsOfReset, adoptStemAsides), and an
+// archive whose rename failed gets "<stem>.owner"
 // where it is, so Files does not offer it while the job exists.
 //
 // A limit: the archive is looked for where output_file says it is. One whose
@@ -77,13 +78,19 @@ var archiveSidecarExts = []string{".chat.json", chatRawSidecarSuffix, ".descript
 
 // archiveSetAsideByReset returns the single-file archive a reset of job sets
 // aside, "" when there is none: the file output_file names (only a finalize
-// writes that column), when the job has no recorded parts, or when its one
-// part IS that file — a job that ended with a single part, which the
-// finalize renamed to the plain name (renameSinglePartToPlain) and which
-// reads as one archive everywhere else. The parts of a split job are deleted
-// by an operator's Reinitialize and counted by the preview as parts
-// (clearJobParts). partsKept is the automatic reinitialize, which keeps every
-// part for the capture to continue from, so it sets none of them aside.
+// writes that column), when no part row names it, or when the job's one part
+// IS that file — a job that ended with a single part, which the finalize
+// renamed to the plain name (renameSinglePartToPlain) and which reads as one
+// archive everywhere else. The parts of a split job are deleted by an
+// operator's Reinitialize and counted by the preview as parts
+// (clearJobParts), the one output_file names among them — a gap-filled
+// Twitch archive included, which is on a part row beside its recovered
+// parts. partsKept is the automatic reinitialize, which keeps every part for
+// the capture to continue from, so it sets none of them aside.
+//
+// A row can name an archive and have parts elsewhere: Resume keeps
+// output_file, so a Finished archive that was resumed, split once and then
+// failed has both. That archive is set aside, and the parts are still parts.
 //
 // A file that is definitely gone (archiveGone) is not one. A file that
 // cannot be reached — its drive is unplugged — is: the confirm names it
@@ -96,9 +103,13 @@ func archiveSetAsideByReset(job *database.Job, parts []database.Segment, partsKe
 	if job == nil || job.OutputFile == "" || archiveGone(job.OutputFile) {
 		return ""
 	}
-	onePart := !partsKept && len(parts) == 1 && normalizePath(parts[0].FilePath) == normalizePath(job.OutputFile)
-	if len(parts) > 0 && !onePart {
-		return ""
+	for _, p := range parts {
+		if normalizePath(p.FilePath) == normalizePath(job.OutputFile) {
+			if len(parts) == 1 && !partsKept {
+				return job.OutputFile
+			}
+			return ""
+		}
 	}
 	return job.OutputFile
 }
@@ -325,7 +336,6 @@ func (w *DownloadWorker) setArchiveAside(jobID, archive string) {
 		return
 	}
 	from := asideBase(archive)
-	w.adoptStemAsides(jobID, from)
 	// keepInPlace marks what stays under the archive's own name as the job's.
 	keepInPlace := func() string {
 		if _, err := writeAsideOwner(from, jobID); err != nil {
@@ -349,6 +359,30 @@ func (w *DownloadWorker) setArchiveAside(jobID, archive string) {
 	}
 	w.logger.Info("reinitialize: the job's existing archive was set aside; it is kept, never replaced",
 		"from", archive, "to", mv.dst, "jobID", jobID)
+}
+
+// stemsOfReset returns the stems prior's row owns recovered set-aside
+// recordings through, read before a reset's claim clears them: the archive
+// output_file names less its extension, and the base its parts share
+// (recordedArchiveLocation, as newOutputOwners indexes them). The row owns
+// them with no archive to set aside too: a split job, or one whose archive
+// file is gone.
+func (w *DownloadWorker) stemsOfReset(prior *database.Job) []string {
+	if prior == nil {
+		return nil
+	}
+	var stems []string
+	if prior.OutputFile != "" {
+		stems = append(stems, asideBase(prior.OutputFile))
+	}
+	if segs, err := w.db.GetSegments(prior.ID); err == nil {
+		for _, s := range segs {
+			if dir, base, ok := recordedArchiveLocation(s.FilePath); ok {
+				stems = append(stems, filepath.Join(dir, base))
+			}
+		}
+	}
+	return stems
 }
 
 // adoptStemAsides marks the recovered set-aside recordings already beside
@@ -399,13 +433,24 @@ func (w *DownloadWorker) adoptStemAsides(jobID, stem string) {
 // (ExecuteWithChat, ExecuteTwitch, the clip download), so a finalize after a
 // reset always has one.
 func (o *DownloadOrchestrator) foreignFileAt(jobID, path string) bool {
+	unnamed, older := o.fileOffRow(jobID, path)
+	return unnamed && older
+}
+
+// fileOffRow is foreignFileAt's two halves: unnamed, a regular file is at
+// path that neither jobID's row nor one of its part rows names; and older,
+// that file is from before the run that is finalizing. A file another row
+// names is that row's whatever its age (setForeignFileAside asks of every
+// unnamed file); the age only tells the job's own interrupted finalize from
+// a file no row names at all.
+func (o *DownloadOrchestrator) fileOffRow(jobID, path string) (unnamed, older bool) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
-		return false
+		return false, false
 	}
 	job, err := o.db.GetJob(jobID)
 	if err != nil || job == nil {
-		return false
+		return false, false
 	}
 	owned := []string{job.OutputFile, job.ChatFile}
 	// A part row's file is the job's too: a job's only part sits at the
@@ -419,18 +464,18 @@ func (o *DownloadOrchestrator) foreignFileAt(jobID, path string) bool {
 	}
 	for _, own := range owned {
 		if own != "" && normalizePath(own) == normalizePath(path) {
-			return false
+			return false, false
 		}
 	}
 	started, err := time.Parse(time.RFC3339, job.DownloadStartedAt)
-	return err == nil && info.ModTime().Before(started)
+	return true, err == nil && info.ModTime().Before(started)
 }
 
 // otherRows is what every row but jobID's own names in the output tree
 // (outputOwners, the rule the Files sweep and its delete use): the other
 // jobs with their parts, and the trims. Read only once a finalize has found
-// a file it did not write at its name, which is rare; a finalize that finds
-// none reads nothing.
+// a file its row does not name at its name, which is rare; a finalize that
+// finds none reads nothing.
 func (o *DownloadOrchestrator) otherRows(jobID string) (*outputOwners, error) {
 	jobs, err := o.db.GetAllJobs()
 	if err != nil {
@@ -466,12 +511,21 @@ func (o *DownloadOrchestrator) otherRows(jobID string) (*outputOwners, error) {
 // for one video. Renaming it would leave that row naming this job's
 // recording, and its own under this job's marker. It is refused instead, as
 // is a file whose owner cannot be read, and a sidecar another row names
-// stays where it is.
+// stays where it is. That is asked of every file at the name that this job's
+// row does not name, ahead of the age rule: the other job can have started
+// later and finished first, and its archive is then newer than this run.
 //
-// An error whenever the file is still at path afterwards — it is another
-// row's, or the rename failed: the caller must not write there.
+// Nor a file kept under another existing job's marker (the archive that
+// job's reset could not rename, outputOwners.asideOwner): set aside, it
+// would go under this job's marker and stop being the other's. It is refused
+// the same way, rather than moved under a marker written for the other job.
+//
+// An error whenever the file is still at path afterwards and is not this
+// job's to replace — it is another row's, or the rename failed: the caller
+// must not write there.
 func (o *DownloadOrchestrator) setForeignFileAside(jobID, path string, sidecars []string) error {
-	if !o.foreignFileAt(jobID, path) {
+	unnamed, older := o.fileOffRow(jobID, path)
+	if !unnamed {
 		return nil
 	}
 	others, err := o.otherRows(jobID)
@@ -484,6 +538,15 @@ func (o *DownloadOrchestrator) setForeignFileAside(jobID, path string, sidecars 
 		o.logger.Warn("finalize: another row's file holds the name it writes; it is kept where it is",
 			"path", path, "owner", row, "jobID", jobID)
 		return fmt.Errorf("%s already exists and belongs to %s: it is kept, not replaced; give one of the two another name, then use Mux", filepath.Base(path), row)
+	}
+	if row := others.asideOwner(path); row != "" {
+		o.logger.Warn("finalize: a file another job kept at a Reinitialize holds the name it writes; it is kept where it is",
+			"path", path, "owner", row, "jobID", jobID)
+		return fmt.Errorf("%s already exists and belongs to %s: it is kept, not replaced; give one of the two another name, then use Mux", filepath.Base(path), row)
+	}
+	if !older {
+		// The run's own, left on no row by a finalize that was interrupted.
+		return nil
 	}
 	stem := asideBase(path)
 	var foreign []string
@@ -501,7 +564,10 @@ func (o *DownloadOrchestrator) setForeignFileAside(jobID, path string, sidecars 
 	// The marker a reset left under the file's own name when it could not
 	// rename it (setArchiveAside) has done its work once nothing of that
 	// reset's is left there: it would outlive the job as a stray in Files.
-	if id, ok := readAsideMarker(stem + asideOwnerSuffix); ok && id == jobID && len(mv.left) == 0 {
+	// Not while a file it keeps is still there: a recording that ends as two
+	// or more parts sets only the old chat aside, and never looks at the old
+	// archive's name.
+	if id, ok := readAsideMarker(stem + asideOwnerSuffix); ok && id == jobID && !o.foreignFileUnder(jobID, stem) {
 		os.Remove(stem + asideOwnerSuffix)
 	}
 	args := []any{"from", path, "to", mv.dst, "jobID", jobID}
@@ -513,6 +579,27 @@ func (o *DownloadOrchestrator) setForeignFileAside(jobID, path string, sidecars 
 	}
 	o.logger.Warn("finalize: a file from before this recording held the name it writes, and was set aside; it is kept, never replaced", args...)
 	return nil
+}
+
+// foreignFileUnder reports whether a file jobID's finalize did not create
+// (foreignFileAt) is still under the name stem, whatever its extension: what
+// an in-place marker "<stem>.owner" is there to keep. A directory that
+// cannot be read counts as holding one.
+func (o *DownloadOrchestrator) foreignFileUnder(jobID, stem string) bool {
+	entries, err := os.ReadDir(filepath.Dir(stem))
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		p := filepath.Join(filepath.Dir(stem), e.Name())
+		if strings.EqualFold(filepath.Ext(p), asideOwnerSuffix) || normalizePath(asideBase(p)) != normalizePath(stem) {
+			continue
+		}
+		if o.foreignFileAt(jobID, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetAsideArchive is one file of a job that was set aside, by a Reinitialize

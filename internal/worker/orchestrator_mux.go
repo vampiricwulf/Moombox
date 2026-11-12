@@ -1655,6 +1655,9 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		// renamed the copy is refused like a failed one, so the capture is
 		// kept in staging.
 		foreign := o.setForeignFileAside(jobCtx.Job.ID, chatDst, []string{chatRawSidecarSuffix})
+		// A chat still at the name is the job's own, and the raw sidecar
+		// beside it is that chat's: both are replaced.
+		ownChat := foreign == nil && fileExists(chatDst)
 		err := foreign
 		if err == nil {
 			err = copyFile(chatSrc, chatDst)
@@ -1684,8 +1687,20 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		// does above, logged at Error (owner decision PR-M6). It used to be a
 		// Warn, and the staging cleanup then deleted the only copy.
 		rawSrc := filepath.Join(jobCtx.StagingDir, "chat.raw.jsonl")
+		// Not over a raw sidecar this job did not write either, one with no
+		// chat of the job's beside it (a reset moved the chat and the raw
+		// could not follow): it is set aside first, and when it cannot be the
+		// copy is refused like a failed one.
 		if _, err := os.Stat(rawSrc); err == nil && foreign == nil {
-			if err := copyFile(rawSrc, filepath.Join(outputDir, filenameBase+".chat.raw.jsonl")); err != nil {
+			rawDst := filepath.Join(outputDir, filenameBase+chatRawSidecarSuffix)
+			var err error
+			if !ownChat {
+				err = o.setForeignFileAside(jobCtx.Job.ID, rawDst, nil)
+			}
+			if err == nil {
+				err = copyFile(rawSrc, rawDst)
+			}
+			if err != nil {
 				updates["chat_status"] = database.ChatIncomplete
 				o.logger.Error("could not copy the chat's raw sidecar beside the archive; the chat capture is kept in staging",
 					"err", err, "raw", rawSrc, "jobID", jobCtx.Job.ID)
