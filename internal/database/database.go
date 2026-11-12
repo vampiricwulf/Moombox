@@ -646,8 +646,13 @@ func (db *Database) updateJobFieldsWhere(id string, fields map[string]any, cond 
 	for key, val := range fields {
 		col, ok := db.fieldToColumn[key]
 		if !ok {
+			// A key the map does not know is a bug at the call site (a typo,
+			// or a new column without its fieldToColumn entry): that field
+			// is never written while the rest of the map is, and the
+			// conditional forms still report the write as applied. Say so
+			// at Error, where it is seen.
 			if db.logger != nil {
-				db.logger.Debug("UpdateJobFields: ignoring unknown field", "jobID", id, "field", key)
+				db.logger.Error("UpdateJobFields: unknown field not written", "jobID", id, "field", key)
 			}
 			continue
 		}

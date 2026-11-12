@@ -517,12 +517,28 @@ func TestUpdateJobFields(t *testing.T) {
 	}
 }
 
+// errorRecorder records the Error lines a Database logs, with their args.
+type errorRecorder struct{ errors []string }
+
+func (*errorRecorder) Debug(string, ...any) {}
+func (*errorRecorder) Info(string, ...any)  {}
+func (*errorRecorder) Warn(string, ...any)  {}
+func (r *errorRecorder) Error(msg string, args ...any) {
+	r.errors = append(r.errors, fmt.Sprint(append([]any{msg}, args...)...))
+}
+
+// TestUpdateJobFieldsInvalidKey: a key fieldToColumn does not know (a typo
+// at a call site, a column added without its map entry) is not written, the
+// rest of the map is, and the drop is logged at Error naming the field. It
+// was a Debug line, which nobody running at the default level ever saw.
+//
+// Mutant: logging the drop at Debug again leaves the recorder empty.
 func TestUpdateJobFieldsInvalidKey(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
-
-	db, err := Open(dbPath)
+	rec := &errorRecorder{}
+	db, err := Open(dbPath, rec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,15 +552,19 @@ func TestUpdateJobFieldsInvalidKey(t *testing.T) {
 		Title:   "Original",
 	}
 	db.AddJob(job)
+	rec.errors = nil
 
-	// Invalid field name should be ignored (with a Debug-level log) without affecting other updates.
 	db.UpdateJobFields("yt_invalid", map[string]any{
 		"nonexistent_field": "value",
+		"title":             "Renamed",
 	})
 
 	got, _ := db.GetJob("yt_invalid")
-	if got.Title != "Original" {
-		t.Errorf("expected title unchanged, got %q", got.Title)
+	if got.Title != "Renamed" {
+		t.Errorf("the known field beside an unknown one was not written: title %q", got.Title)
+	}
+	if len(rec.errors) != 1 || !strings.Contains(rec.errors[0], "nonexistent_field") {
+		t.Errorf("want one Error line naming the unknown field, got %q", rec.errors)
 	}
 }
 
