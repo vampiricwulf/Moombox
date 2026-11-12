@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 )
 
 // catchStopSignals hands every stop signal (stopSignals) the process receives
@@ -41,13 +43,101 @@ func catchStopSignals(signals []os.Signal, onStop func(os.Signal)) {
 // because bubbletea handles SIGINT and SIGTERM itself but not a hangup. A
 // hangup when stdout is a terminal also marks that terminal gone, so the
 // shutdown writes nothing more to it (muteHungUpTerminal). The stop also
-// overrides a restart, requested before it or after (restartPending).
+// overrides a restart, requested before it or after (restartPending). One that
+// means Windows is ending the process (isConsoleEnding) also starts the short
+// budget such a stop has (consoleEndBudget).
 func (s *runState) stopOnSignal(sig os.Signal) {
 	if isHangup(sig) && s.stdoutIsTerminal {
 		s.stdoutHungUp.Store(true) // before the cancel: whoever sees ctx end sees this
 	}
 	s.stopSignalled.Store(true)
+	if isConsoleEnding(sig) {
+		s.consoleEnd.mark()
+	}
 	s.cancel()
+}
+
+// consoleEndBudget is how long a shutdown may take once Windows has said it is
+// closing the console, logging the user off or shutting down. Windows ends a
+// console process about 5 seconds after it delivers one of those events
+// whatever the process is doing, so the ordinary shutdown — up to
+// forceExitAfter, 10 seconds of it waiting for in-flight jobs before a mux is
+// cancelled — was cut off part-way: the mux was killed instead of cancelled,
+// and the notification flush, the final WAL checkpoint and the last log lines
+// never ran. Inside this budget the worker cancels its muxes at once
+// (worker.StopHurried) and the steps after it run as far as they get; when it
+// runs out, the database and the log are closed and the process exits 0, as
+// the ordinary backstop does. The clock starts when the signal arrives, not
+// when shutdown() does: the TUI is torn down in between.
+//
+// Only those three events hurry a stop (owner ruling R2-X4). Ctrl+C, Quit from
+// either UI, a restart and every stop on Linux keep forceExitAfter.
+const consoleEndBudget = 4 * time.Second
+
+// consoleEnd records that Windows is ending the process, and when it said so.
+// Its zero value is ready to use.
+type consoleEnd struct {
+	mu sync.Mutex
+	ch chan struct{}
+	at time.Time
+}
+
+// mark records the event. Only the first call counts: its time is the one
+// Windows counts from.
+func (c *consoleEnd) mark() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.at.IsZero() {
+		return
+	}
+	c.at = time.Now()
+	if c.ch == nil {
+		c.ch = make(chan struct{})
+	}
+	close(c.ch)
+}
+
+// marked is closed once the event has been recorded.
+func (c *consoleEnd) marked() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ch == nil {
+		c.ch = make(chan struct{})
+	}
+	return c.ch
+}
+
+// left is how much of consoleEndBudget remains, never less than zero.
+func (c *consoleEnd) left() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if d := consoleEndBudget - time.Since(c.at); d > 0 {
+		return d
+	}
+	return 0
+}
+
+// exitWhenConsoleEnds runs exit when a console end has been marked and what is
+// left of its budget has passed, unless done closes first (the shutdown
+// finished in time). It returns when either has happened; shutdown runs it on
+// a goroutine of its own. hurried, when not nil, is called once as soon as the
+// event is seen.
+func (c *consoleEnd) exitWhenConsoleEnds(done <-chan struct{}, hurried, exit func()) {
+	select {
+	case <-done:
+		return
+	case <-c.marked():
+	}
+	if hurried != nil {
+		hurried()
+	}
+	t := time.NewTimer(c.left())
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+		exit()
+	}
 }
 
 // restartPending reports whether this run ends in a restart — exit

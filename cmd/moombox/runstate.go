@@ -141,6 +141,10 @@ type runState struct {
 	// stopSignalled is set by every stop signal (stopOnSignal); it overrides
 	// restartRequested (restartPending).
 	stopSignalled atomic.Bool
+	// consoleEnd is marked by a stop signal that means Windows is about to
+	// end the process (isConsoleEnding, stopOnSignal): the shutdown then
+	// hurries (consoleEndBudget). Never marked on Linux.
+	consoleEnd consoleEnd
 	// prevCrash is what the previous process's crash left in the crash file
 	// beside the log (captureCrashOutput, in initServices); the Recovered
 	// From Crash notice reports it.

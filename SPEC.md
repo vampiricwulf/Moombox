@@ -843,7 +843,7 @@ When the main context is cancelled (Ctrl+C, SIGTERM, a hangup — SIGHUP on Unix
 1. 15-second force-exit timer starts (it must outlast the worker's 12-second stop budget — see `forceExitAfter` in `cmd/moombox/shutdown.go`)
 2. Notifications switch to single-attempt delivery
 3. Stop TwitchMonitor, DecapiMonitor, FeedMonitor, then the TrimService (cancels the trims it runs — a finished job's post-download trim among them — and waits up to 2 s for each to remove its partial file)
-4. Stop DownloadWorker (waits up to 10 s for active downloads to save resume state, then cancels in-flight muxes)
+4. Stop DownloadWorker (waits up to 10 s for active downloads to save resume state, then cancels in-flight muxes; at once after a Windows console close, logoff or system shutdown, which leave the process about 5 s — that stop closes the database and log and exits within 4 s, `consoleEndBudget`)
 5. Flush pending notifications
 6. Stop CookieRefresh and AutoCookieService (which cancels its periodic refresh and boot seed and waits up to 2 s for a pass in flight, and the auth re-check after it, to return)
 7. Cleanup PotProvider (evict VMs)

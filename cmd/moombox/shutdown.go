@@ -26,7 +26,8 @@ const forceExitAfter = worker.StopBudget + 3*time.Second
 // is consumers-first so producers keep firing into live consumers until the
 // consumers drain: monitors → trims → worker → notifications → cookie refresh →
 // PO-token provider → web server → log/DB unsubscribe → database. A
-// force-exit timer (forceExitAfter) closes rate limiters, the database and
+// force-exit timer (forceExitAfter; consoleEndBudget once Windows is ending
+// the process) closes rate limiters, the database and
 // the logger and exits as a backstop — with exitCodeRestart when a restart is
 // pending (restartPending), else 0 (see the timer for why never 1). Every individual stop is
 // isolated with panic recovery so one failing service does not block the
@@ -51,13 +52,13 @@ func (s *runState) shutdown() bool {
 	// update/config restart makes the launcher terminate instead of
 	// respawning — turning a self-update into a daemon outage with the new
 	// binary already swapped on disk but never started.
-	forceExit := time.AfterFunc(forceExitAfter, func() {
+	forceExitNow := func(why func()) {
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Fprintf(os.Stderr, "force-exit handler panic: %v\n", r)
 			}
 		}()
-		s.log.Error("Graceful shutdown timed out, forcing exit")
+		why()
 		s.closeLimiters()
 		s.closeDB()  // final WAL checkpoint — committed data survives either way
 		s.closeLog() // flush buffered logs before force exit
@@ -70,8 +71,38 @@ func (s *runState) shutdown() bool {
 		// abnormal codes from a long-lived child as crashes and respawns —
 		// exiting 1 here would resurrect a daemon the user just quit.
 		os.Exit(0)
+	}
+	forceExit := time.AfterFunc(forceExitAfter, func() {
+		forceExitNow(func() { s.log.Error("Graceful shutdown timed out, forcing exit") })
 	})
 	defer forceExit.Stop()
+
+	// Windows closing the console, logging the user off or shutting down
+	// (consoleEnd, marked by stopOnSignal — before this shutdown began or
+	// during it) ends the process about 5 seconds after it said so. The same
+	// steps then run on consoleEndBudget: the worker cancels its muxes at
+	// once (StopHurried, step 2), and when the budget runs out the database
+	// and the log are closed and the process exits, exactly as the backstop
+	// above does. Never marked by Ctrl+C, a Quit, a restart or any stop on
+	// Linux, which keep forceExitAfter.
+	shutdownDone := make(chan struct{})
+	defer close(shutdownDone)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "console-end handler panic: %v\n", r)
+			}
+		}()
+		s.consoleEnd.exitWhenConsoleEnds(shutdownDone,
+			func() {
+				s.log.Info("Windows is closing the console, logging off or shutting down: cancelling muxes and saving now")
+			},
+			func() {
+				forceExitNow(func() {
+					s.log.Warn("Out of the time Windows allows a closing console: closing the database and the log and exiting")
+				})
+			})
+	}()
 
 	// stopService isolates each individual Stop call with panic recovery +
 	// "Stopped X" debug log. Mirrors the TS stopService pattern.
@@ -126,7 +157,9 @@ func (s *runState) shutdown() bool {
 	}
 
 	// 2. Stop worker (waits for active downloads to save state)
-	stopService("DownloadWorker", s.dlWorker.Stop)
+	// When Windows is ending the process there is no time for the 10-second
+	// in-flight wait: the muxes are cancelled as soon as that is known.
+	stopService("DownloadWorker", func() { s.dlWorker.StopHurried(s.consoleEnd.marked()) })
 
 	// 3. Flush in-flight notifications (may have been fired during worker stop)
 	stopService("Notifications", s.notifyMgr.Wait)
