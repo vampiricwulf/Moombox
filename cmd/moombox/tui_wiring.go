@@ -465,7 +465,13 @@ func (s *runState) runTUI() {
 		return s.db.ListClientTokens()
 	}
 	app.OnDeleteClientToken = func(id string) error {
-		return s.db.DeleteClientToken(id)
+		if err := s.db.DeleteClientToken(id); err != nil {
+			return err
+		}
+		// As DELETE /api/client-tokens/{id}: the device's session and its
+		// open socket go with the token.
+		s.endRemoteSessions()
+		return nil
 	}
 	app.OnGetStats = func() (stats.Snapshot, error) {
 		js, err := s.db.GetJobStats()
@@ -770,6 +776,22 @@ func (s *runState) runTUI() {
 	}
 	app.OnVerifyPassword = func(password, hash string) bool {
 		return s.authSvc.VerifyPassword(password, hash)
+	}
+	// Settings, Security set or removed the password. As POST
+	// /api/auth/set-password and remove-password: every client token is
+	// deleted, every session ended and every authenticated socket closed,
+	// so each remote browser logs in again with the new password. It used
+	// to leave all three as they were. Off the UI goroutine: the delete
+	// waits on the database lock.
+	app.OnPasswordChanged = func() {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.log.Error("ending remote sessions after a password change panicked", "panic", r)
+				}
+			}()
+			s.passwordChanged()
+		}()
 	}
 
 	// Wire setup wizard callbacks (OnComplete saves config, OnInstallYtdlp writes plugin)

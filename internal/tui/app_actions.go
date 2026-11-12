@@ -639,6 +639,9 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				// rows it occupied must go back to the panels, or View()
 				// renders a dead row until the next resize.
 				a.recalcLayout()
+				if a.OnPasswordChanged != nil {
+					a.OnPasswordChanged()
+				}
 			}
 			a.settings.OnHashPassword = a.OnHashPassword
 			a.settings.OnVerifyPassword = a.OnVerifyPassword

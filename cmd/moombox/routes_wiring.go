@@ -212,6 +212,11 @@ func (s *runState) wireRoutes() func() {
 		LoginRL:    s.loginRL,
 		PasswordRL: s.passwordRL,
 		Logger:     s.log,
+		CloseAuthenticatedSockets: func() {
+			if s.wsHub != nil {
+				s.wsHub.CloseAuthenticated()
+			}
+		},
 	}
 	routes.AuthRoutes(s.r, authDeps, s.configStore)
 	routes.ClientTokenRoutes(s.r, authDeps)

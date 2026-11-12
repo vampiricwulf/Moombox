@@ -184,11 +184,11 @@ func (l *countingWSLogger) errorCount() int {
 func TestQueueOrDropLogsAtMostOncePerLaggingClient(t *testing.T) {
 	log := &countingWSLogger{}
 	hub := NewWebSocketHub(log)
-	client := &wsClient{writes: make(chan []byte, wsWriteQueueSize)}
+	client := &wsClient{writes: make(chan wsFrame, wsWriteQueueSize)}
 
 	// The first wsWriteQueueSize frames fit; every one after that drops one.
 	for range wsWriteQueueSize + 100 {
-		hub.queueOrDrop(client, []byte(`{"type":"log"}`))
+		hub.queueOrDrop(client, wsFrame{data: []byte(`{"type":"log"}`)})
 	}
 
 	debug, warn := log.counts()
@@ -214,7 +214,7 @@ func TestQueueOrDropLogsAtMostOncePerLaggingClient(t *testing.T) {
 func TestLogDropTotalReportsOnceAtTeardown(t *testing.T) {
 	log := &countingWSLogger{}
 	hub := NewWebSocketHub(log)
-	client := &wsClient{writes: make(chan []byte, 1)}
+	client := &wsClient{writes: make(chan wsFrame, 1)}
 
 	hub.logDropTotal(client)
 	if debug, _ := log.counts(); debug != 0 {
@@ -241,11 +241,11 @@ func TestQueueOrDropResyncsAfterADrop(t *testing.T) {
 	hub.InitialState = func() map[string]any {
 		return map[string]any{"jobs": []any{"snapshot-marker"}}
 	}
-	client := &wsClient{writes: make(chan []byte, wsWriteQueueSize)}
+	client := &wsClient{writes: make(chan wsFrame, wsWriteQueueSize)}
 
 	// One frame more than fits: exactly one drop.
 	for range wsWriteQueueSize + 1 {
-		hub.queueOrDrop(client, []byte(`{"type":"job_update"}`))
+		hub.queueOrDrop(client, wsFrame{data: []byte(`{"type":"job_update"}`)})
 	}
 	if client.drops.Load() != 1 {
 		t.Fatalf("fixture: drops = %d, want exactly 1", client.drops.Load())
@@ -254,15 +254,15 @@ func TestQueueOrDropResyncsAfterADrop(t *testing.T) {
 		<-client.writes
 	}
 
-	hub.queueOrDrop(client, []byte(`{"type":"log","payload":"after"}`))
-	got := <-client.writes
+	hub.queueOrDrop(client, wsFrame{data: []byte(`{"type":"log","payload":"after"}`)})
+	got := (<-client.writes).data
 	if !bytes.Contains(got, []byte(`"initial_state"`)) || !bytes.Contains(got, []byte("snapshot-marker")) {
 		t.Fatalf("first frame after a drop = %s; want the initial_state snapshot — without it the "+
 			"client keeps whatever row the dropped job_deleted was retiring", got)
 	}
 
-	hub.queueOrDrop(client, []byte(`{"type":"log","payload":"later"}`))
-	next := <-client.writes
+	hub.queueOrDrop(client, wsFrame{data: []byte(`{"type":"log","payload":"later"}`)})
+	next := (<-client.writes).data
 	if !bytes.Contains(next, []byte("later")) {
 		t.Fatalf("second frame = %s; want the frame itself — the resync flag must clear, or every "+
 			"later frame is replaced by a full snapshot for the rest of the connection", next)
@@ -287,14 +287,14 @@ func TestQueueOrDropDoesNotRetryAnUnbuildableSnapshot(t *testing.T) {
 		builds++
 		return map[string]any{"jobs": math.NaN()} // json: unsupported value
 	}
-	client := &wsClient{writes: make(chan []byte, wsWriteQueueSize)}
+	client := &wsClient{writes: make(chan wsFrame, wsWriteQueueSize)}
 	client.needsResync.Store(true)
 
-	hub.queueOrDrop(client, []byte(`{"type":"log","payload":"first"}`))
+	hub.queueOrDrop(client, wsFrame{data: []byte(`{"type":"log","payload":"first"}`)})
 	if builds != 1 {
 		t.Fatalf("fixture: InitialState called %d times, want 1", builds)
 	}
-	if got := <-client.writes; !bytes.Contains(got, []byte("first")) {
+	if got := (<-client.writes).data; !bytes.Contains(got, []byte("first")) {
 		t.Fatalf("frame = %s; want the original incremental frame — a snapshot that cannot be built "+
 			"must not also cost the caller its frame", got)
 	}
@@ -306,7 +306,7 @@ func TestQueueOrDropDoesNotRetryAnUnbuildableSnapshot(t *testing.T) {
 	// Past the rate limit, so a re-armed flag — and only a re-armed flag —
 	// would build a second time.
 	client.lastResync.Store(time.Now().Add(-2 * wsResyncMinInterval).UnixNano())
-	hub.queueOrDrop(client, []byte(`{"type":"log","payload":"second"}`))
+	hub.queueOrDrop(client, wsFrame{data: []byte(`{"type":"log","payload":"second"}`)})
 	if builds != 1 {
 		t.Errorf("InitialState called %d times, want 1 — a failed snapshot must not be retried", builds)
 	}
@@ -326,17 +326,18 @@ func TestQueueOrDropSurvivesAPanickingInitialState(t *testing.T) {
 	log := &countingWSLogger{}
 	hub := NewWebSocketHub(log)
 	hub.InitialState = func() map[string]any { panic("provider exploded") }
-	client := &wsClient{writes: make(chan []byte, wsWriteQueueSize)}
+	client := &wsClient{writes: make(chan wsFrame, wsWriteQueueSize)}
 	client.needsResync.Store(true)
 
-	hub.queueOrDrop(client, []byte(`{"type":"log","payload":"survivor"}`))
+	hub.queueOrDrop(client, wsFrame{data: []byte(`{"type":"log","payload":"survivor"}`)})
 
 	if got := log.errorCount(); got != 1 {
 		t.Errorf("Error called %d times, want exactly 1 — a panicking initial-state provider must be "+
 			"LOUD, not absorbed by a recover written for a different race", got)
 	}
 	select {
-	case got := <-client.writes:
+	case f := <-client.writes:
+		got := f.data
 		if !bytes.Contains(got, []byte("survivor")) {
 			t.Errorf("frame = %s; want the original incremental frame", got)
 		}
@@ -367,12 +368,12 @@ func TestQueueOrDropRateLimitsResyncSnapshots(t *testing.T) {
 		builds++
 		return map[string]any{"jobs": []any{"snapshot-marker"}}
 	}
-	client := &wsClient{writes: make(chan []byte, wsWriteQueueSize)}
+	client := &wsClient{writes: make(chan wsFrame, wsWriteQueueSize)}
 
 	// Never drained: the first wsWriteQueueSize frames fill the queue, and every
 	// frame after that evicts one and re-arms — all inside one interval.
 	for range wsWriteQueueSize + 50 {
-		hub.queueOrDrop(client, []byte(`{"type":"job_update"}`))
+		hub.queueOrDrop(client, wsFrame{data: []byte(`{"type":"job_update"}`)})
 	}
 	if builds != 1 {
 		t.Errorf("InitialState called %d times inside one %v window, want exactly 1", builds, wsResyncMinInterval)
@@ -385,7 +386,7 @@ func TestQueueOrDropRateLimitsResyncSnapshots(t *testing.T) {
 		<-client.writes
 	}
 	client.lastResync.Store(time.Now().UnixNano()) // squarely inside the window
-	hub.queueOrDrop(client, []byte(`{"type":"job_update"}`))
+	hub.queueOrDrop(client, wsFrame{data: []byte(`{"type":"job_update"}`)})
 	if builds != 1 {
 		t.Errorf("InitialState called %d times, want 1 — a gated frame must not build a snapshot", builds)
 	}
@@ -395,7 +396,7 @@ func TestQueueOrDropRateLimitsResyncSnapshots(t *testing.T) {
 	}
 
 	client.lastResync.Store(time.Now().Add(-2 * wsResyncMinInterval).UnixNano())
-	hub.queueOrDrop(client, []byte(`{"type":"job_update"}`))
+	hub.queueOrDrop(client, wsFrame{data: []byte(`{"type":"job_update"}`)})
 	if builds != 2 {
 		t.Errorf("InitialState called %d times once the interval elapsed, want 2 — the delayed resync "+
 			"must actually arrive", builds)
@@ -421,7 +422,7 @@ func TestPingTickFlushesAPendingResync(t *testing.T) {
 	hub.InitialState = func() map[string]any {
 		return map[string]any{"jobs": []any{"snapshot-marker"}}
 	}
-	client := &wsClient{writes: make(chan []byte, wsWriteQueueSize)}
+	client := &wsClient{writes: make(chan wsFrame, wsWriteQueueSize)}
 
 	hub.flushResync(client) // nothing armed
 	if len(client.writes) != 0 {
@@ -433,7 +434,7 @@ func TestPingTickFlushesAPendingResync(t *testing.T) {
 	client.lastResync.Store(time.Now().Add(-2 * wsResyncMinInterval).UnixNano())
 	hub.flushResync(client)
 
-	got := <-client.writes
+	got := (<-client.writes).data
 	if !bytes.Contains(got, []byte(`"initial_state"`)) || !bytes.Contains(got, []byte("snapshot-marker")) {
 		t.Fatalf("flushed frame = %s; want the initial_state snapshot", got)
 	}

@@ -99,3 +99,4 @@ type WSMessage struct {
 - Calling `BroadcastJobUpdate` after `BroadcastJobDeleted` for the same ID — the late update will re-add the row via the client's upsert handler
 - Not including new event in initial state — clients that connect after the event miss it
 - Wiring TUI via WebSocket instead of database callbacks — TUI uses direct subscriptions
+- Ending a credential (a client token, the password) without ending what it admitted — a socket is checked only at the upgrade and a session slides for as long as it is used, so call `InvalidateAllSessions` and `WebSocketHub.CloseAuthenticated` after the row is gone (`endRemoteSessions`, `cmd/moombox/ws_wiring.go`)
