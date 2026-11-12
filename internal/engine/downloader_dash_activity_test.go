@@ -86,13 +86,17 @@ func TestHandleRateLimitErrorEmitsRateLimited(t *testing.T) {
 }
 
 // TestHandleDashErrorGenericEmitsRetrying pins the generic (non-HTTP: a
-// transport error or an idle stall, status 0) branch of handleDashError: it
-// must say so on the progress line, as the HLS loop's playlist retry does,
-// instead of sleeping genericRetry behind a frozen segment counter.
+// transport error or an idle stall, status 0) branch of handleDashError
+// below the head: it is handleHTTPError's transient retry, which says so on
+// the progress line, and it ends the gone streak. What bounds the branch is
+// pinned in downloader_dash_transport_test.go.
 func TestHandleDashErrorGenericEmitsRetrying(t *testing.T) {
 	d, got := newActivityDownloader(t)
+	d.headSeq.Store(10)
+	d.currentSeq.Store(5)
+	d.lastHeadProbeTime.StoreNow() // no head probe: there is no server
 	ctx, cancel := context.WithCancel(t.Context())
-	cancel() // cancelled so the fixed-delay retry sleep returns immediately
+	cancel() // cancelled so the retry sleep returns immediately
 	rs := &dashRetryState{consecutiveGoneErrors: 3}
 	err := d.handleDashError(ctx, 0, errors.New("read tcp: i/o timeout"),
 		rs, true, 60)

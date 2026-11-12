@@ -48,8 +48,10 @@ const (
 	// the ErrQualityLost → refresh cycle (audit reports/worker.md F11).
 	postBytes403CipherThreshold = 5
 
-	// genericRetryDelay is the fixed delay used between retries for
-	// non-HTTP-status errors (timeouts, network failures).
+	// genericRetryDelay is the base delay between tries of a fetch that got
+	// no usable answer where nothing else bounds it (delays.genericRetry: the
+	// direct downloader's backoff). The DASH loop no longer uses it: a
+	// transport failure there goes through handleHTTPError.
 	genericRetryDelay = 2 * time.Second
 	// firstSegmentHuntDelay is the short delay between advancing past a
 	// 403/410 while hunting for the first valid segment.
@@ -482,7 +484,8 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 		return d.handleHTTPError(ctx, hasStartedDownloading, rs, delayCap)
 	}
 
-	// Generic non-HTTP error (timeout, network, etc.) -- simple fixed-delay retry
+	// No complete HTTP answer: a dial, TLS or DNS failure, a reset, a stalled
+	// or cut-off body.
 	rs.consecutiveGoneErrors = 0
 	if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 		// Same shape as the HTTP siblings above (handleGoneError,
@@ -501,9 +504,20 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 		d.noteOfflineRecovery()
 		return nil
 	}
-	d.emitActivity(ActivityRetrying)
-	utils.Sleep(ctx, d.delays.genericRetry)
-	return nil
+	// Online, a transport failure is bounded exactly like a 5xx (owner ruling
+	// R2-E1): the same retry count, stream-status check, hand-back for a
+	// rebuild on a fresh player response and MaxTimeout finalize, with no
+	// budget of its own. It used to sleep genericRetryDelay and return, for as
+	// long as the failure lasted: one googlevideo edge that stopped answering
+	// while the device stayed online (a single failing host does not take the
+	// connectivity monitor offline) left the job retrying with no status
+	// check, no rebuild and no finalize, where the same edge answering 503 got
+	// all three. A failed fetch reads no X-Head-Seqnum, so a finalize behind
+	// the head after such a spell does not call that head current
+	// (HeadCurrentAtFinalize).
+	d.logger.Debug("[Downloader] segment fetch failed without an HTTP answer — handled like a server error",
+		"seq", d.currentSeq.Load(), "status", statusCode, "error", fetchErr)
+	return d.handleHTTPError(ctx, hasStartedDownloading, rs, delayCap)
 }
 
 // non403CipherMarkers lists lower-cased substrings that mean the 403
