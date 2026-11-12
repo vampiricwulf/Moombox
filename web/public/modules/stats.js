@@ -17,6 +17,8 @@ export class StatsController {
     this._loadGen = 0;
     // When the cards were last drawn from a successful answer (ms), or null.
     this._lastLoadedAt = null;
+    // A 60 s refresh fell while the browser tab was hidden (onTabVisible).
+    this._skippedWhileHidden = false;
   }
 
   /** The admission holds changed: redraw what reads the disk gate. */
@@ -31,11 +33,24 @@ export class StatsController {
     // Clear any existing interval to prevent leaks on double-activate
     if (this._refreshInterval) clearInterval(this._refreshInterval);
     // Auto-refresh every 60 seconds while active. A hidden browser tab skips
-    // the request; the numbers are read again on the first tick after it is
-    // shown.
+    // the request; the numbers are read again as soon as it is shown
+    // (onTabVisible).
+    this._skippedWhileHidden = false;
     this._refreshInterval = setInterval(() => {
-      if (!document.hidden) this.loadStats();
+      if (document.hidden) this._skippedWhileHidden = true;
+      else this.loadStats();
     }, 60000);
+  }
+
+  /**
+   * The browser tab is visible again. If a refresh was skipped while it was
+   * hidden, read now: the numbers on screen are older than the 60 s the tab
+   * promises.
+   */
+  onTabVisible() {
+    if (!this._refreshInterval || !this._skippedWhileHidden) return;
+    this._skippedWhileHidden = false;
+    this.loadStats();
   }
 
   /** Called when the Stats tab is hidden. */
@@ -44,11 +59,14 @@ export class StatsController {
       clearInterval(this._refreshInterval);
       this._refreshInterval = null;
     }
+    this._skippedWhileHidden = false;
   }
 
   async loadStats() {
     const gen = ++this._loadGen;
     let data = null;
+    // The failure line. The route's own error already says what failed
+    // ("Could not read statistics: ..."), so it is shown as it is.
     let failure = "";
     try {
       const response = await fetch("/api/stats");
@@ -56,11 +74,11 @@ export class StatsController {
         data = await response.json();
       } else {
         const body = await response.json().catch(() => null);
-        failure = (body && body.error) || `HTTP ${response.status}`;
+        failure = (body && body.error) || `Could not load statistics: HTTP ${response.status}`;
       }
     } catch (e) {
       console.error("Failed to load stats:", e);
-      failure = (e && e.message) || "the server did not answer";
+      failure = `Could not load statistics: ${(e && e.message) || "the server did not answer"}`;
     }
     if (gen !== this._loadGen) return;
     if (data) {
@@ -84,11 +102,14 @@ export class StatsController {
       el.textContent = "";
       return;
     }
-    let text = `Could not load statistics: ${failure}`;
+    let text = failure;
     if (this._lastLoadedAt != null) {
       const at = new Date(this._lastLoadedAt).toLocaleString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
       text += ` — the numbers below are from the last successful load, at ${at}.`;
     }
+    // The line is a role="alert": writing the same text again on every failed
+    // refresh would have a screen reader repeat it each minute.
+    if (el.textContent === text && !el.hidden) return;
     el.textContent = text;
     el.hidden = false;
   }

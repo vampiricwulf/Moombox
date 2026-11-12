@@ -5332,6 +5332,7 @@ document.addEventListener("visibilitychange", () => {
     // First: the cards the skipped progress frames changed, so the
     // timestamp refresh below runs over the cards that stay.
     window.app._repaintAfterHidden();
+    window.app.stats.onTabVisible();
     window.app.updateCheckCountdown();
     window.app.refreshRelativeTimestamps();
   }

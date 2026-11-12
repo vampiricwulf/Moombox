@@ -62,9 +62,22 @@ test("a failed stats load is named above the cards, which keep their last values
   answer = harness.response({ status: 500, body: { error: "Could not read statistics: database is closed" } });
   await h.app.stats.loadStats();
   assert.equal(err.hidden, false);
-  assert.match(err.textContent, /^Could not load statistics: Could not read statistics: database is closed/);
+  assert.match(err.textContent, /^Could not read statistics: database is closed — /);
   assert.match(err.textContent, /last successful load/, "the kept numbers are marked as old");
   assert.equal(jobs(), "7", "the last values stay");
+
+  // The line is an alert: the same failure again must not be written again.
+  let writes = 0;
+  const observer = new h.window.MutationObserver((records) => { writes += records.length; });
+  observer.observe(err, { childList: true, characterData: true, subtree: true });
+  await h.app.stats.loadStats();
+  await h.flush();
+  observer.disconnect();
+  assert.equal(writes, 0, "an unchanged failure line was rewritten");
+
+  answer = harness.response({ status: 502, body: "<html>bad gateway</html>" });
+  await h.app.stats.loadStats();
+  assert.match(err.textContent, /^Could not load statistics: HTTP 502 — /, "an answer with no error of its own is named by its code");
 
   answer = { storage: { totalSize: 0, jobCount: 8 } };
   await h.app.stats.loadStats();
@@ -86,4 +99,33 @@ test("the Stats refresh skips its request while the browser tab is hidden", { sk
   h.advance(60000);
   assert.equal(calls(), 2, "visible again: the next tick reads");
   h.app.stats.deactivate();
+});
+
+// Mutant: nothing read on return — an operator coming back to the Stats tab
+// looks at numbers up to a minute older than the skipped refresh.
+test("a refresh skipped while hidden is made up as soon as the tab is shown", { skip }, async () => {
+  const h = await harness.makeApp({ routes: { "GET /api/stats": () => ({}) } });
+  const calls = () => h.http.matching("/api/stats").length;
+  // app.js's visibilitychange listener belongs to the first window of the
+  // process (see helpers/app-dom.mjs), so what it calls is called here.
+  const show = (hidden) => {
+    Object.defineProperty(h.document, "hidden", { configurable: true, get: () => hidden });
+    if (!hidden) h.app.stats.onTabVisible();
+  };
+  h.app.stats.activate();
+  await h.flush();
+
+  show(true);
+  show(false);
+  assert.equal(calls(), 1, "no refresh was skipped: nothing to make up");
+
+  show(true);
+  h.advance(60000);
+  show(false);
+  assert.equal(calls(), 2, "the skipped refresh was not read on return");
+
+  h.app.stats.deactivate();
+  show(true);
+  show(false);
+  assert.equal(calls(), 2, "the Stats tab is not the active one: no read");
 });
