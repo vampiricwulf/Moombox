@@ -59,6 +59,7 @@ If this endpoint triggers state changes that clients need to see in real-time, a
 - `BroadcastCheckTimers(data)` — next monitor check times
 - `Broadcast("channel_monitors", monitor.ChannelMonitors)` — every monitor's health list, sent by `channelMonitorsPush.check` (`cmd/moombox/channel_monitors_push.go`) only when the set of failing channels or a failing channel's newest error changes; the dashboard derives the flag itself with its mirror of `monitor.ChannelFailing`, so never send the derived answer in its place
 - `BroadcastConnectivity(online)` — `{online}` when reachability flips
+- `Broadcast("status_changed", nil)` — no payload, sent by `nudgeDashboardStatus` (`cmd/moombox/status_nudge.go`) when cookie authentication, a re-login flag or the sidecar's health changes; the tab reads `GET /api/status` again. Cookie status is never pushed in a frame: the web badge is drawn only from a fetch the tab made (owner ruling R2-D1). A new status source that `/api/status` serves calls the same nudge instead of adding a frame
 - `BroadcastLog(line, seq)` — one log line, clipped to 4096 bytes on a rune boundary (`clipLogLine`), with its number in the logger's ring as `seq` beside the payload. The hub keeps NO ring of its own (WEB-14): the logger owns the only one, and `cmd/moombox/ws_wiring.go` puts `logger.RecentLines` — the lines and the newest one's number, `logSeq` — into every `initial_state`; the dashboard skips a frame at or below `logSeq`, a line the snapshot already holds.
 
 ### 2. Wire the Source
@@ -99,3 +100,4 @@ type WSMessage struct {
 - Calling `BroadcastJobUpdate` after `BroadcastJobDeleted` for the same ID — the late update will re-add the row via the client's upsert handler
 - Not including new event in initial state — clients that connect after the event miss it
 - Wiring TUI via WebSocket instead of database callbacks — TUI uses direct subscriptions
+- Ending a credential (a client token, the password) without ending what it admitted — a socket is checked only at the upgrade and a session slides for as long as it is used, so call `InvalidateAllSessions` and `WebSocketHub.CloseAuthenticated` after the row is gone (`endRemoteSessions`, `cmd/moombox/ws_wiring.go`)

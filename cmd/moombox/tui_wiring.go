@@ -130,22 +130,62 @@ func cookieBadgesFor(auth cookies.AuthStatus, relogin map[string]bool) (yt, tw t
 // SUCCESSFUL send, is what makes it ONE refresh per streak of drops rather
 // than one per dropped message: it is a catch-up, not a poll, and it leaves
 // the ~60 Hz forwarding path exactly as it was.
-func newTUIResync(needed *atomic.Bool, jobsCh chan []*database.Job, getAll func() ([]*database.Job, error)) func() {
+//
+// The snapshot carries a version floor (tuiJobSnapshot), which is what lets
+// the TUI ignore the older events still queued ahead of it.
+func newTUIResync(needed *atomic.Bool, seen *atomic.Uint64, jobsCh chan tui.JobsUpdateMsg, getAll func() ([]*database.Job, error)) func() {
 	return func() {
 		if !needed.CompareAndSwap(true, false) {
 			return
 		}
-		jobs, err := getAll()
+		snap, err := tuiJobSnapshot(seen, getAll)
 		if err != nil {
 			needed.Store(true)
 			return
 		}
 		select {
-		case jobsCh <- jobs:
+		case jobsCh <- snap:
 		default:
 			needed.Store(true)
 		}
 	}
+}
+
+// noteSeenJobVersion raises seen to v, the Version of a job event a TUI
+// forwarder is about to queue or drop. The forwarders call it BEFORE the
+// send, so at any moment every event in a TUI channel has a version at or
+// below seen. One load on the ~60 Hz path, and one compare-and-swap when the
+// version is a new high.
+func noteSeenJobVersion(seen *atomic.Uint64, v uint64) {
+	for {
+		cur := seen.Load()
+		if v <= cur || seen.CompareAndSwap(cur, v) {
+			return
+		}
+	}
+}
+
+// tuiJobSnapshot reads the full job list for the TUI with its version floor:
+// the highest version the forwarders had seen BEFORE the list was read. The
+// order is the whole point. A forwarder sees a write only after it is
+// committed, so the list read afterwards holds every write at or below the
+// floor; and every event already queued for the TUI is at or below the floor
+// too, so the TUI drops it as stale once it has applied the snapshot
+// (tui.JobsUpdateMsg). Read the other way round, a write landing between the
+// two reads would be at or below the floor and missing from the list, and its
+// event would be thrown away.
+//
+// Before this the backlog a stalled TUI had not read yet was applied AFTER
+// the catch-up snapshot, and a job that finished during the stall was counted
+// active again, or its row went back to Muxing. The database is not involved:
+// rows read by GetAllJobs still carry Version 0.
+func tuiJobSnapshot(seen *atomic.Uint64, getAll func() ([]*database.Job, error)) (tui.JobsUpdateMsg, error) {
+	floor := seen.Load()
+	jobs, err := getAll()
+	if err != nil {
+		return tui.JobsUpdateMsg{}, err
+	}
+	return tui.JobsUpdateMsg{Jobs: jobs, Floor: floor}, nil
 }
 
 // forwardOrDrop hands one DB event to a TUI channel without ever blocking the
@@ -481,7 +521,13 @@ func (s *runState) runTUI() {
 		return s.db.ListClientTokens()
 	}
 	app.OnDeleteClientToken = func(id string) error {
-		return s.db.DeleteClientToken(id)
+		if err := s.db.DeleteClientToken(id); err != nil {
+			return err
+		}
+		// As DELETE /api/client-tokens/{id}: the device's session and its
+		// open socket go with the token.
+		s.endRemoteSessions()
+		return nil
 	}
 	app.OnGetStats = func() (stats.Snapshot, error) {
 		js, err := s.db.GetJobStats()
@@ -787,6 +833,22 @@ func (s *runState) runTUI() {
 	app.OnVerifyPassword = func(password, hash string) bool {
 		return s.authSvc.VerifyPassword(password, hash)
 	}
+	// Settings, Security set or removed the password. As POST
+	// /api/auth/set-password and remove-password: every client token is
+	// deleted, every session ended and every authenticated socket closed,
+	// so each remote browser logs in again with the new password. It used
+	// to leave all three as they were. Off the UI goroutine: the delete
+	// waits on the database lock.
+	app.OnPasswordChanged = func() {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.log.Error("ending remote sessions after a password change panicked", "panic", r)
+				}
+			}()
+			s.passwordChanged()
+		}()
+	}
 
 	// Wire setup wizard callbacks (OnComplete saves config, OnInstallYtdlp writes plugin)
 	app.SetSetupCallbacks(
@@ -913,7 +975,7 @@ func (s *runState) runTUI() {
 	jobAddedCh := make(chan *database.JobAdded, 100)
 	jobDeletedCh := make(chan *database.JobDeleted, 100)
 	jobTrimsChangedCh := make(chan *database.Job, 50)
-	jobsUpdateCh := make(chan []*database.Job, 10)
+	jobsUpdateCh := make(chan tui.JobsUpdateMsg, 10)
 	logCh := make(chan string, 200)
 	checkTimersCh := make(chan tui.CheckTimersMsg, 10)
 	cookieStatusCh := make(chan tui.CookieStatusMsg, 5)
@@ -925,7 +987,11 @@ func (s *runState) runTUI() {
 	// tuiResyncNeeded arms the full-snapshot replay after a dropped job
 	// event (CORE-6). See newTUIResync.
 	var tuiResyncNeeded atomic.Bool
-	resyncTUIJobs := newTUIResync(&tuiResyncNeeded, jobsUpdateCh, s.db.GetAllJobs)
+	// tuiSeenJobVersion is the highest job write version a forwarder has
+	// queued or dropped: the floor a full snapshot is sent with. See
+	// tuiJobSnapshot.
+	var tuiSeenJobVersion atomic.Uint64
+	resyncTUIJobs := newTUIResync(&tuiResyncNeeded, &tuiSeenJobVersion, jobsUpdateCh, s.db.GetAllJobs)
 
 	// Push initial disk status to TUI
 	if ds := routes.SharedDiskStatus.Load(); ds != nil {
@@ -967,6 +1033,7 @@ func (s *runState) runTUI() {
 	// recovering from. While the channel stays full the 1 s backstop below is
 	// the replay path.
 	unsubTUIJobUpdate := s.db.OnJobChange(func(ev *database.JobChange) {
+		noteSeenJobVersion(&tuiSeenJobVersion, ev.Job.Version)
 		forwardOrDrop(jobUpdateCh, ev, ev.Job.ID, resyncTUIJobs, &tuiDroppedJobs, &tuiResyncNeeded, s.log)
 	})
 	// OnJobAdded subscriber: AddJob no longer fires OnJobsChange (the
@@ -975,6 +1042,7 @@ func (s *runState) runTUI() {
 	// the task list instead of clearing + rebuilding from a fresh
 	// snapshot. DECISIONS #21 consumer migration.
 	unsubTUIJobAdded := s.db.OnJobAdded(func(ev *database.JobAdded) {
+		noteSeenJobVersion(&tuiSeenJobVersion, ev.Job.Version)
 		forwardOrDrop(jobAddedCh, ev, ev.Job.ID, resyncTUIJobs, &tuiDroppedJobs, &tuiResyncNeeded, s.log)
 	})
 	// OnJobDeleted subscriber: DeleteJob no longer fires OnJobsChange
@@ -998,20 +1066,32 @@ func (s *runState) runTUI() {
 	})
 	// This one already carries a full list, so its own drop is harmless (a
 	// snapshot is queued when a snapshot cannot be queued) and its default
-	// stays empty. It neither calls the replay nor CLEARS it: the list it
-	// delivers is a time-of-write snapshot taken inside the bulk write, so an
+	// stays empty. It never CLEARS the replay: the list it delivers is a
+	// time-of-write snapshot taken inside the bulk write, so an
 	// UpdateJobFields that lands after that snapshot and is then dropped by a
 	// full jobUpdateCh is NOT in it. Clearing the flag there discarded that
-	// replay — a delivered list is not assumed newer than a pending one — and
-	// the dropped transition was never recovered. Leaving it armed costs one
-	// redundant GetAllJobs in the rare coincidence of a bulk write with a
-	// pending drop, and the next successful send (or the 1 s backstop) does
-	// the catch-up (CORE-6).
+	// replay, and the dropped transition was never recovered (CORE-6).
+	//
+	// For the same reason it states no version floor: a write that landed
+	// after the bulk write's snapshot may already have been seen by a
+	// forwarder, and a floor that covered it would have the TUI drop that
+	// write's event though the list does not hold it.
+	//
+	// And it ARMS the replay after the send. A list with no floor is applied
+	// whatever the TUI has applied before it, and this one is delivered some
+	// time after it was read: a catch-up snapshot read later can reach the
+	// TUI first, and the older list then puts older rows back, while the
+	// events that would correct them are at or below that snapshot's floor
+	// and are dropped as stale. So a floored snapshot always follows a bulk
+	// list (on the next successful send, or the 1 s backstop) and has the
+	// last word. One extra GetAllJobs per bulk write, and the two bulk
+	// writes are rare operator actions.
 	unsubTUIJobsChange := s.db.OnJobsChange(func(jobs []*database.Job) {
 		select {
-		case jobsUpdateCh <- jobs:
+		case jobsUpdateCh <- tui.JobsUpdateMsg{Jobs: jobs}:
 		default:
 		}
+		tuiResyncNeeded.Store(true)
 	})
 
 	// 1 s backstop for the resync: the forwarders above cover the common
@@ -1111,10 +1191,12 @@ func (s *runState) runTUI() {
 	initial := cookieSend(s.cookieRefresh.GetStatus())
 	app.SetCookieStatus(initial.YT, initial.TW, initial.YTActive, initial.TWActive)
 
-	// Send initial job list
-	if jobs, err := s.db.GetAllJobs(); err == nil {
+	// Send initial job list. The forwarders are already subscribed, so it
+	// carries the floor like a resync does: an event queued before this read
+	// must not be applied over it.
+	if snap, err := tuiJobSnapshot(&tuiSeenJobVersion, s.db.GetAllJobs); err == nil {
 		select {
-		case jobsUpdateCh <- jobs:
+		case jobsUpdateCh <- snap:
 		default:
 		}
 	}

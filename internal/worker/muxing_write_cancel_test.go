@@ -254,11 +254,9 @@ func TestFinalizeOnARowWithAnOutcomeMuxesNothing(t *testing.T) {
 		for _, outcome := range []database.JobStatus{database.StatusCancelled, database.StatusFinished} {
 			t.Run(sh.name+"/"+string(outcome), func(t *testing.T) {
 				rec := notificationtest.New()
-				o, jobCtx := muxTestOrchestrator(t, rec, sh.segments)
 				// Twitch: finalizeMultiSegmentJob's part merge, the one branch
 				// that would reach the (nil) muxer, is YouTube-gated.
-				o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"platform": "twitch"})
-				jobCtx.Job.Platform = "twitch"
+				o, jobCtx := muxTestOrchestratorOn(t, rec, sh.segments, "twitch")
 				jobCtx.Config = &JobConfig{}
 				jobCtx.StagingDir = t.TempDir()
 				jobCtx.OutputDir = t.TempDir()

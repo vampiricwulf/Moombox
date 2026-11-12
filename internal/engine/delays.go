@@ -25,7 +25,7 @@ type delays struct {
 	interruptionStallRetry time.Duration // interruptionStallRetryDelay — the may-resume stall arm
 	transientFailureRetry  time.Duration // transientFailureRetryDelay — 5xx/timeouts at the edge
 	segmentRetryUnit       time.Duration // segmentRetryUnitDelay — fetchSegmentWithRetry's linear ladder counts in it (5, 10, 15, 20 s)
-	genericRetry           time.Duration // genericRetryDelay — manifest / unknown-status retries
+	genericRetry           time.Duration // genericRetryDelay — the direct download's size-probe backoff
 	hlsPlaylistRetry       time.Duration // hlsPlaylistRetryDelay — playlist fetch or parse failed
 	hlsStuckRetry          time.Duration // hlsStuckRetryDelay — a segment or the init keeps failing
 	connectivityPoll       time.Duration // connectivityPollInterval — waitForConnectivity's ticker

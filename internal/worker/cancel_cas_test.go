@@ -130,8 +130,15 @@ func TestBacklogRequeueLeavesACancelStanding(t *testing.T) {
 // for it as processJob would: a Cancel flags only a run in flight.
 func runningJob(t *testing.T, w *DownloadWorker, db *database.Database, id string) *database.Job {
 	t.Helper()
+	return runningJobOn(t, w, db, id, "youtube")
+}
+
+// runningJobOn is runningJob for a row of the given platform. The platform
+// is set at insert: UpdateJobFields does not write it.
+func runningJobOn(t *testing.T, w *DownloadWorker, db *database.Database, id, platform string) *database.Job {
+	t.Helper()
 	job := &database.Job{
-		ID: id, VideoID: id, URL: "u", Platform: "youtube", Title: "Cancel Me",
+		ID: id, VideoID: id, URL: "u", Platform: platform, Title: "Cancel Me",
 		ChannelName: "Chan", Status: database.StatusDownloading,
 	}
 	if _, err := db.AddJob(job); err != nil {

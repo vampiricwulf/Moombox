@@ -41,6 +41,7 @@ Pure — no DOM, nothing to install:
 | `nico-geometry.test.mjs` | `nico-geometry.js`: the video's box inside the player (letterbox, pillarbox) for the chat overlay |
 | `nico-lanes.test.mjs` | `nico-lanes.js`: lane allocation for the scrolling chat overlay |
 | `nico-scheduler.test.mjs` | `nico-scheduler.js`: the overlay's cursor, anchor, pending list and drop count |
+| `toast-duration.test.mjs` | how long a toast stays: an error until closed, a warning or a long message for a time scaled to its length, a short success 3 s; the countdown bar runs for the same time |
 | `template-preview.test.mjs` | the Settings page's output-template example, formatted as `config.ResolveTemplate` writes a name |
 | `channel-failing.test.mjs` | `channelFailing`, `failingChannels` and `failingChannel` in `utils.js` against Go over `fixtures/channel-failing-parity.json` (owner ruling R-H1) |
 | `utils.test.mjs` | `utils.js`: the formatters (`formatBytes`, timestamps, durations) and the small helpers beside them |
@@ -105,6 +106,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `tasks-incremental.test.mjs` | the Tasks list's cheap paths against a full rebuild: the sort's precomputed keys, the channel list, one-card removal and re-placement, and the hidden-tab repaint; a thumbnail that arrives in a same-status update, archive-at-once without a rebuild, a status-changing progress frame reaching the open dialog, and the one-row tab stop through inserts, moves and deletes |
 | `trimmer.test.mjs` | the trim dialog's failure states and keyboard reach |
 | `twitch-urls.test.mjs` | `extractTwitchTarget` against the shared Twitch URL table (`internal/utils/testdata/twitch_urls.json`), and the Add dialog refusing clips and lists |
+| `youtube-urls.test.mjs` | `extractVideoId` against the shared YouTube URL table (`internal/utils/testdata/youtube_urls.json`) |
 | `update-check-debounce.test.mjs` | a debounced update check reports the wait, not "Up to date" |
 | `update-check-keep.test.mjs` | an up-to-date check keeps a release that reached the page during its round trip |
 | `update-dialog.test.mjs` | the update dialog's Update Now and Skip name the release on screen, and the dialog closes, saying why, once that release is skipped or withdrawn elsewhere |

@@ -2,6 +2,8 @@
  * Settings Controller — Config UI, channels, notifications, cookies, yt-dlp plugin
  */
 import {
+  activeDownloadCount,
+  activeDownloadsRestartWarning,
   applyChannelOverrides,
   bindPasswordSpaceWarning,
   browserPathValidationOutcome,
@@ -1233,13 +1235,18 @@ export class SettingsController {
     const oldPort = this._originalRestartValues["network.port"] || 774;
     const oldHttps = !!this._originalRestartValues["network.https_enabled"];
 
+    // The same warning the update restart gives (update-indicator.js): this
+    // is the same process restart.
+    const activeWarning = activeDownloadsRestartWarning(activeDownloadCount(this.app.jobs));
     const shouldRestart = await this.app.showConfirm(
       // Enumerates the CATEGORIES RESTART_REQUIRED_FIELDS covers, and has to
       // keep pace with it: an operator who changed only a cookie setting and is
       // shown a list naming four things they did not touch reads this as a
       // prompt about something else and dismisses it — which is the failure the
       // cookie entries exist to prevent.
-      "Some settings require a restart to take effect (port, network access, HTTPS/TLS, connectivity probe targets, database path, log settings, cookie settings, sidecar settings, Twitch Client-ID).\n\nRestart Moombox now?",
+      "Some settings require a restart to take effect (port, network access, HTTPS/TLS, connectivity probe targets, database path, log settings, cookie settings, sidecar settings, Twitch Client-ID).\n\n"
+        + (activeWarning ? activeWarning + "\n\n" : "")
+        + "Restart Moombox now?",
       { okLabel: "Restart", okVariant: "primary", title: "Restart Required" },
     );
     if (!shouldRestart) {
@@ -1300,9 +1307,15 @@ export class SettingsController {
    * operator allows — local, LAN, or authenticated external.
    */
   async restartNow() {
+    // With downloads active, say what the restart costs them, as the update
+    // restart does (one count and one sentence, from utils.js), and leave out
+    // the reassurance that nothing is lost.
+    const activeWarning = activeDownloadsRestartWarning(activeDownloadCount(this.app.jobs));
     const confirmed = await this.app.showConfirm(
-      "Restart Moombox now? In-progress downloads are saved on shutdown and resume automatically once it comes back up.",
-      { okLabel: "Restart", okVariant: "danger", title: "Restart Moombox" },
+      activeWarning
+        ? `${activeWarning} Restart anyway?`
+        : "Restart Moombox now? In-progress downloads are saved on shutdown and resume automatically once it comes back up.",
+      { okLabel: activeWarning ? "Restart Anyway" : "Restart", okVariant: "danger", title: "Restart Moombox" },
     );
     if (!confirmed) return;
 

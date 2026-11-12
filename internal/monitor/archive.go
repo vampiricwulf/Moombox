@@ -132,6 +132,17 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 				gated++
 				continue // the probe gate: skip a request we know is refused; scope is untouched (§9)
 			}
+			// A job row in any status counts the same as a history row. A
+			// job can exist with no history row (a manual add writes none,
+			// and the operator can clear history), and without this gate
+			// such a row cost a refresh probe and an Info line every cycle
+			// only for the job insert to be refused as a duplicate. It sits
+			// below the in-memory gates, so a channel that jobs no past
+			// content pays no database read for it, and above every probe.
+			if has, err := fm.db.HasAnyJob(row.VideoID); err != nil || has {
+				history++
+				continue
+			}
 			// Reuse the walk's FRESH result; refresh-probe otherwise. The
 			// refresh probe exists to stop a job being built on STALE
 			// metadata — metadata from earlier in this same cycle is not

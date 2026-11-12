@@ -100,7 +100,7 @@ Adding a new chord:
 
 That's it. Hints, help screen, action menu, and chord feedback all derive from `buildMenuItems()` automatically.
 
-**Prefixes:** A (Action), R (Request), O (Open), Q (Quit). **Single keys:** F, M, `, ?.
+**Prefixes:** A (Action), R (Request), O (Open), Q (Quit). **Single keys:** F, M, `, ?. On the Tasks panel, Space ticks the cursor row for a batch and Ctrl+A ticks every row shown (`TaskListModel.SelectAllShown`); Esc is the only way to clear.
 
 ### Async Operations
 Long-running work returns a `tea.Cmd` that sends a custom message:
@@ -114,7 +114,7 @@ case "R V":
 Never call blocking operations directly in `Update()`.
 
 ### Non-Blocking Channel Sends
-TUI receives events via channels made in `cmd/moombox/tui_wiring.go`. Sends are non-blocking. The four job forwarders go through `forwardOrDrop` (`cmd/moombox/tui_wiring.go`), which counts a drop, warns once per streak and replays a full snapshot on the next send that gets through; a new channel that carries job state must use it. Other channels drop without replay (log lines are counted and reported at exit):
+TUI receives events via channels made in `cmd/moombox/tui_wiring.go`. Sends are non-blocking. The four job forwarders go through `forwardOrDrop` (`cmd/moombox/tui_wiring.go`), which counts a drop, warns once per streak and replays a full snapshot on the next send that gets through; a new channel that carries job state must use it. A forwarder whose event carries a `Job.Version` calls `noteSeenJobVersion` first: the replayed snapshot is sent with that mark as its floor (`tuiJobSnapshot`, `tui.JobsUpdateMsg.Floor`), and the TUI drops queued events at or below it instead of applying them over the snapshot. Other channels drop without replay (log lines are counted and reported at exit):
 ```go
 select {
 case ch <- msg:

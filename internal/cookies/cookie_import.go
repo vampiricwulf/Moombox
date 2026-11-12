@@ -618,6 +618,7 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 		s.noteSuppliedLocked("twitch")
 	}
 	s.mu.Unlock()
+	s.announceRelogin()
 
 	// The completion line, and on a container it is the only view an operator
 	// has of what their paste did. Platform, outcome, verdict and a row count —

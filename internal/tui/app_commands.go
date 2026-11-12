@@ -154,25 +154,25 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		url := fmt.Sprintf("%s/api/jobs", baseURL)
 		resp, err := client.Post(url, "application/json", bytes.NewReader(jsonBody))
 		if err != nil {
-			return addVideoResultMsg{VideoID: input, Feedback: "Failed to connect to server"}
+			return addVideoResultMsg{VideoID: input, Feedback: "Failed to connect to server", Err: true}
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode == 409 {
-			return addVideoResultMsg{VideoID: input, Feedback: "Job already exists"}
+			return addVideoResultMsg{VideoID: input, Feedback: "Job already exists", Warn: true}
 		}
 		if resp.StatusCode >= 400 {
 			var errResp struct {
 				Error string `json:"error"`
 			}
 			if decErr := json.NewDecoder(resp.Body).Decode(&errResp); decErr != nil {
-				return addVideoResultMsg{VideoID: input, Feedback: fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode)}
+				return addVideoResultMsg{VideoID: input, Feedback: fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode), Err: true}
 			}
 			msg := errResp.Error
 			if msg == "" {
 				msg = fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode)
 			}
-			return addVideoResultMsg{VideoID: input, Feedback: msg}
+			return addVideoResultMsg{VideoID: input, Feedback: msg, Err: true}
 		}
 
 		label := "Added to queue"
@@ -204,7 +204,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 			}
 		}
 		return addVideoResultMsg{VideoID: input, Feedback: label}
-	}, func(text string) tea.Msg { return addVideoResultMsg{VideoID: input, Feedback: text} })
+	}, func(text string) tea.Msg { return addVideoResultMsg{VideoID: input, Feedback: text, Err: true} })
 }
 
 // fetchFormatsCmd fetches format options from the local API for advanced mode.

@@ -532,8 +532,8 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 		// blocks", downloader/http.py), and its fragment loop then skips that
 		// fragment as not found (fatal only for fragment 0); this retries it,
 		// as moonarchive does (_dash.py, EmptyFragmentException), and when the
-		// ladder runs out the caller sees ErrSegmentRetriesExhausted — a gap
-		// it reports and the DASH loop re-fetches — never a quiet skip.
+		// ladder runs out the caller sees ErrSegmentRetriesExhausted — catch-up
+		// stops there and the DASH loop re-fetches it — never a quiet skip.
 		if err == nil && status < 400 && len(body) > 0 {
 			// Every caller of this function fetches MEDIA payload (catch-up
 			// workers, parallel HLS) — playlists and probes use fetchSegment
@@ -1067,6 +1067,9 @@ func (d *SegmentDownloader) directRetryBackoff(n int) time.Duration {
 // came — the caller classifies the first by status and the second by
 // errors.Is.
 //
+// A 206 whose body breaks off after delivering part of the range is not a
+// failure of the call: the part is returned as a short chunk (see keep, below).
+//
 // Two kinds of failure are not charged against those attempts, as on the
 // segmented path (fetchSegmentWithRetry):
 //
@@ -1125,6 +1128,24 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 		// offset (fetchChunk) rides the same ladder, as fetchChunk intends.
 		incomplete := status < 300
 
+		// A 206 that delivered part of the range before it broke off is kept:
+		// the bytes are handed back as a short chunk, which the chunk loop
+		// writes and follows with a request from the new offset, as it does
+		// after an honest short 206 and as the streaming fallback keeps what
+		// it read before a break. They used to be dropped and the whole range
+		// asked again, with the break charged as an attempt: every stall or
+		// reset inside a chunk fetched up to a chunk's worth twice, and a link
+		// that could not carry a whole chunk in one response failed the file
+		// after eleven attempts that had each delivered megabytes. The prefix
+		// is trusted as a whole 206 body is: fetchChunk checked the
+		// Content-Range start before it read (a wrong start returns no data),
+		// and a 200, whose body starts at byte 0, is never kept. The outage
+		// wait and the first step of the backoff still come first, so a link
+		// that keeps breaking is asked no faster than before; only a failure
+		// that delivered nothing is charged. A cancelled fetch keeps nothing.
+		keep := status == http.StatusPartialContent && len(data) > 0 &&
+			!d.isCancelled() && ctx.Err() == nil
+
 		// Retry on 5xx or network errors on directRetryBackoff's ladder.
 		// Skip the backoff after the final attempt — no fetch follows, so it
 		// only delays the already-decided failure.
@@ -1132,7 +1153,7 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 			lastErr, lastStatus = err, status
 			if d.opts.IsOnline != nil {
 				offline := !d.opts.IsOnline()
-				if !offline && incomplete && attempt == MaxChunkRetries-1 {
+				if !offline && incomplete && !keep && attempt == MaxChunkRetries-1 {
 					offline = d.awaitOutageVerdict(ctx)
 				}
 				if offline {
@@ -1140,9 +1161,18 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 					if werr := waitForConnectivity(ctx, d.opts.IsOnline, d.delays.connectivityPoll); werr != nil {
 						return nil, 0, d.cancelErr(ctx)
 					}
+					if keep {
+						return data, status, nil
+					}
 					attempt-- // not charged: the failure says nothing about the chunk
 					continue
 				}
+			}
+			if keep {
+				if utils.Sleep(ctx, d.directRetryBackoff(0)) != nil {
+					return nil, 0, d.cancelErr(ctx)
+				}
+				return data, status, nil
 			}
 			if attempt < MaxChunkRetries-1 {
 				utils.Sleep(ctx, d.directRetryBackoff(attempt))
@@ -1225,9 +1255,10 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 	// bytes at the right length: the read below is bounded to end-start+1
 	// either way, so the file keeps its size and nothing downstream can see
 	// the corruption (sweep-2 D-R1). Returning an error hands it to
-	// fetchChunkWithRetry, which treats it exactly as it treats a short read
-	// that ERRORS — an honest short body is no error at all and is accepted
-	// as it stands.
+	// fetchChunkWithRetry with no data, which retries it as it retries a
+	// break that delivered nothing — an honest short body is no error at all
+	// and is accepted as it stands, and so is the part a body delivered
+	// before it broke off (fetchChunkWithRetry's keep).
 	// An origin that omits Content-Range entirely keeps today's behaviour:
 	// the header is mandatory on a 206, but refusing one on that ground alone
 	// would break a working origin over a header this path does not need.

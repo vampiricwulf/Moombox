@@ -108,6 +108,8 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !a.feedback.until.IsZero() && time.Now().After(a.feedback.until) {
 			a.clearFeedback()
 		}
+		// A Resume or Reinitialize still running keeps its line up.
+		a.keepJobVerbShown()
 		// (Terminal title is event-driven — updated by the job-lifecycle
 		// handlers on status change, not polled here every second.)
 		// Keep the details panel's wall-clock text ("5m ago" suffixes) live
@@ -272,6 +274,15 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(a.listenForUpdates(), a.ensureMarqueeTicking())
 
 	case JobsUpdateMsg:
+		// A list that states a floor below the one already applied was read
+		// before that one (two catch-up reads can overlap and arrive out of
+		// order). Applying it would put older rows back, and the events that
+		// would have corrected them are at or below the applied floor and are
+		// dropped as stale. The list already applied holds every write this
+		// one does, so it is dropped whole. A list with no floor still applies.
+		if msg.Floor != 0 && msg.Floor < a.snapshotFloor {
+			return a, tea.Batch(a.listenForUpdates(), a.ensureProgressTicking(), a.ensureMarqueeTicking())
+		}
 		// If jobs already exist, the user has used the app before — dismiss the newcomer hint.
 		if len(msg.Jobs) > 0 {
 			a.seenChordHint = true
@@ -279,6 +290,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Structural change: clear and rebuild progress store + status map (match TS onJobsChange)
 		a.progressStore.Clear()
 		a.statusMap = make(map[string]database.JobStatus)
+		a.raiseJobVersionFloor(msg)
 		for _, j := range msg.Jobs {
 			a.statusMap[j.ID] = j.Status
 			// Terminal rows get no entry: handleJobUpdate would delete one on
@@ -655,15 +667,25 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// `importedFromProfile || browserActed`, so an import that reaches
 			// a verdict always renewed and this arm is unreachable for one.
 			// TestRefreshResultCarriesTheMechanismThatRan pins that upstream.
-			a.setFeedback("Cookies still work, but this pass could not confirm the browser refreshed them")
+			a.setFeedbackWithSeverity("Cookies still work, but this pass could not confirm the browser refreshed them", severityWarning)
 		default:
 			a.setFeedback(mechanismLabel + " successful")
 		}
 		return a, nil
 
 	case addVideoResultMsg:
+		// A refused add leaves its own dialog open, with the URL, the format
+		// picks and the time range as they were, and the reason as the
+		// dialog's error: the feedback line is under the dialog, and closing
+		// threw the input away. With that dialog gone (Esc during the
+		// request) the reason goes to the feedback line, in red.
+		if msg.Err && a.addVideo.FailSubmit(msg.VideoID, msg.Feedback) {
+			return a, nil
+		}
 		if msg.Feedback != "" {
-			if msg.Warn {
+			if msg.Err {
+				a.setFeedbackWithSeverity(msg.Feedback, severityError)
+			} else if msg.Warn {
 				a.setFeedbackWithSeverity(msg.Feedback, severityWarning)
 			} else {
 				a.setFeedback(msg.Feedback)
@@ -799,6 +821,10 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.setFeedback(fmt.Sprintf("Trim deleted: %s", msg.Filename))
 		return a, nil
 
+	case jobVerbResultMsg:
+		a.finishJobVerb(msg)
+		return a, nil
+
 	case deleteJobsResultMsg:
 		// Row removal + selection refresh already happened via the
 		// JobDeleted lifecycle events; this just reports completion.
@@ -821,7 +847,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.Watched {
 			verb = "Unmarked"
 		}
-		a.setFeedback(fmt.Sprintf("%s %d job(s) watched", verb, msg.Count))
+		a.setFeedback(verb + " " + jobCount(msg.Count) + " watched")
 		return a, nil
 
 	case fetchOrphansResultMsg:
@@ -1184,7 +1210,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setupWiz.resetCookieFlow()
 			a.setupWiz.errorMsg = msg.Text
 		} else {
-			a.setFeedback(msg.Text)
+			// A recovered panic is an error whatever its text says; unstated,
+			// "unexpected error: ..." matched nothing and drew in success green.
+			a.setFeedbackWithSeverity(msg.Text, severityError)
 		}
 		return a, nil
 
@@ -1547,15 +1575,50 @@ type appliedJobVersions struct {
 // about the title, quality or anything else a tick does not write, so it
 // never makes a write stale. A row with no version (0: read rather than
 // written) makes no claim and is never stale.
+//
+// A write at or below the snapshot floor is stale for both stores, and for a
+// job the snapshot did not hold as well (it was deleted before the snapshot
+// was read): see raiseJobVersionFloor.
 func (a *App) staleJobUpdate(job *database.Job, tick bool) bool {
 	if job.Version == 0 {
 		return false
+	}
+	if job.Version <= a.snapshotFloor {
+		return true
 	}
 	applied := a.jobVersions[job.ID]
 	if tick {
 		return job.Version <= applied.progress
 	}
 	return job.Version <= applied.row
+}
+
+// raiseJobVersionFloor records what a full snapshot covers. msg.Floor is a
+// write version the snapshot is at least as new as (JobsUpdateMsg), so every
+// job in it has that version applied to both of its stores, and every event
+// still queued from before the snapshot was read is dropped by staleJobUpdate
+// instead of being put back over it. Without this, the events a stalled TUI
+// had not yet read were applied after the catch-up snapshot: a tick queued
+// before a dropped Finished write counted the job active again for good, and
+// a queued Muxing write put the row itself back.
+//
+// Entries of jobs the snapshot does not hold are dropped: those jobs are
+// gone. A Floor of 0 claims nothing and changes nothing.
+func (a *App) raiseJobVersionFloor(msg JobsUpdateMsg) {
+	if msg.Floor == 0 {
+		return
+	}
+	if msg.Floor > a.snapshotFloor {
+		a.snapshotFloor = msg.Floor
+	}
+	versions := make(map[string]appliedJobVersions, len(msg.Jobs))
+	for _, j := range msg.Jobs {
+		applied := a.jobVersions[j.ID]
+		applied.row = max(applied.row, msg.Floor)
+		applied.progress = max(applied.progress, msg.Floor)
+		versions[j.ID] = applied
+	}
+	a.jobVersions = versions
 }
 
 // noteJobVersion records job's version as applied: to the progress store
@@ -1675,8 +1738,15 @@ func (a *App) handleJobAdded(ev *database.JobAdded) {
 		return
 	}
 	job := ev.Job
-	// Never dropped, however old: the row has to exist. An update that
-	// overtook it found no row to apply to, so nothing newer is lost.
+	// An add from before a full snapshot was read is in that snapshot, or
+	// its job was deleted before it: either way the snapshot has the last
+	// word, and applying the add would put the job's first status back in
+	// the status map and the progress store (see raiseJobVersionFloor).
+	if job.Version != 0 && job.Version <= a.snapshotFloor {
+		return
+	}
+	// Otherwise never dropped, however old: the row has to exist. An update
+	// that overtook it found no row to apply to, so nothing newer is lost.
 	a.noteJobVersion(job, false)
 
 	// Existing app already has data → user has used the app before; the

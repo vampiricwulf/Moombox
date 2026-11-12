@@ -17,7 +17,8 @@ import (
 )
 
 // reconnectDirectiveServer completes the IRC handshake, welcomes the client,
-// and then immediately sends RECONNECT — what Twitch does when it takes a chat
+// and then immediately sends RECONNECT, in the prefixed form Twitch documents
+// (":tmi.twitch.tv RECONNECT") — what Twitch does when it takes a chat
 // edge out of service. It then STAYS OPEN: the client has to leave on the
 // directive alone, not because the socket died under it, or the test would
 // prove nothing about how RECONNECT is handled.
@@ -70,7 +71,7 @@ func startReconnectDirectiveServer(t *testing.T) *reconnectDirectiveServer {
 			return
 		}
 		if writeErr := conn.Write(r.Context(), websocket.MessageText,
-			[]byte("RECONNECT")); writeErr != nil {
+			[]byte(":tmi.twitch.tv RECONNECT")); writeErr != nil {
 			return
 		}
 		s.mu.Lock()
@@ -114,6 +115,8 @@ func startReconnectDirectiveServer(t *testing.T) *reconnectDirectiveServer {
 func TestIRCServerReconnectBeforeTheWelcomeIsNotAnAuthDowngrade(t *testing.T) {
 	// Session 1 is told to leave before it is welcomed; session 2 is welcomed
 	// normally, and is what proves the credentials are still being presented.
+	// The bare form on purpose: the other tests here send the prefixed one, and
+	// both must be taken.
 	rep := startIRCReplier(t, []string{"RECONNECT"}, []string{welcomeLine})
 	logger := &recordingLogger{}
 	reports := &downgradeRecorder{}

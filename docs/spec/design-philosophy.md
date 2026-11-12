@@ -244,7 +244,7 @@ All in-memory buffers have explicit bounds:
 - Chat message deduplication: 5,000 recent IDs with deterministic eviction.
 - Twitch emote cache: 200 channels (LRU), plus one global set per provider (3).
 - Rate limiter entries: 10,000 maximum per-IP entries.
-- Per-job log buffers: in-memory string arrays (bounded by job lifetime).
+- Per-job log buffers: in-memory string arrays, 200 lines at most each, held for every active job and the newest 200 finished ones (`finishedJobLogsKept`).
 
 ---
 

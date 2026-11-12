@@ -2052,6 +2052,11 @@ sl-progress-bar {
     outline-offset: 1px;
 }
 
+/* A Twitch /me message: the text in italics, after the name with no colon. */
+.chat-msg-action {
+    font-style: italic;
+}
+
 .chat-msg-author {
     font-weight: var(--sl-font-weight-semibold);
     margin-right: var(--sl-spacing-2x-small);
@@ -3053,7 +3058,22 @@ sl-progress-bar {
     height: 2px;
     background-color: currentColor;
     opacity: 0.3;
-    animation: toastCountdown 3s linear forwards;
+    /* How long the toast stays: showToast sets --toast-duration from
+       toastDuration (utils.js). A toast that stays until closed has no bar. */
+    animation: toastCountdown var(--toast-duration, 3s) linear forwards;
+}
+
+/* An error toast asked for again while it is still up (showToast). */
+.toast-alert.toast-again::part(base) {
+    animation: toastAgain 0.3s ease-out;
+}
+
+@keyframes toastAgain {
+    50% { transform: scale(1.03); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .toast-alert.toast-again::part(base) { animation: none; }
 }
 
 /* Empty state enhancements */
@@ -3468,6 +3488,16 @@ html.sl-theme-light .log-debug {
 #stats-content {
     padding: var(--sl-spacing-medium);
     max-width: 960px;
+}
+
+/* The Stats tab could not be read; the cards below keep their last values. */
+.stats-error {
+    margin-bottom: var(--sl-spacing-medium);
+    padding: var(--sl-spacing-small) var(--sl-spacing-medium);
+    border: 1px solid var(--sl-color-danger-300);
+    border-radius: var(--sl-border-radius-medium);
+    color: var(--sl-color-danger-800);
+    background-color: var(--sl-color-danger-100);
 }
 
 .stats-section {

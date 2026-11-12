@@ -10,6 +10,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
@@ -32,8 +33,10 @@ type FileRoutesDeps struct {
 // walks the filesystem, which would race config.Store.Update mutating
 // the shared struct in place.
 func FileRoutes(r chi.Router, deps *FileRoutesDeps) {
-	// GET /api/files/orphaned — scan and return orphaned files
-	r.Get("/api/files/orphaned", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/files/orphaned — scan and return orphaned files. The scan
+	// walks the whole output tree, so RefuseCrossSite keeps another site's
+	// page from firing it.
+	r.With(web.RefuseCrossSite).Get("/api/files/orphaned", func(rw http.ResponseWriter, req *http.Request) {
 		entries, err := worker.ScanOrphanedFiles(deps.DB, deps.Store.Snapshot())
 		if err != nil {
 			jsonError(rw, "failed to scan orphaned files", http.StatusInternalServerError)

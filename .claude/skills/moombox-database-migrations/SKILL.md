@@ -61,7 +61,7 @@ Add the new column to the relevant `SELECT` statements, `INSERT` (`AddJob`), and
 ## Common Mistakes
 
 - Forgetting the `createSchema` half — fresh installs silently lack the new table/column
-- Forgetting `fieldToColumn` (or the coverage-test excluded set) for a new jobs column — `TestFieldToColumnCoverage` fails, or `UpdateJobFields` silently ignores the field
+- Forgetting `fieldToColumn` (or the coverage-test excluded set) for a new jobs column — `TestFieldToColumnCoverage` fails, or `UpdateJobFields` does not write the field (it logs `unknown field not written` at Error and writes the rest)
 - Non-idempotent statement — crashes on the re-run of a partially applied block (always `IF NOT EXISTS` / `isDuplicateColumnErr`)
 - Interleaving a backfill UPDATE inside an open SELECT cursor — deadlocks on the single connection
 - Adding a column without a default — existing rows get NULL, which may break scans expecting a value

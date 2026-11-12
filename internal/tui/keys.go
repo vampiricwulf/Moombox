@@ -24,4 +24,8 @@ const (
 	keyEsc   = "esc"
 	keyCtrlC = "ctrl+c"
 	keyCtrlO = "ctrl+o"
+	// keyCtrlA selects every row the Tasks list shows (owner ruling R2-T1).
+	// Only the main view binds it: an overlay or an open filter box gets the
+	// key first, so in a text input it is still "start of line".
+	keyCtrlA = "ctrl+a"
 )

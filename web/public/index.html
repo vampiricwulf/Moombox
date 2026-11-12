@@ -509,6 +509,7 @@
             <!-- Stats Panel -->
             <sl-tab-panel name="stats">
                 <div id="stats-content">
+                    <div id="stats-error" class="stats-error" role="alert" hidden></div>
                     <div class="stats-section">
                         <h2>Storage</h2>
                         <div id="stats-disk"></div>
@@ -1376,7 +1377,8 @@
                                 Restart the Moombox process. The launcher
                                 relaunches it automatically; in-progress
                                 downloads are saved on shutdown and resume on
-                                startup. Available to any connection you allow
+                                startup, but live segments broadcast while it
+                                is down can be lost. Available to any connection you allow
                                 access to — local, LAN, or authenticated
                                 external.
                             </p>
@@ -2192,7 +2194,7 @@
             <dl class="keyboard-shortcut-grid">
                 <dt><kbd>A</kbd></dt><dd>Add video</dd>
                 <dt><kbd>?</kbd></dt><dd>Show this help</dd>
-                <dt><kbd>Esc</kbd></dt><dd>Close dialog</dd>
+                <dt><kbd>Esc</kbd></dt><dd>Close dialog; with none open, close the newest error message</dd>
                 <dt><kbd>1</kbd>-<kbd>8</kbd></dt><dd>Switch tabs</dd>
                 <dt><kbd>F</kbd></dt><dd>Focus search</dd>
                 <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Navigate job list (Tasks and Archived)</dd>

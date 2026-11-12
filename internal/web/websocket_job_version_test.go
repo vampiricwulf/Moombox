@@ -21,7 +21,8 @@ func drainTypes(t *testing.T, c *wsClient) []string {
 	var out []string
 	for {
 		select {
-		case b := <-c.writes:
+		case f := <-c.writes:
+			b := f.data
 			var m struct {
 				Type    string         `json:"type"`
 				Payload versionedFrame `json:"payload"`
@@ -110,7 +111,8 @@ func TestHubSendsAWriteATickOvertook(t *testing.T) {
 		var out []string
 		for {
 			select {
-			case b := <-c.writes:
+			case f := <-c.writes:
+				b := f.data
 				var m struct {
 					Type    string      `json:"type"`
 					Payload titledFrame `json:"payload"`

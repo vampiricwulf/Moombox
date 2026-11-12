@@ -47,7 +47,8 @@ type ActionMenuItem struct {
 	// "deletes 2 set-aside recordings, …" (owner decision PR-M1) — on the
 	// chord's confirm and on the menu's second-Enter footer alike. It may
 	// read the disk: it runs once, when the confirm is armed, never when
-	// the menu opens (CORE-9).
+	// the menu opens (CORE-9). A chord that takes no job is asked with nil
+	// ids: R P's says how many downloads the restart interrupts.
 	ConfirmDetail func(jobIDs []string) string
 
 	// Opens names the overlay this action puts on screen, by its
@@ -390,6 +391,18 @@ func (m *ActionMenuModel) selectedAction() *ActionMenuItem {
 // HandleKey processes a key press and returns an action string.
 // Returns "" for internal navigation, "close" to dismiss, or an action chord
 // like "A A" or "A D:jobID123".
+// pickerJob is the job under the job picker's cursor, as the picker holds it
+// (the row from when the action was chosen), or nil outside the picker.
+func (m *ActionMenuModel) pickerJob() *database.Job {
+	if !m.visible || m.mode != menuJobSelect {
+		return nil
+	}
+	if ji, ok := m.jobList.SelectedItem().(menuJobItem); ok {
+		return ji.job
+	}
+	return nil
+}
+
 func (m *ActionMenuModel) HandleKey(key string) string {
 	m.bareRefused = false
 	switch m.mode {
@@ -471,6 +484,10 @@ func (m *ActionMenuModel) handleMainKey(key string) string {
 		}
 		if item.NeedsConfirm {
 			m.confirmLabel = item.Label
+			m.confirmDetail = ""
+			if item.ConfirmDetail != nil {
+				m.confirmDetail = item.ConfirmDetail(nil)
+			}
 			m.pendingAction = item.Chord
 			m.mode = menuConfirm
 			return ""
@@ -717,6 +734,15 @@ func (m *ActionMenuModel) renderConfirm(boxW int) string {
 	var lines []string
 	lines = append(lines, "")
 	lines = append(lines, "  "+prompt)
+	// What the action costs (R P: the downloads a restart interrupts),
+	// wrapped whole between the question and the keys.
+	if m.confirmDetail != "" {
+		detail := bareWrap(m.confirmDetail, max(boxW-6, 1), len(m.confirmDetail)+1)
+		for _, row := range detail {
+			lines = append(lines, "  "+YellowStyle.Render(row))
+		}
+		ch += len(detail)
+	}
 	lines = append(lines, "  "+hint)
 	for len(lines) < ch+2 {
 		lines = append(lines, "")

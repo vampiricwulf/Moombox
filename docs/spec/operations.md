@@ -110,7 +110,9 @@ Three-stage build that runs the entire pipeline inside the image build — no ho
 
 1. **sidecar** (`node:24-bookworm-slim`): `npm ci --ignore-scripts` + `node build.mjs` → `sidecar.tar.gz` (mirrors release.yml).
 2. **build** (`golang:1.27-bookworm`): `go run ./tools/fetch-node`, then `CGO_ENABLED=0` cross-compile for `$TARGETOS/$TARGETARCH`. Both stages run on `$BUILDPLATFORM`, so multi-arch builds don't emulate the compile.
-3. **runtime** (`debian:bookworm-slim` + ffmpeg + ca-certificates + tzdata): must be glibc — the sidecar extracts an official nodejs.org Linux binary at runtime, and those are glibc-linked (Alpine/musl won't run it).
+3. **runtime** (`debian:bookworm-slim` + ffmpeg + ca-certificates + tzdata): must be glibc — the sidecar extracts an official nodejs.org Linux binary at runtime, and those are glibc-linked (Alpine/musl won't run it). Both `apt-get` calls carry `-o Acquire::Retries=3 -o Acquire::http::Timeout=30`: apt otherwise gives up only on total silence and never retries, and the arm64 install runs under emulation.
+
+**Build context.** The build stage is `COPY . .`, so `.dockerignore` decides what a build uploads and what invalidates the compile layer. Docker matches each pattern against the context root only, unlike `.gitignore`: one meant for any depth starts with `**/` (`**/node_modules/`, `**/*.exe`, `**/*.syso`, `**/*.log`). The root-only entries include `.worktrees/` and `reports/`, so a local `docker build` from a checkout that has worktrees does not send their source copies and embed blobs. None of the any-depth patterns matches a tracked file, so a build from a clean checkout (CI's) gets the same context as before them.
 
 Container conventions:
 - All state under a single `/data` volume (config, DB, logs, staging, output, sidecar cache — `HOME=/data` keeps the one-time sidecar extraction on the volume). `WORKDIR /data` so the binary's cwd-relative defaults land there too. The two large scratch file sets are written on the output volume, not under the container's `/tmp`: a multi-part trim's re-encoded intermediates beside the clip in the job's `trim/` directory (see [architecture.md](architecture.md) § 11. Trim Service), and a dashboard import's upload, up to 500 MB, spooled into `<output>/imports`, where its entries are extracted (`POST /api/import`, [user-interfaces.md](user-interfaces.md)). What else goes under the system temp directory is small: FFmpeg's concat lists and two-pass logs, the cipher player cache, the Firefox cookie-database snapshot, and the updater's manifest and signature checks.
@@ -223,7 +225,7 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 - **`release`** — the binaries; steps below.
 - **`docker`** — calls `.github/workflows/docker-publish.yml` with `push` true only for a tag push. It `needs` `release`, so a failed build or signature check cannot leave a pushed `latest` image for a version that has no release.
 
-**Dry run.** "Run workflow" on any ref runs all three jobs exactly as a tag would. What publishes is the tag *push* — every gate tests `github.event_name == 'push'` — so a manual run started on a tag ref is still a dry run and cannot overwrite that release's assets. In a dry run the image is built for both architectures but not pushed, and the release step uploads the eight assets to a *draft* release named `dryrun-<run id>-<attempt>` — never public, and it creates no git tag — which the following step checks (a draft with eight assets) and deletes. The upload therefore runs with the same action, token and file list a tag uses. Signing runs, self-check included, so a wrong `SIGNING_KEY` is caught before a tag exists — and so does the manifest step, which writes and signs a manifest for the dry run's `-dryrun` version and draft tag, so the manifest pipeline is exercised too. The dry run's version is the one `cmd/moombox/main.go` declares plus `-dryrun`. It exists because this workflow otherwise runs on tags alone and a tag is never replaced: a break in it was found by the release it broke.
+**Dry run.** "Run workflow" on any ref runs all three jobs exactly as a tag would. What publishes is the tag *push* — every gate tests `github.event_name == 'push'` — so a manual run started on a tag ref is still a dry run and cannot overwrite that release's assets. In a dry run the image is built for both architectures and the amd64 one is started once (the build-and-start check, under Docker Publish Workflow) but nothing is pushed, and the release step uploads the eight assets to a *draft* release named `dryrun-<run id>-<attempt>` — never public, and it creates no git tag — which the following step checks (a draft with eight assets) and deletes. The upload therefore runs with the same action, token and file list a tag uses. Signing runs, self-check included, so a wrong `SIGNING_KEY` is caught before a tag exists — and so does the manifest step, which writes and signs a manifest for the dry run's `-dryrun` version and draft tag, so the manifest pipeline is exercised too. The dry run's version is the one `cmd/moombox/main.go` declares plus `-dryrun`. It exists because this workflow otherwise runs on tags alone and a tag is never replaced: a break in it was found by the release it broke.
 
 #### Release job steps
 
@@ -247,6 +249,8 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 18. **Check and delete the draft** (dry run only) — requires a draft with eight assets, and deletes it first so a failed check leaves nothing behind.
 
 Every network command in the job — `go mod download`, `npm ci`, `fetch-node` and the `go-winres` install — runs through `.github/scripts/retry.sh` (three attempts, each cut off after five minutes) inside a step timeout of 10 minutes, as in the test workflow.
+
+Both jobs that publish have a job limit, `timeout-minutes: 45`: `release` here, and `docker` inside docker-publish.yml (a job that `uses:` a workflow cannot carry one). Without a limit a hung step holds the run for GitHub's six hours, with the release published and no image; with one it fails by itself and "Re-run failed jobs" can retry it. The limits are several times the longest run observed: the release job took 2.5 to 3.5 minutes in the releases v2.9.1 to v2.9.9, and the Docker job 4 to 8.5 minutes in the releases since September 2026. 45 minutes also covers every retried network step using its whole step timeout.
 
 Steps 5 and 6 run on every release, with no `actions/cache` in front of them: the embed blobs a signed binary carries are built from the tagged commit. A cache would never hit — a cache saved by one tag's run is not readable from another tag's — and a key that left out `bgutil-sidecar/src` and the vendored ejs would let a hit ship the previous sidecar JS under a new version number.
 
@@ -300,10 +304,16 @@ When `RELEASE_NOTES.md` is present, the release body is assembled as:
 ### Docker Publish Workflow
 
 **File:** `.github/workflows/docker-publish.yml`
-**Trigger:** `workflow_call` from release.yml's `docker` job (after the release job, so it has no tag trigger of its own), plus `workflow_dispatch` for testing image changes without cutting a release. Both take a boolean `push` input, default true: release.yml passes true only for a tag push, and a manual run with it unticked builds both architectures without pushing.
+**Trigger:** `workflow_call` from release.yml's `docker` job (after the release job, so it has no tag trigger of its own), plus `workflow_dispatch` for testing image changes without cutting a release. Both take a boolean `push` input, default true: release.yml passes true only for a tag push, and a manual run with it unticked builds both architectures without pushing. The input only asks; the job's `PUBLISH` value decides (below).
 **Permissions:** `contents: read`, `packages: write`
 
 Builds the multi-arch (linux/amd64 + linux/arm64) image via buildx and pushes to `ghcr.io/vampiricwulf/moombox`. Release tags produce `X.Y.Z`, `X.Y`, and `latest` (pre-release tags containing `-` skip `latest`, matching release.yml's pre-release handling); manual dispatch on `main` produces `edge`. `VERSION`/`COMMIT` build args mirror release.yml's ldflags. QEMU is only used for the small Debian runtime stage of the arm64 image — the Go compile cross-compiles natively.
+
+**Build-and-start check (owner ruling R2-O3).** Before the multi-arch build, the job builds the linux/amd64 image into the runner's own Docker (`load`, same build args) and `.github/scripts/image-smoke.sh` starts it once: `docker run --rm --user <runner uid:gid> -v <empty dir>:/data <image> --version`. That goes through `docker/entrypoint.sh`, which seeds `config.toml` and writes `README-docker.txt` before it execs `moombox -config /data/config.toml --version`; the binary answers `--version` before the launcher, the config or the database are touched. The script requires the last output line to be exactly `moombox <version> (<commit>)` — the `VERSION` build arg, or the version `cmd/moombox/main.go` declares when the image was built without one — and both files to exist and be non-empty. A failure stops the job before anything is built for push. The multi-arch build reuses the amd64 layers from the same builder. The check runs wherever this workflow runs — a release, a release dry run, a manual run — and in no pull request: before it, nothing in any workflow had ever started the image.
+
+**What may push (owner ruling R2-O2).** `PUBLISH` is `inputs.push && (github.event_name == 'push' || github.ref == 'refs/heads/main')`, and it is the build step's `push`. Under `workflow_call`, `github.event_name` is the caller's event, so the two cases are a tag push arriving through release.yml and a run on `main`, which the tag rules give `edge` alone. `latest` and the version tags therefore move only on a real tag push. A manual run with a tag (or any other branch) selected builds both architectures and stops, and its first step says so; without the gate it rebuilt that tag and pushed it as `X.Y.Z`, `X.Y` and `latest`, moving `latest` back to an old version whose binary then refuses the newer database. To publish the image of an existing tag again, open that tag's release run and re-run the `docker` job: "Re-run failed jobs" when it failed, otherwise the re-run button on the `docker` job alone. Either is still a push event. Do not use "Re-run all jobs", which runs the `release` job again too. Do this only for the newest release tag: a re-run pushes `latest` (and `X.Y`) again, so on an older tag it moves them back to that version.
+
+The gate covers only tags created from the commit that added it on. A manual run on a tag executes that tag's own copy of the workflow file, so for `v2.9.9` and older the copy has no gate and still pushes: never "Run workflow" on one of those tags.
 
 ### Vulnerability Scan Workflow
 
@@ -311,7 +321,14 @@ Builds the multi-arch (linux/amd64 + linux/arm64) image via buildx and pushes to
 **Trigger:** weekly `schedule` (Mondays 06:17 UTC), plus `workflow_dispatch`
 **Permissions:** `contents: read`
 
-Runs `govulncheck ./...` (pinned, like staticcheck) and `npm audit` on the two npm projects — the sidecar's runtime dependencies and the frontend test harness, failing at moderate and above. govulncheck fails only when the code reaches the vulnerable symbol. It needs every package to load, so two empty files stand in for the embed blobs instead of building them. Deliberately not a step in ci.yml: an advisory is published on the database's schedule, not on a commit, and would turn an unrelated pull request red. A failed scheduled run is emailed by GitHub to whoever last changed the workflow's schedule.
+Six steps in four groups, each run even when an earlier one failed:
+
+- **`govulncheck ./...`** (pinned, like staticcheck, and installed once for the runner), twice: for linux/amd64 and, with `GOOS=windows GOARCH=amd64`, for the Windows build. govulncheck analyses one build configuration per run, and the Windows one has files (`*_windows.go`), dependencies (`golang.org/x/sys/windows`) and standard-library halves (`os/exec`, `path/filepath`) the linux pass never loads. It fails only when the code reaches the vulnerable symbol. It needs every package to load, so `.github/scripts/embed-standins.sh` writes an empty file for each embed blob instead of building them.
+- **`npm audit`** on the two npm projects — the sidecar's runtime dependencies (`--omit=dev`) and the frontend test harness — failing at moderate and above.
+- **`node audit-bundled.mjs`** in `bgutil-sidecar/` — the same threshold for `meriyah` and `astring` alone. They are devDependencies, so the audit above skips them, but `build.mjs` bundles them into `vendor/ejs.bundle.js`, where they parse YouTube's player JavaScript on every cipher solve. A full `npm audit` is not used because it would also fail on esbuild, which only runs at build time. A sidecar test keeps the two names equal to the packages `vendor/ejs/src` imports, and another fails when either gains a dependency of its own, whose advisory npm would list under a name this check does not read.
+- **`go run ./tools/fetch-node -check-security`** — reads `https://nodejs.org/dist/index.json` and fails when a release on the pinned major line that is newer than `nodeVersion` (`tools/fetch-node/main.go`) is marked `security` (owner ruling R2-O1). `npm audit` cannot see the embedded Node runtime or the undici inside it. A run that cannot reach nodejs.org prints a warning annotation and passes; an index that does not list the pin fails, because the check then cannot judge. Nothing else runs this check: it never blocks a pull request or a release.
+
+Deliberately not a step in ci.yml: an advisory is published on the database's schedule, not on a commit, and would turn an unrelated pull request red. A failed scheduled run is emailed by GitHub to whoever last changed the workflow's schedule.
 
 ---
 
@@ -641,7 +658,7 @@ A live YouTube capture's first setup in the job's first part fell to the live HL
 
 #### `connectivity_resume`
 
-Connectivity restored; the same Twitch job resumed. Only after an outage the connectivity monitor reported for `connectivity.MinOutage` (60 s) — a live capture rides a shorter one out in place and sends nothing. Carries the pause instant — when the link went down, not when the minimum ran out — as a relative timestamp and the outage duration ("Paused `<t:x:R>` · resumed after 4m12s"), which is what the retired `connectivity_pause` event used to say on its own. That embed was sent WHILE the machine was offline and so mostly never arrived; a target still filtering on the old key receives this one through the manager's event alias, for one release
+Connectivity restored; the same Twitch job resumed. Only after an outage the connectivity monitor reported for `connectivity.MinOutage` (60 s) — a live capture rides a shorter one out in place and sends nothing. Carries the pause instant — when the link went down, not when the minimum ran out — as a relative timestamp and the outage duration ("Paused `<t:x:R>` · resumed after 4m12s"), which is what the retired `connectivity_pause` event used to say on its own. That embed was sent WHILE the machine was offline and so mostly never arrived; a target still filtering on the old key receives this one through the manager's event alias, permanently (owner ruling R2-N3)
 
 #### `connectivity_restored`
 
@@ -677,8 +694,9 @@ warning for any configured filter entry outside the vocabulary.
 neither UI offers it and the TUI strips it from a hand-edited config on the
 next save; it remains in `KnownEvents` (so no startup warning) and is the
 target of `eventAliases`' `connectivity_resume` entry (so an unmigrated filter
-keeps receiving the folded embed). The alias is a migration and is removed one
-release after the retirement ships.
+keeps receiving the folded embed). The alias is permanent (owner ruling R2-N3):
+it was first written as a one-release migration, and the owner ruled that a
+filter naming the retired key keeps working.
 
 ### Delivery Modes
 

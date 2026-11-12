@@ -30,7 +30,7 @@ type GojaResolver struct {
 	// in-place slice ops that alias the backing array. Reading it from
 	// elsewhere without the lock would race with mutation. (audit cipher.md H4)
 	solverOrder []string
-	compileMu   sync.Mutex // serializes compilation to prevent thundering herd
+	compileSlot compileSlot // serializes compilation to prevent thundering herd
 	logger      interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -38,6 +38,27 @@ type GojaResolver struct {
 		Error(msg string, args ...any)
 	}
 }
+
+// compileSlot is a lock a waiter can give up on: one holder at a time, and a
+// caller waiting for it leaves when its context ends. The zero value is free.
+type compileSlot struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+// acquire takes the slot, or returns ctx's error once ctx ends first. A
+// caller that gets nil must call release.
+func (c *compileSlot) acquire(ctx context.Context) error {
+	c.once.Do(func() { c.ch = make(chan struct{}, 1) })
+	select {
+	case c.ch <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *compileSlot) release() { <-c.ch }
 
 // NewGojaResolver creates a new GojaResolver with the given cache directory.
 func NewGojaResolver(cacheDir string, logger interface {
@@ -106,9 +127,15 @@ func (s *GojaResolver) GetSolvers(ctx context.Context, playerURL string) (*Solve
 	}
 
 	// Serialize compilation — only one goroutine compiles at a time.
-	// Others block here then find the result in cache.
-	s.compileMu.Lock()
-	defer s.compileMu.Unlock()
+	// Others wait here then find the result in cache. A caller whose context
+	// ends while it waits leaves then: errors are not cached, so with the
+	// player CDN down every caller ahead of it repeats the cold fetch (about
+	// 94s each), and behind a plain mutex a cancelled job, or a shutdown,
+	// waited out all of them.
+	if err := s.compileSlot.acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer s.compileSlot.release()
 
 	// Re-check cache after acquiring compile lock (another goroutine may have compiled).
 	// Also touch the LRU order to reflect the access.
@@ -126,7 +153,7 @@ func (s *GojaResolver) GetSolvers(ctx context.Context, playerURL string) (*Solve
 	solvers, err := s.compileSolver(ctx, playerURL, playerID)
 	if err != nil {
 		// Don't cache errors — allow retry on next request (may be transient).
-		// The compileMu serialization prevents thundering herd during this request.
+		// The compileSlot serialization prevents thundering herd during this request.
 		s.logger.Error("cipher: solver compilation failed", "playerID", playerID, "error", err.Error())
 		return nil, err
 	}

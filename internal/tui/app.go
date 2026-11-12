@@ -47,8 +47,21 @@ type (
 	// the new trim list to the cached row + (if selected) the detail
 	// panel. DECISIONS #21 lifecycle event.
 	TrimsChangedMsg struct{ Job *database.Job }
-	JobsUpdateMsg   struct{ Jobs []*database.Job }
-	LogBatchMsg     struct{ Lines []string }
+	// JobsUpdateMsg is a full job list. It is also the element of the
+	// full-list channel, so the wiring states Floor where it can.
+	//
+	// Floor is a database.Job.Version the list is at least as new as: every
+	// write with that version or a lower one was committed before the list
+	// was read. The wiring reads it (the highest version its forwarders have
+	// seen) BEFORE reading the list, so every job event queued ahead of the
+	// snapshot is at or below it and is dropped as stale once the snapshot is
+	// applied. 0 makes no claim: the bulk-write snapshots are read inside
+	// their write, and a later write's event may already have been seen.
+	JobsUpdateMsg struct {
+		Jobs  []*database.Job
+		Floor uint64
+	}
+	LogBatchMsg struct{ Lines []string }
 	// CheckTimersMsg sets one monitor's header countdown. A zero Next clears
 	// it (the monitor has no channels); see MonitorNextCheckTime.
 	CheckTimersMsg struct {
@@ -151,6 +164,12 @@ type (
 		// Warn shows Feedback as a warning: a pasted Twitch listing some of
 		// whose VODs could not be queued (owner decision PR-M9).
 		Warn bool
+		// Err says the add was refused or never reached the server. The
+		// dialog that sent it stays open with what was typed and shows
+		// Feedback as its error; with that dialog gone, Feedback goes to the
+		// feedback line in the error colour. A job that already exists is
+		// not one: it is a Warn, and closes the dialog as a success does.
+		Err bool
 	}
 	fetchFormatsResultMsg struct {
 		VideoID string
@@ -202,6 +221,16 @@ type (
 		TrimID   string
 		Filename string
 		Err      string
+	}
+	// jobVerbResultMsg is the answer of a Resume or Reinitialize run
+	// (runJobVerb, job_verb_flow.go). Gen is the run it answers; Title is
+	// set for a single job, a batch reports Count and Refused.
+	jobVerbResultMsg struct {
+		Gen     uint64
+		Chord   string // "A R" or "A I"
+		Title   string
+		Count   int
+		Refused verbRefusals
 	}
 	// deleteJobsResultMsg reports completion of an async job delete.
 	// OnDeleteJob blocks in WaitForJobExit (up to 5s per job), so deletes
@@ -580,6 +609,10 @@ type App struct {
 	// order to their writes; the older is dropped (see staleJobUpdate) rather
 	// than put back over the newer.
 	jobVersions map[string]appliedJobVersions
+	// snapshotFloor is the highest JobsUpdateMsg.Floor applied: every write
+	// at or below it is already in a snapshot the lists were rebuilt from.
+	// Written only by raiseJobVersionFloor.
+	snapshotFloor uint64
 
 	// Layout
 	focusedPanel FocusPanel
@@ -614,6 +647,10 @@ type App struct {
 	// TestStatedSeverityDoesNotLeakToTheNextMessage pins the invariant this
 	// makes structural.
 	feedback appFeedback
+
+	// jobVerb is the Resume or Reinitialize run in flight, if any
+	// (job_verb_flow.go).
+	jobVerb jobVerbFlow
 
 	// frame memoises the composed panel frame View returns, and the line
 	// measurements it is joined from (frame_compose.go). Written only by
@@ -664,7 +701,7 @@ type App struct {
 	jobAddedCh        <-chan *database.JobAdded
 	jobDeletedCh      <-chan *database.JobDeleted
 	jobTrimsChangedCh <-chan *database.Job
-	jobsUpdateCh      <-chan []*database.Job
+	jobsUpdateCh      <-chan JobsUpdateMsg
 	logCh             <-chan string
 	checkTimersCh     <-chan CheckTimersMsg
 	cookieStatusCh    <-chan CookieStatusMsg
@@ -766,6 +803,8 @@ type App struct {
 	// OnResumeJob and OnReinitializeJob run the worker's verbs and return
 	// its refusal (worker.ErrResetPending: a different verb already waits on
 	// the job), which the feedback line shows in red, as REST's 409 does.
+	// Both are called from a command's goroutine, never the update loop
+	// (runJobVerb, job_verb_flow.go): a reinitialize deletes staging.
 	OnResumeJob       func(jobID string) error
 	OnReinitializeJob func(jobID string) error
 	// ReinitializeSummary says what reinitializing jobIDs would delete
@@ -847,10 +886,14 @@ type App struct {
 	OnRestart          func()
 	OnHashPassword     func(password string) string
 	OnVerifyPassword   func(password, hash string) bool
-	OnFetchFormats     func(videoID string) (*FormatsData, error)        // optional: fetch formats via service
-	OnImportFile       func(path, title, channel string) (string, error) // optional: import zip, returns title
-	OnListOrphans      func() ([]OrphanedFileEntry, error)               // list orphaned files
-	OnDeleteOrphan     func(path string) error                           // delete orphaned file
+	// OnPasswordChanged runs after Settings, Security set or removed the
+	// dashboard password, so the wiring can end what the old one admitted
+	// (client tokens, sessions, open sockets).
+	OnPasswordChanged func()
+	OnFetchFormats    func(videoID string) (*FormatsData, error)        // optional: fetch formats via service
+	OnImportFile      func(path, title, channel string) (string, error) // optional: import zip, returns title
+	OnListOrphans     func() ([]OrphanedFileEntry, error)               // list orphaned files
+	OnDeleteOrphan    func(path string) error                           // delete orphaned file
 	// Orphaned processing-history rows (no matching job) shown in the same overlay.
 	OnListOrphanedHistory func() ([]OrphanedHistoryEntry, error)
 	OnDeleteHistoryEntry  func(videoID string) error
@@ -993,7 +1036,7 @@ func NewApp() *App {
 	tl := NewTaskListModel()
 	tl.progressStore = ps
 
-	return &App{
+	a := &App{
 		taskList:          tl,
 		details:           NewJobDetailsModel(),
 		logs:              NewLogViewerModel(),
@@ -1019,6 +1062,11 @@ func NewApp() *App {
 		jobVersions:       make(map[string]appliedJobVersions),
 		isDark:            true, // default to dark; updated by BackgroundColorMsg
 	}
+	// The Settings restart prompt warns from the App's own count, read when
+	// it is drawn.
+	a.settings.activeDownloads = a.activeDownloadCount
+	a.settings.runningNote = a.jobVerbRunningNote
+	return a
 }
 
 // BackfillLogs seeds the log viewer with historical lines (e.g. from the logger's ring buffer).
@@ -1173,7 +1221,7 @@ func (a *App) SetUpdateChannels(
 	jobAdded <-chan *database.JobAdded,
 	jobDeleted <-chan *database.JobDeleted,
 	jobTrimsChanged <-chan *database.Job,
-	jobsUpdate <-chan []*database.Job,
+	jobsUpdate <-chan JobsUpdateMsg,
 	logCh <-chan string,
 	checkTimers <-chan CheckTimersMsg,
 	cookieStatus <-chan CookieStatusMsg,
@@ -1412,11 +1460,11 @@ func (a *App) listenForUpdates() tea.Cmd {
 				return channelClosedMsg{Name: "jobTrimsChanged"}
 			}
 			return TrimsChangedMsg{Job: job}
-		case jobs, ok := <-a.jobsUpdateCh:
+		case snap, ok := <-a.jobsUpdateCh:
 			if !ok {
 				return channelClosedMsg{Name: "jobsUpdate"}
 			}
-			return JobsUpdateMsg{Jobs: jobs}
+			return snap
 		case line, ok := <-a.logCh:
 			if !ok {
 				return channelClosedMsg{Name: "log"}
@@ -1471,7 +1519,8 @@ func (a *App) hasActiveDownloads() bool {
 }
 
 // activeDownloadCount counts jobs currently downloading/live/muxing —
-// used by hasActiveDownloads and the update-apply confirmation.
+// used by hasActiveDownloads and by every restart warning: the update-apply
+// confirmation, R P and the Settings restart prompt (restart_warning.go).
 func (a *App) activeDownloadCount() int {
 	n := 0
 	for _, s := range a.statusMap {
@@ -1488,20 +1537,21 @@ func (a *App) activeDownloadCount() int {
 // a SECOND invocation within 5s (mirroring the confirm-chord pattern):
 // updating restarts the process, interrupting recordings — live segments
 // broadcast during the restart gap may be lost (Twitch expires fastest) —
-// so that must be a deliberate choice. Returns nil when only feedback was
+// so that must be a deliberate choice. A Resume or Reinitialize still running
+// asks for the second press too: the restart can stop a reset between its
+// row write and its file deletion. Returns nil when only feedback was
 // shown (no update, or confirmation pending).
 func (a *App) applyUpdateAction() tea.Cmd {
 	if a.updateAvailable == nil || a.OnApplyUpdate == nil {
 		a.setFeedback("No update available — use R V to check")
 		return nil
 	}
-	if n := a.activeDownloadCount(); n > 0 && time.Since(a.updateConfirmAt) > 5*time.Second {
+	warn := joinRestartNotes(activeRestartClause(a.activeDownloadCount(), "update restart"), a.jobVerbRunningNote())
+	if warn != "" && time.Since(a.updateConfirmAt) > 5*time.Second {
 		a.updateConfirmAt = time.Now()
-		plural := "download is"
-		if n != 1 {
-			plural = "downloads are"
-		}
-		a.setFeedback(fmt.Sprintf("%d %s active — the update restart interrupts them; press R U again within 5s to confirm", n, plural))
+		// A confirm prompt, in the yellow every other confirm has: it starts
+		// with a count, so the "Press " scan never saw it.
+		a.setFeedbackWithSeverity(warn+"; press R U again within 5s to confirm", severityWarning)
 		return nil
 	}
 	a.updateConfirmAt = time.Time{}

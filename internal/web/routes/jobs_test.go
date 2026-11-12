@@ -645,6 +645,25 @@ func TestJobLogsReturnsEmptyArray(t *testing.T) {
 	}
 }
 
+// The open details dialog reads this route every second. Mutant: loadJob
+// ahead of the buffer read — every one of those reads costs a SELECT. The
+// buffer here has no row behind it (a state the server never holds: a row's
+// buffer is cleared with it), which is the only way to see from outside that
+// lines are answered without the row being read.
+func TestJobLogsWithLinesAreAnsweredFromTheBuffer(t *testing.T) {
+	f := newJobsFixture(t)
+	f.db.TrackJobForLogs("yt_buffered")
+	f.db.RouteLogToJobs("[yt_buffered] retrying after 403")
+
+	rec := doRequest(t, f.router, "GET", "/api/jobs/yt_buffered/logs", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logs: want 200, got %d", rec.Code)
+	}
+	if want := `["[yt_buffered] retrying after 403"]` + "\n"; rec.Body.String() != want {
+		t.Errorf("logs body: want %q, got %q", want, rec.Body.String())
+	}
+}
+
 // --- POST /api/jobs/{id}/cancel ---
 
 func TestJobCancelInvalidState(t *testing.T) {
@@ -1162,6 +1181,41 @@ func TestJobCreateExtractsVideoIDFromYouTubeURL(t *testing.T) {
 	}
 	if got.VideoID != "abcd1234567" {
 		t.Errorf("VideoID: want abcd1234567, got %q", got.VideoID)
+	}
+}
+
+// TestExtractVideoIDFromURLSharedYouTubeURLTable runs the URL-only add's
+// reader over the one YouTube URL table every add path is tested against
+// (internal/utils/testdata/youtube_urls.json). A bare ID is not a URL here:
+// the caller has videoId for that, and an 11-character word in url may be a
+// Twitch login.
+//
+// Mutant: the route's own regex this replaced (watch?v= with v first,
+// youtu.be/ and /live/ only, on any host) fails the app=desktop, list=,
+// /shorts/, /embed/ and /v/ rows and takes the notyoutube.com row.
+func TestExtractVideoIDFromURLSharedYouTubeURLTable(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "utils", "testdata", "youtube_urls.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var table struct {
+		Rows []struct {
+			Input string `json:"input"`
+			ID    string `json:"id"`
+			Bare  bool   `json:"bare"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(data, &table); err != nil || len(table.Rows) == 0 {
+		t.Fatalf("shared table: %v (%d rows)", err, len(table.Rows))
+	}
+	for _, row := range table.Rows {
+		want := row.ID
+		if row.Bare {
+			want = ""
+		}
+		if got := extractVideoIDFromURL(row.Input); got != want {
+			t.Errorf("extractVideoIDFromURL(%q) = %q, want %q", row.Input, got, want)
+		}
 	}
 }
 

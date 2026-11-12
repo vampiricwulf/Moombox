@@ -1320,7 +1320,7 @@ func (p *PlayerAPI) fetchWithClientOpts(ctx context.Context, videoID string, cli
 	if probeOnly {
 		ctx = withProbeOnlyCall(ctx)
 	}
-	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
+	apiURL := innertubeURL(constants.YouTubeURLs.API+"/player", p.APIKey())
 	headers := p.auth.GenerateAPIHeaders(client, ytcfg)
 
 	// Build client context with optional visitorData
@@ -1392,7 +1392,7 @@ func (p *PlayerAPI) fetchWithClientOpts(ctx context.Context, videoID string, cli
 // token — just the client context plus visitor data when available.
 func (p *PlayerAPI) fetchWithCookielessClient(ctx context.Context, videoID, visitorData string, client constants.YouTubeClientConfig) (*VideoInfo, error) {
 	ctx = withPlayerClient(ctx, client.ClientName)
-	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
+	apiURL := innertubeURL(constants.YouTubeURLs.API+"/player", p.APIKey())
 
 	clientCtx := make(map[string]any, len(client.Context))
 	maps.Copy(clientCtx, client.Context)
@@ -1627,7 +1627,7 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg *YtcfgData, sts int, fetchEmbedPage bool) (*VideoInfo, error) {
 	ctx = withPlayerClient(ctx, constants.WebEmbeddedClient.ClientName)
 	probeOnly := playerCallScopeFrom(ctx).probeOnly
-	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
+	apiURL := innertubeURL(constants.YouTubeURLs.API+"/player", p.APIKey())
 
 	// Fetch embed page for encryptedHostFlags
 	var embedResult *EmbedPageResult
